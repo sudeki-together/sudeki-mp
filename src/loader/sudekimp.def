@@ -1,0 +1,3 @@
+LIBRARY "SudekiMP"
+EXPORTS
+    SudekiMP_Initialize=SudekiMP_Initialize@4

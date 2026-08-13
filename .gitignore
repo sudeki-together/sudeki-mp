@@ -1,0 +1,25 @@
+# User-supplied installers and game files must never be committed.
+/gog-installer/
+/game/
+/vanilla/
+/working/
+*.exe
+*.dll
+*.msi
+*.baf
+*.bin
+*.iso
+
+# Reverse-engineering outputs that may contain copyrighted game data.
+/research/dumps/*
+!/research/dumps/.gitkeep
+
+# Local analysis projects, logs, captures, and build output.
+*.gpr
+*.rep/
+*.log
+*.dmp
+*.core
+/build/
+/out/
+/.cache/

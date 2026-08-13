@@ -1,0 +1,172 @@
+# Combat research
+
+## Quick Menu slowdown
+
+### Confirmed statically
+
+- Quick Menu activation requests `CGameSpeed` mode `1` by writing `1` to the singleton's `+0x24` field at VA `0x00498EF0`.
+- Quick Menu deactivation requests mode `0` by writing zero to the same field at VA `0x004991B6`.
+- The main frame-time path transitions requested mode into current mode, selects `0.07f` for nonzero modes other than mode `4`, and multiplies frame delta by the selected value.
+- Mode `0` selects the normal-speed global, initialized to `1.0f`.
+- The full-pause byte is a separate `CGameSpeed+0x28` field; when set, the frame path supplies a zero delta.
+- A separate master-speed multiplier is applied earlier in the timer path. The Quick Menu methods do not write it.
+
+### Runtime-confirmed mechanism
+
+The Quick Menu slowdown is a global simulation-delta scale implemented through `CGameSpeed` mode `1`. It is not a full pause, an AI-only slowdown, or merely an animation-speed adjustment. The vanilla scale is `0.07x`.
+
+The coordinated Wine runtime trace confirmed:
+
+```text
+vanilla menu open:  current mode 1, requested mode 1, paused 0
+patched menu open:  current mode 0, requested mode 0, paused 0
+menu active bytes:  object+0x29 = 1, object+0xFC = 1
+```
+
+### Milestone 1 experiment
+
+The activation instruction's immediate operand was changed only in live process memory from mode `1` to mode `0`:
+
+```text
+C7 40 24 01 00 00 00
+            ↓
+C7 40 24 00 00 00 00
+```
+
+With the Quick Menu visibly open, both of its active bytes were `1`, current/requested speed modes remained `0`, the full-pause state remained `0`, and the user observed the world moving at normal speed. The menu could be closed normally.
+
+Result:
+
+```text
+Quick Menu remains visible
+world simulation remains at normal speed
+closing the menu leaves normal speed intact
+```
+
+The original process-memory bytes were restored after the test. Both executable copies retained the expected SHA256; no game file was patched. This completes Milestone 1.
+
+Do not change the global `0.07f` constant in a future hook because modes `2` and `3` also use it and their purposes are unknown. Do not rely on `SetGameSpeed(1.0)` globally because mode `1` selects the fixed alternate scale instead.
+
+### Runtime relocation note
+
+Wine loaded `d3dx9_30.dll` at `0x00400000`, so `SUDEKI.exe` was relocated to `0x79CC0000` during this run. The activation and close instructions therefore appeared at `0x79D58EF0` and `0x79D591B6`. Future tools must use the loaded Sudeki module base plus RVA or scan its `.text` section; they must not assume the preferred image base is available.
+
+## Phase 5 — Elco Plasmatica
+
+### Confirmed activation flow
+
+```text
+Quick Menu call at RVA 0x000998A1
+  -> CSkill::Use(slot)
+  -> validate actor, skill, active state, and SP
+  -> subtract SkillData+0x94 cost
+  -> emit OnSkillStarted
+  -> set active byte and selected equipped slot
+  -> retain returned script/task handle
+  -> per-frame completion check
+  -> release actor skill state
+  -> emit OnSkillEnded
+```
+
+The observed equipped-slot argument was `1`, while the selected data object directly contained the UTF-16 display name `Plasmatica`. Runtime hash-table lookup maps the live skill instruction offsets to compiled script `PC_Elco1__Skill|P`. Earlier `PC_Elco3` and `PC_Elco2` identifications were incorrect.
+
+The first clean runtime trace observed no call to the generic attack entry points and no call to `SetAnimationSpeedMultiplier` during activation. Plasmatica therefore has a script/task-controlled path that still needs to be traced for animation requests, projectile/effect spawning, damage timing, and completion.
+
+A broader follow-up GDB trace caused an access-violation crash immediately after activation and produced no valid downstream events. That method has been retired. Further live observation should be implemented as narrowly scoped, exact-build-gated in-process logging in `SudekiMP.dll`.
+
+### First safe logger result
+
+Two Plasmatica tasks completed normally through the in-process DLL logger. Each produced a successful `CSkill::Use`, an active task handle, and a matching completion event. No debugger was attached and the game remained running.
+
+All fourteen script-facing export-table wrappers reported zero calls during both task lifetimes. This is evidence about the export redirection method, not evidence that the underlying engine methods were unused. The next investigation must follow `PC_Elco3__Skill` into the script/native dispatcher or its cached binding table.
+
+Static inspection identified opcode `0x27` as the script/global-call path. It consumes a 32-bit call hash, checks compiled script functions, and then falls back to Sudeki's internal native-binding registry. A disabled-by-default trace of this exact opcode slot passed inert-image installation and restoration tests, then captured the live call path described below.
+
+### Opcode-dispatch capture
+
+One live Plasmatica cast completed normally with the opcode `0x27` logger enabled. The primary skill thread was `0x00B50D8C`; its first Plasmatica instruction was at runtime bytecode offset `0x000AACBA`. Reconstructing the GEX function ranges from their uncompressed lengths places that address inside:
+
+```text
+PC_Elco1__Skill|P
+hash:  0x2F41B420
+range: 0x000AAC9F–0x000AAF66
+```
+
+This is runtime confirmation that Plasmatica is Elco skill script index `1`.
+
+Confirmed calls on the primary thread or its synchronous nested path include:
+
+- `CacheTSAFunction` and `PreLoadTsaAnimState|PR`
+- `Speech_StopPlayerHelp`
+- `PlaySpotCue|S` and `GetSound`
+- `GetScriptedAnimationController`
+- `StartConeTargetedSkill|P`, `SetTurnRate3rdPerson|PN`, and `PlayRailSkillTargettingEffect|P`
+- `TsaPlayCamera|PRSNNBS`, `TestCameraCollision|PR`, and `SetRenderCamera|S`
+- `GetCurrentTsaAnimation|P`
+- `IsPlaying|P`, polled 233 times at Plasmatica bytecode operand offset `0x000AAEA4`
+- `RemoveLightEffect|N`
+
+The repeated `IsPlaying|P` loop proves that task duration waits on a playing object rather than only on a fixed script delay. A focused receiver capture identified the argument as a `GELGroupPtr` whose live pointee has RTTI `ElcoEntity`. The compiled `IsPlaying|P` wrapper then calls `GetComponent("CNewGameModelAnimation")` followed by `TsaIsPlaying`. The wait therefore tracks Elco's game-model animation state, not a free-standing camera or effect handle.
+
+### `IsPlaying` receiver capture
+
+One normal Plasmatica cast produced the same argument on every sampled poll:
+
+```text
+script argument: 0x07F5B390
+RTTI class:      GELGroupPtr
+wrapped pointer: 0x07CC15B0
+wrapped RTTI:    ElcoEntity
+skill task:      0x07F5B438
+```
+
+The addresses are observations from one run and are not stable patch targets. The receiver wrapper's vtable was at module-relative RVA `0x002C0098`; its RTTI type descriptor is `.?AVGELGroupPtr@@`. Reading the wrapper's pointer field at `+0x0C` led to an object whose vtable RTTI type descriptor is `.?AVElcoEntity@@`.
+
+The opcode handler did not synchronously replace the stack argument with a Boolean result. The logger's original `result=` label was therefore incorrect; it represented the stack value immediately after dispatch and still contained the receiver address. The source now labels it `stack_after_dispatch=`. No true/false transition has yet been captured.
+
+### `IsPlaying|P` wrapper
+
+The runtime compiled-function table resolves hash `0x890F6EB1` to bytecode offset `0x00003E22`. Its next function begins at `0x00003E44`, giving this wrapper a length of `0x22` bytes. Decoding its two object-method operations gives:
+
+```text
+opcode 0x28 at operand 0x00003E38: GetComponent|N (0xB2F8076C)
+  component type: CNewGameModelAnimation (0xC5D2509B)
+
+opcode 0x28 at operand 0x00003E3D: TsaIsPlaying (0xDC187AFB)
+```
+
+Sudeki exports both `CNewGameModelAnimation::TsaIsPlaying` variants at RVA `0x0000F2D0`. The implementation returns true when the animation object's state byte at `+0x131` equals `3`.
+
+### Plasmatica event and missile sequence
+
+The primary-thread opcode `0x28` capture establishes this order inside `PC_Elco1__Skill|P`:
+
+```text
+enable skill targeting
+  -> poll ShouldSkillTargettingModeBeActive (181 calls in this run)
+  -> disable skill targeting
+  -> enable auto targeting
+  -> create and attach an event watch
+  -> poll HasArbEventOccured at 0x000AAE2C (216 calls; final result true)
+  -> clear the event list
+  -> poll HasArbEventOccured at 0x000AAE60 (248 calls; final result true)
+  -> GetComponent(CMissileManager)
+  -> FireMissileScripted(10)
+  -> clear the event list
+  -> poll IsPlaying(Elco) / TsaIsPlaying (233 calls)
+  -> animation/controller cleanup
+  -> destroy the event watch
+  -> stop rumble and finish the skill task
+```
+
+The missile identifier is the script number literal `10.0` immediately before the `CMissileManager` component lookup and `FireMissileScripted|N` call. The launch call is at bytecode operand `0x000AAE89`. It occurs after the second watched animation event and before the long animation-completion wait.
+
+No `DoDirectDamage|N`, `ModifyHitPoints|NB`, `HitEntity|PB`, or `CausePoison|PNNN` object-method call occurred on any script thread during a complete Plasmatica lifetime. This rules out those four known script-method paths for the observed cast. Static analysis independently follows `FireMissileScripted` into the native missile update and collision-submission path, so impact and damage ownership is native with high confidence. The exact native function that finally applies damage is not yet identified.
+
+### Native missile and attack data
+
+`CMissileManager::FireMissileScripted(int)` at RVA `0x000C89C0` selects a `MissileData` entry and launches one or more native `CMissile` objects. The active missile update at RVA `0x001867D0` advances movement and lifetime, checks `MissileData` collision flags, and submits a qualified collision through RVA `0x000DCD00`. Missile termination is handled at RVA `0x00186610`.
+
+The user-owned `SOLData.baf` serializes Plasmatica as one projectile with velocity `17.0`, range `100.0`, wall and ground collision enabled, and no penetration or bouncing. Its primary attack record has serialized base damage `500` and links to `PlasmExplosion`, whose serialized base damage is `300`. This does not establish `800` damage: the primary record says the secondary starts `Never`, and the conditions that may activate the linked attack remain unconfirmed.
+
+The script literal passed to `FireMissileScripted` is `10`, while Plasmatica is element `2` of the serialized `MissileCombos` list. Their mapping has not yet been reconstructed and they must not be treated as the same index.
