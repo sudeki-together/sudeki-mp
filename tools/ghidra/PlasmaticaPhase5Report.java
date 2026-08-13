@@ -113,6 +113,9 @@ public class PlasmaticaPhase5Report extends GhidraScript {
         reportInstruction(0x004b48b6L, "Subtract skill resource cost");
         reportInstruction(0x004b4b4cL, "Set queued/active byte");
         reportInstruction(0x004b4b50L, "Store selected slot");
+        reportInstruction(0x004b4b5dL, "Begin generic skill protection");
+        reportInstruction(0x004b47cdL, "End skill: decrement invulnerability refcount");
+        reportInstruction(0x004b47e6L, "End skill: clear IsUsingSkill flag");
         reportReferences(0x004b4810L, "CSkill::Use xrefs");
         reportReferences(0x004b50d0L, "CSkill::StopRumble xrefs");
         reportReferences(0x0040f2e0L, "TsaPlayAnimationState xrefs");
@@ -140,6 +143,8 @@ public class PlasmaticaPhase5Report extends GhidraScript {
         reportSymbols("FireMissileScripted");
         reportSymbols("DoDirectDamage");
         reportSymbols("StartAttack");
+        reportSymbols("Invulnerable");
+        reportSymbols("IsUsingSkill");
         reportFunctions(0x004b4300L, 0x004b5600L);
 
         DecompInterface decompiler = new DecompInterface();
@@ -156,6 +161,12 @@ public class PlasmaticaPhase5Report extends GhidraScript {
         decompile(decompiler, 0x004b5170L, "Skill script-name helper");
         decompile(decompiler, 0x004b5220L, "CSkill nearby function 8");
         decompile(decompiler, 0x004dc200L, "Actor/model state helper");
+        decompile(decompiler, 0x00408980L,
+            "CCharacterArbiter::IsInvulnerable");
+        decompile(decompiler, 0x004089e0L,
+            "CCharacterArbiter::IsUsingSkill");
+        decompile(decompiler, 0x004dca10L,
+            "CCharacterArbiter::GELSetInvulnerable");
         decompile(decompiler, 0x004b5330L, "Post-queue helper");
         decompile(decompiler, 0x004b5450L, "CSkill nearby function 9");
         decompile(decompiler, 0x004fcfd0L, "Skill script dispatcher");

@@ -60,6 +60,9 @@ enum {
     RVA_CNEW_MISSILE_AIMING_ANIMATION_VTABLE = 0x002d5464u,
     RVA_SCRIPT_MANAGER_GLOBAL = 0x003c3108u,
     RVA_SCRIPT_RUNTIME_GLOBAL = 0x003c310cu,
+    RVA_SKILL_TARGET_NODE_GLOBAL = 0x003c3b44u,
+    RVA_SKILL_TARGET_ACTIVE_GLOBAL = 0x003c2fcdu,
+    RVA_ACTIVE_AIM_CAMERA_GLOBAL = 0x00409d7cu,
     PLASMATICA_SCRIPT_START = 0x000aac9fu,
     PLASMATICA_SCRIPT_END = 0x000aaf67u,
     PLASMATICA_CINEMATIC_CAMERA_IP = 0x00038d56u,
@@ -405,6 +408,17 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
     BOOL camera_speed_candidate = FALSE;
     uint32_t camera_previous_speed_bits = 0;
     uint32_t camera_new_speed_bits = 0;
+    uint32_t retained_skill_target = 0;
+    uint32_t skill_owner_context = 0;
+    uint32_t actor_targeter = 0;
+    uint32_t ordinary_target_node = 0;
+    uint32_t aim_mode_component = 0;
+    uint32_t aim_mode_flags = 0;
+    uint32_t actor_transform = 0;
+    uint32_t actor_forward_bits[3] = {0, 0, 0};
+    uint32_t active_aim_camera = 0;
+    uint8_t skill_targeting_active = 0;
+    uint8_t targeter_flags = 0;
     int handler_result;
 
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
@@ -487,6 +501,103 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
                 stack_words[3] == 0x3f800000u &&
                 trace_camera_multiplier != 1.0f &&
                 !trace_camera_speed_applied;
+            if (primary_thread && method_hash == HASH_FIRE_MISSILE_SCRIPTED) {
+                read_trace_memory(
+                    (const uint8_t *)trace_game_module +
+                        RVA_SKILL_TARGET_NODE_GLOBAL,
+                    &retained_skill_target,
+                    sizeof(retained_skill_target)
+                );
+                read_trace_memory(
+                    (const uint8_t *)trace_game_module +
+                        RVA_SKILL_TARGET_ACTIVE_GLOBAL,
+                    &skill_targeting_active,
+                    sizeof(skill_targeting_active)
+                );
+                if (trace_skill_object != NULL &&
+                    read_trace_memory(
+                        (const uint8_t *)trace_skill_object + 0x10,
+                        &skill_owner_context,
+                        sizeof(skill_owner_context)
+                    ) && skill_owner_context != 0 &&
+                    read_trace_memory(
+                        (const void *)(uintptr_t)(skill_owner_context + 0xacu),
+                        &actor_targeter,
+                        sizeof(actor_targeter)
+                    ) && actor_targeter != 0) {
+                    read_trace_memory(
+                        (const void *)(uintptr_t)(actor_targeter + 0x54u),
+                        &ordinary_target_node,
+                        sizeof(ordinary_target_node)
+                    );
+                    read_trace_memory(
+                        (const void *)(uintptr_t)(actor_targeter + 0x84u),
+                        &targeter_flags,
+                        sizeof(targeter_flags)
+                    );
+                }
+                if (skill_owner_context != 0) {
+                    if (read_trace_memory(
+                            (const void *)(uintptr_t)(
+                                skill_owner_context + 0x90u
+                            ),
+                            &aim_mode_component,
+                            sizeof(aim_mode_component)
+                        ) && aim_mode_component != 0) {
+                        read_trace_memory(
+                            (const void *)(uintptr_t)(
+                                aim_mode_component + 0x50u
+                            ),
+                            &aim_mode_flags,
+                            sizeof(aim_mode_flags)
+                        );
+                    }
+                    if (read_trace_memory(
+                            (const void *)(uintptr_t)(
+                                skill_owner_context + 0x44u
+                            ),
+                            &actor_transform,
+                            sizeof(actor_transform)
+                        ) && actor_transform != 0) {
+                        read_trace_memory(
+                            (const void *)(uintptr_t)(
+                                actor_transform + 0x50u
+                            ),
+                            actor_forward_bits,
+                            sizeof(actor_forward_bits)
+                        );
+                    }
+                }
+                read_trace_memory(
+                    (const uint8_t *)trace_game_module +
+                        RVA_ACTIVE_AIM_CAMERA_GLOBAL,
+                    &active_aim_camera,
+                    sizeof(active_aim_camera)
+                );
+                SudekiMpLogFormat(
+                    "skill_trace event=missile_target_snapshot elapsed_ms=%lu ip=0x%08lx skill_target_node=0x%08lx targeting_active=%u owner_context=0x%08lx actor_targeter=0x%08lx ordinary_target_node=0x%08lx auto_target_enabled=%u aim_mode_component=0x%08lx aim_mode_flags=0x%08lx active_aim_camera=0x%08lx actor_transform=0x%08lx actor_forward_bits=%08lx,%08lx,%08lx selected_direction_source=%s argument_bits=0x%08lx\r\n",
+                    (unsigned long)trace_elapsed_milliseconds(),
+                    (unsigned long)instruction_offset,
+                    (unsigned long)retained_skill_target,
+                    (unsigned int)skill_targeting_active,
+                    (unsigned long)skill_owner_context,
+                    (unsigned long)actor_targeter,
+                    (unsigned long)ordinary_target_node,
+                    (unsigned int)((targeter_flags & 2u) != 0),
+                    (unsigned long)aim_mode_component,
+                    (unsigned long)aim_mode_flags,
+                    (unsigned long)active_aim_camera,
+                    (unsigned long)actor_transform,
+                    (unsigned long)actor_forward_bits[0],
+                    (unsigned long)actor_forward_bits[1],
+                    (unsigned long)actor_forward_bits[2],
+                    (aim_mode_flags & 0x00400000u) != 0 &&
+                        active_aim_camera != 0
+                            ? "camera_ray"
+                            : "actor_forward",
+                    (unsigned long)stack_words[1]
+                );
+            }
         }
     }
 

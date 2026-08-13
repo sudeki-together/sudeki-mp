@@ -129,11 +129,42 @@ The opcode `0x27` binding fallback explains why rewriting PE export slots after 
 | `Possible_SelectMissileData` | `0x000C6DE0` / `0x004C6DE0` | Stores selected `MissileData` and its resource reference on the manager; applies its movement constraint | High for data flow; provisional name |
 | `Possible_LaunchSelectedMissile` | `0x000C7160` / `0x004C7160` | Creates/configures missile entities and initializes active `CMissile` instances | High for control flow; provisional name |
 | `Possible_TerminateMissile` | `0x00186610` / `0x00586610` | Removes/releases the missile entity/component and disables it | High; provisional name |
-| `Possible_UpdateMissileCollision` | `0x001867D0` / `0x005867D0` | Advances active missile movement/range and submits collisions that satisfy `MissileData` flags | High; provisional name |
-| `Possible_InitializeMissile` | `0x00186E10` / `0x00586E10` | Enables the missile and installs the standard or bouncing movement controller | High; provisional name |
-| `Possible_SubmitNativeAttackCollision` | `0x000DCD00` / `0x004DCD00` | Wraps a call to RVA `0x00018B90` with attack/resource, collision, owner, and flag data | Medium; final damage behavior unresolved |
+| `Possible_UpdateMissileCollision` | `0x001867D0` / `0x005867D0` | Advances movement/range, handles ground/wall collision and bounce termination, and requests environment-impact SFX; it does not directly apply character damage | High; provisional name |
+| `Possible_InitializeMissile` | `0x00186E10` / `0x00586E10` | Enables the missile, installs its movement controller, and registers its collision body through RVA `0x000EC200` | High; provisional name |
+| `Possible_SubmitMissileImpactSfx` | `0x000DCD00` / `0x004DCD00` | Submits the configured environment-impact effect through RVA `0x00018B90`, which constructs an `SfxSetupPosition`; this is not the damage path | High; provisional name |
+| `Possible_CollisionDamageBridge` | `0x00032A80` / `0x00432A80` | Tests collision geometry and directly invokes the `CCollisionDamage` callback at RVA `0x00138870` for qualifying contacts | High; provisional name |
+| `Possible_ApplyCollisionDamage` | `0x00138870` / `0x00538870` | Enforces the configured multiple-hit delay, checks target state, builds a `DamageStructure` containing damage, knockback, effect, and status data, then calls RVA `0x000DAB50` | High; provisional name |
+| `Possible_DispatchDamageStructure` | `0x000DAB50` / `0x004DAB50` | Applies target/state filters and routes an accepted `DamageStructure` to the target combat component at RVA `0x000D21D0` | High; provisional name |
+| `Possible_ApplyDamageToCharacter` | `0x000D21D0` / `0x004D21D0` | Applies mitigation and clamps the result, stores the resulting current HP at combat-data offset `+0x2C`, then handles hit reactions, status effects, and death follow-up | High for HP flow; provisional name and structure labels |
 
-The `CMissile` vtable begins at VA `0x006D915C`. Movement-controller implementations used by missile initialization begin at RVAs `0x00187600` and `0x00187710`. The vtable includes exported `HitEntity` at RVA `0x000A2900`, but launch reaches later behavior indirectly; there is no direct call from `FireMissileScripted` to `HitEntity`, `DoDirectDamage`, or `ModifyHitPoints`.
+The `CMissile` vtable begins at VA `0x006D915C`. Movement-controller implementations used by missile initialization begin at RVAs `0x00187600` and `0x00187710`. The collision-damage component has RTTI and vtables at VAs `0x006D45D4`, `0x006D4614`, and `0x006D461C`. Entries that point to exported `HitEntity` at RVA `0x000A2900` resolve to a shared no-op/export thunk and are not evidence of damage delivery. The confirmed native chain instead reaches RVA `0x00138870` directly from RVA `0x00032A80`.
+
+Exact-build byte contexts for the three damage functions are recorded in `research/signatures/plasmatica-damage.md`.
+
+## Skill targeting and launch handoff
+
+| Function / field | RVA / VA | Confirmed behavior | Confidence |
+| --- | --- | --- | --- |
+| `CTargeter::StartSkillTargetting` | `0x000B9E20` / `0x004B9E20` | Sets global skill-targeting active, clears the prior skill-target node, and stores targeting parameters | High |
+| `CTargeter::EndSkillTargetting` | `0x000B9EF0` / `0x004B9EF0` | Clears global skill-targeting active and releases the global skill-target node and associated targeting presentation | High |
+| `CTargeter::GetSkillTargettingModeTarget` | `0x000B9E00` / `0x004B9E00` | Resolves the GEL held by the global refcounted skill-target node at VA `0x007C3B44` | High |
+| `CTargeter::EnableAutoTargetting(bool)` | `0x000B9CC0` / `0x004B9CC0` | Stores enabled state in bit `0x02` at `CTargeter+0x84`; disabling also releases and clears the ordinary target node at `+0x54` | High |
+| `CTargeter::GetGelCurrentTarget` | `0x000B9DC0` / `0x004B9DC0` | Resolves the GEL held by the targeter's ordinary current-target node | High for behavior; decompiler obscures the field load |
+| `Possible_ResolveMissileLaunchDirection` | `0x000C7AA0` / `0x004C7AA0` | Chooses a normalized live-target direction when eligible, otherwise an aiming-camera ray when owner flag `0x00400000` is set, otherwise copies the owner transform's forward vector from `+0x50..+0x58` | High for branch structure; provisional name |
+
+Five exact-launch runtime snapshots found the global skill-target node and `CTargeter+0x54` both null, with skill targeting and auto targeting both disabled, immediately before Plasmatica's `FireMissileScripted(10)` dispatch. The same state occurred with and without the cinematic camera. A sixth snapshot captured owner aim-mode flags `0x00080812`, which excludes camera-ray bit `0x00400000`, and the owner transform forward vector. Combined with RVA `0x000C7AA0`, this confirms that the observed standard Plasmatica launch uses committed actor facing rather than a live target or the camera.
+
+## Generic Skill Strike protection
+
+| Function | RVA / VA | Confirmed behavior | Confidence |
+| --- | --- | --- | --- |
+| `Possible_BeginSkillProtection` | `0x000DC200` / `0x004DC200` | Called by `CSkill::Use`; increments arbiter byte `+0x54`, sets state flag `0x800`, and sets `IsUsingSkill` flag `0x10` | High; provisional name |
+| `CCharacterArbiter::IsInvulnerable()` | `0x00008980` / `0x00408980` | Returns true when signed arbiter byte `+0x54` is greater than zero | High; named export and inspected implementation |
+| `CCharacterArbiter::IsUsingSkill()` | `0x000089E0` / `0x004089E0` | Tests arbiter state bit `0x10` at `+0x50` | High; named export and inspected implementation |
+| `CCharacterArbiter::GELSetInvulnerable(bool)` | `0x000DCA10` / `0x004DCA10` | Increments/decrements arbiter byte `+0x54` and sets/clears state flag `0x800` according to the resulting refcount | High; named export and inspected implementation |
+| `Possible_CSkillUpdateCompletion` | `0x000B47A0` / `0x004B47A0` | On task completion, decrements arbiter `+0x54`, maintains/clears flag `0x800`, clears `IsUsingSkill` bit `0x10`, and continues normal skill cleanup | High; provisional name |
+
+`CSkill::Use` therefore enters the same refcounted state exposed by the engine's named `IsInvulnerable`/`GELSetInvulnerable` API. This protection is generic to the native `CSkill` lifetime; the observed `PC_Elco1__Skill|P` bytecode contains no call to `GELSetInvulnerable|B`. Plasmatica does not appear to own a separate skill-specific damage-reduction value.
 
 ## Per-model animation speed
 

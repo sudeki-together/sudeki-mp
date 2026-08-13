@@ -125,9 +125,14 @@ public class MissileImpactReport extends GhidraScript {
         reportSymbols("HitEntity");
         reportSymbols("DoDirectDamage");
         reportSymbols("ModifyHitPoints");
+        reportSymbols("AttackCollision");
+        reportSymbols("AttackEvent");
+        reportSymbols("Damage");
+        reportFunctions(0x00417000L, 0x0041a500L);
         reportFunctions(0x004c5000L, 0x004c9000L);
         reportFunctions(0x00585000L, 0x00588000L);
         reportFunctions(0x0053d000L, 0x00543000L);
+        reportFunctions(0x00538000L, 0x00538c00L);
         reportFunctions(0x004dc000L, 0x004df500L);
 
         Set<Function> hitEntityCallers = reportReferences(
@@ -139,9 +144,117 @@ public class MissileImpactReport extends GhidraScript {
         Set<Function> modifyHitPointsCallers = reportReferences(
             0x004dc4f0L, "CCharacterArbiter::ModifyHitPoints"
         );
+        reportReferences(0x00418b90L,
+            "Positional impact-SFX setup submission");
+        reportReferences(0x00418460L,
+            "SfxSetupPosition constructor");
+        reportReferences(0x004196e0L,
+            "Impact-SFX qualification helper");
+        reportReferences(0x004a2900L,
+            "Shared script/export no-op thunk");
+        reportReferences(0x004ec200L,
+            "Missile collision-damage registration");
+        reportReferences(0x004ed920L,
+            "Collision-damage registration helper");
+        reportReferences(0x0058ea40L,
+            "Collision solver registration path A");
+        reportReferences(0x0058ef60L,
+            "Collision solver registration path B");
+        reportReferences(0x006d45d4L,
+            "CCollisionDamage primary vtable");
+        reportReferences(0x006d4614L,
+            "CCollisionDamage secondary vtable A");
+        reportReferences(0x006d461cL,
+            "CCollisionDamage secondary vtable B");
+        reportReferences(0x00538870L,
+            "CCollisionDamage collision callback");
+        reportReferences(0x004dab50L,
+            "DamageStructure dispatcher");
+        reportReferences(0x004d21d0L,
+            "Damage delivery helper");
 
         DecompInterface decompiler = new DecompInterface();
         decompiler.openProgram(currentProgram);
+        decompile(decompiler, 0x00417640L, "Attack subsystem nearby helper");
+        decompile(decompiler, 0x004177b0L, "Attack subsystem nearby helper");
+        decompile(decompiler, 0x00418140L, "SfxSetupParent constructor");
+        decompile(decompiler, 0x00418300L, "SfxSetupMatrix constructor");
+        decompile(decompiler, 0x00418460L, "SfxSetupPosition constructor");
+        decompile(decompiler, 0x00418760L, "Resolve impact-SFX resource");
+        decompile(decompiler, 0x00418a80L, "Impact-SFX submission variant");
+        decompile(decompiler, 0x00418b90L, "Positional impact-SFX submission");
+        decompile(decompiler, 0x00418c90L, "Indexed impact-SFX submission");
+        decompile(decompiler, 0x004196e0L, "Qualify impact-SFX setup");
+        decompile(decompiler, 0x004a2900L,
+            "Shared script/export no-op thunk");
+        decompile(decompiler, 0x004cc4f0L,
+            "Collision component lookup/configuration helper");
+        decompile(decompiler, 0x004ea7c0L,
+            "Collision-damage state helper");
+        decompile(decompiler, 0x004ea940L,
+            "Collision-damage state helper");
+        decompile(decompiler, 0x004ec200L,
+            "Missile collision-damage registration");
+        decompile(decompiler, 0x004ed920L,
+            "Collision-damage registration helper");
+        decompile(decompiler, 0x004f19b0L,
+            "Collision/damage component resolver");
+        decompile(decompiler, 0x00538760L,
+            "CCollisionDamage primary vtable target 0");
+        decompile(decompiler, 0x005387d0L,
+            "CCollisionDamage primary vtable target 1");
+        decompile(decompiler, 0x00538310L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538320L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538740L,
+            "CCollisionDamage common constructor/destructor helper");
+        decompile(decompiler, 0x005386c0L,
+            "CCollisionDamage constructor");
+        decompile(decompiler, 0x00538780L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538870L,
+            "CCollisionDamage collision callback candidate");
+        decompile(decompiler, 0x00585530L,
+            "DamageStructure constructor");
+        decompile(decompiler, 0x00585960L,
+            "DamageStructure damage initializer");
+        decompile(decompiler, 0x004dab50L,
+            "DamageStructure dispatcher");
+        decompile(decompiler, 0x004d21d0L,
+            "Damage delivery helper");
+        decompile(decompiler, 0x00432a80L,
+            "Collision event to CCollisionDamage callback bridge");
+        decompile(decompiler, 0x00586120L,
+            "DamageStructure qualification helper");
+        decompile(decompiler, 0x00538a30L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538a80L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538ae0L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538b50L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x00538bb0L,
+            "CCollisionDamage nearby helper");
+        decompile(decompiler, 0x005529a0L,
+            "CCollisionDamage alternate constructor");
+        decompile(decompiler, 0x0059b890L,
+            "CCollisionDamage primary vtable inherited target");
+        decompile(decompiler, 0x0043a5a0L,
+            "CCollisionDamage primary vtable inherited target");
+        decompile(decompiler, 0x00538a10L,
+            "CCollisionDamage secondary vtable target");
+        decompile(decompiler, 0x00538a20L,
+            "CCollisionDamage secondary vtable target");
+        decompile(decompiler, 0x00585630L,
+            "DamageStructure vtable target");
+        decompile(decompiler, 0x00585aa0L,
+            "DamageStructure vtable target");
+        decompile(decompiler, 0x0058ea40L,
+            "Collision solver registration path A");
+        decompile(decompiler, 0x0058ef60L,
+            "Collision solver registration path B");
         decompile(decompiler, 0x004c6de0L, "CMissileManager select/prepare missile");
         decompile(decompiler, 0x004c70f0L, "CMissileManager nearby helper");
         decompile(decompiler, 0x004c7160L, "CMissileManager launch missile");
@@ -161,7 +274,7 @@ public class MissileImpactReport extends GhidraScript {
         decompile(decompiler, 0x00586560L, "CMissile vtable target 586560");
         decompile(decompiler, 0x00586600L, "CMissile vtable target 586600");
         decompile(decompiler, 0x00586610L, "CMissile terminate/impact helper");
-        decompile(decompiler, 0x005867d0L, "CMissile collision/damage helper");
+        decompile(decompiler, 0x005867d0L, "CMissile movement/environment-impact update");
         decompile(decompiler, 0x00586c90L, "CMissile cleanup helper");
         decompile(decompiler, 0x00586e10L, "CMissile initialization helper");
         decompile(decompiler, 0x005872f0L, "CMissile vtable target 5872F0");
@@ -176,7 +289,7 @@ public class MissileImpactReport extends GhidraScript {
         decompile(decompiler, 0x00587710L, "BouncingMissileMovementController vtable target");
         decompile(decompiler, 0x00587970L, "MissileData construction helper");
         decompile(decompiler, 0x00587a80L, "MissileData serialization helper");
-        decompile(decompiler, 0x004dcd00L, "Native missile collision submission");
+        decompile(decompiler, 0x004dcd00L, "Missile environment-impact SFX submission");
         decompile(decompiler, 0x004de540L, "Collision resolver helper 4DE540");
         decompile(decompiler, 0x004de920L, "Collision resolver helper 4DE920");
         decompile(decompiler, 0x004df0f0L, "Collision resolver helper 4DF0F0");

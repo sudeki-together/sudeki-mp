@@ -145,7 +145,7 @@ The primary-thread opcode `0x28` capture establishes this order inside `PC_Elco1
 enable skill targeting
   -> poll ShouldSkillTargettingModeBeActive (181 calls in this run)
   -> disable skill targeting
-  -> enable auto targeting
+  -> disable auto targeting and clear its current target
   -> create and attach an event watch
   -> poll HasArbEventOccured at 0x000AAE2C (216 calls; final result true)
   -> clear the event list
@@ -154,22 +154,51 @@ enable skill targeting
   -> FireMissileScripted(10)
   -> clear the event list
   -> poll IsPlaying(Elco) / TsaIsPlaying (233 calls)
-  -> animation/controller cleanup
+  -> unlock the animation controller and wait for it to become inactive
+  -> restore the normal render camera
+  -> re-enable auto targeting
+  -> animation/effect cleanup
   -> destroy the event watch
-  -> stop rumble and finish the skill task
+  -> stop rumble, restore the control filter, and finish the skill task
 ```
 
 The missile identifier is the script number literal `10.0` immediately before the `CMissileManager` component lookup and `FireMissileScripted|N` call. The launch call is at bytecode operand `0x000AAE89`. It occurs after the second watched animation event and before the long animation-completion wait.
 
-No `DoDirectDamage|N`, `ModifyHitPoints|NB`, `HitEntity|PB`, or `CausePoison|PNNN` object-method call occurred on any script thread during a complete Plasmatica lifetime. This rules out those four known script-method paths for the observed cast. Static analysis independently follows `FireMissileScripted` into the native missile update and collision-submission path, so impact and damage ownership is native with high confidence. The exact native function that finally applies damage is not yet identified.
+### Target retention at missile launch
+
+`CTargeter::StartSkillTargetting` at RVA `0x000B9E20` activates the global skill-targeting state and clears its refcounted target node. `CTargeter::EndSkillTargetting` at RVA `0x000B9EF0` deactivates that state and clears the node again. Independently, `CTargeter::EnableAutoTargetting(false)` at RVA `0x000B9CC0` clears the ordinary current-target node at `CTargeter+0x54` and clears auto-target flag bit `0x02` at `+0x84`.
+
+A read-only snapshot at the exact `FireMissileScripted(10)` method call produced the same result in five casts, including one cast where the cinematic camera was rejected, one where it was accepted, and three later confirmation casts. At launch, the global skill-target node was null, skill-targeting was inactive, `CTargeter+0x54` was null, and auto-targeting was disabled. Camera acceptance did not change any of these values.
+
+Plasmatica therefore does not retain a live enemy pointer in either target system until projectile launch. The selected line is committed before the execution animation, after which the script intentionally turns both targeting systems off. It must not be described as a homing target lock.
+
+Native launch-direction resolver RVA `0x000C7AA0` has three ordered sources: a live ordinary target position when eligible; a ray derived from the active aiming camera when owner aim-mode flag `0x00400000` is set; otherwise the owner transform's forward vector at offsets `+0x50..+0x58`. In the final standard-combat capture, Elco's aim-mode flags were `0x00080812`, the camera-ray bit was clear, and the resolver selected the actor-forward branch. The captured normalized forward-vector bits were `3F55D7CE,00000000,3F0CBCEB`.
+
+For the observed Plasmatica path, target selection therefore turns Elco toward the selected line, targeting is torn down, and the later missile launch uses the committed actor-facing vector. The resolver still supports live-target and camera-ray branches for other missile contexts.
+
+### Recovery and restored state
+
+After Elco's model animation reports finished, the shared animation helper calls `TsaUnlock` at bytecode operand `0x00003F84` and polls `TsaIsActive` at `0x00003F8F` until false. `PC_Elco1__Skill|P` then restores the normal render-camera resource at `0x000AAEC9`, calls `EnableAutoTargetting(true)` at `0x000AAEE2`, performs the remaining animation/effect reset, destroys the event watch at `0x000AAF08`, calls `StopRumble` at `0x000AAF2C`, and reaches the `SetControlFilterAll` wrapper at `0x00005880`. The setup side had called `SetControlFilterNone` at `0x00005857`.
+
+Native `CSkill` completion then releases the task-owned invulnerability/skill-lock state described below. This establishes the normal recovery order without assuming that the script binding names describe the internal bit representation of the control filter.
+
+No `DoDirectDamage|N`, `ModifyHitPoints|NB`, `HitEntity|PB`, or `CausePoison|PNNN` object-method call occurred on any script thread during a complete Plasmatica lifetime. This rules out those four known script-method paths for the observed cast. Static analysis independently follows `FireMissileScripted` into the native missile and `CCollisionDamage` path, confirming native impact and damage ownership.
 
 ### Native missile and attack data
 
-`CMissileManager::FireMissileScripted(int)` at RVA `0x000C89C0` selects a `MissileData` entry and launches one or more native `CMissile` objects. The active missile update at RVA `0x001867D0` advances movement and lifetime, checks `MissileData` collision flags, and submits a qualified collision through RVA `0x000DCD00`. Missile termination is handled at RVA `0x00186610`.
+`CMissileManager::FireMissileScripted(int)` at RVA `0x000C89C0` selects a `MissileData` entry and launches one or more native `CMissile` objects. Initialization at RVA `0x00186E10` registers the missile's collision body through RVA `0x000EC200`. The active update at RVA `0x001867D0` advances movement and lifetime and handles ground/wall impacts; its call through RVA `0x000DCD00` creates positional impact SFX and is not character damage. Missile termination is handled at RVA `0x00186610`.
+
+Qualifying character contact reaches the collision geometry bridge at RVA `0x00032A80`, which directly calls the `CCollisionDamage` handler at RVA `0x00138870`. That handler observes the configured multiple-hit delay, constructs a `DamageStructure`, copies damage/knockback/effect/status data into it, and dispatches it through RVA `0x000DAB50`. The accepted packet reaches RVA `0x000D21D0`, where mitigation is applied, the result is clamped, and the target's current HP is written at combat-data offset `+0x2C`. This completes the native launch-to-HP chain with high confidence.
 
 The user-owned `SOLData.baf` serializes Plasmatica as one projectile with velocity `17.0`, range `100.0`, wall and ground collision enabled, and no penetration or bouncing. Its primary attack record has serialized base damage `500` and links to `PlasmExplosion`, whose serialized base damage is `300`. This does not establish `800` damage: the primary record says the secondary starts `Never`, and the conditions that may activate the linked attack remain unconfirmed.
 
 The script literal passed to `FireMissileScripted` is `10`, while Plasmatica is element `2` of the serialized `MissileCombos` list. Their mapping has not yet been reconstructed and they must not be treated as the same index.
+
+### Caster protection
+
+Plasmatica receives the engine's generic `CSkill` protection for the complete native task lifetime. `CSkill::Use` calls RVA `0x000DC200`, which increments `CCharacterArbiter+0x54`, sets arbiter state flag `0x800`, and sets `IsUsingSkill` bit `0x10`. Exported `CCharacterArbiter::IsInvulnerable()` at RVA `0x00008980` returns whether that same `+0x54` refcount is positive. The completion path at RVA `0x000B47A0` decrements the refcount, maintains or clears `0x800`, and clears `0x10`.
+
+The bytecode for `PC_Elco1__Skill|P` contains neither the global nor class-method hash for `GELSetInvulnerable|B`; the protection is inherited from `CSkill::Use`, not applied specially by Plasmatica. No independent damage-reduction scalar has been identified. Static evidence therefore says the caster is invulnerable, and consequently protected from ordinary damaging hit reactions, until the skill task completes. A later hostile-contact runtime test can confirm whether any special damage category bypasses the generic flag.
 
 ### Plasmatica animation identity and speed control
 
