@@ -371,3 +371,20 @@ Resolve the animation state pushed at bytecode operand `0x00004195` and trace th
 ### Interpretation
 
 Milestone 2 is achieved for one skill: world simulation can remain at `1.0x` while Plasmatica's caster animation is independently configurable. Camera timing, preferred multiplier, combat protection, and polish remain future work; `2.0x` is evidence, not a committed balance value.
+
+## 2026-08-13 — Plasmatica eye-camera collision gate and timing
+
+### Confirmed
+
+- The timing logger uses `GetTickCount()` only while the exact Plasmatica lifetime gate is active. It also records the narrow camera bindings and collision/render-camera object methods without changing their arguments or results.
+- One normal-speed cast returned `1` from `TestCameraCollision|PRN` at bytecode operand `0x0002FC0A`. That cast skipped `TsaPlayCamera` and immediately selected normal-camera resource hash `0x933B5BDE`.
+- A second normal-speed cast returned `0`. It called `TsaPlayCamera|PRSNNBS` at `0x00038CEF`, polled `GetCurrentTsaAnimation|P` at `0x00038D1F`, and selected cinematic camera resource hash `0xEE1B1485` before later restoring `0x933B5BDE`.
+- Both `2.0x` comparison casts returned `0` from the collision test and executed the same cinematic-selection and normal-restore calls. The user visually observed the cinematic camera in the available open space.
+- At `1.0x`, the cinematic camera was selected at `3.298 s`, the projectile was requested at `10.746 s`, the caster animation completed at `14.628 s`, the normal camera was restored at `14.883 s`, and the task ended at `15.003 s`.
+- The two `2.0x` casts reproduced selection at `3.279/3.281 s`, projectile request at `7.014/7.014 s`, animation completion at `8.949/8.948 s`, camera restore at `9.203/9.202 s`, and task end at `9.323/9.322 s`.
+- The selected cinematic-camera interval therefore changed from `11.585 s` to `5.924/5.921 s`. The preceding collision-to-selection setup remained about `0.25 s` at both speeds.
+- The user's reported three or four visible view changes did not correspond to repeated `SetRenderCamera` calls. Successful casts contained exactly one cinematic selection and one normal-camera restore, so the intermediate visible motion belongs inside the authored camera presentation.
+
+### Interpretation
+
+The eye-view camera was never proven to be missing at `2.0x`. It is conditionally rejected when its collision test reports insufficient space. When accepted, the same camera path runs at both tested speeds, but it remains selected only until the accelerated caster-animation sequence completes. Camera timing is understood well enough to leave camera logic unchanged for the current proof of concept. The next Phase 5 targets are exact native impact damage resolution and the caster's protection/stagger behavior.

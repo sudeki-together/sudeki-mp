@@ -146,3 +146,15 @@ The `CMissile` vtable begins at VA `0x006D915C`. Movement-controller implementat
 RTTI confirms `CNewGameModelAnimation -> CSkinnedGameModelInterface -> CSimpleGameModelInterface`, with each base at offset zero. Consequently, Plasmatica's live `CNewGameModelAnimation` receiver is directly compatible with these functions.
 
 Opcode `0x28`'s handler resolves a script wrapper to its native object immediately before the relative call at RVA `0x001C4C2F`. That call targets the private binding dispatcher at RVA `0x002351C0`; its second stack argument is the resolved native object. The dispatcher also receives the binding record in `ECX` and argument count in `EAX`, and returns with `ret 0x0C`. Plasmatica speed instrumentation must preserve that private convention. The base `CNewGameModelAnimation` primary vtable is RVA `0x002C8504`; Elco's live concrete `CNewMissileAimingGameModelAnimation` vtable is RVA `0x002D5464`, and RTTI places the relevant base chain at offset zero.
+
+## Plasmatica scripted camera path
+
+| Binding | Hash | Observed bytecode operand | Confirmed role |
+| --- | ---: | ---: | --- |
+| `TestCameraCollision|PRN` | `0x8232C4CA` | `0x0002FC0A` | Spatial gate; result `0` allowed the cinematic path and result `1` rejected it |
+| `TsaPlayCamera|PRSNNBS` | `0xF69C244A` | `0x00038CEF` | Starts the accepted scripted-camera path |
+| `GetCurrentTsaAnimation|P` | `0xB6171BB6` | `0x00038D1F` | Polled during cinematic camera setup |
+| `SetRenderCamera|S` | `0x61F821BD` | `0x00038D56` | Selects observed cinematic resource hash `0xEE1B1485` |
+| `SetRenderCamera|S` | `0x61F821BD` | `0x000AAEC9` | Restores observed normal resource hash `0x933B5BDE` |
+
+Successful casts at both `1.0x` and `2.0x` executed one cinematic selection and one normal-camera restore. The selected interval fell from `11.585 s` to approximately `5.92 s` under the per-model `2.0x` experiment, while the roughly `0.25 s` collision-to-selection setup did not materially change. This is runtime evidence that spatial rejection, not the speed hook, explains casts with no cinematic view.

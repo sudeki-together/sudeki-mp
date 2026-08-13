@@ -97,7 +97,7 @@ printf '%s\n' \
     'SudekiMP research checkpoint:' \
     '  Milestone 1 complete: Quick Menu can remain open at normal world speed.' \
     '  Milestone 2 complete: Plasmatica caster animation is independently scalable.' \
-    '  Next targets: eye-camera timing, native impact damage, and combat protection.' \
+    '  Next targets: native impact damage, combat protection, and direct activation.' \
     "  Research saves: ${save_count}" \
     "  Mode: ${mode}"
 

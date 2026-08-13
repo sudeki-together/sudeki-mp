@@ -73,6 +73,11 @@ enum {
     PLASMATICA_PUSH_ANIMATION_IP = 0x00004195u,
     HASH_TSA_PUSH_ANIMATION_STATE = 0xd36ce8f5u,
     HASH_ANIMID_SKILL_02 = 0xb0242a96u,
+    HASH_TSA_PLAY_CAMERA = 0xf69c244au,
+    HASH_GET_CURRENT_TSA_ANIMATION = 0xb6171bb6u,
+    HASH_TEST_CAMERA_COLLISION = 0x8232c4cau,
+    HASH_SET_RENDER_CAMERA = 0x61f821bdu,
+    HASH_FIRE_MISSILE_SCRIPTED = 0xf907b96bu,
     HASH_DO_DIRECT_DAMAGE = 0xd13c5fe6u,
     HASH_MODIFY_HIT_POINTS = 0x68687a89u,
     HASH_HIT_ENTITY = 0x2d759b0du,
@@ -107,12 +112,14 @@ static volatile LONG trace_targeting_poll_count;
 static volatile LONG trace_first_arbiter_poll_count;
 static volatile LONG trace_second_arbiter_poll_count;
 static volatile LONG trace_animation_active_poll_count;
+static volatile LONG trace_get_current_animation_count;
 static void *trace_skill_object;
 static void *trace_animation_object;
 static float trace_animation_multiplier = 1.0f;
 static float trace_previous_animation_multiplier = 1.0f;
 static BOOL trace_animation_speed_applied;
 static volatile LONG trace_animation_binding_pending;
+static DWORD trace_start_tick;
 
 static SudekiMpRelativeCallHook use_call_hook;
 static SudekiMpRelativeCallHook stop_rumble_call_hook;
@@ -146,6 +153,28 @@ static BOOL read_trace_memory(
     void *destination,
     SIZE_T size
 );
+
+static DWORD trace_elapsed_milliseconds(void) {
+    return GetTickCount() - trace_start_tick;
+}
+
+static const char *camera_call_name(uint32_t call_hash) {
+    switch (call_hash) {
+        case HASH_TSA_PLAY_CAMERA:
+            return "tsa_play_camera";
+        case HASH_GET_CURRENT_TSA_ANIMATION:
+            return "get_current_tsa_animation";
+        case HASH_SET_RENDER_CAMERA:
+            return "set_render_camera";
+        default:
+            return NULL;
+    }
+}
+
+static BOOL is_camera_method(uint32_t method_hash) {
+    return method_hash == HASH_TEST_CAMERA_COLLISION ||
+        method_hash == HASH_SET_RENDER_CAMERA;
+}
 
 /*
  * RVA 0x001C4C2F calls the script/native binding dispatcher with a private
@@ -212,7 +241,8 @@ trace_animation_binding_object(void *native_object) {
     original_animation_speed(native_object, NULL, trace_animation_multiplier);
     trace_animation_speed_applied = TRUE;
     SudekiMpLogFormat(
-        "plasmatica_animation_speed=applied object=0x%08lx vtable=0x%08lx previous_bits=0x%08lx multiplier_bits=0x%08lx animation=ANIMID_SKILL_02\r\n",
+        "plasmatica_animation_speed=applied elapsed_ms=%lu object=0x%08lx vtable=0x%08lx previous_bits=0x%08lx multiplier_bits=0x%08lx animation=ANIMID_SKILL_02\r\n",
+        (unsigned long)trace_elapsed_milliseconds(),
         (unsigned long)(uintptr_t)native_object,
         (unsigned long)(uintptr_t)vtable,
         (unsigned long)previous_bits,
@@ -362,6 +392,8 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
     BOOL damage_method = FALSE;
     BOOL observed_method = FALSE;
     BOOL sampled_wait_call = FALSE;
+    BOOL camera_method = FALSE;
+    BOOL landmark_method = FALSE;
     BOOL should_log = FALSE;
     BOOL animation_binding_candidate = FALSE;
     int handler_result;
@@ -409,6 +441,11 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
             sampled_wait_call =
                 instruction_offset == IS_PLAYING_GET_COMPONENT_IP ||
                 instruction_offset == IS_PLAYING_TSA_IS_PLAYING_IP;
+            camera_method = primary_thread && is_camera_method(method_hash);
+            landmark_method = primary_thread &&
+                ((instruction_offset == PLASMATICA_PUSH_ANIMATION_IP &&
+                    method_hash == HASH_TSA_PUSH_ANIMATION_STATE) ||
+                 method_hash == HASH_FIRE_MISSILE_SCRIPTED);
             if (primary_thread) {
                 repetitive_poll = next_repetitive_method_poll(
                     instruction_offset
@@ -419,7 +456,7 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
                     (poll <= 3 || poll % 50 == 0)) ||
                 (repetitive_poll != 0 &&
                     (repetitive_poll <= 3 || repetitive_poll % 50 == 0)) ||
-                (!sampled_wait_call && repetitive_poll == 0);
+                camera_method || landmark_method;
             animation_binding_candidate = primary_thread &&
                 instruction_offset == PLASMATICA_PUSH_ANIMATION_IP &&
                 method_hash == HASH_TSA_PUSH_ANIMATION_STATE &&
@@ -461,9 +498,10 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
 
     if (should_log) {
         SudekiMpLogFormat(
-            "skill_trace event=%s sequence=%ld poll=%ld repetitive_poll=%ld thread=0x%08lx primary=%u ip=0x%08lx hash=0x%08lx stack=0x%08lx count=%lu words=%08lx,%08lx,%08lx,%08lx stack_after=0x%08lx top_after=0x%08lx\r\n",
+            "skill_trace event=%s sequence=%ld elapsed_ms=%lu poll=%ld repetitive_poll=%ld thread=0x%08lx primary=%u ip=0x%08lx hash=0x%08lx stack=0x%08lx count=%lu words=%08lx,%08lx,%08lx,%08lx stack_after=0x%08lx top_after=0x%08lx\r\n",
             damage_method ? "damage_method" : "object_method",
             (long)next_event(),
+            (unsigned long)trace_elapsed_milliseconds(),
             (long)poll,
             (long)repetitive_poll,
             (unsigned long)(uintptr_t)thread,
@@ -496,6 +534,10 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
     uint32_t nested_words[4] = {0, 0, 0, 0};
     BOOL receiver_read = FALSE;
     BOOL nested_read = FALSE;
+    BOOL primary_thread = FALSE;
+    const char *camera_name = NULL;
+    LONG camera_poll = 0;
+    DWORD camera_before_ms = 0;
     LONG poll = 0;
     int handler_result;
 
@@ -519,6 +561,42 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
                 );
             }
         }
+    }
+
+    if (instruction_offset >= PLASMATICA_SCRIPT_START &&
+        instruction_offset < PLASMATICA_SCRIPT_END) {
+        InterlockedCompareExchange(
+            &trace_primary_thread,
+            (LONG)(uintptr_t)thread,
+            0
+        );
+    }
+    primary_thread = thread != NULL &&
+        (uint32_t)(uintptr_t)thread ==
+        (uint32_t)InterlockedCompareExchange(&trace_primary_thread, 0, 0);
+    camera_name = camera_call_name(call_hash);
+    if (camera_name != NULL && primary_thread) {
+        read_trace_memory(
+            (const uint8_t *)thread + 0x20,
+            &stack_pointer,
+            sizeof(stack_pointer)
+        );
+        read_trace_memory(
+            (const uint8_t *)thread + 0x28,
+            &stack_count,
+            sizeof(stack_count)
+        );
+        read_trace_memory(
+            (const void *)(uintptr_t)stack_pointer,
+            stack_words,
+            sizeof(stack_words)
+        );
+        if (call_hash == HASH_GET_CURRENT_TSA_ANIMATION) {
+            camera_poll = InterlockedIncrement(
+                &trace_get_current_animation_count
+            );
+        }
+        camera_before_ms = trace_elapsed_milliseconds();
     }
 
     if (instruction_offset == PLASMATICA_IS_PLAYING_IP &&
@@ -554,17 +632,43 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
         }
     }
 
-    if (instruction_offset >= PLASMATICA_SCRIPT_START &&
-        instruction_offset < PLASMATICA_SCRIPT_END) {
-        InterlockedCompareExchange(
-            &trace_primary_thread,
-            (LONG)(uintptr_t)thread,
-            0
-        );
-    }
-
     (void)ignored_edx;
     handler_result = original_script_call_opcode(thread, NULL);
+
+    if (camera_name != NULL && primary_thread) {
+        uint32_t camera_stack_after = 0;
+        uint32_t camera_top_after = 0xffffffffu;
+
+        read_trace_memory(
+            (const uint8_t *)thread + 0x20,
+            &camera_stack_after,
+            sizeof(camera_stack_after)
+        );
+        read_trace_memory(
+            (const void *)(uintptr_t)camera_stack_after,
+            &camera_top_after,
+            sizeof(camera_top_after)
+        );
+        SudekiMpLogFormat(
+            "skill_trace event=camera_call sequence=%ld name=%s elapsed_before_ms=%lu elapsed_after_ms=%lu poll=%ld thread=0x%08lx ip=0x%08lx hash=0x%08lx stack=0x%08lx count=%lu words=%08lx,%08lx,%08lx,%08lx stack_after=0x%08lx top_after=0x%08lx\r\n",
+            (long)next_event(),
+            camera_name,
+            (unsigned long)camera_before_ms,
+            (unsigned long)trace_elapsed_milliseconds(),
+            (long)camera_poll,
+            (unsigned long)(uintptr_t)thread,
+            (unsigned long)instruction_offset,
+            (unsigned long)call_hash,
+            (unsigned long)stack_pointer,
+            (unsigned long)stack_count,
+            (unsigned long)stack_words[0],
+            (unsigned long)stack_words[1],
+            (unsigned long)stack_words[2],
+            (unsigned long)stack_words[3],
+            (unsigned long)camera_stack_after,
+            (unsigned long)camera_top_after
+        );
+    }
 
     if (poll != 0) {
         uint32_t result_stack_pointer = 0;
@@ -688,10 +792,13 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         InterlockedExchange(&trace_first_arbiter_poll_count, 0);
         InterlockedExchange(&trace_second_arbiter_poll_count, 0);
         InterlockedExchange(&trace_animation_active_poll_count, 0);
+        InterlockedExchange(&trace_get_current_animation_count, 0);
         InterlockedExchange(&trace_animation_binding_pending, 0);
+        trace_start_tick = GetTickCount();
         InterlockedExchange(&trace_active, 1);
         SudekiMpLogFormat(
-            "skill_trace event=begin this=0x%08lx slot=%d skill_data=0x%08lx\r\n",
+            "skill_trace event=begin elapsed_ms=%lu this=0x%08lx slot=%d skill_data=0x%08lx\r\n",
+            (unsigned long)trace_elapsed_milliseconds(),
             (unsigned long)(uintptr_t)self,
             slot,
             (unsigned long)(uintptr_t)skill_data
@@ -703,7 +810,8 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
     if (trace_skill_object == self) {
         void *task_handle = *(void **)((uint8_t *)self + 0x74);
         SudekiMpLogFormat(
-            "skill_trace event=use_return result=%u active=%u task=0x%08lx\r\n",
+            "skill_trace event=use_return elapsed_ms=%lu result=%u active=%u task=0x%08lx\r\n",
+            (unsigned long)trace_elapsed_milliseconds(),
             (unsigned int)result,
             (unsigned int)*(uint8_t *)((uint8_t *)self + 0x6c),
             (unsigned long)(uintptr_t)task_handle
@@ -729,7 +837,8 @@ static void SUDEKIMP_FASTCALL trace_stop_rumble(void *self, void *ignored_edx) {
                 trace_previous_animation_multiplier
             );
             SudekiMpLogFormat(
-                "plasmatica_animation_speed=restored object=0x%08lx multiplier_bits=0x%08lx\r\n",
+                "plasmatica_animation_speed=restored elapsed_ms=%lu object=0x%08lx multiplier_bits=0x%08lx\r\n",
+                (unsigned long)trace_elapsed_milliseconds(),
                 (unsigned long)(uintptr_t)trace_animation_object,
                 (unsigned long)float_bits(trace_previous_animation_multiplier)
             );
@@ -737,7 +846,8 @@ static void SUDEKIMP_FASTCALL trace_stop_rumble(void *self, void *ignored_edx) {
             trace_animation_speed_applied = FALSE;
         }
         SudekiMpLogFormat(
-            "skill_trace event=end this=0x%08lx events=%ld\r\n",
+            "skill_trace event=end elapsed_ms=%lu this=0x%08lx events=%ld\r\n",
+            (unsigned long)trace_elapsed_milliseconds(),
             (unsigned long)(uintptr_t)self,
             (long)InterlockedCompareExchange(&trace_event_number, 0, 0)
         );
@@ -980,6 +1090,7 @@ BOOL SudekiMpInstallSkillTrace(HMODULE game_module, float plasmatica_speed) {
     }
     trace_game_module = game_module;
     trace_animation_multiplier = plasmatica_speed;
+    trace_start_tick = 0;
     base = (uint8_t *)game_module;
 
     original_skill_use = (SkillUseFunction)(base + RVA_CSKILL_USE);
@@ -1058,5 +1169,6 @@ void SudekiMpUninstallSkillTrace(void) {
     InterlockedExchange(&trace_animation_binding_pending, 0);
     InterlockedExchange(&trace_primary_thread, 0);
     InterlockedExchange(&trace_active, 0);
+    trace_start_tick = 0;
     trace_game_module = NULL;
 }

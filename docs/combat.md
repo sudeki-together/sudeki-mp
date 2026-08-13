@@ -191,4 +191,36 @@ The corrected experimental hook remains disabled by default. It arms on the same
 
 Two live casts at `2.0x` confirmed the mechanism. Both applied to the same persistent native animation component with previous bits `0x3F800000`, used multiplier bits `0x40000000`, completed normally, and restored exactly to `0x3F800000`. Compared with the preceding normal-speed cast, the first arbiter event changed from poll `201` to `101`, the second from `249` to `125`, and `TsaIsPlaying` completion from `233` to `117`. These near-halves are direct evidence that Elco's animation—not global simulation—was doubled.
 
-The user reported that Plasmatica still targeted correctly, but the usual eye-view camera angle appeared to be skipped at `2.0x`. Camera presentation therefore has timing coupled to the accelerated animation/event sequence and must be tuned separately. This does not invalidate independent caster animation control, but `2.0x` is not yet a polished balance value.
+### Plasmatica camera collision and timing
+
+Follow-up observation-only traces resolved the apparent missing eye-view camera. The relevant primary-thread sequence is:
+
+```text
+TestCameraCollision
+  collision-free -> TsaPlayCamera
+                 -> TsaPushAnimationState
+                 -> poll GetCurrentTsaAnimation
+                 -> SetRenderCamera(0xEE1B1485)
+  collision      -> SetRenderCamera(0x933B5BDE) immediately
+
+caster animation and missile sequence
+  -> SetRenderCamera(0x933B5BDE)
+  -> finish skill
+```
+
+`TestCameraCollision|PRN` has hash `0x8232C4CA` and is called at bytecode operand `0x0002FC0A`. In the rejected cast it returned `1`; neither `TsaPlayCamera` nor the cinematic render-camera selection followed. In the accepted casts it returned `0`, followed by `TsaPlayCamera|PRSNNBS` (`0xF69C244A`) at `0x00038CEF`, `GetCurrentTsaAnimation|P` (`0xB6171BB6`) at `0x00038D1F`, and the cinematic `SetRenderCamera|S` (`0x61F821BD`) at `0x00038D56`. The normal-camera restore uses the same `SetRenderCamera` binding at `0x000AAEC9` with resource hash `0x933B5BDE`.
+
+The user's visual observation agreed with this control flow: the cinematic view appeared only when Elco had enough surrounding space, and its authored movement presented a variable-looking three or four visible changes. Those visible changes were not three or four separate render-camera selections; each successful trace contained one cinematic selection and one normal-camera restore.
+
+One accepted normal-speed cast and two accepted `2.0x` casts produced these wall-clock timings:
+
+| Event from skill activation | `1.0x` | `2.0x` cast 1 | `2.0x` cast 2 |
+| --- | ---: | ---: | ---: |
+| Collision test / camera setup begins | `3.032 s` | `3.026 s` | `3.027 s` |
+| Cinematic render camera selected | `3.298 s` | `3.279 s` | `3.281 s` |
+| `FireMissileScripted(10)` | `10.746 s` | `7.014 s` | `7.014 s` |
+| `TsaIsPlaying` becomes false | `14.628 s` | `8.949 s` | `8.948 s` |
+| Normal render camera restored | `14.883 s` | `9.203 s` | `9.202 s` |
+| Skill task ends | `15.003 s` | `9.323 s` | `9.322 s` |
+
+The cinematic-camera selection delay remains approximately `0.25 s` after the collision test at both speeds. The interval for which the cinematic render camera remains selected changes from `11.585 s` at `1.0x` to `5.924 s` and `5.921 s` at `2.0x`, almost exactly one half. This confirms the speed hook does not skip the camera path: the collision gate determines whether it is selected, while its held presentation window ends with the independently accelerated caster-animation sequence. A preferred gameplay multiplier is still a balance and presentation decision; `2.0x` remains an experimental proof value.
