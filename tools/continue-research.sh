@@ -107,8 +107,13 @@ printf '%s\n' \
     '' \
     'SudekiMP research checkpoint:' \
     '  Milestone 1 complete: Quick Menu can remain open at normal world speed.' \
-    '  Milestone 2 complete: Plasmatica caster animation is independently scalable.' \
-    '  Next targets: native impact damage, combat protection, and direct activation.' \
+    '  Milestone 2 complete: Plasmatica caster and cinematic camera have independent rates.' \
+    '  Confirmed presentation: matched 2.0x rates preserve all four camera angles.' \
+    '  Active Phase 5 target: identify Plasmatica native impact damage application.' \
+    '  Resume path: FireMissileScripted -> missile update/collision -> RVA 0x000DCD00 -> RVA 0x00018B90.' \
+    '  After damage: investigate caster protection/stagger, targeting retention, and recovery.' \
+    '  Phase 6 direct hotkeys remains intentionally deferred.' \
+    '  Detailed handoff: docs/research-log.md and docs/combat.md.' \
     "  Research saves: ${save_count}" \
     "  Mode: ${mode}"
 
