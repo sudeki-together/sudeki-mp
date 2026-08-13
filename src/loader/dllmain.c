@@ -6,6 +6,8 @@
 
 #include <windows.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SUDEKIMP_INIT_OK 0u
@@ -14,8 +16,15 @@
 #define SUDEKIMP_INIT_BAD_SIGNATURE 3u
 #define SUDEKIMP_INIT_PATCH_FAILED 4u
 #define SUDEKIMP_INIT_TRACE_FAILED 5u
+#define SUDEKIMP_INIT_BAD_CONFIG 6u
 
 static HMODULE dll_module;
+
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
 
 static BOOL read_config_boolean(
     const wchar_t *path,
@@ -30,6 +39,46 @@ static BOOL read_config_boolean(
         _wcsicmp(value, L"yes") == 0 ||
         _wcsicmp(value, L"on") == 0 ||
         wcscmp(value, L"1") == 0;
+}
+
+static BOOL read_config_float(
+    const wchar_t *path,
+    const wchar_t *section,
+    const wchar_t *key,
+    float default_value,
+    float minimum,
+    float maximum,
+    float *result
+) {
+    wchar_t value[32];
+    wchar_t default_text[32];
+    wchar_t *end = NULL;
+    double parsed;
+
+    if (result == NULL) {
+        return FALSE;
+    }
+    _snwprintf(
+        default_text,
+        sizeof(default_text) / sizeof(default_text[0]),
+        L"%.3f",
+        (double)default_value
+    );
+    default_text[(sizeof(default_text) / sizeof(default_text[0])) - 1] = L'\0';
+    GetPrivateProfileStringW(
+        section,
+        key,
+        default_text,
+        value,
+        (DWORD)(sizeof(value) / sizeof(value[0])),
+        path
+    );
+    parsed = wcstod(value, &end);
+    if (end == value || *end != L'\0' || parsed < minimum || parsed > maximum) {
+        return FALSE;
+    }
+    *result = (float)parsed;
+    return TRUE;
 }
 
 static BOOL get_text_section(
@@ -78,6 +127,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     SudekiMpPatternResult pattern_result;
     BOOL patch_enabled;
     BOOL trace_enabled;
+    BOOL animation_speed_enabled;
+    float plasmatica_animation_speed = 1.0f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -155,6 +206,24 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnablePlasmaticaTrace"
     );
+    animation_speed_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePlasmaticaAnimationSpeed"
+    );
+    if (animation_speed_enabled && !read_config_float(
+            config_path,
+            L"SudekiMP",
+            L"PlasmaticaAnimationSpeed",
+            1.5f,
+            0.25f,
+            4.0f,
+            &plasmatica_animation_speed)) {
+        SudekiMpLogWrite("plasmatica_animation_speed_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
 
     SudekiMpLogFormat("quick_menu_patch_requested=%s\r\n",
         patch_enabled ? "true" : "false");
@@ -173,8 +242,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     SudekiMpLogFormat("plasmatica_trace_requested=%s\r\n",
         trace_enabled ? "true" : "false");
-    if (trace_enabled) {
-        if (!SudekiMpInstallSkillTrace(game_module)) {
+    SudekiMpLogFormat(
+        "plasmatica_animation_speed_requested=%s multiplier_bits=0x%08lx\r\n",
+        animation_speed_enabled ? "true" : "false",
+        (unsigned long)float_bits(plasmatica_animation_speed)
+    );
+    if (trace_enabled || animation_speed_enabled) {
+        if (!SudekiMpInstallSkillTrace(
+                game_module,
+                animation_speed_enabled ? plasmatica_animation_speed : 1.0f)) {
             SudekiMpLogFormat("plasmatica_trace_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("plasmatica_trace_applied=false\r\n");
@@ -187,7 +263,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("plasmatica_trace_applied=false\r\n");
     }
     SudekiMpLogWrite("status=ready\r\n");
-    if (!trace_enabled) {
+    if (!trace_enabled && !animation_speed_enabled) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;

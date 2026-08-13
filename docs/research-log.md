@@ -324,3 +324,50 @@ The script's `FireMissileScripted(10)` literal is not the same visible index as 
 ### Next target
 
 Resolve the animation state pushed at bytecode operand `0x00004195` and trace the independent per-character animation-speed setter. Then test whether changing only Elco's animation multiplier advances the two watched launch events without changing world speed.
+
+## 2026-08-13 — Independent Plasmatica animation-speed prototype prepared
+
+### Confirmed
+
+- The archive's exact resource/hash entry resolves `0xB0242A96` to `ANIMID_SKILL_02`. This is the value passed to `TsaPushAnimationState` at bytecode operand `0x00004195` during the observed Plasmatica cast.
+- MSVC RTTI describes `CNewGameModelAnimation` as deriving through `CSkinnedGameModelInterface` from `CSimpleGameModelInterface`, with all three subobjects at offset zero.
+- Native `SetAnimationSpeedMultiplier(float)` at RVA `0x000E0460` writes the model-local input multiplier at `+0x48`, computes `+0x44 * +0x48 * +0x4C`, stores the effective value at `+0x50`, and notifies the concrete model through a virtual call.
+- Native reset at RVA `0x000E04B0` restores the input to `1.0`; the getter at RVA `0x000E04F0` returns the effective `+0x50` value.
+- The opt-in prototype matches the exact Plasmatica script thread, operand, method hash, and `ANIMID_SKILL_02` hash. It records the existing input multiplier, applies the configured multiplier only to that animation receiver, and restores the recorded value at normal skill cleanup.
+- The project cross-compiled without warnings, and both the relative-call-hook test and exact-image skill-hook installation test passed under Wine.
+
+### First runtime experiment — rejected
+
+- The normal-world-speed patch remained effective, but the user did not observe a faster Plasmatica animation at `1.5x`.
+- The first hook logged object `0x0838F818` and prior multiplier bits `0x00145DB0`. Those bits are not a plausible animation multiplier; event timing also remained essentially vanilla (`201` and `249` polls for the two arbiter events, and `233` polls until `TsaIsPlaying` became false).
+- Static reconstruction of opcode `0x28` confirmed that the logged stack object was only the script-side wrapper. The handler obtains the underlying native object through wrapper virtual slot `+0x14` or `+0x30`, then passes that native pointer as the second stack argument to the binding dispatcher call at RVA `0x001C4C2F`.
+- The bad experiment restored the exact bits it had saved, so it did not leave a persistent field change. It nevertheless does not count as independent animation-speed control.
+
+### Initial binding-dispatch prototype
+
+- A private-convention bridge now intercepts only the exact binding-dispatch call, preserving `EAX`, `ECX`, all three stack arguments, the return value, and the dispatcher's `ret 0x0C` cleanup.
+- The speed operation is armed only for Plasmatica's primary thread at operand `0x00004195`, method `TsaPushAnimationState`, and resource `ANIMID_SKILL_02`.
+- This initial revision required the resolved object vtable to equal supported-build base `CNewGameModelAnimation` RVA `0x002C8504` and the prior multiplier to be finite and positive. A mismatch was logged and left untouched; the concrete-type correction is recorded below.
+- The DLL builds without warnings. The synthetic call-hook test, updated exact-image install/restore test, and launcher build check all pass under Wine. Live behavior is ready for a new comparison run but is not yet confirmed.
+
+### Native type-gate capture
+
+- The first corrected-dispatch run reached native object `0x07C5825C` and safely rejected vtable `0x7AEA5464` because the gate expected the base `CNewGameModelAnimation` vtable. No animation field was written and the cast completed normally.
+- Relocating that vtable against module base `0x7ABD0000` gives RVA `0x002D5464`. MSVC RTTI identifies it as `CNewMissileAimingGameModelAnimation`.
+- Its class hierarchy includes `CNewGameModelAnimation`, `CSkinnedGameModelInterface`, and `CSimpleGameModelInterface`, each with member displacement zero. The live untouched multiplier at native-object offset `+0x48` was `1.0` (`0x3F800000`).
+- The exact-type safety gate now accepts only the supported build's `CNewMissileAimingGameModelAnimation` vtable for this Elco experiment. This correction is statically justified and awaits one new runtime cast.
+
+## 2026-08-13 — Milestone 2 confirmed: independent Plasmatica animation speed
+
+### Confirmed
+
+- Two Plasmatica casts completed normally with normal world simulation and `PlasmaticaAnimationSpeed=2.0`.
+- Each cast resolved the same native object, validated vtable RVA `0x002D5464`, read the prior per-model multiplier as `1.0` (`0x3F800000`), applied `2.0` (`0x40000000`), and restored exactly to `1.0` during normal skill cleanup.
+- The first animation-gated arbiter event changed from normal-speed poll `201` to `101`; the second changed from `249` to `125`; `TsaIsPlaying` changed from false at poll `233` to false at poll `117`. The second 2.0x cast reproduced the same `101`, `125`, and `117` values.
+- The near-exact halving demonstrates that the selected caster animation and its animation events were accelerated independently. The hook does not write the global game-speed state, and the Quick Menu normal-world-speed option remained active.
+- The user reported correct skill targeting. They also reported that the usual eye-view camera angle appeared to be skipped, likely because its presentation window is coupled to the now-shorter animation/event sequence.
+- Repository and generated configurations were returned to disabled defaults after capture. The already-running process retains its startup hooks until normal exit.
+
+### Interpretation
+
+Milestone 2 is achieved for one skill: world simulation can remain at `1.0x` while Plasmatica's caster animation is independently configurable. Camera timing, preferred multiplier, combat protection, and polish remain future work; `2.0x` is evidence, not a committed balance value.

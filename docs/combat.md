@@ -170,3 +170,25 @@ No `DoDirectDamage|N`, `ModifyHitPoints|NB`, `HitEntity|PB`, or `CausePoison|PNN
 The user-owned `SOLData.baf` serializes Plasmatica as one projectile with velocity `17.0`, range `100.0`, wall and ground collision enabled, and no penetration or bouncing. Its primary attack record has serialized base damage `500` and links to `PlasmExplosion`, whose serialized base damage is `300`. This does not establish `800` damage: the primary record says the secondary starts `Never`, and the conditions that may activate the linked attack remain unconfirmed.
 
 The script literal passed to `FireMissileScripted` is `10`, while Plasmatica is element `2` of the serialized `MissileCombos` list. Their mapping has not yet been reconstructed and they must not be treated as the same index.
+
+### Plasmatica animation identity and speed control
+
+The resource/hash dictionary maps the value pushed at bytecode operand `0x00004195` exactly:
+
+```text
+0xB0242A96 = ANIMID_SKILL_02
+```
+
+The receiver of `TsaPushAnimationState` is Elco's `CNewGameModelAnimation`. MSVC RTTI shows that class derives through `CSkinnedGameModelInterface` from `CSimpleGameModelInterface`, all at object offset zero. It is therefore valid to pass the observed receiver directly to the exported per-model speed functions.
+
+`CSimpleGameModelInterface::SetAnimationSpeedMultiplier(float)` at RVA `0x000E0460` stores the supplied multiplier at object offset `+0x48`, multiplies it with the factors at `+0x44` and `+0x4C`, stores the effective speed at `+0x50`, and notifies the concrete model through a virtual call. Reset at RVA `0x000E04B0` supplies `1.0`; get at RVA `0x000E04F0` returns the effective value at `+0x50`.
+
+The first 1.5x runtime experiment did not make Plasmatica meaningfully faster. Its log claimed that object `0x0838F818` had prior multiplier bits `0x00145DB0`; that implausible denormal value proved the object was the script-side wrapper, not the native animation component. The hook restored the same bits after the cast, and the cast's event timing remained essentially vanilla.
+
+The next safe runtime capture obtained native object `0x07C5825C` with vtable RVA `0x002D5464` and rejected it without writing because the initial gate expected the base class's own vtable. RTTI identifies the actual concrete type as `CNewMissileAimingGameModelAnimation`; its hierarchy contains `CNewGameModelAnimation`, `CSkinnedGameModelInterface`, and `CSimpleGameModelInterface`, all at offset zero. Reading the untouched object confirmed `+0x48` held `1.0`. The cast again completed with vanilla timing.
+
+The corrected experimental hook remains disabled by default. It arms on the same exact Plasmatica method/animation tuple, obtains the resolved native object from the interpreter's binding-dispatch call at RVA `0x001C4C2F`, and requires the exact Elco concrete vtable RVA `0x002D5464` plus a finite, positive prior multiplier. It then preserves `+0x48`, applies the configured multiplier before the animation push, and restores the exact prior value during normal skill cleanup.
+
+Two live casts at `2.0x` confirmed the mechanism. Both applied to the same persistent native animation component with previous bits `0x3F800000`, used multiplier bits `0x40000000`, completed normally, and restored exactly to `0x3F800000`. Compared with the preceding normal-speed cast, the first arbiter event changed from poll `201` to `101`, the second from `249` to `125`, and `TsaIsPlaying` completion from `233` to `117`. These near-halves are direct evidence that Elco's animation—not global simulation—was doubled.
+
+The user reported that Plasmatica still targeted correctly, but the usual eye-view camera angle appeared to be skipped at `2.0x`. Camera presentation therefore has timing coupled to the accelerated animation/event sequence and must be tuned separately. This does not invalidate independent caster animation control, but `2.0x` is not yet a polished balance value.

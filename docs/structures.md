@@ -45,3 +45,14 @@ Applies to the same exact executable build. These offsets are supported by `CSki
 | `+0x10` | inline resource/string storage | display/configured name | Runtime object contained UTF-16 `Plasmatica` here | Medium-high |
 | `+0x94` | `int32` | SP cost | Compared against current SP and subtracted on successful use | High |
 | `+0xA0` | pointer | owning `CSkill` | Constructor assigns the parent to each of six `SkillData` entries | High |
+
+## `CSimpleGameModelInterface` animation-speed fields
+
+This is a partial layout for the exact supported build. `CNewGameModelAnimation` derives from this interface at offset zero. Elco's live concrete `CNewMissileAimingGameModelAnimation` derives through that same chain at offset zero; two successful 2.0x casts read and restored its `+0x48` field as `1.0`.
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x44` | `float` | animation-speed factor A | Multiplied by the public setter/reset functions | High for arithmetic; role unnamed |
+| `+0x48` | `float` | public animation-speed multiplier input | Written by `SetAnimationSpeedMultiplier`; reset to `1.0` | High |
+| `+0x4C` | `float` | animation-speed factor B | Multiplied by the public setter/reset functions | High for arithmetic; role unnamed |
+| `+0x50` | `float` | effective animation speed | Product of `+0x44`, `+0x48`, and `+0x4C`; returned by the public getter | High |

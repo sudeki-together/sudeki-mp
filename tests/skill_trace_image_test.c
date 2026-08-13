@@ -13,7 +13,9 @@ enum {
     RVA_SCRIPT_CALL_OPCODE = 0x001c4970u,
     RVA_SCRIPT_CALL_OPCODE_SLOT = 0x00323fa0u,
     RVA_SCRIPT_METHOD_OPCODE = 0x001c4b10u,
-    RVA_SCRIPT_METHOD_OPCODE_SLOT = 0x00323fa4u
+    RVA_SCRIPT_METHOD_OPCODE_SLOT = 0x00323fa4u,
+    RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
+    RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u
 };
 
 typedef struct ExpectedExport {
@@ -149,7 +151,7 @@ int wmain(int argc, wchar_t **argv) {
     *(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) =
         image + RVA_SCRIPT_METHOD_OPCODE;
 
-    if (!SudekiMpInstallSkillTrace((HMODULE)image)) {
+    if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         VirtualFree(image, 0, MEM_RELEASE);
@@ -172,6 +174,11 @@ int wmain(int argc, wchar_t **argv) {
     if (*(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) ==
         image + RVA_SCRIPT_METHOD_OPCODE) {
         fputs("FAIL: script-method opcode slot was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_SCRIPT_METHOD_BINDING_CALL) ==
+        image + RVA_SCRIPT_BINDING_INVOKE) {
+        fputs("FAIL: script binding invoke call was not redirected\n", stderr);
         ++failures;
     }
     for (index = 0; index < sizeof(expected_exports) / sizeof(expected_exports[0]);
@@ -202,6 +209,11 @@ int wmain(int argc, wchar_t **argv) {
     if (*(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) !=
         image + RVA_SCRIPT_METHOD_OPCODE) {
         fputs("FAIL: script-method opcode slot was not restored\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_SCRIPT_METHOD_BINDING_CALL) !=
+        image + RVA_SCRIPT_BINDING_INVOKE) {
+        fputs("FAIL: script binding invoke call was not restored\n", stderr);
         ++failures;
     }
     for (index = 0; index < sizeof(expected_exports) / sizeof(expected_exports[0]);

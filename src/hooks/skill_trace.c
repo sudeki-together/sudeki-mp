@@ -32,6 +32,7 @@ typedef SkillBool (SUDEKIMP_FASTCALL *AnimationDirectResourceFunction)(
 typedef SkillBool (SUDEKIMP_FASTCALL *MissileFunction)(void *, void *, int);
 typedef void (SUDEKIMP_FASTCALL *FloatFunction)(void *, void *, float);
 typedef int (SUDEKIMP_FASTCALL *ScriptCallOpcodeFunction)(void *, void *);
+typedef int (*ScriptBindingInvokeFunction)(void);
 
 enum {
     RVA_CSKILL_USE = 0x000b4810u,
@@ -54,6 +55,9 @@ enum {
     RVA_SCRIPT_CALL_OPCODE_SLOT = 0x00323fa0u,
     RVA_SCRIPT_METHOD_OPCODE = 0x001c4b10u,
     RVA_SCRIPT_METHOD_OPCODE_SLOT = 0x00323fa4u,
+    RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
+    RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
+    RVA_CNEW_MISSILE_AIMING_ANIMATION_VTABLE = 0x002d5464u,
     RVA_SCRIPT_MANAGER_GLOBAL = 0x003c3108u,
     RVA_SCRIPT_RUNTIME_GLOBAL = 0x003c310cu,
     PLASMATICA_SCRIPT_START = 0x000aac9fu,
@@ -66,6 +70,9 @@ enum {
     FIRST_ARBITER_EVENT_POLL_IP = 0x000aae2cu,
     SECOND_ARBITER_EVENT_POLL_IP = 0x000aae60u,
     ANIMATION_ACTIVE_POLL_IP = 0x00003f8fu,
+    PLASMATICA_PUSH_ANIMATION_IP = 0x00004195u,
+    HASH_TSA_PUSH_ANIMATION_STATE = 0xd36ce8f5u,
+    HASH_ANIMID_SKILL_02 = 0xb0242a96u,
     HASH_DO_DIRECT_DAMAGE = 0xd13c5fe6u,
     HASH_MODIFY_HIT_POINTS = 0x68687a89u,
     HASH_HIT_ENTITY = 0x2d759b0du,
@@ -101,12 +108,18 @@ static volatile LONG trace_first_arbiter_poll_count;
 static volatile LONG trace_second_arbiter_poll_count;
 static volatile LONG trace_animation_active_poll_count;
 static void *trace_skill_object;
+static void *trace_animation_object;
+static float trace_animation_multiplier = 1.0f;
+static float trace_previous_animation_multiplier = 1.0f;
+static BOOL trace_animation_speed_applied;
+static volatile LONG trace_animation_binding_pending;
 
 static SudekiMpRelativeCallHook use_call_hook;
 static SudekiMpRelativeCallHook stop_rumble_call_hook;
 static SudekiMpExportHook export_hooks[TRACE_EXPORT_COUNT];
 static SudekiMpPointerHook script_call_opcode_hook;
 static SudekiMpPointerHook script_method_opcode_hook;
+static SudekiMpRelativeCallHook script_binding_invoke_hook;
 
 static SkillUseFunction original_skill_use;
 static StopRumbleFunction original_stop_rumble;
@@ -124,8 +137,111 @@ static FloatFunction original_direct_damage;
 static FloatFunction original_animation_speed;
 static ScriptCallOpcodeFunction original_script_call_opcode;
 static ScriptCallOpcodeFunction original_script_method_opcode;
+static ScriptBindingInvokeFunction original_script_binding_invoke;
 
 static LONG next_event(void);
+static uint32_t float_bits(float value);
+static BOOL read_trace_memory(
+    const void *source,
+    void *destination,
+    SIZE_T size
+);
+
+/*
+ * RVA 0x001C4C2F calls the script/native binding dispatcher with a private
+ * x86 convention: ECX is the binding record, EAX is the argument count, and
+ * three stack arguments are removed by the callee.  The second stack argument
+ * is the resolved native object.  A normal C wrapper would lose EAX, so this
+ * bridge preserves both registers and reproduces the original stack contract.
+ */
+static void __attribute__((used, noinline))
+trace_animation_binding_object(void *native_object) {
+    void *vtable = NULL;
+    float previous_multiplier = 0.0f;
+    uint32_t previous_bits;
+    void *expected_vtable;
+
+    if (InterlockedExchange(&trace_animation_binding_pending, 0) == 0) {
+        return;
+    }
+
+    expected_vtable = (uint8_t *)trace_game_module +
+        RVA_CNEW_MISSILE_AIMING_ANIMATION_VTABLE;
+    if (!read_trace_memory(native_object, &vtable, sizeof(vtable))) {
+        SudekiMpLogFormat(
+            "plasmatica_animation_speed=native_object_read_failed object=0x%08lx error=%lu\r\n",
+            (unsigned long)(uintptr_t)native_object,
+            (unsigned long)GetLastError()
+        );
+        return;
+    }
+    if (vtable != expected_vtable) {
+        SudekiMpLogFormat(
+            "plasmatica_animation_speed=native_object_rejected object=0x%08lx vtable=0x%08lx expected_vtable=0x%08lx reason=unexpected_vtable\r\n",
+            (unsigned long)(uintptr_t)native_object,
+            (unsigned long)(uintptr_t)vtable,
+            (unsigned long)(uintptr_t)expected_vtable
+        );
+        return;
+    }
+    if (!read_trace_memory(
+            (const uint8_t *)native_object + 0x48,
+            &previous_multiplier,
+            sizeof(previous_multiplier))) {
+        SudekiMpLogFormat(
+            "plasmatica_animation_speed=multiplier_read_failed object=0x%08lx error=%lu\r\n",
+            (unsigned long)(uintptr_t)native_object,
+            (unsigned long)GetLastError()
+        );
+        return;
+    }
+
+    previous_bits = float_bits(previous_multiplier);
+    if ((previous_bits & 0x7f800000u) == 0x7f800000u ||
+        previous_multiplier <= 0.0f || previous_multiplier > 16.0f) {
+        SudekiMpLogFormat(
+            "plasmatica_animation_speed=multiplier_rejected object=0x%08lx previous_bits=0x%08lx\r\n",
+            (unsigned long)(uintptr_t)native_object,
+            (unsigned long)previous_bits
+        );
+        return;
+    }
+
+    trace_animation_object = native_object;
+    trace_previous_animation_multiplier = previous_multiplier;
+    original_animation_speed(native_object, NULL, trace_animation_multiplier);
+    trace_animation_speed_applied = TRUE;
+    SudekiMpLogFormat(
+        "plasmatica_animation_speed=applied object=0x%08lx vtable=0x%08lx previous_bits=0x%08lx multiplier_bits=0x%08lx animation=ANIMID_SKILL_02\r\n",
+        (unsigned long)(uintptr_t)native_object,
+        (unsigned long)(uintptr_t)vtable,
+        (unsigned long)previous_bits,
+        (unsigned long)float_bits(trace_animation_multiplier)
+    );
+}
+
+static int __attribute__((naked, used)) trace_script_binding_invoke(void) {
+    __asm__ __volatile__(
+        "pushl %ebp\n\t"
+        "movl %esp, %ebp\n\t"
+        "subl $12, %esp\n\t"
+        "movl %eax, -4(%ebp)\n\t"
+        "movl %ecx, -8(%ebp)\n\t"
+        "pushl 12(%ebp)\n\t"
+        "call _trace_animation_binding_object\n\t"
+        "addl $4, %esp\n\t"
+        "pushl 16(%ebp)\n\t"
+        "pushl 12(%ebp)\n\t"
+        "pushl 8(%ebp)\n\t"
+        "movl -4(%ebp), %eax\n\t"
+        "movl -8(%ebp), %ecx\n\t"
+        "call *_original_script_binding_invoke\n\t"
+        "movl %eax, -12(%ebp)\n\t"
+        "movl -12(%ebp), %eax\n\t"
+        "leave\n\t"
+        "ret $12\n\t"
+    );
+}
 
 static BOOL is_damage_method(uint32_t method_hash) {
     return method_hash == HASH_DO_DIRECT_DAMAGE ||
@@ -247,6 +363,7 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
     BOOL observed_method = FALSE;
     BOOL sampled_wait_call = FALSE;
     BOOL should_log = FALSE;
+    BOOL animation_binding_candidate = FALSE;
     int handler_result;
 
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
@@ -303,11 +420,23 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
                 (repetitive_poll != 0 &&
                     (repetitive_poll <= 3 || repetitive_poll % 50 == 0)) ||
                 (!sampled_wait_call && repetitive_poll == 0);
+            animation_binding_candidate = primary_thread &&
+                instruction_offset == PLASMATICA_PUSH_ANIMATION_IP &&
+                method_hash == HASH_TSA_PUSH_ANIMATION_STATE &&
+                stack_words[3] == HASH_ANIMID_SKILL_02 &&
+                trace_animation_multiplier != 1.0f &&
+                !trace_animation_speed_applied;
         }
     }
 
     (void)ignored_edx;
+    if (animation_binding_candidate) {
+        InterlockedExchange(&trace_animation_binding_pending, 1);
+    }
     handler_result = original_script_method_opcode(thread, NULL);
+    if (animation_binding_candidate) {
+        InterlockedExchange(&trace_animation_binding_pending, 0);
+    }
 
     if (observed_method) {
         read_trace_memory(
@@ -549,6 +678,8 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
     }
     if (is_plasmatica(skill_data)) {
         trace_skill_object = self;
+        trace_animation_object = NULL;
+        trace_animation_speed_applied = FALSE;
         InterlockedExchange(&trace_event_number, 0);
         InterlockedExchange(&trace_receiver_poll_count, 0);
         InterlockedExchange(&trace_last_stack_after_dispatch, -1);
@@ -557,6 +688,7 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         InterlockedExchange(&trace_first_arbiter_poll_count, 0);
         InterlockedExchange(&trace_second_arbiter_poll_count, 0);
         InterlockedExchange(&trace_animation_active_poll_count, 0);
+        InterlockedExchange(&trace_animation_binding_pending, 0);
         InterlockedExchange(&trace_active, 1);
         SudekiMpLogFormat(
             "skill_trace event=begin this=0x%08lx slot=%d skill_data=0x%08lx\r\n",
@@ -578,6 +710,7 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         );
         if (!result) {
             trace_skill_object = NULL;
+            InterlockedExchange(&trace_animation_binding_pending, 0);
             InterlockedExchange(&trace_active, 0);
         }
     }
@@ -589,12 +722,27 @@ static void SUDEKIMP_FASTCALL trace_stop_rumble(void *self, void *ignored_edx) {
     original_stop_rumble(self, NULL);
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
         self == trace_skill_object) {
+        if (trace_animation_speed_applied && trace_animation_object != NULL) {
+            original_animation_speed(
+                trace_animation_object,
+                NULL,
+                trace_previous_animation_multiplier
+            );
+            SudekiMpLogFormat(
+                "plasmatica_animation_speed=restored object=0x%08lx multiplier_bits=0x%08lx\r\n",
+                (unsigned long)(uintptr_t)trace_animation_object,
+                (unsigned long)float_bits(trace_previous_animation_multiplier)
+            );
+            trace_animation_object = NULL;
+            trace_animation_speed_applied = FALSE;
+        }
         SudekiMpLogFormat(
             "skill_trace event=end this=0x%08lx events=%ld\r\n",
             (unsigned long)(uintptr_t)self,
             (long)InterlockedCompareExchange(&trace_event_number, 0, 0)
         );
         trace_skill_object = NULL;
+        InterlockedExchange(&trace_animation_binding_pending, 0);
         InterlockedExchange(&trace_active, 0);
     }
 }
@@ -823,7 +971,7 @@ static BOOL install_export_hooks(void) {
     return TRUE;
 }
 
-BOOL SudekiMpInstallSkillTrace(HMODULE game_module) {
+BOOL SudekiMpInstallSkillTrace(HMODULE game_module, float plasmatica_speed) {
     uint8_t *base;
 
     if (game_module == NULL || trace_game_module != NULL) {
@@ -831,6 +979,7 @@ BOOL SudekiMpInstallSkillTrace(HMODULE game_module) {
         return FALSE;
     }
     trace_game_module = game_module;
+    trace_animation_multiplier = plasmatica_speed;
     base = (uint8_t *)game_module;
 
     original_skill_use = (SkillUseFunction)(base + RVA_CSKILL_USE);
@@ -853,6 +1002,9 @@ BOOL SudekiMpInstallSkillTrace(HMODULE game_module) {
     original_script_method_opcode = (ScriptCallOpcodeFunction)(
         base + RVA_SCRIPT_METHOD_OPCODE
     );
+    original_script_binding_invoke = (ScriptBindingInvokeFunction)(
+        base + RVA_SCRIPT_BINDING_INVOKE
+    );
 
     if (!SudekiMpInstallRelativeCallHook(
             &use_call_hook,
@@ -874,6 +1026,11 @@ BOOL SudekiMpInstallSkillTrace(HMODULE game_module) {
             (void **)(base + RVA_SCRIPT_METHOD_OPCODE_SLOT),
             original_script_method_opcode,
             trace_script_method_opcode) ||
+        !SudekiMpInstallRelativeCallHook(
+            &script_binding_invoke_hook,
+            base + RVA_SCRIPT_METHOD_BINDING_CALL,
+            original_script_binding_invoke,
+            trace_script_binding_invoke) ||
         !install_export_hooks()) {
         SudekiMpUninstallSkillTrace();
         return FALSE;
@@ -889,11 +1046,16 @@ void SudekiMpUninstallSkillTrace(void) {
     for (index = TRACE_EXPORT_COUNT; index > 0; --index) {
         SudekiMpRestoreExportHook(&export_hooks[index - 1]);
     }
+    SudekiMpRestoreRelativeCallHook(&script_binding_invoke_hook);
     SudekiMpRestorePointerHook(&script_method_opcode_hook);
     SudekiMpRestorePointerHook(&script_call_opcode_hook);
     SudekiMpRestoreRelativeCallHook(&stop_rumble_call_hook);
     SudekiMpRestoreRelativeCallHook(&use_call_hook);
     trace_skill_object = NULL;
+    trace_animation_object = NULL;
+    trace_animation_speed_applied = FALSE;
+    trace_animation_multiplier = 1.0f;
+    InterlockedExchange(&trace_animation_binding_pending, 0);
     InterlockedExchange(&trace_primary_thread, 0);
     InterlockedExchange(&trace_active, 0);
     trace_game_module = NULL;

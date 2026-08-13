@@ -134,3 +134,15 @@ The opcode `0x27` binding fallback explains why rewriting PE export slots after 
 | `Possible_SubmitNativeAttackCollision` | `0x000DCD00` / `0x004DCD00` | Wraps a call to RVA `0x00018B90` with attack/resource, collision, owner, and flag data | Medium; final damage behavior unresolved |
 
 The `CMissile` vtable begins at VA `0x006D915C`. Movement-controller implementations used by missile initialization begin at RVAs `0x00187600` and `0x00187710`. The vtable includes exported `HitEntity` at RVA `0x000A2900`, but launch reaches later behavior indirectly; there is no direct call from `FireMissileScripted` to `HitEntity`, `DoDirectDamage`, or `ModifyHitPoints`.
+
+## Per-model animation speed
+
+| Export | RVA / VA | Confirmed behavior |
+| --- | ---: | --- |
+| `CSimpleGameModelInterface::SetAnimationSpeedMultiplier(float)` | `0x000E0460` / `0x004E0460` | Stores input at `+0x48`; recomputes `+0x44 * +0x48 * +0x4C` into effective speed `+0x50`; invokes virtual slot `+0x5C` when changed |
+| `CSimpleGameModelInterface::ResetAnimationSpeedMultiplier()` | `0x000E04B0` / `0x004E04B0` | Sets input multiplier `+0x48` to `1.0` and recomputes effective speed |
+| `CSimpleGameModelInterface::GetAnimationSpeedMultiplier()` | `0x000E04F0` / `0x004E04F0` | Returns effective speed at `+0x50` |
+
+RTTI confirms `CNewGameModelAnimation -> CSkinnedGameModelInterface -> CSimpleGameModelInterface`, with each base at offset zero. Consequently, Plasmatica's live `CNewGameModelAnimation` receiver is directly compatible with these functions.
+
+Opcode `0x28`'s handler resolves a script wrapper to its native object immediately before the relative call at RVA `0x001C4C2F`. That call targets the private binding dispatcher at RVA `0x002351C0`; its second stack argument is the resolved native object. The dispatcher also receives the binding record in `ECX` and argument count in `EAX`, and returns with `ret 0x0C`. Plasmatica speed instrumentation must preserve that private convention. The base `CNewGameModelAnimation` primary vtable is RVA `0x002C8504`; Elco's live concrete `CNewMissileAimingGameModelAnimation` vtable is RVA `0x002D5464`, and RTTI places the relevant base chain at offset zero.

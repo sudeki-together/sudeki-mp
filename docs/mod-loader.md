@@ -11,6 +11,8 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `EnablePlasmaticaTrace` also defaults to `false`. It is diagnostic instrumentation, not a gameplay patch. When enabled, it logs the activation lifetime and script-facing animation, scripted-missile, direct-damage, and animation-speed calls made while the selected `SkillData` name is exactly `Plasmatica`. All wrapper calls forward the original object, arguments, and return value unchanged.
 
+`EnablePlasmaticaAnimationSpeed` defaults to `false`. The experimental `PlasmaticaAnimationSpeed` value is accepted only in the range `0.25` through `4.0`; invalid enabled configuration fails safely. The hook arms only when the confirmed Plasmatica task pushes `ANIMID_SKILL_02`, captures the native object at the interpreter's exact binding-dispatch call, and rejects it unless its vtable is the supported build's concrete `CNewMissileAimingGameModelAnimation` vtable. A successful application restores the model multiplier that existed before the cast. It does not alter the global game-speed state.
+
 ## Linux build
 
 The current host uses these per-user Flatpak components:
@@ -151,7 +153,7 @@ The user played with the option enabled and observed normal-speed combat while t
 Before the first live trace, two standalone Wine tests passed:
 
 - `SudekiMP.CallHookTest.exe` used synthetic executable memory to verify install, rejection, and restoration behavior for relative-call and export-slot hooks.
-- `SudekiMP.SkillTraceImageTest.exe` opened the exact user-supplied `SUDEKI.exe` read-only, mapped its PE sections into inert memory, installed the two call hooks, fourteen export-slot hooks, and the script opcode `0x27` and object-method opcode `0x28` pointer hooks, verified them, uninstalled them, and verified every original target was restored.
+- `SudekiMP.SkillTraceImageTest.exe` opened the exact user-supplied `SUDEKI.exe` read-only, mapped its PE sections into inert memory, installed three call hooks, fourteen export-slot hooks, and the script opcode `0x27` and object-method opcode `0x28` pointer hooks, verified them, uninstalled them, and verified every original target was restored.
 
 The generated x86 assembly was also checked for ABI compatibility. The fastcall bridge receives Sudeki's `this` pointer in `ECX`, treats `EDX` as an ignored bridge register, preserves the original stack-argument positions, and uses the matching callee cleanup sizes.
 

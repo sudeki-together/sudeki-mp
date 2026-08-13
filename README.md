@@ -10,7 +10,7 @@ The exact executable is `SUDEKI.exe` (uppercase), SHA256 `8ceb1d3cf667ad906f1325
 
 The Phase 4 foothold builds as PE32 `SudekiMP.dll` plus `SudekiMP.Launcher.exe`. The launcher safely rejects unknown builds. The DLL's disabled-by-default Quick Menu option has now been tested under Wine: live memory and menu-state capture confirmed normal world speed while the menu remained active, with no executable-file modification. See [docs/mod-loader.md](docs/mod-loader.md).
 
-An additional disabled-by-default Plasmatica diagnostic logger has passed synthetic and inert-image Wine preflight tests. Live captures established the task lifetime and identified Plasmatica as compiled script `PC_Elco1__Skill|P`, including its targeting, camera, animation, sound, and completion-wait call path. The wait wrapper is confirmed to call `CNewGameModelAnimation::TsaIsPlaying` on Elco. Projectile and damage timing still require narrower tracing.
+An additional disabled-by-default Plasmatica diagnostic/control hook has passed synthetic and inert-image Wine preflight tests. Live captures established the task lifetime and identified Plasmatica as compiled script `PC_Elco1__Skill|P`, including its targeting, camera, animation, sound, and completion-wait call path. Milestone 2 is now confirmed: two 2.0x tests independently doubled Elco's validated animation component and nearly halved all animation-event waits while preserving normal world simulation and restoring the prior multiplier. The eye-view camera presentation needs separate timing work, and exact native impact damage resolution remains open.
 
 ## Build on Linux
 
@@ -21,6 +21,16 @@ An additional disabled-by-default Plasmatica diagnostic logger has passed synthe
 ```
 
 Build output is ignored under `build/mingw32/bin/`. The scripts use the per-user MinGW-w64 Flatpak SDK and the dedicated Sudeki Wine prefix by default.
+
+To resume Phase 5 without accidentally using the three-save offline prefix:
+
+```bash
+./tools/continue-research.sh --safe
+./tools/continue-research.sh --trace
+./tools/continue-research.sh --speed-test 2.0
+```
+
+The resume helper requires the 11-slot research save directory, rebuilds and verifies the exact supported executable, prints the current checkpoint and next targets, and restores the generated configuration to disabled defaults when the run ends. `--speed-test` is an explicit reproduction mode, not the default balance configuration.
 
 ## Repository policy
 
