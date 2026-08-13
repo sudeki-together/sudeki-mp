@@ -62,6 +62,7 @@ enum {
     RVA_SCRIPT_RUNTIME_GLOBAL = 0x003c310cu,
     PLASMATICA_SCRIPT_START = 0x000aac9fu,
     PLASMATICA_SCRIPT_END = 0x000aaf67u,
+    PLASMATICA_CINEMATIC_CAMERA_IP = 0x00038d56u,
     PLASMATICA_IS_PLAYING_IP = 0x000aaea4u,
     PLASMATICA_IS_PLAYING_HASH = 0x890f6eb1u,
     IS_PLAYING_GET_COMPONENT_IP = 0x00003e38u,
@@ -71,7 +72,9 @@ enum {
     SECOND_ARBITER_EVENT_POLL_IP = 0x000aae60u,
     ANIMATION_ACTIVE_POLL_IP = 0x00003f8fu,
     PLASMATICA_PUSH_ANIMATION_IP = 0x00004195u,
+    PLASMATICA_START_CAMERA_IP = 0x000045efu,
     HASH_TSA_PUSH_ANIMATION_STATE = 0xd36ce8f5u,
+    HASH_START_CAMERA = 0xebde4799u,
     HASH_ANIMID_SKILL_02 = 0xb0242a96u,
     HASH_TSA_PLAY_CAMERA = 0xf69c244au,
     HASH_GET_CURRENT_TSA_ANIMATION = 0xb6171bb6u,
@@ -113,11 +116,14 @@ static volatile LONG trace_first_arbiter_poll_count;
 static volatile LONG trace_second_arbiter_poll_count;
 static volatile LONG trace_animation_active_poll_count;
 static volatile LONG trace_get_current_animation_count;
+static volatile LONG trace_camera_setup_active;
 static void *trace_skill_object;
 static void *trace_animation_object;
 static float trace_animation_multiplier = 1.0f;
 static float trace_previous_animation_multiplier = 1.0f;
 static BOOL trace_animation_speed_applied;
+static float trace_camera_multiplier = 1.0f;
+static BOOL trace_camera_speed_applied;
 static volatile LONG trace_animation_binding_pending;
 static DWORD trace_start_tick;
 
@@ -396,6 +402,9 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
     BOOL landmark_method = FALSE;
     BOOL should_log = FALSE;
     BOOL animation_binding_candidate = FALSE;
+    BOOL camera_speed_candidate = FALSE;
+    uint32_t camera_previous_speed_bits = 0;
+    uint32_t camera_new_speed_bits = 0;
     int handler_result;
 
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
@@ -456,19 +465,68 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
                     (poll <= 3 || poll % 50 == 0)) ||
                 (repetitive_poll != 0 &&
                     (repetitive_poll <= 3 || repetitive_poll % 50 == 0)) ||
-                camera_method || landmark_method;
+                camera_method || landmark_method ||
+                (primary_thread && InterlockedCompareExchange(
+                    &trace_camera_setup_active, 0, 0
+                ) != 0);
             animation_binding_candidate = primary_thread &&
                 instruction_offset == PLASMATICA_PUSH_ANIMATION_IP &&
                 method_hash == HASH_TSA_PUSH_ANIMATION_STATE &&
                 stack_words[3] == HASH_ANIMID_SKILL_02 &&
                 trace_animation_multiplier != 1.0f &&
                 !trace_animation_speed_applied;
+            camera_speed_candidate = primary_thread &&
+                InterlockedCompareExchange(
+                    &trace_camera_setup_active, 0, 0
+                ) != 0 &&
+                instruction_offset == PLASMATICA_START_CAMERA_IP &&
+                method_hash == HASH_START_CAMERA &&
+                stack_count == 7u &&
+                stack_words[1] == HASH_ANIMID_SKILL_02 &&
+                stack_words[2] == 0xbf800000u &&
+                stack_words[3] == 0x3f800000u &&
+                trace_camera_multiplier != 1.0f &&
+                !trace_camera_speed_applied;
         }
     }
 
     (void)ignored_edx;
     if (animation_binding_candidate) {
         InterlockedExchange(&trace_animation_binding_pending, 1);
+    }
+    if (camera_speed_candidate) {
+        SIZE_T bytes_written = 0;
+        float previous_speed;
+        float new_speed;
+
+        memcpy(&previous_speed, &stack_words[3], sizeof(previous_speed));
+        new_speed = previous_speed * trace_camera_multiplier;
+        camera_previous_speed_bits = float_bits(previous_speed);
+        camera_new_speed_bits = float_bits(new_speed);
+        if (WriteProcessMemory(
+                GetCurrentProcess(),
+                (void *)(uintptr_t)(stack_pointer + 3u * sizeof(uint32_t)),
+                &new_speed,
+                sizeof(new_speed),
+                &bytes_written) && bytes_written == sizeof(new_speed)) {
+            trace_camera_speed_applied = TRUE;
+            SudekiMpLogFormat(
+                "plasmatica_camera_speed=applied elapsed_ms=%lu ip=0x%08lx method=StartCam previous_bits=0x%08lx multiplier_bits=0x%08lx effective_bits=0x%08lx animation=ANIMID_SKILL_02\r\n",
+                (unsigned long)trace_elapsed_milliseconds(),
+                (unsigned long)instruction_offset,
+                (unsigned long)camera_previous_speed_bits,
+                (unsigned long)float_bits(trace_camera_multiplier),
+                (unsigned long)camera_new_speed_bits
+            );
+        } else {
+            SudekiMpLogFormat(
+                "plasmatica_camera_speed=write_failed elapsed_ms=%lu ip=0x%08lx error=%lu bytes_written=%lu\r\n",
+                (unsigned long)trace_elapsed_milliseconds(),
+                (unsigned long)instruction_offset,
+                (unsigned long)GetLastError(),
+                (unsigned long)bytes_written
+            );
+        }
     }
     handler_result = original_script_method_opcode(thread, NULL);
     if (animation_binding_candidate) {
@@ -575,6 +633,11 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
         (uint32_t)(uintptr_t)thread ==
         (uint32_t)InterlockedCompareExchange(&trace_primary_thread, 0, 0);
     camera_name = camera_call_name(call_hash);
+    if (primary_thread && InterlockedCompareExchange(
+            &trace_camera_setup_active, 0, 0
+        ) != 0 && call_hash != HASH_GET_CURRENT_TSA_ANIMATION) {
+        trace_compiled_binding(call_hash, 1);
+    }
     if (camera_name != NULL && primary_thread) {
         read_trace_memory(
             (const uint8_t *)thread + 0x20,
@@ -597,6 +660,10 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
             );
         }
         camera_before_ms = trace_elapsed_milliseconds();
+        if (call_hash == HASH_TSA_PLAY_CAMERA) {
+            InterlockedExchange(&trace_camera_setup_active, 1);
+            trace_compiled_binding(call_hash, 1);
+        }
     }
 
     if (instruction_offset == PLASMATICA_IS_PLAYING_IP &&
@@ -634,6 +701,12 @@ static int SUDEKIMP_FASTCALL trace_script_call_opcode(
 
     (void)ignored_edx;
     handler_result = original_script_call_opcode(thread, NULL);
+
+    if (primary_thread &&
+        instruction_offset == PLASMATICA_CINEMATIC_CAMERA_IP &&
+        call_hash == HASH_SET_RENDER_CAMERA) {
+        InterlockedExchange(&trace_camera_setup_active, 0);
+    }
 
     if (camera_name != NULL && primary_thread) {
         uint32_t camera_stack_after = 0;
@@ -784,6 +857,7 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         trace_skill_object = self;
         trace_animation_object = NULL;
         trace_animation_speed_applied = FALSE;
+        trace_camera_speed_applied = FALSE;
         InterlockedExchange(&trace_event_number, 0);
         InterlockedExchange(&trace_receiver_poll_count, 0);
         InterlockedExchange(&trace_last_stack_after_dispatch, -1);
@@ -793,6 +867,7 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         InterlockedExchange(&trace_second_arbiter_poll_count, 0);
         InterlockedExchange(&trace_animation_active_poll_count, 0);
         InterlockedExchange(&trace_get_current_animation_count, 0);
+        InterlockedExchange(&trace_camera_setup_active, 0);
         InterlockedExchange(&trace_animation_binding_pending, 0);
         trace_start_tick = GetTickCount();
         InterlockedExchange(&trace_active, 1);
@@ -818,6 +893,7 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
         );
         if (!result) {
             trace_skill_object = NULL;
+            InterlockedExchange(&trace_camera_setup_active, 0);
             InterlockedExchange(&trace_animation_binding_pending, 0);
             InterlockedExchange(&trace_active, 0);
         }
@@ -852,6 +928,7 @@ static void SUDEKIMP_FASTCALL trace_stop_rumble(void *self, void *ignored_edx) {
             (long)InterlockedCompareExchange(&trace_event_number, 0, 0)
         );
         trace_skill_object = NULL;
+        InterlockedExchange(&trace_camera_setup_active, 0);
         InterlockedExchange(&trace_animation_binding_pending, 0);
         InterlockedExchange(&trace_active, 0);
     }
@@ -1081,7 +1158,11 @@ static BOOL install_export_hooks(void) {
     return TRUE;
 }
 
-BOOL SudekiMpInstallSkillTrace(HMODULE game_module, float plasmatica_speed) {
+BOOL SudekiMpInstallSkillTrace(
+    HMODULE game_module,
+    float plasmatica_speed,
+    float plasmatica_camera_speed
+) {
     uint8_t *base;
 
     if (game_module == NULL || trace_game_module != NULL) {
@@ -1090,6 +1171,7 @@ BOOL SudekiMpInstallSkillTrace(HMODULE game_module, float plasmatica_speed) {
     }
     trace_game_module = game_module;
     trace_animation_multiplier = plasmatica_speed;
+    trace_camera_multiplier = plasmatica_camera_speed;
     trace_start_tick = 0;
     base = (uint8_t *)game_module;
 
@@ -1166,7 +1248,10 @@ void SudekiMpUninstallSkillTrace(void) {
     trace_animation_object = NULL;
     trace_animation_speed_applied = FALSE;
     trace_animation_multiplier = 1.0f;
+    trace_camera_speed_applied = FALSE;
+    trace_camera_multiplier = 1.0f;
     InterlockedExchange(&trace_animation_binding_pending, 0);
+    InterlockedExchange(&trace_camera_setup_active, 0);
     InterlockedExchange(&trace_primary_thread, 0);
     InterlockedExchange(&trace_active, 0);
     trace_start_tick = 0;

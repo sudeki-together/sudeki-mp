@@ -13,16 +13,17 @@ speed="${2:-2.0}"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--trace|--speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--trace|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --speed-test  Reproduce per-model animation control; defaults to 2.0x.' \
+        '  --camera-speed-test  Run matched 2.0x caster and camera playback.' \
         '  --check       Build and verify the executable/DLL without launching the game.'
 }
 
 case "${mode}" in
-    --safe|--trace|--speed-test|--check)
+    --safe|--trace|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -34,7 +35,7 @@ case "${mode}" in
         ;;
 esac
 
-if [[ "${mode}" == "--speed-test" ]]; then
+if [[ "${mode}" == "--speed-test" || "${mode}" == "--camera-speed-test" ]]; then
     if ! awk -v value="${speed}" 'BEGIN {
         exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0.25 && value <= 4.0)
     }'; then
@@ -85,6 +86,16 @@ case "${mode}" in
             -e 's/^EnablePlasmaticaTrace=false$/EnablePlasmaticaTrace=true/' \
             -e 's/^EnablePlasmaticaAnimationSpeed=false$/EnablePlasmaticaAnimationSpeed=true/' \
             -e "s/^PlasmaticaAnimationSpeed=.*$/PlasmaticaAnimationSpeed=${speed}/" \
+            "${generated_config}"
+        ;;
+    --camera-speed-test)
+        sed -i \
+            -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
+            -e 's/^EnablePlasmaticaTrace=false$/EnablePlasmaticaTrace=true/' \
+            -e 's/^EnablePlasmaticaAnimationSpeed=false$/EnablePlasmaticaAnimationSpeed=true/' \
+            -e "s/^PlasmaticaAnimationSpeed=.*$/PlasmaticaAnimationSpeed=${speed}/" \
+            -e 's/^EnablePlasmaticaCameraSpeed=false$/EnablePlasmaticaCameraSpeed=true/' \
+            -e "s/^PlasmaticaCameraSpeed=.*$/PlasmaticaCameraSpeed=${speed}/" \
             "${generated_config}"
         ;;
 esac

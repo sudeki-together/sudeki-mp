@@ -224,3 +224,24 @@ One accepted normal-speed cast and two accepted `2.0x` casts produced these wall
 | Skill task ends | `15.003 s` | `9.323 s` | `9.322 s` |
 
 The cinematic-camera selection delay remains approximately `0.25 s` after the collision test at both speeds. The interval for which the cinematic render camera remains selected changes from `11.585 s` at `1.0x` to `5.924 s` and `5.921 s` at `2.0x`, almost exactly one half. This confirms the speed hook does not skip the camera path: the collision gate determines whether it is selected, while its held presentation window ends with the independently accelerated caster-animation sequence. A preferred gameplay multiplier is still a balance and presentation decision; `2.0x` remains an experimental proof value.
+
+### Plasmatica camera playback speed
+
+The shorter render-camera window initially showed only three of the four authored camera angles. A focused trace resolved `TsaPlayCamera` to compiled bytecode offset `0x00004532` and identified its native handoff:
+
+```text
+CSpiritCam::SetTargetCamera(0xEE1B1485)
+  -> SetCameraSwitching(false)
+  -> SetStickOnEndFrame(false)
+  -> StartCam(..., ANIMID_SKILL_02, -1, 1.0, ...)
+  -> wait for ANIMID_SKILL_02
+  -> SetRenderCamera(0xEE1B1485)
+```
+
+`StartCam|PPRNNS` has hash `0xEBDE4799` and is called at bytecode operand `0x000045EF`. The exported native implementation is `CSpiritCam::StartCam` at RVA `0x00012910`. Its signature contains one float; the observed value was `1.0`. Native code stores it at `CSpiritCam + 0x1D4`, then multiplies it by a second internal factor and `24.0` while configuring the camera animation.
+
+Two broader candidates were disproved first. Changing the visible `1.0` in the higher-level `TsaPlayCamera` argument list did not alter the camera, and a hook on `Camera::PlaybackSequenceState` received no calls during accepted Plasmatica casts. Both failed patches were removed.
+
+The corrected experiment changes only `StartCam`'s exact float argument. It requires the active Plasmatica primary script thread, the accepted-camera setup window, bytecode operand `0x000045EF`, method hash `0xEBDE4799`, seven stack words, `ANIMID_SKILL_02`, mode `-1`, and an original rate of exactly `1.0`. With both caster and camera configured at `2.0x`, three consecutive casts logged an effective camera rate of `2.0`, completed normally at approximately `9.23 s`, and restored Elco's model multiplier to `1.0`. The user confirmed all four cinematic camera angles appeared before control returned to Elco.
+
+This option remains experimental and disabled by default. The value `2.0` proves independent control; it is not a final balance choice.

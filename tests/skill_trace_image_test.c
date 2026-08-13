@@ -151,7 +151,7 @@ int wmain(int argc, wchar_t **argv) {
     *(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) =
         image + RVA_SCRIPT_METHOD_OPCODE;
 
-    if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f)) {
+    if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         VirtualFree(image, 0, MEM_RELEASE);

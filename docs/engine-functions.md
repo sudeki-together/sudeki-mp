@@ -153,8 +153,11 @@ Opcode `0x28`'s handler resolves a script wrapper to its native object immediate
 | --- | ---: | ---: | --- |
 | `TestCameraCollision|PRN` | `0x8232C4CA` | `0x0002FC0A` | Spatial gate; result `0` allowed the cinematic path and result `1` rejected it |
 | `TsaPlayCamera|PRSNNBS` | `0xF69C244A` | `0x00038CEF` | Starts the accepted scripted-camera path |
+| `CSpiritCam::StartCam|PPRNNS` | `0xEBDE4799` | `0x000045EF` | Receives the two positions, camera resource, playback-rate float, integer mode, and animation name |
 | `GetCurrentTsaAnimation|P` | `0xB6171BB6` | `0x00038D1F` | Polled during cinematic camera setup |
 | `SetRenderCamera|S` | `0x61F821BD` | `0x00038D56` | Selects observed cinematic resource hash `0xEE1B1485` |
 | `SetRenderCamera|S` | `0x61F821BD` | `0x000AAEC9` | Restores observed normal resource hash `0x933B5BDE` |
 
-Successful casts at both `1.0x` and `2.0x` executed one cinematic selection and one normal-camera restore. The selected interval fell from `11.585 s` to approximately `5.92 s` under the per-model `2.0x` experiment, while the roughly `0.25 s` collision-to-selection setup did not materially change. This is runtime evidence that spatial rejection, not the speed hook, explains casts with no cinematic view.
+The compiled `TsaPlayCamera` wrapper starts at bytecode offset `0x00004532`. It configures `CSpiritCam`, calls `StartCam` at `0x000045EF`, waits for the selected TSA animation, and then selects the cinematic render camera. Native `CSpiritCam::StartCam` is exported at RVA `0x00012910`. Its float argument is stored at `CSpiritCam + 0x1D4`; camera initialization multiplies that value by another local factor and `24.0` before configuring playback.
+
+Successful casts execute one cinematic selection and one normal-camera restore. Accelerating only Elco shortens the selected interval from `11.585 s` to approximately `5.92 s`, causing the normal restore to interrupt the authored presentation after three visible angles. An exact-gated `2.0x` change to the `StartCam` float let the presentation complete all four angles within the same approximately `5.92 s` interval. This rate is independent of global simulation speed and Elco's model-animation multiplier.

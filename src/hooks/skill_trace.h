@@ -3,7 +3,11 @@
 
 #include <windows.h>
 
-BOOL SudekiMpInstallSkillTrace(HMODULE game_module, float plasmatica_speed);
+BOOL SudekiMpInstallSkillTrace(
+    HMODULE game_module,
+    float plasmatica_speed,
+    float plasmatica_camera_speed
+);
 void SudekiMpUninstallSkillTrace(void);
 
 #endif

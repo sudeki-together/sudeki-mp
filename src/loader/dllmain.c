@@ -128,7 +128,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL patch_enabled;
     BOOL trace_enabled;
     BOOL animation_speed_enabled;
+    BOOL camera_speed_enabled;
     float plasmatica_animation_speed = 1.0f;
+    float plasmatica_camera_speed = 1.0f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -211,6 +213,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnablePlasmaticaAnimationSpeed"
     );
+    camera_speed_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePlasmaticaCameraSpeed"
+    );
     if (animation_speed_enabled && !read_config_float(
             config_path,
             L"SudekiMP",
@@ -220,6 +227,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             4.0f,
             &plasmatica_animation_speed)) {
         SudekiMpLogWrite("plasmatica_animation_speed_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (camera_speed_enabled && !read_config_float(
+            config_path,
+            L"SudekiMP",
+            L"PlasmaticaCameraSpeed",
+            1.5f,
+            0.25f,
+            4.0f,
+            &plasmatica_camera_speed)) {
+        SudekiMpLogWrite("plasmatica_camera_speed_config=invalid\r\n");
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -247,10 +267,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         animation_speed_enabled ? "true" : "false",
         (unsigned long)float_bits(plasmatica_animation_speed)
     );
-    if (trace_enabled || animation_speed_enabled) {
+    SudekiMpLogFormat(
+        "plasmatica_camera_speed_requested=%s multiplier_bits=0x%08lx\r\n",
+        camera_speed_enabled ? "true" : "false",
+        (unsigned long)float_bits(plasmatica_camera_speed)
+    );
+    if (trace_enabled || animation_speed_enabled || camera_speed_enabled) {
         if (!SudekiMpInstallSkillTrace(
                 game_module,
-                animation_speed_enabled ? plasmatica_animation_speed : 1.0f)) {
+                animation_speed_enabled ? plasmatica_animation_speed : 1.0f,
+                camera_speed_enabled ? plasmatica_camera_speed : 1.0f)) {
             SudekiMpLogFormat("plasmatica_trace_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("plasmatica_trace_applied=false\r\n");
@@ -263,7 +289,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("plasmatica_trace_applied=false\r\n");
     }
     SudekiMpLogWrite("status=ready\r\n");
-    if (!trace_enabled && !animation_speed_enabled) {
+    if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;

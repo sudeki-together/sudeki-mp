@@ -387,4 +387,23 @@ Milestone 2 is achieved for one skill: world simulation can remain at `1.0x` whi
 
 ### Interpretation
 
-The eye-view camera was never proven to be missing at `2.0x`. It is conditionally rejected when its collision test reports insufficient space. When accepted, the same camera path runs at both tested speeds, but it remains selected only until the accelerated caster-animation sequence completes. Camera timing is understood well enough to leave camera logic unchanged for the current proof of concept. The next Phase 5 targets are exact native impact damage resolution and the caster's protection/stagger behavior.
+The cinematic is conditionally rejected when its collision test reports insufficient space. When accepted, the same camera path runs at both tested caster speeds, but it remains selected only until the accelerated caster-animation sequence completes. This explains why the shortened cast could show only three authored angles. The follow-up playback-rate investigation is recorded below.
+
+## 2026-08-13 — Independent Plasmatica camera speed confirmed
+
+### Confirmed
+
+- Runtime compiled-function lookup resolved `TsaPlayCamera|PRSNNBS` (`0xF69C244A`) to bytecode offset `0x00004532`, length `0xC4`.
+- The wrapper calls `CSpiritCam::StartCam|PPRNNS` (hash `0xEBDE4799`) at bytecode operand `0x000045EF`. Its observed reverse stack begins with `ANIMID_SKILL_02`, integer mode `-1`, and float rate `1.0`.
+- The exported native implementation is RVA `0x00012910`. It stores the float at `CSpiritCam + 0x1D4`. Its camera initialization path multiplies that field by another local factor and the constant `24.0` before a virtual playback configuration call.
+- Method hash `0x0D719F5D`, observed at Plasmatica operands `0x000AAE2C` and `0x000AAE60`, resolves to `HasArbEventOccured|NN`. Those frame-by-frame calls gate Elco's animation events and do not own camera playback speed.
+- Changing a higher-level `TsaPlayCamera` stack value from `1.0` to `2.0` had no visible effect. Hooking `Camera::PlaybackSequenceState` update at RVA `0x001A6590` produced zero calls during accepted casts. Both disproved patches were removed.
+- The corrected prototype changes only the `StartCam` float under exact Plasmatica, script-thread, instruction, method-hash, argument-count, animation-name, mode, and original-rate gates. It is disabled by default and fails inertly if any gate differs.
+- Three accepted casts logged `previous_bits=0x3F800000`, configured multiplier `0x40000000`, and effective rate `0x40000000`. Elco's separate model multiplier was also applied at `2.0x` and restored to `1.0` after every cast.
+- The cinematic render camera was selected at approximately `3.29 s`, the normal camera was restored at approximately `9.22 s`, and the task ended at approximately `9.23 s`, matching the established accelerated-caster timing.
+- The user visually confirmed four cinematic camera angles before the return to Elco, compared with three when only the caster was accelerated.
+- The exact-image hook test, synthetic call-hook test, launcher build check, and cross-compile all passed.
+
+### Interpretation
+
+Plasmatica's authored cinematic camera has a playback-rate control independent of both world simulation and the caster's model-animation multiplier. Matching the camera and caster multipliers preserves the full four-angle presentation within the shortened skill. The next Phase 5 targets remain exact native impact damage resolution and caster protection/stagger behavior.

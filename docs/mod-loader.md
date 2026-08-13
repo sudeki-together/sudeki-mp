@@ -157,6 +157,8 @@ Before the first live trace, two standalone Wine tests passed:
 
 The generated x86 assembly was also checked for ABI compatibility. The fastcall bridge receives Sudeki's `this` pointer in `ECX`, treats `EDX` as an ignored bridge register, preserves the original stack-argument positions, and uses the matching callee cleanup sizes.
 
+The disabled-by-default `EnablePlasmaticaCameraSpeed` experiment is narrower than a native code patch. During the exact accepted Plasmatica camera setup, the script-method hook validates the primary thread, `StartCam` bytecode operand and hash, complete stack shape, animation name, mode, and original `1.0` rate before replacing only that invocation's float. Unknown builds are rejected before hook installation, and a mismatch leaves the call untouched.
+
 Two live Plasmatica casts completed normally with this logger and no debugger attached. Both produced `begin`, successful `use_return`, and `end` records, but no export-slot wrapper events. This does not show that the underlying engine functions were unused; it shows that rewriting those export slots after loader initialization does not intercept this task's native calls. Further instrumentation must target the internal script/native binding layer.
 
 The next disabled-by-default logger revision targets that layer at opcode `0x27`'s exact jump-table slot. It logs only the call hash, script thread, and instruction offset while the existing Plasmatica lifetime gate is active, then forwards to the original handler. Its inert-image install/restore test passes; it has not yet had a live cast.
