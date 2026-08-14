@@ -194,6 +194,21 @@ RVA `0x000DB0E0` uses an unusual exact-build i386 ABI: `ECX` is the target `CCha
 
 This is a real per-character boundary: the arbiter is explicitly supplied rather than recovered from the global controller target, and another native caller exists at RVA `0x000DA816`. A one-shot weak request is therefore represented by Weak `1` and zero for the other five states. The disabled prototype uses a small isolated assembly adapter to reproduce the ABI and leaves targeting and every native rejection path unchanged. The adapter's register/stack/cleanup test and the inert exact-image hook test pass. The live battle kept one Buki arbiter and repeatedly changed `+0x50` from idle values into `0x00001002`; exported `CCharacterArbiter::IsAttacking()` at RVA `0x000088D0` tests exactly bit `0x1000`. Independent Buki attack input is therefore confirmed. The observed nearest-target lock remains native, although its underlying pointer/writer is not yet traced.
 
+## Gameplay camera target ownership
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| `CCameraManager::SetCameraTarget` | `0x00037170` / `0x00437170` | Converts an entity `GELPointer` into native ref-counted camera targets; does not store a raw vector |
+| `GetGameCameraMode` | `0x0002A8B0` / `0x0042A8B0` | Returns singleton pointer stored at VA `0x00808DA8` |
+| Front-character camera reassignment | `0x0002A370` / `0x0042A370` | Acquires the new character's cached `GameObjectTarget`, installs it into both active camera target slots, and starts the appropriate native transition |
+| Camera target-slot installer | `0x000E84C0` / `0x004E84C0` | With `CCamera` in `ESI`, installs a ref-counted target at `+0xB4 + slot*4`, releases the old target, and notifies the active camera state |
+| Native `MatrixTarget` create/list insert | `0x00134FB0` / `0x00534FB0` | Allocates 0x80 bytes, copies a 4×4 matrix, updates cached translation, links the target into the manager list, and returns one reference |
+| Camera target zero-ref release | `0x00135340` / `0x00535340` | Finds the target in the manager's typed lists, unlinks it, and invokes its destructor when its reference count reaches zero |
+
+The current `CGameCameraMode` singleton pointer lives at RVA `0x00408DA8`. Its `+0x0C` member points to `CCamera+0x2C`; subtracting `0x2C` recovers the camera whose target slots are `+0xB4/+0xB8`. The camera-target list owner pointer lives at RVA `0x003C2F30`; native creators receive its object plus `0x4C`.
+
+`Camera::Target` virtual `+0x10` supplies position and virtual `+0x20` supplies a complete transform. `GameObjectTarget` resolves those values from the attached entity. `MatrixTarget` supplies them from its owned matrix, with translation in D3DX row `_41/_42/_43`. This shared interface is the confirmed seam behind the disabled two-character midpoint prototype. Zoom and camera distance remain separate unresolved state.
+
 ## Free-roam camera configuration and input staging
 
 | Role | RVA / VA | Evidence |

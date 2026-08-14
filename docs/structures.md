@@ -150,3 +150,31 @@ This is a partial layout for the exact supported build. `CNewGameModelAnimation`
 | `+0x48` | `float` | public animation-speed multiplier input | Written by `SetAnimationSpeedMultiplier`; reset to `1.0` | High |
 | `+0x4C` | `float` | animation-speed factor B | Multiplied by the public setter/reset functions | High for arithmetic; role unnamed |
 | `+0x50` | `float` | effective animation speed | Product of `+0x44`, `+0x48`, and `+0x4C`; returned by the public getter | High |
+
+## Camera target structures
+
+### Partial `CCamera`
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x3C` | pointer | active camera state/listener | Target installer calls virtual `+0x40` when non-null | Medium-high |
+| `+0x40` | ref-counted pointer | state notification companion | Retained while notifying target changes | Medium |
+| `+0xB4` | `Camera::Target*` | target slot 0 | Shared character reassignment installs the new front target here | High |
+| `+0xB8` | `Camera::Target*` | target slot 1 | Shared character reassignment installs the same new front target here | High |
+
+`CGameCameraMode+0x0C` points to `CCamera+0x2C` in the confirmed reassignment path.
+
+### Partial `Camera::MatrixTarget` (size 0x80)
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x00` | vtable pointer | `Camera::MatrixTarget` vtable | Constructor writes VA `0x006D43BC` | High |
+| `+0x04` | `uint32` | intrusive reference count | Create/install/release paths increment and decrement it | High |
+| `+0x14` | `float[3]` | cached translation/position | Virtual update copies the position returned through slot `+0x10` | High |
+| `+0x20` | `float[16]` | owned D3DX matrix | Native creator copies all 16 values here | High |
+| `+0x50` | `float[3]` | matrix translation `_41/_42/_43` | Virtual `+0x10` returns owned matrix `+0x30`, which is object `+0x50` | High |
+| `+0x60` | `float*` | active matrix pointer | Creator points this back to owned matrix at `+0x20` | High |
+| `+0x70` | target pointer | next/older list link | Creator links previous list head here | High |
+| `+0x74` | target pointer | previous/newer list link | Creator writes the new target into the old head's `+0x74` | High |
+
+All offsets are exact-build facts. The midpoint prototype writes only the owned matrix and cached translation of a target it created through Sudeki's own manager; it does not reinterpret an existing `GameObjectTarget` as this type.

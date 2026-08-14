@@ -20,6 +20,10 @@
 *.log
 *.dmp
 *.core
+*.mov
+*.mp4
+*.mkv
+*.webm
 /build/
 /out/
 /.cache/

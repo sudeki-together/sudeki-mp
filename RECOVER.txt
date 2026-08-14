@@ -64,6 +64,12 @@ Confirmed project position:
      position resolves through character+0x44 to CPosition coordinates at
      +0x18/+0x1C/+0x20. At the 10-unit test limit it repeatedly blocked only
      outward movement and released inward/sideways movement immediately.
+ 13. Shared-camera target ownership is statically resolved. The current
+     CCamera holds ref-counted targets at +0xB4/+0xB8; Sudeki provides native
+     GameObjectTarget and MatrixTarget implementations plus create/install/
+     release paths. A disabled midpoint-focus prototype is built and passes
+     inert exact-image preflight, but has not been visually tested. It changes
+     focus only; zoom remains native.
 
 Independent Buki weak-attack test (LIVE-CONFIRMED):
   Confirmed static facts:
@@ -116,6 +122,27 @@ Separation guard (LIVE-CONFIRMED PROOF):
     from the diagnostic. Exact target identity and its writer remain open.
   - PE32 build and inert exact-image install/restore tests pass.
   - Do not launch another game test unless the user is available to confirm it.
+
+Shared midpoint camera (PREPARED; NOT LIVE-CONFIRMED):
+  - EnableSharedGroupCameraPrototype=false by default.
+  - --shared-group-camera-test enables F10 Buki override, camera-relative
+    I/J/K/L movement, the 10-unit outward guard, and midpoint focus.
+  - CGameCameraMode singleton global: RVA 0x00408DA8.
+  - CGameCameraMode+0x0C points to CCamera+0x2C.
+  - CCamera target slots: +0xB4/+0xB8.
+  - GameObjectTarget vtable RVA 0x002D42CC.
+  - MatrixTarget vtable RVA 0x002D43BC; size 0x80; owned matrix +0x20;
+    cached translation +0x14; matrix pointer +0x60.
+  - Native MatrixTarget create/list insertion: RVA 0x00134FB0.
+  - Native CCamera target-slot installer: RVA 0x000E84C0.
+  - Native zero-ref target release: RVA 0x00135340.
+  - The prototype accepts only the standard case where both current slots are
+    the same GameObjectTarget. It preserves Player 1 orientation, replaces
+    translation with the P1/Buki midpoint, and restores only slots it still
+    owns when AI/camera/target state changes.
+  - Warning-clean PE32 build, SudekiMP.CameraTargetAbiTest.exe, launcher
+    exact-build check, and inert exact-image install/restore test pass.
+    Do not claim camera success until a visual run.
 
 Windowed/recording setup:
   - tools/run-wine.sh --windowed selects native windowed mode; --fullscreen is
@@ -211,8 +238,10 @@ SudekiForge / model and world-authoring direction:
 
 Recommended next work after the pause:
   A. If returning to SudekiMP gameplay first:
-     - When the user is available, live-test --second-player-camera-movement-test.
-     - Then live-test --second-player-separation-test and tune only as a test.
+     - When the user is available, live-test --shared-group-camera-test.
+     - Confirm midpoint focus, camera rotation, native target restoration on
+       F10, and behavior when combat/camera state changes.
+     - If focus passes, trace desired/current distance and add adaptive zoom.
      - Passively trace the retained nearest-target pointer/writer.
      - Trace doorway/zone forced catch-up before changing it.
   B. If returning to the camera first:

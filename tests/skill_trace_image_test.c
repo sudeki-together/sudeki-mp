@@ -220,6 +220,7 @@ int wmain(int argc, wchar_t **argv) {
             10.0f,
             TRUE,
             'U',
+            TRUE,
             TRUE)) {
         fprintf(stderr, "control-separation install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());

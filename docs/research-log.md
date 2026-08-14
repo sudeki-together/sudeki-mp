@@ -773,3 +773,41 @@ Existing Plasmatica analysis already anchors the ordinary target system: `charac
 `EnableSecondPlayerTargetTrace`, disabled by default, samples those fields at up to 10 Hz only while Buki's verified AI override is active and the game owns the foreground. The live run acquired Buki at character `0x07C56948`, component `0x07C5727C`, and targeter `0x07C57558`. Across 1,181 samples, the ordinary target node remained one stable non-null value (`0x081E2290`) and auto targeting remained enabled. The final restore changed the verified override refcount to `0` and AI mode to `1`, confirming clean ownership release.
 
 The first diagnostic also called `GetGelCurrentTarget` and logged its returned address. That address changed almost every sample despite the unchanged node, so it is an ephemeral wrapper/scratch address rather than a valid target-identity key. The call and field were removed. The corrected trace performs only passive reads and compares the durable node and flag. This result confirms that native targeting state survives removal of Buki's high-level AI; it does not yet identify the target entity, scoring logic, or writer.
+
+## 2026-08-14 — Native camera-target seam and midpoint prototype
+
+### Confirmed statically
+
+Three exact-build, read-only Ghidra reports now cover the gameplay target handoff and target class hierarchy: `CameraTargetReport.java`, `CameraTargetHierarchyReport.java`, and `CameraTargetSemanticsReport.java`.
+
+- `CCameraManager::SetCameraTarget` at RVA `0x00037170` does not store a raw position. It resolves a supplied entity into reference-counted `Camera::GameObjectTarget` and derived target objects, then installs targets into `CCamera+0xB4/+0xB8`.
+- Shared character reassignment calls RVA `0x0002A370`. That function acquires the new front character's cached `GameObjectTarget`, installs the same target into both camera slots through RVA `0x000E84C0`, and runs the native transition policy.
+- The current `CGameCameraMode` singleton is held at RVA `0x00408DA8`. Its `+0x0C` member points to `CCamera+0x2C`, allowing the active `CCamera` base to be recovered without searching arbitrary heap memory.
+- RVA `0x00134FB0` allocates a native 0x80-byte `Camera::MatrixTarget`, copies a supplied 4×4 matrix to target `+0x20`, points `+0x60` at that matrix, updates its cached position, links it into the camera target manager list, and returns one owned reference.
+- `MatrixTarget` virtual `+0x10` returns the matrix translation row (`matrix+0x30`), while virtual `+0x20` returns the whole matrix. `GameObjectTarget` exposes the controlled entity position and world matrix through the same virtual slots. This makes a synthetic focus compatible with the existing camera consumer rather than a separate raw-coordinate patch.
+- RVA `0x00135340` is the native zero-reference unlink/destruction path for the manager's target lists. The prototype therefore uses Sudeki's own create/install/release lifecycle.
+
+Supported entry signatures used by the prototype are:
+
+```text
+Install target RVA 0x000E84C0:
+53 8B 5C 24 0C 8B 94 9E B4 00 00 00
+
+Create MatrixTarget RVA 0x00134FB0:
+53 55 8B 6C 24 0C 68 80 00 00 00
+
+Release target RVA 0x00135340:
+53 56 8B 77 04 33 DB 32 C0
+```
+
+### Prepared experiment — not yet live-confirmed
+
+`EnableSharedGroupCameraPrototype=false` is a new disabled-by-default option. While the verified Buki AI override and second-player movement are active, it:
+
+1. Requires both current camera slots to contain the same native `GameObjectTarget`; non-gameplay/cinematic target types are left alone.
+2. Retains both original slot references.
+3. Creates one engine-owned `MatrixTarget`, preserving Player 1's target orientation and replacing only its translation with the Player 1/Buki midpoint.
+4. Installs that target into both native camera slots and updates its matrix each controller frame.
+5. Restores only slots still owned by the prototype, then releases every retained/native reference if AI is restored, the camera changes, the engine replaces a target, or required state becomes invalid.
+
+The first proof changes focus only. It deliberately does not change zoom, distance limits, collision, skill-camera ownership, ranged scope behavior, or render view count. `tools/continue-research.sh --shared-group-camera-test` prepares the proven camera-relative movement and 10-unit outward guard plus this midpoint target. It has not been launched because the user was unavailable for visual confirmation. The warning-clean PE32 build, exact-build launcher check, isolated register/stack ABI test, and inert image hook install/restore test pass.

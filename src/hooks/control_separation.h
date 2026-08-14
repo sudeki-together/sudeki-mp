@@ -12,7 +12,8 @@ BOOL SudekiMpInstallControlSeparation(
     float maximum_separation,
     BOOL enable_second_player_weak_attack,
     UINT weak_attack_virtual_key,
-    BOOL enable_target_trace
+    BOOL enable_target_trace,
+    BOOL enable_shared_group_camera
 );
 void SudekiMpUninstallControlSeparation(void);
 

@@ -1,6 +1,7 @@
 #include "hooks/control_separation.h"
 
 #include "engine/arbiter_combat_input.h"
+#include "engine/camera_target_abi.h"
 #include "engine/log.h"
 #include "hooks/call_hook.h"
 
@@ -39,17 +40,32 @@ typedef void (__stdcall *MovementCameraTransformFunction)(
     float *output_direction,
     const float *local_direction
 );
+typedef void (__stdcall *MatrixTargetCreateFunction)(
+    void *target_list,
+    void **output_target,
+    const float *matrix
+);
+typedef const float *(SUDEKIMP_THISCALL *CameraTargetMatrixFunction)(
+    void *target
+);
 enum {
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
+    RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
+    RVA_CAMERA_TARGET_LIST_OWNER_GLOBAL = 0x003c2f30u,
     RVA_AI_OVERRIDE_CONTROL = 0x000f60d0u,
     RVA_AI_DEFAULT_CONTROL = 0x000f6100u,
     RVA_MOVEMENT_CAMERA_TRANSFORM = 0x000291a0u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
+    RVA_CAMERA_TARGET_INSTALL = 0x000e84c0u,
+    RVA_MATRIX_TARGET_CREATE = 0x00134fb0u,
+    RVA_CAMERA_TARGET_RELEASE = 0x00135340u,
+    RVA_GAME_OBJECT_TARGET_VTABLE = 0x002d42ccu,
+    RVA_MATRIX_TARGET_VTABLE = 0x002d43bcu,
     SUPPORTED_IMAGE_SIZE = 0x0045f000u,
     PARTY_SLOT_COUNT = 4u,
     PARTY_SLOT_FIRST_OFFSET = 0x90u,
@@ -84,6 +100,14 @@ static int target_trace_last_auto_enabled;
 static BOOL buki_movement_active;
 static int last_movement_x;
 static int last_movement_z;
+static BOOL shared_group_camera_enabled;
+static MatrixTargetCreateFunction matrix_target_create;
+static void *camera_target_install;
+static void *camera_target_release;
+static void *group_camera_camera;
+static void *group_camera_target;
+static void *group_camera_original_targets[2];
+static void *group_camera_target_list;
 
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
@@ -91,10 +115,74 @@ static const uint8_t expected_arbiter_combat_input_entry[] = {
 static const uint8_t expected_movement_camera_transform_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x8b, 0x55, 0x08, 0xd9, 0xee
 };
+static const uint8_t expected_camera_target_install_entry[] = {
+    0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x8b, 0x94, 0x9e,
+    0xb4, 0x00, 0x00, 0x00
+};
+static const uint8_t expected_matrix_target_create_entry[] = {
+    0x53, 0x55, 0x8b, 0x6c, 0x24, 0x0c, 0x68, 0x80,
+    0x00, 0x00, 0x00
+};
+static const uint8_t expected_camera_target_release_entry[] = {
+    0x53, 0x56, 0x8b, 0x77, 0x04, 0x33, 0xdb, 0x32,
+    0xc0
+};
 static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+static BOOL readable_memory(const void *pointer, size_t size) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t start;
+    uintptr_t end;
+    uintptr_t region_end;
+
+    if (pointer == NULL || size == 0u ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0 ||
+        information.State != MEM_COMMIT ||
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return FALSE;
+    }
+    start = (uintptr_t)pointer;
+    end = start + size;
+    region_end = (uintptr_t)information.BaseAddress +
+        information.RegionSize;
+    return end >= start && end <= region_end;
+}
+
+static BOOL game_code_pointer(const void *pointer) {
+    return game_base != NULL && pointer != NULL &&
+        (const uint8_t *)pointer >= game_base &&
+        (const uint8_t *)pointer < game_base + SUPPORTED_IMAGE_SIZE;
+}
+
+static void retain_camera_target(void *target) {
+    if (readable_memory(target, 8u)) {
+        ++*(uint32_t *)((uint8_t *)target + 4u);
+    }
+}
+
+static void release_camera_target(void *target) {
+    uint32_t *references;
+
+    if (target == NULL || group_camera_target_list == NULL ||
+        camera_target_release == NULL || !readable_memory(target, 8u)) {
+        return;
+    }
+    references = (uint32_t *)((uint8_t *)target + 4u);
+    if (*references == 0u) {
+        return;
+    }
+    --*references;
+    if (*references == 0u) {
+        SudekiMpCallCameraTargetRelease(
+            group_camera_target_list,
+            target,
+            camera_target_release
+        );
+    }
 }
 
 static void reset_target_trace_state(void) {
@@ -103,11 +191,11 @@ static void reset_target_trace_state(void) {
     target_trace_last_auto_enabled = -1;
 }
 
-static BOOL overridden_character_is_in_active_group(void) {
+static BOOL character_is_in_active_group(void *wanted_character) {
     uint8_t *group;
     unsigned int index;
 
-    if (game_base == NULL || overridden_character == NULL) {
+    if (game_base == NULL || wanted_character == NULL) {
         return FALSE;
     }
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
@@ -117,11 +205,264 @@ static BOOL overridden_character_is_in_active_group(void) {
     for (index = 0; index < PARTY_SLOT_COUNT; ++index) {
         uint8_t *slot = group + PARTY_SLOT_FIRST_OFFSET +
             index * PARTY_SLOT_STRIDE;
-        if (*(void **)slot == overridden_character) {
+        if (*(void **)slot == wanted_character) {
             return TRUE;
         }
     }
     return FALSE;
+}
+
+static BOOL overridden_character_is_in_active_group(void) {
+    return character_is_in_active_group(overridden_character);
+}
+
+static uint8_t *current_gameplay_camera(void) {
+    uint8_t *mode;
+    uint8_t *camera_member;
+    uint8_t *camera;
+
+    if (game_base == NULL) {
+        return NULL;
+    }
+    mode = *(uint8_t **)(game_base + RVA_GAME_CAMERA_MODE_GLOBAL);
+    if (!readable_memory(mode, 0x10u)) {
+        return NULL;
+    }
+    camera_member = *(uint8_t **)(mode + 0x0cu);
+    if ((uintptr_t)camera_member < 0x2cu) {
+        return NULL;
+    }
+    camera = camera_member - 0x2cu;
+    if (!readable_memory(camera, 0xbcu)) {
+        return NULL;
+    }
+    return camera;
+}
+
+static BOOL character_position(void *character, float output[3]) {
+    uint8_t *transform;
+
+    if (!readable_memory(character, 0x48u)) {
+        return FALSE;
+    }
+    transform = *(uint8_t **)((uint8_t *)character + 0x44u);
+    if (!readable_memory(transform, 0x24u)) {
+        return FALSE;
+    }
+    output[0] = *(float *)(transform + 0x18u);
+    output[1] = *(float *)(transform + 0x1cu);
+    output[2] = *(float *)(transform + 0x20u);
+    return isfinite(output[0]) && isfinite(output[1]) &&
+        isfinite(output[2]);
+}
+
+static BOOL camera_target_matrix(void *target, float output[16]) {
+    void **vtable;
+    CameraTargetMatrixFunction get_matrix;
+    const float *matrix;
+
+    if (!readable_memory(target, 0x24u)) {
+        return FALSE;
+    }
+    vtable = *(void ***)target;
+    if (!readable_memory(vtable, 0x24u)) {
+        return FALSE;
+    }
+    get_matrix = (CameraTargetMatrixFunction)vtable[8];
+    if (!game_code_pointer((const void *)get_matrix)) {
+        return FALSE;
+    }
+    matrix = get_matrix(target);
+    if (!readable_memory(matrix, sizeof(float) * 16u)) {
+        return FALSE;
+    }
+    memcpy(output, matrix, sizeof(float) * 16u);
+    return TRUE;
+}
+
+static BOOL update_group_camera_target(
+    void *controller_target,
+    void *second_character
+) {
+    float first_position[3];
+    float second_position[3];
+    float matrix[16];
+    uint8_t *target = (uint8_t *)group_camera_target;
+
+    if (!readable_memory(target, 0x80u) ||
+        *(void **)target != game_base + RVA_MATRIX_TARGET_VTABLE ||
+        !camera_target_matrix(group_camera_original_targets[0], matrix) ||
+        !character_position(controller_target, first_position) ||
+        !character_position(second_character, second_position)) {
+        return FALSE;
+    }
+    matrix[12] = (first_position[0] + second_position[0]) * 0.5f;
+    matrix[13] = (first_position[1] + second_position[1]) * 0.5f;
+    matrix[14] = (first_position[2] + second_position[2]) * 0.5f;
+    matrix[15] = 1.0f;
+    memcpy(target + 0x20u, matrix, sizeof(matrix));
+    memcpy(target + 0x14u, matrix + 12, sizeof(float) * 3u);
+    return TRUE;
+}
+
+static void restore_group_camera(const char *reason) {
+    uint8_t *camera = (uint8_t *)group_camera_camera;
+    void *target = group_camera_target;
+    unsigned int slot;
+
+    if (target == NULL) {
+        return;
+    }
+    if (readable_memory(camera, 0xbcu) && camera_target_install != NULL) {
+        for (slot = 0; slot < 2u; ++slot) {
+            void **camera_slot = (void **)(
+                camera + 0xb4u + slot * sizeof(void *)
+            );
+            if (*camera_slot == target) {
+                SudekiMpCallCameraTargetInstall(
+                    camera,
+                    group_camera_original_targets[slot],
+                    slot,
+                    camera_target_install
+                );
+            }
+        }
+    }
+    release_camera_target(group_camera_original_targets[0]);
+    release_camera_target(group_camera_original_targets[1]);
+    release_camera_target(target);
+    SudekiMpLogFormat(
+        "control_separation event=shared_group_camera phase=restore reason=%s\r\n",
+        reason == NULL ? "unspecified" : reason
+    );
+    group_camera_camera = NULL;
+    group_camera_target = NULL;
+    group_camera_original_targets[0] = NULL;
+    group_camera_original_targets[1] = NULL;
+    group_camera_target_list = NULL;
+}
+
+static BOOL acquire_group_camera(
+    uint8_t *camera,
+    void *controller_target,
+    void *second_character
+) {
+    uint8_t *target_list_owner;
+    void *original_target;
+    void *created_target = NULL;
+    float matrix[16];
+    float first_position[3];
+    float second_position[3];
+
+    if (*(void **)(camera + 0xb4u) != *(void **)(camera + 0xb8u)) {
+        return FALSE;
+    }
+    original_target = *(void **)(camera + 0xb4u);
+    if (!readable_memory(original_target, 0x34u) ||
+        *(void **)original_target !=
+            game_base + RVA_GAME_OBJECT_TARGET_VTABLE ||
+        !camera_target_matrix(original_target, matrix) ||
+        !character_position(controller_target, first_position) ||
+        !character_position(second_character, second_position)) {
+        return FALSE;
+    }
+    target_list_owner = *(uint8_t **)(
+        game_base + RVA_CAMERA_TARGET_LIST_OWNER_GLOBAL
+    );
+    if (!readable_memory(target_list_owner, 0x58u)) {
+        return FALSE;
+    }
+    matrix[12] = (first_position[0] + second_position[0]) * 0.5f;
+    matrix[13] = (first_position[1] + second_position[1]) * 0.5f;
+    matrix[14] = (first_position[2] + second_position[2]) * 0.5f;
+    matrix[15] = 1.0f;
+    group_camera_target_list = target_list_owner + 0x4cu;
+    matrix_target_create(
+        group_camera_target_list,
+        &created_target,
+        matrix
+    );
+    if (!readable_memory(created_target, 0x80u) ||
+        *(void **)created_target != game_base + RVA_MATRIX_TARGET_VTABLE) {
+        release_camera_target(created_target);
+        group_camera_target_list = NULL;
+        return FALSE;
+    }
+
+    group_camera_camera = camera;
+    group_camera_target = created_target;
+    group_camera_original_targets[0] = original_target;
+    group_camera_original_targets[1] = original_target;
+    retain_camera_target(original_target);
+    retain_camera_target(original_target);
+    SudekiMpCallCameraTargetInstall(
+        camera,
+        created_target,
+        0u,
+        camera_target_install
+    );
+    SudekiMpCallCameraTargetInstall(
+        camera,
+        created_target,
+        1u,
+        camera_target_install
+    );
+    if (*(void **)(camera + 0xb4u) != created_target ||
+        *(void **)(camera + 0xb8u) != created_target) {
+        restore_group_camera("install_verification_failed");
+        return FALSE;
+    }
+    SudekiMpLogFormat(
+        "control_separation event=shared_group_camera phase=acquire camera=0x%08lx original_target=0x%08lx matrix_target=0x%08lx midpoint_bits=%08lx,%08lx,%08lx policy=two_player_centroid_no_zoom\r\n",
+        (unsigned long)(uintptr_t)camera,
+        (unsigned long)(uintptr_t)original_target,
+        (unsigned long)(uintptr_t)created_target,
+        (unsigned long)float_bits(matrix[12]),
+        (unsigned long)float_bits(matrix[13]),
+        (unsigned long)float_bits(matrix[14])
+    );
+    return TRUE;
+}
+
+static void poll_shared_group_camera(void *controller) {
+    uint8_t *camera;
+    void *controller_target;
+
+    if (!shared_group_camera_enabled) {
+        return;
+    }
+    controller_target = controller == NULL ? NULL :
+        *(void **)((uint8_t *)controller + 0x248u);
+    camera = current_gameplay_camera();
+    if (overridden_character == NULL ||
+        !overridden_character_is_in_active_group() ||
+        !character_is_in_active_group(controller_target) ||
+        controller_target == overridden_character || camera == NULL) {
+        restore_group_camera("inactive_or_incomplete_state");
+        return;
+    }
+    if (group_camera_target != NULL) {
+        if (camera != group_camera_camera) {
+            restore_group_camera("camera_changed");
+            return;
+        }
+        if (*(void **)(camera + 0xb4u) != group_camera_target ||
+            *(void **)(camera + 0xb8u) != group_camera_target) {
+            restore_group_camera("native_target_changed");
+            return;
+        }
+        if (!update_group_camera_target(
+                controller_target,
+                overridden_character)) {
+            restore_group_camera("position_or_target_invalid");
+        }
+        return;
+    }
+    acquire_group_camera(
+        camera,
+        controller_target,
+        overridden_character
+    );
 }
 
 static void stop_buki_movement(void) {
@@ -642,6 +983,7 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     poll_buki_movement(controller, owns_foreground);
     poll_buki_weak_attack(controller, owns_foreground);
     poll_buki_target_trace(owns_foreground);
+    poll_shared_group_camera(controller);
 }
 
 BOOL SudekiMpInstallControlSeparation(
@@ -653,7 +995,8 @@ BOOL SudekiMpInstallControlSeparation(
     float maximum_separation,
     BOOL enable_second_player_weak_attack,
     UINT attack_virtual_key,
-    BOOL enable_target_trace
+    BOOL enable_target_trace,
+    BOOL enable_shared_group_camera
 ) {
     uint8_t *base;
     void **slot;
@@ -684,6 +1027,22 @@ BOOL SudekiMpInstallControlSeparation(
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    if (enable_shared_group_camera &&
+        (memcmp(
+            base + RVA_CAMERA_TARGET_INSTALL,
+            expected_camera_target_install_entry,
+            sizeof(expected_camera_target_install_entry)) != 0 ||
+         memcmp(
+            base + RVA_MATRIX_TARGET_CREATE,
+            expected_matrix_target_create_entry,
+            sizeof(expected_matrix_target_create_entry)) != 0 ||
+         memcmp(
+            base + RVA_CAMERA_TARGET_RELEASE,
+            expected_camera_target_release_entry,
+            sizeof(expected_camera_target_release_entry)) != 0)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
     if (enable_second_player_weak_attack &&
         memcmp(
             base + RVA_ARBITER_COMBAT_INPUT,
@@ -707,6 +1066,17 @@ BOOL SudekiMpInstallControlSeparation(
     weak_attack_virtual_key = attack_virtual_key;
     weak_attack_was_down = FALSE;
     target_trace_enabled = enable_target_trace;
+    shared_group_camera_enabled = enable_shared_group_camera;
+    matrix_target_create = (MatrixTargetCreateFunction)(
+        base + RVA_MATRIX_TARGET_CREATE
+    );
+    camera_target_install = base + RVA_CAMERA_TARGET_INSTALL;
+    camera_target_release = base + RVA_CAMERA_TARGET_RELEASE;
+    group_camera_camera = NULL;
+    group_camera_target = NULL;
+    group_camera_original_targets[0] = NULL;
+    group_camera_original_targets[1] = NULL;
+    group_camera_target_list = NULL;
     reset_target_trace_state();
     buki_movement_active = FALSE;
     last_movement_x = 0;
@@ -733,7 +1103,7 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "control_separation_install=success target_resource_type=0x%02x virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx target_trace=%s combat_input_rva=0x000db0e0\r\n",
+        "control_separation_install=success target_resource_type=0x%02x virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx target_trace=%s shared_group_camera=%s combat_input_rva=0x000db0e0\r\n",
         BUKI_RESOURCE_TYPE,
         (unsigned long)selected_virtual_key,
         second_player_movement_enabled ? "true" : "false",
@@ -742,13 +1112,15 @@ BOOL SudekiMpInstallControlSeparation(
         (unsigned long)float_bits(maximum_separation_distance),
         second_player_weak_attack_enabled ? "true" : "false",
         (unsigned long)weak_attack_virtual_key,
-        target_trace_enabled ? "true" : "false"
+        target_trace_enabled ? "true" : "false",
+        shared_group_camera_enabled ? "true" : "false"
     );
     return TRUE;
 }
 
 void SudekiMpUninstallControlSeparation(void) {
     SudekiMpRestorePointerHook(&controller_update_vtable_hook);
+    restore_group_camera("module_uninstall");
     original_controller_update = NULL;
     ai_override_control = NULL;
     ai_default_control = NULL;
@@ -769,6 +1141,15 @@ void SudekiMpUninstallControlSeparation(void) {
     weak_attack_virtual_key = 0;
     weak_attack_was_down = FALSE;
     target_trace_enabled = FALSE;
+    shared_group_camera_enabled = FALSE;
+    matrix_target_create = NULL;
+    camera_target_install = NULL;
+    camera_target_release = NULL;
+    group_camera_camera = NULL;
+    group_camera_target = NULL;
+    group_camera_original_targets[0] = NULL;
+    group_camera_original_targets[1] = NULL;
+    group_camera_target_list = NULL;
     reset_target_trace_state();
     buki_movement_active = FALSE;
     last_movement_x = 0;
