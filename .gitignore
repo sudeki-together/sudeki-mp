@@ -15,6 +15,7 @@
 !/research/dumps/.gitkeep
 
 # Local analysis projects, logs, captures, and build output.
+/devlog/
 *.gpr
 *.rep/
 *.log

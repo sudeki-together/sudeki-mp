@@ -159,10 +159,21 @@ This is a partial layout for the exact supported build. `CNewGameModelAnimation`
 | ---: | --- | --- | --- | --- |
 | `+0x3C` | pointer | active camera state/listener | Target installer calls virtual `+0x40` when non-null | Medium-high |
 | `+0x40` | ref-counted pointer | state notification companion | Retained while notifying target changes | Medium |
-| `+0xB4` | `Camera::Target*` | target slot 0 | Shared character reassignment installs the new front target here | High |
-| `+0xB8` | `Camera::Target*` | target slot 1 | Shared character reassignment installs the same new front target here | High |
+| `+0xB4` | `Camera::Target*` | composed/current target slot 0 | Live exploration held an `OffsetTarget`; shared character reassignment can install the new front target directly | High |
+| `+0xB8` | `Camera::Target*` | underlying/destination target slot 1 | Live exploration held the front character's `GameObjectTarget`; reassignment can install the same target in both slots | High |
 
 `CGameCameraMode+0x0C` points to `CCamera+0x2C` in the confirmed reassignment path.
+
+### Partial `Camera::OffsetTarget` (size 0xD0)
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x00` | vtable pointer | `Camera::OffsetTarget` vtable | Static VA `0x006D436C`; matched live slot 0 after relocation | High |
+| `+0x04` | `uint32` | intrusive reference count | Same native install/release convention as other targets | High |
+| `+0x20` | `Camera::Target*` | wrapped source target | Virtual methods delegate identity/state to it | High |
+| `+0x70` | `float[16]` | offset matrix | Update multiplies the wrapped target transform by this matrix | High |
+| `+0x80` | `float[16]` | composed output matrix | Virtual `+0x1C/+0x20` returns this matrix | High |
+| `+0xB0` | `float[3]` | cached composed position | Virtual `+0x10` returns this vector | High |
 
 ### Partial `Camera::MatrixTarget` (size 0x80)
 

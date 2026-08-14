@@ -243,7 +243,7 @@ printf '%s\n' \
     '  Shared-camera proof: Buki movement now follows Player 1 camera orientation.' \
     '  Retained targeting proof: Buki target node and auto-target state survive the AI override.' \
     '  Separation proof: the 10-unit guard blocks only outward Buki movement and releases inward movement.' \
-    '  Camera status: native MatrixTarget semantics are resolved; a disabled P1/Buki midpoint prototype is ready for a live check.' \
+    '  Camera proof: the disabled native MatrixTarget prototype follows the P1/Buki midpoint and restores native P1 focus cleanly.' \
     '  Deferred: full no-menu encounter remains required before Milestone 3 closes.' \
     '  Emergency stop: tools/stop-sudeki.sh' \
     '  Detailed handoff: docs/research-log.md and docs/combat.md.' \

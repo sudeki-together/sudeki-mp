@@ -19,8 +19,8 @@ Safety state:
     tools/configure-windowed.sh. The first original PlayerOptions.xml is kept
     beside it as PlayerOptions.xml.sudekimp-backup.
   - The current checkpoint includes the Phase 9 attack proof plus disabled
-    camera-relative movement, separation-guard, and passive-target-trace
-    follow-ups.
+    camera-relative movement, separation-guard, passive-target-trace, and
+    live-confirmed midpoint-camera follow-ups.
 
 Confirmed project position:
   1. Installer/build baseline, exact hashes, Wine baseline, and Ghidra import
@@ -64,12 +64,14 @@ Confirmed project position:
      position resolves through character+0x44 to CPosition coordinates at
      +0x18/+0x1C/+0x20. At the 10-unit test limit it repeatedly blocked only
      outward movement and released inward/sideways movement immediately.
- 13. Shared-camera target ownership is statically resolved. The current
-     CCamera holds ref-counted targets at +0xB4/+0xB8; Sudeki provides native
-     GameObjectTarget and MatrixTarget implementations plus create/install/
-     release paths. A disabled midpoint-focus prototype is built and passes
-     inert exact-image preflight, but has not been visually tested. It changes
-     focus only; zoom remains native.
+ 13. Shared midpoint focus is live-confirmed. Standard gameplay used an
+     OffsetTarget at CCamera+0xB4 and a GameObjectTarget at +0xB8. A disabled
+     prototype creates Sudeki's native MatrixTarget, preserves Player 1's
+     framing offset, and follows the Ailish/Buki midpoint. F10 restored Buki AI
+     and native Ailish focus immediately. An initial R6025 restore failure
+     proved the installer requires one caller-owned reference per slot; the
+     corrected retain/install/release sequence completed cleanly. Zoom and a
+     second rendered viewport remain unimplemented.
 
 Independent Buki weak-attack test (LIVE-CONFIRMED):
   Confirmed static facts:
@@ -123,7 +125,7 @@ Separation guard (LIVE-CONFIRMED PROOF):
   - PE32 build and inert exact-image install/restore tests pass.
   - Do not launch another game test unless the user is available to confirm it.
 
-Shared midpoint camera (PREPARED; NOT LIVE-CONFIRMED):
+Shared midpoint camera (LIVE-CONFIRMED PROOF):
   - EnableSharedGroupCameraPrototype=false by default.
   - --shared-group-camera-test enables F10 Buki override, camera-relative
     I/J/K/L movement, the 10-unit outward guard, and midpoint focus.
@@ -131,18 +133,27 @@ Shared midpoint camera (PREPARED; NOT LIVE-CONFIRMED):
   - CGameCameraMode+0x0C points to CCamera+0x2C.
   - CCamera target slots: +0xB4/+0xB8.
   - GameObjectTarget vtable RVA 0x002D42CC.
+  - OffsetTarget vtable RVA 0x002D436C.
   - MatrixTarget vtable RVA 0x002D43BC; size 0x80; owned matrix +0x20;
     cached translation +0x14; matrix pointer +0x60.
   - Native MatrixTarget create/list insertion: RVA 0x00134FB0.
   - Native CCamera target-slot installer: RVA 0x000E84C0.
   - Native zero-ref target release: RVA 0x00135340.
-  - The prototype accepts only the standard case where both current slots are
-    the same GameObjectTarget. It preserves Player 1 orientation, replaces
-    translation with the P1/Buki midpoint, and restores only slots it still
-    owns when AI/camera/target state changes.
+  - Live standard gameplay held OffsetTarget in slot 0 and GameObjectTarget in
+    slot 1. The prototype accepts that exact pair plus the native same-
+    GameObjectTarget case. It preserves the slot-0 framing transform and moves
+    its translation by the P1-to-midpoint delta.
+  - The native target installer expects its caller to retain once per installed
+    slot. Missing those two retains let the first restore destroy MatrixTarget
+    while slot 1 still referenced it, producing R6025 pure virtual function
+    call. Adding a slot-owned reference before each acquire and restore install
+    fixed the lifetime and produced a complete clean release sequence.
+  - The user confirmed visible Ailish/Buki midpoint tracking and immediate
+    return to Ailish focus when Buki AI was restored.
   - Warning-clean PE32 build, SudekiMP.CameraTargetAbiTest.exe, launcher
     exact-build check, and inert exact-image install/restore test pass.
-    Do not claim camera success until a visual run.
+  - The prototype changes focus only. Adaptive zoom is next; split-screen still
+    requires a second render camera, viewport/scissor, and scene submission.
 
 Windowed/recording setup:
   - tools/run-wine.sh --windowed selects native windowed mode; --fullscreen is

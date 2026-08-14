@@ -782,6 +782,7 @@ Three exact-build, read-only Ghidra reports now cover the gameplay target handof
 
 - `CCameraManager::SetCameraTarget` at RVA `0x00037170` does not store a raw position. It resolves a supplied entity into reference-counted `Camera::GameObjectTarget` and derived target objects, then installs targets into `CCamera+0xB4/+0xB8`.
 - Shared character reassignment calls RVA `0x0002A370`. That function acquires the new front character's cached `GameObjectTarget`, installs the same target into both camera slots through RVA `0x000E84C0`, and runs the native transition policy.
+- Normal live exploration instead held `Camera::OffsetTarget` (vtable RVA `0x002D436C`) in slot 0 and the front character's `GameObjectTarget` (vtable RVA `0x002D42CC`) in slot 1. `OffsetTarget` composes the wrapped target transform with its native framing matrix and exposes the result through the shared target interface.
 - The current `CGameCameraMode` singleton is held at RVA `0x00408DA8`. Its `+0x0C` member points to `CCamera+0x2C`, allowing the active `CCamera` base to be recovered without searching arbitrary heap memory.
 - RVA `0x00134FB0` allocates a native 0x80-byte `Camera::MatrixTarget`, copies a supplied 4×4 matrix to target `+0x20`, points `+0x60` at that matrix, updates its cached position, links it into the camera target manager list, and returns one owned reference.
 - `MatrixTarget` virtual `+0x10` returns the matrix translation row (`matrix+0x30`), while virtual `+0x20` returns the whole matrix. `GameObjectTarget` exposes the controlled entity position and world matrix through the same virtual slots. This makes a synthetic focus compatible with the existing camera consumer rather than a separate raw-coordinate patch.
@@ -800,14 +801,20 @@ Release target RVA 0x00135340:
 53 56 8B 77 04 33 DB 32 C0
 ```
 
-### Prepared experiment — not yet live-confirmed
+### Live result — midpoint focus and native restoration confirmed
 
-`EnableSharedGroupCameraPrototype=false` is a new disabled-by-default option. While the verified Buki AI override and second-player movement are active, it:
+`EnableSharedGroupCameraPrototype=false` remains disabled by default. While the verified Buki AI override and second-player movement are active, it:
 
-1. Requires both current camera slots to contain the same native `GameObjectTarget`; non-gameplay/cinematic target types are left alone.
-2. Retains both original slot references.
-3. Creates one engine-owned `MatrixTarget`, preserving Player 1's target orientation and replacing only its translation with the Player 1/Buki midpoint.
+1. Accepts only the live-confirmed `OffsetTarget`/`GameObjectTarget` gameplay pair or the native same-`GameObjectTarget` pair; other target types remain untouched.
+2. Retains both original targets and preserves the slot-0 composed framing matrix.
+3. Creates one engine-owned `MatrixTarget` and translates that framing matrix by the Player 1-to-P1/Buki-midpoint delta.
 4. Installs that target into both native camera slots and updates its matrix each controller frame.
 5. Restores only slots still owned by the prototype, then releases every retained/native reference if AI is restored, the camera changes, the engine replaces a target, or required state becomes invalid.
 
-The first proof changes focus only. It deliberately does not change zoom, distance limits, collision, skill-camera ownership, ranged scope behavior, or render view count. `tools/continue-research.sh --shared-group-camera-test` prepares the proven camera-relative movement and 10-unit outward guard plus this midpoint target. It has not been launched because the user was unavailable for visual confirmation. The warning-clean PE32 build, exact-build launcher check, isolated register/stack ABI test, and inert image hook install/restore test pass.
+The first visual run rejected the earlier same-target-only assumption safely. Its live pair was `OffsetTarget` in slot 0 and `GameObjectTarget` in slot 1. After accepting that confirmed pair, the user observed that the camera was "certainly shared": it followed the space between stationary Ailish and independently moved Buki rather than remaining locked to Ailish. The acquire log recorded the two originals, one native `MatrixTarget`, and policy `two_player_centroid_preserve_native_offset_no_zoom`.
+
+The first attempt to restore Buki AI produced Microsoft runtime error R6025, "pure virtual function call." Step logging isolated the failure inside the slot-0 reinstall. Before restoration the two native originals had reference counts `1` and `3`, but the `MatrixTarget` had only `1` despite occupying both slots. Disassembly and the live counts together establish an important ABI rule: RVA `0x000E84C0` does not create the persistent slot reference itself; its caller must retain the supplied target once per install. The first restore therefore decremented the synthetic target's only reference to zero while slot 1 still pointed at it.
+
+The corrected path retains the synthetic target before each of its two installs and retains each original before reinstalling it. On the next run the synthetic target entered restoration with reference count `3`. Both native targets reinstalled, the held originals released, the creator reference released the synthetic target, Buki AI resumed, and the camera returned to Ailish immediately without a crash. The final log reached `shared_group_camera phase=restore` cleanly.
+
+This proof changes one camera's focus only. Zoom, distance limits, collision, skill-camera ownership, ranged scope behavior, and render view count are unchanged. Adaptive distance is the next shared-camera task. Split-screen remains a separate rendering investigation requiring a second render camera, viewport/scissor control, aspect policy, and another scene submission.

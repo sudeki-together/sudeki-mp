@@ -26,19 +26,19 @@
 | Phase 9 independent Buki weak attack | Complete (proof of concept) | With another character remaining under Player 1 control and Buki's AI overridden, the user completed and won a battle while `U` submitted attacks to one stable Buki arbiter. The log repeatedly entered native `IsAttacking` flag `0x1000`; visible nearest-target lock-on remained active. |
 | Phase 9 camera-relative Player 2 movement | Complete (shared-camera proof) | With Ailish remaining Player 1/camera focus, the user confirmed Buki's separate `I/J/K/L` movement rotated with the shared camera. The log held one Buki character/arbiter, recorded `camera_relative=true`, produced changing world vectors for repeated local directions as the camera rotated, and restored Buki's AI cleanly. |
 | First maximum-separation guard | Complete (proof of concept) | At the 10-unit test limit, repeated live records blocked outward Buki input near distance-squared `100`, released immediately for inward/within-limit input, and continued camera-relative movement without teleporting either player. |
-| Two-player midpoint camera target | Prepared / awaiting live check | Static analysis confirmed native ref-counted `GameObjectTarget`/`MatrixTarget` ownership, target slots `CCamera+0xB4/+0xB8`, and native create/install/release functions. A disabled prototype preserves Player 1 orientation and tracks the P1/Buki midpoint; build, exact-build check, and inert-image preflight pass. Zoom remains native. |
+| Two-player midpoint camera target | Complete (proof of concept) | Live camera slots were `OffsetTarget` + `GameObjectTarget`. The disabled prototype preserved the native offset, followed the Ailish/Buki midpoint, and restored Ailish focus plus Buki AI immediately. A first restore exposed missing per-slot references and R6025; matching Sudeki's caller-side retain convention fixed it, and the complete restore/release sequence then logged cleanly. Zoom remains native. |
 | Retained native targeting state | Complete (field-retention proof) | During a live Buki AI override, `character+0xAC -> CTargeter`, its ordinary target node at `+0x54` remained non-null/stable, and `+0x84 & 2` remained enabled through 1,181 samples; native AI restored cleanly. Target entity identity and the writer/scoring path remain open. |
 | Free-roam camera usability | Deferred / unresolved | Wheel remap, held pulse, late controller-field injection, and a detected LeftCtrl modifier gate produced no useful visible result. Action IDs and input staging are confirmed, but the actual desired-distance writer and active camera/profile remain untraced. |
 
 ## Current route from here
 
-1. Live-test the prepared two-player midpoint target. If focus and restoration pass, trace the separate desired/current-distance state and add separation-aware zoom. Keep split-screen deferred until a second render view is understood.
-2. Later trace the target writer/scoring path retained while AI is overridden, then add block/dodge and one additional normal attack without replacing native targeting.
-3. Identify the doorway/zone party-recovery path observed during the Milestone 5 test. Preserve normal single-player recovery, but design multiplayer transitions around an all-players-ready or explicit host/group commit rather than silent forced catch-up.
-4. Return to the combat-action/loadout layer: explicitly check Elco key `0` and Ailish's six direct QuickSkill slots, represent the existing Skill Strike, consumable, and Spirit Strike actions, then add external loadout configuration.
-5. Defer the full no-menu encounter playtest until later integration; it remains required before Milestone 3 is formally closed.
-6. Extend the input layer to keyboard chords and controllers after local-player input ownership is understood. Later add an in-game SudekiMP controls screen rather than altering Sudeki's original control data.
-7. If camera work resumes, trace the native desired/current-distance value from a visibly working vanilla mouse-Y adjustment. Do not continue patching controller `+0x184/+0x188` without identifying their downstream consumer and the active camera profile.
+1. Trace the separate desired/current camera-distance state and add separation-aware zoom to the live-confirmed midpoint target.
+2. Investigate split-screen feasibility by locating render-camera selection, viewport/scissor setup, aspect handling, and scene render submission. Do not assume a second focus target creates a second rendered view.
+3. Later trace the target writer/scoring path retained while AI is overridden, then add block/dodge and one additional normal attack without replacing native targeting.
+4. Identify the doorway/zone party-recovery path observed during the Milestone 5 test. Preserve normal single-player recovery, but design multiplayer transitions around an all-players-ready or explicit host/group commit rather than silent forced catch-up.
+5. Return to the combat-action/loadout layer: explicitly check Elco key `0` and Ailish's six direct QuickSkill slots, represent the existing Skill Strike, consumable, and Spirit Strike actions, then add external loadout configuration.
+6. Defer the full no-menu encounter playtest until later integration; it remains required before Milestone 3 is formally closed.
+7. Extend the input layer to keyboard chords and controllers after local-player input ownership is understood. Later add an in-game SudekiMP controls screen rather than altering Sudeki's original control data.
 
 ## Multiplayer integration constraints
 

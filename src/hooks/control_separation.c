@@ -65,6 +65,7 @@ enum {
     RVA_MATRIX_TARGET_CREATE = 0x00134fb0u,
     RVA_CAMERA_TARGET_RELEASE = 0x00135340u,
     RVA_GAME_OBJECT_TARGET_VTABLE = 0x002d42ccu,
+    RVA_OFFSET_TARGET_VTABLE = 0x002d436cu,
     RVA_MATRIX_TARGET_VTABLE = 0x002d43bcu,
     SUPPORTED_IMAGE_SIZE = 0x0045f000u,
     PARTY_SLOT_COUNT = 4u,
@@ -108,6 +109,7 @@ static void *group_camera_camera;
 static void *group_camera_target;
 static void *group_camera_original_targets[2];
 static void *group_camera_target_list;
+static unsigned int group_camera_last_rejection;
 
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
@@ -156,6 +158,37 @@ static BOOL game_code_pointer(const void *pointer) {
     return game_base != NULL && pointer != NULL &&
         (const uint8_t *)pointer >= game_base &&
         (const uint8_t *)pointer < game_base + SUPPORTED_IMAGE_SIZE;
+}
+
+static void log_group_camera_rejection(
+    unsigned int rejection,
+    const char *reason,
+    void *camera,
+    void *controller_target,
+    void *second_character,
+    void *slot_zero,
+    void *slot_one,
+    void *target_vtable
+) {
+    void *slot_one_vtable;
+
+    if (group_camera_last_rejection == rejection) {
+        return;
+    }
+    slot_one_vtable = readable_memory(slot_one, sizeof(void *)) ?
+        *(void **)slot_one : NULL;
+    group_camera_last_rejection = rejection;
+    SudekiMpLogFormat(
+        "control_separation event=shared_group_camera phase=reject reason=%s camera=0x%08lx controller_target=0x%08lx second_character=0x%08lx slot_zero=0x%08lx slot_one=0x%08lx slot_zero_vtable=0x%08lx slot_one_vtable=0x%08lx\r\n",
+        reason,
+        (unsigned long)(uintptr_t)camera,
+        (unsigned long)(uintptr_t)controller_target,
+        (unsigned long)(uintptr_t)second_character,
+        (unsigned long)(uintptr_t)slot_zero,
+        (unsigned long)(uintptr_t)slot_one,
+        (unsigned long)(uintptr_t)target_vtable,
+        (unsigned long)(uintptr_t)slot_one_vtable
+    );
 }
 
 static void retain_camera_target(void *target) {
@@ -296,9 +329,15 @@ static BOOL update_group_camera_target(
         !character_position(second_character, second_position)) {
         return FALSE;
     }
-    matrix[12] = (first_position[0] + second_position[0]) * 0.5f;
-    matrix[13] = (first_position[1] + second_position[1]) * 0.5f;
-    matrix[14] = (first_position[2] + second_position[2]) * 0.5f;
+    matrix[12] +=
+        (first_position[0] + second_position[0]) * 0.5f -
+        first_position[0];
+    matrix[13] +=
+        (first_position[1] + second_position[1]) * 0.5f -
+        first_position[1];
+    matrix[14] +=
+        (first_position[2] + second_position[2]) * 0.5f -
+        first_position[2];
     matrix[15] = 1.0f;
     memcpy(target + 0x20u, matrix, sizeof(matrix));
     memcpy(target + 0x14u, matrix + 12, sizeof(float) * 3u);
@@ -319,6 +358,7 @@ static void restore_group_camera(const char *reason) {
                 camera + 0xb4u + slot * sizeof(void *)
             );
             if (*camera_slot == target) {
+                retain_camera_target(group_camera_original_targets[slot]);
                 SudekiMpCallCameraTargetInstall(
                     camera,
                     group_camera_original_targets[slot],
@@ -348,33 +388,103 @@ static BOOL acquire_group_camera(
     void *second_character
 ) {
     uint8_t *target_list_owner;
-    void *original_target;
     void *created_target = NULL;
     float matrix[16];
     float first_position[3];
     float second_position[3];
+    void *slot_zero = *(void **)(camera + 0xb4u);
+    void *slot_one = *(void **)(camera + 0xb8u);
+    void *target_vtable = readable_memory(slot_zero, sizeof(void *)) ?
+        *(void **)slot_zero : NULL;
+    void *slot_one_vtable = readable_memory(slot_one, sizeof(void *)) ?
+        *(void **)slot_one : NULL;
+    BOOL same_game_object_target =
+        slot_zero == slot_one &&
+        target_vtable == game_base + RVA_GAME_OBJECT_TARGET_VTABLE;
+    BOOL offset_and_game_object_targets =
+        slot_zero != slot_one &&
+        target_vtable == game_base + RVA_OFFSET_TARGET_VTABLE &&
+        slot_one_vtable == game_base + RVA_GAME_OBJECT_TARGET_VTABLE;
 
-    if (*(void **)(camera + 0xb4u) != *(void **)(camera + 0xb8u)) {
+    if (!same_game_object_target && !offset_and_game_object_targets) {
+        log_group_camera_rejection(
+            5u,
+            "unsupported_target_pair",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
         return FALSE;
     }
-    original_target = *(void **)(camera + 0xb4u);
-    if (!readable_memory(original_target, 0x34u) ||
-        *(void **)original_target !=
-            game_base + RVA_GAME_OBJECT_TARGET_VTABLE ||
-        !camera_target_matrix(original_target, matrix) ||
-        !character_position(controller_target, first_position) ||
+    if (!readable_memory(slot_zero, 0x34u) ||
+        !readable_memory(slot_one, 0x34u)) {
+        log_group_camera_rejection(
+            6u,
+            "target_unreadable",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
+        return FALSE;
+    }
+    if (!camera_target_matrix(slot_zero, matrix)) {
+        log_group_camera_rejection(
+            8u,
+            "target_matrix_unavailable",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
+        return FALSE;
+    }
+    if (!character_position(controller_target, first_position) ||
         !character_position(second_character, second_position)) {
+        log_group_camera_rejection(
+            9u,
+            "character_position_unavailable",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
         return FALSE;
     }
     target_list_owner = *(uint8_t **)(
         game_base + RVA_CAMERA_TARGET_LIST_OWNER_GLOBAL
     );
     if (!readable_memory(target_list_owner, 0x58u)) {
+        log_group_camera_rejection(
+            10u,
+            "target_list_owner_unavailable",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
         return FALSE;
     }
-    matrix[12] = (first_position[0] + second_position[0]) * 0.5f;
-    matrix[13] = (first_position[1] + second_position[1]) * 0.5f;
-    matrix[14] = (first_position[2] + second_position[2]) * 0.5f;
+    matrix[12] +=
+        (first_position[0] + second_position[0]) * 0.5f -
+        first_position[0];
+    matrix[13] +=
+        (first_position[1] + second_position[1]) * 0.5f -
+        first_position[1];
+    matrix[14] +=
+        (first_position[2] + second_position[2]) * 0.5f -
+        first_position[2];
     matrix[15] = 1.0f;
     group_camera_target_list = target_list_owner + 0x4cu;
     matrix_target_create(
@@ -384,6 +494,16 @@ static BOOL acquire_group_camera(
     );
     if (!readable_memory(created_target, 0x80u) ||
         *(void **)created_target != game_base + RVA_MATRIX_TARGET_VTABLE) {
+        log_group_camera_rejection(
+            11u,
+            "matrix_target_creation_failed",
+            camera,
+            controller_target,
+            second_character,
+            slot_zero,
+            slot_one,
+            target_vtable
+        );
         release_camera_target(created_target);
         group_camera_target_list = NULL;
         return FALSE;
@@ -391,16 +511,18 @@ static BOOL acquire_group_camera(
 
     group_camera_camera = camera;
     group_camera_target = created_target;
-    group_camera_original_targets[0] = original_target;
-    group_camera_original_targets[1] = original_target;
-    retain_camera_target(original_target);
-    retain_camera_target(original_target);
+    group_camera_original_targets[0] = slot_zero;
+    group_camera_original_targets[1] = slot_one;
+    retain_camera_target(slot_zero);
+    retain_camera_target(slot_one);
+    retain_camera_target(created_target);
     SudekiMpCallCameraTargetInstall(
         camera,
         created_target,
         0u,
         camera_target_install
     );
+    retain_camera_target(created_target);
     SudekiMpCallCameraTargetInstall(
         camera,
         created_target,
@@ -412,10 +534,12 @@ static BOOL acquire_group_camera(
         restore_group_camera("install_verification_failed");
         return FALSE;
     }
+    group_camera_last_rejection = 0u;
     SudekiMpLogFormat(
-        "control_separation event=shared_group_camera phase=acquire camera=0x%08lx original_target=0x%08lx matrix_target=0x%08lx midpoint_bits=%08lx,%08lx,%08lx policy=two_player_centroid_no_zoom\r\n",
+        "control_separation event=shared_group_camera phase=acquire camera=0x%08lx original_targets=0x%08lx,0x%08lx matrix_target=0x%08lx midpoint_bits=%08lx,%08lx,%08lx policy=two_player_centroid_preserve_native_offset_no_zoom\r\n",
         (unsigned long)(uintptr_t)camera,
-        (unsigned long)(uintptr_t)original_target,
+        (unsigned long)(uintptr_t)slot_zero,
+        (unsigned long)(uintptr_t)slot_one,
         (unsigned long)(uintptr_t)created_target,
         (unsigned long)float_bits(matrix[12]),
         (unsigned long)float_bits(matrix[13]),
@@ -434,10 +558,40 @@ static void poll_shared_group_camera(void *controller) {
     controller_target = controller == NULL ? NULL :
         *(void **)((uint8_t *)controller + 0x248u);
     camera = current_gameplay_camera();
-    if (overridden_character == NULL ||
-        !overridden_character_is_in_active_group() ||
-        !character_is_in_active_group(controller_target) ||
-        controller_target == overridden_character || camera == NULL) {
+    if (overridden_character == NULL) {
+        group_camera_last_rejection = 0u;
+        restore_group_camera("inactive_or_incomplete_state");
+        return;
+    }
+    if (!overridden_character_is_in_active_group()) {
+        log_group_camera_rejection(
+            1u, "second_character_not_in_active_group", camera,
+            controller_target, overridden_character, NULL, NULL, NULL
+        );
+        restore_group_camera("inactive_or_incomplete_state");
+        return;
+    }
+    if (!character_is_in_active_group(controller_target)) {
+        log_group_camera_rejection(
+            2u, "controller_target_not_in_active_group", camera,
+            controller_target, overridden_character, NULL, NULL, NULL
+        );
+        restore_group_camera("inactive_or_incomplete_state");
+        return;
+    }
+    if (controller_target == overridden_character) {
+        log_group_camera_rejection(
+            3u, "controller_target_is_second_character", camera,
+            controller_target, overridden_character, NULL, NULL, NULL
+        );
+        restore_group_camera("inactive_or_incomplete_state");
+        return;
+    }
+    if (camera == NULL) {
+        log_group_camera_rejection(
+            4u, "gameplay_camera_unavailable", camera,
+            controller_target, overridden_character, NULL, NULL, NULL
+        );
         restore_group_camera("inactive_or_incomplete_state");
         return;
     }
