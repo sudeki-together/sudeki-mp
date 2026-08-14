@@ -17,7 +17,7 @@ Safety state:
   - Emergency game stop: tools/stop-sudeki.sh
   - The current local HEAD includes the Phase 9 attack proof plus disabled
     camera-relative movement, separation-guard, and passive-target-trace
-    follow-ups. This checkpoint has not yet been pushed.
+    follow-ups. The checkpoint is pushed to origin/main.
 
 Confirmed project position:
   1. Installer/build baseline, exact hashes, Wine baseline, and Ghidra import
