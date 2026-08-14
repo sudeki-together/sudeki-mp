@@ -27,7 +27,7 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `EnableSecondPlayerWeakAttackPrototype` defaults to `false` and requires the same control-separation prototype. While Buki's verified native override is active, rising edges from `[Bindings] SecondPlayerWeakAttack` (default `U`) submit only the weak-attack state to Buki's own arbiter through RVA `0x000DB0E0`; all other combat states are zero. The ABI adapter and exact-image install/restore tests pass under Wine. In the live proof the user completed a battle while one stable Buki arbiter repeatedly entered the native `IsAttacking` state, and nearest-target lock-on remained visibly active. Target selection and all attack/state validation remain native.
 
-`EnableSecondPlayerTargetTrace` defaults to `false`. While Buki's verified override is active and Sudeki owns the foreground, it samples her unchanged `CTargeter` at no more than 10 Hz and logs only changes to the ordinary target node, resolved GEL, and auto-target flag together with Buki's forward vector. The native getter at RVA `0x000B9DC0` has its own entry-signature gate. The trace never assigns, clears, scores, or replaces a target. Build and inert-image preflight pass; live capture remains pending.
+`EnableSecondPlayerTargetTrace` defaults to `false`. While Buki's verified override is active and Sudeki owns the foreground, it samples her unchanged `CTargeter` at no more than 10 Hz and logs only changes to the ordinary target node and auto-target flag together with Buki's forward vector. The trace never calls targeting logic and never assigns, clears, scores, or replaces a target. Build, inert-image preflight, and the first live capture pass.
 
 `EnablePlayerMovementTrace` defaults to `false`. It wraps only the two exact calls from the global controller's normal movement consumer to the per-character arbiter movement routine, samples the unchanged world direction and movement parameters, and forwards immediately. The live trace confirmed the expected normalized horizontal direction, speed, turn rate, movement mode, and controlled character. It does not synthesize or redirect movement.
 
@@ -41,9 +41,9 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `tools/continue-research.sh --second-player-attack-test` adds the disabled weak-attack prototype to that setup and binds it to `U`. Control anyone except Buki, use `F10` to acquire/release the native AI override, move Buki with `I/J/K/L`, and tap `U` once to request her weak attack.
 
-`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard. These modes are prepared for later live testing; neither was launched during implementation.
+`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. Its live run confirmed that Buki's independent input rotates with Player 1's shared camera while Player 1 retains camera focus. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard; that guard remains pending live confirmation.
 
-`tools/continue-research.sh --second-player-target-trace` enables only Buki's native AI override plus the passive target trace. It is intended to compare target changes before attacks, during Player 1 combat, and around enemy death without synthesizing Player 2 input.
+`tools/continue-research.sh --second-player-target-trace` enables only Buki's native AI override plus the passive target trace. It is intended to compare target changes before attacks, during Player 1 combat, and around enemy death without synthesizing Player 2 input. The first live run retained one stable non-null node and the enabled auto-target flag throughout the override, then restored Buki's AI cleanly.
 
 That live check passed: initialization logged virtual key `0x48`, and pressing `H` completed the same validated Ailish Spirit Strike with activation result `1`.
 

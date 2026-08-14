@@ -276,7 +276,7 @@ if [[ "${mode}" == "--second-player-target-trace" ]]; then
     printf '%s\n' \
         '  Test: control anyone except Buki, enter combat, and press F10 once to disable Buki AI.' \
         '  Move around enemies without attacking first, then use normal Player 1 combat.' \
-        '  The trace logs only Buki target-node/GEL/auto-target changes at up to 10 Hz.' \
+        '  The trace logs only Buki target-node/auto-target changes at up to 10 Hz.' \
         '  It never assigns a target; press F10 again to restore Buki AI before exit.'
 fi
 if [[ "${mode}" == "--second-player-attack-test" ]]; then

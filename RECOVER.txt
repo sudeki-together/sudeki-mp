@@ -15,9 +15,9 @@ Safety state:
   - Runtime experiments remain disabled in config/SudekiMP.ini.
   - The vanilla install is read-only and separate from the working copy.
   - Emergency game stop: tools/stop-sudeki.sh
-  - The current local HEAD includes the Phase 9 attack proof plus disabled
+  - The current checkpoint includes the Phase 9 attack proof plus disabled
     camera-relative movement, separation-guard, and passive-target-trace
-    follow-ups. The checkpoint is pushed to origin/main.
+    follow-ups.
 
 Confirmed project position:
   1. Installer/build baseline, exact hashes, Wine baseline, and Ghidra import
@@ -50,10 +50,13 @@ Confirmed project position:
      tests and is live-confirmed: the user won a complete battle while one
      stable Buki arbiter repeatedly entered native IsAttacking bit 0x1000.
  10. With Buki AI disabled, party models visibly retained nearest-target
-     lock-on. The behavior is confirmed; its target pointer/writer is not.
- 11. Camera-relative Buki movement is prepared offline. RVA 0x000291A0 is the
-     exact native Player 1 movement-camera transform; a separately disabled,
-     signature-gated Buki path builds and passes inert-image preflight.
+     lock-on. A passive trace confirmed Buki's target node stayed non-null and
+     stable and auto targeting stayed enabled; entity identity and writer are
+     still unresolved.
+ 11. Camera-relative Buki movement is live-confirmed. With Ailish retaining
+     Player 1 camera focus, Buki's separate I/J/K/L movement rotated with the
+     shared camera. The log recorded one stable Buki arbiter, changing world
+     vectors for repeated local inputs, and clean AI restoration.
  12. A first non-teleporting separation guard is prepared offline. World
      position resolves through character+0x44 to CPosition coordinates at
      +0x18/+0x1C/+0x20. The guard blocks only outward movement at a configured
@@ -84,19 +87,29 @@ Independent Buki weak-attack test (LIVE-CONFIRMED):
     CCharacterArbiter::IsAttacking() tests exactly flag 0x1000.
   - The user completed and won the battle with another Player 1 character.
 
-Prepared offline follow-ups (NOT YET LIVE-CONFIRMED):
+Phase 9 shared-camera movement (LIVE-CONFIRMED):
   - EnableSecondPlayerCameraRelativeMovementPrototype=false by default.
   - --second-player-camera-movement-test uses native transform RVA 0x000291A0.
   - Transform signature: 55 8B EC 83 E4 F0 8B 55 08 D9 EE.
+  - Ailish remained Player 1/camera focus while Buki moved relative to camera.
+  - Stable live Buki character/arbiter: 0x08283F18 / 0x082847E8.
+  - Repeated local directions produced changing normalized world directions as
+    the shared camera rotated; Buki AI restored cleanly.
+
+Prepared offline follow-up (NOT YET LIVE-CONFIRMED):
   - EnableSecondPlayerSeparationGuardPrototype=false by default.
   - SecondPlayerMaximumSeparation=10.0 is a test value, not final balance.
   - --second-player-separation-test enables camera-relative movement plus the
     outward-only limit. It never writes positions or forces catch-up.
   - EnableSecondPlayerTargetTrace=false by default.
-  - --second-player-target-trace logs Buki CTargeter node/GEL/auto-target
-    changes only; native getter RVA 0x000B9DC0 is signature-gated.
+  - --second-player-target-trace logs Buki CTargeter node/auto-target changes
+    only and never calls targeting logic.
+  - Live result: Buki's target node stayed non-null/stable and auto-target
+    stayed enabled during the AI override; native AI restored cleanly.
+  - An attempted resolved-target wrapper address was unstable and was removed
+    from the diagnostic. Exact target identity and its writer remain open.
   - PE32 build and inert exact-image install/restore tests pass.
-  - Per the user, do not launch another game test until they are available.
+  - Do not launch another game test unless the user is available to confirm it.
 
 Free-roam camera research (NOT solved):
   Confirmed static facts:

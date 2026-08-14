@@ -94,7 +94,7 @@ The party character stores its native targeter pointer at `character+0xAC`.
 | `+0x54` | intrusive target pointer/node | ordinary current target | `EnableAutoTargetting(false)` releases and clears it; `GetGelCurrentTarget` copies and resolves it | High |
 | `+0x84` bit `0x02` | flag | automatic targeting enabled | Native enable/disable function updates this bit; prior Plasmatica snapshots confirmed it | High |
 
-The prepared passive trace reads these fields and calls the unchanged native getter. The visible nearest-target lock retained during the Buki AI override is confirmed, but the writer/scoring path is not yet identified.
+The passive trace reads only these fields. During the first live Buki AI override, `+0x54` stayed non-null and stable while the `+0x84` auto-target bit remained enabled; Buki's AI then restored cleanly. This confirms retention of native targeting state, but not the node's final entity identity or the writer/scoring path. An experimental call to `GetGelCurrentTarget` returned changing wrapper addresses, so wrapper address identity was removed from the diagnostic.
 
 ### `character+0x94` component candidate
 

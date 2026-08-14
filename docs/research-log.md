@@ -742,7 +742,11 @@ The native Player 1 movement consumer calls RVA `0x000291A0` at RVA `0x00028C60`
 55 8B EC 83 E4 F0 8B 55 08 D9 EE
 ```
 
-A new `EnableSecondPlayerCameraRelativeMovementPrototype` option, disabled by default, now passes Buki's local `I/J/K/L` vector through that exact helper on the game thread, clears vertical output, horizontally normalizes it, and then uses the already-confirmed arbiter movement submission. It has an independent signature gate. The PE32 build and inert exact-image install/restore test pass. No live direction result is claimed.
+A new `EnableSecondPlayerCameraRelativeMovementPrototype` option, disabled by default, passes Buki's local `I/J/K/L` vector through that exact helper on the game thread, clears vertical output, horizontally normalizes it, and then uses the already-confirmed arbiter movement submission. It has an independent signature gate. The PE32 build and inert exact-image install/restore test pass.
+
+### Live result — shared-camera-relative Buki movement confirmed
+
+With Ailish remaining Player 1 and the visible camera focus, the user disabled Buki's AI and confirmed that Buki's independent movement rotated as the shared camera rotated. The log retained one Buki character/arbiter pair (`0x08283F18` / `0x082847E8`), marked every submission `camera_relative=true`, and recorded substantially different normalized X/Z world vectors for repeated identical local inputs as the camera changed. Buki's override was then released with refcount `0` and AI mode `1`. This establishes the intended X-Men Legends-style first camera model: Player 1 owns one shared camera, while each local player's input is transformed through that same current camera basis.
 
 ### Non-teleporting maximum-separation boundary
 
@@ -750,12 +754,10 @@ Exported `SetPlayerPosition(float,float,float)` at RVA `0x00104ED0` resolves act
 
 A separately disabled `EnableSecondPlayerSeparationGuardPrototype` compares AI-overridden Buki's X/Z position with the current controller target. At or beyond configurable `SecondPlayerMaximumSeparation`, it rejects only a movement direction whose horizontal dot product points farther outward. Inward and tangential movement remain available. Missing/invalid position state fails closed, and the prototype never writes a position, teleports a player, accelerates catch-up, or changes doorway transitions. The initial `10.0` value is explicitly a later test value, not a balance choice. Build and inert-image preflight pass; live confirmation is pending.
 
-### Passive retained-target trace prepared
+### Passive retained-target trace and live result
 
-Existing Plasmatica analysis already anchors the ordinary target system: `character+0xAC` is the native `CTargeter`, its intrusive current-target node is at `+0x54`, auto-target enabled is bit `0x02` at `+0x84`, and `CTargeter::GetGelCurrentTarget()` is exported at RVA `0x000B9DC0`. Disassembly confirms the getter copies/resolves the native pointer and leaves the target unchanged. Its supported entry bytes are:
+Existing Plasmatica analysis already anchors the ordinary target system: `character+0xAC` is the native `CTargeter`, its intrusive current-target node is at `+0x54`, auto-target enabled is bit `0x02` at `+0x84`, and `CTargeter::GetGelCurrentTarget()` is exported at RVA `0x000B9DC0`. Disassembly confirms the getter copies/resolves the native pointer and leaves the target unchanged.
 
-```text
-83 EC 0C 56 83 C1 54 8D 44 24 04
-```
+`EnableSecondPlayerTargetTrace`, disabled by default, samples those fields at up to 10 Hz only while Buki's verified AI override is active and the game owns the foreground. The live run acquired Buki at character `0x07C56948`, component `0x07C5727C`, and targeter `0x07C57558`. Across 1,181 samples, the ordinary target node remained one stable non-null value (`0x081E2290`) and auto targeting remained enabled. The final restore changed the verified override refcount to `0` and AI mode to `1`, confirming clean ownership release.
 
-`EnableSecondPlayerTargetTrace`, disabled by default, now samples those fields at up to 10 Hz only while Buki's verified AI override is active and the game owns the foreground. It logs only target-node, resolved-GEL, or auto-target changes plus Buki's current transform-forward vector. It does not assign or clear targets. `--second-player-target-trace` prepares the later focused run. The signature gate and inert-image install/restore test pass; the writer/scoring mechanism behind the observed nearest-target lock remains unconfirmed.
+The first diagnostic also called `GetGelCurrentTarget` and logged its returned address. That address changed almost every sample despite the unchanged node, so it is an ephemeral wrapper/scratch address rather than a valid target-identity key. The call and field were removed. The corrected trace performs only passive reads and compares the durable node and flag. This result confirms that native targeting state survives removal of Buki's high-level AI; it does not yet identify the target entity, scoring logic, or writer.

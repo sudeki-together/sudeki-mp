@@ -39,10 +39,6 @@ typedef void (__stdcall *MovementCameraTransformFunction)(
     float *output_direction,
     const float *local_direction
 );
-typedef void *(SUDEKIMP_THISCALL *TargeterGetCurrentTargetFunction)(
-    void *targeter
-);
-
 enum {
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
@@ -51,7 +47,6 @@ enum {
     RVA_AI_OVERRIDE_CONTROL = 0x000f60d0u,
     RVA_AI_DEFAULT_CONTROL = 0x000f6100u,
     RVA_MOVEMENT_CAMERA_TRANSFORM = 0x000291a0u,
-    RVA_TARGETER_GET_CURRENT_TARGET = 0x000b9dc0u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
@@ -69,7 +64,6 @@ static AiControlFunction ai_default_control;
 static ArbiterMovementFunction arbiter_movement;
 static ArbiterSetSpeedFunction arbiter_set_speed;
 static MovementCameraTransformFunction movement_camera_transform;
-static TargeterGetCurrentTargetFunction targeter_get_current_target;
 static uint8_t *game_base;
 static void *overridden_character;
 static UINT selected_virtual_key;
@@ -86,7 +80,6 @@ static BOOL weak_attack_was_down;
 static BOOL target_trace_enabled;
 static DWORD target_trace_last_sample_tick;
 static void *target_trace_last_node;
-static void *target_trace_last_gel;
 static int target_trace_last_auto_enabled;
 static BOOL buki_movement_active;
 static int last_movement_x;
@@ -98,10 +91,6 @@ static const uint8_t expected_arbiter_combat_input_entry[] = {
 static const uint8_t expected_movement_camera_transform_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x8b, 0x55, 0x08, 0xd9, 0xee
 };
-static const uint8_t expected_targeter_get_current_target_entry[] = {
-    0x83, 0xec, 0x0c, 0x56, 0x83, 0xc1, 0x54, 0x8d, 0x44, 0x24, 0x04
-};
-
 static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
@@ -111,7 +100,6 @@ static uint32_t float_bits(float value) {
 static void reset_target_trace_state(void) {
     target_trace_last_sample_tick = 0;
     target_trace_last_node = NULL;
-    target_trace_last_gel = NULL;
     target_trace_last_auto_enabled = -1;
 }
 
@@ -391,7 +379,6 @@ static void poll_buki_target_trace(BOOL owns_foreground) {
     uint8_t *targeter;
     uint8_t *transform;
     void *target_node;
-    void *target_gel;
     uint32_t targeter_flags;
     uint32_t forward_bits[3] = {0u, 0u, 0u};
     int auto_enabled;
@@ -421,26 +408,22 @@ static void poll_buki_target_trace(BOOL owns_foreground) {
     target_node = *(void **)(targeter + 0x54);
     targeter_flags = *(uint32_t *)(targeter + 0x84);
     auto_enabled = (targeter_flags & 2u) != 0;
-    target_gel = targeter_get_current_target(targeter);
     if (transform != NULL) {
         memcpy(forward_bits, transform + 0x50, sizeof(forward_bits));
     }
     if (target_node != target_trace_last_node ||
-        target_gel != target_trace_last_gel ||
         auto_enabled != target_trace_last_auto_enabled) {
         SudekiMpLogFormat(
-            "control_separation event=second_player_target_trace character=0x%08lx targeter=0x%08lx target_node=0x%08lx target_gel=0x%08lx auto_target_enabled=%d forward_bits=%08lx,%08lx,%08lx\r\n",
+            "control_separation event=second_player_target_trace character=0x%08lx targeter=0x%08lx target_node=0x%08lx auto_target_enabled=%d forward_bits=%08lx,%08lx,%08lx\r\n",
             (unsigned long)(uintptr_t)character,
             (unsigned long)(uintptr_t)targeter,
             (unsigned long)(uintptr_t)target_node,
-            (unsigned long)(uintptr_t)target_gel,
             auto_enabled,
             (unsigned long)forward_bits[0],
             (unsigned long)forward_bits[1],
             (unsigned long)forward_bits[2]
         );
         target_trace_last_node = target_node;
-        target_trace_last_gel = target_gel;
         target_trace_last_auto_enabled = auto_enabled;
     }
 }
@@ -709,14 +692,6 @@ BOOL SudekiMpInstallControlSeparation(
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
-    if (enable_target_trace &&
-        memcmp(
-            base + RVA_TARGETER_GET_CURRENT_TARGET,
-            expected_targeter_get_current_target_entry,
-            sizeof(expected_targeter_get_current_target_entry)) != 0) {
-        SetLastError(ERROR_INVALID_DATA);
-        return FALSE;
-    }
     slot = (void **)(base + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
     game_base = base;
     selected_virtual_key = toggle_virtual_key;
@@ -747,9 +722,6 @@ BOOL SudekiMpInstallControlSeparation(
     );
     movement_camera_transform = (MovementCameraTransformFunction)(
         base + RVA_MOVEMENT_CAMERA_TRANSFORM
-    );
-    targeter_get_current_target = (TargeterGetCurrentTargetFunction)(
-        base + RVA_TARGETER_GET_CURRENT_TARGET
     );
 
     if (!SudekiMpInstallPointerHook(
@@ -783,7 +755,6 @@ void SudekiMpUninstallControlSeparation(void) {
     arbiter_movement = NULL;
     arbiter_set_speed = NULL;
     movement_camera_transform = NULL;
-    targeter_get_current_target = NULL;
     game_base = NULL;
     overridden_character = NULL;
     selected_virtual_key = 0;
