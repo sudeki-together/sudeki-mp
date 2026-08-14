@@ -164,10 +164,35 @@ The executable's named AI-control exports provide the maintainable separation ro
 | Controller movement-vector consumer | `0x00028B00` / `0x00428B00` | Reads axes at controller `+0x1A0/+0x1A4`, camera-transforms and normalizes a horizontal vector, resolves `controller+0x248`, and submits movement through the character arbiter |
 | Player movement call sites | `0x00028E3F`, `0x00028E5E` | Two branches in the same controller consumer call the arbiter submission with five callee-cleaned arguments; an observation-only live wrapper forwarded both unchanged |
 | Character-arbiter movement submission | `0x000DAE80` / `0x004DAE80` | Accepts arbiter, world direction, speed, turn-rate, and movement mode; applies native state gates, updates the character movement controller, and writes the accepted facing/movement vector to the character's component at `+0xAC` |
+| Movement camera transform | `0x000291A0` / `0x004291A0` | Callee-cleaned `(controller, output, local_input)` helper used by Player 1; refreshes/copies the controller's camera matrix, removes translation, and calls `D3DXVec3TransformCoord` |
 | `CCharacterArbiter::SetSpeed(float,float)` | `0x000DB070` / `0x004DB070` | Exported stop/speed path; writes movement-controller speed and turn rate when current arbiter state permits movement |
 | `CMovementController::SetAbsoluteDeltaMovement(float,float,float)` | `0x000030A0` / `0x004030A0` | Alternate direct-delta movement mode used when controller movement mode `+0x23C` equals `1` |
 
 The normal third-person path uses controller movement mode `0` and RVA `0x000DAE80`. A live `W/A/S/D` capture consistently supplied one controlled character and arbiter, normalized horizontal directions (`Y=0`), turn rate `1.0`, and movement mode `0`. Observed native speed magnitudes were `1.0`, approximately `1.500`, and approximately `1.803`. The wrapper did not replace the character, vector, or any argument. AI movement also reaches the same arbiter submission from RVA `0x000F4BB0`, which supports using it as the shared per-character movement boundary after AI is disabled.
+
+The call at RVA `0x00028C60` passes the controller, output vector, and local movement vector to RVA `0x000291A0`; its `ret 0x0C` confirms callee cleanup. The prepared Player 2 follow-up calls this same helper on the game thread, removes vertical output, and horizontally normalizes before submitting Buki movement. Entry bytes `55 8B EC 83 E4 F0 8B 55 08 D9 EE` are independently gated. This option is disabled and exact-image tested, but not yet live-confirmed.
+
+## Character world-position boundary
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Script-facing `SetPlayerPosition(float,float,float)` | `0x00104ED0` / `0x00504ED0` | Resolves active group slot 0, reads `character+0x44`, and calls the internal position setter |
+| Internal `CPosition` vector setter | `0x00003050` / `0x00403050` | Compares and writes input X/Y/Z to `CPosition+0x18/+0x1C/+0x20`, increments change state, and marks the object dirty |
+
+Because party entries share the same character layout, the two position objects provide a direct horizontal separation measurement without moving or retargeting either actor. The prepared guard compares Buki against the current `controller+0x248` character. At or beyond a configurable limit it rejects only directions with a positive outward dot product; inward or tangential movement remains available. No live guard result is claimed yet.
+
+## Per-character combat-input submission
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Character input-event handler | `0x000277B0` / `0x004277B0` | Maps Weak `0x2C`, Strong `0x2D`, Sweep `0x2E`, Weapon Next `0x2F`, Weapon Previous `0x30`, and Block `0x31` into controller action records |
+| Controller combat-state consumer | `0x000286C0` / `0x004286C0` | Resolves `controller+0x248`, obtains that character's arbiter at `character+0x90`, performs controller/camera handling, and calls the per-arbiter submission at RVA `0x0002891F` |
+| Character-arbiter combat-input submission | `0x000DB0E0` / `0x004DB0E0` | Accepts a chosen arbiter plus Weak, Strong, Sweep, Block, Weapon Next, and Weapon Previous states; enforces the arbiter's native owner, capability, weapon/attack-state, and action-transition rules before dispatch |
+| Provisional native melee dispatch | `0x000DAC00` / `0x004DAC00` | Receives attack kind `1` weak, `2` strong, or `3` sweep from the per-arbiter submission; deeper target/animation behavior remains to be traced |
+
+RVA `0x000DB0E0` uses an unusual exact-build i386 ABI: `ECX` is the target `CCharacterArbiter`, `EAX` is Block, and five callee-cleaned stack arguments are Weak, Strong, Sweep, Weapon Next, and Weapon Previous. At the controller call site, those states come from `+0x8C`, `+0x94`, `+0x9C`, `+0xAC`, and `+0xB4`, with Block loaded from `+0xA4`. Its entry bytes are `55 8B 6C 24 08 56 57 8B F8 8B F1` on the supported executable.
+
+This is a real per-character boundary: the arbiter is explicitly supplied rather than recovered from the global controller target, and another native caller exists at RVA `0x000DA816`. A one-shot weak request is therefore represented by Weak `1` and zero for the other five states. The disabled prototype uses a small isolated assembly adapter to reproduce the ABI and leaves targeting and every native rejection path unchanged. The adapter's register/stack/cleanup test and the inert exact-image hook test pass. The live battle kept one Buki arbiter and repeatedly changed `+0x50` from idle values into `0x00001002`; exported `CCharacterArbiter::IsAttacking()` at RVA `0x000088D0` tests exactly bit `0x1000`. Independent Buki attack input is therefore confirmed. The observed nearest-target lock remains native, although its underlying pointer/writer is not yet traced.
 
 ## Free-roam camera configuration and input staging
 

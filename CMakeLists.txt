@@ -17,6 +17,7 @@ set(SUDEKIMP_COMMON_SOURCES
 
 add_library(SudekiMP SHARED
     src/loader/dllmain.c
+    src/engine/arbiter_combat_input.c
     src/engine/log.c
     src/input/key_binding.c
     src/hooks/call_hook.c
@@ -57,6 +58,9 @@ set_source_files_properties(src/hooks/freeroam_camera_input.c PROPERTIES
 set_source_files_properties(src/hooks/player_input_trace.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
+set_source_files_properties(src/engine/arbiter_combat_input.c PROPERTIES
+    COMPILE_OPTIONS "-Wno-pedantic;-Wno-unused-parameter"
+)
 target_link_libraries(SudekiMP PRIVATE advapi32)
 set_target_properties(SudekiMP PROPERTIES
     PREFIX ""
@@ -94,6 +98,25 @@ add_executable(SudekiMP.KeyBindingTest
     tests/key_binding_test.c
     src/input/key_binding.c
 )
+
+add_executable(SudekiMP.ArbiterCombatInputTest
+    tests/arbiter_combat_input_test.c
+    src/engine/arbiter_combat_input.c
+)
+target_include_directories(SudekiMP.ArbiterCombatInputTest PRIVATE src)
+target_compile_definitions(SudekiMP.ArbiterCombatInputTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.ArbiterCombatInputTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(
+    tests/arbiter_combat_input_test.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.ArbiterCombatInputTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 target_include_directories(SudekiMP.KeyBindingTest PRIVATE src)
 target_compile_definitions(SudekiMP.KeyBindingTest PRIVATE
     WIN32_LEAN_AND_MEAN UNICODE _UNICODE
@@ -105,6 +128,7 @@ set_target_properties(SudekiMP.KeyBindingTest PROPERTIES
 
 add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
+    src/engine/arbiter_combat_input.c
     src/engine/log.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c

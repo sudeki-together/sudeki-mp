@@ -705,3 +705,57 @@ A fourth prototype suppressed free-roam mouse-Y camera actions unless configurab
 ### Conclusion
 
 Controller `+0x184/+0x188` is confirmed input staging, not a proven durable camera control point. Repeating remaps there is not justified. The next camera investigation must begin with a vanilla state where mouse Y visibly changes distance and trace the actual desired/current-distance writer, active camera/profile, config reads, and clamp function. A broader multiplayer camera replacement may ultimately be preferable, but it should be based on that state path rather than blind camera-object writes. The prototype remains disabled by default.
+
+## 2026-08-14 — Per-character normal-attack boundary
+
+### Confirmed static result
+
+The exact-build, read-only Ghidra report `tools/ghidra/AttackInputReport.java` traced the normal combat actions from the character input handler at RVA `0x000277B0` into the controller combat consumer at RVA `0x000286C0`. The action IDs are Weak `0x2C`, Strong `0x2D`, Sweep `0x2E`, Weapon Next `0x2F`, Weapon Previous `0x30`, and Block `0x31`.
+
+At RVA `0x0002891F`, the controller passes its chosen character arbiter to RVA `0x000DB0E0`. That callee is a genuine per-`CCharacterArbiter` combat-input boundary rather than a Player-1-only helper: `ECX` carries the supplied arbiter, `EAX` carries Block, and five stack arguments carry Weak, Strong, Sweep, Weapon Next, and Weapon Previous. The function returns with `ret 0x14`, cleaning those five stack arguments. Its exact entry bytes are:
+
+```text
+55 8B 6C 24 08 56 57 8B F8 8B F1
+```
+
+The function validates the supplied arbiter's owner and combat components, state/capability flags at `+0x50/+0x58/+0x60`, attack transitions, and weapon requirements. For the normal melee branch it maps state value `1` to weak kind `1`, strong kind `2`, and sweep kind `3` before calling provisional dispatch RVA `0x000DAC00`. Targeting is not replaced by this seam. A second native caller at RVA `0x000DA816` further supports that this is shared arbiter behavior.
+
+### Prepared experiment
+
+A disabled-by-default `EnableSecondPlayerWeakAttackPrototype` now uses an isolated i386 assembly adapter to reproduce that ABI. With Buki's existing native AI override active and verified, a rising `U` edge submits Weak `1` and zero for Strong, Sweep, Block, Weapon Next, and Weapon Previous to Buki's own arbiter. The path refuses to act if Buki is front/controller-owned, outside the active party, lacks the required components, or no longer has the verified override state. The supported entry signature must match before installation.
+
+The PE32 ABI test captured the expected `ECX`, `EAX`, five stack arguments, and native stack cleanup under Wine. The exact-image test then installed and removed the combined control-separation/movement/attack hook against an inert mapping of the supported `SUDEKI.exe`; all preflight tests passed. The focused launcher mode is `tools/continue-research.sh --second-player-attack-test`: `F10` toggles Buki's native AI override, `I/J/K/L` remain the fixed-axis movement proof, and `U` requests only Buki's weak attack.
+
+### Live result — independent Buki combat input confirmed
+
+With a different character remaining under Player 1 control, the user disabled Buki's AI, fought through a complete battle, and won. The log kept one stable Buki character/arbiter pair (`0x07C861B0` / `0x07C86A80`) for both movement and every weak-attack submission. The arbiter's `+0x50` flags moved through native idle/attack values including `0x00000003`, `0x00001002`, and `0x00002002` while `+0x58` remained `0x3C000012` and `+0x60` remained `0x72`. This confirms independently submitted Buki attack input reaches and advances her native combat state while Player 1 remains separate.
+
+The user also observed that AI-overridden characters still appeared to lock onto the nearest target. This is strong live evidence that target selection/facing persists outside the disabled high-level AI decision path, but the exact target pointer and writer were not captured in this run. Treat retained native targeting as a useful confirmed behavior at the visible level and its mechanism as a hypothesis pending a passive target trace.
+
+## 2026-08-14 — Camera-relative movement and separation preflight
+
+### Shared movement-camera transform
+
+The native Player 1 movement consumer calls RVA `0x000291A0` at RVA `0x00028C60` with `(controller, output_vector, local_input_vector)`. Disassembly confirms three stack arguments and `ret 0x0C`. The function refreshes or reuses the controller matrix at `+0x1F0`, clears translation/projective terms in a local copy, and calls `D3DXVec3TransformCoord`. Supported-build entry bytes are:
+
+```text
+55 8B EC 83 E4 F0 8B 55 08 D9 EE
+```
+
+A new `EnableSecondPlayerCameraRelativeMovementPrototype` option, disabled by default, now passes Buki's local `I/J/K/L` vector through that exact helper on the game thread, clears vertical output, horizontally normalizes it, and then uses the already-confirmed arbiter movement submission. It has an independent signature gate. The PE32 build and inert exact-image install/restore test pass. No live direction result is claimed.
+
+### Non-teleporting maximum-separation boundary
+
+Exported `SetPlayerPosition(float,float,float)` at RVA `0x00104ED0` resolves active group slot 0, reads `character+0x44`, and invokes RVA `0x00003050`. That setter compares and writes the three coordinates at `CPosition+0x18/+0x1C/+0x20`, establishing a read-only world-position boundary for every party character sharing the layout.
+
+A separately disabled `EnableSecondPlayerSeparationGuardPrototype` compares AI-overridden Buki's X/Z position with the current controller target. At or beyond configurable `SecondPlayerMaximumSeparation`, it rejects only a movement direction whose horizontal dot product points farther outward. Inward and tangential movement remain available. Missing/invalid position state fails closed, and the prototype never writes a position, teleports a player, accelerates catch-up, or changes doorway transitions. The initial `10.0` value is explicitly a later test value, not a balance choice. Build and inert-image preflight pass; live confirmation is pending.
+
+### Passive retained-target trace prepared
+
+Existing Plasmatica analysis already anchors the ordinary target system: `character+0xAC` is the native `CTargeter`, its intrusive current-target node is at `+0x54`, auto-target enabled is bit `0x02` at `+0x84`, and `CTargeter::GetGelCurrentTarget()` is exported at RVA `0x000B9DC0`. Disassembly confirms the getter copies/resolves the native pointer and leaves the target unchanged. Its supported entry bytes are:
+
+```text
+83 EC 0C 56 83 C1 54 8D 44 24 04
+```
+
+`EnableSecondPlayerTargetTrace`, disabled by default, now samples those fields at up to 10 Hz only while Buki's verified AI override is active and the game owns the foreground. It logs only target-node, resolved-GEL, or auto-target changes plus Buki's current transform-forward vector. It does not assign or clear targets. `--second-player-target-trace` prepares the later focused run. The signature gate and inert-image install/restore test pass; the writer/scoring mechanism behind the observed nearest-target lock remains unconfirmed.

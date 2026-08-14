@@ -21,6 +21,14 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `EnableSecondPlayerMovementPrototype` also defaults to `false` and requires the control-separation prototype. While Buki's verified native override is active, it submits normalized fixed-world-axis `I/J/K/L` directions to Buki's own arbiter at RVA `0x000DAE80`; Player 1's normal controller and `W/A/S/D` route remain untouched. The dedicated test launcher temporarily moves `ToggleBukiAi` to `F10` to avoid overlap with `J`. Live testing confirmed independent two-character movement and a clean native AI restore. The prototype refuses to act when Buki is the controller target or no longer belongs to the active group.
 
+`EnableSecondPlayerCameraRelativeMovementPrototype` defaults to `false` and requires the movement prototype. It passes the local `I/J/K/L` vector through Sudeki's own callee-cleaned movement-camera transform at RVA `0x000291A0`, clears vertical motion, normalizes the horizontal result, and then uses the already-proven Buki arbiter path. Its exact entry signature and inert-image installation pass; live directional behavior remains pending.
+
+`EnableSecondPlayerSeparationGuardPrototype` defaults to `false` and also requires movement. `SecondPlayerMaximumSeparation` defaults to an experimental `10.0` units. The guard reads both characters' native `CPosition` objects, blocks only movement whose dot product points farther outward once the horizontal limit is reached, and always permits movement back toward Player 1. It does not teleport, accelerate, or take control of either character. The value is a test starting point rather than a balance decision; live confirmation remains pending.
+
+`EnableSecondPlayerWeakAttackPrototype` defaults to `false` and requires the same control-separation prototype. While Buki's verified native override is active, rising edges from `[Bindings] SecondPlayerWeakAttack` (default `U`) submit only the weak-attack state to Buki's own arbiter through RVA `0x000DB0E0`; all other combat states are zero. The ABI adapter and exact-image install/restore tests pass under Wine. In the live proof the user completed a battle while one stable Buki arbiter repeatedly entered the native `IsAttacking` state, and nearest-target lock-on remained visibly active. Target selection and all attack/state validation remain native.
+
+`EnableSecondPlayerTargetTrace` defaults to `false`. While Buki's verified override is active and Sudeki owns the foreground, it samples her unchanged `CTargeter` at no more than 10 Hz and logs only changes to the ordinary target node, resolved GEL, and auto-target flag together with Buki's forward vector. The native getter at RVA `0x000B9DC0` has its own entry-signature gate. The trace never assigns, clears, scores, or replaces a target. Build and inert-image preflight pass; live capture remains pending.
+
 `EnablePlayerMovementTrace` defaults to `false`. It wraps only the two exact calls from the global controller's normal movement consumer to the per-character arbiter movement routine, samples the unchanged world direction and movement parameters, and forwards immediately. The live trace confirmed the expected normalized horizontal direction, speed, turn rate, movement mode, and controlled character. It does not synthesize or redirect movement.
 
 `EnableFreeRoamCameraModifierPrototype` defaults to `false` and remains an unsuccessful diagnostic prototype. It gates native mouse-Y `CameraU/CameraD` events outside combat behind configurable `[Bindings] FreeRoamCameraModifier` (`LeftCtrl` by default), while leaving combat input unchanged. The modifier edge was observed live, but the user did not obtain a useful camera result. Earlier wheel remap, held-pulse, and late controller-field injection attempts also failed visibly. This option must not be treated as a completed camera feature; further work belongs at the native desired-distance/profile update path.
@@ -30,6 +38,12 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 `tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits.
 
 `tools/continue-research.sh --second-player-movement-test` temporarily enables the guarded Buki toggle and second movement source, uses `F10` for the toggle, and restores the generated configuration after Sudeki exits.
+
+`tools/continue-research.sh --second-player-attack-test` adds the disabled weak-attack prototype to that setup and binds it to `U`. Control anyone except Buki, use `F10` to acquire/release the native AI override, move Buki with `I/J/K/L`, and tap `U` once to request her weak attack.
+
+`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard. These modes are prepared for later live testing; neither was launched during implementation.
+
+`tools/continue-research.sh --second-player-target-trace` enables only Buki's native AI override plus the passive target trace. It is intended to compare target changes before attacks, during Player 1 combat, and around enemy death without synthesizing Player 2 input.
 
 That live check passed: initialization logged virtual key `0x48`, and pressing `H` completed the same validated Ailish Spirit Strike with activation result `1`.
 

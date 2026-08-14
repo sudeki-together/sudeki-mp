@@ -14,7 +14,7 @@ spirit_key="${2:-G}"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
@@ -24,6 +24,10 @@ usage() {
         '  --control-separation-test Toggle non-front Buki AI off/on with J through Sudeki native control APIs.' \
         '  --player-input-trace Sample Player 1 world-direction and speed arguments without changing movement.' \
         '  --second-player-movement-test Use F10 to disable Buki AI, then move Buki with I/J/K/L.' \
+        '  --second-player-camera-movement-test Add the native shared-camera basis to Buki movement.' \
+        '  --second-player-separation-test Add a 10-unit outward-only separation guard.' \
+        '  --second-player-target-trace Passively log Buki native target changes while AI is off.' \
+        '  --second-player-attack-test Use F10 for Buki AI, I/J/K/L movement, and U for Buki weak attack.' \
         '  --ranged-skill-test  Test guarded native UI-state cycling for Elco/Ailish QuickSkills.' \
         '  --spirit-strike-test Test captured Ailish Spirit Strike ID 2; optionally override the default G key.' \
         '  --speed-test  Reproduce per-model animation control; defaults to 2.0x.' \
@@ -32,7 +36,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -131,6 +135,38 @@ case "${mode}" in
             -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
             "${generated_config}"
         ;;
+    --second-player-camera-movement-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
+    --second-player-separation-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
+    --second-player-target-trace)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerTargetTrace=false$/EnableSecondPlayerTargetTrace=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
+    --second-player-attack-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
     --ranged-skill-test)
         sed -i \
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
@@ -192,6 +228,8 @@ printf '%s\n' \
     '  Phase 8 mechanism confirmed: vanilla transfers nested AI mode 0/1 with the controller target.' \
     '  Milestone 4 prototype: J uses native AiOverrideControl/AiDefaultControl on non-front Buki.' \
     '  Milestone 5 proof: Player 1 and AI-overridden Buki accepted separate simultaneous movement input.' \
+    '  Phase 9 attack proof: Buki accepted independent U weak attacks and entered native IsAttacking state.' \
+    '  Prepared offline: camera-relative Buki movement and outward-only separation guard; live tests pending.' \
     '  Camera status: free-roam wheel and modifier prototypes were not visibly effective; desired-distance tracing is next.' \
     '  Deferred: full no-menu encounter remains required before Milestone 3 closes.' \
     '  Emergency stop: tools/stop-sudeki.sh' \
@@ -218,6 +256,34 @@ if [[ "${mode}" == "--second-player-movement-test" ]]; then
         '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
         '  then move Buki with I/J/K/L while Player 1 retains W/A/S/D.' \
         '  I/J/K/L directions use fixed world axes for this first proof.' \
+        '  Do not switch characters; press F10 again to restore Buki AI before exit.'
+fi
+if [[ "${mode}" == "--second-player-camera-movement-test" ]]; then
+    printf '%s\n' \
+        '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
+        '  then rotate the shared camera and move Buki with I/J/K/L.' \
+        '  Buki should follow the same camera-relative basis as Player 1.' \
+        '  Do not switch characters; press F10 again to restore Buki AI before exit.'
+fi
+if [[ "${mode}" == "--second-player-separation-test" ]]; then
+    printf '%s\n' \
+        '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
+        '  then move Buki with I/J/K/L relative to the shared camera.' \
+        '  At 10 horizontal units, outward movement should stop while inward movement remains available.' \
+        '  No teleport or forced catch-up is used; press F10 again to restore Buki AI before exit.'
+fi
+if [[ "${mode}" == "--second-player-target-trace" ]]; then
+    printf '%s\n' \
+        '  Test: control anyone except Buki, enter combat, and press F10 once to disable Buki AI.' \
+        '  Move around enemies without attacking first, then use normal Player 1 combat.' \
+        '  The trace logs only Buki target-node/GEL/auto-target changes at up to 10 Hz.' \
+        '  It never assigns a target; press F10 again to restore Buki AI before exit.'
+fi
+if [[ "${mode}" == "--second-player-attack-test" ]]; then
+    printf '%s\n' \
+        '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
+        '  then use I/J/K/L for Buki movement and tap U for Buki weak attack.' \
+        '  Player 1 retains normal controls; Buki targeting remains native.' \
         '  Do not switch characters; press F10 again to restore Buki AI before exit.'
 fi
 if [[ "${mode}" == "--freeroam-camera-test" ]]; then

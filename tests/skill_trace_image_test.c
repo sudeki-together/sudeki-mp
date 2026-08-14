@@ -211,7 +211,16 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
-    if (!SudekiMpInstallControlSeparation((HMODULE)image, 'J', TRUE)) {
+    if (!SudekiMpInstallControlSeparation(
+            (HMODULE)image,
+            'J',
+            TRUE,
+            TRUE,
+            TRUE,
+            10.0f,
+            TRUE,
+            'U',
+            TRUE)) {
         fprintf(stderr, "control-separation install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallCharacterSwitchTrace();

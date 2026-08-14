@@ -175,19 +175,26 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL control_separation_enabled;
     BOOL player_movement_trace_enabled;
     BOOL second_player_movement_enabled;
+    BOOL second_player_camera_relative_movement_enabled;
+    BOOL second_player_separation_guard_enabled;
+    BOOL second_player_weak_attack_enabled;
+    BOOL second_player_target_trace_enabled;
     BOOL freeroam_camera_input_enabled;
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
+    wchar_t second_player_weak_attack_key_text[32];
     wchar_t freeroam_camera_modifier_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
+    UINT second_player_weak_attack_virtual_key = 'U';
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
+    float second_player_maximum_separation = 10.0f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -300,6 +307,26 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableSecondPlayerMovementPrototype"
     );
+    second_player_camera_relative_movement_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerCameraRelativeMovementPrototype"
+    );
+    second_player_separation_guard_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerSeparationGuardPrototype"
+    );
+    second_player_weak_attack_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerWeakAttackPrototype"
+    );
+    second_player_target_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerTargetTrace"
+    );
     freeroam_camera_input_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -342,6 +369,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             sizeof(control_separation_key_text[0])),
         config_path
     );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"SecondPlayerWeakAttack",
+        L"U",
+        second_player_weak_attack_key_text,
+        (DWORD)(sizeof(second_player_weak_attack_key_text) /
+            sizeof(second_player_weak_attack_key_text[0])),
+        config_path
+    );
     if (direct_spirit_strike_prototype_enabled &&
         !SudekiMpParseInputKey(
             spirit_strike_key_text,
@@ -360,6 +396,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (second_player_weak_attack_enabled &&
+        !SudekiMpParseInputKey(
+            second_player_weak_attack_key_text,
+            &second_player_weak_attack_virtual_key)) {
+        SudekiMpLogWrite(
+            "second_player_weak_attack_key_config=invalid\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (freeroam_camera_input_enabled &&
         !SudekiMpParseInputKey(
             freeroam_camera_modifier_text,
@@ -372,6 +419,55 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if (second_player_movement_enabled && !control_separation_enabled) {
         SudekiMpLogWrite(
             "second_player_movement_config=requires_control_separation\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_camera_relative_movement_enabled &&
+        !second_player_movement_enabled) {
+        SudekiMpLogWrite(
+            "second_player_camera_relative_movement_config=requires_second_player_movement\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_separation_guard_enabled &&
+        !second_player_movement_enabled) {
+        SudekiMpLogWrite(
+            "second_player_separation_guard_config=requires_second_player_movement\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_separation_guard_enabled && !read_config_float(
+            config_path,
+            L"SudekiMP",
+            L"SecondPlayerMaximumSeparation",
+            10.0f,
+            0.25f,
+            1000.0f,
+            &second_player_maximum_separation)) {
+        SudekiMpLogWrite(
+            "second_player_maximum_separation_config=invalid\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_weak_attack_enabled && !control_separation_enabled) {
+        SudekiMpLogWrite(
+            "second_player_weak_attack_config=requires_control_separation\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_target_trace_enabled && !control_separation_enabled) {
+        SudekiMpLogWrite(
+            "second_player_target_trace_config=requires_control_separation\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -536,16 +632,28 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("freeroam_camera_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s\r\n",
+        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx target_trace=%s\r\n",
         control_separation_enabled ? "true" : "false",
         (unsigned long)control_separation_virtual_key,
-        second_player_movement_enabled ? "true" : "false"
+        second_player_movement_enabled ? "true" : "false",
+        second_player_camera_relative_movement_enabled ? "true" : "false",
+        second_player_separation_guard_enabled ? "true" : "false",
+        (unsigned long)float_bits(second_player_maximum_separation),
+        second_player_weak_attack_enabled ? "true" : "false",
+        (unsigned long)second_player_weak_attack_virtual_key,
+        second_player_target_trace_enabled ? "true" : "false"
     );
     if (control_separation_enabled) {
         if (!SudekiMpInstallControlSeparation(
                 game_module,
                 control_separation_virtual_key,
-                second_player_movement_enabled)) {
+                second_player_movement_enabled,
+                second_player_camera_relative_movement_enabled,
+                second_player_separation_guard_enabled,
+                second_player_maximum_separation,
+                second_player_weak_attack_enabled,
+                second_player_weak_attack_virtual_key,
+                second_player_target_trace_enabled)) {
             SudekiMpLogFormat("control_separation_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("control_separation_applied=false\r\n");

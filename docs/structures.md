@@ -52,6 +52,17 @@ The singleton pointer is stored at VA `0x00808DA4`.
 | `+0x184`, `+0x188` | `float` | CameraU/CameraD input staging | Input actions `0x69/0x6A` write their payloads here. Late wheel injection was visible in logs but did not move the camera, so these are not a confirmed desired-distance control point. | High for writes; low for downstream role |
 | `+0x248` | intrusive character pointer | controlled/front character | Shared reassignment writes the new front character; live snapshots matched group slot 0 | High |
 
+Combat-state fields submitted by the controller consumer at RVA `0x000286C0`:
+
+| Offset | Type | Provisional name | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x8C` | action state | Weak Attack | Passed as the first stack state to RVA `0x000DB0E0` | High |
+| `+0x94` | action state | Strong Attack | Passed as the second stack state | High |
+| `+0x9C` | action state | Sweep Attack | Passed as the third stack state | High |
+| `+0xA4` | action state | Block | Loaded into `EAX` for the native mixed-ABI call | High |
+| `+0xAC` | action state | Weapon Next | Passed as the fourth stack state | High |
+| `+0xB4` | action state | Weapon Previous | Passed as the fifth stack state | High |
+
 Movement-specific controller fields:
 
 | Offset | Type | Provisional name | Evidence | Confidence |
@@ -62,6 +73,28 @@ Movement-specific controller fields:
 | `+0x1F0` | 4x4 matrix | stored movement camera transform | RVA `0x000291A0` removes translation and transforms the local movement vector | High |
 | `+0x230..+0x238` | `vec3` | last submitted world movement | Movement consumer stores its final normalized vector here | High |
 | `+0x23C` | `int32` | movement mode | Exported setter/getter at RVAs `0x00029330/0x00029340`; mode `0` uses the arbiter path and mode `1` uses absolute delta movement | High |
+
+### Party character position
+
+| Offset | Type | Provisional name | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| character `+0x44` | `CPosition*` | world-position component | Script-facing `SetPlayerPosition` resolves active group slot 0 and passes this pointer to RVA `0x00003050` | High |
+| `CPosition+0x18` | `float` | world X | Internal setter compares and writes the first supplied coordinate | High |
+| `CPosition+0x1C` | `float` | world Y | Internal setter compares and writes the second supplied coordinate | High |
+| `CPosition+0x20` | `float` | world Z | Internal setter compares and writes the third supplied coordinate | High |
+
+The prepared maximum-separation guard reads only X/Z from two party characters. It does not write `CPosition`; all movement continues through the native arbiter submission.
+
+### `CTargeter`
+
+The party character stores its native targeter pointer at `character+0xAC`.
+
+| Offset | Type | Provisional name | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x54` | intrusive target pointer/node | ordinary current target | `EnableAutoTargetting(false)` releases and clears it; `GetGelCurrentTarget` copies and resolves it | High |
+| `+0x84` bit `0x02` | flag | automatic targeting enabled | Native enable/disable function updates this bit; prior Plasmatica snapshots confirmed it | High |
+
+The prepared passive trace reads these fields and calls the unchanged native getter. The visible nearest-target lock retained during the Buki AI override is confirmed, but the writer/scoring path is not yet identified.
 
 ### `character+0x94` component candidate
 
@@ -74,6 +107,17 @@ Every observed party character held a non-null pointer at `character+0x94`; poin
 | nested `+0x0B` | `uint8` | AI-active/control mode | Live Previous/Next switches showed `0` only for the front/controller target and `1` for every AI party member; ownership transfer flipped the old `0→1` and new `1→0` | High |
 | `+0x44` | flags | behavior flags | Selects internal behavior state during transition | Medium |
 | `+0x16A` | `int16` | AI control-override refcount | Exported `AiIsOverriden`, `AiOverrideControl`, and `AiDefaultControl` query and modify this count; first acquire disables AI and final release restores it for a non-front character | High |
+
+### Provisional `CCharacterArbiter` combat fields
+
+The party character stores its arbiter pointer at `character+0x90`. The following partial fields are used directly by the per-arbiter combat-input function at RVA `0x000DB0E0`; precise flag names remain provisional.
+
+| Offset | Type | Provisional name | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x10` | pointer | owning character | Combat submission follows it to movement/weapon/target components and validates their presence | High for ownership relationship |
+| `+0x50` | `uint32` flags | arbiter state/capability flags | Combat submission requires bit `0x2`; bit `0x400000` selects ranged/weapon behavior; other confirmed systems also use this field | High for bits; provisional names |
+| `+0x58` | `uint32` | attack/weapon state | Low and next nibbles select native combat branches; the submission updates weapon-related subfields | High for use; provisional semantics |
+| `+0x60` | `uint32` flags | combat capability flags | Combat submission requires bit `0x2` and conditionally toggles bit `0x8` during weapon changes | High for bits; provisional names |
 
 ## Provisional `CSkill` fields
 
