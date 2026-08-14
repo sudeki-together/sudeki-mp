@@ -15,6 +15,9 @@ Safety state:
   - Runtime experiments remain disabled in config/SudekiMP.ini.
   - The vanilla install is read-only and separate from the working copy.
   - Emergency game stop: tools/stop-sudeki.sh
+  - Research launches set Sudeki's native FullScreen option to False through
+    tools/configure-windowed.sh. The first original PlayerOptions.xml is kept
+    beside it as PlayerOptions.xml.sudekimp-backup.
   - The current checkpoint includes the Phase 9 attack proof plus disabled
     camera-relative movement, separation-guard, and passive-target-trace
     follow-ups.
@@ -57,10 +60,10 @@ Confirmed project position:
      Player 1 camera focus, Buki's separate I/J/K/L movement rotated with the
      shared camera. The log recorded one stable Buki arbiter, changing world
      vectors for repeated local inputs, and clean AI restoration.
- 12. A first non-teleporting separation guard is prepared offline. World
+ 12. The first non-teleporting separation guard is live-confirmed. World
      position resolves through character+0x44 to CPosition coordinates at
-     +0x18/+0x1C/+0x20. The guard blocks only outward movement at a configured
-     horizontal limit. It is disabled and not yet live-confirmed.
+     +0x18/+0x1C/+0x20. At the 10-unit test limit it repeatedly blocked only
+     outward movement and released inward/sideways movement immediately.
 
 Independent Buki weak-attack test (LIVE-CONFIRMED):
   Confirmed static facts:
@@ -96,11 +99,14 @@ Phase 9 shared-camera movement (LIVE-CONFIRMED):
   - Repeated local directions produced changing normalized world directions as
     the shared camera rotated; Buki AI restored cleanly.
 
-Prepared offline follow-up (NOT YET LIVE-CONFIRMED):
+Separation guard (LIVE-CONFIRMED PROOF):
   - EnableSecondPlayerSeparationGuardPrototype=false by default.
   - SecondPlayerMaximumSeparation=10.0 is a test value, not final balance.
   - --second-player-separation-test enables camera-relative movement plus the
     outward-only limit. It never writes positions or forces catch-up.
+  - Stable Buki character/arbiter: 0x083A5DA8 / 0x083A6678.
+  - Repeated blocks occurred near distance-squared 100 for the 10-unit test
+    value; every inward/within-limit direction produced a release.
   - EnableSecondPlayerTargetTrace=false by default.
   - --second-player-target-trace logs Buki CTargeter node/auto-target changes
     only and never calls targeting logic.
@@ -110,6 +116,20 @@ Prepared offline follow-up (NOT YET LIVE-CONFIRMED):
     from the diagnostic. Exact target identity and its writer remain open.
   - PE32 build and inert exact-image install/restore tests pass.
   - Do not launch another game test unless the user is available to confirm it.
+
+Windowed/recording setup:
+  - tools/run-wine.sh --windowed selects native windowed mode; --fullscreen is
+    the explicit fallback.
+  - continue-research.sh uses --windowed --obs-gamecapture for live research.
+  - Existing Lutris config uses prefix_command: obs-gamecapture. SudekiMP now
+    applies that exact wrapper to Wine as well.
+  - Host i686/x86_64 obs-vkcapture hooks are installed. Flatpak OBS has the
+    OBSVkCapture 1.5.6 extension and exposes its Game Capture source.
+  - Start OBS first, add the OBSVkCapture Game Capture source, then launch
+    Sudeki so the preload exists from process startup. PipeWire window capture
+    is only the fallback. See docs/recording.md.
+  - Live launcher output confirmed Init GLX 1.5.1 (32bit). OBS preview itself
+    is not yet explicitly user-confirmed.
 
 Free-roam camera research (NOT solved):
   Confirmed static facts:

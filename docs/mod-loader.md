@@ -41,7 +41,7 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `tools/continue-research.sh --second-player-attack-test` adds the disabled weak-attack prototype to that setup and binds it to `U`. Control anyone except Buki, use `F10` to acquire/release the native AI override, move Buki with `I/J/K/L`, and tap `U` once to request her weak attack.
 
-`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. Its live run confirmed that Buki's independent input rotates with Player 1's shared camera while Player 1 retains camera focus. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard; that guard remains pending live confirmation.
+`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. Its live run confirmed that Buki's independent input rotates with Player 1's shared camera while Player 1 retains camera focus. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard. Repeated live block/release pairs confirmed outward input stops near the boundary while inward and sideways movement remain available.
 
 `tools/continue-research.sh --second-player-target-trace` enables only Buki's native AI override plus the passive target trace. It is intended to compare target changes before attacks, during Player 1 combat, and around enemy death without synthesizing Player 2 input. The first live run retained one stable non-null node and the enabled auto-target flag throughout the override, then restored Buki's AI cleanly.
 

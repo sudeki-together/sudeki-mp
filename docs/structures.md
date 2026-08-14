@@ -83,7 +83,7 @@ Movement-specific controller fields:
 | `CPosition+0x1C` | `float` | world Y | Internal setter compares and writes the second supplied coordinate | High |
 | `CPosition+0x20` | `float` | world Z | Internal setter compares and writes the third supplied coordinate | High |
 
-The prepared maximum-separation guard reads only X/Z from two party characters. It does not write `CPosition`; all movement continues through the native arbiter submission.
+The live-confirmed maximum-separation guard reads only X/Z from two party characters. It does not write `CPosition`; all movement continues through the native arbiter submission. At the 10-unit test limit, outward requests were repeatedly blocked near horizontal distance-squared `100`, while inward/within-limit requests were released immediately.
 
 ### `CTargeter`
 

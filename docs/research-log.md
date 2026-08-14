@@ -752,7 +752,19 @@ With Ailish remaining Player 1 and the visible camera focus, the user disabled B
 
 Exported `SetPlayerPosition(float,float,float)` at RVA `0x00104ED0` resolves active group slot 0, reads `character+0x44`, and invokes RVA `0x00003050`. That setter compares and writes the three coordinates at `CPosition+0x18/+0x1C/+0x20`, establishing a read-only world-position boundary for every party character sharing the layout.
 
-A separately disabled `EnableSecondPlayerSeparationGuardPrototype` compares AI-overridden Buki's X/Z position with the current controller target. At or beyond configurable `SecondPlayerMaximumSeparation`, it rejects only a movement direction whose horizontal dot product points farther outward. Inward and tangential movement remain available. Missing/invalid position state fails closed, and the prototype never writes a position, teleports a player, accelerates catch-up, or changes doorway transitions. The initial `10.0` value is explicitly a later test value, not a balance choice. Build and inert-image preflight pass; live confirmation is pending.
+A separately disabled `EnableSecondPlayerSeparationGuardPrototype` compares AI-overridden Buki's X/Z position with the current controller target. At or beyond configurable `SecondPlayerMaximumSeparation`, it rejects only a movement direction whose horizontal dot product points farther outward. Inward and tangential movement remain available. Missing/invalid position state fails closed, and the prototype never writes a position, teleports a player, accelerates catch-up, or changes doorway transitions. The initial `10.0` value is explicitly a test value, not a balance choice. Build, inert-image preflight, and the live proof pass.
+
+### Live result — outward-only separation confirmed
+
+With camera-relative Buki movement active, the user observed that Buki could no longer travel beyond the configured range while all inward and sideways movement continued to work. The current log held one stable Buki character/arbiter pair (`0x083A5DA8` / `0x083A6678`) and repeatedly alternated `separation_guard phase=block` with `phase=release reason=inward_or_within_limit`. Block records clustered near distance-squared `100` for the 10-unit limit; input submission resumed without a position write as soon as the direction was no longer outward. This confirms the non-teleporting policy and leaves `10.0` as a test value rather than a final camera/balance choice.
+
+The final run was closed through the explicit emergency-stop helper at the user's request. Its generated INI was restored to the repository's disabled defaults. An earlier restore in the same session cleanly released Buki's override; the final in-memory acquisition ended with process termination rather than another native restore call.
+
+### Windowed and OBS Game Capture launch path
+
+The dedicated research profile stored native `FullScreen=True` in its UTF-16 `PlayerOptions.xml`. `tools/configure-windowed.sh` now preserves the first untouched options file beside it, changes only that Boolean, validates a UTF-16 round trip, and provides explicit windowed/fullscreen/check modes. Research launches select native windowed mode by default; this does not patch Sudeki or change its focus-pause policy.
+
+Existing Lutris configuration on this host uses `prefix_command: obs-gamecapture`. The host provides i686 and x86_64 capture hooks, while Flatpak OBS includes the OBSVkCapture source plugin. `tools/run-wine.sh --obs-gamecapture` now applies the same wrapper to Wine. A live PE32 launch logged `Init GLX 1.5.1 (32bit)` before Sudeki rendering initialized, confirming injection of the correct-architecture OpenGL capture hook. User confirmation of the OBS preview itself remains pending.
 
 ### Passive retained-target trace and live result
 

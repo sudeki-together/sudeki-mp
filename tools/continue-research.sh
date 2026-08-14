@@ -229,7 +229,9 @@ printf '%s\n' \
     '  Milestone 4 prototype: J uses native AiOverrideControl/AiDefaultControl on non-front Buki.' \
     '  Milestone 5 proof: Player 1 and AI-overridden Buki accepted separate simultaneous movement input.' \
     '  Phase 9 attack proof: Buki accepted independent U weak attacks and entered native IsAttacking state.' \
-    '  Prepared offline: camera-relative Buki movement and outward-only separation guard; live tests pending.' \
+    '  Shared-camera proof: Buki movement now follows Player 1 camera orientation.' \
+    '  Retained targeting proof: Buki target node and auto-target state survive the AI override.' \
+    '  Separation proof: the 10-unit guard blocks only outward Buki movement and releases inward movement.' \
     '  Camera status: free-roam wheel and modifier prototypes were not visibly effective; desired-distance tracing is next.' \
     '  Deferred: full no-menu encounter remains required before Milestone 3 closes.' \
     '  Emergency stop: tools/stop-sudeki.sh' \
@@ -298,4 +300,4 @@ if [[ "${mode}" == "--check" ]]; then
 fi
 
 SUDEKIMP_WINEPREFIX="${research_prefix}" \
-    "${project_dir}/tools/run-wine.sh" "${game}"
+    "${project_dir}/tools/run-wine.sh" --windowed --obs-gamecapture "${game}"
