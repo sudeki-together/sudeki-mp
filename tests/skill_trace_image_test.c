@@ -1,4 +1,10 @@
 #include "hooks/skill_trace.h"
+#include "hooks/character_switch_trace.h"
+#include "hooks/control_separation.h"
+#include "hooks/freeroam_camera_input.h"
+#include "hooks/player_input_trace.h"
+#include "hooks/quick_skill_input.h"
+#include "hooks/spirit_strike_input.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -8,6 +14,26 @@
 enum {
     RVA_USE = 0x000b4810u,
     RVA_USE_CALL = 0x000998a1u,
+    RVA_DIRECT_USE_CALL = 0x00027cb1u,
+    RVA_QUICK_SKILL_ACTION = 0x00027bf0u,
+    RVA_QUICK_SKILL_ACTION_CALL = 0x00027acfu,
+    RVA_SKILL_VALIDATE = 0x000b4bc0u,
+    RVA_QUICK_SKILL_VALIDATE_CALL = 0x00027c8cu,
+    RVA_QUICK_MENU_VALIDATE_CALL = 0x00099867u,
+    RVA_USE_INTERNAL_VALIDATE_CALL = 0x000b4828u,
+    RVA_QUICK_MENU_SPIRIT_VALIDATE_CALL = 0x000998b9u,
+    RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL = 0x000998dcu,
+    RVA_SPIRIT_STRIKE_VALIDATE = 0x00010940u,
+    RVA_SPIRIT_STRIKE_ACTIVATE = 0x0000fba0u,
+    RVA_CHARACTER_INPUT_HANDLER = 0x000277b0u,
+    RVA_CHARACTER_INPUT_VTABLE_SLOT = 0x002c9f84u,
+    RVA_CONTROLLER_UPDATE = 0x00027cf0u,
+    RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
+    RVA_ARBITER_MOVEMENT = 0x000dae80u,
+    RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
+    RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
+    RVA_MAIN_FRAME_UPDATE_CALL = 0x0028ddbau,
+    RVA_MAIN_FRAME_UPDATE = 0x0028d3f0u,
     RVA_STOP_RUMBLE = 0x000b50d0u,
     RVA_STOP_RUMBLE_CALL = 0x000b4f23u,
     RVA_SCRIPT_CALL_OPCODE = 0x001c4970u,
@@ -150,6 +176,10 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_SCRIPT_CALL_OPCODE;
     *(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) =
         image + RVA_SCRIPT_METHOD_OPCODE;
+    *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) =
+        image + RVA_CHARACTER_INPUT_HANDLER;
+    *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) =
+        image + RVA_CONTROLLER_UPDATE;
 
     if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
@@ -157,8 +187,101 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
+    if (!SudekiMpInstallQuickSkillInputTrace((HMODULE)image, TRUE)) {
+        fprintf(stderr, "quick-skill install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInstallSpiritStrikeInput((HMODULE)image, -1, 1u, 'G')) {
+        fprintf(stderr, "Spirit Strike input install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInstallCharacterSwitchTrace((HMODULE)image)) {
+        fprintf(stderr, "character-switch trace install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallSpiritStrikeInput();
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInstallControlSeparation((HMODULE)image, 'J', TRUE)) {
+        fprintf(stderr, "control-separation install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallCharacterSwitchTrace();
+        SudekiMpUninstallSpiritStrikeInput();
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInstallPlayerInputTrace((HMODULE)image)) {
+        fprintf(stderr, "player-input trace install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallControlSeparation();
+        SudekiMpUninstallCharacterSwitchTrace();
+        SudekiMpUninstallSpiritStrikeInput();
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (*(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) ==
+        image + RVA_CHARACTER_INPUT_HANDLER) {
+        fputs("FAIL: character input vtable slot was not redirected\n", stderr);
+        ++failures;
+    }
+    if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) ==
+        image + RVA_CONTROLLER_UPDATE) {
+        fputs("FAIL: controller update vtable slot was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
+            image + RVA_ARBITER_MOVEMENT ||
+        relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
+            image + RVA_ARBITER_MOVEMENT) {
+        fputs("FAIL: one or more player movement calls were not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_MAIN_FRAME_UPDATE_CALL) ==
+        image + RVA_MAIN_FRAME_UPDATE) {
+        fputs("FAIL: main-frame input poll call was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) ==
+        image + RVA_QUICK_SKILL_ACTION) {
+        fputs("FAIL: QuickSkill action call was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_QUICK_SKILL_VALIDATE_CALL) ==
+        image + RVA_SKILL_VALIDATE ||
+        relative_call_target(image + RVA_QUICK_MENU_VALIDATE_CALL) ==
+        image + RVA_SKILL_VALIDATE ||
+        relative_call_target(image + RVA_USE_INTERNAL_VALIDATE_CALL) ==
+        image + RVA_SKILL_VALIDATE) {
+        fputs("FAIL: one or more skill-validator calls were not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_QUICK_MENU_SPIRIT_VALIDATE_CALL) ==
+        image + RVA_SPIRIT_STRIKE_VALIDATE ||
+        relative_call_target(image + RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL) ==
+        image + RVA_SPIRIT_STRIKE_ACTIVATE) {
+        fputs("FAIL: one or more Spirit Strike calls were not redirected\n", stderr);
+        ++failures;
+    }
     if (relative_call_target(image + RVA_USE_CALL) == image + RVA_USE) {
         fputs("FAIL: Use call was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_DIRECT_USE_CALL) == image + RVA_USE) {
+        fputs("FAIL: direct Use call was not redirected\n", stderr);
         ++failures;
     }
     if (relative_call_target(image + RVA_STOP_RUMBLE_CALL) ==
@@ -191,9 +314,75 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
 
+    SudekiMpUninstallPlayerInputTrace();
+    if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
+            image + RVA_ARBITER_MOVEMENT ||
+        relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
+            image + RVA_ARBITER_MOVEMENT) {
+        fputs("FAIL: one or more player movement calls were not restored\n",
+            stderr);
+        ++failures;
+    }
+    SudekiMpUninstallControlSeparation();
+    if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+        image + RVA_CONTROLLER_UPDATE) {
+        fputs("FAIL: controller update vtable slot was not restored\n", stderr);
+        ++failures;
+    }
+    SudekiMpUninstallCharacterSwitchTrace();
+    if (*(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) !=
+        image + RVA_CHARACTER_INPUT_HANDLER) {
+        fputs("FAIL: character input vtable slot was not restored\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpInstallFreeRoamCameraInput((HMODULE)image, VK_LCONTROL)) {
+        fprintf(stderr, "free-roam camera install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        ++failures;
+    } else {
+        if (*(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) ==
+            image + RVA_CHARACTER_INPUT_HANDLER) {
+            fputs("FAIL: free-roam camera input slot was not redirected\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpUninstallFreeRoamCameraInput();
+        if (*(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) !=
+            image + RVA_CHARACTER_INPUT_HANDLER) {
+            fputs("FAIL: free-roam camera input slot was not restored\n",
+                stderr);
+            ++failures;
+        }
+    }
+    SudekiMpUninstallSpiritStrikeInput();
+    if (relative_call_target(image + RVA_MAIN_FRAME_UPDATE_CALL) !=
+        image + RVA_MAIN_FRAME_UPDATE) {
+        fputs("FAIL: main-frame input poll call was not restored\n", stderr);
+        ++failures;
+    }
+    SudekiMpUninstallQuickSkillInputTrace();
+    if (relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) !=
+        image + RVA_QUICK_SKILL_ACTION ||
+        relative_call_target(image + RVA_QUICK_SKILL_VALIDATE_CALL) !=
+        image + RVA_SKILL_VALIDATE ||
+        relative_call_target(image + RVA_QUICK_MENU_VALIDATE_CALL) !=
+        image + RVA_SKILL_VALIDATE ||
+        relative_call_target(image + RVA_USE_INTERNAL_VALIDATE_CALL) !=
+        image + RVA_SKILL_VALIDATE ||
+        relative_call_target(image + RVA_QUICK_MENU_SPIRIT_VALIDATE_CALL) !=
+        image + RVA_SPIRIT_STRIKE_VALIDATE ||
+        relative_call_target(image + RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL) !=
+        image + RVA_SPIRIT_STRIKE_ACTIVATE) {
+        fputs("FAIL: one or more QuickSkill hooks were not restored\n", stderr);
+        ++failures;
+    }
     SudekiMpUninstallSkillTrace();
     if (relative_call_target(image + RVA_USE_CALL) != image + RVA_USE) {
         fputs("FAIL: Use call was not restored\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_DIRECT_USE_CALL) != image + RVA_USE) {
+        fputs("FAIL: direct Use call was not restored\n", stderr);
         ++failures;
     }
     if (relative_call_target(image + RVA_STOP_RUMBLE_CALL) !=

@@ -37,6 +37,7 @@ typedef int (*ScriptBindingInvokeFunction)(void);
 enum {
     RVA_CSKILL_USE = 0x000b4810u,
     RVA_CSKILL_USE_CALL = 0x000998a1u,
+    RVA_CSKILL_DIRECT_USE_CALL = 0x00027cb1u,
     RVA_CSKILL_STOP_RUMBLE = 0x000b50d0u,
     RVA_CSKILL_STOP_RUMBLE_CALL = 0x000b4f23u,
     RVA_PLAY_ANIMATION_STATE = 0x0000f2e0u,
@@ -131,6 +132,7 @@ static volatile LONG trace_animation_binding_pending;
 static DWORD trace_start_tick;
 
 static SudekiMpRelativeCallHook use_call_hook;
+static SudekiMpRelativeCallHook direct_use_call_hook;
 static SudekiMpRelativeCallHook stop_rumble_call_hook;
 static SudekiMpExportHook export_hooks[TRACE_EXPORT_COUNT];
 static SudekiMpPointerHook script_call_opcode_hook;
@@ -1316,6 +1318,11 @@ BOOL SudekiMpInstallSkillTrace(
             original_skill_use,
             trace_skill_use) ||
         !SudekiMpInstallRelativeCallHook(
+            &direct_use_call_hook,
+            base + RVA_CSKILL_DIRECT_USE_CALL,
+            original_skill_use,
+            trace_skill_use) ||
+        !SudekiMpInstallRelativeCallHook(
             &stop_rumble_call_hook,
             base + RVA_CSKILL_STOP_RUMBLE_CALL,
             original_stop_rumble,
@@ -1354,6 +1361,7 @@ void SudekiMpUninstallSkillTrace(void) {
     SudekiMpRestorePointerHook(&script_method_opcode_hook);
     SudekiMpRestorePointerHook(&script_call_opcode_hook);
     SudekiMpRestoreRelativeCallHook(&stop_rumble_call_hook);
+    SudekiMpRestoreRelativeCallHook(&direct_use_call_hook);
     SudekiMpRestoreRelativeCallHook(&use_call_hook);
     trace_skill_object = NULL;
     trace_animation_object = NULL;

@@ -97,7 +97,92 @@ Named exports are evidence supplied by the PE, but the behavior descriptions abo
 | Confirmation | Static decompilation plus one successful Plasmatica activation trace |
 | Confidence | High for the offsets and control flow; provisional field names |
 
-The validation helper at RVA `0x000B4BC0` returns nonzero status codes for unavailable global state, an already active skill, invalid actor state, an unusable skill, or insufficient SP. The exact user-facing meaning of every status value is not yet mapped.
+The validation helper at RVA `0x000B4BC0` returns `0` when the skill may start. Confirmed nonzero meanings are `1` = insufficient SP, `2` = actor not ready to use a skill, `3` = actor not in combat, `4` = global skill lock or unusable skill, and `5` = skills globally unavailable. The first three map in order to the localized strings `Not enough SP to use this skill.`, `Not ready to use skill.`, and `Cannot use skill if not in combat.`
+
+### Native QuickSkill activation
+
+| Field | Value |
+| --- | --- |
+| Input handler | RVA `0x000277B0` / VA `0x004277B0` |
+| Direct activation helper | RVA `0x00027BF0` / VA `0x00427BF0` |
+| Helper call site | RVA `0x00027ACF` / VA `0x00427ACF` |
+| Direct `CSkill::Use` call | RVA `0x00027CB1` / VA `0x00427CB1` |
+| Actions | `ac_QuickSkill0..5`, IDs `0x7A..0x7F` |
+
+The shipped and active PC configurations bind these six actions to DirectInput scan codes `6..11`, corresponding to top-row keys `5..0`. On key-down, the handler passes the action ID in `EAX` to the direct helper. The helper resolves the active character through the owner at VA `0x00808D94`, selects the requested ordinal among up to six unlocked/usable `CSkill` entries ordered by `CSkill+0x54`, validates the resolved slot through RVA `0x000B4BC0`, and calls `CSkill::Use` only when validation returns `0`.
+
+Runtime observation confirmed top-row `5` generated action `0x7A`; the user saw Iron Will activate on a melee character without opening the Quick Menu. Three Elco attempts selected slot `0` but returned result `2` with arbiter flags `Armed | Strafing` (`0x00400002`). Two successful menu casts reached the same validator with `Idle | Armed` (`0x00000003`) plus `UsingUI`; the internal validation at RVA `0x000B4828` then passed with `UsingUI` cleared and `Idle | Armed` preserved.
+
+Quick Menu activation calls RVA `0x0000AFD0` with true. This native UI transition toggles the actor control component, `UsingUI`, and registered UI listeners. The selection handler invokes two virtual menu transitions before `CSkill::Use`; the full Quick Menu deactivation routine at RVA `0x00099180` calls RVA `0x0000AFD0` with false. Runtime observation confirms `UsingUI` is cleared while idle is preserved before the internal validation. The ranged failure is therefore specifically the persistent strafe state, not keyboard routing, first-person mode, SP, or a different skill entry point.
+
+An immediate true/false transition did not leave enough time for the actor update and safely aborted. Holding it for 75 ms via a game-thread Windows timer produced `Idle | Armed`; closing it removed `UsingUI` while preserving that state. Retrying RVA `0x00027BF0` then returned zero at both its validator call and `CSkill::Use`'s internal validation. The user confirmed the selected Elco skill executed normally without a visible Quick Menu.
+
+### Native Spirit Strike activation
+
+| Field | Value |
+| --- | --- |
+| Quick Menu handler | RVA `0x00099320` / VA `0x00499320`, category `1` |
+| Validator | RVA `0x00010940` / VA `0x00410940` |
+| Activation implementation | RVA `0x0000FBA0` / VA `0x0040FBA0` |
+| Manager global | RVA `0x00408D30` / VA `0x00808D30` |
+| Party/group owner global | RVA `0x00408D94` / VA `0x00808D94`; not a confirmed character pointer |
+
+The menu passes `(manager, selected_id)` to both native functions using a callee-cleaned two-argument convention. IDs `0..15` form eight character pairs; primary party resource types `0x23`, `0x01`, `0x05`, and `0x0E` map to pair starts `0`, `2`, `4`, and `6`. A live Ailish variant-1 activation confirmed ID `2`, validation result `0`, and activation result `1`.
+
+The main loop calls its normal frame update at RVA `0x0028DDBA`. The direct-input prototype wraps that call solely to poll a rising configured-key edge on the game thread while Sudeki owns the foreground window. `[Bindings] SpiritStrike` defaults to `G` and is converted to a Win32 virtual-key value during initialization. A live override to `H` logged virtual key `0x48` and activated successfully. On success it cycles native UI/control state for 75 ms, validates again, and calls the native activation implementation. The live test returned validator results `0` before and after the transition, activation result `1`, and completed normally. Repeated presses during the move were rejected by the native validator with result `4`.
+
+For automatic definition selection, `SpiritStrikeId=-1` follows the same front-character path as native QuickSkills: active group VA `0x00808D94`, first entry at group `+0x90`, then embedded character-type component at character `+0x2C`. The component's virtual slot `+0x10` returns a resource type, which maps to the primary character pair starts `0`, `2`, `4`, or `6`; `SpiritStrikeVariant=1|2` selects within the pair. The function pointer is accepted only when it lies within the exact supported executable image, and the unchanged Spirit Strike validator still rejects unavailable definitions. A live Ailish test resolved resource type `0x01` to ID `2`, passed both validations, returned activation result `1`, and completed normally.
+
+## Native character-control switching
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Character input-event handler | `0x000277B0` / `0x004277B0` | Maps `ac_PrevChar` (`0x32`) and `ac_NextChar` (`0x33`) into controller action states |
+| Controller frame update | `0x00027CF0` / `0x00427CF0` | Consumes Previous at controller `+0xFC` and Next at `+0xF4` when each state equals `1` |
+| Previous-character consumer | `0x00023F60` / `0x00423F60` | Checks switch eligibility, rotates the group toward the previous character, and invokes shared control reassignment |
+| Next-character consumer | `0x00024060` / `0x00424060` | Checks switch eligibility, rotates the group toward the next character, and invokes shared control reassignment |
+| Previous party rotation | `0x00023CE0` / `0x00423CE0` | Searches eligible entries in reverse order and rotates the group’s four intrusive character entries |
+| Next party rotation | `0x00023B50` / `0x00423B50` | Searches eligible entries in forward order and rotates the group’s four intrusive character entries |
+| Shared post-rotation reassignment | `0x000237B0` / `0x004237B0` | Receives `(group, old_front, new_front)`, updates the global controller target, transitions old/new character components, and notifies downstream camera/controller listeners |
+| Old/new `character+0x94` transition | `0x000EF700` / `0x004EF700` | Sets the old component's nested AI mode byte to `1` and the new component's byte to `0`; live Previous/Next tests confirmed `0` on the sole human-controlled/front character and `1` on all three AI party members |
+| `AiIsOverriden(TPtr<Entity>*)` | `0x000F60A0` / `0x004F60A0` | Exported native query; returns whether the referenced character's component `+0x16A` override refcount is positive |
+| `AiOverrideControl(TPtr<Entity>*)` | `0x000F60D0` / `0x004F60D0` | Exported native entry point; resolves `character+0x94` and enters the refcounted override path at RVA `0x000EC350` |
+| `AiDefaultControl(TPtr<Entity>*)` | `0x000F6100` / `0x004F6100` | Exported native entry point; releases one refcounted override and restores AI mode for a non-controlled character when the count reaches zero |
+
+The global group pointer is VA `0x00808D94`; its active/front entry begins at `group+0x90` and the remaining entries are at 12-byte strides. The global character-controller pointer is VA `0x00808DA4`; its reference-counted target is at `controller+0x248`. A live Previous press rotated the four entries right and changed the controller target to the new slot 0 after approximately 64 ms. A live Next press rotated them left back to the original order with the same delay. The target equaled slot 0 in every captured phase.
+
+The event handler itself did not change ownership: it only recorded the action state. `CGroupPlayers+0xD6` (the exported player-switching enable flag), controller modes `+0x80/+0x84`, every character byte `+0x2A`, actor snapshots, and all four `character+0x94` pointers remained unchanged across the observed switches. Pointer presence and byte `+0x2A` therefore cannot be used alone as the human/AI discriminator.
+
+The focused live trace resolved the discriminator. Before switching, slot 0 and `controller+0x248` referred to the same character and only its nested `[character+0x94+0x3C]+0x0B` mode was `0`; the other three modes were `1`. Approximately 65 ms after Previous, the new slot 0 changed `1→0` and the old front changed `0→1`. Next reversed both changes. Thus mode `0` means AI inactive for the human-controlled character in this path, while mode `1` means AI active.
+
+The executable's named AI-control exports provide the maintainable separation route. `AiOverrideControl` increments signed word `component+0x16A`; the first override clears current AI work and sets mode `0`. `AiDefaultControl` decrements it and, when it reaches zero on a character that is not `controller+0x248`, restores mode `1` and normal AI behavior. These functions accept a pointer to Sudeki's intrusive `TPtr<Entity>` object, so an active group slot address (`group+0x90+slot*0x0C`) is a valid argument. The disabled-by-default Buki prototype uses these reversible APIs rather than writing the nested byte directly.
+
+## Player movement submission
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Controller movement-vector consumer | `0x00028B00` / `0x00428B00` | Reads axes at controller `+0x1A0/+0x1A4`, camera-transforms and normalizes a horizontal vector, resolves `controller+0x248`, and submits movement through the character arbiter |
+| Player movement call sites | `0x00028E3F`, `0x00028E5E` | Two branches in the same controller consumer call the arbiter submission with five callee-cleaned arguments; an observation-only live wrapper forwarded both unchanged |
+| Character-arbiter movement submission | `0x000DAE80` / `0x004DAE80` | Accepts arbiter, world direction, speed, turn-rate, and movement mode; applies native state gates, updates the character movement controller, and writes the accepted facing/movement vector to the character's component at `+0xAC` |
+| `CCharacterArbiter::SetSpeed(float,float)` | `0x000DB070` / `0x004DB070` | Exported stop/speed path; writes movement-controller speed and turn rate when current arbiter state permits movement |
+| `CMovementController::SetAbsoluteDeltaMovement(float,float,float)` | `0x000030A0` / `0x004030A0` | Alternate direct-delta movement mode used when controller movement mode `+0x23C` equals `1` |
+
+The normal third-person path uses controller movement mode `0` and RVA `0x000DAE80`. A live `W/A/S/D` capture consistently supplied one controlled character and arbiter, normalized horizontal directions (`Y=0`), turn rate `1.0`, and movement mode `0`. Observed native speed magnitudes were `1.0`, approximately `1.500`, and approximately `1.803`. The wrapper did not replace the character, vector, or any argument. AI movement also reaches the same arbiter submission from RVA `0x000F4BB0`, which supports using it as the shared per-character movement boundary after AI is disabled.
+
+## Free-roam camera configuration and input staging
+
+| Role | RVA / VA | Evidence |
+| --- | --- | --- |
+| `CGroupPlayers::InCombat()` | `0x00004FA0` / `0x00404FA0` | Exported const method; returns group byte `+0xD4` |
+| Character input handler | `0x000277B0` / `0x004277B0` | Action `0x69` writes controller `+0x184`; action `0x6A` writes `+0x188` |
+| `GetCameraManager()` | `0x00038C40` / `0x00438C40` | Returns the singleton at VA `0x00809D7C` |
+| `CCameraManager::LoadConfig` | `0x000375F0` / `0x004375F0` | Export anchor for named camera-profile loading |
+| `CCameraManager::SetCameraConfig` | `0x00037CD0` / `0x00437CD0` | Export anchor for selecting a loaded camera configuration |
+| `CCamera::GetConfigFloat` | `0x000E8D50` / `0x004E8D50` | Resolves float fields through the camera's current config wrapper at `CCamera+0x38` |
+
+The active PC control file maps `CameraU/CameraD` to mouse Y and weapon next/previous to the two wheel directions. The `DEFAULT` camera profile contains exploration default/min/max/absolute-max distances `3.5/3.5/6.2/8.5`, exploration user-distance scale `8.0`, and combat values `6.0/6.0/10.0/10.0`.
+
+These facts do not yet identify the durable desired/current camera-distance field. Live wheel remapping and late writes to controller `+0x184/+0x188` were observed but did not move the camera. The next reverse-engineering target is therefore the downstream consumer and clamp/profile state reached during a visibly working vanilla mouse-Y distance change.
 
 ### Script interpreter call handlers
 

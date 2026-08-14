@@ -485,3 +485,223 @@ The selected line turns Elco before execution; skill and ordinary targeting are 
 ### Next phase
 
 Begin Phase 6 with an observation-first direct-activation design: identify the narrowest safe engine entry that supplies the same equipped-slot/actor context as `CSkill::Use(1)`, then prototype one disabled-by-default Plasmatica hotkey without invoking the Quick Menu.
+
+## 2026-08-13 — Native QuickSkill route and ranged readiness gate
+
+### Confirmed
+
+- The executable action table maps `ac_QuickSkill0..5` to IDs `0x7A..0x7F`. Both the shipped defaults and active Wine-prefix options bind them to DirectInput scan codes `6..11`, physically top-row `5..0`.
+- Input handler RVA `0x000277B0` calls the native direct-activation helper at RVA `0x00027BF0` for a key-down event in that action range.
+- The helper resolves the active character from the owner at VA `0x00808D94`, obtains `CSkill` at component offset `+0xD8`, walks six ordered entries through `CSkill+0x54`, validates the selected slot with RVA `0x000B4BC0`, and calls `CSkill::Use` at RVA `0x00027CB1` only on validator result `0`.
+- Observation-only logging recorded top-row `5` as action `0x7A`. The user saw it activate Iron Will on a melee character with no Quick Menu.
+- A controlled Elco test recorded action `0x7A`, selected native slot `0`, and validator result `2`; no `CSkill::Use` followed.
+- Validator result `1` is insufficient SP, result `2` maps to `Not ready to use skill.`, and result `3` maps to `Cannot use skill if not in combat.` Static control flow shows result `2` comes from the actor-state readiness branch.
+- The user reports direct number-key activation works for Tal and Buki but not Elco and Ailish. Only Elco's rejection has been instrumented to the validator so far.
+- A launch during this investigation aborted inside Wine with `alloc_user_handle: Assertion 'index < MAX_USER_HANDLES' failed` before any input/skill trace event. This matches the previously observed GE-Proton/Wine compositor failure and is kept separate from mod behavior.
+- `tools/stop-sudeki.sh` now provides an emergency stop scoped to the dedicated Sudeki research prefix.
+
+### Interpretation
+
+Sudeki already contains most of the desired Phase 6 real-time skill entry point. Ranged characters are not missing the input action; their normal combat/aim state fails the shared skill-readiness predicate. The next target is the state transition performed around Quick Menu use for Elco/Ailish. It should be reproduced narrowly before direct activation rather than suppressing validator result `2`.
+
+## 2026-08-13 — Elco's direct-skill blocker isolated to ranged strafing
+
+### Confirmed
+
+- Three direct Elco `5` attempts reached the same skill and failed readiness with `CCharacterArbiter+0x50 = 0x00400002`, the exported `Armed | Strafing` bits.
+- Two menu Plasmatica casts passed the menu validator with `+0x50 = 0x00000003` (`Idle | Armed`) and `UsingUI` set at `+0x60`.
+- A new hook at the validation inside `CSkill::Use` recorded `UsingUI` cleared while `Idle | Armed` remained; that second validation also returned zero and both casts completed.
+- Quick Menu activation calls RVA `0x0000AFD0(true)`. Its skill-selection path calls the menu's full RVA `0x00099180` deactivation routine before `CSkill::Use`; that routine calls RVA `0x0000AFD0(false)`.
+- The transition uses Sudeki's actor-control and UI-listener machinery. No evidence supports directly clearing the `Strafing` bit or suppressing validator result `2`.
+
+### Next experiment
+
+A dedicated `--ranged-skill-test` mode guards QuickSkills by exact failure code and arbiter state. The first immediate open/close attempt changed only `UsingUI` and safely aborted because Elco remained strafing. The corrected version held the native transition for 75 ms through the game-thread message loop. Elco naturally changed to `Idle | Armed`; the prototype cleared `UsingUI`, retried the unchanged helper, and both validator calls returned zero. The user confirmed top-row `5` executed its skill normally without displaying the Quick Menu. The next test expands the same guard across `5..0` and directly invokes Plasmatica through top-row `7` (ordinal `2`, native slot `1`).
+
+### Direct Plasmatica confirmation
+
+- The expanded prototype recorded top-row `7` as action `0x7C`, ordinal `2`, resolving native slot `1`.
+- The initial call returned readiness result `2` in `Armed | Strafing`; the delayed transition produced `Idle | Armed` and cleared `UsingUI` before retry.
+- The helper validation and the internal `CSkill::Use` validation both returned zero. `CSkill::Use` returned success with an active task.
+- The Plasmatica trace completed in `14.992 s` with the normal task end. Internal render-camera calls occurred; the user saw no camera sequence at the constrained test position, consistent with the known space/collision-dependent presentation behavior.
+- This is the first confirmed real-time, no-menu ranged Skill Strike activation. Remaining Phase 6 work includes the other equipped slots, Ailish, consumables, configurable bindings/loadouts, and encounter-level playability.
+
+## 2026-08-13 — Spirit Strike direct-input entry
+
+### Confirmed statically
+
+- The PC input table and active `PlayerOptions.xml` contain no dedicated Spirit Strike action. Vanilla's own tutorial directs the player through the Quick Menu.
+- Quick Menu selection handler RVA `0x00099320`, category `1`, calls Spirit Strike validator RVA `0x00010940` with the manager and selected integer ID. It closes the menu and calls activation RVA `0x0000FBA0` only when validation returns zero.
+- The activation implementation validates again and refuses to begin when the manager is already active. It uses the selected definition, gathers eligible party members, starts native state, and sends `OnSpiritStrikeStarted`.
+- The definition lookup accepts IDs `0..15` as eight two-entry character pairs. The first four pairs resolve the four main party-character resource types.
+- Observation-only hooks now log the Quick Menu's selected Spirit Strike ID, validation result, and activation return. Their inert-image install/restore test passes.
+
+### Live experiments
+
+The current save did not give Elco a Spirit Strike, so the user activated Ailish's first entry instead. The trace recorded ID `2`, validator result `0`, and activation result `1`; the user reported normal execution.
+
+The first automatic-ID prototype incorrectly treated the party/group owner at VA `0x00808D94` as the active character and attempted a virtual type lookup. Pressing `G` crashed before reaching the direct-validator log. That resolver was removed completely; VA `0x00808D94` must not be documented as a confirmed character pointer.
+
+A fixed-ID `2` prototype then passed validation and returned activation result `1` without a UI transition, but did not complete. The game entered deeper slow time with frozen allies and locked character switching. Repeated presses only moved the camera because the manager remained active. This showed that a successful activation return alone was insufficient and that the menu path supplied required transition context.
+
+The next revision added the native UI/control transition but also added an invalid diagnostic state gate. It again interpreted pointer-like party/group-owner fields as arbiter flags and aborted every activation as `not_idle_armed`. That diagnostic gate was removed; no actor-state conclusion is drawn from those values.
+
+The final disabled-by-default `G` prototype polls on the native main-thread frame call at RVA `0x0028DDBA` and submits the explicit configured ID `2`. It calls the unchanged validator, enters the native UI/control transition, waits 75 ms on a game-thread timer, exits the transition, validates again, and calls the native activation implementation only on result `0`. The exact-image install/restore test passes.
+
+The final live trace recorded initial validation `0`, post-transition validation `0`, and activation result `1`. The user confirmed that Ailish performed the complete stage-clearing Spirit Strike and that it stopped normally. Four later `G` presses during the active move returned native validation result `4`; none started another activation. This completes the direct Spirit Strike proof while preserving the native readiness, SSP, party, animation, damage, and cleanup machinery.
+
+ID `2` remains temporary, but the hardcoded key has now been replaced by the first mod input binding. `[Bindings] SpiritStrike` defaults to `G`, accepts one named keyboard or mouse button, and fails safely when an invalid value is enabled. The polling path also requires the foreground window to belong to the Sudeki process. A dedicated Wine parser test passes across valid names, aliases, ranges, and invalid input. The separate PE32 build completed without warnings, and the exact-executable inert-image install/restore test passes with the new hook signature. Chords, controllers, an in-game controls screen, and character/equipment-aware Spirit Strike selection remain future work.
+
+The user also confirmed that native consumable slots `1..4` are a standard working PC feature. SudekiMP does not intercept or alter those actions, so no separate consumable bypass is required.
+
+### Configurable binding live confirmation
+
+The generated test configuration changed `[Bindings] SpiritStrike` from `G` to `H`. Initialization logged virtual key `0x48`. Pressing `H` logged a rising edge for `0x48`, initial and post-transition validator results `0`, and activation result `1`; the user confirmed the Spirit Strike executed. This closes the first configurable mod-action binding. The next functional gap is choosing the correct equipped/controlled-character Spirit Strike definition instead of always submitting captured Ailish ID `2`.
+
+### Corrected front-character resolver candidate
+
+Disassembly of native QuickSkill RVA `0x00027BF0` shows that VA `0x00808D94` is the group object, not a character. The helper passes `group+0x90` to the intrusive-pointer acquisition routine at RVA `0x000015B0`; the acquired first entry is the character whose `CSkill` component is used. Spirit Strike's native party loop independently calls virtual slot `+0x10` on the embedded component at `character+0x2C` to obtain the resource type. This explains the first resolver crash without contradicting the later group-owner findings.
+
+The corrected disabled prototype uses that front character only when `SpiritStrikeId=-1`, validates that the virtual target lies inside the exact supported executable image, maps primary resource types to ID pair starts, and adds configured `SpiritStrikeVariant=1|2`. Null groups, null characters, missing vtables, unexpected function pointers, and unsupported resource types abort with a log rather than activating. Fixed IDs `0..15` remain available for diagnosis. The isolated PE32 build and exact-image hook install/restore test pass.
+
+The live automatic test controlled Ailish and logged group `0x0596E954`, front character `0x07CAAAB0`, resource type `0x01`, variant `1`, and resolved ID `2`. Initial and post-transition validators returned `0`, activation returned `1`, and the user confirmed the move fired normally. The corrected resolver is therefore confirmed for Ailish. Tal, Buki, and Elco pair mappings remain strong static findings until an available live Spirit Strike can exercise each one.
+
+## 2026-08-13 — Encounter validation deferred
+
+The user elected to defer the full no-Quick-Menu encounter playtest. Direct consumables, melee skills, ranged-skill readiness cycling, configurable Spirit Strike input, native activation, and automatic Ailish definition selection have already been confirmed individually. The encounter test remains an integration check and is not recorded as complete. Research now advances to observation-only character human/AI control switching; the deferred encounter must still pass before Milestone 3 is formally closed.
+
+## 2026-08-13 — Multiplayer resource and camera constraints recorded
+
+The user recalls that Spirit Strike power behaves as a party-shared meter: using it as one character appears to deplete it for the others. This is a reported gameplay observation pending a controlled check, not a confirmed engine fact or storage layout. Local multiplayer and eventual networking should conservatively treat the meter as shared and arbitrate simultaneous activation requests until its behavior, owner, write path, and replication model are traced.
+
+The camera plan now explicitly includes scoped ranged-character presentation. Shared-camera local co-op remains the first target, with bounded party separation. Later independent/split views must define per-viewport zoom, camera ownership, and local-character model visibility so Elco's gun scope and Ailish's ranged view do not expose only arms/weapons, hide the wrong model, or globally take over another player's view. Skill cinematics and Spirit Strikes likewise require a multiplayer camera policy rather than inheriting vanilla's global camera seizure unchanged.
+
+## 2026-08-13 — Native character-switch ownership trace
+
+### Confirmed live
+
+- The executable action table assigns `ac_PrevChar` ID `0x32` and `ac_NextChar` ID `0x33`. The input event handler at RVA `0x000277B0` records these at controller action states `+0xFC` and `+0xF4`, respectively.
+- The handler returned without changing the party or controller target. The ownership change appeared approximately 64 ms after each key-down, proving that a later frame consumer performs the switch.
+- Before Previous, group `0x0596E954` contained characters `0x07CD1B00`, `0x07CD36A8`, `0x07CDA030`, and `0x07CDBBB8` in slots 0 through 3; controller `0x00A7DFA8` targeted slot 0.
+- Previous rotated the ordered entries right to `BB B8, 1B 00, 36 A8, A0 30` (full pointers above) and changed `controller+0x248` to `0x07CDBBB8`.
+- Next rotated the entries left back to the original order and restored the target to `0x07CD1B00`. Both results remained stable through the one-second snapshots.
+- `CGroupPlayers+0xD6` remained `1`; controller modes `+0x80/+0x84` remained `1`; every character byte `+0x2A` remained `1`; actor snapshots and all four `character+0x94` pointers remained unchanged. Those fields cannot individually identify the human-controlled character.
+
+### Confirmed statically
+
+- Controller frame update RVA `0x00027CF0` checks Previous `+0xFC` and Next `+0xF4`, then calls dedicated consumers at RVAs `0x00023F60` and `0x00024060`.
+- The consumers validate party count, switch state, front-character state, and world conditions before calling rotations at RVAs `0x00023CE0` and `0x00023B50`.
+- Both then call shared reassignment RVA `0x000237B0` with the group, old front, and new front. This routine assigns the new character to global controller target `+0x248`, resets relevant old/new arbiter and character-component state, transitions their `character+0x94` components through RVA `0x000EF700`, and notifies downstream camera/controller listeners.
+- RVA `0x000EF700` sets the old component's nested `[component+0x3C]+0x0B` byte to `1` when eligible and invokes the same internal mode setter on the new component with `0`. This is the strongest human/AI enable-state candidate, but its exact meaning remains a hypothesis until the focused live trace observes it.
+
+### Next experiment
+
+The first focused build wrapped the old/new transition call and recorded a startup assignment with no old character: the new character's nested mode changed `1→0`. Wine then exited during the known-problematic startup/intro period with process status `0` and no exception recorded in `SudekiMP.log`. Although this does not prove the wrapper caused the exit, it was unnecessary active instrumentation and was removed.
+
+The corrected character-switch trace only passively reads the nested mode byte in the already-proven before/immediate/delayed snapshots.
+
+## 2026-08-14 — AI-control mode confirmed and separation prototype prepared
+
+### Confirmed live
+
+The passive Previous/Next run resolved the ownership field without intercepting any transition code:
+
+- Before Previous, group slot 0 and `controller+0x248` both referenced character `0x07CD33B0`. Its `character+0x94` component was `0x07CD3CE4`, and nested `[component+0x3C]+0x0B` was `0`. The other three party characters all held mode `1`.
+- Approximately 65 ms after Previous, group slot 0/controller target became `0x07CA1A98`; its nested mode changed `1→0`, while old front `0x07CD33B0` changed `0→1`.
+- Next restored `0x07CD33B0` to slot 0/controller target and reversed the same two mode values.
+- Exactly one party member had mode `0` in each stable vanilla snapshot. All observed `component+0x16A` override refcounts remained zero.
+
+This confirms that nested mode `0` is AI inactive for the currently human-controlled/front character and mode `1` is normal AI-active behavior in the vanilla party path. Confidence is high for this build.
+
+### Confirmed statically
+
+The PE export table names three relevant functions (including the game's original spelling):
+
+- `AiIsOverriden(TPtr<Entity>*)`, RVA `0x000F60A0`
+- `AiOverrideControl(TPtr<Entity>*)`, RVA `0x000F60D0`
+- `AiDefaultControl(TPtr<Entity>*)`, RVA `0x000F6100`
+
+All resolve the character from the supplied intrusive `TPtr<Entity>`, then its component at `character+0x94`. `AiOverrideControl` invokes RVA `0x000EC350` with true; the first acquire increments `component+0x16A` to one, clears AI work, and sets nested mode `0`. `AiDefaultControl` invokes the same routine with false; the final release returns the count to zero and restores mode `1` when that character is not the current controller target. This is safer and more reversible than direct byte modification or calling the private mode setter.
+
+### Prepared experiment
+
+A disabled-by-default control-separation module now hooks the controller update vtable pointer at RVA `0x002C9F60`, whose exact expected target is RVA `0x00027CF0`, solely to poll a rising key edge on the game thread. `ToggleBukiAi=J` finds resource type `0x05` in the four active group slots, refuses to run if that character is slot 0/controller target, and calls the native override/default exports through the slot's real `TPtr<Entity>` address. It verifies `+0x16A` and the nested mode after both acquire and release and attempts a native rollback if acquire verification fails. It does not assign input, move the controller target, write an executable file, or remain enabled in the normal configuration.
+
+The PE32 build completed without warnings. The exact-image test mapped the supported `SUDEKI.exe` inertly, verified the controller-update vtable pointer was redirected, uninstalled the hook, and verified the original target was restored. Live gameplay behavior remains pending.
+
+### Live result — Milestone 4 complete
+
+The user loaded gameplay with another character under normal human control and pressed `J`. Buki immediately stopped acting while the controlled character remained usable. The log recorded:
+
+```text
+control_separation event=override result=success slot=1 character=0x08289660 component=0x08289f94 control_ref_16a=1 ai_enabled_3c_0b=0
+```
+
+On the next `J` press, Buki resumed normal behavior. The release logged:
+
+```text
+control_separation event=restore result=success slot=1 character=0x08289660 component=0x08289f94 control_ref_16a=0 ai_enabled_3c_0b=1
+```
+
+The user performed a second complete cycle in the same run; both acquire and release again passed the exact post-call checks. This proves Sudeki can retain its normal human-controlled front character while a second party character has AI disabled, and that the change is reversible through native APIs. Milestone 4 is complete. It does not yet feed input to Buki; that is the next engine boundary to trace.
+
+## 2026-08-14 — Per-character movement boundary
+
+### Static result
+
+Controller frame update RVA `0x00027CF0` calls a dedicated movement-vector consumer at RVA `0x00028B00`. In normal movement mode `0`, that function:
+
+1. Reads local movement axes from controller `+0x1A0/+0x1A4` (with an optional one-shot value at `+0x1BC`).
+2. Preprocesses the axes at RVA `0x000289D0`.
+3. Uses the stored camera transform at controller `+0x1F0` through RVA `0x000291A0`.
+4. Normalizes the horizontal direction and resolves the character at `controller+0x248` and its arbiter at `character+0x90`.
+5. Calls RVA `0x000DAE80` from RVAs `0x00028E3F` or `0x00028E5E` with `(arbiter, direction, speed, 1.0, 0)`.
+
+RVA `0x000DAE80` is a callee-cleaned five-argument function. It preserves native movement-state gates, writes accepted speed/turn rate/mode to the character's movement controller at `character+0x80`, and writes the direction vector to the component at `character+0xAC`. AI update RVA `0x000F4BB0` calls this same function for AI-controlled character movement, making it a genuine per-character boundary rather than a Player-1-only implementation.
+
+### Passive live result
+
+A disabled-by-default trace wrapped only the two Player 1 call instructions, sampled at 10 Hz, and forwarded every argument unchanged. The exact-image test verified both calls redirected and restored. In normal third-person gameplay, the user moved with `W/A/S/D`; every captured record used character `0x07DC86B0`, arbiter `0x07DC8F80`, a normalized horizontal world vector with `Y=0`, turn rate `1.0`, and movement mode `0`. Speed bit patterns decoded to `1.0`, approximately `1.500`, and approximately `1.803`. Directions changed smoothly with the camera and movement input.
+
+This confirms the input-to-character movement seam needed for the first local two-player proof. The next experiment will keep Buki's native AI override active and submit a conservative normalized world-axis direction to her arbiter from otherwise-unbound `I/J/K/L` input while leaving Player 1's controller and `W/A/S/D` path untouched. The dedicated launcher temporarily moves the AI toggle from `J` to `F10`. Arrow keys were rejected because the user's vanilla control file already binds them as Player 1 movement alternatives; numpad keys were rejected because the user's keyboard lacks Num Lock.
+
+### Live result — Milestone 5 complete
+
+With a non-Buki character still controlled through the unchanged Player 1 route, the user enabled Buki's native AI override with `F10` and moved Buki through a separate `I/J/K/L` source. The log recorded repeated cardinal and normalized diagonal submissions to one stable Buki character/arbiter pair, including:
+
+```text
+control_separation event=second_player_movement phase=submit character=0x0828bea8 arbiter=0x0828c778 input_x=-1 input_z=-1 speed_bits=0x3f800000 turn_rate_bits=0x3f800000 movement_mode=0
+control_separation event=second_player_movement phase=submit character=0x0828bea8 arbiter=0x0828c778 input_x=1 input_z=0 speed_bits=0x3f800000 turn_rate_bits=0x3f800000 movement_mode=0
+```
+
+Releasing the movement keys submitted the native stop operation. The final `F10` restored Buki through `AiDefaultControl`; verification passed with override refcount `0` and AI mode `1`. The user completed the independent/simultaneous movement test successfully. This is the first true single-process local multiplayer proof: two party characters accepted separate human input at the same time. The Buki directions are deliberately fixed to world axes and no second attack, targeting, camera, or UI ownership exists yet.
+
+### Doorway/party recovery observation
+
+During the same run, crossing a doorway that begins a party move repositioned Buki into the scripted walk even though ordinary Buki AI was overridden. When she failed to complete the movement normally, the game later accelerated or otherwise forced her through. This is confirmed as visible behavior, but the responsible function and exact mechanism are not yet identified. It suggests doorway/zone recovery has authority separate from ordinary combat AI.
+
+Do not blindly remove this recovery. The multiplayer design should distinguish ordinary same-map separation from committed transitions: require all human players at a transition boundary (or an explicit host/group decision), then let the transition own and place the party before restoring each player's control. Cutscenes require a separate identity test to determine whether their visible cast uses the live party entities, temporary scene actors, or a mixture; only then can absent-player and local-body visibility rules be chosen.
+
+## 2026-08-14 — Free-roam camera input experiments deferred
+
+### Confirmed static/input facts
+
+- `PlayerOptions.xml` binds `ac_CameraU`/`ac_CameraD` to mouse Y (`Type=2`, `Key=1`) and weapon next/previous to mouse wheel directions (`Type=2`, `Key=2/3`).
+- The character input handler at RVA `0x000277B0` receives weapon actions `0x2F/0x30` and camera actions `0x69/0x6A`. It writes the camera float payloads to controller offsets `+0x184/+0x188`.
+- `CGroupPlayers::InCombat()` is exported at RVA `0x00004FA0` and returns group byte `+0xD4`.
+- Camera exports anchor `GetCameraManager` at RVA `0x00038C40`, `CCameraManager::LoadConfig` at `0x000375F0`, `CCameraManager::SetCameraConfig` at `0x00037CD0`, and `CCamera::GetConfigFloat` at `0x000E8D50`.
+- The `DEFAULT` data profile contains exploration default/min/max/absolute-max distances `3.5/3.5/6.2/8.5`, user-distance scale `8.0`, and combat values `6.0/6.0/10.0/10.0`.
+
+### Live results
+
+Three increasingly late wheel routes produced no visible free-roam zoom:
+
+1. Direct action remapping preserved the wheel's observed `+/-12.0` float payload, but each relative-axis event was followed by an immediate zero event.
+2. Holding the remapped native action for 50 ms prevented that immediate reset but still produced no visible camera change.
+3. Queueing a notch and writing `+/-1.0` to controller `+0x184/+0x188` after the native controller update logged one injection for every notch, with zero replaced values, but again did not change the camera.
+
+A fourth prototype suppressed free-roam mouse-Y camera actions unless configurable `LeftCtrl` was held. Seven Ctrl down/up cycles were detected, and the hook followed its non-combat branch, but the user still observed no useful result. The run was classified only by `CGroupPlayers::InCombat()==false`; the active camera/profile and other gameplay state were not independently captured. The modifier result is therefore unsuccessful with a small remaining state ambiguity.
+
+### Conclusion
+
+Controller `+0x184/+0x188` is confirmed input staging, not a proven durable camera control point. Repeating remaps there is not justified. The next camera investigation must begin with a vanilla state where mouse Y visibly changes distance and trace the actual desired/current-distance writer, active camera/profile, config reads, and clamp function. A broader multiplayer camera replacement may ultimately be preferable, but it should be based on that state path rather than blind camera-object writes. The prototype remains disabled by default.

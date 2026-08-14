@@ -1,0 +1,153 @@
+SudekiMP recovery handoff
+Updated: 2026-08-14 (America/New_York)
+
+Repository:
+  /var/home/wander/Documents/Projects/sudeki-mp
+
+Supported game build:
+  GOG build: 50303954381148403
+  Executable: SUDEKI.exe
+  SHA256: 8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94
+  Image base: 0x00400000
+
+Safety state:
+  - No Sudeki executable or archive is stored in this repository.
+  - Runtime experiments remain disabled in config/SudekiMP.ini.
+  - The vanilla install is read-only and separate from the working copy.
+  - Emergency game stop: tools/stop-sudeki.sh
+  - The current branch contains substantial uncommitted research/code since
+    commit d85455a. Inspect git status before committing; do not discard it.
+
+Confirmed project position:
+  1. Installer/build baseline, exact hashes, Wine baseline, and Ghidra import
+     are complete.
+  2. Milestone 1 is complete: Quick Menu can remain visible at normal world
+     speed through an exact-build, disabled-by-default runtime change.
+  3. The PE32 SudekiMP.dll/launcher foothold is complete and fails safely on
+     unknown builds.
+  4. Phase 5/Milestone 2 are complete for Elco Plasmatica. Activation,
+     targeting handoff, animation events, projectile, collision damage,
+     protection, cleanup, and independently adjustable caster/camera timing
+     are traced.
+  5. Phase 6 has working no-menu Skill Strike prototypes. Tal/Buki work through
+     native QuickSkill input. Elco keys 5 through 9 were confirmed through the
+     guarded ranged-state transition. Native consumables 1 through 4 already
+     work. Ailish and Elco key 0 still need explicit coverage.
+  6. Direct Spirit Strike is proven. A configurable key and automatic Ailish
+     definition selection use native validation, transition, activation, SSP,
+     animation, damage, and cleanup.
+  7. Milestone 4 is complete: Buki AI can be disabled and restored independently
+     while another character remains controlled.
+  8. Milestone 5 is complete as a proof of concept: Player 1 retained normal
+     W/A/S/D while I/J/K/L moved AI-overridden Buki through her own arbiter.
+     Buki movement is still fixed to world axes and has no attacks, targeting,
+     UI, or camera ownership.
+
+Free-roam camera research (NOT solved):
+  Confirmed static facts:
+  - GetCameraManager: RVA 0x00038C40; manager global RVA 0x00409D7C.
+  - CCameraManager::LoadConfig: RVA 0x000375F0.
+  - CCameraManager::SetCameraConfig: RVA 0x00037CD0.
+  - CCamera::GetConfigFloat: RVA 0x000E8D50.
+  - CGroupPlayers::InCombat(): RVA 0x00004FA0; reads group byte +0xD4.
+  - Character input handler: RVA 0x000277B0.
+  - CameraU/CameraD action IDs: 0x69/0x6A; handler stores their float payloads
+    at controller +0x184/+0x188.
+  - Weapon wheel action IDs: 0x2F/0x30.
+  - PlayerOptions.xml binds CameraU/CameraD to mouse Y and weapon next/previous
+    to the two wheel directions.
+  - DEFAULT exploration config contains default/min/max/absolute-max distances
+    3.5/3.5/6.2/8.5 and user-distance scale 8.0. Combat uses
+    6.0/6.0/10.0/10.0.
+
+  Failed or inconclusive live experiments:
+  - Directly remapping wheel events to CameraU/CameraD produced no visible zoom.
+    Wheel notches carried real +/-12.0 float payloads, followed immediately by
+    zero events.
+  - Holding the remapped pulse for 50 ms still produced no visible zoom.
+  - Queueing wheel steps and injecting +/-1.0 into controller +0x184/+0x188
+    after controller update logged correctly but still did not move the camera.
+  - A LeftCtrl modifier gate detected every Ctrl press and used the engine's
+    non-combat branch, but the user still observed no useful camera response.
+    The exact player/camera state was not independently classified beyond
+    CGroupPlayers::InCombat() == false, so retain a small state ambiguity.
+
+  Current code state:
+  - EnableFreeRoamCameraModifierPrototype is disabled by default.
+  - --freeroam-camera-test enables the unconfirmed LeftCtrl gate only.
+  - Do not describe the camera as fixed and do not ship this prototype enabled.
+
+  Correct next camera investigation:
+  1. Start from a vanilla run where mouse Y visibly changes distance.
+  2. Trace/watch the actual desired/current camera-distance value while moving
+     mouse Y; controller +0x184/+0x188 are only input staging, not the durable
+     control point.
+  3. Identify the active camera object/profile and the update function that
+     reads ExplorationUserDistanceScale and clamps min/max/absolute max.
+  4. Confirm gameplay state with active camera/profile plus group combat byte,
+     rather than using InCombat() as the only free-roam definition.
+  5. Implement one direct, reversible desired-distance adjustment and only then
+     choose wheel, modifier, wider range, pitch, or near-third-person behavior.
+  6. A true camera revamp may be warranted for multiplayer: shared focus,
+     separation bounds, collision, transitions, scoped ranged views, skill
+     cinematics, and eventual per-viewport ownership all need explicit policy.
+
+SudekiForge / model and world-authoring direction:
+  - Prefer a separate sibling repository named sudeki-forge under a shared
+    parent directory. SudekiMP should consume stable formats/libraries rather
+    than becoming a combined reverse-engineering, editor, and multiplayer tree.
+  - Maya is capable of professional polygon/NURBS/subdivision modeling,
+    rigging, animation, layout, effects, and large scene/world authoring.
+  - Maya does NOT solve Sudeki import/export by itself. The hard work is still
+    decoding Sudeki model, skeleton, animation, material, collision, archive,
+    navmesh, trigger, and world/scene formats, then writing converters.
+  - Maya 2026 officially supports specific RHEL releases on Linux and its
+    licensing has additional Linux library/display constraints. This is less
+    convenient on a non-RHEL desktop.
+  - Blender should be the primary first target: it is free/open source,
+    cross-platform, scriptable with Python, contributor-friendly, and suitable
+    for a custom Sudeki importer/exporter or add-on.
+  - Maya can remain an optional authoring frontend for artists who already own
+    and know it. Keep SudekiForge's intermediate representation independent of
+    either DCC so Blender, Maya, and future tools can share converters.
+  - Neither Blender nor Maya is automatically a complete Sudeki world editor.
+    Long-term world building likely needs a Blender add-on or dedicated
+    SudekiForge scene editor for collision, spawn points, triggers, doors,
+    scripts, nav data, cameras, and archive packaging.
+
+  Current official references checked on 2026-08-14:
+  https://www.autodesk.com/products/maya/overview.htm
+  https://help.autodesk.com/view/MAYAUL/2026/ENU/?caas=caas/sfdcarticles/sfdcarticles/System-Requirements-for-Autodesk-Maya-2026.html
+  https://help.autodesk.com/cloudhelp/2026/ENU/Maya-Installlation/files/GUID-D2B5433C-E0D2-421B-9BD8-24FED217FD7F.htm
+  https://www.blender.org/
+
+Recommended next work after the pause:
+  A. If returning to SudekiMP gameplay first:
+     - Add one independently controlled Buki normal attack.
+     - Convert Buki movement from fixed world axes to shared-camera-relative.
+     - Add a first maximum-separation rule.
+     - Trace doorway/zone forced catch-up before changing it.
+  B. If returning to the camera first:
+     - Follow the desired-distance writer plan above; do not iterate on the
+       CameraU/CameraD staging fields again without new evidence.
+  C. If starting SudekiForge:
+     - Inventory SOLData.baf/model-related names and signatures without copying
+       assets into git.
+     - Pick one small model and establish container, mesh, vertex/index,
+       material, skeleton, and transform facts.
+     - Export first to a neutral research representation, then build a Blender
+       importer. Attempt write-back only after round-trip invariants are known.
+
+Resume commands:
+  cd /var/home/wander/Documents/Projects/sudeki-mp
+  git status --short
+  tools/continue-research.sh --check
+  tools/continue-research.sh --safe
+
+Primary detailed records:
+  docs/research-log.md
+  docs/milestones.md
+  docs/engine-functions.md
+  docs/structures.md
+  docs/combat.md
+  docs/mod-loader.md

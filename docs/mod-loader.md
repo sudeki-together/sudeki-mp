@@ -13,6 +13,26 @@ Phase 4 currently produces two original 32-bit Windows PE artifacts:
 
 `EnablePlasmaticaAnimationSpeed` defaults to `false`. The experimental `PlasmaticaAnimationSpeed` value is accepted only in the range `0.25` through `4.0`; invalid enabled configuration fails safely. The hook arms only when the confirmed Plasmatica task pushes `ANIMID_SKILL_02`, captures the native object at the interpreter's exact binding-dispatch call, and rejects it unless its vtable is the supported build's concrete `CNewMissileAimingGameModelAnimation` vtable. A successful application restores the model multiplier that existed before the cast. It does not alter the global game-speed state.
 
+`EnableQuickSkillInputTrace` and `EnableRangedQuickSkillPrototype` default to `false`. The first observes Sudeki's native `ac_QuickSkill0..5` route. The second uses the game's own UI/control transition only when a ranged QuickSkill fails in the exact `Armed | Strafing` state, then retries through the unchanged validator after 75 ms. It does not write character-state flags or SP.
+
+`EnableDirectSpiritStrikePrototype` defaults to `false`. When explicitly enabled, `[Bindings] SpiritStrike` (default `G`) submits a resolved definition through the native validator, a 75 ms native UI/control transition, a second validation, and the native activation implementation. The first parser accepts a single letter, digit, `F1..F24`, named navigation/numpad/punctuation key, or `Mouse1..Mouse5`; invalid enabled configuration fails initialization safely. Chords and controllers are intentionally deferred. `SpiritStrikeId=-1` derives the pair from the front character and uses `SpiritStrikeVariant=1|2`; a fixed ID `0..15` remains available for diagnosis. A live Ailish automatic-resolution test selected type `0x01`/ID `2` and completed normally. Native validation also rejected repeated activation attempts while a strike was active.
+
+`EnableControlSeparationPrototype` defaults to `false`. When enabled, `[Bindings] ToggleBukiAi` (default `J`) targets Buki only when she is not the front/controller character. It calls Sudeki's exported refcounted `AiOverrideControl` and `AiDefaultControl` functions, verifies both the override count and nested AI mode, and leaves the global controller target unchanged. Two live disable/restore cycles passed: Buki stopped with refcount/mode `1/0`, then resumed normal AI at `0/1`.
+
+`EnableSecondPlayerMovementPrototype` also defaults to `false` and requires the control-separation prototype. While Buki's verified native override is active, it submits normalized fixed-world-axis `I/J/K/L` directions to Buki's own arbiter at RVA `0x000DAE80`; Player 1's normal controller and `W/A/S/D` route remain untouched. The dedicated test launcher temporarily moves `ToggleBukiAi` to `F10` to avoid overlap with `J`. Live testing confirmed independent two-character movement and a clean native AI restore. The prototype refuses to act when Buki is the controller target or no longer belongs to the active group.
+
+`EnablePlayerMovementTrace` defaults to `false`. It wraps only the two exact calls from the global controller's normal movement consumer to the per-character arbiter movement routine, samples the unchanged world direction and movement parameters, and forwards immediately. The live trace confirmed the expected normalized horizontal direction, speed, turn rate, movement mode, and controlled character. It does not synthesize or redirect movement.
+
+`EnableFreeRoamCameraModifierPrototype` defaults to `false` and remains an unsuccessful diagnostic prototype. It gates native mouse-Y `CameraU/CameraD` events outside combat behind configurable `[Bindings] FreeRoamCameraModifier` (`LeftCtrl` by default), while leaving combat input unchanged. The modifier edge was observed live, but the user did not obtain a useful camera result. Earlier wheel remap, held-pulse, and late controller-field injection attempts also failed visibly. This option must not be treated as a completed camera feature; further work belongs at the native desired-distance/profile update path.
+
+`tools/continue-research.sh --spirit-strike-test H` temporarily selects `H` in the generated test configuration, then restores the repository default after Sudeki exits. This provides a direct live check that the configured key—not a compiled-in `G` constant—drives activation.
+
+`tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits.
+
+`tools/continue-research.sh --second-player-movement-test` temporarily enables the guarded Buki toggle and second movement source, uses `F10` for the toggle, and restores the generated configuration after Sudeki exits.
+
+That live check passed: initialization logged virtual key `0x48`, and pressing `H` completed the same validated Ailish Spirit Strike with activation result `1`.
+
 ## Linux build
 
 The current host uses these per-user Flatpak components:
@@ -153,7 +173,7 @@ The user played with the option enabled and observed normal-speed combat while t
 Before the first live trace, two standalone Wine tests passed:
 
 - `SudekiMP.CallHookTest.exe` used synthetic executable memory to verify install, rejection, and restoration behavior for relative-call and export-slot hooks.
-- `SudekiMP.SkillTraceImageTest.exe` opened the exact user-supplied `SUDEKI.exe` read-only, mapped its PE sections into inert memory, installed three call hooks, fourteen export-slot hooks, and the script opcode `0x27` and object-method opcode `0x28` pointer hooks, verified them, uninstalled them, and verified every original target was restored.
+- `SudekiMP.SkillTraceImageTest.exe` opened the exact user-supplied `SUDEKI.exe` read-only, mapped its PE sections into inert memory, installed four call hooks, fourteen export-slot hooks, and the script opcode `0x27` and object-method opcode `0x28` pointer hooks, verified them, uninstalled them, and verified every original target was restored.
 
 The generated x86 assembly was also checked for ABI compatibility. The fastcall bridge receives Sudeki's `this` pointer in `ECX`, treats `EDX` as an ignored bridge register, preserves the original stack-argument positions, and uses the matching callee cleanup sizes.
 

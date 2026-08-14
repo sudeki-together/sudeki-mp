@@ -1,8 +1,15 @@
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "hooks/character_switch_trace.h"
+#include "hooks/control_separation.h"
+#include "hooks/freeroam_camera_input.h"
 #include "hooks/pattern_scan.h"
+#include "hooks/player_input_trace.h"
 #include "hooks/quick_menu.h"
+#include "hooks/quick_skill_input.h"
 #include "hooks/skill_trace.h"
+#include "hooks/spirit_strike_input.h"
+#include "input/key_binding.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -17,6 +24,12 @@
 #define SUDEKIMP_INIT_PATCH_FAILED 4u
 #define SUDEKIMP_INIT_TRACE_FAILED 5u
 #define SUDEKIMP_INIT_BAD_CONFIG 6u
+#define SUDEKIMP_INIT_INPUT_TRACE_FAILED 7u
+#define SUDEKIMP_INIT_SPIRIT_INPUT_FAILED 8u
+#define SUDEKIMP_INIT_CHARACTER_SWITCH_TRACE_FAILED 9u
+#define SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED 10u
+#define SUDEKIMP_INIT_PLAYER_INPUT_TRACE_FAILED 11u
+#define SUDEKIMP_INIT_FREEROAM_CAMERA_FAILED 12u
 
 static HMODULE dll_module;
 
@@ -81,6 +94,34 @@ static BOOL read_config_float(
     return TRUE;
 }
 
+static BOOL read_config_integer(
+    const wchar_t *path,
+    const wchar_t *section,
+    const wchar_t *key,
+    int default_value,
+    int minimum,
+    int maximum,
+    int *result
+) {
+    wchar_t value[32];
+    wchar_t default_text[32];
+    wchar_t *end = NULL;
+    long parsed;
+
+    if (result == NULL) {
+        return FALSE;
+    }
+    _snwprintf(default_text, 32, L"%d", default_value);
+    default_text[31] = L'\0';
+    GetPrivateProfileStringW(section, key, default_text, value, 32, path);
+    parsed = wcstol(value, &end, 10);
+    if (end == value || *end != L'\0' || parsed < minimum || parsed > maximum) {
+        return FALSE;
+    }
+    *result = (int)parsed;
+    return TRUE;
+}
+
 static BOOL get_text_section(
     HMODULE module,
     const uint8_t **section_base,
@@ -129,6 +170,22 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL trace_enabled;
     BOOL animation_speed_enabled;
     BOOL camera_speed_enabled;
+    BOOL quick_skill_input_trace_enabled;
+    BOOL character_switch_trace_enabled;
+    BOOL control_separation_enabled;
+    BOOL player_movement_trace_enabled;
+    BOOL second_player_movement_enabled;
+    BOOL freeroam_camera_input_enabled;
+    BOOL ranged_quick_skill_prototype_enabled;
+    BOOL direct_spirit_strike_prototype_enabled;
+    wchar_t spirit_strike_key_text[32];
+    wchar_t control_separation_key_text[32];
+    wchar_t freeroam_camera_modifier_text[32];
+    UINT spirit_strike_virtual_key = 'G';
+    UINT control_separation_virtual_key = 'J';
+    UINT freeroam_camera_modifier_key = VK_LCONTROL;
+    int spirit_strike_id = -1;
+    int spirit_strike_variant = 1;
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
 
@@ -218,6 +275,142 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnablePlasmaticaCameraSpeed"
     );
+    quick_skill_input_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableQuickSkillInputTrace"
+    );
+    character_switch_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableCharacterSwitchTrace"
+    );
+    control_separation_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableControlSeparationPrototype"
+    );
+    player_movement_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePlayerMovementTrace"
+    );
+    second_player_movement_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerMovementPrototype"
+    );
+    freeroam_camera_input_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableFreeRoamCameraModifierPrototype"
+    );
+    ranged_quick_skill_prototype_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableRangedQuickSkillPrototype"
+    );
+    direct_spirit_strike_prototype_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableDirectSpiritStrikePrototype"
+    );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"SpiritStrike",
+        L"G",
+        spirit_strike_key_text,
+        (DWORD)(sizeof(spirit_strike_key_text) /
+            sizeof(spirit_strike_key_text[0])),
+        config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"FreeRoamCameraModifier",
+        L"LeftCtrl",
+        freeroam_camera_modifier_text,
+        (DWORD)(sizeof(freeroam_camera_modifier_text) /
+            sizeof(freeroam_camera_modifier_text[0])),
+        config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"ToggleBukiAi",
+        L"J",
+        control_separation_key_text,
+        (DWORD)(sizeof(control_separation_key_text) /
+            sizeof(control_separation_key_text[0])),
+        config_path
+    );
+    if (direct_spirit_strike_prototype_enabled &&
+        !SudekiMpParseInputKey(
+            spirit_strike_key_text,
+            &spirit_strike_virtual_key)) {
+        SudekiMpLogWrite("spirit_strike_key_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (control_separation_enabled &&
+        !SudekiMpParseInputKey(
+            control_separation_key_text,
+            &control_separation_virtual_key)) {
+        SudekiMpLogWrite("control_separation_key_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (freeroam_camera_input_enabled &&
+        !SudekiMpParseInputKey(
+            freeroam_camera_modifier_text,
+            &freeroam_camera_modifier_key)) {
+        SudekiMpLogWrite("freeroam_camera_modifier_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_movement_enabled && !control_separation_enabled) {
+        SudekiMpLogWrite(
+            "second_player_movement_config=requires_control_separation\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (freeroam_camera_input_enabled && character_switch_trace_enabled) {
+        SudekiMpLogWrite(
+            "freeroam_camera_config=conflicts_with_character_switch_trace\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (direct_spirit_strike_prototype_enabled && !read_config_integer(
+            config_path,
+            L"SudekiMP",
+            L"SpiritStrikeId",
+            -1,
+            -1,
+            15,
+            &spirit_strike_id)) {
+        SudekiMpLogWrite("spirit_strike_id_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (direct_spirit_strike_prototype_enabled && !read_config_integer(
+            config_path,
+            L"SudekiMP",
+            L"SpiritStrikeVariant",
+            1,
+            1,
+            2,
+            &spirit_strike_variant)) {
+        SudekiMpLogWrite("spirit_strike_variant_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (animation_speed_enabled && !read_config_float(
             config_path,
             L"SudekiMP",
@@ -288,8 +481,129 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("plasmatica_trace_applied=false\r\n");
     }
+    SudekiMpLogFormat("quick_skill_input_trace_requested=%s\r\n",
+        quick_skill_input_trace_enabled ? "true" : "false");
+    SudekiMpLogFormat("ranged_quick_skill_prototype_requested=%s\r\n",
+        ranged_quick_skill_prototype_enabled ? "true" : "false");
+    if (quick_skill_input_trace_enabled || ranged_quick_skill_prototype_enabled) {
+        if (!SudekiMpInstallQuickSkillInputTrace(
+                game_module,
+                ranged_quick_skill_prototype_enabled)) {
+            SudekiMpLogFormat("quick_skill_input_trace_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("quick_skill_input_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=input_trace_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_INPUT_TRACE_FAILED;
+        }
+        SudekiMpLogWrite("quick_skill_input_trace_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("quick_skill_input_trace_applied=false\r\n");
+    }
+    SudekiMpLogFormat("character_switch_trace_requested=%s\r\n",
+        character_switch_trace_enabled ? "true" : "false");
+    if (character_switch_trace_enabled) {
+        if (!SudekiMpInstallCharacterSwitchTrace(game_module)) {
+            SudekiMpLogFormat("character_switch_trace_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("character_switch_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=character_switch_trace_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CHARACTER_SWITCH_TRACE_FAILED;
+        }
+        SudekiMpLogWrite("character_switch_trace_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("character_switch_trace_applied=false\r\n");
+    }
+    SudekiMpLogFormat(
+        "freeroam_camera_requested=%s modifier_virtual_key=0x%02lx\r\n",
+        freeroam_camera_input_enabled ? "true" : "false",
+        (unsigned long)freeroam_camera_modifier_key
+    );
+    if (freeroam_camera_input_enabled) {
+        if (!SudekiMpInstallFreeRoamCameraInput(
+                game_module,
+                freeroam_camera_modifier_key)) {
+            SudekiMpLogFormat("freeroam_camera_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("freeroam_camera_applied=false\r\n");
+            SudekiMpLogWrite("status=freeroam_camera_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_FREEROAM_CAMERA_FAILED;
+        }
+        SudekiMpLogWrite("freeroam_camera_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("freeroam_camera_applied=false\r\n");
+    }
+    SudekiMpLogFormat(
+        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s\r\n",
+        control_separation_enabled ? "true" : "false",
+        (unsigned long)control_separation_virtual_key,
+        second_player_movement_enabled ? "true" : "false"
+    );
+    if (control_separation_enabled) {
+        if (!SudekiMpInstallControlSeparation(
+                game_module,
+                control_separation_virtual_key,
+                second_player_movement_enabled)) {
+            SudekiMpLogFormat("control_separation_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("control_separation_applied=false\r\n");
+            SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+        }
+        SudekiMpLogWrite("control_separation_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("control_separation_applied=false\r\n");
+    }
+    SudekiMpLogFormat("player_movement_trace_requested=%s\r\n",
+        player_movement_trace_enabled ? "true" : "false");
+    if (player_movement_trace_enabled) {
+        if (!SudekiMpInstallPlayerInputTrace(game_module)) {
+            SudekiMpLogFormat("player_movement_trace_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("player_movement_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=player_input_trace_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_PLAYER_INPUT_TRACE_FAILED;
+        }
+        SudekiMpLogWrite("player_movement_trace_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("player_movement_trace_applied=false\r\n");
+    }
+    SudekiMpLogFormat(
+        "direct_spirit_strike_prototype_requested=%s virtual_key=0x%02lx strike_id=%d variant=%d\r\n",
+        direct_spirit_strike_prototype_enabled ? "true" : "false",
+        (unsigned long)spirit_strike_virtual_key,
+        spirit_strike_id,
+        spirit_strike_variant
+    );
+    if (direct_spirit_strike_prototype_enabled) {
+        if (!SudekiMpInstallSpiritStrikeInput(
+                game_module,
+                spirit_strike_id,
+                (unsigned int)spirit_strike_variant,
+                spirit_strike_virtual_key)) {
+            SudekiMpLogFormat("spirit_strike_input_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("spirit_strike_input_applied=false\r\n");
+            SudekiMpLogWrite("status=spirit_input_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_SPIRIT_INPUT_FAILED;
+        }
+        SudekiMpLogWrite("spirit_strike_input_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("spirit_strike_input_applied=false\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
-    if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled) {
+    if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
+        !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
+        !direct_spirit_strike_prototype_enabled &&
+        !character_switch_trace_enabled &&
+        !freeroam_camera_input_enabled &&
+        !control_separation_enabled &&
+        !player_movement_trace_enabled) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;
