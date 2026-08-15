@@ -5,7 +5,8 @@
 
 BOOL SudekiMpInstallQuickSkillInputTrace(
     HMODULE game_module,
-    BOOL enable_ranged_prototype
+    BOOL enable_ranged_prototype,
+    BOOL enable_realtime_targeting_guard
 );
 void SudekiMpUninstallQuickSkillInputTrace(void);
 

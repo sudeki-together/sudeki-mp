@@ -159,6 +159,41 @@ Confirmed project position:
      an actually different party. The final live test showed continuous split
      presentation and correct portraits; the log recorded one acquisition,
      `party_order_rotation phase=tolerated`, and no later release loop.
+ 22. The first real-time multiplayer Skill Strike build has had one incomplete
+     live pass. It adds explicit P1/P2 combat contexts, uses Buki's own
+     CSkill and ordered SkillData through the exact native availability,
+     validation, and Use ABIs for F1-F4, and requires world-speed modes 0/0
+     with pause byte 0. The one proven global targeting byte/node is serialized
+     fail-safe: conflicting target-selection input is rejected, while a second
+     character may begin after the first confirms and continues executing.
+     Plasmatica SetRenderCamera at RVA 0x00036FB0 is inline-hooked only during
+     its confirmed script call and routed to the caster's cached viewport;
+     global camera ownership remains unchanged. Native cleanup also clears a
+     stranded viewport override. PE32 build, combat-context test, private skill
+     ABI test, inline-hook test, and exact-image install/restore test all pass.
+     The cast completed without a crash, but acceptance failed: one mouse moved
+     both views, Buki's viewport saw only Elco's first-person arm/gun, and the
+     log proved native Plasmatica still changed shared game-speed modes from
+     0/0 to 2/2 until cleanup. Do not claim real-time concurrency yet.
+ 23. The first Linux Player 2 controller bridge is live-confirmed for movement
+     and input ownership. The Razer Raiju Mobile is visible at
+     /dev/input/js0 but absent from Wine XInput/DirectInput even with Steam
+     closed. The native helper queries joydev axis/button maps and sends a
+     versioned 32-byte state to a Wine DLL receiver bound only to loopback.
+     Stale input is neutralized after 250 ms. The controller left stick feeds
+     Buki's proven camera-relative arbiter movement path with analog speed; A
+     feeds Buki's proven weak-attack edge. Right stick/triggers/D-pad/buttons
+     cross the protocol, but right stick is observation-only until independent
+     Camera 2 rotation is understood. Actual Raiju map discovery, native self-
+     test, Wine protocol/timeout tests, a real Linux-helper-to-Wine-receiver
+     packet, PE32 build, context/ABI regressions, and exact-image hook
+     installation/restoration all pass. In the castle save, keyboard/mouse
+     retained Player 1 while the Raiju left stick independently moved Buki.
+     One stable Buki character/arbiter received analog speed, camera-relative
+     direction, and clean stop events. A also produced two native weak-attack
+     submissions, but this non-combat save could not show the animation. An
+     arena check remains for visible A-to-attack execution and disconnect
+     neutralization; the independent physical input bridge itself is proven.
 
 Independent Buki weak-attack test (LIVE-CONFIRMED):
   Confirmed static facts:
@@ -418,9 +453,12 @@ Recommended next work after the pause:
        overlay have passed. HUD name, HP, SP, companion ordering, and portrait
        art are live-confirmed per viewport. Stable camera identity now tolerates
        Sudeki's internal Ailish/Buki order reversal without an unsplit/minimap
-       pulse. Next tune Player 2 follow offset/smoothing or define explicit
-       multiplayer character reassignment. SSP remains party-wide unless later
-       evidence disproves that model.
+       pulse. The Raiju/keyboard ownership and independent Buki movement test
+       passed. Repeat --controller-bridge-test in a combat save only to see A
+       execute Buki's already-logged weak attack and verify disconnect
+       neutralization. Then isolate right-stick Camera 2 rotation before
+       returning to Plasmatica.
+       SSP remains party-wide unless later evidence disproves that model.
   B. If returning to the camera first:
      - Keep the shared midpoint camera as a single-screen fallback.
      - Follow the desired-distance writer plan above only after the split
@@ -439,6 +477,8 @@ Resume commands:
   git status --short
   tools/continue-research.sh --check
   tools/continue-research.sh --safe
+  tools/continue-research.sh --controller-bridge-test
+  tools/continue-research.sh --realtime-skill-coop-test
 
 Primary detailed records:
   docs/research-log.md

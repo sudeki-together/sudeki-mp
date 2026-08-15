@@ -1,3 +1,4 @@
+#include "engine/skill_activation_abi.h"
 #include "hooks/skill_trace.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
@@ -69,7 +70,11 @@ enum {
     RVA_SCRIPT_METHOD_OPCODE = 0x001c4b10u,
     RVA_SCRIPT_METHOD_OPCODE_SLOT = 0x00323fa4u,
     RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
-    RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u
+    RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
+    RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_SKILL_DATA_AVAILABLE = 0x000da2a0u,
+    RVA_SKILL_AVAILABILITY_FLAG = 0x003c2fd9u,
+    RVA_SKILL_VALIDATE_FLAG = 0x0034a8b0u
 };
 
 typedef struct ExpectedExport {
@@ -181,6 +186,12 @@ int wmain(int argc, wchar_t **argv) {
     DWORD file_size;
     size_t index;
     int failures = 0;
+    const UINT second_player_skill_keys[4] = {
+        VK_F1, VK_F2, VK_F3, VK_F4
+    };
+    static const uint8_t set_render_camera_original[] = {
+        0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
+    };
 
     if (argc != 2) {
         fwprintf(stderr, L"usage: SudekiMP.SkillTraceImageTest.exe SUDEKI.exe\n");
@@ -214,6 +225,10 @@ int wmain(int argc, wchar_t **argv) {
         (uint32_t)(uintptr_t)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP);
     *(uint32_t *)(image + RVA_HUD_PORTRAIT_RESOURCE_SELECT + 8u) =
         (uint32_t)(uintptr_t)(image + RVA_UI_RESOURCE_TABLE_INITIALIZED);
+    *(uint32_t *)(image + RVA_SKILL_DATA_AVAILABLE + 2u) =
+        (uint32_t)(uintptr_t)(image + RVA_SKILL_AVAILABILITY_FLAG);
+    *(uint32_t *)(image + RVA_SKILL_VALIDATE + 2u) =
+        (uint32_t)(uintptr_t)(image + RVA_SKILL_VALIDATE_FLAG);
 
     if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
@@ -221,7 +236,14 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
-    if (!SudekiMpInstallQuickSkillInputTrace((HMODULE)image, TRUE)) {
+    if (!SudekiMpInitializeSkillActivationAbi((HMODULE)image)) {
+        fprintf(stderr, "skill activation ABI rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInstallQuickSkillInputTrace((HMODULE)image, TRUE, TRUE)) {
         fprintf(stderr, "quick-skill install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallSkillTrace();
@@ -255,7 +277,11 @@ int wmain(int argc, wchar_t **argv) {
             TRUE,
             'U',
             TRUE,
-            TRUE)) {
+            second_player_skill_keys,
+            TRUE,
+            TRUE,
+            FALSE,
+            0.20f)) {
         fprintf(stderr, "control-separation install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallCharacterSwitchTrace();
@@ -269,7 +295,8 @@ int wmain(int argc, wchar_t **argv) {
             (HMODULE)image,
             TRUE,
             TRUE,
-            VK_F9)) {
+            VK_F9,
+            TRUE)) {
         fprintf(stderr, "split-screen render install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallControlSeparation();
@@ -279,6 +306,10 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpUninstallSkillTrace();
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
+    }
+    if (image[RVA_CAMERA_MANAGER_SET_RENDER_CAMERA] != 0xe9) {
+        fputs("FAIL: SetRenderCamera inline hook was not installed\n", stderr);
+        ++failures;
     }
     if (!SudekiMpInstallPlayerInputTrace((HMODULE)image)) {
         fprintf(stderr, "player-input trace install rejected image (error=%lu)\n",
@@ -441,6 +472,13 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     }
     SudekiMpUninstallSplitScreenRender();
+    if (memcmp(
+            image + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            set_render_camera_original,
+            sizeof(set_render_camera_original)) != 0) {
+        fputs("FAIL: SetRenderCamera inline hook was not restored\n", stderr);
+        ++failures;
+    }
     if (relative_call_target(image + RVA_FRAME_END_CALL_MAIN) !=
             image + RVA_FRAME_END) {
         fputs("FAIL: frame-end compositor call was not restored\n", stderr);
@@ -539,6 +577,7 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     }
     SudekiMpUninstallSkillTrace();
+    SudekiMpResetSkillActivationAbi();
     if (relative_call_target(image + RVA_USE_CALL) != image + RVA_USE) {
         fputs("FAIL: Use call was not restored\n", stderr);
         ++failures;

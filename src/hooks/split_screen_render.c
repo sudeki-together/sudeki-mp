@@ -1,6 +1,7 @@
 #include "hooks/split_screen_render.h"
 
 #include "engine/log.h"
+#include "engine/player_combat_context.h"
 #include "hooks/call_hook.h"
 
 #include <math.h>
@@ -136,6 +137,10 @@ typedef void *(SUDEKIMP_THISCALL *CameraManagerGetCameraFunction)(
     void *manager,
     const char *name
 );
+typedef BOOL (SUDEKIMP_THISCALL *CameraManagerSetRenderCameraFunction)(
+    void *manager,
+    const char *name
+);
 enum {
     RVA_D3D_DEVICE_GLOBAL = 0x003c31dcu,
     RVA_SCENE_MANAGER_GLOBAL = 0x00408d58u,
@@ -148,6 +153,7 @@ enum {
     RVA_CAMERA_MANAGER_ADD_CAMERA = 0x00036c10u,
     RVA_CAMERA_MANAGER_REMOVE_CAMERA = 0x00036de0u,
     RVA_CAMERA_MANAGER_GET_CAMERA = 0x00036ed0u,
+    RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
@@ -234,6 +240,7 @@ static SudekiMpRelativeCallHook hud_group_values_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_values_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_name_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_status_pointer_hook;
+static SudekiMpInlineHook set_render_camera_hook;
 static uint8_t *game_base;
 static RenderStartFunction original_render_start;
 static FrameEndFunction original_frame_end;
@@ -285,6 +292,11 @@ static BOOL rendered_player_two_this_frame;
 static BOOL viewport_hud_binding_active;
 static BOOL render_only_swap_active;
 static void **render_only_camera_slot;
+static void *render_only_applied_state;
+static BOOL skill_camera_routing_enabled;
+static void *pending_skill_camera_caster;
+static void *player_skill_cameras[2];
+static void *player_skill_render_states[2];
 static unsigned int second_player_camera_last_rejection;
 
 static const char second_player_camera_name[] = "SudekiMP_P2";
@@ -299,6 +311,9 @@ static const uint8_t expected_camera_manager_remove_camera_entry[] = {
 static const uint8_t expected_camera_manager_get_camera_entry[] = {
     0x53, 0x8b, 0x5c, 0x24, 0x08, 0x55, 0x8b, 0xe9,
     0x85, 0xdb, 0x74, 0x40
+};
+static const uint8_t expected_camera_manager_set_render_camera_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
 };
 static const uint8_t expected_character_type_to_portrait_enum_entry[] = {
     0x48, 0x83, 0xf8, 0x22, 0x77, 0x38, 0x0f, 0xb6, 0x80
@@ -802,15 +817,117 @@ static BOOL update_player_two_render_state(void) {
     return TRUE;
 }
 
+void SudekiMpSplitScreenBeginSkillCameraCall(void *caster) {
+    pending_skill_camera_caster = caster;
+}
+
+void SudekiMpSplitScreenEndSkillCameraCall(void) {
+    pending_skill_camera_caster = NULL;
+}
+
+void SudekiMpSplitScreenClearSkillCamera(void *caster, const char *reason) {
+    int player = caster == player_one_character ? 0 :
+        (caster == player_two_character ? 1 : -1);
+
+    if (player < 0 || player_skill_render_states[player] == NULL) {
+        return;
+    }
+    player_skill_cameras[player] = NULL;
+    player_skill_render_states[player] = NULL;
+    SudekiMpCombatContextSetView(
+        (unsigned int)player,
+        player == 0 ? player_one_camera : player_two_camera,
+        player == 0 ? player_one_render_state : player_two_render_state
+    );
+    SudekiMpLogFormat(
+        "realtime_skill_combat event=skill_camera_cleanup player=%d caster=0x%08lx reason=%s policy=restore_viewport_on_cancel_interrupt_or_end\r\n",
+        player + 1,
+        (unsigned long)(uintptr_t)caster,
+        reason == NULL ? "unspecified" : reason
+    );
+}
+
+static BOOL SUDEKIMP_THISCALL route_skill_render_camera(
+    void *manager,
+    const char *name
+) {
+    CameraManagerSetRenderCameraFunction original =
+        (CameraManagerSetRenderCameraFunction)set_render_camera_hook.trampoline;
+    void *requested_camera;
+    void *render_state;
+    int player;
+
+    if (!skill_camera_routing_enabled ||
+        pending_skill_camera_caster == NULL ||
+        manager != second_player_camera_manager || name == NULL) {
+        return original(manager, name);
+    }
+    player = pending_skill_camera_caster == player_one_character ? 0 :
+        (pending_skill_camera_caster == player_two_character ? 1 : -1);
+    requested_camera = camera_manager_get_camera(manager, name);
+    if (player < 0 || !readable_memory(requested_camera, 0x38u)) {
+        SudekiMpLogFormat(
+            "realtime_skill_combat event=skill_camera_fallback caster=0x%08lx name=%s reason=%s\r\n",
+            (unsigned long)(uintptr_t)pending_skill_camera_caster,
+            name,
+            player < 0 ? "caster_not_assigned_to_viewport" :
+                "requested_camera_unavailable"
+        );
+        return original(manager, name);
+    }
+    if (requested_camera == player_one_camera) {
+        SudekiMpSplitScreenClearSkillCamera(
+            pending_skill_camera_caster,
+            "native_normal_camera_restore"
+        );
+        SudekiMpLogFormat(
+            "realtime_skill_combat event=skill_camera_restore player=%d caster=0x%08lx camera=0x%08lx policy=viewport_only_global_camera_unchanged\r\n",
+            player + 1,
+            (unsigned long)(uintptr_t)pending_skill_camera_caster,
+            (unsigned long)(uintptr_t)requested_camera
+        );
+        return TRUE;
+    }
+    render_state = *(void **)((uint8_t *)requested_camera + 0x34u);
+    if (!readable_memory(render_state, 0xdcu)) {
+        SudekiMpLogFormat(
+            "realtime_skill_combat event=skill_camera_fallback player=%d caster=0x%08lx camera=0x%08lx reason=render_state_unavailable\r\n",
+            player + 1,
+            (unsigned long)(uintptr_t)pending_skill_camera_caster,
+            (unsigned long)(uintptr_t)requested_camera
+        );
+        return original(manager, name);
+    }
+    player_skill_cameras[player] = requested_camera;
+    player_skill_render_states[player] = render_state;
+    SudekiMpCombatContextSetView(
+        (unsigned int)player,
+        requested_camera,
+        render_state
+    );
+    SudekiMpLogFormat(
+        "realtime_skill_combat event=skill_camera_route player=%d caster=0x%08lx camera=0x%08lx render_state=0x%08lx name=%s policy=caster_viewport_only_global_camera_unchanged\r\n",
+        player + 1,
+        (unsigned long)(uintptr_t)pending_skill_camera_caster,
+        (unsigned long)(uintptr_t)requested_camera,
+        (unsigned long)(uintptr_t)render_state,
+        name
+    );
+    return TRUE;
+}
+
 static BOOL restore_render_only_camera(void) {
     void **slot;
+    void *applied_state;
 
     if (!render_only_swap_active) {
         return TRUE;
     }
     slot = render_only_camera_slot;
+    applied_state = render_only_applied_state;
     render_only_swap_active = FALSE;
     render_only_camera_slot = NULL;
+    render_only_applied_state = NULL;
     if (!readable_memory(slot, sizeof(*slot))) {
         log_second_player_camera_rejection_once(
             12u,
@@ -818,7 +935,7 @@ static BOOL restore_render_only_camera(void) {
         );
         return FALSE;
     }
-    if (*slot == player_two_render_state) {
+    if (*slot == applied_state) {
         *slot = player_one_render_state;
         return TRUE;
     }
@@ -834,8 +951,9 @@ static BOOL restore_render_only_camera(void) {
 
 static void apply_render_only_camera(void) {
     void **slot;
+    void *desired_render_state;
 
-    if (!second_player_camera_enabled || !player_two_view_requested ||
+    if (!second_player_camera_enabled ||
         player_two_camera == NULL) {
         return;
     }
@@ -857,7 +975,11 @@ static void apply_render_only_camera(void) {
         player_two_view_requested = FALSE;
         return;
     }
-    if (!update_player_two_render_state()) {
+    desired_render_state = player_skill_render_states[
+        player_two_view_requested ? 1 : 0
+    ];
+    if (desired_render_state == NULL && player_two_view_requested &&
+        !update_player_two_render_state()) {
         log_second_player_camera_rejection_once(
             16u,
             "translated_render_state_update_failed"
@@ -865,8 +987,17 @@ static void apply_render_only_camera(void) {
         player_two_view_requested = FALSE;
         return;
     }
-    *slot = player_two_render_state;
+    if (desired_render_state == NULL) {
+        desired_render_state = player_two_view_requested ?
+            player_two_render_state : player_one_render_state;
+    }
+    if (desired_render_state == player_one_render_state) {
+        second_player_camera_last_rejection = 0u;
+        return;
+    }
+    *slot = desired_render_state;
     render_only_camera_slot = slot;
+    render_only_applied_state = desired_render_state;
     render_only_swap_active = TRUE;
     second_player_camera_last_rejection = 0u;
 }
@@ -882,6 +1013,8 @@ static BOOL release_player_two_camera(const char *reason) {
     void *current;
 
     if (player_two_camera == NULL) {
+        SudekiMpCombatContextSetView(0u, NULL, NULL);
+        SudekiMpCombatContextSetView(1u, NULL, NULL);
         player_two_view_requested = FALSE;
         rendered_player_two_this_frame = FALSE;
         viewport_hud_binding_active = FALSE;
@@ -914,8 +1047,14 @@ static BOOL release_player_two_camera(const char *reason) {
     player_two_camera = NULL;
     player_one_render_state = NULL;
     player_two_render_state = NULL;
+    player_skill_cameras[0] = NULL;
+    player_skill_cameras[1] = NULL;
+    player_skill_render_states[0] = NULL;
+    player_skill_render_states[1] = NULL;
     player_one_character = NULL;
     player_two_character = NULL;
+    SudekiMpCombatContextSetView(0u, NULL, NULL);
+    SudekiMpCombatContextSetView(1u, NULL, NULL);
     player_two_party_slot = 0u;
     player_two_view_requested = FALSE;
     rendered_player_two_this_frame = FALSE;
@@ -994,6 +1133,16 @@ static BOOL acquire_player_two_camera(void) {
         release_player_two_camera("acquire_failed");
         return FALSE;
     }
+    SudekiMpCombatContextSetView(
+        0u,
+        player_one_camera,
+        player_one_render_state
+    );
+    SudekiMpCombatContextSetView(
+        1u,
+        player_two_camera,
+        player_two_render_state
+    );
     second_player_camera_last_rejection = 0u;
     SudekiMpLogFormat(
         "split_screen_render event=second_player_camera phase=acquire manager=0x%08lx player_one_camera=0x%08lx player_two_camera=0x%08lx player_one_render_state=0x%08lx player_two_render_state=0x%08lx player_one_character=0x%08lx player_two_character=0x%08lx player_two_party_slot=%u toggle_virtual_key=0x%02lx policy=%s\r\n",
@@ -1921,7 +2070,8 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     if (!quit_menu_visible) {
         apply_render_only_camera();
     }
-    rendered_player_two_this_frame = render_only_swap_active;
+    rendered_player_two_this_frame = player_two_view_requested &&
+        player_two_camera != NULL;
     if (!quit_menu_visible) {
         refresh_viewport_portraits();
         viewport_hud_binding_active = TRUE;
@@ -1994,7 +2144,8 @@ BOOL SudekiMpInstallSplitScreenRender(
     HMODULE game_module,
     BOOL enable_second_player_camera,
     BOOL enable_dual_camera_frame_cache,
-    UINT toggle_second_player_camera_virtual_key
+    UINT toggle_second_player_camera_virtual_key,
+    BOOL enable_skill_camera_routing
 ) {
     uint8_t *base;
 
@@ -2002,6 +2153,9 @@ BOOL SudekiMpInstallSplitScreenRender(
         original_frame_end != NULL ||
         (enable_dual_camera_frame_cache &&
          !enable_second_player_camera) ||
+        (enable_skill_camera_routing &&
+         (!enable_second_player_camera ||
+          !enable_dual_camera_frame_cache)) ||
         (enable_second_player_camera &&
          (toggle_second_player_camera_virtual_key == 0u ||
           toggle_second_player_camera_virtual_key > 0xffu))) {
@@ -2026,6 +2180,10 @@ BOOL SudekiMpInstallSplitScreenRender(
             base + RVA_CAMERA_MANAGER_GET_CAMERA,
             expected_camera_manager_get_camera_entry,
             sizeof(expected_camera_manager_get_camera_entry)) != 0 ||
+         (enable_skill_camera_routing && memcmp(
+            base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            expected_camera_manager_set_render_camera_entry,
+            sizeof(expected_camera_manager_set_render_camera_entry)) != 0) ||
          (enable_dual_camera_frame_cache &&
           !portrait_selector_signatures_match(base)))) {
         SetLastError(ERROR_INVALID_DATA);
@@ -2049,6 +2207,10 @@ BOOL SudekiMpInstallSplitScreenRender(
     d3d_device_global = (void **)(game_base + RVA_D3D_DEVICE_GLOBAL);
     second_player_camera_enabled = enable_second_player_camera;
     dual_camera_frame_cache_enabled = enable_dual_camera_frame_cache;
+    skill_camera_routing_enabled = enable_skill_camera_routing;
+    pending_skill_camera_caster = NULL;
+    ZeroMemory(player_skill_cameras, sizeof(player_skill_cameras));
+    ZeroMemory(player_skill_render_states, sizeof(player_skill_render_states));
     second_player_camera_virtual_key =
         toggle_second_player_camera_virtual_key;
     second_player_camera_key_was_down = FALSE;
@@ -2066,6 +2228,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     viewport_hud_binding_active = FALSE;
     render_only_swap_active = FALSE;
     render_only_camera_slot = NULL;
+    render_only_applied_state = NULL;
     player_two_hud_ownership_logged = FALSE;
     viewport_portrait_ownership_logged = FALSE;
     party_order_rotation_logged = FALSE;
@@ -2104,12 +2267,19 @@ BOOL SudekiMpInstallSplitScreenRender(
               &hud_gizmo_status_pointer_hook,
               game_base + RVA_HUD_GIZMO_STATUS_POINTER_CALL,
               original_hud_party_pointer_copy,
-              split_screen_hud_party_pointer_copy_entry)))) {
+              split_screen_hud_party_pointer_copy_entry))) ||
+        (skill_camera_routing_enabled &&
+         !SudekiMpInstallInlineHook(
+             &set_render_camera_hook,
+             game_base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+             expected_camera_manager_set_render_camera_entry,
+             sizeof(expected_camera_manager_set_render_camera_entry),
+             route_skill_render_camera))) {
         SudekiMpUninstallSplitScreenRender();
         return FALSE;
     }
     SudekiMpLogFormat(
-        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s skill_camera_routing=%s toggle_virtual_key=0x%02lx\r\n",
         (unsigned long)RVA_RENDER_START,
         (unsigned long)RVA_RENDER_START_CALL,
         (unsigned long)RVA_FRAME_END,
@@ -2124,6 +2294,8 @@ BOOL SudekiMpInstallSplitScreenRender(
         dual_camera_frame_cache_enabled ? "true" : "false",
         dual_camera_frame_cache_enabled ?
             "direct_synchronous_cycle_icon_resource" : "disabled",
+        skill_camera_routing_enabled ?
+            "caster_viewport_only" : "disabled",
         (unsigned long)second_player_camera_virtual_key
     );
     return TRUE;
@@ -2131,6 +2303,7 @@ BOOL SudekiMpInstallSplitScreenRender(
 
 void SudekiMpUninstallSplitScreenRender(void) {
     restore_render_only_camera();
+    SudekiMpRestoreInlineHook(&set_render_camera_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_status_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_name_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_values_pointer_hook);
@@ -2155,6 +2328,10 @@ void SudekiMpUninstallSplitScreenRender(void) {
     shared_menu_gate_last_state = -1;
     second_player_camera_enabled = FALSE;
     dual_camera_frame_cache_enabled = FALSE;
+    skill_camera_routing_enabled = FALSE;
+    pending_skill_camera_caster = NULL;
+    ZeroMemory(player_skill_cameras, sizeof(player_skill_cameras));
+    ZeroMemory(player_skill_render_states, sizeof(player_skill_render_states));
     second_player_camera_virtual_key = 0u;
     second_player_camera_key_was_down = FALSE;
     camera_manager_add_camera = NULL;
@@ -2173,6 +2350,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     viewport_hud_binding_active = FALSE;
     render_only_swap_active = FALSE;
     render_only_camera_slot = NULL;
+    render_only_applied_state = NULL;
     second_player_camera_last_rejection = 0u;
     d3d_device_global = NULL;
     original_render_start = NULL;

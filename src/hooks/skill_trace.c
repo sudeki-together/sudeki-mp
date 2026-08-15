@@ -1,7 +1,9 @@
 #include "hooks/skill_trace.h"
 
 #include "engine/log.h"
+#include "engine/player_combat_context.h"
 #include "hooks/call_hook.h"
+#include "hooks/split_screen_render.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -421,6 +423,8 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
     uint32_t active_aim_camera = 0;
     uint8_t skill_targeting_active = 0;
     uint8_t targeter_flags = 0;
+    void *camera_caster = NULL;
+    BOOL route_camera_call = FALSE;
     int handler_result;
 
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
@@ -641,7 +645,21 @@ static int SUDEKIMP_FASTCALL trace_script_method_opcode(
             );
         }
     }
+    route_camera_call = primary_thread &&
+        method_hash == HASH_SET_RENDER_CAMERA &&
+        trace_skill_object != NULL &&
+        read_trace_memory(
+            (const uint8_t *)trace_skill_object + 0x10u,
+            &camera_caster,
+            sizeof(camera_caster)
+        ) && camera_caster != NULL;
+    if (route_camera_call) {
+        SudekiMpSplitScreenBeginSkillCameraCall(camera_caster);
+    }
     handler_result = original_script_method_opcode(thread, NULL);
+    if (route_camera_call) {
+        SudekiMpSplitScreenEndSkillCameraCall();
+    }
     if (animation_binding_candidate) {
         InterlockedExchange(&trace_animation_binding_pending, 0);
     }
@@ -1015,8 +1033,19 @@ static SkillBool SUDEKIMP_FASTCALL trace_skill_use(
 }
 
 static void SUDEKIMP_FASTCALL trace_stop_rumble(void *self, void *ignored_edx) {
+    void *owner = NULL;
+
     (void)ignored_edx;
+    if (self != NULL) {
+        read_trace_memory(
+            (const uint8_t *)self + 0x10u,
+            &owner,
+            sizeof(owner)
+        );
+    }
     original_stop_rumble(self, NULL);
+    SudekiMpSplitScreenClearSkillCamera(owner, "native_skill_cleanup");
+    SudekiMpCombatContextSkillEnded(self);
     if (InterlockedCompareExchange(&trace_active, 0, 0) != 0 &&
         self == trace_skill_object) {
         if (trace_animation_speed_applied && trace_animation_object != NULL) {

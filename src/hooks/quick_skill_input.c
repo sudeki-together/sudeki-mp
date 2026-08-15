@@ -1,6 +1,7 @@
 #include "hooks/quick_skill_input.h"
 
 #include "engine/log.h"
+#include "engine/player_combat_context.h"
 #include "hooks/call_hook.h"
 
 #include <stdint.h>
@@ -61,6 +62,7 @@ static SpiritStrikeFunction original_spirit_strike_validate;
 static SpiritStrikeFunction original_spirit_strike_activate;
 static uint8_t *game_base;
 static BOOL ranged_prototype_enabled;
+static BOOL realtime_targeting_guard_enabled;
 static BOOL ranged_transition_pending;
 static UINT_PTR ranged_transition_timer;
 static uint32_t ranged_transition_action_id;
@@ -155,6 +157,19 @@ static BOOL is_idle_armed_state(const SkillReadinessSnapshot *snapshot) {
         (snapshot->flags_50 & 0x00400000u) == 0;
 }
 
+static void register_started_quick_skill(void) {
+    void *owner;
+
+    if (current_action_skill == NULL ||
+        !current_action_validation_seen ||
+        current_action_validation_result != 0 ||
+        *(uint8_t *)((uint8_t *)current_action_skill + 0x6cu) == 0u) {
+        return;
+    }
+    owner = *(void **)((uint8_t *)current_action_skill + 0x10u);
+    SudekiMpCombatContextSkillStarted(owner, current_action_skill);
+}
+
 static void CALLBACK complete_ranged_transition(
     HWND window,
     UINT message,
@@ -204,6 +219,10 @@ static void CALLBACK complete_ranged_transition(
             "quick_skill_input event=ranged_transition_retry\r\n"
         );
         original_quick_skill_action(action_id);
+        register_started_quick_skill();
+        if (realtime_targeting_guard_enabled) {
+            SudekiMpCombatContextsPollGame((HMODULE)game_base);
+        }
     } else {
         SudekiMpLogWrite(
             "quick_skill_input event=ranged_transition_abort reason=not_idle_armed\r\n"
@@ -296,6 +315,7 @@ static int __stdcall trace_spirit_strike_activate(
 
 static void SUDEKIMP_EAX_ARGUMENT trace_quick_skill_action(uint32_t action_id) {
     SkillReadinessSnapshot entered_snapshot;
+    const char *guard_reason;
 
     current_action_id = action_id;
     current_action_skill = NULL;
@@ -314,7 +334,27 @@ static void SUDEKIMP_EAX_ARGUMENT trace_quick_skill_action(uint32_t action_id) {
             (unsigned long)action_id
         );
     }
+    if (realtime_targeting_guard_enabled &&
+        action_id >= QUICK_SKILL_ACTION_FIRST &&
+        action_id <= QUICK_SKILL_ACTION_LAST) {
+        SudekiMpCombatContextsPollGame((HMODULE)game_base);
+    }
+    if (realtime_targeting_guard_enabled &&
+        action_id >= QUICK_SKILL_ACTION_FIRST &&
+        action_id <= QUICK_SKILL_ACTION_LAST &&
+        !SudekiMpCombatContextCanStartSkill(0u, &guard_reason)) {
+        SudekiMpLogFormat(
+            "realtime_skill_combat event=player_skill_rejected player=1 ordinal=%lu reason=%s policy=fail_safe_native_targeting_serialization\r\n",
+            (unsigned long)(action_id - QUICK_SKILL_ACTION_FIRST),
+            guard_reason
+        );
+        return;
+    }
     original_quick_skill_action(action_id);
+    register_started_quick_skill();
+    if (realtime_targeting_guard_enabled) {
+        SudekiMpCombatContextsPollGame((HMODULE)game_base);
+    }
     if (ranged_prototype_enabled && is_ranged_strafe_rejection()) {
         SudekiMpLogWrite(
             "quick_skill_input event=ranged_transition_begin method=native_ui_cycle\r\n"
@@ -363,7 +403,8 @@ static void SUDEKIMP_EAX_ARGUMENT trace_quick_skill_action(uint32_t action_id) {
 
 BOOL SudekiMpInstallQuickSkillInputTrace(
     HMODULE game_module,
-    BOOL enable_ranged_prototype
+    BOOL enable_ranged_prototype,
+    BOOL enable_realtime_targeting_guard
 ) {
     uint8_t *base;
 
@@ -375,6 +416,7 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
     base = (uint8_t *)game_module;
     game_base = base;
     ranged_prototype_enabled = enable_ranged_prototype;
+    realtime_targeting_guard_enabled = enable_realtime_targeting_guard;
     original_quick_skill_action = (QuickSkillActionFunction)(
         base + RVA_QUICK_SKILL_ACTION
     );
@@ -430,6 +472,10 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
         "quick_skill_input_ranged_prototype=%s\r\n",
         ranged_prototype_enabled ? "enabled" : "disabled"
     );
+    SudekiMpLogFormat(
+        "quick_skill_input_realtime_targeting_guard=%s policy=serialize_native_global_target_selection_allow_cross_player_execution_overlap\r\n",
+        realtime_targeting_guard_enabled ? "enabled" : "disabled"
+    );
     return TRUE;
 }
 
@@ -449,6 +495,7 @@ void SudekiMpUninstallQuickSkillInputTrace(void) {
     original_spirit_strike_activate = NULL;
     game_base = NULL;
     ranged_prototype_enabled = FALSE;
+    realtime_targeting_guard_enabled = FALSE;
     ranged_transition_pending = FALSE;
     ranged_transition_timer = 0;
     ranged_transition_action_id = 0;

@@ -1,5 +1,7 @@
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "engine/player_combat_context.h"
+#include "engine/skill_activation_abi.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
@@ -10,6 +12,7 @@
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
+#include "input/bridge_receiver.h"
 #include "input/key_binding.h"
 
 #include <windows.h>
@@ -32,6 +35,7 @@
 #define SUDEKIMP_INIT_PLAYER_INPUT_TRACE_FAILED 11u
 #define SUDEKIMP_INIT_FREEROAM_CAMERA_FAILED 12u
 #define SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED 13u
+#define SUDEKIMP_INIT_INPUT_BRIDGE_FAILED 14u
 
 static HMODULE dll_module;
 
@@ -187,22 +191,31 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL dual_camera_frame_cache_enabled;
     BOOL freeroam_camera_input_enabled;
     BOOL ranged_quick_skill_prototype_enabled;
+    BOOL realtime_multiplayer_skill_combat_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
+    BOOL external_input_bridge_enabled;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
     wchar_t second_player_weak_attack_key_text[32];
     wchar_t second_player_camera_key_text[32];
+    wchar_t second_player_skill_key_text[4][32];
     wchar_t freeroam_camera_modifier_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
     UINT second_player_camera_virtual_key = VK_F9;
+    UINT second_player_skill_virtual_keys[4] = {
+        VK_F1, VK_F2, VK_F3, VK_F4
+    };
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
+    int input_bridge_port = 26760;
+    int input_bridge_timeout_ms = 250;
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
     float second_player_maximum_separation = 10.0f;
+    float input_bridge_deadzone = 0.20f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -365,10 +378,20 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableRangedQuickSkillPrototype"
     );
+    realtime_multiplayer_skill_combat_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableRealtimeMultiplayerSkillCombatPrototype"
+    );
     direct_spirit_strike_prototype_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
         L"EnableDirectSpiritStrikePrototype"
+    );
+    external_input_bridge_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableExternalInputBridgePrototype"
     );
     GetPrivateProfileStringW(
         L"Bindings",
@@ -415,6 +438,22 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             sizeof(second_player_camera_key_text[0])),
         config_path
     );
+    GetPrivateProfileStringW(
+        L"Bindings", L"SecondPlayerSkill1", L"F1",
+        second_player_skill_key_text[0], 32u, config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings", L"SecondPlayerSkill2", L"F2",
+        second_player_skill_key_text[1], 32u, config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings", L"SecondPlayerSkill3", L"F3",
+        second_player_skill_key_text[2], 32u, config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings", L"SecondPlayerSkill4", L"F4",
+        second_player_skill_key_text[3], 32u, config_path
+    );
     if (direct_spirit_strike_prototype_enabled &&
         !SudekiMpParseInputKey(
             spirit_strike_key_text,
@@ -452,6 +491,22 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (realtime_multiplayer_skill_combat_enabled) {
+        unsigned int index;
+        for (index = 0u; index < 4u; ++index) {
+            if (!SudekiMpParseInputKey(
+                    second_player_skill_key_text[index],
+                    &second_player_skill_virtual_keys[index])) {
+                SudekiMpLogFormat(
+                    "second_player_skill_key_config=invalid ordinal=%u\r\n",
+                    index
+                );
+                SudekiMpLogWrite("status=config_error\r\n");
+                SudekiMpLogClose();
+                return SUDEKIMP_INIT_BAD_CONFIG;
+            }
+        }
     }
     if (freeroam_camera_input_enabled &&
         !SudekiMpParseInputKey(
@@ -511,6 +566,45 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (external_input_bridge_enabled &&
+        (!control_separation_enabled || !second_player_movement_enabled)) {
+        SudekiMpLogWrite(
+            "external_input_bridge_config=requires_control_separation_and_second_player_movement\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (external_input_bridge_enabled &&
+        (!read_config_integer(
+             config_path,
+             L"SudekiMP",
+             L"InputBridgePort",
+             26760,
+             1024,
+             65535,
+             &input_bridge_port) ||
+         !read_config_integer(
+             config_path,
+             L"SudekiMP",
+             L"InputBridgeTimeoutMs",
+             250,
+             50,
+             5000,
+             &input_bridge_timeout_ms) ||
+         !read_config_float(
+             config_path,
+             L"SudekiMP",
+             L"InputBridgeDeadzone",
+             0.20f,
+             0.0f,
+             0.90f,
+             &input_bridge_deadzone))) {
+        SudekiMpLogWrite("external_input_bridge_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (second_player_target_trace_enabled && !control_separation_enabled) {
         SudekiMpLogWrite(
             "second_player_target_trace_config=requires_control_separation\r\n"
@@ -540,6 +634,23 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (!split_screen_render_enabled || !second_player_camera_enabled)) {
         SudekiMpLogWrite(
             "dual_camera_frame_cache_config=requires_split_screen_render_and_second_player_camera\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (realtime_multiplayer_skill_combat_enabled &&
+        (!patch_enabled || !trace_enabled ||
+         !quick_skill_input_trace_enabled ||
+         !ranged_quick_skill_prototype_enabled ||
+         !control_separation_enabled ||
+         !second_player_movement_enabled ||
+         !second_player_weak_attack_enabled ||
+         !split_screen_render_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "realtime_multiplayer_skill_combat_config=requires_normal_speed_plasmatica_trace_quick_skill_ranged_control_p2_movement_p2_attack_split_p2_camera_dual_cache\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -656,7 +767,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if (quick_skill_input_trace_enabled || ranged_quick_skill_prototype_enabled) {
         if (!SudekiMpInstallQuickSkillInputTrace(
                 game_module,
-                ranged_quick_skill_prototype_enabled)) {
+                ranged_quick_skill_prototype_enabled,
+                realtime_multiplayer_skill_combat_enabled)) {
             SudekiMpLogFormat("quick_skill_input_trace_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("quick_skill_input_trace_applied=false\r\n");
@@ -704,7 +816,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("freeroam_camera_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx target_trace=%s shared_group_camera=%s\r\n",
+        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_port=%d bridge_timeout_ms=%d bridge_deadzone_bits=0x%08lx\r\n",
         control_separation_enabled ? "true" : "false",
         (unsigned long)control_separation_virtual_key,
         second_player_movement_enabled ? "true" : "false",
@@ -713,10 +825,41 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (unsigned long)float_bits(second_player_maximum_separation),
         second_player_weak_attack_enabled ? "true" : "false",
         (unsigned long)second_player_weak_attack_virtual_key,
+        realtime_multiplayer_skill_combat_enabled ? "true" : "false",
+        (unsigned long)second_player_skill_virtual_keys[0],
+        (unsigned long)second_player_skill_virtual_keys[1],
+        (unsigned long)second_player_skill_virtual_keys[2],
+        (unsigned long)second_player_skill_virtual_keys[3],
         second_player_target_trace_enabled ? "true" : "false",
-        shared_group_camera_enabled ? "true" : "false"
+        shared_group_camera_enabled ? "true" : "false",
+        external_input_bridge_enabled ? "true" : "false",
+        input_bridge_port,
+        input_bridge_timeout_ms,
+        (unsigned long)float_bits(input_bridge_deadzone)
     );
     if (control_separation_enabled) {
+        SudekiMpCombatContextsReset();
+        if (external_input_bridge_enabled &&
+            !SudekiMpInputBridgeStart(
+                (unsigned int)input_bridge_port,
+                (DWORD)input_bridge_timeout_ms)) {
+            SudekiMpLogFormat("input_bridge_start_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("status=input_bridge_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
+        }
+        if (realtime_multiplayer_skill_combat_enabled &&
+            !SudekiMpInitializeSkillActivationAbi(game_module)) {
+            SudekiMpLogFormat(
+                "realtime_skill_activation_abi_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpInputBridgeStop();
+            SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+        }
         if (!SudekiMpInstallControlSeparation(
                 game_module,
                 control_separation_virtual_key,
@@ -726,10 +869,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 second_player_maximum_separation,
                 second_player_weak_attack_enabled,
                 second_player_weak_attack_virtual_key,
+                realtime_multiplayer_skill_combat_enabled,
+                second_player_skill_virtual_keys,
                 second_player_target_trace_enabled,
-                shared_group_camera_enabled)) {
+                shared_group_camera_enabled,
+                external_input_bridge_enabled,
+                input_bridge_deadzone)) {
             SudekiMpLogFormat("control_separation_error=%lu\r\n",
                 (unsigned long)GetLastError());
+            SudekiMpInputBridgeStop();
             SudekiMpLogWrite("control_separation_applied=false\r\n");
             SudekiMpLogWrite("status=control_separation_error\r\n");
             SudekiMpLogClose();
@@ -740,7 +888,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s second_player_camera_toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_camera_toggle_virtual_key=0x%02lx\r\n",
         split_screen_render_enabled ? "true" : "false",
         dual_camera_frame_cache_enabled ?
             "alternating_render_state_frame_cache" :
@@ -748,6 +896,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "render_only_translated_camera_toggle" :
                 "same_native_camera"),
         dual_camera_frame_cache_enabled ? "true" : "false",
+        realtime_multiplayer_skill_combat_enabled ?
+            "caster_viewport_only" : "disabled",
         (unsigned long)second_player_camera_virtual_key
     );
     if (split_screen_render_enabled) {
@@ -755,7 +905,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 game_module,
                 second_player_camera_enabled,
                 dual_camera_frame_cache_enabled,
-                second_player_camera_virtual_key)) {
+                second_player_camera_virtual_key,
+                realtime_multiplayer_skill_combat_enabled)) {
             SudekiMpLogFormat(
                 "split_screen_render_error=%lu\r\n",
                 (unsigned long)GetLastError()
@@ -811,6 +962,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     SudekiMpLogWrite("status=ready\r\n");
     if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
+        !realtime_multiplayer_skill_combat_enabled &&
         !direct_spirit_strike_prototype_enabled &&
         !character_switch_trace_enabled &&
         !freeroam_camera_input_enabled &&
@@ -823,11 +975,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
-    (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         dll_module = instance;
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
+        if (reserved == NULL) {
+            SudekiMpInputBridgeStop();
+        }
         SudekiMpLogClose();
     }
     return TRUE;

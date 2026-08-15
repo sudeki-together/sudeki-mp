@@ -2,6 +2,7 @@
 #define SUDEKIMP_CALL_HOOK_H
 
 #include <windows.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct SudekiMpRelativeCallHook {
@@ -21,6 +22,16 @@ typedef struct SudekiMpPointerHook {
     void *original_value;
     BOOL installed;
 } SudekiMpPointerHook;
+
+#define SUDEKIMP_INLINE_HOOK_MAX_BYTES 16u
+
+typedef struct SudekiMpInlineHook {
+    uint8_t *target;
+    uint8_t original[SUDEKIMP_INLINE_HOOK_MAX_BYTES];
+    size_t length;
+    void *trampoline;
+    BOOL installed;
+} SudekiMpInlineHook;
 
 BOOL SudekiMpInstallRelativeCallHook(
     SudekiMpRelativeCallHook *hook,
@@ -49,5 +60,15 @@ BOOL SudekiMpInstallPointerHook(
 );
 
 BOOL SudekiMpRestorePointerHook(SudekiMpPointerHook *hook);
+
+BOOL SudekiMpInstallInlineHook(
+    SudekiMpInlineHook *hook,
+    uint8_t *target,
+    const uint8_t *expected,
+    size_t length,
+    const void *replacement
+);
+
+BOOL SudekiMpRestoreInlineHook(SudekiMpInlineHook *hook);
 
 #endif

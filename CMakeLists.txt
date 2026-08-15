@@ -21,6 +21,10 @@ add_library(SudekiMP SHARED
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/player_combat_context.c
+    src/engine/skill_activation_abi.c
+    src/input/bridge_protocol.c
+    src/input/bridge_receiver.c
     src/input/key_binding.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c
@@ -67,7 +71,10 @@ set_source_files_properties(src/hooks/split_screen_render.c PROPERTIES
 set_source_files_properties(src/engine/arbiter_combat_input.c PROPERTIES
     COMPILE_OPTIONS "-Wno-pedantic;-Wno-unused-parameter"
 )
-target_link_libraries(SudekiMP PRIVATE advapi32)
+set_source_files_properties(src/engine/skill_activation_abi.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+target_link_libraries(SudekiMP PRIVATE advapi32 ws2_32)
 set_target_properties(SudekiMP PROPERTIES
     PREFIX ""
     OUTPUT_NAME "SudekiMP"
@@ -176,6 +183,10 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/player_combat_context.c
+    src/engine/skill_activation_abi.c
+    src/input/bridge_protocol.c
+    src/input/bridge_receiver.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
@@ -194,7 +205,95 @@ target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 target_link_options(SudekiMP.SkillTraceImageTest PRIVATE -municode)
+target_link_libraries(SudekiMP.SkillTraceImageTest PRIVATE ws2_32)
 set_target_properties(SudekiMP.SkillTraceImageTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.PlayerCombatContextTest
+    tests/player_combat_context_test.c
+    src/engine/player_combat_context.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.PlayerCombatContextTest PRIVATE src)
+target_compile_definitions(SudekiMP.PlayerCombatContextTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.PlayerCombatContextTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.PlayerCombatContextTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.SkillActivationAbiTest
+    tests/skill_activation_abi_test.c
+    src/engine/skill_activation_abi.c
+    src/engine/player_combat_context.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.SkillActivationAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.SkillActivationAbiTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.SkillActivationAbiTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(
+    tests/skill_activation_abi_test.c
+    src/engine/skill_activation_abi.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.SkillActivationAbiTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.XInputProbe
+    tests/xinput_probe.c
+)
+target_compile_definitions(SudekiMP.XInputProbe PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.XInputProbe PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.XInputProbe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.DirectInputProbe
+    tests/direct_input_probe.c
+)
+target_compile_definitions(SudekiMP.DirectInputProbe PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.DirectInputProbe PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(SudekiMP.DirectInputProbe PRIVATE dinput8 dxguid)
+set_target_properties(SudekiMP.DirectInputProbe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.InputBridgeProtocolTest
+    tests/input_bridge_protocol_test.c
+    src/input/bridge_protocol.c
+)
+target_include_directories(SudekiMP.InputBridgeProtocolTest PRIVATE src)
+target_compile_options(SudekiMP.InputBridgeProtocolTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.InputBridgeProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.InputBridgeReceiverTest
+    tests/input_bridge_receiver_test.c
+    src/engine/log.c
+    src/input/bridge_protocol.c
+    src/input/bridge_receiver.c
+)
+target_include_directories(SudekiMP.InputBridgeReceiverTest PRIVATE src)
+target_compile_definitions(SudekiMP.InputBridgeReceiverTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.InputBridgeReceiverTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+target_link_libraries(SudekiMP.InputBridgeReceiverTest PRIVATE ws2_32)
+set_target_properties(SudekiMP.InputBridgeReceiverTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

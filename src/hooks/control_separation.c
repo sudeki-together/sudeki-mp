@@ -3,7 +3,11 @@
 #include "engine/arbiter_combat_input.h"
 #include "engine/camera_target_abi.h"
 #include "engine/log.h"
+#include "engine/player_combat_context.h"
+#include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
+#include "input/bridge_protocol.h"
+#include "input/bridge_receiver.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -94,6 +98,9 @@ static BOOL separation_data_missing_logged;
 static BOOL second_player_weak_attack_enabled;
 static UINT weak_attack_virtual_key;
 static BOOL weak_attack_was_down;
+static BOOL second_player_skills_enabled;
+static UINT second_player_skill_virtual_keys[4];
+static BOOL second_player_skill_keys_were_down[4];
 static BOOL target_trace_enabled;
 static DWORD target_trace_last_sample_tick;
 static void *target_trace_last_node;
@@ -101,6 +108,13 @@ static int target_trace_last_auto_enabled;
 static BOOL buki_movement_active;
 static int last_movement_x;
 static int last_movement_z;
+static BOOL input_bridge_enabled;
+static float input_bridge_deadzone;
+static SudekiMpInputBridgeState input_bridge_state;
+static BOOL input_bridge_connected;
+static DWORD input_bridge_last_right_stick_log_tick;
+static int16_t input_bridge_last_right_x;
+static int16_t input_bridge_last_right_y;
 static BOOL shared_group_camera_enabled;
 static MatrixTargetCreateFunction matrix_target_create;
 static void *camera_target_install;
@@ -715,14 +729,87 @@ static BOOL buki_movement_passes_separation_guard(
     return TRUE;
 }
 
+static void poll_input_bridge(void) {
+    BOOL connected;
+    DWORD now;
+    int delta_x;
+    int delta_y;
+
+    if (!input_bridge_enabled) {
+        return;
+    }
+    connected = SudekiMpInputBridgePoll(&input_bridge_state);
+    if (!connected) {
+        if (input_bridge_connected) {
+            weak_attack_was_down = FALSE;
+            stop_buki_movement();
+        }
+        input_bridge_connected = FALSE;
+        return;
+    }
+    input_bridge_connected = TRUE;
+    now = GetTickCount();
+    delta_x = (int)input_bridge_state.right_x -
+        (int)input_bridge_last_right_x;
+    delta_y = (int)input_bridge_state.right_y -
+        (int)input_bridge_last_right_y;
+    if ((delta_x > 4096 || delta_x < -4096 ||
+         delta_y > 4096 || delta_y < -4096) &&
+        (DWORD)(now - input_bridge_last_right_stick_log_tick) >= 250u) {
+        SudekiMpLogFormat(
+            "input_bridge event=right_stick_observed right_x=%d right_y=%d policy=captured_not_applied_independent_camera_pending\r\n",
+            (int)input_bridge_state.right_x,
+            (int)input_bridge_state.right_y
+        );
+        input_bridge_last_right_stick_log_tick = now;
+        input_bridge_last_right_x = input_bridge_state.right_x;
+        input_bridge_last_right_y = input_bridge_state.right_y;
+    }
+}
+
+static BOOL bridge_movement(float *x, float *z, float *speed) {
+    float raw_x;
+    float raw_z;
+    float magnitude;
+    float direction_magnitude;
+    float scaled_magnitude;
+
+    if (!input_bridge_enabled || !input_bridge_connected) {
+        return FALSE;
+    }
+    raw_x = (float)input_bridge_state.left_x / 32768.0f;
+    raw_z = -(float)input_bridge_state.left_y / 32768.0f;
+    magnitude = sqrtf(raw_x * raw_x + raw_z * raw_z);
+    if (magnitude <= input_bridge_deadzone) {
+        *x = 0.0f;
+        *z = 0.0f;
+        *speed = 0.0f;
+        return TRUE;
+    }
+    direction_magnitude = magnitude;
+    if (magnitude > 1.0f) {
+        magnitude = 1.0f;
+    }
+    scaled_magnitude = (magnitude - input_bridge_deadzone) /
+        (1.0f - input_bridge_deadzone);
+    *x = raw_x / direction_magnitude;
+    *z = raw_z / direction_magnitude;
+    *speed = scaled_magnitude;
+    return TRUE;
+}
+
 static void poll_buki_movement(void *controller, BOOL owns_foreground) {
     uint8_t *character = (uint8_t *)overridden_character;
     uint8_t *component;
     uint8_t *mode_state;
     void *arbiter;
     void *controller_target;
-    int x;
-    int z;
+    int x = 0;
+    int z = 0;
+    float input_x;
+    float input_z;
+    float movement_speed;
+    BOOL bridge_source;
     float direction[3];
     uint32_t direction_x_bits;
     uint32_t direction_z_bits;
@@ -747,22 +834,33 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
         return;
     }
 
-    x = ((GetAsyncKeyState('L') & 0x8000) != 0) -
-        ((GetAsyncKeyState('J') & 0x8000) != 0);
-    z = ((GetAsyncKeyState('I') & 0x8000) != 0) -
-        ((GetAsyncKeyState('K') & 0x8000) != 0);
-    if (x == 0 && z == 0) {
+    bridge_source = input_bridge_enabled;
+    if (bridge_source) {
+        if (!bridge_movement(&input_x, &input_z, &movement_speed)) {
+            stop_buki_movement();
+            return;
+        }
+    } else {
+        x = ((GetAsyncKeyState('L') & 0x8000) != 0) -
+            ((GetAsyncKeyState('J') & 0x8000) != 0);
+        z = ((GetAsyncKeyState('I') & 0x8000) != 0) -
+            ((GetAsyncKeyState('K') & 0x8000) != 0);
+        input_x = (float)x;
+        input_z = (float)z;
+        movement_speed = 1.0f;
+        if (x != 0 && z != 0) {
+            input_x *= 0.70710678f;
+            input_z *= 0.70710678f;
+        }
+    }
+    if (movement_speed <= 0.0001f) {
         stop_buki_movement();
         return;
     }
 
-    direction[0] = (float)x;
+    direction[0] = input_x;
     direction[1] = 0.0f;
-    direction[2] = (float)z;
-    if (x != 0 && z != 0) {
-        direction[0] *= 0.70710678f;
-        direction[2] *= 0.70710678f;
-    }
+    direction[2] = input_z;
     if (camera_relative_movement_enabled) {
         float transformed[3] = {0.0f, 0.0f, 0.0f};
         float horizontal_length;
@@ -790,23 +888,30 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
     }
     memcpy(&direction_x_bits, &direction[0], sizeof(direction_x_bits));
     memcpy(&direction_z_bits, &direction[2], sizeof(direction_z_bits));
-    arbiter_movement(arbiter, direction, 1.0f, 1.0f, 0u);
-    if (!buki_movement_active || x != last_movement_x ||
-        z != last_movement_z) {
+    arbiter_movement(arbiter, direction, movement_speed, 1.0f, 0u);
+    if (!buki_movement_active ||
+        (bridge_source &&
+         (((int)input_bridge_state.left_x - last_movement_x > 4096 ||
+           (int)input_bridge_state.left_x - last_movement_x < -4096) ||
+          ((int)input_bridge_state.left_y - last_movement_z > 4096 ||
+           (int)input_bridge_state.left_y - last_movement_z < -4096))) ||
+        (!bridge_source && (x != last_movement_x || z != last_movement_z))) {
         SudekiMpLogFormat(
-            "control_separation event=second_player_movement phase=submit character=0x%08lx arbiter=0x%08lx input_x=%d input_z=%d direction_bits=%08lx,00000000,%08lx camera_relative=%s speed_bits=0x3f800000 turn_rate_bits=0x3f800000 movement_mode=0\r\n",
+            "control_separation event=second_player_movement phase=submit source=%s character=0x%08lx arbiter=0x%08lx input_x=%d input_z=%d direction_bits=%08lx,00000000,%08lx camera_relative=%s speed_bits=0x%08lx turn_rate_bits=0x3f800000 movement_mode=0\r\n",
+            bridge_source ? "external_bridge" : "keyboard",
             (unsigned long)(uintptr_t)character,
             (unsigned long)(uintptr_t)arbiter,
-            x,
-            z,
+            bridge_source ? (int)input_bridge_state.left_x : x,
+            bridge_source ? (int)input_bridge_state.left_y : z,
             (unsigned long)direction_x_bits,
             (unsigned long)direction_z_bits,
-            camera_relative_movement_enabled ? "true" : "false"
+            camera_relative_movement_enabled ? "true" : "false",
+            (unsigned long)float_bits(movement_speed)
         );
     }
     buki_movement_active = TRUE;
-    last_movement_x = x;
-    last_movement_z = z;
+    last_movement_x = bridge_source ? input_bridge_state.left_x : x;
+    last_movement_z = bridge_source ? input_bridge_state.left_y : z;
 }
 
 static void poll_buki_weak_attack(void *controller, BOOL owns_foreground) {
@@ -820,8 +925,10 @@ static void poll_buki_weak_attack(void *controller, BOOL owns_foreground) {
     if (!second_player_weak_attack_enabled) {
         return;
     }
-    key_is_down =
-        (GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0;
+    key_is_down = input_bridge_enabled ?
+        (input_bridge_connected &&
+         (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) :
+        ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0);
     if (character == NULL || !overridden_character_is_in_active_group()) {
         weak_attack_was_down = key_is_down;
         return;
@@ -865,6 +972,72 @@ static void poll_buki_weak_attack(void *controller, BOOL owns_foreground) {
         );
     }
     weak_attack_was_down = key_is_down;
+}
+
+static void poll_second_player_skills(
+    void *controller,
+    BOOL owns_foreground
+) {
+    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *component;
+    uint8_t *mode_state;
+    void *controller_target;
+    unsigned int ordinal;
+
+    if (!second_player_skills_enabled) {
+        return;
+    }
+    component = character == NULL ? NULL :
+        *(uint8_t **)(character + 0x94u);
+    mode_state = component == NULL ? NULL :
+        *(uint8_t **)(component + 0x3cu);
+    controller_target = controller == NULL ? NULL :
+        *(void **)((uint8_t *)controller + 0x248u);
+    for (ordinal = 0u; ordinal < 4u; ++ordinal) {
+        BOOL key_is_down = (GetAsyncKeyState(
+            (int)second_player_skill_virtual_keys[ordinal]
+        ) & 0x8000) != 0;
+
+        if (owns_foreground && key_is_down &&
+            !second_player_skill_keys_were_down[ordinal]) {
+            const char *reason = "invalid_character_state";
+
+            SudekiMpCombatContextsPollGame((HMODULE)game_base);
+            if (character != NULL &&
+                overridden_character_is_in_active_group() &&
+                component != NULL && mode_state != NULL &&
+                *(void **)(character + 0x90u) != NULL &&
+                *(void **)(character + 0xacu) != NULL &&
+                *(int16_t *)(component + 0x16au) == 1 &&
+                *(mode_state + 0x0bu) == 0 &&
+                character != controller_target &&
+                SudekiMpCombatContextCanStartSkill(1u, &reason)) {
+                SudekiMpSkillActivationResult result =
+                    SudekiMpActivateCharacterQuickSkill(character, ordinal);
+                SudekiMpCombatContextsPollGame((HMODULE)game_base);
+                SudekiMpLogFormat(
+                    "realtime_skill_combat event=player_skill_input player=2 ordinal=%u virtual_key=0x%02lx character=0x%08lx status=%s skill=0x%08lx skill_data=0x%08lx slot=%d validation=%d use=%u\r\n",
+                    ordinal,
+                    (unsigned long)second_player_skill_virtual_keys[ordinal],
+                    (unsigned long)(uintptr_t)character,
+                    SudekiMpSkillActivationStatusName(result.status),
+                    (unsigned long)(uintptr_t)result.skill,
+                    (unsigned long)(uintptr_t)result.skill_data,
+                    result.slot,
+                    result.validation_result,
+                    (unsigned int)result.use_result
+                );
+            } else {
+                SudekiMpLogFormat(
+                    "realtime_skill_combat event=player_skill_rejected player=2 ordinal=%u virtual_key=0x%02lx reason=%s policy=fail_safe_native_targeting_serialization\r\n",
+                    ordinal,
+                    (unsigned long)second_player_skill_virtual_keys[ordinal],
+                    reason
+                );
+            }
+        }
+        second_player_skill_keys_were_down[ordinal] = key_is_down;
+    }
 }
 
 static void poll_buki_target_trace(BOOL owns_foreground) {
@@ -1122,6 +1295,31 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     BOOL owns_foreground;
 
     original_controller_update(controller, update_data);
+    poll_input_bridge();
+    SudekiMpCombatContextSetCharacter(
+        0u,
+        controller == NULL ? NULL :
+            *(void **)((uint8_t *)controller + 0x248u)
+    );
+    SudekiMpCombatContextSetCharacter(1u, overridden_character);
+    SudekiMpCombatContextSetInputSource(
+        0u,
+        controller == NULL ? SUDEKIMP_COMBAT_INPUT_NONE :
+            SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER,
+        controller
+    );
+    SudekiMpCombatContextSetInputSource(
+        1u,
+        overridden_character == NULL ? SUDEKIMP_COMBAT_INPUT_NONE :
+            (input_bridge_enabled ?
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE :
+                SUDEKIMP_COMBAT_INPUT_KEYBOARD_PROTOTYPE),
+        overridden_character == NULL ? NULL :
+            (input_bridge_enabled ?
+                (void *)SudekiMpInputBridgeIdentity() :
+                (void *)second_player_skill_virtual_keys)
+    );
+    SudekiMpCombatContextsPollGame((HMODULE)game_base);
     hotkey_is_down =
         (GetAsyncKeyState((int)selected_virtual_key) & 0x8000) != 0;
     foreground = GetForegroundWindow();
@@ -1136,6 +1334,7 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     hotkey_was_down = hotkey_is_down;
     poll_buki_movement(controller, owns_foreground);
     poll_buki_weak_attack(controller, owns_foreground);
+    poll_second_player_skills(controller, owns_foreground);
     poll_buki_target_trace(owns_foreground);
     poll_shared_group_camera(controller);
 }
@@ -1149,8 +1348,12 @@ BOOL SudekiMpInstallControlSeparation(
     float maximum_separation,
     BOOL enable_second_player_weak_attack,
     UINT attack_virtual_key,
+    BOOL enable_second_player_skills,
+    const UINT skill_virtual_keys[4],
     BOOL enable_target_trace,
-    BOOL enable_shared_group_camera
+    BOOL enable_shared_group_camera,
+    BOOL enable_input_bridge,
+    float bridge_deadzone
 ) {
     uint8_t *base;
     void **slot;
@@ -1158,12 +1361,30 @@ BOOL SudekiMpInstallControlSeparation(
     if (game_module == NULL || toggle_virtual_key == 0u ||
         toggle_virtual_key > 0xffu ||
         (enable_second_player_weak_attack &&
-         (attack_virtual_key == 0u || attack_virtual_key > 0xffu))) {
+         (attack_virtual_key == 0u || attack_virtual_key > 0xffu)) ||
+        (enable_second_player_skills && skill_virtual_keys == NULL)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    if (enable_second_player_skills) {
+        unsigned int index;
+        for (index = 0u; index < 4u; ++index) {
+            if (skill_virtual_keys[index] == 0u ||
+                skill_virtual_keys[index] > 0xffu) {
+                SetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+        }
+    }
     base = (uint8_t *)game_module;
     if (enable_camera_relative_movement && !enable_second_player_movement) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (enable_input_bridge &&
+        (!enable_second_player_movement || bridge_deadzone < 0.0f ||
+         bridge_deadzone >= 0.95f ||
+         SudekiMpInputBridgeIdentity() == NULL)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -1219,6 +1440,29 @@ BOOL SudekiMpInstallControlSeparation(
     second_player_weak_attack_enabled = enable_second_player_weak_attack;
     weak_attack_virtual_key = attack_virtual_key;
     weak_attack_was_down = FALSE;
+    input_bridge_enabled = enable_input_bridge;
+    input_bridge_deadzone = bridge_deadzone;
+    ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
+    input_bridge_connected = FALSE;
+    input_bridge_last_right_stick_log_tick = 0u;
+    input_bridge_last_right_x = 0;
+    input_bridge_last_right_y = 0;
+    second_player_skills_enabled = enable_second_player_skills;
+    ZeroMemory(
+        second_player_skill_virtual_keys,
+        sizeof(second_player_skill_virtual_keys)
+    );
+    ZeroMemory(
+        second_player_skill_keys_were_down,
+        sizeof(second_player_skill_keys_were_down)
+    );
+    if (enable_second_player_skills) {
+        memcpy(
+            second_player_skill_virtual_keys,
+            skill_virtual_keys,
+            sizeof(second_player_skill_virtual_keys)
+        );
+    }
     target_trace_enabled = enable_target_trace;
     shared_group_camera_enabled = enable_shared_group_camera;
     matrix_target_create = (MatrixTargetCreateFunction)(
@@ -1257,7 +1501,7 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "control_separation_install=success target_resource_type=0x%02x virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx target_trace=%s shared_group_camera=%s combat_input_rva=0x000db0e0\r\n",
+        "control_separation_install=success target_resource_type=0x%02x virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
         BUKI_RESOURCE_TYPE,
         (unsigned long)selected_virtual_key,
         second_player_movement_enabled ? "true" : "false",
@@ -1266,8 +1510,15 @@ BOOL SudekiMpInstallControlSeparation(
         (unsigned long)float_bits(maximum_separation_distance),
         second_player_weak_attack_enabled ? "true" : "false",
         (unsigned long)weak_attack_virtual_key,
+        second_player_skills_enabled ? "true" : "false",
+        (unsigned long)second_player_skill_virtual_keys[0],
+        (unsigned long)second_player_skill_virtual_keys[1],
+        (unsigned long)second_player_skill_virtual_keys[2],
+        (unsigned long)second_player_skill_virtual_keys[3],
         target_trace_enabled ? "true" : "false",
-        shared_group_camera_enabled ? "true" : "false"
+        shared_group_camera_enabled ? "true" : "false",
+        input_bridge_enabled ? "true" : "false",
+        (unsigned long)float_bits(input_bridge_deadzone)
     );
     return TRUE;
 }
@@ -1294,6 +1545,22 @@ void SudekiMpUninstallControlSeparation(void) {
     second_player_weak_attack_enabled = FALSE;
     weak_attack_virtual_key = 0;
     weak_attack_was_down = FALSE;
+    input_bridge_enabled = FALSE;
+    input_bridge_deadzone = 0.0f;
+    ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
+    input_bridge_connected = FALSE;
+    input_bridge_last_right_stick_log_tick = 0u;
+    input_bridge_last_right_x = 0;
+    input_bridge_last_right_y = 0;
+    second_player_skills_enabled = FALSE;
+    ZeroMemory(
+        second_player_skill_virtual_keys,
+        sizeof(second_player_skill_virtual_keys)
+    );
+    ZeroMemory(
+        second_player_skill_keys_were_down,
+        sizeof(second_player_skill_keys_were_down)
+    );
     target_trace_enabled = FALSE;
     shared_group_camera_enabled = FALSE;
     matrix_target_create = NULL;
@@ -1308,4 +1575,5 @@ void SudekiMpUninstallControlSeparation(void) {
     buki_movement_active = FALSE;
     last_movement_x = 0;
     last_movement_z = 0;
+    SudekiMpCombatContextsReset();
 }

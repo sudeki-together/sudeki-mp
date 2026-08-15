@@ -4,6 +4,14 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
 build_dir="${project_dir}/build/mingw32"
+native_build_dir="${project_dir}/build/linux/bin"
+
+mkdir -p "${native_build_dir}"
+cc -std=c11 -O2 -Wall -Wextra -Wpedantic \
+    -I"${project_dir}/src" \
+    "${project_dir}/tools/input-bridge/main.c" \
+    "${project_dir}/src/input/bridge_protocol.c" \
+    -o "${native_build_dir}/sudekimp-input-bridge"
 
 flatpak run --command=sh org.ghidra_sre.Ghidra -c '
     set -eu

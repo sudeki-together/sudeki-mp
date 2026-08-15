@@ -11,10 +11,14 @@ save_root="${research_prefix}/drive_c/users/steamuser/AppData/Roaming/Sudeki/Sav
 mode="${1:---safe}"
 speed="${2:-2.0}"
 spirit_key="${2:-G}"
+input_device="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
+input_bridge_port="${SUDEKIMP_INPUT_BRIDGE_PORT:-26760}"
+input_bridge_helper="${project_dir}/build/linux/bin/sudekimp-input-bridge"
+input_bridge_log="${project_dir}/build/linux/input-bridge.log"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
@@ -33,6 +37,8 @@ usage() {
         '  --shared-quit-menu-test Verify the Quit menu replaces both camera halves with one full-width native interface.' \
         '  --viewport-hud-test Verify the right viewport reads Buki HUD data while the left viewport remains Ailish-owned.' \
         '  --dual-camera-local-coop-test Combine dual cameras with F10 AI override and I/J/K/L Buki movement.' \
+        '  --controller-bridge-test Drive Buki movement/weak attack from a Linux controller over localhost.' \
+        '  --realtime-skill-coop-test Add guarded P1/P2 native skills and caster-only Plasmatica camera routing.' \
         '  --second-player-target-trace Passively log Buki native target changes while AI is off.' \
         '  --second-player-attack-test Use F10 for Buki AI, I/J/K/L movement, and U for Buki weak attack.' \
         '  --ranged-skill-test  Test guarded native UI-state cycling for Elco/Ailish QuickSkills.' \
@@ -43,7 +49,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -71,6 +77,14 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
         exit 2
     fi
 fi
+if [[ "${mode}" == "--controller-bridge-test" ]]; then
+    if [[ ! "${input_bridge_port}" =~ ^[0-9]+$ ]] ||
+        (( input_bridge_port < 1024 || input_bridge_port > 65535 )); then
+        printf 'Invalid bridge port: %s (expected 1024 through 65535)\n' \
+            "${input_bridge_port}" >&2
+        exit 2
+    fi
+fi
 
 if pgrep -x SUDEKI.exe >/dev/null; then
     printf '%s\n' 'Sudeki is already running; close it normally before resuming research.' >&2
@@ -95,7 +109,14 @@ fi
 "${project_dir}/tools/build-linux.sh"
 
 antialiasing_original=""
+input_bridge_pid=""
 restore_config() {
+    if [[ -n "${input_bridge_pid}" ]]; then
+        kill "${input_bridge_pid}" 2>/dev/null || true
+        wait "${input_bridge_pid}" 2>/dev/null || true
+        input_bridge_pid=""
+        printf '%s\n' 'Stopped the Linux Player 2 input bridge.'
+    fi
     cp -- "${source_config}" "${generated_config}"
     if [[ -n "${antialiasing_original}" ]]; then
         SUDEKIMP_WINEPREFIX="${research_prefix}" \
@@ -219,6 +240,39 @@ case "${mode}" in
             -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
             "${generated_config}"
         ;;
+    --controller-bridge-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
+            -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
+    --realtime-skill-coop-test)
+        sed -i \
+            -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
+            -e 's/^EnablePlasmaticaTrace=false$/EnablePlasmaticaTrace=true/' \
+            -e 's/^EnableQuickSkillInputTrace=false$/EnableQuickSkillInputTrace=true/' \
+            -e 's/^EnableRangedQuickSkillPrototype=false$/EnableRangedQuickSkillPrototype=true/' \
+            -e 's/^EnableRealtimeMultiplayerSkillCombatPrototype=false$/EnableRealtimeMultiplayerSkillCombatPrototype=true/' \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
     --second-player-target-trace)
         sed -i \
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
@@ -279,7 +333,9 @@ if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--dual-camera-frame-cache-test" ||
       "${mode}" == "--shared-quit-menu-test" ||
       "${mode}" == "--viewport-hud-test" ||
-      "${mode}" == "--dual-camera-local-coop-test" ]]; then
+      "${mode}" == "--dual-camera-local-coop-test" ||
+      "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--realtime-skill-coop-test" ]]; then
     antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
         "${project_dir}/tools/configure-antialiasing.sh" --get)"
     SUDEKIMP_WINEPREFIX="${research_prefix}" \
@@ -421,6 +477,26 @@ if [[ "${mode}" == "--dual-camera-local-coop-test" ]]; then
         '  Check for view swapping, stale frames, geometry/shadow defects, or control loss.' \
         '  Press F10 again to restore Buki AI before exiting.'
 fi
+if [[ "${mode}" == "--controller-bridge-test" ]]; then
+    printf '%s\n' \
+        '  Controller bridge test: load the Ailish/Buki save and wait for both cameras.' \
+        '  Press F10 once to disable Buki AI. Player 1 remains keyboard/mouse.' \
+        '  Move Buki with the controller left stick and tap A for Buki weak attack.' \
+        '  The controller right stick is captured/logged but intentionally does not move a camera in this pass.' \
+        '  Player 2 movement still uses the proven Player 1 camera-relative basis and 10-unit guard.' \
+        '  Unplugging the pad or stopping the helper neutralizes Player 2 input within 250 ms.' \
+        '  Press F10 again to restore Buki AI before exiting.' \
+        "  Linux input device: ${input_device}"
+fi
+if [[ "${mode}" == "--realtime-skill-coop-test" ]]; then
+    printf '%s\n' \
+        '  Integrated skill test: load a two-character save, put Elco in the Player 1/front slot, and press F10 to disable Buki AI.' \
+        '  Player 1: native 5-8 Skill Strikes. Player 2: F1-F4 Skill Strikes, U weak attack, I/J/K/L movement.' \
+        '  Hold Plasmatica targeting while Player 2 moves/attacks; enemies, AI, and projectiles must remain at normal speed.' \
+        '  Confirm Plasmatica: only Elco viewport takes the authored camera; Buki viewport remains live and shows Elco casting in-world.' \
+        '  Try a Player 2 skill during P1 targeting: it must be rejected cleanly. Try again after confirmation: native executions may overlap.' \
+        '  Animation and camera multipliers remain native 1.0x. Press F10 again before exit to restore Buki AI.'
+fi
 if [[ "${mode}" == "--second-player-target-trace" ]]; then
     printf '%s\n' \
         '  Test: control anyone except Buki, enter combat, and press F10 once to disable Buki AI.' \
@@ -444,6 +520,31 @@ fi
 
 if [[ "${mode}" == "--check" ]]; then
     exit 0
+fi
+
+if [[ "${mode}" == "--controller-bridge-test" ]]; then
+    if [[ ! -r "${input_device}" ]]; then
+        printf 'Controller device is not readable: %s\n' "${input_device}" >&2
+        printf '%s\n' \
+            'Reconnect the controller or set SUDEKIMP_INPUT_DEVICE to its /dev/input/jsN node.' >&2
+        exit 1
+    fi
+    : >"${input_bridge_log}"
+    "${input_bridge_helper}" \
+        --device "${input_device}" \
+        --port "${input_bridge_port}" \
+        >"${input_bridge_log}" 2>&1 &
+    input_bridge_pid=$!
+    sleep 0.2
+    if ! kill -0 "${input_bridge_pid}" 2>/dev/null; then
+        wait "${input_bridge_pid}" || true
+        input_bridge_pid=""
+        printf '%s\n' 'The Linux input bridge failed to start:' >&2
+        sed -n '1,80p' "${input_bridge_log}" >&2
+        exit 1
+    fi
+    printf 'Linux Player 2 input bridge started (PID %s, log %s).\n' \
+        "${input_bridge_pid}" "${input_bridge_log}"
 fi
 
 SUDEKIMP_WINEPREFIX="${research_prefix}" \

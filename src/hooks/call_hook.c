@@ -162,3 +162,88 @@ BOOL SudekiMpRestorePointerHook(SudekiMpPointerHook *hook) {
     hook->original_value = NULL;
     return TRUE;
 }
+
+BOOL SudekiMpInstallInlineHook(
+    SudekiMpInlineHook *hook,
+    uint8_t *target,
+    const uint8_t *expected,
+    size_t length,
+    const void *replacement
+) {
+    uint8_t patch[SUDEKIMP_INLINE_HOOK_MAX_BYTES];
+    uint8_t *trampoline;
+    int32_t displacement;
+    DWORD old_protection;
+
+    if (hook == NULL || target == NULL || expected == NULL ||
+        replacement == NULL || hook->installed || length < 5u ||
+        length > SUDEKIMP_INLINE_HOOK_MAX_BYTES) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (memcmp(target, expected, length) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+
+    trampoline = (uint8_t *)VirtualAlloc(
+        NULL,
+        length + 5u,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE
+    );
+    if (trampoline == NULL) {
+        return FALSE;
+    }
+    memcpy(trampoline, target, length);
+    trampoline[length] = 0xe9;
+    displacement = (int32_t)((target + length) - (trampoline + length + 5u));
+    memcpy(trampoline + length + 1u, &displacement, sizeof(displacement));
+    if (!VirtualProtect(
+            trampoline,
+            length + 5u,
+            PAGE_EXECUTE_READ,
+            &old_protection)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return FALSE;
+    }
+    FlushInstructionCache(GetCurrentProcess(), trampoline, length + 5u);
+
+    memset(patch, 0x90, length);
+    patch[0] = 0xe9;
+    displacement = (int32_t)((const uint8_t *)replacement - (target + 5u));
+    memcpy(patch + 1u, &displacement, sizeof(displacement));
+
+    hook->target = target;
+    memcpy(hook->original, target, length);
+    hook->length = length;
+    hook->trampoline = trampoline;
+    if (!write_protected_memory(target, patch, length)) {
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        ZeroMemory(hook, sizeof(*hook));
+        return FALSE;
+    }
+    hook->installed = TRUE;
+    return TRUE;
+}
+
+BOOL SudekiMpRestoreInlineHook(SudekiMpInlineHook *hook) {
+    BOOL restored;
+
+    if (hook == NULL || !hook->installed || hook->target == NULL) {
+        return TRUE;
+    }
+    restored = write_protected_memory(
+        hook->target,
+        hook->original,
+        hook->length
+    );
+    if (!restored) {
+        return FALSE;
+    }
+    if (hook->trampoline != NULL) {
+        VirtualFree(hook->trampoline, 0, MEM_RELEASE);
+    }
+    ZeroMemory(hook, sizeof(*hook));
+    return TRUE;
+}
