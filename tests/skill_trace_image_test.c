@@ -5,6 +5,7 @@
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_skill_input.h"
 #include "hooks/spirit_strike_input.h"
+#include "hooks/split_screen_render.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -34,6 +35,33 @@ enum {
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_MAIN_FRAME_UPDATE_CALL = 0x0028ddbau,
     RVA_MAIN_FRAME_UPDATE = 0x0028d3f0u,
+    RVA_RENDER_FIRST_PHASE = 0x001d48c0u,
+    RVA_RENDER_FIRST_PHASE_CALL_MAIN = 0x0028d45bu,
+    RVA_RENDER_START = 0x001dce30u,
+    RVA_RENDER_START_CALL_MAIN = 0x0028d443u,
+    RVA_RENDER_PHASE = 0x001d4750u,
+    RVA_RENDER_PHASE_CALL_MAIN = 0x0028d473u,
+    RVA_FRAME_END = 0x001dd540u,
+    RVA_FRAME_END_CALL_MAIN = 0x0028d58cu,
+    RVA_PC_QUIT_SCREEN_GLOBAL = 0x00408d68u,
+    RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
+    RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
+    RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
+    RVA_HUD_PARTY_POINTER_COPY = 0x000015b0u,
+    RVA_HUD_GROUP_VALUES_POINTER_CALL = 0x00181517u,
+    RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL = 0x000aab3au,
+    RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT = 0x0015c0e0u,
+    RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT_CALL = 0x000aac08u,
+    RVA_CHARACTER_TYPE_TO_PORTRAIT_ENUM = 0x0003f430u,
+    RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP = 0x0003f498u,
+    RVA_HUD_PORTRAIT_RESOURCE_SELECT = 0x0015c070u,
+    RVA_UI_RESOURCE_TABLE_INITIALIZED = 0x003c2fefu,
+    RVA_HUD_GIZMO_VALUES_POINTER_CALL = 0x000a9d5bu,
+    RVA_HUD_GIZMO_NAME_POINTER_CALL = 0x000a9e15u,
+    RVA_HUD_GIZMO_STATUS_POINTER_CALL = 0x000aacabu,
+    RVA_RENDER_PHASE_CALL_WORLD_PREPASS = 0x0000a62du,
+    RVA_RENDER_PHASE_CALL_WORLD = 0x0000a689u,
+    RVA_RENDER_PHASE_CALL_WORLD_OFFSET = 0x0000a738u,
     RVA_STOP_RUMBLE = 0x000b50d0u,
     RVA_STOP_RUMBLE_CALL = 0x000b4f23u,
     RVA_SCRIPT_CALL_OPCODE = 0x001c4970u,
@@ -180,6 +208,12 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_CHARACTER_INPUT_HANDLER;
     *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) =
         image + RVA_CONTROLLER_UPDATE;
+    *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
+        (uint32_t)(uintptr_t)(image + RVA_PC_QUIT_SCREEN_GLOBAL);
+    *(uint32_t *)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_ENUM + 9u) =
+        (uint32_t)(uintptr_t)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP);
+    *(uint32_t *)(image + RVA_HUD_PORTRAIT_RESOURCE_SELECT + 8u) =
+        (uint32_t)(uintptr_t)(image + RVA_UI_RESOURCE_TABLE_INITIALIZED);
 
     if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
@@ -231,9 +265,25 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
+    if (!SudekiMpInstallSplitScreenRender(
+            (HMODULE)image,
+            TRUE,
+            TRUE,
+            VK_F9)) {
+        fprintf(stderr, "split-screen render install rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallControlSeparation();
+        SudekiMpUninstallCharacterSwitchTrace();
+        SudekiMpUninstallSpiritStrikeInput();
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
     if (!SudekiMpInstallPlayerInputTrace((HMODULE)image)) {
         fprintf(stderr, "player-input trace install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
+        SudekiMpUninstallSplitScreenRender();
         SudekiMpUninstallControlSeparation();
         SudekiMpUninstallCharacterSwitchTrace();
         SudekiMpUninstallSpiritStrikeInput();
@@ -263,6 +313,63 @@ int wmain(int argc, wchar_t **argv) {
     if (relative_call_target(image + RVA_MAIN_FRAME_UPDATE_CALL) ==
         image + RVA_MAIN_FRAME_UPDATE) {
         fputs("FAIL: main-frame input poll call was not redirected\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_FRAME_END_CALL_MAIN) ==
+            image + RVA_FRAME_END) {
+        fputs("FAIL: gameplay-gated frame-end compositor was not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_RENDER_START_CALL_MAIN) ==
+            image + RVA_RENDER_START) {
+        fputs("FAIL: render-only camera start call was not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) ==
+            image + RVA_PC_QUIT_SCREEN_RENDER) {
+        fputs("FAIL: pre-Quit cached-backdrop call was not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_HUD_GROUP_VALUES_POINTER_CALL) ==
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_VALUES_POINTER_CALL) ==
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_NAME_POINTER_CALL) ==
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_STATUS_POINTER_CALL) ==
+            image + RVA_HUD_PARTY_POINTER_COPY) {
+        fputs("FAIL: one or more viewport HUD ownership calls were not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(
+            image + RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT_CALL) !=
+            image + RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT) {
+        fputs("FAIL: one or more native portrait-refresh calls were unexpectedly redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_RENDER_PHASE_CALL_MAIN) !=
+            image + RVA_RENDER_PHASE ||
+        relative_call_target(image + RVA_RENDER_FIRST_PHASE_CALL_MAIN) !=
+            image + RVA_RENDER_FIRST_PHASE) {
+        fputs("FAIL: native primary render sequence was redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD_PREPASS) !=
+            image + RVA_RENDER_PHASE ||
+        relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD) !=
+            image + RVA_RENDER_PHASE ||
+        relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD_OFFSET) !=
+            image + RVA_RENDER_PHASE) {
+        fputs("FAIL: one or more world subpass calls were redirected\n",
+            stderr);
         ++failures;
     }
     if (relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) ==
@@ -330,6 +437,51 @@ int wmain(int argc, wchar_t **argv) {
         relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
             image + RVA_ARBITER_MOVEMENT) {
         fputs("FAIL: one or more player movement calls were not restored\n",
+            stderr);
+        ++failures;
+    }
+    SudekiMpUninstallSplitScreenRender();
+    if (relative_call_target(image + RVA_FRAME_END_CALL_MAIN) !=
+            image + RVA_FRAME_END) {
+        fputs("FAIL: frame-end compositor call was not restored\n", stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_RENDER_START_CALL_MAIN) !=
+            image + RVA_RENDER_START) {
+        fputs("FAIL: render-only camera start call was not restored\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
+            image + RVA_PC_QUIT_SCREEN_RENDER) {
+        fputs("FAIL: pre-Quit cached-backdrop call was not restored\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_HUD_GROUP_VALUES_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(
+            image + RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT_CALL) !=
+            image + RVA_HUD_PORTRAIT_RESOURCE_ASSIGNMENT ||
+        relative_call_target(image + RVA_HUD_GIZMO_VALUES_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_NAME_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY ||
+        relative_call_target(image + RVA_HUD_GIZMO_STATUS_POINTER_CALL) !=
+            image + RVA_HUD_PARTY_POINTER_COPY) {
+        fputs("FAIL: one or more viewport HUD ownership calls were not restored\n",
+            stderr);
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD_PREPASS) !=
+            image + RVA_RENDER_PHASE ||
+        relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD) !=
+            image + RVA_RENDER_PHASE ||
+        relative_call_target(image + RVA_RENDER_PHASE_CALL_WORLD_OFFSET) !=
+            image + RVA_RENDER_PHASE) {
+        fputs("FAIL: one or more render-phase calls were not restored\n",
             stderr);
         ++failures;
     }

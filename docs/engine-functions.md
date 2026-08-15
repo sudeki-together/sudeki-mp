@@ -209,6 +209,84 @@ The current `CGameCameraMode` singleton pointer lives at RVA `0x00408DA8`. Its `
 
 `Camera::Target` virtual `+0x10` supplies position and virtual `+0x20` supplies a complete transform. `GameObjectTarget` resolves those values from the attached entity. Live exploration places an `OffsetTarget` (vtable RVA `0x002D436C`) in slot 0; it composes that entity transform with native framing while slot 1 keeps the underlying `GameObjectTarget`. `MatrixTarget` supplies the same interface from its owned matrix, with translation in D3DX row `_41/_42/_43`. The live-confirmed midpoint prototype preserves the slot-0 framing transform, shifts it to the two-character centroid, and restores both native slots. Zoom and camera distance remain separate unresolved state.
 
+## D3D9 frame and split-screen render seam
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Main frame/render loop | `0x0028D3F0` / `0x0068D3F0` | Runs the global graphics layer, invokes the gameplay-world renderer at VA `0x0068D546`, and ends the frame |
+| D3D device global | `0x003C31DC` / `0x007C31DC` | Holds the active `IDirect3DDevice9` used for viewport reads/writes |
+| D3D viewport wrapper | `0x001DCE30` / `0x005DCE30` | Native viewport-setting boundary |
+| Frame begin | `0x001DD200` / `0x005DD200` | Begins the native graphics frame before scene submission |
+| Frame end | `0x001DD540` / `0x005DD540` | Completes callbacks and calls D3D9 `EndScene` through device-vtable byte offset `0xA8` |
+| Gameplay-world render owner | `0x0000A5B0` / `0x0040A5B0` | Owns the three gameplay-world graphics-phase submissions; receives the world context in `EDI` and a stack float from the frame loop |
+| Graphics render phase | `0x001D4750` / `0x005D4750` | Render helper called with renderer in `EAX` and world context in `EDI`; no stack arguments |
+| `CPCQuitScreenShow(bool)` | `0x0001DBE0` / `0x0041DBE0` | Exported wrapper around internal show/hide path at RVA `0x0001D700`; resolves the singleton at VA `0x00808D68` |
+| `CPCQuitScreenEnable(bool)` | `0x0001DC00` / `0x0041DC00` | Exported enable/refcount gate at `CPCQuitScreen+0x1CC`; this is not the visible-state test |
+| Quit-screen per-frame render/update | `0x0001D690` / `0x0041D690` | Tests `CPCQuitScreen+0x1C2` before drawing; main render-loop callsite RVA `0x0028D572` is the confirmed pre-interface backdrop seam |
+
+The exact-build graphics-phase call sites are:
+
+| Call-site RVA / VA | Scope | Split policy |
+| --- | --- | --- |
+| `0x0028D473` / `0x0068D473` | Primary render call used by menu and visible gameplay | Native and single-run; render replay is rejected |
+| `0x0000A62D` / `0x0040A62D` | Conditional world subpass/layer | Single-run; replay contributed to the first run's corruption and did not produce the desired gameplay split alone |
+| `0x0000A689` / `0x0040A689` | Conditional world subpass/layer | Single-run |
+| `0x0000A738` / `0x0040A738` | Conditional offset/secondary world layer | Single-run |
+| `0x0028D58C` / `0x0068D58C` | Main call to frame end RVA `0x001DD540` | Current compositor hook; original frame end/`EndScene` runs first, then the finished native surface is copied during verified gameplay and before the following D3D9 `Present` call |
+
+The first live prototype duplicated all four calls. It proved that the same Sudeki process can submit a genuine left/right viewport pair, but both halves used the same selected native camera. It also split the main menu, duplicated the native HUD, produced large black shadow/visibility regions, and omitted some door geometry from the second view. The visual defects are confirmed; their exact ownership is not. The leading hypothesis is that a global/prepass producer or transient visibility queue was executed or consumed twice.
+
+The second live version left the primary call single-run and replayed only the three world subpasses. Contrary to the initial static classification, the user observed that the title/menu still split while loaded gameplay did not. The good result was equally important: the black regions disappeared and the previously missing door rendered correctly. This identifies replay of the primary call as necessary for the visible gameplay split and confirms that the three subpasses should remain single-run.
+
+The third disabled prototype therefore hooked only RVA `0x0028D473`. It forwarded that call once at full width unless the active-group global was valid, party slot 0 equaled the character controller's target at `+0x248`, and the current game-camera mode exposed a readable camera pointer. Only when all three ownership checks agreed was the call replayed into left/right viewports. This is an exact-build gameplay-state gate, not a guessed timer or menu flag. A second render camera, per-viewport projection/aspect, independent culling, and HUD ownership are not implemented.
+
+The third live run confirmed that gate: title and main menu remained full-width, gameplay split after loading, and the log changed from `gameplay_gate state=inactive` to `active`. The black regions and missing right-view door returned, proving the final primary draw itself is not replay-safe without its preparation lifecycle.
+
+The full main primary sequence is first helper RVA `0x001D48C0` at call site `0x0028D45B`, middle helper RVA `0x001D4820` at `0x0028D46B`, then final helper RVA `0x001D4750` at `0x0028D473`. The first two receive the renderer in `EAX`, world context in `EDI`, and one callee-cleaned float. Their object preparation uses render-generation `uint16` at RVA `0x003C3150`; frame begin increments it, and per-object generation fields prevent duplicate preparation within one generation.
+
+The final helper calls RVA `0x00226F30`, which flushes shared render callback queues through RVA `0x00226E90`. The same queue path carries `cShadowRenderCallback`, explaining why a second final draw sees consumed shadow/visibility work. A fourth experiment set the left viewport before native preparation, then advanced the render generation and reran first/middle with float bits `0` before drawing right. In the live result all player and NPC motion appeared frozen, while the black shadow figures and missing door remained. The generation therefore participates in state that cannot safely be treated as a second-view-only render stamp; this entire replay policy is rejected.
+
+The current experiment hooks only the main call to frame end at RVA `0x0028D58C`. It calls the native frame-end function first and does not modify or replay any prepare, culling, shadow, visibility, world-subpass, or draw call. During the proven gameplay gate it captures render target 0 into a same-size non-multisampled surface, then scales that finished image into the left and right halves. If any D3D operation fails, the native full frame is retained or restored and one diagnostic is logged. The initial proof requires native anti-aliasing `0`; the research launcher changes it only for that run and restores the previous numeric setting at exit. Both halves deliberately receive the same finished camera image. Independent cameras will later render into separate full-size targets that feed this compositor.
+
+The Quit-screen singleton pointer is exact-build RVA `0x00408D68`. Its internal show/hide path stores the true presentation state at object offset `+0x1C2`; the ordinary per-frame Quit renderer checks that same byte. This is narrower than generic game pause state and does not confuse unrelated pauses, loading, or cinematics with the shared interface. The split-screen gate verifies the loader-relocated `CPCQuitScreenShow(bool)` entry, stops camera-cache updates while `+0x1C2` is nonzero, and retains the last valid Player 1/Player 2 render-target textures. At the native Quit callsite RVA `0x0028D572`, it draws those textures as two pre-transformed screen quads, restores the complete device state from a `D3DSBT_ALL` state block, and then calls the unchanged native renderer with the original `EAX` receiver. Live testing confirmed one full-width Quit interface over the frozen two-camera background and clean return to live split gameplay.
+
+## Named native cameras
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| `CCameraManager::AddCamera` | `0x00036C10` / `0x00436C10` | Accepts camera name and configuration name, rejects duplicates/full 10-slot table, allocates a distinct `0x108`-byte `CCamera`, initializes it, copies the name to `+0x4C`, and applies the requested configuration |
+| `CCameraManager::RemoveCamera` | `0x00036DE0` / `0x00436DE0` | Finds the named slot, restores scene-camera state if necessary, destroys the camera, and clears the manager slot; callers must first select another render camera |
+| `CCameraManager::GELGetCamera` | `0x00036ED0` / `0x00436ED0` | Returns the named camera from the ten-slot manager table; empty input returns the current render camera |
+| `CCameraManager::GELGetRenderCamera` | `0x000272E0` / `0x004272E0` | Returns `CCameraManager+0x20` |
+| `CCameraManager::SetRenderCamera` | `0x00036FB0` / `0x00436FB0` | Resolves a named camera, notifies registered camera listeners, updates the scene render-camera state, stores it at manager `+0x20`, and preserves the outgoing camera's `+0x105` mode byte |
+
+`SetRenderCamera` performs two materially different writes: gameplay/global ownership goes to `CCameraManager+0x20`, while the scene renderer receives the selected camera's render-state pointer from `CCamera+0x34` at `scene_manager->+0x40->+0x7C`. The world-render path reads that latter pointer. `CCamera`'s native matrix handoff copies 16 floats to render state `+0x90` and increments the render-state generation at `+0x2C`; debug output identifies matrix translation `+0xC0/+0xC4/+0xC8` as camera position.
+
+The first live Player 2 proof selected the new camera globally. It confirmed lifecycle ownership/restoration but produced invalid framing and interfered with a doorway transition. The replacement keeps `CCameraManager+0x20` on Player 1 at all times. Main render-start call site RVA `0x0028D443` temporarily changes only the scene renderer's `+0x7C` pointer to `SudekiMP_P2+0x34`; the existing frame-end hook restores Player 1 before native `EndScene` at RVA `0x0028D58C`. Camera 2 receives Player 1's complete valid render matrix with its camera-position row translated by the Player 1-to-Player 2 world-position delta. This preserves current orientation and distance for the next proof; independent rotation/zoom remains later work.
+
+The replacement passed live testing. Both diagnostic halves rendered a sensible Buki-centered view while the log retained one unchanged global Ailish camera, and Ailish movement plus the castle doorway transition completed without skybox, freeze, or missing geometry. Toggling back restored normal Ailish framing. The close post-doorway Buki framing is a known limitation of translating position while inheriting Player 1 orientation/distance, not an ownership failure.
+
+The prepared simultaneous-view experiment alternates this render-only selection at the same render-start boundary, but still executes the world renderer exactly once per engine frame. After native `EndScene`, the existing safe compositor caches the finished frame by camera owner and presents the latest Player 1 cache on the left and Player 2 cache on the right. The views are temporally staggered by at most one engine frame and each refreshes every other frame; no render-generation or callback queue is advanced manually.
+
+## Viewport HUD character ownership
+
+| Role | RVA / VA | Evidence |
+| --- | --- | --- |
+| Party smart-pointer copy helper | `0x000015B0` / `0x004015B0` | Copies a 12-byte intrusive party-slot pointer from `ECX` into the destination at `EAX`; RVA `0x000015E0` unlinks the temporary |
+| Main HUD HP/SP numeric source | call at `0x00181517` / `0x00581517` | `UIPortraitGroup` copies party slot 0 at `CGroupPlayers+0x90`, then reads current HP/SP through character `+0x4C` |
+| Portrait-gizmo portrait source | call at `0x000AAB3A` / `0x004AAB3A` | Native portrait refresh RVA `0x000AAB00` copies the indexed party slot, identifies its character, and assigns the corresponding `SUI_PORTRAIT_*.SQX` resource to the gizmo's cycle icon |
+| Character type to portrait enum | `0x0003F430` / `0x0043F430` | Maps the character resource-type value returned by virtual slot `+0x10` on embedded character object `+0x2C` into portrait enum `0..7` |
+| Portrait resource-index table | `0x002C2A94` / `0x006C2A94` | Maps portrait enum (plus alternate-state offset 8 when selected) to the cycle-icon resource index |
+| Narrow cycle-icon resource selector | `0x0015C070` / `0x0055C070` | Loads one resource-table entry and forwards it to RVA `0x0015C0E0`; internal convention is resource index in `ECX`, completion flag in `EAX`, and cycle-icon receiver as its one stack argument |
+| Portrait resource assignment | `0x0015C0E0` / `0x0055C0E0`, native refresh call at `0x000AAC08` / `0x004AAC08` | Replaces the cycle icon's resource and accepts a completion flag as its fourth stack argument. Flag `1` drains the native pending-resource list before returning. |
+| Portrait-gizmo HP/SP source | call at `0x000A9D5B` / `0x004A9D5B` | Selects `CGroupPlayers+0x90+(UIPortraitGizmo+0x32C)*0x0C` before calculating HP/SP ratios |
+| Portrait-gizmo name source | call at `0x000A9E15` / `0x004A9E15` | Uses the same indexed party slot before resolving the displayed character name |
+| Portrait-gizmo status source | call at `0x000AACAB` / `0x004AACAB` | Uses the same indexed party slot before updating status-effect bits |
+
+The first exact-build viewport-HUD prototype redirected the four data callsites and live-confirmed independent names, HP, SP, and companion ordering. `HudPortraitBindingReport.java` established that `UIPortraitGizmo+0x2C` is a separate `UIElementCycleIcon` and gameplay HUD global RVA `0x003C2F9C` owns four live gizmo pointers at `+0x138`. Calling broad refresh RVA `0x000AAB00` per viewport was rejected: its asynchronous assignment initially left the art blank, and its broader UI behavior contributed to party-presentation churn. The accepted implementation leaves callsites `0x000AAB3A` and `0x000AAC08` native, maps the selected stable character identity through RVA `0x0003F430`/table RVA `0x002C2A94`, and calls the narrow RVA `0x0015C070` selector with synchronous completion. The user confirmed correct Ailish/Buki art on the left/right views.
+
+The data source hooks also resolve the desired stable character to whichever live group slot currently contains it, rather than assuming slot 0 always means Player 1. Sudeki reverses the same Ailish/Buki pair as part of this presentation path. The camera poll now treats only that exact reversed pair as an internal order rotation, not a multiplayer reassignment; any missing or different character still triggers safe camera teardown. This removed the per-frame Camera 2 release/cache invalidation that briefly exposed a full-width frame and enlarged the minimap.
+
 ## Free-roam camera configuration and input staging
 
 | Role | RVA / VA | Evidence |

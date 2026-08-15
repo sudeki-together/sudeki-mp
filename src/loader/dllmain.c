@@ -8,6 +8,7 @@
 #include "hooks/quick_menu.h"
 #include "hooks/quick_skill_input.h"
 #include "hooks/skill_trace.h"
+#include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
 #include "input/key_binding.h"
 
@@ -30,6 +31,7 @@
 #define SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED 10u
 #define SUDEKIMP_INIT_PLAYER_INPUT_TRACE_FAILED 11u
 #define SUDEKIMP_INIT_FREEROAM_CAMERA_FAILED 12u
+#define SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED 13u
 
 static HMODULE dll_module;
 
@@ -180,16 +182,21 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL second_player_weak_attack_enabled;
     BOOL second_player_target_trace_enabled;
     BOOL shared_group_camera_enabled;
+    BOOL split_screen_render_enabled;
+    BOOL second_player_camera_enabled;
+    BOOL dual_camera_frame_cache_enabled;
     BOOL freeroam_camera_input_enabled;
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
     wchar_t second_player_weak_attack_key_text[32];
+    wchar_t second_player_camera_key_text[32];
     wchar_t freeroam_camera_modifier_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
+    UINT second_player_camera_virtual_key = VK_F9;
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
@@ -333,6 +340,21 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableSharedGroupCameraPrototype"
     );
+    split_screen_render_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSplitScreenRenderPrototype"
+    );
+    second_player_camera_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerCameraPrototype"
+    );
+    dual_camera_frame_cache_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableDualCameraFrameCachePrototype"
+    );
     freeroam_camera_input_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -384,6 +406,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             sizeof(second_player_weak_attack_key_text[0])),
         config_path
     );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"ToggleSecondPlayerCamera",
+        L"F9",
+        second_player_camera_key_text,
+        (DWORD)(sizeof(second_player_camera_key_text) /
+            sizeof(second_player_camera_key_text[0])),
+        config_path
+    );
     if (direct_spirit_strike_prototype_enabled &&
         !SudekiMpParseInputKey(
             spirit_strike_key_text,
@@ -409,6 +440,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite(
             "second_player_weak_attack_key_config=invalid\r\n"
         );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_camera_enabled &&
+        !SudekiMpParseInputKey(
+            second_player_camera_key_text,
+            &second_player_camera_virtual_key)) {
+        SudekiMpLogWrite("second_player_camera_key_config=invalid\r\n");
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -483,6 +523,23 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (!control_separation_enabled || !second_player_movement_enabled)) {
         SudekiMpLogWrite(
             "shared_group_camera_config=requires_control_separation_and_second_player_movement\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_camera_enabled && !split_screen_render_enabled) {
+        SudekiMpLogWrite(
+            "second_player_camera_config=requires_split_screen_render\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (dual_camera_frame_cache_enabled &&
+        (!split_screen_render_enabled || !second_player_camera_enabled)) {
+        SudekiMpLogWrite(
+            "dual_camera_frame_cache_config=requires_split_screen_render_and_second_player_camera\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -682,6 +739,36 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
+    SudekiMpLogFormat(
+        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s second_player_camera_toggle_virtual_key=0x%02lx\r\n",
+        split_screen_render_enabled ? "true" : "false",
+        dual_camera_frame_cache_enabled ?
+            "alternating_render_state_frame_cache" :
+            (second_player_camera_enabled ?
+                "render_only_translated_camera_toggle" :
+                "same_native_camera"),
+        dual_camera_frame_cache_enabled ? "true" : "false",
+        (unsigned long)second_player_camera_virtual_key
+    );
+    if (split_screen_render_enabled) {
+        if (!SudekiMpInstallSplitScreenRender(
+                game_module,
+                second_player_camera_enabled,
+                dual_camera_frame_cache_enabled,
+                second_player_camera_virtual_key)) {
+            SudekiMpLogFormat(
+                "split_screen_render_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpLogWrite("split_screen_render_applied=false\r\n");
+            SudekiMpLogWrite("status=split_screen_render_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
+        }
+        SudekiMpLogWrite("split_screen_render_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("split_screen_render_applied=false\r\n");
+    }
     SudekiMpLogFormat("player_movement_trace_requested=%s\r\n",
         player_movement_trace_enabled ? "true" : "false");
     if (player_movement_trace_enabled) {
@@ -728,6 +815,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !character_switch_trace_enabled &&
         !freeroam_camera_input_enabled &&
         !control_separation_enabled &&
+        !split_screen_render_enabled &&
         !player_movement_trace_enabled) {
         SudekiMpLogClose();
     }

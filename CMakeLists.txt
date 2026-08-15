@@ -19,6 +19,7 @@ add_library(SudekiMP SHARED
     src/loader/dllmain.c
     src/engine/arbiter_combat_input.c
     src/engine/camera_target_abi.c
+    src/engine/render_phase_abi.c
     src/engine/log.c
     src/input/key_binding.c
     src/hooks/call_hook.c
@@ -30,6 +31,7 @@ add_library(SudekiMP SHARED
     src/hooks/quick_menu.c
     src/hooks/quick_skill_input.c
     src/hooks/spirit_strike_input.c
+    src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
     src/loader/sudekimp.def
     ${SUDEKIMP_COMMON_SOURCES}
@@ -57,6 +59,9 @@ set_source_files_properties(src/hooks/freeroam_camera_input.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_source_files_properties(src/hooks/player_input_trace.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(src/hooks/split_screen_render.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_source_files_properties(src/engine/arbiter_combat_input.c PROPERTIES
@@ -108,6 +113,25 @@ add_executable(SudekiMP.CameraTargetAbiTest
     tests/camera_target_abi_test.c
     src/engine/camera_target_abi.c
 )
+add_executable(SudekiMP.RenderPhaseAbiTest
+    tests/render_phase_abi_test.c
+    src/engine/render_phase_abi.c
+)
+target_include_directories(SudekiMP.RenderPhaseAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.RenderPhaseAbiTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.RenderPhaseAbiTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(
+    tests/render_phase_abi_test.c
+    src/engine/render_phase_abi.c
+    PROPERTIES COMPILE_OPTIONS "-Wno-pedantic;-Wno-unused-function"
+)
+set_target_properties(SudekiMP.RenderPhaseAbiTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 target_include_directories(SudekiMP.CameraTargetAbiTest PRIVATE src)
 target_compile_definitions(SudekiMP.CameraTargetAbiTest PRIVATE
     WIN32_LEAN_AND_MEAN
@@ -150,6 +174,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
     src/engine/arbiter_combat_input.c
     src/engine/camera_target_abi.c
+    src/engine/render_phase_abi.c
     src/engine/log.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c
@@ -158,6 +183,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/player_input_trace.c
     src/hooks/quick_skill_input.c
     src/hooks/spirit_strike_input.c
+    src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
 )
 target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)

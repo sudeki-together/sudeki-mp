@@ -14,7 +14,7 @@ spirit_key="${2:-G}"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
@@ -27,6 +27,12 @@ usage() {
         '  --second-player-camera-movement-test Add the native shared-camera basis to Buki movement.' \
         '  --second-player-separation-test Add a 10-unit outward-only separation guard.' \
         '  --shared-group-camera-test Focus Sudeki camera on the P1/Buki midpoint; zoom remains native.' \
+        '  --split-screen-render-test Duplicate the finished native gameplay frame into two halves; menus remain full-screen.' \
+        '  --second-player-render-camera-test Toggle a render-only party-slot-1 view with F9 while gameplay ownership stays on Player 1.' \
+        '  --dual-camera-frame-cache-test Present cached alternating Ailish/Buki frames side by side without render replay.' \
+        '  --shared-quit-menu-test Verify the Quit menu replaces both camera halves with one full-width native interface.' \
+        '  --viewport-hud-test Verify the right viewport reads Buki HUD data while the left viewport remains Ailish-owned.' \
+        '  --dual-camera-local-coop-test Combine dual cameras with F10 AI override and I/J/K/L Buki movement.' \
         '  --second-player-target-trace Passively log Buki native target changes while AI is off.' \
         '  --second-player-attack-test Use F10 for Buki AI, I/J/K/L movement, and U for Buki weak attack.' \
         '  --ranged-skill-test  Test guarded native UI-state cycling for Elco/Ailish QuickSkills.' \
@@ -37,7 +43,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -88,8 +94,16 @@ fi
 
 "${project_dir}/tools/build-linux.sh"
 
+antialiasing_original=""
 restore_config() {
     cp -- "${source_config}" "${generated_config}"
+    if [[ -n "${antialiasing_original}" ]]; then
+        SUDEKIMP_WINEPREFIX="${research_prefix}" \
+            "${project_dir}/tools/configure-antialiasing.sh" \
+            --set "${antialiasing_original}" || true
+        printf 'Restored Sudeki AntiAliasing=%s.\n' \
+            "${antialiasing_original}"
+    fi
 }
 trap restore_config EXIT
 trap 'exit 130' INT
@@ -163,6 +177,48 @@ case "${mode}" in
             -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
             "${generated_config}"
         ;;
+    --split-screen-render-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
+    --second-player-render-camera-test)
+        sed -i \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            "${generated_config}"
+        ;;
+    --dual-camera-frame-cache-test)
+        sed -i \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            "${generated_config}"
+        ;;
+    --shared-quit-menu-test|--viewport-hud-test)
+        sed -i \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            "${generated_config}"
+        ;;
+    --dual-camera-local-coop-test)
+        sed -i \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e 's/^ToggleBukiAi=J$/ToggleBukiAi=F10/' \
+            "${generated_config}"
+        ;;
     --second-player-target-trace)
         sed -i \
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
@@ -218,6 +274,22 @@ esac
 SUDEKIMP_WINEPREFIX="${research_prefix}" \
     "${project_dir}/tools/run-wine.sh" --check "${game}"
 
+if [[ "${mode}" == "--split-screen-render-test" ||
+      "${mode}" == "--second-player-render-camera-test" ||
+      "${mode}" == "--dual-camera-frame-cache-test" ||
+      "${mode}" == "--shared-quit-menu-test" ||
+      "${mode}" == "--viewport-hud-test" ||
+      "${mode}" == "--dual-camera-local-coop-test" ]]; then
+    antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
+        "${project_dir}/tools/configure-antialiasing.sh" --get)"
+    SUDEKIMP_WINEPREFIX="${research_prefix}" \
+        "${project_dir}/tools/configure-antialiasing.sh" --set 0
+    printf 'Temporarily changed Sudeki AntiAliasing: %s -> 0 for compositor compatibility.\n' \
+        "${antialiasing_original}"
+    printf '%s\n' \
+        'The original value will be restored automatically when this run exits.'
+fi
+
 printf '%s\n' \
     '' \
     'SudekiMP research checkpoint:' \
@@ -244,6 +316,7 @@ printf '%s\n' \
     '  Retained targeting proof: Buki target node and auto-target state survive the AI override.' \
     '  Separation proof: the 10-unit guard blocks only outward Buki movement and releases inward movement.' \
     '  Camera proof: the disabled native MatrixTarget prototype follows the P1/Buki midpoint and restores native P1 focus cleanly.' \
+    '  Split-screen proof: dual viewports work; current test composites the untouched finished native frame before independent cameras.' \
     '  Deferred: full no-menu encounter remains required before Milestone 3 closes.' \
     '  Emergency stop: tools/stop-sudeki.sh' \
     '  Detailed handoff: docs/research-log.md and docs/combat.md.' \
@@ -291,6 +364,62 @@ if [[ "${mode}" == "--shared-group-camera-test" ]]; then
         '  then move both characters and rotate the camera.' \
         '  Camera focus should track the midpoint; distance/zoom remains native in this first proof.' \
         '  The 10-unit outward guard remains active; press F10 again to restore native AI and focus.'
+fi
+if [[ "${mode}" == "--split-screen-render-test" ]]; then
+    printf '%s\n' \
+        '  Test 1: confirm the title/main menu stays one normal full-screen view.' \
+        '  Load gameplay, then confirm the same live 3D view appears in both left and right halves.' \
+        '  Check that black shadow figures/regions are gone and doors appear in both halves.' \
+        '  Player/NPC movement must remain normal; shadows and doors should match exactly in both halves.' \
+        '  HUD ownership remains intentionally unchanged; this proof isolates safe frame composition.' \
+        '  Test 2: control anyone except Buki, press F10, and move Buki with I/J/K/L.' \
+        '  Both halves should still show the same Player 1 camera; independent cameras are the next step.' \
+        '  Press F10 again to restore Buki AI before exit.'
+fi
+if [[ "${mode}" == "--second-player-render-camera-test" ]]; then
+    printf '%s\n' \
+        '  Test: title/menu should remain full-width; load the two-character Ailish/Buki save.' \
+        '  Both compositor halves initially show the original Player 1/Ailish camera.' \
+        '  Tap F9 once: both diagnostic halves should shift to a Buki-centered view while retaining Player 1 orientation/distance.' \
+        '  Player 1/Ailish must remain the gameplay-owned camera. Move Ailish and enter the castle doorway while F9 is active.' \
+        '  The doorway transition and ordinary simulation must complete; a skybox view or held transition is a failure.' \
+        '  Tap F9 again: both halves must return cleanly to the original Player 1/Ailish framing.' \
+        '  This tests render-only camera-state isolation—not simultaneous views or independent Player 2 rotation/zoom yet.'
+fi
+if [[ "${mode}" == "--dual-camera-frame-cache-test" ]]; then
+    printf '%s\n' \
+        '  Test: title/main menu should remain one full-width view; load the Ailish/Buki save.' \
+        '  After both clean caches initialize, the left half should follow Ailish and the right half should center on Buki.' \
+        '  No key is required. Move Ailish, let Buki move, and rotate the native camera to check that both halves update.' \
+        '  Each camera updates every other engine frame in this diagnostic; report visible judder, latency, or stale frames.' \
+        '  Check shadows, doors, NPC/player motion, and the castle doorway transition for regressions.' \
+        '  The duplicated Ailish-owned HUD is expected. Do not assess pause/exit-menu takeover in this pass.'
+fi
+if [[ "${mode}" == "--shared-quit-menu-test" ]]; then
+    printf '%s\n' \
+        '  Focused UI test: load the Ailish/Buki save and wait for the distinct left/right views.' \
+        '  Open the Sudeki Quit menu. The split must disappear and one normal full-width native menu must cover the screen.' \
+        '  Select Back. The native full-width frame may appear briefly while fresh camera caches initialize.' \
+        '  Ailish-left/Buki-right must then resume automatically with no stale menu, swapped view, or frozen control.' \
+        '  Repeat once. Do not choose Exit to Windows or Quit to Title Screen during this focused test.'
+fi
+if [[ "${mode}" == "--viewport-hud-test" ]]; then
+    printf '%s\n' \
+        '  Load the Ailish/Buki save and wait for the two camera halves.' \
+        '  Left: Ailish must remain the large portrait/name/HP/SP, with Buki as the small companion.' \
+        '  Right: Buki must become the large portrait/name/HP/SP, with Ailish as the small companion.' \
+        '  Watch for portrait flicker, wrong art, any brief unsplit frame, or the minimap pulsing to full-screen size.' \
+        '  Open Quit once to ensure the full-width frozen dual-camera backdrop still works, then select Back.'
+fi
+if [[ "${mode}" == "--dual-camera-local-coop-test" ]]; then
+    printf '%s\n' \
+        '  Integrated test: load the Ailish/Buki save and confirm Ailish-left/Buki-right views initialize.' \
+        '  Press F10 once to disable Buki AI. Player 1 keeps W/A/S/D; move Buki independently with I/J/K/L.' \
+        '  Each half should remain centered on its assigned character while both characters move at the same time.' \
+        '  Mouse camera rotation/zoom remains shared in this pass; Player 2 does not yet own separate camera input.' \
+        '  The 10-unit outward-only separation guard is active. Move inward to release it immediately.' \
+        '  Check for view swapping, stale frames, geometry/shadow defects, or control loss.' \
+        '  Press F10 again to restore Buki AI before exiting.'
 fi
 if [[ "${mode}" == "--second-player-target-trace" ]]; then
     printf '%s\n' \

@@ -1,5 +1,5 @@
 SudekiMP recovery handoff
-Updated: 2026-08-14 (America/New_York)
+Updated: 2026-08-15 (America/New_York)
 
 Repository:
   /var/home/wander/Documents/Projects/sudeki-mp
@@ -71,7 +71,94 @@ Confirmed project position:
      and native Ailish focus immediately. An initial R6025 restore failure
      proved the installer requires one caller-owned reference per slot; the
      corrected retain/install/release sequence completed cleanly. Zoom and a
-     second rendered viewport remain unimplemented.
+     second rendered viewport were separate follow-ups.
+ 14. A first dual-viewport render proof is live-confirmed. An exact-build,
+     disabled prototype replayed Sudeki's graphics phase into left/right D3D9
+     viewports and the user captured both halves rendering gameplay in one
+     process. Both halves still used the same native camera. The broad first
+     hook also split the title/menu, duplicated the HUD, produced black
+     shadow/visibility regions, and omitted some door geometry from view 2.
+     A second build replayed only three world subpasses: shadows and doors were
+     correct, but the menu still split and gameplay did not. The third build's
+     active party/controller/game-camera gate fixed menu activation, but final-
+     draw replay still corrupted shadows and the right-view door. Static work
+     confirmed the final draw flushes shared callbacks. The fourth build
+     advanced the render generation and replayed preparation at zero delta;
+     player/NPC motion appeared frozen, shadows remained, and the door still
+     vanished. That replay path is rejected. The prepared fifth build leaves
+     the native frame untouched and duplicates its finished image after frame
+     end as a safe compositor proof. Its live test passed: full-width menu and
+     loading fade, normal actors, matching clean shadows, and the door present
+     in both halves. The log recorded a clean 1368x768 compositor activation.
+ 15. Native Player 2 camera allocation/restoration is proven, but globally
+     selecting the first construction is rejected. F9 created SudekiMP_P2 and
+     restored the exact Ailish camera, yet the incomplete Player 2 state showed
+     a skybox/improper view and held a doorway transition until restoration.
+     Both diagnostic halves showed that same bad frame because the compositor
+     duplicates one finished native image; it was not two independent failures.
+ 16. Static tracing separated gameplay camera ownership from render ownership.
+     SetRenderCamera writes both CCameraManager+0x20 and the scene renderer's
+     camera-state slot at scene_manager->+0x40->+0x7C. The prepared seventh
+     experiment never changes CCameraManager+0x20. At render start only, it
+     copies Ailish's valid render matrix into SudekiMP_P2, translates camera
+     position by Buki minus Ailish world position, swaps only renderer+0x7C,
+     and restores Ailish before native EndScene. Build and exact-image hook
+     tests pass. The live test also passed: Buki framing was sensible, with no
+     skybox, freeze, missing geometry, or doorway failure, and F9 restored
+     Ailish cleanly. The doorway ended temporarily close to Buki because this
+     proof inherits Ailish orientation/distance and translates only position.
+ 17. The alternating clean-frame prototype is live-confirmed. It alternates the proven Ailish
+     and render-only Buki states across successive engine frames, caches each
+     clean full-size image after EndScene, and composites Ailish-left/Buki-right.
+     Sudeki still renders exactly once per engine frame; no simulation, culling,
+     shadow, visibility, door, or draw callback is replayed. Each camera updates
+     every other frame with at most one frame of cache age. The build and exact-
+     image installation/restoration test pass. The user saw distinct Ailish-left
+     and Buki-right views, no noticeable jitter, and otherwise normal rendering.
+     Shared mouse rotation/zoom updated both while each stayed centered on its
+     assigned character. The log recorded both caches active with one render per
+     engine frame, maximum cache age one frame, and no compositor failure.
+ 18. --dual-camera-local-coop-test is live-confirmed. F10 successfully disabled
+     Buki AI, I/J/K/L repeatedly moved one stable Buki arbiter camera-relative,
+     and the distinct Ailish-left/Buki-right caches remained active. The guard
+     repeatedly blocked outward motion and released inward motion. This is the
+     first integrated local-coop proof with independent character movement and
+     distinct assigned cameras. Shared camera input and duplicated HUD remain
+     open ownership/presentation work.
+ 19. The duplicated Quit menu is fixed in the focused prototype. Exported
+     CPCQuitScreenShow(bool) is RVA 0x0001DBE0, its singleton pointer is at
+     RVA 0x00408D68, and the per-frame render path tests the visible byte at
+     CPCQuitScreen+0x1C2. The exact-build gate keeps the last two valid camera
+     textures, draws the frozen Ailish-left/Buki-right pair immediately before
+     the native Quit render call at RVA 0x0028D572, and restores the complete
+     D3D state before Sudeki draws one full-width interface. Back resumes both
+     live cameras. Build and exact-image tests pass; the user confirmed the
+     shared menu, frozen two-camera background, and clean gameplay return.
+ 20. Viewport-owned HUD character data and portrait art are live-confirmed.
+     UIPortraitGroup/UIPortraitGizmo resolve party members through the intrusive
+     pointer copy at RVA 0x000015B0. Confirmed HUD callsites are RVA 0x00181517
+     (main numeric HP/SP), 0x000A9D5B (gizmo HP/SP), 0x000A9E15 (name), and
+     0x000AACAB (status effects). The final binding resolves stable Ailish/Buki
+     character identities to whichever live party slots currently contain
+     them; it never rotates the party or changes controller/AI ownership. The
+     user confirmed Ailish/1800 HP/240 SP and Ailish art on the left, with
+     Buki/2400 HP/150 SP and Buki art on the right, including companion order.
+     Gameplay HUD singleton RVA 0x003C2F9C owns four portrait gizmos at +0x138;
+     each embeds UIElementCycleIcon at +0x2C. High-level refresh RVA 0x000AAB00
+     was rejected because calling it every frame caused broader presentation
+     side effects, and its asynchronous assignment initially left art blank.
+     The accepted path maps the selected character through RVA 0x0003F430 and
+     resource-index table RVA 0x002C2A94, then calls the narrow selector at RVA
+     0x0015C070 synchronously. Natural refresh callsites remain unhooked.
+ 21. The brief unsplit/minimap pulse is fixed. Runtime logs proved Sudeki
+     reverses Ailish/Buki party presentation order while the viewport HUD is
+     active. Treating that exact same-character reversal as a true multiplayer
+     reassignment removed/recreated Camera 2 and invalidated both frame caches
+     every frame. Camera/HUD ownership now follows stable character identity,
+     tolerates only that exact two-character reversal, and still fails safe for
+     an actually different party. The final live test showed continuous split
+     presentation and correct portraits; the log recorded one acquisition,
+     `party_order_rotation phase=tolerated`, and no later release loop.
 
 Independent Buki weak-attack test (LIVE-CONFIRMED):
   Confirmed static facts:
@@ -152,8 +239,83 @@ Shared midpoint camera (LIVE-CONFIRMED PROOF):
     return to Ailish focus when Buki AI was restored.
   - Warning-clean PE32 build, SudekiMP.CameraTargetAbiTest.exe, launcher
     exact-build check, and inert exact-image install/restore test pass.
-  - The prototype changes focus only. Adaptive zoom is next; split-screen still
-    requires a second render camera, viewport/scissor, and scene submission.
+  - The prototype changes focus only. It remains the single-screen fallback.
+    The separate split-screen branch now has a same-camera render-twice proof;
+    independent viewport camera ownership is still unimplemented.
+
+Dual-viewport rendering (LIVE-CONFIRMED, ARTIFACT-LIMITED PROOF):
+  - EnableSplitScreenRenderPrototype=false by default.
+  - --split-screen-render-test enables only this exact-build experiment.
+  - D3D device global: RVA 0x003C31DC.
+  - Main frame/render loop: RVA 0x0028D3F0.
+  - Frame begin/end: RVA 0x001DD200 / 0x001DD540.
+  - Graphics render phase: RVA 0x001D4750; renderer in EAX, world context in
+    EDI, no stack arguments.
+  - Primary graphics-phase call RVA 0x0028D473 produces the visible gameplay
+    split but is also used by menu presentation.
+  - Conditional world-subpass calls RVA 0x0000A62D, 0x0000A689, and
+    0x0000A738 remain single-run in the current build.
+  - First live log divided a 1368x768 viewport into two 684-pixel halves. A
+    1920x1080 user capture visibly confirmed the split.
+  - Both halves currently reuse the same selected native camera. There is no
+    independent Player 2 camera, aspect/projection ownership, or per-player UI.
+  - First-run defects: title/menu split, duplicated HUD, large black shadow or
+    visibility regions, and some doors missing in view 2.
+  - Second live run replayed only the three subpasses: no black shadows, the
+    door rendered correctly, menu remained split, and gameplay did not split.
+    This disproved the earlier call-scope classification.
+  - Third live run: title/menu full-width, gameplay split, and the log changed
+    from gameplay_gate inactive to active. Black shadow figures/regions and the
+    missing right-view door returned. The gate is confirmed; draw-only replay
+    is invalid.
+  - Main primary sequence: first RVA 0x001D48C0 at call RVA 0x0028D45B,
+    middle RVA 0x001D4820 at 0x0028D46B, final RVA 0x001D4750 at 0x0028D473.
+  - Render-generation uint16 global: RVA 0x003C3150. Frame begin increments it;
+    per-object generation fields suppress duplicate preparation.
+  - Final helper flushes shared callback queues through RVA 0x00226F30 ->
+    0x00226E90; the same queue path carries cShadowRenderCallback.
+  - Fourth live run incremented the render generation and reran first/middle
+    with zero delta. Player and NPC motion appeared frozen, black shadows
+    remained, and the door still vanished in one view. Reject render replay.
+  - Prepared fifth build hooks only frame-end call RVA 0x0028D58C. It runs the
+    native frame completely unchanged, copies render target 0 after frame end,
+    then scales the finished image into two halves during the proven gameplay
+    gate. Both halves deliberately duplicate the same camera and HUD.
+  - The focused launcher temporarily sets native AntiAliasing to 0 and restores
+    the prior numeric value when the game exits. The compositor fails safe to
+    the native full-width frame if any D3D9 surface/copy operation fails.
+  - Expanded render_phase_abi_test and inert exact-image install/restore test
+    pass in an isolated 32-bit Wine prefix. Do not claim independent cameras or
+    per-player HUD ownership yet.
+  - Fifth live result passed: title/menu remained full-width through the load
+    fade; gameplay split only after activation; player/NPC motion was normal;
+    shadows matched; and the door rendered in both copies. The log recorded
+    compositor_active at 1368x768, format 21, multisample 0 with no failure.
+  - Live-tested --second-player-render-camera-test. F9 selected the distinct
+    named camera and F9 again restored the exact original Ailish camera; both
+    switches are confirmed in the log. Native ownership/restoration works.
+  - The Camera 2 framing path is rejected: "default" plus a translated target
+    matrix showed a skybox/improper view, not a normal Buki gameplay camera.
+    Both halves displayed it only because this diagnostic compositor duplicates
+    the one selected native frame; the restored Player 1 camera remained valid.
+    Entering the castle while Camera 2 remained globally selected held Player 1
+    in the doorway transition while NPCs continued; restoring Ailish with F9
+    immediately returned normal animation/control.
+  - Do not alternate the global render camera across simulation frames. Static
+    tracing confirmed SetRenderCamera writes gameplay ownership at manager+0x20
+    separately from renderer camera state at scene_manager->+0x40->+0x7C.
+  - Live-confirmed seventh build: F9 leaves manager+0x20 on Ailish, copies Ailish's
+    valid render matrix into SudekiMP_P2, translates only its camera position by
+    Buki-minus-Ailish, swaps renderer+0x7C during rendering, and restores Ailish
+    before native EndScene. The user observed a proper Buki-centered view with
+    no skybox, freeze, missing geometry, or doorway failure. Both halves still
+    duplicate the selected finished image; this is render isolation/framing,
+    not simultaneous output. The close post-doorway framing remains future
+    per-player offset/smoothing work.
+  - Live-confirmed Quit-menu solution: CPCQuitScreen+0x1C2 gates one native
+    full-width interface. The pre-Quit hook draws the last valid Ailish/Buki
+    texture pair beneath it, so the paused background retains both player views
+    rather than switching to Ailish-only. Back returns to live split gameplay.
 
 Windowed/recording setup:
   - tools/run-wine.sh --windowed selects native windowed mode; --fullscreen is
@@ -249,15 +411,21 @@ SudekiForge / model and world-authoring direction:
 
 Recommended next work after the pause:
   A. If returning to SudekiMP gameplay first:
-     - When the user is available, live-test --shared-group-camera-test.
-     - Confirm midpoint focus, camera rotation, native target restoration on
-       F10, and behavior when combat/camera state changes.
-     - If focus passes, trace desired/current distance and add adaptive zoom.
-     - Passively trace the retained nearest-target pointer/writer.
-     - Trace doorway/zone forced catch-up before changing it.
+     - The render-only Buki framing and doorway-isolation test has passed.
+     - The alternating frame-cache test also passed with distinct Ailish/Buki
+       views and no noticeable jitter or rendering regression.
+     - Integrated dual-camera movement and the shared full-width Quit-menu
+       overlay have passed. HUD name, HP, SP, companion ordering, and portrait
+       art are live-confirmed per viewport. Stable camera identity now tolerates
+       Sudeki's internal Ailish/Buki order reversal without an unsplit/minimap
+       pulse. Next tune Player 2 follow offset/smoothing or define explicit
+       multiplayer character reassignment. SSP remains party-wide unless later
+       evidence disproves that model.
   B. If returning to the camera first:
-     - Follow the desired-distance writer plan above; do not iterate on the
-       CameraU/CameraD staging fields again without new evidence.
+     - Keep the shared midpoint camera as a single-screen fallback.
+     - Follow the desired-distance writer plan above only after the split
+       replay path is stable; do not iterate on CameraU/CameraD staging fields
+       again without new evidence.
   C. If starting SudekiForge:
      - Inventory SOLData.baf/model-related names and signatures without copying
        assets into git.
