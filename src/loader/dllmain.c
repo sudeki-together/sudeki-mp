@@ -1,4 +1,5 @@
 #include "engine/build_identity.h"
+#include "cleanroom/menu.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/skill_activation_abi.h"
@@ -36,6 +37,7 @@
 #define SUDEKIMP_INIT_FREEROAM_CAMERA_FAILED 12u
 #define SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED 13u
 #define SUDEKIMP_INIT_INPUT_BRIDGE_FAILED 14u
+#define SUDEKIMP_INIT_CLEANROOM_MENU_FAILED 15u
 
 static HMODULE dll_module;
 
@@ -192,14 +194,21 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL freeroam_camera_input_enabled;
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL realtime_multiplayer_skill_combat_enabled;
+    BOOL skill_camera_routing_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     BOOL external_input_bridge_enabled;
+    BOOL second_player_controller_camera_enabled;
+    BOOL split_screen_ranged_model_isolation_enabled;
+    BOOL spirit_strike_viewport_effect_isolation_enabled;
+    BOOL cleanroom_menu_enabled;
+    BOOL cleanroom_multiplayer_integration;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
     wchar_t second_player_weak_attack_key_text[32];
     wchar_t second_player_camera_key_text[32];
     wchar_t second_player_skill_key_text[4][32];
     wchar_t freeroam_camera_modifier_text[32];
+    wchar_t cleanroom_menu_key_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
@@ -208,6 +217,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         VK_F1, VK_F2, VK_F3, VK_F4
     };
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
+    UINT cleanroom_menu_virtual_key = VK_F8;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
     int input_bridge_port = 26760;
@@ -216,6 +226,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     float plasmatica_camera_speed = 1.0f;
     float second_player_maximum_separation = 10.0f;
     float input_bridge_deadzone = 0.20f;
+    float second_player_controller_camera_yaw_speed = 2.25f;
+    float second_player_controller_camera_pitch_speed = 1.50f;
+    float second_player_controller_camera_maximum_pitch = 0.65f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -393,6 +406,31 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableExternalInputBridgePrototype"
     );
+    second_player_controller_camera_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSecondPlayerControllerCameraPrototype"
+    );
+    split_screen_ranged_model_isolation_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSplitScreenRangedModelIsolationPrototype"
+    );
+    spirit_strike_viewport_effect_isolation_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSpiritStrikeViewportEffectIsolationPrototype"
+    );
+    skill_camera_routing_enabled =
+        realtime_multiplayer_skill_combat_enabled ||
+        spirit_strike_viewport_effect_isolation_enabled;
+    cleanroom_menu_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableCleanroomMenu"
+    );
+    cleanroom_multiplayer_integration = cleanroom_menu_enabled &&
+        control_separation_enabled && split_screen_render_enabled;
     GetPrivateProfileStringW(
         L"Bindings",
         L"SpiritStrike",
@@ -413,7 +451,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     );
     GetPrivateProfileStringW(
         L"Bindings",
-        L"ToggleBukiAi",
+        L"ToggleSecondPlayerAi",
         L"J",
         control_separation_key_text,
         (DWORD)(sizeof(control_separation_key_text) /
@@ -453,6 +491,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     GetPrivateProfileStringW(
         L"Bindings", L"SecondPlayerSkill4", L"F4",
         second_player_skill_key_text[3], 32u, config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"ToggleCleanroomMenu",
+        L"F8",
+        cleanroom_menu_key_text,
+        (DWORD)(sizeof(cleanroom_menu_key_text) /
+            sizeof(cleanroom_menu_key_text[0])),
+        config_path
     );
     if (direct_spirit_strike_prototype_enabled &&
         !SudekiMpParseInputKey(
@@ -513,6 +560,25 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             freeroam_camera_modifier_text,
             &freeroam_camera_modifier_key)) {
         SudekiMpLogWrite("freeroam_camera_modifier_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (cleanroom_menu_enabled &&
+        !SudekiMpParseInputKey(
+            cleanroom_menu_key_text,
+            &cleanroom_menu_virtual_key)) {
+        SudekiMpLogWrite("cleanroom_menu_key_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (cleanroom_menu_enabled &&
+        (player_movement_trace_enabled ||
+         (control_separation_enabled != split_screen_render_enabled))) {
+        SudekiMpLogWrite(
+            "cleanroom_menu_config=requires_standalone_or_complete_multiplayer_hook_pair\r\n"
+        );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -601,6 +667,73 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
              0.90f,
              &input_bridge_deadzone))) {
         SudekiMpLogWrite("external_input_bridge_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_controller_camera_enabled &&
+        (!external_input_bridge_enabled ||
+         !second_player_camera_relative_movement_enabled ||
+         !split_screen_render_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "second_player_controller_camera_config=requires_external_bridge_camera_relative_movement_split_p2_camera_dual_cache\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (split_screen_ranged_model_isolation_enabled &&
+        (!split_screen_render_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "split_screen_ranged_model_isolation_config=requires_split_p2_camera_dual_cache\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (spirit_strike_viewport_effect_isolation_enabled &&
+        (!split_screen_render_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "spirit_strike_viewport_effect_isolation_config=requires_split_p2_camera_dual_cache\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_controller_camera_enabled &&
+        (!read_config_float(
+             config_path,
+             L"SudekiMP",
+             L"SecondPlayerControllerCameraYawSpeed",
+             2.25f,
+             0.1f,
+             10.0f,
+             &second_player_controller_camera_yaw_speed) ||
+         !read_config_float(
+             config_path,
+             L"SudekiMP",
+             L"SecondPlayerControllerCameraPitchSpeed",
+             1.50f,
+             0.1f,
+             10.0f,
+             &second_player_controller_camera_pitch_speed) ||
+         !read_config_float(
+             config_path,
+             L"SudekiMP",
+             L"SecondPlayerControllerCameraMaximumPitch",
+             0.65f,
+             0.1f,
+             1.2f,
+             &second_player_controller_camera_maximum_pitch))) {
+        SudekiMpLogWrite(
+            "second_player_controller_camera_config=invalid\r\n"
+        );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -816,7 +949,37 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("freeroam_camera_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "control_separation_prototype_requested=%s virtual_key=0x%02lx target=buki second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_port=%d bridge_timeout_ms=%d bridge_deadzone_bits=0x%08lx\r\n",
+        "cleanroom_menu_requested=%s virtual_key=0x%02lx\r\n",
+        cleanroom_menu_enabled ? "true" : "false",
+        (unsigned long)cleanroom_menu_virtual_key
+    );
+    if (cleanroom_menu_enabled) {
+        BOOL cleanroom_installed = cleanroom_multiplayer_integration ?
+            SudekiMpInstallIntegratedCleanroomMenu(
+                game_module,
+                cleanroom_menu_virtual_key
+            ) :
+            SudekiMpInstallCleanroomMenu(
+                game_module,
+                cleanroom_menu_virtual_key
+            );
+
+        if (!cleanroom_installed) {
+            SudekiMpLogFormat(
+                "cleanroom_menu_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpLogWrite("cleanroom_menu_applied=false\r\n");
+            SudekiMpLogWrite("status=cleanroom_menu_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
+        }
+        SudekiMpLogWrite("cleanroom_menu_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("cleanroom_menu_applied=false\r\n");
+    }
+    SudekiMpLogFormat(
+        "control_separation_prototype_requested=%s virtual_key=0x%02lx target_policy=first_non_front_active_party_member second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_port=%d bridge_timeout_ms=%d bridge_deadzone_bits=0x%08lx\r\n",
         control_separation_enabled ? "true" : "false",
         (unsigned long)control_separation_virtual_key,
         second_player_movement_enabled ? "true" : "false",
@@ -888,7 +1051,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_camera_toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_controller_camera=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
         split_screen_render_enabled ? "true" : "false",
         dual_camera_frame_cache_enabled ?
             "alternating_render_state_frame_cache" :
@@ -896,8 +1059,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "render_only_translated_camera_toggle" :
                 "same_native_camera"),
         dual_camera_frame_cache_enabled ? "true" : "false",
-        realtime_multiplayer_skill_combat_enabled ?
+        skill_camera_routing_enabled ?
             "caster_viewport_only" : "disabled",
+        second_player_controller_camera_enabled ? "true" : "false",
+        split_screen_ranged_model_isolation_enabled ? "true" : "false",
+        spirit_strike_viewport_effect_isolation_enabled ? "true" : "false",
+        (unsigned long)float_bits(second_player_controller_camera_yaw_speed),
+        (unsigned long)float_bits(second_player_controller_camera_pitch_speed),
+        (unsigned long)float_bits(second_player_controller_camera_maximum_pitch),
         (unsigned long)second_player_camera_virtual_key
     );
     if (split_screen_render_enabled) {
@@ -906,7 +1075,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 second_player_camera_enabled,
                 dual_camera_frame_cache_enabled,
                 second_player_camera_virtual_key,
-                realtime_multiplayer_skill_combat_enabled)) {
+                skill_camera_routing_enabled,
+                second_player_controller_camera_enabled,
+                split_screen_ranged_model_isolation_enabled,
+                spirit_strike_viewport_effect_isolation_enabled,
+                input_bridge_deadzone,
+                second_player_controller_camera_yaw_speed,
+                second_player_controller_camera_pitch_speed,
+                second_player_controller_camera_maximum_pitch)) {
             SudekiMpLogFormat(
                 "split_screen_render_error=%lu\r\n",
                 (unsigned long)GetLastError()
@@ -919,6 +1095,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("split_screen_render_applied=true\r\n");
     } else {
         SudekiMpLogWrite("split_screen_render_applied=false\r\n");
+    }
+    if (cleanroom_multiplayer_integration) {
+        SudekiMpControlSeparationSetUpdateObserver(
+            SudekiMpCleanroomMenuUpdate
+        );
+        SudekiMpSplitScreenSetOverlayRenderer(
+            SudekiMpCleanroomMenuRender
+        );
+        SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+        SudekiMpLogWrite(
+            "cleanroom_multiplayer_integration=ready "
+            "default=disabled input=external_razer_bridge\r\n"
+        );
     }
     SudekiMpLogFormat("player_movement_trace_requested=%s\r\n",
         player_movement_trace_enabled ? "true" : "false");
@@ -968,6 +1157,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !freeroam_camera_input_enabled &&
         !control_separation_enabled &&
         !split_screen_render_enabled &&
+        !cleanroom_menu_enabled &&
         !player_movement_trace_enabled) {
         SudekiMpLogClose();
     }

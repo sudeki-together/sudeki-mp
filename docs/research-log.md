@@ -1014,3 +1014,997 @@ When the bridge option is enabled, Buki's existing control-separation hook consu
 The castle save loaded with Ailish as Player 1 and Buki in slot 1. The receiver connected at sender sequence `1125`; F10 acquired Buki's native AI override successfully. Keyboard/mouse remained Player 1 while the user independently moved Buki with the Raiju left stick and confirmed that two people could control the two characters simultaneously. Every bridge movement record used Buki character `0x082B1D50` and arbiter `0x082B2620`. The input covered the signed analog range, passed through changing camera-relative world vectors, produced sub-1.0 movement-speed bit patterns for partial deflection, reached 1.0 at full deflection, and emitted native stop events inside the deadzone.
 
 Right-stick changes were logged repeatedly with policy `captured_not_applied_independent_camera_pending`, and the user did not report either camera reacting to them. Two A-button rising edges reached `second_player_weak_attack phase=submit` for the same Buki arbiter. The current castle conversation save does not permit visible weak attacks, so this proves controller button mapping and native submission—not completed combat animation. That final visible action remains a small arena test. The core bridge milestone is nevertheless complete: Linux controller input and Sudeki's normal keyboard/mouse input now control different party characters in the same process.
+
+## 2026-08-15 — Party-generic Player 2 control prepared
+
+The control-separation selector no longer searches for Buki's resource type. It now uses the same ownership rule as the split-screen camera layer: the controller-owned front character is Player 1, and the first non-null, non-front active party member is Player 2. F10 applies Sudeki's unchanged refcounted AI override to that exact character pointer. Restoration searches by the retained pointer rather than by party position, so HUD/display reordering cannot silently transfer ownership.
+
+All existing movement, separation, weak-attack, Skill Strike, controller-bridge, and Camera 2 paths already consume the retained overridden-character pointer and therefore become party-generic with this selector change. The focused controller launcher now accepts any two-character party, including Tal/Ailish. Repository defaults remain disabled. The PE32 build, controller protocol/receiver tests, and exact supported-image hook installation/restoration test pass; Tal/Ailish live confirmation is pending.
+
+## 2026-08-15 — Shipped native test arena discovered
+
+Read-only inspection of the user-owned `SOLData.baf` found an internal level-selection document containing `Testroom.zone` and `Testroom_Press.zone`. The same archive identifies level ID `30` as `testroom`, and its resource dictionary contains `SMAP_TestRoom.xml`, `SMAP_TestRoom_Jumps.xml`, `SMAP_TestRoom_Press.xml`, `testroom__OnMain`, `Training_Dummy`, and training-objective text. These names establish that test-room and dummy resources ship with this build; they do not yet establish the room's live contents or the dummy's damage/AI behavior.
+
+The exact executable exports `LoadZone(char const *)` at RVA `0x00007B80`, but decompilation shows that function only locates and requests one already-known zone resource. The safer complete startup path is exported `DoOneLevelTest()` at RVA `0x001051F0`. It reads Sudeki's native `-Level` command-line option, lowercases the selected level, selects the corresponding world record, fires `StartLevelFromStartup`, and performs the remaining world-start initialization. `tools/ghidra/TestArenaReport.java` records this exact-build evidence without changing the Ghidra project or game files.
+
+The first launcher pass correctly applied Windows quoting to the forwarded arguments, but Sudeki remained at its normal front end. `InputArgsReport.java` then confirmed that the game's native tokenizer at RVA `0x00022260` splits only on literal spaces and does not interpret quotation marks. Quoted `"-Level"` therefore could not match the later case-insensitive lookup for `-Level`. The launcher now accepts only non-empty game-argument tokens without spaces or quotes and forwards them unquoted. `tools/continue-research.sh --test-arena` supplies the compatible tokens `-Level testroom` with all optional SudekiMP gameplay hooks disabled. Live test-room entry remains pending after this correction. No game archive, executable, save, or installed asset was modified or copied into the repository.
+
+### First live result — native room entry confirmed; no default player
+
+The corrected launch entered a sparse native room containing a floor and wall rather than the normal front end. No player characters, HUD inventory, or healing items existed, and pressing top-row number keys eventually ended the run. This confirms that the shipped level and basic geometry load without a save, but `-Level testroom` alone does not construct a playable party. Missing inventory is irrelevant to the initial movement/render harness and remains deferred.
+
+`TestArenaPlayerArgsReport.java` traced the character creation path at RVA `0x00006AE0`. A non-empty `-DT` argument gates the entire test-player initializer. Inside that gate, case-insensitive value `1` for `-Tal`, `-Buki`, `-Elco`, or `-Ailish` selects the matching native `PC_*` resource; the same path also exposes several non-party test actors. The next `--test-arena` pass therefore adds `-DT 1 -Tal 1 -Ailish 1`. Live player creation is not claimed until the relaunch is observed.
+
+### Second live result — native Tal/Ailish party confirmed
+
+The user confirmed that `-Level testroom -DT 1 -Tal 1 -Ailish 1` created both
+Tal and Ailish in the shipped room. This proves the developer player-selection
+flags reach the normal playable-character construction path; inventory and
+healing-item setup remain intentionally out of scope for the movement/combat
+harness.
+
+### First dynamic-spawn result — invalid ResourceName assumption isolated
+
+The Ailish-first room and F8 overlay loaded, but selecting another playable
+character faulted inside the supported executable at RVA `0x000B1370` while
+`InternalSpawnPC` dereferenced `ResourceName + 8`. The bad address was
+`0x00006C61`, the trailing bytes `"al"` from the fabricated `PC_Tal` inline
+buffer. This is direct evidence that the earlier 32-byte inline-string model
+was wrong; it is not an `InternalSpawnPC` timing failure.
+
+Disassembly confirms the native object is 12 bytes: encoded kind, identifier,
+and a pointer to a reference-backed text record. The engine constructor at RVA
+`0x001B9440` consumes `ESI=destination`, `EAX=text`, and `ECX=0x7f`; the
+public spawn path then canonicalizes that textual name. The matching native
+reference cleanup is RVA `0x001B9760`. The mod now uses those two exact-build
+entries, validates their prologues before enabling the cleanroom menu, and
+releases the temporary reference after the spawn/remove API returns. The PE32
+build and exact-image regression pass; the corrected dynamic call still needs
+one live confirmation.
+
+## 2026-08-15 — Ailish-first cleanroom menu prepared
+
+The focused launcher now supplies only `-Ailish 1`, making Ailish the initial
+lead. `--cleanroom` is the descriptive launcher name and `--test-arena` remains
+an alias. A disabled-by-default `EnableCleanroomMenu` option installs only when
+the command line also contains the exact testroom, developer-test, and Ailish
+tokens.
+
+Read-only disassembly and the export table established the high-level native
+routes used by the menu: `InternalSpawnPC(ResourceName, xyz)` RVA `0x000B1B00`,
+`RemovePC(ResourceName)` RVA `0x000B23A0`, `SpawnEntity(name, xyz)` RVA
+`0x000B20D0`, `DespawnEntity` RVA `0x000B2300`, `GetPC(text)` RVA `0x00104480`,
+and `GetGenericEntity(text)` RVA `0x00104400`. The playable resource names are
+`PC_Tal`, `PC_Buki`, `PC_Elco`, and `PC_Ailish`; the shipped generic resource is
+`TrainingDummy.sol`. Each resolved export must match its exact supported-build
+RVA before the feature installs.
+
+The F8 overlay uses the existing controller-update and pre-`EndScene` seams but
+refuses to coexist with the prototypes that currently own those same hooks.
+Up/Down selects, Enter toggles, and Escape/F8 closes. Ailish is permanently
+lead-locked. Spawn/remove requests remain pending until native lookup confirms
+their result; a timeout displays failure instead of repeating an unknown
+operation. The dummy is requested six units in front of Ailish's initial room
+position. Playable actors use Sudeki's party-aware path so normal formation is
+expected, but live following remains to be checked.
+
+Confirmed despawns trigger a 260 ms original two-tone descending triangle-wave
+cue generated in memory. Its design is documented in
+`assets/audio/cleanroom/`; no audio or other asset from Sudeki is stored in the
+repository. The PE32 build, cleanroom ResourceName ABI test, and expanded exact
+supported-image signature regression all pass. No live menu/dummy/audio result
+is claimed yet.
+
+### Dynamic party and dummy follow-up
+
+The native 12-byte `ResourceName` correction passed live testing. Tal, Buki,
+and Elco each spawned through `InternalSpawnPC`, joined Sudeki's ordinary party
+formation, despawned through `RemovePC`, and spawned again without a fault. The
+training group name `TrainingDummy` did not create the expected entity;
+read-only archive inspection distinguished the group wrapper from the actual
+monster definition. Passing `MON_TrainingDummy` to `SpawnEntity` (which appends
+`.SOL`) created the shipped dummy successfully.
+
+The first placement intentionally added six units to the captured Ailish Z
+coordinate. Live comparison showed that this was not the visual center of the
+room. The next build instead passes Ailish's exact initial cleanroom anchor as
+the dummy position.
+
+### Native cleanroom combat and camera controls prepared
+
+Read-only disassembly established that `CGroupPlayers::InCombat` at RVA
+`0x00004FA0` reads the state byte at group offset `+0xD4`. The `CGroupPlayers`
+constructor installs a combat-event subobject vtable at group offset `+0x44`;
+its full transition at RVA `0x00024480` performs native party arm/unarm, combat
+camera/UI changes, cleanup, and finally updates the same state byte. The
+cleanroom control calls that transition only after both its exact entry bytes
+and the live embedded vtable identity match. It does not patch `+0xD4`.
+
+The separate Camera Mode control resolves exported
+`SetFirstPersonCameraMode(bool)` at RVA `0x0002A880` and reads the corresponding
+gamepad-controller mode bit at `+0xA0`. The F8 menu now exposes both states and
+permits entering or leaving combat and first-/third-person presentation during
+cleanroom tests. The corrected RVA was caught by the exact-image regression
+before live launch. The PE32 build, unit test, DLL dependency check, and exact
+supported-image test pass; focused live behavior is pending.
+
+### Cleanroom infinite resources prepared
+
+The supported executable already contains explicit developer resource
+bypasses. Exported `NoSpNeeded()` at RVA `0x000B5320` sets global flag RVA
+`0x003C2FCC`; `CSkill::Use` and its validator both check that flag before SP
+comparison or subtraction. Exported `NoSspNeeded()` at RVA `0x0000F5B0` sets
+global flag RVA `0x003C2F23`; Spirit Strike validation and activation check it
+before SSP comparison or deduction. These are engine-authored mechanisms, not
+guessed actor-stat writes.
+
+The cleanroom enables both flags by default and exposes reversible F8 menu
+toggles. Because the SSP bypass prevents spending but does not itself fill an
+already-low display, the enabled state also compares exported `GetSsp()` at RVA
+`0x0000F5E0` and refills through exported `SetSsp(float)` at RVA `0x0000F5C0`
+only below the confirmed native maximum of `200.0`. Initial flag values are
+captured and restored on mod unload. All four exports, their exact RVAs, and
+their entry bytes are covered by the supported-image regression. The PE32
+build, cleanroom unit test, and exact-image test pass; live resource behavior
+is pending.
+
+### Cleanroom inventory, Spirit Strike, stat, and weapon initialization
+
+The cleanroom HUD exposed an initialization distinction: Elco and Buki showed
+full numeric HP with empty bars, and Ailish showed full numeric SP with an empty
+bar. Read-only disassembly of the HUD confirms that the printed numbers use
+character-stat offsets `+0x2C` (current HP) and `+0x34` (current SP), while the
+bars divide those values by `+0x30` (maximum HP) and `+0x38` (maximum SP).
+Therefore the display can show a plausible current number while an invalid
+maximum produces an empty bar.
+
+The guarded repair uses exported `GetCharacterNumberStat()` at RVA
+`0x000C1270` and `SetCharacterNumberStat()` at RVA `0x000C1350` with the exact
+authored names `HitPoints`, `Maximum HitPoints`, `SkillPoints`, and
+`Maximum SkillPoints`. It changes only a non-finite or non-positive maximum
+whose current value is finite and positive. Every observed value and repair is
+logged as raw float bits so the first live pass can confirm the diagnosis.
+
+Exported `FillInventory()` at RVA `0x000204D0` is Sudeki's own developer
+inventory routine. Its implementation walks item IDs through `999`, grants or
+maximizes the corresponding native inventory entries, adds currency, and
+enables inventory categories. The cleanroom calls it once only after the
+inventory global at RVA `0x00408D84` and item database global at RVA
+`0x00408D80` are live. This supplies all weapons but also deliberately supplies
+the rest of the developer inventory.
+
+Static `SOLData.baf` inspection identifies the first weapon record in each
+character family as Tal item `0`, Ailish/Alice item `12` (Royal Sceptre), Elco
+item `24` (Mk1 Pistol), and Buki item `36` (Zesiro). Weapon definitions expose
+character-specific `Item Type` values but no `Level Requirement`; those fields
+occur in ability-advancement records instead. The current evidence is therefore
+that weapons are character-family restricted, not character-level restricted.
+
+Elco's cleanroom animation-without-projectile behavior is consistent with a
+missing native equipped item: the ranged attack route can reach its animation
+fallback while the weapon/missile readiness path refuses to fire.
+`CCharacterWeapon::SetWeapon(int)` at RVA `0x000D8790` resolves the requested
+item through the native inventory and installs it through the full engine path.
+The cleanroom invokes it with the starter ID only when character offset `+0xC0`
+contains a live weapon component whose current-item field at component offset
+`+0x268` is null. Existing equipment is preserved, and each new actor instance
+is initialized only once after both its stats and weapon report ready.
+
+Exported `SpiritStrikeEnable(int)` at RVA `0x000113A0` sets one bit for a
+non-negative ID and writes `0xFF` to the manager unlock byte at `+0xAC` for a
+negative ID. Cleanroom mode uses `-1` once the manager global at RVA
+`0x00408D30` is live, captures the prior byte, and restores it on hook unload.
+The PE32 build, cleanroom pre-initialization unit test, exact supported-image
+entry regression, and diff check pass. Live confirmation of the bars, Elco's
+projectile, all weapon tables, and all Spirit Strike tables is pending.
+
+### Toggleable cleanroom split-screen and Razer readiness prepared
+
+The original cleanroom overlay and the multiplayer prototypes could not be
+enabled together safely: the cleanroom owned the character-controller update
+vtable slot and frame-end callsite, while control separation and split-screen
+needed those same two seams. The loader therefore rejected the combination.
+The integration now retains one hook owner for each seam. Control separation
+invokes a registered cleanroom update observer after native/controller/P2
+processing, and split-screen invokes a registered overlay renderer after its
+final camera composition. Standalone cleanroom mode retains its original hooks
+for configurations that do not load the multiplayer modules.
+
+The F8 menu adds `Split Screen P2`, initially disabled. Enabling it records a
+Player 2 request, asks the native AI-override path to claim the first non-front
+active party member, and opens the runtime gate on the existing alternating
+dual-camera cache. Disabling it closes the render gate, releases Camera 2, and
+requests native AI restoration for the retained character pointer. The request
+reconciler runs on the controller update and retries at a bounded 250 ms cadence
+when a second actor has not finished spawning.
+
+Control separation now exposes three distinct states rather than conflating
+them: requested, independently controlled, and external-input ready. The last
+state is true only while the UDP receiver has accepted a current bridge packet
+inside its existing 250 ms timeout. A cleanroom-only badge on the right side
+reports `P2 JOINING`, `P2 RAZER`, or `P2 READY` from those states. It is drawn
+after the two-camera composite, so it belongs to the Player 2 presentation
+rather than being duplicated into both cached camera frames.
+
+`--cleanroom` now prepares the proven controller-bridge stack—camera-relative
+movement, separation guard, native weak attack, dual per-character cameras,
+viewport HUD ownership, and Player 2 right-stick camera—but keeps its runtime
+split gate disabled until the F8 entry is selected. The Linux helper starts for
+the configured Razer joystick when its device node is readable. Missing input
+does not prevent cleanroom entry; it leaves the badge in its waiting state.
+Anti-aliasing is temporarily set to zero for the existing compositor and is
+restored on exit.
+
+The PE32 build completes without warnings. Bash syntax, DLL dependency, diff,
+cleanroom-engine, input-protocol, input-receiver, and exact supported-image hook
+installation/restoration checks pass. Live validation of toggle-on, readiness,
+movement/camera assignment, toggle-off AI restoration, badge placement, and
+spawn/despawn interactions is pending.
+
+### Cleanroom camera-facing and global-presentation findings
+
+Live Ailish/Tal cleanroom testing confirmed that Player 2 movement and Camera 2
+are independently controllable. Tal rotated toward Camera 2 only after movement
+because native movement committed the new facing direction; orbiting the camera
+alone did not. Read-only tracing identified `FUN_005114D0` (RVA `0x001114D0`)
+as the native `CPosition` forward-vector/orientation commit used by the actor
+direction path. The split-screen module now exposes that exact routine to the
+controller layer. When Player 2 is armed (`arbiter+0x50 & 0x2`) and the right
+stick is outside its deadzone, it commits Camera 2's horizontal forward vector.
+This reuses Sudeki's existing world animation and orientation systems; no new
+walking or firing animation is being authored.
+
+A rejected render-window experiment called the native ranged first-/third-
+person presentation refresh at RVA `0x001888F0` around Player 2 frames. It made
+the ranged body visible but left the model animation static and prevented
+Ailish's wand from firing. The experiment demonstrably changes gameplay-owned
+presentation state and is not a valid render-only boundary. It remains
+disabled by default and is no longer enabled by `--cleanroom` or
+`--realtime-skill-coop-test`.
+
+Pure Land then exposed a different global-camera fault. Runtime logs recorded
+repeated `second_player_camera phase=release
+reason=native_render_camera_changed` events followed by acquisitions based on
+temporary native skill cameras. This matches the user's report that Player 1
+and Player 2 perspectives briefly mirrored or appeared faded over one another.
+The render-only swap now derives the native camera state on every frame, saves
+that exact state, substitutes the stable Player 2 state only for a requested
+Player 2 render, and restores the saved native state afterward. Camera 2 is no
+longer destroyed merely because Player 1 enters an authored cinematic camera.
+
+The exported `QuickMenuIsActive()` at RVA `0x0009C330` is now exact-build
+checked and used as a presentation gate. While active, the alternating renderer
+forces a Player 1 frame, refreshes the Player 1 cache containing the menu, and
+preserves the last clean Player 2 world cache instead of drawing the same menu
+twice. This is a viewport-presentation correction only. Native global time
+scaling and the observation that Pure Land slows the other viewport remain
+open real-time combat tasks.
+
+The PE32 build, cleanroom engine, orbit camera, input bridge protocol/receiver,
+and exact supported-image hook installation/restoration tests pass. Live
+confirmation is pending for restored Ailish wand fire, stationary armed Tal
+facing, Player 1-only Quick Menu presentation, and stable Camera 2 during Pure
+Land.
+
+### Pure Land temporal-history contamination confirmed
+
+The next live trace disproved a remaining camera-ownership hypothesis. For
+Pure Land manager state `10`, the global native camera stayed at `0x0432FEE8`
+with render state `0x04353DA0`. Player 1 frames used that state, while Player 2
+frames used the stable independent state `0x05A5B278`; Camera 2 was never
+released or reacquired. Controller right-stick input continued to update the
+Player 2 camera path.
+
+The corrected ranged component snapshot also showed first-person wrapper
+`0x05B7F340` with render-object flags `0x0081E014` (hidden bit `4` set), while
+the saved world wrapper `0x05B1A148` was the attached model and its render
+object flags `0x0081F011` left it visible. Thus the floating/faded duplicate
+presentation is not the first-person arms model and not Tal controlling
+Ailish's camera. Pure Land uses shared screen-space or temporal render history,
+and the alternating one-camera-per-engine-frame prototype feeds Camera 2's
+image into the history consumed by the next Player 1 frame.
+
+A diagnostic policy that would retain Player 2's last clean image while the
+Spirit manager at global RVA `0x00408D30` is active was rejected before live
+use. Although it would contain cross-camera history bleed, a frozen Player 2
+viewport is not valid co-op behavior. Both cameras and both input paths remain
+live in the current source. The concrete next requirement is distinct
+per-viewport render targets and any temporal/history resources consumed by the
+effect, followed by composition of both live results; another camera-pointer
+patch cannot solve this class of presentation bug.
+
+### First live-history isolation experiment prepared
+
+Read-only exact-build analysis in `PureLandRenderHistoryReport.java` identified
+the first concrete shared temporal resource. `CSceneManager::SetMotionBlur` at
+RVA `0x0001BE60` lazily constructs one global
+`cD3DMotionBlurPostEffect` through RVA `0x001DDFB0` and stores it at scene
+manager `+0x70`. That object owns one render-target/history resource at `+0x10`
+and one `cScreenshotPostRenderCallback` at `+0x14`. Its post-render callback at
+RVA `0x001DE0B0` blends the saved full-screen image; the screenshot callback at
+RVA `0x001DE7B0` then captures the current frame back into the same history.
+Their vtable slots are RVAs `0x002DD930` and `0x002DD910` respectively.
+
+This establishes a direct contamination path for the alternating-camera
+prototype: a Player 2 frame can be captured into the one global history and
+then blended into Player 1's next Pure Land frame. A disabled-by-default,
+exact-pointer-gated experiment now intercepts only those two callbacks. While
+the Spirit manager is active and the current native render is Player 2, both
+the blur composite and screenshot capture are skipped. Player 1 retains the
+native effect and history; Player 2 still performs its normal live world render
+and continues to accept movement, camera, and combat input. No cached-frame
+freeze, simulation pause, camera replacement, or executable-file patch is
+used.
+
+This is intentionally a Player-1-caster containment proof, not the final
+per-player effect architecture. If live testing succeeds, Player 2 casting and
+overlapping cinematic effects will still require effect instances/history
+owned by each combat/viewport context.
+
+The first live attempt crashed immediately after the isolation hook logged its
+first Player 2 suppression. Wine reported a privileged-instruction fault after
+control returned through a corrupted stack. Raw disassembly then corrected an
+ABI detail Ghidra had inferred incompletely: native motion-blur callback RVA
+`0x001DE0B0` ends with `ret 4`, just like the screenshot callback, despite not
+using the stack argument in its body. The initial wrapper declared only the
+ECX/`this` argument and emitted plain `ret`, leaking four stack bytes per
+suppressed call. The wrapper now accepts and forwards the callback flag and
+emits `ret 4`; disassembly confirms the matching epilogue. The PE32 rebuild and
+exact-image installation/restoration regression pass.
+
+The corrected live run no longer crashed, but Pure Land stalled permanently on
+the first isolated Player 2 frame. The runtime log ends immediately after
+`spirit_effect_viewport_isolation`; the Spirit manager remains in state `10`.
+Static code explains the semantic deadlock: native screenshot callback RVA
+`0x001DE7B0` ends by writing `1` to `callback+0x08`. Motion blur checks that
+same byte before consuming the captured target. Suppressing the screenshot
+callback therefore suppresses a required completion signal, not merely an
+image copy.
+
+This suppression policy is rejected and is no longer enabled by either focused
+launcher. The next safe experiment must let the native screenshot callback run
+to completion on Player 1's render, then prevent only the blur composite from
+being drawn into Player 2—or provide a second callback/target pair. It must not
+fake completion until the callback scheduler and target lifetime are fully
+understood. The option remains disabled by default as a recorded failed
+experiment.
+
+### Completion-preserving Pure Land isolation prepared
+
+The replacement keeps the corrected `ret 4` callback ABI but no longer
+suppresses the screenshot callback under any condition. The exact callback
+object is resolved through scene manager `+0x70`, motion-blur effect `+0x14`,
+and its expected exact-build vtable. If `callback+0x08` is still zero when the
+alternating compositor requests Player 2 during an active Spirit presentation,
+that single render is assigned to Player 1. The native screenshot callback then
+performs both its image operation and required completion write. Normal camera
+alternation resumes on the next frame.
+
+The motion-blur composite callback alone is omitted on active Player 2 frames.
+The screenshot wrapper forwards unconditionally and logs which viewport owned
+the first observed completion, allowing the live run to confirm the scheduling
+assumption. This is enabled only by the focused cleanroom and real-time skill
+launchers; the source default remains off. The acceptance conditions for the
+next run are no crash or Spirit-state stall, a completed Pure Land sequence,
+and live Player 2 movement/camera without the caster's temporal composite.
+
+The live test met the safety conditions: Pure Land completed repeatedly without
+a crash or state-`10` stall, the first screenshot callback reported
+`completion_before=0`, `completion_after=1` on Player 1, and Tal retained direct
+movement and Camera 2 input. Two presentation defects remained. Some later Pure
+Land shots copied Camera 2 into the Player 1 viewport, showing that the same
+screenshot callback continues updating the global history after its one-time
+completion signal. Gaze of Wind also replaced both cached views because the
+cleanroom launcher reported `skill_camera_routing=disabled`.
+
+The refined pass therefore distinguishes completion from recurring capture.
+It always runs the callback while `callback+0x08` is zero, forcing that pending
+operation through Player 1 if necessary. On later Player 2 frames, where the
+byte is already nonzero, it skips the screenshot image update as well as the
+motion-blur composite; no required state transition is omitted. The first
+attempt to supply caster identity by enabling the Plasmatica script trace during
+cleanroom startup was rejected immediately: its scope is Plasmatica, not Spirit
+Strikes, and that launch reached the room without its native Ailish startup
+actor. The launcher no longer enables that trace. Instead, while the Spirit
+manager is active, `SetRenderCamera` requests are attributed directly to the
+known Player 1 character and routed through the existing viewport-owned camera
+state. The inactive manager transition clears any retained Spirit camera. The
+next live run must confirm Ailish spawns normally, Pure Land no longer imports
+Camera 2, and Gaze of Wind no longer takes over both viewports.
+
+The same run also clarified that the apparent global freeze is not the known
+world-time mode: every attempted mode `1` write was rejected and the log stayed
+at mode `0`, paused `0`. Tal's injected movement continued while ordinary world
+actors stopped. Spirit Strike therefore owns an additional cinematic/actor
+freeze mechanism that must be traced separately after viewport presentation is
+stable.
+
+### Render-only ranged full-body borrow prepared
+
+The Ailish-Player-1/Tal-Player-2 asymmetry is now isolated from camera
+ownership. In ranged first-person combat, Ailish's component keeps the active
+first-person model wrapper at `+0x160` and a retained world-model wrapper at
+`+0x164`; the character position's `+0xB4` slot selects which wrapper is
+attached for rendering. Native switch RVA `0x00188A90` calls attachment helper
+RVA `0x00111B30`, changes reference counts, copies state, and performs other
+gameplay presentation work. Repeating that transition at render cadence was
+therefore the cause of the frozen body and blocked wand shots in the rejected
+prototype.
+
+The replacement never calls either native transition. It activates only for a
+Player 2 render, only while Player 1's arbiter reports ranged first-person
+state, and only when the position attachment is exactly the first-person
+wrapper and both retained wrappers and render objects are valid writable heap
+objects. It temporarily points the attachment slot at the already-retained
+world wrapper, sets render-object hidden bit `4` on the first-person wrapper,
+clears it on the world wrapper, and restores every exact pointer and flag before
+the native frame-end routine. Restoration is ownership-aware: a value changed
+by the engine during the render window is not overwritten blindly. The option
+remains disabled in repository defaults and is enabled only by the focused
+cleanroom launcher. Live acceptance requires Ailish to fire normally for
+Player 1 while Tal's viewport sees her complete moving/firing world model.
+
+The first live use of that replacement exposed Ailish's complete body without
+breaking the render pass, but the saved world wrapper remained in a T-pose.
+This separates visibility from animation ownership: `component+0x164` is a
+valid retained renderable model, but ranged first-person mode no longer applies
+the current skeletal pose to it.
+
+Read-only decompilation of the exact supported executable first established
+that ranged update owner RVA `0x001884C0` calls base model update RVA
+`0x000E1930`. At callsite RVA `0x000E1A62`, that base update calls RVA
+`0x000E3780`, which advances half-float clock fields at `component+0xFC/+0xFE`
+and applies channel-2 blend through virtual method `+0x144` on only the attached
+wrapper. Mirroring that blend did execute in the next live test, but Ailish
+remained T-posed; the staff alone continued following aim. The blend-only
+hypothesis is therefore rejected.
+
+Sudeki's native debug-animation status path supplies the missing boundary. It
+reads an attached model's animation selection through virtual `+0x100`, rate
+through `+0x108`, time through `+0x110`, channel state through `+0x118`, and
+blend through `+0x148`. The corresponding setters are `+0xFC`, `+0x104`,
+`+0x10C`, `+0x114`, and `+0x144`; native helper RVAs
+`0x001E84F0/0x001E8530/0x001E8580/0x001E85D0` apply those setters to every
+submodel. The replacement now copies that complete low-level state from the
+active first-person interface's canonical submodel to every submodel of the
+saved world interface immediately before Player 2 rendering. It temporarily
+clears hidden bit `4` during the copy and restores the exact flag. It does not
+advance a clock, rerun the component update, perform a native model transition,
+or execute projectile, cost, damage, completion, or animation-event paths.
+PE32 compilation and exact-image installation/restoration checks pass; live
+confirmation remains required.
+
+### Native ranged-presentation comparison and cleanroom ownership findings
+
+The comparison build logged animation IDs and low-level selectors only when
+they changed, before the Player 2 render-only wrapper borrow. With Ailish as
+the ranged Player 1, the component remained attached to its first-person
+wrapper and used the expected strafe/presentation states: idle strafe `0x05`,
+missile-strafe-combo state `0x8E`, and character-specific states `0xC2/0xC3`.
+Copying those selectors into the retained world wrapper animated the complete
+body, but selected semantically unrelated world clips.
+
+After changing ownership to Tal Player 1/Ailish Player 2, the same Ailish
+component remained attached to its native world wrapper. A controller weak
+attack then placed `ANIMID_MISSILE_COMBO3` (`0x87`) on channel `4` and selected
+world clip `55`. This confirms that Camera 2 is capable of drawing and
+animating Ailish correctly. The asymmetry is upstream: Sudeki globally selects
+a ranged Player 1's first-person presentation controller, while an observed
+or AI ranged character receives the authored third-person controller states.
+The remaining fix must translate action semantics into the native world-body
+states or preserve a second presentation controller; additional camera or
+visibility changes cannot solve it.
+
+The same cleanroom run invalidated the starter-weapon argument assumption.
+Static archive IDs `0/12/24/36` identify the first Tal/Ailish/Elco/Buki weapon
+records, but exported `CCharacterWeapon::SetWeapon(int)` calls native inventory
+lookup RVA `0x00021CE0` with category `5` and treats its argument as the index
+within that category. Passing global ID `0` equipped Ailish's weapon on Tal,
+and passing global ID `24` equipped Tal's weapon on Elco. `FillInventory()`'s
+weapon-category order is Ailish, Elco, Tal, Buki, so the corrected starter
+slots are Tal `24`, Buki `36`, Elco `12`, and Ailish `0`. The PE32 build,
+cleanroom engine test, and exact supported-image regression pass.
+
+One ownership regression remains open: after two-player role changes, Player 1
+status could appear in both bottom-right HUD dials. The accepted HUD layer had
+previously worked for a stable Ailish/Buki pair. A new observation-only trace
+records, for each viewport and primary/companion source, the desired stable
+character and actual resolved party slot. The next reproduction will show
+whether the fault is source resolution, party reordering, or cached-frame/HUD
+timing before another patch is attempted.
+
+### Viewport-owned ranged first-person presentation prepared
+
+The Tal-Player-1/Ailish-Player-2 comparison sharpened the requirement. Ailish
+must not be switched globally between first- and third-person. Her owning
+viewport should show the native-style first-person presentation while combat
+is active, Tal's observing viewport should continue to see her complete world
+body, and both viewports should use the world body outside combat.
+
+The next exact-build prototype therefore reads exported
+`CGroupPlayers::InCombat()` at RVA `0x00004FA0` and changes only Camera 2's
+render state. On entry it preserves Camera 2's complete third-person matrix,
+moves only that render matrix to a provisional `1.55`-unit eye offset over the
+Player 2 actor, and applies right-stick yaw/pitch to the in-place first-person
+basis. The preserved orbit receives the same input and actor translation, so
+leaving combat restores the current third-person view instead of rebuilding it
+from Player 1. The eye height is a live-test value, not a confirmed authored
+character locator.
+
+Model presentation follows the same ownership boundary. On the Player 2 render
+window, a ranged Player 2 temporarily attaches and exposes its retained
+first-person wrapper and hides its world wrapper. Any ranged Player 1 is
+simultaneously exposed through its world wrapper for the observing viewport.
+The previous single-swap state is now a two-entry restoration stack so an
+Ailish/Elco pairing can perform both operations in one frame. For Player 2's
+arms, the existing low-level animation bridge runs in reverse: it resolves the
+active high-level animation resource against the first-person model and copies
+selector, state, time, rate, and blend without advancing a clock or replaying
+events. All attachment pointers and render flags are restored before native
+frame end. It never calls global `SetFirstPersonCameraMode()` or the native
+gameplay presentation transition.
+
+The PE32 build, orbit-camera unit test, exact supported-image hook installation
+and restoration regression, and whitespace check pass. Live acceptance is
+pending: Tal must remain fully rendered in his own view, Ailish must see arms
+and weapon from Camera 2 in combat, Tal's view must see her complete animated
+body, and leaving combat must return Camera 2 to its preserved third-person
+orbit.
+
+### Player 2 first-person borrow rejected; world-animation bank corrected
+
+The first Tal-Player-1/Ailish-Player-2 combat activation crashed the exact
+supported executable with access violation `0xC0000005` at VA `0x0061BF17`
+(RVA `0x0021BF17`). The faulting instruction was `mov eax,[edx+0x1c]` with
+`EDX=0`. Its enclosing model-interface method indexes an internal pointer table
+with sub-index `12`; the selected entry was null. The last mod events before
+the fault were the `world_to_first_person` animation mirror and raw attachment
+of Ailish's two-submodel first-person wrapper in place of the three-submodel
+world wrapper.
+
+This confirms that a raw `CPosition+0xB4` pointer/visibility substitution is
+not a safe way to make a world-attached actor render through the first-person
+wrapper. Sudeki's native switch at RVA `0x00188A90` instead calls attachment
+helper RVA `0x00111B30`, updates reference counts, saves/restores attachment
+state, and refreshes the model. Replaying that gameplay transition per cached
+viewport remains out of scope. The P2 first-person camera/model borrow is now
+rejected before render and falls back to the stable third-person Camera 2 and
+world wrapper. The separate observer-side Player-1 first-person-to-world borrow
+remains enabled for focused cleanroom testing.
+
+The same run reconfirmed the observer body was visible but idle-posed. Static
+decompilation shows the high-level animation resource stores two authored
+handles at `+0x14` and `+0x20`, and component flag `+0x133 & 2` chooses the
+currently active bank. The bridge was incorrectly trying that active
+first-person handle first against the opposite world model; some numeric
+handles resolved there to valid but semantically unrelated clips. It now
+prefers the opposite bank handle and uses the active-bank handle only as a
+fallback. This is a narrow animation-presentation correction; live acceptance
+still requires Ailish P1 to show a combat/attack pose from Tal or Buki's view.
+
+Confidence: high for the crash boundary and unsafe raw P2 attachment; strong
+for the opposite-bank animation correction pending the focused live pose test.
+
+### Tal/Moon Wolf invalidates Player 2 Spirit-history suppression
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The corrected cleanroom pass first restored the intended baseline: Tal as
+Player 1, Ailish as Player 2, split screen and combat mode enabled, with both
+actors visible and no activation crash. Ailish still held a static facing while
+the Player 2 right stick orbited her camera; that is a separate presentation
+issue. Activating Tal's Moon Wolf then stalled the process after the log's
+`spirit_history_capture phase=player_two_suppressed` event.
+
+Wine repeatedly reported the main game thread waiting for critical section VA
+`0x00804BC0`. A live WineDbg backtrace placed the native instruction pointer at
+VA `0x005DFAFB`, immediately after the blocking `EnterCriticalSection` call at
+VA `0x005DFAF9` (RVA `0x001DFAF9`). Exact-build Ghidra analysis identifies
+function RVA `0x001DFAD0` as a render-job queue consumer: it enters that global
+lock, invokes the head job's virtual callback while the lock is held, and then
+moves completed jobs between native lists. Companion consumer RVA `0x001DF8C0`
+uses the same lock while transferring completed work.
+
+This does not prove which individual native job corrupted or retained the lock,
+but the timing and last mod event establish that returning early from the
+already-completed Player 2 screenshot/history callback is not lifecycle-safe
+for all Spirit Strikes. The effect-isolation option remains default-off and is
+removed from the automatic cleanroom and real-time skill launch profiles.
+Native Spirit presentation bleed is accepted temporarily rather than risking a
+render-queue deadlock. Future isolation must preserve every native callback and
+provide per-viewport history at a different ownership boundary.
+
+Confidence: high for the blocked native queue and regression boundary; medium
+for the exact callback-lifetime mechanism pending job-object tracing.
+
+The recovery run with automatic temporal isolation disabled succeeded live.
+Tal was Player 1, Ailish was Player 2, split screen and combat mode were active,
+and Moon Wolf completed instead of stalling. The Spirit manager transitioned
+from state `10` back to `0`, while the log retained Player 1 render state
+`0x04353DA0` and Player 2 render state `0x05A5B310`. The user nevertheless saw
+the same cross-viewport mirroring previously observed during Pure Land.
+
+This confirms the recovery and sharpens the remaining fault: authored cameras
+and the two render-state pointers remain separately owned, while the native
+Spirit temporal/post-effect history is global and receives alternating camera
+frames. At least Pure Land and Moon Wolf reproduce the shared-history defect;
+other Spirit Strikes should be treated as exposed to the same architecture, but
+their exact visible severity remains untested. The next safe pass must invoke
+every native queued callback and swap or redirect its history/render resource
+per viewport. Returning early from either callback is rejected.
+
+Confidence: high.
+
+### Native per-viewport Spirit history swap prototype prepared
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The callback-suppression experiment is replaced by a lifecycle-preserving
+prototype. Ghidra tracing of the motion-blur constructor and callbacks found
+that the shared post-effect stores a native history subobject at `+0x10`, while
+the screenshot callback stores the same kind of subobject at `+0x04`. The
+native resource factory at RVA `0x001F6C70` accepts Sudeki's `_RenderTarget`
+name, the current render dimensions, format `0x15`, and the native zero flag.
+
+When the Spirit presentation is active and the Player 2 viewport is being
+rendered, the hook now creates one additional target through that factory and
+temporarily substitutes only the relevant history slot around the complete
+original callback. It restores the slot immediately after the callback. It
+does not change the callback ABI, skip queued work, alter the completion byte,
+or disable Player 2 rendering/input. The native wrapper is retained until
+process exit because the exact destructor ABI and cache ownership are not yet
+confirmed; this is intentionally limited to a focused test process.
+
+The exact-build PE32 DLL builds cleanly, `git diff --check` and shell syntax
+checks pass, and the inert-image regression executable completes under Wine.
+No live claim is made yet. The next acceptance test is Tal/Ailish split
+screen in the cleanroom: cast Moon Wolf, then Pure Land if available, and
+report whether both callbacks complete without a stall, mirrored viewport, or
+lost Player 2 movement/input. If the factory returns no target, the hook logs
+`spirit_history_resource phase=create_failed` and leaves the native path
+unchanged.
+
+Confidence: strong for the callback ownership and factory call shape; pending
+live validation of the native target's actual temporal isolation and
+process-lifetime ownership.
+
+### Spirit startup-camera gate containment prepared
+
+The first native-history pass completed Moon Wolf/Pure Land without a stall,
+but live observation still showed Iron Warrior's startup camera briefly appear
+in Player 2. The runtime log showed Sudeki's transient UI gate becoming active
+around Spirit startup. The split renderer previously treated every
+`QuickMenuIsActive()` result as a Player-1-only frame, which is correct for the
+actual Quick Menu but can suppress the Player 2 render during a Spirit camera
+transition and leave its alternating cache showing the caster's startup frame.
+
+The new exact-build change distinguishes those states: while the Spirit
+manager is active, both viewport renders remain live even if the transient
+native UI flag is set; ordinary Quick Menu and Quit-menu behavior remains
+unchanged. `SetRenderCamera` routing still records Blade Dance's authored
+`InitCam` and `SkillCam` requests against the caster's viewport and restores
+the normal camera on completion. This build is ready for a focused Iron
+Warrior/Blade Dance acceptance pass; no new live camera claim is made yet.
+
+Confidence: medium for the gate diagnosis pending the focused visual test.
+
+### Ailish Player 2 ranged pose remains unresolved; spawned-actor refresh is separate
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The focused cleanroom log that prompted the previous hypothesis was
+misidentified. The user is reporting Ailish as Player 2: her weapon is already
+equipped, but her visible body remains in an idle/static presentation during
+combat. The log identifies the relevant boundary as
+`attached=world first_person_active=0`; when combat input is submitted, the
+world animation selectors and active channel state do change. This makes the
+weapon-initialization path unrelated to the observed Ailish pose.
+
+The raw Player 2 first-person-wrapper attachment remains rejected after the
+exact-build renderer crash at RVA `0x0021BF17`. The current fallback therefore
+keeps Camera 2 third-person and the world wrapper. That fallback is stable but
+does not yet reproduce the first-person combat presentation that Ailish has in
+the native Player 1 viewport.
+
+A separate exploratory log did show Elco being spawned after Combat Mode was
+already active, with no later native transition after Player 2 assignment. The
+cleanroom now has an exact-gated, disabled-outside-cleanroom refresh diagnostic
+for that independent case. It is not a fix for Ailish and has no live
+acceptance claim.
+
+The independent spawned-actor diagnostic invokes the exact native transition
+at RVA `0x00024480` once, with `enabled=true`, only when a newly spawned actor
+finishes native stats/weapon initialization while
+`CGroupPlayers::InCombat()` already reports true. It does not toggle combat
+off/on, write the state byte, or touch existing actors. The call remains behind
+the exact export, entry signature, and combat-event sink-vtable checks already
+used by the cleanroom. Its log reason is
+`new_actor_initialized_during_combat`.
+
+Automated validation: PE32 build, `SudekiMP.CleanroomEngineTest.exe`,
+`SudekiMP.SkillTraceImageTest.exe` against the working exact image, shell
+syntax, and `git diff --check` all pass. Live visual acceptance of the
+spawned-actor diagnostic is still pending and must remain separate from the
+Ailish P2 pose investigation. If it replays an unwanted global camera/UI
+transition, reject it and trace the actor-specific arm helper instead.
+
+Confidence: strong for the separate spawned-actor observation; pending its
+focused live test. Confidence in the Ailish P2 pose cause is medium: the
+world-wrapper state is confirmed to change, but the safe per-viewport combat
+presentation path is still unresolved.
+
+### Control-owner handoff now requests a native combat-arm refresh
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The read-only ranged trace showed that an actor could briefly expose armed
+world selectors immediately before `AiOverrideControl`, then fall back to the
+neutral world selector after Player 2 ownership was installed. The cleanroom
+control-separation path now calls the same exact native group combat transition
+at RVA `0x00024480` once after a verified AI-to-player handoff, with
+`enabled=true` and `force=true`. It does not write animation selectors, weapon
+state, camera state, or the nested AI mode byte. The call is available only
+after the cleanroom engine's existing export, entry-signature, and event-sink
+checks succeed; normal non-cleanroom control separation safely skips it.
+
+The first rebuilt cleanroom run logged:
+
+```text
+control_separation event=override result=success ...
+cleanroom_engine event=combat_mode phase=refresh state=enabled ...
+control_separation event=combat_arm_refresh status=confirmed ...
+```
+
+That run had Ailish as Player 1 and Tal as Player 2, so it is an ABI/path
+verification only. It is not evidence that Ailish's Player 2 ranged pose is
+fixed. The required acceptance pass remains Tal Player 1 with Ailish Player 2,
+then a visible wand action while comparing the world-wrapper trace and the
+second viewport. The new low-cadence clock samples and one-time capture-failure
+classifier remain read-only diagnostics.
+
+Confidence: high that the guarded native refresh is installed and confirmed;
+pending the correct Ailish-Player-2 visual test.
+
+### Cleanroom ranged-readiness prime prepared
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The current cleanroom run used the native Ailish lead with Tal assigned to
+Player 2. Combat Mode enabled movement and the split-screen handoff, but
+Ailish could not perform a normal ranged attack until one Skill Strike had
+been activated. After that first skill, normal fire worked. This confirms
+that the group combat transition alone does not complete the ranged actor's
+readiness transition; the first skill was acting as the initializer.
+
+The next prototype reuses Sudeki's confirmed native UI/control transition at
+RVA `0x0000AFD0`, with the UI manager supplied in ESI, and holds it for the
+same 75 ms game-thread timer already validated by the ranged QuickSkill
+experiment. Combat entry and a verified Player 2 control-owner handoff now
+request this cycle; the callback exits through the unchanged native false
+transition. No animation selector, weapon pointer, arbiter flag, camera
+state, or simulation-time value is written. The entry bytes and UI-manager
+global are exact-build gated, and pending timers are cancelled on combat-off
+and unload.
+
+Automated validation: PE32 build, `SudekiMP.CleanroomEngineTest.exe`,
+`SudekiMP.SkillTraceImageTest.exe` against the working exact image, shell
+syntax, and `git diff --check` all pass. Live acceptance is pending: repeat
+the test with Tal as Player 1 and Ailish as Player 2, then verify that Ailish
+can fire before any Skill Strike and that her observer-side body pose remains
+the separate ranged-presentation question.
+
+Confidence: strong for the observed missing initialization boundary and the
+native-only implementation; pending live confirmation of the new cycle.
+
+### Ranged action-to-world translation trace prepared
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The latest cleanroom observation remains: after pressing `U`, Ailish's body
+is animated rather than completely frozen, but it stays in an idle-like pose;
+switching to her electric weapon still runs a multi-step fallback-looking
+animation cycle. The readiness prime is therefore not the missing pose fix.
+
+The focused diagnostic now records the native presentation mapping at the
+exact boundary where the current prototype copies first-person state to the
+world wrapper. For every changed animation channel it logs the component,
+animation ID, both authored resource handles (`+0x14` and `+0x20`), the
+target/source world lookup results, the original first-person selector, and
+the chosen world selector. It is gated by the existing exact-build ranged
+model isolation path and makes no native resource, animation-ID, or authored
+table writes.
+
+This pass has one question and one acceptance test: capture Ailish entering
+combat, firing the electric weapon through its full cycle, and returning to
+idle; then determine whether the chosen world selector is an opposite-bank
+world clip or an unresolved first-person fallback. Do not install a fixed
+selector map until that correlation is recorded. Automated PE32 build,
+`SudekiMP.SkillTraceImageTest.exe` against the exact working image, shell
+syntax, and `git diff --check` pass. Live capture is pending.
+
+Confidence: high that the readiness prime is unrelated to the remaining pose;
+pending for the resource-to-world mapping cause.
+
+### Live capture confirms first-person-only fallback selectors
+
+The rebuilt exact-image cleanroom capture completed the requested idle →
+electric weapon cycle → idle sequence. The translation trace recorded
+first-person ranged IDs `0x8C`, `0x8E`, `0xC1`, `0xC2`, and `0xC3`. For each,
+the second authored resource handle was the sentinel `0x0007FFFF`; the other
+handle could not be resolved by the saved world model interface
+(`source_lookup=-1`). Consequently the mirror copied first-person selectors
+`2`, `4`, `8`, `9`, and `10` directly into the world wrapper. The world body
+does advance, which matches the user's “animated but idle” observation, but
+those selectors are not authored third-person combat clips.
+
+This confirms the cause of both symptoms: Ailish is not failing to enter the
+ranged-ready state, and the electric weapon is not independently corrupting
+the model. The observer path has no world resource for those first-person
+action IDs and is using an unsafe selector fallback. No mapping was guessed
+or written in this pass. The required next capture is Tal as Player 1 with
+Ailish as Player 2, using the same weapon actions, to record the native
+third-person IDs/selectors for a semantic correlation.
+
+Confidence: high for the fallback diagnosis; pending the native world-side
+action correlation.
+
+### Tal-P1/Ailish-P2 control case confirms native world animation
+
+The requested control run used Tal as Player 1 and Ailish as Player 2. The
+user pressed `U` after the setup. The log shows Ailish attached to the world
+wrapper with `first_person_active=0`; her native weak attack selected
+`animation_id=0x87` (`ANIMID_MISSILE_COMBO3`) and `world_selector=55`, then
+returned to idle. No first-person fallback occurred.
+
+This separates the two cases: Ailish-P2 already has the correct native
+third-person combat path, while Ailish-P1 observer rendering incorrectly
+copies first-person selectors. The `0x87/55` pair is a confirmed correlation
+for the weak attack, not yet a universal mapping for the electric weapon's
+`0xC1/0xC2/0xC3` sequence.
+
+Confidence: high for the role-dependent asymmetry; electric-action mapping
+remains open.
+
+### Live follow-up: Ailish reload misalignment is presentation-state-only
+
+The paired Ailish-Player-1 trace keeps one weapon object, one weapon item,
+one first-person wrapper, one world wrapper, and the same first-person/world
+render objects from idle through the electric weapon reload sequence. No
+weapon selection, item attachment, wrapper pointer, or render-object pointer
+changes when the visible weapon temporarily separates from the arms. This
+rules out an equipment swap or attachment-slot replacement as the immediate
+cause.
+
+During the same cycle, the observer bridge maps the ordinary ranged action
+`0x8E` to the confirmed world selector `55`, but the reload-stage IDs `0xC2`
+and `0xC3` remain raw first-person selectors `9` and `10`. Both viewports can
+therefore show the same bad arm/weapon relationship even though the weapon
+identity and attachment objects remain stable: the shared character
+presentation state is still being driven by first-person reload semantics.
+
+This is high-confidence evidence for a role-dependent animation/presentation
+translation failure, not a camera-only or weapon-ownership failure. Do not
+guess selectors for `0xC2`/`0xC3`; the next controlled capture is the same
+electric cycle with Tal as Player 1 and Ailish as Player 2, recording the
+native third-person IDs/selectors before installing any semantic bridge.
+
+### Live follow-up: Ailish weapon/arm alignment remains role-dependent
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The user reports that the current cleanroom build is visibly closer: when
+Tal is Player 1 and Ailish is Player 2, Ailish's combat animation and weapon
+placement appear aligned. When Ailish is Player 1, her weapon does not line up
+with her arms. This is a new presentation finding, not evidence that the
+native weapon-selection or projectile path is wrong.
+
+The existing hook only borrows animation selectors, state, time, rate, and
+blend into the observer-side world wrapper, and temporarily changes the
+character position's attached wrapper at `+0xB4`. It does not copy a weapon
+bone/attachment transform. The role asymmetry therefore makes an attachment
+or per-viewport model-transform boundary a strong hypothesis, but the
+affected viewport (Ailish's own first-person view versus the observing world
+view) still needs to be identified explicitly before changing an offset.
+
+Next focused acceptance test: repeat the same weapon action with Ailish as
+Player 1 and Tal as Player 2, capture both viewports and the ranged wrapper
+trace, then compare the first-person/world wrapper attachment and weapon
+transform state against the Tal-Player-1/Ailish-Player-2 control case. Do not
+install a guessed weapon offset or animation map from this observation alone.
+
+Confidence: high that the role-dependent visual difference is real; medium on
+the attachment-transform hypothesis pending the paired capture.
+
+### Live control capture: Player 2 controller attack stays native world-side
+
+With Tal as Player 1 and Ailish as Player 2, the Linux controller bridge's
+`A` button submitted its intentionally supported weak-attack path. Ailish
+remained attached to the native world wrapper (`first_person_active=0`) and
+selected `animation_id=0x87` with `world_selector=55`; the sequence returned
+to idle without a first-person fallback or wrapper change. This matches the
+user's visual result: the Player 2 combat animation and weapon presentation
+look correct.
+
+The bridge currently maps `A` only to weak attack, so this capture does not
+reproduce the first-person-only electric reload IDs `0xC2`/`0xC3`. It is a
+valid native world-side control reference, not yet proof of the reload-stage
+mapping. The candidate semantic target for those observer-side stages remains
+unconfirmed until the electric action can be triggered through a native AI or
+weapon-specific input path.
+
+Confidence: high for the native Player 2 control path; pending for the
+electric reload-stage correspondence.
+
+### Read-only companion capture prepared for the electric reload comparison
+
+The existing ranged trace was tied to the split-camera ownership pointers,
+so releasing Player 2 back to native AI also stopped the diagnostic from
+seeing that character. The trace now falls back to the active party's first
+non-front character through the same validated party/controller resolver when
+the split camera is not owned. It only reads the character, component,
+wrapper, weapon, and animation-interface state; it does not change AI,
+attachment, rendering, input, or combat state.
+
+The PE32 build and exact supported-image `SudekiMP.SkillTraceImageTest.exe`
+regression pass. The next live capture can therefore let native AI perform
+Ailish's electric action and record the world-side animation states directly,
+without swapping her to Player 1 or adding a guessed `0xC2`/`0xC3` mapping.
+
+### Live cleanroom control capture: F10 targets Ailish, not the spawned Tal
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The cleanroom log identifies the lead Ailish entity as `0x05B0FE10` and the
+spawned Tal entity as `0x073D2FE0`. The current F10 path then records
+`control_separation event=override slot=1 character=0x05b0fe10`, followed by
+the same Ailish pointer on the control refresh and weak-attack submissions.
+Therefore F10 is currently taking the Ailish entity for Player 2 control; it
+is not enabling native AI for Tal. The user-visible behavior is consistent:
+F10 supplies a second control path without split-screen, while the spawned Tal
+is not the entity selected by this resolver.
+
+During the same run, the Ailish world-side trace recorded authored ranged
+clips `0x85`/selector `59` and `0x87`/selector `55`. The latter is the already
+confirmed `ANIMID_MISSILE_COMBO3` weak-attack pair; the former is the mapped
+`ANIMID_MISSILE_COMBO1` world clip. The two weapon observations therefore
+confirm that Ailish's native world presentation can fire from the controlled
+path. They do not constitute an AI attack test or prove the electric reload
+mapping.
+
+Confidence: high for the F10 entity-selection bug and the observed world-side
+clips. Next fix/experiment must separate `P2 control override` from `AI
+enable`, and resolve the spawned Tal entity explicitly before testing native
+AI behavior.
+
+### Live acceptance: selector fallback reduces pose corruption; weapon transform remains detached
+
+The rebuilt observer-only fallback was exercised with Ailish as Player 1 and
+the second viewport active. The user reports that the formerly frequent
+jumbled animation sequences are substantially reduced, but the weapon still
+floats to Ailish's right while her hands hold the expected pose.
+
+The trace confirms the selector-side result: first-person reload IDs `0xC2`
+and `0xC3` now emit `ranged_world_animation_fallback` and preserve the last
+native world channel instead of copying selectors `9` and `10`. The character,
+weapon, weapon item, first-person wrapper, world wrapper, and both render-object
+pointers remain stable through the transition. Therefore this residual defect
+is not an equipment swap, missing weapon object, or wrapper identity problem.
+
+The current bridge copies animation selector/state/time/rate/blend and the
+character render attachment only; it does not copy a weapon bone or model-local
+attachment transform. The next pass is a read-only paired transform trace
+against the native Tal-Player-1/Ailish-Player-2 control case. No weapon offset
+or matrix will be guessed until that trace identifies the responsible native
+attachment boundary.
+
+Confidence: high for the reduced selector corruption and stable weapon
+identity; strong for a missing observer-side weapon transform, pending the
+paired transform trace.

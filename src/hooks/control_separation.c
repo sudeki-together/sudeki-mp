@@ -1,11 +1,13 @@
 #include "hooks/control_separation.h"
 
+#include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
 #include "engine/camera_target_abi.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
+#include "hooks/split_screen_render.h"
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
 
@@ -22,9 +24,6 @@
 typedef void (SUDEKIMP_THISCALL *ControllerUpdateFunction)(
     void *controller,
     void *update_data
-);
-typedef int (SUDEKIMP_THISCALL *CharacterResourceTypeFunction)(
-    void *component
 );
 typedef void (*AiControlFunction)(void *character_pointer);
 typedef void (__stdcall *ArbiterMovementFunction)(
@@ -74,8 +73,7 @@ enum {
     SUPPORTED_IMAGE_SIZE = 0x0045f000u,
     PARTY_SLOT_COUNT = 4u,
     PARTY_SLOT_FIRST_OFFSET = 0x90u,
-    PARTY_SLOT_STRIDE = 0x0cu,
-    BUKI_RESOURCE_TYPE = 0x05u
+    PARTY_SLOT_STRIDE = 0x0cu
 };
 
 static SudekiMpPointerHook controller_update_vtable_hook;
@@ -105,7 +103,7 @@ static BOOL target_trace_enabled;
 static DWORD target_trace_last_sample_tick;
 static void *target_trace_last_node;
 static int target_trace_last_auto_enabled;
-static BOOL buki_movement_active;
+static BOOL second_player_movement_active;
 static int last_movement_x;
 static int last_movement_z;
 static BOOL input_bridge_enabled;
@@ -124,6 +122,9 @@ static void *group_camera_target;
 static void *group_camera_original_targets[2];
 static void *group_camera_target_list;
 static unsigned int group_camera_last_rejection;
+static BOOL player_two_requested;
+static DWORD player_two_request_last_attempt;
+static SudekiMpControlUpdateObserver update_observer;
 
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
@@ -633,18 +634,18 @@ static void poll_shared_group_camera(void *controller) {
     );
 }
 
-static void stop_buki_movement(void) {
+static void stop_second_player_movement(void) {
     uint8_t *character = (uint8_t *)overridden_character;
     void *arbiter;
 
-    if (!buki_movement_active || character == NULL) {
+    if (!second_player_movement_active || character == NULL) {
         return;
     }
     if (!overridden_character_is_in_active_group()) {
         SudekiMpLogWrite(
             "control_separation event=second_player_movement phase=abort reason=character_not_in_active_group\r\n"
         );
-        buki_movement_active = FALSE;
+        second_player_movement_active = FALSE;
         last_movement_x = 0;
         last_movement_z = 0;
         return;
@@ -657,18 +658,18 @@ static void stop_buki_movement(void) {
         "control_separation event=second_player_movement phase=stop character=0x%08lx\r\n",
         (unsigned long)(uintptr_t)character
     );
-    buki_movement_active = FALSE;
+    second_player_movement_active = FALSE;
     last_movement_x = 0;
     last_movement_z = 0;
 }
 
-static BOOL buki_movement_passes_separation_guard(
+static BOOL second_player_movement_passes_separation_guard(
     void *controller,
     uint8_t *character,
     const float *direction
 ) {
     uint8_t *controller_target;
-    uint8_t *buki_position;
+    uint8_t *second_player_position;
     uint8_t *target_position;
     float delta_x;
     float delta_z;
@@ -680,12 +681,12 @@ static BOOL buki_movement_passes_separation_guard(
     }
     controller_target = controller == NULL ? NULL :
         *(uint8_t **)((uint8_t *)controller + 0x248);
-    buki_position = character == NULL ? NULL :
+    second_player_position = character == NULL ? NULL :
         *(uint8_t **)(character + 0x44);
     target_position = controller_target == NULL ? NULL :
         *(uint8_t **)(controller_target + 0x44);
     if (controller_target == NULL || controller_target == character ||
-        buki_position == NULL || target_position == NULL) {
+        second_player_position == NULL || target_position == NULL) {
         if (!separation_data_missing_logged) {
             SudekiMpLogWrite(
                 "control_separation event=separation_guard phase=abort reason=incomplete_position_state\r\n"
@@ -695,9 +696,9 @@ static BOOL buki_movement_passes_separation_guard(
         return FALSE;
     }
     separation_data_missing_logged = FALSE;
-    delta_x = *(float *)(buki_position + 0x18) -
+    delta_x = *(float *)(second_player_position + 0x18) -
         *(float *)(target_position + 0x18);
-    delta_z = *(float *)(buki_position + 0x20) -
+    delta_z = *(float *)(second_player_position + 0x20) -
         *(float *)(target_position + 0x20);
     distance_squared = delta_x * delta_x + delta_z * delta_z;
     outward_dot = delta_x * direction[0] + delta_z * direction[2];
@@ -742,7 +743,7 @@ static void poll_input_bridge(void) {
     if (!connected) {
         if (input_bridge_connected) {
             weak_attack_was_down = FALSE;
-            stop_buki_movement();
+            stop_second_player_movement();
         }
         input_bridge_connected = FALSE;
         return;
@@ -757,7 +758,7 @@ static void poll_input_bridge(void) {
          delta_y > 4096 || delta_y < -4096) &&
         (DWORD)(now - input_bridge_last_right_stick_log_tick) >= 250u) {
         SudekiMpLogFormat(
-            "input_bridge event=right_stick_observed right_x=%d right_y=%d policy=captured_not_applied_independent_camera_pending\r\n",
+            "input_bridge event=right_stick_observed right_x=%d right_y=%d policy=available_to_player_two_render_camera\r\n",
             (int)input_bridge_state.right_x,
             (int)input_bridge_state.right_y
         );
@@ -798,7 +799,10 @@ static BOOL bridge_movement(float *x, float *z, float *speed) {
     return TRUE;
 }
 
-static void poll_buki_movement(void *controller, BOOL owns_foreground) {
+static void poll_second_player_movement(
+    void *controller,
+    BOOL owns_foreground
+) {
     uint8_t *character = (uint8_t *)overridden_character;
     uint8_t *component;
     uint8_t *mode_state;
@@ -810,6 +814,7 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
     float input_z;
     float movement_speed;
     BOOL bridge_source;
+    BOOL player_two_camera_basis = FALSE;
     float direction[3];
     uint32_t direction_x_bits;
     uint32_t direction_z_bits;
@@ -818,7 +823,7 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
         return;
     }
     if (!overridden_character_is_in_active_group()) {
-        stop_buki_movement();
+        stop_second_player_movement();
         return;
     }
     component = *(uint8_t **)(character + 0x94);
@@ -830,14 +835,14 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
         arbiter == NULL || *(void **)(character + 0xac) == NULL ||
         *(int16_t *)(component + 0x16a) != 1 ||
         *(mode_state + 0x0b) != 0 || character == controller_target) {
-        stop_buki_movement();
+        stop_second_player_movement();
         return;
     }
 
     bridge_source = input_bridge_enabled;
     if (bridge_source) {
         if (!bridge_movement(&input_x, &input_z, &movement_speed)) {
-            stop_buki_movement();
+            stop_second_player_movement();
             return;
         }
     } else {
@@ -854,7 +859,7 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
         }
     }
     if (movement_speed <= 0.0001f) {
-        stop_buki_movement();
+        stop_second_player_movement();
         return;
     }
 
@@ -865,31 +870,39 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
         float transformed[3] = {0.0f, 0.0f, 0.0f};
         float horizontal_length;
 
-        movement_camera_transform(controller, transformed, direction);
+        if (bridge_source) {
+            player_two_camera_basis = SudekiMpTransformPlayerTwoMovement(
+                direction,
+                transformed
+            );
+        }
+        if (!player_two_camera_basis) {
+            movement_camera_transform(controller, transformed, direction);
+        }
         transformed[1] = 0.0f;
         horizontal_length = sqrtf(
             transformed[0] * transformed[0] +
             transformed[2] * transformed[2]
         );
         if (horizontal_length <= 0.0001f) {
-            stop_buki_movement();
+            stop_second_player_movement();
             return;
         }
         direction[0] = transformed[0] / horizontal_length;
         direction[1] = 0.0f;
         direction[2] = transformed[2] / horizontal_length;
     }
-    if (!buki_movement_passes_separation_guard(
+    if (!second_player_movement_passes_separation_guard(
             controller,
             character,
             direction)) {
-        stop_buki_movement();
+        stop_second_player_movement();
         return;
     }
     memcpy(&direction_x_bits, &direction[0], sizeof(direction_x_bits));
     memcpy(&direction_z_bits, &direction[2], sizeof(direction_z_bits));
     arbiter_movement(arbiter, direction, movement_speed, 1.0f, 0u);
-    if (!buki_movement_active ||
+    if (!second_player_movement_active ||
         (bridge_source &&
          (((int)input_bridge_state.left_x - last_movement_x > 4096 ||
            (int)input_bridge_state.left_x - last_movement_x < -4096) ||
@@ -897,7 +910,7 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
            (int)input_bridge_state.left_y - last_movement_z < -4096))) ||
         (!bridge_source && (x != last_movement_x || z != last_movement_z))) {
         SudekiMpLogFormat(
-            "control_separation event=second_player_movement phase=submit source=%s character=0x%08lx arbiter=0x%08lx input_x=%d input_z=%d direction_bits=%08lx,00000000,%08lx camera_relative=%s speed_bits=0x%08lx turn_rate_bits=0x3f800000 movement_mode=0\r\n",
+            "control_separation event=second_player_movement phase=submit source=%s character=0x%08lx arbiter=0x%08lx input_x=%d input_z=%d direction_bits=%08lx,00000000,%08lx camera_relative=%s camera_basis=%s speed_bits=0x%08lx turn_rate_bits=0x3f800000 movement_mode=0\r\n",
             bridge_source ? "external_bridge" : "keyboard",
             (unsigned long)(uintptr_t)character,
             (unsigned long)(uintptr_t)arbiter,
@@ -906,15 +919,51 @@ static void poll_buki_movement(void *controller, BOOL owns_foreground) {
             (unsigned long)direction_x_bits,
             (unsigned long)direction_z_bits,
             camera_relative_movement_enabled ? "true" : "false",
+            player_two_camera_basis ? "player_two_render" : "native_player_one",
             (unsigned long)float_bits(movement_speed)
         );
     }
-    buki_movement_active = TRUE;
+    second_player_movement_active = TRUE;
     last_movement_x = bridge_source ? input_bridge_state.left_x : x;
     last_movement_z = bridge_source ? input_bridge_state.left_y : z;
 }
 
-static void poll_buki_weak_attack(void *controller, BOOL owns_foreground) {
+static void poll_second_player_camera_facing(
+    void *controller,
+    BOOL owns_foreground
+) {
+    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *arbiter;
+    void *controller_target;
+    float right_x;
+    float right_y;
+
+    if (!owns_foreground || !second_player_movement_enabled ||
+        !camera_relative_movement_enabled || !input_bridge_enabled ||
+        !input_bridge_connected || character == NULL ||
+        !overridden_character_is_in_active_group()) {
+        return;
+    }
+    controller_target = controller == NULL ? NULL :
+        *(void **)((uint8_t *)controller + 0x248u);
+    arbiter = *(uint8_t **)(character + 0x90u);
+    if (character == controller_target || !readable_memory(arbiter, 0x54u) ||
+        (*(uint32_t *)(arbiter + 0x50u) & 0x00000002u) == 0u) {
+        return;
+    }
+    right_x = (float)input_bridge_state.right_x / 32768.0f;
+    right_y = (float)input_bridge_state.right_y / 32768.0f;
+    if (sqrtf(right_x * right_x + right_y * right_y) <=
+        input_bridge_deadzone) {
+        return;
+    }
+    SudekiMpAlignPlayerTwoFacingToCamera(character);
+}
+
+static void poll_second_player_weak_attack(
+    void *controller,
+    BOOL owns_foreground
+) {
     uint8_t *character = (uint8_t *)overridden_character;
     uint8_t *component;
     uint8_t *mode_state;
@@ -1040,7 +1089,7 @@ static void poll_second_player_skills(
     }
 }
 
-static void poll_buki_target_trace(BOOL owns_foreground) {
+static void poll_second_player_target_trace(BOOL owns_foreground) {
     uint8_t *character = (uint8_t *)overridden_character;
     uint8_t *component;
     uint8_t *mode_state;
@@ -1096,31 +1145,9 @@ static void poll_buki_target_trace(BOOL owns_foreground) {
     }
 }
 
-static int character_resource_type(uint8_t *character) {
-    void *component;
-    void **vtable;
-    CharacterResourceTypeFunction get_resource_type;
-
-    if (character == NULL) {
-        return -1;
-    }
-    component = character + 0x2c;
-    vtable = *(void ***)component;
-    if (vtable == NULL) {
-        return -1;
-    }
-    get_resource_type = (CharacterResourceTypeFunction)vtable[4];
-    if ((uint8_t *)get_resource_type < game_base ||
-        (uint8_t *)get_resource_type >= game_base + SUPPORTED_IMAGE_SIZE) {
-        return -1;
-    }
-    return get_resource_type(component);
-}
-
-static uint8_t *find_party_slot(
+static uint8_t *find_character_party_slot(
     uint8_t *group,
     void *wanted_character,
-    int wanted_resource_type,
     unsigned int *slot_index
 ) {
     unsigned int index;
@@ -1129,9 +1156,33 @@ static uint8_t *find_party_slot(
         uint8_t *slot = group + PARTY_SLOT_FIRST_OFFSET +
             index * PARTY_SLOT_STRIDE;
         uint8_t *character = *(uint8_t **)slot;
-        if ((wanted_character != NULL && character == wanted_character) ||
-            (wanted_character == NULL &&
-             character_resource_type(character) == wanted_resource_type)) {
+        if (character == wanted_character) {
+            if (slot_index != NULL) {
+                *slot_index = index;
+            }
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static uint8_t *find_second_player_party_slot(
+    uint8_t *group,
+    void *controller_target,
+    unsigned int *slot_index
+) {
+    unsigned int index;
+
+    if (group == NULL || controller_target == NULL ||
+        *(void **)(group + PARTY_SLOT_FIRST_OFFSET) != controller_target) {
+        return NULL;
+    }
+    for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
+        uint8_t *slot = group + PARTY_SLOT_FIRST_OFFSET +
+            index * PARTY_SLOT_STRIDE;
+        void *candidate = *(void **)slot;
+
+        if (candidate != NULL && candidate != controller_target) {
             if (slot_index != NULL) {
                 *slot_index = index;
             }
@@ -1168,7 +1219,7 @@ static void log_control_state(
     );
 }
 
-static void toggle_buki_ai(void) {
+static void toggle_second_player_ai(void) {
     uint8_t *group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
     uint8_t *controller = *(uint8_t **)(
         game_base + RVA_CHARACTER_CONTROLLER_GLOBAL
@@ -1193,20 +1244,28 @@ static void toggle_buki_ai(void) {
     }
 
     if (overridden_character == NULL) {
-        slot = find_party_slot(group, NULL, BUKI_RESOURCE_TYPE, &slot_index);
+        slot = find_second_player_party_slot(
+            group,
+            controller_target,
+            &slot_index
+        );
         if (slot == NULL) {
-            SudekiMpLogWrite(
-                "control_separation event=toggle_abort reason=buki_not_in_party\r\n"
+            SudekiMpLogFormat(
+                "control_separation event=toggle_abort reason=%s controller_target=0x%08lx front_character=0x%08lx policy=first_non_front_active_party_member\r\n",
+                controller_target == NULL ?
+                    "no_controller_target" :
+                    (*(void **)(group + PARTY_SLOT_FIRST_OFFSET) !=
+                        controller_target ?
+                        "front_character_not_controller_owned" :
+                        "second_player_not_in_party"),
+                (unsigned long)(uintptr_t)controller_target,
+                (unsigned long)(uintptr_t)*(void **)(
+                    group + PARTY_SLOT_FIRST_OFFSET
+                )
             );
             return;
         }
         character = *(uint8_t **)slot;
-        if (slot_index == 0u || character == controller_target) {
-            SudekiMpLogWrite(
-                "control_separation event=toggle_abort reason=buki_is_front_character\r\n"
-            );
-            return;
-        }
         component = *(uint8_t **)(character + 0x94);
         mode_state = component == NULL ? NULL :
             *(uint8_t **)(component + 0x3c);
@@ -1231,6 +1290,17 @@ static void toggle_buki_ai(void) {
             overridden_character = character;
             reset_target_trace_state();
             log_control_state("override", "success", slot, slot_index);
+            if (SudekiMpCleanroomEngineRefreshCombatMode()) {
+                SudekiMpLogFormat(
+                    "control_separation event=combat_arm_refresh status=confirmed character=0x%08lx reason=second_player_control_override policy=native_group_transition\r\n",
+                    (unsigned long)(uintptr_t)character
+                );
+            } else {
+                SudekiMpLogFormat(
+                    "control_separation event=combat_arm_refresh status=skipped character=0x%08lx reason=combat_mode_unavailable_or_disabled policy=native_group_transition\r\n",
+                    (unsigned long)(uintptr_t)character
+                );
+            }
         } else {
             log_control_state("override", "verification_failed", slot,
                 slot_index);
@@ -1243,7 +1313,11 @@ static void toggle_buki_ai(void) {
         return;
     }
 
-    slot = find_party_slot(group, overridden_character, -1, &slot_index);
+    slot = find_character_party_slot(
+        group,
+        overridden_character,
+        &slot_index
+    );
     if (slot == NULL) {
         SudekiMpLogWrite(
             "control_separation event=restore_abort reason=character_not_in_party\r\n"
@@ -1267,7 +1341,7 @@ static void toggle_buki_ai(void) {
         return;
     }
 
-    stop_buki_movement();
+    stop_second_player_movement();
     ai_default_control(slot);
     after_ref = (int)*(int16_t *)(component + 0x16a);
     after_mode = (int)*(mode_state + 0x0b);
@@ -1283,6 +1357,22 @@ static void toggle_buki_ai(void) {
             overridden_character = NULL;
         }
     }
+}
+
+static void reconcile_player_two_request(void) {
+    BOOL active = overridden_character != NULL;
+    DWORD now;
+
+    if (active == player_two_requested) {
+        return;
+    }
+    now = GetTickCount();
+    if (player_two_request_last_attempt != 0u &&
+        (DWORD)(now - player_two_request_last_attempt) < 250u) {
+        return;
+    }
+    player_two_request_last_attempt = now;
+    toggle_second_player_ai();
 }
 
 static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
@@ -1329,14 +1419,57 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     owns_foreground = foreground_process_id == GetCurrentProcessId();
     if (owns_foreground &&
         hotkey_is_down && !hotkey_was_down) {
-        toggle_buki_ai();
+        player_two_requested = !player_two_requested;
+        player_two_request_last_attempt = 0u;
+        SudekiMpLogFormat(
+            "control_separation event=player_two_request source=hotkey "
+            "state=%s\r\n",
+            player_two_requested ? "enabled" : "disabled"
+        );
     }
     hotkey_was_down = hotkey_is_down;
-    poll_buki_movement(controller, owns_foreground);
-    poll_buki_weak_attack(controller, owns_foreground);
+    reconcile_player_two_request();
+    poll_second_player_movement(controller, owns_foreground);
+    poll_second_player_camera_facing(controller, owns_foreground);
+    poll_second_player_weak_attack(controller, owns_foreground);
     poll_second_player_skills(controller, owns_foreground);
-    poll_buki_target_trace(owns_foreground);
+    poll_second_player_target_trace(owns_foreground);
     poll_shared_group_camera(controller);
+    if (update_observer != NULL) {
+        update_observer();
+    }
+}
+
+BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
+    if (original_controller_update == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    player_two_requested = enabled != FALSE;
+    player_two_request_last_attempt = 0u;
+    SudekiMpLogFormat(
+        "control_separation event=player_two_request source=api state=%s\r\n",
+        player_two_requested ? "enabled" : "disabled"
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationPlayerTwoRequested(void) {
+    return player_two_requested;
+}
+
+BOOL SudekiMpControlSeparationPlayerTwoActive(void) {
+    return overridden_character != NULL;
+}
+
+BOOL SudekiMpControlSeparationInputReady(void) {
+    return input_bridge_enabled && input_bridge_connected;
+}
+
+void SudekiMpControlSeparationSetUpdateObserver(
+    SudekiMpControlUpdateObserver observer
+) {
+    update_observer = observer;
 }
 
 BOOL SudekiMpInstallControlSeparation(
@@ -1431,6 +1564,8 @@ BOOL SudekiMpInstallControlSeparation(
     selected_virtual_key = toggle_virtual_key;
     hotkey_was_down = FALSE;
     overridden_character = NULL;
+    player_two_requested = FALSE;
+    player_two_request_last_attempt = 0u;
     second_player_movement_enabled = enable_second_player_movement;
     camera_relative_movement_enabled = enable_camera_relative_movement;
     separation_guard_enabled = enable_separation_guard;
@@ -1476,7 +1611,7 @@ BOOL SudekiMpInstallControlSeparation(
     group_camera_original_targets[1] = NULL;
     group_camera_target_list = NULL;
     reset_target_trace_state();
-    buki_movement_active = FALSE;
+    second_player_movement_active = FALSE;
     last_movement_x = 0;
     last_movement_z = 0;
     original_controller_update = (ControllerUpdateFunction)(
@@ -1501,8 +1636,7 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "control_separation_install=success target_resource_type=0x%02x virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
-        BUKI_RESOURCE_TYPE,
+        "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
         (unsigned long)selected_virtual_key,
         second_player_movement_enabled ? "true" : "false",
         camera_relative_movement_enabled ? "true" : "false",
@@ -1534,6 +1668,8 @@ void SudekiMpUninstallControlSeparation(void) {
     movement_camera_transform = NULL;
     game_base = NULL;
     overridden_character = NULL;
+    player_two_requested = FALSE;
+    player_two_request_last_attempt = 0u;
     selected_virtual_key = 0;
     hotkey_was_down = FALSE;
     second_player_movement_enabled = FALSE;
@@ -1572,8 +1708,9 @@ void SudekiMpUninstallControlSeparation(void) {
     group_camera_original_targets[1] = NULL;
     group_camera_target_list = NULL;
     reset_target_trace_state();
-    buki_movement_active = FALSE;
+    second_player_movement_active = FALSE;
     last_movement_x = 0;
     last_movement_z = 0;
+    update_observer = NULL;
     SudekiMpCombatContextsReset();
 }

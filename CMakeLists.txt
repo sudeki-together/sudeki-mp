@@ -17,10 +17,14 @@ set(SUDEKIMP_COMMON_SOURCES
 
 add_library(SudekiMP SHARED
     src/loader/dllmain.c
+    src/cleanroom/audio.c
+    src/cleanroom/engine.c
+    src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/orbit_camera.c
     src/engine/player_combat_context.c
     src/engine/skill_activation_abi.c
     src/input/bridge_protocol.c
@@ -44,6 +48,7 @@ add_library(SudekiMP SHARED
 target_include_directories(SudekiMP PRIVATE src)
 target_compile_definitions(SudekiMP PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(SudekiMP PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(SudekiMP PRIVATE -static-libgcc)
 set_source_files_properties(src/hooks/skill_trace.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
@@ -68,13 +73,18 @@ set_source_files_properties(src/hooks/player_input_trace.c PROPERTIES
 set_source_files_properties(src/hooks/split_screen_render.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
+set_source_files_properties(
+    src/cleanroom/engine.c
+    src/cleanroom/menu.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
 set_source_files_properties(src/engine/arbiter_combat_input.c PROPERTIES
     COMPILE_OPTIONS "-Wno-pedantic;-Wno-unused-parameter"
 )
 set_source_files_properties(src/engine/skill_activation_abi.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
-target_link_libraries(SudekiMP PRIVATE advapi32 ws2_32)
+target_link_libraries(SudekiMP PRIVATE advapi32 ws2_32 winmm)
 set_target_properties(SudekiMP PROPERTIES
     PREFIX ""
     OUTPUT_NAME "SudekiMP"
@@ -179,10 +189,12 @@ set_target_properties(SudekiMP.KeyBindingTest PROPERTIES
 
 add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
+    src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/orbit_camera.c
     src/engine/player_combat_context.c
     src/engine/skill_activation_abi.c
     src/input/bridge_protocol.c
@@ -294,6 +306,39 @@ target_compile_options(SudekiMP.InputBridgeReceiverTest PRIVATE
 )
 target_link_libraries(SudekiMP.InputBridgeReceiverTest PRIVATE ws2_32)
 set_target_properties(SudekiMP.InputBridgeReceiverTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.OrbitCameraTest
+    tests/orbit_camera_test.c
+    src/engine/orbit_camera.c
+)
+target_include_directories(SudekiMP.OrbitCameraTest PRIVATE src)
+target_compile_options(SudekiMP.OrbitCameraTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.OrbitCameraTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.CleanroomEngineTest
+    tests/cleanroom_engine_test.c
+    src/cleanroom/engine.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.CleanroomEngineTest PRIVATE src)
+target_compile_definitions(SudekiMP.CleanroomEngineTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.CleanroomEngineTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(
+    tests/cleanroom_engine_test.c
+    src/cleanroom/engine.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.CleanroomEngineTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

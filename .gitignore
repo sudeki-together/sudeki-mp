@@ -28,3 +28,6 @@
 /build/
 /out/
 /.cache/
+
+# Local generated Graphify knowledge graph and live activity state.
+/graphify-out/

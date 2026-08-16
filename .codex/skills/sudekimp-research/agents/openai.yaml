@@ -1,0 +1,4 @@
+interface:
+  display_name: "SudekiMP Research"
+  short_description: "Continue SudekiMP reverse engineering safely"
+  default_prompt: "Use $sudekimp-research to resume the documented checkpoint and continue the next safe experiment."

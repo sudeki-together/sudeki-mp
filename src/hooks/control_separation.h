@@ -3,6 +3,8 @@
 
 #include <windows.h>
 
+typedef void (*SudekiMpControlUpdateObserver)(void);
+
 BOOL SudekiMpInstallControlSeparation(
     HMODULE game_module,
     UINT toggle_virtual_key,
@@ -18,6 +20,13 @@ BOOL SudekiMpInstallControlSeparation(
     BOOL enable_shared_group_camera,
     BOOL enable_input_bridge,
     float input_bridge_deadzone
+);
+BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled);
+BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
+BOOL SudekiMpControlSeparationPlayerTwoActive(void);
+BOOL SudekiMpControlSeparationInputReady(void);
+void SudekiMpControlSeparationSetUpdateObserver(
+    SudekiMpControlUpdateObserver observer
 );
 void SudekiMpUninstallControlSeparation(void);
 

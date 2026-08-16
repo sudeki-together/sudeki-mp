@@ -487,3 +487,53 @@ Primary detailed records:
   docs/structures.md
   docs/combat.md
   docs/mod-loader.md
+
+Latest focused finding (2026-08-16):
+  - The current visual issue is Ailish as Player 2, not Elco and not missing
+    weapon setup. The log shows Ailish's weapon already equipped, the P2
+    presentation attached to the world wrapper with first_person_active=0, and
+    combat input changing the world animation selectors. The unresolved issue
+    is the per-viewport ranged presentation/pose boundary; the raw P2
+    first-person-wrapper attachment remains rejected after the exact-build
+    renderer crash at RVA 0x0021BF17.
+  - A cleanroom spawned-actor combat-transition refresh remains an exploratory,
+    unconfirmed diagnostic only. Do not treat it as the Ailish fix. The next
+    pass should capture Ailish P2 combat entry and a wand action, comparing
+    world-wrapper and first-person animation state/clock without changing
+    weapon setup or global camera ownership.
+  - The control-separation handoff now requests one guarded native combat-arm
+    refresh after a verified AI-to-Player-2 override. The first rebuilt run
+    confirmed the native refresh path, but it used Ailish P1/Tal P2 and is not
+    an Ailish-P2 visual acceptance result. Keep the required Tal P1/Ailish P2
+    wand test separate.
+
+Prepared ranged-readiness pass (2026-08-16):
+  - In the Ailish-lead/Tal-P2 cleanroom run, Combat Mode enabled movement but
+    Ailish could not normal-fire until one Skill Strike initialized her native
+    ranged action state; normal fire worked afterward.
+  - The new exact-gated prototype reuses native UI transition RVA 0x0000AFD0,
+    holds it for the validated 75 ms game-thread cycle, then exits with the
+    native false transition. It runs on combat entry and after verified Player
+    2 ownership handoff, and writes no animation, weapon, arbiter, camera, or
+    time state.
+  - PE32 build, CleanroomEngineTest, SkillTraceImageTest, shell syntax, and
+    git diff --check pass. Live Tal-P1/Ailish-P2 validation is pending.
+
+Confirmed first-person-only fallback (2026-08-16):
+  - The exact-build Ailish-lead cleanroom capture completed idle, electric
+    weapon, and return-to-idle actions. First-person IDs 0x8C, 0x8E, 0xC1,
+    0xC2, and 0xC3 have a 0x0007FFFF second resource handle; the remaining
+    handle fails the world-wrapper lookup. The observer path therefore copies
+    first-person selectors 2, 4, 8, 9, and 10 into the world wrapper.
+  - This explains the animated-but-idle body and electric multi-animation
+    cycle. It is a presentation-resource mapping failure, not a missing
+    readiness prime. No selector map has been installed.
+  - Next required experiment: Tal Player 1/Ailish Player 2 using the same
+    actions, to capture native third-person IDs/selectors before mapping.
+
+  - That control case is now live-confirmed: Tal Player 1/Ailish Player 2
+    plus `U` produced Ailish world `animation_id=0x87`, selector `55`, with
+    `first_person_active=0`. This proves the world action exists and the
+    defect is restricted to Ailish Player 1 observer translation. The pair is
+    a weak-attack correlation only; do not apply it to the electric sequence
+    until that sequence is captured in both roles.

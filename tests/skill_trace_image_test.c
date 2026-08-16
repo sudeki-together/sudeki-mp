@@ -48,6 +48,8 @@ enum {
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
+    RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
+    RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
     RVA_HUD_PARTY_POINTER_COPY = 0x000015b0u,
     RVA_HUD_GROUP_VALUES_POINTER_CALL = 0x00181517u,
     RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL = 0x000aab3au,
@@ -72,6 +74,10 @@ enum {
     RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
     RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_MOTION_BLUR_POST_RENDER = 0x001de0b0u,
+    RVA_SCREENSHOT_POST_RENDER = 0x001de7b0u,
+    RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT = 0x002dd930u,
+    RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT = 0x002dd910u,
     RVA_SKILL_DATA_AVAILABLE = 0x000da2a0u,
     RVA_SKILL_AVAILABILITY_FLAG = 0x003c2fd9u,
     RVA_SKILL_VALIDATE_FLAG = 0x0034a8b0u
@@ -81,6 +87,13 @@ typedef struct ExpectedExport {
     uint32_t slot_rva;
     uint32_t function_rva;
 } ExpectedExport;
+
+typedef struct ExpectedEntry {
+    uint32_t function_rva;
+    uint8_t bytes[8];
+    size_t byte_count;
+    const char *name;
+} ExpectedEntry;
 
 static const ExpectedExport expected_exports[] = {
     {0x0030c570u, 0x000d3ae0u},
@@ -97,6 +110,53 @@ static const ExpectedExport expected_exports[] = {
     {0x0030d3ecu, 0x0003aff0u},
     {0x0030d3f0u, 0x0000f3f0u},
     {0x0030d3f4u, 0x0000f3f0u}
+};
+
+static const ExpectedEntry expected_cleanroom_entries[] = {
+    {0x000b1b00u, {0x83,0xec,0x3c,0x56,0x57}, 5u,
+        "InternalSpawnPC(ResourceName, xyz)"},
+    {0x000b23a0u, {0x81,0xec,0x14,0x01,0x00,0x00,0x56,0x57}, 8u,
+        "RemovePC(ResourceName)"},
+    {0x000b20d0u, {0x55,0x8b,0xec,0x83,0xe4,0xf8}, 6u,
+        "SpawnEntity(name, xyz)"},
+    {0x000b2300u, {0x55,0x8b,0xec,0x83,0xe4,0xf8}, 6u,
+        "DespawnEntity"},
+    {0x00104480u, {0x51,0x8b,0x44,0x24,0x08,0x50}, 6u,
+        "GetPC(text)"},
+    {0x00104400u, {0x83,0xec,0x0c,0xa1,0x8c,0x9d,0x80,0x00}, 8u,
+        "GetGenericEntity(text)"},
+    {0x001b9440u, {0x57,0x8b,0xf8,0x8b,0x06,0x25,0x80,0xef}, 8u,
+        "ResourceName from text"},
+    {0x001b9760u, {0x85,0xc0,0x74,0x2f,0x53,0x8d,0x58,0xfc}, 8u,
+        "ResourceName reference release"},
+    {0x00025100u, {0xa1,0x94,0x8d,0x80,0x00,0xc3}, 6u,
+        "GetGroupPlayers"},
+    {0x00004fa0u, {0x8a,0x81,0xd4,0x00,0x00,0x00,0xc3}, 7u,
+        "CGroupPlayers::InCombat"},
+    {0x00024480u, {0x53,0x8b,0x5c,0x24,0x10,0x55,0x8b,0xe9}, 8u,
+        "CGroupPlayers combat event transition"},
+    {0x0002a880u, {0xa1,0xa8,0x8d,0x80,0x00,0x85,0xc0,0x74}, 8u,
+        "SetFirstPersonCameraMode"},
+    {0x000b5320u, {0xc6,0x05,0xcc,0x2f,0x7c,0x00,0x01,0xc3}, 8u,
+        "NoSpNeeded"},
+    {0x0000f5b0u, {0xc6,0x05,0x23,0x2f,0x7c,0x00,0x01,0xc3}, 8u,
+        "NoSspNeeded"},
+    {0x0000f5e0u, {0x51,0xa1,0x30,0x8d,0x80,0x00,0x85,0xc0}, 8u,
+        "GetSsp"},
+    {0x0000f5c0u, {0xd9,0x44,0x24,0x04,0x51,0x8b,0x0d,0x30}, 8u,
+        "SetSsp"},
+    {0x000204d0u, {0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec}, 8u,
+        "FillInventory"},
+    {0x000113a0u, {0xa1,0x30,0x8d,0x80,0x00,0x56,0x8b,0x74}, 8u,
+        "SpiritStrikeEnable"},
+    {0x000c1270u, {0x83,0xec,0x0c,0x56,0x8b,0x74,0x24,0x14}, 8u,
+        "GetCharacterNumberStat"},
+    {0x000c1350u, {0x83,0xec,0x0c,0x53,0x56,0x8b,0x74,0x24}, 8u,
+        "SetCharacterNumberStat"},
+    {0x000d8790u, {0x8b,0x44,0x24,0x04,0x56,0x8b,0xf1,0x83}, 8u,
+        "CCharacterWeapon::SetWeapon"},
+    {0x000d8280u, {0x53,0x55,0x8b,0x6c,0x24,0x0c,0x56,0x57}, 8u,
+        "ranged weapon reattach after model switch"}
 };
 
 static uint8_t *read_file(const wchar_t *path, DWORD *file_size) {
@@ -219,8 +279,14 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_CHARACTER_INPUT_HANDLER;
     *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) =
         image + RVA_CONTROLLER_UPDATE;
+    *(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) =
+        image + RVA_MOTION_BLUR_POST_RENDER;
+    *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) =
+        image + RVA_SCREENSHOT_POST_RENDER;
     *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
         (uint32_t)(uintptr_t)(image + RVA_PC_QUIT_SCREEN_GLOBAL);
+    *(uint32_t *)(image + RVA_QUICK_MENU_IS_ACTIVE + 1u) =
+        (uint32_t)(uintptr_t)(image + RVA_QUICK_MENU_GLOBAL);
     *(uint32_t *)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_ENUM + 9u) =
         (uint32_t)(uintptr_t)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP);
     *(uint32_t *)(image + RVA_HUD_PORTRAIT_RESOURCE_SELECT + 8u) =
@@ -229,6 +295,27 @@ int wmain(int argc, wchar_t **argv) {
         (uint32_t)(uintptr_t)(image + RVA_SKILL_AVAILABILITY_FLAG);
     *(uint32_t *)(image + RVA_SKILL_VALIDATE + 2u) =
         (uint32_t)(uintptr_t)(image + RVA_SKILL_VALIDATE_FLAG);
+
+    for (index = 0u;
+            index < sizeof(expected_cleanroom_entries) /
+                sizeof(expected_cleanroom_entries[0]);
+            ++index) {
+        if (memcmp(
+                image + expected_cleanroom_entries[index].function_rva,
+                expected_cleanroom_entries[index].bytes,
+                expected_cleanroom_entries[index].byte_count) != 0) {
+            fprintf(
+                stderr,
+                "FAIL: cleanroom native entry mismatch: %s\n",
+                expected_cleanroom_entries[index].name
+            );
+            ++failures;
+        }
+    }
+    if (failures != 0) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
 
     if (!SudekiMpInstallSkillTrace((HMODULE)image, 1.0f, 1.0f)) {
         fprintf(stderr, "install rejected image (error=%lu)\n",
@@ -296,7 +383,14 @@ int wmain(int argc, wchar_t **argv) {
             TRUE,
             TRUE,
             VK_F9,
-            TRUE)) {
+            TRUE,
+            FALSE,
+            TRUE,
+            TRUE,
+            0.20f,
+            2.25f,
+            1.50f,
+            0.65f)) {
         fprintf(stderr, "split-screen render install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallControlSeparation();
@@ -309,6 +403,14 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (image[RVA_CAMERA_MANAGER_SET_RENDER_CAMERA] != 0xe9) {
         fputs("FAIL: SetRenderCamera inline hook was not installed\n", stderr);
+        ++failures;
+    }
+    if (*(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) ==
+            image + RVA_MOTION_BLUR_POST_RENDER ||
+        *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) ==
+            image + RVA_SCREENSHOT_POST_RENDER) {
+        fputs("FAIL: Spirit viewport effect callbacks were not redirected\n",
+            stderr);
         ++failures;
     }
     if (!SudekiMpInstallPlayerInputTrace((HMODULE)image)) {
@@ -472,6 +574,14 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     }
     SudekiMpUninstallSplitScreenRender();
+    if (*(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) !=
+            image + RVA_MOTION_BLUR_POST_RENDER ||
+        *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) !=
+            image + RVA_SCREENSHOT_POST_RENDER) {
+        fputs("FAIL: Spirit viewport effect callbacks were not restored\n",
+            stderr);
+        ++failures;
+    }
     if (memcmp(
             image + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
             set_render_camera_original,

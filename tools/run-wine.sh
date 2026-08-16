@@ -9,6 +9,7 @@ check_flag=""
 display_mode=""
 obs_game_capture="false"
 game=""
+game_args=()
 while (( $# > 0 )); do
     case "$1" in
         --check)
@@ -23,9 +24,20 @@ while (( $# > 0 )); do
         --obs-gamecapture)
             obs_game_capture="true"
             ;;
+        --game-arg)
+            shift
+            if (( $# == 0 )); then
+                printf '%s\n' '--game-arg requires a value.' >&2
+                exit 2
+            fi
+            game_args+=("$1")
+            ;;
+        --game-arg=*)
+            game_args+=("${1#*=}")
+            ;;
         --help|-h)
             printf '%s\n' \
-                'usage: tools/run-wine.sh [--check] [--windowed|--fullscreen] [--obs-gamecapture] [SUDEKI.exe]'
+                'usage: tools/run-wine.sh [--check] [--windowed|--fullscreen] [--obs-gamecapture] [--game-arg value] [SUDEKI.exe]'
             exit 0
             ;;
         --*)
@@ -72,6 +84,6 @@ if [[ "${obs_game_capture}" == "true" ]]; then
             'obs-gamecapture is unavailable; install the 32-bit and 64-bit obs-vkcapture hook libraries.' >&2
         exit 1
     fi
-    exec obs-gamecapture wine "${launcher}" "$(to_wine_path "${game}")" "$(to_wine_path "${dll}")"
+    exec obs-gamecapture wine "${launcher}" "$(to_wine_path "${game}")" "$(to_wine_path "${dll}")" "${game_args[@]}"
 fi
-exec wine "${launcher}" "$(to_wine_path "${game}")" "$(to_wine_path "${dll}")"
+exec wine "${launcher}" "$(to_wine_path "${game}")" "$(to_wine_path "${dll}")" "${game_args[@]}"
