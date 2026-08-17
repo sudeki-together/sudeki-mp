@@ -106,6 +106,8 @@ static int target_trace_last_auto_enabled;
 static BOOL second_player_movement_active;
 static int last_movement_x;
 static int last_movement_z;
+static BOOL second_player_facing_valid;
+static float second_player_last_facing[3];
 static BOOL input_bridge_enabled;
 static float input_bridge_deadzone;
 static SudekiMpInputBridgeState input_bridge_state;
@@ -937,11 +939,15 @@ static void poll_second_player_camera_facing(
     void *controller_target;
     float right_x;
     float right_y;
+    static const float local_forward[3] = {0.0f, 0.0f, 1.0f};
+    float world_forward[3];
+    float dot;
 
     if (!owns_foreground || !second_player_movement_enabled ||
         !camera_relative_movement_enabled || !input_bridge_enabled ||
         !input_bridge_connected || character == NULL ||
         !overridden_character_is_in_active_group()) {
+        second_player_facing_valid = FALSE;
         return;
     }
     controller_target = controller == NULL ? NULL :
@@ -949,15 +955,36 @@ static void poll_second_player_camera_facing(
     arbiter = *(uint8_t **)(character + 0x90u);
     if (character == controller_target || !readable_memory(arbiter, 0x54u) ||
         (*(uint32_t *)(arbiter + 0x50u) & 0x00000002u) == 0u) {
+        second_player_facing_valid = FALSE;
         return;
     }
     right_x = (float)input_bridge_state.right_x / 32768.0f;
     right_y = (float)input_bridge_state.right_y / 32768.0f;
     if (sqrtf(right_x * right_x + right_y * right_y) <=
-        input_bridge_deadzone) {
+        input_bridge_deadzone && second_player_movement_active) {
         return;
     }
-    SudekiMpAlignPlayerTwoFacingToCamera(character);
+    if (!SudekiMpTransformPlayerTwoMovement(
+            local_forward,
+            world_forward)) {
+        return;
+    }
+    /* Position::SetForward is a native orientation commit, not a cheap
+     * render-only assignment. Repeating it every controller tick while the
+     * stick is at rest can make the observer model visibly micro-oscillate.
+     * Keep the first commit and only send another one after a meaningful
+     * camera rotation (about 0.5 degrees). */
+    dot = world_forward[0] * second_player_last_facing[0] +
+        world_forward[1] * second_player_last_facing[1] +
+        world_forward[2] * second_player_last_facing[2];
+    if (second_player_facing_valid && dot > 0.99996f) {
+        return;
+    }
+    if (SudekiMpAlignPlayerTwoFacingToCamera(character)) {
+        memcpy(second_player_last_facing, world_forward,
+            sizeof(second_player_last_facing));
+        second_player_facing_valid = TRUE;
+    }
 }
 
 static void poll_second_player_weak_attack(

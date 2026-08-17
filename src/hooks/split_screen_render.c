@@ -126,6 +126,9 @@ typedef void (*HudPartyPointerCopyFunction)(void);
 #if defined(__GNUC__) && defined(__i386__)
 #define SUDEKIMP_THISCALL __attribute__((thiscall))
 #endif
+typedef void (SUDEKIMP_THISCALL *QuickMenuRenderSubmitFunction)(
+    void *quick_menu
+);
 typedef unsigned int (SUDEKIMP_THISCALL *CharacterResourceTypeFunction)(
     void *character_resource
 );
@@ -246,6 +249,9 @@ enum {
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
+    RVA_QUICK_MENU_RENDER_SUBMIT = 0x0009bba0u,
+    RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT = 0x002caf28u,
+    RVA_QUICK_MENU_VTABLE = 0x002caf1cu,
     RVA_HUD_PARTY_POINTER_COPY = 0x000015b0u,
     RVA_HUD_GROUP_VALUES_POINTER_CALL = 0x00181517u,
     RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL = 0x000aab3au,
@@ -258,6 +264,19 @@ enum {
     RVA_HUD_PORTRAIT_GIZMO_VTABLE = 0x002cb590u,
     RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP = 0x0003f498u,
     RVA_UI_RESOURCE_TABLE_INITIALIZED = 0x003c2fefu,
+    RVA_ANIMATION_RENDERER_VTABLE = 0x002df8ecu,
+    RVA_ANIMATION_RENDERER_LOOKUP = 0x0021bac0u,
+    RVA_ANIMATION_RENDERER_COUNT = 0x0021bb10u,
+    RVA_ANIMATION_RENDERER_SELECTOR_SET = 0x00223000u,
+    RVA_ANIMATION_RENDERER_SELECTOR_GET = 0x002230b0u,
+    RVA_ANIMATION_RENDERER_RATE_SET = 0x002230d0u,
+    RVA_ANIMATION_RENDERER_RATE_GET = 0x00223160u,
+    RVA_ANIMATION_RENDERER_TIME_SET = 0x00223180u,
+    RVA_ANIMATION_RENDERER_TIME_GET = 0x00223220u,
+    RVA_ANIMATION_RENDERER_STATE_SET = 0x00223240u,
+    RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
+    RVA_ANIMATION_RENDERER_BLEND_SET = 0x002234c0u,
+    RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
     RVA_RENDER_LOCATOR_INDEX = 0x000c5ff0u,
     RVA_RANGED_WEAPON_REATTACH = 0x000d8280u,
     RVA_RENDER_START = 0x001dce30u,
@@ -374,6 +393,46 @@ typedef struct SudekiMpRangedModelRenderSwap {
     uint32_t saved_world_flags;
 } SudekiMpRangedModelRenderSwap;
 
+typedef struct SudekiMpRangedWorldCompositorState {
+    BOOL owned;
+    BOOL applied;
+    BOOL write_attempted;
+    BOOL moving;
+    BOOL standard_source_present;
+    BOOL shock_source_present;
+    BOOL action_playing;
+    void *character;
+    void *component;
+    void *first_person_wrapper;
+    void *world_wrapper;
+    void *world_renderer;
+    unsigned int submodels;
+    int idle_selector;
+    int walk_selector;
+    int run_selector;
+    int standard_action_selector;
+    int shock_action_selector;
+    unsigned int action_source_id;
+    unsigned int action_target_id;
+    int action_selector;
+    DWORD action_started_tick;
+    const char *last_rejection;
+} SudekiMpRangedWorldCompositorState;
+
+typedef struct SudekiMpRangedWorldAnimationMethods {
+    ModelAnimationCountFunction count;
+    ModelAnimationSelectorSetFunction set_selector;
+    ModelAnimationSelectorGetFunction get_selector;
+    ModelAnimationValueSetFunction set_rate;
+    ModelAnimationValueGetFunction get_rate;
+    ModelAnimationTimeSetFunction set_time;
+    ModelAnimationValueGetFunction get_time;
+    ModelAnimationStateSetFunction set_state;
+    ModelAnimationStateGetFunction get_state;
+    ModelAnimationBlendSetFunction set_blend;
+    ModelAnimationBlendGetFunction get_blend;
+} SudekiMpRangedWorldAnimationMethods;
+
 static SudekiMpRelativeCallHook render_start_hook;
 static SudekiMpRelativeCallHook frame_end_hook;
 static SudekiMpRelativeCallHook quit_screen_render_hook;
@@ -384,11 +443,13 @@ static SudekiMpRelativeCallHook hud_gizmo_status_pointer_hook;
 static SudekiMpInlineHook set_render_camera_hook;
 static SudekiMpPointerHook motion_blur_post_render_hook;
 static SudekiMpPointerHook screenshot_post_render_hook;
+static SudekiMpPointerHook quick_menu_render_submit_hook;
 static uint8_t *game_base;
 static RenderStartFunction original_render_start;
 static FrameEndFunction original_frame_end;
 static QuitScreenRenderFunction original_quit_screen_render
     __attribute__((used));
+static QuickMenuRenderSubmitFunction original_quick_menu_render_submit;
 static QuickMenuIsActiveFunction quick_menu_is_active;
 static HudPartyPointerCopyFunction original_hud_party_pointer_copy
     __attribute__((used));
@@ -437,6 +498,85 @@ static unsigned int player_two_party_slot;
 static BOOL player_two_view_requested;
 static BOOL rendered_player_two_this_frame;
 static BOOL viewport_hud_binding_active;
+static BOOL genuine_quick_menu_active_this_frame;
+static BOOL quick_menu_live_player_two_available_this_frame;
+static BOOL suppress_quick_menu_render_submit_this_frame;
+static BOOL quick_menu_render_submit_isolation_logged;
+static BOOL quick_menu_isolation_active;
+static BOOL quick_menu_isolation_tail_active;
+static BOOL quick_menu_isolation_failed_for_open_menu;
+static BOOL quick_menu_genuine_visible_previous_frame;
+static BOOL quick_menu_expected_player_two;
+static BOOL quick_menu_render_phase_confirmed_this_frame;
+static BOOL quick_menu_submit_seen_since_frame_end;
+static BOOL quick_menu_owner_trace_valid;
+static uint32_t quick_menu_owner_trace_values[5];
+static BOOL readable_memory(const void *pointer, size_t size);
+
+static unsigned int quick_menu_find_character_reference(
+    const void *object,
+    unsigned int size,
+    const void *character
+) {
+    unsigned int offset;
+
+    if (object == NULL || character == NULL || size < sizeof(void *) ||
+        !readable_memory(object, size)) {
+        return 0xffffffffu;
+    }
+    for (offset = 0u; offset + sizeof(void *) <= size; offset += 4u) {
+        if (*(const void **)((const uint8_t *)object + offset) == character) {
+            return offset;
+        }
+    }
+    return 0xffffffffu;
+}
+
+static BOOL quick_menu_find_character_graph_reference(
+    const void *object,
+    unsigned int size,
+    const void *character,
+    unsigned int depth,
+    unsigned int *first_offset,
+    unsigned int *second_offset
+) {
+    unsigned int offset;
+    unsigned int direct;
+    const void *child;
+
+    if (first_offset == NULL || second_offset == NULL) {
+        return FALSE;
+    }
+    direct = quick_menu_find_character_reference(object, size, character);
+    if (direct != 0xffffffffu) {
+        *first_offset = direct;
+        *second_offset = 0xffffffffu;
+        return TRUE;
+    }
+    if (depth == 0u || object == NULL || !readable_memory(object, size)) {
+        return FALSE;
+    }
+    for (offset = 0u; offset + sizeof(void *) <= size; offset += 4u) {
+        child = *(const void **)((const uint8_t *)object + offset);
+        if (child == NULL || child == object ||
+            !readable_memory(child, 0x500u)) {
+            continue;
+        }
+        direct = quick_menu_find_character_reference(child, 0x500u, character);
+        if (direct != 0xffffffffu) {
+            *first_offset = offset;
+            *second_offset = direct;
+            return TRUE;
+        }
+        if (depth > 1u && quick_menu_find_character_graph_reference(
+                child, 0x500u, character, depth - 1u,
+                first_offset, second_offset)) {
+            *first_offset = offset;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
 static BOOL render_only_swap_active;
 static void **render_only_camera_slot;
 static void *render_only_applied_state;
@@ -467,6 +607,7 @@ static BOOL player_two_camera_transform_initialized;
 static float player_two_camera_last_target[3];
 static float player_two_camera_pitch_offset;
 static BOOL player_two_first_person_camera_active;
+static BOOL player_two_forced_third_person_active;
 static float player_two_third_person_matrix[16];
 static DWORD player_two_camera_input_last_tick;
 static BOOL player_two_camera_input_logged;
@@ -484,6 +625,8 @@ static void *ranged_locator_trace_character;
 static int ranged_locator_trace_pitch_bucket;
 static DWORD ranged_locator_trace_last_tick;
 static unsigned int ranged_locator_trace_sequence;
+static BOOL ranged_state_details_inventory_complete;
+static BOOL ranged_state_details_inventory_pending_logged;
 static DWORD ranged_transform_trace_last_tick;
 static unsigned int ranged_transform_trace_sequence;
 static void *ranged_translation_last_component;
@@ -510,6 +653,7 @@ static int ranged_translation_last_selector[
 static SudekiMpRangedModelRenderSwap ranged_model_render_swaps[
     RANGED_MODEL_RENDER_SWAP_COUNT
 ];
+static SudekiMpRangedWorldCompositorState ranged_world_compositor_state;
 static SudekiMpAnimationTraceSnapshot ranged_animation_trace[2];
 static unsigned int ranged_animation_trace_sequence[2];
 static unsigned int ranged_animation_progress_frame[2];
@@ -542,6 +686,8 @@ static const char *const ranged_observer_locator_names[] = {
     "WeaponParent"
 };
 static const float player_two_first_person_eye_height = 1.55f;
+static const float player_two_third_person_camera_distance = 3.25f;
+static const float player_two_third_person_camera_height = 1.15f;
 static const uint8_t expected_camera_manager_add_camera_entry[] = {
     0x83, 0xec, 0x14, 0x53, 0x55, 0x8b, 0x6c, 0x24,
     0x20, 0x56, 0x57, 0x8b
@@ -582,6 +728,10 @@ static const uint8_t expected_history_resource_factory_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec,
     0x0c, 0x53, 0x56, 0x57, 0x8b, 0xf9, 0x85, 0xc0
 };
+static const uint8_t expected_quick_menu_render_submit_entry[] = {
+    0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x38, 0x00, 0x75,
+    0x2e, 0x80, 0xbe, 0xfe, 0x00, 0x00, 0x00, 0x00
+};
 static const uint8_t expected_ranged_weapon_reattach_entry[] = {
     0x53, 0x55, 0x8b, 0x6c, 0x24, 0x0c,
     0x56, 0x57, 0x85, 0xc0, 0x74, 0x6a
@@ -619,6 +769,39 @@ static BOOL quick_menu_is_active_signature_matches(uint8_t *base) {
         (uint32_t)(uintptr_t)(base + RVA_QUICK_MENU_GLOBAL);
 }
 
+static BOOL animation_renderer_signatures_match(uint8_t *base) {
+    uint8_t *vtable;
+
+    if (base == NULL) {
+        return FALSE;
+    }
+    vtable = base + RVA_ANIMATION_RENDERER_VTABLE;
+    return *(void **)(vtable + 0x40u) ==
+            base + RVA_ANIMATION_RENDERER_LOOKUP &&
+        *(void **)(vtable + 0xf8u) ==
+            base + RVA_ANIMATION_RENDERER_COUNT &&
+        *(void **)(vtable + 0xfcu) ==
+            base + RVA_ANIMATION_RENDERER_SELECTOR_SET &&
+        *(void **)(vtable + 0x100u) ==
+            base + RVA_ANIMATION_RENDERER_SELECTOR_GET &&
+        *(void **)(vtable + 0x104u) ==
+            base + RVA_ANIMATION_RENDERER_RATE_SET &&
+        *(void **)(vtable + 0x108u) ==
+            base + RVA_ANIMATION_RENDERER_RATE_GET &&
+        *(void **)(vtable + 0x10cu) ==
+            base + RVA_ANIMATION_RENDERER_TIME_SET &&
+        *(void **)(vtable + 0x110u) ==
+            base + RVA_ANIMATION_RENDERER_TIME_GET &&
+        *(void **)(vtable + 0x114u) ==
+            base + RVA_ANIMATION_RENDERER_STATE_SET &&
+        *(void **)(vtable + 0x118u) ==
+            base + RVA_ANIMATION_RENDERER_STATE_GET &&
+        *(void **)(vtable + 0x144u) ==
+            base + RVA_ANIMATION_RENDERER_BLEND_SET &&
+        *(void **)(vtable + 0x148u) ==
+            base + RVA_ANIMATION_RENDERER_BLEND_GET;
+}
+
 static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
@@ -633,6 +816,7 @@ static void reset_player_two_controller_camera(void) {
     );
     player_two_camera_pitch_offset = 0.0f;
     player_two_first_person_camera_active = FALSE;
+    player_two_forced_third_person_active = FALSE;
     ZeroMemory(
         player_two_third_person_matrix,
         sizeof(player_two_third_person_matrix)
@@ -1123,7 +1307,7 @@ static const char *ranged_locator_pitch_bucket_name(int pitch_bucket) {
     }
 }
 
-static void log_ranged_observer_locator_inventory(
+static void __attribute__((unused)) log_ranged_observer_locator_inventory(
     const SudekiMpRangedModelRenderSwap *swap
 ) {
     const float *first_person_matrix;
@@ -1445,6 +1629,280 @@ static BOOL pc_quit_screen_visible(void) {
 
 static BOOL quick_menu_visible(void) {
     return quick_menu_is_active != NULL && quick_menu_is_active() != FALSE;
+}
+
+static void *quick_menu_singleton(void) {
+    void *quick_menu;
+
+    if (game_base == NULL || !readable_memory(
+            game_base + RVA_QUICK_MENU_GLOBAL,
+            sizeof(quick_menu))) {
+        return NULL;
+    }
+    quick_menu = *(void **)(game_base + RVA_QUICK_MENU_GLOBAL);
+    return readable_memory(quick_menu, 0x2au) &&
+        *(void **)quick_menu == game_base + RVA_QUICK_MENU_VTABLE ?
+            quick_menu : NULL;
+}
+
+static BOOL genuine_quick_menu_visible(void) {
+    uint8_t *quick_menu = (uint8_t *)quick_menu_singleton();
+
+    return quick_menu != NULL && quick_menu[0x29u] != 0u;
+}
+
+static BOOL quick_menu_live_player_two_ready(void) {
+    void *manager = current_camera_manager();
+
+    return dual_camera_frame_cache_enabled &&
+        second_player_camera_enabled &&
+        manager != NULL &&
+        manager == second_player_camera_manager &&
+        readable_memory(manager, 0x4cu) &&
+        player_one_camera != NULL &&
+        player_two_camera != NULL &&
+        player_one_render_state != NULL &&
+        player_two_render_state != NULL &&
+        player_one_frame_valid &&
+        player_two_frame_valid &&
+        frame_cache_device != NULL &&
+        player_one_frame_texture != NULL &&
+        player_two_frame_texture != NULL &&
+        player_one_frame_surface != NULL &&
+        player_two_frame_surface != NULL;
+}
+
+BOOL SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+    BOOL isolation_requested,
+    BOOL resources_ready,
+    BOOL player_two_requested_before_apply,
+    BOOL player_two_rendered
+) {
+    return isolation_requested &&
+        resources_ready &&
+        (!player_two_requested_before_apply || player_two_rendered);
+}
+
+unsigned int SudekiMpSplitScreenQuickMenuIsolationBeginState(
+    unsigned int state,
+    BOOL was_visible,
+    BOOL visible,
+    BOOL eligible_on_rising_edge
+) {
+    BOOL rising_edge = visible && !was_visible;
+
+    if (state > SUDEKIMP_QUICK_MENU_ISOLATION_TAIL) {
+        return visible ? SUDEKIMP_QUICK_MENU_ISOLATION_FAILED :
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+    }
+    if (rising_edge) {
+        return eligible_on_rising_edge ?
+            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE :
+            SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
+    }
+    if (!visible && was_visible) {
+        return state == SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE ?
+            SUDEKIMP_QUICK_MENU_ISOLATION_TAIL :
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+    }
+    if (visible) {
+        return state == SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE ||
+            state == SUDEKIMP_QUICK_MENU_ISOLATION_FAILED ? state :
+            SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
+    }
+    return state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL ? state :
+        SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+}
+
+unsigned int SudekiMpSplitScreenQuickMenuIsolationEndState(
+    unsigned int state,
+    BOOL quick_menu_submit_seen
+) {
+    if (state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL &&
+        !quick_menu_submit_seen) {
+        return SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+    }
+    return state;
+}
+
+unsigned int SudekiMpSplitScreenQuickMenuIsolationCancelState(
+    BOOL quick_menu_visible
+) {
+    return quick_menu_visible ? SUDEKIMP_QUICK_MENU_ISOLATION_FAILED :
+        SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+}
+
+BOOL SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+    BOOL isolation_in_progress,
+    BOOL render_phase_confirmed,
+    BOOL player_two_expected,
+    BOOL player_two_rendered
+) {
+    /* Quick Menu submits after the active viewport's scene flush.  The
+     * queued payload is consumed by the next viewport's flush, so suppress
+     * the P1 submit to keep the following P2 cache free of menu UI. */
+    return isolation_in_progress &&
+        render_phase_confirmed &&
+        !player_two_expected &&
+        !player_two_rendered;
+}
+
+static int current_spirit_presentation_state(void);
+
+static BOOL quick_menu_render_submit_would_submit(void *quick_menu) {
+    const uint8_t *object = (const uint8_t *)quick_menu;
+
+    return readable_memory(object, 0xffu) &&
+        *(const uint32_t *)(object + 0x38u) == 0u &&
+        object[0xfeu] == 0u;
+}
+
+static void trace_quick_menu_owner_state(void *quick_menu) {
+    static const unsigned int offsets[5] = {
+        0x1f4u, /* selected skill/item */
+        0x204u, /* menu mode */
+        0x208u, /* menu resource/controller */
+        0x214u, /* native active-character owner */
+        0x218u  /* owner-side resource/selection state */
+    };
+    uint32_t values[5];
+    unsigned int index;
+    unsigned int owner_p1_offset;
+    unsigned int owner_p2_offset;
+    unsigned int nested_p1_offset = 0xffffffffu;
+    unsigned int nested_p2_offset = 0xffffffffu;
+    unsigned int menu_p1_offset;
+    unsigned int menu_p2_offset;
+    unsigned int resource_p1_offset;
+    unsigned int resource_p2_offset;
+    unsigned int aux_p1_offset;
+    unsigned int aux_p2_offset;
+    unsigned int graph_first_p1_offset = 0xffffffffu;
+    unsigned int graph_second_p1_offset = 0xffffffffu;
+    unsigned int graph_first_p2_offset = 0xffffffffu;
+    unsigned int graph_second_p2_offset = 0xffffffffu;
+    uint8_t *controller;
+    void *owner;
+    void *nested;
+    void *controller_target = NULL;
+
+    if (quick_menu == NULL || !readable_memory(quick_menu, 0x21cu)) {
+        return;
+    }
+    for (index = 0u; index < 5u; ++index) {
+        values[index] = *(uint32_t *)((uint8_t *)quick_menu + offsets[index]);
+    }
+    if (quick_menu_owner_trace_valid &&
+        memcmp(values, quick_menu_owner_trace_values,
+            sizeof(values)) == 0) {
+        return;
+    }
+    memcpy(quick_menu_owner_trace_values, values, sizeof(values));
+    quick_menu_owner_trace_valid = TRUE;
+    owner = *(void **)((uint8_t *)quick_menu + 0x214u);
+    owner_p1_offset = quick_menu_find_character_reference(
+        owner, 0x500u, player_one_character);
+    owner_p2_offset = quick_menu_find_character_reference(
+        owner, 0x500u, player_two_character);
+    menu_p1_offset = quick_menu_find_character_reference(
+        quick_menu, 0x21cu, player_one_character);
+    menu_p2_offset = quick_menu_find_character_reference(
+        quick_menu, 0x21cu, player_two_character);
+    resource_p1_offset = quick_menu_find_character_reference(
+        (void *)(uintptr_t)values[2], 0x500u, player_one_character);
+    resource_p2_offset = quick_menu_find_character_reference(
+        (void *)(uintptr_t)values[2], 0x500u, player_two_character);
+    aux_p1_offset = quick_menu_find_character_reference(
+        (void *)(uintptr_t)values[4], 0x500u, player_one_character);
+    aux_p2_offset = quick_menu_find_character_reference(
+        (void *)(uintptr_t)values[4], 0x500u, player_two_character);
+    (void)quick_menu_find_character_graph_reference(
+        quick_menu, 0x21cu, player_one_character, 2u,
+        &graph_first_p1_offset, &graph_second_p1_offset);
+    (void)quick_menu_find_character_graph_reference(
+        quick_menu, 0x21cu, player_two_character, 2u,
+        &graph_first_p2_offset, &graph_second_p2_offset);
+    if (readable_memory(owner, 0x3c4u)) {
+        nested = *(void **)((uint8_t *)owner + 0x3c0u);
+        nested_p1_offset = quick_menu_find_character_reference(
+            nested, 0x500u, player_one_character);
+        nested_p2_offset = quick_menu_find_character_reference(
+            nested, 0x500u, player_two_character);
+    }
+    if (game_base != NULL && readable_memory(
+            game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        controller = *(uint8_t **)(game_base +
+            RVA_CHARACTER_CONTROLLER_GLOBAL);
+        if (readable_memory(controller, CONTROLLER_TARGET_OFFSET +
+                sizeof(controller_target))) {
+            controller_target = *(void **)(controller +
+                CONTROLLER_TARGET_OFFSET);
+        }
+    }
+    SudekiMpLogFormat(
+        "split_screen_render event=quick_menu_owner_trace phase=%s quick_menu=0x%08lx owner=0x%08lx controller_target=0x%08lx selected=0x%08lx mode=0x%08lx resource=0x%08lx owner_state=0x%08lx owner_aux=0x%08lx player_one=0x%08lx player_two=0x%08lx owner_p1_offset=0x%08lx owner_p2_offset=0x%08lx nested_p1_offset=0x%08lx nested_p2_offset=0x%08lx menu_p1_offset=0x%08lx menu_p2_offset=0x%08lx resource_p1_offset=0x%08lx resource_p2_offset=0x%08lx aux_p1_offset=0x%08lx aux_p2_offset=0x%08lx graph_p1=0x%08lx:0x%08lx graph_p2=0x%08lx:0x%08lx policy=read_only_native_owner_field_inventory_before_virtualization\r\n",
+        rendered_player_two_this_frame ? "player_two_submit" :
+            "player_one_submit",
+        (unsigned long)(uintptr_t)quick_menu,
+        (unsigned long)values[3],
+        (unsigned long)(uintptr_t)controller_target,
+        (unsigned long)values[0],
+        (unsigned long)values[1],
+        (unsigned long)values[2],
+        (unsigned long)values[4],
+        (unsigned long)*(uint32_t *)((uint8_t *)quick_menu + 0x20cu),
+        (unsigned long)(uintptr_t)player_one_character,
+        (unsigned long)(uintptr_t)player_two_character,
+        (unsigned long)owner_p1_offset,
+        (unsigned long)owner_p2_offset,
+        (unsigned long)nested_p1_offset,
+        (unsigned long)nested_p2_offset,
+        (unsigned long)menu_p1_offset,
+        (unsigned long)menu_p2_offset,
+        (unsigned long)resource_p1_offset,
+        (unsigned long)resource_p2_offset,
+        (unsigned long)aux_p1_offset,
+        (unsigned long)aux_p2_offset,
+        (unsigned long)graph_first_p1_offset,
+        (unsigned long)graph_second_p1_offset,
+        (unsigned long)graph_first_p2_offset,
+        (unsigned long)graph_second_p2_offset
+    );
+}
+
+static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
+    void *quick_menu
+) {
+    BOOL singleton_match = quick_menu == quick_menu_singleton();
+    BOOL would_submit = singleton_match &&
+        quick_menu_render_submit_would_submit(quick_menu);
+
+    if (would_submit &&
+        (genuine_quick_menu_visible() ||
+         quick_menu_isolation_active ||
+         quick_menu_isolation_tail_active)) {
+        trace_quick_menu_owner_state(quick_menu);
+        quick_menu_submit_seen_since_frame_end = TRUE;
+    }
+    if (would_submit &&
+        suppress_quick_menu_render_submit_this_frame &&
+        quick_menu_render_phase_confirmed_this_frame &&
+        (quick_menu_isolation_active ||
+         quick_menu_isolation_tail_active) &&
+        !pc_quit_screen_visible() &&
+        current_spirit_presentation_state() == 0) {
+        if (!quick_menu_render_submit_isolation_logged) {
+            quick_menu_render_submit_isolation_logged = TRUE;
+            SudekiMpLogFormat(
+                "split_screen_render event=quick_menu_render_submit_isolation phase=active render_submit_rva=0x%08lx render_submit_vtable_slot_rva=0x%08lx policy=allow_submit_after_player_two_render_for_next_player_one_frame_suppress_after_player_one_render_for_next_player_two_frame_native_ui_queue_drain_unchanged\r\n",
+                (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT,
+                (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT
+            );
+        }
+        return;
+    }
+    original_quick_menu_render_submit(quick_menu);
 }
 
 static int current_spirit_presentation_state(void) {
@@ -2205,9 +2663,11 @@ static BOOL apply_player_two_controller_camera_input(
 static BOOL update_player_two_render_state(void) {
     float first_position[3];
     float second_position[3];
+    float camera_target[3];
     float matrix[16];
     float target_delta[3] = {0.0f, 0.0f, 0.0f};
     BOOL should_use_first_person;
+    BOOL player_one_first_person = FALSE;
     uint16_t *generation;
 
     if (!readable_memory(player_one_render_state, 0xdcu) ||
@@ -2217,6 +2677,18 @@ static BOOL update_player_two_render_state(void) {
         return FALSE;
     }
     should_use_first_person = player_two_should_use_first_person();
+    if (readable_memory(player_one_character, 0x94u)) {
+        uint8_t *arbiter = *(uint8_t **)(
+            (uint8_t *)player_one_character + 0x90u
+        );
+        player_one_first_person = readable_memory(arbiter, 0x54u) &&
+            (*(uint32_t *)(arbiter + 0x50u) &
+             RANGED_FIRST_PERSON_ARBITER_FLAG) != 0u;
+    }
+    memcpy(camera_target, second_position, sizeof(camera_target));
+    if (!should_use_first_person) {
+        camera_target[1] += 1.0f;
+    }
     if (!second_player_controller_camera_enabled ||
         !player_two_camera_transform_initialized) {
         memcpy(
@@ -2230,7 +2702,7 @@ static BOOL update_player_two_render_state(void) {
         if (second_player_controller_camera_enabled) {
             memcpy(
                 player_two_camera_last_target,
-                second_position,
+                camera_target,
                 sizeof(player_two_camera_last_target)
             );
             player_two_camera_transform_initialized = TRUE;
@@ -2242,11 +2714,11 @@ static BOOL update_player_two_render_state(void) {
             (uint8_t *)player_two_render_state + 0x90u,
             sizeof(matrix)
         );
-        target_delta[0] = second_position[0] -
+        target_delta[0] = camera_target[0] -
             player_two_camera_last_target[0];
-        target_delta[1] = second_position[1] -
+        target_delta[1] = camera_target[1] -
             player_two_camera_last_target[1];
-        target_delta[2] = second_position[2] -
+        target_delta[2] = camera_target[2] -
             player_two_camera_last_target[2];
         if (player_two_first_person_camera_active) {
             player_two_third_person_matrix[12] += target_delta[0];
@@ -2259,9 +2731,44 @@ static BOOL update_player_two_render_state(void) {
         }
         memcpy(
             player_two_camera_last_target,
-            second_position,
+            camera_target,
             sizeof(player_two_camera_last_target)
         );
+    }
+    if (player_one_first_person && !should_use_first_person) {
+        if (!player_two_forced_third_person_active ||
+            !second_player_controller_camera_enabled) {
+            float forward_x = matrix[8];
+            float forward_z = matrix[10];
+            float horizontal_length = sqrtf(
+                forward_x * forward_x + forward_z * forward_z
+            );
+
+            if (!isfinite(horizontal_length) ||
+                horizontal_length <= 0.0001f) {
+                return FALSE;
+            }
+            forward_x /= horizontal_length;
+            forward_z /= horizontal_length;
+            matrix[12] = camera_target[0] -
+                forward_x * player_two_third_person_camera_distance;
+            matrix[13] = camera_target[1] +
+                player_two_third_person_camera_height;
+            matrix[14] = camera_target[2] -
+                forward_z * player_two_third_person_camera_distance;
+            player_two_forced_third_person_active = TRUE;
+            SudekiMpLogFormat(
+                "split_screen_render event=player_two_camera phase=third_person_rebase reason=player_one_native_first_person distance_bits=0x%08lx height_bits=0x%08lx policy=preserve_player_one_native_combat_view_and_keep_observer_melee_body_in_vanilla_style_orbit\r\n",
+                (unsigned long)float_bits(
+                    player_two_third_person_camera_distance
+                ),
+                (unsigned long)float_bits(
+                    player_two_third_person_camera_height
+                )
+            );
+        }
+    } else {
+        player_two_forced_third_person_active = FALSE;
     }
     if (should_use_first_person) {
         float eye[3] = {
@@ -2304,7 +2811,7 @@ static BOOL update_player_two_render_state(void) {
     if (second_player_controller_camera_enabled &&
         !apply_player_two_controller_camera_input(
             matrix,
-            second_position,
+            camera_target,
             should_use_first_person)) {
         return FALSE;
     }
@@ -2523,6 +3030,962 @@ static void *model_animation_method(
     }
     method = *(void **)((uint8_t *)vtable + offset);
     return executable_memory(method) ? method : NULL;
+}
+
+static BOOL ranged_state_details_renderer(
+    void *wrapper,
+    void **renderer_result,
+    ModelAnimationLookupFunction *lookup_result,
+    const char **reason_result
+) {
+    void *renderer;
+    void *lookup;
+
+    *renderer_result = NULL;
+    *lookup_result = NULL;
+    *reason_result = "unknown";
+    if (game_base == NULL) {
+        *reason_result = "game_base_unavailable";
+        return FALSE;
+    }
+    if (!readable_memory(wrapper, 0x14u)) {
+        *reason_result = "wrapper_unreadable";
+        return FALSE;
+    }
+    renderer = *(void **)((uint8_t *)wrapper + 0x10u);
+    *renderer_result = renderer;
+    if (!readable_memory(renderer, sizeof(void *))) {
+        *reason_result = "renderer_unreadable";
+        return FALSE;
+    }
+    if (*(void **)renderer != game_base + RVA_ANIMATION_RENDERER_VTABLE) {
+        *reason_result = "renderer_vtable_mismatch";
+        return FALSE;
+    }
+    lookup = model_animation_method(renderer, 0x40u);
+    if (lookup != game_base + RVA_ANIMATION_RENDERER_LOOKUP) {
+        *reason_result = "renderer_lookup_identity_mismatch";
+        return FALSE;
+    }
+    *lookup_result = (ModelAnimationLookupFunction)lookup;
+    *reason_result = "resolved";
+    return TRUE;
+}
+
+static int resolve_ranged_state_details_handle(
+    void *renderer,
+    ModelAnimationLookupFunction lookup,
+    uint32_t handle
+) {
+    if (handle == 0u || handle == 0x0007ffffu) {
+        return -2;
+    }
+    /* Handles are opaque 32-bit values; the sign bit is not an invalidity. */
+    return lookup(renderer, (int)(int32_t)handle);
+}
+
+static void reset_ranged_world_compositor(const char *reason) {
+    if (ranged_world_compositor_state.owned) {
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_world_compositor phase=reset reason=%s character=0x%08lx component=0x%08lx first_person_wrapper=0x%08lx world_wrapper=0x%08lx world_renderer=0x%08lx previous=%s moving=%s action_playing=%s action_source_id=0x%02x action_target_id=0x%02x action_selector=%d policy=clear_ownership_guard_without_animation_write\r\n",
+            reason == NULL ? "unspecified" : reason,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.character,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.component,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.first_person_wrapper,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.world_wrapper,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.world_renderer,
+            ranged_world_compositor_state.applied ? "applied" : "rejected",
+            ranged_world_compositor_state.moving ? "true" : "false",
+            ranged_world_compositor_state.action_playing ? "true" : "false",
+            ranged_world_compositor_state.action_source_id,
+            ranged_world_compositor_state.action_target_id,
+            ranged_world_compositor_state.action_selector
+        );
+    }
+    ZeroMemory(
+        &ranged_world_compositor_state,
+        sizeof(ranged_world_compositor_state)
+    );
+}
+
+static void claim_ranged_world_compositor(
+    void *character,
+    void *component,
+    void *first_person_wrapper,
+    void *world_wrapper
+) {
+    if (ranged_world_compositor_state.owned &&
+        (ranged_world_compositor_state.character != character ||
+         ranged_world_compositor_state.component != component ||
+         ranged_world_compositor_state.first_person_wrapper !=
+            first_person_wrapper ||
+         ranged_world_compositor_state.world_wrapper != world_wrapper)) {
+        reset_ranged_world_compositor("ownership_changed");
+    }
+    if (!ranged_world_compositor_state.owned) {
+        ranged_world_compositor_state.owned = TRUE;
+        ranged_world_compositor_state.character = character;
+        ranged_world_compositor_state.component = component;
+        ranged_world_compositor_state.first_person_wrapper =
+            first_person_wrapper;
+        ranged_world_compositor_state.world_wrapper = world_wrapper;
+    }
+}
+
+static BOOL reject_ranged_world_compositor(const char *reason) {
+    if (ranged_world_compositor_state.last_rejection != reason ||
+        ranged_world_compositor_state.applied) {
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_world_compositor phase=rejected reason=%s character=0x%08lx component=0x%08lx first_person_wrapper=0x%08lx world_wrapper=0x%08lx world_renderer=0x%08lx write_attempted=%s policy=%s\r\n",
+            reason,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.character,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.component,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.first_person_wrapper,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.world_wrapper,
+            (unsigned long)(uintptr_t)
+                ranged_world_compositor_state.world_renderer,
+            ranged_world_compositor_state.write_attempted ? "true" : "false",
+            ranged_world_compositor_state.write_attempted ?
+                "fallback_stable_mirror_no_retry_until_ownership_reset" :
+                "retry_same_ownership_without_animation_write"
+        );
+    }
+    ranged_world_compositor_state.applied = FALSE;
+    ranged_world_compositor_state.last_rejection = reason;
+    return FALSE;
+}
+
+/*
+ * The detached Ailish world renderer is natively advanced by Sudeki, but it
+ * has no second gameplay animation-controller owner.  Compose only the
+ * confirmed native world clips at presentation level: hard-cut the base
+ * locomotion state when movement changes and play the confirmed standard or
+ * shock fire action on channel 4.  The first-person-only C1/C2/C3 reload
+ * clips are intentionally ignored.  Never tick the renderer or call the
+ * gameplay controller.
+ */
+static BOOL ranged_world_animation_methods(
+    void *renderer,
+    SudekiMpRangedWorldAnimationMethods *methods,
+    const char **reason_result
+) {
+    void *method;
+
+    ZeroMemory(methods, sizeof(*methods));
+    *reason_result = "animation_method_identity_mismatch";
+    method = model_animation_method(renderer, 0xf8u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_COUNT) {
+        return FALSE;
+    }
+    methods->count = (ModelAnimationCountFunction)method;
+    method = model_animation_method(renderer, 0xfcu);
+    if (method != game_base + RVA_ANIMATION_RENDERER_SELECTOR_SET) {
+        return FALSE;
+    }
+    methods->set_selector = (ModelAnimationSelectorSetFunction)method;
+    method = model_animation_method(renderer, 0x100u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_SELECTOR_GET) {
+        return FALSE;
+    }
+    methods->get_selector = (ModelAnimationSelectorGetFunction)method;
+    method = model_animation_method(renderer, 0x104u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_RATE_SET) {
+        return FALSE;
+    }
+    methods->set_rate = (ModelAnimationValueSetFunction)method;
+    method = model_animation_method(renderer, 0x108u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_RATE_GET) {
+        return FALSE;
+    }
+    methods->get_rate = (ModelAnimationValueGetFunction)method;
+    method = model_animation_method(renderer, 0x10cu);
+    if (method != game_base + RVA_ANIMATION_RENDERER_TIME_SET) {
+        return FALSE;
+    }
+    methods->set_time = (ModelAnimationTimeSetFunction)method;
+    method = model_animation_method(renderer, 0x110u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_TIME_GET) {
+        return FALSE;
+    }
+    methods->get_time = (ModelAnimationValueGetFunction)method;
+    method = model_animation_method(renderer, 0x114u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_STATE_SET) {
+        return FALSE;
+    }
+    methods->set_state = (ModelAnimationStateSetFunction)method;
+    method = model_animation_method(renderer, 0x118u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_STATE_GET) {
+        return FALSE;
+    }
+    methods->get_state = (ModelAnimationStateGetFunction)method;
+    method = model_animation_method(renderer, 0x144u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_BLEND_SET) {
+        return FALSE;
+    }
+    methods->set_blend = (ModelAnimationBlendSetFunction)method;
+    method = model_animation_method(renderer, 0x148u);
+    if (method != game_base + RVA_ANIMATION_RENDERER_BLEND_GET) {
+        return FALSE;
+    }
+    methods->get_blend = (ModelAnimationBlendGetFunction)method;
+    *reason_result = "resolved";
+    return TRUE;
+}
+
+static BOOL resolve_ranged_world_animation_selector(
+    uint8_t *component,
+    void *renderer,
+    ModelAnimationLookupFunction lookup,
+    unsigned int animation_id,
+    int required_selector,
+    int *selector_result,
+    const char **reason_result
+) {
+    uint8_t *animation_table;
+    uint8_t *details;
+    uint32_t handle;
+    BOOL selected_first_bank;
+    int selector;
+
+    *selector_result = -2;
+    if (!readable_memory(component, 0x134u)) {
+        *reason_result = "animation_component_unavailable";
+        return FALSE;
+    }
+    animation_table = *(uint8_t **)(component + 0xdcu);
+    if (!readable_memory(
+            animation_table,
+            0x14u + (animation_id + 1u) * sizeof(void *))) {
+        *reason_result = "animation_table_unavailable";
+        return FALSE;
+    }
+    details = *(uint8_t **)(
+        animation_table + 0x14u + animation_id * sizeof(void *)
+    );
+    if (!readable_memory(details, 0x28u)) {
+        *reason_result = "animation_details_unavailable";
+        return FALSE;
+    }
+    selected_first_bank = (component[0x133u] & 2u) != 0u;
+    memcpy(
+        &handle,
+        details + (selected_first_bank ? 0x14u : 0x20u),
+        sizeof(handle)
+    );
+    selector = resolve_ranged_state_details_handle(renderer, lookup, handle);
+    *selector_result = selector;
+    if (selector != required_selector) {
+        *reason_result = "animation_selector_exact_gate_failed";
+        return FALSE;
+    }
+    *reason_result = "resolved";
+    return TRUE;
+}
+
+static BOOL classify_ranged_world_movement(
+    void *character,
+    float *speed_result,
+    BOOL *gate_result,
+    BOOL *moving_result,
+    const char **reason_result
+) {
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *arbiter;
+    uint8_t *movement_state;
+    float speed;
+
+    *speed_result = 0.0f;
+    *gate_result = FALSE;
+    *moving_result = FALSE;
+    if (!readable_memory(character_bytes, 0x94u)) {
+        *reason_result = "movement_character_unavailable";
+        return FALSE;
+    }
+    arbiter = *(uint8_t **)(character_bytes + 0x90u);
+    if (!readable_memory(arbiter, 0x14u) ||
+        *(void **)(arbiter + 0x10u) != character) {
+        *reason_result = "movement_arbiter_owner_gate_failed";
+        return FALSE;
+    }
+    movement_state = *(uint8_t **)(character_bytes + 0x80u);
+    if (!readable_memory(movement_state, 0xc0u)) {
+        *reason_result = "movement_state_unavailable";
+        return FALSE;
+    }
+    memcpy(&speed, movement_state + 0x24u, sizeof(speed));
+    if (!isfinite(speed)) {
+        *reason_result = "movement_speed_not_finite";
+        return FALSE;
+    }
+    speed = fabsf(speed);
+    *gate_result = (movement_state[0xbeu] & 0x08u) != 0u;
+    *speed_result = speed;
+    *moving_result = *gate_result && speed > 0.0001f;
+    *reason_result = "resolved";
+    return TRUE;
+}
+
+static BOOL ranged_source_animation_present(
+    uint8_t *component,
+    unsigned int animation_id,
+    BOOL *present_result,
+    const char **reason_result
+) {
+    uint8_t *animation_state;
+    unsigned int channel;
+
+    *present_result = FALSE;
+    if (!readable_memory(component, 0xfcu)) {
+        *reason_result = "source_animation_component_unavailable";
+        return FALSE;
+    }
+    animation_state = *(uint8_t **)(component + 0xf8u);
+    if (!readable_memory(
+            animation_state,
+            RANGED_ANIMATION_CHANNEL_COUNT * 4u)) {
+        *reason_result = "source_animation_state_unavailable";
+        return FALSE;
+    }
+    for (channel = 0u;
+         channel < RANGED_ANIMATION_CHANNEL_COUNT;
+         ++channel) {
+        if (animation_state[channel * 4u + 2u] == animation_id) {
+            *present_result = TRUE;
+            break;
+        }
+    }
+    *reason_result = "resolved";
+    return TRUE;
+}
+
+static void set_ranged_world_animation_channel(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels,
+    int channel,
+    int selector,
+    int state,
+    float rate
+) {
+    unsigned int submodel;
+
+    for (submodel = 0u; submodel < submodels; ++submodel) {
+        methods->set_selector(renderer, channel, submodel, selector);
+        methods->set_state(renderer, channel, submodel, state);
+        methods->set_time(renderer, channel, submodel, 0.0f, 0);
+        methods->set_rate(renderer, channel, submodel, rate);
+    }
+}
+
+static BOOL verify_ranged_world_animation_channel(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels,
+    int channel,
+    int selector,
+    unsigned int state,
+    float rate
+) {
+    unsigned int submodel;
+
+    for (submodel = 0u; submodel < submodels; ++submodel) {
+        float current_time = methods->get_time(
+            renderer, channel, submodel
+        );
+        float current_rate = methods->get_rate(
+            renderer, channel, submodel
+        );
+
+        if (methods->get_selector(renderer, channel, submodel) != selector ||
+            methods->get_state(renderer, channel, submodel) != state ||
+            !isfinite(current_time) || !isfinite(current_rate) ||
+            fabsf(current_rate - rate) > 0.0001f) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/*
+ * The native ranged UI transition can clear the detached world renderer
+ * without changing our movement classification.  Compare only the base
+ * channels that this compositor owns.  State and time are deliberately not
+ * part of this steady-state gate: Sudeki transiently sets the state 0x80 bit
+ * when a looping clip wraps, and the native renderer owns clock advancement.
+ * Channel 4 and blend 3 remain exclusively owned by the fire lifecycle.
+ */
+static BOOL ranged_world_base_matches(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels,
+    BOOL moving,
+    int idle_selector,
+    int walk_selector,
+    int run_selector
+) {
+    const int selectors[4] = {
+        moving ? walk_selector : idle_selector,
+        moving ? run_selector : 0,
+        0,
+        0
+    };
+    const float rates[4] = {
+        moving ? 24.0f : 12.0f,
+        moving ? 18.0f : 0.0f,
+        0.0f,
+        0.0f
+    };
+    const float blends[3] = {
+        moving ? 0.99f : 0.0f,
+        0.0f,
+        0.0f
+    };
+    unsigned int channel;
+    unsigned int submodel;
+
+    for (channel = 0u; channel < 4u; ++channel) {
+        for (submodel = 0u; submodel < submodels; ++submodel) {
+            float rate = methods->get_rate(
+                renderer, (int)channel, submodel
+            );
+
+            if (methods->get_selector(
+                    renderer, (int)channel, submodel) !=
+                    selectors[channel] ||
+                !isfinite(rate) ||
+                fabsf(rate - rates[channel]) > 0.0001f) {
+                return FALSE;
+            }
+        }
+    }
+    for (channel = 0u; channel < 3u; ++channel) {
+        float blend = methods->get_blend(renderer, (int)channel);
+
+        if (!isfinite(blend) ||
+            fabsf(blend - blends[channel]) > 0.0001f) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL apply_ranged_world_base_transition(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels,
+    BOOL moving,
+    BOOL action_playing
+) {
+    const int dormant_state = 192;
+    float blend_zero;
+    float blend_three;
+
+    if (moving) {
+        set_ranged_world_animation_channel(
+            renderer, methods, submodels, 0, 22, 0, 24.0f
+        );
+        set_ranged_world_animation_channel(
+            renderer, methods, submodels, 1, 23, 0, 18.0f
+        );
+    } else {
+        set_ranged_world_animation_channel(
+            renderer, methods, submodels, 0, 20, 0, 12.0f
+        );
+        set_ranged_world_animation_channel(
+            renderer, methods, submodels, 1, 0, dormant_state, 0.0f
+        );
+    }
+    set_ranged_world_animation_channel(
+        renderer, methods, submodels, 2, 0, dormant_state, 0.0f
+    );
+    set_ranged_world_animation_channel(
+        renderer, methods, submodels, 3, 0, dormant_state, 0.0f
+    );
+    methods->set_blend(renderer, 0, moving ? 0.99f : 0.0f);
+    methods->set_blend(renderer, 1, 0.0f);
+    methods->set_blend(renderer, 2, 0.0f);
+    methods->set_blend(renderer, 3, action_playing ? 1.0f : 0.0f);
+
+    if (!verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 0,
+            moving ? 22 : 20, 0u, moving ? 24.0f : 12.0f) ||
+        !verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 1,
+            moving ? 23 : 0, moving ? 0u : 192u,
+            moving ? 18.0f : 0.0f) ||
+        !verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 2, 0, 192u, 0.0f) ||
+        !verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 3, 0, 192u, 0.0f)) {
+        return FALSE;
+    }
+    blend_zero = methods->get_blend(renderer, 0);
+    blend_three = methods->get_blend(renderer, 3);
+    return isfinite(blend_zero) && isfinite(blend_three) &&
+        fabsf(blend_zero - (moving ? 0.99f : 0.0f)) <= 0.0001f &&
+        fabsf(methods->get_blend(renderer, 1)) <= 0.0001f &&
+        fabsf(methods->get_blend(renderer, 2)) <= 0.0001f &&
+        fabsf(blend_three - (action_playing ? 1.0f : 0.0f)) <= 0.0001f;
+}
+
+static BOOL start_ranged_world_action(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels,
+    int selector
+) {
+    set_ranged_world_animation_channel(
+        renderer, methods, submodels, 4, selector, 1, 24.0f
+    );
+    methods->set_blend(renderer, 3, 1.0f);
+    return verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 4, selector, 1u, 24.0f) &&
+        isfinite(methods->get_blend(renderer, 3)) &&
+        fabsf(methods->get_blend(renderer, 3) - 1.0f) <= 0.0001f;
+}
+
+static BOOL cleanup_ranged_world_action(
+    void *renderer,
+    const SudekiMpRangedWorldAnimationMethods *methods,
+    unsigned int submodels
+) {
+    set_ranged_world_animation_channel(
+        renderer, methods, submodels, 4, 0, 192, 0.0f
+    );
+    methods->set_blend(renderer, 3, 0.0f);
+    return verify_ranged_world_animation_channel(
+            renderer, methods, submodels, 4, 0, 192u, 0.0f) &&
+        isfinite(methods->get_blend(renderer, 3)) &&
+        fabsf(methods->get_blend(renderer, 3)) <= 0.0001f;
+}
+
+static BOOL compose_ranged_world_animation(
+    void *character,
+    uint8_t *component,
+    void *first_person_wrapper,
+    void *world_wrapper
+) {
+    static const char rejection_renderer_changed[] =
+        "renderer_changed_during_ownership";
+    static const char rejection_count[] = "submodel_count_invalid";
+    static const char rejection_count_changed[] =
+        "submodel_count_changed_during_ownership";
+    static const char rejection_base_verify[] =
+        "base_transition_getter_verification_failed";
+    static const char rejection_action_verify[] =
+        "action_transition_getter_verification_failed";
+    static const DWORD action_timeout_ms = 1500u;
+    SudekiMpRangedWorldAnimationMethods methods;
+    ModelAnimationLookupFunction lookup;
+    const char *reason;
+    void *renderer;
+    unsigned int submodels;
+    int idle_selector;
+    int walk_selector;
+    int run_selector;
+    int standard_action_selector;
+    int shock_action_selector;
+    float speed;
+    BOOL movement_gate;
+    BOOL moving;
+    BOOL standard_source_present;
+    BOOL shock_source_present;
+    BOOL standard_source_rising;
+    BOOL shock_source_rising;
+    BOOL action_replaced;
+    BOOL active_source_present;
+    unsigned int requested_source_id;
+    unsigned int requested_target_id;
+    int requested_selector;
+    BOOL initial_base;
+    BOOL base_drifted;
+    const char *base_transition_reason;
+    DWORD now;
+
+    claim_ranged_world_compositor(
+        character,
+        component,
+        first_person_wrapper,
+        world_wrapper
+    );
+    reason = "unknown";
+    if (!ranged_state_details_renderer(
+            world_wrapper,
+            &renderer,
+            &lookup,
+            &reason)) {
+        return reject_ranged_world_compositor(reason);
+    }
+    if (ranged_world_compositor_state.world_renderer != NULL &&
+        ranged_world_compositor_state.world_renderer != renderer) {
+        reset_ranged_world_compositor(rejection_renderer_changed);
+        claim_ranged_world_compositor(
+            character,
+            component,
+            first_person_wrapper,
+            world_wrapper
+        );
+        ranged_world_compositor_state.world_renderer = renderer;
+        return reject_ranged_world_compositor(rejection_renderer_changed);
+    }
+    ranged_world_compositor_state.world_renderer = renderer;
+    if (ranged_world_compositor_state.write_attempted &&
+        !ranged_world_compositor_state.applied) {
+        return FALSE;
+    }
+    if (!ranged_world_animation_methods(renderer, &methods, &reason)) {
+        return reject_ranged_world_compositor(reason);
+    }
+    if (!resolve_ranged_world_animation_selector(
+            component, renderer, lookup, 0x02u, 20,
+            &idle_selector, &reason) ||
+        !resolve_ranged_world_animation_selector(
+            component, renderer, lookup, 0x06u, 22,
+            &walk_selector, &reason) ||
+        !resolve_ranged_world_animation_selector(
+            component, renderer, lookup, 0x07u, 23,
+            &run_selector, &reason) ||
+        !resolve_ranged_world_animation_selector(
+            component, renderer, lookup, 0x85u, 59,
+            &standard_action_selector, &reason) ||
+        !resolve_ranged_world_animation_selector(
+            component, renderer, lookup, 0x87u, 55,
+            &shock_action_selector, &reason)) {
+        return reject_ranged_world_compositor(reason);
+    }
+    submodels = methods.count(renderer);
+    if (submodels == 0u || submodels > 32u) {
+        return reject_ranged_world_compositor(rejection_count);
+    }
+    if (ranged_world_compositor_state.applied &&
+        ranged_world_compositor_state.submodels != submodels) {
+        return reject_ranged_world_compositor(rejection_count_changed);
+    }
+    if (!classify_ranged_world_movement(
+            character,
+            &speed,
+            &movement_gate,
+            &moving,
+            &reason) ||
+        !ranged_source_animation_present(
+            component, 0x8cu, &standard_source_present, &reason) ||
+        !ranged_source_animation_present(
+            component, 0x8eu, &shock_source_present, &reason)) {
+        return reject_ranged_world_compositor(reason);
+    }
+
+    initial_base = !ranged_world_compositor_state.applied;
+    base_drifted = !initial_base &&
+        ranged_world_compositor_state.moving == moving &&
+        !ranged_world_base_matches(
+            renderer,
+            &methods,
+            submodels,
+            moving,
+            idle_selector,
+            walk_selector,
+            run_selector
+        );
+    if (initial_base || ranged_world_compositor_state.moving != moving ||
+        base_drifted) {
+        base_transition_reason = initial_base ? "initialization" :
+            (ranged_world_compositor_state.moving != moving ?
+                "movement_state_changed" : "renderer_drift");
+        ranged_world_compositor_state.write_attempted = TRUE;
+        if (!apply_ranged_world_base_transition(
+                renderer,
+                &methods,
+                submodels,
+                moving,
+                ranged_world_compositor_state.action_playing)) {
+            return reject_ranged_world_compositor(rejection_base_verify);
+        }
+        ranged_world_compositor_state.applied = TRUE;
+        ranged_world_compositor_state.moving = moving;
+        ranged_world_compositor_state.submodels = submodels;
+        ranged_world_compositor_state.idle_selector = idle_selector;
+        ranged_world_compositor_state.walk_selector = walk_selector;
+        ranged_world_compositor_state.run_selector = run_selector;
+        ranged_world_compositor_state.standard_action_selector =
+            standard_action_selector;
+        ranged_world_compositor_state.shock_action_selector =
+            shock_action_selector;
+        ranged_world_compositor_state.last_rejection = NULL;
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_world_compositor phase=base_transition reason=%s character=0x%08lx world_renderer=0x%08lx mode=%s initial=%s movement_gate=%s speed=%.4f submodels=%u channels=ch0:%d@%.1f,ch1:%d@%.1f,ch2:dormant,ch3:dormant blends=%.2f,0,0,%s selectors_exact=id02:%d,id06:%d,id07:%d,id85:%d,id87:%d time_policy=reset_only_on_transition clock_policy=native_renderer_tick_only crossfade=disabled_hard_cut drift_scope=channels_0_3_selectors_rates_and_blends_0_2_excludes_state_time_channel_4_blend_3 controller_policy=no_gameplay_controller_call root_policy=no_pitch_or_root_write\r\n",
+            base_transition_reason,
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)(uintptr_t)renderer,
+            moving ? "moving" : "idle",
+            initial_base ? "true" : "false",
+            movement_gate ? "true" : "false",
+            speed,
+            submodels,
+            moving ? walk_selector : idle_selector,
+            moving ? 24.0 : 12.0,
+            moving ? run_selector : 0,
+            moving ? 18.0 : 0.0,
+            moving ? 0.99 : 0.0,
+            ranged_world_compositor_state.action_playing ? "1" : "0",
+            idle_selector,
+            walk_selector,
+            run_selector,
+            standard_action_selector,
+            shock_action_selector
+        );
+    }
+
+    standard_source_rising = standard_source_present &&
+        !ranged_world_compositor_state.standard_source_present;
+    shock_source_rising = shock_source_present &&
+        !ranged_world_compositor_state.shock_source_present;
+    requested_source_id = 0u;
+    requested_target_id = 0u;
+    requested_selector = 0;
+    if (shock_source_rising) {
+        requested_source_id = 0x8eu;
+        requested_target_id = 0x87u;
+        requested_selector = shock_action_selector;
+    } else if (standard_source_rising) {
+        requested_source_id = 0x8cu;
+        requested_target_id = 0x85u;
+        requested_selector = standard_action_selector;
+    }
+    now = GetTickCount();
+    if (requested_source_id != 0u) {
+        action_replaced = ranged_world_compositor_state.action_playing;
+        ranged_world_compositor_state.write_attempted = TRUE;
+        if (!start_ranged_world_action(
+                renderer, &methods, submodels, requested_selector)) {
+            return reject_ranged_world_compositor(
+                rejection_action_verify
+            );
+        }
+        ranged_world_compositor_state.action_playing = TRUE;
+        ranged_world_compositor_state.action_source_id =
+            requested_source_id;
+        ranged_world_compositor_state.action_target_id =
+            requested_target_id;
+        ranged_world_compositor_state.action_selector =
+            requested_selector;
+        ranged_world_compositor_state.action_started_tick = now;
+        ranged_world_compositor_state.last_rejection = NULL;
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_world_compositor phase=action_start character=0x%08lx world_renderer=0x%08lx semantic=%s source_id=0x%02x target_id=0x%02x channel=4 selector=%d state=1 rate=24.0000 blend_channel=3 blend=1.0000 rising_edge=true replaced_or_restarted=%s migration_policy=presence_across_all_channels_no_restart_on_channel_2_to_0 clock_policy=native_renderer_tick_only\r\n",
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)(uintptr_t)renderer,
+            requested_source_id == 0x8eu ? "shock_fire" :
+                "standard_fire",
+            requested_source_id,
+            requested_target_id,
+            requested_selector,
+            action_replaced ? "true" : "false"
+        );
+    } else if (ranged_world_compositor_state.action_playing) {
+        unsigned int action_state = methods.get_state(
+            renderer, 4, 0u
+        );
+        DWORD elapsed = now -
+            ranged_world_compositor_state.action_started_tick;
+        BOOL renderer_complete = (action_state & 0x40u) != 0u;
+        BOOL timed_out = elapsed >= action_timeout_ms;
+
+        active_source_present =
+            (ranged_world_compositor_state.action_source_id == 0x8cu &&
+             standard_source_present) ||
+            (ranged_world_compositor_state.action_source_id == 0x8eu &&
+             shock_source_present);
+
+        if (!active_source_present && (renderer_complete || timed_out)) {
+            unsigned int completed_source_id =
+                ranged_world_compositor_state.action_source_id;
+            unsigned int completed_target_id =
+                ranged_world_compositor_state.action_target_id;
+            int completed_selector =
+                ranged_world_compositor_state.action_selector;
+
+            ranged_world_compositor_state.write_attempted = TRUE;
+            if (!cleanup_ranged_world_action(
+                    renderer, &methods, submodels)) {
+                return reject_ranged_world_compositor(
+                    rejection_action_verify
+                );
+            }
+            ranged_world_compositor_state.action_playing = FALSE;
+            ranged_world_compositor_state.action_source_id = 0u;
+            ranged_world_compositor_state.action_target_id = 0u;
+            ranged_world_compositor_state.action_selector = 0;
+            ranged_world_compositor_state.last_rejection = NULL;
+            SudekiMpLogFormat(
+                "split_screen_render event=ranged_world_compositor phase=action_cleanup character=0x%08lx world_renderer=0x%08lx semantic=%s source_id=0x%02x target_id=0x%02x completed_selector=%d reason=%s observed_state=%u elapsed_ms=%lu channel=4 selector=0 state=192 rate=0 blend_channel=3 blend=0 timeout_ms=%lu\r\n",
+                (unsigned long)(uintptr_t)character,
+                (unsigned long)(uintptr_t)renderer,
+                completed_source_id == 0x8eu ? "shock_fire" :
+                    "standard_fire",
+                completed_source_id,
+                completed_target_id,
+                completed_selector,
+                renderer_complete ? "renderer_complete" : "timeout",
+                action_state,
+                (unsigned long)elapsed,
+                (unsigned long)action_timeout_ms
+            );
+        }
+    }
+    ranged_world_compositor_state.standard_source_present =
+        standard_source_present;
+    ranged_world_compositor_state.shock_source_present =
+        shock_source_present;
+    return TRUE;
+}
+
+static BOOL ranged_world_compositor_eligible(
+    void *character,
+    uint8_t *position,
+    uint8_t *component,
+    void *first_person_wrapper,
+    void *world_wrapper,
+    BOOL show_first_person
+) {
+    return !show_first_person && rendered_player_two_this_frame &&
+        character == player_one_character &&
+        character_has_resource_type(character, 0x01u) &&
+        readable_memory(position, 0xb8u) &&
+        readable_memory(component, 0x168u) &&
+        first_person_wrapper != world_wrapper &&
+        *(void **)(component + 0x160u) == first_person_wrapper &&
+        *(void **)(component + 0x164u) == world_wrapper &&
+        *(void **)(position + 0xb4u) == first_person_wrapper &&
+        *(void **)(position + 0xb4u) != world_wrapper;
+}
+
+/*
+ * IDs 0x97/0x98/0x99 are registered MISSILE_AIM names/property IDs. Read any
+ * matching loaded StateDetails pointers directly from the component table and
+ * ask both retained renderers whether the two animation handles exist.
+ * This deliberately avoids the StateDetails lookup/state-machine path and
+ * never selects, plays, advances, or writes an animation.
+ */
+static void log_ranged_state_details_inventory(
+    void *character,
+    uint8_t *component,
+    void *first_person_wrapper,
+    void *world_wrapper
+) {
+    static const unsigned int animation_ids[] = {0x97u, 0x98u, 0x99u};
+    uint8_t *animation_table;
+    void *first_person_renderer;
+    void *world_renderer;
+    ModelAnimationLookupFunction first_person_lookup;
+    ModelAnimationLookupFunction world_lookup;
+    const char *first_person_reason;
+    const char *world_reason;
+    BOOL first_person_valid;
+    BOOL world_valid;
+    unsigned int index;
+
+    if (ranged_state_details_inventory_complete ||
+        !character_has_resource_type(character, 0x01u) ||
+        !readable_memory(component, 0xe0u)) {
+        return;
+    }
+    animation_table = *(uint8_t **)(component + 0xdcu);
+    if (!readable_memory(
+            animation_table,
+            0x14u + (animation_ids[2] + 1u) * sizeof(void *))) {
+        return;
+    }
+
+    first_person_reason = "unknown";
+    world_reason = "unknown";
+    first_person_valid = ranged_state_details_renderer(
+        first_person_wrapper,
+        &first_person_renderer,
+        &first_person_lookup,
+        &first_person_reason
+    );
+    world_valid = ranged_state_details_renderer(
+        world_wrapper,
+        &world_renderer,
+        &world_lookup,
+        &world_reason
+    );
+    if (!first_person_valid || !world_valid) {
+        if (!ranged_state_details_inventory_pending_logged) {
+            ranged_state_details_inventory_pending_logged = TRUE;
+            SudekiMpLogFormat(
+                "split_screen_render event=ranged_state_details_inventory phase=pending first_person_renderer=0x%08lx world_renderer=0x%08lx first_person_reason=%s world_reason=%s policy=retry_exact_renderer_gate_without_state_lookup_or_write\r\n",
+                (unsigned long)(uintptr_t)first_person_renderer,
+                (unsigned long)(uintptr_t)world_renderer,
+                first_person_reason,
+                world_reason
+            );
+        }
+        return;
+    }
+    ranged_state_details_inventory_pending_logged = FALSE;
+
+    for (index = 0u;
+         index < sizeof(animation_ids) / sizeof(animation_ids[0]);
+         ++index) {
+        unsigned int animation_id = animation_ids[index];
+        uint8_t *details = *(uint8_t **)(
+            animation_table + 0x14u + animation_id * sizeof(void *)
+        );
+        uint32_t handle_14;
+        uint32_t ref_18;
+        uint32_t handle_20;
+        uint32_t ref_24;
+        unsigned int byte_59;
+
+        if (!readable_memory(details, 0x5au)) {
+            SudekiMpLogFormat(
+                "split_screen_render event=ranged_state_details_inventory animation_id=0x%02x result=rejected details=0x%08lx first_person_renderer=0x%08lx world_renderer=0x%08lx first_person_reason=%s world_reason=%s details_reason=%s policy=one_time_direct_table_read_no_state_lookup_or_animation_write\r\n",
+                animation_id,
+                (unsigned long)(uintptr_t)details,
+                (unsigned long)(uintptr_t)first_person_renderer,
+                (unsigned long)(uintptr_t)world_renderer,
+                first_person_reason,
+                world_reason,
+                readable_memory(details, 0x5au) ? "readable" : "unreadable"
+            );
+            continue;
+        }
+
+        memcpy(&handle_14, details + 0x14u, sizeof(handle_14));
+        memcpy(&ref_18, details + 0x18u, sizeof(ref_18));
+        memcpy(&handle_20, details + 0x20u, sizeof(handle_20));
+        memcpy(&ref_24, details + 0x24u, sizeof(ref_24));
+        byte_59 = details[0x59u];
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_state_details_inventory animation_id=0x%02x result=resolved details=0x%08lx handle_14=0x%08lx fp_14=%d world_14=%d ref_18=0x%08lx handle_20=0x%08lx fp_20=%d world_20=%d ref_24=0x%08lx field_59=0x%02x policy=one_time_direct_table_read_exact_renderer_handle_lookup_no_state_lookup_selector_playback_or_animation_write\r\n",
+            animation_id,
+            (unsigned long)(uintptr_t)details,
+            (unsigned long)handle_14,
+            resolve_ranged_state_details_handle(
+                first_person_renderer, first_person_lookup, handle_14),
+            resolve_ranged_state_details_handle(
+                world_renderer, world_lookup, handle_14),
+            (unsigned long)ref_18,
+            (unsigned long)handle_20,
+            resolve_ranged_state_details_handle(
+                first_person_renderer, first_person_lookup, handle_20),
+            resolve_ranged_state_details_handle(
+                world_renderer, world_lookup, handle_20),
+            (unsigned long)ref_24,
+            byte_59
+        );
+    }
+    ranged_state_details_inventory_complete = TRUE;
 }
 
 static void reset_ranged_animation_trace(void) {
@@ -3342,7 +4805,8 @@ static BOOL restore_ranged_model_render_view(void) {
 static BOOL stage_ranged_model_render_view(
     void *character_pointer,
     BOOL show_first_person,
-    const char *ownership
+    const char *ownership,
+    BOOL *world_compositor_owned_result
 ) {
     uint8_t *character = (uint8_t *)character_pointer;
     uint8_t *position;
@@ -3360,7 +4824,13 @@ static BOOL stage_ranged_model_render_view(
     uint32_t applied_first_person_flags;
     uint32_t applied_world_flags;
     SudekiMpRangedModelRenderSwap *swap = NULL;
+    BOOL world_compositor_eligible;
+    BOOL world_compositor_applied;
     unsigned int index;
+
+    if (world_compositor_owned_result != NULL) {
+        *world_compositor_owned_result = FALSE;
+    }
 
     if (!ranged_presentation_parts(
             character,
@@ -3384,7 +4854,36 @@ static BOOL stage_ranged_model_render_view(
             world_wrapper : first_person_wrapper)) {
         return FALSE;
     }
-    if (!sync_ranged_animation_model(
+    if (!show_first_person &&
+        character_has_resource_type(character, 0x01u)) {
+        log_ranged_state_details_inventory(
+            character,
+            component,
+            first_person_wrapper,
+            world_wrapper
+        );
+    }
+    world_compositor_eligible = ranged_world_compositor_eligible(
+        character,
+        position,
+        component,
+        first_person_wrapper,
+        world_wrapper,
+        show_first_person
+    );
+    if (world_compositor_owned_result != NULL &&
+        world_compositor_eligible) {
+        *world_compositor_owned_result = TRUE;
+    }
+    world_compositor_applied = world_compositor_eligible &&
+        compose_ranged_world_animation(
+            character,
+            component,
+            first_person_wrapper,
+            world_wrapper
+        );
+    if (!world_compositor_applied &&
+        !sync_ranged_animation_model(
             character,
             component,
             (uint8_t *)(show_first_person ?
@@ -3454,9 +4953,6 @@ static BOOL stage_ranged_model_render_view(
     *first_person_flags = applied_first_person_flags;
     *world_flags = applied_world_flags;
     *attachment_slot = swap->applied_attachment;
-    if (!show_first_person) {
-        log_ranged_observer_locator_inventory(swap);
-    }
     weapon = swap->weapon;
     if (!show_first_person &&
         !reattach_ranged_weapon_to_current_model(
@@ -3501,6 +4997,7 @@ static BOOL stage_ranged_model_render_view(
 
 static void apply_ranged_model_render_view(void) {
     uint8_t *arbiter;
+    BOOL world_compositor_owned = FALSE;
 
     if (!split_screen_ranged_model_isolation_enabled ||
         !rendered_player_two_this_frame) {
@@ -3516,7 +5013,8 @@ static void apply_ranged_model_render_view(void) {
             stage_ranged_model_render_view(
                 player_one_character,
                 FALSE,
-                "player_one_observed_by_player_two"
+                "player_one_observed_by_player_two",
+                &world_compositor_owned
             );
         }
     }
@@ -3524,8 +5022,12 @@ static void apply_ranged_model_render_view(void) {
         stage_ranged_model_render_view(
             player_two_character,
             TRUE,
-            "player_two_own_combat_view"
+            "player_two_own_combat_view",
+            NULL
         );
+    }
+    if (!world_compositor_owned) {
+        reset_ranged_world_compositor("observer_ownership_inactive");
     }
 }
 
@@ -3623,6 +5125,35 @@ static void apply_render_only_camera(void) {
     second_player_camera_last_rejection = 0u;
 }
 
+static BOOL render_only_camera_phase_confirmed(BOOL player_two_expected) {
+    void *native_camera;
+    void *native_render_state;
+    void **slot;
+
+    if (!readable_memory(second_player_camera_manager, 0x4cu)) {
+        return FALSE;
+    }
+    native_camera = current_render_camera(second_player_camera_manager);
+    if (!readable_memory(native_camera, 0x38u)) {
+        return FALSE;
+    }
+    native_render_state = *(void **)((uint8_t *)native_camera + 0x34u);
+    slot = current_scene_render_camera_slot();
+    if (!readable_memory(native_render_state, 0xdcu) ||
+        slot == NULL ||
+        !readable_memory(slot, sizeof(*slot))) {
+        return FALSE;
+    }
+    if (!player_two_expected) {
+        return !render_only_swap_active && *slot == native_render_state;
+    }
+    return render_only_swap_active &&
+        render_only_camera_slot == slot &&
+        render_only_original_state == native_render_state &&
+        render_only_applied_state != native_render_state &&
+        *slot == render_only_applied_state;
+}
+
 static void invalidate_dual_frame_cache(void) {
     player_one_frame_valid = FALSE;
     player_two_frame_valid = FALSE;
@@ -3647,6 +5178,7 @@ static BOOL release_player_two_camera(const char *reason) {
     void *current;
 
     restore_ranged_model_render_view();
+    reset_ranged_world_compositor("camera_release");
     if (player_two_camera == NULL) {
         reset_player_two_controller_camera();
         reset_ranged_animation_trace();
@@ -3837,6 +5369,7 @@ static BOOL rebind_player_characters(
     }
     reset_ranged_animation_trace();
     reset_hud_mapping_trace();
+    reset_ranged_world_compositor("player_ownership_rebind");
     SudekiMpLogFormat(
         "split_screen_render event=player_ownership phase=rebind old_player_one=0x%08lx old_player_two=0x%08lx player_one=0x%08lx player_two=0x%08lx player_two_party_slot=%u cache_policy=%s reason=controller_owned_character_changed\r\n",
         (unsigned long)(uintptr_t)old_first_character,
@@ -4032,16 +5565,18 @@ static void log_shared_menu_gate(BOOL visible) {
     );
 }
 
-static void log_quick_menu_gate(BOOL visible) {
-    int state = visible ? 1 : 0;
+static void log_quick_menu_gate(BOOL visible, BOOL live_player_two_ready) {
+    int state = visible ? (live_player_two_ready ? 2 : 1) : 0;
 
     if (state == quick_menu_gate_last_state) {
         return;
     }
     quick_menu_gate_last_state = state;
     SudekiMpLogFormat(
-        "split_screen_render event=quick_menu_gate state=%s policy=player_one_viewport_only_preserve_last_player_two_world_frame\r\n",
-        visible ? "active" : "inactive"
+        "split_screen_render event=quick_menu_gate state=%s player_two_mode=%s policy=player_one_native_menu_ui_plus_live_player_two_world_when_existing_camera_and_both_frame_caches_are_valid_otherwise_preserve_last_player_two_world_frame\r\n",
+        visible ? "active" : "inactive",
+        visible ? (live_player_two_ready ? "live_world_no_ui" :
+            "frozen_cache_fallback") : "not_applicable"
     );
 }
 
@@ -4365,7 +5900,7 @@ static void compose_native_frame(void) {
     release_com_object(&native_surface);
 }
 
-static void compose_cached_camera_frames(BOOL rendered_player_two) {
+static BOOL compose_cached_camera_frames(BOOL rendered_player_two) {
     void *device;
     void **device_vtable;
     D3DCreateTextureFunction create_texture;
@@ -4380,23 +5915,24 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
     RECT left_rectangle;
     RECT right_rectangle;
     HRESULT result;
+    BOOL capture_succeeded;
 
     if (d3d_device_global == NULL ||
         !readable_memory(d3d_device_global, sizeof(*d3d_device_global))) {
         log_failure_once("device_global_unavailable", E_POINTER);
-        return;
+        return FALSE;
     }
     device = *d3d_device_global;
     if (!readable_memory(device, sizeof(void *))) {
         log_failure_once("device_unavailable", E_POINTER);
-        return;
+        return FALSE;
     }
     device_vtable = *(void ***)device;
     if (!readable_memory(
             device_vtable,
             (D3D_DEVICE_GET_RENDER_TARGET_INDEX + 1u) * sizeof(void *))) {
         log_failure_once("device_vtable_unavailable", E_POINTER);
-        return;
+        return FALSE;
     }
     create_texture = (D3DCreateTextureFunction)
         device_vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
@@ -4407,13 +5943,13 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
     if (create_texture == NULL || stretch_rect == NULL ||
         get_render_target == NULL) {
         log_failure_once("compositor_method_unavailable", E_POINTER);
-        return;
+        return FALSE;
     }
     result = get_render_target(device, 0u, &native_surface);
     if (FAILED(result) || !readable_memory(native_surface, sizeof(void *))) {
         log_failure_once("get_native_surface_failed", result);
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
     surface_vtable = *(void ***)native_surface;
     if (!readable_memory(
@@ -4421,7 +5957,7 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
             (D3D_SURFACE_GET_DESC_INDEX + 1u) * sizeof(void *))) {
         log_failure_once("surface_vtable_unavailable", E_POINTER);
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
     get_description = (D3DSurfaceGetDescFunction)
         surface_vtable[D3D_SURFACE_GET_DESC_INDEX];
@@ -4429,19 +5965,19 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
     if (FAILED(result) || description.width < 2u || description.height == 0u) {
         log_failure_once("get_surface_description_failed", result);
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
     if (description.multisample_type != D3D_MULTISAMPLE_NONE) {
         log_failure_once("multisampled_backbuffer_unsupported", E_NOTIMPL);
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
     if (!ensure_dual_frame_surfaces(
             device,
             create_texture,
             &description)) {
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
 
     source_rectangle.left = 0;
@@ -4462,19 +5998,19 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
         &source_rectangle,
         D3D_TEXTURE_FILTER_NONE
     );
-    if (FAILED(result)) {
+    capture_succeeded = SUCCEEDED(result);
+    if (!capture_succeeded) {
         log_failure_once("capture_camera_frame_failed", result);
-        release_com_object(&native_surface);
-        return;
-    }
-    if (rendered_player_two) {
-        player_two_frame_valid = TRUE;
     } else {
-        player_one_frame_valid = TRUE;
+        if (rendered_player_two) {
+            player_two_frame_valid = TRUE;
+        } else {
+            player_one_frame_valid = TRUE;
+        }
     }
     if (!player_one_frame_valid || !player_two_frame_valid) {
         release_com_object(&native_surface);
-        return;
+        return capture_succeeded;
     }
 
     result = stretch_rect(
@@ -4506,7 +6042,7 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
         );
         log_failure_once("compose_cached_camera_frames_failed", result);
         release_com_object(&native_surface);
-        return;
+        return FALSE;
     }
     if (!dual_compositor_logged) {
         dual_compositor_logged = TRUE;
@@ -4519,6 +6055,7 @@ static void compose_cached_camera_frames(BOOL rendered_player_two) {
         );
     }
     release_com_object(&native_surface);
+    return capture_succeeded;
 }
 
 static void log_quit_backdrop_failure_once(
@@ -4760,7 +6297,15 @@ restore_state:
 void SudekiMpSplitScreenRenderStartDispatch(void) {
     BOOL quit_menu_visible;
     BOOL quick_menu_is_visible;
+    BOOL genuine_quick_menu_is_visible;
+    BOOL genuine_quick_menu_rising_edge;
     BOOL spirit_presentation_active;
+    BOOL spirit_state_active;
+    BOOL isolation_in_progress;
+    BOOL isolation_resources_ready;
+    BOOL live_view_allowed;
+    BOOL player_two_requested_before_apply;
+    unsigned int isolation_state;
     void *trace_player_one_character = player_one_character;
     void *trace_player_two_character = player_two_character;
     void *resolved_player_one_character = NULL;
@@ -4791,29 +6336,136 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
 
     rendered_player_two_this_frame = FALSE;
     viewport_hud_binding_active = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
     original_render_start();
     quit_menu_visible = pc_quit_screen_visible();
     quick_menu_is_visible = quick_menu_visible();
+    genuine_quick_menu_is_visible = genuine_quick_menu_visible();
+    spirit_state_active = current_spirit_presentation_state() != 0;
     spirit_presentation_active =
         spirit_strike_viewport_effect_isolation_enabled &&
-        current_spirit_presentation_state() != 0;
+        spirit_state_active;
+    genuine_quick_menu_active_this_frame =
+        genuine_quick_menu_is_visible &&
+        !quit_menu_visible &&
+        !spirit_state_active;
+    genuine_quick_menu_rising_edge =
+        genuine_quick_menu_is_visible &&
+        !quick_menu_genuine_visible_previous_frame;
+    isolation_state = quick_menu_isolation_tail_active ?
+        SUDEKIMP_QUICK_MENU_ISOLATION_TAIL :
+        (quick_menu_isolation_active ?
+            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE :
+            (quick_menu_isolation_failed_for_open_menu ?
+                SUDEKIMP_QUICK_MENU_ISOLATION_FAILED :
+                SUDEKIMP_QUICK_MENU_ISOLATION_IDLE));
+    isolation_state = SudekiMpSplitScreenQuickMenuIsolationBeginState(
+        isolation_state,
+        quick_menu_genuine_visible_previous_frame,
+        genuine_quick_menu_is_visible,
+        genuine_quick_menu_active_this_frame &&
+            quick_menu_live_player_two_ready()
+    );
+    quick_menu_isolation_active =
+        isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE;
+    quick_menu_isolation_tail_active =
+        isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL;
+    quick_menu_isolation_failed_for_open_menu =
+        isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
+    if (genuine_quick_menu_rising_edge) {
+        quick_menu_expected_player_two = quick_menu_isolation_active;
+    } else if (!quick_menu_isolation_active &&
+               !quick_menu_isolation_tail_active) {
+        quick_menu_expected_player_two = FALSE;
+    }
+    if ((quit_menu_visible || spirit_state_active) &&
+        (genuine_quick_menu_is_visible ||
+         quick_menu_isolation_active ||
+         quick_menu_isolation_tail_active)) {
+        isolation_state =
+            SudekiMpSplitScreenQuickMenuIsolationCancelState(
+                genuine_quick_menu_is_visible
+            );
+        quick_menu_isolation_active =
+            isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE;
+        quick_menu_isolation_tail_active =
+            isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL;
+        quick_menu_isolation_failed_for_open_menu =
+            isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
+        quick_menu_expected_player_two = FALSE;
+    }
+    quick_menu_genuine_visible_previous_frame =
+        genuine_quick_menu_is_visible;
+    isolation_in_progress =
+        quick_menu_isolation_active ||
+        quick_menu_isolation_tail_active;
+    isolation_resources_ready =
+        isolation_in_progress && quick_menu_live_player_two_ready();
+    if (isolation_in_progress && !isolation_resources_ready) {
+        quick_menu_isolation_active = FALSE;
+        quick_menu_isolation_tail_active = FALSE;
+        quick_menu_isolation_failed_for_open_menu =
+            genuine_quick_menu_is_visible;
+        quick_menu_expected_player_two = FALSE;
+        isolation_in_progress = FALSE;
+    }
+    if (isolation_in_progress) {
+        player_two_view_requested = quick_menu_expected_player_two;
+    } else if (genuine_quick_menu_is_visible) {
+        player_two_view_requested = FALSE;
+    }
+    live_view_allowed = !quit_menu_visible &&
+        (isolation_in_progress ||
+         (!genuine_quick_menu_is_visible &&
+          (!quick_menu_is_visible || spirit_presentation_active)));
     if (!quit_menu_visible && !quick_menu_is_visible) {
         trace_ranged_animation_transition(0u, trace_player_one_character);
         trace_ranged_animation_transition(1u, trace_player_two_character);
         trace_ranged_animation_progress(0u, trace_player_one_character);
         trace_ranged_animation_progress(1u, trace_player_two_character);
     }
-    if (quick_menu_is_visible && !spirit_presentation_active) {
-        player_two_view_requested = FALSE;
-    }
-    if (!quit_menu_visible &&
-        (!quick_menu_is_visible || spirit_presentation_active)) {
+    player_two_requested_before_apply = player_two_view_requested;
+    if (live_view_allowed) {
         apply_render_only_camera();
     }
     rendered_player_two_this_frame =
-        (!quick_menu_is_visible || spirit_presentation_active) &&
+        live_view_allowed &&
         player_two_view_requested &&
         player_two_camera != NULL;
+    quick_menu_render_phase_confirmed_this_frame = FALSE;
+    if (isolation_in_progress) {
+        quick_menu_render_phase_confirmed_this_frame =
+            render_only_camera_phase_confirmed(
+                quick_menu_expected_player_two
+            );
+        quick_menu_live_player_two_available_this_frame =
+            SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+                isolation_in_progress,
+                isolation_resources_ready,
+                player_two_requested_before_apply,
+                rendered_player_two_this_frame
+            ) && quick_menu_render_phase_confirmed_this_frame;
+        if (!quick_menu_live_player_two_available_this_frame) {
+            restore_render_only_camera();
+            quick_menu_isolation_active = FALSE;
+            quick_menu_isolation_tail_active = FALSE;
+            quick_menu_isolation_failed_for_open_menu =
+                genuine_quick_menu_is_visible;
+            quick_menu_expected_player_two = FALSE;
+            player_two_view_requested = FALSE;
+            rendered_player_two_this_frame = FALSE;
+            quick_menu_render_phase_confirmed_this_frame = FALSE;
+            live_view_allowed = !quit_menu_visible;
+        }
+    }
+    suppress_quick_menu_render_submit_this_frame =
+        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+            quick_menu_live_player_two_available_this_frame,
+            quick_menu_render_phase_confirmed_this_frame,
+            quick_menu_expected_player_two,
+            rendered_player_two_this_frame
+        );
     if (!quit_menu_visible &&
         (!quick_menu_is_visible || spirit_presentation_active) &&
         spirit_strike_viewport_effect_isolation_enabled &&
@@ -4821,8 +6473,7 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
         ensure_spirit_history_resource();
     }
     trace_spirit_presentation(rendered_player_two_this_frame);
-    if (!quit_menu_visible &&
-        (!quick_menu_is_visible || spirit_presentation_active)) {
+    if (live_view_allowed) {
         apply_ranged_model_render_view();
         refresh_viewport_portraits();
         viewport_hud_binding_active = TRUE;
@@ -4862,6 +6513,11 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     BOOL quit_menu_visible;
     BOOL quick_menu_is_visible;
     BOOL presentation_allowed;
+    BOOL isolation_in_progress;
+    BOOL isolation_tail_active;
+    BOOL cached_frame_advanced = TRUE;
+    BOOL isolation_cache_failed = FALSE;
+    unsigned int isolation_state;
 
     viewport_hud_binding_active = FALSE;
     restore_ranged_model_render_view();
@@ -4870,24 +6526,87 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     split_allowed = gameplay_split_allowed(&gate_reason);
     quit_menu_visible = pc_quit_screen_visible();
     quick_menu_is_visible = quick_menu_visible();
+    isolation_in_progress =
+        quick_menu_isolation_active ||
+        quick_menu_isolation_tail_active;
+    isolation_tail_active = quick_menu_isolation_tail_active;
     presentation_allowed = split_allowed && !quit_menu_visible;
     log_gameplay_gate(split_allowed, gate_reason);
     log_shared_menu_gate(quit_menu_visible);
-    log_quick_menu_gate(quick_menu_is_visible);
+    log_quick_menu_gate(
+        genuine_quick_menu_active_this_frame,
+        quick_menu_live_player_two_available_this_frame
+    );
     if (presentation_allowed) {
         if (dual_camera_frame_cache_enabled) {
-            compose_cached_camera_frames(rendered_player_two_this_frame);
+            cached_frame_advanced = compose_cached_camera_frames(
+                rendered_player_two_this_frame
+            );
         } else {
             compose_native_frame();
         }
     }
-    if (!quit_menu_visible && !quick_menu_is_visible) {
+    isolation_cache_failed =
+        isolation_in_progress && !cached_frame_advanced;
+    if (isolation_cache_failed) {
+        isolation_state =
+            SudekiMpSplitScreenQuickMenuIsolationCancelState(
+                genuine_quick_menu_visible()
+            );
+        quick_menu_isolation_active = FALSE;
+        quick_menu_isolation_tail_active = FALSE;
+        quick_menu_isolation_failed_for_open_menu =
+            isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
+        quick_menu_expected_player_two = FALSE;
+        quick_menu_live_player_two_available_this_frame = FALSE;
+        quick_menu_render_phase_confirmed_this_frame = FALSE;
+        player_two_view_requested = FALSE;
+        isolation_in_progress = FALSE;
+        SudekiMpLogWrite(
+            "split_screen_render event=quick_menu_live_isolation phase=fallback reason=camera_cache_capture_or_compose_failed policy=preserve_last_valid_camera_pair_for_remainder_of_menu\r\n"
+        );
+    }
+    if (split_allowed && isolation_in_progress &&
+        quick_menu_live_player_two_available_this_frame &&
+        quick_menu_render_phase_confirmed_this_frame &&
+        quick_menu_live_player_two_ready()) {
+        quick_menu_expected_player_two =
+            !rendered_player_two_this_frame;
+        player_two_view_requested = quick_menu_expected_player_two;
+        if (isolation_tail_active) {
+            isolation_state =
+                SudekiMpSplitScreenQuickMenuIsolationEndState(
+                    SUDEKIMP_QUICK_MENU_ISOLATION_TAIL,
+                    quick_menu_submit_seen_since_frame_end
+                );
+            quick_menu_isolation_tail_active =
+                isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL;
+            if (!quick_menu_isolation_tail_active) {
+                quick_menu_expected_player_two = FALSE;
+            }
+        }
+    } else if (isolation_cache_failed || isolation_in_progress) {
+        quick_menu_isolation_active = FALSE;
+        quick_menu_isolation_tail_active = FALSE;
+        quick_menu_isolation_failed_for_open_menu =
+            genuine_quick_menu_visible();
+        quick_menu_expected_player_two = FALSE;
+        player_two_view_requested = FALSE;
+    } else if (!quit_menu_visible && !quick_menu_is_visible &&
+               !quick_menu_isolation_failed_for_open_menu) {
         poll_second_player_camera(split_allowed);
+    } else if (quick_menu_isolation_failed_for_open_menu) {
+        player_two_view_requested = FALSE;
     }
     if (overlay_renderer != NULL) {
         overlay_renderer();
     }
     rendered_player_two_this_frame = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
+    suppress_quick_menu_render_submit_this_frame = FALSE;
+    quick_menu_render_phase_confirmed_this_frame = FALSE;
+    quick_menu_submit_seen_since_frame_end = FALSE;
 }
 
 __attribute__((naked, noinline, used))
@@ -4998,6 +6717,7 @@ BOOL SudekiMpInstallSplitScreenRender(
               base + RVA_GROUP_PLAYERS_IN_COMBAT,
               expected_group_players_in_combat_entry,
               sizeof(expected_group_players_in_combat_entry)) != 0 ||
+           !animation_renderer_signatures_match(base) ||
            memcmp(
               base + RVA_RANGED_WEAPON_REATTACH,
               expected_ranged_weapon_reattach_entry,
@@ -5007,7 +6727,11 @@ BOOL SudekiMpInstallSplitScreenRender(
               expected_render_locator_index_entry,
               sizeof(expected_render_locator_index_entry)) != 0)) ||
          (enable_dual_camera_frame_cache &&
-          !portrait_selector_signatures_match(base)) ||
+          (!portrait_selector_signatures_match(base) ||
+           memcmp(
+              base + RVA_QUICK_MENU_RENDER_SUBMIT,
+              expected_quick_menu_render_submit_entry,
+              sizeof(expected_quick_menu_render_submit_entry)) != 0)) ||
          (enable_spirit_strike_viewport_effect_isolation &&
           memcmp(
               base + RVA_HISTORY_RESOURCE_FACTORY,
@@ -5025,6 +6749,10 @@ BOOL SudekiMpInstallSplitScreenRender(
     original_quit_screen_render = (QuitScreenRenderFunction)(
         game_base + RVA_PC_QUIT_SCREEN_RENDER
     );
+    original_quick_menu_render_submit =
+        (QuickMenuRenderSubmitFunction)(
+            game_base + RVA_QUICK_MENU_RENDER_SUBMIT
+        );
     quick_menu_is_active = (QuickMenuIsActiveFunction)(
         game_base + RVA_QUICK_MENU_IS_ACTIVE
     );
@@ -5095,6 +6823,19 @@ BOOL SudekiMpInstallSplitScreenRender(
     player_two_view_requested = FALSE;
     rendered_player_two_this_frame = FALSE;
     viewport_hud_binding_active = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
+    suppress_quick_menu_render_submit_this_frame = FALSE;
+    quick_menu_render_submit_isolation_logged = FALSE;
+    quick_menu_isolation_active = FALSE;
+    quick_menu_isolation_tail_active = FALSE;
+    quick_menu_genuine_visible_previous_frame =
+        genuine_quick_menu_visible();
+    quick_menu_isolation_failed_for_open_menu =
+        quick_menu_genuine_visible_previous_frame;
+    quick_menu_expected_player_two = FALSE;
+    quick_menu_render_phase_confirmed_this_frame = FALSE;
+    quick_menu_submit_seen_since_frame_end = FALSE;
     render_only_swap_active = FALSE;
     render_only_camera_slot = NULL;
     render_only_applied_state = NULL;
@@ -5113,6 +6854,12 @@ BOOL SudekiMpInstallSplitScreenRender(
     ranged_locator_trace_pitch_bucket = -1;
     ranged_locator_trace_last_tick = 0u;
     ranged_locator_trace_sequence = 0u;
+    ranged_state_details_inventory_complete = FALSE;
+    ranged_state_details_inventory_pending_logged = FALSE;
+    ZeroMemory(
+        &ranged_world_compositor_state,
+        sizeof(ranged_world_compositor_state)
+    );
     ranged_transform_trace_last_tick = 0u;
     ranged_transform_trace_sequence = 0u;
     reset_ranged_animation_trace();
@@ -5145,7 +6892,13 @@ BOOL SudekiMpInstallSplitScreenRender(
             original_quit_screen_render,
             split_screen_quit_screen_render_entry) ||
         (dual_camera_frame_cache_enabled &&
-         (!SudekiMpInstallRelativeCallHook(
+         (!SudekiMpInstallPointerHook(
+              &quick_menu_render_submit_hook,
+              (void **)(game_base +
+                  RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT),
+              original_quick_menu_render_submit,
+              route_quick_menu_render_submit) ||
+          !SudekiMpInstallRelativeCallHook(
               &hud_group_values_pointer_hook,
               game_base + RVA_HUD_GROUP_VALUES_POINTER_CALL,
               original_hud_party_pointer_copy,
@@ -5189,13 +6942,15 @@ BOOL SudekiMpInstallSplitScreenRender(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=player_one_viewport_only shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s skill_camera_routing=%s controller_camera=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx quick_menu_render_submit_rva=0x%08lx quick_menu_render_submit_vtable_slot_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=player_one_native_menu_plus_live_player_two_world_via_one_frame_submit_cadence shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s skill_camera_routing=%s controller_camera=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
         (unsigned long)RVA_RENDER_START,
         (unsigned long)RVA_RENDER_START_CALL,
         (unsigned long)RVA_FRAME_END,
         (unsigned long)RVA_FRAME_END_CALL,
         (unsigned long)RVA_PC_QUIT_SCREEN_RENDER,
         (unsigned long)RVA_PC_QUIT_SCREEN_RENDER_CALL,
+        (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT,
+        (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT,
         dual_camera_frame_cache_enabled ?
             "alternating_clean_frame_cache" :
             "duplicate_finished_native_frame",
@@ -5209,7 +6964,7 @@ BOOL SudekiMpInstallSplitScreenRender(
         second_player_controller_camera_enabled ?
             "right_stick_render_only_player_two" : "disabled",
         split_screen_ranged_model_isolation_enabled ?
-            "p1_observer_world_body_native_weapon_rebind_read_only_locator_inventory_root_pitch_rejected_disabled_p2_owner_stable_third_person_fallback" :
+            "p1_observer_world_body_native_weapon_rebind_state_details_inventory_root_pitch_rejected_disabled_p2_owner_stable_third_person_fallback" :
             "disabled",
         spirit_strike_viewport_effect_isolation_enabled ?
             "native_history_resource_per_viewport_callbacks_unmodified" :
@@ -5218,8 +6973,12 @@ BOOL SudekiMpInstallSplitScreenRender(
     );
     if (split_screen_ranged_model_isolation_enabled) {
         SudekiMpLogFormat(
-            "split_screen_render event=ranged_observer_pitch phase=disabled reason=rejected_whole_root_feet_pivot locator_index_rva=0x%08lx locator_matrix_vtable_offset=0x24 locator_index_vtable_offset=0x28 policy=read_only_locator_inventory_before_upper_body_or_bone_write\r\n",
-            (unsigned long)RVA_RENDER_LOCATOR_INDEX
+            "split_screen_render event=ranged_observer_pitch phase=disabled reason=rejected_whole_root_feet_pivot policy=preserve_stable_observer_animation_mirror_while_reading_candidate_state_details\r\n"
+        );
+        SudekiMpLogFormat(
+            "split_screen_render event=ranged_state_details_inventory phase=armed animation_ids=0x97,0x98,0x99 renderer_vtable_rva=0x%08lx renderer_lookup_rva=0x%08lx policy=one_time_direct_component_table_read_exact_fp_and_world_handle_resolution_no_state_lookup_selector_playback_or_animation_write\r\n",
+            (unsigned long)RVA_ANIMATION_RENDERER_VTABLE,
+            (unsigned long)RVA_ANIMATION_RENDERER_LOOKUP
         );
     }
     return TRUE;
@@ -5227,9 +6986,11 @@ BOOL SudekiMpInstallSplitScreenRender(
 
 void SudekiMpUninstallSplitScreenRender(void) {
     restore_ranged_model_render_view();
+    reset_ranged_world_compositor("module_uninstall");
     restore_render_only_camera();
     SudekiMpRestorePointerHook(&screenshot_post_render_hook);
     SudekiMpRestorePointerHook(&motion_blur_post_render_hook);
+    SudekiMpRestorePointerHook(&quick_menu_render_submit_hook);
     SudekiMpRestoreInlineHook(&set_render_camera_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_status_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_name_pointer_hook);
@@ -5262,6 +7023,8 @@ void SudekiMpUninstallSplitScreenRender(void) {
     ranged_locator_trace_pitch_bucket = -1;
     ranged_locator_trace_last_tick = 0u;
     ranged_locator_trace_sequence = 0u;
+    ranged_state_details_inventory_complete = FALSE;
+    ranged_state_details_inventory_pending_logged = FALSE;
     ranged_transform_trace_last_tick = 0u;
     ranged_transform_trace_sequence = 0u;
     reset_ranged_animation_trace();
@@ -5320,6 +7083,17 @@ void SudekiMpUninstallSplitScreenRender(void) {
     player_two_view_requested = FALSE;
     rendered_player_two_this_frame = FALSE;
     viewport_hud_binding_active = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
+    suppress_quick_menu_render_submit_this_frame = FALSE;
+    quick_menu_render_submit_isolation_logged = FALSE;
+    quick_menu_isolation_active = FALSE;
+    quick_menu_isolation_tail_active = FALSE;
+    quick_menu_isolation_failed_for_open_menu = FALSE;
+    quick_menu_genuine_visible_previous_frame = FALSE;
+    quick_menu_expected_player_two = FALSE;
+    quick_menu_render_phase_confirmed_this_frame = FALSE;
+    quick_menu_submit_seen_since_frame_end = FALSE;
     render_only_swap_active = FALSE;
     render_only_camera_slot = NULL;
     render_only_applied_state = NULL;
@@ -5329,6 +7103,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     original_render_start = NULL;
     original_frame_end = NULL;
     original_quit_screen_render = NULL;
+    original_quick_menu_render_submit = NULL;
     quick_menu_is_active = NULL;
     original_hud_party_pointer_copy = NULL;
     original_character_type_to_portrait_enum = NULL;

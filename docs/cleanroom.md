@@ -327,3 +327,34 @@ resource and animation data exist; the failure is limited to the observer
 copy performed when Ailish is Player 1. The eventual bridge must translate
 that first-person action state to the native world action rather than reuse
 the first-person selector.
+
+## Ranged observer vertical-aim checkpoint
+
+All findings in this checkpoint apply to the exact supported executable,
+SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+**Rejected:** pitching Ailish's complete observer-side world root is not an
+aim-pose solution. It rotates the model from her feet as one rigid "seahorse"
+object rather than articulating the waist, torso, and arms. The write is
+disabled.
+
+**Confirmed:** a 13-sample neutral/up/down named-locator audit resolved only
+`WeaponFollow`, `Staff1`, and `WeaponParent`; all three matrices stayed
+unchanged with pitch. Waist/backbone/shoulder/clavicle/arm/wrist names were not
+present. A separate 15-sequence audit spanning camera pitch `-0.52360` through
+`+0.26599` found the first-person and saved-world renderer slot-3 configuration
+and logical channel 4 invariant. Normal fire uses first-person channels `0`
+and `2`, so neither the locators nor slot 3/channel 4 is the continuous
+vertical-aim seam.
+
+Static analysis also confirms that authored state details can carry an
+`Upper body` flag at `StateDetails+0x59` bit `0x08`, but exhaustive exact-image
+review has not found a runtime consumer. It is metadata evidence only, not a
+safe field to patch.
+
+**Open next pass:** inventory the already-loaded first-person and world
+resources for aim IDs `0x97` (`MISSILE_AIM_CIRCLE`), `0x98`
+(`MISSILE_AIM_STRAIGHT`), and `0x99` (`MISSILE_AIM_STRAFE`) once, read-only.
+Do not invoke their state-machine path or write a selector/pose. This pass asks
+only whether Sudeki already loaded a distinct authored world-side upper-body
+aim resource that the observer presentation can reuse.

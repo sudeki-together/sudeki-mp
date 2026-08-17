@@ -5,6 +5,13 @@
 
 typedef void (*SudekiMpSplitScreenOverlayRenderer)(void);
 
+enum {
+    SUDEKIMP_QUICK_MENU_ISOLATION_IDLE = 0u,
+    SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE = 1u,
+    SUDEKIMP_QUICK_MENU_ISOLATION_FAILED = 2u,
+    SUDEKIMP_QUICK_MENU_ISOLATION_TAIL = 3u
+};
+
 BOOL SudekiMpInstallSplitScreenRender(
     HMODULE game_module,
     BOOL enable_second_player_camera,
@@ -21,6 +28,31 @@ BOOL SudekiMpInstallSplitScreenRender(
 );
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled);
 BOOL SudekiMpSplitScreenRuntimeEnabled(void);
+BOOL SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+    BOOL isolation_requested,
+    BOOL resources_ready,
+    BOOL player_two_requested_before_apply,
+    BOOL player_two_rendered
+);
+unsigned int SudekiMpSplitScreenQuickMenuIsolationBeginState(
+    unsigned int state,
+    BOOL was_visible,
+    BOOL visible,
+    BOOL eligible_on_rising_edge
+);
+unsigned int SudekiMpSplitScreenQuickMenuIsolationEndState(
+    unsigned int state,
+    BOOL quick_menu_submit_seen
+);
+unsigned int SudekiMpSplitScreenQuickMenuIsolationCancelState(
+    BOOL quick_menu_visible
+);
+BOOL SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+    BOOL isolation_in_progress,
+    BOOL render_phase_confirmed,
+    BOOL player_two_expected,
+    BOOL player_two_rendered
+);
 void SudekiMpSplitScreenSetOverlayRenderer(
     SudekiMpSplitScreenOverlayRenderer renderer
 );

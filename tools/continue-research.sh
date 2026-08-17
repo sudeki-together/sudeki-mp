@@ -148,6 +148,7 @@ trap 'exit 143' TERM
 case "${mode}" in
     --cleanroom|--test-arena)
         sed -i \
+            -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
             -e 's/^EnableCleanroomMenu=false$/EnableCleanroomMenu=true/' \
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
             -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \

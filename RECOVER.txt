@@ -1,5 +1,5 @@
 SudekiMP recovery handoff
-Updated: 2026-08-15 (America/New_York)
+Updated: 2026-08-16 (America/New_York)
 
 Repository:
   /var/home/wander/Documents/Projects/sudeki-mp
@@ -537,3 +537,21 @@ Confirmed first-person-only fallback (2026-08-16):
     defect is restricted to Ailish Player 1 observer translation. The pair is
     a weak-attack correlation only; do not apply it to the electric sequence
     until that sequence is captured in both roles.
+
+Upper-body pitch-seam checkpoint (2026-08-16):
+  - REJECTED: applying camera pitch to Ailish's complete world root pivots the
+    whole model from her feet (the live "seahorse toy" result). Keep that write
+    disabled.
+  - CONFIRMED: 13 neutral/up/down samples resolved only WeaponFollow, Staff1,
+    and WeaponParent through the named-locator provider; all three matrices
+    were invariant and skeletal waist/backbone/arm names were absent.
+  - CONFIRMED: 15 renderer samples across pitch -0.52360..+0.26599 left
+    configuration slot 3 and logical channel 4 invariant. Normal fire instead
+    uses first-person channels 0 and 2. Neither audited route carries the
+    continuous upper-body pitch.
+  - CONFIRMED STATIC LIMIT: StateDetails+0x59 bit 0x08 is loaded from the
+    authored `Upper body` property, but exact-image review found no confirmed
+    runtime consumer. Do not patch or infer a mask from it.
+  - NEXT: make one read-only runtime resource inventory for authored aim IDs
+    0x97/0x98/0x99 against both first-person and saved-world wrappers. Do not
+    call the state machine, play selectors, or write animation/pose state.

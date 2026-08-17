@@ -50,6 +50,10 @@ enum {
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
     RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
+    RVA_QUICK_MENU_RENDER_SUBMIT = 0x0009bba0u,
+    RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT = 0x002caf28u,
+    RVA_UI_SCENE_RENDER = 0x0000a820u,
+    RVA_UI_SCENE_RENDER_CALL = 0x0000a760u,
     RVA_HUD_PARTY_POINTER_COPY = 0x000015b0u,
     RVA_HUD_GROUP_VALUES_POINTER_CALL = 0x00181517u,
     RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL = 0x000aab3au,
@@ -78,6 +82,19 @@ enum {
     RVA_SCREENSHOT_POST_RENDER = 0x001de7b0u,
     RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT = 0x002dd930u,
     RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT = 0x002dd910u,
+    RVA_ANIMATION_RENDERER_VTABLE = 0x002df8ecu,
+    RVA_ANIMATION_RENDERER_LOOKUP = 0x0021bac0u,
+    RVA_ANIMATION_RENDERER_COUNT = 0x0021bb10u,
+    RVA_ANIMATION_RENDERER_SELECTOR_SET = 0x00223000u,
+    RVA_ANIMATION_RENDERER_SELECTOR_GET = 0x002230b0u,
+    RVA_ANIMATION_RENDERER_RATE_SET = 0x002230d0u,
+    RVA_ANIMATION_RENDERER_RATE_GET = 0x00223160u,
+    RVA_ANIMATION_RENDERER_TIME_SET = 0x00223180u,
+    RVA_ANIMATION_RENDERER_TIME_GET = 0x00223220u,
+    RVA_ANIMATION_RENDERER_STATE_SET = 0x00223240u,
+    RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
+    RVA_ANIMATION_RENDERER_BLEND_SET = 0x002234c0u,
+    RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
     RVA_SKILL_DATA_AVAILABLE = 0x000da2a0u,
     RVA_SKILL_AVAILABILITY_FLAG = 0x003c2fd9u,
     RVA_SKILL_VALIDATE_FLAG = 0x0034a8b0u
@@ -246,6 +263,7 @@ int wmain(int argc, wchar_t **argv) {
     DWORD file_size;
     size_t index;
     int failures = 0;
+    unsigned int quick_menu_isolation_state;
     const UINT second_player_skill_keys[4] = {
         VK_F1, VK_F2, VK_F3, VK_F4
     };
@@ -270,6 +288,101 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
 
+    if (SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+            FALSE, TRUE, FALSE, FALSE) ||
+        SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+            TRUE, FALSE, FALSE, FALSE) ||
+        !SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+            TRUE, TRUE, FALSE, FALSE) ||
+        !SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+            TRUE, TRUE, TRUE, TRUE) ||
+        SudekiMpSplitScreenQuickMenuLiveViewAccepted(
+            TRUE, TRUE, TRUE, FALSE)) {
+        fputs("FAIL: Quick Menu live-view acceptance truth table mismatch\n",
+            stderr);
+        ++failures;
+    }
+
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationBeginState(
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE,
+            FALSE,
+            TRUE,
+            TRUE
+        );
+    if (quick_menu_isolation_state !=
+            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE ||
+        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+            TRUE, TRUE, TRUE, TRUE) ||
+        !SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+            TRUE, TRUE, FALSE, FALSE) ||
+        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+            TRUE, FALSE, FALSE, FALSE)) {
+        fputs("FAIL: Quick Menu P2-first submit cadence mismatch\n", stderr);
+        ++failures;
+    }
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationBeginState(
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE,
+            FALSE,
+            TRUE,
+            FALSE
+        );
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationBeginState(
+            quick_menu_isolation_state,
+            TRUE,
+            TRUE,
+            TRUE
+        );
+    if (quick_menu_isolation_state !=
+        SUDEKIMP_QUICK_MENU_ISOLATION_FAILED) {
+        fputs("FAIL: Quick Menu isolation upgraded in the middle of an open menu\n",
+            stderr);
+        ++failures;
+    }
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationBeginState(
+            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE,
+            TRUE,
+            FALSE,
+            FALSE
+        );
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationEndState(
+            quick_menu_isolation_state,
+            TRUE
+        );
+    if (quick_menu_isolation_state !=
+        SUDEKIMP_QUICK_MENU_ISOLATION_TAIL) {
+        fputs("FAIL: Quick Menu close tail did not preserve a queued submit\n",
+            stderr);
+        ++failures;
+    }
+    quick_menu_isolation_state =
+        SudekiMpSplitScreenQuickMenuIsolationEndState(
+            quick_menu_isolation_state,
+            FALSE
+        );
+    if (quick_menu_isolation_state !=
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE ||
+        SudekiMpSplitScreenQuickMenuIsolationCancelState(TRUE) !=
+            SUDEKIMP_QUICK_MENU_ISOLATION_FAILED ||
+        SudekiMpSplitScreenQuickMenuIsolationCancelState(FALSE) !=
+            SUDEKIMP_QUICK_MENU_ISOLATION_IDLE) {
+        fputs("FAIL: Quick Menu close/failure/quit state sequence mismatch\n",
+            stderr);
+        ++failures;
+    }
+
+    if (*(const uint32_t *)(
+            image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) !=
+        0x0049bba0u) {
+        fputs("FAIL: exact Quick Menu render-submit vtable slot mismatch\n",
+            stderr);
+        ++failures;
+    }
+
     /* Simulate the loader relocation for the absolute jump-table pointer. */
     *(void **)(image + RVA_SCRIPT_CALL_OPCODE_SLOT) =
         image + RVA_SCRIPT_CALL_OPCODE;
@@ -283,6 +396,32 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_MOTION_BLUR_POST_RENDER;
     *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) =
         image + RVA_SCREENSHOT_POST_RENDER;
+    *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_RENDER_SUBMIT;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u) =
+        image + RVA_ANIMATION_RENDERER_LOOKUP;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
+        image + RVA_ANIMATION_RENDERER_COUNT;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xfcu) =
+        image + RVA_ANIMATION_RENDERER_SELECTOR_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x100u) =
+        image + RVA_ANIMATION_RENDERER_SELECTOR_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x104u) =
+        image + RVA_ANIMATION_RENDERER_RATE_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x108u) =
+        image + RVA_ANIMATION_RENDERER_RATE_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x10cu) =
+        image + RVA_ANIMATION_RENDERER_TIME_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x110u) =
+        image + RVA_ANIMATION_RENDERER_TIME_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x114u) =
+        image + RVA_ANIMATION_RENDERER_STATE_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x118u) =
+        image + RVA_ANIMATION_RENDERER_STATE_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x144u) =
+        image + RVA_ANIMATION_RENDERER_BLEND_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x148u) =
+        image + RVA_ANIMATION_RENDERER_BLEND_GET;
     *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
         (uint32_t)(uintptr_t)(image + RVA_PC_QUIT_SCREEN_GLOBAL);
     *(uint32_t *)(image + RVA_QUICK_MENU_IS_ACTIVE + 1u) =
@@ -378,6 +517,28 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
+    *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_IS_ACTIVE;
+    if (SudekiMpInstallSplitScreenRender(
+            (HMODULE)image,
+            TRUE,
+            TRUE,
+            VK_F9,
+            TRUE,
+            FALSE,
+            TRUE,
+            TRUE,
+            0.20f,
+            2.25f,
+            1.50f,
+            0.65f)) {
+        fputs("FAIL: split-screen render accepted a mismatched Quick Menu render-submit slot\n",
+            stderr);
+        ++failures;
+        SudekiMpUninstallSplitScreenRender();
+    }
+    *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_RENDER_SUBMIT;
     if (!SudekiMpInstallSplitScreenRender(
             (HMODULE)image,
             TRUE,
@@ -410,6 +571,12 @@ int wmain(int argc, wchar_t **argv) {
         *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) ==
             image + RVA_SCREENSHOT_POST_RENDER) {
         fputs("FAIL: Spirit viewport effect callbacks were not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (*(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) ==
+            image + RVA_QUICK_MENU_RENDER_SUBMIT) {
+        fputs("FAIL: Quick Menu render-submit vtable slot was not redirected\n",
             stderr);
         ++failures;
     }
@@ -505,6 +672,11 @@ int wmain(int argc, wchar_t **argv) {
             stderr);
         ++failures;
     }
+    if (relative_call_target(image + RVA_UI_SCENE_RENDER_CALL) !=
+            image + RVA_UI_SCENE_RENDER) {
+        fputs("FAIL: native shared UI queue drain was redirected\n", stderr);
+        ++failures;
+    }
     if (relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) ==
         image + RVA_QUICK_SKILL_ACTION) {
         fputs("FAIL: QuickSkill action call was not redirected\n", stderr);
@@ -574,6 +746,12 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     }
     SudekiMpUninstallSplitScreenRender();
+    if (*(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) !=
+            image + RVA_QUICK_MENU_RENDER_SUBMIT) {
+        fputs("FAIL: Quick Menu render-submit vtable slot was not restored\n",
+            stderr);
+        ++failures;
+    }
     if (*(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) !=
             image + RVA_MOTION_BLUR_POST_RENDER ||
         *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) !=

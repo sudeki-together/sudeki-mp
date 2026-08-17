@@ -2008,3 +2008,117 @@ attachment boundary.
 Confidence: high for the reduced selector corruption and stable weapon
 identity; strong for a missing observer-side weapon transform, pending the
 paired transform trace.
+
+### Observer vertical-aim seam triage rejects root, locators, and renderer slot 3/channel 4
+
+Build: exact supported GOG executable, SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+**Rejected — whole-root pitch.** Applying the Player 1 camera pitch to
+Ailish's observer-side world root did make the complete model tilt vertically,
+but it pivoted from the feet/bottom of the actor. The user accurately described
+the result as a "seahorse toy": legs, torso, arms, weapon, and head moved as one
+rigid object instead of the waist/upper body articulating around the aim. That
+write is disabled and must not be reused as an upper-body solution.
+
+**Confirmed — named locators are not the needed skeletal seam.** A read-only
+13-sample neutral/up/down inventory queried the exact provider used by the
+observer world render object. Only three requested names resolved:
+
+- `WeaponFollow`, index `5`;
+- `Staff1`, index `7`; and
+- `WeaponParent`, index `6`.
+
+Their matrices were invariant at every sampled pitch. `WeaponFollow` remained
+identity at translation `(0,0,0)`, `Staff1` remained at
+`(-0.46546,0.92584,0.35868)`, and `WeaponParent` remained at
+`(0,1.48098,-0.01219)`. Requested waist, backbone, shoulder, clavicle, upper-
+arm, lower-arm, and wrist names all returned `name_not_present`. This exact
+named-locator interface exposes weapon/attachment anchors; it does not expose
+the live skeleton articulation required for vertical aim.
+
+**Confirmed — renderer configuration slot 3 and logical channel 4 do not
+encode pitch.** A second read-only audit captured 15 complete first-person and
+saved-world renderer sequences across camera pitch `-0.52360` through
+`+0.26599`, including the accompanying normal-fire test. Both exact
+`cAnimObjectRenderer` instances retained logical-channel-4 assignment `2` and
+slot-3 source pair `0x8002,4`, mask `0x2`, blend `0.0`, and extra value `0`.
+Channel 4's selector/state/rate/blend were likewise invariant with pitch. The
+ordinary firing trace instead placed the active first-person work on channels
+`0` and `2`. Slot 3/channel 4 is therefore an authored action-layer setup, not
+the continuous vertical-aim parameter. No animation, pose, locator, or model
+transform was written during either audit.
+
+**Confirmed static limit — `Upper body` is metadata, not yet an actionable
+runtime seam.** The authored `StateDetails+0x59` bit `0x08` is loaded from the
+`Upper body` property by the state-details loader at RVA `0x00144B50` (property
+callsite VA `0x00544BA5`). Exhaustive exact-image cross-reference and
+disassembly review found the loader/writer but no confirmed runtime consumer
+of that bit. It remains useful format evidence, but treating it as a live mask
+or pose switch would be speculation.
+
+**Open — next bounded experiment.** Perform one read-only runtime inventory of
+the already-loaded resources for `0x97` `ANIMID_MISSILE_AIM_CIRCLE`, `0x98`
+`ANIMID_MISSILE_AIM_STRAIGHT`, and `0x99` `ANIMID_MISSILE_AIM_STRAFE`. Resolve
+their existing handles independently against Ailish's first-person and saved-
+world wrappers. Do not call the state machine, play a selector, mutate authored
+metadata, or write animation/pose state. Accept this route only if the inventory
+proves that one of those authored resources supplies a distinct world-side
+upper-body aim representation.
+
+Confidence: high for both rejected runtime seams and for the absence of a
+confirmed `Upper body` bit consumer; open for the `0x97..0x99` resource role.
+### 2026-08-16 — Combat input/reload watcher remains Player 1-owned
+
+The split-screen camera/facing pass improved Tal's observer presentation: the
+second viewport now keeps a stable third-person combat framing and stationary
+right-stick rotation no longer decays back to the last movement direction.
+
+The remaining combat-HUD issue is separate from the already-correct party
+portrait/HP/SP ownership seam.  The native reload/combo/input watcher (the
+overlay that reports reload state, combo inputs, or a failed combo) still
+resolves its source from Sudeki's single global active-controller/Player 1
+state.  As a result, the widget can show Player 1/Ailish information while
+the other viewport is owned by Tal, instead of following the character whose
+camera is being rendered.
+
+The shipped resource names support this identification but not yet the native
+ownership boundary: `sui_combo_gizmo`, `sui_attackbar_gizmo`,
+`sui_context_attack`, `sui_combo_1_miss`, and `sui_combo_2_miss` are present in
+`SOLData.baf`.  They are presentation resources, not evidence that the
+combat/animation compositor should be changed.
+
+This is recorded as an open viewport-owned combat-HUD task.  The next trace
+must identify the widget's exact source object and update boundary before any
+pointer substitution is attempted; the existing party-slot pointer hooks must
+remain unchanged.  Acceptance is one independent reload/combo/input state per
+viewport, with no cross-viewport prompts, costs, or failure/result text.
+### 2026-08-16 — Quick Menu is one global queued UI payload
+
+The live split-screen trace captured the native Quick Menu render-submit path
+at RVA `0x0009BBA0` during the Player 2 render phase. The menu object's
+`+0x214` field is a UI/loadout state pointer, not a direct character pointer;
+the native controller target at the same moment was the Player 1 Ailish
+object. The menu submit is queued after the active viewport's scene flush and
+consumed by the next viewport's flush. This explains the observed duplicated
+menu and phase-split text: the current render hook isolates world/UI cadence,
+but does not clone the Quick Menu's owner, skill list, weapon list, or Spirit
+Strike state.
+
+The safe next seam is to trace the `+0x214` state object's character/resource
+references and the menu-open input owner before any pointer virtualization.
+Do not write the global controller target or the Quick Menu state during a
+render pass.
+
+The Player 2 facing path now has a 0.5-degree hysteresis guard before issuing
+the native position-orientation commit. This avoids repeatedly reapplying the
+same orientation while stationary, which was the leading explanation for the
+reported Tal micro-shiver. Build and exact-image regression passed.
+
+The first widened owner inventory found no direct Ailish/Tal pointer in the
+Quick Menu object, its `+0x214` owner object, the owner's `+0x3c0` nested state,
+the `+0x208` resource object, or the `+0x218` auxiliary object. This strengthens
+the conclusion that native Quick Menu content is a single global payload rather
+than a hidden per-character menu instance. A bounded two-level pointer-graph
+probe is installed for a later submit event, but no pointer substitution or
+controller-target write has been attempted.
