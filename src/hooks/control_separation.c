@@ -43,6 +43,19 @@ typedef void (__stdcall *MovementCameraTransformFunction)(
     float *output_direction,
     const float *local_direction
 );
+typedef void (__attribute__((regparm(1), stdcall))
+    *MovementControllerUpdateFunction)(void *movement_controller,
+                                       void *update_data);
+typedef void (SUDEKIMP_THISCALL *MovementControllerSetAbsoluteDeltaFunction)(
+    void *movement_controller,
+    float delta_x,
+    float delta_y,
+    float delta_z
+);
+typedef void (SUDEKIMP_THISCALL *TalCharacterUpdateFunction)(
+    void *character_update,
+    void *update_data
+);
 typedef void (__stdcall *MatrixTargetCreateFunction)(
     void *target_list,
     void **output_target,
@@ -61,6 +74,9 @@ enum {
     RVA_AI_OVERRIDE_CONTROL = 0x000f60d0u,
     RVA_AI_DEFAULT_CONTROL = 0x000f6100u,
     RVA_MOVEMENT_CAMERA_TRANSFORM = 0x000291a0u,
+    RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA = 0x000030a0u,
+    RVA_MOVEMENT_CONTROLLER_UPDATE = 0x000c3200u,
+    RVA_TAL_CHARACTER_UPDATE = 0x00153240u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
@@ -76,13 +92,26 @@ enum {
     PARTY_SLOT_STRIDE = 0x0cu
 };
 
+/*
+ * Absolute-delta mode treats +0x1D4 as one world unit per second.  Sudeki's
+ * normal melee locomotion is root-motion driven and the cleanroom Tal trace
+ * measured roughly 6.4 world units per second at full input.  Match that
+ * native gameplay pace only for the
+ * Spirit-locked non-caster fallback; ordinary movement remains untouched.
+ */
+static const float spirit_noncaster_direct_movement_pace = 6.4f;
+
 static SudekiMpPointerHook controller_update_vtable_hook;
+static SudekiMpInlineHook movement_controller_update_hook;
+static SudekiMpInlineHook tal_character_update_hook;
 static ControllerUpdateFunction original_controller_update;
 static AiControlFunction ai_override_control;
 static AiControlFunction ai_default_control;
 static ArbiterMovementFunction arbiter_movement;
 static ArbiterSetSpeedFunction arbiter_set_speed;
 static MovementCameraTransformFunction movement_camera_transform;
+static MovementControllerSetAbsoluteDeltaFunction
+    movement_controller_set_absolute_delta;
 static uint8_t *game_base;
 static void *overridden_character;
 static UINT selected_virtual_key;
@@ -104,8 +133,19 @@ static DWORD target_trace_last_sample_tick;
 static void *target_trace_last_node;
 static int target_trace_last_auto_enabled;
 static BOOL second_player_movement_active;
+static float second_player_movement_magnitude;
 static int last_movement_x;
 static int last_movement_z;
+static int last_native_movement_acceptance = -1;
+static unsigned int last_native_movement_gate = 0xffffffffu;
+static DWORD last_movement_pipeline_sample_tick;
+static BOOL last_movement_pipeline_position_valid;
+static float last_movement_pipeline_position[3];
+static BOOL controller_update_spirit_virtualization_logged;
+static BOOL spirit_direct_movement_active;
+static DWORD spirit_direct_movement_last_trace_tick;
+static DWORD movement_controller_update_last_trace_tick;
+static DWORD tal_character_update_last_trace_tick;
 static BOOL second_player_facing_valid;
 static float second_player_last_facing[3];
 static BOOL input_bridge_enabled;
@@ -133,6 +173,16 @@ static const uint8_t expected_arbiter_combat_input_entry[] = {
 };
 static const uint8_t expected_movement_camera_transform_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x8b, 0x55, 0x08, 0xd9, 0xee
+};
+static const uint8_t expected_movement_controller_set_absolute_delta_entry[] = {
+    0x83, 0xec, 0x0c, 0xf6, 0x81, 0xbe, 0x00, 0x00,
+    0x00, 0x08, 0x74, 0x20
+};
+static const uint8_t expected_movement_controller_update_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
+};
+static const uint8_t expected_tal_character_update_entry[] = {
+    0x53, 0x8b, 0x5c, 0x24, 0x08, 0x56
 };
 static const uint8_t expected_camera_target_install_entry[] = {
     0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x8b, 0x94, 0x9e,
@@ -648,6 +698,7 @@ static void stop_second_player_movement(void) {
             "control_separation event=second_player_movement phase=abort reason=character_not_in_active_group\r\n"
         );
         second_player_movement_active = FALSE;
+        second_player_movement_magnitude = 0.0f;
         last_movement_x = 0;
         last_movement_z = 0;
         return;
@@ -661,6 +712,7 @@ static void stop_second_player_movement(void) {
         (unsigned long)(uintptr_t)character
     );
     second_player_movement_active = FALSE;
+    second_player_movement_magnitude = 0.0f;
     last_movement_x = 0;
     last_movement_z = 0;
 }
@@ -801,8 +853,488 @@ static BOOL bridge_movement(float *x, float *z, float *speed) {
     return TRUE;
 }
 
+enum {
+    NATIVE_MOVEMENT_GATE_ALLOWED = 0u,
+    NATIVE_MOVEMENT_GATE_UNREADABLE = 1u,
+    NATIVE_MOVEMENT_GATE_ARBITER_FLAGS = 2u,
+    NATIVE_MOVEMENT_GATE_ATTACHMENT_STATE = 3u,
+    NATIVE_MOVEMENT_GATE_ARBITER_MODE = 4u,
+    NATIVE_MOVEMENT_GATE_GLOBAL_STATE = 5u,
+    NATIVE_MOVEMENT_GATE_CONTROL_STATE = 6u,
+    NATIVE_MOVEMENT_GATE_CONTROLLER_DISABLED = 7u,
+    NATIVE_MOVEMENT_GATE_SPIRIT_NONCASTER_VIRTUALIZED = 8u
+};
+
+static const char *native_movement_gate_name(unsigned int gate) {
+    switch (gate) {
+    case NATIVE_MOVEMENT_GATE_ALLOWED:
+        return "allowed";
+    case NATIVE_MOVEMENT_GATE_UNREADABLE:
+        return "unreadable";
+    case NATIVE_MOVEMENT_GATE_ARBITER_FLAGS:
+        return "arbiter_flags";
+    case NATIVE_MOVEMENT_GATE_ATTACHMENT_STATE:
+        return "attachment_state";
+    case NATIVE_MOVEMENT_GATE_ARBITER_MODE:
+        return "arbiter_mode";
+    case NATIVE_MOVEMENT_GATE_GLOBAL_STATE:
+        return "global_state";
+    case NATIVE_MOVEMENT_GATE_CONTROL_STATE:
+        return "control_state";
+    case NATIVE_MOVEMENT_GATE_CONTROLLER_DISABLED:
+        return "movement_controller_disabled";
+    case NATIVE_MOVEMENT_GATE_SPIRIT_NONCASTER_VIRTUALIZED:
+        return "spirit_noncaster_virtualized";
+    default:
+        return "unknown";
+    }
+}
+
+static void reset_native_movement_acceptance_trace(void) {
+    last_native_movement_acceptance = -1;
+    last_native_movement_gate = 0xffffffffu;
+    last_movement_pipeline_sample_tick = 0u;
+    last_movement_pipeline_position_valid = FALSE;
+    ZeroMemory(
+        last_movement_pipeline_position,
+        sizeof(last_movement_pipeline_position)
+    );
+    controller_update_spirit_virtualization_logged = FALSE;
+    movement_controller_update_last_trace_tick = 0u;
+    tal_character_update_last_trace_tick = 0u;
+}
+
+static uint32_t begin_spirit_noncaster_arbiter_virtualization(
+    uint8_t *character,
+    uint32_t **arbiter_flags_result
+) {
+    void *arbiter;
+    uint32_t *arbiter_flags;
+    uint32_t saved_flags;
+
+    *arbiter_flags_result = NULL;
+    if (!readable_memory(character, 0x94u) ||
+        !SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(character)) {
+        return 0u;
+    }
+    arbiter = *(void **)(character + 0x90u);
+    arbiter_flags = readable_memory(arbiter, 0x54u) ?
+        (uint32_t *)((uint8_t *)arbiter + 0x50u) : NULL;
+    if (!readable_memory(arbiter_flags, sizeof(*arbiter_flags)) ||
+        (*arbiter_flags & 0x0289e568u) != 0x00080000u) {
+        return 0u;
+    }
+    saved_flags = *arbiter_flags;
+    *arbiter_flags = saved_flags & ~0x00080000u;
+    *arbiter_flags_result = arbiter_flags;
+    return saved_flags;
+}
+
+static void end_spirit_noncaster_arbiter_virtualization(
+    uint8_t *character,
+    uint32_t *arbiter_flags,
+    uint32_t saved_flags
+) {
+    if (arbiter_flags == NULL || saved_flags == 0u ||
+        !readable_memory(arbiter_flags, sizeof(*arbiter_flags))) {
+        return;
+    }
+    (void)character;
+    *arbiter_flags = (*arbiter_flags & ~0x00080000u) |
+        (saved_flags & 0x00080000u);
+}
+
+static unsigned int classify_native_movement_gate(
+    void *arbiter,
+    uint32_t ignored_arbiter_flags,
+    uint32_t *arbiter_flags,
+    int *arbiter_mode,
+    unsigned int *arbiter_state_60,
+    int *control_state,
+    unsigned int *movement_flags
+) {
+    uint8_t *arbiter_bytes = (uint8_t *)arbiter;
+    uint8_t *character;
+    uint8_t *attachment_state;
+    uint8_t *attachment_owner;
+    uint8_t *movement_controller;
+    uint8_t *control;
+    uint32_t raw_mode;
+    unsigned int nibble;
+
+    *arbiter_flags = 0u;
+    *arbiter_mode = -1;
+    *arbiter_state_60 = 0u;
+    *control_state = -1;
+    *movement_flags = 0u;
+    if (!readable_memory(arbiter_bytes, 0x64u)) {
+        return NATIVE_MOVEMENT_GATE_UNREADABLE;
+    }
+    *arbiter_flags = *(uint32_t *)(arbiter_bytes + 0x50u);
+    *arbiter_state_60 = *(uint32_t *)(arbiter_bytes + 0x60u);
+    raw_mode = *(uint32_t *)(arbiter_bytes + 0x58u);
+    nibble = raw_mode & 0x0fu;
+    *arbiter_mode = (int)(nibble >= 8u ? nibble - 16u : nibble);
+    character = *(uint8_t **)(arbiter_bytes + 0x10u);
+    if (!readable_memory(character, 0xd4u)) {
+        return NATIVE_MOVEMENT_GATE_UNREADABLE;
+    }
+    movement_controller = *(uint8_t **)(character + 0x80u);
+    if (!readable_memory(movement_controller, 0xbfu)) {
+        return NATIVE_MOVEMENT_GATE_UNREADABLE;
+    }
+    *movement_flags = movement_controller[0xbeu];
+    if (((*arbiter_flags & ~ignored_arbiter_flags) & 0x0289e568u) != 0u) {
+        return NATIVE_MOVEMENT_GATE_ARBITER_FLAGS;
+    }
+    attachment_state = *(uint8_t **)(character + 0xa4u);
+    attachment_owner = *(uint8_t **)(character + 0xb8u);
+    if (readable_memory(attachment_state, 0x73u) &&
+        readable_memory(attachment_owner, 0xb2u) &&
+        (attachment_state[0x72u] & 0x10u) != 0u &&
+        (attachment_owner[0xb1u] & 0x04u) == 0u) {
+        return NATIVE_MOVEMENT_GATE_ATTACHMENT_STATE;
+    }
+    if (*arbiter_mode == 1 || *arbiter_mode == 3) {
+        return NATIVE_MOVEMENT_GATE_ARBITER_MODE;
+    }
+    if (game_base != NULL &&
+        readable_memory(game_base + 0x00409ddcu, 1u) &&
+        game_base[0x00409ddcu] != 0u &&
+        (*arbiter_state_60 & 0x01u) != 0u) {
+        return NATIVE_MOVEMENT_GATE_GLOBAL_STATE;
+    }
+    control = *(uint8_t **)(character + 0xd0u);
+    if (readable_memory(control, 0x20u)) {
+        *control_state = *(int *)(control + 0x1cu);
+        if (*control_state == 1 || *control_state == 2) {
+            return NATIVE_MOVEMENT_GATE_CONTROL_STATE;
+        }
+    }
+    if ((*movement_flags & 0x08u) == 0u) {
+        return NATIVE_MOVEMENT_GATE_CONTROLLER_DISABLED;
+    }
+    return NATIVE_MOVEMENT_GATE_ALLOWED;
+}
+
+static void trace_native_movement_acceptance(
+    uint8_t *character,
+    void *arbiter,
+    float requested_speed,
+    uint32_t virtualized_arbiter_flags
+) {
+    uint8_t *movement_controller;
+    float accepted_speed = 0.0f;
+    uint32_t requested_speed_bits;
+    uint32_t accepted_speed_bits = 0u;
+    uint32_t arbiter_flags;
+    int arbiter_mode;
+    unsigned int arbiter_state_60;
+    int control_state;
+    unsigned int movement_flags;
+    unsigned int gate;
+    int accepted;
+
+    if (!readable_memory(character, 0x84u)) {
+        return;
+    }
+    movement_controller = *(uint8_t **)(character + 0x80u);
+    if (readable_memory(movement_controller, 0x28u)) {
+        accepted_speed = *(float *)(movement_controller + 0x24u);
+        memcpy(&accepted_speed_bits, &accepted_speed,
+            sizeof(accepted_speed_bits));
+    }
+    memcpy(&requested_speed_bits, &requested_speed,
+        sizeof(requested_speed_bits));
+    gate = classify_native_movement_gate(
+        arbiter,
+        virtualized_arbiter_flags,
+        &arbiter_flags,
+        &arbiter_mode,
+        &arbiter_state_60,
+        &control_state,
+        &movement_flags
+    );
+    accepted = gate == NATIVE_MOVEMENT_GATE_ALLOWED &&
+        isfinite(accepted_speed) && accepted_speed > 0.0001f;
+    if (accepted && virtualized_arbiter_flags != 0u) {
+        gate = NATIVE_MOVEMENT_GATE_SPIRIT_NONCASTER_VIRTUALIZED;
+    }
+    if (accepted == last_native_movement_acceptance &&
+        gate == last_native_movement_gate) {
+        return;
+    }
+    last_native_movement_acceptance = accepted;
+    last_native_movement_gate = gate;
+    SudekiMpLogFormat(
+        "control_separation event=native_movement_acceptance character=0x%08lx arbiter=0x%08lx accepted=%u gate=%s gate_id=%u requested_speed_bits=0x%08lx accepted_speed_bits=0x%08lx arbiter_flags=0x%08lx blocked_flag_mask=0x%08lx virtualized_arbiter_flags=0x%08lx arbiter_mode=%d arbiter_state_60=0x%08lx control_state=%d movement_flags=0x%02x policy=exact_scoped_native_arbiter_submission_with_spirit_noncaster_flag_virtualization\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)arbiter,
+        accepted ? 1u : 0u,
+        native_movement_gate_name(gate),
+        gate,
+        (unsigned long)requested_speed_bits,
+        (unsigned long)accepted_speed_bits,
+        (unsigned long)arbiter_flags,
+        (unsigned long)(arbiter_flags & 0x0289e568u),
+        (unsigned long)virtualized_arbiter_flags,
+        arbiter_mode,
+        (unsigned long)arbiter_state_60,
+        control_state,
+        movement_flags
+    );
+}
+
+static void trace_second_player_movement_pipeline(
+    uint8_t *character,
+    void *arbiter,
+    uint32_t virtualized_arbiter_flags
+) {
+    DWORD now;
+    uint8_t *movement_controller;
+    uint8_t *transform;
+    float target_speed;
+    float smoothed_speed;
+    float previous_speed;
+    float current_speed;
+    float run_blend;
+    float position[3];
+    float delta[3] = {0.0f, 0.0f, 0.0f};
+    int direction_family;
+
+    if (virtualized_arbiter_flags == 0u ||
+        !readable_memory(character, 0x84u)) {
+        return;
+    }
+    now = GetTickCount();
+    if (last_movement_pipeline_sample_tick != 0u &&
+        (DWORD)(now - last_movement_pipeline_sample_tick) < 200u) {
+        return;
+    }
+    movement_controller = *(uint8_t **)(character + 0x80u);
+    transform = *(uint8_t **)(character + 0x44u);
+    if (!readable_memory(movement_controller, 0x64u) ||
+        !readable_memory(transform, 0x24u)) {
+        SudekiMpLogFormat(
+            "control_separation event=second_player_movement_pipeline phase=unavailable character=0x%08lx arbiter=0x%08lx movement_controller=0x%08lx transform=0x%08lx policy=read_only_post_native_submission_pipeline_trace\r\n",
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)(uintptr_t)arbiter,
+            (unsigned long)(uintptr_t)movement_controller,
+            (unsigned long)(uintptr_t)transform
+        );
+        last_movement_pipeline_sample_tick = now;
+        return;
+    }
+    target_speed = *(float *)(movement_controller + 0x24u);
+    smoothed_speed = *(float *)(movement_controller + 0x28u);
+    direction_family = *(int *)(movement_controller + 0x54u);
+    previous_speed = *(float *)(movement_controller + 0x58u);
+    current_speed = *(float *)(movement_controller + 0x5cu);
+    run_blend = *(float *)(movement_controller + 0x60u);
+    position[0] = *(float *)(transform + 0x18u);
+    position[1] = *(float *)(transform + 0x1cu);
+    position[2] = *(float *)(transform + 0x20u);
+    if (last_movement_pipeline_position_valid) {
+        delta[0] = position[0] - last_movement_pipeline_position[0];
+        delta[1] = position[1] - last_movement_pipeline_position[1];
+        delta[2] = position[2] - last_movement_pipeline_position[2];
+    }
+    SudekiMpLogFormat(
+        "control_separation event=second_player_movement_pipeline phase=sample character=0x%08lx arbiter=0x%08lx movement_controller=0x%08lx transform=0x%08lx elapsed_ms=%lu target_speed_bits=0x%08lx smoothed_speed_bits=0x%08lx direction_family=%d previous_speed_bits=0x%08lx current_speed_bits=0x%08lx run_blend_bits=0x%08lx position_bits=%08lx,%08lx,%08lx delta_bits=%08lx,%08lx,%08lx virtualized_arbiter_flags=0x%08lx policy=read_only_post_native_submission_pipeline_trace\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)arbiter,
+        (unsigned long)(uintptr_t)movement_controller,
+        (unsigned long)(uintptr_t)transform,
+        last_movement_pipeline_sample_tick == 0u ? 0ul :
+            (unsigned long)(DWORD)(now - last_movement_pipeline_sample_tick),
+        (unsigned long)float_bits(target_speed),
+        (unsigned long)float_bits(smoothed_speed),
+        direction_family,
+        (unsigned long)float_bits(previous_speed),
+        (unsigned long)float_bits(current_speed),
+        (unsigned long)float_bits(run_blend),
+        (unsigned long)float_bits(position[0]),
+        (unsigned long)float_bits(position[1]),
+        (unsigned long)float_bits(position[2]),
+        (unsigned long)float_bits(delta[0]),
+        (unsigned long)float_bits(delta[1]),
+        (unsigned long)float_bits(delta[2]),
+        (unsigned long)virtualized_arbiter_flags
+    );
+    memcpy(
+        last_movement_pipeline_position,
+        position,
+        sizeof(last_movement_pipeline_position)
+    );
+    last_movement_pipeline_position_valid = TRUE;
+    last_movement_pipeline_sample_tick = now;
+}
+
+static void __attribute__((regparm(1), stdcall))
+trace_movement_controller_update(
+    void *movement_controller,
+    void *update_data
+) {
+    MovementControllerUpdateFunction original =
+        (MovementControllerUpdateFunction)
+            movement_controller_update_hook.trampoline;
+    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *expected_controller;
+    uint8_t *transform;
+    DWORD now;
+    void *caller;
+    unsigned long caller_rva;
+    uint32_t update_words[4] = {0u, 0u, 0u, 0u};
+    uint32_t position_before[3] = {0u, 0u, 0u};
+    uint32_t position_after[3] = {0u, 0u, 0u};
+    BOOL trace_this_update = FALSE;
+
+    expected_controller = readable_memory(character, 0x84u) ?
+        *(uint8_t **)(character + 0x80u) : NULL;
+    transform = readable_memory(character, 0x48u) ?
+        *(uint8_t **)(character + 0x44u) : NULL;
+    now = GetTickCount();
+    if (movement_controller == expected_controller &&
+        SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(character) &&
+        readable_memory(update_data, 0x10u) &&
+        (movement_controller_update_last_trace_tick == 0u ||
+         (DWORD)(now - movement_controller_update_last_trace_tick) >= 200u)) {
+        memcpy(update_words, update_data, sizeof(update_words));
+        if (readable_memory(transform, 0x24u)) {
+            memcpy(&position_before[0], transform + 0x18u, sizeof(uint32_t));
+            memcpy(&position_before[1], transform + 0x1cu, sizeof(uint32_t));
+            memcpy(&position_before[2], transform + 0x20u, sizeof(uint32_t));
+        }
+        trace_this_update = TRUE;
+    }
+    original(movement_controller, update_data);
+    if (!trace_this_update) {
+        return;
+    }
+    if (readable_memory(transform, 0x24u)) {
+        memcpy(&position_after[0], transform + 0x18u, sizeof(uint32_t));
+        memcpy(&position_after[1], transform + 0x1cu, sizeof(uint32_t));
+        memcpy(&position_after[2], transform + 0x20u, sizeof(uint32_t));
+    }
+    caller = __builtin_return_address(0);
+    caller_rva = game_base != NULL &&
+        (uint8_t *)caller >= game_base &&
+        (uint8_t *)caller < game_base + SUPPORTED_IMAGE_SIZE ?
+        (unsigned long)((uint8_t *)caller - game_base) : 0xfffffffful;
+    movement_controller_update_last_trace_tick = now;
+    SudekiMpLogFormat(
+        "control_separation event=movement_controller_update phase=sample character=0x%08lx movement_controller=0x%08lx update_data=0x%08lx caller=0x%08lx caller_rva=0x%08lx update_words=%08lx,%08lx,%08lx,%08lx position_before=%08lx,%08lx,%08lx position_after=%08lx,%08lx,%08lx policy=read_only_exact_native_movement_controller_update_dt_and_transform_trace\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)movement_controller,
+        (unsigned long)(uintptr_t)update_data,
+        (unsigned long)(uintptr_t)caller,
+        caller_rva,
+        (unsigned long)update_words[0],
+        (unsigned long)update_words[1],
+        (unsigned long)update_words[2],
+        (unsigned long)update_words[3],
+        (unsigned long)position_before[0],
+        (unsigned long)position_before[1],
+        (unsigned long)position_before[2],
+        (unsigned long)position_after[0],
+        (unsigned long)position_after[1],
+        (unsigned long)position_after[2]
+    );
+}
+
+static unsigned long virtual_update_target_rva(
+    uint8_t *owner,
+    size_t component_offset,
+    size_t slot_offset
+) {
+    uint8_t *component;
+    uint8_t *vtable;
+    void *target;
+
+    component = owner + component_offset;
+    if (!readable_memory(component, sizeof(void *))) {
+        return 0xfffffffful;
+    }
+    vtable = *(uint8_t **)component;
+    if (!readable_memory(vtable + slot_offset, sizeof(void *))) {
+        return 0xfffffffful;
+    }
+    target = *(void **)(vtable + slot_offset);
+    if (!game_code_pointer(target)) {
+        return 0xfffffffful;
+    }
+    return (unsigned long)((uint8_t *)target - game_base);
+}
+
+static void SUDEKIMP_THISCALL trace_tal_character_update(
+    void *character_update,
+    void *update_data
+) {
+    TalCharacterUpdateFunction original =
+        (TalCharacterUpdateFunction)tal_character_update_hook.trampoline;
+    uint8_t *owner = (uint8_t *)character_update;
+    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *transform = NULL;
+    DWORD now = GetTickCount();
+    uint32_t update_words[4] = {0u, 0u, 0u, 0u};
+    uint32_t position_before[3] = {0u, 0u, 0u};
+    uint32_t position_after[3] = {0u, 0u, 0u};
+    unsigned long phase_targets[4] = {
+        0xfffffffful, 0xfffffffful, 0xfffffffful, 0xfffffffful
+    };
+    BOOL trace_this_update = FALSE;
+
+    if (character != NULL && owner == character + 0x08u &&
+        SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(character) &&
+        readable_memory(update_data, sizeof(update_words)) &&
+        (tal_character_update_last_trace_tick == 0u ||
+         (DWORD)(now - tal_character_update_last_trace_tick) >= 200u)) {
+        transform = readable_memory(character, 0x48u) ?
+            *(uint8_t **)(character + 0x44u) : NULL;
+        memcpy(update_words, update_data, sizeof(update_words));
+        if (readable_memory(transform, 0x24u)) {
+            memcpy(position_before, transform + 0x18u, sizeof(position_before));
+        }
+        phase_targets[0] = virtual_update_target_rva(owner, 0x878u, 0x3cu);
+        phase_targets[1] = virtual_update_target_rva(owner, 0x39cu, 0x40u);
+        phase_targets[2] = virtual_update_target_rva(owner, 0xaa0u, 0x3cu);
+        phase_targets[3] = virtual_update_target_rva(owner, 0x1608u, 0x3cu);
+        trace_this_update = TRUE;
+    }
+
+    original(character_update, update_data);
+    if (!trace_this_update) {
+        return;
+    }
+    if (readable_memory(transform, 0x24u)) {
+        memcpy(position_after, transform + 0x18u, sizeof(position_after));
+    }
+    tal_character_update_last_trace_tick = now;
+    SudekiMpLogFormat(
+        "control_separation event=tal_character_update phase=sample character=0x%08lx owner=0x%08lx update_data=0x%08lx update_words=%08lx,%08lx,%08lx,%08lx virtual_targets_rva=%08lx,%08lx,%08lx,%08lx position_before=%08lx,%08lx,%08lx position_after=%08lx,%08lx,%08lx policy=read_only_exact_tal_post_controller_phase_trace\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)owner,
+        (unsigned long)(uintptr_t)update_data,
+        (unsigned long)update_words[0],
+        (unsigned long)update_words[1],
+        (unsigned long)update_words[2],
+        (unsigned long)update_words[3],
+        phase_targets[0],
+        phase_targets[1],
+        phase_targets[2],
+        phase_targets[3],
+        (unsigned long)position_before[0],
+        (unsigned long)position_before[1],
+        (unsigned long)position_before[2],
+        (unsigned long)position_after[0],
+        (unsigned long)position_after[1],
+        (unsigned long)position_after[2]
+    );
+}
+
 static void poll_second_player_movement(
     void *controller,
+    void *update_data,
     BOOL owns_foreground
 ) {
     uint8_t *character = (uint8_t *)overridden_character;
@@ -820,6 +1352,12 @@ static void poll_second_player_movement(
     float direction[3];
     uint32_t direction_x_bits;
     uint32_t direction_z_bits;
+    uint32_t *arbiter_flags;
+    uint32_t saved_arbiter_flags = 0u;
+    uint32_t virtualized_arbiter_flags = 0u;
+    uint8_t *movement_controller;
+    float frame_delta;
+    float direct_move_speed;
 
     if (!second_player_movement_enabled || character == NULL) {
         return;
@@ -903,7 +1441,83 @@ static void poll_second_player_movement(
     }
     memcpy(&direction_x_bits, &direction[0], sizeof(direction_x_bits));
     memcpy(&direction_z_bits, &direction[2], sizeof(direction_z_bits));
+    arbiter_flags = (uint32_t *)((uint8_t *)arbiter + 0x50u);
+    if (readable_memory(arbiter_flags, sizeof(*arbiter_flags)) &&
+        SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(character) &&
+        (*arbiter_flags & 0x0289e568u) == 0x00080000u) {
+        saved_arbiter_flags = *arbiter_flags;
+        virtualized_arbiter_flags = 0x00080000u;
+        *arbiter_flags = saved_arbiter_flags & ~virtualized_arbiter_flags;
+    }
     arbiter_movement(arbiter, direction, movement_speed, 1.0f, 0u);
+    movement_controller = readable_memory(character, 0x84u) ?
+        *(uint8_t **)(character + 0x80u) : NULL;
+    frame_delta = readable_memory(update_data, 0x10u) ?
+        *(float *)((uint8_t *)update_data + 0x0cu) : 0.0f;
+    direct_move_speed = readable_memory(controller, 0x1d8u) ?
+        *(float *)((uint8_t *)controller + 0x1d4u) : 0.0f;
+    if (virtualized_arbiter_flags != 0u &&
+        readable_memory(movement_controller, 0xbfu) &&
+        movement_controller_set_absolute_delta != NULL &&
+        isfinite(frame_delta) && frame_delta > 0.0f &&
+        frame_delta <= 0.25f &&
+        isfinite(direct_move_speed) && direct_move_speed > 0.0f &&
+        direct_move_speed <= 100.0f) {
+        float direct_scale =
+            movement_speed *
+            direct_move_speed *
+            spirit_noncaster_direct_movement_pace *
+            frame_delta;
+        DWORD now = GetTickCount();
+
+        movement_controller_set_absolute_delta(
+            movement_controller,
+            direction[0] * direct_scale,
+            0.0f,
+            direction[2] * direct_scale
+        );
+        if (!spirit_direct_movement_active ||
+            spirit_direct_movement_last_trace_tick == 0u ||
+            (DWORD)(now - spirit_direct_movement_last_trace_tick) >= 500u) {
+            SudekiMpLogFormat(
+                "control_separation event=spirit_noncaster_direct_movement phase=submit character=0x%08lx movement_controller=0x%08lx direction_bits=%08lx,%08lx,%08lx movement_speed_bits=0x%08lx direct_move_speed_bits=0x%08lx pace_bits=0x%08lx frame_delta_bits=0x%08lx direct_scale_bits=0x%08lx policy=exact_native_set_absolute_delta_only_while_spirit_arbiter_lock_is_virtualized\r\n",
+                (unsigned long)(uintptr_t)character,
+                (unsigned long)(uintptr_t)movement_controller,
+                (unsigned long)float_bits(direction[0]),
+                (unsigned long)float_bits(direction[1]),
+                (unsigned long)float_bits(direction[2]),
+                (unsigned long)float_bits(movement_speed),
+                (unsigned long)float_bits(direct_move_speed),
+                (unsigned long)float_bits(spirit_noncaster_direct_movement_pace),
+                (unsigned long)float_bits(frame_delta),
+                (unsigned long)float_bits(direct_scale)
+            );
+            spirit_direct_movement_last_trace_tick = now;
+        }
+        spirit_direct_movement_active = TRUE;
+    } else if (spirit_direct_movement_active) {
+        spirit_direct_movement_active = FALSE;
+        spirit_direct_movement_last_trace_tick = 0u;
+        SudekiMpLogWrite(
+            "control_separation event=spirit_noncaster_direct_movement phase=inactive policy=native_root_motion_only\r\n"
+        );
+    }
+    if (virtualized_arbiter_flags != 0u &&
+        readable_memory(arbiter_flags, sizeof(*arbiter_flags))) {
+        *arbiter_flags = (*arbiter_flags & ~virtualized_arbiter_flags) |
+            (saved_arbiter_flags & virtualized_arbiter_flags);
+    }
+    trace_native_movement_acceptance(
+        character,
+        arbiter,
+        movement_speed,
+        virtualized_arbiter_flags
+    );
+    trace_second_player_movement_pipeline(
+        character,
+        arbiter,
+        virtualized_arbiter_flags
+    );
     if (!second_player_movement_active ||
         (bridge_source &&
          (((int)input_bridge_state.left_x - last_movement_x > 4096 ||
@@ -926,6 +1540,7 @@ static void poll_second_player_movement(
         );
     }
     second_player_movement_active = TRUE;
+    second_player_movement_magnitude = movement_speed;
     last_movement_x = bridge_source ? input_bridge_state.left_x : x;
     last_movement_z = bridge_source ? input_bridge_state.left_y : z;
 }
@@ -1315,6 +1930,7 @@ static void toggle_second_player_ai(void) {
         after_mode = (int)*(mode_state + 0x0b);
         if (after_ref == before_ref + 1 && after_mode == 0) {
             overridden_character = character;
+            reset_native_movement_acceptance_trace();
             reset_target_trace_state();
             log_control_state("override", "success", slot, slot_index);
             if (SudekiMpCleanroomEngineRefreshCombatMode()) {
@@ -1377,11 +1993,13 @@ static void toggle_second_player_ai(void) {
          (character != controller_target && after_mode == 1))) {
         log_control_state("restore", "success", slot, slot_index);
         overridden_character = NULL;
+        reset_native_movement_acceptance_trace();
         reset_target_trace_state();
     } else {
         log_control_state("restore", "verification_failed", slot, slot_index);
         if (after_ref == 0) {
             overridden_character = NULL;
+            reset_native_movement_acceptance_trace();
         }
     }
 }
@@ -1410,8 +2028,39 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     DWORD foreground_process_id = 0;
     BOOL hotkey_is_down;
     BOOL owns_foreground;
+    uint8_t *player_two_character = (uint8_t *)overridden_character;
+    uint32_t *player_two_arbiter_flags = NULL;
+    uint32_t saved_player_two_arbiter_flags;
 
+    saved_player_two_arbiter_flags =
+        begin_spirit_noncaster_arbiter_virtualization(
+            player_two_character,
+            &player_two_arbiter_flags
+        );
+    if (saved_player_two_arbiter_flags != 0u &&
+        !controller_update_spirit_virtualization_logged) {
+        controller_update_spirit_virtualization_logged = TRUE;
+        SudekiMpLogFormat(
+            "control_separation event=spirit_noncaster_movement_virtualization phase=controller_update_active character=0x%08lx arbiter_flags_before=0x%08lx virtualized_flag=0x00080000 policy=exact_player_two_native_controller_update_scope_restore_while_spirit_remains_active\r\n",
+            (unsigned long)(uintptr_t)player_two_character,
+            (unsigned long)saved_player_two_arbiter_flags
+        );
+    }
     original_controller_update(controller, update_data);
+    end_spirit_noncaster_arbiter_virtualization(
+        player_two_character,
+        player_two_arbiter_flags,
+        saved_player_two_arbiter_flags
+    );
+    if (saved_player_two_arbiter_flags == 0u &&
+        !SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(
+            player_two_character) &&
+        controller_update_spirit_virtualization_logged) {
+        controller_update_spirit_virtualization_logged = FALSE;
+        SudekiMpLogWrite(
+            "control_separation event=spirit_noncaster_movement_virtualization phase=controller_update_inactive policy=native_arbiter_state_unmodified\r\n"
+        );
+    }
     poll_input_bridge();
     SudekiMpCombatContextSetCharacter(
         0u,
@@ -1456,7 +2105,7 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     }
     hotkey_was_down = hotkey_is_down;
     reconcile_player_two_request();
-    poll_second_player_movement(controller, owns_foreground);
+    poll_second_player_movement(controller, update_data, owns_foreground);
     poll_second_player_camera_facing(controller, owns_foreground);
     poll_second_player_weak_attack(controller, owns_foreground);
     poll_second_player_skills(controller, owns_foreground);
@@ -1491,6 +2140,15 @@ BOOL SudekiMpControlSeparationPlayerTwoActive(void) {
 
 BOOL SudekiMpControlSeparationInputReady(void) {
     return input_bridge_enabled && input_bridge_connected;
+}
+
+BOOL SudekiMpControlSeparationSecondPlayerMovementActive(void) {
+    return second_player_movement_active;
+}
+
+float SudekiMpControlSeparationSecondPlayerMovementMagnitude(void) {
+    return second_player_movement_active ?
+        second_player_movement_magnitude : 0.0f;
 }
 
 void SudekiMpControlSeparationSetUpdateObserver(
@@ -1559,6 +2217,30 @@ BOOL SudekiMpInstallControlSeparation(
             base + RVA_MOVEMENT_CAMERA_TRANSFORM,
             expected_movement_camera_transform_entry,
             sizeof(expected_movement_camera_transform_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (enable_second_player_movement &&
+        memcmp(
+            base + RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA,
+            expected_movement_controller_set_absolute_delta_entry,
+            sizeof(expected_movement_controller_set_absolute_delta_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (enable_second_player_movement &&
+        memcmp(
+            base + RVA_MOVEMENT_CONTROLLER_UPDATE,
+            expected_movement_controller_update_entry,
+            sizeof(expected_movement_controller_update_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (enable_second_player_movement &&
+        memcmp(
+            base + RVA_TAL_CHARACTER_UPDATE,
+            expected_tal_character_update_entry,
+            sizeof(expected_tal_character_update_entry)) != 0) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -1639,8 +2321,10 @@ BOOL SudekiMpInstallControlSeparation(
     group_camera_target_list = NULL;
     reset_target_trace_state();
     second_player_movement_active = FALSE;
+    second_player_movement_magnitude = 0.0f;
     last_movement_x = 0;
     last_movement_z = 0;
+    reset_native_movement_acceptance_trace();
     original_controller_update = (ControllerUpdateFunction)(
         base + RVA_CONTROLLER_UPDATE
     );
@@ -1653,6 +2337,33 @@ BOOL SudekiMpInstallControlSeparation(
     movement_camera_transform = (MovementCameraTransformFunction)(
         base + RVA_MOVEMENT_CAMERA_TRANSFORM
     );
+    movement_controller_set_absolute_delta =
+        (MovementControllerSetAbsoluteDeltaFunction)(
+            base + RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA
+        );
+    spirit_direct_movement_active = FALSE;
+    spirit_direct_movement_last_trace_tick = 0u;
+
+    if (enable_second_player_movement &&
+        !SudekiMpInstallInlineHook(
+            &movement_controller_update_hook,
+            base + RVA_MOVEMENT_CONTROLLER_UPDATE,
+            expected_movement_controller_update_entry,
+            sizeof(expected_movement_controller_update_entry),
+            trace_movement_controller_update)) {
+        SudekiMpUninstallControlSeparation();
+        return FALSE;
+    }
+    if (enable_second_player_movement &&
+        !SudekiMpInstallInlineHook(
+            &tal_character_update_hook,
+            base + RVA_TAL_CHARACTER_UPDATE,
+            expected_tal_character_update_entry,
+            sizeof(expected_tal_character_update_entry),
+            trace_tal_character_update)) {
+        SudekiMpUninstallControlSeparation();
+        return FALSE;
+    }
 
     if (!SudekiMpInstallPointerHook(
             &controller_update_vtable_hook,
@@ -1686,6 +2397,8 @@ BOOL SudekiMpInstallControlSeparation(
 
 void SudekiMpUninstallControlSeparation(void) {
     SudekiMpRestorePointerHook(&controller_update_vtable_hook);
+    SudekiMpRestoreInlineHook(&tal_character_update_hook);
+    SudekiMpRestoreInlineHook(&movement_controller_update_hook);
     restore_group_camera("module_uninstall");
     original_controller_update = NULL;
     ai_override_control = NULL;
@@ -1693,6 +2406,9 @@ void SudekiMpUninstallControlSeparation(void) {
     arbiter_movement = NULL;
     arbiter_set_speed = NULL;
     movement_camera_transform = NULL;
+    movement_controller_set_absolute_delta = NULL;
+    spirit_direct_movement_active = FALSE;
+    spirit_direct_movement_last_trace_tick = 0u;
     game_base = NULL;
     overridden_character = NULL;
     player_two_requested = FALSE;
@@ -1736,8 +2452,10 @@ void SudekiMpUninstallControlSeparation(void) {
     group_camera_target_list = NULL;
     reset_target_trace_state();
     second_player_movement_active = FALSE;
+    second_player_movement_magnitude = 0.0f;
     last_movement_x = 0;
     last_movement_z = 0;
+    reset_native_movement_acceptance_trace();
     update_observer = NULL;
     SudekiMpCombatContextsReset();
 }

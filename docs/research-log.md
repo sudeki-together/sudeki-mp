@@ -2122,3 +2122,98 @@ the conclusion that native Quick Menu content is a single global payload rather
 than a hidden per-character menu instance. A bounded two-level pointer-graph
 probe is installed for a later submit event, but no pointer substitution or
 controller-target write has been attempted.
+
+### 2026-08-16 — Owner-scoped Quick Menu submit prototype
+
+The first safe implementation of per-player menu presentation is now in place.
+At the ordinary-menu rising edge, SudekiMP latches the already-current native
+controller target as the menu owner, primes the opposite viewport, and suppresses
+only the owner's outgoing render-submit. Because native submission is queued for
+the next viewport, this keeps the payload on its owner's camera without writing
+the global controller target, loadout resource, or menu object. Early frames now
+reuse the validated active-party resolution when cached viewport character
+pointers are not ready. Exact-image regression and build passed.
+
+This is presentation ownership only. The native payload remains global, so
+independent skill/weapon/Spirit lists still require a future cloned loadout/UI
+state layer once a safe native state boundary is identified.
+
+### 2026-08-17 — Witches' Kiss camera trigger timeline
+
+An observation-only camera trace was added around the exact native
+`CameraManager::SetRenderCamera` hook and the split-screen render-state slot.
+It records each requested camera name and caller, the native `IsUsingSkill`
+owner flags, the routing decision, and the global/scene/Player 1/Player 2
+camera matrices on every rendered skill frame. It does not write camera or
+gameplay state.
+
+Two consecutive Ailish Witches' Kiss casts produced the same native sequence:
+
+- The Ailish skill flag became active at trace time `0 ms`.
+- Native requested `InitCam` at `14–26 ms`. SudekiMP inferred Ailish as the
+  only character using a skill and routed its render state to Player 1 only.
+- Native requested `SkillCam` at `3268 ms`, again routed to Player 1 only.
+- Native requested `default` at `9564 ms`; this restored Player 1's ordinary
+  viewport camera. The skill flag cleared at about `9696 ms`.
+
+All six calls returned through RVA `0x0023525F`. Static disassembly identifies
+that address as the return site in a generic native indirect-call/event thunk,
+not yet the upstream skill-state function. Camera names and timings are
+confirmed; the higher logical caller remains open if a deeper stack trace is
+needed.
+
+Each cast contained 727 camera samples. Player 1 used three render states
+(`default`, `InitCam`, and `SkillCam`). Player 2 used exactly one render state
+for all 727 samples, and every one of its 356 rendered frames selected that
+state without a scene-slot mismatch. The global native camera also remained
+`default` throughout. This confirms that the current caster router does not
+assign Witches' Kiss's authored cameras to Tal's viewport. If a duplicate is
+still visible with this build, its remaining boundary is the cached-frame or
+post-processing presentation path rather than native camera selection.
+
+One deterministic handoff gap remains. After `InitCam` was routed, 14 Player 1
+render-start samples (about `187–199 ms`) still displayed the ordinary native
+camera before the scene slot began presenting `InitCam`. During this interval
+the authored `InitCam` matrix was already rotating off-screen. This coincides
+with the transient Quick Menu active state after the ordinary menu payload has
+closed. Player 2 had zero camera-state mismatches. Treat this as a menu-to-skill
+presentation-cadence issue, separate from caster ownership.
+
+Confidence: high. Both casts repeated the same requests, timings, state
+ownership, and scene-slot results on the supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+### 2026-08-17 — Spirit non-caster movement boundary
+
+Pure Land exposed a second global single-player assumption after its cameras
+were isolated: Tal could rotate but the Spirit presentation state prevented his
+normal movement submission from producing useful displacement. The confirmed
+lock appears as arbiter bit `0x00080000`. SudekiMP now virtualizes only that bit
+around Player 2's existing movement submission and, while the exact non-caster
+Spirit predicate remains true, submits collision-aware absolute delta through
+native `CMovementController::SetAbsoluteDeltaMovement` RVA `0x000030A0`.
+Ordinary movement and the caster remain untouched.
+
+Live traces separated motion from presentation. Tal's character position,
+render-model root, and Camera 2 target all moved together, proving that the
+fallback does not merely displace the camera or leave the visible model behind.
+The initial one-unit scale looked extremely slow; a normal cleanroom control
+trace measured roughly `6.4` world units per second at full input. Applying that
+pace produced movement the user judged normal during Pure Land.
+
+The remaining defect is animation ownership. During Spirit, Tal continued to
+use idle selector `17` on channel 0 at rate `12`, with channel 1 dormant, even
+while his transform moved. The corresponding normal full-speed combat trace
+used selector `36` on channel 0 at approximately `37.17` and selector `32` on
+channel 1 at approximately `30.98`. A narrowly gated Tal presentation
+compositor now applies only that observed pair during the non-caster Spirit
+window and never calls the high-level animation controller or manually ticks
+the renderer. Its initial resource-type gate incorrectly used `0x00`; the live
+party mapping proves Tal is `0x23`, Ailish `0x01`, Buki `0x05`, and Elco `0x0E`,
+so the Tal gate has been corrected. Visible running remains a pending live
+acceptance item; the confirmed result at this checkpoint is normal-speed,
+collision-aware non-caster displacement.
+
+The PE32 build and exact supported-image install/restore regression pass. This
+prototype is intentionally limited to Tal until equivalent native locomotion
+selectors are measured for the other characters.

@@ -25,6 +25,8 @@ BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled);
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
 BOOL SudekiMpControlSeparationPlayerTwoActive(void);
 BOOL SudekiMpControlSeparationInputReady(void);
+BOOL SudekiMpControlSeparationSecondPlayerMovementActive(void);
+float SudekiMpControlSeparationSecondPlayerMovementMagnitude(void);
 void SudekiMpControlSeparationSetUpdateObserver(
     SudekiMpControlUpdateObserver observer
 );

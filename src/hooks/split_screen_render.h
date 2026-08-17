@@ -61,6 +61,7 @@ BOOL SudekiMpTransformPlayerTwoMovement(
     float world_direction[3]
 );
 BOOL SudekiMpAlignPlayerTwoFacingToCamera(void *character);
+BOOL SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(void *character);
 void SudekiMpSplitScreenBeginSkillCameraCall(void *caster);
 void SudekiMpSplitScreenEndSkillCameraCall(void);
 void SudekiMpSplitScreenClearSkillCamera(void *caster, const char *reason);
