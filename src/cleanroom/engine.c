@@ -459,6 +459,10 @@ static void *actor_pointer(SudekiMpCleanroomActor actor) {
     return lookup_entity(get_pc, actor_resources[actor]);
 }
 
+void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
+    return actor_pointer(actor);
+}
+
 static BOOL prepare_training_inventory(void) {
     void **inventory_global;
     void **item_database_global;

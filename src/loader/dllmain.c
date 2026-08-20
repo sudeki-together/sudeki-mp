@@ -201,6 +201,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL split_screen_ranged_model_isolation_enabled;
     BOOL spirit_strike_viewport_effect_isolation_enabled;
     BOOL cleanroom_menu_enabled;
+    BOOL coop_roster_menu_enabled;
+    BOOL skip_startup_movies;
     BOOL cleanroom_multiplayer_integration;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
@@ -429,6 +431,24 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableCleanroomMenu"
     );
+    coop_roster_menu_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableCoopRosterMenu"
+    );
+    skip_startup_movies = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"SkipStartupMovies"
+    );
+    if (coop_roster_menu_enabled && cleanroom_menu_enabled) {
+        SudekiMpLogWrite(
+            "coop_roster_menu_config=invalid reason=mutually_exclusive_with_cleanroom_menu\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     cleanroom_multiplayer_integration = cleanroom_menu_enabled &&
         control_separation_enabled && split_screen_render_enabled;
     GetPrivateProfileStringW(
@@ -953,6 +973,30 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         cleanroom_menu_enabled ? "true" : "false",
         (unsigned long)cleanroom_menu_virtual_key
     );
+    SudekiMpLogFormat(
+        "coop_roster_menu_requested=%s virtual_key=0x%02lx\r\n",
+        coop_roster_menu_enabled ? "true" : "false",
+        (unsigned long)cleanroom_menu_virtual_key
+    );
+    if (coop_roster_menu_enabled) {
+        if (!SudekiMpInstallCoopRosterMenu(
+                game_module,
+                cleanroom_menu_virtual_key,
+                skip_startup_movies
+            )) {
+            SudekiMpLogFormat(
+                "coop_roster_menu_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
+            SudekiMpLogWrite("status=coop_roster_menu_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
+        }
+        SudekiMpLogWrite("coop_roster_menu_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
+    }
     if (cleanroom_menu_enabled) {
         BOOL cleanroom_installed = cleanroom_multiplayer_integration ?
             SudekiMpInstallIntegratedCleanroomMenu(
@@ -1158,6 +1202,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !control_separation_enabled &&
         !split_screen_render_enabled &&
         !cleanroom_menu_enabled &&
+        !coop_roster_menu_enabled &&
         !player_movement_trace_enabled) {
         SudekiMpLogClose();
     }

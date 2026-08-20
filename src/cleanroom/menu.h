@@ -8,6 +8,11 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     HMODULE game_module,
     UINT toggle_key
 );
+BOOL SudekiMpInstallCoopRosterMenu(
+    HMODULE game_module,
+    UINT toggle_key,
+    BOOL skip_startup_movies
+);
 void SudekiMpCleanroomMenuUpdate(void);
 void SudekiMpCleanroomMenuRender(void);
 void SudekiMpUninstallCleanroomMenu(void);

@@ -209,6 +209,168 @@ The current `CGameCameraMode` singleton pointer lives at RVA `0x00408DA8`. Its `
 
 `Camera::Target` virtual `+0x10` supplies position and virtual `+0x20` supplies a complete transform. `GameObjectTarget` resolves those values from the attached entity. Live exploration places an `OffsetTarget` (vtable RVA `0x002D436C`) in slot 0; it composes that entity transform with native framing while slot 1 keeps the underlying `GameObjectTarget`. `MatrixTarget` supplies the same interface from its owned matrix, with translation in D3DX row `_41/_42/_43`. The live-confirmed midpoint prototype preserves the slot-0 framing transform, shifts it to the two-character centroid, and restores both native slots. Zoom and camera distance remain separate unresolved state.
 
+## Native title/front-end menu state machine
+
+The exact-build, read-only `tools/ghidra/TitleMenuReport.java` traces the title/front-end menu without modifying the executable or UI state. The native menu is not a texture-only overlay: a front-end controller at `FUN_004A1950` (RVA `0x000A1950`) populates localized menu labels and their action names, while `FUN_004A0360` (RVA `0x000A0360`) consumes the selected action and advances the front-end state machine.
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Native menu population/refresh | `0x000A1950` / `0x004A1950` | Registers localized keys with `FUN_005B9FC0` and action names with `FUN_004049C0`; writes the active item count at controller `+0x17D8` and selected index at `+0x17D4` |
+| Front-end state/update caller | `0x000A0F40` / `0x004A0F40` | Handles front-end states, calls the menu population routine, performs native sound/fade/transition work, and resets/rebuilds menu entries on state changes |
+| Front-end action dispatcher | `0x000A0360` / `0x004A0360` | Compares the selected action name and routes `Options`, `Continue`, `DashBoard`, `ShowFrontEndCredits`, and `QuitGame` to native states |
+| Native localized-label registration | `0x001B9FC0` / `0x005B9FC0` | Receives keys such as `NewGame`, `Options`, `Continue`, `Credits`, and `QuitGame` |
+| Native action binding | `0x000049C0` / `0x004049C0` | Receives action names such as `StartNewGame`, `Options`, `ShowFrontEndCredits`, and `QuitGame` |
+
+The executable stores the UTF-16 labels `Options`, `Continue`, `Credits`, and `QuitGame` at VA `0x006CB140`, `0x006CB164`, `0x006CB178`, and `0x006CB188`; all references resolve to the `FUN_004A1950` menu builder. The builder has distinct branches for a fresh title menu, a save-available menu, and the in-game/front-end return path. In the action dispatcher, selecting `Options` sets the pending operation at controller `+0x4C` to `1`, changes the state to `6`, and re-enters `FUN_004A0F40`; selecting `Continue` uses the same options state with pending operation `2`. Credits enter state `10` and set the front-end credits flag; `QuitGame` calls `PostQuitMessage(0)`.
+
+This is the correct future seam for a native co-op roster: observe or extend the front-end state/action boundary after the title menu's own labels and callbacks are understood. The current SudekiMP roster remains an opt-in diagnostic overlay; it does not patch these native states, localized resources, or action callbacks. Confidence: high for the menu population/action routing, medium for the meaning of undocumented controller offsets beyond the state/index fields listed above.
+
+### Native title-menu assets
+
+The exact-build, read-only `tools/ghidra/TitleMenuAssetReport.java` traces the
+language-indexed presentation resources used by the five stock title rows.
+`FUN_005132B0` initializes the resource records at runtime; the corresponding
+tables are zero-filled in the static image, so reading their uninitialized
+values alone is insufficient.
+
+| Row | Resource table VA | Indices | English resource |
+| --- | --- | --- | --- |
+| Continue | `0x006C2BEC` | `363–369` | `SFE_OPTION1.SQX` |
+| New Game | `0x006C2C08` | `370–376` | `SFE_OPTION2.SQX` |
+| Options | `0x006C2C24` | `377–383` | `SFE_OPTION3.SQX` |
+| Credits | `0x006C2C40` | `384–390` | `SFE_OPTION4.SQX` |
+| Quit | `0x006C2C5C` | `391–397` | `SFE_OPTION_QUIT.SQX` |
+
+Each seven-entry family follows language order English, French, German,
+Spanish, Italian, Japanese, and Russian. The non-English filenames use the
+suffixes `_FRE`, `_GER`, `_SPA`, `_ITA`, `_JAP`, and `_RUS`. These SQX files
+are label presentations rather than generic text slots; a new `Single Player`
+or `Co-op` row must not pretend that the stock label can be renamed in place.
+
+The reusable native geometry is separate. The executable and `SOLData.baf`
+identify `SFE_OPTION_START.HOM`, `SFE_OPTION1.HOM` through
+`SFE_OPTION5.HOM`, `SFE_Option_Bar`, `SFE_Option_Bar_Highlight`, and
+`SFE_Option_Bar_Select`. Each numbered option object exposes native `IDLE`,
+`ON`, `OFF`, `HIGHLIGHT`, `SELECT`, and `UP` animations; the start object
+exposes `IDLE`, `ON`, and `OFF`. The front-end background exposes `IDLE`,
+`ON`, `OFF`, `UP`, `UP_IDLE`, `UP2`, `UP2_IDLE`, and `DOWN`. Other reusable
+front-end nodes include `SFE_Background_Characters`, `SFE_MenuPanel`,
+`sfe_menu_titlebar`, `sfe_menu_listbar`, and `sfe_menu_infobar`.
+
+Native character portraits are available uniformly as
+`SUI_PORTRAIT_TAL.SQX`, `SUI_PORTRAIT_AILISH.SQX`,
+`SUI_PORTRAIT_BUKI.SQX`, and `SUI_PORTRAIT_ELCO.SQX`. Their existing resource
+route is resource type -> RVA `0x0003F430` -> table RVA `0x002C2A94` ->
+narrow selector RVA `0x0015C070`. These are preferable to the unevenly named
+character-logo resources for the first roster page.
+
+Live construction refined that boundary. Each numbered `SFE_OPTION*.HOM`
+renderer exposes one outer animation submodel and no separately addressable
+named component for its text shape. `SFE_OPTION_START.HOM` is not a blank bar
+either: its presentation includes the baked `Press START` label. Reusing
+either resource therefore leaks a stock word into a new logical row.
+
+The working boundary retains the native state-10 fade and queued-font
+function at RVA `0x00009930`, keeps the resident rows hidden behind private
+OFF-state objects, and recreates only the label-free button as a
+runtime-generated D3D9 texture. Its original-code renderer composes a soft
+shadow, rounded dark rim, and tighter inset gradient bar; the two rounded
+boundaries use quarter-pixel coverage sampling, while selection adds the
+measured cyan-left/gold-right color language. It is drawn immediately before
+the native CUIScene text flush at call RVA `0x0000A760` and contains no
+extracted game pixels. Portraits can still load from the user's installed
+archives; SudekiMP does not copy or redistribute those resources.
+
+The follow-up exact-build `TitleMenuLifecycleReport.java` removed the need to
+construct extra row objects for the first page. The PC front-end controller
+retains five native option-row animation objects at `+0x70..+0x80`, a separate
+start object at `+0x84`, and five localized label-presentation objects at
+`+0x88..+0x98`. `FUN_004A16F0` (RVA `0x000A16F0`) reads the active count at
+`+0x17D8` and selection at `+0x17D4`, then queues animation state `3` on the
+selected row and state `0` on the other active rows. The same native queue
+helper at RVA `0x00120260` accepts state `2` for unused rows. Label resource
+replacement and tinting remain separately owned by `FUN_004A1950`.
+
+The first resident-page prototype therefore borrows those five existing rows,
+never allocates or destroys a front-end object, hides the stock label
+presentations through their common active-state notification, queues native
+`IDLE`/`OFF`/`HIGHLIGHT` states on the bar rows, and submits only SudekiMP's
+words through the native font queue. It snapshots and restores the five label
+active states before calling the unchanged menu builder on exit. Every pointer,
+vtable notification, and state-queue target is checked before use; a failed
+gate falls back to the text-only roster page. Live visual acceptance remains
+pending.
+
+Live testing rejected that borrowed-row design as the final menu architecture.
+Although roster input can be isolated, the bars remain the title page's same
+five physical row objects, so their presentation necessarily moves in sync
+with `Continue`, `New Game`, and the other stock choices. This cannot be fixed
+by changing labels, colors, or queued row states.
+
+The native `Options` route demonstrates the required independent-page seam.
+`FUN_004A0360` first performs the normal front-end transition, writes pending
+operation `1` at controller `+0x4C`, enters state `6`, and calls
+`FUN_004A0F40`. In that state, `FUN_004A0F40` assigns the separate page object
+at controller `+0xB0` to the active-page slot at `+0xAC`, then activates that
+object through virtual slot `+0x48`. Pending operation `2` selects the
+alternate object at `+0xB4`. Therefore a proper Sudeki Together page must own
+its own page object and child rows, and participate in this activation and
+restoration lifecycle; it must not borrow the resident title rows. A read-only
+runtime trace now records the active/options/alternate pointers and vtable RVAs
+immediately before and after one native Options activation so the exact page
+class and cleanup path can be identified before allocation is attempted.
+
+That live trace passed. Before activation, controller state was `5`, mode was
+`0`, and active page `+0xAC` was null. After activation, state was `6`, previous
+state was `5`, mode was `1`, and `+0xAC` exactly matched the Options object at
+`+0xB0`. Its vtable is RVA `0x002D1CB4`; RTTI identifies the class as
+`UILayerOptionsMenu`. The alternate `+0xB4` object has a distinct vtable at RVA
+`0x002CA89C`.
+
+`UILayerOptionsMenu` is a specialized `0x198`-byte object constructed at VA
+`0x0051A7B0`. Its RTTI hierarchy contains `UILayerSubMenu`, `UILayer`,
+`UIGameSpeedListener`, and `UIAnimationListener`. Virtual `+0x48` at VA
+`0x0051CC80` is the activation boundary observed from `FUN_004A0F40`; it
+allocates Options-specific child objects before dispatching virtual `+0x60`.
+Virtual `+0x4C` at VA `0x0051CD00` releases those children and dispatches
+virtual `+0x68`. The destructor path begins at VA `0x0051C050`. Construction
+also publishes a singleton at VA `0x007C3030`, so constructing another raw
+`UILayerOptionsMenu` would collide with native Options ownership and is
+rejected. The supported design is a SudekiMP-owned `UILayerSubMenu`-compatible
+page with separately owned native row children, registered through the same
+active-page lifecycle.
+
+### Native queued-font text submission and alignment
+
+Read-only decompilation of the queued-font path (`TextSubmitReport.java` plus
+follow-up traces) resolves the argument semantics used by the roster page.
+
+| Role | RVA / VA | Confirmed behavior |
+| --- | --- | --- |
+| Queued text submit | `0x00009930` / `0x00409930` | `FUN_00409930` takes the `CUIScene` in `ECX`, a UTF-16 SSO text record in `EAX`, and five stack args: font, alignment, x, y, color. Writes entry `[0..3]=font,alignment,x,y`, `[0x13]=color`, `[0x14]=0`. |
+| Submit variant | `0x00009990` / `0x00409990` | Identical layout but writes `[0x14]=1`. |
+| Queue entry allocator | `0x00009810` / `0x00409810` | Returns the next `0x54`-byte entry from the CUIScene ring buffer (`scene+0x124` array, `+0x11c`/`+0x128` read/write cursors, backing pointer `scene+0x12C`). |
+| Queue consumer | `0x0000A820` / `0x0040A820` | `FUN_0040A820` (CUIScene render) iterates the queue: reads `[0]` as font, `[2]` as x, `[3]` as y, `[0x13]` as ARGB color, `[0x14]` as the draw-variant flag. It does **not** read `[1]` here. |
+| Text draw (flag 0) | `0x001D11F0` / `0x005D11F0` | `FUN_005d11f0(alignment, x, y)`; sets the layout object `+0x20` to the mode. |
+| Text draw (flag 1) | `0x001D12A0` / `0x005D12A0` | `FUN_005d12a0(alignment, x, y)`; same mode field, minor layout variant. |
+
+Entry layout (0x54 bytes): `[0]` font, `[1]` alignment, `[2]` x, `[3]` y,
+`[4]` SSO length flag (`0x80000000 | n`), `[5..]` inline UTF-16 text,
+`[0x13]` ARGB color, `[0x14]` draw-variant flag.
+
+Alignment semantics (the draw helpers' mode field `+0x20`): **0 = center at x,
+1 = left at x, 2 = right at x.** The front-end text space is 640x480 units
+(the right-align branch uses `0x1E0` = 480 as canvas height), so the horizontal
+center is **x = 320 = `0x140`**. Native call sites confirm this: centered title
+labels submit `x = 0x140` with alignment `0` (e.g. `FUN_00409990(1, 0, 0x140,
+0x122, …)` in `FUN_00578C90`), the right-side version string uses `x = 0x22A`
+(554) with alignment `2` (`FUN_004A3760`), and left-anchored rows use alignment
+`1` with x values 86/220/342/496/515. The earlier roster value of `x = 145`
+was a misread of the left edge of centered text (320 minus roughly half a
+heading's width), not the API's center coordinate; the corrected value is
+`0x140`. Confidence: high (decompiler-confirmed mode field plus consistent
+native call sites); executable SHA256 `8ceb1d3c…bb94`.
+
 ## D3D9 frame and split-screen render seam
 
 | Role | RVA / VA | Confirmed behavior |
@@ -395,3 +557,16 @@ Opcode `0x28`'s handler resolves a script wrapper to its native object immediate
 The compiled `TsaPlayCamera` wrapper starts at bytecode offset `0x00004532`. It configures `CSpiritCam`, calls `StartCam` at `0x000045EF`, waits for the selected TSA animation, and then selects the cinematic render camera. Native `CSpiritCam::StartCam` is exported at RVA `0x00012910`. Its float argument is stored at `CSpiritCam + 0x1D4`; camera initialization multiplies that value by another local factor and `24.0` before configuring playback.
 
 Successful casts execute one cinematic selection and one normal-camera restore. Accelerating only Elco shortens the selected interval from `11.585 s` to approximately `5.92 s`, causing the normal restore to interrupt the authored presentation after three visible angles. An exact-gated `2.0x` change to the `StartCam` float let the presentation complete all four angles within the same approximately `5.92 s` interval. This rate is independent of global simulation speed and Elco's model-animation multiplier.
+
+## Front-end portrait texture ownership
+
+| Object / function | RVA / offset | Confirmed behavior | Confidence |
+| --- | ---: | --- | --- |
+| `cSOLMaterial` vtable | `0x002DEB7C` | Identifies the material stored at `UIElementCycleIcon+0x34`; `material+0x08` points to the resident-texture array | High |
+| `cResidentD3DTexture` vtable | `0x002DD80C` | Identifies `material_texture_array[0]`; `+0x04` points to its resident backend | High |
+| Resident backend GPU field | `backend+0x04` | Holds a valid Wine `IDirect3DTexture9*` for the decoded portrait | High |
+| `UIElementCycleIcon` visibility | `0x0015C020` / `0x0055C020` | State `2` hides the original native anchor without releasing the material or resident texture | High |
+
+This chain was live-confirmed for the Load Game page's Ailish, Tal, Buki, and
+Elco portraits. It is a borrowing boundary only: the game continues to own the
+material, resident wrapper, backend, and COM texture.

@@ -16,6 +16,7 @@ const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);
 BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module);
 BOOL SudekiMpCleanroomEngineWorldReady(void);
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor);
+void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor);
 BOOL SudekiMpCleanroomEngineActorPosition(
     SudekiMpCleanroomActor actor,
     float position[3]

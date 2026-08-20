@@ -28,6 +28,15 @@ BOOL SudekiMpInstallSplitScreenRender(
 );
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled);
 BOOL SudekiMpSplitScreenRuntimeEnabled(void);
+/* Lock the two party identities for the current co-op gameplay session. */
+BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two);
+BOOL SudekiMpSplitScreenRolesLocked(void);
+BOOL SudekiMpSplitScreenSetRosterTypes(
+    unsigned int player_one_type,
+    unsigned int player_two_type
+);
+/* Apply a title-selected roster from the game/controller update thread. */
+void SudekiMpSplitScreenApplyRosterOnGameThread(void);
 BOOL SudekiMpSplitScreenQuickMenuLiveViewAccepted(
     BOOL isolation_requested,
     BOOL resources_ready,

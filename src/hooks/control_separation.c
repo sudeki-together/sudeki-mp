@@ -165,6 +165,7 @@ static void *group_camera_original_targets[2];
 static void *group_camera_target_list;
 static unsigned int group_camera_last_rejection;
 static BOOL player_two_requested;
+static BOOL role_lock_active;
 static DWORD player_two_request_last_attempt;
 static SudekiMpControlUpdateObserver update_observer;
 
@@ -2121,11 +2122,28 @@ BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
+    if (role_lock_active && !enabled) {
+        SetLastError(ERROR_LOCK_VIOLATION);
+        SudekiMpLogWrite(
+            "control_separation event=player_two_request status=rejected "
+            "reason=co_op_roles_locked\r\n"
+        );
+        return FALSE;
+    }
     player_two_requested = enabled != FALSE;
     player_two_request_last_attempt = 0u;
     SudekiMpLogFormat(
         "control_separation event=player_two_request source=api state=%s\r\n",
         player_two_requested ? "enabled" : "disabled"
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled) {
+    role_lock_active = enabled != FALSE;
+    SudekiMpLogFormat(
+        "control_separation event=co_op_roles state=%s\r\n",
+        role_lock_active ? "locked" : "unlocked"
     );
     return TRUE;
 }
@@ -2273,6 +2291,7 @@ BOOL SudekiMpInstallControlSeparation(
     selected_virtual_key = toggle_virtual_key;
     hotkey_was_down = FALSE;
     overridden_character = NULL;
+    role_lock_active = FALSE;
     player_two_requested = FALSE;
     player_two_request_last_attempt = 0u;
     second_player_movement_enabled = enable_second_player_movement;
@@ -2411,6 +2430,7 @@ void SudekiMpUninstallControlSeparation(void) {
     spirit_direct_movement_last_trace_tick = 0u;
     game_base = NULL;
     overridden_character = NULL;
+    role_lock_active = FALSE;
     player_two_requested = FALSE;
     player_two_request_last_attempt = 0u;
     selected_virtual_key = 0;

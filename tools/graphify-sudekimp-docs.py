@@ -75,6 +75,10 @@ CONCEPTS = {
         "Native Cleanroom Test Harness",
         ("cleanroom", "training loadout", "menu", "native test-arena harness"),
     ),
+    "native_title_menu": (
+        "Native Title and Front-End Menu State Machine",
+        ("native title/front-end menu", "title/menu state machine", "native menu population", "front-end action dispatcher"),
+    ),
     "ranged_presentation": (
         "Viewport-Owned Ranged Presentation",
         ("viewport-owned ranged", "render-only ranged", "native ranged-presentation"),

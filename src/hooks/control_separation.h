@@ -22,6 +22,7 @@ BOOL SudekiMpInstallControlSeparation(
     float input_bridge_deadzone
 );
 BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled);
+BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled);
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
 BOOL SudekiMpControlSeparationPlayerTwoActive(void);
 BOOL SudekiMpControlSeparationInputReady(void);

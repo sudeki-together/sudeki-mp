@@ -2217,3 +2217,575 @@ collision-aware non-caster displacement.
 The PE32 build and exact supported-image install/restore regression pass. This
 prototype is intentionally limited to Tal until equivalent native locomotion
 selectors are measured for the other characters.
+### 2026-08-17 — Co-op role lobby and immutable session ownership
+
+The split-screen resolver previously selected the first active non-lead party
+member on every ownership poll. That was useful for experiments but allowed a
+native character switch or party-order change to invalidate the camera, HUD,
+input, and animation bindings independently.
+
+The integrated cleanroom now opens a role-lobby overlay when the testroom is
+ready. Ailish remains the native Player 1 lead for this first safe pass. The
+user can spawn/select exactly one of Tal, Buki, or Elco as the Player 2
+candidate, then activate `CO-OP READY`. The mod resolves both native entity
+pointers, enables Player 2 input and split rendering, and records an immutable
+role tuple for the session. The resolver accepts only that tuple and the
+control/split APIs reject attempts to disable Player 2 or remove actors after
+the lock. Multiple active P2 candidates are rejected rather than guessed.
+
+This is a session lock, not a title-screen character-select implementation.
+The testroom is already loaded underneath the overlay, so gameplay is not yet
+paused by a native lobby state. Arbitrary Player 1 selection, controller join
+readiness, and safe transition back to a new lobby remain open. These are
+deliberately deferred until a native pre-game/party-commit boundary is found.
+
+Evidence: supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Build, `SudekiMP.CleanroomEngineTest.exe`, and
+`SudekiMP.SkillTraceImageTest.exe` pass. No game binary or asset was modified.
+
+### 2026-08-17 — Title-screen roster selection prototype
+
+The role-lobby direction has been moved to the pre-game boundary. With
+`EnableCoopRosterMenu=true`, SudekiMP installs a title roster overlay rather
+than opening the cleanroom developer menu. Up/Down selects the P1 or P2 row,
+Left/Right chooses Tal, Buki, Elco, or Ailish, and Enter rejects duplicate
+choices and locks the pair for the process session. The selected resource types
+are retained until DLL uninstall; no game asset or save file is modified.
+Enabling this mode also provisions the already-tested split-camera/control
+stack, but leaves it runtime-disabled until the roster is actually applied.
+
+Once the native party group exists, the controller-update hook applies the
+selection on Sudeki's own game thread. It pulses the native Next/Previous
+character action fields (`controller+0xF4`/`+0xFC`) until the selected P1 is the
+front party entry, then waits for the selected P2 to become available in the
+story. Only after both identities are present does SudekiMP take the immutable
+role lock used by split-screen/HUD/input ownership. A character who has not
+joined the story yet therefore remains unavailable rather than being spawned or
+silently substituted.
+
+This is the first title-selection foothold, not a complete title UI replacement:
+the overlay is intentionally a small SudekiMP texture and role selection is
+process-session state. Save-file persistence, controller-ready prompts, and
+story-specific “character unavailable” messaging remain future UI work. The
+native party rotation is exact-build gated and fails closed if the party or
+controller action fields are not valid.
+
+### 2026-08-17 — Native title/front-end menu trace
+
+Before attempting to make the roster look native, the exact GOG executable was
+traced read-only with `tools/ghidra/TitleMenuReport.java`. The report confirms
+that Sudeki's title screen and front-end settings are driven by a native menu
+state machine rather than by a single composited image.
+
+`FUN_004A1950` (RVA `0x000A1950`) rebuilds the menu entries. It registers
+localized keys (`NewGame`, `Options`, `Credits`, `QuitGame`, and the save-aware
+`Continue` path) through `FUN_005B9FC0`, binds the corresponding action names
+through `FUN_004049C0`, and stores the active item count at controller
+`+0x17D8` and the selected index at `+0x17D4`. Its callers are in the native
+front-end setup/update routines at `FUN_004A0F40`, `FUN_004A0060`, and
+`FUN_004A0360`.
+
+`FUN_004A0360` is the action boundary. It compares the selected action string:
+`Options` enters front-end state `6` with pending operation `+0x4C=1`, while
+`Continue` enters the same state with `+0x4C=2`. `ShowFrontEndCredits` enters
+state `10` and sets the credits flag; `QuitGame` calls `PostQuitMessage(0)`.
+The executable's UTF-16 labels are at VA `0x006CB140` (`Options`),
+`0x006CB164` (`Continue`), `0x006CB178` (`Credits`), and `0x006CB188`
+(`QuitGame`).
+
+This establishes the next safe direction: trace the native state-6 options
+builder and its input/selection callback before attempting a native roster
+replacement. No game memory or asset was changed by this pass, and the current
+SudekiMP roster overlay remains a reversible diagnostic only.
+
+### 2026-08-17 — Native New Game roster interception prototype
+
+The first title roster prototype now sits on Sudeki's actual New Game action
+rather than opening unconditionally at DLL startup. The exact action hook at RVA
+`0x000A0360` recognizes the native `StartNewGame` item, retains the original
+controller/phase/event arguments, and returns without starting save creation while
+the two-player roster is selected. Enter rejects duplicate character choices and
+locks the tuple; SudekiMP then applies the selected resource types and replays the
+unchanged native action on the game thread.
+
+The visible selector is still a small reversible SudekiMP overlay. It displays
+character names and badge/initial markers for Ailish, Tal, Buki, and Elco. Chosen
+roles are persisted in `SudekiMP-roster.ini` beside the working executable and are
+loaded on the next launch. This is intentionally a sidecar profile, not a write to
+Sudeki's copyrighted save format; binding the tuple to each actual save slot remains
+open. The native title state, save creation, and subsequent loading are not replaced.
+
+Evidence: exact executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`; native menu
+builder/action boundaries from `TitleMenuReport.java`; `CallHookTest` and exact-image
+regression pass; build and `git diff --check` pass. Live confirmation still needs a
+New Game click, roster lock, and observation that the original game flow resumes.
+
+### 2026-08-18 — Native title asset inventory
+
+Live testing confirmed that the intercepted New Game flow now performs the
+native fade to black, accepts a roster lock, and resumes the original game
+start. The remaining visual problem is presentation: the selection page is
+still drawn as queued text over black rather than as a resident Sudeki
+front-end page.
+
+The exact-build, read-only `TitleMenuAssetReport.java` now identifies the five
+language-indexed title-label tables and traces their runtime initializers. The
+English rows are `SFE_OPTION1.SQX` (Continue), `SFE_OPTION2.SQX` (New Game),
+`SFE_OPTION3.SQX` (Options), `SFE_OPTION4.SQX` (Credits), and
+`SFE_OPTION_QUIT.SQX` (Quit). Each table contains seven language variants in
+English/French/German/Spanish/Italian/Japanese/Russian order. This confirms
+that the visible stock words are baked into separate SQX presentation
+resources; they are not generic native text fields that can safely be renamed.
+
+The animated row geometry is reusable and separate from those labels.
+Confirmed resources include `SFE_OPTION_START.HOM`, `SFE_OPTION1.HOM` through
+`SFE_OPTION5.HOM`, `SFE_Option_Bar`, `SFE_Option_Bar_Highlight`, and
+`SFE_Option_Bar_Select`. The numbered option objects expose `IDLE`, `ON`,
+`OFF`, `HIGHLIGHT`, `SELECT`, and `UP` animation states. The front-end also
+contains `SFE_Background_Characters`, `SFE_MenuPanel`, `sfe_menu_titlebar`,
+`sfe_menu_listbar`, and `sfe_menu_infobar` nodes. Character portraits are
+available as the uniform `SUI_PORTRAIT_{TAL,AILISH,BUKI,ELCO}.SQX` family.
+
+The intended official-looking mode page can therefore use Sudeki's native
+fade, backdrop, option-bar geometry, highlight/select animations, portrait
+resources, and queued font renderer while supplying original labels such as
+`Single Player` and `Co-op`. It must load every game-owned resource from the
+user's installed archives at runtime; no extracted image, model, or archive is
+added to the repository. The next engine question is the safe constructor and
+ownership lifecycle for additional resident front-end row objects. Until that
+is confirmed, blindly replacing one of the five native title item pointers is
+rejected.
+
+Confidence: high for the label-resource mapping, language order, available
+bar animation names, and portrait family; medium for which panel/background
+combination best matches the final roster layout; open for safe creation and
+destruction of new title-row instances.
+
+### 2026-08-18 — Independent Sudeki Together buttons rendered
+
+Live probes closed the remaining title-row ambiguity. The cAnim renderer
+vtable for the numbered option resources has one outer submodel and zero
+separately addressable named components; `OptionN_textShape` cannot be hidden
+through that public component interface. A controlled construction of
+resource `0x60` also proved `SFE_OPTION_START.HOM` is not reusable blank
+geometry: it visibly contains `Press START`. The numbered resources similarly
+retain their localized stock words. Both asset-reuse approaches are rejected.
+
+The accepted implementation recreates the label-free button at runtime from
+the observed geometry and color language. The first single-contour capsule
+was visually rejected as too flat and unlike the shipped button. The revised
+renderer uses three original-code layers: a soft rear shadow, a dark rounded
+outer rim, and a tighter, less-rounded inset gradient bar. The selected inset
+has cyan illumination from the left and gold illumination from the right.
+Both rounded boundaries use quarter-pixel coverage sampling rather than the
+first prototype's rectangular border test. It is generated directly into a
+dynamic D3D9 texture, so the repository contains no copied Sudeki texture. An
+exact relative-call hook at
+RVA `0x0000A760` draws that texture after the front-end backdrop and directly
+before Sudeki's ordinary CUIScene UI flush at RVA `0x0000A820`; the existing
+native queued-font labels are consequently rendered on top. Five private
+numbered row objects remain OFF and temporarily replace the resident title
+row pointers during rendering, preventing Continue/New Game/Options/Credits/
+Quit from leaking through without mutating or destroying the stock objects.
+
+Virtual-display acceptance confirmed both mode-page states: `Single Player`
+and `Co-op` are the only visible rows, and moving selection transfers the
+cyan/gold highlight without moving or revealing the underlying title menu.
+The three-layer refinement was captured at
+`/tmp/sudekimp-layered-button-pass.png`; this path is only a local research
+capture and is not repository content. The exact supported executable
+regression test and Linux MinGW build pass.
+
+Confidence: high for the render order, isolation from the stock title rows,
+native text ownership, and runtime-only artwork policy; medium for final
+spacing/polish until character portraits are added to the subsequent roster
+pages.
+
+### 2026-08-18 — Resident native title-row prototype
+
+`TitleMenuLifecycleReport.java` now confirms that a new constructor is not
+required for the first official-looking roster page. The live PC front-end
+controller already owns five resident animated rows at `+0x70..+0x80` and five
+separate localized label presentations at `+0x88..+0x98`. Selection refresh
+RVA `0x000A16F0` queues state `3` for the highlighted row and state `0` for
+the remaining active rows; the shared UI-state request at RVA `0x00120260`
+also supports the native state `2` used to turn unused rows off.
+
+The opt-in roster build now borrows those resident objects. Each roster page
+sets the controller's native count and selection, sends the real option bars
+their `IDLE`, `OFF`, or `HIGHLIGHT` state, hides only the five stock localized
+label presentations, and renders `Single Player`, `Co-op`, character names,
+and confirmation text through Sudeki's queued PC-font helper. No archive asset
+is extracted or copied, and no title object is allocated or destroyed. The
+original label active states are snapshotted and restored before the unchanged
+menu builder reconstructs the shipped page. Pointer/vtable/state-queue gates
+fail back to the earlier text-only page.
+
+The title roster still represents identity selection, not complete in-game
+controller activation. It persists Player 1 and Player 2 character resource
+types and waits for both selected characters to be present in the story party.
+The current default configuration does not install control separation, the
+external Razer input bridge, Player 2 movement, AI override, or split-screen;
+there is consequently no missing activation key in this title-only build.
+Those systems must be enabled as an explicit co-op runtime profile after the
+roster handoff is made atomic.
+
+Automated checks: the PE32 DLL builds, the exact supported-image inert hook
+regression passes, and `git diff --check` is clean. Live acceptance must still
+confirm that only the new labels are visible, bar highlighting follows roster
+navigation, unused rows animate off, and the original title menu returns
+unchanged after Single Player, Co-op lock-in, or cancellation.
+
+### 2026-08-18 — Stock title bleed-through diagnosis
+
+The first resident-row live test established that roster input ownership was
+correct: Up/Down changed only `Single Player` and `Co-op`. Presentation was
+not yet isolated. `Continue Game`, `New Game`, `Options`, `Credits`, and
+`Quit` remained visible, the old Continue row remained highlighted behind the
+roster, and queued stock row animations replayed underneath the custom page.
+
+Two implementation assumptions were corrected against the exact native code:
+
+- the pointers at controller `+0x88..+0x98` are title text wrappers, not
+  generic active-state objects at `+0x1C`; `FUN_004A1950` controls their
+  visible color through the nested renderer at wrapper `+0x34`, vslot
+  `+0x2C`. The roster now sets those five native text renderers to zero alpha
+  and restores visibility before rebuilding the vanilla page;
+- `FUN_004A16F0` discards each resident row's pending animation queue by
+  copying the write cursor at row `+0xB8` into the read cursor at `+0xB4`
+  before requesting the next state. The roster now performs the same native
+  queue reset before requesting `IDLE`, `OFF`, or `HIGHLIGHT`, preventing old
+  title transitions from looping through the new page.
+
+The correction remains render/presentation-only. It does not modify title
+actions, save creation, controller ownership, or runtime co-op activation.
+The DLL builds and `git diff --check` passes; live acceptance is still needed
+for clean stock-label suppression, two visible animated bars, and unchanged
+vanilla restoration.
+
+The next live pass rejected two further assumptions. Zero alpha applied once
+to the nested title-label renderer did not persist, and rewriting the
+controller's localized records at `+0xD0` changed neither the visible stock
+words nor their independent presentation. It only removed the separately
+submitted Together choices. The exact render report explains why:
+`FUN_004A3760` is the PC front-end controller render callback, but it submits
+only the bottom instruction prompt for modes 5 through 7. The five stock title
+labels are resident UI objects rendered outside that callback, while
+`FUN_004A1950` can recolor them again during later native page transitions.
+
+The record rewrite has therefore been removed. The next bounded experiment
+keeps the working Together text and native option bars, then reapplies zero
+alpha to all five exact-gated stock label renderers at the controller's
+per-frame render boundary. This tests persistent presentation suppression
+without altering localized records, actions, controller state, or resource
+ownership. A successful clean page still requires live confirmation.
+
+### 2026-08-18 — Borrowed title rows rejected; native Options page boundary
+
+The subsequent live pass isolated roster navigation but confirmed that the
+highlight bars still moved in exact synchrony with the underlying title
+choices. This is expected from the object layout: SudekiMP was borrowing the
+same five row objects at controller `+0x70..+0x80`. The prototype was a
+replacement presentation over the title page, not a new native page. Further
+alpha, label, or animation-state adjustments cannot make one object maintain
+two independent selections.
+
+Read-only exact-build analysis of the stock Options route found the proper
+architecture. The action dispatcher `FUN_004A0360` performs the front-end
+transition, sets controller `+0x4C` to operation `1`, enters state `6`, and
+re-enters `FUN_004A0F40`. State 6 places the separate object stored at
+controller `+0xB0` into the active-page pointer at `+0xAC` and activates it
+through vtable slot `+0x48`; operation `2` instead selects `+0xB4`. This is a
+real independent subpage and is now the model for Sudeki Together.
+
+The next experiment is deliberately read-only: selecting native Options once
+and returning with Back logs controller state/previous/mode plus the active,
+Options, and alternate page pointers and vtable RVAs immediately before and
+after activation. No new page is allocated until this confirms the exact
+runtime class, activation transition, and restoration lifecycle.
+
+The live Options/Back pass confirmed the boundary. Immediately before Options,
+the title controller reported state `5`, previous `4`, mode `0`, and a null
+active-page pointer. Immediately after the unchanged native action returned,
+it reported state `6`, previous `5`, mode `1`, and active page `05CAC7F8`,
+exactly equal to controller `+0xB0`. Both resolved to vtable RVA `0x002D1CB4`.
+The alternate object at `+0xB4` remained separate with vtable RVA
+`0x002CA89C`.
+
+RTTI and the focused exact-hash `TitleOptionsPageReport.java` identify that
+object as `UILayerOptionsMenu`, size `0x198`, constructor VA `0x0051A7B0`,
+destructor VA `0x0051C050`, activation virtual `+0x48` VA `0x0051CC80`, and
+release virtual `+0x4C` VA `0x0051CD00`. Its base hierarchy is
+`UILayerSubMenu` -> `UILayer`, plus `UIGameSpeedListener` and
+`UIAnimationListener`. Activation constructs Options-specific children, and
+the constructor writes the native Options singleton at VA `0x007C3030`.
+Consequently, duplicating or repurposing this concrete class is unsafe. The
+new design target is a SudekiMP-owned `UILayerSubMenu`-compatible page with its
+own native option-bar children, installed into the same active-page transition
+and restored through the same Back lifecycle. This is a genuine sibling page,
+not another presentation laid over state 5.
+
+### 2026-08-18 — Independent title subpage state prototype
+
+The first bounded implementation now leaves native title state `5` instead of
+placing a second presentation over it. It validates the exact
+`UILayerSubMenu` vtable at RVA `0x002CA834` and the resident Options object
+vtable at RVA `0x002D1CB4`, copies the base page contract into mod-owned
+storage, and overrides only the known input, close-query, activation, and
+release slots. During New Game interception, controller `+0xB0` points to the
+mod page only for the native state-6 activation call. The real Options pointer
+is restored immediately afterward, while controller `+0xAC` retains the mod
+page as the active subpage and controller state remains `6`.
+
+This separates title-controller input ownership: the state-5 navigation and
+menu-builder path no longer runs beneath Together navigation. All roster-page
+events are consumed by SudekiMP until selection completes. On Single Player
+or co-op lock-in, the original active-page pointer, Options pointer, state,
+previous state, and mode are restored before the original New Game action is
+replayed. A failed pointer, vtable, or activation check restores the captured
+controller fields and declines the interception.
+
+This pass still reuses the five resident animated bar objects for its visual
+rows; it does not yet allocate independent native child-row objects. The live
+acceptance question is now narrower: confirm that the original title choices
+are absent and no longer move in sync while the Together page is active, then
+confirm that Single Player restores and starts the untouched New Game path.
+The PE32 DLL builds, the exact supported-image regression passes, and
+`git diff --check` is clean.
+
+### 2026-08-18 — Queued-font alignment semantics (roster centering bug fixed)
+
+Static-only pass (no game launched) to resolve why the roster heading, option
+labels, and `ENTER SELECTS` prompt were not centered while the button bars
+were. Decompiled the queued-font path against the supported image (SHA256
+`8ceb1d3c…bb94`).
+
+Confirmed facts:
+- `FUN_00409930` (RVA `0x00009930`) is the queued text submit: `CUIScene` in
+  `ECX`, UTF-16 SSO text in `EAX`, five stack args font/alignment/x/y/color.
+  `FUN_00409990` is the same with the draw-variant flag `[0x14]` set to `1`.
+- Entry layout (0x54 bytes): `[0]` font, `[1]` alignment, `[2]` x, `[3]` y,
+  `[4]` SSO length flag, `[5..]` UTF-16 text, `[0x13]` ARGB color, `[0x14]`
+  draw-variant flag.
+- `FUN_0040A820` (RVA `0x0000A820`, CUIScene render) consumes the queue and
+  does not read `[1]` (alignment) in this pass; it passes `(x, y, text)` to
+  the draw helpers.
+- `FUN_005d11f0` (flag 0) / `FUN_005d12a0` (flag 1) take `(alignment, x, y)`
+  and store the mode at layout object `+0x20`.
+- Alignment modes: `0` = center at x, `1` = left at x, `2` = right at x.
+- Text space is 640x480 units (right-align uses `0x1E0` = 480 height), so the
+  horizontal center is `x = 320 = 0x140`.
+
+Root cause: the roster page submitted `x = 145` with alignment `0`. Native
+centered title labels submit `x = 0x140` (e.g. `FUN_00409990(1,0,0x140,0x122)`
+in `FUN_00578C90`); `145` was the left edge of a centered heading, not the
+API's center coordinate. Fixed by submitting `x = 0x140` (constant renamed to
+`NATIVE_ROSTER_TEXT_CENTER_X`). PE32 build, `SkillTraceImageTest` under Wine,
+`continue-research.sh --check`, and `git diff --check` all pass. Live visual
+acceptance is pending a user-available run.
+
+### 2026-08-19 — Four-character roster portrait discovery
+
+The four shipped character portrait textures are confirmed in the user-owned
+`SOLData.baf` archive:
+
+- `SUI_PORTRAIT_TAL.SQX`
+- `SUI_PORTRAIT_AILISH.SQX`
+- `SUI_PORTRAIT_BUKI.SQX`
+- `SUI_PORTRAIT_ELCO.SQX`
+
+The archive's World Map UI configuration also explicitly maps these portraits
+to the four party entries. This confirms that the roster can load them from
+the legitimate local game installation at runtime; no extracted texture is
+needed or may be stored in the repository.
+
+Focused read-only exact-build Ghidra reports
+`PortraitRosterUiReport.java` and `TitlePortraitSlotReport.java` established
+an important ownership boundary. The title controller constructs a native
+portrait group at `controller+0x84` through `FUN_00559490` (VA `0x00559490`),
+and the constructor assigns that group during front-end setup
+(`FUN_0049F110`, VA `0x0049F110`). This is not a generic image widget: it
+allocates three complete `UIPortraitGizmo` objects (each 0xC00 bytes), a
+0x6C0 subordinate state object, a UI block loader, and named-anchor bindings.
+
+Title state `0x0F` activates and refreshes that existing group. It operates on
+only the two embedded cycle-icon fields at group offsets `+0x30C8+0x600` and
+`+0x30C8+0x640`; it does not expose a four-slot roster API. The narrow native
+resource selector is `FUN_0055C070` (RVA `0x0015C070`), but assignment alone
+is insufficient because the portrait/gizmo construction and attachment route
+depends on its UI scene configuration and named anchors. The combat HUD
+portrait route has the same constraint and must not be borrowed for title UI.
+
+Conclusion: the portrait assets are known and legal to load at runtime, but
+the current three-gizmo title group must not be resized, hijacked, or reused
+as a four-player roster. The next bounded research target is the World Map's
+four-party-marker presentation, or a generic title-scene `UIElementTexture`
+construction/attachment route. Either must establish object ownership,
+anchors, teardown, and resource assignment before SudekiMP creates its own
+four centered roster portraits. Player-color rings/labels remain mod-owned
+presentation around those runtime-loaded native images: P1 red, P2 blue, P3
+yellow, P4 green.
+
+### 2026-08-19 — Portrait handle boundary confirmed
+
+The roster page successfully resolves each logical `SUI_Portrait_*` key through
+Sudeki's native cache. The returned slot-4 value, however, is an opaque and
+tagged Sudeki UI texture-table handle (observed examples include
+`0x00AF575E`), not an aligned `IDirect3DTexture9*`. A short experiment that
+fed those values into a mod-owned D3D9 textured quad produced four white
+fallback rectangles. That draw path was removed rather than shipped.
+
+`GenericCycleIconReport.java` confirms the correct owned path: a
+`UIElementCycleIcon` receives the resource through `FUN_0055C070` /
+`FUN_0055C0E0`, which starts the request with the icon's pending-job list and
+then refreshes the named scene-anchor binding. The roster must use that native
+widget lifecycle (or an equally verified generic UI attachment route) before
+the shipped head art is displayed. The present page therefore keeps its
+original-code character cards, names, and player-color selection ring, while
+the user's local portrait assets remain unextracted and unredistributed.
+
+### 2026-08-20 — Native Load Game portrait-selector trace
+
+The split-screen camera trace was not required for the front-end. A temporary
+observation-only inline hook was installed at the exact portrait/resource
+selector `FUN_0055C070` (RVA `0x0015C070`) while the native **Load Game** page
+was open. The hook was hash-gated, forwarded the original six-byte prologue
+through a trampoline, and recorded raw register/stack values without changing
+resource selection or UI state.
+
+Opening the save page produced four selector calls after the native front-end
+dispatch settled. The observed raw tuples were:
+
+```text
+ECX=0x7AD7C230 EAX=0x06D57B00 stack_receiver=0x06D57BF4
+ECX=0x06D57F14 EAX=0x06D57F00 stack_receiver=0x06D57F14
+ECX=0x00000009 EAX=0x06D57C00 stack_receiver=0x06D57C34
+ECX=0x06D57F54 EAX=0x06D57F00 stack_receiver=0x06D57F54
+```
+
+This confirms that save-select portraits use the same native selector
+boundary, but their inputs are runtime resource handles/pointers rather than
+four simple character enum values. Static disassembly of the surrounding
+save-page update function (`FUN_0048C710`) shows it selecting resource handles
+from the save entry's party data and passing per-entry UI receivers at offsets
+around `+0x2C0`/`+0x300`. The four calls establish the correct live path, but do
+not yet prove which raw handle corresponds to Tal, Ailish, Buki, or Elco. A
+follow-up hook at the save-entry update boundary can correlate each receiver
+with its party record before roster-widget construction is attempted.
+
+### 2026-08-20 — Native save-page action boundary correction
+
+The first observation hook targeted `FUN_0048C710` (RVA `0x0008C710`), a
+resource-refresh helper that expects its save-entry object in `EAX`. Exact-build
+static tracing identified the actual save-page action dispatcher as
+`FUN_004898A0` (RVA `0x000898A0`), with the controller in `ECX` and two action
+arguments on the stack. Its cases for events `6` and `7` call `FUN_0048C710`
+after validating the selected save and current page state.
+
+SudekiMP now installs a hash/byte-gated, observation-only hook at
+`0x000898A0` in addition to the portrait selector trace. It records the
+controller, phase, event, argument, page mode, selection, and flags, then
+tail-jumps through the original trampoline. No save data, UI state, or
+resource handle is modified. Live callback capture remains pending because
+the automated test window reached the native confirmation dialog without
+accepting its final input; the next run should validate the event-6/7 records
+before any portrait-to-character mapping is attempted.
+
+### 2026-08-20 — Save-page focus callback located
+
+The follow-up run disproved both save-page inline-hook candidates as the live
+navigation boundary: neither `FUN_004898A0` nor `FUN_0048D970` emitted a
+callback while the native Load Game list visibly moved. The active path is the
+front-end action bridge already used by SudekiMP at `FUN_004A0360` (RVA
+`0x000A0360`, native front-end action vtable slot RVA `0x002CB228`). Runtime
+trace while opening Continue Game recorded this native phase/event sequence:
+
+```text
+phase=5 event=3 argument=1  stage=4 mode=5
+phase=6 event=3 argument=0  stage=4 mode=5
+phase=5 event=0 argument=1  stage=4 mode=5
+phase=6 event=0 argument=0  stage=5 mode=6
+phase=2 event=0 argument=0  stage=7 mode=8
+```
+
+The save-page focus object then advances through `FUN_0055E120` (previous),
+`FUN_0055E190` (next), and `FUN_0055E2D0` (apply selected group). The latter
+refreshes each portrait child through `FUN_0055C070` / `FUN_0055C0E0` and
+updates the native save details. This explains why portrait-selector calls
+appear when a slot changes even though the guessed save-page action hook stays
+silent.
+
+Confidence: high for the front-end action boundary and portrait-group update
+chain; the event-number meaning and direct save-slot-to-character mapping are
+still to be correlated from the save-page object, not guessed from raw
+portrait handles.
+
+### 2026-08-20 — Native roster portrait GPU boundary confirmed
+
+The four Load Game `UIElementCycleIcon` widgets do expose the decoded portrait
+textures, but not through the previously tested opaque resource handle. On the
+supported executable the confirmed ownership chain is:
+
+```text
+UIElementCycleIcon+0x34
+  -> cSOLMaterial (vtable RVA 0x002DEB7C)
+  -> material+0x08 pointer array
+  -> array[0] cResidentD3DTexture (vtable RVA 0x002DD80C)
+  -> resident+0x04 backend
+  -> backend+0x04 IDirect3DTexture9
+```
+
+Runtime validation found a Wine D3D9 COM object at the final pointer for each
+of Ailish, Tal, Buki, and Elco. Drawing those game-owned textures after the
+native UI flush produced all four correct heads in the centered roster cards.
+The old white-square result is therefore closed: it was caused by treating a
+resource identifier as a GPU texture pointer. SudekiMP does not extract,
+serialize, copy, or redistribute the portrait data and does not take ownership
+of the final COM objects; the native Load Game page remains their lifetime
+owner.
+
+The original portrait anchors can be hidden safely through the exact
+`UIElementCycleIcon` visibility method at RVA `0x0015C020`. The broader Load
+Game scene is a separate remaining presentation problem. Calling the page's
+paired visual-release method at RVA `0x00080660` while the title controller
+still retains the page caused a next-render crash, so that experiment was
+rejected and removed. The stable build retains the owner page and borrows only
+the validated resident textures.
+
+Confidence: high for the complete material/resident/backend/GPU chain and the
+four live portraits; high that page-wide destruction is not a safe hiding
+mechanism under current title-controller ownership.
+
+### 2026-08-20 — Roster backing-page isolation confirmed live
+
+The Load Game page cannot be destroyed after lending the four portrait
+materials: its native visual-release method at RVA `0x00080660` invalidates
+objects still retained by the title controller and caused a next-render crash.
+The safe boundary is instead the existing CUIScene queue consumer at RVA
+`0x0000A820`.
+
+The accepted render order is now:
+
+```text
+drain native title/Load Game queue
+-> draw an opaque SudekiMP roster backdrop
+-> draw independent roster cards
+-> draw the four borrowed game-resident portrait textures
+-> submit SudekiMP labels through Sudeki's native font queue
+-> flush that fresh text queue
+```
+
+The four source `UIElementCycleIcon` anchors are also hidden again at this
+last presentation boundary because native page updates may reactivate them.
+This keeps the Load Game owner objects alive while preventing their page,
+map preview, stock buttons, and original portrait positions from appearing.
+When a resident head exists, its card no longer draws the fallback silhouette.
+
+Live acceptance on the supported GOG build showed one clean full-screen roster
+canvas with the four heads in their corresponding character slots, native-font
+heading/names/prompt, and no Continue/Load page or duplicate title map beneath
+it. Build and exact supported-image regression passed before the live run.
+
+Confidence: high for the queue-order cause and the presentation-only fix.

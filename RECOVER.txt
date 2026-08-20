@@ -555,3 +555,110 @@ Upper-body pitch-seam checkpoint (2026-08-16):
   - NEXT: make one read-only runtime resource inventory for authored aim IDs
     0x97/0x98/0x99 against both first-person and saved-world wrappers. Do not
     call the state machine, play selectors, or write animation/pose state.
+
+Current handoff — pre-game co-op roster and launch workflow (2026-08-18):
+  Active design:
+  - The old "atomic mid-game role swap" priority was deliberately replaced by
+    a pre-game lock-in flow. New Game opens Sudeki Together -> Single Player or
+    Co-op -> Player 1 character -> Player 2 character -> confirmation.
+  - Player choices are intended to remain locked for the save and become usable
+    only when the selected character exists in the current party/story state.
+  - Front-end selection/persistence scaffolding exists, but the lock-in is NOT
+    yet wired end-to-end into gameplay controller ownership, AI state, HUD,
+    cameras, or input sources after a save begins.
+
+  Current UI result:
+  - New Game interception and the independent page work without moving the
+    original Continue/New Game/Options/Credits/Quit selection.
+  - The native state-10 fade, options-page background, and queued Sudeki font
+    are reused. Private OFF-state rows prevent stock title words from leaking.
+  - SFE_OPTION1..5.HOM contain their localized stock words and expose one cAnim
+    submodel with zero separately addressable named components. The public
+    renderer interface cannot safely hide OptionN_textShape alone.
+  - The label-free button is therefore original runtime D3D9 artwork: soft rear
+    shadow, rounded dark rim, tighter/squarer inset gradient, cyan-left and
+    gold-right selection. No extracted asset is committed or redistributed.
+  - 2026-08-20 portrait breakthrough: the real four head textures are now
+    found and rendered. The exact chain is CycleIcon+0x34 cSOLMaterial (vtable
+    RVA 0x2DEB7C) -> material+0x08 array[0] cResidentD3DTexture (vtable RVA
+    0x2DD80C) -> resident+0x04 backend -> backend+0x04 IDirect3DTexture9.
+    SudekiMP borrows those live game-owned GPU pointers and draws Ailish, Tal,
+    Buki, and Elco centered in the roster cards; no asset is extracted or
+    stored in the repository. The original portrait anchors are hidden with
+    CycleIcon visibility RVA 0x15C020.
+  - Remaining UI presentation issue: the Load Game page must remain resident
+    as the portrait owner, and its wider scene is still visible underneath the
+    custom roster. Do not call its visual-release RVA 0x80660 while the title
+    controller retains the page; that experiment caused a next-render crash
+    and was removed. Solve scene isolation separately from texture discovery.
+  - The button bars are centered (observed midpoint x~686 on 1366px output;
+    screen center x=683). The heading, option labels, and ENTER SELECTS prompt
+    are not centered; they are incorrectly anchored near the midpoint. This is
+    the immediate visual bug. Local capture:
+    /tmp/sudekimp-new-game-screen-centered.png
+  - Next pass: trace/correct the native queued-font alignment or calculate its
+    actual anchor semantics. Keep the centered button geometry unchanged.
+
+  Normal launch/stop:
+    cd /var/home/wander/Documents/Projects/sudeki-mp
+    tools/continue-research.sh --check
+    tools/continue-research.sh --safe
+    tools/stop-sudeki.sh
+  The launcher builds, checks SHA256 8ceb1d3c...bb94, installs the current DLL
+  into the dedicated working copy/prefix, and launches. Press Escape once after
+  the Sudeki window appears to skip the intro movie and reach the title page.
+  Do not launch an unvalidated executable or use the user's normal Wine prefix.
+
+  Headless/visual QA using the existing isolated X display:
+    pgrep -a Xvfb
+    env DISPLAY=:99 LIBGL_ALWAYS_SOFTWARE=1 \
+      SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true \
+      tools/continue-research.sh --safe
+    env DISPLAY=:99 xdotool search --sync --onlyvisible --name '^Sudeki$' \
+      windowfocus --sync %@ key --clearmodifiers Escape
+    timeout 8s env DISPLAY=:99 ffmpeg -hide_banner -loglevel error \
+      -f x11grab -video_size 1366x768 -i :99 -frames:v 1 -y /tmp/capture.png
+  Display :99 is pre-existing infrastructure. The temporary passwordless VNC
+  experiment was completely removed: x11vnc stopped, port 5900 closed, Sudeki
+  stopped, and /tmp download/extraction/log deleted. Do not recreate VNC unless
+  the user explicitly requests it again.
+
+  Required checks after source changes:
+    tools/build-linux.sh
+    env WINEPREFIX=/home/wander/Games/sudeki-research-prefix wine \
+      build/mingw32/bin/SudekiMP.SkillTraceImageTest.exe \
+      /home/wander/Games/SudekiMP/working/SUDEKI.exe
+    tools/continue-research.sh --check
+    git diff --check
+    graphify update .
+  The latest three-layer button revision passed all of these checks.
+
+  2026-08-20 roster portrait/backing-page checkpoint:
+  - The four native portrait GPU textures resolve and render correctly.
+  - The Load Game page remains resident only to own those textures; do not call
+    its visual-release RVA 0x00080660 while the title controller retains it.
+  - The clean presentation drains the old CUIScene queue at RVA 0x0000A820,
+    draws an opaque SudekiMP backdrop/cards/heads, then submits and flushes only
+    the fresh native-font roster labels.
+  - Live verification showed no Continue page, save-map preview, title-map
+    duplication, stock buttons, or old portrait anchors behind the roster.
+  - Real portraits suppress the original fallback silhouettes.
+
+  Working method / Graphify instructions:
+  - Read AGENTS.md first. graphify-out/graph.json is a live project knowledge
+    graph, not generated noise to ignore.
+  - Before codebase questions use `graphify query "<specific question>"`.
+    Prefer `graphify path "<A>" "<B>"` for relationships and
+    `graphify explain "<concept>"` for one subsystem. Use wiki/index.md for
+    broad navigation if present; avoid loading GRAPH_REPORT.md unless scoped
+    queries are insufficient.
+  - After every code/document change run `graphify update .`. When the user
+    invokes /graphify, follow the installed Graphify skill/instructions first.
+  - Separate confirmed facts, strong hypotheses, and open speculation. Use
+    exact-image gates, signatures, reversible writes, safe failure, and the
+    smallest experiment. Never infer function identity from one string/xref.
+  - Use read-only Ghidra headless reports for static boundaries and transition-
+    only logs for live behavior. Record RVA, evidence, experiment, confidence,
+    and executable hash. Never copy game assets into the repository.
+  - The worktree is intentionally dirty with the ongoing roster, camera,
+    control, and presentation work. Do not reset, overwrite, or discard it.

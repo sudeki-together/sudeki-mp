@@ -294,6 +294,9 @@ enum {
     PARTY_SLOT_ZERO_OFFSET = 0x90u,
     PARTY_SLOT_STRIDE = 0x0cu,
     CONTROLLER_TARGET_OFFSET = 0x248u,
+    CONTROLLER_NEXT_CHARACTER_OFFSET = 0xf4u,
+    CONTROLLER_PREVIOUS_CHARACTER_OFFSET = 0xfcu,
+    PARTY_COUNT_OFFSET = 0xccu,
     GAME_CAMERA_POINTER_OFFSET = 0x0cu,
     PC_QUIT_SCREEN_VISIBLE_OFFSET = 0x1c2u,
     GAMEPLAY_HUD_PORTRAIT_GIZMO_ARRAY_OFFSET = 0x138u,
@@ -698,6 +701,14 @@ static void *spirit_player_two_melee_locomotion_character;
 static void *spirit_player_two_melee_locomotion_wrapper;
 static void *spirit_player_two_melee_locomotion_renderer;
 static BOOL runtime_split_enabled = TRUE;
+static BOOL coop_role_lock_active;
+static void *coop_locked_player_one;
+static void *coop_locked_player_two;
+static BOOL coop_roster_valid;
+static unsigned int coop_roster_player_one_type;
+static unsigned int coop_roster_player_two_type;
+static unsigned int coop_roster_rotation_attempts;
+static BOOL coop_roster_rotation_previous;
 static SudekiMpSplitScreenOverlayRenderer overlay_renderer;
 
 static const char second_player_camera_name[] = "SudekiMP_P2";
@@ -2886,6 +2897,47 @@ static BOOL resolve_player_characters(
     );
     if (controller_target == NULL ||
         *(void **)(group + PARTY_SLOT_ZERO_OFFSET) != controller_target) {
+        return FALSE;
+    }
+    if (coop_roster_valid) {
+        if (!character_has_resource_type(
+                controller_target,
+                coop_roster_player_one_type)) {
+            return FALSE;
+        }
+        for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
+            void *candidate = *(void **)(
+                group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE
+            );
+            if (candidate != NULL &&
+                character_has_resource_type(
+                    candidate,
+                    coop_roster_player_two_type)) {
+                *first_character = controller_target;
+                *second_character = candidate;
+                *second_slot = index;
+                return TRUE;
+            }
+        }
+        return FALSE;
+    }
+    if (coop_role_lock_active) {
+        if (coop_locked_player_one == NULL ||
+            coop_locked_player_two == NULL ||
+            controller_target != coop_locked_player_one) {
+            return FALSE;
+        }
+        for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
+            void *candidate = *(void **)(
+                group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE
+            );
+            if (candidate == coop_locked_player_two) {
+                *first_character = coop_locked_player_one;
+                *second_character = coop_locked_player_two;
+                *second_slot = index;
+                return TRUE;
+            }
+        }
         return FALSE;
     }
     if (SudekiMpCombatContextGetSnapshot(
@@ -7615,6 +7667,16 @@ static void split_screen_frame_end_entry(void) {
 }
 
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled) {
+    if (coop_role_lock_active && !enabled) {
+        if (game_base != NULL) {
+            SudekiMpLogWrite(
+                "split_screen_render event=runtime_toggle status=rejected "
+                "reason=co_op_roles_locked\r\n"
+            );
+        }
+        SetLastError(ERROR_LOCK_VIOLATION);
+        return FALSE;
+    }
     runtime_split_enabled = enabled != FALSE;
     if (game_base != NULL) {
         SudekiMpLogFormat(
@@ -7627,6 +7689,169 @@ BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled) {
 
 BOOL SudekiMpSplitScreenRuntimeEnabled(void) {
     return runtime_split_enabled;
+}
+
+BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two) {
+    if (player_one == NULL || player_two == NULL ||
+        player_one == player_two ||
+        !readable_memory(player_one, 0x94u) ||
+        !readable_memory(player_two, 0x94u)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    coop_locked_player_one = player_one;
+    coop_locked_player_two = player_two;
+    coop_role_lock_active = TRUE;
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roles phase=locked "
+        "player_one=0x%08lx player_two=0x%08lx "
+        "policy=immutable_party_identities_until_uninstall\r\n",
+        (unsigned long)(uintptr_t)player_one,
+        (unsigned long)(uintptr_t)player_two
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenRolesLocked(void) {
+    return coop_role_lock_active;
+}
+
+BOOL SudekiMpSplitScreenSetRosterTypes(
+    unsigned int player_one_type,
+    unsigned int player_two_type
+) {
+    if (player_one_type == player_two_type ||
+        player_one_type == 0u || player_two_type == 0u) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    coop_roster_player_one_type = player_one_type;
+    coop_roster_player_two_type = player_two_type;
+    coop_roster_valid = TRUE;
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=selected "
+        "player_one_type=0x%02lx player_two_type=0x%02lx "
+        "policy=persist_until_process_exit\r\n",
+        (unsigned long)player_one_type,
+        (unsigned long)player_two_type
+    );
+    return TRUE;
+}
+
+static void *find_roster_character(
+    uint8_t *group,
+    unsigned int expected_type,
+    unsigned int *slot_result
+) {
+    unsigned int index;
+
+    if (group == NULL || expected_type == 0u ||
+        !readable_memory(group + PARTY_COUNT_OFFSET, sizeof(int))) {
+        return NULL;
+    }
+    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+        void *candidate = *(void **)(
+            group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE
+        );
+        if (candidate != NULL && character_has_resource_type(
+                candidate, expected_type)) {
+            if (slot_result != NULL) {
+                *slot_result = index;
+            }
+            return candidate;
+        }
+    }
+    return NULL;
+}
+
+void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
+    uint8_t *group;
+    uint8_t *controller;
+    void *controller_target;
+    void *desired_player_one;
+    void *desired_player_two;
+    unsigned int desired_slot;
+    int party_count;
+    uint8_t *next_action;
+    uint8_t *previous_action;
+    uint8_t *action;
+
+    if (!coop_roster_valid || coop_role_lock_active || game_base == NULL ||
+        !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
+            sizeof(group)) ||
+        !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        return;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if (!readable_memory(group, PARTY_COUNT_OFFSET + sizeof(int)) ||
+        !readable_memory(controller, CONTROLLER_TARGET_OFFSET +
+            sizeof(controller_target))) {
+        return;
+    }
+    party_count = *(int *)(group + PARTY_COUNT_OFFSET);
+    if (party_count < 2 || party_count > (int)PARTY_SLOT_COUNT) {
+        return;
+    }
+    desired_player_one = find_roster_character(
+        group, coop_roster_player_one_type, &desired_slot
+    );
+    if (desired_player_one == NULL) {
+        return; /* The selected character has not entered the party yet. */
+    }
+    desired_player_two = find_roster_character(
+        group, coop_roster_player_two_type, NULL
+    );
+    controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+    if (controller_target == desired_player_one) {
+        if (desired_player_two != NULL && desired_player_two != desired_player_one) {
+            BOOL runtime_enabled = SudekiMpSplitScreenSetRuntimeEnabled(TRUE);
+            BOOL roles_locked = runtime_enabled &&
+                SudekiMpSplitScreenLockRoles(
+                    desired_player_one, desired_player_two);
+            if (!roles_locked && runtime_enabled) {
+                (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+            }
+            if (roles_locked) {
+                SudekiMpLogFormat(
+                    "split_screen_render event=co_op_roster phase=applied "
+                    "player_one=0x%08lx player_two=0x%08lx "
+                    "player_one_slot=%u policy=native_party_order_rotation_then_immutable_lock\r\n",
+                    (unsigned long)(uintptr_t)desired_player_one,
+                    (unsigned long)(uintptr_t)desired_player_two,
+                    desired_slot
+                );
+            }
+        }
+        return;
+    }
+    if (desired_slot == 0u || coop_roster_rotation_attempts >=
+            (unsigned int)party_count) {
+        coop_roster_rotation_attempts = 0u;
+        coop_roster_rotation_previous = !coop_roster_rotation_previous;
+    }
+    next_action = controller + CONTROLLER_NEXT_CHARACTER_OFFSET;
+    previous_action = controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET;
+    if (!writable_memory(next_action, sizeof(*next_action)) ||
+        !writable_memory(previous_action, sizeof(*previous_action))) {
+        return;
+    }
+    if (*next_action != 0u || *previous_action != 0u) {
+        return; /* Let the native frame consumer finish the prior pulse. */
+    }
+    action = coop_roster_rotation_previous ? previous_action : next_action;
+    *action = 1u;
+    ++coop_roster_rotation_attempts;
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=rotate "
+        "direction=%s desired_type=0x%02lx desired_slot=%u attempt=%u "
+        "policy=native_controller_action_pulse\r\n",
+        coop_roster_rotation_previous ? "previous" : "next",
+        (unsigned long)coop_roster_player_one_type,
+        desired_slot,
+        coop_roster_rotation_attempts
+    );
 }
 
 void SudekiMpSplitScreenSetOverlayRenderer(
@@ -7683,6 +7908,48 @@ BOOL SudekiMpInstallSplitScreenRender(
         return FALSE;
     }
     base = (uint8_t *)game_module;
+    if (!pc_quit_screen_show_signature_matches(base) ||
+        !quick_menu_is_active_signature_matches(base)) {
+        SudekiMpLogFormat(
+            "split_screen_render_preflight common_quit=%u common_quick=%u\r\n",
+            pc_quit_screen_show_signature_matches(base),
+            quick_menu_is_active_signature_matches(base));
+    }
+    if (enable_dual_camera_frame_cache) {
+        SudekiMpLogFormat(
+            "split_screen_render_preflight portrait_selector=%u quick_submit=%u\r\n",
+            portrait_selector_signatures_match(base),
+            memcmp(
+                base + RVA_QUICK_MENU_RENDER_SUBMIT,
+                expected_quick_menu_render_submit_entry,
+                sizeof(expected_quick_menu_render_submit_entry)
+            ) == 0);
+    }
+    if (enable_second_player_camera) {
+        SudekiMpLogFormat(
+            "split_screen_render_preflight camera_add=%u camera_remove=%u "
+            "camera_get=%u camera_render=%u\r\n",
+            memcmp(
+                base + RVA_CAMERA_MANAGER_ADD_CAMERA,
+                expected_camera_manager_add_camera_entry,
+                sizeof(expected_camera_manager_add_camera_entry)
+            ) == 0,
+            memcmp(
+                base + RVA_CAMERA_MANAGER_REMOVE_CAMERA,
+                expected_camera_manager_remove_camera_entry,
+                sizeof(expected_camera_manager_remove_camera_entry)
+            ) == 0,
+            memcmp(
+                base + RVA_CAMERA_MANAGER_GET_CAMERA,
+                expected_camera_manager_get_camera_entry,
+                sizeof(expected_camera_manager_get_camera_entry)
+            ) == 0,
+            !enable_skill_camera_routing || memcmp(
+                base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+                expected_camera_manager_set_render_camera_entry,
+                sizeof(expected_camera_manager_set_render_camera_entry)
+            ) == 0);
+    }
     if (!pc_quit_screen_show_signature_matches(base) ||
         !quick_menu_is_active_signature_matches(base)) {
         SetLastError(ERROR_INVALID_DATA);
@@ -7904,6 +8171,14 @@ BOOL SudekiMpInstallSplitScreenRender(
     spirit_effect_isolation_logged = FALSE;
     spirit_capture_completion_logged = FALSE;
     runtime_split_enabled = TRUE;
+    coop_role_lock_active = FALSE;
+    coop_locked_player_one = NULL;
+    coop_locked_player_two = NULL;
+    coop_roster_rotation_attempts = 0u;
+    coop_roster_rotation_previous = FALSE;
+    coop_roster_valid = FALSE;
+    coop_roster_player_one_type = 0u;
+    coop_roster_player_two_type = 0u;
     overlay_renderer = NULL;
     if (!SudekiMpInstallRelativeCallHook(
             &render_start_hook,
