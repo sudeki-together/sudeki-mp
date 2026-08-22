@@ -18,14 +18,19 @@ input_bridge_log="${project_dir}/build/linux/input-bridge.log"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
         '  --test-arena  Alias for --cleanroom retained for the research checkpoint.' \
+        '  --cafu-testroom  Bootstrap Ailish in testroom and ask Sudeki native developer code to spawn Cafu.' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --input-trace Trace native QuickSkill input and either native Plasmatica activation route.' \
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
+        '  --party-lifecycle-trace Observe native PC spawn/removal plus resulting party/controller/AI state during a normal save load.' \
+        '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
+        '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
+        '  --zone-traversal-test  Open the F7 world/interior traversal menu on a normal save.' \
         '  --freeroam-camera-test Require LeftCtrl for mouse-Y distance changes outside combat; retain vanilla combat input.' \
         '  --control-separation-test Toggle Player 2 AI off/on with J through Sudeki native control APIs.' \
         '  --player-input-trace Sample Player 1 world-direction and speed arguments without changing movement.' \
@@ -51,7 +56,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--trace|--input-trace|--character-switch-trace|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -62,6 +67,11 @@ case "${mode}" in
         exit 2
         ;;
 esac
+
+if [[ "${mode}" == "--zone-transition-trace" ||
+      "${mode}" == "--zone-traversal-test" ]]; then
+    export SUDEKIMP_ZONE_TRACE=1
+fi
 
 if [[ "${mode}" == "--speed-test" || "${mode}" == "--camera-speed-test" ]]; then
     if ! awk -v value="${speed}" 'BEGIN {
@@ -80,7 +90,8 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
     fi
 fi
 if [[ "${mode}" == "--controller-bridge-test" ||
-      "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
+      "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
+      "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! "${input_bridge_port}" =~ ^[0-9]+$ ]] ||
         (( input_bridge_port < 1024 || input_bridge_port > 65535 )); then
         printf 'Invalid bridge port: %s (expected 1024 through 65535)\n' \
@@ -90,7 +101,8 @@ if [[ "${mode}" == "--controller-bridge-test" ||
 fi
 
 game_launch_args=()
-if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
+if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
+      "${mode}" == "--cafu-testroom" ]]; then
     game_launch_args+=(
         --game-arg=-Level
         --game-arg=testroom
@@ -99,6 +111,15 @@ if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
         --game-arg=-Ailish
         --game-arg=1
     )
+    if [[ "${mode}" == "--cafu-testroom" ]]; then
+        # Sudeki's shipped -Cafu path dereferences a null model payload because
+        # hidden item 48 names a hash absent from SOLData's resource index.
+        # This private token waits for the item database, preloads the actual
+        # indexed W033_CAFUSPISTOL resource, applies the reversible hash
+        # correction, switches to Cafu through Sudeki's native party action,
+        # and only uses the visual fallback if that load fails.
+        game_launch_args+=(--game-arg=-SudekiMPCafuProbe --game-arg=1)
+    fi
 fi
 
 if pgrep -x SUDEKI.exe >/dev/null; then
@@ -146,10 +167,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 case "${mode}" in
-    --cleanroom|--test-arena)
+    --cleanroom|--test-arena|--cafu-testroom)
         sed -i \
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
             -e 's/^EnableCleanroomMenu=false$/EnableCleanroomMenu=true/' \
+            -e 's/^EnableCoopRosterMenu=true$/EnableCoopRosterMenu=false/' \
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
             -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
             -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
@@ -172,6 +194,13 @@ case "${mode}" in
             -e 's/^EnablePlasmaticaTrace=false$/EnablePlasmaticaTrace=true/' \
             "${generated_config}"
         ;;
+    --zone-traversal-test)
+        sed -i \
+            -e 's/^EnableCoopRosterMenu=true$/EnableCoopRosterMenu=false/' \
+            -e 's/^EnableZoneTraversalMenu=false$/EnableZoneTraversalMenu=true/' \
+            -e 's/^ToggleZoneTraversalMenu=F7$/ToggleZoneTraversalMenu=F7/' \
+            "${generated_config}"
+        ;;
     --input-trace)
         sed -i \
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
@@ -179,10 +208,15 @@ case "${mode}" in
             -e 's/^EnableQuickSkillInputTrace=false$/EnableQuickSkillInputTrace=true/' \
             "${generated_config}"
         ;;
-    --character-switch-trace)
+    --character-switch-trace|--party-lifecycle-trace|--talos-party-test)
         sed -i \
             -e 's/^EnableCharacterSwitchTrace=false$/EnableCharacterSwitchTrace=true/' \
             "${generated_config}"
+        if [[ "${mode}" == "--talos-party-test" ]]; then
+            sed -i \
+                -e 's/^EnableTalosPartyPrototype=false$/EnableTalosPartyPrototype=true/' \
+                "${generated_config}"
+        fi
         ;;
     --freeroam-camera-test)
         sed -i \
@@ -367,6 +401,7 @@ SUDEKIMP_WINEPREFIX="${research_prefix}" \
 if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--cleanroom" ||
       "${mode}" == "--test-arena" ||
+      "${mode}" == "--cafu-testroom" ||
       "${mode}" == "--second-player-render-camera-test" ||
       "${mode}" == "--dual-camera-frame-cache-test" ||
       "${mode}" == "--shared-quit-menu-test" ||
@@ -420,7 +455,8 @@ printf '%s\n' \
 if [[ "${mode}" == "--spirit-strike-test" ]]; then
     printf '  Spirit Strike test key: %s\n' "${spirit_key}"
 fi
-if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
+if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
+      "${mode}" == "--cafu-testroom" ]]; then
     printf '%s\n' \
         '  Native test arena: Sudeki received -Level testroom through its shipped startup-test path.' \
         '  Native -DT/-Ailish flags spawn Ailish as the cleanroom lead.' \
@@ -431,6 +467,12 @@ if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
         '  Tal must remain live; the Spirit Strike must finish instead of stalling.' \
         '  Use Up/Down and Enter; Escape or F8 closes the overlay.' \
         '  Ailish is lead-locked and cannot be despawned by this menu.'
+    if [[ "${mode}" == "--cafu-testroom" ]]; then
+        printf '%s\n' \
+            '  Cafu probe: hidden item 48 is preserved; its stale W033 hash is corrected to the verified archive entry before spawn.' \
+            '  Cafu control: after spawn, the native Next-character action makes Cafu Player 1 for direct movement/fire testing.' \
+            '  Cafu fallback: the reversible Elco-pistol visual alias is used only if the actual W033 resource cannot load.'
+    fi
 fi
 if [[ "${mode}" == "--control-separation-test" ]]; then
     printf '%s\n' \
@@ -569,13 +611,28 @@ if [[ "${mode}" == "--freeroam-camera-test" ]]; then
         '  Hold LeftCtrl and move the mouse forward/back; native distance control should resume.' \
         '  Mouse left/right rotation and all combat input remain vanilla; limits and pitch are unchanged.'
 fi
+if [[ "${mode}" == "--zone-transition-trace" ]]; then
+    printf '%s\n' \
+        '  Observation-only trace: load the Tal save and approach a named door.' \
+        '  Press Enter once at the door. The log records EnterZone/SwitchZoneNOW/LoadZone and CWorld::SwitchMainZone before/after.' \
+        '  No teleport, combat, door, or level state is changed by this pass.'
+fi
+if [[ "${mode}" == "--zone-traversal-test" ]]; then
+    printf '%s\n' \
+        '  F7 opens the world-aware traversal menu.' \
+        '  Worlds use native default-entry transitions.' \
+        '  Right opens temporary interiors for the active world only.' \
+        '  Enter performs the selected authored transition; Left returns to worlds.' \
+        '  Cross-world interior jumps are rejected.'
+fi
 
 if [[ "${mode}" == "--check" ]]; then
     exit 0
 fi
 
 if [[ "${mode}" == "--controller-bridge-test" ||
-      "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ]]; then
+      "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
+      "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! -r "${input_device}" ]]; then
         printf 'Controller device is not readable: %s\n' "${input_device}" >&2
         printf '%s\n' \

@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep the private SudekiMP mirror synchronized from the NetBird source
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/Projects/sudeki-mp
+ExecStart=%h/Documents/Projects/sudeki-mp/tools/sync/pull-sudekimp.sh --watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

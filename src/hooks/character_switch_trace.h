@@ -3,7 +3,10 @@
 
 #include <windows.h>
 
-BOOL SudekiMpInstallCharacterSwitchTrace(HMODULE game_module);
+BOOL SudekiMpInstallCharacterSwitchTrace(
+    HMODULE game_module,
+    BOOL enable_talos_party_prototype
+);
 void SudekiMpUninstallCharacterSwitchTrace(void);
 
 #endif

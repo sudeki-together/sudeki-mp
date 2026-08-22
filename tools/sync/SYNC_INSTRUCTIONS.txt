@@ -1,0 +1,108 @@
+SudekiMP private mirror handoff
+================================
+
+This is a private NetBird-only mirror for the SudekiMP development environment.
+It includes original source/docs/tooling AND the user's privately owned Sudeki
+game files and Wine prefixes required to run and diagnose the mod. The game files
+must never be committed to Git, uploaded to a public host, or redistributed.
+
+SOURCE MACHINE
+--------------
+NetBird address: 100.95.93.91
+Rsync port:      18730
+Instructions:    http://100.95.93.91:18731/SYNC_INSTRUCTIONS.txt
+Allowed client:  100.95.174.52
+
+The source machine exports these read-only rsync modules:
+
+  sudeki-project           source tree, docs, DLL build tooling, logs metadata
+  sudeki-game              /home/wander/Games/SudekiMP (vanilla/working/analysis)
+  sudeki-research-prefix   Wine research prefix
+  sudeki-prefix            Wine prefix used for the installed game
+  sudeki-offline-prefix    offline/install prefix used by the launcher
+  sudeki-bootstrap-prefix  win32 bootstrap prefix
+
+INITIAL PULL ON THE SECOND MACHINE
+-----------------------------------
+
+1. Connect that machine to the same NetBird network and confirm its address is
+   100.95.174.52. Do not expose these services on a public interface.
+
+2. Install rsync, Wine, and a 32-bit Wine runtime. On Fedora, the package
+   names are typically `wine.i686` and `wine-core.i686`; on Debian/Ubuntu,
+   enable i386 first and install `wine32:i386`. Create the destination
+   directories under $HOME (the pull script uses $HOME, not /home/wander):
+
+     mkdir -p "$HOME/Documents/Projects" "$HOME/Games"
+
+3. Download this handoff if needed:
+
+     curl -fsS http://100.95.93.91:18731/SYNC_INSTRUCTIONS.txt
+
+4. Bootstrap the project tree before the pull helper exists locally:
+
+     rsync -aH --delete-delay --info=progress2 \
+       rsync://100.95.93.91:18730/sudeki-project/ \
+       "$HOME/Documents/Projects/sudeki-mp/"
+
+5. From the copied project tree, run:
+
+     cd "$HOME/Documents/Projects/sudeki-mp"
+     tools/sync/pull-sudekimp.sh
+
+   The script mirrors the project, game installation/working copies, analysis,
+   and all listed Wine prefixes. It uses --delete-delay, so commit or back up
+   destination-only changes in those private targets before pulling.
+
+RUNNING THE GAME AND MOD
+------------------------
+
+The exact supported executable is the user's GOG Sudeki build under:
+
+  $HOME/Games/SudekiMP/working/SUDEKI.exe
+
+The normal research prefix is:
+
+  $HOME/Games/sudeki-research-prefix
+
+From the project tree:
+
+  tools/continue-research.sh --check
+  tools/continue-research.sh --safe
+
+The launcher, build script, and recovery notes are in the project. If OBS is
+not installed on the second machine, set SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true
+when launching. Never overwrite the vanilla copy while experimenting; use the
+working copy and keep the hashes in research/hashes/ and staging.sha256.
+
+PERSISTENT STARTUP SYNC
+-----------------------
+
+After the first pull, install the included user service. If the second machine
+must sync while nobody is logged in, enable user-service lingering once (this
+may require administrator permission):
+
+  loginctl enable-linger "$USER"
+
+  mkdir -p "$HOME/.config/systemd/user"
+  cp tools/sync/sudekimp-pull.service "$HOME/.config/systemd/user/"
+  systemctl --user daemon-reload
+  systemctl --user enable --now sudekimp-pull.service
+
+It retries every 30 seconds while the source peer is unavailable and pulls all
+modules after the NetBird link comes up. Stop it with:
+
+  systemctl --user disable --now sudekimp-pull.service
+
+The service intentionally mirrors only the paths listed above. It does not
+copy the user's home directory, credentials, Codex state, browser profiles, or
+any unrelated games.
+
+CODEX CONTEXT
+-------------
+
+An interactive Codex conversation cannot be transferred as a live session.
+The durable handoff is RECOVER.txt, README.md, docs/project-status.md,
+docs/milestones.md, docs/research-log.md, and this sync document. Start a new
+task on the second machine and read those files before making changes. Do not
+copy ~/.codex or credentials; those are machine-local and may contain secrets.

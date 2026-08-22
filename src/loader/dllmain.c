@@ -3,6 +3,7 @@
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/skill_activation_abi.h"
+#include "hooks/accelerator_cache.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
@@ -13,6 +14,7 @@
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
+#include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
 #include "input/key_binding.h"
 
@@ -38,6 +40,7 @@
 #define SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED 13u
 #define SUDEKIMP_INIT_INPUT_BRIDGE_FAILED 14u
 #define SUDEKIMP_INIT_CLEANROOM_MENU_FAILED 15u
+#define SUDEKIMP_INIT_ACCELERATOR_CACHE_FAILED 16u
 
 static HMODULE dll_module;
 
@@ -180,6 +183,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL camera_speed_enabled;
     BOOL quick_skill_input_trace_enabled;
     BOOL character_switch_trace_enabled;
+    BOOL talos_party_prototype_enabled;
     BOOL control_separation_enabled;
     BOOL player_movement_trace_enabled;
     BOOL second_player_movement_enabled;
@@ -200,6 +204,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL second_player_controller_camera_enabled;
     BOOL split_screen_ranged_model_isolation_enabled;
     BOOL spirit_strike_viewport_effect_isolation_enabled;
+    BOOL zone_transition_trace_enabled;
+    BOOL zone_traversal_enabled;
     BOOL cleanroom_menu_enabled;
     BOOL coop_roster_menu_enabled;
     BOOL skip_startup_movies;
@@ -211,6 +217,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     wchar_t second_player_skill_key_text[4][32];
     wchar_t freeroam_camera_modifier_text[32];
     wchar_t cleanroom_menu_key_text[32];
+    wchar_t zone_traversal_menu_key_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
@@ -220,6 +227,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     };
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
     UINT cleanroom_menu_virtual_key = VK_F8;
+    UINT zone_traversal_menu_virtual_key = VK_F7;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
     int input_bridge_port = 26760;
@@ -241,7 +249,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
 
     SudekiMpLogWrite("SudekiMP 0.1.0\r\n");
-    SudekiMpLogWrite("event=process_attach\r\n");
+    SudekiMpLogFormat(
+        "event=process_attach pid=%lu\r\n",
+        (unsigned long)GetCurrentProcessId());
     SudekiMpLogFormat("module_base=0x%08lx\r\n", (unsigned long)(uintptr_t)game_module);
 
     if (!SudekiMpCheckExecutableFile(game_path, &build)) {
@@ -280,6 +290,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     SudekiMpLogFormat("quick_menu_signature_rva=0x%08lx\r\n",
         (unsigned long)(pattern_result.address - (const uint8_t *)game_module));
+
+    SudekiMpLogWrite("accelerator_cache_requested=true\r\n");
+    if (!SudekiMpInstallAcceleratorCache(game_module)) {
+        SudekiMpLogFormat("accelerator_cache_error=%lu\r\n",
+            (unsigned long)GetLastError());
+        SudekiMpLogWrite("accelerator_cache_applied=false\r\n");
+        SudekiMpLogWrite("status=accelerator_cache_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_ACCELERATOR_CACHE_FAILED;
+    }
+    SudekiMpLogWrite("accelerator_cache_applied=true\r\n");
 
     if (dll_module == NULL ||
         GetModuleFileNameW(dll_module, config_path, MAX_PATH) == 0) {
@@ -327,6 +348,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         config_path,
         L"SudekiMP",
         L"EnableCharacterSwitchTrace"
+    );
+    talos_party_prototype_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableTalosPartyPrototype"
     );
     control_separation_enabled = read_config_boolean(
         config_path,
@@ -423,6 +449,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableSpiritStrikeViewportEffectIsolationPrototype"
     );
+    zone_transition_trace_enabled = GetEnvironmentVariableA(
+        "SUDEKIMP_ZONE_TRACE",
+        NULL,
+        0u
+    ) > 0u;
     skill_camera_routing_enabled =
         realtime_multiplayer_skill_combat_enabled ||
         spirit_strike_viewport_effect_isolation_enabled;
@@ -431,6 +462,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableCleanroomMenu"
     );
+    zone_traversal_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableZoneTraversalMenu"
+    );
+    zone_transition_trace_enabled = zone_transition_trace_enabled ||
+        zone_traversal_enabled;
     coop_roster_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -441,7 +479,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"SkipStartupMovies"
     );
-    if (coop_roster_menu_enabled && cleanroom_menu_enabled) {
+    if (coop_roster_menu_enabled &&
+        (cleanroom_menu_enabled || zone_traversal_enabled)) {
         SudekiMpLogWrite(
             "coop_roster_menu_config=invalid reason=mutually_exclusive_with_cleanroom_menu\r\n"
         );
@@ -521,6 +560,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             sizeof(cleanroom_menu_key_text[0])),
         config_path
     );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"ToggleZoneTraversalMenu",
+        L"F7",
+        zone_traversal_menu_key_text,
+        (DWORD)(sizeof(zone_traversal_menu_key_text) /
+            sizeof(zone_traversal_menu_key_text[0])),
+        config_path
+    );
     if (direct_spirit_strike_prototype_enabled &&
         !SudekiMpParseInputKey(
             spirit_strike_key_text,
@@ -589,6 +637,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             cleanroom_menu_key_text,
             &cleanroom_menu_virtual_key)) {
         SudekiMpLogWrite("cleanroom_menu_key_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (zone_traversal_enabled &&
+        !SudekiMpParseInputKey(
+            zone_traversal_menu_key_text,
+            &zone_traversal_menu_virtual_key)) {
+        SudekiMpLogWrite("zone_traversal_menu_key_config=invalid\r\n");
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -933,10 +990,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("quick_skill_input_trace_applied=false\r\n");
     }
-    SudekiMpLogFormat("character_switch_trace_requested=%s\r\n",
-        character_switch_trace_enabled ? "true" : "false");
-    if (character_switch_trace_enabled) {
-        if (!SudekiMpInstallCharacterSwitchTrace(game_module)) {
+    SudekiMpLogFormat(
+        "character_switch_trace_requested=%s talos_party_prototype=%s\r\n",
+        character_switch_trace_enabled ? "true" : "false",
+        talos_party_prototype_enabled ? "true" : "false");
+    if (character_switch_trace_enabled || talos_party_prototype_enabled) {
+        if (!SudekiMpInstallCharacterSwitchTrace(
+                game_module,
+                talos_party_prototype_enabled)) {
             SudekiMpLogFormat("character_switch_trace_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("character_switch_trace_applied=false\r\n");
@@ -978,6 +1039,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         coop_roster_menu_enabled ? "true" : "false",
         (unsigned long)cleanroom_menu_virtual_key
     );
+    SudekiMpLogFormat(
+        "zone_traversal_menu_requested=%s virtual_key=0x%02lx\r\n",
+        zone_traversal_enabled ? "true" : "false",
+        (unsigned long)zone_traversal_menu_virtual_key
+    );
     if (coop_roster_menu_enabled) {
         if (!SudekiMpInstallCoopRosterMenu(
                 game_module,
@@ -997,16 +1063,39 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
     }
-    if (cleanroom_menu_enabled) {
-        BOOL cleanroom_installed = cleanroom_multiplayer_integration ?
+    SudekiMpLogFormat(
+        "zone_transition_trace_requested=%s\r\n",
+        zone_transition_trace_enabled ? "true" : "false"
+    );
+    if (zone_transition_trace_enabled) {
+        if (!SudekiMpInstallZoneTransitionTrace(game_module)) {
+            SudekiMpLogFormat(
+                "zone_transition_trace_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpLogWrite("zone_transition_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=zone_transition_trace_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TRACE_FAILED;
+        }
+        SudekiMpLogWrite("zone_transition_trace_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("zone_transition_trace_applied=false\r\n");
+    }
+    if (cleanroom_menu_enabled || zone_traversal_enabled) {
+        BOOL cleanroom_installed = zone_traversal_enabled &&
+                !cleanroom_menu_enabled && !coop_roster_menu_enabled ?
+            SudekiMpInstallZoneTraversalMenu(
+                game_module, zone_traversal_menu_virtual_key,
+                skip_startup_movies) :
+            (cleanroom_multiplayer_integration ?
             SudekiMpInstallIntegratedCleanroomMenu(
                 game_module,
                 cleanroom_menu_virtual_key
             ) :
             SudekiMpInstallCleanroomMenu(
                 game_module,
-                cleanroom_menu_virtual_key
-            );
+                cleanroom_menu_virtual_key));
 
         if (!cleanroom_installed) {
             SudekiMpLogFormat(
@@ -1018,7 +1107,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
-        SudekiMpLogWrite("cleanroom_menu_applied=true\r\n");
+        SudekiMpLogFormat(
+            "cleanroom_menu_applied=true traversal=%s toggle_key=0x%02lx\r\n",
+            zone_traversal_enabled ? "true" : "false",
+            (unsigned long)(zone_traversal_enabled && !cleanroom_menu_enabled ?
+                zone_traversal_menu_virtual_key : cleanroom_menu_virtual_key));
     } else {
         SudekiMpLogWrite("cleanroom_menu_applied=false\r\n");
     }
@@ -1203,7 +1296,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !split_screen_render_enabled &&
         !cleanroom_menu_enabled &&
         !coop_roster_menu_enabled &&
-        !player_movement_trace_enabled) {
+        !player_movement_trace_enabled &&
+        !zone_transition_trace_enabled &&
+        !zone_traversal_enabled) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;
@@ -1215,7 +1310,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpUninstallZoneTransitionTrace();
             SudekiMpInputBridgeStop();
+            SudekiMpUninstallAcceleratorCache();
         }
         SudekiMpLogClose();
     }

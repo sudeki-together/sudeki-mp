@@ -30,12 +30,14 @@ add_library(SudekiMP SHARED
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
     src/input/key_binding.c
+    src/hooks/accelerator_cache.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
     src/hooks/pattern_scan.c
     src/hooks/player_input_trace.c
+    src/hooks/zone_transition_trace.c
     src/hooks/quick_menu.c
     src/hooks/quick_skill_input.c
     src/hooks/spirit_strike_input.c
@@ -114,6 +116,23 @@ target_include_directories(SudekiMP.CallHookTest PRIVATE src)
 target_compile_definitions(SudekiMP.CallHookTest PRIVATE WIN32_LEAN_AND_MEAN)
 target_compile_options(SudekiMP.CallHookTest PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(SudekiMP.CallHookTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.AcceleratorCacheTest
+    tests/accelerator_cache_test.c
+    src/hooks/accelerator_cache.c
+    src/hooks/call_hook.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.AcceleratorCacheTest PRIVATE src)
+target_compile_definitions(SudekiMP.AcceleratorCacheTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.AcceleratorCacheTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.AcceleratorCacheTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -325,6 +344,7 @@ add_executable(SudekiMP.CleanroomEngineTest
     tests/cleanroom_engine_test.c
     src/cleanroom/engine.c
     src/engine/log.c
+    src/hooks/call_hook.c
 )
 target_include_directories(SudekiMP.CleanroomEngineTest PRIVATE src)
 target_compile_definitions(SudekiMP.CleanroomEngineTest PRIVATE

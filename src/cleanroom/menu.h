@@ -8,6 +8,11 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     HMODULE game_module,
     UINT toggle_key
 );
+BOOL SudekiMpInstallZoneTraversalMenu(
+    HMODULE game_module,
+    UINT toggle_key,
+    BOOL skip_startup_movies
+);
 BOOL SudekiMpInstallCoopRosterMenu(
     HMODULE game_module,
     UINT toggle_key,

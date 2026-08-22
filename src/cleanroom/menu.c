@@ -6,6 +6,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/split_screen_render.h"
+#include "hooks/zone_transition_trace.h"
 
 #include <stdint.h>
 #include <limits.h>
@@ -275,6 +276,8 @@ enum {
     PLAYER_TWO_BADGE_HEIGHT = 42u,
     MENU_TIMEOUT_MS = 6000u,
     MENU_STATUS_INTERVAL_MS = 150u,
+    ZONE_TRAVERSAL_PAGE_WORLDS = 0u,
+    ZONE_TRAVERSAL_PAGE_INTERIORS = 1u,
     D3D_DEVICE_CREATE_TEXTURE_INDEX = 23u,
     D3D_DEVICE_GET_RENDER_TARGET_INDEX = 38u,
     D3D_DEVICE_SET_RENDER_STATE_INDEX = 57u,
@@ -678,8 +681,63 @@ static BOOL infinite_sp_valid;
 static BOOL infinite_spirit;
 static BOOL infinite_spirit_valid;
 static BOOL integrated_multiplayer_mode;
+static BOOL zone_traversal_mode;
+static unsigned int zone_traversal_page;
+static unsigned int zone_traversal_selection;
+static BOOL zone_traversal_waiting;
+static char zone_traversal_waiting_world[64];
+static DWORD zone_traversal_waiting_since;
+static DWORD zone_traversal_transition_guard_until;
+/*
+ * EnterTemporaryZone is not a complete arbitrary-area teleport by itself:
+ * native doors also establish the destination start-position/camera context.
+ * Keep direct menu activation disabled until that authored context seam is
+ * identified; a raw call can place the party in the skybox and is unsafe to
+ * repeat while the asynchronous load is still settling.
+ */
+static const BOOL zone_traversal_direct_temporary_enabled = TRUE;
+/* SetZoneNOW performs world teardown/load, but the cleanroom has no authored
+ * default spawn/camera handoff for the newly selected world.  Keep direct
+ * persistent-world jumps fail-closed until that context is identified. */
+static const BOOL zone_traversal_direct_persistent_enabled = TRUE;
+
+typedef struct SudekiMpTraversalWorld {
+    const char *name;
+    const char *label;
+} SudekiMpTraversalWorld;
+
+typedef struct SudekiMpTraversalInterior {
+    const char *world;
+    const char *name;
+    const char *label;
+} SudekiMpTraversalInterior;
+
+static const SudekiMpTraversalWorld traversal_worlds[] = {
+    {"NewBrightwater", "NEWBRIGHTWATER"},
+    {"Illumina_Countryside_Hub", "COUNTRYSIDE HUB"},
+    {"Illumina_Countryside_NE", "COUNTRYSIDE NE"},
+    {"Illumina_Countryside_SE", "COUNTRYSIDE SE"},
+    {"Illumina_Countryside_SW", "COUNTRYSIDE SW"},
+    {"Illumina_Countryside_NW", "COUNTRYSIDE NW"}
+};
+
+static const SudekiMpTraversalInterior traversal_interiors[] = {
+    {"NewBrightwater", "LNBr_Church", "CHURCH"},
+    {"NewBrightwater", "LNBr_Kamo_shop", "KAMO SHOP"},
+    {"NewBrightwater", "LNBr_Kilks_house", "KILKS HOUSE"},
+    {"NewBrightwater", "LNBr_Lighthouse", "LIGHTHOUSE"},
+    {"NewBrightwater", "LNBr_Salty_dog_Inn", "SALTY DOG INN"},
+    {"NewBrightwater", "LNBr_ShortTent", "SHORT TENT"},
+    {"NewBrightwater", "LNBr_TallTent01", "TALL TENT 01"},
+    {"NewBrightwater", "LNBr_TallTent02", "TALL TENT 02"},
+    {"Illumina_Countryside_SE", "LICo_Athlos_Shack", "ATHLOS SHACK"},
+    {"Illumina_Countryside_SE", "LICo_Frappe_Farm", "FRAPPE FARM"},
+    {"Illumina_Countryside_SE", "LICo_Porkins", "PORKINS"},
+    {"Illumina_Countryside_SE", "LICo_SW_Trader_Cave", "TRADER CAVE"}
+};
 static BOOL roster_mode;
 static BOOL roster_locked;
+static BOOL roster_coop_profile;
 static unsigned int roster_player_one;
 static unsigned int roster_player_two;
 static unsigned int roster_cursor;
@@ -960,6 +1018,7 @@ static void roster_build_persistence_path(void) {
 static void roster_load_persistence(void) {
     char player_one[32];
     char player_two[32];
+    char mode[16];
 
     if (roster_persistence_path[0] == '\0') {
         return;
@@ -968,18 +1027,27 @@ static void roster_load_persistence(void) {
         sizeof(player_one), roster_persistence_path);
     GetPrivateProfileStringA("Roster", "PlayerTwo", "Tal", player_two,
         sizeof(player_two), roster_persistence_path);
+    GetPrivateProfileStringA("Roster", "Mode", "Single", mode,
+        sizeof(mode), roster_persistence_path);
     roster_player_one = roster_actor_from_label(player_one);
     roster_player_two = roster_actor_from_label(player_two);
     if (roster_player_one == roster_player_two) {
         roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
         roster_player_two = SUDEKIMP_CLEANROOM_TAL;
     }
+    roster_coop_profile = _stricmp(mode, "Coop") == 0;
+    if (roster_coop_profile) {
+        roster_locked = SudekiMpSplitScreenSetRosterTypes(
+            roster_actor_type(roster_player_one),
+            roster_actor_type(roster_player_two));
+    }
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=loaded "
-        "path=%s p1=%s p2=%s policy=sidecar_profile\r\n",
+        "path=%s p1=%s p2=%s mode=%s policy=sidecar_profile\r\n",
         roster_persistence_path,
         roster_actor_label(roster_player_one),
-        roster_actor_label(roster_player_two)
+        roster_actor_label(roster_player_two),
+        roster_coop_profile ? "Coop" : "Single"
     );
 }
 
@@ -991,12 +1059,15 @@ static void roster_save_persistence(void) {
         roster_actor_label(roster_player_one), roster_persistence_path);
     WritePrivateProfileStringA("Roster", "PlayerTwo",
         roster_actor_label(roster_player_two), roster_persistence_path);
+    WritePrivateProfileStringA("Roster", "Mode",
+        roster_coop_profile ? "Coop" : "Single", roster_persistence_path);
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=saved "
-        "path=%s p1=%s p2=%s policy=sidecar_profile\r\n",
+        "path=%s p1=%s p2=%s mode=%s policy=sidecar_profile\r\n",
         roster_persistence_path,
         roster_actor_label(roster_player_one),
-        roster_actor_label(roster_player_two)
+        roster_actor_label(roster_player_two),
+        roster_coop_profile ? "Coop" : "Single"
     );
 }
 
@@ -1841,14 +1912,14 @@ static BOOL native_roster_submit_centered_title_text(
 
 static unsigned int native_roster_item_count(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
-        return 2u;
+        return 3u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
-        return 3u;
+        return 4u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
         roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
-        return 4u;
+        return 5u;
     }
     return 0u;
 }
@@ -2036,7 +2107,9 @@ static void native_roster_restore_vanilla_items(void *controller) {
 }
 
 static void native_roster_submit_page(void) {
-    static const char *const mode_labels[] = {"Single Player", "Co-op"};
+    static const char *const mode_labels[] = {
+        "Single Player", "Co-op", "Back"
+    };
     static const char *const actor_labels[] = {"Ailish", "Tal", "Buki", "Elco"};
     /* The card texture uses its own centered 640-wide overlay.  Font-1 title
      * text is submitted in the title renderer's logical coordinates, so these
@@ -2046,13 +2119,15 @@ static void native_roster_submit_page(void) {
     };
     char confirm_player_one[28];
     char confirm_player_two[28];
+    const char *actor_back_label = "Back";
     const char *const *labels = NULL;
     const char *heading = NULL;
     unsigned int count = 0u;
     unsigned int selection = 0u;
     unsigned int index;
     unsigned int alpha;
-    const char *confirm_labels[3];
+    unsigned int prompt_y;
+    const char *confirm_labels[4];
 
     if (!roster_native_screen || roster_pending_controller == NULL) {
         return;
@@ -2061,17 +2136,17 @@ static void native_roster_submit_page(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
         heading = "SUDEKI TOGETHER";
         labels = mode_labels;
-        count = 2u;
+        count = 3u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE) {
         heading = "PLAYER 1 - CHOOSE YOUR HERO";
         labels = actor_labels;
-        count = 4u;
+        count = 5u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
         heading = "PLAYER 2 - CHOOSE YOUR HERO";
         labels = actor_labels;
-        count = 4u;
+        count = 5u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
         wsprintfA(confirm_player_one, "Player 1: %s",
@@ -2081,9 +2156,10 @@ static void native_roster_submit_page(void) {
         confirm_labels[0] = confirm_player_one;
         confirm_labels[1] = confirm_player_two;
         confirm_labels[2] = "Lock In";
+        confirm_labels[3] = "Back";
         heading = "CONFIRM CO-OP ROSTER";
         labels = confirm_labels;
-        count = 3u;
+        count = 4u;
     }
     if (labels == NULL || selection >= count) {
         return;
@@ -2092,6 +2168,9 @@ static void native_roster_submit_page(void) {
     if (alpha == 0u) {
         return;
     }
+    prompt_y = (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) ? 458u :
+        NATIVE_ROSTER_PROMPT_Y;
     (void)native_roster_submit_centered_title_text(
         heading,
         NATIVE_ROSTER_TITLE_CONTENT_CENTER_X,
@@ -2099,13 +2178,18 @@ static void native_roster_submit_page(void) {
         0xf0dc9600u | alpha);
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
         roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
-        for (index = 0u; index < count; ++index) {
+        for (index = 0u; index < 4u; ++index) {
             (void)native_roster_submit_centered_title_text(
                 labels[index],
                 actor_title_card_centers[index],
                 403u,
                 (index == selection ? 0xffffff00u : 0x9a9a9a00u) | alpha);
         }
+        (void)native_roster_submit_centered_title_text(
+            actor_back_label,
+            NATIVE_ROSTER_TITLE_CONTENT_CENTER_X,
+            430u,
+            (selection == 4u ? 0xffffff00u : 0x9a9a9a00u) | alpha);
     }
     else {
         for (index = 0u; index < count; ++index) {
@@ -2119,7 +2203,7 @@ static void native_roster_submit_page(void) {
     (void)native_roster_submit_centered_title_text(
         "ENTER SELECTS",
         NATIVE_ROSTER_TITLE_CONTENT_CENTER_X,
-        NATIVE_ROSTER_PROMPT_Y,
+        prompt_y,
         0xb8b8b800u | alpha);
 }
 
@@ -2164,37 +2248,68 @@ static void native_roster_refresh_screen(void *controller) {
 
 static const char *native_roster_selected_action(void) {
     static const char *const mode_actions[] = {
-        "SudekiMPSinglePlayer", "SudekiMPCoop"
+        "SudekiMPSinglePlayer", "SudekiMPCoop", "SudekiMPRosterBack"
     };
     static const char *const p1_actions[] = {
         "SudekiMPP1Ailish", "SudekiMPP1Tal", "SudekiMPP1Buki",
-        "SudekiMPP1Elco"
+        "SudekiMPP1Elco", "SudekiMPRosterBack"
     };
     static const char *const p2_actions[] = {
         "SudekiMPP2Ailish", "SudekiMPP2Tal", "SudekiMPP2Buki",
-        "SudekiMPP2Elco"
+        "SudekiMPP2Elco", "SudekiMPRosterBack"
     };
     static const char *const confirm_actions[] = {
-        "SudekiMPRosterP1", "SudekiMPRosterP2", "SudekiMPRosterLock"
+        "SudekiMPRosterP1", "SudekiMPRosterP2", "SudekiMPRosterLock",
+        "SudekiMPRosterBack"
     };
 
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE &&
-        roster_native_selection < 2u) {
+        roster_native_selection < 3u) {
         return mode_actions[roster_native_selection];
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE &&
-        roster_native_selection < 4u) {
+        roster_native_selection < 5u) {
         return p1_actions[roster_native_selection];
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO &&
-        roster_native_selection < 4u) {
+        roster_native_selection < 5u) {
         return p2_actions[roster_native_selection];
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM &&
-        roster_native_selection < 3u) {
+        roster_native_selection < 4u) {
         return confirm_actions[roster_native_selection];
     }
     return NULL;
+}
+
+static BOOL native_roster_restore_original_menu(void *controller);
+
+static BOOL native_roster_back_to_title(void *controller) {
+    if (controller == NULL ||
+        !native_roster_restore_original_menu(controller)) {
+        SudekiMpLogWrite(
+            "cleanroom_menu event=native_roster status=rejected "
+            "reason=back_to_title_restore_failed\r\n");
+        return FALSE;
+    }
+    native_roster_release_animated_rows();
+    native_roster_release_options_rows(controller);
+    if (!native_roster_leave_page_state(controller)) {
+        SudekiMpLogWrite(
+            "cleanroom_menu event=native_roster status=rejected "
+            "reason=back_to_title_page_restore_failed\r\n");
+        return FALSE;
+    }
+    roster_native_screen = FALSE;
+    roster_native_screen_kind = NATIVE_ROSTER_NONE;
+    roster_native_selection = 0u;
+    roster_waiting_new_game = FALSE;
+    roster_pending_controller = NULL;
+    native_roster_restore_vanilla_items(controller);
+    SudekiMpLogWrite(
+        "cleanroom_menu event=native_roster state=back_to_title "
+        "reason=user_selection\r\n");
+    return TRUE;
 }
 
 static void native_roster_rebuild_from_native_menu(void *controller) {
@@ -2392,10 +2507,10 @@ static BOOL native_roster_navigation(
         (event != 6u && event != 7u)) {
         return FALSE;
     }
-    count = roster_native_screen_kind == NATIVE_ROSTER_MODE ? 2u :
-        (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM ? 3u : 4u);
+    count = roster_native_screen_kind == NATIVE_ROSTER_MODE ? 3u :
+        (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM ? 4u : 5u);
     selection = roster_native_selection;
-    if (count == 0u || count > 4u || selection >= count) {
+    if (count == 0u || count > NATIVE_ROSTER_ROW_COUNT || selection >= count) {
         return FALSE;
     }
     if (event == 6u) {
@@ -2974,7 +3089,32 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
     if (action == NULL) {
         return 0u;
     }
+    if (_stricmp(action, "SudekiMPRosterBack") == 0) {
+        if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
+            (void)native_roster_back_to_title(controller);
+        }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE) {
+            roster_native_screen_kind = NATIVE_ROSTER_MODE;
+            roster_native_selection = 1u;
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+            roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
+            roster_native_selection = roster_player_one;
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
+            roster_native_screen_kind = NATIVE_ROSTER_PLAYER_TWO;
+            roster_native_selection = roster_player_two;
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
+        return 1u;
+    }
     if (_stricmp(action, "SudekiMPSinglePlayer") == 0) {
+        roster_coop_profile = FALSE;
         roster_save_persistence();
         if (!native_roster_restore_original_menu(controller)) {
             SudekiMpLogWrite(
@@ -3067,6 +3207,7 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             return 1u;
         }
         roster_locked = TRUE;
+        roster_coop_profile = TRUE;
         roster_save_persistence();
         if (!native_roster_restore_original_menu(controller)) {
             roster_locked = FALSE;
@@ -3205,6 +3346,28 @@ static void update_action_status(void) {
         multiplayer_input_ready = FALSE;
         last_status_update = 0u;
         return;
+    }
+    if (zone_traversal_mode && zone_traversal_waiting &&
+        SudekiMpZoneTraversalWorldMatches(zone_traversal_waiting_world)) {
+        zone_traversal_waiting = FALSE;
+        zone_traversal_waiting_since = 0u;
+        zone_traversal_waiting_world[0] = '\0';
+        menu_texture_dirty = TRUE;
+        SudekiMpLogFormat(
+            "zone_traversal event=world_ready world=%s\r\n",
+            SudekiMpZoneTraversalCurrentWorld());
+    } else if (zone_traversal_mode && zone_traversal_waiting &&
+        zone_traversal_waiting_since != 0u &&
+        (DWORD)(now - zone_traversal_waiting_since) > 15000u) {
+        SudekiMpLogFormat(
+            "zone_traversal event=world_ready status=timeout "
+            "requested=%s\r\n",
+            zone_traversal_waiting_world[0] == '\0' ?
+                "<unknown>" : zone_traversal_waiting_world);
+        zone_traversal_waiting = FALSE;
+        zone_traversal_waiting_since = 0u;
+        zone_traversal_waiting_world[0] = '\0';
+        menu_texture_dirty = TRUE;
     }
     if (integrated_multiplayer_mode && !coop_lobby_prompted &&
         !coop_role_lock_active) {
@@ -3355,10 +3518,186 @@ static void begin_pending(unsigned int index, SudekiMpPendingAction action) {
     menu_texture_dirty = TRUE;
 }
 
+static BOOL rising_key(unsigned int slot, UINT key);
+
+static unsigned int traversal_interior_count_for_world(
+    const char *world,
+    unsigned int *first_index
+) {
+    unsigned int index;
+    unsigned int count = 0u;
+    unsigned int first = 0u;
+
+    if (world == NULL) {
+        if (first_index != NULL) {
+            *first_index = 0u;
+        }
+        return 0u;
+    }
+    for (index = 0u; index < sizeof(traversal_interiors) /
+            sizeof(traversal_interiors[0]); ++index) {
+        if (_stricmp(traversal_interiors[index].world, world) != 0) {
+            continue;
+        }
+        if (count == 0u) {
+            first = index;
+        }
+        ++count;
+    }
+    if (first_index != NULL) {
+        *first_index = first;
+    }
+    return count;
+}
+
+static void activate_traversal_selection(void) {
+    const char *current_world = SudekiMpZoneTraversalCurrentWorld();
+
+    if (zone_traversal_waiting ||
+        (LONG)(GetTickCount() - zone_traversal_transition_guard_until) < 0) {
+        SudekiMpLogWrite(
+            "zone_traversal action=ignored reason=transition_pending\r\n");
+        return;
+    }
+
+    if (zone_traversal_page == ZONE_TRAVERSAL_PAGE_WORLDS) {
+        const SudekiMpTraversalWorld *destination =
+            &traversal_worlds[zone_traversal_selection];
+
+        if (SudekiMpZoneTraversalWorldMatches(destination->name)) {
+            SudekiMpLogFormat(
+                "zone_traversal action=set_world status=already_current "
+                "world=%s\r\n",
+                destination->name);
+            menu_texture_dirty = TRUE;
+            return;
+        }
+
+        if (!zone_traversal_direct_persistent_enabled ||
+            !SudekiMpZoneTraversalArrivalContextReady(
+                destination->name, NULL)) {
+            SudekiMpLogFormat(
+                "zone_traversal action=set_world status=rejected "
+                "reason=awaiting_cached_native_savepoint_context zone=%s\r\n",
+                destination->name);
+            return;
+        }
+
+        if (!SudekiMpZoneTraversalSwitchWorld(destination->name)) {
+            SudekiMpLogFormat(
+                "zone_traversal action=switch_world status=rejected "
+                "zone=%s error=%lu\r\n",
+                destination->name, (unsigned long)GetLastError());
+            return;
+        }
+        lstrcpynA(zone_traversal_waiting_world, destination->name,
+            sizeof(zone_traversal_waiting_world));
+        zone_traversal_waiting = TRUE;
+        zone_traversal_waiting_since = GetTickCount();
+        zone_traversal_transition_guard_until = GetTickCount() + 1200u;
+        menu_texture_dirty = TRUE;
+        return;
+    }
+    {
+        unsigned int first_index;
+        unsigned int count = traversal_interior_count_for_world(
+            current_world, &first_index);
+        const SudekiMpTraversalInterior *destination;
+
+        if (count == 0u || zone_traversal_selection >= count) {
+            SudekiMpLogFormat(
+                "zone_traversal action=enter_temporary status=rejected "
+                "reason=no_confirmed_interiors current_world=%s\r\n",
+                current_world == NULL ? "<unknown>" : current_world);
+            return;
+        }
+        destination = &traversal_interiors[first_index +
+            zone_traversal_selection];
+
+        if (!zone_traversal_direct_temporary_enabled ||
+            !SudekiMpZoneTraversalArrivalContextReady(
+                current_world, destination->name)) {
+            SudekiMpLogFormat(
+                "zone_traversal action=enter_temporary status=rejected "
+                "reason=awaiting_cached_native_savepoint_context world=%s "
+                "zone=%s\r\n",
+                current_world == NULL ? "<unknown>" : current_world,
+                destination->name);
+            return;
+        }
+        if (!SudekiMpZoneTraversalEnterTemporary(destination->name)) {
+            SudekiMpLogFormat(
+                "zone_traversal action=enter_temporary status=rejected "
+                "world=%s zone=%s error=%lu\r\n",
+                current_world == NULL ? "<unknown>" : current_world,
+                destination->name, (unsigned long)GetLastError());
+            return;
+        }
+        menu_open = FALSE;
+        zone_traversal_transition_guard_until = GetTickCount() + 1200u;
+        menu_texture_dirty = TRUE;
+    }
+}
+
+static void poll_traversal_input(
+    BOOL up,
+    BOOL down,
+    BOOL left,
+    BOOL right
+) {
+
+    if (left && zone_traversal_page == ZONE_TRAVERSAL_PAGE_INTERIORS) {
+        zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;
+        zone_traversal_selection = 0u;
+        menu_texture_dirty = TRUE;
+    }
+    if (right && zone_traversal_page == ZONE_TRAVERSAL_PAGE_WORLDS) {
+        const char *world = SudekiMpZoneTraversalCurrentWorld();
+        if (!zone_traversal_waiting && world != NULL &&
+            traversal_interior_count_for_world(
+                world, NULL) != 0u) {
+            zone_traversal_page = ZONE_TRAVERSAL_PAGE_INTERIORS;
+            zone_traversal_selection = 0u;
+            menu_texture_dirty = TRUE;
+        }
+    }
+    if (zone_traversal_page == ZONE_TRAVERSAL_PAGE_WORLDS) {
+        unsigned int count = sizeof(traversal_worlds) /
+            sizeof(traversal_worlds[0]);
+        if (up) {
+            zone_traversal_selection = zone_traversal_selection == 0u ?
+                count - 1u : zone_traversal_selection - 1u;
+            menu_texture_dirty = TRUE;
+        }
+        if (down) {
+            zone_traversal_selection = (zone_traversal_selection + 1u) % count;
+            menu_texture_dirty = TRUE;
+        }
+    }
+    else {
+        const char *world = SudekiMpZoneTraversalCurrentWorld();
+        unsigned int count = traversal_interior_count_for_world(world, NULL);
+        if (count != 0u && up) {
+            zone_traversal_selection = zone_traversal_selection == 0u ?
+                count - 1u : zone_traversal_selection - 1u;
+            menu_texture_dirty = TRUE;
+        }
+        if (count != 0u && down) {
+            zone_traversal_selection = (zone_traversal_selection + 1u) % count;
+            menu_texture_dirty = TRUE;
+        }
+    }
+}
+
 static void activate_selected_item(void) {
     float position[3];
     BOOL accepted = FALSE;
     BOOL mode;
+
+    if (zone_traversal_mode) {
+        activate_traversal_selection();
+        return;
+    }
 
     if (selected_item == MENU_CLOSE_INDEX) {
         menu_open = FALSE;
@@ -3600,6 +3939,8 @@ static void poll_menu_input(void) {
     BOOL toggle = rising_key(0u, menu_toggle_key);
     BOOL up = rising_key(1u, VK_UP);
     BOOL down = rising_key(2u, VK_DOWN);
+    BOOL left = rising_key(6u, VK_LEFT);
+    BOOL right = rising_key(7u, VK_RIGHT);
     BOOL activate = rising_key(3u, VK_RETURN) ||
         (menu_open && rising_key(4u, VK_SPACE));
     BOOL escape = rising_key(5u, VK_ESCAPE);
@@ -3623,6 +3964,13 @@ static void poll_menu_input(void) {
         SudekiMpLogWrite(
             "cleanroom_menu event=visibility state=closed reason=escape\r\n"
         );
+        return;
+    }
+    if (zone_traversal_mode) {
+        poll_traversal_input(up, down, left, right);
+        if (activate) {
+            activate_selected_item();
+        }
         return;
     }
     if (up) {
@@ -3717,14 +4065,25 @@ void SudekiMpCleanroomMenuUpdate(void) {
     if (game_base == NULL) {
         return;
     }
+    if (zone_traversal_mode) {
+        SudekiMpZoneTraversalService();
+    }
     if (roster_mode) {
         poll_roster_input();
         if (roster_locked) {
             SudekiMpSplitScreenApplyRosterOnGameThread();
-            if (!coop_role_lock_active &&
-                SudekiMpSplitScreenRolesLocked()) {
-                (void)SudekiMpControlSeparationSetRoleLock(TRUE);
-                coop_role_lock_active = TRUE;
+            {
+                BOOL native_roles_locked =
+                    SudekiMpSplitScreenRolesLocked();
+                if (coop_role_lock_active != native_roles_locked) {
+                    (void)SudekiMpControlSeparationSetRoleLock(
+                        native_roles_locked);
+                    coop_role_lock_active = native_roles_locked;
+                    SudekiMpLogFormat(
+                        "cleanroom_menu event=native_roster "
+                        "state=role_lock_sync locked=%s\r\n",
+                        native_roles_locked ? "true" : "false");
+                }
             }
         }
         return;
@@ -4587,6 +4946,84 @@ static BOOL update_menu_texture(void *texture) {
     fill_rectangle(
         pixels, locked.pitch, MENU_TEXTURE_WIDTH - 4, 0,
         MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT, UINT32_C(0xff35e6e0));
+    if (zone_traversal_mode) {
+        const char *current_world = SudekiMpZoneTraversalCurrentWorld();
+        unsigned int index;
+        unsigned int first_index = 0u;
+        unsigned int interior_count = traversal_interior_count_for_world(
+            current_world, &first_index);
+
+        draw_text(
+            pixels, locked.pitch, 32, 24, "SUDEKIMP WORLD TRAVEL",
+            UINT32_C(0xff5ef7f0), 3);
+        draw_text(
+            pixels, locked.pitch, 32, 56,
+            "F7 CLOSE  UP DOWN CHOOSE  RIGHT AREAS  LEFT WORLDS",
+            UINT32_C(0xffaab8c8), 2);
+        draw_text(
+            pixels, locked.pitch, 32, 82,
+            current_world == NULL ? "WORLD: UNKNOWN" : "WORLD:",
+            UINT32_C(0xffb9c4d1), 2);
+        if (current_world != NULL) {
+            draw_text(pixels, locked.pitch, 190, 82, current_world,
+                UINT32_C(0xff7cf29a), 2);
+        }
+        if (zone_traversal_waiting) {
+            draw_text(pixels, locked.pitch, 32, 108,
+                "WAITING FOR WORLD LOAD",
+                UINT32_C(0xffffd166), 2);
+        }
+        if (zone_traversal_page == ZONE_TRAVERSAL_PAGE_WORLDS) {
+            draw_text(pixels, locked.pitch, 32, 140,
+                "PERSISTENT WORLDS - ENTER USES DEFAULT START",
+                UINT32_C(0xffd6dce5), 2);
+            for (index = 0u; index < sizeof(traversal_worlds) /
+                    sizeof(traversal_worlds[0]); ++index) {
+                int y = 174 + (int)index * 38;
+                if (index == zone_traversal_selection) {
+                    fill_rectangle(pixels, locked.pitch, 20, y - 8,
+                        MENU_TEXTURE_WIDTH - 20, y + 22,
+                        UINT32_C(0x90324962));
+                    draw_text(pixels, locked.pitch, 30, y, ">",
+                        UINT32_C(0xffffffff), 2);
+                }
+                draw_text(pixels, locked.pitch, 58, y,
+                    traversal_worlds[index].label,
+                    UINT32_C(0xffffffff), 2);
+            }
+        }
+        else {
+            draw_text(pixels, locked.pitch, 32, 140,
+                "TEMPORARY AREAS - ACTIVE WORLD ONLY",
+                UINT32_C(0xffd6dce5), 2);
+            if (interior_count == 0u) {
+                draw_text(pixels, locked.pitch, 58, 184,
+                    "NO CONFIRMED AREAS FOR THIS WORLD",
+                    UINT32_C(0xffff6b6b), 2);
+            }
+            else {
+                for (index = 0u; index < interior_count; ++index) {
+                    int y = 174 + (int)index * 38;
+                    if (index == zone_traversal_selection) {
+                        fill_rectangle(pixels, locked.pitch, 20, y - 8,
+                            MENU_TEXTURE_WIDTH - 20, y + 22,
+                            UINT32_C(0x90324962));
+                        draw_text(pixels, locked.pitch, 30, y, ">",
+                            UINT32_C(0xffffffff), 2);
+                    }
+                    draw_text(pixels, locked.pitch, 58, y,
+                        traversal_interiors[first_index + index].label,
+                        UINT32_C(0xffffffff), 2);
+                }
+            }
+        }
+        result = unlock_rectangle(texture, 0u);
+        if (FAILED(result)) {
+            return FALSE;
+        }
+        menu_texture_dirty = FALSE;
+        return TRUE;
+    }
     if (roster_mode) {
         draw_text(
             pixels, locked.pitch, 32, 24, "SUDEKIMP CO-OP ROSTER",
@@ -5578,6 +6015,35 @@ static BOOL __attribute__((cdecl)) cleanroom_movie_play(
         "Publisher.bik", "ClimaxLogo.bik", "TWIMTBP.bik"
     };
     unsigned int index;
+    static char last_movie_name[128];
+    char observed_movie_name[128];
+
+    observed_movie_name[0] = '\0';
+    if (movie_name != NULL && menu_memory_readable(movie_name, 1u)) {
+        size_t length = 0u;
+        while (length + 1u < sizeof(observed_movie_name) &&
+            menu_memory_readable(movie_name + length, 1u) &&
+            movie_name[length] != '\0') {
+            ++length;
+        }
+        if (length != 0u && length + 1u < sizeof(observed_movie_name)) {
+            memcpy(observed_movie_name, movie_name, length);
+            observed_movie_name[length] = '\0';
+        }
+    }
+    if (observed_movie_name[0] != '\0' &&
+        strcmp(observed_movie_name, last_movie_name) != 0) {
+        strncpy(last_movie_name, observed_movie_name,
+            sizeof(last_movie_name) - 1u);
+        last_movie_name[sizeof(last_movie_name) - 1u] = '\0';
+        SudekiMpLogFormat(
+            "cleanroom_menu event=movie_play_observed name=%s "
+            "skippable=%s roster_screen=%s pid=%lu\r\n",
+            observed_movie_name,
+            skippable ? "true" : "false",
+            roster_native_screen ? "true" : "false",
+            (unsigned long)GetCurrentProcessId());
+    }
 
     for (index = 0u;
          movie_name != NULL && index < sizeof(startup_movies) /
@@ -5602,22 +6068,25 @@ static BOOL install_cleanroom_menu_internal(
     UINT toggle_key,
     BOOL integrated,
     BOOL roster,
-    BOOL skip_startup_movies
+    BOOL skip_startup_movies,
+    BOOL traversal
 ) {
     uint8_t *base;
     void **controller_slot;
 
     if (game_module == NULL || game_base != NULL || toggle_key == 0u ||
-        toggle_key > 0xffu || (!roster && !command_line_is_cleanroom())) {
+        toggle_key > 0xffu ||
+        (!roster && !traversal && !command_line_is_cleanroom())) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
     if (!SudekiMpCleanroomEngineInitialize(game_module) ||
-        (!roster && !SudekiMpCleanroomAudioInitialize())) {
+        (!roster && !traversal && !SudekiMpCleanroomAudioInitialize())) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
     }
-    if (!roster && (!SudekiMpCleanroomEngineSetInfiniteSp(TRUE) ||
+    if (!roster && !traversal &&
+        (!SudekiMpCleanroomEngineSetInfiniteSp(TRUE) ||
         !SudekiMpCleanroomEngineSetInfiniteSpirit(TRUE))) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
@@ -5667,7 +6136,15 @@ static BOOL install_cleanroom_menu_internal(
     infinite_spirit_valid = TRUE;
     integrated_multiplayer_mode = integrated;
     roster_mode = roster;
+    zone_traversal_mode = traversal;
+    zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;
+    zone_traversal_selection = 0u;
+    zone_traversal_waiting = FALSE;
+    zone_traversal_waiting_since = 0u;
+    zone_traversal_waiting_world[0] = '\0';
+    zone_traversal_transition_guard_until = 0u;
     roster_locked = FALSE;
+    roster_coop_profile = FALSE;
     roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
     roster_player_two = SUDEKIMP_CLEANROOM_TAL;
     roster_cursor = 0u;
@@ -5730,8 +6207,34 @@ static BOOL install_cleanroom_menu_internal(
         (FrontEndMenuBuilderFunction)(base + RVA_FRONT_END_MENU_BUILDER) : NULL;
     front_end_selection_refresh = roster ?
         (FrontEndSelectionRefreshFunction)(base + RVA_FRONT_END_SELECTION_REFRESH) : NULL;
-    if (!roster) {
+    if (!roster && !traversal) {
         update_action_status();
+    }
+
+    if (traversal && skip_startup_movies) {
+        static const uint8_t traversal_movie_play_entry[] = {
+            0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
+        };
+        if (!SudekiMpInstallInlineHook(
+                &startup_movie_hook,
+                base + RVA_MOVIE_PLAY,
+                traversal_movie_play_entry,
+                sizeof(traversal_movie_play_entry),
+                (const void *)cleanroom_movie_play)) {
+            SudekiMpUninstallCleanroomMenu();
+            return FALSE;
+        }
+        original_movie_play =
+            (MoviePlayFunction)startup_movie_hook.trampoline;
+        if (menu_memory_executable(base + RVA_MOVIE_STOP)) {
+            MovieStopFunction stop_movie =
+                (MovieStopFunction)(base + RVA_MOVIE_STOP);
+            (void)stop_movie();
+        }
+        SudekiMpLogFormat(
+            "cleanroom_menu event=startup_movie_skip status=installed "
+            "rva=0x%08lx policy=traversal_world_test\r\n",
+            (unsigned long)RVA_MOVIE_PLAY);
     }
 
     if (roster) {
@@ -5949,17 +6452,19 @@ static BOOL install_cleanroom_menu_internal(
         "lead=PC_Ailish actor_policy=native_internal_spawn_and_remove "
         "dummy_resource=MON_TrainingDummy dummy_placement=cleanroom_center_anchor "
         "controls=combat_camera_infinite_sp_infinite_spirit "
-        "resource_defaults=enabled multiplayer_integration=%s\r\n",
+        "resource_defaults=enabled multiplayer_integration=%s traversal=%s\r\n",
         (unsigned long)menu_toggle_key,
         integrated ? "external_control_and_render_hooks" :
-            (roster ? "title_roster_hooks" : "standalone_hooks")
+            (roster ? "title_roster_hooks" :
+                (traversal ? "world_aware_traversal" : "standalone_hooks")),
+        traversal ? "true" : "false"
     );
     return TRUE;
 }
 
 BOOL SudekiMpInstallCleanroomMenu(HMODULE game_module, UINT toggle_key) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, FALSE, FALSE);
+        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE);
 }
 
 BOOL SudekiMpInstallIntegratedCleanroomMenu(
@@ -5967,7 +6472,16 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     UINT toggle_key
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, TRUE, FALSE, FALSE);
+        game_module, toggle_key, TRUE, FALSE, FALSE, FALSE);
+}
+
+BOOL SudekiMpInstallZoneTraversalMenu(
+    HMODULE game_module,
+    UINT toggle_key,
+    BOOL skip_startup_movies
+) {
+    return install_cleanroom_menu_internal(
+        game_module, toggle_key, FALSE, FALSE, skip_startup_movies, TRUE);
 }
 
 BOOL SudekiMpInstallCoopRosterMenu(
@@ -5976,7 +6490,7 @@ BOOL SudekiMpInstallCoopRosterMenu(
     BOOL skip_startup_movies
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, TRUE, skip_startup_movies);
+        game_module, toggle_key, FALSE, TRUE, skip_startup_movies, FALSE);
 }
 
 void SudekiMpUninstallCleanroomMenu(void) {
@@ -6093,8 +6607,15 @@ void SudekiMpUninstallCleanroomMenu(void) {
     infinite_spirit = FALSE;
     infinite_spirit_valid = FALSE;
     integrated_multiplayer_mode = FALSE;
+    zone_traversal_mode = FALSE;
+    zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;
+    zone_traversal_selection = 0u;
+    zone_traversal_waiting = FALSE;
+    zone_traversal_waiting_since = 0u;
+    zone_traversal_waiting_world[0] = '\0';
     roster_mode = FALSE;
     roster_locked = FALSE;
+    roster_coop_profile = FALSE;
     roster_waiting_new_game = FALSE;
     roster_replaying_new_game = FALSE;
     roster_resume_committed = FALSE;

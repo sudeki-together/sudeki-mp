@@ -1,4 +1,5 @@
 #include "engine/skill_activation_abi.h"
+#include "hooks/accelerator_cache.h"
 #include "hooks/skill_trace.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
@@ -288,6 +289,27 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
 
+    {
+        static const uint8_t message_pump_accelerator_call[] = {
+            0x6a, 0x65,
+            0x6a, 0x00,
+            0xff, 0x15, 0xec, 0xa0, 0x69, 0x00,
+            0x50,
+            0xff, 0x15, 0xf0, 0xa1, 0x69, 0x00
+        };
+        if (memcmp(
+                image + SUDEKIMP_MESSAGE_PUMP_ACCELERATOR_CALL_RVA,
+                message_pump_accelerator_call,
+                sizeof(message_pump_accelerator_call)) != 0 ||
+            *(const uint32_t *)(
+                image + SUDEKIMP_LOAD_ACCELERATORS_IAT_RVA) !=
+                SUDEKIMP_LOAD_ACCELERATORS_IMPORT_NAME_RVA) {
+            fputs("FAIL: exact accelerator-cache import seam mismatch\n",
+                stderr);
+            ++failures;
+        }
+    }
+
     if (SudekiMpSplitScreenQuickMenuLiveViewAccepted(
             FALSE, TRUE, FALSE, FALSE) ||
         SudekiMpSplitScreenQuickMenuLiveViewAccepted(
@@ -484,7 +506,7 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
-    if (!SudekiMpInstallCharacterSwitchTrace((HMODULE)image)) {
+    if (!SudekiMpInstallCharacterSwitchTrace((HMODULE)image, TRUE)) {
         fprintf(stderr, "character-switch trace install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallSpiritStrikeInput();

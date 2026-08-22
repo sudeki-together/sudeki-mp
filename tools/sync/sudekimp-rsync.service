@@ -1,0 +1,12 @@
+[Unit]
+Description=Private SudekiMP rsync mirror over NetBird
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/rsync --daemon --no-detach --address=100.95.93.91 --port=18730 --config=%h/.config/sudekimp-sync/rsyncd.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

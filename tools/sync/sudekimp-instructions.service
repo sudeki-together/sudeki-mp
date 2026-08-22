@@ -1,0 +1,13 @@
+[Unit]
+Description=Private SudekiMP handoff HTTP service over NetBird
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/Documents/Projects/sudeki-mp
+ExecStart=/usr/bin/python3 %h/Documents/Projects/sudeki-mp/tools/sync/serve_instructions.py --bind=100.95.93.91 --port=18731 --peer=100.95.174.52
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

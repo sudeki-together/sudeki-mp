@@ -709,6 +709,7 @@ static unsigned int coop_roster_player_one_type;
 static unsigned int coop_roster_player_two_type;
 static unsigned int coop_roster_rotation_attempts;
 static BOOL coop_roster_rotation_previous;
+static unsigned int coop_roster_last_presence_mask;
 static SudekiMpSplitScreenOverlayRenderer overlay_renderer;
 
 static const char second_player_camera_name[] = "SudekiMP_P2";
@@ -7728,6 +7729,7 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     coop_roster_player_one_type = player_one_type;
     coop_roster_player_two_type = player_two_type;
     coop_roster_valid = TRUE;
+    coop_roster_last_presence_mask = ~0u;
     SudekiMpLogFormat(
         "split_screen_render event=co_op_roster phase=selected "
         "player_one_type=0x%02lx player_two_type=0x%02lx "
@@ -7776,7 +7778,7 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
     uint8_t *previous_action;
     uint8_t *action;
 
-    if (!coop_roster_valid || coop_role_lock_active || game_base == NULL ||
+    if (!coop_roster_valid || game_base == NULL ||
         !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
             sizeof(group)) ||
         !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
@@ -7791,18 +7793,50 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
         return;
     }
     party_count = *(int *)(group + PARTY_COUNT_OFFSET);
-    if (party_count < 2 || party_count > (int)PARTY_SLOT_COUNT) {
+    if (party_count < 1 || party_count > (int)PARTY_SLOT_COUNT) {
         return;
     }
     desired_player_one = find_roster_character(
         group, coop_roster_player_one_type, &desired_slot
     );
-    if (desired_player_one == NULL) {
-        return; /* The selected character has not entered the party yet. */
-    }
     desired_player_two = find_roster_character(
         group, coop_roster_player_two_type, NULL
     );
+    {
+        unsigned int presence_mask =
+            (desired_player_one != NULL ? 1u : 0u) |
+            (desired_player_two != NULL ? 2u : 0u);
+        if (presence_mask != coop_roster_last_presence_mask) {
+            coop_roster_last_presence_mask = presence_mask;
+            SudekiMpLogFormat(
+                "split_screen_render event=co_op_roster phase=availability "
+                "player_one=%s player_two=%s mask=0x%02lx "
+                "policy=deferred_until_selected_party_members_exist\r\n",
+                desired_player_one != NULL ? "present" : "waiting",
+                desired_player_two != NULL ? "present" : "waiting",
+                (unsigned long)presence_mask);
+        }
+    }
+    if (coop_role_lock_active) {
+        if (desired_player_one == coop_locked_player_one &&
+            desired_player_two == coop_locked_player_two) {
+            return;
+        }
+        /* A level transition can rebuild party objects even when the
+         * selected character identities are unchanged.  Release only the
+         * runtime pointer lock; the roster types remain the session contract
+         * and will be applied again once both actors are available. */
+        coop_role_lock_active = FALSE;
+        coop_locked_player_one = NULL;
+        coop_locked_player_two = NULL;
+        (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+        SudekiMpLogWrite(
+            "split_screen_render event=co_op_roster phase=deferred "
+            "reason=party_members_rebuilt_or_unavailable\r\n");
+    }
+    if (desired_player_one == NULL || desired_player_two == NULL) {
+        return; /* Selected characters may join the party later. */
+    }
     controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
     if (controller_target == desired_player_one) {
         if (desired_player_two != NULL && desired_player_two != desired_player_one) {
@@ -8176,6 +8210,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     coop_locked_player_two = NULL;
     coop_roster_rotation_attempts = 0u;
     coop_roster_rotation_previous = FALSE;
+    coop_roster_last_presence_mask = ~0u;
     coop_roster_valid = FALSE;
     coop_roster_player_one_type = 0u;
     coop_roster_player_two_type = 0u;

@@ -2789,3 +2789,690 @@ heading/names/prompt, and no Continue/Load page or duplicate title map beneath
 it. Build and exact supported-image regression passed before the live run.
 
 Confidence: high for the queue-order cause and the presentation-only fix.
+
+### 2026-08-20 — Story-intro Wine crash isolated to accelerator-handle exhaustion
+
+The long-standing crash during the orange opening-story movie is not a
+SudekiMP exception. It reproduces with the untouched supported GOG executable
+(`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`)
+launched directly in the dedicated research prefix without the launcher or
+injected DLL. Both the vanilla and modded runs terminate in Wine 11.0 Staging
+with:
+
+```text
+dlls/win32u/window.c:97: alloc_user_handle:
+Assertion `index < MAX_USER_HANDLES' failed.
+```
+
+A filtered Wine-server trace identifies the exhausted object class exactly.
+The failing vanilla run made 32,693 `alloc_user_handle(type=0008)` requests,
+all from Sudeki's main thread `0024`. Wine's public `ntuser.h` defines type
+`0x0008` as `NTUSER_OBJ_ACCEL`. The final successful handle was `0x0001fff0`;
+the following allocation exceeded Wine's 32,768-entry USER table and triggered
+the assertion. Other allocations in the same trace were insignificant by
+comparison: 20 icons, 10 input contexts, and 6 menus.
+
+The executable-side cause is also confirmed. Sudeki's message-pump helper at
+VA `0x0068BF50` / RVA `0x0028BF50` calls `LoadAcceleratorsA` at VA
+`0x0068BF60` / RVA `0x0028BF60` every time the helper runs, always loading
+integer resource `0x65` (101). The Bink/movie playback loop at VA
+`0x00504D90` / RVA `0x00104D90` calls that helper repeatedly at VA
+`0x00504DD1` and during its completion wait at VAs `0x00504E51` and
+`0x00504E67`. `SUDEKI.exe` imports `LoadAcceleratorsA` and
+`TranslateAcceleratorA`, but not `DestroyAcceleratorTable`.
+
+Wine 11's public `dlls/user32/resource.c` implementation of
+`LoadAcceleratorsW` parses the resource and calls
+`NtUserCreateAcceleratorTable` for every invocation; it does not cache the
+resource-backed table. Sudeki's tight movie loop therefore consumes a new Wine
+USER handle on every message-pump call. This is a compatibility mismatch
+between Sudeki's repeated resource-load behavior and Wine's per-call allocator,
+not evidence that Bink itself corrupts memory.
+
+The behavioral A/B test supports the same boundary. With SudekiMP skipping
+only the three logo movies, one automated Escape skipped the opening-story
+movie and reached the normal title page. That run remained healthy for several
+minutes, well beyond the unskipped movie's failure interval, and exited cleanly
+when the dedicated prefix was stopped. Allowing the story movie to run filled
+the accelerator table and reproduced the assertion.
+
+The compatibility fix is now implemented as an exact-build-gated
+`LoadAcceleratorsA` IAT wrapper. It validates the supported message-pump
+opcodes and their relocated import targets, then caches the first successful
+handle only for Sudeki's own module/resource-101 pair. All other instance and
+resource combinations forward unchanged to the real `user32` function. A
+dedicated unit test confirms that the matching request calls the native API
+once, repeated requests reuse the result, and nonmatching requests continue to
+call the native API.
+
+The first live install attempt safely failed before process resume because the
+initial signature gate compared raw absolute operands without accounting for
+normal PE base relocation. No patch was applied. The corrected gate resolves
+both operands relative to the live module base and still requires the exact
+IAT target. The isolated Wine/Gamescope rerun then logged one
+`resource_loaded` event for handle `0x0002007e` and one `resource_reused` event
+for the same handle. With `SkipStartupMovies=false` and no injected Escape,
+the complete orange opening-story movie played successfully; the user also
+confirmed the intro now plays in full. Sudeki remained alive past the former
+failure interval and was stopped deliberately after acceptance.
+
+Build, accelerator-cache unit test, exact supported-image regression, and the
+normal research checkpoint all passed. The generated test configuration was
+restored afterward; no game executable or archive was modified.
+
+Confidence: high for the vanilla reproduction, leaking object class, exact
+Sudeki call chain, Wine allocation behavior, cached-IAT remedy, and full-intro
+live acceptance.
+
+## 2026-08-20 - New Game roster lifecycle observation
+
+Executable: supported GOG build SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+Method: observation-only launch in a dedicated headless Gamescope window using
+the research prefix. The three logo movies were skipped by the existing
+startup hook. One automated `Escape` skipped the opening story movie so the
+title controller could be reached without spending the run waiting on video.
+No gameplay ownership, AI, split-screen, HUD, or camera override was enabled.
+
+Findings:
+
+- The title front-end controller was observed at vtable RVA `0x002cb2b4`.
+- Activating New Game transitioned into an independent roster subpage rather
+  than a second title-button overlay. The roster page reached native state 6,
+  then performed a controlled backing-page leave and took over with its own
+  controller/renderer state.
+- Runtime-created roster rows use resource IDs `0x63` through `0x67` and the
+  native renderer vtable. This is a native-compatible presentation path, not
+  an extracted asset copy.
+- The portrait trace resolved resident game-owned resources for all four
+  actors: Ailish index `0x116`, Tal `0x115`, Buki `0x117`, and Elco `0x118`.
+  Each produced a material, resident texture, backend/GPU texture, and icon
+  object. The page can therefore display the actual game portraits without
+  putting game assets in the repository.
+- Save-page traces were installed at RVAs `0x0008c710`, `0x000898a0`, and
+  `0x0008d970`; no save load was committed during this observation.
+
+Confirmed fact: New Game -> independent native-compatible roster page ->
+resident portrait resources.
+
+Open boundary: roster choice/lock -> save/load completion -> party creation ->
+controller target, AI mode, HUD ownership, and camera initialization. The next
+pass should select Co-op and trace that boundary while keeping gameplay hooks
+disabled.
+
+## 2026-08-20 - Co-op lock and post-New-Game transition
+
+Method: same isolated headless Gamescope/Wine workflow, with the automated
+story-movie Escape path.  The run remained observation-only for gameplay.
+
+Confirmed:
+
+- Roster navigation reached the character pages and accepted a distinct
+  Ailish/Tal pair.
+- `split_screen_render event=co_op_roster` recorded player-one type `0x01`
+  and player-two type `0x23`.
+- The sidecar profile was written successfully.
+- The native roster rows and borrowed resident portrait objects were released.
+- The roster page backing state was restored.
+- The original native New Game action was replayed with stage transition
+  `stage=5/mode=10` followed by `stage=10/mode=0`.
+
+Result after the replay: the isolated frame remained black.  No subsequent
+party creation, level-load, controller-target, AI-mode, HUD, camera, or actor
+spawn trace was observed before the run was stopped.  This is a confirmed
+transition boundary, not evidence that gameplay ownership failed: native New
+Game was invoked, but the research process did not reach a visible initialized
+level.
+
+Confidence: high for Co-op selection, sidecar persistence, page teardown, and
+native action replay; unresolved for post-lock world initialization.  Next
+pass should isolate the black transition (including whether a second native
+movie/scene process is created) before adding any gameplay ownership writes.
+
+Follow-up diagnosis: the isolated capture was stopped approximately 12 seconds
+after the native action replay.  The working installation contains
+`movies/FMA01_poem.bik`, the opening story movie, and its container reports a
+duration of approximately 115.7 seconds.  `SkipStartupMovies=true` currently
+intercepts only `Publisher.bik`, `ClimaxLogo.bik`, and `TWIMTBP.bik`; it does not
+skip story movies.  Therefore a black frame during the first dozen seconds is
+consistent with the normal New Game opening movie and is not evidence of a
+failed level load.  The roster lock/replay logs still show no gameplay
+initialization because the run ended before that movie completed.  An
+observation-only movie-name/PID trace was added for the next run; no movie is
+being skipped or altered by that trace.
+## 2026-08-20 - Deferred roster availability and roster navigation recovery
+
+The roster is now treated as a session contract rather than an instruction to
+force whichever actor happens to be the initial native lead. The selected
+Player 1/Player 2 resource types persist after the roster page closes. The
+game-thread application path reports each selected actor independently as
+`present` or `waiting` and does not enable split-screen or rotate the native
+controller until both selected actors exist in the active party.
+
+This supports the intended Tal-first flow: a save may begin with Tal as the
+only available party member while the selected Ailish role remains pending;
+when Ailish is created in the party, the same persistent roster contract can
+finish the role handoff. If a level transition recreates party objects, the
+old pointer lock is released and reacquired against the new actor instances;
+the selected types are not discarded.
+
+The native-compatible roster page now has a Back action on the mode, player,
+and confirmation pages. Back returns one page at a time, and Back on the
+Single Player/Co-op page restores the original title menu without replaying
+New Game. This is reversible UI state only; it does not alter native movie
+playback or save data.
+
+The opening story movie remains observation-only. The movie/PID trace confirms
+which BIK resource starts; autonomous research should continue using the
+existing external Escape movie-skip path rather than spending the run waiting
+for the full intro.
+
+## 2026-08-20 - Story shortcut feasibility: position and door inventory
+
+A read-only Graphify/source/archive pass was performed before attempting any
+story shortcut. The executable and existing reports establish a promising but
+incomplete teleport boundary:
+
+- Script-facing `SetPlayerPosition(float,float,float)` is at RVA `0x00104ED0`
+  and resolves the active group slot 0 before calling the internal position
+  setter.
+- The internal `CPosition` vector setter is at RVA `0x00003050`; it writes
+  `CPosition+0x18/+0x1C/+0x20`, marks the object dirty, and records a change.
+- Party entries use the same character layout and expose their position object
+  through `character+0x44`, so arbitrary-character position access is plausible.
+  The ABI, collision/grounding side effects, and safe multi-actor call sequence
+  are not yet proven; no teleport write has been added.
+
+The executable's native transition inventory includes `EnterZone`,
+`SwitchZoneNOW`, `LoadZone`, `CWorld::SwitchMainZone`, and
+`CWorld::LockActiveZone`. The user-owned archive also contains serialized
+`CDoor` components, `LEVEL`/`INTERIOR`/`DOGLEG` zone records, and named portal
+resources such as `Portal_Tal`, `Portal_Ailish`, `Portal_Buki`, and
+`Portal_Elco`. These facts confirm that door/zone identities exist in the
+engine/data model, but do not yet identify the exact story-door object or the
+interaction ABI that checks combat completion.
+
+Next safe research step: resolve the position-setter calling convention and
+trace one `CDoor` interaction through its combat gate into `EnterZone` or the
+equivalent native transition function. Only then should a disabled story-mode
+teleport/door-assist command be implemented.
+
+## 2026-08-20 - Cafu cleanroom crash and weapon compatibility boundary
+
+All addresses below apply to the supported GOG executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The authored developer PC `PC_Cafu` can be created successfully. His actor,
+Elco-compatible body resources, and hidden weapon item are not the immediate
+crash. The repeatable access violation occurs at VA `0x00523638` (RVA
+`0x00123638`) in the model-wrapper constructor called from the
+`CCharacterWeapon` item transition. The instruction dereferences `ECX`, which
+is null because the typed `.HOM:41` resource proxy has no loaded model payload.
+The native constructor does not check this result before calling the model
+interface.
+
+Read-only live inventory inspection confirmed:
+
+- Cafu's pistol is global item ID `48`, type `WeaponDarkElco`.
+- It is deliberately absent from retail inventory category 5; category slot
+  `48` returns null because the playable list ends at slot `47`.
+- Item 48's primary model is `W033_CAFUSPISTOL.HOM:41`, runtime identifier
+  `0xD4E32E13`.
+- Its equipped-model override is the normal empty sentinel, matching retail
+  Elco weapons; that field is not the fault.
+- Elco's first weapon is global item ID `24`, and its working primary model
+  identifier is `0xDF85ECE7`.
+- `SOLData.baf` contains the W033 item reference and complete model data, but
+  its resource index contains no entry for item 48's identifier
+  `0xD4E32E13`.
+- The archive's trailing bucketed index stores records as
+  `{data offset, byte size, full hash}`. The one record whose extent contains
+  the complete W033 model is hash `0xA4FE4833`, data offset `0x206F5000`, size
+  `0x0002C888`. Its strings include `W033_CafusPistol_SolShader2SG`,
+  `WeaponFollow`, the pistol mesh hierarchy, and its authored effects.
+- The working Elco control hash `0xDF85ECE7` appears in that same index, while
+  Cafu's stale `0xD4E32E13` value is absent from both the index and the entire
+  archive byte stream. This is a shipped item-to-archive hash mismatch.
+
+A private `--cafu-testroom` compatibility path now waits for the native item
+database and asks Sudeki's own creating resource lookup at RVA `0x00011730`
+to preload type `41`, hash `0xA4FE4833`. Only after that lookup exposes a
+non-null loaded HOM payload does the mod save item 48's original 12-byte
+`ResourceName` and replace only its stale identifier with the verified archive
+identifier. Cafu retains item ID 48, `WeaponDarkElco` behavior, damage, and all
+other item/actor data. The write is exact-build/resource-identity gated,
+verified after application, and restored only if ownership still matches.
+
+The earlier reversible Elco-pistol visual alias remains only as a delayed
+safety fallback if the real W033 payload cannot load. It is not used when the
+archive correction succeeds.
+
+The isolated Wine acceptance run requested `0xA4FE4833`, received a non-null
+proxy payload, logged `policy=actual_w033_archive_resource`, spawned Cafu, and
+confirmed that item 48 remained his current weapon. The Elco alias did not run
+and no access violation occurred. This closes the missing weapon-payload cause
+and proves the actual shipped W033 can be loaded without editing
+`SOLData.baf`.
+
+The first firing tests then exposed a second, independent missing-resource
+boundary. Cafu's selected missile record reached the native launch path, but
+its presentation wrapper contained no render object. Native `CPosition`
+transform processing dereferenced that null render object first at RVA
+`0x00110F02` and, after a narrower dirty-flag experiment, at RVA `0x00111163`.
+The Cafu-probe build now consumes only this impossible presentation update:
+when the exact missile call presents a dirty `CPosition` whose attached
+wrapper has a null render object, it clears the dirty flag and detaches that
+wrapper before native transform processing. Repeated shots no longer crash;
+their gameplay path, wall collision, and impact sparks continue, but the
+projectile mesh is intentionally absent. This is containment, not a completed
+projectile-visual repair.
+
+Read-only weapon-presentation tracing established that the remaining floating
+pistol is not caused by failure to run the native equip transition:
+
+- `PC_CAFU.sol` uses `ELCO_CAFU_LORES.HOM:41`, `pc_elco.ani:43`, armed locator
+  `WeaponLoc_Rhand`, holster locator `WeaponLoc_leg`, and fire locator `SFX`.
+  The retail Elco record uses the same three locator names.
+- Cafu's world model resolves `WeaponLoc_leg` as index `6` and
+  `WeaponLoc_Rhand` as index `12`; the weapon slot changes from `6` to `12`
+  during the native arm transition.
+- The first-person model resolves `WeaponLoc_Rhand` as index `4`, and the
+  weapon slot is rebound to `4` when the wrapper switches.
+- The world renderer progresses through its movement/arm selectors, while the
+  first-person renderer uses selector `5` for ranged idle and selector `3`
+  for the firing action. The fire selector advances at rate `24.0` and the
+  missile launch occurs during it.
+- Both weapon attachment slots retain an identity local matrix; only slot zero
+  is active. The gun therefore receives no mod-authored positional or rotation
+  correction.
+
+These facts moved the visible pistol fault below the item/config/controller
+layer. A reversible, environment-gated A/B build then substituted Elco's
+known-good pistol visual while leaving Cafu's actor, animation, controller,
+locators, and missile data unchanged. Live visual acceptance confirmed that
+the Elco pistol sits correctly in Cafu's hand. This rejects the Cafu
+low-resolution skeleton and Elco animation set as the cause: the shipped W033
+Cafu pistol's own mesh origin/orientation is incompatible with the otherwise
+working attachment contract.
+
+The safe compatibility path is therefore to retain Cafu's hidden item 48 and
+all of its gameplay data while substituting only a known-good Elco pistol
+visual. Restoring W033 itself requires either a verified local model-transform
+correction or a future SudekiForge asset repair; copying or replacing Cafu's
+body animations is neither necessary nor supported by this test.
+
+Confidence: high for both crash boundaries, hidden item identity,
+stale-versus-indexed hash mismatch, reversible W033 correction, native equip
+and fire transitions, crash-free invisible projectile containment, and the
+live locator indices. Confirmed by controlled A/B comparison: W033's visual
+transform is the source of the floating/spinning gun. Open: visible projectile
+construction and whether W033 should receive a runtime local-transform fix or
+an offline SudekiForge asset correction.
+
+Disposition: Cafu exploration is complete for the current SudekiMP scope. The
+character is an unfinished Elco-derived developer variant rather than a fifth
+independent playable-character implementation: he uses an Elco-derived model,
+`pc_elco.ani`, Elco-compatible ranged control/locators, and a hidden Dark Elco
+weapon with Cafu-specific visual resources. The remaining invisible projectile
+and malformed W033 presentation are asset-completion problems, not blockers for
+the four-character co-op architecture. Retain the compatibility probes for
+future SudekiForge work, but do not spend the current multiplayer milestone on
+finishing Cafu.
+## 2026-08-21 - Observation-only native door and zone transition trace
+
+The earlier door experiment was not a valid transition observation: it was
+run with the character-switch trace and recorded action `0x32`, which is the
+party/character action rather than a zone change. The exact-build Ghidra pass
+confirmed the native entry-point ABIs:
+
+- `EnterZone(char const *)`, RVA `0x00007970`, is `cdecl`.
+- `SwitchZoneNOW(char const *)`, RVA `0x00007990`, is `cdecl`.
+- `LoadZone(char const *)`, RVA `0x00007B80`, is `cdecl`.
+- `CWorld::SwitchMainZone(char const *)`, RVA `0x00006380`, is `thiscall`.
+
+SudekiMP now has an opt-in, observation-only trace for those boundaries plus
+`SetZoneNOW` (RVA `0x00007910`) and the exported
+`CDoor::ActivateFromScript` (RVA `0x000CE3A0`, `thiscall`,
+`(bool requested, bool forced)`). It is enabled only by
+`tools/continue-research.sh --zone-transition-trace`, which exports
+`SUDEKIMP_ZONE_TRACE=1`. The hooks are exact-entry/signature gated against the
+known GOG executable, log before/after calls, copy zone strings defensively,
+and never alter a door, combat, position, or loading argument.
+`CDoor` activation is the first boundary that observes the interaction request
+itself; its native state fields include the door state at `+0x74`, flags at
+`+0x73`, and a guarded availability field at `+0x70`, while its helper at RVA
+`0x000CE300` prepares transition/timer state. The optional `LoadZone` hook may
+be rejected by a runtime signature mismatch and is explicitly logged as
+unavailable; the other required hooks must install successfully.
+
+Archive inspection identifies the authored building-door system. Interior and
+exterior entrances are commonly `.sol` trigger resources (type `38`) named
+things such as `NB_Church_Door_Entry_Trig.sol`, `NB_Lhouse_Door_Entry.sol`,
+`NB_Densi_Door_Entry.sol`, `NB_Inn_Door_Exit_Trig.sol`,
+`ICS_Athlos_Shack_Door_Entry.sol`, and `ICS_Frappe_Door_Entry_Trig.sol`.
+Their serialized script objects expose `OnEntry`, `OnExit`, and `OnAction`
+handlers. Decorative/physical door assets also exist as type `12`, `15`, or
+`34` resources (`IC_Door_CastleInteriorEntrance.sol`, `Door.sol`,
+`DoorTAR.sol`, etc.), but the zone-changing behavior is authored in the
+trigger script layer. World transition resources are separately named, for
+example `WS_Country_SE_to_Bright_NE.sol` and
+`WS_Country_NW_to_Castle_S.sol`, alongside their `Trigger1` and local-volume
+(`LC1`/`LC2`) scripts. This gives us a static mapping source: stage/door
+trigger -> authored destination script -> `SwitchZoneNOW` zone name.
+
+This build is ready for the next live pass: launch the mode, load the Tal save,
+approach a named door, and press Enter once. The log should distinguish a door
+request (`EnterZone`/`SwitchZoneNOW`) from actual world loading
+(`LoadZone`/`CWorld::SwitchMainZone`).
+
+The first fresh run with the expanded hooks produced two real transitions while
+the user entered and exited dungeon/building doors:
+`SwitchZoneNOW("Illumina_Countryside_SE")`, followed by
+`SwitchZoneNOW("Illumina_Countryside_Hub")`, each with matching before/after
+records. No `CDoor::ActivateFromScript`, `EnterTemporaryZone`, or
+`CWorld::SwitchMainZone` record appeared. This establishes `SwitchZoneNOW` as
+the active boundary for the building/dungeon doorway progression; the exported
+`CDoor` method is a script-side state helper and is not universally called by
+the player interaction path. The next research target is therefore the caller
+that selects the `SwitchZoneNOW` destination, not another door-state write.
+
+### Countryside to Brightwater church mapping
+
+Archive level metadata gives the authored route from the countryside to the
+Brightwater church:
+
+`Illumina_Countryside_SE` (level 148) -> `WS_Country_SE_to_Bright_NE`
+(dogleg 50) -> `NewBrightwater` (level 11) -> `LNBr_Church` (interior 12).
+
+The corresponding trigger resources are `NB_Church_Door_Entry_Trig.sol` and
+`NB_Church_Door_Exit_Trig.sol`; the church also has `NB_Church_Start_Pos`
+and `NB_Church_Cam` authored resources. These IDs are archive metadata, not
+yet proven direct arguments for the runtime exports. A safe teleport/skip
+command must use the authored destination and spawn/transition state rather
+than blindly calling `SwitchZoneNOW("LNBr_Church")`, which may load only the
+outer world or leave the player without the church entry placement.
+
+Live confirmation at Brightwater’s Kamo entrance established the interior
+mechanism: the game called `EnterTemporaryZone("LNBr_Kamo_shop")` while the
+active world remained `NewBrightwater`; no `SwitchZoneNOW` event occurred for
+that doorway. This strongly suggests the church entry should be tested as an
+`EnterTemporaryZone("LNBr_Church")` transition after the correct exterior
+world is active, with its authored start position and camera applied by the
+native temporary-zone loader.
+
+The church test confirmed that prediction. The doorway emitted
+`ExitTemporaryZone()` followed by `EnterTemporaryZone("LNBr_Church")`, with
+`NewBrightwater` still active as the main world. This is the confirmed native
+building-entry path for the church and is the correct boundary for a future
+observation-gated cleanroom skip command.
+
+## 2026-08-21 — World-aware traversal subsystem
+
+The first traversal subsystem is now implemented behind
+`EnableZoneTraversalMenu`. F7 opens a developer-only menu with two pages:
+
+- Persistent worlds. Enter invokes the exact-build `SwitchZoneNOW` path and
+  relies on the authored default start for that world.
+- Temporary areas. Right opens only interiors whose metadata parent matches
+  the currently loaded main world. Enter constructs Sudeki's native
+  reference-backed 12-byte `ResourceName` and calls the native
+  `EnterTemporaryZone` path. An active temporary area is exited first.
+
+The menu refuses to open an interior page while a persistent world transition
+is still pending, preventing a stale-world pointer from being reused. The
+initial registry contains the six confirmed countryside/Brightwater worlds and
+the confirmed Brightwater and Countryside-SE interiors; more authored entries
+can be added as their parent-world mappings are verified.
+
+This is a reversible research tool, not a gameplay teleport system. It does
+not write player coordinates, bypass doors, or fabricate spawn markers. Native
+world loading, temporary-zone cleanup, start positions, cameras, and party
+catch-up remain responsible for placement.
+
+### Traversal first-live test: repeated world selection and Church crash
+
+The first live F7 pass reached the expected `EnterTemporaryZone("LNBr_Church")`
+call from `NewBrightwater`, but the operator rapidly repeated Enter/world
+selection inputs first. The trace contained many repeated `SwitchZoneNOW`
+requests (including a cycle through the countryside zones) before the Church
+request. This is unsafe for an asynchronous loader and is treated as a failed
+stress pass, not evidence that the authored Church mapping is invalid.
+
+The traversal path now has two safety changes: a transition guard rejects
+repeated activation while a world/area request is pending or inside a short
+settling window, and the reference-backed native `ResourceName` for a temporary
+area is retained until the corresponding temporary-zone exit. The latter avoids
+an asynchronous load observing freed resource-name metadata. Build and both
+offline regression tests pass after this change; a clean live Church retry is
+still required. The follow-up retry showed why that is necessary: a raw
+`EnterTemporaryZone("LNBr_Church")` call can load the temporary resource without
+the door-authored start-position/camera context, leaving the party in the
+skybox. Direct interior activation is therefore fail-closed until the native
+door placement seam is identified; persistent-world switching remains available.
+
+The follow-up observation-only run entered the Church through the real door.
+The trace again showed only the expected `EnterTemporaryZone("LNBr_Church")`
+boundary with `NewBrightwater` as the world pointer; the existing transition
+hooks did not observe a start-position or camera call before the process ended.
+This narrows the missing work to the native temporary-zone/door state machine
+or its subsequent placement consumer. It does not justify re-enabling the raw
+menu call.
+
+### Church placement hook — internal position setter identified
+
+The script-facing `SetPlayerPosition` export (`RVA 0x00104ED0`) is not used by
+the authored Church door. A five-byte exact hook on the internal fastcall
+setter (`RVA 0x00003050`) captured the real post-transition placement writes.
+The setter receives `CPosition` in ECX and a float3 in EDX, then writes
+`CPosition+0x18/+0x1C/+0x20`.
+
+On the clean Church entry, the first captured vector was
+`(0.0244926, 0.5283574, -0.0156175)`, followed by several zero/default
+component writes and additional actor/scene vectors. This proves the door
+does perform native placement after `EnterTemporaryZone`; the missing data is
+which captured `CPosition` belongs to the active player and which later call
+installs the authored `NB_Church_Start_Pos`/`NB_Church_Cam` context. The direct
+temporary-zone menu remains disabled until that ownership/camera correlation is
+complete.
+
+The camera-aware retry added a second result. `EnterTemporaryZone` populated
+the live `CWorld` start-state fields with `(X,Y,Z)=(-43.21291,-4.11155,
+339.59406)`, orientation `(-0.013462,-0.0,0.999909)`, and camera-index value
+`2820` (`0x0B04`). No `SetRenderCamera` call followed the Church load; only the
+ordinary `default` camera was selected before the transition. Therefore the
+interior camera is selected through temporary-world state/index consumption,
+not by the named-camera API. This is the next static boundary to trace before
+implementing a safe world teleport.
+
+### 2026-08-22 — Full persistent-world transition boundary
+
+The live comparison pass established why the first F7 world request appeared
+to do nothing. Static analysis of the supported executable shows two distinct
+exports:
+
+- `SwitchZoneNOW` (RVA `0x00007990`) only marks a valid zone for switching by
+  calling the internal `FUN_00405A70` path.
+- `SetZoneNOW` (RVA `0x00007910`) calls `FUN_00405D20`, which performs the full
+  teardown and authored world-transition setup.
+
+The developer traversal menu had been calling `SwitchZoneNOW` directly. Its
+live trace showed only `switch_zone_now` before/after and no subsequent
+world-load/placement sequence. A real authored transition reaches the broader
+pipeline and emits the expected `set_zone_now`/`enter_zone` behavior before
+temporary-area placement.
+
+The traversal world action now routes through the observation wrapper for
+`SetZoneNOW`, preserving the exact native call trace while using the complete
+authored transition boundary. Interior traversal remains disabled until the
+door-specific temporary placement context is reproduced.
+
+The first live `SetZoneNOW` attempt exposed a second safety boundary: the
+cleanroom party is not automatically assigned the selected world's authored
+start position/camera. Ailish remained at an invalid world-relative position
+and appeared below the map while drifting upward. The trace also showed that
+rapidly selecting multiple destinations stacked teardown requests. A native
+completion latch now blocks repeated requests until an `EnterZone` or
+`SwitchMainZone` confirmation is observed. Direct persistent-world traversal
+is additionally fail-closed until its authored spawn/camera context is found;
+the tool will no longer send either world or interior jumps blindly.
+
+### 2026-08-22 — Native arrival-context cache for safe traversal
+
+The next traversal pass adds a bounded, in-memory arrival-context cache keyed
+by `(main world, destination)`. The cache is populated only while a real save
+load or authored door transition is running. The internal CPosition setter
+(RVA `0x00003050`) is correlated against the currently-present cleanroom actor
+position pointers (`actor+0x44`), so actor-specific authored arrival positions
+are retained instead of guessing from arbitrary frame coordinates. Temporary
+world camera-index state is retained as diagnostic context as well.
+
+F7 traversal now reuses a destination only when that native context has already
+been observed. After the native world/interior load settles, the service applies
+the cached actor-specific positions through the same internal setter and logs
+the result. If no matching actor anchor exists, the request fails closed; it
+never writes zero coordinates, invents a world position, or queues another
+transition. This is the safe equivalent of using the nearby save-point/door
+arrival anchor that normal loading establishes.
+
+This is intentionally a first prototype. A destination must first be reached
+through a normal save load or door transition so its authored anchor can be
+captured. Generalizing the cache to every authored save-point resource and
+camera route remains follow-up work. Offline build, exact-image regression, and
+`git diff --check` pass; no game binary or asset is stored in the repository.
+
+This manual-previsit rule was superseded later the same day by the automatic
+first-use discovery pass below; the cache format and fail-closed behavior were
+retained.
+
+### 2026-08-22 — Automatic first-use arrival discovery
+
+The manual pre-visit requirement has been removed for the confirmed developer
+traversal registry. The registry contains the six known persistent worlds and
+the twelve confirmed interior resources already exposed by the F7 page. A
+first F7 request for one of those names is now allowed to enter Sudeki's normal
+`SetZoneNOW`/`EnterTemporaryZone` pipeline even when no cached actor anchor
+exists. The existing exact internal CPosition setter hook (`RVA 0x00003050`)
+captures the resulting actor-specific positions automatically; subsequent
+requests reuse those anchors.
+
+Arrival application now retries on the game thread for up to 15 seconds while
+the asynchronous load creates/rebinds party actors, rather than failing after
+one 750 ms attempt. Unknown destination names remain fail-closed, and no
+coordinates, camera indices, or archive assets are guessed or written. This
+removes the need to manually walk through every known destination before using
+the traversal menu, while preserving the native Church-style confined camera
+behavior. Build, exact-image regression, and `git diff --check` pass.
+
+### 2026-08-22 — Talos companion target eligibility
+
+The natural final-battle transition removes Ailish, Buki, and Elco and spawns
+Tal alone at zero position. The exact transition detector and deferred native
+combat refresh now restore all four party actors successfully. Live testing
+confirmed that the restored companions become combat-aware, but do not attack
+Talos.
+
+Static analysis explains the distinction. The ordinary `CTargeter` acquisition
+at RVA `0x000BA1C0` asks the world candidate query at RVA `0x00034C20` for only
+the type bits stored at `CTargeter+0x7C`. Candidate scoring itself performs no
+faction comparison. The shipped exports identify the relevant category API:
+
+- `CTargeter::IncludeAlliesAsTargets()` — RVA `0x0000F520`, sets mask bit
+  `0x00000004`.
+- `CTargeter::RemoveAlliesAsTargets()` — RVA `0x0000F560`, clears that bit.
+- `CTargeter::IsTargettingAllies()` — RVA `0x0000F5A0`, reads that bit.
+
+The final encounter data contains `ALLY_Talos.sol`, so Talos is absent from the
+companions' normal monster/boss candidate sets even though their AI and combat
+states are active. The prototype now resolves the exact live `ALLY_Talos`
+entity and, only for the naturally restored Ailish/Buki/Elco party, enables the
+native ally-target category for the lifetime of that entity. Each actor's
+original setting is captured and restored when Talos disappears or the hook is
+uninstalled. It does not rewrite global factions, widen every targeter, or raw
+patch the intrusive current-target node at `CTargeter+0x54`.
+
+Party snapshots now also record the targeter pointer, ordinary target node,
+candidate mask at `+0x7C`, and flags at `+0x84`. Build, exact-image regression,
+Graphify refresh, and `git diff --check` pass. Live confirmation that the three
+companions acquire `ALLY_Talos` and attack him remains pending.
+### Talos companion targeting gate correction
+
+- The first live party-restoration build correctly returned Ailish, Buki,
+  and Elco to native AI control and their targeters repeatedly acquired the
+  same ordinary target as Tal. However, their masks remained `0x02000008`:
+  the prototype never called native `CTargeter::IncludeAlliesAsTargets`.
+- The cause was an unnecessary policy gate. `GetGenericEntity("ALLY_Talos")`
+  and `GetGenericEntity("CC_Ally_Talos")` do not resolve the final encounter's
+  live entity, even though Tal's native targeter identifies it. The resource
+  lookup was therefore unsuitable as encounter ownership proof.
+- The targeting policy is now bounded by the already confirmed retail
+  lifecycle instead: an exact zero-position Tal spawn following the observed
+  four-to-one void-party collapse, followed by a complete four-member native
+  party restoration. The optional name lookup and Tal's ordinary target are
+  diagnostics only.
+- Expected next-run evidence is a one-time `target_policy status=confirmed`
+  record and companion target masks changing from `0x02000008` to
+  `0x0200000c`. This pass does not force target pointers or invoke attacks.
+### Talos clone targeting rejects the attacker-reservation hypothesis
+
+**Status:** live hypothesis rejected; boss-specific AI decision guard remains.
+
+- In the restored four-character Talos encounter, companion target masks were
+  confirmed as `0x0200000c`, their native AI remained enabled, and their
+  targeters acquired the encounter target. They still did not attack the real
+  Talos, while the same companions did attack his spawned clones.
+- The shipped resources distinguish `BOSS_Talos.sol:3` from
+  `BOSS_Talos_Fake.sol:3` / `BOSS_Talos_Fake2.sol:3`. The real entity is a
+  boss AI unit while the clones are general monster AI units. This remains the
+  strongest confirmed authored distinction relevant to companion behavior.
+- Exact-image static analysis found the consumer rather than treating this as
+  a faction problem. `AiState_PC_MeleeBase` uses its `+0x24` MaxAttackers
+  field and `AiState_PC_MissileBase` uses `+0x28`. Their native request-build
+  methods copy the values into the target request bytes at `+0xBE/+0xBF`.
+  The class loaders are VA `0x005AEE80` (melee) and VA `0x005AE6A0`
+  (missile).
+- A read-only debugger snapshot of all four live AI-state objects per restored
+  companion confirmed those exact layouts and vtables, but their live
+  MaxAttackers values are already `-1` (unlimited), not `1`. The bounded
+  prototype therefore made zero writes, and the capacity theory is rejected.
+- Player-controlled party members can attack and damage real Talos, while the
+  same actors do not initiate attacks under AI ownership. Companion AI remains
+  enabled and intermittently commits real Talos as its ordinary target. The
+  next boundary is therefore the boss-type-specific AI action/attack decision,
+  not damage, animation, faction masks, target acquisition, or attacker count.
+
+### Talos boss-type candidate rejection and scoped bypass
+
+**Status:** exact native rejection confirmed; bounded live prototype accepted.
+
+- A clean live replay confirmed the behavioral discriminator: Ailish, Buki,
+  and Elco remain under native AI ownership, ignore the real Talos, then begin
+  attacking as soon as his type-1 clones appear. Their target pointers switch
+  between the real encounter entity and clone entities without losing AI
+  ownership.
+- Exact-build function VA `0x005B6EC0` (RVA `0x001B6EC0`) is the shared AI
+  candidate validator. Its first authored-policy check reads request byte
+  `+0x25`; when bit `0x04` is set, it rejects candidates whose `CAiUnit+0x148`
+  AI Unit Type is `3`. The real `BOSS_Talos` is live type `3`; his clones are
+  live type `1`.
+- Both relevant companion request paths explicitly set the bit before native
+  enumeration. The missile path VA `0x005AE820` sets request-base `+0x25`
+  through state byte `+0x5D`; the melee path VA `0x005AEFA0` sets it through
+  request byte `+0xBD` for the request rooted at state `+0x98`.
+- The prototype hooks only the exact supported build's shared validator. It
+  recognizes the exact restored companion `CAiUnit` as the source and the
+  exact live `BOSS_Talos` type-3 `CAiUnit` as the candidate. It copies the
+  validator's 0x28-byte request to stack storage, clears only bit `0x04` in
+  the copy, invokes the native validator, and discards the copy. No persistent
+  AI state, Talos type, clone behavior, faction, target pointer, or attack
+  function is modified.
+- The hook is installed only with `EnableTalosPartyPrototype=true`, uses the
+  exact eight-byte function-entry signature, and logs one scoped-bypass record
+  per restored companion. The exact-image regression installs this path and
+  passes.
+- Live acceptance confirmed all three restored companions attack the real
+  Talos and continue attacking his type-1 clones normally. The log recorded
+  one exact scoped bypass for slots 1, 2, and 3 with source request flags
+  `0x04`, `0x44`, and `0x74`; the copied flags became `0x00`, `0x40`, and
+  `0x70`. No exception, crash, persistent query write, or clone regression was
+  observed.

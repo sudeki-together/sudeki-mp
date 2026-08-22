@@ -1,5 +1,13 @@
 SudekiMP recovery handoff
-Updated: 2026-08-16 (America/New_York)
+Updated: 2026-08-20 (America/New_York)
+
+Planning checkpoint:
+  - Read docs/project-status.md before choosing the next implementation pass.
+  - Current estimates: 70% of the roadmap touched, 45% at a concrete proof or
+    milestone, 30-35% production-ready toward stable local co-op, and 20-25%
+    of the complete 2-4-player plus online vision.
+  - These are deliberately separate measurements; do not report a prototype
+    or reverse-engineered seam as a finished player-facing feature.
 
 Repository:
   /var/home/wander/Documents/Projects/sudeki-mp
@@ -21,6 +29,11 @@ Safety state:
   - The current checkpoint includes the Phase 9 attack proof plus disabled
     camera-relative movement, separation-guard, passive-target-trace, and
     live-confirmed midpoint-camera follow-ups.
+  - Autonomous research launches should skip all startup movies by default;
+    full story-intro playback is reserved for explicit compatibility tests.
+    Note: the current `SkipStartupMovies=true` setting skips only the three
+    logo clips, not the orange story movie. Add/use a dedicated all-movies
+    research override before the next unattended lifecycle pass.
 
 Confirmed project position:
   1. Installer/build baseline, exact hashes, Wine baseline, and Ghidra import

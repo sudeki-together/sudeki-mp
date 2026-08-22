@@ -1,16 +1,24 @@
 #include "cleanroom/engine.h"
 
 #include "engine/log.h"
+#include "hooks/call_hook.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 
-typedef struct SudekiMpResourceName {
-    uint32_t encoded_kind;
-    uint32_t identifier;
-    uint32_t *text_reference;
-} SudekiMpResourceName;
+typedef struct SudekiMpResourceLookup {
+    uint8_t storage[12];
+    uint32_t *reference;
+    void *resource_proxy;
+} SudekiMpResourceLookup;
+
+typedef struct SudekiMpCafuMissileModelPatch {
+    SudekiMpResourceName *target;
+    SudekiMpResourceName saved;
+    SudekiMpResourceName applied;
+} SudekiMpCafuMissileModelPatch;
 
 typedef void (__cdecl *InternalSpawnPcFunction)(
     const SudekiMpResourceName *resource_name,
@@ -58,6 +66,12 @@ typedef void (__attribute__((thiscall)) *SetWeaponFunction)(
     void *character_weapon,
     int item_identifier
 );
+typedef void (__attribute__((thiscall)) *TargeterFlagFunction)(
+    void *targeter
+);
+typedef unsigned char (__attribute__((thiscall)) *TargeterPredicateFunction)(
+    const void *targeter
+);
 typedef BOOL (__cdecl *GelPointerToEntityFunction)(
     void *gel_pointer,
     void *entity_pointer
@@ -69,6 +83,43 @@ typedef void *(__attribute__((thiscall)) *GelPointerDeletingDestructor)(
     void *gel_pointer,
     unsigned int flags
 );
+typedef unsigned int (__attribute__((thiscall)) *ResourceProxyTypeFunction)(
+    void *resource_proxy
+);
+typedef void *(__attribute__((thiscall)) *LoadedResourceGetFunction)(
+    void *loaded_resource
+);
+typedef void (__attribute__((thiscall)) *MissileLaunchThunkFunction)(
+    void *missile_interface,
+    void *launch_context
+);
+typedef unsigned char (__attribute__((regparm(2))) *MissileSelectFunction)(
+    void *missile_manager,
+    void *missile_data
+);
+typedef void (__attribute__((stdcall)) *PositionTransformUpdateFunction)(
+    void *position
+);
+typedef const float *(__attribute__((thiscall))
+    *CafuRenderLocatorMatrixFunction)(void *provider, int locator_index);
+typedef unsigned int (__attribute__((thiscall))
+    *CafuAnimationCountFunction)(void *renderer);
+typedef int (__attribute__((thiscall)) *CafuAnimationSelectorGetFunction)(
+    void *renderer,
+    int channel,
+    unsigned int submodel
+);
+typedef float (__attribute__((thiscall)) *CafuAnimationFloatGetFunction)(
+    void *renderer,
+    int channel,
+    unsigned int submodel
+);
+typedef unsigned int (__attribute__((thiscall))
+    *CafuAnimationStateGetFunction)(
+        void *renderer,
+        int channel,
+        unsigned int submodel
+    );
 
 enum {
     RVA_INTERNAL_SPAWN_PC = 0x000b1b00u,
@@ -81,10 +132,12 @@ enum {
     RVA_ENTITY_DIRECTORY_GLOBAL = 0x00409de4u,
     RVA_GEL_POINTER_VTABLE = 0x002c0098u,
     RVA_GEL_POINTER_TO_ENTITY = 0x001bf4e0u,
+    RVA_RESOURCE_LOOKUP = 0x00011730u,
     RVA_ENTITY_POINTER_CLEANUP = 0x000015e0u,
     RVA_RESOURCE_NAME_FROM_TEXT = 0x001b9440u,
     RVA_RESOURCE_NAME_RELEASE_REFERENCE = 0x001b9760u,
     RVA_GET_GROUP_PLAYERS = 0x00025100u,
+    RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_GROUP_PLAYERS_IN_COMBAT = 0x00004fa0u,
     RVA_GROUP_PLAYERS_COMBAT_TRANSITION = 0x00024480u,
     RVA_GROUP_PLAYERS_COMBAT_SINK_VTABLE = 0x002c6d68u,
@@ -101,6 +154,22 @@ enum {
     RVA_GET_CHARACTER_NUMBER_STAT = 0x000c1270u,
     RVA_SET_CHARACTER_NUMBER_STAT = 0x000c1350u,
     RVA_SET_WEAPON = 0x000d8790u,
+    RVA_TARGETER_INCLUDE_ALLIES = 0x0000f520u,
+    RVA_TARGETER_REMOVE_ALLIES = 0x0000f560u,
+    RVA_TARGETER_IS_TARGETING_ALLIES = 0x0000f5a0u,
+    RVA_MISSILE_LAUNCH_VTABLE_SLOT = 0x002d4cdcu,
+    RVA_MISSILE_LAUNCH_THUNK = 0x000c7140u,
+    RVA_MISSILE_SELECT = 0x000c6de0u,
+    RVA_MISSILE_MANAGER_VTABLE = 0x002d4c8cu,
+    RVA_MISSILE_PRESENTATION_TRANSFORM_CALL = 0x00136b36u,
+    RVA_POSITION_TRANSFORM_UPDATE = 0x00110d40u,
+    RVA_RENDER_LOCATOR_INDEX = 0x000c5ff0u,
+    RVA_ANIMATION_RENDERER_VTABLE = 0x002df8ecu,
+    RVA_ANIMATION_RENDERER_COUNT = 0x0021bb10u,
+    RVA_ANIMATION_RENDERER_SELECTOR_GET = 0x002230b0u,
+    RVA_ANIMATION_RENDERER_RATE_GET = 0x00223160u,
+    RVA_ANIMATION_RENDERER_TIME_GET = 0x00223220u,
+    RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
     RVA_NO_SP_NEEDED_FLAG = 0x003c2fccu,
     RVA_NO_SSP_NEEDED_FLAG = 0x003c2f23u,
     RVA_SPIRIT_STRIKE_MANAGER_GLOBAL = 0x00408d30u,
@@ -108,11 +177,41 @@ enum {
     RVA_INVENTORY_GLOBAL = 0x00408d84u,
     CHARACTER_WEAPON_OFFSET = 0x00c0u,
     CHARACTER_WEAPON_CURRENT_ITEM_OFFSET = 0x0268u,
+    ELCO_STARTER_WEAPON_SLOT = 12,
+    ELCO_STARTER_WEAPON_ITEM_ID = 24,
+    CAFU_WEAPON_ITEM_ID = 48,
+    CAFU_WEAPON_BROKEN_MODEL_IDENTIFIER = 0xd4e32e13u,
+    CAFU_WEAPON_ARCHIVE_MODEL_IDENTIFIER = 0xa4fe4833u,
+    ELCO_WEAPON_MODEL_IDENTIFIER = 0xdf85ece7u,
+    CAFU_WEAPON_PRELOAD_WAIT_MS = 2000u,
+    CAFU_MISSILE_MANAGER_OFFSET = 0x0fd4u,
+    CAFU_MISSILE_MANAGER_SELECTED_OFFSET = 0x0058u,
+    CAFU_MISSILE_MANAGER_SELECTED_COMBO_OFFSET = 0x005cu,
+    CAFU_MISSILE_COMBO_COUNT_OFFSET = 0x0044u,
+    CAFU_MISSILE_COMBO_ARRAY_OFFSET = 0x004cu,
+    CAFU_MISSILE_MODEL_OFFSET = 0x0030u,
+    CAFU_MISSILE_MODEL_RESOURCE_KIND = 0x00000fa9u,
+    CAFU_MISSILE_ARCHIVE_MODEL_IDENTIFIER = 0x4969a228u,
+    CAFU_MISSILE_RUNTIME_MODEL_IDENTIFIER = 0xd7a3ae33u,
+    CAFU_MISSILE_REPLACEMENT_MODEL_IDENTIFIER = 0x890597cdu,
+    CAFU_MISSILE_PATCH_CAPACITY = 10u,
+    CAFU_WEAPON_PRESENTATION_SAMPLE_LIMIT = 96u,
+    PARTY_SLOT_COUNT = 4u,
+    PARTY_SLOT_ZERO_OFFSET = 0x0090u,
+    PARTY_SLOT_STRIDE = 0x000cu,
+    PARTY_COUNT_OFFSET = 0x00ccu,
+    CONTROLLER_NEXT_CHARACTER_OFFSET = 0x00f4u,
+    CONTROLLER_PREVIOUS_CHARACTER_OFFSET = 0x00fcu,
+    CONTROLLER_TARGET_OFFSET = 0x0248u,
+    CAFU_PLAYER_ONE_MAX_ROTATIONS = 8u,
     SPIRIT_STRIKE_UNLOCKS_OFFSET = 0x00acu
 };
 
 static const uint8_t resource_name_from_text_entry[] = {
     0x57u, 0x8bu, 0xf8u, 0x8bu, 0x06u, 0x25u, 0x80u, 0xefu
+};
+static const uint8_t resource_lookup_entry[] = {
+    0x51u, 0xc6u, 0x04u, 0x24u, 0x00u, 0x8bu, 0x04u, 0x24u
 };
 static const uint8_t resource_name_release_entry[] = {
     0x85u, 0xc0u, 0x74u, 0x2fu, 0x53u, 0x8du, 0x58u, 0xfcu
@@ -123,17 +222,28 @@ static const uint8_t group_players_combat_transition_entry[] = {
 static const uint8_t set_ui_active_entry[] = {
     0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u, 0xa1u, 0x94u
 };
+static const uint8_t missile_select_entry[] = {
+    0x51u, 0x32u, 0xc9u, 0x56u, 0x8bu, 0xf0u
+};
+static const uint8_t position_transform_update_entry[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf0u,
+    0x81u, 0xecu, 0xe4u, 0x00u, 0x00u, 0x00u
+};
 
 _Static_assert(
     sizeof(SudekiMpResourceName) == 12u,
     "Sudeki ResourceName ABI must remain 12 bytes"
 );
+_Static_assert(
+    sizeof(SudekiMpResourceLookup) == 20u,
+    "Sudeki retained resource lookup ABI must remain 20 bytes"
+);
 
 static const char *const actor_labels[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
-    "Tal", "Buki", "Elco", "Ailish"
+    "Tal", "Buki", "Elco", "Ailish", "Cafu"
 };
 static const char *const actor_resources[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
-    "PC_Tal", "PC_Buki", "PC_Elco", "PC_Ailish"
+    "PC_Tal", "PC_Buki", "PC_Elco", "PC_Ailish", "PC_Cafu"
 };
 /*
  * CCharacterWeapon::SetWeapon takes an index in inventory category 5, not
@@ -142,11 +252,10 @@ static const char *const actor_resources[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
  * are therefore different from global item IDs 12, 24, 0, and 36.
  */
 static const int actor_starter_weapon_slots[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
-    24, 36, 12, 0
+    24, 36, 12, 0, -1
 };
 /* SpawnEntity appends .SOL; this is the monster definition, not its group. */
 static const char dummy_resource[] = "MON_TrainingDummy";
-
 static uint8_t *game_base;
 static InternalSpawnPcFunction internal_spawn_pc;
 static RemovePcFunction remove_pc;
@@ -167,6 +276,9 @@ static SpiritStrikeEnableFunction spirit_strike_enable;
 static GetCharacterNumberStatFunction get_character_number_stat;
 static SetCharacterNumberStatFunction set_character_number_stat;
 static SetWeaponFunction set_weapon;
+static TargeterFlagFunction targeter_include_allies;
+static TargeterFlagFunction targeter_remove_allies;
+static TargeterPredicateFunction targeter_is_targeting_allies;
 static GelPointerToEntityFunction gel_pointer_to_entity;
 static EntityPointerCleanupFunction entity_pointer_cleanup;
 static void *resource_name_from_text;
@@ -185,6 +297,418 @@ static BOOL spirit_strike_unlocks_captured;
 static uint8_t saved_spirit_strike_unlocks;
 static void *saved_spirit_strike_manager;
 static void *initialized_actor_entities[SUDEKIMP_CLEANROOM_ACTOR_COUNT];
+static BOOL cafu_probe_requested;
+static BOOL cafu_probe_spawn_attempted;
+static BOOL cafu_player_one_confirmed;
+static unsigned int cafu_player_one_rotation_attempts;
+static BOOL cafu_weapon_inventory_logged;
+static unsigned int cafu_weapon_gate_log;
+static BOOL cafu_weapon_model_patched;
+static BOOL cafu_weapon_model_uses_fallback;
+static uint8_t *cafu_weapon_model_item;
+static SudekiMpResourceName saved_cafu_weapon_model;
+static SudekiMpResourceName applied_cafu_weapon_model;
+static SudekiMpResourceLookup cafu_weapon_preload;
+static BOOL cafu_weapon_preload_requested;
+static BOOL cafu_weapon_model_ready;
+static BOOL cafu_weapon_force_elco_model;
+static DWORD cafu_weapon_preload_started_at;
+static SudekiMpResourceName cafu_missile_model_name;
+static SudekiMpResourceLookup cafu_missile_model_preload;
+static BOOL cafu_missile_model_name_initialized;
+static BOOL cafu_missile_model_preload_requested;
+static BOOL cafu_missile_model_ready;
+static SudekiMpCafuMissileModelPatch
+    cafu_missile_model_patches[CAFU_MISSILE_PATCH_CAPACITY];
+static unsigned int cafu_missile_model_patch_count;
+static SudekiMpPointerHook cafu_missile_launch_hook;
+static MissileLaunchThunkFunction original_missile_launch;
+static SudekiMpInlineHook cafu_missile_select_hook;
+static MissileSelectFunction original_missile_select;
+static SudekiMpRelativeCallHook cafu_position_transform_hook;
+static SudekiMpInlineHook cafu_position_transform_entry_hook;
+static PositionTransformUpdateFunction original_position_transform_update;
+static unsigned int cafu_missile_launch_sequence;
+static void *last_cafu_missile_selected;
+static void *last_cafu_missile_weapon;
+static void *last_cafu_guarded_position;
+static unsigned int cafu_guard_skip_count;
+static PVOID cafu_exception_handler;
+static BOOL cafu_autofire_requested;
+static BOOL cafu_autofire_sent;
+static DWORD cafu_autofire_ready_at;
+static DWORD cafu_weapon_presentation_last_tick;
+static unsigned int cafu_weapon_presentation_sample_count;
+
+static BOOL readable_memory(const void *pointer, size_t size);
+static BOOL writable_memory(const void *pointer, size_t size);
+static void *actor_pointer(SudekiMpCleanroomActor actor);
+static BOOL patch_cafu_missile_model_record(
+    SudekiMpResourceName *model,
+    uint8_t *combo,
+    unsigned int combo_index,
+    const char *source
+);
+
+__attribute__((naked, noinline, used))
+static int call_cafu_render_locator_index(
+    void *render_object __attribute__((unused)),
+    const char *locator_name __attribute__((unused)),
+    void *function __attribute__((unused))
+) {
+    __asm__ volatile(
+        "movl 4(%esp), %eax\n\t"
+        "movl 12(%esp), %edx\n\t"
+        "pushl 8(%esp)\n\t"
+        "call *%edx\n\t"
+        "ret\n\t"
+    );
+}
+
+static void maintain_cafu_autofire(void) {
+    INPUT inputs[2];
+    DWORD now;
+
+    if (!cafu_autofire_requested || cafu_autofire_sent ||
+        !cafu_player_one_confirmed) {
+        return;
+    }
+    now = GetTickCount();
+    if (cafu_autofire_ready_at == 0u) {
+        cafu_autofire_ready_at = now;
+        return;
+    }
+    if ((DWORD)(now - cafu_autofire_ready_at) < 1500u) {
+        return;
+    }
+    ZeroMemory(inputs, sizeof(inputs));
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    cafu_autofire_sent = TRUE;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_autofire action=send_input "
+        "sent=%u policy=diagnostic_environment_gate\r\n",
+        (unsigned int)SendInput(2u, inputs, sizeof(INPUT))
+    );
+}
+
+static LONG CALLBACK trace_cafu_exception(
+    EXCEPTION_POINTERS *exception_pointers
+) {
+    EXCEPTION_RECORD *record;
+    CONTEXT *context;
+    uintptr_t address;
+    uintptr_t base;
+
+    if (!cafu_probe_requested || exception_pointers == NULL ||
+        exception_pointers->ExceptionRecord == NULL ||
+        exception_pointers->ContextRecord == NULL || game_base == NULL) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    record = exception_pointers->ExceptionRecord;
+    context = exception_pointers->ContextRecord;
+    address = (uintptr_t)record->ExceptionAddress;
+    base = (uintptr_t)game_base;
+    if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+        address < base || address >= base + 0x00460000u) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_exception code=0x%08lx "
+        "address=%p rva=0x%08lx operation=%lu target=%p "
+        "eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx "
+        "edi=%08lx esp=%08lx ebp=%08lx "
+        "policy=diagnostic_continue_search\r\n",
+        (unsigned long)record->ExceptionCode,
+        record->ExceptionAddress,
+        (unsigned long)(address - base),
+        record->NumberParameters > 0u ?
+            (unsigned long)record->ExceptionInformation[0] : 0ul,
+        record->NumberParameters > 1u ?
+            (void *)(uintptr_t)record->ExceptionInformation[1] : NULL,
+        (unsigned long)context->Eax,
+        (unsigned long)context->Ebx,
+        (unsigned long)context->Ecx,
+        (unsigned long)context->Edx,
+        (unsigned long)context->Esi,
+        (unsigned long)context->Edi,
+        (unsigned long)context->Esp,
+        (unsigned long)context->Ebp
+    );
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static BOOL consume_invalid_cafu_position_transform(
+    void *position,
+    BOOL establish_ownership,
+    const char *source
+) {
+    uint8_t *wrapper;
+    void *render_object;
+    uint8_t dirty_transform;
+    uint8_t attached_update;
+    uint8_t direct_render;
+
+    dirty_transform = readable_memory(position, 0xb9u) ?
+        *((uint8_t *)position + 0xb8u) : 0u;
+    attached_update = readable_memory(position, 0x103u) ?
+        *((uint8_t *)position + 0x102u) : 0u;
+    direct_render = readable_memory(position, 0x102u) ?
+        *((uint8_t *)position + 0x101u) : 0u;
+    wrapper = readable_memory(position, 0xb8u) ?
+        *(uint8_t **)((uint8_t *)position + 0xb4u) : NULL;
+    render_object = readable_memory(wrapper, 0x0cu) ?
+        *(void **)(wrapper + 0x08u) : NULL;
+    if (!establish_ownership && position != last_cafu_guarded_position) {
+        return FALSE;
+    }
+    if (dirty_transform == 1u && wrapper != NULL &&
+        render_object == NULL && writable_memory(position, 0xb9u)) {
+        /*
+         * CPosition::UpdateTransform normally consumes this dirty byte at
+         * +0xB8 after publishing its matrix.  Cafu's missing projectile
+         * presentation has an attachment wrapper but no render object, so
+         * both UpdateTransform and the following attachment resolver would
+         * dereference it.  Detach only that unusable presentation wrapper
+         * and consume the impossible update; missile gameplay remains owned
+         * by Sudeki.
+         */
+        *((uint8_t *)position + 0xb8u) = 0u;
+        *(void **)((uint8_t *)position + 0xb4u) = NULL;
+        last_cafu_guarded_position = position;
+        cafu_guard_skip_count += 1u;
+        if (cafu_guard_skip_count <= 3u) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_missile_presentation_guard "
+                "action=skip_invalid_transform source=%s "
+                "position=%p wrapper_before=%p wrapper_after=%p "
+                "render_object=%p dirty_before=%u dirty_after=%u "
+                "attached_update=%u direct_render=%u skips=%u "
+                "policy=consume_impossible_presentation_update\r\n",
+                source == NULL ? "unknown" : source,
+                position,
+                wrapper,
+                *(void **)((uint8_t *)position + 0xb4u),
+                render_object,
+                (unsigned int)dirty_transform,
+                (unsigned int)*((uint8_t *)position + 0xb8u),
+                (unsigned int)attached_update,
+                (unsigned int)direct_render,
+                cafu_guard_skip_count
+            );
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void __attribute__((stdcall)) guard_cafu_position_transform(
+    void *position
+) {
+    if (consume_invalid_cafu_position_transform(
+            position,
+            TRUE,
+            "missile_presentation_call")) {
+        return;
+    }
+    if (original_position_transform_update != NULL) {
+        original_position_transform_update(position);
+    }
+}
+
+static void __attribute__((stdcall)) guard_cafu_position_transform_entry(
+    void *position
+) {
+    if (consume_invalid_cafu_position_transform(
+            position,
+            FALSE,
+            "global_transform_retry")) {
+        return;
+    }
+    if (original_position_transform_update != NULL) {
+        original_position_transform_update(position);
+    }
+}
+
+static void inspect_cafu_missile_manager_state(void) {
+    uint8_t *cafu;
+    uint8_t *manager;
+    uint8_t *selected;
+    void *weapon;
+    const SudekiMpResourceName *model;
+    const SudekiMpResourceName *fire_effect;
+    const SudekiMpResourceName *environment_effect;
+
+    cafu = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    if (!readable_memory(
+            cafu,
+            CAFU_MISSILE_MANAGER_OFFSET + 0xe4u)) {
+        return;
+    }
+    manager = cafu + CAFU_MISSILE_MANAGER_OFFSET;
+    if (*(void **)manager != game_base + RVA_MISSILE_MANAGER_VTABLE) {
+        return;
+    }
+    selected = *(uint8_t **)(
+        manager + CAFU_MISSILE_MANAGER_SELECTED_OFFSET
+    );
+    weapon = *(void **)(
+        manager + CAFU_MISSILE_MANAGER_SELECTED_COMBO_OFFSET
+    );
+    if (selected == last_cafu_missile_selected &&
+        weapon == last_cafu_missile_weapon) {
+        return;
+    }
+    last_cafu_missile_selected = selected;
+    last_cafu_missile_weapon = weapon;
+    if (!readable_memory(selected, 0x48u)) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_missile_manager_state "
+            "manager=%p selected=%p weapon=%p mode=%u "
+            "status=selected_record_unavailable policy=read_only\r\n",
+            manager,
+            selected,
+            weapon,
+            (unsigned int)*(manager + 0xe0u)
+        );
+        return;
+    }
+    model = (const SudekiMpResourceName *)(selected + 0x24u);
+    fire_effect = (const SudekiMpResourceName *)(selected + 0x30u);
+    environment_effect = (const SudekiMpResourceName *)(selected + 0x3cu);
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_missile_manager_state "
+        "manager=%p selected=%p weapon=%p mode=%u "
+        "model=%08lx,%08lx,%p fire_effect=%08lx,%08lx,%p "
+        "environment_effect=%08lx,%08lx,%p "
+        "policy=read_only_persistent_selection_inventory\r\n",
+        manager,
+        selected,
+        weapon,
+        (unsigned int)*(manager + 0xe0u),
+        (unsigned long)model->encoded_kind,
+        (unsigned long)model->identifier,
+        model->text_reference,
+        (unsigned long)fire_effect->encoded_kind,
+        (unsigned long)fire_effect->identifier,
+        fire_effect->text_reference,
+        (unsigned long)environment_effect->encoded_kind,
+        (unsigned long)environment_effect->identifier,
+        environment_effect->text_reference
+    );
+}
+
+static unsigned char __attribute__((regparm(2))) trace_cafu_missile_select(
+    void *missile_manager,
+    void *missile_data
+) {
+    uint8_t *cafu;
+    SudekiMpResourceName *model;
+    const SudekiMpResourceName *fire_effect;
+    const SudekiMpResourceName *environment_effect;
+    BOOL is_cafu;
+
+    cafu = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    is_cafu = readable_memory(cafu, sizeof(void *)) &&
+        readable_memory(missile_manager, 0x14u) &&
+        *(void **)((uint8_t *)missile_manager + 0x10u) == cafu;
+    if (is_cafu && readable_memory(missile_data, 0xc0u)) {
+        model = (SudekiMpResourceName *)(
+            (const uint8_t *)missile_data + 0x30u
+        );
+        fire_effect = (const SudekiMpResourceName *)(
+            (const uint8_t *)missile_data + 0x3cu
+        );
+        environment_effect = (const SudekiMpResourceName *)(
+            (const uint8_t *)missile_data + 0x48u
+        );
+        (void)patch_cafu_missile_model_record(
+            model,
+            (uint8_t *)missile_data,
+            UINT_MAX,
+            "first_use_selection"
+        );
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_missile_select phase=pre_native "
+            "manager=%p data=%p model=%08lx,%08lx,%p "
+            "fire_effect=%08lx,%08lx,%p "
+            "environment_effect=%08lx,%08lx,%p "
+            "policy=read_only_resource_inventory\r\n",
+            missile_manager,
+            missile_data,
+            (unsigned long)model->encoded_kind,
+            (unsigned long)model->identifier,
+            model->text_reference,
+            (unsigned long)fire_effect->encoded_kind,
+            (unsigned long)fire_effect->identifier,
+            fire_effect->text_reference,
+            (unsigned long)environment_effect->encoded_kind,
+            (unsigned long)environment_effect->identifier,
+            environment_effect->text_reference
+        );
+    }
+    return original_missile_select != NULL ?
+        original_missile_select(missile_manager, missile_data) : 0u;
+}
+
+static void __attribute__((thiscall)) trace_cafu_missile_launch(
+    void *missile_interface,
+    void *launch_context
+) {
+    uint8_t *missile_manager;
+    uint8_t *cafu;
+    uint8_t *selected;
+    const SudekiMpResourceName *model;
+    const SudekiMpResourceName *fire_effect;
+    const SudekiMpResourceName *environment_effect;
+    BOOL is_cafu;
+
+    missile_manager = readable_memory(missile_interface, 0xc9u) &&
+        *((uint8_t *)missile_interface + 0xc8u) == 2u ?
+        (uint8_t *)missile_interface - 0x18u : NULL;
+    cafu = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    is_cafu = readable_memory(
+            cafu,
+            CAFU_MISSILE_MANAGER_OFFSET + sizeof(void *)) &&
+        missile_manager == cafu + CAFU_MISSILE_MANAGER_OFFSET &&
+        readable_memory(missile_manager, sizeof(void *)) &&
+        *(void **)missile_manager ==
+            game_base + RVA_MISSILE_MANAGER_VTABLE;
+    selected = readable_memory(missile_manager, 0x5cu) ?
+        *(uint8_t **)((uint8_t *)missile_manager + 0x58u) : NULL;
+    if (is_cafu && readable_memory(selected, 0x48u)) {
+        model = (const SudekiMpResourceName *)(selected + 0x24u);
+        fire_effect = (const SudekiMpResourceName *)(selected + 0x30u);
+        environment_effect =
+            (const SudekiMpResourceName *)(selected + 0x3cu);
+        cafu_missile_launch_sequence += 1u;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_missile_launch phase=pre_native "
+            "sequence=%u manager=%p selected=%p "
+            "model=%08lx,%08lx,%p fire_effect=%08lx,%08lx,%p "
+            "environment_effect=%08lx,%08lx,%p weapon=%p "
+            "policy=read_only_resource_inventory\r\n",
+            cafu_missile_launch_sequence,
+            missile_manager,
+            selected,
+            (unsigned long)model->encoded_kind,
+            (unsigned long)model->identifier,
+            model->text_reference,
+            (unsigned long)fire_effect->encoded_kind,
+            (unsigned long)fire_effect->identifier,
+            fire_effect->text_reference,
+            (unsigned long)environment_effect->encoded_kind,
+            (unsigned long)environment_effect->identifier,
+            environment_effect->text_reference,
+            *(void **)((uint8_t *)missile_manager + 0x5cu)
+        );
+    }
+    if (original_missile_launch != NULL) {
+        original_missile_launch(missile_interface, launch_context);
+    }
+}
 
 static uint32_t float_bits(float value) {
     uint32_t bits;
@@ -236,6 +760,265 @@ static BOOL writable_memory(const void *pointer, size_t size) {
     region_end = (uintptr_t)information.BaseAddress +
         information.RegionSize;
     return end >= start && end <= region_end;
+}
+
+static BOOL executable_memory(const void *pointer) {
+    MEMORY_BASIC_INFORMATION information;
+    DWORD protection;
+
+    if (pointer == NULL ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0 ||
+        information.State != MEM_COMMIT ||
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return FALSE;
+    }
+    protection = information.Protect & 0xffu;
+    return protection == PAGE_EXECUTE ||
+        protection == PAGE_EXECUTE_READ ||
+        protection == PAGE_EXECUTE_READWRITE ||
+        protection == PAGE_EXECUTE_WRITECOPY;
+}
+
+static BOOL cafu_locator_matrix(
+    void *render_object_pointer,
+    const char *locator_name,
+    int *locator_index_result,
+    const float **matrix_result
+) {
+    uint8_t *render_object = (uint8_t *)render_object_pointer;
+    uint8_t *provider;
+    void **vtable;
+    CafuRenderLocatorMatrixFunction get_matrix;
+    const float *matrix;
+    int locator_index;
+    unsigned int value_index;
+
+    *locator_index_result = -1;
+    *matrix_result = NULL;
+    if (game_base == NULL || locator_name == NULL ||
+        !readable_memory(render_object, 0x18u) ||
+        !executable_memory(game_base + RVA_RENDER_LOCATOR_INDEX)) {
+        return FALSE;
+    }
+    provider = *(uint8_t **)(render_object + 0x14u);
+    if (!readable_memory(provider, sizeof(void *))) {
+        return FALSE;
+    }
+    vtable = *(void ***)provider;
+    if (!readable_memory(vtable, 0x2cu) ||
+        !executable_memory(vtable[0x24u / sizeof(void *)]) ||
+        !executable_memory(vtable[0x28u / sizeof(void *)])) {
+        return FALSE;
+    }
+    locator_index = call_cafu_render_locator_index(
+        render_object,
+        locator_name,
+        game_base + RVA_RENDER_LOCATOR_INDEX
+    );
+    *locator_index_result = locator_index;
+    if (locator_index < 0) {
+        return FALSE;
+    }
+    get_matrix = (CafuRenderLocatorMatrixFunction)(
+        vtable[0x24u / sizeof(void *)]
+    );
+    matrix = get_matrix(provider, locator_index);
+    if (!readable_memory(matrix, sizeof(float) * 16u)) {
+        return FALSE;
+    }
+    for (value_index = 0u; value_index < 16u; ++value_index) {
+        if (!isfinite(matrix[value_index])) {
+            return FALSE;
+        }
+    }
+    *matrix_result = matrix;
+    return TRUE;
+}
+
+static void trace_cafu_weapon_presentation(void) {
+    static const char *const locator_names[] = {
+        "WeaponLoc_Rhand",
+        "WeaponLoc_leg",
+        "SFX",
+        "WeaponFollow"
+    };
+    uint8_t *character;
+    uint8_t *position;
+    uint8_t *wrapper;
+    uint8_t *render_object;
+    uint8_t *weapon;
+    uint8_t *weapon_slot0_wrapper;
+    uint8_t *weapon_slot0_render_object;
+    uint8_t *renderer;
+    void **renderer_vtable;
+    CafuAnimationCountFunction get_count;
+    CafuAnimationSelectorGetFunction get_selector;
+    CafuAnimationFloatGetFunction get_rate;
+    CafuAnimationFloatGetFunction get_time;
+    CafuAnimationStateGetFunction get_state;
+    const float *locator_matrix;
+    DWORD now;
+    unsigned int submodels;
+    unsigned int channel;
+    unsigned int locator_name_index;
+    int locator_index;
+
+    if (!cafu_probe_requested || !cafu_player_one_confirmed ||
+        cafu_weapon_presentation_sample_count >=
+            CAFU_WEAPON_PRESENTATION_SAMPLE_LIMIT) {
+        return;
+    }
+    now = GetTickCount();
+    if (cafu_weapon_presentation_last_tick != 0u &&
+        (DWORD)(now - cafu_weapon_presentation_last_tick) < 125u) {
+        return;
+    }
+    character = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    if (!readable_memory(character, 0x138u)) {
+        return;
+    }
+    position = *(uint8_t **)(character + 0x44u);
+    weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (!readable_memory(position, 0xb8u) ||
+        !readable_memory(weapon, 0x26cu)) {
+        return;
+    }
+    wrapper = *(uint8_t **)(position + 0xb4u);
+    if (!readable_memory(wrapper, 0x14u)) {
+        return;
+    }
+    render_object = *(uint8_t **)(wrapper + 0x08u);
+    renderer = *(uint8_t **)(wrapper + 0x10u);
+    if (!readable_memory(render_object, 0x18u) ||
+        !readable_memory(renderer, sizeof(void *))) {
+        return;
+    }
+    renderer_vtable = *(void ***)renderer;
+    if (!readable_memory(renderer_vtable, 0x11cu) ||
+        renderer_vtable[0xf8u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_COUNT ||
+        renderer_vtable[0x100u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_SELECTOR_GET ||
+        renderer_vtable[0x108u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_RATE_GET ||
+        renderer_vtable[0x110u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_TIME_GET ||
+        renderer_vtable[0x118u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_STATE_GET ||
+        *(void **)renderer != game_base + RVA_ANIMATION_RENDERER_VTABLE) {
+        return;
+    }
+    get_count = (CafuAnimationCountFunction)
+        renderer_vtable[0xf8u / sizeof(void *)];
+    get_selector = (CafuAnimationSelectorGetFunction)
+        renderer_vtable[0x100u / sizeof(void *)];
+    get_rate = (CafuAnimationFloatGetFunction)
+        renderer_vtable[0x108u / sizeof(void *)];
+    get_time = (CafuAnimationFloatGetFunction)
+        renderer_vtable[0x110u / sizeof(void *)];
+    get_state = (CafuAnimationStateGetFunction)
+        renderer_vtable[0x118u / sizeof(void *)];
+    submodels = get_count(renderer);
+    if (submodels == 0u || submodels > 32u) {
+        return;
+    }
+
+    cafu_weapon_presentation_last_tick = now;
+    ++cafu_weapon_presentation_sample_count;
+    weapon_slot0_wrapper = *(uint8_t **)(weapon + 0xf4u);
+    weapon_slot0_render_object =
+        readable_memory(weapon_slot0_wrapper, 0x0cu) ?
+            *(uint8_t **)(weapon_slot0_wrapper + 0x08u) : NULL;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_weapon_presentation sequence=%u "
+        "phase=attachment character=%p position=%p wrapper=%p "
+        "render_object=%p renderer=%p submodels=%u weapon=%p "
+        "slot0_parent=%p slot0_locator=%ld slot0_wrapper=%p "
+        "slot0_local_translation=%.5f,%.5f,%.5f "
+        "slot0_world_translation=%.5f,%.5f,%.5f "
+        "slot0_render=%p slot0_render_translation=%.5f,%.5f,%.5f "
+        "slot1_parent=%p slot1_locator=%ld slot1_wrapper=%p "
+        "slot1_local_translation=%.5f,%.5f,%.5f "
+        "policy=read_only_no_attachment_or_animation_write\r\n",
+        cafu_weapon_presentation_sample_count,
+        character,
+        position,
+        wrapper,
+        render_object,
+        renderer,
+        submodels,
+        weapon,
+        *(void **)(weapon + 0xd4u),
+        (long)*(int *)(weapon + 0xecu),
+        *(void **)(weapon + 0xf4u),
+        *(float *)(weapon + 0xa0u),
+        *(float *)(weapon + 0xa4u),
+        *(float *)(weapon + 0xa8u),
+        *(float *)(weapon + 0x130u),
+        *(float *)(weapon + 0x134u),
+        *(float *)(weapon + 0x138u),
+        weapon_slot0_render_object,
+        readable_memory(weapon_slot0_render_object, 0xd0u) ?
+            *(float *)(weapon_slot0_render_object + 0xc0u) : NAN,
+        readable_memory(weapon_slot0_render_object, 0xd0u) ?
+            *(float *)(weapon_slot0_render_object + 0xc4u) : NAN,
+        readable_memory(weapon_slot0_render_object, 0xd0u) ?
+            *(float *)(weapon_slot0_render_object + 0xc8u) : NAN,
+        *(void **)(weapon + 0x1e4u),
+        (long)*(int *)(weapon + 0x1fcu),
+        *(void **)(weapon + 0x204u),
+        *(float *)(weapon + 0x1b0u),
+        *(float *)(weapon + 0x1b4u),
+        *(float *)(weapon + 0x1b8u)
+    );
+    for (locator_name_index = 0u;
+         locator_name_index <
+             sizeof(locator_names) / sizeof(locator_names[0]);
+         ++locator_name_index) {
+        locator_index = -1;
+        locator_matrix = NULL;
+        if (cafu_locator_matrix(
+                render_object,
+                locator_names[locator_name_index],
+                &locator_index,
+                &locator_matrix)) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_presentation "
+                "sequence=%u phase=locator name=%s index=%d "
+                "right=%.5f,%.5f,%.5f up=%.5f,%.5f,%.5f "
+                "forward=%.5f,%.5f,%.5f translation=%.5f,%.5f,%.5f\r\n",
+                cafu_weapon_presentation_sample_count,
+                locator_names[locator_name_index],
+                locator_index,
+                locator_matrix[0], locator_matrix[1], locator_matrix[2],
+                locator_matrix[4], locator_matrix[5], locator_matrix[6],
+                locator_matrix[8], locator_matrix[9], locator_matrix[10],
+                locator_matrix[12], locator_matrix[13], locator_matrix[14]
+            );
+        } else {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_presentation "
+                "sequence=%u phase=locator name=%s index=%d "
+                "status=unresolved\r\n",
+                cafu_weapon_presentation_sample_count,
+                locator_names[locator_name_index],
+                locator_index
+            );
+        }
+    }
+    for (channel = 0u; channel < 5u; ++channel) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_presentation sequence=%u "
+            "phase=animation channel=%u selector=%d state=%u "
+            "rate=%.5f time=%.5f\r\n",
+            cafu_weapon_presentation_sample_count,
+            channel,
+            get_selector(renderer, (int)channel, 0u),
+            get_state(renderer, (int)channel, 0u),
+            get_rate(renderer, (int)channel, 0u),
+            get_time(renderer, (int)channel, 0u)
+        );
+    }
 }
 
 static BOOL resolve_exact_export(
@@ -416,6 +1199,42 @@ static void release_resource_name(SudekiMpResourceName *resource_name) {
     ZeroMemory(resource_name, sizeof(*resource_name));
 }
 
+BOOL SudekiMpCleanroomEngineResourceNameFromText(
+    SudekiMpResourceName *resource_name,
+    const char *text
+) {
+    return initialize_resource_name(resource_name, text);
+}
+
+void SudekiMpCleanroomEngineReleaseResourceName(
+    SudekiMpResourceName *resource_name
+) {
+    release_resource_name(resource_name);
+}
+
+static void release_retained_reference(uint32_t **reference_slot) {
+    uint32_t *reference;
+
+    if (reference_slot == NULL) {
+        return;
+    }
+    reference = *reference_slot;
+    *reference_slot = NULL;
+    if (reference != NULL &&
+        readable_memory(reference, 2u * sizeof(uint32_t)) &&
+        reference[0] > 0u) {
+        --reference[0];
+        if (reference[0] == 0u && resource_name_release_reference != NULL) {
+            __asm__ volatile(
+                "call *%[function]"
+                : "+a"(reference)
+                : [function] "r"(resource_name_release_reference)
+                : "ecx", "edx", "memory", "cc"
+            );
+        }
+    }
+}
+
 static void *entity_from_gel_pointer(void *gel_pointer) {
     void **vtable;
     void *tracked_entity[3] = {NULL, NULL, NULL};
@@ -461,6 +1280,60 @@ static void *actor_pointer(SudekiMpCleanroomActor actor) {
 
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
     return actor_pointer(actor);
+}
+
+void *SudekiMpCleanroomEngineGenericEntity(const char *resource_name) {
+    return lookup_entity(get_generic_entity, resource_name);
+}
+
+BOOL SudekiMpCleanroomEngineActorTargetsAllies(
+    SudekiMpCleanroomActor actor,
+    BOOL *enabled
+) {
+    uint8_t *character;
+    void *targeter;
+
+    if (enabled == NULL || targeter_is_targeting_allies == NULL) {
+        return FALSE;
+    }
+    character = (uint8_t *)actor_pointer(actor);
+    if (!readable_memory(character, 0xb0u)) {
+        return FALSE;
+    }
+    targeter = *(void **)(character + 0xacu);
+    if (!readable_memory(targeter, 0x80u)) {
+        return FALSE;
+    }
+    *enabled = targeter_is_targeting_allies(targeter) != 0u;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetActorTargetsAllies(
+    SudekiMpCleanroomActor actor,
+    BOOL enabled
+) {
+    uint8_t *character;
+    void *targeter;
+    BOOL actual;
+
+    if (targeter_include_allies == NULL || targeter_remove_allies == NULL) {
+        return FALSE;
+    }
+    character = (uint8_t *)actor_pointer(actor);
+    if (!readable_memory(character, 0xb0u)) {
+        return FALSE;
+    }
+    targeter = *(void **)(character + 0xacu);
+    if (!readable_memory(targeter, 0x80u)) {
+        return FALSE;
+    }
+    if (enabled) {
+        targeter_include_allies(targeter);
+    } else {
+        targeter_remove_allies(targeter);
+    }
+    return SudekiMpCleanroomEngineActorTargetsAllies(actor, &actual) &&
+        actual == enabled;
 }
 
 static BOOL prepare_training_inventory(void) {
@@ -637,6 +1510,815 @@ static BOOL initialize_actor_weapon(
     return current_item != NULL;
 }
 
+static void log_weapon_item_resources(
+    const char *source,
+    const uint8_t *item
+) {
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_weapon_resource_item "
+        "source=%s item=%p item_id=%lu "
+        "primary=%08lx,%08lx,%p equipped=%08lx,%08lx,%p\r\n",
+        source,
+        item,
+        (unsigned long)*(const uint32_t *)(item + 0x14u),
+        (unsigned long)*(const uint32_t *)(item + 0x44u),
+        (unsigned long)*(const uint32_t *)(item + 0x48u),
+        *(void *const *)(item + 0x4cu),
+        (unsigned long)*(const uint32_t *)(item + 0x104u),
+        (unsigned long)*(const uint32_t *)(item + 0x108u),
+        *(void *const *)(item + 0x10cu)
+    );
+}
+
+static uint8_t *global_item(unsigned int item_identifier) {
+    void **item_database_global;
+    uint8_t *item_database;
+
+    if (game_base == NULL || item_identifier > 0x3e6u) {
+        return NULL;
+    }
+    item_database_global = (void **)(game_base + RVA_ITEM_DATABASE_GLOBAL);
+    if (!readable_memory(item_database_global, sizeof(*item_database_global)) ||
+        !readable_memory(*item_database_global, 0x1000u)) {
+        return NULL;
+    }
+    item_database = (uint8_t *)*item_database_global;
+    return *(uint8_t **)(
+        item_database + 0x0cu + item_identifier * sizeof(void *)
+    );
+}
+
+static BOOL inspect_cafu_inventory_weapon(void) {
+    uint8_t *cafu_item;
+    uint8_t *elco_item;
+
+    if (cafu_weapon_inventory_logged) {
+        return TRUE;
+    }
+    if (!inventory_filled) {
+        if ((cafu_weapon_gate_log & 0x01u) == 0u) {
+            cafu_weapon_gate_log |= 0x01u;
+            SudekiMpLogWrite(
+                "cleanroom_engine event=cafu_weapon_resource_inventory "
+                "status=pending reason=inventory_not_ready\r\n"
+            );
+        }
+        return FALSE;
+    }
+    cafu_item = global_item(CAFU_WEAPON_ITEM_ID);
+    elco_item = global_item(ELCO_STARTER_WEAPON_ITEM_ID);
+    if (cafu_item == NULL && elco_item == NULL) {
+        if ((cafu_weapon_gate_log & 0x02u) == 0u) {
+            cafu_weapon_gate_log |= 0x02u;
+            SudekiMpLogWrite(
+                "cleanroom_engine event=cafu_weapon_resource_inventory "
+                "status=pending reason=item_database_unreadable\r\n"
+            );
+        }
+        return FALSE;
+    }
+    if (!readable_memory(cafu_item, 0x110u)) {
+        if ((cafu_weapon_gate_log & 0x04u) == 0u) {
+            cafu_weapon_gate_log |= 0x04u;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_resource_inventory "
+                "status=rejected reason=cafu_database_item_unreadable "
+                "global_item_id=%u item=%p\r\n",
+                CAFU_WEAPON_ITEM_ID,
+                cafu_item
+            );
+        }
+        return FALSE;
+    }
+    if (!readable_memory(elco_item, 0x110u)) {
+        if ((cafu_weapon_gate_log & 0x10u) == 0u) {
+            cafu_weapon_gate_log |= 0x10u;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_resource_inventory "
+                "status=rejected reason=control_database_item_unreadable "
+                "global_item_id=%u item=%p\r\n",
+                ELCO_STARTER_WEAPON_ITEM_ID,
+                elco_item
+            );
+        }
+        return FALSE;
+    }
+    log_weapon_item_resources("cafu_global_item_48", cafu_item);
+    log_weapon_item_resources("elco_global_item_24", elco_item);
+    cafu_weapon_inventory_logged = TRUE;
+    SudekiMpLogWrite(
+        "cleanroom_engine event=cafu_weapon_resource_inventory "
+        "status=observed policy=no_resource_or_weapon_mutation\r\n"
+    );
+    return TRUE;
+}
+
+static BOOL request_cafu_weapon_model(
+    const SudekiMpResourceName *resource_name
+) {
+    void **manager_global;
+    void *manager;
+    void *function;
+    void *result;
+    BOOL entry_matches;
+    BOOL global_readable;
+    BOOL manager_readable;
+    void *type_manager;
+    void **type_vtable;
+    void **proxy_vtable;
+
+    if (cafu_weapon_preload_requested) {
+        return cafu_weapon_preload.resource_proxy != NULL;
+    }
+    manager_global = (void **)(game_base + RVA_ENTITY_MANAGER_GLOBAL);
+    entry_matches = matches_entry(
+        game_base + RVA_RESOURCE_LOOKUP,
+        resource_lookup_entry,
+        sizeof(resource_lookup_entry)
+    );
+    global_readable = readable_memory(
+        manager_global,
+        sizeof(*manager_global)
+    );
+    manager = global_readable ? *manager_global : NULL;
+    /* Type 41 indexes manager+0x40+41*4, ending at manager+0xE8. */
+    manager_readable = readable_memory(manager, 0xe8u);
+    if (resource_name == NULL || !entry_matches || !global_readable ||
+        !manager_readable) {
+        if ((cafu_weapon_gate_log & 0x80u) == 0u) {
+            cafu_weapon_gate_log |= 0x80u;
+            SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_preload "
+                "status=pending reason=lookup_gate_failed "
+                "resource_name=%p entry_match=%s manager_global=%p "
+                "global_readable=%s manager=%p manager_readable=%s\r\n",
+                resource_name,
+                entry_matches ? "true" : "false",
+                manager_global,
+                global_readable ? "true" : "false",
+                manager,
+                manager_readable ? "true" : "false"
+            );
+        }
+        return FALSE;
+    }
+    function = game_base + RVA_RESOURCE_LOOKUP;
+    ZeroMemory(&cafu_weapon_preload, sizeof(cafu_weapon_preload));
+    result = function;
+    __asm__ volatile(
+        "pushl 8(%[name])\n\t"
+        "pushl 4(%[name])\n\t"
+        "pushl 0(%[name])\n\t"
+        "pushl %[manager]\n\t"
+        "movl %[output], %%esi\n\t"
+        "xorl %%ecx, %%ecx\n\t"
+        "xorl %%edx, %%edx\n\t"
+        "call *%%eax"
+        : "+a"(result)
+        : [name] "r"(resource_name),
+          [manager] "r"(manager),
+          [output] "r"(&cafu_weapon_preload)
+        : "ecx", "edx", "esi", "memory", "cc"
+    );
+    cafu_weapon_preload_requested = TRUE;
+    cafu_weapon_preload_started_at = GetTickCount();
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_weapon_model_preload phase=request "
+        "status=%s encoded_kind=%08lx identifier=%08lx "
+        "result=%p lookup=%p reference=%p proxy=%p\r\n",
+        result == &cafu_weapon_preload &&
+            cafu_weapon_preload.resource_proxy != NULL ?
+                "retained" : "unavailable",
+        (unsigned long)resource_name->encoded_kind,
+        (unsigned long)resource_name->identifier,
+        result,
+        &cafu_weapon_preload,
+        cafu_weapon_preload.reference,
+        cafu_weapon_preload.resource_proxy
+    );
+    type_manager = *(void **)((uint8_t *)manager + 0xe4u);
+    type_vtable = readable_memory(type_manager, sizeof(void *)) ?
+        *(void ***)type_manager : NULL;
+    proxy_vtable = readable_memory(
+        cafu_weapon_preload.resource_proxy,
+        sizeof(void *)
+    ) ? *(void ***)cafu_weapon_preload.resource_proxy : NULL;
+    if (readable_memory(type_vtable, 16u * sizeof(void *))) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_preload "
+            "phase=type_manager manager=%p object=%p vtable=%p "
+            "slots_00_1c=%p,%p,%p,%p,%p,%p,%p,%p\r\n",
+            manager,
+            type_manager,
+            type_vtable,
+            type_vtable[0], type_vtable[1], type_vtable[2],
+            type_vtable[3], type_vtable[4], type_vtable[5],
+            type_vtable[6], type_vtable[7]
+        );
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_preload "
+            "phase=type_manager slots_20_3c=%p,%p,%p,%p,%p,%p,%p,%p\r\n",
+            type_vtable[8], type_vtable[9], type_vtable[10],
+            type_vtable[11], type_vtable[12], type_vtable[13],
+            type_vtable[14], type_vtable[15]
+        );
+    }
+    if (readable_memory(proxy_vtable, 8u * sizeof(void *))) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_preload "
+            "phase=proxy object=%p vtable=%p nested=%p "
+            "slots_00_1c=%p,%p,%p,%p,%p,%p,%p,%p\r\n",
+            cafu_weapon_preload.resource_proxy,
+            proxy_vtable,
+            *(void **)((uint8_t *)cafu_weapon_preload.resource_proxy + 8u),
+            proxy_vtable[0], proxy_vtable[1], proxy_vtable[2],
+            proxy_vtable[3], proxy_vtable[4], proxy_vtable[5],
+            proxy_vtable[6], proxy_vtable[7]
+        );
+    }
+    return result == &cafu_weapon_preload &&
+        cafu_weapon_preload.resource_proxy != NULL;
+}
+
+static void *retained_resource_payload(
+    const SudekiMpResourceLookup *lookup
+) {
+    uint8_t *proxy;
+    void **proxy_vtable;
+    ResourceProxyTypeFunction proxy_type;
+    void *loaded_resource;
+    void **loaded_vtable;
+    LoadedResourceGetFunction get_resource;
+
+    if (lookup == NULL) {
+        return NULL;
+    }
+    proxy = (uint8_t *)lookup->resource_proxy;
+    if (!readable_memory(proxy, 3u * sizeof(void *))) {
+        return NULL;
+    }
+    proxy_vtable = *(void ***)proxy;
+    if (!readable_memory(proxy_vtable, 5u * sizeof(void *))) {
+        return NULL;
+    }
+    proxy_type = (ResourceProxyTypeFunction)proxy_vtable[4];
+    if (!executable_memory((const void *)proxy_type) ||
+        proxy_type(proxy) != 41u) {
+        return NULL;
+    }
+    loaded_resource = *(void **)(proxy + 2u * sizeof(void *));
+    if (!readable_memory(loaded_resource, sizeof(void *))) {
+        return NULL;
+    }
+    loaded_vtable = *(void ***)loaded_resource;
+    if (!readable_memory(loaded_vtable, 3u * sizeof(void *))) {
+        return NULL;
+    }
+    get_resource = (LoadedResourceGetFunction)loaded_vtable[2];
+    if (!executable_memory((const void *)get_resource)) {
+        return NULL;
+    }
+    return get_resource(loaded_resource);
+}
+
+static BOOL retained_resource_is_type(
+    const SudekiMpResourceLookup *lookup,
+    unsigned int expected_type
+) {
+    uint8_t *proxy;
+    void **proxy_vtable;
+    ResourceProxyTypeFunction proxy_type;
+
+    if (lookup == NULL) {
+        return FALSE;
+    }
+    proxy = (uint8_t *)lookup->resource_proxy;
+    if (!readable_memory(proxy, sizeof(void *))) {
+        return FALSE;
+    }
+    proxy_vtable = *(void ***)proxy;
+    if (!readable_memory(proxy_vtable, 5u * sizeof(void *))) {
+        return FALSE;
+    }
+    proxy_type = (ResourceProxyTypeFunction)proxy_vtable[4];
+    return executable_memory((const void *)proxy_type) &&
+        proxy_type(proxy) == expected_type;
+}
+
+static void *cafu_weapon_model_payload(void) {
+    return retained_resource_payload(&cafu_weapon_preload);
+}
+
+static BOOL patch_cafu_missile_model_record(
+    SudekiMpResourceName *model,
+    uint8_t *combo,
+    unsigned int combo_index,
+    const char *source
+) {
+    SudekiMpCafuMissileModelPatch *patch;
+    unsigned int index;
+
+    if (!cafu_missile_model_ready || model == NULL ||
+        model->encoded_kind != CAFU_MISSILE_MODEL_RESOURCE_KIND ||
+        (model->identifier != CAFU_MISSILE_ARCHIVE_MODEL_IDENTIFIER &&
+         model->identifier != CAFU_MISSILE_RUNTIME_MODEL_IDENTIFIER) ||
+        model->text_reference != NULL ||
+        !writable_memory(model, sizeof(*model))) {
+        return FALSE;
+    }
+    for (index = 0u; index < cafu_missile_model_patch_count; ++index) {
+        if (cafu_missile_model_patches[index].target == model) {
+            return TRUE;
+        }
+    }
+    if (cafu_missile_model_patch_count >= CAFU_MISSILE_PATCH_CAPACITY) {
+        return FALSE;
+    }
+    patch = &cafu_missile_model_patches[cafu_missile_model_patch_count];
+    patch->target = model;
+    patch->saved = *model;
+    patch->applied = *model;
+    patch->applied.identifier =
+        CAFU_MISSILE_REPLACEMENT_MODEL_IDENTIFIER;
+    *model = patch->applied;
+    if (memcmp(model, &patch->applied, sizeof(*model)) != 0) {
+        *model = patch->saved;
+        ZeroMemory(patch, sizeof(*patch));
+        return FALSE;
+    }
+    ++cafu_missile_model_patch_count;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_missile_model_correction "
+        "status=applied source=%s combo_index=%u combo=%p model=%p "
+        "original_identifier=%08lx replacement_identifier=%08lx "
+        "policy=projectile_presentation_only\r\n",
+        source == NULL ? "unknown" : source,
+        combo_index,
+        combo,
+        model,
+        (unsigned long)patch->saved.identifier,
+        (unsigned long)patch->applied.identifier
+    );
+    return TRUE;
+}
+
+static BOOL request_cafu_missile_model(void) {
+    void **manager_global;
+    void *manager;
+    void *function;
+    void *result;
+
+    if (cafu_missile_model_preload_requested) {
+        return cafu_missile_model_preload.resource_proxy != NULL;
+    }
+    manager_global = game_base == NULL ? NULL :
+        (void **)(game_base + RVA_ENTITY_MANAGER_GLOBAL);
+    manager = readable_memory(manager_global, sizeof(*manager_global)) ?
+        *manager_global : NULL;
+    if (!cafu_missile_model_name_initialized ||
+        !matches_entry(
+            game_base + RVA_RESOURCE_LOOKUP,
+            resource_lookup_entry,
+            sizeof(resource_lookup_entry)) ||
+        !readable_memory(manager, 0xe8u)) {
+        return FALSE;
+    }
+    function = game_base + RVA_RESOURCE_LOOKUP;
+    ZeroMemory(
+        &cafu_missile_model_preload,
+        sizeof(cafu_missile_model_preload)
+    );
+    result = function;
+    __asm__ volatile(
+        "pushl 8(%[name])\n\t"
+        "pushl 4(%[name])\n\t"
+        "pushl 0(%[name])\n\t"
+        "pushl %[manager]\n\t"
+        "movl %[output], %%esi\n\t"
+        "xorl %%ecx, %%ecx\n\t"
+        "xorl %%edx, %%edx\n\t"
+        "call *%%eax"
+        : "+a"(result)
+        : [name] "r"(&cafu_missile_model_name),
+          [manager] "r"(manager),
+          [output] "r"(&cafu_missile_model_preload)
+        : "ecx", "edx", "esi", "memory", "cc"
+    );
+    cafu_missile_model_preload_requested = TRUE;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_missile_model_preload phase=request "
+        "status=%s encoded_kind=%08lx identifier=%08lx "
+        "result=%p reference=%p proxy=%p "
+        "replacement=SFXEP001_MK1_PISTOL.HOM:41\r\n",
+        result == &cafu_missile_model_preload &&
+            cafu_missile_model_preload.resource_proxy != NULL ?
+                "retained" : "unavailable",
+        (unsigned long)cafu_missile_model_name.encoded_kind,
+        (unsigned long)cafu_missile_model_name.identifier,
+        result,
+        cafu_missile_model_preload.reference,
+        cafu_missile_model_preload.resource_proxy
+    );
+    return result == &cafu_missile_model_preload &&
+        cafu_missile_model_preload.resource_proxy != NULL;
+}
+
+static BOOL prepare_cafu_missile_models(void) {
+    uint8_t *cafu;
+    uint8_t *manager;
+    uint8_t **combo_array;
+    uint8_t *combo;
+    SudekiMpResourceName *model;
+    unsigned int combo_count;
+    unsigned int index;
+
+    if (!cafu_missile_model_name_initialized) {
+        ZeroMemory(
+            &cafu_missile_model_name,
+            sizeof(cafu_missile_model_name)
+        );
+        cafu_missile_model_name.encoded_kind =
+            CAFU_MISSILE_MODEL_RESOURCE_KIND;
+        cafu_missile_model_name.identifier =
+            CAFU_MISSILE_REPLACEMENT_MODEL_IDENTIFIER;
+        cafu_missile_model_name_initialized = TRUE;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_missile_model_correction "
+            "status=prepared encoded_kind=%08lx "
+            "original_identifier=%08lx replacement_identifier=%08lx "
+            "replacement=SFXEP001_MK1_PISTOL.HOM:41\r\n",
+            (unsigned long)cafu_missile_model_name.encoded_kind,
+            (unsigned long)CAFU_MISSILE_RUNTIME_MODEL_IDENTIFIER,
+            (unsigned long)cafu_missile_model_name.identifier
+        );
+    }
+    if (!cafu_missile_model_preload_requested) {
+        (void)request_cafu_missile_model();
+        return FALSE;
+    }
+    if (!retained_resource_is_type(&cafu_missile_model_preload, 41u)) {
+        return FALSE;
+    }
+    if (!cafu_missile_model_ready) {
+        cafu_missile_model_ready = TRUE;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_missile_model_correction "
+            "status=preload_ready encoded_kind=%08lx identifier=%08lx "
+            "policy=spawn_blocked_until_replacement_available\r\n",
+            (unsigned long)cafu_missile_model_name.encoded_kind,
+            (unsigned long)cafu_missile_model_name.identifier
+        );
+    }
+    cafu = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    if (!readable_memory(
+            cafu,
+            CAFU_MISSILE_MANAGER_OFFSET + 0xe4u)) {
+        return TRUE;
+    }
+    manager = cafu + CAFU_MISSILE_MANAGER_OFFSET;
+    if (*(void **)manager != game_base + RVA_MISSILE_MANAGER_VTABLE) {
+        return TRUE;
+    }
+    combo_count = *(unsigned int *)(
+        manager + CAFU_MISSILE_COMBO_COUNT_OFFSET
+    );
+    combo_array = *(uint8_t ***) (
+        manager + CAFU_MISSILE_COMBO_ARRAY_OFFSET
+    );
+    if (combo_count == 0u || combo_count > CAFU_MISSILE_PATCH_CAPACITY ||
+        !readable_memory(combo_array, combo_count * sizeof(*combo_array))) {
+        return TRUE;
+    }
+    for (index = 0u; index < combo_count; ++index) {
+        combo = combo_array[index];
+        model = readable_memory(
+            combo,
+            CAFU_MISSILE_MODEL_OFFSET + sizeof(*model)) ?
+                (SudekiMpResourceName *)(
+                    combo + CAFU_MISSILE_MODEL_OFFSET
+                ) : NULL;
+        (void)patch_cafu_missile_model_record(
+            model,
+            combo,
+            index,
+            "manager_inventory"
+        );
+    }
+    return TRUE;
+}
+
+static BOOL prepare_cafu_weapon_model(void) {
+    uint8_t *cafu_item;
+    uint8_t *elco_item;
+    SudekiMpResourceName *cafu_model;
+    const SudekiMpResourceName *elco_model;
+    SudekiMpResourceName archive_model;
+    void *payload;
+    DWORD elapsed;
+
+    if (cafu_weapon_model_ready) {
+        return TRUE;
+    }
+    if (!inspect_cafu_inventory_weapon()) {
+        return FALSE;
+    }
+    cafu_item = global_item(CAFU_WEAPON_ITEM_ID);
+    elco_item = global_item(ELCO_STARTER_WEAPON_ITEM_ID);
+    if (!readable_memory(cafu_item, 0x110u) ||
+        !readable_memory(elco_item, 0x110u)) {
+        return FALSE;
+    }
+    cafu_model = (SudekiMpResourceName *)(cafu_item + 0x44u);
+    elco_model = (const SudekiMpResourceName *)(elco_item + 0x44u);
+    if (!cafu_weapon_force_elco_model && !cafu_weapon_preload_requested) {
+        if (cafu_model->identifier !=
+                CAFU_WEAPON_BROKEN_MODEL_IDENTIFIER ||
+            (cafu_model->encoded_kind & 0x7fu) != 41u ||
+            cafu_model->text_reference != NULL) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_model_correction "
+                "status=rejected reason=source_identity_mismatch "
+                "kind=%08lx identifier=%08lx reference=%p\r\n",
+                (unsigned long)cafu_model->encoded_kind,
+                (unsigned long)cafu_model->identifier,
+                cafu_model->text_reference
+            );
+            return FALSE;
+        }
+        archive_model = *cafu_model;
+        archive_model.identifier = CAFU_WEAPON_ARCHIVE_MODEL_IDENTIFIER;
+        (void)request_cafu_weapon_model(&archive_model);
+        return FALSE;
+    }
+    payload = cafu_weapon_force_elco_model ? NULL :
+        cafu_weapon_model_payload();
+    if (!cafu_weapon_force_elco_model && payload != NULL) {
+        if (!writable_memory(cafu_model, sizeof(*cafu_model)) ||
+            cafu_model->identifier !=
+                CAFU_WEAPON_BROKEN_MODEL_IDENTIFIER ||
+            (cafu_model->encoded_kind & 0x7fu) != 41u ||
+            cafu_model->text_reference != NULL) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_model_correction "
+                "status=rejected reason=apply_identity_mismatch "
+                "kind=%08lx identifier=%08lx reference=%p\r\n",
+                (unsigned long)cafu_model->encoded_kind,
+                (unsigned long)cafu_model->identifier,
+                cafu_model->text_reference
+            );
+            return FALSE;
+        }
+        saved_cafu_weapon_model = *cafu_model;
+        applied_cafu_weapon_model = *cafu_model;
+        applied_cafu_weapon_model.identifier =
+            CAFU_WEAPON_ARCHIVE_MODEL_IDENTIFIER;
+        *cafu_model = applied_cafu_weapon_model;
+        if (memcmp(cafu_model, &applied_cafu_weapon_model,
+                sizeof(*cafu_model)) != 0) {
+            *cafu_model = saved_cafu_weapon_model;
+            ZeroMemory(
+                &saved_cafu_weapon_model,
+                sizeof(saved_cafu_weapon_model)
+            );
+            ZeroMemory(
+                &applied_cafu_weapon_model,
+                sizeof(applied_cafu_weapon_model)
+            );
+            SudekiMpLogWrite(
+                "cleanroom_engine event=cafu_weapon_model_correction "
+                "status=rejected reason=write_verification_failed\r\n"
+            );
+            return FALSE;
+        }
+        cafu_weapon_model_item = cafu_item;
+        cafu_weapon_model_patched = TRUE;
+        cafu_weapon_model_uses_fallback = FALSE;
+        cafu_weapon_model_ready = TRUE;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_preload phase=ready "
+            "status=native_model_available proxy=%p payload=%p "
+            "broken_identifier=%08lx archive_identifier=%08lx "
+            "policy=actual_w033_archive_resource\r\n",
+            cafu_weapon_preload.resource_proxy,
+            payload,
+            (unsigned long)saved_cafu_weapon_model.identifier,
+            (unsigned long)applied_cafu_weapon_model.identifier
+        );
+        return TRUE;
+    }
+    elapsed = cafu_weapon_force_elco_model ?
+        CAFU_WEAPON_PRELOAD_WAIT_MS :
+        GetTickCount() - cafu_weapon_preload_started_at;
+    if (!cafu_weapon_force_elco_model &&
+        elapsed < CAFU_WEAPON_PRELOAD_WAIT_MS) {
+        return FALSE;
+    }
+    if (!writable_memory(cafu_model, sizeof(*cafu_model)) ||
+        cafu_model->identifier != CAFU_WEAPON_BROKEN_MODEL_IDENTIFIER ||
+        elco_model->identifier != ELCO_WEAPON_MODEL_IDENTIFIER ||
+        (cafu_model->encoded_kind & 0x7fu) != 41u ||
+        (elco_model->encoded_kind & 0x7fu) != 41u ||
+        cafu_model->text_reference != NULL ||
+        elco_model->text_reference != NULL) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_weapon_model_alias status=rejected "
+            "reason=resource_identity_mismatch cafu_item=%p elco_item=%p "
+            "cafu_kind=%08lx cafu_identifier=%08lx cafu_ref=%p "
+            "elco_kind=%08lx elco_identifier=%08lx elco_ref=%p\r\n",
+            cafu_item,
+            elco_item,
+            (unsigned long)cafu_model->encoded_kind,
+            (unsigned long)cafu_model->identifier,
+            cafu_model->text_reference,
+            (unsigned long)elco_model->encoded_kind,
+            (unsigned long)elco_model->identifier,
+            elco_model->text_reference
+        );
+        return FALSE;
+    }
+    saved_cafu_weapon_model = *cafu_model;
+    applied_cafu_weapon_model = *elco_model;
+    *cafu_model = applied_cafu_weapon_model;
+    if (memcmp(cafu_model, &applied_cafu_weapon_model,
+            sizeof(*cafu_model)) != 0) {
+        *cafu_model = saved_cafu_weapon_model;
+        ZeroMemory(&saved_cafu_weapon_model, sizeof(saved_cafu_weapon_model));
+        ZeroMemory(&applied_cafu_weapon_model,
+            sizeof(applied_cafu_weapon_model));
+        SudekiMpLogWrite(
+            "cleanroom_engine event=cafu_weapon_model_alias status=rejected "
+            "reason=write_verification_failed\r\n"
+        );
+        return FALSE;
+    }
+    cafu_weapon_model_item = cafu_item;
+    cafu_weapon_model_patched = TRUE;
+    cafu_weapon_model_uses_fallback = TRUE;
+    cafu_weapon_model_ready = TRUE;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_weapon_model_alias status=applied "
+        "item=%p preserved_item_id=%u original_identifier=%08lx "
+        "replacement_identifier=%08lx preload_wait_ms=%lu "
+        "policy=visual_resource_only\r\n",
+        cafu_item,
+        CAFU_WEAPON_ITEM_ID,
+        (unsigned long)saved_cafu_weapon_model.identifier,
+        (unsigned long)applied_cafu_weapon_model.identifier,
+        (unsigned long)elapsed
+    );
+    return TRUE;
+}
+
+static BOOL inspect_cafu_weapon_resources(uint8_t *character) {
+    uint8_t *character_weapon;
+    uint8_t *current_item;
+
+    if (!inspect_cafu_inventory_weapon()) {
+        return FALSE;
+    }
+    if (!readable_memory(character, CHARACTER_WEAPON_OFFSET + sizeof(void *))) {
+        if ((cafu_weapon_gate_log & 0x08u) == 0u) {
+            cafu_weapon_gate_log |= 0x08u;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_runtime_item status=pending "
+                "reason=character_unreadable character=%p\r\n",
+                character
+            );
+        }
+        return FALSE;
+    }
+    character_weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (character_weapon == NULL || !readable_memory(
+            character_weapon,
+            CHARACTER_WEAPON_CURRENT_ITEM_OFFSET + sizeof(void *))) {
+        if ((cafu_weapon_gate_log & 0x20u) == 0u) {
+            cafu_weapon_gate_log |= 0x20u;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_runtime_item status=pending "
+                "reason=character_weapon_unreadable character=%p weapon=%p\r\n",
+                character,
+                character_weapon
+            );
+        }
+        return FALSE;
+    }
+    current_item = *(uint8_t **)(
+        character_weapon + CHARACTER_WEAPON_CURRENT_ITEM_OFFSET
+    );
+    if (!readable_memory(current_item, 0x110u)) {
+        if ((cafu_weapon_gate_log & 0x40u) == 0u) {
+            cafu_weapon_gate_log |= 0x40u;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_runtime_item status=pending "
+                "reason=current_item_unreadable character=%p weapon=%p item=%p\r\n",
+                character,
+                character_weapon,
+                current_item
+            );
+        }
+        return FALSE;
+    }
+    log_weapon_item_resources("cafu_runtime_current", current_item);
+    return TRUE;
+}
+
+static void maintain_cafu_player_one(void) {
+    uint8_t *group;
+    uint8_t **controller_global;
+    uint8_t *controller;
+    void *cafu;
+    void *controller_target;
+    uint8_t *next_action;
+    uint8_t *previous_action;
+    unsigned int index;
+    unsigned int cafu_slot = PARTY_SLOT_COUNT;
+    int party_count;
+
+    if (!cafu_probe_requested || cafu_player_one_confirmed ||
+        game_base == NULL) {
+        return;
+    }
+    cafu = actor_pointer(SUDEKIMP_CLEANROOM_CAFU);
+    group = (uint8_t *)get_group_players();
+    controller_global = (uint8_t **)(
+        game_base + RVA_CHARACTER_CONTROLLER_GLOBAL
+    );
+    if (cafu == NULL || !readable_memory(group,
+            PARTY_COUNT_OFFSET + sizeof(party_count)) ||
+        !readable_memory(controller_global, sizeof(*controller_global))) {
+        return;
+    }
+    controller = *controller_global;
+    if (!readable_memory(controller,
+            CONTROLLER_TARGET_OFFSET + sizeof(controller_target))) {
+        return;
+    }
+    controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+    if (controller_target == cafu) {
+        cafu_player_one_confirmed = TRUE;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_player_one status=confirmed "
+            "character=%p controller=%p rotations=%u "
+            "policy=native_character_switch\r\n",
+            cafu,
+            controller,
+            cafu_player_one_rotation_attempts
+        );
+        return;
+    }
+    party_count = *(int *)(group + PARTY_COUNT_OFFSET);
+    if (party_count < 1 || party_count > (int)PARTY_SLOT_COUNT ||
+        !readable_memory(
+            group + PARTY_SLOT_ZERO_OFFSET,
+            PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE
+        )) {
+        return;
+    }
+    for (index = 0u; index < (unsigned int)party_count; ++index) {
+        if (*(void **)(group + PARTY_SLOT_ZERO_OFFSET +
+                index * PARTY_SLOT_STRIDE) == cafu) {
+            cafu_slot = index;
+            break;
+        }
+    }
+    if (cafu_slot == PARTY_SLOT_COUNT) {
+        return;
+    }
+    if (cafu_player_one_rotation_attempts >=
+            CAFU_PLAYER_ONE_MAX_ROTATIONS) {
+        if (cafu_player_one_rotation_attempts ==
+                CAFU_PLAYER_ONE_MAX_ROTATIONS) {
+            ++cafu_player_one_rotation_attempts;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_player_one status=rejected "
+                "reason=rotation_limit character=%p slot=%u target=%p\r\n",
+                cafu,
+                cafu_slot,
+                controller_target
+            );
+        }
+        return;
+    }
+    next_action = controller + CONTROLLER_NEXT_CHARACTER_OFFSET;
+    previous_action = controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET;
+    if (!writable_memory(next_action, sizeof(*next_action)) ||
+        !writable_memory(previous_action, sizeof(*previous_action)) ||
+        *next_action != 0u || *previous_action != 0u) {
+        return;
+    }
+    *next_action = 1u;
+    ++cafu_player_one_rotation_attempts;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=cafu_player_one phase=rotate "
+        "character=%p slot=%u target=%p attempt=%u "
+        "policy=native_next_character_action\r\n",
+        cafu,
+        cafu_slot,
+        controller_target,
+        cafu_player_one_rotation_attempts
+    );
+}
+
 static BOOL invoke_combat_transition(
     BOOL enabled,
     BOOL force,
@@ -711,6 +2393,29 @@ static void initialize_present_actors(void) {
             continue;
         }
         if (initialized_actor_entities[index] == character) {
+            continue;
+        }
+        if (index == SUDEKIMP_CLEANROOM_CAFU) {
+            /*
+             * Cafu is an authored developer PC, but he is not part of the
+             * retail four-character inventory/HUD contract.  The first
+             * isolation path avoids retail stat, combat, and controller
+             * assumptions.  His hidden item 48 remains the equipped weapon;
+             * only its stale visual-model resource hash is corrected.  The
+             * compatible Elco visual remains a load-failure fallback.
+             */
+            if (inspect_cafu_weapon_resources(character)) {
+                initialized_actor_entities[index] = character;
+                SudekiMpLogFormat(
+                    "cleanroom_engine event=actor_training_setup actor=Cafu "
+                    "status=observed entity=%p "
+                    "policy=%s\r\n",
+                    character,
+                    cafu_weapon_model_uses_fallback ?
+                        "authored_item_with_visual_resource_alias" :
+                        "authored_item_with_actual_w033_resource"
+                );
+            }
             continue;
         }
         stats_ready = repair_actor_stat_maxima(
@@ -795,6 +2500,9 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     void *resolved_get_character_number_stat = NULL;
     void *resolved_set_character_number_stat = NULL;
     void *resolved_set_weapon = NULL;
+    void *resolved_targeter_include_allies = NULL;
+    void *resolved_targeter_remove_allies = NULL;
+    void *resolved_targeter_is_targeting_allies = NULL;
     uint8_t *base;
 
     if (game_module == NULL || game_base != NULL ||
@@ -888,6 +2596,21 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
             "?SetWeapon@CCharacterWeapon@@QAEXH@Z",
             RVA_SET_WEAPON,
             &resolved_set_weapon) ||
+        !resolve_exact_export(
+            game_module,
+            "?IncludeAlliesAsTargets@CTargeter@@QAEXXZ",
+            RVA_TARGETER_INCLUDE_ALLIES,
+            &resolved_targeter_include_allies) ||
+        !resolve_exact_export(
+            game_module,
+            "?RemoveAlliesAsTargets@CTargeter@@QAEXXZ",
+            RVA_TARGETER_REMOVE_ALLIES,
+            &resolved_targeter_remove_allies) ||
+        !resolve_exact_export(
+            game_module,
+            "?IsTargettingAllies@CTargeter@@QBE_NXZ",
+            RVA_TARGETER_IS_TARGETING_ALLIES,
+            &resolved_targeter_is_targeting_allies) ||
         !matches_entry(
             (const uint8_t *)game_module + RVA_RESOURCE_NAME_FROM_TEXT,
             resource_name_from_text_entry,
@@ -947,6 +2670,12 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     set_character_number_stat =
         (SetCharacterNumberStatFunction)resolved_set_character_number_stat;
     set_weapon = (SetWeaponFunction)resolved_set_weapon;
+    targeter_include_allies =
+        (TargeterFlagFunction)resolved_targeter_include_allies;
+    targeter_remove_allies =
+        (TargeterFlagFunction)resolved_targeter_remove_allies;
+    targeter_is_targeting_allies =
+        (TargeterPredicateFunction)resolved_targeter_is_targeting_allies;
     gel_pointer_to_entity = (GelPointerToEntityFunction)(
         game_base + RVA_GEL_POINTER_TO_ENTITY
     );
@@ -956,12 +2685,150 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     resource_name_from_text = game_base + RVA_RESOURCE_NAME_FROM_TEXT;
     resource_name_release_reference =
         game_base + RVA_RESOURCE_NAME_RELEASE_REFERENCE;
+    cafu_probe_requested = strstr(
+        GetCommandLineA(),
+        "-SudekiMPCafuProbe 1"
+    ) != NULL;
+    cafu_autofire_requested = cafu_probe_requested &&
+        GetEnvironmentVariableA(
+            "SUDEKIMP_CAFU_AUTOFIRE",
+            NULL,
+            0u
+        ) > 0u;
+    cafu_weapon_force_elco_model = cafu_probe_requested &&
+        GetEnvironmentVariableA(
+            "SUDEKIMP_CAFU_ELCO_WEAPON",
+            NULL,
+            0u
+        ) > 0u;
+    cafu_autofire_sent = FALSE;
+    cafu_autofire_ready_at = 0u;
+    cafu_weapon_presentation_last_tick = 0u;
+    cafu_weapon_presentation_sample_count = 0u;
+    cafu_exception_handler = cafu_probe_requested ?
+        AddVectoredExceptionHandler(1u, trace_cafu_exception) : NULL;
+    if (cafu_probe_requested && cafu_exception_handler == NULL) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_exception_trace_install "
+            "status=rejected win32_error=%lu\r\n",
+            (unsigned long)GetLastError()
+        );
+    }
+    original_missile_launch = NULL;
+    original_missile_select = NULL;
+    original_position_transform_update = NULL;
+    cafu_missile_launch_sequence = 0u;
+    if (cafu_probe_requested) {
+        original_missile_launch = (MissileLaunchThunkFunction)(
+            game_base + RVA_MISSILE_LAUNCH_THUNK
+        );
+        if (!SudekiMpInstallPointerHook(
+                &cafu_missile_launch_hook,
+                (void **)(game_base + RVA_MISSILE_LAUNCH_VTABLE_SLOT),
+                original_missile_launch,
+                trace_cafu_missile_launch)) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_missile_trace_install "
+                "status=rejected win32_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpCleanroomEngineReset();
+            return FALSE;
+        }
+        if (!SudekiMpInstallInlineHook(
+                &cafu_missile_select_hook,
+                game_base + RVA_MISSILE_SELECT,
+                missile_select_entry,
+                sizeof(missile_select_entry),
+                trace_cafu_missile_select)) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_missile_select_trace_install "
+                "status=rejected win32_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpCleanroomEngineReset();
+            return FALSE;
+        }
+        original_missile_select = (MissileSelectFunction)(
+            cafu_missile_select_hook.trampoline
+        );
+        original_position_transform_update =
+            (PositionTransformUpdateFunction)(
+                game_base + RVA_POSITION_TRANSFORM_UPDATE
+            );
+        if (!SudekiMpInstallRelativeCallHook(
+                &cafu_position_transform_hook,
+                game_base + RVA_MISSILE_PRESENTATION_TRANSFORM_CALL,
+                original_position_transform_update,
+                guard_cafu_position_transform)) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_missile_presentation_guard_install "
+                "status=rejected win32_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpCleanroomEngineReset();
+            return FALSE;
+        }
+        if (!SudekiMpInstallInlineHook(
+                &cafu_position_transform_entry_hook,
+                game_base + RVA_POSITION_TRANSFORM_UPDATE,
+                position_transform_update_entry,
+                sizeof(position_transform_update_entry),
+                guard_cafu_position_transform_entry)) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_position_transform_entry_guard_install "
+                "status=rejected win32_error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpCleanroomEngineReset();
+            return FALSE;
+        }
+        original_position_transform_update =
+            (PositionTransformUpdateFunction)(
+                cafu_position_transform_entry_hook.trampoline
+            );
+        SudekiMpLogWrite(
+            "cleanroom_engine event=cafu_missile_trace_install "
+            "status=success vtable_slot_rva=0x002d4cdc "
+            "target_rva=0x000c7140 select_entry_rva=0x000c6de0 "
+            "select_hook_kind=inline transform_call_rva=0x00136b36 "
+            "transform_entry_rva=0x00110d40 "
+            "transform_guard=probe_only\r\n"
+        );
+    }
+    cafu_probe_spawn_attempted = FALSE;
+    cafu_player_one_confirmed = FALSE;
+    cafu_player_one_rotation_attempts = 0u;
+    cafu_weapon_inventory_logged = FALSE;
+    cafu_weapon_gate_log = 0u;
+    cafu_weapon_model_patched = FALSE;
+    cafu_weapon_model_uses_fallback = FALSE;
+    cafu_weapon_model_item = NULL;
+    cafu_weapon_preload_requested = FALSE;
+    cafu_weapon_model_ready = FALSE;
+    cafu_weapon_preload_started_at = 0u;
+    cafu_missile_model_name_initialized = FALSE;
+    cafu_missile_model_preload_requested = FALSE;
+    cafu_missile_model_ready = FALSE;
+    cafu_missile_model_patch_count = 0u;
+    ZeroMemory(&saved_cafu_weapon_model, sizeof(saved_cafu_weapon_model));
+    ZeroMemory(&applied_cafu_weapon_model, sizeof(applied_cafu_weapon_model));
+    ZeroMemory(&cafu_weapon_preload, sizeof(cafu_weapon_preload));
+    ZeroMemory(&cafu_missile_model_name, sizeof(cafu_missile_model_name));
+    ZeroMemory(
+        &cafu_missile_model_preload,
+        sizeof(cafu_missile_model_preload)
+    );
+    ZeroMemory(
+        cafu_missile_model_patches,
+        sizeof(cafu_missile_model_patches)
+    );
     no_sp_needed_flag = game_base + RVA_NO_SP_NEEDED_FLAG;
     no_ssp_needed_flag = game_base + RVA_NO_SSP_NEEDED_FLAG;
     saved_no_sp_needed = *no_sp_needed_flag;
     saved_no_ssp_needed = *no_ssp_needed_flag;
     resource_flags_captured = TRUE;
-    SudekiMpLogWrite(
+    SudekiMpLogFormat(
         "cleanroom_engine event=initialize status=success "
         "player_spawn_rva=0x000b1b00 player_remove_rva=0x000b23a0 "
         "entity_spawn_rva=0x000b20d0 entity_despawn_rva=0x000b2300 "
@@ -973,7 +2840,8 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
         "fill_inventory_rva=0x000204d0 "
         "spirit_strike_enable_rva=0x000113a0 "
         "character_stats_rvas=0x000c1270,0x000c1350 "
-        "set_weapon_rva=0x000d8790\r\n"
+        "set_weapon_rva=0x000d8790 cafu_probe=%s\r\n",
+        cafu_probe_requested ? "requested" : "disabled"
     );
     return TRUE;
 }
@@ -1312,13 +3180,47 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
     void *manager;
     BOOL enabled;
     float current;
+    float cafu_position[3];
 
     if (game_base == NULL || !SudekiMpCleanroomEngineWorldReady()) {
         return;
     }
     (void)prepare_training_inventory();
     (void)prepare_spirit_strikes();
+    if (cafu_probe_requested) {
+        (void)prepare_cafu_weapon_model();
+        (void)prepare_cafu_missile_models();
+    }
+    if (cafu_probe_requested && !cafu_probe_spawn_attempted &&
+        cafu_weapon_model_ready && cafu_missile_model_ready &&
+        !SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_CAFU) &&
+        SudekiMpCleanroomEngineActorPosition(
+            SUDEKIMP_CLEANROOM_AILISH,
+            cafu_position)) {
+        cafu_position[0] += 2.0f;
+        cafu_probe_spawn_attempted = SudekiMpCleanroomEngineSpawnActor(
+            SUDEKIMP_CLEANROOM_CAFU,
+            cafu_position
+        );
+        SudekiMpLogFormat(
+            "cleanroom_engine event=cafu_probe phase=runtime_spawn "
+            "status=%s position_bits=%08lx,%08lx,%08lx\r\n",
+            cafu_probe_spawn_attempted ? "returned" : "pending",
+            (unsigned long)float_bits(cafu_position[0]),
+            (unsigned long)float_bits(cafu_position[1]),
+            (unsigned long)float_bits(cafu_position[2])
+        );
+    }
     initialize_present_actors();
+    if (cafu_probe_requested) {
+        (void)prepare_cafu_missile_models();
+        inspect_cafu_missile_manager_state();
+        if (cafu_missile_model_ready) {
+            maintain_cafu_player_one();
+            maintain_cafu_autofire();
+            trace_cafu_weapon_presentation();
+        }
+    }
 
     if (get_ssp == NULL || set_ssp == NULL ||
         !SudekiMpCleanroomEngineInfiniteSpirit(&enabled) || !enabled) {
@@ -1346,8 +3248,32 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
 
 void SudekiMpCleanroomEngineReset(void) {
     void **manager_global;
+    SudekiMpResourceName *current_cafu_model;
+    SudekiMpCafuMissileModelPatch *missile_patch;
+    unsigned int missile_patch_index;
 
     cancel_ranged_prime();
+    if (cafu_exception_handler != NULL) {
+        (void)RemoveVectoredExceptionHandler(cafu_exception_handler);
+        cafu_exception_handler = NULL;
+    }
+    (void)SudekiMpRestoreInlineHook(&cafu_position_transform_entry_hook);
+    (void)SudekiMpRestoreRelativeCallHook(&cafu_position_transform_hook);
+    (void)SudekiMpRestoreInlineHook(&cafu_missile_select_hook);
+    (void)SudekiMpRestorePointerHook(&cafu_missile_launch_hook);
+    original_missile_launch = NULL;
+    original_missile_select = NULL;
+    original_position_transform_update = NULL;
+    cafu_missile_launch_sequence = 0u;
+    last_cafu_missile_selected = NULL;
+    last_cafu_missile_weapon = NULL;
+    last_cafu_guarded_position = NULL;
+    cafu_guard_skip_count = 0u;
+    cafu_autofire_requested = FALSE;
+    cafu_autofire_sent = FALSE;
+    cafu_autofire_ready_at = 0u;
+    cafu_weapon_presentation_last_tick = 0u;
+    cafu_weapon_presentation_sample_count = 0u;
     if (game_base != NULL && spirit_strike_unlocks_captured &&
         saved_spirit_strike_manager != NULL) {
         manager_global =
@@ -1371,6 +3297,53 @@ void SudekiMpCleanroomEngineReset(void) {
             *no_ssp_needed_flag = saved_no_ssp_needed;
         }
     }
+    if (cafu_weapon_model_patched && cafu_weapon_model_item != NULL) {
+        current_cafu_model = (SudekiMpResourceName *)(
+            cafu_weapon_model_item + 0x44u
+        );
+        if (writable_memory(current_cafu_model, sizeof(*current_cafu_model)) &&
+            memcmp(current_cafu_model, &applied_cafu_weapon_model,
+                sizeof(*current_cafu_model)) == 0) {
+            *current_cafu_model = saved_cafu_weapon_model;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_weapon_model_patch "
+                "status=restored item=%p identifier=%08lx "
+                "previous_policy=%s\r\n",
+                cafu_weapon_model_item,
+                (unsigned long)saved_cafu_weapon_model.identifier,
+                cafu_weapon_model_uses_fallback ?
+                    "visual_fallback" : "actual_w033_archive_resource"
+            );
+        } else {
+            SudekiMpLogWrite(
+                "cleanroom_engine event=cafu_weapon_model_patch "
+                "status=restore_skipped reason=ownership_changed\r\n"
+            );
+        }
+    }
+    for (missile_patch_index = 0u;
+         missile_patch_index < cafu_missile_model_patch_count;
+         ++missile_patch_index) {
+        missile_patch = &cafu_missile_model_patches[missile_patch_index];
+        if (writable_memory(missile_patch->target, sizeof(*missile_patch->target)) &&
+            memcmp(
+                missile_patch->target,
+                &missile_patch->applied,
+                sizeof(missile_patch->applied)) == 0) {
+            *missile_patch->target = missile_patch->saved;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=cafu_missile_model_patch "
+                "status=restored model=%p identifier=%08lx\r\n",
+                missile_patch->target,
+                (unsigned long)missile_patch->saved.identifier
+            );
+        }
+    }
+    release_retained_reference(&cafu_missile_model_preload.reference);
+    if (cafu_missile_model_name_initialized) {
+        release_resource_name(&cafu_missile_model_name);
+    }
+    release_retained_reference(&cafu_weapon_preload.reference);
     game_base = NULL;
     internal_spawn_pc = NULL;
     remove_pc = NULL;
@@ -1391,6 +3364,9 @@ void SudekiMpCleanroomEngineReset(void) {
     get_character_number_stat = NULL;
     set_character_number_stat = NULL;
     set_weapon = NULL;
+    targeter_include_allies = NULL;
+    targeter_remove_allies = NULL;
+    targeter_is_targeting_allies = NULL;
     gel_pointer_to_entity = NULL;
     entity_pointer_cleanup = NULL;
     resource_name_from_text = NULL;
@@ -1408,6 +3384,35 @@ void SudekiMpCleanroomEngineReset(void) {
     spirit_strike_unlocks_captured = FALSE;
     saved_spirit_strike_unlocks = 0u;
     saved_spirit_strike_manager = NULL;
+    cafu_probe_requested = FALSE;
+    cafu_probe_spawn_attempted = FALSE;
+    cafu_player_one_confirmed = FALSE;
+    cafu_player_one_rotation_attempts = 0u;
+    cafu_weapon_inventory_logged = FALSE;
+    cafu_weapon_gate_log = 0u;
+    cafu_weapon_model_patched = FALSE;
+    cafu_weapon_model_uses_fallback = FALSE;
+    cafu_weapon_model_item = NULL;
+    cafu_weapon_preload_requested = FALSE;
+    cafu_weapon_model_ready = FALSE;
+    cafu_weapon_force_elco_model = FALSE;
+    cafu_weapon_preload_started_at = 0u;
+    cafu_missile_model_name_initialized = FALSE;
+    cafu_missile_model_preload_requested = FALSE;
+    cafu_missile_model_ready = FALSE;
+    cafu_missile_model_patch_count = 0u;
+    ZeroMemory(&saved_cafu_weapon_model, sizeof(saved_cafu_weapon_model));
+    ZeroMemory(&applied_cafu_weapon_model, sizeof(applied_cafu_weapon_model));
+    ZeroMemory(&cafu_weapon_preload, sizeof(cafu_weapon_preload));
+    ZeroMemory(&cafu_missile_model_name, sizeof(cafu_missile_model_name));
+    ZeroMemory(
+        &cafu_missile_model_preload,
+        sizeof(cafu_missile_model_preload)
+    );
+    ZeroMemory(
+        cafu_missile_model_patches,
+        sizeof(cafu_missile_model_patches)
+    );
     ZeroMemory(
         initialized_actor_entities,
         sizeof(initialized_actor_entities)
