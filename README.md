@@ -1,57 +1,230 @@
 # SudekiMP
 
-SudekiMP is a research and modding project intended to add local co-op, and eventually online co-op, to the GOG Windows release of *Sudeki*. It does not contain or redistribute the game, its installer, or its assets. A legitimate user-supplied copy is required.
+SudekiMP is a reverse-engineering and modding project that is extending the
+GOG Windows release of *Sudeki* into local co-op and, eventually,
+host-authoritative online co-op.
 
-## Current milestone
+The repository contains only original source code, documentation, signatures,
+configuration, hooks, and development tooling. It does **not** contain the
+game, installer, saves, extracted resources, or copyrighted game assets. A
+legitimate user-supplied copy is required.
 
-Phases 0 and 1 are complete for GOG build `50303954381148403`. The three-part offline installer is hashed, the installed game has a complete 394-file SHA256 manifest, separate read-only `vanilla` and writable `working` trees verify byte-for-byte, and the user-confirmed vanilla gameplay baseline passes under Wine.
+> [!IMPORTANT]
+> SudekiMP is an active research prototype, not a general-purpose release.
+> Individual systems have strong live proofs, but they are not yet integrated
+> into a complete co-op playthrough.
 
-The exact executable is `SUDEKI.exe` (uppercase), SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`. Ghidra 12.1.2 has imported and analyzed it. Milestones 1, 2, 4, and the local two-player movement proof (Milestone 5) are complete. Phase 5 fully traces Elco's Plasmatica task from `CSkill::Use` through animation, projectile, damage, and completion. See [docs/project-status.md](docs/project-status.md), [docs/combat.md](docs/combat.md), [docs/engine-functions.md](docs/engine-functions.md), [docs/milestones.md](docs/milestones.md), and [RECOVER.txt](RECOVER.txt).
+## Supported game build
 
-The Phase 4 foothold builds as PE32 `SudekiMP.dll` plus `SudekiMP.Launcher.exe`. The launcher safely rejects unknown builds. The DLL's disabled-by-default Quick Menu option has now been tested under Wine: live memory and menu-state capture confirmed normal world speed while the menu remained active, with no executable-file modification. See [docs/mod-loader.md](docs/mod-loader.md).
+SudekiMP currently supports one exact executable:
 
-An additional disabled-by-default Plasmatica diagnostic/control hook has passed synthetic and inert-image Wine preflight tests. Live captures established the complete task lifetime, including targeting teardown, actor-forward missile launch, native collision damage, task-lifetime invulnerability, and ordered recovery. Milestone 2 is confirmed: independent 2.0x caster and camera rates shorten the cast while preserving all four authored camera angles at normal world simulation. Phase 6 found Sudeki's native `ac_QuickSkill0..5` real-time activation route, and the user confirmed Elco's `5` through `9` keys through a guarded native state transition. Native consumable slots `1` through `4` remain functional without modification. Spirit Strike has no native direct input action, but a disabled-by-default prototype now resolves the front character's authored pair and launches the selected variant through Sudeki's native validation, UI/control transition, activation, and cleanup path. Its default `G` key is configurable through `[Bindings] SpiritStrike`; a live Ailish test on an `H` override completed normally. Phase 8 and Milestone 4 are also confirmed: vanilla transfers a nested AI-active mode with the controller target, while Sudeki's exported refcounted control APIs can independently disable and restore non-front Buki AI without moving that target. Milestone 5 proved simultaneous independent movement for Player 1 and AI-overridden Buki in one process. The next live battle confirmed independent Buki weak attacks through her own arbiter while another character remained Player 1, and a passive field trace confirmed native targeting state remained active with Buki's AI disabled. Following tests confirmed Buki's separate movement rotates with Player 1's shared camera and that an outward-only 10-unit boundary prevents further separation while preserving inward and sideways movement. The disabled midpoint prototype is now live-confirmed: Sudeki's camera followed the space between Ailish and independently moved Buki, then immediately restored native Ailish focus and Buki AI.
+| Property | Value |
+| --- | --- |
+| Store/build | GOG offline build `50303954381148403` |
+| Executable | `SUDEKI.exe` (PE32/x86) |
+| SHA256 | `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94` |
+| Static analysis | Ghidra 12.1.2 |
+| Primary runtime | Wine on Linux |
 
-The first dual-viewport proof is also live-confirmed: Sudeki rendered two side-by-side gameplay views in one process. Early render-replay versions exposed black shadow/visibility corruption, missing door geometry, a split title/menu, and frozen actors; those paths are rejected. The replacement compositor copies complete native frames after `EndScene`, alternates isolated Ailish/Buki render states, and presents clean character-centered views without replaying simulation, culling, shadows, doors, or callbacks. The integrated test combines those cameras with independently movable Buki and the separation guard. The Quit menu now renders once at full width over the frozen camera pair. Viewport-owned HUD names, HP, SP, companion order, and portrait art are also live-confirmed. Portraits use Sudeki's lower-level synchronous cycle-icon resource selector rather than its broader HUD refresh. Sudeki's internal Ailish/Buki party-order rotation is treated as presentation state, so it no longer destroys Camera 2, invalidates both caches, briefly unsplits the view, or pulses the minimap. The final log recorded one camera acquisition, active per-viewport HUD/portrait ownership, one tolerated order rotation, and no release/reacquire loop. Per-player camera input, aspect/projection tuning, additional shared menus/cinematics, and broader party combinations remain later work. Free-roam camera usability remains unresolved.
+The launcher refuses unknown executable builds. Runtime experiments are
+disabled by default, signature-gated, reversible, and do not patch the game on
+disk. The original vanilla installation remains separate from the writable
+research copy; the complete 394-file baseline is hashed and reproducible.
 
-The next integrated combat prototype is implemented and awaiting live confirmation. It keeps the shared simulation at native `1.0x`, tracks a combat context for each local player, exposes four character-owned native Skill Strike activations for Player 2 on `F1..F4`, and leaves Player 1 on Sudeki's native `5..8` route. The exact build has one proven global Skill Targeting node, so activations are rejected only while that target-selection window is occupied; executions may overlap after confirmation. Plasmatica's `SetRenderCamera` request is routed to the caster's cached viewport while the other viewport retains its normal player camera. Native skill availability, validation, SP cost, targeting, animation, projectiles, damage, protection, and cleanup remain unchanged. The new code passes PE32 build, ABI/state-machine tests, inline-hook restoration tests, and exact-image installation/restoration preflight; no live gameplay result is claimed yet.
+## Current status
 
-The first physical Player 2 controller route is now live-confirmed on Linux. Because the connected Razer Raiju Mobile is visible as `/dev/input/js0` but not as XInput or DirectInput inside Wine, `sudekimp-input-bridge` reads Linux joydev events and sends a versioned 32-byte state packet to the DLL over UDP loopback. The receiver accepts only `127.0.0.1`, neutralizes stale input after 250 ms, and never modifies a device or game file. In the focused test, keyboard/mouse retained Player 1 while the Raiju left stick independently moved AI-overridden Buki with analog speed. The log recorded stable character/arbiter ownership, clean stops, and two A-button weak-attack submissions. This castle save disallowed visible combat, so the A-to-attack animation still needs an arena check. Both sticks, triggers, D-pad, and standard buttons are transported. Player 2 selection is now party-generic: F10 targets the first non-front active party member, matching Camera 2, so Tal/Ailish and other two-character saves can use the same bridge; that broader pairing is awaiting live confirmation.
+### Confirmed foundations
 
-## Build on Linux
+- The GOG installer, installed files, executable, and vanilla Wine baseline
+  are documented and reproducible.
+- `SudekiMP.dll` and `SudekiMP.Launcher.exe` build as PE32 binaries on Linux
+  and safely reject an unsupported executable.
+- Sudeki's Quick Menu slowdown is understood. A live-only prototype keeps the
+  shared world simulation at `1.0x` while the menu remains logically active.
+- Elco's Plasmatica path is traced from skill activation through targeting,
+  animation, projectile launch, collision damage, invulnerability, and
+  cleanup. Per-skill actor and cinematic-camera rates can be changed without
+  changing global world time.
+- Native real-time Skill Strike activation, consumable slots, and direct
+  Spirit Strike activation have all been demonstrated.
+- Sudeki's native AI override/default-control exports can release and restore
+  an individual party member without removing that character's movement,
+  targeting, or attack systems.
+
+### Local co-op proofs
+
+- Keyboard/mouse Player 1 and a Linux-controller Player 2 can move and attack
+  independently in one Sudeki process.
+- Player 2 input is transported from Linux joydev through a small loopback UDP
+  bridge because the test controller is not exposed to Wine as XInput or
+  DirectInput.
+- A maximum-separation guard, shared midpoint camera, distinct render-only
+  cameras, and alternating dual-camera split-screen compositor all have live
+  proofs.
+- The compositor preserves native world rendering, culling, shadows, doors,
+  and simulation by caching one complete native frame per engine frame rather
+  than replaying the game renderer.
+- Viewport-owned character names, HP, SP, companion ordering, and native
+  portrait art are confirmed for the two-character prototype.
+- The native Quit interface renders once at full width over the preserved
+  split-screen background.
+- Skills and Spirit Strikes can leave the other player's simulation and
+  movement active at normal world speed. Camera containment and observer
+  animation coverage remain incomplete for several moves.
+
+### Sudeki Together front end
+
+The New Game flow can now open a dedicated Sudeki Together roster page:
+
+1. Choose Single Player or Co-op.
+2. Assign distinct Player 1 and Player 2 characters.
+3. Select Ailish, Tal, Buki, or Elco.
+4. Persist the selected role contract in a sidecar profile.
+5. Wait for a selected character when the story has not added them yet.
+
+The page reuses Sudeki's native title fade, font submission, and four resident
+character-portrait textures. No portrait file is extracted or committed. The
+four-card presentation, Back navigation, duplicate-role rejection, cleanup,
+and return to native New Game flow work.
+
+The critical remaining validation is the handoff from a saved roster contract
+to gameplay ownership. A Tal-only opening must remain native until Ailish joins
+the party, then atomically bind controller input, AI ownership, HUD, and
+cameras to the locked roles. The implementation scaffolding exists, but that
+Tal-to-Ailish story transition still requires end-to-end live acceptance.
+
+### Cleanroom and research tools
+
+- Sudeki's shipped `testroom` can start with Ailish and expose an F8 research
+  menu for party members, Training Dummy, combat mode, camera mode, infinite
+  resources, and split-screen Player 2.
+- The F7 traversal prototype distinguishes persistent worlds from temporary
+  interiors and uses Sudeki's native `SetZoneNOW` and
+  `EnterTemporaryZone` paths. It records actor-specific arrival anchors and
+  fails closed for unknown destinations instead of inventing coordinates.
+- The orange story-intro crash was traced to repeated accelerator-resource
+  loading. An exact-build cache now lets the complete intro play normally.
+- Cafu was confirmed as an unfinished Elco-derived developer variant, not a
+  fifth complete party archetype. His native fire crash is contained, and an
+  Elco pistol visual attaches correctly, but the missing projectile visual and
+  malformed Cafu pistol remain asset-completion/SudekiForge work.
+
+### Latest confirmed encounter: Talos
+
+The natural final-battle transition normally collapses the party to Tal. The
+current research mode restores Ailish, Buki, and Elco through Sudeki's native
+party lifecycle and returns them to native AI control.
+
+The companions originally attacked Talos's clones but ignored the real boss.
+Static and live analysis found the exact cause: the shared AI candidate
+validator rejects AI-unit type `3` when an authored request bit is set. Real
+Talos is type `3`; his clones are type `1`.
+
+The accepted prototype clears that one request bit only in a temporary stack
+copy, only for a restored retail companion evaluating the exact live real
+Talos candidate. It does not change Talos, clone behavior, factions, target
+pointers, damage, or persistent AI state. Live acceptance confirmed Ailish,
+Buki, and Elco attack both the real Talos and his clones.
+
+## Integration frontier
+
+The project has proven the engine rails needed for local co-op, but the next
+work is integration rather than adding more isolated features:
+
+1. Validate roster lock-in through the real Tal-only-to-Ailish party arrival.
+2. Confirm HUD, movement, camera, input, and AI ownership survive every role
+   bind and party/level reconstruction.
+3. Finish visible Player 2 locomotion during Pure Land and complete one
+   uninterrupted two-player combat encounter.
+4. Finish skill-camera startup, cinematic, and restoration containment.
+5. Resolve ranged observer presentation: full-body locomotion, firing, aim,
+   weapon attachment, and vanilla-compatible first-person-only reloads.
+6. Build direct combat loadouts before attempting full per-player Quick Menu
+   UI/state virtualization. Sudeki's Quick Menu is currently a global payload.
+7. Add an optional shared-focus camera alongside split-screen.
+8. Generalize doors, party transitions, cutscenes, quests, and scripted world
+   progression.
+9. Expand to three or four local players only after two-player play is stable.
+10. Begin host-authoritative networking only after the local simulation and
+    ownership model is reliable.
+
+Known global or shared systems include Skill Targeting, Spirit Strike power,
+Quick Menu state, some cinematic cameras and post-processing histories, and
+parts of HUD/input presentation. They must be virtualized deliberately; the
+project will not synchronize arbitrary process memory between machines.
+
+## Build and verify on Linux
 
 ```bash
 ./tools/build-linux.sh
 ./tools/run-wine.sh --check
-./tools/run-wine.sh --windowed
 ```
 
-Build output is ignored under `build/mingw32/bin/`. The scripts use the per-user MinGW-w64 Flatpak SDK and the dedicated Sudeki Wine prefix by default.
+The build uses the configured MinGW-w64 environment and produces ignored
+artifacts under `build/mingw32/bin/`.
 
-To resume research without accidentally using the three-save offline prefix:
+For the dedicated working game and research saves:
 
 ```bash
+./tools/continue-research.sh --check
 ./tools/continue-research.sh --safe
-./tools/continue-research.sh --cleanroom
-./tools/continue-research.sh --test-arena
-./tools/continue-research.sh --trace
-./tools/continue-research.sh --second-player-attack-test
-./tools/continue-research.sh --second-player-camera-movement-test
-./tools/continue-research.sh --second-player-separation-test
-./tools/continue-research.sh --shared-group-camera-test
-./tools/continue-research.sh --split-screen-render-test
-./tools/continue-research.sh --viewport-hud-test
-./tools/continue-research.sh --controller-bridge-test
-./tools/continue-research.sh --realtime-skill-coop-test
-./tools/continue-research.sh --speed-test 2.0
-./tools/continue-research.sh --spirit-strike-test
-./tools/continue-research.sh --spirit-strike-test H
 ```
 
-The resume helper requires the 11-slot research save directory, rebuilds and verifies the exact supported executable, prints the current checkpoint and next targets, and restores the generated configuration to disabled defaults when the run ends. `--cleanroom` (also available through the older `--test-arena` alias) passes Sudeki's shipped `-Level testroom -DT 1 -Ailish 1` startup options. Ailish is the lead; F8 opens the cleanroom-only party/dummy, combat/camera, infinite-resource, and optional split-screen Player 2 controls. The cleanroom's right-side badge reports `P2 READY` only when a second character is independently controlled and the Razer/Linux input bridge is live. Once the native managers are ready, the cleanroom also fills Sudeki's developer inventory, unlocks all party Spirit Strikes, repairs missing maximum HP/SP values, and equips a character's starter weapon only when its native weapon slot is empty. This does not extract, repack, or alter the game's archive. The compositor test temporarily changes native anti-aliasing to `0` and restores its original numeric value when the game exits. `--controller-bridge-test` starts and stops only the repository-built Linux helper; override `/dev/input/js0` with `SUDEKIMP_INPUT_DEVICE=/dev/input/jsN` if needed. `--speed-test` is an explicit reproduction mode, not the default balance configuration.
+Useful focused modes include:
 
-Research launches now use Sudeki's native windowed option so the game remains a normal desktop window after focus changes. They also run Wine through this host's existing `obs-gamecapture`/OBSVkCapture integration—the same prefix command used by its Lutris games—so the Flatpak OBS **Game Capture** source can receive Sudeki's OpenGL frames. **Window Capture (PipeWire)** remains a fallback. See [docs/recording.md](docs/recording.md).
+```bash
+./tools/continue-research.sh --cleanroom
+./tools/continue-research.sh --controller-bridge-test
+./tools/continue-research.sh --realtime-skill-coop-test
+./tools/continue-research.sh --zone-traversal-test
+./tools/continue-research.sh --talos-party-test
+```
+
+Run `./tools/continue-research.sh --help` for the complete research-mode list.
+Focused modes temporarily generate their required configuration and restore
+the checked-in disabled defaults when the run ends.
+
+Use the emergency stop helper if a live experiment stalls:
+
+```bash
+./tools/stop-sudeki.sh
+```
+
+## OBS recording
+
+Research launches use Sudeki's native windowed option and, by default, start
+Wine through the host's `obs-gamecapture`/OBSVkCapture hook. Because Sudeki is
+PE32, both the 32-bit capture hook and the OBSVkCapture source are required.
+
+1. Start OBS before Sudeki.
+2. Add the OBSVkCapture **Game Capture** source.
+3. Launch through `continue-research.sh`.
+4. Confirm the source receives the Sudeki texture before recording.
+
+Set `SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true` only when capture injection must be
+disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
+
+## Documentation map
+
+- [RECOVER.txt](RECOVER.txt) — operational checkpoint and safe resume notes
+- [docs/project-status.md](docs/project-status.md) — planning status and open
+  acceptance work
+- [docs/milestones.md](docs/milestones.md) — milestone evidence and status
+- [docs/research-log.md](docs/research-log.md) — chronological experiments,
+  failures, and confirmations
+- [docs/combat.md](docs/combat.md) — combat, skills, timing, and protection
+- [docs/cleanroom.md](docs/cleanroom.md) — native testroom harness
+- [docs/engine-functions.md](docs/engine-functions.md) — RVAs, ABIs, signatures,
+  and confidence
+- [docs/structures.md](docs/structures.md) — reverse-engineered structures
+- [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
+- [docs/recording.md](docs/recording.md) — windowed Wine and OBS capture
+- [docs/sync.md](docs/sync.md) — private development mirror
 
 ## Repository policy
 
-Only original source, documentation, signatures, configuration, hooks, and tooling belong here. User-supplied installers, installed game files, archive contents, memory dumps containing game data, and other copyrighted assets must remain outside version control.
+Do not commit or redistribute Sudeki installers, executables, archives,
+extracted assets, saves, memory dumps containing game data, or Wine prefixes.
+Keep the user-supplied vanilla tree read-only and run experiments against the
+dedicated working copy. Reverse-engineered names and structures must remain
+isolated and correctable as the engine model improves.
