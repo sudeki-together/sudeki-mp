@@ -1660,13 +1660,17 @@ static BOOL inspect_cafu_inventory_weapon(void) {
     return TRUE;
 }
 
-static BOOL request_cafu_weapon_model(
+static BOOL __attribute__((noinline)) request_cafu_weapon_model(
     const SudekiMpResourceName *resource_name
 ) {
     void **manager_global;
     void *manager;
     void *function;
+    void *output;
     void *result;
+    uint32_t name_kind;
+    uint32_t name_identifier;
+    uint32_t *name_text;
     BOOL entry_matches;
     BOOL global_readable;
     BOOL manager_readable;
@@ -1710,21 +1714,28 @@ static BOOL request_cafu_weapon_model(
         return FALSE;
     }
     function = game_base + RVA_RESOURCE_LOOKUP;
+    output = &cafu_weapon_preload;
+    name_kind = resource_name->encoded_kind;
+    name_identifier = resource_name->identifier;
+    name_text = resource_name->text_reference;
     ZeroMemory(&cafu_weapon_preload, sizeof(cafu_weapon_preload));
-    result = function;
     __asm__ volatile(
-        "pushl 8(%[name])\n\t"
-        "pushl 4(%[name])\n\t"
-        "pushl 0(%[name])\n\t"
+        "pushl %[name_text]\n\t"
+        "pushl %[name_identifier]\n\t"
+        "pushl %[name_kind]\n\t"
         "pushl %[manager]\n\t"
         "movl %[output], %%esi\n\t"
         "xorl %%ecx, %%ecx\n\t"
         "xorl %%edx, %%edx\n\t"
+        "movl %[function], %%eax\n\t"
         "call *%%eax"
-        : "+a"(result)
-        : [name] "r"(resource_name),
-          [manager] "r"(manager),
-          [output] "r"(&cafu_weapon_preload)
+        : "=a"(result)
+        : [name_text] "m"(name_text),
+          [name_identifier] "m"(name_identifier),
+          [name_kind] "m"(name_kind),
+          [manager] "m"(manager),
+          [output] "m"(output),
+          [function] "m"(function)
         : "ecx", "edx", "esi", "memory", "cc"
     );
     cafu_weapon_preload_requested = TRUE;
@@ -1909,10 +1920,11 @@ static BOOL patch_cafu_missile_model_record(
     return TRUE;
 }
 
-static BOOL request_cafu_missile_model(void) {
+static BOOL __attribute__((noinline)) request_cafu_missile_model(void) {
     void **manager_global;
     void *manager;
     void *function;
+    void *output;
     void *result;
 
     if (cafu_missile_model_preload_requested) {
@@ -1935,20 +1947,24 @@ static BOOL request_cafu_missile_model(void) {
         &cafu_missile_model_preload,
         sizeof(cafu_missile_model_preload)
     );
-    result = function;
+    output = &cafu_missile_model_preload;
     __asm__ volatile(
-        "pushl 8(%[name])\n\t"
-        "pushl 4(%[name])\n\t"
-        "pushl 0(%[name])\n\t"
+        "pushl %[name_text]\n\t"
+        "pushl %[name_identifier]\n\t"
+        "pushl %[name_kind]\n\t"
         "pushl %[manager]\n\t"
         "movl %[output], %%esi\n\t"
         "xorl %%ecx, %%ecx\n\t"
         "xorl %%edx, %%edx\n\t"
+        "movl %[function], %%eax\n\t"
         "call *%%eax"
-        : "+a"(result)
-        : [name] "r"(&cafu_missile_model_name),
-          [manager] "r"(manager),
-          [output] "r"(&cafu_missile_model_preload)
+        : "=a"(result)
+        : [name_text] "m"(cafu_missile_model_name.text_reference),
+          [name_identifier] "m"(cafu_missile_model_name.identifier),
+          [name_kind] "m"(cafu_missile_model_name.encoded_kind),
+          [manager] "rm"(manager),
+          [output] "m"(output),
+          [function] "m"(function)
         : "ecx", "edx", "esi", "memory", "cc"
     );
     cafu_missile_model_preload_requested = TRUE;

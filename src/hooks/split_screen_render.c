@@ -2252,7 +2252,7 @@ static uint8_t *current_spirit_motion_blur_effect(void) {
     return motion_blur_effect;
 }
 
-static void *create_spirit_history_surface(void) {
+static void *__attribute__((noinline)) create_spirit_history_surface(void) {
     void *wrapper = NULL;
     void *surface = NULL;
     UINT width = frame_cache_description.width;

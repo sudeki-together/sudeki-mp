@@ -121,7 +121,7 @@ static void log_skill_readiness(
     );
 }
 
-static void set_native_ui_active(BOOL active) {
+static void __attribute__((noinline)) set_native_ui_active(BOOL active) {
     void *ui_manager;
     void *function;
 
