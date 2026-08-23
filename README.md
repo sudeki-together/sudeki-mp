@@ -190,6 +190,26 @@ Run `./tools/continue-research.sh --help` for the complete research-mode list.
 Focused modes temporarily generate their required configuration and restore
 the checked-in disabled defaults when the run ends.
 
+## Build and run on Windows
+
+Windows does not require Wine. The supported source-build path uses MSYS2's
+32-bit `MINGW32` GCC environment because Sudeki and the injected DLL are PE32
+and the low-level hooks use GNU calling-convention and inline-assembly
+extensions.
+
+The repository now provides a checked build helper and a PowerShell installer:
+
+```text
+tools/build-windows.sh
+tools/install-windows.ps1
+```
+
+The installer verifies the exact GOG executable hash and copies only the
+launcher, DLL, and configuration into a removable `SudekiMP` subdirectory. It
+does not modify or redistribute the game. See
+[docs/windows-build.md](docs/windows-build.md) for the complete setup,
+preflight, launch, limitations, and eventual binary-release path.
+
 Use the emergency stop helper if a live experiment stalls:
 
 ```bash
@@ -224,6 +244,10 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
   and confidence
 - [docs/structures.md](docs/structures.md) — reverse-engineered structures
 - [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
+- [docs/windows-build.md](docs/windows-build.md) — native Windows build,
+  validation, installation, and launch
+- [docs/windows-agent-handoff.md](docs/windows-agent-handoff.md) — bounded
+  native-Windows agent scope and acceptance evidence
 - [docs/recording.md](docs/recording.md) — windowed Wine and OBS capture
 - [docs/sync.md](docs/sync.md) — private development mirror
 
