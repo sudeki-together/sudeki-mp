@@ -8,6 +8,7 @@
 #include "hooks/quick_skill_input.h"
 #include "hooks/spirit_strike_input.h"
 #include "hooks/split_screen_render.h"
+#include "hooks/talos_defense_trace.h"
 
 #include <windows.h>
 #include <stdint.h>
@@ -30,6 +31,8 @@ enum {
     RVA_SPIRIT_STRIKE_ACTIVATE = 0x0000fba0u,
     RVA_CHARACTER_INPUT_HANDLER = 0x000277b0u,
     RVA_CHARACTER_INPUT_VTABLE_SLOT = 0x002c9f84u,
+    RVA_APPLY_DAMAGE = 0x000d21d0u,
+    RVA_COLLISION_DAMAGE = 0x00138870u,
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
@@ -515,6 +518,21 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
+    if (!SudekiMpInstallTalosDefenseTrace((HMODULE)image)) {
+        fprintf(stderr, "Talos defense trace rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallCharacterSwitchTrace();
+        SudekiMpUninstallSpiritStrikeInput();
+        SudekiMpUninstallQuickSkillInputTrace();
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (image[RVA_APPLY_DAMAGE] != 0xe9u ||
+        image[RVA_COLLISION_DAMAGE] != 0xe9u) {
+        fputs("FAIL: Talos defense inline hooks were not installed\n", stderr);
+        ++failures;
+    }
     if (!SudekiMpInstallControlSeparation(
             (HMODULE)image,
             'J',
@@ -837,6 +855,14 @@ int wmain(int argc, wchar_t **argv) {
     if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
         image + RVA_CONTROLLER_UPDATE) {
         fputs("FAIL: controller update vtable slot was not restored\n", stderr);
+        ++failures;
+    }
+    SudekiMpUninstallTalosDefenseTrace();
+    if (memcmp(image + RVA_APPLY_DAMAGE,
+            "\x55\x8b\xec\x83\xe4\xf8", 6u) != 0 ||
+        memcmp(image + RVA_COLLISION_DAMAGE,
+            "\x83\xec\x78\x53\x55", 5u) != 0) {
+        fputs("FAIL: Talos defense inline hooks were not restored\n", stderr);
         ++failures;
     }
     SudekiMpUninstallCharacterSwitchTrace();

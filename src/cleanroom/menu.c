@@ -6,6 +6,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/split_screen_render.h"
+#include "hooks/talos_coop_balance.h"
 #include "hooks/zone_transition_trace.h"
 
 #include <stdint.h>
@@ -265,9 +266,10 @@ enum {
     MENU_MULTIPLAYER_INDEX = 7u,
     MENU_INFINITE_SP_INDEX = 8u,
     MENU_INFINITE_SPIRIT_INDEX = 9u,
-    MENU_COOP_READY_INDEX = 10u,
-    MENU_CLOSE_INDEX = 11u,
-    MENU_ITEM_COUNT = 12u,
+    MENU_INFINITE_JETPACK_INDEX = 10u,
+    MENU_COOP_READY_INDEX = 11u,
+    MENU_CLOSE_INDEX = 12u,
+    MENU_ITEM_COUNT = 13u,
     MENU_TEXTURE_WIDTH = 640u,
     MENU_TEXTURE_HEIGHT = 480u,
     ROSTER_BACKDROP_WIDTH = 64u,
@@ -680,6 +682,8 @@ static BOOL infinite_sp;
 static BOOL infinite_sp_valid;
 static BOOL infinite_spirit;
 static BOOL infinite_spirit_valid;
+static BOOL infinite_jetpack_fuel;
+static BOOL infinite_jetpack_fuel_valid;
 static BOOL integrated_multiplayer_mode;
 static BOOL zone_traversal_mode;
 static unsigned int zone_traversal_page;
@@ -738,6 +742,10 @@ static const SudekiMpTraversalInterior traversal_interiors[] = {
 static BOOL roster_mode;
 static BOOL roster_locked;
 static BOOL roster_coop_profile;
+static BOOL roster_talos_tuning_enabled;
+static unsigned int roster_talos_health_scale;
+static unsigned int roster_talos_stagger_limit;
+static unsigned int roster_talos_stagger_window;
 static unsigned int roster_player_one;
 static unsigned int roster_player_two;
 static unsigned int roster_cursor;
@@ -817,7 +825,8 @@ enum {
     NATIVE_ROSTER_MODE = 1u,
     NATIVE_ROSTER_PLAYER_ONE = 2u,
     NATIVE_ROSTER_PLAYER_TWO = 3u,
-    NATIVE_ROSTER_CONFIRM = 4u
+    NATIVE_ROSTER_CONFIRM = 4u,
+    NATIVE_ROSTER_SETTINGS = 5u
 };
 
 static uint32_t float_bits(float value) {
@@ -1036,6 +1045,44 @@ static void roster_load_persistence(void) {
         roster_player_two = SUDEKIMP_CLEANROOM_TAL;
     }
     roster_coop_profile = _stricmp(mode, "Coop") == 0;
+    roster_talos_tuning_enabled = GetPrivateProfileIntA(
+        "TalosCoop", "Enabled", 0, roster_persistence_path) != 0;
+    /* The settings page must also work with an existing late-game save.  An
+     * explicit Talos tuning opt-in therefore establishes the sidecar's co-op
+     * profile even when an older build left Mode=Single behind.  Choosing the
+     * visible Single Player action below disables both values again. */
+    if (roster_talos_tuning_enabled) {
+        roster_coop_profile = TRUE;
+    }
+    roster_talos_health_scale = (unsigned int)GetPrivateProfileIntA(
+        "TalosCoop", "HealthScale", 2, roster_persistence_path);
+    roster_talos_stagger_limit = (unsigned int)GetPrivateProfileIntA(
+        "TalosCoop", "StaggerLimit", 10, roster_persistence_path);
+    roster_talos_stagger_window = (unsigned int)GetPrivateProfileIntA(
+        "TalosCoop", "StaggerWindowSeconds", 10,
+        roster_persistence_path);
+    if (roster_talos_health_scale < 1u ||
+        roster_talos_health_scale > 4u) {
+        roster_talos_health_scale = 2u;
+    }
+    if (roster_talos_stagger_limit != 6u &&
+        roster_talos_stagger_limit != 10u &&
+        roster_talos_stagger_limit != 14u &&
+        roster_talos_stagger_limit != 18u) {
+        roster_talos_stagger_limit = 10u;
+    }
+    if (roster_talos_stagger_window != 5u &&
+        roster_talos_stagger_window != 10u &&
+        roster_talos_stagger_window != 15u &&
+        roster_talos_stagger_window != 20u) {
+        roster_talos_stagger_window = 10u;
+    }
+    (void)SudekiMpTalosCoopBalanceConfigure(
+        roster_talos_tuning_enabled,
+        roster_coop_profile,
+        roster_talos_health_scale,
+        roster_talos_stagger_limit,
+        roster_talos_stagger_window);
     if (roster_coop_profile) {
         roster_locked = SudekiMpSplitScreenSetRosterTypes(
             roster_actor_type(roster_player_one),
@@ -1043,11 +1090,16 @@ static void roster_load_persistence(void) {
     }
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=loaded "
-        "path=%s p1=%s p2=%s mode=%s policy=sidecar_profile\r\n",
+        "path=%s p1=%s p2=%s mode=%s talos_tuning=%s "
+        "talos_health=%ux talos_stagger=%u/%us policy=sidecar_profile\r\n",
         roster_persistence_path,
         roster_actor_label(roster_player_one),
         roster_actor_label(roster_player_two),
-        roster_coop_profile ? "Coop" : "Single"
+        roster_coop_profile ? "Coop" : "Single",
+        roster_talos_tuning_enabled ? "on" : "off",
+        roster_talos_health_scale,
+        roster_talos_stagger_limit,
+        roster_talos_stagger_window
     );
 }
 
@@ -1061,13 +1113,38 @@ static void roster_save_persistence(void) {
         roster_actor_label(roster_player_two), roster_persistence_path);
     WritePrivateProfileStringA("Roster", "Mode",
         roster_coop_profile ? "Coop" : "Single", roster_persistence_path);
+    WritePrivateProfileStringA("TalosCoop", "Enabled",
+        roster_talos_tuning_enabled ? "1" : "0", roster_persistence_path);
+    {
+        char value[16];
+        wsprintfA(value, "%u", roster_talos_health_scale);
+        WritePrivateProfileStringA(
+            "TalosCoop", "HealthScale", value, roster_persistence_path);
+        wsprintfA(value, "%u", roster_talos_stagger_limit);
+        WritePrivateProfileStringA(
+            "TalosCoop", "StaggerLimit", value, roster_persistence_path);
+        wsprintfA(value, "%u", roster_talos_stagger_window);
+        WritePrivateProfileStringA("TalosCoop", "StaggerWindowSeconds",
+            value, roster_persistence_path);
+    }
+    (void)SudekiMpTalosCoopBalanceConfigure(
+        roster_talos_tuning_enabled,
+        roster_coop_profile,
+        roster_talos_health_scale,
+        roster_talos_stagger_limit,
+        roster_talos_stagger_window);
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=saved "
-        "path=%s p1=%s p2=%s mode=%s policy=sidecar_profile\r\n",
+        "path=%s p1=%s p2=%s mode=%s talos_tuning=%s "
+        "talos_health=%ux talos_stagger=%u/%us policy=sidecar_profile\r\n",
         roster_persistence_path,
         roster_actor_label(roster_player_one),
         roster_actor_label(roster_player_two),
-        roster_coop_profile ? "Coop" : "Single"
+        roster_coop_profile ? "Coop" : "Single",
+        roster_talos_tuning_enabled ? "on" : "off",
+        roster_talos_health_scale,
+        roster_talos_stagger_limit,
+        roster_talos_stagger_window
     );
 }
 
@@ -1887,6 +1964,8 @@ static unsigned int native_roster_title_text_width(const char *text) {
     if (strcmp(text, "SUDEKI TOGETHER") == 0) return 129u;
     if (strcmp(text, "Single Player") == 0) return 91u;
     if (strcmp(text, "Co-op") == 0) return 42u;
+    if (strcmp(text, "SudekiMP Settings") == 0) return 124u;
+    if (strcmp(text, "TALOS CO-OP SETTINGS") == 0) return 157u;
     if (strcmp(text, "ENTER SELECTS") == 0) return 108u;
     if (strcmp(text, "PLAYER 1 - CHOOSE YOUR HERO") == 0) return 213u;
     if (strcmp(text, "PLAYER 2 - CHOOSE YOUR HERO") == 0) return 213u;
@@ -1912,13 +1991,16 @@ static BOOL native_roster_submit_centered_title_text(
 
 static unsigned int native_roster_item_count(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
-        return 3u;
+        return 4u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
         return 4u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
         roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        return 5u;
+    }
+    if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
         return 5u;
     }
     return 0u;
@@ -2108,7 +2190,7 @@ static void native_roster_restore_vanilla_items(void *controller) {
 
 static void native_roster_submit_page(void) {
     static const char *const mode_labels[] = {
-        "Single Player", "Co-op", "Back"
+        "Single Player", "Co-op", "SudekiMP Settings", "Back"
     };
     static const char *const actor_labels[] = {"Ailish", "Tal", "Buki", "Elco"};
     /* The card texture uses its own centered 640-wide overlay.  Font-1 title
@@ -2119,6 +2201,10 @@ static void native_roster_submit_page(void) {
     };
     char confirm_player_one[28];
     char confirm_player_two[28];
+    char talos_tuning[28];
+    char talos_health[28];
+    char talos_stagger[28];
+    char talos_window[28];
     const char *actor_back_label = "Back";
     const char *const *labels = NULL;
     const char *heading = NULL;
@@ -2128,6 +2214,7 @@ static void native_roster_submit_page(void) {
     unsigned int alpha;
     unsigned int prompt_y;
     const char *confirm_labels[4];
+    const char *settings_labels[5];
 
     if (!roster_native_screen || roster_pending_controller == NULL) {
         return;
@@ -2136,7 +2223,7 @@ static void native_roster_submit_page(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
         heading = "SUDEKI TOGETHER";
         labels = mode_labels;
-        count = 3u;
+        count = 4u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE) {
         heading = "PLAYER 1 - CHOOSE YOUR HERO";
@@ -2160,6 +2247,24 @@ static void native_roster_submit_page(void) {
         heading = "CONFIRM CO-OP ROSTER";
         labels = confirm_labels;
         count = 4u;
+    }
+    else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
+        wsprintfA(talos_tuning, "Talos Tuning: %s",
+            roster_talos_tuning_enabled ? "ON" : "OFF");
+        wsprintfA(talos_health, "Health Scale: %ux",
+            roster_talos_health_scale);
+        wsprintfA(talos_stagger, "Armor Hits: %u",
+            roster_talos_stagger_limit);
+        wsprintfA(talos_window, "Armor Window: %us",
+            roster_talos_stagger_window);
+        settings_labels[0] = talos_tuning;
+        settings_labels[1] = talos_health;
+        settings_labels[2] = talos_stagger;
+        settings_labels[3] = talos_window;
+        settings_labels[4] = "Back";
+        heading = "TALOS CO-OP SETTINGS";
+        labels = settings_labels;
+        count = 5u;
     }
     if (labels == NULL || selection >= count) {
         return;
@@ -2248,7 +2353,8 @@ static void native_roster_refresh_screen(void *controller) {
 
 static const char *native_roster_selected_action(void) {
     static const char *const mode_actions[] = {
-        "SudekiMPSinglePlayer", "SudekiMPCoop", "SudekiMPRosterBack"
+        "SudekiMPSinglePlayer", "SudekiMPCoop", "SudekiMPSettings",
+        "SudekiMPRosterBack"
     };
     static const char *const p1_actions[] = {
         "SudekiMPP1Ailish", "SudekiMPP1Tal", "SudekiMPP1Buki",
@@ -2262,9 +2368,14 @@ static const char *native_roster_selected_action(void) {
         "SudekiMPRosterP1", "SudekiMPRosterP2", "SudekiMPRosterLock",
         "SudekiMPRosterBack"
     };
+    static const char *const settings_actions[] = {
+        "SudekiMPTalosToggle", "SudekiMPTalosHealth",
+        "SudekiMPTalosStagger", "SudekiMPTalosWindow",
+        "SudekiMPRosterBack"
+    };
 
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE &&
-        roster_native_selection < 3u) {
+        roster_native_selection < 4u) {
         return mode_actions[roster_native_selection];
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE &&
@@ -2278,6 +2389,10 @@ static const char *native_roster_selected_action(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM &&
         roster_native_selection < 4u) {
         return confirm_actions[roster_native_selection];
+    }
+    if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS &&
+        roster_native_selection < 5u) {
+        return settings_actions[roster_native_selection];
     }
     return NULL;
 }
@@ -2507,7 +2622,7 @@ static BOOL native_roster_navigation(
         (event != 6u && event != 7u)) {
         return FALSE;
     }
-    count = roster_native_screen_kind == NATIVE_ROSTER_MODE ? 3u :
+    count = roster_native_screen_kind == NATIVE_ROSTER_MODE ? 4u :
         (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM ? 4u : 5u);
     selection = roster_native_selection;
     if (count == 0u || count > NATIVE_ROSTER_ROW_COUNT || selection >= count) {
@@ -3111,10 +3226,17 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
+            roster_native_screen_kind = NATIVE_ROSTER_MODE;
+            roster_native_selection = 2u;
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
         return 1u;
     }
     if (_stricmp(action, "SudekiMPSinglePlayer") == 0) {
         roster_coop_profile = FALSE;
+        roster_talos_tuning_enabled = FALSE;
         roster_save_persistence();
         if (!native_roster_restore_original_menu(controller)) {
             SudekiMpLogWrite(
@@ -3149,6 +3271,44 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPSettings") == 0) {
+        roster_native_screen_kind = NATIVE_ROSTER_SETTINGS;
+        roster_native_selection = 0u;
+        native_roster_start_page_transition(FALSE);
+        native_roster_rebuild_from_native_menu(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPTalosToggle") == 0) {
+        roster_talos_tuning_enabled = !roster_talos_tuning_enabled;
+        if (roster_talos_tuning_enabled) {
+            roster_coop_profile = TRUE;
+        }
+        roster_save_persistence();
+        native_roster_refresh_screen(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPTalosHealth") == 0) {
+        roster_talos_health_scale = roster_talos_health_scale >= 4u ?
+            1u : roster_talos_health_scale + 1u;
+        roster_save_persistence();
+        native_roster_refresh_screen(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPTalosStagger") == 0) {
+        roster_talos_stagger_limit = roster_talos_stagger_limit == 6u ? 10u :
+            (roster_talos_stagger_limit == 10u ? 14u :
+            (roster_talos_stagger_limit == 14u ? 18u : 6u));
+        roster_save_persistence();
+        native_roster_refresh_screen(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPTalosWindow") == 0) {
+        roster_talos_stagger_window = roster_talos_stagger_window >= 20u ?
+            5u : roster_talos_stagger_window + 5u;
+        roster_save_persistence();
+        native_roster_refresh_screen(controller);
         return 1u;
     }
     if (_stricmp(action, "SudekiMPP1Ailish") == 0 ||
@@ -3342,6 +3502,7 @@ static void update_action_status(void) {
         first_person_mode_valid = FALSE;
         infinite_sp_valid = FALSE;
         infinite_spirit_valid = FALSE;
+        infinite_jetpack_fuel_valid = FALSE;
         multiplayer_active = FALSE;
         multiplayer_input_ready = FALSE;
         last_status_update = 0u;
@@ -3425,6 +3586,17 @@ static void update_action_status(void) {
         }
     } else if (infinite_spirit_valid) {
         infinite_spirit_valid = FALSE;
+        menu_texture_dirty = TRUE;
+    }
+    if (SudekiMpCleanroomEngineInfiniteJetpackFuel(&mode)) {
+        if (!infinite_jetpack_fuel_valid ||
+            infinite_jetpack_fuel != mode) {
+            infinite_jetpack_fuel = mode;
+            infinite_jetpack_fuel_valid = TRUE;
+            menu_texture_dirty = TRUE;
+        }
+    } else if (infinite_jetpack_fuel_valid) {
+        infinite_jetpack_fuel_valid = FALSE;
         menu_texture_dirty = TRUE;
     }
     if (integrated_multiplayer_mode) {
@@ -3834,6 +4006,22 @@ static void activate_selected_item(void) {
         }
         return;
     }
+    if (selected_item == MENU_INFINITE_JETPACK_INDEX) {
+        if (SudekiMpCleanroomEngineInfiniteJetpackFuel(&mode)) {
+            accepted = SudekiMpCleanroomEngineSetInfiniteJetpackFuel(!mode);
+        }
+        infinite_jetpack_fuel_valid =
+            SudekiMpCleanroomEngineInfiniteJetpackFuel(
+                &infinite_jetpack_fuel);
+        menu_texture_dirty = TRUE;
+        if (!accepted) {
+            SudekiMpLogWrite(
+                "cleanroom_menu event=infinite_jetpack_fuel "
+                "status=rejected\r\n"
+            );
+        }
+        return;
+    }
     if (selected_item == SUDEKIMP_CLEANROOM_AILISH ||
         selected_item > MENU_DUMMY_INDEX ||
         pending_actions[selected_item] != SUDEKIMP_PENDING_NONE) {
@@ -3994,6 +4182,27 @@ static BOOL roster_key(unsigned int slot, UINT key) {
     return rising;
 }
 
+static void clear_roster_resume_guard_after_gameplay_handoff(void) {
+    unsigned int actor;
+
+    if (!roster_resume_committed) {
+        return;
+    }
+    for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
+        if (!SudekiMpCleanroomEngineActorPresent(
+                (SudekiMpCleanroomActor)actor)) {
+            continue;
+        }
+        roster_resume_committed = FALSE;
+        roster_resume_controller = NULL;
+        SudekiMpLogFormat(
+            "cleanroom_menu event=native_roster state=resume_guard_cleared "
+            "reason=gameplay_actor_present actor=%s\r\n",
+            SudekiMpCleanroomActorLabel((SudekiMpCleanroomActor)actor));
+        return;
+    }
+}
+
 static void poll_roster_input(void) {
     unsigned int *selected = roster_cursor == 0u ?
         &roster_player_one : &roster_player_two;
@@ -4065,6 +4274,8 @@ void SudekiMpCleanroomMenuUpdate(void) {
     if (game_base == NULL) {
         return;
     }
+    SudekiMpTalosCoopBalanceService();
+    clear_roster_resume_guard_after_gameplay_handoff();
     if (zone_traversal_mode) {
         SudekiMpZoneTraversalService();
     }
@@ -5086,7 +5297,7 @@ static BOOL update_menu_texture(void *texture) {
         UINT32_C(0xffaab8c8), 2);
 
     for (index = 0u; index < MENU_ITEM_COUNT; ++index) {
-        int y = 94 + (int)index * 34;
+        int y = 88 + (int)index * 30;
         const char *label;
         const char *status;
         uint32_t status_color = UINT32_C(0xffb9c4d1);
@@ -5155,6 +5366,14 @@ static BOOL update_menu_texture(void *texture) {
                 (infinite_spirit ? "ENABLED" : "DISABLED") :
                 "UNAVAILABLE";
             if (infinite_spirit_valid && infinite_spirit) {
+                status_color = UINT32_C(0xff7cf29a);
+            }
+        } else if (index == MENU_INFINITE_JETPACK_INDEX) {
+            label = "INFINITE JETPACK";
+            status = infinite_jetpack_fuel_valid ?
+                (infinite_jetpack_fuel ? "ENABLED" : "DISABLED") :
+                "UNAVAILABLE";
+            if (infinite_jetpack_fuel_valid && infinite_jetpack_fuel) {
                 status_color = UINT32_C(0xff7cf29a);
             }
         } else if (index == MENU_COOP_READY_INDEX) {
@@ -6087,7 +6306,8 @@ static BOOL install_cleanroom_menu_internal(
     }
     if (!roster && !traversal &&
         (!SudekiMpCleanroomEngineSetInfiniteSp(TRUE) ||
-        !SudekiMpCleanroomEngineSetInfiniteSpirit(TRUE))) {
+        !SudekiMpCleanroomEngineSetInfiniteSpirit(TRUE) ||
+        !SudekiMpCleanroomEngineSetInfiniteJetpackFuel(TRUE))) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
     }
@@ -6134,6 +6354,8 @@ static BOOL install_cleanroom_menu_internal(
     infinite_sp_valid = TRUE;
     infinite_spirit = TRUE;
     infinite_spirit_valid = TRUE;
+    infinite_jetpack_fuel = TRUE;
+    infinite_jetpack_fuel_valid = TRUE;
     integrated_multiplayer_mode = integrated;
     roster_mode = roster;
     zone_traversal_mode = traversal;
@@ -6145,6 +6367,10 @@ static BOOL install_cleanroom_menu_internal(
     zone_traversal_transition_guard_until = 0u;
     roster_locked = FALSE;
     roster_coop_profile = FALSE;
+    roster_talos_tuning_enabled = FALSE;
+    roster_talos_health_scale = 2u;
+    roster_talos_stagger_limit = 10u;
+    roster_talos_stagger_window = 10u;
     roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
     roster_player_two = SUDEKIMP_CLEANROOM_TAL;
     roster_cursor = 0u;
@@ -6567,6 +6793,7 @@ void SudekiMpUninstallCleanroomMenu(void) {
     roster_native_screen = FALSE;
     roster_native_screen_kind = NATIVE_ROSTER_NONE;
     roster_native_selection = 0u;
+    SudekiMpTalosCoopBalanceReset();
     roster_confirm_input_armed = FALSE;
     roster_native_transition_started = 0u;
     roster_native_transition_from_title = FALSE;
@@ -6606,6 +6833,8 @@ void SudekiMpUninstallCleanroomMenu(void) {
     infinite_sp_valid = FALSE;
     infinite_spirit = FALSE;
     infinite_spirit_valid = FALSE;
+    infinite_jetpack_fuel = FALSE;
+    infinite_jetpack_fuel_valid = FALSE;
     integrated_multiplayer_mode = FALSE;
     zone_traversal_mode = FALSE;
     zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;

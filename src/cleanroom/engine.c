@@ -53,6 +53,13 @@ typedef float (__cdecl *GetSspFunction)(void);
 typedef void (__cdecl *SetSspFunction)(float value);
 typedef void (__cdecl *FillInventoryFunction)(void);
 typedef void (__cdecl *SpiritStrikeEnableFunction)(int identifier);
+typedef float (__attribute__((thiscall)) *ElcoGetFuelFunction)(
+    const void *elco_ability
+);
+typedef void (__attribute__((thiscall)) *ElcoSetFuelFunction)(
+    void *elco_ability,
+    float value
+);
 typedef float (__cdecl *GetCharacterNumberStatFunction)(
     const void *gel_pointer,
     const char *name
@@ -151,6 +158,8 @@ enum {
     RVA_SET_SSP = 0x0000f5c0u,
     RVA_FILL_INVENTORY = 0x000204d0u,
     RVA_SPIRIT_STRIKE_ENABLE = 0x000113a0u,
+    RVA_ELCO_GET_FUEL = 0x000cdfe0u,
+    RVA_ELCO_SET_FUEL = 0x000cdf30u,
     RVA_GET_CHARACTER_NUMBER_STAT = 0x000c1270u,
     RVA_SET_CHARACTER_NUMBER_STAT = 0x000c1350u,
     RVA_SET_WEAPON = 0x000d8790u,
@@ -205,6 +214,14 @@ enum {
     CONTROLLER_TARGET_OFFSET = 0x0248u,
     CAFU_PLAYER_ONE_MAX_ROTATIONS = 8u,
     SPIRIT_STRIKE_UNLOCKS_OFFSET = 0x00acu
+};
+
+static const uint8_t elco_get_fuel_entry[] = {
+    0xd9u, 0x41u, 0x6cu, 0xc3u
+};
+static const uint8_t elco_set_fuel_entry[] = {
+    0xd9u, 0x44u, 0x24u, 0x04u, 0x56u, 0x8bu, 0xf1u,
+    0xd9u, 0x56u, 0x68u, 0xd9u, 0x5eu, 0x6cu
 };
 
 static const uint8_t resource_name_from_text_entry[] = {
@@ -273,6 +290,8 @@ static GetSspFunction get_ssp;
 static SetSspFunction set_ssp;
 static FillInventoryFunction fill_inventory;
 static SpiritStrikeEnableFunction spirit_strike_enable;
+static ElcoGetFuelFunction elco_get_fuel;
+static ElcoSetFuelFunction elco_set_fuel;
 static GetCharacterNumberStatFunction get_character_number_stat;
 static SetCharacterNumberStatFunction set_character_number_stat;
 static SetWeaponFunction set_weapon;
@@ -293,6 +312,9 @@ static uint8_t saved_no_ssp_needed;
 static BOOL resource_flags_captured;
 static BOOL inventory_filled;
 static BOOL spirit_strikes_unlocked;
+static BOOL infinite_jetpack_fuel;
+static void *last_elco_ability;
+static BOOL elco_fuel_refill_logged;
 static BOOL spirit_strike_unlocks_captured;
 static uint8_t saved_spirit_strike_unlocks;
 static void *saved_spirit_strike_manager;
@@ -343,6 +365,31 @@ static unsigned int cafu_weapon_presentation_sample_count;
 static BOOL readable_memory(const void *pointer, size_t size);
 static BOOL writable_memory(const void *pointer, size_t size);
 static void *actor_pointer(SudekiMpCleanroomActor actor);
+
+static void *elco_ability_pointer(void) {
+    uint8_t *elco;
+    void *ability;
+    float maximum;
+    float current;
+
+    elco = (uint8_t *)actor_pointer(SUDEKIMP_CLEANROOM_ELCO);
+    if (!readable_memory(elco, 0x108u)) {
+        return NULL;
+    }
+    ability = *(void **)(elco + 0x104u);
+    if (!readable_memory(ability, 0x80u) ||
+        !writable_memory(ability, 0x80u)) {
+        return NULL;
+    }
+    maximum = *(const float *)((const uint8_t *)ability + 0x68u);
+    current = *(const float *)((const uint8_t *)ability + 0x6cu);
+    if (!isfinite(maximum) || !isfinite(current) || maximum <= 0.0f ||
+        maximum > 1000000.0f || current < -maximum ||
+        current > maximum * 2.0f) {
+        return NULL;
+    }
+    return ability;
+}
 static BOOL patch_cafu_missile_model_record(
     SudekiMpResourceName *model,
     uint8_t *combo,
@@ -2497,6 +2544,8 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     void *resolved_set_ssp = NULL;
     void *resolved_fill_inventory = NULL;
     void *resolved_spirit_strike_enable = NULL;
+    void *resolved_elco_get_fuel = NULL;
+    void *resolved_elco_set_fuel = NULL;
     void *resolved_get_character_number_stat = NULL;
     void *resolved_set_character_number_stat = NULL;
     void *resolved_set_weapon = NULL;
@@ -2583,6 +2632,16 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
             &resolved_spirit_strike_enable) ||
         !resolve_exact_export(
             game_module,
+            "?GetFuel@CElcoAbility@@QAEMXZ",
+            RVA_ELCO_GET_FUEL,
+            &resolved_elco_get_fuel) ||
+        !resolve_exact_export(
+            game_module,
+            "?SetFuel@CElcoAbility@@QAEXM@Z",
+            RVA_ELCO_SET_FUEL,
+            &resolved_elco_set_fuel) ||
+        !resolve_exact_export(
+            game_module,
             "?GetCharacterNumberStat@@YAMPBVGELPointer@@QBD@Z",
             RVA_GET_CHARACTER_NUMBER_STAT,
             &resolved_get_character_number_stat) ||
@@ -2628,7 +2687,15 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
         !matches_entry(
             (const uint8_t *)game_module + RVA_SET_UI_ACTIVE,
             set_ui_active_entry,
-            sizeof(set_ui_active_entry))) {
+            sizeof(set_ui_active_entry)) ||
+        !matches_entry(
+            (const uint8_t *)resolved_elco_get_fuel,
+            elco_get_fuel_entry,
+            sizeof(elco_get_fuel_entry)) ||
+        !matches_entry(
+            (const uint8_t *)resolved_elco_set_fuel,
+            elco_set_fuel_entry,
+            sizeof(elco_set_fuel_entry))) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
     }
@@ -2665,6 +2732,8 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     fill_inventory = (FillInventoryFunction)resolved_fill_inventory;
     spirit_strike_enable =
         (SpiritStrikeEnableFunction)resolved_spirit_strike_enable;
+    elco_get_fuel = (ElcoGetFuelFunction)resolved_elco_get_fuel;
+    elco_set_fuel = (ElcoSetFuelFunction)resolved_elco_set_fuel;
     get_character_number_stat =
         (GetCharacterNumberStatFunction)resolved_get_character_number_stat;
     set_character_number_stat =
@@ -2797,6 +2866,9 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
         );
     }
     cafu_probe_spawn_attempted = FALSE;
+    infinite_jetpack_fuel = FALSE;
+    last_elco_ability = NULL;
+    elco_fuel_refill_logged = FALSE;
     cafu_player_one_confirmed = FALSE;
     cafu_player_one_rotation_attempts = 0u;
     cafu_weapon_inventory_logged = FALSE;
@@ -3175,11 +3247,47 @@ BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled) {
+    if (enabled == NULL || game_base == NULL || elco_get_fuel == NULL ||
+        elco_set_fuel == NULL) {
+        return FALSE;
+    }
+    *enabled = infinite_jetpack_fuel;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
+    BOOL current;
+
+    enabled = enabled != FALSE;
+    if (game_base == NULL || elco_get_fuel == NULL || elco_set_fuel == NULL) {
+        return FALSE;
+    }
+    infinite_jetpack_fuel = enabled;
+    last_elco_ability = NULL;
+    elco_fuel_refill_logged = FALSE;
+    if (!SudekiMpCleanroomEngineInfiniteJetpackFuel(&current) ||
+        current != enabled) {
+        return FALSE;
+    }
+    if (enabled) {
+        SudekiMpCleanroomEngineMaintainResources();
+    }
+    SudekiMpLogFormat(
+        "cleanroom_engine event=infinite_jetpack_fuel "
+        "status=confirmed state=%s policy=refill_native_maximum\r\n",
+        enabled ? "enabled" : "disabled"
+    );
+    return TRUE;
+}
+
 void SudekiMpCleanroomEngineMaintainResources(void) {
     void **manager_global;
     void *manager;
     BOOL enabled;
     float current;
+    float maximum;
+    void *elco_ability;
     float cafu_position[3];
 
     if (game_base == NULL || !SudekiMpCleanroomEngineWorldReady()) {
@@ -3212,6 +3320,33 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
         );
     }
     initialize_present_actors();
+    if (infinite_jetpack_fuel && elco_get_fuel != NULL &&
+        elco_set_fuel != NULL) {
+        elco_ability = elco_ability_pointer();
+        if (elco_ability != last_elco_ability) {
+            last_elco_ability = elco_ability;
+            elco_fuel_refill_logged = FALSE;
+        }
+        if (elco_ability != NULL) {
+            maximum = *(const float *)((const uint8_t *)elco_ability + 0x68u);
+            current = elco_get_fuel(elco_ability);
+            if (isfinite(maximum) && isfinite(current) && maximum > 0.0f &&
+                current < maximum) {
+                elco_set_fuel(elco_ability, maximum);
+                if (!elco_fuel_refill_logged) {
+                    SudekiMpLogFormat(
+                        "cleanroom_engine event=infinite_jetpack_fuel "
+                        "action=refill ability=%p previous_bits=0x%08lx "
+                        "maximum_bits=0x%08lx\r\n",
+                        elco_ability,
+                        (unsigned long)float_bits(current),
+                        (unsigned long)float_bits(maximum)
+                    );
+                    elco_fuel_refill_logged = TRUE;
+                }
+            }
+        }
+    }
     if (cafu_probe_requested) {
         (void)prepare_cafu_missile_models();
         inspect_cafu_missile_manager_state();
@@ -3361,6 +3496,8 @@ void SudekiMpCleanroomEngineReset(void) {
     set_ssp = NULL;
     fill_inventory = NULL;
     spirit_strike_enable = NULL;
+    elco_get_fuel = NULL;
+    elco_set_fuel = NULL;
     get_character_number_stat = NULL;
     set_character_number_stat = NULL;
     set_weapon = NULL;
@@ -3381,6 +3518,9 @@ void SudekiMpCleanroomEngineReset(void) {
     resource_flags_captured = FALSE;
     inventory_filled = FALSE;
     spirit_strikes_unlocked = FALSE;
+    infinite_jetpack_fuel = FALSE;
+    last_elco_ability = NULL;
+    elco_fuel_refill_logged = FALSE;
     spirit_strike_unlocks_captured = FALSE;
     saved_spirit_strike_unlocks = 0u;
     saved_spirit_strike_manager = NULL;

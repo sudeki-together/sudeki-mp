@@ -79,6 +79,12 @@ The initialized values are `1.0f` at VA `0x00745F70` and `0.07f` at VA `0x006C40
 | `QuickMenuIsActive()` | `0x0009C330` | `0x0049C330` | Tests Quick Menu object bytes `+0xFC` and `+0x29` |
 | `QuickMenuClose()` | `0x0009C360` | `0x0049C360` | Dispatches close operations on the Quick Menu singleton |
 | `UIStartQuickMenu()` | `0x0009C3A0` | `0x0049C3A0` | Dispatches UI event `0x10` into the menu system |
+| `CElcoAbility::GetFuel()` | `0x000CDFE0` | `0x004CDFE0` | Returns current jetpack fuel from `this+0x6C` |
+| `CElcoAbility::SetFuel(float)` | `0x000CDF30` | `0x004CDF30` | Writes the supplied value to maximum `+0x68` and current `+0x6C`, then invokes the native presentation refresh |
+| `CElcoAbility::SetMaxFuel(float,bool)` | `0x000CDF80` | `0x004CDF80` | Writes maximum `+0x68` and optionally current `+0x6C` |
+| `CElcoAbility::SetFillupRate()` | `0x000CDFF0` | `0x004CDFF0` | Copies the configured fill rate `+0x70` into active rate `+0x7C` |
+| `CElcoAbility::SetEmptyRate()` | `0x000CE0C0` | `0x004CE0C0` | Copies the configured drain rate `+0x74` into active rate `+0x7C` |
+| `CElcoAbility::ResetFuel()` | `0x000CE110` | `0x004CE110` | Zeros active rate, current fuel, and maximum fuel |
 
 Named exports are evidence supplied by the PE, but the behavior descriptions above come from instruction-level inspection rather than names alone.
 
@@ -501,10 +507,34 @@ The opcode `0x27` binding fallback explains why rewriting PE export slots after 
 | `Possible_ApplyCollisionDamage` | `0x00138870` / `0x00538870` | Enforces the configured multiple-hit delay, checks target state, builds a `DamageStructure` containing damage, knockback, effect, and status data, then calls RVA `0x000DAB50` | High; provisional name |
 | `Possible_DispatchDamageStructure` | `0x000DAB50` / `0x004DAB50` | Applies target/state filters and routes an accepted `DamageStructure` to the target combat component at RVA `0x000D21D0` | High; provisional name |
 | `Possible_ApplyDamageToCharacter` | `0x000D21D0` / `0x004D21D0` | Applies mitigation and clamps the result, stores the resulting current HP at combat-data offset `+0x2C`, then handles hit reactions, status effects, and death follow-up | High for HP flow; provisional name and structure labels |
+| `Possible_UpdateKnockbackSession` | `0x000D2170` / `0x004D2170` | Receives whether the chosen hit reaction lies in ID range `0x2A..0x36`; starts/increments the configured session and sets the threshold flag once the previous count exceeds the authored limit | High for counter/flag behavior; provisional name |
 
 The `CMissile` vtable begins at VA `0x006D915C`. Movement-controller implementations used by missile initialization begin at RVAs `0x00187600` and `0x00187710`. The collision-damage component has RTTI and vtables at VAs `0x006D45D4`, `0x006D4614`, and `0x006D461C`. Entries that point to exported `HitEntity` at RVA `0x000A2900` resolve to a shared no-op/export thunk and are not evidence of damage delivery. The confirmed native chain instead reaches RVA `0x00138870` directly from RVA `0x00032A80`.
 
 Exact-build byte contexts for the three damage functions are recorded in `research/signatures/plasmatica-damage.md`.
+
+The Talos defense trace exact-gates the accepted receiver with bytes
+`55 8B EC 83 E4 F8` and the collision handler with
+`83 EC 78 53 55`. It observes the unchanged calls through inline trampolines.
+For Talos's authored limit `10`, `Possible_UpdateKnockbackSession` sets the
+threshold flag on qualifying reaction 11 because it compares the old count
+against the limit before incrementing.
+
+Focused live testing confirms the consequence. Tal's Blade Dance delivered
+15 packets of 465 damage. The first 11 selected reaction `0x2E`; the remaining
+four still reduced HP by 465 but selected no hit reaction while
+`CCombat+0x72 bit 0` remained set. After the 10-second session expired, the
+counter and flag cleared and a basic hit selected reaction `0x2A` normally.
+The arbiter invulnerability refcount remained zero throughout, classifying
+this boundary as anti-stagger/super armor rather than an iframe mechanism.
+In a follow-up live test, Blade Dance first left Talos at session count `11`
+with the threshold flag active. A Spirit Strike then dealt `9,296` damage and
+still selected reaction `0x2F` (`ANIMID_GETHIT_FRONT_MEGA`) without clearing
+the threshold. Talos's data maps that reaction to
+`A015_TALOS_GETHITFRONTUP.CLM:64`; the distinct authored floor-knockdown clip
+is mapped to reaction `0x2D`. Spirit Strike therefore bypasses ordinary
+post-threshold reaction suppression, but this capture does not establish that
+Talos enters a prone knockdown/get-up state.
 
 ## Skill targeting and launch handoff
 

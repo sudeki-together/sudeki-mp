@@ -43,6 +43,8 @@ add_library(SudekiMP SHARED
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
+    src/hooks/talos_coop_balance.c
+    src/hooks/talos_defense_trace.c
     src/loader/sudekimp.def
     ${SUDEKIMP_COMMON_SOURCES}
 )
@@ -61,6 +63,9 @@ set_source_files_properties(src/hooks/spirit_strike_input.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_source_files_properties(src/hooks/character_switch_trace.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(src/hooks/talos_defense_trace.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_source_files_properties(src/hooks/control_separation.c PROPERTIES
@@ -227,6 +232,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
+    src/hooks/talos_defense_trace.c
 )
 target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)
 target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE

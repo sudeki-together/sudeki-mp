@@ -189,3 +189,44 @@ This is a partial layout for the exact supported build. `CNewGameModelAnimation`
 | `+0x74` | target pointer | previous/newer list link | Creator writes the new target into the old head's `+0x74` | High |
 
 All offsets are exact-build facts. The midpoint prototype writes only the owned matrix and cached translation of a target it created through Sudeki's own manager; it does not reinterpret an existing `GameObjectTarget` as this type.
+
+## Partial `CElcoAbility` fuel state
+
+The live Elco actor stores its `CElcoAbility*` at `actor+0x104`. This ownership
+edge is used by the native fuel-crystal update at VA `0x0059C8C0` before it
+calls the exported fill/empty/max methods.
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x68` | `float` | maximum jetpack fuel | Written by `SetFuel` and `SetMaxFuel`; zeroed by `ResetFuel` | High |
+| `+0x6C` | `float` | current jetpack fuel | Returned by `GetFuel`; written by `SetFuel`; optionally written by `SetMaxFuel` | High |
+| `+0x70` | `float` | configured refill rate | Copied to active rate by `SetFillupRate` | High |
+| `+0x74` | `float` | configured drain rate | Copied to active rate by `SetEmptyRate` | High |
+| `+0x7C` | `float` | active fuel rate | Selected by fill/empty methods and zeroed by `ResetFuel` | High |
+
+The cleanroom infinite-fuel option validates the live actor/ability and finite
+current/maximum values on every maintenance pass. It uses the native setter
+and preserves the authored maximum instead of writing an arbitrary capacity.
+
+## Partial `CCombat` knockback-session state
+
+This is the exact supported-build layout used by the disabled-by-default
+Talos defense trace. `CCombat+0x10` points to the owning character.
+Three independent live Talos instances placed this embedded `CCombat` at
+`character+0xF64`; the co-op balance service verifies that owner link before
+writing any setting.
+
+| Offset | Type | Meaning | Evidence | Confidence |
+| ---: | --- | --- | --- | --- |
+| `+0x5C` | `uint32` | three packed 9-bit presentation/reaction IDs | Native reaction selection shifts/masks the three fields | High |
+| `+0x60` | `uint16` | authored qualifying-reaction limit | Loaded from `Num KnockBacks in Session`; Talos value is 10 | High |
+| `+0x64` | `float` | authored session duration | Loaded from `KnockBack Session Length(seconds)`; Talos value is 10.0 | High |
+| `+0x68` | `float` | active session timer | Loaded from `+0x64` on the first qualifying reaction | High |
+| `+0x70` | `uint16` | current qualifying-reaction count | Incremented only for reaction IDs `0x2A..0x36` | High |
+| `+0x72` | `uint8` flags | bit 3 qualifying-family active; bit 0 threshold tripped | Exact consumer VA `0x004D2170` | High |
+
+The threshold comparison uses the count before incrementing. Thus configured
+limit 10 trips bit 0 on reaction 11 within the same active session.
+Live Blade Dance testing confirmed the layout: count reached 11, bit 0 set,
+four later damage packets produced no reaction while still reducing HP, and
+both count and bit reset after the 10-second session expired.

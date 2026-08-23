@@ -87,6 +87,12 @@ character-portrait textures. No portrait file is extracted or committed. The
 four-card presentation, Back navigation, duplicate-role rejection, cleanup,
 and return to native New Game flow work.
 
+The same page now includes `SudekiMP Settings`. Its first bounded settings
+panel tunes the real Talos encounter for a locked co-op profile: explicit
+enable/disable, `1x`–`4x` maximum HP, stagger limits, and stagger-session
+duration. Settings persist in the existing sidecar. Vanilla values remain the
+default and Single Player never receives the co-op override.
+
 The critical remaining validation is the handoff from a saved roster contract
 to gameplay ownership. A Tal-only opening must remain native until Ailish joins
 the party, then atomically bind controller input, AI ownership, HUD, and

@@ -22,8 +22,8 @@ and remains the protected lead.
 - Escape: close the menu
 
 The entries are Tal, Buki, Elco, Ailish, Training Dummy, Combat Mode, Camera
-Mode, Split Screen P2, Infinite SP, Infinite Spirit, and Close. Ailish is shown
-as `LEAD LOCKED` and cannot be removed.
+Mode, Split Screen P2, Infinite SP, Infinite Spirit, Infinite Jetpack, and
+Close. Ailish is shown as `LEAD LOCKED` and cannot be removed.
 Playable characters use Sudeki's native `InternalSpawnPC`/`RemovePC` path so
 its party and formation systems keep ownership. Character names are
 constructed through Sudeki's own 12-byte, reference-backed `ResourceName`
@@ -44,6 +44,14 @@ also uses the native `GetSsp()`/`SetSsp()` route to keep the party-shared meter
 at its confirmed maximum of `200`, so its HUD display remains full. Disabling a
 menu entry clears only its corresponding developer flag. Unloading the mod
 restores both flags to the values captured before cleanroom installation.
+
+Infinite Jetpack also defaults to `ENABLED`. Elco's live actor owns a
+`CElcoAbility*` at `actor+0x104`; its native maximum and current fuel are the
+floats at `ability+0x68` and `ability+0x6C`. The maintenance pass calls the
+exact exported `CElcoAbility::SetFuel(float)` only when current fuel is below
+the existing native maximum. It does not enlarge the tank, patch the fuel
+drain rate, or retain a game-owned pointer across actor replacement. Disabling
+the option simply stops refilling.
 
 ## Training loadout initialization
 

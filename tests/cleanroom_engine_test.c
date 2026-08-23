@@ -37,7 +37,10 @@ int main(void) {
             "infinite SP should be unavailable before initialization") ||
         !require_true(
             !SudekiMpCleanroomEngineInfiniteSpirit(&mode),
-            "infinite spirit should be unavailable before initialization")) {
+            "infinite spirit should be unavailable before initialization") ||
+        !require_true(
+            !SudekiMpCleanroomEngineInfiniteJetpackFuel(&mode),
+            "infinite jetpack should be unavailable before initialization")) {
         return 1;
     }
     puts("cleanroom_engine_test: pass");

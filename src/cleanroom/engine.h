@@ -66,6 +66,8 @@ BOOL SudekiMpCleanroomEngineInfiniteSp(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSp(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
+BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);
+BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled);
 void SudekiMpCleanroomEngineMaintainResources(void);
 void SudekiMpCleanroomEngineReset(void);
 

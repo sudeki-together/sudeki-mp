@@ -3476,3 +3476,209 @@ companions acquire `ALLY_Talos` and attack him remains pending.
   `0x04`, `0x44`, and `0x74`; the copied flags became `0x00`, `0x40`, and
   `0x70`. No exception, crash, persistent query write, or clone regression was
   observed.
+
+## 2026-08-22 — Elco jetpack fuel and cleanroom infinite-fuel control
+
+**Status:** exact static boundary confirmed; implementation built; focused
+live flight acceptance pending.
+
+- Executable SHA256:
+  `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+- PE exports and exact-build decompilation identify
+  `CElcoAbility::SetFuel(float)` at RVA `0x000CDF30`, `SetMaxFuel` at
+  `0x000CDF80`, `GetFuel` at `0x000CDFE0`, `SetFillupRate` at `0x000CDFF0`,
+  `SetEmptyRate` at `0x000CE0C0`, and `ResetFuel` at `0x000CE110`.
+- `GetFuel` returns `this+0x6C`. `SetFuel` writes the argument to both maximum
+  `+0x68` and current `+0x6C` and then runs the native refresh path.
+  `SetMaxFuel` writes `+0x68` and optionally `+0x6C`; fill and empty select
+  configured rates `+0x70/+0x74` into active rate `+0x7C`.
+- The native fuel-point consumer at VA `0x0059C8C0` obtains the active Elco
+  actor and reads `CElcoAbility*` at `actor+0x104` before invoking those
+  methods. This confirms the live ownership edge; it is not inferred from a
+  coincidental changing float.
+- The cleanroom now exposes `INFINITE JETPACK`. It exact-gates the two native
+  exports and their entry bytes, reacquires the ability from the current Elco
+  actor, validates readable/writable storage plus finite sane values, and
+  calls `SetFuel(ability, ability->maximum)` only after fuel drops. It never
+  installs a drain-rate patch or raises the native maximum.
+- `tools/ghidra/ElcoFuelReport.java` records the functions, decompilation, and
+  callers under the supported SHA gate. The PE32 build and exact-image test
+  pass. The isolated Wine cleanroom-engine test also passes. An in-game Elco
+  flight test remains pending.
+
+## 2026-08-22 — Talos defensive and co-op balance inventory
+
+**Status:** authored stats and generic invulnerability mechanism confirmed;
+Talos-specific invulnerability windows and knockback-session behavior require
+a live damage trace.
+
+- Exact read-only inspection of the supported `SOLData.baf` record for
+  `BOSS_Talos.sol:3` found current and maximum HP `45,000`, Spirit Strike
+  resistance `0.4`, and boss AI Unit Type `3`.
+- Talos is authored immune to poison, slow, freeze, concussed, stun, weaken,
+  and curse. Haste, boost, regen, and protect are not immunity entries.
+- His `CCombat` record enables the knockback system and stores
+  `Num KnockBacks in Session = 10` plus
+  `KnockBack Session Length(seconds) = 10.0`. The exact consumer/state
+  transition has not yet been traced, so these values are confirmed but the
+  provisional interpretation as an accumulated super-armour threshold is not.
+- `BOSS_Talos.ANI:43` includes front/back weak and strong hit reactions,
+  front/back knockdowns, get-up animations, and deaths. A static or
+  non-staggering Talos is therefore not explained by absent authored clips.
+- The executable's generic `CCharacterArbiter::IsInvulnerable()` export at
+  RVA `0x00008980` returns whether signed byte `arbiter+0x54` is positive.
+  `GELSetInvulnerable(bool)` at RVA `0x000DCA10` increments/decrements that
+  refcount and mirrors it to arbiter flag `+0x50 bit 0x00000800`. This is a
+  confirmed engine-wide iframe mechanism; whether and when the Talos fight
+  drives it remains open.
+- For comparison, the same archive parser reads Nassaria at `9,000 HP` and
+  Rhythicus at `1,500 HP`; Talos is already authored as an unusually durable
+  solo finale. Co-op still increases combined damage uptime and divides his
+  attention, so balance should scale by active human participants rather than
+  replacing the retail values globally.
+- Recommended first live trace: for each hit on real Talos, record incoming
+  damage/knockback, HP before/after, arbiter `+0x54/+0x50`, current AI/action
+  state, animation selector, and knockback-session state. Acceptance is a
+  strict classification of (a) damage rejected by invulnerability, (b) damage
+  applied without hit reaction, or (c) knockback threshold/session gating.
+
+## 2026-08-23 — Talos native damage and knockback-session trace boundary
+
+**Status:** exact static consumer, observation-only hooks, and focused live
+attack classification confirmed.
+
+- Executable SHA256:
+  `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+- The accepted character receiver at RVA `0x000D21D0` is a normal x86
+  `thiscall`: `ECX=CCombat`, stack argument 1 is `DamageStructure*`, and
+  `CCombat+0x10` owns the target character. The trace records the packet's
+  encoded damage at `+0x14`, source pointer at `+0x30`, and presentation fields
+  `+0x60..+0x67`, then compares HP and combat state before/after the unchanged
+  native call.
+- The collision handler at RVA `0x00138870` is `stdcall` with seven stack
+  arguments and `ret 0x1C`. Argument 1 is the `CCollisionDamage` object and
+  argument 5 is the target character. Its configured damage is at `+0x48`,
+  multiple-hit delay at `+0x50`, and active delay timer at `+0x54`. Comparing
+  a nested accepted-damage sequence classifies whether each collision attempt
+  reached the combat receiver without modifying either result.
+- `CCombat` loads authored `Num KnockBacks in Session` into `+0x60` and
+  `KnockBack Session Length(seconds)` into `+0x64`. Runtime session storage is
+  the timer at `+0x68`, current count at `+0x70`, and flags at `+0x72`.
+- Exact consumer VA `0x004D2170` receives a native reaction-family boolean.
+  Callsite VA `0x004D2FEA` sets that boolean only when the selected reaction ID
+  lies in inclusive range `0x2A..0x36`; arbitrary damage is therefore not a
+  qualifying knockback-session hit.
+- On the first qualifying reaction the consumer loads the authored session
+  duration into `+0x68`, then increments `+0x70`. It sets `CCombat+0x72 bit 0`
+  only when the previous count is greater than the configured `+0x60` limit.
+  With Talos's configured value `10`, the threshold edge is consequently the
+  **11th qualifying reaction** inside one live session, not the 10th raw hit.
+- `CCombat+0x5C` packs three 9-bit presentation/reaction IDs. The live trace
+  records all three alongside `+0x68/+0x70/+0x72`, HP, arbiter flags, and the
+  `+0x54` invulnerability refcount.
+- `EnableTalosDefenseTrace` is disabled by default and exact-entry gated at
+  both native receivers. It resolves only the real `BOSS_Talos` entity and
+  performs no damage, HP, AI, reaction, iframe, counter, timer, or animation
+  writes. The PE32 build and exact-image hook install/restore regression pass.
+- The Tal-only baseline identified Tal as the sole source pointer and showed
+  normal 500-damage hits select reaction `0x2A`; the stronger 1500-damage hit
+  selected `0x2C`. Both qualify. Waiting beyond the authored 10-second window
+  returned the next sample to count 0 before its reaction was processed.
+- Blade Dance supplied the decisive pressure case: it delivered 15 separate
+  465-damage packets (6,975 total), each with the same Tal source. Hits 1–11
+  selected qualifying reaction `0x2E` while the session counter advanced from
+  0 through 11. Before hit 12, `CCombat+0x72 bit 0` was set; hits 12–15 still
+  removed the full 465 HP but selected no reaction. Talos therefore gained
+  **super armor, not damage immunity**.
+- Talos's generic arbiter invulnerability refcount and mirrored `0x800` flag
+  remained zero throughout the baseline and Blade Dance samples. No observed
+  damage rejection was attributable to generic iframes.
+- After more than 12 seconds, the final basic hit entered with timer `-0.112`,
+  count 0, and threshold bit clear, removed 500 HP, and selected reaction
+  `0x2A` again. This live-confirms the authored session expiry resets both the
+  accumulated qualifying count and anti-stagger state.
+- Several accepted zero-damage packets changed neither HP nor reaction state.
+  Tal's observed attacks reached the lower damage receiver without traversing
+  the instrumented `CCollisionDamage` handler, so that component is not the
+  universal entry path for player melee/skill damage.
+- Confirmed gameplay interpretation: within any 10-second window, the first
+  11 qualifying hit reactions can play. Once reaction 11 completes the count,
+  later qualifying damage in that session continues at full value but cannot
+  stagger Talos. Expiry restores normal reactions on the next qualifying hit.
+- A follow-up Blade Dance -> Spirit Strike test reached the decisive ordering.
+  Blade Dance left the live session at count `11`, timer `7.788`, and
+  `CCombat+0x72 bit 0` set. The immediately following Spirit Strike packet
+  (`field_63=0x06`, `field_64=0x03`, `field_67=0x11`) applied `9,296` damage,
+  reducing Talos from `19,425` to `10,129` HP while the threshold remained
+  set. Unlike ordinary post-threshold Blade Dance packets, it still selected
+  reaction `0x2F` (`ANIMID_GETHIT_FRONT_MEGA`). This proves that the Spirit
+  Strike overrides the session's ordinary reaction suppression; it does not
+  clear the threshold or use generic invulnerability.
+- Talos maps both `ANIMID_GETHIT_FRONT_AIR` (`0x2E`) and
+  `ANIMID_GETHIT_FRONT_MEGA` (`0x2F`) to
+  `A015_TALOS_GETHITFRONTUP.CLM:64`. His authored floor-knockdown clip
+  `A014_TALOS_GETHITFRONTKNOCKDOWN.CLM:64` is instead bound to
+  `ANIMID_GETHIT_FRONT_OVER` (`0x2D`). The successful Spirit test therefore
+  proves a super-armour-bypassing mega/up reaction, not a confirmed prone
+  knockdown/get-up cycle.
+
+## 2026-08-23 — Native SudekiMP settings page and Talos co-op tuning
+
+**Status:** native title-page navigation and persistence live-confirmed;
+final-battle balance acceptance pending.
+
+- The independent Sudeki Together page now exposes a fourth root choice,
+  `SudekiMP Settings`, and a five-row `TALOS CO-OP SETTINGS` subpage. It uses
+  the same private native row objects, runtime capsule presentation, title
+  font submission, fade lifecycle, input ownership, and Back behavior as the
+  roster flow; it does not borrow the resident title button records.
+- The first settings are `Talos Tuning`, `Health Scale`, `Armor Hits`, and
+  `Armor Window`. Enter cycles bounded values. The existing
+  `SudekiMP-roster.ini` sidecar stores them in section `TalosCoop`; invalid
+  values fall back to vanilla-compatible defaults.
+- A focused title pass opened the four-row Sudeki Together root page, entered
+  the five-row settings page, navigated through every row, cycled all four
+  settings, and wrote each result to the sidecar without a crash or native
+  title-action leak. The trace also confirmed that enabled tuning remained
+  inert while the saved profile mode was `Single`.
+- Tuning is applied only when both the explicit toggle and a locked Co-op
+  profile are active. Single Player and disabled tuning perform no game-data
+  write. Supported health scales are `1x` through `4x`; stagger limits are
+  `6/10/14/18`; windows are `5/10/15/20` seconds.
+- Follow-up loaded-save testing exposed an interaction gap: an enabled tuning
+  profile could retain `Mode=Single`, causing the safety gate to reject the
+  override even though the settings page displayed `ON`. The explicit Talos
+  toggle now establishes the Co-op sidecar profile, including migration of
+  previously saved `Enabled=1` profiles. Choosing the visible Single Player
+  action disables Talos tuning as well, so the vanilla opt-out remains clear.
+- Three independent live Talos allocations established the exact embedded
+  relation `CCombat = character+0xF64`. The runtime service resolves only the
+  exact real `BOSS_Talos`, verifies `CCombat+0x10 == character`, validates
+  writable committed storage and sane finite HP, and refuses to scale a
+  maximum other than vanilla `45,000` or its own expected target.
+- Maximum and current HP are scaled together while preserving the current HP
+  percentage. The confirmed `CCombat+0x60/+0x64` fields receive the selected
+  stagger limit/window; active counters, timers, flags, reactions, AI, and
+  damage packets are untouched. The service revalidates the fields after save
+  reload even if Sudeki reuses the same heap address.
+- A follow-up HUD discrepancy was traced across both native presentation
+  paths. `UILayerBossBar::Update` at VA `0x004A6AC0` reads the bound entity's
+  live `CStats` current/max HP at `+0x2C/+0x30` every frame and optionally
+  remaps it through boss-bar upper/lower fields `+0x94/+0x98`. Live Talos
+  samples proved those limits were already the neutral `1.0/0.0`; changing
+  them was neither needed nor retained as the fix.
+- The overhead display is the character-owned `CStatDisplay*` at
+  `character+0xB0`. Its native health callback at VA `0x00529780` receives the
+  display in `ESI`, stores current HP at `CStatDisplay+0x16C`, computes the raw
+  current/max ratio, and updates the embedded health renderer at `+0xD0`.
+  Directly scaling the two `CStats` floats bypassed that callback, leaving the
+  overhead fill cached at its prior state while the boss HUD read the new
+  180,000 maximum live.
+- The co-op balance service now exact-gates the `CStatDisplay` vtable and
+  callback entry, then invokes the unchanged native callback whenever the
+  resolved real Talos's current or maximum HP changes. It performs no direct
+  overhead-renderer write. Live 4x acceptance showed both renderers agree:
+  at `170,750/180,000` (~94.9%) each cached `0.47`; at
+  `161,780/180,000` (~89.9%) each cached `0.44`; and at
+  `152,805/180,000` (~84.9%) each cached `0.42`. HP, damage, AI, phase scripts,
+  and combat state remain owned by the original game.

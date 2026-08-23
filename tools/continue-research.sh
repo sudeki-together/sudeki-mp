@@ -18,7 +18,7 @@ input_bridge_log="${project_dir}/build/linux/input-bridge.log"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
@@ -29,6 +29,7 @@ usage() {
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
         '  --party-lifecycle-trace Observe native PC spawn/removal plus resulting party/controller/AI state during a normal save load.' \
         '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
+        '  --talos-defense-trace Restore the Talos party and trace real-boss damage, invulnerability, reaction IDs, and knockback sessions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
         '  --zone-traversal-test  Open the F7 world/interior traversal menu on a normal save.' \
         '  --freeroam-camera-test Require LeftCtrl for mouse-Y distance changes outside combat; retain vanilla combat input.' \
@@ -56,7 +57,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -208,13 +209,18 @@ case "${mode}" in
             -e 's/^EnableQuickSkillInputTrace=false$/EnableQuickSkillInputTrace=true/' \
             "${generated_config}"
         ;;
-    --character-switch-trace|--party-lifecycle-trace|--talos-party-test)
+    --character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace)
         sed -i \
             -e 's/^EnableCharacterSwitchTrace=false$/EnableCharacterSwitchTrace=true/' \
             "${generated_config}"
         if [[ "${mode}" == "--talos-party-test" ]]; then
             sed -i \
                 -e 's/^EnableTalosPartyPrototype=false$/EnableTalosPartyPrototype=true/' \
+                "${generated_config}"
+        fi
+        if [[ "${mode}" == "--talos-defense-trace" ]]; then
+            sed -i \
+                -e 's/^EnableTalosDefenseTrace=false$/EnableTalosDefenseTrace=true/' \
                 "${generated_config}"
         fi
         ;;

@@ -14,6 +14,7 @@
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
+#include "hooks/talos_defense_trace.h"
 #include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
 #include "input/key_binding.h"
@@ -41,6 +42,7 @@
 #define SUDEKIMP_INIT_INPUT_BRIDGE_FAILED 14u
 #define SUDEKIMP_INIT_CLEANROOM_MENU_FAILED 15u
 #define SUDEKIMP_INIT_ACCELERATOR_CACHE_FAILED 16u
+#define SUDEKIMP_INIT_TALOS_DEFENSE_TRACE_FAILED 17u
 
 static HMODULE dll_module;
 
@@ -184,6 +186,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL quick_skill_input_trace_enabled;
     BOOL character_switch_trace_enabled;
     BOOL talos_party_prototype_enabled;
+    BOOL talos_defense_trace_enabled;
     BOOL control_separation_enabled;
     BOOL player_movement_trace_enabled;
     BOOL second_player_movement_enabled;
@@ -353,6 +356,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         config_path,
         L"SudekiMP",
         L"EnableTalosPartyPrototype"
+    );
+    talos_defense_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableTalosDefenseTrace"
     );
     control_separation_enabled = read_config_boolean(
         config_path,
@@ -1010,6 +1018,23 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("character_switch_trace_applied=false\r\n");
     }
     SudekiMpLogFormat(
+        "talos_defense_trace_requested=%s\r\n",
+        talos_defense_trace_enabled ? "true" : "false"
+    );
+    if (talos_defense_trace_enabled) {
+        if (!SudekiMpInstallTalosDefenseTrace(game_module)) {
+            SudekiMpLogFormat("talos_defense_trace_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("talos_defense_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=talos_defense_trace_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_DEFENSE_TRACE_FAILED;
+        }
+        SudekiMpLogWrite("talos_defense_trace_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("talos_defense_trace_applied=false\r\n");
+    }
+    SudekiMpLogFormat(
         "freeroam_camera_requested=%s modifier_virtual_key=0x%02lx\r\n",
         freeroam_camera_input_enabled ? "true" : "false",
         (unsigned long)freeroam_camera_modifier_key
@@ -1291,6 +1316,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !realtime_multiplayer_skill_combat_enabled &&
         !direct_spirit_strike_prototype_enabled &&
         !character_switch_trace_enabled &&
+        !talos_defense_trace_enabled &&
         !freeroam_camera_input_enabled &&
         !control_separation_enabled &&
         !split_screen_render_enabled &&
@@ -1310,6 +1336,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpUninstallTalosDefenseTrace();
             SudekiMpUninstallZoneTransitionTrace();
             SudekiMpInputBridgeStop();
             SudekiMpUninstallAcceleratorCache();
