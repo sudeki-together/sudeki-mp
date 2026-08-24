@@ -329,6 +329,15 @@ enum {
 enum {
     NATIVE_TITLE_ROW_COUNT = 5u,
     NATIVE_ROSTER_ROW_COUNT = 5u,
+    ROSTER_CAPSULE_FIRST_TOP = 319u,
+    ROSTER_CAPSULE_ROW_SPACING = 31u,
+    ROSTER_CAPSULE_HEIGHT = 30u,
+    ROSTER_CAPSULE_DRAW_TOP_MARGIN = 1u,
+    ROSTER_CAPSULE_DRAW_BOTTOM_EXCLUSIVE = 4u,
+    ROSTER_CAPSULE_MAX_DRAW_ROW =
+        ROSTER_CAPSULE_FIRST_TOP +
+        (NATIVE_TITLE_ROW_COUNT - 1u) * ROSTER_CAPSULE_ROW_SPACING +
+        ROSTER_CAPSULE_HEIGHT + ROSTER_CAPSULE_DRAW_BOTTOM_EXCLUSIVE - 1u,
     NATIVE_ROSTER_FIRST_RESOURCE_ID = 0x63u,
     NATIVE_ANIMATED_TITLE_ROW_SIZE = 0x13cu,
     NATIVE_TITLE_ROW_POINTER_OFFSET = 0x70u,
@@ -341,6 +350,12 @@ enum {
     NATIVE_UI_ROW_STATE_OFF = 2u,
     NATIVE_UI_ROW_STATE_HIGHLIGHT = 3u
 };
+
+_Static_assert(
+    (unsigned int)ROSTER_CAPSULE_MAX_DRAW_ROW <
+        (unsigned int)MENU_TEXTURE_HEIGHT,
+    "five roster capsule rows must fit inside the menu texture"
+);
 
 /* The shipped title labels use font 1, alignment mode 1, and x=0x156.  That
  * exact path centers Continue Game/New Game on the title bars.  Mode 0 belongs
@@ -4425,15 +4440,33 @@ static void draw_roster_button_capsule(
 ) {
     const int left = 55;
     const int right = 585;
-    const int bottom = top + 30;
+    const int bottom = top + (int)ROSTER_CAPSULE_HEIGHT;
     const int border_inset = 2;
     const int inner_radius = 8;
     int y;
+    int first_x;
+    int last_x_exclusive;
+    int first_y;
+    int last_y_exclusive;
 
-    for (y = top - 1; y < bottom + 4; ++y) {
+    first_x = left - 3;
+    last_x_exclusive = right + 3;
+    first_y = top - (int)ROSTER_CAPSULE_DRAW_TOP_MARGIN;
+    last_y_exclusive = bottom +
+        (int)ROSTER_CAPSULE_DRAW_BOTTOM_EXCLUSIVE;
+    if (first_x < 0) first_x = 0;
+    if (last_x_exclusive > (int)MENU_TEXTURE_WIDTH) {
+        last_x_exclusive = MENU_TEXTURE_WIDTH;
+    }
+    if (first_y < 0) first_y = 0;
+    if (last_y_exclusive > (int)MENU_TEXTURE_HEIGHT) {
+        last_y_exclusive = MENU_TEXTURE_HEIGHT;
+    }
+
+    for (y = first_y; y < last_y_exclusive; ++y) {
         uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
         int x;
-        for (x = left - 3; x < right + 3; ++x) {
+        for (x = first_x; x < last_x_exclusive; ++x) {
             int local_x = x - left;
             unsigned int shadow_coverage = roster_rounded_rect_coverage(
                 x, y, left - 2, top + 1, right + 2, bottom + 4, 16);
@@ -5441,9 +5474,16 @@ static BOOL update_roster_button_texture(void *texture) {
         vtable[D3D_TEXTURE_LOCK_RECT_INDEX];
     unlock_rectangle = (D3DTextureUnlockRectFunction)
         vtable[D3D_TEXTURE_UNLOCK_RECT_INDEX];
-    if (lock_rectangle == NULL || unlock_rectangle == NULL ||
-        FAILED(lock_rectangle(texture, 0u, &locked, NULL, 0u)) ||
-        locked.bits == NULL || locked.pitch <= 0) {
+    if (lock_rectangle == NULL || unlock_rectangle == NULL) {
+        return FALSE;
+    }
+    result = lock_rectangle(texture, 0u, &locked, NULL, 0u);
+    if (FAILED(result)) {
+        return FALSE;
+    }
+    if (locked.bits == NULL ||
+        locked.pitch < (int)(MENU_TEXTURE_WIDTH * sizeof(uint32_t))) {
+        (void)unlock_rectangle(texture, 0u);
         return FALSE;
     }
     pixels = (uint32_t *)locked.bits;
@@ -5467,7 +5507,8 @@ static BOOL update_roster_button_texture(void *texture) {
         draw_roster_button_capsule(
             pixels,
             locked.pitch,
-            387 + (int)index * 31,
+            ROSTER_CAPSULE_FIRST_TOP +
+                (int)index * ROSTER_CAPSULE_ROW_SPACING,
             index == roster_native_selection);
     }
     result = unlock_rectangle(texture, 0u);
