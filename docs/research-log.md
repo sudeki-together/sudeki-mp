@@ -3682,3 +3682,31 @@ final-battle balance acceptance pending.
   `161,780/180,000` (~89.9%) each cached `0.44`; and at
   `152,805/180,000` (~84.9%) each cached `0.42`. HP, damage, AI, phase scripts,
   and combat state remain owned by the original game.
+
+## 2026-08-23 — Native Windows roster-menu access violation isolated
+
+**Status:** deterministic source defect fixed locally; native Windows visual
+and New Game acceptance pending.
+
+- Three earlier manual Windows runs crashed `SUDEKI.exe` in `SudekiMP.dll`
+  with exception `0xc0000005` at DLL RVA `0x0000C106`. Symbolization of the
+  exact installed DLL (SHA256 `eba6fd492a787afbd070ebf64f10482baf27e861848b56c688d31d2c1780a56c`)
+  resolved the fault to `draw_roster_button_capsule` at the shadow-pixel write
+  in `src/cleanroom/menu.c`. The same zero-save tree remained alive with the
+  roster feature disabled, so missing saves and the native Load Game page are
+  ruled out as causes.
+- The original two-row capsule prototype began at texture row 387. Later the
+  root page grew to four rows and the settings page to five, but the texture
+  remained 640x480 and the drawing loop had no clipping. The third row wrote
+  through row 482 and later rows went farther beyond the locked D3D9 surface.
+  Wine tolerated that undefined write during prior testing; native Windows
+  faulted at the first out-of-bounds shadow pixel.
+- The five-row block now begins at row 319, placing its final shadow row at
+  476. A C11 compile-time assertion prevents future row-count/layout changes
+  from exceeding the 480-line texture. The capsule rasterizer also clips both
+  axes, and the D3D lock path rejects a pitch smaller than one complete
+  640-pixel ARGB row while still unlocking a successfully locked surface.
+- Linux MinGW compilation, the supported-image launcher check, and
+  `SudekiMP.SkillTraceImageTest` pass. Native Windows must still rebuild the
+  DLL, manually select New Game, inspect all four/five rows, and confirm both
+  crash freedom and acceptable layout before this item is closed.
