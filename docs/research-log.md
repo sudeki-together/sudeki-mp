@@ -4032,9 +4032,18 @@ per-seat Quick Menu, and per-seat Quickshot consumers remain future work.
   independently for seats 0 through 3; the current bridge integration supplies
   P2 only. Modal context wins over transition consent, which wins over an exact
   known interaction target, which wins over ordinary gameplay.
-- The shipped Xbox-style face-button contract is now explicit. A reports an
+- The base Xbox-style face-button contract is explicit. A reports an
   exact interaction intent only for a complete actor/target/source-generation
-  tuple and otherwise submits native Weak. X submits native Strong. Y reports
+  tuple and otherwise submits native Weak. X submits native Strong for
+  Tal/Buki. For Ailish/Elco, SudekiMP contextually uses X for a viewport-local
+  camera perspective toggle: the exact ranged arbiter branch never reads its
+  Strong argument, while the executable registers separate native
+  `ac_FirstPersonMode` (`0x3C`) and `ac_FirstPersonModeToggle` (`0x3D`)
+  actions. This contextual X rule is SudekiMP policy rather than the shipped
+  first-person binding. The Player 2 consumer changes only its independent
+  render matrix and preserved third-person orbit; it does not invoke the
+  global native camera/model transition, provide first-person arms, or claim
+  Ailish magical-sight behavior. Y reports
   `quick_menu` with `intent_only` delivery because no per-seat native menu
   consumer exists. B resolves modal/consent Cancel and submits native Sweep in
   combat; outside those contexts it is blocked rather than repurposed.
@@ -4042,7 +4051,7 @@ per-seat Quick Menu, and per-seat Quickshot consumers remain future work.
   resolve navigation/page intents. These remain intent-only until their owning
   per-seat consumers are connected. The sticks stay on the existing movement
   and camera paths.
-- A, X, and combat B share the exact validated arbiter-combat ABI. The older
+- A, melee X, and combat B share the exact validated arbiter-combat ABI. The older
   external-bridge A polling path is bypassed, preventing double submission.
   Every routed edge logs the protocol button name, resolved intent, context,
   delivery, rejection reason, actor, arbiter, and native state flags, so a

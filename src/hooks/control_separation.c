@@ -282,6 +282,20 @@ static BOOL game_code_pointer(const void *pointer) {
         (const uint8_t *)pointer < game_base + SUPPORTED_IMAGE_SIZE;
 }
 
+static BOOL second_player_character_is_ranged(void *character_pointer) {
+    unsigned int player_one_type;
+    unsigned int player_two_type;
+
+    if (character_pointer == NULL ||
+        !SudekiMpSplitScreenGetRosterTypes(
+            &player_one_type, &player_two_type) ||
+        (player_two_type != 0x01u && player_two_type != 0x0eu)) {
+        return FALSE;
+    }
+    return SudekiMpSplitScreenRosterActorIdentityMatches(
+        1u, character_pointer, player_two_type);
+}
+
 static void log_group_camera_rejection(
     unsigned int rejection,
     const char *reason,
@@ -1339,6 +1353,11 @@ static void service_second_player_controller_actions(
     context.interaction_target_known =
         second_player_exact_interaction_target_known();
     context.combat_active = second_player_combat_active();
+    context.ranged_character = context.seat_active &&
+        second_player_character_is_ranged(overridden_character);
+    context.perspective_toggle_available = context.ranged_character &&
+        SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(
+            overridden_character);
     result_count = SudekiMpControllerActionRouterAdvance(
         &controller_action_router,
         1u,
@@ -1360,6 +1379,8 @@ static void service_second_player_controller_actions(
         uint32_t flags_50 = 0u;
         uint32_t state_58 = 0u;
         uint8_t flags_60 = 0u;
+        BOOL perspective_first_person = FALSE;
+        BOOL perspective_mode_known = FALSE;
 
         if (resolution->intent == SUDEKIMP_CONTROLLER_INTENT_NONE) {
             delivery = "blocked";
@@ -1383,6 +1404,21 @@ static void service_second_player_controller_actions(
                 SUDEKIMP_CONTROLLER_INTENT_INTERACT) {
             reason = "exact_target_consumer_not_connected";
         } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE) {
+            if (!owns_foreground) {
+                delivery = "rejected";
+                reason = "game_window_not_foreground";
+            } else if (SudekiMpSplitScreenTogglePlayerTwoPerspective(
+                           overridden_character,
+                           &perspective_first_person)) {
+                delivery = "applied";
+                reason = "player_two_camera_perspective_toggled";
+                perspective_mode_known = TRUE;
+            } else {
+                delivery = "rejected";
+                reason = "player_two_camera_perspective_unavailable";
+            }
+        } else if (resolution->intent ==
                 SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
             reason = "per_seat_quick_menu_consumer_not_connected";
         } else if (resolution->intent >=
@@ -1399,7 +1435,9 @@ static void service_second_player_controller_actions(
         SudekiMpLogFormat(
             "control_separation event=controller_action_edge phase=rising "
             "player=2 protocol_button=%s intent=%s layer=%s "
-            "combat=%s exact_target=%s delivery=%s reason=%s "
+            "combat=%s exact_target=%s ranged=%s "
+            "perspective_available=%s perspective_mode=%s "
+            "delivery=%s reason=%s "
             "character=0x%08lx arbiter=0x%08lx flags_50=0x%08lx "
             "state_58=0x%08lx flags_60=0x%02x\r\n",
             SudekiMpControllerProtocolButtonName(
@@ -1408,6 +1446,11 @@ static void service_second_player_controller_actions(
             controller_action_layer_name(&context),
             context.combat_active ? "true" : "false",
             context.interaction_target_known ? "true" : "false",
+            context.ranged_character ? "true" : "false",
+            context.perspective_toggle_available ? "true" : "false",
+            perspective_mode_known ?
+                (perspective_first_person ?
+                    "first_person" : "third_person") : "unchanged",
             delivery,
             reason,
             (unsigned long)(uintptr_t)overridden_character,

@@ -638,6 +638,7 @@ static BOOL quick_menu_non_owner_render_suppression_active;
 static void *quick_menu_non_owner_render_object;
 static uint32_t quick_menu_non_owner_render_saved_state;
 static BOOL readable_memory(const void *pointer, size_t size);
+static BOOL writable_memory(void *pointer, size_t size);
 static void invalidate_dual_frame_cache(void);
 static unsigned int refresh_shared_interaction_modal(void);
 
@@ -747,6 +748,9 @@ static unsigned int player_two_temporary_camera_policy =
 static float player_two_camera_last_target[3];
 static float player_two_camera_pitch_offset;
 static BOOL player_two_first_person_camera_active;
+static BOOL player_two_first_person_camera_requested;
+static void *player_two_perspective_character;
+static uint32_t player_two_perspective_actor_generation;
 static BOOL player_two_forced_third_person_active;
 static int player_two_camera_phase_last = -1;
 static int player_two_rebased_phase = -1;
@@ -1166,6 +1170,31 @@ static void SUDEKIMP_THISCALL route_camera_input_event(
 }
 
 static void reset_player_two_controller_camera(void) {
+    if (player_two_first_person_camera_active &&
+        writable_memory(player_two_render_state, 0xdcu)) {
+        unsigned int index;
+        BOOL saved_matrix_valid = TRUE;
+
+        for (index = 0u; index < 16u; ++index) {
+            if (!isfinite(player_two_third_person_matrix[index])) {
+                saved_matrix_valid = FALSE;
+                break;
+            }
+        }
+        if (fabsf(player_two_third_person_matrix[15] - 1.0f) > 0.001f) {
+            saved_matrix_valid = FALSE;
+        }
+        if (saved_matrix_valid) {
+            uint16_t *generation = (uint16_t *)(
+                (uint8_t *)player_two_render_state + 0x2cu);
+
+            memcpy(
+                (uint8_t *)player_two_render_state + 0x90u,
+                player_two_third_person_matrix,
+                sizeof(player_two_third_person_matrix));
+            ++*generation;
+        }
+    }
     player_two_camera_transform_initialized = FALSE;
     player_two_temporary_camera_policy = SUDEKIMP_TEMP_CAMERA_OUTSIDE;
     ZeroMemory(
@@ -1174,6 +1203,9 @@ static void reset_player_two_controller_camera(void) {
     );
     player_two_camera_pitch_offset = 0.0f;
     player_two_first_person_camera_active = FALSE;
+    player_two_first_person_camera_requested = FALSE;
+    player_two_perspective_character = NULL;
+    player_two_perspective_actor_generation = 0u;
     player_two_forced_third_person_active = FALSE;
     player_two_camera_phase_last = -1;
     player_two_rebased_phase = -1;
@@ -1992,6 +2024,29 @@ static BOOL player_two_should_use_first_person(void) {
         );
     }
     return FALSE;
+}
+
+static BOOL player_two_should_use_camera_first_person(void) {
+    SudekiMpPlayerStatehood *statehood;
+    const SudekiMpPlayerLease *lease;
+
+    if (!player_two_first_person_camera_requested) {
+        return FALSE;
+    }
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    lease = statehood == NULL ? NULL : &statehood->players[1];
+    if (player_two_perspective_character == NULL || lease == NULL ||
+        !lease->human_present || lease->actor == 0u ||
+        lease->actor_generation == 0u ||
+        lease->actor != (uintptr_t)player_two_perspective_character ||
+        lease->actor_generation != player_two_perspective_actor_generation) {
+        player_two_first_person_camera_requested = FALSE;
+        player_two_perspective_character = NULL;
+        player_two_perspective_actor_generation = 0u;
+        return FALSE;
+    }
+    return SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(
+        player_two_perspective_character);
 }
 
 static void log_player_two_camera_phase(
@@ -2861,6 +2916,117 @@ static int current_spirit_presentation_state(void) {
     }
     manager = *(uint8_t **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
     return readable_memory(manager, 0x60u) ? *(int *)(manager + 0x5cu) : 0;
+}
+
+BOOL SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
+    BOOL runtime_ready,
+    BOOL camera_ready,
+    BOOL input_ready,
+    BOOL presentation_clear,
+    BOOL combat_active,
+    BOOL actor_matches,
+    BOOL lease_matches,
+    BOOL ranged_capable
+) {
+    return runtime_ready && camera_ready && input_ready &&
+        presentation_clear && combat_active && actor_matches &&
+        lease_matches && ranged_capable;
+}
+
+BOOL SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(void *character) {
+    SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
+    const SudekiMpPlayerLease *lease =
+        statehood == NULL ? NULL : &statehood->players[1];
+    unsigned int player_one_type = 0u;
+    unsigned int player_two_type = 0u;
+    BOOL roster_type_available = SudekiMpSplitScreenGetRosterTypes(
+        &player_one_type, &player_two_type);
+    BOOL runtime_ready = split_screen_render_installed &&
+        runtime_split_enabled && coop_role_lock_active &&
+        coop_roster_participation_requested &&
+        !coop_roster_party_transition_active;
+    BOOL camera_ready = second_player_camera_enabled &&
+        dual_camera_frame_cache_enabled &&
+        second_player_controller_camera_enabled &&
+        player_two_camera != NULL &&
+        writable_memory(player_two_render_state, 0xdcu) &&
+        !render_only_swap_active;
+    BOOL input_ready = SudekiMpControlSeparationInputReady() &&
+        !SudekiMpControlSeparationGameplayInputFrozen();
+    BOOL presentation_clear =
+        player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_OUTSIDE &&
+        !settled_temporary_zone_active() &&
+        !pc_quit_screen_visible() && !quick_menu_visible() &&
+        !SudekiMpSplitScreenSharedInteractionModalActive() &&
+        player_skill_render_states[0] == NULL &&
+        player_skill_render_states[1] == NULL &&
+        current_spirit_presentation_state() == 0 &&
+        !character_is_using_skill(player_one_character) &&
+        !character_is_using_skill(player_two_character);
+    BOOL actor_matches = character != NULL &&
+        character == player_two_character &&
+        character == SudekiMpControlSeparationPlayerTwoCharacter() &&
+        SudekiMpControlSeparationPlayerTwoRequested() &&
+        SudekiMpControlSeparationPlayerTwoActive();
+    BOOL lease_matches = lease != NULL && lease->human_present &&
+        lease->actor == (uintptr_t)character &&
+        lease->actor_generation != 0u;
+    BOOL ranged_capable = roster_type_available &&
+        (player_two_type == 0x01u || player_two_type == 0x0eu) &&
+        SudekiMpSplitScreenRosterActorIdentityMatches(
+            1u, character, player_two_type) &&
+        ranged_presentation_parts(character, NULL, NULL, NULL, NULL);
+
+    (void)player_one_type;
+
+    return SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
+        runtime_ready,
+        camera_ready,
+        input_ready,
+        presentation_clear,
+        active_group_in_combat(),
+        actor_matches,
+        lease_matches,
+        ranged_capable);
+}
+
+BOOL SudekiMpSplitScreenTogglePlayerTwoPerspective(
+    void *character,
+    BOOL *first_person
+) {
+    SudekiMpPlayerStatehood *statehood;
+    const SudekiMpPlayerLease *lease;
+    BOOL currently_requested;
+
+    if (first_person == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *first_person = player_two_first_person_camera_requested &&
+        player_two_perspective_character == character;
+    if (!SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(character)) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    lease = &statehood->players[1];
+    currently_requested = player_two_first_person_camera_requested &&
+        player_two_perspective_character == character &&
+        player_two_perspective_actor_generation == lease->actor_generation;
+    player_two_first_person_camera_requested = !currently_requested;
+    player_two_perspective_character = character;
+    player_two_perspective_actor_generation = lease->actor_generation;
+    *first_person = player_two_first_person_camera_requested;
+    invalidate_dual_frame_cache();
+    SudekiMpLogFormat(
+        "split_screen_render event=player_two_perspective phase=request "
+        "state=%s character=0x%08lx actor_generation=%lu "
+        "policy=viewport_two_camera_matrix_only_world_wrapper_retained_no_global_first_person_transition\r\n",
+        *first_person ? "first_person" : "third_person",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)player_two_perspective_actor_generation);
+    return TRUE;
 }
 
 BOOL SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(void *character) {
@@ -4577,7 +4743,8 @@ static BOOL update_player_two_render_state(void) {
         player_two_camera_input_last_tick = GetTickCount();
         return TRUE;
     }
-    should_use_first_person = player_two_should_use_first_person();
+    should_use_first_person =
+        player_two_should_use_camera_first_person();
     if (readable_memory(player_one_character, 0x94u)) {
         uint8_t *arbiter = *(uint8_t **)(
             (uint8_t *)player_one_character + 0x90u
@@ -4601,9 +4768,11 @@ static BOOL update_player_two_render_state(void) {
         skill_phase
     );
     memcpy(camera_target, second_position, sizeof(camera_target));
-    if (!should_use_first_person) {
-        camera_target[1] += 1.0f;
-    }
+    /* Keep the preserved third-person orbit on one stable target across a
+     * perspective toggle.  First person uses its separate eye coordinate
+     * below; changing this target would lower the saved orbit by one unit and
+     * make an asynchronous reset restore the wrong height. */
+    camera_target[1] += 1.0f;
     if (!second_player_controller_camera_enabled ||
         !player_two_camera_transform_initialized) {
         memcpy(

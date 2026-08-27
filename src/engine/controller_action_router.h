@@ -25,6 +25,7 @@ typedef enum SudekiMpControllerActionIntent {
     SUDEKIMP_CONTROLLER_INTENT_INTERACT,
     SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK,
     SUDEKIMP_CONTROLLER_INTENT_SECONDARY_ATTACK_STRONG,
+    SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE,
     SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU,
     SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP,
     SUDEKIMP_CONTROLLER_INTENT_QUICKSHOT_UP,
@@ -43,6 +44,11 @@ typedef struct SudekiMpControllerActionContext {
     int transition_vote_active;
     int interaction_target_known;
     int combat_active;
+    /* Sudeki's ranged arbiter ignores AttackStrong. SudekiMP therefore uses
+     * protocol X as a contextual perspective toggle only when the active
+     * seat owns Ailish/Elco and a real viewport-local consumer is ready. */
+    int ranged_character;
+    int perspective_toggle_available;
 } SudekiMpControllerActionContext;
 
 typedef struct SudekiMpControllerActionResolution {

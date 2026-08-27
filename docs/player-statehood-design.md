@@ -15,15 +15,19 @@ The central rule is:
 > state. Shared mutations are serialized and progression remains host-owned
 > until an exact target-specific path proves otherwise.
 
-The current controller router follows the shipped Xbox-style roles without
-inventing Player 1 authority for another seat. A resolves a proven exact
-interaction intent or falls back to native Weak; X submits native Strong; Y
-exposes a per-seat Quick Menu intent whose native consumer is not connected;
-B resolves modal Cancel or native combat Sweep; and the D-pad exposes per-seat
-Quickshot intents whose consumers are not connected. The sticks remain on
-their movement/camera paths. Button edges and reconnect-neutral fences are
-stored independently for seats 0 through 3, although the present runtime
-bridge supplies only P2.
+The current controller router preserves the shipped face-button roles except
+for one explicit character-capability rule. A resolves a proven exact
+interaction intent or falls back to native Weak. X submits native Strong for
+Tal/Buki, but toggles Player 2's viewport-local camera perspective for
+Ailish/Elco because the exact native ranged branch never consumes Strong. This
+is SudekiMP policy, not a claim that the shipped first-person action was bound
+to X; the supported executable keeps first-person hold/toggle as separate
+actions. Y exposes a per-seat Quick Menu intent whose native consumer is not
+connected; B resolves modal Cancel or native combat Sweep; and the D-pad
+exposes per-seat Quickshot intents whose consumers are not connected. The
+sticks remain on their movement/camera paths. Button edges and
+reconnect-neutral fences are stored independently for seats 0 through 3,
+although the present runtime bridge supplies only P2.
 
 This design describes one process and one loaded Sudeki world. Running two
 independent exterior/interior worlds, player-local inventories, or player-local

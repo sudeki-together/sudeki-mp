@@ -43,6 +43,24 @@ BOOL SudekiMpInstallSplitScreenRender(
 );
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled);
 BOOL SudekiMpSplitScreenRuntimeEnabled(void);
+/* Camera-2-only ranged perspective.  The toggle only latches a requested
+ * render-matrix mode; it never invokes Sudeki's global first-person transition
+ * or changes a character's attached model wrapper. */
+BOOL SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
+    BOOL runtime_ready,
+    BOOL camera_ready,
+    BOOL input_ready,
+    BOOL presentation_clear,
+    BOOL combat_active,
+    BOOL actor_matches,
+    BOOL lease_matches,
+    BOOL ranged_capable
+);
+BOOL SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(void *character);
+BOOL SudekiMpSplitScreenTogglePlayerTwoPerspective(
+    void *character,
+    BOOL *first_person
+);
 /* Lock the two party identities for the current co-op gameplay session. */
 BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two);
 BOOL SudekiMpSplitScreenRolesLocked(void);

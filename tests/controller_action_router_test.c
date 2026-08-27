@@ -79,6 +79,33 @@ static void test_shipped_gameplay_face_contract(void) {
     CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP);
 }
 
+static void test_sudekimp_ranged_x_policy(void) {
+    SudekiMpControllerActionRouter router;
+    SudekiMpControllerActionContext context;
+    SudekiMpControllerActionResolution result;
+
+    SudekiMpControllerActionRouterInitialize(&router);
+    prime_seat(&router, 1u);
+    memset(&context, 0, sizeof(context));
+    context.seat_active = 1;
+    context.ranged_character = 1;
+    context.perspective_toggle_available = 1;
+
+    result = press(&router, 1u, SUDEKIMP_BRIDGE_BUTTON_X, &context);
+    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE);
+    release(&router, 1u, &context);
+
+    context.perspective_toggle_available = 0;
+    result = press(&router, 1u, SUDEKIMP_BRIDGE_BUTTON_X, &context);
+    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_NONE);
+    release(&router, 1u, &context);
+
+    context.ranged_character = 0;
+    result = press(&router, 1u, SUDEKIMP_BRIDGE_BUTTON_X, &context);
+    CHECK(result.intent ==
+        SUDEKIMP_CONTROLLER_INTENT_SECONDARY_ATTACK_STRONG);
+}
+
 static void test_context_priority(void) {
     SudekiMpControllerActionRouter router;
     SudekiMpControllerActionContext context;
@@ -247,6 +274,9 @@ static void test_inactive_and_names(void) {
     CHECK(strcmp(SudekiMpControllerActionIntentName(
         SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU), "quick_menu") == 0);
     CHECK(strcmp(SudekiMpControllerActionIntentName(
+        SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE),
+        "perspective_toggle") == 0);
+    CHECK(strcmp(SudekiMpControllerActionIntentName(
         (SudekiMpControllerActionIntent)999), "unknown") == 0);
 }
 
@@ -266,11 +296,15 @@ static void test_exact_native_combat_flags(void) {
         SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU, &flags));
     CHECK(flags.weak == 0 && flags.strong == 0 && flags.sweep == 0);
     CHECK(!SudekiMpControllerActionCombatFlags(
+        SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE, &flags));
+    CHECK(flags.weak == 0 && flags.strong == 0 && flags.sweep == 0);
+    CHECK(!SudekiMpControllerActionCombatFlags(
         SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK, NULL));
 }
 
 int main(void) {
     test_shipped_gameplay_face_contract();
+    test_sudekimp_ranged_x_policy();
     test_context_priority();
     test_modal_navigation_and_quickshots();
     test_edges_reconnect_and_seat_independence();

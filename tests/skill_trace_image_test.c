@@ -1279,6 +1279,36 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     {
+        BOOL perspective_gates[8] = {
+            TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE
+        };
+        unsigned int gate_index;
+
+        if (!SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
+                perspective_gates[0], perspective_gates[1],
+                perspective_gates[2], perspective_gates[3],
+                perspective_gates[4], perspective_gates[5],
+                perspective_gates[6], perspective_gates[7])) {
+            fputs("FAIL: complete P2 perspective gate set was rejected\n",
+                stderr);
+            ++failures;
+        }
+        for (gate_index = 0u; gate_index < 8u; ++gate_index) {
+            perspective_gates[gate_index] = FALSE;
+            if (SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
+                    perspective_gates[0], perspective_gates[1],
+                    perspective_gates[2], perspective_gates[3],
+                    perspective_gates[4], perspective_gates[5],
+                    perspective_gates[6], perspective_gates[7])) {
+                fputs("FAIL: P2 perspective policy did not fail closed\n",
+                    stderr);
+                ++failures;
+            }
+            perspective_gates[gate_index] = TRUE;
+        }
+    }
+
+    {
         const void *player_one = (const void *)(uintptr_t)0x11110000u;
         const void *player_two = (const void *)(uintptr_t)0x22220000u;
 

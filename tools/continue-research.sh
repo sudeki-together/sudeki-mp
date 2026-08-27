@@ -605,6 +605,7 @@ if [[ "${mode}" == "--controller-bridge-test" ]]; then
         '  Player 1 is the front/controller-owned character; Player 2 is the first non-front party member.' \
         '  Press F10 once to disable Player 2 AI. Player 1 remains keyboard/mouse.' \
         '  Move Player 2 with the controller left stick and tap A for the selected character weak attack.' \
+        '  Tap X: Tal/Buki submit native Strong; Ailish/Elco toggle only Camera 2 between third-person and camera-only first-person.' \
         '  Rotate only Player 2/right viewport with the controller right stick; Player 1 mouse should affect only the left viewport.' \
         '  After rotating Camera 2, left-stick forward must follow its forward direction. The 10-unit guard remains active.' \
         '  Unplugging the pad or stopping the helper neutralizes Player 2 input within 250 ms.' \
@@ -621,7 +622,7 @@ if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
         '  Authored temporary-room doors move the active party together and rebuild Player 2 only after the destination settles.' \
         '  Travel voting is intentionally disabled: the current late hook runs after Sudeki starts the door approach/script and cannot safely cancel it. Do not test P2 B or P1 Esc until a target-specific pre-OnAction seam is verified.' \
         '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick. A submits Weak Attack unless an exact actor/target/source-generation interaction has been proven; until then interaction intent is denied rather than replaying global Select.' \
-        '  X submits Strong Attack. B submits the native Sweep only in combat and acts as modal Cancel. Y and D-pad edges are named in the log, but their per-seat Quick Menu/Quickshot consumers are not connected yet.' \
+        '  X submits Strong Attack for Tal/Buki. For Ailish/Elco it toggles only the Player 2 viewport perspective; this is SudekiMP policy because native ranged Strong is ignored. B submits the native Sweep only in combat and acts as modal Cancel. Y and D-pad edges are named in the log, but their per-seat Quick Menu/Quickshot consumers are not connected yet.' \
         '  The passive provenance trace records P1/P2 candidate and OnAction identities without invoking any world action. The old orange P2 INTERACT? targetless request has been removed.' \
         '  The rejected custom Blacksmith preview remains OFF. Native Blacksmith behavior is unchanged while actor/merchant provenance and a proven per-player native-window strategy are researched.' \
         '  Shops still use one serialized full-width native menu; Player 2 input is neutralized until it closes and both camera caches refresh.' \

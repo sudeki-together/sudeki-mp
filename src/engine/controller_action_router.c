@@ -65,6 +65,11 @@ static SudekiMpControllerActionIntent resolve_gameplay(
             SUDEKIMP_CONTROLLER_INTENT_INTERACT :
             SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK;
     case SUDEKIMP_BRIDGE_BUTTON_X:
+        if (context->ranged_character) {
+            return context->perspective_toggle_available ?
+                SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE :
+                SUDEKIMP_CONTROLLER_INTENT_NONE;
+        }
         return SUDEKIMP_CONTROLLER_INTENT_SECONDARY_ATTACK_STRONG;
     case SUDEKIMP_BRIDGE_BUTTON_Y:
         return SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU;
@@ -228,6 +233,8 @@ const char *SudekiMpControllerActionIntentName(
         return "primary_attack_weak";
     case SUDEKIMP_CONTROLLER_INTENT_SECONDARY_ATTACK_STRONG:
         return "secondary_attack_strong";
+    case SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE:
+        return "perspective_toggle";
     case SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU: return "quick_menu";
     case SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP:
         return "crowd_clear_sweep";

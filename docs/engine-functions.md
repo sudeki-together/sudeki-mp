@@ -200,6 +200,17 @@ RVA `0x000DB0E0` uses an unusual exact-build i386 ABI: `ECX` is the target `CCha
 
 This is a real per-character boundary: the arbiter is explicitly supplied rather than recovered from the global controller target, and another native caller exists at RVA `0x000DA816`. A one-shot weak request is therefore represented by Weak `1` and zero for the other five states. The disabled prototype uses a small isolated assembly adapter to reproduce the ABI and leaves targeting and every native rejection path unchanged. The adapter's register/stack/cleanup test and the inert exact-image hook test pass. The live battle kept one Buki arbiter and repeatedly changed `+0x50` from idle values into `0x00001002`; exported `CCharacterArbiter::IsAttacking()` at RVA `0x000088D0` tests exactly bit `0x1000`. Independent Buki attack input is therefore confirmed. The observed nearest-target lock remains native, although its underlying pointer/writer is not yet traced.
 
+The same exact function also establishes the ranged capability boundary. When
+the low state nibble at arbiter `+0x58` is melee mode `1`, Weak, Strong, and
+Sweep select attack kinds `1`, `2`, and `3`. In ranged/missile mode `2`, the
+branch checks Sweep, weapon-next/previous, and Weak states `1|2` before firing;
+it never reads the Strong argument. Ailish and Elco therefore have no usable
+normal `AttackStrong` through this native path even though the global input
+action exists. First-person input is separate: the exact action registry maps
+`0x3C` to `ac_FirstPersonMode` and `0x3D` to
+`ac_FirstPersonModeToggle`, and the controller consumer routes the latter to
+the process-global camera/presentation helper.
+
 ## Gameplay camera target ownership
 
 | Role | RVA / VA | Confirmed behavior |
