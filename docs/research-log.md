@@ -1005,7 +1005,7 @@ Rather than installing an unavailable proprietary Windows kernel driver or creat
 
 The version-1 packet is 32 bytes and encodes sequence, sender monotonic timestamp, signed 16-bit left/right axes, unsigned 16-bit triggers, and standardized button bits. The helper queries `JSIOCGAXMAP` and `JSIOCGBTNMAP` rather than assuming numeric indices. Against the connected `Razer Raiju Mobile Wired` at `/dev/input/js0`, it found 8 axes and 15 buttons with left stick `0/1`, right stick `2/3`, triggers `5/4`, and D-pad `6/7`. This records transport discovery only; trigger semantics are not yet used by gameplay.
 
-When the bridge option is enabled, Buki's existing control-separation hook consumes the left stick with a configurable radial deadzone, preserves analog magnitude as native movement speed, transforms direction through RVA `0x000291A0`, and submits it to Buki's already-proven arbiter RVA `0x000DAE80`. Controller A supplies the same rising weak-attack input previously proven on keyboard U. The receiver exposes a distinct external-bridge combat-context identity. Right-stick values are change-logged as `captured_not_applied_independent_camera_pending`; they do not move Player 1's global camera or the translated Player 2 view.
+At this checkpoint, enabling the bridge made Buki's existing control-separation hook consume the left stick with a configurable radial deadzone, preserve analog magnitude as native movement speed, transform direction through RVA `0x000291A0`, and submit it to Buki's already-proven arbiter RVA `0x000DAE80`. Controller A supplied the same rising weak-attack input previously proven on keyboard U. The receiver exposed a distinct external-bridge combat-context identity. Right-stick values were change-logged as `captured_not_applied_independent_camera_pending`; they did not move Player 1's global camera or the translated Player 2 view.
 
 `sudekimp-input-bridge --self-test`, the PE32 protocol round-trip test, Wine localhost receiver/timeout test, player combat-context and skill-activation regressions, and the exact supported-executable inert-image hook install/restore test all pass. A separate external-sender run then opened the physical Raiju in the Linux helper and delivered sequence `67` through loopback to the PE32 receiver under Wine, completing the non-game end-to-end path. `--controller-bridge-test` packages the native helper, F10 Buki override, dual cameras, camera-relative analog movement, separation guard, and A weak attack while restoring all generated settings on exit. Live in-game ownership is deliberately not claimed until the user confirms movement and attack.
 
@@ -1013,7 +1013,7 @@ When the bridge option is enabled, Buki's existing control-separation hook consu
 
 The castle save loaded with Ailish as Player 1 and Buki in slot 1. The receiver connected at sender sequence `1125`; F10 acquired Buki's native AI override successfully. Keyboard/mouse remained Player 1 while the user independently moved Buki with the Raiju left stick and confirmed that two people could control the two characters simultaneously. Every bridge movement record used Buki character `0x082B1D50` and arbiter `0x082B2620`. The input covered the signed analog range, passed through changing camera-relative world vectors, produced sub-1.0 movement-speed bit patterns for partial deflection, reached 1.0 at full deflection, and emitted native stop events inside the deadzone.
 
-Right-stick changes were logged repeatedly with policy `captured_not_applied_independent_camera_pending`, and the user did not report either camera reacting to them. Two A-button rising edges reached `second_player_weak_attack phase=submit` for the same Buki arbiter. The current castle conversation save does not permit visible weak attacks, so this proves controller button mapping and native submission—not completed combat animation. That final visible action remains a small arena test. The core bridge milestone is nevertheless complete: Linux controller input and Sudeki's normal keyboard/mouse input now control different party characters in the same process.
+Right-stick changes were logged repeatedly with policy `captured_not_applied_independent_camera_pending`, and the user did not report either camera reacting to them. Two A-button rising edges reached `second_player_weak_attack phase=submit` for the same Buki arbiter. The castle conversation save used for this historical run did not permit visible weak attacks, so the capture proved controller button mapping and native submission—not completed combat animation. That final visible action remained a small arena test. The core bridge milestone was nevertheless complete: Linux controller input and Sudeki's normal keyboard/mouse input controlled different party characters in the same process.
 
 ## 2026-08-15 — Party-generic Player 2 control prepared
 
@@ -1932,12 +1932,12 @@ to idle without a first-person fallback or wrapper change. This matches the
 user's visual result: the Player 2 combat animation and weapon presentation
 look correct.
 
-The bridge currently maps `A` only to weak attack, so this capture does not
-reproduce the first-person-only electric reload IDs `0xC2`/`0xC3`. It is a
-valid native world-side control reference, not yet proof of the reload-stage
-mapping. The candidate semantic target for those observer-side stages remains
-unconfirmed until the electric action can be triggered through a native AI or
-weapon-specific input path.
+At this capture, the bridge mapped `A` only to weak attack, so it did not
+reproduce the first-person-only electric reload IDs `0xC2`/`0xC3`. It remains
+a valid historical native world-side control reference, not proof of the
+reload-stage mapping. The candidate semantic target for those observer-side
+stages remains unconfirmed until the electric action can be triggered through
+a native AI or weapon-specific input path.
 
 Confidence: high for the native Player 2 control path; pending for the
 electric reload-stage correspondence.
@@ -3990,16 +3990,19 @@ visual entry/exit acceptance.
 
 ## 2026-08-26 — Player-statehood and shared shop ownership audit
 
-**Status:** ownership policy and request-only P2 feedback are implemented;
-target-specific P2 world dispatch and independent shop UI remain future work.
+**Historical checkpoint, superseded later on 2026-08-26:** ownership policy and
+request-only P2 feedback were implemented here; target-specific P2 world
+dispatch and independent shop UI remained future work.
 
 - A process-global coordinator now separates a human seat, its generation-bound
   actor lease, and an interaction session. The immutable request provenance is
   `(serial, player, actor, actor generation, target, source generation, kind,
-  target-known)`. A five-second targetless `GENERIC_REQUEST` is attention-only
-  and cannot enter the native commit path.
-- The P2 badge consumes that snapshot and shows `P2 INTERACT?` for a live P2
-  generic request. Texture invalidation follows request serial/state edges.
+  target-known)`. At this checkpoint, a five-second targetless
+  `GENERIC_REQUEST` was attention-only and could not enter the native commit
+  path.
+- At this checkpoint, the P2 badge consumed that snapshot and showed
+  `P2 INTERACT?` for a live P2 generic request. Texture invalidation followed
+  request serial/state edges.
   Known or uncertain shared shop/blacksmith modals suppress the split-only P2
   badge and roaming-boundary overlay.
 - Exact-image static analysis found one `CInventory` pointer (`0x00808D84`), one
@@ -4015,6 +4018,38 @@ target-specific P2 world dispatch and independent shop UI remain future work.
   host-only. The complete authority matrix, save offsets, failure policy, and
   staged shop/blacksmith roadmap are recorded in
   [player-statehood-design.md](player-statehood-design.md).
+
+## 2026-08-26 — Seat-neutral controller actions replace targetless X
+
+**Status:** current controller contract implemented; exact world interaction,
+per-seat Quick Menu, and per-seat Quickshot consumers remain future work.
+
+- The controller-X targetless `GENERIC_REQUEST` generator and the
+  `P2 INTERACT?` badge were removed. The generic player-statehood API remains
+  available for isolated provenance research, but no runtime controller path
+  creates that request.
+- A pointer-free action router owns rising edges and reconnect-neutral fences
+  independently for seats 0 through 3; the current bridge integration supplies
+  P2 only. Modal context wins over transition consent, which wins over an exact
+  known interaction target, which wins over ordinary gameplay.
+- The shipped Xbox-style face-button contract is now explicit. A reports an
+  exact interaction intent only for a complete actor/target/source-generation
+  tuple and otherwise submits native Weak. X submits native Strong. Y reports
+  `quick_menu` with `intent_only` delivery because no per-seat native menu
+  consumer exists. B resolves modal/consent Cancel and submits native Sweep in
+  combat; outside those contexts it is blocked rather than repurposed.
+- The D-pad resolves per-seat Quickshot intents, and modal D-pad/shoulder edges
+  resolve navigation/page intents. These remain intent-only until their owning
+  per-seat consumers are connected. The sticks stay on the existing movement
+  and camera paths.
+- A, X, and combat B share the exact validated arbiter-combat ABI. The older
+  external-bridge A polling path is bypassed, preventing double submission.
+  Every routed edge logs the protocol button name, resolved intent, context,
+  delivery, rejection reason, actor, arbiter, and native state flags, so a
+  device/driver X-Y swap is visible without packet-level log spam.
+- The host and Wine router tests, native combat-ABI test, player-statehood test,
+  full MinGW DLL build, and exact supported-image regression passed. No live
+  game acceptance is claimed by this noninteractive checkpoint.
 
 ## 2026-08-26 — Per-player blacksmith presentation experiment
 
@@ -4082,3 +4117,37 @@ remain intentionally disabled and live acceptance has not started.
 - Native per-player UI construction/virtualization, exact actor/merchant SOL
   provenance, P2 target acquisition, live wallet persistence, and native commit
   wiring remain future milestones. All mutation paths stay disabled.
+
+## 2026-08-26 — Passive actor/target provenance observation integrated
+
+**Status:** exact-build observation groundwork is integrated, default-off, and
+incapable of activating a world interaction.
+
+- The legacy `EnablePlayerInteractionRequestsPrototype` key now requires the
+  zone-transition observer and installs passive call-site hooks for native
+  action dispatch (`0x0040D75B`), its accepted message path (`0x0040D951`), and
+  the OnAction-to-SOL submission (`0x0040CAEB`). Exact instruction signatures
+  are checked before any hook is installed, and a partial install rolls every
+  provenance hook back.
+- Each dispatch trace records the source actor, native front actor, bounded
+  candidate count (maximum 15), overflow/ambiguity, accepted target/event, and
+  native acceptance state. The accepted message and SOL thread are correlated
+  only inside the same dispatch/thread context; repeated identical observations
+  are suppressed in the production log.
+- Zone observation initializes a nonzero source generation, advances it on
+  every existing zone-generation bump, and invalidates all provenance during
+  teardown. Generation zero is always invalid. Actor authority also requires a
+  current statehood lease and matching actor generation.
+- Native-front/P1 OnAction can be labelled native-validated. A non-front/P2
+  accepted candidate is deliberately labelled accepted-but-unvalidated and
+  cannot authorize activation. Controller A remains intent-only: there is no
+  targetless request, GUI Select replay, controller swap, validator bypass, or
+  native world action.
+- The SOL hook preserves both native return registers consumed by the caller:
+  the task-handle result in EAX and the post-call ECX later pushed at
+  `0x0040CAFA`. The exact-image signature includes that ECX consumer, so a build
+  without the proven continuation fails closed.
+- This is merchant/session provenance groundwork, not native per-player
+  Blacksmith UI. Commit wiring stays blocked until P2 has an independently
+  validated target/eligibility path and the native per-player UI/session state
+  can be virtualized safely.

@@ -9,6 +9,7 @@
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
+#include "hooks/interaction_provenance.h"
 #include "hooks/pattern_scan.h"
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_menu.h"
@@ -209,6 +210,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL direct_spirit_strike_prototype_enabled;
     BOOL external_input_bridge_enabled;
     BOOL player_interaction_requests_enabled;
+    BOOL interaction_provenance_enabled;
     BOOL experimental_blacksmith_ui_enabled;
     BOOL second_player_controller_camera_enabled;
     BOOL native_second_player_camera_collision_enabled;
@@ -517,6 +519,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     zone_transition_trace_enabled = zone_transition_trace_enabled ||
         zone_traversal_enabled || party_atomic_transitions_enabled ||
         transition_vote_enabled;
+    interaction_provenance_enabled =
+        player_interaction_requests_enabled && zone_transition_trace_enabled;
     coop_roster_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -1297,6 +1301,43 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("zone_transition_trace_applied=false\r\n");
     }
+    SudekiMpLogFormat(
+        "interaction_provenance_trace_requested=%s "
+        "zone_transition_trace_ready=%s "
+        "effective=%s mutation=disabled\r\n",
+        player_interaction_requests_enabled ? "true" : "false",
+        zone_transition_trace_enabled ? "true" : "false",
+        interaction_provenance_enabled ? "true" : "false");
+    if (!SudekiMpInstallInteractionProvenance(
+            game_module, interaction_provenance_enabled)) {
+        DWORD provenance_error = GetLastError();
+
+        SudekiMpUninstallInteractionProvenance();
+        SudekiMpUninstallZoneTransitionTrace();
+        SudekiMpLogFormat(
+            "interaction_provenance_trace_error=%lu "
+            "phase=exact_observation_hook_install\r\n",
+            (unsigned long)provenance_error);
+        SudekiMpLogWrite(
+            "interaction_provenance_trace_applied=false "
+            "rollback=all_provenance_hooks_and_zone_generation\r\n");
+        SudekiMpLogWrite("status=interaction_provenance_trace_error\r\n");
+        SudekiMpLogClose();
+        SetLastError(provenance_error);
+        return SUDEKIMP_INIT_TRACE_FAILED;
+    }
+    if (interaction_provenance_enabled) {
+        SudekiMpLogWrite(
+            "interaction_provenance_trace_applied=true "
+            "policy=passive_actor_target_observation_only_"
+            "p2_activation_fail_closed\r\n");
+    } else {
+        SudekiMpLogFormat(
+            "interaction_provenance_trace_applied=false reason=%s "
+            "default=false\r\n",
+            player_interaction_requests_enabled ?
+                "zone_transition_trace_required" : "config_disabled");
+    }
     if (cleanroom_menu_enabled || zone_traversal_enabled) {
         BOOL cleanroom_installed = zone_traversal_enabled &&
                 !cleanroom_menu_enabled && !coop_roster_menu_enabled ?
@@ -1319,6 +1360,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             );
             SudekiMpLogWrite("cleanroom_menu_applied=false\r\n");
             SudekiMpLogWrite("status=cleanroom_menu_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
@@ -1353,8 +1395,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (unsigned long)float_bits(input_bridge_deadzone)
     );
     SudekiMpLogFormat(
-        "player_interaction_requests_requested=%s button=controller_x "
-        "policy=targetless_attention_only_no_native_world_action\r\n",
+        "interaction_provenance_and_intent_trace_requested=%s "
+        "button=controller_a "
+        "policy=passive_exact_actor_target_source_generation_trace_"
+        "intent_only_no_targetless_request_no_native_world_action\r\n",
         player_interaction_requests_enabled ? "true" : "false"
     );
     SudekiMpLogFormat(
@@ -1371,6 +1415,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogFormat("input_bridge_start_error=%lu\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=input_bridge_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
         }
@@ -1382,6 +1427,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             );
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
@@ -1405,6 +1451,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("control_separation_applied=false\r\n");
             SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
@@ -1468,6 +1515,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             );
             SudekiMpLogWrite("split_screen_render_applied=false\r\n");
             SudekiMpLogWrite("status=split_screen_render_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             SetLastError(split_screen_error);
             return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
@@ -1495,6 +1543,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             );
             SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
             SudekiMpLogWrite("status=coop_roster_menu_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
@@ -1522,6 +1571,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("player_movement_trace_applied=false\r\n");
             SudekiMpLogWrite("status=player_input_trace_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_PLAYER_INPUT_TRACE_FAILED;
         }
@@ -1546,6 +1596,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("spirit_strike_input_applied=false\r\n");
             SudekiMpLogWrite("status=spirit_input_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_SPIRIT_INPUT_FAILED;
         }
@@ -1565,6 +1616,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogWrite(
                 "per_player_blacksmith_ui_applied=false\r\n");
             SudekiMpLogWrite("status=cleanroom_menu_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
@@ -1606,6 +1658,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
             SudekiMpUninstallBlacksmithUiAdapter();
             SudekiMpUninstallTalosDefenseTrace();
+            SudekiMpUninstallInteractionProvenance();
             SudekiMpUninstallZoneTransitionTrace();
             SudekiMpInputBridgeStop();
             SudekiMpUninstallAcceleratorCache();

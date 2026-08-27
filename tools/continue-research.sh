@@ -27,7 +27,7 @@ usage() {
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --input-trace Trace native QuickSkill input and either native Plasmatica activation route.' \
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
-        '  --party-lifecycle-trace Exercise roster handoff, party-atomic rooms, the visible roaming boundary, P2 interaction requests, and the historical two-viewport blacksmith data preview; native per-player windows, forge commits, and the late travel-vote experiment stay disabled.' \
+        '  --party-lifecycle-trace Exercise roster handoff, party-atomic rooms, the visible roaming boundary, passive actor/target provenance, and controller routing; the rejected custom blacksmith preview, forge commits, and the late travel-vote experiment stay disabled.' \
         '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
         '  --talos-defense-trace Restore the Talos party and trace real-boss damage, invulnerability, reaction IDs, and knockback sessions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
@@ -225,7 +225,6 @@ case "${mode}" in
                 -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
                 -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
                 -e 's/^EnablePlayerInteractionRequestsPrototype=false$/EnablePlayerInteractionRequestsPrototype=true/' \
-                -e 's/^EnablePerPlayerBlacksmithUiExperiment=false$/EnablePerPlayerBlacksmithUiExperiment=true/' \
                 -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
                 -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
                 -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
@@ -621,10 +620,10 @@ if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
         '  Controller Start requests drop-in; hold Back+Start for one second to drop out.' \
         '  Authored temporary-room doors move the active party together and rebuild Player 2 only after the destination settles.' \
         '  Travel voting is intentionally disabled: the current late hook runs after Sudeki starts the door approach/script and cannot safely cancel it. Do not test P2 B or P1 Esc until a target-specific pre-OnAction seam is verified.' \
-        '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick and A weak attack.' \
-        '  Player 2 taps controller X to post/cancel a visible five-second INTERACT? request; it is advisory and never injects a native world action.' \
-        '  Blacksmith preview experiment is ON for this profile only: Player 1 opening a forge should keep split view and open distinct P1/P2 equipment, socket, rune, price, and projected-stat panels with independent cursor/page state and shared money.' \
-        '  This is preview only, no forge commits: Enter/A reports COMMIT DISABLED and never purchases, equips, sockets, or mutates native inventory. Escape/B closes each seat.' \
+        '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick. A submits Weak Attack unless an exact actor/target/source-generation interaction has been proven; until then interaction intent is denied rather than replaying global Select.' \
+        '  X submits Strong Attack. B submits the native Sweep only in combat and acts as modal Cancel. Y and D-pad edges are named in the log, but their per-seat Quick Menu/Quickshot consumers are not connected yet.' \
+        '  The passive provenance trace records P1/P2 candidate and OnAction identities without invoking any world action. The old orange P2 INTERACT? targetless request has been removed.' \
+        '  The rejected custom Blacksmith preview remains OFF. Native Blacksmith behavior is unchanged while actor/merchant provenance and a proven per-player native-window strategy are researched.' \
         '  Shops still use one serialized full-width native menu; Player 2 input is neutralized until it closes and both camera caches refresh.' \
         '  Camera 2 uses the existing manual orbit fallback in this live profile; the native collision experiment remains disabled after its first runtime acquisition fault.' \
         '  In settled exploration, both viewports warn at 80% of the 10-unit party range; at the visible hard limit only clearly inward movement is accepted for either player.' \

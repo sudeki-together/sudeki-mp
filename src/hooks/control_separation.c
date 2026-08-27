@@ -3,11 +3,13 @@
 #include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
 #include "engine/camera_target_abi.h"
+#include "engine/controller_action_router.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
 #include "engine/roaming_boundary.h"
 #include "engine/skill_activation_abi.h"
+#include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/call_hook.h"
 #include "hooks/split_screen_render.h"
 #include "input/bridge_protocol.h"
@@ -186,7 +188,7 @@ static float input_bridge_deadzone;
 static SudekiMpInputBridgeState input_bridge_state;
 static BOOL input_bridge_connected;
 static BOOL interaction_requests_enabled;
-static BOOL interaction_request_x_was_down;
+static SudekiMpControllerActionRouter controller_action_router;
 static BOOL shared_interaction_modal_quiesce_logged;
 static void *published_player_actors[2];
 static uint32_t published_player_actor_generations[2];
@@ -440,11 +442,6 @@ static void publish_runtime_player_leases(void *controller) {
     }
     publish_runtime_player_lease(0u, player_one, player_one_present);
     publish_runtime_player_lease(1u, player_two, player_two_present);
-}
-
-static BOOL interaction_request_x_down(void) {
-    return input_bridge_enabled && input_bridge_connected &&
-        (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_X) != 0u;
 }
 
 static uint8_t *current_gameplay_camera(void) {
@@ -865,11 +862,9 @@ static void quiesce_second_player_input(void) {
     stop_second_player_movement();
     second_player_facing_valid = FALSE;
     spirit_direct_movement_active = FALSE;
-    interaction_request_x_was_down = interaction_request_x_down();
-    weak_attack_was_down = input_bridge_enabled ?
-        (input_bridge_connected &&
-         (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) :
-        ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0);
+    weak_attack_was_down = !input_bridge_enabled ?
+        ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0)
+        : FALSE;
     for (ordinal = 0u; ordinal < 4u; ++ordinal) {
         second_player_skill_keys_were_down[ordinal] =
             (GetAsyncKeyState(
@@ -1158,7 +1153,6 @@ static void __stdcall enforce_player_one_roaming_boundary(
 
 static void poll_input_bridge(void) {
     BOOL connected;
-    BOOL was_connected;
     DWORD now;
     int delta_x;
     int delta_y;
@@ -1166,7 +1160,6 @@ static void poll_input_bridge(void) {
     if (!input_bridge_enabled) {
         return;
     }
-    was_connected = input_bridge_connected;
     connected = SudekiMpInputBridgePoll(&input_bridge_state);
     if (!connected) {
         if (input_bridge_connected) {
@@ -1174,14 +1167,9 @@ static void poll_input_bridge(void) {
             stop_second_player_movement();
         }
         input_bridge_connected = FALSE;
-        interaction_request_x_was_down = FALSE;
         return;
     }
     input_bridge_connected = TRUE;
-    if (!was_connected) {
-        /* A held button on the first live packet is not a rising edge. */
-        interaction_request_x_was_down = interaction_request_x_down();
-    }
     now = GetTickCount();
     delta_x = (int)input_bridge_state.right_x -
         (int)input_bridge_last_right_x;
@@ -1201,84 +1189,234 @@ static void poll_input_bridge(void) {
     }
 }
 
-static void service_second_player_interaction_request(
-    BOOL owns_foreground
-) {
-    SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
+static BOOL second_player_combat_active(void) {
+    uint8_t *group;
+
+    if (game_base == NULL || group_players_in_combat == NULL ||
+        !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group))) {
+        return FALSE;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    return readable_memory(group, 0xd5u) &&
+        group_players_in_combat(group) != 0u;
+}
+
+static BOOL second_player_exact_interaction_target_known(void) {
+    SudekiMpPlayerStatehood *statehood;
     SudekiMpPlayerStatehoodSnapshot snapshot;
-    const SudekiMpPlayerLease *player_two;
-    BOOL x_down = interaction_request_x_down();
-    DWORD now = GetTickCount();
+    const SudekiMpPlayerLease *lease;
 
-    SudekiMpPlayerStatehoodService(statehood, now);
-    if (!interaction_requests_enabled || !owns_foreground ||
-        !input_bridge_enabled || !input_bridge_connected ||
-        SudekiMpSplitScreenSharedInteractionModalActive()) {
-        interaction_request_x_was_down = x_down;
-        return;
+    if (!interaction_requests_enabled || overridden_character == NULL) {
+        return FALSE;
     }
-    if (!x_down || interaction_request_x_was_down) {
-        interaction_request_x_was_down = x_down;
-        return;
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    if (!SudekiMpPlayerStatehoodGetSnapshot(
+            statehood, GetTickCount(), &snapshot) ||
+        snapshot.state != SUDEKIMP_INTERACTION_SESSION_REQUESTED ||
+        snapshot.provenance.player_index != 1u ||
+        !snapshot.provenance.target_known ||
+        snapshot.provenance.target == 0u ||
+        snapshot.provenance.source_generation == 0u ||
+        snapshot.provenance.kind == SUDEKIMP_INTERACTION_NONE) {
+        return FALSE;
+    }
+    lease = &statehood->players[1];
+    return lease->human_present &&
+        lease->actor == (uintptr_t)overridden_character &&
+        lease->actor == snapshot.provenance.actor &&
+        lease->actor_generation != 0u &&
+        lease->actor_generation == snapshot.provenance.actor_generation;
+}
+
+static BOOL submit_second_player_controller_combat_action(
+    void *controller,
+    BOOL owns_foreground,
+    SudekiMpControllerActionIntent intent,
+    const char **reason,
+    void **submitted_arbiter,
+    uint32_t *flags_50,
+    uint32_t *state_58,
+    uint8_t *flags_60
+) {
+    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *component;
+    uint8_t *mode_state;
+    uint8_t *arbiter;
+    void *controller_target;
+    SudekiMpControllerCombatFlags combat_flags;
+
+    *reason = "invalid_action_intent";
+    *submitted_arbiter = NULL;
+    *flags_50 = 0u;
+    *state_58 = 0u;
+    *flags_60 = 0u;
+    if (!SudekiMpControllerActionCombatFlags(intent, &combat_flags)) {
+        return FALSE;
+    }
+    if (!second_player_weak_attack_enabled || game_base == NULL) {
+        *reason = "combat_input_consumer_disabled";
+        return FALSE;
+    }
+    if (!owns_foreground) {
+        *reason = "game_window_not_foreground";
+        return FALSE;
+    }
+    if (!player_two_requested || character == NULL ||
+        !overridden_character_is_in_active_group()) {
+        *reason = "no_live_player_two_character";
+        return FALSE;
     }
 
-    if (SudekiMpPlayerStatehoodGetSnapshot(statehood, now, &snapshot)) {
-        if (snapshot.state == SUDEKIMP_INTERACTION_SESSION_REQUESTED &&
-            snapshot.provenance.player_index == 1u &&
-            snapshot.provenance.kind ==
-                SUDEKIMP_INTERACTION_GENERIC_REQUEST &&
-            !snapshot.provenance.target_known &&
-            snapshot.provenance.target == 0u &&
-            SudekiMpPlayerStatehoodCancelRequest(statehood, 1u)) {
-            SudekiMpLogFormat(
-                "control_separation event=interaction_request player=2 "
-                "phase=cancel serial=%lu source=controller_x "
-                "policy=targetless_acknowledgement_never_dispatch_native_action\r\n",
-                (unsigned long)snapshot.provenance.serial);
-        } else {
-            SudekiMpLogFormat(
-                "control_separation event=interaction_request player=2 "
-                "phase=reject reason=session_occupied state=%u kind=%u "
-                "owner=%lu source=controller_x\r\n",
-                (unsigned int)snapshot.state,
-                (unsigned int)snapshot.provenance.kind,
-                (unsigned long)snapshot.provenance.player_index + 1u);
+    component = *(uint8_t **)(character + 0x94u);
+    mode_state = component == NULL ? NULL :
+        *(uint8_t **)(component + 0x3cu);
+    arbiter = *(uint8_t **)(character + 0x90u);
+    controller_target = controller == NULL ? NULL :
+        *(void **)((uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
+    if (component == NULL || mode_state == NULL || arbiter == NULL ||
+        *(void **)(character + 0xacu) == NULL ||
+        *(int16_t *)(component + 0x16au) != 1 ||
+        *(mode_state + 0x0bu) != 0 || character == controller_target) {
+        *reason = "native_player_two_combat_state_unavailable";
+        return FALSE;
+    }
+
+    *submitted_arbiter = arbiter;
+    *flags_50 = *(uint32_t *)(arbiter + 0x50u);
+    *state_58 = *(uint32_t *)(arbiter + 0x58u);
+    *flags_60 = *(uint8_t *)(arbiter + 0x60u);
+    SudekiMpSubmitArbiterCombatInput(
+        game_base + RVA_ARBITER_COMBAT_INPUT,
+        arbiter,
+        combat_flags.weak,
+        combat_flags.strong,
+        combat_flags.sweep,
+        0,
+        0,
+        0
+    );
+    *reason = "native_arbiter_combat_input_submitted";
+    return TRUE;
+}
+
+static BOOL controller_intent_is_combat(
+    SudekiMpControllerActionIntent intent
+) {
+    return intent == SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK ||
+        intent == SUDEKIMP_CONTROLLER_INTENT_SECONDARY_ATTACK_STRONG ||
+        intent == SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP;
+}
+
+static const char *controller_action_layer_name(
+    const SudekiMpControllerActionContext *context
+) {
+    if (!context->seat_active) return "inactive";
+    if (context->modal_active) return "modal";
+    if (context->transition_vote_active) return "transition_vote";
+    if (context->interaction_target_known) return "known_interaction";
+    return "gameplay";
+}
+
+static void service_second_player_controller_actions(
+    void *controller,
+    BOOL owns_foreground,
+    BOOL modal_active,
+    BOOL transition_vote_active
+) {
+    SudekiMpControllerActionContext context;
+    SudekiMpControllerActionResolution
+        results[SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS];
+    size_t result_count;
+    size_t result_index;
+
+    ZeroMemory(&context, sizeof(context));
+    context.seat_active = player_two_requested &&
+        overridden_character != NULL &&
+        overridden_character_is_in_active_group();
+    context.modal_active = modal_active != FALSE;
+    context.transition_vote_active = transition_vote_active != FALSE;
+    context.interaction_target_known =
+        second_player_exact_interaction_target_known();
+    context.combat_active = second_player_combat_active();
+    result_count = SudekiMpControllerActionRouterAdvance(
+        &controller_action_router,
+        1u,
+        input_bridge_enabled && input_bridge_connected,
+        input_bridge_state.buttons,
+        &context,
+        results,
+        SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS
+    );
+    if (result_count > SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS) {
+        result_count = SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS;
+    }
+    for (result_index = 0u; result_index < result_count; ++result_index) {
+        SudekiMpControllerActionResolution *resolution =
+            &results[result_index];
+        const char *delivery = "intent_only";
+        const char *reason = "context_owner_must_consume";
+        void *arbiter = NULL;
+        uint32_t flags_50 = 0u;
+        uint32_t state_58 = 0u;
+        uint8_t flags_60 = 0u;
+
+        if (resolution->intent == SUDEKIMP_CONTROLLER_INTENT_NONE) {
+            delivery = "blocked";
+            reason = context.seat_active ?
+                "no_action_in_current_context" : "seat_inactive";
+        } else if (controller_intent_is_combat(resolution->intent)) {
+            if (submit_second_player_controller_combat_action(
+                    controller,
+                    owns_foreground,
+                    resolution->intent,
+                    &reason,
+                    &arbiter,
+                    &flags_50,
+                    &state_58,
+                    &flags_60)) {
+                delivery = "submitted";
+            } else {
+                delivery = "rejected";
+            }
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_INTERACT) {
+            reason = "exact_target_consumer_not_connected";
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+            reason = "per_seat_quick_menu_consumer_not_connected";
+        } else if (resolution->intent >=
+                SUDEKIMP_CONTROLLER_INTENT_QUICKSHOT_UP &&
+            resolution->intent <=
+                SUDEKIMP_CONTROLLER_INTENT_QUICKSHOT_LEFT) {
+            reason = "per_seat_quickshot_consumer_not_connected";
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_VOTE_ACCEPT ||
+            resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_VOTE_CANCEL) {
+            reason = "transition_vote_owner_observes_bridge_independently";
         }
-        interaction_request_x_was_down = x_down;
-        return;
+        SudekiMpLogFormat(
+            "control_separation event=controller_action_edge phase=rising "
+            "player=2 protocol_button=%s intent=%s layer=%s "
+            "combat=%s exact_target=%s delivery=%s reason=%s "
+            "character=0x%08lx arbiter=0x%08lx flags_50=0x%08lx "
+            "state_58=0x%08lx flags_60=0x%02x\r\n",
+            SudekiMpControllerProtocolButtonName(
+                resolution->protocol_button),
+            SudekiMpControllerActionIntentName(resolution->intent),
+            controller_action_layer_name(&context),
+            context.combat_active ? "true" : "false",
+            context.interaction_target_known ? "true" : "false",
+            delivery,
+            reason,
+            (unsigned long)(uintptr_t)overridden_character,
+            (unsigned long)(uintptr_t)arbiter,
+            (unsigned long)flags_50,
+            (unsigned long)state_58,
+            (unsigned int)flags_60
+        );
     }
-
-    player_two = &statehood->players[1];
-    {
-        uint32_t serial = 0u;
-        if (SudekiMpPlayerStatehoodRequest(
-                statehood,
-                1u,
-                player_two->actor,
-                player_two->actor_generation,
-                SUDEKIMP_INTERACTION_GENERIC_REQUEST,
-                0u,
-                0,
-                0u,
-                now,
-                &serial)) {
-            SudekiMpLogFormat(
-                "control_separation event=interaction_request player=2 "
-                "phase=create serial=%lu actor=0x%08lx "
-                "actor_generation=%lu target=0x00000000 target_known=false "
-                "source=controller_x "
-                "policy=request_only_never_dispatch_native_action\r\n",
-                (unsigned long)serial,
-                (unsigned long)player_two->actor,
-                (unsigned long)player_two->actor_generation);
-        } else {
-            SudekiMpLogWrite(
-                "control_separation event=interaction_request player=2 "
-                "phase=reject reason=no_live_player_two_actor_lease "
-                "source=controller_x\r\n");
-        }
-    }
-    interaction_request_x_was_down = x_down;
 }
 
 static void quiesce_for_shared_interaction_modal(void) {
@@ -1330,6 +1468,7 @@ BOOL SudekiMpControlSeparationGameplayInputFrozen(void) {
 
 static BOOL service_transition_vote_input_freeze(void *controller) {
     unsigned int ordinal;
+    BOOL blacksmith_modal;
     BOOL escape_down =
         (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     BOOL vote_suppressed = SudekiMpInputBridgeGameplaySuppressed();
@@ -1352,10 +1491,16 @@ static BOOL service_transition_vote_input_freeze(void *controller) {
         return FALSE;
     }
     poll_input_bridge();
+    blacksmith_modal = SudekiMpBlacksmithUiAdapterActive();
+    service_second_player_controller_actions(
+        controller,
+        FALSE,
+        blacksmith_modal,
+        vote_suppressed && !blacksmith_modal
+    );
     stop_first_player_movement(controller);
     stop_second_player_movement();
     second_player_facing_valid = FALSE;
-    interaction_request_x_was_down = interaction_request_x_down();
     weak_attack_was_down = FALSE;
     for (ordinal = 0u; ordinal < 4u; ++ordinal) {
         second_player_skill_keys_were_down[ordinal] =
@@ -2216,13 +2361,15 @@ static void poll_second_player_weak_attack(
     void *controller_target;
     BOOL key_is_down;
 
-    if (!second_player_weak_attack_enabled) {
+    if (!second_player_weak_attack_enabled || input_bridge_enabled) {
+        /* External-controller face buttons are owned exclusively by the
+         * seat-neutral action router. Keep this polling path only for the
+         * legacy keyboard prototype so A can never submit twice. */
+        weak_attack_was_down = FALSE;
         return;
     }
-    key_is_down = input_bridge_enabled ?
-        (input_bridge_connected &&
-         (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) :
-        ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0);
+    key_is_down =
+        (GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0;
     if (!player_two_requested) {
         weak_attack_was_down = key_is_down;
         return;
@@ -2672,6 +2819,8 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
         return;
     }
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
+        service_second_player_controller_actions(
+            controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
         original_controller_update(controller, update_data);
         publish_runtime_player_leases(controller);
@@ -2715,6 +2864,8 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     }
     publish_runtime_player_leases(controller);
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
+        service_second_player_controller_actions(
+            controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
         SudekiMpPlayerStatehoodService(
             SudekiMpPlayerStatehoodRuntime(), GetTickCount());
@@ -2801,7 +2952,8 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     hotkey_was_down = hotkey_is_down;
     reconcile_player_two_request();
     publish_runtime_player_leases(controller);
-    service_second_player_interaction_request(owns_foreground);
+    service_second_player_controller_actions(
+        controller, owns_foreground, FALSE, FALSE);
     update_roaming_boundary(controller);
     poll_second_player_movement(controller, update_data, owns_foreground);
     poll_second_player_camera_facing(controller, owns_foreground);
@@ -2981,11 +3133,11 @@ BOOL SudekiMpControlSeparationSetInteractionRequestsEnabled(BOOL enabled) {
         SudekiMpPlayerStatehoodCancelRequest(statehood, 1u);
     }
     interaction_requests_enabled = next_enabled;
-    interaction_request_x_was_down = interaction_request_x_down();
     SudekiMpLogFormat(
         "control_separation event=interaction_requests state=%s "
-        "button=controller_x "
-        "policy=targetless_player_two_acknowledgement_never_dispatch_native_action\r\n",
+        "button=controller_a "
+        "policy=exact_actor_target_source_generation_required_intent_only_"
+        "no_targetless_controller_request_generation\r\n",
         interaction_requests_enabled ? "enabled" : "disabled");
     return TRUE;
 }
@@ -3109,11 +3261,12 @@ BOOL SudekiMpInstallControlSeparation(
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (enable_separation_guard &&
-        (memcmp(
+    if ((enable_separation_guard &&
+         memcmp(
              base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE,
              expected_camera_manager_get_camera_mode_entry,
-             sizeof(expected_camera_manager_get_camera_mode_entry)) != 0 ||
+             sizeof(expected_camera_manager_get_camera_mode_entry)) != 0) ||
+        ((enable_separation_guard || enable_input_bridge) &&
          memcmp(
              base + RVA_GROUP_PLAYERS_IN_COMBAT,
              expected_group_players_in_combat_entry,
@@ -3205,7 +3358,7 @@ BOOL SudekiMpInstallControlSeparation(
     ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
     input_bridge_connected = FALSE;
     interaction_requests_enabled = FALSE;
-    interaction_request_x_was_down = FALSE;
+    SudekiMpControllerActionRouterInitialize(&controller_action_router);
     shared_interaction_modal_quiesce_logged = FALSE;
     ZeroMemory(published_player_actors,
         sizeof(published_player_actors));
@@ -3268,7 +3421,8 @@ BOOL SudekiMpInstallControlSeparation(
     camera_manager_get_camera_mode = enable_separation_guard ?
         (CameraManagerGetCameraModeFunction)(
             base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE) : NULL;
-    group_players_in_combat = enable_separation_guard ?
+    group_players_in_combat =
+        (enable_separation_guard || enable_input_bridge) ?
         (GroupPlayersInCombatFunction)(
             base + RVA_GROUP_PLAYERS_IN_COMBAT) : NULL;
     movement_camera_transform = (MovementCameraTransformFunction)(
@@ -3330,7 +3484,7 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s roaming_boundary=%s roaming_boundary_policy=symmetric_p1_p2_stable_exploration_only warning_fraction_bits=0x3f4ccccd maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
+        "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s roaming_boundary=%s roaming_boundary_policy=symmetric_p1_p2_stable_exploration_only warning_fraction_bits=0x3f4ccccd maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0 controller_router_seats=4 controller_contract=xbox_a_context_or_weak_x_strong_y_quick_menu_intent_b_modal_cancel_or_combat_sweep_dpad_quickshot_intent\r\n",
         (unsigned long)selected_virtual_key,
         second_player_movement_enabled ? "true" : "false",
         camera_relative_movement_enabled ? "true" : "false",
@@ -3398,7 +3552,7 @@ void SudekiMpUninstallControlSeparation(void) {
     ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
     input_bridge_connected = FALSE;
     interaction_requests_enabled = FALSE;
-    interaction_request_x_was_down = FALSE;
+    SudekiMpControllerActionRouterInitialize(&controller_action_router);
     shared_interaction_modal_quiesce_logged = FALSE;
     ZeroMemory(published_player_actors,
         sizeof(published_player_actors));

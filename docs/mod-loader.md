@@ -27,7 +27,7 @@ The supported executable currently exposes one global Skill Targeting active byt
 
 `EnableSecondPlayerMovementPrototype` also defaults to `false` and requires the control-separation prototype. While Buki's verified native override is active, it submits normalized fixed-world-axis `I/J/K/L` directions to Buki's own arbiter at RVA `0x000DAE80`; Player 1's normal controller and `W/A/S/D` route remain untouched. The dedicated test launcher temporarily moves `ToggleBukiAi` to `F10` to avoid overlap with `J`. Live testing confirmed independent two-character movement and a clean native AI restore. The prototype refuses to act when Buki is the controller target or no longer belongs to the active group.
 
-`EnableExternalInputBridgePrototype` defaults to `false` and requires control separation plus Player 2 movement. It binds a nonblocking UDP receiver to `127.0.0.1:InputBridgePort` (default `26760`) and accepts only the exact version-1, 32-byte SudekiMP packet from loopback. `InputBridgeTimeoutMs` defaults to `250`; missing or stale packets immediately produce neutral axes/buttons rather than retaining the last action. `InputBridgeDeadzone` defaults to `0.20` and applies a radial rescale before the existing native camera transform and Buki arbiter movement call. Controller A replaces the keyboard weak-attack edge while this mode is active. The right stick, triggers, D-pad, and remaining standard buttons cross the protocol, but only right-stick observation is logged at this checkpoint; no independent camera mutation is attempted.
+`EnableExternalInputBridgePrototype` defaults to `false` and requires control separation plus Player 2 movement. It binds a nonblocking UDP receiver to `127.0.0.1:InputBridgePort` (default `26760`) and accepts only the exact version-1, 32-byte SudekiMP packet from loopback. `InputBridgeTimeoutMs` defaults to `250`; missing or stale packets immediately produce neutral axes/buttons rather than retaining the last action. `InputBridgeDeadzone` defaults to `0.20` and applies a radial rescale before the existing native camera transform and Player 2 arbiter movement call. The left and right sticks retain their movement and per-player camera roles outside the action router. Rising button edges use the shipped Xbox-style contract: A resolves an exact interaction intent when a complete actor/target/source-generation tuple is already known, otherwise it submits native Weak; X submits native Strong; Y reports a per-seat Quick Menu intent but does not claim success because no per-seat native menu consumer is connected; B resolves modal Cancel or submits native Sweep in combat; and the D-pad reports per-seat Quickshot intents that are likewise not connected yet. Triggers still cross the protocol without a gameplay consumer. Edge state is maintained independently for four seats, and a disconnected/reconnected device must report neutral before another action edge is accepted.
 
 The native Linux sender is built at `build/linux/bin/sudekimp-input-bridge`. It reads joydev mappings with `JSIOCGAXMAP`/`JSIOCGBTNMAP`, so it uses Linux event codes instead of fixed device-specific indices, and sends at approximately 60 Hz. `tools/continue-research.sh --controller-bridge-test` starts the helper for `/dev/input/js0`, enables dual Ailish/Buki views, the F10 native AI override, analog camera-relative movement, the 10-unit separation guard, and weak attack, then terminates only that helper and restores configuration/anti-aliasing when the game exits. Set `SUDEKIMP_INPUT_DEVICE=/dev/input/jsN` or `SUDEKIMP_INPUT_BRIDGE_PORT=NNNNN` to override its two launch parameters.
 
@@ -68,13 +68,20 @@ The native Linux sender is built at `build/linux/bin/sudekimp-input-bridge`. It 
 That live check passed: initialization logged virtual key `0x48`, and pressing `H` completed the same validated Ailish Spirit Strike with activation result `1`.
 
 The runtime now also has a process-global player-statehood coordinator for
-actor leases and interaction provenance. A P2 action whose target is not yet
-proven creates only a five-second `GENERIC_REQUEST`; the cleanroom overlay may
-show `P2 INTERACT?`, but the coordinator cannot promote that targetless request
-into a native world action. Known shops and blacksmiths are classified as one
-serialized shared modal, while travel, dialogue, quests, saves, and cutscenes
-remain host-owned. See [player-statehood-design.md](player-statehood-design.md)
-for the ownership contract and staged interaction plan.
+actor leases and interaction provenance. The old controller-X targetless
+`GENERIC_REQUEST` and `P2 INTERACT?` badge path has been retired. The legacy
+`EnablePlayerInteractionRequestsPrototype` key now gates a passive exact-build
+trace only when the zone-transition observer is also active. It records the
+native Select/OnAction source actor, the bounded candidate set, the accepted
+message path, and the same-thread SOL submission against a nonzero world-source
+generation. Controller A publishes intent only: the runtime never replays GUI
+Select, swaps the global controller, bypasses native eligibility, or generates
+a targetless/native world action. A non-front/P2 candidate remains explicitly
+unvalidated and cannot authorize activation. Known shops and blacksmiths remain
+one serialized shared modal, while travel, dialogue, quests, saves, and
+cutscenes remain host-owned. See
+[player-statehood-design.md](player-statehood-design.md) for the ownership
+contract and staged interaction plan.
 
 `EnablePerPlayerBlacksmithUiExperiment=false` is an exact-build, default-off,
 historical data-isolation experiment. Its custom P1/P2 panels proved that two

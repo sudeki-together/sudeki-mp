@@ -2,6 +2,7 @@
 
 #include "cleanroom/audio.h"
 #include "cleanroom/engine.h"
+#include "engine/blacksmith_ui_presenter.h"
 #include "engine/log.h"
 #include "engine/player_statehood.h"
 #include "engine/transition_vote.h"
@@ -674,9 +675,6 @@ static void *menu_texture_device;
 static void *player_two_badge_texture;
 static void *player_two_badge_device;
 static BOOL player_two_badge_dirty;
-static BOOL player_two_generic_request_visible;
-static uint32_t player_two_interaction_serial;
-static unsigned int player_two_interaction_state;
 static void *transition_vote_texture;
 static void *transition_vote_texture_device;
 static BOOL transition_vote_texture_dirty;
@@ -6029,16 +6027,16 @@ static BOOL update_player_two_badge_texture(void *texture) {
     pixels = (uint32_t *)locked.bits;
     participation_requested =
         SudekiMpSplitScreenRosterParticipationRequested();
-    accent = player_two_generic_request_visible ?
-        UINT32_C(0xffffd166) :
-        (!participation_requested ? UINT32_C(0xff58aee8) :
-            (multiplayer_active && multiplayer_input_ready ?
-                UINT32_C(0xff7cf29a) : UINT32_C(0xffffd166)));
-    text = player_two_generic_request_visible ? "P2 INTERACT?" :
-        (!participation_requested ? "P2 START JOIN" :
-            (multiplayer_active && multiplayer_input_ready ?
-                "P2 READY" :
-                (multiplayer_active ? "P2 CONNECT" : "P2 JOINING")));
+    /* A generic interaction request has no proven target at this layer.
+     * Present only participation/input readiness here; modal action feedback
+     * belongs to the owner that can actually consume the routed A/B intent. */
+    accent = !participation_requested ? UINT32_C(0xff58aee8) :
+        (multiplayer_active && multiplayer_input_ready ?
+            UINT32_C(0xff7cf29a) : UINT32_C(0xffffd166));
+    text = !participation_requested ? "P2 START JOIN" :
+        (multiplayer_active && multiplayer_input_ready ?
+            "P2 READY" :
+            (multiplayer_active ? "P2 CONNECT" : "P2 JOINING"));
     fill_rectangle(
         pixels,
         locked.pitch,
@@ -6062,15 +6060,15 @@ static BOOL update_player_two_badge_texture(void *texture) {
         PLAYER_TWO_BADGE_WIDTH, PLAYER_TWO_BADGE_HEIGHT, accent);
     fill_rectangle(
         pixels, locked.pitch,
-        player_two_generic_request_visible ? 8 : 12,
-        player_two_generic_request_visible ? 17 : 13,
-        player_two_generic_request_visible ? 16 : 26,
-        player_two_generic_request_visible ? 25 : 29,
+        12,
+        13,
+        26,
+        29,
         accent);
     draw_text(
         pixels,
         locked.pitch,
-        player_two_generic_request_visible ? 22 : 36,
+        36,
         13,
         text,
         UINT32_C(0xffffffff),
@@ -6126,269 +6124,74 @@ static BOOL ensure_player_two_badge_texture(void *device) {
     return update_player_two_badge_texture(player_two_badge_texture);
 }
 
-static const char *blacksmith_ui_character_label(uint32_t character_id) {
-    switch (character_id) {
-    case 0x23u: return "TAL";
-    case 0x05u: return "BUKI";
-    case 0x0eu: return "ELCO";
-    case 0x01u: return "AILISH";
-    default: return "UNKNOWN";
-    }
-}
-
-static long blacksmith_ui_round_float(float value) {
-    if (!isfinite(value)) return 0L;
-    if (value > 999999.0f) return 999999L;
-    if (value < -999999.0f) return -999999L;
-    return value >= 0.0f ? (long)(value + 0.5f) :
-        (long)(value - 0.5f);
-}
-
-static const SudekiMpBlacksmithReadEquipment *
-blacksmith_ui_selected_equipment(
-    const SudekiMpBlacksmithUiSnapshot *snapshot,
-    unsigned int player_index
-) {
-    const SudekiMpBlacksmithReadSeat *read_seat;
-    uint32_t selected;
-
-    if (snapshot == NULL ||
-        player_index >= SUDEKIMP_BLACKSMITH_UI_PLAYER_COUNT) {
-        return NULL;
-    }
-    read_seat = &snapshot->read_model.seats[player_index];
-    selected = snapshot->seats[player_index].selected_equipment_index;
-    return read_seat->valid && selected < read_seat->equipment_count ?
-        &read_seat->equipment[selected] : NULL;
-}
-
-static const SudekiMpBlacksmithReadComponent *
-blacksmith_ui_selected_component(
-    const SudekiMpBlacksmithUiSnapshot *snapshot,
-    unsigned int player_index
-) {
-    uint32_t selected;
-
-    if (snapshot == NULL ||
-        player_index >= SUDEKIMP_BLACKSMITH_UI_PLAYER_COUNT) {
-        return NULL;
-    }
-    selected = snapshot->seats[player_index].selected_component_index;
-    return selected < snapshot->read_model.component_count ?
-        &snapshot->read_model.components[selected] : NULL;
-}
-
-static void draw_blacksmith_ui_seat(
+static BOOL draw_blacksmith_ui_presentation(
     uint32_t *pixels,
     int pitch,
-    const SudekiMpBlacksmithUiSnapshot *snapshot,
-    unsigned int player_index
+    const SudekiMpBlacksmithUiPresentation *presentation
 ) {
-    static const char *const page_labels[
-        SUDEKIMP_BLACKSMITH_UI_PAGE_COUNT] = {
-        "EQUIPMENT", "SOCKETS", "COMPONENTS"
-    };
-    const SudekiMpBlacksmithUiSeatSnapshot *seat =
-        &snapshot->seats[player_index];
-    const SudekiMpBlacksmithReadSeat *read_seat =
-        &snapshot->read_model.seats[player_index];
-    const SudekiMpBlacksmithReadEquipment *selected_equipment =
-        blacksmith_ui_selected_equipment(snapshot, player_index);
-    const SudekiMpBlacksmithReadComponent *selected_component =
-        blacksmith_ui_selected_component(snapshot, player_index);
-    const int left = player_index == 0u ? 8 : 328;
-    const int right = left + 304;
-    const uint32_t accent = player_index == 0u ?
-        UINT32_C(0xffffd166) : UINT32_C(0xff58aee8);
-    char title[40];
-    char page[40];
-    char category[40];
-    char revision[40];
-    char row_text[64];
-    char row_detail[64];
-    char stat_text[64];
-    uint32_t row_count = 0u;
-    uint32_t row_offset = 0u;
-    unsigned int row;
+    uint32_t player_index;
 
-    fill_rectangle(pixels, pitch, left, 34, right, 446,
-        UINT32_C(0xde111923));
-    fill_rectangle(pixels, pitch, left, 34, right, 39, accent);
-    fill_rectangle(pixels, pitch, left, 441, right, 446, accent);
-    fill_rectangle(pixels, pitch, left, 34, left + 4, 446, accent);
-    fill_rectangle(pixels, pitch, right - 4, 34, right, 446, accent);
-    wsprintfA(title, "P%lu %s BUILD",
-        (unsigned long)(player_index + 1u),
-        blacksmith_ui_character_label(seat->character_id));
-    draw_text(pixels, pitch, left + 16, 54, title,
-        UINT32_C(0xffffffff), 2);
-    if (!seat->open) {
-        draw_text(pixels, pitch, left + 36, 204,
-            "PLAYER CLOSED", accent, 2);
-        draw_text(pixels, pitch, left + 42, 234,
-            "WAITING FOR PARTY", UINT32_C(0xffb7c4d6), 1);
-        return;
+    if (pixels == NULL || pitch <= 0 || presentation == NULL) {
+        return FALSE;
     }
+    for (player_index = 0u;
+         player_index < SUDEKIMP_BLACKSMITH_UI_PLAYER_COUNT;
+         ++player_index) {
+        const SudekiMpBlacksmithUiViewportPresentation *viewport =
+            &presentation->viewports[player_index];
+        const int viewport_left =
+            (int)(player_index * SUDEKIMP_BLACKSMITH_UI_VIEWPORT_WIDTH);
+        uint32_t command_index;
 
-    wsprintfA(page, "PAGE: %s",
-        page_labels[seat->page % SUDEKIMP_BLACKSMITH_UI_PAGE_COUNT]);
-    wsprintfA(category, "FILTER: %lu",
-        (unsigned long)(seat->category + 1u));
-    wsprintfA(revision, "SEAT REV: %lu",
-        (unsigned long)seat->revision);
-    draw_text(pixels, pitch, left + 16, 88, page,
-        UINT32_C(0xffdce6f4), 1);
-    draw_text(pixels, pitch, left + 16, 102, category,
-        UINT32_C(0xffdce6f4), 1);
-    draw_text(pixels, pitch, left + 176, 102, revision,
-        UINT32_C(0xff8fa2bb), 1);
-    if (seat->page == 0u) {
-        row_count = read_seat->equipment_count;
-        row_offset = seat->category * SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT;
-    } else if (seat->page == 1u) {
-        row_count = selected_equipment == NULL ? 0u :
-            selected_equipment->socket_count;
-    } else {
-        row_count = snapshot->read_model.component_count;
-        row_offset = seat->category * SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT;
-    }
-    for (row = 0u; row < SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT; ++row) {
-        const int top = 124 + (int)row * 32;
-        const uint32_t absolute = row_offset + row;
-        uint32_t color = UINT32_C(0xffffffff);
-        BOOL row_present = absolute < row_count;
+        for (command_index = 0u;
+             command_index < viewport->command_count;
+             ++command_index) {
+            const SudekiMpBlacksmithUiDrawCommand *command =
+                &viewport->commands[command_index];
 
-        row_text[0] = '\0';
-        row_detail[0] = '\0';
-        if (row_present && seat->page == 0u) {
-            const SudekiMpBlacksmithReadEquipment *equipment =
-                &read_seat->equipment[absolute];
-            lstrcpynA(row_text, equipment->name, sizeof(row_text));
-            wsprintfA(row_detail, "ID %lu%s",
-                (unsigned long)equipment->item_id,
-                equipment->equipped ? "  EQUIPPED" : "");
-        } else if (row_present && seat->page == 1u &&
-                selected_equipment != NULL) {
-            const SudekiMpBlacksmithReadSocket *socket =
-                &selected_equipment->sockets[absolute];
-            wsprintfA(row_text, "SOCKET %lu: %s",
-                (unsigned long)(absolute + 1u), socket->occupant_name);
-            if (socket->locked) {
-                lstrcpynA(row_detail, "LOCKED", sizeof(row_detail));
-                color = UINT32_C(0xff8fa2bb);
-            } else if (socket->authored_component_id != -1) {
-                wsprintfA(row_detail, "AUTHORED  BANK %lu",
-                    (unsigned long)socket->bank);
-                color = UINT32_C(0xff8fa2bb);
+            if (command->kind == SUDEKIMP_BLACKSMITH_UI_DRAW_RECTANGLE) {
+                fill_rectangle(
+                    pixels,
+                    pitch,
+                    viewport_left + command->left,
+                    command->top,
+                    viewport_left + command->right,
+                    command->bottom,
+                    command->color);
+            } else if (command->kind == SUDEKIMP_BLACKSMITH_UI_DRAW_TEXT) {
+                draw_text(
+                    pixels,
+                    pitch,
+                    viewport_left + command->left,
+                    command->top,
+                    command->text,
+                    command->color,
+                    (int)command->text_scale);
             } else {
-                wsprintfA(row_detail, "BANK %lu",
-                    (unsigned long)socket->bank);
+                return FALSE;
             }
-        } else if (row_present && seat->page == 2u) {
-            const SudekiMpBlacksmithReadComponent *component =
-                &snapshot->read_model.components[absolute];
-            BOOL compatible = selected_equipment != NULL &&
-                SudekiMpBlacksmithReadModelComponentCompatible(
-                    selected_equipment,
-                    seat->selected_socket_index,
-                    component);
-            lstrcpynA(row_text, component->name, sizeof(row_text));
-            if (component->effect_class == 2u) {
-                wsprintfA(row_detail, "%ldG  %s %ld%%",
-                    (long)component->price, component->effect_name,
-                    blacksmith_ui_round_float(component->effect * 100.0f));
-            } else {
-                wsprintfA(row_detail, "%ldG  %s %ld",
-                    (long)component->price, component->effect_name,
-                    blacksmith_ui_round_float(component->effect));
-            }
-            if (!compatible) color = UINT32_C(0xff718096);
-        }
-        if (row_present && row == seat->cursor) {
-            fill_rectangle(pixels, pitch,
-                left + 14, top - 5, right - 14, top + 24,
-                player_index == 0u ?
-                    UINT32_C(0xb03c3420) : UINT32_C(0xb019354c));
-            draw_text(pixels, pitch, left + 22, top,
-                ">", accent, 2);
-        }
-        if (row_present) {
-            draw_text(pixels, pitch, left + 42, top,
-                row_text, color, 1);
-            draw_text(pixels, pitch, left + 42, top + 12,
-                row_detail, color, 1);
         }
     }
-    if (selected_equipment != NULL) {
-        draw_text(pixels, pitch, left + 18, 319,
-            selected_equipment->name, accent, 1);
-        if (selected_equipment->stats_valid) {
-            wsprintfA(stat_text, "POWER %ld   RESIST %ld%%",
-                blacksmith_ui_round_float(
-                    selected_equipment->primary_stat),
-                blacksmith_ui_round_float(
-                    selected_equipment->secondary_percent));
-        } else {
-            lstrcpynA(stat_text, "STATS UNAVAILABLE",
-                sizeof(stat_text));
-        }
-        draw_text(pixels, pitch, left + 18, 333,
-            stat_text, UINT32_C(0xffdce6f4), 1);
-    }
-    if (seat->page == 2u && selected_equipment != NULL &&
-        selected_component != NULL) {
-        float projected_primary;
-        float projected_secondary;
-        if (SudekiMpBlacksmithReadModelProjectStats(
-                selected_equipment, seat->selected_socket_index,
-                selected_component, &projected_primary,
-                &projected_secondary)) {
-            wsprintfA(stat_text, "PREVIEW %ld POWER  %ld%% RESIST",
-                blacksmith_ui_round_float(projected_primary),
-                blacksmith_ui_round_float(projected_secondary));
-        } else {
-            lstrcpynA(stat_text, "PREVIEW INCOMPATIBLE",
-                sizeof(stat_text));
-        }
-        draw_text(pixels, pitch, left + 18, 347,
-            stat_text, UINT32_C(0xffaebdd0), 1);
-    }
-    if (seat->notice ==
-            SUDEKIMP_BLACKSMITH_UI_NOTICE_COMMIT_DISABLED) {
-        draw_text(pixels, pitch, left + 32, 372,
-            "PREVIEW ONLY", UINT32_C(0xffff8f70), 2);
-    } else {
-        draw_text(pixels, pitch, left + 24, 372,
-            snapshot->read_model.catalog_truncated ?
-                "CATALOG PARTIAL - VALID ROWS ONLY" :
-                "SELECT A PREVIEW ROW",
-            UINT32_C(0xffaebdd0), 1);
-    }
-    draw_text(pixels, pitch, left + 18, 404,
-        player_index == 0u ?
-            "ARROWS MOVE  ENTER PREVIEW  ESC CLOSE" :
-            "DPAD MOVE  A PREVIEW  B CLOSE",
-        UINT32_C(0xffdce6f4), 1);
-    draw_text(pixels, pitch, left + 18, 418,
-        player_index == 0u ?
-            "PAGE UP AND PAGE DOWN CHANGE PAGE" :
-            "SHOULDERS CHANGE PAGE",
-        UINT32_C(0xff8fa2bb), 1);
+    return TRUE;
 }
 
 static BOOL update_blacksmith_ui_texture(
     void *texture,
     const SudekiMpBlacksmithUiSnapshot *snapshot
 ) {
-    void **vtable = *(void ***)texture;
+    void **vtable;
     D3DTextureLockRectFunction lock_rectangle;
     D3DTextureUnlockRectFunction unlock_rectangle;
+    SudekiMpBlacksmithUiPresentation presentation;
     SudekiMpD3DLockedRect locked;
-    uint32_t *pixels;
-    char money[96];
     HRESULT result;
 
-    if (vtable == NULL || snapshot == NULL) {
+    if (texture == NULL || snapshot == NULL) {
+        return FALSE;
+    }
+    vtable = *(void ***)texture;
+    if (vtable == NULL ||
+        !SudekiMpBlacksmithUiBuildPresentation(snapshot, &presentation)) {
         return FALSE;
     }
     lock_rectangle = (D3DTextureLockRectFunction)
@@ -6401,29 +6204,11 @@ static BOOL update_blacksmith_ui_texture(
         locked.pitch < (int)(MENU_TEXTURE_WIDTH * sizeof(uint32_t))) {
         return FALSE;
     }
-    pixels = (uint32_t *)locked.bits;
-    fill_rectangle(pixels, locked.pitch, 0, 0,
-        MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT, UINT32_C(0x72070b11));
-    fill_rectangle(pixels, locked.pitch, 0, 0,
-        MENU_TEXTURE_WIDTH, 28, UINT32_C(0xf018202c));
-    wsprintfA(money,
-        "BLACKSMITH LAB  MONEY %lu  CAT %lu  INV %lu  ECO %lu",
-        (unsigned long)snapshot->shared_money,
-        (unsigned long)snapshot->catalog_generation,
-        (unsigned long)snapshot->inventory_generation,
-        (unsigned long)snapshot->economy_generation);
-    draw_text(pixels, locked.pitch, 76, 8, money,
-        UINT32_C(0xffffffff), 1);
-    draw_blacksmith_ui_seat(
-        pixels, locked.pitch, snapshot, 0u);
-    draw_blacksmith_ui_seat(
-        pixels, locked.pitch, snapshot, 1u);
-    fill_rectangle(pixels, locked.pitch, 0, 454,
-        MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT,
-        UINT32_C(0xf018202c));
-    draw_text(pixels, locked.pitch, 82, 460,
-        "EXPERIMENTAL PREVIEW - NATIVE PURCHASES AND COMMITS DISABLED",
-        UINT32_C(0xffff8f70), 1);
+    if (!draw_blacksmith_ui_presentation(
+            (uint32_t *)locked.bits, locked.pitch, &presentation)) {
+        (void)unlock_rectangle(texture, 0u);
+        return FALSE;
+    }
     result = unlock_rectangle(texture, 0u);
     if (FAILED(result)) {
         return FALSE;
@@ -7033,34 +6818,11 @@ static BOOL draw_blacksmith_ui_overlay(
         0.0f, 0.0f, 0.0f, 0.0f);
 }
 
-static void update_player_two_interaction_badge(DWORD now) {
+static void service_player_two_interaction_state(DWORD now) {
     SudekiMpPlayerStatehood *statehood;
-    SudekiMpPlayerStatehoodSnapshot snapshot;
-    BOOL snapshot_valid;
-    BOOL request_visible;
-    uint32_t serial;
-    unsigned int state;
 
     statehood = SudekiMpPlayerStatehoodRuntime();
     SudekiMpPlayerStatehoodService(statehood, (uint32_t)now);
-    snapshot_valid = SudekiMpPlayerStatehoodGetSnapshot(
-        statehood, (uint32_t)now, &snapshot);
-    serial = snapshot_valid ? snapshot.provenance.serial : 0u;
-    state = snapshot_valid ? (unsigned int)snapshot.state :
-        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
-    request_visible = snapshot_valid &&
-        snapshot.state == SUDEKIMP_INTERACTION_SESSION_REQUESTED &&
-        snapshot.provenance.player_index == 1u &&
-        snapshot.provenance.kind == SUDEKIMP_INTERACTION_GENERIC_REQUEST &&
-        snapshot.remaining_ms != 0u;
-    if (player_two_interaction_serial != serial ||
-        player_two_interaction_state != state ||
-        player_two_generic_request_visible != request_visible) {
-        player_two_interaction_serial = serial;
-        player_two_interaction_state = state;
-        player_two_generic_request_visible = request_visible;
-        player_two_badge_dirty = TRUE;
-    }
 }
 
 static BOOL draw_transition_vote_overlay(
@@ -7340,7 +7102,7 @@ void SudekiMpCleanroomMenuRender(void) {
     blacksmith_ui_active = SudekiMpBlacksmithUiAdapterActive();
     blacksmith_snapshot_valid = blacksmith_ui_active &&
         SudekiMpBlacksmithUiAdapterGetSnapshot(&blacksmith_snapshot);
-    update_player_two_interaction_badge(GetTickCount());
+    service_player_two_interaction_state(GetTickCount());
     shared_interaction_modal_active =
         SudekiMpSplitScreenSharedInteractionModalActive() ||
         blacksmith_ui_active;
@@ -7564,10 +7326,6 @@ static BOOL install_cleanroom_menu_internal(
     menu_open = FALSE;
     menu_texture_dirty = TRUE;
     player_two_badge_dirty = TRUE;
-    player_two_generic_request_visible = FALSE;
-    player_two_interaction_serial = 0u;
-    player_two_interaction_state =
-        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
     transition_vote_texture = NULL;
     transition_vote_texture_device = NULL;
     transition_vote_texture_dirty = TRUE;
@@ -8061,10 +7819,6 @@ void SudekiMpUninstallCleanroomMenu(void) {
     roster_button_texture_device = NULL;
     roster_backdrop_texture_device = NULL;
     player_two_badge_dirty = FALSE;
-    player_two_generic_request_visible = FALSE;
-    player_two_interaction_serial = 0u;
-    player_two_interaction_state =
-        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
     transition_vote_texture_dirty = FALSE;
     roaming_boundary_texture_dirty = FALSE;
     transition_vote_overlay_failure_logged = FALSE;

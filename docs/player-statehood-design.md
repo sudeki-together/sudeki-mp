@@ -15,6 +15,16 @@ The central rule is:
 > state. Shared mutations are serialized and progression remains host-owned
 > until an exact target-specific path proves otherwise.
 
+The current controller router follows the shipped Xbox-style roles without
+inventing Player 1 authority for another seat. A resolves a proven exact
+interaction intent or falls back to native Weak; X submits native Strong; Y
+exposes a per-seat Quick Menu intent whose native consumer is not connected;
+B resolves modal Cancel or native combat Sweep; and the D-pad exposes per-seat
+Quickshot intents whose consumers are not connected. The sticks remain on
+their movement/camera paths. Button edges and reconnect-neutral fences are
+stored independently for seats 0 through 3, although the present runtime
+bridge supplies only P2.
+
 This design describes one process and one loaded Sudeki world. Running two
 independent exterior/interior worlds, player-local inventories, or player-local
 save timelines would require a different engine architecture.
@@ -164,7 +174,7 @@ lifecycle.
 | Interaction kind | Authority | Current presentation | Commit rule |
 | --- | --- | --- | --- |
 | None / actor-local movement and combat | Local actor | Player viewport | Valid live actor lease and proven actor-specific native path. |
-| Generic request | Request only | Small request badge | Attention only; target is unknown and commit is forbidden. |
+| Generic request | Request only | Research API only; no controller-created badge | Target is unknown and commit is forbidden. Ordinary controller input never creates one. |
 | Shop | Serialized shared | Shared full width | One owner, known target/generation, then one atomic shared-inventory commit. |
 | Blacksmith | Serialized shared | Default-off per-viewport read preview; native fallback is shared full width | One owner plus explicit merchant/character/equipment target; serialize shared money/material mutation. |
 | Pickup | Serialized shared | World feedback | Revalidate target existence and inventory capacity; exactly one winner. |
@@ -180,8 +190,7 @@ lifecycle.
 Shop and blacksmith presentation can become owner-viewport-local only after
 their mutable UI state is independently virtualized. Until then the renderer
 treats a known or uncertain shared modal as full-width and suppresses the P2
-status/request badge and roaming-boundary overlay so split-only UI does not
-draw over it.
+status and roaming-boundary overlays so split-only UI does not draw over it.
 
 ## Shared-inventory transaction rule
 
@@ -238,24 +247,40 @@ Consequences:
 
 ## Staged roadmap
 
-### Stage 0 — visible request, no authority
+### Stage 0 — targetless feedback experiment (retired)
 
-- Publish stable P1/P2 actor leases.
-- Convert P2's still-unclassified interact press into a five-second
-  `GENERIC_REQUEST` only.
-- Show `P2 INTERACT?` as attention feedback. It must not dispatch a world
-  action, and split-only badges/boundaries stay hidden under a shared modal.
+- Stable P1/P2 actor leases remain part of the current coordinator.
+- An earlier checkpoint converted controller X into a five-second targetless
+  `GENERIC_REQUEST` and displayed `P2 INTERACT?` as attention feedback.
+- That runtime path and badge are now removed. The generic coordinator API is
+  retained for isolated research, but no controller action creates a targetless
+  request or presents one as interaction success.
 
-### Stage 1 — exact interaction provenance
+### Stage 1 — passive actor/target provenance, no authority
 
-- Trace the P1 Select/OnAction path far enough to recover the exact usable and
-  source generation before any native side effect.
+- The action router now reserves A for an exact interaction intent only when
+  actor, actor generation, target, source generation, and kind are all known.
+  With no exact tuple it resolves A to native Weak instead; with a tuple it
+  currently reports intent only because native target dispatch is not connected.
+- On the exact supported image, observe the native Select/OnAction source
+  actor, at most 15 candidates, the native accepted-message path, and its
+  same-thread SOL submission. Tie every observation to a nonzero zone source
+  generation and invalidate it with that lifecycle.
+- Keep a non-front/P2 candidate explicitly accepted-but-unvalidated and unable
+  to authorize activation. The observer must not replay GUI Select, swap the
+  global controller, bypass native eligibility, or invoke a world object.
+
+### Stage 2 — authoritative P2 target validation
+
+- Establish a native or safely equivalent P2 selection/eligibility seam that
+  produces the same exact usable, actor, and source generation before any
+  native side effect, without global controller swapping.
 - Classify merchant, blacksmith, pickup, chest, benign switch, and host-only
   targets.
 - Add target lifetime/generation checks and rejection logs. Unknown remains
   host-only.
 
-### Stage 2 — one serialized owner session
+### Stage 3 — one serialized owner session
 
 - Permit either player's known shop/blacksmith request to acquire the sole
   session.
@@ -268,21 +293,21 @@ This is the first practical independent-interaction milestone. It lets Ailish
 open a merchant as P2 without pretending Tal pressed the button, while still
 using Sudeki's one native shop/economy safely.
 
-### Stage 3 — independent browsing, serialized commits
+### Stage 4 — independent browsing, serialized commits
 
 - Reverse and shadow every mutable shop/blacksmith UI field.
 - Render an owner-viewport UI from stable IDs and catalog snapshots.
 - Allow another player to continue roaming or browse a separate shadow, but
   serialize all shared inventory/economy confirmations through the commit gate.
 
-### Stage 4 — actor-capable world interactions
+### Stage 5 — actor-capable world interactions
 
 - Extend the same provenance and winner rules to pickups, chests, and proven
   non-progression switches.
 - Add actor-specific animations, reach/orientation validation, world feedback,
   and deterministic conflict handling.
 
-### Stage 5 — host progression and consent
+### Stage 6 — host progression and consent
 
 - Keep dialogue, quests, save/load, cutscenes, and travel host-owned.
 - Add pre-action votes only at a reversible, target-specific seam; never veto
@@ -292,7 +317,8 @@ using Sudeki's one native shop/economy safely.
 
 ## Acceptance invariants
 
-- A generic request can light a badge and nothing else.
+- A generic research request can never be promoted into a world action, and
+  ordinary controller input neither creates it nor lights a badge.
 - A P2 action never changes the global lead to borrow P1 authority.
 - At most one native shared modal and one shared-inventory commit exist at a
   time.

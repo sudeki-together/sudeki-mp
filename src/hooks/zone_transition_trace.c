@@ -5,6 +5,7 @@
 #include "engine/transition_vote.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
+#include "hooks/interaction_provenance.h"
 #include "hooks/split_screen_render.h"
 #include "input/bridge_receiver.h"
 
@@ -535,6 +536,8 @@ static void bump_zone_source_generation(const char *reason) {
     if (zone_source_generation == 0u) {
         zone_source_generation = 1u;
     }
+    SudekiMpInteractionProvenanceSetSourceGeneration(
+        zone_source_generation);
 }
 
 static BOOL readable_zone_bytes(const char *source, size_t size) {
@@ -3084,6 +3087,8 @@ BOOL SudekiMpInstallZoneTransitionTrace(
     ZeroMemory(&transition_vote_visibility_quarantine,
         sizeof(transition_vote_visibility_quarantine));
     zone_source_generation = 1u;
+    SudekiMpInteractionProvenanceSetSourceGeneration(
+        zone_source_generation);
     SudekiMpInputBridgeSetGameplaySuppressed(FALSE);
     SudekiMpLogWrite(
         "zone_transition_trace_install=success "
@@ -3975,6 +3980,7 @@ void SudekiMpUninstallZoneTransitionTrace(void) {
     transition_vote_visibility_quarantined = FALSE;
     ZeroMemory(&transition_vote_visibility_quarantine,
         sizeof(transition_vote_visibility_quarantine));
+    SudekiMpInteractionProvenanceInvalidate();
     zone_source_generation = 0u;
     set_zone_now_depth = 0u;
     clear_party_presentation_lease();

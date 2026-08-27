@@ -21,9 +21,11 @@ add_library(SudekiMP SHARED
     src/cleanroom/engine.c
     src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
+    src/engine/controller_action_router.c
     src/engine/blacksmith_commit_adapter.c
     src/engine/blacksmith_read_model.c
     src/engine/blacksmith_shadow.c
+    src/engine/blacksmith_ui_presenter.c
     src/engine/blacksmith_ui_session.c
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
@@ -42,6 +44,7 @@ add_library(SudekiMP SHARED
     src/hooks/blacksmith_read_adapter.c
     src/hooks/blacksmith_ui_adapter.c
     src/hooks/call_hook.c
+    src/hooks/interaction_provenance.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
@@ -255,6 +258,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
     src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
+    src/engine/controller_action_router.c
     src/engine/blacksmith_read_model.c
     src/engine/blacksmith_shadow.c
     src/engine/blacksmith_ui_session.c
@@ -275,6 +279,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
+    src/hooks/interaction_provenance.c
     src/hooks/player_input_trace.c
     src/hooks/quick_skill_input.c
     src/hooks/spirit_strike_input.c
@@ -389,6 +394,18 @@ set_target_properties(SudekiMP.InputBridgeReceiverTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_executable(SudekiMP.ControllerActionRouterTest
+    tests/controller_action_router_test.c
+    src/engine/controller_action_router.c
+)
+target_include_directories(SudekiMP.ControllerActionRouterTest PRIVATE src)
+target_compile_options(SudekiMP.ControllerActionRouterTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.ControllerActionRouterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.PlayerStatehoodTest
     tests/player_statehood_test.c
     src/engine/player_statehood.c
@@ -439,6 +456,19 @@ set_target_properties(SudekiMP.BlacksmithUiSessionTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_executable(SudekiMP.BlacksmithUiPresenterTest
+    tests/blacksmith_ui_presenter_test.c
+    src/engine/blacksmith_read_model.c
+    src/engine/blacksmith_ui_presenter.c
+)
+target_include_directories(SudekiMP.BlacksmithUiPresenterTest PRIVATE src)
+target_compile_options(SudekiMP.BlacksmithUiPresenterTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.BlacksmithUiPresenterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.BlacksmithReadModelTest
     tests/blacksmith_read_model_test.c
     src/engine/blacksmith_read_model.c
@@ -477,6 +507,27 @@ target_compile_options(SudekiMP.BlacksmithCommitAdapterTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 set_target_properties(SudekiMP.BlacksmithCommitAdapterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.InteractionProvenanceTest
+    tests/interaction_provenance_test.c
+    src/engine/player_statehood.c
+    src/hooks/call_hook.c
+    src/hooks/interaction_provenance.c
+)
+target_include_directories(SudekiMP.InteractionProvenanceTest PRIVATE src)
+target_compile_definitions(SudekiMP.InteractionProvenanceTest PRIVATE
+    WIN32_LEAN_AND_MEAN UNICODE _UNICODE
+    SUDEKIMP_INTERACTION_PROVENANCE_TESTING=1
+)
+target_compile_options(SudekiMP.InteractionProvenanceTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(src/hooks/interaction_provenance.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.InteractionProvenanceTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
