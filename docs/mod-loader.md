@@ -33,7 +33,7 @@ The native Linux sender is built at `build/linux/bin/sudekimp-input-bridge`. It 
 
 `EnableSecondPlayerCameraRelativeMovementPrototype` defaults to `false` and requires the movement prototype. It passes the local `I/J/K/L` vector through Sudeki's own callee-cleaned movement-camera transform at RVA `0x000291A0`, clears vertical motion, normalizes the horizontal result, and then uses the already-proven Buki arbiter path. Its exact entry signature and inert-image installation pass; a live run confirmed Buki's direction rotates with Player 1's camera.
 
-`EnableSecondPlayerSeparationGuardPrototype` defaults to `false` and also requires movement. `SecondPlayerMaximumSeparation` defaults to an experimental `10.0` units. The guard reads both characters' native `CPosition` objects, blocks only movement whose dot product points farther outward once the horizontal limit is reached, and always permits movement back toward Player 1. It does not teleport, accelerate, or take control of either character. A live run confirmed repeated outward blocks near distance-squared `100` and immediate inward releases; the value remains a test starting point rather than a balance decision.
+`EnableSecondPlayerSeparationGuardPrototype` retains its historical name, defaults to `false`, and requires Player 2 movement plus the integrated menu/split-screen overlay path. Standalone and single-camera combinations are rejected instead of enabling a boundary that can never become visible. It now enables a symmetric roaming-only co-op boundary for both players. The policy becomes eligible only after two human-controlled characters, the native party/controller state, world resources, Exploration camera, and non-combat state remain settled for 250 ms. It becomes inactive immediately for combat, loading, authored/non-Exploration cameras, travel/votes, drop-out, or a disconnected external input bridge. Both viewports receive an amber warning at 80% of `SecondPlayerMaximumSeparation` (experimental default `10.0` units). At the hard limit, outward, lateral, and numerically near-lateral requests are blocked for either player; only movement with a clear inward radial component is accepted. Hard blocking additionally requires the warning overlay to have rendered successfully; a missing/reset D3D device therefore fails open instead of creating an invisible wall. No position, ownership, speed, camera, or transition state is written.
 
 `EnableSharedGroupCameraPrototype` defaults to `false` and requires both control separation and second-player movement. It accepts the live-confirmed standard gameplay pair (`OffsetTarget` in `CCamera+0xB4`, `GameObjectTarget` in `+0xB8`) or the native same-`GameObjectTarget` pair. It retains both originals, creates Sudeki's native `MatrixTarget`, preserves Player 1's native framing offset, and translates focus to the Player 1/Buki midpoint. Every installed slot receives the caller-owned reference expected by RVA `0x000E84C0`; restoration changes only slots still owned by the prototype and releases all held references through the native manager. The user confirmed midpoint tracking and immediate, crash-free return to Ailish focus and Buki AI. This first prototype changes focus only; zoom, distance limits, collision, scope cameras, cinematics, and render views remain unchanged.
 
@@ -53,19 +53,41 @@ The native Linux sender is built at `build/linux/bin/sudekimp-input-bridge`. It 
 
 `tools/continue-research.sh --spirit-strike-test H` temporarily selects `H` in the generated test configuration, then restores the repository default after Sudeki exits. This provides a direct live check that the configured key—not a compiled-in `G` constant—drives activation.
 
-`tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits.
+`tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits. `--party-lifecycle-trace` opts into the symmetric roaming boundary together with roster/drop-in and party-atomic TEMP transitions; the repository INI remains default-off. It deliberately leaves `EnableTransitionVotePrototype=false`: the current late `EnterTemporaryZone` adapter cannot safely veto an approach/script that Sudeki has already started.
 
 `tools/continue-research.sh --second-player-movement-test` temporarily enables the guarded Buki toggle and second movement source, uses `F10` for the toggle, and restores the generated configuration after Sudeki exits.
 
 `tools/continue-research.sh --second-player-attack-test` adds the disabled weak-attack prototype to that setup and binds it to `U`. Control anyone except Buki, use `F10` to acquire/release the native AI override, move Buki with `I/J/K/L`, and tap `U` once to request her weak attack.
 
-`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. Its live run confirmed that Buki's independent input rotates with Player 1's shared camera while Player 1 retains camera focus. `--second-player-separation-test` additionally enables the experimental 10-unit outward-only guard. Repeated live block/release pairs confirmed outward input stops near the boundary while inward and sideways movement remain available.
+`tools/continue-research.sh --second-player-camera-movement-test` selects only the shared-camera movement follow-up. Its live run confirmed that Buki's independent input rotates with Player 1's shared camera while Player 1 retains camera focus. `--second-player-separation-test` additionally enables the experimental visible 10-unit roaming boundary. At the hard limit the current policy accepts only a clear inward radial request; outward and lateral requests are blocked for both players.
 
 `tools/continue-research.sh --shared-group-camera-test` adds the live-confirmed native midpoint target to the camera-relative movement and separation setup. Use `F10` to acquire/release Buki's AI override; the camera follows the P1/Buki midpoint and restores native P1 focus when the override ends. The launcher does not enable adaptive zoom in this mode.
 
 `tools/continue-research.sh --second-player-target-trace` enables only Buki's native AI override plus the passive target trace. It is intended to compare target changes before attacks, during Player 1 combat, and around enemy death without synthesizing Player 2 input. The first live run retained one stable non-null node and the enabled auto-target flag throughout the override, then restored Buki's AI cleanly.
 
 That live check passed: initialization logged virtual key `0x48`, and pressing `H` completed the same validated Ailish Spirit Strike with activation result `1`.
+
+The runtime now also has a process-global player-statehood coordinator for
+actor leases and interaction provenance. A P2 action whose target is not yet
+proven creates only a five-second `GENERIC_REQUEST`; the cleanroom overlay may
+show `P2 INTERACT?`, but the coordinator cannot promote that targetless request
+into a native world action. Known shops and blacksmiths are classified as one
+serialized shared modal, while travel, dialogue, quests, saves, and cutscenes
+remain host-owned. See [player-statehood-design.md](player-statehood-design.md)
+for the ownership contract and staged interaction plan.
+
+`EnablePerPlayerBlacksmithUiExperiment=false` is an exact-build, default-off,
+historical data-isolation experiment. Its custom P1/P2 panels proved that two
+actor-specific read models can coexist, including equipment, sockets,
+compatible native rune rows, prices, and projected stats. Those panels are not
+the intended interface. The product target is a separate native Blacksmith
+window and native-style interaction lifecycle for each player. Forge/purchase
+commits and all native inventory/money mutation remain intentionally disabled
+until the interaction carries exact merchant/actor provenance, native UI-layer
+state is safely virtualized, and the serialized commit path is live-verified.
+`--party-lifecycle-trace` temporarily enables the old preview and prints
+`preview only, no forge commits`; the checked-in INI remains false and every
+failed prerequisite falls back to Sudeki's native full-width blacksmith.
 
 ## Linux build
 

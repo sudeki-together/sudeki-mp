@@ -16,7 +16,11 @@ BOOL SudekiMpInstallZoneTraversalMenu(
 BOOL SudekiMpInstallCoopRosterMenu(
     HMODULE game_module,
     UINT toggle_key,
-    BOOL skip_startup_movies
+    BOOL integrated_multiplayer,
+    BOOL skip_startup_movies,
+    BOOL story_test_boost_enabled,
+    UINT story_test_boost_key,
+    float story_test_boost_multiplier
 );
 void SudekiMpCleanroomMenuUpdate(void);
 void SudekiMpCleanroomMenuRender(void);

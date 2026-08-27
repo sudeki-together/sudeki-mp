@@ -180,7 +180,7 @@ static uint16_t read_trigger(
         return 0u;
     }
     value = (int)values[index] + 32768;
-    if (value < 0) {
+    if (value <= (int)SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM) {
         value = 0;
     } else if (value > 65535) {
         value = 65535;
@@ -215,6 +215,20 @@ static int run_self_test(void) {
     SudekiMpInputBridgeState source;
     SudekiMpInputBridgeState decoded;
     uint8_t packet[SUDEKIMP_INPUT_BRIDGE_PACKET_SIZE];
+    int16_t trigger_values[MAX_AXES];
+
+    memset(trigger_values, 0, sizeof(trigger_values));
+    trigger_values[0] = -32768;
+    trigger_values[1] = -32767;
+    trigger_values[2] = -32766;
+    if (read_trigger(trigger_values, 0) != 0u ||
+        read_trigger(trigger_values, 1) != 0u ||
+        read_trigger(trigger_values, 2) != 2u) {
+        fputs("sudekimp-input-bridge: trigger neutralization self-test failed\n",
+              stderr);
+        return 1;
+    }
+
     memset(&source, 0, sizeof(source));
     source.sequence = 7u;
     source.left_x = -1234;

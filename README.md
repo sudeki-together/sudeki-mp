@@ -61,11 +61,19 @@ research copy; the complete 394-file baseline is hashed and reproducible.
 - A maximum-separation guard, shared midpoint camera, distinct render-only
   cameras, and alternating dual-camera split-screen compositor all have live
   proofs.
+- A disabled-by-default native Player 2 obstruction prototype now binds the
+  named camera to Player 2 and lets Sudeki's Exploration solver keep it out of
+  outdoor world geometry. This first cut is collision parity, not input parity:
+  while native Exploration is ready, Player 1 camera broadcasts are filtered
+  and Player 2 right-stick orbit is disabled; the right stick still operates in
+  the existing manual fallback/combat/unsupported phases.
 - The compositor preserves native world rendering, culling, shadows, doors,
   and simulation by caching one complete native frame per engine frame rather
   than replaying the game renderer.
 - Viewport-owned character names, HP, SP, companion ordering, and native
   portrait art are confirmed for the two-character prototype.
+- The map pointer and heading now resolve the character assigned to each
+  cached viewport instead of hard-coding party slot zero for both halves.
 - The native Quit interface renders once at full width over the preserved
   split-screen background.
 - Skills and Spirit Strikes can leave the other player's simulation and
@@ -93,11 +101,30 @@ enable/disable, `1x`–`4x` maximum HP, stagger limits, and stagger-session
 duration. Settings persist in the existing sidecar. Vanilla values remain the
 default and Single Player never receives the co-op override.
 
-The critical remaining validation is the handoff from a saved roster contract
-to gameplay ownership. A Tal-only opening must remain native until Ailish joins
-the party, then atomically bind controller input, AI ownership, HUD, and
-cameras to the locked roles. The implementation scaffolding exists, but that
-Tal-to-Ailish story transition still requires end-to-end live acceptance.
+The Tal-to-Ailish roster handoff now activates the selected split roles without
+duplicating Ailish's HUD portrait. Participation is separate from selection:
+F10 drops Player 2 back to native AI and full-screen play without erasing the
+locked character, and F10 again requests that same character. With the Linux
+controller bridge, Start requests drop-in and holding Back+Start for one second
+drops out. This is the first two-player implementation of a seat model intended
+to scale to additional local or network players later.
+
+An opt-in party-atomic transition prototype addresses Sudeki's single active
+world. On an authored temporary-room entry or exit, it quiesces the second
+viewport/control lease, lets Sudeki place the native lead, then calls the
+engine's own formation-pop operation so every declared party member follows
+with collision/navigation-aware offsets. Co-op is rebuilt only after the new
+zone is stable. Failure leaves the game in usable native single-player mode,
+retains the roster contract, and permits a later manual drop-in.
+
+The travel-vote state machine and overlay remain available for isolated
+research, but the adapter is disabled in the integrated lifecycle profile. A
+live Player 2 veto proved that the current `EnterTemporaryZone` hook runs after
+Sudeki has already started the native door approach/script; returning from that
+void call without loading cannot roll the native task back and can leave the
+world paused. The feature must remain off until a target-specific pre-OnAction
+hook can defer the approach itself and replay that exact action only after
+consent.
 
 ### Cleanroom and research tools
 
@@ -110,6 +137,12 @@ Tal-to-Ailish story transition still requires end-to-end live acceptance.
   fails closed for unknown destinations instead of inventing coordinates.
 - The orange story-intro crash was traced to repeated accelerator-resource
   loading. An exact-build cache now lets the complete intro play normally.
+- An opt-in F6 Story Test Boost is available while the roster prototype is
+  installed. It starts off, runs engine/world time at the configured multiplier
+  while the game is focused, and gives each current party member one lease from
+  Sudeki's native refcounted invulnerability system. Normal speed is restored
+  whenever title/loading/focus-loss state is observed; party protection is
+  reconciled across rebuilt and newly joined party members.
 - Cafu was confirmed as an unfinished Elco-derived developer variant, not a
   fifth complete party archetype. His native fire crash is contained, and an
   Elco pistol visual attaches correctly, but the missing projectile visual and
@@ -243,6 +276,8 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
 - [docs/engine-functions.md](docs/engine-functions.md) — RVAs, ABIs, signatures,
   and confidence
 - [docs/structures.md](docs/structures.md) — reverse-engineered structures
+- [docs/player-statehood-design.md](docs/player-statehood-design.md) — player
+  leases, interaction authority, shared inventory, and shop/blacksmith roadmap
 - [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
 - [docs/windows-build.md](docs/windows-build.md) — native Windows build,
   validation, installation, and launch

@@ -21,16 +21,26 @@ add_library(SudekiMP SHARED
     src/cleanroom/engine.c
     src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
+    src/engine/blacksmith_commit_adapter.c
+    src/engine/blacksmith_read_model.c
+    src/engine/blacksmith_shadow.c
+    src/engine/blacksmith_ui_session.c
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
     src/engine/orbit_camera.c
+    src/engine/personal_wallet.c
     src/engine/player_combat_context.c
+    src/engine/player_statehood.c
+    src/engine/roaming_boundary.c
     src/engine/skill_activation_abi.c
+    src/engine/transition_vote.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
     src/input/key_binding.c
     src/hooks/accelerator_cache.c
+    src/hooks/blacksmith_read_adapter.c
+    src/hooks/blacksmith_ui_adapter.c
     src/hooks/call_hook.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
@@ -54,6 +64,12 @@ target_compile_definitions(SudekiMP PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE
 target_compile_options(SudekiMP PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP PRIVATE -static-libgcc)
 set_source_files_properties(src/hooks/skill_trace.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(src/hooks/blacksmith_read_adapter.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(src/hooks/blacksmith_ui_adapter.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_source_files_properties(src/hooks/quick_skill_input.c PROPERTIES
@@ -146,6 +162,30 @@ add_executable(SudekiMP.KeyBindingTest
     src/input/key_binding.c
 )
 
+add_executable(SudekiMP.TransitionVoteTest
+    tests/transition_vote_test.c
+    src/engine/transition_vote.c
+)
+
+add_executable(SudekiMP.RoamingBoundaryTest
+    tests/roaming_boundary_test.c
+    src/engine/roaming_boundary.c
+)
+target_include_directories(SudekiMP.RoamingBoundaryTest PRIVATE src)
+target_compile_options(SudekiMP.RoamingBoundaryTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.RoamingBoundaryTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TransitionVoteTest PRIVATE src)
+target_compile_options(SudekiMP.TransitionVoteTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.TransitionVoteTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.ArbiterCombatInputTest
     tests/arbiter_combat_input_test.c
     src/engine/arbiter_combat_input.c
@@ -215,15 +255,23 @@ add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
     src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
+    src/engine/blacksmith_read_model.c
+    src/engine/blacksmith_shadow.c
+    src/engine/blacksmith_ui_session.c
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
     src/engine/orbit_camera.c
     src/engine/player_combat_context.c
+    src/engine/player_statehood.c
+    src/engine/roaming_boundary.c
     src/engine/skill_activation_abi.c
+    src/engine/transition_vote.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
     src/hooks/call_hook.c
+    src/hooks/blacksmith_read_adapter.c
+    src/hooks/blacksmith_ui_adapter.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
@@ -233,10 +281,12 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
     src/hooks/talos_defense_trace.c
+    src/hooks/zone_transition_trace.c
 )
 target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)
 target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE
     WIN32_LEAN_AND_MEAN UNICODE _UNICODE
+    SUDEKIMP_BLACKSMITH_UI_ADAPTER_TESTING=1
 )
 target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
     -Wall -Wextra -Wpedantic
@@ -245,6 +295,11 @@ target_link_options(SudekiMP.SkillTraceImageTest PRIVATE -municode)
 target_link_libraries(SudekiMP.SkillTraceImageTest PRIVATE ws2_32)
 set_target_properties(SudekiMP.SkillTraceImageTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+set_source_files_properties(
+    src/hooks/zone_transition_trace.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
 )
 
 add_executable(SudekiMP.PlayerCombatContextTest
@@ -331,6 +386,97 @@ target_compile_options(SudekiMP.InputBridgeReceiverTest PRIVATE
 )
 target_link_libraries(SudekiMP.InputBridgeReceiverTest PRIVATE ws2_32)
 set_target_properties(SudekiMP.InputBridgeReceiverTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.PlayerStatehoodTest
+    tests/player_statehood_test.c
+    src/engine/player_statehood.c
+)
+target_include_directories(SudekiMP.PlayerStatehoodTest PRIVATE src)
+target_compile_options(SudekiMP.PlayerStatehoodTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.PlayerStatehoodTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.PersonalWalletTest
+    tests/personal_wallet_test.c
+    src/engine/personal_wallet.c
+)
+target_include_directories(SudekiMP.PersonalWalletTest PRIVATE src)
+target_compile_options(SudekiMP.PersonalWalletTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.PersonalWalletTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BlacksmithShadowTest
+    tests/blacksmith_shadow_test.c
+    src/engine/blacksmith_shadow.c
+)
+target_include_directories(SudekiMP.BlacksmithShadowTest PRIVATE src)
+target_compile_options(SudekiMP.BlacksmithShadowTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.BlacksmithShadowTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BlacksmithUiSessionTest
+    tests/blacksmith_ui_session_test.c
+    src/engine/blacksmith_read_model.c
+    src/engine/blacksmith_ui_session.c
+    src/engine/blacksmith_shadow.c
+)
+target_include_directories(SudekiMP.BlacksmithUiSessionTest PRIVATE src)
+target_compile_options(SudekiMP.BlacksmithUiSessionTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.BlacksmithUiSessionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BlacksmithReadModelTest
+    tests/blacksmith_read_model_test.c
+    src/engine/blacksmith_read_model.c
+)
+target_include_directories(SudekiMP.BlacksmithReadModelTest PRIVATE src)
+target_compile_options(SudekiMP.BlacksmithReadModelTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.BlacksmithReadModelTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BlacksmithReadAdapterTest
+    tests/blacksmith_read_adapter_test.c
+    src/engine/blacksmith_read_model.c
+    src/hooks/blacksmith_read_adapter.c
+)
+target_include_directories(SudekiMP.BlacksmithReadAdapterTest PRIVATE src)
+target_compile_definitions(SudekiMP.BlacksmithReadAdapterTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.BlacksmithReadAdapterTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.BlacksmithReadAdapterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BlacksmithCommitAdapterTest
+    tests/blacksmith_commit_adapter_test.c
+    src/engine/blacksmith_commit_adapter.c
+    src/engine/blacksmith_shadow.c
+)
+target_include_directories(SudekiMP.BlacksmithCommitAdapterTest PRIVATE src)
+target_compile_options(SudekiMP.BlacksmithCommitAdapterTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.BlacksmithCommitAdapterTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

@@ -5,6 +5,8 @@
 #include "engine/camera_target_abi.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
+#include "engine/player_statehood.h"
+#include "engine/roaming_boundary.h"
 #include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/split_screen_render.h"
@@ -38,6 +40,13 @@ typedef void (SUDEKIMP_THISCALL *ArbiterSetSpeedFunction)(
     float speed,
     float turn_rate
 );
+typedef int (SUDEKIMP_THISCALL *CameraManagerGetCameraModeFunction)(
+    void *manager,
+    const char *name
+);
+typedef uint8_t (SUDEKIMP_THISCALL *GroupPlayersInCombatFunction)(
+    void *group
+);
 typedef void (__stdcall *MovementCameraTransformFunction)(
     void *controller,
     float *output_direction,
@@ -70,6 +79,10 @@ enum {
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
+    RVA_CAMERA_MANAGER_GLOBAL = 0x00409d7cu,
+    RVA_ENTITY_MANAGER_GLOBAL = 0x00409d8cu,
+    RVA_ENTITY_DIRECTORY_GLOBAL = 0x00409de4u,
+    RVA_CAMERA_MANAGER_GET_CAMERA_MODE = 0x000374b0u,
     RVA_CAMERA_TARGET_LIST_OWNER_GLOBAL = 0x003c2f30u,
     RVA_AI_OVERRIDE_CONTROL = 0x000f60d0u,
     RVA_AI_DEFAULT_CONTROL = 0x000f6100u,
@@ -79,6 +92,9 @@ enum {
     RVA_TAL_CHARACTER_UPDATE = 0x00153240u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
+    RVA_GROUP_PLAYERS_IN_COMBAT = 0x00004fa0u,
+    RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
+    RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
     RVA_CAMERA_TARGET_INSTALL = 0x000e84c0u,
     RVA_MATRIX_TARGET_CREATE = 0x00134fb0u,
@@ -89,7 +105,17 @@ enum {
     SUPPORTED_IMAGE_SIZE = 0x0045f000u,
     PARTY_SLOT_COUNT = 4u,
     PARTY_SLOT_FIRST_OFFSET = 0x90u,
-    PARTY_SLOT_STRIDE = 0x0cu
+    PARTY_SLOT_STRIDE = 0x0cu,
+    CONTROLLER_MODE_80_OFFSET = 0x80u,
+    CONTROLLER_MODE_84_OFFSET = 0x84u,
+    CONTROLLER_NEXT_CHARACTER_OFFSET = 0xf4u,
+    CONTROLLER_PREVIOUS_CHARACTER_OFFSET = 0xfcu,
+    CONTROLLER_TARGET_OFFSET = 0x248u,
+    PARTY_STATE_D0_OFFSET = 0xd0u,
+    PARTY_SWITCHING_D6_OFFSET = 0xd6u,
+    PARTY_STATE_D7_OFFSET = 0xd7u,
+    CAMERA_MODE_EXPLORATION = 0,
+    ROAMING_BOUNDARY_SETTLE_MS = 250u
 };
 
 /*
@@ -102,6 +128,8 @@ enum {
 static const float spirit_noncaster_direct_movement_pace = 6.4f;
 
 static SudekiMpPointerHook controller_update_vtable_hook;
+static SudekiMpRelativeCallHook player_one_alternate_movement_call_hook;
+static SudekiMpRelativeCallHook player_one_normal_movement_call_hook;
 static SudekiMpInlineHook movement_controller_update_hook;
 static SudekiMpInlineHook tal_character_update_hook;
 static ControllerUpdateFunction original_controller_update;
@@ -109,6 +137,8 @@ static AiControlFunction ai_override_control;
 static AiControlFunction ai_default_control;
 static ArbiterMovementFunction arbiter_movement;
 static ArbiterSetSpeedFunction arbiter_set_speed;
+static CameraManagerGetCameraModeFunction camera_manager_get_camera_mode;
+static GroupPlayersInCombatFunction group_players_in_combat;
 static MovementCameraTransformFunction movement_camera_transform;
 static MovementControllerSetAbsoluteDeltaFunction
     movement_controller_set_absolute_delta;
@@ -120,8 +150,11 @@ static BOOL second_player_movement_enabled;
 static BOOL camera_relative_movement_enabled;
 static BOOL separation_guard_enabled;
 static float maximum_separation_distance;
-static BOOL separation_blocked;
-static BOOL separation_data_missing_logged;
+static SudekiMpRoamingBoundaryEvaluation roaming_boundary_snapshot;
+static DWORD roaming_boundary_candidate_since;
+static unsigned int roaming_boundary_last_gate;
+static BOOL roaming_boundary_player_blocked[2];
+static BOOL roaming_boundary_overlay_ready;
 static BOOL second_player_weak_attack_enabled;
 static UINT weak_attack_virtual_key;
 static BOOL weak_attack_was_down;
@@ -152,9 +185,20 @@ static BOOL input_bridge_enabled;
 static float input_bridge_deadzone;
 static SudekiMpInputBridgeState input_bridge_state;
 static BOOL input_bridge_connected;
+static BOOL interaction_requests_enabled;
+static BOOL interaction_request_x_was_down;
+static BOOL shared_interaction_modal_quiesce_logged;
+static void *published_player_actors[2];
+static uint32_t published_player_actor_generations[2];
+static BOOL published_player_human_present[2];
+static BOOL roster_join_start_was_down;
+static DWORD roster_leave_chord_since;
+static BOOL roster_leave_chord_consumed;
 static DWORD input_bridge_last_right_stick_log_tick;
 static int16_t input_bridge_last_right_x;
 static int16_t input_bridge_last_right_y;
+static BOOL transition_vote_input_freeze_logged;
+static BOOL transition_vote_escape_release_pending;
 static BOOL shared_group_camera_enabled;
 static MatrixTargetCreateFunction matrix_target_create;
 static void *camera_target_install;
@@ -165,6 +209,7 @@ static void *group_camera_original_targets[2];
 static void *group_camera_target_list;
 static unsigned int group_camera_last_rejection;
 static BOOL player_two_requested;
+static void *requested_player_two_character;
 static BOOL role_lock_active;
 static DWORD player_two_request_last_attempt;
 static SudekiMpControlUpdateObserver update_observer;
@@ -184,6 +229,13 @@ static const uint8_t expected_movement_controller_update_entry[] = {
 };
 static const uint8_t expected_tal_character_update_entry[] = {
     0x53, 0x8b, 0x5c, 0x24, 0x08, 0x56
+};
+static const uint8_t expected_camera_manager_get_camera_mode_entry[] = {
+    0x53, 0x8b, 0x5c, 0x24, 0x08, 0x55, 0x56, 0x57,
+    0x8b, 0xe9, 0x85, 0xdb
+};
+static const uint8_t expected_group_players_in_combat_entry[] = {
+    0x8a, 0x81, 0xd4, 0x00, 0x00, 0x00, 0xc3
 };
 static const uint8_t expected_camera_target_install_entry[] = {
     0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x8b, 0x94, 0x9e,
@@ -315,6 +367,84 @@ static BOOL character_is_in_active_group(void *wanted_character) {
 
 static BOOL overridden_character_is_in_active_group(void) {
     return character_is_in_active_group(overridden_character);
+}
+
+static uint32_t advance_actor_generation(uint32_t generation) {
+    ++generation;
+    if (generation == 0u) {
+        ++generation;
+    }
+    return generation;
+}
+
+static void publish_runtime_player_lease(
+    unsigned int player_index,
+    void *actor,
+    BOOL human_present
+) {
+    SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
+
+    if (player_index >= 2u) {
+        return;
+    }
+    human_present = human_present != FALSE;
+    if (!human_present) {
+        actor = NULL;
+    }
+    if (published_player_actors[player_index] != actor ||
+        published_player_human_present[player_index] != human_present) {
+        published_player_actor_generations[player_index] =
+            advance_actor_generation(
+                published_player_actor_generations[player_index]);
+        published_player_actors[player_index] = actor;
+        published_player_human_present[player_index] = human_present;
+        SudekiMpLogFormat(
+            "control_separation event=player_actor_lease player=%u "
+            "actor=0x%08lx actor_generation=%lu human_present=%s "
+            "policy=runtime_only_never_save\r\n",
+            player_index + 1u,
+            (unsigned long)(uintptr_t)actor,
+            (unsigned long)published_player_actor_generations[player_index],
+            human_present ? "true" : "false");
+    }
+    SudekiMpPlayerStatehoodPublishPlayer(
+        statehood,
+        player_index,
+        (uintptr_t)actor,
+        published_player_actor_generations[player_index],
+        human_present);
+}
+
+static void publish_runtime_player_leases(void *controller) {
+    void *player_one = NULL;
+    void *player_two = NULL;
+    BOOL player_one_present = FALSE;
+    BOOL player_two_present = FALSE;
+
+    if (readable_memory(controller, CONTROLLER_TARGET_OFFSET +
+            sizeof(player_one))) {
+        player_one = *(void **)((uint8_t *)controller +
+            CONTROLLER_TARGET_OFFSET);
+        player_one_present = player_one != NULL &&
+            character_is_in_active_group(player_one);
+    }
+    if (player_two_requested && input_bridge_enabled &&
+        input_bridge_connected && SudekiMpSplitScreenRuntimeEnabled() &&
+        (!SudekiMpSplitScreenRosterParticipationAvailable() ||
+         SudekiMpSplitScreenRosterParticipationRequested()) &&
+        overridden_character != NULL &&
+        overridden_character != player_one &&
+        overridden_character_is_in_active_group()) {
+        player_two = overridden_character;
+        player_two_present = TRUE;
+    }
+    publish_runtime_player_lease(0u, player_one, player_one_present);
+    publish_runtime_player_lease(1u, player_two, player_two_present);
+}
+
+static BOOL interaction_request_x_down(void) {
+    return input_bridge_enabled && input_bridge_connected &&
+        (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_X) != 0u;
 }
 
 static uint8_t *current_gameplay_camera(void) {
@@ -623,6 +753,10 @@ static void poll_shared_group_camera(void *controller) {
     if (!shared_group_camera_enabled) {
         return;
     }
+    if (!player_two_requested) {
+        restore_group_camera("player_two_not_requested");
+        return;
+    }
     controller_target = controller == NULL ? NULL :
         *(void **)((uint8_t *)controller + 0x248u);
     camera = current_gameplay_camera();
@@ -691,7 +825,14 @@ static void stop_second_player_movement(void) {
     uint8_t *character = (uint8_t *)overridden_character;
     void *arbiter;
 
-    if (!second_player_movement_active || character == NULL) {
+    if (!second_player_movement_active) {
+        return;
+    }
+    if (character == NULL) {
+        second_player_movement_active = FALSE;
+        second_player_movement_magnitude = 0.0f;
+        last_movement_x = 0;
+        last_movement_z = 0;
         return;
     }
     if (!overridden_character_is_in_active_group()) {
@@ -718,75 +859,306 @@ static void stop_second_player_movement(void) {
     last_movement_z = 0;
 }
 
-static BOOL second_player_movement_passes_separation_guard(
-    void *controller,
-    uint8_t *character,
-    const float *direction
+static void quiesce_second_player_input(void) {
+    unsigned int ordinal;
+
+    stop_second_player_movement();
+    second_player_facing_valid = FALSE;
+    spirit_direct_movement_active = FALSE;
+    interaction_request_x_was_down = interaction_request_x_down();
+    weak_attack_was_down = input_bridge_enabled ?
+        (input_bridge_connected &&
+         (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) :
+        ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0);
+    for (ordinal = 0u; ordinal < 4u; ++ordinal) {
+        second_player_skill_keys_were_down[ordinal] =
+            (GetAsyncKeyState(
+                (int)second_player_skill_virtual_keys[ordinal]) &
+             0x8000) != 0;
+    }
+    restore_group_camera("player_two_not_requested");
+    reset_target_trace_state();
+}
+
+enum {
+    ROAMING_BOUNDARY_GATE_READY = 0u,
+    ROAMING_BOUNDARY_GATE_DISABLED = 1u,
+    ROAMING_BOUNDARY_GATE_WORLD_UNAVAILABLE = 2u,
+    ROAMING_BOUNDARY_GATE_SPLIT_INACTIVE = 3u,
+    ROAMING_BOUNDARY_GATE_TRANSITION = 4u,
+    ROAMING_BOUNDARY_GATE_HUMANS_INACTIVE = 5u,
+    ROAMING_BOUNDARY_GATE_NATIVE_STATE = 6u,
+    ROAMING_BOUNDARY_GATE_COMBAT = 7u,
+    ROAMING_BOUNDARY_GATE_CAMERA_MODE = 8u,
+    ROAMING_BOUNDARY_GATE_POSITION = 9u,
+    ROAMING_BOUNDARY_GATE_SHARED_INTERACTION_MODAL = 10u
+};
+
+static const char *roaming_boundary_gate_name(unsigned int gate) {
+    switch (gate) {
+    case ROAMING_BOUNDARY_GATE_READY: return "stable_exploration";
+    case ROAMING_BOUNDARY_GATE_DISABLED: return "config_disabled";
+    case ROAMING_BOUNDARY_GATE_WORLD_UNAVAILABLE: return "loading_or_world_unavailable";
+    case ROAMING_BOUNDARY_GATE_SPLIT_INACTIVE: return "split_runtime_inactive";
+    case ROAMING_BOUNDARY_GATE_TRANSITION: return "transition_or_vote";
+    case ROAMING_BOUNDARY_GATE_HUMANS_INACTIVE: return "two_active_humans_required";
+    case ROAMING_BOUNDARY_GATE_NATIVE_STATE: return "native_party_not_settled";
+    case ROAMING_BOUNDARY_GATE_COMBAT: return "combat";
+    case ROAMING_BOUNDARY_GATE_CAMERA_MODE: return "non_exploration_camera";
+    case ROAMING_BOUNDARY_GATE_POSITION: return "position_unavailable";
+    case ROAMING_BOUNDARY_GATE_SHARED_INTERACTION_MODAL: return "shared_interaction_modal";
+    default: return "unknown";
+    }
+}
+
+static BOOL roaming_boundary_world_ready(void) {
+    void *entity_manager;
+    void *entity_directory;
+
+    if (game_base == NULL ||
+        !readable_memory(
+            game_base + RVA_ENTITY_MANAGER_GLOBAL,
+            sizeof(entity_manager)) ||
+        !readable_memory(
+            game_base + RVA_ENTITY_DIRECTORY_GLOBAL,
+            sizeof(entity_directory))) {
+        return FALSE;
+    }
+    entity_manager = *(void **)(game_base + RVA_ENTITY_MANAGER_GLOBAL);
+    entity_directory = *(void **)(game_base + RVA_ENTITY_DIRECTORY_GLOBAL);
+    return readable_memory(entity_manager, 0x38u) &&
+        readable_memory(entity_directory, 0xf0u);
+}
+
+static unsigned int classify_roaming_boundary_context(
+    void *controller_pointer,
+    float player_one_position[3],
+    float player_two_position[3]
 ) {
-    uint8_t *controller_target;
-    uint8_t *second_player_position;
-    uint8_t *target_position;
-    float delta_x;
-    float delta_z;
-    float distance_squared;
-    float outward_dot;
+    uint8_t *group;
+    uint8_t *controller;
+    uint8_t *player_one;
+    uint8_t *player_two;
+    uint8_t *component;
+    uint8_t *mode_state;
+    void *camera_manager;
 
     if (!separation_guard_enabled) {
+        return ROAMING_BOUNDARY_GATE_DISABLED;
+    }
+    if (!roaming_boundary_world_ready()) {
+        return ROAMING_BOUNDARY_GATE_WORLD_UNAVAILABLE;
+    }
+    if (!SudekiMpSplitScreenRuntimeEnabled()) {
+        return ROAMING_BOUNDARY_GATE_SPLIT_INACTIVE;
+    }
+    if (SudekiMpSplitScreenSharedInteractionModalActive()) {
+        return ROAMING_BOUNDARY_GATE_SHARED_INTERACTION_MODAL;
+    }
+    if (SudekiMpControlSeparationGameplayInputFrozen()) {
+        return ROAMING_BOUNDARY_GATE_TRANSITION;
+    }
+    if (!player_two_requested || overridden_character == NULL ||
+        !second_player_movement_enabled ||
+        (input_bridge_enabled && !input_bridge_connected)) {
+        return ROAMING_BOUNDARY_GATE_HUMANS_INACTIVE;
+    }
+    if (!readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group)) ||
+        !readable_memory(
+            game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        return ROAMING_BOUNDARY_GATE_NATIVE_STATE;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if (controller_pointer != controller ||
+        !readable_memory(group, PARTY_STATE_D7_OFFSET + 1u) ||
+        !readable_memory(controller, CONTROLLER_TARGET_OFFSET +
+            sizeof(player_one))) {
+        return ROAMING_BOUNDARY_GATE_NATIVE_STATE;
+    }
+    player_one = *(uint8_t **)(controller + CONTROLLER_TARGET_OFFSET);
+    player_two = (uint8_t *)overridden_character;
+    if (!SudekiMpSplitScreenRosterLeadReady(
+            player_one,
+            *(void **)(group + PARTY_SLOT_FIRST_OFFSET),
+            player_one,
+            *(uint32_t *)(controller + CONTROLLER_MODE_80_OFFSET),
+            *(uint32_t *)(controller + CONTROLLER_MODE_84_OFFSET),
+            *(uint32_t *)(group + PARTY_STATE_D0_OFFSET),
+            *(uint8_t *)(group + PARTY_SWITCHING_D6_OFFSET),
+            *(uint8_t *)(group + PARTY_STATE_D7_OFFSET),
+            *(uint32_t *)(controller + CONTROLLER_NEXT_CHARACTER_OFFSET),
+            *(uint32_t *)(controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET)) ||
+        player_two == player_one ||
+        !overridden_character_is_in_active_group() ||
+        !readable_memory(player_two, 0x98u)) {
+        return ROAMING_BOUNDARY_GATE_NATIVE_STATE;
+    }
+    component = *(uint8_t **)(player_two + 0x94u);
+    mode_state = readable_memory(component, 0x170u) ?
+        *(uint8_t **)(component + 0x3cu) : NULL;
+    if (!readable_memory(mode_state, 0x0cu) ||
+        *(int16_t *)(component + 0x16au) != 1 ||
+        *(uint8_t *)(mode_state + 0x0bu) != 0u) {
+        return ROAMING_BOUNDARY_GATE_HUMANS_INACTIVE;
+    }
+    if (group_players_in_combat == NULL) {
+        return ROAMING_BOUNDARY_GATE_NATIVE_STATE;
+    }
+    if (group_players_in_combat(group) != 0u) {
+        return ROAMING_BOUNDARY_GATE_COMBAT;
+    }
+    if (camera_manager_get_camera_mode == NULL ||
+        !readable_memory(
+            game_base + RVA_CAMERA_MANAGER_GLOBAL,
+            sizeof(camera_manager))) {
+        return ROAMING_BOUNDARY_GATE_CAMERA_MODE;
+    }
+    camera_manager = *(void **)(game_base + RVA_CAMERA_MANAGER_GLOBAL);
+    if (!readable_memory(camera_manager, sizeof(void *)) ||
+        camera_manager_get_camera_mode(camera_manager, NULL) !=
+            CAMERA_MODE_EXPLORATION) {
+        return ROAMING_BOUNDARY_GATE_CAMERA_MODE;
+    }
+    if (!character_position(player_one, player_one_position) ||
+        !character_position(player_two, player_two_position)) {
+        return ROAMING_BOUNDARY_GATE_POSITION;
+    }
+    return ROAMING_BOUNDARY_GATE_READY;
+}
+
+static void update_roaming_boundary(void *controller) {
+    SudekiMpRoamingBoundaryEvaluation next;
+    float player_one_position[3];
+    float player_two_position[3];
+    unsigned int previous_phase = roaming_boundary_snapshot.phase;
+    unsigned int gate = classify_roaming_boundary_context(
+        controller, player_one_position, player_two_position);
+    DWORD now = GetTickCount();
+
+    ZeroMemory(&next, sizeof(next));
+    if (gate == ROAMING_BOUNDARY_GATE_READY) {
+        if (roaming_boundary_last_gate != ROAMING_BOUNDARY_GATE_READY) {
+            roaming_boundary_candidate_since = now;
+        }
+        if ((DWORD)(now - roaming_boundary_candidate_since) >=
+            ROAMING_BOUNDARY_SETTLE_MS) {
+            SudekiMpRoamingBoundaryEvaluate(
+                TRUE,
+                player_one_position[0], player_one_position[2],
+                player_two_position[0], player_two_position[2],
+                maximum_separation_distance,
+                0.8f,
+                &next);
+        }
+    } else {
+        roaming_boundary_candidate_since = 0u;
+    }
+    roaming_boundary_snapshot = next;
+    if (gate != roaming_boundary_last_gate) {
+        SudekiMpLogFormat(
+            "control_separation event=roaming_boundary gate=%s active=%s policy=stable_exploration_two_active_humans_only\r\n",
+            roaming_boundary_gate_name(gate),
+            next.phase != SUDEKIMP_ROAMING_BOUNDARY_INACTIVE ?
+                "true" : "false");
+        roaming_boundary_last_gate = gate;
+    }
+    if (next.phase != previous_phase) {
+        SudekiMpLogFormat(
+            "control_separation event=roaming_boundary phase=%u distance_bits=0x%08lx warning_bits=0x%08lx maximum_bits=0x%08lx policy=warn_at_80_percent_require_clear_inward_at_limit\r\n",
+            next.phase,
+            (unsigned long)float_bits(next.distance),
+            (unsigned long)float_bits(next.warning_distance),
+            (unsigned long)float_bits(next.maximum_distance));
+    }
+    if (next.phase != SUDEKIMP_ROAMING_BOUNDARY_LIMIT) {
+        roaming_boundary_player_blocked[0] = FALSE;
+        roaming_boundary_player_blocked[1] = FALSE;
+    }
+    if (next.phase < SUDEKIMP_ROAMING_BOUNDARY_WARNING) {
+        roaming_boundary_overlay_ready = FALSE;
+    }
+}
+
+static BOOL constrain_roaming_boundary_movement(
+    unsigned int player_index,
+    float direction[3]
+) {
+    float constrained_x;
+    float constrained_z;
+    BOOL movement_remains;
+    BOOL changed;
+
+    if (!separation_guard_enabled || direction == NULL ||
+        player_index > 1u) {
         return TRUE;
     }
-    controller_target = controller == NULL ? NULL :
-        *(uint8_t **)((uint8_t *)controller + 0x248);
-    second_player_position = character == NULL ? NULL :
-        *(uint8_t **)(character + 0x44);
-    target_position = controller_target == NULL ? NULL :
-        *(uint8_t **)(controller_target + 0x44);
-    if (controller_target == NULL || controller_target == character ||
-        second_player_position == NULL || target_position == NULL) {
-        if (!separation_data_missing_logged) {
-            SudekiMpLogWrite(
-                "control_separation event=separation_guard phase=abort reason=incomplete_position_state\r\n"
-            );
-            separation_data_missing_logged = TRUE;
-        }
-        return FALSE;
+    movement_remains = SudekiMpRoamingBoundaryConstrainMovement(
+        &roaming_boundary_snapshot,
+        roaming_boundary_overlay_ready,
+        player_index,
+        direction[0],
+        direction[2],
+        &constrained_x,
+        &constrained_z) != 0;
+    changed = fabsf(constrained_x - direction[0]) > 0.00001f ||
+        fabsf(constrained_z - direction[2]) > 0.00001f;
+    direction[0] = constrained_x;
+    direction[2] = constrained_z;
+    if (changed && !roaming_boundary_player_blocked[player_index]) {
+        SudekiMpLogFormat(
+            "control_separation event=roaming_boundary player=%u action=%s distance_bits=0x%08lx policy=require_clear_inward_radial_component\r\n",
+            player_index + 1u,
+            movement_remains ? "clamp" : "block",
+            (unsigned long)float_bits(roaming_boundary_snapshot.distance));
+    } else if (!changed && roaming_boundary_player_blocked[player_index]) {
+        SudekiMpLogFormat(
+            "control_separation event=roaming_boundary player=%u action=release reason=clear_inward_or_within_limit\r\n",
+            player_index + 1u);
     }
-    separation_data_missing_logged = FALSE;
-    delta_x = *(float *)(second_player_position + 0x18) -
-        *(float *)(target_position + 0x18);
-    delta_z = *(float *)(second_player_position + 0x20) -
-        *(float *)(target_position + 0x20);
-    distance_squared = delta_x * delta_x + delta_z * delta_z;
-    outward_dot = delta_x * direction[0] + delta_z * direction[2];
-    if (distance_squared >=
-            maximum_separation_distance * maximum_separation_distance &&
-        outward_dot > 0.0f) {
-        if (!separation_blocked) {
-            uint32_t distance_bits;
-            uint32_t maximum_bits;
+    roaming_boundary_player_blocked[player_index] = changed;
+    return movement_remains;
+}
 
-            memcpy(&distance_bits, &distance_squared, sizeof(distance_bits));
-            memcpy(&maximum_bits, &maximum_separation_distance,
-                sizeof(maximum_bits));
-            SudekiMpLogFormat(
-                "control_separation event=separation_guard phase=block distance_squared_bits=0x%08lx maximum_bits=0x%08lx policy=allow_inward_block_outward\r\n",
-                (unsigned long)distance_bits,
-                (unsigned long)maximum_bits
-            );
-        }
-        separation_blocked = TRUE;
-        return FALSE;
+static void __stdcall enforce_player_one_roaming_boundary(
+    void *arbiter,
+    const float *direction,
+    float speed,
+    float turn_rate,
+    uint32_t movement_mode
+) {
+    float constrained[3];
+    uint8_t *controller;
+    void *character;
+
+    if (direction == NULL || !readable_memory(arbiter, 0x14u)) {
+        arbiter_movement(
+            arbiter, direction, speed, turn_rate, movement_mode);
+        return;
     }
-    if (separation_blocked) {
-        SudekiMpLogWrite(
-            "control_separation event=separation_guard phase=release reason=inward_or_within_limit\r\n"
-        );
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    character = *(void **)((uint8_t *)arbiter + 0x10u);
+    if (!readable_memory(controller, CONTROLLER_TARGET_OFFSET +
+            sizeof(character)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != character) {
+        arbiter_movement(
+            arbiter, direction, speed, turn_rate, movement_mode);
+        return;
     }
-    separation_blocked = FALSE;
-    return TRUE;
+    memcpy(constrained, direction, sizeof(constrained));
+    if (!constrain_roaming_boundary_movement(0u, constrained)) {
+        arbiter_set_speed(arbiter, 0.0f, turn_rate);
+        return;
+    }
+    arbiter_movement(
+        arbiter, constrained, speed, turn_rate, movement_mode);
 }
 
 static void poll_input_bridge(void) {
     BOOL connected;
+    BOOL was_connected;
     DWORD now;
     int delta_x;
     int delta_y;
@@ -794,6 +1166,7 @@ static void poll_input_bridge(void) {
     if (!input_bridge_enabled) {
         return;
     }
+    was_connected = input_bridge_connected;
     connected = SudekiMpInputBridgePoll(&input_bridge_state);
     if (!connected) {
         if (input_bridge_connected) {
@@ -801,9 +1174,14 @@ static void poll_input_bridge(void) {
             stop_second_player_movement();
         }
         input_bridge_connected = FALSE;
+        interaction_request_x_was_down = FALSE;
         return;
     }
     input_bridge_connected = TRUE;
+    if (!was_connected) {
+        /* A held button on the first live packet is not a rising edge. */
+        interaction_request_x_was_down = interaction_request_x_down();
+    }
     now = GetTickCount();
     delta_x = (int)input_bridge_state.right_x -
         (int)input_bridge_last_right_x;
@@ -821,6 +1199,228 @@ static void poll_input_bridge(void) {
         input_bridge_last_right_x = input_bridge_state.right_x;
         input_bridge_last_right_y = input_bridge_state.right_y;
     }
+}
+
+static void service_second_player_interaction_request(
+    BOOL owns_foreground
+) {
+    SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
+    SudekiMpPlayerStatehoodSnapshot snapshot;
+    const SudekiMpPlayerLease *player_two;
+    BOOL x_down = interaction_request_x_down();
+    DWORD now = GetTickCount();
+
+    SudekiMpPlayerStatehoodService(statehood, now);
+    if (!interaction_requests_enabled || !owns_foreground ||
+        !input_bridge_enabled || !input_bridge_connected ||
+        SudekiMpSplitScreenSharedInteractionModalActive()) {
+        interaction_request_x_was_down = x_down;
+        return;
+    }
+    if (!x_down || interaction_request_x_was_down) {
+        interaction_request_x_was_down = x_down;
+        return;
+    }
+
+    if (SudekiMpPlayerStatehoodGetSnapshot(statehood, now, &snapshot)) {
+        if (snapshot.state == SUDEKIMP_INTERACTION_SESSION_REQUESTED &&
+            snapshot.provenance.player_index == 1u &&
+            snapshot.provenance.kind ==
+                SUDEKIMP_INTERACTION_GENERIC_REQUEST &&
+            !snapshot.provenance.target_known &&
+            snapshot.provenance.target == 0u &&
+            SudekiMpPlayerStatehoodCancelRequest(statehood, 1u)) {
+            SudekiMpLogFormat(
+                "control_separation event=interaction_request player=2 "
+                "phase=cancel serial=%lu source=controller_x "
+                "policy=targetless_acknowledgement_never_dispatch_native_action\r\n",
+                (unsigned long)snapshot.provenance.serial);
+        } else {
+            SudekiMpLogFormat(
+                "control_separation event=interaction_request player=2 "
+                "phase=reject reason=session_occupied state=%u kind=%u "
+                "owner=%lu source=controller_x\r\n",
+                (unsigned int)snapshot.state,
+                (unsigned int)snapshot.provenance.kind,
+                (unsigned long)snapshot.provenance.player_index + 1u);
+        }
+        interaction_request_x_was_down = x_down;
+        return;
+    }
+
+    player_two = &statehood->players[1];
+    {
+        uint32_t serial = 0u;
+        if (SudekiMpPlayerStatehoodRequest(
+                statehood,
+                1u,
+                player_two->actor,
+                player_two->actor_generation,
+                SUDEKIMP_INTERACTION_GENERIC_REQUEST,
+                0u,
+                0,
+                0u,
+                now,
+                &serial)) {
+            SudekiMpLogFormat(
+                "control_separation event=interaction_request player=2 "
+                "phase=create serial=%lu actor=0x%08lx "
+                "actor_generation=%lu target=0x00000000 target_known=false "
+                "source=controller_x "
+                "policy=request_only_never_dispatch_native_action\r\n",
+                (unsigned long)serial,
+                (unsigned long)player_two->actor,
+                (unsigned long)player_two->actor_generation);
+        } else {
+            SudekiMpLogWrite(
+                "control_separation event=interaction_request player=2 "
+                "phase=reject reason=no_live_player_two_actor_lease "
+                "source=controller_x\r\n");
+        }
+    }
+    interaction_request_x_was_down = x_down;
+}
+
+static void quiesce_for_shared_interaction_modal(void) {
+    quiesce_second_player_input();
+    SudekiMpCombatContextSetInputSource(
+        1u, SUDEKIMP_COMBAT_INPUT_NONE, NULL);
+    if (!shared_interaction_modal_quiesce_logged) {
+        shared_interaction_modal_quiesce_logged = TRUE;
+        SudekiMpLogWrite(
+            "control_separation event=shared_interaction_modal player=2 "
+            "input=quiesced "
+            "policy=no_movement_attack_skill_camera_or_request_injection\r\n");
+    }
+}
+
+static void report_shared_interaction_modal_released(void) {
+    if (!shared_interaction_modal_quiesce_logged) {
+        return;
+    }
+    shared_interaction_modal_quiesce_logged = FALSE;
+    SudekiMpLogWrite(
+        "control_separation event=shared_interaction_modal player=2 "
+        "input=released policy=require_new_edges_after_fresh_camera_caches\r\n");
+}
+
+static void stop_first_player_movement(void *controller) {
+    uint8_t *character;
+    void *arbiter;
+
+    if (controller == NULL || arbiter_set_speed == NULL ||
+        !readable_memory(controller, 0x24cu)) {
+        return;
+    }
+    character = *(uint8_t **)((uint8_t *)controller + 0x248u);
+    if (character == NULL || !readable_memory(character, 0x94u)) {
+        return;
+    }
+    arbiter = *(void **)(character + 0x90u);
+    if (arbiter != NULL) {
+        arbiter_set_speed(arbiter, 0.0f, 1.0f);
+    }
+}
+
+BOOL SudekiMpControlSeparationGameplayInputFrozen(void) {
+    return SudekiMpInputBridgeGameplaySuppressed() ||
+        transition_vote_escape_release_pending ||
+        SudekiMpSplitScreenSharedInteractionModalActive();
+}
+
+static BOOL service_transition_vote_input_freeze(void *controller) {
+    unsigned int ordinal;
+    BOOL escape_down =
+        (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    BOOL vote_suppressed = SudekiMpInputBridgeGameplaySuppressed();
+
+    if (!vote_suppressed && transition_vote_input_freeze_logged &&
+        escape_down) {
+        transition_vote_escape_release_pending = TRUE;
+    }
+    if (!vote_suppressed && transition_vote_escape_release_pending &&
+        !escape_down) {
+        transition_vote_escape_release_pending = FALSE;
+    }
+    if (!vote_suppressed && !transition_vote_escape_release_pending) {
+        if (transition_vote_input_freeze_logged) {
+            transition_vote_input_freeze_logged = FALSE;
+            SudekiMpLogWrite(
+                "transition_vote event=input_freeze state=released "
+                "policy=native_controller_update_resumes_after_escape_release\r\n");
+        }
+        return FALSE;
+    }
+    poll_input_bridge();
+    stop_first_player_movement(controller);
+    stop_second_player_movement();
+    second_player_facing_valid = FALSE;
+    interaction_request_x_was_down = interaction_request_x_down();
+    weak_attack_was_down = FALSE;
+    for (ordinal = 0u; ordinal < 4u; ++ordinal) {
+        second_player_skill_keys_were_down[ordinal] =
+            (GetAsyncKeyState(
+                (int)second_player_skill_virtual_keys[ordinal]) &
+             0x8000) != 0;
+    }
+    if (!transition_vote_input_freeze_logged) {
+        transition_vote_input_freeze_logged = TRUE;
+        SudekiMpLogWrite(
+            "transition_vote event=input_freeze state=active "
+            "policy=skip_p1_native_controller_update_and_all_p2_submissions_keep_vote_observer_running_until_vote_and_escape_release\r\n");
+    }
+    if (update_observer != NULL) {
+        update_observer();
+    }
+    return TRUE;
+}
+
+static void poll_roster_participation_input(BOOL owns_foreground) {
+    BOOL start_down;
+    BOOL back_down;
+    DWORD now;
+
+    if (!owns_foreground || !input_bridge_enabled ||
+        !SudekiMpSplitScreenRosterParticipationAvailable()) {
+        roster_join_start_was_down = FALSE;
+        roster_leave_chord_since = 0u;
+        roster_leave_chord_consumed = FALSE;
+        return;
+    }
+    start_down = input_bridge_connected &&
+        (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_START) != 0u;
+    back_down = input_bridge_connected &&
+        (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_BACK) != 0u;
+    now = GetTickCount();
+
+    if (!SudekiMpSplitScreenRosterParticipationRequested() &&
+        start_down && !back_down && !roster_join_start_was_down) {
+        if (SudekiMpSplitScreenRequestRosterParticipation(TRUE)) {
+            SudekiMpLogWrite(
+                "control_separation event=player_two_participation "
+                "source=controller_start state=drop_in_requested "
+                "policy=reclaim_locked_roster_character\r\n");
+        }
+    }
+    if (SudekiMpSplitScreenRosterParticipationRequested() &&
+        start_down && back_down) {
+        if (roster_leave_chord_since == 0u) {
+            roster_leave_chord_since = now;
+        } else if (!roster_leave_chord_consumed &&
+            (DWORD)(now - roster_leave_chord_since) >= 1000u) {
+            if (SudekiMpSplitScreenRequestRosterParticipation(FALSE)) {
+                roster_leave_chord_consumed = TRUE;
+                SudekiMpLogWrite(
+                    "control_separation event=player_two_participation "
+                    "source=controller_back_start_hold state=dropped_out "
+                    "policy=restore_native_ai_retain_roster_character\r\n");
+            }
+        }
+    } else {
+        roster_leave_chord_since = 0u;
+        roster_leave_chord_consumed = FALSE;
+    }
+    roster_join_start_was_down = start_down;
 }
 
 static BOOL bridge_movement(float *x, float *z, float *speed) {
@@ -1360,6 +1960,10 @@ static void poll_second_player_movement(
     float frame_delta;
     float direct_move_speed;
 
+    if (!player_two_requested) {
+        stop_second_player_movement();
+        return;
+    }
     if (!second_player_movement_enabled || character == NULL) {
         return;
     }
@@ -1433,10 +2037,7 @@ static void poll_second_player_movement(
         direction[1] = 0.0f;
         direction[2] = transformed[2] / horizontal_length;
     }
-    if (!second_player_movement_passes_separation_guard(
-            controller,
-            character,
-            direction)) {
+    if (!constrain_roaming_boundary_movement(1u, direction)) {
         stop_second_player_movement();
         return;
     }
@@ -1559,7 +2160,8 @@ static void poll_second_player_camera_facing(
     float world_forward[3];
     float dot;
 
-    if (!owns_foreground || !second_player_movement_enabled ||
+    if (!player_two_requested || !owns_foreground ||
+        !second_player_movement_enabled ||
         !camera_relative_movement_enabled || !input_bridge_enabled ||
         !input_bridge_connected || character == NULL ||
         !overridden_character_is_in_active_group()) {
@@ -1621,6 +2223,10 @@ static void poll_second_player_weak_attack(
         (input_bridge_connected &&
          (input_bridge_state.buttons & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) :
         ((GetAsyncKeyState((int)weak_attack_virtual_key) & 0x8000) != 0);
+    if (!player_two_requested) {
+        weak_attack_was_down = key_is_down;
+        return;
+    }
     if (character == NULL || !overridden_character_is_in_active_group()) {
         weak_attack_was_down = key_is_down;
         return;
@@ -1677,6 +2283,15 @@ static void poll_second_player_skills(
     unsigned int ordinal;
 
     if (!second_player_skills_enabled) {
+        return;
+    }
+    if (!player_two_requested) {
+        for (ordinal = 0u; ordinal < 4u; ++ordinal) {
+            second_player_skill_keys_were_down[ordinal] =
+                (GetAsyncKeyState(
+                    (int)second_player_skill_virtual_keys[ordinal]) &
+                 0x8000) != 0;
+        }
         return;
     }
     component = character == NULL ? NULL :
@@ -1744,7 +2359,8 @@ static void poll_second_player_target_trace(BOOL owns_foreground) {
     int auto_enabled;
     DWORD now;
 
-    if (!target_trace_enabled || !owns_foreground || character == NULL ||
+    if (!player_two_requested || !target_trace_enabled ||
+        !owns_foreground || character == NULL ||
         !overridden_character_is_in_active_group()) {
         return;
     }
@@ -1825,7 +2441,9 @@ static uint8_t *find_second_player_party_slot(
             index * PARTY_SLOT_STRIDE;
         void *candidate = *(void **)slot;
 
-        if (candidate != NULL && candidate != controller_target) {
+        if (candidate != NULL && candidate != controller_target &&
+            (requested_player_two_character == NULL ||
+             candidate == requested_player_two_character)) {
             if (slot_index != NULL) {
                 *slot_index = index;
             }
@@ -1964,8 +2582,14 @@ static void toggle_second_player_ai(void) {
     );
     if (slot == NULL) {
         SudekiMpLogWrite(
-            "control_separation event=restore_abort reason=character_not_in_party\r\n"
+            "control_separation event=restore status=released_without_native_default "
+            "reason=owned_character_no_longer_in_active_party "
+            "policy=drop_stale_runtime_identity_after_party_rebuild\r\n"
         );
+        overridden_character = NULL;
+        stop_second_player_movement();
+        reset_native_movement_acceptance_trace();
+        reset_target_trace_state();
         return;
     }
     character = *(uint8_t **)slot;
@@ -2007,9 +2631,12 @@ static void toggle_second_player_ai(void) {
 
 static void reconcile_player_two_request(void) {
     BOOL active = overridden_character != NULL;
+    BOOL target_mismatch = active && player_two_requested &&
+        requested_player_two_character != NULL &&
+        overridden_character != requested_player_two_character;
     DWORD now;
 
-    if (active == player_two_requested) {
+    if (!target_mismatch && active == player_two_requested) {
         return;
     }
     now = GetTickCount();
@@ -2033,9 +2660,33 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     uint32_t *player_two_arbiter_flags = NULL;
     uint32_t saved_player_two_arbiter_flags;
 
+    /* Refresh bridge liveness before the native Player 1 movement callsites
+     * run, so a disconnected Player 2 can never leave Player 1 tethered for
+     * an extra controller frame. */
+    poll_input_bridge();
+    publish_runtime_player_leases(controller);
+    SudekiMpPlayerStatehoodService(
+        SudekiMpPlayerStatehoodRuntime(), GetTickCount());
+    update_roaming_boundary(controller);
+    if (service_transition_vote_input_freeze(controller)) {
+        return;
+    }
+    if (SudekiMpSplitScreenSharedInteractionModalActive()) {
+        quiesce_for_shared_interaction_modal();
+        original_controller_update(controller, update_data);
+        publish_runtime_player_leases(controller);
+        SudekiMpPlayerStatehoodService(
+            SudekiMpPlayerStatehoodRuntime(), GetTickCount());
+        update_roaming_boundary(controller);
+        if (update_observer != NULL) {
+            update_observer();
+        }
+        return;
+    }
+    report_shared_interaction_modal_released();
     saved_player_two_arbiter_flags =
         begin_spirit_noncaster_arbiter_virtualization(
-            player_two_character,
+            player_two_requested ? player_two_character : NULL,
             &player_two_arbiter_flags
         );
     if (saved_player_two_arbiter_flags != 0u &&
@@ -2062,13 +2713,28 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
             "control_separation event=spirit_noncaster_movement_virtualization phase=controller_update_inactive policy=native_arbiter_state_unmodified\r\n"
         );
     }
+    publish_runtime_player_leases(controller);
+    if (SudekiMpSplitScreenSharedInteractionModalActive()) {
+        quiesce_for_shared_interaction_modal();
+        SudekiMpPlayerStatehoodService(
+            SudekiMpPlayerStatehoodRuntime(), GetTickCount());
+        update_roaming_boundary(controller);
+        if (update_observer != NULL) {
+            update_observer();
+        }
+        return;
+    }
+    if (service_transition_vote_input_freeze(controller)) {
+        return;
+    }
     poll_input_bridge();
     SudekiMpCombatContextSetCharacter(
         0u,
         controller == NULL ? NULL :
             *(void **)((uint8_t *)controller + 0x248u)
     );
-    SudekiMpCombatContextSetCharacter(1u, overridden_character);
+    SudekiMpCombatContextSetCharacter(
+        1u, player_two_requested ? overridden_character : NULL);
     SudekiMpCombatContextSetInputSource(
         0u,
         controller == NULL ? SUDEKIMP_COMBAT_INPUT_NONE :
@@ -2077,11 +2743,12 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     );
     SudekiMpCombatContextSetInputSource(
         1u,
-        overridden_character == NULL ? SUDEKIMP_COMBAT_INPUT_NONE :
+        !player_two_requested || overridden_character == NULL ?
+            SUDEKIMP_COMBAT_INPUT_NONE :
             (input_bridge_enabled ?
                 SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE :
                 SUDEKIMP_COMBAT_INPUT_KEYBOARD_PROTOTYPE),
-        overridden_character == NULL ? NULL :
+        !player_two_requested || overridden_character == NULL ? NULL :
             (input_bridge_enabled ?
                 (void *)SudekiMpInputBridgeIdentity() :
                 (void *)second_player_skill_virtual_keys)
@@ -2094,18 +2761,48 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
         GetWindowThreadProcessId(foreground, &foreground_process_id);
     }
     owns_foreground = foreground_process_id == GetCurrentProcessId();
+    poll_roster_participation_input(owns_foreground);
     if (owns_foreground &&
         hotkey_is_down && !hotkey_was_down) {
-        player_two_requested = !player_two_requested;
-        player_two_request_last_attempt = 0u;
-        SudekiMpLogFormat(
-            "control_separation event=player_two_request source=hotkey "
-            "state=%s\r\n",
-            player_two_requested ? "enabled" : "disabled"
-        );
+        if (SudekiMpSplitScreenRosterParticipationAvailable()) {
+            BOOL participation_requested =
+                SudekiMpSplitScreenRosterParticipationRequested();
+            if (!SudekiMpSplitScreenRequestRosterParticipation(
+                    !participation_requested)) {
+                SudekiMpLogFormat(
+                    "control_separation event=player_two_request "
+                    "source=hotkey status=rejected reason=roster_transition_busy "
+                    "error=%lu\r\n",
+                    (unsigned long)GetLastError());
+            } else {
+                SudekiMpLogFormat(
+                    "control_separation event=player_two_request "
+                    "source=hotkey state=%s "
+                    "policy=retain_locked_character_identity\r\n",
+                    participation_requested ? "dropped_out" :
+                        "drop_in_requested");
+            }
+        } else if (role_lock_active) {
+            SudekiMpLogWrite(
+                "control_separation event=player_two_request source=hotkey "
+                "status=rejected reason=co_op_roles_locked\r\n"
+            );
+        } else {
+            requested_player_two_character = NULL;
+            player_two_requested = !player_two_requested;
+            player_two_request_last_attempt = 0u;
+            SudekiMpLogFormat(
+                "control_separation event=player_two_request source=hotkey "
+                "state=%s policy=first_non_front_active_party_member\r\n",
+                player_two_requested ? "enabled" : "disabled"
+            );
+        }
     }
     hotkey_was_down = hotkey_is_down;
     reconcile_player_two_request();
+    publish_runtime_player_leases(controller);
+    service_second_player_interaction_request(owns_foreground);
+    update_roaming_boundary(controller);
     poll_second_player_movement(controller, update_data, owns_foreground);
     poll_second_player_camera_facing(controller, owns_foreground);
     poll_second_player_weak_attack(controller, owns_foreground);
@@ -2130,8 +2827,12 @@ BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
         );
         return FALSE;
     }
+    requested_player_two_character = NULL;
     player_two_requested = enabled != FALSE;
     player_two_request_last_attempt = 0u;
+    if (!player_two_requested) {
+        quiesce_second_player_input();
+    }
     SudekiMpLogFormat(
         "control_separation event=player_two_request source=api state=%s\r\n",
         player_two_requested ? "enabled" : "disabled"
@@ -2139,12 +2840,153 @@ BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
+    uint8_t *group;
+    uint8_t *controller;
+    void *controller_target;
+    unsigned int slot_index;
+
+    if (original_controller_update == NULL || game_base == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (role_lock_active &&
+        (character == NULL || character != requested_player_two_character)) {
+        SetLastError(ERROR_LOCK_VIOLATION);
+        SudekiMpLogWrite(
+            "control_separation event=player_two_request source=roster "
+            "status=rejected reason=co_op_roles_locked\r\n"
+        );
+        return FALSE;
+    }
+    if ((character != NULL && player_two_requested &&
+         requested_player_two_character == character) ||
+        (character == NULL && !player_two_requested &&
+         requested_player_two_character == NULL)) {
+        if (character == NULL) {
+            quiesce_second_player_input();
+        }
+        return TRUE;
+    }
+    if (character != NULL) {
+        if (!readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
+                sizeof(group)) ||
+            !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+                sizeof(controller))) {
+            SetLastError(ERROR_INVALID_STATE);
+            return FALSE;
+        }
+        group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+        controller = *(uint8_t **)(
+            game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+        if (!readable_memory(group,
+                PARTY_SLOT_FIRST_OFFSET +
+                    PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE) ||
+            !readable_memory(controller, 0x24cu)) {
+            SetLastError(ERROR_NOT_FOUND);
+            return FALSE;
+        }
+        controller_target = controller == NULL ? NULL :
+            *(void **)(controller + 0x248u);
+        if (group == NULL || controller_target == NULL ||
+            *(void **)(group + PARTY_SLOT_FIRST_OFFSET) != controller_target ||
+            find_character_party_slot(group, character, &slot_index) == NULL ||
+            slot_index == 0u || character == controller_target) {
+            SetLastError(ERROR_NOT_FOUND);
+            return FALSE;
+        }
+    }
+    requested_player_two_character = character;
+    player_two_requested = character != NULL;
+    player_two_request_last_attempt = 0u;
+    if (!player_two_requested) {
+        quiesce_second_player_input();
+    }
+    SudekiMpLogFormat(
+        "control_separation event=player_two_request source=roster "
+        "state=%s character=0x%08lx policy=exact_selected_party_member\r\n",
+        character != NULL ? "enabled" : "disabled",
+        (unsigned long)(uintptr_t)character
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
+    if (original_controller_update == NULL || game_base == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (role_lock_active) {
+        SetLastError(ERROR_LOCK_VIOLATION);
+        return FALSE;
+    }
+    requested_player_two_character = NULL;
+    player_two_requested = FALSE;
+    player_two_request_last_attempt = 0u;
+    quiesce_second_player_input();
+    if (overridden_character == NULL) {
+        return TRUE;
+    }
+    toggle_second_player_ai();
+    if (overridden_character != NULL) {
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogWrite(
+            "control_separation event=player_two_transition_release "
+            "status=pending reason=native_ai_restore_not_verified\r\n");
+        return FALSE;
+    }
+    SudekiMpLogWrite(
+        "control_separation event=player_two_transition_release "
+        "status=confirmed policy=synchronous_game_thread_native_ai_restore\r\n");
+    return TRUE;
+}
+
 BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled) {
+    if (enabled && requested_player_two_character != NULL &&
+        overridden_character != requested_player_two_character) {
+        SetLastError(ERROR_INVALID_STATE);
+        SudekiMpLogWrite(
+            "control_separation event=co_op_roles state=rejected "
+            "reason=selected_player_two_not_control_owned\r\n"
+        );
+        return FALSE;
+    }
     role_lock_active = enabled != FALSE;
     SudekiMpLogFormat(
         "control_separation event=co_op_roles state=%s\r\n",
         role_lock_active ? "locked" : "unlocked"
     );
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSetInteractionRequestsEnabled(BOOL enabled) {
+    SudekiMpPlayerStatehood *statehood;
+    SudekiMpPlayerStatehoodSnapshot snapshot;
+    BOOL next_enabled;
+
+    if (original_controller_update == NULL || game_base == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    next_enabled = enabled != FALSE;
+    if (!next_enabled &&
+        SudekiMpPlayerStatehoodGetSnapshot(
+            statehood, GetTickCount(), &snapshot) &&
+        snapshot.state == SUDEKIMP_INTERACTION_SESSION_REQUESTED &&
+        snapshot.provenance.player_index == 1u &&
+        snapshot.provenance.kind == SUDEKIMP_INTERACTION_GENERIC_REQUEST &&
+        !snapshot.provenance.target_known &&
+        snapshot.provenance.target == 0u) {
+        SudekiMpPlayerStatehoodCancelRequest(statehood, 1u);
+    }
+    interaction_requests_enabled = next_enabled;
+    interaction_request_x_was_down = interaction_request_x_down();
+    SudekiMpLogFormat(
+        "control_separation event=interaction_requests state=%s "
+        "button=controller_x "
+        "policy=targetless_player_two_acknowledgement_never_dispatch_native_action\r\n",
+        interaction_requests_enabled ? "enabled" : "disabled");
     return TRUE;
 }
 
@@ -2154,6 +2996,10 @@ BOOL SudekiMpControlSeparationPlayerTwoRequested(void) {
 
 BOOL SudekiMpControlSeparationPlayerTwoActive(void) {
     return overridden_character != NULL;
+}
+
+void *SudekiMpControlSeparationPlayerTwoCharacter(void) {
+    return overridden_character;
 }
 
 BOOL SudekiMpControlSeparationInputReady(void) {
@@ -2167,6 +3013,39 @@ BOOL SudekiMpControlSeparationSecondPlayerMovementActive(void) {
 float SudekiMpControlSeparationSecondPlayerMovementMagnitude(void) {
     return second_player_movement_active ?
         second_player_movement_magnitude : 0.0f;
+}
+
+BOOL SudekiMpControlSeparationGetRoamingBoundarySnapshot(
+    SudekiMpRoamingBoundaryEvaluation *snapshot
+) {
+    if (snapshot == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!separation_guard_enabled) {
+        ZeroMemory(snapshot, sizeof(*snapshot));
+        return FALSE;
+    }
+    *snapshot = roaming_boundary_snapshot;
+    if (!roaming_boundary_world_ready() ||
+        !SudekiMpSplitScreenRuntimeEnabled() ||
+        SudekiMpControlSeparationGameplayInputFrozen()) {
+        ZeroMemory(snapshot, sizeof(*snapshot));
+    }
+    return TRUE;
+}
+
+void SudekiMpControlSeparationReportRoamingBoundaryOverlay(BOOL visible) {
+    BOOL ready = separation_guard_enabled && visible &&
+        roaming_boundary_snapshot.phase >=
+            SUDEKIMP_ROAMING_BOUNDARY_WARNING;
+
+    if (ready != roaming_boundary_overlay_ready) {
+        roaming_boundary_overlay_ready = ready;
+        SudekiMpLogFormat(
+            "control_separation event=roaming_boundary_overlay state=%s policy=hard_limit_requires_visible_warning\r\n",
+            ready ? "ready" : "unavailable");
+    }
 }
 
 void SudekiMpControlSeparationSetUpdateObserver(
@@ -2228,6 +3107,18 @@ BOOL SudekiMpInstallControlSeparation(
         (!enable_second_player_movement || maximum_separation <= 0.0f ||
          maximum_separation > 1000.0f)) {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (enable_separation_guard &&
+        (memcmp(
+             base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE,
+             expected_camera_manager_get_camera_mode_entry,
+             sizeof(expected_camera_manager_get_camera_mode_entry)) != 0 ||
+         memcmp(
+             base + RVA_GROUP_PLAYERS_IN_COMBAT,
+             expected_group_players_in_combat_entry,
+             sizeof(expected_group_players_in_combat_entry)) != 0)) {
+        SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
     if (enable_camera_relative_movement &&
@@ -2293,13 +3184,19 @@ BOOL SudekiMpInstallControlSeparation(
     overridden_character = NULL;
     role_lock_active = FALSE;
     player_two_requested = FALSE;
+    requested_player_two_character = NULL;
     player_two_request_last_attempt = 0u;
     second_player_movement_enabled = enable_second_player_movement;
     camera_relative_movement_enabled = enable_camera_relative_movement;
     separation_guard_enabled = enable_separation_guard;
     maximum_separation_distance = maximum_separation;
-    separation_blocked = FALSE;
-    separation_data_missing_logged = FALSE;
+    ZeroMemory(&roaming_boundary_snapshot,
+        sizeof(roaming_boundary_snapshot));
+    roaming_boundary_candidate_since = 0u;
+    roaming_boundary_last_gate = 0xffffffffu;
+    ZeroMemory(roaming_boundary_player_blocked,
+        sizeof(roaming_boundary_player_blocked));
+    roaming_boundary_overlay_ready = FALSE;
     second_player_weak_attack_enabled = enable_second_player_weak_attack;
     weak_attack_virtual_key = attack_virtual_key;
     weak_attack_was_down = FALSE;
@@ -2307,9 +3204,24 @@ BOOL SudekiMpInstallControlSeparation(
     input_bridge_deadzone = bridge_deadzone;
     ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
     input_bridge_connected = FALSE;
+    interaction_requests_enabled = FALSE;
+    interaction_request_x_was_down = FALSE;
+    shared_interaction_modal_quiesce_logged = FALSE;
+    ZeroMemory(published_player_actors,
+        sizeof(published_player_actors));
+    ZeroMemory(published_player_actor_generations,
+        sizeof(published_player_actor_generations));
+    ZeroMemory(published_player_human_present,
+        sizeof(published_player_human_present));
+    SudekiMpPlayerStatehoodInitialize(SudekiMpPlayerStatehoodRuntime());
     input_bridge_last_right_stick_log_tick = 0u;
     input_bridge_last_right_x = 0;
     input_bridge_last_right_y = 0;
+    transition_vote_input_freeze_logged = FALSE;
+    transition_vote_escape_release_pending = FALSE;
+    roster_join_start_was_down = FALSE;
+    roster_leave_chord_since = 0u;
+    roster_leave_chord_consumed = FALSE;
     second_player_skills_enabled = enable_second_player_skills;
     ZeroMemory(
         second_player_skill_virtual_keys,
@@ -2353,6 +3265,12 @@ BOOL SudekiMpInstallControlSeparation(
     arbiter_set_speed = (ArbiterSetSpeedFunction)(
         base + RVA_ARBITER_SET_SPEED
     );
+    camera_manager_get_camera_mode = enable_separation_guard ?
+        (CameraManagerGetCameraModeFunction)(
+            base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE) : NULL;
+    group_players_in_combat = enable_separation_guard ?
+        (GroupPlayersInCombatFunction)(
+            base + RVA_GROUP_PLAYERS_IN_COMBAT) : NULL;
     movement_camera_transform = (MovementCameraTransformFunction)(
         base + RVA_MOVEMENT_CAMERA_TRANSFORM
     );
@@ -2384,6 +3302,25 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
 
+    if (enable_separation_guard &&
+        !SudekiMpInstallRelativeCallHook(
+            &player_one_alternate_movement_call_hook,
+            base + RVA_PLAYER_MOVE_CALL_ALTERNATE,
+            arbiter_movement,
+            enforce_player_one_roaming_boundary)) {
+        SudekiMpUninstallControlSeparation();
+        return FALSE;
+    }
+    if (enable_separation_guard &&
+        !SudekiMpInstallRelativeCallHook(
+            &player_one_normal_movement_call_hook,
+            base + RVA_PLAYER_MOVE_CALL_NORMAL,
+            arbiter_movement,
+            enforce_player_one_roaming_boundary)) {
+        SudekiMpUninstallControlSeparation();
+        return FALSE;
+    }
+
     if (!SudekiMpInstallPointerHook(
             &controller_update_vtable_hook,
             slot,
@@ -2393,7 +3330,7 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
+        "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s roaming_boundary=%s roaming_boundary_policy=symmetric_p1_p2_stable_exploration_only warning_fraction_bits=0x3f4ccccd maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0\r\n",
         (unsigned long)selected_virtual_key,
         second_player_movement_enabled ? "true" : "false",
         camera_relative_movement_enabled ? "true" : "false",
@@ -2416,6 +3353,10 @@ BOOL SudekiMpInstallControlSeparation(
 
 void SudekiMpUninstallControlSeparation(void) {
     SudekiMpRestorePointerHook(&controller_update_vtable_hook);
+    SudekiMpRestoreRelativeCallHook(
+        &player_one_normal_movement_call_hook);
+    SudekiMpRestoreRelativeCallHook(
+        &player_one_alternate_movement_call_hook);
     SudekiMpRestoreInlineHook(&tal_character_update_hook);
     SudekiMpRestoreInlineHook(&movement_controller_update_hook);
     restore_group_camera("module_uninstall");
@@ -2424,6 +3365,8 @@ void SudekiMpUninstallControlSeparation(void) {
     ai_default_control = NULL;
     arbiter_movement = NULL;
     arbiter_set_speed = NULL;
+    camera_manager_get_camera_mode = NULL;
+    group_players_in_combat = NULL;
     movement_camera_transform = NULL;
     movement_controller_set_absolute_delta = NULL;
     spirit_direct_movement_active = FALSE;
@@ -2432,6 +3375,7 @@ void SudekiMpUninstallControlSeparation(void) {
     overridden_character = NULL;
     role_lock_active = FALSE;
     player_two_requested = FALSE;
+    requested_player_two_character = NULL;
     player_two_request_last_attempt = 0u;
     selected_virtual_key = 0;
     hotkey_was_down = FALSE;
@@ -2439,8 +3383,13 @@ void SudekiMpUninstallControlSeparation(void) {
     camera_relative_movement_enabled = FALSE;
     separation_guard_enabled = FALSE;
     maximum_separation_distance = 0.0f;
-    separation_blocked = FALSE;
-    separation_data_missing_logged = FALSE;
+    ZeroMemory(&roaming_boundary_snapshot,
+        sizeof(roaming_boundary_snapshot));
+    roaming_boundary_candidate_since = 0u;
+    roaming_boundary_last_gate = 0xffffffffu;
+    ZeroMemory(roaming_boundary_player_blocked,
+        sizeof(roaming_boundary_player_blocked));
+    roaming_boundary_overlay_ready = FALSE;
     second_player_weak_attack_enabled = FALSE;
     weak_attack_virtual_key = 0;
     weak_attack_was_down = FALSE;
@@ -2448,9 +3397,24 @@ void SudekiMpUninstallControlSeparation(void) {
     input_bridge_deadzone = 0.0f;
     ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
     input_bridge_connected = FALSE;
+    interaction_requests_enabled = FALSE;
+    interaction_request_x_was_down = FALSE;
+    shared_interaction_modal_quiesce_logged = FALSE;
+    ZeroMemory(published_player_actors,
+        sizeof(published_player_actors));
+    ZeroMemory(published_player_actor_generations,
+        sizeof(published_player_actor_generations));
+    ZeroMemory(published_player_human_present,
+        sizeof(published_player_human_present));
+    SudekiMpPlayerStatehoodInitialize(SudekiMpPlayerStatehoodRuntime());
     input_bridge_last_right_stick_log_tick = 0u;
     input_bridge_last_right_x = 0;
     input_bridge_last_right_y = 0;
+    transition_vote_input_freeze_logged = FALSE;
+    transition_vote_escape_release_pending = FALSE;
+    roster_join_start_was_down = FALSE;
+    roster_leave_chord_since = 0u;
+    roster_leave_chord_consumed = FALSE;
     second_player_skills_enabled = FALSE;
     ZeroMemory(
         second_player_skill_virtual_keys,

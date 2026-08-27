@@ -79,6 +79,11 @@ typedef void (__attribute__((thiscall)) *TargeterFlagFunction)(
 typedef unsigned char (__attribute__((thiscall)) *TargeterPredicateFunction)(
     const void *targeter
 );
+typedef void (__attribute__((thiscall)) *ArbiterSetInvulnerableFunction)(
+    void *arbiter,
+    BOOL enabled
+);
+typedef void (__cdecl *SetMasterGameSpeedFunction)(float multiplier);
 typedef BOOL (__cdecl *GelPointerToEntityFunction)(
     void *gel_pointer,
     void *entity_pointer
@@ -166,6 +171,9 @@ enum {
     RVA_TARGETER_INCLUDE_ALLIES = 0x0000f520u,
     RVA_TARGETER_REMOVE_ALLIES = 0x0000f560u,
     RVA_TARGETER_IS_TARGETING_ALLIES = 0x0000f5a0u,
+    RVA_ARBITER_SET_INVULNERABLE = 0x000dca10u,
+    RVA_SET_MASTER_GAME_SPEED = 0x0028be90u,
+    RVA_MASTER_GAME_SPEED = 0x00325810u,
     RVA_MISSILE_LAUNCH_VTABLE_SLOT = 0x002d4cdcu,
     RVA_MISSILE_LAUNCH_THUNK = 0x000c7140u,
     RVA_MISSILE_SELECT = 0x000c6de0u,
@@ -209,6 +217,13 @@ enum {
     PARTY_SLOT_ZERO_OFFSET = 0x0090u,
     PARTY_SLOT_STRIDE = 0x000cu,
     PARTY_COUNT_OFFSET = 0x00ccu,
+    CHARACTER_POSITION_OFFSET = 0x0044u,
+    CHARACTER_COMBAT_DATA_OFFSET = 0x004cu,
+    CHARACTER_ARBITER_OFFSET = 0x0090u,
+    ARBITER_OWNER_OFFSET = 0x0010u,
+    ARBITER_FLAGS_OFFSET = 0x0050u,
+    ARBITER_INVULNERABILITY_REF_OFFSET = 0x0054u,
+    ARBITER_INVULNERABILITY_FLAG = 0x00000800u,
     CONTROLLER_NEXT_CHARACTER_OFFSET = 0x00f4u,
     CONTROLLER_PREVIOUS_CHARACTER_OFFSET = 0x00fcu,
     CONTROLLER_TARGET_OFFSET = 0x0248u,
@@ -222,6 +237,22 @@ static const uint8_t elco_get_fuel_entry[] = {
 static const uint8_t elco_set_fuel_entry[] = {
     0xd9u, 0x44u, 0x24u, 0x04u, 0x56u, 0x8bu, 0xf1u,
     0xd9u, 0x56u, 0x68u, 0xd9u, 0x5eu, 0x6cu
+};
+static const uint8_t arbiter_set_invulnerable_entry[] = {
+    0x80u, 0x7cu, 0x24u, 0x04u, 0x00u,
+    0x74u, 0x05u,
+    0xfeu, 0x41u, 0x54u,
+    0xebu, 0x03u,
+    0xfeu, 0x49u, 0x54u,
+    0x80u, 0x79u, 0x54u, 0x00u,
+    0x7eu, 0x0au,
+    0x81u, 0x49u, 0x50u, 0x00u, 0x08u, 0x00u, 0x00u,
+    0xc2u, 0x04u, 0x00u,
+    0x81u, 0x61u, 0x50u, 0xffu, 0xf7u, 0xffu, 0xffu,
+    0xc2u, 0x04u, 0x00u
+};
+static const uint8_t set_master_game_speed_entry_prefix[] = {
+    0xd9u, 0x44u, 0x24u, 0x04u, 0xd9u, 0x1du
 };
 
 static const uint8_t resource_name_from_text_entry[] = {
@@ -298,6 +329,9 @@ static SetWeaponFunction set_weapon;
 static TargeterFlagFunction targeter_include_allies;
 static TargeterFlagFunction targeter_remove_allies;
 static TargeterPredicateFunction targeter_is_targeting_allies;
+static ArbiterSetInvulnerableFunction arbiter_set_invulnerable;
+static SetMasterGameSpeedFunction set_master_game_speed;
+static volatile float *master_game_speed;
 static GelPointerToEntityFunction gel_pointer_to_entity;
 static EntityPointerCleanupFunction entity_pointer_cleanup;
 static void *resource_name_from_text;
@@ -362,9 +396,47 @@ static DWORD cafu_autofire_ready_at;
 static DWORD cafu_weapon_presentation_last_tick;
 static unsigned int cafu_weapon_presentation_sample_count;
 
+typedef struct SudekiMpPartyInvulnerabilityLease {
+    void *character;
+    void *arbiter;
+    void *position;
+    void *combat_data;
+    void *world_manager;
+    void *world_directory;
+    int actor;
+    BOOL owned;
+} SudekiMpPartyInvulnerabilityLease;
+
+static BOOL party_invulnerability_enabled;
+static SudekiMpPartyInvulnerabilityLease
+    party_invulnerability_leases[PARTY_SLOT_COUNT];
+static unsigned int party_invulnerability_lease_count;
+static BOOL story_test_speed_owned;
+static BOOL story_test_speed_conflicted;
+static uint32_t story_test_speed_saved_bits;
+static uint32_t story_test_speed_applied_bits;
+
 static BOOL readable_memory(const void *pointer, size_t size);
 static BOOL writable_memory(const void *pointer, size_t size);
 static void *actor_pointer(SudekiMpCleanroomActor actor);
+
+static BOOL matches_set_master_game_speed_entry(
+    const uint8_t *entry,
+    const uint8_t *module_base
+) {
+    uint32_t relocated_target;
+
+    if (!readable_memory(entry, 11u) || module_base == NULL ||
+        memcmp(entry, set_master_game_speed_entry_prefix,
+            sizeof(set_master_game_speed_entry_prefix)) != 0 ||
+        entry[10] != 0xc3u) {
+        return FALSE;
+    }
+    memcpy(&relocated_target, entry + 6u, sizeof(relocated_target));
+    return relocated_target == (uint32_t)(uintptr_t)(
+        module_base + RVA_MASTER_GAME_SPEED
+    );
+}
 
 static void *elco_ability_pointer(void) {
     uint8_t *elco;
@@ -1215,6 +1287,7 @@ static BOOL initialize_resource_name(
     );
     if (result != resource_name || resource_name->text_reference == NULL ||
         !readable_memory(resource_name->text_reference, 2u * sizeof(uint32_t)) ||
+        !writable_memory(resource_name->text_reference, sizeof(uint32_t)) ||
         resource_name->text_reference[0] == 0u ||
         resource_name->text_reference[1] == 0u) {
         return FALSE;
@@ -1232,6 +1305,7 @@ static void release_resource_name(SudekiMpResourceName *resource_name) {
     resource_name->text_reference = NULL;
     if (reference != NULL &&
         readable_memory(reference, 2u * sizeof(uint32_t)) &&
+        writable_memory(reference, sizeof(uint32_t)) &&
         reference[0] > 0u) {
         --reference[0];
         if (reference[0] == 0u && resource_name_release_reference != NULL) {
@@ -1251,6 +1325,32 @@ BOOL SudekiMpCleanroomEngineResourceNameFromText(
     const char *text
 ) {
     return initialize_resource_name(resource_name, text);
+}
+
+BOOL SudekiMpCleanroomEngineRetainResourceNameExact(
+    SudekiMpResourceName *destination,
+    const SudekiMpResourceName *source
+) {
+    SudekiMpResourceName copy;
+    uint32_t *reference;
+
+    if (destination == NULL || source == NULL || destination == source ||
+        !readable_memory(source, sizeof(*source))) {
+        return FALSE;
+    }
+    copy = *source;
+    reference = copy.text_reference;
+    if (reference == NULL ||
+        !readable_memory(reference, 2u * sizeof(uint32_t)) ||
+        !writable_memory(reference, sizeof(uint32_t)) ||
+        reference[0] == 0u || reference[0] == UINT32_MAX ||
+        reference[1] == 0u) {
+        ZeroMemory(destination, sizeof(*destination));
+        return FALSE;
+    }
+    ++reference[0];
+    *destination = copy;
+    return TRUE;
 }
 
 void SudekiMpCleanroomEngineReleaseResourceName(
@@ -1331,6 +1431,538 @@ void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
 
 void *SudekiMpCleanroomEngineGenericEntity(const char *resource_name) {
     return lookup_entity(get_generic_entity, resource_name);
+}
+
+static BOOL party_invulnerability_world(
+    void **world_manager,
+    void **world_directory
+) {
+    void **manager_global;
+    void **directory_global;
+
+    if (world_manager == NULL || world_directory == NULL ||
+        game_base == NULL || !SudekiMpCleanroomEngineWorldReady()) {
+        return FALSE;
+    }
+    manager_global = (void **)(game_base + RVA_ENTITY_MANAGER_GLOBAL);
+    directory_global = (void **)(game_base + RVA_ENTITY_DIRECTORY_GLOBAL);
+    if (!readable_memory(manager_global, sizeof(*manager_global)) ||
+        !readable_memory(directory_global, sizeof(*directory_global))) {
+        return FALSE;
+    }
+    *world_manager = *manager_global;
+    *world_directory = *directory_global;
+    return *world_manager != NULL && *world_directory != NULL;
+}
+
+static BOOL capture_party_invulnerability_identity(
+    void *character_pointer,
+    void *world_manager,
+    void *world_directory,
+    SudekiMpPartyInvulnerabilityLease *identity
+) {
+    uint8_t *character = (uint8_t *)character_pointer;
+    uint8_t *arbiter;
+
+    if (identity == NULL ||
+        !readable_memory(
+            character,
+            CHARACTER_ARBITER_OFFSET + sizeof(arbiter))) {
+        return FALSE;
+    }
+    arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+    if (!readable_memory(
+            arbiter,
+            ARBITER_INVULNERABILITY_REF_OFFSET + 1u) ||
+        !writable_memory(
+            arbiter + ARBITER_FLAGS_OFFSET,
+            ARBITER_INVULNERABILITY_REF_OFFSET + 1u -
+                ARBITER_FLAGS_OFFSET) ||
+        *(void **)(arbiter + ARBITER_OWNER_OFFSET) != character) {
+        return FALSE;
+    }
+    ZeroMemory(identity, sizeof(*identity));
+    identity->character = character;
+    identity->arbiter = arbiter;
+    identity->position = *(void **)(character + CHARACTER_POSITION_OFFSET);
+    identity->combat_data = *(
+        void **)(character + CHARACTER_COMBAT_DATA_OFFSET);
+    identity->world_manager = world_manager;
+    identity->world_directory = world_directory;
+    identity->actor = -1;
+    return TRUE;
+}
+
+static BOOL same_party_invulnerability_identity(
+    const SudekiMpPartyInvulnerabilityLease *left,
+    const SudekiMpPartyInvulnerabilityLease *right
+) {
+    return left != NULL && right != NULL &&
+        left->character == right->character &&
+        left->arbiter == right->arbiter &&
+        left->position == right->position &&
+        left->combat_data == right->combat_data &&
+        left->world_manager == right->world_manager &&
+        left->world_directory == right->world_directory;
+}
+
+static BOOL capture_current_party_invulnerability_identities(
+    SudekiMpPartyInvulnerabilityLease identities[PARTY_SLOT_COUNT],
+    unsigned int *identity_count
+) {
+    uint8_t *group;
+    void *world_manager;
+    void *world_directory;
+    int party_count;
+    unsigned int index;
+
+    if (identities == NULL || identity_count == NULL ||
+        get_group_players == NULL ||
+        !party_invulnerability_world(&world_manager, &world_directory)) {
+        return FALSE;
+    }
+    group = (uint8_t *)get_group_players();
+    if (!readable_memory(
+            group,
+            PARTY_COUNT_OFFSET + sizeof(party_count))) {
+        return FALSE;
+    }
+    party_count = *(int *)(group + PARTY_COUNT_OFFSET);
+    if (party_count < 0 || party_count > (int)PARTY_SLOT_COUNT) {
+        return FALSE;
+    }
+    *identity_count = 0u;
+    for (index = 0u; index < (unsigned int)party_count; ++index) {
+        void *character = *(void **)(
+            group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE);
+        SudekiMpPartyInvulnerabilityLease candidate;
+        unsigned int prior;
+
+        if (!capture_party_invulnerability_identity(
+                character,
+                world_manager,
+                world_directory,
+                &candidate)) {
+            return FALSE;
+        }
+        for (prior = 0u; prior < *identity_count; ++prior) {
+            if (same_party_invulnerability_identity(
+                    &candidate,
+                    &identities[prior])) {
+                break;
+            }
+        }
+        if (prior != *identity_count) {
+            return FALSE;
+        }
+        identities[*identity_count] = candidate;
+        ++*identity_count;
+    }
+    return TRUE;
+}
+
+static int party_invulnerability_actor(void *character) {
+    int actor;
+
+    for (actor = 0; actor < SUDEKIMP_CLEANROOM_ACTOR_COUNT; ++actor) {
+        if (actor_pointer((SudekiMpCleanroomActor)actor) == character) {
+            return actor;
+        }
+    }
+    return -1;
+}
+
+static int find_party_invulnerability_identity(
+    const SudekiMpPartyInvulnerabilityLease *identity,
+    const SudekiMpPartyInvulnerabilityLease identities[PARTY_SLOT_COUNT],
+    unsigned int identity_count
+) {
+    unsigned int index;
+
+    for (index = 0u; index < identity_count; ++index) {
+        if (same_party_invulnerability_identity(identity, &identities[index])) {
+            return (int)index;
+        }
+    }
+    return -1;
+}
+
+static BOOL party_invulnerability_lease_resolves(
+    const SudekiMpPartyInvulnerabilityLease *lease,
+    const SudekiMpPartyInvulnerabilityLease identities[PARTY_SLOT_COUNT],
+    unsigned int identity_count
+) {
+    SudekiMpPartyInvulnerabilityLease resolved;
+    void *world_manager;
+    void *world_directory;
+
+    if (find_party_invulnerability_identity(
+            lease, identities, identity_count) >= 0) {
+        return TRUE;
+    }
+    if (lease == NULL || lease->actor < 0 ||
+        lease->actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT ||
+        !party_invulnerability_world(&world_manager, &world_directory) ||
+        lease->world_manager != world_manager ||
+        lease->world_directory != world_directory ||
+        actor_pointer((SudekiMpCleanroomActor)lease->actor) !=
+            lease->character ||
+        !capture_party_invulnerability_identity(
+            lease->character,
+            world_manager,
+            world_directory,
+            &resolved)) {
+        return FALSE;
+    }
+    return same_party_invulnerability_identity(lease, &resolved);
+}
+
+static BOOL party_invulnerability_native_state_present(
+    const SudekiMpPartyInvulnerabilityLease *lease
+) {
+    SudekiMpPartyInvulnerabilityLease resolved;
+    const uint8_t *arbiter;
+    int reference_count;
+    uint32_t flags;
+
+    if (lease == NULL || !lease->owned ||
+        !capture_party_invulnerability_identity(
+            lease->character,
+            lease->world_manager,
+            lease->world_directory,
+            &resolved) ||
+        !same_party_invulnerability_identity(lease, &resolved)) {
+        return FALSE;
+    }
+    arbiter = (const uint8_t *)lease->arbiter;
+    reference_count = (int)*(
+        const int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    flags = *(const uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    return reference_count > 0 &&
+        (flags & ARBITER_INVULNERABILITY_FLAG) != 0u;
+}
+
+static BOOL acquire_party_invulnerability_lease(
+    const SudekiMpPartyInvulnerabilityLease *identity,
+    SudekiMpPartyInvulnerabilityLease *lease
+) {
+    uint8_t *arbiter;
+    int before;
+    int after;
+    int rollback_after;
+    uint32_t flags_before;
+    uint32_t flags_after;
+    uint32_t rollback_flags;
+    BOOL increment_proven;
+    BOOL rollback_confirmed;
+
+    if (identity == NULL || lease == NULL ||
+        arbiter_set_invulnerable == NULL) {
+        return FALSE;
+    }
+    arbiter = (uint8_t *)identity->arbiter;
+    before = (int)*(
+        int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    flags_before = *(uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    if (before < 0 || before == INT8_MAX ||
+        ((before > 0) !=
+            ((flags_before & ARBITER_INVULNERABILITY_FLAG) != 0u))) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability "
+            "action=acquire status=rejected character=%p arbiter=%p "
+            "ref_before=%d flags_before=0x%08lx "
+            "reason=invalid_native_state\r\n",
+            identity->character,
+            identity->arbiter,
+            before,
+            (unsigned long)flags_before
+        );
+        return FALSE;
+    }
+    ZeroMemory(lease, sizeof(*lease));
+    arbiter_set_invulnerable(arbiter, TRUE);
+    after = (int)*(
+        int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    flags_after = *(uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    increment_proven = after == before + 1;
+    if (increment_proven &&
+        (flags_after & ARBITER_INVULNERABILITY_FLAG) != 0u) {
+        *lease = *identity;
+        lease->actor = party_invulnerability_actor(identity->character);
+        lease->owned = TRUE;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability action=acquire "
+            "status=confirmed actor=%s character=%p arbiter=%p "
+            "ref_before=%d ref_after=%d flags_after=0x%08lx "
+            "policy=native_refcount_lease\r\n",
+            lease->actor >= 0 ? actor_labels[lease->actor] : "Unknown",
+            lease->character,
+            lease->arbiter,
+            before,
+            after,
+            (unsigned long)flags_after
+        );
+        return TRUE;
+    }
+    if (!increment_proven) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability action=acquire "
+            "status=verification_failed character=%p arbiter=%p "
+            "ref_before=%d ref_after=%d flags_after=0x%08lx "
+            "rollback=not_attempted reason=increment_not_proven\r\n",
+            identity->character,
+            identity->arbiter,
+            before,
+            after,
+            (unsigned long)flags_after
+        );
+        return FALSE;
+    }
+    arbiter_set_invulnerable(arbiter, FALSE);
+    rollback_after = (int)*(
+        int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    rollback_flags = *(uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    rollback_confirmed = rollback_after == before &&
+        ((before > 0) ==
+            ((rollback_flags & ARBITER_INVULNERABILITY_FLAG) != 0u));
+    SudekiMpLogFormat(
+        "cleanroom_engine event=party_invulnerability action=acquire "
+        "status=verification_failed character=%p arbiter=%p "
+        "ref_before=%d ref_after=%d flags_after=0x%08lx "
+        "rollback=%s rollback_ref=%d rollback_flags=0x%08lx "
+        "reason=flag_not_set_after_proven_increment\r\n",
+        identity->character,
+        identity->arbiter,
+        before,
+        after,
+        (unsigned long)flags_after,
+        rollback_confirmed ? "confirmed" : "verification_failed",
+        rollback_after,
+        (unsigned long)rollback_flags
+    );
+    return FALSE;
+}
+
+static BOOL release_party_invulnerability_lease(
+    SudekiMpPartyInvulnerabilityLease *lease,
+    const char *reason
+) {
+    uint8_t *arbiter;
+    int before;
+    int after;
+    uint32_t flags_before;
+    uint32_t flags_after;
+    BOOL decrement_proven;
+    BOOL state_consistent;
+
+    if (lease == NULL || !lease->owned ||
+        arbiter_set_invulnerable == NULL) {
+        return lease != NULL && !lease->owned;
+    }
+    arbiter = (uint8_t *)lease->arbiter;
+    before = (int)*(
+        int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    flags_before = *(uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    if (before == 0 &&
+        (flags_before & ARBITER_INVULNERABILITY_FLAG) == 0u) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability action=release "
+            "status=skipped actor=%s character=%p arbiter=%p "
+            "ref_before=%d flags_before=0x%08lx "
+            "reason=native_lease_no_longer_present\r\n",
+            lease->actor >= 0 ? actor_labels[lease->actor] : "Unknown",
+            lease->character,
+            lease->arbiter,
+            before,
+            (unsigned long)flags_before
+        );
+        lease->owned = FALSE;
+        return TRUE;
+    }
+    if (before <= 0 ||
+        (flags_before & ARBITER_INVULNERABILITY_FLAG) == 0u) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability action=release "
+            "status=verification_failed actor=%s character=%p arbiter=%p "
+            "ref_before=%d flags_before=0x%08lx "
+            "reason=inconsistent_native_state\r\n",
+            lease->actor >= 0 ? actor_labels[lease->actor] : "Unknown",
+            lease->character,
+            lease->arbiter,
+            before,
+            (unsigned long)flags_before
+        );
+        return FALSE;
+    }
+    arbiter_set_invulnerable(arbiter, FALSE);
+    after = (int)*(
+        int8_t *)(arbiter + ARBITER_INVULNERABILITY_REF_OFFSET);
+    flags_after = *(uint32_t *)(arbiter + ARBITER_FLAGS_OFFSET);
+    decrement_proven = after == before - 1;
+    state_consistent = (after > 0) ==
+        ((flags_after & ARBITER_INVULNERABILITY_FLAG) != 0u);
+    SudekiMpLogFormat(
+        "cleanroom_engine event=party_invulnerability action=release "
+        "status=%s actor=%s character=%p arbiter=%p "
+        "ref_before=%d ref_after=%d flags_after=0x%08lx reason=%s\r\n",
+        decrement_proven && state_consistent ?
+                    "confirmed" : "verification_failed",
+        lease->actor >= 0 ? actor_labels[lease->actor] : "Unknown",
+        lease->character,
+        lease->arbiter,
+        before,
+        after,
+        (unsigned long)flags_after,
+        reason == NULL ? "unspecified" : reason
+    );
+    if (decrement_proven) {
+        lease->owned = FALSE;
+    }
+    return decrement_proven && state_consistent;
+}
+
+static BOOL maintain_party_invulnerability_leases(void) {
+    SudekiMpPartyInvulnerabilityLease current[PARTY_SLOT_COUNT];
+    SudekiMpPartyInvulnerabilityLease next[PARTY_SLOT_COUNT];
+    BOOL covered[PARTY_SLOT_COUNT] = {FALSE, FALSE, FALSE, FALSE};
+    unsigned int current_count;
+    unsigned int next_count = 0u;
+    unsigned int index;
+    BOOL reconciled = TRUE;
+
+    if (game_base == NULL || arbiter_set_invulnerable == NULL ||
+        !capture_current_party_invulnerability_identities(
+            current, &current_count)) {
+        return FALSE;
+    }
+    if (party_invulnerability_enabled && current_count == 0u) {
+        return FALSE;
+    }
+    ZeroMemory(next, sizeof(next));
+    for (index = 0u; index < party_invulnerability_lease_count; ++index) {
+        SudekiMpPartyInvulnerabilityLease lease =
+            party_invulnerability_leases[index];
+        int current_index = find_party_invulnerability_identity(
+            &lease, current, current_count);
+
+        if (party_invulnerability_enabled && current_index >= 0 &&
+            party_invulnerability_native_state_present(&lease)) {
+            covered[current_index] = TRUE;
+            next[next_count++] = lease;
+            continue;
+        }
+        if (party_invulnerability_lease_resolves(
+                &lease, current, current_count)) {
+            if (!release_party_invulnerability_lease(
+                    &lease,
+                    party_invulnerability_enabled ?
+                        "party_member_removed_or_rebuilt" :
+                        "feature_disabled")) {
+                reconciled = FALSE;
+            }
+            if (lease.owned) {
+                if (next_count < PARTY_SLOT_COUNT) {
+                    next[next_count++] = lease;
+                    if (current_index >= 0) {
+                        covered[current_index] = TRUE;
+                    }
+                } else {
+                    reconciled = FALSE;
+                }
+            }
+        } else if (lease.owned) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=party_invulnerability "
+                "action=release status=dropped actor=%s character=%p "
+                "arbiter=%p reason=object_identity_unavailable\r\n",
+                lease.actor >= 0 ? actor_labels[lease.actor] : "Unknown",
+                lease.character,
+                lease.arbiter
+            );
+        }
+    }
+    if (party_invulnerability_enabled) {
+        for (index = 0u; index < current_count; ++index) {
+            SudekiMpPartyInvulnerabilityLease lease;
+
+            if (covered[index] || next_count >= PARTY_SLOT_COUNT) {
+                if (!covered[index]) {
+                    reconciled = FALSE;
+                }
+                continue;
+            }
+            if (acquire_party_invulnerability_lease(
+                    &current[index], &lease)) {
+                next[next_count++] = lease;
+                covered[index] = TRUE;
+            } else {
+                reconciled = FALSE;
+            }
+        }
+    }
+    ZeroMemory(
+        party_invulnerability_leases,
+        sizeof(party_invulnerability_leases)
+    );
+    memcpy(
+        party_invulnerability_leases,
+        next,
+        next_count * sizeof(next[0])
+    );
+    party_invulnerability_lease_count = next_count;
+    if (party_invulnerability_enabled) {
+        for (index = 0u; index < current_count; ++index) {
+            int lease_index = find_party_invulnerability_identity(
+                &current[index], next, next_count);
+
+            if (lease_index < 0 ||
+                !party_invulnerability_native_state_present(
+                    &next[lease_index])) {
+                reconciled = FALSE;
+            }
+        }
+        return reconciled;
+    }
+    return reconciled && next_count == 0u;
+}
+
+BOOL SudekiMpCleanroomEnginePartyInvulnerable(BOOL *enabled) {
+    if (enabled == NULL || game_base == NULL ||
+        arbiter_set_invulnerable == NULL) {
+        return FALSE;
+    }
+    *enabled = party_invulnerability_enabled;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineMaintainPartyInvulnerability(BOOL enabled) {
+    if (game_base == NULL || arbiter_set_invulnerable == NULL ||
+        get_group_players == NULL) {
+        return FALSE;
+    }
+    party_invulnerability_enabled = enabled != FALSE;
+    return maintain_party_invulnerability_leases();
+}
+
+BOOL SudekiMpCleanroomEngineSetPartyInvulnerable(BOOL enabled) {
+    BOOL requested = enabled != FALSE;
+    BOOL reconciled;
+
+    if (game_base == NULL || arbiter_set_invulnerable == NULL ||
+        get_group_players == NULL) {
+        return FALSE;
+    }
+    party_invulnerability_enabled = requested;
+    reconciled = maintain_party_invulnerability_leases();
+    SudekiMpLogFormat(
+        "cleanroom_engine event=party_invulnerability action=request "
+        "state=%s status=%s active_leases=%u "
+        "policy=native_refcount_reconciled_current_party\r\n",
+        requested ? "enabled" : "disabled",
+        reconciled ? "confirmed" : "pending_world",
+        party_invulnerability_lease_count
+    );
+    return reconciled;
 }
 
 BOOL SudekiMpCleanroomEngineActorTargetsAllies(
@@ -2568,6 +3200,8 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     void *resolved_targeter_include_allies = NULL;
     void *resolved_targeter_remove_allies = NULL;
     void *resolved_targeter_is_targeting_allies = NULL;
+    void *resolved_arbiter_set_invulnerable = NULL;
+    void *resolved_set_master_game_speed = NULL;
     uint8_t *base;
 
     if (game_module == NULL || game_base != NULL ||
@@ -2686,6 +3320,16 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
             "?IsTargettingAllies@CTargeter@@QBE_NXZ",
             RVA_TARGETER_IS_TARGETING_ALLIES,
             &resolved_targeter_is_targeting_allies) ||
+        !resolve_exact_export(
+            game_module,
+            "?GELSetInvulnerable@CCharacterArbiter@@QAEX_N@Z",
+            RVA_ARBITER_SET_INVULNERABLE,
+            &resolved_arbiter_set_invulnerable) ||
+        !resolve_exact_export(
+            game_module,
+            "?SetMasterGameSpeed@@YAXM@Z",
+            RVA_SET_MASTER_GAME_SPEED,
+            &resolved_set_master_game_speed) ||
         !matches_entry(
             (const uint8_t *)game_module + RVA_RESOURCE_NAME_FROM_TEXT,
             resource_name_from_text_entry,
@@ -2711,14 +3355,22 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
         !matches_entry(
             (const uint8_t *)resolved_elco_set_fuel,
             elco_set_fuel_entry,
-            sizeof(elco_set_fuel_entry))) {
+            sizeof(elco_set_fuel_entry)) ||
+        !matches_entry(
+            (const uint8_t *)resolved_arbiter_set_invulnerable,
+            arbiter_set_invulnerable_entry,
+            sizeof(arbiter_set_invulnerable_entry)) ||
+        !matches_set_master_game_speed_entry(
+            (const uint8_t *)resolved_set_master_game_speed,
+            (const uint8_t *)game_module)) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
     }
 
     base = (uint8_t *)game_module;
     if (!writable_memory(base + RVA_NO_SP_NEEDED_FLAG, 1u) ||
-        !writable_memory(base + RVA_NO_SSP_NEEDED_FLAG, 1u)) {
+        !writable_memory(base + RVA_NO_SSP_NEEDED_FLAG, 1u) ||
+        !writable_memory(base + RVA_MASTER_GAME_SPEED, sizeof(float))) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -2761,6 +3413,21 @@ BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
         (TargeterFlagFunction)resolved_targeter_remove_allies;
     targeter_is_targeting_allies =
         (TargeterPredicateFunction)resolved_targeter_is_targeting_allies;
+    arbiter_set_invulnerable =
+        (ArbiterSetInvulnerableFunction)resolved_arbiter_set_invulnerable;
+    set_master_game_speed =
+        (SetMasterGameSpeedFunction)resolved_set_master_game_speed;
+    master_game_speed = (float *)(game_base + RVA_MASTER_GAME_SPEED);
+    party_invulnerability_enabled = FALSE;
+    party_invulnerability_lease_count = 0u;
+    ZeroMemory(
+        party_invulnerability_leases,
+        sizeof(party_invulnerability_leases)
+    );
+    story_test_speed_owned = FALSE;
+    story_test_speed_conflicted = FALSE;
+    story_test_speed_saved_bits = 0u;
+    story_test_speed_applied_bits = 0u;
     gel_pointer_to_entity = (GelPointerToEntityFunction)(
         game_base + RVA_GEL_POINTER_TO_ENTITY
     );
@@ -3297,6 +3964,144 @@ BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
     return TRUE;
 }
 
+static BOOL story_test_speed_bits(uint32_t *bits) {
+    float value;
+
+    if (bits == NULL || master_game_speed == NULL ||
+        !readable_memory((const void *)master_game_speed, sizeof(float))) {
+        return FALSE;
+    }
+    value = *master_game_speed;
+    memcpy(bits, &value, sizeof(*bits));
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetStoryTestSpeed(
+    BOOL enabled,
+    float multiplier
+) {
+    uint32_t requested_bits;
+    uint32_t current_bits;
+    uint32_t result_bits;
+    float current;
+    float restore;
+    BOOL restored = TRUE;
+    BOOL result_readable;
+
+    if (game_base == NULL || set_master_game_speed == NULL ||
+        master_game_speed == NULL || !isfinite(multiplier) ||
+        multiplier < 1.0f || multiplier > 4.0f ||
+        !story_test_speed_bits(&current_bits)) {
+        return FALSE;
+    }
+    requested_bits = float_bits(multiplier);
+    if (enabled) {
+        if (story_test_speed_conflicted) {
+            return FALSE;
+        }
+        if (story_test_speed_owned &&
+            current_bits != story_test_speed_applied_bits) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=story_test_speed action=apply "
+                "status=rejected requested_bits=0x%08lx "
+                "current_bits=0x%08lx owned_bits=0x%08lx "
+                "reason=ownership_changed\r\n",
+                (unsigned long)requested_bits,
+                (unsigned long)current_bits,
+                (unsigned long)story_test_speed_applied_bits
+            );
+            story_test_speed_owned = FALSE;
+            story_test_speed_conflicted = TRUE;
+            story_test_speed_saved_bits = 0u;
+            story_test_speed_applied_bits = 0u;
+            return FALSE;
+        }
+        if (story_test_speed_owned &&
+            current_bits == story_test_speed_applied_bits &&
+            requested_bits == story_test_speed_applied_bits) {
+            return TRUE;
+        }
+        memcpy(&current, &current_bits, sizeof(current));
+        if (!isfinite(current)) {
+            return FALSE;
+        }
+        if (!story_test_speed_owned) {
+            story_test_speed_saved_bits = current_bits;
+        }
+        set_master_game_speed(multiplier);
+        story_test_speed_owned = TRUE;
+        story_test_speed_applied_bits = requested_bits;
+        result_readable = story_test_speed_bits(&result_bits);
+        if (!result_readable || result_bits != requested_bits) {
+            SudekiMpLogFormat(
+                "cleanroom_engine event=story_test_speed action=apply "
+                "status=verification_failed requested_bits=0x%08lx "
+                "result_bits=0x%08lx\r\n",
+                (unsigned long)requested_bits,
+                (unsigned long)(result_readable ? result_bits : 0u)
+            );
+            return FALSE;
+        }
+        SudekiMpLogFormat(
+            "cleanroom_engine event=story_test_speed action=apply "
+            "status=confirmed previous_bits=0x%08lx "
+            "multiplier_bits=0x%08lx "
+            "policy=native_master_multiplier_owned_lease\r\n",
+            (unsigned long)current_bits,
+            (unsigned long)requested_bits
+        );
+        return TRUE;
+    }
+    if (!story_test_speed_owned) {
+        story_test_speed_conflicted = FALSE;
+        return TRUE;
+    }
+    if (current_bits == story_test_speed_applied_bits) {
+        memcpy(&restore, &story_test_speed_saved_bits, sizeof(restore));
+        set_master_game_speed(restore);
+        result_readable = story_test_speed_bits(&result_bits);
+        restored = result_readable &&
+            result_bits == story_test_speed_saved_bits;
+        SudekiMpLogFormat(
+            "cleanroom_engine event=story_test_speed action=restore "
+            "status=%s applied_bits=0x%08lx restored_bits=0x%08lx\r\n",
+            restored ? "confirmed" : "verification_failed",
+            (unsigned long)story_test_speed_applied_bits,
+            (unsigned long)(result_readable ? result_bits : 0u)
+        );
+        if (!restored) {
+            if (result_readable &&
+                result_bits != story_test_speed_applied_bits) {
+                SudekiMpLogFormat(
+                    "cleanroom_engine event=story_test_speed "
+                    "action=restore status=ownership_yielded "
+                    "result_bits=0x%08lx "
+                    "reason=different_external_value_observed\r\n",
+                    (unsigned long)result_bits
+                );
+                story_test_speed_owned = FALSE;
+                story_test_speed_conflicted = FALSE;
+                story_test_speed_saved_bits = 0u;
+                story_test_speed_applied_bits = 0u;
+            }
+            return FALSE;
+        }
+    } else {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=story_test_speed action=restore "
+            "status=skipped applied_bits=0x%08lx current_bits=0x%08lx "
+            "reason=ownership_changed\r\n",
+            (unsigned long)story_test_speed_applied_bits,
+            (unsigned long)current_bits
+        );
+    }
+    story_test_speed_owned = FALSE;
+    story_test_speed_conflicted = FALSE;
+    story_test_speed_saved_bits = 0u;
+    story_test_speed_applied_bits = 0u;
+    return TRUE;
+}
+
 void SudekiMpCleanroomEngineMaintainResources(void) {
     void **manager_global;
     void *manager;
@@ -3306,7 +4111,11 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
     void *elco_ability;
     float cafu_position[3];
 
-    if (game_base == NULL || !SudekiMpCleanroomEngineWorldReady()) {
+    if (game_base == NULL) {
+        return;
+    }
+    (void)maintain_party_invulnerability_leases();
+    if (!SudekiMpCleanroomEngineWorldReady()) {
         return;
     }
     (void)prepare_training_inventory();
@@ -3403,6 +4212,22 @@ void SudekiMpCleanroomEngineReset(void) {
     SudekiMpCafuMissileModelPatch *missile_patch;
     unsigned int missile_patch_index;
 
+    party_invulnerability_enabled = FALSE;
+    (void)maintain_party_invulnerability_leases();
+    if (party_invulnerability_lease_count != 0u) {
+        SudekiMpLogFormat(
+            "cleanroom_engine event=party_invulnerability action=reset "
+            "status=dropped_unresolved leases=%u "
+            "policy=never_call_native_helper_through_stale_identity\r\n",
+            party_invulnerability_lease_count
+        );
+    }
+    party_invulnerability_lease_count = 0u;
+    ZeroMemory(
+        party_invulnerability_leases,
+        sizeof(party_invulnerability_leases)
+    );
+    (void)SudekiMpCleanroomEngineSetStoryTestSpeed(FALSE, 1.0f);
     cancel_ranged_prime();
     if (cafu_exception_handler != NULL) {
         (void)RemoveVectoredExceptionHandler(cafu_exception_handler);
@@ -3520,6 +4345,9 @@ void SudekiMpCleanroomEngineReset(void) {
     targeter_include_allies = NULL;
     targeter_remove_allies = NULL;
     targeter_is_targeting_allies = NULL;
+    arbiter_set_invulnerable = NULL;
+    set_master_game_speed = NULL;
+    master_game_speed = NULL;
     gel_pointer_to_entity = NULL;
     entity_pointer_cleanup = NULL;
     resource_name_from_text = NULL;
@@ -3535,6 +4363,11 @@ void SudekiMpCleanroomEngineReset(void) {
     inventory_filled = FALSE;
     spirit_strikes_unlocked = FALSE;
     infinite_jetpack_fuel = FALSE;
+    party_invulnerability_enabled = FALSE;
+    story_test_speed_owned = FALSE;
+    story_test_speed_conflicted = FALSE;
+    story_test_speed_saved_bits = 0u;
+    story_test_speed_applied_bits = 0u;
     last_elco_ability = NULL;
     elco_fuel_refill_logged = FALSE;
     spirit_strike_unlocks_captured = FALSE;

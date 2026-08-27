@@ -3,6 +3,7 @@
 #include "engine/log.h"
 #include "engine/orbit_camera.h"
 #include "engine/player_combat_context.h"
+#include "engine/player_statehood.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "input/bridge_protocol.h"
@@ -123,6 +124,8 @@ typedef void (*RenderStartFunction)(void);
 typedef void (*FrameEndFunction)(void);
 typedef void (*QuitScreenRenderFunction)(void);
 typedef BOOL (*QuickMenuIsActiveFunction)(void);
+/* UIBlackSmithActive returns only AL and leaves the upper EAX bits intact. */
+typedef uint8_t (*NativeModalIsActiveFunction)(void);
 typedef void (*HudPartyPointerCopyFunction)(void);
 #if defined(__GNUC__) && defined(__i386__)
 #define SUDEKIMP_THISCALL __attribute__((thiscall))
@@ -145,6 +148,27 @@ typedef void (SUDEKIMP_THISCALL *CameraManagerRemoveCameraFunction)(
 typedef void *(SUDEKIMP_THISCALL *CameraManagerGetCameraFunction)(
     void *manager,
     const char *name
+);
+typedef void (SUDEKIMP_THISCALL *CameraManagerSetCameraTargetFunction)(
+    void *manager,
+    const char *name,
+    void *gel_pointer
+);
+typedef int (SUDEKIMP_THISCALL *CameraManagerGetCameraModeFunction)(
+    void *manager,
+    const char *name
+);
+typedef void (SUDEKIMP_THISCALL *CameraManagerSetCameraStateFunction)(
+    void *manager,
+    const char *name,
+    const char *state,
+    float transition_a,
+    BOOL transition_flag,
+    float transition_b
+);
+typedef void (SUDEKIMP_THISCALL *CameraInputEventFunction)(
+    void *camera,
+    const void *event
 );
 typedef BOOL (SUDEKIMP_THISCALL *CameraManagerSetRenderCameraFunction)(
     void *manager,
@@ -233,14 +257,22 @@ enum {
     RVA_PC_QUIT_SCREEN_GLOBAL = 0x00408d68u,
     RVA_SPIRIT_STRIKE_MANAGER_GLOBAL = 0x00408d30u,
     RVA_GAMEPLAY_HUD_GLOBAL = 0x003c2f9cu,
+    RVA_WORLD_GLOBAL = 0x00408d10u,
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
+    RVA_CHARACTER_SWITCH_UI_GATE_GLOBAL = 0x00408d3cu,
+    RVA_CHARACTER_SWITCH_INPUT_BLOCK_GLOBAL = 0x00408db8u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
     RVA_CAMERA_MANAGER_GLOBAL = 0x00409d7cu,
     RVA_CAMERA_MANAGER_ADD_CAMERA = 0x00036c10u,
     RVA_CAMERA_MANAGER_REMOVE_CAMERA = 0x00036de0u,
     RVA_CAMERA_MANAGER_GET_CAMERA = 0x00036ed0u,
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_CAMERA_MANAGER_SET_CAMERA_TARGET = 0x00037170u,
+    RVA_CAMERA_MANAGER_GET_CAMERA_MODE = 0x000374b0u,
+    RVA_CAMERA_MANAGER_SET_CAMERA_STATE = 0x00037530u,
+    RVA_CAMERA_INPUT_EVENT = 0x000e85f0u,
+    RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT = 0x002cce5cu,
     RVA_GAME_SPEED_SET_MODE = 0x00207560u,
     RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
     RVA_MOTION_BLUR_POST_RENDER = 0x001de0b0u,
@@ -251,6 +283,29 @@ enum {
     RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT = 0x002dd910u,
     RVA_POSITION_SET_FORWARD = 0x001114d0u,
     RVA_GROUP_PLAYERS_IN_COMBAT = 0x00004fa0u,
+    RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER = 0x00023f60u,
+    RVA_GROUP_PLAYERS_NEXT_CHARACTER = 0x00024060u,
+    RVA_INGAME_UI_CONTROLLER_GLOBAL = 0x003c2f88u,
+    RVA_SHOP_LAYER_GLOBAL = 0x003c2f70u,
+    RVA_BLACKSMITH_LAYER_GLOBAL = 0x003c2f74u,
+    RVA_SHOP_IS_ACTIVE = 0x0008d1c0u,
+    RVA_BLACKSMITH_IS_ACTIVE = 0x00092c60u,
+    RVA_INGAME_UI_CONTROLLER_VTABLE = 0x002caf9cu,
+    RVA_SHOP_LAYER_VTABLE = 0x002cabb4u,
+    RVA_BLACKSMITH_LAYER_VTABLE = 0x002cacfcu,
+    RVA_INGAME_UI_CONTROLLER_UPDATE = 0x0009d1d0u,
+    RVA_INGAME_UI_CONTROLLER_RENDER = 0x0009d8d0u,
+    RVA_INGAME_UI_CONTROLLER_INPUT = 0x0009c930u,
+    RVA_SHOP_LAYER_UPDATE = 0x00089660u,
+    RVA_SHOP_LAYER_RENDER = 0x0008a210u,
+    RVA_SHOP_LAYER_INPUT = 0x000898a0u,
+    RVA_SHOP_LAYER_RESOURCE_CREATE = 0x0008c850u,
+    RVA_SHOP_LAYER_RESOURCE_DESTROY = 0x0008d030u,
+    RVA_BLACKSMITH_LAYER_UPDATE = 0x0008d6f0u,
+    RVA_BLACKSMITH_LAYER_RENDER = 0x0008e910u,
+    RVA_BLACKSMITH_LAYER_INPUT = 0x0008d970u,
+    RVA_BLACKSMITH_LAYER_RESOURCE_CREATE = 0x00090c20u,
+    RVA_BLACKSMITH_LAYER_RESOURCE_DESTROY = 0x00091b40u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
     RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
@@ -265,6 +320,8 @@ enum {
     RVA_HUD_GIZMO_VALUES_POINTER_CALL = 0x000a9d5bu,
     RVA_HUD_GIZMO_NAME_POINTER_CALL = 0x000a9e15u,
     RVA_HUD_GIZMO_STATUS_POINTER_CALL = 0x000aacabu,
+    RVA_MINIMAP_UPDATE_POINTER_CALL = 0x00087760u,
+    RVA_MINIMAP_RENDER_POINTER_CALL = 0x00087af7u,
     RVA_CHARACTER_TYPE_TO_PORTRAIT_ENUM = 0x0003f430u,
     RVA_HUD_PORTRAIT_RESOURCE_SELECT = 0x0015c070u,
     RVA_HUD_PORTRAIT_RESOURCE_INDEX_TABLE = 0x002c2a94u,
@@ -293,10 +350,36 @@ enum {
     PARTY_SLOT_COUNT = 4u,
     PARTY_SLOT_ZERO_OFFSET = 0x90u,
     PARTY_SLOT_STRIDE = 0x0cu,
+    CAMERA_RENDER_STATE_OFFSET = 0x34u,
+    CAMERA_ACTIVE_STATE_OFFSET = 0x3cu,
+    CAMERA_ACTIVE_STATE_DATA_OFFSET = 0x40u,
+    CAMERA_POSITION_TARGET_OFFSET = 0xb4u,
+    CAMERA_LOOK_AT_TARGET_OFFSET = 0xb8u,
+    RENDER_STATE_GENERATION_OFFSET = 0x2cu,
+    CAMERA_MODE_EXPLORATION = 0,
+    CAMERA_MODE_STATE_TRANSITION = 0x13,
+    CONTROLLER_MODE_80_OFFSET = 0x80u,
+    CONTROLLER_MODE_84_OFFSET = 0x84u,
     CONTROLLER_TARGET_OFFSET = 0x248u,
     CONTROLLER_NEXT_CHARACTER_OFFSET = 0xf4u,
     CONTROLLER_PREVIOUS_CHARACTER_OFFSET = 0xfcu,
+    INGAME_UI_CONTROLLER_SHOP_OFFSET = 0x74u,
+    INGAME_UI_CONTROLLER_BLACKSMITH_OFFSET = 0x78u,
+    INGAME_UI_CONTROLLER_CURRENT_MODE_OFFSET = 0xb8u,
+    INGAME_UI_CONTROLLER_NEXT_MODE_OFFSET = 0xbcu,
+    SHOP_LAYER_STATE_OFFSET = 0x88u,
+    BLACKSMITH_LAYER_ACTIVE_OFFSET = 0x29u,
+    BLACKSMITH_LAYER_STATE_OFFSET = 0x314u,
+    CHARACTER_SWITCH_FLAGS_50_OFFSET = 0x50u,
+    CHARACTER_SWITCH_FLAGS_60_OFFSET = 0x60u,
+    CHARACTER_SWITCH_BUSY_FLAGS_50 = 0x081802c0u,
+    CHARACTER_SWITCH_BUSY_FLAGS_60 = 0x00000001u,
+    CHARACTER_SWITCH_UI_GATE_OFFSET = 0x47du,
     PARTY_COUNT_OFFSET = 0xccu,
+    PARTY_STATE_D0_OFFSET = 0xd0u,
+    PARTY_SWITCHING_D6_OFFSET = 0xd6u,
+    PARTY_STATE_D7_OFFSET = 0xd7u,
+    COOP_ROSTER_READY_WINDOW_MS = 250u,
     GAME_CAMERA_POINTER_OFFSET = 0x0cu,
     PC_QUIT_SCREEN_VISIBLE_OFFSET = 0x1c2u,
     GAMEPLAY_HUD_PORTRAIT_GIZMO_ARRAY_OFFSET = 0x138u,
@@ -450,11 +533,14 @@ static SudekiMpRelativeCallHook hud_group_values_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_values_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_name_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_status_pointer_hook;
+static SudekiMpRelativeCallHook minimap_update_pointer_hook;
+static SudekiMpRelativeCallHook minimap_render_pointer_hook;
 static SudekiMpInlineHook set_render_camera_hook;
 static SudekiMpInlineHook set_game_speed_mode_hook;
 static SudekiMpPointerHook motion_blur_post_render_hook;
 static SudekiMpPointerHook screenshot_post_render_hook;
 static SudekiMpPointerHook quick_menu_render_submit_hook;
+static SudekiMpPointerHook camera_input_event_hook;
 static uint8_t *game_base;
 static RenderStartFunction original_render_start;
 static FrameEndFunction original_frame_end;
@@ -462,6 +548,8 @@ static QuitScreenRenderFunction original_quit_screen_render
     __attribute__((used));
 static QuickMenuRenderSubmitFunction original_quick_menu_render_submit;
 static QuickMenuIsActiveFunction quick_menu_is_active;
+static NativeModalIsActiveFunction shop_is_active;
+static NativeModalIsActiveFunction blacksmith_is_active;
 static HudPartyPointerCopyFunction original_hud_party_pointer_copy
     __attribute__((used));
 static void *original_character_type_to_portrait_enum __attribute__((used));
@@ -485,10 +573,19 @@ static BOOL quit_backdrop_logged;
 static BOOL quit_backdrop_failure_logged;
 static BOOL player_two_hud_ownership_logged;
 static BOOL viewport_portrait_ownership_logged;
+static BOOL minimap_ownership_logged[2];
+static BOOL minimap_owner_mismatch_logged;
 static BOOL hud_mapping_trace_valid[2][2];
 static unsigned int hud_mapping_trace_resolved_slot[2][2];
 static int gameplay_gate_last_state = -1;
 static int shared_menu_gate_last_state = -1;
+static unsigned int shared_interaction_modal_observation =
+    SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+static BOOL shared_interaction_modal_recovery_pending;
+static BOOL shared_interaction_modal_had_live_split;
+static SudekiMpInteractionKind shared_interaction_modal_published_kind =
+    SUDEKIMP_INTERACTION_NONE;
+static BOOL split_screen_render_installed;
 static BOOL second_player_camera_enabled;
 static BOOL dual_camera_frame_cache_enabled;
 static UINT second_player_camera_virtual_key;
@@ -496,6 +593,10 @@ static BOOL second_player_camera_key_was_down;
 static CameraManagerAddCameraFunction camera_manager_add_camera;
 static CameraManagerRemoveCameraFunction camera_manager_remove_camera;
 static CameraManagerGetCameraFunction camera_manager_get_camera;
+static CameraManagerSetCameraTargetFunction camera_manager_set_camera_target;
+static CameraManagerGetCameraModeFunction camera_manager_get_camera_mode;
+static CameraManagerSetCameraStateFunction camera_manager_set_camera_state;
+static CameraInputEventFunction original_camera_input_event;
 static GroupPlayersInCombatFunction group_players_in_combat;
 static void *position_set_forward_function __attribute__((used));
 static void *second_player_camera_manager;
@@ -509,6 +610,12 @@ static unsigned int player_two_party_slot;
 static BOOL player_two_view_requested;
 static BOOL rendered_player_two_this_frame;
 static BOOL viewport_hud_binding_active;
+static BOOL minimap_scheduled_owner_valid;
+static BOOL minimap_scheduled_player_two;
+static BOOL minimap_update_owner_valid;
+static BOOL minimap_update_player_two;
+static void *minimap_update_character;
+static BOOL minimap_source_failure_this_frame;
 static BOOL genuine_quick_menu_active_this_frame;
 static BOOL quick_menu_live_player_two_available_this_frame;
 static BOOL suppress_quick_menu_render_submit_this_frame;
@@ -531,6 +638,8 @@ static BOOL quick_menu_non_owner_render_suppression_active;
 static void *quick_menu_non_owner_render_object;
 static uint32_t quick_menu_non_owner_render_saved_state;
 static BOOL readable_memory(const void *pointer, size_t size);
+static void invalidate_dual_frame_cache(void);
+static unsigned int refresh_shared_interaction_modal(void);
 
 static unsigned int quick_menu_find_character_reference(
     const void *object,
@@ -615,6 +724,7 @@ static unsigned int skill_camera_history_logged_callbacks;
 static DWORD skill_camera_history_tail_until;
 static unsigned int second_player_camera_last_rejection;
 static BOOL second_player_controller_camera_enabled;
+static BOOL native_second_player_camera_collision_enabled;
 static BOOL split_screen_ranged_model_isolation_enabled;
 static BOOL spirit_strike_viewport_effect_isolation_enabled;
 static MotionBlurPostRenderFunction original_motion_blur_post_render;
@@ -632,6 +742,8 @@ static float second_player_controller_camera_yaw_speed;
 static float second_player_controller_camera_pitch_speed;
 static float second_player_controller_camera_maximum_pitch;
 static BOOL player_two_camera_transform_initialized;
+static unsigned int player_two_temporary_camera_policy =
+    SUDEKIMP_TEMP_CAMERA_OUTSIDE;
 static float player_two_camera_last_target[3];
 static float player_two_camera_pitch_offset;
 static BOOL player_two_first_person_camera_active;
@@ -641,6 +753,13 @@ static int player_two_rebased_phase = -1;
 static float player_two_third_person_matrix[16];
 static DWORD player_two_camera_input_last_tick;
 static BOOL player_two_camera_input_logged;
+static BOOL player_two_native_camera_bound;
+static BOOL player_two_native_camera_attempted;
+static BOOL player_two_native_camera_ready;
+static BOOL player_two_native_camera_ready_logged;
+static BOOL player_two_native_camera_fallback_logged;
+static uint16_t player_two_native_camera_start_generation;
+static void *player_two_native_camera_target_slot;
 static BOOL ranged_model_isolation_logged;
 static BOOL ranged_first_person_model_isolation_logged;
 static BOOL ranged_model_animation_mirror_logged;
@@ -707,12 +826,40 @@ static void *coop_locked_player_two;
 static BOOL coop_roster_valid;
 static unsigned int coop_roster_player_one_type;
 static unsigned int coop_roster_player_two_type;
+static BOOL coop_roster_participation_requested = TRUE;
+static BOOL coop_roster_party_transition_active;
+static BOOL coop_roster_runtime_release_pending;
 static unsigned int coop_roster_rotation_attempts;
 static BOOL coop_roster_rotation_previous;
 static unsigned int coop_roster_last_presence_mask;
+static BOOL coop_roster_ready_window_active;
+static DWORD coop_roster_ready_since;
+static void *coop_roster_ready_group;
+static void *coop_roster_ready_controller_target;
+static void *coop_roster_ready_party_front;
+static void *coop_roster_ready_player_one;
+static void *coop_roster_ready_player_two;
+static unsigned int coop_roster_ready_player_one_slot;
+static unsigned int coop_roster_ready_player_two_slot;
+static int coop_roster_ready_party_count;
+static int coop_roster_control_phase = -1;
 static SudekiMpSplitScreenOverlayRenderer overlay_renderer;
+static SudekiMpModOwnedBlacksmithActiveQuery
+    mod_owned_blacksmith_active_query;
+
+static BOOL coop_roster_native_transition_settled(
+    unsigned int controller_mode_80,
+    unsigned int controller_mode_84,
+    unsigned int group_state_d0,
+    unsigned int group_switching_d6,
+    unsigned int group_state_d7,
+    unsigned int next_character_action,
+    unsigned int previous_character_action
+);
+static void reset_coop_roster_ready_window(void);
 
 static const char second_player_camera_name[] = "SudekiMP_P2";
+static const char exploration_camera_state_name[] = "Exploration";
 static const char spirit_history_resource_name[] = "_RenderTarget";
 static const char *const ranged_observer_locator_names[] = {
     "WeaponFollow",
@@ -740,6 +887,13 @@ static const float player_two_exploration_camera_distance = 3.5f;
 static const float player_two_combat_camera_distance = 6.0f;
 static const float player_two_exploration_camera_height = 1.15f;
 static const float player_two_combat_camera_height = 1.35f;
+/* The supported image's native Exploration bootstrap at 0x004cf831 prepares
+ * (0.0f, FALSE, 0x47c34ff3) for the internal transition installer called at
+ * 0x004cf847.  CCameraManager::SetCameraState reaches that same installer
+ * after resolving the state name; CCamera+0x40 is ExplorationStateData and
+ * must not be interpreted as this tuple. */
+static const uint32_t native_exploration_transition_b_bits =
+    UINT32_C(0x47c34ff3);
 static const uint8_t expected_camera_manager_add_camera_entry[] = {
     0x83, 0xec, 0x14, 0x53, 0x55, 0x8b, 0x6c, 0x24,
     0x20, 0x56, 0x57, 0x8b
@@ -755,6 +909,22 @@ static const uint8_t expected_camera_manager_get_camera_entry[] = {
 static const uint8_t expected_camera_manager_set_render_camera_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
 };
+static const uint8_t expected_camera_manager_set_camera_target_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x83, 0xec,
+    0x74, 0x53, 0x8b, 0xd9
+};
+static const uint8_t expected_camera_manager_get_camera_mode_entry[] = {
+    0x53, 0x8b, 0x5c, 0x24, 0x08, 0x55, 0x56, 0x57,
+    0x8b, 0xe9, 0x85, 0xdb
+};
+static const uint8_t expected_camera_manager_set_camera_state_entry[] = {
+    0xd9, 0x44, 0x24, 0x14, 0x8b, 0x44, 0x24, 0x10,
+    0x56, 0x51, 0xd9, 0x1c, 0x24
+};
+static const uint8_t expected_camera_input_event_entry[] = {
+    0x51, 0x56, 0x8b, 0xf1, 0x8b, 0x4e, 0x38, 0x33,
+    0xc0, 0x85, 0xc9, 0x74
+};
 static const uint8_t expected_game_speed_set_mode_entry[] = {
     0x8b, 0x44, 0x24, 0x04, 0x89, 0x41, 0x24
 };
@@ -767,6 +937,10 @@ static const uint8_t expected_position_set_forward_entry[] = {
 };
 static const uint8_t expected_group_players_in_combat_entry[] = {
     0x8a, 0x81, 0xd4, 0x00, 0x00, 0x00, 0xc3
+};
+static const uint8_t expected_group_players_character_switch_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec,
+    0x18, 0x83, 0xbe, 0xcc, 0x00, 0x00, 0x00, 0x01
 };
 static const uint8_t expected_character_type_to_portrait_enum_entry[] = {
     0x48, 0x83, 0xf8, 0x22, 0x77, 0x38, 0x0f, 0xb6, 0x80
@@ -789,6 +963,25 @@ static const uint8_t expected_history_resource_factory_entry[] = {
 static const uint8_t expected_quick_menu_render_submit_entry[] = {
     0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x38, 0x00, 0x75,
     0x2e, 0x80, 0xbe, 0xfe, 0x00, 0x00, 0x00, 0x00
+};
+static const uint8_t expected_shop_is_active_tail[] = {
+    0x85, 0xc0, 0x74, 0x1e, 0x83, 0xb8, 0xb8, 0x00,
+    0x00, 0x00, 0x07, 0x74, 0x0f, 0x8b, 0x40, 0x74
+};
+static const uint8_t expected_blacksmith_is_active_tail[] = {
+    0x85, 0xc0, 0x74, 0x04, 0x8a, 0x40, 0x29, 0xc3,
+    0x32, 0xc0, 0xc3
+};
+static const uint8_t expected_ingame_ui_controller_update_entry[] = {
+    0x51, 0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x2c, 0x00
+};
+static const uint8_t expected_ingame_ui_controller_render_entry[] = {
+    0x56, 0x8b, 0xf1, 0x8b, 0x86, 0xb8, 0x00, 0x00,
+    0x00, 0x48, 0x83, 0xf8, 0x11
+};
+static const uint8_t expected_ingame_ui_controller_input_entry[] = {
+    0x83, 0xec, 0x18, 0x53, 0x55, 0x56, 0x8b, 0x74,
+    0x24, 0x28, 0x8d, 0x46, 0xfb
 };
 static const uint8_t expected_ranged_weapon_reattach_entry[] = {
     0x53, 0x55, 0x8b, 0x6c, 0x24, 0x0c,
@@ -827,6 +1020,84 @@ static BOOL quick_menu_is_active_signature_matches(uint8_t *base) {
         (uint32_t)(uintptr_t)(base + RVA_QUICK_MENU_GLOBAL);
 }
 
+static BOOL shared_interaction_modal_signatures_match(uint8_t *base) {
+    uint32_t shop_singleton_address;
+    uint32_t blacksmith_singleton_address;
+    uint8_t *controller_vtable;
+    uint8_t *shop_vtable;
+    uint8_t *blacksmith_vtable;
+
+    if (base == NULL || base[RVA_SHOP_IS_ACTIVE] != 0xa1u ||
+        base[RVA_BLACKSMITH_IS_ACTIVE] != 0xa1u ||
+        memcmp(
+            base + RVA_SHOP_IS_ACTIVE + 5u,
+            expected_shop_is_active_tail,
+            sizeof(expected_shop_is_active_tail)) != 0 ||
+        memcmp(
+            base + RVA_BLACKSMITH_IS_ACTIVE + 5u,
+            expected_blacksmith_is_active_tail,
+            sizeof(expected_blacksmith_is_active_tail)) != 0 ||
+        memcmp(
+            base + RVA_INGAME_UI_CONTROLLER_UPDATE,
+            expected_ingame_ui_controller_update_entry,
+            sizeof(expected_ingame_ui_controller_update_entry)) != 0 ||
+        memcmp(
+            base + RVA_INGAME_UI_CONTROLLER_RENDER,
+            expected_ingame_ui_controller_render_entry,
+            sizeof(expected_ingame_ui_controller_render_entry)) != 0 ||
+        memcmp(
+            base + RVA_INGAME_UI_CONTROLLER_INPUT,
+            expected_ingame_ui_controller_input_entry,
+            sizeof(expected_ingame_ui_controller_input_entry)) != 0) {
+        return FALSE;
+    }
+    memcpy(
+        &shop_singleton_address,
+        base + RVA_SHOP_IS_ACTIVE + 1u,
+        sizeof(shop_singleton_address)
+    );
+    memcpy(
+        &blacksmith_singleton_address,
+        base + RVA_BLACKSMITH_IS_ACTIVE + 1u,
+        sizeof(blacksmith_singleton_address)
+    );
+    if (shop_singleton_address != (uint32_t)(uintptr_t)(
+            base + RVA_INGAME_UI_CONTROLLER_GLOBAL) ||
+        blacksmith_singleton_address != (uint32_t)(uintptr_t)(
+            base + RVA_BLACKSMITH_LAYER_GLOBAL)) {
+        return FALSE;
+    }
+    controller_vtable = base + RVA_INGAME_UI_CONTROLLER_VTABLE;
+    shop_vtable = base + RVA_SHOP_LAYER_VTABLE;
+    blacksmith_vtable = base + RVA_BLACKSMITH_LAYER_VTABLE;
+    return *(void **)(controller_vtable + 0x08u) ==
+            base + RVA_INGAME_UI_CONTROLLER_UPDATE &&
+        *(void **)(controller_vtable + 0x0cu) ==
+            base + RVA_INGAME_UI_CONTROLLER_RENDER &&
+        *(void **)(controller_vtable + 0x2cu) ==
+            base + RVA_INGAME_UI_CONTROLLER_INPUT &&
+        *(void **)(shop_vtable + 0x08u) ==
+            base + RVA_SHOP_LAYER_UPDATE &&
+        *(void **)(shop_vtable + 0x0cu) ==
+            base + RVA_SHOP_LAYER_RENDER &&
+        *(void **)(shop_vtable + 0x2cu) ==
+            base + RVA_SHOP_LAYER_INPUT &&
+        *(void **)(shop_vtable + 0x48u) ==
+            base + RVA_SHOP_LAYER_RESOURCE_CREATE &&
+        *(void **)(shop_vtable + 0x4cu) ==
+            base + RVA_SHOP_LAYER_RESOURCE_DESTROY &&
+        *(void **)(blacksmith_vtable + 0x08u) ==
+            base + RVA_BLACKSMITH_LAYER_UPDATE &&
+        *(void **)(blacksmith_vtable + 0x0cu) ==
+            base + RVA_BLACKSMITH_LAYER_RENDER &&
+        *(void **)(blacksmith_vtable + 0x2cu) ==
+            base + RVA_BLACKSMITH_LAYER_INPUT &&
+        *(void **)(blacksmith_vtable + 0x48u) ==
+            base + RVA_BLACKSMITH_LAYER_RESOURCE_CREATE &&
+        *(void **)(blacksmith_vtable + 0x4cu) ==
+            base + RVA_BLACKSMITH_LAYER_RESOURCE_DESTROY;
+}
+
 static BOOL animation_renderer_signatures_match(uint8_t *base) {
     uint8_t *vtable;
 
@@ -860,14 +1131,43 @@ static BOOL animation_renderer_signatures_match(uint8_t *base) {
             base + RVA_ANIMATION_RENDERER_BLEND_GET;
 }
 
+static BOOL character_switch_consumer_signatures_match(uint8_t *base) {
+    return base != NULL &&
+        memcmp(
+            base + RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER,
+            expected_group_players_character_switch_entry,
+            sizeof(expected_group_players_character_switch_entry)) == 0 &&
+        memcmp(
+            base + RVA_GROUP_PLAYERS_NEXT_CHARACTER,
+            expected_group_players_character_switch_entry,
+            sizeof(expected_group_players_character_switch_entry)) == 0;
+}
+
 static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
 }
 
+/* Every CCamera is registered with the same native input dispatcher.  The
+ * game broadcasts Player 1 camera events to every registered camera, so the
+ * named Player 2 camera must not consume those events.  Update scheduling is
+ * a separate UpdateNode registration and remains active. */
+static void SUDEKIMP_THISCALL route_camera_input_event(
+    void *camera,
+    const void *event
+) {
+    if (camera == player_two_camera) {
+        return;
+    }
+    if (original_camera_input_event != NULL) {
+        original_camera_input_event(camera, event);
+    }
+}
+
 static void reset_player_two_controller_camera(void) {
     player_two_camera_transform_initialized = FALSE;
+    player_two_temporary_camera_policy = SUDEKIMP_TEMP_CAMERA_OUTSIDE;
     ZeroMemory(
         player_two_camera_last_target,
         sizeof(player_two_camera_last_target)
@@ -883,6 +1183,34 @@ static void reset_player_two_controller_camera(void) {
     );
     player_two_camera_input_last_tick = 0u;
     player_two_camera_input_logged = FALSE;
+    player_two_native_camera_bound = FALSE;
+    player_two_native_camera_attempted = FALSE;
+    player_two_native_camera_ready = FALSE;
+    player_two_native_camera_ready_logged = FALSE;
+    player_two_native_camera_fallback_logged = FALSE;
+    player_two_native_camera_start_generation = 0u;
+    player_two_native_camera_target_slot = NULL;
+}
+
+static BOOL settled_temporary_zone_active(void) {
+    uint8_t *world;
+    uint8_t *descriptor;
+
+    if (game_base == NULL || !readable_memory(
+            game_base + RVA_WORLD_GLOBAL, sizeof(world))) {
+        return FALSE;
+    }
+    world = *(uint8_t **)(game_base + RVA_WORLD_GLOBAL);
+    if (!readable_memory(world, 0x39bu)) {
+        return FALSE;
+    }
+    descriptor = *(uint8_t **)(world + 0x0cu);
+    return descriptor != NULL &&
+        readable_memory(descriptor, 0x38u) &&
+        *(uint32_t *)(descriptor + 0x34u) == 4u &&
+        *(void **)(world + 0x14u) == NULL &&
+        *(uint8_t *)(world + 0x399u) != 0u &&
+        *(uint8_t *)(world + 0x39au) != 0u;
 }
 
 static BOOL pc_quit_screen_show_signature_matches(uint8_t *base) {
@@ -1754,6 +2082,424 @@ static BOOL genuine_quick_menu_visible(void) {
     return quick_menu != NULL && quick_menu[0x29u] != 0u;
 }
 
+BOOL SudekiMpSplitScreenSharedInteractionModalShouldQuiesce(
+    BOOL inspector_installed,
+    unsigned int observation,
+    BOOL recovery_pending
+) {
+    if (!inspector_installed) {
+        return FALSE;
+    }
+    return observation != SUDEKIMP_SHARED_INTERACTION_MODAL_NONE ||
+        recovery_pending;
+}
+
+BOOL SudekiMpSplitScreenSharedInteractionRecoveryEligible(
+    BOOL runtime_enabled,
+    BOOL participation_requested,
+    BOOL roles_locked,
+    BOOL camera_feature_enabled,
+    BOOL cache_feature_enabled,
+    BOOL camera_pair_ready,
+    BOOL cache_pair_ready
+) {
+    return runtime_enabled && participation_requested && roles_locked &&
+        camera_feature_enabled && cache_feature_enabled &&
+        camera_pair_ready && cache_pair_ready;
+}
+
+BOOL SudekiMpSplitScreenSharedInteractionRecoveryPendingNext(
+    BOOL recovery_pending,
+    BOOL modal_closed_edge,
+    BOOL modal_had_live_split,
+    BOOL current_eligible,
+    BOOL fresh_cache_pair_ready
+) {
+    if (!current_eligible || fresh_cache_pair_ready) {
+        return FALSE;
+    }
+    if (recovery_pending) {
+        return TRUE;
+    }
+    return modal_closed_edge && modal_had_live_split;
+}
+
+unsigned int SudekiMpSplitScreenClassifySharedInteractionModal(
+    BOOL inspection_valid,
+    BOOL shop_reported_active,
+    BOOL blacksmith_reported_active,
+    unsigned int current_ui_mode,
+    unsigned int next_ui_mode
+) {
+    BOOL shop_active;
+    BOOL blacksmith_active;
+
+    if (!inspection_valid) {
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    shop_active = shop_reported_active || current_ui_mode == 7u ||
+        current_ui_mode == 8u || current_ui_mode == 9u ||
+        next_ui_mode == 7u || next_ui_mode == 8u ||
+        next_ui_mode == 9u;
+    blacksmith_active = blacksmith_reported_active ||
+        current_ui_mode == 5u || current_ui_mode == 6u ||
+        next_ui_mode == 5u || next_ui_mode == 6u;
+    if (shop_active && blacksmith_active) {
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    if (shop_active) {
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_SHOP;
+    }
+    if (blacksmith_active) {
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_BLACKSMITH;
+    }
+    return SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+}
+
+BOOL SudekiMpSplitScreenNativeBlacksmithReportedActive(
+    BOOL reported_active,
+    BOOL mod_owned_active,
+    BOOL native_layer_active,
+    unsigned int current_ui_mode,
+    unsigned int next_ui_mode
+) {
+    /* UIBlackSmithActive is also a script wait predicate. A mod-owned session
+     * deliberately keeps that export true without constructing/activating the
+     * singleton. Exclude it only when all independent native state agrees;
+     * any layer/mode disagreement preserves the conservative full-width path. */
+    if (mod_owned_active && !native_layer_active &&
+        current_ui_mode != 5u && current_ui_mode != 6u &&
+        next_ui_mode != 5u && next_ui_mode != 6u) {
+        return FALSE;
+    }
+    return reported_active || native_layer_active;
+}
+
+static BOOL shared_interaction_recovery_runtime_eligible(
+    BOOL require_fresh_frames,
+    const char **reason
+) {
+    void *manager = current_camera_manager();
+    BOOL camera_pair_ready;
+    BOOL cache_pair_ready;
+
+    if (reason != NULL) {
+        *reason = "eligible";
+    }
+    camera_pair_ready =
+        manager != NULL && manager == second_player_camera_manager &&
+        readable_memory(player_one_camera, 0x38u) &&
+        readable_memory(player_two_camera, 0x38u) &&
+        readable_memory(player_one_render_state, 0xdcu) &&
+        readable_memory(player_two_render_state, 0xdcu) &&
+        readable_memory(player_one_character, 0x94u) &&
+        readable_memory(player_two_character, 0x94u);
+    cache_pair_ready =
+        readable_memory(frame_cache_device, sizeof(void *)) &&
+        readable_memory(player_one_frame_surface, sizeof(void *)) &&
+        readable_memory(player_two_frame_surface, sizeof(void *)) &&
+        readable_memory(player_one_frame_texture, sizeof(void *)) &&
+        readable_memory(player_two_frame_texture, sizeof(void *)) &&
+        frame_cache_description.width != 0u &&
+        frame_cache_description.height != 0u &&
+        (!require_fresh_frames ||
+         (player_one_frame_valid && player_two_frame_valid));
+    if (!split_screen_render_installed && reason != NULL) {
+        *reason = "inspector_not_installed";
+    } else if (!runtime_split_enabled && reason != NULL) {
+        *reason = "split_runtime_disabled";
+    } else if ((!coop_roster_valid ||
+                !coop_roster_participation_requested) && reason != NULL) {
+        *reason = "player_two_participation_inactive";
+    } else if (!coop_role_lock_active && reason != NULL) {
+        *reason = "co_op_roles_unlocked";
+    } else if ((!second_player_camera_enabled ||
+                !dual_camera_frame_cache_enabled) && reason != NULL) {
+        *reason = "camera_cache_features_disabled";
+    } else if (!camera_pair_ready && reason != NULL) {
+        *reason = "live_camera_pair_unavailable";
+    } else if (!cache_pair_ready && reason != NULL) {
+        *reason = require_fresh_frames ?
+            "fresh_cache_pair_unavailable" :
+            "cache_resources_unavailable";
+    }
+    return SudekiMpSplitScreenSharedInteractionRecoveryEligible(
+        split_screen_render_installed && runtime_split_enabled,
+        coop_roster_valid && coop_roster_participation_requested,
+        coop_role_lock_active,
+        second_player_camera_enabled,
+        dual_camera_frame_cache_enabled,
+        camera_pair_ready,
+        cache_pair_ready
+    );
+}
+
+static const char *shared_interaction_modal_name(unsigned int observation) {
+    switch (observation) {
+        case SUDEKIMP_SHARED_INTERACTION_MODAL_SHOP:
+            return "shop";
+        case SUDEKIMP_SHARED_INTERACTION_MODAL_BLACKSMITH:
+            return "blacksmith";
+        case SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN:
+            return "uncertain";
+        default:
+            return "none";
+    }
+}
+
+static unsigned int inspect_shared_interaction_modal(
+    const char **reason
+) {
+    uint8_t *controller;
+    uint8_t *shop;
+    uint8_t *blacksmith;
+    void *controller_shop;
+    void *controller_blacksmith;
+    unsigned int current_mode;
+    unsigned int next_mode;
+    BOOL shop_active;
+    BOOL blacksmith_active;
+    BOOL mod_owned_blacksmith_active;
+    BOOL native_blacksmith_layer_active;
+
+    if (reason != NULL) {
+        *reason = "observed";
+    }
+    if (!split_screen_render_installed) {
+        if (reason != NULL) {
+            *reason = "inspector_not_installed";
+        }
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    }
+    if (game_base == NULL || shop_is_active == NULL ||
+        blacksmith_is_active == NULL) {
+        if (reason != NULL) {
+            *reason = "native_modal_bindings_unavailable";
+        }
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    if (!readable_memory(
+            game_base + RVA_INGAME_UI_CONTROLLER_GLOBAL,
+            sizeof(controller)) ||
+        !readable_memory(
+            game_base + RVA_SHOP_LAYER_GLOBAL,
+            sizeof(shop)) ||
+        !readable_memory(
+            game_base + RVA_BLACKSMITH_LAYER_GLOBAL,
+            sizeof(blacksmith))) {
+        if (reason != NULL) {
+            *reason = "native_modal_singleton_slots_unreadable";
+        }
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    controller = *(uint8_t **)(
+        game_base + RVA_INGAME_UI_CONTROLLER_GLOBAL
+    );
+    shop = *(uint8_t **)(game_base + RVA_SHOP_LAYER_GLOBAL);
+    blacksmith = *(uint8_t **)(
+        game_base + RVA_BLACKSMITH_LAYER_GLOBAL
+    );
+    if (controller == NULL && shop == NULL && blacksmith == NULL) {
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    }
+    if (!readable_memory(
+            controller,
+            INGAME_UI_CONTROLLER_NEXT_MODE_OFFSET + sizeof(unsigned int)) ||
+        *(void **)controller !=
+            game_base + RVA_INGAME_UI_CONTROLLER_VTABLE) {
+        if (reason != NULL) {
+            *reason = "native_ui_controller_identity_uncertain";
+        }
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    controller_shop = *(void **)(
+        controller + INGAME_UI_CONTROLLER_SHOP_OFFSET
+    );
+    controller_blacksmith = *(void **)(
+        controller + INGAME_UI_CONTROLLER_BLACKSMITH_OFFSET
+    );
+    if (controller_shop != shop || controller_blacksmith != blacksmith ||
+        !readable_memory(shop, SHOP_LAYER_STATE_OFFSET + sizeof(int)) ||
+        *(void **)shop != game_base + RVA_SHOP_LAYER_VTABLE ||
+        !readable_memory(
+            blacksmith,
+            BLACKSMITH_LAYER_STATE_OFFSET + sizeof(int)) ||
+        *(void **)blacksmith != game_base + RVA_BLACKSMITH_LAYER_VTABLE) {
+        if (reason != NULL) {
+            *reason = "native_modal_layer_identity_uncertain";
+        }
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN;
+    }
+    current_mode = *(unsigned int *)(
+        controller + INGAME_UI_CONTROLLER_CURRENT_MODE_OFFSET
+    );
+    next_mode = *(unsigned int *)(
+        controller + INGAME_UI_CONTROLLER_NEXT_MODE_OFFSET
+    );
+    shop_active = shop_is_active() != FALSE;
+    mod_owned_blacksmith_active =
+        mod_owned_blacksmith_active_query != NULL &&
+        mod_owned_blacksmith_active_query() != FALSE;
+    native_blacksmith_layer_active =
+        blacksmith[BLACKSMITH_LAYER_ACTIVE_OFFSET] != 0u;
+    /* Avoid invoking the hooked script predicate while the mod-owned
+     * lifecycle is proven: its TRUE means "script still waiting", not
+     * "native singleton visible". Any native disagreement fails closed. */
+    blacksmith_active =
+        SudekiMpSplitScreenNativeBlacksmithReportedActive(
+            mod_owned_blacksmith_active ? FALSE :
+                blacksmith_is_active() != FALSE,
+            mod_owned_blacksmith_active,
+            native_blacksmith_layer_active,
+            current_mode,
+            next_mode);
+    return SudekiMpSplitScreenClassifySharedInteractionModal(
+        TRUE,
+        shop_active,
+        blacksmith_active,
+        current_mode,
+        next_mode
+    );
+}
+
+static unsigned int refresh_shared_interaction_modal(void) {
+    const char *reason;
+    const char *eligibility_reason;
+    unsigned int previous_observation =
+        shared_interaction_modal_observation;
+    unsigned int observation = inspect_shared_interaction_modal(&reason);
+    BOOL was_full_width = previous_observation !=
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    BOOL full_width = observation !=
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    BOOL recovery_was_pending =
+        shared_interaction_modal_recovery_pending;
+    BOOL current_recovery_eligible;
+    SudekiMpInteractionKind observed_kind = SUDEKIMP_INTERACTION_NONE;
+
+    if (!split_screen_render_installed) {
+        shared_interaction_modal_observation =
+            SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+        shared_interaction_modal_recovery_pending = FALSE;
+        shared_interaction_modal_had_live_split = FALSE;
+        return SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    }
+    shared_interaction_modal_observation = observation;
+    if (was_full_width != full_width) {
+        if (full_width) {
+            shared_interaction_modal_had_live_split =
+                shared_interaction_recovery_runtime_eligible(
+                    TRUE,
+                    &eligibility_reason
+                );
+        }
+        invalidate_dual_frame_cache();
+        if (full_width) {
+            shared_interaction_modal_recovery_pending = FALSE;
+            player_two_view_requested = FALSE;
+            SudekiMpLogFormat(
+                "split_screen_render event=shared_interaction_modal phase=enter kind=%s reason=%s owner=player_one presentation=native_full_width recovery_eligible=%u recovery_reason=%s cache_policy=invalidate_on_edge_bypass_dual_compositor\r\n",
+                shared_interaction_modal_name(observation),
+                reason,
+                shared_interaction_modal_had_live_split ? 1u : 0u,
+                eligibility_reason
+            );
+        } else {
+            current_recovery_eligible =
+                shared_interaction_recovery_runtime_eligible(
+                    FALSE,
+                    &eligibility_reason
+                );
+            shared_interaction_modal_recovery_pending =
+                SudekiMpSplitScreenSharedInteractionRecoveryPendingNext(
+                    FALSE,
+                    TRUE,
+                    shared_interaction_modal_had_live_split,
+                    current_recovery_eligible,
+                    FALSE
+                );
+            shared_interaction_modal_had_live_split = FALSE;
+            SudekiMpLogFormat(
+                "split_screen_render event=shared_interaction_modal phase=exit kind=%s owner=player_one presentation=%s recovery_eligible=%u recovery_reason=%s cache_policy=invalidate_on_edge_then_rebuild_both_views_or_fail_open\r\n",
+                shared_interaction_modal_name(previous_observation),
+                shared_interaction_modal_recovery_pending ?
+                    "full_width_recovery_barrier" : "native",
+                current_recovery_eligible ? 1u : 0u,
+                eligibility_reason
+            );
+        }
+    } else if (full_width && shared_interaction_modal_had_live_split &&
+               !shared_interaction_recovery_runtime_eligible(
+                    FALSE,
+                    &eligibility_reason)) {
+        shared_interaction_modal_had_live_split = FALSE;
+        SudekiMpLogFormat(
+            "split_screen_render event=shared_interaction_modal phase=recovery_disarmed reason=%s timing=modal_active policy=fail_open_after_close\r\n",
+            eligibility_reason
+        );
+    } else if (!full_width && recovery_was_pending) {
+        current_recovery_eligible =
+            shared_interaction_recovery_runtime_eligible(
+                FALSE,
+                &eligibility_reason
+            );
+        shared_interaction_modal_recovery_pending =
+            SudekiMpSplitScreenSharedInteractionRecoveryPendingNext(
+                recovery_was_pending,
+                FALSE,
+                FALSE,
+                current_recovery_eligible,
+                FALSE
+            );
+        if (!shared_interaction_modal_recovery_pending) {
+            SudekiMpLogFormat(
+                "split_screen_render event=shared_interaction_modal phase=recovery_cancelled reason=%s policy=fail_open_do_not_rearm_on_rejoin\r\n",
+                eligibility_reason
+            );
+        }
+    }
+    if (observation == SUDEKIMP_SHARED_INTERACTION_MODAL_SHOP) {
+        observed_kind = SUDEKIMP_INTERACTION_SHOP;
+    } else if (observation ==
+            SUDEKIMP_SHARED_INTERACTION_MODAL_BLACKSMITH) {
+        observed_kind = SUDEKIMP_INTERACTION_BLACKSMITH;
+    }
+    if (observed_kind != SUDEKIMP_INTERACTION_NONE) {
+        SudekiMpPlayerStatehoodObserveNativeModal(
+            SudekiMpPlayerStatehoodRuntime(),
+            observed_kind,
+            0u,
+            GetTickCount()
+        );
+        shared_interaction_modal_published_kind = observed_kind;
+    } else if (observation == SUDEKIMP_SHARED_INTERACTION_MODAL_NONE &&
+               shared_interaction_modal_published_kind !=
+                    SUDEKIMP_INTERACTION_NONE) {
+        SudekiMpPlayerStatehoodObserveNativeModal(
+            SudekiMpPlayerStatehoodRuntime(),
+            SUDEKIMP_INTERACTION_NONE,
+            0u,
+            GetTickCount()
+        );
+        shared_interaction_modal_published_kind = SUDEKIMP_INTERACTION_NONE;
+    }
+    return observation;
+}
+
+BOOL SudekiMpSplitScreenSharedInteractionModalActive(void) {
+    unsigned int observation;
+
+    if (!split_screen_render_installed) {
+        return FALSE;
+    }
+    observation = refresh_shared_interaction_modal();
+    return SudekiMpSplitScreenSharedInteractionModalShouldQuiesce(
+        split_screen_render_installed,
+        observation,
+        shared_interaction_modal_recovery_pending
+    );
+}
+
 static BOOL quick_menu_live_player_two_ready(void) {
     void *manager = current_camera_manager();
 
@@ -1848,6 +2594,27 @@ BOOL SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
         render_phase_confirmed &&
         !player_two_expected &&
         !player_two_rendered;
+}
+
+BOOL SudekiMpSplitScreenMinimapOwnerIsPlayerTwo(
+    BOOL enabled,
+    BOOL update_owner_valid,
+    BOOL update_player_two
+) {
+    return enabled && update_owner_valid && update_player_two;
+}
+
+BOOL SudekiMpSplitScreenMinimapCaptureAllowed(
+    BOOL enabled,
+    BOOL update_owner_valid,
+    BOOL update_player_two,
+    BOOL rendered_player_two
+) {
+    if (!enabled) {
+        return TRUE;
+    }
+    return update_owner_valid &&
+        update_player_two == rendered_player_two;
 }
 
 static int current_spirit_presentation_state(void);
@@ -2629,7 +3396,7 @@ void *SudekiMpSplitScreenHudPartySourceDispatch(void *source) {
         return source;
     }
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
-    if (!readable_memory(
+    if (group == NULL || !readable_memory(
             group + PARTY_SLOT_ZERO_OFFSET,
             PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
         return source;
@@ -2694,6 +3461,150 @@ static void split_screen_hud_party_pointer_copy_entry(void) {
         "pushl %eax\n\t"
         "pushl %ecx\n\t"
         "call _SudekiMpSplitScreenHudPartySourceDispatch\n\t"
+        "addl $4, %esp\n\t"
+        "movl %eax, %ecx\n\t"
+        "popl %eax\n\t"
+        "call *_original_hud_party_pointer_copy\n\t"
+        "ret\n\t"
+    );
+}
+
+static void *minimap_party_source_dispatch(
+    void *source,
+    void *desired_character,
+    BOOL player_two_owner,
+    BOOL *resolved,
+    const char *phase
+) {
+    uint8_t *group;
+    uint8_t *party_source;
+    unsigned int index;
+    unsigned int viewport_index;
+
+    if (resolved != NULL) {
+        *resolved = FALSE;
+    }
+    if (game_base == NULL || desired_character == NULL ||
+        !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL,
+            sizeof(group))) {
+        minimap_source_failure_this_frame = TRUE;
+        return source;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    if (group == NULL || !readable_memory(
+            group + PARTY_SLOT_ZERO_OFFSET,
+            PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
+        minimap_source_failure_this_frame = TRUE;
+        return source;
+    }
+    party_source = group + PARTY_SLOT_ZERO_OFFSET;
+    if (source != party_source) {
+        minimap_source_failure_this_frame = TRUE;
+        return source;
+    }
+    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+        uint8_t *candidate_source = party_source +
+            index * PARTY_SLOT_STRIDE;
+        if (*(void **)candidate_source == desired_character) {
+            viewport_index = player_two_owner ? 1u : 0u;
+            if (!minimap_ownership_logged[viewport_index]) {
+                minimap_ownership_logged[viewport_index] = TRUE;
+                SudekiMpLogFormat(
+                    "split_screen_render event=minimap_ownership phase=%s viewport=%u desired_character=0x%08lx resolved_slot=%u policy=stable_character_identity_per_cached_view_no_party_or_controller_write\r\n",
+                    phase,
+                    viewport_index + 1u,
+                    (unsigned long)(uintptr_t)desired_character,
+                    index
+                );
+            }
+            if (resolved != NULL) {
+                *resolved = TRUE;
+            }
+            return candidate_source;
+        }
+    }
+    minimap_source_failure_this_frame = TRUE;
+    return source;
+}
+
+void *SudekiMpSplitScreenMinimapScheduledPartySourceDispatch(void *source) {
+    BOOL resolved = FALSE;
+    void *desired_character;
+    void *resolved_source;
+
+    minimap_update_owner_valid = FALSE;
+    minimap_update_player_two = FALSE;
+    minimap_update_character = NULL;
+    if (!dual_camera_frame_cache_enabled ||
+        !minimap_scheduled_owner_valid) {
+        return source;
+    }
+    minimap_update_player_two =
+        SudekiMpSplitScreenMinimapOwnerIsPlayerTwo(
+            dual_camera_frame_cache_enabled,
+            minimap_scheduled_owner_valid,
+            minimap_scheduled_player_two
+        );
+    desired_character = minimap_update_player_two ?
+        player_two_character : player_one_character;
+    resolved_source = minimap_party_source_dispatch(
+        source,
+        desired_character,
+        minimap_update_player_two,
+        &resolved,
+        "update"
+    );
+    if (resolved) {
+        minimap_update_owner_valid = TRUE;
+        minimap_update_character = desired_character;
+    }
+    return resolved_source;
+}
+
+void *SudekiMpSplitScreenMinimapRenderPartySourceDispatch(void *source) {
+    void *expected_character;
+
+    if (!dual_camera_frame_cache_enabled) {
+        return source;
+    }
+    expected_character = minimap_update_player_two ?
+        player_two_character : player_one_character;
+    if (!minimap_update_owner_valid ||
+        minimap_update_character == NULL ||
+        minimap_update_character != expected_character) {
+        minimap_source_failure_this_frame = TRUE;
+        return source;
+    }
+    return minimap_party_source_dispatch(
+        source,
+        minimap_update_character,
+        minimap_update_player_two,
+        NULL,
+        "render"
+    );
+}
+
+__attribute__((naked, noinline, used))
+static void split_screen_minimap_scheduled_party_pointer_copy_entry(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "pushl %ecx\n\t"
+        "call _SudekiMpSplitScreenMinimapScheduledPartySourceDispatch\n\t"
+        "addl $4, %esp\n\t"
+        "movl %eax, %ecx\n\t"
+        "popl %eax\n\t"
+        "call *_original_hud_party_pointer_copy\n\t"
+        "ret\n\t"
+    );
+}
+
+__attribute__((naked, noinline, used))
+static void split_screen_minimap_render_party_pointer_copy_entry(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "pushl %ecx\n\t"
+        "call _SudekiMpSplitScreenMinimapRenderPartySourceDispatch\n\t"
         "addl $4, %esp\n\t"
         "movl %eax, %ecx\n\t"
         "popl %eax\n\t"
@@ -3163,6 +4074,10 @@ static BOOL apply_player_two_controller_camera_input(
     if (!second_player_controller_camera_enabled) {
         return TRUE;
     }
+    if (SudekiMpControlSeparationGameplayInputFrozen()) {
+        player_two_camera_input_last_tick = now;
+        return TRUE;
+    }
     elapsed_ms = player_two_camera_input_last_tick == 0u ? 0u :
         (DWORD)(now - player_two_camera_input_last_tick);
     player_two_camera_input_last_tick = now;
@@ -3231,6 +4146,313 @@ static BOOL apply_player_two_controller_camera_input(
     return TRUE;
 }
 
+static void *current_player_two_party_pointer_slot(void) {
+    uint8_t *group;
+    uint8_t *slot;
+
+    if (game_base == NULL || player_two_character == NULL ||
+        player_two_party_slot >= PARTY_SLOT_COUNT || !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group))) {
+        return NULL;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    slot = group == NULL ? NULL : group + PARTY_SLOT_ZERO_OFFSET +
+        player_two_party_slot * PARTY_SLOT_STRIDE;
+    return readable_memory(slot, PARTY_SLOT_STRIDE) &&
+        *(void **)slot == player_two_character ? slot : NULL;
+}
+
+void *SudekiMpSplitScreenNativeCameraTargetFromPartySlot(
+    const void *party_slot
+) {
+    void *character = NULL;
+
+    if (party_slot != NULL) {
+        memcpy(&character, party_slot, sizeof(character));
+    }
+    return character;
+}
+
+static BOOL player_two_native_matrix_valid(void) {
+    const float *matrix;
+    unsigned int index;
+
+    if (!readable_memory(player_two_render_state, 0xdcu)) {
+        return FALSE;
+    }
+    matrix = (const float *)((const uint8_t *)player_two_render_state + 0x90u);
+    for (index = 0u; index < 16u; ++index) {
+        if (!isfinite(matrix[index])) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenObserveNativeCameraGeneration(
+    unsigned short *baseline,
+    unsigned short generation,
+    BOOL manual_fallback_write
+) {
+    if (baseline == NULL) {
+        return FALSE;
+    }
+    if (manual_fallback_write) {
+        *baseline = generation;
+        return FALSE;
+    }
+    return generation != *baseline;
+}
+
+unsigned int SudekiMpSplitScreenTemporaryCameraPolicy(
+    BOOL settled_temporary_zone,
+    int player_one_camera_mode,
+    BOOL native_player_two_ready
+) {
+    if (!settled_temporary_zone) {
+        return SUDEKIMP_TEMP_CAMERA_OUTSIDE;
+    }
+    if (player_one_camera_mode == CAMERA_MODE_EXPLORATION &&
+        native_player_two_ready) {
+        return SUDEKIMP_TEMP_CAMERA_NATIVE_PLAYER_TWO;
+    }
+    return SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH;
+}
+
+static int current_player_one_camera_mode(void) {
+    if (!native_second_player_camera_collision_enabled ||
+        camera_manager_get_camera_mode == NULL ||
+        second_player_camera_manager == NULL) {
+        return -1;
+    }
+    return camera_manager_get_camera_mode(
+        second_player_camera_manager, NULL);
+}
+
+static void set_player_two_temporary_camera_policy(
+    unsigned int policy,
+    int player_one_camera_mode,
+    const char *reason
+) {
+    unsigned int previous = player_two_temporary_camera_policy;
+    const char *presentation;
+
+    if (policy > SUDEKIMP_TEMP_CAMERA_NATIVE_PLAYER_TWO ||
+        policy == previous) {
+        return;
+    }
+    player_two_temporary_camera_policy = policy;
+    invalidate_dual_frame_cache();
+    if (policy == SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH) {
+        player_two_view_requested = FALSE;
+        presentation = "shared_native_full_width";
+    } else if (policy == SUDEKIMP_TEMP_CAMERA_NATIVE_PLAYER_TWO) {
+        presentation = "split_native_exploration";
+    } else {
+        presentation = "ordinary_outdoor_policy";
+    }
+    SudekiMpLogFormat(
+        "split_screen_render event=temporary_camera_policy "
+        "previous=%u current=%u player_one_mode=%d presentation=%s "
+        "reason=%s "
+        "policy=native_p2_only_after_exact_exploration_readiness_otherwise_shared_full_width\r\n",
+        previous,
+        policy,
+        player_one_camera_mode,
+        presentation,
+        reason == NULL ? "unspecified" : reason);
+}
+
+static BOOL initialize_player_two_native_camera(void) {
+    void *target_slot;
+    void *target_character;
+    void *active_state;
+    void *active_state_data;
+    float transition_b;
+    int mode;
+
+    if (!native_second_player_camera_collision_enabled ||
+        player_two_native_camera_bound ||
+        player_two_native_camera_attempted ||
+        camera_manager_set_camera_target == NULL ||
+        camera_manager_get_camera_mode == NULL ||
+        camera_manager_set_camera_state == NULL ||
+        second_player_camera_manager == NULL ||
+        player_one_camera == NULL || player_two_camera == NULL ||
+        !readable_memory(player_two_camera,
+            CAMERA_LOOK_AT_TARGET_OFFSET + sizeof(void *)) ||
+        !readable_memory(player_two_render_state, 0xdcu)) {
+        return FALSE;
+    }
+    mode = camera_manager_get_camera_mode(
+        second_player_camera_manager, NULL);
+    if (mode != CAMERA_MODE_EXPLORATION || active_group_in_combat() ||
+        player_skill_render_states[0] != NULL ||
+        player_skill_render_states[1] != NULL ||
+        current_spirit_presentation_state() != 0) {
+        return FALSE;
+    }
+    target_slot = current_player_two_party_pointer_slot();
+    target_character =
+        SudekiMpSplitScreenNativeCameraTargetFromPartySlot(target_slot);
+    if (target_character == NULL ||
+        target_character != player_two_character) {
+        return FALSE;
+    }
+    memcpy(&transition_b, &native_exploration_transition_b_bits,
+        sizeof(transition_b));
+
+    player_two_native_camera_attempted = TRUE;
+    /* SetCameraTarget takes the resolved GELPointer entity itself.  The
+     * active-group address is only the intrusive TPtr slot that retains that
+     * entity; passing the slot makes the native resolver dispatch through the
+     * character pointer as though it were a vtable.  Keep the slot solely as
+     * the stable identity token used by the rebind checks below. */
+    camera_manager_set_camera_target(
+        second_player_camera_manager,
+        second_player_camera_name,
+        target_character);
+    camera_manager_set_camera_state(
+        second_player_camera_manager,
+        second_player_camera_name,
+        exploration_camera_state_name,
+        0.0f,
+        FALSE,
+        transition_b);
+
+    active_state = *(void **)(
+        (uint8_t *)player_two_camera + CAMERA_ACTIVE_STATE_OFFSET);
+    active_state_data = *(void **)(
+        (uint8_t *)player_two_camera + CAMERA_ACTIVE_STATE_DATA_OFFSET);
+    mode = camera_manager_get_camera_mode(
+        second_player_camera_manager, second_player_camera_name);
+    player_two_native_camera_bound = active_state != NULL &&
+        active_state_data != NULL &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_POSITION_TARGET_OFFSET) != NULL &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_LOOK_AT_TARGET_OFFSET) != NULL &&
+        (mode == CAMERA_MODE_EXPLORATION ||
+         mode == CAMERA_MODE_STATE_TRANSITION);
+    if (!player_two_native_camera_bound) {
+        if (!player_two_native_camera_fallback_logged) {
+            player_two_native_camera_fallback_logged = TRUE;
+            SudekiMpLogFormat(
+                "split_screen_render event=player_two_native_camera "
+                "phase=bind_rejected mode=%d active_state=0x%08lx "
+                "state_data=0x%08lx position_target=0x%08lx "
+                "look_at_target=0x%08lx "
+                "policy=retain_translated_render_camera_no_retry_until_rebind\r\n",
+                mode,
+                (unsigned long)(uintptr_t)active_state,
+                (unsigned long)(uintptr_t)active_state_data,
+                (unsigned long)(uintptr_t)*(void **)(
+                    (uint8_t *)player_two_camera +
+                    CAMERA_POSITION_TARGET_OFFSET),
+                (unsigned long)(uintptr_t)*(void **)(
+                    (uint8_t *)player_two_camera +
+                    CAMERA_LOOK_AT_TARGET_OFFSET));
+        }
+        return FALSE;
+    }
+    player_two_native_camera_target_slot = target_slot;
+    player_two_native_camera_start_generation = *(uint16_t *)(
+        (uint8_t *)player_two_render_state +
+        RENDER_STATE_GENERATION_OFFSET);
+    SudekiMpLogFormat(
+        "split_screen_render event=player_two_native_camera "
+        "phase=bound mode=%d target_slot=0x%08lx "
+        "transition_a_bits=0x%08lx transition_flag=%u "
+        "transition_b_bits=0x%08lx generation=%u "
+        "policy=named_camera_native_exploration_state_no_global_render_ownership\r\n",
+        mode,
+        (unsigned long)(uintptr_t)target_slot,
+        (unsigned long)float_bits(0.0f),
+        0u,
+        (unsigned long)float_bits(transition_b),
+        (unsigned int)player_two_native_camera_start_generation);
+    return TRUE;
+}
+
+static BOOL player_two_native_camera_is_ready(void) {
+    void *target_slot;
+    uint16_t generation;
+    int player_one_mode;
+    int player_two_mode;
+
+    if (!native_second_player_camera_collision_enabled ||
+        !player_two_native_camera_bound ||
+        camera_manager_get_camera_mode == NULL ||
+        second_player_camera_manager == NULL ||
+        !readable_memory(player_two_camera,
+            CAMERA_LOOK_AT_TARGET_OFFSET + sizeof(void *)) ||
+        !readable_memory(player_two_render_state, 0xdcu) ||
+        active_group_in_combat() ||
+        player_skill_render_states[0] != NULL ||
+        player_skill_render_states[1] != NULL ||
+        current_spirit_presentation_state() != 0) {
+        player_two_native_camera_ready = FALSE;
+        return FALSE;
+    }
+    player_one_mode = camera_manager_get_camera_mode(
+        second_player_camera_manager, NULL);
+    player_two_mode = camera_manager_get_camera_mode(
+        second_player_camera_manager, second_player_camera_name);
+    target_slot = current_player_two_party_pointer_slot();
+    generation = *(uint16_t *)((uint8_t *)player_two_render_state +
+        RENDER_STATE_GENERATION_OFFSET);
+    if (target_slot != NULL &&
+        target_slot != player_two_native_camera_target_slot) {
+        SudekiMpLogFormat(
+            "split_screen_render event=player_two_native_camera "
+            "phase=target_slot_changed old_slot=0x%08lx new_slot=0x%08lx "
+            "policy=fall_back_for_one_frame_then_rebind_exact_live_gel_pointer\r\n",
+            (unsigned long)(uintptr_t)player_two_native_camera_target_slot,
+            (unsigned long)(uintptr_t)target_slot);
+        player_two_native_camera_bound = FALSE;
+        player_two_native_camera_attempted = FALSE;
+        player_two_native_camera_ready = FALSE;
+        player_two_native_camera_ready_logged = FALSE;
+        player_two_native_camera_fallback_logged = FALSE;
+        player_two_native_camera_start_generation = generation;
+        player_two_native_camera_target_slot = NULL;
+        return FALSE;
+    }
+    player_two_native_camera_ready =
+        player_one_mode == CAMERA_MODE_EXPLORATION &&
+        player_two_mode == CAMERA_MODE_EXPLORATION &&
+        target_slot != NULL &&
+        target_slot == player_two_native_camera_target_slot &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_ACTIVE_STATE_OFFSET) != NULL &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_ACTIVE_STATE_DATA_OFFSET) != NULL &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_POSITION_TARGET_OFFSET) != NULL &&
+        *(void **)((uint8_t *)player_two_camera +
+            CAMERA_LOOK_AT_TARGET_OFFSET) != NULL &&
+        SudekiMpSplitScreenObserveNativeCameraGeneration(
+            &player_two_native_camera_start_generation,
+            generation,
+            FALSE) &&
+        player_two_native_matrix_valid();
+    if (player_two_native_camera_ready &&
+        !player_two_native_camera_ready_logged) {
+        player_two_native_camera_ready_logged = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=player_two_native_camera "
+            "phase=ready player_one_mode=%d player_two_mode=%d "
+            "target_slot=0x%08lx generation=%u "
+            "p2_right_stick=disabled_native_ready_manual_fallback_only "
+            "policy=native_exploration_collision_matrix_input_broadcast_suppressed_manual_orbit_disabled\r\n",
+            player_one_mode,
+            player_two_mode,
+            (unsigned long)(uintptr_t)target_slot,
+            (unsigned int)generation);
+    }
+    return player_two_native_camera_ready;
+}
+
 static BOOL update_player_two_render_state(void) {
     float first_position[3];
     float second_position[3];
@@ -3241,6 +4463,10 @@ static BOOL update_player_two_render_state(void) {
     BOOL player_one_first_person = FALSE;
     BOOL combat_phase;
     BOOL skill_phase;
+    BOOL settled_temporary;
+    BOOL native_temporary_ready = FALSE;
+    unsigned int temporary_policy;
+    int player_one_camera_mode = -1;
     int rebase_phase;
     uint16_t *generation;
 
@@ -3249,6 +4475,107 @@ static BOOL update_player_two_render_state(void) {
         !character_position(player_one_character, first_position) ||
         !character_position(player_two_character, second_position)) {
         return FALSE;
+    }
+    settled_temporary = settled_temporary_zone_active();
+    if (settled_temporary) {
+        player_one_camera_mode = current_player_one_camera_mode();
+        if (player_one_camera_mode == CAMERA_MODE_EXPLORATION) {
+            native_temporary_ready = player_two_native_camera_is_ready();
+            if (!native_temporary_ready) {
+                (void)initialize_player_two_native_camera();
+                native_temporary_ready = player_two_native_camera_is_ready();
+            }
+        } else {
+            player_two_native_camera_ready = FALSE;
+        }
+        temporary_policy = SudekiMpSplitScreenTemporaryCameraPolicy(
+            TRUE,
+            player_one_camera_mode,
+            native_temporary_ready);
+        set_player_two_temporary_camera_policy(
+            temporary_policy,
+            player_one_camera_mode,
+            temporary_policy == SUDEKIMP_TEMP_CAMERA_NATIVE_PLAYER_TWO ?
+                "exact_native_exploration_ready" :
+                (player_one_camera_mode == CAMERA_MODE_EXPLORATION ?
+                    "native_player_two_not_ready" :
+                    "fixed_transitional_or_unknown_player_one_mode"));
+        if (temporary_policy ==
+                SUDEKIMP_TEMP_CAMERA_NATIVE_PLAYER_TWO) {
+            memcpy(
+                player_two_camera_last_target,
+                second_position,
+                sizeof(player_two_camera_last_target));
+            player_two_camera_transform_initialized = TRUE;
+            player_two_camera_pitch_offset = 0.0f;
+            player_two_first_person_camera_active = FALSE;
+            player_two_forced_third_person_active = FALSE;
+            player_two_camera_input_last_tick = GetTickCount();
+            return TRUE;
+        }
+
+        /* Fixed, transitional, and unknown TEMP cameras remain at the exact
+         * authored eye.  The frame scheduler presents only the native Player 1
+         * frame at full width while this state is active, so this copy is a
+         * warm, safe fallback rather than a duplicated split viewport. */
+        memcpy(
+            (uint8_t *)player_two_render_state + 0x90u,
+            (uint8_t *)player_one_render_state + 0x90u,
+            sizeof(matrix));
+        memcpy(
+            (uint8_t *)player_two_render_state + 0xd0u,
+            (uint8_t *)player_one_render_state + 0xd0u,
+            sizeof(float) * 3u);
+        memcpy(
+            player_two_camera_last_target,
+            second_position,
+            sizeof(player_two_camera_last_target));
+        player_two_camera_transform_initialized = TRUE;
+        player_two_camera_pitch_offset = 0.0f;
+        player_two_first_person_camera_active = FALSE;
+        player_two_forced_third_person_active = FALSE;
+        player_two_camera_input_last_tick = GetTickCount();
+        generation = (uint16_t *)(
+            (uint8_t *)player_two_render_state + 0x2cu);
+        ++*generation;
+        if (player_two_native_camera_bound &&
+            !player_two_native_camera_ready) {
+            (void)SudekiMpSplitScreenObserveNativeCameraGeneration(
+                &player_two_native_camera_start_generation,
+                *generation,
+                TRUE);
+        }
+        return TRUE;
+    }
+    if (player_two_temporary_camera_policy !=
+            SUDEKIMP_TEMP_CAMERA_OUTSIDE) {
+        unsigned int previous_temporary_policy =
+            player_two_temporary_camera_policy;
+
+        set_player_two_temporary_camera_policy(
+            SUDEKIMP_TEMP_CAMERA_OUTSIDE,
+            current_player_one_camera_mode(),
+            "settled_temporary_zone_ended");
+        if (previous_temporary_policy ==
+                SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH) {
+            reset_player_two_controller_camera();
+        }
+        SudekiMpLogWrite(
+            "split_screen_render event=player_two_camera "
+            "phase=temporary_camera_exit "
+            "policy=rebase_from_current_native_outdoor_camera\r\n");
+    }
+    if (player_two_native_camera_is_ready()) {
+        memcpy(
+            player_two_camera_last_target,
+            second_position,
+            sizeof(player_two_camera_last_target));
+        player_two_camera_transform_initialized = TRUE;
+        player_two_camera_pitch_offset = 0.0f;
+        player_two_first_person_camera_active = FALSE;
+        player_two_forced_third_person_active = FALSE;
+        player_two_camera_input_last_tick = GetTickCount();
+        return TRUE;
     }
     should_use_first_person = player_two_should_use_first_person();
     if (readable_memory(player_one_character, 0x94u)) {
@@ -3424,6 +4751,14 @@ static BOOL update_player_two_render_state(void) {
     );
     generation = (uint16_t *)((uint8_t *)player_two_render_state + 0x2cu);
     ++*generation;
+    if (player_two_native_camera_bound &&
+        !player_two_native_camera_ready) {
+        (void)SudekiMpSplitScreenObserveNativeCameraGeneration(
+            &player_two_native_camera_start_generation,
+            *generation,
+            TRUE);
+    }
+    (void)initialize_player_two_native_camera();
     return TRUE;
 }
 
@@ -5033,6 +6368,41 @@ static void reset_hud_mapping_trace(void) {
     );
 }
 
+static void reset_minimap_owner_schedule(void) {
+    minimap_scheduled_owner_valid = FALSE;
+    minimap_scheduled_player_two = FALSE;
+    minimap_update_owner_valid = FALSE;
+    minimap_update_player_two = FALSE;
+    minimap_update_character = NULL;
+    minimap_source_failure_this_frame = FALSE;
+    minimap_owner_mismatch_logged = FALSE;
+    ZeroMemory(minimap_ownership_logged, sizeof(minimap_ownership_logged));
+}
+
+static void latch_minimap_scheduled_owner(void) {
+    /* The update owner belongs only to the frame that just finished.  The
+     * next frame must prove a fresh native UIMapManager::Update before its
+     * map render is allowed to replace either cached viewport. */
+    minimap_update_owner_valid = FALSE;
+    minimap_update_player_two = FALSE;
+    minimap_update_character = NULL;
+    minimap_scheduled_owner_valid =
+        dual_camera_frame_cache_enabled &&
+        second_player_camera_enabled &&
+        runtime_split_enabled &&
+        player_two_camera != NULL &&
+        player_one_character != NULL &&
+        player_two_character != NULL &&
+        player_one_character != player_two_character &&
+        player_two_party_slot > 0u &&
+        player_two_party_slot < PARTY_SLOT_COUNT &&
+        readable_memory(player_one_character, 0x94u) &&
+        readable_memory(player_two_character, 0x94u);
+    minimap_scheduled_player_two =
+        minimap_scheduled_owner_valid && player_two_view_requested;
+    minimap_source_failure_this_frame = FALSE;
+}
+
 static BOOL read_animation_interface_state(
     void *wrapper,
     int selectors[RANGED_ANIMATION_CHANNEL_COUNT],
@@ -6194,45 +7564,7 @@ static void swap_dual_frame_cache_ownership(void) {
     player_two_frame_valid = valid;
 }
 
-static BOOL release_player_two_camera(const char *reason) {
-    void *manager = second_player_camera_manager;
-    void *current;
-
-    restore_ranged_model_render_view();
-    reset_ranged_world_compositor("camera_release");
-    if (player_two_camera == NULL) {
-        reset_player_two_controller_camera();
-        reset_ranged_animation_trace();
-        reset_hud_mapping_trace();
-        SudekiMpCombatContextSetView(0u, NULL, NULL);
-        SudekiMpCombatContextSetView(1u, NULL, NULL);
-        player_two_view_requested = FALSE;
-        rendered_player_two_this_frame = FALSE;
-        viewport_hud_binding_active = FALSE;
-        invalidate_dual_frame_cache();
-        return TRUE;
-    }
-    restore_render_only_camera();
-    if (!readable_memory(manager, 0x4cu)) {
-        log_second_player_camera_rejection_once(
-            8u,
-            "camera_manager_unavailable_during_release"
-        );
-        return FALSE;
-    }
-    current = current_render_camera(manager);
-    if (current == player_two_camera) {
-        log_second_player_camera_rejection_once(
-            9u,
-            "refusing_to_remove_globally_selected_player_two_camera"
-        );
-        return FALSE;
-    }
-    camera_manager_remove_camera(manager, second_player_camera_name);
-    SudekiMpLogFormat(
-        "split_screen_render event=second_player_camera phase=release reason=%s\r\n",
-        reason == NULL ? "unspecified" : reason
-    );
+static void clear_player_two_camera_runtime_state(void) {
     second_player_camera_manager = NULL;
     player_one_camera = NULL;
     player_two_camera = NULL;
@@ -6248,6 +7580,7 @@ static BOOL release_player_two_camera(const char *reason) {
     reset_player_two_controller_camera();
     reset_ranged_animation_trace();
     reset_hud_mapping_trace();
+    reset_minimap_owner_schedule();
     SudekiMpCombatContextSetView(0u, NULL, NULL);
     SudekiMpCombatContextSetView(1u, NULL, NULL);
     player_two_party_slot = 0u;
@@ -6255,6 +7588,74 @@ static BOOL release_player_two_camera(const char *reason) {
     rendered_player_two_this_frame = FALSE;
     viewport_hud_binding_active = FALSE;
     invalidate_dual_frame_cache();
+}
+
+static BOOL release_player_two_camera(const char *reason) {
+    void *manager = second_player_camera_manager;
+    void *live_manager;
+    void *current;
+
+    restore_ranged_model_render_view();
+    reset_ranged_world_compositor("camera_release");
+    if (!restore_render_only_camera()) {
+        return FALSE;
+    }
+    if (player_two_camera == NULL) {
+        clear_player_two_camera_runtime_state();
+        return TRUE;
+    }
+    if (game_base == NULL || !readable_memory(
+            game_base + RVA_CAMERA_MANAGER_GLOBAL,
+            sizeof(live_manager))) {
+        log_second_player_camera_rejection_once(
+            8u,
+            "camera_manager_identity_unavailable_during_release"
+        );
+        return FALSE;
+    }
+    live_manager = *(void **)(game_base + RVA_CAMERA_MANAGER_GLOBAL);
+    if (live_manager != manager) {
+        SudekiMpLogFormat(
+            "split_screen_render event=second_player_camera phase=release "
+            "reason=%s status=abandoned_old_generation "
+            "saved_manager=0x%08lx live_manager=0x%08lx "
+            "policy=never_call_native_camera_api_through_stale_manager\r\n",
+            reason == NULL ? "unspecified" : reason,
+            (unsigned long)(uintptr_t)manager,
+            (unsigned long)(uintptr_t)live_manager);
+        clear_player_two_camera_runtime_state();
+        return TRUE;
+    }
+    if (!readable_memory(manager, 0x4cu)) {
+        log_second_player_camera_rejection_once(
+            11u,
+            "camera_manager_unavailable_during_release"
+        );
+        return FALSE;
+    }
+    current = current_render_camera(manager);
+    if (current == player_two_camera) {
+        log_second_player_camera_rejection_once(
+            9u,
+            "refusing_to_remove_globally_selected_player_two_camera"
+        );
+        return FALSE;
+    }
+    camera_manager_remove_camera(manager, second_player_camera_name);
+    if (camera_manager_get_camera == NULL ||
+        camera_manager_get_camera(manager, second_player_camera_name) !=
+            NULL) {
+        log_second_player_camera_rejection_once(
+            10u,
+            "camera_manager_did_not_confirm_player_two_camera_removal"
+        );
+        return FALSE;
+    }
+    SudekiMpLogFormat(
+        "split_screen_render event=second_player_camera phase=release reason=%s\r\n",
+        reason == NULL ? "unspecified" : reason
+    );
+    clear_player_two_camera_runtime_state();
     return TRUE;
 }
 
@@ -6391,6 +7792,7 @@ static BOOL rebind_player_characters(
     }
     reset_ranged_animation_trace();
     reset_hud_mapping_trace();
+    reset_minimap_owner_schedule();
     reset_ranged_world_compositor("player_ownership_rebind");
     SudekiMpLogFormat(
         "split_screen_render event=player_ownership phase=rebind old_player_one=0x%08lx old_player_two=0x%08lx player_one=0x%08lx player_two=0x%08lx player_two_party_slot=%u cache_policy=%s reason=controller_owned_character_changed\r\n",
@@ -6407,6 +7809,7 @@ static BOOL rebind_player_characters(
 
 static void poll_second_player_camera(BOOL gameplay_allowed) {
     BOOL key_is_down;
+    BOOL settled_temporary;
     void *first_character;
     void *second_character;
     unsigned int second_slot;
@@ -6452,6 +7855,30 @@ static void poll_second_player_camera(BOOL gameplay_allowed) {
             second_player_camera_key_was_down = key_is_down;
             return;
         }
+    }
+    /* A shared full-width TEMP frame no longer schedules Camera 2, so service
+     * the policy explicitly until the room exits or the native P2 Exploration
+     * camera proves ready. */
+    settled_temporary = settled_temporary_zone_active();
+    if ((settled_temporary ||
+         player_two_temporary_camera_policy !=
+            SUDEKIMP_TEMP_CAMERA_OUTSIDE) &&
+        !update_player_two_render_state()) {
+        if (settled_temporary) {
+            set_player_two_temporary_camera_policy(
+                SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH,
+                current_player_one_camera_mode(),
+                "temporary_render_state_update_unavailable");
+        }
+        player_two_view_requested = FALSE;
+        second_player_camera_key_was_down = key_is_down;
+        return;
+    }
+    if (player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH) {
+        player_two_view_requested = FALSE;
+        second_player_camera_key_was_down = key_is_down;
+        return;
     }
     if (dual_camera_frame_cache_enabled) {
         player_two_view_requested = !rendered_player_two_this_frame;
@@ -6922,7 +8349,10 @@ static void compose_native_frame(void) {
     release_com_object(&native_surface);
 }
 
-static BOOL compose_cached_camera_frames(BOOL rendered_player_two) {
+static BOOL compose_cached_camera_frames(
+    BOOL rendered_player_two,
+    BOOL capture_current_frame
+) {
     void *device;
     void **device_vtable;
     D3DCreateTextureFunction create_texture;
@@ -7012,27 +8442,30 @@ static BOOL compose_cached_camera_frames(BOOL rendered_player_two) {
     right_rectangle.left = left_rectangle.right;
     current_frame_surface = rendered_player_two ?
         player_two_frame_surface : player_one_frame_surface;
-    result = stretch_rect(
-        device,
-        native_surface,
-        &source_rectangle,
-        current_frame_surface,
-        &source_rectangle,
-        D3D_TEXTURE_FILTER_NONE
-    );
-    capture_succeeded = SUCCEEDED(result);
-    if (!capture_succeeded) {
-        log_failure_once("capture_camera_frame_failed", result);
-    } else {
-        if (rendered_player_two) {
-            player_two_frame_valid = TRUE;
+    capture_succeeded = TRUE;
+    if (capture_current_frame) {
+        result = stretch_rect(
+            device,
+            native_surface,
+            &source_rectangle,
+            current_frame_surface,
+            &source_rectangle,
+            D3D_TEXTURE_FILTER_NONE
+        );
+        capture_succeeded = SUCCEEDED(result);
+        if (!capture_succeeded) {
+            log_failure_once("capture_camera_frame_failed", result);
         } else {
-            player_one_frame_valid = TRUE;
+            if (rendered_player_two) {
+                player_two_frame_valid = TRUE;
+            } else {
+                player_one_frame_valid = TRUE;
+            }
         }
     }
     if (!player_one_frame_valid || !player_two_frame_valid) {
         release_com_object(&native_surface);
-        return capture_succeeded;
+        return capture_current_frame ? capture_succeeded : FALSE;
     }
 
     result = stretch_rect(
@@ -7326,8 +8759,10 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     BOOL isolation_in_progress;
     BOOL isolation_resources_ready;
     BOOL live_view_allowed;
+    BOOL shared_modal_native_full_width;
     BOOL player_two_requested_before_apply;
     unsigned int isolation_state;
+    unsigned int shared_modal_observation;
     void *trace_player_one_character = player_one_character;
     void *trace_player_two_character = player_two_character;
     void *resolved_player_one_character = NULL;
@@ -7367,6 +8802,9 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     genuine_quick_menu_active_this_frame = FALSE;
     quick_menu_live_player_two_available_this_frame = FALSE;
     original_render_start();
+    shared_modal_observation = refresh_shared_interaction_modal();
+    shared_modal_native_full_width = shared_modal_observation !=
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
     quit_menu_visible = pc_quit_screen_visible();
     quick_menu_is_visible = quick_menu_visible();
     genuine_quick_menu_is_visible = genuine_quick_menu_visible();
@@ -7459,7 +8897,18 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     } else if (genuine_quick_menu_is_visible) {
         player_two_view_requested = FALSE;
     }
-    live_view_allowed = !quit_menu_visible &&
+    if (player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH) {
+        /* Fixed/unknown room cameras have one authored safe eye.  Render that
+         * native owner once at full width rather than alternately labelling two
+         * identical cached halves as independent views. */
+        player_two_view_requested = FALSE;
+    }
+    if (shared_modal_native_full_width) {
+        player_two_view_requested = FALSE;
+    }
+    live_view_allowed = !shared_modal_native_full_width &&
+        !quit_menu_visible &&
         (isolation_in_progress ||
          (!genuine_quick_menu_is_visible &&
           (!quick_menu_is_visible || spirit_presentation_active)));
@@ -7563,13 +9012,23 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     BOOL isolation_tail_active;
     BOOL cached_frame_advanced = TRUE;
     BOOL isolation_cache_failed = FALSE;
+    BOOL minimap_capture_allowed = TRUE;
+    BOOL shared_temporary_full_width;
+    BOOL shared_modal_native_full_width;
+    BOOL recovery_eligible;
+    BOOL recovery_fresh_pair_ready;
+    const char *recovery_reason;
     unsigned int isolation_state;
+    unsigned int shared_modal_observation;
 
     viewport_hud_binding_active = FALSE;
     restore_ranged_model_render_view();
     restore_render_only_camera();
     restore_quick_menu_non_owner_render();
     original_frame_end();
+    shared_modal_observation = refresh_shared_interaction_modal();
+    shared_modal_native_full_width = shared_modal_observation !=
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
     split_allowed = gameplay_split_allowed(&gate_reason);
     quit_menu_visible = pc_quit_screen_visible();
     quick_menu_is_visible = quick_menu_visible();
@@ -7577,20 +9036,82 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
         quick_menu_isolation_active ||
         quick_menu_isolation_tail_active;
     isolation_tail_active = quick_menu_isolation_tail_active;
-    presentation_allowed = split_allowed && !quit_menu_visible;
+    presentation_allowed = split_allowed && !quit_menu_visible &&
+        !shared_modal_native_full_width;
+    shared_temporary_full_width =
+        player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH;
     log_gameplay_gate(split_allowed, gate_reason);
     log_shared_menu_gate(quit_menu_visible);
     log_quick_menu_gate(
         genuine_quick_menu_active_this_frame,
         quick_menu_live_player_two_available_this_frame
     );
-    if (presentation_allowed) {
+    if (presentation_allowed && !shared_temporary_full_width) {
         if (dual_camera_frame_cache_enabled) {
+            minimap_capture_allowed =
+                SudekiMpSplitScreenMinimapCaptureAllowed(
+                    dual_camera_frame_cache_enabled,
+                    minimap_update_owner_valid,
+                    minimap_update_player_two,
+                    rendered_player_two_this_frame
+                ) && !minimap_source_failure_this_frame;
+            if (!minimap_capture_allowed &&
+                !minimap_owner_mismatch_logged) {
+                const char *reason = minimap_source_failure_this_frame ?
+                    "party_source_unavailable" :
+                    (!minimap_update_owner_valid ?
+                        "update_owner_unavailable" :
+                        "update_owner_not_rendered");
+                minimap_owner_mismatch_logged = TRUE;
+                SudekiMpLogFormat(
+                    "split_screen_render event=minimap_ownership phase=cache_hold reason=%s update_latch_valid=%u update_viewport=%u rendered_viewport=%u policy=retain_last_valid_camera_pair_without_wrong_owner_capture\r\n",
+                    reason,
+                    minimap_update_owner_valid ? 1u : 0u,
+                    minimap_update_player_two ? 2u : 1u,
+                    rendered_player_two_this_frame ? 2u : 1u
+                );
+            } else if (minimap_capture_allowed) {
+                minimap_owner_mismatch_logged = FALSE;
+            }
             cached_frame_advanced = compose_cached_camera_frames(
-                rendered_player_two_this_frame
+                rendered_player_two_this_frame,
+                minimap_capture_allowed
             );
         } else {
             compose_native_frame();
+        }
+    }
+    if (shared_interaction_modal_recovery_pending &&
+        !shared_modal_native_full_width) {
+        recovery_eligible =
+            shared_interaction_recovery_runtime_eligible(
+                FALSE,
+                &recovery_reason
+            );
+        recovery_fresh_pair_ready =
+            presentation_allowed && !shared_temporary_full_width &&
+            cached_frame_advanced &&
+            shared_interaction_recovery_runtime_eligible(TRUE, NULL);
+        shared_interaction_modal_recovery_pending =
+            SudekiMpSplitScreenSharedInteractionRecoveryPendingNext(
+                TRUE,
+                FALSE,
+                FALSE,
+                recovery_eligible,
+                recovery_fresh_pair_ready
+            );
+        if (!shared_interaction_modal_recovery_pending) {
+            if (recovery_fresh_pair_ready) {
+                SudekiMpLogWrite(
+                    "split_screen_render event=shared_interaction_modal phase=recovery_complete presentation=split_ready cache_policy=fresh_player_one_and_player_two_frames control_policy=resume\r\n"
+                );
+            } else {
+                SudekiMpLogFormat(
+                    "split_screen_render event=shared_interaction_modal phase=recovery_cancelled reason=%s policy=fail_open_do_not_rearm_on_rejoin\r\n",
+                    recovery_reason
+                );
+            }
         }
     }
     isolation_cache_failed =
@@ -7613,7 +9134,10 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
             "split_screen_render event=quick_menu_live_isolation phase=fallback reason=camera_cache_capture_or_compose_failed policy=preserve_last_valid_camera_pair_for_remainder_of_menu\r\n"
         );
     }
-    if (split_allowed && isolation_in_progress &&
+    if (shared_modal_native_full_width) {
+        quick_menu_expected_player_two = FALSE;
+        player_two_view_requested = FALSE;
+    } else if (split_allowed && isolation_in_progress &&
         quick_menu_live_player_two_available_this_frame &&
         quick_menu_render_phase_confirmed_this_frame &&
         quick_menu_live_player_two_ready()) {
@@ -7648,6 +9172,7 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     } else if (quick_menu_isolation_failed_for_open_menu) {
         player_two_view_requested = FALSE;
     }
+    latch_minimap_scheduled_owner();
     if (overlay_renderer != NULL) {
         overlay_renderer();
     }
@@ -7729,7 +9254,21 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     coop_roster_player_one_type = player_one_type;
     coop_roster_player_two_type = player_two_type;
     coop_roster_valid = TRUE;
+    coop_roster_participation_requested = TRUE;
+    coop_roster_party_transition_active = FALSE;
+    coop_roster_runtime_release_pending = FALSE;
     coop_roster_last_presence_mask = ~0u;
+    coop_roster_ready_window_active = FALSE;
+    coop_roster_ready_since = 0u;
+    coop_roster_ready_group = NULL;
+    coop_roster_ready_controller_target = NULL;
+    coop_roster_ready_party_front = NULL;
+    coop_roster_ready_player_one = NULL;
+    coop_roster_ready_player_two = NULL;
+    coop_roster_ready_player_one_slot = 0u;
+    coop_roster_ready_player_two_slot = 0u;
+    coop_roster_ready_party_count = 0;
+    coop_roster_control_phase = -1;
     SudekiMpLogFormat(
         "split_screen_render event=co_op_roster phase=selected "
         "player_one_type=0x%02lx player_two_type=0x%02lx "
@@ -7740,18 +9279,220 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     return TRUE;
 }
 
+static BOOL release_coop_roster_runtime(const char *reason) {
+    BOOL camera_released;
+    BOOL control_released;
+
+    coop_role_lock_active = FALSE;
+    coop_locked_player_one = NULL;
+    coop_locked_player_two = NULL;
+    camera_released = release_player_two_camera(
+        reason == NULL ? "roster_runtime_release" : reason);
+    (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+    control_released =
+        SudekiMpControlSeparationReleasePlayerTwoNow();
+    (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
+    coop_roster_runtime_release_pending =
+        !(camera_released && control_released);
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=runtime_release "
+        "reason=%s camera=%s control=%s "
+        "policy=retain_selected_types_restore_native_ai\r\n",
+        reason == NULL ? "unspecified" : reason,
+        camera_released ? "released" : "pending",
+        control_released ? "released" : "pending");
+    return camera_released && control_released;
+}
+
+BOOL SudekiMpSplitScreenClearRosterTypes(void) {
+    if (coop_roster_party_transition_active) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (coop_roster_valid && game_base != NULL &&
+        !release_coop_roster_runtime("roster_contract_cleared")) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    coop_roster_valid = FALSE;
+    coop_roster_player_one_type = 0u;
+    coop_roster_player_two_type = 0u;
+    coop_roster_participation_requested = FALSE;
+    coop_roster_party_transition_active = FALSE;
+    coop_roster_runtime_release_pending = FALSE;
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
+    SudekiMpLogWrite(
+        "split_screen_render event=co_op_roster phase=cleared "
+        "policy=single_player_has_no_multiplayer_runtime_contract\r\n");
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenRosterParticipationAvailable(void) {
+    return coop_roster_valid && game_base != NULL;
+}
+
+BOOL SudekiMpSplitScreenRosterParticipationRequested(void) {
+    return coop_roster_valid && coop_roster_participation_requested;
+}
+
+BOOL SudekiMpSplitScreenRequestRosterParticipation(BOOL enabled) {
+    BOOL requested = enabled != FALSE;
+
+    if (!coop_roster_valid || game_base == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (coop_roster_party_transition_active) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (requested && coop_roster_runtime_release_pending) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (coop_roster_participation_requested == requested) {
+        return TRUE;
+    }
+    coop_roster_participation_requested = requested;
+    if (!requested) {
+        coop_roster_party_transition_active = FALSE;
+        (void)release_coop_roster_runtime("player_two_drop_out");
+    } else {
+        reset_coop_roster_ready_window();
+        coop_roster_control_phase = -1;
+    }
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=participation "
+        "player_two=%s policy=drop_out_restores_ai_drop_in_reclaims_locked_character\r\n",
+        requested ? "drop_in_requested" : "dropped_out");
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenBeginPartyTransition(void) {
+    if (!coop_roster_valid || game_base == NULL) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (coop_roster_party_transition_active) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    coop_roster_party_transition_active = TRUE;
+    if (!release_coop_roster_runtime("party_transition_begin")) {
+        SudekiMpLogWrite(
+            "split_screen_render event=co_op_roster "
+            "phase=party_transition_quarantine status=pending "
+            "policy=native_transition_may_continue_split_remains_disabled\r\n");
+    }
+    SudekiMpLogWrite(
+        "split_screen_render event=co_op_roster phase=party_transition_begin "
+        "policy=single_native_world_release_camera_and_p2_control\r\n");
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenEndPartyTransition(BOOL party_placed) {
+    if (!coop_roster_party_transition_active) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (party_placed && coop_roster_runtime_release_pending) {
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogWrite(
+            "split_screen_render event=co_op_roster "
+            "phase=party_transition_end status=deferred "
+            "reason=runtime_release_not_confirmed\r\n");
+        return FALSE;
+    }
+    coop_roster_party_transition_active = FALSE;
+    if (!party_placed) {
+        coop_roster_participation_requested = FALSE;
+    }
+    reset_player_two_controller_camera();
+    invalidate_dual_frame_cache();
+    reset_minimap_owner_schedule();
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=party_transition_end "
+        "party_placed=%s next=%s policy=reacquire_only_after_verified_group_placement\r\n",
+        party_placed ? "true" : "false",
+        party_placed && coop_roster_participation_requested ?
+            "reclaim_player_two" : "remain_dropped_out");
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenGetRosterTypes(
+    unsigned int *player_one_type,
+    unsigned int *player_two_type
+) {
+    if (player_one_type == NULL || player_two_type == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!coop_roster_valid) {
+        SetLastError(ERROR_NOT_FOUND);
+        return FALSE;
+    }
+    *player_one_type = coop_roster_player_one_type;
+    *player_two_type = coop_roster_player_two_type;
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenRosterLeadReady(
+    const void *controller_target,
+    const void *party_front,
+    const void *expected_player_one,
+    unsigned int controller_mode_80,
+    unsigned int controller_mode_84,
+    unsigned int group_state_d0,
+    unsigned int group_switching_d6,
+    unsigned int group_state_d7,
+    unsigned int next_character_action,
+    unsigned int previous_character_action
+) {
+    return expected_player_one != NULL &&
+        controller_target == expected_player_one &&
+        party_front == expected_player_one &&
+        coop_roster_native_transition_settled(
+            controller_mode_80,
+            controller_mode_84,
+            group_state_d0,
+            group_switching_d6,
+            group_state_d7,
+            next_character_action,
+            previous_character_action);
+}
+
+BOOL SudekiMpSplitScreenRosterLockHealthy(
+    const void *controller_target,
+    const void *party_front,
+    const void *locked_player_one,
+    const void *controlled_player_two,
+    const void *locked_player_two
+) {
+    return locked_player_one != NULL && locked_player_two != NULL &&
+        controller_target == locked_player_one &&
+        party_front == locked_player_one &&
+        controlled_player_two == locked_player_two;
+}
+
 static void *find_roster_character(
     uint8_t *group,
     unsigned int expected_type,
+    unsigned int party_count,
     unsigned int *slot_result
 ) {
     unsigned int index;
 
-    if (group == NULL || expected_type == 0u ||
+    if (group == NULL || expected_type == 0u || party_count == 0u ||
+        party_count > PARTY_SLOT_COUNT ||
         !readable_memory(group + PARTY_COUNT_OFFSET, sizeof(int))) {
         return NULL;
     }
-    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+    for (index = 0u; index < party_count; ++index) {
         void *candidate = *(void **)(
             group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE
         );
@@ -7766,17 +9507,182 @@ static void *find_roster_character(
     return NULL;
 }
 
+BOOL SudekiMpSplitScreenRosterActorIdentityPolicy(
+    unsigned int player_index,
+    const void *actor,
+    unsigned int requested_type,
+    unsigned int expected_type,
+    const void *unique_party_actor,
+    unsigned int actor_occurrences,
+    const void *locked_actor,
+    BOOL runtime_enabled,
+    BOOL roles_locked,
+    BOOL participation_requested,
+    BOOL party_transition_active
+) {
+    return player_index < 2u && actor != NULL && requested_type != 0u &&
+        requested_type == expected_type && actor_occurrences == 1u &&
+        unique_party_actor == actor && locked_actor == actor &&
+        runtime_enabled && roles_locked && participation_requested &&
+        !party_transition_active;
+}
+
+BOOL SudekiMpSplitScreenRosterActorIdentityMatches(
+    unsigned int player_index,
+    const void *actor,
+    unsigned int character_type
+) {
+    uint8_t *group;
+    unsigned int expected_type;
+    const void *locked_actor;
+    const void *unique_party_actor = NULL;
+    unsigned int actor_occurrences = 0u;
+    unsigned int index;
+    int party_count;
+
+    if (player_index >= 2u || game_base == NULL || !coop_roster_valid ||
+        !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
+            sizeof(group))) {
+        return FALSE;
+    }
+    expected_type = player_index == 0u ? coop_roster_player_one_type :
+        coop_roster_player_two_type;
+    locked_actor = player_index == 0u ? coop_locked_player_one :
+        coop_locked_player_two;
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    if (!readable_memory(group, PARTY_COUNT_OFFSET + sizeof(party_count))) {
+        return FALSE;
+    }
+    party_count = *(int *)(group + PARTY_COUNT_OFFSET);
+    if (party_count < 1 || party_count > (int)PARTY_SLOT_COUNT ||
+        !readable_memory(group + PARTY_SLOT_ZERO_OFFSET,
+            (size_t)party_count * PARTY_SLOT_STRIDE)) {
+        return FALSE;
+    }
+    for (index = 0u; index < (unsigned int)party_count; ++index) {
+        void *candidate = *(void **)(group + PARTY_SLOT_ZERO_OFFSET +
+            index * PARTY_SLOT_STRIDE);
+        if (candidate == actor) {
+            unique_party_actor = candidate;
+            ++actor_occurrences;
+        }
+    }
+    return SudekiMpSplitScreenRosterActorIdentityPolicy(
+        player_index,
+        actor,
+        character_type,
+        expected_type,
+        unique_party_actor,
+        actor_occurrences,
+        locked_actor,
+        runtime_split_enabled,
+        coop_role_lock_active,
+        coop_roster_participation_requested,
+        coop_roster_party_transition_active);
+}
+
+static void reset_coop_roster_ready_window(void) {
+    coop_roster_ready_window_active = FALSE;
+    coop_roster_ready_since = 0u;
+    coop_roster_ready_group = NULL;
+    coop_roster_ready_controller_target = NULL;
+    coop_roster_ready_party_front = NULL;
+    coop_roster_ready_player_one = NULL;
+    coop_roster_ready_player_two = NULL;
+    coop_roster_ready_player_one_slot = 0u;
+    coop_roster_ready_player_two_slot = 0u;
+    coop_roster_ready_party_count = 0;
+}
+
+static BOOL coop_roster_ready_window_elapsed(
+    uint8_t *group,
+    int party_count,
+    void *controller_target,
+    void *party_front,
+    void *desired_player_one,
+    unsigned int desired_player_one_slot,
+    void *desired_player_two,
+    unsigned int desired_player_two_slot
+) {
+    if (!coop_roster_ready_window_active ||
+        coop_roster_ready_group != group ||
+        coop_roster_ready_party_count != party_count ||
+        coop_roster_ready_controller_target != controller_target ||
+        coop_roster_ready_party_front != party_front ||
+        coop_roster_ready_player_one != desired_player_one ||
+        coop_roster_ready_player_one_slot != desired_player_one_slot ||
+        coop_roster_ready_player_two != desired_player_two ||
+        coop_roster_ready_player_two_slot != desired_player_two_slot) {
+        coop_roster_ready_window_active = TRUE;
+        coop_roster_ready_since = GetTickCount();
+        coop_roster_ready_group = group;
+        coop_roster_ready_party_count = party_count;
+        coop_roster_ready_controller_target = controller_target;
+        coop_roster_ready_party_front = party_front;
+        coop_roster_ready_player_one = desired_player_one;
+        coop_roster_ready_player_one_slot = desired_player_one_slot;
+        coop_roster_ready_player_two = desired_player_two;
+        coop_roster_ready_player_two_slot = desired_player_two_slot;
+        return FALSE;
+    }
+    return (DWORD)(GetTickCount() - coop_roster_ready_since) >=
+        COOP_ROSTER_READY_WINDOW_MS;
+}
+
+static BOOL coop_roster_native_transition_settled(
+    unsigned int controller_mode_80,
+    unsigned int controller_mode_84,
+    unsigned int group_state_d0,
+    unsigned int group_switching_d6,
+    unsigned int group_state_d7,
+    unsigned int next_character_action,
+    unsigned int previous_character_action
+) {
+    return controller_mode_80 == 1u && controller_mode_84 == 1u &&
+        group_state_d0 == 0u && group_switching_d6 != 0u &&
+        group_state_d7 == 0u && next_character_action == 0u &&
+        previous_character_action == 0u;
+}
+
+/* The exact native Previous/Next consumers use ESI for CGroupPlayers and no
+ * stack arguments.  Calling the consumer keeps Sudeki's own party rotation,
+ * control reassignment, AI/arbiter transitions, and listener notifications;
+ * calling the lower slot-rotation helpers directly would omit those effects. */
+__attribute__((naked, noinline, used))
+static void call_group_players_character_switch(
+    void *group __attribute__((unused)),
+    void *target __attribute__((unused))
+) {
+    __asm__ volatile(
+        "pushl %esi\n\t"
+        "movl 8(%esp), %esi\n\t"
+        "call *12(%esp)\n\t"
+        "popl %esi\n\t"
+        "ret\n\t"
+    );
+}
+
 void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
     uint8_t *group;
     uint8_t *controller;
     void *controller_target;
+    void *party_front;
     void *desired_player_one;
     void *desired_player_two;
     unsigned int desired_slot;
+    unsigned int desired_player_two_slot;
+    unsigned int controller_mode_80;
+    unsigned int controller_mode_84;
+    unsigned int group_state_d0;
+    unsigned int group_switching_d6;
+    unsigned int group_state_d7;
+    unsigned int next_character_action;
+    unsigned int previous_character_action;
+    uint32_t actor_flags_50;
+    uint32_t actor_flags_60;
+    uint8_t *character_switch_actor;
+    uint8_t *character_switch_ui_gate;
     int party_count;
-    uint8_t *next_action;
-    uint8_t *previous_action;
-    uint8_t *action;
 
     if (!coop_roster_valid || game_base == NULL ||
         !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
@@ -7785,9 +9691,22 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             sizeof(controller))) {
         return;
     }
+    if (coop_roster_party_transition_active ||
+        !coop_roster_participation_requested) {
+        if (coop_role_lock_active ||
+            SudekiMpControlSeparationPlayerTwoRequested() ||
+            SudekiMpControlSeparationPlayerTwoCharacter() != NULL ||
+            runtime_split_enabled || coop_roster_runtime_release_pending ||
+            player_two_camera != NULL || render_only_swap_active) {
+            (void)release_coop_roster_runtime(
+                coop_roster_party_transition_active ?
+                    "party_transition_wait" : "player_two_dropped_out");
+        }
+        return;
+    }
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
     controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
-    if (!readable_memory(group, PARTY_COUNT_OFFSET + sizeof(int)) ||
+    if (!readable_memory(group, PARTY_STATE_D7_OFFSET + sizeof(uint8_t)) ||
         !readable_memory(controller, CONTROLLER_TARGET_OFFSET +
             sizeof(controller_target))) {
         return;
@@ -7796,11 +9715,26 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
     if (party_count < 1 || party_count > (int)PARTY_SLOT_COUNT) {
         return;
     }
+    controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+    party_front = *(void **)(group + PARTY_SLOT_ZERO_OFFSET);
+    controller_mode_80 = *(unsigned int *)(
+        controller + CONTROLLER_MODE_80_OFFSET);
+    controller_mode_84 = *(unsigned int *)(
+        controller + CONTROLLER_MODE_84_OFFSET);
+    group_state_d0 = *(uint32_t *)(group + PARTY_STATE_D0_OFFSET);
+    group_switching_d6 = *(uint8_t *)(group + PARTY_SWITCHING_D6_OFFSET);
+    group_state_d7 = *(uint8_t *)(group + PARTY_STATE_D7_OFFSET);
+    next_character_action = *(uint32_t *)(
+        controller + CONTROLLER_NEXT_CHARACTER_OFFSET);
+    previous_character_action = *(uint32_t *)(
+        controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET);
     desired_player_one = find_roster_character(
-        group, coop_roster_player_one_type, &desired_slot
+        group, coop_roster_player_one_type, (unsigned int)party_count,
+        &desired_slot
     );
     desired_player_two = find_roster_character(
-        group, coop_roster_player_two_type, NULL
+        group, coop_roster_player_two_type, (unsigned int)party_count,
+        &desired_player_two_slot
     );
     {
         unsigned int presence_mask =
@@ -7808,6 +9742,8 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             (desired_player_two != NULL ? 2u : 0u);
         if (presence_mask != coop_roster_last_presence_mask) {
             coop_roster_last_presence_mask = presence_mask;
+            reset_coop_roster_ready_window();
+            coop_roster_control_phase = -1;
             SudekiMpLogFormat(
                 "split_screen_render event=co_op_roster phase=availability "
                 "player_one=%s player_two=%s mask=0x%02lx "
@@ -7818,8 +9754,17 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
         }
     }
     if (coop_role_lock_active) {
-        if (desired_player_one == coop_locked_player_one &&
-            desired_player_two == coop_locked_player_two) {
+        if (SudekiMpSplitScreenRosterLockHealthy(
+                controller_target,
+                party_front,
+                coop_locked_player_one,
+                SudekiMpControlSeparationPlayerTwoCharacter(),
+                coop_locked_player_two) &&
+            SudekiMpControlSeparationPlayerTwoRequested() &&
+            desired_player_one == coop_locked_player_one &&
+            desired_player_two == coop_locked_player_two &&
+            SudekiMpControlSeparationPlayerTwoCharacter() ==
+                desired_player_two) {
             return;
         }
         /* A level transition can rebuild party objects even when the
@@ -7829,29 +9774,152 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
         coop_role_lock_active = FALSE;
         coop_locked_player_one = NULL;
         coop_locked_player_two = NULL;
+        (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
         (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
-        SudekiMpLogWrite(
+        reset_coop_roster_ready_window();
+        coop_roster_control_phase = -1;
+        SudekiMpLogFormat(
             "split_screen_render event=co_op_roster phase=deferred "
-            "reason=party_members_rebuilt_or_unavailable\r\n");
+            "reason=party_members_rebuilt_unavailable_or_control_lost "
+            "controller_target=0x%08lx party_front=0x%08lx "
+            "desired_player_one=0x%08lx desired_player_two=0x%08lx "
+            "policy=release_old_p2_then_reacquire_selected_identity\r\n",
+            (unsigned long)(uintptr_t)controller_target,
+            (unsigned long)(uintptr_t)party_front,
+            (unsigned long)(uintptr_t)desired_player_one,
+            (unsigned long)(uintptr_t)desired_player_two);
+        return;
     }
     if (desired_player_one == NULL || desired_player_two == NULL) {
+        if (SudekiMpControlSeparationPlayerTwoRequested() ||
+            SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+            (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+            (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+        }
+        reset_coop_roster_ready_window();
         return; /* Selected characters may join the party later. */
     }
-    controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
-    if (controller_target == desired_player_one) {
-        if (desired_player_two != NULL && desired_player_two != desired_player_one) {
-            BOOL runtime_enabled = SudekiMpSplitScreenSetRuntimeEnabled(TRUE);
+    if (!SudekiMpControlSeparationPlayerTwoRequested() &&
+        SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+        /* A prior rollback is still restoring the native AI lease.  Never
+         * rotate or reacquire until the old override is actually gone. */
+        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+        reset_coop_roster_ready_window();
+        if (coop_roster_control_phase != 2) {
+            coop_roster_control_phase = 2;
+            SudekiMpLogWrite(
+                "split_screen_render event=co_op_roster "
+                "phase=control_cleanup reason=release_pending\r\n");
+        }
+        return;
+    }
+    if (!coop_roster_native_transition_settled(
+            controller_mode_80,
+            controller_mode_84,
+            group_state_d0,
+            group_switching_d6,
+            group_state_d7,
+            next_character_action,
+            previous_character_action)) {
+        reset_coop_roster_ready_window();
+        if (SudekiMpControlSeparationPlayerTwoRequested() ||
+            SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+            (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+            (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+        }
+        return;
+    }
+    if (!coop_roster_ready_window_elapsed(
+            group,
+            party_count,
+            controller_target,
+            party_front,
+            desired_player_one,
+            desired_slot,
+            desired_player_two,
+            desired_player_two_slot)) {
+        return;
+    }
+    if (controller_target == desired_player_one && desired_slot == 0u) {
+        void *controlled_player_two;
+
+        if (!SudekiMpSplitScreenRosterLeadReady(
+                controller_target,
+                party_front,
+                desired_player_one,
+                controller_mode_80,
+                controller_mode_84,
+                group_state_d0,
+                group_switching_d6,
+                group_state_d7,
+                next_character_action,
+                previous_character_action)) {
+            reset_coop_roster_ready_window();
+            coop_roster_control_phase = 0;
+            if (SudekiMpControlSeparationPlayerTwoRequested() ||
+                SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+            }
+            return;
+        }
+        controlled_player_two =
+            SudekiMpControlSeparationPlayerTwoCharacter();
+        if (!SudekiMpControlSeparationPlayerTwoRequested() ||
+            controlled_player_two != desired_player_two) {
+            if (controlled_player_two != NULL) {
+                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+                if (coop_roster_control_phase != 2) {
+                    coop_roster_control_phase = 2;
+                    SudekiMpLogWrite(
+                        "split_screen_render event=co_op_roster "
+                        "phase=control_cleanup reason=wrong_p2_identity\r\n");
+                }
+                return;
+            }
+            if (SudekiMpControlSeparationRequestPlayerTwoCharacter(
+                    desired_player_two)) {
+                if (coop_roster_control_phase != 1) {
+                    coop_roster_control_phase = 1;
+                    SudekiMpLogFormat(
+                        "split_screen_render event=co_op_roster "
+                        "phase=claim_player_two player_two=0x%08lx "
+                        "policy=exact_selected_identity_before_split\r\n",
+                        (unsigned long)(uintptr_t)desired_player_two);
+                }
+            }
+            return;
+        }
+        {
+            BOOL control_locked =
+                SudekiMpControlSeparationSetRoleLock(TRUE);
+            BOOL runtime_enabled = control_locked &&
+                SudekiMpSplitScreenSetRuntimeEnabled(TRUE);
             BOOL roles_locked = runtime_enabled &&
                 SudekiMpSplitScreenLockRoles(
                     desired_player_one, desired_player_two);
-            if (!roles_locked && runtime_enabled) {
-                (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
-            }
-            if (roles_locked) {
+
+            if (!roles_locked) {
+                if (runtime_enabled) {
+                    (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+                }
+                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+                reset_coop_roster_ready_window();
+                coop_roster_control_phase = -1;
+                SudekiMpLogWrite(
+                    "split_screen_render event=co_op_roster "
+                    "phase=commit status=rolled_back "
+                    "reason=runtime_or_role_lock_failed\r\n");
+            } else {
+                coop_roster_control_phase = 3;
                 SudekiMpLogFormat(
                     "split_screen_render event=co_op_roster phase=applied "
                     "player_one=0x%08lx player_two=0x%08lx "
-                    "player_one_slot=%u policy=native_party_order_rotation_then_immutable_lock\r\n",
+                    "player_one_slot=%u "
+                    "policy=native_p1_rotation_exact_p2_claim_then_atomic_split_lock\r\n",
                     (unsigned long)(uintptr_t)desired_player_one,
                     (unsigned long)(uintptr_t)desired_player_two,
                     desired_slot
@@ -7860,38 +9928,115 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
         }
         return;
     }
-    if (desired_slot == 0u || coop_roster_rotation_attempts >=
-            (unsigned int)party_count) {
-        coop_roster_rotation_attempts = 0u;
-        coop_roster_rotation_previous = !coop_roster_rotation_previous;
-    }
-    next_action = controller + CONTROLLER_NEXT_CHARACTER_OFFSET;
-    previous_action = controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET;
-    if (!writable_memory(next_action, sizeof(*next_action)) ||
-        !writable_memory(previous_action, sizeof(*previous_action))) {
+    if (SudekiMpControlSeparationPlayerTwoRequested() ||
+        SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+        (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
         return;
     }
-    if (*next_action != 0u || *previous_action != 0u) {
-        return; /* Let the native frame consumer finish the prior pulse. */
+    if (controller_target != party_front ||
+        !readable_memory(
+            game_base + RVA_CHARACTER_SWITCH_UI_GATE_GLOBAL,
+            sizeof(character_switch_ui_gate)) ||
+        !readable_memory(
+            game_base + RVA_CHARACTER_SWITCH_INPUT_BLOCK_GLOBAL,
+            sizeof(void *)) ||
+        *(void **)(game_base +
+            RVA_CHARACTER_SWITCH_INPUT_BLOCK_GLOBAL) != NULL ||
+        !readable_memory(controller_target, 0x94u) ||
+        pc_quit_screen_visible() || quick_menu_visible()) {
+        reset_coop_roster_ready_window();
+        return;
     }
-    action = coop_roster_rotation_previous ? previous_action : next_action;
-    *action = 1u;
-    ++coop_roster_rotation_attempts;
-    SudekiMpLogFormat(
-        "split_screen_render event=co_op_roster phase=rotate "
-        "direction=%s desired_type=0x%02lx desired_slot=%u attempt=%u "
-        "policy=native_controller_action_pulse\r\n",
-        coop_roster_rotation_previous ? "previous" : "next",
-        (unsigned long)coop_roster_player_one_type,
-        desired_slot,
-        coop_roster_rotation_attempts
-    );
+    character_switch_ui_gate = *(uint8_t **)(
+        game_base + RVA_CHARACTER_SWITCH_UI_GATE_GLOBAL);
+    if (character_switch_ui_gate != NULL &&
+        (!readable_memory(
+             character_switch_ui_gate,
+             CHARACTER_SWITCH_UI_GATE_OFFSET + sizeof(uint8_t)) ||
+         character_switch_ui_gate[CHARACTER_SWITCH_UI_GATE_OFFSET] != 0u)) {
+        reset_coop_roster_ready_window();
+        return;
+    }
+    character_switch_actor = *(uint8_t **)(
+        (uint8_t *)controller_target + 0x90u);
+    if (!readable_memory(
+            character_switch_actor,
+            CHARACTER_SWITCH_FLAGS_60_OFFSET + sizeof(uint32_t))) {
+        reset_coop_roster_ready_window();
+        return;
+    }
+    actor_flags_50 = *(uint32_t *)(
+        character_switch_actor + CHARACTER_SWITCH_FLAGS_50_OFFSET);
+    actor_flags_60 = *(uint32_t *)(
+        character_switch_actor + CHARACTER_SWITCH_FLAGS_60_OFFSET);
+    if ((actor_flags_50 & CHARACTER_SWITCH_BUSY_FLAGS_50) != 0u ||
+        (actor_flags_60 & CHARACTER_SWITCH_BUSY_FLAGS_60) != 0u) {
+        reset_coop_roster_ready_window();
+        return;
+    }
+    {
+        BOOL use_previous = desired_slot > (unsigned int)party_count / 2u;
+        void *consumer = game_base + (use_previous ?
+            RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER :
+            RVA_GROUP_PLAYERS_NEXT_CHARACTER);
+        void *before_target = controller_target;
+        void *before_front = party_front;
+        void *after_target;
+        void *after_front;
+        unsigned int attempt = coop_roster_rotation_attempts + 1u;
+        BOOL target_changed;
+        BOOL front_changed;
+        BOOL coherent_change;
+        const char *status;
+
+        call_group_players_character_switch(group, consumer);
+        after_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+        after_front = *(void **)(group + PARTY_SLOT_ZERO_OFFSET);
+        target_changed = after_target != before_target;
+        front_changed = after_front != before_front;
+        coherent_change = target_changed && front_changed &&
+            after_target == after_front;
+        status = coherent_change ? "accepted" :
+            ((target_changed || front_changed) ?
+                "invariant_rejected" : "deferred");
+        reset_coop_roster_ready_window();
+        if (coherent_change) {
+            coop_roster_rotation_attempts = 0u;
+        } else {
+            coop_roster_rotation_attempts = attempt;
+        }
+        coop_roster_rotation_previous = use_previous;
+        SudekiMpLogFormat(
+            "split_screen_render event=co_op_roster phase=rotate "
+            "status=%s direction=%s desired_type=0x%02lx "
+            "desired_slot=%u attempt=%u before_target=0x%08lx "
+            "after_target=0x%08lx before_front=0x%08lx "
+            "after_front=0x%08lx "
+            "policy=exact_native_switch_consumer_game_thread_verified\r\n",
+            status,
+            use_previous ? "previous" : "next",
+            (unsigned long)coop_roster_player_one_type,
+            desired_slot,
+            attempt,
+            (unsigned long)(uintptr_t)before_target,
+            (unsigned long)(uintptr_t)after_target,
+            (unsigned long)(uintptr_t)before_front,
+            (unsigned long)(uintptr_t)after_front
+        );
+    }
 }
 
 void SudekiMpSplitScreenSetOverlayRenderer(
     SudekiMpSplitScreenOverlayRenderer renderer
 ) {
     overlay_renderer = renderer;
+}
+
+void SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(
+    SudekiMpModOwnedBlacksmithActiveQuery query
+) {
+    mod_owned_blacksmith_active_query = query;
 }
 
 BOOL SudekiMpInstallSplitScreenRender(
@@ -7901,6 +10046,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     UINT toggle_second_player_camera_virtual_key,
     BOOL enable_skill_camera_routing,
     BOOL enable_second_player_controller_camera,
+    BOOL enable_native_second_player_camera_collision,
     BOOL enable_split_screen_ranged_model_isolation,
     BOOL enable_spirit_strike_viewport_effect_isolation,
     float controller_camera_deadzone,
@@ -7935,6 +10081,9 @@ BOOL SudekiMpInstallSplitScreenRender(
           controller_camera_pitch_speed > 10.0f ||
           controller_camera_maximum_pitch <= 0.0f ||
           controller_camera_maximum_pitch > 1.2f)) ||
+        (enable_native_second_player_camera_collision &&
+         (!enable_second_player_camera ||
+          !enable_dual_camera_frame_cache)) ||
         (enable_second_player_camera &&
          (toggle_second_player_camera_virtual_key == 0u ||
           toggle_second_player_camera_virtual_key > 0xffu))) {
@@ -7943,11 +10092,16 @@ BOOL SudekiMpInstallSplitScreenRender(
     }
     base = (uint8_t *)game_module;
     if (!pc_quit_screen_show_signature_matches(base) ||
-        !quick_menu_is_active_signature_matches(base)) {
+        !quick_menu_is_active_signature_matches(base) ||
+        !shared_interaction_modal_signatures_match(base) ||
+        !character_switch_consumer_signatures_match(base)) {
         SudekiMpLogFormat(
-            "split_screen_render_preflight common_quit=%u common_quick=%u\r\n",
+            "split_screen_render_preflight common_quit=%u common_quick=%u "
+            "shared_interaction_modal=%u character_switch_consumer=%u\r\n",
             pc_quit_screen_show_signature_matches(base),
-            quick_menu_is_active_signature_matches(base));
+            quick_menu_is_active_signature_matches(base),
+            shared_interaction_modal_signatures_match(base),
+            character_switch_consumer_signatures_match(base));
     }
     if (enable_dual_camera_frame_cache) {
         SudekiMpLogFormat(
@@ -7962,7 +10116,9 @@ BOOL SudekiMpInstallSplitScreenRender(
     if (enable_second_player_camera) {
         SudekiMpLogFormat(
             "split_screen_render_preflight camera_add=%u camera_remove=%u "
-            "camera_get=%u camera_render=%u\r\n",
+            "camera_get=%u camera_render=%u native_target=%u "
+            "native_mode=%u native_state=%u native_input=%u "
+            "native_input_slot=%u native_combat_gate=%u\r\n",
             memcmp(
                 base + RVA_CAMERA_MANAGER_ADD_CAMERA,
                 expected_camera_manager_add_camera_entry,
@@ -7982,10 +10138,40 @@ BOOL SudekiMpInstallSplitScreenRender(
                 base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
                 expected_camera_manager_set_render_camera_entry,
                 sizeof(expected_camera_manager_set_render_camera_entry)
+            ) == 0,
+            !enable_native_second_player_camera_collision || memcmp(
+                base + RVA_CAMERA_MANAGER_SET_CAMERA_TARGET,
+                expected_camera_manager_set_camera_target_entry,
+                sizeof(expected_camera_manager_set_camera_target_entry)
+            ) == 0,
+            !enable_native_second_player_camera_collision || memcmp(
+                base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE,
+                expected_camera_manager_get_camera_mode_entry,
+                sizeof(expected_camera_manager_get_camera_mode_entry)
+            ) == 0,
+            !enable_native_second_player_camera_collision || memcmp(
+                base + RVA_CAMERA_MANAGER_SET_CAMERA_STATE,
+                expected_camera_manager_set_camera_state_entry,
+                sizeof(expected_camera_manager_set_camera_state_entry)
+            ) == 0,
+            !enable_native_second_player_camera_collision || memcmp(
+                base + RVA_CAMERA_INPUT_EVENT,
+                expected_camera_input_event_entry,
+                sizeof(expected_camera_input_event_entry)
+            ) == 0,
+            !enable_native_second_player_camera_collision ||
+                *(void **)(base + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) ==
+                    base + RVA_CAMERA_INPUT_EVENT,
+            !enable_native_second_player_camera_collision || memcmp(
+                base + RVA_GROUP_PLAYERS_IN_COMBAT,
+                expected_group_players_in_combat_entry,
+                sizeof(expected_group_players_in_combat_entry)
             ) == 0);
     }
     if (!pc_quit_screen_show_signature_matches(base) ||
-        !quick_menu_is_active_signature_matches(base)) {
+        !quick_menu_is_active_signature_matches(base) ||
+        !shared_interaction_modal_signatures_match(base) ||
+        !character_switch_consumer_signatures_match(base)) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -8002,6 +10188,29 @@ BOOL SudekiMpInstallSplitScreenRender(
             base + RVA_CAMERA_MANAGER_GET_CAMERA,
             expected_camera_manager_get_camera_entry,
             sizeof(expected_camera_manager_get_camera_entry)) != 0 ||
+         (enable_native_second_player_camera_collision &&
+          (memcmp(
+              base + RVA_CAMERA_MANAGER_SET_CAMERA_TARGET,
+              expected_camera_manager_set_camera_target_entry,
+              sizeof(expected_camera_manager_set_camera_target_entry)) != 0 ||
+           memcmp(
+              base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE,
+              expected_camera_manager_get_camera_mode_entry,
+              sizeof(expected_camera_manager_get_camera_mode_entry)) != 0 ||
+           memcmp(
+              base + RVA_CAMERA_MANAGER_SET_CAMERA_STATE,
+              expected_camera_manager_set_camera_state_entry,
+              sizeof(expected_camera_manager_set_camera_state_entry)) != 0 ||
+           memcmp(
+              base + RVA_CAMERA_INPUT_EVENT,
+              expected_camera_input_event_entry,
+              sizeof(expected_camera_input_event_entry)) != 0 ||
+           *(void **)(base + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
+              base + RVA_CAMERA_INPUT_EVENT ||
+           memcmp(
+              base + RVA_GROUP_PLAYERS_IN_COMBAT,
+              expected_group_players_in_combat_entry,
+              sizeof(expected_group_players_in_combat_entry)) != 0)) ||
          (enable_skill_camera_routing &&
           (memcmp(
               base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
@@ -8063,6 +10272,12 @@ BOOL SudekiMpInstallSplitScreenRender(
     quick_menu_is_active = (QuickMenuIsActiveFunction)(
         game_base + RVA_QUICK_MENU_IS_ACTIVE
     );
+    shop_is_active = (NativeModalIsActiveFunction)(
+        game_base + RVA_SHOP_IS_ACTIVE
+    );
+    blacksmith_is_active = (NativeModalIsActiveFunction)(
+        game_base + RVA_BLACKSMITH_IS_ACTIVE
+    );
     original_hud_party_pointer_copy = (HudPartyPointerCopyFunction)(
         game_base + RVA_HUD_PARTY_POINTER_COPY
     );
@@ -8076,6 +10291,8 @@ BOOL SudekiMpInstallSplitScreenRender(
     skill_camera_routing_enabled = enable_skill_camera_routing;
     second_player_controller_camera_enabled =
         enable_second_player_controller_camera;
+    native_second_player_camera_collision_enabled =
+        enable_native_second_player_camera_collision;
     split_screen_ranged_model_isolation_enabled =
         enable_split_screen_ranged_model_isolation;
     spirit_strike_viewport_effect_isolation_enabled =
@@ -8125,7 +10342,25 @@ BOOL SudekiMpInstallSplitScreenRender(
     camera_manager_get_camera = (CameraManagerGetCameraFunction)(
         game_base + RVA_CAMERA_MANAGER_GET_CAMERA
     );
-    group_players_in_combat = enable_split_screen_ranged_model_isolation ?
+    camera_manager_set_camera_target =
+        enable_native_second_player_camera_collision ?
+            (CameraManagerSetCameraTargetFunction)(
+                game_base + RVA_CAMERA_MANAGER_SET_CAMERA_TARGET) : NULL;
+    camera_manager_get_camera_mode =
+        enable_native_second_player_camera_collision ?
+            (CameraManagerGetCameraModeFunction)(
+                game_base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE) : NULL;
+    camera_manager_set_camera_state =
+        enable_native_second_player_camera_collision ?
+            (CameraManagerSetCameraStateFunction)(
+                game_base + RVA_CAMERA_MANAGER_SET_CAMERA_STATE) : NULL;
+    original_camera_input_event =
+        enable_native_second_player_camera_collision ?
+            (CameraInputEventFunction)(
+                game_base + RVA_CAMERA_INPUT_EVENT) : NULL;
+    group_players_in_combat =
+        (enable_split_screen_ranged_model_isolation ||
+         enable_native_second_player_camera_collision) ?
         (GroupPlayersInCombatFunction)(
             game_base + RVA_GROUP_PLAYERS_IN_COMBAT
         ) : NULL;
@@ -8139,6 +10374,11 @@ BOOL SudekiMpInstallSplitScreenRender(
     player_two_view_requested = FALSE;
     rendered_player_two_this_frame = FALSE;
     viewport_hud_binding_active = FALSE;
+    shared_interaction_modal_observation =
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    shared_interaction_modal_recovery_pending = FALSE;
+    shared_interaction_modal_had_live_split = FALSE;
+    shared_interaction_modal_published_kind = SUDEKIMP_INTERACTION_NONE;
     genuine_quick_menu_active_this_frame = FALSE;
     quick_menu_live_player_two_available_this_frame = FALSE;
     suppress_quick_menu_render_submit_this_frame = FALSE;
@@ -8180,6 +10420,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     ranged_transform_trace_sequence = 0u;
     reset_ranged_animation_trace();
     reset_hud_mapping_trace();
+    reset_minimap_owner_schedule();
     player_two_facing_logged = FALSE;
     ZeroMemory(
         ranged_model_render_swaps,
@@ -8208,13 +10449,16 @@ BOOL SudekiMpInstallSplitScreenRender(
     coop_role_lock_active = FALSE;
     coop_locked_player_one = NULL;
     coop_locked_player_two = NULL;
+    coop_roster_participation_requested = TRUE;
+    coop_roster_party_transition_active = FALSE;
+    coop_roster_runtime_release_pending = FALSE;
     coop_roster_rotation_attempts = 0u;
     coop_roster_rotation_previous = FALSE;
     coop_roster_last_presence_mask = ~0u;
-    coop_roster_valid = FALSE;
-    coop_roster_player_one_type = 0u;
-    coop_roster_player_two_type = 0u;
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
     overlay_renderer = NULL;
+    mod_owned_blacksmith_active_query = NULL;
     if (!SudekiMpInstallRelativeCallHook(
             &render_start_hook,
             game_base + RVA_RENDER_START_CALL,
@@ -8230,6 +10474,13 @@ BOOL SudekiMpInstallSplitScreenRender(
             game_base + RVA_PC_QUIT_SCREEN_RENDER_CALL,
             original_quit_screen_render,
             split_screen_quit_screen_render_entry) ||
+        (native_second_player_camera_collision_enabled &&
+         !SudekiMpInstallPointerHook(
+              &camera_input_event_hook,
+              (void **)(game_base +
+                  RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT),
+              original_camera_input_event,
+              route_camera_input_event)) ||
         (dual_camera_frame_cache_enabled &&
          (!SudekiMpInstallPointerHook(
               &quick_menu_render_submit_hook,
@@ -8256,7 +10507,17 @@ BOOL SudekiMpInstallSplitScreenRender(
               &hud_gizmo_status_pointer_hook,
               game_base + RVA_HUD_GIZMO_STATUS_POINTER_CALL,
               original_hud_party_pointer_copy,
-              split_screen_hud_party_pointer_copy_entry))) ||
+              split_screen_hud_party_pointer_copy_entry) ||
+          !SudekiMpInstallRelativeCallHook(
+              &minimap_update_pointer_hook,
+              game_base + RVA_MINIMAP_UPDATE_POINTER_CALL,
+              original_hud_party_pointer_copy,
+              split_screen_minimap_scheduled_party_pointer_copy_entry) ||
+          !SudekiMpInstallRelativeCallHook(
+              &minimap_render_pointer_hook,
+              game_base + RVA_MINIMAP_RENDER_POINTER_CALL,
+              original_hud_party_pointer_copy,
+              split_screen_minimap_render_party_pointer_copy_entry))) ||
         (skill_camera_routing_enabled &&
          (!SudekiMpInstallInlineHook(
               &set_render_camera_hook,
@@ -8286,8 +10547,9 @@ BOOL SudekiMpInstallSplitScreenRender(
         SudekiMpUninstallSplitScreenRender();
         return FALSE;
     }
+    split_screen_render_installed = TRUE;
     SudekiMpLogFormat(
-        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx quick_menu_render_submit_rva=0x%08lx quick_menu_render_submit_vtable_slot_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=player_one_native_menu_plus_live_player_two_world_via_one_frame_submit_cadence shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s skill_camera_routing=%s skill_world_time=%s controller_camera=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx quick_menu_render_submit_rva=0x%08lx quick_menu_render_submit_vtable_slot_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=player_one_native_menu_plus_live_player_two_world_via_one_frame_submit_cadence shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s viewport_minimap_ownership=%s skill_camera_routing=%s skill_world_time=%s controller_camera=%s native_player_two_camera_collision=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
         (unsigned long)RVA_RENDER_START,
         (unsigned long)RVA_RENDER_START_CALL,
         (unsigned long)RVA_FRAME_END,
@@ -8304,12 +10566,18 @@ BOOL SudekiMpInstallSplitScreenRender(
         dual_camera_frame_cache_enabled ? "true" : "false",
         dual_camera_frame_cache_enabled ?
             "direct_synchronous_cycle_icon_resource" : "disabled",
+        dual_camera_frame_cache_enabled ?
+            "exact_update_owner_latched_through_render_native_last_cluster_snapshot_unchanged" :
+            "disabled",
         skill_camera_routing_enabled ?
             "caster_viewport_only" : "disabled",
         skill_camera_routing_enabled ?
             "native_mode_handshake_with_shared_realtime_scale" : "disabled",
         second_player_controller_camera_enabled ?
             "right_stick_render_only_player_two" : "disabled",
+        native_second_player_camera_collision_enabled ?
+            "named_exploration_state_targeted_to_live_party_slot_input_broadcast_suppressed_no_independent_p2_right_stick_native_ready" :
+            "disabled",
         split_screen_ranged_model_isolation_enabled ?
             "p1_observer_world_body_native_weapon_rebind_state_details_inventory_root_pitch_rejected_disabled_p2_owner_stable_third_person_fallback" :
             "disabled",
@@ -8328,10 +10596,29 @@ BOOL SudekiMpInstallSplitScreenRender(
             (unsigned long)RVA_ANIMATION_RENDERER_LOOKUP
         );
     }
+    if (coop_roster_valid) {
+        SudekiMpLogFormat(
+            "split_screen_render event=co_op_roster phase=install_preserved "
+            "player_one_type=0x%02lx player_two_type=0x%02lx "
+            "policy=preinstalled_title_roster_contract\r\n",
+            (unsigned long)coop_roster_player_one_type,
+            (unsigned long)coop_roster_player_two_type
+        );
+    }
     return TRUE;
 }
 
 void SudekiMpUninstallSplitScreenRender(void) {
+    split_screen_render_installed = FALSE;
+    if (shared_interaction_modal_published_kind !=
+            SUDEKIMP_INTERACTION_NONE) {
+        SudekiMpPlayerStatehoodObserveNativeModal(
+            SudekiMpPlayerStatehoodRuntime(),
+            SUDEKIMP_INTERACTION_NONE,
+            0u,
+            GetTickCount()
+        );
+    }
     if (skill_time_scale_override_active) {
         set_skill_time_scale_override(FALSE);
     }
@@ -8339,11 +10626,14 @@ void SudekiMpUninstallSplitScreenRender(void) {
     reset_ranged_world_compositor("module_uninstall");
     restore_render_only_camera();
     restore_quick_menu_non_owner_render();
+    SudekiMpRestorePointerHook(&camera_input_event_hook);
     SudekiMpRestorePointerHook(&screenshot_post_render_hook);
     SudekiMpRestorePointerHook(&motion_blur_post_render_hook);
     SudekiMpRestorePointerHook(&quick_menu_render_submit_hook);
     SudekiMpRestoreInlineHook(&set_game_speed_mode_hook);
     SudekiMpRestoreInlineHook(&set_render_camera_hook);
+    SudekiMpRestoreRelativeCallHook(&minimap_render_pointer_hook);
+    SudekiMpRestoreRelativeCallHook(&minimap_update_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_status_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_name_pointer_hook);
     SudekiMpRestoreRelativeCallHook(&hud_gizmo_values_pointer_hook);
@@ -8381,6 +10671,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     ranged_transform_trace_sequence = 0u;
     reset_ranged_animation_trace();
     reset_hud_mapping_trace();
+    reset_minimap_owner_schedule();
     player_two_facing_logged = FALSE;
     ZeroMemory(
         ranged_model_render_swaps,
@@ -8388,6 +10679,11 @@ void SudekiMpUninstallSplitScreenRender(void) {
     );
     gameplay_gate_last_state = -1;
     shared_menu_gate_last_state = -1;
+    shared_interaction_modal_observation =
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    shared_interaction_modal_recovery_pending = FALSE;
+    shared_interaction_modal_had_live_split = FALSE;
+    shared_interaction_modal_published_kind = SUDEKIMP_INTERACTION_NONE;
     quick_menu_gate_last_state = -1;
     spirit_presentation_last_state = -1;
     spirit_presentation_logged_views = 0u;
@@ -8400,6 +10696,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     second_player_camera_enabled = FALSE;
     dual_camera_frame_cache_enabled = FALSE;
     second_player_controller_camera_enabled = FALSE;
+    native_second_player_camera_collision_enabled = FALSE;
     split_screen_ranged_model_isolation_enabled = FALSE;
     spirit_strike_viewport_effect_isolation_enabled = FALSE;
     original_motion_blur_post_render = NULL;
@@ -8435,6 +10732,10 @@ void SudekiMpUninstallSplitScreenRender(void) {
     camera_manager_add_camera = NULL;
     camera_manager_remove_camera = NULL;
     camera_manager_get_camera = NULL;
+    camera_manager_set_camera_target = NULL;
+    camera_manager_get_camera_mode = NULL;
+    camera_manager_set_camera_state = NULL;
+    original_camera_input_event = NULL;
     group_players_in_combat = NULL;
     ranged_weapon_reattach_function = NULL;
     render_locator_index_function = NULL;
@@ -8480,10 +10781,22 @@ void SudekiMpUninstallSplitScreenRender(void) {
     original_quit_screen_render = NULL;
     original_quick_menu_render_submit = NULL;
     quick_menu_is_active = NULL;
+    shop_is_active = NULL;
+    blacksmith_is_active = NULL;
     original_hud_party_pointer_copy = NULL;
     original_character_type_to_portrait_enum = NULL;
     original_hud_portrait_resource_select = NULL;
     game_base = NULL;
     runtime_split_enabled = TRUE;
+    coop_roster_valid = FALSE;
+    coop_roster_player_one_type = 0u;
+    coop_roster_player_two_type = 0u;
+    coop_roster_participation_requested = TRUE;
+    coop_roster_party_transition_active = FALSE;
+    coop_roster_runtime_release_pending = FALSE;
+    coop_roster_last_presence_mask = ~0u;
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
     overlay_renderer = NULL;
+    mod_owned_blacksmith_active_query = NULL;
 }

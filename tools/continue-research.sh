@@ -27,7 +27,7 @@ usage() {
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --input-trace Trace native QuickSkill input and either native Plasmatica activation route.' \
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
-        '  --party-lifecycle-trace Observe native PC spawn/removal plus resulting party/controller/AI state during a normal save load.' \
+        '  --party-lifecycle-trace Exercise roster handoff, party-atomic rooms, the visible roaming boundary, P2 interaction requests, and the historical two-viewport blacksmith data preview; native per-player windows, forge commits, and the late travel-vote experiment stay disabled.' \
         '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
         '  --talos-defense-trace Restore the Talos party and trace real-boss damage, invulnerability, reaction IDs, and knockback sessions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
@@ -37,7 +37,7 @@ usage() {
         '  --player-input-trace Sample Player 1 world-direction and speed arguments without changing movement.' \
         '  --second-player-movement-test Use F10 to disable Player 2 AI, then move Player 2 with I/J/K/L.' \
         '  --second-player-camera-movement-test Add the native shared-camera basis to Buki movement.' \
-        '  --second-player-separation-test Add a 10-unit outward-only separation guard.' \
+        '  --second-player-separation-test Add the visible symmetric 10-unit roaming boundary to dual cameras.' \
         '  --shared-group-camera-test Focus Sudeki camera on the P1/Buki midpoint; zoom remains native.' \
         '  --split-screen-render-test Duplicate the finished native gameplay frame into two halves; menus remain full-screen.' \
         '  --second-player-render-camera-test Toggle a render-only party-slot-1 view with F9 while gameplay ownership stays on Player 1.' \
@@ -91,6 +91,7 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
     fi
 fi
 if [[ "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
       "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! "${input_bridge_port}" =~ ^[0-9]+$ ]] ||
@@ -173,6 +174,7 @@ case "${mode}" in
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
             -e 's/^EnableCleanroomMenu=false$/EnableCleanroomMenu=true/' \
             -e 's/^EnableCoopRosterMenu=true$/EnableCoopRosterMenu=false/' \
+            -e 's/^EnableStoryTestBoost=true$/EnableStoryTestBoost=false/' \
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
             -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
             -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
@@ -198,6 +200,7 @@ case "${mode}" in
     --zone-traversal-test)
         sed -i \
             -e 's/^EnableCoopRosterMenu=true$/EnableCoopRosterMenu=false/' \
+            -e 's/^EnableStoryTestBoost=true$/EnableStoryTestBoost=false/' \
             -e 's/^EnableZoneTraversalMenu=false$/EnableZoneTraversalMenu=true/' \
             -e 's/^ToggleZoneTraversalMenu=F7$/ToggleZoneTraversalMenu=F7/' \
             "${generated_config}"
@@ -213,6 +216,25 @@ case "${mode}" in
         sed -i \
             -e 's/^EnableCharacterSwitchTrace=false$/EnableCharacterSwitchTrace=true/' \
             "${generated_config}"
+        if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
+            sed -i \
+                -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+                -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+                -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+                -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+                -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+                -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
+                -e 's/^EnablePlayerInteractionRequestsPrototype=false$/EnablePlayerInteractionRequestsPrototype=true/' \
+                -e 's/^EnablePerPlayerBlacksmithUiExperiment=false$/EnablePerPlayerBlacksmithUiExperiment=true/' \
+                -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+                -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+                -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+                -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+                -e 's/^EnableSecondPlayerControllerCameraPrototype=false$/EnableSecondPlayerControllerCameraPrototype=true/' \
+                -e 's/^EnablePartyAtomicTransitionsPrototype=false$/EnablePartyAtomicTransitionsPrototype=true/' \
+                -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
+                "${generated_config}"
+        fi
         if [[ "${mode}" == "--talos-party-test" ]]; then
             sed -i \
                 -e 's/^EnableTalosPartyPrototype=false$/EnableTalosPartyPrototype=true/' \
@@ -260,6 +282,9 @@ case "${mode}" in
             -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
             -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
             -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
             -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
             "${generated_config}"
         ;;
@@ -268,7 +293,6 @@ case "${mode}" in
             -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
             -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
             -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
-            -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
             -e 's/^EnableSharedGroupCameraPrototype=false$/EnableSharedGroupCameraPrototype=true/' \
             -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
             "${generated_config}"
@@ -413,6 +437,7 @@ if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--shared-quit-menu-test" ||
       "${mode}" == "--viewport-hud-test" ||
       "${mode}" == "--dual-camera-local-coop-test" ||
+      "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--realtime-skill-coop-test" ]]; then
     antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
@@ -449,7 +474,7 @@ printf '%s\n' \
     '  Phase 9 attack proof: Buki accepted independent U weak attacks and entered native IsAttacking state.' \
     '  Shared-camera proof: Buki movement now follows Player 1 camera orientation.' \
     '  Retained targeting proof: Buki target node and auto-target state survive the AI override.' \
-    '  Separation proof: the 10-unit guard blocks only outward Buki movement and releases inward movement.' \
+    '  Roaming boundary: both players are warned near 10 units; at the hard limit only clearly inward movement is accepted.' \
     '  Camera proof: the disabled native MatrixTarget prototype follows the P1/Buki midpoint and restores native P1 focus cleanly.' \
     '  Split-screen proof: dual viewports work; current test composites the untouched finished native frame before independent cameras.' \
     '  Deferred: full no-menu encounter remains required before Milestone 3 closes.' \
@@ -509,7 +534,7 @@ if [[ "${mode}" == "--second-player-separation-test" ]]; then
     printf '%s\n' \
         '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
         '  then move Buki with I/J/K/L relative to the shared camera.' \
-        '  At 10 horizontal units, outward movement should stop while inward movement remains available.' \
+        '  Both viewports warn at 8 units. At 10 units, only clearly inward movement is accepted; outward and lateral requests are blocked for either player.' \
         '  No teleport or forced catch-up is used; press F10 again to restore Buki AI before exit.'
 fi
 if [[ "${mode}" == "--shared-group-camera-test" ]]; then
@@ -517,7 +542,7 @@ if [[ "${mode}" == "--shared-group-camera-test" ]]; then
         '  Test: control anyone except Buki, press F10 once to disable Buki AI,' \
         '  then move both characters and rotate the camera.' \
         '  Camera focus should track the midpoint; distance/zoom remains native in this first proof.' \
-        '  The 10-unit outward guard remains active; press F10 again to restore native AI and focus.'
+        '  No roaming boundary is installed in this single-camera profile; press F10 again to restore native AI and focus.'
 fi
 if [[ "${mode}" == "--split-screen-render-test" ]]; then
     printf '%s\n' \
@@ -571,7 +596,7 @@ if [[ "${mode}" == "--dual-camera-local-coop-test" ]]; then
         '  Press F10 once to disable Buki AI. Player 1 keeps W/A/S/D; move Buki independently with I/J/K/L.' \
         '  Each half should remain centered on its assigned character while both characters move at the same time.' \
         '  Mouse camera rotation/zoom remains shared in this pass; Player 2 does not yet own separate camera input.' \
-        '  The 10-unit outward-only separation guard is active. Move inward to release it immediately.' \
+        '  The visible 10-unit roaming boundary is active. At the limit, move clearly inward to release it; outward and lateral requests are blocked.' \
         '  Check for view swapping, stale frames, geometry/shadow defects, or control loss.' \
         '  Press F10 again to restore Buki AI before exiting.'
 fi
@@ -585,6 +610,26 @@ if [[ "${mode}" == "--controller-bridge-test" ]]; then
         '  After rotating Camera 2, left-stick forward must follow its forward direction. The 10-unit guard remains active.' \
         '  Unplugging the pad or stopping the helper neutralizes Player 2 input within 250 ms.' \
         '  Press F10 again to restore AI on the exact overridden character before exiting.' \
+        "  Linux input device: ${input_device}"
+fi
+if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
+    printf '%s\n' \
+        '  Roster lifecycle test: keep the persisted Co-op profile at Tal=P1 and Ailish=P2.' \
+        '  Load the save immediately before Ailish joins. Tal-only play must remain full-screen single-player.' \
+        '  When Ailish joins, SudekiMP must rotate Tal back to native slot 0, claim exactly Ailish for Player 2, then enable both viewports.' \
+        '  F10 drops Player 2 out to native AI/full-screen without changing the roster; press it again to rejoin the same character.' \
+        '  Controller Start requests drop-in; hold Back+Start for one second to drop out.' \
+        '  Authored temporary-room doors move the active party together and rebuild Player 2 only after the destination settles.' \
+        '  Travel voting is intentionally disabled: the current late hook runs after Sudeki starts the door approach/script and cannot safely cancel it. Do not test P2 B or P1 Esc until a target-specific pre-OnAction seam is verified.' \
+        '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick and A weak attack.' \
+        '  Player 2 taps controller X to post/cancel a visible five-second INTERACT? request; it is advisory and never injects a native world action.' \
+        '  Blacksmith preview experiment is ON for this profile only: Player 1 opening a forge should keep split view and open distinct P1/P2 equipment, socket, rune, price, and projected-stat panels with independent cursor/page state and shared money.' \
+        '  This is preview only, no forge commits: Enter/A reports COMMIT DISABLED and never purchases, equips, sockets, or mutates native inventory. Escape/B closes each seat.' \
+        '  Shops still use one serialized full-width native menu; Player 2 input is neutralized until it closes and both camera caches refresh.' \
+        '  Camera 2 uses the existing manual orbit fallback in this live profile; the native collision experiment remains disabled after its first runtime acquisition fault.' \
+        '  In settled exploration, both viewports warn at 80% of the 10-unit party range; at the visible hard limit only clearly inward movement is accepted for either player.' \
+        '  Combat, loading, cutscenes, travel/votes, Player 2 disconnect/drop-out, or an unavailable overlay disables the hard boundary.' \
+        '  A failed ownership step must leave split off rather than exposing a partial co-op state.' \
         "  Linux input device: ${input_device}"
 fi
 if [[ "${mode}" == "--realtime-skill-coop-test" ]]; then
@@ -637,13 +682,19 @@ if [[ "${mode}" == "--check" ]]; then
 fi
 
 if [[ "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
       "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! -r "${input_device}" ]]; then
         printf 'Controller device is not readable: %s\n' "${input_device}" >&2
-        printf '%s\n' \
-            'The cleanroom can still launch; P2 will remain WAITING until the Razer bridge is restarted.' >&2
-        if [[ "${mode}" == "--controller-bridge-test" ]]; then
+        if [[ "${mode}" == "--cleanroom" ||
+              "${mode}" == "--test-arena" ||
+              "${mode}" == "--cafu-testroom" ]]; then
+            printf '%s\n' \
+                'The cleanroom can still launch; P2 will remain WAITING until the Razer bridge is restarted.' >&2
+        fi
+        if [[ "${mode}" == "--controller-bridge-test" ||
+              "${mode}" == "--party-lifecycle-trace" ]]; then
             exit 1
         fi
     else
@@ -659,7 +710,8 @@ if [[ "${mode}" == "--controller-bridge-test" ||
             input_bridge_pid=""
             printf '%s\n' 'The Linux input bridge failed to start:' >&2
             sed -n '1,80p' "${input_bridge_log}" >&2
-            if [[ "${mode}" == "--controller-bridge-test" ]]; then
+            if [[ "${mode}" == "--controller-bridge-test" ||
+                  "${mode}" == "--party-lifecycle-trace" ]]; then
                 exit 1
             fi
         else

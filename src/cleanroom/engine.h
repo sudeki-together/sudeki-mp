@@ -27,6 +27,13 @@ BOOL SudekiMpCleanroomEngineResourceNameFromText(
     SudekiMpResourceName *resource_name,
     const char *text
 );
+/* Copy the exact 12-byte engine value and acquire one reference to its shared
+ * backing store. This is for deferred calls whose ResourceName may describe a
+ * start marker distinct from the human-readable destination string. */
+BOOL SudekiMpCleanroomEngineRetainResourceNameExact(
+    SudekiMpResourceName *destination,
+    const SudekiMpResourceName *source
+);
 void SudekiMpCleanroomEngineReleaseResourceName(
     SudekiMpResourceName *resource_name
 );
@@ -68,6 +75,14 @@ BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled);
+BOOL SudekiMpCleanroomEnginePartyInvulnerable(BOOL *enabled);
+BOOL SudekiMpCleanroomEngineSetPartyInvulnerable(BOOL enabled);
+/* Reconcile the native refcount lease after party or level changes. */
+BOOL SudekiMpCleanroomEngineMaintainPartyInvulnerability(BOOL enabled);
+BOOL SudekiMpCleanroomEngineSetStoryTestSpeed(
+    BOOL enabled,
+    float multiplier
+);
 void SudekiMpCleanroomEngineMaintainResources(void);
 void SudekiMpCleanroomEngineReset(void);
 

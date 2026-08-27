@@ -2,8 +2,10 @@
 #include "cleanroom/menu.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
+#include "engine/player_statehood.h"
 #include "engine/skill_activation_abi.h"
 #include "hooks/accelerator_cache.h"
+#include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
@@ -20,6 +22,7 @@
 #include "input/key_binding.h"
 
 #include <windows.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,7 +103,8 @@ static BOOL read_config_float(
         path
     );
     parsed = wcstod(value, &end);
-    if (end == value || *end != L'\0' || parsed < minimum || parsed > maximum) {
+    if (end == value || *end != L'\0' || !isfinite(parsed) ||
+        parsed < minimum || parsed > maximum) {
         return FALSE;
     }
     *result = (float)parsed;
@@ -204,15 +208,22 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL skill_camera_routing_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     BOOL external_input_bridge_enabled;
+    BOOL player_interaction_requests_enabled;
+    BOOL experimental_blacksmith_ui_enabled;
     BOOL second_player_controller_camera_enabled;
+    BOOL native_second_player_camera_collision_enabled;
     BOOL split_screen_ranged_model_isolation_enabled;
     BOOL spirit_strike_viewport_effect_isolation_enabled;
     BOOL zone_transition_trace_enabled;
+    BOOL party_atomic_transitions_enabled;
+    BOOL transition_vote_enabled;
     BOOL zone_traversal_enabled;
     BOOL cleanroom_menu_enabled;
     BOOL coop_roster_menu_enabled;
     BOOL skip_startup_movies;
+    BOOL story_test_boost_enabled;
     BOOL cleanroom_multiplayer_integration;
+    BOOL defer_integrated_roster;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
     wchar_t second_player_weak_attack_key_text[32];
@@ -221,6 +232,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     wchar_t freeroam_camera_modifier_text[32];
     wchar_t cleanroom_menu_key_text[32];
     wchar_t zone_traversal_menu_key_text[32];
+    wchar_t story_test_boost_key_text[32];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
@@ -231,6 +243,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     UINT freeroam_camera_modifier_key = VK_LCONTROL;
     UINT cleanroom_menu_virtual_key = VK_F8;
     UINT zone_traversal_menu_virtual_key = VK_F7;
+    UINT story_test_boost_virtual_key = VK_F6;
     int spirit_strike_id = -1;
     int spirit_strike_variant = 1;
     int input_bridge_port = 26760;
@@ -242,6 +255,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     float second_player_controller_camera_yaw_speed = 2.25f;
     float second_player_controller_camera_pitch_speed = 1.50f;
     float second_player_controller_camera_maximum_pitch = 0.65f;
+    float story_test_boost_multiplier = 2.0f;
 
     (void)unused;
     if (GetModuleFileNameW(NULL, game_path, MAX_PATH) == 0) {
@@ -442,10 +456,25 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableExternalInputBridgePrototype"
     );
+    player_interaction_requests_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePlayerInteractionRequestsPrototype"
+    );
+    experimental_blacksmith_ui_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePerPlayerBlacksmithUiExperiment"
+    );
     second_player_controller_camera_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
         L"EnableSecondPlayerControllerCameraPrototype"
+    );
+    native_second_player_camera_collision_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableNativeSecondPlayerCameraCollisionPrototype"
     );
     split_screen_ranged_model_isolation_enabled = read_config_boolean(
         config_path,
@@ -475,8 +504,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableZoneTraversalMenu"
     );
+    party_atomic_transitions_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnablePartyAtomicTransitionsPrototype"
+    );
+    transition_vote_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableTransitionVotePrototype"
+    );
     zone_transition_trace_enabled = zone_transition_trace_enabled ||
-        zone_traversal_enabled;
+        zone_traversal_enabled || party_atomic_transitions_enabled ||
+        transition_vote_enabled;
     coop_roster_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -487,6 +527,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"SkipStartupMovies"
     );
+    story_test_boost_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableStoryTestBoost"
+    );
     if (coop_roster_menu_enabled &&
         (cleanroom_menu_enabled || zone_traversal_enabled)) {
         SudekiMpLogWrite(
@@ -496,8 +541,66 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
-    cleanroom_multiplayer_integration = cleanroom_menu_enabled &&
+    if (party_atomic_transitions_enabled &&
+        (!coop_roster_menu_enabled || !control_separation_enabled ||
+         !split_screen_render_enabled || !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled || zone_traversal_enabled)) {
+        SudekiMpLogWrite(
+            "party_atomic_transitions_config=invalid "
+            "reason=requires_roster_control_split_p2_camera_dual_cache_and_no_traversal_menu\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (transition_vote_enabled &&
+        (!party_atomic_transitions_enabled ||
+         !external_input_bridge_enabled)) {
+        SudekiMpLogWrite(
+            "transition_vote_config=invalid "
+            "reason=requires_party_atomic_transitions_and_external_input_bridge\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    cleanroom_multiplayer_integration =
+        (cleanroom_menu_enabled || coop_roster_menu_enabled) &&
         control_separation_enabled && split_screen_render_enabled;
+    defer_integrated_roster = coop_roster_menu_enabled &&
+        cleanroom_multiplayer_integration;
+    if (second_player_separation_guard_enabled &&
+        !cleanroom_multiplayer_integration) {
+        SudekiMpLogWrite(
+            "roaming_boundary_config=invalid reason=requires_integrated_menu_and_split_overlay\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (player_interaction_requests_enabled &&
+        (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
+         !external_input_bridge_enabled || !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "player_interaction_requests_config=invalid "
+            "reason=requires_coop_roster_integrated_menu_control_split_dual_cache_and_external_bridge\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (experimental_blacksmith_ui_enabled &&
+        (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
+         !external_input_bridge_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "per_player_blacksmith_ui_config=invalid "
+            "reason=requires_integrated_coop_roster_control_split_player_two_camera_dual_cache_and_external_bridge\r\n");
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     GetPrivateProfileStringW(
         L"Bindings",
         L"SpiritStrike",
@@ -575,6 +678,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         zone_traversal_menu_key_text,
         (DWORD)(sizeof(zone_traversal_menu_key_text) /
             sizeof(zone_traversal_menu_key_text[0])),
+        config_path
+    );
+    GetPrivateProfileStringW(
+        L"Bindings",
+        L"ToggleStoryTestBoost",
+        L"F6",
+        story_test_boost_key_text,
+        (DWORD)(sizeof(story_test_boost_key_text) /
+            sizeof(story_test_boost_key_text[0])),
         config_path
     );
     if (direct_spirit_strike_prototype_enabled &&
@@ -658,6 +770,27 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (story_test_boost_enabled &&
+        (!coop_roster_menu_enabled ||
+         !SudekiMpParseInputKey(
+             story_test_boost_key_text,
+             &story_test_boost_virtual_key) ||
+         !read_config_float(
+             config_path,
+             L"SudekiMP",
+             L"StoryTestBoostMultiplier",
+             2.0f,
+             1.0f,
+             4.0f,
+             &story_test_boost_multiplier))) {
+        SudekiMpLogWrite(
+            "story_test_boost_config=invalid "
+            "reason=requires_coop_roster_finite_multiplier_1_to_4\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (cleanroom_menu_enabled &&
         (player_movement_trace_enabled ||
          (control_separation_enabled != split_screen_render_enabled))) {
@@ -665,6 +798,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "cleanroom_menu_config=requires_standalone_or_complete_multiplayer_hook_pair\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (coop_roster_menu_enabled &&
+        (control_separation_enabled != split_screen_render_enabled)) {
+        SudekiMpLogWrite(
+            "coop_roster_menu_config=requires_standalone_or_complete_multiplayer_hook_pair\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
@@ -689,6 +831,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !second_player_movement_enabled) {
         SudekiMpLogWrite(
             "second_player_separation_guard_config=requires_second_player_movement\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (second_player_separation_guard_enabled &&
+        player_movement_trace_enabled) {
+        SudekiMpLogWrite(
+            "roaming_boundary_config=conflicts_with_player_movement_trace_same_native_callsites\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -764,6 +915,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
          !dual_camera_frame_cache_enabled)) {
         SudekiMpLogWrite(
             "second_player_controller_camera_config=requires_external_bridge_camera_relative_movement_split_p2_camera_dual_cache\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (native_second_player_camera_collision_enabled &&
+        (!split_screen_render_enabled ||
+         !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled)) {
+        SudekiMpLogWrite(
+            "native_second_player_camera_collision_config=requires_split_p2_camera_dual_cache\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -935,6 +1097,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
 
+    /* Runtime interaction provenance is process-local only.  Initialize it
+     * before any menu/input/render hook can publish a player or modal lease. */
+    SudekiMpPlayerStatehoodInitialize(SudekiMpPlayerStatehoodRuntime());
+
     SudekiMpLogFormat("quick_menu_patch_requested=%s\r\n",
         patch_enabled ? "true" : "false");
     if (patch_enabled) {
@@ -1065,15 +1231,27 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (unsigned long)cleanroom_menu_virtual_key
     );
     SudekiMpLogFormat(
+        "story_test_boost_requested=%s virtual_key=0x%02lx "
+        "multiplier_bits=0x%08lx default=off "
+        "policy=master_game_speed_plus_native_party_invulnerability\r\n",
+        story_test_boost_enabled ? "true" : "false",
+        (unsigned long)story_test_boost_virtual_key,
+        (unsigned long)float_bits(story_test_boost_multiplier)
+    );
+    SudekiMpLogFormat(
         "zone_traversal_menu_requested=%s virtual_key=0x%02lx\r\n",
         zone_traversal_enabled ? "true" : "false",
         (unsigned long)zone_traversal_menu_virtual_key
     );
-    if (coop_roster_menu_enabled) {
+    if (coop_roster_menu_enabled && !defer_integrated_roster) {
         if (!SudekiMpInstallCoopRosterMenu(
                 game_module,
                 cleanroom_menu_virtual_key,
-                skip_startup_movies
+                cleanroom_multiplayer_integration,
+                skip_startup_movies,
+                story_test_boost_enabled,
+                story_test_boost_virtual_key,
+                story_test_boost_multiplier
             )) {
             SudekiMpLogFormat(
                 "coop_roster_menu_error=%lu\r\n",
@@ -1085,15 +1263,27 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
         SudekiMpLogWrite("coop_roster_menu_applied=true\r\n");
+    } else if (defer_integrated_roster) {
+        SudekiMpLogWrite(
+            "coop_roster_menu_applied=pending_after_split_preflight\r\n"
+        );
     } else {
         SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "zone_transition_trace_requested=%s\r\n",
-        zone_transition_trace_enabled ? "true" : "false"
+        "zone_transition_trace_requested=%s "
+        "party_atomic_transitions_requested=%s transition_vote_requested=%s\r\n",
+        zone_transition_trace_enabled ? "true" : "false",
+        party_atomic_transitions_enabled ? "true" : "false",
+        transition_vote_enabled ? "true" : "false"
     );
     if (zone_transition_trace_enabled) {
-        if (!SudekiMpInstallZoneTransitionTrace(game_module)) {
+        if (!SudekiMpZoneTransitionConfigureVote(
+                transition_vote_enabled) ||
+            !SudekiMpInstallZoneTransitionTrace(
+                game_module,
+                party_atomic_transitions_enabled,
+                !skill_camera_routing_enabled)) {
             SudekiMpLogFormat(
                 "zone_transition_trace_error=%lu\r\n",
                 (unsigned long)GetLastError()
@@ -1162,6 +1352,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         input_bridge_timeout_ms,
         (unsigned long)float_bits(input_bridge_deadzone)
     );
+    SudekiMpLogFormat(
+        "player_interaction_requests_requested=%s button=controller_x "
+        "policy=targetless_attention_only_no_native_world_action\r\n",
+        player_interaction_requests_enabled ? "true" : "false"
+    );
+    SudekiMpLogFormat(
+        "per_player_blacksmith_ui_experiment_requested=%s "
+        "default=false mutation=disabled "
+        "policy=exact_gated_start_and_active_script_contract_two_native_inert_panels\r\n",
+        experimental_blacksmith_ui_enabled ? "true" : "false");
     if (control_separation_enabled) {
         SudekiMpCombatContextsReset();
         if (external_input_bridge_enabled &&
@@ -1208,12 +1408,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
+        SudekiMpControlSeparationSetInteractionRequestsEnabled(
+            player_interaction_requests_enabled);
         SudekiMpLogWrite("control_separation_applied=true\r\n");
     } else {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_controller_camera=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_controller_camera=%s native_second_player_camera_collision=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
         split_screen_render_enabled ? "true" : "false",
         dual_camera_frame_cache_enabled ?
             "alternating_render_state_frame_cache" :
@@ -1224,6 +1426,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         skill_camera_routing_enabled ?
             "caster_viewport_only" : "disabled",
         second_player_controller_camera_enabled ? "true" : "false",
+        native_second_player_camera_collision_enabled ? "true" : "false",
         split_screen_ranged_model_isolation_enabled ? "true" : "false",
         spirit_strike_viewport_effect_isolation_enabled ? "true" : "false",
         (unsigned long)float_bits(second_player_controller_camera_yaw_speed),
@@ -1239,24 +1442,65 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 second_player_camera_virtual_key,
                 skill_camera_routing_enabled,
                 second_player_controller_camera_enabled,
+                native_second_player_camera_collision_enabled,
                 split_screen_ranged_model_isolation_enabled,
                 spirit_strike_viewport_effect_isolation_enabled,
                 input_bridge_deadzone,
                 second_player_controller_camera_yaw_speed,
                 second_player_controller_camera_pitch_speed,
                 second_player_controller_camera_maximum_pitch)) {
+            DWORD split_screen_error = GetLastError();
+
+            if (control_separation_enabled) {
+                (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
+                    FALSE);
+                SudekiMpUninstallControlSeparation();
+                SudekiMpInputBridgeStop();
+                SudekiMpLogWrite(
+                    "control_separation_applied=false "
+                    "phase=split_screen_install_rollback "
+                    "policy=remove_controller_hook_and_runtime_interaction_state\r\n"
+                );
+            }
             SudekiMpLogFormat(
                 "split_screen_render_error=%lu\r\n",
-                (unsigned long)GetLastError()
+                (unsigned long)split_screen_error
             );
             SudekiMpLogWrite("split_screen_render_applied=false\r\n");
             SudekiMpLogWrite("status=split_screen_render_error\r\n");
             SudekiMpLogClose();
+            SetLastError(split_screen_error);
             return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
         }
         SudekiMpLogWrite("split_screen_render_applied=true\r\n");
+        if (cleanroom_multiplayer_integration) {
+            (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
+        }
     } else {
         SudekiMpLogWrite("split_screen_render_applied=false\r\n");
+    }
+    if (defer_integrated_roster) {
+        if (!SudekiMpInstallCoopRosterMenu(
+                game_module,
+                cleanroom_menu_virtual_key,
+                TRUE,
+                skip_startup_movies,
+                story_test_boost_enabled,
+                story_test_boost_virtual_key,
+                story_test_boost_multiplier
+            )) {
+            SudekiMpLogFormat(
+                "coop_roster_menu_error=%lu phase=deferred_integrated_install\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
+            SudekiMpLogWrite("status=coop_roster_menu_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
+        }
+        SudekiMpLogWrite(
+            "coop_roster_menu_applied=true phase=after_split_preflight\r\n"
+        );
     }
     if (cleanroom_multiplayer_integration) {
         SudekiMpControlSeparationSetUpdateObserver(
@@ -1265,9 +1509,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpSplitScreenSetOverlayRenderer(
             SudekiMpCleanroomMenuRender
         );
-        SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
         SudekiMpLogWrite(
-            "cleanroom_multiplayer_integration=ready "
+            "menu_multiplayer_integration=ready "
             "default=disabled input=external_razer_bridge\r\n"
         );
     }
@@ -1310,6 +1553,30 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("spirit_strike_input_applied=false\r\n");
     }
+    /* Install the paired script-export hook last so no subsequent
+     * initialization failure can leave an accepted custom Active lease in a
+     * partially initialized runtime. */
+    if (experimental_blacksmith_ui_enabled) {
+        if (!SudekiMpInstallBlacksmithUiAdapter(game_module, TRUE)) {
+            SudekiMpLogFormat(
+                "per_player_blacksmith_ui_error=%lu "
+                "phase=exact_start_active_hook_install\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite(
+                "per_player_blacksmith_ui_applied=false\r\n");
+            SudekiMpLogWrite("status=cleanroom_menu_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
+        }
+        SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(
+            SudekiMpBlacksmithUiAdapterActive);
+        SudekiMpLogWrite(
+            "per_player_blacksmith_ui_applied=true "
+            "native_commit=disabled fallback=native_when_prerequisites_fail\r\n");
+    } else {
+        SudekiMpLogWrite(
+            "per_player_blacksmith_ui_applied=false default=false\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
     if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
@@ -1336,6 +1603,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
+            SudekiMpUninstallBlacksmithUiAdapter();
             SudekiMpUninstallTalosDefenseTrace();
             SudekiMpUninstallZoneTransitionTrace();
             SudekiMpInputBridgeStop();

@@ -15,7 +15,10 @@ static SudekiMpInputBridgeState last_state;
 static BOOL winsock_started;
 static BOOL packet_received;
 static BOOL connection_logged;
+static BOOL gameplay_suppressed;
+static BOOL gameplay_resume_requires_neutral;
 static unsigned int invalid_packet_count;
+static unsigned int stale_sequence_count;
 static unsigned int bound_port;
 
 static void reset_receiver_state(void) {
@@ -24,8 +27,37 @@ static void reset_receiver_state(void) {
     ZeroMemory(&last_state, sizeof(last_state));
     packet_received = FALSE;
     connection_logged = FALSE;
+    gameplay_suppressed = FALSE;
+    gameplay_resume_requires_neutral = FALSE;
     invalid_packet_count = 0u;
+    stale_sequence_count = 0u;
     bound_port = 0u;
+}
+
+BOOL SudekiMpInputBridgeSequenceIsNewer(
+    uint32_t candidate,
+    uint32_t baseline
+) {
+    uint32_t distance = candidate - baseline;
+
+    return distance != 0u && distance < 0x80000000u;
+}
+
+static void expire_sequence_epoch(DWORD now) {
+    if (!packet_received ||
+        (DWORD)(now - last_packet_tick) <= bridge_timeout_ms) {
+        return;
+    }
+    if (connection_logged) {
+        SudekiMpLogFormat(
+            "input_bridge event=disconnected timeout_ms=%lu policy=neutralize_player_two_input\r\n",
+            (unsigned long)bridge_timeout_ms
+        );
+    }
+    ZeroMemory(&last_state, sizeof(last_state));
+    last_packet_tick = 0u;
+    packet_received = FALSE;
+    connection_logged = FALSE;
 }
 
 BOOL SudekiMpInputBridgeStart(unsigned int port, DWORD timeout_ms) {
@@ -92,7 +124,7 @@ void SudekiMpInputBridgeStop(void) {
     reset_receiver_state();
 }
 
-BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
+BOOL SudekiMpInputBridgePollRaw(SudekiMpInputBridgeState *state) {
     uint8_t packet[64];
     struct sockaddr_in sender;
     int sender_size;
@@ -105,6 +137,9 @@ BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
         }
         return FALSE;
     }
+    /* Expire before draining the socket so a sender restart can begin at any
+     * sequence, even when its first new-epoch packet is already queued. */
+    expire_sequence_epoch(GetTickCount());
     for (;;) {
         SudekiMpInputBridgeState decoded;
         sender_size = sizeof(sender);
@@ -138,21 +173,28 @@ BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
             }
             continue;
         }
+        if (packet_received &&
+            !SudekiMpInputBridgeSequenceIsNewer(
+                decoded.sequence,
+                last_state.sequence)) {
+            ++stale_sequence_count;
+            if (stale_sequence_count == 1u) {
+                SudekiMpLogFormat(
+                    "input_bridge event=packet_rejected reason=duplicate_or_out_of_order sequence=%lu baseline=%lu\r\n",
+                    (unsigned long)decoded.sequence,
+                    (unsigned long)last_state.sequence
+                );
+            }
+            continue;
+        }
         last_state = decoded;
         last_packet_tick = GetTickCount();
         packet_received = TRUE;
     }
 
     now = GetTickCount();
-    if (!packet_received ||
-        (DWORD)(now - last_packet_tick) > bridge_timeout_ms) {
-        if (connection_logged) {
-            SudekiMpLogFormat(
-                "input_bridge event=disconnected timeout_ms=%lu policy=neutralize_player_two_input\r\n",
-                (unsigned long)bridge_timeout_ms
-            );
-            connection_logged = FALSE;
-        }
+    expire_sequence_epoch(now);
+    if (!packet_received) {
         ZeroMemory(state, sizeof(*state));
         return FALSE;
     }
@@ -166,6 +208,73 @@ BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
     }
     *state = last_state;
     return TRUE;
+}
+
+static BOOL gameplay_state_is_neutral(
+    const SudekiMpInputBridgeState *state
+) {
+    return state != NULL && state->left_x == 0 && state->left_y == 0 &&
+        state->right_x == 0 && state->right_y == 0 &&
+        state->left_trigger <=
+            SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM &&
+        state->right_trigger <=
+            SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM &&
+        state->buttons == 0u;
+}
+
+static void neutralize_gameplay_state(SudekiMpInputBridgeState *state) {
+    uint32_t sequence;
+    uint32_t sender_timestamp_ms;
+
+    if (state == NULL) {
+        return;
+    }
+    sequence = state->sequence;
+    sender_timestamp_ms = state->sender_timestamp_ms;
+    ZeroMemory(state, sizeof(*state));
+    state->sequence = sequence;
+    state->sender_timestamp_ms = sender_timestamp_ms;
+}
+
+BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
+    if (!SudekiMpInputBridgePollRaw(state)) {
+        return FALSE;
+    }
+    if (gameplay_suppressed) {
+        neutralize_gameplay_state(state);
+        return TRUE;
+    }
+    if (gameplay_resume_requires_neutral) {
+        if (gameplay_state_is_neutral(state)) {
+            gameplay_resume_requires_neutral = FALSE;
+            SudekiMpLogFormat(
+                "input_bridge event=gameplay_resume state=released trigger_neutral_maximum=%u policy=require_post_vote_neutral_before_gameplay\r\n",
+                SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM
+            );
+        } else {
+            neutralize_gameplay_state(state);
+        }
+    }
+    return TRUE;
+}
+
+void SudekiMpInputBridgeSetGameplaySuppressed(BOOL suppressed) {
+    BOOL requested = suppressed != FALSE;
+
+    if (gameplay_suppressed && !requested) {
+        /* Do not leak a held A/B/stick from the consent prompt into movement,
+         * combat, or camera control on the first resumed frame. */
+        gameplay_resume_requires_neutral = TRUE;
+        SudekiMpLogFormat(
+            "input_bridge event=gameplay_resume state=waiting_for_neutral trigger_neutral_maximum=%u policy=require_post_vote_neutral_before_gameplay\r\n",
+            SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM
+        );
+    }
+    gameplay_suppressed = requested;
+}
+
+BOOL SudekiMpInputBridgeGameplaySuppressed(void) {
+    return gameplay_suppressed;
 }
 
 unsigned int SudekiMpInputBridgeBoundPort(void) {

@@ -3710,3 +3710,375 @@ and New Game acceptance pending.
   `SudekiMP.SkillTraceImageTest` pass. Native Windows must still rebuild the
   DLL, manually select New Game, inspect all four/five rows, and confirm both
   crash freedom and acceptable layout before this item is closed.
+
+## 2026-08-25 — Story Test Boost for accelerated progression
+
+**Status:** implementation and offline regression accepted; first live story
+toggle/transition acceptance pending.
+
+- The roster research profile now exposes an F6 Story Test Boost. It always
+  starts off and, while active and focused in a ready world, applies the
+  configured multiplier through Sudeki's exported `SetMasterGameSpeed` entry
+  at RVA `0x0028BE90`. The default is `2x`; values through `4x` are accepted
+  but values above `2x` remain explicitly experimental because the engine
+  clamps elapsed time before applying this multiplier.
+- This is an engine/world fast-forward rather than a whole-process clock. It
+  should accelerate traversal, animation, scripts, and engine-timed dialogue,
+  but Bink movies, streamed audio, and wall-clock waits can retain their own
+  timing.
+- Party protection uses the native
+  `CCharacterArbiter::GELSetInvulnerable(bool)` export at RVA `0x000DCA10`.
+  The helper owns a signed reference count at arbiter `+0x54` and mirrors it
+  into flag `0x800` at `+0x50`; SudekiMP therefore acquires exactly one native
+  lease per validated live party member and never issues an unmatched release.
+- Party identities are captured from `CGroupPlayers` (`+0x90`, stride `0x0C`,
+  count `+0xCC`) and require reciprocal `arbiter+0x10 == character` ownership,
+  the same live world/directory generation, and stable character position and
+  combat pointers. Additions and reconstructions are reconciled without
+  disturbing native nested invulnerability used by skills or scripts.
+- Speed is gated on complete party coverage: if any declared party member
+  cannot acquire and verify protection, normal speed remains in force. Failed
+  release verification retains the owned lease record for a safe retry rather
+  than forgetting a possible native increment. External/cutscene ownership of
+  the master-speed global causes an atomic fail-safe disable instead of being
+  overwritten on the following frame.
+- Focus loss and title/loading states restore normal speed when observed.
+  Protection remains requested for a still-live ready party during focus loss,
+  and is safely reconciled when world objects are rebuilt. The feature does not
+  patch the executable or write save data.
+- MinGW DLL build, supported-image signature regression, Wine cleanroom-engine
+  regression, launcher shell validation, and whitespace validation pass. Live
+  acceptance still needs F6 on/off, damage immunity, party join, focus loss,
+  and a door/level transition in a real story save.
+
+## 2026-08-25 — Persisted Tal/Ailish roster activates automatically on arrival
+
+**Status:** first live story-arrival acceptance passed; door/level-transition
+survival remains to be tested.
+
+- The persisted Co-op contract selected Tal (`0x23`) as Player 1 and Ailish
+  (`0x01`) as Player 2. A Tal-only save remained full-screen while Ailish was
+  absent. When native recruitment published Ailish, the roster service waited
+  for the stable party/controller signature instead of committing during the
+  recruitment transition.
+- The earlier synthetic post-update F1 pulse was rejected. Sudeki preprocesses
+  that action before its next exact `== 1` consumer check, so the injected
+  value advanced without switching. The replacement exact-gates and calls the
+  native `CGroupPlayers` Previous/Next consumers at RVAs `0x00023F60` and
+  `0x00024060` with their shipped `ESI=group` ABI. This preserves native party
+  rotation, controller reassignment, AI/arbiter ownership, and listeners.
+- The call mirrors the native outer safety gates: stable controller and party
+  state, target actor flags, player-switch permission, quit/UI/input blocks,
+  and a 250 ms unchanged-identity window. Controller target and party front
+  must agree before the call and must change coherently together afterward.
+- Live trace sequence `957424..957583` proves the automatic path. The first
+  native request deferred without mutation; the second moved both target and
+  front from Ailish `0x086A2F18` to Tal `0x0836BAA0`. SudekiMP then claimed
+  exactly Ailish for Player 2, enabled runtime split-screen, locked the
+  Tal/Ailish identities, and activated the gameplay gate. No manual F1 or F10
+  was used.
+- The viewport portraits were distinct and the user confirmed the resulting
+  split looked correct. Build, exact supported-image regression, deliberate
+  Previous/Next signature-mismatch rejection tests, and whitespace validation
+  pass. The next acceptance boundary is preserving the same controller, AI,
+  HUD, and camera ownership across a door or level transition.
+- At this checkpoint normal roster co-op was intentionally untethered. The
+  `--party-lifecycle-trace` profile explicitly leaves
+  `EnableSecondPlayerSeparationGuardPrototype=false`, so Player 2 movement
+  bypasses the former 10-unit outward-only guard while camera-relative input,
+  attacks, split cameras, and controller bridging remain active. The dedicated
+  `--second-player-separation-test` retains the old guard for isolated research.
+  A fresh live install logged `separation_guard=false` in both configuration
+  and control-separation initialization.
+
+  This temporary policy was superseded by the 2026-08-26 roaming-boundary
+  milestone below; repository defaults remain off, while the lifecycle profile
+  now opts into the visible, symmetric, exploration-only implementation.
+
+## 2026-08-26 — Visible symmetric roaming boundary
+
+**Status:** implemented and exact-image/pure-policy acceptance prepared; live
+gameplay acceptance remains pending.
+
+- The former Player-2-only separation check is replaced by one pure policy
+  shared by both players. Exact relative-call hooks at controller movement
+  submissions `0x00028E3F` and `0x00028E5E` gate Player 1 without skipping the
+  rest of the native controller update; synthetic Player 2 movement uses the
+  same evaluator. Live roaming exposed that projecting away only the outward
+  component still allowed a tangential path into unloaded terrain. At the hard
+  limit the revised policy therefore accepts only a clear inward radial
+  request; outward, lateral, and near-lateral requests are blocked
+  symmetrically.
+- Eligibility requires a settled native party/controller state, two active
+  human leases, world resources, non-combat state, and native Exploration
+  camera mode for 250 ms. Combat, loading, cutscenes/authored cameras,
+  transitions and votes, Player 2 drop-out, and external-controller loss clear
+  the evaluator immediately.
+- A full-frame transparent cleanroom overlay draws the same amber/red range
+  panel and meter in both viewports beginning at 80% of the configured range.
+  The hard clamp is armed only after that overlay reports a successful draw;
+  device loss or presentation failure makes the boundary advisory and
+  fail-open, preventing an invisible wall.
+- `EnableSecondPlayerSeparationGuardPrototype` remains default-off for
+  compatibility. The `--party-lifecycle-trace` and dedicated separation
+  profiles opt in. `EnablePlayerMovementTrace` is rejected alongside the
+  boundary because both deliberately own the same two exact callsites.
+
+## 2026-08-26 — Roster participation and party-atomic TEMP transitions
+
+**Status:** native whole-party placement is live-confirmed; balanced follower
+presentation and authored TEMP-camera sharing are built and awaiting the next
+visual entry/exit acceptance.
+
+- Sudeki's temporary interiors are not independent worlds. `CWorld` retains
+  the exterior descriptor, but `EnterTemporaryZone` deactivates its scene,
+  update nodes, collision, registry bodies, and localized audio before making
+  the TEMP descriptor current. A surviving Player 2 actor/camera at the old
+  coordinates therefore sees a void; keeping both rooms fully live would
+  require world/scene/entity/AI/script/audio virtualization.
+- The multiplayer policy now treats roster identity, human participation, and
+  the current actor/camera lease as separate state. Dropping out restores the
+  locked Player 2 character to native AI, collapses to native full-screen, and
+  keeps the Tal/Ailish-style type contract. F10 toggles this participation;
+  controller Start requests rejoin and a one-second Back+Start hold drops out.
+- `CGroupPlayers` TEMP entry normally places only slot zero. Exact call RVA
+  `0x00005C59` invokes `PopToNamedLocation` (`0x000F63D0`) while the incoming
+  descriptor is temporarily current. Exit call RVA `0x000068D3` invokes the
+  native lead mover (`0x000F30A0`, stdcall/20-byte cleanup) after exterior
+  roots reactivate.
+- The opt-in transition prototype wraps those two relative calls and, after a
+  verified lead `CPosition` write, invokes exported
+  `AiPCFormationPopMembers` at RVA `0x000F6260`. The engine synchronously
+  derives collision/navigation-safe formation offsets and moves every member.
+  Exact formation membership is checked against the declared active party;
+  transform-only fallback is deliberately disabled because an XYZ write cannot
+  prove destination scene/entity membership.
+- Before the native transition, Player 2 input, camera, HUD cache, pointer
+  locks, and AI override are synchronously quiesced where verifiable. The
+  roster types and participation intent survive. After placement, the service
+  waits for a stable state-4 TEMP or state-3 exterior descriptor for 250 ms,
+  invalidates old camera frames, then lets the existing roster transaction
+  reacquire the same selected character by type.
+- A 15-second timeout never reuses stale actor/camera pointers. It leaves the
+  native Player 1 world playable, keeps the roster choice, and drops Player 2
+  out until an explicit rejoin. The first live acceptance should use one
+  authored New Brightwater door, verify both actors inside, move both players,
+  exit, and then test F10 plus controller leave/rejoin.
+- The first save-load acceptance exposed a false transition boundary before
+  gameplay ownership existed. `SetZoneNow(NewBrightwater)` calls
+  `ExitTemporaryZone` twice as cleanup with no active TEMP descriptor. The
+  prototype armed an exit transaction from the persisted roster alone, never
+  observed a lead placement, timed out, and cleared Player 2 participation;
+  F10 only appeared to fix the split because it requested participation again.
+- Party-atomic transitions now require an active roster role lock. The TEMP
+  exit wrapper additionally rejects calls nested inside `SetZoneNow` and
+  requires the current descriptor to be native state 4. Thus save loading
+  preserves the pending Tal/Ailish join request, while a genuine active co-op
+  interior exit still enters the fail-closed transition barrier. A pure policy
+  regression distinguishes active state-4 exit from inactive runtime,
+  SetZoneNow cleanup, and state-3 main-world cases.
+- The first authored-door acceptance reached the exact native lead-placement
+  call, but rejected the formation pop because `CGroupPlayers+0xD0` was
+  nonzero. Static exports identify that field as the `SetModeLeadOnly` nesting
+  count, and TEMP placement deliberately leaves the group in lead-only mode
+  for the entire interior. Removing only the validation gate proved that the
+  formation API cannot move a suspended follower: Tal was inside, while
+  Ailish remained outside with `+0x2B=1` and `+0xD0=1`.
+- At the exact lead-placement call Ailish still has two disable leases: the
+  interior lead-only lease plus a short-lived loading lease. The hook records
+  the proven lead write but defers the group operation until the state-4 TEMP
+  descriptor and world-ready flags remain stable for 250 ms. It then requires
+  exact depth one and exact follower disable refs of one, invokes native
+  `CGroupPlayers::SetModeFullParty` at RVA `0x24850`, verifies depth/ref
+  transitions to zero and unchanged formation identity, and finally invokes
+  `AiPCFormationPopMembers`. If the synchronous radius check fails after the
+  lease was consumed, exact `SetModeLeadOnly` at RVA `0x24720` restores the
+  vanilla quarantine. Nested depth or inconsistent disable refs fail closed;
+  exit never consumes an unrelated lead-only lease.
+- The next authored-door run confirmed the deferred native sequence itself.
+  `SetModeFullParty` changed group depth `1 -> 0`, formation placement moved
+  Ailish to within the destination radius, the roster transaction reclaimed
+  her exact actor, and split-screen resumed. Her transform, model wrapper,
+  render object, and renderer all remained valid and advanced inside the room,
+  but the body was invisible because render-object flag `0x4` remained set.
+  This separates successful scene/actor placement from presentation ownership.
+- Exact functions `CGroupPlayers::ShowPartyMembers` at RVA `0x00024950` and
+  `HidePartyMembers` at RVA `0x00024A70` own that separate presentation layer.
+  Both are `void __thiscall(CGroupPlayers *)` and share the stable 13-byte
+  entry `83 EC 10 53 55 56 57 8D A9 9C 00 00 00`. They iterate fixed nonlead
+  slots 1 through 3. Show decrements each body model's signed hide depth at
+  `model+0x74`, clears render flag `0x4`, invokes the registered visibility
+  callback, and unhides the two supported equipment presentation objects;
+  Hide is the exact inverse.
+- The transition now captures exact follower/model/render identities and a
+  visible depth-zero baseline before native entry. After full-party mode and
+  formation placement it requires a native `0 -> 1` hide-depth delta, calls
+  Show exactly once, and verifies depth zero plus visible body/equipment before
+  split can commit. The override is explicitly owned across the interior. On
+  genuine state-4 exit, after Player 2 quarantine but before native Exit, it
+  calls Hide once and verifies `0 -> 1`; Sudeki's own exit path then consumes
+  that lease before the hooked lead mover. This avoids the signed counter
+  underflow that a blind or repeated Show would cause.
+- The clumped doorway/void Camera 2 was not stale cache state. Fresh Camera 2
+  copied the persistent Player 1 matrix and then translated its eye by the
+  actor-position delta, which is appropriate for an outdoor follow camera but
+  wrong for authored fixed TEMP cameras such as Yemi's house camera index
+  `2820`. While a settled state-4 TEMP descriptor is current, Camera 2 now
+  copies the exact native room matrix and projection every frame, applies no
+  actor translation, and ignores independent right-stick orbit. On exit the
+  controller camera state resets and the outdoor translated/orbit policy is
+  rebuilt from the current native camera.
+- Static camera reconstruction identifies the outdoor mismatch as the same
+  architectural shortcut: Camera 2's translated/manual matrix never entered
+  Sudeki's Exploration obstruction solver. A disabled-by-default prototype now
+  targets the named Camera 2 through `CCameraManager::SetCameraTarget`, installs
+  its own Exploration state, and consumes that camera's independently scheduled
+  native render-state generation only after exact target/mode/state checks.
+  Player 1 remains the global render camera. The shared `CCamera` input vtable
+  forwards every native camera except Camera 2, preventing Player 1 mouse events
+  from rotating both views. This first cut intentionally has no synthetic
+  Player 2 input bridge: while native Exploration is ready, independent P2
+  right-stick orbit is disabled; manual fallback/combat/unsupported phases keep
+  the existing right-stick path. Native input translation is a separate follow-up.
+- The exact Exploration bootstrap tuple is not stored in the live P1
+  `ExplorationStateData`. The supported image's native state-zero path at
+  `0x004CF831` prepares `0.0f`, `FALSE`, and exact bits `0x47C34FF3`
+  (`99999.8984375f`) for the internal transition installer called at
+  `0x004CF847`; the public `SetCameraState` wrapper reaches that same installer
+  after resolving the state name. Camera 2 uses that evidenced tuple. The
+  previous draft's P1 `+0x40` field interpretation was rejected before live
+  use. A changed active-group allocation also forces a one-frame manual
+  fallback and exact party-slot rebind instead of remaining in fallback
+  indefinitely.
+- The first live native-Camera-2 bootstrap exposed an argument-identity bug:
+  the code passed the address of the party's intrusive `TPtr<Entity>` slot to
+  `SetCameraTarget`, but the native resolver immediately performs virtual
+  dispatch on the supplied `GELPointer` entity itself. Treating the slot as the
+  entity made it call the character pointer as though it were a vtable and the
+  process exited before camera acquisition could log. The corrected path keeps
+  the party-slot address only as a stable rebind token and passes the character
+  stored in that slot to `SetCameraTarget`. The native-collision profile stays
+  disabled in user-facing runs pending a fresh isolated live acceptance.
+- The compass/minimap was still globally Player-1-owned even after portrait,
+  name, HP, and SP routing. Two exact call hooks now route its per-frame data:
+  `UIMapManager::Update` at RVA `0x00087760` resolves and latches the stable
+  character assigned to the scheduled cached viewport, and the later
+  `UIMapManager::Render` call at RVA `0x00087AF7` reuses that exact latch. This
+  keeps the centered yellow facing pointer and highlighted party dot on one
+  actor. The event-driven last-cluster snapshot at RVA `0x00087A27` remains
+  byte-for-byte native; it is global history rather than viewport HUD state.
+  A missing update latch or a mismatch with the camera actually rendered holds
+  the previous valid cache. Party order and controller ownership are never
+  rewritten for the map.
+- A disabled-by-default natural-door consent gate now captures the exact
+  native HidePartyMembers delta and retains the exact reference-backed
+  ResourceName before deferring `EnterTemporaryZone`. With two active humans,
+  it restores the exterior, freezes P1 and P2, requires a successfully drawn
+  overlay, then starts a full visible five-second countdown. P2 `A` accepts,
+  P2 `B` or P1 `Esc` vetoes, unanimous acceptance commits early, and silence
+  commits at the deadline. A newer neutral controller packet is required before
+  P2 consent, held Esc is fenced until release, and missing UI, stale source,
+  or uncertain visibility ownership blocks the door rather than failing open.
+  The remaining live risk is the opaque caller continuation after the deferred
+  void native call returns, so the feature remains an isolated acceptance
+  prototype rather than a default gameplay feature.
+- MinGW build, call-hook ABI tests, exact supported-image install/restore, and
+  independent Show/Hide signature-corruption rollback tests pass. Visual
+  acceptance still requires one entry and exit: both models visible inside,
+  shared authored room framing, no void, and automatic split/control recovery
+  outside without F10.
+
+## 2026-08-26 — Player-statehood and shared shop ownership audit
+
+**Status:** ownership policy and request-only P2 feedback are implemented;
+target-specific P2 world dispatch and independent shop UI remain future work.
+
+- A process-global coordinator now separates a human seat, its generation-bound
+  actor lease, and an interaction session. The immutable request provenance is
+  `(serial, player, actor, actor generation, target, source generation, kind,
+  target-known)`. A five-second targetless `GENERIC_REQUEST` is attention-only
+  and cannot enter the native commit path.
+- The P2 badge consumes that snapshot and shows `P2 INTERACT?` for a live P2
+  generic request. Texture invalidation follows request serial/state edges.
+  Known or uncertain shared shop/blacksmith modals suppress the split-only P2
+  badge and roaming-boundary overlay.
+- Exact-image static analysis found one `CInventory` pointer (`0x00808D84`), one
+  `CShopInventory` pointer (`0x00808D44`), and global shop/blacksmith UI state.
+  Buy, sell, and forge confirmations mutate shared item/money/equipment state in
+  sequential native calls without a re-entrant transaction or rollback seam.
+- The resulting policy is one serialized shared mutation lane. Money, items,
+  stock, forge bytes, and save data remain native party state. Future per-player
+  UI instances may shadow only selection, quantity, preview, confirmation,
+  stable merchant/item IDs, and catalog revision; every confirm must re-resolve
+  and revalidate against native state on the game thread.
+- Dialogue, travel, quests, save/load, cutscenes, and unknown interactions stay
+  host-only. The complete authority matrix, save offsets, failure policy, and
+  staged shop/blacksmith roadmap are recorded in
+  [player-statehood-design.md](player-statehood-design.md).
+
+## 2026-08-26 — Per-player blacksmith presentation experiment
+
+**Status:** exact-gated, default-off preview implemented; native forge commits
+remain intentionally disabled and live acceptance has not started.
+
+- `UIBlackSmithStart` (`0x00492C40`) only requests global UI mode `0x0D` and
+  returns AL. SOL discards that result and polls `UIBlackSmithActive`
+  (`0x00492C60`), which also returns AL only. A paired hook can therefore own
+  the wait lifecycle without activating or cloning `UILayerBlackSmith`; a
+  Start-only hook would strand or prematurely resume the script.
+- The loaded-image gate validates both exported RVAs and ASLR-relocated `A1`
+  operands, then detours the exact five-byte first instruction of both exports.
+  Independent signature mismatch, injected second-hook failure, and uninstall
+  tests require byte-for-byte restoration.
+- An accepted host Start opens two native-inert blacksmith shadows with distinct
+  P1/P2 page, category, cursor, revision, and close state. An exact-image,
+  read-only adapter now resolves each stable roster actor's equipped item and
+  inventory category, socket state, ordered blacksmith rune catalog, localized
+  labels, prices, compatibility, and projected native stat formula into bounded
+  pointer-free snapshots. Both panels still observe the same party money.
+  Keyboard and raw controller edges are routed separately while gameplay input
+  for both actors is frozen.
+- Every native root is checked against its exact object vtable before field
+  traversal. Actor provenance additionally requires the locked stable roster
+  type, the same statehood actor/generation, and exactly one occurrence of that
+  actor in the bounded live party. Catalog nodes require consistent head/tail
+  and next/previous links plus unique node, payload, and component identities.
+  Missing definitions, unsafe text, unresolved occupants, invalid stats, and
+  load/world/lease changes fail closed rather than leaving stale selectable
+  rows.
+- Separate catalog, inventory/augmentation, and economy generations are
+  observed. The inventory fingerprint includes ordered category entries and
+  both saved forge-byte regions. A changed catalog or inventory refreshes every
+  open seat and clears quote/confirmation state; selection is preserved by
+  stable item/rune ID rather than list index. Zero is a valid native item/rune
+  ID and is represented with explicit selection-valid state.
+- The split modal inspector excludes the mod-owned lifecycle only when the
+  adapter proves active and the real native layer/controller are inactive, so
+  both cached cameras remain visible. Any disagreement fails closed to the
+  existing native full-width policy.
+- Confirm remains a visible `COMMIT DISABLED` action. The serialized commit
+  adapter and its exact-image tests are built, but the native mutation backend
+  and UI commit wiring remain disabled. Start still exposes no merchant target,
+  so authoritative forging requires pre-Start target provenance and a fresh
+  game-thread revalidation of merchant, funds, equipment, socket, compatibility,
+  catalog price, inventory generation, and economy generation. The latter two
+  must both advance before a claimed commit could be marked verified.
+  `--party-lifecycle-trace` enables only this preview for a focused run; the
+  checked-in INI remains false.
+## 2026-08-26: per-player Blacksmith presentation target clarified
+
+- The custom two-panel Blacksmith overlay is retained only as a default-off,
+  read-only data-isolation research scaffold. It is not the intended player
+  interface.
+- The product target is one native Blacksmith window per player, preserving
+  each viewport and independent build navigation while serializing all
+  authoritative inventory, forge, and money mutations on the host/game thread.
+- Sudeki's merchant catalog remains shared and is not multiplied: purchases do
+  not deplete a listing and sales do not replenish one. Native inventory also
+  remains shared for compatibility with scripts and saves.
+- Personal wallets follow Tal, Ailish, Buki, and Elco. A purchase charges the
+  initiating character, while a shared-item sale removes the selected quantity
+  once and awards the full proceeds to all four character wallets.
+- Native per-player UI construction/virtualization, exact actor/merchant SOL
+  provenance, P2 target acquisition, live wallet persistence, and native commit
+  wiring remain future milestones. All mutation paths stay disabled.

@@ -3,7 +3,10 @@
 #include "cleanroom/audio.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
+#include "engine/player_statehood.h"
+#include "engine/transition_vote.h"
 #include "hooks/call_hook.h"
+#include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/control_separation.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/talos_coop_balance.h"
@@ -11,6 +14,7 @@
 
 #include <stdint.h>
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
 #if !defined(__GNUC__) || !defined(__i386__)
@@ -276,6 +280,10 @@ enum {
     ROSTER_BACKDROP_HEIGHT = 64u,
     PLAYER_TWO_BADGE_WIDTH = 168u,
     PLAYER_TWO_BADGE_HEIGHT = 42u,
+    TRANSITION_VOTE_OVERLAY_WIDTH = 512u,
+    TRANSITION_VOTE_OVERLAY_HEIGHT = 196u,
+    ROAMING_BOUNDARY_OVERLAY_WIDTH = 640u,
+    ROAMING_BOUNDARY_OVERLAY_HEIGHT = 480u,
     MENU_TIMEOUT_MS = 6000u,
     MENU_STATUS_INTERVAL_MS = 150u,
     ZONE_TRAVERSAL_PAGE_WORLDS = 0u,
@@ -372,7 +380,11 @@ enum {
     NATIVE_UI_TEXT_ALIGNMENT_TITLE_LEFT = 1u,
     NATIVE_ROSTER_TITLE_CONTENT_CENTER_X = 320u,
     NATIVE_ROSTER_HEADING_Y = 276u,
-    NATIVE_ROSTER_FIRST_ROW_Y = 342u,
+    /* The generated row texture and the native title-font queue use
+     * different vertical transforms.  This measured title-font coordinate
+     * centers the label on the generated capsule whose first texture row is
+     * ROSTER_CAPSULE_FIRST_TOP. */
+    NATIVE_ROSTER_FIRST_ROW_Y = 300u,
     NATIVE_ROSTER_PROMPT_Y = 438u
 };
 
@@ -662,6 +674,29 @@ static void *menu_texture_device;
 static void *player_two_badge_texture;
 static void *player_two_badge_device;
 static BOOL player_two_badge_dirty;
+static BOOL player_two_generic_request_visible;
+static uint32_t player_two_interaction_serial;
+static unsigned int player_two_interaction_state;
+static void *transition_vote_texture;
+static void *transition_vote_texture_device;
+static BOOL transition_vote_texture_dirty;
+static BOOL transition_vote_overlay_failure_logged;
+static uint32_t transition_vote_overlay_serial;
+static uint32_t transition_vote_overlay_tenth_seconds;
+static unsigned int transition_vote_overlay_state;
+static uint8_t transition_vote_overlay_accepted_mask;
+static char transition_vote_overlay_destination[64];
+static void *roaming_boundary_texture;
+static void *roaming_boundary_texture_device;
+static BOOL roaming_boundary_texture_dirty;
+static BOOL roaming_boundary_overlay_failure_logged;
+static unsigned int roaming_boundary_overlay_phase;
+static unsigned int roaming_boundary_overlay_percent;
+static void *blacksmith_ui_texture;
+static void *blacksmith_ui_texture_device;
+static BOOL blacksmith_ui_texture_dirty;
+static BOOL blacksmith_ui_overlay_failure_logged;
+static SudekiMpBlacksmithUiSnapshot blacksmith_ui_last_snapshot;
 static void *roster_button_texture;
 static void *roster_button_texture_device;
 static BOOL roster_button_texture_dirty;
@@ -680,6 +715,13 @@ static BOOL menu_open;
 static BOOL menu_texture_dirty;
 static unsigned int selected_item;
 static BOOL key_was_down[8];
+static BOOL story_test_boost_enabled;
+static BOOL story_test_boost_active;
+static BOOL story_test_boost_runtime_applied;
+static BOOL story_test_boost_key_was_down;
+static BOOL story_test_boost_failure_logged;
+static UINT story_test_boost_key;
+static float story_test_boost_multiplier;
 static BOOL item_present[MENU_DUMMY_INDEX + 1u];
 static SudekiMpPendingAction pending_actions[MENU_DUMMY_INDEX + 1u];
 static DWORD pending_started[MENU_DUMMY_INDEX + 1u];
@@ -767,6 +809,7 @@ static unsigned int roster_cursor;
 static BOOL multiplayer_requested;
 static BOOL multiplayer_active;
 static BOOL multiplayer_input_ready;
+static BOOL multiplayer_participation_requested;
 static BOOL coop_role_lock_active;
 static SudekiMpCleanroomActor coop_selected_actor;
 static DWORD coop_ready_failed_until;
@@ -1002,6 +1045,28 @@ static const char *roster_display_actor_label(unsigned int card) {
     return roster_actor_label((unsigned int)roster_display_actor(card));
 }
 
+static unsigned int roster_display_card_for_actor(unsigned int actor) {
+    unsigned int card;
+
+    for (card = 0u; card < MENU_ACTOR_COUNT; ++card) {
+        if ((unsigned int)roster_display_actor(card) == actor) {
+            return card;
+        }
+    }
+    return 0u;
+}
+
+static unsigned int roster_first_available_player_two_card(void) {
+    unsigned int card;
+
+    for (card = 0u; card < MENU_ACTOR_COUNT; ++card) {
+        if ((unsigned int)roster_display_actor(card) != roster_player_one) {
+            return card;
+        }
+    }
+    return 4u;
+}
+
 static unsigned int roster_actor_from_label(const char *label) {
     unsigned int actor;
 
@@ -1098,10 +1163,21 @@ static void roster_load_persistence(void) {
         roster_talos_health_scale,
         roster_talos_stagger_limit,
         roster_talos_stagger_window);
+    /* Loading the sidecar is also the authoritative way to restore the
+     * gameplay contract after the user cancels out of the New Game editor.
+     * The editor deliberately clears roster_locked while its choices are
+     * provisional; a Single profile must therefore clear an older in-memory
+     * co-op lock just as a Coop profile republishes it. */
+    roster_locked = FALSE;
     if (roster_coop_profile) {
         roster_locked = SudekiMpSplitScreenSetRosterTypes(
             roster_actor_type(roster_player_one),
             roster_actor_type(roster_player_two));
+    } else if (!SudekiMpSplitScreenClearRosterTypes()) {
+        SudekiMpLogFormat(
+            "cleanroom_menu event=native_roster_persistence status=rejected "
+            "reason=single_profile_runtime_release_failed error=%lu\r\n",
+            (unsigned long)GetLastError());
     }
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=loaded "
@@ -1914,7 +1990,6 @@ static void native_roster_release_options_rows(void *controller) {
 }
 
 static void native_roster_start_page_transition(BOOL from_title) {
-    roster_native_selection = 0u;
     roster_native_transition_started = GetTickCount();
     roster_native_transition_from_title = from_title;
 }
@@ -2436,9 +2511,13 @@ static BOOL native_roster_back_to_title(void *controller) {
     roster_waiting_new_game = FALSE;
     roster_pending_controller = NULL;
     native_roster_restore_vanilla_items(controller);
+    /* Back means cancel the provisional New Game edit, not disable the
+     * persisted co-op session.  Re-read and republish the sidecar so loading
+     * an existing save in the same process still performs its roster handoff. */
+    roster_load_persistence();
     SudekiMpLogWrite(
         "cleanroom_menu event=native_roster state=back_to_title "
-        "reason=user_selection\r\n");
+        "reason=user_selection contract=restored_from_sidecar\r\n");
     return TRUE;
 }
 
@@ -2650,6 +2729,23 @@ static BOOL native_roster_navigation(
         selection = selection + 1u;
         if (selection >= count) {
             selection = 0u;
+        }
+    }
+    /* Player 2 can see Player 1's choice, but cannot focus or confirm it.
+     * Treat that card as a disabled item instead of accepting a press and
+     * silently rejecting it later. */
+    while (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO &&
+           selection < MENU_ACTOR_COUNT &&
+           (unsigned int)roster_display_actor(selection) ==
+               roster_player_one) {
+        if (event == 6u) {
+            selection = selection == 0u ? count - 1u : selection - 1u;
+        }
+        else {
+            selection = selection + 1u;
+            if (selection >= count) {
+                selection = 0u;
+            }
         }
     }
     roster_native_selection = selection;
@@ -3040,6 +3136,7 @@ static void roster_begin_native_new_game(
     native_save_page_input_suppression_logged = FALSE;
     roster_native_screen = TRUE;
     roster_native_screen_kind = NATIVE_ROSTER_MODE;
+    roster_native_selection = 0u;
     menu_open = FALSE;
     menu_texture_dirty = FALSE;
     native_roster_start_page_transition(TRUE);
@@ -3231,13 +3328,15 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         }
         else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
             roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
-            roster_native_selection = roster_player_one;
+            roster_native_selection =
+                roster_display_card_for_actor(roster_player_one);
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
         else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
             roster_native_screen_kind = NATIVE_ROSTER_PLAYER_TWO;
-            roster_native_selection = roster_player_two;
+            roster_native_selection =
+                roster_display_card_for_actor(roster_player_two);
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
@@ -3250,6 +3349,13 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         return 1u;
     }
     if (_stricmp(action, "SudekiMPSinglePlayer") == 0) {
+        if (!SudekiMpSplitScreenClearRosterTypes()) {
+            SudekiMpLogFormat(
+                "cleanroom_menu event=native_roster status=rejected "
+                "reason=single_player_runtime_release_failed error=%lu\r\n",
+                (unsigned long)GetLastError());
+            return 0u;
+        }
         roster_coop_profile = FALSE;
         roster_talos_tuning_enabled = FALSE;
         roster_save_persistence();
@@ -3284,6 +3390,8 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
     }
     if (_stricmp(action, "SudekiMPCoop") == 0) {
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
+        roster_native_selection =
+            roster_display_card_for_actor(roster_player_one);
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
@@ -3335,6 +3443,7 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             (_stricmp(action, "SudekiMPP1Buki") == 0 ? 2u : 3u));
         roster_player_one = (unsigned int)roster_display_actor(actor);
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_TWO;
+        roster_native_selection = roster_first_available_player_two_card();
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
@@ -3355,18 +3464,23 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         }
         roster_player_two = actor;
         roster_native_screen_kind = NATIVE_ROSTER_CONFIRM;
+        roster_native_selection = 2u;
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
     }
     if (_stricmp(action, "SudekiMPRosterP1") == 0) {
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
+        roster_native_selection =
+            roster_display_card_for_actor(roster_player_one);
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
     }
     if (_stricmp(action, "SudekiMPRosterP2") == 0) {
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_TWO;
+        roster_native_selection =
+            roster_display_card_for_actor(roster_player_two);
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
@@ -3618,13 +3732,19 @@ static void update_action_status(void) {
         BOOL requested = SudekiMpControlSeparationPlayerTwoRequested();
         BOOL active = SudekiMpControlSeparationPlayerTwoActive();
         BOOL input_ready = SudekiMpControlSeparationInputReady();
+        BOOL participation_requested =
+            SudekiMpSplitScreenRosterParticipationRequested();
 
         if (multiplayer_requested != requested ||
             multiplayer_active != active ||
-            multiplayer_input_ready != input_ready) {
+            multiplayer_input_ready != input_ready ||
+            multiplayer_participation_requested !=
+                participation_requested) {
             multiplayer_requested = requested;
             multiplayer_active = active;
             multiplayer_input_ready = input_ready;
+            multiplayer_participation_requested =
+                participation_requested;
             menu_texture_dirty = TRUE;
             player_two_badge_dirty = TRUE;
         }
@@ -4285,12 +4405,125 @@ static void __attribute__((thiscall)) cleanroom_controller_update(
     SudekiMpCleanroomMenuUpdate();
 }
 
+static void service_story_test_boost(void) {
+    BOOL foreground;
+    BOOL key_down;
+    BOOL key_rising;
+    BOOL world_ready;
+    BOOL should_protect;
+    BOOL should_apply;
+    BOOL speed_ok;
+    BOOL party_ok;
+    BOOL applied;
+
+    if (!story_test_boost_enabled) {
+        return;
+    }
+    foreground = owns_foreground();
+    key_down = (GetAsyncKeyState((int)story_test_boost_key) & 0x8000) != 0;
+    key_rising = key_down && !story_test_boost_key_was_down;
+    story_test_boost_key_was_down = key_down;
+    if (foreground && key_rising) {
+        story_test_boost_active = !story_test_boost_active;
+        story_test_boost_failure_logged = FALSE;
+        SudekiMpLogFormat(
+            "story_test_boost event=toggle requested=%s "
+            "multiplier_bits=0x%08lx key=0x%02lx\r\n",
+            story_test_boost_active ? "on" : "off",
+            (unsigned long)float_bits(story_test_boost_multiplier),
+            (unsigned long)story_test_boost_key
+        );
+    }
+
+    world_ready = SudekiMpCleanroomEngineWorldReady();
+    should_protect = story_test_boost_active && world_ready;
+    should_apply = should_protect && foreground;
+    party_ok = SudekiMpCleanroomEngineMaintainPartyInvulnerability(
+        should_protect
+    );
+    speed_ok = SudekiMpCleanroomEngineSetStoryTestSpeed(
+        should_apply && party_ok,
+        story_test_boost_multiplier
+    );
+    if (should_apply && party_ok && !speed_ok) {
+        BOOL party_rollback_ok;
+        BOOL speed_rollback_ok;
+
+        /* A native/cutscene speed owner changed the global, or applying our
+         * multiplier failed verification. Yield ownership atomically instead
+         * of leaving protection and timing in a half-enabled state. */
+        story_test_boost_active = FALSE;
+        party_rollback_ok =
+            SudekiMpCleanroomEngineMaintainPartyInvulnerability(FALSE);
+        speed_rollback_ok = SudekiMpCleanroomEngineSetStoryTestSpeed(
+            FALSE,
+            story_test_boost_multiplier
+        );
+        should_protect = FALSE;
+        should_apply = FALSE;
+        party_ok = party_rollback_ok;
+        speed_ok = speed_rollback_ok;
+        SudekiMpLogFormat(
+            "story_test_boost event=fail_safe status=disabled "
+            "party_rollback=%s speed_rollback=%s "
+            "reason=speed_apply_or_ownership_conflict\r\n",
+            party_rollback_ok ? "confirmed" : "pending",
+            speed_rollback_ok ? "confirmed" : "skipped_or_failed"
+        );
+    }
+    applied = should_apply && speed_ok && party_ok;
+    if (applied != story_test_boost_runtime_applied) {
+        story_test_boost_runtime_applied = applied;
+        SudekiMpLogFormat(
+            "story_test_boost event=runtime state=%s requested=%s "
+            "foreground=%s world_ready=%s speed=%s party=%s "
+            "policy=suspend_during_title_loading_or_focus_loss\r\n",
+            applied ? "active" : "inactive",
+            story_test_boost_active ? "on" : "off",
+            foreground ? "true" : "false",
+            world_ready ? "true" : "false",
+            speed_ok ? "ready" : "failed",
+            party_ok ? "ready" : "failed"
+        );
+    }
+    if ((!speed_ok || (should_protect && !party_ok)) &&
+        !story_test_boost_failure_logged) {
+        story_test_boost_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "story_test_boost event=apply status=pending_or_rejected "
+            "requested=%s protect_requested=%s speed=%s party=%s "
+            "policy=retry_on_game_thread_and_frame_end\r\n",
+            story_test_boost_active ? "on" : "off",
+            should_protect ? "true" : "false",
+            speed_ok ? "ready" : "failed",
+            party_ok ? "ready" : "failed"
+        );
+    } else if (applied) {
+        story_test_boost_failure_logged = FALSE;
+    }
+}
+
 void SudekiMpCleanroomMenuUpdate(void) {
+    SudekiMpZoneTransitionVoteSnapshot vote_snapshot;
+    BOOL vote_was_active;
+
     if (game_base == NULL) {
         return;
     }
+    /* The custom blacksmith entry suppresses native controller updates while
+     * its panels own input. Service it before the generic frozen-input return
+     * so keyboard/controller navigation and clean close remain live. */
+    SudekiMpBlacksmithUiAdapterService();
+    vote_was_active = SudekiMpZoneTransitionGetVoteSnapshot(
+        &vote_snapshot) && vote_snapshot.active;
     SudekiMpTalosCoopBalanceService();
+    service_story_test_boost();
     clear_roster_resume_guard_after_gameplay_handoff();
+    SudekiMpZoneTransitionService();
+    if (vote_was_active ||
+        SudekiMpControlSeparationGameplayInputFrozen()) {
+        return;
+    }
     if (zone_traversal_mode) {
         SudekiMpZoneTraversalService();
     }
@@ -4302,8 +4535,9 @@ void SudekiMpCleanroomMenuUpdate(void) {
                 BOOL native_roles_locked =
                     SudekiMpSplitScreenRolesLocked();
                 if (coop_role_lock_active != native_roles_locked) {
-                    (void)SudekiMpControlSeparationSetRoleLock(
-                        native_roles_locked);
+                    /* ApplyRoster owns the atomic control claim and rollback.
+                     * This mirror only protects cleanroom UI actions from
+                     * mutating an established story roster. */
                     coop_role_lock_active = native_roles_locked;
                     SudekiMpLogFormat(
                         "cleanroom_menu event=native_roster "
@@ -4323,6 +4557,7 @@ static const uint8_t *glyph_rows(char character) {
     static const uint8_t greater[7] = {16,8,4,2,4,8,16};
     static const uint8_t dash[7] = {0,0,0,31,0,0,0};
     static const uint8_t colon[7] = {0,4,4,0,4,4,0};
+    static const uint8_t question[7] = {14,17,1,2,4,0,4};
 
     if (character >= 'A' && character <= 'Z') {
         return font_letters[character - 'A'];
@@ -4333,6 +4568,7 @@ static const uint8_t *glyph_rows(char character) {
     if (character == '>') return greater;
     if (character == '-') return dash;
     if (character == ':') return colon;
+    if (character == '?') return question;
     return blank;
 }
 
@@ -4438,8 +4674,12 @@ static void draw_roster_button_capsule(
     int top,
     BOOL highlighted
 ) {
-    const int left = 55;
-    const int right = 585;
+    /* The first prototype copied the near-full-width proportions of the
+     * title page.  On an independent roster page that read as an empty rail
+     * rather than a button.  Keep the native capsule language but give each
+     * choice a deliberate, centered 368-pixel footprint. */
+    const int left = 136;
+    const int right = 504;
     const int bottom = top + (int)ROSTER_CAPSULE_HEIGHT;
     const int border_inset = 2;
     const int inner_radius = 8;
@@ -4502,12 +4742,12 @@ static void draw_roster_button_capsule(
             vertical = (unsigned int)(bottom - y) * 24u /
                 (unsigned int)(bottom - top);
             if (highlighted) {
-                if (local_x < 175) {
-                    cyan_weight = (unsigned int)(175 - local_x) * 190u / 175u;
+                if (local_x < 120) {
+                    cyan_weight = (unsigned int)(120 - local_x) * 190u / 120u;
                 }
-                if (local_x > right - left - 176) {
+                if (local_x > right - left - 121) {
                     gold_weight = (unsigned int)(local_x -
-                        (right - left - 176)) * 175u / 175u;
+                        (right - left - 121)) * 175u / 120u;
                 }
             }
             fill_red = roster_color_channel(29u + vertical, 0u, 65u,
@@ -5060,6 +5300,15 @@ static void draw_roster_character_card(
     const char *label = roster_display_actor_label(actor);
     int y;
 
+    if (selected) {
+        /* A broad translucent glow makes ownership readable before the
+         * player needs to inspect the name or portrait. */
+        fill_rectangle(pixels, pitch,
+            left - 5, top - 5, right + 5, bottom + 5,
+            (selection_color & UINT32_C(0x00ffffff)) |
+                UINT32_C(0x4f000000));
+    }
+
     for (y = top - 3; y < bottom + 4; ++y) {
         uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
         int x;
@@ -5079,13 +5328,15 @@ static void draw_roster_character_card(
                 continue;
             }
             if (inner == 0u) {
-                const uint32_t ring = selected ? selection_color :
-                    UINT32_C(0xff17202c);
-                row[x] = ((236u * outer / 4u) << 24) | (ring & UINT32_C(0x00ffffff));
+                const uint32_t ring = selected ? selection_color : actor_color;
+                const unsigned int ring_alpha = selected ? 244u : 146u;
+                row[x] = ((ring_alpha * outer / 4u) << 24) |
+                    (ring & UINT32_C(0x00ffffff));
                 continue;
             }
             fill = unavailable ? UINT32_C(0xff20252e) :
-                UINT32_C(0xff192331);
+                (selected ? UINT32_C(0xff243245) :
+                    UINT32_C(0xff192331));
             if (selected && (x < left + 5 || x > right - 6 ||
                     y < top + 5 || y > bottom - 6)) {
                 fill = (fill & UINT32_C(0xff1f1f1f)) |
@@ -5095,10 +5346,24 @@ static void draw_roster_character_card(
         }
     }
 
+    /* Character identity owns the lower accent; controller ownership owns
+     * the small P1/P2 badge.  This keeps Ailish blue, Tal red, Buki gold and
+     * Elco green without confusing those colors with player numbers. */
+    fill_rectangle(pixels, pitch,
+        left + 10, bottom - 5, right - 10, bottom - 2, actor_color);
+    if (selected) {
+        const char *player_badge = roster_native_screen_kind ==
+            NATIVE_ROSTER_PLAYER_TWO ? "P2" : "P1";
+        fill_rectangle(pixels, pitch,
+            left + 8, top - 13, left + 38, top + 2, selection_color);
+        draw_text(pixels, pitch, left + 17, top - 9,
+            player_badge, UINT32_C(0xffffffff), 1);
+    }
+
     /* The silhouette is only a safe fallback while Sudeki's own portrait is
      * unavailable.  Once the resident game texture resolves, leave the card
      * interior empty so the head is the sole portrait presentation. */
-    if (roster_native_portrait_gpu_textures[actor] == NULL) {
+    if (roster_native_portrait_gpu_textures[actor] == NULL || unavailable) {
         fill_rectangle(pixels, pitch,
             left + 49, top + 17, left + 77, top + 43, actor_color);
         fill_rectangle(pixels, pitch,
@@ -5106,9 +5371,66 @@ static void draw_roster_character_card(
         fill_rectangle(pixels, pitch,
             left + 46, top + 13, left + 80, top + 18,
             selected ? selection_color : UINT32_C(0xffc8d1dc));
-        draw_text(pixels, pitch, left + 56, top + 66,
-            label[0] == '\0' ? "?" : (char[2]){label[0], '\0'},
-            selected ? UINT32_C(0xffffffff) : UINT32_C(0xffb6c0cc), 2);
+        if (unavailable) {
+            int offset;
+            for (offset = 0; offset < 48; ++offset) {
+                fill_rectangle(pixels, pitch,
+                    left + 39 + offset, top + 15 + offset,
+                    left + 41 + offset, top + 17 + offset,
+                    UINT32_C(0xd8b9c0c8));
+                fill_rectangle(pixels, pitch,
+                    right - 41 - offset, top + 15 + offset,
+                    right - 39 - offset, top + 17 + offset,
+                    UINT32_C(0xd8b9c0c8));
+            }
+            draw_text(pixels, pitch, left + 48, top + 67,
+                "TAKEN", UINT32_C(0xffb9c0c8), 1);
+        }
+        else {
+            draw_text(pixels, pitch, left + 56, top + 66,
+                label[0] == '\0' ? "?" : (char[2]){label[0], '\0'},
+                selected ? UINT32_C(0xffffffff) :
+                    UINT32_C(0xffb6c0cc), 2);
+        }
+    }
+}
+
+static void draw_roster_character_back_button(
+    uint32_t *pixels,
+    int pitch,
+    BOOL selected
+) {
+    const int left = 238;
+    const int right = 402;
+    const int top = 407;
+    const int bottom = 435;
+    const uint32_t accent = selected ? roster_player_selection_color() :
+        UINT32_C(0xff465366);
+    int y;
+
+    for (y = top - 2; y < bottom + 3; ++y) {
+        uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
+        int x;
+        for (x = left - 2; x < right + 3; ++x) {
+            const unsigned int outer = roster_rounded_rect_coverage(
+                x, y, left, top, right, bottom, 14);
+            const unsigned int inner = roster_rounded_rect_coverage(
+                x, y, left + 3, top + 3, right - 3, bottom - 3, 10);
+
+            if (outer == 0u) {
+                continue;
+            }
+            if (inner == 0u) {
+                row[x] = ((selected ? 242u : 170u) * outer / 4u << 24) |
+                    (accent & UINT32_C(0x00ffffff));
+            }
+            else {
+                const uint32_t fill = selected ? UINT32_C(0xff26384a) :
+                    UINT32_C(0xff18212d);
+                row[x] = (232u * inner / 4u << 24) |
+                    (fill & UINT32_C(0x00ffffff));
+            }
+        }
     }
 }
 
@@ -5130,6 +5452,8 @@ static void draw_roster_character_cards(uint32_t *pixels, int pitch) {
             player_two && roster_display_actor(actor) == roster_player_one
         );
     }
+    draw_roster_character_back_button(
+        pixels, pitch, roster_native_selection == 4u);
 }
 
 static const char *item_status(unsigned int index) {
@@ -5687,6 +6011,7 @@ static BOOL update_player_two_badge_texture(void *texture) {
     uint32_t *pixels;
     uint32_t accent;
     const char *text;
+    BOOL participation_requested;
     HRESULT result;
 
     if (vtable == NULL) {
@@ -5702,10 +6027,18 @@ static BOOL update_player_two_badge_texture(void *texture) {
         return FALSE;
     }
     pixels = (uint32_t *)locked.bits;
-    accent = multiplayer_active && multiplayer_input_ready ?
-        UINT32_C(0xff7cf29a) : UINT32_C(0xffffd166);
-    text = multiplayer_active && multiplayer_input_ready ?
-        "P2 READY" : (multiplayer_active ? "P2 RAZER" : "P2 JOINING");
+    participation_requested =
+        SudekiMpSplitScreenRosterParticipationRequested();
+    accent = player_two_generic_request_visible ?
+        UINT32_C(0xffffd166) :
+        (!participation_requested ? UINT32_C(0xff58aee8) :
+            (multiplayer_active && multiplayer_input_ready ?
+                UINT32_C(0xff7cf29a) : UINT32_C(0xffffd166)));
+    text = player_two_generic_request_visible ? "P2 INTERACT?" :
+        (!participation_requested ? "P2 START JOIN" :
+            (multiplayer_active && multiplayer_input_ready ?
+                "P2 READY" :
+                (multiplayer_active ? "P2 CONNECT" : "P2 JOINING")));
     fill_rectangle(
         pixels,
         locked.pitch,
@@ -5728,11 +6061,16 @@ static BOOL update_player_two_badge_texture(void *texture) {
         pixels, locked.pitch, PLAYER_TWO_BADGE_WIDTH - 3, 0,
         PLAYER_TWO_BADGE_WIDTH, PLAYER_TWO_BADGE_HEIGHT, accent);
     fill_rectangle(
-        pixels, locked.pitch, 12, 13, 26, 29, accent);
+        pixels, locked.pitch,
+        player_two_generic_request_visible ? 8 : 12,
+        player_two_generic_request_visible ? 17 : 13,
+        player_two_generic_request_visible ? 16 : 26,
+        player_two_generic_request_visible ? 25 : 29,
+        accent);
     draw_text(
         pixels,
         locked.pitch,
-        36,
+        player_two_generic_request_visible ? 22 : 36,
         13,
         text,
         UINT32_C(0xffffffff),
@@ -5786,6 +6124,648 @@ static BOOL ensure_player_two_badge_texture(void *device) {
     }
     player_two_badge_dirty = TRUE;
     return update_player_two_badge_texture(player_two_badge_texture);
+}
+
+static const char *blacksmith_ui_character_label(uint32_t character_id) {
+    switch (character_id) {
+    case 0x23u: return "TAL";
+    case 0x05u: return "BUKI";
+    case 0x0eu: return "ELCO";
+    case 0x01u: return "AILISH";
+    default: return "UNKNOWN";
+    }
+}
+
+static long blacksmith_ui_round_float(float value) {
+    if (!isfinite(value)) return 0L;
+    if (value > 999999.0f) return 999999L;
+    if (value < -999999.0f) return -999999L;
+    return value >= 0.0f ? (long)(value + 0.5f) :
+        (long)(value - 0.5f);
+}
+
+static const SudekiMpBlacksmithReadEquipment *
+blacksmith_ui_selected_equipment(
+    const SudekiMpBlacksmithUiSnapshot *snapshot,
+    unsigned int player_index
+) {
+    const SudekiMpBlacksmithReadSeat *read_seat;
+    uint32_t selected;
+
+    if (snapshot == NULL ||
+        player_index >= SUDEKIMP_BLACKSMITH_UI_PLAYER_COUNT) {
+        return NULL;
+    }
+    read_seat = &snapshot->read_model.seats[player_index];
+    selected = snapshot->seats[player_index].selected_equipment_index;
+    return read_seat->valid && selected < read_seat->equipment_count ?
+        &read_seat->equipment[selected] : NULL;
+}
+
+static const SudekiMpBlacksmithReadComponent *
+blacksmith_ui_selected_component(
+    const SudekiMpBlacksmithUiSnapshot *snapshot,
+    unsigned int player_index
+) {
+    uint32_t selected;
+
+    if (snapshot == NULL ||
+        player_index >= SUDEKIMP_BLACKSMITH_UI_PLAYER_COUNT) {
+        return NULL;
+    }
+    selected = snapshot->seats[player_index].selected_component_index;
+    return selected < snapshot->read_model.component_count ?
+        &snapshot->read_model.components[selected] : NULL;
+}
+
+static void draw_blacksmith_ui_seat(
+    uint32_t *pixels,
+    int pitch,
+    const SudekiMpBlacksmithUiSnapshot *snapshot,
+    unsigned int player_index
+) {
+    static const char *const page_labels[
+        SUDEKIMP_BLACKSMITH_UI_PAGE_COUNT] = {
+        "EQUIPMENT", "SOCKETS", "COMPONENTS"
+    };
+    const SudekiMpBlacksmithUiSeatSnapshot *seat =
+        &snapshot->seats[player_index];
+    const SudekiMpBlacksmithReadSeat *read_seat =
+        &snapshot->read_model.seats[player_index];
+    const SudekiMpBlacksmithReadEquipment *selected_equipment =
+        blacksmith_ui_selected_equipment(snapshot, player_index);
+    const SudekiMpBlacksmithReadComponent *selected_component =
+        blacksmith_ui_selected_component(snapshot, player_index);
+    const int left = player_index == 0u ? 8 : 328;
+    const int right = left + 304;
+    const uint32_t accent = player_index == 0u ?
+        UINT32_C(0xffffd166) : UINT32_C(0xff58aee8);
+    char title[40];
+    char page[40];
+    char category[40];
+    char revision[40];
+    char row_text[64];
+    char row_detail[64];
+    char stat_text[64];
+    uint32_t row_count = 0u;
+    uint32_t row_offset = 0u;
+    unsigned int row;
+
+    fill_rectangle(pixels, pitch, left, 34, right, 446,
+        UINT32_C(0xde111923));
+    fill_rectangle(pixels, pitch, left, 34, right, 39, accent);
+    fill_rectangle(pixels, pitch, left, 441, right, 446, accent);
+    fill_rectangle(pixels, pitch, left, 34, left + 4, 446, accent);
+    fill_rectangle(pixels, pitch, right - 4, 34, right, 446, accent);
+    wsprintfA(title, "P%lu %s BUILD",
+        (unsigned long)(player_index + 1u),
+        blacksmith_ui_character_label(seat->character_id));
+    draw_text(pixels, pitch, left + 16, 54, title,
+        UINT32_C(0xffffffff), 2);
+    if (!seat->open) {
+        draw_text(pixels, pitch, left + 36, 204,
+            "PLAYER CLOSED", accent, 2);
+        draw_text(pixels, pitch, left + 42, 234,
+            "WAITING FOR PARTY", UINT32_C(0xffb7c4d6), 1);
+        return;
+    }
+
+    wsprintfA(page, "PAGE: %s",
+        page_labels[seat->page % SUDEKIMP_BLACKSMITH_UI_PAGE_COUNT]);
+    wsprintfA(category, "FILTER: %lu",
+        (unsigned long)(seat->category + 1u));
+    wsprintfA(revision, "SEAT REV: %lu",
+        (unsigned long)seat->revision);
+    draw_text(pixels, pitch, left + 16, 88, page,
+        UINT32_C(0xffdce6f4), 1);
+    draw_text(pixels, pitch, left + 16, 102, category,
+        UINT32_C(0xffdce6f4), 1);
+    draw_text(pixels, pitch, left + 176, 102, revision,
+        UINT32_C(0xff8fa2bb), 1);
+    if (seat->page == 0u) {
+        row_count = read_seat->equipment_count;
+        row_offset = seat->category * SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT;
+    } else if (seat->page == 1u) {
+        row_count = selected_equipment == NULL ? 0u :
+            selected_equipment->socket_count;
+    } else {
+        row_count = snapshot->read_model.component_count;
+        row_offset = seat->category * SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT;
+    }
+    for (row = 0u; row < SUDEKIMP_BLACKSMITH_UI_CURSOR_COUNT; ++row) {
+        const int top = 124 + (int)row * 32;
+        const uint32_t absolute = row_offset + row;
+        uint32_t color = UINT32_C(0xffffffff);
+        BOOL row_present = absolute < row_count;
+
+        row_text[0] = '\0';
+        row_detail[0] = '\0';
+        if (row_present && seat->page == 0u) {
+            const SudekiMpBlacksmithReadEquipment *equipment =
+                &read_seat->equipment[absolute];
+            lstrcpynA(row_text, equipment->name, sizeof(row_text));
+            wsprintfA(row_detail, "ID %lu%s",
+                (unsigned long)equipment->item_id,
+                equipment->equipped ? "  EQUIPPED" : "");
+        } else if (row_present && seat->page == 1u &&
+                selected_equipment != NULL) {
+            const SudekiMpBlacksmithReadSocket *socket =
+                &selected_equipment->sockets[absolute];
+            wsprintfA(row_text, "SOCKET %lu: %s",
+                (unsigned long)(absolute + 1u), socket->occupant_name);
+            if (socket->locked) {
+                lstrcpynA(row_detail, "LOCKED", sizeof(row_detail));
+                color = UINT32_C(0xff8fa2bb);
+            } else if (socket->authored_component_id != -1) {
+                wsprintfA(row_detail, "AUTHORED  BANK %lu",
+                    (unsigned long)socket->bank);
+                color = UINT32_C(0xff8fa2bb);
+            } else {
+                wsprintfA(row_detail, "BANK %lu",
+                    (unsigned long)socket->bank);
+            }
+        } else if (row_present && seat->page == 2u) {
+            const SudekiMpBlacksmithReadComponent *component =
+                &snapshot->read_model.components[absolute];
+            BOOL compatible = selected_equipment != NULL &&
+                SudekiMpBlacksmithReadModelComponentCompatible(
+                    selected_equipment,
+                    seat->selected_socket_index,
+                    component);
+            lstrcpynA(row_text, component->name, sizeof(row_text));
+            if (component->effect_class == 2u) {
+                wsprintfA(row_detail, "%ldG  %s %ld%%",
+                    (long)component->price, component->effect_name,
+                    blacksmith_ui_round_float(component->effect * 100.0f));
+            } else {
+                wsprintfA(row_detail, "%ldG  %s %ld",
+                    (long)component->price, component->effect_name,
+                    blacksmith_ui_round_float(component->effect));
+            }
+            if (!compatible) color = UINT32_C(0xff718096);
+        }
+        if (row_present && row == seat->cursor) {
+            fill_rectangle(pixels, pitch,
+                left + 14, top - 5, right - 14, top + 24,
+                player_index == 0u ?
+                    UINT32_C(0xb03c3420) : UINT32_C(0xb019354c));
+            draw_text(pixels, pitch, left + 22, top,
+                ">", accent, 2);
+        }
+        if (row_present) {
+            draw_text(pixels, pitch, left + 42, top,
+                row_text, color, 1);
+            draw_text(pixels, pitch, left + 42, top + 12,
+                row_detail, color, 1);
+        }
+    }
+    if (selected_equipment != NULL) {
+        draw_text(pixels, pitch, left + 18, 319,
+            selected_equipment->name, accent, 1);
+        if (selected_equipment->stats_valid) {
+            wsprintfA(stat_text, "POWER %ld   RESIST %ld%%",
+                blacksmith_ui_round_float(
+                    selected_equipment->primary_stat),
+                blacksmith_ui_round_float(
+                    selected_equipment->secondary_percent));
+        } else {
+            lstrcpynA(stat_text, "STATS UNAVAILABLE",
+                sizeof(stat_text));
+        }
+        draw_text(pixels, pitch, left + 18, 333,
+            stat_text, UINT32_C(0xffdce6f4), 1);
+    }
+    if (seat->page == 2u && selected_equipment != NULL &&
+        selected_component != NULL) {
+        float projected_primary;
+        float projected_secondary;
+        if (SudekiMpBlacksmithReadModelProjectStats(
+                selected_equipment, seat->selected_socket_index,
+                selected_component, &projected_primary,
+                &projected_secondary)) {
+            wsprintfA(stat_text, "PREVIEW %ld POWER  %ld%% RESIST",
+                blacksmith_ui_round_float(projected_primary),
+                blacksmith_ui_round_float(projected_secondary));
+        } else {
+            lstrcpynA(stat_text, "PREVIEW INCOMPATIBLE",
+                sizeof(stat_text));
+        }
+        draw_text(pixels, pitch, left + 18, 347,
+            stat_text, UINT32_C(0xffaebdd0), 1);
+    }
+    if (seat->notice ==
+            SUDEKIMP_BLACKSMITH_UI_NOTICE_COMMIT_DISABLED) {
+        draw_text(pixels, pitch, left + 32, 372,
+            "PREVIEW ONLY", UINT32_C(0xffff8f70), 2);
+    } else {
+        draw_text(pixels, pitch, left + 24, 372,
+            snapshot->read_model.catalog_truncated ?
+                "CATALOG PARTIAL - VALID ROWS ONLY" :
+                "SELECT A PREVIEW ROW",
+            UINT32_C(0xffaebdd0), 1);
+    }
+    draw_text(pixels, pitch, left + 18, 404,
+        player_index == 0u ?
+            "ARROWS MOVE  ENTER PREVIEW  ESC CLOSE" :
+            "DPAD MOVE  A PREVIEW  B CLOSE",
+        UINT32_C(0xffdce6f4), 1);
+    draw_text(pixels, pitch, left + 18, 418,
+        player_index == 0u ?
+            "PAGE UP AND PAGE DOWN CHANGE PAGE" :
+            "SHOULDERS CHANGE PAGE",
+        UINT32_C(0xff8fa2bb), 1);
+}
+
+static BOOL update_blacksmith_ui_texture(
+    void *texture,
+    const SudekiMpBlacksmithUiSnapshot *snapshot
+) {
+    void **vtable = *(void ***)texture;
+    D3DTextureLockRectFunction lock_rectangle;
+    D3DTextureUnlockRectFunction unlock_rectangle;
+    SudekiMpD3DLockedRect locked;
+    uint32_t *pixels;
+    char money[96];
+    HRESULT result;
+
+    if (vtable == NULL || snapshot == NULL) {
+        return FALSE;
+    }
+    lock_rectangle = (D3DTextureLockRectFunction)
+        vtable[D3D_TEXTURE_LOCK_RECT_INDEX];
+    unlock_rectangle = (D3DTextureUnlockRectFunction)
+        vtable[D3D_TEXTURE_UNLOCK_RECT_INDEX];
+    if (lock_rectangle == NULL || unlock_rectangle == NULL ||
+        FAILED(lock_rectangle(texture, 0u, &locked, NULL, 0u)) ||
+        locked.bits == NULL ||
+        locked.pitch < (int)(MENU_TEXTURE_WIDTH * sizeof(uint32_t))) {
+        return FALSE;
+    }
+    pixels = (uint32_t *)locked.bits;
+    fill_rectangle(pixels, locked.pitch, 0, 0,
+        MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT, UINT32_C(0x72070b11));
+    fill_rectangle(pixels, locked.pitch, 0, 0,
+        MENU_TEXTURE_WIDTH, 28, UINT32_C(0xf018202c));
+    wsprintfA(money,
+        "BLACKSMITH LAB  MONEY %lu  CAT %lu  INV %lu  ECO %lu",
+        (unsigned long)snapshot->shared_money,
+        (unsigned long)snapshot->catalog_generation,
+        (unsigned long)snapshot->inventory_generation,
+        (unsigned long)snapshot->economy_generation);
+    draw_text(pixels, locked.pitch, 76, 8, money,
+        UINT32_C(0xffffffff), 1);
+    draw_blacksmith_ui_seat(
+        pixels, locked.pitch, snapshot, 0u);
+    draw_blacksmith_ui_seat(
+        pixels, locked.pitch, snapshot, 1u);
+    fill_rectangle(pixels, locked.pitch, 0, 454,
+        MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT,
+        UINT32_C(0xf018202c));
+    draw_text(pixels, locked.pitch, 82, 460,
+        "EXPERIMENTAL PREVIEW - NATIVE PURCHASES AND COMMITS DISABLED",
+        UINT32_C(0xffff8f70), 1);
+    result = unlock_rectangle(texture, 0u);
+    if (FAILED(result)) {
+        return FALSE;
+    }
+    blacksmith_ui_texture_dirty = FALSE;
+    blacksmith_ui_last_snapshot = *snapshot;
+    return TRUE;
+}
+
+static BOOL ensure_blacksmith_ui_texture(
+    void *device,
+    const SudekiMpBlacksmithUiSnapshot *snapshot
+) {
+    void **vtable;
+    D3DCreateTextureFunction create_texture;
+    HRESULT result;
+
+    if (blacksmith_ui_texture_device != device) {
+        release_com_object(&blacksmith_ui_texture);
+        blacksmith_ui_texture_device = device;
+        blacksmith_ui_texture_dirty = TRUE;
+    }
+    if (memcmp(&blacksmith_ui_last_snapshot, snapshot,
+            sizeof(*snapshot)) != 0) {
+        blacksmith_ui_texture_dirty = TRUE;
+    }
+    if (blacksmith_ui_texture != NULL) {
+        return !blacksmith_ui_texture_dirty ||
+            update_blacksmith_ui_texture(blacksmith_ui_texture, snapshot);
+    }
+    vtable = *(void ***)device;
+    create_texture = vtable == NULL ? NULL : (D3DCreateTextureFunction)
+        vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
+    if (create_texture == NULL) {
+        return FALSE;
+    }
+    result = create_texture(
+        device,
+        MENU_TEXTURE_WIDTH,
+        MENU_TEXTURE_HEIGHT,
+        1u,
+        D3D_USAGE_DYNAMIC,
+        D3D_FORMAT_A8R8G8B8,
+        D3D_POOL_DEFAULT,
+        &blacksmith_ui_texture,
+        NULL);
+    if (FAILED(result) || blacksmith_ui_texture == NULL) {
+        blacksmith_ui_texture = NULL;
+        return FALSE;
+    }
+    blacksmith_ui_texture_dirty = TRUE;
+    return update_blacksmith_ui_texture(blacksmith_ui_texture, snapshot);
+}
+
+static BOOL update_transition_vote_texture(
+    void *texture,
+    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+) {
+    void **vtable = *(void ***)texture;
+    D3DTextureLockRectFunction lock_rectangle;
+    D3DTextureUnlockRectFunction unlock_rectangle;
+    SudekiMpD3DLockedRect locked;
+    uint32_t *pixels;
+    char destination[40];
+    char countdown[40];
+    const char *status;
+    unsigned long remaining_tenths;
+    unsigned long seconds;
+    unsigned long tenths;
+    HRESULT result;
+
+    if (vtable == NULL || snapshot == NULL) {
+        return FALSE;
+    }
+    lock_rectangle = (D3DTextureLockRectFunction)
+        vtable[D3D_TEXTURE_LOCK_RECT_INDEX];
+    unlock_rectangle = (D3DTextureUnlockRectFunction)
+        vtable[D3D_TEXTURE_UNLOCK_RECT_INDEX];
+    if (lock_rectangle == NULL || unlock_rectangle == NULL ||
+        FAILED(lock_rectangle(texture, 0u, &locked, NULL, 0u)) ||
+        locked.bits == NULL ||
+        locked.pitch < (int)(TRANSITION_VOTE_OVERLAY_WIDTH *
+            sizeof(uint32_t))) {
+        return FALSE;
+    }
+    pixels = (uint32_t *)locked.bits;
+    fill_rectangle(
+        pixels, locked.pitch, 0, 0,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        UINT32_C(0xe818202c));
+    fill_rectangle(pixels, locked.pitch, 0, 0,
+        TRANSITION_VOTE_OVERLAY_WIDTH, 4,
+        UINT32_C(0xff35e6e0));
+    fill_rectangle(pixels, locked.pitch, 0,
+        TRANSITION_VOTE_OVERLAY_HEIGHT - 4,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        UINT32_C(0xff35e6e0));
+    fill_rectangle(pixels, locked.pitch, 0, 0, 4,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        UINT32_C(0xff35e6e0));
+    fill_rectangle(pixels, locked.pitch,
+        TRANSITION_VOTE_OVERLAY_WIDTH - 4, 0,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        UINT32_C(0xff35e6e0));
+
+    memcpy(destination, snapshot->destination,
+        sizeof(destination) - 1u);
+    destination[sizeof(destination) - 1u] = '\0';
+    remaining_tenths =
+        (unsigned long)((snapshot->remaining_ms + 99u) / 100u);
+    seconds = remaining_tenths / 10u;
+    tenths = remaining_tenths % 10u;
+    wsprintfA(countdown, "AUTO ENTER IN %lu.%lu", seconds, tenths);
+    status = snapshot->state == SUDEKIMP_TRANSITION_VOTE_READY ?
+        "P1 READY   P2 READY" :
+        ((snapshot->accepted_mask & 0x02u) != 0u ?
+            "P1 READY   P2 READY" : "P1 READY   P2 WAITING");
+
+    draw_text(pixels, locked.pitch, 58, 18,
+        "CO-OP TRAVEL VOTE", UINT32_C(0xff5ef7f0), 3);
+    draw_text(pixels, locked.pitch, 22, 54,
+        "DESTINATION", UINT32_C(0xffaab8c8), 2);
+    draw_text(pixels, locked.pitch, 22, 76,
+        destination[0] == '\0' ? "UNKNOWN" : destination,
+        UINT32_C(0xffffffff), 2);
+    draw_text(pixels, locked.pitch, 22, 104,
+        status, UINT32_C(0xff7cf29a), 2);
+    draw_text(pixels, locked.pitch, 22, 128,
+        countdown, UINT32_C(0xffffd166), 2);
+    draw_text(pixels, locked.pitch, 22, 154,
+        "P2 A ACCEPT   P2 B CANCEL", UINT32_C(0xffffffff), 2);
+    draw_text(pixels, locked.pitch, 22, 176,
+        "P1 ESC CANCEL", UINT32_C(0xffff9b9b), 1);
+
+    result = unlock_rectangle(texture, 0u);
+    if (FAILED(result)) {
+        return FALSE;
+    }
+    transition_vote_texture_dirty = FALSE;
+    return TRUE;
+}
+
+static BOOL ensure_transition_vote_texture(
+    void *device,
+    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+) {
+    void **vtable;
+    D3DCreateTextureFunction create_texture;
+    uint32_t tenth_seconds;
+    HRESULT result;
+
+    if (device == NULL || snapshot == NULL || !snapshot->active) {
+        return FALSE;
+    }
+    tenth_seconds = (snapshot->remaining_ms + 99u) / 100u;
+    if (transition_vote_overlay_serial != snapshot->serial ||
+        transition_vote_overlay_tenth_seconds != tenth_seconds ||
+        transition_vote_overlay_state != snapshot->state ||
+        transition_vote_overlay_accepted_mask != snapshot->accepted_mask ||
+        memcmp(transition_vote_overlay_destination,
+            snapshot->destination,
+            sizeof(transition_vote_overlay_destination)) != 0) {
+        transition_vote_overlay_serial = snapshot->serial;
+        transition_vote_overlay_tenth_seconds = tenth_seconds;
+        transition_vote_overlay_state = snapshot->state;
+        transition_vote_overlay_accepted_mask = snapshot->accepted_mask;
+        memcpy(transition_vote_overlay_destination,
+            snapshot->destination,
+            sizeof(transition_vote_overlay_destination));
+        transition_vote_texture_dirty = TRUE;
+    }
+    if (transition_vote_texture_device != device) {
+        release_com_object(&transition_vote_texture);
+        transition_vote_texture_device = device;
+        transition_vote_texture_dirty = TRUE;
+    }
+    if (transition_vote_texture != NULL) {
+        return !transition_vote_texture_dirty ||
+            update_transition_vote_texture(
+                transition_vote_texture, snapshot);
+    }
+    vtable = *(void ***)device;
+    create_texture = vtable == NULL ? NULL :
+        (D3DCreateTextureFunction)
+            vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
+    if (create_texture == NULL) {
+        return FALSE;
+    }
+    result = create_texture(
+        device,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        1u,
+        D3D_USAGE_DYNAMIC,
+        D3D_FORMAT_A8R8G8B8,
+        D3D_POOL_DEFAULT,
+        &transition_vote_texture,
+        NULL);
+    if (FAILED(result) || transition_vote_texture == NULL) {
+        transition_vote_texture = NULL;
+        return FALSE;
+    }
+    transition_vote_texture_dirty = TRUE;
+    return update_transition_vote_texture(
+        transition_vote_texture, snapshot);
+}
+
+static BOOL update_roaming_boundary_texture(
+    void *texture,
+    const SudekiMpRoamingBoundaryEvaluation *snapshot
+) {
+    static const int panel_left[2] = {16, 336};
+    void **vtable = *(void ***)texture;
+    D3DTextureLockRectFunction lock_rectangle;
+    D3DTextureUnlockRectFunction unlock_rectangle;
+    SudekiMpD3DLockedRect locked;
+    uint32_t *pixels;
+    uint32_t accent;
+    const char *message;
+    unsigned int player;
+    int fill_width;
+    HRESULT result;
+
+    if (vtable == NULL || snapshot == NULL ||
+        snapshot->phase < SUDEKIMP_ROAMING_BOUNDARY_WARNING) {
+        return FALSE;
+    }
+    lock_rectangle = (D3DTextureLockRectFunction)
+        vtable[D3D_TEXTURE_LOCK_RECT_INDEX];
+    unlock_rectangle = (D3DTextureUnlockRectFunction)
+        vtable[D3D_TEXTURE_UNLOCK_RECT_INDEX];
+    if (lock_rectangle == NULL || unlock_rectangle == NULL ||
+        FAILED(lock_rectangle(texture, 0u, &locked, NULL, 0u)) ||
+        locked.bits == NULL ||
+        locked.pitch < (int)(ROAMING_BOUNDARY_OVERLAY_WIDTH *
+            sizeof(uint32_t))) {
+        return FALSE;
+    }
+    pixels = (uint32_t *)locked.bits;
+    fill_rectangle(
+        pixels, locked.pitch, 0, 0,
+        ROAMING_BOUNDARY_OVERLAY_WIDTH,
+        ROAMING_BOUNDARY_OVERLAY_HEIGHT,
+        UINT32_C(0x00000000));
+    accent = snapshot->phase == SUDEKIMP_ROAMING_BOUNDARY_LIMIT ?
+        UINT32_C(0xffff6868) : UINT32_C(0xffffd166);
+    message = snapshot->phase == SUDEKIMP_ROAMING_BOUNDARY_LIMIT ?
+        "MOVE TOWARD PARTY" : "PARTY RANGE WARNING";
+    fill_width = (int)(248.0f * snapshot->progress);
+    if (fill_width < 0) fill_width = 0;
+    if (fill_width > 248) fill_width = 248;
+    for (player = 0u; player < 2u; ++player) {
+        const int left = panel_left[player];
+        const int right = left + 288;
+        const char *label = player == 0u ? "P1 PARTY BOUNDARY" :
+            "P2 PARTY BOUNDARY";
+
+        fill_rectangle(pixels, locked.pitch,
+            left, 402, right, 466, UINT32_C(0xd818202c));
+        fill_rectangle(pixels, locked.pitch,
+            left, 402, right, 405, accent);
+        fill_rectangle(pixels, locked.pitch,
+            left, 463, right, 466, accent);
+        fill_rectangle(pixels, locked.pitch,
+            left, 402, left + 3, 466, accent);
+        fill_rectangle(pixels, locked.pitch,
+            right - 3, 402, right, 466, accent);
+        draw_text(pixels, locked.pitch,
+            left + 14, 411, label, UINT32_C(0xffffffff), 1);
+        draw_text(pixels, locked.pitch,
+            left + 150, 411, message, accent, 1);
+        fill_rectangle(pixels, locked.pitch,
+            left + 20, 440, right - 20, 454,
+            UINT32_C(0xff303b4c));
+        fill_rectangle(pixels, locked.pitch,
+            left + 20, 440, left + 20 + fill_width, 454, accent);
+    }
+    result = unlock_rectangle(texture, 0u);
+    if (FAILED(result)) {
+        return FALSE;
+    }
+    roaming_boundary_texture_dirty = FALSE;
+    return TRUE;
+}
+
+static BOOL ensure_roaming_boundary_texture(
+    void *device,
+    const SudekiMpRoamingBoundaryEvaluation *snapshot
+) {
+    void **vtable;
+    D3DCreateTextureFunction create_texture;
+    unsigned int percent;
+    HRESULT result;
+
+    if (device == NULL || snapshot == NULL ||
+        snapshot->phase < SUDEKIMP_ROAMING_BOUNDARY_WARNING) {
+        return FALSE;
+    }
+    percent = (unsigned int)(snapshot->progress * 100.0f + 0.5f);
+    if (roaming_boundary_overlay_phase != snapshot->phase ||
+        roaming_boundary_overlay_percent != percent) {
+        roaming_boundary_overlay_phase = snapshot->phase;
+        roaming_boundary_overlay_percent = percent;
+        roaming_boundary_texture_dirty = TRUE;
+    }
+    if (roaming_boundary_texture_device != device) {
+        release_com_object(&roaming_boundary_texture);
+        roaming_boundary_texture_device = device;
+        roaming_boundary_texture_dirty = TRUE;
+    }
+    if (roaming_boundary_texture != NULL) {
+        return !roaming_boundary_texture_dirty ||
+            update_roaming_boundary_texture(
+                roaming_boundary_texture, snapshot);
+    }
+    vtable = *(void ***)device;
+    create_texture = vtable == NULL ? NULL :
+        (D3DCreateTextureFunction)
+            vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
+    if (create_texture == NULL) {
+        return FALSE;
+    }
+    result = create_texture(
+        device,
+        ROAMING_BOUNDARY_OVERLAY_WIDTH,
+        ROAMING_BOUNDARY_OVERLAY_HEIGHT,
+        1u,
+        D3D_USAGE_DYNAMIC,
+        D3D_FORMAT_A8R8G8B8,
+        D3D_POOL_DEFAULT,
+        &roaming_boundary_texture,
+        NULL);
+    if (FAILED(result) || roaming_boundary_texture == NULL) {
+        roaming_boundary_texture = NULL;
+        return FALSE;
+    }
+    roaming_boundary_texture_dirty = TRUE;
+    return update_roaming_boundary_texture(
+        roaming_boundary_texture, snapshot);
 }
 
 static BOOL draw_texture_overlay(
@@ -6032,6 +7012,100 @@ static BOOL draw_player_two_badge(void) {
     );
 }
 
+static BOOL draw_blacksmith_ui_overlay(
+    const SudekiMpBlacksmithUiSnapshot *snapshot
+) {
+    void *device;
+
+    if (snapshot == NULL || !snapshot->active ||
+        d3d_device_global == NULL ||
+        (device = *d3d_device_global) == NULL ||
+        !ensure_blacksmith_ui_texture(device, snapshot)) {
+        return FALSE;
+    }
+    return draw_texture_overlay(
+        blacksmith_ui_texture,
+        MENU_TEXTURE_WIDTH,
+        MENU_TEXTURE_HEIGHT,
+        FALSE,
+        FALSE,
+        TRUE,
+        0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+static void update_player_two_interaction_badge(DWORD now) {
+    SudekiMpPlayerStatehood *statehood;
+    SudekiMpPlayerStatehoodSnapshot snapshot;
+    BOOL snapshot_valid;
+    BOOL request_visible;
+    uint32_t serial;
+    unsigned int state;
+
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    SudekiMpPlayerStatehoodService(statehood, (uint32_t)now);
+    snapshot_valid = SudekiMpPlayerStatehoodGetSnapshot(
+        statehood, (uint32_t)now, &snapshot);
+    serial = snapshot_valid ? snapshot.provenance.serial : 0u;
+    state = snapshot_valid ? (unsigned int)snapshot.state :
+        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
+    request_visible = snapshot_valid &&
+        snapshot.state == SUDEKIMP_INTERACTION_SESSION_REQUESTED &&
+        snapshot.provenance.player_index == 1u &&
+        snapshot.provenance.kind == SUDEKIMP_INTERACTION_GENERIC_REQUEST &&
+        snapshot.remaining_ms != 0u;
+    if (player_two_interaction_serial != serial ||
+        player_two_interaction_state != state ||
+        player_two_generic_request_visible != request_visible) {
+        player_two_interaction_serial = serial;
+        player_two_interaction_state = state;
+        player_two_generic_request_visible = request_visible;
+        player_two_badge_dirty = TRUE;
+    }
+}
+
+static BOOL draw_transition_vote_overlay(
+    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+) {
+    void *device;
+
+    if (snapshot == NULL || !snapshot->active ||
+        d3d_device_global == NULL ||
+        (device = *d3d_device_global) == NULL ||
+        !ensure_transition_vote_texture(device, snapshot)) {
+        return FALSE;
+    }
+    return draw_texture_overlay(
+        transition_vote_texture,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        FALSE,
+        FALSE,
+        FALSE,
+        0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+static BOOL draw_roaming_boundary_overlay(
+    const SudekiMpRoamingBoundaryEvaluation *snapshot
+) {
+    void *device;
+
+    if (snapshot == NULL ||
+        snapshot->phase < SUDEKIMP_ROAMING_BOUNDARY_WARNING ||
+        d3d_device_global == NULL ||
+        (device = *d3d_device_global) == NULL ||
+        !ensure_roaming_boundary_texture(device, snapshot)) {
+        return FALSE;
+    }
+    return draw_texture_overlay(
+        roaming_boundary_texture,
+        ROAMING_BOUNDARY_OVERLAY_WIDTH,
+        ROAMING_BOUNDARY_OVERLAY_HEIGHT,
+        FALSE,
+        FALSE,
+        TRUE,
+        0.0f, 0.0f, 0.0f, 0.0f);
+}
+
 static BOOL draw_roster_buttons(void) {
     void *device;
 
@@ -6078,8 +7152,11 @@ static void draw_roster_native_portraits(void) {
     for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
         const float card_left = 40.0f + (float)actor * 144.0f;
         void *texture = roster_native_portrait_gpu_textures[actor];
+        const BOOL unavailable = roster_native_screen_kind ==
+            NATIVE_ROSTER_PLAYER_TWO &&
+            (unsigned int)roster_display_actor(actor) == roster_player_one;
 
-        if (texture == NULL) {
+        if (texture == NULL || unavailable) {
             continue;
         }
         /* The card interior is 120x77 after its native-style border.  Keep
@@ -6234,15 +7311,70 @@ static DWORD WINAPI pc_front_end_trace_thread_main(void *unused) {
 }
 
 void SudekiMpCleanroomFrameEndDispatch(void) {
+    /* Keep focus/loading suspension responsive even when the gameplay
+     * controller is not ticking during a front-end or transition frame. */
+    service_story_test_boost();
     SudekiMpCleanroomMenuRender();
     original_frame_end();
 }
 
 void SudekiMpCleanroomMenuRender(void) {
+    SudekiMpZoneTransitionVoteSnapshot vote_snapshot;
+    SudekiMpRoamingBoundaryEvaluation boundary_snapshot;
+    SudekiMpBlacksmithUiSnapshot blacksmith_snapshot;
+    BOOL vote_snapshot_valid;
+    BOOL boundary_snapshot_valid;
+    BOOL shared_interaction_modal_active;
+    BOOL blacksmith_ui_active;
+    BOOL blacksmith_snapshot_valid;
+
     if (game_base == NULL) {
         return;
     }
-    if (integrated_multiplayer_mode && multiplayer_requested &&
+    vote_snapshot_valid = SudekiMpZoneTransitionGetVoteSnapshot(
+        &vote_snapshot);
+    boundary_snapshot_valid =
+        SudekiMpControlSeparationGetRoamingBoundarySnapshot(
+            &boundary_snapshot);
+    SudekiMpBlacksmithUiAdapterService();
+    blacksmith_ui_active = SudekiMpBlacksmithUiAdapterActive();
+    blacksmith_snapshot_valid = blacksmith_ui_active &&
+        SudekiMpBlacksmithUiAdapterGetSnapshot(&blacksmith_snapshot);
+    update_player_two_interaction_badge(GetTickCount());
+    shared_interaction_modal_active =
+        SudekiMpSplitScreenSharedInteractionModalActive() ||
+        blacksmith_ui_active;
+    if (integrated_multiplayer_mode) {
+        /* In integrated mode the split compositor owns the frame-end hook,
+         * so this overlay callback is also the loading/focus-safe service
+         * point for restoring the optional story fast-forward lease. */
+        service_story_test_boost();
+        {
+            BOOL requested =
+                SudekiMpControlSeparationPlayerTwoRequested();
+            BOOL active = SudekiMpControlSeparationPlayerTwoActive();
+            BOOL input_ready = SudekiMpControlSeparationInputReady();
+            BOOL participation_requested =
+                SudekiMpSplitScreenRosterParticipationRequested();
+
+            if (multiplayer_requested != requested ||
+                multiplayer_active != active ||
+                multiplayer_input_ready != input_ready ||
+                multiplayer_participation_requested !=
+                    participation_requested) {
+                multiplayer_requested = requested;
+                multiplayer_active = active;
+                multiplayer_input_ready = input_ready;
+                multiplayer_participation_requested =
+                    participation_requested;
+                player_two_badge_dirty = TRUE;
+            }
+        }
+    }
+    if (integrated_multiplayer_mode &&
+        !shared_interaction_modal_active &&
+        SudekiMpSplitScreenRosterParticipationAvailable() &&
+        SudekiMpCleanroomEngineWorldReady() &&
         !draw_player_two_badge() && !player_two_badge_failure_logged) {
         player_two_badge_failure_logged = TRUE;
         SudekiMpLogWrite(
@@ -6250,12 +7382,64 @@ void SudekiMpCleanroomMenuRender(void) {
             "fallback=split_screen_unchanged\r\n"
         );
     }
-    if (menu_open && !draw_menu_overlay() && !overlay_failure_logged) {
+    if (integrated_multiplayer_mode && !shared_interaction_modal_active &&
+        boundary_snapshot_valid &&
+        boundary_snapshot.phase >= SUDEKIMP_ROAMING_BOUNDARY_WARNING) {
+        BOOL overlay_visible =
+            draw_roaming_boundary_overlay(&boundary_snapshot);
+
+        SudekiMpControlSeparationReportRoamingBoundaryOverlay(
+            overlay_visible);
+        if (!overlay_visible &&
+            !roaming_boundary_overlay_failure_logged) {
+            roaming_boundary_overlay_failure_logged = TRUE;
+            SudekiMpLogWrite(
+                "cleanroom_menu event=roaming_boundary_overlay status=unavailable fallback=advisory_only_no_hidden_movement_clamp\r\n");
+        }
+    } else {
+        SudekiMpControlSeparationReportRoamingBoundaryOverlay(FALSE);
+        roaming_boundary_overlay_failure_logged = FALSE;
+    }
+    if (!blacksmith_ui_active && menu_open &&
+        !draw_menu_overlay() && !overlay_failure_logged) {
         overlay_failure_logged = TRUE;
         SudekiMpLogWrite(
             "cleanroom_menu event=overlay status=unavailable "
             "fallback=gameplay_unchanged\r\n"
         );
+    }
+    if (!blacksmith_ui_active &&
+        vote_snapshot_valid && vote_snapshot.active) {
+        BOOL overlay_visible =
+            draw_transition_vote_overlay(&vote_snapshot);
+
+        (void)SudekiMpZoneTransitionReportVoteOverlay(
+            vote_snapshot.serial, overlay_visible);
+        if (!overlay_visible &&
+            !transition_vote_overlay_failure_logged) {
+            transition_vote_overlay_failure_logged = TRUE;
+            SudekiMpLogWrite(
+                "transition_vote event=overlay status=unavailable "
+                "fallback=cancel_request_and_remain_outside\r\n");
+        }
+    } else {
+        transition_vote_overlay_failure_logged = FALSE;
+    }
+    if (blacksmith_ui_active) {
+        BOOL overlay_visible = blacksmith_snapshot_valid &&
+            draw_blacksmith_ui_overlay(&blacksmith_snapshot);
+
+        SudekiMpBlacksmithUiAdapterReportOverlay(overlay_visible);
+        if (!overlay_visible && !blacksmith_ui_overlay_failure_logged) {
+            blacksmith_ui_overlay_failure_logged = TRUE;
+            SudekiMpLogWrite(
+                "blacksmith_ui event=overlay status=unavailable "
+                "fallback=close_all_panels_release_script_and_world_input\r\n");
+        } else if (overlay_visible) {
+            blacksmith_ui_overlay_failure_logged = FALSE;
+        }
+    } else {
+        blacksmith_ui_overlay_failure_logged = FALSE;
     }
 }
 
@@ -6329,14 +7513,23 @@ static BOOL install_cleanroom_menu_internal(
     BOOL integrated,
     BOOL roster,
     BOOL skip_startup_movies,
-    BOOL traversal
+    BOOL traversal,
+    BOOL enable_story_test_boost,
+    UINT configured_story_test_boost_key,
+    float configured_story_test_boost_multiplier
 ) {
     uint8_t *base;
     void **controller_slot;
 
     if (game_module == NULL || game_base != NULL || toggle_key == 0u ||
         toggle_key > 0xffu ||
-        (!roster && !traversal && !command_line_is_cleanroom())) {
+        (!roster && !traversal && !command_line_is_cleanroom()) ||
+        (enable_story_test_boost &&
+         (!roster || configured_story_test_boost_key == 0u ||
+          configured_story_test_boost_key > 0xffu ||
+          !isfinite(configured_story_test_boost_multiplier) ||
+          configured_story_test_boost_multiplier < 1.0f ||
+          configured_story_test_boost_multiplier > 4.0f))) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -6361,9 +7554,30 @@ static BOOL install_cleanroom_menu_internal(
     original_frame_end = integrated ? NULL :
         (FrameEndFunction)(base + RVA_FRAME_END);
     menu_toggle_key = toggle_key;
+    story_test_boost_enabled = enable_story_test_boost;
+    story_test_boost_active = FALSE;
+    story_test_boost_runtime_applied = FALSE;
+    story_test_boost_key_was_down = FALSE;
+    story_test_boost_failure_logged = FALSE;
+    story_test_boost_key = configured_story_test_boost_key;
+    story_test_boost_multiplier = configured_story_test_boost_multiplier;
     menu_open = FALSE;
     menu_texture_dirty = TRUE;
     player_two_badge_dirty = TRUE;
+    player_two_generic_request_visible = FALSE;
+    player_two_interaction_serial = 0u;
+    player_two_interaction_state =
+        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
+    transition_vote_texture = NULL;
+    transition_vote_texture_device = NULL;
+    transition_vote_texture_dirty = TRUE;
+    transition_vote_overlay_failure_logged = FALSE;
+    transition_vote_overlay_serial = 0u;
+    transition_vote_overlay_tenth_seconds = 0u;
+    transition_vote_overlay_state = 0u;
+    transition_vote_overlay_accepted_mask = 0u;
+    ZeroMemory(transition_vote_overlay_destination,
+        sizeof(transition_vote_overlay_destination));
     roster_button_texture_dirty = TRUE;
     roster_backdrop_texture = NULL;
     roster_backdrop_texture_device = NULL;
@@ -6418,6 +7632,7 @@ static BOOL install_cleanroom_menu_internal(
     multiplayer_requested = FALSE;
     multiplayer_active = FALSE;
     multiplayer_input_ready = FALSE;
+    multiplayer_participation_requested = FALSE;
     coop_role_lock_active = FALSE;
     coop_selected_actor = SUDEKIMP_CLEANROOM_TAL;
     coop_ready_failed_until = 0u;
@@ -6555,7 +7770,15 @@ static BOOL install_cleanroom_menu_internal(
         }
         {
             static const uint8_t save_page_action_entry[] = {
-                0x53, 0x8b, 0xd9, 0x80, 0xbb, 0x0c
+                /* push ebx; mov ebx,ecx;
+                 * cmp byte ptr [ebx+0x10c],0
+                 *
+                 * The compare is seven bytes by itself.  A six-byte hook
+                 * split it after the displacement's first byte, producing
+                 * an invalid trampoline as soon as the native save page
+                 * forwarded an action. */
+                0x53, 0x8b, 0xd9,
+                0x80, 0xbb, 0x0c, 0x01, 0x00, 0x00, 0x00
             };
             if (!SudekiMpInstallInlineHook(
                     &native_save_page_action_hook,
@@ -6731,7 +7954,8 @@ static BOOL install_cleanroom_menu_internal(
 
 BOOL SudekiMpInstallCleanroomMenu(HMODULE game_module, UINT toggle_key) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE);
+        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE,
+        FALSE, 0u, 1.0f);
 }
 
 BOOL SudekiMpInstallIntegratedCleanroomMenu(
@@ -6739,7 +7963,8 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     UINT toggle_key
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, TRUE, FALSE, FALSE, FALSE);
+        game_module, toggle_key, TRUE, FALSE, FALSE, FALSE,
+        FALSE, 0u, 1.0f);
 }
 
 BOOL SudekiMpInstallZoneTraversalMenu(
@@ -6748,21 +7973,31 @@ BOOL SudekiMpInstallZoneTraversalMenu(
     BOOL skip_startup_movies
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, FALSE, skip_startup_movies, TRUE);
+        game_module, toggle_key, FALSE, FALSE, skip_startup_movies, TRUE,
+        FALSE, 0u, 1.0f);
 }
 
 BOOL SudekiMpInstallCoopRosterMenu(
     HMODULE game_module,
     UINT toggle_key,
-    BOOL skip_startup_movies
+    BOOL integrated_multiplayer,
+    BOOL skip_startup_movies,
+    BOOL enable_story_test_boost,
+    UINT configured_story_test_boost_key,
+    float configured_story_test_boost_multiplier
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, TRUE, skip_startup_movies, FALSE);
+        game_module, toggle_key, integrated_multiplayer, TRUE,
+        skip_startup_movies, FALSE,
+        enable_story_test_boost,
+        configured_story_test_boost_key,
+        configured_story_test_boost_multiplier);
 }
 
 void SudekiMpUninstallCleanroomMenu(void) {
     HANDLE trace_thread = pc_front_end_trace_thread_handle;
 
+    SudekiMpControlSeparationReportRoamingBoundaryOverlay(FALSE);
     InterlockedExchange(&pc_front_end_trace_stop, 1);
     pc_front_end_trace_thread_handle = NULL;
     if (trace_thread != NULL) {
@@ -6812,14 +8047,40 @@ void SudekiMpUninstallCleanroomMenu(void) {
     SudekiMpRestorePointerHook(&controller_update_hook);
     release_com_object(&menu_texture);
     release_com_object(&player_two_badge_texture);
+    release_com_object(&transition_vote_texture);
+    release_com_object(&roaming_boundary_texture);
+    release_com_object(&blacksmith_ui_texture);
     release_com_object(&roster_button_texture);
     release_com_object(&roster_backdrop_texture);
     roster_release_native_portraits();
     menu_texture_device = NULL;
     player_two_badge_device = NULL;
+    transition_vote_texture_device = NULL;
+    roaming_boundary_texture_device = NULL;
+    blacksmith_ui_texture_device = NULL;
     roster_button_texture_device = NULL;
     roster_backdrop_texture_device = NULL;
     player_two_badge_dirty = FALSE;
+    player_two_generic_request_visible = FALSE;
+    player_two_interaction_serial = 0u;
+    player_two_interaction_state =
+        (unsigned int)SUDEKIMP_INTERACTION_SESSION_IDLE;
+    transition_vote_texture_dirty = FALSE;
+    roaming_boundary_texture_dirty = FALSE;
+    transition_vote_overlay_failure_logged = FALSE;
+    roaming_boundary_overlay_failure_logged = FALSE;
+    blacksmith_ui_texture_dirty = FALSE;
+    blacksmith_ui_overlay_failure_logged = FALSE;
+    ZeroMemory(&blacksmith_ui_last_snapshot,
+        sizeof(blacksmith_ui_last_snapshot));
+    transition_vote_overlay_serial = 0u;
+    transition_vote_overlay_tenth_seconds = 0u;
+    transition_vote_overlay_state = 0u;
+    transition_vote_overlay_accepted_mask = 0u;
+    ZeroMemory(transition_vote_overlay_destination,
+        sizeof(transition_vote_overlay_destination));
+    roaming_boundary_overlay_phase = 0u;
+    roaming_boundary_overlay_percent = 0u;
     roster_button_texture_dirty = FALSE;
     original_controller_update = NULL;
     original_frame_end = NULL;
@@ -6859,6 +8120,13 @@ void SudekiMpUninstallCleanroomMenu(void) {
     game_base = NULL;
     d3d_device_global = NULL;
     menu_toggle_key = 0u;
+    story_test_boost_enabled = FALSE;
+    story_test_boost_active = FALSE;
+    story_test_boost_runtime_applied = FALSE;
+    story_test_boost_key_was_down = FALSE;
+    story_test_boost_failure_logged = FALSE;
+    story_test_boost_key = 0u;
+    story_test_boost_multiplier = 1.0f;
     menu_open = FALSE;
     menu_texture_dirty = FALSE;
     selected_item = 0u;
@@ -6901,6 +8169,7 @@ void SudekiMpUninstallCleanroomMenu(void) {
     multiplayer_requested = FALSE;
     multiplayer_active = FALSE;
     multiplayer_input_ready = FALSE;
+    multiplayer_participation_requested = FALSE;
     coop_role_lock_active = FALSE;
     coop_selected_actor = SUDEKIMP_CLEANROOM_TAL;
     coop_ready_failed_until = 0u;
