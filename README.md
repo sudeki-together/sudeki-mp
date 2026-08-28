@@ -194,6 +194,10 @@ project will not synchronize arbitrary process memory between machines.
 
 ## Build and verify on Linux
 
+For the shortest supported two-player setup, start with the
+[Linux Local Co-op Beta Quick Start](docs/linux-coop-beta.md). The commands
+below are the underlying developer and research workflow.
+
 ```bash
 ./tools/build-linux.sh
 ./tools/run-wine.sh --check
