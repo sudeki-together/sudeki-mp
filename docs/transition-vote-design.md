@@ -1,14 +1,23 @@
 # Co-op room-transition vote boundary
 
-**Status: suspended from integrated gameplay.** The pure vote state machine,
-overlay, and late native adapter remain compiled for isolated research, but
-the live lifecycle profile keeps `EnableTransitionVotePrototype=false`.
+**Status: retired from authored campaign co-op.** Normal temporary rooms are
+host-led: P1 starts the native door/interior action, Sudeki moves the active
+party through its own formation path, and SudekiMP reacquires P2 only after
+the destination has settled. The pure vote state machine, overlay, and late
+native adapter remain compiled as isolated research for future divergent or
+custom content; the live lifecycle profile keeps
+`EnableTransitionVotePrototype=false`.
 
-The vote is intended to be a consent gate in front of one native Sudeki door
-action. It is not a replacement loading system and it must never begin the
-native approach or invoke `EnterTemporaryZone` until consent has reached
-`READY`. The checked-in INI and `tools/continue-research.sh
---party-lifecycle-trace` both keep the prototype off.
+This is grounded in the Kamo's Shop trace: P1 initiated `LNBr_Kamo_shop`, the
+party-atomic path staged Ailish, accepted the native formation transition,
+then reclaimed the locked P2 roster after placement. No prompt, delay, replay,
+or synthetic interaction was required.
+
+Any future vote must be a consent gate in front of one native Sudeki action.
+It is not a replacement loading system and it must never begin the native
+approach or invoke `EnterTemporaryZone` until consent has reached `READY`.
+The checked-in INI and `tools/continue-research.sh --party-lifecycle-trace`
+keep that experiment off.
 
 A live Player 2 veto rejected the existing integration seam. Sudeki had already
 changed the controller to scripted state, approached the door, and hidden the
@@ -17,7 +26,7 @@ SudekiMP's saved resource, vote state, and input suppression; it could not
 cancel or complete the opaque native script task. The process remained alive
 with `paused=1` and controller modes `0/0`, but no load or recovery followed.
 
-## State flow
+## Research-only state flow
 
 1. A live human requests a door/interior transition.
 2. Build an active-human mask from players who currently own input. Do not

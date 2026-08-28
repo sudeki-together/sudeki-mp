@@ -20,10 +20,39 @@ enum {
 };
 
 enum {
+    SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE = 0u,
+    SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED = 1u,
+    SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED = 2u
+};
+
+enum {
+    SUDEKIMP_NATIVE_CAMERA_DECISION_FALLBACK = 0u,
+    SUDEKIMP_NATIVE_CAMERA_DECISION_SET_TARGET = 1u,
+    SUDEKIMP_NATIVE_CAMERA_DECISION_WAIT = 2u,
+    SUDEKIMP_NATIVE_CAMERA_DECISION_SET_STATE = 3u,
+    SUDEKIMP_NATIVE_CAMERA_DECISION_READY = 4u,
+    SUDEKIMP_NATIVE_CAMERA_DECISION_REVOKE = 5u
+};
+
+enum {
+    SUDEKIMP_NATIVE_CAMERA_READINESS_INACTIVE = 0u,
+    SUDEKIMP_NATIVE_CAMERA_READINESS_PENDING_STATE = 1u,
+    SUDEKIMP_NATIVE_CAMERA_READINESS_CHECK_STATE = 2u,
+    SUDEKIMP_NATIVE_CAMERA_READINESS_REVOKE = 3u
+};
+
+enum {
+    SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT = 0u,
+    SUDEKIMP_NATIVE_CAMERA_RELEASE_REMOVE = 1u,
+    SUDEKIMP_NATIVE_CAMERA_RELEASE_ABANDON = 2u
+};
+
+enum {
     SUDEKIMP_SHARED_INTERACTION_MODAL_NONE = 0u,
     SUDEKIMP_SHARED_INTERACTION_MODAL_SHOP = 1u,
     SUDEKIMP_SHARED_INTERACTION_MODAL_BLACKSMITH = 2u,
-    SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN = 3u
+    SUDEKIMP_SHARED_INTERACTION_MODAL_UNCERTAIN = 3u,
+    SUDEKIMP_SHARED_INTERACTION_MODAL_SAVE_BOOK = 4u
 };
 
 BOOL SudekiMpInstallSplitScreenRender(
@@ -132,11 +161,84 @@ BOOL SudekiMpSplitScreenObserveNativeCameraGeneration(
     unsigned short generation,
     BOOL manual_fallback_write
 );
-/* SetCameraTarget consumes the entity stored in a party TPtr slot, not the
- * address of the intrusive slot itself.  Kept public as a pure ABI regression
- * seam for the exact-image test. */
-void *SudekiMpSplitScreenNativeCameraTargetFromPartySlot(
+/* Read the raw actor only as a generation-scoped provenance identity. Neither
+ * this actor nor the intrusive party slot is a valid SetCameraTarget argument;
+ * the setter requires a caller-owned native GELGroupPtr wrapper. */
+void *SudekiMpSplitScreenNativeCameraActorFromPartySlot(
     const void *party_slot
+);
+BOOL SudekiMpSplitScreenNativeCameraWrapperPolicy(
+    const void *wrapper,
+    const void *party_slot,
+    const void *raw_actor,
+    const void *embedded_actor,
+    const void *resolved_actor,
+    const void *leased_actor,
+    unsigned int current_actor_generation,
+    unsigned int expected_actor_generation,
+    BOOL exact_wrapper_vtable
+);
+BOOL SudekiMpSplitScreenNativeCameraWrapperOneShotPolicy(
+    BOOL getter_already_attempted,
+    BOOL live_group_slot_actor_valid,
+    BOOL camera_ownership_valid
+);
+unsigned int SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+    unsigned int stage,
+    BOOL bound
+);
+/* Pure fail-closed gates for the staged native Exploration bootstrap. */
+BOOL SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+    BOOL current_manager_matches,
+    BOOL named_camera_matches,
+    BOOL global_camera_matches,
+    BOOL player_one_render_state_matches,
+    BOOL scene_render_state_matches,
+    BOOL render_swap_inactive
+);
+BOOL SudekiMpSplitScreenNativeCameraIdentityPolicy(
+    const void *current_slot,
+    const void *bound_slot,
+    const void *current_actor,
+    const void *bound_actor,
+    const void *leased_actor,
+    unsigned int current_actor_generation,
+    unsigned int bound_actor_generation
+);
+BOOL SudekiMpSplitScreenNativeCameraMatrixPolicy(const float matrix[16]);
+/* A named camera may be removed only while every live ownership identity is
+ * known and still names the saved Player 1 world state. Stale generations or
+ * name reuse are abandoned only after proving that no live owner references
+ * the saved Player 2 camera/state. */
+unsigned int SudekiMpSplitScreenNativeCameraReleasePolicy(
+    BOOL manager_matches,
+    BOOL named_identity_known,
+    const void *named_camera,
+    const void *saved_player_two_camera,
+    BOOL global_identity_known,
+    const void *global_camera,
+    const void *global_render_state,
+    const void *saved_player_one_camera,
+    const void *saved_player_one_render_state,
+    BOOL scene_identity_known,
+    const void *scene_render_state,
+    const void *saved_player_two_render_state,
+    BOOL render_swap_inactive
+);
+unsigned int SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+    BOOL session_enabled,
+    unsigned int stage,
+    BOOL phase_eligible,
+    BOOL ownership_valid,
+    BOOL identity_valid,
+    BOOL target_pair_stable,
+    BOOL later_frame,
+    BOOL active_state_valid,
+    BOOL player_one_exploration,
+    BOOL player_two_exploration,
+    BOOL native_generation_advanced,
+    BOOL matrix_valid,
+    BOOL readiness_deadline_expired
 );
 /* A settled TEMP room receives a distinct second view only after the live
  * Player 1 camera and the independently updated Player 2 camera have both
@@ -201,6 +303,14 @@ unsigned int SudekiMpSplitScreenClassifySharedInteractionModal(
     unsigned int next_ui_mode
 );
 BOOL SudekiMpSplitScreenSharedInteractionModalActive(void);
+/* The save-book hook must enter this narrow lifecycle before publishing its
+ * vote or invoking any native continuation.  Opening synchronously switches
+ * presentation to the single native Player 1 frame and invalidates both
+ * alternating caches.  Closed keeps control quiesced until both camera caches
+ * have been captured afresh. */
+BOOL SudekiMpSplitScreenNativeSaveModalOpening(void);
+void SudekiMpSplitScreenNativeSaveModalClosed(void);
+BOOL SudekiMpSplitScreenNativeSaveModalActive(void);
 /* A mod-owned blacksmith start keeps UIBlackSmithActive true only to satisfy
  * the script polling contract. The inspector may exclude it from the native
  * full-width policy solely when this query is true and the actual native
@@ -237,6 +347,15 @@ BOOL SudekiMpSplitScreenSharedInteractionRecoveryPendingNext(
     BOOL modal_had_live_split,
     BOOL current_eligible,
     BOOL fresh_cache_pair_ready
+);
+/* Skip redundant same-owner assignments. A stored-enum change for the
+ * currently rendered viewport may still invoke Sudeki's synchronous selector
+ * on each alternating P1/P2 view. Native/uncertain modal construction
+ * suspends it even when the currently stored enum differs. */
+BOOL SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+    BOOL modal_construction_active,
+    unsigned int current_portrait_enum,
+    unsigned int desired_portrait_enum
 );
 void SudekiMpSplitScreenSetOverlayRenderer(
     SudekiMpSplitScreenOverlayRenderer renderer

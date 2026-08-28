@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 #if !defined(__GNUC__) || !defined(__i386__)
 #error "Interaction provenance requires the 32-bit Windows target"
@@ -29,6 +30,37 @@ typedef void (__attribute__((stdcall)) *EnqueueInteractionFunction)(
     uint32_t event_type,
     void *source_actor
 );
+typedef void (__attribute__((thiscall)) *UsableCollisionFunction)(
+    void *usable_subobject,
+    void *collision_source,
+    void *source_actor,
+    uint32_t event_type
+);
+typedef int (__attribute__((stdcall)) *NearbyCollisionQueryFunction)(
+    void *collision_system,
+    const float *position,
+    float radius,
+    int maximum_results,
+    void *results,
+    uint32_t category_mask
+);
+typedef void (__attribute__((thiscall)) *TrackedEntityCleanupFunction)(
+    void *tracked_entity
+);
+/* Native CUsable::GetCanUse.  This is a pure predicate over the supplied
+ * tracked entity: unlike SetCanUse or the P1-only arbiter path, it does not
+ * select a target, mutate interaction state, or dispatch a script action. */
+typedef uint8_t (__attribute__((cdecl)) *UsableGetCanUseFunction)(
+    const void *tracked_entity
+);
+/* CTrigger::AllowsActor.  It reads the trigger's authored category mask and
+ * the actor resource type; it does not add a contact, choose a candidate, or
+ * send an event. */
+typedef uint8_t (__attribute__((stdcall)) *TriggerActorEligibilityFunction)(
+    const void *trigger,
+    const void *actor,
+    uint32_t native_front_actor
+);
 
 enum {
     RVA_ACTION_CANDIDATE_DISPATCH_CALL = 0x0000d75bu,
@@ -37,6 +69,34 @@ enum {
     RVA_ENQUEUE_INTERACTION = 0x0000ccd0u,
     RVA_ON_ACTION_SOL_SUBMISSION_CALL = 0x0000caebu,
     RVA_SOL_SUBMISSION = 0x001c37b0u,
+    RVA_USABLE_COLLISION = 0x000b5c30u,
+    RVA_COLLISION_SYSTEM_GLOBAL = 0x00408dd4u,
+    RVA_TRIGGER_MANAGER_GLOBAL = 0x00408d24u,
+    RVA_NEARBY_COLLISION_QUERY = 0x00034c20u,
+    RVA_TRACKED_ENTITY_CLEANUP = 0x000015e0u,
+    RVA_USABLE_GET_CAN_USE = 0x000b59c0u,
+    RVA_TRIGGER_ACTOR_ELIGIBILITY = 0x00124320u,
+    COLLISION_SYSTEM_PRIMARY_ARRAY_COUNT_OFFSET = 0x70u,
+    COLLISION_SYSTEM_PRIMARY_ARRAY_DATA_OFFSET = 0x78u,
+    COLLISION_SYSTEM_SECONDARY_ARRAY_COUNT_OFFSET = 0x80u,
+    COLLISION_SYSTEM_SECONDARY_ARRAY_DATA_OFFSET = 0x88u,
+    COLLISION_SYSTEM_MAXIMUM_ENTITIES = 8192u,
+    TRIGGER_MANAGER_OWNER_COUNT_OFFSET = 0x1c8u,
+    TRIGGER_MANAGER_OWNER_DATA_OFFSET = 0x1d0u,
+    TRIGGER_OWNER_TARGET_COUNT_OFFSET = 0x2cu,
+    TRIGGER_OWNER_TARGET_DATA_OFFSET = 0x34u,
+    /* CCollisionSystem returns the embedded collision proxy.  In this exact
+     * build its containing CTrigger owner begins 0x35c bytes later.  Runtime
+     * code never trusts this arithmetic by itself: the resulting address must
+     * occur exactly once in CTriggerManager's bounded owner registry. */
+    NEARBY_COLLISION_TRIGGER_OWNER_OFFSET = 0x35cu,
+    TRIGGER_MANAGER_MAXIMUM_OWNERS = 1024u,
+    TRIGGER_OWNER_MAXIMUM_TARGETS = 128u,
+    TRIGGER_CORRELATION_MAXIMUM_TARGETS = 2048u,
+    TRIGGER_OBJECT_ELIGIBILITY_FLAGS_OFFSET = 0x144u,
+    ACTOR_TRANSFORM_OFFSET = 0x44u,
+    TRANSFORM_POSITION_OFFSET = 0x18u,
+    ACTOR_LOCAL_NEARBY_LIMIT = 16u,
     NATIVE_CANDIDATE_ARRAY_OFFSET = 0x20u,
     NATIVE_CANDIDATE_STRIDE = 0x1cu,
     NATIVE_CANDIDATE_EVENT_OFFSET = 0x00u,
@@ -69,6 +129,31 @@ static const uint8_t on_action_sol_submission_call_signature[] = {
     0x8bu, 0x74u, 0x24u, 0x1cu,
     0x75u, 0x14u, 0x51u
 };
+static const uint8_t usable_collision_signature[] = {
+    0x83u, 0xecu, 0x0cu, 0x56u, 0x8bu, 0xf1u
+};
+static const uint8_t nearby_collision_query_signature[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u, 0x83u, 0xecu,
+    0x34u, 0x53u, 0x33u, 0xd2u, 0x56u, 0x33u, 0xc0u, 0x57u
+};
+static const uint8_t tracked_entity_cleanup_signature[] = {
+    0x8bu, 0x01u, 0x33u, 0xd2u, 0x3bu, 0xc2u, 0x74u, 0x2du,
+    0x56u, 0x39u, 0x48u, 0x04u
+};
+static const uint8_t usable_get_can_use_signature[] = {
+    0x8bu, 0x4cu, 0x24u, 0x04u, 0x83u, 0xecu, 0x0cu, 0x85u,
+    0xc9u, 0x74u, 0x38u, 0x8du, 0x04u, 0x24u, 0xe8u, 0xddu
+};
+static const uint8_t trigger_actor_eligibility_signature[] = {
+    0x8bu, 0x4cu, 0x24u, 0x08u, 0x8bu, 0x41u, 0x2cu, 0x8bu,
+    0x50u, 0x10u, 0x83u, 0xc1u, 0x2cu, 0xffu, 0xd2u, 0x8du
+};
+
+typedef struct NativeEntityPointer {
+    void *entity;
+    void *link_previous;
+    void *link_next;
+} NativeEntityPointer;
 
 typedef struct RuntimeDispatchContext {
     struct RuntimeDispatchContext *previous;
@@ -92,9 +177,15 @@ static SudekiMpSolInteractionProvenance sol_observations[
 static SudekiMpRelativeCallHook action_candidate_dispatch_hook;
 static SudekiMpRelativeCallHook enqueue_interaction_hook;
 static SudekiMpRelativeCallHook on_action_sol_submission_hook;
+static SudekiMpInlineHook usable_collision_hook;
 static ActionCandidateDispatchFunction original_action_candidate_dispatch;
 static EnqueueInteractionFunction original_enqueue_interaction;
 static void *original_script_submission __attribute__((used));
+static UsableCollisionFunction original_usable_collision;
+static NearbyCollisionQueryFunction nearby_collision_query;
+static TrackedEntityCleanupFunction tracked_entity_cleanup;
+static UsableGetCanUseFunction usable_get_can_use;
+static TriggerActorEligibilityFunction trigger_actor_eligibility;
 
 static BOOL readable_memory(const void *pointer, size_t size) {
     MEMORY_BASIC_INFORMATION information;
@@ -112,6 +203,394 @@ static BOOL readable_memory(const void *pointer, size_t size) {
     end = start + size;
     region_end = (uintptr_t)information.BaseAddress + information.RegionSize;
     return end >= start && end <= region_end;
+}
+
+static BOOL finite_actor_position(uintptr_t actor, float position[3]) {
+    uint8_t *transform;
+
+    if (position == NULL || !readable_memory((const void *)actor,
+            ACTOR_TRANSFORM_OFFSET + sizeof(transform))) {
+        return FALSE;
+    }
+    transform = *(uint8_t **)(actor + ACTOR_TRANSFORM_OFFSET);
+    if (!readable_memory(transform, TRANSFORM_POSITION_OFFSET +
+            3u * sizeof(float))) {
+        return FALSE;
+    }
+    memcpy(position, transform + TRANSFORM_POSITION_OFFSET,
+        3u * sizeof(float));
+    return isfinite(position[0]) && isfinite(position[1]) &&
+        isfinite(position[2]);
+}
+
+static BOOL collision_system_ready(void **collision_system_result) {
+    void *collision_system;
+    uint32_t count;
+    void *data;
+
+    if (collision_system_result != NULL) {
+        *collision_system_result = NULL;
+    }
+    if (game_base == NULL || nearby_collision_query == NULL ||
+        tracked_entity_cleanup == NULL || usable_get_can_use == NULL ||
+        !readable_memory(
+            game_base + RVA_COLLISION_SYSTEM_GLOBAL,
+            sizeof(collision_system))) {
+        return FALSE;
+    }
+    collision_system = *(void **)(game_base + RVA_COLLISION_SYSTEM_GLOBAL);
+    if (!readable_memory(collision_system,
+            COLLISION_SYSTEM_SECONDARY_ARRAY_DATA_OFFSET + sizeof(data))) {
+        return FALSE;
+    }
+    memcpy(&count, (uint8_t *)collision_system +
+        COLLISION_SYSTEM_PRIMARY_ARRAY_COUNT_OFFSET, sizeof(count));
+    memcpy(&data, (uint8_t *)collision_system +
+        COLLISION_SYSTEM_PRIMARY_ARRAY_DATA_OFFSET, sizeof(data));
+    if (count > COLLISION_SYSTEM_MAXIMUM_ENTITIES ||
+        (count != 0u && !readable_memory(data, count * sizeof(void *)))) {
+        return FALSE;
+    }
+    memcpy(&count, (uint8_t *)collision_system +
+        COLLISION_SYSTEM_SECONDARY_ARRAY_COUNT_OFFSET, sizeof(count));
+    memcpy(&data, (uint8_t *)collision_system +
+        COLLISION_SYSTEM_SECONDARY_ARRAY_DATA_OFFSET, sizeof(data));
+    if (count > COLLISION_SYSTEM_MAXIMUM_ENTITIES ||
+        (count != 0u && !readable_memory(data, count * sizeof(void *)))) {
+        return FALSE;
+    }
+    if (collision_system_result != NULL) {
+        *collision_system_result = collision_system;
+    }
+    return TRUE;
+}
+
+static BOOL trigger_manager_ready(void ***owners_result,
+    uint32_t *owner_count_result) {
+    void *manager;
+    void **owners;
+    uint32_t count;
+
+    if (owners_result != NULL) {
+        *owners_result = NULL;
+    }
+    if (owner_count_result != NULL) {
+        *owner_count_result = 0u;
+    }
+    if (game_base == NULL || trigger_actor_eligibility == NULL ||
+        !readable_memory(game_base + RVA_TRIGGER_MANAGER_GLOBAL,
+            sizeof(manager))) {
+        return FALSE;
+    }
+    manager = *(void **)(game_base + RVA_TRIGGER_MANAGER_GLOBAL);
+    if (!readable_memory(manager, TRIGGER_MANAGER_OWNER_DATA_OFFSET +
+            sizeof(owners))) {
+        return FALSE;
+    }
+    memcpy(&count, (uint8_t *)manager + TRIGGER_MANAGER_OWNER_COUNT_OFFSET,
+        sizeof(count));
+    memcpy(&owners, (uint8_t *)manager + TRIGGER_MANAGER_OWNER_DATA_OFFSET,
+        sizeof(owners));
+    if (count > TRIGGER_MANAGER_MAXIMUM_OWNERS ||
+        (count != 0u && !readable_memory(owners, count * sizeof(*owners)))) {
+        return FALSE;
+    }
+    if (owners_result != NULL) {
+        *owners_result = owners;
+    }
+    if (owner_count_result != NULL) {
+        *owner_count_result = count;
+    }
+    return TRUE;
+}
+
+static BOOL block_contains_pointer(const void *block, size_t size,
+    const void *needle) {
+    size_t offset;
+    uintptr_t value;
+
+    if (block == NULL || needle == NULL || size < sizeof(value) ||
+        !readable_memory(block, size)) {
+        return FALSE;
+    }
+    for (offset = 0u; offset + sizeof(value) <= size;
+            offset += sizeof(value)) {
+        memcpy(&value, (const uint8_t *)block + offset, sizeof(value));
+        if (value == (uintptr_t)needle) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void log_trigger_correlations(uint32_t player_index,
+    const SudekiMpPlayerLease *lease, const NativeEntityPointer *candidates,
+    int candidate_count) {
+    void **owners = NULL;
+    uint32_t owner_count = 0u;
+    uint32_t owner_index;
+    uint32_t scanned_targets = 0u;
+    uint32_t linked_targets = 0u;
+    uint32_t direct_owner_matches = 0u;
+    const char *status = "complete_no_nearby_trigger_link";
+    const SudekiMpPlayerStatehood *statehood =
+        SudekiMpPlayerStatehoodRuntime();
+
+#if defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+    (void)player_index;
+#endif
+
+    if (lease == NULL || candidates == NULL || candidate_count <= 0) {
+        status = "invalid_probe_input";
+        goto report;
+    }
+    if (!trigger_manager_ready(&owners, &owner_count)) {
+        status = "trigger_manager_unavailable";
+        goto report;
+    }
+    for (int candidate_index = 0; candidate_index < candidate_count;
+            ++candidate_index) {
+        uintptr_t entity = (uintptr_t)candidates[candidate_index].entity;
+        void *matched_owner = NULL;
+        uint32_t match_count = 0u;
+        uint32_t target_count;
+        void **targets;
+        BOOL live_party_actor = FALSE;
+
+        if (statehood != NULL) {
+            for (uint32_t seat_index = 0u; seat_index <
+                    SUDEKIMP_INTERACTION_PROVENANCE_PLAYER_COUNT;
+                    ++seat_index) {
+                if (statehood->players[seat_index].actor == entity &&
+                    entity != 0u) {
+                    live_party_actor = TRUE;
+                    break;
+                }
+            }
+        }
+        if (entity == 0u || live_party_actor ||
+            entity > (uintptr_t)(UINT32_MAX -
+                NEARBY_COLLISION_TRIGGER_OWNER_OFFSET)) {
+            continue;
+        }
+        for (owner_index = 0u; owner_index < owner_count; ++owner_index) {
+            if (owners[owner_index] == (void *)(entity +
+                    NEARBY_COLLISION_TRIGGER_OWNER_OFFSET)) {
+                matched_owner = owners[owner_index];
+                ++match_count;
+            }
+        }
+        if (match_count == 0u) {
+            continue;
+        }
+        if (match_count != 1u || !readable_memory(matched_owner,
+                TRIGGER_OWNER_TARGET_DATA_OFFSET + sizeof(targets))) {
+            status = "ambiguous_or_unreadable_embedded_trigger_owner";
+            goto report;
+        }
+        memcpy(&target_count, (uint8_t *)matched_owner +
+            TRIGGER_OWNER_TARGET_COUNT_OFFSET, sizeof(target_count));
+        memcpy(&targets, (uint8_t *)matched_owner +
+            TRIGGER_OWNER_TARGET_DATA_OFFSET, sizeof(targets));
+        if (target_count == 0u || target_count > TRIGGER_OWNER_MAXIMUM_TARGETS ||
+            !readable_memory(targets, target_count * sizeof(*targets))) {
+            status = "invalid_embedded_trigger_target_array";
+            goto report;
+        }
+        ++direct_owner_matches;
+        for (uint32_t target_index = 0u; target_index < target_count;
+                ++target_index) {
+            void *trigger = targets[target_index];
+            BOOL eligible;
+            BOOL native_front_eligible = FALSE;
+
+            if (!readable_memory(trigger,
+                    TRIGGER_OBJECT_ELIGIBILITY_FLAGS_OFFSET + sizeof(uint8_t))) {
+                status = "unreadable_embedded_trigger_target";
+                goto report;
+            }
+            eligible = trigger_actor_eligibility(trigger,
+                (const void *)lease->actor, 0u) != 0u;
+            if (statehood != NULL && statehood->players[0].human_present &&
+                statehood->players[0].actor != 0u &&
+                statehood->players[0].actor_generation != 0u) {
+                native_front_eligible = trigger_actor_eligibility(trigger,
+                    (const void *)statehood->players[0].actor, 1u) != 0u;
+            }
+#if !defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+            SudekiMpLogFormat(
+                "interaction_provenance event=actor_local_embedded_trigger "
+                "seat=%lu nearby_index=%d entity=0x%08lx owner=0x%08lx "
+                "target_index=%lu target=0x%08lx eligible_for_actor=%s "
+                "eligible_for_native_front=%s "
+                "policy=read_only_registry_validated_no_candidate_or_action\\r\\n",
+                (unsigned long)player_index + 1ul, candidate_index,
+                (unsigned long)entity, (unsigned long)(uintptr_t)matched_owner,
+                (unsigned long)target_index, (unsigned long)(uintptr_t)trigger,
+                eligible ? "true" : "false",
+                native_front_eligible ? "true" : "false");
+#else
+            (void)eligible;
+            (void)native_front_eligible;
+#endif
+        }
+    }
+    for (owner_index = 0u; owner_index < owner_count &&
+            scanned_targets < TRIGGER_CORRELATION_MAXIMUM_TARGETS;
+            ++owner_index) {
+        void *owner = owners[owner_index];
+        void **targets;
+        uint32_t target_count;
+        uint32_t target_index;
+
+        if (!readable_memory(owner, TRIGGER_OWNER_TARGET_DATA_OFFSET +
+                sizeof(targets))) {
+            status = "unreadable_trigger_owner";
+            goto report;
+        }
+        memcpy(&target_count, (uint8_t *)owner +
+            TRIGGER_OWNER_TARGET_COUNT_OFFSET, sizeof(target_count));
+        memcpy(&targets, (uint8_t *)owner + TRIGGER_OWNER_TARGET_DATA_OFFSET,
+            sizeof(targets));
+        if (target_count > TRIGGER_OWNER_MAXIMUM_TARGETS ||
+            (target_count != 0u && !readable_memory(targets,
+                target_count * sizeof(*targets)))) {
+            status = "invalid_trigger_target_array";
+            goto report;
+        }
+        for (target_index = 0u; target_index < target_count &&
+                scanned_targets < TRIGGER_CORRELATION_MAXIMUM_TARGETS;
+                ++target_index, ++scanned_targets) {
+            void *trigger = targets[target_index];
+            int candidate_index;
+
+            if (!readable_memory(trigger,
+                    TRIGGER_OBJECT_ELIGIBILITY_FLAGS_OFFSET + sizeof(uint8_t))) {
+                status = "unreadable_trigger";
+                goto report;
+            }
+            for (candidate_index = 0; candidate_index < candidate_count;
+                    ++candidate_index) {
+                BOOL linked;
+                BOOL eligible;
+
+                if (candidates[candidate_index].entity == NULL ||
+                    candidates[candidate_index].entity == (void *)lease->actor) {
+                    continue;
+                }
+                linked = owner == candidates[candidate_index].entity ||
+                    trigger == candidates[candidate_index].entity ||
+                    block_contains_pointer(trigger,
+                        TRIGGER_OBJECT_ELIGIBILITY_FLAGS_OFFSET +
+                            sizeof(uint8_t), candidates[candidate_index].entity);
+                if (!linked) {
+                    continue;
+                }
+                ++linked_targets;
+                eligible = trigger_actor_eligibility(trigger,
+                    (const void *)lease->actor, 0u) != 0u;
+#if !defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+                SudekiMpLogFormat(
+                    "interaction_provenance event=actor_local_trigger_link "
+                    "seat=%lu nearby_index=%d entity=0x%08lx owner=0x%08lx "
+                    "trigger=0x%08lx eligible_for_actor=%s "
+                    "policy=read_only_link_and_eligibility_no_candidate_or_action\\r\\n",
+                    (unsigned long)player_index + 1ul, candidate_index,
+                    (unsigned long)(uintptr_t)candidates[candidate_index].entity,
+                    (unsigned long)(uintptr_t)owner,
+                    (unsigned long)(uintptr_t)trigger,
+                    eligible ? "true" : "false");
+#else
+                (void)eligible;
+#endif
+            }
+        }
+    }
+report:
+    if (status[0] == 'c' && direct_owner_matches != 0u) {
+        status = "complete_with_registry_validated_embedded_trigger";
+    }
+#if !defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+    SudekiMpLogFormat(
+        "interaction_provenance event=actor_local_trigger_scan "
+        "seat=%lu owner_count=%lu scanned_targets=%lu linked_targets=%lu "
+        "embedded_owner_matches=%lu "
+        "status=%s policy=read_only_no_candidate_or_action\\r\\n",
+        (unsigned long)player_index + 1ul, (unsigned long)owner_count,
+        (unsigned long)scanned_targets, (unsigned long)linked_targets,
+        (unsigned long)direct_owner_matches,
+        status);
+#else
+    (void)linked_targets;
+    (void)direct_owner_matches;
+    (void)status;
+#endif
+}
+
+BOOL SudekiMpInteractionProvenanceProbeActorLocalNearby(
+    uint32_t player_index
+) {
+    const SudekiMpPlayerStatehood *statehood =
+        SudekiMpPlayerStatehoodRuntime();
+    const SudekiMpPlayerLease *lease;
+    NativeEntityPointer candidates[ACTOR_LOCAL_NEARBY_LIMIT];
+    float position[3];
+    void *collision_system;
+    int count;
+    int index;
+
+    if (statehood == NULL || player_index >=
+            SUDEKIMP_INTERACTION_PROVENANCE_PLAYER_COUNT ||
+        active_source_generation == 0u) {
+        return FALSE;
+    }
+    lease = &statehood->players[player_index];
+    if (!lease->human_present || lease->actor == 0u ||
+        lease->actor_generation == 0u ||
+        !finite_actor_position(lease->actor, position) ||
+        !collision_system_ready(&collision_system)) {
+        return FALSE;
+    }
+    ZeroMemory(candidates, sizeof(candidates));
+    count = nearby_collision_query(collision_system, position, 2.0f,
+        (int)ACTOR_LOCAL_NEARBY_LIMIT, candidates, UINT32_MAX);
+    if (count < 0 || count > (int)ACTOR_LOCAL_NEARBY_LIMIT) {
+        for (index = 0; index < (int)ACTOR_LOCAL_NEARBY_LIMIT; ++index) {
+            tracked_entity_cleanup(&candidates[index]);
+        }
+        return FALSE;
+    }
+#if !defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+    SudekiMpLogFormat(
+        "interaction_provenance event=actor_local_nearby_entities "
+        "seat=%lu actor=0x%08lx actor_generation=%lu "
+        "source_generation=%lu radius=2.00 count=%d "
+        "policy=observation_only_no_target_selection_or_native_action\\r\\n",
+        (unsigned long)player_index + 1ul,
+        (unsigned long)lease->actor,
+        (unsigned long)lease->actor_generation,
+        (unsigned long)active_source_generation,
+        count);
+    for (index = 0; index < count; ++index) {
+        BOOL usable = candidates[index].entity != NULL &&
+            readable_memory(candidates[index].entity, sizeof(void *)) &&
+            usable_get_can_use(&candidates[index]) != 0u;
+
+        SudekiMpLogFormat(
+            "interaction_provenance event=actor_local_nearby_entity "
+            "seat=%lu index=%d entity=0x%08lx usable_can_use=%s "
+            "policy=read_only_classification_no_target_selection_or_native_action\\r\\n",
+            (unsigned long)player_index + 1ul,
+            index,
+            (unsigned long)(uintptr_t)candidates[index].entity,
+            usable ? "true" : "false");
+    }
+#endif
+    log_trigger_correlations(player_index, lease, candidates, count);
+    for (index = 0; index < (int)ACTOR_LOCAL_NEARBY_LIMIT; ++index) {
+        tracked_entity_cleanup(&candidates[index]);
+    }
+    return TRUE;
 }
 
 static uint32_t next_observation_serial(void) {
@@ -182,6 +661,58 @@ static BOOL observation_lease_is_current(
     lease = &statehood->players[player_index];
     return lease->human_present && lease->actor == actor &&
         lease->actor_generation == actor_generation;
+}
+
+static void observe_usable_collision_contact(
+    void *usable_subobject,
+    void *collision_source,
+    void *source_actor,
+    uint32_t event_type
+) {
+    uint32_t player_index;
+    uint32_t actor_generation;
+    const char *actor_argument;
+
+    if (usable_subobject == NULL || active_source_generation == 0u) {
+        return;
+    }
+    /*
+     * The legacy callback's two object arguments are both opaque from this
+     * interface.  Do not assume their source/target ordering: observe either
+     * one only when it is an exact live player lease.  This remains purely
+     * diagnostic and never promotes or dispatches a native interaction.
+     */
+    if (source_actor != NULL &&
+        resolve_actor_lease((uintptr_t)source_actor, &player_index,
+            &actor_generation)) {
+        actor_argument = "source_actor";
+    } else if (collision_source != NULL &&
+        resolve_actor_lease((uintptr_t)collision_source, &player_index,
+            &actor_generation)) {
+        actor_argument = "collision_source";
+    } else {
+        return;
+    }
+#if !defined(SUDEKIMP_INTERACTION_PROVENANCE_TESTING)
+    SudekiMpLogFormat(
+        "interaction_provenance event=usable_contact seat=%lu "
+        "actor_argument=%s source_actor=0x%08lx usable=0x%08lx "
+        "collision_source=0x%08lx "
+        "event_type=%lu actor_generation=%lu source_generation=%lu "
+        "policy=observation_only_no_native_action\r\n",
+        (unsigned long)player_index + 1ul,
+        actor_argument,
+        (unsigned long)(uintptr_t)source_actor,
+        (unsigned long)((uintptr_t)usable_subobject - 0x3cu),
+        (unsigned long)(uintptr_t)collision_source,
+        (unsigned long)event_type,
+        (unsigned long)actor_generation,
+        (unsigned long)active_source_generation);
+#else
+    (void)collision_source;
+    (void)event_type;
+    (void)actor_argument;
+#endif
 }
 
 static void clear_observations(void) {
@@ -839,6 +1370,21 @@ static void *observe_script_submission(void) {
     );
 }
 
+static void __attribute__((thiscall)) observe_usable_collision(
+    void *usable_subobject,
+    void *collision_source,
+    void *source_actor,
+    uint32_t event_type
+) {
+    DWORD incoming_error = GetLastError();
+
+    observe_usable_collision_contact(usable_subobject, collision_source,
+        source_actor, event_type);
+    SetLastError(incoming_error);
+    original_usable_collision(usable_subobject, collision_source,
+        source_actor, event_type);
+}
+
 static BOOL signatures_match(uint8_t *base) {
     return readable_memory(
             base + RVA_ACTION_CANDIDATE_DISPATCH_CALL,
@@ -849,6 +1395,16 @@ static BOOL signatures_match(uint8_t *base) {
         readable_memory(
             base + RVA_ON_ACTION_SOL_SUBMISSION_CALL,
             sizeof(on_action_sol_submission_call_signature)) &&
+        readable_memory(base + RVA_USABLE_COLLISION,
+            sizeof(usable_collision_signature)) &&
+        readable_memory(base + RVA_NEARBY_COLLISION_QUERY,
+            sizeof(nearby_collision_query_signature)) &&
+        readable_memory(base + RVA_TRACKED_ENTITY_CLEANUP,
+            sizeof(tracked_entity_cleanup_signature)) &&
+        readable_memory(base + RVA_USABLE_GET_CAN_USE,
+            sizeof(usable_get_can_use_signature)) &&
+        readable_memory(base + RVA_TRIGGER_ACTOR_ELIGIBILITY,
+            sizeof(trigger_actor_eligibility_signature)) &&
         memcmp(base + RVA_ACTION_CANDIDATE_DISPATCH_CALL,
             action_candidate_dispatch_call_signature,
             sizeof(action_candidate_dispatch_call_signature)) == 0 &&
@@ -857,7 +1413,20 @@ static BOOL signatures_match(uint8_t *base) {
             sizeof(enqueue_interaction_call_signature)) == 0 &&
         memcmp(base + RVA_ON_ACTION_SOL_SUBMISSION_CALL,
             on_action_sol_submission_call_signature,
-            sizeof(on_action_sol_submission_call_signature)) == 0;
+            sizeof(on_action_sol_submission_call_signature)) == 0 &&
+        memcmp(base + RVA_USABLE_COLLISION, usable_collision_signature,
+            sizeof(usable_collision_signature)) == 0 &&
+        memcmp(base + RVA_NEARBY_COLLISION_QUERY,
+            nearby_collision_query_signature,
+            sizeof(nearby_collision_query_signature)) == 0 &&
+        memcmp(base + RVA_TRACKED_ENTITY_CLEANUP,
+            tracked_entity_cleanup_signature,
+            sizeof(tracked_entity_cleanup_signature)) == 0 &&
+        memcmp(base + RVA_USABLE_GET_CAN_USE, usable_get_can_use_signature,
+            sizeof(usable_get_can_use_signature)) == 0 &&
+        memcmp(base + RVA_TRIGGER_ACTOR_ELIGIBILITY,
+            trigger_actor_eligibility_signature,
+            sizeof(trigger_actor_eligibility_signature)) == 0;
 }
 
 BOOL SudekiMpInstallInteractionProvenance(
@@ -887,6 +1456,14 @@ BOOL SudekiMpInstallInteractionProvenance(
     original_enqueue_interaction =
         (EnqueueInteractionFunction)(base + RVA_ENQUEUE_INTERACTION);
     original_script_submission = base + RVA_SOL_SUBMISSION;
+    nearby_collision_query = (NearbyCollisionQueryFunction)(
+        base + RVA_NEARBY_COLLISION_QUERY);
+    tracked_entity_cleanup = (TrackedEntityCleanupFunction)(
+        base + RVA_TRACKED_ENTITY_CLEANUP);
+    usable_get_can_use = (UsableGetCanUseFunction)(
+        base + RVA_USABLE_GET_CAN_USE);
+    trigger_actor_eligibility = (TriggerActorEligibilityFunction)(
+        base + RVA_TRIGGER_ACTOR_ELIGIBILITY);
     if (!SudekiMpInstallRelativeCallHook(
             &action_candidate_dispatch_hook,
             base + RVA_ACTION_CANDIDATE_DISPATCH_CALL,
@@ -905,10 +1482,19 @@ BOOL SudekiMpInstallInteractionProvenance(
         SudekiMpUninstallInteractionProvenance();
         return FALSE;
     }
+    if (!SudekiMpInstallInlineHook(&usable_collision_hook,
+            base + RVA_USABLE_COLLISION, usable_collision_signature,
+            sizeof(usable_collision_signature), observe_usable_collision)) {
+        SudekiMpUninstallInteractionProvenance();
+        return FALSE;
+    }
+    original_usable_collision = (UsableCollisionFunction)
+        usable_collision_hook.trampoline;
     return TRUE;
 }
 
 void SudekiMpUninstallInteractionProvenance(void) {
+    SudekiMpRestoreInlineHook(&usable_collision_hook);
     SudekiMpRestoreRelativeCallHook(&on_action_sol_submission_hook);
     SudekiMpRestoreRelativeCallHook(&enqueue_interaction_hook);
     SudekiMpRestoreRelativeCallHook(&action_candidate_dispatch_hook);
@@ -917,6 +1503,11 @@ void SudekiMpUninstallInteractionProvenance(void) {
         dispatch_tls_index = TLS_OUT_OF_INDEXES;
     }
     original_script_submission = NULL;
+    tracked_entity_cleanup = NULL;
+    nearby_collision_query = NULL;
+    usable_get_can_use = NULL;
+    trigger_actor_eligibility = NULL;
+    original_usable_collision = NULL;
     original_enqueue_interaction = NULL;
     original_action_candidate_dispatch = NULL;
     game_base = NULL;

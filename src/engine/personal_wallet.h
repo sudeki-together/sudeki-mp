@@ -31,14 +31,20 @@ typedef enum SudekiMpWalletTransactionKind {
     SUDEKIMP_WALLET_TRANSACTION_NONE = 0,
     /* Literal florins or another actor-owned reward source. */
     SUDEKIMP_WALLET_TRANSACTION_PERSONAL_REWARD,
-    /* Anonymous quest/script rewards remain in the party reserve. */
+    /* Legacy compatibility policy: anonymous rewards credit the reserve. */
     SUDEKIMP_WALLET_TRANSACTION_PARTY_REWARD,
     /* Shared inventory receives an item; its buyer pays personally. */
     SUDEKIMP_WALLET_TRANSACTION_PURCHASE,
     /* Shared equipment changes; its builder pays personally. */
     SUDEKIMP_WALLET_TRANSACTION_FORGE,
     /* One shared item leaves; every character receives the full price. */
-    SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND
+    SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND,
+    /* A proven literal florin/drop source gives the full amount to all four. */
+    SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD,
+    /* A quest/script reward has no character source but still dividends. */
+    SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND,
+    /* Host-only party reserve distribution to one character wallet. */
+    SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION
 } SudekiMpWalletTransactionKind;
 
 typedef enum SudekiMpWalletMoneyPolicy {
@@ -46,7 +52,8 @@ typedef enum SudekiMpWalletMoneyPolicy {
     SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_CHARACTER,
     SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_RESERVE,
     SUDEKIMP_WALLET_MONEY_POLICY_DEBIT_CHARACTER,
-    SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_ALL_CHARACTERS
+    SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_ALL_CHARACTERS,
+    SUDEKIMP_WALLET_MONEY_POLICY_TRANSFER_RESERVE_TO_CHARACTER
 } SudekiMpWalletMoneyPolicy;
 
 typedef enum SudekiMpWalletExternalEffect {
@@ -110,6 +117,7 @@ typedef struct SudekiMpWalletPlan {
     uint32_t character_debit[SUDEKIMP_PERSONAL_WALLET_CHARACTER_COUNT];
     uint32_t character_overflow[SUDEKIMP_PERSONAL_WALLET_CHARACTER_COUNT];
     uint32_t reserve_credit;
+    uint32_t reserve_debit;
     uint64_t reserve_overflow;
     uint64_t nominal_character_credit;
     uint64_t applied_character_credit;
@@ -126,6 +134,7 @@ typedef struct SudekiMpWalletReceipt {
     uint32_t character_overflow[SUDEKIMP_PERSONAL_WALLET_CHARACTER_COUNT];
     uint32_t party_reserve;
     uint32_t reserve_credit;
+    uint32_t reserve_debit;
     uint64_t nominal_character_credit;
     uint64_t applied_character_credit;
     uint64_t discarded_character_overflow;

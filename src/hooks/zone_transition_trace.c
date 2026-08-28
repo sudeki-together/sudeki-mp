@@ -281,6 +281,7 @@ static SudekiMpDoorwayStaging party_doorway_staging;
 static BOOL transition_vote_raw_input_neutral(
     const SudekiMpInputBridgeState *state
 );
+static BOOL readable_zone_bytes(const char *source, size_t size);
 
 typedef struct SudekiMpPartyPresentationFollower {
     void *character;
@@ -538,6 +539,28 @@ static void bump_zone_source_generation(const char *reason) {
     }
     SudekiMpInteractionProvenanceSetSourceGeneration(
         zone_source_generation);
+}
+
+BOOL SudekiMpZoneTransitionGetSourceSnapshot(
+    uint32_t *source_generation,
+    uintptr_t *world_identity
+) {
+    uint8_t *base = (uint8_t *)trace_module;
+    void *world;
+
+    if (source_generation == NULL || world_identity == NULL ||
+        base == NULL || zone_source_generation == 0u ||
+        !readable_zone_bytes(
+            (const char *)(base + RVA_WORLD_GLOBAL), sizeof(world))) {
+        return FALSE;
+    }
+    world = *(void **)(base + RVA_WORLD_GLOBAL);
+    if (world == NULL) {
+        return FALSE;
+    }
+    *source_generation = zone_source_generation;
+    *world_identity = (uintptr_t)world;
+    return TRUE;
 }
 
 static BOOL readable_zone_bytes(const char *source, size_t size) {

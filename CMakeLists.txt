@@ -22,6 +22,8 @@ add_library(SudekiMP SHARED
     src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
     src/engine/controller_action_router.c
+    src/engine/economy_coordinator.c
+    src/engine/economy_sidecar.c
     src/engine/blacksmith_commit_adapter.c
     src/engine/blacksmith_read_model.c
     src/engine/blacksmith_shadow.c
@@ -30,11 +32,16 @@ add_library(SudekiMP SHARED
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/merchant_provenance.c
+    src/engine/merchant_checkout.c
     src/engine/orbit_camera.c
     src/engine/personal_wallet.c
+    src/engine/shared_inventory_entitlement_ledger.c
     src/engine/player_combat_context.c
     src/engine/player_statehood.c
     src/engine/roaming_boundary.c
+    src/engine/save_book_vote.c
+    src/engine/save_book_vote_input.c
     src/engine/skill_activation_abi.c
     src/engine/transition_vote.c
     src/input/bridge_protocol.c
@@ -45,6 +52,7 @@ add_library(SudekiMP SHARED
     src/hooks/blacksmith_ui_adapter.c
     src/hooks/call_hook.c
     src/hooks/interaction_provenance.c
+    src/hooks/merchant_provenance_adapter.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
@@ -53,6 +61,8 @@ add_library(SudekiMP SHARED
     src/hooks/zone_transition_trace.c
     src/hooks/quick_menu.c
     src/hooks/quick_skill_input.c
+    src/hooks/save_book_intercept.c
+    src/hooks/shop_catalog_adapter.c
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
@@ -170,6 +180,30 @@ add_executable(SudekiMP.TransitionVoteTest
     src/engine/transition_vote.c
 )
 
+add_executable(SudekiMP.SaveBookVoteTest
+    tests/save_book_vote_test.c
+    src/engine/save_book_vote.c
+)
+target_include_directories(SudekiMP.SaveBookVoteTest PRIVATE src)
+target_compile_options(SudekiMP.SaveBookVoteTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.SaveBookVoteTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.SaveBookVoteInputTest
+    tests/save_book_vote_input_test.c
+    src/engine/save_book_vote_input.c
+)
+target_include_directories(SudekiMP.SaveBookVoteInputTest PRIVATE src)
+target_compile_options(SudekiMP.SaveBookVoteInputTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.SaveBookVoteInputTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.RoamingBoundaryTest
     tests/roaming_boundary_test.c
     src/engine/roaming_boundary.c
@@ -269,6 +303,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/player_combat_context.c
     src/engine/player_statehood.c
     src/engine/roaming_boundary.c
+    src/engine/save_book_vote.c
     src/engine/skill_activation_abi.c
     src/engine/transition_vote.c
     src/input/bridge_protocol.c
@@ -282,6 +317,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/interaction_provenance.c
     src/hooks/player_input_trace.c
     src/hooks/quick_skill_input.c
+    src/hooks/save_book_intercept.c
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
@@ -292,6 +328,7 @@ target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)
 target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE
     WIN32_LEAN_AND_MEAN UNICODE _UNICODE
     SUDEKIMP_BLACKSMITH_UI_ADAPTER_TESTING=1
+    SUDEKIMP_SAVE_BOOK_INTERCEPT_TESTING=1
 )
 target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
     -Wall -Wextra -Wpedantic
@@ -430,6 +467,87 @@ set_target_properties(SudekiMP.PersonalWalletTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_executable(SudekiMP.SharedInventoryEntitlementLedgerTest
+    tests/shared_inventory_entitlement_ledger_test.c
+    src/engine/personal_wallet.c
+    src/engine/shared_inventory_entitlement_ledger.c
+)
+target_include_directories(SudekiMP.SharedInventoryEntitlementLedgerTest PRIVATE src)
+target_compile_options(SudekiMP.SharedInventoryEntitlementLedgerTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.SharedInventoryEntitlementLedgerTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.EconomyCoordinatorTest
+    tests/economy_coordinator_test.c
+    src/engine/economy_coordinator.c
+    src/engine/personal_wallet.c
+    src/engine/shared_inventory_entitlement_ledger.c
+)
+target_include_directories(SudekiMP.EconomyCoordinatorTest PRIVATE src)
+target_compile_options(SudekiMP.EconomyCoordinatorTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.EconomyCoordinatorTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.EconomySidecarTest
+    tests/economy_sidecar_test.c
+    src/engine/economy_coordinator.c
+    src/engine/economy_sidecar.c
+    src/engine/personal_wallet.c
+    src/engine/shared_inventory_entitlement_ledger.c
+)
+target_include_directories(SudekiMP.EconomySidecarTest PRIVATE src)
+target_compile_options(SudekiMP.EconomySidecarTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.EconomySidecarTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.MerchantCheckoutTest
+    tests/merchant_checkout_test.c
+    src/engine/economy_coordinator.c
+    src/engine/merchant_checkout.c
+    src/engine/personal_wallet.c
+    src/engine/shared_inventory_entitlement_ledger.c
+)
+
+add_executable(SudekiMP.MerchantProvenanceTest
+    tests/merchant_provenance_test.c
+    src/engine/merchant_provenance.c
+)
+target_include_directories(SudekiMP.MerchantProvenanceTest PRIVATE src)
+target_compile_options(SudekiMP.MerchantProvenanceTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.MerchantProvenanceTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.MerchantCheckoutTest PRIVATE src)
+target_compile_options(SudekiMP.MerchantCheckoutTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.MerchantCheckoutTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.ShopCatalogAdapterTest
+    tests/shop_catalog_adapter_test.c
+    src/hooks/shop_catalog_adapter.c
+)
+target_include_directories(SudekiMP.ShopCatalogAdapterTest PRIVATE src)
+target_compile_options(SudekiMP.ShopCatalogAdapterTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.ShopCatalogAdapterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.BlacksmithShadowTest
     tests/blacksmith_shadow_test.c
     src/engine/blacksmith_shadow.c
@@ -525,6 +643,9 @@ target_compile_options(SudekiMP.InteractionProvenanceTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 set_source_files_properties(src/hooks/interaction_provenance.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(src/hooks/merchant_provenance_adapter.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
 set_target_properties(SudekiMP.InteractionProvenanceTest PROPERTIES

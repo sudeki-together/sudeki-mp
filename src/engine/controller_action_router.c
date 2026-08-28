@@ -61,9 +61,12 @@ static SudekiMpControllerActionIntent resolve_gameplay(
 ) {
     switch (button) {
     case SUDEKIMP_BRIDGE_BUTTON_A:
-        return context->interaction_target_known ?
-            SUDEKIMP_CONTROLLER_INTENT_INTERACT :
-            SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK;
+        /* Exploration A is always an interaction attempt.  The resolver, not
+         * the face-button policy, decides whether Ailish currently has an
+         * actor-local target. */
+        return context->combat_active ?
+            SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK :
+            SUDEKIMP_CONTROLLER_INTENT_INTERACT;
     case SUDEKIMP_BRIDGE_BUTTON_X:
         if (context->ranged_character) {
             return context->perspective_toggle_available ?

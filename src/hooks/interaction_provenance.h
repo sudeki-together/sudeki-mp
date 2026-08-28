@@ -84,6 +84,15 @@ void SudekiMpInteractionProvenanceSetSourceGeneration(uint32_t generation);
 void SudekiMpInteractionProvenanceInvalidate(void);
 void SudekiMpInteractionProvenanceInvalidateSolThread(uintptr_t sol_thread);
 
+/* Runs Sudeki's existing read-only nearby-collision query around one live
+ * player lease and logs bounded entity identities.  It deliberately does not
+ * select, validate, enqueue, or dispatch an interaction.  This is the first
+ * actor-local discovery seam because the native CUsable contact path only
+ * scans the front character. */
+BOOL SudekiMpInteractionProvenanceProbeActorLocalNearby(
+    uint32_t player_index
+);
+
 BOOL SudekiMpInteractionProvenanceGetSeat(
     uint32_t player_index,
     SudekiMpInteractionSeatObservation *observation

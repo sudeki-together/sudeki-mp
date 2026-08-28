@@ -99,6 +99,64 @@ static void test_stable_character_ids_and_policy(void) {
     CHECK(SudekiMpPersonalWalletExternalEffectForKind(
         SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND) ==
         SUDEKIMP_WALLET_EXTERNAL_REMOVE_SHARED_ITEM_QUANTITY);
+    CHECK(SudekiMpPersonalWalletMoneyPolicyForKind(
+        SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD) ==
+        SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_ALL_CHARACTERS);
+    CHECK(SudekiMpPersonalWalletMoneyPolicyForKind(
+        SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION) ==
+        SUDEKIMP_WALLET_MONEY_POLICY_TRANSFER_RESERVE_TO_CHARACTER);
+}
+
+static void test_dividend_rewards_and_reserve_distribution(void) {
+    SudekiMpPersonalWallet wallet;
+    SudekiMpWalletRequest request;
+    SudekiMpWalletPlan plan;
+
+    SudekiMpPersonalWalletInitialize(&wallet);
+    request = request_for(
+        &wallet, 1u, SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD,
+        SUDEKIMP_WALLET_CHARACTER_AILISH, 100u, 4u, 0u, 0u, 1);
+    CHECK(SudekiMpPersonalWalletPlanTransaction(
+        &wallet, &request, &plan) == SUDEKIMP_WALLET_PLAN_CREATED);
+    CHECK(plan.nominal_character_credit == 400u);
+    CHECK(SudekiMpPersonalWalletBeginApplication(
+        &wallet, 1u, request.expected_wallet_generation) ==
+        SUDEKIMP_WALLET_APPLICATION_BEGUN);
+    CHECK(SudekiMpPersonalWalletResolveApplication(
+        &wallet, 1u, SUDEKIMP_WALLET_EXTERNAL_VERIFIED, 5u, NULL) ==
+        SUDEKIMP_WALLET_APPLIED);
+    CHECK(balance_of(&wallet, SUDEKIMP_WALLET_CHARACTER_TAL) == 100u);
+    CHECK(balance_of(&wallet, SUDEKIMP_WALLET_CHARACTER_ELCO) == 100u);
+
+    request = request_for(
+        &wallet, 2u, SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND,
+        SUDEKIMP_WALLET_CHARACTER_INVALID, 100u, 0u, 0u, 0u, 0);
+    CHECK(SudekiMpPersonalWalletPlanTransaction(
+        &wallet, &request, &plan) == SUDEKIMP_WALLET_PLAN_CREATED);
+    CHECK(SudekiMpPersonalWalletBeginApplication(
+        &wallet, 2u, request.expected_wallet_generation) ==
+        SUDEKIMP_WALLET_APPLICATION_BEGUN);
+    CHECK(SudekiMpPersonalWalletResolveApplication(
+        &wallet, 2u, SUDEKIMP_WALLET_EXTERNAL_VERIFIED, 0u, NULL) ==
+        SUDEKIMP_WALLET_APPLIED);
+    CHECK(balance_of(&wallet, SUDEKIMP_WALLET_CHARACTER_BUKI) == 200u);
+
+    wallet.party_reserve = 300u;
+    ++wallet.generation;
+    request = request_for(
+        &wallet, 3u, SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION,
+        SUDEKIMP_WALLET_CHARACTER_TAL, 75u, 0u, 0u, 0u, 0);
+    CHECK(SudekiMpPersonalWalletPlanTransaction(
+        &wallet, &request, &plan) == SUDEKIMP_WALLET_PLAN_CREATED);
+    CHECK(plan.reserve_debit == 75u);
+    CHECK(SudekiMpPersonalWalletBeginApplication(
+        &wallet, 3u, request.expected_wallet_generation) ==
+        SUDEKIMP_WALLET_APPLICATION_BEGUN);
+    CHECK(SudekiMpPersonalWalletResolveApplication(
+        &wallet, 3u, SUDEKIMP_WALLET_EXTERNAL_VERIFIED, 0u, NULL) ==
+        SUDEKIMP_WALLET_APPLIED);
+    CHECK(wallet.party_reserve == 225u);
+    CHECK(balance_of(&wallet, SUDEKIMP_WALLET_CHARACTER_TAL) == 275u);
 }
 
 static void test_sale_is_one_removal_and_four_full_dividends(void) {
@@ -551,6 +609,7 @@ static void test_restore_cannot_erase_planned_or_applying_effect(void) {
 
 int main(void) {
     test_stable_character_ids_and_policy();
+    test_dividend_rewards_and_reserve_distribution();
     test_sale_is_one_removal_and_four_full_dividends();
     test_sale_caps_each_wallet_and_discards_overflow();
     test_purchase_and_sale_quantities_are_explicit();

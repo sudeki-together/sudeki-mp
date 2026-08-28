@@ -87,6 +87,10 @@ public class BlacksmithInteractionProvenanceReport extends GhidraScript {
             0x0040cfd0L, // adjacent trigger scan / candidate population
             0x0040d320L, // adjacent candidate lifecycle
             0x0040d530L, // adjacent candidate lifecycle
+            0x004b5c30L, // CUsable collision/source callback
+            0x004b5ce0L, // CUsable interaction eligibility
+            0x004b5fa0L, // CUsable CanUse predicate
+            0x004b6c70L, // CUsable current-target assignment
             0x005c37b0L, // script-message queue insertion helper
             0x005c38d0L, // construct/schedule the returned SOL task
             0x005c41d0L, // SOL bytecode interpreter step
@@ -106,7 +110,9 @@ public class BlacksmithInteractionProvenanceReport extends GhidraScript {
             "interaction message enqueue", "action source dispatch",
             "OnAction candidate dispatch", "OnAction candidate validator",
             "trigger candidate scan", "candidate lifecycle A",
-            "candidate lifecycle B", "script message submission",
+            "candidate lifecycle B", "usable collision callback",
+            "usable eligibility", "usable CanUse", "usable target assignment",
+            "script message submission",
             "SOL task construction", "SOL bytecode interpreter step",
             "opcode 0x27 global binding dispatch",
             "message queue append", "script/native dispatch A",

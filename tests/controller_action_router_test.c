@@ -61,7 +61,7 @@ static void test_shipped_gameplay_face_contract(void) {
     context.seat_active = 1;
 
     result = press(&router, 0u, SUDEKIMP_BRIDGE_BUTTON_A, &context);
-    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK);
+    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_INTERACT);
     release(&router, 0u, &context);
     result = press(&router, 0u, SUDEKIMP_BRIDGE_BUTTON_X, &context);
     CHECK(result.intent ==
@@ -75,6 +75,9 @@ static void test_shipped_gameplay_face_contract(void) {
     release(&router, 0u, &context);
 
     context.combat_active = 1;
+    result = press(&router, 0u, SUDEKIMP_BRIDGE_BUTTON_A, &context);
+    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK);
+    release(&router, 0u, &context);
     result = press(&router, 0u, SUDEKIMP_BRIDGE_BUTTON_B, &context);
     CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP);
 }
@@ -136,6 +139,7 @@ static void test_context_priority(void) {
     release(&router, 1u, &context);
 
     context.transition_vote_active = 0;
+    context.combat_active = 0;
     result = press(&router, 1u, SUDEKIMP_BRIDGE_BUTTON_A, &context);
     CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_INTERACT);
 }
@@ -207,7 +211,7 @@ static void test_edges_reconnect_and_seat_independence(void) {
 
     result = press(&router, 3u, SUDEKIMP_BRIDGE_BUTTON_A, &context);
     CHECK(result.seat_index == 3u);
-    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK);
+    CHECK(result.intent == SUDEKIMP_CONTROLLER_INTENT_INTERACT);
 
     CHECK(SudekiMpControllerActionRouterAdvance(
         &router, 0u, 0, 0u, &context, NULL, 0u) == 0u);

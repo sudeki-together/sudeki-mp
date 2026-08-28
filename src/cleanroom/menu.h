@@ -24,6 +24,9 @@ BOOL SudekiMpInstallCoopRosterMenu(
 );
 void SudekiMpCleanroomMenuUpdate(void);
 void SudekiMpCleanroomMenuRender(void);
+/* Read-only bridge for code that already depends on the cleanroom presenter;
+ * the save-book interceptor owns exact native opening/closed observation. */
+BOOL SudekiMpCleanroomNativeSaveModalActive(void);
 void SudekiMpUninstallCleanroomMenu(void);
 
 #endif

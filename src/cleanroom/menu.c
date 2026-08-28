@@ -5,13 +5,17 @@
 #include "engine/blacksmith_ui_presenter.h"
 #include "engine/log.h"
 #include "engine/player_statehood.h"
+#include "engine/save_book_vote.h"
+#include "engine/save_book_vote_input.h"
 #include "engine/transition_vote.h"
 #include "hooks/call_hook.h"
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/control_separation.h"
+#include "hooks/save_book_intercept.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/talos_coop_balance.h"
 #include "hooks/zone_transition_trace.h"
+#include "input/bridge_receiver.h"
 
 #include <stdint.h>
 #include <limits.h>
@@ -203,6 +207,29 @@ typedef enum SudekiMpPendingAction {
     SUDEKIMP_PENDING_SPAWN = 1,
     SUDEKIMP_PENDING_REMOVE = 2
 } SudekiMpPendingAction;
+
+typedef enum SudekiMpCleanroomVoteKind {
+    SUDEKIMP_CLEANROOM_VOTE_TRAVEL = 0,
+    SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK = 1
+} SudekiMpCleanroomVoteKind;
+
+typedef struct SudekiMpCleanroomVoteSnapshot {
+    BOOL active;
+    SudekiMpCleanroomVoteKind kind;
+    unsigned int state;
+    uint32_t serial;
+    uint32_t remaining_ms;
+    uint8_t participant_mask;
+    uint8_t accepted_mask;
+    uint8_t cancelled_mask;
+    char subject[64];
+} SudekiMpCleanroomVoteSnapshot;
+
+typedef struct SudekiMpSaveBookVoteInputRuntime {
+    SudekiMpSaveBookVoteInputFence player_two;
+    BOOL overlay_acknowledged;
+    BOOL player_one_cancel_was_down;
+} SudekiMpSaveBookVoteInputRuntime;
 
 enum {
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
@@ -417,17 +444,12 @@ static const uint8_t font_digits[10][7] = {
 };
 
 static SudekiMpPointerHook controller_update_hook;
-static SudekiMpInlineHook native_save_portrait_selector_hook;
-void *native_save_portrait_selector_trampoline;
 static SudekiMpInlineHook native_save_entry_update_hook;
 void *native_save_entry_update_trampoline;
 static SudekiMpInlineHook native_save_page_action_hook;
 void *native_save_page_action_trampoline;
 static SudekiMpInlineHook native_save_page_input_hook;
 void *native_save_page_input_trampoline;
-static unsigned int native_save_portrait_last_ecx = UINT_MAX;
-static unsigned int native_save_portrait_last_eax = UINT_MAX;
-static void *native_save_portrait_last_receiver;
 static void *native_save_entry_last_object;
 static unsigned int native_save_entry_last_mode = UINT_MAX;
 static unsigned int native_save_entry_last_selection = UINT_MAX;
@@ -464,28 +486,8 @@ static volatile LONG pc_front_end_trace_stop;
 static void **d3d_device_global;
 static BOOL menu_memory_readable(const void *pointer, size_t size);
 
-void trace_native_save_portrait_selector(
-    unsigned int ecx_value,
-    unsigned int eax_value,
-    void *cycle_icon
-) {
-    if (ecx_value == native_save_portrait_last_ecx &&
-        eax_value == native_save_portrait_last_eax &&
-        cycle_icon == native_save_portrait_last_receiver) {
-        return;
-    }
-    native_save_portrait_last_ecx = ecx_value;
-    native_save_portrait_last_eax = eax_value;
-    native_save_portrait_last_receiver = cycle_icon;
-    SudekiMpLogFormat(
-        "cleanroom_menu event=native_portrait_selector phase=front_end_or_hud "
-        "ecx=0x%08lx eax=0x%08lx stack_receiver=%p "
-        "policy=observation_only rva=0x%08lx\r\n",
-        (unsigned long)ecx_value,
-        (unsigned long)eax_value,
-        cycle_icon,
-        (unsigned long)RVA_HUD_PORTRAIT_RESOURCE_SELECT
-    );
+BOOL SudekiMpCleanroomNativeSaveModalActive(void) {
+    return SudekiMpSplitScreenNativeSaveModalActive();
 }
 
 void trace_native_save_entry_update(void *entry) {
@@ -532,15 +534,13 @@ void trace_native_save_page_action(
     unsigned int state = UINT_MAX;
     unsigned int selection = UINT_MAX;
     unsigned int mode = UINT_MAX;
-    unsigned int flags = UINT_MAX;
 
-    if (controller == NULL || !menu_memory_readable(controller, 0x114u)) {
+    if (controller == NULL || !menu_memory_readable(controller, 0x8cu)) {
         return;
     }
     mode = *(unsigned int *)((uint8_t *)controller + 0x88u);
     selection = *(unsigned int *)((uint8_t *)controller + 0x54u);
     state = *(unsigned int *)((uint8_t *)controller + 0x48u);
-    flags = *(unsigned char *)((uint8_t *)controller + 0x10cu);
     if (controller == native_save_page_action_last_object &&
         event == native_save_page_action_last_event &&
         argument == native_save_page_action_last_argument) {
@@ -552,7 +552,7 @@ void trace_native_save_page_action(
     SudekiMpLogFormat(
         "cleanroom_menu event=native_save_page_action controller=%p "
         "event_code=%lu argument=%lu mode=%lu state=%lu "
-        "selection=%lu flags=0x%02lx policy=observation_only "
+        "selection=%lu policy=observation_only "
         "rva=0x%08lx\r\n",
         controller,
         (unsigned long)event,
@@ -560,7 +560,6 @@ void trace_native_save_page_action(
         (unsigned long)mode,
         (unsigned long)state,
         (unsigned long)selection,
-        (unsigned long)flags,
         (unsigned long)RVA_NATIVE_SAVE_PAGE_ACTION
     );
 }
@@ -656,20 +655,6 @@ static void native_save_page_input_entry(void) {
     );
 }
 
-__attribute__((naked, noinline, used))
-static void native_save_portrait_selector_entry(void) {
-    __asm__ volatile(
-        "pushal\n\t"
-        "pushl 36(%esp)\n\t"
-        "pushl 32(%esp)\n\t"
-        "pushl 28(%esp)\n\t"
-        "call _trace_native_save_portrait_selector\n\t"
-        "addl $12, %esp\n\t"
-        "popal\n\t"
-        "jmp *_native_save_portrait_selector_trampoline\n\t"
-    );
-}
-
 static void *menu_texture;
 static void *menu_texture_device;
 static void *player_two_badge_texture;
@@ -679,11 +664,15 @@ static void *transition_vote_texture;
 static void *transition_vote_texture_device;
 static BOOL transition_vote_texture_dirty;
 static BOOL transition_vote_overlay_failure_logged;
+static BOOL save_book_vote_overlay_failure_logged;
 static uint32_t transition_vote_overlay_serial;
 static uint32_t transition_vote_overlay_tenth_seconds;
 static unsigned int transition_vote_overlay_state;
+static unsigned int transition_vote_overlay_kind;
+static uint8_t transition_vote_overlay_participant_mask;
 static uint8_t transition_vote_overlay_accepted_mask;
 static char transition_vote_overlay_destination[64];
+static SudekiMpSaveBookVoteInputRuntime save_book_vote_input;
 static void *roaming_boundary_texture;
 static void *roaming_boundary_texture_device;
 static BOOL roaming_boundary_texture_dirty;
@@ -3577,6 +3566,118 @@ static BOOL owns_foreground(void) {
     return process_id == GetCurrentProcessId();
 }
 
+static void reset_save_book_vote_input(void) {
+    ZeroMemory(&save_book_vote_input, sizeof(save_book_vote_input));
+}
+
+static void begin_save_book_vote_input(
+    const SudekiMpSaveBookVoteSnapshot *snapshot
+) {
+    SudekiMpInputBridgeState raw_input;
+    BOOL raw_available;
+
+    reset_save_book_vote_input();
+    raw_available = SudekiMpInputBridgePollRaw(&raw_input);
+    SudekiMpSaveBookVoteInputBegin(
+        &save_book_vote_input.player_two,
+        snapshot->serial,
+        raw_available,
+        raw_available ? &raw_input : NULL);
+    save_book_vote_input.overlay_acknowledged =
+        snapshot->state == SUDEKIMP_SAVE_BOOK_VOTE_WAITING;
+    save_book_vote_input.player_one_cancel_was_down =
+        (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    SudekiMpLogFormat(
+        "save_book_vote event=input_fence phase=open serial=%lu "
+        "p1_escape_down=%u p2_baseline=%s p2_sequence=%lu "
+        "policy=p1_release_then_rising_escape_p2_newer_neutral_then_a_or_b\r\n",
+        (unsigned long)snapshot->serial,
+        save_book_vote_input.player_one_cancel_was_down ? 1u : 0u,
+        save_book_vote_input.player_two.baseline_valid ?
+            "captured" : "awaiting",
+        (unsigned long)save_book_vote_input.player_two.last_sequence);
+}
+
+static void service_save_book_vote_input(
+    const SudekiMpSaveBookVoteSnapshot *snapshot
+) {
+    SudekiMpInputBridgeState raw_input;
+    SudekiMpSaveBookVoteInputAction player_two_action;
+    BOOL player_one_cancel_down;
+    BOOL foreground;
+
+    if (snapshot == NULL || !snapshot->active || snapshot->serial == 0u) {
+        reset_save_book_vote_input();
+        return;
+    }
+    if (save_book_vote_input.player_two.serial != snapshot->serial) {
+        begin_save_book_vote_input(snapshot);
+    }
+    if (snapshot->state == SUDEKIMP_SAVE_BOOK_VOTE_WAITING) {
+        save_book_vote_input.overlay_acknowledged = TRUE;
+    }
+
+    player_one_cancel_down =
+        (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    foreground = owns_foreground();
+    if (foreground &&
+        save_book_vote_input.overlay_acknowledged &&
+        player_one_cancel_down &&
+        !save_book_vote_input.player_one_cancel_was_down) {
+        if (SudekiMpSaveBookRespondVote(
+                snapshot->serial, 0u, FALSE)) {
+            SudekiMpLogFormat(
+                "save_book_vote event=input player=1 action=veto "
+                "source=escape serial=%lu fence=release_then_rising\r\n",
+                (unsigned long)snapshot->serial);
+            save_book_vote_input.player_one_cancel_was_down =
+                player_one_cancel_down;
+            return;
+        }
+    }
+    save_book_vote_input.player_one_cancel_was_down =
+        player_one_cancel_down;
+
+    if (!foreground || (snapshot->participant_mask & 0x02u) == 0u ||
+        !SudekiMpInputBridgePollRaw(&raw_input)) {
+        return;
+    }
+    player_two_action = SudekiMpSaveBookVoteInputAdvance(
+        &save_book_vote_input.player_two,
+        snapshot->serial,
+        &raw_input,
+        save_book_vote_input.overlay_acknowledged);
+    if (player_two_action == SUDEKIMP_SAVE_BOOK_VOTE_INPUT_ARMED) {
+        SudekiMpLogFormat(
+            "save_book_vote event=input_fence phase=armed player=2 "
+            "serial=%lu sequence=%lu "
+            "policy=post_open_newer_neutral_observed\r\n",
+            (unsigned long)snapshot->serial,
+            (unsigned long)raw_input.sequence);
+        return;
+    }
+    if (player_two_action == SUDEKIMP_SAVE_BOOK_VOTE_INPUT_VETO) {
+        if (SudekiMpSaveBookRespondVote(
+                snapshot->serial, 1u, FALSE)) {
+            SudekiMpLogFormat(
+                "save_book_vote event=input player=2 action=veto "
+                "source=controller_b serial=%lu sequence=%lu\r\n",
+                (unsigned long)snapshot->serial,
+                (unsigned long)raw_input.sequence);
+        }
+    } else if (player_two_action ==
+            SUDEKIMP_SAVE_BOOK_VOTE_INPUT_ACCEPT) {
+        if (SudekiMpSaveBookRespondVote(
+                snapshot->serial, 1u, TRUE)) {
+            SudekiMpLogFormat(
+                "save_book_vote event=input player=2 action=accept "
+                "source=controller_a serial=%lu sequence=%lu\r\n",
+                (unsigned long)snapshot->serial,
+                (unsigned long)raw_input.sequence);
+        }
+    }
+}
+
 static void release_com_object(void **object) {
     void **vtable;
     ComReleaseFunction release;
@@ -4503,11 +4604,21 @@ static void service_story_test_boost(void) {
 
 void SudekiMpCleanroomMenuUpdate(void) {
     SudekiMpZoneTransitionVoteSnapshot vote_snapshot;
+    SudekiMpSaveBookVoteSnapshot save_book_snapshot;
     BOOL vote_was_active;
+    BOOL save_book_vote_was_active;
 
     if (game_base == NULL) {
         return;
     }
+    /* The control-separation freeze path deliberately keeps this update
+     * observer alive. Service the save-book owner and consent edges before
+     * any frozen-input early return. */
+    SudekiMpSaveBookService();
+    save_book_vote_was_active = SudekiMpSaveBookGetVoteSnapshot(
+        &save_book_snapshot) && save_book_snapshot.active;
+    service_save_book_vote_input(
+        save_book_vote_was_active ? &save_book_snapshot : NULL);
     /* The custom blacksmith entry suppresses native controller updates while
      * its panels own input. Service it before the generic frozen-input return
      * so keyboard/controller navigation and clean close remain live. */
@@ -4518,7 +4629,7 @@ void SudekiMpCleanroomMenuUpdate(void) {
     service_story_test_boost();
     clear_roster_resume_guard_after_gameplay_handoff();
     SudekiMpZoneTransitionService();
-    if (vote_was_active ||
+    if (save_book_vote_was_active || vote_was_active ||
         SudekiMpControlSeparationGameplayInputFrozen()) {
         return;
     }
@@ -4989,22 +5100,12 @@ static void roster_request_native_portraits(void *controller) {
         goto rejected;
     }
     selector_target = game_base + RVA_HUD_PORTRAIT_RESOURCE_SELECT;
-    if (native_save_portrait_selector_hook.installed &&
-        native_save_portrait_selector_hook.target == selector_target &&
-        native_save_portrait_selector_hook.length == sizeof(selector_entry) &&
-        memcmp(native_save_portrait_selector_hook.original,
-            selector_entry, sizeof(selector_entry)) == 0 &&
-        menu_memory_executable(
-            native_save_portrait_selector_hook.trampoline)) {
-        selector_target = native_save_portrait_selector_hook.trampoline;
-    }
     if (memcmp(game_base + RVA_NATIVE_CYCLE_ICON_CONSTRUCTOR,
             constructor_entry, sizeof(constructor_entry)) != 0 ||
         memcmp(game_base + RVA_NATIVE_CYCLE_ICON_BIND,
             bind_entry, sizeof(bind_entry)) != 0 ||
-        (selector_target == game_base + RVA_HUD_PORTRAIT_RESOURCE_SELECT &&
-            memcmp(selector_target,
-                selector_entry, sizeof(selector_entry)) != 0) ||
+        memcmp(selector_target,
+            selector_entry, sizeof(selector_entry)) != 0 ||
         !menu_memory_executable(
             game_base + RVA_NATIVE_CYCLE_ICON_CONSTRUCTOR) ||
         !menu_memory_executable(game_base + RVA_NATIVE_CYCLE_ICON_BIND) ||
@@ -5022,9 +5123,8 @@ static void roster_request_native_portraits(void *controller) {
                 constructor_entry, sizeof(constructor_entry)) == 0,
             memcmp(game_base + RVA_NATIVE_CYCLE_ICON_BIND,
                 bind_entry, sizeof(bind_entry)) == 0,
-            selector_target != game_base + RVA_HUD_PORTRAIT_RESOURCE_SELECT ||
-                memcmp(selector_target,
-                    selector_entry, sizeof(selector_entry)) == 0,
+            memcmp(selector_target,
+                selector_entry, sizeof(selector_entry)) == 0,
             menu_memory_executable(
                 game_base + RVA_NATIVE_CYCLE_ICON_CONSTRUCTOR),
             menu_memory_executable(game_base + RVA_NATIVE_CYCLE_ICON_BIND),
@@ -6263,9 +6363,64 @@ static BOOL ensure_blacksmith_ui_texture(
     return update_blacksmith_ui_texture(blacksmith_ui_texture, snapshot);
 }
 
+static unsigned int cleanroom_vote_participant_count(uint8_t mask) {
+    unsigned int count = 0u;
+
+    mask &= SUDEKIMP_TRANSITION_VOTE_PLAYER_MASK;
+    while (mask != 0u) {
+        count += mask & 1u;
+        mask >>= 1u;
+    }
+    return count;
+}
+
+static void cleanroom_vote_seat_status(
+    const SudekiMpCleanroomVoteSnapshot *snapshot,
+    unsigned int player_index,
+    char output[16]
+) {
+    uint8_t bit = (uint8_t)(1u << player_index);
+    const char *state;
+
+    output[0] = '\0';
+    if (snapshot == NULL || player_index >= 4u ||
+        (snapshot->participant_mask & bit) == 0u) {
+        return;
+    }
+    if ((snapshot->cancelled_mask & bit) != 0u) {
+        state = "VETO";
+    } else if ((snapshot->accepted_mask & bit) != 0u) {
+        state = "READY";
+    } else {
+        state = "WAIT";
+    }
+    wsprintfA(output, "P%u %s", player_index + 1u, state);
+}
+
+static void cleanroom_vote_status_pair(
+    const SudekiMpCleanroomVoteSnapshot *snapshot,
+    unsigned int first_player_index,
+    char output[40]
+) {
+    char first[16];
+    char second[16];
+
+    cleanroom_vote_seat_status(snapshot, first_player_index, first);
+    cleanroom_vote_seat_status(snapshot, first_player_index + 1u, second);
+    if (first[0] != '\0' && second[0] != '\0') {
+        wsprintfA(output, "%s   %s", first, second);
+    } else if (first[0] != '\0') {
+        lstrcpyA(output, first);
+    } else if (second[0] != '\0') {
+        lstrcpyA(output, second);
+    } else {
+        output[0] = '\0';
+    }
+}
+
 static BOOL update_transition_vote_texture(
     void *texture,
-    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+    const SudekiMpCleanroomVoteSnapshot *snapshot
 ) {
     void **vtable = *(void ***)texture;
     D3DTextureLockRectFunction lock_rectangle;
@@ -6274,7 +6429,13 @@ static BOOL update_transition_vote_texture(
     uint32_t *pixels;
     char destination[40];
     char countdown[40];
-    const char *status;
+    char electorate[40];
+    char status_primary[40];
+    char status_secondary[40];
+    const char *title;
+    const char *subject_label;
+    const char *player_two_prompt;
+    const char *player_one_prompt;
     unsigned long remaining_tenths;
     unsigned long seconds;
     unsigned long tenths;
@@ -6317,34 +6478,55 @@ static BOOL update_transition_vote_texture(
         TRANSITION_VOTE_OVERLAY_HEIGHT,
         UINT32_C(0xff35e6e0));
 
-    memcpy(destination, snapshot->destination,
+    memcpy(destination, snapshot->subject,
         sizeof(destination) - 1u);
     destination[sizeof(destination) - 1u] = '\0';
     remaining_tenths =
         (unsigned long)((snapshot->remaining_ms + 99u) / 100u);
     seconds = remaining_tenths / 10u;
     tenths = remaining_tenths % 10u;
-    wsprintfA(countdown, "AUTO ENTER IN %lu.%lu", seconds, tenths);
-    status = snapshot->state == SUDEKIMP_TRANSITION_VOTE_READY ?
-        "P1 READY   P2 READY" :
-        ((snapshot->accepted_mask & 0x02u) != 0u ?
-            "P1 READY   P2 READY" : "P1 READY   P2 WAITING");
+    wsprintfA(countdown,
+        snapshot->kind == SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK ?
+            "AUTO OPEN IN %lu.%lu" : "AUTO ENTER IN %lu.%lu",
+        seconds, tenths);
+    wsprintfA(electorate, "PLAYERS %u   MASK %02X",
+        cleanroom_vote_participant_count(snapshot->participant_mask),
+        (unsigned int)snapshot->participant_mask);
+    cleanroom_vote_status_pair(snapshot, 0u, status_primary);
+    cleanroom_vote_status_pair(snapshot, 2u, status_secondary);
+    title = snapshot->kind == SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK ?
+        "CO-OP SAVE VOTE" : "CO-OP TRAVEL VOTE";
+    subject_label = snapshot->kind == SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK ?
+        "REQUEST" : "DESTINATION";
+    player_two_prompt =
+        snapshot->kind == SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK ?
+            "P2 A ACCEPT   P2 B VETO" :
+            "P2 A ACCEPT   P2 B CANCEL";
+    player_one_prompt =
+        snapshot->kind == SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK ?
+            "P1 ESC VETO" : "P1 ESC CANCEL";
 
     draw_text(pixels, locked.pitch, 58, 18,
-        "CO-OP TRAVEL VOTE", UINT32_C(0xff5ef7f0), 3);
-    draw_text(pixels, locked.pitch, 22, 54,
-        "DESTINATION", UINT32_C(0xffaab8c8), 2);
-    draw_text(pixels, locked.pitch, 22, 76,
+        title, UINT32_C(0xff5ef7f0), 3);
+    draw_text(pixels, locked.pitch, 22, 52,
+        subject_label, UINT32_C(0xffaab8c8), 2);
+    draw_text(pixels, locked.pitch, 22, 72,
         destination[0] == '\0' ? "UNKNOWN" : destination,
         UINT32_C(0xffffffff), 2);
-    draw_text(pixels, locked.pitch, 22, 104,
-        status, UINT32_C(0xff7cf29a), 2);
-    draw_text(pixels, locked.pitch, 22, 128,
+    draw_text(pixels, locked.pitch, 22, 94,
+        electorate, UINT32_C(0xffaab8c8), 1);
+    draw_text(pixels, locked.pitch, 22, 108,
+        status_primary, UINT32_C(0xff7cf29a), 1);
+    if (status_secondary[0] != '\0') {
+        draw_text(pixels, locked.pitch, 22, 121,
+            status_secondary, UINT32_C(0xff7cf29a), 1);
+    }
+    draw_text(pixels, locked.pitch, 22, 136,
         countdown, UINT32_C(0xffffd166), 2);
-    draw_text(pixels, locked.pitch, 22, 154,
-        "P2 A ACCEPT   P2 B CANCEL", UINT32_C(0xffffffff), 2);
-    draw_text(pixels, locked.pitch, 22, 176,
-        "P1 ESC CANCEL", UINT32_C(0xffff9b9b), 1);
+    draw_text(pixels, locked.pitch, 22, 159,
+        player_two_prompt, UINT32_C(0xffffffff), 1);
+    draw_text(pixels, locked.pitch, 22, 178,
+        player_one_prompt, UINT32_C(0xffff9b9b), 1);
 
     result = unlock_rectangle(texture, 0u);
     if (FAILED(result)) {
@@ -6356,7 +6538,7 @@ static BOOL update_transition_vote_texture(
 
 static BOOL ensure_transition_vote_texture(
     void *device,
-    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+    const SudekiMpCleanroomVoteSnapshot *snapshot
 ) {
     void **vtable;
     D3DCreateTextureFunction create_texture;
@@ -6370,16 +6552,22 @@ static BOOL ensure_transition_vote_texture(
     if (transition_vote_overlay_serial != snapshot->serial ||
         transition_vote_overlay_tenth_seconds != tenth_seconds ||
         transition_vote_overlay_state != snapshot->state ||
+        transition_vote_overlay_kind != (unsigned int)snapshot->kind ||
+        transition_vote_overlay_participant_mask !=
+            snapshot->participant_mask ||
         transition_vote_overlay_accepted_mask != snapshot->accepted_mask ||
         memcmp(transition_vote_overlay_destination,
-            snapshot->destination,
+            snapshot->subject,
             sizeof(transition_vote_overlay_destination)) != 0) {
         transition_vote_overlay_serial = snapshot->serial;
         transition_vote_overlay_tenth_seconds = tenth_seconds;
         transition_vote_overlay_state = snapshot->state;
+        transition_vote_overlay_kind = (unsigned int)snapshot->kind;
+        transition_vote_overlay_participant_mask =
+            snapshot->participant_mask;
         transition_vote_overlay_accepted_mask = snapshot->accepted_mask;
         memcpy(transition_vote_overlay_destination,
-            snapshot->destination,
+            snapshot->subject,
             sizeof(transition_vote_overlay_destination));
         transition_vote_texture_dirty = TRUE;
     }
@@ -6563,7 +6751,8 @@ static BOOL draw_texture_overlay(
     float roster_left,
     float roster_top,
     float roster_right,
-    float roster_bottom
+    float roster_bottom,
+    int split_vote_viewport
 ) {
     void *device;
     void **device_vtable;
@@ -6636,9 +6825,11 @@ static BOOL draw_texture_overlay(
         return FALSE;
     }
     release_com_object(&render_target);
-    if (!roster_card_rectangle && !full_screen &&
+    if (split_vote_viewport > 1 ||
+        (!roster_card_rectangle && !full_screen &&
+         split_vote_viewport < 0 &&
         (description.width < texture_width ||
-         description.height < texture_height)) {
+         description.height < texture_height))) {
         return FALSE;
     }
     result = create_state_block(device, D3D_STATE_BLOCK_ALL, &state_block);
@@ -6668,6 +6859,36 @@ static BOOL draw_texture_overlay(
             0.5f + roster_right - 0.5f;
         bottom = ((float)description.height - (float)MENU_TEXTURE_HEIGHT) *
             0.5f + roster_bottom - 0.5f;
+    } else if (split_vote_viewport >= 0) {
+        const float viewport_width = (float)description.width * 0.5f;
+        const float available_width = viewport_width > 16.0f ?
+            viewport_width - 16.0f : viewport_width;
+        const float available_height = description.height > 16u ?
+            (float)description.height - 16.0f :
+            (float)description.height;
+        float scale = available_width / (float)texture_width;
+        const float height_scale =
+            available_height / (float)texture_height;
+        float drawn_width;
+        float drawn_height;
+
+        if (height_scale < scale) {
+            scale = height_scale;
+        }
+        if (scale > 1.0f) {
+            scale = 1.0f;
+        }
+        if (scale <= 0.0f) {
+            release_com_object(&state_block);
+            return FALSE;
+        }
+        drawn_width = (float)texture_width * scale;
+        drawn_height = (float)texture_height * scale;
+        left = (float)split_vote_viewport * viewport_width +
+            (viewport_width - drawn_width) * 0.5f - 0.5f;
+        top = ((float)description.height - drawn_height) * 0.5f - 0.5f;
+        right = left + drawn_width;
+        bottom = top + drawn_height;
     } else if (player_two_badge) {
         left = (float)description.width * 0.75f -
             (float)texture_width * 0.5f - 0.5f;
@@ -6681,7 +6902,8 @@ static BOOL draw_texture_overlay(
      * metadata, so deriving right/bottom from texture_width here would
      * collapse the quad to 0x0 and make a successfully-resolved portrait
      * invisible. */
-    if (!roster_card_rectangle && !full_screen) {
+    if (!roster_card_rectangle && !full_screen &&
+        split_vote_viewport < 0) {
         right = left + texture_width;
         bottom = top + texture_height;
     }
@@ -6773,7 +6995,7 @@ static BOOL draw_menu_overlay(void) {
         FALSE,
         FALSE,
         FALSE,
-        0.0f, 0.0f, 0.0f, 0.0f
+        0.0f, 0.0f, 0.0f, 0.0f, -1
     );
 }
 
@@ -6793,7 +7015,7 @@ static BOOL draw_player_two_badge(void) {
         TRUE,
         FALSE,
         FALSE,
-        0.0f, 0.0f, 0.0f, 0.0f
+        0.0f, 0.0f, 0.0f, 0.0f, -1
     );
 }
 
@@ -6815,7 +7037,7 @@ static BOOL draw_blacksmith_ui_overlay(
         FALSE,
         FALSE,
         TRUE,
-        0.0f, 0.0f, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, -1);
 }
 
 static void service_player_two_interaction_state(DWORD now) {
@@ -6826,9 +7048,10 @@ static void service_player_two_interaction_state(DWORD now) {
 }
 
 static BOOL draw_transition_vote_overlay(
-    const SudekiMpZoneTransitionVoteSnapshot *snapshot
+    const SudekiMpCleanroomVoteSnapshot *snapshot
 ) {
     void *device;
+    BOOL player_one_visible;
 
     if (snapshot == NULL || !snapshot->active ||
         d3d_device_global == NULL ||
@@ -6836,6 +7059,24 @@ static BOOL draw_transition_vote_overlay(
         !ensure_transition_vote_texture(device, snapshot)) {
         return FALSE;
     }
+    if (snapshot->kind != SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK) {
+        return draw_texture_overlay(
+            transition_vote_texture,
+            TRANSITION_VOTE_OVERLAY_WIDTH,
+            TRANSITION_VOTE_OVERLAY_HEIGHT,
+            FALSE,
+            FALSE,
+            FALSE,
+            0.0f, 0.0f, 0.0f, 0.0f, -1);
+    }
+    player_one_visible = draw_texture_overlay(
+        transition_vote_texture,
+        TRANSITION_VOTE_OVERLAY_WIDTH,
+        TRANSITION_VOTE_OVERLAY_HEIGHT,
+        FALSE,
+        FALSE,
+        FALSE,
+        0.0f, 0.0f, 0.0f, 0.0f, 0);
     return draw_texture_overlay(
         transition_vote_texture,
         TRANSITION_VOTE_OVERLAY_WIDTH,
@@ -6843,7 +7084,7 @@ static BOOL draw_transition_vote_overlay(
         FALSE,
         FALSE,
         FALSE,
-        0.0f, 0.0f, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, 1) && player_one_visible;
 }
 
 static BOOL draw_roaming_boundary_overlay(
@@ -6865,7 +7106,7 @@ static BOOL draw_roaming_boundary_overlay(
         FALSE,
         FALSE,
         TRUE,
-        0.0f, 0.0f, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, -1);
 }
 
 static BOOL draw_roster_buttons(void) {
@@ -6883,7 +7124,7 @@ static BOOL draw_roster_buttons(void) {
         FALSE,
         FALSE,
         FALSE,
-        0.0f, 0.0f, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, -1);
 }
 
 static BOOL draw_roster_backdrop(void) {
@@ -6901,7 +7142,7 @@ static BOOL draw_roster_backdrop(void) {
         FALSE,
         FALSE,
         TRUE,
-        0.0f, 0.0f, 0.0f, 0.0f);
+        0.0f, 0.0f, 0.0f, 0.0f, -1);
 }
 
 static void draw_roster_native_portraits(void) {
@@ -6934,7 +7175,8 @@ static void draw_roster_native_portraits(void) {
             card_left + 25.0f,
             310.0f,
             card_left + 101.0f,
-            386.0f);
+            386.0f,
+            -1);
     }
 }
 
@@ -7072,6 +7314,41 @@ static DWORD WINAPI pc_front_end_trace_thread_main(void *unused) {
     return 0u;
 }
 
+static void cleanroom_vote_snapshot_from_zone(
+    SudekiMpCleanroomVoteSnapshot *output,
+    const SudekiMpZoneTransitionVoteSnapshot *source
+) {
+    ZeroMemory(output, sizeof(*output));
+    output->active = source->active;
+    output->kind = SUDEKIMP_CLEANROOM_VOTE_TRAVEL;
+    output->state = source->state;
+    output->serial = source->serial;
+    output->remaining_ms = source->remaining_ms;
+    output->participant_mask = source->participant_mask;
+    output->accepted_mask = source->accepted_mask;
+    output->cancelled_mask = source->cancelled_mask;
+    memcpy(output->subject, source->destination,
+        sizeof(output->subject));
+}
+
+static void cleanroom_vote_snapshot_from_save_book(
+    SudekiMpCleanroomVoteSnapshot *output,
+    const SudekiMpSaveBookVoteSnapshot *source
+) {
+    ZeroMemory(output, sizeof(*output));
+    output->active = source->active;
+    output->kind = SUDEKIMP_CLEANROOM_VOTE_SAVE_BOOK;
+    output->state = source->state;
+    output->serial = source->serial;
+    output->remaining_ms =
+        source->state == SUDEKIMP_SAVE_BOOK_VOTE_AWAITING_VISIBLE ?
+            SUDEKIMP_SAVE_BOOK_VOTE_TIMEOUT_MS : source->remaining_ms;
+    output->participant_mask = source->participant_mask;
+    output->accepted_mask = source->accepted_mask;
+    output->cancelled_mask = source->cancelled_mask;
+    lstrcpyA(output->subject, "OPEN SAVE MENU");
+}
+
 void SudekiMpCleanroomFrameEndDispatch(void) {
     /* Keep focus/loading suspension responsive even when the gameplay
      * controller is not ticking during a front-end or transition frame. */
@@ -7082,9 +7359,13 @@ void SudekiMpCleanroomFrameEndDispatch(void) {
 
 void SudekiMpCleanroomMenuRender(void) {
     SudekiMpZoneTransitionVoteSnapshot vote_snapshot;
+    SudekiMpSaveBookVoteSnapshot save_book_snapshot;
+    SudekiMpCleanroomVoteSnapshot cleanroom_vote_snapshot;
     SudekiMpRoamingBoundaryEvaluation boundary_snapshot;
     SudekiMpBlacksmithUiSnapshot blacksmith_snapshot;
     BOOL vote_snapshot_valid;
+    BOOL save_book_snapshot_valid;
+    BOOL save_book_vote_active;
     BOOL boundary_snapshot_valid;
     BOOL shared_interaction_modal_active;
     BOOL blacksmith_ui_active;
@@ -7095,6 +7376,10 @@ void SudekiMpCleanroomMenuRender(void) {
     }
     vote_snapshot_valid = SudekiMpZoneTransitionGetVoteSnapshot(
         &vote_snapshot);
+    save_book_snapshot_valid = SudekiMpSaveBookGetVoteSnapshot(
+        &save_book_snapshot);
+    save_book_vote_active = save_book_snapshot_valid &&
+        save_book_snapshot.active;
     boundary_snapshot_valid =
         SudekiMpControlSeparationGetRoamingBoundarySnapshot(
             &boundary_snapshot);
@@ -7134,6 +7419,7 @@ void SudekiMpCleanroomMenuRender(void) {
         }
     }
     if (integrated_multiplayer_mode &&
+        !save_book_vote_active &&
         !shared_interaction_modal_active &&
         SudekiMpSplitScreenRosterParticipationAvailable() &&
         SudekiMpCleanroomEngineWorldReady() &&
@@ -7144,7 +7430,8 @@ void SudekiMpCleanroomMenuRender(void) {
             "fallback=split_screen_unchanged\r\n"
         );
     }
-    if (integrated_multiplayer_mode && !shared_interaction_modal_active &&
+    if (integrated_multiplayer_mode && !save_book_vote_active &&
+        !shared_interaction_modal_active &&
         boundary_snapshot_valid &&
         boundary_snapshot.phase >= SUDEKIMP_ROAMING_BOUNDARY_WARNING) {
         BOOL overlay_visible =
@@ -7162,7 +7449,7 @@ void SudekiMpCleanroomMenuRender(void) {
         SudekiMpControlSeparationReportRoamingBoundaryOverlay(FALSE);
         roaming_boundary_overlay_failure_logged = FALSE;
     }
-    if (!blacksmith_ui_active && menu_open &&
+    if (!save_book_vote_active && !blacksmith_ui_active && menu_open &&
         !draw_menu_overlay() && !overlay_failure_logged) {
         overlay_failure_logged = TRUE;
         SudekiMpLogWrite(
@@ -7170,10 +7457,55 @@ void SudekiMpCleanroomMenuRender(void) {
             "fallback=gameplay_unchanged\r\n"
         );
     }
-    if (!blacksmith_ui_active &&
+    if (save_book_vote_active && blacksmith_ui_active) {
+        (void)SudekiMpSaveBookReportVoteOverlay(
+            save_book_snapshot.serial, FALSE);
+        save_book_vote_overlay_failure_logged = TRUE;
+        SudekiMpLogWrite(
+            "save_book_vote event=overlay status=blocked "
+            "reason=blacksmith_ui_active "
+            "policy=cancel_save_vote_preserve_existing_modal\r\n");
+        transition_vote_overlay_failure_logged = FALSE;
+    } else if (save_book_vote_active) {
+        BOOL overlay_visible;
+        BOOL overlay_reported;
+
+        cleanroom_vote_snapshot_from_save_book(
+            &cleanroom_vote_snapshot, &save_book_snapshot);
+        overlay_visible = owns_foreground() &&
+            draw_transition_vote_overlay(&cleanroom_vote_snapshot);
+        overlay_reported = SudekiMpSaveBookReportVoteOverlay(
+            save_book_snapshot.serial, overlay_visible);
+        if (overlay_visible && overlay_reported &&
+            save_book_vote_input.player_two.serial ==
+                save_book_snapshot.serial) {
+            save_book_vote_input.overlay_acknowledged = TRUE;
+        }
+        if (!overlay_visible &&
+            !save_book_vote_overlay_failure_logged) {
+            save_book_vote_overlay_failure_logged = TRUE;
+            SudekiMpLogWrite(
+                "save_book_vote event=overlay status=unavailable "
+                "fallback=cancel_request_never_open_native_save_ui\r\n");
+        } else if (overlay_visible) {
+            save_book_vote_overlay_failure_logged = FALSE;
+        }
+        if (vote_snapshot_valid && vote_snapshot.active) {
+            (void)SudekiMpZoneTransitionReportVoteOverlay(
+                vote_snapshot.serial, FALSE);
+            SudekiMpLogWrite(
+                "save_book_vote event=overlay conflict=travel_vote "
+                "resolution=save_book_priority_travel_fail_closed\r\n");
+        }
+        transition_vote_overlay_failure_logged = FALSE;
+    } else if (!blacksmith_ui_active &&
         vote_snapshot_valid && vote_snapshot.active) {
-        BOOL overlay_visible =
-            draw_transition_vote_overlay(&vote_snapshot);
+        BOOL overlay_visible;
+
+        cleanroom_vote_snapshot_from_zone(
+            &cleanroom_vote_snapshot, &vote_snapshot);
+        overlay_visible = draw_transition_vote_overlay(
+            &cleanroom_vote_snapshot);
 
         (void)SudekiMpZoneTransitionReportVoteOverlay(
             vote_snapshot.serial, overlay_visible);
@@ -7186,6 +7518,9 @@ void SudekiMpCleanroomMenuRender(void) {
         }
     } else {
         transition_vote_overlay_failure_logged = FALSE;
+        if (!save_book_vote_active) {
+            save_book_vote_overlay_failure_logged = FALSE;
+        }
     }
     if (blacksmith_ui_active) {
         BOOL overlay_visible = blacksmith_snapshot_valid &&
@@ -7330,12 +7665,16 @@ static BOOL install_cleanroom_menu_internal(
     transition_vote_texture_device = NULL;
     transition_vote_texture_dirty = TRUE;
     transition_vote_overlay_failure_logged = FALSE;
+    save_book_vote_overlay_failure_logged = FALSE;
     transition_vote_overlay_serial = 0u;
     transition_vote_overlay_tenth_seconds = 0u;
     transition_vote_overlay_state = 0u;
+    transition_vote_overlay_kind = 0u;
+    transition_vote_overlay_participant_mask = 0u;
     transition_vote_overlay_accepted_mask = 0u;
     ZeroMemory(transition_vote_overlay_destination,
         sizeof(transition_vote_overlay_destination));
+    reset_save_book_vote_input();
     roster_button_texture_dirty = TRUE;
     roster_backdrop_texture = NULL;
     roster_backdrop_texture_device = NULL;
@@ -7481,28 +7820,14 @@ static BOOL install_cleanroom_menu_internal(
         static const uint8_t movie_play_entry[] = {
             0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
         };
-        static const uint8_t portrait_selector_entry[] = {
-            0x56, 0x57, 0x50, 0x83, 0xec, 0x0c
-        };
         static const uint8_t front_end_action_entry[] = {
             0x8b, 0x44, 0x24, 0x04, 0x57
         };
-        if (!SudekiMpInstallInlineHook(
-                &native_save_portrait_selector_hook,
-                base + RVA_HUD_PORTRAIT_RESOURCE_SELECT,
-                portrait_selector_entry,
-                sizeof(portrait_selector_entry),
-                (const void *)native_save_portrait_selector_entry)) {
-            SudekiMpUninstallCleanroomMenu();
-            return FALSE;
-        }
-        native_save_portrait_selector_trampoline =
-            native_save_portrait_selector_hook.trampoline;
         SudekiMpLogFormat(
             "cleanroom_menu event=native_portrait_selector_trace "
-            "status=installed rva=0x%08lx length=%lu policy=observation_only\r\n",
-            (unsigned long)RVA_HUD_PORTRAIT_RESOURCE_SELECT,
-            (unsigned long)sizeof(portrait_selector_entry)
+            "status=disabled rva=0x%08lx "
+            "policy=direct_exact_native_calls_no_diagnostic_detour\r\n",
+            (unsigned long)RVA_HUD_PORTRAIT_RESOURCE_SELECT
         );
         {
             static const uint8_t save_entry_update_entry[] = {
@@ -7789,11 +8114,6 @@ void SudekiMpUninstallCleanroomMenu(void) {
     native_save_page_input_last_object = NULL;
     native_save_page_input_last_event = UINT_MAX;
     native_save_page_input_last_argument = UINT_MAX;
-    SudekiMpRestoreInlineHook(&native_save_portrait_selector_hook);
-    native_save_portrait_selector_trampoline = NULL;
-    native_save_portrait_last_ecx = UINT_MAX;
-    native_save_portrait_last_eax = UINT_MAX;
-    native_save_portrait_last_receiver = NULL;
     SudekiMpRestoreInlineHook(&front_end_action_hook);
     SudekiMpRestorePointerHook(&front_end_action_vtable_hook);
     SudekiMpRestorePointerHook(&front_end_render_hook);
@@ -7822,6 +8142,7 @@ void SudekiMpUninstallCleanroomMenu(void) {
     transition_vote_texture_dirty = FALSE;
     roaming_boundary_texture_dirty = FALSE;
     transition_vote_overlay_failure_logged = FALSE;
+    save_book_vote_overlay_failure_logged = FALSE;
     roaming_boundary_overlay_failure_logged = FALSE;
     blacksmith_ui_texture_dirty = FALSE;
     blacksmith_ui_overlay_failure_logged = FALSE;
@@ -7830,9 +8151,12 @@ void SudekiMpUninstallCleanroomMenu(void) {
     transition_vote_overlay_serial = 0u;
     transition_vote_overlay_tenth_seconds = 0u;
     transition_vote_overlay_state = 0u;
+    transition_vote_overlay_kind = 0u;
+    transition_vote_overlay_participant_mask = 0u;
     transition_vote_overlay_accepted_mask = 0u;
     ZeroMemory(transition_vote_overlay_destination,
         sizeof(transition_vote_overlay_destination));
+    reset_save_book_vote_input();
     roaming_boundary_overlay_phase = 0u;
     roaming_boundary_overlay_percent = 0u;
     roster_button_texture_dirty = FALSE;

@@ -18,7 +18,7 @@ input_bridge_log="${project_dir}/build/linux/input-bridge.log"
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
@@ -27,7 +27,10 @@ usage() {
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --input-trace Trace native QuickSkill input and either native Plasmatica activation route.' \
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
-        '  --party-lifecycle-trace Exercise roster handoff, party-atomic rooms, the visible roaming boundary, passive actor/target provenance, and controller routing; the rejected custom blacksmith preview, forge commits, and the late travel-vote experiment stay disabled.' \
+        '  --party-lifecycle-trace Exercise roster handoff, party-atomic rooms, the visible roaming boundary, and controller routing. General P2 interaction provenance, custom blacksmith, forge commits, and voting experiments stay disabled.' \
+        '  --door-transition-trace Run the co-op profile with passive validated P1 door/OnAction/SOL/temporary-zone tracing. It never opens a vote, delays, or replays a door.' \
+        '  --merchant-checkout-trace Run the co-op profile plus passive P1 ShopStart/merchant observation. It never changes shop, inventory, or money.' \
+        '  --native-p2-camera-collision-test Add the focused native Exploration camera/obstruction experiment to the complete Tal=P1/Ailish=P2 party-lifecycle profile.' \
         '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
         '  --talos-defense-trace Restore the Talos party and trace real-boss damage, invulnerability, reaction IDs, and knockback sessions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
@@ -57,7 +60,7 @@ usage() {
 }
 
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -70,6 +73,8 @@ case "${mode}" in
 esac
 
 if [[ "${mode}" == "--zone-transition-trace" ||
+      "${mode}" == "--door-transition-trace" ||
+      "${mode}" == "--merchant-checkout-trace" ||
       "${mode}" == "--zone-traversal-test" ]]; then
     export SUDEKIMP_ZONE_TRACE=1
 fi
@@ -92,6 +97,9 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
 fi
 if [[ "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
+      "${mode}" == "--door-transition-trace" ||
+      "${mode}" == "--merchant-checkout-trace" ||
+      "${mode}" == "--native-p2-camera-collision-test" ||
       "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
       "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! "${input_bridge_port}" =~ ^[0-9]+$ ]] ||
@@ -212,11 +220,14 @@ case "${mode}" in
             -e 's/^EnableQuickSkillInputTrace=false$/EnableQuickSkillInputTrace=true/' \
             "${generated_config}"
         ;;
-    --character-switch-trace|--party-lifecycle-trace|--talos-party-test|--talos-defense-trace)
+    --character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-defense-trace)
         sed -i \
             -e 's/^EnableCharacterSwitchTrace=false$/EnableCharacterSwitchTrace=true/' \
             "${generated_config}"
-        if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
+        if [[ "${mode}" == "--party-lifecycle-trace" ||
+              "${mode}" == "--door-transition-trace" ||
+              "${mode}" == "--merchant-checkout-trace" ||
+              "${mode}" == "--native-p2-camera-collision-test" ]]; then
             sed -i \
                 -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
                 -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
@@ -224,15 +235,28 @@ case "${mode}" in
                 -e 's/^EnableSecondPlayerSeparationGuardPrototype=false$/EnableSecondPlayerSeparationGuardPrototype=true/' \
                 -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
                 -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
-                -e 's/^EnablePlayerInteractionRequestsPrototype=false$/EnablePlayerInteractionRequestsPrototype=true/' \
+                -e 's/^EnablePlayerInteractionRequestsPrototype=true$/EnablePlayerInteractionRequestsPrototype=false/' \
+                -e 's/^EnableTransitionVotePrototype=.*/EnableTransitionVotePrototype=false/' \
                 -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
                 -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
                 -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
                 -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
                 -e 's/^EnableSecondPlayerControllerCameraPrototype=false$/EnableSecondPlayerControllerCameraPrototype=true/' \
+                -e 's/^EnableNativeSecondPlayerCameraCollisionPrototype=.*/EnableNativeSecondPlayerCameraCollisionPrototype=true/' \
                 -e 's/^EnablePartyAtomicTransitionsPrototype=false$/EnablePartyAtomicTransitionsPrototype=true/' \
                 -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
                 "${generated_config}"
+            if [[ "${mode}" == "--door-transition-trace" ||
+                  "${mode}" == "--merchant-checkout-trace" ]]; then
+                sed -i \
+                    -e 's/^EnablePlayerInteractionRequestsPrototype=false$/EnablePlayerInteractionRequestsPrototype=true/' \
+                    "${generated_config}"
+            fi
+            if [[ "${mode}" == "--merchant-checkout-trace" ]]; then
+                sed -i \
+                    -e 's/^EnableMerchantCheckoutTracePrototype=false$/EnableMerchantCheckoutTracePrototype=true/' \
+                    "${generated_config}"
+            fi
         fi
         if [[ "${mode}" == "--talos-party-test" ]]; then
             sed -i \
@@ -437,6 +461,8 @@ if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--viewport-hud-test" ||
       "${mode}" == "--dual-camera-local-coop-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
+      "${mode}" == "--door-transition-trace" ||
+      "${mode}" == "--native-p2-camera-collision-test" ||
       "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--realtime-skill-coop-test" ]]; then
     antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
@@ -619,17 +645,32 @@ if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
         '  When Ailish joins, SudekiMP must rotate Tal back to native slot 0, claim exactly Ailish for Player 2, then enable both viewports.' \
         '  F10 drops Player 2 out to native AI/full-screen without changing the roster; press it again to rejoin the same character.' \
         '  Controller Start requests drop-in; hold Back+Start for one second to drop out.' \
-        '  Authored temporary-room doors move the active party together and rebuild Player 2 only after the destination settles.' \
-        '  Travel voting is intentionally disabled: the current late hook runs after Sudeki starts the door approach/script and cannot safely cancel it. Do not test P2 B or P1 Esc until a target-specific pre-OnAction seam is verified.' \
-        '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick. A submits Weak Attack unless an exact actor/target/source-generation interaction has been proven; until then interaction intent is denied rather than replaying global Select.' \
+        '  Authored temporary-room doors are host-led: P1 enters normally, Sudeki moves the active party through the door, and Player 2 is rebuilt only after the destination settles.' \
+        '  There is no campaign travel vote. P2 B and P1 Esc are not travel-vote controls; consent remains research-only for future divergent/custom content.' \
+        '  Save points remain native and immediate: saving never opens a co-op consent vote.' \
+        '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick. General P2 world-interaction provenance is isolated and disabled in this profile; no GUI Select or SOL action is replayed.' \
         '  X submits Strong Attack for Tal/Buki. For Ailish/Elco it toggles only the Player 2 viewport perspective; this is SudekiMP policy because native ranged Strong is ignored. B submits the native Sweep only in combat and acts as modal Cancel. Y and D-pad edges are named in the log, but their per-seat Quick Menu/Quickshot consumers are not connected yet.' \
-        '  The passive provenance trace records P1/P2 candidate and OnAction identities without invoking any world action. The old orange P2 INTERACT? targetless request has been removed.' \
+        '  The passive Select/OnAction/SOL provenance hooks remain back-burnered and are not installed. The old orange P2 INTERACT? targetless request has been removed.' \
         '  The rejected custom Blacksmith preview remains OFF. Native Blacksmith behavior is unchanged while actor/merchant provenance and a proven per-player native-window strategy are researched.' \
         '  Shops still use one serialized full-width native menu; Player 2 input is neutralized until it closes and both camera caches refresh.' \
-        '  Camera 2 uses the existing manual orbit fallback in this live profile; the native collision experiment remains disabled after its first runtime acquisition fault.' \
+        '  In ordinary exploration Camera 2 uses the native collision-aware Exploration camera, so walls and terrain pull it inward around Ailish. The P2 right stick is unavailable while that native camera is ready; manual orbit resumes only in fallback, combat, or unsupported phases.' \
         '  In settled exploration, both viewports warn at 80% of the 10-unit party range; at the visible hard limit only clearly inward movement is accepted for either player.' \
         '  Combat, loading, cutscenes, travel/votes, Player 2 disconnect/drop-out, or an unavailable overlay disables the hard boundary.' \
         '  A failed ownership step must leave split off rather than exposing a partial co-op state.' \
+        "  Linux input device: ${input_device}"
+fi
+if [[ "${mode}" == "--native-p2-camera-collision-test" ]]; then
+    printf '%s\n' \
+        '  Focused native Camera 2 collision test: keep the persisted Co-op profile at Tal=P1 and Ailish=P2, then load the same outdoor roaming save.' \
+        '  This mode includes the complete party-lifecycle configuration; only EnableNativeSecondPlayerCameraCollisionPrototype is added.' \
+        '  Startup log milestone: split_screen_render_prototype_requested must report native_second_player_camera_collision=true.' \
+        '  Install log milestone: split_screen_render event=install must report native_player_two_camera_collision=named_exploration_state_targeted_to_live_gel_entity_generation_scoped_input_broadcast_suppressed_no_independent_p2_right_stick_native_ready.' \
+        '  Live log milestones: player_two_native_camera phase=target_verified must be followed by phase=state_verified and then phase=ready for Ailish in ordinary Exploration.' \
+        '  Visually confirm Ailish remains centered as she walks, and that walls/terrain push Camera 2 inward instead of letting it pass through the world.' \
+        '  Compare Tal on the left at the same wall or tight corner; both cameras should preserve their own character target and native obstruction behavior.' \
+        '  The Player 2 right stick is intentionally unavailable while the native Exploration camera reports ready. Do not use this run to accept or reject independent native orbit.' \
+        '  Manual Player 2 right-stick orbit remains available only when the native camera falls back in combat or another unsupported phase.' \
+        '  Record any phase=session_disabled and its reason, missing phase=ready, view swap, off-center framing, wall clipping, camera pop, void frame, or loss of either character control.' \
         "  Linux input device: ${input_device}"
 fi
 if [[ "${mode}" == "--realtime-skill-coop-test" ]]; then
@@ -668,6 +709,12 @@ if [[ "${mode}" == "--zone-transition-trace" ]]; then
         '  Press Enter once at the door. The log records EnterZone/SwitchZoneNOW/LoadZone and CWorld::SwitchMainZone before/after.' \
         '  No teleport, combat, door, or level state is changed by this pass.'
 fi
+if [[ "${mode}" == "--door-transition-trace" ]]; then
+    printf '%s\n' \
+        '  Observation-only door trace: use P1 to activate one temporary-room door normally.' \
+        '  The log records the validated P1 candidate, OnAction/SOL handoff, door activation, and native temporary-zone transition.' \
+        '  No vote, delay, cancellation, synthetic interaction, or replay is enabled.'
+fi
 if [[ "${mode}" == "--zone-traversal-test" ]]; then
     printf '%s\n' \
         '  F7 opens the world-aware traversal menu.' \
@@ -683,6 +730,9 @@ fi
 
 if [[ "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
+      "${mode}" == "--door-transition-trace" ||
+      "${mode}" == "--merchant-checkout-trace" ||
+      "${mode}" == "--native-p2-camera-collision-test" ||
       "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
       "${mode}" == "--cafu-testroom" ]]; then
     if [[ ! -r "${input_device}" ]]; then
@@ -694,7 +744,10 @@ if [[ "${mode}" == "--controller-bridge-test" ||
                 'The cleanroom can still launch; P2 will remain WAITING until the Razer bridge is restarted.' >&2
         fi
         if [[ "${mode}" == "--controller-bridge-test" ||
-              "${mode}" == "--party-lifecycle-trace" ]]; then
+              "${mode}" == "--party-lifecycle-trace" ||
+              "${mode}" == "--door-transition-trace" ||
+              "${mode}" == "--merchant-checkout-trace" ||
+              "${mode}" == "--native-p2-camera-collision-test" ]]; then
             exit 1
         fi
     else
@@ -711,7 +764,10 @@ if [[ "${mode}" == "--controller-bridge-test" ||
             printf '%s\n' 'The Linux input bridge failed to start:' >&2
             sed -n '1,80p' "${input_bridge_log}" >&2
             if [[ "${mode}" == "--controller-bridge-test" ||
-                  "${mode}" == "--party-lifecycle-trace" ]]; then
+              "${mode}" == "--party-lifecycle-trace" ||
+              "${mode}" == "--door-transition-trace" ||
+              "${mode}" == "--merchant-checkout-trace" ||
+              "${mode}" == "--native-p2-camera-collision-test" ]]; then
                 exit 1
             fi
         else

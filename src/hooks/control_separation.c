@@ -11,6 +11,7 @@
 #include "engine/skill_activation_abi.h"
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/call_hook.h"
+#include "hooks/interaction_provenance.h"
 #include "hooks/split_screen_render.h"
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
@@ -1402,7 +1403,16 @@ static void service_second_player_controller_actions(
             }
         } else if (resolution->intent ==
                 SUDEKIMP_CONTROLLER_INTENT_INTERACT) {
-            reason = "exact_target_consumer_not_connected";
+            if (!owns_foreground) {
+                delivery = "rejected";
+                reason = "game_window_not_foreground";
+            } else if (context.interaction_target_known) {
+                reason = "exact_target_consumer_not_connected";
+            } else if (SudekiMpInteractionProvenanceProbeActorLocalNearby(1u)) {
+                reason = "actor_local_nearby_entities_observed_no_target_mapping";
+            } else {
+                reason = "awaiting_actor_local_interaction_target";
+            }
         } else if (resolution->intent ==
                 SUDEKIMP_CONTROLLER_INTENT_PERSPECTIVE_TOGGLE) {
             if (!owns_foreground) {

@@ -36,8 +36,9 @@ typedef enum SudekiMpControllerActionIntent {
 
 /* Context is authoritative and supplied independently for each local seat.
  * A true interaction_target_known means an upstream resolver has already
- * validated the exact actor/target/source-generation tuple. The router never
- * promotes a targetless attention request into an interaction. */
+ * validated the exact actor/target/source-generation tuple. Exploration A
+ * remains an interaction attempt even while resolution is pending; consumers
+ * must still fail closed instead of constructing a targetless world action. */
 typedef struct SudekiMpControllerActionContext {
     int seat_active;
     int modal_active;

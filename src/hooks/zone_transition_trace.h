@@ -39,6 +39,13 @@ BOOL SudekiMpInstallZoneTransitionTrace(
 void SudekiMpUninstallZoneTransitionTrace(void);
 /* No-op unless an opt-in vote or party transition awaits service. */
 void SudekiMpZoneTransitionService(void);
+
+/* Read-only lifecycle token for other exact pre-action gates. Both values
+ * must match before a delayed no-argument native continuation is replayed. */
+BOOL SudekiMpZoneTransitionGetSourceSnapshot(
+    uint32_t *source_generation,
+    uintptr_t *world_identity
+);
 /* Pure policy seam used by the runtime exit hook and exact-image regression:
  * only an active co-op lease, outside SetZoneNow cleanup, may treat a
  * state-4 descriptor as a real temporary-room exit. */

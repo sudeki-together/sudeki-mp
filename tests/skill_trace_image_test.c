@@ -8,12 +8,14 @@
 #include "hooks/freeroam_camera_input.h"
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_skill_input.h"
+#include "hooks/save_book_intercept.h"
 #include "hooks/spirit_strike_input.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/talos_defense_trace.h"
 #include "hooks/zone_transition_trace.h"
 
 #include <windows.h>
+#include <float.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -65,6 +67,8 @@ enum {
     RVA_SHOP_LAYER_GLOBAL = 0x003c2f70u,
     RVA_BLACKSMITH_LAYER_GLOBAL = 0x003c2f74u,
     RVA_WORLD_SCENE_GLOBAL = 0x00408d1cu,
+    RVA_SAVE_MENU_SHOW = 0x00084f10u,
+    RVA_LOAD_GAME_SAVE = 0x00101690u,
     RVA_SHOP_IS_ACTIVE = 0x0008d1c0u,
     RVA_BLACKSMITH_START = 0x00092c40u,
     RVA_BLACKSMITH_IS_ACTIVE = 0x00092c60u,
@@ -115,6 +119,14 @@ enum {
     RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
     RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_GROUP_PLAYERS_GET_PLAYER_GROUP = 0x000246d0u,
+    RVA_GEL_POINTER_RESOLVE_ENTITY = 0x001bf4e0u,
+    RVA_TRACKED_ENTITY_CLEANUP = 0x000015e0u,
+    RVA_GEL_GROUP_PTR_DELETING_DESTRUCTOR = 0x00001b30u,
+    RVA_GEL_GROUP_PTR_VTABLE = 0x002c0098u,
+    RVA_GEL_GROUP_PTR_GET_RAW_ENTITY = 0x000017b0u,
+    RVA_GEL_GROUP_PTR_TYPE_NAME = 0x00001820u,
+    RVA_GEL_POINTER_RESOLVER_HANDLER = 0x002947f8u,
     RVA_CAMERA_INPUT_EVENT = 0x000e85f0u,
     RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT = 0x002cce5cu,
     RVA_MOTION_BLUR_POST_RENDER = 0x001de0b0u,
@@ -207,6 +219,18 @@ static const ExpectedEntry expected_cleanroom_entries[] = {
         "ResourceName reference release"},
     {0x00025100u, {0xa1,0x94,0x8d,0x80,0x00,0xc3}, 6u,
         "GetGroupPlayers"},
+    {RVA_GROUP_PLAYERS_GET_PLAYER_GROUP,
+        {0x83,0xec,0x0c,0x8b,0x44,0x24,0x10,0x8d,
+         0x44,0x40,0x24,0x8d,0x0c,0x81,0x8d,0x04}, 16u,
+        "CGroupPlayers::GetPlayerGroupByPosition"},
+    {RVA_TRACKED_ENTITY_CLEANUP,
+        {0x8b,0x01,0x33,0xd2,0x3b,0xc2,0x74,0x2d,
+         0x56,0x39,0x48,0x04}, 12u,
+        "tracked-entity cleanup"},
+    {RVA_GEL_GROUP_PTR_DELETING_DESTRUCTOR,
+        {0x56,0x8b,0xf1,0x56,0xe8,0x17,0x00,0x00,
+         0x00,0xf6,0x44,0x24,0x08,0x01}, 14u,
+        "GELGroupPtr scalar deleting destructor"},
     {RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER,
         {0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,
          0x18,0x83,0xbe,0xcc,0x00,0x00,0x00,0x01}, 16u,
@@ -326,6 +350,157 @@ static const uint8_t *relative_call_target(const uint8_t *instruction) {
     }
     memcpy(&displacement, instruction + 1, sizeof(displacement));
     return instruction + 5 + displacement;
+}
+
+static const uint8_t *relative_jump_target(const uint8_t *instruction) {
+    int32_t displacement;
+
+    if (instruction[0] != 0xe9) {
+        return NULL;
+    }
+    memcpy(&displacement, instruction + 1, sizeof(displacement));
+    return instruction + 5 + displacement;
+}
+
+static void check_save_book_intercept_exact_image(
+    uint8_t *image,
+    int *failures
+) {
+    static const uint8_t expected_body[] = {
+        0xa1, 0x1c, 0x8d, 0x80, 0x00,
+        0x85, 0xc0, 0x74, 0x17,
+        0x8b, 0x88, 0x70, 0x01, 0x00, 0x00,
+        0x85, 0xc9, 0x74, 0x0d,
+        0x8b, 0x01, 0x8b, 0x50, 0x2c,
+        0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x1b,
+        0xff, 0xd2, 0xc3
+    };
+    static const uint8_t expected_load_entry[] = {
+        0x80, 0x3d, 0xf8, 0x9d, 0x80, 0x00, 0x00
+    };
+    uint8_t original_entry[5];
+    uint8_t original_load_entry[7];
+    uint32_t relocated_scene_global;
+    uint32_t relocated_load_flag;
+    const uint8_t *trampoline;
+    const uint8_t *load_trampoline;
+
+    if (memcmp(
+            image + RVA_SAVE_MENU_SHOW,
+            expected_body,
+            sizeof(expected_body)) != 0) {
+        fputs("FAIL: exact SaveMenuShow cdecl body mismatch\n", stderr);
+        ++*failures;
+        return;
+    }
+    if (memcmp(image + RVA_LOAD_GAME_SAVE,
+            expected_load_entry, sizeof(expected_load_entry)) != 0) {
+        fputs("FAIL: exact LoadGameSave cdecl body mismatch\n", stderr);
+        ++*failures;
+        return;
+    }
+    memcpy(original_entry, image + RVA_SAVE_MENU_SHOW, sizeof(original_entry));
+    if (!SudekiMpInstallSaveBookIntercept((HMODULE)image, FALSE) ||
+        memcmp(image + RVA_SAVE_MENU_SHOW,
+            original_entry, sizeof(original_entry)) != 0 ||
+        SudekiMpSaveBookInterceptOriginalForTesting() != NULL ||
+        SudekiMpSaveBookInterceptLoadGameSaveOriginalForTesting() != NULL) {
+        fputs("FAIL: disabled save-book hook was not an inert no-op\n", stderr);
+        ++*failures;
+        SudekiMpUninstallSaveBookIntercept();
+    }
+
+    relocated_scene_global = (uint32_t)(uintptr_t)(
+        image + RVA_WORLD_SCENE_GLOBAL);
+    memcpy(
+        image + RVA_SAVE_MENU_SHOW + 1u,
+        &relocated_scene_global,
+        sizeof(relocated_scene_global));
+    relocated_load_flag = (uint32_t)(uintptr_t)(
+        image + 0x00409df8u);
+    memcpy(
+        image + RVA_LOAD_GAME_SAVE + 2u,
+        &relocated_load_flag,
+        sizeof(relocated_load_flag));
+    memcpy(original_entry, image + RVA_SAVE_MENU_SHOW, sizeof(original_entry));
+    memcpy(original_load_entry, image + RVA_LOAD_GAME_SAVE,
+        sizeof(original_load_entry));
+
+    *(uint32_t *)(image + RVA_SAVE_MENU_SHOW + 1u) ^=
+        UINT32_C(0x00000004);
+    SetLastError(ERROR_SUCCESS);
+    if (SudekiMpInstallSaveBookIntercept((HMODULE)image, TRUE) ||
+        GetLastError() != ERROR_BAD_EXE_FORMAT) {
+        fputs("FAIL: save-book hook accepted a mismatched relocated operand\n",
+            stderr);
+        ++*failures;
+        SudekiMpUninstallSaveBookIntercept();
+    }
+    memcpy(image + RVA_SAVE_MENU_SHOW, original_entry, sizeof(original_entry));
+
+    *(uint32_t *)(image + RVA_LOAD_GAME_SAVE + 2u) ^=
+        UINT32_C(0x00000004);
+    SetLastError(ERROR_SUCCESS);
+    if (SudekiMpInstallSaveBookIntercept((HMODULE)image, TRUE) ||
+        GetLastError() != ERROR_BAD_EXE_FORMAT) {
+        fputs("FAIL: save-book hook accepted a mismatched LoadGameSave operand\n",
+            stderr);
+        ++*failures;
+        SudekiMpUninstallSaveBookIntercept();
+    }
+    memcpy(image + RVA_LOAD_GAME_SAVE, original_load_entry,
+        sizeof(original_load_entry));
+
+    image[RVA_SAVE_MENU_SHOW + 5u] ^= 0xffu;
+    SetLastError(ERROR_SUCCESS);
+    if (SudekiMpInstallSaveBookIntercept((HMODULE)image, TRUE) ||
+        GetLastError() != ERROR_BAD_EXE_FORMAT) {
+        fputs("FAIL: save-book hook accepted a mismatched stable tail\n",
+            stderr);
+        ++*failures;
+        SudekiMpUninstallSaveBookIntercept();
+    }
+    image[RVA_SAVE_MENU_SHOW + 5u] ^= 0xffu;
+
+    if (!SudekiMpInstallSaveBookIntercept((HMODULE)image, TRUE)) {
+        fprintf(stderr,
+            "FAIL: save-book hook rejected relocated exact image error=%lu\n",
+            (unsigned long)GetLastError());
+        ++*failures;
+        return;
+    }
+    trampoline = (const uint8_t *)
+        SudekiMpSaveBookInterceptOriginalForTesting();
+    load_trampoline = (const uint8_t *)
+        SudekiMpSaveBookInterceptLoadGameSaveOriginalForTesting();
+    if (image[RVA_SAVE_MENU_SHOW] != 0xe9u || trampoline == NULL ||
+        memcmp(trampoline, original_entry, sizeof(original_entry)) != 0 ||
+        relative_jump_target(trampoline + sizeof(original_entry)) !=
+            image + RVA_SAVE_MENU_SHOW + sizeof(original_entry)) {
+        fputs("FAIL: save-book entry detour/trampoline shape mismatch\n",
+            stderr);
+        ++*failures;
+    }
+    if (image[RVA_LOAD_GAME_SAVE] != 0xe9u || load_trampoline == NULL ||
+        memcmp(load_trampoline, original_load_entry,
+            sizeof(original_load_entry)) != 0 ||
+        relative_jump_target(load_trampoline + sizeof(original_load_entry)) !=
+            image + RVA_LOAD_GAME_SAVE + sizeof(original_load_entry)) {
+        fputs("FAIL: final LoadGameSave detour/trampoline shape mismatch\n",
+            stderr);
+        ++*failures;
+    }
+    SudekiMpUninstallSaveBookIntercept();
+    if (memcmp(image + RVA_SAVE_MENU_SHOW,
+            original_entry, sizeof(original_entry)) != 0 ||
+        memcmp(image + RVA_LOAD_GAME_SAVE, original_load_entry,
+            sizeof(original_load_entry)) != 0 ||
+        SudekiMpSaveBookInterceptOriginalForTesting() != NULL ||
+        SudekiMpSaveBookInterceptLoadGameSaveOriginalForTesting() != NULL) {
+        fputs("FAIL: save-book uninstall did not restore exact entry\n",
+            stderr);
+        ++*failures;
+    }
 }
 
 typedef struct ZonePatchProbe {
@@ -587,6 +762,30 @@ static void check_shared_interaction_modal_runtime(
             stderr);
         ++*failures;
     }
+    if (!SudekiMpSplitScreenNativeSaveModalOpening()) {
+        fputs("FAIL: save-book pre-native opening was not accepted\n",
+            stderr);
+        ++*failures;
+    }
+    /* This assertion is deliberately the first operation after Opening:
+     * the save hook's next operation is allowed to be the native continuation. */
+    if (!SudekiMpSplitScreenNativeSaveModalActive() ||
+        SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+            SudekiMpSplitScreenNativeSaveModalActive(),
+            1u,
+            2u) ||
+        !SudekiMpSplitScreenSharedInteractionModalActive()) {
+        fputs("FAIL: save-book opening returned before portrait assignment/compositor quiescence\n",
+            stderr);
+        ++*failures;
+    }
+    SudekiMpSplitScreenNativeSaveModalClosed();
+    if (SudekiMpSplitScreenNativeSaveModalActive() ||
+        SudekiMpSplitScreenSharedInteractionModalActive()) {
+        fputs("FAIL: no-cache save-book close retained a modal/recovery barrier\n",
+            stderr);
+        ++*failures;
+    }
     *(unsigned int *)(controller + 0xb8u) = 9u;
     if (!SudekiMpSplitScreenSharedInteractionModalActive() ||
         !SudekiMpPlayerStatehoodGetSnapshot(
@@ -633,6 +832,12 @@ static void check_shared_interaction_modal_runtime(
     SudekiMpUninstallSplitScreenRender();
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         fputs("FAIL: uninstalled modal inspector retained quiescence\n",
+            stderr);
+        ++*failures;
+    }
+    if (SudekiMpSplitScreenNativeSaveModalOpening() ||
+        SudekiMpSplitScreenNativeSaveModalActive()) {
+        fputs("FAIL: uninstalled save-book lifecycle accepted opening\n",
             stderr);
         ++*failures;
     }
@@ -1024,6 +1229,7 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_MINIMAP_SNAPSHOT_POINTER_CALL,
         sizeof(minimap_snapshot_call_original)
     );
+    check_save_book_intercept_exact_image(image, &failures);
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         fputs("FAIL: uninstalled shared modal inspector quiesced gameplay\n",
             stderr);
@@ -1137,6 +1343,18 @@ int wmain(int argc, wchar_t **argv) {
             stderr);
         ++failures;
     }
+    if (!SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+            FALSE, 1u, 2u) ||
+        SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+            FALSE, 2u, 2u) ||
+        SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+            TRUE, 1u, 2u) ||
+        SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+            FALSE, 1u, 16u)) {
+        fputs("FAIL: viewport portrait enum-edge/modal suspension policy mismatch\n",
+            stderr);
+        ++failures;
+    }
     if (!SudekiMpSplitScreenSharedInteractionRecoveryEligible(
             TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE) ||
         SudekiMpSplitScreenSharedInteractionRecoveryEligible(
@@ -1231,10 +1449,23 @@ int wmain(int argc, wchar_t **argv) {
     {
         unsigned short native_generation_baseline = 7u;
         void *native_camera_entity = &native_generation_baseline;
+        unsigned int native_actor_generation = 17u;
+        int native_player_one_camera_marker = 0;
+        int native_player_two_camera_marker = 0;
+        int native_other_camera_marker = 0;
+        int native_player_one_state_marker = 0;
+        int native_player_two_state_marker = 0;
+        int native_other_state_marker = 0;
         void *native_camera_party_slot[3] = {
             native_camera_entity,
             NULL,
             NULL
+        };
+        float native_matrix[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            4.0f, 5.0f, 6.0f, 1.0f
         };
 
         if (SudekiMpSplitScreenObserveNativeCameraGeneration(
@@ -1248,12 +1479,436 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
-        if (SudekiMpSplitScreenNativeCameraTargetFromPartySlot(NULL) != NULL ||
-            SudekiMpSplitScreenNativeCameraTargetFromPartySlot(
+        if (SudekiMpSplitScreenNativeCameraActorFromPartySlot(NULL) != NULL ||
+            SudekiMpSplitScreenNativeCameraActorFromPartySlot(
                 native_camera_party_slot) != native_camera_entity ||
-            SudekiMpSplitScreenNativeCameraTargetFromPartySlot(
+            SudekiMpSplitScreenNativeCameraActorFromPartySlot(
                 native_camera_party_slot) == native_camera_party_slot) {
-            fputs("FAIL: native P2 camera target resolved to the intrusive party slot instead of its entity\n",
+            fputs("FAIL: native P2 camera actor provenance did not resolve the party TPtr entity\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenNativeCameraWrapperPolicy(
+                &native_player_two_camera_marker,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation,
+                TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperPolicy(
+                native_camera_party_slot,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation,
+                TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperPolicy(
+                native_camera_entity,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation,
+                TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperPolicy(
+                &native_player_two_camera_marker,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                &native_other_camera_marker,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation,
+                TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperPolicy(
+                &native_player_two_camera_marker,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation,
+                FALSE)) {
+            fputs("FAIL: native P2 camera wrapper gate accepted a party slot, raw actor, or unproven GELGroupPtr\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenNativeCameraWrapperOneShotPolicy(
+                FALSE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperOneShotPolicy(
+                TRUE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperOneShotPolicy(
+                FALSE, FALSE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraWrapperOneShotPolicy(
+                FALSE, TRUE, FALSE)) {
+            fputs("FAIL: native P2 camera wrapper one-shot gate allowed reuse or an unstable live precondition\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_INACTIVE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE, TRUE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_REVOKE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_PENDING_STATE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED, TRUE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_REVOKE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED, TRUE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_CHECK_STATE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_REVOKE ||
+            SudekiMpSplitScreenNativeCameraReadinessStagePolicy(
+                99u, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_READINESS_REVOKE) {
+            fputs("FAIL: native P2 camera readiness stage gate revoked the intentional target-to-state delay or accepted an invalid stage/bound pair\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, TRUE, TRUE, TRUE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                FALSE, TRUE, TRUE, TRUE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, FALSE, TRUE, TRUE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, TRUE, FALSE, TRUE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, TRUE, TRUE, FALSE, TRUE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, TRUE, TRUE, TRUE, FALSE, TRUE) ||
+            SudekiMpSplitScreenNativeCameraOwnershipPolicy(
+                TRUE, TRUE, TRUE, TRUE, TRUE, FALSE)) {
+            fputs("FAIL: native P2 camera ownership gate was not fail closed\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                native_camera_party_slot,
+                native_camera_party_slot,
+                native_camera_entity,
+                native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation) ||
+            SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                NULL, native_camera_party_slot,
+                native_camera_entity, native_camera_entity,
+                native_camera_entity,
+                native_actor_generation, native_actor_generation) ||
+            SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                native_camera_party_slot,
+                (uint8_t *)native_camera_party_slot + sizeof(void *),
+                native_camera_entity, native_camera_entity,
+                native_camera_entity,
+                native_actor_generation, native_actor_generation) ||
+            SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                native_camera_party_slot, native_camera_party_slot,
+                native_camera_entity, native_camera_entity,
+                native_camera_party_slot,
+                native_actor_generation, native_actor_generation) ||
+            SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                native_camera_party_slot, native_camera_party_slot,
+                native_camera_entity, native_camera_entity,
+                native_camera_entity,
+                0u, native_actor_generation) ||
+            SudekiMpSplitScreenNativeCameraIdentityPolicy(
+                native_camera_party_slot, native_camera_party_slot,
+                native_camera_entity, native_camera_entity,
+                native_camera_entity,
+                native_actor_generation,
+                native_actor_generation + 1u)) {
+            fputs("FAIL: native P2 camera actor-generation identity gate mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenNativeCameraMatrixPolicy(native_matrix)) {
+            fputs("FAIL: valid affine native P2 camera matrix was rejected\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_REMOVE ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                FALSE, FALSE, NULL,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_ABANDON ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE, NULL,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_ABANDON ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_other_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_ABANDON ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, FALSE, NULL,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                FALSE, NULL, NULL,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                FALSE, NULL,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_two_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_two_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_two_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_other_camera_marker,
+                &native_other_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_other_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                TRUE, TRUE,
+                &native_player_two_camera_marker,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                FALSE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                FALSE, FALSE, NULL, NULL,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                &native_player_two_state_marker,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT ||
+            SudekiMpSplitScreenNativeCameraReleasePolicy(
+                FALSE, FALSE, NULL,
+                &native_player_two_camera_marker,
+                TRUE,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                &native_player_one_camera_marker,
+                &native_player_one_state_marker,
+                TRUE,
+                &native_player_one_state_marker,
+                NULL,
+                TRUE) != SUDEKIMP_NATIVE_CAMERA_RELEASE_WAIT) {
+            fputs("FAIL: native P2 camera release ownership policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        native_matrix[15] = 0.0f;
+        if (SudekiMpSplitScreenNativeCameraMatrixPolicy(native_matrix)) {
+            fputs("FAIL: non-affine native P2 camera matrix was accepted\n",
+                stderr);
+            ++failures;
+        }
+        native_matrix[15] = 1.0f;
+        native_matrix[4] = 1.0f;
+        native_matrix[5] = 0.0f;
+        if (SudekiMpSplitScreenNativeCameraMatrixPolicy(native_matrix)) {
+            fputs("FAIL: degenerate native P2 camera basis was accepted\n",
+                stderr);
+            ++failures;
+        }
+        native_matrix[0] = 0.0f;
+        native_matrix[4] = 0.0f;
+        if (SudekiMpSplitScreenNativeCameraMatrixPolicy(native_matrix)) {
+            fputs("FAIL: zero native P2 camera basis was accepted\n",
+                stderr);
+            ++failures;
+        }
+        native_matrix[0] = FLT_MAX;
+        native_matrix[1] = 0.0f;
+        native_matrix[2] = 0.0f;
+        native_matrix[4] = 0.0f;
+        native_matrix[5] = 1.0f;
+        native_matrix[6] = 0.0f;
+        native_matrix[8] = 0.0f;
+        native_matrix[9] = 0.0f;
+        native_matrix[10] = 1.0f;
+        if (SudekiMpSplitScreenNativeCameraMatrixPolicy(native_matrix)) {
+            fputs("FAIL: finite native P2 matrix with derived overflow was accepted\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                FALSE, SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE,
+                TRUE, TRUE, TRUE, FALSE, FALSE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_FALLBACK ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE,
+                TRUE, TRUE, FALSE, FALSE, FALSE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_FALLBACK ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_IDLE,
+                TRUE, TRUE, TRUE, FALSE, FALSE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_SET_TARGET ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, FALSE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_WAIT ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, TRUE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_SET_STATE ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_TARGET_VERIFIED,
+                TRUE, TRUE, TRUE, FALSE, TRUE, FALSE,
+                TRUE, FALSE, FALSE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_REVOKE ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                TRUE, FALSE, TRUE, TRUE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_WAIT ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                TRUE, TRUE, TRUE, TRUE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_READY ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                TRUE, TRUE, TRUE, TRUE, TRUE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_REVOKE ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED,
+                TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                TRUE, TRUE, TRUE, FALSE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_REVOKE ||
+            SudekiMpSplitScreenNativeCameraBootstrapPolicy(
+                TRUE, SUDEKIMP_NATIVE_CAMERA_STAGE_STATE_VERIFIED,
+                TRUE, TRUE, FALSE, TRUE, TRUE, TRUE,
+                TRUE, TRUE, TRUE, TRUE, FALSE) !=
+                    SUDEKIMP_NATIVE_CAMERA_DECISION_REVOKE) {
+            fputs("FAIL: staged native P2 Exploration bootstrap policy mismatch\n",
                 stderr);
             ++failures;
         }
@@ -1524,6 +2179,54 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_CONTROLLER_UPDATE;
     *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
         image + RVA_CAMERA_INPUT_EVENT;
+    *(void **)(image + RVA_GEL_GROUP_PTR_VTABLE + 0x00u) =
+        image + RVA_GEL_GROUP_PTR_DELETING_DESTRUCTOR;
+    *(void **)(image + RVA_GEL_GROUP_PTR_VTABLE + 0x10u) =
+        image + RVA_GEL_GROUP_PTR_GET_RAW_ENTITY;
+    *(void **)(image + RVA_GEL_GROUP_PTR_VTABLE + 0x2cu) =
+        image + RVA_GEL_GROUP_PTR_TYPE_NAME;
+    *(uint32_t *)(image + RVA_GEL_POINTER_RESOLVE_ENTITY + 3u) =
+        (uint32_t)(uintptr_t)(image + RVA_GEL_POINTER_RESOLVER_HANDLER);
+    *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_RENDER_SUBMIT;
+    *(void **)(image + RVA_INGAME_UI_CONTROLLER_VTABLE + 0x08u) =
+        image + RVA_INGAME_UI_CONTROLLER_UPDATE;
+    *(void **)(image + RVA_INGAME_UI_CONTROLLER_VTABLE + 0x0cu) =
+        image + RVA_INGAME_UI_CONTROLLER_RENDER;
+    *(void **)(image + RVA_INGAME_UI_CONTROLLER_VTABLE + 0x2cu) =
+        image + RVA_INGAME_UI_CONTROLLER_INPUT;
+    *(void **)(image + RVA_SHOP_LAYER_VTABLE + 0x08u) =
+        image + RVA_SHOP_LAYER_UPDATE;
+    *(void **)(image + RVA_SHOP_LAYER_VTABLE + 0x0cu) =
+        image + RVA_SHOP_LAYER_RENDER;
+    *(void **)(image + RVA_SHOP_LAYER_VTABLE + 0x2cu) =
+        image + RVA_SHOP_LAYER_INPUT;
+    *(void **)(image + RVA_SHOP_LAYER_VTABLE + 0x48u) =
+        image + RVA_SHOP_LAYER_RESOURCE_CREATE;
+    *(void **)(image + RVA_SHOP_LAYER_VTABLE + 0x4cu) =
+        image + RVA_SHOP_LAYER_RESOURCE_DESTROY;
+    *(void **)(image + RVA_BLACKSMITH_LAYER_VTABLE + 0x08u) =
+        image + RVA_BLACKSMITH_LAYER_UPDATE;
+    *(void **)(image + RVA_BLACKSMITH_LAYER_VTABLE + 0x0cu) =
+        image + RVA_BLACKSMITH_LAYER_RENDER;
+    *(void **)(image + RVA_BLACKSMITH_LAYER_VTABLE + 0x2cu) =
+        image + RVA_BLACKSMITH_LAYER_INPUT;
+    *(void **)(image + RVA_BLACKSMITH_LAYER_VTABLE + 0x48u) =
+        image + RVA_BLACKSMITH_LAYER_RESOURCE_CREATE;
+    *(void **)(image + RVA_BLACKSMITH_LAYER_VTABLE + 0x4cu) =
+        image + RVA_BLACKSMITH_LAYER_RESOURCE_DESTROY;
+    *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
+        (uint32_t)(uintptr_t)(image + RVA_PC_QUIT_SCREEN_GLOBAL);
+    *(uint32_t *)(image + RVA_QUICK_MENU_IS_ACTIVE + 1u) =
+        (uint32_t)(uintptr_t)(image + RVA_QUICK_MENU_GLOBAL);
+    *(uint32_t *)(image + RVA_SHOP_IS_ACTIVE + 1u) =
+        (uint32_t)(uintptr_t)(image + RVA_INGAME_UI_CONTROLLER_GLOBAL);
+    *(uint32_t *)(image + RVA_BLACKSMITH_IS_ACTIVE + 1u) =
+        (uint32_t)(uintptr_t)(image + RVA_BLACKSMITH_LAYER_GLOBAL);
+    *(uint32_t *)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_ENUM + 9u) =
+        (uint32_t)(uintptr_t)(image + RVA_CHARACTER_TYPE_TO_PORTRAIT_LOOKUP);
+    *(uint32_t *)(image + RVA_HUD_PORTRAIT_RESOURCE_SELECT + 8u) =
+        (uint32_t)(uintptr_t)(image + RVA_UI_RESOURCE_TABLE_INITIALIZED);
     *(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) =
         image + RVA_MOTION_BLUR_POST_RENDER;
     *(void **)(image + RVA_SCREENSHOT_POST_RENDER_VTABLE_SLOT) =
@@ -1934,7 +2637,7 @@ int wmain(int argc, wchar_t **argv) {
         roster_player_two_type != 0x21u) {
         fputs("FAIL: preinstall co-op roster contract was not recorded\n",
             stderr);
-        ++failures;
+            ++failures;
     }
     if (!SudekiMpInstallSplitScreenRender(
             (HMODULE)image,

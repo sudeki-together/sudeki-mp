@@ -91,11 +91,16 @@ SudekiMpWalletMoneyPolicy SudekiMpPersonalWalletMoneyPolicyForKind(
         return SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_CHARACTER;
     case SUDEKIMP_WALLET_TRANSACTION_PARTY_REWARD:
         return SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_RESERVE;
+    case SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND:
+        return SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_ALL_CHARACTERS;
     case SUDEKIMP_WALLET_TRANSACTION_PURCHASE:
     case SUDEKIMP_WALLET_TRANSACTION_FORGE:
         return SUDEKIMP_WALLET_MONEY_POLICY_DEBIT_CHARACTER;
     case SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND:
         return SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_ALL_CHARACTERS;
+    case SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION:
+        return SUDEKIMP_WALLET_MONEY_POLICY_TRANSFER_RESERVE_TO_CHARACTER;
     case SUDEKIMP_WALLET_TRANSACTION_NONE:
     default:
         return SUDEKIMP_WALLET_MONEY_POLICY_INVALID;
@@ -107,8 +112,11 @@ SudekiMpWalletExternalEffect SudekiMpPersonalWalletExternalEffectForKind(
 ) {
     switch (kind) {
     case SUDEKIMP_WALLET_TRANSACTION_PERSONAL_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD:
         return SUDEKIMP_WALLET_EXTERNAL_CONSUME_REWARD_SOURCE;
     case SUDEKIMP_WALLET_TRANSACTION_PARTY_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND:
+    case SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION:
         return SUDEKIMP_WALLET_EXTERNAL_NONE;
     case SUDEKIMP_WALLET_TRANSACTION_PURCHASE:
         return SUDEKIMP_WALLET_EXTERNAL_ADD_SHARED_ITEM;
@@ -299,8 +307,23 @@ static int valid_request_shape(const SudekiMpWalletRequest *request) {
     if (policy == SUDEKIMP_WALLET_MONEY_POLICY_INVALID) {
         return 0;
     }
-    needs_character = policy !=
-        SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_RESERVE;
+    switch (request->kind) {
+    case SUDEKIMP_WALLET_TRANSACTION_PERSONAL_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_PURCHASE:
+    case SUDEKIMP_WALLET_TRANSACTION_FORGE:
+    case SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND:
+    case SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION:
+        needs_character = 1;
+        break;
+    case SUDEKIMP_WALLET_TRANSACTION_PARTY_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND:
+        needs_character = 0;
+        break;
+    case SUDEKIMP_WALLET_TRANSACTION_NONE:
+    default:
+        return 0;
+    }
     if (needs_character !=
         SudekiMpPersonalWalletCharacterIndex(request->character_id, NULL)) {
         return 0;
@@ -354,8 +377,12 @@ static SudekiMpWalletResult build_plan(
     plan->external_effect =
         SudekiMpPersonalWalletExternalEffectForKind(request->kind);
 
-    if (plan->money_policy !=
-        SUDEKIMP_WALLET_MONEY_POLICY_CREDIT_RESERVE &&
+    if ((request->kind == SUDEKIMP_WALLET_TRANSACTION_PERSONAL_REWARD ||
+         request->kind == SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD ||
+         request->kind == SUDEKIMP_WALLET_TRANSACTION_PURCHASE ||
+         request->kind == SUDEKIMP_WALLET_TRANSACTION_FORGE ||
+         request->kind == SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND ||
+         request->kind == SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION) &&
         !SudekiMpPersonalWalletCharacterIndex(
             request->character_id, &character_index)) {
         return SUDEKIMP_WALLET_REJECTED_INVALID;
@@ -378,13 +405,8 @@ static SudekiMpWalletResult build_plan(
         plan->reserve_overflow = request->amount - applied;
         break;
     }
-    case SUDEKIMP_WALLET_TRANSACTION_PURCHASE:
-    case SUDEKIMP_WALLET_TRANSACTION_FORGE:
-        if (wallet->character_balance[character_index] < request->amount) {
-            return SUDEKIMP_WALLET_REJECTED_FUNDS;
-        }
-        plan->character_debit[character_index] = request->amount;
-        break;
+    case SUDEKIMP_WALLET_TRANSACTION_DIVIDEND_REWARD:
+    case SUDEKIMP_WALLET_TRANSACTION_QUEST_DIVIDEND:
     case SUDEKIMP_WALLET_TRANSACTION_SALE_DIVIDEND:
         for (index = 0u;
              index < SUDEKIMP_PERSONAL_WALLET_CHARACTER_COUNT;
@@ -396,6 +418,25 @@ static SudekiMpWalletResult build_plan(
                 request->amount
             );
         }
+        break;
+    case SUDEKIMP_WALLET_TRANSACTION_PURCHASE:
+    case SUDEKIMP_WALLET_TRANSACTION_FORGE:
+        if (wallet->character_balance[character_index] < request->amount) {
+            return SUDEKIMP_WALLET_REJECTED_FUNDS;
+        }
+        plan->character_debit[character_index] = request->amount;
+        break;
+    case SUDEKIMP_WALLET_TRANSACTION_RESERVE_DISTRIBUTION:
+        if (wallet->party_reserve < request->amount) {
+            return SUDEKIMP_WALLET_REJECTED_FUNDS;
+        }
+        plan->reserve_debit = request->amount;
+        plan_credit(
+            plan,
+            character_index,
+            wallet->character_balance[character_index],
+            request->amount
+        );
         break;
     case SUDEKIMP_WALLET_TRANSACTION_NONE:
     default:
@@ -539,7 +580,11 @@ static int plan_still_applies(const SudekiMpPersonalWallet *wallet) {
             return 0;
         }
     }
-    return (uint64_t)wallet->party_reserve +
+    if (wallet->party_reserve < wallet->pending.reserve_debit) {
+        return 0;
+    }
+    return (uint64_t)(wallet->party_reserve -
+        wallet->pending.reserve_debit) +
         wallet->pending.reserve_credit <=
             SUDEKIMP_PERSONAL_WALLET_RESERVE_CAP;
 }
@@ -575,8 +620,10 @@ static void apply_plan(SudekiMpPersonalWallet *wallet) {
         receipt.character_overflow[index] =
             wallet->pending.character_overflow[index];
     }
+    wallet->party_reserve -= wallet->pending.reserve_debit;
     wallet->party_reserve += wallet->pending.reserve_credit;
     receipt.reserve_credit = wallet->pending.reserve_credit;
+    receipt.reserve_debit = wallet->pending.reserve_debit;
     wallet->generation = advance_nonzero(wallet->generation);
     receipt.generation_after = wallet->generation;
     receipt.party_reserve = wallet->party_reserve;

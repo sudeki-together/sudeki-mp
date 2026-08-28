@@ -4065,6 +4065,10 @@ per-seat Quick Menu, and per-seat Quickshot consumers remain future work.
 **Status:** exact-gated, default-off preview implemented; native forge commits
 remain intentionally disabled and live acceptance has not started.
 
+**Superseded profile note (2026-08-27):** this section records the experiment's
+historical focused-run configuration. The current `--party-lifecycle-trace`
+profile explicitly leaves the custom preview and all forge commits disabled.
+
 - `UIBlackSmithStart` (`0x00492C40`) only requests global UI mode `0x0D` and
   returns AL. SOL discards that result and polls `UIBlackSmithActive`
   (`0x00492C60`), which also returns AL only. A paired hook can therefore own
@@ -4107,8 +4111,9 @@ remain intentionally disabled and live acceptance has not started.
   game-thread revalidation of merchant, funds, equipment, socket, compatibility,
   catalog price, inventory generation, and economy generation. The latter two
   must both advance before a claimed commit could be marked verified.
-  `--party-lifecycle-trace` enables only this preview for a focused run; the
-  checked-in INI remains false.
+  At this historical checkpoint, `--party-lifecycle-trace` enabled only this
+  preview for a focused run; the checked-in INI remained false. The superseding
+  2026-08-27 profile leaves the preview disabled.
 ## 2026-08-26: per-player Blacksmith presentation target clarified
 
 - The custom two-panel Blacksmith overlay is retained only as a default-off,
@@ -4160,3 +4165,36 @@ incapable of activating a world interaction.
   Blacksmith UI. Commit wiring stays blocked until P2 has an independently
   validated target/eligibility path and the native per-player UI/session state
   can be virtualized safely.
+
+## 2026-08-27 — Temporary-room interaction trace: Kamo's Shop
+
+- The dedicated co-op observation profile reached a real native temporary-room
+  entry for `LNBr_Kamo_shop` exactly once. `CWorld::EnterTemporaryZone` logged
+  before and after with the native world and resource identities intact; no
+  vote, delay, synthetic action, or replay was enabled.
+- The entry was preceded by ordinary native-validated P1 interaction records,
+  but this authored shop route did not emit the currently observed event-type-2
+  OnAction/SOL handoff or `CDoor::ActivateFromScript` record. Therefore those
+  existing probes are insufficient to classify every temporary-room trigger.
+  A safe co-op consent gate must capture the earlier target-specific authored
+  route and retain/replay that exact request, rather than treating
+  `EnterTemporaryZone` or the CDoor activation state as a cancellable boundary.
+- Product decision: authored campaign travel remains host-led rather than
+  consent-gated. The already-proven party-atomic path stages the active
+  follower, lets P1's native transition run unchanged, then reacquires P2 at
+  the settled destination. The vote remains disabled research for future
+  divergent/custom content only.
+
+## 2026-08-27 — Player 2 native Exploration camera accepted
+
+- The native Camera 2 bridge completed a live Tal=P1/Ailish=P2 acquisition:
+  the engine-created GELGroupPtr wrapper resolved exactly to Ailish,
+  `SetCameraTarget` and `SetCameraState(Exploration)` returned, and the camera
+  advanced through `target_verified`, `state_verified`, and `ready` without a
+  process failure. The co-op lifecycle and door-trace launch profiles now use
+  this camera in ordinary Exploration so its authored obstruction logic pulls
+  Camera 2 in at walls and terrain instead of translating through them.
+- The current native-ready limitation is deliberate: P2's manual right-stick
+  orbit is suspended until controller events can be translated safely into the
+  named native camera. Manual orbit remains the fallback for combat and other
+  unsupported phases.

@@ -10,10 +10,12 @@
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
 #include "hooks/interaction_provenance.h"
+#include "hooks/merchant_provenance_adapter.h"
 #include "hooks/pattern_scan.h"
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_menu.h"
 #include "hooks/quick_skill_input.h"
+#include "hooks/save_book_intercept.h"
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
@@ -47,8 +49,30 @@
 #define SUDEKIMP_INIT_CLEANROOM_MENU_FAILED 15u
 #define SUDEKIMP_INIT_ACCELERATOR_CACHE_FAILED 16u
 #define SUDEKIMP_INIT_TALOS_DEFENSE_TRACE_FAILED 17u
+#define SUDEKIMP_INIT_SAVE_BOOK_VOTE_FAILED 18u
 
 static HMODULE dll_module;
+
+static void uninstall_runtime_hooks(void) {
+    SudekiMpUninstallSaveBookIntercept();
+    SudekiMpUninstallMerchantProvenanceAdapter();
+    SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
+    SudekiMpUninstallBlacksmithUiAdapter();
+    SudekiMpUninstallSpiritStrikeInput();
+    SudekiMpUninstallPlayerInputTrace();
+    SudekiMpUninstallCleanroomMenu();
+    SudekiMpUninstallSplitScreenRender();
+    SudekiMpUninstallControlSeparation();
+    SudekiMpInputBridgeStop();
+    SudekiMpUninstallInteractionProvenance();
+    SudekiMpUninstallZoneTransitionTrace();
+    SudekiMpUninstallFreeRoamCameraInput();
+    SudekiMpUninstallTalosDefenseTrace();
+    SudekiMpUninstallCharacterSwitchTrace();
+    SudekiMpUninstallQuickSkillInputTrace();
+    SudekiMpUninstallSkillTrace();
+    (void)SudekiMpUninstallAcceleratorCache();
+}
 
 static uint32_t float_bits(float value) {
     uint32_t bits;
@@ -211,6 +235,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL external_input_bridge_enabled;
     BOOL player_interaction_requests_enabled;
     BOOL interaction_provenance_enabled;
+    BOOL merchant_checkout_trace_enabled;
+    BOOL save_book_vote_enabled;
     BOOL experimental_blacksmith_ui_enabled;
     BOOL second_player_controller_camera_enabled;
     BOOL native_second_player_camera_collision_enabled;
@@ -463,6 +489,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnablePlayerInteractionRequestsPrototype"
     );
+    merchant_checkout_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableMerchantCheckoutTracePrototype"
+    );
+    save_book_vote_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableSaveBookVotePrototype"
+    );
     experimental_blacksmith_ui_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -518,9 +554,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     );
     zone_transition_trace_enabled = zone_transition_trace_enabled ||
         zone_traversal_enabled || party_atomic_transitions_enabled ||
-        transition_vote_enabled;
+        transition_vote_enabled || save_book_vote_enabled;
     interaction_provenance_enabled =
         player_interaction_requests_enabled && zone_transition_trace_enabled;
+    merchant_checkout_trace_enabled = merchant_checkout_trace_enabled &&
+        interaction_provenance_enabled && !trace_enabled;
     coop_roster_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -573,6 +611,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         control_separation_enabled && split_screen_render_enabled;
     defer_integrated_roster = coop_roster_menu_enabled &&
         cleanroom_multiplayer_integration;
+    if (save_book_vote_enabled &&
+        (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
+         !control_separation_enabled || !split_screen_render_enabled ||
+         !dual_camera_frame_cache_enabled ||
+         !external_input_bridge_enabled)) {
+        SudekiMpLogWrite(
+            "save_book_vote_config=invalid "
+            "reason=requires_coop_roster_integrated_menu_control_split_"
+            "dual_cache_and_external_bridge\r\n");
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (second_player_separation_guard_enabled &&
         !cleanroom_multiplayer_integration) {
         SudekiMpLogWrite(
@@ -1402,6 +1453,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         player_interaction_requests_enabled ? "true" : "false"
     );
     SudekiMpLogFormat(
+        "save_book_vote_requested=%s timeout_ms=10000 "
+        "general_interaction_provenance=%s "
+        "policy=native_SaveMenuShow_pass_through_exact_final_LoadGameSave_"
+        "defer_independent_of_SOL_active_predicates\r\n",
+        save_book_vote_enabled ? "true" : "false",
+        interaction_provenance_enabled ? "enabled" : "disabled");
+    SudekiMpLogFormat(
         "per_player_blacksmith_ui_experiment_requested=%s "
         "default=false mutation=disabled "
         "policy=exact_gated_start_and_active_script_contract_two_native_inert_panels\r\n",
@@ -1629,6 +1687,57 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite(
             "per_player_blacksmith_ui_applied=false default=false\r\n");
     }
+    /* Install the native save-menu lifecycle marker plus final LoadGameSave
+     * deferral last. No later initialization failure can strand its lease. */
+    if (save_book_vote_enabled) {
+        if (!SudekiMpInstallSaveBookIntercept(game_module, TRUE)) {
+            DWORD save_book_error = GetLastError();
+
+            SudekiMpUninstallSaveBookIntercept();
+            SudekiMpLogFormat(
+                "save_book_vote_error=%lu "
+                "phase=exact_SaveMenuShow_and_LoadGameSave_hook_install\r\n",
+                (unsigned long)save_book_error);
+            SudekiMpLogWrite("save_book_vote_applied=false\r\n");
+            SudekiMpLogWrite("status=save_book_vote_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(save_book_error);
+            return SUDEKIMP_INIT_SAVE_BOOK_VOTE_FAILED;
+        }
+        SudekiMpLogWrite(
+            "save_book_vote_applied=true "
+            "interaction_provenance_dependency=false\r\n");
+    } else {
+        SudekiMpLogWrite(
+            "save_book_vote_applied=false default=false\r\n");
+    }
+    /* Install this pointer-slot observer last. It cannot safely chain the
+     * broad SkillTrace opcode hook and it never changes native shop behavior. */
+    if (merchant_checkout_trace_enabled) {
+        if (!SudekiMpInstallMerchantProvenanceAdapter(game_module, TRUE)) {
+            DWORD merchant_trace_error = GetLastError();
+
+            SudekiMpUninstallMerchantProvenanceAdapter();
+            SudekiMpLogFormat(
+                "merchant_checkout_trace_error=%lu "
+                "phase=exact_SOL_opcode_observer_install\r\n",
+                (unsigned long)merchant_trace_error);
+            SudekiMpLogWrite("merchant_checkout_trace_applied=false\r\n");
+            SudekiMpLogWrite("status=merchant_checkout_trace_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(merchant_trace_error);
+            return SUDEKIMP_INIT_TRACE_FAILED;
+        }
+        SudekiMpLogWrite(
+            "merchant_checkout_trace_applied=true "
+            "policy=passive_ShopStart_provenance_no_native_checkout\r\n");
+    } else {
+        SudekiMpLogWrite(
+            "merchant_checkout_trace_applied=false "
+            "default=false_or_missing_interaction_zone_or_skilltrace_conflict\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
     if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
@@ -1641,6 +1750,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !split_screen_render_enabled &&
         !cleanroom_menu_enabled &&
         !coop_roster_menu_enabled &&
+        !save_book_vote_enabled &&
         !player_movement_trace_enabled &&
         !zone_transition_trace_enabled &&
         !zone_traversal_enabled) {
@@ -1655,6 +1765,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpUninstallSaveBookIntercept();
+            SudekiMpUninstallMerchantProvenanceAdapter();
             SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
             SudekiMpUninstallBlacksmithUiAdapter();
             SudekiMpUninstallTalosDefenseTrace();
