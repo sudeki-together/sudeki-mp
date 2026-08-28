@@ -50,7 +50,20 @@ injection. A hash mismatch is a stop condition, not something to bypass.
 
 ## Play local co-op
 
-Connect the second controller, then launch the tested co-op profile:
+Connect the second controller and start the graphical launcher:
+
+```bash
+./tools/sudekimp-beta-launcher.sh
+```
+
+It presents the supported launch options, explains each one, and lets you
+choose the game executable, Wine prefix, and controller device through
+**Settings**. Choose **Play local co-op beta** to use the tested profile. The
+launcher writes its own output to `build/linux/beta-launcher.log`.
+If Zenity or a graphical desktop session is unavailable, it automatically uses
+an accessible terminal menu instead.
+
+The equivalent terminal command is:
 
 ```bash
 SUDEKIMP_INPUT_DEVICE=/dev/input/js0 \
