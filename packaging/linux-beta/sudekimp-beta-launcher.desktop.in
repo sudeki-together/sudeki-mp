@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SudekiMP Local Co-op Beta
+Comment=Launch the guarded SudekiMP Linux local co-op profiles
+Exec=/bin/bash "@LAUNCHER@"
+Icon=@ICON@
+Terminal=false
+Categories=Game;
+StartupNotify=true

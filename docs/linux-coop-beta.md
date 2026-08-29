@@ -58,10 +58,25 @@ Connect the second controller and start the graphical launcher:
 
 It presents the supported launch options, explains each one, and lets you
 choose the game executable, Wine prefix, and controller device through
-**Settings**. Choose **Play local co-op beta** to use the tested profile. The
-launcher writes its own output to `build/linux/beta-launcher.log`.
+**Settings**. **Paste paths…** accepts all three values directly from the
+keyboard or clipboard. Choose **Play local co-op beta** to use the tested
+profile. The launcher writes its own output to `build/linux/beta-launcher.log`.
+It uses the Sudeki Together crest, opens the developer page for **wander**, and
+can stream **Map Inversion** inside the launcher through `ffplay` after it
+checks the public project music catalog. Music is optional; the launcher still
+works when `curl` or FFmpeg is absent.
 If Zenity or a graphical desktop session is unavailable, it automatically uses
 an accessible terminal menu instead.
+
+To add it to your Linux desktop/app launcher, run this once from the repository
+root:
+
+```bash
+./tools/install-linux-launcher.sh
+```
+
+This creates a per-user `.desktop` entry pointing at this checkout; it does not
+copy game files or install system-wide software.
 
 The equivalent terminal command is:
 

@@ -11,12 +11,20 @@ research_launcher="${script_dir}/continue-research.sh"
 settings_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/sudekimp-beta-launcher"
 settings_file="${settings_dir}/settings"
 launch_log="${project_dir}/build/linux/beta-launcher.log"
+project_icon="${project_dir}/src/launcher/assets/SudekiMP.png"
+music_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt'
+music_track_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/Map%20Inversion.mp3'
+music_pid=''
 
 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
 wine_prefix="${SUDEKIMP_WINEPREFIX:-${HOME}/Games/sudeki-research-prefix}"
 controller_path="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
 
 readonly app_title="SudekiMP Local Co-op"
+
+zenity_app() {
+    zenity --window-icon="${project_icon}" "$@"
+}
 
 usage() {
     cat <<'EOF'
@@ -92,38 +100,99 @@ environment_summary() {
 }
 
 show_about() {
-    zenity --info --title="${app_title}" --width=620 \
-        --text="<b>Linux local co-op beta launcher</b>\n\nThis app starts the existing guarded SudekiMP profiles; it does not patch SUDEKI.exe or copy game files.\n\nThe co-op beta is one local game process: Player 1 is keyboard/mouse and Player 2 is a Linux controller. Menus, save books, inventory, and merchant checkout are still shared native systems.\n\nUse Settings to choose the game executable, Wine prefix, and controller device."
+    zenity_app --info --title="${app_title}" --width=620 \
+        --text="<b>Linux local co-op beta launcher</b>\n\nThis app starts the existing guarded SudekiMP profiles; it does not patch SUDEKI.exe or copy game files.\n\nThe co-op beta is one local game process: Player 1 is keyboard/mouse and Player 2 is a Linux controller. Menus, save books, inventory, and merchant checkout are still shared native systems.\n\nDeveloper: wander — git.unfilteredrealm.com/wander\n\nUse Settings to choose the game executable, Wine prefix, and controller device."
+}
+
+open_developer_page() {
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open 'https://git.unfilteredrealm.com/wander' >/dev/null 2>&1 &
+        return
+    fi
+    zenity_app --error --title="${app_title}" \
+        --text='xdg-open is unavailable, so the developer page could not be opened.'
+}
+
+play_project_music() {
+    local catalog
+
+    if [[ -n "${music_pid}" ]] && kill -0 "${music_pid}" 2>/dev/null; then
+        zenity_app --info --title="${app_title}" \
+            --text='Map Inversion is already playing in the launcher session.'
+        return
+    fi
+    if ! command -v curl >/dev/null 2>&1 || ! command -v ffplay >/dev/null 2>&1; then
+        zenity_app --error --title="${app_title}" \
+            --text='Project music needs curl and ffplay (from FFmpeg). The game launcher still works without them.'
+        return
+    fi
+    if ! catalog="$(curl --fail --silent --show-error --location "${music_manifest_url}")" || \
+        ! grep -Fqx 'track=Map Inversion.mp3' <<< "${catalog}"; then
+        zenity_app --error --title="${app_title}" \
+            --text='The public SudekiMP music catalog could not be read. No game files were changed.'
+        return
+    fi
+    ffplay -nodisp -autoexit -loglevel error "${music_track_url}" \
+        >> "${launch_log}" 2>&1 &
+    music_pid=$!
+    zenity_app --info --title="${app_title}" \
+        --text='Playing Map Inversion inside the launcher session. Choose Stop music to end it.'
+}
+
+stop_project_music() {
+    if [[ -n "${music_pid}" ]] && kill -0 "${music_pid}" 2>/dev/null; then
+        kill "${music_pid}" 2>/dev/null || true
+    fi
+    music_pid=''
+}
+
+paste_paths_gui() {
+    local selected
+
+    selected="$(zenity_app --entry --title="${app_title} — Game executable" \
+        --text='Paste the full path to SUDEKI.exe.' --entry-text="${game_path}")" || return
+    [[ -n "${selected}" ]] && game_path="${selected}"
+    selected="$(zenity_app --entry --title="${app_title} — Wine prefix" \
+        --text='Paste the Wine prefix directory.' --entry-text="${wine_prefix}")" || return
+    [[ -n "${selected}" ]] && wine_prefix="${selected}"
+    selected="$(zenity_app --entry --title="${app_title} — Player 2 controller" \
+        --text='Paste the controller device path (usually /dev/input/js0).' --entry-text="${controller_path}")" || return
+    [[ -n "${selected}" ]] && controller_path="${selected}"
+    save_settings
 }
 
 configure_gui() {
     local choice selected
 
     while true; do
-        choice="$(zenity --list --title="${app_title} — Settings" --width=820 --height=350 \
+        choice="$(zenity_app --list --title="${app_title} — Settings" --width=820 --height=380 \
             --text="Choose what to change.\n\n$(environment_summary)" \
             --column="Setting" --column="Current value" \
             "Game executable" "${game_path}" \
             "Wine prefix" "${wine_prefix}" \
             "Player 2 controller" "${controller_path}" \
+            "Paste paths…" "Enter all three paths directly from the keyboard or clipboard" \
             "Reset to defaults" "Use the project defaults" \
             "Back" "Return to play options")" || return
 
         case "${choice}" in
             "Game executable")
-                selected="$(zenity --file-selection --title="Choose SUDEKI.exe" \
+                selected="$(zenity_app --file-selection --title="Choose SUDEKI.exe" \
                     --filename="${game_path}")" || continue
                 [[ -n "${selected}" ]] && game_path="${selected}"
                 ;;
             "Wine prefix")
-                selected="$(zenity --file-selection --directory --title="Choose Wine prefix" \
+                selected="$(zenity_app --file-selection --directory --title="Choose Wine prefix" \
                     --filename="${wine_prefix}")" || continue
                 [[ -n "${selected}" ]] && wine_prefix="${selected}"
                 ;;
             "Player 2 controller")
-                selected="$(zenity --file-selection --title="Choose controller device (usually /dev/input/js0)" \
+                selected="$(zenity_app --file-selection --title="Choose controller device (usually /dev/input/js0)" \
                     --filename="${controller_path}")" || continue
                 [[ -n "${selected}" ]] && controller_path="${selected}"
+                ;;
+            "Paste paths…")
+                paste_paths_gui
                 ;;
             "Reset to defaults")
                 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
@@ -143,17 +212,17 @@ validate_selection() {
     local mode="$1"
 
     if [[ ! -f "${game_path}" ]]; then
-        zenity --error --title="${app_title}" \
+        zenity_app --error --title="${app_title}" \
             --text="SUDEKI.exe was not found:\n${game_path}\n\nUse Settings to choose your owned GOG game executable."
         return 1
     fi
     if [[ ! -d "${wine_prefix}" ]]; then
-        zenity --error --title="${app_title}" \
+        zenity_app --error --title="${app_title}" \
             --text="Wine prefix directory was not found:\n${wine_prefix}\n\nUse Settings to choose the prefix that contains Sudeki."
         return 1
     fi
     if mode_needs_controller "${mode}" && [[ ! -r "${controller_path}" ]]; then
-        zenity --error --title="${app_title}" \
+        zenity_app --error --title="${app_title}" \
             --text="The Player 2 controller is not readable:\n${controller_path}\n\nConnect it, grant your user input-device access, then choose it in Settings."
         return 1
     fi
@@ -173,7 +242,7 @@ run_check_gui() {
     else
         status="Validation failed"
     fi
-    zenity --text-info --title="${app_title} — ${status}" --width=850 --height=560 \
+    zenity_app --text-info --title="${app_title} — ${status}" --width=850 --height=560 \
         --filename="${result_file}"
     rm -f "${result_file}"
 }
@@ -187,7 +256,7 @@ launch_mode_gui() {
     fi
     validate_selection "${mode}" || return
 
-    if ! zenity --question --title="${app_title}" --width=650 \
+    if ! zenity_app --question --title="${app_title}" --width=650 \
         --ok-label="Launch" --cancel-label="Back" \
         --text="<b>$(mode_summary "${mode}")</b>\n\n$(environment_summary)\n\nThe game will open in a separate Wine window. The launcher log is written to:\n${launch_log}"; then
         return
@@ -207,7 +276,7 @@ launch_mode_gui() {
     process_id=$!
     disown "${process_id}" 2>/dev/null || true
 
-    zenity --info --title="${app_title}" --width=620 \
+    zenity_app --info --title="${app_title}" --width=620 \
         --text="Launch started. Sudeki should open shortly.\n\nPlayer 1: keyboard and mouse\nPlayer 2: ${controller_path}\n\nIf the game does not open, see:\n${launch_log}"
 }
 
@@ -242,7 +311,7 @@ run_gui() {
     local choice mode
 
     while true; do
-        choice="$(zenity --list --title="${app_title}" --width=900 --height=460 \
+        choice="$(zenity_app --list --title="${app_title}" --width=900 --height=490 \
             --text="<b>Choose how to start SudekiMP</b>\n\nTwo-player local co-op is the supported beta path. Select Settings if your game, Wine prefix, or controller differs from the defaults." \
             --column="Option" --column="What it does" \
             "Play local co-op beta" "Two local players: keyboard/mouse host plus Linux controller Player 2." \
@@ -250,10 +319,15 @@ run_gui() {
             "Talos party encounter" "Restore Tal's companions for the focused Talos encounter." \
             "Verify installation" "Build and check the exact supported game/DLL pair without launching." \
             --ok-label="Continue" --cancel-label="Quit" \
-            --extra-button="Settings" --extra-button="About")" || return
+            --extra-button="Settings" --extra-button="Play music" \
+            --extra-button="Stop music" --extra-button="Developer: wander" \
+            --extra-button="About")" || return
 
         case "${choice}" in
             "Settings") configure_gui ;;
+            "Play music") play_project_music ;;
+            "Stop music") stop_project_music ;;
+            "Developer: wander") open_developer_page ;;
             "About") show_about ;;
             *)
                 mode="$(mode_argument "${choice}")" || continue
@@ -282,4 +356,5 @@ main() {
     fi
 }
 
+trap stop_project_music EXIT
 main "$@"
