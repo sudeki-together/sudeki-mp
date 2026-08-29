@@ -108,6 +108,12 @@ The Windows beta launcher additionally has an explicit loaded-save co-op
 profile. It requests the same atomic Tal-host/Ailish-Player-2 contract only
 after a save's native world and party have settled; it never edits save data or
 party pointers outside Sudeki's own roster path.
+
+> [!WARNING]
+> Talos's retail Void transition is still host-only in the beta. Its separate
+> four-party restoration experiment is deliberately rejected when split-screen
+> is enabled, because the cinematic collapses the party and commandeers the
+> global camera before its lifecycle is safe to virtualize.
 5. Wait for a selected character when the story has not added them yet.
 
 The page reuses Sudeki's native title fade, font submission, and four resident

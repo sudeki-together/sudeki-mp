@@ -41,7 +41,10 @@ pointer. If either hero is not in the loaded party, it stays single-player and
 records the deferred roster state in `SudekiMP.log` instead of guessing.
 The profile deliberately leaves the experimental native P2 collision camera off
 for this first Windows input pass so the existing right-stick orbit remains
-available. It does not modify `SUDEKI.exe`, game data, or saves.
+available. It also leaves the separate Talos full-party restoration experiment
+off: Talos's retail Void handoff collapses the party and takes global cinematic
+camera ownership, which is not yet safe with the two-viewport runtime. It does
+not modify `SUDEKI.exe`, game data, or saves.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits

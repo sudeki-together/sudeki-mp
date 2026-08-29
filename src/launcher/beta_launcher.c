@@ -318,7 +318,6 @@ static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
         L"EnableSecondPlayerCameraPrototype",
         L"EnableDualCameraFrameCachePrototype",
         L"EnableSecondPlayerControllerCameraPrototype",
-        L"EnableTalosPartyPrototype",
         L"EnablePartyAtomicTransitionsPrototype"
     };
     WCHAR config_path[MAX_PATH];
@@ -337,7 +336,10 @@ static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
             config_path) ||
         !WritePrivateProfileStringW(
             L"SudekiMP", L"EnableNativeSecondPlayerCameraCollisionPrototype",
-            L"false", config_path)) {
+            L"false", config_path) ||
+        !WritePrivateProfileStringW(
+            L"SudekiMP", L"EnableTalosPartyPrototype", L"false",
+            config_path)) {
         show_error(owner,
                    L"SudekiMP could not select the Windows controller input profile.");
         return FALSE;

@@ -640,6 +640,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    /* Talos deliberately collapses the retail four-member party to Tal while
+     * its Void/cinematic camera pipeline is active.  The restoration hook is
+     * still an isolated research experiment; it has not proved safe alongside
+     * the two-viewport renderer or Player 2 control lifetime. */
+    if (talos_party_prototype_enabled && split_screen_render_enabled) {
+        SudekiMpLogWrite(
+            "talos_party_config=invalid "
+            "reason=Talos_restoration_experiment_cannot_share_split_camera_or_player_two_runtime\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (save_book_vote_enabled &&
         (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
          !control_separation_enabled || !split_screen_render_enabled ||
