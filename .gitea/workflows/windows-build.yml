@@ -1,0 +1,64 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows
+    steps:
+      - name: Verify host build prerequisites
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'git',
+            'C:\msys64\usr\bin\bash.exe',
+            'C:\msys64\mingw32.exe'
+          )
+          $missing = @($required | Where-Object {
+            if ($_ -eq 'git') {
+              -not (Get-Command git -ErrorAction SilentlyContinue)
+            }
+            else {
+              -not (Test-Path -LiteralPath $_ -PathType Leaf)
+            }
+          })
+          if ($missing.Count -gt 0) {
+            throw "Windows build prerequisites are missing: $($missing -join ', '). Install MSYS2, Git, and the MINGW32 packages documented in docs/windows-build.md."
+          }
+
+      - uses: actions/checkout@v4
+
+      - name: Build PE32 DLL and launcher
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'export MSYSTEM=MINGW32; export CHERE_INVOKING=1; cd "$GITHUB_WORKSPACE"; ./tools/build-windows.sh'
+          if ($LASTEXITCODE -ne 0) {
+            throw "tools/build-windows.sh failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package CI artifact
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:GITHUB_WORKSPACE 'build\windows-mingw32\bin'
+          $files = @(
+            (Join-Path $bin 'SudekiMP.Launcher.exe'),
+            (Join-Path $bin 'SudekiMP.dll'),
+            (Join-Path $bin 'SudekiMP.ini')
+          )
+          $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+          if ($missing.Count -gt 0) {
+            throw "Build completed without expected runtime files: $($missing -join ', ')"
+          }
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-windows-ci.zip'
+          Compress-Archive -LiteralPath $files -DestinationPath $artifact -Force
+
+      - name: Upload Windows CI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: SudekiMP-windows-ci
+          path: SudekiMP-windows-ci.zip
+          if-no-files-found: error

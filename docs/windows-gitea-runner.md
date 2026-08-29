@@ -59,11 +59,11 @@ time on a full native build.
 
 ## Prepare it for the real build
 
-Before adding a Windows build workflow, install the documented MSYS2
-`MINGW32` toolchain on that Windows host. See
-[windows-build.md](windows-build.md). The runner should then receive a
-workflow that builds the project and retains the PE32 DLL/launcher artifacts;
-do not automatically publish or inject them from CI.
+Install the documented MSYS2 `MINGW32` toolchain and Git on that Windows host.
+See [windows-build.md](windows-build.md). The manual-only **Windows build**
+workflow checks those prerequisites, builds the project, and uploads a
+`SudekiMP-windows-ci.zip` artifact containing the PE32 DLL, launcher, and
+default configuration. It does not publish a release or inject into a game.
 
 ## Stop or remove
 

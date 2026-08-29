@@ -86,6 +86,32 @@ function Initialize-RunnerFiles {
         }
     }
 
+    # act_runner generates Linux Docker labels by default.  This runner is
+    # intentionally a Windows host runner, so write the requested labels into
+    # config.yaml before the daemon starts; otherwise it tries to find Docker.
+    $configText = Get-Content -LiteralPath $ConfigPath -Raw
+    $labelLines = @()
+    foreach ($label in ($Labels -split ',')) {
+        $trimmedLabel = $label.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmedLabel)) {
+            $labelLines += "    - `"$trimmedLabel`""
+        }
+    }
+    if ($labelLines.Count -eq 0) {
+        throw 'At least one runner label is required.'
+    }
+
+    $newline = [Environment]::NewLine
+    $replacement = '  labels:' + $newline + ($labelLines -join $newline) + $newline
+    $updatedConfigText = [regex]::Replace(
+        $configText,
+        '(?ms)^  labels:\r?\n(?:    - .*\r?\n)+',
+        $replacement)
+    if ($updatedConfigText -eq $configText) {
+        throw 'act_runner generated an unrecognized labels section.'
+    }
+    Set-Content -LiteralPath $ConfigPath -Value $updatedConfigText -Encoding utf8
+
     @'
 @echo off
 setlocal
