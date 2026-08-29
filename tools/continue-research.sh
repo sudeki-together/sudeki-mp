@@ -229,6 +229,7 @@ case "${mode}" in
               "${mode}" == "--merchant-checkout-trace" ||
               "${mode}" == "--native-p2-camera-collision-test" ]]; then
             sed -i \
+                -e 's/^EnableCoopRosterMenu=false$/EnableCoopRosterMenu=true/' \
                 -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
                 -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
                 -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \

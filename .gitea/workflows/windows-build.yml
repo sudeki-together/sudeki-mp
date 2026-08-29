@@ -44,22 +44,33 @@ jobs:
             throw "tools/build-windows.sh failed with exit code $LASTEXITCODE"
           }
 
-      - name: Package CI artifact
+      - name: Package Windows beta
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $bin = Join-Path $env:GITHUB_WORKSPACE 'build\windows-mingw32\bin'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'package-stage\SudekiMP'
           $files = @(
             (Join-Path $bin 'SudekiMP.Launcher.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
-            (Join-Path $bin 'SudekiMP.ini')
+            (Join-Path $bin 'SudekiMP.ini'),
+            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt')
           )
           $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
           if ($missing.Count -gt 0) {
             throw "Build completed without expected runtime files: $($missing -join ', ')"
           }
-          $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-windows-ci.zip'
-          Compress-Archive -LiteralPath $files -DestinationPath $artifact -Force
+          Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
+          @'
+@echo off
+"%~dp0SudekiMP.Launcher.exe" "%~dp0..\SUDEKI.exe" "%~dp0SudekiMP.dll"
+if errorlevel 1 pause
+'@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
+          Compress-Archive -Path $stage -DestinationPath $artifact -Force
 
       - name: Upload Windows CI package
         # Gitea implements the artifact-v4 protocol but stock v4 rejects
@@ -67,6 +78,6 @@ jobs:
         # that client-side GHES refusal.
         uses: christopherhx/gitea-upload-artifact@v4
         with:
-          name: SudekiMP-windows-ci
-          path: SudekiMP-windows-ci.zip
+          name: SudekiMP-Windows-Beta
+          path: SudekiMP-Windows-Beta.zip
           if-no-files-found: error

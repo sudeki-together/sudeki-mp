@@ -4,11 +4,17 @@ SudekiMP can be built and launched directly on Windows. Wine is a development
 convenience used by the primary research machine; it is not a requirement for
 the DLL or launcher.
 
-This is currently a **developer installation**, not a finished co-op release.
+This is currently a **Windows beta loader**, not a finished co-op release.
 It provides the same exact-build-gated DLL, configuration, and launcher used by
 the Linux research environment. Several local-co-op systems still require
 focused configuration and live acceptance before ordinary players should use
 them for a complete playthrough.
+
+The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
+`Launch SudekiMP.cmd` and `README-Windows.txt`. Copy that folder beside the
+supported `SUDEKI.exe`, then run the `.cmd` file. Do not open
+`SudekiMP.Launcher.exe` directly: it is a console loader which needs explicit
+game/DLL paths.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits

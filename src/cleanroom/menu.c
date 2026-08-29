@@ -3127,10 +3127,20 @@ static void roster_begin_native_new_game(
     menu_open = FALSE;
     menu_texture_dirty = FALSE;
     native_roster_start_page_transition(TRUE);
-    if (original_front_end_state_update != NULL) {
-        native_front_end_state_bridge(
-            controller, 10u, original_front_end_state_update);
-    }
+    /*
+     * Do not request the shipped New Game fade (state 10) until the
+     * experimental roster has proved that it can take over the native page.
+     *
+     * The title dispatcher and controller state are distinct.  On a real
+     * Windows title flow the activation may arrive through dispatcher phase
+     * 5 while controller+0x44 is still state 2.  The roster page requires a
+     * stricter state-5/load-page contract, so this is an expected fail-open
+     * boundary rather than permission to fade the title out.  Requesting
+     * state 10 first left the native front end black after a rejected page
+     * takeover, even though the original StartNewGame action was later
+     * replayed.  Keeping the title untouched lets that original action run
+     * exactly as vanilla when the roster experiment is unavailable.
+     */
     if (!native_roster_enter_page_state(controller)) {
         roster_native_screen = FALSE;
         roster_native_screen_kind = NATIVE_ROSTER_NONE;
@@ -3140,7 +3150,8 @@ static void roster_begin_native_new_game(
         native_roster_restore_vanilla_items(controller);
         SudekiMpLogWrite(
             "cleanroom_menu event=native_roster status=rejected "
-            "reason=independent_page_activation_failed\r\n");
+            "reason=independent_page_activation_failed "
+            "fallback=vanilla_new_game_title_unchanged\r\n");
         return;
     }
     if (!native_roster_create_animated_rows()) {
