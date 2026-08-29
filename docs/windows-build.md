@@ -11,11 +11,19 @@ focused configuration and live acceptance before ordinary players should use
 them for a complete playthrough.
 
 The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
-`Launch SudekiMP.cmd` and `README-Windows.txt`. Copy that folder beside the
-supported `SUDEKI.exe`, then run the `.cmd` file. Do not open
+`Launch SudekiMP.cmd`, `SudekiMP-Beta-Launcher.ps1`, and
+`README-Windows.txt`. Copy that folder beside the supported `SUDEKI.exe`, then
+run the `.cmd` file. The beta launcher asks for the game folder on its first
+run, remembers the selection under `%LOCALAPPDATA%\SudekiMP`, verifies the
+exact build, and launches the raw loader with the correct paths. Do not open
 `SudekiMP.Launcher.exe` directly: it is a console loader which needs explicit
-game/DLL paths. The script also recognizes a deliberate flat installation in
-the game folder, and gives a readable error if it cannot find `SUDEKI.exe`.
+game/DLL paths.
+
+The beta launcher’s update button is explicitly opt-in and warns before it
+downloads an unsigned package over HTTPS. Manual package downloads remain the
+recommended route. An accepted update preserves `SudekiMP.ini`, makes a local
+backup of replaced mod files, and never changes the game executable, game
+assets, or saves.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits

@@ -54,7 +54,8 @@ jobs:
             (Join-Path $bin 'SudekiMP.Launcher.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
-            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt')
+            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'),
+            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1')
           )
           $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
           if ($missing.Count -gt 0) {
@@ -63,27 +64,27 @@ jobs:
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
-          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'), (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1') -Destination $stage
           @'
           @echo off
-          setlocal
-          set "loader=%~dp0SudekiMP.Launcher.exe"
-          set "dll=%~dp0SudekiMP.dll"
-          set "game=%~dp0..\SUDEKI.exe"
-          if not exist "%game%" set "game=%~dp0SUDEKI.exe"
-          if not exist "%game%" (
-            echo SudekiMP could not find SUDEKI.exe next to this folder or its parent.
-            echo Put the SudekiMP folder beside SUDEKI.exe, then run this script again.
-            pause
-            exit /b 2
-          )
-          "%loader%" "%game%" "%dll%"
-          set "exit_code=%ERRORLEVEL%"
-          if not "%exit_code%"=="0" pause
-          exit /b %exit_code%
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0SudekiMP-Beta-Launcher.ps1"
+          if errorlevel 1 pause
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
+
+      - name: Validate Windows beta launcher script
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1'
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            throw ($errors | ForEach-Object { $_.Message } | Out-String)
+          }
 
       - name: Upload Windows CI package
         # Gitea implements the artifact-v4 protocol but stock v4 rejects
