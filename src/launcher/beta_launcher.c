@@ -15,6 +15,8 @@
 
 #define SUDEKIMP_TITLE L"SudekiMP Windows Beta Launcher"
 #define SUDEKIMP_PROJECT_URL L"https://git.unfilteredrealm.com/wander"
+#define SUDEKIMP_WINDOWS_BETA_URL \
+    L"https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta"
 #define SUDEKIMP_MUSIC_MANIFEST_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt"
 #define SUDEKIMP_MUSIC_TRACK_URL \
@@ -250,10 +252,10 @@ static BOOL build_loader_command(WCHAR *command,
                                       dll_path));
 }
 
-static BOOL verify_game(HWND owner) {
-    WCHAR game_directory[MAX_PATH];
-    WCHAR loader_path[MAX_PATH];
-    WCHAR dll_path[MAX_PATH];
+static BOOL verify_game(HWND owner,
+                        WCHAR game_directory[MAX_PATH],
+                        WCHAR loader_path[MAX_PATH],
+                        WCHAR dll_path[MAX_PATH]) {
     WCHAR command[MAX_PATH * 3u + 80u];
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
@@ -309,7 +311,7 @@ static void launch_game(HWND owner) {
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
 
-    if (!verify_game(owner) ||
+    if (!verify_game(owner, game_directory, loader_path, dll_path) ||
         !build_loader_command(command,
                               sizeof(command) / sizeof(command[0]),
                               loader_path,
@@ -497,46 +499,29 @@ static void start_music_download(HWND owner) {
     CloseHandle(thread);
 }
 
-static void begin_optional_update(HWND owner) {
-    WCHAR updater_path[MAX_PATH];
-    WCHAR parameters[MAX_PATH + 80u];
+static void open_windows_beta_download(HWND owner) {
     const INT_PTR result = MessageBoxW(
         owner,
-        L"Manual package downloads are recommended. This opt-in action contacts the "
-        L"Sudeki Together server over HTTPS, downloads an unsigned beta ZIP, and "
-        L"updates only SudekiMP files. It preserves SudekiMP.ini and never changes "
-        L"SUDEKI.exe, game data, or saves.\n\nContinue?",
-        L"Optional SudekiMP beta update",
+        L"This opens the public SudekiMP Windows beta package page in your browser. "
+        L"Download and extract the ZIP yourself, then replace only the SudekiMP "
+        L"folder. It never changes SUDEKI.exe, game data, or saves.\n\nOpen the page?",
+        L"Get latest SudekiMP beta",
         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
 
     if (result != IDYES) {
-        set_status(L"Update cancelled. No files changed.");
-        return;
-    }
-    if (!join_path(updater_path,
-                   sizeof(updater_path) / sizeof(updater_path[0]),
-                   package_directory,
-                   L"SudekiMP-Beta-Launcher.ps1") ||
-        !file_exists(updater_path) ||
-        FAILED(StringCchPrintfW(parameters,
-                                sizeof(parameters) / sizeof(parameters[0]),
-                                L"-NoProfile -ExecutionPolicy Bypass -File \"%s\" -UpdateOnly -WaitForPid %lu",
-                                updater_path,
-                                (unsigned long)GetCurrentProcessId()))) {
-        show_error(owner, L"The packaged update helper is missing.");
+        set_status(L"Download cancelled. No files changed.");
         return;
     }
     if ((INT_PTR)ShellExecuteW(owner,
                                L"open",
-                               L"powershell.exe",
-                               parameters,
-                               package_directory,
-                               SW_HIDE) <= 32) {
-        show_error(owner, L"Windows could not start the optional update helper.");
+                               SUDEKIMP_WINDOWS_BETA_URL,
+                               NULL,
+                               NULL,
+                               SW_SHOWNORMAL) <= 32) {
+        show_error(owner, L"Windows could not open the public beta package page.");
         return;
     }
-    set_status(L"The update helper will continue after this launcher closes.");
-    DestroyWindow(owner);
+    set_status(L"Opened the public beta package page. This launcher remains unchanged.");
 }
 
 static void apply_default_font(HWND control) {
@@ -665,13 +650,18 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     browse_for_game_directory(window);
                     return 0;
                 case IDC_VERIFY:
-                    (void)verify_game(window);
+                    {
+                        WCHAR game_directory[MAX_PATH];
+                        WCHAR loader_path[MAX_PATH];
+                        WCHAR dll_path[MAX_PATH];
+                        (void)verify_game(window, game_directory, loader_path, dll_path);
+                    }
                     return 0;
                 case IDC_LAUNCH:
                     launch_game(window);
                     return 0;
                 case IDC_UPDATE:
-                    begin_optional_update(window);
+                    open_windows_beta_download(window);
                     return 0;
                 case IDC_PLAY_MUSIC:
                     start_music_download(window);
@@ -935,7 +925,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
-                            L"Optional update…",
+                            L"Get latest beta…",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             392,
                             252,

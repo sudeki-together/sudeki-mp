@@ -22,7 +22,8 @@ published from [Windows CI run #159](https://git.unfilteredrealm.com/sudeki-toge
 It contains a ready-to-copy `SudekiMP` folder with a standalone PE32 beta
 launcher, raw loader, DLL, safe default configuration, launch script, and
 Windows guide—not Sudeki or any game assets. The beta launcher supports pasted
-game paths, optional in-app project music, and an opt-in updater. See
+game paths, optional in-app project music, and a browser link to the public
+manual-download page. See
 [Windows build instructions](docs/windows-build.md) for
 the supported game build and installation steps.
 

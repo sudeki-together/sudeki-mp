@@ -30,8 +30,8 @@ local co-op character-lock screen when you choose New Game.
 If the launcher reports an error, keep the command window open and include
 the text from it plus SudekiMP.log (beside SUDEKI.exe) in a bug report.
 
-OPTIONAL MUSIC AND SELF-UPDATE
---------------------
+OPTIONAL MUSIC AND MANUAL BETA DOWNLOADS
+----------------------------------------
 
 The native launcher uses the Sudeki Together crest as its application icon and
 includes a **Play project music** button. That button alone fetches the public
@@ -39,9 +39,8 @@ music catalog and track over HTTPS, caches it under `%LOCALAPPDATA%\SudekiMP`,
 and plays it inside the launcher. The MP3 is not packaged with the beta.
 The **Developer: wander** button opens https://git.unfilteredrealm.com/wander.
 
-The beta launcher includes an "Optional update" button. It is OFF by default.
-Manual package downloads are recommended. If you explicitly choose update, it
-downloads the latest unsigned beta package over HTTPS from the Sudeki Together
-project server, confirms its required files, backs up the current SudekiMP
-files, preserves your SudekiMP.ini, and changes only mod-side files. It never
-changes SUDEKI.exe, game data, or save files. Close Sudeki before updating.
+The **Get latest beta** button opens the public package page in your browser.
+Download and extract the ZIP yourself, then replace only this `SudekiMP`
+folder. This beta deliberately does not use an unsigned PowerShell self-updater:
+manual replacement is clearer, preserves your `SudekiMP.ini`, and never changes
+SUDEKI.exe, game data, or save files. Close Sudeki before replacing the folder.

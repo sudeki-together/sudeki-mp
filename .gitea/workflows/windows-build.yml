@@ -55,8 +55,7 @@ jobs:
             (Join-Path $bin 'SudekiMP.BetaLauncher.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
-            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'),
-            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1')
+            (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt')
           )
           $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
           if ($missing.Count -gt 0) {
@@ -65,7 +64,7 @@ jobs:
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.BetaLauncher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
-          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'), (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
           @'
           @echo off
           "%~dp0SudekiMP.BetaLauncher.exe"
@@ -76,19 +75,6 @@ jobs:
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
-
-      - name: Validate Windows beta launcher script
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $path = Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1'
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            $path, [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) {
-            throw ($errors | ForEach-Object { $_.Message } | Out-String)
-          }
 
       - name: Upload Windows CI package
         # Gitea implements the artifact-v4 protocol but stock v4 rejects

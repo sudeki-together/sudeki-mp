@@ -133,7 +133,6 @@ C:\GOG Games\Sudeki\SudekiMP\
   SudekiMP.BetaLauncher.exe
   SudekiMP.dll
   SudekiMP.ini
-  SudekiMP-Beta-Launcher.ps1
   Launch SudekiMP.cmd
 ```
 
