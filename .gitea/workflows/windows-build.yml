@@ -14,7 +14,9 @@ jobs:
           $required = @(
             'git',
             'C:\msys64\usr\bin\bash.exe',
-            'C:\msys64\mingw32.exe'
+            'C:\msys64\mingw32\bin\gcc.exe',
+            'C:\msys64\mingw32\bin\cmake.exe',
+            'C:\msys64\mingw32\bin\ninja.exe'
           )
           $missing = @($required | Where-Object {
             if ($_ -eq 'git') {
@@ -34,7 +36,10 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          & 'C:\msys64\usr\bin\bash.exe' -lc 'export MSYSTEM=MINGW32; export CHERE_INVOKING=1; cd "$GITHUB_WORKSPACE"; ./tools/build-windows.sh'
+          $env:MSYSTEM = 'MINGW32'
+          $env:CHERE_INVOKING = '1'
+          $env:PATH = 'C:\msys64\mingw32\bin;C:\msys64\usr\bin;' + $env:PATH
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE"; ./tools/build-windows.sh'
           if ($LASTEXITCODE -ne 0) {
             throw "tools/build-windows.sh failed with exit code $LASTEXITCODE"
           }
