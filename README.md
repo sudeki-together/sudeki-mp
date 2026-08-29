@@ -242,6 +242,11 @@ tools/build-windows.sh
 tools/install-windows.ps1
 ```
 
+For a dedicated native-Windows build machine, see
+[windows-gitea-runner.md](docs/windows-gitea-runner.md). It installs a
+repository-scoped Actions runner and includes a manual smoke workflow; it does
+not publish builds or run game injection from CI.
+
 The installer verifies the exact GOG executable hash and copies only the
 launcher, DLL, and configuration into a removable `SudekiMP` subdirectory. It
 does not modify or redistribute the game. See
