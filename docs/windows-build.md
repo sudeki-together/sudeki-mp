@@ -11,13 +11,18 @@ focused configuration and live acceptance before ordinary players should use
 them for a complete playthrough.
 
 The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
-`Launch SudekiMP.cmd`, `SudekiMP-Beta-Launcher.ps1`, and
-`README-Windows.txt`. Copy that folder beside the supported `SUDEKI.exe`, then
-run the `.cmd` file. The beta launcher asks for the game folder on its first
-run, remembers the selection under `%LOCALAPPDATA%\SudekiMP`, verifies the
-exact build, and launches the raw loader with the correct paths. Do not open
-`SudekiMP.Launcher.exe` directly: it is a console loader which needs explicit
-game/DLL paths.
+`Launch SudekiMP.cmd`, `SudekiMP.BetaLauncher.exe`, its opt-in PowerShell
+update helper, and `README-Windows.txt`. Copy that folder beside the supported
+`SUDEKI.exe`, then run the `.cmd` file. The standalone launcher accepts either
+a pasted game-folder path or Browse selection, remembers it under
+`%LOCALAPPDATA%\SudekiMP`, verifies the exact build, and launches the raw
+loader with the correct paths. Do not open `SudekiMP.Launcher.exe` directly:
+it is a console loader which needs explicit game/DLL paths.
+
+The beta launcher uses the project crest as its application icon, includes a
+developer link to [wander](https://git.unfilteredrealm.com/wander), and can
+play the public project music inside the launcher. Music is fetched only after
+the user presses Play, then cached locally; it is not embedded in the package.
 
 The beta launcher’s update button is explicitly opt-in and warns before it
 downloads an unsigned package over HTTPS. Manual package downloads remain the
@@ -102,12 +107,14 @@ Build products are written to:
 
 ```text
 build/windows-mingw32/bin/SudekiMP.Launcher.exe
+build/windows-mingw32/bin/SudekiMP.BetaLauncher.exe
 build/windows-mingw32/bin/SudekiMP.dll
 build/windows-mingw32/bin/SudekiMP.ini
 ```
 
-The DLL is linked with the GCC runtime statically, so those three files are the
-only SudekiMP runtime files the current launcher requires.
+The DLL is linked with the GCC runtime statically. The installed beta contains
+the native front end, raw loader, DLL, configuration, and update helper; it
+does not require an extra MSYS2 runtime beside the game.
 
 ## 4. Install beside a working game
 
@@ -123,13 +130,15 @@ The installer performs the executable hash check first. It then creates:
 ```text
 C:\GOG Games\Sudeki\SudekiMP\
   SudekiMP.Launcher.exe
+  SudekiMP.BetaLauncher.exe
   SudekiMP.dll
   SudekiMP.ini
+  SudekiMP-Beta-Launcher.ps1
   Launch SudekiMP.cmd
 ```
 
 It does not overwrite the game executable, archives, saves, or other game
-assets. Re-running it updates only those four mod-side files. Removing that
+assets. Re-running it updates only those mod-side files. Removing that
 `SudekiMP` directory removes the developer installation.
 
 ## 5. Preflight and launch
@@ -147,7 +156,8 @@ The expected result includes:
 Build supported; launcher will permit injection.
 ```
 
-Then double-click `Launch SudekiMP.cmd`. The launcher:
+Then double-click `Launch SudekiMP.cmd`. The standalone launcher lets you
+paste or browse for the Sudeki game folder, then it:
 
 1. validates `SUDEKI.exe`;
 2. starts the game suspended;

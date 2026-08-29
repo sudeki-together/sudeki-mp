@@ -1,9 +1,14 @@
 # SudekiMP Windows Beta Launcher
 #
-# This is deliberately a small local bootstrapper.  It keeps the game's files
+# This is the update helper used by SudekiMP.BetaLauncher.exe. It keeps the game's files
 # untouched: it remembers a game folder, validates/starts the shipped loader,
 # and can optionally fetch a newer SudekiMP beta package after an explicit
 # confirmation.  It never runs automatic updates.
+
+param(
+    [switch]$UpdateOnly,
+    [uint32]$WaitForPid = 0
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -19,6 +24,7 @@ $PackageDirectory = $PSScriptRoot
 $SettingsDirectory = Join-Path $env:LOCALAPPDATA 'SudekiMP'
 $SettingsPath = Join-Path $SettingsDirectory 'windows-beta-launcher.json'
 $script:GameDirectory = $null
+$script:statusLabel = $null
 
 function Show-Problem([string]$Message) {
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -126,20 +132,22 @@ function Get-LatestPackage {
     return $latest
 }
 
-function Update-LocalPackage {
+function Update-LocalPackage([switch]$SkipConfirmation) {
     if (Get-Process -Name 'SUDEKI' -ErrorAction SilentlyContinue) {
         Show-Problem 'Close Sudeki before updating SudekiMP.'
         return
     }
-    $confirmation = [System.Windows.Forms.MessageBox]::Show(
-        "Manual download is recommended. This option contacts the Sudeki Together project server over HTTPS, downloads an unsigned beta ZIP, and replaces only SudekiMP files. It preserves your SudekiMP.ini and never changes game files or saves.`r`n`r`nContinue?",
-        'Optional beta update',
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning,
-        [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-    if ($confirmation -ne [System.Windows.Forms.DialogResult]::Yes) {
-        Set-Status 'Update cancelled. No files changed.' $false
-        return
+    if (-not $SkipConfirmation) {
+        $confirmation = [System.Windows.Forms.MessageBox]::Show(
+            "Manual download is recommended. This option contacts the Sudeki Together project server over HTTPS, downloads an unsigned beta ZIP, and replaces only SudekiMP files. It preserves your SudekiMP.ini and never changes game files or saves.`r`n`r`nContinue?",
+            'Optional beta update',
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+        if ($confirmation -ne [System.Windows.Forms.DialogResult]::Yes) {
+            Set-Status 'Update cancelled. No files changed.' $false
+            return
+        }
     }
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath())
@@ -155,6 +163,7 @@ function Update-LocalPackage {
         $source = Join-Path $tempRoot 'SudekiMP'
         $required = @(
             'SudekiMP.Launcher.exe',
+            'SudekiMP.BetaLauncher.exe',
             'SudekiMP.dll',
             'SudekiMP.ini',
             'SudekiMP-Beta-Launcher.ps1',
@@ -196,13 +205,29 @@ function Update-LocalPackage {
 }
 
 function Set-Status([string]$Text, [bool]$Success) {
+    if ($null -eq $script:statusLabel) {
+        Write-Host $Text
+        return
+    }
     if ($Success) {
-        $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(0, 105, 55)
+        $script:statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(0, 105, 55)
     }
     else {
-        $statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(105, 60, 0)
+        $script:statusLabel.ForeColor = [System.Drawing.Color]::FromArgb(105, 60, 0)
     }
-    $statusLabel.Text = $Text
+    $script:statusLabel.Text = $Text
+}
+
+if ($UpdateOnly) {
+    if ($WaitForPid -ne 0) {
+        try { Wait-Process -Id $WaitForPid -ErrorAction Stop } catch { }
+    }
+    Update-LocalPackage -SkipConfirmation
+    $nativeLauncher = Join-Path $PackageDirectory 'SudekiMP.BetaLauncher.exe'
+    if (Test-Path -LiteralPath $nativeLauncher -PathType Leaf) {
+        Start-Process -FilePath $nativeLauncher -WorkingDirectory $PackageDirectory
+    }
+    exit
 }
 
 $form = New-Object System.Windows.Forms.Form
@@ -238,7 +263,6 @@ $form.Controls.Add($folderLabel)
 $folderBox = New-Object System.Windows.Forms.TextBox
 $folderBox.Location = New-Object System.Drawing.Point(26, 118)
 $folderBox.Size = New-Object System.Drawing.Size(485, 25)
-$folderBox.ReadOnly = $true
 $form.Controls.Add($folderBox)
 
 $browseButton = New-Object System.Windows.Forms.Button
@@ -247,11 +271,11 @@ $browseButton.Location = New-Object System.Drawing.Point(520, 116)
 $browseButton.Size = New-Object System.Drawing.Size(95, 28)
 $form.Controls.Add($browseButton)
 
-$statusLabel = New-Object System.Windows.Forms.Label
-$statusLabel.Location = New-Object System.Drawing.Point(26, 160)
-$statusLabel.Size = New-Object System.Drawing.Size(585, 53)
-$statusLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-$form.Controls.Add($statusLabel)
+$script:statusLabel = New-Object System.Windows.Forms.Label
+$script:statusLabel.Location = New-Object System.Drawing.Point(26, 160)
+$script:statusLabel.Size = New-Object System.Drawing.Size(585, 53)
+$script:statusLabel.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$form.Controls.Add($script:statusLabel)
 
 $launchButton = New-Object System.Windows.Forms.Button
 $launchButton.Text = 'Launch SudekiMP'

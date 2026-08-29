@@ -1,0 +1,3 @@
+#include "beta_launcher_resource.h"
+
+IDI_SUDEKIMP_BETA ICON "assets/SudekiMP.ico"

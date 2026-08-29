@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(SudekiMP VERSION 0.1.0 LANGUAGES C)
+project(SudekiMP VERSION 0.1.0 LANGUAGES C RC)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR "SudekiMP must be cross-compiled as a 32-bit Windows target")
@@ -139,6 +139,23 @@ target_compile_options(SudekiMP.Launcher PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP.Launcher PRIVATE -municode)
 target_link_libraries(SudekiMP.Launcher PRIVATE advapi32)
 set_target_properties(SudekiMP.Launcher PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.BetaLauncher WIN32
+    src/launcher/beta_launcher.c
+    src/launcher/beta_launcher.rc
+)
+target_include_directories(SudekiMP.BetaLauncher PRIVATE src/launcher)
+target_compile_definitions(SudekiMP.BetaLauncher PRIVATE
+    WIN32_LEAN_AND_MEAN
+    UNICODE
+    _UNICODE
+)
+target_compile_options(SudekiMP.BetaLauncher PRIVATE -Wall -Wextra -Wpedantic)
+target_link_options(SudekiMP.BetaLauncher PRIVATE -municode -static-libgcc)
+target_link_libraries(SudekiMP.BetaLauncher PRIVATE ole32 shell32 urlmon winmm)
+set_target_properties(SudekiMP.BetaLauncher PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

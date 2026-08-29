@@ -52,6 +52,7 @@ jobs:
           $stage = Join-Path $env:GITHUB_WORKSPACE 'package-stage\SudekiMP'
           $files = @(
             (Join-Path $bin 'SudekiMP.Launcher.exe'),
+            (Join-Path $bin 'SudekiMP.BetaLauncher.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
             (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'),
@@ -63,12 +64,15 @@ jobs:
           }
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.BetaLauncher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'), (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\SudekiMP-Beta-Launcher.ps1') -Destination $stage
           @'
           @echo off
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0SudekiMP-Beta-Launcher.ps1"
-          if errorlevel 1 pause
+          "%~dp0SudekiMP.BetaLauncher.exe"
+          if errorlevel 1 (
+            echo SudekiMP Beta Launcher could not start.
+            pause
+          )
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force

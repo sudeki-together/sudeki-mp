@@ -34,6 +34,7 @@ SudekiMP currently supports only GOG offline build 50303954381148403.
 
 $Artifacts = @(
     'SudekiMP.Launcher.exe',
+    'SudekiMP.BetaLauncher.exe',
     'SudekiMP.dll',
     'SudekiMP.ini'
 )
@@ -50,10 +51,17 @@ foreach ($Artifact in $Artifacts) {
         -Destination (Join-Path $InstallDirectory $Artifact) -Force
 }
 
+$UpdateHelper = Join-Path $PSScriptRoot '..\packaging\windows-beta\SudekiMP-Beta-Launcher.ps1'
+if (-not (Test-Path -LiteralPath $UpdateHelper -PathType Leaf)) {
+    throw "Missing Windows beta update helper '$UpdateHelper'."
+}
+Copy-Item -LiteralPath $UpdateHelper `
+    -Destination (Join-Path $InstallDirectory 'SudekiMP-Beta-Launcher.ps1') -Force
+
 $LaunchScript = Join-Path $InstallDirectory 'Launch SudekiMP.cmd'
 $LaunchContents = @'
 @echo off
-"%~dp0SudekiMP.Launcher.exe" "%~dp0..\SUDEKI.exe" "%~dp0SudekiMP.dll"
+"%~dp0SudekiMP.BetaLauncher.exe"
 if errorlevel 1 pause
 '@
 Set-Content -LiteralPath $LaunchScript -Value $LaunchContents -Encoding Ascii
@@ -63,6 +71,5 @@ Write-Host 'SUDEKI.exe and the game data were not modified.'
 Write-Host "Launch with: $LaunchScript"
 
 if ($Launch) {
-    & (Join-Path $InstallDirectory 'SudekiMP.Launcher.exe') `
-        $GameExecutable (Join-Path $InstallDirectory 'SudekiMP.dll')
+    & (Join-Path $InstallDirectory 'SudekiMP.BetaLauncher.exe')
 }

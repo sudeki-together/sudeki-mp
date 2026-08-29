@@ -1,0 +1,3 @@
+# SudekiMP launcher music catalog
+# The launcher downloads this catalog only after the user presses Play music.
+track=Map Inversion.mp3
