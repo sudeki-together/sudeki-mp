@@ -17,8 +17,8 @@ legitimate user-supplied copy is required.
 ## Latest Windows beta package
 
 The latest successful Windows build is available as the
-[`SudekiMP Windows beta package](https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta/ci-158-20ff04e),
-published from [Windows CI run #158](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/158).
+[`SudekiMP Windows beta package](https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta/ci-159-a625a04),
+published from [Windows CI run #159](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/159).
 It contains a ready-to-copy `SudekiMP` folder with a standalone PE32 beta
 launcher, raw loader, DLL, safe default configuration, launch script, and
 Windows guide—not Sudeki or any game assets. The beta launcher supports pasted
