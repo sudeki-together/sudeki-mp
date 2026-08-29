@@ -23,6 +23,7 @@ $PackageArchiveName = 'SudekiMP-Windows-Beta.zip'
 $PackageDirectory = $PSScriptRoot
 $SettingsDirectory = Join-Path $env:LOCALAPPDATA 'SudekiMP'
 $SettingsPath = Join-Path $SettingsDirectory 'windows-beta-launcher.json'
+$UpdateLogPath = Join-Path $SettingsDirectory 'windows-beta-updater.log'
 $script:GameDirectory = $null
 $script:statusLabel = $null
 
@@ -32,6 +33,17 @@ function Show-Problem([string]$Message) {
         'SudekiMP Windows Beta',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error)
+}
+
+function Write-UpdateLog([string]$Message) {
+    try {
+        New-Item -ItemType Directory -Path $SettingsDirectory -Force | Out-Null
+        Add-Content -LiteralPath $UpdateLogPath -Encoding UTF8 -Value (
+            ('[{0:O}] {1}' -f (Get-Date), $Message))
+    }
+    catch {
+        # Logging must never turn an update failure into an unrecoverable state.
+    }
 }
 
 function Get-SettingsGameDirectory {
@@ -135,7 +147,8 @@ function Get-LatestPackage {
 function Update-LocalPackage([switch]$SkipConfirmation) {
     if (Get-Process -Name 'SUDEKI' -ErrorAction SilentlyContinue) {
         Show-Problem 'Close Sudeki before updating SudekiMP.'
-        return
+        Write-UpdateLog 'Update rejected because SUDEKI.exe is still running.'
+        return $false
     }
     if (-not $SkipConfirmation) {
         $confirmation = [System.Windows.Forms.MessageBox]::Show(
@@ -146,14 +159,16 @@ function Update-LocalPackage([switch]$SkipConfirmation) {
             [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
         if ($confirmation -ne [System.Windows.Forms.DialogResult]::Yes) {
             Set-Status 'Update cancelled. No files changed.' $false
-            return
+            Write-UpdateLog 'Update cancelled by the user.'
+            return $false
         }
     }
 
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath())
-        ('SudekiMP-update-' + [guid]::NewGuid().ToString('N'))
+    $tempRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) `
+        -ChildPath ('SudekiMP-update-' + [guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+        Write-UpdateLog "Starting update from $PackageDirectory."
         Set-Status 'Checking for the latest Windows beta…' $false
         $latest = Get-LatestPackage
         $archive = Join-Path $tempRoot $PackageArchiveName
@@ -176,8 +191,8 @@ function Update-LocalPackage([switch]$SkipConfirmation) {
             }
         }
 
-        $backup = Join-Path $PackageDirectory
-            ('SudekiMP-Backups\\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $backup = Join-Path -Path $PackageDirectory `
+            -ChildPath ('SudekiMP-Backups\\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
         New-Item -ItemType Directory -Path $backup -Force | Out-Null
         foreach ($name in $required) {
             $destination = Join-Path $PackageDirectory $name
@@ -194,10 +209,15 @@ function Update-LocalPackage([switch]$SkipConfirmation) {
             Copy-Item -LiteralPath (Join-Path $source $name) -Destination (Join-Path $PackageDirectory $name) -Force
         }
         Set-Status "Updated to $($latest.version). Close and reopen this launcher before playing." $true
+        Write-UpdateLog "Update succeeded: $($latest.version)."
+        return $true
     }
     catch {
-        Show-Problem "Update failed. Existing game and save files were not changed.`r`n`r`n$($_.Exception.Message)"
+        $failure = $_.Exception.Message
+        Write-UpdateLog "Update failed: $failure"
+        Show-Problem "Update failed. Existing game and save files were not changed.`r`n`r`n$failure`r`n`r`nDetails: $UpdateLogPath"
         Set-Status 'Update failed; see the message above.' $false
+        return $false
     }
     finally {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -222,10 +242,11 @@ if ($UpdateOnly) {
     if ($WaitForPid -ne 0) {
         try { Wait-Process -Id $WaitForPid -ErrorAction Stop } catch { }
     }
-    Update-LocalPackage -SkipConfirmation
-    $nativeLauncher = Join-Path $PackageDirectory 'SudekiMP.BetaLauncher.exe'
-    if (Test-Path -LiteralPath $nativeLauncher -PathType Leaf) {
-        Start-Process -FilePath $nativeLauncher -WorkingDirectory $PackageDirectory
+    if (Update-LocalPackage -SkipConfirmation) {
+        $nativeLauncher = Join-Path $PackageDirectory 'SudekiMP.BetaLauncher.exe'
+        if (Test-Path -LiteralPath $nativeLauncher -PathType Leaf) {
+            Start-Process -FilePath $nativeLauncher -WorkingDirectory $PackageDirectory
+        }
     }
     exit
 }
