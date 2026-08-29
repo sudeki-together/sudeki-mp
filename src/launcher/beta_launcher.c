@@ -576,6 +576,9 @@ static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
     COLORREF fill_color = disabled ? RGB(43, 52, 62) :
                                      button_fill_color(draw->CtlID, selected);
 
+    /* RoundRect does not paint its corners. Clear the full owner-draw area
+       first so the system button background cannot peek through there. */
+    FillRect(draw->hDC, &content, app_background_brush);
     fill = CreateSolidBrush(fill_color);
     outline = CreatePen(PS_SOLID,
                         1,
@@ -636,7 +639,9 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
             if (GetDlgCtrlID(control) == IDC_STATUS) {
                 return (LRESULT)panel_background_brush;
             }
-            return (LRESULT)app_background_brush;
+            /* The window paints the shared background; returning an opaque
+               brush here created the dark text-sized bars behind each label. */
+            return (LRESULT)GetStockObject(HOLLOW_BRUSH);
         }
         case WM_CTLCOLOREDIT:
             SetTextColor((HDC)wparam, SUDEKIMP_COLOR_TEXT);
@@ -978,8 +983,8 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"STATIC",
-                            L"Music is fetched only when you press Play, cached under LocalAppData, and played inside this launcher.",
-                            WS_CHILD | WS_VISIBLE,
+                            L"Music downloads only when you press Play; it is cached locally and played inside this launcher.",
+                            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
                             28,
                             382,
                             680,
