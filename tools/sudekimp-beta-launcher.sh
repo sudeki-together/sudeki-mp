@@ -77,7 +77,7 @@ mode_summary() {
     case "$1" in
         --party-lifecycle-trace)
             printf '%s\n' \
-                'The supported two-player local co-op profile. Player 1 uses keyboard/mouse; Player 2 uses the selected Linux controller. Campaign transitions remain host-led.'
+                'The supported two-player local co-op profile. Player 1 uses keyboard/mouse; Player 2 uses the selected Linux controller. Campaign transitions remain host-led, and the Talos party restoration is enabled.'
             ;;
         --safe)
             printf '%s\n' \

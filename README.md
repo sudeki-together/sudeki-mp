@@ -164,8 +164,9 @@ consent.
 ### Latest confirmed encounter: Talos
 
 The natural final-battle transition normally collapses the party to Tal. The
-current research mode restores Ailish, Buki, and Elco through Sudeki's native
-party lifecycle and returns them to native AI control.
+local co-op lifecycle profile restores Ailish, Buki, and Elco through Sudeki's
+native party lifecycle, preserving human-controlled co-op seats and returning
+any remaining companions to native AI control.
 
 The companions originally attacked Talos's clones but ignored the real boss.
 Static and live analysis found the exact cause: the shared AI candidate

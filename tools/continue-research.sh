@@ -244,6 +244,7 @@ case "${mode}" in
                 -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
                 -e 's/^EnableSecondPlayerControllerCameraPrototype=false$/EnableSecondPlayerControllerCameraPrototype=true/' \
                 -e 's/^EnableNativeSecondPlayerCameraCollisionPrototype=.*/EnableNativeSecondPlayerCameraCollisionPrototype=true/' \
+                -e 's/^EnableTalosPartyPrototype=false$/EnableTalosPartyPrototype=true/' \
                 -e 's/^EnablePartyAtomicTransitionsPrototype=false$/EnablePartyAtomicTransitionsPrototype=true/' \
                 -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
                 "${generated_config}"
