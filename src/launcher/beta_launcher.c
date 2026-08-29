@@ -372,6 +372,225 @@ static void browse_for_game_directory(HWND owner) {
     CoTaskMemFree(item);
 }
 
+static BOOL create_directory_if_missing(const WCHAR *path) {
+    const DWORD attributes = GetFileAttributesW(path);
+
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+    return CreateDirectoryW(path, NULL) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static BOOL remove_directory_tree(const WCHAR *path) {
+    WCHAR pattern[MAX_PATH];
+    WIN32_FIND_DATAW entry;
+    HANDLE search;
+
+    if (!join_path(pattern, MAX_PATH, path, L"*")) {
+        return FALSE;
+    }
+    search = FindFirstFileW(pattern, &entry);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            WCHAR child[MAX_PATH];
+            if (lstrcmpW(entry.cFileName, L".") == 0 ||
+                lstrcmpW(entry.cFileName, L"..") == 0) {
+                continue;
+            }
+            if (!join_path(child, MAX_PATH, path, entry.cFileName)) {
+                FindClose(search);
+                return FALSE;
+            }
+            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                if (!remove_directory_tree(child)) {
+                    FindClose(search);
+                    return FALSE;
+                }
+            } else if (DeleteFileW(child) == 0) {
+                FindClose(search);
+                return FALSE;
+            }
+        } while (FindNextFileW(search, &entry));
+        FindClose(search);
+    }
+    return RemoveDirectoryW(path) != 0 || GetLastError() == ERROR_FILE_NOT_FOUND;
+}
+
+static BOOL copy_directory_tree(const WCHAR *source, const WCHAR *destination) {
+    WCHAR pattern[MAX_PATH];
+    WIN32_FIND_DATAW entry;
+    HANDLE search;
+
+    if (!create_directory_if_missing(destination) ||
+        !join_path(pattern, MAX_PATH, source, L"*")) {
+        return FALSE;
+    }
+    search = FindFirstFileW(pattern, &entry);
+    if (search == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    do {
+        WCHAR source_child[MAX_PATH];
+        WCHAR destination_child[MAX_PATH];
+        if (lstrcmpW(entry.cFileName, L".") == 0 ||
+            lstrcmpW(entry.cFileName, L"..") == 0) {
+            continue;
+        }
+        if (!join_path(source_child, MAX_PATH, source, entry.cFileName) ||
+            !join_path(destination_child, MAX_PATH, destination, entry.cFileName)) {
+            FindClose(search);
+            return FALSE;
+        }
+        if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if (!copy_directory_tree(source_child, destination_child)) {
+                FindClose(search);
+                return FALSE;
+            }
+        } else if (CopyFileW(source_child, destination_child, TRUE) == 0) {
+            FindClose(search);
+            return FALSE;
+        }
+    } while (FindNextFileW(search, &entry));
+    FindClose(search);
+    return TRUE;
+}
+
+static BOOL get_sudeki_save_directory(WCHAR save_directory[MAX_PATH],
+                                      WCHAR sudeki_directory[MAX_PATH]) {
+    WCHAR app_data[MAX_PATH];
+
+    if (FAILED(SHGetFolderPathW(NULL,
+                                CSIDL_APPDATA | CSIDL_FLAG_CREATE,
+                                NULL,
+                                SHGFP_TYPE_CURRENT,
+                                app_data)) ||
+        !join_path(sudeki_directory, MAX_PATH, app_data, L"Sudeki") ||
+        !create_directory_if_missing(sudeki_directory) ||
+        !join_path(save_directory, MAX_PATH, sudeki_directory, L"Save")) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL install_coop_save_fixtures(HWND owner) {
+    WCHAR fixture_root[MAX_PATH];
+    WCHAR fixture_marker[MAX_PATH];
+    WCHAR save_directory[MAX_PATH];
+    WCHAR sudeki_directory[MAX_PATH];
+    WCHAR backup_root[MAX_PATH];
+    WCHAR backup_directory[MAX_PATH];
+    SYSTEMTIME now;
+    DWORD save_attributes;
+    BOOL moved_existing_save = FALSE;
+    INT_PTR confirmation;
+
+    if (!join_path(fixture_root,
+                   MAX_PATH,
+                   package_directory,
+                   L"CoopSaveFixtures") ||
+        !join_path(fixture_marker,
+                   MAX_PATH,
+                   fixture_root,
+                   L"SAVESLOT0000\\sudeki.fish") ||
+        !file_exists(fixture_marker)) {
+        show_error(owner,
+                   L"This beta package does not contain the co-op save fixtures. "
+                   L"Download the current Windows beta package.");
+        return FALSE;
+    }
+    if (!get_sudeki_save_directory(save_directory, sudeki_directory)) {
+        show_error(owner, L"Windows could not locate the Sudeki save directory.");
+        return FALSE;
+    }
+    confirmation = MessageBoxW(
+        owner,
+        L"WARNING: This will move your current Sudeki saves out of the live save "
+        L"location and install the SudekiMP co-op test saves.\n\n"
+        L"Your old saves are moved to %APPDATA%\\Sudeki\\SudekiMP-Backups first. "
+        L"They are not deleted, but the game will no longer see them until you "
+        L"restore that folder manually.\n\nContinue?",
+        L"Install co-op save fixtures",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (confirmation != IDYES) {
+        set_status(L"Co-op save installation cancelled. Existing saves were untouched.");
+        return FALSE;
+    }
+
+    save_attributes = GetFileAttributesW(save_directory);
+    if (save_attributes != INVALID_FILE_ATTRIBUTES &&
+        (save_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        show_error(owner, L"The Sudeki save path is a file, not a folder. No files changed.");
+        return FALSE;
+    }
+    if (!join_path(backup_root, MAX_PATH, sudeki_directory, L"SudekiMP-Backups") ||
+        !create_directory_if_missing(backup_root)) {
+        show_error(owner, L"Windows could not create the SudekiMP save-backup folder.");
+        return FALSE;
+    }
+    GetLocalTime(&now);
+    if (FAILED(StringCchPrintfW(backup_directory,
+                                MAX_PATH,
+                                L"%s\\Save-%04u%02u%02u-%02u%02u%02u",
+                                backup_root,
+                                (unsigned int)now.wYear,
+                                (unsigned int)now.wMonth,
+                                (unsigned int)now.wDay,
+                                (unsigned int)now.wHour,
+                                (unsigned int)now.wMinute,
+                                (unsigned int)now.wSecond))) {
+        show_error(owner, L"The save-backup path is too long. No files changed.");
+        return FALSE;
+    }
+    if (save_attributes != INVALID_FILE_ATTRIBUTES) {
+        if (MoveFileExW(save_directory, backup_directory, MOVEFILE_WRITE_THROUGH) == 0) {
+            show_error(owner, L"Windows could not archive the existing Sudeki saves. No files changed.");
+            return FALSE;
+        }
+        moved_existing_save = TRUE;
+    }
+    if (!create_directory_if_missing(save_directory) ||
+        !copy_directory_tree(fixture_root, save_directory)) {
+        (void)remove_directory_tree(save_directory);
+        if (moved_existing_save) {
+            (void)MoveFileExW(backup_directory, save_directory, MOVEFILE_WRITE_THROUGH);
+        }
+        show_error(owner,
+                   L"Installing co-op saves failed. SudekiMP attempted to restore your old saves; "
+                   L"check %APPDATA%\\Sudeki\\SudekiMP-Backups before launching the game.");
+        return FALSE;
+    }
+    set_status(moved_existing_save ?
+        L"Co-op saves installed. Your old saves are archived under %APPDATA%\\Sudeki\\SudekiMP-Backups." :
+        L"Co-op saves installed. No existing Sudeki save folder needed archiving.");
+    return TRUE;
+}
+
+static void test_xinput_controller(HWND owner) {
+    WCHAR probe_path[MAX_PATH];
+    WCHAR parameters[MAX_PATH + 32u];
+
+    if (!join_path(probe_path,
+                   MAX_PATH,
+                   package_directory,
+                   L"SudekiMP.XInputProbe.exe") ||
+        !file_exists(probe_path) ||
+        FAILED(StringCchPrintfW(parameters,
+                                sizeof(parameters) / sizeof(parameters[0]),
+                                L"/k \"\"%s\" & echo. & pause\"",
+                                probe_path))) {
+        show_error(owner, L"This beta package does not include the Windows XInput diagnostic.");
+        return;
+    }
+    if ((INT_PTR)ShellExecuteW(owner,
+                               L"open",
+                               L"cmd.exe",
+                               parameters,
+                               package_directory,
+                               SW_SHOWNORMAL) <= 32) {
+        show_error(owner, L"Windows could not start the XInput diagnostic.");
+    }
+}
+
 static void close_music(void) {
     mciSendStringW(L"close SudekiMPMusic", NULL, 0u, NULL);
 }
@@ -617,9 +836,11 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
         case WM_CTLCOLORSTATIC: {
             HDC control_dc = (HDC)wparam;
             const HWND control = (HWND)lparam;
+            const int control_id = GetDlgCtrlID(control);
             SetTextColor(control_dc,
-                         GetDlgCtrlID(control) == IDC_STATUS ? SUDEKIMP_COLOR_MUTED :
-                                                                SUDEKIMP_COLOR_TEXT);
+                         control_id == IDC_STATUS ? SUDEKIMP_COLOR_MUTED :
+                         control_id == IDC_SAVE_WARNING ? RGB(244, 105, 105) :
+                                                           SUDEKIMP_COLOR_TEXT);
             SetBkMode(control_dc, TRANSPARENT);
             if (GetDlgCtrlID(control) == IDC_STATUS) {
                 return (LRESULT)panel_background_brush;
@@ -662,6 +883,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     return 0;
                 case IDC_UPDATE:
                     open_windows_beta_download(window);
+                    return 0;
+                case IDC_INSTALL_COOP_SAVES:
+                    (void)install_coop_save_fixtures(window);
+                    return 0;
+                case IDC_TEST_XINPUT:
+                    test_xinput_controller(window);
                     return 0;
                 case IDC_PLAY_MUSIC:
                     start_music_download(window);
@@ -794,7 +1021,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                                        CW_USEDEFAULT,
                                        CW_USEDEFAULT,
                                        760,
-                                       450,
+                                       550,
                                        NULL,
                                        NULL,
                                        instance,
@@ -937,10 +1164,47 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
+                            L"Install co-op save fixtures…",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            28,
+                            314,
+                            230,
+                            34,
+                            launcher_window,
+                            (HMENU)(INT_PTR)IDC_INSTALL_COOP_SAVES,
+                            instance,
+                            NULL);
+    apply_default_font(control);
+    control = CreateWindowW(L"BUTTON",
+                            L"Test XInput controller…",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            270,
+                            314,
+                            210,
+                            34,
+                            launcher_window,
+                            (HMENU)(INT_PTR)IDC_TEST_XINPUT,
+                            instance,
+                            NULL);
+    apply_default_font(control);
+    control = CreateWindowW(L"STATIC",
+                            L"WARNING: installing co-op fixtures archives your current %APPDATA%\\Sudeki\\Save folder first. "
+                            L"It then creates a clean save folder for the beta fixtures.",
+                            WS_CHILD | WS_VISIBLE | SS_LEFT,
+                            28,
+                            362,
+                            680,
+                            42,
+                            launcher_window,
+                            (HMENU)(INT_PTR)IDC_SAVE_WARNING,
+                            instance,
+                            NULL);
+    apply_default_font(control);
+    control = CreateWindowW(L"BUTTON",
                             L"Play project music",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             28,
-                            316,
+                            422,
                             190,
                             34,
                             launcher_window,
@@ -952,7 +1216,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Stop music",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             230,
-                            316,
+                            422,
                             130,
                             34,
                             launcher_window,
@@ -964,7 +1228,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Developer: wander",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             530,
-                            316,
+                            422,
                             192,
                             34,
                             launcher_window,
@@ -976,7 +1240,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Music downloads only when you press Play; it is cached locally and played inside this launcher.",
                             WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
                             28,
-                            382,
+                            484,
                             680,
                             28,
                             launcher_window,

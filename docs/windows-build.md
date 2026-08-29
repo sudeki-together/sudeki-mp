@@ -11,8 +11,8 @@ focused configuration and live acceptance before ordinary players should use
 them for a complete playthrough.
 
 The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
-`Launch SudekiMP.cmd`, `SudekiMP.BetaLauncher.exe`, its opt-in PowerShell
-update helper, and `README-Windows.txt`. Copy that folder beside the supported
+`Launch SudekiMP.cmd`, `SudekiMP.BetaLauncher.exe`, `SudekiMP.XInputProbe.exe`,
+co-op save fixtures, and `README-Windows.txt`. Copy that folder beside the supported
 `SUDEKI.exe`, then run the `.cmd` file. The standalone launcher accepts either
 a pasted game-folder path or Browse selection, remembers it under
 `%LOCALAPPDATA%\SudekiMP`, verifies the exact build, and launches the raw
@@ -24,11 +24,9 @@ developer link to [wander](https://git.unfilteredrealm.com/wander), and can
 play the public project music inside the launcher. Music is fetched only after
 the user presses Play, then cached locally; it is not embedded in the package.
 
-The beta launcher’s update button is explicitly opt-in and warns before it
-downloads an unsigned package over HTTPS. Manual package downloads remain the
-recommended route. An accepted update preserves `SudekiMP.ini`, makes a local
-backup of replaced mod files, and never changes the game executable, game
-assets, or saves.
+The beta launcher's **Get latest beta** button opens the public package page in
+a browser. It does not download, run PowerShell, or replace local files. Manual
+download and extraction remain the supported update process.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits
@@ -113,7 +111,8 @@ build/windows-mingw32/bin/SudekiMP.ini
 ```
 
 The DLL is linked with the GCC runtime statically. The installed beta contains
-the native front end, raw loader, DLL, configuration, and update helper; it
+the native front end, raw loader, DLL, configuration, XInput diagnostic, and
+optional co-op save fixtures; it
 does not require an extra MSYS2 runtime beside the game.
 
 ## 4. Install beside a working game
@@ -131,8 +130,10 @@ The installer performs the executable hash check first. It then creates:
 C:\GOG Games\Sudeki\SudekiMP\
   SudekiMP.Launcher.exe
   SudekiMP.BetaLauncher.exe
+  SudekiMP.XInputProbe.exe
   SudekiMP.dll
   SudekiMP.ini
+  CoopSaveFixtures\
   Launch SudekiMP.cmd
 ```
 
@@ -180,6 +181,22 @@ That helper exists only because the research controller was not exposed to
 Wine. Native Windows controller routing still needs its own integration and
 acceptance pass; building successfully should not be mistaken for a complete
 Windows two-player input release.
+
+### Co-op fixture save isolation
+
+The standalone beta launcher has an **Install co-op save fixtures…** action.
+It is deliberately separate from game launch. After an explicit warning and
+confirmation, it moves the live `%APPDATA%\Sudeki\Save` directory to a
+timestamped `%APPDATA%\Sudeki\SudekiMP-Backups\Save-*` archive, creates a new
+empty `Save` directory, and copies the packaged beta fixtures there. If fixture
+copying fails, it removes the incomplete new directory and attempts to restore
+the moved archive. It never deletes an existing save archive or writes game
+installation files.
+
+The **Test XInput controller…** control starts only `SudekiMP.XInputProbe.exe`.
+It reports whether Windows exposes an XInput controller and its slot; it makes
+no game/input mutation. Use its output as the first prerequisite for the
+separate native Windows Player 2 input acceptance pass.
 
 If initialization is rejected, the launcher terminates the still-suspended
 child rather than running a partially hooked game. If the game stalls after a

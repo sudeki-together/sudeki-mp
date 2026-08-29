@@ -35,6 +35,7 @@ SudekiMP currently supports only GOG offline build 50303954381148403.
 $Artifacts = @(
     'SudekiMP.Launcher.exe',
     'SudekiMP.BetaLauncher.exe',
+    'SudekiMP.XInputProbe.exe',
     'SudekiMP.dll',
     'SudekiMP.ini'
 )
@@ -51,12 +52,15 @@ foreach ($Artifact in $Artifacts) {
         -Destination (Join-Path $InstallDirectory $Artifact) -Force
 }
 
-$UpdateHelper = Join-Path $PSScriptRoot '..\packaging\windows-beta\SudekiMP-Beta-Launcher.ps1'
-if (-not (Test-Path -LiteralPath $UpdateHelper -PathType Leaf)) {
-    throw "Missing Windows beta update helper '$UpdateHelper'."
+$FixturesSource = Join-Path $PSScriptRoot '..\testdata\sudeki-saves'
+$FixturesDestination = Join-Path $InstallDirectory 'CoopSaveFixtures'
+if (-not (Test-Path -LiteralPath $FixturesSource -PathType Container)) {
+    throw "Missing co-op save fixtures '$FixturesSource'."
 }
-Copy-Item -LiteralPath $UpdateHelper `
-    -Destination (Join-Path $InstallDirectory 'SudekiMP-Beta-Launcher.ps1') -Force
+Remove-Item -LiteralPath $FixturesDestination -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $FixturesDestination -Force | Out-Null
+Get-ChildItem -LiteralPath $FixturesSource -Directory -Filter 'SAVESLOT*' |
+    Copy-Item -Destination $FixturesDestination -Recurse
 
 $LaunchScript = Join-Path $InstallDirectory 'Launch SudekiMP.cmd'
 $LaunchContents = @'
@@ -68,6 +72,7 @@ Set-Content -LiteralPath $LaunchScript -Value $LaunchContents -Encoding Ascii
 
 Write-Host "Installed SudekiMP development build to: $InstallDirectory"
 Write-Host 'SUDEKI.exe and the game data were not modified.'
+Write-Host 'The launcher can archive existing saves and install co-op fixtures only after an explicit confirmation.'
 Write-Host "Launch with: $LaunchScript"
 
 if ($Launch) {

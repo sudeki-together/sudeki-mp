@@ -53,6 +53,7 @@ jobs:
           $files = @(
             (Join-Path $bin 'SudekiMP.Launcher.exe'),
             (Join-Path $bin 'SudekiMP.BetaLauncher.exe'),
+            (Join-Path $bin 'SudekiMP.XInputProbe.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
             (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt')
@@ -63,8 +64,12 @@ jobs:
           }
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.BetaLauncher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.BetaLauncher.exe'), (Join-Path $bin 'SudekiMP.XInputProbe.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
+          $fixtures = Join-Path $env:GITHUB_WORKSPACE 'testdata\sudeki-saves'
+          $fixtureDestination = Join-Path $stage 'CoopSaveFixtures'
+          New-Item -ItemType Directory -Path $fixtureDestination -Force | Out-Null
+          Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $fixtures -Directory -Filter 'SAVESLOT*' | ForEach-Object { $_.FullName }) -Destination $fixtureDestination -Recurse
           @'
           @echo off
           "%~dp0SudekiMP.BetaLauncher.exe"

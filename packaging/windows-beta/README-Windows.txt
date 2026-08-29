@@ -27,6 +27,24 @@ The title roster experiment is intentionally off until its Windows native-page
 path has passed live acceptance. This package therefore does not yet show the
 local co-op character-lock screen when you choose New Game.
 
+CO-OP SAVE FIXTURES
+-------------------
+
+The beta launcher includes **Install co-op save fixtures…**. It is an explicit,
+recoverable test-data action: it moves `%APPDATA%\Sudeki\Save` to a timestamped
+folder under `%APPDATA%\Sudeki\SudekiMP-Backups`, creates a fresh Save folder,
+then copies the included co-op fixtures into that fresh folder. It never deletes
+the archived folder or changes files inside the game installation. Cancel leaves
+your saves untouched. Restore an old save set by closing Sudeki, removing the
+fresh `%APPDATA%\Sudeki\Save` folder, and renaming the desired archived `Save-*`
+folder back to `Save`.
+
+The **Test XInput controller…** button opens a console-only diagnostic. With an
+XInput-compatible controller connected, it reports the detected Windows slot
+and live button/stick values. It does not start Sudeki or change controller
+settings. Send that result before enabling Windows Player 2 input; native
+Windows P2 routing is still an acceptance-stage feature.
+
 If the launcher reports an error, keep the command window open and include
 the text from it plus SudekiMP.log (beside SUDEKI.exe) in a bug report.
 
