@@ -27,6 +27,21 @@ static HWND status_label;
 static WCHAR package_directory[MAX_PATH];
 static WCHAR music_cache_path[MAX_PATH];
 static LONG music_download_running;
+static HBRUSH app_background_brush;
+static HBRUSH panel_background_brush;
+static HBRUSH input_background_brush;
+static HFONT body_font;
+static HFONT title_font;
+static HFONT subtitle_font;
+
+#define SUDEKIMP_COLOR_BACKGROUND RGB(12, 20, 31)
+#define SUDEKIMP_COLOR_PANEL RGB(23, 34, 49)
+#define SUDEKIMP_COLOR_INPUT RGB(17, 27, 40)
+#define SUDEKIMP_COLOR_TEXT RGB(232, 240, 248)
+#define SUDEKIMP_COLOR_MUTED RGB(159, 181, 202)
+#define SUDEKIMP_COLOR_CYAN RGB(54, 193, 218)
+#define SUDEKIMP_COLOR_BLUE RGB(40, 100, 168)
+#define SUDEKIMP_COLOR_BUTTON RGB(38, 55, 75)
 
 static void set_status(const WCHAR *text) {
     if (status_label != NULL) {
@@ -527,8 +542,74 @@ static void begin_optional_update(HWND owner) {
 static void apply_default_font(HWND control) {
     SendMessageW(control,
                  WM_SETFONT,
-                 (WPARAM)GetStockObject(DEFAULT_GUI_FONT),
+                 (WPARAM)(body_font != NULL ? body_font : GetStockObject(DEFAULT_GUI_FONT)),
                  TRUE);
+}
+
+static void apply_font(HWND control, HFONT font) {
+    SendMessageW(control,
+                 WM_SETFONT,
+                 (WPARAM)(font != NULL ? font : GetStockObject(DEFAULT_GUI_FONT)),
+                 TRUE);
+}
+
+static COLORREF button_fill_color(unsigned int identifier, BOOL selected) {
+    if (identifier == IDC_LAUNCH) {
+        return selected ? RGB(20, 132, 160) : SUDEKIMP_COLOR_CYAN;
+    }
+    if (identifier == IDC_PLAY_MUSIC) {
+        return selected ? RGB(42, 105, 144) : SUDEKIMP_COLOR_BLUE;
+    }
+    return selected ? RGB(53, 76, 101) : SUDEKIMP_COLOR_BUTTON;
+}
+
+static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
+    WCHAR text[128];
+    RECT content = draw->rcItem;
+    HBRUSH fill;
+    HPEN outline;
+    HGDIOBJ old_pen;
+    HGDIOBJ old_brush;
+    HGDIOBJ old_font;
+    BOOL selected = (draw->itemState & ODS_SELECTED) != 0u;
+    BOOL disabled = (draw->itemState & ODS_DISABLED) != 0u;
+    COLORREF fill_color = disabled ? RGB(43, 52, 62) :
+                                     button_fill_color(draw->CtlID, selected);
+
+    fill = CreateSolidBrush(fill_color);
+    outline = CreatePen(PS_SOLID,
+                        1,
+                        (draw->CtlID == IDC_LAUNCH) ? RGB(145, 235, 245) :
+                                                        RGB(77, 105, 133));
+    old_brush = SelectObject(draw->hDC, fill);
+    old_pen = SelectObject(draw->hDC, outline);
+    RoundRect(draw->hDC,
+              content.left,
+              content.top,
+              content.right,
+              content.bottom,
+              8,
+              8);
+    SelectObject(draw->hDC, old_brush);
+    SelectObject(draw->hDC, old_pen);
+    DeleteObject(fill);
+    DeleteObject(outline);
+
+    GetWindowTextW(draw->hwndItem, text, (int)(sizeof(text) / sizeof(text[0])));
+    SetBkMode(draw->hDC, TRANSPARENT);
+    SetTextColor(draw->hDC, disabled ? RGB(125, 140, 155) : SUDEKIMP_COLOR_TEXT);
+    old_font = SelectObject(draw->hDC,
+                            body_font != NULL ? body_font : GetStockObject(DEFAULT_GUI_FONT));
+    DrawTextW(draw->hDC,
+              text,
+              -1,
+              &content,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(draw->hDC, old_font);
+    if ((draw->itemState & ODS_FOCUS) != 0u) {
+        InflateRect(&content, -3, -3);
+        DrawFocusRect(draw->hDC, &content);
+    }
 }
 
 static LRESULT CALLBACK launcher_window_proc(HWND window,
@@ -536,6 +617,43 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                                               WPARAM wparam,
                                               LPARAM lparam) {
     switch (message) {
+        case WM_DRAWITEM:
+            if (lparam != 0) {
+                const DRAWITEMSTRUCT *draw = (const DRAWITEMSTRUCT *)lparam;
+                if (draw->CtlType == ODT_BUTTON) {
+                    draw_owner_button(draw);
+                    return TRUE;
+                }
+            }
+            break;
+        case WM_CTLCOLORSTATIC: {
+            HDC control_dc = (HDC)wparam;
+            const HWND control = (HWND)lparam;
+            SetTextColor(control_dc,
+                         GetDlgCtrlID(control) == IDC_STATUS ? SUDEKIMP_COLOR_MUTED :
+                                                                SUDEKIMP_COLOR_TEXT);
+            SetBkMode(control_dc, TRANSPARENT);
+            if (GetDlgCtrlID(control) == IDC_STATUS) {
+                return (LRESULT)panel_background_brush;
+            }
+            return (LRESULT)app_background_brush;
+        }
+        case WM_CTLCOLOREDIT:
+            SetTextColor((HDC)wparam, SUDEKIMP_COLOR_TEXT);
+            SetBkColor((HDC)wparam, SUDEKIMP_COLOR_INPUT);
+            return (LRESULT)input_background_brush;
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
+            HDC paint_dc = BeginPaint(window, &paint);
+            RECT header = { 16, 14, 744, 102 };
+            RECT status = { 24, 180, 704, 234 };
+            HBRUSH header_brush = CreateSolidBrush(SUDEKIMP_COLOR_PANEL);
+            FillRect(paint_dc, &header, header_brush);
+            FillRect(paint_dc, &status, panel_background_brush);
+            DeleteObject(header_brush);
+            EndPaint(window, &paint);
+            return 0;
+        }
         case WM_COMMAND:
             switch (LOWORD(wparam)) {
                 case IDC_BROWSE:
@@ -581,6 +699,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
             return 0;
         case WM_DESTROY:
             close_music();
+            DeleteObject(app_background_brush);
+            DeleteObject(panel_background_brush);
+            DeleteObject(input_background_brush);
+            DeleteObject(body_font);
+            DeleteObject(title_font);
+            DeleteObject(subtitle_font);
             PostQuitMessage(0);
             return 0;
         default:
@@ -609,11 +733,56 @@ int WINAPI wWinMain(HINSTANCE instance,
                     MB_OK | MB_ICONERROR);
         return 1;
     }
+    app_background_brush = CreateSolidBrush(SUDEKIMP_COLOR_BACKGROUND);
+    panel_background_brush = CreateSolidBrush(SUDEKIMP_COLOR_PANEL);
+    input_background_brush = CreateSolidBrush(SUDEKIMP_COLOR_INPUT);
+    body_font = CreateFontW(-15,
+                            0,
+                            0,
+                            0,
+                            FW_SEMIBOLD,
+                            FALSE,
+                            FALSE,
+                            FALSE,
+                            DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS,
+                            CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE,
+                            L"Segoe UI");
+    title_font = CreateFontW(-23,
+                             0,
+                             0,
+                             0,
+                             FW_BOLD,
+                             FALSE,
+                             FALSE,
+                             FALSE,
+                             DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE,
+                             L"Segoe UI");
+    subtitle_font = CreateFontW(-14,
+                                0,
+                                0,
+                                0,
+                                FW_NORMAL,
+                                FALSE,
+                                FALSE,
+                                FALSE,
+                                DEFAULT_CHARSET,
+                                OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE,
+                                L"Segoe UI");
     ZeroMemory(&window_class, sizeof(window_class));
     window_class.cbSize = sizeof(window_class);
     window_class.hInstance = instance;
     window_class.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    window_class.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    window_class.hbrBackground = app_background_brush;
     window_class.lpfnWndProc = launcher_window_proc;
     window_class.lpszClassName = L"SudekiMPBetaLauncher";
     window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_SUDEKIMP_BETA));
@@ -629,8 +798,8 @@ int WINAPI wWinMain(HINSTANCE instance,
                                            WS_MINIMIZEBOX,
                                        CW_USEDEFAULT,
                                        CW_USEDEFAULT,
-                                       700,
-                                       455,
+                                       760,
+                                       450,
                                        NULL,
                                        NULL,
                                        instance,
@@ -651,10 +820,10 @@ int WINAPI wWinMain(HINSTANCE instance,
     control = CreateWindowW(L"STATIC",
                             L"",
                             WS_CHILD | WS_VISIBLE | SS_ICON,
-                            22,
-                            22,
-                            72,
-                            72,
+                            30,
+                            26,
+                            64,
+                            64,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_PROJECT_ICON,
                             instance,
@@ -666,33 +835,33 @@ int WINAPI wWinMain(HINSTANCE instance,
     control = CreateWindowW(L"STATIC",
                             L"SUDEKI TOGETHER",
                             WS_CHILD | WS_VISIBLE,
-                            112,
-                            25,
-                            500,
+                            116,
+                            27,
+                            530,
                             28,
                             launcher_window,
                             NULL,
                             instance,
                             NULL);
-    apply_default_font(control);
+    apply_font(control, title_font);
     control = CreateWindowW(L"STATIC",
                             L"Windows beta launcher • validates before injection • game files stay untouched",
                             WS_CHILD | WS_VISIBLE,
-                            112,
-                            54,
-                            545,
+                            117,
+                            61,
+                            570,
                             24,
                             launcher_window,
                             NULL,
                             instance,
                             NULL);
-    apply_default_font(control);
+    apply_font(control, subtitle_font);
     control = CreateWindowW(L"STATIC",
                             L"Sudeki folder (paste the folder that contains SUDEKI.exe):",
                             WS_CHILD | WS_VISIBLE,
-                            24,
-                            118,
-                            570,
+                            28,
+                            119,
+                            620,
                             20,
                             launcher_window,
                             NULL,
@@ -703,10 +872,10 @@ int WINAPI wWinMain(HINSTANCE instance,
                                      L"EDIT",
                                      L"",
                                      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                     24,
-                                     140,
-                                     530,
-                                     26,
+                                     28,
+                                     143,
+                                     548,
+                                     30,
                                      launcher_window,
                                      (HMENU)(INT_PTR)IDC_GAME_DIRECTORY,
                                      instance,
@@ -714,11 +883,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(directory_edit);
     control = CreateWindowW(L"BUTTON",
                             L"Browse…",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            564,
-                            139,
-                            105,
-                            28,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            590,
+                            142,
+                            132,
+                            32,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_BROWSE,
                             instance,
@@ -727,10 +896,10 @@ int WINAPI wWinMain(HINSTANCE instance,
     status_label = CreateWindowW(L"STATIC",
                                  L"Paste or choose the supported GOG Sudeki folder, then verify it.",
                                  WS_CHILD | WS_VISIBLE,
+                                 40,
+                                 196,
+                                 650,
                                  24,
-                                 185,
-                                 645,
-                                 42,
                                  launcher_window,
                                  (HMENU)(INT_PTR)IDC_STATUS,
                                  instance,
@@ -738,11 +907,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(status_label);
     control = CreateWindowW(L"BUTTON",
                             L"Verify build",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            24,
-                            245,
-                            132,
-                            36,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            28,
+                            252,
+                            150,
+                            38,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_VERIFY,
                             instance,
@@ -750,11 +919,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Launch SudekiMP",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                            168,
-                            245,
-                            154,
-                            36,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            190,
+                            252,
+                            190,
+                            38,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_LAUNCH,
                             instance,
@@ -762,11 +931,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Optional update…",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            334,
-                            245,
-                            145,
-                            36,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            392,
+                            252,
+                            170,
+                            38,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_UPDATE,
                             instance,
@@ -774,11 +943,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Play project music",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            24,
-                            308,
-                            170,
-                            32,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            28,
+                            316,
+                            190,
+                            34,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_PLAY_MUSIC,
                             instance,
@@ -786,11 +955,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Stop music",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            205,
-                            308,
-                            120,
-                            32,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            230,
+                            316,
+                            130,
+                            34,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_STOP_MUSIC,
                             instance,
@@ -798,11 +967,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Developer: wander",
-                            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                            493,
-                            308,
-                            176,
-                            32,
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            530,
+                            316,
+                            192,
+                            34,
                             launcher_window,
                             (HMENU)(INT_PTR)IDC_DEVELOPER,
                             instance,
@@ -811,10 +980,10 @@ int WINAPI wWinMain(HINSTANCE instance,
     control = CreateWindowW(L"STATIC",
                             L"Music is fetched only when you press Play, cached under LocalAppData, and played inside this launcher.",
                             WS_CHILD | WS_VISIBLE,
-                            24,
-                            362,
-                            645,
-                            34,
+                            28,
+                            382,
+                            680,
+                            28,
                             launcher_window,
                             NULL,
                             instance,

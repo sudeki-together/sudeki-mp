@@ -308,20 +308,26 @@ run_terminal_menu() {
 }
 
 run_gui() {
-    local choice mode
+    local choice mode dialog_status
 
     while true; do
-        choice="$(zenity_app --list --title="${app_title}" --width=900 --height=490 \
+        choice="$(zenity_app --list --title="${app_title}" --width=900 --height=470 \
             --text="<b>Choose how to start SudekiMP</b>\n\nTwo-player local co-op is the supported beta path. Select Settings if your game, Wine prefix, or controller differs from the defaults." \
             --column="Option" --column="What it does" \
             "Play local co-op beta" "Two local players: keyboard/mouse host plus Linux controller Player 2." \
             "Safe launch" "Start with optional co-op prototypes disabled." \
             "Talos party encounter" "Restore Tal's companions for the focused Talos encounter." \
             "Verify installation" "Build and check the exact supported game/DLL pair without launching." \
-            --ok-label="Continue" --cancel-label="Quit" \
-            --extra-button="Settings" --extra-button="Play music" \
-            --extra-button="Stop music" --extra-button="Developer: wander" \
-            --extra-button="About")" || return
+            "Settings" "Choose or paste the game, Wine-prefix, and controller paths." \
+            "Play music" "Stream Map Inversion inside this launcher session." \
+            "Stop music" "Stop the current project-music stream." \
+            "Developer: wander" "Open the Sudeki Together developer page." \
+            "About" "Read the local co-op beta scope and safety notes." \
+            --ok-label="Continue" --cancel-label="Quit")"
+        dialog_status=$?
+        if (( dialog_status != 0 )) && [[ -z "${choice}" ]]; then
+            return
+        fi
 
         case "${choice}" in
             "Settings") configure_gui ;;
