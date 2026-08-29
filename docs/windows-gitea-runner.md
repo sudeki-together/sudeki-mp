@@ -23,7 +23,7 @@ installer script. Open PowerShell as the Windows user that should own the
 runner and run:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 .\tools\install-windows-gitea-runner.ps1
 ```
 
@@ -60,8 +60,16 @@ time on a full native build.
 ## Prepare it for the real build
 
 Install the documented MSYS2 `MINGW32` toolchain and Git on that Windows host.
-See [windows-build.md](windows-build.md). The manual-only **Windows build**
-workflow checks those prerequisites, builds the project, and uploads a
+The runner also needs Node.js for JavaScript-based actions such as checkout and
+artifact upload. From an MSYS2 terminal, install the supported host runtime:
+
+```bash
+pacman -S --needed mingw-w64-x86_64-nodejs
+```
+
+The installer adds that runtime to the runner's process path when it is
+available. See [windows-build.md](windows-build.md). The manual-only **Windows build**
+workflow checks the build prerequisites, builds the project, and uploads a
 `SudekiMP-windows-ci.zip` artifact containing the PE32 DLL, launcher, and
 default configuration. It does not publish a release or inject into a game.
 

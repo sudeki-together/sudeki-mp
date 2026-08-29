@@ -115,6 +115,7 @@ function Initialize-RunnerFiles {
 @'
 @echo off
 setlocal
+if exist "C:\msys64\mingw64\bin\node.exe" set "PATH=C:\msys64\mingw64\bin;%PATH%"
 if exist "C:\msys64\usr\bin\git.exe" set "PATH=C:\msys64\usr\bin;%PATH%"
 cd /d "%~dp0"
 "%~dp0act_runner.exe" daemon --config "%~dp0config.yaml"
