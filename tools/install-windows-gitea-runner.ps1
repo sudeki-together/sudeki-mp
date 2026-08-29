@@ -112,9 +112,10 @@ function Initialize-RunnerFiles {
     }
     Set-Content -LiteralPath $ConfigPath -Value $updatedConfigText -Encoding utf8
 
-    @'
+@'
 @echo off
 setlocal
+if exist "C:\msys64\usr\bin\git.exe" set "PATH=C:\msys64\usr\bin;%PATH%"
 cd /d "%~dp0"
 "%~dp0act_runner.exe" daemon --config "%~dp0config.yaml"
 '@ | Set-Content -LiteralPath $WrapperPath -Encoding ascii
