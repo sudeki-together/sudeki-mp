@@ -14,12 +14,13 @@ legitimate user-supplied copy is required.
 > Individual systems have strong live proofs, but they are not yet integrated
 > into a complete co-op playthrough.
 
-## Latest Windows CI package
+## Latest Windows beta package
 
 The latest successful Windows build is available as the
-[`SudekiMP-windows-ci` package](https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-ci/ci-153-cc5878f),
-published from [Windows CI run #153](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/153).
-It contains the PE32 launcher, DLL, and default configuration—not Sudeki or
+[`SudekiMP Windows beta package](https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta/ci-154-ab9ae65),
+published from [Windows CI run #154](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/154).
+It contains a ready-to-copy `SudekiMP` folder with the PE32 launcher, DLL,
+safe default configuration, launch script, and Windows guide—not Sudeki or
 any game assets. See [Windows build instructions](docs/windows-build.md) for
 the supported game build and installation steps.
 
