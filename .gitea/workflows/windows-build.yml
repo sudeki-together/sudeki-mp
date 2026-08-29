@@ -65,10 +65,10 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
           @'
-@echo off
-"%~dp0SudekiMP.Launcher.exe" "%~dp0..\SUDEKI.exe" "%~dp0SudekiMP.dll"
-if errorlevel 1 pause
-'@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
+          @echo off
+          "%~dp0SudekiMP.Launcher.exe" "%~dp0..\SUDEKI.exe" "%~dp0SudekiMP.dll"
+          if errorlevel 1 pause
+          '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
 
