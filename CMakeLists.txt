@@ -65,6 +65,7 @@ add_library(SudekiMP SHARED
     src/hooks/shop_catalog_adapter.c
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
+    src/hooks/xinput_player_two.c
     src/hooks/skill_trace.c
     src/hooks/talos_coop_balance.c
     src/hooks/talos_defense_trace.c

@@ -26,6 +26,7 @@ static HINSTANCE launcher_instance;
 static HWND launcher_window;
 static HWND directory_edit;
 static HWND status_label;
+static HWND windows_coop_checkbox;
 static WCHAR package_directory[MAX_PATH];
 static WCHAR music_cache_path[MAX_PATH];
 static LONG music_download_running;
@@ -303,6 +304,65 @@ static BOOL verify_game(HWND owner,
     return TRUE;
 }
 
+static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
+    static const WCHAR *const coop_keys[] = {
+        L"EnableCoopRosterMenu",
+        L"EnableControlSeparationPrototype",
+        L"EnableSecondPlayerMovementPrototype",
+        L"EnableSecondPlayerCameraRelativeMovementPrototype",
+        L"EnableSecondPlayerSeparationGuardPrototype",
+        L"EnableSecondPlayerWeakAttackPrototype",
+        L"EnableNativeXInputPlayerTwoPrototype",
+        L"EnableSplitScreenRenderPrototype",
+        L"EnableSecondPlayerCameraPrototype",
+        L"EnableDualCameraFrameCachePrototype",
+        L"EnableSecondPlayerControllerCameraPrototype",
+        L"EnableTalosPartyPrototype",
+        L"EnablePartyAtomicTransitionsPrototype"
+    };
+    WCHAR config_path[MAX_PATH];
+    size_t index;
+
+    if (!join_path(config_path,
+                   sizeof(config_path) / sizeof(config_path[0]),
+                   package_directory,
+                   L"SudekiMP.ini") || !file_exists(config_path)) {
+        show_error(owner,
+                   L"This beta package is missing SudekiMP.ini. Reinstall it before launching.");
+        return FALSE;
+    }
+    if (!WritePrivateProfileStringW(
+            L"SudekiMP", L"EnableExternalInputBridgePrototype", L"false",
+            config_path) ||
+        !WritePrivateProfileStringW(
+            L"SudekiMP", L"EnableNativeSecondPlayerCameraCollisionPrototype",
+            L"false", config_path)) {
+        show_error(owner,
+                   L"SudekiMP could not select the Windows controller input profile.");
+        return FALSE;
+    }
+    for (index = 0u; index < sizeof(coop_keys) / sizeof(coop_keys[0]); ++index) {
+        if (!WritePrivateProfileStringW(L"SudekiMP", coop_keys[index],
+                                        enabled ? L"true" : L"false",
+                                        config_path)) {
+            show_error(owner,
+                       L"SudekiMP could not write its package-side co-op settings.");
+            return FALSE;
+        }
+    }
+    if (enabled &&
+        (!WritePrivateProfileStringW(L"SudekiMP", L"XInputPlayerTwoSlot", L"0",
+                                     config_path) ||
+         !WritePrivateProfileStringW(L"Bindings", L"ToggleSecondPlayerAi", L"F10",
+                                     config_path))) {
+        show_error(owner, L"SudekiMP could not finish its Windows co-op settings.");
+        return FALSE;
+    }
+    /* Flush the profile cache before the injected DLL reads the file. */
+    WritePrivateProfileStringW(NULL, NULL, NULL, config_path);
+    return TRUE;
+}
+
 static void launch_game(HWND owner) {
     WCHAR game_directory[MAX_PATH];
     WCHAR loader_path[MAX_PATH];
@@ -310,8 +370,11 @@ static void launch_game(HWND owner) {
     WCHAR command[MAX_PATH * 3u + 80u];
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
+    const BOOL coop_requested = windows_coop_checkbox != NULL &&
+        SendMessageW(windows_coop_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
 
-    if (!verify_game(owner, game_directory, loader_path, dll_path) ||
+    if (!configure_windows_coop_profile(owner, coop_requested) ||
+        !verify_game(owner, game_directory, loader_path, dll_path) ||
         !build_loader_command(command,
                               sizeof(command) / sizeof(command[0]),
                               loader_path,
@@ -339,7 +402,9 @@ static void launch_game(HWND owner) {
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    set_status(L"SudekiMP loader started. Keep its console open if it reports an error.");
+    set_status(coop_requested ?
+        L"Windows local co-op requested. Keep the loader console open for errors." :
+        L"SudekiMP loader started. Keep its console open if it reports an error.");
 }
 
 static void browse_for_game_directory(HWND owner) {
@@ -1127,6 +1192,20 @@ int WINAPI wWinMain(HINSTANCE instance,
                                  instance,
                                  NULL);
     apply_default_font(status_label);
+    windows_coop_checkbox = CreateWindowW(
+        L"BUTTON",
+        L"Windows local co-op beta — reserve detected XInput slot 0 for Player 2",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        28,
+        222,
+        560,
+        22,
+        launcher_window,
+        (HMENU)(INT_PTR)IDC_WINDOWS_COOP,
+        instance,
+        NULL
+    );
+    apply_default_font(windows_coop_checkbox);
     control = CreateWindowW(L"BUTTON",
                             L"Verify build",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,

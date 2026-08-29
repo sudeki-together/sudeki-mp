@@ -21,11 +21,14 @@ beta launcher, which verifies the game build before it launches that loader.
 Before first launch, this beta checks that SUDEKI.exe is the supported GOG
 build. It never changes SUDEKI.exe, the game archives, or your save files.
 
-This package starts with all research and co-op prototypes disabled. It is a
-safe loader/injection beta, not yet a general Windows local-co-op release.
-The title roster experiment is intentionally off until its Windows native-page
-path has passed live acceptance. This package therefore does not yet show the
-local co-op character-lock screen when you choose New Game.
+This package starts in a safe single-player configuration. To run the focused
+Windows local-co-op beta, connect one XInput controller, use **Test XInput
+controller…** to confirm its slot, tick **Windows local co-op beta**, and then
+launch. The current beta reserves XInput slot 0 for Player 2, opens the
+co-op roster path, enables split presentation and Talos party restoration, and
+keeps the game's native slot-0 controller route from also moving Player 1.
+Player 1 remains keyboard/mouse. This is a focused input-and-lifecycle beta,
+not a complete co-op playthrough or online multiplayer release.
 
 CO-OP SAVE FIXTURES
 -------------------
@@ -41,9 +44,10 @@ folder back to `Save`.
 
 The **Test XInput controller…** button opens a console-only diagnostic. With an
 XInput-compatible controller connected, it reports the detected Windows slot
-and live button/stick values. It does not start Sudeki or change controller
-settings. Send that result before enabling Windows Player 2 input; native
-Windows P2 routing is still an acceptance-stage feature.
+and live button/stick values. The first Windows co-op launch supports slot 0
+only; the launcher’s checkbox reserves that slot for Player 2. If the probe
+reports another slot, do not start co-op yet—send the output so the profile can
+be adjusted deliberately.
 
 If the launcher reports an error, keep the command window open and include
 the text from it plus SudekiMP.log (beside SUDEKI.exe) in a bug report.

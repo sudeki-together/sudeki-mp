@@ -4,11 +4,12 @@ SudekiMP can be built and launched directly on Windows. Wine is a development
 convenience used by the primary research machine; it is not a requirement for
 the DLL or launcher.
 
-This is currently a **Windows beta loader**, not a finished co-op release.
-It provides the same exact-build-gated DLL, configuration, and launcher used by
-the Linux research environment. Several local-co-op systems still require
-focused configuration and live acceptance before ordinary players should use
-them for a complete playthrough.
+This is currently a **Windows beta loader with a focused local-co-op input
+acceptance path**, not a finished co-op release. It provides the same
+exact-build-gated DLL, configuration, and launcher used by the Linux research
+environment. The launcher can reserve one detected XInput slot for Player 2;
+several gameplay and lifecycle systems still require live acceptance before
+ordinary players should use it for a complete playthrough.
 
 The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
 `Launch SudekiMP.cmd`, `SudekiMP.BetaLauncher.exe`, `SudekiMP.XInputProbe.exe`,
@@ -27,6 +28,15 @@ the user presses Play, then cached locally; it is not embedded in the package.
 The beta launcher's **Get latest beta** button opens the public package page in
 a browser. It does not download, run PowerShell, or replace local files. Manual
 download and extraction remain the supported update process.
+
+The launcher also exposes **Windows local co-op beta**. With a controller
+confirmed by its XInput probe as slot `0`, ticking that option writes only the
+package-local `SudekiMP.ini` profile: it enables the proven roster/control/split
+stack, routes slot 0 through the mod’s Player 2 protocol, and masks that one
+slot from the game’s native Player 1 reads. Player 1 remains keyboard/mouse.
+The profile deliberately leaves the experimental native P2 collision camera off
+for this first Windows input pass so the existing right-stick orbit remains
+available. It does not modify `SUDEKI.exe`, game data, or saves.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits

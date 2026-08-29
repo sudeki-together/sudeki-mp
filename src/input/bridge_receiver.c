@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <xinput.h>
 
 #include "input/bridge_receiver.h"
 
@@ -9,6 +10,21 @@
 #include <string.h>
 
 static SOCKET bridge_socket = INVALID_SOCKET;
+typedef enum SudekiMpInputBridgeTransport {
+    SUDEKIMP_INPUT_TRANSPORT_NONE = 0,
+    SUDEKIMP_INPUT_TRANSPORT_UDP,
+    SUDEKIMP_INPUT_TRANSPORT_XINPUT
+} SudekiMpInputBridgeTransport;
+
+typedef DWORD(WINAPI *SudekiMpXInputGetStateFunction)(
+    DWORD user_index,
+    XINPUT_STATE *state
+);
+
+static SudekiMpInputBridgeTransport bridge_transport;
+static HMODULE xinput_module;
+static SudekiMpXInputGetStateFunction xinput_get_state;
+static unsigned int xinput_slot;
 static DWORD bridge_timeout_ms;
 static DWORD last_packet_tick;
 static SudekiMpInputBridgeState last_state;
@@ -32,6 +48,90 @@ static void reset_receiver_state(void) {
     invalid_packet_count = 0u;
     stale_sequence_count = 0u;
     bound_port = 0u;
+    bridge_transport = SUDEKIMP_INPUT_TRANSPORT_NONE;
+    xinput_slot = 0u;
+}
+
+static uint32_t xinput_buttons_to_bridge(uint16_t buttons) {
+    uint32_t result = 0u;
+
+    if ((buttons & XINPUT_GAMEPAD_A) != 0u) result |= SUDEKIMP_BRIDGE_BUTTON_A;
+    if ((buttons & XINPUT_GAMEPAD_B) != 0u) result |= SUDEKIMP_BRIDGE_BUTTON_B;
+    if ((buttons & XINPUT_GAMEPAD_X) != 0u) result |= SUDEKIMP_BRIDGE_BUTTON_X;
+    if ((buttons & XINPUT_GAMEPAD_Y) != 0u) result |= SUDEKIMP_BRIDGE_BUTTON_Y;
+    if ((buttons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_LEFT_SHOULDER;
+    if ((buttons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_RIGHT_SHOULDER;
+    if ((buttons & XINPUT_GAMEPAD_BACK) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_BACK;
+    if ((buttons & XINPUT_GAMEPAD_START) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_START;
+    if ((buttons & XINPUT_GAMEPAD_LEFT_THUMB) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_LEFT_STICK;
+    if ((buttons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_RIGHT_STICK;
+    if ((buttons & XINPUT_GAMEPAD_DPAD_UP) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_DPAD_UP;
+    if ((buttons & XINPUT_GAMEPAD_DPAD_DOWN) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_DPAD_DOWN;
+    if ((buttons & XINPUT_GAMEPAD_DPAD_LEFT) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_DPAD_LEFT;
+    if ((buttons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0u) result |=
+        SUDEKIMP_BRIDGE_BUTTON_DPAD_RIGHT;
+    return result;
+}
+
+static uint16_t xinput_trigger_to_bridge(BYTE value) {
+    return (uint16_t)value * 257u;
+}
+
+static BOOL poll_xinput_state(SudekiMpInputBridgeState *state) {
+    XINPUT_STATE native_state;
+    DWORD result;
+
+    if (state == NULL || xinput_get_state == NULL ||
+        bridge_transport != SUDEKIMP_INPUT_TRANSPORT_XINPUT) {
+        if (state != NULL) ZeroMemory(state, sizeof(*state));
+        return FALSE;
+    }
+    ZeroMemory(&native_state, sizeof(native_state));
+    result = xinput_get_state((DWORD)xinput_slot, &native_state);
+    if (result != ERROR_SUCCESS) {
+        if (connection_logged) {
+            SudekiMpLogFormat(
+                "input_bridge event=disconnected transport=xinput slot=%u error=%lu policy=neutralize_player_two_input\r\n",
+                xinput_slot, (unsigned long)result
+            );
+        }
+        connection_logged = FALSE;
+        packet_received = FALSE;
+        ZeroMemory(&last_state, sizeof(last_state));
+        ZeroMemory(state, sizeof(*state));
+        return FALSE;
+    }
+    ZeroMemory(&last_state, sizeof(last_state));
+    last_state.sequence = native_state.dwPacketNumber;
+    last_state.sender_timestamp_ms = GetTickCount();
+    last_state.left_x = native_state.Gamepad.sThumbLX;
+    last_state.left_y = native_state.Gamepad.sThumbLY;
+    last_state.right_x = native_state.Gamepad.sThumbRX;
+    last_state.right_y = native_state.Gamepad.sThumbRY;
+    last_state.left_trigger = xinput_trigger_to_bridge(
+        native_state.Gamepad.bLeftTrigger);
+    last_state.right_trigger = xinput_trigger_to_bridge(
+        native_state.Gamepad.bRightTrigger);
+    last_state.buttons = xinput_buttons_to_bridge(native_state.Gamepad.wButtons);
+    packet_received = TRUE;
+    if (!connection_logged) {
+        SudekiMpLogFormat(
+            "input_bridge event=connected transport=xinput slot=%u packet=%lu\r\n",
+            xinput_slot, (unsigned long)last_state.sequence
+        );
+        connection_logged = TRUE;
+    }
+    *state = last_state;
+    return TRUE;
 }
 
 BOOL SudekiMpInputBridgeSequenceIsNewer(
@@ -66,7 +166,8 @@ BOOL SudekiMpInputBridgeStart(unsigned int port, DWORD timeout_ms) {
     int address_size;
     u_long nonblocking = 1u;
 
-    if (bridge_socket != INVALID_SOCKET || port > 65535u ||
+    if (bridge_transport != SUDEKIMP_INPUT_TRANSPORT_NONE ||
+        bridge_socket != INVALID_SOCKET || port > 65535u ||
         timeout_ms < 50u || timeout_ms > 5000u) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -103,11 +204,49 @@ BOOL SudekiMpInputBridgeStart(unsigned int port, DWORD timeout_ms) {
     }
     bridge_timeout_ms = timeout_ms;
     bound_port = (unsigned int)ntohs(address.sin_port);
+    bridge_transport = SUDEKIMP_INPUT_TRANSPORT_UDP;
     SudekiMpLogFormat(
         "input_bridge event=receiver_start transport=udp address=127.0.0.1 port=%u timeout_ms=%lu protocol_version=%u\r\n",
         bound_port,
         (unsigned long)bridge_timeout_ms,
         SUDEKIMP_INPUT_BRIDGE_PROTOCOL_VERSION
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpInputBridgeStartXInput(unsigned int slot) {
+    union {
+        FARPROC generic;
+        SudekiMpXInputGetStateFunction typed;
+    } resolver;
+    XINPUT_STATE initial_state;
+
+    if (bridge_transport != SUDEKIMP_INPUT_TRANSPORT_NONE ||
+        slot >= XUSER_MAX_COUNT) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    reset_receiver_state();
+    xinput_module = LoadLibraryW(L"xinput1_2.dll");
+    if (xinput_module == NULL) return FALSE;
+    resolver.generic = GetProcAddress(xinput_module, "XInputGetState");
+    xinput_get_state = resolver.typed;
+    if (xinput_get_state == NULL) {
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        SudekiMpInputBridgeStop();
+        return FALSE;
+    }
+    ZeroMemory(&initial_state, sizeof(initial_state));
+    if (xinput_get_state((DWORD)slot, &initial_state) != ERROR_SUCCESS) {
+        SetLastError(ERROR_DEVICE_NOT_CONNECTED);
+        SudekiMpInputBridgeStop();
+        return FALSE;
+    }
+    xinput_slot = slot;
+    bridge_transport = SUDEKIMP_INPUT_TRANSPORT_XINPUT;
+    SudekiMpLogFormat(
+        "input_bridge event=receiver_start transport=xinput slot=%u protocol_version=%u\r\n",
+        slot, SUDEKIMP_INPUT_BRIDGE_PROTOCOL_VERSION
     );
     return TRUE;
 }
@@ -121,6 +260,11 @@ void SudekiMpInputBridgeStop(void) {
         WSACleanup();
         winsock_started = FALSE;
     }
+    if (xinput_module != NULL) {
+        FreeLibrary(xinput_module);
+        xinput_module = NULL;
+    }
+    xinput_get_state = NULL;
     reset_receiver_state();
 }
 
@@ -131,7 +275,11 @@ BOOL SudekiMpInputBridgePollRaw(SudekiMpInputBridgeState *state) {
     int received;
     DWORD now;
 
-    if (state == NULL || bridge_socket == INVALID_SOCKET) {
+    if (bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT) {
+        return poll_xinput_state(state);
+    }
+    if (state == NULL || bridge_transport != SUDEKIMP_INPUT_TRANSPORT_UDP ||
+        bridge_socket == INVALID_SOCKET) {
         if (state != NULL) {
             ZeroMemory(state, sizeof(*state));
         }
@@ -281,6 +429,21 @@ unsigned int SudekiMpInputBridgeBoundPort(void) {
     return bound_port;
 }
 
+unsigned int SudekiMpInputBridgeXInputSlot(void) {
+    return bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT ?
+        xinput_slot : XUSER_MAX_COUNT;
+}
+
+BOOL SudekiMpInputBridgeUsesXInput(void) {
+    return bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT;
+}
+
 const void *SudekiMpInputBridgeIdentity(void) {
-    return bridge_socket == INVALID_SOCKET ? NULL : &bridge_socket;
+    if (bridge_transport == SUDEKIMP_INPUT_TRANSPORT_UDP) {
+        return bridge_socket == INVALID_SOCKET ? NULL : &bridge_socket;
+    }
+    if (bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT) {
+        return xinput_get_state == NULL ? NULL : (const void *)&xinput_module;
+    }
+    return NULL;
 }

@@ -20,6 +20,7 @@
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
 #include "hooks/talos_defense_trace.h"
+#include "hooks/xinput_player_two.h"
 #include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
 #include "input/key_binding.h"
@@ -63,6 +64,7 @@ static void uninstall_runtime_hooks(void) {
     SudekiMpUninstallCleanroomMenu();
     SudekiMpUninstallSplitScreenRender();
     SudekiMpUninstallControlSeparation();
+    SudekiMpUninstallXInputPlayerTwoReservation();
     SudekiMpInputBridgeStop();
     SudekiMpUninstallInteractionProvenance();
     SudekiMpUninstallZoneTransitionTrace();
@@ -233,6 +235,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL skill_camera_routing_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     BOOL external_input_bridge_enabled;
+    BOOL native_xinput_player_two_enabled;
+    BOOL player_two_input_enabled;
     BOOL player_interaction_requests_enabled;
     BOOL interaction_provenance_enabled;
     BOOL merchant_checkout_trace_enabled;
@@ -276,6 +280,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     int spirit_strike_variant = 1;
     int input_bridge_port = 26760;
     int input_bridge_timeout_ms = 250;
+    int xinput_player_two_slot = 0;
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
     float second_player_maximum_separation = 10.0f;
@@ -484,6 +489,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableExternalInputBridgePrototype"
     );
+    native_xinput_player_two_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableNativeXInputPlayerTwoPrototype"
+    );
     player_interaction_requests_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -574,6 +584,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableStoryTestBoost"
     );
+    player_two_input_enabled = external_input_bridge_enabled ||
+        native_xinput_player_two_enabled;
     if (coop_roster_menu_enabled &&
         (cleanroom_menu_enabled || zone_traversal_enabled)) {
         SudekiMpLogWrite(
@@ -597,10 +609,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if (transition_vote_enabled &&
         (!party_atomic_transitions_enabled ||
-         !external_input_bridge_enabled)) {
+         !player_two_input_enabled)) {
         SudekiMpLogWrite(
             "transition_vote_config=invalid "
-            "reason=requires_party_atomic_transitions_and_external_input_bridge\r\n"
+            "reason=requires_party_atomic_transitions_and_player_two_input_source\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
@@ -615,11 +627,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
          !control_separation_enabled || !split_screen_render_enabled ||
          !dual_camera_frame_cache_enabled ||
-         !external_input_bridge_enabled)) {
+         !player_two_input_enabled)) {
         SudekiMpLogWrite(
             "save_book_vote_config=invalid "
             "reason=requires_coop_roster_integrated_menu_control_split_"
-            "dual_cache_and_external_bridge\r\n");
+            "dual_cache_and_player_two_input_source\r\n");
         SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -635,10 +647,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if (player_interaction_requests_enabled &&
         (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
-         !external_input_bridge_enabled || !dual_camera_frame_cache_enabled)) {
+         !player_two_input_enabled || !dual_camera_frame_cache_enabled)) {
         SudekiMpLogWrite(
             "player_interaction_requests_config=invalid "
-            "reason=requires_coop_roster_integrated_menu_control_split_dual_cache_and_external_bridge\r\n"
+            "reason=requires_coop_roster_integrated_menu_control_split_dual_cache_and_player_two_input_source\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
@@ -646,12 +658,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if (experimental_blacksmith_ui_enabled &&
         (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
-         !external_input_bridge_enabled ||
+         !player_two_input_enabled ||
          !second_player_camera_enabled ||
          !dual_camera_frame_cache_enabled)) {
         SudekiMpLogWrite(
             "per_player_blacksmith_ui_config=invalid "
-            "reason=requires_integrated_coop_roster_control_split_player_two_camera_dual_cache_and_external_bridge\r\n");
+            "reason=requires_integrated_coop_roster_control_split_player_two_camera_dual_cache_and_player_two_input_source\r\n");
         SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -923,10 +935,18 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
-    if (external_input_bridge_enabled &&
+    if (external_input_bridge_enabled && native_xinput_player_two_enabled) {
+        SudekiMpLogWrite(
+            "player_two_input_config=invalid reason=external_udp_and_native_xinput_are_mutually_exclusive\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (player_two_input_enabled &&
         (!control_separation_enabled || !second_player_movement_enabled)) {
         SudekiMpLogWrite(
-            "external_input_bridge_config=requires_control_separation_and_second_player_movement\r\n"
+            "player_two_input_config=requires_control_separation_and_second_player_movement\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -948,28 +968,46 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
              250,
              50,
              5000,
-             &input_bridge_timeout_ms) ||
-         !read_config_float(
+             &input_bridge_timeout_ms))) {
+        SudekiMpLogWrite("external_input_bridge_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (player_two_input_enabled && !read_config_float(
              config_path,
              L"SudekiMP",
              L"InputBridgeDeadzone",
              0.20f,
              0.0f,
              0.90f,
-             &input_bridge_deadzone))) {
-        SudekiMpLogWrite("external_input_bridge_config=invalid\r\n");
+             &input_bridge_deadzone)) {
+        SudekiMpLogWrite("player_two_input_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (native_xinput_player_two_enabled && !read_config_integer(
+            config_path,
+            L"SudekiMP",
+            L"XInputPlayerTwoSlot",
+            0,
+            0,
+            3,
+            &xinput_player_two_slot)) {
+        SudekiMpLogWrite("native_xinput_player_two_config=invalid\r\n");
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
     if (second_player_controller_camera_enabled &&
-        (!external_input_bridge_enabled ||
+        (!player_two_input_enabled ||
          !second_player_camera_relative_movement_enabled ||
          !split_screen_render_enabled ||
          !second_player_camera_enabled ||
          !dual_camera_frame_cache_enabled)) {
         SudekiMpLogWrite(
-            "second_player_controller_camera_config=requires_external_bridge_camera_relative_movement_split_p2_camera_dual_cache\r\n"
+            "second_player_controller_camera_config=requires_player_two_input_camera_relative_movement_split_p2_camera_dual_cache\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -1446,6 +1484,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (unsigned long)float_bits(input_bridge_deadzone)
     );
     SudekiMpLogFormat(
+        "native_xinput_player_two_requested=%s slot=%d transport=%s\r\n",
+        native_xinput_player_two_enabled ? "true" : "false",
+        xinput_player_two_slot,
+        native_xinput_player_two_enabled ?
+            "direct_xinput_reserved_from_native_player_one" : "disabled"
+    );
+    SudekiMpLogFormat(
         "interaction_provenance_and_intent_trace_requested=%s "
         "button=controller_a "
         "policy=passive_exact_actor_target_source_generation_trace_"
@@ -1477,12 +1522,27 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
         }
+        if (native_xinput_player_two_enabled &&
+            (!SudekiMpInputBridgeStartXInput(
+                 (unsigned int)xinput_player_two_slot) ||
+             !SudekiMpInstallXInputPlayerTwoReservation(
+                 game_module, (unsigned int)xinput_player_two_slot))) {
+            SudekiMpLogFormat("native_xinput_player_two_error=%lu\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpUninstallXInputPlayerTwoReservation();
+            SudekiMpInputBridgeStop();
+            SudekiMpLogWrite("status=input_bridge_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
+        }
         if (realtime_multiplayer_skill_combat_enabled &&
             !SudekiMpInitializeSkillActivationAbi(game_module)) {
             SudekiMpLogFormat(
                 "realtime_skill_activation_abi_error=%lu\r\n",
                 (unsigned long)GetLastError()
             );
+            SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("status=control_separation_error\r\n");
             SudekiMpUninstallInteractionProvenance();
@@ -1502,10 +1562,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 second_player_skill_virtual_keys,
                 second_player_target_trace_enabled,
                 shared_group_camera_enabled,
-                external_input_bridge_enabled,
+                player_two_input_enabled,
                 input_bridge_deadzone)) {
             SudekiMpLogFormat("control_separation_error=%lu\r\n",
                 (unsigned long)GetLastError());
+            SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("control_separation_applied=false\r\n");
             SudekiMpLogWrite("status=control_separation_error\r\n");
@@ -1560,6 +1621,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
                     FALSE);
                 SudekiMpUninstallControlSeparation();
+                SudekiMpUninstallXInputPlayerTwoReservation();
                 SudekiMpInputBridgeStop();
                 SudekiMpLogWrite(
                     "control_separation_applied=false "
@@ -1772,6 +1834,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             SudekiMpUninstallTalosDefenseTrace();
             SudekiMpUninstallInteractionProvenance();
             SudekiMpUninstallZoneTransitionTrace();
+            SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpUninstallAcceleratorCache();
         }

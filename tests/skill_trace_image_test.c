@@ -12,6 +12,7 @@
 #include "hooks/spirit_strike_input.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/talos_defense_trace.h"
+#include "hooks/xinput_player_two.h"
 #include "hooks/zone_transition_trace.h"
 
 #include <windows.h>
@@ -1255,6 +1256,12 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+    }
+
+    if (*(const uint32_t *)(image + SUDEKIMP_XINPUT_GET_STATE_IAT_RVA) !=
+        SUDEKIMP_XINPUT_GET_STATE_IMPORT_NAME_RVA) {
+        fputs("FAIL: exact XInputGetState import seam mismatch\n", stderr);
+        ++failures;
     }
 
     if (SudekiMpSplitScreenQuickMenuLiveViewAccepted(

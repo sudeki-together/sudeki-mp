@@ -6,6 +6,10 @@
 #include <windows.h>
 
 BOOL SudekiMpInputBridgeStart(unsigned int port, DWORD timeout_ms);
+/* Windows-only direct input source. It normalizes XInput into the exact same
+ * state contract as the Linux UDP bridge, so gameplay consumers remain
+ * transport-neutral. `slot` is the Windows XInput user index (0..3). */
+BOOL SudekiMpInputBridgeStartXInput(unsigned int slot);
 void SudekiMpInputBridgeStop(void);
 /* Serial-number ordering uses the usual uint32 half-range rule.  An exact
  * duplicate and the ambiguous half-range value are both not newer. */
@@ -21,6 +25,8 @@ BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state);
 void SudekiMpInputBridgeSetGameplaySuppressed(BOOL suppressed);
 BOOL SudekiMpInputBridgeGameplaySuppressed(void);
 unsigned int SudekiMpInputBridgeBoundPort(void);
+unsigned int SudekiMpInputBridgeXInputSlot(void);
+BOOL SudekiMpInputBridgeUsesXInput(void);
 const void *SudekiMpInputBridgeIdentity(void);
 
 #endif
