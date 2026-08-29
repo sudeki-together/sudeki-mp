@@ -34,6 +34,11 @@ confirmed by its XInput probe as slot `0`, ticking that option writes only the
 package-local `SudekiMP.ini` profile: it enables the proven roster/control/split
 stack, routes slot 0 through the mod’s Player 2 protocol, and masks that one
 slot from the game’s native Player 1 reads. Player 1 remains keyboard/mouse.
+For a loaded save, the injected DLL waits for the world and native party to
+settle, then uses its existing atomic roster path to make **Tal** the host and
+**Ailish** Player 2. The launcher itself never modifies a save or live party
+pointer. If either hero is not in the loaded party, it stays single-player and
+records the deferred roster state in `SudekiMP.log` instead of guessing.
 The profile deliberately leaves the experimental native P2 collision camera off
 for this first Windows input pass so the existing right-stick orbit remains
 available. It does not modify `SUDEKI.exe`, game data, or saves.

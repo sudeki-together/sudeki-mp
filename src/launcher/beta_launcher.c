@@ -307,6 +307,7 @@ static BOOL verify_game(HWND owner,
 static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
     static const WCHAR *const coop_keys[] = {
         L"EnableCoopRosterMenu",
+        L"EnableLoadedSaveCoopAutostartPrototype",
         L"EnableControlSeparationPrototype",
         L"EnableSecondPlayerMovementPrototype",
         L"EnableSecondPlayerCameraRelativeMovementPrototype",
@@ -1194,7 +1195,7 @@ int WINAPI wWinMain(HINSTANCE instance,
     apply_default_font(status_label);
     windows_coop_checkbox = CreateWindowW(
         L"BUTTON",
-        L"Windows local co-op beta — reserve detected XInput slot 0 for Player 2",
+        L"Windows local co-op beta — Tal + Ailish loaded-save split, XInput slot 0",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
         28,
         222,

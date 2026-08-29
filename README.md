@@ -103,6 +103,11 @@ The New Game flow can now open a dedicated Sudeki Together roster page:
 2. Assign distinct Player 1 and Player 2 characters.
 3. Select Ailish, Tal, Buki, or Elco.
 4. Persist the selected role contract in a sidecar profile.
+
+The Windows beta launcher additionally has an explicit loaded-save co-op
+profile. It requests the same atomic Tal-host/Ailish-Player-2 contract only
+after a save's native world and party have settled; it never edits save data or
+party pointers outside Sudeki's own roster path.
 5. Wait for a selected character when the story has not added them yet.
 
 The page reuses Sudeki's native title fade, font submission, and four resident

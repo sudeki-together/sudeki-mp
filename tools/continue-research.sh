@@ -230,6 +230,7 @@ case "${mode}" in
               "${mode}" == "--native-p2-camera-collision-test" ]]; then
             sed -i \
                 -e 's/^EnableCoopRosterMenu=false$/EnableCoopRosterMenu=true/' \
+                -e 's/^EnableLoadedSaveCoopAutostartPrototype=false$/EnableLoadedSaveCoopAutostartPrototype=true/' \
                 -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
                 -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
                 -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \

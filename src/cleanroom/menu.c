@@ -785,6 +785,9 @@ static const SudekiMpTraversalInterior traversal_interiors[] = {
 };
 static BOOL roster_mode;
 static BOOL roster_locked;
+static BOOL loaded_save_coop_autostart_enabled;
+static BOOL loaded_save_coop_autostart_roster_published;
+static BOOL loaded_save_coop_autostart_last_locked;
 static BOOL roster_coop_profile;
 static BOOL roster_talos_tuning_enabled;
 static unsigned int roster_talos_health_scale;
@@ -1004,6 +1007,56 @@ static unsigned int roster_actor_type(unsigned int actor) {
         0x23u, 0x05u, 0x0eu, 0x01u
     };
     return actor < MENU_ACTOR_COUNT ? types[actor] : 0u;
+}
+
+void SudekiMpCleanroomMenuSetLoadedSaveCoopAutostart(BOOL enabled) {
+    loaded_save_coop_autostart_enabled = enabled ? TRUE : FALSE;
+    loaded_save_coop_autostart_roster_published = FALSE;
+    loaded_save_coop_autostart_last_locked = FALSE;
+    SudekiMpLogFormat(
+        "cleanroom_menu event=loaded_save_coop_autostart state=%s "
+        "player_one=Tal player_two=Ailish "
+        "policy=game_thread_after_world_and_party_settle\r\n",
+        loaded_save_coop_autostart_enabled ? "armed" : "disabled");
+}
+
+static void service_loaded_save_coop_autostart(void) {
+    BOOL roles_locked;
+
+    if (!loaded_save_coop_autostart_enabled || !roster_mode) {
+        return;
+    }
+    if (!SudekiMpCleanroomEngineWorldReady()) {
+        return;
+    }
+    if (!loaded_save_coop_autostart_roster_published) {
+        loaded_save_coop_autostart_roster_published =
+            SudekiMpSplitScreenSetRosterTypes(
+                roster_actor_type(SUDEKIMP_CLEANROOM_TAL),
+                roster_actor_type(SUDEKIMP_CLEANROOM_AILISH));
+        SudekiMpLogFormat(
+            "cleanroom_menu event=loaded_save_coop_autostart "
+            "phase=publish_roster status=%s player_one=Tal player_two=Ailish "
+            "policy=defer_until_native_party_contains_both\r\n",
+            loaded_save_coop_autostart_roster_published ?
+                "accepted" : "rejected");
+        if (!loaded_save_coop_autostart_roster_published) {
+            return;
+        }
+    }
+    /* This update hook is the existing native controller/game-thread seam.
+     * ApplyRoster retains all rotation, AI override, and role-lock checks, so
+     * a not-yet-settled save simply waits rather than being forced. */
+    SudekiMpSplitScreenApplyRosterOnGameThread();
+    roles_locked = SudekiMpSplitScreenRolesLocked();
+    if (roles_locked != loaded_save_coop_autostart_last_locked) {
+        loaded_save_coop_autostart_last_locked = roles_locked;
+        coop_role_lock_active = roles_locked;
+        SudekiMpLogFormat(
+            "cleanroom_menu event=loaded_save_coop_autostart phase=%s "
+            "policy=atomic_native_roster_apply\r\n",
+            roles_locked ? "active" : "waiting_for_settled_party");
+    }
 }
 
 static const char *roster_actor_label(unsigned int actor) {
@@ -4648,6 +4701,7 @@ void SudekiMpCleanroomMenuUpdate(void) {
         SudekiMpZoneTraversalService();
     }
     if (roster_mode) {
+        service_loaded_save_coop_autostart();
         poll_roster_input();
         if (roster_locked) {
             SudekiMpSplitScreenApplyRosterOnGameThread();
@@ -7721,6 +7775,9 @@ static BOOL install_cleanroom_menu_internal(
     infinite_jetpack_fuel_valid = TRUE;
     integrated_multiplayer_mode = integrated;
     roster_mode = roster;
+    loaded_save_coop_autostart_enabled = FALSE;
+    loaded_save_coop_autostart_roster_published = FALSE;
+    loaded_save_coop_autostart_last_locked = FALSE;
     zone_traversal_mode = traversal;
     zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;
     zone_traversal_selection = 0u;
@@ -8242,6 +8299,9 @@ void SudekiMpUninstallCleanroomMenu(void) {
     zone_traversal_waiting_world[0] = '\0';
     roster_mode = FALSE;
     roster_locked = FALSE;
+    loaded_save_coop_autostart_enabled = FALSE;
+    loaded_save_coop_autostart_roster_published = FALSE;
+    loaded_save_coop_autostart_last_locked = FALSE;
     roster_coop_profile = FALSE;
     roster_waiting_new_game = FALSE;
     roster_replaying_new_game = FALSE;

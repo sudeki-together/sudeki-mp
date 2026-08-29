@@ -22,6 +22,10 @@ BOOL SudekiMpInstallCoopRosterMenu(
     UINT story_test_boost_key,
     float story_test_boost_multiplier
 );
+/* Requests the fixed Tal (host) / Ailish (Player 2) co-op roster only after
+ * a loaded save has restored a stable world and party.  This setter merely
+ * arms the game-thread service; it never changes party pointers itself. */
+void SudekiMpCleanroomMenuSetLoadedSaveCoopAutostart(BOOL enabled);
 void SudekiMpCleanroomMenuUpdate(void);
 void SudekiMpCleanroomMenuRender(void);
 /* Read-only bridge for code that already depends on the cleanroom presenter;

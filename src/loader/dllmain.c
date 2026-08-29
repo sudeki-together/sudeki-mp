@@ -252,6 +252,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL zone_traversal_enabled;
     BOOL cleanroom_menu_enabled;
     BOOL coop_roster_menu_enabled;
+    BOOL loaded_save_coop_autostart_enabled;
     BOOL skip_startup_movies;
     BOOL story_test_boost_enabled;
     BOOL cleanroom_multiplayer_integration;
@@ -574,6 +575,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableCoopRosterMenu"
     );
+    loaded_save_coop_autostart_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableLoadedSaveCoopAutostartPrototype"
+    );
     skip_startup_movies = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -623,6 +629,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         control_separation_enabled && split_screen_render_enabled;
     defer_integrated_roster = coop_roster_menu_enabled &&
         cleanroom_multiplayer_integration;
+    if (loaded_save_coop_autostart_enabled &&
+        (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
+         !player_two_input_enabled)) {
+        SudekiMpLogWrite(
+            "loaded_save_coop_autostart_config=invalid "
+            "reason=requires_coop_roster_integrated_menu_control_split_and_player_two_input_source\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (save_book_vote_enabled &&
         (!coop_roster_menu_enabled || !cleanroom_multiplayer_integration ||
          !control_separation_enabled || !split_screen_render_enabled ||
@@ -1671,6 +1688,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "coop_roster_menu_applied=true phase=after_split_preflight\r\n"
         );
     }
+    if (coop_roster_menu_enabled) {
+        SudekiMpCleanroomMenuSetLoadedSaveCoopAutostart(
+            loaded_save_coop_autostart_enabled);
+    }
+    SudekiMpLogFormat(
+        "loaded_save_coop_autostart_requested=%s "
+        "policy=Tal_host_Ailish_player_two_after_loaded_party_settles\r\n",
+        loaded_save_coop_autostart_enabled ? "true" : "false");
     if (cleanroom_multiplayer_integration) {
         SudekiMpControlSeparationSetUpdateObserver(
             SudekiMpCleanroomMenuUpdate
