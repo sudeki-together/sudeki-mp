@@ -62,9 +62,10 @@ jobs:
           Compress-Archive -LiteralPath $files -DestinationPath $artifact -Force
 
       - name: Upload Windows CI package
-        # upload-artifact@v4 deliberately rejects non-GitHub.com servers.
-        # Gitea 1.27 exposes the compatible GHES-style artifact protocol.
-        uses: actions/upload-artifact@v3
+        # Gitea implements the artifact-v4 protocol but stock v4 rejects
+        # non-GitHub.com servers. This maintained compatibility fork removes
+        # that client-side GHES refusal.
+        uses: christopherhx/gitea-upload-artifact@v4
         with:
           name: SudekiMP-windows-ci
           path: SudekiMP-windows-ci.zip
