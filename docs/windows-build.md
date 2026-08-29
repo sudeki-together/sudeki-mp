@@ -14,7 +14,8 @@ The Windows CI beta archive contains a ready-to-copy `SudekiMP` folder with
 `Launch SudekiMP.cmd` and `README-Windows.txt`. Copy that folder beside the
 supported `SUDEKI.exe`, then run the `.cmd` file. Do not open
 `SudekiMP.Launcher.exe` directly: it is a console loader which needs explicit
-game/DLL paths.
+game/DLL paths. The script also recognizes a deliberate flat installation in
+the game folder, and gives a readable error if it cannot find `SUDEKI.exe`.
 
 An automated coding agent performing the first native-machine validation should
 also follow [windows-agent-handoff.md](windows-agent-handoff.md), which limits

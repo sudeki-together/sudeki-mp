@@ -66,8 +66,21 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
           @'
           @echo off
-          "%~dp0SudekiMP.Launcher.exe" "%~dp0..\SUDEKI.exe" "%~dp0SudekiMP.dll"
-          if errorlevel 1 pause
+          setlocal
+          set "loader=%~dp0SudekiMP.Launcher.exe"
+          set "dll=%~dp0SudekiMP.dll"
+          set "game=%~dp0..\SUDEKI.exe"
+          if not exist "%game%" set "game=%~dp0SUDEKI.exe"
+          if not exist "%game%" (
+            echo SudekiMP could not find SUDEKI.exe next to this folder or its parent.
+            echo Put the SudekiMP folder beside SUDEKI.exe, then run this script again.
+            pause
+            exit /b 2
+          )
+          "%loader%" "%game%" "%dll%"
+          set "exit_code=%ERRORLEVEL%"
+          if not "%exit_code%"=="0" pause
+          exit /b %exit_code%
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
