@@ -69,9 +69,32 @@ enum {
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
+    RVA_QUICK_MENU_CLOSE = 0x0009c360u,
+    RVA_QUICK_MENU_START = 0x0009c3a0u,
     RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
+    RVA_QUICK_MENU_VTABLE = 0x002caf1cu,
     RVA_QUICK_MENU_RENDER_SUBMIT = 0x0009bba0u,
     RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT = 0x002caf28u,
+    RVA_QUICK_MENU_INPUT = 0x00098b40u,
+    RVA_QUICK_MENU_INPUT_VTABLE_SLOT = 0x002caf48u,
+    RVA_QUICK_MENU_NATIVE_TOGGLE = 0x0000a080u,
+    RVA_QUICK_MENU_NATIVE_TOGGLE_CALL = 0x00028228u,
+    RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE = 0x0000aff1u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION = 0x00099341u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_WEAPON = 0x000995d6u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_ITEM = 0x000996e9u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_SKILL = 0x0009984bu,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_HEADER = 0x00099afcu,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_SKILL = 0x00099e80u,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_WEAPON = 0x00099f48u,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_ITEM = 0x00099f8bu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_HEADER = 0x0009a33eu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_RESOURCE = 0x0009a960u,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_SKILL = 0x0009b40cu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_WEAPON = 0x0009b7cbu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_ITEM = 0x0009cc15u,
+    RVA_QUICK_MENU_OWNER_COPY_DEFAULT_RECIPIENT = 0x0009c153u,
+    QUICK_MENU_ACTIVE_OFFSET = 0x29u,
     RVA_INGAME_UI_CONTROLLER_GLOBAL = 0x003c2f88u,
     RVA_SHOP_LAYER_GLOBAL = 0x003c2f70u,
     RVA_BLACKSMITH_LAYER_GLOBAL = 0x003c2f74u,
@@ -201,6 +224,24 @@ enum {
     RVA_ZONE_SHOW_PARTY_MEMBERS = 0x00024950u,
     RVA_ZONE_HIDE_PARTY_MEMBERS = 0x00024a70u,
     RVA_ZONE_AI_MANAGER_GLOBAL = 0x00409de4u
+};
+
+static const uint32_t quick_menu_owner_copy_call_rvas[] = {
+    RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_ITEM,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_HEADER,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_ITEM,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_HEADER,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_RESOURCE,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_ITEM,
+    RVA_QUICK_MENU_OWNER_COPY_DEFAULT_RECIPIENT
 };
 
 typedef struct ExpectedExport {
@@ -3186,6 +3227,204 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
 
+    {
+        unsigned int isolation;
+        unsigned int owner_valid;
+        unsigned int owner_player_two;
+        unsigned int fallback_player_two;
+        unsigned int render_phase_confirmed;
+        unsigned int rendered_player_two;
+        unsigned int capture_allowed;
+        unsigned int compose_succeeded;
+        unsigned int state;
+        unsigned int submit_seen;
+        unsigned int owner_frame_captured;
+        BOOL pin_policy_mismatch = FALSE;
+        BOOL submit_policy_mismatch = FALSE;
+        BOOL capture_policy_mismatch = FALSE;
+        BOOL tail_policy_mismatch = FALSE;
+
+        for (isolation = 0u; isolation <= 1u; ++isolation) {
+            for (owner_valid = 0u; owner_valid <= 1u; ++owner_valid) {
+                for (owner_player_two = 0u;
+                     owner_player_two <= 1u;
+                     ++owner_player_two) {
+                    for (fallback_player_two = 0u;
+                         fallback_player_two <= 1u;
+                         ++fallback_player_two) {
+                        BOOL expected = isolation && owner_valid ?
+                            owner_player_two != 0u :
+                            fallback_player_two != 0u;
+                        BOOL actual =
+                            SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                                isolation != 0u,
+                                owner_valid != 0u,
+                                owner_player_two != 0u,
+                                fallback_player_two != 0u
+                            );
+                        if ((actual != FALSE) != (expected != FALSE)) {
+                            pin_policy_mismatch = TRUE;
+                        }
+                    }
+                }
+            }
+        }
+        if (pin_policy_mismatch) {
+            fputs("FAIL: Quick Menu owner-pinned viewport truth table mismatch\n",
+                stderr);
+            ++failures;
+        }
+
+        for (isolation = 0u; isolation <= 1u; ++isolation) {
+            for (render_phase_confirmed = 0u;
+                 render_phase_confirmed <= 1u;
+                 ++render_phase_confirmed) {
+                for (owner_valid = 0u;
+                     owner_valid <= 1u;
+                     ++owner_valid) {
+                    for (owner_player_two = 0u;
+                         owner_player_two <= 1u;
+                         ++owner_player_two) {
+                        for (rendered_player_two = 0u;
+                             rendered_player_two <= 1u;
+                             ++rendered_player_two) {
+                            BOOL expected = isolation &&
+                                render_phase_confirmed && owner_valid &&
+                                rendered_player_two != owner_player_two;
+                            BOOL actual =
+                                SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                                    isolation != 0u,
+                                    render_phase_confirmed != 0u,
+                                    owner_valid != 0u,
+                                    owner_player_two != 0u,
+                                    rendered_player_two != 0u
+                                );
+                            if ((actual != FALSE) != (expected != FALSE)) {
+                                submit_policy_mismatch = TRUE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (submit_policy_mismatch) {
+            fputs("FAIL: Quick Menu owner-only submit truth table mismatch\n",
+                stderr);
+            ++failures;
+        }
+
+        for (isolation = 0u; isolation <= 1u; ++isolation) {
+            for (owner_valid = 0u; owner_valid <= 1u; ++owner_valid) {
+                for (owner_player_two = 0u;
+                     owner_player_two <= 1u;
+                     ++owner_player_two) {
+                    for (rendered_player_two = 0u;
+                         rendered_player_two <= 1u;
+                         ++rendered_player_two) {
+                        for (capture_allowed = 0u;
+                             capture_allowed <= 1u;
+                             ++capture_allowed) {
+                            for (compose_succeeded = 0u;
+                                 compose_succeeded <= 1u;
+                                 ++compose_succeeded) {
+                                BOOL expected = isolation && owner_valid &&
+                                    capture_allowed && compose_succeeded &&
+                                    rendered_player_two == owner_player_two;
+                                BOOL actual =
+                                    SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+                                        isolation != 0u,
+                                        owner_valid != 0u,
+                                        owner_player_two != 0u,
+                                        rendered_player_two != 0u,
+                                        capture_allowed != 0u,
+                                        compose_succeeded != 0u
+                                    );
+                                if ((actual != FALSE) !=
+                                    (expected != FALSE)) {
+                                    capture_policy_mismatch = TRUE;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (capture_policy_mismatch) {
+            fputs("FAIL: Quick Menu owner-cache capture truth table mismatch\n",
+                stderr);
+            ++failures;
+        }
+
+        for (state = SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+             state <= SUDEKIMP_QUICK_MENU_ISOLATION_TAIL + 1u;
+             ++state) {
+            for (submit_seen = 0u; submit_seen <= 1u; ++submit_seen) {
+                for (owner_frame_captured = 0u;
+                     owner_frame_captured <= 1u;
+                     ++owner_frame_captured) {
+                    unsigned int expected = state;
+                    unsigned int actual;
+
+                    if (state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL &&
+                        !submit_seen && owner_frame_captured) {
+                        expected = SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
+                    }
+                    actual = SudekiMpSplitScreenQuickMenuIsolationEndState(
+                        state,
+                        submit_seen != 0u,
+                        owner_frame_captured != 0u
+                    );
+                    if (actual != expected) {
+                        tail_policy_mismatch = TRUE;
+                    }
+                }
+            }
+        }
+        if (tail_policy_mismatch) {
+            fputs("FAIL: Quick Menu close-tail truth table mismatch\n", stderr);
+            ++failures;
+        }
+
+        /* The native root has both same-frame drawing and next-flush queued
+         * text.  Consecutive frames must therefore stay on the same owner.
+         * A minimap owner mismatch holds capture=false and must not discharge
+         * the tail just because composition retained a valid cached pair. */
+        if (SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                TRUE, TRUE, FALSE, TRUE) ||
+            SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                TRUE, TRUE, FALSE, FALSE) ||
+            SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                TRUE, TRUE, TRUE, FALSE, FALSE) ||
+            !SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                TRUE, TRUE, TRUE, FALSE, TRUE) ||
+            SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+                TRUE, TRUE, FALSE, FALSE, FALSE, TRUE) ||
+            SudekiMpSplitScreenQuickMenuIsolationEndState(
+                SUDEKIMP_QUICK_MENU_ISOLATION_TAIL,
+                FALSE,
+                FALSE
+            ) != SUDEKIMP_QUICK_MENU_ISOLATION_TAIL ||
+            !SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+                TRUE, TRUE, FALSE, FALSE, TRUE, TRUE) ||
+            SudekiMpSplitScreenQuickMenuIsolationEndState(
+                SUDEKIMP_QUICK_MENU_ISOLATION_TAIL,
+                FALSE,
+                TRUE
+            ) != SUDEKIMP_QUICK_MENU_ISOLATION_IDLE ||
+            !SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                TRUE, TRUE, TRUE, FALSE) ||
+            SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                TRUE, TRUE, TRUE, TRUE, TRUE) ||
+            !SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                TRUE, TRUE, TRUE, TRUE, FALSE) ||
+            !SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                FALSE, TRUE, FALSE, TRUE)) {
+            fputs("FAIL: Quick Menu current/queued owner-cache sequence mismatch\n",
+                stderr);
+            ++failures;
+        }
+    }
+
     quick_menu_isolation_state =
         SudekiMpSplitScreenQuickMenuIsolationBeginState(
             SUDEKIMP_QUICK_MENU_ISOLATION_IDLE,
@@ -3194,14 +3433,9 @@ int wmain(int argc, wchar_t **argv) {
             TRUE
         );
     if (quick_menu_isolation_state !=
-            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE ||
-        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
-            TRUE, TRUE, TRUE, TRUE) ||
-        !SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
-            TRUE, TRUE, FALSE, FALSE) ||
-        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
-            TRUE, FALSE, FALSE, FALSE)) {
-        fputs("FAIL: Quick Menu P2-first submit cadence mismatch\n", stderr);
+            SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE) {
+        fputs("FAIL: Quick Menu eligible rising edge did not start isolation\n",
+            stderr);
         ++failures;
     }
     quick_menu_isolation_state =
@@ -3234,6 +3468,7 @@ int wmain(int argc, wchar_t **argv) {
     quick_menu_isolation_state =
         SudekiMpSplitScreenQuickMenuIsolationEndState(
             quick_menu_isolation_state,
+            TRUE,
             TRUE
         );
     if (quick_menu_isolation_state !=
@@ -3245,7 +3480,8 @@ int wmain(int argc, wchar_t **argv) {
     quick_menu_isolation_state =
         SudekiMpSplitScreenQuickMenuIsolationEndState(
             quick_menu_isolation_state,
-            FALSE
+            FALSE,
+            TRUE
         );
     if (quick_menu_isolation_state !=
             SUDEKIMP_QUICK_MENU_ISOLATION_IDLE ||
@@ -3264,6 +3500,39 @@ int wmain(int argc, wchar_t **argv) {
         fputs("FAIL: exact Quick Menu render-submit vtable slot mismatch\n",
             stderr);
         ++failures;
+    }
+    if (*(const uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+            0x00498b40u ||
+        relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+            image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+        *(const uint32_t *)(image + RVA_QUICK_MENU_CLOSE + 3u) !=
+            0x007c2f84u ||
+        *(const uint32_t *)(image + RVA_QUICK_MENU_START + 1u) !=
+            0x00808d1cu ||
+        memcmp(image + RVA_QUICK_MENU_INPUT,
+            "\x8b\x44\x24\x04\x55\x56\x57\x8b\xe9\x83\xf8\x19",
+            12u) != 0 ||
+        memcmp(image + RVA_HUD_PARTY_POINTER_COPY,
+            "\x8b\x11\x8b\xca\x89\x10\xc7\x40\x04\x00\x00\x00",
+            12u) != 0 ||
+        memcmp(image + RVA_TRACKED_ENTITY_CLEANUP,
+            "\x8b\x01\x33\xd2\x3b\xc2\x74\x2d",
+            8u) != 0) {
+        fputs("FAIL: exact seat-owned Quick Menu ABI seam mismatch\n", stderr);
+        ++failures;
+    }
+    for (index = 0u;
+         index < sizeof(quick_menu_owner_copy_call_rvas) /
+            sizeof(quick_menu_owner_copy_call_rvas[0]);
+         ++index) {
+        if (relative_call_target(
+                image + quick_menu_owner_copy_call_rvas[index]) !=
+            image + RVA_HUD_PARTY_POINTER_COPY) {
+            fprintf(stderr,
+                "FAIL: exact Quick Menu owner-copy seam %lu mismatch\n",
+                (unsigned long)index);
+            ++failures;
+        }
     }
     {
         static const uint8_t shop_active_tail[] = {
@@ -3361,6 +3630,12 @@ int wmain(int argc, wchar_t **argv) {
         (uint32_t)(uintptr_t)(image + RVA_GEL_POINTER_RESOLVER_HANDLER);
     *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
         image + RVA_QUICK_MENU_RENDER_SUBMIT;
+    *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_INPUT;
+    *(uint32_t *)(image + RVA_QUICK_MENU_CLOSE + 3u) =
+        (uint32_t)(uintptr_t)(image + RVA_QUICK_MENU_GLOBAL);
+    *(uint32_t *)(image + RVA_QUICK_MENU_START + 1u) =
+        (uint32_t)(uintptr_t)(image + RVA_WORLD_SCENE_GLOBAL);
     *(void **)(image + RVA_INGAME_UI_CONTROLLER_VTABLE + 0x08u) =
         image + RVA_INGAME_UI_CONTROLLER_UPDATE;
     *(void **)(image + RVA_INGAME_UI_CONTROLLER_VTABLE + 0x0cu) =
@@ -4433,6 +4708,147 @@ int wmain(int argc, wchar_t **argv) {
             image[character_switch_rvas[index]] = saved_entry;
         }
     }
+    *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_IS_ACTIVE;
+    SetLastError(ERROR_SUCCESS);
+    if (SudekiMpInstallSplitScreenRender(
+            (HMODULE)image,
+            TRUE,
+            TRUE,
+            VK_F9,
+            FALSE,
+            FALSE,
+            FALSE,
+            FALSE,
+            FALSE,
+            0.20f,
+            2.25f,
+            1.50f,
+            0.65f)) {
+        fputs("FAIL: split-screen render accepted a mismatched Quick Menu input slot\n",
+            stderr);
+        ++failures;
+        SudekiMpUninstallSplitScreenRender();
+    } else if (GetLastError() != ERROR_INVALID_DATA) {
+        fprintf(stderr,
+            "FAIL: Quick Menu input-slot mismatch returned error=%lu\n",
+            (unsigned long)GetLastError());
+        ++failures;
+    }
+    if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+            image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+        relative_call_target(
+            image + RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE) !=
+            image + RVA_HUD_PARTY_POINTER_COPY) {
+        fputs("FAIL: Quick Menu input mismatch mutated later owner hooks\n",
+            stderr);
+        ++failures;
+    }
+    *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_INPUT;
+    {
+        uint8_t cleanup_entry = image[RVA_TRACKED_ENTITY_CLEANUP];
+
+        image[RVA_TRACKED_ENTITY_CLEANUP] ^= 0xffu;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallSplitScreenRender(
+                (HMODULE)image,
+                TRUE,
+                TRUE,
+                VK_F9,
+                FALSE,
+                FALSE,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.20f,
+                2.25f,
+                1.50f,
+                0.65f)) {
+            fputs("FAIL: split-screen render accepted mismatched Quick Menu TPtr cleanup\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallSplitScreenRender();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: Quick Menu TPtr cleanup mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        if (*(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT ||
+            relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE) {
+            fputs("FAIL: Quick Menu cleanup mismatch retained an earlier hook\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_TRACKED_ENTITY_CLEANUP] = cleanup_entry;
+    }
+    for (index = 0u;
+         index < sizeof(quick_menu_owner_copy_call_rvas) /
+            sizeof(quick_menu_owner_copy_call_rvas[0]);
+         ++index) {
+        uint32_t call_rva = quick_menu_owner_copy_call_rvas[index];
+        int32_t owner_copy_displacement;
+
+        memcpy(
+            &owner_copy_displacement,
+            image + call_rva + 1u,
+            sizeof(owner_copy_displacement));
+        image[call_rva + 1u] ^= 0xffu;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallSplitScreenRender(
+                (HMODULE)image,
+                TRUE,
+                TRUE,
+                VK_F9,
+                FALSE,
+                FALSE,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.20f,
+                2.25f,
+                1.50f,
+                0.65f)) {
+            fprintf(stderr,
+                "FAIL: split-screen render accepted mismatched Quick Menu owner source %lu\n",
+                (unsigned long)index);
+            ++failures;
+            SudekiMpUninstallSplitScreenRender();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: Quick Menu owner-source %lu mismatch returned error=%lu\n",
+                (unsigned long)index,
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        if (*(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT ||
+            relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            relative_call_target(image + (index == 0u ?
+                RVA_QUICK_MENU_OWNER_COPY_SELECTION :
+                RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE)) !=
+                image + RVA_HUD_PARTY_POINTER_COPY) {
+            fprintf(stderr,
+                "FAIL: Quick Menu source %lu mismatch retained an earlier hook\n",
+                (unsigned long)index);
+            ++failures;
+        }
+        memcpy(
+            image + call_rva + 1u,
+            &owner_copy_displacement,
+            sizeof(owner_copy_displacement));
+        if (relative_call_target(image + call_rva) !=
+                image + RVA_HUD_PARTY_POINTER_COPY) {
+            fprintf(stderr,
+                "FAIL: Quick Menu owner source %lu did not restore after probe\n",
+                (unsigned long)index);
+            ++failures;
+        }
+    }
     *(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) =
         image + RVA_QUICK_MENU_IS_ACTIVE;
     if (SudekiMpInstallSplitScreenRender(
@@ -4617,6 +5033,10 @@ int wmain(int argc, wchar_t **argv) {
         }
         if (relative_call_target(image + RVA_MINIMAP_UPDATE_POINTER_CALL) !=
                 image + RVA_HUD_PARTY_POINTER_COPY ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT ||
+            relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
             memcmp(
                 image + RVA_MINIMAP_SNAPSHOT_POINTER_CALL,
                 minimap_snapshot_call_original,
@@ -4624,6 +5044,19 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: minimap partial-install rollback retained an earlier hook\n",
                 stderr);
             ++failures;
+        }
+        for (index = 0u;
+             index < sizeof(quick_menu_owner_copy_call_rvas) /
+                sizeof(quick_menu_owner_copy_call_rvas[0]);
+             ++index) {
+            if (relative_call_target(
+                    image + quick_menu_owner_copy_call_rvas[index]) !=
+                    image + RVA_HUD_PARTY_POINTER_COPY) {
+                fprintf(stderr,
+                    "FAIL: Quick Menu owner hook %lu survived minimap rollback\n",
+                    (unsigned long)index);
+                ++failures;
+            }
         }
         memcpy(
             image + RVA_MINIMAP_RENDER_POINTER_CALL + 1u,
@@ -4761,6 +5194,71 @@ int wmain(int argc, wchar_t **argv) {
     if (*(void **)(image + RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT) ==
             image + RVA_QUICK_MENU_RENDER_SUBMIT) {
         fputs("FAIL: Quick Menu render-submit vtable slot was not redirected\n",
+            stderr);
+        ++failures;
+    }
+    if (*(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) ==
+            image + RVA_QUICK_MENU_INPUT ||
+        relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) ==
+            image + RVA_QUICK_MENU_NATIVE_TOGGLE) {
+        fputs("FAIL: seat-owned Quick Menu input/toggle seams were not redirected\n",
+            stderr);
+        ++failures;
+    }
+    for (index = 0u;
+         index < sizeof(quick_menu_owner_copy_call_rvas) /
+            sizeof(quick_menu_owner_copy_call_rvas[0]);
+         ++index) {
+        if (relative_call_target(
+                image + quick_menu_owner_copy_call_rvas[index]) ==
+                image + RVA_HUD_PARTY_POINTER_COPY) {
+            fprintf(stderr,
+                "FAIL: Quick Menu owner-copy call %lu was not redirected\n",
+                (unsigned long)index);
+            ++failures;
+        }
+    }
+    {
+        union {
+            void *alignment;
+            uint8_t bytes[0x2au];
+        } quick_menu_visible_edge_fake;
+        void *saved_quick_menu =
+            *(void **)(image + RVA_QUICK_MENU_GLOBAL);
+
+        ZeroMemory(
+            &quick_menu_visible_edge_fake,
+            sizeof(quick_menu_visible_edge_fake)
+        );
+        *(void **)quick_menu_visible_edge_fake.bytes =
+            image + RVA_QUICK_MENU_VTABLE;
+        *(void **)(image + RVA_QUICK_MENU_GLOBAL) =
+            quick_menu_visible_edge_fake.bytes;
+        quick_menu_visible_edge_fake.bytes[QUICK_MENU_ACTIVE_OFFSET] = 1u;
+        if (!SudekiMpSplitScreenQuickMenuAnyActive()) {
+            fputs("FAIL: native Quick Menu visible edge was not modal before owner capture\n",
+                stderr);
+            ++failures;
+        }
+        quick_menu_visible_edge_fake.bytes[QUICK_MENU_ACTIVE_OFFSET] = 0u;
+        if (SudekiMpSplitScreenQuickMenuAnyActive()) {
+            fputs("FAIL: inactive native Quick Menu edge remained globally modal\n",
+                stderr);
+            ++failures;
+        }
+        *(void **)(image + RVA_QUICK_MENU_GLOBAL) = saved_quick_menu;
+    }
+    if (SudekiMpSplitScreenQuickMenuRequest(2u) ||
+        SudekiMpSplitScreenQuickMenuRequest(3u) ||
+        SudekiMpSplitScreenQuickMenuActive(2u) ||
+        SudekiMpSplitScreenQuickMenuActive(3u) ||
+        SudekiMpSplitScreenQuickMenuSubmit(
+            2u, SUDEKIMP_QUICK_MENU_ACTION_CONFIRM) ||
+        SudekiMpSplitScreenQuickMenuSubmit(
+            3u, SUDEKIMP_QUICK_MENU_ACTION_CANCEL) ||
+        SudekiMpSplitScreenQuickMenuSubmit(
+            1u, SUDEKIMP_QUICK_MENU_ACTION_SECONDARY)) {
+        fputs("FAIL: unsupported Quick Menu seat/action did not fail closed\n",
             stderr);
         ++failures;
     }
@@ -4959,6 +5457,27 @@ int wmain(int argc, wchar_t **argv) {
         fputs("FAIL: Quick Menu render-submit vtable slot was not restored\n",
             stderr);
         ++failures;
+    }
+    if (*(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+            image + RVA_QUICK_MENU_INPUT ||
+        relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+            image + RVA_QUICK_MENU_NATIVE_TOGGLE) {
+        fputs("FAIL: seat-owned Quick Menu input/toggle seams were not restored\n",
+            stderr);
+        ++failures;
+    }
+    for (index = 0u;
+         index < sizeof(quick_menu_owner_copy_call_rvas) /
+            sizeof(quick_menu_owner_copy_call_rvas[0]);
+         ++index) {
+        if (relative_call_target(
+                image + quick_menu_owner_copy_call_rvas[index]) !=
+                image + RVA_HUD_PARTY_POINTER_COPY) {
+            fprintf(stderr,
+                "FAIL: Quick Menu owner-copy call %lu was not restored\n",
+                (unsigned long)index);
+            ++failures;
+        }
     }
     if (*(void **)(image + RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT) !=
             image + RVA_MOTION_BLUR_POST_RENDER ||

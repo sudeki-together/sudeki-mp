@@ -125,6 +125,8 @@ typedef void (*RenderStartFunction)(void);
 typedef void (*FrameEndFunction)(void);
 typedef void (*QuitScreenRenderFunction)(void);
 typedef BOOL (*QuickMenuIsActiveFunction)(void);
+typedef uint8_t (*QuickMenuCloseFunction)(void);
+typedef void (*QuickMenuStartFunction)(void);
 /* UIBlackSmithActive returns only AL and leaves the upper EAX bits intact. */
 typedef uint8_t (*NativeModalIsActiveFunction)(void);
 typedef void (*HudPartyPointerCopyFunction)(void);
@@ -133,6 +135,12 @@ typedef void (*HudPartyPointerCopyFunction)(void);
 #endif
 typedef void (SUDEKIMP_THISCALL *QuickMenuRenderSubmitFunction)(
     void *quick_menu
+);
+typedef uint8_t (SUDEKIMP_THISCALL *QuickMenuInputFunction)(
+    void *quick_menu,
+    unsigned int event_kind,
+    unsigned int command,
+    unsigned int value
 );
 typedef unsigned int (SUDEKIMP_THISCALL *CharacterResourceTypeFunction)(
     void *character_resource
@@ -270,6 +278,7 @@ enum {
     RVA_SPIRIT_STRIKE_MANAGER_GLOBAL = 0x00408d30u,
     RVA_GAMEPLAY_HUD_GLOBAL = 0x003c2f9cu,
     RVA_WORLD_GLOBAL = 0x00408d10u,
+    RVA_WORLD_SCENE_GLOBAL = 0x00408d1cu,
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_CHARACTER_SWITCH_UI_GATE_GLOBAL = 0x00408d3cu,
@@ -327,6 +336,8 @@ enum {
     RVA_BLACKSMITH_LAYER_RESOURCE_CREATE = 0x00090c20u,
     RVA_BLACKSMITH_LAYER_RESOURCE_DESTROY = 0x00091b40u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
+    RVA_QUICK_MENU_CLOSE = 0x0009c360u,
+    RVA_QUICK_MENU_START = 0x0009c3a0u,
     RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
@@ -334,6 +345,25 @@ enum {
     RVA_QUICK_MENU_RENDER_SUBMIT = 0x0009bba0u,
     RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT = 0x002caf28u,
     RVA_QUICK_MENU_VTABLE = 0x002caf1cu,
+    RVA_QUICK_MENU_INPUT = 0x00098b40u,
+    RVA_QUICK_MENU_INPUT_VTABLE_SLOT = 0x002caf48u,
+    RVA_QUICK_MENU_NATIVE_TOGGLE = 0x0000a080u,
+    RVA_QUICK_MENU_NATIVE_TOGGLE_CALL = 0x00028228u,
+    RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE = 0x0000aff1u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION = 0x00099341u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_WEAPON = 0x000995d6u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_ITEM = 0x000996e9u,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_SKILL = 0x0009984bu,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_HEADER = 0x00099afcu,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_SKILL = 0x00099e80u,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_WEAPON = 0x00099f48u,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_ITEM = 0x00099f8bu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_HEADER = 0x0009a33eu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_RESOURCE = 0x0009a960u,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_SKILL = 0x0009b40cu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_WEAPON = 0x0009b7cbu,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_ITEM = 0x0009cc15u,
+    RVA_QUICK_MENU_OWNER_COPY_DEFAULT_RECIPIENT = 0x0009c153u,
     RVA_HUD_PARTY_POINTER_COPY = 0x000015b0u,
     RVA_HUD_GROUP_VALUES_POINTER_CALL = 0x00181517u,
     RVA_HUD_GIZMO_PORTRAIT_POINTER_CALL = 0x000aab3au,
@@ -370,6 +400,18 @@ enum {
     PARTY_SLOT_COUNT = 4u,
     PARTY_SLOT_ZERO_OFFSET = 0x90u,
     PARTY_SLOT_STRIDE = 0x0cu,
+    QUICK_MENU_OWNER_COPY_HOOK_COUNT = 14u,
+    QUICK_MENU_ACTIVE_OFFSET = 0x29u,
+    QUICK_MENU_DEFAULT_RECIPIENT_OFFSET = 0x1d8u,
+    QUICK_MENU_CATEGORY_OFFSET = 0x204u,
+    QUICK_MENU_SKILLS_CATEGORY = 0u,
+    QUICK_MENU_INPUT_EVENT_DOWN = 5u,
+    QUICK_MENU_INPUT_EVENT_UP = 6u,
+    QUICK_MENU_INPUT_EVENT_POINTER = 0x19u,
+    QUICK_MENU_COMMAND_CONFIRM = 0u,
+    QUICK_MENU_COMMAND_CANCEL = 11u,
+    QUICK_MENU_COMMAND_UP = 6u,
+    QUICK_MENU_COMMAND_DOWN = 7u,
     CAMERA_RENDER_STATE_OFFSET = 0x34u,
     CAMERA_ACTIVE_STATE_OFFSET = 0x3cu,
     CAMERA_ACTIVE_STATE_DATA_OFFSET = 0x40u,
@@ -459,6 +501,49 @@ enum {
     D3D_TEXTURE_FILTER_NONE = 0,
     D3D_TEXTURE_FILTER_LINEAR = 2,
     D3D_MULTISAMPLE_NONE = 0
+};
+
+typedef enum SudekiMpQuickMenuSessionPhase {
+    SUDEKIMP_QUICK_MENU_SESSION_IDLE = 0,
+    SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED,
+    SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN,
+    SUDEKIMP_QUICK_MENU_SESSION_CLOSING,
+    SUDEKIMP_QUICK_MENU_SESSION_QUARANTINED
+} SudekiMpQuickMenuSessionPhase;
+
+typedef struct SudekiMpQuickMenuSession {
+    SudekiMpQuickMenuSessionPhase phase;
+    unsigned int owner_seat;
+    uint32_t serial;
+    void *actor;
+    uint32_t actor_generation;
+    void *input_identity;
+    uint32_t input_generation;
+    void *camera;
+    void *render_state;
+    void *native_menu;
+    void *group;
+    uint32_t held_party_source[3];
+    BOOL quarantine_logged;
+} SudekiMpQuickMenuSession;
+
+static const uint32_t quick_menu_owner_copy_call_rvas[
+    QUICK_MENU_OWNER_COPY_HOOK_COUNT
+] = {
+    RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_ITEM,
+    RVA_QUICK_MENU_OWNER_COPY_SELECTION_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_HEADER,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_DETAIL_ITEM,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_HEADER,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_RESOURCE,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_SKILL,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_WEAPON,
+    RVA_QUICK_MENU_OWNER_COPY_REBUILD_ITEM
 };
 
 typedef struct SudekiMpAnimationTraceSnapshot {
@@ -579,11 +664,17 @@ static SudekiMpRelativeCallHook hud_gizmo_name_pointer_hook;
 static SudekiMpRelativeCallHook hud_gizmo_status_pointer_hook;
 static SudekiMpRelativeCallHook minimap_update_pointer_hook;
 static SudekiMpRelativeCallHook minimap_render_pointer_hook;
+static SudekiMpRelativeCallHook quick_menu_owner_copy_hooks[
+    QUICK_MENU_OWNER_COPY_HOOK_COUNT
+];
+static SudekiMpRelativeCallHook quick_menu_owner_default_recipient_hook;
+static SudekiMpRelativeCallHook quick_menu_native_toggle_hook;
 static SudekiMpInlineHook set_render_camera_hook;
 static SudekiMpInlineHook set_game_speed_mode_hook;
 static SudekiMpPointerHook motion_blur_post_render_hook;
 static SudekiMpPointerHook screenshot_post_render_hook;
 static SudekiMpPointerHook quick_menu_render_submit_hook;
+static SudekiMpPointerHook quick_menu_input_hook;
 static SudekiMpPointerHook camera_input_event_hook;
 static uint8_t *game_base;
 static RenderStartFunction original_render_start;
@@ -592,6 +683,11 @@ static QuitScreenRenderFunction original_quit_screen_render
     __attribute__((used));
 static QuickMenuRenderSubmitFunction original_quick_menu_render_submit;
 static QuickMenuIsActiveFunction quick_menu_is_active;
+static QuickMenuCloseFunction quick_menu_close;
+static QuickMenuStartFunction quick_menu_start;
+static QuickMenuInputFunction original_quick_menu_input;
+static void *original_quick_menu_native_toggle __attribute__((used));
+static TrackedEntityCleanupFunction quick_menu_party_pointer_cleanup;
 static NativeModalIsActiveFunction shop_is_active;
 static NativeModalIsActiveFunction blacksmith_is_active;
 static HudPartyPointerCopyFunction original_hud_party_pointer_copy
@@ -670,7 +766,6 @@ static void *minimap_update_character;
 static BOOL minimap_source_failure_this_frame;
 static BOOL genuine_quick_menu_active_this_frame;
 static BOOL quick_menu_live_player_two_available_this_frame;
-static BOOL suppress_quick_menu_render_submit_this_frame;
 static BOOL quick_menu_render_submit_isolation_logged;
 static BOOL quick_menu_isolation_active;
 static BOOL quick_menu_isolation_tail_active;
@@ -685,10 +780,8 @@ static BOOL quick_menu_owner_session_valid;
 static void *quick_menu_owner_character;
 static BOOL quick_menu_owner_player_two;
 static BOOL quick_menu_owner_session_logged;
-static BOOL quick_menu_owner_submit_primed;
-static BOOL quick_menu_non_owner_render_suppression_active;
-static void *quick_menu_non_owner_render_object;
-static uint32_t quick_menu_non_owner_render_saved_state;
+static SudekiMpQuickMenuSession quick_menu_session;
+static uint32_t quick_menu_next_serial;
 static SudekiMpPlayerTwoCollisionSelfCull
     player_two_collision_self_cull;
 static BOOL player_two_collision_self_cull_logged;
@@ -1075,6 +1168,29 @@ static const uint8_t expected_quick_menu_render_submit_entry[] = {
     0x56, 0x8b, 0xf1, 0x83, 0x7e, 0x38, 0x00, 0x75,
     0x2e, 0x80, 0xbe, 0xfe, 0x00, 0x00, 0x00, 0x00
 };
+static const uint8_t expected_quick_menu_input_entry[] = {
+    0x8b, 0x44, 0x24, 0x04, 0x55, 0x56, 0x57, 0x8b,
+    0xe9, 0x83, 0xf8, 0x19
+};
+static const uint8_t expected_quick_menu_close_prefix[] = {
+    0x56, 0x8b, 0x35
+};
+static const uint8_t expected_quick_menu_close_suffix[] = {
+    0x85, 0xf6, 0x74, 0x22, 0x80, 0x7e, 0x29, 0x00
+};
+static const uint8_t expected_quick_menu_start_suffix[] = {
+    0x8b, 0x88, 0x74, 0x01, 0x00, 0x00, 0x8b, 0x11,
+    0x8b, 0x42, 0x2c, 0x6a, 0x00, 0x6a, 0x00, 0x6a,
+    0x10, 0xff, 0xd0, 0xc3
+};
+static const uint8_t expected_quick_menu_native_toggle_entry[] = {
+    0x80, 0xb8, 0x8c, 0x00, 0x00, 0x00, 0x00, 0x74,
+    0x46
+};
+static const uint8_t expected_hud_party_pointer_copy_entry[] = {
+    0x8b, 0x11, 0x8b, 0xca, 0x89, 0x10, 0xc7, 0x40,
+    0x04, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x40, 0x08
+};
 static const uint8_t expected_shop_is_active_tail[] = {
     0x85, 0xc0, 0x74, 0x1e, 0x83, 0xb8, 0xb8, 0x00,
     0x00, 0x00, 0x07, 0x74, 0x0f, 0x8b, 0x40, 0x74
@@ -1111,6 +1227,94 @@ static BOOL character_has_resource_type(
     void *character_pointer,
     unsigned int expected_type
 );
+
+static BOOL relative_call_targets_rva(
+    const uint8_t *base,
+    uint32_t call_rva,
+    uint32_t target_rva
+) {
+    int32_t displacement;
+
+    if (base == NULL || base[call_rva] != 0xe8u) {
+        return FALSE;
+    }
+    memcpy(&displacement, base + call_rva + 1u, sizeof(displacement));
+    return base + call_rva + 5u + displacement == base + target_rva;
+}
+
+static BOOL quick_menu_owner_signatures_match(uint8_t *base) {
+    uint32_t relocated_address;
+    unsigned int index;
+
+    if (base == NULL ||
+        memcmp(
+            base + RVA_QUICK_MENU_INPUT,
+            expected_quick_menu_input_entry,
+            sizeof(expected_quick_menu_input_entry)) != 0 ||
+        memcmp(
+            base + RVA_QUICK_MENU_CLOSE,
+            expected_quick_menu_close_prefix,
+            sizeof(expected_quick_menu_close_prefix)) != 0 ||
+        memcmp(
+            base + RVA_QUICK_MENU_CLOSE + 7u,
+            expected_quick_menu_close_suffix,
+            sizeof(expected_quick_menu_close_suffix)) != 0 ||
+        base[RVA_QUICK_MENU_START] != 0xa1u ||
+        memcmp(
+            base + RVA_QUICK_MENU_START + 5u,
+            expected_quick_menu_start_suffix,
+            sizeof(expected_quick_menu_start_suffix)) != 0 ||
+        memcmp(
+            base + RVA_QUICK_MENU_NATIVE_TOGGLE,
+            expected_quick_menu_native_toggle_entry,
+            sizeof(expected_quick_menu_native_toggle_entry)) != 0 ||
+        memcmp(
+            base + RVA_HUD_PARTY_POINTER_COPY,
+            expected_hud_party_pointer_copy_entry,
+            sizeof(expected_hud_party_pointer_copy_entry)) != 0 ||
+        memcmp(
+            base + RVA_TRACKED_ENTITY_CLEANUP,
+            expected_tracked_entity_cleanup_entry,
+            sizeof(expected_tracked_entity_cleanup_entry)) != 0 ||
+        *(void **)(base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+            base + RVA_QUICK_MENU_INPUT ||
+        !relative_call_targets_rva(
+            base,
+            RVA_QUICK_MENU_NATIVE_TOGGLE_CALL,
+            RVA_QUICK_MENU_NATIVE_TOGGLE) ||
+        !relative_call_targets_rva(
+            base,
+            RVA_QUICK_MENU_OWNER_COPY_DEFAULT_RECIPIENT,
+            RVA_HUD_PARTY_POINTER_COPY)) {
+        return FALSE;
+    }
+    memcpy(
+        &relocated_address,
+        base + RVA_QUICK_MENU_CLOSE +
+            sizeof(expected_quick_menu_close_prefix),
+        sizeof(relocated_address));
+    if (relocated_address !=
+            (uint32_t)(uintptr_t)(base + RVA_QUICK_MENU_GLOBAL)) {
+        return FALSE;
+    }
+    memcpy(
+        &relocated_address,
+        base + RVA_QUICK_MENU_START + 1u,
+        sizeof(relocated_address));
+    if (relocated_address !=
+            (uint32_t)(uintptr_t)(base + RVA_WORLD_SCENE_GLOBAL)) {
+        return FALSE;
+    }
+    for (index = 0u; index < QUICK_MENU_OWNER_COPY_HOOK_COUNT; ++index) {
+        if (!relative_call_targets_rva(
+                base,
+                quick_menu_owner_copy_call_rvas[index],
+                RVA_HUD_PARTY_POINTER_COPY)) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
 
 static BOOL quick_menu_is_active_signature_matches(uint8_t *base) {
     uint32_t relocated_singleton_address;
@@ -2953,10 +3157,11 @@ unsigned int SudekiMpSplitScreenQuickMenuIsolationBeginState(
 
 unsigned int SudekiMpSplitScreenQuickMenuIsolationEndState(
     unsigned int state,
-    BOOL quick_menu_submit_seen
+    BOOL quick_menu_submit_seen,
+    BOOL owner_frame_captured
 ) {
     if (state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL &&
-        !quick_menu_submit_seen) {
+        !quick_menu_submit_seen && owner_frame_captured) {
         return SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
     }
     return state;
@@ -2969,19 +3174,43 @@ unsigned int SudekiMpSplitScreenQuickMenuIsolationCancelState(
         SUDEKIMP_QUICK_MENU_ISOLATION_IDLE;
 }
 
+BOOL SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+    BOOL isolation_in_progress,
+    BOOL owner_valid,
+    BOOL owner_player_two,
+    BOOL fallback_player_two
+) {
+    return isolation_in_progress && owner_valid ? owner_player_two :
+        fallback_player_two;
+}
+
 BOOL SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
     BOOL isolation_in_progress,
     BOOL render_phase_confirmed,
-    BOOL player_two_expected,
+    BOOL owner_valid,
+    BOOL owner_player_two,
     BOOL player_two_rendered
 ) {
-    /* Quick Menu submits after the active viewport's scene flush.  The
-     * queued payload is consumed by the next viewport's flush, so suppress
-     * the P1 submit to keep the following P2 cache free of menu UI. */
+    /* The native Quick Menu root mixes current-frame presentation with text
+     * queued for a later CUIScene flush.  Its owning viewport is pinned for
+     * the complete open/tail session, so reject any non-owner invocation and
+     * let both portions land in consecutive frames of the same owner cache. */
     return isolation_in_progress &&
         render_phase_confirmed &&
-        !player_two_expected &&
-        !player_two_rendered;
+        owner_valid &&
+        player_two_rendered != owner_player_two;
+}
+
+BOOL SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+    BOOL isolation_in_progress,
+    BOOL owner_valid,
+    BOOL owner_player_two,
+    BOOL player_two_rendered,
+    BOOL capture_allowed,
+    BOOL compose_succeeded
+) {
+    return isolation_in_progress && owner_valid && capture_allowed &&
+        compose_succeeded && player_two_rendered == owner_player_two;
 }
 
 BOOL SudekiMpSplitScreenMinimapOwnerIsPlayerTwo(
@@ -3129,12 +3358,305 @@ static void trace_quick_menu_owner_state(void *quick_menu) {
     );
 }
 
+static void reset_quick_menu_owner_session(void) {
+    if ((quick_menu_session.held_party_source[0] != 0u ||
+         quick_menu_session.held_party_source[1] != 0u ||
+         quick_menu_session.held_party_source[2] != 0u) &&
+        quick_menu_party_pointer_cleanup != NULL) {
+        quick_menu_party_pointer_cleanup(
+            quick_menu_session.held_party_source);
+    }
+    ZeroMemory(&quick_menu_session, sizeof(quick_menu_session));
+    quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_IDLE;
+    quick_menu_owner_session_valid = FALSE;
+    quick_menu_owner_character = NULL;
+    quick_menu_owner_player_two = FALSE;
+    quick_menu_owner_session_logged = FALSE;
+}
+
+static uint8_t *quick_menu_current_group(void) {
+    uint8_t *group;
+
+    if (game_base == NULL || !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL,
+            sizeof(group))) {
+        return NULL;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    return group != NULL && readable_memory(
+            group + PARTY_SLOT_ZERO_OFFSET,
+            PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE) ? group : NULL;
+}
+
+static uint8_t *quick_menu_unique_party_source(
+    uint8_t *group,
+    void *actor
+) {
+    uint8_t *resolved = NULL;
+    unsigned int matches = 0u;
+    unsigned int index;
+
+    if (group == NULL || actor == NULL || !readable_memory(
+            group + PARTY_SLOT_ZERO_OFFSET,
+            PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
+        return NULL;
+    }
+    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+        uint8_t *candidate = group + PARTY_SLOT_ZERO_OFFSET +
+            index * PARTY_SLOT_STRIDE;
+        if (*(void **)candidate == actor) {
+            resolved = candidate;
+            ++matches;
+        }
+    }
+    return matches == 1u ? resolved : NULL;
+}
+
+static BOOL quick_menu_retain_party_source(
+    const void *source,
+    const void *actor
+) {
+    void *destination = quick_menu_session.held_party_source;
+    void *native_source = (void *)source;
+
+    if (source == NULL || actor == NULL ||
+        original_hud_party_pointer_copy == NULL ||
+        quick_menu_party_pointer_cleanup == NULL ||
+        quick_menu_session.held_party_source[0] != 0u ||
+        quick_menu_session.held_party_source[1] != 0u ||
+        quick_menu_session.held_party_source[2] != 0u) {
+        return FALSE;
+    }
+    __asm__ volatile(
+        "call *%[copy]"
+        : "+a"(destination), "+c"(native_source)
+        : [copy] "r"(original_hud_party_pointer_copy)
+        : "edx", "memory", "cc"
+    );
+    if ((void *)(uintptr_t)quick_menu_session.held_party_source[0] != actor) {
+        quick_menu_party_pointer_cleanup(
+            quick_menu_session.held_party_source);
+        ZeroMemory(
+            quick_menu_session.held_party_source,
+            sizeof(quick_menu_session.held_party_source));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static uint8_t *quick_menu_held_party_source(void) {
+    return (void *)(uintptr_t)quick_menu_session.held_party_source[0] ==
+            quick_menu_session.actor ?
+        (uint8_t *)quick_menu_session.held_party_source : NULL;
+}
+
+static void quick_menu_publish_owner_session(void) {
+    quick_menu_owner_session_valid =
+        quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE;
+    quick_menu_owner_character = quick_menu_session.actor;
+    quick_menu_owner_player_two = quick_menu_session.owner_seat == 1u;
+    if (quick_menu_owner_session_valid && !quick_menu_owner_session_logged) {
+        quick_menu_owner_session_logged = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=quick_menu_owner_session owner=player_%u serial=%lu character=0x%08lx actor_generation=%lu input=0x%08lx camera=0x%08lx render_state=0x%08lx policy=serialized_native_skills_owner_pinned_no_group_or_controller_write\r\n",
+            quick_menu_session.owner_seat + 1u,
+            (unsigned long)quick_menu_session.serial,
+            (unsigned long)(uintptr_t)quick_menu_session.actor,
+            (unsigned long)quick_menu_session.actor_generation,
+            (unsigned long)(uintptr_t)quick_menu_session.input_identity,
+            (unsigned long)(uintptr_t)quick_menu_session.camera,
+            (unsigned long)(uintptr_t)quick_menu_session.render_state
+        );
+    }
+}
+
+static BOOL quick_menu_capture_seat_session(
+    unsigned int seat_index,
+    SudekiMpQuickMenuSessionPhase phase
+) {
+    SudekiMpPlayerStatehood *statehood;
+    const SudekiMpPlayerLease *lease;
+    SudekiMpPlayerCombatSnapshot combat;
+    uint8_t *group;
+    void *actor;
+    void *camera;
+    void *render_state;
+    void *input_identity;
+    void *native_menu;
+    uint8_t *party_source;
+
+    if (seat_index >= 2u || !split_screen_render_installed ||
+        !runtime_split_enabled || !quick_menu_live_player_two_ready()) {
+        return FALSE;
+    }
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    lease = statehood == NULL ? NULL : &statehood->players[seat_index];
+    if (lease == NULL || !lease->human_present || lease->actor == 0u ||
+        lease->actor_generation == 0u ||
+        !SudekiMpCombatContextGetSnapshot(seat_index, &combat)) {
+        return FALSE;
+    }
+    actor = seat_index == 0u ? player_one_character : player_two_character;
+    camera = seat_index == 0u ? player_one_camera : player_two_camera;
+    render_state = seat_index == 0u ?
+        player_one_render_state : player_two_render_state;
+    input_identity = combat.input_source;
+    if (actor == NULL || camera == NULL || render_state == NULL ||
+        input_identity == NULL || lease->actor != (uintptr_t)actor ||
+        combat.character != actor || combat.viewport_camera != camera ||
+        combat.render_state != render_state ||
+        (seat_index == 0u &&
+         combat.input_source_kind !=
+            SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER) ||
+        (seat_index == 1u &&
+         (combat.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+          !SudekiMpControlSeparationPlayerTwoActive() ||
+          !SudekiMpControlSeparationInputReady() ||
+          input_identity != (void *)SudekiMpInputBridgeIdentity()))) {
+        return FALSE;
+    }
+    group = quick_menu_current_group();
+    native_menu = quick_menu_singleton();
+    party_source = quick_menu_unique_party_source(group, actor);
+    if (group == NULL || native_menu == NULL ||
+        party_source == NULL) {
+        return FALSE;
+    }
+    ++quick_menu_next_serial;
+    if (quick_menu_next_serial == 0u) {
+        ++quick_menu_next_serial;
+    }
+    ZeroMemory(&quick_menu_session, sizeof(quick_menu_session));
+    quick_menu_session.phase = phase;
+    quick_menu_session.owner_seat = seat_index;
+    quick_menu_session.serial = quick_menu_next_serial;
+    quick_menu_session.actor = actor;
+    quick_menu_session.actor_generation = lease->actor_generation;
+    quick_menu_session.input_identity = input_identity;
+    /* The legacy bridge exposes a stable identity and live-ready predicate,
+     * but no generation. Zero records that limitation honestly. */
+    quick_menu_session.input_generation = 0u;
+    quick_menu_session.camera = camera;
+    quick_menu_session.render_state = render_state;
+    quick_menu_session.native_menu = native_menu;
+    quick_menu_session.group = group;
+    if (!quick_menu_retain_party_source(party_source, actor)) {
+        reset_quick_menu_owner_session();
+        return FALSE;
+    }
+    quick_menu_publish_owner_session();
+    return TRUE;
+}
+
+static BOOL quick_menu_session_lease_valid(
+    BOOL require_open,
+    BOOL require_skills
+) {
+    SudekiMpPlayerStatehood *statehood;
+    const SudekiMpPlayerLease *lease;
+    SudekiMpPlayerCombatSnapshot combat;
+    uint8_t *menu = (uint8_t *)quick_menu_session.native_menu;
+    uint8_t *group;
+    unsigned int seat_index = quick_menu_session.owner_seat;
+
+    if (quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE ||
+        seat_index >= 2u || !quick_menu_owner_session_valid ||
+        menu == NULL || menu != quick_menu_singleton() ||
+        !readable_memory(
+            menu,
+            QUICK_MENU_CATEGORY_OFFSET + sizeof(uint32_t))) {
+        return FALSE;
+    }
+    statehood = SudekiMpPlayerStatehoodRuntime();
+    lease = statehood == NULL ? NULL : &statehood->players[seat_index];
+    group = quick_menu_current_group();
+    if (lease == NULL || !lease->human_present ||
+        lease->actor != (uintptr_t)quick_menu_session.actor ||
+        lease->actor_generation != quick_menu_session.actor_generation ||
+        group == NULL || group != quick_menu_session.group ||
+        quick_menu_unique_party_source(group, quick_menu_session.actor) == NULL ||
+        !SudekiMpCombatContextGetSnapshot(seat_index, &combat) ||
+        combat.character != quick_menu_session.actor ||
+        combat.input_source != quick_menu_session.input_identity ||
+        combat.viewport_camera != quick_menu_session.camera ||
+        combat.render_state != quick_menu_session.render_state ||
+        (seat_index == 0u &&
+         (quick_menu_session.actor != player_one_character ||
+          quick_menu_session.camera != player_one_camera ||
+          quick_menu_session.render_state != player_one_render_state ||
+          combat.input_source_kind !=
+            SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER)) ||
+        (seat_index == 1u &&
+         (quick_menu_session.actor != player_two_character ||
+          quick_menu_session.camera != player_two_camera ||
+          quick_menu_session.render_state != player_two_render_state ||
+          combat.input_source_kind !=
+            SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+          !SudekiMpControlSeparationPlayerTwoActive() ||
+          !SudekiMpControlSeparationInputReady() ||
+          quick_menu_session.input_identity !=
+            (void *)SudekiMpInputBridgeIdentity())) ||
+        (require_open && menu[QUICK_MENU_ACTIVE_OFFSET] == 0u) ||
+        (require_skills && seat_index == 1u && *(uint32_t *)(menu +
+            QUICK_MENU_CATEGORY_OFFSET) != QUICK_MENU_SKILLS_CATEGORY)) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void quick_menu_quarantine(const char *reason) {
+    if (quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE ||
+        quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_CLOSING) {
+        return;
+    }
+    quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_QUARANTINED;
+    if (!quick_menu_session.quarantine_logged) {
+        quick_menu_session.quarantine_logged = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=quick_menu_owner_session phase=quarantined owner=player_%u serial=%lu reason=%s policy=close_before_next_render_held_owner_reference_preferred_original_only_after_actor_invalidation\r\n",
+            quick_menu_session.owner_seat + 1u,
+            (unsigned long)quick_menu_session.serial,
+            reason == NULL ? "lease_invalid" : reason
+        );
+    }
+}
+
+static BOOL quick_menu_seat_one_owns_native_input(void) {
+    return quick_menu_owner_session_valid &&
+        quick_menu_session.owner_seat == 1u &&
+        quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE;
+}
+
+static void quick_menu_close_quarantined(void) {
+    if (quick_menu_session.phase !=
+            SUDEKIMP_QUICK_MENU_SESSION_QUARANTINED ||
+        quick_menu_close == NULL) {
+        return;
+    }
+    quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_CLOSING;
+    if (genuine_quick_menu_visible()) {
+        (void)quick_menu_close();
+    }
+}
+
 static void quick_menu_latch_owner_from_controller(void) {
     uint8_t *controller;
     void *target = NULL;
 
-    if (quick_menu_owner_session_valid || game_base == NULL ||
-        !readable_memory(
+    if (quick_menu_owner_session_valid) {
+        if (quick_menu_session.phase ==
+                SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED) {
+            if (quick_menu_session_lease_valid(TRUE, TRUE)) {
+                quick_menu_session.phase =
+                    SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN;
+            } else {
+                quick_menu_quarantine("pending_owner_lease_invalid_on_open");
+            }
+        }
+        return;
+    }
+    if (game_base == NULL || !readable_memory(
             game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
             sizeof(controller))) {
         return;
@@ -3146,52 +3668,330 @@ static void quick_menu_latch_owner_from_controller(void) {
         return;
     }
     target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
-    if (target == NULL ||
-        (target != player_one_character && target != player_two_character)) {
+    /* A native open without an explicit request is owned by P1. Controller
+     * target is only an identity check; it is never changed to manufacture
+     * ownership for another seat. */
+    if (target != player_one_character ||
+        !quick_menu_capture_seat_session(
+            0u,
+            SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN)) {
         return;
     }
-    quick_menu_owner_character = target;
-    quick_menu_owner_player_two = target == player_two_character;
-    quick_menu_owner_session_valid = TRUE;
-    if (!quick_menu_owner_session_logged) {
-        quick_menu_owner_session_logged = TRUE;
-        SudekiMpLogFormat(
-            "split_screen_render event=quick_menu_owner_session owner=%s character=0x%08lx policy=owner_submit_suppressed_next_viewport_payload_only_no_controller_or_loadout_mutation\r\n",
-            quick_menu_owner_player_two ? "player_two" : "player_one",
-            (unsigned long)(uintptr_t)quick_menu_owner_character
+}
+
+static void quick_menu_service_owner_session(BOOL native_visible) {
+    if (!quick_menu_owner_session_valid ||
+        quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE) {
+        return;
+    }
+    if (quick_menu_session.phase ==
+            SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN) {
+        if (!native_visible) {
+            quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_CLOSING;
+        } else if (!quick_menu_session_lease_valid(TRUE, TRUE)) {
+            quick_menu_quarantine(
+                "frame_owner_lease_or_skills_category_invalid");
+        }
+    } else if (quick_menu_session.phase ==
+                   SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED &&
+               native_visible) {
+        quick_menu_latch_owner_from_controller();
+    }
+    quick_menu_close_quarantined();
+}
+
+BOOL SudekiMpSplitScreenQuickMenuRequest(unsigned int seat_index) {
+    if (seat_index >= 2u || quick_menu_start == NULL ||
+        quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE ||
+        genuine_quick_menu_visible() ||
+        (seat_index == 1u &&
+         (!runtime_authorized_at_render_start ||
+          !SudekiMpSplitScreenRuntimeAuthorized() ||
+          pc_quit_screen_visible() ||
+          SudekiMpSplitScreenSharedInteractionModalActive() ||
+          current_spirit_presentation_state() != 0 ||
+          player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH)) ||
+        !quick_menu_capture_seat_session(
+            seat_index,
+            SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED)) {
+        return FALSE;
+    }
+    quick_menu_start();
+    if (quick_menu_session.phase ==
+            SUDEKIMP_QUICK_MENU_SESSION_QUARANTINED) {
+        quick_menu_close_quarantined();
+        reset_quick_menu_owner_session();
+        return FALSE;
+    }
+    if (!genuine_quick_menu_visible() ||
+        !quick_menu_session_lease_valid(TRUE, TRUE)) {
+        if (genuine_quick_menu_visible() && quick_menu_close != NULL) {
+            quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_CLOSING;
+            (void)quick_menu_close();
+        }
+        reset_quick_menu_owner_session();
+        return FALSE;
+    }
+    quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN;
+    SudekiMpLogFormat(
+        "split_screen_render event=quick_menu_request owner=player_%u serial=%lu status=opened category=skills policy=one_native_singleton_no_queue\r\n",
+        seat_index + 1u,
+        (unsigned long)quick_menu_session.serial
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenQuickMenuActive(unsigned int seat_index) {
+    if (seat_index >= 2u || !quick_menu_owner_session_valid ||
+        quick_menu_session.owner_seat != seat_index ||
+        quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE) {
+        return FALSE;
+    }
+    if ((quick_menu_session.phase ==
+            SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED ||
+         quick_menu_session.phase ==
+            SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN) &&
+        genuine_quick_menu_visible() &&
+        !quick_menu_session_lease_valid(TRUE, TRUE)) {
+        quick_menu_quarantine("active_owner_lease_or_skills_category_invalid");
+    }
+    /* Ownership remains modal through quarantine/close so gameplay cannot
+     * resume behind a still-visible singleton.  Submit separately requires
+     * NATIVE_OPEN and therefore stays fail closed. */
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenQuickMenuAnyActive(void) {
+    /* A native P1 open can occur during the controller update before the
+     * following RenderStart has captured its serialized owner.  Treat the
+     * singleton's exact visible edge as modal immediately so P2 cannot act
+     * behind the owner-pinned viewport during that one-frame handoff. */
+    return genuine_quick_menu_visible() ||
+        (quick_menu_owner_session_valid &&
+         quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE);
+}
+
+BOOL SudekiMpSplitScreenQuickMenuSubmit(
+    unsigned int seat_index,
+    SudekiMpSplitScreenQuickMenuAction action
+) {
+    unsigned int command;
+    uint8_t handled;
+    BOOL close_requested = FALSE;
+
+    switch (action) {
+    case SUDEKIMP_QUICK_MENU_ACTION_CONFIRM:
+        command = QUICK_MENU_COMMAND_CONFIRM;
+        break;
+    case SUDEKIMP_QUICK_MENU_ACTION_CANCEL:
+        command = QUICK_MENU_COMMAND_CANCEL;
+        close_requested = TRUE;
+        break;
+    case SUDEKIMP_QUICK_MENU_ACTION_SECONDARY:
+        /* QuickMenu command 2 reaches the same activation branch as confirm;
+         * it is not an independent Skills action. */
+        return FALSE;
+    case SUDEKIMP_QUICK_MENU_ACTION_UP:
+        command = QUICK_MENU_COMMAND_UP;
+        break;
+    case SUDEKIMP_QUICK_MENU_ACTION_DOWN:
+        command = QUICK_MENU_COMMAND_DOWN;
+        break;
+    default:
+        return FALSE;
+    }
+    if (!SudekiMpSplitScreenQuickMenuActive(seat_index) ||
+        quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN ||
+        !genuine_quick_menu_visible() ||
+        (close_requested ? quick_menu_close == NULL :
+            original_quick_menu_input == NULL)) {
+        return FALSE;
+    }
+    if (close_requested) {
+        /* Command 11's release branch is animation-state dependent.  The
+         * native close helper performs its event-4 lifecycle and close
+         * synchronously, while CLOSING keeps every owner copy pinned. */
+        quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_CLOSING;
+        (void)quick_menu_close();
+        return TRUE;
+    }
+    handled = original_quick_menu_input(
+        quick_menu_session.native_menu,
+        QUICK_MENU_INPUT_EVENT_DOWN,
+        command,
+        1u
+    );
+    (void)original_quick_menu_input(
+        quick_menu_session.native_menu,
+        QUICK_MENU_INPUT_EVENT_UP,
+        command,
+        0u
+    );
+    if (!genuine_quick_menu_visible()) {
+        quick_menu_session.phase = SUDEKIMP_QUICK_MENU_SESSION_CLOSING;
+    }
+    return handled != 0u;
+}
+
+static uint8_t SUDEKIMP_THISCALL route_quick_menu_input(
+    void *quick_menu,
+    unsigned int event_kind,
+    unsigned int command,
+    unsigned int value
+) {
+    if (quick_menu == quick_menu_session.native_menu &&
+        quick_menu_seat_one_owns_native_input() &&
+        (event_kind == QUICK_MENU_INPUT_EVENT_DOWN ||
+         event_kind == QUICK_MENU_INPUT_EVENT_UP ||
+         event_kind == QUICK_MENU_INPUT_EVENT_POINTER)) {
+        return 1u;
+    }
+    return original_quick_menu_input == NULL ? 0u :
+        original_quick_menu_input(
+            quick_menu,
+            event_kind,
+            command,
+            value
         );
-    }
 }
 
-static void suppress_quick_menu_non_owner_render(void) {
-    uint8_t *quick_menu;
-
-    if (quick_menu_non_owner_render_suppression_active) {
-        return;
-    }
-    quick_menu = (uint8_t *)quick_menu_singleton();
-    if (quick_menu == NULL || !readable_memory(quick_menu, 0x3cu)) {
-        return;
-    }
-    quick_menu_non_owner_render_object = quick_menu;
-    quick_menu_non_owner_render_saved_state =
-        *(uint32_t *)(quick_menu + 0x38u);
-    *(uint32_t *)(quick_menu + 0x38u) = 1u;
-    quick_menu_non_owner_render_suppression_active = TRUE;
+BOOL SudekiMpSplitScreenQuickMenuNativeToggleSuppressed(void) {
+    return quick_menu_seat_one_owns_native_input();
 }
 
-static void restore_quick_menu_non_owner_render(void) {
-    if (!quick_menu_non_owner_render_suppression_active) {
-        return;
+__attribute__((naked, noinline, used))
+static void quick_menu_native_toggle_entry(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "call _SudekiMpSplitScreenQuickMenuNativeToggleSuppressed\n\t"
+        "testl %eax, %eax\n\t"
+        "popl %eax\n\t"
+        "jnz 1f\n\t"
+        "call *_original_quick_menu_native_toggle\n\t"
+        "ret\n\t"
+        "1:\n\t"
+        "xorl %eax, %eax\n\t"
+        "ret\n\t"
+    );
+}
+
+static void *quick_menu_owner_source_dispatch(
+    void *source,
+    BOOL default_recipient
+) {
+    uint8_t *group;
+    uint8_t *owner_source;
+    uint8_t *menu = (uint8_t *)quick_menu_session.native_menu;
+
+    if (!quick_menu_owner_session_valid ||
+        quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE) {
+        return source;
     }
-    if (quick_menu_non_owner_render_object != NULL &&
-        readable_memory(quick_menu_non_owner_render_object, 0x3cu)) {
-        *(uint32_t *)((uint8_t *)quick_menu_non_owner_render_object + 0x38u) =
-            quick_menu_non_owner_render_saved_state;
+    if (quick_menu_session.owner_seat == 0u) {
+        return source;
     }
-    quick_menu_non_owner_render_object = NULL;
-    quick_menu_non_owner_render_saved_state = 0u;
-    quick_menu_non_owner_render_suppression_active = FALSE;
+    if (default_recipient &&
+        (!readable_memory(
+            menu,
+            QUICK_MENU_DEFAULT_RECIPIENT_OFFSET + sizeof(int32_t)) ||
+         *(int32_t *)(menu + QUICK_MENU_DEFAULT_RECIPIENT_OFFSET) >= 0)) {
+        return source;
+    }
+    group = quick_menu_current_group();
+    owner_source = quick_menu_unique_party_source(
+        group,
+        quick_menu_session.actor
+    );
+    if (group == NULL || group != quick_menu_session.group ||
+        source != group + PARTY_SLOT_ZERO_OFFSET) {
+        quick_menu_quarantine("native_owner_source_or_group_mismatch");
+    }
+    if (owner_source == NULL) {
+        quick_menu_quarantine("owner_actor_party_slot_not_unique");
+        owner_source = quick_menu_held_party_source();
+    }
+    /* Native Close clears menu+0x29 before its SetUIActive(false) owner copy.
+     * Therefore this path deliberately depends only on the captured
+     * actor/group/unique-slot identity, never active/category/input/view
+     * state.  CLOSING and QUARANTINED still complete against the same real
+     * 12-byte party slot instead of falling back to the front actor. */
+    if (owner_source == NULL) {
+        quick_menu_quarantine("held_owner_reference_invalid");
+        /* Actor destruction invalidates every intrusive observer.  The menu
+         * is already quarantined for close at the next pre-render boundary;
+         * preserve native memory safety for this in-flight call. */
+        return source;
+    }
+    return owner_source;
+}
+
+void *SudekiMpSplitScreenQuickMenuOwnerSourceDispatch(void *source) {
+    return quick_menu_owner_source_dispatch(source, FALSE);
+}
+
+void *SudekiMpSplitScreenQuickMenuDefaultSourceDispatch(void *source) {
+    return quick_menu_owner_source_dispatch(source, TRUE);
+}
+
+__attribute__((naked, noinline, used))
+static void quick_menu_owner_pointer_copy_entry(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "pushl %ecx\n\t"
+        "call _SudekiMpSplitScreenQuickMenuOwnerSourceDispatch\n\t"
+        "addl $4, %esp\n\t"
+        "movl %eax, %ecx\n\t"
+        "popl %eax\n\t"
+        "call *_original_hud_party_pointer_copy\n\t"
+        "ret\n\t"
+    );
+}
+
+__attribute__((naked, noinline, used))
+static void quick_menu_owner_default_pointer_copy_entry(void) {
+    __asm__ volatile(
+        "pushl %eax\n\t"
+        "pushl %ecx\n\t"
+        "call _SudekiMpSplitScreenQuickMenuDefaultSourceDispatch\n\t"
+        "addl $4, %esp\n\t"
+        "movl %eax, %ecx\n\t"
+        "popl %eax\n\t"
+        "call *_original_hud_party_pointer_copy\n\t"
+        "ret\n\t"
+    );
+}
+
+static BOOL install_quick_menu_owner_hooks(void) {
+    unsigned int index;
+
+    if (!SudekiMpInstallPointerHook(
+            &quick_menu_input_hook,
+            (void **)(game_base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT),
+            original_quick_menu_input,
+            route_quick_menu_input) ||
+        !SudekiMpInstallRelativeCallHook(
+            &quick_menu_native_toggle_hook,
+            game_base + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL,
+            original_quick_menu_native_toggle,
+            quick_menu_native_toggle_entry)) {
+        return FALSE;
+    }
+    for (index = 0u; index < QUICK_MENU_OWNER_COPY_HOOK_COUNT; ++index) {
+        if (!SudekiMpInstallRelativeCallHook(
+                &quick_menu_owner_copy_hooks[index],
+                game_base + quick_menu_owner_copy_call_rvas[index],
+                original_hud_party_pointer_copy,
+                quick_menu_owner_pointer_copy_entry)) {
+            return FALSE;
+        }
+    }
+    return SudekiMpInstallRelativeCallHook(
+        &quick_menu_owner_default_recipient_hook,
+        game_base + RVA_QUICK_MENU_OWNER_COPY_DEFAULT_RECIPIENT,
+        original_hud_party_pointer_copy,
+        quick_menu_owner_default_pointer_copy_entry
+    );
 }
 
 static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
@@ -3207,17 +4007,17 @@ static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
          quick_menu_isolation_active ||
          quick_menu_isolation_tail_active)) {
         quick_menu_latch_owner_from_controller();
-        /* The native menu is a sequence of independent submissions: shell,
-         * labels, descriptions, values, and selection state.  Every one must
-         * reach the owning viewport.  The non-owner viewport is isolated at
-         * its render window by suppress_quick_menu_non_owner_render(), so
-         * filtering individual owner submissions would leave a shell with
-         * missing text. */
         trace_quick_menu_owner_state(quick_menu);
         quick_menu_submit_seen_since_frame_end = TRUE;
-        suppress_this_submit = quick_menu_owner_session_valid ?
-            (rendered_player_two_this_frame == quick_menu_owner_player_two) :
-            suppress_quick_menu_render_submit_this_frame;
+        suppress_this_submit =
+            SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
+                quick_menu_isolation_active ||
+                    quick_menu_isolation_tail_active,
+                quick_menu_render_phase_confirmed_this_frame,
+                quick_menu_owner_session_valid,
+                quick_menu_owner_player_two,
+                rendered_player_two_this_frame
+            );
     }
     if (would_submit &&
         suppress_this_submit &&
@@ -3229,7 +4029,7 @@ static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
         if (!quick_menu_render_submit_isolation_logged) {
             quick_menu_render_submit_isolation_logged = TRUE;
             SudekiMpLogFormat(
-                "split_screen_render event=quick_menu_render_submit_isolation phase=active render_submit_rva=0x%08lx render_submit_vtable_slot_rva=0x%08lx policy=allow_submit_after_player_two_render_for_next_player_one_frame_suppress_after_player_one_render_for_next_player_two_frame_native_ui_queue_drain_unchanged\r\n",
+                "split_screen_render event=quick_menu_render_submit_isolation phase=active render_submit_rva=0x%08lx render_submit_vtable_slot_rva=0x%08lx policy=allow_owner_only_pin_same_owner_for_current_and_next_frame_payload\r\n",
                 (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT,
                 (unsigned long)RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT
             );
@@ -9869,9 +10669,9 @@ static void log_quick_menu_gate(BOOL visible, BOOL live_player_two_ready) {
     }
     quick_menu_gate_last_state = state;
     SudekiMpLogFormat(
-        "split_screen_render event=quick_menu_gate state=%s player_two_mode=%s policy=player_one_native_menu_ui_plus_live_player_two_world_when_existing_camera_and_both_frame_caches_are_valid_otherwise_preserve_last_player_two_world_frame\r\n",
+        "split_screen_render event=quick_menu_gate state=%s isolation_mode=%s policy=pin_native_menu_owner_cache_for_current_and_queued_ui_preserve_non_owner_clean_cache\r\n",
         visible ? "active" : "inactive",
-        visible ? (live_player_two_ready ? "live_world_no_ui" :
+        visible ? (live_player_two_ready ? "owner_pinned" :
             "frozen_cache_fallback") : "not_applicable"
     );
 }
@@ -10620,6 +11420,10 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     ++split_render_frame_sequence;
     runtime_authorized = SudekiMpSplitScreenRuntimeAuthorized();
     runtime_authorized_at_render_start = runtime_authorized;
+    /* This is the last guaranteed boundary before the native frame begins.
+     * Quarantine closes here so no UI-tree teardown occurs inside the native
+     * render transaction. */
+    quick_menu_service_owner_session(genuine_quick_menu_visible());
 
     /*
      * Keep the ranged trace useful when the split-camera ownership is
@@ -10673,19 +11477,10 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
         genuine_quick_menu_is_visible &&
         !quick_menu_genuine_visible_previous_frame;
     if (genuine_quick_menu_rising_edge) {
-        quick_menu_owner_session_valid = FALSE;
-        quick_menu_owner_character = NULL;
-        quick_menu_owner_player_two = FALSE;
-        quick_menu_owner_session_logged = FALSE;
-        quick_menu_owner_submit_primed = FALSE;
+        /* An explicit P2 request captures its owner before UIStart.  Preserve
+         * that pending lease across the native visible edge; only a native
+         * no-request open is inferred from P1's unchanged controller target. */
         quick_menu_latch_owner_from_controller();
-    } else if (!genuine_quick_menu_is_visible &&
-               quick_menu_genuine_visible_previous_frame) {
-        quick_menu_owner_session_valid = FALSE;
-        quick_menu_owner_character = NULL;
-        quick_menu_owner_player_two = FALSE;
-        quick_menu_owner_session_logged = FALSE;
-        quick_menu_owner_submit_primed = FALSE;
     }
     isolation_state = quick_menu_isolation_tail_active ?
         SUDEKIMP_QUICK_MENU_ISOLATION_TAIL :
@@ -10699,7 +11494,8 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
         quick_menu_genuine_visible_previous_frame,
         genuine_quick_menu_is_visible,
         genuine_quick_menu_active_this_frame &&
-            quick_menu_live_player_two_ready()
+            quick_menu_live_player_two_ready() &&
+            quick_menu_owner_session_valid
     );
     quick_menu_isolation_active =
         isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_ACTIVE;
@@ -10707,13 +11503,6 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
         isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL;
     quick_menu_isolation_failed_for_open_menu =
         isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_FAILED;
-    if (genuine_quick_menu_rising_edge) {
-        quick_menu_expected_player_two = quick_menu_owner_session_valid ?
-            !quick_menu_owner_player_two : quick_menu_isolation_active;
-    } else if (!quick_menu_isolation_active &&
-               !quick_menu_isolation_tail_active) {
-        quick_menu_expected_player_two = FALSE;
-    }
     if ((quit_menu_visible || spirit_state_active) &&
         (genuine_quick_menu_is_visible ||
          quick_menu_isolation_active ||
@@ -10745,10 +11534,19 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
         quick_menu_expected_player_two = FALSE;
         isolation_in_progress = FALSE;
     }
+    quick_menu_expected_player_two =
+        SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+            isolation_in_progress,
+            quick_menu_owner_session_valid,
+            quick_menu_owner_player_two,
+            FALSE
+        );
     if (isolation_in_progress) {
         player_two_view_requested = quick_menu_expected_player_two;
     } else if (genuine_quick_menu_is_visible) {
         player_two_view_requested = FALSE;
+    } else {
+        reset_quick_menu_owner_session();
     }
     if (player_two_temporary_camera_policy ==
             SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH) {
@@ -10810,13 +11608,6 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
             live_view_allowed = !quit_menu_visible;
         }
     }
-    suppress_quick_menu_render_submit_this_frame =
-        SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
-            quick_menu_live_player_two_available_this_frame,
-            quick_menu_render_phase_confirmed_this_frame,
-            quick_menu_expected_player_two,
-            rendered_player_two_this_frame
-        );
     if (!quit_menu_visible &&
         spirit_strike_viewport_effect_isolation_enabled &&
         routed_camera_effect_active()) {
@@ -10868,6 +11659,7 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     BOOL isolation_in_progress;
     BOOL isolation_tail_active;
     BOOL cached_frame_advanced = TRUE;
+    BOOL owner_capture_advanced = FALSE;
     BOOL isolation_cache_failed = FALSE;
     BOOL minimap_capture_allowed = TRUE;
     BOOL shared_temporary_full_width;
@@ -10882,7 +11674,6 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     restore_player_two_collision_self_cull();
     restore_ranged_model_render_view();
     restore_render_only_camera();
-    restore_quick_menu_non_owner_render();
     original_frame_end();
     shared_modal_observation = refresh_shared_interaction_modal();
     shared_modal_native_full_width = shared_modal_observation !=
@@ -10943,6 +11734,15 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
                 rendered_player_two_this_frame,
                 minimap_capture_allowed
             );
+            owner_capture_advanced =
+                SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+                    isolation_in_progress,
+                    quick_menu_owner_session_valid,
+                    quick_menu_owner_player_two,
+                    rendered_player_two_this_frame,
+                    minimap_capture_allowed,
+                    cached_frame_advanced
+                );
         } else {
             compose_native_frame();
         }
@@ -10995,6 +11795,9 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
         quick_menu_render_phase_confirmed_this_frame = FALSE;
         player_two_view_requested = FALSE;
         isolation_in_progress = FALSE;
+        if (isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_IDLE) {
+            reset_quick_menu_owner_session();
+        }
         SudekiMpLogWrite(
             "split_screen_render event=quick_menu_live_isolation phase=fallback reason=camera_cache_capture_or_compose_failed policy=preserve_last_valid_camera_pair_for_remainder_of_menu\r\n"
         );
@@ -11006,22 +11809,37 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
         quick_menu_live_player_two_available_this_frame &&
         quick_menu_render_phase_confirmed_this_frame &&
         quick_menu_live_player_two_ready()) {
-        /* Keep both viewports alive while the owner menu is open.  The next
-         * render must be the opposite of the viewport that actually rendered
-         * this frame; pinning the schedule to the menu owner starves the
-         * companion camera and makes its character appear frozen. */
-        quick_menu_expected_player_two = !rendered_player_two_this_frame;
+        /* QuickMenu::Render mixes immediately presented UI with text queued
+         * for the next CUIScene flush.  Keep both destinations on the owner
+         * until the close tail observes a submit-free, successfully captured
+         * owner frame.  The non-owner half intentionally retains its last
+         * clean cached world frame for this short native modal session. */
+        quick_menu_expected_player_two =
+            SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+                TRUE,
+                quick_menu_owner_session_valid,
+                quick_menu_owner_player_two,
+                FALSE
+            );
         player_two_view_requested = quick_menu_expected_player_two;
         if (isolation_tail_active) {
             isolation_state =
                 SudekiMpSplitScreenQuickMenuIsolationEndState(
                     SUDEKIMP_QUICK_MENU_ISOLATION_TAIL,
-                    quick_menu_submit_seen_since_frame_end
+                    quick_menu_submit_seen_since_frame_end,
+                    owner_capture_advanced
                 );
             quick_menu_isolation_tail_active =
                 isolation_state == SUDEKIMP_QUICK_MENU_ISOLATION_TAIL;
             if (!quick_menu_isolation_tail_active) {
                 quick_menu_expected_player_two = FALSE;
+                player_two_view_requested =
+                    !rendered_player_two_this_frame;
+                isolation_in_progress = FALSE;
+                reset_quick_menu_owner_session();
+                SudekiMpLogWrite(
+                    "split_screen_render event=quick_menu_live_isolation phase=tail_complete reason=submit_free_owner_frame_captured policy=resume_opposite_viewport_alternation_preserve_clean_non_owner_cache\r\n"
+                );
             }
         }
     } else if (isolation_cache_failed || isolation_in_progress) {
@@ -11031,6 +11849,9 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
             genuine_quick_menu_visible();
         quick_menu_expected_player_two = FALSE;
         player_two_view_requested = FALSE;
+        if (!quick_menu_isolation_failed_for_open_menu) {
+            reset_quick_menu_owner_session();
+        }
     } else if (!quit_menu_visible && !quick_menu_is_visible &&
                !quick_menu_isolation_failed_for_open_menu) {
         poll_second_player_camera(split_allowed);
@@ -11044,7 +11865,6 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     rendered_player_two_this_frame = FALSE;
     genuine_quick_menu_active_this_frame = FALSE;
     quick_menu_live_player_two_available_this_frame = FALSE;
-    suppress_quick_menu_render_submit_this_frame = FALSE;
     quick_menu_render_phase_confirmed_this_frame = FALSE;
     quick_menu_submit_seen_since_frame_end = FALSE;
 }
@@ -12039,13 +12859,14 @@ BOOL SudekiMpInstallSplitScreenRender(
     }
     if (enable_dual_camera_frame_cache) {
         SudekiMpLogFormat(
-            "split_screen_render_preflight portrait_selector=%u quick_submit=%u\r\n",
+            "split_screen_render_preflight portrait_selector=%u quick_submit=%u quick_owner=%u\r\n",
             portrait_selector_signatures_match(base),
             memcmp(
                 base + RVA_QUICK_MENU_RENDER_SUBMIT,
                 expected_quick_menu_render_submit_entry,
                 sizeof(expected_quick_menu_render_submit_entry)
-            ) == 0);
+            ) == 0,
+            quick_menu_owner_signatures_match(base));
     }
     if (enable_second_player_camera) {
         SudekiMpLogFormat(
@@ -12188,6 +13009,7 @@ BOOL SudekiMpInstallSplitScreenRender(
               sizeof(expected_render_locator_index_entry)) != 0)) ||
          (enable_dual_camera_frame_cache &&
           (!portrait_selector_signatures_match(base) ||
+           !quick_menu_owner_signatures_match(base) ||
            memcmp(
               base + RVA_QUICK_MENU_RENDER_SUBMIT,
               expected_quick_menu_render_submit_entry,
@@ -12216,6 +13038,17 @@ BOOL SudekiMpInstallSplitScreenRender(
     quick_menu_is_active = (QuickMenuIsActiveFunction)(
         game_base + RVA_QUICK_MENU_IS_ACTIVE
     );
+    quick_menu_close = enable_dual_camera_frame_cache ?
+        (QuickMenuCloseFunction)(game_base + RVA_QUICK_MENU_CLOSE) : NULL;
+    quick_menu_start = enable_dual_camera_frame_cache ?
+        (QuickMenuStartFunction)(game_base + RVA_QUICK_MENU_START) : NULL;
+    original_quick_menu_input = enable_dual_camera_frame_cache ?
+        (QuickMenuInputFunction)(game_base + RVA_QUICK_MENU_INPUT) : NULL;
+    original_quick_menu_native_toggle = enable_dual_camera_frame_cache ?
+        game_base + RVA_QUICK_MENU_NATIVE_TOGGLE : NULL;
+    quick_menu_party_pointer_cleanup = enable_dual_camera_frame_cache ?
+        (TrackedEntityCleanupFunction)(
+            game_base + RVA_TRACKED_ENTITY_CLEANUP) : NULL;
     shop_is_active = (NativeModalIsActiveFunction)(
         game_base + RVA_SHOP_IS_ACTIVE
     );
@@ -12343,7 +13176,6 @@ BOOL SudekiMpInstallSplitScreenRender(
     shared_interaction_modal_published_kind = SUDEKIMP_INTERACTION_NONE;
     genuine_quick_menu_active_this_frame = FALSE;
     quick_menu_live_player_two_available_this_frame = FALSE;
-    suppress_quick_menu_render_submit_this_frame = FALSE;
     quick_menu_render_submit_isolation_logged = FALSE;
     quick_menu_isolation_active = FALSE;
     quick_menu_isolation_tail_active = FALSE;
@@ -12389,14 +13221,8 @@ BOOL SudekiMpInstallSplitScreenRender(
         sizeof(ranged_model_render_swaps)
     );
     quick_menu_gate_last_state = -1;
-    quick_menu_owner_session_valid = FALSE;
-    quick_menu_owner_character = NULL;
-    quick_menu_owner_player_two = FALSE;
-    quick_menu_owner_session_logged = FALSE;
-    quick_menu_owner_submit_primed = FALSE;
-    quick_menu_non_owner_render_suppression_active = FALSE;
-    quick_menu_non_owner_render_object = NULL;
-    quick_menu_non_owner_render_saved_state = 0u;
+    quick_menu_next_serial = 0u;
+    reset_quick_menu_owner_session();
     spirit_presentation_last_state = -1;
     spirit_presentation_logged_views = 0u;
     spirit_player_two_presentation_last_trace_tick = 0u;
@@ -12452,6 +13278,7 @@ BOOL SudekiMpInstallSplitScreenRender(
                   RVA_QUICK_MENU_RENDER_SUBMIT_VTABLE_SLOT),
               original_quick_menu_render_submit,
               route_quick_menu_render_submit) ||
+          !install_quick_menu_owner_hooks() ||
           !SudekiMpInstallRelativeCallHook(
               &hud_group_values_pointer_hook,
               game_base + RVA_HUD_GROUP_VALUES_POINTER_CALL,
@@ -12513,7 +13340,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     }
     split_screen_render_installed = TRUE;
     SudekiMpLogFormat(
-        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx quick_menu_render_submit_rva=0x%08lx quick_menu_render_submit_vtable_slot_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=player_one_native_menu_plus_live_player_two_world_via_one_frame_submit_cadence shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s viewport_minimap_ownership=%s skill_camera_routing=%s skill_world_time=%s controller_camera=%s native_player_two_camera_collision=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render event=install render_start_rva=0x%08lx render_start_callsite_rva=0x%08lx frame_end_rva=0x%08lx frame_end_callsite_rva=0x%08lx quit_render_rva=0x%08lx quit_render_callsite_rva=0x%08lx quick_menu_render_submit_rva=0x%08lx quick_menu_render_submit_vtable_slot_rva=0x%08lx scope=render_only_camera_swap_plus_post_end_scene_compositor gameplay_state_gated shared_menu_gate=pc_quit_screen_plus_0x1c2 quick_menu_gate=owner_pinned_native_menu_cache_plus_preserved_non_owner_clean_cache shared_menu_backdrop=frozen_cached_camera_pair_before_native_quit_ui layout=left_right camera_policy=%s second_player_named_camera=%s dual_camera_frame_cache=%s viewport_hud_party_slot_swap=%s viewport_hud_portrait_assignment=%s viewport_minimap_ownership=%s skill_camera_routing=%s skill_world_time=%s controller_camera=%s native_player_two_camera_collision=%s ranged_model_isolation=%s spirit_effect_isolation=%s toggle_virtual_key=0x%02lx\r\n",
         (unsigned long)RVA_RENDER_START,
         (unsigned long)RVA_RENDER_START_CALL,
         (unsigned long)RVA_FRAME_END,
@@ -12574,6 +13401,8 @@ BOOL SudekiMpInstallSplitScreenRender(
 }
 
 void SudekiMpUninstallSplitScreenRender(void) {
+    unsigned int quick_menu_hook_index;
+
     split_screen_render_installed = FALSE;
     /* Keep a fail-closed authorization state until both render hooks are
      * restored.  Clearing the optional query first would make the default
@@ -12597,11 +13426,20 @@ void SudekiMpUninstallSplitScreenRender(void) {
     restore_ranged_model_render_view();
     reset_ranged_world_compositor("module_uninstall");
     restore_render_only_camera();
-    restore_quick_menu_non_owner_render();
     SudekiMpRestorePointerHook(&camera_input_event_hook);
     SudekiMpRestorePointerHook(&screenshot_post_render_hook);
     SudekiMpRestorePointerHook(&motion_blur_post_render_hook);
     SudekiMpRestorePointerHook(&quick_menu_render_submit_hook);
+    SudekiMpRestoreRelativeCallHook(
+        &quick_menu_owner_default_recipient_hook);
+    for (quick_menu_hook_index = QUICK_MENU_OWNER_COPY_HOOK_COUNT;
+         quick_menu_hook_index > 0u;
+         --quick_menu_hook_index) {
+        SudekiMpRestoreRelativeCallHook(
+            &quick_menu_owner_copy_hooks[quick_menu_hook_index - 1u]);
+    }
+    SudekiMpRestoreRelativeCallHook(&quick_menu_native_toggle_hook);
+    SudekiMpRestorePointerHook(&quick_menu_input_hook);
     SudekiMpRestoreInlineHook(&set_game_speed_mode_hook);
     SudekiMpRestoreInlineHook(&set_render_camera_hook);
     SudekiMpRestoreRelativeCallHook(&minimap_render_pointer_hook);
@@ -12733,16 +13571,8 @@ void SudekiMpUninstallSplitScreenRender(void) {
     viewport_hud_binding_active = FALSE;
     genuine_quick_menu_active_this_frame = FALSE;
     quick_menu_live_player_two_available_this_frame = FALSE;
-    suppress_quick_menu_render_submit_this_frame = FALSE;
     quick_menu_render_submit_isolation_logged = FALSE;
-    quick_menu_owner_session_valid = FALSE;
-    quick_menu_owner_character = NULL;
-    quick_menu_owner_player_two = FALSE;
-    quick_menu_owner_session_logged = FALSE;
-    quick_menu_owner_submit_primed = FALSE;
-    quick_menu_non_owner_render_suppression_active = FALSE;
-    quick_menu_non_owner_render_object = NULL;
-    quick_menu_non_owner_render_saved_state = 0u;
+    reset_quick_menu_owner_session();
     quick_menu_isolation_active = FALSE;
     quick_menu_isolation_tail_active = FALSE;
     quick_menu_isolation_failed_for_open_menu = FALSE;
@@ -12761,6 +13591,11 @@ void SudekiMpUninstallSplitScreenRender(void) {
     original_quit_screen_render = NULL;
     original_quick_menu_render_submit = NULL;
     quick_menu_is_active = NULL;
+    quick_menu_close = NULL;
+    quick_menu_start = NULL;
+    original_quick_menu_input = NULL;
+    original_quick_menu_native_toggle = NULL;
+    quick_menu_party_pointer_cleanup = NULL;
     shop_is_active = NULL;
     blacksmith_is_active = NULL;
     original_hud_party_pointer_copy = NULL;

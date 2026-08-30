@@ -1803,6 +1803,34 @@ static BOOL controller_intent_is_combat(
         intent == SUDEKIMP_CONTROLLER_INTENT_CROWD_CLEAR_SWEEP;
 }
 
+static BOOL controller_intent_quick_menu_action(
+    SudekiMpControllerActionIntent intent,
+    SudekiMpSplitScreenQuickMenuAction *action
+) {
+    if (action == NULL) {
+        return FALSE;
+    }
+    switch (intent) {
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_CONFIRM:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_CONFIRM;
+        return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_CANCEL:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_CANCEL;
+        return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_SECONDARY:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_SECONDARY;
+        return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_UP:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_UP;
+        return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_DOWN:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_DOWN;
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
 static const char *controller_action_layer_name(
     const SudekiMpControllerActionContext *context
 ) {
@@ -1824,12 +1852,28 @@ static void service_second_player_controller_actions(
         results[SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS];
     size_t result_count;
     size_t result_index;
+    size_t quick_menu_result_index = SIZE_MAX;
+    BOOL seat_quick_menu_active;
+    BOOL any_quick_menu_active;
+    BOOL other_seat_quick_menu_active;
+    BOOL seat_quick_menu_controls_modal;
+    BOOL quick_menu_opened = FALSE;
+    const char *quick_menu_open_reason = "seat_quick_menu_open_rejected";
 
     ZeroMemory(&context, sizeof(context));
+    any_quick_menu_active =
+        SudekiMpSplitScreenQuickMenuAnyActive();
+    seat_quick_menu_active =
+        SudekiMpSplitScreenQuickMenuActive(1u);
+    other_seat_quick_menu_active = any_quick_menu_active &&
+        !seat_quick_menu_active;
+    seat_quick_menu_controls_modal = seat_quick_menu_active &&
+        !modal_active && !transition_vote_active;
     context.seat_active = player_two_requested &&
         overridden_character != NULL &&
         overridden_character_is_in_active_group();
-    context.modal_active = modal_active != FALSE;
+    context.modal_active = modal_active != FALSE ||
+        any_quick_menu_active;
     context.transition_vote_active = transition_vote_active != FALSE;
     context.interaction_target_known =
         second_player_exact_interaction_target_known();
@@ -1851,6 +1895,25 @@ static void service_second_player_controller_actions(
     if (result_count > SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS) {
         result_count = SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS;
     }
+    if (!any_quick_menu_active) {
+        for (result_index = 0u;
+             result_index < result_count;
+             ++result_index) {
+            if (results[result_index].intent ==
+                    SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+                quick_menu_result_index = result_index;
+                break;
+            }
+        }
+    }
+    if (quick_menu_result_index != SIZE_MAX) {
+        if (!owns_foreground) {
+            quick_menu_open_reason = "game_window_not_foreground";
+        } else if (SudekiMpSplitScreenQuickMenuRequest(1u)) {
+            quick_menu_opened = TRUE;
+            quick_menu_open_reason = "seat_quick_menu_opened";
+        }
+    }
     for (result_index = 0u; result_index < result_count; ++result_index) {
         SudekiMpControllerActionResolution *resolution =
             &results[result_index];
@@ -1863,10 +1926,39 @@ static void service_second_player_controller_actions(
         BOOL perspective_first_person = FALSE;
         BOOL perspective_mode_known = FALSE;
 
-        if (resolution->intent == SUDEKIMP_CONTROLLER_INTENT_NONE) {
+        if (other_seat_quick_menu_active) {
+            delivery = "blocked";
+            reason = "other_seat_quick_menu_active";
+        } else if (quick_menu_result_index != SIZE_MAX &&
+            result_index != quick_menu_result_index) {
+            delivery = "blocked";
+            reason = "menu_open_edge_consumed";
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+            delivery = quick_menu_opened ? "submitted" : "rejected";
+            reason = quick_menu_open_reason;
+        } else if (resolution->intent == SUDEKIMP_CONTROLLER_INTENT_NONE) {
             delivery = "blocked";
             reason = context.seat_active ?
                 "no_action_in_current_context" : "seat_inactive";
+        } else if (context.modal_active &&
+                seat_quick_menu_controls_modal) {
+            SudekiMpSplitScreenQuickMenuAction action;
+
+            if (!owns_foreground) {
+                delivery = "rejected";
+                reason = "game_window_not_foreground";
+            } else if (!controller_intent_quick_menu_action(
+                           resolution->intent, &action)) {
+                delivery = "blocked";
+                reason = "seat_quick_menu_action_not_supported";
+            } else if (SudekiMpSplitScreenQuickMenuSubmit(1u, action)) {
+                delivery = "submitted";
+                reason = "seat_quick_menu_action_submitted";
+            } else {
+                delivery = "rejected";
+                reason = "seat_quick_menu_action_rejected";
+            }
         } else if (controller_intent_is_combat(resolution->intent)) {
             if (submit_second_player_controller_combat_action(
                     controller,
@@ -1908,9 +2000,6 @@ static void service_second_player_controller_actions(
                 delivery = "rejected";
                 reason = "player_two_camera_perspective_unavailable";
             }
-        } else if (resolution->intent ==
-                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
-            reason = "per_seat_quick_menu_consumer_not_connected";
         } else if (resolution->intent >=
                 SUDEKIMP_CONTROLLER_INTENT_QUICKSHOT_UP &&
             resolution->intent <=
@@ -1996,7 +2085,8 @@ static void stop_first_player_movement(void *controller) {
 BOOL SudekiMpControlSeparationGameplayInputFrozen(void) {
     return SudekiMpInputBridgeGameplaySuppressed() ||
         transition_vote_escape_release_pending ||
-        SudekiMpSplitScreenSharedInteractionModalActive();
+        SudekiMpSplitScreenSharedInteractionModalActive() ||
+        SudekiMpSplitScreenQuickMenuAnyActive();
 }
 
 static BOOL service_transition_vote_input_freeze(
@@ -3418,6 +3508,7 @@ static void poll_control_separation_hotkey_body(
     DWORD foreground_process_id = 0;
     BOOL hotkey_is_down;
     BOOL owns_foreground;
+    BOOL gameplay_input_allowed;
     uint8_t *player_two_character = (uint8_t *)overridden_character;
     uint32_t *player_two_arbiter_flags = NULL;
     uint32_t saved_player_two_arbiter_flags;
@@ -3579,12 +3670,29 @@ static void poll_control_separation_hotkey_body(
     publish_runtime_player_leases(controller);
     service_second_player_controller_actions(
         controller, owns_foreground, FALSE, FALSE);
+    gameplay_input_allowed =
+        !SudekiMpControlSeparationGameplayInputFrozen();
     update_roaming_boundary(controller);
-    poll_second_player_movement(controller, update_data, owns_foreground);
-    poll_second_player_camera_facing(controller, owns_foreground);
-    poll_second_player_weak_attack(controller, owns_foreground);
-    poll_second_player_skills(controller, owns_foreground);
-    poll_second_player_target_trace(owns_foreground);
+    poll_second_player_movement(
+        controller,
+        update_data,
+        owns_foreground && gameplay_input_allowed
+    );
+    poll_second_player_camera_facing(
+        controller,
+        owns_foreground && gameplay_input_allowed
+    );
+    poll_second_player_weak_attack(
+        controller,
+        owns_foreground && gameplay_input_allowed
+    );
+    poll_second_player_skills(
+        controller,
+        owns_foreground && gameplay_input_allowed
+    );
+    poll_second_player_target_trace(
+        owns_foreground && gameplay_input_allowed
+    );
     poll_shared_group_camera(controller);
     notify_update_observers(
         controller,

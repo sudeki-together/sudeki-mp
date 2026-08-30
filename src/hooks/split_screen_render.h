@@ -14,6 +14,14 @@ enum {
     SUDEKIMP_QUICK_MENU_ISOLATION_TAIL = 3u
 };
 
+typedef enum SudekiMpSplitScreenQuickMenuAction {
+    SUDEKIMP_QUICK_MENU_ACTION_CONFIRM = 0,
+    SUDEKIMP_QUICK_MENU_ACTION_CANCEL = 1,
+    SUDEKIMP_QUICK_MENU_ACTION_SECONDARY = 2,
+    SUDEKIMP_QUICK_MENU_ACTION_UP = 3,
+    SUDEKIMP_QUICK_MENU_ACTION_DOWN = 4
+} SudekiMpSplitScreenQuickMenuAction;
+
 enum {
     SUDEKIMP_TEMP_CAMERA_OUTSIDE = 0u,
     SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH = 1u,
@@ -305,16 +313,44 @@ unsigned int SudekiMpSplitScreenQuickMenuIsolationBeginState(
 );
 unsigned int SudekiMpSplitScreenQuickMenuIsolationEndState(
     unsigned int state,
-    BOOL quick_menu_submit_seen
+    BOOL quick_menu_submit_seen,
+    BOOL owner_frame_captured
 );
 unsigned int SudekiMpSplitScreenQuickMenuIsolationCancelState(
     BOOL quick_menu_visible
 );
+BOOL SudekiMpSplitScreenQuickMenuPinnedViewIsPlayerTwo(
+    BOOL isolation_in_progress,
+    BOOL owner_valid,
+    BOOL owner_player_two,
+    BOOL fallback_player_two
+);
 BOOL SudekiMpSplitScreenQuickMenuSubmitShouldBeSuppressed(
     BOOL isolation_in_progress,
     BOOL render_phase_confirmed,
-    BOOL player_two_expected,
+    BOOL owner_valid,
+    BOOL owner_player_two,
     BOOL player_two_rendered
+);
+BOOL SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
+    BOOL isolation_in_progress,
+    BOOL owner_valid,
+    BOOL owner_player_two,
+    BOOL player_two_rendered,
+    BOOL capture_allowed,
+    BOOL compose_succeeded
+);
+/* One shipped QuickMenu singleton is serialized across local seats. P1/P2
+ * have complete actor, input, view, and cached-viewport leases today; P3/P4
+ * reject requests until those native consumers exist. P2 confirm/up/down are
+ * atomic taps, cancel uses native close, and secondary is rejected under the
+ * deliberately Skills-only contract. */
+BOOL SudekiMpSplitScreenQuickMenuRequest(unsigned int seat_index);
+BOOL SudekiMpSplitScreenQuickMenuActive(unsigned int seat_index);
+BOOL SudekiMpSplitScreenQuickMenuAnyActive(void);
+BOOL SudekiMpSplitScreenQuickMenuSubmit(
+    unsigned int seat_index,
+    SudekiMpSplitScreenQuickMenuAction action
 );
 /* Pure policy used by the alternating frame cache and its exact-image tests.
  * The native map update owns both the centered facing pointer and the map
