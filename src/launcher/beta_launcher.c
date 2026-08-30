@@ -339,6 +339,9 @@ static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
             L"false", config_path) ||
         !WritePrivateProfileStringW(
             L"SudekiMP", L"EnableTalosPartyPrototype", L"false",
+            config_path) ||
+        !WritePrivateProfileStringW(
+            L"SudekiMP", L"EnableExpandedTalosEncounterPrototype", L"false",
             config_path)) {
         show_error(owner,
                    L"SudekiMP could not select the Windows controller input profile.");

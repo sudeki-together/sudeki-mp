@@ -7,6 +7,7 @@
 #include "hooks/control_separation.h"
 #include "hooks/interaction_provenance.h"
 #include "hooks/split_screen_render.h"
+#include "hooks/talos_native_lifecycle_trace.h"
 #include "input/bridge_receiver.h"
 
 #include <math.h>
@@ -2141,6 +2142,7 @@ static void log_transition_callsite(const char *event) {
 }
 
 static void __cdecl trace_set_zone_now(const char *zone_name) {
+    SudekiMpTalosNativeLifecycleObserveSetZoneNowBefore(zone_name);
     bump_zone_source_generation("set_zone_now");
     if (party_presentation_hide_candidate.snapshot_valid) {
         clear_party_presentation_hide_candidate();
@@ -2155,6 +2157,7 @@ static void __cdecl trace_set_zone_now(const char *zone_name) {
     arm_arrival_capture(FALSE, current_world_name, current_world_name);
     ++set_zone_now_depth;
     original_set_zone_now(zone_name);
+    SudekiMpTalosNativeLifecycleObserveSetZoneNowAfter(zone_name);
     --set_zone_now_depth;
     release_active_temporary_resource();
     log_zone_phase("set_zone_now", "after", zone_name, NULL);
@@ -2767,6 +2770,8 @@ static BOOL __attribute__((thiscall)) trace_set_render_camera(
 ) {
     char safe_name[64];
     BOOL result;
+    DWORD incoming_error = GetLastError();
+    DWORD result_error;
 
     copy_zone_name(name, safe_name);
     SudekiMpLogFormat(
@@ -2775,7 +2780,12 @@ static BOOL __attribute__((thiscall)) trace_set_render_camera(
         current_temporary_name[0] == '\0' ? "<none>" : current_temporary_name,
         manager,
         safe_name[0] == '\0' ? "<empty-or-unreadable>" : safe_name);
+    SetLastError(incoming_error);
     result = original_set_render_camera(manager, name);
+    result_error = GetLastError();
+    SetLastError(result_error);
+    SudekiMpTalosNativeLifecycleObserveRenderCameraAfter(
+        manager, safe_name, result);
     SudekiMpLogFormat(
         "zone_transition event=set_render_camera phase=after "
         "temporary=%s manager=%p name=%s result=%d policy=observation_only\r\n",
@@ -2783,6 +2793,7 @@ static BOOL __attribute__((thiscall)) trace_set_render_camera(
         manager,
         safe_name[0] == '\0' ? "<empty-or-unreadable>" : safe_name,
         result ? 1 : 0);
+    SetLastError(result_error);
     return result;
 }
 

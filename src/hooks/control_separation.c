@@ -118,8 +118,28 @@ enum {
     PARTY_SWITCHING_D6_OFFSET = 0xd6u,
     PARTY_STATE_D7_OFFSET = 0xd7u,
     CAMERA_MODE_EXPLORATION = 0,
-    ROAMING_BOUNDARY_SETTLE_MS = 250u
+    ROAMING_BOUNDARY_SETTLE_MS = 250u,
+    UPDATE_OBSERVER_CAPACITY = 4u
 };
+
+typedef struct ControlUpdateObserverEntry {
+    const void *owner;
+    SudekiMpControlUpdateObserver observer;
+} ControlUpdateObserverEntry;
+
+typedef struct ControlUpdateDispatchFrame {
+    struct ControlUpdateDispatchFrame *previous;
+    const SudekiMpControlUpdateDispatchWitness *active_witness;
+    uint64_t dispatch_serial;
+    DWORD native_thread_id;
+    uint32_t update_depth;
+    uint32_t overlap_generation;
+    uint32_t original_call_count;
+    uint8_t tls_exact;
+    uint8_t service_only;
+    uint8_t reentrancy_seen;
+    uint8_t reserved;
+} ControlUpdateDispatchFrame;
 
 /*
  * Absolute-delta mode treats +0x1D4 as one world unit per second.  Sudeki's
@@ -147,6 +167,7 @@ static MovementControllerSetAbsoluteDeltaFunction
     movement_controller_set_absolute_delta;
 static uint8_t *game_base;
 static void *overridden_character;
+static void *overridden_ai_component;
 static UINT selected_virtual_key;
 static BOOL hotkey_was_down;
 static BOOL second_player_movement_enabled;
@@ -215,8 +236,31 @@ static BOOL player_two_requested;
 static void *requested_player_two_character;
 static BOOL role_lock_active;
 static DWORD player_two_request_last_attempt;
-static SudekiMpControlUpdateObserver update_observer;
+static BOOL service_only_mode;
+static volatile LONG control_update_lifecycle_lock;
+static BOOL control_update_wrapper_enabled;
+static ControllerUpdateFunction retained_original_controller_update;
+static volatile LONG update_observer_registry_lock;
+static ControlUpdateObserverEntry update_observers[UPDATE_OBSERVER_CAPACITY];
+static uint32_t update_observer_registry_generation;
+static DWORD control_update_dispatch_tls = TLS_OUT_OF_INDEXES;
+static volatile LONG control_update_dispatch_serial;
+static volatile LONG active_control_update_dispatches;
+static volatile LONG control_update_overlap_generation;
 
+static void SUDEKIMP_THISCALL service_control_update_observers(
+    void *controller,
+    void *update_data
+);
+static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
+    void *controller,
+    void *update_data
+);
+
+static const uint8_t expected_controller_update_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec,
+    0x24, 0x53, 0x8b, 0xd9, 0x80, 0xbb, 0xc7, 0x01
+};
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
 };
@@ -256,6 +300,442 @@ static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+static void acquire_update_observer_registry(void) {
+    while (InterlockedCompareExchange(
+            &update_observer_registry_lock, 1, 0) != 0) {
+        SwitchToThread();
+    }
+}
+
+static void acquire_control_update_lifecycle(void) {
+    while (InterlockedCompareExchange(
+            &control_update_lifecycle_lock, 1, 0) != 0) {
+        SwitchToThread();
+    }
+}
+
+static void release_control_update_lifecycle(void) {
+    InterlockedExchange(&control_update_lifecycle_lock, 0);
+}
+
+static void release_update_observer_registry(void) {
+    InterlockedExchange(&update_observer_registry_lock, 0);
+}
+
+BOOL SudekiMpControlUpdateObserverGateEnable(
+    SudekiMpControlUpdateObserverGate *gate
+) {
+    DWORD saved_error = GetLastError();
+
+    if (gate == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (InterlockedCompareExchange(&gate->active_entries, 0, 0) != 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (InterlockedCompareExchange(&gate->enabled, 1, 0) != 0) {
+        SetLastError(ERROR_ALREADY_EXISTS);
+        return FALSE;
+    }
+    SetLastError(saved_error);
+    return TRUE;
+}
+
+BOOL SudekiMpControlUpdateObserverGateTryEnter(
+    SudekiMpControlUpdateObserverGate *gate
+) {
+    DWORD saved_error = GetLastError();
+    BOOL entered = FALSE;
+
+    if (gate != NULL &&
+        InterlockedCompareExchange(&gate->enabled, 0, 0) != 0) {
+        (void)InterlockedIncrement(&gate->active_entries);
+        if (InterlockedCompareExchange(&gate->enabled, 0, 0) != 0) {
+            entered = TRUE;
+        } else {
+            (void)InterlockedDecrement(&gate->active_entries);
+        }
+    }
+    SetLastError(saved_error);
+    return entered;
+}
+
+void SudekiMpControlUpdateObserverGateLeave(
+    SudekiMpControlUpdateObserverGate *gate
+) {
+    DWORD saved_error = GetLastError();
+
+    if (gate != NULL) {
+        (void)InterlockedDecrement(&gate->active_entries);
+    }
+    SetLastError(saved_error);
+}
+
+void SudekiMpControlUpdateObserverGateDisable(
+    SudekiMpControlUpdateObserverGate *gate
+) {
+    DWORD saved_error = GetLastError();
+
+    if (gate != NULL) InterlockedExchange(&gate->enabled, 0);
+    SetLastError(saved_error);
+}
+
+void SudekiMpControlUpdateObserverGateDrain(
+    SudekiMpControlUpdateObserverGate *gate
+) {
+    DWORD saved_error = GetLastError();
+
+    if (gate != NULL) {
+        while (InterlockedCompareExchange(
+                &gate->active_entries, 0, 0) != 0) {
+            SwitchToThread();
+        }
+    }
+    SetLastError(saved_error);
+}
+
+static void advance_update_observer_registry_generation(void) {
+    ++update_observer_registry_generation;
+    if (update_observer_registry_generation == 0u) {
+        ++update_observer_registry_generation;
+    }
+}
+
+static BOOL ensure_control_update_dispatch_tls(void) {
+    DWORD tls_index;
+
+    if (control_update_dispatch_tls != TLS_OUT_OF_INDEXES) return TRUE;
+    tls_index = TlsAlloc();
+    if (tls_index == TLS_OUT_OF_INDEXES) {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    control_update_dispatch_tls = tls_index;
+    return TRUE;
+}
+
+static uint64_t next_control_update_dispatch_serial(void) {
+    uint32_t serial = (uint32_t)InterlockedIncrement(
+        &control_update_dispatch_serial);
+
+    if (serial == 0u) {
+        serial = (uint32_t)InterlockedIncrement(
+            &control_update_dispatch_serial);
+    }
+    return (uint64_t)serial;
+}
+
+static void begin_control_update_dispatch(
+    ControlUpdateDispatchFrame *frame,
+    BOOL service_only
+) {
+    DWORD saved_error = GetLastError();
+    LONG active_count;
+    LONG overlap_before;
+    DWORD tls_error = ERROR_SUCCESS;
+    ControlUpdateDispatchFrame *previous = NULL;
+
+    ZeroMemory(frame, sizeof(*frame));
+    frame->dispatch_serial = next_control_update_dispatch_serial();
+    frame->native_thread_id = GetCurrentThreadId();
+    frame->service_only = service_only != FALSE ? 1u : 0u;
+    overlap_before = InterlockedCompareExchange(
+        &control_update_overlap_generation, 0, 0);
+    active_count = InterlockedIncrement(&active_control_update_dispatches);
+    if (active_count != 1) {
+        (void)InterlockedIncrement(&control_update_overlap_generation);
+        frame->reentrancy_seen = 1u;
+    }
+    frame->overlap_generation = (uint32_t)overlap_before;
+
+    if (control_update_dispatch_tls != TLS_OUT_OF_INDEXES) {
+        SetLastError(ERROR_SUCCESS);
+        previous = (ControlUpdateDispatchFrame *)TlsGetValue(
+            control_update_dispatch_tls);
+        tls_error = GetLastError();
+        if (previous != NULL) {
+            previous->reentrancy_seen = 1u;
+            frame->reentrancy_seen = 1u;
+        }
+        if (tls_error == ERROR_SUCCESS) {
+            frame->previous = previous;
+            frame->update_depth = previous == NULL ? 1u :
+                previous->update_depth + 1u;
+            if (TlsSetValue(control_update_dispatch_tls, frame)) {
+                frame->tls_exact = 1u;
+            }
+        }
+    }
+    SetLastError(saved_error);
+}
+
+static void end_control_update_dispatch(ControlUpdateDispatchFrame *frame) {
+    DWORD saved_error = GetLastError();
+
+    if (frame != NULL && frame->tls_exact != 0u &&
+        control_update_dispatch_tls != TLS_OUT_OF_INDEXES) {
+        (void)TlsSetValue(control_update_dispatch_tls, frame->previous);
+    }
+    (void)InterlockedDecrement(&active_control_update_dispatches);
+    SetLastError(saved_error);
+}
+
+static BOOL begin_owned_control_update_dispatch(
+    ControlUpdateDispatchFrame *frame,
+    BOOL service_only,
+    ControllerUpdateFunction *fallback_original
+) {
+    DWORD saved_error = GetLastError();
+    void *expected_replacement = service_only ?
+        (void *)service_control_update_observers :
+        (void *)poll_control_separation_hotkey;
+    BOOL admitted;
+
+    acquire_control_update_lifecycle();
+    *fallback_original = retained_original_controller_update;
+    admitted = control_update_wrapper_enabled &&
+        controller_update_vtable_hook.installed != FALSE &&
+        controller_update_vtable_hook.replacement_value ==
+            expected_replacement &&
+        original_controller_update != NULL &&
+        service_only_mode == (service_only != FALSE);
+    if (admitted) begin_control_update_dispatch(frame, service_only);
+    release_control_update_lifecycle();
+    SetLastError(saved_error);
+    return admitted;
+}
+
+static BOOL control_update_dispatch_frame_current(
+    const ControlUpdateDispatchFrame *frame
+) {
+    DWORD saved_error;
+    DWORD tls_error;
+    const ControlUpdateDispatchFrame *current;
+
+    if (frame == NULL || frame->tls_exact == 0u ||
+        control_update_dispatch_tls == TLS_OUT_OF_INDEXES) return FALSE;
+    saved_error = GetLastError();
+    SetLastError(ERROR_SUCCESS);
+    current = (const ControlUpdateDispatchFrame *)TlsGetValue(
+        control_update_dispatch_tls);
+    tls_error = GetLastError();
+    SetLastError(saved_error);
+    return tls_error == ERROR_SUCCESS && current == frame;
+}
+
+static void control_update_hook_ownership(
+    const ControlUpdateDispatchFrame *frame,
+    BOOL *hook_owned,
+    BOOL *slot_owned
+) {
+    void *expected_replacement;
+    void **expected_slot;
+    BOOL hook_exact;
+
+    *hook_owned = FALSE;
+    *slot_owned = FALSE;
+    if (frame == NULL || game_base == NULL) return;
+    expected_replacement = frame->service_only != 0u ?
+        (void *)service_control_update_observers :
+        (void *)poll_control_separation_hotkey;
+    expected_slot = (void **)(game_base +
+        RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+    hook_exact = controller_update_vtable_hook.installed != FALSE &&
+        controller_update_vtable_hook.slot == expected_slot &&
+        controller_update_vtable_hook.original_value ==
+            game_base + RVA_CONTROLLER_UPDATE &&
+        controller_update_vtable_hook.replacement_value ==
+            expected_replacement &&
+        original_controller_update == (ControllerUpdateFunction)(
+            game_base + RVA_CONTROLLER_UPDATE) &&
+        service_only_mode == (frame->service_only != 0u);
+    *hook_owned = hook_exact;
+    *slot_owned = hook_exact && *expected_slot == expected_replacement;
+}
+
+static BOOL update_observer_registry_generation_is(uint32_t generation) {
+    BOOL equal;
+
+    acquire_update_observer_registry();
+    equal = update_observer_registry_generation == generation;
+    release_update_observer_registry();
+    return equal;
+}
+
+static BOOL control_update_source_shape_exact(
+    const ControlUpdateDispatchFrame *frame,
+    SudekiMpControlUpdateDispatchSource source
+) {
+    if (frame == NULL) return FALSE;
+    if (source ==
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL) {
+        return frame->service_only != 0u &&
+            frame->original_call_count == 1u;
+    }
+    if (source ==
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_PRE_ORIGINAL) {
+        return frame->service_only == 0u &&
+            frame->original_call_count == 0u;
+    }
+    if (source ==
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL) {
+        return frame->service_only == 0u &&
+            frame->original_call_count == 1u;
+    }
+    return FALSE;
+}
+
+static void build_control_update_dispatch_witness(
+    const ControlUpdateDispatchFrame *frame,
+    SudekiMpControlUpdateDispatchSource source,
+    uint32_t observer_count,
+    uint32_t registry_generation,
+    SudekiMpControlUpdateDispatchWitness *witness
+) {
+    LONG active_count_start;
+    LONG active_count_end;
+    LONG overlap_generation_start;
+    LONG overlap_generation_end;
+    BOOL hook_owned_start;
+    BOOL hook_owned_end;
+    BOOL slot_owned_start;
+    BOOL slot_owned_end;
+    BOOL registry_stable_start;
+    BOOL registry_stable_end;
+    BOOL source_shape_start;
+    BOOL source_shape_end;
+    BOOL frame_current_start;
+    BOOL frame_current_end;
+    BOOL frame_exact;
+
+    ZeroMemory(witness, sizeof(*witness));
+    overlap_generation_start = InterlockedCompareExchange(
+        &control_update_overlap_generation, 0, 0);
+    active_count_start = InterlockedCompareExchange(
+        &active_control_update_dispatches, 0, 0);
+    control_update_hook_ownership(
+        frame, &hook_owned_start, &slot_owned_start);
+    registry_stable_start =
+        update_observer_registry_generation_is(registry_generation);
+    source_shape_start = control_update_source_shape_exact(frame, source);
+    frame_current_start = control_update_dispatch_frame_current(frame);
+
+    control_update_hook_ownership(
+        frame, &hook_owned_end, &slot_owned_end);
+    registry_stable_end =
+        update_observer_registry_generation_is(registry_generation);
+    source_shape_end = control_update_source_shape_exact(frame, source);
+    frame_current_end = control_update_dispatch_frame_current(frame);
+    active_count_end = InterlockedCompareExchange(
+        &active_control_update_dispatches, 0, 0);
+    overlap_generation_end = InterlockedCompareExchange(
+        &control_update_overlap_generation, 0, 0);
+
+    witness->dispatch_serial = frame == NULL ? 0u :
+        frame->dispatch_serial;
+    witness->native_thread_id = frame == NULL ? 0u :
+        (uint32_t)frame->native_thread_id;
+    witness->outer_update_depth = frame == NULL ||
+        frame->tls_exact == 0u ? 0u : frame->update_depth;
+    witness->active_dispatch_count = active_count_end <= 0 ? 0u :
+        (uint32_t)active_count_end;
+    witness->original_call_count = frame == NULL ? 0u :
+        frame->original_call_count;
+    witness->observer_snapshot_count = observer_count;
+    witness->observer_registry_generation = registry_generation;
+    witness->dispatch_overlap_generation =
+        (uint32_t)overlap_generation_end;
+    witness->hook_owned_exact =
+        hook_owned_start && hook_owned_end ? 1u : 0u;
+    witness->slot_owned_exact =
+        slot_owned_start && slot_owned_end ? 1u : 0u;
+    witness->service_only = frame != NULL && frame->service_only != 0u ?
+        1u : 0u;
+    witness->source = (uint8_t)source;
+    witness->post_original =
+        source == SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL ||
+        source == SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL ?
+            1u : 0u;
+    witness->sole_observer = observer_count == 1u ? 1u : 0u;
+    witness->registry_generation_stable =
+        registry_stable_start && registry_stable_end ? 1u : 0u;
+
+    frame_exact = frame != NULL && frame->dispatch_serial != 0u &&
+        frame->native_thread_id == GetCurrentThreadId() &&
+        frame->update_depth == 1u && frame->reentrancy_seen == 0u &&
+        active_count_start == 1 && active_count_end == 1 &&
+        overlap_generation_start == overlap_generation_end &&
+        (uint32_t)overlap_generation_start == frame->overlap_generation &&
+        frame_current_start && frame_current_end &&
+        hook_owned_start && hook_owned_end &&
+        slot_owned_start && slot_owned_end;
+    witness->source_exact = frame_exact &&
+        source_shape_start && source_shape_end ? 1u : 0u;
+    witness->service_post_original_exact =
+        witness->source_exact != 0u &&
+        source ==
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL ?
+                1u : 0u;
+}
+
+static void notify_update_observers(
+    void *controller,
+    void *update_data,
+    ControlUpdateDispatchFrame *frame,
+    SudekiMpControlUpdateDispatchSource source
+) {
+    SudekiMpControlUpdateObserver snapshot[UPDATE_OBSERVER_CAPACITY];
+    DWORD incoming_last_error = GetLastError();
+    uint32_t registry_generation;
+    uint32_t observer_count = 0u;
+    unsigned int index;
+
+    /* Snapshot outside callback execution so an observer may unregister
+     * itself without changing which callbacks belong to this native update. */
+    acquire_update_observer_registry();
+    for (index = 0u; index < UPDATE_OBSERVER_CAPACITY; ++index) {
+        snapshot[index] = update_observers[index].observer;
+        if (snapshot[index] != NULL) ++observer_count;
+    }
+    registry_generation = update_observer_registry_generation;
+    release_update_observer_registry();
+    for (index = 0u; index < UPDATE_OBSERVER_CAPACITY; ++index) {
+        if (snapshot[index] != NULL) {
+            SudekiMpControlUpdateDispatchWitness witness;
+
+            build_control_update_dispatch_witness(
+                frame, source, observer_count, registry_generation, &witness);
+            if (frame != NULL) frame->active_witness = &witness;
+            SetLastError(incoming_last_error);
+            snapshot[index](controller, update_data, &witness);
+            if (frame != NULL && frame->active_witness == &witness) {
+                frame->active_witness = NULL;
+            }
+            SetLastError(incoming_last_error);
+        }
+    }
+    SetLastError(incoming_last_error);
+}
+
+static void clear_update_observers(void) {
+    BOOL changed = FALSE;
+    unsigned int index;
+
+    acquire_update_observer_registry();
+    for (index = 0u; index < UPDATE_OBSERVER_CAPACITY; ++index) {
+        if (update_observers[index].owner != NULL ||
+            update_observers[index].observer != NULL) {
+            changed = TRUE;
+            break;
+        }
+    }
+    ZeroMemory(update_observers, sizeof(update_observers));
+    if (changed) advance_update_observer_registry_generation();
+    release_update_observer_registry();
 }
 
 static BOOL readable_memory(const void *pointer, size_t size) {
@@ -1519,7 +1999,11 @@ BOOL SudekiMpControlSeparationGameplayInputFrozen(void) {
         SudekiMpSplitScreenSharedInteractionModalActive();
 }
 
-static BOOL service_transition_vote_input_freeze(void *controller) {
+static BOOL service_transition_vote_input_freeze(
+    void *controller,
+    void *update_data,
+    ControlUpdateDispatchFrame *dispatch_frame
+) {
     unsigned int ordinal;
     BOOL blacksmith_modal;
     BOOL escape_down =
@@ -1567,9 +2051,12 @@ static BOOL service_transition_vote_input_freeze(void *controller) {
             "transition_vote event=input_freeze state=active "
             "policy=skip_p1_native_controller_update_and_all_p2_submissions_keep_vote_observer_running_until_vote_and_escape_release\r\n");
     }
-    if (update_observer != NULL) {
-        update_observer();
-    }
+    notify_update_observers(
+        controller,
+        update_data,
+        dispatch_frame,
+        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_PRE_ORIGINAL
+    );
     return TRUE;
 }
 
@@ -2350,6 +2837,8 @@ static void poll_second_player_camera_facing(
     BOOL owns_foreground
 ) {
     uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *component;
+    uint8_t *mode_state;
     uint8_t *arbiter;
     void *controller_target;
     float right_x;
@@ -2368,8 +2857,14 @@ static void poll_second_player_camera_facing(
     }
     controller_target = controller == NULL ? NULL :
         *(void **)((uint8_t *)controller + 0x248u);
+    component = *(uint8_t **)(character + 0x94u);
+    mode_state = component == NULL ? NULL :
+        *(uint8_t **)(component + 0x3cu);
     arbiter = *(uint8_t **)(character + 0x90u);
-    if (character == controller_target || !readable_memory(arbiter, 0x54u) ||
+    if (component == NULL || mode_state == NULL ||
+        *(int16_t *)(component + 0x16au) != 1 ||
+        *(uint8_t *)(mode_state + 0x0bu) != 0u ||
+        character == controller_target || !readable_memory(arbiter, 0x54u) ||
         (*(uint32_t *)(arbiter + 0x50u) & 0x00000002u) == 0u) {
         second_player_facing_valid = FALSE;
         return;
@@ -2680,7 +3175,24 @@ static void log_control_state(
     );
 }
 
-static void toggle_second_player_ai(void) {
+BOOL SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+    int16_t before_ref,
+    uint8_t before_mode,
+    int16_t after_ref,
+    uint8_t after_mode,
+    BOOL controller_target
+) {
+    if (before_ref <= 0 || before_mode != 0u ||
+        (int)after_ref != (int)before_ref - 1) {
+        return FALSE;
+    }
+    if (after_ref > 0) {
+        return after_mode == 0u;
+    }
+    return after_mode == (controller_target ? 0u : 1u);
+}
+
+static BOOL toggle_second_player_ai(void) {
     uint8_t *group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
     uint8_t *controller = *(uint8_t **)(
         game_base + RVA_CHARACTER_CONTROLLER_GLOBAL
@@ -2701,7 +3213,7 @@ static void toggle_second_player_ai(void) {
         SudekiMpLogWrite(
             "control_separation event=toggle_abort reason=no_active_group\r\n"
         );
-        return;
+        return FALSE;
     }
 
     if (overridden_character == NULL) {
@@ -2724,7 +3236,7 @@ static void toggle_second_player_ai(void) {
                     group + PARTY_SLOT_FIRST_OFFSET
                 )
             );
-            return;
+            return FALSE;
         }
         character = *(uint8_t **)slot;
         component = *(uint8_t **)(character + 0x94);
@@ -2734,14 +3246,14 @@ static void toggle_second_player_ai(void) {
             SudekiMpLogWrite(
                 "control_separation event=toggle_abort reason=incomplete_ai_component\r\n"
             );
-            return;
+            return FALSE;
         }
         before_ref = (int)*(int16_t *)(component + 0x16a);
         before_mode = (int)*(mode_state + 0x0b);
         if (before_ref != 0 || before_mode != 1) {
             log_control_state("override_abort", "unexpected_initial_state",
                 slot, slot_index);
-            return;
+            return FALSE;
         }
 
         ai_override_control(slot);
@@ -2749,6 +3261,7 @@ static void toggle_second_player_ai(void) {
         after_mode = (int)*(mode_state + 0x0b);
         if (after_ref == before_ref + 1 && after_mode == 0) {
             overridden_character = character;
+            overridden_ai_component = component;
             reset_native_movement_acceptance_trace();
             reset_target_trace_state();
             log_control_state("override", "success", slot, slot_index);
@@ -2763,6 +3276,7 @@ static void toggle_second_player_ai(void) {
                     (unsigned long)(uintptr_t)character
                 );
             }
+            return TRUE;
         } else {
             log_control_state("override", "verification_failed", slot,
                 slot_index);
@@ -2772,7 +3286,7 @@ static void toggle_second_player_ai(void) {
                     slot_index);
             }
         }
-        return;
+        return FALSE;
     }
 
     slot = find_character_party_slot(
@@ -2787,10 +3301,11 @@ static void toggle_second_player_ai(void) {
             "policy=drop_stale_runtime_identity_after_party_rebuild\r\n"
         );
         overridden_character = NULL;
+        overridden_ai_component = NULL;
         stop_second_player_movement();
         reset_native_movement_acceptance_trace();
         reset_target_trace_state();
-        return;
+        return TRUE;
     }
     character = *(uint8_t **)slot;
     component = *(uint8_t **)(character + 0x94);
@@ -2799,33 +3314,47 @@ static void toggle_second_player_ai(void) {
         SudekiMpLogWrite(
             "control_separation event=restore_abort reason=incomplete_ai_component\r\n"
         );
-        return;
+        return FALSE;
+    }
+    if (component != overridden_ai_component) {
+        SudekiMpLogWrite(
+            "control_separation event=restore_abort "
+            "reason=owned_ai_component_identity_changed\r\n"
+        );
+        return FALSE;
     }
     before_ref = (int)*(int16_t *)(component + 0x16a);
     before_mode = (int)*(mode_state + 0x0b);
-    if (before_ref != 1) {
-        log_control_state("restore_abort", "unexpected_override_count", slot,
+    if (before_ref < 1 || before_mode != 0) {
+        log_control_state("restore_abort", "unexpected_owned_lease_state", slot,
             slot_index);
-        return;
+        return FALSE;
     }
 
     stop_second_player_movement();
     ai_default_control(slot);
     after_ref = (int)*(int16_t *)(component + 0x16a);
     after_mode = (int)*(mode_state + 0x0b);
-    if (after_ref == 0 &&
-        ((character == controller_target && after_mode == 0) ||
-         (character != controller_target && after_mode == 1))) {
+    if (SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            (int16_t)before_ref,
+            (uint8_t)before_mode,
+            (int16_t)after_ref,
+            (uint8_t)after_mode,
+            character == controller_target)) {
         log_control_state("restore", "success", slot, slot_index);
         overridden_character = NULL;
+        overridden_ai_component = NULL;
         reset_native_movement_acceptance_trace();
         reset_target_trace_state();
+        return TRUE;
     } else {
         log_control_state("restore", "verification_failed", slot, slot_index);
-        if (after_ref == 0) {
+        if (after_ref == before_ref - 1) {
             overridden_character = NULL;
+            overridden_ai_component = NULL;
             reset_native_movement_acceptance_trace();
         }
+        return FALSE;
     }
 }
 
@@ -2845,12 +3374,41 @@ static void reconcile_player_two_request(void) {
         return;
     }
     player_two_request_last_attempt = now;
-    toggle_second_player_ai();
+    (void)toggle_second_player_ai();
 }
 
-static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
+static void SUDEKIMP_THISCALL service_control_update_observers(
     void *controller,
     void *update_data
+) {
+    ControlUpdateDispatchFrame dispatch_frame;
+    ControllerUpdateFunction fallback_original;
+    DWORD native_last_error;
+
+    if (!begin_owned_control_update_dispatch(
+            &dispatch_frame, TRUE, &fallback_original)) {
+        if (fallback_original != NULL) {
+            fallback_original(controller, update_data);
+        }
+        return;
+    }
+    original_controller_update(controller, update_data);
+    ++dispatch_frame.original_call_count;
+    native_last_error = GetLastError();
+    notify_update_observers(
+        controller,
+        update_data,
+        &dispatch_frame,
+        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL
+    );
+    end_control_update_dispatch(&dispatch_frame);
+    SetLastError(native_last_error);
+}
+
+static void poll_control_separation_hotkey_body(
+    void *controller,
+    void *update_data,
+    ControlUpdateDispatchFrame *dispatch_frame
 ) {
     HWND foreground;
     DWORD foreground_process_id = 0;
@@ -2868,7 +3426,8 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     SudekiMpPlayerStatehoodService(
         SudekiMpPlayerStatehoodRuntime(), GetTickCount());
     update_roaming_boundary(controller);
-    if (service_transition_vote_input_freeze(controller)) {
+    if (service_transition_vote_input_freeze(
+            controller, update_data, dispatch_frame)) {
         return;
     }
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
@@ -2876,13 +3435,17 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
             controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
         original_controller_update(controller, update_data);
+        ++dispatch_frame->original_call_count;
         publish_runtime_player_leases(controller);
         SudekiMpPlayerStatehoodService(
             SudekiMpPlayerStatehoodRuntime(), GetTickCount());
         update_roaming_boundary(controller);
-        if (update_observer != NULL) {
-            update_observer();
-        }
+        notify_update_observers(
+            controller,
+            update_data,
+            dispatch_frame,
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL
+        );
         return;
     }
     report_shared_interaction_modal_released();
@@ -2901,6 +3464,7 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
         );
     }
     original_controller_update(controller, update_data);
+    ++dispatch_frame->original_call_count;
     end_spirit_noncaster_arbiter_virtualization(
         player_two_character,
         player_two_arbiter_flags,
@@ -2923,12 +3487,16 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
         SudekiMpPlayerStatehoodService(
             SudekiMpPlayerStatehoodRuntime(), GetTickCount());
         update_roaming_boundary(controller);
-        if (update_observer != NULL) {
-            update_observer();
-        }
+        notify_update_observers(
+            controller,
+            update_data,
+            dispatch_frame,
+            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL
+        );
         return;
     }
-    if (service_transition_vote_input_freeze(controller)) {
+    if (service_transition_vote_input_freeze(
+            controller, update_data, dispatch_frame)) {
         return;
     }
     poll_input_bridge();
@@ -3014,13 +3582,41 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     poll_second_player_skills(controller, owns_foreground);
     poll_second_player_target_trace(owns_foreground);
     poll_shared_group_camera(controller);
-    if (update_observer != NULL) {
-        update_observer();
+    notify_update_observers(
+        controller,
+        update_data,
+        dispatch_frame,
+        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL
+    );
+}
+
+static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
+    void *controller,
+    void *update_data
+) {
+    ControlUpdateDispatchFrame dispatch_frame;
+    ControllerUpdateFunction fallback_original;
+    DWORD entry_last_error = GetLastError();
+    DWORD body_last_error;
+
+    if (!begin_owned_control_update_dispatch(
+            &dispatch_frame, FALSE, &fallback_original)) {
+        SetLastError(entry_last_error);
+        if (fallback_original != NULL) {
+            fallback_original(controller, update_data);
+        }
+        return;
     }
+    SetLastError(entry_last_error);
+    poll_control_separation_hotkey_body(
+        controller, update_data, &dispatch_frame);
+    body_last_error = GetLastError();
+    end_control_update_dispatch(&dispatch_frame);
+    SetLastError(body_last_error);
 }
 
 BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
-    if (original_controller_update == NULL) {
+    if (original_controller_update == NULL || service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
@@ -3051,7 +3647,8 @@ BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
     void *controller_target;
     unsigned int slot_index;
 
-    if (original_controller_update == NULL || game_base == NULL) {
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
@@ -3117,7 +3714,10 @@ BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
 }
 
 BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
-    if (original_controller_update == NULL || game_base == NULL) {
+    BOOL transition_exact;
+
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
@@ -3132,8 +3732,8 @@ BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
     if (overridden_character == NULL) {
         return TRUE;
     }
-    toggle_second_player_ai();
-    if (overridden_character != NULL) {
+    transition_exact = toggle_second_player_ai();
+    if (!transition_exact || overridden_character != NULL) {
         SetLastError(ERROR_BUSY);
         SudekiMpLogWrite(
             "control_separation event=player_two_transition_release "
@@ -3147,6 +3747,10 @@ BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
 }
 
 BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled) {
+    if (service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
     if (enabled && requested_player_two_character != NULL &&
         overridden_character != requested_player_two_character) {
         SetLastError(ERROR_INVALID_STATE);
@@ -3169,7 +3773,8 @@ BOOL SudekiMpControlSeparationSetInteractionRequestsEnabled(BOOL enabled) {
     SudekiMpPlayerStatehoodSnapshot snapshot;
     BOOL next_enabled;
 
-    if (original_controller_update == NULL || game_base == NULL) {
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
@@ -3253,10 +3858,168 @@ void SudekiMpControlSeparationReportRoamingBoundaryOverlay(BOOL visible) {
     }
 }
 
-void SudekiMpControlSeparationSetUpdateObserver(
+BOOL SudekiMpControlSeparationRegisterUpdateObserver(
+    const void *owner,
     SudekiMpControlUpdateObserver observer
 ) {
-    update_observer = observer;
+    unsigned int index;
+    unsigned int free_index = UPDATE_OBSERVER_CAPACITY;
+
+    if (owner == NULL || observer == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    acquire_update_observer_registry();
+    for (index = 0u; index < UPDATE_OBSERVER_CAPACITY; ++index) {
+        if (update_observers[index].owner == owner) {
+            if (update_observers[index].observer == observer) {
+                release_update_observer_registry();
+                return TRUE;
+            }
+            release_update_observer_registry();
+            SetLastError(ERROR_ALREADY_EXISTS);
+            return FALSE;
+        }
+        if (free_index == UPDATE_OBSERVER_CAPACITY &&
+            update_observers[index].owner == NULL) {
+            free_index = index;
+        }
+    }
+    if (free_index == UPDATE_OBSERVER_CAPACITY) {
+        release_update_observer_registry();
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    update_observers[free_index].owner = owner;
+    update_observers[free_index].observer = observer;
+    advance_update_observer_registry_generation();
+    release_update_observer_registry();
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationUnregisterUpdateObserver(
+    const void *owner
+) {
+    unsigned int index;
+
+    if (owner == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    acquire_update_observer_registry();
+    for (index = 0u; index < UPDATE_OBSERVER_CAPACITY; ++index) {
+        if (update_observers[index].owner == owner) {
+            update_observers[index].observer = NULL;
+            update_observers[index].owner = NULL;
+            advance_update_observer_registry_generation();
+            release_update_observer_registry();
+            return TRUE;
+        }
+    }
+    release_update_observer_registry();
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    DWORD saved_error = GetLastError();
+    DWORD tls_error = ERROR_SUCCESS;
+    ControlUpdateDispatchFrame *frame = NULL;
+    SudekiMpControlUpdateDispatchSource source;
+    LONG active_count_start;
+    LONG active_count_end;
+    LONG overlap_generation_start;
+    LONG overlap_generation_end;
+    BOOL hook_owned_start;
+    BOOL hook_owned_end;
+    BOOL slot_owned_start;
+    BOOL slot_owned_end;
+    BOOL registry_stable_start;
+    BOOL registry_stable_end;
+    BOOL source_shape_start;
+    BOOL source_shape_end;
+    BOOL frame_current_end;
+    BOOL service_source;
+    BOOL post_original;
+    BOOL exact = FALSE;
+
+    if (witness == NULL ||
+        control_update_dispatch_tls == TLS_OUT_OF_INDEXES) {
+        goto done;
+    }
+    SetLastError(ERROR_SUCCESS);
+    frame = (ControlUpdateDispatchFrame *)TlsGetValue(
+        control_update_dispatch_tls);
+    tls_error = GetLastError();
+    if (tls_error != ERROR_SUCCESS || frame == NULL ||
+        frame->active_witness != witness) {
+        goto done;
+    }
+    overlap_generation_start = InterlockedCompareExchange(
+        &control_update_overlap_generation, 0, 0);
+    active_count_start = InterlockedCompareExchange(
+        &active_control_update_dispatches, 0, 0);
+    control_update_hook_ownership(
+        frame, &hook_owned_start, &slot_owned_start);
+    registry_stable_start = update_observer_registry_generation_is(
+        witness->observer_registry_generation);
+    source = (SudekiMpControlUpdateDispatchSource)witness->source;
+    service_source = source ==
+        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL;
+    post_original = service_source || source ==
+        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL;
+    source_shape_start = control_update_source_shape_exact(frame, source);
+
+    control_update_hook_ownership(
+        frame, &hook_owned_end, &slot_owned_end);
+    registry_stable_end = update_observer_registry_generation_is(
+        witness->observer_registry_generation);
+    source_shape_end = control_update_source_shape_exact(frame, source);
+    frame_current_end = control_update_dispatch_frame_current(frame);
+    active_count_end = InterlockedCompareExchange(
+        &active_control_update_dispatches, 0, 0);
+    overlap_generation_end = InterlockedCompareExchange(
+        &control_update_overlap_generation, 0, 0);
+
+    exact = witness->dispatch_serial != 0u &&
+        witness->dispatch_serial == frame->dispatch_serial &&
+        witness->native_thread_id == (uint32_t)GetCurrentThreadId() &&
+        witness->native_thread_id == (uint32_t)frame->native_thread_id &&
+        witness->outer_update_depth == 1u && frame->update_depth == 1u &&
+        witness->active_dispatch_count == 1u &&
+        active_count_start == 1 && active_count_end == 1 &&
+        witness->original_call_count == frame->original_call_count &&
+        witness->observer_snapshot_count != 0u &&
+        witness->observer_registry_generation != 0u &&
+        witness->dispatch_overlap_generation ==
+            frame->overlap_generation &&
+        witness->dispatch_overlap_generation ==
+            (uint32_t)overlap_generation_start &&
+        overlap_generation_start == overlap_generation_end &&
+        frame->tls_exact != 0u && frame->reentrancy_seen == 0u &&
+        frame->active_witness == witness && frame_current_end &&
+        witness->hook_owned_exact == 1u &&
+        hook_owned_start && hook_owned_end &&
+        witness->slot_owned_exact == 1u &&
+        slot_owned_start && slot_owned_end &&
+        witness->service_only == (uint8_t)(service_source ? 1u : 0u) &&
+        witness->service_only == frame->service_only &&
+        witness->post_original == (uint8_t)(post_original ? 1u : 0u) &&
+        witness->source_exact == 1u &&
+        witness->service_post_original_exact ==
+            (uint8_t)(service_source ? 1u : 0u) &&
+        witness->sole_observer ==
+            (uint8_t)(witness->observer_snapshot_count == 1u ? 1u : 0u) &&
+        witness->registry_generation_stable == 1u &&
+        registry_stable_start && registry_stable_end &&
+        witness->reserved[0] == 0u && witness->reserved[1] == 0u &&
+        witness->reserved[2] == 0u &&
+        source_shape_start && source_shape_end;
+
+done:
+    SetLastError(saved_error);
+    return exact;
 }
 
 BOOL SudekiMpInstallControlSeparation(
@@ -3277,9 +4040,28 @@ BOOL SudekiMpInstallControlSeparation(
 ) {
     uint8_t *base;
     void **slot;
+    BOOL gameplay_features_enabled;
+    BOOL service_only;
+    BOOL already_installed;
 
-    if (game_module == NULL || toggle_virtual_key == 0u ||
-        toggle_virtual_key > 0xffu ||
+    acquire_control_update_lifecycle();
+    already_installed = control_update_wrapper_enabled ||
+        controller_update_vtable_hook.installed != FALSE ||
+        game_base != NULL || original_controller_update != NULL;
+    release_control_update_lifecycle();
+    if (already_installed) {
+        SetLastError(ERROR_ALREADY_EXISTS);
+        return FALSE;
+    }
+
+    gameplay_features_enabled = enable_second_player_movement ||
+        enable_camera_relative_movement || enable_separation_guard ||
+        enable_second_player_weak_attack || enable_second_player_skills ||
+        enable_target_trace || enable_shared_group_camera ||
+        enable_input_bridge;
+    service_only = toggle_virtual_key == 0u;
+    if (game_module == NULL || toggle_virtual_key > 0xffu ||
+        (service_only && gameplay_features_enabled) ||
         (enable_second_player_weak_attack &&
          (attack_virtual_key == 0u || attack_virtual_key > 0xffu)) ||
         (enable_second_player_skills && skill_virtual_keys == NULL)) {
@@ -3312,6 +4094,13 @@ BOOL SudekiMpInstallControlSeparation(
         (!enable_second_player_movement || maximum_separation <= 0.0f ||
          maximum_separation > 1000.0f)) {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (memcmp(
+            base + RVA_CONTROLLER_UPDATE,
+            expected_controller_update_entry,
+            sizeof(expected_controller_update_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
     if ((enable_separation_guard &&
@@ -3384,10 +4173,39 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     slot = (void **)(base + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+    if (!ensure_control_update_dispatch_tls()) return FALSE;
+    if (service_only) {
+        game_base = base;
+        selected_virtual_key = 0u;
+        original_controller_update = (ControllerUpdateFunction)(
+            base + RVA_CONTROLLER_UPDATE
+        );
+        retained_original_controller_update = original_controller_update;
+        service_only_mode = TRUE;
+        if (!SudekiMpInstallPointerHook(
+                &controller_update_vtable_hook,
+                slot,
+                original_controller_update,
+                service_control_update_observers)) {
+            SudekiMpUninstallControlSeparation();
+            return FALSE;
+        }
+        acquire_control_update_lifecycle();
+        control_update_wrapper_enabled = TRUE;
+        release_control_update_lifecycle();
+        SudekiMpLogWrite(
+            "control_separation_install=success profile=service_only "
+            "policy=exact_native_controller_update_once_then_owned_observers "
+            "gameplay_and_coop_services=disabled\r\n"
+        );
+        return TRUE;
+    }
     game_base = base;
+    service_only_mode = FALSE;
     selected_virtual_key = toggle_virtual_key;
     hotkey_was_down = FALSE;
     overridden_character = NULL;
+    overridden_ai_component = NULL;
     role_lock_active = FALSE;
     player_two_requested = FALSE;
     requested_player_two_character = NULL;
@@ -3465,6 +4283,7 @@ BOOL SudekiMpInstallControlSeparation(
     original_controller_update = (ControllerUpdateFunction)(
         base + RVA_CONTROLLER_UPDATE
     );
+    retained_original_controller_update = original_controller_update;
     ai_override_control = (AiControlFunction)(base + RVA_AI_OVERRIDE_CONTROL);
     ai_default_control = (AiControlFunction)(base + RVA_AI_DEFAULT_CONTROL);
     arbiter_movement = (ArbiterMovementFunction)(base + RVA_ARBITER_MOVEMENT);
@@ -3536,6 +4355,9 @@ BOOL SudekiMpInstallControlSeparation(
         SudekiMpUninstallControlSeparation();
         return FALSE;
     }
+    acquire_control_update_lifecycle();
+    control_update_wrapper_enabled = TRUE;
+    release_control_update_lifecycle();
     SudekiMpLogFormat(
         "control_separation_install=success target_policy=first_non_front_active_party_member virtual_key=0x%02lx second_player_movement=%s camera_relative_movement=%s roaming_boundary=%s roaming_boundary_policy=symmetric_p1_p2_stable_exploration_only warning_fraction_bits=0x3f4ccccd maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_deadzone_bits=0x%08lx combat_input_rva=0x000db0e0 controller_router_seats=4 controller_contract=xbox_a_context_or_weak_x_strong_y_quick_menu_intent_b_modal_cancel_or_combat_sweep_dpad_quickshot_intent\r\n",
         (unsigned long)selected_virtual_key,
@@ -3559,7 +4381,28 @@ BOOL SudekiMpInstallControlSeparation(
 }
 
 void SudekiMpUninstallControlSeparation(void) {
-    SudekiMpRestorePointerHook(&controller_update_vtable_hook);
+    DWORD teardown_error;
+
+    acquire_control_update_lifecycle();
+    if (InterlockedCompareExchange(
+            &active_control_update_dispatches, 0, 0) != 0) {
+        release_control_update_lifecycle();
+        SetLastError(ERROR_BUSY);
+        return;
+    }
+    if (!SudekiMpRestorePointerHook(&controller_update_vtable_hook)) {
+        /* The controller wrapper may still be reachable either directly or
+         * through the foreign slot owner.  Keep its native callback,
+         * observers, and all supporting state alive until ownership is
+         * returned and teardown can be retried. */
+        teardown_error = GetLastError();
+        release_control_update_lifecycle();
+        SetLastError(teardown_error);
+        return;
+    }
+    control_update_wrapper_enabled = FALSE;
+    release_control_update_lifecycle();
+    clear_update_observers();
     SudekiMpRestoreRelativeCallHook(
         &player_one_normal_movement_call_hook);
     SudekiMpRestoreRelativeCallHook(
@@ -3580,10 +4423,12 @@ void SudekiMpUninstallControlSeparation(void) {
     spirit_direct_movement_last_trace_tick = 0u;
     game_base = NULL;
     overridden_character = NULL;
+    overridden_ai_component = NULL;
     role_lock_active = FALSE;
     player_two_requested = FALSE;
     requested_player_two_character = NULL;
     player_two_request_last_attempt = 0u;
+    service_only_mode = FALSE;
     selected_virtual_key = 0;
     hotkey_was_down = FALSE;
     second_player_movement_enabled = FALSE;
@@ -3647,6 +4492,11 @@ void SudekiMpUninstallControlSeparation(void) {
     last_movement_x = 0;
     last_movement_z = 0;
     reset_native_movement_acceptance_trace();
-    update_observer = NULL;
     SudekiMpCombatContextsReset();
+    if (control_update_dispatch_tls != TLS_OUT_OF_INDEXES &&
+        InterlockedCompareExchange(
+            &active_control_update_dispatches, 0, 0) == 0) {
+        (void)TlsFree(control_update_dispatch_tls);
+        control_update_dispatch_tls = TLS_OUT_OF_INDEXES;
+    }
 }

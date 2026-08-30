@@ -4,15 +4,40 @@
 #include <string.h>
 
 static BOOL write_protected_memory(void *destination, const void *source, size_t size) {
+    uint8_t original[SUDEKIMP_INLINE_HOOK_MAX_BYTES];
     DWORD old_protection;
     DWORD ignored_protection;
+    DWORD restore_error;
+    DWORD rollback_protection;
 
+    if (destination == NULL || source == NULL || size == 0u ||
+        size > sizeof(original)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     if (!VirtualProtect(destination, size, PAGE_EXECUTE_READWRITE, &old_protection)) {
         return FALSE;
     }
+    CopyMemory(original, destination, size);
     CopyMemory(destination, source, size);
     FlushInstructionCache(GetCurrentProcess(), destination, size);
     if (!VirtualProtect(destination, size, old_protection, &ignored_protection)) {
+        /* The bytes are already live.  Never report a failed install and let
+         * the caller free its trampoline while a detour still targets it.
+         * Reacquire write access and roll the bytes back first.  If even that
+         * fails, keep the hook transaction installed/owned; this is safer
+         * than creating a dangling jump. */
+        restore_error = GetLastError();
+        if (!VirtualProtect(destination, size, PAGE_EXECUTE_READWRITE,
+                &rollback_protection)) {
+            SetLastError(restore_error);
+            return TRUE;
+        }
+        CopyMemory(destination, original, size);
+        FlushInstructionCache(GetCurrentProcess(), destination, size);
+        (void)VirtualProtect(destination, size, old_protection,
+            &ignored_protection);
+        SetLastError(restore_error);
         return FALSE;
     }
     return TRUE;
@@ -139,9 +164,14 @@ BOOL SudekiMpInstallPointerHook(
 
     hook->slot = slot;
     hook->original_value = *slot;
-    hook->installed = TRUE;
     replacement_value = (void *)replacement;
+    hook->replacement_value = replacement_value;
+    hook->installed = TRUE;
     if (!write_protected_memory(slot, &replacement_value, sizeof(replacement_value))) {
+        /* A FALSE result guarantees that write_protected_memory either never
+         * wrote the slot or rolled it back.  Do not leave an inert failed
+         * install looking owned. */
+        ZeroMemory(hook, sizeof(*hook));
         return FALSE;
     }
     return TRUE;
@@ -151,15 +181,19 @@ BOOL SudekiMpRestorePointerHook(SudekiMpPointerHook *hook) {
     if (hook == NULL || !hook->installed || hook->slot == NULL) {
         return TRUE;
     }
+    if (*hook->slot != hook->replacement_value) {
+        /* Another hook owns the slot now.  Retain the complete record so its
+         * owner can put our replacement back and retry teardown safely. */
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
     if (!write_protected_memory(
             hook->slot,
             &hook->original_value,
             sizeof(hook->original_value))) {
         return FALSE;
     }
-    hook->installed = FALSE;
-    hook->slot = NULL;
-    hook->original_value = NULL;
+    ZeroMemory(hook, sizeof(*hook));
     return TRUE;
 }
 

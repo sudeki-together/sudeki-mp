@@ -44,6 +44,39 @@ jobs:
             throw "tools/build-windows.sh failed with exit code $LASTEXITCODE"
           }
 
+      - name: Run expanded-encounter policy regressions
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:GITHUB_WORKSPACE 'build\windows-mingw32\bin'
+          $tests = @(
+            'SudekiMP.LocalViewportLayoutTest.exe',
+            'SudekiMP.LocalInputHubTest.exe',
+            'SudekiMP.TalosEncounterSessionTest.exe',
+            'SudekiMP.TalosEncounterAdmissionTest.exe',
+            'SudekiMP.TalosCompanionCarryTest.exe',
+            'SudekiMP.TalosCompanionStagingTest.exe',
+            'SudekiMP.TalosCompanionStagingResearchTest.exe',
+            'SudekiMP.TalosCompanionMembershipAbiTest.exe',
+            'SudekiMP.TalosCompanionStagingResearchAdapterTest.exe',
+            'SudekiMP.TalosCompanionStagingNativeSamplerTest.exe',
+            'SudekiMP.TalosCompanionStagingNativeCaptureTest.exe',
+            'SudekiMP.TalosCompanionCarryAdapterTest.exe',
+            'SudekiMP.TalosEncounterInterceptTest.exe',
+            'SudekiMP.TalosNativeLifecycleTraceTest.exe',
+            'SudekiMP.TalosPostMoviePartyRestoreTest.exe'
+          )
+          foreach ($test in $tests) {
+            $path = Join-Path $bin $test
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing regression executable: $path"
+            }
+            & $path
+            if ($LASTEXITCODE -ne 0) {
+              throw "$test failed with exit code $LASTEXITCODE"
+            }
+          }
+
       - name: Package Windows beta
         shell: powershell
         run: |

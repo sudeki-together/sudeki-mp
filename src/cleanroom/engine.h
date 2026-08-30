@@ -41,6 +41,28 @@ BOOL SudekiMpCleanroomEngineWorldReady(void);
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor);
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor);
 void *SudekiMpCleanroomEngineGenericEntity(const char *resource_name);
+/* Prove the live native group and AI formation each contain exactly the four
+ * retail heroes once, with Tal still leading the group. No pointer escapes. */
+BOOL SudekiMpCleanroomEngineExactRetailPartyReady(void);
+/* Additionally prove the restored control split: Ailish owns the native
+ * player-override lease while Buki and Elco remain in native AI mode. */
+BOOL SudekiMpCleanroomEngineExactPostRestoreControlsReady(void);
+/* Pointer-free policy behind the persistent live-combat control check. */
+BOOL SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+    int16_t tal_ref,
+    uint8_t tal_mode,
+    int16_t ailish_ref,
+    uint8_t ailish_mode,
+    int16_t buki_ref,
+    uint8_t buki_mode,
+    int16_t elco_ref,
+    uint8_t elco_mode
+);
+/* Revalidate an already-proven control split during live combat. Sudeki's
+ * native skill-camera path temporarily acquires refcounted control leases on
+ * all eligible party actors. This accepts their balanced native leases
+ * without weakening the initial exact-one Ailish admission proof. */
+BOOL SudekiMpCleanroomEnginePostRestoreControlsActive(void);
 BOOL SudekiMpCleanroomEngineActorTargetsAllies(
     SudekiMpCleanroomActor actor,
     BOOL *enabled
@@ -56,6 +78,13 @@ BOOL SudekiMpCleanroomEngineActorPosition(
 BOOL SudekiMpCleanroomEngineSpawnActor(
     SudekiMpCleanroomActor actor,
     const float position[3]
+);
+/* Initialize one already-present retail party actor without applying the
+ * cleanroom-wide inventory, Spirit Strike, fuel, or training-room policies.
+ * This is intended for native asynchronous party spawns whose entity became
+ * visible after the world's original initialization pass. */
+BOOL SudekiMpCleanroomEngineInitializePartyActor(
+    SudekiMpCleanroomActor actor
 );
 BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor);
 BOOL SudekiMpCleanroomEngineDummyPresent(void);

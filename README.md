@@ -70,6 +70,14 @@ research copy; the complete 394-file baseline is hashed and reproducible.
 
 - Keyboard/mouse Player 1 and a Linux-controller Player 2 can move and attack
   independently in one Sudeki process.
+- The Talos post-movie profile now lets retail Sudeki complete the companion
+  deletes, Kazel lifecycle, and TSA settle, then restores Ailish, Buki, and
+  Elco from one exact one-shot ticket. Live testing confirmed four heroes with
+  Ailish owned by Player 2 while Buki and Elco remain native AI.
+- A gated Tal-left/Ailish-right presentation is live-proven for that restored
+  party. Ailish navigation is camera-relative to the current view orientation;
+  independent right-stick rotation is the next step. The same seat-local basis
+  is the intended model for future P3/P4 views, which are not implemented yet.
 - Player 2 input is transported from Linux joydev through a small loopback UDP
   bridge because the test controller is not exposed to Wine as XInput or
   DirectInput.
@@ -110,10 +118,12 @@ after a save's native world and party have settled; it never edits save data or
 party pointers outside Sudeki's own roster path.
 
 > [!WARNING]
-> Talos's retail Void transition is still host-only in the beta. Its separate
-> four-party restoration experiment is deliberately rejected when split-screen
-> is enabled, because the cinematic collapses the party and commandeers the
-> global camera before its lifecycle is safe to virtualize.
+> Talos's retail Void transition is still host-only in the beta. The old
+> post-collapse four-party restoration experiment is retired because it can
+> trigger an R6025 pure-virtual failure. The replacement expanded-encounter
+> coordinator remains default-off until the four heroes can be carried through
+> the native transition without spawning them afterward and every human seat
+> has proven camera/render/HUD/input ownership.
 5. Wait for a selected character when the story has not added them yet.
 
 The page reuses Sudeki's native title fade, font submission, and four resident
@@ -176,21 +186,43 @@ consent.
 
 ### Latest confirmed encounter: Talos
 
-The natural final-battle transition normally collapses the party to Tal. The
-local co-op lifecycle profile restores Ailish, Buki, and Elco through Sudeki's
-native party lifecycle, preserving human-controlled co-op seats and returning
-any remaining companions to native AI control.
+The retail final-battle transition deliberately removes Ailish, Buki, and Elco
+and carries only Tal into the Void. The former prototype restored companions
+after that collapse with an internal spawn routine. It is retired: skipping the
+Void movie exposed an R6025 pure-virtual failure, so supported launch profiles
+now reject that path before installing its hooks.
 
-The companions originally attacked Talos's clones but ignored the real boss.
-Static and live analysis found the exact cause: the shared AI candidate
-validator rejects AI-unit type `3` when an authored request bit is set. Real
-Talos is type `3`; his clones are type `1`.
+The replacement expanded-encounter work is native-inert groundwork. It has
+tested policies for a four-hero roster, one to four human seats, adaptive
+viewport rectangles, stable controller identities, replay-safe transition
+provenance, native-AI admission, and a one-shot `45,000 x 4 = 180,000` Talos HP
+ticket. It does not yet intercept the live transition or create Player 3/4
+cameras.
 
-The accepted prototype clears that one request bit only in a temporary stack
-copy, only for a restored retail companion evaluating the exact live real
-Talos candidate. It does not change Talos, clone behavior, factions, target
-pointers, damage, or persistent AI state. Live acceptance confirmed Ailish,
-Buki, and Elco attack both the real Talos and his clones.
+The first passive Void trace also found that the authored Tal/Kazel merge
+temporarily occupies a second slot in both native four-entry party structures.
+Simply preserving all four heroes in place would therefore overfill those
+structures when `PC_KAZEL` arrives. Exact disassembly closes the dangerous
+part of that question: the group insertion core has no four-member guard and
+would write a fifth slot/count, while the formation core rejects a fifth
+member. The passive observer now follows the exact TalKazelMerge/SpawnPC SOL
+chain, classifies the transient DarkTal actor, and wraps only the native raw
+group-insert call. A corrected retail run proved the unchanged native
+`1 -> 2 -> 1` Kazel lifecycle, including the same actor token entering and
+leaving both party structures. A native-safe way to stage and reattach one
+companion around that temporary slot remains required before any carry
+experiment. The selected research path is to use Sudeki's public
+membership-only remove/add APIs on the exact group-last nonlead hero, leave
+Kazel's native `3 -> 4 -> 3` callbacks untouched, and require byte-exact
+restoration of both independently ordered hero rosters before combat.
+
+Companion AI will not be pinned to the canonical `BOSS_Talos` entity. The
+intended rule is to make verified real and clone Talos entities eligible, then
+leave defensive target selection and retargeting to Sudeki's native AI. Prior
+live research observed companions switching between the real boss and clones;
+native selectors use distance within authored priority buckets, but a hit is
+not yet proven to force retargeting and globally nearest is not guaranteed.
+See [Expanded Talos encounter design](docs/expanded-talos-encounter-design.md).
 
 ## Integration frontier
 
@@ -249,7 +281,7 @@ Useful focused modes include:
 ./tools/continue-research.sh --controller-bridge-test
 ./tools/continue-research.sh --realtime-skill-coop-test
 ./tools/continue-research.sh --zone-traversal-test
-./tools/continue-research.sh --talos-party-test
+./tools/continue-research.sh --talos-defense-trace
 ```
 
 Run `./tools/continue-research.sh --help` for the complete research-mode list.

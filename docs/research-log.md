@@ -4198,3 +4198,462 @@ incapable of activating a world interaction.
   orbit is suspended until controller events can be translated safely into the
   named native camera. Manual orbit remains the fallback for combat and other
   unsupported phases.
+
+## 2026-08-29 — Expanded Talos encounter safety checkpoint
+
+**Status:** native-inert policy and exact transition research implemented; the
+playable encounter remains unavailable and default-off.
+
+- The former `EnableTalosPartyPrototype` path is retired. It restored Ailish,
+  Buki, and Elco with `InternalSpawnPC` after the retail Void transition had
+  already reduced the party to Tal, and a live movie-skip run ended in an
+  R6025 pure-virtual failure. Its collapse trigger also mislabeled
+  `0xA6D349CC` as Tal; the exact native hash is `PC_KAZEL`, so the old path was
+  armed by the authored merge actor's zero-position spawn. The loader now
+  rejects that key before installing Talos hooks. The reserved
+  `EnableExpandedTalosEncounterPrototype` key is also rejected until a
+  pre-transition four-hero lifecycle and all requested per-seat runtime owners
+  are proven. Supported Windows and Linux co-op launch profiles force both keys
+  off.
+- Pointer-free coordinators now model the replacement without calling the
+  game. `TalosEncounterSession` binds a monotonic encounter/transition serial,
+  world and source generations, Tal's actor and lease generations, the four
+  distinct existing hero actor/lifecycle-generation tuples, immutable
+  hero-to-seat/AI assignments, physical controller slots, and input identity
+  generations. Post-arrival admission requires those exact same four tuples;
+  a replacement actor or boss/hero alias is rejected before HP authorization.
+  Confirm, cancel, claim, replay, mismatch, quarantine, and generation-bound
+  recovery are strict state transitions.
+- `LocalViewportLayout` produces exact full-screen, left/right, top-wide plus
+  two bottom, and 2x2 rectangles for one through four human seats. A separate
+  pure activation gate requires actor, camera, render, HUD, input, and cache
+  proof masks to equal the active seat mask. It has no production caller; the
+  live renderer and control-separation service are still concretely two-seat.
+- An opt-in `LocalInputHub` models P2 through P4 controller ownership with
+  stable physical-slot reservations, reconnect identity generations, neutral
+  fences, and independent suppression. It has no production start caller, so
+  the existing P2 bridge path remains unchanged.
+- `TalosEncounterAdmission` requires four distinct resource-confirmed hero
+  actors, exact human or native-AI control ownership, a live native targeter,
+  exact real-boss combat/stat/boss-bar identity, and a one-shot health ticket.
+  The ticket scales vanilla `45,000` maximum HP to `180,000`, preserves the
+  current-health ratio, and cannot complete until the exact post-write state is
+  verified. A bounded WAITING/ADMITTED transaction can be abandoned before an
+  HP ticket is claimed so future integration can release mod ownership and
+  fall back without a partial mutation.
+- Companion admission deliberately does not bind the current target to
+  `BOSS_Talos`. A null target is accepted while native AI is idle/reacquiring;
+  a non-null target must be classified as an authored Talos encounter threat,
+  including real Talos or a clone. The selected target is not part of the
+  immutable ticket, so Sudeki remains free to retarget. Earlier live research
+  already observed Ailish, Buki, and Elco switching between the type-3 real
+  boss and type-1 clones. Static selectors establish that proximity is
+  material without promising a globally nearest result: world queries
+  radius-filter by squared 3D distance; ordinary acquisition uses
+  forward/near priority buckets and selects the smallest squared distance in
+  the winning bucket; combat enumeration retains the smallest squared
+  horizontal distance among candidates accepted by the authored validator.
+  The dispatcher still supports multiple authored request modes, and no
+  damage-source-to-target-selection link is proven. A strict closest-target or
+  guaranteed hit-forces-retarget rule is therefore neither imposed nor
+  advertised.
+- The earlier transition containment report was corrected after a raw/logical
+  GEX-offset error. The exact serialized bytecode base is raw `0x27E6C`.
+  `CC_NPC_Caprine_TalkingT3|PP` (`0xFAC73F18`) starts `LoadTheVoid`
+  (`0x70F470C2`) with opcode `0x29` at logical `0x21C0C`.
+  `LoadTheVoid` calls `SetZone|S` (`0x76FC7114`) at logical `0x2196E`
+  (raw `0x497DA`), and that wrapper
+  invokes native `SetZoneNOW|S` (`0xBC8FDC32`) at `0x317C`.
+  `LoadTheVoid` also contains the FMA07/Void sequence and three explicit
+  `DeletePC|R` calls immediately before the zone wrapper: Buki resource 4 at
+  raw/logical `0x497B9/0x2194D`, Ailish resource 3 at
+  `0x497C4/0x21958`, and Elco resource 5 at `0x497CF/0x21963`. All false
+  `TableScene`/GimpFemale attribution was removed, and
+  `tools/inspect-sol-gex.pl` now derives the bytecode base from the version-4
+  hash-index size instead of treating the function-table end as code.
+- The new transition-lineage tracker remains passive. It can compare exact
+  source, caller, wrapper, native binding, world/source/host provenance, and
+  same/descendant SOL task generations, but production continuation is hard
+  coded unsupported. A live scoped opcode-`0x29` task-construction trace and
+  both opcode-`0x27` frames must prove ancestry and an exact replay boundary;
+  generic native binding return RVA `0x002352B1` is not sufficient.
+- Static lifecycle analysis identifies an all-existing-actor alternative to
+  the crashed spawn path: omit only those three exact companion deletes after
+  prevalidating the immutable group/formation, then, after Tal's native Void
+  placement and a settled zone, use the existing native
+  `AiPCFormationPopMembers()` route to place the preserved followers. A broad
+  DeletePC hook is forbidden because `TalKazelMerge`, invoked by the same
+  transition, separately spawns and deletes PC_KAZEL. Final
+  `GameFinish -> RemoveAllPlayers` cleanup is count-generic and loops until the
+  active group is empty. The formation route is proven in ordinary temporary
+  zones, not yet in the Void; after the first omitted delete, fallback is no
+  longer clean, so this remains observation-only until all preconditions and
+  teardown are accepted live.
+- Strict host tests, the full MinGW build, five Wine policy regressions, and the
+  exact supported-image regression pass. No game was launched for this
+  checkpoint. The next live work is observation-only: prove the SOL lineage,
+  prove exact companion-delete task lineage, retained-actor formation placement,
+  cinematic/global-camera recovery, and count-generic teardown. Native
+  companion distance/threat selection will be observed without requiring a
+  hit-forces-retarget rule before any feature activation.
+
+### First passive retail Void lifecycle trace
+
+The closed `--talos-lifecycle-observation` profile completed one unskipped,
+one-human retail transition without an R6025, exception, or process exit. The
+profile hash-gated both the supported executable and `SOLWORLDM.gex`; every
+optional gameplay mutation remained off. `FMA07.bik` is 380.37 seconds long,
+which accounts for the expected quiet interval between task creation and the
+post-movie script calls.
+
+- Exact opcode `0x29` at logical `0x21C0C` started `LoadTheVoid`; the scoped
+  constructor observer then captured the returned child task/thread and bound
+  generation-one opaque lineage. The original handler returned normally.
+- The three exact opcode-`0x27` calls and nested native `DeletePC` returns were
+  observed in authored order. Group and AI-formation identity sets matched at
+  every edge: Buki changed both sets `4 -> 3`, Ailish `3 -> 2`, and Elco
+  `2 -> 1`. The same opaque Tal token survived all three removals.
+- The exact `SetZone|S` carrier and nested `SetZoneNOW|S("Void")` frames shared
+  that lineage and both returned. After arrival, a separate out-of-scope
+  `DeletePC` changed a transient two-member set back to Tal-only; its native
+  identifier was `PC_KAZEL` (`0xA6D349CC`), consistent with the authored
+  Tal/Kazel merge cleanup and distinct from the three companion call sites.
+- The exact EndTSA opcode returned and live gameplay resumed with Tal alone,
+  Tal's HUD present, and the native quit menu responsive. No
+  `AiPCFormationPopMembers` call occurred in the retail path.
+- The transient `PC_KAZEL` member is a carry-capacity blocker, not merely an
+  out-of-scope delete to ignore. It occupied a second slot in both native
+  four-entry rosters before its authored deletion. Preserving Tal, Ailish,
+  Buki, and Elco in place would fill both structures before that Kazel step;
+  exact-build analysis shows the raw group core has no four-member capacity
+  guard and would write a fifth entry/count, while the paired formation core
+  rejects a fifth member. That would create a divergent ownership state, so a
+  live full-roster probe is forbidden. A guarded no-delete experiment remains
+  blocked until a native-safe companion staging/reattachment lifecycle is
+  proven.
+- Later in the same process, exact `GameFinish` opcode context entered native
+  `RemoveAllPlayers` once. Its original call returned with both independently
+  sampled owners still readable and the active group plus AI formation each
+  changing from Tal-only (`1`, mask `0x01`) to verified empty (`0`, mask
+  `0x00`). The enclosing handler then returned, with no R6025, exception, or
+  detach failure. This closes the vanilla count-generic final-cleanup baseline;
+  it does not by itself prove a future retained four-person cleanup.
+
+The first observer build mislabeled `ResourceName.identifier` as a small
+script resource ID and compared the native values to `4/3/5`. The captured
+values were actually the already-known PC hashes: Buki `0x019C1EBA`, Ailish
+`0x8557D453`, and Elco `0x0180E1D4`. The later `0xA6D349CC` value recomputes
+exactly from `PC_KAZEL`; `PC_Tal` is `0x0213755C`. The observer now records the
+full 12-byte native shape, safely copies a bounded name from the shared backing
+record, recomputes Sudeki's alternating-add/multiply uppercase identifier, and
+requires the expected exact PC name and hash for passive correlation. Word
+zero is logged but is not an identity gate: its low seven bits are mutable
+lazy-resolution state, so generic textual `0x00000FFF` is not universal.
+Focused and exact-image Wine regressions pass after that correction; a second
+passive retail run must make the new `resource_matches=true` evidence live
+before any deletion can be considered for guarded omission.
+
+This run still does not authorize party carry. Opaque roster identities are
+not backed by stable actor lifecycle generations; EndTSA reported the TSA flag
+true at the handler's immediate after edge; and that build had not yet captured
+the committed default-camera/native-controller settle edge. The hardened
+observer now covers those latter edges, but they still need live confirmation
+and do not provide allocator lifetime or frame-cache freshness authority.
+
+Post-run observer hardening does not reinterpret that old log. A new exact
+`TSASetPlaying(false)` entry detour is gated to the authored EndTSA operand,
+same script-runtime generation, and same native thread; it accepts completion
+only on the native `true -> false` edge after the original returns. A pure-read
+hero classifier now validates the complete relocated main/secondary/resource
+vtable triplet for each retail hero without invoking any virtual method. During
+the next passive run it will require the copied PC name/hash and the same
+hero-token set difference in both party structures, in Buki/Ailish/Elco order.
+Its counters are explicitly roster-observation leases, not allocator-lifetime
+authority. Full-function relocation gates, all hero RTTI/COL/method evidence,
+foreign-hook rejection, rollback, and byte-for-byte restoration pass focused
+and exact supported-image Wine regressions. None of this observer code can
+suppress a call or activate the expanded encounter.
+
+The next passive build adds the missing Kazel insertion edge without adding a
+gameplay mutation. Exact SOL provenance is
+`LoadTheVoid -> TalKazelMerge (0x219F8) -> SpawnPC (0xBC1B3) ->`
+`InternalSpawnPC (0x3099)`. A relocation-gated relative-call observer at RVA
+`0x000B15DB` forwards the native raw group-add core exactly once, preserves its
+custom EAX/stack ABI and result registers, and samples both native rosters
+before and after. The candidate actor must match the exact `DarkTalEntity`
+vtable/RTTI triplet and produce one common new opaque token in the group and
+formation. The later exact `DeletePC(PC_KAZEL)` must remove that same token.
+No raw pointer is published or retained, and the evidence remains explicitly
+non-authoritative for actor lifetime. The next unskipped retail run must prove
+this `1 -> 2 -> 1` chain before staging design advances.
+
+### Second passive retail Void lifecycle trace
+
+Run `0000016000c7b2c6` completed the corrected, unskipped one-human baseline
+through native TSA release and playable Tal-only Void without R6025, exception,
+or process exit. It also disproved one observer assumption without changing
+native behavior.
+
+- Native `ResourceName` evidence is now exact and live. Buki
+  (`PC_BUKI`, `0x019C1EBA`) reduced both native rosters `4 -> 3`; Ailish
+  (`PC_AILISH`, `0x8557D453`) reduced them `3 -> 2`; Elco (`PC_ELCO`,
+  `0x0180E1D4`) reduced them `2 -> 1`. Bounded text, stored identifier,
+  recomputed identifier, and expected identifier all matched. The same Tal
+  token survived, and the corroborated hero-removal mask reached `0x0E`.
+- Exact `SetZone|S` and nested `SetZoneNOW("Void")` provenance committed the
+  Void settle session. The later authored `TSASetPlaying(false)` call produced
+  a native `true -> false` edge with the original Tal roster, default render
+  camera, controller target/modes, and Tal AI-inactive state all revalidated.
+  `settle_evidence_complete=true`, and live inspection confirmed Tal-only boss
+  gameplay with HUD and boss bar.
+- Native Kazel identity is also exact. Immediately before the authored
+  `DeletePC`, both native rosters contained two identical member tokens. The
+  bounded resource was `PC_KAZEL`; stored, recomputed, and expected identifiers
+  were all `0xA6D349CC`. The original call removed the same second token from
+  both structures and restored the original Tal-only token.
+- The first Kazel insertion observer did not arm. Live opcode edges were
+  serialized as `TalKazelMerge before/after`, `SpawnPC before/after`, then
+  `InternalSpawnPC before/after`; they were not nested on the opcode-27 TLS
+  stack. Consequently the old `previous`-frame test correctly failed closed,
+  emitted no group-add acceptance, and left every original call untouched.
+  The native `1 -> 2 -> 1` evidence remains valid at the deletion boundary,
+  but that run does not prove the raw-add call correlation itself.
+
+The observer now models those six exact opcode edges as an ordered serialized
+state machine, still bound to one LoadVoid task/runtime/script-thread/native-
+thread provenance tuple. Only the complete six-edge sequence may arm the
+existing RVA `0x000B15DB` raw-group-add observer. Skips, duplicates, reordered
+edges, stale generations, or provenance replacement quarantine evidence while
+calling native code exactly once. Kazel evidence is deliberately one-shot per
+process: a second LoadVoid session is quarantined so a delayed asynchronous
+completion from the first can never be attributed to the second. A repeat
+passive run must therefore start in a fresh process and is required to close
+the raw-add correlation; expanded-party mutation remains disabled.
+
+### Third passive retail Void lifecycle trace
+
+Fresh process run `00000159a12b1dff` closed the raw Kazel insertion evidence
+gap without changing native behavior. The exact supported-image profile
+reached `status=ready`; every gameplay mutation and expanded-encounter key
+remained disabled.
+
+- LoadVoid task, runtime, script-thread, and native-thread provenance bound at
+  generations `1/1`. The exact Buki, Ailish, and Elco deletes again reduced
+  identical native group/formation sets `4 -> 3 -> 2 -> 1`, with hero removal
+  mask `0x0E` and one stable Tal token.
+- The ordered TalKazelMerge, SpawnPC wrapper, and InternalSpawnPC before/after
+  edges advanced the serialized mask `0x01 -> 0x03 -> 0x07 -> 0x0F -> 0x1F
+  -> 0x3F`. Only the sixth edge armed request generation `1`, after a second
+  exact Tal-only roster check.
+- The exact raw group-add call at RVA `0x000B15DB` observed the unchanged
+  original move both native structures `1 -> 2`. The added actor matched the
+  full `DarkTalEntity` RTTI/vtable identity, both sets contained opaque token
+  `44C608D0579AD5DE`, and the evidence state reached corroborated.
+- The later exact `DeletePC(PC_KAZEL)` used stored, recomputed, and expected
+  identifier `0xA6D349CC`, removed that same token from both structures, and
+  returned them `2 -> 1`. Request generation `1` reached delete-corroborated
+  state with no ambiguity.
+- Exact `TSASetPlaying(false)` then observed native `true -> false` and
+  revalidated the original Tal survivor, default camera, Tal controller
+  target/modes, and inactive Tal AI override. `settle_evidence_complete=true`.
+  Read-only window acceptance then saw the cinematic finish and stable Tal
+  gameplay with HUD and boss bar. No R6025, exception, trace error, or
+  unexpected native-call suppression was observed. The evidence occupies log
+  bytes `614332482..614370530` on inode `15327792`.
+
+The observer does not record the movie-skip input itself. The roughly
+23-second LoadVoid-to-TSA interval is consistent with a skipped movie, but is
+not treated as direct proof that the skip button was pressed.
+
+This proves the normal temporary Kazel lifecycle and closes the raw-add seam;
+it does not make a five-member roster safe. The group core still writes a
+fifth entry while formation rejects it. The next milestone is a separate,
+default-off proof that one companion can be removed from and restored to both
+native membership structures without losing actor lifetime or ownership.
+
+### Companion staging direction after Kazel proof
+
+The capacity solution will preserve Kazel's full native membership lifecycle,
+not suppress its raw group add. Skipping RVA `0x000B15DB` would also skip
+unknown group listeners, formation enrollment, combat-state propagation, an
+actor-side update, and a spawn-completion membership branch. That route is not
+fail-closed once a four-hero carry has begun.
+
+The candidate instead stages the exact group-last nonlead hero. On the proven
+roster this is Elco: group order is `[Tal,Ailish,Buki,Elco]`, while formation
+order is independently `[Tal,Elco,Ailish,Buki]`. Public
+`CGroupPlayers::RemovePlayer` at RVA `0x00023390` must synchronously remove the
+same Elco actor from both structures; public `AddPlayer` at RVA `0x00023230`
+must restore both exact original orders through native listener and formation
+canonicalization. Kazel then remains the authored `3 -> 4 -> 3` transaction,
+and Elco restoration returns the party to four.
+
+This is not yet a rollback contract. Both public calls return void, group and
+formation can diverge on a partial listener failure, and an intrusive `TPtr`
+is a weak liveness witness rather than a strong lifetime owner. The
+pointer-free coordinator and exact-image, default-off observation gates are
+now implemented below. The next live milestone is observation only. Even a
+valid observation does not authorize a disposable synchronous Elco
+remove/re-add; that mutation would require a separate decision and proof
+contract. Expanded Void mutation remains disabled.
+
+## 2026-08-30 — Ordinary-world companion-staging groundwork
+
+**Status:** the inert coordinator and the default-off, read-only native
+observation pipeline are implemented and strictly tested. Native membership
+mutation remains structurally absent from the production adapter; the profile
+is still disabled in the checked-in configuration, and no live run has been
+performed.
+
+- A separate pure, pointer-free research coordinator now models exactly one
+  process-lifetime Elco staging attempt. It accepts only group order
+  `[Tal,Ailish,Buki,Elco]` and independent formation order
+  `[Tal,Elco,Ailish,Buki]`, emits symbolic tickets for one public Remove and
+  one public Add, rejects replay/non-wrapping authorization errors, and moves
+  any post-remove drift into sticky quarantine with reload required. Its
+  snapshots can never grant production, carry, or actor-lifetime authority.
+- Strict tests cover preflight rejection, exact detached/restored membership,
+  immediate stability, ticket tampering, serial half-range behavior, one-shot
+  consumption, authority rejection, and continuity drift. Continuity includes
+  source/world, group and formation owners, controller and Tal front actor,
+  camera, selected render camera, render state, scene manager, and scene
+  renderer. This does not establish camera-target authority.
+- The pure membership-ABI validator is now version 3. It checks exact
+  supported-build PE32 bytes, relocated operands, relative-call targets,
+  calling conventions, public membership wrappers, formation/listener
+  propagation, complete intrusive `TPtr` and wrapper ownership machinery,
+  HUD/resource and stat-display paths, Elco arbiter effects, and stat-camera
+  synchronization. `seams_valid` is deliberately narrower than image
+  identity, performs no native call, and grants no mutation or lifetime
+  authority.
+- `GetPC` returns a `0x18`-byte GELPointer/PtrObj wrapper whose embedded weak
+  `TPtr` begins at `+0x0C` and is `0x0C` bytes long. The proposed no-yield
+  transaction retains the same wrapper for synchronous public Remove then
+  public Add and calls the wrapper's scalar deleting destructor exactly once
+  afterward. This is weak liveness observation, not proof that the wrapper
+  owns or preserves Elco. Direct raw group add/remove calls are forbidden;
+  only the public wrappers may drive their native listeners.
+- Control separation now provides an exact service-post-original dispatch
+  witness. The closed service profile forwards the original native controller
+  update exactly once and then invokes its sole registered observer with the
+  borrowed `controller` and `update_data`. Admission requires an outermost,
+  non-overlapping native-thread dispatch, exact hook/slot ownership, one
+  original call, a sole observer, stable registry generation, and synchronous
+  revalidation of that same witness after capture. Co-op and gameplay services
+  remain off.
+- The native capture bridge performs discardable A/B planning captures to
+  discover the mapped image and all required dynamic spans. It bounds each
+  immutable view to 128 ranges and 5 MiB, revalidates every range and its
+  native read/write permissions, then crosses a final boundary for independent
+  A/barrier/B/barrier copies in the same callback with no yield. It performs no
+  memory query after the final boundary. Planning results are never published;
+  permission or content drift, an incomplete span, overlap, overflow,
+  foreground loss, or witness drift fails closed before the adapter sink.
+- The pure native sampler parses only those two immutable captured views and
+  makes no OS, engine, hook, allocation, or mutation call. It requires exact
+  group `[Tal,Ailish,Buki,Elco]` and independent formation
+  `[Tal,Elco,Ailish,Buki]` order plus the complete finite side-effect closure:
+  formation fields/control backpointers, intrusive `TPtr` heads, sole listener
+  dispatch, each hero's control/HUD gizmo/label and bounded no-allocation HUD
+  resource path, stat display/health-bar state, stat-camera sync nodes, Elco's
+  arbiter coherence, and active camera/render/scene identity. Near-miss and
+  exact-image tests cover those gates.
+- The sampler output is wrapperless and pointer-free: it retains salted scalar
+  equality tokens and diagnostics, not native addresses or continuations, and
+  leaves Elco's wrapper token zero. All production authority bits remain zero.
+  The adapter accepts at most the first valid result bound to the same dispatch
+  witness and publishes it as a sticky observation without beginning the pure
+  coordinator.
+- The normal adapter backend has no `GetPC`, wrapper resolver,
+  `RemovePlayer`, `AddPlayer`, destructor, raw-sample, or membership-mutation
+  path and grants no actor-lifetime authority. The synthetic synchronous
+  remove/add choreography remains test-only behind
+  `SUDEKIMP_TALOS_STAGING_RESEARCH_ADAPTER_TESTING`; none of it is reachable
+  from the observation profile.
+- Exact modal and transition audits still disprove the broad central
+  predicates as comprehensive authority. CUIScene may retain the native
+  CharacterController through independent TSA, Quick Menu, shop, blacksmith,
+  quit, dialog/conversation, and pause states. World, async, HD-cache, object,
+  texture, door, script, and PVS transition work likewise has no single exact
+  global predicate. These values remain non-authoritative diagnostics. The
+  finite same-frame listener/HUD/stat/arbiter/camera closure together with the
+  exact game-thread, post-original, no-yield witness supports observation of
+  that one callback only; it does not authorize mutation or prove actor
+  lifetime.
+- The loader now exposes only the default-off
+  `EnableTalosCompanionStagingObservation=false` key for this pipeline. Its
+  closed profile rejects every other optional feature or trace, an enabled
+  `SkipStartupMovies`, and the environment-owned zone trace. It locally
+  authenticates `SUDEKI.exe` SHA256
+  `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`
+  and `Data/SOLWORLDM.gex` SHA256
+  `e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9`,
+  installs the capture observer last, and tears it down only through gated
+  disable/unregister/drain before resetting capture and adapter state.
+- `tools/continue-research.sh --talos-staging-observation` now generates and
+  verifies that exact closed profile without enabling the zone trace. Its live
+  target is a settled ordinary-world four-hero save, not the Void handoff, so
+  FMA07 and the Tal/Kazel cinematic are not part of this observation.
+- Strict host, MinGW, Wine, exact-image, rollback, range/copy-drift, witness,
+  sampler near-miss, and adapter-ingestion regressions cover the pipeline. The
+  checked-in configuration remains false. No Sudeki process was launched and
+  no ordinary-world membership mutation was attempted for this work.
+
+## 2026-08-30 — Pivot to exact post-movie restore and dual views
+
+The playable Talos direction no longer depends on carrying all four heroes
+through the final cinematic. Roughly six hours of pre-cutscene preservation
+work established useful lifecycle, membership, and capacity evidence, but it
+also showed that suppressing retail deletes or staging a hero around Kazel
+would introduce ownership and SOL-continuation risk that the actual local-co-op
+goal does not require. That carry-through route remains inert research.
+
+The replacement keeps the authored transition intact. Retail Sudeki deletes
+Buki, Ailish, and Elco, enters the Void, adds and deletes the temporary Kazel,
+and completes the TSA falling edge. A lifecycle-owned, process-terminal ticket
+is claimable only after those exact same-generation facts and the settled Tal
+state agree. The new restore module then spawns Ailish, Buki, and Elco once,
+verifies the exact four-member group and formation, initializes the restored
+actors, refreshes native combat state, and applies the narrow real-Talos AI
+candidate policy. Kazel is already gone, so no fifth party entry is attempted.
+Any identity, topology, control, hook-ownership, or witness failure terminates
+the attempt and requires reload rather than guessing or retrying the spawn.
+
+Live runs proved the corrected boundary. The restore reached
+`valid=true state=active party_count=4`, with Tal as P1, Ailish acquired through
+the existing P2 control lease, and Buki/Elco in native AI mode. The first
+durability runs exposed that native skill/camera and scripted paths take nested
+AI-control refcount leases. Admission still requires the exact baseline, while
+ACTIVE now accepts only the balanced native count/mode relations; all actual
+P2 movement and action consumers remain paused unless Ailish is at this mod's
+exact action-ready lease. Release drops exactly one owned lease and never drains
+another native owner. Repeated live camera cycles then retained the party and
+recovered cleanly without R6025.
+
+The first Talos presentation checkpoint reuses the proven alternating
+full-frame compositor. Before restore, on uncertain cameras, and until both
+fresh caches exist, the game remains one native full-width view. Once the
+strict post-movie status authorizes it, Tal renders on the left and Ailish on
+the right; the global gameplay camera stays native and every authorization edge
+invalidates both caches. The P2 camera identity must equal the requested,
+active Ailish control lease, so the generic first-companion fallback is not
+permitted in this closed mode. Live logs recorded exact camera acquisition and
+`dual_camera_cache_active` with no compositor failure.
+
+Ailish navigation initially used raw world axes because the closed camera
+profile left camera-relative movement disabled. The corrected profile pairs
+camera-relative movement with the exact split/P2-camera/dual-cache bundle and
+rejects every partial combination. In this checkpoint Camera 2 is a translated
+render-only view whose orientation is copied from the native gameplay camera,
+so the existing native camera transform is the correct basis. Live movement
+records now consistently report
+`camera_relative=true camera_basis=native_player_one`, and the user confirmed
+that navigation follows the visible Ailish view.
+
+This establishes the intended ownership boundary for future seats: each human
+seat should consume the orientation basis of its own presented view. Only Tal
+and Ailish have a live runtime today; Buki/Elco remain AI, and P3/P4 camera
+state, render caches, HUD passes, and input consumers are still future work.
+The immediate next milestone is independent Ailish right-stick camera rotation,
+at which point her movement transform must switch from the shared native basis
+to the independently rotated P2 render basis.

@@ -217,6 +217,13 @@ enum {
     PARTY_SLOT_ZERO_OFFSET = 0x0090u,
     PARTY_SLOT_STRIDE = 0x000cu,
     PARTY_COUNT_OFFSET = 0x00ccu,
+    FORMATION_MEMBERS_OFFSET = 0x00f4u,
+    FORMATION_COUNT_OFFSET = 0x0124u,
+    CHARACTER_AI_COMPONENT_OFFSET = 0x0094u,
+    AI_FORMATION_BACKPOINTER_OFFSET = 0x0040u,
+    AI_MODE_STATE_OFFSET = 0x003cu,
+    AI_MODE_VALUE_OFFSET = 0x000bu,
+    AI_CONTROL_OVERRIDE_REF_OFFSET = 0x016au,
     CHARACTER_POSITION_OFFSET = 0x0044u,
     CHARACTER_COMBAT_DATA_OFFSET = 0x004cu,
     CHARACTER_ARBITER_OFFSET = 0x0090u,
@@ -1433,6 +1440,248 @@ void *SudekiMpCleanroomEngineGenericEntity(const char *resource_name) {
     return lookup_entity(get_generic_entity, resource_name);
 }
 
+static BOOL exact_retail_hero_set(
+    void *const members[PARTY_SLOT_COUNT],
+    void *const heroes[PARTY_SLOT_COUNT],
+    BOOL require_tal_lead
+) {
+    uint8_t seen = 0u;
+    unsigned int member_index;
+
+    if (require_tal_lead && members[0] != heroes[SUDEKIMP_CLEANROOM_TAL]) {
+        return FALSE;
+    }
+    for (member_index = 0u; member_index < PARTY_SLOT_COUNT;
+            ++member_index) {
+        unsigned int hero_index;
+
+        if (members[member_index] == NULL) {
+            return FALSE;
+        }
+        for (hero_index = 0u; hero_index < PARTY_SLOT_COUNT; ++hero_index) {
+            if (members[member_index] == heroes[hero_index]) {
+                break;
+            }
+        }
+        if (hero_index == PARTY_SLOT_COUNT ||
+            (seen & (uint8_t)(1u << hero_index)) != 0u) {
+            return FALSE;
+        }
+        seen = (uint8_t)(seen | (uint8_t)(1u << hero_index));
+    }
+    return seen == 0x0fu;
+}
+
+BOOL SudekiMpCleanroomEngineExactRetailPartyReady(void) {
+    uint8_t *group;
+    uint8_t *ai_manager;
+    uint8_t *formation;
+    void **ai_manager_global;
+    void *heroes[PARTY_SLOT_COUNT];
+    void *group_members[PARTY_SLOT_COUNT];
+    void *formation_members[PARTY_SLOT_COUNT];
+    int group_count_before;
+    int group_count_after;
+    int formation_count_before;
+    int formation_count_after;
+    unsigned int index;
+
+    if (game_base == NULL || get_group_players == NULL) {
+        return FALSE;
+    }
+    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+        heroes[index] = actor_pointer((SudekiMpCleanroomActor)index);
+        if (heroes[index] == NULL) {
+            return FALSE;
+        }
+    }
+    group = (uint8_t *)get_group_players();
+    ai_manager_global = (void **)(game_base + RVA_ENTITY_DIRECTORY_GLOBAL);
+    if (!readable_memory(group, PARTY_COUNT_OFFSET + sizeof(int)) ||
+        !readable_memory(ai_manager_global, sizeof(*ai_manager_global))) {
+        return FALSE;
+    }
+    ai_manager = (uint8_t *)*ai_manager_global;
+    if (!readable_memory(ai_manager,
+            FORMATION_COUNT_OFFSET + sizeof(int))) {
+        return FALSE;
+    }
+    formation = ai_manager + FORMATION_MEMBERS_OFFSET;
+    group_count_before = *(int *)(group + PARTY_COUNT_OFFSET);
+    formation_count_before = *(int *)(ai_manager + FORMATION_COUNT_OFFSET);
+    if (group_count_before != (int)PARTY_SLOT_COUNT ||
+        formation_count_before != (int)PARTY_SLOT_COUNT) {
+        return FALSE;
+    }
+    for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+        uint8_t *character = (uint8_t *)heroes[index];
+        uint8_t *ai_component;
+
+        group_members[index] = *(void **)(
+            group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE);
+        formation_members[index] = *(void **)(
+            formation + index * PARTY_SLOT_STRIDE);
+        if (!readable_memory(character,
+                CHARACTER_AI_COMPONENT_OFFSET + sizeof(ai_component))) {
+            return FALSE;
+        }
+        ai_component = *(uint8_t **)(
+            character + CHARACTER_AI_COMPONENT_OFFSET);
+        if (!readable_memory(ai_component,
+                AI_FORMATION_BACKPOINTER_OFFSET + sizeof(void *)) ||
+            *(void **)(ai_component + AI_FORMATION_BACKPOINTER_OFFSET) !=
+                formation) {
+            return FALSE;
+        }
+    }
+    group_count_after = *(int *)(group + PARTY_COUNT_OFFSET);
+    formation_count_after = *(int *)(ai_manager + FORMATION_COUNT_OFFSET);
+    return group_count_before == group_count_after &&
+        formation_count_before == formation_count_after &&
+        exact_retail_hero_set(group_members, heroes, TRUE) &&
+        exact_retail_hero_set(formation_members, heroes, FALSE);
+}
+
+static BOOL actor_control_state(
+    SudekiMpCleanroomActor actor,
+    int16_t *override_ref,
+    uint8_t *mode
+);
+
+static BOOL actor_control_state_exact(
+    SudekiMpCleanroomActor actor,
+    int16_t expected_override_ref,
+    uint8_t expected_mode
+) {
+    int16_t override_ref;
+    uint8_t mode;
+
+    if (!actor_control_state(actor, &override_ref, &mode)) {
+        return FALSE;
+    }
+    return override_ref == expected_override_ref && mode == expected_mode;
+}
+
+static BOOL actor_control_state(
+    SudekiMpCleanroomActor actor,
+    int16_t *override_ref,
+    uint8_t *mode
+) {
+    uint8_t *character = (uint8_t *)actor_pointer(actor);
+    uint8_t *component;
+    uint8_t *mode_state;
+
+    if (override_ref == NULL || mode == NULL || !readable_memory(character,
+            CHARACTER_AI_COMPONENT_OFFSET + sizeof(component))) {
+        return FALSE;
+    }
+    component = *(uint8_t **)(
+        character + CHARACTER_AI_COMPONENT_OFFSET);
+    if (!readable_memory(component,
+            AI_CONTROL_OVERRIDE_REF_OFFSET + sizeof(int16_t))) {
+        return FALSE;
+    }
+    mode_state = *(uint8_t **)(component + AI_MODE_STATE_OFFSET);
+    if (!readable_memory(mode_state,
+            AI_MODE_VALUE_OFFSET + sizeof(uint8_t))) {
+        return FALSE;
+    }
+    *override_ref = *(int16_t *)(component + AI_CONTROL_OVERRIDE_REF_OFFSET);
+    *mode = *(uint8_t *)(mode_state + AI_MODE_VALUE_OFFSET);
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineExactPostRestoreControlsReady(void) {
+    uint8_t *controller;
+    void *tal;
+
+    if (!SudekiMpCleanroomEngineExactRetailPartyReady() ||
+        !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        return FALSE;
+    }
+    controller = *(uint8_t **)(
+        game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    tal = actor_pointer(SUDEKIMP_CLEANROOM_TAL);
+    if (tal == NULL || !readable_memory(controller,
+            CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != tal) {
+        return FALSE;
+    }
+    return actor_control_state_exact(SUDEKIMP_CLEANROOM_TAL, 0, 0u) &&
+        actor_control_state_exact(SUDEKIMP_CLEANROOM_AILISH, 1, 0u) &&
+        actor_control_state_exact(SUDEKIMP_CLEANROOM_BUKI, 0, 1u) &&
+        actor_control_state_exact(SUDEKIMP_CLEANROOM_ELCO, 0, 1u) &&
+        SudekiMpCleanroomEngineExactRetailPartyReady();
+}
+
+BOOL SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+    int16_t tal_ref,
+    uint8_t tal_mode,
+    int16_t ailish_ref,
+    uint8_t ailish_mode,
+    int16_t buki_ref,
+    uint8_t buki_mode,
+    int16_t elco_ref,
+    uint8_t elco_mode
+) {
+    return tal_ref >= 0 && tal_mode == 0u &&
+        ailish_ref >= 1 && ailish_mode == 0u &&
+        buki_ref >= 0 &&
+        ((buki_ref == 0 && buki_mode == 1u) ||
+         (buki_ref > 0 && buki_mode == 0u)) &&
+        elco_ref >= 0 &&
+        ((elco_ref == 0 && elco_mode == 1u) ||
+         (elco_ref > 0 && elco_mode == 0u));
+}
+
+BOOL SudekiMpCleanroomEnginePostRestoreControlsActive(void) {
+    uint8_t *controller;
+    void *tal;
+    int16_t tal_override_ref;
+    int16_t ailish_override_ref;
+    int16_t buki_override_ref;
+    int16_t elco_override_ref;
+    uint8_t tal_mode;
+    uint8_t ailish_mode;
+    uint8_t buki_mode;
+    uint8_t elco_mode;
+
+    if (!SudekiMpCleanroomEngineExactRetailPartyReady() ||
+        !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        return FALSE;
+    }
+    controller = *(uint8_t **)(
+        game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    tal = actor_pointer(SUDEKIMP_CLEANROOM_TAL);
+    if (tal == NULL || !readable_memory(controller,
+            CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != tal ||
+        !actor_control_state(SUDEKIMP_CLEANROOM_TAL,
+            &tal_override_ref, &tal_mode) ||
+        !actor_control_state(SUDEKIMP_CLEANROOM_AILISH,
+            &ailish_override_ref, &ailish_mode) ||
+        !actor_control_state(SUDEKIMP_CLEANROOM_BUKI,
+            &buki_override_ref, &buki_mode) ||
+        !actor_control_state(SUDEKIMP_CLEANROOM_ELCO,
+            &elco_override_ref, &elco_mode)) {
+        return FALSE;
+    }
+    /* +0x16A is a shared native lease count. Our Ailish lease was already
+     * proven as the exact 0->1 transition at admission. Skill cameras acquire
+     * every eligible party AI component: Tal/Buki/Elco transition 0->1->0,
+     * while Ailish transitions 1->2->1. Those balanced native leases do not
+     * revoke ours. Input consumers remain stricter and pause unless Ailish's
+     * count is exactly one. */
+    return SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+            tal_override_ref, tal_mode,
+            ailish_override_ref, ailish_mode,
+            buki_override_ref, buki_mode,
+            elco_override_ref, elco_mode) &&
+        SudekiMpCleanroomEngineExactRetailPartyReady();
+}
+
 static BOOL party_invulnerability_world(
     void **world_manager,
     void **world_directory
@@ -2160,8 +2409,9 @@ static BOOL initialize_actor_weapon(
     uint8_t *character_weapon;
     void *current_item;
 
-    if (!inventory_filled || set_weapon == NULL ||
-        !readable_memory(character, CHARACTER_WEAPON_OFFSET + sizeof(void *))) {
+    if (!readable_memory(
+            character,
+            CHARACTER_WEAPON_OFFSET + sizeof(void *))) {
         return FALSE;
     }
     character_weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
@@ -2175,6 +2425,13 @@ static BOOL initialize_actor_weapon(
     );
     if (current_item != NULL) {
         return TRUE;
+    }
+    /* A native story spawn normally arrives with its authored weapon already
+     * equipped. Buki's proven post-Void respawn is the exception: use the
+     * existing native per-character setter for only this actor. This does not
+     * call FillInventory or grant/unlock any unrelated item. */
+    if (set_weapon == NULL) {
+        return FALSE;
     }
     set_weapon(character_weapon, actor_starter_weapon_slots[actor]);
     current_item = *(void **)(
@@ -3074,12 +3331,61 @@ static BOOL invoke_combat_transition(
     return TRUE;
 }
 
-static void initialize_present_actors(void) {
-    unsigned int index;
+BOOL SudekiMpCleanroomEngineInitializePartyActor(
+    SudekiMpCleanroomActor actor
+) {
     uint8_t *character;
     BOOL stats_ready;
     BOOL weapon_ready;
     BOOL combat_enabled;
+
+    if (actor < SUDEKIMP_CLEANROOM_TAL ||
+        actor > SUDEKIMP_CLEANROOM_AILISH) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    character = (uint8_t *)actor_pointer(actor);
+    if (character == NULL) {
+        initialized_actor_entities[actor] = NULL;
+        SetLastError(ERROR_NOT_FOUND);
+        return FALSE;
+    }
+    if (initialized_actor_entities[actor] == character) {
+        return TRUE;
+    }
+    stats_ready = repair_actor_stat_maxima(actor);
+    weapon_ready = initialize_actor_weapon(actor, character);
+    if (!stats_ready || !weapon_ready) {
+        return FALSE;
+    }
+    initialized_actor_entities[actor] = character;
+    SudekiMpLogFormat(
+        "cleanroom_engine event=actor_training_setup actor=%s "
+        "status=complete entity=%p scope=single_party_actor\r\n",
+        actor_labels[actor],
+        character
+    );
+    /*
+     * A PC spawned after the group entered combat is not included in the
+     * already-completed native arm pass. Re-run that native pass once for
+     * this newly initialized actor; never toggle combat or synthesize the
+     * actor's combat state locally.
+     */
+    if (SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
+        combat_enabled) {
+        (void)invoke_combat_transition(
+            TRUE,
+            TRUE,
+            "new_actor_initialized_during_combat",
+            actor_labels[actor]
+        );
+    }
+    return TRUE;
+}
+
+static void initialize_present_actors(void) {
+    unsigned int index;
+    uint8_t *character;
 
     for (index = 0u; index < SUDEKIMP_CLEANROOM_ACTOR_COUNT; ++index) {
         character = (uint8_t *)actor_pointer((SudekiMpCleanroomActor)index);
@@ -3113,37 +3419,9 @@ static void initialize_present_actors(void) {
             }
             continue;
         }
-        stats_ready = repair_actor_stat_maxima(
+        (void)SudekiMpCleanroomEngineInitializePartyActor(
             (SudekiMpCleanroomActor)index
         );
-        weapon_ready = initialize_actor_weapon(
-            (SudekiMpCleanroomActor)index,
-            character
-        );
-        if (stats_ready && weapon_ready) {
-            initialized_actor_entities[index] = character;
-            SudekiMpLogFormat(
-                "cleanroom_engine event=actor_training_setup actor=%s "
-                "status=complete entity=%p\r\n",
-                actor_labels[index],
-                character
-            );
-            /*
-             * A PC spawned after the group entered combat is not included in
-             * the already-completed native arm pass.  Re-run that native pass
-             * once for this newly initialized actor; never toggle combat or
-             * synthesize the actor's combat state locally.
-             */
-            if (SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
-                combat_enabled) {
-                (void)invoke_combat_transition(
-                    TRUE,
-                    TRUE,
-                    "new_actor_initialized_during_combat",
-                    actor_labels[index]
-                );
-            }
-        }
     }
 }
 

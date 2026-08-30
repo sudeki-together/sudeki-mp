@@ -23,8 +23,15 @@ int main(void) {
     int32_t displacement;
     SudekiMpRelativeCallHook call_hook = {0};
     SudekiMpExportHook export_hook = {0};
+    SudekiMpPointerHook pointer_hook = {0};
+    SudekiMpPointerHook restore_failure_hook = {0};
     SudekiMpInlineHook inline_hook = {0};
     uint32_t *export_slot;
+    void **pointer_slot;
+    void *foreign_target;
+    HANDLE mapping;
+    void **writable_view;
+    void **read_only_view;
     uint8_t *inline_target;
     uint8_t *inline_trampoline;
     static const uint8_t inline_expected[] = {
@@ -73,6 +80,77 @@ int main(void) {
     check(!SudekiMpInstallExportHook(
         &export_hook, (HMODULE)memory, 0x800u, 0x300u, replacement_target
     ), "reject unexpected export RVA");
+
+    pointer_slot = (void **)(memory + 0x900);
+    foreign_target = memory + 0x700;
+    *pointer_slot = original_target;
+    check(SudekiMpInstallPointerHook(
+        &pointer_hook, pointer_slot, original_target, replacement_target
+    ), "install pointer hook");
+    check(*pointer_slot == replacement_target,
+        "pointer slot targets replacement");
+    check(pointer_hook.installed && pointer_hook.slot == pointer_slot &&
+        pointer_hook.original_value == original_target &&
+        pointer_hook.replacement_value == replacement_target,
+        "pointer hook records complete ownership");
+
+    *pointer_slot = foreign_target;
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpRestorePointerHook(&pointer_hook) &&
+        GetLastError() == ERROR_BUSY,
+        "pointer restore rejects a foreign slot owner");
+    check(*pointer_slot == foreign_target && pointer_hook.installed &&
+        pointer_hook.slot == pointer_slot &&
+        pointer_hook.original_value == original_target &&
+        pointer_hook.replacement_value == replacement_target,
+        "foreign ownership retains pointer-hook bookkeeping");
+
+    *pointer_slot = replacement_target;
+    check(SudekiMpRestorePointerHook(&pointer_hook),
+        "restore pointer hook after ownership returns");
+    check(*pointer_slot == original_target,
+        "pointer slot restored after ownership returns");
+    check(!pointer_hook.installed && pointer_hook.slot == NULL &&
+        pointer_hook.original_value == NULL &&
+        pointer_hook.replacement_value == NULL,
+        "successful pointer restore clears ownership bookkeeping");
+
+    /* A read-only mapped view lets the ownership comparison succeed while
+     * making write_protected_memory fail its protection upgrade. */
+    mapping = CreateFileMappingA(
+        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0u, 0x1000u, NULL
+    );
+    writable_view = mapping != NULL ? (void **)MapViewOfFile(
+        mapping, FILE_MAP_WRITE, 0u, 0u, 0x1000u) : NULL;
+    check(mapping != NULL && writable_view != NULL,
+        "create mapped pointer slot for restore-write failure");
+    if (writable_view != NULL) {
+        *writable_view = replacement_target;
+        UnmapViewOfFile(writable_view);
+    }
+    read_only_view = mapping != NULL ? (void **)MapViewOfFile(
+        mapping, FILE_MAP_READ, 0u, 0u, 0x1000u) : NULL;
+    check(read_only_view != NULL,
+        "map read-only pointer slot for restore-write failure");
+    if (read_only_view != NULL) {
+        restore_failure_hook.slot = read_only_view;
+        restore_failure_hook.original_value = original_target;
+        restore_failure_hook.replacement_value = replacement_target;
+        restore_failure_hook.installed = TRUE;
+        SetLastError(ERROR_SUCCESS);
+        check(!SudekiMpRestorePointerHook(&restore_failure_hook),
+            "pointer restore reports a protected-write failure");
+        check(*read_only_view == replacement_target &&
+            restore_failure_hook.installed &&
+            restore_failure_hook.slot == read_only_view &&
+            restore_failure_hook.original_value == original_target &&
+            restore_failure_hook.replacement_value == replacement_target,
+            "protected-write failure retains pointer-hook bookkeeping");
+        UnmapViewOfFile(read_only_view);
+    }
+    if (mapping != NULL) {
+        CloseHandle(mapping);
+    }
 
     inline_target = memory + 0xa00;
     memcpy(inline_target, inline_expected, sizeof(inline_expected));

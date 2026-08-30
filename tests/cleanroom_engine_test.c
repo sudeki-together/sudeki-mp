@@ -24,6 +24,57 @@ int main(void) {
     SudekiMpResourceName resource_copy;
 
     if (!require_true(
+            SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 1, 0u, 0, 1u, 0, 1u),
+            "exact post-restore control tuple was rejected") ||
+        !require_true(
+            SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 2, 0u, 0, 1u, 0, 1u),
+            "nested Ailish native lease was rejected") ||
+        !require_true(
+            SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                1, 0u, 1, 0u, 0, 1u, 0, 1u),
+            "nested Tal native lease was rejected") ||
+        !require_true(
+            SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                1, 0u, 2, 0u, 1, 0u, 1, 0u),
+            "whole-party native skill-camera leases were rejected") ||
+        !require_true(
+            SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                2, 0u, 3, 0u, 2, 0u, 2, 0u),
+            "nested whole-party native leases were rejected") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 0, 1u, 0, 1u, 0, 1u),
+            "missing owned Ailish lease was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 2, 1u, 0, 1u, 0, 1u),
+            "nested Ailish lease with AI mode was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                -1, 0u, 1, 0u, 0, 1u, 0, 1u),
+            "negative Tal lease count was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 1, 0u, 1, 1u, 0, 1u),
+            "Buki positive lease with AI mode was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 1, 0u, 0, 1u, 1, 1u),
+            "Elco positive lease with AI mode was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 1, 0u, 0, 0u, 0, 1u),
+            "Buki zero lease with disabled AI was accepted") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePostRestoreControlTupleActive(
+                0, 0u, 1, 0u, 0, 1u, -1, 0u),
+            "negative Elco lease count was accepted")) {
+        return 1;
+    }
+
+    if (!require_true(
             SudekiMpCleanroomEngineRetainResourceNameExact(
                 &resource_copy, &resource_source),
             "exact ResourceName retain failed") ||

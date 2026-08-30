@@ -25,7 +25,8 @@ This package starts in a safe single-player configuration. To run the focused
 Windows local-co-op beta, connect one XInput controller, use **Test XInput
 controller…** to confirm its slot, tick **Windows local co-op beta**, and then
 launch. The current beta reserves XInput slot 0 for Player 2, opens the
-co-op roster path, enables split presentation and Talos party restoration, and
+co-op roster path, and enables split presentation. The unsafe post-collapse
+Talos party restoration is retired and forced off, and
 keeps the game's native slot-0 controller route from also moving Player 1.
 Player 1 remains keyboard/mouse. This is a focused input-and-lifecycle beta,
 not a complete co-op playthrough or online multiplayer release.

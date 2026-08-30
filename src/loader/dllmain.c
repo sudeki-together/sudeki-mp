@@ -3,6 +3,7 @@
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
+#include "engine/sha256.h"
 #include "engine/skill_activation_abi.h"
 #include "hooks/accelerator_cache.h"
 #include "hooks/blacksmith_ui_adapter.h"
@@ -19,6 +20,11 @@
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
+#include "hooks/talos_companion_membership_abi.h"
+#include "hooks/talos_companion_staging_native_capture.h"
+#include "hooks/talos_companion_staging_research_adapter.h"
+#include "hooks/talos_native_lifecycle_trace.h"
+#include "hooks/talos_post_movie_party_restore.h"
 #include "hooks/talos_defense_trace.h"
 #include "hooks/xinput_player_two.h"
 #include "hooks/zone_transition_trace.h"
@@ -26,6 +32,7 @@
 #include "input/key_binding.h"
 
 #include <windows.h>
+#include <wincrypt.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,10 +58,192 @@
 #define SUDEKIMP_INIT_ACCELERATOR_CACHE_FAILED 16u
 #define SUDEKIMP_INIT_TALOS_DEFENSE_TRACE_FAILED 17u
 #define SUDEKIMP_INIT_SAVE_BOOK_VOTE_FAILED 18u
+#define SUDEKIMP_INIT_TALOS_LIFECYCLE_TRACE_FAILED 19u
+#define SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED 20u
+#define SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED 21u
+#define SUDEKIMP_TALOS_EXACT_SOL_SHA256 \
+    "e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9"
 
 static HMODULE dll_module;
+static char cleanroom_update_observer_owner;
+static SudekiMpControlUpdateObserverGate cleanroom_update_observer_gate;
+static char talos_staging_observation_owner;
+static SudekiMpControlUpdateObserverGate talos_staging_observation_gate;
+static volatile LONG talos_staging_observation_install_started;
+static uint64_t talos_staging_observation_last_logged_attempts;
+
+static BOOL talos_post_movie_dual_camera_authorized(void) {
+    DWORD entry_error = GetLastError();
+    SudekiMpTalosPostMoviePartyRestoreStatus status;
+    BOOL authorized =
+        SudekiMpTalosPostMoviePartyRestoreGetStatus(&status) &&
+        SudekiMpTalosPostMoviePartyRestoreCameraAuthorized(&status);
+
+    SetLastError(entry_error);
+    return authorized;
+}
+
+static BOOL build_sol_world_path(
+    const wchar_t *game_path,
+    wchar_t *sol_path,
+    size_t sol_path_capacity
+) {
+    static const wchar_t suffix[] = L"Data\\SOLWORLDM.gex";
+    const wchar_t *slash;
+    size_t prefix_length;
+    size_t suffix_length = (sizeof(suffix) / sizeof(suffix[0])) - 1u;
+
+    if (game_path == NULL || sol_path == NULL || sol_path_capacity == 0u) {
+        return FALSE;
+    }
+    slash = wcsrchr(game_path, L'\\');
+    if (slash == NULL) slash = wcsrchr(game_path, L'/');
+    prefix_length = slash == NULL ? 0u : (size_t)(slash - game_path) + 1u;
+    if (prefix_length + suffix_length + 1u > sol_path_capacity) {
+        return FALSE;
+    }
+    if (prefix_length != 0u) {
+        memcpy(sol_path, game_path, prefix_length * sizeof(sol_path[0]));
+    }
+    memcpy(sol_path + prefix_length, suffix, sizeof(suffix));
+    return TRUE;
+}
+
+static BOOL generate_talos_staging_observation_identity(
+    uint64_t *process_token,
+    uint64_t *identity_salt
+) {
+    HCRYPTPROV provider = 0;
+    uint8_t random_bytes[16];
+    BOOL generated;
+
+    if (process_token == NULL || identity_salt == NULL) return FALSE;
+    generated = CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES,
+        CRYPT_VERIFYCONTEXT | CRYPT_SILENT) &&
+        CryptGenRandom(provider, (DWORD)sizeof(random_bytes), random_bytes);
+    if (provider != 0) CryptReleaseContext(provider, 0);
+    if (!generated) return FALSE;
+    memcpy(process_token, random_bytes, sizeof(*process_token));
+    memcpy(identity_salt, random_bytes + sizeof(*process_token),
+        sizeof(*identity_salt));
+    *process_token |= UINT64_C(1);
+    *identity_salt |= UINT64_C(1);
+    if (*identity_salt == *process_token) {
+        *identity_salt ^= UINT64_C(0x9e3779b97f4a7c15);
+        if (*identity_salt == 0u) *identity_salt = UINT64_C(1);
+    }
+    SecureZeroMemory(random_bytes, sizeof(random_bytes));
+    return TRUE;
+}
+
+static BOOL talos_staging_observation_sink(
+    void *context,
+    const SudekiMpTalosStagingNativeCaptureStatus *status,
+    const SudekiMpTalosStagingNativeSamplerResult *result,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    (void)context;
+    (void)status;
+    return SudekiMpTalosCompanionStagingResearchAdapterIngestNativeObservation(
+        result, witness);
+}
+
+static void talos_staging_observation_control_update_observer(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    DWORD entry_error = GetLastError();
+    SudekiMpTalosStagingNativeCaptureStatus status;
+
+    if (!SudekiMpControlUpdateObserverGateTryEnter(
+            &talos_staging_observation_gate)) {
+        SetLastError(entry_error);
+        return;
+    }
+    SudekiMpTalosCompanionStagingNativeCaptureService(
+        controller, update_data, witness);
+    /* Logging is deliberately outside CaptureService's final immutable
+     * capture window. Only real attempts, not throttled callbacks, emit. */
+    if (SudekiMpTalosCompanionStagingNativeCaptureGetStatus(&status, NULL) &&
+        status.active == 0u &&
+        status.attempts != talos_staging_observation_last_logged_attempts) {
+        talos_staging_observation_last_logged_attempts = status.attempts;
+        SudekiMpLogFormat(
+            "talos_companion_staging_observation attempt=%lu "
+            "failure=%lu sampler_failure=%lu planning_passes=%lu ranges=%lu "
+            "capture_bytes=%lu witness_exact=%s sink_published=%s "
+            "valid=%s policy=read_only_no_membership_calls\r\n",
+            (unsigned long)status.attempts,
+            (unsigned long)status.failure,
+            (unsigned long)status.sampler_failure,
+            (unsigned long)status.planning_passes,
+            (unsigned long)status.final_range_count,
+            (unsigned long)status.final_capture_bytes,
+            status.witness_revalidated_exact ? "true" : "false",
+            status.sink_published ? "true" : "false",
+            status.completed_valid ? "true" : "false"
+        );
+    }
+    SudekiMpControlUpdateObserverGateLeave(
+        &talos_staging_observation_gate);
+    SetLastError(entry_error);
+}
+
+static void uninstall_talos_staging_observation(void) {
+    DWORD entry_error = GetLastError();
+
+    if (InterlockedCompareExchange(
+            &talos_staging_observation_install_started, 0, 0) == 0) {
+        SetLastError(entry_error);
+        return;
+    }
+    SudekiMpControlUpdateObserverGateDisable(
+        &talos_staging_observation_gate);
+    (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+        &talos_staging_observation_owner);
+    SudekiMpControlUpdateObserverGateDrain(
+        &talos_staging_observation_gate);
+    (void)SudekiMpTalosCompanionStagingNativeCaptureReset();
+    SudekiMpUninstallTalosCompanionStagingResearchAdapter();
+    SudekiMpUninstallControlSeparation();
+    (void)InterlockedExchange(
+        &talos_staging_observation_install_started, 0);
+    talos_staging_observation_last_logged_attempts = 0u;
+    SetLastError(entry_error);
+}
+
+static void cleanroom_control_update_observer(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    (void)controller;
+    (void)update_data;
+    if (!SudekiMpControlUpdateObserverGateTryEnter(
+            &cleanroom_update_observer_gate)) {
+        return;
+    }
+    if (!SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness)) {
+        SudekiMpControlUpdateObserverGateLeave(
+            &cleanroom_update_observer_gate);
+        return;
+    }
+    SudekiMpCleanroomMenuUpdate();
+    SudekiMpControlUpdateObserverGateLeave(
+        &cleanroom_update_observer_gate);
+}
 
 static void uninstall_runtime_hooks(void) {
+    SudekiMpUninstallTalosPostMoviePartyRestore();
+    uninstall_talos_staging_observation();
+    SudekiMpControlUpdateObserverGateDisable(
+        &cleanroom_update_observer_gate);
+    (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+        &cleanroom_update_observer_owner);
+    SudekiMpControlUpdateObserverGateDrain(
+        &cleanroom_update_observer_gate);
+    SudekiMpUninstallTalosNativeLifecycleTrace();
     SudekiMpUninstallSaveBookIntercept();
     SudekiMpUninstallMerchantProvenanceAdapter();
     SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
@@ -205,8 +394,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     static const char activation_mask[] = "x????xx????xxxxxxx";
     wchar_t game_path[MAX_PATH];
     wchar_t config_path[MAX_PATH];
+    wchar_t sol_world_path[MAX_PATH];
+    char sol_world_sha256[65];
     HMODULE game_module = GetModuleHandleW(NULL);
     SudekiMpBuildCheck build;
+    SudekiMpTalosStagingNativeCaptureConfiguration
+        talos_staging_capture_configuration;
     const uint8_t *text_base;
     size_t text_size;
     SudekiMpPatternResult pattern_result;
@@ -217,6 +410,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL quick_skill_input_trace_enabled;
     BOOL character_switch_trace_enabled;
     BOOL talos_party_prototype_enabled;
+    BOOL expanded_talos_encounter_prototype_enabled;
+    BOOL expanded_talos_lifecycle_trace_enabled;
+    BOOL talos_post_movie_party_restore_enabled;
+    BOOL talos_companion_staging_observation_enabled;
     BOOL talos_defense_trace_enabled;
     BOOL control_separation_enabled;
     BOOL player_movement_trace_enabled;
@@ -240,6 +437,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL player_interaction_requests_enabled;
     BOOL interaction_provenance_enabled;
     BOOL merchant_checkout_trace_enabled;
+    BOOL merchant_checkout_trace_requested;
     BOOL save_book_vote_enabled;
     BOOL experimental_blacksmith_ui_enabled;
     BOOL second_player_controller_camera_enabled;
@@ -247,6 +445,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL split_screen_ranged_model_isolation_enabled;
     BOOL spirit_strike_viewport_effect_isolation_enabled;
     BOOL zone_transition_trace_enabled;
+    BOOL zone_transition_trace_environment_enabled;
     BOOL party_atomic_transitions_enabled;
     BOOL transition_vote_enabled;
     BOOL zone_traversal_enabled;
@@ -257,6 +456,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL story_test_boost_enabled;
     BOOL cleanroom_multiplayer_integration;
     BOOL defer_integrated_roster;
+    BOOL talos_exact_sol_authenticated = FALSE;
+    BOOL talos_post_movie_dual_camera_enabled;
+    unsigned int talos_post_movie_camera_bundle_mask;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
     wchar_t second_player_weak_attack_key_text[32];
@@ -405,6 +607,26 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableTalosPartyPrototype"
     );
+    expanded_talos_encounter_prototype_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableExpandedTalosEncounterPrototype"
+    );
+    expanded_talos_lifecycle_trace_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableExpandedTalosLifecycleTrace"
+    );
+    talos_post_movie_party_restore_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableTalosPostMoviePartyRestorePrototype"
+    );
+    talos_companion_staging_observation_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableTalosCompanionStagingObservation"
+    );
     talos_defense_trace_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -500,11 +722,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnablePlayerInteractionRequestsPrototype"
     );
-    merchant_checkout_trace_enabled = read_config_boolean(
+    merchant_checkout_trace_requested = read_config_boolean(
         config_path,
         L"SudekiMP",
         L"EnableMerchantCheckoutTracePrototype"
     );
+    merchant_checkout_trace_enabled = merchant_checkout_trace_requested;
     save_book_vote_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -535,14 +758,28 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableSpiritStrikeViewportEffectIsolationPrototype"
     );
-    zone_transition_trace_enabled = GetEnvironmentVariableA(
+    zone_transition_trace_environment_enabled = GetEnvironmentVariableA(
         "SUDEKIMP_ZONE_TRACE",
         NULL,
         0u
     ) > 0u;
+    zone_transition_trace_enabled = zone_transition_trace_environment_enabled;
     skill_camera_routing_enabled =
         realtime_multiplayer_skill_combat_enabled ||
         spirit_strike_viewport_effect_isolation_enabled;
+    talos_post_movie_camera_bundle_mask =
+        (split_screen_render_enabled ?
+            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_SPLIT : 0u) |
+        (second_player_camera_enabled ?
+            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO : 0u) |
+        (dual_camera_frame_cache_enabled ?
+            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE : 0u);
+    talos_post_movie_dual_camera_enabled =
+        talos_post_movie_party_restore_enabled &&
+        talos_post_movie_camera_bundle_mask != 0u &&
+        SudekiMpTalosPostMoviePartyRestoreCameraNavigationProfileAllowed(
+            talos_post_movie_camera_bundle_mask,
+            second_player_camera_relative_movement_enabled);
     cleanroom_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -564,12 +801,18 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"EnableTransitionVotePrototype"
     );
     zone_transition_trace_enabled = zone_transition_trace_enabled ||
+        expanded_talos_lifecycle_trace_enabled ||
+        talos_post_movie_party_restore_enabled ||
         zone_traversal_enabled || party_atomic_transitions_enabled ||
         transition_vote_enabled || save_book_vote_enabled;
     interaction_provenance_enabled =
-        player_interaction_requests_enabled && zone_transition_trace_enabled;
+        (player_interaction_requests_enabled ||
+         expanded_talos_lifecycle_trace_enabled ||
+         talos_post_movie_party_restore_enabled) &&
+        zone_transition_trace_enabled;
     merchant_checkout_trace_enabled = merchant_checkout_trace_enabled &&
-        interaction_provenance_enabled && !trace_enabled;
+        interaction_provenance_enabled && !trace_enabled &&
+        !animation_speed_enabled && !camera_speed_enabled;
     coop_roster_menu_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -592,6 +835,102 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     );
     player_two_input_enabled = external_input_bridge_enabled ||
         native_xinput_player_two_enabled;
+    /* This is a deliberately closed, ordinary-world observation profile.
+     * Even passive sibling traces and the startup-movie bypass would change
+     * the provenance of a captured frame, so every optional path must remain
+     * disabled and the environment-owned zone hook must be absent. */
+    if (talos_companion_staging_observation_enabled &&
+        (patch_enabled || trace_enabled || animation_speed_enabled ||
+         camera_speed_enabled || quick_skill_input_trace_enabled ||
+         character_switch_trace_enabled || talos_party_prototype_enabled ||
+         expanded_talos_encounter_prototype_enabled ||
+         expanded_talos_lifecycle_trace_enabled ||
+         talos_post_movie_party_restore_enabled ||
+         talos_defense_trace_enabled || control_separation_enabled ||
+         player_movement_trace_enabled || second_player_movement_enabled ||
+         second_player_camera_relative_movement_enabled ||
+         second_player_separation_guard_enabled ||
+         second_player_weak_attack_enabled ||
+         second_player_target_trace_enabled || shared_group_camera_enabled ||
+         split_screen_render_enabled || second_player_camera_enabled ||
+         dual_camera_frame_cache_enabled || freeroam_camera_input_enabled ||
+         ranged_quick_skill_prototype_enabled ||
+         realtime_multiplayer_skill_combat_enabled ||
+         direct_spirit_strike_prototype_enabled ||
+         external_input_bridge_enabled || native_xinput_player_two_enabled ||
+         player_interaction_requests_enabled ||
+         merchant_checkout_trace_requested || save_book_vote_enabled ||
+         experimental_blacksmith_ui_enabled ||
+         second_player_controller_camera_enabled ||
+         native_second_player_camera_collision_enabled ||
+         split_screen_ranged_model_isolation_enabled ||
+         spirit_strike_viewport_effect_isolation_enabled ||
+         party_atomic_transitions_enabled || transition_vote_enabled ||
+         zone_traversal_enabled || cleanroom_menu_enabled ||
+         coop_roster_menu_enabled || loaded_save_coop_autostart_enabled ||
+         skip_startup_movies || story_test_boost_enabled ||
+         zone_transition_trace_environment_enabled)) {
+        SudekiMpLogWrite(
+            "talos_companion_staging_observation_config=invalid "
+            "reason=requires_closed_ordinary_world_profile_no_optional_"
+            "gameplay_coop_menu_trace_camera_input_speed_transition_"
+            "environment_hook_or_startup_movie_bypass\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpUninstallAcceleratorCache();
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    /* This is one closed mutation-adjacent research profile. The only optional
+     * runtime owners admitted beside the new restore coordinator are normal
+     * control separation, Player 2 movement/weak attack, and exactly one
+     * Player 2 transport. Zone/provenance observation is forced internally so
+     * an environment-owned second zone hook is still rejected. */
+    if (talos_post_movie_party_restore_enabled &&
+        (patch_enabled || trace_enabled || animation_speed_enabled ||
+         camera_speed_enabled || quick_skill_input_trace_enabled ||
+         character_switch_trace_enabled || talos_party_prototype_enabled ||
+         expanded_talos_encounter_prototype_enabled ||
+         expanded_talos_lifecycle_trace_enabled ||
+         talos_companion_staging_observation_enabled ||
+         talos_defense_trace_enabled || !control_separation_enabled ||
+         player_movement_trace_enabled || !second_player_movement_enabled ||
+         second_player_separation_guard_enabled ||
+         !second_player_weak_attack_enabled ||
+         second_player_target_trace_enabled || shared_group_camera_enabled ||
+         !SudekiMpTalosPostMoviePartyRestoreCameraNavigationProfileAllowed(
+             talos_post_movie_camera_bundle_mask,
+             second_player_camera_relative_movement_enabled) ||
+         freeroam_camera_input_enabled ||
+         ranged_quick_skill_prototype_enabled ||
+         realtime_multiplayer_skill_combat_enabled ||
+         direct_spirit_strike_prototype_enabled ||
+         (external_input_bridge_enabled ==
+          native_xinput_player_two_enabled) ||
+         player_interaction_requests_enabled ||
+         merchant_checkout_trace_requested || save_book_vote_enabled ||
+         experimental_blacksmith_ui_enabled ||
+         second_player_controller_camera_enabled ||
+         native_second_player_camera_collision_enabled ||
+         split_screen_ranged_model_isolation_enabled ||
+         spirit_strike_viewport_effect_isolation_enabled ||
+         party_atomic_transitions_enabled || transition_vote_enabled ||
+         zone_traversal_enabled || cleanroom_menu_enabled ||
+         coop_roster_menu_enabled || loaded_save_coop_autostart_enabled ||
+         story_test_boost_enabled || zone_transition_trace_environment_enabled)) {
+        SudekiMpLogWrite(
+            "talos_post_movie_party_restore_config=invalid "
+            "reason=requires_closed_exact_asset_profile_normal_control_"
+            "separation_p2_movement_p2_weak_attack_exactly_one_input_source_"
+            "optional_exact_split_p2_camera_dual_cache_bundle_paired_with_"
+            "camera_relative_movement_and_no_legacy_talos_carry_staging_"
+            "character_switch_or_other_hook_owner\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpUninstallAcceleratorCache();
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (coop_roster_menu_enabled &&
         (cleanroom_menu_enabled || zone_traversal_enabled)) {
         SudekiMpLogWrite(
@@ -640,14 +979,65 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
-    /* Talos deliberately collapses the retail four-member party to Tal while
-     * its Void/cinematic camera pipeline is active.  The restoration hook is
-     * still an isolated research experiment; it has not proved safe alongside
-     * the two-viewport renderer or Player 2 control lifetime. */
-    if (talos_party_prototype_enabled && split_screen_render_enabled) {
+    /* The retired prototype armed from the authored zero-position PC_KAZEL
+     * spawn, before the exact Kazel delete and TSA settle boundary. That early
+     * trigger is implicated in the R6025 run and may never be re-enabled. The
+     * separate post-movie coordinator below requires the later exact ticket. */
+    if (talos_party_prototype_enabled) {
         SudekiMpLogWrite(
             "talos_party_config=invalid "
-            "reason=Talos_restoration_experiment_cannot_share_split_camera_or_player_two_runtime\r\n"
+            "reason=retired_PC_KAZEL_spawn_trigger_precedes_exact_delete_and_"
+            "TSA_settle_boundary\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (expanded_talos_encounter_prototype_enabled) {
+        SudekiMpLogWrite(
+            "expanded_talos_encounter_config=unavailable "
+            "reason=pre_transition_four_hero_carry_through_and_adaptive_seat_runtime_not_proven\r\n"
+        );
+        SudekiMpLogWrite("status=bad_config\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    /* The lifecycle observer is a closed, one-human research profile. It owns
+     * the exact SOL opcode slot that SkillTrace and the merchant observer also
+     * own, and its evidence is invalid if any optional gameplay, co-op, camera,
+     * input, menu, speed, or transition mutation is active. ZoneTransition and
+     * InteractionProvenance are its only internally-forced dependencies. */
+    if (expanded_talos_lifecycle_trace_enabled &&
+        (patch_enabled || trace_enabled || animation_speed_enabled ||
+         camera_speed_enabled || quick_skill_input_trace_enabled ||
+         character_switch_trace_enabled || talos_defense_trace_enabled ||
+         talos_post_movie_party_restore_enabled ||
+         control_separation_enabled || player_movement_trace_enabled ||
+         second_player_movement_enabled ||
+         second_player_camera_relative_movement_enabled ||
+         second_player_separation_guard_enabled ||
+         second_player_weak_attack_enabled ||
+         second_player_target_trace_enabled || shared_group_camera_enabled ||
+         split_screen_render_enabled || second_player_camera_enabled ||
+         dual_camera_frame_cache_enabled || freeroam_camera_input_enabled ||
+         ranged_quick_skill_prototype_enabled ||
+         realtime_multiplayer_skill_combat_enabled ||
+         direct_spirit_strike_prototype_enabled ||
+         external_input_bridge_enabled || native_xinput_player_two_enabled ||
+         player_interaction_requests_enabled ||
+         merchant_checkout_trace_enabled || save_book_vote_enabled ||
+         experimental_blacksmith_ui_enabled ||
+         second_player_controller_camera_enabled ||
+         native_second_player_camera_collision_enabled ||
+         split_screen_ranged_model_isolation_enabled ||
+         spirit_strike_viewport_effect_isolation_enabled ||
+         party_atomic_transitions_enabled || transition_vote_enabled ||
+         zone_traversal_enabled || cleanroom_menu_enabled ||
+         coop_roster_menu_enabled || loaded_save_coop_autostart_enabled ||
+         skip_startup_movies || story_test_boost_enabled)) {
+        SudekiMpLogWrite(
+            "expanded_talos_lifecycle_trace_config=invalid "
+            "reason=research_observer_requires_closed_native_passthrough_profile\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
         SudekiMpLogClose();
@@ -1220,6 +1610,131 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
 
+    ZeroMemory(&talos_staging_capture_configuration,
+        sizeof(talos_staging_capture_configuration));
+    if (talos_post_movie_party_restore_enabled) {
+        if (!build_sol_world_path(game_path, sol_world_path,
+                sizeof(sol_world_path) / sizeof(sol_world_path[0])) ||
+            !SudekiMpSha256File(sol_world_path, sol_world_sha256)) {
+            SudekiMpLogFormat(
+                "talos_post_movie_party_restore_error=%lu "
+                "phase=SOLWORLDM_full_file_sha256\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("status=talos_post_movie_restore_error\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
+        }
+        SudekiMpLogFormat("talos_post_movie_solworldm_sha256=%s\r\n",
+            sol_world_sha256);
+        if (strcmp(sol_world_sha256,
+                SUDEKIMP_TALOS_EXACT_SOL_SHA256) != 0) {
+            SudekiMpLogWrite(
+                "talos_post_movie_party_restore_error=exact_SOLWORLDM_"
+                "hash_mismatch\r\n");
+            SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
+        }
+        talos_exact_sol_authenticated = TRUE;
+        SudekiMpLogWrite(
+            "talos_post_movie_party_restore_preflight=ready "
+            "executable_hash=exact solworldm_hash=exact\r\n");
+    }
+    if (talos_companion_staging_observation_enabled) {
+        SudekiMpTalosMembershipAbiDescriptor membership_descriptor =
+            SudekiMpTalosCompanionMembershipAbiDescribe();
+        SudekiMpTalosMembershipValidationResult membership_validation;
+
+        if (!build_sol_world_path(game_path, sol_world_path,
+                sizeof(sol_world_path) / sizeof(sol_world_path[0])) ||
+            !SudekiMpSha256File(sol_world_path, sol_world_sha256)) {
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=SOLWORLDM_full_file_sha256\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        SudekiMpLogFormat("talos_staging_solworldm_sha256=%s\r\n",
+            sol_world_sha256);
+        if (strcmp(sol_world_sha256,
+                SUDEKIMP_TALOS_EXACT_SOL_SHA256) != 0) {
+            SudekiMpLogWrite(
+                "talos_companion_staging_observation_error=exact_SOLWORLDM_"
+                "hash_mismatch\r\n");
+            SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        membership_validation =
+            SudekiMpTalosCompanionMembershipAbiValidateMappedImage(
+                (const uint8_t *)game_module,
+                membership_descriptor.mapped_image_size,
+                (uint32_t)(uintptr_t)game_module);
+        if (membership_validation.seams_valid != 1u ||
+            membership_validation.validated_symbol_mask !=
+                membership_validation.required_symbol_mask ||
+            membership_validation.pure_validation_only != 1u ||
+            membership_validation.native_calls_permitted != 0u ||
+            membership_validation.external_sha256_required != 1u) {
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=membership_abi failure=%lu symbol=%lu rva=0x%08lx "
+                "expected=0x%08lx observed=0x%08lx checks=%lu\r\n",
+                (unsigned long)ERROR_BAD_EXE_FORMAT,
+                (unsigned long)membership_validation.failure,
+                (unsigned long)membership_validation.failed_symbol,
+                (unsigned long)membership_validation.failed_rva,
+                (unsigned long)membership_validation.expected_value,
+                (unsigned long)membership_validation.observed_value,
+                (unsigned long)membership_validation.checks_completed);
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        if (!generate_talos_staging_observation_identity(
+                &talos_staging_capture_configuration.process_token,
+                &talos_staging_capture_configuration.identity_salt)) {
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=per_run_identity_generation\r\n",
+                (unsigned long)GetLastError());
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpUninstallAcceleratorCache();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        talos_staging_capture_configuration.loaded_image_base =
+            (uint32_t)(uintptr_t)game_module;
+        talos_staging_capture_configuration.mapped_image_size =
+            membership_descriptor.mapped_image_size;
+        talos_staging_capture_configuration.
+            expected_observer_registry_generation = 0u;
+        talos_staging_capture_configuration.failed_retry_dispatches =
+            SUDEKIMP_TALOS_NATIVE_CAPTURE_DEFAULT_RETRY_DISPATCHES;
+        talos_staging_capture_configuration.exact_executable_hash = 1u;
+        talos_staging_capture_configuration.exact_sol_hash = 1u;
+        talos_staging_capture_configuration.membership_abi_valid = 1u;
+        /* The service-only install below validates the exact controller
+         * entry before this configuration is admitted. */
+        talos_staging_capture_configuration.controller_abi_valid = 0u;
+        /* Modal state is diagnostic only and never authorizes this sample. */
+        talos_staging_capture_configuration.modal_active = 0u;
+        talos_staging_capture_configuration.reload_required = 0u;
+        talos_staging_capture_configuration.require_default_camera_name = 0u;
+        SudekiMpLogFormat(
+            "talos_companion_staging_observation_preflight=ready "
+            "membership_checks=%lu sol_hash=exact identity=per_run_nonzero "
+            "policy=read_only_no_native_membership_calls\r\n",
+            (unsigned long)membership_validation.checks_completed);
+    }
+
     /* Runtime interaction provenance is process-local only.  Initialize it
      * before any menu/input/render hook can publish a player or modal lease. */
     SudekiMpPlayerStatehoodInitialize(SudekiMpPlayerStatehoodRuntime());
@@ -1631,6 +2146,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (unsigned long)second_player_camera_virtual_key
     );
     if (split_screen_render_enabled) {
+        SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
+            talos_post_movie_dual_camera_enabled ?
+                talos_post_movie_dual_camera_authorized : NULL
+        );
+        SudekiMpLogFormat(
+            "talos_post_movie_dual_camera_requested=%s "
+            "activation=post_restore_exact_status "
+            "fallback=native_full_width_until_two_fresh_frames\r\n",
+            talos_post_movie_dual_camera_enabled ? "true" : "false"
+        );
         if (!SudekiMpInstallSplitScreenRender(
                 game_module,
                 second_player_camera_enabled,
@@ -1647,6 +2172,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 second_player_controller_camera_maximum_pitch)) {
             DWORD split_screen_error = GetLastError();
 
+            SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
             if (control_separation_enabled) {
                 (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
                     FALSE);
@@ -1710,9 +2236,31 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         "policy=Tal_host_Ailish_player_two_after_loaded_party_settles\r\n",
         loaded_save_coop_autostart_enabled ? "true" : "false");
     if (cleanroom_multiplayer_integration) {
-        SudekiMpControlSeparationSetUpdateObserver(
-            SudekiMpCleanroomMenuUpdate
-        );
+        if (!SudekiMpControlUpdateObserverGateEnable(
+                &cleanroom_update_observer_gate) ||
+            !SudekiMpControlSeparationRegisterUpdateObserver(
+                &cleanroom_update_observer_owner,
+                cleanroom_control_update_observer)) {
+            DWORD observer_error = GetLastError();
+
+            SudekiMpControlUpdateObserverGateDisable(
+                &cleanroom_update_observer_gate);
+            SudekiMpControlUpdateObserverGateDrain(
+                &cleanroom_update_observer_gate);
+            SudekiMpLogFormat(
+                "menu_multiplayer_integration_error=%lu "
+                "phase=owned_controller_update_observer_registration\r\n",
+                (unsigned long)observer_error
+            );
+            SudekiMpLogWrite(
+                "menu_multiplayer_integration=failed "
+                "rollback=all_runtime_hooks\r\n"
+            );
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(observer_error);
+            return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
+        }
         SudekiMpSplitScreenSetOverlayRenderer(
             SudekiMpCleanroomMenuRender
         );
@@ -1788,7 +2336,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "per_player_blacksmith_ui_applied=false default=false\r\n");
     }
     /* Install the native save-menu lifecycle marker plus final LoadGameSave
-     * deferral last. No later initialization failure can strand its lease. */
+     * deferral near the end; the common rollback owns every later failure. */
     if (save_book_vote_enabled) {
         if (!SudekiMpInstallSaveBookIntercept(game_module, TRUE)) {
             DWORD save_book_error = GetLastError();
@@ -1812,8 +2360,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite(
             "save_book_vote_applied=false default=false\r\n");
     }
-    /* Install this pointer-slot observer last. It cannot safely chain the
-     * broad SkillTrace opcode hook and it never changes native shop behavior. */
+    /* This pointer-slot observer cannot safely chain the broad SkillTrace
+     * opcode hook and never changes native shop behavior. */
     if (merchant_checkout_trace_enabled) {
         if (!SudekiMpInstallMerchantProvenanceAdapter(game_module, TRUE)) {
             DWORD merchant_trace_error = GetLastError();
@@ -1838,6 +2386,199 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "merchant_checkout_trace_applied=false "
             "default=false_or_missing_interaction_zone_or_skilltrace_conflict\r\n");
     }
+    /* Install the lifecycle observer after every other fallible hook. It owns
+     * the same raw opcode-0x27 slot as SkillTrace and merchant provenance, and
+     * the closed profile rejects those owners before initialization. */
+    SudekiMpLogFormat(
+        "expanded_talos_lifecycle_trace_requested=%s "
+        "dependencies=zone_transition_trace,interaction_provenance "
+        "coverage=opcode29_opcode27_task_constructor_nested_SetZoneNOW_"
+        "DeletePC_native_RemoveAllPlayers_native_FormationPopMembers_"
+        "TSA_query_group_formation_counts "
+        "missing=predelete_actor_generation_global_camera_cache "
+        "policy=observation_only_native_passthrough_not_acceptance_ready\r\n",
+        expanded_talos_lifecycle_trace_enabled ? "true" : "false"
+    );
+    SudekiMpLogFormat(
+        "talos_post_movie_lifecycle_ticket_requested=%s "
+        "exact_solworldm_authenticated=%s "
+        "trigger=exact_Kazel_delete_plus_same_session_TSA_settle\r\n",
+        talos_post_movie_party_restore_enabled ? "true" : "false",
+        talos_exact_sol_authenticated ? "true" : "false");
+    if (!(talos_post_movie_party_restore_enabled ?
+            SudekiMpInstallTalosNativeLifecycleTraceForPostMovieRestore(
+                game_module, TRUE, TRUE, talos_exact_sol_authenticated) :
+            SudekiMpInstallTalosNativeLifecycleTrace(
+                game_module, expanded_talos_lifecycle_trace_enabled))) {
+        DWORD lifecycle_trace_error = GetLastError();
+
+        if (talos_post_movie_party_restore_enabled) {
+            SudekiMpLogFormat(
+                "talos_post_movie_lifecycle_ticket_error=%lu "
+                "phase=exact_lifecycle_observer_install\r\n",
+                (unsigned long)lifecycle_trace_error);
+            SudekiMpLogWrite(
+                "talos_post_movie_lifecycle_ticket_applied=false "
+                "rollback=lifecycle_control_input_provenance_zone\r\n"
+                "status=talos_post_movie_restore_error\r\n");
+        } else {
+            SudekiMpLogFormat(
+                "expanded_talos_lifecycle_trace_error=%lu "
+                "phase=exact_lifecycle_observer_install\r\n",
+                (unsigned long)lifecycle_trace_error);
+            SudekiMpLogWrite(
+                "expanded_talos_lifecycle_trace_applied=false "
+                "rollback=lifecycle_interaction_zone_and_runtime_hooks\r\n"
+                "status=expanded_talos_lifecycle_trace_error\r\n");
+        }
+        uninstall_runtime_hooks();
+        SudekiMpLogClose();
+        SetLastError(lifecycle_trace_error);
+        return talos_post_movie_party_restore_enabled ?
+            SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED :
+            SUDEKIMP_INIT_TALOS_LIFECYCLE_TRACE_FAILED;
+    }
+    if (expanded_talos_lifecycle_trace_enabled) {
+        SudekiMpLogWrite(
+            "expanded_talos_lifecycle_trace_applied=true "
+            "coverage=opcode29_opcode27_task_constructor_nested_SetZoneNOW_"
+            "DeletePC_native_RemoveAllPlayers_native_FormationPopMembers_"
+            "TSA_query_group_formation_counts "
+            "policy=observation_only_native_passthrough_not_acceptance_ready\r\n"
+        );
+    } else {
+        SudekiMpLogWrite(
+            "expanded_talos_lifecycle_trace_applied=false default=false\r\n"
+        );
+    }
+    if (talos_post_movie_party_restore_enabled) {
+        DWORD restore_error;
+
+        SudekiMpLogWrite(
+            "talos_post_movie_lifecycle_ticket_applied=true "
+            "claim=one_process_terminal_attempt exact_asset_gate=closed\r\n");
+        if (!SudekiMpInstallTalosPostMoviePartyRestore(game_module, TRUE)) {
+            restore_error = GetLastError();
+            SudekiMpLogFormat(
+                "talos_post_movie_party_restore_error=%lu "
+                "phase=restore_observer_and_AI_filter_install\r\n",
+                (unsigned long)restore_error);
+            SudekiMpLogWrite(
+                "talos_post_movie_party_restore_applied=false "
+                "rollback=restore_lifecycle_control_input_provenance_zone\r\n");
+            SudekiMpLogWrite("status=talos_post_movie_restore_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(restore_error);
+            return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
+        }
+        SudekiMpLogWrite(
+            "talos_post_movie_party_restore_applied=true "
+            "roster=Tal_Ailish_Buki_Elco no_fifth_actor=true "
+            "player_two=Ailish automatic_claim=true "
+            "remaining_companions=native_AI\r\n");
+    } else {
+        SudekiMpLogWrite(
+            "talos_post_movie_lifecycle_ticket_applied=false default=false\r\n"
+            "talos_post_movie_party_restore_applied=false default=false\r\n");
+    }
+    /* Install this closed profile after every other fallible runtime path.
+     * Adapter admission is pointer-free; the service-only controller wrapper
+     * calls the native update exactly once and owns no gameplay features. The
+     * capture observer is registered last, after all backing state is ready. */
+    SudekiMpLogFormat(
+        "talos_companion_staging_observation_requested=%s "
+        "profile=closed_ordinary_world service_key=0 "
+        "membership_mutation=absent default_camera_name_required=false "
+        "reload_required=false modal_authority=false\r\n",
+        talos_companion_staging_observation_enabled ? "true" : "false");
+    if (talos_companion_staging_observation_enabled) {
+        DWORD observation_error;
+
+        if (!SudekiMpInstallTalosCompanionStagingResearchAdapter(
+                game_module, TRUE, 0u, TRUE, TRUE)) {
+            observation_error = GetLastError();
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=observation_adapter_install\r\n",
+                (unsigned long)observation_error);
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(observation_error);
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        (void)InterlockedExchange(
+            &talos_staging_observation_install_started, 1);
+        if (!SudekiMpInstallControlSeparation(
+                game_module,
+                0u,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.0f,
+                FALSE,
+                0u,
+                FALSE,
+                NULL,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.0f)) {
+            observation_error = GetLastError();
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=service_only_controller_install\r\n",
+                (unsigned long)observation_error);
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(observation_error);
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        talos_staging_capture_configuration.controller_abi_valid = 1u;
+        if (!SudekiMpTalosCompanionStagingNativeCaptureConfigure(
+                &talos_staging_capture_configuration,
+                talos_staging_observation_sink,
+                NULL)) {
+            observation_error = GetLastError();
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=immutable_capture_configure\r\n",
+                (unsigned long)observation_error);
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(observation_error);
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        talos_staging_observation_last_logged_attempts = 0u;
+        if (!SudekiMpControlUpdateObserverGateEnable(
+                &talos_staging_observation_gate) ||
+            !SudekiMpControlSeparationRegisterUpdateObserver(
+                &talos_staging_observation_owner,
+                talos_staging_observation_control_update_observer)) {
+            observation_error = GetLastError();
+            SudekiMpLogFormat(
+                "talos_companion_staging_observation_error=%lu "
+                "phase=sole_capture_observer_register\r\n",
+                (unsigned long)observation_error);
+            SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(observation_error);
+            return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
+        }
+        SudekiMpLogWrite(
+            "talos_companion_staging_observation_applied=true "
+            "observer=sole_service_post_original capture=automatic_one_shot "
+            "retry_dispatches=120 policy=read_only_no_GetPC_RemovePlayer_"
+            "AddPlayer_or_destructor\r\n");
+    } else {
+        SudekiMpLogWrite(
+            "talos_companion_staging_observation_applied=false "
+            "default=false\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
     if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
@@ -1852,6 +2593,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !coop_roster_menu_enabled &&
         !save_book_vote_enabled &&
         !player_movement_trace_enabled &&
+        !expanded_talos_lifecycle_trace_enabled &&
+        !talos_post_movie_party_restore_enabled &&
+        !talos_companion_staging_observation_enabled &&
         !zone_transition_trace_enabled &&
         !zone_traversal_enabled) {
         SudekiMpLogClose();
@@ -1865,6 +2609,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpUninstallTalosPostMoviePartyRestore();
+            uninstall_talos_staging_observation();
+            SudekiMpUninstallTalosNativeLifecycleTrace();
             SudekiMpUninstallSaveBookIntercept();
             SudekiMpUninstallMerchantProvenanceAdapter();
             SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
@@ -1872,6 +2619,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             SudekiMpUninstallTalosDefenseTrace();
             SudekiMpUninstallInteractionProvenance();
             SudekiMpUninstallZoneTransitionTrace();
+            SudekiMpUninstallSplitScreenRender();
+            SudekiMpUninstallControlSeparation();
             SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpUninstallAcceleratorCache();

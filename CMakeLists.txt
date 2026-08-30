@@ -32,6 +32,7 @@ add_library(SudekiMP SHARED
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/local_viewport_layout.c
     src/engine/merchant_provenance.c
     src/engine/merchant_checkout.c
     src/engine/orbit_camera.c
@@ -43,9 +44,15 @@ add_library(SudekiMP SHARED
     src/engine/save_book_vote.c
     src/engine/save_book_vote_input.c
     src/engine/skill_activation_abi.c
+    src/engine/talos_companion_carry.c
+    src/engine/talos_companion_staging.c
+    src/engine/talos_companion_staging_research.c
+    src/engine/talos_encounter_admission.c
+    src/engine/talos_encounter_session.c
     src/engine/transition_vote.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
+    src/input/local_input_hub.c
     src/input/key_binding.c
     src/hooks/accelerator_cache.c
     src/hooks/blacksmith_read_adapter.c
@@ -65,6 +72,14 @@ add_library(SudekiMP SHARED
     src/hooks/shop_catalog_adapter.c
     src/hooks/spirit_strike_input.c
     src/hooks/split_screen_render.c
+    src/hooks/talos_companion_membership_abi.c
+    src/hooks/talos_companion_staging_native_sampler.c
+    src/hooks/talos_companion_staging_native_capture.c
+    src/hooks/talos_companion_staging_research_adapter.c
+    src/hooks/talos_companion_carry_adapter.c
+    src/hooks/talos_encounter_intercept.c
+    src/hooks/talos_native_lifecycle_trace.c
+    src/hooks/talos_post_movie_party_restore.c
     src/hooks/xinput_player_two.c
     src/hooks/skill_trace.c
     src/hooks/talos_coop_balance.c
@@ -317,6 +332,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/camera_target_abi.c
     src/engine/render_phase_abi.c
     src/engine/log.c
+    src/engine/local_viewport_layout.c
     src/engine/orbit_camera.c
     src/engine/player_combat_context.c
     src/engine/player_statehood.c
@@ -326,6 +342,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/transition_vote.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
+    src/input/local_input_hub.c
     src/hooks/call_hook.c
     src/hooks/blacksmith_read_adapter.c
     src/hooks/blacksmith_ui_adapter.c
@@ -340,6 +357,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/split_screen_render.c
     src/hooks/skill_trace.c
     src/hooks/talos_defense_trace.c
+    src/hooks/talos_native_lifecycle_trace.c
     src/hooks/zone_transition_trace.c
 )
 target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)
@@ -359,6 +377,10 @@ set_target_properties(SudekiMP.SkillTraceImageTest PROPERTIES
 
 set_source_files_properties(
     src/hooks/zone_transition_trace.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_source_files_properties(
+    src/hooks/talos_native_lifecycle_trace.c
     PROPERTIES COMPILE_OPTIONS -Wno-pedantic
 )
 
@@ -436,6 +458,7 @@ add_executable(SudekiMP.InputBridgeReceiverTest
     src/engine/log.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
+    src/input/local_input_hub.c
 )
 target_include_directories(SudekiMP.InputBridgeReceiverTest PRIVATE src)
 target_compile_definitions(SudekiMP.InputBridgeReceiverTest PRIVATE
@@ -449,9 +472,242 @@ set_target_properties(SudekiMP.InputBridgeReceiverTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_executable(SudekiMP.LocalInputHubTest
+    tests/local_input_hub_test.c
+    src/engine/log.c
+    src/input/bridge_protocol.c
+    src/input/local_input_hub.c
+)
+target_include_directories(SudekiMP.LocalInputHubTest PRIVATE src)
+target_compile_definitions(SudekiMP.LocalInputHubTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LocalInputHubTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+target_link_libraries(SudekiMP.LocalInputHubTest PRIVATE ws2_32)
+set_target_properties(SudekiMP.LocalInputHubTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 add_executable(SudekiMP.ControllerActionRouterTest
     tests/controller_action_router_test.c
     src/engine/controller_action_router.c
+)
+
+add_executable(SudekiMP.LocalViewportLayoutTest
+    tests/local_viewport_layout_test.c
+    src/engine/local_viewport_layout.c
+)
+
+add_executable(SudekiMP.TalosEncounterSessionTest
+    tests/talos_encounter_session_test.c
+    src/engine/talos_encounter_session.c
+)
+
+add_executable(SudekiMP.TalosEncounterAdmissionTest
+    tests/talos_encounter_admission_test.c
+    src/engine/talos_encounter_admission.c
+    src/engine/talos_encounter_session.c
+)
+
+add_executable(SudekiMP.TalosCompanionCarryTest
+    tests/talos_companion_carry_test.c
+    src/engine/talos_companion_carry.c
+)
+
+add_executable(SudekiMP.TalosCompanionStagingTest
+    tests/talos_companion_staging_test.c
+    src/engine/talos_companion_staging.c
+)
+
+add_executable(SudekiMP.TalosCompanionStagingResearchTest
+    tests/talos_companion_staging_research_test.c
+    src/engine/talos_companion_staging_research.c
+)
+
+add_executable(SudekiMP.TalosCompanionMembershipAbiTest
+    tests/talos_companion_membership_abi_test.c
+    src/hooks/talos_companion_membership_abi.c
+)
+
+add_executable(SudekiMP.TalosCompanionStagingResearchAdapterTest
+    tests/talos_companion_staging_research_adapter_test.c
+    src/engine/log.c
+    src/engine/talos_companion_staging_research.c
+    src/hooks/talos_companion_membership_abi.c
+    src/hooks/talos_companion_staging_research_adapter.c
+)
+
+add_executable(SudekiMP.TalosCompanionStagingNativeSamplerTest
+    tests/talos_companion_staging_native_sampler_test.c
+    src/hooks/talos_companion_membership_abi.c
+    src/hooks/talos_companion_staging_native_sampler.c
+)
+
+add_executable(SudekiMP.TalosCompanionStagingNativeCaptureTest
+    tests/talos_companion_staging_native_capture_test.c
+    src/hooks/talos_companion_staging_native_capture.c
+)
+
+add_executable(SudekiMP.TalosCompanionCarryAdapterTest
+    tests/talos_companion_carry_adapter_test.c
+    src/hooks/talos_companion_carry_adapter.c
+)
+
+add_executable(SudekiMP.TalosEncounterInterceptTest
+    tests/talos_encounter_intercept_test.c
+    src/hooks/talos_encounter_intercept.c
+)
+
+add_executable(SudekiMP.TalosNativeLifecycleTraceTest
+    tests/talos_native_lifecycle_trace_test.c
+    src/engine/log.c
+    src/hooks/call_hook.c
+    src/hooks/talos_native_lifecycle_trace.c
+)
+
+add_executable(SudekiMP.TalosPostMoviePartyRestoreTest
+    tests/talos_post_movie_party_restore_test.c
+    src/hooks/talos_post_movie_party_restore.c
+)
+target_include_directories(SudekiMP.TalosPostMoviePartyRestoreTest PRIVATE src)
+target_compile_definitions(SudekiMP.TalosPostMoviePartyRestoreTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+    SUDEKIMP_TALOS_POST_MOVIE_PARTY_RESTORE_POLICY_ONLY=1
+)
+target_compile_options(SudekiMP.TalosPostMoviePartyRestoreTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosPostMoviePartyRestoreTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosNativeLifecycleTraceTest PRIVATE src)
+target_compile_definitions(SudekiMP.TalosNativeLifecycleTraceTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.TalosNativeLifecycleTraceTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosNativeLifecycleTraceTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosEncounterInterceptTest PRIVATE src)
+target_compile_definitions(SudekiMP.TalosEncounterInterceptTest PRIVATE
+    SUDEKIMP_TALOS_ENCOUNTER_INTERCEPT_TESTING=1
+)
+target_compile_options(SudekiMP.TalosEncounterInterceptTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosEncounterInterceptTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosEncounterSessionTest PRIVATE src)
+target_compile_options(SudekiMP.TalosEncounterSessionTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosEncounterSessionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosEncounterAdmissionTest PRIVATE src)
+target_compile_options(SudekiMP.TalosEncounterAdmissionTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosEncounterAdmissionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionCarryTest PRIVATE src)
+target_compile_options(SudekiMP.TalosCompanionCarryTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionCarryTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionStagingTest PRIVATE src)
+target_compile_options(SudekiMP.TalosCompanionStagingTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionStagingTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionStagingResearchTest PRIVATE src)
+target_compile_options(SudekiMP.TalosCompanionStagingResearchTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionStagingResearchTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionMembershipAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.TalosCompanionMembershipAbiTest PRIVATE
+    SUDEKIMP_TALOS_MEMBERSHIP_ABI_TESTING=1
+)
+target_compile_options(SudekiMP.TalosCompanionMembershipAbiTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionMembershipAbiTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionStagingResearchAdapterTest
+    PRIVATE src
+)
+target_compile_definitions(SudekiMP.TalosCompanionStagingResearchAdapterTest
+    PRIVATE
+        SUDEKIMP_TALOS_MEMBERSHIP_ABI_TESTING=1
+        SUDEKIMP_TALOS_STAGING_RESEARCH_ADAPTER_TESTING=1
+)
+target_compile_options(SudekiMP.TalosCompanionStagingResearchAdapterTest
+    PRIVATE -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionStagingResearchAdapterTest
+    PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionStagingNativeSamplerTest
+    PRIVATE src
+)
+target_compile_definitions(SudekiMP.TalosCompanionStagingNativeSamplerTest
+    PRIVATE WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.TalosCompanionStagingNativeSamplerTest
+    PRIVATE -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionStagingNativeSamplerTest
+    PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED YES
+        C_EXTENSIONS NO
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionStagingNativeCaptureTest
+    PRIVATE src
+)
+target_compile_definitions(SudekiMP.TalosCompanionStagingNativeCaptureTest
+    PRIVATE
+        WIN32_LEAN_AND_MEAN
+        SUDEKIMP_TALOS_STAGING_NATIVE_CAPTURE_TESTING=1
+)
+target_compile_options(SudekiMP.TalosCompanionStagingNativeCaptureTest
+    PRIVATE -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionStagingNativeCaptureTest
+    PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED YES
+        C_EXTENSIONS NO
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.TalosCompanionCarryAdapterTest PRIVATE src)
+target_compile_options(SudekiMP.TalosCompanionCarryAdapterTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.TalosCompanionCarryAdapterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.LocalViewportLayoutTest PRIVATE src)
+target_compile_options(SudekiMP.LocalViewportLayoutTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LocalViewportLayoutTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 target_include_directories(SudekiMP.ControllerActionRouterTest PRIVATE src)
 target_compile_options(SudekiMP.ControllerActionRouterTest PRIVATE

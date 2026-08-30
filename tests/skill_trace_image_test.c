@@ -12,14 +12,22 @@
 #include "hooks/spirit_strike_input.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/talos_defense_trace.h"
+#include "hooks/talos_native_lifecycle_trace.h"
 #include "hooks/xinput_player_two.h"
 #include "hooks/zone_transition_trace.h"
+#include "input/bridge_receiver.h"
 
 #include <windows.h>
 #include <float.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+static BOOL split_runtime_authorization_result;
+
+static BOOL split_runtime_authorization_query(void) {
+    return split_runtime_authorization_result;
+}
 
 enum {
     RVA_USE = 0x000b4810u,
@@ -117,6 +125,28 @@ enum {
     RVA_SCRIPT_CALL_OPCODE_SLOT = 0x00323fa0u,
     RVA_SCRIPT_METHOD_OPCODE = 0x001c4b10u,
     RVA_SCRIPT_METHOD_OPCODE_SLOT = 0x00323fa4u,
+    RVA_SCRIPT_SCENE_OPCODE = 0x001c4d30u,
+    RVA_SCRIPT_SCENE_OPCODE_SLOT = 0x00323fa8u,
+    RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL = 0x001c4db8u,
+    RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR = 0x001c3170u,
+    RVA_KAZEL_GROUP_ADD_CALL = 0x000b15dbu,
+    RVA_RAW_GROUP_ADD = 0x00023280u,
+    RVA_AI_LISTENER_VTABLE = 0x002ca244u,
+    RVA_AI_LISTENER_ADD = 0x000f2b00u,
+    RVA_AI_LISTENER_FORMATION_ADD_CALL = 0x000f2b14u,
+    RVA_RAW_FORMATION_ADD = 0x000b2cb0u,
+    RVA_DELETE_PC = 0x000b2520u,
+    RVA_REMOVE_ALL_PLAYERS = 0x000252d0u,
+    RVA_FORMATION_POP_MEMBERS = 0x000f6260u,
+    RVA_TSA_IS_PLAYING = 0x0001a230u,
+    RVA_TSA_SET_PLAYING = 0x0001a240u,
+    RVA_TSA_DISPATCH = 0x0003f3b0u,
+    RVA_LIFECYCLE_TSA_PLAYING_GLOBAL = 0x00408d4cu,
+    RVA_LIFECYCLE_TSA_SHADOW_GLOBAL = 0x003c2f3cu,
+    RVA_LIFECYCLE_TSA_SCRIPT_MANAGER_GLOBAL = 0x00409d8cu,
+    RVA_LIFECYCLE_TSA_EVENT_NAME = 0x003c3a64u,
+    RVA_LIFECYCLE_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
+    RVA_LIFECYCLE_AI_MANAGER_GLOBAL = 0x00409de4u,
     RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
     RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
@@ -183,6 +213,430 @@ typedef struct ExpectedEntry {
     size_t byte_count;
     const char *name;
 } ExpectedEntry;
+
+typedef void (__attribute__((thiscall)) *TestControllerUpdateFunction)(
+    void *controller,
+    void *update_data
+);
+
+static unsigned int service_update_original_calls;
+static unsigned int service_update_observer_one_calls;
+static unsigned int service_update_observer_two_calls;
+static unsigned int service_update_sequence;
+static BOOL service_update_order_failed;
+static BOOL service_update_context_failed;
+static BOOL service_update_expect_observer_one;
+static const void *service_update_expected_controller;
+static const void *service_update_expected_data;
+static const void *service_update_self_unregister_owner;
+static TestControllerUpdateFunction service_update_reentrant_target;
+static unsigned int service_update_reentrant_depth;
+static SudekiMpControlUpdateDispatchWitness service_update_witnesses[8];
+static DWORD service_update_observer_entry_errors[8];
+static BOOL service_update_witness_revalidated[8];
+static BOOL service_update_witness_revalidated_after_mutation;
+static unsigned int service_update_witness_count;
+static BOOL service_update_request_uninstall;
+static DWORD service_update_uninstall_error;
+static BOOL service_update_revalidated_after_uninstall_attempt;
+static SudekiMpControlUpdateObserverGate stale_snapshot_observer_gate;
+static const void *stale_snapshot_observer_owner;
+static unsigned int stale_snapshot_disabler_calls;
+static unsigned int stale_snapshot_callback_calls;
+static unsigned int stale_snapshot_backing_calls;
+
+static void reset_service_update_witnesses(void) {
+    ZeroMemory(service_update_witnesses, sizeof(service_update_witnesses));
+    ZeroMemory(
+        service_update_observer_entry_errors,
+        sizeof(service_update_observer_entry_errors)
+    );
+    ZeroMemory(
+        service_update_witness_revalidated,
+        sizeof(service_update_witness_revalidated)
+    );
+    service_update_witness_revalidated_after_mutation = FALSE;
+    service_update_uninstall_error = ERROR_SUCCESS;
+    service_update_revalidated_after_uninstall_attempt = FALSE;
+    service_update_witness_count = 0u;
+}
+
+static void capture_service_update_witness(
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    DWORD entry_last_error = GetLastError();
+
+    if (witness == NULL || service_update_witness_count >=
+            sizeof(service_update_witnesses) /
+                sizeof(service_update_witnesses[0])) {
+        service_update_context_failed = TRUE;
+        return;
+    }
+    service_update_observer_entry_errors[service_update_witness_count] =
+        entry_last_error;
+    service_update_witness_revalidated[service_update_witness_count] =
+        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
+    if (GetLastError() != entry_last_error) {
+        service_update_context_failed = TRUE;
+    }
+    service_update_witnesses[service_update_witness_count++] = *witness;
+}
+
+static BOOL service_update_witness_matches(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    SudekiMpControlUpdateDispatchSource source,
+    uint32_t original_call_count,
+    uint32_t observer_count,
+    BOOL service_only,
+    BOOL post_original,
+    BOOL sole_observer,
+    BOOL registry_stable,
+    BOOL hook_owned,
+    BOOL slot_owned,
+    BOOL source_exact,
+    BOOL service_post_original_exact
+) {
+    return witness != NULL && witness->dispatch_serial != 0u &&
+        witness->native_thread_id == GetCurrentThreadId() &&
+        witness->outer_update_depth == 1u &&
+        witness->active_dispatch_count == 1u &&
+        witness->original_call_count == original_call_count &&
+        witness->observer_snapshot_count == observer_count &&
+        witness->observer_registry_generation != 0u &&
+        witness->hook_owned_exact == (uint8_t)(hook_owned ? 1u : 0u) &&
+        witness->slot_owned_exact == (uint8_t)(slot_owned ? 1u : 0u) &&
+        witness->service_only == (uint8_t)(service_only ? 1u : 0u) &&
+        witness->post_original == (uint8_t)(post_original ? 1u : 0u) &&
+        witness->source == (uint8_t)source &&
+        witness->source_exact == (uint8_t)(source_exact ? 1u : 0u) &&
+        witness->service_post_original_exact ==
+            (uint8_t)(service_post_original_exact ? 1u : 0u) &&
+        witness->sole_observer == (uint8_t)(sole_observer ? 1u : 0u) &&
+        witness->registry_generation_stable ==
+            (uint8_t)(registry_stable ? 1u : 0u) &&
+        witness->reserved[0] == 0u && witness->reserved[1] == 0u &&
+        witness->reserved[2] == 0u;
+}
+
+static void __attribute__((thiscall)) service_update_original_stub(
+    void *controller,
+    void *update_data
+) {
+    (void)controller;
+    (void)update_data;
+    ++service_update_original_calls;
+    if (service_update_sequence != 0u) {
+        service_update_order_failed = TRUE;
+    }
+    service_update_sequence = 1u;
+    SetLastError(0x1234u);
+}
+
+static void __attribute__((thiscall)) service_update_reentrant_original_stub(
+    void *controller,
+    void *update_data
+) {
+    ++service_update_original_calls;
+    if (service_update_reentrant_depth == 0u &&
+        service_update_reentrant_target != NULL) {
+        service_update_reentrant_depth = 1u;
+        service_update_reentrant_target(controller, update_data);
+        service_update_reentrant_depth = 0u;
+    }
+    SetLastError(0x1234u);
+}
+
+static void service_update_observer_one(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    capture_service_update_witness(witness);
+    ++service_update_observer_one_calls;
+    if (!service_update_expect_observer_one ||
+        service_update_sequence != 1u) {
+        service_update_order_failed = TRUE;
+    }
+    if (controller != service_update_expected_controller ||
+        update_data != service_update_expected_data) {
+        service_update_context_failed = TRUE;
+    }
+    service_update_sequence = 2u;
+    if (service_update_self_unregister_owner != NULL &&
+        !SudekiMpControlSeparationUnregisterUpdateObserver(
+            service_update_self_unregister_owner)) {
+        service_update_order_failed = TRUE;
+    }
+    if (service_update_self_unregister_owner != NULL) {
+        service_update_witness_revalidated_after_mutation =
+            SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
+    }
+    SetLastError(0x5678u);
+}
+
+static void service_update_observer_two(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    capture_service_update_witness(witness);
+    ++service_update_observer_two_calls;
+    if (service_update_sequence !=
+            (service_update_expect_observer_one ? 2u : 1u)) {
+        service_update_order_failed = TRUE;
+    }
+    if (controller != service_update_expected_controller ||
+        update_data != service_update_expected_data) {
+        service_update_context_failed = TRUE;
+    }
+    service_update_sequence = service_update_expect_observer_one ? 3u : 2u;
+}
+
+static void service_update_observer_replacement(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    (void)controller;
+    (void)update_data;
+    (void)witness;
+    service_update_order_failed = TRUE;
+}
+
+static void service_update_witness_capture_observer(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    if (controller != service_update_expected_controller ||
+        update_data != service_update_expected_data) {
+        service_update_context_failed = TRUE;
+    }
+    capture_service_update_witness(witness);
+    if (service_update_request_uninstall) {
+        SetLastError(ERROR_SUCCESS);
+        SudekiMpUninstallControlSeparation();
+        service_update_uninstall_error = GetLastError();
+        service_update_revalidated_after_uninstall_attempt =
+            SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
+    }
+}
+
+static void stale_snapshot_disabler_observer(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    (void)controller;
+    (void)update_data;
+    (void)witness;
+    ++stale_snapshot_disabler_calls;
+    SudekiMpControlUpdateObserverGateDisable(
+        &stale_snapshot_observer_gate);
+    if (!SudekiMpControlSeparationUnregisterUpdateObserver(
+            stale_snapshot_observer_owner)) {
+        service_update_context_failed = TRUE;
+    }
+    SudekiMpControlUpdateObserverGateDrain(
+        &stale_snapshot_observer_gate);
+}
+
+static void stale_snapshot_gated_observer(
+    void *controller,
+    void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness
+) {
+    (void)controller;
+    (void)update_data;
+    (void)witness;
+    ++stale_snapshot_callback_calls;
+    if (!SudekiMpControlUpdateObserverGateTryEnter(
+            &stale_snapshot_observer_gate)) {
+        return;
+    }
+    ++stale_snapshot_backing_calls;
+    SudekiMpControlUpdateObserverGateLeave(
+        &stale_snapshot_observer_gate);
+}
+
+static BOOL install_control_separation_profile(
+    uint8_t *image,
+    UINT toggle_virtual_key,
+    unsigned int enabled_feature
+) {
+    static const UINT skill_keys[4] = {'I', 'O', 'P', 'K'};
+
+    return SudekiMpInstallControlSeparation(
+        (HMODULE)image,
+        toggle_virtual_key,
+        enabled_feature == 1u,
+        enabled_feature == 2u,
+        enabled_feature == 3u,
+        enabled_feature == 3u ? 10.0f : 0.0f,
+        enabled_feature == 4u,
+        enabled_feature == 4u ? 'U' : 0u,
+        enabled_feature == 5u,
+        enabled_feature == 5u ? skill_keys : NULL,
+        enabled_feature == 6u,
+        enabled_feature == 7u,
+        enabled_feature == 8u,
+        enabled_feature == 8u ? 0.20f : 0.0f
+    );
+}
+
+typedef struct LifecycleHeroIdentityFixture {
+    uint32_t main_vtable_rva;
+    uint32_t secondary_vtable_rva;
+    uint32_t resource_vtable_rva;
+    uint32_t main_col_rva;
+    uint32_t secondary_col_rva;
+    uint32_t resource_col_rva;
+    uint32_t type_descriptor_rva;
+    uint32_t type_method_rva;
+    uint32_t type_value;
+    const char *type_name;
+} LifecycleHeroIdentityFixture;
+
+typedef struct LifecycleHeroRelocationBackup {
+    uint32_t vtable_col_pointer[3];
+    uint32_t col_type_pointer[3];
+    uint32_t resource_method_pointer;
+} LifecycleHeroRelocationBackup;
+
+static const LifecycleHeroIdentityFixture lifecycle_hero_fixtures[] = {
+    {0x002d5010u, 0x002d5034u, 0x002d5054u,
+     0x002fd4e4u, 0x002fd4d0u, 0x002fd4bcu,
+     0x0035a8fcu, 0x00139ad0u, 0x23u, ".?AVTalEntity@@"},
+    {0x002d555cu, 0x002d5580u, 0x002d55a0u,
+     0x002fe500u, 0x002fe4ecu, 0x002fe4d8u,
+     0x0035ad34u, 0x001e8240u, 0x01u, ".?AVAilishEntity@@"},
+    {0x002d5a88u, 0x002d5aacu, 0x002d5accu,
+     0x002fec4cu, 0x002fec38u, 0x002fec24u,
+     0x0035af80u, 0x0022c0e0u, 0x05u, ".?AVBukiEntity@@"},
+    {0x002d66fcu, 0x002d6720u, 0x002d6740u,
+     0x002ff718u, 0x002ff704u, 0x002ff6f0u,
+     0x0035b1d4u, 0x0014d730u, 0x0eu, ".?AVElcoEntity@@"},
+    {0x002d6884u, 0x002d68a8u, 0x002d68c8u,
+     0x002ff864u, 0x002ff850u, 0x002ff83cu,
+     0x0035b238u, 0x00151230u, 0x0bu, ".?AVDarkTalEntity@@"}
+};
+
+static void relocate_lifecycle_hero_identity(
+    uint8_t *image,
+    LifecycleHeroRelocationBackup backups[5]
+) {
+    size_t hero;
+
+    for (hero = 0u; hero < 5u; ++hero) {
+        const LifecycleHeroIdentityFixture *fixture =
+            &lifecycle_hero_fixtures[hero];
+        const uint32_t vtables[] = {
+            fixture->main_vtable_rva,
+            fixture->secondary_vtable_rva,
+            fixture->resource_vtable_rva
+        };
+        const uint32_t locators[] = {
+            fixture->main_col_rva,
+            fixture->secondary_col_rva,
+            fixture->resource_col_rva
+        };
+        size_t subobject;
+
+        for (subobject = 0u; subobject < 3u; ++subobject) {
+            uint32_t relocated = (uint32_t)(uintptr_t)(
+                image + locators[subobject]);
+
+            memcpy(&backups[hero].vtable_col_pointer[subobject],
+                image + vtables[subobject] - 4u, sizeof(uint32_t));
+            memcpy(image + vtables[subobject] - 4u,
+                &relocated, sizeof(relocated));
+            memcpy(&backups[hero].col_type_pointer[subobject],
+                image + locators[subobject] + 12u, sizeof(uint32_t));
+            relocated = (uint32_t)(uintptr_t)(
+                image + fixture->type_descriptor_rva);
+            memcpy(image + locators[subobject] + 12u,
+                &relocated, sizeof(relocated));
+        }
+        memcpy(&backups[hero].resource_method_pointer,
+            image + fixture->resource_vtable_rva + 0x10u,
+            sizeof(uint32_t));
+        {
+            uint32_t relocated = (uint32_t)(uintptr_t)(
+                image + fixture->type_method_rva);
+
+            memcpy(image + fixture->resource_vtable_rva + 0x10u,
+                &relocated, sizeof(relocated));
+        }
+    }
+}
+
+static void restore_lifecycle_hero_identity(
+    uint8_t *image,
+    const LifecycleHeroRelocationBackup backups[5]
+) {
+    size_t hero;
+
+    for (hero = 0u; hero < 5u; ++hero) {
+        const LifecycleHeroIdentityFixture *fixture =
+            &lifecycle_hero_fixtures[hero];
+        const uint32_t vtables[] = {
+            fixture->main_vtable_rva,
+            fixture->secondary_vtable_rva,
+            fixture->resource_vtable_rva
+        };
+        const uint32_t locators[] = {
+            fixture->main_col_rva,
+            fixture->secondary_col_rva,
+            fixture->resource_col_rva
+        };
+        size_t subobject;
+
+        for (subobject = 0u; subobject < 3u; ++subobject) {
+            memcpy(image + vtables[subobject] - 4u,
+                &backups[hero].vtable_col_pointer[subobject],
+                sizeof(uint32_t));
+            memcpy(image + locators[subobject] + 12u,
+                &backups[hero].col_type_pointer[subobject],
+                sizeof(uint32_t));
+        }
+        memcpy(image + fixture->resource_vtable_rva + 0x10u,
+            &backups[hero].resource_method_pointer, sizeof(uint32_t));
+    }
+}
+
+static BOOL lifecycle_hero_identity_relocations_match(
+    const uint8_t *image
+) {
+    size_t hero;
+
+    for (hero = 0u; hero < 5u; ++hero) {
+        const LifecycleHeroIdentityFixture *fixture =
+            &lifecycle_hero_fixtures[hero];
+        const uint32_t vtables[] = {
+            fixture->main_vtable_rva,
+            fixture->secondary_vtable_rva,
+            fixture->resource_vtable_rva
+        };
+        const uint32_t locators[] = {
+            fixture->main_col_rva,
+            fixture->secondary_col_rva,
+            fixture->resource_col_rva
+        };
+        size_t subobject;
+
+        for (subobject = 0u; subobject < 3u; ++subobject) {
+            if (*(const uint32_t *)(image + vtables[subobject] - 4u) !=
+                    (uint32_t)(uintptr_t)(image + locators[subobject]) ||
+                *(const uint32_t *)(image + locators[subobject] + 12u) !=
+                    (uint32_t)(uintptr_t)(
+                        image + fixture->type_descriptor_rva)) return FALSE;
+        }
+        if (*(const uint32_t *)(image + fixture->resource_vtable_rva +
+                0x10u) != (uint32_t)(uintptr_t)(
+                    image + fixture->type_method_rva)) return FALSE;
+    }
+    return TRUE;
+}
 
 static const ExpectedExport expected_exports[] = {
     {0x0030c570u, 0x000d3ae0u},
@@ -518,6 +972,13 @@ static void point_relative_call(uint8_t *instruction, const uint8_t *target) {
     memcpy(instruction + 1u, &displacement, sizeof(displacement));
 }
 
+static void point_relative_jump(uint8_t *instruction, const uint8_t *target) {
+    int32_t displacement = (int32_t)(target - (instruction + 5u));
+
+    instruction[0] = 0xe9u;
+    memcpy(instruction + 1u, &displacement, sizeof(displacement));
+}
+
 static void check_blacksmith_ui_adapter_exact_image(
     uint8_t *image,
     int *failures
@@ -704,6 +1165,148 @@ static void check_blacksmith_roster_actor_identity_policy(int *failures) {
 #undef CHECK_ROSTER_IDENTITY
 }
 
+static void check_adaptive_seat_activation_policy(int *failures) {
+    unsigned int active_mask;
+
+#define CHECK_ADAPTIVE_SEATS(expected, expression, label) do { \
+    BOOL actual = (expression); \
+    if ((actual != FALSE) != (expected)) { \
+        fprintf(stderr, "FAIL: adaptive-seat activation policy %s\n", \
+            label); \
+        ++*failures; \
+    } \
+} while (0)
+    for (active_mask = 0u; active_mask <= 0xffu; ++active_mask) {
+        const int valid = active_mask <= 0x0fu &&
+            (active_mask & 1u) != 0u;
+
+        CHECK_ADAPTIVE_SEATS(valid,
+            SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                TRUE, active_mask, TRUE,
+                active_mask, active_mask, active_mask,
+                active_mask, active_mask, active_mask, TRUE),
+            "did not enforce host-present four-bit active mask");
+        CHECK_ADAPTIVE_SEATS(0,
+            SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                FALSE, active_mask, TRUE,
+                active_mask, active_mask, active_mask,
+                active_mask, active_mask, active_mask, TRUE),
+            "accepted a disabled feature");
+    }
+    for (active_mask = 1u; active_mask <= 0x0fu; active_mask += 2u) {
+        unsigned int missing_bit;
+        unsigned int extra_bit = 0u;
+
+        for (missing_bit = 1u; missing_bit <= 8u; missing_bit <<= 1u) {
+            if ((active_mask & missing_bit) == 0u) {
+                if (extra_bit == 0u) {
+                    extra_bit = missing_bit;
+                }
+                continue;
+            }
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask & ~missing_bit,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted missing actor lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask & ~missing_bit,
+                    active_mask, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted missing camera lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask,
+                    active_mask & ~missing_bit, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted missing render-state lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask & ~missing_bit,
+                    active_mask, active_mask, TRUE),
+                "accepted missing HUD lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask & ~missing_bit,
+                    active_mask, TRUE),
+                "accepted missing input lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask,
+                    active_mask & ~missing_bit, TRUE),
+                "accepted missing frame cache");
+        }
+        if (extra_bit != 0u) {
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask | extra_bit,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted an inactive seat actor lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask | extra_bit,
+                    active_mask, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted an inactive seat camera lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask,
+                    active_mask | extra_bit, active_mask,
+                    active_mask, active_mask, TRUE),
+                "accepted an inactive seat render-state lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask | extra_bit,
+                    active_mask, active_mask, TRUE),
+                "accepted an inactive seat HUD lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask | extra_bit,
+                    active_mask, TRUE),
+                "accepted an inactive seat input lease");
+            CHECK_ADAPTIVE_SEATS(0,
+                SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                    TRUE, active_mask, TRUE,
+                    active_mask, active_mask, active_mask,
+                    active_mask, active_mask,
+                    active_mask | extra_bit, TRUE),
+                "accepted an inactive seat frame cache");
+        }
+        CHECK_ADAPTIVE_SEATS(0,
+            SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                TRUE, active_mask, FALSE,
+                active_mask, active_mask, active_mask,
+                active_mask, active_mask, active_mask, TRUE),
+            "accepted an unproven viewport layout");
+        CHECK_ADAPTIVE_SEATS(0,
+            SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+                TRUE, active_mask, TRUE,
+                active_mask, active_mask, active_mask,
+                active_mask, active_mask, active_mask, FALSE),
+            "accepted global presentation ownership");
+    }
+#undef CHECK_ADAPTIVE_SEATS
+}
+
 static void check_shared_interaction_modal_runtime(
     uint8_t *image,
     int *failures
@@ -830,7 +1433,20 @@ static void check_shared_interaction_modal_runtime(
             stderr);
         ++*failures;
     }
+    split_runtime_authorization_result = FALSE;
+    SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
+        split_runtime_authorization_query);
+    if (SudekiMpSplitScreenRuntimeAuthorized()) {
+        fputs("FAIL: split runtime query was not active before uninstall\n",
+            stderr);
+        ++*failures;
+    }
     SudekiMpUninstallSplitScreenRender();
+    if (!SudekiMpSplitScreenRuntimeAuthorized()) {
+        fputs("FAIL: split-screen uninstall retained runtime authorization query\n",
+            stderr);
+        ++*failures;
+    }
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         fputs("FAIL: uninstalled modal inspector retained quiescence\n",
             stderr);
@@ -1191,6 +1807,470 @@ static void test_zone_transition_exact_image(
         probes, probe_count, image, failures);
 }
 
+static BOOL lifecycle_kazel_seams_match(
+    const uint8_t *image,
+    BOOL native_group_add_call_expected
+) {
+    static const uint8_t call_prefix[] = {
+        0x8bu, 0x4cu, 0x24u, 0x18u, 0xa1u
+    };
+    static const uint8_t raw_group_entry[] = {
+        0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u, 0x8bu, 0x55u,
+        0x08u, 0x83u, 0xecu, 0x14u, 0x53u, 0x56u, 0x57u, 0x8bu,
+        0xf0u
+    };
+    static const uint8_t listener_prefix[] = {
+        0x8bu, 0x54u, 0x24u, 0x04u, 0x56u, 0x85u, 0xd2u, 0x74u,
+        0x10u, 0x51u, 0x8bu, 0xc4u, 0x8du, 0xb1u, 0xb0u, 0x00u,
+        0x00u, 0x00u, 0x89u, 0x10u
+    };
+    static const uint8_t raw_formation_entry[] = {
+        0x51u, 0x8bu, 0x4eu, 0x30u, 0x8bu, 0x54u, 0x24u, 0x08u,
+        0x33u, 0xc0u, 0x57u, 0x85u, 0xc9u, 0x7eu, 0x0eu
+    };
+    const uint8_t *window = image + RVA_KAZEL_GROUP_ADD_CALL - 10u;
+    uint32_t operand;
+    uint32_t listener;
+    BOOL call_is_native;
+
+    memcpy(&operand, window + 5u, sizeof(operand));
+    memcpy(&listener, image + RVA_AI_LISTENER_VTABLE + 0x18u,
+        sizeof(listener));
+    call_is_native = relative_call_target(
+        (uint8_t *)image + RVA_KAZEL_GROUP_ADD_CALL) ==
+        image + RVA_RAW_GROUP_ADD;
+    return memcmp(window, call_prefix, sizeof(call_prefix)) == 0 &&
+        operand == (uint32_t)(uintptr_t)(
+            image + RVA_LIFECYCLE_ACTIVE_GROUP_GLOBAL) &&
+        window[9u] == 0x51u && window[10u] == 0xe8u &&
+        window[15u] == 0xebu && window[16u] == 0x1bu &&
+        call_is_native == native_group_add_call_expected &&
+        memcmp(image + RVA_RAW_GROUP_ADD, raw_group_entry,
+            sizeof(raw_group_entry)) == 0 &&
+        memcmp(image + RVA_RAW_GROUP_ADD + 0x108u,
+            "\xc2\x04\x00", 3u) == 0 &&
+        listener == (uint32_t)(uintptr_t)(image + RVA_AI_LISTENER_ADD) &&
+        memcmp(image + RVA_AI_LISTENER_ADD, listener_prefix,
+            sizeof(listener_prefix)) == 0 &&
+        relative_call_target(
+            (uint8_t *)image + RVA_AI_LISTENER_FORMATION_ADD_CALL) ==
+            image + RVA_RAW_FORMATION_ADD &&
+        memcmp(image + RVA_AI_LISTENER_ADD + 0x23u,
+            "\xc2\x0c\x00", 3u) == 0 &&
+        memcmp(image + RVA_RAW_FORMATION_ADD, raw_formation_entry,
+            sizeof(raw_formation_entry)) == 0 &&
+        memcmp(image + RVA_RAW_FORMATION_ADD + 0x87u,
+            "\xc2\x04\x00", 3u) == 0 &&
+        memcmp(image + RVA_RAW_FORMATION_ADD + 0x8eu,
+            "\xc2\x04\x00", 3u) == 0;
+}
+
+static void test_talos_native_lifecycle_exact_image(
+    uint8_t *image,
+    int *failures
+) {
+    static const size_t corrupt_rvas[] = {
+        RVA_SCRIPT_CALL_OPCODE + 17u,
+        RVA_SCRIPT_SCENE_OPCODE + 17u,
+        RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL + 5u,
+        RVA_DELETE_PC + 7u,
+        RVA_REMOVE_ALL_PLAYERS + 1u,
+        RVA_REMOVE_ALL_PLAYERS + 15u,
+        RVA_FORMATION_POP_MEMBERS + 1u,
+        RVA_FORMATION_POP_MEMBERS + 19u,
+        RVA_TSA_IS_PLAYING + 1u,
+        RVA_TSA_IS_PLAYING + 15u,
+        RVA_TSA_SET_PLAYING + 0x01u,
+        RVA_TSA_SET_PLAYING + 0x1eu,
+        RVA_TSA_SET_PLAYING + 0x56u,
+        RVA_TSA_SET_PLAYING + 0x31u,
+        RVA_TSA_SET_PLAYING + 0x36u,
+        RVA_TSA_SET_PLAYING + 0x5fu,
+        RVA_TSA_SET_PLAYING + 0x50u,
+        RVA_KAZEL_GROUP_ADD_CALL - 10u,
+        RVA_KAZEL_GROUP_ADD_CALL - 5u,
+        RVA_KAZEL_GROUP_ADD_CALL + 1u,
+        RVA_KAZEL_GROUP_ADD_CALL + 6u,
+        RVA_RAW_GROUP_ADD + 16u,
+        RVA_RAW_GROUP_ADD + 0x108u,
+        RVA_AI_LISTENER_VTABLE + 0x18u,
+        RVA_AI_LISTENER_ADD + 19u,
+        RVA_AI_LISTENER_FORMATION_ADD_CALL + 1u,
+        RVA_AI_LISTENER_ADD + 0x23u,
+        RVA_RAW_FORMATION_ADD + 14u,
+        RVA_RAW_FORMATION_ADD + 0x87u,
+        RVA_RAW_FORMATION_ADD + 0x8eu,
+        0x002d5010u - 4u,
+        0x002fe4ecu + 4u,
+        0x002fec24u + 12u,
+        0x0035b1d4u + 8u,
+        0x002d5054u + 0x10u,
+        0x0014d730u + 5u,
+        0x002d6884u - 4u,
+        0x002ff850u + 4u,
+        0x002ff83cu + 12u,
+        0x0035b238u + 8u,
+        0x002d68c8u + 0x10u,
+        0x00151230u + 5u
+    };
+    static const char *const corrupt_names[] = {
+        "opcode-27 signature",
+        "opcode-29 signature",
+        "task-constructor call window",
+        "DeletePC signature",
+        "RemoveAllPlayers relocated global",
+        "RemoveAllPlayers signature",
+        "AiPCFormationPopMembers relocated global",
+        "AiPCFormationPopMembers signature",
+        "TSAIsPlaying relocated global",
+        "TSAIsPlaying signature",
+        "TSASetPlaying playing-state relocation",
+        "TSASetPlaying shadow relocation (read)",
+        "TSASetPlaying shadow relocation (write)",
+        "TSASetPlaying script-manager relocation",
+        "TSASetPlaying event-name relocation",
+        "TSASetPlaying stable suffix",
+        "TSASetPlaying dispatch call target",
+        "Kazel completion call prefix",
+        "Kazel completion active-group relocation",
+        "Kazel completion raw-group call target",
+        "Kazel completion call suffix",
+        "raw group-add entry",
+        "raw group-add ret-4 site",
+        "AI listener vtable add slot",
+        "AI listener add entry",
+        "AI listener formation-add call target",
+        "AI listener add ret-12 site",
+        "raw formation-add entry",
+        "raw formation-add primary ret-4 site",
+        "raw formation-add duplicate ret-4 site",
+        "hero vtable complete-object-locator pointer",
+        "hero complete-object-locator subobject offset",
+        "hero complete-object-locator type pointer",
+        "hero RTTI type name",
+        "hero resource-vtable type-method slot",
+        "hero type-method body",
+        "DarkTal vtable complete-object-locator pointer",
+        "DarkTal complete-object-locator subobject offset",
+        "DarkTal complete-object-locator type pointer",
+        "DarkTal RTTI type name",
+        "DarkTal resource-vtable type-method slot",
+        "DarkTal type-method body"
+    };
+    void **call_slot = (void **)(image + RVA_SCRIPT_CALL_OPCODE_SLOT);
+    void **scene_slot = (void **)(image + RVA_SCRIPT_SCENE_OPCODE_SLOT);
+    void *const native_call = image + RVA_SCRIPT_CALL_OPCODE;
+    void *const native_scene = image + RVA_SCRIPT_SCENE_OPCODE;
+    SudekiMpTalosNativeLifecycleSnapshot snapshot;
+    uint8_t saved_constructor_call[5];
+    uint8_t saved_kazel_group_add_window[17];
+    uint8_t saved_delete_pc[8];
+    uint8_t saved_remove_all_players[16];
+    uint8_t saved_formation_pop_members[20];
+    uint8_t saved_tsa_is_playing[16];
+    uint8_t original_tsa_set_playing[0x60];
+    uint8_t saved_tsa_set_playing[0x60];
+    LifecycleHeroRelocationBackup hero_relocation_backups[5];
+    uint32_t original_kazel_active_group_global;
+    uint32_t original_ai_listener_add;
+    uint32_t original_remove_all_players_global;
+    uint32_t original_formation_pop_members_global;
+    uint32_t original_tsa_is_playing_global;
+    uint32_t relocated_global;
+    size_t index;
+
+    if (relative_call_target(
+            image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL) !=
+            image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR) {
+        fputs("FAIL: exact task-constructor call target mismatch\n", stderr);
+        ++*failures;
+        return;
+    }
+    if (relative_call_target(image + RVA_KAZEL_GROUP_ADD_CALL) !=
+            image + RVA_RAW_GROUP_ADD ||
+        relative_call_target(
+            image + RVA_AI_LISTENER_FORMATION_ADD_CALL) !=
+            image + RVA_RAW_FORMATION_ADD) {
+        fputs("FAIL: exact Kazel native-add call target mismatch\n", stderr);
+        ++*failures;
+        return;
+    }
+    memcpy(&original_kazel_active_group_global,
+        image + RVA_KAZEL_GROUP_ADD_CALL - 5u,
+        sizeof(original_kazel_active_group_global));
+    memcpy(&original_ai_listener_add,
+        image + RVA_AI_LISTENER_VTABLE + 0x18u,
+        sizeof(original_ai_listener_add));
+    memcpy(&original_remove_all_players_global,
+        image + RVA_REMOVE_ALL_PLAYERS + 1u,
+        sizeof(original_remove_all_players_global));
+    memcpy(&original_formation_pop_members_global,
+        image + RVA_FORMATION_POP_MEMBERS + 1u,
+        sizeof(original_formation_pop_members_global));
+    memcpy(&original_tsa_is_playing_global,
+        image + RVA_TSA_IS_PLAYING + 1u,
+        sizeof(original_tsa_is_playing_global));
+    memcpy(original_tsa_set_playing, image + RVA_TSA_SET_PLAYING,
+        sizeof(original_tsa_set_playing));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_ACTIVE_GROUP_GLOBAL);
+    memcpy(image + RVA_REMOVE_ALL_PLAYERS + 1u,
+        &relocated_global, sizeof(relocated_global));
+    memcpy(image + RVA_KAZEL_GROUP_ADD_CALL - 5u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(image + RVA_AI_LISTENER_ADD);
+    memcpy(image + RVA_AI_LISTENER_VTABLE + 0x18u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_AI_MANAGER_GLOBAL);
+    memcpy(image + RVA_FORMATION_POP_MEMBERS + 1u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_TSA_PLAYING_GLOBAL);
+    memcpy(image + RVA_TSA_IS_PLAYING + 1u,
+        &relocated_global, sizeof(relocated_global));
+    memcpy(image + RVA_TSA_SET_PLAYING + 0x01u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_TSA_SHADOW_GLOBAL);
+    memcpy(image + RVA_TSA_SET_PLAYING + 0x1eu,
+        &relocated_global, sizeof(relocated_global));
+    memcpy(image + RVA_TSA_SET_PLAYING + 0x56u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_TSA_SCRIPT_MANAGER_GLOBAL);
+    memcpy(image + RVA_TSA_SET_PLAYING + 0x31u,
+        &relocated_global, sizeof(relocated_global));
+    relocated_global = (uint32_t)(uintptr_t)(
+        image + RVA_LIFECYCLE_TSA_EVENT_NAME);
+    memcpy(image + RVA_TSA_SET_PLAYING + 0x36u,
+        &relocated_global, sizeof(relocated_global));
+    point_relative_call(image + RVA_TSA_SET_PLAYING + 0x4fu,
+        image + RVA_TSA_DISPATCH);
+    if (relative_call_target(image + RVA_TSA_SET_PLAYING + 0x4fu) !=
+            image + RVA_TSA_DISPATCH) {
+        fputs("FAIL: exact TSASetPlaying dispatch call target mismatch\n",
+            stderr);
+        ++*failures;
+        memcpy(image + RVA_REMOVE_ALL_PLAYERS + 1u,
+            &original_remove_all_players_global,
+            sizeof(original_remove_all_players_global));
+        memcpy(image + RVA_FORMATION_POP_MEMBERS + 1u,
+            &original_formation_pop_members_global,
+            sizeof(original_formation_pop_members_global));
+        memcpy(image + RVA_TSA_IS_PLAYING + 1u,
+            &original_tsa_is_playing_global,
+            sizeof(original_tsa_is_playing_global));
+        memcpy(image + RVA_TSA_SET_PLAYING, original_tsa_set_playing,
+            sizeof(original_tsa_set_playing));
+        memcpy(image + RVA_KAZEL_GROUP_ADD_CALL - 5u,
+            &original_kazel_active_group_global,
+            sizeof(original_kazel_active_group_global));
+        memcpy(image + RVA_AI_LISTENER_VTABLE + 0x18u,
+            &original_ai_listener_add, sizeof(original_ai_listener_add));
+        return;
+    }
+    relocate_lifecycle_hero_identity(image, hero_relocation_backups);
+    memcpy(saved_constructor_call,
+        image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL,
+        sizeof(saved_constructor_call));
+    memcpy(saved_kazel_group_add_window,
+        image + RVA_KAZEL_GROUP_ADD_CALL - 10u,
+        sizeof(saved_kazel_group_add_window));
+    memcpy(saved_delete_pc, image + RVA_DELETE_PC,
+        sizeof(saved_delete_pc));
+    memcpy(saved_remove_all_players, image + RVA_REMOVE_ALL_PLAYERS,
+        sizeof(saved_remove_all_players));
+    memcpy(saved_formation_pop_members,
+        image + RVA_FORMATION_POP_MEMBERS,
+        sizeof(saved_formation_pop_members));
+    memcpy(saved_tsa_is_playing, image + RVA_TSA_IS_PLAYING,
+        sizeof(saved_tsa_is_playing));
+    memcpy(saved_tsa_set_playing, image + RVA_TSA_SET_PLAYING,
+        sizeof(saved_tsa_set_playing));
+
+    SetLastError(ERROR_SUCCESS);
+    if (!SudekiMpInstallTalosNativeLifecycleTrace((HMODULE)image, TRUE)) {
+        fprintf(stderr,
+            "FAIL: Talos lifecycle exact-image install failed (error=%lu)\n",
+            (unsigned long)GetLastError());
+        ++*failures;
+        memcpy(image + RVA_REMOVE_ALL_PLAYERS + 1u,
+            &original_remove_all_players_global,
+            sizeof(original_remove_all_players_global));
+        memcpy(image + RVA_FORMATION_POP_MEMBERS + 1u,
+            &original_formation_pop_members_global,
+            sizeof(original_formation_pop_members_global));
+        memcpy(image + RVA_TSA_IS_PLAYING + 1u,
+            &original_tsa_is_playing_global,
+            sizeof(original_tsa_is_playing_global));
+        memcpy(image + RVA_TSA_SET_PLAYING, original_tsa_set_playing,
+            sizeof(original_tsa_set_playing));
+        memcpy(image + RVA_KAZEL_GROUP_ADD_CALL - 5u,
+            &original_kazel_active_group_global,
+            sizeof(original_kazel_active_group_global));
+        memcpy(image + RVA_AI_LISTENER_VTABLE + 0x18u,
+            &original_ai_listener_add, sizeof(original_ai_listener_add));
+        restore_lifecycle_hero_identity(image, hero_relocation_backups);
+        return;
+    }
+    if (*call_slot == native_call || *scene_slot == native_scene) {
+        fputs("FAIL: Talos lifecycle install did not own both opcode slots\n",
+            stderr);
+        ++*failures;
+    }
+    if (relative_call_target(
+            image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL) ==
+            image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR ||
+        !lifecycle_kazel_seams_match(image, FALSE) ||
+        memcmp(image + RVA_DELETE_PC, saved_delete_pc,
+            sizeof(saved_delete_pc)) == 0 ||
+        memcmp(image + RVA_REMOVE_ALL_PLAYERS, saved_remove_all_players,
+            5u) == 0 ||
+        memcmp(image + RVA_FORMATION_POP_MEMBERS,
+            saved_formation_pop_members, 5u) == 0 ||
+        memcmp(image + RVA_TSA_IS_PLAYING, saved_tsa_is_playing,
+            sizeof(saved_tsa_is_playing)) != 0 ||
+        memcmp(image + RVA_TSA_SET_PLAYING, saved_tsa_set_playing,
+            5u) == 0 ||
+        memcmp(image + RVA_TSA_SET_PLAYING + 5u,
+            saved_tsa_set_playing + 5u,
+            sizeof(saved_tsa_set_playing) - 5u) != 0 ||
+        !lifecycle_hero_identity_relocations_match(image)) {
+        fputs("FAIL: Talos lifecycle install did not own every native edge\n",
+            stderr);
+        ++*failures;
+    }
+    if (!SudekiMpTalosNativeLifecycleGetSnapshot(&snapshot) ||
+        snapshot.installed == 0u ||
+        snapshot.native_passthrough_required == 0u ||
+        snapshot.mutation_supported != 0u) {
+        fputs("FAIL: Talos lifecycle installed snapshot is not inert passthrough\n",
+            stderr);
+        ++*failures;
+    }
+    SudekiMpUninstallTalosNativeLifecycleTrace();
+    if (*call_slot != native_call || *scene_slot != native_scene ||
+        memcmp(image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL,
+            saved_constructor_call, sizeof(saved_constructor_call)) != 0 ||
+        memcmp(image + RVA_KAZEL_GROUP_ADD_CALL - 10u,
+            saved_kazel_group_add_window,
+            sizeof(saved_kazel_group_add_window)) != 0 ||
+        !lifecycle_kazel_seams_match(image, TRUE) ||
+        memcmp(image + RVA_DELETE_PC, saved_delete_pc,
+            sizeof(saved_delete_pc)) != 0 ||
+        memcmp(image + RVA_REMOVE_ALL_PLAYERS, saved_remove_all_players,
+            sizeof(saved_remove_all_players)) != 0 ||
+        memcmp(image + RVA_FORMATION_POP_MEMBERS,
+            saved_formation_pop_members,
+            sizeof(saved_formation_pop_members)) != 0 ||
+        memcmp(image + RVA_TSA_IS_PLAYING, saved_tsa_is_playing,
+            sizeof(saved_tsa_is_playing)) != 0 ||
+        memcmp(image + RVA_TSA_SET_PLAYING, saved_tsa_set_playing,
+            sizeof(saved_tsa_set_playing)) != 0 ||
+        !lifecycle_hero_identity_relocations_match(image)) {
+        fputs("FAIL: Talos lifecycle uninstall did not exactly restore every seam\n",
+            stderr);
+        ++*failures;
+    }
+
+    for (index = 0u;
+            index < sizeof(corrupt_rvas) / sizeof(corrupt_rvas[0]);
+            ++index) {
+        uint8_t saved_byte = image[corrupt_rvas[index]];
+
+        image[corrupt_rvas[index]] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallTalosNativeLifecycleTrace((HMODULE)image, TRUE) ||
+            GetLastError() != ERROR_BAD_EXE_FORMAT) {
+            fprintf(stderr,
+                "FAIL: Talos lifecycle accepted a mismatched %s\n",
+                corrupt_names[index]);
+            ++*failures;
+            SudekiMpUninstallTalosNativeLifecycleTrace();
+        }
+        image[corrupt_rvas[index]] = saved_byte;
+        if (*call_slot != native_call || *scene_slot != native_scene ||
+            memcmp(image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL,
+                saved_constructor_call,
+                sizeof(saved_constructor_call)) != 0 ||
+            memcmp(image + RVA_KAZEL_GROUP_ADD_CALL - 10u,
+                saved_kazel_group_add_window,
+                sizeof(saved_kazel_group_add_window)) != 0 ||
+            !lifecycle_kazel_seams_match(image, TRUE) ||
+            memcmp(image + RVA_DELETE_PC, saved_delete_pc,
+                sizeof(saved_delete_pc)) != 0 ||
+            memcmp(image + RVA_REMOVE_ALL_PLAYERS,
+                saved_remove_all_players,
+                sizeof(saved_remove_all_players)) != 0 ||
+            memcmp(image + RVA_FORMATION_POP_MEMBERS,
+                saved_formation_pop_members,
+                sizeof(saved_formation_pop_members)) != 0 ||
+            memcmp(image + RVA_TSA_IS_PLAYING, saved_tsa_is_playing,
+                sizeof(saved_tsa_is_playing)) != 0 ||
+            memcmp(image + RVA_TSA_SET_PLAYING, saved_tsa_set_playing,
+                sizeof(saved_tsa_set_playing)) != 0 ||
+            !lifecycle_hero_identity_relocations_match(image)) {
+            fprintf(stderr,
+                "FAIL: Talos lifecycle %s rejection changed a native seam\n",
+                corrupt_names[index]);
+            ++*failures;
+        }
+    }
+
+    *call_slot = image + RVA_SCRIPT_METHOD_OPCODE;
+    SetLastError(ERROR_SUCCESS);
+    if (SudekiMpInstallTalosNativeLifecycleTrace((HMODULE)image, TRUE) ||
+        GetLastError() != ERROR_BUSY) {
+        fputs("FAIL: Talos lifecycle did not reject a pre-owned opcode-27 slot\n",
+            stderr);
+        ++*failures;
+        SudekiMpUninstallTalosNativeLifecycleTrace();
+    }
+    if (*call_slot != image + RVA_SCRIPT_METHOD_OPCODE ||
+        *scene_slot != native_scene ||
+        memcmp(image + RVA_SCRIPT_SCENE_TASK_CONSTRUCTOR_CALL,
+            saved_constructor_call, sizeof(saved_constructor_call)) != 0 ||
+        memcmp(image + RVA_KAZEL_GROUP_ADD_CALL - 10u,
+            saved_kazel_group_add_window,
+            sizeof(saved_kazel_group_add_window)) != 0 ||
+        !lifecycle_kazel_seams_match(image, TRUE) ||
+        memcmp(image + RVA_DELETE_PC, saved_delete_pc,
+            sizeof(saved_delete_pc)) != 0 ||
+        memcmp(image + RVA_REMOVE_ALL_PLAYERS, saved_remove_all_players,
+            sizeof(saved_remove_all_players)) != 0 ||
+        memcmp(image + RVA_FORMATION_POP_MEMBERS,
+            saved_formation_pop_members,
+            sizeof(saved_formation_pop_members)) != 0 ||
+        memcmp(image + RVA_TSA_IS_PLAYING, saved_tsa_is_playing,
+            sizeof(saved_tsa_is_playing)) != 0 ||
+        memcmp(image + RVA_TSA_SET_PLAYING, saved_tsa_set_playing,
+            sizeof(saved_tsa_set_playing)) != 0 ||
+        !lifecycle_hero_identity_relocations_match(image)) {
+        fputs("FAIL: Talos lifecycle busy rejection changed a native seam\n",
+            stderr);
+        ++*failures;
+    }
+    *call_slot = native_call;
+    memcpy(image + RVA_REMOVE_ALL_PLAYERS + 1u,
+        &original_remove_all_players_global,
+        sizeof(original_remove_all_players_global));
+    memcpy(image + RVA_FORMATION_POP_MEMBERS + 1u,
+        &original_formation_pop_members_global,
+        sizeof(original_formation_pop_members_global));
+    memcpy(image + RVA_TSA_IS_PLAYING + 1u,
+        &original_tsa_is_playing_global,
+        sizeof(original_tsa_is_playing_global));
+    memcpy(image + RVA_TSA_SET_PLAYING, original_tsa_set_playing,
+        sizeof(original_tsa_set_playing));
+    memcpy(image + RVA_KAZEL_GROUP_ADD_CALL - 5u,
+        &original_kazel_active_group_global,
+        sizeof(original_kazel_active_group_global));
+    memcpy(image + RVA_AI_LISTENER_VTABLE + 0x18u,
+        &original_ai_listener_add, sizeof(original_ai_listener_add));
+    restore_lifecycle_hero_identity(image, hero_relocation_backups);
+}
+
 int wmain(int argc, wchar_t **argv) {
     uint8_t *file;
     uint8_t *image;
@@ -1201,6 +2281,8 @@ int wmain(int argc, wchar_t **argv) {
     BOOL shared_modal_recovery_pending;
     unsigned int roster_player_one_type;
     unsigned int roster_player_two_type;
+    int player_two_character_marker = 0;
+    int other_character_marker = 0;
     uint8_t minimap_snapshot_call_original[5];
     const UINT second_player_skill_keys[4] = {
         VK_F1, VK_F2, VK_F3, VK_F4
@@ -1208,6 +2290,86 @@ int wmain(int argc, wchar_t **argv) {
     static const uint8_t set_render_camera_original[] = {
         0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8
     };
+
+    if (!SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+            TRUE, FALSE, FALSE) ||
+        !SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+            TRUE, TRUE, TRUE) ||
+        SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+            FALSE, FALSE, TRUE) ||
+        SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+            TRUE, TRUE, FALSE)) {
+        fputs("FAIL: split runtime authorization policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            FALSE, FALSE, FALSE, NULL, NULL) ||
+        !SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            TRUE, TRUE, TRUE,
+            &player_two_character_marker,
+            &player_two_character_marker) ||
+        SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            TRUE, FALSE, TRUE,
+            &player_two_character_marker,
+            &player_two_character_marker) ||
+        SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            TRUE, TRUE, FALSE,
+            &player_two_character_marker,
+            &player_two_character_marker) ||
+        SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            TRUE, TRUE, TRUE, NULL, NULL) ||
+        SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+            TRUE, TRUE, TRUE,
+            &player_two_character_marker,
+            &other_character_marker)) {
+        fputs("FAIL: external Player 2 lease identity policy\n", stderr);
+        ++failures;
+    }
+    split_runtime_authorization_result = FALSE;
+    SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
+        split_runtime_authorization_query);
+    SetLastError(0x1234u);
+    if (SudekiMpSplitScreenRuntimeAuthorized() ||
+        GetLastError() != 0x1234u) {
+        fputs("FAIL: false split runtime authorization query or LastError\n",
+            stderr);
+        ++failures;
+    }
+    split_runtime_authorization_result = TRUE;
+    SetLastError(0x5678u);
+    if (!SudekiMpSplitScreenRuntimeAuthorized() ||
+        GetLastError() != 0x5678u) {
+        fputs("FAIL: true split runtime authorization query or LastError\n",
+            stderr);
+        ++failures;
+    }
+    SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
+
+    if (!SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            1, 0u, 0, 1u, FALSE) ||
+        !SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            1, 0u, 0, 0u, TRUE) ||
+        !SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            2, 0u, 1, 0u, FALSE) ||
+        !SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            3, 0u, 2, 0u, FALSE) ||
+        !SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            INT16_MAX, 0u, INT16_MAX - 1, 0u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            0, 0u, 0, 1u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            1, 1u, 0, 1u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            2, 0u, 0, 1u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            2, 0u, 1, 1u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            1, 0u, 0, 0u, FALSE) ||
+        SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
+            1, 0u, 0, 1u, TRUE)) {
+        fputs("FAIL: AI lease release transition policy\n", stderr);
+        ++failures;
+    }
 
     if (argc != 2) {
         fwprintf(stderr, L"usage: SudekiMP.SkillTraceImageTest.exe SUDEKI.exe\n");
@@ -2180,6 +3342,8 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_SCRIPT_CALL_OPCODE;
     *(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) =
         image + RVA_SCRIPT_METHOD_OPCODE;
+    *(void **)(image + RVA_SCRIPT_SCENE_OPCODE_SLOT) =
+        image + RVA_SCRIPT_SCENE_OPCODE;
     *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) =
         image + RVA_CHARACTER_INPUT_HANDLER;
     *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) =
@@ -2311,6 +3475,7 @@ int wmain(int argc, wchar_t **argv) {
 
     check_blacksmith_ui_adapter_exact_image(image, &failures);
     check_blacksmith_roster_actor_identity_policy(&failures);
+    check_adaptive_seat_activation_policy(&failures);
 
     {
         uint8_t saved_blacksmith_signature =
@@ -2369,6 +3534,7 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
     test_zone_transition_exact_image(image, &failures);
+    test_talos_native_lifecycle_exact_image(image, &failures);
     if (failures != 0) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
@@ -2425,6 +3591,737 @@ int wmain(int argc, wchar_t **argv) {
         image[RVA_COLLISION_DAMAGE] != 0xe9u) {
         fputs("FAIL: Talos defense inline hooks were not installed\n", stderr);
         ++failures;
+    }
+    {
+        uint8_t controller_update_original[16];
+        char observer_owner_one;
+        char observer_owner_two;
+        unsigned int feature;
+        BOOL service_installed;
+        TestControllerUpdateFunction installed_update = NULL;
+        void *installed_update_value = NULL;
+        uint64_t first_dispatch_serial = 0u;
+        uint32_t first_registry_generation = 0u;
+
+        memcpy(
+            controller_update_original,
+            image + RVA_CONTROLLER_UPDATE,
+            sizeof(controller_update_original)
+        );
+        image[RVA_CONTROLLER_UPDATE + 15u] ^= 0xffu;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 0u, 0u) ||
+            GetLastError() != ERROR_INVALID_DATA) {
+            fputs("FAIL: service-only control hook accepted a mismatched exact controller entry\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        }
+        memcpy(
+            image + RVA_CONTROLLER_UPDATE,
+            controller_update_original,
+            sizeof(controller_update_original)
+        );
+        for (feature = 1u; feature <= 8u; ++feature) {
+            SetLastError(ERROR_SUCCESS);
+            if (install_control_separation_profile(image, 0u, feature) ||
+                GetLastError() != ERROR_INVALID_PARAMETER) {
+                fprintf(stderr,
+                    "FAIL: zero-key control service accepted enabled feature %u (error=%lu)\n",
+                    feature,
+                    (unsigned long)GetLastError());
+                ++failures;
+                SudekiMpUninstallControlSeparation();
+            }
+            if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                    image + RVA_CONTROLLER_UPDATE) {
+                fputs("FAIL: rejected zero-key control profile changed the controller slot\n",
+                    stderr);
+                ++failures;
+                SudekiMpUninstallControlSeparation();
+            }
+        }
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpControlSeparationRegisterUpdateObserver(
+                NULL, service_update_observer_one) ||
+            GetLastError() != ERROR_INVALID_PARAMETER) {
+            fputs("FAIL: control observer registry accepted a null owner\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                &observer_owner_one, service_update_observer_one) ||
+            !SudekiMpControlSeparationRegisterUpdateObserver(
+                &observer_owner_one, service_update_observer_one)) {
+            fputs("FAIL: owned control observer registration was not idempotent\n",
+                stderr);
+            ++failures;
+        }
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpControlSeparationRegisterUpdateObserver(
+                &observer_owner_one, service_update_observer_replacement) ||
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            fputs("FAIL: control observer owner was silently replaced\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                &observer_owner_two, service_update_observer_two)) {
+            fputs("FAIL: second owned control observer was rejected\n", stderr);
+            ++failures;
+        }
+        service_installed = install_control_separation_profile(image, 0u, 0u);
+        if (!service_installed) {
+            fprintf(stderr,
+                "FAIL: exact service-only control hook was rejected (error=%lu)\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        } else {
+            TestControllerUpdateFunction update;
+
+            installed_update_value = *(void **)(
+                image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+            update = (TestControllerUpdateFunction)installed_update_value;
+            installed_update = update;
+            if (installed_update_value == image + RVA_CONTROLLER_UPDATE) {
+                fputs("FAIL: service-only control hook did not redirect the controller slot\n",
+                    stderr);
+                ++failures;
+            }
+            SetLastError(ERROR_SUCCESS);
+            if (install_control_separation_profile(image, 'J', 0u) ||
+                GetLastError() != ERROR_ALREADY_EXISTS ||
+                *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                    installed_update_value ||
+                memcmp(
+                    image + RVA_CONTROLLER_UPDATE,
+                    controller_update_original,
+                    sizeof(controller_update_original)) != 0) {
+                fputs("FAIL: duplicate normal install mutated the live service hook or native entry\n",
+                    stderr);
+                ++failures;
+            }
+            service_update_original_calls = 0u;
+            service_update_observer_one_calls = 0u;
+            service_update_observer_two_calls = 0u;
+            service_update_sequence = 0u;
+            service_update_order_failed = FALSE;
+            service_update_context_failed = FALSE;
+            service_update_expect_observer_one = TRUE;
+            reset_service_update_witnesses();
+            service_update_expected_controller =
+                (void *)(uintptr_t)0x11111111u;
+            service_update_expected_data =
+                (void *)(uintptr_t)0x22222222u;
+            service_update_self_unregister_owner = &observer_owner_one;
+            point_relative_jump(
+                image + RVA_CONTROLLER_UPDATE,
+                (const uint8_t *)service_update_original_stub
+            );
+            update(
+                (void *)service_update_expected_controller,
+                (void *)service_update_expected_data
+            );
+            if (service_update_original_calls != 1u ||
+                service_update_observer_one_calls != 1u ||
+                service_update_observer_two_calls != 1u ||
+                service_update_sequence != 3u ||
+                service_update_order_failed || service_update_context_failed ||
+                service_update_witness_count != 2u ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[0],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, TRUE, TRUE, TRUE,
+                    TRUE, TRUE) ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[1],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, FALSE, TRUE, TRUE,
+                    TRUE, TRUE) ||
+                service_update_witnesses[0].dispatch_serial !=
+                    service_update_witnesses[1].dispatch_serial ||
+                service_update_witnesses[0].observer_registry_generation !=
+                    service_update_witnesses[1].observer_registry_generation ||
+                service_update_observer_entry_errors[0] != 0x1234u ||
+                service_update_observer_entry_errors[1] != 0x1234u ||
+                !service_update_witness_revalidated[0] ||
+                service_update_witness_revalidated_after_mutation ||
+                service_update_witness_revalidated[1] ||
+                GetLastError() != 0x1234u) {
+                fputs("FAIL: service-only control dispatch did not preserve native context, exact witness, and original-once then owned-observers order\n",
+                    stderr);
+                ++failures;
+            }
+            if (service_update_witness_count == 2u) {
+                first_dispatch_serial =
+                    service_update_witnesses[0].dispatch_serial;
+                first_registry_generation =
+                    service_update_witnesses[0]
+                        .observer_registry_generation;
+            }
+            service_update_sequence = 0u;
+            service_update_order_failed = FALSE;
+            service_update_context_failed = FALSE;
+            service_update_expect_observer_one = FALSE;
+            reset_service_update_witnesses();
+            service_update_expected_controller =
+                (void *)(uintptr_t)0x33333333u;
+            service_update_expected_data =
+                (void *)(uintptr_t)0x44444444u;
+            service_update_self_unregister_owner = NULL;
+            update(
+                (void *)service_update_expected_controller,
+                (void *)service_update_expected_data
+            );
+            if (service_update_original_calls != 2u ||
+                service_update_observer_one_calls != 1u ||
+                service_update_observer_two_calls != 2u ||
+                service_update_sequence != 2u ||
+                service_update_order_failed || service_update_context_failed ||
+                service_update_witness_count != 1u ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[0],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 1u, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                    TRUE, TRUE) ||
+                service_update_witnesses[0].dispatch_serial ==
+                    first_dispatch_serial ||
+                service_update_witnesses[0].observer_registry_generation ==
+                    first_registry_generation ||
+                service_update_observer_entry_errors[0] != 0x1234u ||
+                !service_update_witness_revalidated[0] ||
+                GetLastError() != 0x1234u) {
+                fputs("FAIL: self-unregistered control observer ran later or registry witness did not advance\n",
+                    stderr);
+                ++failures;
+            }
+            SetLastError(0x2468u);
+            if (service_update_witness_count == 1u &&
+                (SudekiMpControlSeparationUpdateDispatchWitnessStillExact(
+                    &service_update_witnesses[0]) ||
+                 GetLastError() != 0x2468u)) {
+                fputs("FAIL: retained control witness revalidated outside its borrowed callback lifetime\n",
+                    stderr);
+                ++failures;
+            }
+            memcpy(
+                image + RVA_CONTROLLER_UPDATE,
+                controller_update_original,
+                sizeof(controller_update_original)
+            );
+            SetLastError(ERROR_SUCCESS);
+            if (SudekiMpControlSeparationRequestPlayerTwo(TRUE) ||
+                GetLastError() != ERROR_INVALID_STATE) {
+                fputs("FAIL: service-only control profile accepted a Player 2 request\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        if (!SudekiMpControlSeparationUnregisterUpdateObserver(
+                &observer_owner_one) ||
+            !SudekiMpControlSeparationUnregisterUpdateObserver(
+                &observer_owner_one)) {
+            fputs("FAIL: owned control observer removal was not idempotent\n",
+                stderr);
+            ++failures;
+        }
+        if (service_installed) {
+            void **controller_slot = (void **)(
+                image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+            void *foreign_controller_owner =
+                image + RVA_CHARACTER_INPUT_HANDLER;
+
+            if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                    &observer_owner_one, service_update_observer_one)) {
+                fputs("FAIL: control observer could not be restored for teardown ownership test\n",
+                    stderr);
+                ++failures;
+            }
+            *controller_slot = foreign_controller_owner;
+            SetLastError(ERROR_SUCCESS);
+            SudekiMpUninstallControlSeparation();
+            if (GetLastError() != ERROR_BUSY ||
+                *controller_slot != foreign_controller_owner) {
+                fputs("FAIL: control teardown overwrote a foreign controller-slot owner\n",
+                    stderr);
+                ++failures;
+            }
+
+            /* The still-live wrapper must expose that its pointer-hook record
+             * remains owned while the vtable slot itself has been replaced.
+             * A direct stale invocation is observable, but cannot claim exact
+             * service-only dispatch authority. */
+            point_relative_jump(
+                image + RVA_CONTROLLER_UPDATE,
+                (const uint8_t *)service_update_original_stub
+            );
+            service_update_original_calls = 0u;
+            service_update_observer_one_calls = 0u;
+            service_update_observer_two_calls = 0u;
+            service_update_sequence = 0u;
+            service_update_order_failed = FALSE;
+            service_update_context_failed = FALSE;
+            service_update_expect_observer_one = TRUE;
+            service_update_expected_controller =
+                (void *)(uintptr_t)0x55555555u;
+            service_update_expected_data =
+                (void *)(uintptr_t)0x66666666u;
+            service_update_self_unregister_owner = NULL;
+            reset_service_update_witnesses();
+            installed_update(
+                (void *)service_update_expected_controller,
+                (void *)service_update_expected_data
+            );
+            if (service_update_original_calls != 1u ||
+                service_update_observer_one_calls != 1u ||
+                service_update_observer_two_calls != 1u ||
+                service_update_sequence != 3u ||
+                service_update_order_failed || service_update_context_failed ||
+                service_update_witness_count != 2u ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[0],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, TRUE, TRUE, FALSE,
+                    FALSE, FALSE) ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[1],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, TRUE, TRUE, FALSE,
+                    FALSE, FALSE) ||
+                service_update_witnesses[0].dispatch_serial !=
+                    service_update_witnesses[1].dispatch_serial ||
+                service_update_observer_entry_errors[0] != 0x1234u ||
+                service_update_observer_entry_errors[1] != 0x1234u ||
+                service_update_witness_revalidated[0] ||
+                service_update_witness_revalidated[1] ||
+                GetLastError() != 0x1234u) {
+                fputs("FAIL: foreign controller slot retained or forged exact service dispatch authority\n",
+                    stderr);
+                ++failures;
+            }
+
+            /* Return slot ownership and call the still-installed wrapper.
+             * Failed teardown must preserve both the native callback and its
+             * observer registry until a later successful retry. */
+            *controller_slot = installed_update_value;
+            service_update_original_calls = 0u;
+            service_update_observer_one_calls = 0u;
+            service_update_observer_two_calls = 0u;
+            service_update_sequence = 0u;
+            service_update_order_failed = FALSE;
+            service_update_context_failed = FALSE;
+            service_update_expect_observer_one = TRUE;
+            service_update_expected_controller =
+                (void *)(uintptr_t)0x77777777u;
+            service_update_expected_data =
+                (void *)(uintptr_t)0x88888888u;
+            reset_service_update_witnesses();
+            installed_update(
+                (void *)service_update_expected_controller,
+                (void *)service_update_expected_data
+            );
+            if (service_update_original_calls != 1u ||
+                service_update_observer_one_calls != 1u ||
+                service_update_observer_two_calls != 1u ||
+                service_update_sequence != 3u ||
+                service_update_order_failed || service_update_context_failed ||
+                service_update_witness_count != 2u ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[0],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, TRUE, TRUE, TRUE,
+                    TRUE, TRUE) ||
+                !service_update_witness_matches(
+                    &service_update_witnesses[1],
+                    SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                    1u, 2u, TRUE, TRUE, FALSE, TRUE, TRUE, TRUE,
+                    TRUE, TRUE) ||
+                service_update_witnesses[0].dispatch_serial !=
+                    service_update_witnesses[1].dispatch_serial ||
+                service_update_observer_entry_errors[0] != 0x1234u ||
+                service_update_observer_entry_errors[1] != 0x1234u ||
+                !service_update_witness_revalidated[0] ||
+                !service_update_witness_revalidated[1] ||
+                GetLastError() != 0x1234u) {
+                fputs("FAIL: failed control teardown cleared live wrapper state or exact witness\n",
+                    stderr);
+                ++failures;
+            }
+            memcpy(
+                image + RVA_CONTROLLER_UPDATE,
+                controller_update_original,
+                sizeof(controller_update_original)
+            );
+        }
+        SudekiMpUninstallControlSeparation();
+        if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                image + RVA_CONTROLLER_UPDATE) {
+            fputs("FAIL: service-only control hook did not restore the controller slot\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                &observer_owner_two, service_update_observer_replacement)) {
+            fputs("FAIL: control teardown did not clear owned observers after slot restoration\n",
+                stderr);
+            ++failures;
+        }
+        (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+            &observer_owner_two);
+
+        {
+            char normal_observer_owner;
+            uint8_t controller[0x24cu];
+            uint32_t update_data = 0x13572468u;
+            TestControllerUpdateFunction normal_update;
+
+            ZeroMemory(controller, sizeof(controller));
+            if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                    &normal_observer_owner,
+                    service_update_witness_capture_observer) ||
+                !install_control_separation_profile(image, 'J', 0u)) {
+                fprintf(stderr,
+                    "FAIL: normal control witness fixture could not install (error=%lu)\n",
+                    (unsigned long)GetLastError());
+                ++failures;
+                SudekiMpUninstallControlSeparation();
+            } else {
+                normal_update = (TestControllerUpdateFunction)*(void **)(
+                    image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+                SetLastError(ERROR_SUCCESS);
+                if (install_control_separation_profile(image, 0u, 0u) ||
+                    GetLastError() != ERROR_ALREADY_EXISTS ||
+                    *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                        (void *)normal_update ||
+                    memcmp(
+                        image + RVA_CONTROLLER_UPDATE,
+                        controller_update_original,
+                        sizeof(controller_update_original)) != 0) {
+                    fputs("FAIL: duplicate service install mutated the live normal hook or native entry\n",
+                        stderr);
+                    ++failures;
+                }
+                point_relative_jump(
+                    image + RVA_CONTROLLER_UPDATE,
+                    (const uint8_t *)service_update_original_stub
+                );
+                SudekiMpInputBridgeSetGameplaySuppressed(FALSE);
+                service_update_original_calls = 0u;
+                service_update_context_failed = FALSE;
+                service_update_expected_controller = controller;
+                service_update_expected_data = &update_data;
+                reset_service_update_witnesses();
+                normal_update(controller, &update_data);
+                if (service_update_original_calls != 1u ||
+                    service_update_context_failed ||
+                    service_update_witness_count != 1u ||
+                    !service_update_witness_matches(
+                        &service_update_witnesses[0],
+                        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL,
+                        1u, 1u, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                        TRUE, FALSE) ||
+                    service_update_observer_entry_errors[0] != 0x1234u ||
+                    !service_update_witness_revalidated[0] ||
+                    GetLastError() != 0x1234u) {
+                    fputs("FAIL: normal post-original notify forged or lost its dispatch witness\n",
+                        stderr);
+                    ++failures;
+                }
+
+                SudekiMpInputBridgeSetGameplaySuppressed(TRUE);
+                service_update_context_failed = FALSE;
+                reset_service_update_witnesses();
+                normal_update(controller, &update_data);
+                if (service_update_original_calls != 1u ||
+                    service_update_context_failed ||
+                    service_update_witness_count != 1u ||
+                    !service_update_witness_matches(
+                        &service_update_witnesses[0],
+                        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_PRE_ORIGINAL,
+                        0u, 1u, FALSE, FALSE, TRUE, TRUE, TRUE, TRUE,
+                        TRUE, FALSE) ||
+                    !service_update_witness_revalidated[0]) {
+                    fputs("FAIL: normal pre-original notify forged service-only post-original authority\n",
+                        stderr);
+                    ++failures;
+                }
+                SudekiMpInputBridgeSetGameplaySuppressed(FALSE);
+                memcpy(
+                    image + RVA_CONTROLLER_UPDATE,
+                    controller_update_original,
+                    sizeof(controller_update_original)
+                );
+                (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+                    &normal_observer_owner);
+                SudekiMpUninstallControlSeparation();
+                if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                        image + RVA_CONTROLLER_UPDATE) {
+                    fputs("FAIL: normal control witness fixture did not restore the controller slot\n",
+                        stderr);
+                    ++failures;
+                }
+            }
+        }
+
+        {
+            char reentrant_observer_owner;
+            TestControllerUpdateFunction reentrant_update;
+
+            if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                    &reentrant_observer_owner,
+                    service_update_witness_capture_observer) ||
+                !install_control_separation_profile(image, 0u, 0u)) {
+                fprintf(stderr,
+                    "FAIL: reentrant control witness fixture could not install (error=%lu)\n",
+                    (unsigned long)GetLastError());
+                ++failures;
+                SudekiMpUninstallControlSeparation();
+            } else {
+                reentrant_update = (TestControllerUpdateFunction)*(void **)(
+                    image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+                point_relative_jump(
+                    image + RVA_CONTROLLER_UPDATE,
+                    (const uint8_t *)service_update_reentrant_original_stub
+                );
+                service_update_reentrant_target = reentrant_update;
+                service_update_reentrant_depth = 0u;
+                service_update_original_calls = 0u;
+                service_update_context_failed = FALSE;
+                service_update_expected_controller =
+                    (void *)(uintptr_t)0x99999999u;
+                service_update_expected_data =
+                    (void *)(uintptr_t)0xaaaaaaaau;
+                reset_service_update_witnesses();
+                reentrant_update(
+                    (void *)service_update_expected_controller,
+                    (void *)service_update_expected_data
+                );
+                if (service_update_original_calls != 2u ||
+                    service_update_context_failed ||
+                    service_update_witness_count != 2u ||
+                    service_update_witnesses[0].dispatch_serial == 0u ||
+                    service_update_witnesses[1].dispatch_serial == 0u ||
+                    service_update_witnesses[0].dispatch_serial ==
+                        service_update_witnesses[1].dispatch_serial ||
+                    service_update_witnesses[0].native_thread_id !=
+                        GetCurrentThreadId() ||
+                    service_update_witnesses[1].native_thread_id !=
+                        GetCurrentThreadId() ||
+                    service_update_witnesses[0].outer_update_depth != 2u ||
+                    service_update_witnesses[0].active_dispatch_count != 2u ||
+                    service_update_witnesses[1].outer_update_depth != 1u ||
+                    service_update_witnesses[1].active_dispatch_count != 1u ||
+                    service_update_witnesses[0].original_call_count != 1u ||
+                    service_update_witnesses[1].original_call_count != 1u ||
+                    service_update_witnesses[0].observer_snapshot_count != 1u ||
+                    service_update_witnesses[1].observer_snapshot_count != 1u ||
+                    service_update_witnesses[0].observer_registry_generation !=
+                        service_update_witnesses[1]
+                            .observer_registry_generation ||
+                    service_update_witnesses[0].hook_owned_exact != 1u ||
+                    service_update_witnesses[1].hook_owned_exact != 1u ||
+                    service_update_witnesses[0].slot_owned_exact != 1u ||
+                    service_update_witnesses[1].slot_owned_exact != 1u ||
+                    service_update_witnesses[0].service_only != 1u ||
+                    service_update_witnesses[1].service_only != 1u ||
+                    service_update_witnesses[0].post_original != 1u ||
+                    service_update_witnesses[1].post_original != 1u ||
+                    service_update_witnesses[0].source !=
+                        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL ||
+                    service_update_witnesses[1].source !=
+                        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL ||
+                    service_update_witnesses[0].source_exact != 0u ||
+                    service_update_witnesses[1].source_exact != 0u ||
+                    service_update_witnesses[0]
+                        .service_post_original_exact != 0u ||
+                    service_update_witnesses[1]
+                        .service_post_original_exact != 0u ||
+                    service_update_witnesses[0].sole_observer != 1u ||
+                    service_update_witnesses[1].sole_observer != 1u ||
+                    service_update_witnesses[0]
+                        .registry_generation_stable != 1u ||
+                    service_update_witnesses[1]
+                        .registry_generation_stable != 1u ||
+                    service_update_observer_entry_errors[0] != 0x1234u ||
+                    service_update_observer_entry_errors[1] != 0x1234u ||
+                    service_update_witness_revalidated[0] ||
+                    service_update_witness_revalidated[1] ||
+                    GetLastError() != 0x1234u) {
+                    fputs("FAIL: reentrant controller updates retained exact dispatch authority\n",
+                        stderr);
+                    ++failures;
+                }
+                service_update_reentrant_target = NULL;
+                memcpy(
+                    image + RVA_CONTROLLER_UPDATE,
+                    controller_update_original,
+                    sizeof(controller_update_original)
+                );
+                (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+                    &reentrant_observer_owner);
+                SudekiMpUninstallControlSeparation();
+            }
+        }
+
+        {
+            char teardown_observer_owner;
+            TestControllerUpdateFunction fetched_update;
+
+            if (!SudekiMpControlSeparationRegisterUpdateObserver(
+                    &teardown_observer_owner,
+                    service_update_witness_capture_observer) ||
+                !install_control_separation_profile(image, 0u, 0u)) {
+                fprintf(stderr,
+                    "FAIL: in-flight control teardown fixture could not install (error=%lu)\n",
+                    (unsigned long)GetLastError());
+                ++failures;
+                SudekiMpUninstallControlSeparation();
+            } else {
+                fetched_update = (TestControllerUpdateFunction)*(void **)(
+                    image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+                point_relative_jump(
+                    image + RVA_CONTROLLER_UPDATE,
+                    (const uint8_t *)service_update_original_stub
+                );
+                service_update_original_calls = 0u;
+                service_update_context_failed = FALSE;
+                service_update_expected_controller =
+                    (void *)(uintptr_t)0xbbbbbbbbu;
+                service_update_expected_data =
+                    (void *)(uintptr_t)0xccccccccu;
+                reset_service_update_witnesses();
+                service_update_request_uninstall = TRUE;
+                fetched_update(
+                    (void *)service_update_expected_controller,
+                    (void *)service_update_expected_data
+                );
+                service_update_request_uninstall = FALSE;
+                if (service_update_original_calls != 1u ||
+                    service_update_context_failed ||
+                    service_update_witness_count != 1u ||
+                    service_update_uninstall_error != ERROR_BUSY ||
+                    !service_update_revalidated_after_uninstall_attempt ||
+                    *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                        (void *)fetched_update ||
+                    !service_update_witness_matches(
+                        &service_update_witnesses[0],
+                        SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
+                        1u, 1u, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                        TRUE, TRUE) ||
+                    GetLastError() != 0x1234u) {
+                    fputs("FAIL: in-flight control teardown cleared or weakened the live installation\n",
+                        stderr);
+                    ++failures;
+                }
+
+                reset_service_update_witnesses();
+                fetched_update(
+                    (void *)service_update_expected_controller,
+                    (void *)service_update_expected_data
+                );
+                if (service_update_original_calls != 2u ||
+                    service_update_context_failed ||
+                    service_update_witness_count != 1u ||
+                    !service_update_witness_revalidated[0]) {
+                    fputs("FAIL: observer state did not survive rejected in-flight teardown\n",
+                        stderr);
+                    ++failures;
+                }
+
+                reset_service_update_witnesses();
+                SudekiMpUninstallControlSeparation();
+                if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                        image + RVA_CONTROLLER_UPDATE) {
+                    fputs("FAIL: quiescent retry did not restore the controller slot\n",
+                        stderr);
+                    ++failures;
+                }
+                fetched_update(
+                    (void *)service_update_expected_controller,
+                    (void *)service_update_expected_data
+                );
+                if (service_update_original_calls != 3u ||
+                    service_update_witness_count != 0u ||
+                    GetLastError() != 0x1234u) {
+                    fputs("FAIL: prefetched controller wrapper touched cleared state after teardown\n",
+                        stderr);
+                    ++failures;
+                }
+                memcpy(
+                    image + RVA_CONTROLLER_UPDATE,
+                    controller_update_original,
+                    sizeof(controller_update_original)
+                );
+            }
+        }
+
+        {
+            char disabler_owner;
+            char gated_owner;
+            TestControllerUpdateFunction stale_snapshot_update;
+
+            stale_snapshot_observer_owner = &gated_owner;
+            stale_snapshot_disabler_calls = 0u;
+            stale_snapshot_callback_calls = 0u;
+            stale_snapshot_backing_calls = 0u;
+            service_update_context_failed = FALSE;
+            if (!SudekiMpControlUpdateObserverGateEnable(
+                    &stale_snapshot_observer_gate) ||
+                !SudekiMpControlSeparationRegisterUpdateObserver(
+                    &disabler_owner,
+                    stale_snapshot_disabler_observer) ||
+                !SudekiMpControlSeparationRegisterUpdateObserver(
+                    &gated_owner,
+                    stale_snapshot_gated_observer) ||
+                !install_control_separation_profile(image, 0u, 0u)) {
+                fprintf(stderr,
+                    "FAIL: stale observer snapshot gate fixture could not install (error=%lu)\n",
+                    (unsigned long)GetLastError());
+                ++failures;
+                SudekiMpControlUpdateObserverGateDisable(
+                    &stale_snapshot_observer_gate);
+                SudekiMpControlUpdateObserverGateDrain(
+                    &stale_snapshot_observer_gate);
+                SudekiMpUninstallControlSeparation();
+            } else {
+                stale_snapshot_update =
+                    (TestControllerUpdateFunction)*(void **)(
+                        image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+                point_relative_jump(
+                    image + RVA_CONTROLLER_UPDATE,
+                    (const uint8_t *)service_update_original_stub
+                );
+                service_update_original_calls = 0u;
+                service_update_sequence = 0u;
+                stale_snapshot_update(
+                    (void *)(uintptr_t)0xddddddddu,
+                    (void *)(uintptr_t)0xeeeeeeeeu
+                );
+                if (service_update_original_calls != 1u ||
+                    stale_snapshot_disabler_calls != 1u ||
+                    stale_snapshot_callback_calls != 1u ||
+                    stale_snapshot_backing_calls != 0u ||
+                    InterlockedCompareExchange(
+                        &stale_snapshot_observer_gate.enabled, 0, 0) != 0 ||
+                    InterlockedCompareExchange(
+                        &stale_snapshot_observer_gate.active_entries,
+                        0, 0) != 0 ||
+                    service_update_context_failed ||
+                    GetLastError() != 0x1234u) {
+                    fputs("FAIL: stale snapshotted observer entered disabled backing state\n",
+                        stderr);
+                    ++failures;
+                }
+                (void)SudekiMpControlSeparationUnregisterUpdateObserver(
+                    &disabler_owner);
+                memcpy(
+                    image + RVA_CONTROLLER_UPDATE,
+                    controller_update_original,
+                    sizeof(controller_update_original)
+                );
+                SudekiMpUninstallControlSeparation();
+            }
+        }
     }
     if (!SudekiMpInstallControlSeparation(
             (HMODULE)image,
@@ -3121,6 +5018,11 @@ int wmain(int argc, wchar_t **argv) {
     if (*(void **)(image + RVA_SCRIPT_METHOD_OPCODE_SLOT) !=
         image + RVA_SCRIPT_METHOD_OPCODE) {
         fputs("FAIL: script-method opcode slot was not restored\n", stderr);
+        ++failures;
+    }
+    if (*(void **)(image + RVA_SCRIPT_SCENE_OPCODE_SLOT) !=
+        image + RVA_SCRIPT_SCENE_OPCODE) {
+        fputs("FAIL: script-scene opcode slot was not restored\n", stderr);
         ++failures;
     }
     if (relative_call_target(image + RVA_SCRIPT_METHOD_BINDING_CALL) !=

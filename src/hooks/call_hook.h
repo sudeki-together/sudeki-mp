@@ -20,6 +20,7 @@ typedef struct SudekiMpExportHook {
 typedef struct SudekiMpPointerHook {
     void **slot;
     void *original_value;
+    void *replacement_value;
     BOOL installed;
 } SudekiMpPointerHook;
 

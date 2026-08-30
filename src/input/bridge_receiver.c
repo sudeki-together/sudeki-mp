@@ -3,6 +3,7 @@
 #include <xinput.h>
 
 #include "input/bridge_receiver.h"
+#include "input/local_input_hub.h"
 
 #include "engine/log.h"
 
@@ -266,6 +267,10 @@ void SudekiMpInputBridgeStop(void) {
     }
     xinput_get_state = NULL;
     reset_receiver_state();
+    /* The expanded local-seat bank is opt-in and currently has no production
+     * starter, but it shares the input lifetime. Keep teardown complete before
+     * any future activation path is allowed to reserve P3/P4 resources. */
+    SudekiMpLocalInputHubStop();
 }
 
 BOOL SudekiMpInputBridgePollRaw(SudekiMpInputBridgeState *state) {
@@ -275,6 +280,9 @@ BOOL SudekiMpInputBridgePollRaw(SudekiMpInputBridgeState *state) {
     int received;
     DWORD now;
 
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubPollRaw(1u, state);
+    }
     if (bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT) {
         return poll_xinput_state(state);
     }
@@ -385,6 +393,9 @@ static void neutralize_gameplay_state(SudekiMpInputBridgeState *state) {
 }
 
 BOOL SudekiMpInputBridgePoll(SudekiMpInputBridgeState *state) {
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubPoll(1u, state);
+    }
     if (!SudekiMpInputBridgePollRaw(state)) {
         return FALSE;
     }
@@ -419,10 +430,12 @@ void SudekiMpInputBridgeSetGameplaySuppressed(BOOL suppressed) {
         );
     }
     gameplay_suppressed = requested;
+    SudekiMpLocalInputHubSetGameplaySuppressed(requested);
 }
 
 BOOL SudekiMpInputBridgeGameplaySuppressed(void) {
-    return gameplay_suppressed;
+    return gameplay_suppressed ||
+        SudekiMpLocalInputHubGameplaySuppressed();
 }
 
 unsigned int SudekiMpInputBridgeBoundPort(void) {
@@ -430,15 +443,24 @@ unsigned int SudekiMpInputBridgeBoundPort(void) {
 }
 
 unsigned int SudekiMpInputBridgeXInputSlot(void) {
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubSeatController(1u);
+    }
     return bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT ?
         xinput_slot : XUSER_MAX_COUNT;
 }
 
 BOOL SudekiMpInputBridgeUsesXInput(void) {
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubSeatController(1u) < XUSER_MAX_COUNT;
+    }
     return bridge_transport == SUDEKIMP_INPUT_TRANSPORT_XINPUT;
 }
 
 const void *SudekiMpInputBridgeIdentity(void) {
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubSeatIdentity(1u);
+    }
     if (bridge_transport == SUDEKIMP_INPUT_TRANSPORT_UDP) {
         return bridge_socket == INVALID_SOCKET ? NULL : &bridge_socket;
     }

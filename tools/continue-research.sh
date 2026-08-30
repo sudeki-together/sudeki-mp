@@ -15,10 +15,12 @@ input_device="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
 input_bridge_port="${SUDEKIMP_INPUT_BRIDGE_PORT:-26760}"
 input_bridge_helper="${project_dir}/build/linux/bin/sudekimp-input-bridge"
 input_bridge_log="${project_dir}/build/linux/input-bridge.log"
+supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
+supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
@@ -31,8 +33,12 @@ usage() {
         '  --door-transition-trace Run the co-op profile with passive validated P1 door/OnAction/SOL/temporary-zone tracing. It never opens a vote, delays, or replays a door.' \
         '  --merchant-checkout-trace Run the co-op profile plus passive P1 ShopStart/merchant observation. It never changes shop, inventory, or money.' \
         '  --native-p2-camera-collision-test Add the focused native Exploration camera/obstruction experiment to the complete Tal=P1/Ailish=P2 party-lifecycle profile.' \
-        '  --talos-party-test Load a normal save; after the exact Void four-to-one Tal rebuild, restore the other retail party members natively.' \
-        '  --talos-defense-trace Restore the Talos party and trace real-boss damage, invulnerability, reaction IDs, and knockback sessions.' \
+        '  --talos-party-test RETIRED: its PC_KAZEL-spawn trigger ran before exact Kazel deletion and TSA settle; use the corrected post-movie mode.' \
+        '  --talos-lifecycle-observation Exact-image, one-human, native-passthrough observation of the retail pre-Void lifecycle. It never preserves companions or enables the expanded fight.' \
+        '  --talos-staging-observation Exact-image, one-human, read-only capture of a settled ordinary-world four-hero frame. It makes no membership call and never enters the Void.' \
+        '  --talos-post-movie-party-test Exact-image closed test: let retail delete the companions and Kazel, then restore Ailish/Buki/Elco after the same-session TSA settle; Ailish is Player 2.' \
+        '  --talos-post-movie-dual-camera-test Add split rendering, the Player 2 camera, dual frame caching, and view-relative P2 navigation to the exact post-movie four-hero restore.' \
+        '  --talos-defense-trace Trace real-boss damage, invulnerability, reaction IDs, and knockback sessions without restoring companions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
         '  --zone-traversal-test  Open the F7 world/interior traversal menu on a normal save.' \
         '  --freeroam-camera-test Require LeftCtrl for mouse-Y distance changes outside combat; retain vanilla combat input.' \
@@ -59,8 +65,16 @@ usage() {
         '  --check       Build and verify the executable/DLL without launching the game.'
 }
 
+if [[ "${mode}" == "--talos-party-test" ]]; then
+    printf '%s\n' \
+        'The old Talos party test is retired.' \
+        'It armed on the authored PC_KAZEL spawn before exact Kazel deletion and TSA settle.' \
+        'Use --talos-post-movie-party-test for the corrected exact post-movie boundary.' >&2
+    exit 2
+fi
+
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -73,10 +87,16 @@ case "${mode}" in
 esac
 
 if [[ "${mode}" == "--zone-transition-trace" ||
+      "${mode}" == "--talos-lifecycle-observation" ||
       "${mode}" == "--door-transition-trace" ||
       "${mode}" == "--merchant-checkout-trace" ||
       "${mode}" == "--zone-traversal-test" ]]; then
     export SUDEKIMP_ZONE_TRACE=1
+fi
+if [[ "${mode}" == "--talos-staging-observation" ||
+      "${mode}" == "--talos-post-movie-party-test" ||
+      "${mode}" == "--talos-post-movie-dual-camera-test" ]]; then
+    unset SUDEKIMP_ZONE_TRACE
 fi
 
 if [[ "${mode}" == "--speed-test" || "${mode}" == "--camera-speed-test" ]]; then
@@ -96,6 +116,8 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
     fi
 fi
 if [[ "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--talos-post-movie-party-test" ||
+      "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--door-transition-trace" ||
       "${mode}" == "--merchant-checkout-trace" ||
@@ -140,6 +162,42 @@ if [[ ! -f "${game}" ]]; then
     printf 'Working executable is missing: %s\n' "${game}" >&2
     exit 1
 fi
+if [[ "${mode}" == "--talos-lifecycle-observation" ||
+      "${mode}" == "--talos-staging-observation" ||
+      "${mode}" == "--talos-post-movie-party-test" ||
+      "${mode}" == "--talos-post-movie-dual-camera-test" ]]; then
+    world_asset="$(dirname -- "${game}")/Data/SOLWORLDM.gex"
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        printf '%s\n' 'sha256sum is required for the Talos exact-image gate.' >&2
+        exit 1
+    fi
+    if [[ ! -f "${world_asset}" ]]; then
+        printf 'Required Talos script asset is missing: %s\n' "${world_asset}" >&2
+        exit 1
+    fi
+    game_sha256="$(sha256sum -- "${game}")"
+    game_sha256="${game_sha256%% *}"
+    world_sha256="$(sha256sum -- "${world_asset}")"
+    world_sha256="${world_sha256%% *}"
+    if [[ "${game_sha256}" != "${supported_game_sha256}" ]]; then
+        printf '%s\n' \
+            'Talos exact-image gate refused: unsupported SUDEKI.exe.' \
+            "  expected: ${supported_game_sha256}" \
+            "  actual:   ${game_sha256}" >&2
+        exit 1
+    fi
+    if [[ "${world_sha256}" != "${supported_world_sha256}" ]]; then
+        printf '%s\n' \
+            'Talos exact-image gate refused: unsupported SOLWORLDM.gex.' \
+            "  expected: ${supported_world_sha256}" \
+            "  actual:   ${world_sha256}" >&2
+        exit 1
+    fi
+    printf '%s\n' \
+        'Talos exact-image gate passed.' \
+        "  SUDEKI.exe:    ${game_sha256}" \
+        "  SOLWORLDM.gex: ${world_sha256}"
+fi
 if [[ ! -d "${save_root}" ]]; then
     printf 'Research save directory is missing: %s\n' "${save_root}" >&2
     exit 1
@@ -177,6 +235,170 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 case "${mode}" in
+    --talos-post-movie-party-test)
+        # Closed two-human/four-hero profile. Retail owns every companion and
+        # Kazel delete plus the entire movie/TSA sequence; the DLL restores only
+        # after its exact process-terminal lifecycle ticket is claimable.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^EnableTalosPostMoviePartyRestorePrototype=false$/EnableTalosPostMoviePartyRestorePrototype=true/' \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
+            -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+            -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
+            "${generated_config}"
+        unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableTalosPostMoviePartyRestorePrototype" &&
+                $1 != "EnableControlSeparationPrototype" &&
+                $1 != "EnableSecondPlayerMovementPrototype" &&
+                $1 != "EnableSecondPlayerWeakAttackPrototype" &&
+                $1 != "EnableExternalInputBridgePrototype" { print }
+        ' "${generated_config}")"
+        if [[ -n "${unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableTalosPostMoviePartyRestorePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableControlSeparationPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerWeakAttackPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableExternalInputBridgePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableNativeXInputPlayerTwoPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerCameraRelativeMovementPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableCharacterSwitchTrace=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPartyPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosEncounterPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosLifecycleTrace=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosCompanionStagingObservation=false' "${generated_config}" ||
+           ! grep -Fqx 'EnablePartyAtomicTransitionsPrototype=false' "${generated_config}"; then
+            printf '%s\n' \
+                'Talos post-movie party test refused: generated configuration is not closed.' >&2
+            if [[ -n "${unexpected_enabled}" ]]; then
+                printf '%s\n' "${unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
+    --talos-post-movie-dual-camera-test)
+        # Preserve the exact post-movie four-hero/P2 baseline, then add only
+        # the already-scoped distinct-angle dual-camera compositor path.
+        # The allowlist below keeps every other experiment forcibly disabled.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^EnableTalosPostMoviePartyRestorePrototype=false$/EnableTalosPostMoviePartyRestorePrototype=true/' \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^EnableExternalInputBridgePrototype=false$/EnableExternalInputBridgePrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+            -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
+            "${generated_config}"
+        unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableTalosPostMoviePartyRestorePrototype" &&
+                $1 != "EnableControlSeparationPrototype" &&
+                $1 != "EnableSecondPlayerMovementPrototype" &&
+                $1 != "EnableSecondPlayerCameraRelativeMovementPrototype" &&
+                $1 != "EnableSecondPlayerWeakAttackPrototype" &&
+                $1 != "EnableExternalInputBridgePrototype" &&
+                $1 != "EnableSplitScreenRenderPrototype" &&
+                $1 != "EnableSecondPlayerCameraPrototype" &&
+                $1 != "EnableDualCameraFrameCachePrototype" { print }
+        ' "${generated_config}")"
+        if [[ -n "${unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableTalosPostMoviePartyRestorePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableControlSeparationPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerCameraRelativeMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerWeakAttackPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableExternalInputBridgePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSplitScreenRenderPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerCameraPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableDualCameraFrameCachePrototype=true' "${generated_config}" ||
+           ! grep -Fqx "InputBridgePort=${input_bridge_port}" "${generated_config}" ||
+           ! grep -Fqx 'ToggleSecondPlayerAi=F10' "${generated_config}" ||
+           ! grep -Fqx 'EnableNativeXInputPlayerTwoPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerControllerCameraPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerSeparationGuardPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSharedGroupCameraPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableNativeSecondPlayerCameraCollisionPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSplitScreenRangedModelIsolationPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableRangedQuickSkillPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableRealtimeMultiplayerSkillCombatPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableCharacterSwitchTrace=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPartyPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosEncounterPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosLifecycleTrace=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosCompanionStagingObservation=false' "${generated_config}" ||
+           ! grep -Fqx 'EnablePartyAtomicTransitionsPrototype=false' "${generated_config}"; then
+            printf '%s\n' \
+                'Talos post-movie dual-camera test refused: generated configuration is not the exact closed camera profile.' >&2
+            if [[ -n "${unexpected_enabled}" ]]; then
+                printf '%s\n' "${unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
+    --talos-staging-observation)
+        # Generate the exact closed ordinary-world profile. The observer is an
+        # automatic one-shot immutable capture; no hotkey or native membership
+        # operation exists in this build.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^SkipStartupMovies=.*/SkipStartupMovies=false/' \
+            -e 's/^EnableTalosCompanionStagingObservation=false$/EnableTalosCompanionStagingObservation=true/' \
+            "${generated_config}"
+        unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableTalosCompanionStagingObservation" { print }
+        ' "${generated_config}")"
+        if [[ -n "${unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableTalosCompanionStagingObservation=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPostMoviePartyRestorePrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosLifecycleTrace=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPartyPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosEncounterPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'SkipStartupMovies=false' "${generated_config}"; then
+            printf '%s\n' \
+                'Talos staging observation refused: generated configuration is not closed and inert.' >&2
+            if [[ -n "${unexpected_enabled}" ]]; then
+                printf '%s\n' "${unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
+    --talos-lifecycle-observation)
+        # Make this a closed research profile even if a developer changed a
+        # checked-in default locally. The one trace key is the complete native
+        # integration contract; every gameplay/co-op/skill/merchant mutator is
+        # forced off, and the retail story movie remains available unchanged.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^SkipStartupMovies=.*/SkipStartupMovies=false/' \
+            -e 's/^EnableExpandedTalosLifecycleTrace=false$/EnableExpandedTalosLifecycleTrace=true/' \
+            "${generated_config}"
+        unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableExpandedTalosLifecycleTrace" { print }
+        ' "${generated_config}")"
+        if [[ -n "${unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableExpandedTalosLifecycleTrace=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPostMoviePartyRestorePrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableTalosPartyPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExpandedTalosEncounterPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'SkipStartupMovies=false' "${generated_config}"; then
+            printf '%s\n' \
+                'Talos lifecycle observation refused: generated configuration is not closed and inert.' >&2
+            if [[ -n "${unexpected_enabled}" ]]; then
+                printf '%s\n' "${unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
     --cleanroom|--test-arena|--cafu-testroom)
         sed -i \
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
@@ -260,11 +482,6 @@ case "${mode}" in
                     -e 's/^EnableMerchantCheckoutTracePrototype=false$/EnableMerchantCheckoutTracePrototype=true/' \
                     "${generated_config}"
             fi
-        fi
-        if [[ "${mode}" == "--talos-party-test" ]]; then
-            sed -i \
-                -e 's/^EnableTalosPartyPrototype=false$/EnableTalosPartyPrototype=true/' \
-                "${generated_config}"
         fi
         if [[ "${mode}" == "--talos-defense-trace" ]]; then
             sed -i \
@@ -466,6 +683,7 @@ if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--door-transition-trace" ||
       "${mode}" == "--native-p2-camera-collision-test" ||
+      "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--realtime-skill-coop-test" ]]; then
     antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
@@ -667,7 +885,7 @@ if [[ "${mode}" == "--native-p2-camera-collision-test" ]]; then
         '  Focused native Camera 2 collision test: keep the persisted Co-op profile at Tal=P1 and Ailish=P2, then load the same outdoor roaming save.' \
         '  This mode includes the complete party-lifecycle configuration; only EnableNativeSecondPlayerCameraCollisionPrototype is added.' \
         '  Startup log milestone: split_screen_render_prototype_requested must report native_second_player_camera_collision=true.' \
-        '  Install log milestone: split_screen_render event=install must report native_player_two_camera_collision=named_exploration_state_targeted_to_live_gel_entity_generation_scoped_input_broadcast_suppressed_no_independent_p2_right_stick_native_ready.' \
+        '  Install log milestone: split_screen_render event=install must report native_player_two_camera_collision=named_exploration_state_targeted_via_one_shot_engine_ptrobj_owned_gel_group_ptr_wrapper_no_mod_destructor_no_reuse_generation_scoped_input_broadcast_suppressed_no_independent_p2_right_stick_native_ready.' \
         '  Live log milestones: player_two_native_camera phase=target_verified must be followed by phase=state_verified and then phase=ready for Ailish in ordinary Exploration.' \
         '  Visually confirm Ailish remains centered as she walks, and that walls/terrain push Camera 2 inward instead of letting it pass through the world.' \
         '  Compare Tal on the left at the same wall or tight corner; both cameras should preserve their own character target and native obstruction behavior.' \
@@ -712,6 +930,57 @@ if [[ "${mode}" == "--zone-transition-trace" ]]; then
         '  Press Enter once at the door. The log records EnterZone/SwitchZoneNOW/LoadZone and CWorld::SwitchMainZone before/after.' \
         '  No teleport, combat, door, or level state is changed by this pass.'
 fi
+if [[ "${mode}" == "--talos-lifecycle-observation" ]]; then
+    printf '%s\n' \
+        '  RESEARCH OBSERVER ONLY: no prompt, delete suppression, party carry, HP change, camera lease, input lease, or transition replay is permitted.' \
+        '  Every observed SOL/native operation must pass through once with its original arguments, result, and ordering unchanged.' \
+        '  1. Use one human player and keyboard/mouse only. Do not start the co-op roster or connect a Player 2 input bridge.' \
+        '  2. Load a known save immediately before the final Talos handoff. Confirm Tal leads a native four-hero party.' \
+        '  3. Move Tal once so the normal gameplay state is settled, then trigger the authored final interaction with Tal.' \
+        '  4. Do not skip FMA07. Do not open menus, switch characters, pause, fast-forward, or press controller buttons during the transition.' \
+        '  5. Let retail Sudeki remove Buki, Ailish, and Elco and enter the Void normally. Companion preservation or restoration is a failed run.' \
+        '  6. After Tal reaches a stable playable Void frame, exit normally and preserve SudekiMP.log before repeating the run.' \
+        '  Stop before triggering if the four-hero/Tal-lead baseline is wrong. After the transition starts, never attempt to cancel it; let native Sudeki finish and mark any trace mismatch as a failed observation.' \
+        "  Log: $(dirname -- "${game}")/SudekiMP.log"
+fi
+if [[ "${mode}" == "--talos-staging-observation" ]]; then
+    printf '%s\n' \
+        '  READ-ONLY ORDINARY-WORLD OBSERVER: no GetPC, RemovePlayer, AddPlayer, wrapper destructor, party carry, or Void hook exists.' \
+        '  1. Use one human player and load an ordinary save with Tal leading the native four-hero party.' \
+        '  2. Keep the Sudeki window focused and remain in settled noncombat gameplay; do not enter the final Talos transition.' \
+        '  3. The observer captures automatically after one exact native controller update and becomes inert after the first valid result.' \
+        '  4. Once the log records valid=true, exit normally. A failed observation changes no membership or actor state.' \
+        '  This run does not include FMA07 or the Tal/Kazel movie; it is only the ordinary-world four-hero baseline.' \
+        "  Log: $(dirname -- "${game}")/SudekiMP.log"
+fi
+if [[ "${mode}" == "--talos-post-movie-party-test" ]]; then
+    printf '%s\n' \
+        '  CLOSED LIVE TEST: four heroes maximum. Kazel is Tals shadow half and is never retained as a fifth party member.' \
+        '  1. Use Tal as Player 1 and load the known save immediately before the final Talos handoff.' \
+        '  2. Trigger the authored transition normally. Retail Sudeki must remove Ailish, Buki, and Elco and execute Kazel unchanged.' \
+        '  3. FMA07 is not auto-skipped. Press Escape once during the movie if you want Sudekis native movie skip; do not send synthetic or repeated skip input.' \
+        '  4. Wait for the exact Kazel delete and post-movie TSA settle. Only then does one ticket restore Ailish, Buki, and Elco.' \
+        '  5. Ailish is claimed automatically as Player 2. Use the controller left stick to move her and A for weak attack; do not press F10.' \
+        '  6. Buki and Elco remain native AI in this first two-human/four-hero test. Confirm all four heroes are present and the companions join the fight.' \
+        '  If the log reports a quarantined/failed ticket or restore, stop the run; the process deliberately does not retry or guess.' \
+        "  Linux input device: ${input_device}" \
+        "  Log: $(dirname -- "${game}")/SudekiMP.log"
+fi
+if [[ "${mode}" == "--talos-post-movie-dual-camera-test" ]]; then
+    printf '%s\n' \
+        '  CLOSED DUAL-CAMERA LIVE TEST: the exact four-hero restore is unchanged, and Kazel is never retained as a fifth party member.' \
+        '  1. Use Tal as Player 1 and load the known save immediately before the final Talos handoff.' \
+        '  2. Trigger the authored transition normally. Retail Sudeki must remove Ailish, Buki, and Elco and execute Kazel unchanged.' \
+        '  3. FMA07 is not auto-skipped. Press Escape once during the movie only if you want Sudekis native movie skip; never send repeated or synthetic skip input.' \
+        '  4. Wait for the exact Kazel delete, post-movie TSA settle, and valid=true four-hero restore before judging the cameras.' \
+        '  5. Tal remains Player 1 on the left. Ailish is claimed automatically as Player 2 on the right; do not press F10.' \
+        '  6. Move Ailish with the controller left stick; movement is transformed through the camera basis for the right-hand view. Use A for weak attack while verifying Tal-left and Ailish-right remain distinct.' \
+        '  7. Buki and Elco remain native AI. Confirm both camera halves keep their assigned hero while all four join the fight.' \
+        '  Scope is deliberately narrow: camera-relative movement is enabled for navigation; Player 2 controller camera/right-stick orbit, separation guard, native camera collision, shared camera, ranged-model isolation, and skills remain disabled.' \
+        '  If the ticket/restore fails, a viewport swaps or freezes, or either control owner changes, stop the run; this process does not retry.' \
+        "  Linux input device: ${input_device}" \
+        "  Log: $(dirname -- "${game}")/SudekiMP.log"
+fi
 if [[ "${mode}" == "--door-transition-trace" ]]; then
     printf '%s\n' \
         '  Observation-only door trace: use P1 to activate one temporary-room door normally.' \
@@ -732,6 +1001,8 @@ if [[ "${mode}" == "--check" ]]; then
 fi
 
 if [[ "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--talos-post-movie-party-test" ||
+      "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
       "${mode}" == "--door-transition-trace" ||
       "${mode}" == "--merchant-checkout-trace" ||
@@ -747,6 +1018,8 @@ if [[ "${mode}" == "--controller-bridge-test" ||
                 'The cleanroom can still launch; P2 will remain WAITING until the Razer bridge is restarted.' >&2
         fi
         if [[ "${mode}" == "--controller-bridge-test" ||
+              "${mode}" == "--talos-post-movie-party-test" ||
+              "${mode}" == "--talos-post-movie-dual-camera-test" ||
               "${mode}" == "--party-lifecycle-trace" ||
               "${mode}" == "--door-transition-trace" ||
               "${mode}" == "--merchant-checkout-trace" ||
@@ -767,6 +1040,8 @@ if [[ "${mode}" == "--controller-bridge-test" ||
             printf '%s\n' 'The Linux input bridge failed to start:' >&2
             sed -n '1,80p' "${input_bridge_log}" >&2
             if [[ "${mode}" == "--controller-bridge-test" ||
+              "${mode}" == "--talos-post-movie-party-test" ||
+              "${mode}" == "--talos-post-movie-dual-camera-test" ||
               "${mode}" == "--party-lifecycle-trace" ||
               "${mode}" == "--door-transition-trace" ||
               "${mode}" == "--merchant-checkout-trace" ||

@@ -15,6 +15,8 @@ project_icon="${project_dir}/src/launcher/assets/SudekiMP.png"
 music_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt'
 music_track_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/Map%20Inversion.mp3'
 music_pid=''
+supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
+supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
 
 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
 wine_prefix="${SUDEKIMP_WINEPREFIX:-${HOME}/Games/sudeki-research-prefix}"
@@ -63,29 +65,29 @@ mode_argument() {
     case "$1" in
         "Play local co-op beta") printf '%s\n' '--party-lifecycle-trace' ;;
         "Safe launch") printf '%s\n' '--safe' ;;
-        "Talos party encounter") printf '%s\n' '--talos-party-test' ;;
+        "Talos lifecycle observation") printf '%s\n' '--talos-lifecycle-observation' ;;
         "Verify installation") printf '%s\n' '--check' ;;
         *) return 1 ;;
     esac
 }
 
 mode_needs_controller() {
-    [[ "$1" == '--party-lifecycle-trace' || "$1" == '--talos-party-test' ]]
+    [[ "$1" == '--party-lifecycle-trace' ]]
 }
 
 mode_summary() {
     case "$1" in
         --party-lifecycle-trace)
             printf '%s\n' \
-                'The supported two-player local co-op profile. Player 1 uses keyboard/mouse; Player 2 uses the selected Linux controller. Campaign transitions remain host-led, and the Talos party restoration is enabled.'
+                'The supported two-player local co-op profile. Player 1 uses keyboard/mouse; Player 2 uses the selected Linux controller. Campaign transitions remain host-led. The unsafe Talos post-collapse restoration is retired and remains off.'
             ;;
         --safe)
             printf '%s\n' \
                 'Launch SudekiMP with optional co-op prototypes disabled. Use this to verify that the game and loader start normally.'
             ;;
-        --talos-party-test)
+        --talos-lifecycle-observation)
             printf '%s\n' \
-                "Restore Tal's retail companions after the native Talos encounter rebuild. This is a focused encounter profile, not a general campaign setting."
+                'Research-only, one-human observation of the untouched retail pre-Void transition. Exact game and script hashes are required; expanded Talos, companion carry, co-op, skills, merchants, and every other optional prototype remain off.'
             ;;
         --check)
             printf '%s\n' \
@@ -210,6 +212,7 @@ configure_gui() {
 
 validate_selection() {
     local mode="$1"
+    local world_asset actual_game_sha256 actual_world_sha256
 
     if [[ ! -f "${game_path}" ]]; then
         zenity_app --error --title="${app_title}" \
@@ -225,6 +228,29 @@ validate_selection() {
         zenity_app --error --title="${app_title}" \
             --text="The Player 2 controller is not readable:\n${controller_path}\n\nConnect it, grant your user input-device access, then choose it in Settings."
         return 1
+    fi
+    if [[ "${mode}" == '--talos-lifecycle-observation' ]]; then
+        world_asset="$(dirname -- "${game_path}")/Data/SOLWORLDM.gex"
+        if ! command -v sha256sum >/dev/null 2>&1; then
+            zenity_app --error --title="${app_title}" \
+                --text='sha256sum is required for the Talos lifecycle exact-image gate.'
+            return 1
+        fi
+        if [[ ! -f "${world_asset}" ]]; then
+            zenity_app --error --title="${app_title}" \
+                --text="SOLWORLDM.gex was not found:\n${world_asset}\n\nSelect the supported GOG SUDEKI.exe in its original game folder."
+            return 1
+        fi
+        actual_game_sha256="$(sha256sum -- "${game_path}")"
+        actual_game_sha256="${actual_game_sha256%% *}"
+        actual_world_sha256="$(sha256sum -- "${world_asset}")"
+        actual_world_sha256="${actual_world_sha256%% *}"
+        if [[ "${actual_game_sha256}" != "${supported_game_sha256}" ||
+              "${actual_world_sha256}" != "${supported_world_sha256}" ]]; then
+            zenity_app --error --title="${app_title}" --width=720 \
+                --text="Talos lifecycle observation requires the exact supported GOG images. Nothing was launched.\n\nSUDEKI.exe\nExpected: ${supported_game_sha256}\nActual:   ${actual_game_sha256}\n\nSOLWORLDM.gex\nExpected: ${supported_world_sha256}\nActual:   ${actual_world_sha256}"
+            return 1
+        fi
     fi
     return 0
 }
@@ -276,8 +302,13 @@ launch_mode_gui() {
     process_id=$!
     disown "${process_id}" 2>/dev/null || true
 
-    zenity_app --info --title="${app_title}" --width=620 \
-        --text="Launch started. Sudeki should open shortly.\n\nPlayer 1: keyboard and mouse\nPlayer 2: ${controller_path}\n\nIf the game does not open, see:\n${launch_log}"
+    if [[ "${mode}" == '--talos-lifecycle-observation' ]]; then
+        zenity_app --info --title="${app_title}" --width=660 \
+            --text="Observation launch started. Sudeki should open shortly.\n\nUse one human player with keyboard/mouse. Load the pre-Talos four-hero save, trigger the final interaction as Tal, and do not skip FMA07. The retail transition must remain unchanged.\n\nIf the game does not open, see:\n${launch_log}"
+    else
+        zenity_app --info --title="${app_title}" --width=620 \
+            --text="Launch started. Sudeki should open shortly.\n\nPlayer 1: keyboard and mouse\nPlayer 2: ${controller_path}\n\nIf the game does not open, see:\n${launch_log}"
+    fi
 }
 
 run_terminal_menu() {
@@ -286,7 +317,7 @@ run_terminal_menu() {
     printf '\n%s\n' "${app_title}"
     printf '%s\n' '1) Play local co-op beta'
     printf '%s\n' '2) Safe launch'
-    printf '%s\n' '3) Talos party encounter'
+    printf '%s\n' '3) Talos lifecycle observation'
     printf '%s\n' '4) Verify installation'
     printf '%s\n' '5) Quit'
     printf 'Choose an option [1-5]: '
@@ -294,7 +325,7 @@ run_terminal_menu() {
     case "${choice}" in
         1) mode='--party-lifecycle-trace' ;;
         2) mode='--safe' ;;
-        3) mode='--talos-party-test' ;;
+        3) mode='--talos-lifecycle-observation' ;;
         4) mode='--check' ;;
         5) return 0 ;;
         *) printf '%s\n' 'Invalid choice.' >&2; return 2 ;;
@@ -316,7 +347,7 @@ run_gui() {
             --column="Option" --column="What it does" \
             "Play local co-op beta" "Two local players: keyboard/mouse host plus Linux controller Player 2." \
             "Safe launch" "Start with optional co-op prototypes disabled." \
-            "Talos party encounter" "Restore Tal's companions for the focused Talos encounter." \
+            "Talos lifecycle observation" "One-human exact-image trace of the untouched retail pre-Void lifecycle." \
             "Verify installation" "Build and check the exact supported game/DLL pair without launching." \
             "Settings" "Choose or paste the game, Wine-prefix, and controller paths." \
             "Play music" "Stream Map Inversion inside this launcher session." \

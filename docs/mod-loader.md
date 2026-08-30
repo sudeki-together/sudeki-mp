@@ -66,7 +66,50 @@ The native Linux sender is built at `build/linux/bin/sudekimp-input-bridge`. It 
 
 `tools/continue-research.sh --spirit-strike-test H` temporarily selects `H` in the generated test configuration, then restores the repository default after Sudeki exits. This provides a direct live check that the configured key—not a compiled-in `G` constant—drives activation.
 
-`tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits. `--party-lifecycle-trace` opts into the symmetric roaming boundary together with roster/drop-in, party-atomic TEMP transitions, and the validated Talos party restoration. Authored campaign rooms are deliberately host-led: P1 starts the native transition, Sudeki's formation carries the active party through it, and SudekiMP reacquires P2 after the destination settles. It keeps both vote experiments disabled. Save books remain native and immediate; saving never opens a co-op consent prompt. `EnableTransitionVotePrototype=false` is reserved for future divergent/custom content with a proven pre-action seam; the current late `EnterTemporaryZone` adapter cannot safely veto an approach/script that Sudeki has already started.
+`tools/continue-research.sh --control-separation-test` temporarily enables only the guarded Buki toggle and restores the generated configuration after Sudeki exits. `--party-lifecycle-trace` opts into the symmetric roaming boundary together with roster/drop-in and party-atomic TEMP transitions. Authored campaign rooms are deliberately host-led: P1 starts the native transition, Sudeki's formation carries the active party through it, and SudekiMP reacquires P2 after the destination settles. The retail Talos Void transition is excluded: `EnableTalosPartyPrototype` is retired after the R6025 failure, while `EnableExpandedTalosEncounterPrototype` remains an unavailable, default-off replacement gate until pre-transition four-hero carry-through and adaptive-seat ownership are proven. Both vote experiments remain disabled. Save books are native and immediate; saving never opens a co-op consent prompt. `EnableTransitionVotePrototype=false` is reserved for future divergent/custom content with a proven pre-action seam; the current late `EnterTemporaryZone` adapter cannot safely veto an approach/script that Sudeki has already started.
+
+`tools/continue-research.sh --talos-lifecycle-observation` is the separate,
+one-human research profile for that pre-transition proof. It exact-gates both
+`SUDEKI.exe` and `Data/SOLWORLDM.gex`, forces every other `Enable*` setting and
+`SkipStartupMovies` off, enables only
+`EnableExpandedTalosLifecycleTrace=true`, and starts the passive native zone
+observer without a controller helper. The lifecycle adapter is a strict
+passthrough. Its current coverage is exact opcode-29/opcode-27 edges, the
+`LoadTheVoid` task-constructor return and opaque task/thread generations,
+nested `SetZoneNOW` before/after edges, native `DeletePC` before/after edges
+with copied and independently rehashed native `ResourceName` evidence, and
+native `RemoveAllPlayers` before/after group and
+formation counts/masks (including a verified-empty result only when both
+samples are readable and empty). It also records native
+`AiPCFormationPopMembers` before/after samples and the native `TSAIsPlaying`
+state at every exact opcode edge, plus the exact authored
+`TSASetPlaying(false)` falling edge. Roster samples use exact retail-hero
+vtable/RTTI classification, per-run opaque member tokens, and matching
+group/formation set differences to identify the authored Buki, Ailish, and
+Elco removals without assuming slot order. Those roster lease generations are
+observational correlation aids, not authoritative actor allocation/lifetime
+generations. After the exact Void `SetZoneNOW` return, the existing camera
+wrapper now passively proves a committed global `default` camera; the exact
+TSA falling edge revalidates that binding together with the original surviving
+Tal as the native controller target, gameplay controller modes, and inactive
+AI override. It does not yet prove allocator-level hero lifetime equivalence
+or lifecycle-owned frame-cache freshness. The same observer also records the
+exact ordered before/after edges for `TalKazelMerge`, the SpawnPC wrapper, and
+the InternalSpawnPC binding,
+then passively wraps the completion helper's raw group-add call at RVA
+`0x000B15DB`. It classifies the transient actor as exact `DarkTalEntity` and
+accepts evidence only when the unchanged native call moves both party
+structures `1 -> 2` with the same new opaque token and the authored Kazel
+delete returns them `2 -> 1`. This evidence path is one-shot per process;
+later LoadVoid sessions are quarantined. It never opens the expanded encounter,
+skips a delete, carries or spawns a hero, changes HP, claims input/camera
+ownership, or delays/replays the native transition. A run without both
+`talos_lifecycle_trace_install=success` and
+`expanded_talos_lifecycle_trace_applied=true` is invalid evidence. The full
+observer DLL is pinned before its first patch and this profile supports only
+launcher-startup installation/rollback, never live runtime toggling. The full
+run checklist and required hashes are in
+[expanded-talos-encounter-design.md](expanded-talos-encounter-design.md).
 
 `tools/continue-research.sh --second-player-movement-test` temporarily enables the guarded Buki toggle and second movement source, uses `F10` for the toggle, and restores the generated configuration after Sudeki exits.
 

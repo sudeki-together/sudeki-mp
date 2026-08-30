@@ -5,6 +5,7 @@
 
 typedef void (*SudekiMpSplitScreenOverlayRenderer)(void);
 typedef BOOL (*SudekiMpModOwnedBlacksmithActiveQuery)(void);
+typedef BOOL (*SudekiMpSplitScreenRuntimeAuthorizationQuery)(void);
 
 enum {
     SUDEKIMP_QUICK_MENU_ISOLATION_IDLE = 0u,
@@ -72,6 +73,45 @@ BOOL SudekiMpInstallSplitScreenRender(
 );
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled);
 BOOL SudekiMpSplitScreenRuntimeEnabled(void);
+/* Optional startup-owned presentation authorization. A configured query is
+ * evaluated once before RenderStart and that result is latched through the
+ * matching FrameEnd, before Camera 2 acquisition, render-state swaps, cache
+ * capture, or split composition. False leaves the native full-width frame
+ * untouched. The query is cleared by uninstall and must not mutate game
+ * state. */
+void SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
+    SudekiMpSplitScreenRuntimeAuthorizationQuery query
+);
+BOOL SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+    BOOL runtime_enabled,
+    BOOL query_present,
+    BOOL query_authorized
+);
+BOOL SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+    BOOL external_authorization_present,
+    BOOL player_two_requested,
+    BOOL player_two_active,
+    const void *combat_context_character,
+    const void *control_lease_character
+);
+BOOL SudekiMpSplitScreenRuntimeAuthorized(void);
+/* Pure fail-closed gate for the dormant 1-4 human compositor.  Every ready
+ * mask must exactly match active_human_mask: inactive seats may not retain a
+ * stale native lease, and no active seat may render until its actor, camera,
+ * render state, HUD owner, input source, and frame cache are all proven.
+ * This policy has no live caller while P3/P4 native ownership is unproven. */
+BOOL SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+    BOOL feature_enabled,
+    unsigned int active_human_mask,
+    BOOL layout_ready,
+    unsigned int actor_lease_mask,
+    unsigned int camera_lease_mask,
+    unsigned int render_state_lease_mask,
+    unsigned int hud_lease_mask,
+    unsigned int input_lease_mask,
+    unsigned int frame_cache_ready_mask,
+    BOOL global_presentation_clear
+);
 /* Camera-2-only ranged perspective.  The toggle only latches a requested
  * render-matrix mode; it never invokes Sudeki's global first-person transition
  * or changes a character's attached model wrapper. */

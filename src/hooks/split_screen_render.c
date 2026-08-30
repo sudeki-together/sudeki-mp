@@ -1,6 +1,7 @@
 #include "hooks/split_screen_render.h"
 
 #include "engine/log.h"
+#include "engine/local_viewport_layout.h"
 #include "engine/orbit_camera.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
@@ -897,6 +898,10 @@ static void *spirit_player_two_melee_locomotion_character;
 static void *spirit_player_two_melee_locomotion_wrapper;
 static void *spirit_player_two_melee_locomotion_renderer;
 static BOOL runtime_split_enabled = TRUE;
+static SudekiMpSplitScreenRuntimeAuthorizationQuery
+    runtime_authorization_query;
+static int runtime_authorization_last_state = -1;
+static BOOL runtime_authorized_at_render_start;
 static BOOL coop_role_lock_active;
 static void *coop_locked_player_one;
 static void *coop_locked_player_two;
@@ -3261,6 +3266,31 @@ BOOL SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
         lease_matches && ranged_capable;
 }
 
+BOOL SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+    BOOL feature_enabled,
+    unsigned int active_human_mask,
+    BOOL layout_ready,
+    unsigned int actor_lease_mask,
+    unsigned int camera_lease_mask,
+    unsigned int render_state_lease_mask,
+    unsigned int hud_lease_mask,
+    unsigned int input_lease_mask,
+    unsigned int frame_cache_ready_mask,
+    BOOL global_presentation_clear
+) {
+    return SudekiMpLocalViewportActivationPolicy(
+        feature_enabled != FALSE,
+        active_human_mask,
+        layout_ready != FALSE,
+        actor_lease_mask,
+        camera_lease_mask,
+        render_state_lease_mask,
+        hud_lease_mask,
+        input_lease_mask,
+        frame_cache_ready_mask,
+        global_presentation_clear != FALSE) ? TRUE : FALSE;
+}
+
 BOOL SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(void *character) {
     SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
     const SudekiMpPlayerLease *lease =
@@ -4375,6 +4405,14 @@ static BOOL resolve_player_characters(
             &second_player_context
         ) && second_player_context.character != NULL &&
         second_player_context.character != controller_target) {
+        if (!SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+                runtime_authorization_query != NULL,
+                SudekiMpControlSeparationPlayerTwoRequested(),
+                SudekiMpControlSeparationPlayerTwoActive(),
+                second_player_context.character,
+                SudekiMpControlSeparationPlayerTwoCharacter())) {
+            return FALSE;
+        }
         for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
             void *candidate = *(void **)(
                 group + PARTY_SLOT_ZERO_OFFSET + index * PARTY_SLOT_STRIDE
@@ -4386,6 +4424,13 @@ static BOOL resolve_player_characters(
                 return TRUE;
             }
         }
+        return FALSE;
+    }
+    /* A closed externally-authorized profile must name Player 2 through the
+     * already-proven control/combat lease.  Falling back to the first
+     * non-front party slot could bind an AI companion before that lease is
+     * published or after it is revoked. */
+    if (runtime_authorization_query != NULL) {
         return FALSE;
     }
     for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
@@ -9683,7 +9728,10 @@ static void log_failure_once(const char *reason, HRESULT result) {
     );
 }
 
-static BOOL gameplay_split_allowed(const char **reason) {
+static BOOL gameplay_split_allowed(
+    BOOL runtime_authorized,
+    const char **reason
+) {
     uint8_t *group;
     uint8_t *controller;
     uint8_t *camera_mode;
@@ -9691,8 +9739,10 @@ static BOOL gameplay_split_allowed(const char **reason) {
     void *controller_target;
     void *camera_pointer;
 
-    if (!runtime_split_enabled) {
-        *reason = "runtime_toggle_disabled";
+    if (!runtime_authorized) {
+        *reason = runtime_split_enabled ?
+            "external_runtime_authorization_pending" :
+            "runtime_toggle_disabled";
         return FALSE;
     }
     if (game_base == NULL) {
@@ -10532,6 +10582,7 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     BOOL player_two_requested_before_apply;
     unsigned int isolation_state;
     unsigned int shared_modal_observation;
+    BOOL runtime_authorized;
     void *trace_player_one_character = player_one_character;
     void *trace_player_two_character = player_two_character;
     void *resolved_player_one_character = NULL;
@@ -10539,6 +10590,8 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     unsigned int resolved_player_two_slot = 0u;
 
     ++split_render_frame_sequence;
+    runtime_authorized = SudekiMpSplitScreenRuntimeAuthorized();
+    runtime_authorized_at_render_start = runtime_authorized;
 
     /*
      * Keep the ranged trace useful when the split-camera ownership is
@@ -10547,8 +10600,9 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
      * here lets a read-only capture observe that controller without borrowing
      * a render wrapper or changing AI/input state.
      */
-    if (trace_player_one_character == NULL ||
-        trace_player_two_character == NULL) {
+    if (runtime_authorized &&
+        (trace_player_one_character == NULL ||
+         trace_player_two_character == NULL)) {
         if (resolve_player_characters(
                 &resolved_player_one_character,
                 &resolved_player_two_character,
@@ -10678,7 +10732,11 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     if (shared_modal_native_full_width) {
         player_two_view_requested = FALSE;
     }
-    live_view_allowed = !shared_modal_native_full_width &&
+    if (!runtime_authorized) {
+        player_two_view_requested = FALSE;
+    }
+    live_view_allowed = runtime_authorized &&
+        !shared_modal_native_full_width &&
         !quit_menu_visible &&
         (isolation_in_progress ||
          (!genuine_quick_menu_is_visible &&
@@ -10801,7 +10859,14 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     shared_modal_observation = refresh_shared_interaction_modal();
     shared_modal_native_full_width = shared_modal_observation !=
         SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
-    split_allowed = gameplay_split_allowed(&gate_reason);
+    /* Use the exact authorization sampled before RenderStart for the complete
+     * native render transaction.  Resampling here could admit a false->true
+     * half-frame or expose a raw Camera-2 frame on a true->false edge.  A
+     * changed status takes effect at the next RenderStart. */
+    split_allowed = gameplay_split_allowed(
+        runtime_authorized_at_render_start,
+        &gate_reason
+    );
     quit_menu_visible = pc_quit_screen_visible();
     quick_menu_is_visible = quick_menu_visible();
     isolation_in_progress =
@@ -10987,6 +11052,66 @@ BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled) {
 
 BOOL SudekiMpSplitScreenRuntimeEnabled(void) {
     return runtime_split_enabled;
+}
+
+void SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
+    SudekiMpSplitScreenRuntimeAuthorizationQuery query
+) {
+    runtime_authorization_query = query;
+}
+
+BOOL SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+    BOOL runtime_enabled,
+    BOOL query_present,
+    BOOL query_authorized
+) {
+    return runtime_enabled && (!query_present || query_authorized);
+}
+
+BOOL SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
+    BOOL external_authorization_present,
+    BOOL player_two_requested,
+    BOOL player_two_active,
+    const void *combat_context_character,
+    const void *control_lease_character
+) {
+    return !external_authorization_present ||
+        (player_two_requested && player_two_active &&
+         combat_context_character != NULL &&
+         combat_context_character == control_lease_character);
+}
+
+BOOL SudekiMpSplitScreenRuntimeAuthorized(void) {
+    SudekiMpSplitScreenRuntimeAuthorizationQuery query =
+        runtime_authorization_query;
+    DWORD entry_error = GetLastError();
+    BOOL authorized = TRUE;
+    BOOL accepted;
+    int state;
+
+    if (query != NULL) {
+        authorized = query();
+    }
+    accepted = SudekiMpSplitScreenRuntimeAuthorizationPolicy(
+        runtime_split_enabled,
+        query != NULL,
+        authorized
+    );
+    state = accepted ? 1 : 0;
+    if (state != runtime_authorization_last_state) {
+        runtime_authorization_last_state = state;
+        player_two_view_requested = FALSE;
+        invalidate_dual_frame_cache();
+        if (game_base != NULL && query != NULL) {
+            SudekiMpLogFormat(
+                "split_screen_render event=external_runtime_gate state=%s "
+                "policy=full_width_until_exact_authorization_then_two_fresh_frames\r\n",
+                accepted ? "authorized" : "native_full_width"
+            );
+        }
+    }
+    SetLastError(entry_error);
+    return accepted;
 }
 
 BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two) {
@@ -12250,6 +12375,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     spirit_effect_isolation_logged = FALSE;
     spirit_capture_completion_logged = FALSE;
     runtime_split_enabled = TRUE;
+    runtime_authorized_at_render_start = FALSE;
     coop_role_lock_active = FALSE;
     coop_locked_player_one = NULL;
     coop_locked_player_two = NULL;
@@ -12415,6 +12541,11 @@ BOOL SudekiMpInstallSplitScreenRender(
 
 void SudekiMpUninstallSplitScreenRender(void) {
     split_screen_render_installed = FALSE;
+    /* Keep a fail-closed authorization state until both render hooks are
+     * restored.  Clearing the optional query first would make the default
+     * policy permissive while a prefetched wrapper can still dispatch. */
+    runtime_split_enabled = FALSE;
+    runtime_authorized_at_render_start = FALSE;
     InterlockedExchange(&native_save_modal_opening, 0);
     if (shared_interaction_modal_published_kind !=
             SUDEKIMP_INTERACTION_NONE) {
@@ -12448,6 +12579,8 @@ void SudekiMpUninstallSplitScreenRender(void) {
     SudekiMpRestoreRelativeCallHook(&quit_screen_render_hook);
     SudekiMpRestoreRelativeCallHook(&render_start_hook);
     SudekiMpRestoreRelativeCallHook(&frame_end_hook);
+    runtime_authorization_query = NULL;
+    runtime_authorization_last_state = -1;
     release_player_two_camera("module_uninstall");
     release_com_object(&composite_surface);
     release_dual_frame_surfaces();
@@ -12601,6 +12734,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     original_hud_portrait_resource_select = NULL;
     game_base = NULL;
     runtime_split_enabled = TRUE;
+    runtime_authorized_at_render_start = FALSE;
     coop_roster_valid = FALSE;
     coop_roster_player_one_type = 0u;
     coop_roster_player_two_type = 0u;

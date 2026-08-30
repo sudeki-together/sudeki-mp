@@ -259,7 +259,7 @@ static void __cdecl trace_internal_spawn_pc(
     float y,
     float z
 ) {
-    enum { TALOS_VOID_TAL_RESOURCE_IDENTIFIER = 0xa6d349ccu };
+    enum { TALOS_VOID_KAZEL_RESOURCE_IDENTIFIER = 0xa6d349ccu };
     SwitchSnapshot before;
     SwitchSnapshot after;
     uint32_t resource_words[3] = {0u, 0u, 0u};
@@ -267,7 +267,7 @@ static void __cdecl trace_internal_spawn_pc(
     uint32_t y_bits;
     uint32_t z_bits;
     BOOL resource_readable;
-    BOOL talos_resource;
+    BOOL kazel_resource;
     BOOL zero_position;
     BOOL four_to_one;
     BOOL companions_removed;
@@ -281,8 +281,8 @@ static void __cdecl trace_internal_spawn_pc(
     if (resource_readable) {
         memcpy(resource_words, resource_name, sizeof(resource_words));
     }
-    talos_resource = resource_readable &&
-        resource_words[1] == TALOS_VOID_TAL_RESOURCE_IDENTIFIER;
+    kazel_resource = resource_readable &&
+        resource_words[1] == TALOS_VOID_KAZEL_RESOURCE_IDENTIFIER;
     zero_position = x_bits == 0u && y_bits == 0u && z_bits == 0u;
     capture_switch_snapshot(&before);
     log_resource_name_words("spawn_pc", "before", resource_name);
@@ -323,7 +323,7 @@ static void __cdecl trace_internal_spawn_pc(
         after.party[3].character == NULL;
     recent_observed_collapse = talos_party_collapse_observed &&
         (DWORD)(GetTickCount() - talos_party_collapse_observed_at) <= 5000u;
-    if (talos_party_prototype_enabled && talos_resource && zero_position) {
+    if (talos_party_prototype_enabled && kazel_resource && zero_position) {
         SudekiMpLogFormat(
             "talos_party event=collapse_gate resource_snapshot=%08lx before_count=%u after_count=%u lead_before=0x%08lx lead_after=0x%08lx lead_same=%u companions_removed=%u companions_removed_since_snapshot=%u recent_observed_collapse=%u armed=%u\r\n",
             (unsigned long)resource_words[1],
@@ -339,7 +339,7 @@ static void __cdecl trace_internal_spawn_pc(
         );
     }
     if (talos_party_prototype_enabled && !talos_party_restore_armed &&
-        talos_resource && zero_position &&
+        kazel_resource && zero_position &&
         ((four_to_one && companions_removed) ||
          companions_removed_since_snapshot ||
          (recent_observed_collapse && after.party_count == 1 &&
@@ -348,7 +348,7 @@ static void __cdecl trace_internal_spawn_pc(
         talos_party_restore_armed = TRUE;
         talos_party_restore_armed_at = GetTickCount();
         SudekiMpLogWrite(
-            "talos_party event=void_party_collapse status=confirmed before_count=4 after_count=1 resource_identifier=a6d349cc coordinates=zero action=arm_post_movie_native_party_restore\r\n"
+            "talos_party event=void_party_collapse status=confirmed before_count=4 after_count=1 resource=PC_KAZEL resource_identifier=a6d349cc coordinates=zero action=arm_post_movie_native_party_restore\r\n"
         );
     }
 }
