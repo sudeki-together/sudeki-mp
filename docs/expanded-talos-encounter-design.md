@@ -35,9 +35,11 @@ Use the two closed launch profiles:
 ```
 
 The second profile adds only split rendering, the render-only P2 camera, the
-alternating two-frame cache, and camera-relative P2 navigation. Independent
-Ailish right-stick camera rotation is the next milestone and remains disabled
-in this checkpoint.
+alternating two-frame cache, independent Ailish right-stick orbit, and
+camera-relative P2 navigation through that same Camera-2 basis. P1 mouse input
+is filtered from Camera 2. This is the first mod-owned instance of the stable
+seat-to-camera/input-basis contract intended for P2 through P4; the runtime for
+P3/P4 remains unimplemented.
 
 ## Long-term product contract
 

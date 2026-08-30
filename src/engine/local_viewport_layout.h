@@ -35,6 +35,10 @@ typedef struct SudekiMpLocalSeatViewport {
     SudekiMpLocalViewportRectangle rectangle;
 } SudekiMpLocalSeatViewport;
 
+/* Camera, movement-transform, and orbit ownership follow seat_index, never
+ * the compact viewport_ordinal. This keeps P1-P4 view/input bases stable when
+ * a future local session uses a gapped human-seat mask. */
+
 typedef struct SudekiMpLocalViewportLayout {
     uint8_t active_human_mask;
     uint8_t viewport_count;

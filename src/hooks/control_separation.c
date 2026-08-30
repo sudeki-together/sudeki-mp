@@ -2701,7 +2701,9 @@ static void poll_second_player_movement(
         float horizontal_length;
 
         if (bridge_source) {
-            player_two_camera_basis = SudekiMpTransformPlayerTwoMovement(
+            player_two_camera_basis = SudekiMpTransformSeatMovement(
+                1u,
+                character,
                 direction,
                 transformed
             );
@@ -2875,7 +2877,9 @@ static void poll_second_player_camera_facing(
         input_bridge_deadzone && second_player_movement_active) {
         return;
     }
-    if (!SudekiMpTransformPlayerTwoMovement(
+    if (!SudekiMpTransformSeatMovement(
+            1u,
+            character,
             local_forward,
             world_forward)) {
         return;
@@ -2891,7 +2895,7 @@ static void poll_second_player_camera_facing(
     if (second_player_facing_valid && dot > 0.99996f) {
         return;
     }
-    if (SudekiMpAlignPlayerTwoFacingToCamera(character)) {
+    if (SudekiMpAlignSeatFacingToCamera(1u, character)) {
         memcpy(second_player_last_facing, world_forward,
             sizeof(second_player_last_facing));
         second_player_facing_valid = TRUE;

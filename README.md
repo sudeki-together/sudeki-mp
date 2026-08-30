@@ -75,9 +75,10 @@ research copy; the complete 394-file baseline is hashed and reproducible.
   Elco from one exact one-shot ticket. Live testing confirmed four heroes with
   Ailish owned by Player 2 while Buki and Elco remain native AI.
 - A gated Tal-left/Ailish-right presentation is live-proven for that restored
-  party. Ailish navigation is camera-relative to the current view orientation;
-  independent right-stick rotation is the next step. The same seat-local basis
-  is the intended model for future P3/P4 views, which are not implemented yet.
+  party. Ailish's right stick independently rotates Camera 2 and her movement
+  is transformed through that same right-hand view basis without rotating
+  Tal's native camera. The same seat-local basis is the intended model for
+  future P3/P4 views, which are not implemented yet.
 - Player 2 input is transported from Linux joydev through a small loopback UDP
   bridge because the test controller is not exposed to Wine as XInput or
   DirectInput.

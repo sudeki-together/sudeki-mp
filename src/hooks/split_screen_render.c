@@ -6211,7 +6211,6 @@ static BOOL update_player_two_render_state(void) {
                 camera_target,
                 sizeof(player_two_camera_last_target)
             );
-            player_two_camera_transform_initialized = TRUE;
             player_two_camera_input_last_tick = GetTickCount();
         }
     } else {
@@ -6340,6 +6339,10 @@ static BOOL update_player_two_render_state(void) {
         (uint8_t *)player_one_render_state + 0xd0u,
         sizeof(float) * 3u
     );
+    /* A valid Camera-2 basis belongs to the seat even when that seat has no
+     * active orbit input. The orbit flag controls mutation of this matrix;
+     * it does not control whether movement may read the resulting view. */
+    player_two_camera_transform_initialized = TRUE;
     generation = (uint16_t *)((uint8_t *)player_two_render_state + 0x2cu);
     ++*generation;
     if (player_two_native_camera_bound &&
@@ -6353,15 +6356,19 @@ static BOOL update_player_two_render_state(void) {
     return TRUE;
 }
 
-BOOL SudekiMpTransformPlayerTwoMovement(
+BOOL SudekiMpTransformSeatMovement(
+    unsigned int seat_index,
+    const void *character,
     const float local_direction[3],
     float world_direction[3]
 ) {
     float matrix[16];
 
-    if (!second_player_controller_camera_enabled ||
+    if (seat_index != 1u || character == NULL ||
+        character != player_two_character || player_two_camera == NULL ||
         !player_two_camera_transform_initialized ||
         !readable_memory(player_two_render_state, 0xd0u) ||
+        !render_state_camera_matrix_valid(player_two_render_state) ||
         local_direction == NULL || world_direction == NULL) {
         return FALSE;
     }
@@ -6372,6 +6379,18 @@ BOOL SudekiMpTransformPlayerTwoMovement(
     );
     return SudekiMpCameraTransformHorizontalDirection(
         matrix, local_direction, world_direction
+    );
+}
+
+BOOL SudekiMpTransformPlayerTwoMovement(
+    const float local_direction[3],
+    float world_direction[3]
+) {
+    return SudekiMpTransformSeatMovement(
+        1u,
+        player_two_character,
+        local_direction,
+        world_direction
     );
 }
 
@@ -6390,16 +6409,21 @@ static void call_position_set_forward(
     );
 }
 
-BOOL SudekiMpAlignPlayerTwoFacingToCamera(void *character) {
+BOOL SudekiMpAlignSeatFacingToCamera(
+    unsigned int seat_index,
+    void *character
+) {
     static const float local_forward[3] = {0.0f, 0.0f, 1.0f};
     uint8_t *position;
     float world_forward[3];
 
-    if (!second_player_controller_camera_enabled ||
+    if (seat_index != 1u || !second_player_controller_camera_enabled ||
         position_set_forward_function == NULL ||
         character == NULL || character != player_two_character ||
         !readable_memory(character, 0x48u) ||
-        !SudekiMpTransformPlayerTwoMovement(
+        !SudekiMpTransformSeatMovement(
+            seat_index,
+            character,
             local_forward,
             world_forward)) {
         return FALSE;
@@ -6418,6 +6442,10 @@ BOOL SudekiMpAlignPlayerTwoFacingToCamera(void *character) {
         );
     }
     return TRUE;
+}
+
+BOOL SudekiMpAlignPlayerTwoFacingToCamera(void *character) {
+    return SudekiMpAlignSeatFacingToCamera(1u, character);
 }
 
 void SudekiMpSplitScreenBeginSkillCameraCall(void *caster) {
@@ -12061,12 +12089,14 @@ BOOL SudekiMpInstallSplitScreenRender(
                 expected_camera_manager_set_camera_state_entry,
                 sizeof(expected_camera_manager_set_camera_state_entry)
             ) == 0,
-            !enable_native_second_player_camera_collision || memcmp(
+            (!enable_second_player_controller_camera &&
+             !enable_native_second_player_camera_collision) || memcmp(
                 base + RVA_CAMERA_INPUT_EVENT,
                 expected_camera_input_event_entry,
                 sizeof(expected_camera_input_event_entry)
             ) == 0,
-            !enable_native_second_player_camera_collision ||
+            (!enable_second_player_controller_camera &&
+             !enable_native_second_player_camera_collision) ||
                 *(void **)(base + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) ==
                     base + RVA_CAMERA_INPUT_EVENT,
             !enable_native_second_player_camera_collision || memcmp(
@@ -12098,6 +12128,14 @@ BOOL SudekiMpInstallSplitScreenRender(
             base + RVA_CAMERA_MANAGER_GET_CAMERA,
             expected_camera_manager_get_camera_entry,
             sizeof(expected_camera_manager_get_camera_entry)) != 0 ||
+         ((enable_second_player_controller_camera ||
+           enable_native_second_player_camera_collision) &&
+          (memcmp(
+              base + RVA_CAMERA_INPUT_EVENT,
+              expected_camera_input_event_entry,
+              sizeof(expected_camera_input_event_entry)) != 0 ||
+           *(void **)(base + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
+              base + RVA_CAMERA_INPUT_EVENT)) ||
          (enable_native_second_player_camera_collision &&
           (memcmp(
               base + RVA_CAMERA_MANAGER_SET_CAMERA_TARGET,
@@ -12111,12 +12149,6 @@ BOOL SudekiMpInstallSplitScreenRender(
               base + RVA_CAMERA_MANAGER_SET_CAMERA_STATE,
               expected_camera_manager_set_camera_state_entry,
               sizeof(expected_camera_manager_set_camera_state_entry)) != 0 ||
-           memcmp(
-              base + RVA_CAMERA_INPUT_EVENT,
-              expected_camera_input_event_entry,
-              sizeof(expected_camera_input_event_entry)) != 0 ||
-           *(void **)(base + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
-              base + RVA_CAMERA_INPUT_EVENT ||
            memcmp(
               base + RVA_GROUP_PLAYERS_IN_COMBAT,
               expected_group_players_in_combat_entry,
@@ -12283,7 +12315,8 @@ BOOL SudekiMpInstallSplitScreenRender(
             (CameraManagerSetCameraStateFunction)(
                 game_base + RVA_CAMERA_MANAGER_SET_CAMERA_STATE) : NULL;
     original_camera_input_event =
-        enable_native_second_player_camera_collision ?
+        (enable_second_player_controller_camera ||
+         enable_native_second_player_camera_collision) ?
             (CameraInputEventFunction)(
                 game_base + RVA_CAMERA_INPUT_EVENT) : NULL;
     group_players_in_combat =
@@ -12404,7 +12437,8 @@ BOOL SudekiMpInstallSplitScreenRender(
             game_base + RVA_PC_QUIT_SCREEN_RENDER_CALL,
             original_quit_screen_render,
             split_screen_quit_screen_render_entry) ||
-        (native_second_player_camera_collision_enabled &&
+        ((second_player_controller_camera_enabled ||
+          native_second_player_camera_collision_enabled) &&
          !SudekiMpInstallPointerHook(
               &camera_input_event_hook,
               (void **)(game_base +

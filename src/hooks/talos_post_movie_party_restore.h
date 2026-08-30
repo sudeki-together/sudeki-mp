@@ -22,10 +22,12 @@ enum {
     SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_SPLIT = 1u << 0u,
     SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO = 1u << 1u,
     SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE = 1u << 2u,
+    SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO_ORBIT = 1u << 3u,
     SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_EXACT =
         SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_SPLIT |
         SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO |
-        SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE
+        SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE |
+        SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO_ORBIT
 };
 
 typedef enum SudekiMpTalosPostMoviePartyRestoreState {
@@ -168,14 +170,16 @@ BOOL SudekiMpTalosPostMoviePartyRestoreCameraAuthorized(
     const SudekiMpTalosPostMoviePartyRestoreStatus *status
 );
 /* Pure closed-profile configuration gate. The baseline admits no camera
- * owners; the distinct-angle experiment admits the complete three-feature
- * bundle. Every partial or unknown bit pattern is rejected. */
+ * owners; the distinct-angle experiment admits split presentation, Camera 2,
+ * dual frame caching, and independent Camera-2 orbit as one exact bundle.
+ * Every partial or unknown bit pattern is rejected. */
 BOOL SudekiMpTalosPostMoviePartyRestoreCameraBundleAllowed(
     unsigned int bundle_mask
 );
 /* The Talos baseline has neither camera bundle nor camera-relative input. The
- * distinct-angle profile requires both the complete camera bundle and the
- * proven camera-relative movement transform; partial pairings are rejected. */
+ * distinct-angle profile requires the complete independently rotatable camera
+ * bundle and the proven camera-relative movement transform; partial pairings
+ * are rejected. */
 BOOL SudekiMpTalosPostMoviePartyRestoreCameraNavigationProfileAllowed(
     unsigned int bundle_mask,
     BOOL camera_relative_movement

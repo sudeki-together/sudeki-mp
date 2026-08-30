@@ -37,7 +37,7 @@ usage() {
         '  --talos-lifecycle-observation Exact-image, one-human, native-passthrough observation of the retail pre-Void lifecycle. It never preserves companions or enables the expanded fight.' \
         '  --talos-staging-observation Exact-image, one-human, read-only capture of a settled ordinary-world four-hero frame. It makes no membership call and never enters the Void.' \
         '  --talos-post-movie-party-test Exact-image closed test: let retail delete the companions and Kazel, then restore Ailish/Buki/Elco after the same-session TSA settle; Ailish is Player 2.' \
-        '  --talos-post-movie-dual-camera-test Add split rendering, the Player 2 camera, dual frame caching, and view-relative P2 navigation to the exact post-movie four-hero restore.' \
+        '  --talos-post-movie-dual-camera-test Add split rendering, an independently rotatable Player 2 camera, dual frame caching, and view-relative P2 navigation to the exact post-movie four-hero restore.' \
         '  --talos-defense-trace Trace real-boss damage, invulnerability, reaction IDs, and knockback sessions without restoring companions.' \
         '  --zone-transition-trace  Observe door/zone entry, zone loading, and main-world transitions without changing them.' \
         '  --zone-traversal-test  Open the F7 world/interior traversal menu on a normal save.' \
@@ -281,7 +281,8 @@ case "${mode}" in
         ;;
     --talos-post-movie-dual-camera-test)
         # Preserve the exact post-movie four-hero/P2 baseline, then add only
-        # the already-scoped distinct-angle dual-camera compositor path.
+        # the already-scoped distinct-angle dual-camera compositor, Camera-2
+        # right-stick orbit, and matching movement-basis path.
         # The allowlist below keeps every other experiment forcibly disabled.
         sed -i -E \
             -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
@@ -294,6 +295,7 @@ case "${mode}" in
             -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
             -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
             -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e 's/^EnableSecondPlayerControllerCameraPrototype=false$/EnableSecondPlayerControllerCameraPrototype=true/' \
             -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
             -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
             "${generated_config}"
@@ -307,7 +309,8 @@ case "${mode}" in
                 $1 != "EnableExternalInputBridgePrototype" &&
                 $1 != "EnableSplitScreenRenderPrototype" &&
                 $1 != "EnableSecondPlayerCameraPrototype" &&
-                $1 != "EnableDualCameraFrameCachePrototype" { print }
+                $1 != "EnableDualCameraFrameCachePrototype" &&
+                $1 != "EnableSecondPlayerControllerCameraPrototype" { print }
         ' "${generated_config}")"
         if [[ -n "${unexpected_enabled}" ]] ||
            ! grep -Fqx 'EnableTalosPostMoviePartyRestorePrototype=true' "${generated_config}" ||
@@ -319,10 +322,10 @@ case "${mode}" in
            ! grep -Fqx 'EnableSplitScreenRenderPrototype=true' "${generated_config}" ||
            ! grep -Fqx 'EnableSecondPlayerCameraPrototype=true' "${generated_config}" ||
            ! grep -Fqx 'EnableDualCameraFrameCachePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerControllerCameraPrototype=true' "${generated_config}" ||
            ! grep -Fqx "InputBridgePort=${input_bridge_port}" "${generated_config}" ||
            ! grep -Fqx 'ToggleSecondPlayerAi=F10' "${generated_config}" ||
            ! grep -Fqx 'EnableNativeXInputPlayerTwoPrototype=false' "${generated_config}" ||
-           ! grep -Fqx 'EnableSecondPlayerControllerCameraPrototype=false' "${generated_config}" ||
            ! grep -Fqx 'EnableSecondPlayerSeparationGuardPrototype=false' "${generated_config}" ||
            ! grep -Fqx 'EnableSharedGroupCameraPrototype=false' "${generated_config}" ||
            ! grep -Fqx 'EnableNativeSecondPlayerCameraCollisionPrototype=false' "${generated_config}" ||
@@ -974,9 +977,9 @@ if [[ "${mode}" == "--talos-post-movie-dual-camera-test" ]]; then
         '  3. FMA07 is not auto-skipped. Press Escape once during the movie only if you want Sudekis native movie skip; never send repeated or synthetic skip input.' \
         '  4. Wait for the exact Kazel delete, post-movie TSA settle, and valid=true four-hero restore before judging the cameras.' \
         '  5. Tal remains Player 1 on the left. Ailish is claimed automatically as Player 2 on the right; do not press F10.' \
-        '  6. Move Ailish with the controller left stick; movement is transformed through the camera basis for the right-hand view. Use A for weak attack while verifying Tal-left and Ailish-right remain distinct.' \
+        '  6. Rotate Ailishs right-hand camera with the controller right stick. Move with the left stick; movement must follow that independently rotated view basis. Use A for weak attack while verifying Tal-left and Ailish-right remain distinct.' \
         '  7. Buki and Elco remain native AI. Confirm both camera halves keep their assigned hero while all four join the fight.' \
-        '  Scope is deliberately narrow: camera-relative movement is enabled for navigation; Player 2 controller camera/right-stick orbit, separation guard, native camera collision, shared camera, ranged-model isolation, and skills remain disabled.' \
+        '  Scope is deliberately narrow: Player 2 right-stick orbit and camera-relative movement through that same Camera-2 basis are enabled; separation guard, native camera collision, shared camera, ranged-model isolation, and skills remain disabled.' \
         '  If the ticket/restore fails, a viewport swaps or freezes, or either control owner changes, stop the run; this process does not retry.' \
         "  Linux input device: ${input_device}" \
         "  Log: $(dirname -- "${game}")/SudekiMP.log"

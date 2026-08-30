@@ -405,6 +405,20 @@ BOOL SudekiMpTransformPlayerTwoMovement(
     float world_direction[3]
 );
 BOOL SudekiMpAlignPlayerTwoFacingToCamera(void *character);
+/* Seat-indexed view/input-basis seam. P1 remains native-owned. P2 is the
+ * first mod-managed seat; P3/P4 fail closed until exact actor, camera, render
+ * state, input, and frame-cache leases exist for them. Movement-basis
+ * availability is independent of whether orbit input is enabled. */
+BOOL SudekiMpTransformSeatMovement(
+    unsigned int seat_index,
+    const void *character,
+    const float local_direction[3],
+    float world_direction[3]
+);
+BOOL SudekiMpAlignSeatFacingToCamera(
+    unsigned int seat_index,
+    void *character
+);
 BOOL SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(void *character);
 void SudekiMpSplitScreenBeginSkillCameraCall(void *caster);
 void SudekiMpSplitScreenEndSkillCameraCall(void);

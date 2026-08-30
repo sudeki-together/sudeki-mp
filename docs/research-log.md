@@ -4641,19 +4641,42 @@ permitted in this closed mode. Live logs recorded exact camera acquisition and
 `dual_camera_cache_active` with no compositor failure.
 
 Ailish navigation initially used raw world axes because the closed camera
-profile left camera-relative movement disabled. The corrected profile pairs
-camera-relative movement with the exact split/P2-camera/dual-cache bundle and
-rejects every partial combination. In this checkpoint Camera 2 is a translated
-render-only view whose orientation is copied from the native gameplay camera,
-so the existing native camera transform is the correct basis. Live movement
-records now consistently report
-`camera_relative=true camera_basis=native_player_one`, and the user confirmed
-that navigation follows the visible Ailish view.
+profile left camera-relative movement disabled. The corrected first camera
+profile paired camera-relative movement with split/P2-camera/dual-cache and
+rejected every partial combination. While Camera 2 still copied the native
+orientation, movement correctly used the equivalent native P1 basis.
+
+The next exact profile added independent Camera-2 orbit as a fourth mandatory
+bundle bit. The camera-input vtable route now filters P1 broadcasts from the
+named P2 camera even when native P2 collision is disabled, while forwarding
+every other camera unchanged. A seat-indexed transform API publishes the
+Camera-2 basis independently of whether orbit input is enabled; it accepts only
+the exact seat-1 actor/camera/render-state lease and fails closed for P3/P4.
+Facing changes remain separately orbit-gated.
+
+The live run proved isolation and view-relative navigation. Before P2 input,
+Camera 2 forward was approximately `(-0.158,-0.302,0.940)` while P1 remained
+approximately `(-0.223,-0.236,-0.946)`. A P2 right-stick X input advanced only
+Camera 2 to approximately `(-0.716,-0.302,0.629)`; P1 stayed near its original
+basis. A straight P2 movement submission changed from direction bits
+`be2a384e,3f7c7032` to `bf405205,3f28f6d1` and consistently reported
+`camera_relative=true camera_basis=player_two_render`. Native SpiritCam
+temporarily returned presentation to full width, released Camera 2, and then
+reacquired it with fresh caches after the default camera and exact control
+lease returned. No R6025, reload requirement, or compositor failure occurred.
 
 This establishes the intended ownership boundary for future seats: each human
-seat should consume the orientation basis of its own presented view. Only Tal
-and Ailish have a live runtime today; Buki/Elco remain AI, and P3/P4 camera
-state, render caches, HUD passes, and input consumers are still future work.
-The immediate next milestone is independent Ailish right-stick camera rotation,
-at which point her movement transform must switch from the shared native basis
-to the independently rotated P2 render basis.
+seat consumes the orientation basis of its own presented view and rotates only
+that camera. P1 already has this natively; P2 is now live. Buki/Elco remain AI,
+and P3/P4 camera state, render caches, HUD passes, and control consumers remain
+future work.
+
+The same run exposed the next presentation defect. Ailish cannot open a
+viewport-owned Skills menu. When Tal opens his Skills menu, Tal's own half is
+blank while the complete menu is also rendered on Ailish's half. Menu input,
+skill-data ownership, and render ownership are therefore still global or
+scheduled to the wrong cached viewport. The next milestone is independent
+per-seat skill-menu opening and population: Tal's native menu must appear only
+on Tal's viewport with Tal's skills, and Ailish must be able to open and use a
+separate menu containing Ailish's skills. The older final-fight camera-doubling
+issue follows after that menu ownership work.

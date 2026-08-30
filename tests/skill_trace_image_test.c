@@ -160,6 +160,7 @@ enum {
     RVA_GEL_POINTER_RESOLVER_HANDLER = 0x002947f8u,
     RVA_CAMERA_INPUT_EVENT = 0x000e85f0u,
     RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT = 0x002cce5cu,
+    RVA_POSITION_SET_FORWARD = 0x001114d0u,
     RVA_MOTION_BLUR_POST_RENDER = 0x001de0b0u,
     RVA_SCREENSHOT_POST_RENDER = 0x001de7b0u,
     RVA_MOTION_BLUR_POST_RENDER_VTABLE_SLOT = 0x002dd930u,
@@ -4484,6 +4485,108 @@ int wmain(int argc, wchar_t **argv) {
     }
     *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
         image + RVA_CAMERA_INPUT_EVENT;
+    if (!SudekiMpInputBridgeStart(0u, 100u)) {
+        fprintf(stderr,
+            "FAIL: controller-camera-only exact-image probe could not start input bridge (error=%lu)\n",
+            (unsigned long)GetLastError());
+        ++failures;
+    } else {
+        uint8_t saved_position_set_forward =
+            image[RVA_POSITION_SET_FORWARD];
+
+        *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
+            image + RVA_QUICK_MENU_IS_ACTIVE;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallSplitScreenRender(
+                (HMODULE)image,
+                TRUE,
+                TRUE,
+                VK_F9,
+                FALSE,
+                TRUE,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.20f,
+                2.25f,
+                1.50f,
+                0.65f)) {
+            fputs("FAIL: manual controller camera accepted a mismatched input slot\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallSplitScreenRender();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: manual controller-camera input-slot mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
+            image + RVA_CAMERA_INPUT_EVENT;
+
+        image[RVA_POSITION_SET_FORWARD] ^= 0xffu;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallSplitScreenRender(
+                (HMODULE)image,
+                TRUE,
+                TRUE,
+                VK_F9,
+                FALSE,
+                TRUE,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.20f,
+                2.25f,
+                1.50f,
+                0.65f)) {
+            fputs("FAIL: manual controller camera accepted a mismatched facing seam\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallSplitScreenRender();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: manual controller-camera facing mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        image[RVA_POSITION_SET_FORWARD] = saved_position_set_forward;
+
+        if (!SudekiMpInstallSplitScreenRender(
+                (HMODULE)image,
+                TRUE,
+                TRUE,
+                VK_F9,
+                FALSE,
+                TRUE,
+                FALSE,
+                FALSE,
+                FALSE,
+                0.20f,
+                2.25f,
+                1.50f,
+                0.65f)) {
+            fprintf(stderr,
+                "FAIL: manual controller-camera exact-image install rejected (error=%lu)\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        } else {
+            if (*(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) ==
+                    image + RVA_CAMERA_INPUT_EVENT) {
+                fputs("FAIL: manual controller camera did not isolate P1 camera broadcasts\n",
+                    stderr);
+                ++failures;
+            }
+            SudekiMpUninstallSplitScreenRender();
+            if (*(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
+                    image + RVA_CAMERA_INPUT_EVENT) {
+                fputs("FAIL: manual controller-camera input slot was not restored\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        SudekiMpInputBridgeStop();
+    }
     {
         int32_t minimap_render_displacement;
 

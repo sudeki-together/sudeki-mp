@@ -357,7 +357,7 @@ static int test_dual_camera_authorization_is_exact_and_fail_closed(void) {
 static int test_dual_camera_bundle_is_all_or_nothing(void) {
     unsigned int mask;
 
-    for (mask = 0u; mask < 16u; ++mask) {
+    for (mask = 0u; mask < 32u; ++mask) {
         const int expected = mask == 0u ||
             mask == SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_EXACT;
         CHECK((SudekiMpTalosPostMoviePartyRestoreCameraBundleAllowed(mask) !=
@@ -369,7 +369,7 @@ static int test_dual_camera_bundle_is_all_or_nothing(void) {
 static int test_dual_camera_navigation_profile_is_exact(void) {
     unsigned int mask;
 
-    for (mask = 0u; mask < 16u; ++mask) {
+    for (mask = 0u; mask < 32u; ++mask) {
         CHECK((SudekiMpTalosPostMoviePartyRestoreCameraNavigationProfileAllowed(
             mask, FALSE) != FALSE) == (mask == 0u));
         CHECK((SudekiMpTalosPostMoviePartyRestoreCameraNavigationProfileAllowed(

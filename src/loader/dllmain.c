@@ -773,7 +773,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         (second_player_camera_enabled ?
             SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO : 0u) |
         (dual_camera_frame_cache_enabled ?
-            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE : 0u);
+            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_DUAL_CACHE : 0u) |
+        (second_player_controller_camera_enabled ?
+            SUDEKIMP_TALOS_POST_MOVIE_CAMERA_BUNDLE_PLAYER_TWO_ORBIT : 0u);
     talos_post_movie_dual_camera_enabled =
         talos_post_movie_party_restore_enabled &&
         talos_post_movie_camera_bundle_mask != 0u &&
@@ -910,7 +912,6 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
          player_interaction_requests_enabled ||
          merchant_checkout_trace_requested || save_book_vote_enabled ||
          experimental_blacksmith_ui_enabled ||
-         second_player_controller_camera_enabled ||
          native_second_player_camera_collision_enabled ||
          split_screen_ranged_model_isolation_enabled ||
          spirit_strike_viewport_effect_isolation_enabled ||
@@ -922,8 +923,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "talos_post_movie_party_restore_config=invalid "
             "reason=requires_closed_exact_asset_profile_normal_control_"
             "separation_p2_movement_p2_weak_attack_exactly_one_input_source_"
-            "optional_exact_split_p2_camera_dual_cache_bundle_paired_with_"
-            "camera_relative_movement_and_no_legacy_talos_carry_staging_"
+            "optional_exact_split_p2_camera_dual_cache_controller_orbit_"
+            "bundle_paired_with_camera_relative_movement_and_no_legacy_"
+            "talos_carry_staging_"
             "character_switch_or_other_hook_owner\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
