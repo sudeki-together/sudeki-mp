@@ -94,4 +94,17 @@ int SudekiMpLocalViewportActivationPolicy(
     int global_presentation_clear
 );
 
+/* Select one stable seat for the next native full-frame render pass.  The
+ * ordinary path advances through active seat indices in ascending order and
+ * wraps.  A serialized owner-pinned presentation (for example QuickMenu)
+ * keeps rendering the exact owner seat until the caller releases the pin.
+ * The compact viewport ordinal is deliberately never used as ownership. */
+int SudekiMpLocalViewportNextRenderSeat(
+    uint8_t active_human_mask,
+    uint8_t current_seat,
+    int owner_pin_active,
+    uint8_t owner_seat,
+    uint8_t *next_seat
+);
+
 #endif

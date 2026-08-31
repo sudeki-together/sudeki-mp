@@ -3,6 +3,7 @@
 #include "cleanroom/audio.h"
 #include "cleanroom/engine.h"
 #include "engine/blacksmith_ui_presenter.h"
+#include "engine/coop_roster_assignment.h"
 #include "engine/log.h"
 #include "engine/player_statehood.h"
 #include "engine/save_book_vote.h"
@@ -16,6 +17,7 @@
 #include "hooks/talos_coop_balance.h"
 #include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
+#include "input/local_input_hub.h"
 
 #include <stdint.h>
 #include <limits.h>
@@ -795,7 +797,14 @@ static unsigned int roster_talos_stagger_limit;
 static unsigned int roster_talos_stagger_window;
 static unsigned int roster_player_one;
 static unsigned int roster_player_two;
+static unsigned int roster_player_three;
+static unsigned int roster_player_count;
 static unsigned int roster_cursor;
+static uint32_t roster_external_previous_buttons[
+    SUDEKIMP_LOCAL_INPUT_MAX_SEATS];
+static uint32_t roster_external_input_generation[
+    SUDEKIMP_LOCAL_INPUT_MAX_SEATS];
+static BOOL roster_external_activation_in_progress;
 static BOOL multiplayer_requested;
 static BOOL multiplayer_active;
 static BOOL multiplayer_input_ready;
@@ -873,8 +882,9 @@ enum {
     NATIVE_ROSTER_MODE = 1u,
     NATIVE_ROSTER_PLAYER_ONE = 2u,
     NATIVE_ROSTER_PLAYER_TWO = 3u,
-    NATIVE_ROSTER_CONFIRM = 4u,
-    NATIVE_ROSTER_SETTINGS = 5u
+    NATIVE_ROSTER_PLAYER_THREE = 4u,
+    NATIVE_ROSTER_CONFIRM = 5u,
+    NATIVE_ROSTER_SETTINGS = 6u
 };
 
 static uint32_t float_bits(float value) {
@@ -1009,6 +1019,38 @@ static unsigned int roster_actor_type(unsigned int actor) {
     return actor < MENU_ACTOR_COUNT ? types[actor] : 0u;
 }
 
+static BOOL roster_three_seat_available(void) {
+    return SudekiMpSplitScreenRosterSeatCapacity() >= 3u;
+}
+
+static BOOL roster_build_assignment(
+    SudekiMpCoopRosterAssignment *assignment
+) {
+    if (assignment == NULL ||
+        (roster_player_count != 2u && roster_player_count != 3u)) {
+        return FALSE;
+    }
+    ZeroMemory(assignment, sizeof(*assignment));
+    assignment->active_human_mask = roster_player_count == 3u ? 0x07u : 0x03u;
+    assignment->actor_type_by_seat[0] =
+        roster_actor_type(roster_player_one);
+    assignment->actor_type_by_seat[1] =
+        roster_actor_type(roster_player_two);
+    if (roster_player_count == 3u) {
+        assignment->actor_type_by_seat[2] =
+            roster_actor_type(roster_player_three);
+    }
+    return SudekiMpCoopRosterAssignmentFitsCapacity(
+        assignment, SudekiMpSplitScreenRosterSeatCapacity());
+}
+
+static BOOL roster_publish_assignment(void) {
+    SudekiMpCoopRosterAssignment assignment;
+
+    return roster_build_assignment(&assignment) &&
+        SudekiMpSplitScreenSetRosterAssignment(&assignment);
+}
+
 void SudekiMpCleanroomMenuSetLoadedSaveCoopAutostart(BOOL enabled) {
     loaded_save_coop_autostart_enabled = enabled ? TRUE : FALSE;
     loaded_save_coop_autostart_roster_published = FALSE;
@@ -1107,18 +1149,35 @@ static unsigned int roster_first_available_player_two_card(void) {
     return 4u;
 }
 
-static unsigned int roster_actor_from_label(const char *label) {
+static unsigned int roster_first_available_player_three_card(void) {
+    unsigned int card;
+
+    for (card = 0u; card < MENU_ACTOR_COUNT; ++card) {
+        unsigned int actor = (unsigned int)roster_display_actor(card);
+
+        if (actor != roster_player_one && actor != roster_player_two) {
+            return card;
+        }
+    }
+    return 4u;
+}
+
+static BOOL roster_actor_from_label_exact(
+    const char *label,
+    unsigned int *actor_result
+) {
     unsigned int actor;
 
-    if (label == NULL) {
-        return SUDEKIMP_CLEANROOM_AILISH;
+    if (label == NULL || actor_result == NULL) {
+        return FALSE;
     }
     for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
         if (_stricmp(label, roster_actor_label(actor)) == 0) {
-            return actor;
+            *actor_result = actor;
+            return TRUE;
         }
     }
-    return SUDEKIMP_CLEANROOM_AILISH;
+    return FALSE;
 }
 
 static void roster_build_persistence_path(void) {
@@ -1147,7 +1206,13 @@ static void roster_build_persistence_path(void) {
 static void roster_load_persistence(void) {
     char player_one[32];
     char player_two[32];
+    char player_three[32];
     char mode[16];
+    unsigned int loaded_player_one = SUDEKIMP_CLEANROOM_AILISH;
+    unsigned int loaded_player_two = SUDEKIMP_CLEANROOM_TAL;
+    unsigned int loaded_player_three = SUDEKIMP_CLEANROOM_BUKI;
+    unsigned int loaded_player_count;
+    BOOL assignment_valid;
 
     if (roster_persistence_path[0] == '\0') {
         return;
@@ -1156,15 +1221,41 @@ static void roster_load_persistence(void) {
         sizeof(player_one), roster_persistence_path);
     GetPrivateProfileStringA("Roster", "PlayerTwo", "Tal", player_two,
         sizeof(player_two), roster_persistence_path);
+    GetPrivateProfileStringA("Roster", "PlayerThree", "Buki", player_three,
+        sizeof(player_three), roster_persistence_path);
     GetPrivateProfileStringA("Roster", "Mode", "Single", mode,
         sizeof(mode), roster_persistence_path);
-    roster_player_one = roster_actor_from_label(player_one);
-    roster_player_two = roster_actor_from_label(player_two);
-    if (roster_player_one == roster_player_two) {
+    loaded_player_count = (unsigned int)GetPrivateProfileIntA(
+        "Roster", "PlayerCount", 2, roster_persistence_path);
+    assignment_valid =
+        (loaded_player_count == 2u || loaded_player_count == 3u) &&
+        roster_actor_from_label_exact(player_one, &loaded_player_one) &&
+        roster_actor_from_label_exact(player_two, &loaded_player_two) &&
+        (loaded_player_count != 3u ||
+            roster_actor_from_label_exact(
+                player_three, &loaded_player_three)) &&
+        loaded_player_one != loaded_player_two &&
+        (loaded_player_count != 3u ||
+            (loaded_player_three != loaded_player_one &&
+             loaded_player_three != loaded_player_two));
+    if (assignment_valid) {
+        roster_player_count = loaded_player_count;
+        roster_player_one = loaded_player_one;
+        roster_player_two = loaded_player_two;
+        roster_player_three = loaded_player_count == 3u ?
+            loaded_player_three : SUDEKIMP_CLEANROOM_BUKI;
+    }
+    else {
+        roster_player_count = 2u;
         roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
         roster_player_two = SUDEKIMP_CLEANROOM_TAL;
+        roster_player_three = SUDEKIMP_CLEANROOM_BUKI;
+        SudekiMpLogWrite(
+            "cleanroom_menu event=native_roster_persistence status=rejected "
+            "reason=invalid_player_count_label_or_duplicate "
+            "fallback=single_player_safe_defaults\r\n");
     }
-    roster_coop_profile = _stricmp(mode, "Coop") == 0;
+    roster_coop_profile = assignment_valid && _stricmp(mode, "Coop") == 0;
     roster_talos_tuning_enabled = GetPrivateProfileIntA(
         "TalosCoop", "Enabled", 0, roster_persistence_path) != 0;
     /* The settings page must also work with an existing late-game save.  An
@@ -1172,7 +1263,7 @@ static void roster_load_persistence(void) {
      * profile even when an older build left Mode=Single behind.  Choosing the
      * visible Single Player action below disables both values again. */
     if (roster_talos_tuning_enabled) {
-        roster_coop_profile = TRUE;
+        roster_coop_profile = assignment_valid;
     }
     roster_talos_health_scale = (unsigned int)GetPrivateProfileIntA(
         "TalosCoop", "HealthScale", 2, roster_persistence_path);
@@ -1209,10 +1300,24 @@ static void roster_load_persistence(void) {
      * provisional; a Single profile must therefore clear an older in-memory
      * co-op lock just as a Coop profile republishes it. */
     roster_locked = FALSE;
-    if (roster_coop_profile) {
-        roster_locked = SudekiMpSplitScreenSetRosterTypes(
-            roster_actor_type(roster_player_one),
-            roster_actor_type(roster_player_two));
+    if (roster_coop_profile &&
+        (roster_player_count != 3u || roster_three_seat_available())) {
+        roster_locked = roster_publish_assignment();
+        if (!roster_locked) {
+            roster_coop_profile = FALSE;
+            SudekiMpLogWrite(
+                "cleanroom_menu event=native_roster_persistence "
+                "status=rejected reason=runtime_assignment_rejected "
+                "fallback=single_profile_no_partial_roles\r\n");
+        }
+    }
+    else if (roster_coop_profile) {
+        roster_coop_profile = FALSE;
+        (void)SudekiMpSplitScreenClearRosterTypes();
+        SudekiMpLogWrite(
+            "cleanroom_menu event=native_roster_persistence status=rejected "
+            "reason=three_seat_profile_runtime_unavailable "
+            "fallback=single_profile_no_role_drop\r\n");
     } else if (!SudekiMpSplitScreenClearRosterTypes()) {
         SudekiMpLogFormat(
             "cleanroom_menu event=native_roster_persistence status=rejected "
@@ -1221,11 +1326,14 @@ static void roster_load_persistence(void) {
     }
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=loaded "
-        "path=%s p1=%s p2=%s mode=%s talos_tuning=%s "
+        "path=%s players=%lu p1=%s p2=%s p3=%s mode=%s talos_tuning=%s "
         "talos_health=%ux talos_stagger=%u/%us policy=sidecar_profile\r\n",
         roster_persistence_path,
+        (unsigned long)roster_player_count,
         roster_actor_label(roster_player_one),
         roster_actor_label(roster_player_two),
+        roster_player_count == 3u ?
+            roster_actor_label(roster_player_three) : "none",
         roster_coop_profile ? "Coop" : "Single",
         roster_talos_tuning_enabled ? "on" : "off",
         roster_talos_health_scale,
@@ -1235,13 +1343,20 @@ static void roster_load_persistence(void) {
 }
 
 static void roster_save_persistence(void) {
+    char player_count[8];
+
     if (roster_persistence_path[0] == '\0') {
         return;
     }
+    wsprintfA(player_count, "%u", roster_player_count);
+    WritePrivateProfileStringA("Roster", "PlayerCount",
+        player_count, roster_persistence_path);
     WritePrivateProfileStringA("Roster", "PlayerOne",
         roster_actor_label(roster_player_one), roster_persistence_path);
     WritePrivateProfileStringA("Roster", "PlayerTwo",
         roster_actor_label(roster_player_two), roster_persistence_path);
+    WritePrivateProfileStringA("Roster", "PlayerThree",
+        roster_actor_label(roster_player_three), roster_persistence_path);
     WritePrivateProfileStringA("Roster", "Mode",
         roster_coop_profile ? "Coop" : "Single", roster_persistence_path);
     WritePrivateProfileStringA("TalosCoop", "Enabled",
@@ -1266,11 +1381,14 @@ static void roster_save_persistence(void) {
         roster_talos_stagger_window);
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster_persistence status=saved "
-        "path=%s p1=%s p2=%s mode=%s talos_tuning=%s "
+        "path=%s players=%lu p1=%s p2=%s p3=%s mode=%s talos_tuning=%s "
         "talos_health=%ux talos_stagger=%u/%us policy=sidecar_profile\r\n",
         roster_persistence_path,
+        (unsigned long)roster_player_count,
         roster_actor_label(roster_player_one),
         roster_actor_label(roster_player_two),
+        roster_player_count == 3u ?
+            roster_actor_label(roster_player_three) : "none",
         roster_coop_profile ? "Coop" : "Single",
         roster_talos_tuning_enabled ? "on" : "off",
         roster_talos_health_scale,
@@ -2094,11 +2212,14 @@ static unsigned int native_roster_title_text_width(const char *text) {
     if (strcmp(text, "SUDEKI TOGETHER") == 0) return 129u;
     if (strcmp(text, "Single Player") == 0) return 91u;
     if (strcmp(text, "Co-op") == 0) return 42u;
+    if (strcmp(text, "Co-op (2 Players)") == 0) return 112u;
+    if (strcmp(text, "Co-op (3 Players)") == 0) return 112u;
     if (strcmp(text, "SudekiMP Settings") == 0) return 124u;
     if (strcmp(text, "TALOS CO-OP SETTINGS") == 0) return 157u;
     if (strcmp(text, "ENTER SELECTS") == 0) return 108u;
     if (strcmp(text, "PLAYER 1 - CHOOSE YOUR HERO") == 0) return 213u;
     if (strcmp(text, "PLAYER 2 - CHOOSE YOUR HERO") == 0) return 213u;
+    if (strcmp(text, "PLAYER 3 - CHOOSE YOUR HERO") == 0) return 213u;
     if (strcmp(text, "CONFIRM CO-OP ROSTER") == 0) return 160u;
     if (strcmp(text, "Ailish") == 0) return 36u;
     if (strcmp(text, "Tal") == 0) return 20u;
@@ -2121,13 +2242,14 @@ static BOOL native_roster_submit_centered_title_text(
 
 static unsigned int native_roster_item_count(void) {
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
-        return 4u;
+        return roster_three_seat_available() ? 5u : 4u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
-        return 4u;
+        return roster_player_count == 3u ? 5u : 4u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
-        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
         return 5u;
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
@@ -2319,8 +2441,12 @@ static void native_roster_restore_vanilla_items(void *controller) {
 }
 
 static void native_roster_submit_page(void) {
-    static const char *const mode_labels[] = {
-        "Single Player", "Co-op", "SudekiMP Settings", "Back"
+    static const char *const mode_two_seat_labels[] = {
+        "Single Player", "Co-op (2 Players)", "SudekiMP Settings", "Back"
+    };
+    static const char *const mode_three_seat_labels[] = {
+        "Single Player", "Co-op (2 Players)", "Co-op (3 Players)",
+        "SudekiMP Settings", "Back"
     };
     static const char *const actor_labels[] = {"Ailish", "Tal", "Buki", "Elco"};
     /* The card texture uses its own centered 640-wide overlay.  Font-1 title
@@ -2331,6 +2457,7 @@ static void native_roster_submit_page(void) {
     };
     char confirm_player_one[28];
     char confirm_player_two[28];
+    char confirm_player_three[28];
     char talos_tuning[28];
     char talos_health[28];
     char talos_stagger[28];
@@ -2343,7 +2470,7 @@ static void native_roster_submit_page(void) {
     unsigned int index;
     unsigned int alpha;
     unsigned int prompt_y;
-    const char *confirm_labels[4];
+    const char *confirm_labels[5];
     const char *settings_labels[5];
 
     if (!roster_native_screen || roster_pending_controller == NULL) {
@@ -2352,8 +2479,9 @@ static void native_roster_submit_page(void) {
     selection = roster_native_selection;
     if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
         heading = "SUDEKI TOGETHER";
-        labels = mode_labels;
-        count = 4u;
+        labels = roster_three_seat_available() ?
+            mode_three_seat_labels : mode_two_seat_labels;
+        count = roster_three_seat_available() ? 5u : 4u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE) {
         heading = "PLAYER 1 - CHOOSE YOUR HERO";
@@ -2365,6 +2493,11 @@ static void native_roster_submit_page(void) {
         labels = actor_labels;
         count = 5u;
     }
+    else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
+        heading = "PLAYER 3 - CHOOSE YOUR HERO";
+        labels = actor_labels;
+        count = 5u;
+    }
     else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
         wsprintfA(confirm_player_one, "Player 1: %s",
             roster_actor_label(roster_player_one));
@@ -2372,11 +2505,20 @@ static void native_roster_submit_page(void) {
             roster_actor_label(roster_player_two));
         confirm_labels[0] = confirm_player_one;
         confirm_labels[1] = confirm_player_two;
-        confirm_labels[2] = "Lock In";
-        confirm_labels[3] = "Back";
+        if (roster_player_count == 3u) {
+            wsprintfA(confirm_player_three, "Player 3: %s",
+                roster_actor_label(roster_player_three));
+            confirm_labels[2] = confirm_player_three;
+            confirm_labels[3] = "Lock In";
+            confirm_labels[4] = "Back";
+        }
+        else {
+            confirm_labels[2] = "Lock In";
+            confirm_labels[3] = "Back";
+        }
         heading = "CONFIRM CO-OP ROSTER";
         labels = confirm_labels;
-        count = 4u;
+        count = roster_player_count == 3u ? 5u : 4u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
         wsprintfA(talos_tuning, "Talos Tuning: %s",
@@ -2404,7 +2546,8 @@ static void native_roster_submit_page(void) {
         return;
     }
     prompt_y = (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
-        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) ? 458u :
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) ? 458u :
         NATIVE_ROSTER_PROMPT_Y;
     (void)native_roster_submit_centered_title_text(
         heading,
@@ -2412,7 +2555,8 @@ static void native_roster_submit_page(void) {
         NATIVE_ROSTER_HEADING_Y,
         0xf0dc9600u | alpha);
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
-        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
         for (index = 0u; index < 4u; ++index) {
             (void)native_roster_submit_centered_title_text(
                 labels[index],
@@ -2448,7 +2592,8 @@ static void native_roster_refresh_screen(void *controller) {
     roster_native_rows_active = FALSE;
     roster_button_texture_dirty = TRUE;
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
-        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
         /* Loading belongs to the title-update transition, not the D3D draw
          * callback.  Sudeki's cache may schedule I/O and must retain its own
          * normal update/worker ordering. */
@@ -2482,9 +2627,13 @@ static void native_roster_refresh_screen(void *controller) {
 }
 
 static const char *native_roster_selected_action(void) {
-    static const char *const mode_actions[] = {
-        "SudekiMPSinglePlayer", "SudekiMPCoop", "SudekiMPSettings",
+    static const char *const mode_two_seat_actions[] = {
+        "SudekiMPSinglePlayer", "SudekiMPCoop2", "SudekiMPSettings",
         "SudekiMPRosterBack"
+    };
+    static const char *const mode_three_seat_actions[] = {
+        "SudekiMPSinglePlayer", "SudekiMPCoop2", "SudekiMPCoop3",
+        "SudekiMPSettings", "SudekiMPRosterBack"
     };
     static const char *const p1_actions[] = {
         "SudekiMPP1Ailish", "SudekiMPP1Tal", "SudekiMPP1Buki",
@@ -2494,9 +2643,17 @@ static const char *native_roster_selected_action(void) {
         "SudekiMPP2Ailish", "SudekiMPP2Tal", "SudekiMPP2Buki",
         "SudekiMPP2Elco", "SudekiMPRosterBack"
     };
-    static const char *const confirm_actions[] = {
+    static const char *const p3_actions[] = {
+        "SudekiMPP3Ailish", "SudekiMPP3Tal", "SudekiMPP3Buki",
+        "SudekiMPP3Elco", "SudekiMPRosterBack"
+    };
+    static const char *const confirm_two_seat_actions[] = {
         "SudekiMPRosterP1", "SudekiMPRosterP2", "SudekiMPRosterLock",
         "SudekiMPRosterBack"
+    };
+    static const char *const confirm_three_seat_actions[] = {
+        "SudekiMPRosterP1", "SudekiMPRosterP2", "SudekiMPRosterP3",
+        "SudekiMPRosterLock", "SudekiMPRosterBack"
     };
     static const char *const settings_actions[] = {
         "SudekiMPTalosToggle", "SudekiMPTalosHealth",
@@ -2504,9 +2661,13 @@ static const char *native_roster_selected_action(void) {
         "SudekiMPRosterBack"
     };
 
-    if (roster_native_screen_kind == NATIVE_ROSTER_MODE &&
-        roster_native_selection < 4u) {
-        return mode_actions[roster_native_selection];
+    if (roster_native_screen_kind == NATIVE_ROSTER_MODE) {
+        if (roster_three_seat_available() && roster_native_selection < 5u) {
+            return mode_three_seat_actions[roster_native_selection];
+        }
+        if (!roster_three_seat_available() && roster_native_selection < 4u) {
+            return mode_two_seat_actions[roster_native_selection];
+        }
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE &&
         roster_native_selection < 5u) {
@@ -2516,9 +2677,17 @@ static const char *native_roster_selected_action(void) {
         roster_native_selection < 5u) {
         return p2_actions[roster_native_selection];
     }
-    if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM &&
-        roster_native_selection < 4u) {
-        return confirm_actions[roster_native_selection];
+    if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE &&
+        roster_native_selection < 5u) {
+        return p3_actions[roster_native_selection];
+    }
+    if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
+        if (roster_player_count == 3u && roster_native_selection < 5u) {
+            return confirm_three_seat_actions[roster_native_selection];
+        }
+        if (roster_player_count == 2u && roster_native_selection < 4u) {
+            return confirm_two_seat_actions[roster_native_selection];
+        }
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS &&
         roster_native_selection < 5u) {
@@ -2725,6 +2894,9 @@ static BOOL native_roster_confirm_input_down(unsigned int event) {
      * physical press from a stale title-controller event queued by the page
      * transition.  VK_GAMEPAD_A is 0xC3 on Windows 10+; spelling the value
      * directly keeps the MinGW build compatible with older SDK headers. */
+    if (roster_external_activation_in_progress) {
+        return TRUE;
+    }
     if (event == 2u) {
         return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     }
@@ -2756,8 +2928,7 @@ static BOOL native_roster_navigation(
         (event != 6u && event != 7u)) {
         return FALSE;
     }
-    count = roster_native_screen_kind == NATIVE_ROSTER_MODE ? 4u :
-        (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM ? 4u : 5u);
+    count = native_roster_item_count();
     selection = roster_native_selection;
     if (count == 0u || count > NATIVE_ROSTER_ROW_COUNT || selection >= count) {
         return FALSE;
@@ -2774,10 +2945,14 @@ static BOOL native_roster_navigation(
     /* Player 2 can see Player 1's choice, but cannot focus or confirm it.
      * Treat that card as a disabled item instead of accepting a press and
      * silently rejecting it later. */
-    while (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO &&
+    while ((roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+            roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) &&
            selection < MENU_ACTOR_COUNT &&
-           (unsigned int)roster_display_actor(selection) ==
-               roster_player_one) {
+           ((unsigned int)roster_display_actor(selection) ==
+                roster_player_one ||
+            (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE &&
+             (unsigned int)roster_display_actor(selection) ==
+                roster_player_two))) {
         if (event == 6u) {
             selection = selection == 0u ? count - 1u : selection - 1u;
         }
@@ -2972,6 +3147,8 @@ static void log_pc_front_end_update(void *controller, const char *edge) {
         (unsigned long)flags);
 }
 
+static void service_native_roster_external_seat_input(void *controller);
+
 static void __attribute__((thiscall)) cleanroom_pc_front_end_update_trace(
     void *controller,
     float delta_seconds
@@ -2982,6 +3159,8 @@ static void __attribute__((thiscall)) cleanroom_pc_front_end_update_trace(
     if (original_front_end_update != NULL) {
         original_front_end_update(controller, delta_seconds);
     }
+    service_native_roster_external_seat_input(
+        roster_native_page_controller);
     title_controller = roster_native_page_controller;
     if (roster_native_page_takeover_pending && roster_native_screen &&
         controller != NULL && title_controller != NULL &&
@@ -3215,12 +3394,15 @@ static void roster_begin_native_new_game(
     native_roster_rebuild_from_native_menu(controller);
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster state=native_mode reason=new_game "
-        "phase=%lu event_code=%lu p1=%s p2=%s "
+        "phase=%lu event_code=%lu players=%lu p1=%s p2=%s p3=%s "
         "presentation=native_state10_independent_state6_sfe_option_rows\r\n",
         (unsigned long)phase,
         (unsigned long)event,
+        (unsigned long)roster_player_count,
         roster_actor_label(roster_player_one),
-        roster_actor_label(roster_player_two)
+        roster_actor_label(roster_player_two),
+        roster_player_count == 3u ?
+            roster_actor_label(roster_player_three) : "none"
     );
 }
 
@@ -3373,7 +3555,7 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         }
         else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE) {
             roster_native_screen_kind = NATIVE_ROSTER_MODE;
-            roster_native_selection = 1u;
+            roster_native_selection = roster_player_count == 3u ? 2u : 1u;
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
@@ -3384,16 +3566,26 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
-        else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
+        else if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
             roster_native_screen_kind = NATIVE_ROSTER_PLAYER_TWO;
             roster_native_selection =
                 roster_display_card_for_actor(roster_player_two);
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_CONFIRM) {
+            roster_native_screen_kind = roster_player_count == 3u ?
+                NATIVE_ROSTER_PLAYER_THREE : NATIVE_ROSTER_PLAYER_TWO;
+            roster_native_selection =
+                roster_display_card_for_actor(roster_player_count == 3u ?
+                    roster_player_three : roster_player_two);
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
         else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
             roster_native_screen_kind = NATIVE_ROSTER_MODE;
-            roster_native_selection = 2u;
+            roster_native_selection =
+                roster_three_seat_available() ? 3u : 2u;
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
@@ -3439,7 +3631,16 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         roster_pending_controller = NULL;
         return result;
     }
-    if (_stricmp(action, "SudekiMPCoop") == 0) {
+    if (_stricmp(action, "SudekiMPCoop2") == 0 ||
+        _stricmp(action, "SudekiMPCoop3") == 0) {
+        roster_player_count = _stricmp(action, "SudekiMPCoop3") == 0 ?
+            3u : 2u;
+        if (roster_player_count == 3u && !roster_three_seat_available()) {
+            SudekiMpLogWrite(
+                "cleanroom_menu event=native_roster status=rejected "
+                "reason=three_seat_runtime_unavailable\r\n");
+            return 1u;
+        }
         roster_native_screen_kind = NATIVE_ROSTER_PLAYER_ONE;
         roster_native_selection =
             roster_display_card_for_actor(roster_player_one);
@@ -3514,8 +3715,36 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             return 1u;
         }
         roster_player_two = actor;
+        if (roster_player_count == 3u) {
+            roster_native_screen_kind = NATIVE_ROSTER_PLAYER_THREE;
+            roster_native_selection =
+                roster_first_available_player_three_card();
+        }
+        else {
+            roster_native_screen_kind = NATIVE_ROSTER_CONFIRM;
+            roster_native_selection = 2u;
+        }
+        native_roster_start_page_transition(FALSE);
+        native_roster_rebuild_from_native_menu(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPP3Ailish") == 0 ||
+        _stricmp(action, "SudekiMPP3Tal") == 0 ||
+        _stricmp(action, "SudekiMPP3Buki") == 0 ||
+        _stricmp(action, "SudekiMPP3Elco") == 0) {
+        actor = _stricmp(action, "SudekiMPP3Ailish") == 0 ? 0u :
+            (_stricmp(action, "SudekiMPP3Tal") == 0 ? 1u :
+            (_stricmp(action, "SudekiMPP3Buki") == 0 ? 2u : 3u));
+        actor = (unsigned int)roster_display_actor(actor);
+        if (actor == roster_player_one || actor == roster_player_two) {
+            SudekiMpLogWrite(
+                "cleanroom_menu event=native_roster status=rejected "
+                "reason=duplicate_character\r\n");
+            return 1u;
+        }
+        roster_player_three = actor;
         roster_native_screen_kind = NATIVE_ROSTER_CONFIRM;
-        roster_native_selection = 2u;
+        roster_native_selection = 3u;
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
@@ -3536,11 +3765,19 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         native_roster_rebuild_from_native_menu(controller);
         return 1u;
     }
+    if (_stricmp(action, "SudekiMPRosterP3") == 0) {
+        if (roster_player_count != 3u) {
+            return 1u;
+        }
+        roster_native_screen_kind = NATIVE_ROSTER_PLAYER_THREE;
+        roster_native_selection =
+            roster_display_card_for_actor(roster_player_three);
+        native_roster_start_page_transition(FALSE);
+        native_roster_rebuild_from_native_menu(controller);
+        return 1u;
+    }
     if (_stricmp(action, "SudekiMPRosterLock") == 0) {
-        if (roster_player_one == roster_player_two ||
-            !SudekiMpSplitScreenSetRosterTypes(
-                roster_actor_type(roster_player_one),
-                roster_actor_type(roster_player_two))) {
+        if (!roster_publish_assignment()) {
             SudekiMpLogWrite(
                 "cleanroom_menu event=native_roster status=rejected "
                 "reason=role_binding_failed\r\n");
@@ -3574,9 +3811,13 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
         roster_replaying_new_game = TRUE;
         SudekiMpLogFormat(
             "cleanroom_menu event=native_roster status=locked "
-            "p1=%s p2=%s policy=native_menu_then_native_resume\r\n",
+            "players=%lu p1=%s p2=%s p3=%s "
+            "policy=native_menu_then_native_resume\r\n",
+            (unsigned long)roster_player_count,
             roster_actor_label(roster_player_one),
-            roster_actor_label(roster_player_two));
+            roster_actor_label(roster_player_two),
+            roster_player_count == 3u ?
+                roster_actor_label(roster_player_three) : "none");
         result = original_front_end_action == NULL ? 0u :
             original_front_end_action(roster_pending_controller,
                 roster_pending_phase, roster_pending_event,
@@ -3590,25 +3831,118 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
     return 1u;
 }
 
+static void service_native_roster_external_seat_input(void *controller) {
+    unsigned int owner_seat =
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ? 1u :
+        (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE ? 2u : 0u);
+    unsigned int seat_index;
+
+    if (SudekiMpLocalInputHubRequestedMask() !=
+            SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK) {
+        return;
+    }
+    for (seat_index = 1u; seat_index <= 2u; ++seat_index) {
+        SudekiMpInputBridgeState state;
+        uint32_t generation;
+        uint32_t rising;
+
+        if (!SudekiMpLocalInputHubPollRaw(seat_index, &state)) {
+            roster_external_previous_buttons[seat_index] = 0u;
+            roster_external_input_generation[seat_index] = 0u;
+            continue;
+        }
+        generation =
+            SudekiMpLocalInputHubSeatIdentityGeneration(seat_index);
+        if (generation == 0u ||
+            roster_external_input_generation[seat_index] != generation) {
+            roster_external_input_generation[seat_index] = generation;
+            roster_external_previous_buttons[seat_index] = state.buttons;
+            continue;
+        }
+        rising = state.buttons &
+            ~roster_external_previous_buttons[seat_index];
+        roster_external_previous_buttons[seat_index] = state.buttons;
+        if (!roster_native_screen ||
+            !roster_native_page_state_active ||
+            roster_native_page_takeover_pending ||
+            controller == NULL || controller != roster_pending_controller ||
+            seat_index != owner_seat || rising == 0u) {
+            continue;
+        }
+        if ((rising & SUDEKIMP_BRIDGE_BUTTON_B) != 0u) {
+            SudekiMpLogFormat(
+                "cleanroom_menu event=native_roster_external_input "
+                "seat=%u action=back page=%lu\r\n",
+                seat_index + 1u,
+                (unsigned long)roster_native_screen_kind);
+            roster_native_selection = 4u;
+            roster_confirm_input_armed = TRUE;
+            roster_external_activation_in_progress = TRUE;
+            (void)cleanroom_front_end_action(controller, 5u, 0u, 0u);
+            roster_external_activation_in_progress = FALSE;
+            return;
+        }
+        if ((rising & (SUDEKIMP_BRIDGE_BUTTON_DPAD_LEFT |
+                       SUDEKIMP_BRIDGE_BUTTON_DPAD_UP)) != 0u) {
+            SudekiMpLogFormat(
+                "cleanroom_menu event=native_roster_external_input "
+                "seat=%u action=previous page=%lu\r\n",
+                seat_index + 1u,
+                (unsigned long)roster_native_screen_kind);
+            (void)cleanroom_front_end_action(controller, 5u, 6u, 0u);
+            return;
+        }
+        if ((rising & (SUDEKIMP_BRIDGE_BUTTON_DPAD_RIGHT |
+                       SUDEKIMP_BRIDGE_BUTTON_DPAD_DOWN)) != 0u) {
+            SudekiMpLogFormat(
+                "cleanroom_menu event=native_roster_external_input "
+                "seat=%u action=next page=%lu\r\n",
+                seat_index + 1u,
+                (unsigned long)roster_native_screen_kind);
+            (void)cleanroom_front_end_action(controller, 5u, 7u, 0u);
+            return;
+        }
+        if ((rising & SUDEKIMP_BRIDGE_BUTTON_A) != 0u) {
+            SudekiMpLogFormat(
+                "cleanroom_menu event=native_roster_external_input "
+                "seat=%u action=confirm page=%lu\r\n",
+                seat_index + 1u,
+                (unsigned long)roster_native_screen_kind);
+            roster_confirm_input_armed = TRUE;
+            roster_external_activation_in_progress = TRUE;
+            (void)cleanroom_front_end_action(controller, 5u, 0u, 0u);
+            roster_external_activation_in_progress = FALSE;
+            return;
+        }
+    }
+}
+
 static void roster_resume_native_new_game(void) {
     if (!roster_waiting_new_game || !roster_locked ||
         original_front_end_action == NULL || roster_pending_controller == NULL) {
         return;
     }
     roster_save_persistence();
-    (void)SudekiMpSplitScreenSetRosterTypes(
-        roster_actor_type(roster_player_one),
-        roster_actor_type(roster_player_two)
-    );
+    if (!roster_publish_assignment()) {
+        roster_locked = FALSE;
+        SudekiMpLogWrite(
+            "cleanroom_menu event=native_roster status=rejected "
+            "reason=resume_assignment_revalidation_failed\r\n");
+        return;
+    }
     roster_waiting_new_game = FALSE;
     menu_open = FALSE;
     menu_texture_dirty = TRUE;
     roster_replaying_new_game = TRUE;
     SudekiMpLogFormat(
         "cleanroom_menu event=native_roster state=resume "
-        "action=StartNewGame p1=%s p2=%s policy=native_action_replay\r\n",
+        "action=StartNewGame players=%lu p1=%s p2=%s p3=%s "
+        "policy=native_action_replay\r\n",
+        (unsigned long)roster_player_count,
         roster_actor_label(roster_player_one),
-        roster_actor_label(roster_player_two)
+        roster_actor_label(roster_player_two),
+        roster_player_count == 3u ?
+            roster_actor_label(roster_player_three) : "none"
     );
     (void)original_front_end_action(
         roster_pending_controller,
@@ -4502,8 +4836,10 @@ static void clear_roster_resume_guard_after_gameplay_handoff(void) {
 }
 
 static void poll_roster_input(void) {
-    unsigned int *selected = roster_cursor == 0u ?
-        &roster_player_one : &roster_player_two;
+    unsigned int *selected = roster_cursor == 0u ? &roster_player_one :
+        (roster_cursor == 1u ? &roster_player_two : &roster_player_three);
+    BOOL up;
+    BOOL down;
     if (roster_native_screen || !roster_waiting_new_game || !owns_foreground()) {
         return;
     }
@@ -4521,8 +4857,16 @@ static void poll_roster_input(void) {
         );
         return;
     }
-    if (roster_key(1u, VK_UP) || roster_key(2u, VK_DOWN)) {
-        roster_cursor = roster_cursor == 0u ? 1u : 0u;
+    up = roster_key(1u, VK_UP);
+    down = roster_key(2u, VK_DOWN);
+    if (up || down) {
+        if (up) {
+            roster_cursor = roster_cursor == 0u ?
+                roster_player_count - 1u : roster_cursor - 1u;
+        }
+        else {
+            roster_cursor = (roster_cursor + 1u) % roster_player_count;
+        }
         menu_texture_dirty = TRUE;
     }
     if (roster_key(6u, VK_LEFT)) {
@@ -4534,23 +4878,28 @@ static void poll_roster_input(void) {
         menu_texture_dirty = TRUE;
     }
     if (roster_key(3u, VK_RETURN)) {
-        if (roster_player_one == roster_player_two) {
+        if (roster_player_one == roster_player_two ||
+            (roster_player_count == 3u &&
+             (roster_player_three == roster_player_one ||
+              roster_player_three == roster_player_two))) {
             SudekiMpLogWrite(
                 "cleanroom_menu event=co_op_roster status=rejected "
                 "reason=duplicate_character\r\n"
             );
             return;
         }
-        if (SudekiMpSplitScreenSetRosterTypes(
-                roster_actor_type(roster_player_one),
-                roster_actor_type(roster_player_two))) {
+        if (roster_publish_assignment()) {
             roster_locked = TRUE;
             menu_texture_dirty = TRUE;
             SudekiMpLogFormat(
                 "cleanroom_menu event=native_roster status=locked "
-                "p1=%s p2=%s policy=save_sidecar_then_native_resume\r\n",
+                "players=%lu p1=%s p2=%s p3=%s "
+                "policy=save_sidecar_then_native_resume\r\n",
+                (unsigned long)roster_player_count,
                 roster_actor_label(roster_player_one),
-                roster_actor_label(roster_player_two)
+                roster_actor_label(roster_player_two),
+                roster_player_count == 3u ?
+                    roster_actor_label(roster_player_three) : "none"
             );
         }
     }
@@ -4998,8 +5347,13 @@ static void draw_text(
  * character portraits remain runtime-owned resources; no extracted or copied
  * game pixels belong in this texture. */
 static uint32_t roster_player_selection_color(void) {
-    return roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ?
-        UINT32_C(0xff58aee8) : UINT32_C(0xffdf6158);
+    if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        return UINT32_C(0xff58aee8);
+    }
+    if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
+        return UINT32_C(0xff78c66a);
+    }
+    return UINT32_C(0xffdf6158);
 }
 
 static uint32_t roster_actor_card_color(unsigned int actor) {
@@ -5515,8 +5869,10 @@ static void draw_roster_character_card(
     fill_rectangle(pixels, pitch,
         left + 10, bottom - 5, right - 10, bottom - 2, actor_color);
     if (selected) {
-        const char *player_badge = roster_native_screen_kind ==
-            NATIVE_ROSTER_PLAYER_TWO ? "P2" : "P1";
+        const char *player_badge =
+            roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ? "P2" :
+            (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE ?
+                "P3" : "P1");
         fill_rectangle(pixels, pitch,
             left + 8, top - 13, left + 38, top + 2, selection_color);
         draw_text(pixels, pitch, left + 17, top - 9,
@@ -5601,9 +5957,11 @@ static void draw_roster_character_cards(uint32_t *pixels, int pitch) {
     unsigned int actor;
     const BOOL player_two = roster_native_screen_kind ==
         NATIVE_ROSTER_PLAYER_TWO;
+    const BOOL player_three = roster_native_screen_kind ==
+        NATIVE_ROSTER_PLAYER_THREE;
 
     if (roster_native_screen_kind != NATIVE_ROSTER_PLAYER_ONE &&
-        !player_two) {
+        !player_two && !player_three) {
         return;
     }
     for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
@@ -5612,7 +5970,11 @@ static void draw_roster_character_cards(uint32_t *pixels, int pitch) {
             pitch,
             actor,
             actor == roster_native_selection,
-            player_two && roster_display_actor(actor) == roster_player_one
+            (player_two &&
+                roster_display_actor(actor) == roster_player_one) ||
+            (player_three &&
+                (roster_display_actor(actor) == roster_player_one ||
+                 roster_display_actor(actor) == roster_player_two))
         );
     }
     draw_roster_character_back_button(
@@ -5795,8 +6157,28 @@ static BOOL update_menu_texture(void *texture) {
             pixels, locked.pitch, 250, 250,
             roster_actor_label(roster_player_two),
             UINT32_C(0xffffd166), 3);
+        if (roster_player_count == 3u) {
+            draw_text(
+                pixels, locked.pitch, 72, 350,
+                roster_cursor == 2u ? "> P3" : "  P3",
+                UINT32_C(0xffffffff), 3);
+            fill_rectangle(
+                pixels, locked.pitch, 178, 336, 232, 390,
+                UINT32_C(0xff284b35));
+            draw_text(
+                pixels, locked.pitch, 194, 350,
+                roster_actor_label(roster_player_three)[0] == '\0' ? "?" :
+                    (char[2]){
+                        roster_actor_label(roster_player_three)[0], '\0'},
+                UINT32_C(0xffffffff), 3);
+            draw_text(
+                pixels, locked.pitch, 250, 350,
+                roster_actor_label(roster_player_three),
+                UINT32_C(0xff80d890), 3);
+        }
         draw_text(
-            pixels, locked.pitch, 72, 370,
+            pixels, locked.pitch, 72,
+            roster_player_count == 3u ? 440 : 370,
             "ROLES LOCK BEFORE GAMEPLAY",
             UINT32_C(0xffb9c4d1), 2);
         result = unlock_rectangle(texture, 0u);
@@ -5977,7 +6359,8 @@ static BOOL update_roster_button_texture(void *texture) {
     fill_rectangle(pixels, locked.pitch, 0, 0,
         MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT, UINT32_C(0x00000000));
     if (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_ONE ||
-        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO) {
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO ||
+        roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
         draw_roster_character_cards(pixels, locked.pitch);
         result = unlock_rectangle(texture, 0u);
         if (FAILED(result)) {
@@ -7214,15 +7597,19 @@ static void draw_roster_native_portraits(void) {
     unsigned int actor;
 
     if (roster_native_screen_kind != NATIVE_ROSTER_PLAYER_ONE &&
-        roster_native_screen_kind != NATIVE_ROSTER_PLAYER_TWO) {
+        roster_native_screen_kind != NATIVE_ROSTER_PLAYER_TWO &&
+        roster_native_screen_kind != NATIVE_ROSTER_PLAYER_THREE) {
         return;
     }
     for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
         const float card_left = 40.0f + (float)actor * 144.0f;
         void *texture = roster_native_portrait_gpu_textures[actor];
-        const BOOL unavailable = roster_native_screen_kind ==
-            NATIVE_ROSTER_PLAYER_TWO &&
-            (unsigned int)roster_display_actor(actor) == roster_player_one;
+        const BOOL unavailable =
+            (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_TWO &&
+             (unsigned int)roster_display_actor(actor) == roster_player_one) ||
+            (roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE &&
+             ((unsigned int)roster_display_actor(actor) == roster_player_one ||
+              (unsigned int)roster_display_actor(actor) == roster_player_two));
 
         if (texture == NULL || unavailable) {
             continue;
@@ -7665,8 +8052,23 @@ static BOOL __attribute__((cdecl)) cleanroom_movie_play(
             return TRUE;
         }
     }
-    return original_movie_play == NULL ? FALSE :
-        original_movie_play(movie_name, skippable);
+    if (original_movie_play == NULL) {
+        return FALSE;
+    }
+    if (!SudekiMpSplitScreenNativeMovieOpening()) {
+        SudekiMpLogFormat(
+            "cleanroom_menu event=movie_play_gate status=rejected "
+            "name=%s reason=co_op_runtime_release_unconfirmed "
+            "policy=fail_closed_before_native_movie_takeover\r\n",
+            observed_movie_name[0] != '\0' ?
+                observed_movie_name : "<unreadable>");
+        return FALSE;
+    }
+    {
+        BOOL result = original_movie_play(movie_name, skippable);
+        SudekiMpSplitScreenNativeMovieClosed();
+        return result;
+    }
 }
 
 static BOOL install_cleanroom_menu_internal(
@@ -7793,7 +8195,14 @@ static BOOL install_cleanroom_menu_internal(
     roster_talos_stagger_window = 10u;
     roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
     roster_player_two = SUDEKIMP_CLEANROOM_TAL;
+    roster_player_three = SUDEKIMP_CLEANROOM_BUKI;
+    roster_player_count = 2u;
     roster_cursor = 0u;
+    ZeroMemory(roster_external_previous_buttons,
+        sizeof(roster_external_previous_buttons));
+    ZeroMemory(roster_external_input_generation,
+        sizeof(roster_external_input_generation));
+    roster_external_activation_in_progress = FALSE;
     multiplayer_requested = FALSE;
     multiplayer_active = FALSE;
     multiplayer_input_ready = FALSE;
@@ -8314,7 +8723,14 @@ void SudekiMpUninstallCleanroomMenu(void) {
     roster_persistence_path[0] = '\0';
     roster_player_one = SUDEKIMP_CLEANROOM_AILISH;
     roster_player_two = SUDEKIMP_CLEANROOM_TAL;
+    roster_player_three = SUDEKIMP_CLEANROOM_BUKI;
+    roster_player_count = 2u;
     roster_cursor = 0u;
+    ZeroMemory(roster_external_previous_buttons,
+        sizeof(roster_external_previous_buttons));
+    ZeroMemory(roster_external_input_generation,
+        sizeof(roster_external_input_generation));
+    roster_external_activation_in_progress = FALSE;
     multiplayer_requested = FALSE;
     multiplayer_active = FALSE;
     multiplayer_input_ready = FALSE;

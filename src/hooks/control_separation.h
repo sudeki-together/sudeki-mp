@@ -88,6 +88,26 @@ BOOL SudekiMpInstallControlSeparation(
 );
 BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled);
 BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character);
+/* Stable zero-based local-seat APIs for the fixed P1/P2/P3 control slice.
+ * Seats 1 and 2 are the only companion seats accepted.  P2 retains its legacy
+ * first-non-front request wrapper; P3 must always be named with the Character
+ * form so it can never bind an arbitrary remaining AI.  These APIs are game-
+ * thread transitions and do not manufacture camera ownership. */
+BOOL SudekiMpControlSeparationRequestSeat(
+    unsigned int seat_index,
+    BOOL enabled
+);
+BOOL SudekiMpControlSeparationRequestSeatCharacter(
+    unsigned int seat_index,
+    void *character
+);
+/* Pure verifier for acquiring exactly one previously-unowned native AI lease. */
+BOOL SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+    int16_t before_ref,
+    uint8_t before_mode,
+    int16_t after_ref,
+    uint8_t after_mode
+);
 /* Pure verifier for releasing this module's one refcounted AI-control lease.
  * A nested native lease may remain active after our single decrement. */
 BOOL SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
@@ -100,8 +120,79 @@ BOOL SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
 /* Game-thread transition barrier: disable the request and synchronously
  * return a currently-owned Player 2 character to native AI when possible. */
 BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void);
+BOOL SudekiMpControlSeparationReleaseSeatNow(unsigned int seat_index);
 BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled);
 BOOL SudekiMpControlSeparationSetInteractionRequestsEnabled(BOOL enabled);
+BOOL SudekiMpControlSeparationSeatRequested(unsigned int seat_index);
+BOOL SudekiMpControlSeparationSeatActive(unsigned int seat_index);
+void *SudekiMpControlSeparationSeatCharacter(unsigned int seat_index);
+BOOL SudekiMpControlSeparationSeatInputReady(unsigned int seat_index);
+/* Pure fail-closed policy used by P3 movement/combat and exact-image tests.
+ * P2 preserves its existing native-camera fallback. P3 cannot submit until a
+ * distinct viewport camera and render state have been published for seat 2. */
+BOOL SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+    unsigned int seat_index,
+    BOOL requested,
+    BOOL active,
+    BOOL input_ready,
+    BOOL seat_view_ready
+);
+/* Pure fixed-seat lifecycle policies used by the live reconciler and focused
+ * tests. `actor_changed` covers disable and retarget operations. */
+BOOL SudekiMpControlSeparationSeatRequestTransitionPolicy(
+    unsigned int seat_index,
+    BOOL enabling,
+    BOOL actor_changed,
+    BOOL player_two_exact_requested,
+    BOOL player_three_present
+);
+BOOL SudekiMpControlSeparationSeatAcquireOrderPolicy(
+    unsigned int seat_index,
+    BOOL player_two_exact_active
+);
+BOOL SudekiMpControlSeparationSeatReleaseOrderPolicy(
+    unsigned int seat_index,
+    BOOL player_three_owned
+);
+/* A committed fixed-three roster owns camera-before-actor teardown.  The
+ * control reconciler must defer release until the roster observer can run. */
+BOOL SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+    BOOL fixed_three_contract,
+    BOOL role_lock_active,
+    BOOL release_required
+);
+BOOL SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+    const void *leased_identity,
+    uint32_t leased_generation,
+    const void *current_identity,
+    uint32_t current_generation
+);
+/* Pre-acquire readiness is intentionally independent of a lease that does not
+ * exist yet. Fixed 0x07 requires current input for both companion seats;
+ * legacy 0x03 preserves its established P2 acquire/reconnect behavior. */
+BOOL SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+    unsigned int seat_index,
+    BOOL fixed_three_contract,
+    BOOL current_input_ready
+);
+/* Fixed 0x07 must never begin a partial native-control claim.  This is
+ * evaluated before either companion request is submitted. */
+BOOL SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+    BOOL player_two_input_ready,
+    BOOL player_three_input_ready
+);
+/* Active submission/publication must match the input identity and generation
+ * captured by the AI lease for P3 and for P2 under fixed 0x07. */
+BOOL SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+    unsigned int seat_index,
+    BOOL fixed_three_contract,
+    BOOL current_input_ready,
+    const void *leased_identity,
+    uint32_t leased_generation,
+    const void *current_identity,
+    uint32_t current_generation
+);
+BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index);
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
 BOOL SudekiMpControlSeparationPlayerTwoActive(void);
 void *SudekiMpControlSeparationPlayerTwoCharacter(void);

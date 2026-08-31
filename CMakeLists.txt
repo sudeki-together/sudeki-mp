@@ -17,11 +17,13 @@ set(SUDEKIMP_COMMON_SOURCES
 
 add_library(SudekiMP SHARED
     src/loader/dllmain.c
+    src/loader/fixed_three_profile.c
     src/cleanroom/audio.c
     src/cleanroom/engine.c
     src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
     src/engine/controller_action_router.c
+    src/engine/coop_roster_assignment.c
     src/engine/economy_coordinator.c
     src/engine/economy_sidecar.c
     src/engine/blacksmith_commit_adapter.c
@@ -326,6 +328,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
     src/engine/controller_action_router.c
+    src/engine/coop_roster_assignment.c
     src/engine/blacksmith_read_model.c
     src/engine/blacksmith_shadow.c
     src/engine/blacksmith_ui_session.c
@@ -498,6 +501,16 @@ add_executable(SudekiMP.ControllerActionRouterTest
 add_executable(SudekiMP.LocalViewportLayoutTest
     tests/local_viewport_layout_test.c
     src/engine/local_viewport_layout.c
+)
+
+add_executable(SudekiMP.CoopRosterAssignmentTest
+    tests/coop_roster_assignment_test.c
+    src/engine/coop_roster_assignment.c
+)
+
+add_executable(SudekiMP.FixedThreeProfileTest
+    tests/fixed_three_profile_test.c
+    src/loader/fixed_three_profile.c
 )
 
 add_executable(SudekiMP.TalosEncounterSessionTest
@@ -707,6 +720,23 @@ target_compile_options(SudekiMP.LocalViewportLayoutTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
 )
 set_target_properties(SudekiMP.LocalViewportLayoutTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.CoopRosterAssignmentTest PRIVATE src)
+target_compile_options(SudekiMP.CoopRosterAssignmentTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.CoopRosterAssignmentTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.FixedThreeProfileTest PRIVATE src)
+target_compile_definitions(SudekiMP.FixedThreeProfileTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.FixedThreeProfileTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.FixedThreeProfileTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 target_include_directories(SudekiMP.ControllerActionRouterTest PRIVATE src)

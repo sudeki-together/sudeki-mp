@@ -267,9 +267,9 @@ void SudekiMpInputBridgeStop(void) {
     }
     xinput_get_state = NULL;
     reset_receiver_state();
-    /* The expanded local-seat bank is opt-in and currently has no production
-     * starter, but it shares the input lifetime. Keep teardown complete before
-     * any future activation path is allowed to reserve P3/P4 resources. */
+    /* The expanded local-seat bank is opt-in and shares this input lifetime.
+     * The loader-started fixed-three transport must release both UDP sockets
+     * before a later session can reserve either seat again. */
     SudekiMpLocalInputHubStop();
 }
 
@@ -439,6 +439,9 @@ BOOL SudekiMpInputBridgeGameplaySuppressed(void) {
 }
 
 unsigned int SudekiMpInputBridgeBoundPort(void) {
+    if ((SudekiMpLocalInputHubRequestedMask() & 0x02u) != 0u) {
+        return SudekiMpLocalInputHubSeatPort(1u);
+    }
     return bound_port;
 }
 

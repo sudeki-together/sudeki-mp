@@ -9,8 +9,21 @@
 enum {
     SUDEKIMP_LOCAL_INPUT_MAX_SEATS = 4u,
     SUDEKIMP_LOCAL_INPUT_HOST_MASK = 0x01u,
-    SUDEKIMP_LOCAL_INPUT_CONTROLLER_MASK = 0x0eu
+    SUDEKIMP_LOCAL_INPUT_CONTROLLER_MASK = 0x0eu,
+    /* Reconnect fencing must tolerate ordinary centered-stick drift while
+     * remaining below the 0.20 gameplay deadzone used by control separation. */
+    SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM = 4096,
+    /* P1 keyboard/mouse plus UDP-backed P2 and P3. This is transport
+     * admission only; live actor/render ownership remains a separate gate. */
+    SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK = 0x07u
 };
+
+/* Pure policy used by reconnect/resume fencing and focused tests. Meaningful
+ * stick motion, any button, or a pressed trigger must still be released
+ * before a reconnected seat can submit gameplay input. */
+BOOL SudekiMpLocalInputHubResumeNeutralPolicy(
+    const SudekiMpInputBridgeState *state
+);
 
 /* A separate, opt-in input bank for expanded local sessions.  P1 remains
  * keyboard/mouse-owned; bits 1..3 select P2..P4.  XInput slots are stable

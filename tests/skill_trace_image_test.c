@@ -1,4 +1,5 @@
 #include "engine/skill_activation_abi.h"
+#include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
 #include "hooks/accelerator_cache.h"
 #include "hooks/blacksmith_ui_adapter.h"
@@ -1159,11 +1160,16 @@ static void check_blacksmith_roster_actor_identity_policy(int *failures) {
             0u, actor, 0x23u, 0x23u, actor, 1u, actor,
             TRUE, TRUE, TRUE, FALSE),
         "rejected exact unique active lease");
-    CHECK_ROSTER_IDENTITY(0,
+    CHECK_ROSTER_IDENTITY(1,
         SudekiMpSplitScreenRosterActorIdentityPolicy(
             2u, actor, 0x23u, 0x23u, actor, 1u, actor,
             TRUE, TRUE, TRUE, FALSE),
-        "accepted invalid seat");
+        "rejected exact Player 3 lease");
+    CHECK_ROSTER_IDENTITY(0,
+        SudekiMpSplitScreenRosterActorIdentityPolicy(
+            3u, actor, 0x23u, 0x23u, actor, 1u, actor,
+            TRUE, TRUE, TRUE, FALSE),
+        "accepted unsupported Player 4 seat");
     CHECK_ROSTER_IDENTITY(0,
         SudekiMpSplitScreenRosterActorIdentityPolicy(
             0u, actor, 0x01u, 0x23u, actor, 1u, actor,
@@ -1349,6 +1355,143 @@ static void check_adaptive_seat_activation_policy(int *failures) {
 #undef CHECK_ADAPTIVE_SEATS
 }
 
+static void check_fixed_three_owner_evidence_and_orbit_policies(
+    int *failures
+) {
+#define CHECK_FIXED_THREE_POLICY(expected, expression, label) do { \
+    BOOL actual = (expression); \
+    if ((actual != FALSE) != (expected)) { \
+        fprintf(stderr, "FAIL: fixed-three policy %s\n", label); \
+        ++*failures; \
+    } \
+} while (0)
+    CHECK_FIXED_THREE_POLICY(1,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            0u, 0u, 0x01u, 0u, 0x01u,
+            9u, TRUE, 0u, 9u, TRUE, 0u, FALSE),
+        "rejected exact P1 frame-owner evidence");
+    CHECK_FIXED_THREE_POLICY(1,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x03u, 1u, 0x03u,
+            10u, TRUE, 1u, 10u, TRUE, 1u, FALSE),
+        "rejected exact P2 frame-owner evidence");
+    CHECK_FIXED_THREE_POLICY(1,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            2u, 2u, 0x03u, 2u, 0x03u,
+            11u, TRUE, 2u, 11u, TRUE, 2u, FALSE),
+        "rejected exact P3 frame-owner evidence");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            3u, 3u, 0x03u, 3u, 0x03u,
+            12u, TRUE, 3u, 12u, TRUE, 3u, FALSE),
+        "accepted out-of-range rendered seat");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 0u, 0x03u, 1u, 0x03u,
+            10u, TRUE, 1u, 10u, TRUE, 1u, FALSE),
+        "accepted wrong-seat HUD evidence");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x01u, 1u, 0x03u,
+            10u, TRUE, 1u, 10u, TRUE, 1u, FALSE),
+        "accepted incomplete companion HUD roles");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x03u, 0u, 0x03u,
+            10u, TRUE, 1u, 10u, TRUE, 1u, FALSE),
+        "accepted wrong-seat portrait evidence");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            2u, 2u, 0x03u, 2u, 0x01u,
+            11u, TRUE, 2u, 11u, TRUE, 2u, FALSE),
+        "accepted incomplete companion portrait roles");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            0u, 0u, 0x01u, 0u, 0x01u,
+            0u, TRUE, 0u, 0u, TRUE, 0u, FALSE),
+        "accepted an unarmed minimap update epoch");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x03u, 1u, 0x03u,
+            10u, FALSE, 1u, 10u, TRUE, 1u, FALSE),
+        "accepted a missing minimap update");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x03u, 1u, 0x03u,
+            10u, TRUE, 2u, 10u, TRUE, 1u, FALSE),
+        "accepted a wrong-seat minimap update");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            1u, 1u, 0x03u, 1u, 0x03u,
+            10u, TRUE, 1u, 9u, TRUE, 1u, FALSE),
+        "accepted a stale minimap update epoch");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            2u, 2u, 0x03u, 2u, 0x03u,
+            11u, TRUE, 2u, 11u, FALSE, 2u, FALSE),
+        "accepted a missing minimap render");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            2u, 2u, 0x03u, 2u, 0x03u,
+            11u, TRUE, 2u, 11u, TRUE, 1u, FALSE),
+        "accepted a wrong-seat minimap render");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+            0u, 0u, 0x01u, 0u, 0x01u,
+            9u, TRUE, 0u, 9u, TRUE, 0u, TRUE),
+        "accepted sticky UI source failure");
+
+    CHECK_FIXED_THREE_POLICY(1,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x07u, 0x07u, FALSE),
+        "rejected exact ready orbit state");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            FALSE, TRUE, TRUE, 0x07u, 0x07u, FALSE),
+        "accepted unclear presentation for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, FALSE, TRUE, 0x07u, 0x07u, FALSE),
+        "accepted inexact base leases for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, FALSE, 0x07u, 0x07u, FALSE),
+        "accepted inexact layout for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x00u, 0x07u, FALSE),
+        "accepted empty cache warmup for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x01u, 0x07u, FALSE),
+        "accepted one-seat cache warmup for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x03u, 0x07u, FALSE),
+        "accepted two-seat cache warmup for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x0fu, 0x07u, FALSE),
+        "accepted non-exact cache mask for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x07u, 0x03u, FALSE),
+        "accepted incomplete owner evidence for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x07u, 0x0fu, FALSE),
+        "accepted non-exact owner evidence for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x07u, 0x07u, TRUE),
+        "accepted frozen gameplay input for orbit");
+    CHECK_FIXED_THREE_POLICY(0,
+        SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+            TRUE, TRUE, TRUE, 0x00u, 0x00u, FALSE),
+        "accepted orbit immediately after cache invalidation");
+#undef CHECK_FIXED_THREE_POLICY
+}
+
 static void check_shared_interaction_modal_runtime(
     uint8_t *image,
     int *failures
@@ -1405,6 +1548,30 @@ static void check_shared_interaction_modal_runtime(
     }
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         fputs("FAIL: inactive native Shop/Blacksmith reported active\n",
+            stderr);
+        ++*failures;
+    }
+    if (!SudekiMpSplitScreenNativeMovieOpening() ||
+        !SudekiMpSplitScreenNativeMovieActive() ||
+        !SudekiMpSplitScreenSharedInteractionModalActive()) {
+        fputs("FAIL: native movie opening did not synchronously quiesce presentation\n",
+            stderr);
+        ++*failures;
+    }
+    if (!SudekiMpSplitScreenNativeMovieOpening()) {
+        fputs("FAIL: nested native movie opening was rejected\n", stderr);
+        ++*failures;
+    }
+    SudekiMpSplitScreenNativeMovieClosed();
+    if (!SudekiMpSplitScreenNativeMovieActive()) {
+        fputs("FAIL: nested native movie close released the outer gate\n",
+            stderr);
+        ++*failures;
+    }
+    SudekiMpSplitScreenNativeMovieClosed();
+    if (SudekiMpSplitScreenNativeMovieActive() ||
+        SudekiMpSplitScreenSharedInteractionModalActive()) {
+        fputs("FAIL: native movie close retained presentation quiescence\n",
             stderr);
         ++*failures;
     }
@@ -1497,6 +1664,12 @@ static void check_shared_interaction_modal_runtime(
     if (SudekiMpSplitScreenNativeSaveModalOpening() ||
         SudekiMpSplitScreenNativeSaveModalActive()) {
         fputs("FAIL: uninstalled save-book lifecycle accepted opening\n",
+            stderr);
+        ++*failures;
+    }
+    if (!SudekiMpSplitScreenNativeMovieOpening() ||
+        SudekiMpSplitScreenNativeMovieActive()) {
+        fputs("FAIL: uninstalled native movie lifecycle was not inert\n",
             stderr);
         ++*failures;
     }
@@ -2323,6 +2496,7 @@ int wmain(int argc, wchar_t **argv) {
     BOOL shared_modal_recovery_pending;
     unsigned int roster_player_one_type;
     unsigned int roster_player_two_type;
+    SudekiMpCoopRosterAssignment three_seat_assignment;
     int player_two_character_marker = 0;
     int other_character_marker = 0;
     uint8_t minimap_snapshot_call_original[5];
@@ -2387,6 +2561,19 @@ int wmain(int argc, wchar_t **argv) {
     }
     SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
 
+    if (!SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+            0, 1u, 1, 0u) ||
+        SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+            1, 1u, 2, 0u) ||
+        SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+            0, 0u, 1, 0u) ||
+        SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+            0, 1u, 2, 0u) ||
+        SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+            0, 1u, 1, 1u)) {
+        fputs("FAIL: AI lease acquire transition policy\n", stderr);
+        ++failures;
+    }
     if (!SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
             1, 0u, 0, 1u, FALSE) ||
         !SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
@@ -2410,6 +2597,153 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
             1, 0u, 0, 1u, TRUE)) {
         fputs("FAIL: AI lease release transition policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            1u, TRUE, TRUE, TRUE, FALSE) ||
+        !SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            2u, TRUE, TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            0u, TRUE, TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            3u, TRUE, TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            1u, FALSE, TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            1u, TRUE, FALSE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            1u, TRUE, TRUE, FALSE, TRUE) ||
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            2u, TRUE, TRUE, TRUE, FALSE)) {
+        fputs("FAIL: companion seat submission readiness policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            1u, TRUE, FALSE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            1u, FALSE, TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            1u, FALSE, FALSE, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            1u, TRUE, TRUE, TRUE, TRUE) ||
+        !SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            1u, FALSE, TRUE, TRUE, FALSE) ||
+        !SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            2u, TRUE, TRUE, TRUE, FALSE) ||
+        SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            2u, TRUE, TRUE, FALSE, FALSE) ||
+        !SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            2u, FALSE, TRUE, FALSE, TRUE) ||
+        SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            0u, TRUE, FALSE, TRUE, FALSE)) {
+        fputs("FAIL: companion seat request/dependency policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatAcquireOrderPolicy(
+            1u, FALSE) ||
+        !SudekiMpControlSeparationSeatAcquireOrderPolicy(
+            2u, TRUE) ||
+        SudekiMpControlSeparationSeatAcquireOrderPolicy(
+            2u, FALSE) ||
+        SudekiMpControlSeparationSeatAcquireOrderPolicy(
+            3u, TRUE)) {
+        fputs("FAIL: companion P2-to-P3 acquire order policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            2u, TRUE) ||
+        !SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            1u, FALSE) ||
+        SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            1u, TRUE) ||
+        SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            0u, FALSE)) {
+        fputs("FAIL: companion P3-to-P2 release order policy\n", stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+            TRUE, TRUE, TRUE) ||
+        SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+            TRUE, TRUE, FALSE) ||
+        SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+            TRUE, FALSE, TRUE) ||
+        SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+            FALSE, TRUE, TRUE)) {
+        fputs("FAIL: fixed-three camera-first release deferral policy\n",
+            stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+            (const void *)(uintptr_t)0x11111111u, 7u,
+            (const void *)(uintptr_t)0x11111111u, 7u) ||
+        SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+            NULL, 7u, (const void *)(uintptr_t)0x11111111u, 7u) ||
+        SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+            (const void *)(uintptr_t)0x11111111u, 0u,
+            (const void *)(uintptr_t)0x11111111u, 0u) ||
+        SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+            (const void *)(uintptr_t)0x11111111u, 7u,
+            (const void *)(uintptr_t)0x22222222u, 7u) ||
+        SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+            (const void *)(uintptr_t)0x11111111u, 7u,
+            (const void *)(uintptr_t)0x11111111u, 8u)) {
+        fputs("FAIL: companion input identity/generation lease policy\n",
+            stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            1u, FALSE, FALSE) ||
+        !SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            1u, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            1u, TRUE, FALSE) ||
+        !SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            2u, TRUE, TRUE) ||
+        SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            2u, TRUE, FALSE) ||
+        SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            0u, FALSE, TRUE)) {
+        fputs("FAIL: fixed-three pre-acquire input readiness policy\n",
+            stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+            TRUE, TRUE) ||
+        SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+            TRUE, FALSE) ||
+        SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+            FALSE, TRUE) ||
+        SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+            FALSE, FALSE)) {
+        fputs("FAIL: fixed-three atomic two-seat input preflight policy\n",
+            stderr);
+        ++failures;
+    }
+    if (!SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            1u, FALSE, TRUE, NULL, 0u, NULL, 0u) ||
+        SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            1u, FALSE, FALSE, NULL, 0u, NULL, 0u) ||
+        !SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            1u, TRUE, TRUE,
+            (const void *)(uintptr_t)0x11111111u, 7u,
+            (const void *)(uintptr_t)0x11111111u, 7u) ||
+        SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            1u, TRUE, TRUE,
+            (const void *)(uintptr_t)0x11111111u, 7u,
+            (const void *)(uintptr_t)0x11111111u, 8u) ||
+        !SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            2u, TRUE, TRUE,
+            (const void *)(uintptr_t)0x22222222u, 9u,
+            (const void *)(uintptr_t)0x22222222u, 9u) ||
+        SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            2u, TRUE, TRUE,
+            (const void *)(uintptr_t)0x22222222u, 9u,
+            (const void *)(uintptr_t)0x22222222u, 10u) ||
+        SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            2u, TRUE, FALSE,
+            (const void *)(uintptr_t)0x22222222u, 9u,
+            (const void *)(uintptr_t)0x22222222u, 9u)) {
+        fputs("FAIL: fixed-three active input lease policy\n", stderr);
         ++failures;
     }
 
@@ -3177,6 +3511,7 @@ int wmain(int argc, wchar_t **argv) {
     {
         const void *player_one = (const void *)(uintptr_t)0x11110000u;
         const void *player_two = (const void *)(uintptr_t)0x22220000u;
+        const void *player_three = (const void *)(uintptr_t)0x33330000u;
 
         if (!SudekiMpSplitScreenRosterLeadReady(
                 player_one, player_one, player_one,
@@ -3222,6 +3557,26 @@ int wmain(int argc, wchar_t **argv) {
                 player_one, player_one, player_one,
                 player_one, player_two)) {
             fputs("FAIL: co-op roster lock-health truth table mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+                player_one, player_one, player_one,
+                player_two, player_two,
+                player_three, player_three) ||
+            SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+                player_one, player_one, player_one,
+                player_two, player_two,
+                player_two, player_three) ||
+            SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+                player_one, player_one, player_one,
+                player_two, player_two,
+                player_three, player_two) ||
+            SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+                player_one, player_one, player_one,
+                player_two, player_two,
+                player_three, player_one)) {
+            fputs("FAIL: three-seat roster lock-health truth table mismatch\n",
                 stderr);
             ++failures;
         }
@@ -3752,6 +4107,7 @@ int wmain(int argc, wchar_t **argv) {
     check_blacksmith_ui_adapter_exact_image(image, &failures);
     check_blacksmith_roster_actor_identity_policy(&failures);
     check_adaptive_seat_activation_policy(&failures);
+    check_fixed_three_owner_evidence_and_orbit_policies(&failures);
 
     {
         uint8_t saved_blacksmith_signature =
@@ -4092,6 +4448,21 @@ int wmain(int argc, wchar_t **argv) {
                     stderr);
                 ++failures;
             }
+            SetLastError(ERROR_SUCCESS);
+            if (SudekiMpControlSeparationRequestSeat(2u, TRUE) ||
+                GetLastError() != ERROR_INVALID_STATE) {
+                fputs("FAIL: service-only control profile accepted a Player 3 request\n",
+                    stderr);
+                ++failures;
+            }
+            SetLastError(ERROR_SUCCESS);
+            if (SudekiMpControlSeparationRequestSeatCharacter(
+                    2u, (void *)(uintptr_t)0x33333333u) ||
+                GetLastError() != ERROR_INVALID_STATE) {
+                fputs("FAIL: service-only control profile accepted a Player 3 actor request\n",
+                    stderr);
+                ++failures;
+            }
         }
         if (!SudekiMpControlSeparationUnregisterUpdateObserver(
                 &observer_owner_one) ||
@@ -4229,7 +4600,37 @@ int wmain(int argc, wchar_t **argv) {
                 sizeof(controller_update_original)
             );
         }
-        SudekiMpUninstallControlSeparation();
+        {
+            int player_three_character_marker;
+            int player_three_input_marker;
+            int player_three_camera_marker;
+            int player_three_render_state_marker;
+            SudekiMpPlayerCombatSnapshot player_three_snapshot;
+
+            SudekiMpCombatContextSetCharacter(
+                2u, &player_three_character_marker);
+            SudekiMpCombatContextSetInputSource(
+                2u,
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE,
+                &player_three_input_marker);
+            SudekiMpCombatContextSetView(
+                2u,
+                &player_three_camera_marker,
+                &player_three_render_state_marker);
+            SudekiMpUninstallControlSeparation();
+            if (!SudekiMpCombatContextGetSnapshot(
+                    2u, &player_three_snapshot) ||
+                player_three_snapshot.character != NULL ||
+                player_three_snapshot.input_source != NULL ||
+                player_three_snapshot.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_NONE ||
+                player_three_snapshot.viewport_camera != NULL ||
+                player_three_snapshot.render_state != NULL) {
+                fputs("FAIL: control teardown retained Player 3 combat-context ownership\n",
+                    stderr);
+                ++failures;
+            }
+        }
         if (*(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
                 image + RVA_CONTROLLER_UPDATE) {
             fputs("FAIL: service-only control hook did not restore the controller slot\n",
@@ -5070,11 +5471,14 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
     }
-    if (!SudekiMpSplitScreenSetRosterTypes(0x11u, 0x21u) ||
+    if (SudekiMpSplitScreenRosterSeatCapacity() != 0u ||
+        !SudekiMpSplitScreenSetRosterTypes(
+            SUDEKIMP_COOP_ROSTER_ACTOR_TAL,
+            SUDEKIMP_COOP_ROSTER_ACTOR_AILISH) ||
         !SudekiMpSplitScreenGetRosterTypes(
             &roster_player_one_type, &roster_player_two_type) ||
-        roster_player_one_type != 0x11u ||
-        roster_player_two_type != 0x21u) {
+        roster_player_one_type != SUDEKIMP_COOP_ROSTER_ACTOR_TAL ||
+        roster_player_two_type != SUDEKIMP_COOP_ROSTER_ACTOR_AILISH) {
         fputs("FAIL: preinstall co-op roster contract was not recorded\n",
             stderr);
             ++failures;
@@ -5103,11 +5507,29 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
-    if (!SudekiMpSplitScreenGetRosterTypes(
+    if (SudekiMpSplitScreenRosterSeatCapacity() != 2u ||
+        !SudekiMpSplitScreenGetRosterTypes(
             &roster_player_one_type, &roster_player_two_type) ||
-        roster_player_one_type != 0x11u ||
-        roster_player_two_type != 0x21u) {
+        roster_player_one_type != SUDEKIMP_COOP_ROSTER_ACTOR_TAL ||
+        roster_player_two_type != SUDEKIMP_COOP_ROSTER_ACTOR_AILISH) {
         fputs("FAIL: split-screen install discarded the preinstalled co-op roster contract\n",
+            stderr);
+        ++failures;
+    }
+    ZeroMemory(&three_seat_assignment, sizeof(three_seat_assignment));
+    three_seat_assignment.active_human_mask = 0x07u;
+    three_seat_assignment.actor_type_by_seat[0] =
+        SUDEKIMP_COOP_ROSTER_ACTOR_TAL;
+    three_seat_assignment.actor_type_by_seat[1] =
+        SUDEKIMP_COOP_ROSTER_ACTOR_AILISH;
+    three_seat_assignment.actor_type_by_seat[2] =
+        SUDEKIMP_COOP_ROSTER_ACTOR_BUKI;
+    if (SudekiMpSplitScreenSetRosterAssignment(&three_seat_assignment) ||
+        !SudekiMpSplitScreenGetRosterTypes(
+            &roster_player_one_type, &roster_player_two_type) ||
+        roster_player_one_type != SUDEKIMP_COOP_ROSTER_ACTOR_TAL ||
+        roster_player_two_type != SUDEKIMP_COOP_ROSTER_ACTOR_AILISH) {
+        fputs("FAIL: capacity-two renderer accepted 0x07 roster or mutated prior assignment\n",
             stderr);
         ++failures;
     }
@@ -5173,7 +5595,9 @@ int wmain(int argc, wchar_t **argv) {
             stderr);
         ++failures;
     }
-    if (!SudekiMpSplitScreenSetRosterTypes(0x11u, 0x21u) ||
+    if (!SudekiMpSplitScreenSetRosterTypes(
+            SUDEKIMP_COOP_ROSTER_ACTOR_TAL,
+            SUDEKIMP_COOP_ROSTER_ACTOR_AILISH) ||
         !SudekiMpSplitScreenSetRuntimeEnabled(TRUE)) {
         fputs("FAIL: co-op roster could not be republished after Single Player clear\n",
             stderr);

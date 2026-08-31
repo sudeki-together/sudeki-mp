@@ -103,9 +103,18 @@ static uint32_t bridge_buttons(WORD buttons) {
     return result;
 }
 
-static BOOL input_neutral(const SudekiMpInputBridgeState *state) {
-    return state != NULL && state->left_x == 0 && state->left_y == 0 &&
-        state->right_x == 0 && state->right_y == 0 &&
+BOOL SudekiMpLocalInputHubResumeNeutralPolicy(
+    const SudekiMpInputBridgeState *state
+) {
+    return state != NULL &&
+        (int)state->left_x >= -SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->left_x <= SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->left_y >= -SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->left_y <= SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->right_x >= -SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->right_x <= SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->right_y >= -SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
+        (int)state->right_y <= SUDEKIMP_LOCAL_INPUT_STICK_NEUTRAL_MAXIMUM &&
         state->left_trigger <= SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM &&
         state->right_trigger <= SUDEKIMP_INPUT_BRIDGE_TRIGGER_NEUTRAL_MAXIMUM &&
         state->buttons == 0u;
@@ -427,7 +436,7 @@ BOOL SudekiMpLocalInputHubPoll(
         return TRUE;
     }
     if (seat->resume_requires_neutral) {
-        if (input_neutral(state)) {
+        if (SudekiMpLocalInputHubResumeNeutralPolicy(state)) {
             seat->resume_requires_neutral = FALSE;
         } else {
             neutralize(state);

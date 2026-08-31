@@ -12,15 +12,18 @@ mode="${1:---safe}"
 speed="${2:-2.0}"
 spirit_key="${2:-G}"
 input_device="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
+input_device_p3="${SUDEKIMP_INPUT_DEVICE_P3:-/dev/input/js1}"
 input_bridge_port="${SUDEKIMP_INPUT_BRIDGE_PORT:-26760}"
 input_bridge_helper="${project_dir}/build/linux/bin/sudekimp-input-bridge"
 input_bridge_log="${project_dir}/build/linux/input-bridge.log"
+input_bridge_p2_log="${project_dir}/build/linux/input-bridge-p2.log"
+input_bridge_p3_log="${project_dir}/build/linux/input-bridge-p3.log"
 supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
 supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
@@ -55,6 +58,8 @@ usage() {
         '  --viewport-hud-test Verify the right viewport reads Buki HUD data while the left viewport remains Ailish-owned.' \
         '  --dual-camera-local-coop-test Combine dual cameras with F10 AI override and I/J/K/L Buki movement.' \
         '  --controller-bridge-test Drive the first non-front party member, weak attack, and independent camera from a Linux controller.' \
+        '  --three-seat-input-transport-test Start distinct Linux bridges for P2 and P3 and require the closed LocalInputHub 0x07 transport bank. P3 actor, camera, HUD, and gameplay ownership are not enabled.' \
+        '  --three-player-local-coop-test Run the closed three-player roster, control, camera, frame-cache, and fixed js0/js1 UDP profile. P3 Quick Menu and P4 remain fail-closed.' \
         '  --realtime-skill-coop-test Add guarded P1/P2 native skills and caster-only Plasmatica camera routing.' \
         '  --second-player-target-trace Passively log Buki native target changes while AI is off.' \
         '  --second-player-attack-test Use F10 for Buki AI, I/J/K/L movement, and U for Buki weak attack.' \
@@ -74,7 +79,7 @@ if [[ "${mode}" == "--talos-party-test" ]]; then
 fi
 
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -95,7 +100,8 @@ if [[ "${mode}" == "--zone-transition-trace" ||
 fi
 if [[ "${mode}" == "--talos-staging-observation" ||
       "${mode}" == "--talos-post-movie-party-test" ||
-      "${mode}" == "--talos-post-movie-dual-camera-test" ]]; then
+      "${mode}" == "--talos-post-movie-dual-camera-test" ||
+      "${mode}" == "--three-player-local-coop-test" ]]; then
     unset SUDEKIMP_ZONE_TRACE
 fi
 
@@ -116,6 +122,8 @@ if [[ "${mode}" == "--spirit-strike-test" ]]; then
     fi
 fi
 if [[ "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--three-seat-input-transport-test" ||
+      "${mode}" == "--three-player-local-coop-test" ||
       "${mode}" == "--talos-post-movie-party-test" ||
       "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--party-lifecycle-trace" ||
@@ -130,6 +138,13 @@ if [[ "${mode}" == "--controller-bridge-test" ||
             "${input_bridge_port}" >&2
         exit 2
     fi
+fi
+if [[ "${mode}" == "--three-seat-input-transport-test" ||
+      "${mode}" == "--three-player-local-coop-test" ]] &&
+   (( input_bridge_port > 65533 )); then
+    printf 'Invalid three-seat bridge base port: %s (expected 1024 through 65533)\n' \
+        "${input_bridge_port}" >&2
+    exit 2
 fi
 
 game_launch_args=()
@@ -214,7 +229,14 @@ fi
 
 antialiasing_original=""
 input_bridge_pid=""
+input_bridge_p3_pid=""
 restore_config() {
+    if [[ -n "${input_bridge_p3_pid}" ]]; then
+        kill "${input_bridge_p3_pid}" 2>/dev/null || true
+        wait "${input_bridge_p3_pid}" 2>/dev/null || true
+        input_bridge_p3_pid=""
+        printf '%s\n' 'Stopped the Linux Player 3 input bridge.'
+    fi
     if [[ -n "${input_bridge_pid}" ]]; then
         kill "${input_bridge_pid}" 2>/dev/null || true
         wait "${input_bridge_pid}" 2>/dev/null || true
@@ -455,7 +477,6 @@ case "${mode}" in
               "${mode}" == "--native-p2-camera-collision-test" ]]; then
             sed -i \
                 -e 's/^EnableCoopRosterMenu=false$/EnableCoopRosterMenu=true/' \
-                -e 's/^EnableLoadedSaveCoopAutostartPrototype=false$/EnableLoadedSaveCoopAutostartPrototype=true/' \
                 -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
                 -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
                 -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
@@ -474,6 +495,11 @@ case "${mode}" in
                 -e 's/^EnablePartyAtomicTransitionsPrototype=false$/EnablePartyAtomicTransitionsPrototype=true/' \
                 -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
                 "${generated_config}"
+            if [[ "${mode}" != "--party-lifecycle-trace" ]]; then
+                sed -i \
+                    -e 's/^EnableLoadedSaveCoopAutostartPrototype=false$/EnableLoadedSaveCoopAutostartPrototype=true/' \
+                    "${generated_config}"
+            fi
             if [[ "${mode}" == "--door-transition-trace" ||
                   "${mode}" == "--merchant-checkout-trace" ]]; then
                 sed -i \
@@ -601,6 +627,101 @@ case "${mode}" in
             -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
             "${generated_config}"
         ;;
+    --three-seat-input-transport-test)
+        # This profile proves only transport admission and isolation. P2 keeps
+        # the already-live control path; P3 has no actor/render/gameplay caller
+        # until the separate fixed-three-seat integration is installed.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableThreeSeatUdpTransportPrototype=false$/EnableThreeSeatUdpTransportPrototype=true/' \
+            -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+            -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
+            "${generated_config}"
+        transport_unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableControlSeparationPrototype" &&
+                $1 != "EnableSecondPlayerMovementPrototype" &&
+                $1 != "EnableThreeSeatUdpTransportPrototype" { print }
+        ' "${generated_config}")"
+        if [[ -n "${transport_unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableControlSeparationPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableThreeSeatUdpTransportPrototype=true' "${generated_config}" ||
+           ! grep -Fqx "InputBridgePort=${input_bridge_port}" "${generated_config}" ||
+           ! grep -Fqx 'ToggleSecondPlayerAi=F10' "${generated_config}"; then
+            printf '%s\n' \
+                'Three-seat input transport test refused: generated configuration is not the exact closed profile.' >&2
+            if [[ -n "${transport_unexpected_enabled}" ]]; then
+                printf '%s\n' "${transport_unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
+    --three-player-local-coop-test)
+        # Closed first three-player gameplay slice. Reset every optional owner
+        # before enabling the exact roster/control/render/transport set.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^EnableCoopRosterMenu=false$/EnableCoopRosterMenu=true/' \
+            -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+            -e 's/^EnableSecondPlayerMovementPrototype=false$/EnableSecondPlayerMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraRelativeMovementPrototype=false$/EnableSecondPlayerCameraRelativeMovementPrototype=true/' \
+            -e 's/^EnableSecondPlayerWeakAttackPrototype=false$/EnableSecondPlayerWeakAttackPrototype=true/' \
+            -e 's/^EnableThreeSeatUdpTransportPrototype=false$/EnableThreeSeatUdpTransportPrototype=true/' \
+            -e 's/^EnableSplitScreenRenderPrototype=false$/EnableSplitScreenRenderPrototype=true/' \
+            -e 's/^EnableSecondPlayerCameraPrototype=false$/EnableSecondPlayerCameraPrototype=true/' \
+            -e 's/^EnableDualCameraFrameCachePrototype=false$/EnableDualCameraFrameCachePrototype=true/' \
+            -e 's/^EnableFixedThreeSeatRendererPrototype=false$/EnableFixedThreeSeatRendererPrototype=true/' \
+            -e 's/^EnableSecondPlayerControllerCameraPrototype=false$/EnableSecondPlayerControllerCameraPrototype=true/' \
+            -e 's/^SkipStartupMovies=.*/SkipStartupMovies=true/' \
+            -e 's/^InputBridgeDeadzone=.*/InputBridgeDeadzone=0.20/' \
+            -e "s/^InputBridgePort=.*$/InputBridgePort=${input_bridge_port}/" \
+            -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
+            "${generated_config}"
+        three_player_unexpected_enabled="$(awk -F= '
+            $1 ~ /^Enable/ && $2 == "true" &&
+                $1 != "EnableCoopRosterMenu" &&
+                $1 != "EnableControlSeparationPrototype" &&
+                $1 != "EnableSecondPlayerMovementPrototype" &&
+                $1 != "EnableSecondPlayerCameraRelativeMovementPrototype" &&
+                $1 != "EnableSecondPlayerWeakAttackPrototype" &&
+                $1 != "EnableThreeSeatUdpTransportPrototype" &&
+                $1 != "EnableSplitScreenRenderPrototype" &&
+                $1 != "EnableSecondPlayerCameraPrototype" &&
+                $1 != "EnableDualCameraFrameCachePrototype" &&
+                $1 != "EnableFixedThreeSeatRendererPrototype" &&
+                $1 != "EnableSecondPlayerControllerCameraPrototype" { print }
+        ' "${generated_config}")"
+        if [[ -n "${three_player_unexpected_enabled}" ]] ||
+           ! grep -Fqx 'EnableCoopRosterMenu=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableControlSeparationPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerCameraRelativeMovementPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerWeakAttackPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableThreeSeatUdpTransportPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSplitScreenRenderPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerCameraPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableDualCameraFrameCachePrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableFixedThreeSeatRendererPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableSecondPlayerControllerCameraPrototype=true' "${generated_config}" ||
+           ! grep -Fqx 'EnableLoadedSaveCoopAutostartPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableExternalInputBridgePrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableNativeXInputPlayerTwoPrototype=false' "${generated_config}" ||
+           [[ -v SUDEKIMP_ZONE_TRACE ]] ||
+           ! grep -Fqx 'SkipStartupMovies=true' "${generated_config}" ||
+           ! grep -Fqx 'InputBridgeDeadzone=0.20' "${generated_config}" ||
+           ! grep -Fqx "InputBridgePort=${input_bridge_port}" "${generated_config}" ||
+           ! grep -Fqx 'ToggleSecondPlayerAi=F10' "${generated_config}"; then
+            printf '%s\n' \
+                'Three-player local co-op test refused: generated configuration is not the exact closed profile.' >&2
+            if [[ -n "${three_player_unexpected_enabled}" ]]; then
+                printf '%s\n' "${three_player_unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
     --realtime-skill-coop-test)
         sed -i \
             -e 's/^EnableQuickMenuNormalSpeed=false$/EnableQuickMenuNormalSpeed=true/' \
@@ -688,6 +809,7 @@ if [[ "${mode}" == "--split-screen-render-test" ||
       "${mode}" == "--native-p2-camera-collision-test" ||
       "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--controller-bridge-test" ||
+      "${mode}" == "--three-player-local-coop-test" ||
       "${mode}" == "--realtime-skill-coop-test" ]]; then
     antialiasing_original="$(SUDEKIMP_WINEPREFIX="${research_prefix}" \
         "${project_dir}/tools/configure-antialiasing.sh" --get)"
@@ -862,18 +984,40 @@ if [[ "${mode}" == "--controller-bridge-test" ]]; then
         '  Press F10 again to restore AI on the exact overridden character before exiting.' \
         "  Linux input device: ${input_device}"
 fi
+if [[ "${mode}" == "--three-seat-input-transport-test" ]]; then
+    printf '%s\n' \
+        '  CLOSED THREE-SEAT INPUT TRANSPORT TEST: Player 1 remains keyboard/mouse.' \
+        "  Player 2 bridge: ${input_device} -> UDP ${input_bridge_port}." \
+        "  Player 3 bridge: ${input_device_p3} -> UDP $((input_bridge_port + 1))." \
+        '  The loader admits only fixed mask 0x07 and requires both controller transports before installing control separation.' \
+        '  Player 2 retains the existing gameplay consumer. This profile does not give Player 3 an actor, camera, HUD, menu, combat context, or gameplay authority.' \
+        '  Treat distinct P2/P3 packets and identities in SudekiMP.log as the only success criterion; Player 3 input doing nothing in-world is expected in this transport-only checkpoint.'
+fi
+if [[ "${mode}" == "--three-player-local-coop-test" ]]; then
+    printf '%s\n' \
+        '  CLOSED THREE-PLAYER LOCAL CO-OP TEST: choose New Game, then Co-op (3 Players).' \
+        '  Choose three distinct heroes for P1, P2, and P3, review the confirmation page, and lock the roster. A seat remains inactive until its authored hero has joined the native party.' \
+        '  Player 1 uses keyboard/mouse and owns the wide top viewport.' \
+        "  Player 2 uses ${input_device} on UDP ${input_bridge_port} and owns the bottom-left viewport." \
+        "  Player 3 uses ${input_device_p3} on UDP $((input_bridge_port + 1)) and owns the bottom-right viewport." \
+        '  P2 and P3 left sticks move relative to their own camera; each right stick rotates only that seats camera. A submits the guarded native weak attack.' \
+        '  This first P3 slice intentionally rejects Player 3 Quick Menu and every unproven P3 action. Player 4, roaming-boundary policy, party-transition integration, and loaded-save autostart remain disabled.' \
+        '  The profile fails closed unless both distinct controller transports, all three actor/input generations, three camera/render/HUD leases, and all three fresh frame caches agree on mask 0x07.' \
+        '  Stop the run on a swapped hero/view, cross-driven camera, stale frame, duplicate input device, missing lease, or any fallback that grants P3 control without a ready P3 viewport.'
+fi
 if [[ "${mode}" == "--party-lifecycle-trace" ]]; then
     printf '%s\n' \
-        '  Roster lifecycle test: keep the persisted Co-op profile at Tal=P1 and Ailish=P2.' \
-        '  Load the save immediately before Ailish joins. Tal-only play must remain full-screen single-player.' \
-        '  When Ailish joins, SudekiMP must rotate Tal back to native slot 0, claim exactly Ailish for Player 2, then enable both viewports.' \
+        '  Roster lifecycle test: choose New Game to open the Co-op roster.' \
+        '  Use Up/Down to choose P1 or P2, Left/Right to choose a hero, and Enter to lock the roster.' \
+        '  The selected roles remain authoritative after WorldReady; the legacy Tal/Ailish loaded-save override is disabled in this profile.' \
+        '  A selected hero becomes active only after the native story has added that hero to the party; unavailable seats stay full-screen and fail closed.' \
         '  F10 drops Player 2 out to native AI/full-screen without changing the roster; press it again to rejoin the same character.' \
         '  Controller Start requests drop-in; hold Back+Start for one second to drop out.' \
         '  Authored temporary-room doors are host-led: P1 enters normally, Sudeki moves the active party through the door, and Player 2 is rebuilt only after the destination settles.' \
         '  There is no campaign travel vote. P2 B and P1 Esc are not travel-vote controls; consent remains research-only for future divergent/custom content.' \
         '  Save points remain native and immediate: saving never opens a co-op consent vote.' \
         '  Player 1 remains keyboard/mouse. Player 2 uses the controller left stick. General P2 world-interaction provenance is isolated and disabled in this profile; no GUI Select or SOL action is replayed.' \
-        '  X submits Strong Attack for Tal/Buki. For Ailish/Elco it toggles only the Player 2 viewport perspective; this is SudekiMP policy because native ranged Strong is ignored. B submits the native Sweep only in combat and acts as modal Cancel. Y and D-pad edges are named in the log, but their per-seat Quick Menu/Quickshot consumers are not connected yet.' \
+        '  X submits Strong Attack for Tal/Buki. For Ailish/Elco it toggles only the Player 2 viewport perspective; this is SudekiMP policy because native ranged Strong is ignored. B submits the native Sweep only in combat and acts as modal Cancel. Y opens the selected Player 2 hero Skills menu; A/B and Up/Down operate that serialized owner-pinned menu.' \
         '  The passive Select/OnAction/SOL provenance hooks remain back-burnered and are not installed. The old orange P2 INTERACT? targetless request has been removed.' \
         '  The rejected custom Blacksmith preview remains OFF. Native Blacksmith behavior is unchanged while actor/merchant provenance and a proven per-player native-window strategy are researched.' \
         '  Shops still use one serialized full-width native menu; Player 2 input is neutralized until it closes and both camera caches refresh.' \
@@ -1003,7 +1147,76 @@ if [[ "${mode}" == "--check" ]]; then
     exit 0
 fi
 
-if [[ "${mode}" == "--controller-bridge-test" ||
+if [[ "${mode}" == "--three-seat-input-transport-test" ||
+      "${mode}" == "--three-player-local-coop-test" ]]; then
+    input_device_canonical=""
+    input_device_p3_canonical=""
+    if ! input_device_canonical="$(readlink -e -- "${input_device}")" ||
+       [[ -z "${input_device_canonical}" ||
+          ! -r "${input_device_canonical}" ]]; then
+        printf 'Player 2 controller device is not readable: %s\n' \
+            "${input_device}" >&2
+        exit 1
+    fi
+    if ! input_device_p3_canonical="$(readlink -e -- "${input_device_p3}")" ||
+       [[ -z "${input_device_p3_canonical}" ||
+          ! -r "${input_device_p3_canonical}" ]]; then
+        printf 'Player 3 controller device is not readable: %s\n' \
+            "${input_device_p3}" >&2
+        exit 1
+    fi
+    if [[ "${input_device_canonical}" == "${input_device_p3_canonical}" ]]; then
+        printf '%s\n' \
+            'Three-seat transport refused: Player 2 and Player 3 resolve to the same controller device.' \
+            "  Player 2: ${input_device} -> ${input_device_canonical}" \
+            "  Player 3: ${input_device_p3} -> ${input_device_p3_canonical}" >&2
+        exit 1
+    fi
+
+    : >"${input_bridge_p2_log}"
+    : >"${input_bridge_p3_log}"
+    "${input_bridge_helper}" \
+        --device "${input_device_canonical}" \
+        --port "${input_bridge_port}" \
+        >"${input_bridge_p2_log}" 2>&1 &
+    input_bridge_pid=$!
+    sleep 0.2
+    if ! kill -0 "${input_bridge_pid}" 2>/dev/null; then
+        wait "${input_bridge_pid}" || true
+        input_bridge_pid=""
+        printf '%s\n' 'The Linux Player 2 input bridge failed to start:' >&2
+        sed -n '1,80p' "${input_bridge_p2_log}" >&2
+        exit 1
+    fi
+
+    "${input_bridge_helper}" \
+        --device "${input_device_p3_canonical}" \
+        --port "$((input_bridge_port + 1))" \
+        >"${input_bridge_p3_log}" 2>&1 &
+    input_bridge_p3_pid=$!
+    sleep 0.2
+    if ! kill -0 "${input_bridge_p3_pid}" 2>/dev/null; then
+        wait "${input_bridge_p3_pid}" || true
+        input_bridge_p3_pid=""
+        printf '%s\n' 'The Linux Player 3 input bridge failed to start:' >&2
+        sed -n '1,80p' "${input_bridge_p3_log}" >&2
+        exit 1
+    fi
+    if ! kill -0 "${input_bridge_pid}" 2>/dev/null; then
+        wait "${input_bridge_pid}" || true
+        input_bridge_pid=""
+        printf '%s\n' \
+            'The Linux Player 2 input bridge exited while Player 3 was starting:' >&2
+        sed -n '1,80p' "${input_bridge_p2_log}" >&2
+        exit 1
+    fi
+    printf 'Linux Player 2 input bridge started (PID %s, device %s, UDP %s, log %s).\n' \
+        "${input_bridge_pid}" "${input_device_canonical}" \
+        "${input_bridge_port}" "${input_bridge_p2_log}"
+    printf 'Linux Player 3 input bridge started (PID %s, device %s, UDP %s, log %s).\n' \
+        "${input_bridge_p3_pid}" "${input_device_p3_canonical}" \
+        "$((input_bridge_port + 1))" "${input_bridge_p3_log}"
+elif [[ "${mode}" == "--controller-bridge-test" ||
       "${mode}" == "--talos-post-movie-party-test" ||
       "${mode}" == "--talos-post-movie-dual-camera-test" ||
       "${mode}" == "--party-lifecycle-trace" ||

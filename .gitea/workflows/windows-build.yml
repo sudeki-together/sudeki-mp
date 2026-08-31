@@ -52,6 +52,9 @@ jobs:
           $tests = @(
             'SudekiMP.LocalViewportLayoutTest.exe',
             'SudekiMP.LocalInputHubTest.exe',
+            'SudekiMP.CoopRosterAssignmentTest.exe',
+            'SudekiMP.FixedThreeProfileTest.exe',
+            'SudekiMP.OrbitCameraTest.exe',
             'SudekiMP.TalosEncounterSessionTest.exe',
             'SudekiMP.TalosEncounterAdmissionTest.exe',
             'SudekiMP.TalosCompanionCarryTest.exe',

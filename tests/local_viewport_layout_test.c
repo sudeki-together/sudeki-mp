@@ -306,12 +306,57 @@ static void test_activation_policy(void) {
     }
 }
 
+static void test_render_seat_scheduler(void) {
+    uint8_t next = 0u;
+    unsigned int current;
+
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x01u, 0u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 0u);
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 0u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 1u);
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 1u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 2u);
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 2u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 0u);
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x0bu, 1u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 3u);
+    CHECK(SudekiMpLocalViewportNextRenderSeat(
+        0x0bu, 3u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(next == 0u);
+    for (current = 0u; current < 4u; ++current) {
+        CHECK(SudekiMpLocalViewportNextRenderSeat(
+            0x07u, (uint8_t)current, 1, 2u, &next));
+        CHECK(next == 2u);
+    }
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 0u, 1, 3u, &next));
+    CHECK(next == SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER);
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 0u, 2, 2u, &next));
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 0u, 0, 0u, &next));
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x06u, 1u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x17u, 1u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 4u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, &next));
+    CHECK(!SudekiMpLocalViewportNextRenderSeat(
+        0x07u, 0u, 0, SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER, NULL));
+}
+
 int main(void) {
     test_input_contract();
     test_exact_layouts();
     test_all_masks();
     test_invalid_inputs();
     test_activation_policy();
+    test_render_seat_scheduler();
 
     if (failures != 0) {
         fprintf(stderr, "local viewport layout tests failed: %d\n",

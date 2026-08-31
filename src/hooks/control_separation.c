@@ -15,6 +15,7 @@
 #include "hooks/split_screen_render.h"
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
+#include "input/local_input_hub.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -119,8 +120,32 @@ enum {
     PARTY_STATE_D7_OFFSET = 0xd7u,
     CAMERA_MODE_EXPLORATION = 0,
     ROAMING_BOUNDARY_SETTLE_MS = 250u,
-    UPDATE_OBSERVER_CAPACITY = 4u
+    UPDATE_OBSERVER_CAPACITY = 4u,
+    CONTROL_COMPANION_FIRST_SEAT = 1u,
+    CONTROL_COMPANION_LAST_SEAT = 2u,
+    CONTROL_COMPANION_COUNT = 2u,
+    CONTROL_PUBLISHED_PLAYER_COUNT = 3u
 };
+
+typedef struct SudekiMpCompanionControlRuntime {
+    BOOL requested;
+    void *requested_character;
+    DWORD request_last_attempt;
+    void *character;
+    void *ai_component;
+    BOOL lease_exact;
+    SudekiMpInputBridgeState input_state;
+    BOOL input_connected;
+    const void *input_identity;
+    uint32_t input_generation;
+    const void *leased_input_identity;
+    uint32_t leased_input_generation;
+    BOOL movement_active;
+    float movement_magnitude;
+    int movement_input_x;
+    int movement_input_z;
+    BOOL keyboard_weak_was_down;
+} SudekiMpCompanionControlRuntime;
 
 typedef struct ControlUpdateObserverEntry {
     const void *owner;
@@ -166,8 +191,24 @@ static MovementCameraTransformFunction movement_camera_transform;
 static MovementControllerSetAbsoluteDeltaFunction
     movement_controller_set_absolute_delta;
 static uint8_t *game_base;
-static void *overridden_character;
-static void *overridden_ai_component;
+static SudekiMpCompanionControlRuntime
+    companion_controls[CONTROL_COMPANION_COUNT];
+#define overridden_character (companion_controls[0].character)
+#define overridden_ai_component (companion_controls[0].ai_component)
+#define player_two_requested (companion_controls[0].requested)
+#define requested_player_two_character \
+    (companion_controls[0].requested_character)
+#define player_two_request_last_attempt \
+    (companion_controls[0].request_last_attempt)
+#define input_bridge_state (companion_controls[0].input_state)
+#define input_bridge_connected (companion_controls[0].input_connected)
+#define second_player_movement_active \
+    (companion_controls[0].movement_active)
+#define second_player_movement_magnitude \
+    (companion_controls[0].movement_magnitude)
+#define last_movement_x (companion_controls[0].movement_input_x)
+#define last_movement_z (companion_controls[0].movement_input_z)
+#define weak_attack_was_down (companion_controls[0].keyboard_weak_was_down)
 static UINT selected_virtual_key;
 static BOOL hotkey_was_down;
 static BOOL second_player_movement_enabled;
@@ -181,7 +222,6 @@ static BOOL roaming_boundary_player_blocked[2];
 static BOOL roaming_boundary_overlay_ready;
 static BOOL second_player_weak_attack_enabled;
 static UINT weak_attack_virtual_key;
-static BOOL weak_attack_was_down;
 static BOOL second_player_skills_enabled;
 static UINT second_player_skill_virtual_keys[4];
 static BOOL second_player_skill_keys_were_down[4];
@@ -189,10 +229,6 @@ static BOOL target_trace_enabled;
 static DWORD target_trace_last_sample_tick;
 static void *target_trace_last_node;
 static int target_trace_last_auto_enabled;
-static BOOL second_player_movement_active;
-static float second_player_movement_magnitude;
-static int last_movement_x;
-static int last_movement_z;
 static int last_native_movement_acceptance = -1;
 static unsigned int last_native_movement_gate = 0xffffffffu;
 static DWORD last_movement_pipeline_sample_tick;
@@ -207,14 +243,13 @@ static BOOL second_player_facing_valid;
 static float second_player_last_facing[3];
 static BOOL input_bridge_enabled;
 static float input_bridge_deadzone;
-static SudekiMpInputBridgeState input_bridge_state;
-static BOOL input_bridge_connected;
 static BOOL interaction_requests_enabled;
 static SudekiMpControllerActionRouter controller_action_router;
 static BOOL shared_interaction_modal_quiesce_logged;
-static void *published_player_actors[2];
-static uint32_t published_player_actor_generations[2];
-static BOOL published_player_human_present[2];
+static void *published_player_actors[CONTROL_PUBLISHED_PLAYER_COUNT];
+static uint32_t
+    published_player_actor_generations[CONTROL_PUBLISHED_PLAYER_COUNT];
+static BOOL published_player_human_present[CONTROL_PUBLISHED_PLAYER_COUNT];
 static BOOL roster_join_start_was_down;
 static DWORD roster_leave_chord_since;
 static BOOL roster_leave_chord_consumed;
@@ -232,10 +267,8 @@ static void *group_camera_target;
 static void *group_camera_original_targets[2];
 static void *group_camera_target_list;
 static unsigned int group_camera_last_rejection;
-static BOOL player_two_requested;
-static void *requested_player_two_character;
 static BOOL role_lock_active;
-static DWORD player_two_request_last_attempt;
+static BOOL fixed_three_release_deferred_logged;
 static BOOL service_only_mode;
 static volatile LONG control_update_lifecycle_lock;
 static BOOL control_update_wrapper_enabled;
@@ -300,6 +333,144 @@ static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+static SudekiMpCompanionControlRuntime *companion_control_for_seat(
+    unsigned int seat_index
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT) {
+        return NULL;
+    }
+    return &companion_controls[seat_index - CONTROL_COMPANION_FIRST_SEAT];
+}
+
+BOOL SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+    unsigned int seat_index,
+    BOOL requested,
+    BOOL active,
+    BOOL input_ready,
+    BOOL seat_view_ready
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT ||
+        !requested || !active || !input_ready) {
+        return FALSE;
+    }
+    /* The established P2 path may still use its exact native P1-camera
+     * fallback.  P3 has no such proven fallback and must wait for a distinct
+     * camera/render-state lease from the compositor. */
+    return seat_index == CONTROL_COMPANION_FIRST_SEAT || seat_view_ready;
+}
+
+BOOL SudekiMpControlSeparationSeatRequestTransitionPolicy(
+    unsigned int seat_index,
+    BOOL enabling,
+    BOOL actor_changed,
+    BOOL player_two_exact_requested,
+    BOOL player_three_present
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT) {
+        return FALSE;
+    }
+    if (seat_index == 1u) {
+        if (!enabling && player_three_present) {
+            return FALSE;
+        }
+        return !actor_changed || !player_three_present;
+    }
+    return !enabling || player_two_exact_requested;
+}
+
+BOOL SudekiMpControlSeparationSeatAcquireOrderPolicy(
+    unsigned int seat_index,
+    BOOL player_two_exact_active
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT) {
+        return FALSE;
+    }
+    return seat_index == 1u || player_two_exact_active;
+}
+
+BOOL SudekiMpControlSeparationSeatReleaseOrderPolicy(
+    unsigned int seat_index,
+    BOOL player_three_owned
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT) {
+        return FALSE;
+    }
+    return seat_index == 2u || !player_three_owned;
+}
+
+BOOL SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+    BOOL fixed_three_contract,
+    BOOL role_lock_active_value,
+    BOOL release_required
+) {
+    return fixed_three_contract != FALSE &&
+        role_lock_active_value != FALSE && release_required != FALSE;
+}
+
+BOOL SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+    const void *leased_identity,
+    uint32_t leased_generation,
+    const void *current_identity,
+    uint32_t current_generation
+) {
+    return leased_identity != NULL && current_identity != NULL &&
+        leased_generation != 0u && current_generation != 0u &&
+        leased_identity == current_identity &&
+        leased_generation == current_generation;
+}
+
+BOOL SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+    unsigned int seat_index,
+    BOOL fixed_three_contract,
+    BOOL current_input_ready
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT) {
+        return FALSE;
+    }
+    return seat_index == CONTROL_COMPANION_FIRST_SEAT &&
+            !fixed_three_contract ?
+        TRUE : current_input_ready != FALSE;
+}
+
+BOOL SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+    BOOL player_two_input_ready,
+    BOOL player_three_input_ready
+) {
+    return player_two_input_ready != FALSE &&
+        player_three_input_ready != FALSE;
+}
+
+BOOL SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+    unsigned int seat_index,
+    BOOL fixed_three_contract,
+    BOOL current_input_ready,
+    const void *leased_identity,
+    uint32_t leased_generation,
+    const void *current_identity,
+    uint32_t current_generation
+) {
+    if (seat_index < CONTROL_COMPANION_FIRST_SEAT ||
+        seat_index > CONTROL_COMPANION_LAST_SEAT ||
+        !current_input_ready) {
+        return FALSE;
+    }
+    if (seat_index == CONTROL_COMPANION_FIRST_SEAT &&
+        !fixed_three_contract) {
+        return TRUE;
+    }
+    return SudekiMpControlSeparationSeatInputLeaseExactPolicy(
+        leased_identity,
+        leased_generation,
+        current_identity,
+        current_generation);
 }
 
 static void acquire_update_observer_registry(void) {
@@ -866,6 +1037,85 @@ static BOOL overridden_character_is_in_active_group(void) {
     return character_is_in_active_group(overridden_character);
 }
 
+static BOOL companion_character_is_in_active_group(
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    return companion != NULL &&
+        character_is_in_active_group(companion->character);
+}
+
+static BOOL companion_seat_view_ready(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    SudekiMpPlayerCombatSnapshot snapshot;
+
+    return companion != NULL && companion->character != NULL &&
+        SudekiMpCombatContextGetSnapshot(seat_index, &snapshot) &&
+        snapshot.character == companion->character &&
+        snapshot.viewport_camera != NULL && snapshot.render_state != NULL &&
+        SudekiMpSplitScreenSeatViewReady(
+            seat_index, companion->character);
+}
+
+static BOOL fixed_three_control_contract_active(void) {
+    DWORD saved_error = GetLastError();
+    BOOL active = SudekiMpSplitScreenFixedThreeSeatEnabled() &&
+        SudekiMpLocalInputHubRequestedMask() ==
+            SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK;
+
+    SetLastError(saved_error);
+    return active;
+}
+
+static BOOL companion_input_ready(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    if (companion == NULL || !input_bridge_enabled ||
+        !companion->input_connected || companion->input_identity == NULL) {
+        return FALSE;
+    }
+    if ((SudekiMpLocalInputHubRequestedMask() &
+            (uint8_t)(1u << seat_index)) != 0u) {
+        return companion->input_generation != 0u &&
+            companion->input_identity ==
+                SudekiMpLocalInputHubSeatIdentity(seat_index) &&
+            companion->input_generation ==
+                SudekiMpLocalInputHubSeatIdentityGeneration(seat_index);
+    }
+    return seat_index == CONTROL_COMPANION_FIRST_SEAT &&
+        companion->input_identity == SudekiMpInputBridgeIdentity();
+}
+
+static BOOL companion_active_input_lease(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    return companion != NULL &&
+        SudekiMpControlSeparationSeatActiveInputLeasePolicy(
+            seat_index,
+            fixed_three_control_contract_active(),
+            companion_input_ready(seat_index, companion),
+            companion->leased_input_identity,
+            companion->leased_input_generation,
+            companion->input_identity,
+            companion->input_generation);
+}
+
+static BOOL companion_actor_publication_ready(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    if (companion == NULL || !companion->requested ||
+        !companion->lease_exact || companion->character == NULL) {
+        return FALSE;
+    }
+    return seat_index == CONTROL_COMPANION_FIRST_SEAT &&
+            !fixed_three_control_contract_active() ?
+        TRUE : companion_active_input_lease(seat_index, companion);
+}
+
 static uint32_t advance_actor_generation(uint32_t generation) {
     ++generation;
     if (generation == 0u) {
@@ -881,7 +1131,7 @@ static void publish_runtime_player_lease(
 ) {
     SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
 
-    if (player_index >= 2u) {
+    if (player_index >= CONTROL_PUBLISHED_PLAYER_COUNT) {
         return;
     }
     human_present = human_present != FALSE;
@@ -915,8 +1165,12 @@ static void publish_runtime_player_lease(
 static void publish_runtime_player_leases(void *controller) {
     void *player_one = NULL;
     void *player_two = NULL;
+    void *player_three = NULL;
     BOOL player_one_present = FALSE;
     BOOL player_two_present = FALSE;
+    BOOL player_three_present = FALSE;
+    SudekiMpCompanionControlRuntime *player_three_control =
+        companion_control_for_seat(2u);
 
     if (readable_memory(controller, CONTROLLER_TARGET_OFFSET +
             sizeof(player_one))) {
@@ -926,17 +1180,30 @@ static void publish_runtime_player_leases(void *controller) {
             character_is_in_active_group(player_one);
     }
     if (player_two_requested && input_bridge_enabled &&
-        input_bridge_connected && SudekiMpSplitScreenRuntimeEnabled() &&
+        companion_active_input_lease(1u, &companion_controls[0]) &&
+        SudekiMpSplitScreenRuntimeEnabled() &&
         (!SudekiMpSplitScreenRosterParticipationAvailable() ||
          SudekiMpSplitScreenRosterParticipationRequested()) &&
-        overridden_character != NULL &&
+        companion_controls[0].lease_exact && overridden_character != NULL &&
         overridden_character != player_one &&
         overridden_character_is_in_active_group()) {
         player_two = overridden_character;
         player_two_present = TRUE;
     }
+    if (player_three_control != NULL && player_three_control->requested &&
+        companion_active_input_lease(2u, player_three_control) &&
+        SudekiMpSplitScreenRuntimeEnabled() &&
+        player_three_control->lease_exact &&
+        player_three_control->character != NULL &&
+        player_three_control->character != player_one &&
+        player_three_control->character != player_two &&
+        companion_character_is_in_active_group(player_three_control)) {
+        player_three = player_three_control->character;
+        player_three_present = TRUE;
+    }
     publish_runtime_player_lease(0u, player_one, player_one_present);
     publish_runtime_player_lease(1u, player_two, player_two_present);
+    publish_runtime_player_lease(2u, player_three, player_three_present);
 }
 
 static uint8_t *current_gameplay_camera(void) {
@@ -1313,42 +1580,53 @@ static void poll_shared_group_camera(void *controller) {
     );
 }
 
-static void stop_second_player_movement(void) {
-    uint8_t *character = (uint8_t *)overridden_character;
+static void stop_companion_movement(
+    unsigned int seat_index,
+    SudekiMpCompanionControlRuntime *companion
+) {
+    uint8_t *character = companion == NULL ? NULL :
+        (uint8_t *)companion->character;
     void *arbiter;
 
-    if (!second_player_movement_active) {
+    if (companion == NULL || !companion->movement_active) {
         return;
     }
     if (character == NULL) {
-        second_player_movement_active = FALSE;
-        second_player_movement_magnitude = 0.0f;
-        last_movement_x = 0;
-        last_movement_z = 0;
+        companion->movement_active = FALSE;
+        companion->movement_magnitude = 0.0f;
+        companion->movement_input_x = 0;
+        companion->movement_input_z = 0;
         return;
     }
-    if (!overridden_character_is_in_active_group()) {
-        SudekiMpLogWrite(
-            "control_separation event=second_player_movement phase=abort reason=character_not_in_active_group\r\n"
-        );
-        second_player_movement_active = FALSE;
-        second_player_movement_magnitude = 0.0f;
-        last_movement_x = 0;
-        last_movement_z = 0;
+    if (!companion_character_is_in_active_group(companion)) {
+        SudekiMpLogFormat(
+            "control_separation event=companion_movement player=%u "
+            "phase=abort reason=character_not_in_active_group\r\n",
+            seat_index + 1u);
+        companion->movement_active = FALSE;
+        companion->movement_magnitude = 0.0f;
+        companion->movement_input_x = 0;
+        companion->movement_input_z = 0;
         return;
     }
     arbiter = *(void **)(character + 0x90);
-    if (arbiter != NULL) {
+    if (arbiter != NULL && arbiter_set_speed != NULL) {
         arbiter_set_speed(arbiter, 0.0f, 1.0f);
     }
     SudekiMpLogFormat(
-        "control_separation event=second_player_movement phase=stop character=0x%08lx\r\n",
+        "control_separation event=companion_movement player=%u "
+        "phase=stop character=0x%08lx\r\n",
+        seat_index + 1u,
         (unsigned long)(uintptr_t)character
     );
-    second_player_movement_active = FALSE;
-    second_player_movement_magnitude = 0.0f;
-    last_movement_x = 0;
-    last_movement_z = 0;
+    companion->movement_active = FALSE;
+    companion->movement_magnitude = 0.0f;
+    companion->movement_input_x = 0;
+    companion->movement_input_z = 0;
+}
+
+static void stop_second_player_movement(void) {
+    stop_companion_movement(1u, &companion_controls[0]);
 }
 
 static void quiesce_second_player_input(void) {
@@ -1646,8 +1924,47 @@ static void __stdcall enforce_player_one_roaming_boundary(
         arbiter, constrained, speed, turn_rate, movement_mode);
 }
 
+static void poll_companion_input(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+    const uint8_t hub_mask = SudekiMpLocalInputHubRequestedMask();
+    BOOL hub_seat_requested =
+        (hub_mask & (uint8_t)(1u << seat_index)) != 0u;
+    BOOL connected = FALSE;
+
+    if (companion == NULL) {
+        return;
+    }
+    if (hub_seat_requested) {
+        connected = SudekiMpLocalInputHubPoll(
+            seat_index, &companion->input_state);
+        companion->input_identity = connected ?
+            SudekiMpLocalInputHubSeatIdentity(seat_index) : NULL;
+        companion->input_generation = connected ?
+            SudekiMpLocalInputHubSeatIdentityGeneration(seat_index) : 0u;
+    } else if (seat_index == CONTROL_COMPANION_FIRST_SEAT) {
+        connected = SudekiMpInputBridgePoll(&companion->input_state);
+        companion->input_identity = connected ?
+            SudekiMpInputBridgeIdentity() : NULL;
+        /* The legacy bridge has no public connection generation. */
+        companion->input_generation = 0u;
+    } else {
+        ZeroMemory(&companion->input_state, sizeof(companion->input_state));
+        companion->input_identity = NULL;
+        companion->input_generation = 0u;
+    }
+    if (!connected) {
+        if (companion->input_connected) {
+            companion->keyboard_weak_was_down = FALSE;
+            stop_companion_movement(seat_index, companion);
+        }
+        companion->input_connected = FALSE;
+        return;
+    }
+    companion->input_connected = TRUE;
+}
+
 static void poll_input_bridge(void) {
-    BOOL connected;
     DWORD now;
     int delta_x;
     int delta_y;
@@ -1655,16 +1972,11 @@ static void poll_input_bridge(void) {
     if (!input_bridge_enabled) {
         return;
     }
-    connected = SudekiMpInputBridgePoll(&input_bridge_state);
-    if (!connected) {
-        if (input_bridge_connected) {
-            weak_attack_was_down = FALSE;
-            stop_second_player_movement();
-        }
-        input_bridge_connected = FALSE;
+    poll_companion_input(1u);
+    poll_companion_input(2u);
+    if (!input_bridge_connected) {
         return;
     }
-    input_bridge_connected = TRUE;
     now = GetTickCount();
     delta_x = (int)input_bridge_state.right_x -
         (int)input_bridge_last_right_x;
@@ -1724,7 +2036,9 @@ static BOOL second_player_exact_interaction_target_known(void) {
         lease->actor_generation == snapshot.provenance.actor_generation;
 }
 
-static BOOL submit_second_player_controller_combat_action(
+static BOOL submit_companion_controller_combat_action(
+    unsigned int seat_index,
+    SudekiMpCompanionControlRuntime *companion,
     void *controller,
     BOOL owns_foreground,
     SudekiMpControllerActionIntent intent,
@@ -1734,12 +2048,15 @@ static BOOL submit_second_player_controller_combat_action(
     uint32_t *state_58,
     uint8_t *flags_60
 ) {
-    uint8_t *character = (uint8_t *)overridden_character;
+    uint8_t *character = companion == NULL ? NULL :
+        (uint8_t *)companion->character;
     uint8_t *component;
     uint8_t *mode_state;
     uint8_t *arbiter;
     void *controller_target;
     SudekiMpControllerCombatFlags combat_flags;
+    BOOL seat_view_ready;
+    BOOL fixed_three_contract;
 
     *reason = "invalid_action_intent";
     *submitted_arbiter = NULL;
@@ -1757,9 +2074,21 @@ static BOOL submit_second_player_controller_combat_action(
         *reason = "game_window_not_foreground";
         return FALSE;
     }
-    if (!player_two_requested || character == NULL ||
-        !overridden_character_is_in_active_group()) {
-        *reason = "no_live_player_two_character";
+    seat_view_ready = companion_seat_view_ready(seat_index, companion);
+    fixed_three_contract = seat_index == 1u &&
+        fixed_three_control_contract_active();
+    if (companion == NULL ||
+        !SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            seat_index,
+            companion->requested,
+            companion->lease_exact && character != NULL,
+            companion_active_input_lease(seat_index, companion),
+            seat_view_ready) ||
+        (fixed_three_contract && !seat_view_ready) ||
+        !companion_character_is_in_active_group(companion)) {
+        *reason = (seat_index == 2u || fixed_three_contract) &&
+                !seat_view_ready ?
+                "seat_view_unavailable" : "no_live_companion_character";
         return FALSE;
     }
 
@@ -1771,9 +2100,10 @@ static BOOL submit_second_player_controller_combat_action(
         *(void **)((uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
     if (component == NULL || mode_state == NULL || arbiter == NULL ||
         *(void **)(character + 0xacu) == NULL ||
+        component != companion->ai_component ||
         *(int16_t *)(component + 0x16au) != 1 ||
         *(mode_state + 0x0bu) != 0 || character == controller_target) {
-        *reason = "native_player_two_combat_state_unavailable";
+        *reason = "native_companion_combat_state_unavailable";
         return FALSE;
     }
 
@@ -1857,6 +2187,7 @@ static void service_second_player_controller_actions(
     BOOL any_quick_menu_active;
     BOOL other_seat_quick_menu_active;
     BOOL seat_quick_menu_controls_modal;
+    BOOL input_lease_active;
     BOOL quick_menu_opened = FALSE;
     const char *quick_menu_open_reason = "seat_quick_menu_open_rejected";
 
@@ -1869,8 +2200,11 @@ static void service_second_player_controller_actions(
         !seat_quick_menu_active;
     seat_quick_menu_controls_modal = seat_quick_menu_active &&
         !modal_active && !transition_vote_active;
+    input_lease_active = companion_active_input_lease(
+        1u, &companion_controls[0]);
     context.seat_active = player_two_requested &&
-        overridden_character != NULL &&
+        companion_controls[0].lease_exact && overridden_character != NULL &&
+        input_lease_active &&
         overridden_character_is_in_active_group();
     context.modal_active = modal_active != FALSE ||
         any_quick_menu_active;
@@ -1886,7 +2220,7 @@ static void service_second_player_controller_actions(
     result_count = SudekiMpControllerActionRouterAdvance(
         &controller_action_router,
         1u,
-        input_bridge_enabled && input_bridge_connected,
+        input_bridge_enabled && input_lease_active,
         input_bridge_state.buttons,
         &context,
         results,
@@ -1909,6 +2243,8 @@ static void service_second_player_controller_actions(
     if (quick_menu_result_index != SIZE_MAX) {
         if (!owns_foreground) {
             quick_menu_open_reason = "game_window_not_foreground";
+        } else if (!context.seat_active) {
+            quick_menu_open_reason = "seat_input_lease_inactive";
         } else if (SudekiMpSplitScreenQuickMenuRequest(1u)) {
             quick_menu_opened = TRUE;
             quick_menu_open_reason = "seat_quick_menu_opened";
@@ -1941,6 +2277,9 @@ static void service_second_player_controller_actions(
             delivery = "blocked";
             reason = context.seat_active ?
                 "no_action_in_current_context" : "seat_inactive";
+        } else if (!context.seat_active) {
+            delivery = "blocked";
+            reason = "seat_input_lease_inactive";
         } else if (context.modal_active &&
                 seat_quick_menu_controls_modal) {
             SudekiMpSplitScreenQuickMenuAction action;
@@ -1960,7 +2299,9 @@ static void service_second_player_controller_actions(
                 reason = "seat_quick_menu_action_rejected";
             }
         } else if (controller_intent_is_combat(resolution->intent)) {
-            if (submit_second_player_controller_combat_action(
+            if (submit_companion_controller_combat_action(
+                    1u,
+                    &companion_controls[0],
                     controller,
                     owns_foreground,
                     resolution->intent,
@@ -2041,14 +2382,115 @@ static void service_second_player_controller_actions(
     }
 }
 
+static void service_player_three_controller_actions(
+    void *controller,
+    BOOL owns_foreground,
+    BOOL modal_active,
+    BOOL transition_vote_active
+) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[1];
+    SudekiMpControllerActionContext context;
+    SudekiMpControllerActionResolution
+        results[SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS];
+    size_t result_count;
+    size_t result_index;
+    BOOL view_ready = companion_seat_view_ready(2u, companion);
+    BOOL input_ready = companion_active_input_lease(2u, companion);
+
+    ZeroMemory(&context, sizeof(context));
+    context.seat_active =
+        SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            2u,
+            companion->requested,
+            companion->lease_exact && companion->character != NULL,
+            input_ready,
+            view_ready) &&
+        companion_character_is_in_active_group(companion);
+    context.modal_active = modal_active != FALSE ||
+        SudekiMpSplitScreenQuickMenuAnyActive();
+    context.transition_vote_active = transition_vote_active != FALSE;
+    context.combat_active = second_player_combat_active();
+    result_count = SudekiMpControllerActionRouterAdvance(
+        &controller_action_router,
+        2u,
+        input_ready,
+        companion->input_state.buttons,
+        &context,
+        results,
+        SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS);
+    if (result_count > SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS) {
+        result_count = SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS;
+    }
+    for (result_index = 0u; result_index < result_count; ++result_index) {
+        SudekiMpControllerActionResolution *resolution =
+            &results[result_index];
+        const char *delivery = "blocked";
+        const char *reason = context.seat_active ?
+            "consumer_not_in_first_p3_slice" :
+            (view_ready ? "seat_inactive" : "seat_view_unavailable");
+        void *arbiter = NULL;
+        uint32_t flags_50 = 0u;
+        uint32_t state_58 = 0u;
+        uint8_t flags_60 = 0u;
+
+        if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK) {
+            if (submit_companion_controller_combat_action(
+                    2u,
+                    companion,
+                    controller,
+                    owns_foreground,
+                    resolution->intent,
+                    &reason,
+                    &arbiter,
+                    &flags_50,
+                    &state_58,
+                    &flags_60)) {
+                delivery = "submitted";
+            } else {
+                delivery = "rejected";
+            }
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_NONE) {
+            reason = context.seat_active ?
+                "no_action_in_current_context" : reason;
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+            reason = "p3_quick_menu_consumer_not_connected";
+        }
+        SudekiMpLogFormat(
+            "control_separation event=controller_action_edge phase=rising "
+            "player=3 protocol_button=%s intent=%s layer=%s combat=%s "
+            "view_ready=%s delivery=%s reason=%s character=0x%08lx "
+            "arbiter=0x%08lx flags_50=0x%08lx state_58=0x%08lx "
+            "flags_60=0x%02x policy=first_p3_slice_weak_attack_only\r\n",
+            SudekiMpControllerProtocolButtonName(
+                resolution->protocol_button),
+            SudekiMpControllerActionIntentName(resolution->intent),
+            controller_action_layer_name(&context),
+            context.combat_active ? "true" : "false",
+            view_ready ? "true" : "false",
+            delivery,
+            reason,
+            (unsigned long)(uintptr_t)companion->character,
+            (unsigned long)(uintptr_t)arbiter,
+            (unsigned long)flags_50,
+            (unsigned long)state_58,
+            (unsigned int)flags_60);
+    }
+}
+
 static void quiesce_for_shared_interaction_modal(void) {
     quiesce_second_player_input();
+    stop_companion_movement(2u, &companion_controls[1]);
     SudekiMpCombatContextSetInputSource(
         1u, SUDEKIMP_COMBAT_INPUT_NONE, NULL);
+    SudekiMpCombatContextSetInputSource(
+        2u, SUDEKIMP_COMBAT_INPUT_NONE, NULL);
     if (!shared_interaction_modal_quiesce_logged) {
         shared_interaction_modal_quiesce_logged = TRUE;
         SudekiMpLogWrite(
-            "control_separation event=shared_interaction_modal player=2 "
+            "control_separation event=shared_interaction_modal players=2,3 "
             "input=quiesced "
             "policy=no_movement_attack_skill_camera_or_request_injection\r\n");
     }
@@ -2060,7 +2502,7 @@ static void report_shared_interaction_modal_released(void) {
     }
     shared_interaction_modal_quiesce_logged = FALSE;
     SudekiMpLogWrite(
-        "control_separation event=shared_interaction_modal player=2 "
+        "control_separation event=shared_interaction_modal players=2,3 "
         "input=released policy=require_new_edges_after_fresh_camera_caches\r\n");
 }
 
@@ -2125,8 +2567,15 @@ static BOOL service_transition_vote_input_freeze(
         blacksmith_modal,
         vote_suppressed && !blacksmith_modal
     );
+    service_player_three_controller_actions(
+        controller,
+        FALSE,
+        blacksmith_modal,
+        vote_suppressed && !blacksmith_modal
+    );
     stop_first_player_movement(controller);
     stop_second_player_movement();
+    stop_companion_movement(2u, &companion_controls[1]);
     second_player_facing_valid = FALSE;
     weak_attack_was_down = FALSE;
     for (ordinal = 0u; ordinal < 4u; ++ordinal) {
@@ -2139,7 +2588,7 @@ static BOOL service_transition_vote_input_freeze(
         transition_vote_input_freeze_logged = TRUE;
         SudekiMpLogWrite(
             "transition_vote event=input_freeze state=active "
-            "policy=skip_p1_native_controller_update_and_all_p2_submissions_keep_vote_observer_running_until_vote_and_escape_release\r\n");
+            "policy=skip_p1_native_controller_update_and_all_companion_submissions_keep_vote_observer_running_until_vote_and_escape_release\r\n");
     }
     notify_update_observers(
         controller,
@@ -2198,18 +2647,24 @@ static void poll_roster_participation_input(BOOL owns_foreground) {
     roster_join_start_was_down = start_down;
 }
 
-static BOOL bridge_movement(float *x, float *z, float *speed) {
+static BOOL companion_bridge_movement(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion,
+    float *x,
+    float *z,
+    float *speed
+) {
     float raw_x;
     float raw_z;
     float magnitude;
     float direction_magnitude;
     float scaled_magnitude;
 
-    if (!input_bridge_enabled || !input_bridge_connected) {
+    if (!companion_active_input_lease(seat_index, companion)) {
         return FALSE;
     }
-    raw_x = (float)input_bridge_state.left_x / 32768.0f;
-    raw_z = -(float)input_bridge_state.left_y / 32768.0f;
+    raw_x = (float)companion->input_state.left_x / 32768.0f;
+    raw_z = -(float)companion->input_state.left_y / 32768.0f;
     magnitude = sqrtf(raw_x * raw_x + raw_z * raw_z);
     if (magnitude <= input_bridge_deadzone) {
         *x = 0.0f;
@@ -2227,6 +2682,11 @@ static BOOL bridge_movement(float *x, float *z, float *speed) {
     *z = raw_z / direction_magnitude;
     *speed = scaled_magnitude;
     return TRUE;
+}
+
+static BOOL bridge_movement(float *x, float *z, float *speed) {
+    return companion_bridge_movement(
+        1u, &companion_controls[0], x, z, speed);
 }
 
 enum {
@@ -2739,7 +3199,15 @@ static void poll_second_player_movement(
         stop_second_player_movement();
         return;
     }
-    if (!second_player_movement_enabled || character == NULL) {
+    if (!second_player_movement_enabled ||
+        !companion_controls[0].lease_exact || character == NULL) {
+        stop_second_player_movement();
+        return;
+    }
+    if (fixed_three_control_contract_active() &&
+        (!companion_active_input_lease(1u, &companion_controls[0]) ||
+         !companion_seat_view_ready(1u, &companion_controls[0]))) {
+        stop_second_player_movement();
         return;
     }
     if (!overridden_character_is_in_active_group()) {
@@ -2751,7 +3219,9 @@ static void poll_second_player_movement(
     arbiter = *(void **)(character + 0x90);
     controller_target = controller == NULL ? NULL :
         *(void **)((uint8_t *)controller + 0x248);
-    if (!owns_foreground || component == NULL || mode_state == NULL ||
+    if (!owns_foreground || component == NULL ||
+        component != companion_controls[0].ai_component ||
+        mode_state == NULL ||
         arbiter == NULL || *(void **)(character + 0xac) == NULL ||
         *(int16_t *)(component + 0x16a) != 1 ||
         *(mode_state + 0x0b) != 0 || character == controller_target) {
@@ -2799,6 +3269,10 @@ static void poll_second_player_movement(
             );
         }
         if (!player_two_camera_basis) {
+            if (fixed_three_control_contract_active()) {
+                stop_second_player_movement();
+                return;
+            }
             movement_camera_transform(controller, transformed, direction);
         }
         transformed[1] = 0.0f;
@@ -2924,6 +3398,129 @@ static void poll_second_player_movement(
     last_movement_z = bridge_source ? input_bridge_state.left_y : z;
 }
 
+static void poll_player_three_movement(
+    void *controller,
+    BOOL owns_foreground
+) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[1];
+    uint8_t *character = (uint8_t *)companion->character;
+    uint8_t *component;
+    uint8_t *mode_state;
+    void *arbiter;
+    void *controller_target;
+    float input_x;
+    float input_z;
+    float movement_speed;
+    float direction[3];
+    uint32_t arbiter_flags;
+    int arbiter_mode;
+    unsigned int arbiter_state_60;
+    int control_state;
+    unsigned int movement_flags;
+    unsigned int native_gate;
+
+    if (!second_player_movement_enabled || !owns_foreground ||
+        !SudekiMpControlSeparationSeatSubmissionReadyPolicy(
+            2u,
+            companion->requested,
+            companion->lease_exact && character != NULL,
+            companion_active_input_lease(2u, companion),
+            companion_seat_view_ready(2u, companion)) ||
+        !companion_character_is_in_active_group(companion) ||
+        !companion_bridge_movement(
+            2u, companion, &input_x, &input_z, &movement_speed)) {
+        stop_companion_movement(2u, companion);
+        return;
+    }
+    if (movement_speed <= 0.0001f) {
+        stop_companion_movement(2u, companion);
+        return;
+    }
+    component = *(uint8_t **)(character + 0x94u);
+    mode_state = component == NULL ? NULL :
+        *(uint8_t **)(component + 0x3cu);
+    arbiter = *(void **)(character + 0x90u);
+    controller_target = controller == NULL ? NULL :
+        *(void **)((uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
+    if (component == NULL || component != companion->ai_component ||
+        mode_state == NULL || arbiter == NULL ||
+        *(void **)(character + 0xacu) == NULL ||
+        *(int16_t *)(component + 0x16au) != 1 ||
+        *(mode_state + 0x0bu) != 0u || character == controller_target ||
+        arbiter_movement == NULL) {
+        stop_companion_movement(2u, companion);
+        return;
+    }
+
+    direction[0] = input_x;
+    direction[1] = 0.0f;
+    direction[2] = input_z;
+    if (camera_relative_movement_enabled) {
+        float transformed[3] = {0.0f, 0.0f, 0.0f};
+        float horizontal_length;
+
+        /* The fixed-three renderer validates actor, view, render state, and
+         * cache ownership again. Never fall back to P1's global basis. */
+        if (!SudekiMpTransformSeatMovement(
+                2u, character, direction, transformed)) {
+            stop_companion_movement(2u, companion);
+            return;
+        }
+        transformed[1] = 0.0f;
+        horizontal_length = sqrtf(
+            transformed[0] * transformed[0] +
+            transformed[2] * transformed[2]);
+        if (horizontal_length <= 0.0001f) {
+            stop_companion_movement(2u, companion);
+            return;
+        }
+        direction[0] = transformed[0] / horizontal_length;
+        direction[2] = transformed[2] / horizontal_length;
+    }
+    native_gate = classify_native_movement_gate(
+        arbiter,
+        0u,
+        &arbiter_flags,
+        &arbiter_mode,
+        &arbiter_state_60,
+        &control_state,
+        &movement_flags);
+    if (native_gate != NATIVE_MOVEMENT_GATE_ALLOWED) {
+        stop_companion_movement(2u, companion);
+        return;
+    }
+    arbiter_movement(arbiter, direction, movement_speed, 1.0f, 0u);
+    if (!companion->movement_active ||
+        (int)companion->input_state.left_x -
+                companion->movement_input_x > 4096 ||
+        (int)companion->input_state.left_x -
+                companion->movement_input_x < -4096 ||
+        (int)companion->input_state.left_y -
+                companion->movement_input_z > 4096 ||
+        (int)companion->input_state.left_y -
+                companion->movement_input_z < -4096) {
+        SudekiMpLogFormat(
+            "control_separation event=companion_movement player=3 "
+            "phase=submit source=local_input_hub character=0x%08lx "
+            "arbiter=0x%08lx input_x=%d input_z=%d "
+            "camera_relative=%s camera_basis=%s seat_view=exact "
+            "speed_bits=0x%08lx native_gate=%s\r\n",
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)(uintptr_t)arbiter,
+            (int)companion->input_state.left_x,
+            (int)companion->input_state.left_y,
+            camera_relative_movement_enabled ? "true" : "false",
+            camera_relative_movement_enabled ?
+                "player_three_render" : "world_axes",
+            (unsigned long)float_bits(movement_speed),
+            native_movement_gate_name(native_gate));
+    }
+    companion->movement_active = TRUE;
+    companion->movement_magnitude = movement_speed;
+    companion->movement_input_x = companion->input_state.left_x;
+    companion->movement_input_z = companion->input_state.left_y;
+}
+
 static void poll_second_player_camera_facing(
     void *controller,
     BOOL owns_foreground
@@ -2940,9 +3537,13 @@ static void poll_second_player_camera_facing(
     float dot;
 
     if (!player_two_requested || !owns_foreground ||
+        !companion_controls[0].lease_exact ||
         !second_player_movement_enabled ||
         !camera_relative_movement_enabled || !input_bridge_enabled ||
         !input_bridge_connected || character == NULL ||
+        (fixed_three_control_contract_active() &&
+         (!companion_active_input_lease(1u, &companion_controls[0]) ||
+          !companion_seat_view_ready(1u, &companion_controls[0]))) ||
         !overridden_character_is_in_active_group()) {
         second_player_facing_valid = FALSE;
         return;
@@ -2953,7 +3554,9 @@ static void poll_second_player_camera_facing(
     mode_state = component == NULL ? NULL :
         *(uint8_t **)(component + 0x3cu);
     arbiter = *(uint8_t **)(character + 0x90u);
-    if (component == NULL || mode_state == NULL ||
+    if (component == NULL ||
+        component != companion_controls[0].ai_component ||
+        mode_state == NULL ||
         *(int16_t *)(component + 0x16au) != 1 ||
         *(uint8_t *)(mode_state + 0x0bu) != 0u ||
         character == controller_target || !readable_memory(arbiter, 0x54u) ||
@@ -3016,7 +3619,8 @@ static void poll_second_player_weak_attack(
         weak_attack_was_down = key_is_down;
         return;
     }
-    if (character == NULL || !overridden_character_is_in_active_group()) {
+    if (!companion_controls[0].lease_exact || character == NULL ||
+        !overridden_character_is_in_active_group()) {
         weak_attack_was_down = key_is_down;
         return;
     }
@@ -3026,7 +3630,9 @@ static void poll_second_player_weak_attack(
     arbiter = *(uint8_t **)(character + 0x90);
     controller_target = controller == NULL ? NULL :
         *(void **)((uint8_t *)controller + 0x248);
-    if (!owns_foreground || component == NULL || mode_state == NULL ||
+    if (!owns_foreground || component == NULL ||
+        component != companion_controls[0].ai_component ||
+        mode_state == NULL ||
         arbiter == NULL || *(void **)(character + 0xac) == NULL ||
         *(int16_t *)(component + 0x16a) != 1 ||
         *(mode_state + 0x0b) != 0 || character == controller_target) {
@@ -3100,8 +3706,11 @@ static void poll_second_player_skills(
 
             SudekiMpCombatContextsPollGame((HMODULE)game_base);
             if (character != NULL &&
+                companion_controls[0].lease_exact &&
                 overridden_character_is_in_active_group() &&
-                component != NULL && mode_state != NULL &&
+                component != NULL &&
+                component == companion_controls[0].ai_component &&
+                mode_state != NULL &&
                 *(void **)(character + 0x90u) != NULL &&
                 *(void **)(character + 0xacu) != NULL &&
                 *(int16_t *)(component + 0x16au) == 1 &&
@@ -3214,15 +3823,45 @@ static uint8_t *find_character_party_slot(
     return NULL;
 }
 
-static uint8_t *find_second_player_party_slot(
+static BOOL companion_character_reserved_by_other_seat(
+    unsigned int seat_index,
+    void *character
+) {
+    unsigned int other_seat;
+
+    for (other_seat = CONTROL_COMPANION_FIRST_SEAT;
+         other_seat <= CONTROL_COMPANION_LAST_SEAT;
+         ++other_seat) {
+        SudekiMpCompanionControlRuntime *other;
+
+        if (other_seat == seat_index) {
+            continue;
+        }
+        other = companion_control_for_seat(other_seat);
+        if (other != NULL &&
+            (other->character == character ||
+             other->requested_character == character)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static uint8_t *find_companion_party_slot(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion,
     uint8_t *group,
     void *controller_target,
     unsigned int *slot_index
 ) {
     unsigned int index;
 
-    if (group == NULL || controller_target == NULL ||
+    if (companion == NULL || group == NULL || controller_target == NULL ||
         *(void **)(group + PARTY_SLOT_FIRST_OFFSET) != controller_target) {
+        return NULL;
+    }
+    /* P3 never infers identity from party order. */
+    if (seat_index == 2u && companion->requested_character == NULL) {
         return NULL;
     }
     for (index = 1u; index < PARTY_SLOT_COUNT; ++index) {
@@ -3231,8 +3870,10 @@ static uint8_t *find_second_player_party_slot(
         void *candidate = *(void **)slot;
 
         if (candidate != NULL && candidate != controller_target &&
-            (requested_player_two_character == NULL ||
-             candidate == requested_player_two_character)) {
+            (companion->requested_character == NULL ||
+             candidate == companion->requested_character) &&
+            !companion_character_reserved_by_other_seat(
+                seat_index, candidate)) {
             if (slot_index != NULL) {
                 *slot_index = index;
             }
@@ -3243,10 +3884,11 @@ static uint8_t *find_second_player_party_slot(
 }
 
 static void log_control_state(
+    unsigned int seat_index,
     const char *event,
     const char *result,
     uint8_t *slot,
-    unsigned int slot_index
+    unsigned int party_slot_index
 ) {
     uint8_t *character = slot == NULL ? NULL : *(uint8_t **)slot;
     uint8_t *component = character == NULL ? NULL :
@@ -3258,10 +3900,13 @@ static void log_control_state(
     int ai_enabled = mode_state == NULL ? -1 : (int)*(mode_state + 0x0b);
 
     SudekiMpLogFormat(
-        "control_separation event=%s result=%s slot=%u character=0x%08lx component=0x%08lx control_ref_16a=%d ai_enabled_3c_0b=%d\r\n",
+        "control_separation event=%s player=%u result=%s slot=%u "
+        "character=0x%08lx component=0x%08lx control_ref_16a=%d "
+        "ai_enabled_3c_0b=%d\r\n",
         event,
+        seat_index + 1u,
         result,
-        slot_index,
+        party_slot_index,
         (unsigned long)(uintptr_t)character,
         (unsigned long)(uintptr_t)component,
         control_ref,
@@ -3286,13 +3931,46 @@ BOOL SudekiMpControlSeparationAiLeaseReleaseTransitionExact(
     return after_mode == (controller_target ? 0u : 1u);
 }
 
-static BOOL toggle_second_player_ai(void) {
-    uint8_t *group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
-    uint8_t *controller = *(uint8_t **)(
-        game_base + RVA_CHARACTER_CONTROLLER_GLOBAL
-    );
-    void *controller_target = controller == NULL ? NULL :
-        *(void **)(controller + 0x248);
+BOOL SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+    int16_t before_ref,
+    uint8_t before_mode,
+    int16_t after_ref,
+    uint8_t after_mode
+) {
+    return before_ref == 0 && before_mode == 1u &&
+        after_ref == 1 && after_mode == 0u;
+}
+
+static void clear_companion_owned_identity(
+    unsigned int seat_index,
+    SudekiMpCompanionControlRuntime *companion
+) {
+    if (companion == NULL) {
+        return;
+    }
+    stop_companion_movement(seat_index, companion);
+    companion->character = NULL;
+    companion->ai_component = NULL;
+    companion->lease_exact = FALSE;
+    companion->leased_input_identity = NULL;
+    companion->leased_input_generation = 0u;
+    if (seat_index == 1u) {
+        reset_native_movement_acceptance_trace();
+        reset_target_trace_state();
+    } else {
+        SudekiMpCombatContextSetCharacter(seat_index, NULL);
+        SudekiMpCombatContextSetInputSource(
+            seat_index, SUDEKIMP_COMBAT_INPUT_NONE, NULL);
+        SudekiMpCombatContextSetView(seat_index, NULL, NULL);
+    }
+}
+
+static BOOL transition_companion_ai(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+    uint8_t *group;
+    uint8_t *controller;
+    void *controller_target;
     uint8_t *slot;
     uint8_t *character;
     uint8_t *component;
@@ -3303,22 +3981,45 @@ static BOOL toggle_second_player_ai(void) {
     int after_ref;
     int after_mode;
 
-    if (group == NULL) {
-        SudekiMpLogWrite(
-            "control_separation event=toggle_abort reason=no_active_group\r\n"
-        );
+    if (companion == NULL || game_base == NULL || ai_override_control == NULL ||
+        ai_default_control == NULL ||
+        !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group)) ||
+        !readable_memory(
+            game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    controller_target = readable_memory(
+            controller, CONTROLLER_TARGET_OFFSET + sizeof(controller_target)) ?
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) : NULL;
+    if (!readable_memory(
+            group,
+            PARTY_SLOT_FIRST_OFFSET + PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
+        SudekiMpLogFormat(
+            "control_separation event=toggle_abort player=%u "
+            "reason=no_active_group\r\n",
+            seat_index + 1u);
         return FALSE;
     }
 
-    if (overridden_character == NULL) {
-        slot = find_second_player_party_slot(
+    if (companion->character == NULL) {
+        slot = find_companion_party_slot(
+            seat_index,
+            companion,
             group,
             controller_target,
             &slot_index
         );
         if (slot == NULL) {
             SudekiMpLogFormat(
-                "control_separation event=toggle_abort reason=%s controller_target=0x%08lx front_character=0x%08lx policy=first_non_front_active_party_member\r\n",
+                "control_separation event=toggle_abort player=%u reason=%s "
+                "controller_target=0x%08lx front_character=0x%08lx "
+                "policy=exact_distinct_companion_p3_never_inferred\r\n",
+                seat_index + 1u,
                 controller_target == NULL ?
                     "no_controller_target" :
                     (*(void **)(group + PARTY_SLOT_FIRST_OFFSET) !=
@@ -3337,47 +4038,99 @@ static BOOL toggle_second_player_ai(void) {
         mode_state = component == NULL ? NULL :
             *(uint8_t **)(component + 0x3c);
         if (component == NULL || mode_state == NULL) {
-            SudekiMpLogWrite(
-                "control_separation event=toggle_abort reason=incomplete_ai_component\r\n"
-            );
+            SudekiMpLogFormat(
+                "control_separation event=toggle_abort player=%u "
+                "reason=incomplete_ai_component\r\n",
+                seat_index + 1u);
             return FALSE;
         }
         before_ref = (int)*(int16_t *)(component + 0x16a);
         before_mode = (int)*(mode_state + 0x0b);
         if (before_ref != 0 || before_mode != 1) {
-            log_control_state("override_abort", "unexpected_initial_state",
-                slot, slot_index);
+            log_control_state(seat_index, "override_abort",
+                "unexpected_initial_state", slot, slot_index);
+            return FALSE;
+        }
+
+        if (!SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+                seat_index,
+                fixed_three_control_contract_active(),
+                companion_input_ready(seat_index, companion))) {
+            SudekiMpLogFormat(
+                "control_separation event=override_abort player=%u "
+                "reason=current_input_not_ready_before_native_acquire "
+                "policy=fixed_0x07_requires_both_transport_leases\r\n",
+                seat_index + 1u);
             return FALSE;
         }
 
         ai_override_control(slot);
         after_ref = (int)*(int16_t *)(component + 0x16a);
         after_mode = (int)*(mode_state + 0x0b);
-        if (after_ref == before_ref + 1 && after_mode == 0) {
-            overridden_character = character;
-            overridden_ai_component = component;
-            reset_native_movement_acceptance_trace();
-            reset_target_trace_state();
-            log_control_state("override", "success", slot, slot_index);
+        if (SudekiMpControlSeparationAiLeaseAcquireTransitionExact(
+                (int16_t)before_ref,
+                (uint8_t)before_mode,
+                (int16_t)after_ref,
+                (uint8_t)after_mode)) {
+            companion->character = character;
+            companion->ai_component = component;
+            companion->lease_exact = TRUE;
+            companion->leased_input_identity = companion->input_identity;
+            companion->leased_input_generation = companion->input_generation;
+            if (seat_index == 1u) {
+                reset_native_movement_acceptance_trace();
+                reset_target_trace_state();
+            } else {
+                /* A prior actor's view can never authorize this new lease. */
+                SudekiMpCombatContextSetView(seat_index, NULL, NULL);
+                /* Publish actor and transport identity before the compositor
+                 * is allowed to acquire a view for this exact lease. */
+                SudekiMpCombatContextSetCharacter(seat_index, character);
+                SudekiMpCombatContextSetInputSource(
+                    seat_index,
+                    SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE,
+                    (void *)companion->input_identity);
+            }
+            log_control_state(
+                seat_index, "override", "success", slot, slot_index);
             if (SudekiMpCleanroomEngineRefreshCombatMode()) {
                 SudekiMpLogFormat(
-                    "control_separation event=combat_arm_refresh status=confirmed character=0x%08lx reason=second_player_control_override policy=native_group_transition\r\n",
+                    "control_separation event=combat_arm_refresh player=%u "
+                    "status=confirmed character=0x%08lx "
+                    "reason=companion_control_override "
+                    "policy=native_group_transition\r\n",
+                    seat_index + 1u,
                     (unsigned long)(uintptr_t)character
                 );
             } else {
                 SudekiMpLogFormat(
-                    "control_separation event=combat_arm_refresh status=skipped character=0x%08lx reason=combat_mode_unavailable_or_disabled policy=native_group_transition\r\n",
+                    "control_separation event=combat_arm_refresh player=%u "
+                    "status=skipped character=0x%08lx "
+                    "reason=combat_mode_unavailable_or_disabled "
+                    "policy=native_group_transition\r\n",
+                    seat_index + 1u,
                     (unsigned long)(uintptr_t)character
                 );
             }
             return TRUE;
         } else {
-            log_control_state("override", "verification_failed", slot,
-                slot_index);
+            log_control_state(seat_index, "override",
+                "verification_failed", slot, slot_index);
             if (after_ref > before_ref) {
                 ai_default_control(slot);
-                log_control_state("override_rollback", "requested", slot,
-                    slot_index);
+                after_ref = (int)*(int16_t *)(component + 0x16a);
+                after_mode = (int)*(mode_state + 0x0b);
+                log_control_state(seat_index, "override_rollback",
+                    after_ref == before_ref && after_mode == before_mode ?
+                        "confirmed" : "verification_failed",
+                    slot, slot_index);
+                if (after_ref > before_ref) {
+                    /* Preserve the exact identity so a later teardown can
+                     * retry; this quarantined lease is never reported active. */
+                    companion->character = character;
+                    companion->ai_component = component;
+                    companion->lease_exact = FALSE;
+                }
             }
         }
         return FALSE;
@@ -3385,47 +4138,45 @@ static BOOL toggle_second_player_ai(void) {
 
     slot = find_character_party_slot(
         group,
-        overridden_character,
+        companion->character,
         &slot_index
     );
     if (slot == NULL) {
-        SudekiMpLogWrite(
-            "control_separation event=restore status=released_without_native_default "
+        SudekiMpLogFormat(
+            "control_separation event=restore player=%u "
+            "status=released_without_native_default "
             "reason=owned_character_no_longer_in_active_party "
-            "policy=drop_stale_runtime_identity_after_party_rebuild\r\n"
-        );
-        overridden_character = NULL;
-        overridden_ai_component = NULL;
-        stop_second_player_movement();
-        reset_native_movement_acceptance_trace();
-        reset_target_trace_state();
+            "policy=drop_stale_runtime_identity_after_party_rebuild\r\n",
+            seat_index + 1u);
+        clear_companion_owned_identity(seat_index, companion);
         return TRUE;
     }
     character = *(uint8_t **)slot;
     component = *(uint8_t **)(character + 0x94);
     mode_state = component == NULL ? NULL : *(uint8_t **)(component + 0x3c);
     if (component == NULL || mode_state == NULL) {
-        SudekiMpLogWrite(
-            "control_separation event=restore_abort reason=incomplete_ai_component\r\n"
-        );
+        SudekiMpLogFormat(
+            "control_separation event=restore_abort player=%u "
+            "reason=incomplete_ai_component\r\n",
+            seat_index + 1u);
         return FALSE;
     }
-    if (component != overridden_ai_component) {
-        SudekiMpLogWrite(
-            "control_separation event=restore_abort "
-            "reason=owned_ai_component_identity_changed\r\n"
-        );
+    if (component != companion->ai_component) {
+        SudekiMpLogFormat(
+            "control_separation event=restore_abort player=%u "
+            "reason=owned_ai_component_identity_changed\r\n",
+            seat_index + 1u);
         return FALSE;
     }
     before_ref = (int)*(int16_t *)(component + 0x16a);
     before_mode = (int)*(mode_state + 0x0b);
     if (before_ref < 1 || before_mode != 0) {
-        log_control_state("restore_abort", "unexpected_owned_lease_state", slot,
-            slot_index);
+        log_control_state(seat_index, "restore_abort",
+            "unexpected_owned_lease_state", slot, slot_index);
         return FALSE;
     }
 
-    stop_second_player_movement();
+    stop_companion_movement(seat_index, companion);
     ai_default_control(slot);
     after_ref = (int)*(int16_t *)(component + 0x16a);
     after_mode = (int)*(mode_state + 0x0b);
@@ -3435,40 +4186,125 @@ static BOOL toggle_second_player_ai(void) {
             (int16_t)after_ref,
             (uint8_t)after_mode,
             character == controller_target)) {
-        log_control_state("restore", "success", slot, slot_index);
-        overridden_character = NULL;
-        overridden_ai_component = NULL;
-        reset_native_movement_acceptance_trace();
-        reset_target_trace_state();
+        log_control_state(
+            seat_index, "restore", "success", slot, slot_index);
+        clear_companion_owned_identity(seat_index, companion);
         return TRUE;
     } else {
-        log_control_state("restore", "verification_failed", slot, slot_index);
+        log_control_state(seat_index, "restore",
+            "verification_failed", slot, slot_index);
         if (after_ref == before_ref - 1) {
-            overridden_character = NULL;
-            overridden_ai_component = NULL;
-            reset_native_movement_acceptance_trace();
+            /* Our one decrement occurred. Never retry and double-release it,
+             * even if the remaining native state is surprising. */
+            clear_companion_owned_identity(seat_index, companion);
         }
         return FALSE;
     }
 }
 
-static void reconcile_player_two_request(void) {
-    BOOL active = overridden_character != NULL;
-    BOOL target_mismatch = active && player_two_requested &&
-        requested_player_two_character != NULL &&
-        overridden_character != requested_player_two_character;
+static BOOL companion_requires_release(
+    unsigned int seat_index,
+    const SudekiMpCompanionControlRuntime *companion
+) {
+    if (companion == NULL || companion->character == NULL) {
+        return FALSE;
+    }
+    if (!companion->requested || !companion->lease_exact ||
+        (companion->requested_character != NULL &&
+         companion->character != companion->requested_character)) {
+        return TRUE;
+    }
+    if ((seat_index == 2u ||
+         (seat_index == 1u && fixed_three_control_contract_active())) &&
+        !companion_active_input_lease(seat_index, companion)) {
+        return TRUE;
+    }
+    if (seat_index == 2u &&
+        (!companion_controls[0].requested ||
+         !companion_controls[0].lease_exact ||
+         companion_controls[0].character == NULL ||
+         companion_controls[0].requested_character == NULL ||
+         companion_controls[0].character !=
+            companion_controls[0].requested_character ||
+         !companion_active_input_lease(
+             1u, &companion_controls[0]))) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void reconcile_companion_request(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+    BOOL release_required;
+    BOOL acquire_required;
     DWORD now;
 
-    if (!target_mismatch && active == player_two_requested) {
+    if (companion == NULL) {
+        return;
+    }
+    release_required = companion_requires_release(seat_index, companion);
+    acquire_required = companion->character == NULL && companion->requested &&
+        SudekiMpControlSeparationSeatAcquireOrderPolicy(
+            seat_index,
+            companion_controls[0].requested &&
+                companion_controls[0].lease_exact &&
+                companion_controls[0].character != NULL &&
+                companion_controls[0].requested_character != NULL &&
+                companion_controls[0].character ==
+                    companion_controls[0].requested_character) &&
+        SudekiMpControlSeparationSeatAcquireInputReadyPolicy(
+            seat_index,
+            fixed_three_control_contract_active(),
+            companion_input_ready(seat_index, companion));
+    if (!release_required && !acquire_required) {
         return;
     }
     now = GetTickCount();
-    if (player_two_request_last_attempt != 0u &&
-        (DWORD)(now - player_two_request_last_attempt) < 250u) {
+    if (companion->request_last_attempt != 0u &&
+        (DWORD)(now - companion->request_last_attempt) < 250u) {
         return;
     }
-    player_two_request_last_attempt = now;
-    (void)toggle_second_player_ai();
+    companion->request_last_attempt = now;
+    (void)transition_companion_ai(seat_index);
+}
+
+static void reconcile_companion_requests(void) {
+    BOOL player_three_release_required =
+        companion_requires_release(2u, &companion_controls[1]);
+    BOOL player_two_release_required =
+        companion_requires_release(1u, &companion_controls[0]);
+
+    if (SudekiMpControlSeparationDeferReleaseToRosterPolicy(
+            fixed_three_control_contract_active(),
+            role_lock_active,
+            player_two_release_required ||
+                player_three_release_required)) {
+        if (!fixed_three_release_deferred_logged) {
+            fixed_three_release_deferred_logged = TRUE;
+            SudekiMpLogWrite(
+                "control_separation event=companion_release phase=deferred "
+                "reason=fixed_three_committed_input_lease_lost "
+                "policy=roster_observer_releases_cameras_then_p3_then_p2\r\n");
+        }
+        return;
+    }
+    fixed_three_release_deferred_logged = FALSE;
+    /* Native ownership unwinds in reverse acquisition order. */
+    if (player_three_release_required) {
+        reconcile_companion_request(2u);
+    }
+    if (SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            1u, companion_controls[1].character != NULL) &&
+        player_two_release_required) {
+        reconcile_companion_request(1u);
+    }
+    if (companion_controls[0].character == NULL) {
+        reconcile_companion_request(1u);
+    }
+    if (companion_controls[1].character == NULL) {
+        reconcile_companion_request(2u);
+    }
 }
 
 static void SUDEKIMP_THISCALL service_control_update_observers(
@@ -3528,6 +4364,8 @@ static void poll_control_separation_hotkey_body(
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         service_second_player_controller_actions(
             controller, FALSE, TRUE, FALSE);
+        service_player_three_controller_actions(
+            controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
         original_controller_update(controller, update_data);
         ++dispatch_frame->original_call_count;
@@ -3578,6 +4416,8 @@ static void poll_control_separation_hotkey_body(
     if (SudekiMpSplitScreenSharedInteractionModalActive()) {
         service_second_player_controller_actions(
             controller, FALSE, TRUE, FALSE);
+        service_player_three_controller_actions(
+            controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
         SudekiMpPlayerStatehoodService(
             SudekiMpPlayerStatehoodRuntime(), GetTickCount());
@@ -3601,7 +4441,14 @@ static void poll_control_separation_hotkey_body(
             *(void **)((uint8_t *)controller + 0x248u)
     );
     SudekiMpCombatContextSetCharacter(
-        1u, player_two_requested ? overridden_character : NULL);
+        1u, companion_actor_publication_ready(
+                1u, &companion_controls[0]) ?
+            overridden_character : NULL);
+    SudekiMpCombatContextSetCharacter(
+        2u,
+        companion_actor_publication_ready(
+                2u, &companion_controls[1]) ?
+            companion_controls[1].character : NULL);
     SudekiMpCombatContextSetInputSource(
         0u,
         controller == NULL ? SUDEKIMP_COMBAT_INPUT_NONE :
@@ -3610,15 +4457,37 @@ static void poll_control_separation_hotkey_body(
     );
     SudekiMpCombatContextSetInputSource(
         1u,
-        !player_two_requested || overridden_character == NULL ?
+        !player_two_requested || !companion_controls[0].lease_exact ||
+                overridden_character == NULL ||
+                (input_bridge_enabled &&
+                 !companion_active_input_lease(
+                     1u, &companion_controls[0])) ?
             SUDEKIMP_COMBAT_INPUT_NONE :
             (input_bridge_enabled ?
                 SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE :
                 SUDEKIMP_COMBAT_INPUT_KEYBOARD_PROTOTYPE),
-        !player_two_requested || overridden_character == NULL ? NULL :
+        !player_two_requested || !companion_controls[0].lease_exact ||
+                overridden_character == NULL ||
+                (input_bridge_enabled &&
+                 !companion_active_input_lease(
+                     1u, &companion_controls[0])) ? NULL :
             (input_bridge_enabled ?
-                (void *)SudekiMpInputBridgeIdentity() :
+                (void *)companion_controls[0].input_identity :
                 (void *)second_player_skill_virtual_keys)
+    );
+    SudekiMpCombatContextSetInputSource(
+        2u,
+        !companion_controls[1].requested ||
+                !companion_controls[1].lease_exact ||
+                !companion_active_input_lease(
+                    2u, &companion_controls[1]) ?
+            SUDEKIMP_COMBAT_INPUT_NONE :
+            SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE,
+        !companion_controls[1].requested ||
+                !companion_controls[1].lease_exact ||
+                !companion_active_input_lease(
+                    2u, &companion_controls[1]) ? NULL :
+            (void *)companion_controls[1].input_identity
     );
     SudekiMpCombatContextsPollGame((HMODULE)game_base);
     hotkey_is_down =
@@ -3654,6 +4523,13 @@ static void poll_control_separation_hotkey_body(
                 "control_separation event=player_two_request source=hotkey "
                 "status=rejected reason=co_op_roles_locked\r\n"
             );
+        } else if (player_two_requested &&
+            (companion_controls[1].requested ||
+             companion_controls[1].character != NULL)) {
+            SudekiMpLogWrite(
+                "control_separation event=player_two_request source=hotkey "
+                "status=rejected reason=release_player_three_first\r\n"
+            );
         } else {
             requested_player_two_character = NULL;
             player_two_requested = !player_two_requested;
@@ -3666,9 +4542,50 @@ static void poll_control_separation_hotkey_body(
         }
     }
     hotkey_was_down = hotkey_is_down;
-    reconcile_player_two_request();
+    reconcile_companion_requests();
     publish_runtime_player_leases(controller);
+    SudekiMpCombatContextSetCharacter(
+        1u, companion_actor_publication_ready(
+                1u, &companion_controls[0]) ?
+            overridden_character : NULL);
+    SudekiMpCombatContextSetCharacter(
+        2u,
+        companion_actor_publication_ready(
+                2u, &companion_controls[1]) ?
+            companion_controls[1].character : NULL);
+    SudekiMpCombatContextSetInputSource(
+        1u,
+        !player_two_requested || !companion_controls[0].lease_exact ||
+                (input_bridge_enabled &&
+                 !companion_active_input_lease(
+                     1u, &companion_controls[0])) ?
+            SUDEKIMP_COMBAT_INPUT_NONE :
+            (input_bridge_enabled ?
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE :
+                SUDEKIMP_COMBAT_INPUT_KEYBOARD_PROTOTYPE),
+        !player_two_requested || !companion_controls[0].lease_exact ||
+                (input_bridge_enabled &&
+                 !companion_active_input_lease(
+                     1u, &companion_controls[0])) ? NULL :
+            (input_bridge_enabled ?
+                (void *)companion_controls[0].input_identity :
+                (void *)second_player_skill_virtual_keys));
+    SudekiMpCombatContextSetInputSource(
+        2u,
+        !companion_controls[1].requested ||
+                !companion_controls[1].lease_exact ||
+                !companion_active_input_lease(
+                    2u, &companion_controls[1]) ?
+            SUDEKIMP_COMBAT_INPUT_NONE :
+            SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE,
+        !companion_controls[1].requested ||
+                !companion_controls[1].lease_exact ||
+                !companion_active_input_lease(
+                    2u, &companion_controls[1]) ? NULL :
+            (void *)companion_controls[1].input_identity);
     service_second_player_controller_actions(
+        controller, owns_foreground, FALSE, FALSE);
+    service_player_three_controller_actions(
         controller, owns_foreground, FALSE, FALSE);
     gameplay_input_allowed =
         !SudekiMpControlSeparationGameplayInputFrozen();
@@ -3676,6 +4593,10 @@ static void poll_control_separation_hotkey_body(
     poll_second_player_movement(
         controller,
         update_data,
+        owns_foreground && gameplay_input_allowed
+    );
+    poll_player_three_movement(
+        controller,
         owns_foreground && gameplay_input_allowed
     );
     poll_second_player_camera_facing(
@@ -3727,33 +4648,104 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
     SetLastError(body_last_error);
 }
 
-BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
+static void quiesce_companion_input(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    if (companion == NULL) {
+        return;
+    }
+    if (seat_index == 1u) {
+        quiesce_second_player_input();
+    } else {
+        stop_companion_movement(seat_index, companion);
+        companion->keyboard_weak_was_down = FALSE;
+    }
+    SudekiMpCombatContextSetInputSource(
+        seat_index, SUDEKIMP_COMBAT_INPUT_NONE, NULL);
+}
+
+BOOL SudekiMpControlSeparationRequestSeat(
+    unsigned int seat_index,
+    BOOL enabled
+) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
     if (original_controller_update == NULL || service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (role_lock_active && !enabled) {
-        SetLastError(ERROR_LOCK_VIOLATION);
-        SudekiMpLogWrite(
-            "control_separation event=player_two_request status=rejected "
-            "reason=co_op_roles_locked\r\n"
-        );
+    if (companion == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    requested_player_two_character = NULL;
-    player_two_requested = enabled != FALSE;
-    player_two_request_last_attempt = 0u;
-    if (!player_two_requested) {
-        quiesce_second_player_input();
+    if (role_lock_active && !enabled) {
+        SetLastError(ERROR_LOCK_VIOLATION);
+        SudekiMpLogFormat(
+            "control_separation event=companion_request player=%u "
+            "status=rejected reason=co_op_roles_locked\r\n",
+            seat_index + 1u);
+        return FALSE;
+    }
+    if (!SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            seat_index,
+            enabled,
+            companion->requested != (enabled != FALSE),
+            companion_controls[0].requested &&
+                companion_controls[0].requested_character != NULL,
+            companion_controls[1].requested ||
+                companion_controls[1].character != NULL)) {
+        SetLastError(seat_index == 1u ? ERROR_BUSY : ERROR_NOT_READY);
+        SudekiMpLogFormat(
+            "control_separation event=companion_request player=%u "
+            "status=rejected reason=%s\r\n",
+            seat_index + 1u,
+            seat_index == 1u ? "release_player_three_first" :
+                "exact_player_two_dependency_required");
+        return FALSE;
+    }
+    if (seat_index == 2u && enabled &&
+        companion->requested_character == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        SudekiMpLogWrite(
+            "control_separation event=companion_request player=3 "
+            "status=rejected reason=exact_actor_required\r\n");
+        return FALSE;
+    }
+    if (seat_index == 1u && enabled && companion->requested) {
+        /* Idempotent legacy enable must not downgrade a fixed exact P2 actor
+         * while P3 depends on it. */
+        return TRUE;
+    }
+    if (seat_index == 1u && !(role_lock_active && enabled)) {
+        companion->requested_character = NULL;
+    }
+    companion->requested = enabled != FALSE;
+    companion->request_last_attempt = 0u;
+    if (!companion->requested) {
+        companion->requested_character = NULL;
+        quiesce_companion_input(seat_index);
     }
     SudekiMpLogFormat(
-        "control_separation event=player_two_request source=api state=%s\r\n",
-        player_two_requested ? "enabled" : "disabled"
-    );
+        "control_separation event=companion_request player=%u source=api "
+        "state=%s policy=%s\r\n",
+        seat_index + 1u,
+        companion->requested ? "enabled" : "disabled",
+        seat_index == 1u ? "legacy_first_non_front" : "exact_actor_only");
     return TRUE;
 }
 
-BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
+BOOL SudekiMpControlSeparationRequestPlayerTwo(BOOL enabled) {
+    return SudekiMpControlSeparationRequestSeat(1u, enabled);
+}
+
+BOOL SudekiMpControlSeparationRequestSeatCharacter(
+    unsigned int seat_index,
+    void *character
+) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
     uint8_t *group;
     uint8_t *controller;
     void *controller_target;
@@ -3764,25 +4756,51 @@ BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (role_lock_active &&
-        (character == NULL || character != requested_player_two_character)) {
-        SetLastError(ERROR_LOCK_VIOLATION);
-        SudekiMpLogWrite(
-            "control_separation event=player_two_request source=roster "
-            "status=rejected reason=co_op_roles_locked\r\n"
-        );
+    if (companion == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if ((character != NULL && player_two_requested &&
-         requested_player_two_character == character) ||
-        (character == NULL && !player_two_requested &&
-         requested_player_two_character == NULL)) {
+    if (role_lock_active &&
+        (character == NULL || character != companion->requested_character)) {
+        SetLastError(ERROR_LOCK_VIOLATION);
+        SudekiMpLogFormat(
+            "control_separation event=companion_request player=%u "
+            "source=roster status=rejected reason=co_op_roles_locked\r\n",
+            seat_index + 1u);
+        return FALSE;
+    }
+    if (!SudekiMpControlSeparationSeatRequestTransitionPolicy(
+            seat_index,
+            character != NULL,
+            character != companion->requested_character,
+            companion_controls[0].requested &&
+                companion_controls[0].requested_character != NULL,
+            companion_controls[1].requested ||
+                companion_controls[1].character != NULL)) {
+        SetLastError(seat_index == 1u ? ERROR_BUSY : ERROR_NOT_READY);
+        SudekiMpLogFormat(
+            "control_separation event=companion_request player=%u "
+            "source=roster status=rejected reason=%s\r\n",
+            seat_index + 1u,
+            seat_index == 1u ? "release_player_three_first" :
+                "exact_player_two_dependency_required");
+        return FALSE;
+    }
+    if ((character != NULL && companion->requested &&
+         companion->requested_character == character) ||
+        (character == NULL && !companion->requested &&
+         companion->requested_character == NULL)) {
         if (character == NULL) {
-            quiesce_second_player_input();
+            quiesce_companion_input(seat_index);
         }
         return TRUE;
     }
     if (character != NULL) {
+        if (seat_index == 2u &&
+            (SudekiMpLocalInputHubRequestedMask() & 0x04u) == 0u) {
+            SetLastError(ERROR_NOT_READY);
+            return FALSE;
+        }
         if (!readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
                 sizeof(group)) ||
             !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
@@ -3805,27 +4823,36 @@ BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
         if (group == NULL || controller_target == NULL ||
             *(void **)(group + PARTY_SLOT_FIRST_OFFSET) != controller_target ||
             find_character_party_slot(group, character, &slot_index) == NULL ||
-            slot_index == 0u || character == controller_target) {
+            slot_index == 0u || character == controller_target ||
+            companion_character_reserved_by_other_seat(
+                seat_index, character)) {
             SetLastError(ERROR_NOT_FOUND);
             return FALSE;
         }
     }
-    requested_player_two_character = character;
-    player_two_requested = character != NULL;
-    player_two_request_last_attempt = 0u;
-    if (!player_two_requested) {
-        quiesce_second_player_input();
+    companion->requested_character = character;
+    companion->requested = character != NULL;
+    companion->request_last_attempt = 0u;
+    if (!companion->requested) {
+        quiesce_companion_input(seat_index);
     }
     SudekiMpLogFormat(
-        "control_separation event=player_two_request source=roster "
+        "control_separation event=companion_request player=%u source=roster "
         "state=%s character=0x%08lx policy=exact_selected_party_member\r\n",
+        seat_index + 1u,
         character != NULL ? "enabled" : "disabled",
         (unsigned long)(uintptr_t)character
     );
     return TRUE;
 }
 
-BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
+BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
+    return SudekiMpControlSeparationRequestSeatCharacter(1u, character);
+}
+
+BOOL SudekiMpControlSeparationReleaseSeatNow(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
     BOOL transition_exact;
 
     if (original_controller_update == NULL || game_base == NULL ||
@@ -3833,44 +4860,82 @@ BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
+    if (companion == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     if (role_lock_active) {
         SetLastError(ERROR_LOCK_VIOLATION);
         return FALSE;
     }
-    requested_player_two_character = NULL;
-    player_two_requested = FALSE;
-    player_two_request_last_attempt = 0u;
-    quiesce_second_player_input();
-    if (overridden_character == NULL) {
-        return TRUE;
-    }
-    transition_exact = toggle_second_player_ai();
-    if (!transition_exact || overridden_character != NULL) {
+    if (!SudekiMpControlSeparationSeatReleaseOrderPolicy(
+            seat_index, companion_controls[1].character != NULL) ||
+        (seat_index == 1u && companion_controls[1].requested)) {
         SetLastError(ERROR_BUSY);
         SudekiMpLogWrite(
-            "control_separation event=player_two_transition_release "
-            "status=pending reason=native_ai_restore_not_verified\r\n");
+            "control_separation event=companion_transition_release player=2 "
+            "status=rejected reason=release_player_three_first\r\n");
         return FALSE;
     }
-    SudekiMpLogWrite(
-        "control_separation event=player_two_transition_release "
-        "status=confirmed policy=synchronous_game_thread_native_ai_restore\r\n");
+    companion->requested_character = NULL;
+    companion->requested = FALSE;
+    companion->request_last_attempt = 0u;
+    quiesce_companion_input(seat_index);
+    if (companion->character == NULL) {
+        return TRUE;
+    }
+    transition_exact = transition_companion_ai(seat_index);
+    if (!transition_exact || companion->character != NULL) {
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogFormat(
+            "control_separation event=companion_transition_release player=%u "
+            "status=pending reason=native_ai_restore_not_verified\r\n",
+            seat_index + 1u);
+        return FALSE;
+    }
+    SudekiMpLogFormat(
+        "control_separation event=companion_transition_release player=%u "
+        "status=confirmed "
+        "policy=synchronous_game_thread_native_ai_restore\r\n",
+        seat_index + 1u);
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
+    return SudekiMpControlSeparationReleaseSeatNow(1u);
+}
+
 BOOL SudekiMpControlSeparationSetRoleLock(BOOL enabled) {
+    unsigned int seat_index;
+    BOOL fixed_three_contract;
+
     if (service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (enabled && requested_player_two_character != NULL &&
-        overridden_character != requested_player_two_character) {
-        SetLastError(ERROR_INVALID_STATE);
-        SudekiMpLogWrite(
-            "control_separation event=co_op_roles state=rejected "
-            "reason=selected_player_two_not_control_owned\r\n"
-        );
-        return FALSE;
+    fixed_three_contract = enabled && fixed_three_control_contract_active();
+    if (enabled) {
+        for (seat_index = CONTROL_COMPANION_FIRST_SEAT;
+             seat_index <= CONTROL_COMPANION_LAST_SEAT;
+             ++seat_index) {
+            SudekiMpCompanionControlRuntime *companion =
+                companion_control_for_seat(seat_index);
+
+            if (companion->requested_character != NULL &&
+                (!companion->lease_exact ||
+                 companion->character != companion->requested_character ||
+                 (fixed_three_contract &&
+                  !companion_active_input_lease(
+                      seat_index, companion)))) {
+                SetLastError(ERROR_INVALID_STATE);
+                SudekiMpLogFormat(
+                    "control_separation event=co_op_roles state=rejected "
+                    "player=%u reason=selected_companion_control_or_input_"
+                    "lease_not_exact\r\n",
+                    seat_index + 1u);
+                return FALSE;
+            }
+        }
     }
     role_lock_active = enabled != FALSE;
     SudekiMpLogFormat(
@@ -3912,20 +4977,59 @@ BOOL SudekiMpControlSeparationSetInteractionRequestsEnabled(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationSeatRequested(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    return companion != NULL && companion->requested;
+}
+
+BOOL SudekiMpControlSeparationSeatActive(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    return companion != NULL && companion->lease_exact &&
+        companion->character != NULL;
+}
+
+void *SudekiMpControlSeparationSeatCharacter(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    return companion != NULL && companion->lease_exact ?
+        companion->character : NULL;
+}
+
+BOOL SudekiMpControlSeparationSeatInputReady(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    return companion_input_ready(seat_index, companion);
+}
+
+BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index) {
+    SudekiMpCompanionControlRuntime *companion =
+        companion_control_for_seat(seat_index);
+
+    return companion != NULL && companion->requested &&
+        companion->lease_exact && companion->character != NULL &&
+        companion_active_input_lease(seat_index, companion);
+}
+
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void) {
-    return player_two_requested;
+    return SudekiMpControlSeparationSeatRequested(1u);
 }
 
 BOOL SudekiMpControlSeparationPlayerTwoActive(void) {
-    return overridden_character != NULL;
+    return SudekiMpControlSeparationSeatActive(1u);
 }
 
 void *SudekiMpControlSeparationPlayerTwoCharacter(void) {
-    return overridden_character;
+    return SudekiMpControlSeparationSeatCharacter(1u);
 }
 
 BOOL SudekiMpControlSeparationInputReady(void) {
-    return input_bridge_enabled && input_bridge_connected;
+    return SudekiMpControlSeparationSeatInputReady(1u);
 }
 
 BOOL SudekiMpControlSeparationSecondPlayerMovementActive(void) {
@@ -4198,7 +5302,8 @@ BOOL SudekiMpInstallControlSeparation(
     if (enable_input_bridge &&
         (!enable_second_player_movement || bridge_deadzone < 0.0f ||
          bridge_deadzone >= 0.95f ||
-         SudekiMpInputBridgeIdentity() == NULL)) {
+         (SudekiMpInputBridgeIdentity() == NULL &&
+          SudekiMpLocalInputHubRequestedMask() == 0u))) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -4316,9 +5421,11 @@ BOOL SudekiMpInstallControlSeparation(
     service_only_mode = FALSE;
     selected_virtual_key = toggle_virtual_key;
     hotkey_was_down = FALSE;
+    ZeroMemory(companion_controls, sizeof(companion_controls));
     overridden_character = NULL;
     overridden_ai_component = NULL;
     role_lock_active = FALSE;
+    fixed_three_release_deferred_logged = FALSE;
     player_two_requested = FALSE;
     requested_player_two_character = NULL;
     player_two_request_last_attempt = 0u;
@@ -4492,12 +5599,53 @@ BOOL SudekiMpInstallControlSeparation(
     return TRUE;
 }
 
+static BOOL release_companion_leases_for_uninstall(void) {
+    unsigned int seat_index;
+
+    role_lock_active = FALSE;
+    for (seat_index = CONTROL_COMPANION_FIRST_SEAT;
+         seat_index <= CONTROL_COMPANION_LAST_SEAT;
+         ++seat_index) {
+        SudekiMpCompanionControlRuntime *companion =
+            companion_control_for_seat(seat_index);
+
+        companion->requested = FALSE;
+        companion->requested_character = NULL;
+        companion->request_last_attempt = 0u;
+        quiesce_companion_input(seat_index);
+    }
+    for (seat_index = CONTROL_COMPANION_LAST_SEAT;; --seat_index) {
+        SudekiMpCompanionControlRuntime *companion =
+            companion_control_for_seat(seat_index);
+
+        if (companion->character != NULL &&
+            (!transition_companion_ai(seat_index) ||
+             companion->character != NULL)) {
+            SudekiMpLogFormat(
+                "control_separation event=module_uninstall player=%u "
+                "status=pending reason=owned_ai_lease_restore_not_exact "
+                "policy=preserve_live_hook_and_retry_reverse_order\r\n",
+                seat_index + 1u);
+            return FALSE;
+        }
+        if (seat_index == CONTROL_COMPANION_FIRST_SEAT) {
+            break;
+        }
+    }
+    return TRUE;
+}
+
 void SudekiMpUninstallControlSeparation(void) {
     DWORD teardown_error;
 
     acquire_control_update_lifecycle();
     if (InterlockedCompareExchange(
             &active_control_update_dispatches, 0, 0) != 0) {
+        release_control_update_lifecycle();
+        SetLastError(ERROR_BUSY);
+        return;
+    }
+    if (!release_companion_leases_for_uninstall()) {
         release_control_update_lifecycle();
         SetLastError(ERROR_BUSY);
         return;
@@ -4534,12 +5682,9 @@ void SudekiMpUninstallControlSeparation(void) {
     spirit_direct_movement_active = FALSE;
     spirit_direct_movement_last_trace_tick = 0u;
     game_base = NULL;
-    overridden_character = NULL;
-    overridden_ai_component = NULL;
+    ZeroMemory(companion_controls, sizeof(companion_controls));
     role_lock_active = FALSE;
-    player_two_requested = FALSE;
-    requested_player_two_character = NULL;
-    player_two_request_last_attempt = 0u;
+    fixed_three_release_deferred_logged = FALSE;
     service_only_mode = FALSE;
     selected_virtual_key = 0;
     hotkey_was_down = FALSE;
@@ -4556,11 +5701,8 @@ void SudekiMpUninstallControlSeparation(void) {
     roaming_boundary_overlay_ready = FALSE;
     second_player_weak_attack_enabled = FALSE;
     weak_attack_virtual_key = 0;
-    weak_attack_was_down = FALSE;
     input_bridge_enabled = FALSE;
     input_bridge_deadzone = 0.0f;
-    ZeroMemory(&input_bridge_state, sizeof(input_bridge_state));
-    input_bridge_connected = FALSE;
     interaction_requests_enabled = FALSE;
     SudekiMpControllerActionRouterInitialize(&controller_action_router);
     shared_interaction_modal_quiesce_logged = FALSE;
@@ -4599,10 +5741,6 @@ void SudekiMpUninstallControlSeparation(void) {
     group_camera_original_targets[1] = NULL;
     group_camera_target_list = NULL;
     reset_target_trace_state();
-    second_player_movement_active = FALSE;
-    second_player_movement_magnitude = 0.0f;
-    last_movement_x = 0;
-    last_movement_z = 0;
     reset_native_movement_acceptance_trace();
     SudekiMpCombatContextsReset();
     if (control_update_dispatch_tls != TLS_OUT_OF_INDEXES &&

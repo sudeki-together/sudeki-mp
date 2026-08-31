@@ -30,6 +30,8 @@
 #include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
 #include "input/key_binding.h"
+#include "input/local_input_hub.h"
+#include "loader/fixed_three_profile.h"
 
 #include <windows.h>
 #include <wincrypt.h>
@@ -280,10 +282,108 @@ static BOOL read_config_boolean(
 
     GetPrivateProfileStringW(section, key, L"false", value,
         (DWORD)(sizeof(value) / sizeof(value[0])), path);
-    return _wcsicmp(value, L"true") == 0 ||
-        _wcsicmp(value, L"yes") == 0 ||
-        _wcsicmp(value, L"on") == 0 ||
-        wcscmp(value, L"1") == 0;
+    return SudekiMpConfigBooleanTextIsTrue(value);
+}
+
+static void copy_fixed_three_profile_key(
+    wchar_t *destination,
+    size_t capacity,
+    const wchar_t *key
+) {
+    size_t length;
+
+    if (destination == NULL || capacity == 0u) return;
+    if (key == NULL) key = L"<none>";
+    length = wcslen(key);
+    if (length >= capacity) length = capacity - 1u;
+    memcpy(destination, key, length * sizeof(destination[0]));
+    destination[length] = L'\0';
+}
+
+static BOOL validate_fixed_three_enable_profile(
+    const wchar_t *path,
+    SudekiMpFixedThreeProfileFailure *failure,
+    wchar_t *failure_key,
+    size_t failure_key_capacity
+) {
+    enum { SECTION_CAPACITY = 32768u };
+    SudekiMpFixedThreeProfileState state;
+    wchar_t *section;
+    wchar_t *entry;
+    DWORD section_length;
+    BOOL valid = TRUE;
+
+    if (failure != NULL) {
+        *failure = SUDEKIMP_FIXED_THREE_PROFILE_FAILURE_NONE;
+    }
+    copy_fixed_three_profile_key(
+        failure_key, failure_key_capacity, L"<none>");
+    if (path == NULL) {
+        if (failure != NULL) {
+            *failure =
+                SUDEKIMP_FIXED_THREE_PROFILE_FAILURE_INVALID_ARGUMENT;
+        }
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    section = (wchar_t *)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY,
+        SECTION_CAPACITY * sizeof(section[0]));
+    if (section == NULL) {
+        if (failure != NULL) {
+            *failure =
+                SUDEKIMP_FIXED_THREE_PROFILE_FAILURE_INVALID_ARGUMENT;
+        }
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    section_length = GetPrivateProfileSectionW(
+        L"SudekiMP", section, SECTION_CAPACITY, path);
+    SudekiMpFixedThreeProfileInitialize(&state);
+    if (section_length >= SECTION_CAPACITY - 2u) {
+        state.failure =
+            SUDEKIMP_FIXED_THREE_PROFILE_FAILURE_INVALID_ARGUMENT;
+        copy_fixed_three_profile_key(
+            failure_key, failure_key_capacity, L"<section_truncated>");
+        valid = FALSE;
+    }
+    entry = section;
+    while (valid && *entry != L'\0') {
+        size_t entry_length = wcslen(entry);
+        wchar_t *next = entry + entry_length + 1u;
+        wchar_t *separator = wcschr(entry, L'=');
+
+        if (separator == NULL) {
+            state.failure =
+                SUDEKIMP_FIXED_THREE_PROFILE_FAILURE_INVALID_ARGUMENT;
+            copy_fixed_three_profile_key(
+                failure_key, failure_key_capacity, entry);
+            valid = FALSE;
+            break;
+        }
+        *separator = L'\0';
+        if (!SudekiMpFixedThreeProfileObserve(
+                &state,
+                entry,
+                SudekiMpConfigBooleanTextIsTrue(separator + 1u))) {
+            copy_fixed_three_profile_key(
+                failure_key, failure_key_capacity, entry);
+            valid = FALSE;
+            break;
+        }
+        entry = next;
+    }
+    if (valid && !SudekiMpFixedThreeProfileComplete(&state)) {
+        copy_fixed_three_profile_key(
+            failure_key,
+            failure_key_capacity,
+            SudekiMpFixedThreeProfileFirstMissingKey(&state));
+        valid = FALSE;
+    }
+    if (failure != NULL) *failure = state.failure;
+    HeapFree(GetProcessHeap(), 0u, section);
+    if (!valid) SetLastError(ERROR_INVALID_DATA);
+    return valid;
 }
 
 static BOOL read_config_float(
@@ -353,6 +453,24 @@ static BOOL read_config_integer(
     }
     *result = (int)parsed;
     return TRUE;
+}
+
+static BOOL wait_for_local_input_hub_connections(
+    uint8_t required_mask,
+    DWORD timeout_ms
+) {
+    DWORD started = GetTickCount();
+
+    do {
+        uint8_t connected = SudekiMpLocalInputHubConnectedMask();
+
+        if ((connected & required_mask) == required_mask) {
+            return TRUE;
+        }
+        Sleep(5u);
+    } while ((DWORD)(GetTickCount() - started) < timeout_ms);
+    SetLastError(ERROR_DEVICE_NOT_CONNECTED);
+    return FALSE;
 }
 
 static BOOL get_text_section(
@@ -426,12 +544,14 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL split_screen_render_enabled;
     BOOL second_player_camera_enabled;
     BOOL dual_camera_frame_cache_enabled;
+    BOOL fixed_three_seat_renderer_enabled;
     BOOL freeroam_camera_input_enabled;
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL realtime_multiplayer_skill_combat_enabled;
     BOOL skill_camera_routing_enabled;
     BOOL direct_spirit_strike_prototype_enabled;
     BOOL external_input_bridge_enabled;
+    BOOL three_seat_udp_transport_enabled;
     BOOL native_xinput_player_two_enabled;
     BOOL player_two_input_enabled;
     BOOL player_interaction_requests_enabled;
@@ -687,6 +807,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableDualCameraFrameCachePrototype"
     );
+    fixed_three_seat_renderer_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableFixedThreeSeatRendererPrototype"
+    );
     freeroam_camera_input_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -711,6 +836,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         config_path,
         L"SudekiMP",
         L"EnableExternalInputBridgePrototype"
+    );
+    three_seat_udp_transport_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableThreeSeatUdpTransportPrototype"
     );
     native_xinput_player_two_enabled = read_config_boolean(
         config_path,
@@ -836,7 +966,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"EnableStoryTestBoost"
     );
     player_two_input_enabled = external_input_bridge_enabled ||
-        native_xinput_player_two_enabled;
+        three_seat_udp_transport_enabled || native_xinput_player_two_enabled;
     /* This is a deliberately closed, ordinary-world observation profile.
      * Even passive sibling traces and the startup-movie bypass would change
      * the provenance of a captured frame, so every optional path must remain
@@ -855,11 +985,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
          second_player_weak_attack_enabled ||
          second_player_target_trace_enabled || shared_group_camera_enabled ||
          split_screen_render_enabled || second_player_camera_enabled ||
-         dual_camera_frame_cache_enabled || freeroam_camera_input_enabled ||
+         dual_camera_frame_cache_enabled ||
+         fixed_three_seat_renderer_enabled || freeroam_camera_input_enabled ||
          ranged_quick_skill_prototype_enabled ||
          realtime_multiplayer_skill_combat_enabled ||
          direct_spirit_strike_prototype_enabled ||
-         external_input_bridge_enabled || native_xinput_player_two_enabled ||
+         external_input_bridge_enabled || three_seat_udp_transport_enabled ||
+         native_xinput_player_two_enabled ||
          player_interaction_requests_enabled ||
          merchant_checkout_trace_requested || save_book_vote_enabled ||
          experimental_blacksmith_ui_enabled ||
@@ -907,6 +1039,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
          ranged_quick_skill_prototype_enabled ||
          realtime_multiplayer_skill_combat_enabled ||
          direct_spirit_strike_prototype_enabled ||
+         three_seat_udp_transport_enabled ||
+         fixed_three_seat_renderer_enabled ||
          (external_input_bridge_enabled ==
           native_xinput_player_two_enabled) ||
          player_interaction_requests_enabled ||
@@ -1021,11 +1155,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
          second_player_weak_attack_enabled ||
          second_player_target_trace_enabled || shared_group_camera_enabled ||
          split_screen_render_enabled || second_player_camera_enabled ||
-         dual_camera_frame_cache_enabled || freeroam_camera_input_enabled ||
+         dual_camera_frame_cache_enabled ||
+         fixed_three_seat_renderer_enabled || freeroam_camera_input_enabled ||
          ranged_quick_skill_prototype_enabled ||
          realtime_multiplayer_skill_combat_enabled ||
          direct_spirit_strike_prototype_enabled ||
-         external_input_bridge_enabled || native_xinput_player_two_enabled ||
+         external_input_bridge_enabled || three_seat_udp_transport_enabled ||
+         native_xinput_player_two_enabled ||
          player_interaction_requests_enabled ||
          merchant_checkout_trace_enabled || save_book_vote_enabled ||
          experimental_blacksmith_ui_enabled ||
@@ -1357,9 +1493,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
-    if (external_input_bridge_enabled && native_xinput_player_two_enabled) {
+    if ((external_input_bridge_enabled &&
+         (three_seat_udp_transport_enabled ||
+          native_xinput_player_two_enabled)) ||
+        (three_seat_udp_transport_enabled &&
+         native_xinput_player_two_enabled)) {
         SudekiMpLogWrite(
-            "player_two_input_config=invalid reason=external_udp_and_native_xinput_are_mutually_exclusive\r\n"
+            "player_two_input_config=invalid reason=legacy_udp_three_seat_udp_and_native_xinput_are_mutually_exclusive\r\n"
         );
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
@@ -1374,7 +1514,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
-    if (external_input_bridge_enabled &&
+    if ((external_input_bridge_enabled || three_seat_udp_transport_enabled) &&
         (!read_config_integer(
              config_path,
              L"SudekiMP",
@@ -1396,6 +1536,82 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (three_seat_udp_transport_enabled && input_bridge_port > 65533) {
+        SudekiMpLogWrite(
+            "three_seat_udp_transport_config=invalid reason=base_port_exceeds_local_input_hub_port_bank_range\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (fixed_three_seat_renderer_enabled) {
+        SudekiMpFixedThreeProfileFailure profile_failure;
+        wchar_t profile_failure_key[96];
+        char profile_failure_key_utf8[192];
+
+        if (!validate_fixed_three_enable_profile(
+                config_path,
+                &profile_failure,
+                profile_failure_key,
+                sizeof(profile_failure_key) /
+                    sizeof(profile_failure_key[0]))) {
+            int converted = WideCharToMultiByte(
+                CP_UTF8,
+                0u,
+                profile_failure_key,
+                -1,
+                profile_failure_key_utf8,
+                (int)sizeof(profile_failure_key_utf8),
+                NULL,
+                NULL);
+
+            if (converted == 0) {
+                strcpy(profile_failure_key_utf8, "<conversion_failed>");
+            }
+            SudekiMpLogFormat(
+                "fixed_three_seat_renderer_config=invalid "
+                "reason=exact_enable_profile_rejected failure=%u key=%s\r\n",
+                (unsigned int)profile_failure,
+                profile_failure_key_utf8);
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if (zone_transition_trace_environment_enabled) {
+            SudekiMpLogWrite(
+                "fixed_three_seat_renderer_config=invalid "
+                "reason=inherited_zone_trace_environment_forbidden\r\n");
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+    }
+    if (fixed_three_seat_renderer_enabled &&
+        (!three_seat_udp_transport_enabled ||
+         !coop_roster_menu_enabled || !control_separation_enabled ||
+         !second_player_movement_enabled ||
+         !second_player_camera_relative_movement_enabled ||
+         !second_player_weak_attack_enabled ||
+         !split_screen_render_enabled || !second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled ||
+         !second_player_controller_camera_enabled ||
+         !player_two_input_enabled || external_input_bridge_enabled ||
+         native_xinput_player_two_enabled || skill_camera_routing_enabled ||
+         zone_transition_trace_enabled || interaction_provenance_enabled ||
+         merchant_checkout_trace_enabled ||
+         talos_post_movie_dual_camera_enabled ||
+         loaded_save_coop_autostart_enabled ||
+         !skip_startup_movies ||
+         !cleanroom_multiplayer_integration || !defer_integrated_roster)) {
+        SudekiMpLogWrite(
+            "fixed_three_seat_renderer_config=invalid "
+            "reason=requires_exact_11_enable_profile_and_closed_derived_"
+            "state\r\n"
+        );
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     if (player_two_input_enabled && !read_config_float(
              config_path,
              L"SudekiMP",
@@ -1405,6 +1621,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
              0.90f,
              &input_bridge_deadzone)) {
         SudekiMpLogWrite("player_two_input_config=invalid\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (fixed_three_seat_renderer_enabled &&
+        float_bits(input_bridge_deadzone) != UINT32_C(0x3e4ccccd)) {
+        SudekiMpLogWrite(
+            "fixed_three_seat_renderer_config=invalid "
+            "reason=requires_input_bridge_deadzone_0_20_for_reconnect_"
+            "neutral_fence_and_gameplay_deadzone_agreement\r\n");
         SudekiMpLogWrite("status=config_error\r\n");
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -2009,7 +2235,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("cleanroom_menu_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "control_separation_prototype_requested=%s virtual_key=0x%02lx target_policy=first_non_front_active_party_member second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s bridge_port=%d bridge_timeout_ms=%d bridge_deadzone_bits=0x%08lx\r\n",
+        "control_separation_prototype_requested=%s virtual_key=0x%02lx target_policy=first_non_front_active_party_member second_player_movement=%s camera_relative_movement=%s separation_guard=%s maximum_separation_bits=0x%08lx second_player_weak_attack=%s weak_attack_virtual_key=0x%02lx second_player_skills=%s skill_keys=0x%02lx,0x%02lx,0x%02lx,0x%02lx target_trace=%s shared_group_camera=%s external_input_bridge=%s three_seat_udp_transport=%s requested_human_mask=0x%02x bridge_port=%d bridge_timeout_ms=%d bridge_deadzone_bits=0x%08lx\r\n",
         control_separation_enabled ? "true" : "false",
         (unsigned long)control_separation_virtual_key,
         second_player_movement_enabled ? "true" : "false",
@@ -2026,6 +2252,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         second_player_target_trace_enabled ? "true" : "false",
         shared_group_camera_enabled ? "true" : "false",
         external_input_bridge_enabled ? "true" : "false",
+        three_seat_udp_transport_enabled ? "true" : "false",
+        three_seat_udp_transport_enabled ?
+            SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK :
+            (player_two_input_enabled ? 0x03u : 0x01u),
         input_bridge_port,
         input_bridge_timeout_ms,
         (unsigned long)float_bits(input_bridge_deadzone)
@@ -2058,6 +2288,44 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         experimental_blacksmith_ui_enabled ? "true" : "false");
     if (control_separation_enabled) {
         SudekiMpCombatContextsReset();
+        if (three_seat_udp_transport_enabled) {
+            DWORD transport_error;
+
+            if (!SudekiMpLocalInputHubStartUdp(
+                    SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK,
+                    (unsigned int)input_bridge_port,
+                    (DWORD)input_bridge_timeout_ms) ||
+                !wait_for_local_input_hub_connections(
+                    SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK,
+                    1000u)) {
+                transport_error = GetLastError();
+                SudekiMpInputBridgeStop();
+                SudekiMpLogFormat(
+                    "three_seat_udp_transport_start_error=%lu required_mask=0x%02x base_port=%d startup_timeout_ms=1000\r\n",
+                    (unsigned long)transport_error,
+                    SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK,
+                    input_bridge_port);
+                SudekiMpLogWrite("status=input_bridge_error\r\n");
+                SudekiMpUninstallInteractionProvenance();
+                SudekiMpLogClose();
+                return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
+            }
+            SudekiMpLogFormat(
+                "three_seat_udp_transport_started=true profile=%s "
+                "requested_mask=0x%02x connected_mask=0x%02x "
+                "p2_port=%u p3_port=%u policy=%s\r\n",
+                fixed_three_seat_renderer_enabled ?
+                    "fixed_three_local_coop" : "transport_diagnostic",
+                SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK,
+                SudekiMpLocalInputHubConnectedMask(),
+                SudekiMpLocalInputHubSeatPort(1u),
+                SudekiMpLocalInputHubSeatPort(2u),
+                fixed_three_seat_renderer_enabled ?
+                    "reserve_exact_p2_p3_input_generations_before_renderer_"
+                    "and_roster_admission" :
+                    "transport_only_no_player_three_actor_camera_hud_or_"
+                    "gameplay_authority");
+        }
         if (external_input_bridge_enabled &&
             !SudekiMpInputBridgeStart(
                 (unsigned int)input_bridge_port,
@@ -2128,14 +2396,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
     SudekiMpLogFormat(
-        "split_screen_render_prototype_requested=%s layout=left_right camera_policy=%s dual_camera_frame_cache=%s skill_camera_routing=%s second_player_controller_camera=%s native_second_player_camera_collision=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
+        "split_screen_render_prototype_requested=%s layout=%s camera_policy=%s dual_camera_frame_cache=%s fixed_three_seat_renderer=%s skill_camera_routing=%s second_player_controller_camera=%s native_second_player_camera_collision=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
         split_screen_render_enabled ? "true" : "false",
-        dual_camera_frame_cache_enabled ?
-            "alternating_render_state_frame_cache" :
+        fixed_three_seat_renderer_enabled ?
+            "p1_top_p2_bottom_left_p3_bottom_right" : "left_right",
+        fixed_three_seat_renderer_enabled ?
+            "fixed_three_seat_round_robin_frame_cache" :
+            (dual_camera_frame_cache_enabled ?
+                "alternating_render_state_frame_cache" :
             (second_player_camera_enabled ?
                 "render_only_translated_camera_toggle" :
-                "same_native_camera"),
+                "same_native_camera")),
         dual_camera_frame_cache_enabled ? "true" : "false",
+        fixed_three_seat_renderer_enabled ? "true" : "false",
         skill_camera_routing_enabled ?
             "caster_viewport_only" : "disabled",
         second_player_controller_camera_enabled ? "true" : "false",
@@ -2171,9 +2444,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 input_bridge_deadzone,
                 second_player_controller_camera_yaw_speed,
                 second_player_controller_camera_pitch_speed,
-                second_player_controller_camera_maximum_pitch)) {
+                second_player_controller_camera_maximum_pitch) ||
+            (fixed_three_seat_renderer_enabled &&
+             !SudekiMpSplitScreenSetFixedThreeSeatEnabled(TRUE))) {
             DWORD split_screen_error = GetLastError();
 
+            (void)SudekiMpSplitScreenSetFixedThreeSeatEnabled(FALSE);
+            SudekiMpUninstallSplitScreenRender();
             SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
             if (control_separation_enabled) {
                 (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
@@ -2199,6 +2476,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
         }
         SudekiMpLogWrite("split_screen_render_applied=true\r\n");
+        SudekiMpLogFormat(
+            "fixed_three_seat_renderer_applied=%s roster_capacity=%u "
+            "hub_requested_mask=0x%02x hub_connected_mask=0x%02x\r\n",
+            fixed_three_seat_renderer_enabled ? "true" : "false",
+            SudekiMpSplitScreenRosterSeatCapacity(),
+            SudekiMpLocalInputHubRequestedMask(),
+            SudekiMpLocalInputHubConnectedMask());
         if (cleanroom_multiplayer_integration) {
             (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
         }
@@ -2213,16 +2497,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 skip_startup_movies,
                 story_test_boost_enabled,
                 story_test_boost_virtual_key,
-                story_test_boost_multiplier
+            story_test_boost_multiplier
             )) {
+            DWORD roster_error = GetLastError();
+
             SudekiMpLogFormat(
                 "coop_roster_menu_error=%lu phase=deferred_integrated_install\r\n",
-                (unsigned long)GetLastError()
+                (unsigned long)roster_error
             );
             SudekiMpLogWrite("coop_roster_menu_applied=false\r\n");
             SudekiMpLogWrite("status=coop_roster_menu_error\r\n");
-            SudekiMpUninstallInteractionProvenance();
+            uninstall_runtime_hooks();
             SudekiMpLogClose();
+            SetLastError(roster_error);
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
         SudekiMpLogWrite(

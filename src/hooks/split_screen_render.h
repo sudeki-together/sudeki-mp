@@ -1,6 +1,8 @@
 #ifndef SUDEKIMP_SPLIT_SCREEN_RENDER_H
 #define SUDEKIMP_SPLIT_SCREEN_RENDER_H
 
+#include "engine/coop_roster_assignment.h"
+
 #include <windows.h>
 
 typedef void (*SudekiMpSplitScreenOverlayRenderer)(void);
@@ -81,6 +83,32 @@ BOOL SudekiMpInstallSplitScreenRender(
 );
 BOOL SudekiMpSplitScreenSetRuntimeEnabled(BOOL enabled);
 BOOL SudekiMpSplitScreenRuntimeEnabled(void);
+/* Explicit opt-in for the fixed P1/P2/P3 renderer.  Enabling is admitted
+ * only after the legacy named-camera/cache/controller-camera prerequisites
+ * and the exact 0x07 LocalInputHub transport are live.  A 0x03 roster keeps
+ * using the unchanged legacy two-seat path even while this capability is
+ * configured. */
+BOOL SudekiMpSplitScreenSetFixedThreeSeatEnabled(BOOL enabled);
+BOOL SudekiMpSplitScreenFixedThreeSeatEnabled(void);
+/* Zero while the renderer is unavailable, two for the legacy renderer, and
+ * three only after the fixed-three capability has been admitted. */
+unsigned int SudekiMpSplitScreenRosterSeatCapacity(void);
+/* Transactional, pointer-free title/runtime roster publication.  This first
+ * renderer slice accepts exactly 0x03 or 0x07; the latter requires capacity
+ * three.  The legacy Set/GetRosterTypes calls remain exact 0x03 wrappers. */
+BOOL SudekiMpSplitScreenSetRosterAssignment(
+    const SudekiMpCoopRosterAssignment *assignment
+);
+BOOL SudekiMpSplitScreenGetRosterAssignment(
+    SudekiMpCoopRosterAssignment *assignment
+);
+/* Prove that the named stable seat still owns its captured actor generation,
+ * input identity/generation, named camera, and render-state publication.
+ * Seat 2 (P3) fails closed outside an active fixed-three session. */
+BOOL SudekiMpSplitScreenSeatViewReady(
+    unsigned int seat_index,
+    const void *character
+);
 /* Optional startup-owned presentation authorization. A configured query is
  * evaluated once before RenderStart and that result is latched through the
  * matching FrameEnd, before Camera 2 acquisition, render-state swaps, cache
@@ -103,11 +131,10 @@ BOOL SudekiMpSplitScreenExternalPlayerTwoLeasePolicy(
     const void *control_lease_character
 );
 BOOL SudekiMpSplitScreenRuntimeAuthorized(void);
-/* Pure fail-closed gate for the dormant 1-4 human compositor.  Every ready
+/* Pure fail-closed gate for the local human compositor.  Every ready
  * mask must exactly match active_human_mask: inactive seats may not retain a
  * stale native lease, and no active seat may render until its actor, camera,
- * render state, HUD owner, input source, and frame cache are all proven.
- * This policy has no live caller while P3/P4 native ownership is unproven. */
+ * render state, HUD owner, input source, and frame cache are all proven. */
 BOOL SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
     BOOL feature_enabled,
     unsigned int active_human_mask,
@@ -119,6 +146,37 @@ BOOL SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
     unsigned int input_lease_mask,
     unsigned int frame_cache_ready_mask,
     BOOL global_presentation_clear
+);
+/* One fixed-three cache frame is admissible only after the armed pre-render
+ * minimap update epoch and the current render transaction prove the selected
+ * seat's exact HUD source roles, portrait mappings, and minimap render
+ * ownership.  P1 requires the primary role (bit 0); P2/P3 additionally
+ * require the owner-slot-to-P1 swap role (bit 1).  Source failure remains
+ * sticky from the scheduled update through the render transaction. */
+BOOL SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+    unsigned int rendered_seat,
+    unsigned int hud_evidence_seat,
+    unsigned int hud_role_mask,
+    unsigned int portrait_evidence_seat,
+    unsigned int portrait_role_mask,
+    unsigned int expected_minimap_update_epoch,
+    BOOL minimap_update_valid,
+    unsigned int minimap_update_seat,
+    unsigned int minimap_update_epoch,
+    BOOL minimap_render_valid,
+    unsigned int minimap_render_seat,
+    BOOL source_failure
+);
+/* User orbit input is admitted from the transaction-start snapshot only
+ * after a previously completed exact 0x07 cache/layout/owner-evidence set.
+ * Manual camera initialization and target-follow do not use this gate. */
+BOOL SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+    BOOL presentation_clear,
+    BOOL base_leases_exact,
+    BOOL layout_exact,
+    unsigned int frame_cache_ready_mask,
+    unsigned int frame_owner_evidence_mask,
+    BOOL gameplay_input_frozen
 );
 /* Camera-2-only ranged perspective.  The toggle only latches a requested
  * render-matrix mode; it never invokes Sudeki's global first-person transition
@@ -201,6 +259,15 @@ BOOL SudekiMpSplitScreenRosterLockHealthy(
     const void *locked_player_one,
     const void *controlled_player_two,
     const void *locked_player_two
+);
+BOOL SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+    const void *controller_target,
+    const void *party_front,
+    const void *locked_player_one,
+    const void *controlled_player_two,
+    const void *locked_player_two,
+    const void *controlled_player_three,
+    const void *locked_player_three
 );
 /* Pure native-camera readiness edge used by the exact-image regression test.
  * A fallback write refreshes the baseline and can never prove native work. */
@@ -387,6 +454,16 @@ BOOL SudekiMpSplitScreenSharedInteractionModalActive(void);
 BOOL SudekiMpSplitScreenNativeSaveModalOpening(void);
 void SudekiMpSplitScreenNativeSaveModalClosed(void);
 BOOL SudekiMpSplitScreenNativeSaveModalActive(void);
+/* Movie playback replaces the ordinary render loop and may destroy native
+ * camera-side objects before another RenderStart can observe the transition.
+ * Opening therefore synchronously restores any render-only swap, removes the
+ * named companion cameras, and invalidates every cached viewport before the
+ * native MoviePlay call.  False means the caller must not enter MoviePlay.
+ * Closed never reacquires eagerly; the ordinary exact gameplay gate must
+ * rebuild all camera/cache evidence after the blocking movie call returns. */
+BOOL SudekiMpSplitScreenNativeMovieOpening(void);
+void SudekiMpSplitScreenNativeMovieClosed(void);
+BOOL SudekiMpSplitScreenNativeMovieActive(void);
 /* A mod-owned blacksmith start keeps UIBlackSmithActive true only to satisfy
  * the script polling contract. The inspector may exclude it from the native
  * full-width policy solely when this query is true and the actual native

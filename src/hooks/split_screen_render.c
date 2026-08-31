@@ -9,6 +9,7 @@
 #include "hooks/control_separation.h"
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
+#include "input/local_input_hub.h"
 
 #include <math.h>
 #include <limits.h>
@@ -500,7 +501,11 @@ enum {
     D3D_TEXTURE_FILTER_LINEAR_VALUE = 2,
     D3D_TEXTURE_FILTER_NONE = 0,
     D3D_TEXTURE_FILTER_LINEAR = 2,
-    D3D_MULTISAMPLE_NONE = 0
+    D3D_MULTISAMPLE_NONE = 0,
+    FIXED_THREE_SEAT_COUNT = 3u,
+    FIXED_THREE_COMPANION_FIRST_SEAT = 1u,
+    FIXED_THREE_COMPANION_LAST_SEAT = 2u,
+    FIXED_THREE_HUMAN_MASK = 0x07u
 };
 
 typedef enum SudekiMpQuickMenuSessionPhase {
@@ -526,6 +531,65 @@ typedef struct SudekiMpQuickMenuSession {
     uint32_t held_party_source[3];
     BOOL quarantine_logged;
 } SudekiMpQuickMenuSession;
+
+typedef struct SudekiMpFixedThreeSeatRuntime {
+    BOOL configured;
+    BOOL transaction_active;
+    BOOL presentation_clear_this_frame;
+    BOOL cameras_acquired;
+    BOOL compositor_logged;
+    BOOL rejection_logged;
+    void *manager;
+    void *group;
+    void *host_controller;
+    void *actors[FIXED_THREE_SEAT_COUNT];
+    uint32_t actor_generations[FIXED_THREE_SEAT_COUNT];
+    unsigned int party_slots[FIXED_THREE_SEAT_COUNT];
+    const void *input_identities[FIXED_THREE_SEAT_COUNT];
+    uint32_t input_generations[FIXED_THREE_SEAT_COUNT];
+    void *cameras[FIXED_THREE_SEAT_COUNT];
+    void *render_states[FIXED_THREE_SEAT_COUNT];
+    BOOL camera_transform_initialized[FIXED_THREE_SEAT_COUNT];
+    float camera_last_target[FIXED_THREE_SEAT_COUNT][3];
+    float camera_pitch_offset[FIXED_THREE_SEAT_COUNT];
+    DWORD camera_input_last_tick[FIXED_THREE_SEAT_COUNT];
+    BOOL camera_input_logged[FIXED_THREE_SEAT_COUNT];
+    void *frame_surfaces[FIXED_THREE_SEAT_COUNT];
+    void *frame_textures[FIXED_THREE_SEAT_COUNT];
+    void *frame_device;
+    SudekiMpD3DSurfaceDesc frame_description;
+    unsigned int frame_valid_mask;
+    unsigned int frame_owner_evidence_mask;
+    SudekiMpLocalViewportLayout layout;
+    uint8_t scheduled_seat;
+    uint8_t rendered_seat;
+    unsigned int hud_evidence_seat;
+    unsigned int hud_role_mask;
+    BOOL hud_source_failure_this_frame;
+    unsigned int portrait_evidence_seat;
+    unsigned int portrait_role_mask;
+    uint8_t minimap_expected_update_seat;
+    uint32_t minimap_expected_update_epoch;
+    uint8_t minimap_update_seat;
+    uint32_t minimap_update_epoch;
+    BOOL minimap_update_valid;
+    uint8_t minimap_render_seat;
+    BOOL minimap_render_valid;
+    void **render_swap_slot;
+    void *render_swap_native_state;
+    void *render_swap_applied_state;
+    BOOL render_swap_active;
+} SudekiMpFixedThreeSeatRuntime;
+
+typedef struct SudekiMpFixedThreeSeatLeaseCandidate {
+    void *group;
+    void *host_controller;
+    void *actors[FIXED_THREE_SEAT_COUNT];
+    uint32_t actor_generations[FIXED_THREE_SEAT_COUNT];
+    unsigned int party_slots[FIXED_THREE_SEAT_COUNT];
+    const void *input_identities[FIXED_THREE_SEAT_COUNT];
+    uint32_t input_generations[FIXED_THREE_SEAT_COUNT];
+} SudekiMpFixedThreeSeatLeaseCandidate;
 
 static const uint32_t quick_menu_owner_copy_call_rvas[
     QUICK_MENU_OWNER_COPY_HOOK_COUNT
@@ -713,10 +777,12 @@ static BOOL quit_backdrop_logged;
 static BOOL quit_backdrop_failure_logged;
 static BOOL player_two_hud_ownership_logged;
 static BOOL viewport_portrait_ownership_logged;
-static BOOL minimap_ownership_logged[2];
+static BOOL minimap_ownership_logged[FIXED_THREE_SEAT_COUNT];
 static BOOL minimap_owner_mismatch_logged;
-static BOOL hud_mapping_trace_valid[2][2];
-static unsigned int hud_mapping_trace_resolved_slot[2][2];
+static BOOL hud_mapping_trace_valid[FIXED_THREE_SEAT_COUNT][2];
+static unsigned int hud_mapping_trace_resolved_slot[
+    FIXED_THREE_SEAT_COUNT
+][2];
 static int gameplay_gate_last_state = -1;
 static int shared_menu_gate_last_state = -1;
 static unsigned int shared_interaction_modal_observation =
@@ -726,6 +792,10 @@ static unsigned int shared_interaction_modal_observation =
  * singleton inspection so construction itself is a fail-closed full-width
  * phase, not a one-frame blind spot. */
 static volatile LONG native_save_modal_opening;
+/* MoviePlay is a blocking native presentation takeover.  Its hook enters this
+ * gate before invoking retail code so no named companion camera or cached
+ * render surface can outlive the gameplay render loop that owns it. */
+static volatile LONG native_movie_gate_depth;
 static BOOL shared_interaction_modal_recovery_pending;
 static BOOL shared_interaction_modal_had_live_split;
 static SudekiMpInteractionKind shared_interaction_modal_published_kind =
@@ -979,6 +1049,7 @@ static unsigned int ranged_animation_trace_sequence[2];
 static unsigned int ranged_animation_progress_frame[2];
 static void *ranged_animation_capture_failure_character[2];
 static BOOL player_two_facing_logged;
+static BOOL fixed_three_facing_logged[FIXED_THREE_SEAT_COUNT];
 static int quick_menu_gate_last_state = -1;
 static int spirit_presentation_last_state = -1;
 static unsigned int spirit_presentation_logged_views;
@@ -998,9 +1069,12 @@ static BOOL runtime_authorized_at_render_start;
 static BOOL coop_role_lock_active;
 static void *coop_locked_player_one;
 static void *coop_locked_player_two;
+static void *coop_locked_player_three;
 static BOOL coop_roster_valid;
 static unsigned int coop_roster_player_one_type;
 static unsigned int coop_roster_player_two_type;
+static SudekiMpCoopRosterAssignmentStore coop_roster_assignment_store;
+static SudekiMpFixedThreeSeatRuntime fixed_three_runtime;
 static BOOL coop_roster_participation_requested = TRUE;
 static BOOL coop_roster_party_transition_active;
 static BOOL coop_roster_runtime_release_pending;
@@ -1014,8 +1088,10 @@ static void *coop_roster_ready_controller_target;
 static void *coop_roster_ready_party_front;
 static void *coop_roster_ready_player_one;
 static void *coop_roster_ready_player_two;
+static void *coop_roster_ready_player_three;
 static unsigned int coop_roster_ready_player_one_slot;
 static unsigned int coop_roster_ready_player_two_slot;
+static unsigned int coop_roster_ready_player_three_slot;
 static int coop_roster_ready_party_count;
 static int coop_roster_control_phase = -1;
 static SudekiMpSplitScreenOverlayRenderer overlay_renderer;
@@ -1032,8 +1108,23 @@ static BOOL coop_roster_native_transition_settled(
     unsigned int previous_character_action
 );
 static void reset_coop_roster_ready_window(void);
+static BOOL fixed_three_assignment_selected(void);
+static BOOL fixed_three_base_leases_exact(void);
+static void fixed_three_invalidate_frame_cache(void);
+static BOOL fixed_three_restore_render_swap(void);
+static BOOL fixed_three_release_cameras(const char *reason);
+static void fixed_three_release_frame_surfaces(void);
+static BOOL release_player_two_camera(const char *reason);
+static BOOL release_coop_roster_runtime(const char *reason);
+static BOOL fixed_three_seat_view_exact(
+    unsigned int seat_index,
+    const void *character
+);
+static BOOL fixed_three_render_start_dispatch(BOOL runtime_authorized);
+static void fixed_three_frame_end_dispatch(void);
 
 static const char second_player_camera_name[] = "SudekiMP_P2";
+static const char third_player_camera_name[] = "SudekiMP_P3";
 static const char exploration_camera_state_name[] = "Exploration";
 static const char spirit_history_resource_name[] = "_RenderTarget";
 static const char *const ranged_observer_locator_names[] = {
@@ -1623,7 +1714,10 @@ static void SUDEKIMP_THISCALL route_camera_input_event(
     void *camera,
     const void *event
 ) {
-    if (camera == player_two_camera) {
+    if (camera == player_two_camera ||
+        (fixed_three_runtime.cameras_acquired &&
+         (camera == fixed_three_runtime.cameras[1] ||
+          camera == fixed_three_runtime.cameras[2]))) {
         return;
     }
     if (original_camera_input_event != NULL) {
@@ -3078,11 +3172,96 @@ BOOL SudekiMpSplitScreenNativeSaveModalActive(void) {
             SUDEKIMP_SHARED_INTERACTION_MODAL_SAVE_BOOK);
 }
 
+BOOL SudekiMpSplitScreenNativeMovieOpening(void) {
+    LONG depth;
+    BOOL release_confirmed;
+
+    if (!split_screen_render_installed) {
+        /* The movie hook is also used by standalone traversal/title modes.
+         * With no renderer installed this is an inert pass-through, not a
+         * failed movie gate. */
+        return TRUE;
+    }
+    depth = InterlockedIncrement(&native_movie_gate_depth);
+    if (depth > 1) {
+        return TRUE;
+    }
+    player_two_view_requested = FALSE;
+    invalidate_dual_frame_cache();
+    fixed_three_invalidate_frame_cache();
+    if (fixed_three_runtime.transaction_active) {
+        InterlockedDecrement(&native_movie_gate_depth);
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogWrite(
+            "split_screen_render event=native_movie_gate phase=reject "
+            "reason=render_transaction_active policy=do_not_enter_movie\r\n");
+        return FALSE;
+    }
+    if (coop_roster_valid) {
+        /* FMA07 continues synchronously into native companion destruction
+         * after MoviePlay returns.  Keep the roster selection, but release
+         * every live runtime ownership in the proven order: named cameras,
+         * role lock, P3 AI, then P2 AI.  The normal 250ms exact-ready window
+         * is the post-movie quarantine before any later reacquire. */
+        release_confirmed = release_coop_roster_runtime(
+            "native_movie_opening");
+    } else {
+        BOOL fixed_released = fixed_three_release_cameras(
+            "native_movie_opening");
+        BOOL legacy_released = release_player_two_camera(
+            "native_movie_opening");
+
+        release_confirmed = fixed_released && legacy_released;
+    }
+    if (!release_confirmed) {
+        InterlockedDecrement(&native_movie_gate_depth);
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogWrite(
+            "split_screen_render event=native_movie_gate phase=reject "
+            "reason=runtime_release_unconfirmed "
+            "policy=do_not_enter_destructive_movie_continuation\r\n");
+        return FALSE;
+    }
+    SudekiMpLogWrite(
+        "split_screen_render event=native_movie_gate phase=enter "
+        "presentation=native_full_width runtime=released "
+        "cache=invalidated input=quiesced\r\n");
+    return TRUE;
+}
+
+void SudekiMpSplitScreenNativeMovieClosed(void) {
+    LONG depth;
+
+    depth = InterlockedCompareExchange(&native_movie_gate_depth, 0, 0);
+    if (depth <= 0) {
+        return;
+    }
+    depth = InterlockedDecrement(&native_movie_gate_depth);
+    if (depth != 0) {
+        return;
+    }
+    player_two_view_requested = FALSE;
+    invalidate_dual_frame_cache();
+    fixed_three_invalidate_frame_cache();
+    SudekiMpLogWrite(
+        "split_screen_render event=native_movie_gate phase=exit "
+        "presentation=native_full_width cache=requires_all_fresh_frames "
+        "reacquire=ordinary_exact_gameplay_gate\r\n");
+}
+
+BOOL SudekiMpSplitScreenNativeMovieActive(void) {
+    return split_screen_render_installed &&
+        InterlockedCompareExchange(&native_movie_gate_depth, 0, 0) > 0;
+}
+
 BOOL SudekiMpSplitScreenSharedInteractionModalActive(void) {
     unsigned int observation;
 
     if (!split_screen_render_installed) {
         return FALSE;
+    }
+    if (SudekiMpSplitScreenNativeMovieActive()) {
+        return TRUE;
     }
     observation = refresh_shared_interaction_modal();
     return SudekiMpSplitScreenSharedInteractionModalShouldQuiesce(
@@ -4002,6 +4181,11 @@ static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
         quick_menu_render_submit_would_submit(quick_menu);
     BOOL suppress_this_submit = FALSE;
 
+    if (fixed_three_assignment_selected()) {
+        original_quick_menu_render_submit(quick_menu);
+        return;
+    }
+
     if (would_submit &&
         (genuine_quick_menu_visible() ||
          quick_menu_isolation_active ||
@@ -4091,6 +4275,50 @@ BOOL SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
         global_presentation_clear != FALSE) ? TRUE : FALSE;
 }
 
+BOOL SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+    unsigned int rendered_seat,
+    unsigned int hud_evidence_seat,
+    unsigned int hud_role_mask,
+    unsigned int portrait_evidence_seat,
+    unsigned int portrait_role_mask,
+    unsigned int expected_minimap_update_epoch,
+    BOOL minimap_update_valid,
+    unsigned int minimap_update_seat,
+    unsigned int minimap_update_epoch,
+    BOOL minimap_render_valid,
+    unsigned int minimap_render_seat,
+    BOOL source_failure
+) {
+    unsigned int required_role_mask;
+
+    if (rendered_seat >= FIXED_THREE_SEAT_COUNT || source_failure) {
+        return FALSE;
+    }
+    required_role_mask = rendered_seat == 0u ? 0x01u : 0x03u;
+    return hud_evidence_seat == rendered_seat &&
+        hud_role_mask == required_role_mask &&
+        portrait_evidence_seat == rendered_seat &&
+        portrait_role_mask == required_role_mask &&
+        expected_minimap_update_epoch != 0u && minimap_update_valid &&
+        minimap_update_seat == rendered_seat &&
+        minimap_update_epoch == expected_minimap_update_epoch &&
+        minimap_render_valid && minimap_render_seat == rendered_seat;
+}
+
+BOOL SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+    BOOL presentation_clear,
+    BOOL base_leases_exact,
+    BOOL layout_exact,
+    unsigned int frame_cache_ready_mask,
+    unsigned int frame_owner_evidence_mask,
+    BOOL gameplay_input_frozen
+) {
+    return presentation_clear && base_leases_exact && layout_exact &&
+        frame_cache_ready_mask == FIXED_THREE_HUMAN_MASK &&
+        frame_owner_evidence_mask == FIXED_THREE_HUMAN_MASK &&
+        !gameplay_input_frozen;
+}
+
 BOOL SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(void *character) {
     SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
     const SudekiMpPlayerLease *lease =
@@ -4137,6 +4365,10 @@ BOOL SudekiMpSplitScreenPlayerTwoPerspectiveAvailable(void *character) {
         ranged_presentation_parts(character, NULL, NULL, NULL, NULL);
 
     (void)player_one_type;
+
+    if (fixed_three_assignment_selected()) {
+        return FALSE;
+    }
 
     return SudekiMpSplitScreenPlayerTwoPerspectivePolicy(
         runtime_ready,
@@ -4188,7 +4420,8 @@ BOOL SudekiMpSplitScreenTogglePlayerTwoPerspective(
 }
 
 BOOL SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(void *character) {
-    return spirit_strike_viewport_effect_isolation_enabled &&
+    return !fixed_three_assignment_selected() &&
+        spirit_strike_viewport_effect_isolation_enabled &&
         runtime_split_enabled && dual_camera_frame_cache_enabled &&
         player_one_character != NULL && player_two_character != NULL &&
         character == player_two_character &&
@@ -4197,7 +4430,8 @@ BOOL SudekiMpSplitScreenPlayerTwoIsNonCasterDuringSpirit(void *character) {
 }
 
 static BOOL split_skill_realtime_session_active(void) {
-    return skill_camera_routing_enabled && runtime_split_enabled &&
+    return !fixed_three_assignment_selected() &&
+        skill_camera_routing_enabled && runtime_split_enabled &&
         dual_camera_frame_cache_enabled &&
         second_player_camera_manager != NULL &&
         player_two_camera != NULL && player_one_character != NULL &&
@@ -4404,7 +4638,8 @@ static BOOL routed_camera_effect_active(void) {
 }
 
 static BOOL isolate_camera_effect_from_player_two(void) {
-    return spirit_strike_viewport_effect_isolation_enabled &&
+    return !fixed_three_assignment_selected() &&
+        spirit_strike_viewport_effect_isolation_enabled &&
         rendered_player_two_this_frame &&
         routed_camera_effect_active();
 }
@@ -4500,6 +4735,11 @@ static void SUDEKIMP_THISCALL route_motion_blur_post_render(
     BOOL swapped = FALSE;
     unsigned int trace_bit = rendered_player_two_this_frame ? 2u : 1u;
 
+    if (fixed_three_assignment_selected()) {
+        original_motion_blur_post_render(callback, flags);
+        return;
+    }
+
     if (isolate_camera_effect_from_player_two() &&
         readable_memory(callback, 0x14u)) {
         history_slot = (void **)((uint8_t *)callback + 0x10u);
@@ -4544,6 +4784,11 @@ static void SUDEKIMP_THISCALL route_screenshot_post_render(
     void *active_history = NULL;
     BOOL swapped = FALSE;
     unsigned int trace_bit = rendered_player_two ? 8u : 4u;
+
+    if (fixed_three_assignment_selected()) {
+        original_screenshot_post_render(callback, flags);
+        return;
+    }
 
     if (readable_memory(callback, 0x0cu)) {
         completion_before = ((uint8_t *)callback)[0x08u];
@@ -4708,6 +4953,88 @@ void *SudekiMpSplitScreenHudPartySourceDispatch(void *source) {
     unsigned int source_role;
     unsigned int viewport_index;
     unsigned int resolved_slot = UINT_MAX;
+    unsigned int expected_slot = UINT_MAX;
+    unsigned int matches = 0u;
+
+    if (fixed_three_runtime.transaction_active &&
+        fixed_three_runtime.presentation_clear_this_frame &&
+        viewport_hud_binding_active &&
+        fixed_three_runtime.rendered_seat < FIXED_THREE_SEAT_COUNT) {
+        unsigned int owner_seat = fixed_three_runtime.rendered_seat;
+        unsigned int owner_slot =
+            fixed_three_runtime.party_slots[owner_seat];
+
+        if (game_base == NULL || !readable_memory(
+                game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group))) {
+            fixed_three_runtime.hud_source_failure_this_frame = TRUE;
+            return source;
+        }
+        group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+        if (group != fixed_three_runtime.group ||
+            owner_slot >= PARTY_SLOT_COUNT ||
+            !readable_memory(group + PARTY_SLOT_ZERO_OFFSET,
+                PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
+            fixed_three_runtime.hud_source_failure_this_frame = TRUE;
+            return source;
+        }
+        player_one_source = group + PARTY_SLOT_ZERO_OFFSET;
+        player_two_source = player_one_source +
+            owner_slot * PARTY_SLOT_STRIDE;
+        if (source == player_one_source) {
+            source_role = 0u;
+            desired_character = fixed_three_runtime.actors[owner_seat];
+            expected_slot = owner_slot;
+        } else if (owner_seat != 0u && source == player_two_source) {
+            source_role = 1u;
+            desired_character = fixed_three_runtime.actors[0];
+            expected_slot = 0u;
+        } else {
+            /* Native HUD paths for untouched AI slots retain their own source
+             * and do not constitute evidence for or against the rendered
+             * human seat. */
+            return source;
+        }
+        resolved_source = NULL;
+        for (index = 0u; index < PARTY_SLOT_COUNT; ++index) {
+            uint8_t *candidate_source = player_one_source +
+                index * PARTY_SLOT_STRIDE;
+
+            if (*(void **)candidate_source == desired_character) {
+                resolved_source = candidate_source;
+                resolved_slot = index;
+                ++matches;
+            }
+        }
+        if (matches != 1u || resolved_slot != expected_slot ||
+            resolved_source != player_one_source +
+                expected_slot * PARTY_SLOT_STRIDE) {
+            fixed_three_runtime.hud_source_failure_this_frame = TRUE;
+            return source;
+        }
+        if (fixed_three_runtime.hud_role_mask != 0u &&
+            fixed_three_runtime.hud_evidence_seat != owner_seat) {
+            fixed_three_runtime.hud_source_failure_this_frame = TRUE;
+            return source;
+        }
+        fixed_three_runtime.hud_evidence_seat = owner_seat;
+        fixed_three_runtime.hud_role_mask |= 1u << source_role;
+        viewport_index = owner_seat;
+        if (!hud_mapping_trace_valid[viewport_index][source_role] ||
+            hud_mapping_trace_resolved_slot[viewport_index][source_role] !=
+                resolved_slot) {
+            hud_mapping_trace_valid[viewport_index][source_role] = TRUE;
+            hud_mapping_trace_resolved_slot[viewport_index][source_role] =
+                resolved_slot;
+            SudekiMpLogFormat(
+                "split_screen_render event=fixed_three_hud_mapping "
+                "viewport=%u source_role=%s resolved_slot=%ld "
+                "policy=stable_seat_actor_swap_no_party_write\r\n",
+                viewport_index + 1u,
+                source_role == 0u ? "primary" : "owner_slot",
+                resolved_slot == UINT_MAX ? -1L : (long)resolved_slot);
+        }
+        return resolved_source;
+    }
 
     if (!viewport_hud_binding_active || !dual_camera_frame_cache_enabled ||
         game_base == NULL ||
@@ -4796,7 +5123,7 @@ static void split_screen_hud_party_pointer_copy_entry(void) {
 static void *minimap_party_source_dispatch(
     void *source,
     void *desired_character,
-    BOOL player_two_owner,
+    unsigned int owner_seat,
     BOOL *resolved,
     const char *phase
 ) {
@@ -4831,7 +5158,8 @@ static void *minimap_party_source_dispatch(
         uint8_t *candidate_source = party_source +
             index * PARTY_SLOT_STRIDE;
         if (*(void **)candidate_source == desired_character) {
-            viewport_index = player_two_owner ? 1u : 0u;
+            viewport_index = owner_seat < FIXED_THREE_SEAT_COUNT ?
+                owner_seat : 0u;
             if (!minimap_ownership_logged[viewport_index]) {
                 minimap_ownership_logged[viewport_index] = TRUE;
                 SudekiMpLogFormat(
@@ -4860,6 +5188,54 @@ void *SudekiMpSplitScreenMinimapScheduledPartySourceDispatch(void *source) {
     minimap_update_owner_valid = FALSE;
     minimap_update_player_two = FALSE;
     minimap_update_character = NULL;
+    if (fixed_three_assignment_selected()) {
+        unsigned int owner_seat =
+            fixed_three_runtime.minimap_expected_update_seat;
+
+        if (fixed_three_runtime.transaction_active ||
+            !fixed_three_runtime.configured ||
+            !fixed_three_runtime.cameras_acquired ||
+            !fixed_three_base_leases_exact() ||
+            owner_seat >= FIXED_THREE_SEAT_COUNT ||
+            fixed_three_runtime.minimap_expected_update_epoch == 0u ||
+            inspect_shared_interaction_modal(NULL) !=
+                SUDEKIMP_SHARED_INTERACTION_MODAL_NONE ||
+            pc_quit_screen_visible() ||
+            quick_menu_visible() ||
+            genuine_quick_menu_visible() ||
+            current_spirit_presentation_state() != 0 ||
+            settled_temporary_zone_active() ||
+            coop_roster_party_transition_active) {
+            /* UIMapManager::Update runs before RenderStart.  A cache frame
+             * scheduled by the previous clear presentation must not remap a
+             * native full-width modal/special frame that became active in
+             * between.  Preserve the arm but withhold proof; RenderStart and
+             * FrameEnd will invalidate it and require a fresh clear retry. */
+            fixed_three_runtime.minimap_update_valid = FALSE;
+            fixed_three_runtime.minimap_update_seat =
+                SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+            fixed_three_runtime.minimap_update_epoch = 0u;
+            return source;
+        }
+        fixed_three_runtime.minimap_update_valid = FALSE;
+        fixed_three_runtime.minimap_update_seat =
+            SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+        fixed_three_runtime.minimap_update_epoch = 0u;
+        desired_character = fixed_three_runtime.actors[owner_seat];
+        resolved_source = minimap_party_source_dispatch(
+            source,
+            desired_character,
+            owner_seat,
+            &resolved,
+            "fixed_three_update");
+        if (resolved) {
+            fixed_three_runtime.minimap_update_valid = TRUE;
+            fixed_three_runtime.minimap_update_seat = (uint8_t)owner_seat;
+            fixed_three_runtime.minimap_update_epoch =
+                fixed_three_runtime.minimap_expected_update_epoch;
+        }
+        return resolved_source;
+    }
     if (!dual_camera_frame_cache_enabled ||
         !minimap_scheduled_owner_valid) {
         return source;
@@ -4875,7 +5251,7 @@ void *SudekiMpSplitScreenMinimapScheduledPartySourceDispatch(void *source) {
     resolved_source = minimap_party_source_dispatch(
         source,
         desired_character,
-        minimap_update_player_two,
+        minimap_update_player_two ? 1u : 0u,
         &resolved,
         "update"
     );
@@ -4888,6 +5264,37 @@ void *SudekiMpSplitScreenMinimapScheduledPartySourceDispatch(void *source) {
 
 void *SudekiMpSplitScreenMinimapRenderPartySourceDispatch(void *source) {
     void *expected_character;
+    void *resolved_source;
+    BOOL resolved = FALSE;
+
+    if (fixed_three_runtime.transaction_active &&
+        fixed_three_runtime.presentation_clear_this_frame) {
+        unsigned int owner_seat =
+            fixed_three_runtime.minimap_update_seat;
+
+        if (!fixed_three_runtime.minimap_update_valid ||
+            owner_seat >= FIXED_THREE_SEAT_COUNT ||
+            owner_seat != fixed_three_runtime.rendered_seat ||
+            owner_seat !=
+                fixed_three_runtime.minimap_expected_update_seat ||
+            fixed_three_runtime.minimap_update_epoch == 0u ||
+            fixed_three_runtime.minimap_update_epoch !=
+                fixed_three_runtime.minimap_expected_update_epoch) {
+            minimap_source_failure_this_frame = TRUE;
+            return source;
+        }
+        resolved_source = minimap_party_source_dispatch(
+            source,
+            fixed_three_runtime.actors[owner_seat],
+            owner_seat,
+            &resolved,
+            "fixed_three_render");
+        if (resolved) {
+            fixed_three_runtime.minimap_render_valid = TRUE;
+            fixed_three_runtime.minimap_render_seat = (uint8_t)owner_seat;
+        }
+        return resolved_source;
+    }
 
     if (!dual_camera_frame_cache_enabled) {
         return source;
@@ -4903,7 +5310,7 @@ void *SudekiMpSplitScreenMinimapRenderPartySourceDispatch(void *source) {
     return minimap_party_source_dispatch(
         source,
         minimap_update_character,
-        minimap_update_player_two,
+        minimap_update_player_two ? 1u : 0u,
         NULL,
         "render"
     );
@@ -4971,7 +5378,7 @@ static void assign_portrait_resource_synchronously(
     );
 }
 
-static void refresh_viewport_portraits(void) {
+static unsigned int refresh_viewport_portraits(void) {
     uint8_t *hud;
     uint8_t *group;
     uint8_t *party_source;
@@ -4989,6 +5396,16 @@ static void refresh_viewport_portraits(void) {
     unsigned int portrait_enum;
     unsigned int resource_index;
     unsigned int assigned_count = 0u;
+    unsigned int proven_role_mask = 0u;
+    BOOL fixed_three_view = fixed_three_runtime.transaction_active &&
+        fixed_three_runtime.presentation_clear_this_frame &&
+        fixed_three_runtime.rendered_seat < FIXED_THREE_SEAT_COUNT;
+    unsigned int fixed_three_owner_seat =
+        fixed_three_runtime.rendered_seat;
+    unsigned int fixed_three_owner_slot = fixed_three_owner_seat <
+            FIXED_THREE_SEAT_COUNT ?
+        fixed_three_runtime.party_slots[fixed_three_owner_seat] :
+        PARTY_SLOT_COUNT;
 
     if (!dual_camera_frame_cache_enabled || game_base == NULL ||
         original_character_type_to_portrait_enum == NULL ||
@@ -5005,7 +5422,7 @@ static void refresh_viewport_portraits(void) {
         !readable_memory(
             game_base + RVA_ACTIVE_GROUP_GLOBAL,
             sizeof(group))) {
-        return;
+        return 0u;
     }
     hud = *(uint8_t **)(game_base + RVA_GAMEPLAY_HUD_GLOBAL);
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
@@ -5017,7 +5434,7 @@ static void refresh_viewport_portraits(void) {
         !readable_memory(
             group + PARTY_SLOT_ZERO_OFFSET,
             PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE)) {
-        return;
+        return 0u;
     }
     group_size = *(unsigned int *)(group + 0xccu);
     if (group_size > PARTY_SLOT_COUNT) {
@@ -5025,6 +5442,14 @@ static void refresh_viewport_portraits(void) {
     }
     expected_vtable = game_base + RVA_HUD_PORTRAIT_GIZMO_VTABLE;
     for (index = 0u; index < group_size; ++index) {
+        unsigned int fixed_three_role_bit = 0u;
+
+        if (fixed_three_view && index == 0u) {
+            fixed_three_role_bit = 0x01u;
+        } else if (fixed_three_view && fixed_three_owner_seat != 0u &&
+                   index == fixed_three_owner_slot) {
+            fixed_three_role_bit = 0x02u;
+        }
         portrait_gizmo = *(void **)(
             hud + GAMEPLAY_HUD_PORTRAIT_GIZMO_ARRAY_OFFSET +
                 index * sizeof(portrait_gizmo)
@@ -5041,7 +5466,13 @@ static void refresh_viewport_portraits(void) {
         party_source = group + PARTY_SLOT_ZERO_OFFSET +
             source_index * PARTY_SLOT_STRIDE;
         character = *(uint8_t **)party_source;
-        if (index == 0u) {
+        if (fixed_three_view && index == 0u) {
+            character = (uint8_t *)
+                fixed_three_runtime.actors[fixed_three_owner_seat];
+        } else if (fixed_three_view && fixed_three_owner_seat != 0u &&
+                   index == fixed_three_owner_slot) {
+            character = (uint8_t *)fixed_three_runtime.actors[0];
+        } else if (index == 0u) {
             character = (uint8_t *)(rendered_player_two_this_frame ?
                 player_two_character : player_one_character);
         } else if (index == player_two_party_slot) {
@@ -5085,39 +5516,51 @@ static void refresh_viewport_portraits(void) {
         current_portrait_enum = *(unsigned int *)(
             (uint8_t *)portrait_gizmo + HUD_PORTRAIT_ENUM_OFFSET
         );
-        if (!SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
-                shared_interaction_modal_observation !=
-                    SUDEKIMP_SHARED_INTERACTION_MODAL_NONE ||
-                InterlockedCompareExchange(
-                    &native_save_modal_opening,
-                    0,
-                    0) != 0,
-                current_portrait_enum,
-                portrait_enum)) {
-            continue;
+        if (current_portrait_enum != portrait_enum) {
+            if (!SudekiMpSplitScreenViewportPortraitAssignmentNeeded(
+                    shared_interaction_modal_observation !=
+                        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE ||
+                    InterlockedCompareExchange(
+                        &native_save_modal_opening,
+                        0,
+                        0) != 0,
+                    current_portrait_enum,
+                    portrait_enum)) {
+                continue;
+            }
+            *(unsigned int *)(
+                (uint8_t *)portrait_gizmo + HUD_PORTRAIT_ENUM_OFFSET
+            ) = portrait_enum;
+            resource_index = *(unsigned int *)(
+                game_base + RVA_HUD_PORTRAIT_RESOURCE_INDEX_TABLE +
+                    portrait_enum * sizeof(resource_index)
+            );
+            assign_portrait_resource_synchronously(
+                (uint8_t *)portrait_gizmo + HUD_PORTRAIT_CYCLE_ICON_OFFSET,
+                resource_index
+            );
+            ++assigned_count;
         }
-        *(unsigned int *)(
-            (uint8_t *)portrait_gizmo + HUD_PORTRAIT_ENUM_OFFSET
-        ) = portrait_enum;
-        resource_index = *(unsigned int *)(
-            game_base + RVA_HUD_PORTRAIT_RESOURCE_INDEX_TABLE +
-                portrait_enum * sizeof(resource_index)
-        );
-        assign_portrait_resource_synchronously(
-            (uint8_t *)portrait_gizmo + HUD_PORTRAIT_CYCLE_ICON_OFFSET,
-            resource_index
-        );
-        ++assigned_count;
+        if (*(unsigned int *)((uint8_t *)portrait_gizmo +
+                HUD_PORTRAIT_ENUM_OFFSET) == portrait_enum) {
+            proven_role_mask |= fixed_three_role_bit;
+        }
     }
     if (!viewport_portrait_ownership_logged &&
-        rendered_player_two_this_frame && assigned_count != 0u) {
+        (rendered_player_two_this_frame || fixed_three_view) &&
+        assigned_count != 0u) {
         viewport_portrait_ownership_logged = TRUE;
         SudekiMpLogFormat(
-            "split_screen_render event=player_two_hud_portrait phase=active assigned_gizmos=%u player_two_party_slot=%u policy=skip_redundant_same_owner_assignment_call_on_viewport_enum_change\r\n",
+            "split_screen_render event=viewport_hud_portrait phase=active "
+            "viewport=%u assigned_gizmos=%u owner_party_slot=%u "
+            "policy=skip_redundant_same_owner_assignment_call_on_viewport_enum_change\r\n",
+            fixed_three_view ? fixed_three_owner_seat + 1u : 2u,
             assigned_count,
-            player_two_party_slot
+            fixed_three_view ? fixed_three_owner_slot :
+                player_two_party_slot
         );
     }
+    return fixed_three_view ? proven_role_mask : 0u;
 }
 
 static BOOL resolve_player_characters(
@@ -7163,18 +7606,33 @@ BOOL SudekiMpTransformSeatMovement(
     float world_direction[3]
 ) {
     float matrix[16];
+    void *render_state;
 
-    if (seat_index != 1u || character == NULL ||
-        character != player_two_character || player_two_camera == NULL ||
-        !player_two_camera_transform_initialized ||
-        !readable_memory(player_two_render_state, 0xd0u) ||
-        !render_state_camera_matrix_valid(player_two_render_state) ||
-        local_direction == NULL || world_direction == NULL) {
+    if (local_direction == NULL || world_direction == NULL ||
+        character == NULL) {
         return FALSE;
+    }
+    if (fixed_three_assignment_selected()) {
+        if (seat_index < FIXED_THREE_COMPANION_FIRST_SEAT ||
+            seat_index > FIXED_THREE_COMPANION_LAST_SEAT ||
+            !fixed_three_runtime.camera_transform_initialized[seat_index] ||
+            !fixed_three_seat_view_exact(seat_index, character)) {
+            return FALSE;
+        }
+        render_state = fixed_three_runtime.render_states[seat_index];
+    } else {
+        if (seat_index != 1u || character != player_two_character ||
+            player_two_camera == NULL ||
+            !player_two_camera_transform_initialized ||
+            !readable_memory(player_two_render_state, 0xd0u) ||
+            !render_state_camera_matrix_valid(player_two_render_state)) {
+            return FALSE;
+        }
+        render_state = player_two_render_state;
     }
     memcpy(
         matrix,
-        (uint8_t *)player_two_render_state + 0x90u,
+        (uint8_t *)render_state + 0x90u,
         sizeof(matrix)
     );
     return SudekiMpCameraTransformHorizontalDirection(
@@ -7217,9 +7675,15 @@ BOOL SudekiMpAlignSeatFacingToCamera(
     uint8_t *position;
     float world_forward[3];
 
-    if (seat_index != 1u || !second_player_controller_camera_enabled ||
+    if ((seat_index < FIXED_THREE_COMPANION_FIRST_SEAT ||
+         seat_index > FIXED_THREE_COMPANION_LAST_SEAT) ||
+        (!fixed_three_assignment_selected() && seat_index != 1u) ||
+        !second_player_controller_camera_enabled ||
         position_set_forward_function == NULL ||
-        character == NULL || character != player_two_character ||
+        character == NULL ||
+        (fixed_three_assignment_selected() ?
+            character != fixed_three_runtime.actors[seat_index] :
+            character != player_two_character) ||
         !readable_memory(character, 0x48u) ||
         !SudekiMpTransformSeatMovement(
             seat_index,
@@ -7233,10 +7697,19 @@ BOOL SudekiMpAlignSeatFacingToCamera(
         return FALSE;
     }
     call_position_set_forward(position, world_forward);
-    if (!player_two_facing_logged) {
-        player_two_facing_logged = TRUE;
+    if (fixed_three_assignment_selected() ?
+            !fixed_three_facing_logged[seat_index] :
+            !player_two_facing_logged) {
+        if (fixed_three_assignment_selected()) {
+            fixed_three_facing_logged[seat_index] = TRUE;
+        } else {
+            player_two_facing_logged = TRUE;
+        }
         SudekiMpLogFormat(
-            "split_screen_render event=player_two_camera_facing phase=active character=0x%08lx position=0x%08lx policy=native_position_orientation_commit_from_camera_two_forward\r\n",
+            "split_screen_render event=seat_camera_facing player=%u "
+            "phase=active character=0x%08lx position=0x%08lx "
+            "policy=native_position_orientation_commit_from_owned_camera_forward\r\n",
+            seat_index + 1u,
             (unsigned long)(uintptr_t)character,
             (unsigned long)(uintptr_t)position
         );
@@ -7297,7 +7770,8 @@ static BOOL SUDEKIMP_THISCALL route_skill_render_camera(
     unsigned long caller_rva;
     int player;
 
-    if (!skill_camera_routing_enabled ||
+    if (fixed_three_assignment_selected() ||
+        !skill_camera_routing_enabled ||
         manager != second_player_camera_manager || name == NULL) {
         return original(manager, name);
     }
@@ -8631,7 +9105,8 @@ static BOOL ranged_world_compositor_eligible(
     void *world_wrapper,
     BOOL show_first_person
 ) {
-    return !show_first_person && rendered_player_two_this_frame &&
+    return !fixed_three_assignment_selected() &&
+        !show_first_person && rendered_player_two_this_frame &&
         character == player_one_character &&
         character_has_resource_type(character, 0x01u) &&
         readable_memory(position, 0xb8u) &&
@@ -9824,7 +10299,8 @@ static void stage_player_two_collision_self_cull(void) {
     float distance_squared;
     float radius_squared;
 
-    if (player_two_collision_self_cull.active ||
+    if (fixed_three_assignment_selected() ||
+        player_two_collision_self_cull.active ||
         !rendered_player_two_this_frame ||
         !native_second_player_camera_collision_session_enabled ||
         !player_two_native_camera_ready ||
@@ -9893,7 +10369,8 @@ static void apply_ranged_model_render_view(void) {
     uint8_t *arbiter;
     BOOL world_compositor_owned = FALSE;
 
-    if (!rendered_player_two_this_frame) {
+    if (fixed_three_assignment_selected() ||
+        !rendered_player_two_this_frame) {
         return;
     }
     stage_player_two_collision_self_cull();
@@ -10567,6 +11044,10 @@ static BOOL gameplay_split_allowed(
     void *controller_target;
     void *camera_pointer;
 
+    if (SudekiMpSplitScreenNativeMovieActive()) {
+        *reason = "native_movie_active";
+        return FALSE;
+    }
     if (!runtime_authorized) {
         *reason = runtime_split_enabled ?
             "external_runtime_authorization_pending" :
@@ -10714,6 +11195,881 @@ static BOOL same_surface_description(
         left->format == right->format;
 }
 
+static BOOL fixed_three_assignment_selected(void) {
+    SudekiMpCoopRosterAssignment assignment;
+
+    return coop_roster_valid &&
+        SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, &assignment) &&
+        assignment.active_human_mask == FIXED_THREE_HUMAN_MASK;
+}
+
+static void fixed_three_reset_render_owner_evidence(void) {
+    fixed_three_runtime.hud_evidence_seat = UINT_MAX;
+    fixed_three_runtime.hud_role_mask = 0u;
+    fixed_three_runtime.hud_source_failure_this_frame = FALSE;
+    fixed_three_runtime.portrait_evidence_seat = UINT_MAX;
+    fixed_three_runtime.portrait_role_mask = 0u;
+    fixed_three_runtime.minimap_render_seat =
+        SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    fixed_three_runtime.minimap_render_valid = FALSE;
+}
+
+static void fixed_three_clear_minimap_update_proof(void) {
+    fixed_three_runtime.minimap_update_seat =
+        SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    fixed_three_runtime.minimap_update_epoch = 0u;
+    fixed_three_runtime.minimap_update_valid = FALSE;
+    minimap_source_failure_this_frame = FALSE;
+}
+
+static void fixed_three_arm_minimap_update(unsigned int seat_index) {
+    fixed_three_clear_minimap_update_proof();
+    if (seat_index >= FIXED_THREE_SEAT_COUNT) {
+        fixed_three_runtime.minimap_expected_update_seat =
+            SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+        return;
+    }
+    ++fixed_three_runtime.minimap_expected_update_epoch;
+    if (fixed_three_runtime.minimap_expected_update_epoch == 0u) {
+        ++fixed_three_runtime.minimap_expected_update_epoch;
+    }
+    fixed_three_runtime.minimap_expected_update_seat = (uint8_t)seat_index;
+}
+
+static BOOL fixed_three_consume_frame_owner_evidence(
+    unsigned int rendered_seat
+) {
+    BOOL ready = SudekiMpSplitScreenFixedThreeFrameOwnerEvidencePolicy(
+        rendered_seat,
+        fixed_three_runtime.hud_evidence_seat,
+        fixed_three_runtime.hud_role_mask,
+        fixed_three_runtime.portrait_evidence_seat,
+        fixed_three_runtime.portrait_role_mask,
+        fixed_three_runtime.minimap_expected_update_epoch,
+        fixed_three_runtime.minimap_update_valid,
+        fixed_three_runtime.minimap_update_seat,
+        fixed_three_runtime.minimap_update_epoch,
+        fixed_three_runtime.minimap_render_valid,
+        fixed_three_runtime.minimap_render_seat,
+        fixed_three_runtime.hud_source_failure_this_frame ||
+            minimap_source_failure_this_frame);
+
+    fixed_three_reset_render_owner_evidence();
+    fixed_three_clear_minimap_update_proof();
+    fixed_three_runtime.minimap_expected_update_seat =
+        SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    return ready;
+}
+
+static void fixed_three_invalidate_frame_cache(void) {
+    fixed_three_runtime.frame_valid_mask = 0u;
+    fixed_three_runtime.frame_owner_evidence_mask = 0u;
+    fixed_three_runtime.compositor_logged = FALSE;
+    fixed_three_reset_render_owner_evidence();
+    fixed_three_clear_minimap_update_proof();
+    fixed_three_runtime.minimap_expected_update_seat =
+        SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    ZeroMemory(&fixed_three_runtime.layout,
+        sizeof(fixed_three_runtime.layout));
+}
+
+static void fixed_three_release_frame_surfaces(void) {
+    unsigned int seat_index;
+
+    for (seat_index = FIXED_THREE_SEAT_COUNT; seat_index > 0u;
+            --seat_index) {
+        release_com_object(
+            &fixed_three_runtime.frame_surfaces[seat_index - 1u]);
+    }
+    for (seat_index = FIXED_THREE_SEAT_COUNT; seat_index > 0u;
+            --seat_index) {
+        release_com_object(
+            &fixed_three_runtime.frame_textures[seat_index - 1u]);
+    }
+    fixed_three_runtime.frame_device = NULL;
+    ZeroMemory(&fixed_three_runtime.frame_description,
+        sizeof(fixed_three_runtime.frame_description));
+    fixed_three_invalidate_frame_cache();
+}
+
+static BOOL fixed_three_collect_leases(
+    SudekiMpFixedThreeSeatLeaseCandidate *candidate
+) {
+    SudekiMpCoopRosterAssignment assignment;
+    SudekiMpPlayerStatehood *statehood = SudekiMpPlayerStatehoodRuntime();
+    uint8_t *group;
+    uint8_t *controller;
+    void *controller_target;
+    unsigned int seat_index;
+    unsigned int party_index;
+
+    if (candidate == NULL || game_base == NULL || statehood == NULL ||
+        !SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, &assignment) ||
+        assignment.active_human_mask != FIXED_THREE_HUMAN_MASK ||
+        SudekiMpLocalInputHubRequestedMask() != FIXED_THREE_HUMAN_MASK ||
+        SudekiMpLocalInputHubConnectedMask() != FIXED_THREE_HUMAN_MASK ||
+        !readable_memory(
+            game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(group)) ||
+        !readable_memory(
+            game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        return FALSE;
+    }
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if (group == NULL || controller == NULL ||
+        !readable_memory(group + PARTY_SLOT_ZERO_OFFSET,
+            PARTY_SLOT_COUNT * PARTY_SLOT_STRIDE) ||
+        !readable_memory(controller + CONTROLLER_TARGET_OFFSET,
+            sizeof(controller_target))) {
+        return FALSE;
+    }
+    controller_target = *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+    ZeroMemory(candidate, sizeof(*candidate));
+    candidate->group = group;
+    candidate->host_controller = controller;
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        const SudekiMpPlayerLease *lease = &statehood->players[seat_index];
+        unsigned int occurrences = 0u;
+
+        if (!lease->human_present || lease->actor == 0u ||
+            lease->actor_generation == 0u ||
+            !character_has_resource_type(
+                (void *)lease->actor,
+                assignment.actor_type_by_seat[seat_index])) {
+            return FALSE;
+        }
+        candidate->actors[seat_index] = (void *)lease->actor;
+        candidate->actor_generations[seat_index] = lease->actor_generation;
+        candidate->party_slots[seat_index] = PARTY_SLOT_COUNT;
+        for (party_index = 0u; party_index < PARTY_SLOT_COUNT;
+                ++party_index) {
+            void *party_actor = *(void **)(group + PARTY_SLOT_ZERO_OFFSET +
+                party_index * PARTY_SLOT_STRIDE);
+
+            if (party_actor == candidate->actors[seat_index]) {
+                candidate->party_slots[seat_index] = party_index;
+                ++occurrences;
+            }
+        }
+        if (occurrences != 1u) {
+            return FALSE;
+        }
+        if (seat_index != 0u &&
+            (candidate->actors[seat_index] == candidate->actors[0] ||
+             (seat_index == 2u && candidate->actors[seat_index] ==
+                candidate->actors[1]))) {
+            return FALSE;
+        }
+    }
+    if (candidate->party_slots[0] != 0u ||
+        controller_target != candidate->actors[0]) {
+        return FALSE;
+    }
+    candidate->input_identities[0] = controller;
+    candidate->input_generations[0] = 0u;
+    {
+        SudekiMpPlayerCombatSnapshot host_snapshot;
+
+        if (!SudekiMpCombatContextGetSnapshot(0u, &host_snapshot) ||
+            host_snapshot.character != candidate->actors[0] ||
+            host_snapshot.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER ||
+            host_snapshot.input_source != controller) {
+            return FALSE;
+        }
+    }
+    for (seat_index = FIXED_THREE_COMPANION_FIRST_SEAT;
+            seat_index <= FIXED_THREE_COMPANION_LAST_SEAT;
+            ++seat_index) {
+        SudekiMpPlayerCombatSnapshot snapshot;
+        const void *identity =
+            SudekiMpLocalInputHubSeatIdentity(seat_index);
+        uint32_t generation =
+            SudekiMpLocalInputHubSeatIdentityGeneration(seat_index);
+
+        if (!SudekiMpControlSeparationSeatRequested(seat_index) ||
+            !SudekiMpControlSeparationSeatActive(seat_index) ||
+            !SudekiMpControlSeparationSeatInputReady(seat_index) ||
+            !SudekiMpControlSeparationSeatInputLeaseActive(seat_index) ||
+            SudekiMpControlSeparationSeatCharacter(seat_index) !=
+                candidate->actors[seat_index] ||
+            identity == NULL || generation == 0u ||
+            !SudekiMpCombatContextGetSnapshot(seat_index, &snapshot) ||
+            snapshot.character != candidate->actors[seat_index] ||
+            snapshot.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+            snapshot.input_source != identity) {
+            return FALSE;
+        }
+        candidate->input_identities[seat_index] = identity;
+        candidate->input_generations[seat_index] = generation;
+    }
+    return TRUE;
+}
+
+static void fixed_three_clear_published_view_if_exact(
+    unsigned int seat_index,
+    void *camera,
+    void *render_state
+) {
+    SudekiMpPlayerCombatSnapshot snapshot;
+
+    if (seat_index < FIXED_THREE_SEAT_COUNT && camera != NULL &&
+        render_state != NULL &&
+        SudekiMpCombatContextGetSnapshot(seat_index, &snapshot) &&
+        snapshot.viewport_camera == camera &&
+        snapshot.render_state == render_state) {
+        SudekiMpCombatContextSetView(seat_index, NULL, NULL);
+    }
+}
+
+static void fixed_three_clear_camera_runtime(void) {
+    unsigned int seat_index;
+
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        fixed_three_clear_published_view_if_exact(
+            seat_index,
+            fixed_three_runtime.cameras[seat_index],
+            fixed_three_runtime.render_states[seat_index]);
+    }
+    fixed_three_runtime.manager = NULL;
+    fixed_three_runtime.group = NULL;
+    fixed_three_runtime.host_controller = NULL;
+    ZeroMemory(fixed_three_runtime.actors,
+        sizeof(fixed_three_runtime.actors));
+    ZeroMemory(fixed_three_runtime.actor_generations,
+        sizeof(fixed_three_runtime.actor_generations));
+    ZeroMemory(fixed_three_runtime.party_slots,
+        sizeof(fixed_three_runtime.party_slots));
+    ZeroMemory(fixed_three_runtime.input_identities,
+        sizeof(fixed_three_runtime.input_identities));
+    ZeroMemory(fixed_three_runtime.input_generations,
+        sizeof(fixed_three_runtime.input_generations));
+    ZeroMemory(fixed_three_runtime.cameras,
+        sizeof(fixed_three_runtime.cameras));
+    ZeroMemory(fixed_three_runtime.render_states,
+        sizeof(fixed_three_runtime.render_states));
+    ZeroMemory(fixed_three_runtime.camera_transform_initialized,
+        sizeof(fixed_three_runtime.camera_transform_initialized));
+    ZeroMemory(fixed_three_runtime.camera_last_target,
+        sizeof(fixed_three_runtime.camera_last_target));
+    ZeroMemory(fixed_three_runtime.camera_pitch_offset,
+        sizeof(fixed_three_runtime.camera_pitch_offset));
+    ZeroMemory(fixed_three_runtime.camera_input_last_tick,
+        sizeof(fixed_three_runtime.camera_input_last_tick));
+    ZeroMemory(fixed_three_runtime.camera_input_logged,
+        sizeof(fixed_three_runtime.camera_input_logged));
+    fixed_three_runtime.cameras_acquired = FALSE;
+    fixed_three_runtime.scheduled_seat = 0u;
+    fixed_three_runtime.rendered_seat = 0u;
+    fixed_three_runtime.rejection_logged = FALSE;
+    fixed_three_invalidate_frame_cache();
+}
+
+static BOOL fixed_three_restore_render_swap(void) {
+    if (!fixed_three_runtime.render_swap_active) {
+        return TRUE;
+    }
+    if (!writable_memory(fixed_three_runtime.render_swap_slot,
+            sizeof(*fixed_three_runtime.render_swap_slot)) ||
+        *fixed_three_runtime.render_swap_slot !=
+            fixed_three_runtime.render_swap_applied_state) {
+        return FALSE;
+    }
+    *fixed_three_runtime.render_swap_slot =
+        fixed_three_runtime.render_swap_native_state;
+    fixed_three_runtime.render_swap_slot = NULL;
+    fixed_three_runtime.render_swap_native_state = NULL;
+    fixed_three_runtime.render_swap_applied_state = NULL;
+    fixed_three_runtime.render_swap_active = FALSE;
+    return TRUE;
+}
+
+static BOOL fixed_three_release_cameras(const char *reason) {
+    void *manager = fixed_three_runtime.manager;
+    void *live_manager;
+    void *global_camera;
+    void *global_state;
+    void **scene_slot;
+    int seat_index;
+
+    fixed_three_invalidate_frame_cache();
+    if (!fixed_three_restore_render_swap()) {
+        return FALSE;
+    }
+    if (!fixed_three_runtime.cameras_acquired) {
+        fixed_three_clear_camera_runtime();
+        fixed_three_release_frame_surfaces();
+        return TRUE;
+    }
+    if (game_base == NULL || manager == NULL ||
+        camera_manager_get_camera == NULL ||
+        camera_manager_remove_camera == NULL ||
+        !readable_memory(
+            game_base + RVA_CAMERA_MANAGER_GLOBAL,
+            sizeof(live_manager))) {
+        return FALSE;
+    }
+    live_manager = *(void **)(game_base + RVA_CAMERA_MANAGER_GLOBAL);
+    global_camera = current_render_camera(manager);
+    global_state = readable_memory(global_camera, 0x38u) ?
+        *(void **)((uint8_t *)global_camera + CAMERA_RENDER_STATE_OFFSET) :
+        NULL;
+    scene_slot = current_scene_render_camera_slot();
+    if (live_manager != manager ||
+        global_camera != fixed_three_runtime.cameras[0] ||
+        global_state != fixed_three_runtime.render_states[0] ||
+        scene_slot == NULL || !readable_memory(scene_slot, sizeof(*scene_slot)) ||
+        *scene_slot != fixed_three_runtime.render_states[0]) {
+        return FALSE;
+    }
+    for (seat_index = (int)FIXED_THREE_COMPANION_LAST_SEAT;
+            seat_index >= (int)FIXED_THREE_COMPANION_FIRST_SEAT;
+            --seat_index) {
+        const char *name = seat_index == 2 ?
+            third_player_camera_name : second_player_camera_name;
+        void *saved_camera = fixed_three_runtime.cameras[seat_index];
+        void *saved_render_state =
+            fixed_three_runtime.render_states[seat_index];
+        void *named_camera;
+
+        if (saved_camera == NULL) {
+            continue;
+        }
+        named_camera = camera_manager_get_camera(manager, name);
+        if (named_camera != saved_camera) {
+            return FALSE;
+        }
+        camera_manager_remove_camera(manager, name);
+        if (camera_manager_get_camera(manager, name) == saved_camera) {
+            return FALSE;
+        }
+        /* A later P2 verification/removal can still fail after P3 was
+         * successfully removed.  Retire this seat's exact published view
+         * before discarding the saved identity so a retry cannot strand a
+         * CombatContext snapshot on the removed named camera. */
+        fixed_three_clear_published_view_if_exact(
+            (unsigned int)seat_index,
+            saved_camera,
+            saved_render_state);
+        fixed_three_runtime.cameras[seat_index] = NULL;
+        fixed_three_runtime.render_states[seat_index] = NULL;
+    }
+    SudekiMpLogFormat(
+        "split_screen_render event=fixed_three_seat_camera phase=release "
+        "reason=%s order=P3,P2 policy=exact_named_identity_reverse_teardown\r\n",
+        reason == NULL ? "unspecified" : reason);
+    fixed_three_clear_camera_runtime();
+    fixed_three_release_frame_surfaces();
+    return TRUE;
+}
+
+static BOOL fixed_three_acquire_cameras(void) {
+    SudekiMpFixedThreeSeatLeaseCandidate candidate;
+    void *manager;
+    void *host_camera;
+    void *host_render_state;
+    void **scene_slot;
+    unsigned int seat_index;
+
+    if (!fixed_three_collect_leases(&candidate)) {
+        return FALSE;
+    }
+    if (player_two_camera != NULL &&
+        !release_player_two_camera("fixed_three_seat_enter")) {
+        return FALSE;
+    }
+    manager = current_camera_manager();
+    host_camera = current_render_camera(manager);
+    host_render_state = readable_memory(host_camera, 0x38u) ?
+        *(void **)((uint8_t *)host_camera + CAMERA_RENDER_STATE_OFFSET) :
+        NULL;
+    scene_slot = current_scene_render_camera_slot();
+    if (manager == NULL || !readable_memory(host_camera, 0x108u) ||
+        !render_state_camera_matrix_valid(host_render_state) ||
+        scene_slot == NULL || !readable_memory(scene_slot, sizeof(*scene_slot)) ||
+        *scene_slot != host_render_state ||
+        camera_manager_get_camera(manager, second_player_camera_name) != NULL ||
+        camera_manager_get_camera(manager, third_player_camera_name) != NULL) {
+        return FALSE;
+    }
+    fixed_three_runtime.manager = manager;
+    fixed_three_runtime.cameras[0] = host_camera;
+    fixed_three_runtime.render_states[0] = host_render_state;
+    for (seat_index = FIXED_THREE_COMPANION_FIRST_SEAT;
+            seat_index <= FIXED_THREE_COMPANION_LAST_SEAT;
+            ++seat_index) {
+        const char *name = seat_index == 2u ?
+            third_player_camera_name : second_player_camera_name;
+        void *camera;
+        void *render_state;
+
+        if (!camera_manager_add_camera(manager, name, "default")) {
+            fixed_three_runtime.cameras_acquired = TRUE;
+            (void)fixed_three_release_cameras("acquire_add_failed");
+            return FALSE;
+        }
+        camera = camera_manager_get_camera(manager, name);
+        render_state = readable_memory(camera, 0x108u) ?
+            *(void **)((uint8_t *)camera + CAMERA_RENDER_STATE_OFFSET) :
+            NULL;
+        if (!readable_memory(camera, 0x108u) ||
+            !readable_memory(render_state, 0xdcu)) {
+            fixed_three_runtime.cameras[seat_index] = camera;
+            fixed_three_runtime.render_states[seat_index] = render_state;
+            fixed_three_runtime.cameras_acquired = TRUE;
+            (void)fixed_three_release_cameras("acquire_identity_failed");
+            return FALSE;
+        }
+        fixed_three_runtime.cameras[seat_index] = camera;
+        fixed_three_runtime.render_states[seat_index] = render_state;
+    }
+    fixed_three_runtime.group = candidate.group;
+    fixed_three_runtime.host_controller = candidate.host_controller;
+    memcpy(fixed_three_runtime.actors, candidate.actors,
+        sizeof(candidate.actors));
+    memcpy(fixed_three_runtime.actor_generations,
+        candidate.actor_generations, sizeof(candidate.actor_generations));
+    memcpy(fixed_three_runtime.party_slots, candidate.party_slots,
+        sizeof(candidate.party_slots));
+    memcpy(fixed_three_runtime.input_identities,
+        candidate.input_identities, sizeof(candidate.input_identities));
+    memcpy(fixed_three_runtime.input_generations,
+        candidate.input_generations, sizeof(candidate.input_generations));
+    fixed_three_runtime.cameras_acquired = TRUE;
+    fixed_three_runtime.scheduled_seat = 0u;
+    fixed_three_runtime.rendered_seat = 0u;
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        SudekiMpCombatContextSetView(
+            seat_index,
+            fixed_three_runtime.cameras[seat_index],
+            fixed_three_runtime.render_states[seat_index]);
+    }
+    fixed_three_invalidate_frame_cache();
+    SudekiMpLogFormat(
+        "split_screen_render event=fixed_three_seat_camera phase=acquire "
+        "manager=0x%08lx p1=0x%08lx p2=0x%08lx p3=0x%08lx "
+        "actors=0x%08lx,0x%08lx,0x%08lx "
+        "policy=named_manual_cameras_no_native_collision_or_special_camera_routing\r\n",
+        (unsigned long)(uintptr_t)manager,
+        (unsigned long)(uintptr_t)fixed_three_runtime.cameras[0],
+        (unsigned long)(uintptr_t)fixed_three_runtime.cameras[1],
+        (unsigned long)(uintptr_t)fixed_three_runtime.cameras[2],
+        (unsigned long)(uintptr_t)fixed_three_runtime.actors[0],
+        (unsigned long)(uintptr_t)fixed_three_runtime.actors[1],
+        (unsigned long)(uintptr_t)fixed_three_runtime.actors[2]);
+    return TRUE;
+}
+
+static BOOL fixed_three_seat_view_exact(
+    unsigned int seat_index,
+    const void *character
+) {
+    SudekiMpFixedThreeSeatLeaseCandidate candidate;
+    SudekiMpPlayerCombatSnapshot snapshot;
+    void *live_camera;
+    void *live_render_state;
+    void **scene_slot;
+    const char *name;
+
+    if (seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !fixed_three_runtime.configured ||
+        !fixed_three_assignment_selected() ||
+        !fixed_three_runtime.cameras_acquired || character == NULL ||
+        character != fixed_three_runtime.actors[seat_index] ||
+        !fixed_three_collect_leases(&candidate) ||
+        candidate.group != fixed_three_runtime.group ||
+        candidate.host_controller != fixed_three_runtime.host_controller ||
+        candidate.actors[seat_index] != character ||
+        candidate.actor_generations[seat_index] !=
+            fixed_three_runtime.actor_generations[seat_index] ||
+        candidate.party_slots[seat_index] !=
+            fixed_three_runtime.party_slots[seat_index] ||
+        candidate.input_identities[seat_index] !=
+            fixed_three_runtime.input_identities[seat_index] ||
+        candidate.input_generations[seat_index] !=
+            fixed_three_runtime.input_generations[seat_index] ||
+        fixed_three_runtime.cameras[seat_index] == NULL ||
+        !render_state_camera_matrix_valid(
+            fixed_three_runtime.render_states[seat_index]) ||
+        !SudekiMpCombatContextGetSnapshot(seat_index, &snapshot) ||
+        snapshot.character != character ||
+        (seat_index == 0u ?
+            (snapshot.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER ||
+             snapshot.input_source != candidate.host_controller) :
+            (snapshot.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+             snapshot.input_source !=
+                candidate.input_identities[seat_index])) ||
+        snapshot.viewport_camera != fixed_three_runtime.cameras[seat_index] ||
+        snapshot.render_state != fixed_three_runtime.render_states[seat_index]) {
+        return FALSE;
+    }
+    live_camera = current_render_camera(fixed_three_runtime.manager);
+    live_render_state = readable_memory(live_camera, 0x38u) ?
+        *(void **)((uint8_t *)live_camera + CAMERA_RENDER_STATE_OFFSET) :
+        NULL;
+    scene_slot = current_scene_render_camera_slot();
+    if (current_camera_manager() != fixed_three_runtime.manager ||
+        live_camera != fixed_three_runtime.cameras[0] ||
+        live_render_state != fixed_three_runtime.render_states[0] ||
+        scene_slot == NULL || !readable_memory(scene_slot, sizeof(*scene_slot)) ||
+        *scene_slot != fixed_three_runtime.render_states[0]) {
+        return FALSE;
+    }
+    if (seat_index == 0u) {
+        return TRUE;
+    }
+    name = seat_index == 2u ?
+        third_player_camera_name : second_player_camera_name;
+    return current_camera_manager() == fixed_three_runtime.manager &&
+        camera_manager_get_camera(fixed_three_runtime.manager, name) ==
+            fixed_three_runtime.cameras[seat_index];
+}
+
+static BOOL fixed_three_layout_exact(void) {
+    unsigned int width = fixed_three_runtime.frame_description.width;
+    unsigned int height = fixed_three_runtime.frame_description.height;
+    unsigned int half_width = width / 2u;
+    unsigned int half_height = height / 2u;
+    const SudekiMpLocalViewportLayout *layout = &fixed_three_runtime.layout;
+
+    return fixed_three_runtime.frame_device != NULL &&
+        width >= 2u && height >= 2u &&
+        layout->active_human_mask == FIXED_THREE_HUMAN_MASK &&
+        layout->viewport_count == FIXED_THREE_SEAT_COUNT &&
+        layout->surface_width == width &&
+        layout->surface_height == height &&
+        layout->viewports[0].seat_index == 0u &&
+        layout->viewports[0].rectangle.x == 0u &&
+        layout->viewports[0].rectangle.y == 0u &&
+        layout->viewports[0].rectangle.width == width &&
+        layout->viewports[0].rectangle.height == half_height &&
+        layout->viewports[1].seat_index == 1u &&
+        layout->viewports[1].rectangle.x == 0u &&
+        layout->viewports[1].rectangle.y == half_height &&
+        layout->viewports[1].rectangle.width == half_width &&
+        layout->viewports[1].rectangle.height == height - half_height &&
+        layout->viewports[2].seat_index == 2u &&
+        layout->viewports[2].rectangle.x == half_width &&
+        layout->viewports[2].rectangle.y == half_height &&
+        layout->viewports[2].rectangle.width == width - half_width &&
+        layout->viewports[2].rectangle.height == height - half_height;
+}
+
+BOOL SudekiMpSplitScreenSeatViewReady(
+    unsigned int seat_index,
+    const void *character
+) {
+    SudekiMpPlayerCombatSnapshot snapshot;
+
+    if (fixed_three_assignment_selected()) {
+        /* Camera publication precedes cache warmup.  Gameplay submission is
+         * not admitted until every seat has a fresh full-frame cache and the
+         * exact P1-top/P2-bottom-left/P3-bottom-right layout is the currently
+         * composed ownership contract. */
+        return fixed_three_runtime.frame_valid_mask ==
+                FIXED_THREE_HUMAN_MASK &&
+            fixed_three_runtime.frame_owner_evidence_mask ==
+                FIXED_THREE_HUMAN_MASK &&
+            fixed_three_layout_exact() &&
+            fixed_three_seat_view_exact(seat_index, character);
+    }
+    if (seat_index != 1u || character == NULL ||
+        character != player_two_character || player_two_camera == NULL ||
+        !player_two_camera_transform_initialized ||
+        !render_state_camera_matrix_valid(player_two_render_state) ||
+        !SudekiMpCombatContextGetSnapshot(1u, &snapshot)) {
+        return FALSE;
+    }
+    return snapshot.character == character &&
+        snapshot.viewport_camera == player_two_camera &&
+        snapshot.render_state == player_two_render_state;
+}
+
+static BOOL fixed_three_base_leases_exact(void) {
+    SudekiMpFixedThreeSeatLeaseCandidate candidate;
+    void *live_camera;
+    void *live_render_state;
+    void **scene_slot;
+    unsigned int seat_index;
+
+    live_camera = current_render_camera(fixed_three_runtime.manager);
+    live_render_state = readable_memory(live_camera, 0x38u) ?
+        *(void **)((uint8_t *)live_camera + CAMERA_RENDER_STATE_OFFSET) :
+        NULL;
+    scene_slot = current_scene_render_camera_slot();
+    if (!fixed_three_runtime.cameras_acquired ||
+        fixed_three_runtime.render_swap_active ||
+        !fixed_three_collect_leases(&candidate) ||
+        candidate.group != fixed_three_runtime.group ||
+        candidate.host_controller != fixed_three_runtime.host_controller ||
+        current_camera_manager() != fixed_three_runtime.manager ||
+        live_camera != fixed_three_runtime.cameras[0] ||
+        live_render_state != fixed_three_runtime.render_states[0] ||
+        scene_slot == NULL || !readable_memory(scene_slot, sizeof(*scene_slot)) ||
+        *scene_slot != fixed_three_runtime.render_states[0]) {
+        return FALSE;
+    }
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        const char *name;
+
+        if (candidate.actors[seat_index] !=
+                fixed_three_runtime.actors[seat_index] ||
+            candidate.actor_generations[seat_index] !=
+                fixed_three_runtime.actor_generations[seat_index] ||
+            candidate.party_slots[seat_index] !=
+                fixed_three_runtime.party_slots[seat_index] ||
+            candidate.input_identities[seat_index] !=
+                fixed_three_runtime.input_identities[seat_index] ||
+            candidate.input_generations[seat_index] !=
+                fixed_three_runtime.input_generations[seat_index] ||
+            !render_state_camera_matrix_valid(
+                fixed_three_runtime.render_states[seat_index])) {
+            return FALSE;
+        }
+        if (seat_index == 0u) {
+            continue;
+        }
+        name = seat_index == 2u ?
+            third_player_camera_name : second_player_camera_name;
+        if (camera_manager_get_camera(
+                fixed_three_runtime.manager, name) !=
+            fixed_three_runtime.cameras[seat_index]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static BOOL fixed_three_apply_camera_input(
+    unsigned int seat_index,
+    float matrix[16],
+    const float target[3]
+) {
+    SudekiMpInputBridgeState input;
+    DWORD now = GetTickCount();
+    DWORD elapsed_ms;
+    float raw_x;
+    float raw_y;
+    float raw_magnitude;
+    float magnitude;
+    float scaled_magnitude;
+    float axis_x;
+    float axis_y;
+    float yaw_delta;
+    float pitch_delta;
+    float proposed_pitch;
+
+    if (seat_index < FIXED_THREE_COMPANION_FIRST_SEAT ||
+        seat_index > FIXED_THREE_COMPANION_LAST_SEAT) {
+        return FALSE;
+    }
+    if (SudekiMpControlSeparationGameplayInputFrozen()) {
+        fixed_three_runtime.camera_input_last_tick[seat_index] = now;
+        return TRUE;
+    }
+    elapsed_ms = fixed_three_runtime.camera_input_last_tick[seat_index] == 0u ?
+        0u : (DWORD)(now -
+            fixed_three_runtime.camera_input_last_tick[seat_index]);
+    fixed_three_runtime.camera_input_last_tick[seat_index] = now;
+    if (elapsed_ms > 100u) {
+        elapsed_ms = 100u;
+    }
+    if (!SudekiMpLocalInputHubPoll(seat_index, &input) ||
+        elapsed_ms == 0u ||
+        SudekiMpLocalInputHubSeatIdentity(seat_index) !=
+            fixed_three_runtime.input_identities[seat_index] ||
+        SudekiMpLocalInputHubSeatIdentityGeneration(seat_index) !=
+            fixed_three_runtime.input_generations[seat_index]) {
+        return elapsed_ms == 0u;
+    }
+    raw_x = (float)input.right_x / 32768.0f;
+    raw_y = -(float)input.right_y / 32768.0f;
+    raw_magnitude = sqrtf(raw_x * raw_x + raw_y * raw_y);
+    if (!isfinite(raw_magnitude)) {
+        return FALSE;
+    }
+    if (raw_magnitude <= second_player_controller_camera_deadzone) {
+        return TRUE;
+    }
+    magnitude = raw_magnitude > 1.0f ? 1.0f : raw_magnitude;
+    scaled_magnitude =
+        (magnitude - second_player_controller_camera_deadzone) /
+        (1.0f - second_player_controller_camera_deadzone);
+    axis_x = raw_x / raw_magnitude * scaled_magnitude;
+    axis_y = raw_y / raw_magnitude * scaled_magnitude;
+    yaw_delta = -axis_x * second_player_controller_camera_yaw_speed *
+        ((float)elapsed_ms / 1000.0f);
+    pitch_delta = axis_y * second_player_controller_camera_pitch_speed *
+        ((float)elapsed_ms / 1000.0f);
+    proposed_pitch =
+        fixed_three_runtime.camera_pitch_offset[seat_index] + pitch_delta;
+    if (proposed_pitch > second_player_controller_camera_maximum_pitch) {
+        proposed_pitch = second_player_controller_camera_maximum_pitch;
+    } else if (proposed_pitch <
+            -second_player_controller_camera_maximum_pitch) {
+        proposed_pitch = -second_player_controller_camera_maximum_pitch;
+    }
+    pitch_delta = proposed_pitch -
+        fixed_three_runtime.camera_pitch_offset[seat_index];
+    if (!SudekiMpOrbitCameraTransform(
+            matrix, target, yaw_delta, pitch_delta)) {
+        return FALSE;
+    }
+    fixed_three_runtime.camera_pitch_offset[seat_index] = proposed_pitch;
+    if (!fixed_three_runtime.camera_input_logged[seat_index]) {
+        fixed_three_runtime.camera_input_logged[seat_index] = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=fixed_three_seat_orbit player=%u "
+            "phase=active input_generation=%lu "
+            "policy=independent_right_stick_manual_named_camera\r\n",
+            seat_index + 1u,
+            (unsigned long)
+                fixed_three_runtime.input_generations[seat_index]);
+    }
+    return TRUE;
+}
+
+static BOOL fixed_three_update_manual_views(BOOL allow_user_orbit) {
+    float host_position[3];
+    unsigned int seat_index;
+
+    if (!fixed_three_base_leases_exact() ||
+        !character_position(fixed_three_runtime.actors[0], host_position)) {
+        return FALSE;
+    }
+    SudekiMpCombatContextSetView(
+        0u,
+        fixed_three_runtime.cameras[0],
+        fixed_three_runtime.render_states[0]);
+    for (seat_index = FIXED_THREE_COMPANION_FIRST_SEAT;
+            seat_index <= FIXED_THREE_COMPANION_LAST_SEAT;
+            ++seat_index) {
+        float actor_position[3];
+        float target[3];
+        float matrix[16];
+        float target_delta[3];
+        uint16_t *generation;
+
+        if (!character_position(
+                fixed_three_runtime.actors[seat_index], actor_position)) {
+            return FALSE;
+        }
+        memcpy(target, actor_position, sizeof(target));
+        target[1] += 1.0f;
+        if (!fixed_three_runtime.camera_transform_initialized[seat_index]) {
+            memcpy(matrix,
+                (uint8_t *)fixed_three_runtime.render_states[0] + 0x90u,
+                sizeof(matrix));
+            matrix[12] += actor_position[0] - host_position[0];
+            matrix[13] += actor_position[1] - host_position[1];
+            matrix[14] += actor_position[2] - host_position[2];
+            memcpy(fixed_three_runtime.camera_last_target[seat_index],
+                target, sizeof(target));
+            fixed_three_runtime.camera_input_last_tick[seat_index] =
+                GetTickCount();
+        } else {
+            memcpy(matrix,
+                (uint8_t *)fixed_three_runtime.render_states[seat_index] +
+                    0x90u,
+                sizeof(matrix));
+            target_delta[0] = target[0] -
+                fixed_three_runtime.camera_last_target[seat_index][0];
+            target_delta[1] = target[1] -
+                fixed_three_runtime.camera_last_target[seat_index][1];
+            target_delta[2] = target[2] -
+                fixed_three_runtime.camera_last_target[seat_index][2];
+            matrix[12] += target_delta[0];
+            matrix[13] += target_delta[1];
+            matrix[14] += target_delta[2];
+            memcpy(fixed_three_runtime.camera_last_target[seat_index],
+                target, sizeof(target));
+        }
+        if (allow_user_orbit) {
+            if (!fixed_three_apply_camera_input(
+                    seat_index, matrix, target)) {
+                return FALSE;
+            }
+        } else {
+            /* Warmup and invalidation may prepare/follow manual cameras, but
+             * right-stick time cannot accumulate behind a full-width or
+             * otherwise unproven presentation. */
+            fixed_three_runtime.camera_input_last_tick[seat_index] =
+                GetTickCount();
+        }
+        matrix[15] = 1.0f;
+        if (!SudekiMpSplitScreenNativeCameraMatrixPolicy(matrix)) {
+            return FALSE;
+        }
+        memcpy((uint8_t *)fixed_three_runtime.render_states[seat_index] +
+                0x90u,
+            matrix, sizeof(matrix));
+        memcpy((uint8_t *)fixed_three_runtime.render_states[seat_index] +
+                0xd0u,
+            (uint8_t *)fixed_three_runtime.render_states[0] + 0xd0u,
+            sizeof(float) * 3u);
+        generation = (uint16_t *)(
+            (uint8_t *)fixed_three_runtime.render_states[seat_index] +
+            RENDER_STATE_GENERATION_OFFSET);
+        ++*generation;
+        fixed_three_runtime.camera_transform_initialized[seat_index] = TRUE;
+        SudekiMpCombatContextSetView(
+            seat_index,
+            fixed_three_runtime.cameras[seat_index],
+            fixed_three_runtime.render_states[seat_index]);
+    }
+    return fixed_three_seat_view_exact(
+            0u, fixed_three_runtime.actors[0]) &&
+        fixed_three_seat_view_exact(
+            1u, fixed_three_runtime.actors[1]) &&
+        fixed_three_seat_view_exact(
+            2u, fixed_three_runtime.actors[2]);
+}
+
+static BOOL fixed_three_apply_render_seat(
+    unsigned int seat_index,
+    BOOL allow_user_orbit
+) {
+    void *native_camera;
+    void *native_state;
+    void **scene_slot;
+
+    if (seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !fixed_three_update_manual_views(allow_user_orbit)) {
+        return FALSE;
+    }
+    native_camera = current_render_camera(fixed_three_runtime.manager);
+    native_state = readable_memory(native_camera, 0x38u) ?
+        *(void **)((uint8_t *)native_camera + CAMERA_RENDER_STATE_OFFSET) :
+        NULL;
+    scene_slot = current_scene_render_camera_slot();
+    if (native_camera != fixed_three_runtime.cameras[0] ||
+        native_state != fixed_three_runtime.render_states[0] ||
+        scene_slot == NULL || !writable_memory(scene_slot, sizeof(*scene_slot)) ||
+        *scene_slot != native_state) {
+        return FALSE;
+    }
+    if (seat_index == 0u) {
+        return TRUE;
+    }
+    *scene_slot = fixed_three_runtime.render_states[seat_index];
+    fixed_three_runtime.render_swap_slot = scene_slot;
+    fixed_three_runtime.render_swap_native_state = native_state;
+    fixed_three_runtime.render_swap_applied_state =
+        fixed_three_runtime.render_states[seat_index];
+    fixed_three_runtime.render_swap_active = TRUE;
+    return TRUE;
+}
+
 static BOOL ensure_composite_surface(
     void *device,
     D3DCreateRenderTargetFunction create_render_target,
@@ -10849,6 +12205,282 @@ static BOOL ensure_dual_frame_surfaces(
     frame_cache_description = *source_description;
     frame_cache_description.multisample_type = D3D_MULTISAMPLE_NONE;
     frame_cache_description.multisample_quality = 0u;
+    return TRUE;
+}
+
+static BOOL ensure_fixed_three_frame_surfaces(
+    void *device,
+    D3DCreateTextureFunction create_texture,
+    const SudekiMpD3DSurfaceDesc *source_description
+) {
+    unsigned int seat_index;
+
+    if (fixed_three_runtime.frame_device == device &&
+        same_surface_description(
+            &fixed_three_runtime.frame_description,
+            source_description)) {
+        for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+                ++seat_index) {
+            if (fixed_three_runtime.frame_surfaces[seat_index] == NULL ||
+                fixed_three_runtime.frame_textures[seat_index] == NULL) {
+                break;
+            }
+        }
+        if (seat_index == FIXED_THREE_SEAT_COUNT) {
+            return TRUE;
+        }
+    }
+    fixed_three_release_frame_surfaces();
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        void **texture_vtable;
+        D3DTextureGetSurfaceLevelFunction get_surface_level;
+        HRESULT result = create_texture(
+            device,
+            source_description->width,
+            source_description->height,
+            1u,
+            D3D_USAGE_RENDER_TARGET,
+            source_description->format,
+            D3D_POOL_DEFAULT,
+            &fixed_three_runtime.frame_textures[seat_index],
+            NULL);
+
+        if (FAILED(result) ||
+            fixed_three_runtime.frame_textures[seat_index] == NULL) {
+            log_failure_once("create_fixed_three_frame_texture_failed",
+                result);
+            fixed_three_release_frame_surfaces();
+            return FALSE;
+        }
+        texture_vtable = *(void ***)
+            fixed_three_runtime.frame_textures[seat_index];
+        if (!readable_memory(texture_vtable,
+                (D3D_TEXTURE_GET_SURFACE_LEVEL_INDEX + 1u) *
+                    sizeof(void *))) {
+            log_failure_once("fixed_three_texture_vtable_unavailable",
+                E_POINTER);
+            fixed_three_release_frame_surfaces();
+            return FALSE;
+        }
+        get_surface_level = (D3DTextureGetSurfaceLevelFunction)
+            texture_vtable[D3D_TEXTURE_GET_SURFACE_LEVEL_INDEX];
+        result = get_surface_level(
+            fixed_three_runtime.frame_textures[seat_index],
+            0u,
+            &fixed_three_runtime.frame_surfaces[seat_index]);
+        if (FAILED(result) ||
+            fixed_three_runtime.frame_surfaces[seat_index] == NULL) {
+            log_failure_once("get_fixed_three_frame_surface_failed",
+                result);
+            fixed_three_release_frame_surfaces();
+            return FALSE;
+        }
+    }
+    fixed_three_runtime.frame_device = device;
+    fixed_three_runtime.frame_description = *source_description;
+    fixed_three_runtime.frame_description.multisample_type =
+        D3D_MULTISAMPLE_NONE;
+    fixed_three_runtime.frame_description.multisample_quality = 0u;
+    fixed_three_invalidate_frame_cache();
+    return TRUE;
+}
+
+static BOOL fixed_three_build_layout(
+    const SudekiMpD3DSurfaceDesc *description
+) {
+    uint8_t controller_slots[SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS];
+    unsigned int seat_index;
+
+    for (seat_index = 0u; seat_index < SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS;
+            ++seat_index) {
+        controller_slots[seat_index] =
+            SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    }
+    for (seat_index = FIXED_THREE_COMPANION_FIRST_SEAT;
+            seat_index <= FIXED_THREE_COMPANION_LAST_SEAT;
+            ++seat_index) {
+        unsigned int controller =
+            SudekiMpLocalInputHubSeatController(seat_index);
+
+        /* UDP has no XInput index.  Its stable transport lanes are P2=0 and
+         * P3=1, matching base_port/base_port+1 and remaining distinct from
+         * seat ownership. */
+        controller_slots[seat_index] = (uint8_t)(controller < 4u ?
+            controller : seat_index - 1u);
+    }
+    return SudekiMpLocalViewportLayoutBuild(
+        FIXED_THREE_HUMAN_MASK,
+        controller_slots,
+        description->width,
+        description->height,
+        &fixed_three_runtime.layout) ? TRUE : FALSE;
+}
+
+static BOOL compose_fixed_three_camera_frames(
+    unsigned int rendered_seat,
+    BOOL owner_evidence_ready
+) {
+    void *device;
+    void **device_vtable;
+    D3DCreateTextureFunction create_texture;
+    D3DStretchRectFunction stretch_rect;
+    D3DGetRenderTargetFunction get_render_target;
+    void *native_surface = NULL;
+    void **surface_vtable;
+    D3DSurfaceGetDescFunction get_description;
+    SudekiMpD3DSurfaceDesc description;
+    RECT source_rectangle;
+    HRESULT result;
+    unsigned int seat_index;
+    unsigned int actor_mask = 0u;
+    unsigned int camera_mask = 0u;
+    unsigned int render_state_mask = 0u;
+    unsigned int hud_mask = 0u;
+    unsigned int input_mask = 0u;
+    BOOL layout_ready;
+    BOOL activation_ready;
+
+    if (rendered_seat >= FIXED_THREE_SEAT_COUNT || !owner_evidence_ready ||
+        d3d_device_global == NULL ||
+        !readable_memory(d3d_device_global, sizeof(*d3d_device_global))) {
+        return FALSE;
+    }
+    device = *d3d_device_global;
+    if (!readable_memory(device, sizeof(void *))) {
+        return FALSE;
+    }
+    device_vtable = *(void ***)device;
+    if (!readable_memory(device_vtable,
+            (D3D_DEVICE_GET_RENDER_TARGET_INDEX + 1u) * sizeof(void *))) {
+        return FALSE;
+    }
+    create_texture = (D3DCreateTextureFunction)
+        device_vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
+    stretch_rect = (D3DStretchRectFunction)
+        device_vtable[D3D_DEVICE_STRETCH_RECT_INDEX];
+    get_render_target = (D3DGetRenderTargetFunction)
+        device_vtable[D3D_DEVICE_GET_RENDER_TARGET_INDEX];
+    if (create_texture == NULL || stretch_rect == NULL ||
+        get_render_target == NULL) {
+        return FALSE;
+    }
+    result = get_render_target(device, 0u, &native_surface);
+    if (FAILED(result) || !readable_memory(native_surface, sizeof(void *))) {
+        release_com_object(&native_surface);
+        return FALSE;
+    }
+    surface_vtable = *(void ***)native_surface;
+    if (!readable_memory(surface_vtable,
+            (D3D_SURFACE_GET_DESC_INDEX + 1u) * sizeof(void *))) {
+        release_com_object(&native_surface);
+        return FALSE;
+    }
+    get_description = (D3DSurfaceGetDescFunction)
+        surface_vtable[D3D_SURFACE_GET_DESC_INDEX];
+    result = get_description(native_surface, &description);
+    if (FAILED(result) || description.width < 2u ||
+        description.height < 2u ||
+        description.multisample_type != D3D_MULTISAMPLE_NONE ||
+        !ensure_fixed_three_frame_surfaces(
+            device, create_texture, &description)) {
+        release_com_object(&native_surface);
+        return FALSE;
+    }
+    source_rectangle.left = 0;
+    source_rectangle.top = 0;
+    source_rectangle.right = (LONG)description.width;
+    source_rectangle.bottom = (LONG)description.height;
+    result = stretch_rect(
+        device,
+        native_surface,
+        &source_rectangle,
+        fixed_three_runtime.frame_surfaces[rendered_seat],
+        &source_rectangle,
+        D3D_TEXTURE_FILTER_NONE);
+    if (FAILED(result)) {
+        fixed_three_invalidate_frame_cache();
+        release_com_object(&native_surface);
+        return FALSE;
+    }
+    fixed_three_runtime.frame_valid_mask |= 1u << rendered_seat;
+    fixed_three_runtime.frame_owner_evidence_mask |= 1u << rendered_seat;
+    layout_ready = fixed_three_build_layout(&description);
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+            ++seat_index) {
+        unsigned int bit = 1u << seat_index;
+
+        if (fixed_three_seat_view_exact(
+                seat_index, fixed_three_runtime.actors[seat_index])) {
+            actor_mask |= bit;
+            camera_mask |= bit;
+            render_state_mask |= bit;
+            input_mask |= bit;
+        }
+    }
+    hud_mask = fixed_three_runtime.frame_owner_evidence_mask;
+    activation_ready = fixed_three_runtime.frame_owner_evidence_mask ==
+            FIXED_THREE_HUMAN_MASK &&
+        SudekiMpSplitScreenAdaptiveSeatActivationPolicy(
+            fixed_three_runtime.configured,
+            FIXED_THREE_HUMAN_MASK,
+            layout_ready,
+            actor_mask,
+            camera_mask,
+            render_state_mask,
+            hud_mask,
+            input_mask,
+            fixed_three_runtime.frame_valid_mask,
+            fixed_three_runtime.presentation_clear_this_frame);
+    if (!activation_ready) {
+        release_com_object(&native_surface);
+        return TRUE;
+    }
+    for (seat_index = 0u;
+            seat_index < fixed_three_runtime.layout.viewport_count;
+            ++seat_index) {
+        const SudekiMpLocalSeatViewport *viewport =
+            &fixed_three_runtime.layout.viewports[seat_index];
+        RECT destination;
+
+        destination.left = (LONG)viewport->rectangle.x;
+        destination.top = (LONG)viewport->rectangle.y;
+        destination.right = (LONG)(viewport->rectangle.x +
+            viewport->rectangle.width);
+        destination.bottom = (LONG)(viewport->rectangle.y +
+            viewport->rectangle.height);
+        result = stretch_rect(
+            device,
+            fixed_three_runtime.frame_surfaces[viewport->seat_index],
+            &source_rectangle,
+            native_surface,
+            &destination,
+            D3D_TEXTURE_FILTER_LINEAR);
+        if (FAILED(result)) {
+            (void)stretch_rect(
+                device,
+                fixed_three_runtime.frame_surfaces[rendered_seat],
+                &source_rectangle,
+                native_surface,
+                &source_rectangle,
+                D3D_TEXTURE_FILTER_NONE);
+            fixed_three_invalidate_frame_cache();
+            release_com_object(&native_surface);
+            return FALSE;
+        }
+    }
+    if (!fixed_three_runtime.compositor_logged) {
+        fixed_three_runtime.compositor_logged = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=fixed_three_seat_cache phase=active "
+            "source=%ux%u layout=p1_top_wide_p2_bottom_left_p3_bottom_right "
+            "cadence=0,1,2 cache_ready_mask=0x%02lx "
+            "policy=full_width_until_all_three_fresh\r\n",
+            description.width,
+            description.height,
+            (unsigned long)fixed_three_runtime.frame_valid_mask);
+    }
+    release_com_object(&native_surface);
     return TRUE;
 }
 
@@ -11396,6 +13028,159 @@ restore_state:
     return drawn;
 }
 
+static BOOL fixed_three_render_start_dispatch(BOOL runtime_authorized) {
+    const char *gate_reason = "fixed_three_unavailable";
+    BOOL gameplay_allowed = gameplay_split_allowed(
+        runtime_authorized, &gate_reason);
+    BOOL base_leases_exact;
+    BOOL shared_modal_clear;
+    BOOL presentation_clear;
+    BOOL allow_user_orbit;
+
+    fixed_three_reset_render_owner_evidence();
+    fixed_three_runtime.transaction_active = TRUE;
+    fixed_three_runtime.presentation_clear_this_frame = FALSE;
+    fixed_three_runtime.rendered_seat = 0u;
+    rendered_player_two_this_frame = FALSE;
+    viewport_hud_binding_active = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
+    if (!fixed_three_runtime.configured || !runtime_authorized ||
+        !gameplay_allowed) {
+        if (fixed_three_runtime.cameras_acquired) {
+            (void)fixed_three_release_cameras(
+                fixed_three_runtime.configured ?
+                    "runtime_or_gameplay_gate_inactive" :
+                    "feature_disabled");
+        }
+        original_render_start();
+        (void)refresh_shared_interaction_modal();
+        return TRUE;
+    }
+    if (!fixed_three_runtime.cameras_acquired) {
+        if (!fixed_three_acquire_cameras() &&
+            !fixed_three_runtime.rejection_logged) {
+            fixed_three_runtime.rejection_logged = TRUE;
+            SudekiMpLogWrite(
+                "split_screen_render event=fixed_three_seat_camera "
+                "phase=wait reason=actor_input_or_named_camera_lease_pending "
+                "presentation=native_full_width\r\n");
+        }
+    } else if (!fixed_three_base_leases_exact()) {
+        (void)fixed_three_release_cameras("lease_changed");
+    }
+    original_render_start();
+    shared_modal_clear = refresh_shared_interaction_modal() ==
+        SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
+    base_leases_exact = fixed_three_runtime.cameras_acquired &&
+        fixed_three_base_leases_exact();
+    presentation_clear = base_leases_exact &&
+        shared_modal_clear &&
+        InterlockedCompareExchange(&native_save_modal_opening, 0, 0) == 0 &&
+        !pc_quit_screen_visible() &&
+        !quick_menu_visible() &&
+        !genuine_quick_menu_visible() &&
+        current_spirit_presentation_state() == 0 &&
+        !settled_temporary_zone_active() &&
+        !coop_roster_party_transition_active;
+    allow_user_orbit = SudekiMpSplitScreenFixedThreeOrbitInputPolicy(
+        presentation_clear,
+        base_leases_exact,
+        fixed_three_layout_exact(),
+        fixed_three_runtime.frame_valid_mask,
+        fixed_three_runtime.frame_owner_evidence_mask,
+        SudekiMpControlSeparationGameplayInputFrozen());
+    if (presentation_clear &&
+        fixed_three_apply_render_seat(
+            fixed_three_runtime.scheduled_seat,
+            allow_user_orbit)) {
+        fixed_three_runtime.rendered_seat =
+            fixed_three_runtime.scheduled_seat;
+        fixed_three_runtime.presentation_clear_this_frame = TRUE;
+        rendered_player_two_this_frame =
+            fixed_three_runtime.rendered_seat != 0u;
+        viewport_hud_binding_active = TRUE;
+        fixed_three_runtime.portrait_evidence_seat =
+            fixed_three_runtime.rendered_seat;
+        fixed_three_runtime.portrait_role_mask =
+            refresh_viewport_portraits();
+    } else {
+        fixed_three_invalidate_frame_cache();
+        fixed_three_runtime.rendered_seat = 0u;
+        rendered_player_two_this_frame = FALSE;
+        viewport_hud_binding_active = FALSE;
+    }
+    return TRUE;
+}
+
+static void fixed_three_frame_end_dispatch(void) {
+    uint8_t next_seat = SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    unsigned int attempted_seat = fixed_three_runtime.scheduled_seat <
+            FIXED_THREE_SEAT_COUNT ?
+        fixed_three_runtime.scheduled_seat : 0u;
+    BOOL owner_evidence_ready = FALSE;
+    BOOL restore_succeeded;
+    BOOL capture_succeeded = FALSE;
+
+    viewport_hud_binding_active = FALSE;
+    restore_succeeded = fixed_three_restore_render_swap();
+    original_frame_end();
+    if (fixed_three_runtime.presentation_clear_this_frame &&
+        fixed_three_runtime.rendered_seat == attempted_seat) {
+        owner_evidence_ready = fixed_three_consume_frame_owner_evidence(
+            fixed_three_runtime.rendered_seat);
+    } else {
+        fixed_three_reset_render_owner_evidence();
+        fixed_three_clear_minimap_update_proof();
+        fixed_three_runtime.minimap_expected_update_seat =
+            SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    }
+    if (restore_succeeded &&
+        fixed_three_runtime.presentation_clear_this_frame &&
+        owner_evidence_ready &&
+        fixed_three_assignment_selected() &&
+        fixed_three_runtime.configured &&
+        fixed_three_base_leases_exact()) {
+        capture_succeeded = compose_fixed_three_camera_frames(
+            fixed_three_runtime.rendered_seat,
+            owner_evidence_ready);
+    }
+    if (!capture_succeeded) {
+        fixed_three_invalidate_frame_cache();
+        fixed_three_runtime.scheduled_seat = (uint8_t)attempted_seat;
+    } else if (SudekiMpLocalViewportNextRenderSeat(
+            FIXED_THREE_HUMAN_MASK,
+            fixed_three_runtime.rendered_seat,
+            FALSE,
+            SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER,
+            &next_seat)) {
+        fixed_three_runtime.scheduled_seat = next_seat;
+    } else {
+        fixed_three_invalidate_frame_cache();
+        fixed_three_runtime.scheduled_seat = 0u;
+    }
+    if (restore_succeeded &&
+        fixed_three_runtime.presentation_clear_this_frame &&
+        fixed_three_assignment_selected() &&
+        fixed_three_runtime.configured &&
+        fixed_three_runtime.cameras_acquired &&
+        fixed_three_base_leases_exact()) {
+        fixed_three_arm_minimap_update(
+            fixed_three_runtime.scheduled_seat);
+    }
+    if (overlay_renderer != NULL) {
+        overlay_renderer();
+    }
+    fixed_three_runtime.transaction_active = FALSE;
+    fixed_three_runtime.presentation_clear_this_frame = FALSE;
+    fixed_three_runtime.rendered_seat = 0u;
+    rendered_player_two_this_frame = FALSE;
+    genuine_quick_menu_active_this_frame = FALSE;
+    quick_menu_live_player_two_available_this_frame = FALSE;
+    quick_menu_render_phase_confirmed_this_frame = FALSE;
+    quick_menu_submit_seen_since_frame_end = FALSE;
+}
+
 void SudekiMpSplitScreenRenderStartDispatch(void) {
     BOOL quit_menu_visible;
     BOOL quick_menu_is_visible;
@@ -11424,6 +13209,14 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
      * Quarantine closes here so no UI-tree teardown occurs inside the native
      * render transaction. */
     quick_menu_service_owner_session(genuine_quick_menu_visible());
+
+    if (fixed_three_assignment_selected()) {
+        (void)fixed_three_render_start_dispatch(runtime_authorized);
+        return;
+    }
+    if (fixed_three_runtime.cameras_acquired) {
+        (void)fixed_three_release_cameras("three_seat_assignment_inactive");
+    }
 
     /*
      * Keep the ranged trace useful when the split-camera ownership is
@@ -11618,13 +13411,13 @@ void SudekiMpSplitScreenRenderStartDispatch(void) {
     trace_spirit_player_two_presentation();
     if (live_view_allowed) {
         apply_ranged_model_render_view();
-        refresh_viewport_portraits();
+        (void)refresh_viewport_portraits();
         viewport_hud_binding_active = TRUE;
     }
 }
 
 void SudekiMpSplitScreenQuitScreenRenderDispatch(void) {
-    if (pc_quit_screen_visible()) {
+    if (!fixed_three_assignment_selected() && pc_quit_screen_visible()) {
         draw_cached_camera_backdrop();
     }
 }
@@ -11669,6 +13462,11 @@ void SudekiMpSplitScreenFrameEndDispatch(void) {
     const char *recovery_reason;
     unsigned int isolation_state;
     unsigned int shared_modal_observation;
+
+    if (fixed_three_runtime.transaction_active) {
+        fixed_three_frame_end_dispatch();
+        return;
+    }
 
     viewport_hud_binding_active = FALSE;
     restore_player_two_collision_self_cull();
@@ -11902,6 +13700,61 @@ BOOL SudekiMpSplitScreenRuntimeEnabled(void) {
     return runtime_split_enabled;
 }
 
+unsigned int SudekiMpSplitScreenRosterSeatCapacity(void) {
+    if (!split_screen_render_installed) {
+        return 0u;
+    }
+    return fixed_three_runtime.configured ? 3u : 2u;
+}
+
+BOOL SudekiMpSplitScreenSetFixedThreeSeatEnabled(BOOL enabled) {
+    BOOL requested = enabled != FALSE;
+
+    if (!split_screen_render_installed) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (fixed_three_runtime.transaction_active) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (requested &&
+        (!second_player_camera_enabled ||
+         !dual_camera_frame_cache_enabled ||
+         !second_player_controller_camera_enabled ||
+         camera_manager_add_camera == NULL ||
+         camera_manager_remove_camera == NULL ||
+         camera_manager_get_camera == NULL ||
+         SudekiMpLocalInputHubRequestedMask() !=
+            FIXED_THREE_HUMAN_MASK)) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (fixed_three_runtime.configured == requested) {
+        return TRUE;
+    }
+    if (!requested &&
+        !fixed_three_release_cameras("fixed_three_config_disabled")) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    fixed_three_runtime.configured = requested;
+    fixed_three_invalidate_frame_cache();
+    SudekiMpLogFormat(
+        "split_screen_render event=fixed_three_seat_config state=%s "
+        "active_mask=0x07 camera_names=%s,%s "
+        "policy=explicit_opt_in_0x07_assignment_only_reverse_teardown\r\n",
+        requested ? "enabled" : "disabled",
+        second_player_camera_name,
+        third_player_camera_name);
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenFixedThreeSeatEnabled(void) {
+    return split_screen_render_installed &&
+        fixed_three_runtime.configured;
+}
+
 void SudekiMpSplitScreenSetRuntimeAuthorizationQuery(
     SudekiMpSplitScreenRuntimeAuthorizationQuery query
 ) {
@@ -11950,6 +13803,7 @@ BOOL SudekiMpSplitScreenRuntimeAuthorized(void) {
         runtime_authorization_last_state = state;
         player_two_view_requested = FALSE;
         invalidate_dual_frame_cache();
+        fixed_three_invalidate_frame_cache();
         if (game_base != NULL && query != NULL) {
             SudekiMpLogFormat(
                 "split_screen_render event=external_runtime_gate state=%s "
@@ -11962,25 +13816,45 @@ BOOL SudekiMpSplitScreenRuntimeAuthorized(void) {
     return accepted;
 }
 
-BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two) {
+static BOOL lock_coop_roster_roles(
+    void *player_one,
+    void *player_two,
+    void *player_three,
+    BOOL require_player_three
+) {
     if (player_one == NULL || player_two == NULL ||
         player_one == player_two ||
         !readable_memory(player_one, 0x94u) ||
-        !readable_memory(player_two, 0x94u)) {
+        !readable_memory(player_two, 0x94u) ||
+        (require_player_three &&
+         (player_three == NULL || player_three == player_one ||
+          player_three == player_two ||
+          !readable_memory(player_three, 0x94u))) ||
+        (!require_player_three && player_three != NULL)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
     coop_locked_player_one = player_one;
     coop_locked_player_two = player_two;
+    coop_locked_player_three = require_player_three ? player_three : NULL;
     coop_role_lock_active = TRUE;
     SudekiMpLogFormat(
         "split_screen_render event=co_op_roles phase=locked "
-        "player_one=0x%08lx player_two=0x%08lx "
+        "active_mask=0x%02lx player_one=0x%08lx player_two=0x%08lx "
+        "player_three=0x%08lx "
         "policy=immutable_party_identities_until_uninstall\r\n",
+        (unsigned long)(require_player_three ?
+            FIXED_THREE_HUMAN_MASK : 0x03u),
         (unsigned long)(uintptr_t)player_one,
-        (unsigned long)(uintptr_t)player_two
+        (unsigned long)(uintptr_t)player_two,
+        (unsigned long)(uintptr_t)coop_locked_player_three
     );
     return TRUE;
+}
+
+BOOL SudekiMpSplitScreenLockRoles(void *player_one, void *player_two) {
+    return lock_coop_roster_roles(
+        player_one, player_two, NULL, FALSE);
 }
 
 BOOL SudekiMpSplitScreenRolesLocked(void) {
@@ -11991,8 +13865,18 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     unsigned int player_one_type,
     unsigned int player_two_type
 ) {
-    if (player_one_type == player_two_type ||
-        player_one_type == 0u || player_two_type == 0u) {
+    SudekiMpCoopRosterAssignment assignment;
+
+    ZeroMemory(&assignment, sizeof(assignment));
+    assignment.active_human_mask = 0x03u;
+    assignment.actor_type_by_seat[0] = player_one_type;
+    assignment.actor_type_by_seat[1] = player_two_type;
+    /* The legacy title path may publish its two-seat contract immediately
+     * before the render hook is installed.  It is still validated against
+     * the exact capacity-two contract; the public capacity query correctly
+     * remains zero until the renderer itself is available. */
+    if (!SudekiMpCoopRosterAssignmentStoreCommit(
+            &coop_roster_assignment_store, &assignment, 2u)) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -12010,13 +13894,15 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     coop_roster_ready_party_front = NULL;
     coop_roster_ready_player_one = NULL;
     coop_roster_ready_player_two = NULL;
+    coop_roster_ready_player_three = NULL;
     coop_roster_ready_player_one_slot = 0u;
     coop_roster_ready_player_two_slot = 0u;
+    coop_roster_ready_player_three_slot = 0u;
     coop_roster_ready_party_count = 0;
     coop_roster_control_phase = -1;
     SudekiMpLogFormat(
         "split_screen_render event=co_op_roster phase=selected "
-        "player_one_type=0x%02lx player_two_type=0x%02lx "
+        "active_mask=0x03 player_one_type=0x%02lx player_two_type=0x%02lx "
         "policy=persist_until_process_exit\r\n",
         (unsigned long)player_one_type,
         (unsigned long)player_two_type
@@ -12024,18 +13910,113 @@ BOOL SudekiMpSplitScreenSetRosterTypes(
     return TRUE;
 }
 
+BOOL SudekiMpSplitScreenSetRosterAssignment(
+    const SudekiMpCoopRosterAssignment *assignment
+) {
+    unsigned int capacity = SudekiMpSplitScreenRosterSeatCapacity();
+
+    if (assignment == NULL || capacity == 0u ||
+        (assignment->active_human_mask != 0x03u &&
+         assignment->active_human_mask != FIXED_THREE_HUMAN_MASK) ||
+        !SudekiMpCoopRosterAssignmentStoreCommit(
+            &coop_roster_assignment_store, assignment, capacity)) {
+        SetLastError(capacity == 0u ?
+            ERROR_INVALID_STATE : ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    coop_roster_player_one_type = assignment->actor_type_by_seat[0];
+    coop_roster_player_two_type = assignment->actor_type_by_seat[1];
+    coop_roster_valid = TRUE;
+    coop_roster_participation_requested = TRUE;
+    coop_roster_party_transition_active = FALSE;
+    coop_roster_runtime_release_pending = FALSE;
+    coop_roster_last_presence_mask = ~0u;
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = -1;
+    fixed_three_invalidate_frame_cache();
+    SudekiMpLogFormat(
+        "split_screen_render event=co_op_roster phase=selected "
+        "active_mask=0x%02lx p1_type=0x%02lx p2_type=0x%02lx "
+        "p3_type=0x%02lx capacity=%u "
+        "policy=transactional_seat_indexed_assignment\r\n",
+        (unsigned long)assignment->active_human_mask,
+        (unsigned long)assignment->actor_type_by_seat[0],
+        (unsigned long)assignment->actor_type_by_seat[1],
+        (unsigned long)assignment->actor_type_by_seat[2],
+        capacity);
+    return TRUE;
+}
+
+BOOL SudekiMpSplitScreenGetRosterAssignment(
+    SudekiMpCoopRosterAssignment *assignment
+) {
+    if (assignment == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!coop_roster_valid ||
+        !SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, assignment)) {
+        SetLastError(ERROR_NOT_FOUND);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL release_coop_control_seats_reverse(void) {
+    BOOL player_three_released;
+    BOOL player_two_released;
+
+    /* Control separation deliberately refuses to release P2 while P3 still
+     * depends on it. Always unwind the dependency in reverse seat order. */
+    player_three_released =
+        SudekiMpControlSeparationReleaseSeatNow(2u);
+    player_two_released =
+        SudekiMpControlSeparationReleaseSeatNow(1u);
+    return player_three_released && player_two_released;
+}
+
+static BOOL coop_control_seats_present(void) {
+    return SudekiMpControlSeparationSeatRequested(1u) ||
+        SudekiMpControlSeparationSeatCharacter(1u) != NULL ||
+        SudekiMpControlSeparationSeatRequested(2u) ||
+        SudekiMpControlSeparationSeatCharacter(2u) != NULL;
+}
+
 static BOOL release_coop_roster_runtime(const char *reason) {
+    BOOL fixed_cameras_released;
+    BOOL legacy_camera_released;
     BOOL camera_released;
     BOOL control_released;
 
+    fixed_cameras_released = fixed_three_release_cameras(
+        reason == NULL ? "roster_runtime_release" : reason);
+    legacy_camera_released = release_player_two_camera(
+        reason == NULL ? "roster_runtime_release" : reason);
+    camera_released = fixed_cameras_released && legacy_camera_released;
+    if (!camera_released) {
+        /* A named/render-only camera still holds actor-facing view state.
+         * Preserve role/control/runtime ownership and retry at a later safe
+         * game-thread boundary; dropping the actor lease first would strand
+         * a live camera on a released AI character. */
+        reset_coop_roster_ready_window();
+        coop_roster_control_phase = 2;
+        coop_roster_runtime_release_pending = TRUE;
+        SudekiMpLogFormat(
+            "split_screen_render event=co_op_roster phase=runtime_release "
+            "reason=%s camera=pending fixed_camera=%s legacy_camera=%s "
+            "control=retained policy=camera_release_before_role_or_actor_release\r\n",
+            reason == NULL ? "unspecified" : reason,
+            fixed_cameras_released ? "released" : "pending",
+            legacy_camera_released ? "released" : "pending");
+        return FALSE;
+    }
     coop_role_lock_active = FALSE;
     coop_locked_player_one = NULL;
     coop_locked_player_two = NULL;
-    camera_released = release_player_two_camera(
-        reason == NULL ? "roster_runtime_release" : reason);
+    coop_locked_player_three = NULL;
     (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-    control_released =
-        SudekiMpControlSeparationReleasePlayerTwoNow();
+    control_released = release_coop_control_seats_reverse();
     (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
     reset_coop_roster_ready_window();
     coop_roster_control_phase = -1;
@@ -12043,10 +14024,12 @@ static BOOL release_coop_roster_runtime(const char *reason) {
         !(camera_released && control_released);
     SudekiMpLogFormat(
         "split_screen_render event=co_op_roster phase=runtime_release "
-        "reason=%s camera=%s control=%s "
-        "policy=retain_selected_types_restore_native_ai\r\n",
+        "reason=%s camera=%s fixed_camera=%s legacy_camera=%s control=%s "
+        "policy=retain_selected_types_restore_native_ai_p3_then_p2\r\n",
         reason == NULL ? "unspecified" : reason,
         camera_released ? "released" : "pending",
+        fixed_cameras_released ? "released" : "pending",
+        legacy_camera_released ? "released" : "pending",
         control_released ? "released" : "pending");
     return camera_released && control_released;
 }
@@ -12064,6 +14047,9 @@ BOOL SudekiMpSplitScreenClearRosterTypes(void) {
     coop_roster_valid = FALSE;
     coop_roster_player_one_type = 0u;
     coop_roster_player_two_type = 0u;
+    SudekiMpCoopRosterAssignmentStoreInitialize(
+        &coop_roster_assignment_store);
+    fixed_three_invalidate_frame_cache();
     coop_roster_participation_requested = FALSE;
     coop_roster_party_transition_active = FALSE;
     coop_roster_runtime_release_pending = FALSE;
@@ -12173,16 +14159,21 @@ BOOL SudekiMpSplitScreenGetRosterTypes(
     unsigned int *player_one_type,
     unsigned int *player_two_type
 ) {
+    SudekiMpCoopRosterAssignment assignment;
+
     if (player_one_type == NULL || player_two_type == NULL) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (!coop_roster_valid) {
+    if (!coop_roster_valid ||
+        !SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, &assignment) ||
+        assignment.active_human_mask != 0x03u) {
         SetLastError(ERROR_NOT_FOUND);
         return FALSE;
     }
-    *player_one_type = coop_roster_player_one_type;
-    *player_two_type = coop_roster_player_two_type;
+    *player_one_type = assignment.actor_type_by_seat[0];
+    *player_two_type = assignment.actor_type_by_seat[1];
     return TRUE;
 }
 
@@ -12224,6 +14215,27 @@ BOOL SudekiMpSplitScreenRosterLockHealthy(
         controlled_player_two == locked_player_two;
 }
 
+BOOL SudekiMpSplitScreenRosterThreeSeatLockHealthy(
+    const void *controller_target,
+    const void *party_front,
+    const void *locked_player_one,
+    const void *controlled_player_two,
+    const void *locked_player_two,
+    const void *controlled_player_three,
+    const void *locked_player_three
+) {
+    return SudekiMpSplitScreenRosterLockHealthy(
+            controller_target,
+            party_front,
+            locked_player_one,
+            controlled_player_two,
+            locked_player_two) &&
+        locked_player_three != NULL &&
+        locked_player_three != locked_player_one &&
+        locked_player_three != locked_player_two &&
+        controlled_player_three == locked_player_three;
+}
+
 static void *find_roster_character(
     uint8_t *group,
     unsigned int expected_type,
@@ -12231,6 +14243,8 @@ static void *find_roster_character(
     unsigned int *slot_result
 ) {
     unsigned int index;
+    void *match = NULL;
+    unsigned int match_slot = 0u;
 
     if (group == NULL || expected_type == 0u || party_count == 0u ||
         party_count > PARTY_SLOT_COUNT ||
@@ -12243,13 +14257,17 @@ static void *find_roster_character(
         );
         if (candidate != NULL && character_has_resource_type(
                 candidate, expected_type)) {
-            if (slot_result != NULL) {
-                *slot_result = index;
+            if (match != NULL) {
+                return NULL;
             }
-            return candidate;
+            match = candidate;
+            match_slot = index;
         }
     }
-    return NULL;
+    if (match != NULL && slot_result != NULL) {
+        *slot_result = match_slot;
+    }
+    return match;
 }
 
 BOOL SudekiMpSplitScreenRosterActorIdentityPolicy(
@@ -12265,7 +14283,8 @@ BOOL SudekiMpSplitScreenRosterActorIdentityPolicy(
     BOOL participation_requested,
     BOOL party_transition_active
 ) {
-    return player_index < 2u && actor != NULL && requested_type != 0u &&
+    return player_index < FIXED_THREE_SEAT_COUNT && actor != NULL &&
+        requested_type != 0u &&
         requested_type == expected_type && actor_occurrences == 1u &&
         unique_party_actor == actor && locked_actor == actor &&
         runtime_enabled && roles_locked && participation_requested &&
@@ -12277,6 +14296,7 @@ BOOL SudekiMpSplitScreenRosterActorIdentityMatches(
     const void *actor,
     unsigned int character_type
 ) {
+    SudekiMpCoopRosterAssignment assignment;
     uint8_t *group;
     unsigned int expected_type;
     const void *locked_actor;
@@ -12285,15 +14305,19 @@ BOOL SudekiMpSplitScreenRosterActorIdentityMatches(
     unsigned int index;
     int party_count;
 
-    if (player_index >= 2u || game_base == NULL || !coop_roster_valid ||
+    if (player_index >= FIXED_THREE_SEAT_COUNT || game_base == NULL ||
+        !coop_roster_valid ||
+        !SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, &assignment) ||
+        (assignment.active_human_mask & (1u << player_index)) == 0u ||
         !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
             sizeof(group))) {
         return FALSE;
     }
-    expected_type = player_index == 0u ? coop_roster_player_one_type :
-        coop_roster_player_two_type;
+    expected_type = assignment.actor_type_by_seat[player_index];
     locked_actor = player_index == 0u ? coop_locked_player_one :
-        coop_locked_player_two;
+        (player_index == 1u ? coop_locked_player_two :
+            coop_locked_player_three);
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
     if (!readable_memory(group, PARTY_COUNT_OFFSET + sizeof(party_count))) {
         return FALSE;
@@ -12334,8 +14358,10 @@ static void reset_coop_roster_ready_window(void) {
     coop_roster_ready_party_front = NULL;
     coop_roster_ready_player_one = NULL;
     coop_roster_ready_player_two = NULL;
+    coop_roster_ready_player_three = NULL;
     coop_roster_ready_player_one_slot = 0u;
     coop_roster_ready_player_two_slot = 0u;
+    coop_roster_ready_player_three_slot = 0u;
     coop_roster_ready_party_count = 0;
 }
 
@@ -12347,7 +14373,9 @@ static BOOL coop_roster_ready_window_elapsed(
     void *desired_player_one,
     unsigned int desired_player_one_slot,
     void *desired_player_two,
-    unsigned int desired_player_two_slot
+    unsigned int desired_player_two_slot,
+    void *desired_player_three,
+    unsigned int desired_player_three_slot
 ) {
     if (!coop_roster_ready_window_active ||
         coop_roster_ready_group != group ||
@@ -12357,7 +14385,9 @@ static BOOL coop_roster_ready_window_elapsed(
         coop_roster_ready_player_one != desired_player_one ||
         coop_roster_ready_player_one_slot != desired_player_one_slot ||
         coop_roster_ready_player_two != desired_player_two ||
-        coop_roster_ready_player_two_slot != desired_player_two_slot) {
+        coop_roster_ready_player_two_slot != desired_player_two_slot ||
+        coop_roster_ready_player_three != desired_player_three ||
+        coop_roster_ready_player_three_slot != desired_player_three_slot) {
         coop_roster_ready_window_active = TRUE;
         coop_roster_ready_since = GetTickCount();
         coop_roster_ready_group = group;
@@ -12368,6 +14398,8 @@ static BOOL coop_roster_ready_window_elapsed(
         coop_roster_ready_player_one_slot = desired_player_one_slot;
         coop_roster_ready_player_two = desired_player_two;
         coop_roster_ready_player_two_slot = desired_player_two_slot;
+        coop_roster_ready_player_three = desired_player_three;
+        coop_roster_ready_player_three_slot = desired_player_three_slot;
         return FALSE;
     }
     return (DWORD)(GetTickCount() - coop_roster_ready_since) >=
@@ -12407,15 +14439,36 @@ static void call_group_players_character_switch(
     );
 }
 
+static BOOL release_coop_control_for_retry(const char *reason) {
+    BOOL released;
+
+    (void)SudekiMpControlSeparationSetRoleLock(FALSE);
+    released = release_coop_control_seats_reverse();
+    reset_coop_roster_ready_window();
+    coop_roster_control_phase = released ? -1 : 2;
+    if (!released || reason != NULL) {
+        SudekiMpLogFormat(
+            "split_screen_render event=co_op_roster "
+            "phase=control_cleanup status=%s reason=%s "
+            "policy=release_p3_then_p2_before_retry\r\n",
+            released ? "confirmed" : "pending",
+            reason == NULL ? "unspecified" : reason);
+    }
+    return released;
+}
+
 void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
+    SudekiMpCoopRosterAssignment assignment;
     uint8_t *group;
     uint8_t *controller;
     void *controller_target;
     void *party_front;
     void *desired_player_one;
     void *desired_player_two;
+    void *desired_player_three = NULL;
     unsigned int desired_slot;
     unsigned int desired_player_two_slot;
+    unsigned int desired_player_three_slot = 0u;
     unsigned int controller_mode_80;
     unsigned int controller_mode_84;
     unsigned int group_state_d0;
@@ -12427,26 +14480,47 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
     uint32_t actor_flags_60;
     uint8_t *character_switch_actor;
     uint8_t *character_switch_ui_gate;
+    BOOL fixed_three_assignment;
     int party_count;
 
     if (!coop_roster_valid || game_base == NULL ||
+        !SudekiMpCoopRosterAssignmentStoreGet(
+            &coop_roster_assignment_store, &assignment) ||
+        (assignment.active_human_mask != 0x03u &&
+         assignment.active_human_mask != FIXED_THREE_HUMAN_MASK) ||
         !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL,
             sizeof(group)) ||
         !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
             sizeof(controller))) {
         return;
     }
+    fixed_three_assignment = assignment.active_human_mask ==
+        FIXED_THREE_HUMAN_MASK;
+    if (fixed_three_assignment && !fixed_three_runtime.configured) {
+        if (coop_role_lock_active || coop_control_seats_present() ||
+            fixed_three_runtime.cameras_acquired ||
+            fixed_three_runtime.transaction_active) {
+            (void)release_coop_roster_runtime(
+                "fixed_three_renderer_not_configured");
+        }
+        return;
+    }
     if (coop_roster_party_transition_active ||
         !coop_roster_participation_requested) {
         if (coop_role_lock_active ||
-            SudekiMpControlSeparationPlayerTwoRequested() ||
-            SudekiMpControlSeparationPlayerTwoCharacter() != NULL ||
+            coop_control_seats_present() ||
             runtime_split_enabled || coop_roster_runtime_release_pending ||
-            player_two_camera != NULL || render_only_swap_active) {
+            player_two_camera != NULL || render_only_swap_active ||
+            fixed_three_runtime.cameras_acquired ||
+            fixed_three_runtime.transaction_active) {
             (void)release_coop_roster_runtime(
                 coop_roster_party_transition_active ?
                     "party_transition_wait" : "player_two_dropped_out");
         }
+        return;
+    }
+    if (coop_roster_runtime_release_pending) {
+        (void)release_coop_roster_runtime("runtime_release_retry");
         return;
     }
     group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
@@ -12474,83 +14548,116 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
     previous_character_action = *(uint32_t *)(
         controller + CONTROLLER_PREVIOUS_CHARACTER_OFFSET);
     desired_player_one = find_roster_character(
-        group, coop_roster_player_one_type, (unsigned int)party_count,
+        group, assignment.actor_type_by_seat[0],
+        (unsigned int)party_count,
         &desired_slot
     );
     desired_player_two = find_roster_character(
-        group, coop_roster_player_two_type, (unsigned int)party_count,
+        group, assignment.actor_type_by_seat[1],
+        (unsigned int)party_count,
         &desired_player_two_slot
     );
+    if (fixed_three_assignment) {
+        desired_player_three = find_roster_character(
+            group, assignment.actor_type_by_seat[2],
+            (unsigned int)party_count,
+            &desired_player_three_slot
+        );
+    }
     {
         unsigned int presence_mask =
             (desired_player_one != NULL ? 1u : 0u) |
-            (desired_player_two != NULL ? 2u : 0u);
+            (desired_player_two != NULL ? 2u : 0u) |
+            (desired_player_three != NULL ? 4u : 0u);
         if (presence_mask != coop_roster_last_presence_mask) {
             coop_roster_last_presence_mask = presence_mask;
             reset_coop_roster_ready_window();
             coop_roster_control_phase = -1;
             SudekiMpLogFormat(
                 "split_screen_render event=co_op_roster phase=availability "
-                "player_one=%s player_two=%s mask=0x%02lx "
+                "player_one=%s player_two=%s player_three=%s "
+                "mask=0x%02lx expected_mask=0x%02lx "
                 "policy=deferred_until_selected_party_members_exist\r\n",
                 desired_player_one != NULL ? "present" : "waiting",
                 desired_player_two != NULL ? "present" : "waiting",
-                (unsigned long)presence_mask);
+                desired_player_three != NULL ? "present" :
+                    (fixed_three_assignment ? "waiting" : "inactive"),
+                (unsigned long)presence_mask,
+                (unsigned long)assignment.active_human_mask);
         }
     }
     if (coop_role_lock_active) {
-        if (SudekiMpSplitScreenRosterLockHealthy(
+        BOOL identities_healthy = fixed_three_assignment ?
+            SudekiMpSplitScreenRosterThreeSeatLockHealthy(
                 controller_target,
                 party_front,
                 coop_locked_player_one,
-                SudekiMpControlSeparationPlayerTwoCharacter(),
-                coop_locked_player_two) &&
-            SudekiMpControlSeparationPlayerTwoRequested() &&
+                SudekiMpControlSeparationSeatCharacter(1u),
+                coop_locked_player_two,
+                SudekiMpControlSeparationSeatCharacter(2u),
+                coop_locked_player_three) :
+            SudekiMpSplitScreenRosterLockHealthy(
+                controller_target,
+                party_front,
+                coop_locked_player_one,
+                SudekiMpControlSeparationSeatCharacter(1u),
+                coop_locked_player_two);
+        BOOL player_two_lease_healthy =
+            SudekiMpControlSeparationSeatRequested(1u) &&
+            SudekiMpControlSeparationSeatActive(1u) &&
+            (fixed_three_assignment ?
+                SudekiMpControlSeparationSeatInputLeaseActive(1u) :
+                SudekiMpControlSeparationSeatInputReady(1u));
+        BOOL player_three_lease_healthy = fixed_three_assignment ?
+            (SudekiMpControlSeparationSeatRequested(2u) &&
+             SudekiMpControlSeparationSeatActive(2u) &&
+             SudekiMpControlSeparationSeatInputLeaseActive(2u)) :
+            (!SudekiMpControlSeparationSeatRequested(2u) &&
+             SudekiMpControlSeparationSeatCharacter(2u) == NULL);
+
+        if (identities_healthy && player_two_lease_healthy &&
+            player_three_lease_healthy &&
             desired_player_one == coop_locked_player_one &&
             desired_player_two == coop_locked_player_two &&
-            SudekiMpControlSeparationPlayerTwoCharacter() ==
-                desired_player_two) {
+            desired_player_three == coop_locked_player_three) {
             return;
         }
         /* A level transition can rebuild party objects even when the
          * selected character identities are unchanged.  Release only the
          * runtime pointer lock; the roster types remain the session contract
          * and will be applied again once both actors are available. */
-        coop_role_lock_active = FALSE;
-        coop_locked_player_one = NULL;
-        coop_locked_player_two = NULL;
-        (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
-        (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
-        reset_coop_roster_ready_window();
-        coop_roster_control_phase = -1;
+        (void)release_coop_roster_runtime(
+            "party_members_rebuilt_unavailable_or_control_lost");
         SudekiMpLogFormat(
             "split_screen_render event=co_op_roster phase=deferred "
             "reason=party_members_rebuilt_unavailable_or_control_lost "
             "controller_target=0x%08lx party_front=0x%08lx "
             "desired_player_one=0x%08lx desired_player_two=0x%08lx "
-            "policy=release_old_p2_then_reacquire_selected_identity\r\n",
+            "desired_player_three=0x%08lx "
+            "policy=release_old_p3_then_p2_then_reacquire_selected_identities\r\n",
             (unsigned long)(uintptr_t)controller_target,
             (unsigned long)(uintptr_t)party_front,
             (unsigned long)(uintptr_t)desired_player_one,
-            (unsigned long)(uintptr_t)desired_player_two);
+            (unsigned long)(uintptr_t)desired_player_two,
+            (unsigned long)(uintptr_t)desired_player_three);
         return;
     }
-    if (desired_player_one == NULL || desired_player_two == NULL) {
-        if (SudekiMpControlSeparationPlayerTwoRequested() ||
-            SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
-            (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-            (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+    if (desired_player_one == NULL || desired_player_two == NULL ||
+        (fixed_three_assignment && desired_player_three == NULL)) {
+        if (coop_control_seats_present()) {
+            (void)release_coop_control_for_retry(
+                "selected_actor_unavailable");
         }
         reset_coop_roster_ready_window();
         return; /* Selected characters may join the party later. */
     }
-    if (!SudekiMpControlSeparationPlayerTwoRequested() &&
-        SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
+    if ((!SudekiMpControlSeparationSeatRequested(1u) &&
+         SudekiMpControlSeparationSeatCharacter(1u) != NULL) ||
+        (!SudekiMpControlSeparationSeatRequested(2u) &&
+         SudekiMpControlSeparationSeatCharacter(2u) != NULL)) {
         /* A prior rollback is still restoring the native AI lease.  Never
          * rotate or reacquire until the old override is actually gone. */
-        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
-        reset_coop_roster_ready_window();
+        (void)release_coop_control_for_retry("release_pending");
         if (coop_roster_control_phase != 2) {
             coop_roster_control_phase = 2;
             SudekiMpLogWrite(
@@ -12566,12 +14673,11 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             group_switching_d6,
             group_state_d7,
             next_character_action,
-            previous_character_action)) {
+        previous_character_action)) {
         reset_coop_roster_ready_window();
-        if (SudekiMpControlSeparationPlayerTwoRequested() ||
-            SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
-            (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-            (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+        if (coop_control_seats_present()) {
+            (void)release_coop_control_for_retry(
+                "native_transition_unsettled");
         }
         return;
     }
@@ -12583,11 +14689,16 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             desired_player_one,
             desired_slot,
             desired_player_two,
-            desired_player_two_slot)) {
+            desired_player_two_slot,
+            desired_player_three,
+            desired_player_three_slot)) {
         return;
     }
     if (controller_target == desired_player_one && desired_slot == 0u) {
         void *controlled_player_two;
+        void *controlled_player_three;
+        BOOL player_two_requested;
+        BOOL player_three_requested;
 
         if (!SudekiMpSplitScreenRosterLeadReady(
                 controller_target,
@@ -12602,40 +14713,105 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
                 previous_character_action)) {
             reset_coop_roster_ready_window();
             coop_roster_control_phase = 0;
-            if (SudekiMpControlSeparationPlayerTwoRequested() ||
-                SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
-                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+            if (coop_control_seats_present()) {
+                (void)release_coop_control_for_retry(
+                    "player_one_lead_not_ready");
             }
             return;
         }
         controlled_player_two =
-            SudekiMpControlSeparationPlayerTwoCharacter();
-        if (!SudekiMpControlSeparationPlayerTwoRequested() ||
-            controlled_player_two != desired_player_two) {
-            if (controlled_player_two != NULL) {
-                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
-                if (coop_roster_control_phase != 2) {
-                    coop_roster_control_phase = 2;
-                    SudekiMpLogWrite(
+            SudekiMpControlSeparationSeatCharacter(1u);
+        controlled_player_three =
+            SudekiMpControlSeparationSeatCharacter(2u);
+        player_two_requested =
+            SudekiMpControlSeparationSeatRequested(1u);
+        player_three_requested =
+            SudekiMpControlSeparationSeatRequested(2u);
+
+        /* Fixed 0x07 is one atomic admission contract.  Both external seats
+         * must have current hub identities before either native AI override
+         * is requested; otherwise a missing P3 pad could leave P2 claimed
+         * indefinitely.  Any partial claim unwinds in reverse order. */
+        if (fixed_three_assignment &&
+            !SudekiMpControlSeparationFixedThreeInputPreflightPolicy(
+                SudekiMpControlSeparationSeatInputReady(1u),
+                SudekiMpControlSeparationSeatInputReady(2u))) {
+            if (player_two_requested || controlled_player_two != NULL ||
+                player_three_requested || controlled_player_three != NULL) {
+                (void)release_coop_control_for_retry(
+                    "fixed_three_input_preflight_not_ready");
+            }
+            return;
+        }
+
+        if (!fixed_three_assignment &&
+            (player_three_requested || controlled_player_three != NULL)) {
+            (void)release_coop_control_for_retry(
+                "p3_present_for_two_seat_assignment");
+            return;
+        }
+        if (!player_two_requested || controlled_player_two == NULL) {
+            if (player_three_requested || controlled_player_three != NULL) {
+                (void)release_coop_control_for_retry(
+                    "p3_present_before_exact_p2");
+                return;
+            }
+            if (SudekiMpControlSeparationRequestSeatCharacter(
+                    1u, desired_player_two) &&
+                coop_roster_control_phase != 1) {
+                coop_roster_control_phase = 1;
+                SudekiMpLogFormat(
+                    "split_screen_render event=co_op_roster "
+                    "phase=claim_player_two player_two=0x%08lx "
+                    "policy=exact_selected_identity_before_p3_or_split\r\n",
+                    (unsigned long)(uintptr_t)desired_player_two);
+            }
+            return;
+        }
+        if (controlled_player_two != desired_player_two) {
+            (void)release_coop_control_for_retry("wrong_p2_identity");
+            return;
+        }
+        if (!SudekiMpControlSeparationSeatActive(1u)) {
+            return;
+        }
+        if (fixed_three_assignment &&
+            !SudekiMpControlSeparationSeatInputLeaseActive(1u)) {
+            (void)release_coop_control_for_retry(
+                "fixed_three_p2_input_lease_lost_before_commit");
+            return;
+        }
+        if (!fixed_three_assignment &&
+            !SudekiMpControlSeparationSeatInputReady(1u)) {
+            return;
+        }
+        if (fixed_three_assignment) {
+            if (!player_three_requested || controlled_player_three == NULL) {
+                if (SudekiMpControlSeparationRequestSeatCharacter(
+                        2u, desired_player_three) &&
+                    coop_roster_control_phase != 4) {
+                    coop_roster_control_phase = 4;
+                    SudekiMpLogFormat(
                         "split_screen_render event=co_op_roster "
-                        "phase=control_cleanup reason=wrong_p2_identity\r\n");
+                        "phase=claim_player_three player_three=0x%08lx "
+                        "policy=only_after_exact_active_input_ready_p2\r\n",
+                        (unsigned long)(uintptr_t)desired_player_three);
                 }
                 return;
             }
-            if (SudekiMpControlSeparationRequestPlayerTwoCharacter(
-                    desired_player_two)) {
-                if (coop_roster_control_phase != 1) {
-                    coop_roster_control_phase = 1;
-                    SudekiMpLogFormat(
-                        "split_screen_render event=co_op_roster "
-                        "phase=claim_player_two player_two=0x%08lx "
-                        "policy=exact_selected_identity_before_split\r\n",
-                        (unsigned long)(uintptr_t)desired_player_two);
-                }
+            if (controlled_player_three != desired_player_three) {
+                (void)release_coop_control_for_retry(
+                    "wrong_p3_identity");
+                return;
             }
-            return;
+            if (!SudekiMpControlSeparationSeatActive(2u)) {
+                return;
+            }
+            if (!SudekiMpControlSeparationSeatInputLeaseActive(2u)) {
+                (void)release_coop_control_for_retry(
+                    "fixed_three_p3_input_lease_lost_before_commit");
+                return;
+            }
         }
         {
             BOOL control_locked =
@@ -12643,17 +14819,15 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             BOOL runtime_enabled = control_locked &&
                 SudekiMpSplitScreenSetRuntimeEnabled(TRUE);
             BOOL roles_locked = runtime_enabled &&
-                SudekiMpSplitScreenLockRoles(
-                    desired_player_one, desired_player_two);
+                lock_coop_roster_roles(
+                    desired_player_one,
+                    desired_player_two,
+                    desired_player_three,
+                    fixed_three_assignment);
 
             if (!roles_locked) {
-                if (runtime_enabled) {
-                    (void)SudekiMpSplitScreenSetRuntimeEnabled(FALSE);
-                }
-                (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-                (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
-                reset_coop_roster_ready_window();
-                coop_roster_control_phase = -1;
+                (void)release_coop_roster_runtime(
+                    "runtime_or_role_lock_failed");
                 SudekiMpLogWrite(
                     "split_screen_render event=co_op_roster "
                     "phase=commit status=rolled_back "
@@ -12663,20 +14837,25 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
                 SudekiMpLogFormat(
                     "split_screen_render event=co_op_roster phase=applied "
                     "player_one=0x%08lx player_two=0x%08lx "
-                    "player_one_slot=%u "
-                    "policy=native_p1_rotation_exact_p2_claim_then_atomic_split_lock\r\n",
+                    "player_three=0x%08lx active_mask=0x%02lx "
+                    "player_one_slot=%u player_two_slot=%u "
+                    "player_three_slot=%u "
+                    "policy=native_p1_rotation_then_p2_then_p3_exact_claim_atomic_role_lock\r\n",
                     (unsigned long)(uintptr_t)desired_player_one,
                     (unsigned long)(uintptr_t)desired_player_two,
-                    desired_slot
+                    (unsigned long)(uintptr_t)desired_player_three,
+                    (unsigned long)assignment.active_human_mask,
+                    desired_slot,
+                    desired_player_two_slot,
+                    desired_player_three_slot
                 );
             }
         }
         return;
     }
-    if (SudekiMpControlSeparationPlayerTwoRequested() ||
-        SudekiMpControlSeparationPlayerTwoCharacter() != NULL) {
-        (void)SudekiMpControlSeparationSetRoleLock(FALSE);
-        (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(NULL);
+    if (coop_control_seats_present()) {
+        (void)release_coop_control_for_retry(
+            "native_p1_rotation_requires_no_companion_leases");
         return;
     }
     if (controller_target != party_front ||
@@ -12761,7 +14940,7 @@ void SudekiMpSplitScreenApplyRosterOnGameThread(void) {
             "policy=exact_native_switch_consumer_game_thread_verified\r\n",
             status,
             use_previous ? "previous" : "next",
-            (unsigned long)coop_roster_player_one_type,
+            (unsigned long)assignment.actor_type_by_seat[0],
             desired_slot,
             attempt,
             (unsigned long)(uintptr_t)before_target,
@@ -12818,7 +14997,9 @@ BOOL SudekiMpInstallSplitScreenRender(
         (enable_second_player_controller_camera &&
          (!enable_second_player_camera ||
           !enable_dual_camera_frame_cache ||
-          SudekiMpInputBridgeIdentity() == NULL ||
+          (SudekiMpInputBridgeIdentity() == NULL &&
+           SudekiMpLocalInputHubRequestedMask() !=
+                FIXED_THREE_HUMAN_MASK) ||
           controller_camera_deadzone < 0.0f ||
           controller_camera_deadzone >= 0.95f ||
           controller_camera_yaw_speed <= 0.0f ||
@@ -13171,6 +15352,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     shared_interaction_modal_observation =
         SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
     InterlockedExchange(&native_save_modal_opening, 0);
+    InterlockedExchange(&native_movie_gate_depth, 0);
     shared_interaction_modal_recovery_pending = FALSE;
     shared_interaction_modal_had_live_split = FALSE;
     shared_interaction_modal_published_kind = SUDEKIMP_INTERACTION_NONE;
@@ -13238,6 +15420,12 @@ BOOL SudekiMpInstallSplitScreenRender(
     coop_role_lock_active = FALSE;
     coop_locked_player_one = NULL;
     coop_locked_player_two = NULL;
+    coop_locked_player_three = NULL;
+    ZeroMemory(&fixed_three_runtime, sizeof(fixed_three_runtime));
+    if (!coop_roster_valid) {
+        SudekiMpCoopRosterAssignmentStoreInitialize(
+            &coop_roster_assignment_store);
+    }
     coop_roster_participation_requested = TRUE;
     coop_roster_party_transition_active = FALSE;
     coop_roster_runtime_release_pending = FALSE;
@@ -13402,7 +15590,20 @@ BOOL SudekiMpInstallSplitScreenRender(
 
 void SudekiMpUninstallSplitScreenRender(void) {
     unsigned int quick_menu_hook_index;
+    BOOL fixed_three_released;
 
+    /* Named cameras and their full-frame caches are mod-owned. Release them
+     * while the exact manager APIs and scene ownership proof are still live,
+     * always in the P3-then-P2 order enforced by the helper. */
+    fixed_three_released = fixed_three_release_cameras("module_uninstall");
+    if (!fixed_three_released) {
+        fixed_three_release_frame_surfaces();
+        SudekiMpLogWrite(
+            "split_screen_render event=fixed_three_seat_camera "
+            "phase=release status=quarantined reason=ownership_mismatch "
+            "policy=do_not_remove_unproven_native_camera\r\n");
+    }
+    ZeroMemory(&fixed_three_runtime, sizeof(fixed_three_runtime));
     split_screen_render_installed = FALSE;
     /* Keep a fail-closed authorization state until both render hooks are
      * restored.  Clearing the optional query first would make the default
@@ -13410,6 +15611,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
     runtime_split_enabled = FALSE;
     runtime_authorized_at_render_start = FALSE;
     InterlockedExchange(&native_save_modal_opening, 0);
+    InterlockedExchange(&native_movie_gate_depth, 0);
     if (shared_interaction_modal_published_kind !=
             SUDEKIMP_INTERACTION_NONE) {
         SudekiMpPlayerStatehoodObserveNativeModal(
@@ -13604,9 +15806,15 @@ void SudekiMpUninstallSplitScreenRender(void) {
     game_base = NULL;
     runtime_split_enabled = TRUE;
     runtime_authorized_at_render_start = FALSE;
+    coop_role_lock_active = FALSE;
+    coop_locked_player_one = NULL;
+    coop_locked_player_two = NULL;
+    coop_locked_player_three = NULL;
     coop_roster_valid = FALSE;
     coop_roster_player_one_type = 0u;
     coop_roster_player_two_type = 0u;
+    SudekiMpCoopRosterAssignmentStoreInitialize(
+        &coop_roster_assignment_store);
     coop_roster_participation_requested = TRUE;
     coop_roster_party_transition_active = FALSE;
     coop_roster_runtime_release_pending = FALSE;

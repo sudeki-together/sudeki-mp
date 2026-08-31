@@ -24,6 +24,8 @@ int main(void) {
         0.0f, 2.0f, 10.0f, 1.0f
     };
     float unchanged_host_matrix[16];
+    float player_two_matrix[16];
+    float player_three_matrix[16];
     float matrix[16] = {
         1.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 1.0f, 0.0f, 0.0f,
@@ -35,6 +37,9 @@ int main(void) {
     float world[3];
     float host_world_before[3];
     float host_world_after[3];
+    float player_two_world[3];
+    float player_two_world_after[3];
+    float player_three_world[3];
     float original_distance = sqrtf(104.0f);
     float result_distance;
     float first_person_matrix[16] = {
@@ -46,6 +51,8 @@ int main(void) {
     const float eye[3] = {2.0f, 3.5f, -4.0f};
 
     memcpy(unchanged_host_matrix, host_matrix, sizeof(host_matrix));
+    memcpy(player_two_matrix, host_matrix, sizeof(host_matrix));
+    memcpy(player_three_matrix, host_matrix, sizeof(host_matrix));
 
     if (!require(SudekiMpCameraTransformHorizontalDirection(
                      host_matrix, forward, host_world_before),
@@ -77,6 +84,36 @@ int main(void) {
         !require(SudekiMpOrbitCameraTransform(
                      matrix, target, 0.0f, 0.25f),
                  "pitch transform failed")) {
+        return 1;
+    }
+    if (!require(SudekiMpOrbitCameraTransform(
+                     player_two_matrix, target, 1.57079632679f, 0.0f),
+                 "Player 2 basis rotation failed") ||
+        !require(SudekiMpOrbitCameraTransform(
+                     player_three_matrix, target, -1.57079632679f, 0.0f),
+                 "Player 3 basis rotation failed") ||
+        !require(SudekiMpCameraTransformHorizontalDirection(
+                     player_two_matrix, forward, player_two_world),
+                 "Player 2 basis transform failed") ||
+        !require(SudekiMpCameraTransformHorizontalDirection(
+                     player_three_matrix, forward, player_three_world),
+                 "Player 3 basis transform failed") ||
+        !require(close_enough(player_two_world[0], 1.0f) &&
+                     close_enough(player_two_world[2], 0.0f) &&
+                     close_enough(player_three_world[0], -1.0f) &&
+                     close_enough(player_three_world[2], 0.0f),
+                 "Player 2 and Player 3 movement bases were not isolated") ||
+        !require(SudekiMpCameraTransformHorizontalDirection(
+                     player_two_matrix, forward, player_two_world_after),
+                 "Player 2 basis recheck failed after Player 3 rotation") ||
+        !require(close_enough(player_two_world_after[0],
+                     player_two_world[0]) &&
+                     close_enough(player_two_world_after[2],
+                     player_two_world[2]),
+                 "Player 3 orbit mutated Player 2 movement basis") ||
+        !require(memcmp(host_matrix, unchanged_host_matrix,
+                     sizeof(host_matrix)) == 0,
+                 "companion basis isolation mutated the host matrix")) {
         return 1;
     }
     result_distance = sqrtf(

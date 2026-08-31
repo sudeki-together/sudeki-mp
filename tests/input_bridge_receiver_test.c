@@ -3,6 +3,7 @@
 
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
+#include "input/local_input_hub.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -301,6 +302,71 @@ static int run_external_sender_test(unsigned int port) {
     return 0;
 }
 
+static int run_local_hub_adapter_test(void) {
+    WSADATA data;
+    SOCKET sender = INVALID_SOCKET;
+    SudekiMpInputBridgeState source;
+    SudekiMpInputBridgeState received;
+    unsigned int base_port = 0u;
+    unsigned int candidate;
+    int sender_winsock_started = 0;
+    int passed = 0;
+
+    for (candidate = 53000u; candidate <= 55000u; candidate += 13u) {
+        if (SudekiMpLocalInputHubStartUdp(
+                SUDEKIMP_LOCAL_INPUT_FIXED_THREE_SEAT_MASK,
+                candidate,
+                250u)) {
+            base_port = candidate;
+            break;
+        }
+    }
+    if (!require(base_port != 0u,
+                 "fixed-three LocalInputHub start failed") ||
+        !require(SudekiMpInputBridgeBoundPort() == base_port,
+                 "legacy adapter did not expose the P2 hub port") ||
+        !require(WSAStartup(MAKEWORD(2, 2), &data) == 0,
+                 "hub adapter sender WSAStartup failed")) {
+        goto cleanup;
+    }
+    sender_winsock_started = 1;
+    sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (!require(sender != INVALID_SOCKET,
+                 "hub adapter sender socket failed")) {
+        goto cleanup;
+    }
+
+    ZeroMemory(&source, sizeof(source));
+    source.sequence = 900u;
+    source.sender_timestamp_ms = 9000u;
+    source.left_x = 900;
+    source.buttons = SUDEKIMP_BRIDGE_BUTTON_A;
+    if (!require(send_state_packet(sender, base_port, &source),
+                 "hub adapter P2 packet send failed") ||
+        !require(wait_for_raw_state(&source, &received, 250u),
+                 "legacy adapter did not poll the P2 hub seat") ||
+        !require(SudekiMpInputBridgeIdentity() ==
+                     SudekiMpLocalInputHubSeatIdentity(1u),
+                 "legacy adapter did not expose the P2 hub identity")) {
+        goto cleanup;
+    }
+    passed = 1;
+
+cleanup:
+    if (sender != INVALID_SOCKET) {
+        closesocket(sender);
+    }
+    if (sender_winsock_started) {
+        WSACleanup();
+    }
+    SudekiMpInputBridgeStop();
+    if (!require(SudekiMpLocalInputHubRequestedMask() == 0u,
+                 "legacy bridge stop did not release the hub bank")) {
+        passed = 0;
+    }
+    return passed;
+}
+
 int main(int argc, char **argv) {
     WSADATA data;
     SOCKET sender;
@@ -524,6 +590,9 @@ int main(int argc, char **argv) {
     WSACleanup();
     SudekiMpInputBridgeStop();
     if (!run_sequence_ordering_test()) {
+        return 1;
+    }
+    if (!run_local_hub_adapter_test()) {
         return 1;
     }
     puts("input bridge receiver tests passed");

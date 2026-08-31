@@ -209,3 +209,47 @@ int SudekiMpLocalViewportActivationPolicy(
         input_lease_mask == active_human_mask &&
         frame_cache_ready_mask == active_human_mask;
 }
+
+int SudekiMpLocalViewportNextRenderSeat(
+    uint8_t active_human_mask,
+    uint8_t current_seat,
+    int owner_pin_active,
+    uint8_t owner_seat,
+    uint8_t *next_seat
+) {
+    unsigned int offset;
+
+    if (next_seat == NULL) {
+        return 0;
+    }
+    *next_seat = SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER;
+    if ((owner_pin_active != 0 && owner_pin_active != 1) ||
+        (active_human_mask & 1u) == 0u ||
+        (active_human_mask &
+            (uint8_t)~SUDEKIMP_LOCAL_VIEWPORT_VALID_MASK) != 0u) {
+        return 0;
+    }
+    if (owner_pin_active) {
+        if (owner_seat >= SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS ||
+            (active_human_mask & (uint8_t)(1u << owner_seat)) == 0u) {
+            return 0;
+        }
+        *next_seat = owner_seat;
+        return 1;
+    }
+    if (owner_seat != SUDEKIMP_LOCAL_VIEWPORT_NO_CONTROLLER ||
+        current_seat >= SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS) {
+        return 0;
+    }
+    for (offset = 1u; offset <= SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS;
+            ++offset) {
+        unsigned int candidate =
+            (current_seat + offset) % SUDEKIMP_LOCAL_VIEWPORT_MAX_SEATS;
+
+        if ((active_human_mask & (uint8_t)(1u << candidate)) != 0u) {
+            *next_seat = (uint8_t)candidate;
+            return 1;
+        }
+    }
+    return 0;
+}
