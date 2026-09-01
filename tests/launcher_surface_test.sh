@@ -5,6 +5,8 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 linux_launcher="${project_dir}/tools/sudekimp-beta-launcher.sh"
 windows_launcher="${project_dir}/src/launcher/beta_launcher.c"
 manifest="${project_dir}/public/launcher-manifest.txt"
+license="${project_dir}/LICENSE"
+notice="${project_dir}/NOTICE"
 
 for required in \
     'Local co-op — 2 players' \
@@ -48,5 +50,13 @@ grep -Fq 'automatic_upload=false' "${windows_launcher}"
 grep -Fq 'Automatic upload is intentionally not enabled yet' "${linux_launcher}"
 grep -Fq 'SUDEKIMP_CLEANROOM_TOOLS' "${linux_launcher}"
 grep -Fq 'EnableCleanroomMenu' "${windows_launcher}"
+grep -Fq 'GNU AFFERO GENERAL PUBLIC LICENSE' "${license}"
+grep -Fq 'Version 3, 19 November 2007' "${license}"
+grep -Fq 'SudekiMP was originally created by wander.' "${notice}"
+grep -Fq 'AGPL-3.0-or-later' "${notice}"
+grep -Fq '"${project_dir}/LICENSE" "${project_dir}/NOTICE"' \
+    "${project_dir}/tools/build-launcher-packages.sh"
+grep -Fq "(Join-Path \$env:GITHUB_WORKSPACE 'LICENSE')" \
+    "${project_dir}/.gitea/workflows/windows-build.yml"
 
 printf '%s\n' 'launcher surface checks passed'

@@ -18,6 +18,10 @@ implemented; bundles are for manual sharing. Optional update checks read the
 official launcher manifest and always ask before opening the download page.
 No update is silently installed.
 
+SudekiMP is licensed under `AGPL-3.0-or-later`. Distributed launcher packages
+include `LICENSE` and `NOTICE`, including the required attribution:
+“SudekiMP was originally created by wander.”
+
 Build the shareable Linux and Windows launcher archives together with:
 
 ```bash

@@ -368,6 +368,20 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
 - [docs/recording.md](docs/recording.md) — windowed Wine and OBS capture
 - [docs/sync.md](docs/sync.md) — private development mirror
 
+## License
+
+SudekiMP is licensed under the [GNU Affero General Public License, version 3
+or later](LICENSE) (`AGPL-3.0-or-later`). Network users of modified versions
+must be offered the corresponding source as required by AGPLv3 section 13.
+
+Redistributions must also preserve the reasonable author attribution in
+[NOTICE](NOTICE):
+
+> SudekiMP was originally created by wander.
+
+The license covers SudekiMP's original code and documentation. It does not
+license or redistribute Sudeki itself, its assets, or any user save data.
+
 ## Repository policy
 
 Do not commit or redistribute Sudeki installers, executables, archives,

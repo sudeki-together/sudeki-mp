@@ -45,6 +45,14 @@ Update checks are optional. **Check for updates on startup** only reads the
 official small manifest and prompts when a different version exists. The
 launcher never installs an update silently or changes Sudeki game data/saves.
 
+LICENSE AND ATTRIBUTION
+-----------------------
+
+SudekiMP is licensed under AGPL-3.0-or-later. See the included LICENSE and
+NOTICE files. Redistributions must preserve the attribution:
+
+    SudekiMP was originally created by wander.
+
 CO-OP SAVE FIXTURES
 -------------------
 
