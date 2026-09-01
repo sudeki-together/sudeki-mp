@@ -1,397 +1,322 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# A small desktop front end for the guarded research launcher.  It deliberately
-# delegates every game-facing action to continue-research.sh so the exact-build
-# checks and per-mode cleanup policy remain in one place.
+# Public Linux front end. Game-facing configuration remains delegated to the
+# guarded research launcher so exact-image checks and rollback stay centralized.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
 research_launcher="${script_dir}/continue-research.sh"
-settings_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/sudekimp-beta-launcher"
+stop_launcher="${script_dir}/stop-sudeki.sh"
+settings_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/sudekimp-launcher"
 settings_file="${settings_dir}/settings"
-launch_log="${project_dir}/build/linux/beta-launcher.log"
+launch_log="${project_dir}/build/linux/sudekimp-launcher.log"
 project_icon="${project_dir}/src/launcher/assets/SudekiMP.png"
-music_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt'
-music_track_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/Map%20Inversion.mp3'
-music_pid=''
-supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
-supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
+update_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/launcher-manifest.txt'
+launcher_version='0.4.0'
 
 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
 wine_prefix="${SUDEKIMP_WINEPREFIX:-${HOME}/Games/sudeki-research-prefix}"
 controller_path="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
+controller_p3_path="${SUDEKIMP_INPUT_DEVICE_P3:-/dev/input/js1}"
+lan_host="${SUDEKIMP_LAN_ARENA_HOST:-127.0.0.1}"
+lan_port="${SUDEKIMP_LAN_ARENA_PORT:-26770}"
+auto_update='false'
+cleanroom_tools='true'
+packaged_launcher='false'
+[[ -f "${project_dir}/.sudekimp-package" ]] && packaged_launcher='true'
 
-readonly app_title="SudekiMP Local Co-op"
+readonly app_title="SudekiMP Launcher"
 
-zenity_app() {
-    zenity --window-icon="${project_icon}" "$@"
-}
+zenity_app() { zenity --window-icon="${project_icon}" "$@"; }
 
 usage() {
     cat <<'EOF'
 Usage: tools/sudekimp-beta-launcher.sh [--help|--terminal]
 
-Open the Linux graphical launcher for the supported local co-op profiles.
---terminal forces the accessible terminal fallback.
+Open the SudekiMP launcher for local co-op, LAN arena, and cleanroom modes.
+--terminal uses the accessible terminal menu.
 EOF
 }
 
 load_settings() {
     local -a values=()
-
-    if [[ -f "${settings_file}" ]]; then
-        mapfile -t values < "${settings_file}"
-        if (( ${#values[@]} == 3 )); then
-            [[ -n "${values[0]}" ]] && game_path="${values[0]}"
-            [[ -n "${values[1]}" ]] && wine_prefix="${values[1]}"
-            [[ -n "${values[2]}" ]] && controller_path="${values[2]}"
-        fi
-    fi
+    [[ -f "${settings_file}" ]] || return 0
+    mapfile -t values < "${settings_file}"
+    (( ${#values[@]} >= 1 )) && [[ -n "${values[0]}" ]] && game_path="${values[0]}"
+    (( ${#values[@]} >= 2 )) && [[ -n "${values[1]}" ]] && wine_prefix="${values[1]}"
+    (( ${#values[@]} >= 3 )) && [[ -n "${values[2]}" ]] && controller_path="${values[2]}"
+    (( ${#values[@]} >= 4 )) && [[ -n "${values[3]}" ]] && controller_p3_path="${values[3]}"
+    (( ${#values[@]} >= 5 )) && [[ -n "${values[4]}" ]] && lan_host="${values[4]}"
+    (( ${#values[@]} >= 6 )) && [[ -n "${values[5]}" ]] && lan_port="${values[5]}"
+    (( ${#values[@]} >= 7 )) && [[ "${values[6]}" == 'true' ]] && auto_update='true'
+    (( ${#values[@]} >= 8 )) && [[ "${values[7]}" == 'false' ]] && cleanroom_tools='false'
 }
 
 save_settings() {
     local temporary_file
-
     mkdir -p "${settings_dir}"
     temporary_file="$(mktemp "${settings_dir}/.settings.XXXXXX")"
-    printf '%s\n%s\n%s\n' \
-        "${game_path}" "${wine_prefix}" "${controller_path}" > "${temporary_file}"
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+        "${game_path}" "${wine_prefix}" "${controller_path}" \
+        "${controller_p3_path}" "${lan_host}" "${lan_port}" \
+        "${auto_update}" "${cleanroom_tools}" > "${temporary_file}"
     chmod 600 "${temporary_file}"
     mv -f "${temporary_file}" "${settings_file}"
 }
 
 mode_argument() {
     case "$1" in
-        "Play local co-op beta") printf '%s\n' '--party-lifecycle-trace' ;;
+        "Local co-op — 2 players") printf '%s\n' '--party-lifecycle-trace' ;;
+        "Local co-op — 3 players") printf '%s\n' '--three-player-local-coop-test' ;;
+        "LAN arena — Host as Tal") printf '%s\n' '--lan-arena-host' ;;
+        "LAN arena — Join as Ailish") printf '%s\n' '--lan-arena-client' ;;
+        "Cleanroom") printf '%s\n' '--cleanroom' ;;
         "Safe launch") printf '%s\n' '--safe' ;;
-        "Talos lifecycle observation") printf '%s\n' '--talos-lifecycle-observation' ;;
         "Verify installation") printf '%s\n' '--check' ;;
         *) return 1 ;;
     esac
 }
 
-mode_needs_controller() {
-    [[ "$1" == '--party-lifecycle-trace' ]]
-}
-
 mode_summary() {
     case "$1" in
-        --party-lifecycle-trace)
-            printf '%s\n' \
-                'The supported two-player local co-op profile. Player 1 uses keyboard/mouse; Player 2 uses the selected Linux controller. Campaign transitions remain host-led. The unsafe Talos post-collapse restoration is retired and remains off.'
+        --party-lifecycle-trace) printf '%s' 'Two local players: keyboard/mouse host plus Player 2 controller.' ;;
+        --three-player-local-coop-test) printf '%s' 'Three local players: keyboard/mouse host plus distinct Player 2 and Player 3 controllers.' ;;
+        --lan-arena-host) printf '%s' "Host the save-free cleanroom arena as Tal on UDP ${lan_port}." ;;
+        --lan-arena-client) printf '%s' "Join ${lan_host}:${lan_port} as Ailish in a separate full-screen process." ;;
+        --cleanroom)
+            if [[ "${cleanroom_tools}" == true ]]; then
+                printf '%s' 'Start the save-free cleanroom with F8 sandbox tools: actors, Training Dummy, combat/camera modes, full inventory, and infinite meters.'
+            else
+                printf '%s' 'Start the save-free cleanroom with the F8 sandbox tools disabled.'
+            fi
             ;;
-        --safe)
-            printf '%s\n' \
-                'Launch SudekiMP with optional co-op prototypes disabled. Use this to verify that the game and loader start normally.'
-            ;;
-        --talos-lifecycle-observation)
-            printf '%s\n' \
-                'Research-only, one-human observation of the untouched retail pre-Void transition. Exact game and script hashes are required; expanded Talos, companion carry, co-op, skills, merchants, and every other optional prototype remain off.'
-            ;;
-        --check)
-            printf '%s\n' \
-                'Build and validate the exact supported SUDEKI.exe/DLL pair without starting the game.'
-            ;;
+        --safe) printf '%s' 'Start Sudeki with optional multiplayer hooks disabled.' ;;
+        --check) printf '%s' 'Build and validate the exact supported executable and DLL without starting Sudeki.' ;;
     esac
 }
 
 environment_summary() {
-    printf 'Game: %s\nWine prefix: %s\nP2 controller: %s' \
-        "${game_path}" "${wine_prefix}" "${controller_path}"
+    printf 'Game: %s\nWine prefix: %s\nP2: %s\nP3: %s\nLAN: %s:%s' \
+        "${game_path}" "${wine_prefix}" "${controller_path}" \
+        "${controller_p3_path}" "${lan_host}" "${lan_port}"
 }
 
-show_about() {
-    zenity_app --info --title="${app_title}" --width=620 \
-        --text="<b>Linux local co-op beta launcher</b>\n\nThis app starts the existing guarded SudekiMP profiles; it does not patch SUDEKI.exe or copy game files.\n\nThe co-op beta is one local game process: Player 1 is keyboard/mouse and Player 2 is a Linux controller. Menus, save books, inventory, and merchant checkout are still shared native systems.\n\nDeveloper: wander — git.unfilteredrealm.com/wander\n\nUse Settings to choose the game executable, Wine prefix, and controller device."
-}
-
-open_developer_page() {
-    if command -v xdg-open >/dev/null 2>&1; then
-        xdg-open 'https://git.unfilteredrealm.com/wander' >/dev/null 2>&1 &
-        return
+validate_selection() {
+    local mode="$1"
+    [[ -f "${game_path}" ]] || { zenity_app --error --title="${app_title}" --text="SUDEKI.exe was not found:\n${game_path}"; return 1; }
+    [[ -d "${wine_prefix}" ]] || { zenity_app --error --title="${app_title}" --text="Wine prefix was not found:\n${wine_prefix}"; return 1; }
+    if [[ "${mode}" == '--party-lifecycle-trace' || "${mode}" == '--three-player-local-coop-test' ]] && [[ ! -r "${controller_path}" ]]; then
+        zenity_app --error --title="${app_title}" --text="Player 2 controller is not readable:\n${controller_path}"
+        return 1
     fi
-    zenity_app --error --title="${app_title}" \
-        --text='xdg-open is unavailable, so the developer page could not be opened.'
-}
-
-play_project_music() {
-    local catalog
-
-    if [[ -n "${music_pid}" ]] && kill -0 "${music_pid}" 2>/dev/null; then
-        zenity_app --info --title="${app_title}" \
-            --text='Map Inversion is already playing in the launcher session.'
-        return
+    if [[ "${mode}" == '--three-player-local-coop-test' ]] && [[ ! -r "${controller_p3_path}" ]]; then
+        zenity_app --error --title="${app_title}" --text="Player 3 controller is not readable:\n${controller_p3_path}"
+        return 1
     fi
-    if ! command -v curl >/dev/null 2>&1 || ! command -v ffplay >/dev/null 2>&1; then
-        zenity_app --error --title="${app_title}" \
-            --text='Project music needs curl and ffplay (from FFmpeg). The game launcher still works without them.'
-        return
+    if [[ "${mode}" == '--lan-arena-client' && ! "${lan_host}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        zenity_app --error --title="${app_title}" --text="Enter a direct IPv4 address for the LAN host."
+        return 1
     fi
-    if ! catalog="$(curl --fail --silent --show-error --location "${music_manifest_url}")" || \
-        ! grep -Fqx 'track=Map Inversion.mp3' <<< "${catalog}"; then
-        zenity_app --error --title="${app_title}" \
-            --text='The public SudekiMP music catalog could not be read. No game files were changed.'
-        return
+    if [[ ! "${lan_port}" =~ ^[0-9]+$ ]] || (( lan_port < 1024 || lan_port > 65535 )); then
+        zenity_app --error --title="${app_title}" --text="LAN port must be between 1024 and 65535."
+        return 1
     fi
-    ffplay -nodisp -autoexit -loglevel error "${music_track_url}" \
-        >> "${launch_log}" 2>&1 &
-    music_pid=$!
-    zenity_app --info --title="${app_title}" \
-        --text='Playing Map Inversion inside the launcher session. Choose Stop music to end it.'
-}
-
-stop_project_music() {
-    if [[ -n "${music_pid}" ]] && kill -0 "${music_pid}" 2>/dev/null; then
-        kill "${music_pid}" 2>/dev/null || true
-    fi
-    music_pid=''
-}
-
-paste_paths_gui() {
-    local selected
-
-    selected="$(zenity_app --entry --title="${app_title} — Game executable" \
-        --text='Paste the full path to SUDEKI.exe.' --entry-text="${game_path}")" || return
-    [[ -n "${selected}" ]] && game_path="${selected}"
-    selected="$(zenity_app --entry --title="${app_title} — Wine prefix" \
-        --text='Paste the Wine prefix directory.' --entry-text="${wine_prefix}")" || return
-    [[ -n "${selected}" ]] && wine_prefix="${selected}"
-    selected="$(zenity_app --entry --title="${app_title} — Player 2 controller" \
-        --text='Paste the controller device path (usually /dev/input/js0).' --entry-text="${controller_path}")" || return
-    [[ -n "${selected}" ]] && controller_path="${selected}"
-    save_settings
 }
 
 configure_gui() {
     local choice selected
-
     while true; do
-        choice="$(zenity_app --list --title="${app_title} — Settings" --width=820 --height=380 \
-            --text="Choose what to change.\n\n$(environment_summary)" \
-            --column="Setting" --column="Current value" \
-            "Game executable" "${game_path}" \
-            "Wine prefix" "${wine_prefix}" \
-            "Player 2 controller" "${controller_path}" \
-            "Paste paths…" "Enter all three paths directly from the keyboard or clipboard" \
-            "Reset to defaults" "Use the project defaults" \
-            "Back" "Return to play options")" || return
-
+        choice="$(zenity_app --list --title="${app_title} — Settings" --width=900 --height=470 \
+            --text="$(environment_summary)\n\nUpdate checks never install silently; a newer release always requires confirmation." \
+            --column='Setting' --column='Current value' \
+            'Game executable' "${game_path}" \
+            'Wine prefix' "${wine_prefix}" \
+            'Player 2 controller' "${controller_path}" \
+            'Player 3 controller' "${controller_p3_path}" \
+            'LAN host address' "${lan_host}" \
+            'LAN port' "${lan_port}" \
+            'Enable cleanroom sandbox tools (F8)' "${cleanroom_tools}" \
+            'Check for updates on startup' "${auto_update}" \
+            'Back' 'Save and return')" || return
         case "${choice}" in
-            "Game executable")
-                selected="$(zenity_app --file-selection --title="Choose SUDEKI.exe" \
-                    --filename="${game_path}")" || continue
-                [[ -n "${selected}" ]] && game_path="${selected}"
-                ;;
-            "Wine prefix")
-                selected="$(zenity_app --file-selection --directory --title="Choose Wine prefix" \
-                    --filename="${wine_prefix}")" || continue
-                [[ -n "${selected}" ]] && wine_prefix="${selected}"
-                ;;
-            "Player 2 controller")
-                selected="$(zenity_app --file-selection --title="Choose controller device (usually /dev/input/js0)" \
-                    --filename="${controller_path}")" || continue
-                [[ -n "${selected}" ]] && controller_path="${selected}"
-                ;;
-            "Paste paths…")
-                paste_paths_gui
-                ;;
-            "Reset to defaults")
-                game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
-                wine_prefix="${SUDEKIMP_WINEPREFIX:-${HOME}/Games/sudeki-research-prefix}"
-                controller_path="${SUDEKIMP_INPUT_DEVICE:-/dev/input/js0}"
-                ;;
-            "Back")
-                save_settings
-                return
-                ;;
+            'Game executable') selected="$(zenity_app --file-selection --title='Choose SUDEKI.exe' --filename="${game_path}")" || continue; game_path="${selected}" ;;
+            'Wine prefix') selected="$(zenity_app --file-selection --directory --title='Choose Wine prefix' --filename="${wine_prefix}")" || continue; wine_prefix="${selected}" ;;
+            'Player 2 controller') selected="$(zenity_app --file-selection --title='Choose Player 2 controller' --filename="${controller_path}")" || continue; controller_path="${selected}" ;;
+            'Player 3 controller') selected="$(zenity_app --file-selection --title='Choose Player 3 controller' --filename="${controller_p3_path}")" || continue; controller_p3_path="${selected}" ;;
+            'LAN host address') selected="$(zenity_app --entry --title="${app_title}" --text='Direct IPv4 address' --entry-text="${lan_host}")" || continue; lan_host="${selected}" ;;
+            'LAN port') selected="$(zenity_app --entry --title="${app_title}" --text='UDP port' --entry-text="${lan_port}")" || continue; lan_port="${selected}" ;;
+            'Enable cleanroom sandbox tools (F8)') [[ "${cleanroom_tools}" == true ]] && cleanroom_tools=false || cleanroom_tools=true ;;
+            'Check for updates on startup') [[ "${auto_update}" == true ]] && auto_update=false || auto_update=true ;;
+            'Back') save_settings; return ;;
         esac
         save_settings
     done
 }
 
-validate_selection() {
-    local mode="$1"
-    local world_asset actual_game_sha256 actual_world_sha256
-
-    if [[ ! -f "${game_path}" ]]; then
-        zenity_app --error --title="${app_title}" \
-            --text="SUDEKI.exe was not found:\n${game_path}\n\nUse Settings to choose your owned GOG game executable."
-        return 1
-    fi
-    if [[ ! -d "${wine_prefix}" ]]; then
-        zenity_app --error --title="${app_title}" \
-            --text="Wine prefix directory was not found:\n${wine_prefix}\n\nUse Settings to choose the prefix that contains Sudeki."
-        return 1
-    fi
-    if mode_needs_controller "${mode}" && [[ ! -r "${controller_path}" ]]; then
-        zenity_app --error --title="${app_title}" \
-            --text="The Player 2 controller is not readable:\n${controller_path}\n\nConnect it, grant your user input-device access, then choose it in Settings."
-        return 1
-    fi
-    if [[ "${mode}" == '--talos-lifecycle-observation' ]]; then
-        world_asset="$(dirname -- "${game_path}")/Data/SOLWORLDM.gex"
-        if ! command -v sha256sum >/dev/null 2>&1; then
-            zenity_app --error --title="${app_title}" \
-                --text='sha256sum is required for the Talos lifecycle exact-image gate.'
-            return 1
-        fi
-        if [[ ! -f "${world_asset}" ]]; then
-            zenity_app --error --title="${app_title}" \
-                --text="SOLWORLDM.gex was not found:\n${world_asset}\n\nSelect the supported GOG SUDEKI.exe in its original game folder."
-            return 1
-        fi
-        actual_game_sha256="$(sha256sum -- "${game_path}")"
-        actual_game_sha256="${actual_game_sha256%% *}"
-        actual_world_sha256="$(sha256sum -- "${world_asset}")"
-        actual_world_sha256="${actual_world_sha256%% *}"
-        if [[ "${actual_game_sha256}" != "${supported_game_sha256}" ||
-              "${actual_world_sha256}" != "${supported_world_sha256}" ]]; then
-            zenity_app --error --title="${app_title}" --width=720 \
-                --text="Talos lifecycle observation requires the exact supported GOG images. Nothing was launched.\n\nSUDEKI.exe\nExpected: ${supported_game_sha256}\nActual:   ${actual_game_sha256}\n\nSOLWORLDM.gex\nExpected: ${supported_world_sha256}\nActual:   ${actual_world_sha256}"
-            return 1
-        fi
-    fi
-    return 0
-}
-
 run_check_gui() {
     local result_file status
-
     result_file="$(mktemp)"
-    if env \
-        "SUDEKIMP_GAME=${game_path}" \
-        "SUDEKIMP_WINEPREFIX=${wine_prefix}" \
-        "SUDEKIMP_INPUT_DEVICE=${controller_path}" \
-        "${research_launcher}" --check > "${result_file}" 2>&1; then
-        status="Validation passed"
+    if env SUDEKIMP_GAME="${game_path}" SUDEKIMP_WINEPREFIX="${wine_prefix}" "${research_launcher}" --check >"${result_file}" 2>&1; then
+        status='Validation passed'
     else
-        status="Validation failed"
+        status='Validation failed'
     fi
-    zenity_app --text-info --title="${app_title} — ${status}" --width=850 --height=560 \
-        --filename="${result_file}"
-    rm -f "${result_file}"
+    zenity_app --text-info --title="${app_title} — ${status}" --width=900 --height=580 --filename="${result_file}"
+    rm -f -- "${result_file}"
 }
 
 launch_mode_gui() {
     local mode="$1" process_id
-
-    if [[ "${mode}" == '--check' ]]; then
-        run_check_gui
-        return
-    fi
+    [[ "${mode}" == '--check' ]] && { run_check_gui; return; }
     validate_selection "${mode}" || return
-
-    if ! zenity_app --question --title="${app_title}" --width=650 \
-        --ok-label="Launch" --cancel-label="Back" \
-        --text="<b>$(mode_summary "${mode}")</b>\n\n$(environment_summary)\n\nThe game will open in a separate Wine window. The launcher log is written to:\n${launch_log}"; then
-        return
-    fi
-
+    zenity_app --question --title="${app_title}" --width=680 --ok-label='Launch' --cancel-label='Back' \
+        --text="<b>$(mode_summary "${mode}")</b>\n\n$(environment_summary)\n\nRuntime output: ${launch_log}" || return
     mkdir -p "$(dirname -- "${launch_log}")"
     {
-        printf '%s\n' "=== SudekiMP launcher started $(date --iso-8601=seconds) ==="
-        printf 'Mode: %s\n' "${mode}"
-        env \
-            "SUDEKIMP_GAME=${game_path}" \
-            "SUDEKIMP_WINEPREFIX=${wine_prefix}" \
-            "SUDEKIMP_INPUT_DEVICE=${controller_path}" \
+        printf '=== SudekiMP %s %s ===\n' "${mode}" "$(date --iso-8601=seconds)"
+        env SUDEKIMP_GAME="${game_path}" \
+            SUDEKIMP_WINEPREFIX="${wine_prefix}" \
+            SUDEKIMP_SKIP_BUILD="${packaged_launcher}" \
+            SUDEKIMP_PUBLIC_LAUNCHER=true \
+            SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true \
+            SUDEKIMP_INPUT_DEVICE="${controller_path}" \
+            SUDEKIMP_INPUT_DEVICE_P3="${controller_p3_path}" \
+            SUDEKIMP_LAN_ARENA_HOST="${lan_host}" \
+            SUDEKIMP_LAN_ARENA_PORT="${lan_port}" \
+            SUDEKIMP_CLEANROOM_TOOLS="${cleanroom_tools}" \
             "${research_launcher}" "${mode}"
-        printf '=== SudekiMP launcher exited with status %s ===\n' "$?"
-    } >> "${launch_log}" 2>&1 &
+        printf '=== launcher exit %s ===\n' "$?"
+    } >>"${launch_log}" 2>&1 &
     process_id=$!
     disown "${process_id}" 2>/dev/null || true
+    zenity_app --info --title="${app_title}" --text="Launch requested. Sudeki should open shortly.\n\nUse View recent log if it does not."
+}
 
-    if [[ "${mode}" == '--talos-lifecycle-observation' ]]; then
-        zenity_app --info --title="${app_title}" --width=660 \
-            --text="Observation launch started. Sudeki should open shortly.\n\nUse one human player with keyboard/mouse. Load the pre-Talos four-hero save, trigger the final interaction as Tal, and do not skip FMA07. The retail transition must remain unchanged.\n\nIf the game does not open, see:\n${launch_log}"
-    else
-        zenity_app --info --title="${app_title}" --width=620 \
-            --text="Launch started. Sudeki should open shortly.\n\nPlayer 1: keyboard and mouse\nPlayer 2: ${controller_path}\n\nIf the game does not open, see:\n${launch_log}"
+stop_game_gui() {
+    zenity_app --question --title="${app_title}" --ok-label='Stop Sudeki' --cancel-label='Cancel' \
+        --text='Stop Sudeki and its Wine session now? Unsaved game progress will be lost.' || return
+    env SUDEKIMP_WINEPREFIX="${wine_prefix}" "${stop_launcher}" >>"${launch_log}" 2>&1 || true
+    zenity_app --info --title="${app_title}" --text='Stop request completed.'
+}
+
+view_recent_log_gui() {
+    local runtime_log recent
+    runtime_log="$(dirname -- "${game_path}")/SudekiMP.log"
+    recent="$(mktemp)"
+    {
+        printf '=== Launcher log ===\n'
+        [[ -f "${launch_log}" ]] && tail -n 1200 -- "${launch_log}"
+        printf '\n=== SudekiMP runtime log (latest 5000 lines) ===\n'
+        [[ -f "${runtime_log}" ]] && tail -n 5000 -- "${runtime_log}"
+    } >"${recent}"
+    zenity_app --text-info --title="${app_title} — Recent logs" --width=1000 --height=700 --filename="${recent}"
+    rm -f -- "${recent}"
+}
+
+export_logs_gui() {
+    local destination runtime_log bundle_temp bundle_name archive
+    destination="$(zenity_app --file-selection --directory --title='Choose where to save the support bundle')" || return
+    runtime_log="$(dirname -- "${game_path}")/SudekiMP.log"
+    bundle_temp="$(mktemp -d)"
+    bundle_name="SudekiMP-support-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "${bundle_temp}/${bundle_name}"
+    [[ -f "${runtime_log}" ]] && tail -n 20000 -- "${runtime_log}" >"${bundle_temp}/${bundle_name}/SudekiMP-recent.log"
+    [[ -f "${launch_log}" ]] && cp -- "${launch_log}" "${bundle_temp}/${bundle_name}/launcher.log"
+    [[ -f "${project_dir}/build/mingw32/bin/SudekiMP.ini" ]] && cp -- "${project_dir}/build/mingw32/bin/SudekiMP.ini" "${bundle_temp}/${bundle_name}/SudekiMP.ini"
+    printf 'launcher_version=%s\nmode_user_selected=true\ngame=%s\nwine_prefix=%s\nlan=%s:%s\n' \
+        "${launcher_version}" "${game_path}" "${wine_prefix}" "${lan_host}" "${lan_port}" \
+        >"${bundle_temp}/${bundle_name}/launcher-summary.txt"
+    archive="${destination}/${bundle_name}.tar.gz"
+    tar -C "${bundle_temp}" -czf "${archive}" "${bundle_name}"
+    rm -rf -- "${bundle_temp:?}"
+    zenity_app --info --title="${app_title}" --width=650 \
+        --text="Support bundle saved:\n${archive}\n\nAutomatic upload is intentionally not enabled yet. Send this archive manually when requested."
+}
+
+check_updates_gui() {
+    local quiet="${1:-false}" manifest remote_version release_url
+    command -v curl >/dev/null 2>&1 || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='curl is required to check for updates.'; return; }
+    manifest="$(curl --fail --silent --show-error --location "${update_manifest_url}" 2>/dev/null)" || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The official release channel could not be reached. Nothing was changed.'; return; }
+    remote_version="$(sed -n 's/^version=//p' <<<"${manifest}" | head -1)"
+    release_url="$(sed -n 's/^release_url=//p' <<<"${manifest}" | head -1)"
+    [[ -n "${remote_version}" && -n "${release_url}" ]] || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The update manifest is malformed.'; return; }
+    if [[ "$(printf '%s\n%s\n' "${launcher_version}" "${remote_version}" | sort -V | tail -1)" == "${launcher_version}" ]]; then
+        [[ "${quiet}" == true ]] || zenity_app --info --title="${app_title}" --text="SudekiMP Launcher ${launcher_version} is current."
+        return
     fi
+    zenity_app --question --title="${app_title}" --ok-label='Open download page' --cancel-label='Later' \
+        --text="SudekiMP ${remote_version} is available.\n\nUpdates are never installed silently. Open the official download page?" || return
+    xdg-open "${release_url}" >/dev/null 2>&1 &
+}
+
+show_about() {
+    zenity_app --info --title="${app_title}" --width=700 \
+        --text="<b>SudekiMP Launcher ${launcher_version}</b>\n\nLocal co-op, direct-IP LAN arena, and cleanroom profiles share one guarded launcher. Campaign saves are never used by LAN arena. Talos research profiles are intentionally not exposed.\n\nLog upload is not implemented: Export support logs creates a reviewable archive for manual sharing. Update checks are opt-in and always ask before opening a download."
 }
 
 run_terminal_menu() {
     local choice mode
-
-    printf '\n%s\n' "${app_title}"
-    printf '%s\n' '1) Play local co-op beta'
-    printf '%s\n' '2) Safe launch'
-    printf '%s\n' '3) Talos lifecycle observation'
-    printf '%s\n' '4) Verify installation'
-    printf '%s\n' '5) Quit'
-    printf 'Choose an option [1-5]: '
-    read -r choice
+    printf '\n%s\n' "${app_title} ${launcher_version}"
+    printf '%s\n' '1) Local co-op (2 players)' '2) Local co-op (3 players)' '3) LAN host' '4) LAN client' '5) Cleanroom' '6) Safe launch' '7) Verify' '8) Stop Sudeki' '9) Quit'
+    read -r -p 'Choose [1-9]: ' choice
     case "${choice}" in
-        1) mode='--party-lifecycle-trace' ;;
-        2) mode='--safe' ;;
-        3) mode='--talos-lifecycle-observation' ;;
-        4) mode='--check' ;;
-        5) return 0 ;;
-        *) printf '%s\n' 'Invalid choice.' >&2; return 2 ;;
+        1) mode='--party-lifecycle-trace' ;; 2) mode='--three-player-local-coop-test' ;;
+        3) mode='--lan-arena-host' ;; 4) mode='--lan-arena-client' ;;
+        5) mode='--cleanroom' ;; 6) mode='--safe' ;; 7) mode='--check' ;;
+        8) env SUDEKIMP_WINEPREFIX="${wine_prefix}" "${stop_launcher}"; return ;;
+        9) return ;; *) return 2 ;;
     esac
-    printf '%s\n\n' "$(mode_summary "${mode}")"
-    env \
-        "SUDEKIMP_GAME=${game_path}" \
-        "SUDEKIMP_WINEPREFIX=${wine_prefix}" \
-        "SUDEKIMP_INPUT_DEVICE=${controller_path}" \
+    env SUDEKIMP_GAME="${game_path}" SUDEKIMP_WINEPREFIX="${wine_prefix}" \
+        SUDEKIMP_SKIP_BUILD="${packaged_launcher}" \
+        SUDEKIMP_PUBLIC_LAUNCHER=true SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true \
+        SUDEKIMP_INPUT_DEVICE="${controller_path}" SUDEKIMP_INPUT_DEVICE_P3="${controller_p3_path}" \
+        SUDEKIMP_LAN_ARENA_HOST="${lan_host}" SUDEKIMP_LAN_ARENA_PORT="${lan_port}" \
+        SUDEKIMP_CLEANROOM_TOOLS="${cleanroom_tools}" \
         "${research_launcher}" "${mode}"
 }
 
 run_gui() {
     local choice mode dialog_status
-
+    [[ "${auto_update}" == true ]] && check_updates_gui true
     while true; do
-        choice="$(zenity_app --list --title="${app_title}" --width=900 --height=470 \
-            --text="<b>Choose how to start SudekiMP</b>\n\nTwo-player local co-op is the supported beta path. Select Settings if your game, Wine prefix, or controller differs from the defaults." \
-            --column="Option" --column="What it does" \
-            "Play local co-op beta" "Two local players: keyboard/mouse host plus Linux controller Player 2." \
-            "Safe launch" "Start with optional co-op prototypes disabled." \
-            "Talos lifecycle observation" "One-human exact-image trace of the untouched retail pre-Void lifecycle." \
-            "Verify installation" "Build and check the exact supported game/DLL pair without launching." \
-            "Settings" "Choose or paste the game, Wine-prefix, and controller paths." \
-            "Play music" "Stream Map Inversion inside this launcher session." \
-            "Stop music" "Stop the current project-music stream." \
-            "Developer: wander" "Open the Sudeki Together developer page." \
-            "About" "Read the local co-op beta scope and safety notes." \
-            --ok-label="Continue" --cancel-label="Quit")"
+        choice="$(zenity_app --list --title="${app_title}" --width=980 --height=610 \
+            --text="<b>Choose a SudekiMP profile or launcher tool</b>\n\nLAN arena uses no campaign saves. Talos research flags are not part of this launcher." \
+            --column='Option' --column='What it does' \
+            'Local co-op — 2 players' 'Keyboard/mouse host plus one local controller.' \
+            'Local co-op — 3 players' 'Keyboard/mouse host plus two distinct local controllers.' \
+            'LAN arena — Host as Tal' 'Host-authoritative cleanroom arena on a direct UDP port.' \
+            'LAN arena — Join as Ailish' 'Join a host with a separate full-screen camera and HUD.' \
+            'Cleanroom' 'Save-free sandbox; optional F8 tools spawn actors/dummy and expose combat, camera, inventory, and infinite-meter controls.' \
+            'Safe launch' 'Launch with optional hooks disabled.' \
+            'Verify installation' 'Validate the supported build without starting the game.' \
+            'Stop Sudeki' 'Stop the configured Wine Sudeki session.' \
+            'View recent log' 'Read bounded launcher and runtime log tails.' \
+            'Export support logs' 'Create a local archive for manual sharing.' \
+            'Check for updates' 'Check the official manifest; never install silently.' \
+            'Settings' 'Game, Wine, controllers, LAN, cleanroom tools, and opt-in update checks.' \
+            'About' 'Scope and safety information.' \
+            --ok-label='Continue' --cancel-label='Quit')"
         dialog_status=$?
-        if (( dialog_status != 0 )) && [[ -z "${choice}" ]]; then
-            return
-        fi
-
+        (( dialog_status != 0 )) && [[ -z "${choice}" ]] && return
         case "${choice}" in
-            "Settings") configure_gui ;;
-            "Play music") play_project_music ;;
-            "Stop music") stop_project_music ;;
-            "Developer: wander") open_developer_page ;;
-            "About") show_about ;;
-            *)
-                mode="$(mode_argument "${choice}")" || continue
-                launch_mode_gui "${mode}"
-                ;;
+            'Settings') configure_gui ;; 'Stop Sudeki') stop_game_gui ;;
+            'View recent log') view_recent_log_gui ;; 'Export support logs') export_logs_gui ;;
+            'Check for updates') check_updates_gui false ;; 'About') show_about ;;
+            *) mode="$(mode_argument "${choice}")" || continue; launch_mode_gui "${mode}" ;;
         esac
     done
 }
 
 main() {
     local force_terminal=false
-
-    case "${1:-}" in
-        --help|-h) usage; return 0 ;;
-        --terminal) force_terminal=true ;;
-        '') ;;
-        *) usage >&2; return 2 ;;
-    esac
-
+    case "${1:-}" in --help|-h) usage; return ;; --terminal) force_terminal=true ;; '') ;; *) usage >&2; return 2 ;; esac
     load_settings
-    if [[ "${force_terminal}" == true ]] || ! command -v zenity >/dev/null 2>&1 || \
-        { [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; }; then
+    if [[ "${force_terminal}" == true ]] || ! command -v zenity >/dev/null 2>&1 || { [[ -z "${DISPLAY:-}" ]] && [[ -z "${WAYLAND_DISPLAY:-}" ]]; }; then
         run_terminal_menu
     else
         run_gui
     fi
 }
 
-trap stop_project_music EXIT
 main "$@"

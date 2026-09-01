@@ -22,7 +22,9 @@ enum {
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
     TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR = 10,
-    TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR = 11
+    TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR = 11,
+    AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
+    AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5
 };
 
 static SudekiMpRelativeCallHook lan_arena_frame_end_hook;
@@ -187,17 +189,17 @@ static void host_apply_presentation_state(
     } else if (moving) {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    } else if (actor_index == 0u &&
-               host_actor_presentation_valid[actor_index] &&
+    } else if (host_actor_presentation_valid[actor_index] &&
                host_actor_presentation[actor_index].selector[0] ==
-                   TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR) {
+                   (actor_index == 0u ? TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR :
+                       AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR)) {
         snapshot->animation_state =
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    } else if (actor_index == 0u &&
-               host_actor_presentation_valid[actor_index] &&
+    } else if (host_actor_presentation_valid[actor_index] &&
                host_actor_presentation[actor_index].selector[0] ==
-                   TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR) {
+                   (actor_index == 0u ? TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR :
+                       AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR)) {
         snapshot->animation_state =
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;

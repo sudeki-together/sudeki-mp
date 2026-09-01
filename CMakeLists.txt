@@ -191,6 +191,7 @@ target_compile_options(SudekiMP.BetaLauncher PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP.BetaLauncher PRIVATE -municode -static-libgcc)
 target_link_libraries(SudekiMP.BetaLauncher PRIVATE ole32 shell32 urlmon winmm)
 set_target_properties(SudekiMP.BetaLauncher PROPERTIES
+    OUTPUT_NAME "SudekiMP.LauncherGUI"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

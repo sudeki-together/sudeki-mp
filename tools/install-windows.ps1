@@ -34,7 +34,7 @@ SudekiMP currently supports only GOG offline build 50303954381148403.
 
 $Artifacts = @(
     'SudekiMP.Launcher.exe',
-    'SudekiMP.BetaLauncher.exe',
+    'SudekiMP.LauncherGUI.exe',
     'SudekiMP.XInputProbe.exe',
     'SudekiMP.dll',
     'SudekiMP.ini'
@@ -65,7 +65,7 @@ Get-ChildItem -LiteralPath $FixturesSource -Directory -Filter 'SAVESLOT*' |
 $LaunchScript = Join-Path $InstallDirectory 'Launch SudekiMP.cmd'
 $LaunchContents = @'
 @echo off
-"%~dp0SudekiMP.BetaLauncher.exe"
+"%~dp0SudekiMP.LauncherGUI.exe"
 if errorlevel 1 pause
 '@
 Set-Content -LiteralPath $LaunchScript -Value $LaunchContents -Encoding Ascii
@@ -76,5 +76,5 @@ Write-Host 'The launcher can archive existing saves and install co-op fixtures o
 Write-Host "Launch with: $LaunchScript"
 
 if ($Launch) {
-    & (Join-Path $InstallDirectory 'SudekiMP.BetaLauncher.exe')
+    & (Join-Path $InstallDirectory 'SudekiMP.LauncherGUI.exe')
 }

@@ -16,6 +16,11 @@ and remains the protected lead.
 
 ## Menu
 
+The public Linux and Windows launchers expose this as **Enable cleanroom
+sandbox tools (F8)**, enabled by default for the Cleanroom profile only. It is
+the `EnableCleanroomMenu` configuration flag. Disabling it still starts the
+save-free testroom but does not install the overlay.
+
 - F8: open or close the cleanroom menu
 - Up/Down: select an entry
 - Enter: spawn/despawn the selected entry

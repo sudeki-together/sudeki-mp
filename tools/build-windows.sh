@@ -34,6 +34,7 @@ cmake --build "${build_dir}"
 
 printf '\nSudekiMP Windows build complete:\n'
 printf '  %s\n' "${build_dir}/bin/SudekiMP.Launcher.exe"
+printf '  %s\n' "${build_dir}/bin/SudekiMP.LauncherGUI.exe"
 printf '  %s\n' "${build_dir}/bin/SudekiMP.dll"
 printf '  %s\n' "${build_dir}/bin/SudekiMP.ini"
 printf '\nSee docs/windows-build.md for validation and installation.\n'

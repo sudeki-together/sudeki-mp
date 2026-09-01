@@ -80,6 +80,8 @@ enum {
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
     AILISH_WORLD_IDLE_SELECTOR = 1,
+    AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
+    AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5,
     AILISH_WORLD_MOVE_PRIMARY_SELECTOR = 7,
     AILISH_WORLD_MOVE_SECONDARY_SELECTOR = 8,
     /* Native Tal-P1/Ailish-P2 capture: ANIMID_MISSILE_COMBO3 (0x87). */
@@ -108,6 +110,32 @@ static DWORD latest_snapshot_received_at;
 static LanArenaPresentationLease presentation_leases[2];
 
 enum { REPLICA_INTERPOLATION_DELAY_MS = 25u };
+
+BOOL SudekiMpLanArenaClientIdleVariantSelector(
+    uint8_t actor_type,
+    uint8_t animation_state,
+    int *selector
+) {
+    if (selector == NULL ||
+        (actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+         actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE) ||
+        (animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE &&
+         animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO)) {
+        return FALSE;
+    }
+    if (actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE) {
+        *selector = animation_state ==
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE ?
+            TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR :
+            TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    } else {
+        *selector = animation_state ==
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE ?
+            AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR :
+            AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    }
+    return TRUE;
+}
 
 static BOOL readable_memory(const void *pointer, size_t length) {
     MEMORY_BASIC_INFORMATION information;
@@ -246,13 +274,10 @@ static BOOL actor_presentation_matches(
         (actor_index == 0u ? TAL_WORLD_MOVE_SECONDARY_RATE :
             AILISH_WORLD_MOVE_SECONDARY_RATE) : 0.0f;
     float blend_zero = methods->get_blend(renderer, 0);
-    if (actor_index == 0u &&
-        animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE) {
-        selector_zero = TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR;
-        rate_zero = 24.0f;
-    } else if (actor_index == 0u &&
-               animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO) {
-        selector_zero = TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    if (SudekiMpLanArenaClientIdleVariantSelector(
+            actor_index == 0u ? SUDEKIMP_LAN_ARENA_TAL_TYPE :
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+            animation_state, &selector_zero)) {
         rate_zero = 24.0f;
     }
     if (!animation_channel_matches(renderer, methods, submodels, 0,
@@ -302,6 +327,30 @@ static BOOL ailish_locomotion_base_matches(
             AILISH_WORLD_MOVE_SECONDARY_SELECTOR,
             AILISH_WORLD_MOVE_SECONDARY_RATE) &&
         isfinite(blend_zero) && fabsf(blend_zero - 0.99f) <= 0.001f;
+}
+
+static BOOL ailish_idle_variant_base_matches(
+    void *renderer,
+    const LanArenaAnimationMethods *methods,
+    unsigned int submodels,
+    uint8_t animation_state
+) {
+    int selector;
+    float blend_zero;
+    if (animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE) {
+        selector = AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR;
+    } else if (animation_state ==
+               SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO) {
+        selector = AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    } else {
+        return FALSE;
+    }
+    blend_zero = methods->get_blend(renderer, 0);
+    return animation_channel_matches(
+            renderer, methods, submodels, 0, selector, 24.0f) &&
+        animation_channel_matches(
+            renderer, methods, submodels, 1, 0, 0.0f) &&
+        isfinite(blend_zero) && fabsf(blend_zero) <= 0.001f;
 }
 
 static BOOL apply_actor_presentation(
@@ -369,10 +418,16 @@ static BOOL apply_actor_presentation(
          * remains verified continuously because his auxiliary selectors are
          * not safe to touch. */
         if (actor_index == 1u) {
-            if (!moving || weak_attack) return TRUE;
-            if (ailish_locomotion_base_matches(
+            if (weak_attack) return TRUE;
+            if (!moving && ailish_idle_variant_base_matches(
+                    renderer, &methods, submodels,
+                    snapshot->animation_state)) return TRUE;
+            if (!moving && actor_presentation_matches(
+                    renderer, &methods, submodels, actor_index,
+                    snapshot->animation_state, weak_attack)) return TRUE;
+            if (moving && ailish_locomotion_base_matches(
                     renderer, &methods, submodels)) return TRUE;
-            preserve_ailish_auxiliary = TRUE;
+            preserve_ailish_auxiliary = moving;
         } else if (actor_presentation_matches(
                        renderer, &methods, submodels, actor_index,
                        snapshot->animation_state, weak_attack)) {
@@ -405,6 +460,12 @@ static BOOL apply_actor_presentation(
         state_one = moving ? 0 : 192;
         rate_zero = moving ? AILISH_WORLD_MOVE_PRIMARY_RATE : 12.0f;
         rate_one = moving ? AILISH_WORLD_MOVE_SECONDARY_RATE : 0.0f;
+        if (SudekiMpLanArenaClientIdleVariantSelector(
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                snapshot->animation_state, &selector_zero)) {
+            rate_zero = 24.0f;
+            state_zero = 1;
+        }
     }
     set_animation_channel(renderer, &methods, submodels, 0,
         selector_zero, state_zero, rate_zero, logical_transition);

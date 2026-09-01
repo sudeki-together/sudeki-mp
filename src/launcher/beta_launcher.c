@@ -6,6 +6,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <strsafe.h>
+#include <tlhelp32.h>
 #include <urlmon.h>
 
 #include <string.h>
@@ -13,7 +14,8 @@
 
 #include "beta_launcher_resource.h"
 
-#define SUDEKIMP_TITLE L"SudekiMP Windows Beta Launcher"
+#define SUDEKIMP_TITLE L"SudekiMP Launcher"
+#define SUDEKIMP_LAUNCHER_VERSION L"0.4.0"
 #define SUDEKIMP_PROJECT_URL L"https://git.unfilteredrealm.com/wander"
 #define SUDEKIMP_WINDOWS_BETA_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta"
@@ -21,21 +23,36 @@
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt"
 #define SUDEKIMP_MUSIC_TRACK_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/Map%20Inversion.mp3"
+#define SUDEKIMP_UPDATE_MANIFEST_URL \
+    L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/launcher-manifest.txt"
 
 static HINSTANCE launcher_instance;
 static HWND launcher_window;
 static HWND directory_edit;
 static HWND status_label;
-static HWND windows_coop_checkbox;
+static HWND profile_combo;
+static HWND lan_host_edit;
+static HWND lan_port_edit;
+static HWND auto_update_checkbox;
+static HWND cleanroom_tools_checkbox;
 static WCHAR package_directory[MAX_PATH];
 static WCHAR music_cache_path[MAX_PATH];
 static LONG music_download_running;
+static HANDLE launched_game_job;
 static HBRUSH app_background_brush;
 static HBRUSH panel_background_brush;
 static HBRUSH input_background_brush;
 static HFONT body_font;
 static HFONT title_font;
 static HFONT subtitle_font;
+
+typedef enum SudekiMpLauncherProfile {
+    SUDEKIMP_PROFILE_LOCAL_COOP = 0,
+    SUDEKIMP_PROFILE_LAN_HOST = 1,
+    SUDEKIMP_PROFILE_LAN_CLIENT = 2,
+    SUDEKIMP_PROFILE_CLEANROOM = 3,
+    SUDEKIMP_PROFILE_SAFE = 4
+} SudekiMpLauncherProfile;
 
 #define SUDEKIMP_COLOR_BACKGROUND RGB(12, 20, 31)
 #define SUDEKIMP_COLOR_PANEL RGB(23, 34, 49)
@@ -191,6 +208,36 @@ static void persist_game_directory(const WCHAR *game_directory) {
     }
 }
 
+static void persist_launcher_options(void) {
+    WCHAR settings_path[MAX_PATH];
+    WCHAR value[64];
+    int profile;
+    if (!get_settings_path(settings_path,
+            sizeof(settings_path) / sizeof(settings_path[0]))) return;
+    profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
+        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    StringCchPrintfW(value, sizeof(value) / sizeof(value[0]), L"%d", profile);
+    WritePrivateProfileStringW(L"launcher", L"profile", value, settings_path);
+    if (lan_host_edit != NULL) {
+        GetWindowTextW(lan_host_edit, value,
+            (int)(sizeof(value) / sizeof(value[0])));
+        WritePrivateProfileStringW(L"launcher", L"lan_host", value, settings_path);
+    }
+    if (lan_port_edit != NULL) {
+        GetWindowTextW(lan_port_edit, value,
+            (int)(sizeof(value) / sizeof(value[0])));
+        WritePrivateProfileStringW(L"launcher", L"lan_port", value, settings_path);
+    }
+    WritePrivateProfileStringW(L"launcher", L"check_updates_on_startup",
+        auto_update_checkbox != NULL &&
+            SendMessageW(auto_update_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
+            L"true" : L"false", settings_path);
+    WritePrivateProfileStringW(L"launcher", L"cleanroom_tools",
+        cleanroom_tools_checkbox != NULL &&
+            SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
+            L"true" : L"false", settings_path);
+}
+
 static void load_saved_game_directory(void) {
     WCHAR settings_path[MAX_PATH];
     WCHAR saved_directory[MAX_PATH];
@@ -205,6 +252,40 @@ static void load_saved_game_directory(void) {
                              settings_path);
     if (saved_directory[0] != L'\0') {
         SetWindowTextW(directory_edit, saved_directory);
+    }
+    if (profile_combo != NULL) {
+        int profile = GetPrivateProfileIntW(L"launcher", L"profile",
+            SUDEKIMP_PROFILE_LOCAL_COOP, settings_path);
+        if (profile < SUDEKIMP_PROFILE_LOCAL_COOP || profile > SUDEKIMP_PROFILE_SAFE) {
+            profile = SUDEKIMP_PROFILE_LOCAL_COOP;
+        }
+        SendMessageW(profile_combo, CB_SETCURSEL, (WPARAM)profile, 0);
+    }
+    if (lan_host_edit != NULL) {
+        GetPrivateProfileStringW(L"launcher", L"lan_host", L"127.0.0.1",
+            saved_directory, (DWORD)(sizeof(saved_directory) /
+                sizeof(saved_directory[0])), settings_path);
+        SetWindowTextW(lan_host_edit, saved_directory);
+    }
+    if (lan_port_edit != NULL) {
+        GetPrivateProfileStringW(L"launcher", L"lan_port", L"26770",
+            saved_directory, (DWORD)(sizeof(saved_directory) /
+                sizeof(saved_directory[0])), settings_path);
+        SetWindowTextW(lan_port_edit, saved_directory);
+    }
+    if (auto_update_checkbox != NULL) {
+        GetPrivateProfileStringW(L"launcher", L"check_updates_on_startup", L"false",
+            saved_directory, (DWORD)(sizeof(saved_directory) /
+                sizeof(saved_directory[0])), settings_path);
+        SendMessageW(auto_update_checkbox, BM_SETCHECK,
+            lstrcmpiW(saved_directory, L"true") == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (cleanroom_tools_checkbox != NULL) {
+        GetPrivateProfileStringW(L"launcher", L"cleanroom_tools", L"true",
+            saved_directory, (DWORD)(sizeof(saved_directory) /
+                sizeof(saved_directory[0])), settings_path);
+        SendMessageW(cleanroom_tools_checkbox, BM_SETCHECK,
+            lstrcmpiW(saved_directory, L"false") == 0 ? BST_UNCHECKED : BST_CHECKED, 0);
     }
 }
 
@@ -238,19 +319,32 @@ static BOOL build_loader_command(WCHAR *command,
                                  const WCHAR *loader_path,
                                  const WCHAR *game_directory,
                                  const WCHAR *dll_path,
-                                 BOOL check_only) {
+                                 BOOL check_only,
+                                 SudekiMpLauncherProfile profile) {
     WCHAR game_executable[MAX_PATH];
+    const WCHAR *game_arguments = L"";
     if (!join_path(game_executable, MAX_PATH, game_directory, L"SUDEKI.exe")) {
         return FALSE;
+    }
+    if (!check_only) {
+        if (profile == SUDEKIMP_PROFILE_LAN_HOST) {
+            game_arguments = L" --game-arg=-Level --game-arg=testroom "
+                L"--game-arg=-DT --game-arg=1 --game-arg=-Tal --game-arg=1";
+        } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT ||
+                   profile == SUDEKIMP_PROFILE_CLEANROOM) {
+            game_arguments = L" --game-arg=-Level --game-arg=testroom "
+                L"--game-arg=-DT --game-arg=1 --game-arg=-Ailish --game-arg=1";
+        }
     }
     return SUCCEEDED(StringCchPrintfW(command,
                                       command_count,
                                       check_only
                                           ? L"\"%s\" --check \"%s\" \"%s\""
-                                          : L"\"%s\" \"%s\" \"%s\"",
+                                          : L"\"%s\" \"%s\" \"%s\"%s",
                                       loader_path,
                                       game_executable,
-                                      dll_path));
+                                      dll_path,
+                                      game_arguments));
 }
 
 static BOOL verify_game(HWND owner,
@@ -268,7 +362,8 @@ static BOOL verify_game(HWND owner,
                               loader_path,
                               game_directory,
                               dll_path,
-                              TRUE)) {
+                              TRUE,
+                              SUDEKIMP_PROFILE_SAFE)) {
         return FALSE;
     }
     ZeroMemory(&startup, sizeof(startup));
@@ -276,7 +371,12 @@ static BOOL verify_game(HWND owner,
     startup.cb = sizeof(startup);
     set_status(L"Verifying the selected GOG game build…");
     RedrawWindow(launcher_window, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
-    if (!CreateProcessW(NULL,
+    if (launched_game_job != NULL) {
+        CloseHandle(launched_game_job);
+        launched_game_job = NULL;
+    }
+    launched_game_job = CreateJobObjectW(NULL, NULL);
+    if (launched_game_job == NULL || !CreateProcessW(NULL,
                         command,
                         NULL,
                         NULL,
@@ -304,10 +404,42 @@ static BOOL verify_game(HWND owner,
     return TRUE;
 }
 
-static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
+static BOOL disable_all_optional_profiles(const WCHAR *config_path) {
+    enum { SECTION_CAPACITY = 32768u };
+    WCHAR *section;
+    WCHAR *entry;
+    DWORD length;
+    BOOL success = TRUE;
+    section = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+        SECTION_CAPACITY * sizeof(WCHAR));
+    if (section == NULL) return FALSE;
+    length = GetPrivateProfileSectionW(
+        L"SudekiMP", section, SECTION_CAPACITY, config_path);
+    if (length >= SECTION_CAPACITY - 2u) success = FALSE;
+    entry = section;
+    while (success && *entry != L'\0') {
+        WCHAR *separator = wcschr(entry, L'=');
+        WCHAR *next = entry + lstrlenW(entry) + 1u;
+        if (separator != NULL) {
+            *separator = L'\0';
+            if (wcsncmp(entry, L"Enable", 6u) == 0 &&
+                !WritePrivateProfileStringW(
+                    L"SudekiMP", entry, L"false", config_path)) {
+                success = FALSE;
+            }
+        }
+        entry = next;
+    }
+    HeapFree(GetProcessHeap(), 0u, section);
+    return success;
+}
+
+static BOOL configure_launcher_profile(
+    HWND owner,
+    SudekiMpLauncherProfile profile
+) {
     static const WCHAR *const coop_keys[] = {
         L"EnableCoopRosterMenu",
-        L"EnableLoadedSaveCoopAutostartPrototype",
         L"EnableControlSeparationPrototype",
         L"EnableSecondPlayerMovementPrototype",
         L"EnableSecondPlayerCameraRelativeMovementPrototype",
@@ -321,6 +453,8 @@ static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
         L"EnablePartyAtomicTransitionsPrototype"
     };
     WCHAR config_path[MAX_PATH];
+    WCHAR lan_host[64];
+    WCHAR lan_port[16];
     size_t index;
 
     if (!join_path(config_path,
@@ -331,38 +465,62 @@ static BOOL configure_windows_coop_profile(HWND owner, BOOL enabled) {
                    L"This beta package is missing SudekiMP.ini. Reinstall it before launching.");
         return FALSE;
     }
-    if (!WritePrivateProfileStringW(
-            L"SudekiMP", L"EnableExternalInputBridgePrototype", L"false",
-            config_path) ||
-        !WritePrivateProfileStringW(
-            L"SudekiMP", L"EnableNativeSecondPlayerCameraCollisionPrototype",
-            L"false", config_path) ||
-        !WritePrivateProfileStringW(
-            L"SudekiMP", L"EnableTalosPartyPrototype", L"false",
-            config_path) ||
-        !WritePrivateProfileStringW(
-            L"SudekiMP", L"EnableExpandedTalosEncounterPrototype", L"false",
-            config_path)) {
+    if (!disable_all_optional_profiles(config_path)) {
         show_error(owner,
-                   L"SudekiMP could not select the Windows controller input profile.");
+                   L"SudekiMP could not reset the package to a closed launch profile.");
         return FALSE;
     }
-    for (index = 0u; index < sizeof(coop_keys) / sizeof(coop_keys[0]); ++index) {
-        if (!WritePrivateProfileStringW(L"SudekiMP", coop_keys[index],
-                                        enabled ? L"true" : L"false",
-                                        config_path)) {
+    if (profile == SUDEKIMP_PROFILE_LOCAL_COOP) {
+        for (index = 0u; index < sizeof(coop_keys) / sizeof(coop_keys[0]); ++index) {
+            if (!WritePrivateProfileStringW(
+                    L"SudekiMP", coop_keys[index], L"true", config_path)) {
+                show_error(owner,
+                           L"SudekiMP could not write its local co-op profile.");
+                return FALSE;
+            }
+        }
+        if (!WritePrivateProfileStringW(L"SudekiMP", L"XInputPlayerTwoSlot", L"0",
+                                         config_path) ||
+            !WritePrivateProfileStringW(L"Bindings", L"ToggleSecondPlayerAi", L"F10",
+                                         config_path)) {
             show_error(owner,
-                       L"SudekiMP could not write its package-side co-op settings.");
+                       L"SudekiMP could not finish its local co-op settings.");
             return FALSE;
         }
-    }
-    if (enabled &&
-        (!WritePrivateProfileStringW(L"SudekiMP", L"XInputPlayerTwoSlot", L"0",
-                                     config_path) ||
-         !WritePrivateProfileStringW(L"Bindings", L"ToggleSecondPlayerAi", L"F10",
-                                     config_path))) {
-        show_error(owner, L"SudekiMP could not finish its Windows co-op settings.");
-        return FALSE;
+    } else if (profile == SUDEKIMP_PROFILE_LAN_HOST ||
+               profile == SUDEKIMP_PROFILE_LAN_CLIENT) {
+        GetWindowTextW(lan_host_edit, lan_host,
+            (int)(sizeof(lan_host) / sizeof(lan_host[0])));
+        GetWindowTextW(lan_port_edit, lan_port,
+            (int)(sizeof(lan_port) / sizeof(lan_port[0])));
+        if (lan_host[0] == L'\0' || lan_port[0] == L'\0' ||
+            !WritePrivateProfileStringW(L"SudekiMP", L"LanArenaHost", lan_host,
+                                         config_path) ||
+            !WritePrivateProfileStringW(L"SudekiMP", L"LanArenaPort", lan_port,
+                                         config_path) ||
+            !WritePrivateProfileStringW(L"SudekiMP", L"SkipStartupMovies", L"true",
+                                         config_path) ||
+            !WritePrivateProfileStringW(L"SudekiMP", L"EnableControlSeparationPrototype",
+                                         L"true", config_path) ||
+            !WritePrivateProfileStringW(L"SudekiMP",
+                profile == SUDEKIMP_PROFILE_LAN_HOST ?
+                    L"EnableLanArenaHostPrototype" :
+                    L"EnableLanArenaClientPrototype",
+                L"true", config_path)) {
+            show_error(owner, L"SudekiMP could not write its closed LAN arena profile.");
+            return FALSE;
+        }
+    } else if (profile == SUDEKIMP_PROFILE_CLEANROOM) {
+        const BOOL cleanroom_tools_enabled = cleanroom_tools_checkbox == NULL ||
+            SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (!WritePrivateProfileStringW(
+                L"SudekiMP", L"SkipStartupMovies", L"true", config_path) ||
+            !WritePrivateProfileStringW(
+                L"SudekiMP", L"EnableCleanroomMenu",
+                cleanroom_tools_enabled ? L"true" : L"false", config_path)) {
+            show_error(owner, L"SudekiMP could not write the cleanroom profile.");
+            return FALSE;
+        }
     }
     /* Flush the profile cache before the injected DLL reads the file. */
     WritePrivateProfileStringW(NULL, NULL, NULL, config_path);
@@ -376,17 +534,26 @@ static void launch_game(HWND owner) {
     WCHAR command[MAX_PATH * 3u + 80u];
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
-    const BOOL coop_requested = windows_coop_checkbox != NULL &&
-        SendMessageW(windows_coop_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    int selected_profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
+        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    SudekiMpLauncherProfile profile;
 
-    if (!configure_windows_coop_profile(owner, coop_requested) ||
+    if (selected_profile < SUDEKIMP_PROFILE_LOCAL_COOP ||
+        selected_profile > SUDEKIMP_PROFILE_SAFE) {
+        selected_profile = SUDEKIMP_PROFILE_LOCAL_COOP;
+    }
+    profile = (SudekiMpLauncherProfile)selected_profile;
+
+    persist_launcher_options();
+    if (!configure_launcher_profile(owner, profile) ||
         !verify_game(owner, game_directory, loader_path, dll_path) ||
         !build_loader_command(command,
                               sizeof(command) / sizeof(command[0]),
                               loader_path,
                               game_directory,
                               dll_path,
-                              FALSE)) {
+                              FALSE,
+                              profile)) {
         return;
     }
     ZeroMemory(&startup, sizeof(startup));
@@ -397,20 +564,44 @@ static void launch_game(HWND owner) {
                         NULL,
                         NULL,
                         FALSE,
-                        CREATE_NEW_CONSOLE,
+                        CREATE_NEW_CONSOLE | CREATE_SUSPENDED,
                         NULL,
                         game_directory,
                         &startup,
                         &process)) {
         show_error(owner, L"SudekiMP could not start the loader.");
         set_status(L"Launch failed before injection.");
+        if (launched_game_job != NULL) CloseHandle(launched_game_job);
+        launched_game_job = NULL;
         return;
     }
+    if (!AssignProcessToJobObject(launched_game_job, process.hProcess)) {
+        TerminateProcess(process.hProcess, 1u);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        CloseHandle(launched_game_job);
+        launched_game_job = NULL;
+        show_error(owner, L"SudekiMP could not create a safely tracked launch session.");
+        set_status(L"Launch blocked before the game started.");
+        return;
+    }
+    ResumeThread(process.hThread);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    set_status(coop_requested ?
-        L"Windows local co-op requested. Keep the loader console open for errors." :
-        L"SudekiMP loader started. Keep its console open if it reports an error.");
+    if (profile == SUDEKIMP_PROFILE_LAN_HOST) {
+        set_status(L"LAN arena host started as Tal. Keep the loader console for errors.");
+    } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT) {
+        set_status(L"LAN arena client started as Ailish. Keep the loader console for errors.");
+    } else if (profile == SUDEKIMP_PROFILE_CLEANROOM) {
+        set_status(cleanroom_tools_checkbox != NULL &&
+                SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
+            L"Cleanroom started. Press F8 for sandbox tools; campaign saves are not used." :
+            L"Cleanroom started with F8 sandbox tools disabled; campaign saves are not used.");
+    } else if (profile == SUDEKIMP_PROFILE_LOCAL_COOP) {
+        set_status(L"Windows local co-op started. Player 2 uses XInput slot 0.");
+    } else {
+        set_status(L"Safe SudekiMP launch started.");
+    }
 }
 
 static void browse_for_game_directory(HWND owner) {
@@ -814,6 +1005,209 @@ static void open_windows_beta_download(HWND owner) {
     set_status(L"Opened the public beta package page. This launcher remains unchanged.");
 }
 
+static void check_for_launcher_update(HWND owner, BOOL quiet_when_current) {
+    WCHAR settings_directory[MAX_PATH];
+    WCHAR manifest_path[MAX_PATH];
+    HANDLE file;
+    DWORD size;
+    DWORD read_count = 0u;
+    char buffer[2048];
+    char *version;
+    char *end;
+    WCHAR remote_version[64];
+    if (!get_settings_directory(settings_directory,
+            sizeof(settings_directory) / sizeof(settings_directory[0])) ||
+        !join_path(manifest_path,
+            sizeof(manifest_path) / sizeof(manifest_path[0]),
+            settings_directory, L"launcher-manifest.txt") ||
+        FAILED(URLDownloadToFileW(NULL, SUDEKIMP_UPDATE_MANIFEST_URL,
+            manifest_path, 0u, NULL))) {
+        if (!quiet_when_current) {
+            show_error(owner, L"The official update manifest could not be read. Nothing was changed.");
+        }
+        return;
+    }
+    file = CreateFileW(manifest_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    size = GetFileSize(file, NULL);
+    if (size == INVALID_FILE_SIZE || size >= sizeof(buffer) ||
+        !ReadFile(file, buffer, size, &read_count, NULL)) {
+        CloseHandle(file);
+        return;
+    }
+    CloseHandle(file);
+    buffer[read_count] = '\0';
+    version = strstr(buffer, "version=");
+    if (version == NULL) return;
+    version += 8;
+    end = strpbrk(version, "\r\n");
+    if (end != NULL) *end = '\0';
+    if (MultiByteToWideChar(CP_UTF8, 0, version, -1, remote_version,
+            (int)(sizeof(remote_version) / sizeof(remote_version[0]))) == 0) return;
+    if (lstrcmpW(remote_version, SUDEKIMP_LAUNCHER_VERSION) == 0) {
+        if (!quiet_when_current) set_status(L"SudekiMP Launcher is current.");
+        return;
+    }
+    if (MessageBoxW(owner,
+            L"A different SudekiMP launcher release is available. Updates are "
+            L"never installed silently. Open the official package page now?",
+            L"SudekiMP update available", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+        open_windows_beta_download(owner);
+    }
+}
+
+static void stop_tracked_sudeki(HWND owner) {
+    if (launched_game_job == NULL) {
+        set_status(L"No Sudeki process started by this launcher session is tracked.");
+        return;
+    }
+    if (MessageBoxW(owner,
+            L"Stop the Sudeki process started by this launcher session? Unsaved progress will be lost.",
+            L"Stop Sudeki", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    if (!TerminateJobObject(launched_game_job, 0u)) {
+        show_error(owner, L"Windows could not stop the tracked Sudeki session.");
+        return;
+    }
+    CloseHandle(launched_game_job);
+    launched_game_job = NULL;
+    set_status(L"The tracked Sudeki session was stopped.");
+}
+
+static BOOL copy_file_tail(
+    const WCHAR *source_path,
+    const WCHAR *target_path,
+    DWORD maximum_bytes
+) {
+    HANDLE source;
+    HANDLE target;
+    LARGE_INTEGER size;
+    LARGE_INTEGER offset;
+    BYTE buffer[32768];
+    DWORD read_count;
+    DWORD written;
+    BOOL success = TRUE;
+    source = CreateFileW(source_path, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (source == INVALID_HANDLE_VALUE) return FALSE;
+    target = CreateFileW(target_path, GENERIC_WRITE, 0u, NULL, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (target == INVALID_HANDLE_VALUE) {
+        CloseHandle(source);
+        return FALSE;
+    }
+    if (!GetFileSizeEx(source, &size)) {
+        success = FALSE;
+    } else {
+        offset.QuadPart = size.QuadPart > maximum_bytes ?
+            size.QuadPart - maximum_bytes : 0;
+        success = SetFilePointerEx(source, offset, NULL, FILE_BEGIN);
+    }
+    while (success) {
+        if (!ReadFile(source, buffer, sizeof(buffer), &read_count, NULL)) {
+            success = FALSE;
+            break;
+        }
+        if (read_count == 0u) break;
+        if (!WriteFile(target, buffer, read_count, &written, NULL) ||
+            written != read_count) success = FALSE;
+    }
+    CloseHandle(target);
+    CloseHandle(source);
+    return success;
+}
+
+static void view_runtime_log(HWND owner) {
+    WCHAR game_directory[MAX_PATH];
+    WCHAR log_path[MAX_PATH];
+    WCHAR settings_directory[MAX_PATH];
+    WCHAR recent_path[MAX_PATH];
+    if (!selected_game_directory(game_directory, MAX_PATH) ||
+        !join_path(log_path, MAX_PATH, game_directory, L"SudekiMP.log") ||
+        !file_exists(log_path)) {
+        show_error(owner, L"SudekiMP.log was not found beside the selected SUDEKI.exe.");
+        return;
+    }
+    if (!get_settings_directory(settings_directory,
+            sizeof(settings_directory) / sizeof(settings_directory[0])) ||
+        !join_path(recent_path, MAX_PATH, settings_directory,
+            L"SudekiMP-recent.log") ||
+        !copy_file_tail(log_path, recent_path, 2u * 1024u * 1024u)) {
+        show_error(owner, L"Windows could not prepare a bounded recent-log view.");
+        return;
+    }
+    if ((INT_PTR)ShellExecuteW(owner, L"open", L"notepad.exe", recent_path,
+            settings_directory, SW_SHOWNORMAL) <= 32) {
+        show_error(owner, L"Windows could not open the runtime log.");
+    }
+}
+
+static void export_support_logs(HWND owner) {
+    BROWSEINFOW browse;
+    PIDLIST_ABSOLUTE item;
+    WCHAR destination[MAX_PATH];
+    WCHAR game_directory[MAX_PATH];
+    WCHAR bundle_directory[MAX_PATH];
+    WCHAR source[MAX_PATH];
+    WCHAR target[MAX_PATH];
+    WCHAR summary[1024];
+    SYSTEMTIME now;
+    HANDLE file;
+    DWORD written;
+    if (!selected_game_directory(game_directory, MAX_PATH)) {
+        show_error(owner, L"Choose the Sudeki folder before exporting logs.");
+        return;
+    }
+    ZeroMemory(&browse, sizeof(browse));
+    browse.hwndOwner = owner;
+    browse.lpszTitle = L"Choose where to save the SudekiMP support folder";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    item = SHBrowseForFolderW(&browse);
+    if (item == NULL) return;
+    if (!SHGetPathFromIDListW(item, destination)) {
+        CoTaskMemFree(item);
+        return;
+    }
+    CoTaskMemFree(item);
+    GetLocalTime(&now);
+    if (FAILED(StringCchPrintfW(bundle_directory, MAX_PATH,
+            L"%s\\SudekiMP-support-%04u%02u%02u-%02u%02u%02u",
+            destination, (unsigned int)now.wYear, (unsigned int)now.wMonth,
+            (unsigned int)now.wDay, (unsigned int)now.wHour,
+            (unsigned int)now.wMinute, (unsigned int)now.wSecond)) ||
+        !create_directory_if_missing(bundle_directory)) {
+        show_error(owner, L"Windows could not create the support folder.");
+        return;
+    }
+    if (join_path(source, MAX_PATH, game_directory, L"SudekiMP.log") &&
+        join_path(target, MAX_PATH, bundle_directory, L"SudekiMP.log") &&
+        file_exists(source)) (void)copy_file_tail(
+            source, target, 8u * 1024u * 1024u);
+    if (join_path(source, MAX_PATH, package_directory, L"SudekiMP.ini") &&
+        join_path(target, MAX_PATH, bundle_directory, L"SudekiMP.ini") &&
+        file_exists(source)) (void)CopyFileW(source, target, FALSE);
+    if (join_path(target, MAX_PATH, bundle_directory, L"launcher-summary.txt") &&
+        SUCCEEDED(StringCchPrintfW(summary,
+            sizeof(summary) / sizeof(summary[0]),
+            L"launcher_version=%s\r\ngame_directory=%s\r\n"
+            L"automatic_upload=false\r\n",
+            SUDEKIMP_LAUNCHER_VERSION, game_directory))) {
+        file = CreateFileW(target, GENERIC_WRITE, 0u, NULL, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+            WriteFile(file, summary,
+                (DWORD)(lstrlenW(summary) * sizeof(WCHAR)), &written, NULL);
+            CloseHandle(file);
+        }
+    }
+    MessageBoxW(owner,
+        L"The support folder was saved. Automatic log upload is intentionally "
+        L"not enabled yet; share this folder manually when requested.",
+        SUDEKIMP_TITLE, MB_OK | MB_ICONINFORMATION);
+    ShellExecuteW(owner, L"open", bundle_directory, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static void apply_default_font(HWND control) {
     SendMessageW(control,
                  WM_SETFONT,
@@ -953,7 +1347,23 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     launch_game(window);
                     return 0;
                 case IDC_UPDATE:
-                    open_windows_beta_download(window);
+                    check_for_launcher_update(window, FALSE);
+                    return 0;
+                case IDC_STOP_GAME:
+                    stop_tracked_sudeki(window);
+                    return 0;
+                case IDC_VIEW_LOG:
+                    view_runtime_log(window);
+                    return 0;
+                case IDC_EXPORT_LOGS:
+                    export_support_logs(window);
+                    return 0;
+                case IDC_PROFILE:
+                case IDC_LAN_HOST:
+                case IDC_LAN_PORT:
+                case IDC_AUTO_UPDATE:
+                case IDC_CLEANROOM_TOOLS:
+                    persist_launcher_options();
                     return 0;
                 case IDC_INSTALL_COOP_SAVES:
                     (void)install_coop_save_fixtures(window);
@@ -991,7 +1401,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
             }
             return 0;
         case WM_DESTROY:
+            persist_launcher_options();
             close_music();
+            if (launched_game_job != NULL) {
+                CloseHandle(launched_game_job);
+                launched_game_job = NULL;
+            }
             DeleteObject(app_background_brush);
             DeleteObject(panel_background_brush);
             DeleteObject(input_background_brush);
@@ -1092,7 +1507,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                                        CW_USEDEFAULT,
                                        CW_USEDEFAULT,
                                        760,
-                                       550,
+                                       668,
                                        NULL,
                                        NULL,
                                        instance,
@@ -1138,7 +1553,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_font(control, title_font);
     control = CreateWindowW(L"STATIC",
-                            L"Windows beta launcher • validates before injection • game files stay untouched",
+                            L"Local co-op • LAN arena • cleanroom • exact-build validation",
                             WS_CHILD | WS_VISIBLE,
                             117,
                             61,
@@ -1198,25 +1613,51 @@ int WINAPI wWinMain(HINSTANCE instance,
                                  instance,
                                  NULL);
     apply_default_font(status_label);
-    windows_coop_checkbox = CreateWindowW(
-        L"BUTTON",
-        L"Windows local co-op beta — Tal + Ailish loaded-save split, XInput slot 0",
+    control = CreateWindowW(L"STATIC", L"Profile:", WS_CHILD | WS_VISIBLE,
+                            28, 222, 72, 22, launcher_window, NULL, instance, NULL);
+    apply_default_font(control);
+    profile_combo = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        100, 218, 315, 160, launcher_window,
+        (HMENU)(INT_PTR)IDC_PROFILE, instance, NULL);
+    apply_default_font(profile_combo);
+    SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Local co-op (2 players)");
+    SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"LAN arena host — Tal");
+    SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"LAN arena client — Ailish");
+    SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Cleanroom");
+    SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Safe launch");
+    SendMessageW(profile_combo, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+    control = CreateWindowW(L"STATIC", L"LAN IP:", WS_CHILD | WS_VISIBLE,
+                            430, 222, 60, 22, launcher_window, NULL, instance, NULL);
+    apply_default_font(control);
+    lan_host_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"127.0.0.1",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        488, 218, 142, 28, launcher_window,
+        (HMENU)(INT_PTR)IDC_LAN_HOST, instance, NULL);
+    apply_default_font(lan_host_edit);
+    lan_port_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"26770",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+        640, 218, 82, 28, launcher_window,
+        (HMENU)(INT_PTR)IDC_LAN_PORT, instance, NULL);
+    apply_default_font(lan_port_edit);
+    auto_update_checkbox = CreateWindowW(L"BUTTON",
+        L"Check for updates on startup (prompt before download)",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        28,
-        222,
-        560,
-        22,
-        launcher_window,
-        (HMENU)(INT_PTR)IDC_WINDOWS_COOP,
-        instance,
-        NULL
-    );
-    apply_default_font(windows_coop_checkbox);
+        28, 254, 430, 22, launcher_window,
+        (HMENU)(INT_PTR)IDC_AUTO_UPDATE, instance, NULL);
+    apply_default_font(auto_update_checkbox);
+    cleanroom_tools_checkbox = CreateWindowW(L"BUTTON",
+        L"Enable cleanroom sandbox tools (F8): actors, dummy, combat/camera, inventory, infinite meters",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        28, 278, 690, 22, launcher_window,
+        (HMENU)(INT_PTR)IDC_CLEANROOM_TOOLS, instance, NULL);
+    apply_default_font(cleanroom_tools_checkbox);
+    SendMessageW(cleanroom_tools_checkbox, BM_SETCHECK, BST_CHECKED, 0);
     control = CreateWindowW(L"BUTTON",
                             L"Verify build",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             28,
-                            252,
+                            314,
                             150,
                             38,
                             launcher_window,
@@ -1228,7 +1669,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Launch SudekiMP",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             190,
-                            252,
+                            314,
                             190,
                             38,
                             launcher_window,
@@ -1237,59 +1678,61 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
-                            L"Get latest beta…",
+                            L"Stop tracked game",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             392,
-                            252,
+                            314,
                             170,
                             38,
                             launcher_window,
-                            (HMENU)(INT_PTR)IDC_UPDATE,
+                            (HMENU)(INT_PTR)IDC_STOP_GAME,
                             instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
-                            L"Install co-op save fixtures…",
+                            L"View runtime log",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             28,
-                            314,
-                            230,
+                            366,
+                            200,
                             34,
                             launcher_window,
-                            (HMENU)(INT_PTR)IDC_INSTALL_COOP_SAVES,
+                            (HMENU)(INT_PTR)IDC_VIEW_LOG,
                             instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
-                            L"Test XInput controller…",
+                            L"Export support logs…",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                            270,
-                            314,
-                            210,
+                            240,
+                            366,
+                            220,
                             34,
                             launcher_window,
-                            (HMENU)(INT_PTR)IDC_TEST_XINPUT,
+                            (HMENU)(INT_PTR)IDC_EXPORT_LOGS,
                             instance,
                             NULL);
     apply_default_font(control);
-    control = CreateWindowW(L"STATIC",
-                            L"WARNING: installing co-op fixtures archives your current %APPDATA%\\Sudeki\\Save folder first. "
-                            L"It then creates a clean save folder for the beta fixtures.",
-                            WS_CHILD | WS_VISIBLE | SS_LEFT,
-                            28,
-                            362,
-                            680,
-                            42,
-                            launcher_window,
-                            (HMENU)(INT_PTR)IDC_SAVE_WARNING,
-                            instance,
-                            NULL);
+    control = CreateWindowW(L"BUTTON", L"Check for updates…",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            472, 366, 190, 34, launcher_window,
+                            (HMENU)(INT_PTR)IDC_UPDATE, instance, NULL);
+    apply_default_font(control);
+    control = CreateWindowW(L"BUTTON", L"Install co-op save fixtures…",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            28, 416, 230, 34, launcher_window,
+                            (HMENU)(INT_PTR)IDC_INSTALL_COOP_SAVES, instance, NULL);
+    apply_default_font(control);
+    control = CreateWindowW(L"BUTTON", L"Test XInput controller…",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                            270, 416, 210, 34, launcher_window,
+                            (HMENU)(INT_PTR)IDC_TEST_XINPUT, instance, NULL);
     apply_default_font(control);
     control = CreateWindowW(L"BUTTON",
                             L"Play project music",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             28,
-                            422,
+                            466,
                             190,
                             34,
                             launcher_window,
@@ -1301,7 +1744,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Stop music",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             230,
-                            422,
+                            466,
                             130,
                             34,
                             launcher_window,
@@ -1313,7 +1756,7 @@ int WINAPI wWinMain(HINSTANCE instance,
                             L"Developer: wander",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                             530,
-                            422,
+                            466,
                             192,
                             34,
                             launcher_window,
@@ -1322,21 +1765,20 @@ int WINAPI wWinMain(HINSTANCE instance,
                             NULL);
     apply_default_font(control);
     control = CreateWindowW(L"STATIC",
-                            L"Music downloads only when you press Play; it is cached locally and played inside this launcher.",
-                            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
-                            28,
-                            484,
-                            680,
-                            28,
-                            launcher_window,
-                            NULL,
-                            instance,
-                            NULL);
+                            L"LAN arena and cleanroom do not read campaign saves. Talos research flags are not exposed. "
+                            L"Support logs are exported locally for manual sharing; nothing is uploaded automatically.",
+                            WS_CHILD | WS_VISIBLE | SS_LEFT,
+                            28, 520, 680, 48, launcher_window,
+                            (HMENU)(INT_PTR)IDC_SAVE_WARNING, instance, NULL);
     apply_default_font(control);
 
     load_saved_game_directory();
     ShowWindow(launcher_window, show_command);
     UpdateWindow(launcher_window);
+    if (auto_update_checkbox != NULL &&
+        SendMessageW(auto_update_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        check_for_launcher_update(launcher_window, TRUE);
+    }
     while (GetMessageW(&message, NULL, 0u, 0u) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);

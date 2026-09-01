@@ -2805,6 +2805,28 @@ int wmain(int argc, wchar_t **argv) {
         fputs("failed to map PE image\n", stderr);
         return 1;
     }
+    {
+        int selector = -1;
+        if (!SudekiMpLanArenaClientIdleVariantSelector(
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+                &selector) || selector != 4 ||
+            !SudekiMpLanArenaClientIdleVariantSelector(
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO,
+                &selector) || selector != 5 ||
+            !SudekiMpLanArenaClientIdleVariantSelector(
+                SUDEKIMP_LAN_ARENA_TAL_TYPE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+                &selector) || selector != 10 ||
+            SudekiMpLanArenaClientIdleVariantSelector(
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                &selector)) {
+            fputs("FAIL: LAN idle-variant semantic mapping mismatch\n", stderr);
+            ++failures;
+        }
+    }
     /* The harness maps sections without applying PE base relocations.  Put the
      * exact animation methods used by the LAN replica at their mapped-image
      * addresses before asking its supported-image preflight to inspect them. */

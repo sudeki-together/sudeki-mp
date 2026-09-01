@@ -44,7 +44,7 @@ jobs:
             throw "tools/build-windows.sh failed with exit code $LASTEXITCODE"
           }
 
-      - name: Run expanded-encounter policy regressions
+      - name: Run launcher, multiplayer, and policy regressions
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -55,6 +55,11 @@ jobs:
             'SudekiMP.CoopRosterAssignmentTest.exe',
             'SudekiMP.FixedThreeProfileTest.exe',
             'SudekiMP.OrbitCameraTest.exe',
+            'SudekiMP.LanArenaProtocolTest.exe',
+            'SudekiMP.LanArenaReplicaTest.exe',
+            'SudekiMP.LanArenaAuthorityTest.exe',
+            'SudekiMP.LanArenaSessionTest.exe',
+            'SudekiMP.LanArenaProfileTest.exe',
             'SudekiMP.TalosEncounterSessionTest.exe',
             'SudekiMP.TalosEncounterAdmissionTest.exe',
             'SudekiMP.TalosCompanionCarryTest.exe',
@@ -80,15 +85,27 @@ jobs:
             }
           }
 
-      - name: Package Windows beta
+      - name: Verify public launcher surface
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:MSYSTEM = 'MINGW32'
+          $env:CHERE_INVOKING = '1'
+          $env:PATH = 'C:\msys64\mingw32\bin;C:\msys64\usr\bin;' + $env:PATH
+          & 'C:\msys64\usr\bin\bash.exe' -lc 'cd "$GITHUB_WORKSPACE"; bash tests/launcher_surface_test.sh'
+          if ($LASTEXITCODE -ne 0) {
+            throw "launcher_surface_test.sh failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package unified Windows launcher
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $bin = Join-Path $env:GITHUB_WORKSPACE 'build\windows-mingw32\bin'
-          $stage = Join-Path $env:GITHUB_WORKSPACE 'package-stage\SudekiMP'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'package-stage\SudekiMP-Windows'
           $files = @(
             (Join-Path $bin 'SudekiMP.Launcher.exe'),
-            (Join-Path $bin 'SudekiMP.BetaLauncher.exe'),
+            (Join-Path $bin 'SudekiMP.LauncherGUI.exe'),
             (Join-Path $bin 'SudekiMP.XInputProbe.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
@@ -100,7 +117,7 @@ jobs:
           }
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.BetaLauncher.exe'), (Join-Path $bin 'SudekiMP.XInputProbe.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.LauncherGUI.exe'), (Join-Path $bin 'SudekiMP.XInputProbe.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
           $fixtures = Join-Path $env:GITHUB_WORKSPACE 'testdata\sudeki-saves'
           $fixtureDestination = Join-Path $stage 'CoopSaveFixtures'
@@ -108,21 +125,22 @@ jobs:
           Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $fixtures -Directory -Filter 'SAVESLOT*' | ForEach-Object { $_.FullName }) -Destination $fixtureDestination -Recurse
           @'
           @echo off
-          "%~dp0SudekiMP.BetaLauncher.exe"
+          "%~dp0SudekiMP.LauncherGUI.exe"
           if errorlevel 1 (
-            echo SudekiMP Beta Launcher could not start.
+            echo SudekiMP Launcher could not start.
             pause
           )
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
-          $artifact = Join-Path $env:GITHUB_WORKSPACE 'SudekiMP-Windows-Beta.zip'
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'public\launcher-manifest.txt') -Destination $stage
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'sudekimp-windows-launcher-0.4.0.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
 
-      - name: Upload Windows CI package
+      - name: Upload unified Windows launcher
         # Gitea implements the artifact-v4 protocol but stock v4 rejects
         # non-GitHub.com servers. This maintained compatibility fork removes
         # that client-side GHES refusal.
         uses: christopherhx/gitea-upload-artifact@v4
         with:
-          name: SudekiMP-Windows-Beta
-          path: SudekiMP-Windows-Beta.zip
+          name: sudekimp-windows-launcher-0.4.0
+          path: sudekimp-windows-launcher-0.4.0.zip
           if-no-files-found: error

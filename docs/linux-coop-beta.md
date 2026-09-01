@@ -1,4 +1,33 @@
-# Linux Local Co-op Beta Quick Start
+# Linux SudekiMP Launcher Quick Start
+
+The desktop launcher now exposes two-player and three-player local co-op, LAN
+arena host/client, cleanroom, and safe launch from one guarded UI. It does not
+expose the old Talos research flags. LAN arena and cleanroom never read
+campaign saves.
+
+The cleanroom profile exposes **Enable cleanroom sandbox tools (F8)** and
+defaults it on. Press F8 in the cleanroom to spawn or remove party actors and
+the Training Dummy, toggle combat/camera modes, and use the cleanroom inventory
+and infinite-meter conveniences. Turning it off leaves the save-free testroom
+available without installing that menu; it never enables cheats in campaign or
+LAN profiles.
+
+It can stop the configured dedicated Wine session, show bounded recent log
+tails, and export a timestamped `.tar.gz` support bundle. Upload is not
+implemented; bundles are for manual sharing. Optional update checks read the
+official launcher manifest and always ask before opening the download page.
+No update is silently installed.
+
+Build the shareable Linux and Windows launcher archives together with:
+
+```bash
+./tools/build-launcher-packages.sh
+```
+
+The Linux archive carries prebuilt loader/DLL/controller-bridge artifacts and
+skips source compilation while retaining exact-image verification. The Windows
+archive carries the native profile launcher, injection loader, DLL, INI, and
+XInput diagnostic.
 
 This guide is for the current **two-player local co-op beta**. It runs one
 authoritative Sudeki process through Wine: Player 1 uses keyboard and mouse;
@@ -53,7 +82,7 @@ injection. A hash mismatch is a stop condition, not something to bypass.
 Connect the second controller and start the graphical launcher:
 
 ```bash
-./tools/sudekimp-beta-launcher.sh
+./tools/sudekimp-launcher.sh
 ```
 
 It presents the supported launch options, explains each one, and lets you

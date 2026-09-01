@@ -20,8 +20,15 @@ input_bridge_p2_log="${project_dir}/build/linux/input-bridge-p2.log"
 input_bridge_p3_log="${project_dir}/build/linux/input-bridge-p3.log"
 lan_arena_host="${SUDEKIMP_LAN_ARENA_HOST:-127.0.0.1}"
 lan_arena_port="${SUDEKIMP_LAN_ARENA_PORT:-26770}"
+cleanroom_tools="${SUDEKIMP_CLEANROOM_TOOLS:-true}"
 supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
 supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
+
+if [[ "${cleanroom_tools}" != true && "${cleanroom_tools}" != false ]]; then
+    printf 'Invalid SUDEKIMP_CLEANROOM_TOOLS value: %s (expected true or false)\n' \
+        "${cleanroom_tools}" >&2
+    exit 2
+fi
 
 usage() {
     printf '%s\n' \
@@ -199,7 +206,7 @@ if [[ "${mode}" == "--lan-arena-host" || "${mode}" == "--lan-arena-client" ]]; t
     fi
 fi
 
-if pgrep -x SUDEKI.exe >/dev/null; then
+if [[ "${mode}" != "--check" ]] && pgrep -x SUDEKI.exe >/dev/null; then
     printf '%s\n' 'Sudeki is already running; close it normally before resuming research.' >&2
     exit 1
 fi
@@ -243,24 +250,37 @@ if [[ "${mode}" == "--talos-lifecycle-observation" ||
         "  SUDEKI.exe:    ${game_sha256}" \
         "  SOLWORLDM.gex: ${world_sha256}"
 fi
-if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
+if [[ "${SUDEKIMP_PUBLIC_LAUNCHER:-false}" != "true" &&
+      "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
       ! -d "${save_root}" ]]; then
     printf 'Research save directory is missing: %s\n' "${save_root}" >&2
     exit 1
 fi
 
 save_count=0
-if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" ]]; then
+if [[ "${SUDEKIMP_PUBLIC_LAUNCHER:-false}" != "true" &&
+      "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" ]]; then
     save_count="$(find "${save_root}" -mindepth 1 -maxdepth 1 -type d -name 'SAVESLOT*' | wc -l)"
 fi
-if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
+if [[ "${SUDEKIMP_PUBLIC_LAUNCHER:-false}" != "true" &&
+      "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
       ${save_count} -lt 11 ]]; then
     printf 'Expected at least 11 research saves, found %s in %s\n' \
         "${save_count}" "${save_root}" >&2
     exit 1
 fi
 
-"${project_dir}/tools/build-linux.sh"
+if [[ "${SUDEKIMP_SKIP_BUILD:-false}" == "true" ]]; then
+    if [[ ! -f "${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe" ||
+          ! -f "${project_dir}/build/mingw32/bin/SudekiMP.dll" ||
+          ! -f "${project_dir}/build/mingw32/bin/SudekiMP.ini" ]]; then
+        printf '%s\n' \
+            'Packaged launcher artifacts are incomplete; reinstall SudekiMP.' >&2
+        exit 1
+    fi
+else
+    "${project_dir}/tools/build-linux.sh"
+fi
 
 antialiasing_original=""
 input_bridge_pid=""
@@ -524,6 +544,10 @@ case "${mode}" in
             -e 's/^EnableSpiritStrikeViewportEffectIsolationPrototype=false$/EnableSpiritStrikeViewportEffectIsolationPrototype=true/' \
             -e 's/^ToggleSecondPlayerAi=J$/ToggleSecondPlayerAi=F10/' \
             "${generated_config}"
+        if [[ "${cleanroom_tools}" == false ]]; then
+            sed -i -e 's/^EnableCleanroomMenu=true$/EnableCleanroomMenu=false/' \
+                "${generated_config}"
+        fi
         ;;
     --trace)
         sed -i \

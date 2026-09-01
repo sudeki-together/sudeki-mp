@@ -1,5 +1,5 @@
-SUDEKIMP WINDOWS BETA
-=====================
+SUDEKIMP WINDOWS LAUNCHER
+========================
 
 This archive contains one SudekiMP folder. It is not a game installer and it
 does not include Sudeki itself.
@@ -16,20 +16,34 @@ does not include Sudeki itself.
 
 Do not double-click SudekiMP.Launcher.exe by itself. It is a console loader
 which requires the game and DLL paths. `Launch SudekiMP.cmd` opens the native
-beta launcher, which verifies the game build before it launches that loader.
+`SudekiMP.LauncherGUI.exe`, which verifies the game build before it launches
+that loader.
 
 Before first launch, this beta checks that SUDEKI.exe is the supported GOG
 build. It never changes SUDEKI.exe, the game archives, or your save files.
 
-This package starts in a safe single-player configuration. To run the focused
-Windows local-co-op beta, connect one XInput controller, use **Test XInput
-controller…** to confirm its slot, tick **Windows local co-op beta**, and then
-launch. The current beta reserves XInput slot 0 for Player 2, opens the
-co-op roster path, and enables split presentation. The unsafe post-collapse
-Talos party restoration is retired and forced off, and
-keeps the game's native slot-0 controller route from also moving Player 1.
-Player 1 remains keyboard/mouse. This is a focused input-and-lifecycle beta,
-not a complete co-op playthrough or online multiplayer release.
+Choose a profile in the launcher: **Local co-op (2 players)**, **LAN arena
+host**, **LAN arena client**, **Cleanroom**, or **Safe launch**. Local co-op
+reserves XInput slot 0 for Player 2 while Player 1 remains keyboard/mouse.
+LAN arena is a save-free, direct-IP, host-authoritative Tal/Ailish experiment;
+host and client each run a separate full-screen Sudeki process. Cleanroom is
+also save-free. Talos research profiles are intentionally not exposed.
+
+The **Enable cleanroom sandbox tools (F8)** checkbox applies only to the
+Cleanroom profile and defaults on. Press F8 there to spawn/remove party actors
+and the Training Dummy, toggle combat/camera modes, and use the cleanroom
+inventory and infinite-meter conveniences. Turning it off still launches the
+save-free testroom without installing the menu. It never enables these tools
+in campaign or LAN profiles.
+
+The launcher can stop only the game session it started and still tracks. It can
+open `SudekiMP.log` and export a local support folder containing the runtime
+log, active INI, and launcher summary. Log upload is not implemented; share the
+folder manually when requested.
+
+Update checks are optional. **Check for updates on startup** only reads the
+official small manifest and prompts when a different version exists. The
+launcher never installs an update silently or changes Sudeki game data/saves.
 
 CO-OP SAVE FIXTURES
 -------------------
@@ -62,7 +76,8 @@ music catalog and track over HTTPS, caches it under `%LOCALAPPDATA%\SudekiMP`,
 and plays it inside the launcher. The MP3 is not packaged with the beta.
 The **Developer: wander** button opens https://git.unfilteredrealm.com/wander.
 
-The **Get latest beta** button opens the public package page in your browser.
+The **Check for updates** button reads the public launcher manifest and, after
+confirmation, opens the public package page in your browser.
 Download and extract the ZIP yourself, then replace only this `SudekiMP`
 folder. This beta deliberately does not use an unsigned PowerShell self-updater:
 manual replacement is clearer, preserves your `SudekiMP.ini`, and never changes

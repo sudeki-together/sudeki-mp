@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
-launcher="${script_dir}/sudekimp-beta-launcher.sh"
+launcher="${script_dir}/sudekimp-launcher.sh"
 icon="${project_dir}/src/launcher/assets/SudekiMP.png"
 desktop_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
 desktop_file="${desktop_dir}/sudekimp-beta-launcher.desktop"
@@ -18,8 +18,8 @@ cat > "${desktop_file}" <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=SudekiMP Local Co-op Beta
-Comment=Launch the guarded SudekiMP Linux local co-op profiles
+Name=SudekiMP Launcher
+Comment=Launch SudekiMP local co-op, LAN arena, or cleanroom
 Exec=/bin/bash "${launcher}"
 Icon=${icon}
 Terminal=false

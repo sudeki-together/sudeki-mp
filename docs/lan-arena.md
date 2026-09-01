@@ -21,9 +21,13 @@ experiments.
 - Presentation: each process uses a separate full-screen native camera and HUD.
 - Replica locomotion: continuous movement retains a 25 ms interpolation
   buffer. A moving-to-idle edge consumes that final buffered distance in its
-  run pose instead of snapping or sliding. Tal's two verified native idle variants cross the wire as semantic
-  states; Ailish's native renderer owns animation-clock and blend progression
-  between semantic locomotion/action edges.
+  run pose instead of snapping or sliding. Tal's two verified native idle
+  variants and Ailish's verified selector-4/selector-5 idle variants cross the
+  wire as actor-neutral semantic states. Each client maps those semantics back
+  to its actor-local native clips; native selector numbers never cross the
+  network. A generic Ailish idle also suppresses client-only fidgets, while her
+  renderer still owns animation-clock and blend progression inside the
+  authenticated semantic clip.
 - Client native QuickMenu, skills, items, Spirit, save/load, transitions,
   dialogue, shops, and loot are blocked in this slice.
 
@@ -108,6 +112,18 @@ The LAN exact profile blocks native Previous/Next character rotation (including
 F1-driven rotation) because v1 authority is fixed to Tal on the host and Ailish
 on the client. Accepting a native switch would assign two authorities to one
 actor.
+
+## Scaling presentation to NPCs
+
+Snapshots deliberately carry semantic presentation (`idle`, `idle variant 1`,
+`idle variant 2`, `moving`, `action`, `incapacitated`) rather than renderer
+selectors. NPC expansion therefore does not require a different packet format
+for every model. Actors that share a skeleton/animation family can share one
+verified presentation adapter. A genuinely different rig, locomotion graph, or
+action layer needs its own exact selector/state/rate mapping and rollback test.
+The network and interpolation work grows mostly with replicated actor count;
+the reverse-engineering cost grows with the number of distinct animation
+families, not simply the number of NPC instances.
 
 ## Acceptance boundary
 
