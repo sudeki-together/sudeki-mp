@@ -12,13 +12,18 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LAN3`, exact GOG executable hash only.
+- Protocol/build: `LAN4`, exact GOG executable hash only.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
 - Client actions: camera-relative movement and weak attack.
 - Host snapshots: Tal, Ailish, the fixed training dummy, HP/SP, transforms,
   facing, presentation/combat state, and match state at 20 Hz.
 - Presentation: each process uses a separate full-screen native camera and HUD.
+- Replica locomotion: continuous movement retains a 25 ms interpolation
+  buffer. A moving-to-idle edge consumes that final buffered distance in its
+  run pose instead of snapping or sliding. Tal's two verified native idle variants cross the wire as semantic
+  states; Ailish's native renderer owns animation-clock and blend progression
+  between semantic locomotion/action edges.
 - Client native QuickMenu, skills, items, Spirit, save/load, transitions,
   dialogue, shops, and loot are blocked in this slice.
 

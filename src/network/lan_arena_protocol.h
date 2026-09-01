@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 3u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 4u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c414e33u /* "LAN3" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c414e34u /* "LAN4" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -33,7 +33,9 @@ typedef enum SudekiMpLanArenaAnimationState {
     SUDEKIMP_LAN_ARENA_ANIMATION_IDLE = 0,
     SUDEKIMP_LAN_ARENA_ANIMATION_MOVING = 1,
     SUDEKIMP_LAN_ARENA_ANIMATION_ACTION = 2,
-    SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED = 3
+    SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED = 3,
+    SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE = 4,
+    SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO = 5
 } SudekiMpLanArenaAnimationState;
 
 typedef enum SudekiMpLanArenaCombatState {

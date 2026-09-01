@@ -86,7 +86,7 @@ static int valid_actor_snapshot(
     float facing_length;
     if (actor == NULL || actor->actor_type != expected_type ||
         actor->native_entity_id != expected_type || actor->reserved != 0u ||
-        actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED ||
+        actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
         actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         actor->sp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||

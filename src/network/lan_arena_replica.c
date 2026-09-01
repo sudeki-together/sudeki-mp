@@ -21,6 +21,15 @@ static void interpolate_actor(
     *output = *after;
     if (before->native_entity_id != after->native_entity_id ||
         before->actor_type != after->actor_type) return;
+    /* Keep the final locomotion pose while consuming the remaining buffered
+     * distance. Switching to idle before the endpoint produces foot sliding;
+     * snapping directly to the endpoint produces a visible position pop. */
+    if (before->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
+        after->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
+        after->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_IDLE) {
+        output->animation_state = before->animation_state;
+        output->combat_state = before->combat_state;
+    }
     output->x = interpolate_float(before->x, after->x, alpha);
     output->y = interpolate_float(before->y, after->y, alpha);
     output->z = interpolate_float(before->z, after->z, alpha);

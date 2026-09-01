@@ -114,8 +114,14 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[size - 1u] = 3u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
-    source.body.snapshot.tal.animation_state = 4u;
+    source.body.snapshot.tal.animation_state = 6u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.tal.animation_state =
         SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
     source.body.snapshot.ailish.combat_state = 3u;

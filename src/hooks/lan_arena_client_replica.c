@@ -75,6 +75,8 @@ enum {
      * image.  These are renderer selectors, not protocol values: the LAN
      * snapshot remains semantic (idle/moving/action) across the wire. */
     TAL_WORLD_IDLE_SELECTOR = 4,
+    TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR = 10,
+    TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR = 11,
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
     AILISH_WORLD_IDLE_SELECTOR = 1,
@@ -105,7 +107,7 @@ static SudekiMpLanArenaReplica replica;
 static DWORD latest_snapshot_received_at;
 static LanArenaPresentationLease presentation_leases[2];
 
-enum { REPLICA_INTERPOLATION_DELAY_MS = 50u };
+enum { REPLICA_INTERPOLATION_DELAY_MS = 25u };
 
 static BOOL readable_memory(const void *pointer, size_t length) {
     MEMORY_BASIC_INFORMATION information;
@@ -227,9 +229,10 @@ static BOOL actor_presentation_matches(
     const LanArenaAnimationMethods *methods,
     unsigned int submodels,
     unsigned int actor_index,
-    BOOL moving,
+    uint8_t animation_state,
     BOOL weak_attack
 ) {
+    BOOL moving = animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
     int selector_zero = actor_index == 0u ?
         (moving ? TAL_WORLD_MOVE_PRIMARY_SELECTOR : TAL_WORLD_IDLE_SELECTOR) :
         (moving ? AILISH_WORLD_MOVE_PRIMARY_SELECTOR : AILISH_WORLD_IDLE_SELECTOR);
@@ -243,6 +246,15 @@ static BOOL actor_presentation_matches(
         (actor_index == 0u ? TAL_WORLD_MOVE_SECONDARY_RATE :
             AILISH_WORLD_MOVE_SECONDARY_RATE) : 0.0f;
     float blend_zero = methods->get_blend(renderer, 0);
+    if (actor_index == 0u &&
+        animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE) {
+        selector_zero = TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR;
+        rate_zero = 24.0f;
+    } else if (actor_index == 0u &&
+               animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO) {
+        selector_zero = TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+        rate_zero = 24.0f;
+    }
     if (!animation_channel_matches(renderer, methods, submodels, 0,
             selector_zero, rate_zero) ||
         !animation_channel_matches(renderer, methods, submodels, 1,
@@ -275,6 +287,23 @@ static BOOL actor_presentation_matches(
             (actor_index == 1u && weak_attack ? 1.0f : 0.0f)) <= 0.001f;
 }
 
+static BOOL ailish_locomotion_base_matches(
+    void *renderer,
+    const LanArenaAnimationMethods *methods,
+    unsigned int submodels
+) {
+    float blend_zero = methods->get_blend(renderer, 0);
+    return animation_channel_matches(
+            renderer, methods, submodels, 0,
+            AILISH_WORLD_MOVE_PRIMARY_SELECTOR,
+            AILISH_WORLD_MOVE_PRIMARY_RATE) &&
+        animation_channel_matches(
+            renderer, methods, submodels, 1,
+            AILISH_WORLD_MOVE_SECONDARY_SELECTOR,
+            AILISH_WORLD_MOVE_SECONDARY_RATE) &&
+        isfinite(blend_zero) && fabsf(blend_zero - 0.99f) <= 0.001f;
+}
+
 static BOOL apply_actor_presentation(
     uint8_t *character,
     const SudekiMpLanArenaActorSnapshot *snapshot,
@@ -290,6 +319,7 @@ static BOOL apply_actor_presentation(
     BOOL moving;
     int selector_zero;
     int selector_one;
+    int state_zero;
     int state_one;
     float rate_zero;
     float rate_one;
@@ -300,6 +330,7 @@ static BOOL apply_actor_presentation(
     float action_rate;
     BOOL weak_attack;
     BOOL logical_transition;
+    BOOL preserve_ailish_auxiliary = FALSE;
     if (character == NULL || snapshot == NULL || actor_index >= 2u ||
         snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED) {
         return FALSE;
@@ -329,10 +360,26 @@ static BOOL apply_actor_presentation(
         lease->renderer != renderer ||
         lease->animation_state != snapshot->animation_state ||
         lease->combat_state != snapshot->combat_state;
-    if (!logical_transition && actor_presentation_matches(
-            renderer, &methods, submodels, actor_index, moving, weak_attack)) {
-        return TRUE;
+    if (!logical_transition) {
+        /* Ailish's native renderer advances locomotion through a double-
+         * buffered channel pair. Reasserting our settled pair whenever that
+         * native blend progressed caused the visible limp/stumble. Own only
+         * semantic edges for her and let Sudeki advance the animation clock
+         * and blend between those edges. Tal's restricted base-channel path
+         * remains verified continuously because his auxiliary selectors are
+         * not safe to touch. */
+        if (actor_index == 1u) {
+            if (!moving || weak_attack) return TRUE;
+            if (ailish_locomotion_base_matches(
+                    renderer, &methods, submodels)) return TRUE;
+            preserve_ailish_auxiliary = TRUE;
+        } else if (actor_presentation_matches(
+                       renderer, &methods, submodels, actor_index,
+                       snapshot->animation_state, weak_attack)) {
+            return TRUE;
+        }
     }
+    state_zero = 0;
     if (actor_index == 0u) {
         selector_zero = moving ?
             TAL_WORLD_MOVE_PRIMARY_SELECTOR : TAL_WORLD_IDLE_SELECTOR;
@@ -340,6 +387,17 @@ static BOOL apply_actor_presentation(
         state_one = moving ? 0 : 192;
         rate_zero = moving ? TAL_WORLD_MOVE_PRIMARY_RATE : 12.0f;
         rate_one = moving ? TAL_WORLD_MOVE_SECONDARY_RATE : 0.0f;
+        if (snapshot->animation_state ==
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE) {
+            selector_zero = TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR;
+            rate_zero = 24.0f;
+            state_zero = 1;
+        } else if (snapshot->animation_state ==
+                   SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO) {
+            selector_zero = TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+            rate_zero = 24.0f;
+            state_zero = 1;
+        }
     } else {
         selector_zero = moving ?
             AILISH_WORLD_MOVE_PRIMARY_SELECTOR : AILISH_WORLD_IDLE_SELECTOR;
@@ -349,7 +407,7 @@ static BOOL apply_actor_presentation(
         rate_one = moving ? AILISH_WORLD_MOVE_SECONDARY_RATE : 0.0f;
     }
     set_animation_channel(renderer, &methods, submodels, 0,
-        selector_zero, 0, rate_zero, logical_transition);
+        selector_zero, state_zero, rate_zero, logical_transition);
     set_animation_channel(renderer, &methods, submodels, 1,
         selector_one, state_one, rate_one, logical_transition);
     expected_blend_zero = moving ? 0.99f : 0.0f;
@@ -363,7 +421,7 @@ static BOOL apply_actor_presentation(
          * Keep the client replica on its clean base pose instead of guessing
          * or retaining a native action layer from before the AI lease. */
         methods.set_blend(renderer, 3, 0.0f);
-    } else {
+    } else if (!preserve_ailish_auxiliary) {
         set_animation_channel(renderer, &methods, submodels, 2,
             0, 192, 0.0f, logical_transition);
         set_animation_channel(renderer, &methods, submodels, 3,
@@ -380,9 +438,15 @@ static BOOL apply_actor_presentation(
             action_selector, action_state, action_rate, logical_transition);
         methods.set_blend(renderer, 3, expected_blend_three);
     }
-    if (!actor_presentation_matches(
-            renderer, &methods, submodels, actor_index, moving, weak_attack)) {
-        return FALSE;
+    if (preserve_ailish_auxiliary) {
+        if (!ailish_locomotion_base_matches(
+                renderer, &methods, submodels)) return FALSE;
+    } else {
+        if (!actor_presentation_matches(
+                renderer, &methods, submodels, actor_index,
+                snapshot->animation_state, weak_attack)) {
+            return FALSE;
+        }
     }
     lease->character = character;
     lease->renderer = renderer;
