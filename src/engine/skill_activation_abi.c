@@ -22,6 +22,7 @@ enum {
     CSKILL_ORDER_ARRAY_OFFSET = 0x54u,
     SKILL_DATA_ENABLED_OFFSET = 0x08u,
     SKILL_DATA_SLOT_OFFSET = 0x0cu,
+    SKILL_DATA_COST_OFFSET = 0x94u,
     NATIVE_QUICK_SKILL_COUNT = 6u
 };
 
@@ -247,6 +248,82 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkillWithApi(
     }
     result.status = SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE;
     return result;
+}
+
+BOOL SudekiMpDescribeCharacterQuickSkillsWithApi(
+    void *character,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpSkillQuickSkillList *list
+) {
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *skill;
+    void *skill_context;
+    unsigned int index;
+
+    if (list == NULL) {
+        return FALSE;
+    }
+    ZeroMemory(list, sizeof(*list));
+    if (character_bytes == NULL || api == NULL ||
+        api->availability_target == NULL ||
+        !readable_memory(api->include_unavailable_skills,
+            sizeof(*api->include_unavailable_skills)) ||
+        !readable_memory(character_bytes,
+            CHARACTER_SKILL_OFFSET + sizeof(skill))) {
+        return FALSE;
+    }
+    skill_context = *(void **)(character_bytes +
+        CHARACTER_SKILL_CONTEXT_OFFSET);
+    skill = *(uint8_t **)(character_bytes + CHARACTER_SKILL_OFFSET);
+    if (skill_context == NULL || !readable_memory(skill,
+            CSKILL_ORDER_ARRAY_OFFSET +
+            NATIVE_QUICK_SKILL_COUNT * sizeof(unsigned int)) ||
+        *(void **)(skill + 0x10u) != character) {
+        return FALSE;
+    }
+    for (index = 0u; index < NATIVE_QUICK_SKILL_COUNT; ++index) {
+        unsigned int data_index = *(unsigned int *)(
+            skill + CSKILL_ORDER_ARRAY_OFFSET + index * sizeof(unsigned int));
+        void *skill_data;
+        BOOL available;
+        SudekiMpSkillQuickSkillRow *row;
+
+        if (data_index >= NATIVE_QUICK_SKILL_COUNT) {
+            continue;
+        }
+        skill_data = *(void **)(skill + CSKILL_DATA_ARRAY_OFFSET +
+            data_index * sizeof(void *));
+        if (!readable_memory(skill_data,
+                SKILL_DATA_COST_OFFSET + sizeof(uint32_t))) {
+            continue;
+        }
+        available = *((uint8_t *)skill_data + SKILL_DATA_ENABLED_OFFSET) != 0u &&
+            SudekiMpCallSkillAvailability(
+                api->availability_target, skill_data, skill_context) != 0u;
+        if (!available && *api->include_unavailable_skills == 0u) {
+            continue;
+        }
+        if (list->row_count >= NATIVE_QUICK_SKILL_COUNT) {
+            return FALSE;
+        }
+        row = &list->rows[list->row_count];
+        row->ordinal = list->row_count;
+        row->slot = *(int *)((uint8_t *)skill_data +
+            SKILL_DATA_SLOT_OFFSET);
+        row->cost = *(uint32_t *)((uint8_t *)skill_data +
+            SKILL_DATA_COST_OFFSET);
+        row->available = available != FALSE;
+        ++list->row_count;
+    }
+    return TRUE;
+}
+
+BOOL SudekiMpDescribeCharacterQuickSkills(
+    void *character,
+    SudekiMpSkillQuickSkillList *list
+) {
+    return native_module != NULL &&
+        SudekiMpDescribeCharacterQuickSkillsWithApi(character, &native_api, list);
 }
 
 SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkill(

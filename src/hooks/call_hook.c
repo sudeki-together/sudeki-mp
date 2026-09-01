@@ -197,6 +197,50 @@ BOOL SudekiMpRestorePointerHook(SudekiMpPointerHook *hook) {
     return TRUE;
 }
 
+BOOL SudekiMpInstallBytePatch(
+    SudekiMpBytePatch *patch,
+    uint8_t *target,
+    uint8_t expected_value,
+    uint8_t replacement_value
+) {
+    if (patch == NULL || target == NULL || patch->installed ||
+        expected_value == replacement_value) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (*target != expected_value) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    patch->target = target;
+    patch->original_value = expected_value;
+    patch->replacement_value = replacement_value;
+    patch->installed = TRUE;
+    if (!write_protected_memory(
+            target, &replacement_value, sizeof(replacement_value))) {
+        ZeroMemory(patch, sizeof(*patch));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL SudekiMpRestoreBytePatch(SudekiMpBytePatch *patch) {
+    if (patch == NULL || !patch->installed || patch->target == NULL) {
+        return TRUE;
+    }
+    if (*patch->target != patch->replacement_value) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (!write_protected_memory(
+            patch->target, &patch->original_value,
+            sizeof(patch->original_value))) {
+        return FALSE;
+    }
+    ZeroMemory(patch, sizeof(*patch));
+    return TRUE;
+}
+
 BOOL SudekiMpInstallInlineHook(
     SudekiMpInlineHook *hook,
     uint8_t *target,

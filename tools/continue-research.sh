@@ -18,17 +18,21 @@ input_bridge_helper="${project_dir}/build/linux/bin/sudekimp-input-bridge"
 input_bridge_log="${project_dir}/build/linux/input-bridge.log"
 input_bridge_p2_log="${project_dir}/build/linux/input-bridge-p2.log"
 input_bridge_p3_log="${project_dir}/build/linux/input-bridge-p3.log"
+lan_arena_host="${SUDEKIMP_LAN_ARENA_HOST:-127.0.0.1}"
+lan_arena_port="${SUDEKIMP_LAN_ARENA_PORT:-26770}"
 supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
 supported_world_sha256='e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9'
 
 usage() {
     printf '%s\n' \
-        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
+        'usage: tools/continue-research.sh [--safe|--cleanroom|--test-arena|--cafu-testroom|--lan-arena-host|--lan-arena-client|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test [key]|--speed-test [multiplier]|--camera-speed-test [multiplier]|--check]' \
         '' \
         '  --safe        Build, verify, and launch with every optional hook disabled.' \
         '  --cleanroom   Start Ailish in the shipped testroom with the F8 spawn/despawn menu.' \
         '  --test-arena  Alias for --cleanroom retained for the research checkpoint.' \
         '  --cafu-testroom  Bootstrap Ailish in testroom and ask Sudeki native developer code to spawn Cafu.' \
+        '  --lan-arena-host Host the cleanroom LAN arena as Tal (direct IPv4 UDP).' \
+        '  --lan-arena-client Join the cleanroom LAN arena as Ailish (set SUDEKIMP_LAN_ARENA_HOST and optional _PORT).' \
         '  --trace       Enable normal-speed Quick Menu and observation-only Plasmatica tracing.' \
         '  --input-trace Trace native QuickSkill input and either native Plasmatica activation route.' \
         '  --character-switch-trace  Observe vanilla party rotation, controller target, and old/new AI-mode transition.' \
@@ -59,7 +63,7 @@ usage() {
         '  --dual-camera-local-coop-test Combine dual cameras with F10 AI override and I/J/K/L Buki movement.' \
         '  --controller-bridge-test Drive the first non-front party member, weak attack, and independent camera from a Linux controller.' \
         '  --three-seat-input-transport-test Start distinct Linux bridges for P2 and P3 and require the closed LocalInputHub 0x07 transport bank. P3 actor, camera, HUD, and gameplay ownership are not enabled.' \
-        '  --three-player-local-coop-test Run the closed three-player roster, control, camera, frame-cache, and fixed js0/js1 UDP profile. P3 Quick Menu and P4 remain fail-closed.' \
+        '  --three-player-local-coop-test Run the closed three-player roster, control, camera, frame-cache, and fixed js0/js1 UDP profile. One serialized Skills menu stays pinned to its P1/P2/P3 viewport; P4 remains fail-closed.' \
         '  --realtime-skill-coop-test Add guarded P1/P2 native skills and caster-only Plasmatica camera routing.' \
         '  --second-player-target-trace Passively log Buki native target changes while AI is off.' \
         '  --second-player-attack-test Use F10 for Buki AI, I/J/K/L movement, and U for Buki weak attack.' \
@@ -79,7 +83,7 @@ if [[ "${mode}" == "--talos-party-test" ]]; then
 fi
 
 case "${mode}" in
-    --safe|--cleanroom|--test-arena|--cafu-testroom|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
+    --safe|--cleanroom|--test-arena|--cafu-testroom|--lan-arena-host|--lan-arena-client|--trace|--input-trace|--character-switch-trace|--party-lifecycle-trace|--door-transition-trace|--merchant-checkout-trace|--native-p2-camera-collision-test|--talos-party-test|--talos-lifecycle-observation|--talos-staging-observation|--talos-post-movie-party-test|--talos-post-movie-dual-camera-test|--talos-defense-trace|--zone-transition-trace|--zone-traversal-test|--freeroam-camera-test|--control-separation-test|--player-input-trace|--second-player-movement-test|--second-player-camera-movement-test|--second-player-separation-test|--shared-group-camera-test|--split-screen-render-test|--second-player-render-camera-test|--dual-camera-frame-cache-test|--shared-quit-menu-test|--viewport-hud-test|--dual-camera-local-coop-test|--controller-bridge-test|--three-seat-input-transport-test|--three-player-local-coop-test|--realtime-skill-coop-test|--second-player-target-trace|--second-player-attack-test|--ranged-skill-test|--spirit-strike-test|--speed-test|--camera-speed-test|--check)
         ;;
     --help|-h)
         usage
@@ -101,8 +105,23 @@ fi
 if [[ "${mode}" == "--talos-staging-observation" ||
       "${mode}" == "--talos-post-movie-party-test" ||
       "${mode}" == "--talos-post-movie-dual-camera-test" ||
+      "${mode}" == "--lan-arena-host" ||
+      "${mode}" == "--lan-arena-client" ||
       "${mode}" == "--three-player-local-coop-test" ]]; then
     unset SUDEKIMP_ZONE_TRACE
+fi
+if [[ "${mode}" == "--lan-arena-host" || "${mode}" == "--lan-arena-client" ]]; then
+    if [[ ! "${lan_arena_port}" =~ ^[0-9]+$ ]] ||
+       (( lan_arena_port < 1024 || lan_arena_port > 65535 )); then
+        printf 'Invalid LAN arena port: %s (expected 1024 through 65535)\n' \
+            "${lan_arena_port}" >&2
+        exit 2
+    fi
+    if [[ "${mode}" == "--lan-arena-client" &&
+          ! "${lan_arena_host}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        printf 'Invalid LAN arena IPv4 address: %s\n' "${lan_arena_host}" >&2
+        exit 2
+    fi
 fi
 
 if [[ "${mode}" == "--speed-test" || "${mode}" == "--camera-speed-test" ]]; then
@@ -168,6 +187,17 @@ if [[ "${mode}" == "--cleanroom" || "${mode}" == "--test-arena" ||
         game_launch_args+=(--game-arg=-SudekiMPCafuProbe --game-arg=1)
     fi
 fi
+if [[ "${mode}" == "--lan-arena-host" || "${mode}" == "--lan-arena-client" ]]; then
+    game_launch_args+=(
+        --game-arg=-Level --game-arg=testroom
+        --game-arg=-DT --game-arg=1
+    )
+    if [[ "${mode}" == "--lan-arena-host" ]]; then
+        game_launch_args+=(--game-arg=-Tal --game-arg=1)
+    else
+        game_launch_args+=(--game-arg=-Ailish --game-arg=1)
+    fi
+fi
 
 if pgrep -x SUDEKI.exe >/dev/null; then
     printf '%s\n' 'Sudeki is already running; close it normally before resuming research.' >&2
@@ -213,13 +243,18 @@ if [[ "${mode}" == "--talos-lifecycle-observation" ||
         "  SUDEKI.exe:    ${game_sha256}" \
         "  SOLWORLDM.gex: ${world_sha256}"
 fi
-if [[ ! -d "${save_root}" ]]; then
+if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
+      ! -d "${save_root}" ]]; then
     printf 'Research save directory is missing: %s\n' "${save_root}" >&2
     exit 1
 fi
 
-save_count="$(find "${save_root}" -mindepth 1 -maxdepth 1 -type d -name 'SAVESLOT*' | wc -l)"
-if (( save_count < 11 )); then
+save_count=0
+if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" ]]; then
+    save_count="$(find "${save_root}" -mindepth 1 -maxdepth 1 -type d -name 'SAVESLOT*' | wc -l)"
+fi
+if [[ "${mode}" != "--lan-arena-host" && "${mode}" != "--lan-arena-client" &&
+      ${save_count} -lt 11 ]]; then
     printf 'Expected at least 11 research saves, found %s in %s\n' \
         "${save_count}" "${save_root}" >&2
     exit 1
@@ -257,6 +292,50 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 case "${mode}" in
+    --lan-arena-host|--lan-arena-client)
+        # Closed direct-IP arena profile. It intentionally does not reuse the
+        # local-controller bridge, split renderer, roster, campaign save, or
+        # global native QuickMenu experiments.
+        sed -i -E \
+            -e 's/^(Enable[A-Za-z0-9]+)=.*/\1=false/' \
+            -e 's/^SkipStartupMovies=.*/SkipStartupMovies=true/' \
+            -e "s/^LanArenaHost=.*$/LanArenaHost=${lan_arena_host}/" \
+            -e "s/^LanArenaPort=.*$/LanArenaPort=${lan_arena_port}/" \
+            "${generated_config}"
+        if [[ "${mode}" == "--lan-arena-host" ]]; then
+            sed -i -E \
+                -e 's/^EnableLanArenaHostPrototype=false$/EnableLanArenaHostPrototype=true/' \
+                -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+                "${generated_config}"
+            lan_expected_one='EnableLanArenaHostPrototype'
+            lan_expected_two='EnableControlSeparationPrototype'
+        else
+            sed -i -E \
+                -e 's/^EnableLanArenaClientPrototype=false$/EnableLanArenaClientPrototype=true/' \
+                -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+                "${generated_config}"
+            lan_expected_one='EnableLanArenaClientPrototype'
+            lan_expected_two='EnableControlSeparationPrototype'
+        fi
+        lan_unexpected_enabled="$(awk -F= -v one="${lan_expected_one}" -v two="${lan_expected_two}" '
+            $1 ~ /^Enable/ && $2 == "true" && $1 != one && $1 != two { print }
+        ' "${generated_config}")"
+        if [[ -n "${lan_unexpected_enabled}" ]] ||
+           ! grep -Fqx "${lan_expected_one}=true" "${generated_config}" ||
+           { [[ -n "${lan_expected_two}" ]] && ! grep -Fqx "${lan_expected_two}=true" "${generated_config}"; } ||
+           ! grep -Fqx "LanArenaHost=${lan_arena_host}" "${generated_config}" ||
+           ! grep -Fqx "LanArenaPort=${lan_arena_port}" "${generated_config}" ||
+           ! grep -Fqx 'EnableExternalInputBridgePrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableThreeSeatUdpTransportPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableSplitScreenRenderPrototype=false' "${generated_config}" ||
+           ! grep -Fqx 'EnableCoopRosterMenu=false' "${generated_config}"; then
+            printf '%s\n' 'LAN arena refused: generated configuration is not the closed direct-IP profile.' >&2
+            if [[ -n "${lan_unexpected_enabled}" ]]; then
+                printf '%s\n' "${lan_unexpected_enabled}" >&2
+            fi
+            exit 1
+        fi
+        ;;
     --talos-post-movie-party-test)
         # Closed two-human/four-hero profile. Retail owns every companion and
         # Kazel delete plus the entire movie/TSA sequence; the DLL restores only
@@ -1001,7 +1080,7 @@ if [[ "${mode}" == "--three-player-local-coop-test" ]]; then
         "  Player 2 uses ${input_device} on UDP ${input_bridge_port} and owns the bottom-left viewport." \
         "  Player 3 uses ${input_device_p3} on UDP $((input_bridge_port + 1)) and owns the bottom-right viewport." \
         '  P2 and P3 left sticks move relative to their own camera; each right stick rotates only that seats camera. A submits the guarded native weak attack.' \
-        '  This first P3 slice intentionally rejects Player 3 Quick Menu and every unproven P3 action. Player 4, roaming-boundary policy, party-transition integration, and loaded-save autostart remain disabled.' \
+        '  Q (P1) and Y (P2/P3) open compact mod-owned Quick Menu panels in their own viewports; the global native Quick Menu remains closed. Each panel has Skills, Weapons, Items, and Spirit tabs and freezes only its owner. Player 4, roaming-boundary policy, party-transition integration, and loaded-save autostart remain disabled.' \
         '  The profile fails closed unless both distinct controller transports, all three actor/input generations, three camera/render/HUD leases, and all three fresh frame caches agree on mask 0x07.' \
         '  Stop the run on a swapped hero/view, cross-driven camera, stale frame, duplicate input device, missing lease, or any fallback that grants P3 control without a ready P3 viewport.'
 fi

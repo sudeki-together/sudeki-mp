@@ -24,6 +24,13 @@ typedef struct SudekiMpPointerHook {
     BOOL installed;
 } SudekiMpPointerHook;
 
+typedef struct SudekiMpBytePatch {
+    uint8_t *target;
+    uint8_t original_value;
+    uint8_t replacement_value;
+    BOOL installed;
+} SudekiMpBytePatch;
+
 #define SUDEKIMP_INLINE_HOOK_MAX_BYTES 16u
 
 typedef struct SudekiMpInlineHook {
@@ -61,6 +68,15 @@ BOOL SudekiMpInstallPointerHook(
 );
 
 BOOL SudekiMpRestorePointerHook(SudekiMpPointerHook *hook);
+
+BOOL SudekiMpInstallBytePatch(
+    SudekiMpBytePatch *patch,
+    uint8_t *target,
+    uint8_t expected_value,
+    uint8_t replacement_value
+);
+
+BOOL SudekiMpRestoreBytePatch(SudekiMpBytePatch *patch);
 
 BOOL SudekiMpInstallInlineHook(
     SudekiMpInlineHook *hook,

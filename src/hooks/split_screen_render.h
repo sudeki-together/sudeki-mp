@@ -2,6 +2,7 @@
 #define SUDEKIMP_SPLIT_SCREEN_RENDER_H
 
 #include "engine/coop_roster_assignment.h"
+#include "engine/local_quick_menu.h"
 
 #include <windows.h>
 
@@ -21,7 +22,12 @@ typedef enum SudekiMpSplitScreenQuickMenuAction {
     SUDEKIMP_QUICK_MENU_ACTION_CANCEL = 1,
     SUDEKIMP_QUICK_MENU_ACTION_SECONDARY = 2,
     SUDEKIMP_QUICK_MENU_ACTION_UP = 3,
-    SUDEKIMP_QUICK_MENU_ACTION_DOWN = 4
+    SUDEKIMP_QUICK_MENU_ACTION_DOWN = 4,
+    /* These map to the custom fixed-three panel only.  The legacy native
+     * singleton deliberately rejects them rather than guessing a native
+     * command. */
+    SUDEKIMP_QUICK_MENU_ACTION_PREVIOUS_CATEGORY = 5,
+    SUDEKIMP_QUICK_MENU_ACTION_NEXT_CATEGORY = 6
 } SudekiMpSplitScreenQuickMenuAction;
 
 enum {
@@ -407,17 +413,25 @@ BOOL SudekiMpSplitScreenQuickMenuOwnerCaptureAdvanced(
     BOOL capture_allowed,
     BOOL compose_succeeded
 );
-/* One shipped QuickMenu singleton is serialized across local seats. P1/P2
- * have complete actor, input, view, and cached-viewport leases today; P3/P4
- * reject requests until those native consumers exist. P2 confirm/up/down are
- * atomic taps, cancel uses native close, and secondary is rejected under the
- * deliberately Skills-only contract. */
+/* One shipped QuickMenu singleton is serialized across local seats. In the
+ * fixed three-seat renderer it is pinned to P1, P2, or P3's own cached
+ * viewport for the entire native open/close tail; a second request is busy
+ * rather than displaying the first player's Skills elsewhere. P2/P3
+ * confirm/up/down are atomic taps, cancel uses native close, and secondary
+ * remains rejected under the deliberately Skills-only contract. */
 BOOL SudekiMpSplitScreenQuickMenuRequest(unsigned int seat_index);
 BOOL SudekiMpSplitScreenQuickMenuActive(unsigned int seat_index);
 BOOL SudekiMpSplitScreenQuickMenuAnyActive(void);
 BOOL SudekiMpSplitScreenQuickMenuSubmit(
     unsigned int seat_index,
     SudekiMpSplitScreenQuickMenuAction action
+);
+/* Fixed 0x07 uses a mod-owned, per-seat panel instead of retail's one global
+ * QuickMenu.  It stays invisible until every category adapter has passed its
+ * own native-action preflight; no partially actionable menu is exposed. */
+BOOL SudekiMpSplitScreenFixedThreeCustomQuickMenuEnabled(void);
+void SudekiMpSplitScreenSetFixedThreeCustomQuickMenuActionCapabilities(
+    uint32_t category_mask
 );
 /* Pure policy used by the alternating frame cache and its exact-image tests.
  * The native map update owns both the centered facing pointer and the map

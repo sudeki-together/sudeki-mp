@@ -12,26 +12,31 @@ BOOL SudekiMpLogOpenBesideGame(const wchar_t *game_path) {
     static const wchar_t filename[] = L"SudekiMP.log";
     size_t prefix_length;
 
-    if (game_path == NULL || lstrlenW(game_path) >= MAX_PATH) {
-        return FALSE;
-    }
+    DWORD override_length = GetEnvironmentVariableW(
+        L"SUDEKIMP_LOG_PATH", path, MAX_PATH);
 
-    lstrcpyW(path, game_path);
-    slash = wcsrchr(path, L'\\');
-    if (slash == NULL) {
-        slash = wcsrchr(path, L'/');
-    }
-    if (slash != NULL) {
-        slash[1] = L'\0';
+    if (override_length > 0u) {
+        if (override_length >= MAX_PATH) return FALSE;
+    } else if (game_path == NULL || lstrlenW(game_path) >= MAX_PATH) {
+        return FALSE;
     } else {
-        path[0] = L'\0';
-    }
+        lstrcpyW(path, game_path);
+        slash = wcsrchr(path, L'\\');
+        if (slash == NULL) {
+            slash = wcsrchr(path, L'/');
+        }
+        if (slash != NULL) {
+            slash[1] = L'\0';
+        } else {
+            path[0] = L'\0';
+        }
 
-    prefix_length = (size_t)lstrlenW(path);
-    if (prefix_length + (sizeof(filename) / sizeof(filename[0])) > MAX_PATH) {
-        return FALSE;
+        prefix_length = (size_t)lstrlenW(path);
+        if (prefix_length + (sizeof(filename) / sizeof(filename[0])) > MAX_PATH) {
+            return FALSE;
+        }
+        lstrcatW(path, filename);
     }
-    lstrcatW(path, filename);
 
     log_file = CreateFileW(
         path,

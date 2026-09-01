@@ -38,6 +38,27 @@ typedef struct SudekiMpSkillActivationResult {
     uint8_t use_result;
 } SudekiMpSkillActivationResult;
 
+enum {
+    SUDEKIMP_SKILL_ACTIVATION_MAX_QUICK_SKILLS = 6u
+};
+
+/* Pointer-free enough to cross into the local Quick Menu model.  `ordinal`
+ * is the same filtered ordinal accepted by ActivateCharacterQuickSkill; it
+ * is never a guessed UI row or a raw CSkill pointer. */
+typedef struct SudekiMpSkillQuickSkillRow {
+    uint32_t ordinal;
+    int slot;
+    uint32_t cost;
+    uint8_t available;
+    uint8_t reserved[3];
+} SudekiMpSkillQuickSkillRow;
+
+typedef struct SudekiMpSkillQuickSkillList {
+    uint32_t row_count;
+    SudekiMpSkillQuickSkillRow
+        rows[SUDEKIMP_SKILL_ACTIVATION_MAX_QUICK_SKILLS];
+} SudekiMpSkillQuickSkillList;
+
 uint8_t SudekiMpCallSkillAvailability(
     void *target,
     void *skill_data,
@@ -53,6 +74,15 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkillWithApi(
     void *character,
     unsigned int ordinal,
     const SudekiMpSkillActivationApi *api
+);
+BOOL SudekiMpDescribeCharacterQuickSkills(
+    void *character,
+    SudekiMpSkillQuickSkillList *list
+);
+BOOL SudekiMpDescribeCharacterQuickSkillsWithApi(
+    void *character,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpSkillQuickSkillList *list
 );
 const char *SudekiMpSkillActivationStatusName(
     SudekiMpSkillActivationStatus status

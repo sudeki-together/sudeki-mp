@@ -193,6 +193,28 @@ BOOL SudekiMpControlSeparationSeatActiveInputLeasePolicy(
     uint32_t current_generation
 );
 BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index);
+/* LAN host-only ingress. The runtime must enable this only after the UDP
+ * session has authenticated a fixed Ailish client; local keyboard/bridge
+ * input remains a separate path. Inputs are world-relative and are submitted
+ * through the same native Ailish AI lease and arbiter ABI as local co-op. */
+BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled);
+/* LAN profiles name their replica/remote actor explicitly and must not allow
+ * the ordinary local drop-in hotkey to retarget that lease. */
+BOOL SudekiMpControlSeparationSetManualToggleEnabled(BOOL enabled);
+BOOL SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
+    BOOL remote_session_authenticated,
+    BOOL player_two_requested,
+    BOOL player_two_lease_exact,
+    BOOL character_in_active_group,
+    BOOL native_control_state_exact,
+    BOOL direction_finite,
+    BOOL weak_attack_edge
+);
+BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
+    float world_direction_x,
+    float world_direction_z,
+    BOOL weak_attack_edge
+);
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
 BOOL SudekiMpControlSeparationPlayerTwoActive(void);
 void *SudekiMpControlSeparationPlayerTwoCharacter(void);

@@ -1,10 +1,15 @@
 #include "hooks/split_screen_render.h"
 
 #include "engine/log.h"
+#include "engine/local_quick_menu.h"
+#include "engine/item_activation_abi.h"
 #include "engine/local_viewport_layout.h"
 #include "engine/orbit_camera.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
+#include "engine/skill_activation_abi.h"
+#include "engine/spirit_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "input/bridge_protocol.h"
@@ -30,6 +35,11 @@ typedef struct SudekiMpD3DSurfaceDesc {
     UINT width;
     UINT height;
 } SudekiMpD3DSurfaceDesc;
+
+typedef struct SudekiMpD3DLockedRect {
+    int pitch;
+    void *bits;
+} SudekiMpD3DLockedRect;
 
 typedef struct SudekiMpBackdropVertex {
     float x;
@@ -78,6 +88,13 @@ typedef HRESULT (__stdcall *D3DGetRenderTargetFunction)(
 typedef HRESULT (__stdcall *D3DSurfaceGetDescFunction)(
     void *surface,
     SudekiMpD3DSurfaceDesc *description
+);
+typedef HRESULT (__stdcall *D3DTextureLockRectFunction)(
+    void *texture, UINT level, SudekiMpD3DLockedRect *locked,
+    const RECT *rectangle, DWORD flags
+);
+typedef HRESULT (__stdcall *D3DTextureUnlockRectFunction)(
+    void *texture, UINT level
 );
 typedef ULONG (__stdcall *ComReleaseFunction)(void *object);
 typedef HRESULT (__stdcall *D3DTextureGetSurfaceLevelFunction)(
@@ -470,9 +487,13 @@ enum {
     D3D_DEVICE_SET_PIXEL_SHADER_INDEX = 107u,
     D3D_SURFACE_GET_DESC_INDEX = 12u,
     D3D_TEXTURE_GET_SURFACE_LEVEL_INDEX = 18u,
+    D3D_TEXTURE_LOCK_RECT_INDEX = 19u,
+    D3D_TEXTURE_UNLOCK_RECT_INDEX = 20u,
     D3D_STATE_BLOCK_APPLY_INDEX = 5u,
     D3D_USAGE_RENDER_TARGET = 0x00000001u,
+    D3D_USAGE_DYNAMIC = 0x00000200u,
     D3D_POOL_DEFAULT = 0,
+    D3D_FORMAT_A8R8G8B8 = 21,
     D3D_STATE_BLOCK_ALL = 1,
     D3D_PRIMITIVE_TRIANGLE_STRIP = 5,
     D3D_FVF_XYZRHW_TEX1 = 0x00000104u,
@@ -556,6 +577,8 @@ typedef struct SudekiMpFixedThreeSeatRuntime {
     BOOL camera_input_logged[FIXED_THREE_SEAT_COUNT];
     void *frame_surfaces[FIXED_THREE_SEAT_COUNT];
     void *frame_textures[FIXED_THREE_SEAT_COUNT];
+    void *local_quick_menu_textures[FIXED_THREE_SEAT_COUNT];
+    uint32_t local_quick_menu_texture_revision[FIXED_THREE_SEAT_COUNT];
     void *frame_device;
     SudekiMpD3DSurfaceDesc frame_description;
     unsigned int frame_valid_mask;
@@ -852,6 +875,9 @@ static BOOL quick_menu_owner_player_two;
 static BOOL quick_menu_owner_session_logged;
 static SudekiMpQuickMenuSession quick_menu_session;
 static uint32_t quick_menu_next_serial;
+/* Unlike retail's singleton, this state is fully seat-indexed.  It is kept
+ * action-inert until the Skills/Weapons/Items/Spirit adapters are all exact. */
+static SudekiMpLocalQuickMenuState fixed_three_local_quick_menu;
 static SudekiMpPlayerTwoCollisionSelfCull
     player_two_collision_self_cull;
 static BOOL player_two_collision_self_cull_logged;
@@ -861,6 +887,21 @@ static BOOL writable_memory(void *pointer, size_t size);
 static void invalidate_dual_frame_cache(void);
 static unsigned int refresh_shared_interaction_modal(void);
 static void request_native_camera_manual_recreation(const char *reason);
+static BOOL fixed_three_assignment_selected(void);
+static BOOL fixed_three_base_leases_exact(void);
+static BOOL fixed_three_local_quick_menu_lease(
+    unsigned int seat_index,
+    SudekiMpLocalQuickMenuLease *lease
+);
+static BOOL fixed_three_refresh_local_quick_menu_snapshots(
+    unsigned int seat_index
+);
+static SudekiMpLocalQuickMenuResult fixed_three_execute_local_quick_menu_row(
+    unsigned int seat_index
+);
+static SudekiMpLocalQuickMenuResult fixed_three_begin_item_target_selection(
+    unsigned int seat_index
+);
 
 static unsigned int quick_menu_find_character_reference(
     const void *object,
@@ -1120,6 +1161,33 @@ static BOOL fixed_three_seat_view_exact(
     unsigned int seat_index,
     const void *character
 );
+
+static SudekiMpLocalQuickMenuResult fixed_three_begin_item_target_selection(
+    unsigned int seat_index
+) {
+    const void *targets[FIXED_THREE_SEAT_COUNT];
+    unsigned int target_index;
+
+    if (seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !fixed_three_runtime.configured ||
+        !fixed_three_base_leases_exact()) {
+        return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_LEASE;
+    }
+    for (target_index = 0u; target_index < FIXED_THREE_SEAT_COUNT;
+            ++target_index) {
+        if (fixed_three_runtime.actors[target_index] == NULL ||
+            fixed_three_runtime.party_slots[target_index] == UINT_MAX) {
+            return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_LEASE;
+        }
+        targets[target_index] = fixed_three_runtime.actors[target_index];
+    }
+    return SudekiMpLocalQuickMenuBeginTargetSelection(
+        &fixed_three_local_quick_menu,
+        seat_index,
+        targets,
+        FIXED_THREE_SEAT_COUNT);
+}
+
 static BOOL fixed_three_render_start_dispatch(BOOL runtime_authorized);
 static void fixed_three_frame_end_dispatch(void);
 
@@ -1405,6 +1473,25 @@ static BOOL quick_menu_owner_signatures_match(uint8_t *base) {
         }
     }
     return TRUE;
+}
+
+static void fixed_three_service_local_quick_menus(BOOL presentation_allowed) {
+    unsigned int seat_index;
+    SudekiMpLocalQuickMenuLease lease;
+
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+         ++seat_index) {
+        if (!SudekiMpLocalQuickMenuSeatActive(
+                &fixed_three_local_quick_menu, seat_index)) {
+            continue;
+        }
+        (void)SudekiMpLocalQuickMenuInvalidateIfLeaseChanged(
+            &fixed_three_local_quick_menu,
+            seat_index,
+            presentation_allowed &&
+                fixed_three_local_quick_menu_lease(seat_index, &lease) ?
+                    &lease : NULL);
+    }
 }
 
 static BOOL quick_menu_is_active_signature_matches(uint8_t *base) {
@@ -3664,36 +3751,74 @@ static BOOL quick_menu_capture_seat_session(
     void *native_menu;
     uint8_t *party_source;
 
-    if (seat_index >= 2u || !split_screen_render_installed ||
-        !runtime_split_enabled || !quick_menu_live_player_two_ready()) {
+    if (!split_screen_render_installed || !runtime_split_enabled) {
+        return FALSE;
+    }
+    if (seat_index >= (fixed_three_assignment_selected() ?
+            FIXED_THREE_SEAT_COUNT : 2u)) {
         return FALSE;
     }
     statehood = SudekiMpPlayerStatehoodRuntime();
     lease = statehood == NULL ? NULL : &statehood->players[seat_index];
-    if (lease == NULL || !lease->human_present || lease->actor == 0u ||
-        lease->actor_generation == 0u ||
-        !SudekiMpCombatContextGetSnapshot(seat_index, &combat)) {
-        return FALSE;
-    }
-    actor = seat_index == 0u ? player_one_character : player_two_character;
-    camera = seat_index == 0u ? player_one_camera : player_two_camera;
-    render_state = seat_index == 0u ?
-        player_one_render_state : player_two_render_state;
-    input_identity = combat.input_source;
-    if (actor == NULL || camera == NULL || render_state == NULL ||
-        input_identity == NULL || lease->actor != (uintptr_t)actor ||
-        combat.character != actor || combat.viewport_camera != camera ||
-        combat.render_state != render_state ||
-        (seat_index == 0u &&
-         combat.input_source_kind !=
-            SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER) ||
-        (seat_index == 1u &&
-         (combat.input_source_kind !=
-                SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
-          !SudekiMpControlSeparationPlayerTwoActive() ||
-          !SudekiMpControlSeparationInputReady() ||
-          input_identity != (void *)SudekiMpInputBridgeIdentity()))) {
-        return FALSE;
+    if (fixed_three_assignment_selected()) {
+        if (seat_index >= FIXED_THREE_SEAT_COUNT ||
+            !fixed_three_runtime.cameras_acquired ||
+            !fixed_three_base_leases_exact() || lease == NULL ||
+            !lease->human_present || lease->actor == 0u ||
+            lease->actor_generation == 0u ||
+            !SudekiMpCombatContextGetSnapshot(seat_index, &combat)) {
+            return FALSE;
+        }
+        actor = fixed_three_runtime.actors[seat_index];
+        camera = fixed_three_runtime.cameras[seat_index];
+        render_state = fixed_three_runtime.render_states[seat_index];
+        input_identity = combat.input_source;
+        if (actor == NULL || camera == NULL || render_state == NULL ||
+            input_identity == NULL || lease->actor != (uintptr_t)actor ||
+            lease->actor_generation !=
+                fixed_three_runtime.actor_generations[seat_index] ||
+            combat.character != actor || combat.viewport_camera != camera ||
+            combat.render_state != render_state ||
+            (seat_index == 0u &&
+             (combat.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER ||
+              input_identity != fixed_three_runtime.host_controller)) ||
+            (seat_index != 0u &&
+             (combat.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+              input_identity != fixed_three_runtime.input_identities[seat_index] ||
+              !SudekiMpControlSeparationSeatInputLeaseActive(seat_index) ||
+              SudekiMpLocalInputHubSeatIdentityGeneration(seat_index) !=
+                    fixed_three_runtime.input_generations[seat_index]))) {
+            return FALSE;
+        }
+    } else {
+        if (seat_index >= 2u || !quick_menu_live_player_two_ready() ||
+            lease == NULL || !lease->human_present || lease->actor == 0u ||
+            lease->actor_generation == 0u ||
+            !SudekiMpCombatContextGetSnapshot(seat_index, &combat)) {
+            return FALSE;
+        }
+        actor = seat_index == 0u ? player_one_character : player_two_character;
+        camera = seat_index == 0u ? player_one_camera : player_two_camera;
+        render_state = seat_index == 0u ?
+            player_one_render_state : player_two_render_state;
+        input_identity = combat.input_source;
+        if (actor == NULL || camera == NULL || render_state == NULL ||
+            input_identity == NULL || lease->actor != (uintptr_t)actor ||
+            combat.character != actor || combat.viewport_camera != camera ||
+            combat.render_state != render_state ||
+            (seat_index == 0u &&
+             combat.input_source_kind !=
+                SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER) ||
+            (seat_index == 1u &&
+             (combat.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+              !SudekiMpControlSeparationPlayerTwoActive() ||
+              !SudekiMpControlSeparationInputReady() ||
+              input_identity != (void *)SudekiMpInputBridgeIdentity()))) {
+            return FALSE;
+        }
     }
     group = quick_menu_current_group();
     native_menu = quick_menu_singleton();
@@ -3714,8 +3839,11 @@ static BOOL quick_menu_capture_seat_session(
     quick_menu_session.actor_generation = lease->actor_generation;
     quick_menu_session.input_identity = input_identity;
     /* The legacy bridge exposes a stable identity and live-ready predicate,
-     * but no generation. Zero records that limitation honestly. */
-    quick_menu_session.input_generation = 0u;
+     * but no generation. The fixed-three hub pins every companion generation
+     * alongside the camera/render lease. */
+    quick_menu_session.input_generation = fixed_three_assignment_selected() &&
+        seat_index != 0u ? fixed_three_runtime.input_generations[seat_index] :
+        0u;
     quick_menu_session.camera = camera;
     quick_menu_session.render_state = render_state;
     quick_menu_session.native_menu = native_menu;
@@ -3740,7 +3868,8 @@ static BOOL quick_menu_session_lease_valid(
     unsigned int seat_index = quick_menu_session.owner_seat;
 
     if (quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE ||
-        seat_index >= 2u || !quick_menu_owner_session_valid ||
+        seat_index >= (fixed_three_assignment_selected() ?
+            FIXED_THREE_SEAT_COUNT : 2u) || !quick_menu_owner_session_valid ||
         menu == NULL || menu != quick_menu_singleton() ||
         !readable_memory(
             menu,
@@ -3750,6 +3879,47 @@ static BOOL quick_menu_session_lease_valid(
     statehood = SudekiMpPlayerStatehoodRuntime();
     lease = statehood == NULL ? NULL : &statehood->players[seat_index];
     group = quick_menu_current_group();
+    if (fixed_three_assignment_selected()) {
+        if (lease == NULL || !lease->human_present ||
+            lease->actor != (uintptr_t)quick_menu_session.actor ||
+            lease->actor_generation != quick_menu_session.actor_generation ||
+            group == NULL || group != quick_menu_session.group ||
+            quick_menu_unique_party_source(
+                group, quick_menu_session.actor) == NULL ||
+            !fixed_three_runtime.cameras_acquired ||
+            !fixed_three_base_leases_exact() ||
+            quick_menu_session.actor !=
+                fixed_three_runtime.actors[seat_index] ||
+            quick_menu_session.camera !=
+                fixed_three_runtime.cameras[seat_index] ||
+            quick_menu_session.render_state !=
+                fixed_three_runtime.render_states[seat_index] ||
+            !SudekiMpCombatContextGetSnapshot(seat_index, &combat) ||
+            combat.character != quick_menu_session.actor ||
+            combat.viewport_camera != quick_menu_session.camera ||
+            combat.render_state != quick_menu_session.render_state ||
+            combat.input_source != quick_menu_session.input_identity ||
+            (seat_index == 0u &&
+             (combat.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_NATIVE_CONTROLLER ||
+              combat.input_source != fixed_three_runtime.host_controller)) ||
+            (seat_index != 0u &&
+             (combat.input_source_kind !=
+                    SUDEKIMP_COMBAT_INPUT_EXTERNAL_BRIDGE ||
+              !SudekiMpControlSeparationSeatInputLeaseActive(seat_index) ||
+              quick_menu_session.input_generation == 0u ||
+              quick_menu_session.input_generation !=
+                fixed_three_runtime.input_generations[seat_index] ||
+              SudekiMpLocalInputHubSeatIdentityGeneration(seat_index) !=
+                quick_menu_session.input_generation)) ||
+            (require_open && menu[QUICK_MENU_ACTIVE_OFFSET] == 0u) ||
+            (require_skills && seat_index != 0u &&
+             *(uint32_t *)(menu + QUICK_MENU_CATEGORY_OFFSET) !=
+                QUICK_MENU_SKILLS_CATEGORY)) {
+            return FALSE;
+        }
+        return TRUE;
+    }
     if (lease == NULL || !lease->human_present ||
         lease->actor != (uintptr_t)quick_menu_session.actor ||
         lease->actor_generation != quick_menu_session.actor_generation ||
@@ -3777,7 +3947,7 @@ static BOOL quick_menu_session_lease_valid(
           quick_menu_session.input_identity !=
             (void *)SudekiMpInputBridgeIdentity())) ||
         (require_open && menu[QUICK_MENU_ACTIVE_OFFSET] == 0u) ||
-        (require_skills && seat_index == 1u && *(uint32_t *)(menu +
+        (require_skills && seat_index != 0u && *(uint32_t *)(menu +
             QUICK_MENU_CATEGORY_OFFSET) != QUICK_MENU_SKILLS_CATEGORY)) {
         return FALSE;
     }
@@ -3803,7 +3973,7 @@ static void quick_menu_quarantine(const char *reason) {
 
 static BOOL quick_menu_seat_one_owns_native_input(void) {
     return quick_menu_owner_session_valid &&
-        quick_menu_session.owner_seat == 1u &&
+        quick_menu_session.owner_seat != 0u &&
         quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE;
 }
 
@@ -3850,7 +4020,8 @@ static void quick_menu_latch_owner_from_controller(void) {
     /* A native open without an explicit request is owned by P1. Controller
      * target is only an identity check; it is never changed to manufacture
      * ownership for another seat. */
-    if (target != player_one_character ||
+    if (target != (fixed_three_assignment_selected() ?
+            fixed_three_runtime.actors[0] : player_one_character) ||
         !quick_menu_capture_seat_session(
             0u,
             SUDEKIMP_QUICK_MENU_SESSION_NATIVE_OPEN)) {
@@ -3880,17 +4051,48 @@ static void quick_menu_service_owner_session(BOOL native_visible) {
 }
 
 BOOL SudekiMpSplitScreenQuickMenuRequest(unsigned int seat_index) {
-    if (seat_index >= 2u || quick_menu_start == NULL ||
+    unsigned int seat_capacity = fixed_three_assignment_selected() ?
+        FIXED_THREE_SEAT_COUNT : 2u;
+    SudekiMpLocalQuickMenuLease lease;
+
+    if (fixed_three_assignment_selected()) {
+        SudekiMpLocalQuickMenuResult result;
+
+        if (!fixed_three_local_quick_menu_lease(seat_index, &lease)) {
+            return FALSE;
+        }
+        result = SudekiMpLocalQuickMenuOpen(
+            &fixed_three_local_quick_menu, seat_index, &lease);
+        if (result == SUDEKIMP_LOCAL_QUICK_MENU_RESULT_OPENED) {
+            if (!fixed_three_refresh_local_quick_menu_snapshots(seat_index)) {
+                (void)SudekiMpLocalQuickMenuClose(
+                    &fixed_three_local_quick_menu, seat_index);
+                SudekiMpLogFormat(
+                    "split_screen_render event=local_quick_menu phase=open_rejected player=%u reason=skills_snapshot_unavailable policy=no_partial_or_stale_panel\r\n",
+                    seat_index + 1u);
+                return FALSE;
+            }
+            SudekiMpLogFormat(
+                "split_screen_render event=local_quick_menu phase=open player=%u serial=%lu policy=mod_owned_per_seat_no_native_singleton\r\n",
+                seat_index + 1u,
+                (unsigned long)SudekiMpLocalQuickMenuSessionForSeat(
+                    &fixed_three_local_quick_menu, seat_index)->serial);
+        }
+        return result == SUDEKIMP_LOCAL_QUICK_MENU_RESULT_OPENED;
+    }
+
+    if (seat_index >= seat_capacity || quick_menu_start == NULL ||
         quick_menu_session.phase != SUDEKIMP_QUICK_MENU_SESSION_IDLE ||
         genuine_quick_menu_visible() ||
-        (seat_index == 1u &&
+        (seat_index != 0u &&
          (!runtime_authorized_at_render_start ||
           !SudekiMpSplitScreenRuntimeAuthorized() ||
           pc_quit_screen_visible() ||
           SudekiMpSplitScreenSharedInteractionModalActive() ||
           current_spirit_presentation_state() != 0 ||
-          player_two_temporary_camera_policy ==
-            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH)) ||
+          (!fixed_three_assignment_selected() &&
+           player_two_temporary_camera_policy ==
+            SUDEKIMP_TEMP_CAMERA_SHARED_FULL_WIDTH))) ||
         !quick_menu_capture_seat_session(
             seat_index,
             SUDEKIMP_QUICK_MENU_SESSION_OPEN_REQUESTED)) {
@@ -3922,7 +4124,24 @@ BOOL SudekiMpSplitScreenQuickMenuRequest(unsigned int seat_index) {
 }
 
 BOOL SudekiMpSplitScreenQuickMenuActive(unsigned int seat_index) {
-    if (seat_index >= 2u || !quick_menu_owner_session_valid ||
+    SudekiMpLocalQuickMenuLease lease;
+
+    if (fixed_three_assignment_selected()) {
+        if (!SudekiMpLocalQuickMenuSeatActive(
+                &fixed_three_local_quick_menu, seat_index)) {
+            return FALSE;
+        }
+        (void)SudekiMpLocalQuickMenuInvalidateIfLeaseChanged(
+            &fixed_three_local_quick_menu,
+            seat_index,
+            fixed_three_local_quick_menu_lease(seat_index, &lease) ?
+                &lease : NULL);
+        return SudekiMpLocalQuickMenuSeatActive(
+            &fixed_three_local_quick_menu, seat_index);
+    }
+    if (seat_index >= (fixed_three_assignment_selected() ?
+            FIXED_THREE_SEAT_COUNT : 2u) ||
+        !quick_menu_owner_session_valid ||
         quick_menu_session.owner_seat != seat_index ||
         quick_menu_session.phase == SUDEKIMP_QUICK_MENU_SESSION_IDLE) {
         return FALSE;
@@ -3942,6 +4161,23 @@ BOOL SudekiMpSplitScreenQuickMenuActive(unsigned int seat_index) {
 }
 
 BOOL SudekiMpSplitScreenQuickMenuAnyActive(void) {
+    if (fixed_three_assignment_selected()) {
+        unsigned int seat_index;
+        SudekiMpLocalQuickMenuLease lease;
+
+        for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT;
+             ++seat_index) {
+            if (SudekiMpLocalQuickMenuSeatActive(
+                    &fixed_three_local_quick_menu, seat_index)) {
+                (void)SudekiMpLocalQuickMenuInvalidateIfLeaseChanged(
+                    &fixed_three_local_quick_menu,
+                    seat_index,
+                    fixed_three_local_quick_menu_lease(seat_index, &lease) ?
+                        &lease : NULL);
+            }
+        }
+        return SudekiMpLocalQuickMenuAnyActive(&fixed_three_local_quick_menu);
+    }
     /* A native P1 open can occur during the controller update before the
      * following RenderStart has captured its serialized owner.  Treat the
      * singleton's exact visible edge as modal immediately so P2 cannot act
@@ -3958,6 +4194,67 @@ BOOL SudekiMpSplitScreenQuickMenuSubmit(
     unsigned int command;
     uint8_t handled;
     BOOL close_requested = FALSE;
+
+    if (fixed_three_assignment_selected()) {
+        SudekiMpLocalQuickMenuAction local_action;
+        const SudekiMpLocalQuickMenuSession *session;
+        uint32_t row_count;
+        SudekiMpLocalQuickMenuResult result;
+
+        switch (action) {
+        case SUDEKIMP_QUICK_MENU_ACTION_CONFIRM:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_CONFIRM;
+            break;
+        case SUDEKIMP_QUICK_MENU_ACTION_CANCEL:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_CANCEL;
+            break;
+        case SUDEKIMP_QUICK_MENU_ACTION_UP:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_UP;
+            break;
+        case SUDEKIMP_QUICK_MENU_ACTION_DOWN:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_DOWN;
+            break;
+        case SUDEKIMP_QUICK_MENU_ACTION_PREVIOUS_CATEGORY:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_PREVIOUS_CATEGORY;
+            break;
+        case SUDEKIMP_QUICK_MENU_ACTION_NEXT_CATEGORY:
+            local_action = SUDEKIMP_LOCAL_QUICK_MENU_ACTION_NEXT_CATEGORY;
+            break;
+        default:
+            return FALSE;
+        }
+        session = SudekiMpLocalQuickMenuSessionForSeat(
+            &fixed_three_local_quick_menu, seat_index);
+        if (session != NULL &&
+            session->category == SUDEKIMP_LOCAL_QUICK_MENU_ITEMS &&
+            local_action == SUDEKIMP_LOCAL_QUICK_MENU_ACTION_CONFIRM &&
+            !SudekiMpLocalQuickMenuTargetSelectionActive(
+                &fixed_three_local_quick_menu, seat_index)) {
+            result = fixed_three_begin_item_target_selection(seat_index);
+            return result == SUDEKIMP_LOCAL_QUICK_MENU_RESULT_TARGET_SELECTING;
+        }
+        row_count = session == NULL ? 0u :
+            session->snapshot_by_category[session->category].row_count;
+        result = SudekiMpLocalQuickMenuHandleAction(
+            &fixed_three_local_quick_menu, seat_index, local_action, row_count);
+        if (result == SUDEKIMP_LOCAL_QUICK_MENU_RESULT_EXECUTE_REQUESTED) {
+            result = SudekiMpLocalQuickMenuRecordActionResult(
+                &fixed_three_local_quick_menu,
+                seat_index,
+                fixed_three_execute_local_quick_menu_row(seat_index));
+            SudekiMpLogFormat(
+                "split_screen_render event=local_quick_menu phase=action player=%u category=%u result=%u policy=native_adapter_result_required\r\n",
+                seat_index + 1u,
+                session == NULL ? UINT_MAX : (unsigned int)session->category,
+                (unsigned int)result);
+        }
+        /* Every recognized panel edge is consumed, including a native
+         * validation failure.  That keeps held input from leaking to combat
+         * behind the still-open owner panel. */
+        return result != SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_ACTION &&
+            result != SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_LEASE &&
+            result != SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_NOT_READY;
+    }
 
     switch (action) {
     case SUDEKIMP_QUICK_MENU_ACTION_CONFIRM:
@@ -4036,7 +4333,25 @@ static uint8_t SUDEKIMP_THISCALL route_quick_menu_input(
 }
 
 BOOL SudekiMpSplitScreenQuickMenuNativeToggleSuppressed(void) {
+    if (fixed_three_assignment_selected()) {
+        /* Q is a panel request in 0x07.  Always consume the retail toggle:
+         * when adapters are not all armed the request simply rejects instead
+         * of resurrecting the native singleton and collapsing the compositor. */
+        (void)SudekiMpSplitScreenQuickMenuRequest(0u);
+        return TRUE;
+    }
     return quick_menu_seat_one_owns_native_input();
+}
+
+BOOL SudekiMpSplitScreenFixedThreeCustomQuickMenuEnabled(void) {
+    return fixed_three_assignment_selected();
+}
+
+void SudekiMpSplitScreenSetFixedThreeCustomQuickMenuActionCapabilities(
+    uint32_t category_mask
+) {
+    SudekiMpLocalQuickMenuSetActionCapableCategories(
+        &fixed_three_local_quick_menu, category_mask);
 }
 
 __attribute__((naked, noinline, used))
@@ -4182,6 +4497,9 @@ static void SUDEKIMP_THISCALL route_quick_menu_render_submit(
     BOOL suppress_this_submit = FALSE;
 
     if (fixed_three_assignment_selected()) {
+        /* Fixed-three never rebinds the singleton's actor/UI sources.  The
+         * native call is left untouched so a non-custom menu remains retail,
+         * while RenderStart falls back safely instead of pinning one cache. */
         original_quick_menu_render_submit(quick_menu);
         return;
     }
@@ -11204,6 +11522,333 @@ static BOOL fixed_three_assignment_selected(void) {
         assignment.active_human_mask == FIXED_THREE_HUMAN_MASK;
 }
 
+/* A custom panel may only outlive the exact camera/input/actor tuple that
+ * opened it.  The compact `view_revision` deliberately contains the two
+ * native render identities as well as generations: a named-camera or scene
+ * state replacement invalidates the panel even when the actor pointer did
+ * not change. */
+static BOOL fixed_three_local_quick_menu_lease(
+    unsigned int seat_index,
+    SudekiMpLocalQuickMenuLease *lease
+) {
+    uintptr_t revision;
+
+    if (lease == NULL || !fixed_three_assignment_selected() ||
+        !fixed_three_runtime.configured ||
+        seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !SudekiMpSplitScreenSeatViewReady(
+            seat_index, fixed_three_runtime.actors[seat_index])) {
+        return FALSE;
+    }
+    if (fixed_three_runtime.actors[seat_index] == NULL ||
+        fixed_three_runtime.actor_generations[seat_index] == 0u ||
+        fixed_three_runtime.cameras[seat_index] == NULL ||
+        fixed_three_runtime.render_states[seat_index] == NULL ||
+        (seat_index == 0u ? fixed_three_runtime.host_controller == NULL :
+         fixed_three_runtime.input_identities[seat_index] == NULL) ||
+        (seat_index != 0u &&
+         fixed_three_runtime.input_generations[seat_index] == 0u)) {
+        return FALSE;
+    }
+    ZeroMemory(lease, sizeof(*lease));
+    lease->actor = fixed_three_runtime.actors[seat_index];
+    lease->input_identity = seat_index == 0u ?
+        fixed_three_runtime.host_controller :
+        fixed_three_runtime.input_identities[seat_index];
+    lease->actor_generation =
+        fixed_three_runtime.actor_generations[seat_index];
+    lease->input_generation = seat_index == 0u ?
+        fixed_three_runtime.actor_generations[seat_index] :
+        fixed_three_runtime.input_generations[seat_index];
+    revision = ((uintptr_t)fixed_three_runtime.cameras[seat_index] >> 4u) ^
+        ((uintptr_t)fixed_three_runtime.render_states[seat_index] >> 4u) ^
+        (uintptr_t)lease->actor_generation ^
+        (uintptr_t)lease->input_generation;
+    lease->view_revision = (uint32_t)revision;
+    if (lease->view_revision == 0u) {
+        lease->view_revision = 1u;
+    }
+    return TRUE;
+}
+
+/* The Skills adapter is the first complete category seam: it snapshots the
+ * same filtered ordinal/cost/availability contract that its executor later
+ * consumes.  It intentionally does not make the panel available by itself;
+ * LocalQuickMenu keeps every panel hidden until the other three adapters are
+ * equally action-capable. */
+static BOOL fixed_three_refresh_local_quick_menu_skills(
+    unsigned int seat_index,
+    const SudekiMpLocalQuickMenuLease *lease
+) {
+    SudekiMpSkillQuickSkillList skills;
+    SudekiMpLocalQuickMenuRow rows[SUDEKIMP_SKILL_ACTIVATION_MAX_QUICK_SKILLS];
+    uint32_t revision;
+    unsigned int index;
+
+    if (lease == NULL || seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !SudekiMpDescribeCharacterQuickSkills(
+            fixed_three_runtime.actors[seat_index], &skills) ||
+        skills.row_count > SUDEKIMP_SKILL_ACTIVATION_MAX_QUICK_SKILLS) {
+        return FALSE;
+    }
+    ZeroMemory(rows, sizeof(rows));
+    revision = lease->actor_generation ^ lease->input_generation ^
+        lease->view_revision ^ skills.row_count;
+    for (index = 0u; index < skills.row_count; ++index) {
+        rows[index].native_identifier = skills.rows[index].ordinal;
+        rows[index].cost = skills.rows[index].cost;
+        rows[index].available = skills.rows[index].available;
+        /* A name string is native-owned and its exact lifetime ABI has not
+         * been proved yet.  This stable ordinal is deliberately honest until
+         * that read-only string adapter is verified. */
+        (void)wsprintfA(rows[index].label, "SKILL %u", index + 1u);
+        revision ^= skills.rows[index].ordinal +
+            (skills.rows[index].cost << (index & 7u));
+    }
+    if (revision == 0u) {
+        revision = 1u;
+    }
+    return SudekiMpLocalQuickMenuSetCategorySnapshot(
+        &fixed_three_local_quick_menu,
+        seat_index,
+        SUDEKIMP_LOCAL_QUICK_MENU_SKILLS,
+        rows,
+        skills.row_count,
+        revision);
+}
+
+/* Spirit is a two-choice actor-local snapshot, but its availability remains
+ * retail-global: the native validator sees shared Spirit ownership before a
+ * panel makes a choice.  A failing validator makes only that row unavailable;
+ * it never serializes other seats' browsing. */
+static BOOL fixed_three_refresh_local_quick_menu_spirit(
+    unsigned int seat_index,
+    const SudekiMpLocalQuickMenuLease *lease
+) {
+    SudekiMpSpiritQuickOptionList options;
+    SudekiMpLocalQuickMenuRow rows[2];
+    uint32_t revision;
+    unsigned int index;
+
+    if (lease == NULL || seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !SudekiMpDescribeCharacterSpiritOptions(
+            fixed_three_runtime.actors[seat_index], &options) ||
+        options.option_count != 2u) {
+        return FALSE;
+    }
+    ZeroMemory(rows, sizeof(rows));
+    revision = lease->actor_generation ^ lease->input_generation ^
+        lease->view_revision ^ options.resource_type;
+    for (index = 0u; index < options.option_count; ++index) {
+        rows[index].native_identifier = options.options[index].variant;
+        rows[index].cost = 0u;
+        rows[index].available = options.options[index].available;
+        (void)wsprintfA(rows[index].label, "SPIRIT %u", index + 1u);
+        revision ^= (uint32_t)options.options[index].strike_id <<
+            ((index * 5u) & 15u);
+    }
+    if (revision == 0u) {
+        revision = 1u;
+    }
+    return SudekiMpLocalQuickMenuSetCategorySnapshot(
+        &fixed_three_local_quick_menu,
+        seat_index,
+        SUDEKIMP_LOCAL_QUICK_MENU_SPIRIT,
+        rows,
+        options.option_count,
+        revision);
+}
+
+/* Weapon rows use the actor-family inventory category derived by retail and
+ * the exported CCharacterWeapon path.  The selected slot is re-looked-up and
+ * verified against the component's current item on confirm. */
+static BOOL fixed_three_refresh_local_quick_menu_weapons(
+    unsigned int seat_index,
+    const SudekiMpLocalQuickMenuLease *lease
+) {
+    SudekiMpWeaponQuickList weapons;
+    SudekiMpLocalQuickMenuRow rows[SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS];
+    uint32_t revision;
+    unsigned int index;
+
+    if (lease == NULL || seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !SudekiMpDescribeCharacterWeapons(
+            fixed_three_runtime.actors[seat_index], &weapons) ||
+        weapons.row_count > SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS) {
+        return FALSE;
+    }
+    ZeroMemory(rows, sizeof(rows));
+    revision = lease->actor_generation ^ lease->input_generation ^
+        lease->view_revision ^ weapons.inventory_category;
+    for (index = 0u; index < weapons.row_count; ++index) {
+        rows[index].native_identifier = weapons.rows[index].slot;
+        rows[index].available = 1u;
+        (void)wsprintfA(rows[index].label, "WEAPON %u%s", index + 1u,
+            weapons.rows[index].equipped ? " ACTIVE" : "");
+        revision ^= weapons.rows[index].slot << ((index * 3u) & 15u);
+    }
+    if (revision == 0u) {
+        revision = 1u;
+    }
+    return SudekiMpLocalQuickMenuSetCategorySnapshot(
+        &fixed_three_local_quick_menu,
+        seat_index,
+        SUDEKIMP_LOCAL_QUICK_MENU_WEAPONS,
+        rows,
+        weapons.row_count,
+        revision);
+}
+
+/* Items are retail-global inventory entries but target a particular live
+ * party slot.  The session's target picker stores opaque actor identities;
+ * confirm reproves the fixed-three slot before native ApplyItem consumes it. */
+static BOOL fixed_three_refresh_local_quick_menu_items(
+    unsigned int seat_index,
+    const SudekiMpLocalQuickMenuLease *lease
+) {
+    SudekiMpItemQuickList items;
+    SudekiMpLocalQuickMenuRow rows[SUDEKIMP_ITEM_ACTIVATION_MAX_ROWS];
+    uint32_t revision;
+    unsigned int index;
+
+    if (lease == NULL || seat_index >= FIXED_THREE_SEAT_COUNT ||
+        !SudekiMpDescribeQuickItems(&items) ||
+        items.row_count > SUDEKIMP_ITEM_ACTIVATION_MAX_ROWS) {
+        return FALSE;
+    }
+    ZeroMemory(rows, sizeof(rows));
+    revision = lease->actor_generation ^ lease->input_generation ^
+        lease->view_revision ^ items.row_count;
+    for (index = 0u; index < items.row_count; ++index) {
+        rows[index].native_identifier = items.rows[index].slot;
+        rows[index].available = 1u;
+        (void)wsprintfA(rows[index].label, "ITEM %u", index + 1u);
+        revision ^= items.rows[index].slot << ((index * 3u) & 15u);
+    }
+    if (revision == 0u) {
+        revision = 1u;
+    }
+    return SudekiMpLocalQuickMenuSetCategorySnapshot(
+        &fixed_three_local_quick_menu,
+        seat_index,
+        SUDEKIMP_LOCAL_QUICK_MENU_ITEMS,
+        rows,
+        items.row_count,
+        revision);
+}
+
+static BOOL fixed_three_refresh_local_quick_menu_snapshots(
+    unsigned int seat_index
+) {
+    SudekiMpLocalQuickMenuLease lease;
+
+    if (!fixed_three_local_quick_menu_lease(seat_index, &lease)) {
+        SudekiMpLogFormat("split_screen_render event=local_quick_menu "
+            "phase=snapshot_rejected player=%u adapter=lease\r\n",
+            seat_index + 1u);
+        return FALSE;
+    }
+    if (!fixed_three_refresh_local_quick_menu_skills(seat_index, &lease))
+        goto skills_unavailable;
+    if (!fixed_three_refresh_local_quick_menu_weapons(seat_index, &lease))
+        goto weapons_unavailable;
+    if (!fixed_three_refresh_local_quick_menu_items(seat_index, &lease))
+        goto items_unavailable;
+    if (!fixed_three_refresh_local_quick_menu_spirit(seat_index, &lease))
+        goto spirit_unavailable;
+    return TRUE;
+
+skills_unavailable:
+    SudekiMpLogFormat("split_screen_render event=local_quick_menu "
+        "phase=snapshot_rejected player=%u adapter=skills\r\n", seat_index + 1u);
+    return FALSE;
+weapons_unavailable:
+    SudekiMpLogFormat("split_screen_render event=local_quick_menu "
+        "phase=snapshot_rejected player=%u adapter=weapons\r\n", seat_index + 1u);
+    return FALSE;
+items_unavailable:
+    SudekiMpLogFormat("split_screen_render event=local_quick_menu "
+        "phase=snapshot_rejected player=%u adapter=items\r\n", seat_index + 1u);
+    return FALSE;
+spirit_unavailable:
+    SudekiMpLogFormat("split_screen_render event=local_quick_menu "
+        "phase=snapshot_rejected player=%u adapter=spirit\r\n", seat_index + 1u);
+    return FALSE;
+}
+
+static SudekiMpLocalQuickMenuResult fixed_three_execute_local_quick_menu_row(
+    unsigned int seat_index
+) {
+    SudekiMpLocalQuickMenuLease lease;
+    const SudekiMpLocalQuickMenuSession *session;
+    const SudekiMpLocalQuickMenuRow *row;
+    SudekiMpSkillActivationResult skill_result;
+    SudekiMpSpiritActivationResult spirit_result;
+    SudekiMpWeaponActivationResult weapon_result;
+    SudekiMpItemActivationResult item_result;
+    const void *target;
+    unsigned int target_seat;
+
+    session = SudekiMpLocalQuickMenuSessionForSeat(
+        &fixed_three_local_quick_menu, seat_index);
+    if (session == NULL || !fixed_three_local_quick_menu_lease(
+            seat_index, &lease) ||
+        !SudekiMpLocalQuickMenuLeaseExact(&session->lease, &lease)) {
+        return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_LEASE;
+    }
+    row = SudekiMpLocalQuickMenuSelectedRow(
+        &fixed_three_local_quick_menu, seat_index);
+    if (row == NULL || row->available == 0u) {
+        return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+    }
+    if (session->category == SUDEKIMP_LOCAL_QUICK_MENU_SKILLS) {
+        skill_result = SudekiMpActivateCharacterQuickSkill(
+            fixed_three_runtime.actors[seat_index], row->native_identifier);
+        return skill_result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED ?
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_STARTED :
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+    }
+    if (session->category == SUDEKIMP_LOCAL_QUICK_MENU_WEAPONS) {
+        weapon_result = SudekiMpActivateCharacterWeapon(
+            fixed_three_runtime.actors[seat_index], row->native_identifier);
+        return weapon_result.status == SUDEKIMP_WEAPON_ACTIVATION_STARTED ?
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_STARTED :
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+    }
+    if (session->category == SUDEKIMP_LOCAL_QUICK_MENU_ITEMS) {
+        target = SudekiMpLocalQuickMenuSelectedTarget(
+            &fixed_three_local_quick_menu, seat_index);
+        for (target_seat = 0u; target_seat < FIXED_THREE_SEAT_COUNT;
+                ++target_seat) {
+            if (fixed_three_runtime.actors[target_seat] == target) {
+                break;
+            }
+        }
+        if (target_seat == FIXED_THREE_SEAT_COUNT ||
+            fixed_three_runtime.party_slots[target_seat] == UINT_MAX) {
+            return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_LEASE;
+        }
+        item_result = SudekiMpActivateCharacterItem(
+            fixed_three_runtime.actors[seat_index], row->native_identifier,
+            fixed_three_runtime.actors[target_seat],
+            fixed_three_runtime.party_slots[target_seat]);
+        return item_result.status == SUDEKIMP_ITEM_ACTIVATION_STARTED ?
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_STARTED :
+            SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+    }
+    if (session->category != SUDEKIMP_LOCAL_QUICK_MENU_SPIRIT) {
+        return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+    }
+    spirit_result = SudekiMpActivateCharacterSpirit(
+        fixed_three_runtime.actors[seat_index], row->native_identifier);
+    if (spirit_result.status == SUDEKIMP_SPIRIT_ACTIVATION_STARTED) {
+        return SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_STARTED;
+    }
+    return spirit_result.status == SUDEKIMP_SPIRIT_ACTIVATION_BUSY ?
+        SUDEKIMP_LOCAL_QUICK_MENU_RESULT_REJECTED_BUSY :
+        SUDEKIMP_LOCAL_QUICK_MENU_RESULT_ACTION_REJECTED;
+}
+
 static void fixed_three_reset_render_owner_evidence(void) {
     fixed_three_runtime.hud_evidence_seat = UINT_MAX;
     fixed_three_runtime.hud_role_mask = 0u;
@@ -11279,6 +11924,10 @@ static void fixed_three_release_frame_surfaces(void) {
 
     for (seat_index = FIXED_THREE_SEAT_COUNT; seat_index > 0u;
             --seat_index) {
+        release_com_object(&fixed_three_runtime.local_quick_menu_textures[
+            seat_index - 1u]);
+        fixed_three_runtime.local_quick_menu_texture_revision[
+            seat_index - 1u] = 0u;
         release_com_object(
             &fixed_three_runtime.frame_surfaces[seat_index - 1u]);
     }
@@ -12484,6 +13133,168 @@ static BOOL compose_fixed_three_camera_frames(
     return TRUE;
 }
 
+/* The panel is a mod-owned, opaque cache-layer texture.  Keeping it fully in
+ * the compositor avoids the retail UI queue and makes each seat's panel a
+ * post-composition viewport-local presentation object. */
+static void fixed_three_panel_fill_rectangle(
+    uint32_t *pixels, int pitch, unsigned int left, unsigned int top,
+    unsigned int right, unsigned int bottom, uint32_t color
+) {
+    unsigned int y;
+
+    if (pixels == NULL || left >= right || top >= bottom) return;
+    for (y = top; y < bottom; ++y) {
+        uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
+        unsigned int x;
+        for (x = left; x < right; ++x) row[x] = color;
+    }
+}
+
+static BOOL fixed_three_update_local_quick_menu_texture(
+    unsigned int seat_index,
+    void *device,
+    D3DCreateTextureFunction create_texture
+) {
+    enum { PANEL_WIDTH = 256u, PANEL_HEIGHT = 164u };
+    const SudekiMpLocalQuickMenuSession *session;
+    void *texture;
+    void **vtable;
+    D3DTextureLockRectFunction lock_rect;
+    D3DTextureUnlockRectFunction unlock_rect;
+    SudekiMpD3DLockedRect locked;
+    HRESULT result;
+    uint32_t revision;
+    unsigned int tab;
+    unsigned int row;
+    unsigned int first_visible_row;
+    unsigned int row_count;
+
+    session = SudekiMpLocalQuickMenuSessionForSeat(
+        &fixed_three_local_quick_menu, seat_index);
+    if (session == NULL || session->open == 0u || device == NULL ||
+        create_texture == NULL) return FALSE;
+    revision = session->presentation_revision ^ (session->category << 24u) ^
+        session->cursor_by_category[session->category];
+    texture = fixed_three_runtime.local_quick_menu_textures[seat_index];
+    if (texture == NULL) {
+        result = create_texture(device, PANEL_WIDTH, PANEL_HEIGHT, 1u,
+            D3D_USAGE_DYNAMIC, D3D_FORMAT_A8R8G8B8, D3D_POOL_DEFAULT,
+            &texture, NULL);
+        if (FAILED(result) || texture == NULL) return FALSE;
+        fixed_three_runtime.local_quick_menu_textures[seat_index] = texture;
+        fixed_three_runtime.local_quick_menu_texture_revision[seat_index] = 0u;
+    }
+    if (fixed_three_runtime.local_quick_menu_texture_revision[seat_index] ==
+        revision) return TRUE;
+    vtable = *(void ***)texture;
+    if (!readable_memory(vtable,
+            (D3D_TEXTURE_UNLOCK_RECT_INDEX + 1u) * sizeof(void *))) return FALSE;
+    lock_rect = (D3DTextureLockRectFunction)vtable[D3D_TEXTURE_LOCK_RECT_INDEX];
+    unlock_rect = (D3DTextureUnlockRectFunction)vtable[D3D_TEXTURE_UNLOCK_RECT_INDEX];
+    if (lock_rect == NULL || unlock_rect == NULL) return FALSE;
+    result = lock_rect(texture, 0u, &locked, NULL, 0u);
+    if (FAILED(result) || locked.bits == NULL || locked.pitch <
+        (int)(PANEL_WIDTH * sizeof(uint32_t))) return FALSE;
+    fixed_three_panel_fill_rectangle((uint32_t *)locked.bits, locked.pitch,
+        0u, 0u, PANEL_WIDTH, PANEL_HEIGHT, UINT32_C(0xff11161f));
+    fixed_three_panel_fill_rectangle((uint32_t *)locked.bits, locked.pitch,
+        0u, 0u, PANEL_WIDTH, 4u, UINT32_C(0xff52d8e8));
+    for (tab = 0u; tab < SUDEKIMP_LOCAL_QUICK_MENU_CATEGORY_COUNT; ++tab) {
+        static const uint32_t colors[4] = {
+            UINT32_C(0xff3c8ddb), UINT32_C(0xffd65a55),
+            UINT32_C(0xff5faf6c), UINT32_C(0xffa871d9)
+        };
+        uint32_t color = tab == session->category ? colors[tab] :
+            UINT32_C(0xff343b49);
+        fixed_three_panel_fill_rectangle((uint32_t *)locked.bits, locked.pitch,
+            tab * 64u + 3u, 12u, tab * 64u + 61u, 27u, color);
+    }
+    row_count = session->snapshot_by_category[session->category].row_count;
+    first_visible_row = session->cursor_by_category[session->category] >= 7u ?
+        session->cursor_by_category[session->category] - 6u : 0u;
+    if (first_visible_row + 7u > row_count && row_count > 7u) {
+        first_visible_row = row_count - 7u;
+    }
+    for (row = 0u; row < 7u && first_visible_row + row < row_count; ++row) {
+        unsigned int snapshot_row = first_visible_row + row;
+        BOOL selected = snapshot_row ==
+            session->cursor_by_category[session->category];
+        const SudekiMpLocalQuickMenuRow *entry =
+            &session->snapshot_by_category[session->category].rows[snapshot_row];
+        fixed_three_panel_fill_rectangle((uint32_t *)locked.bits, locked.pitch,
+            12u, 38u + row * 16u, 244u, 52u + row * 16u,
+            selected ? UINT32_C(0xff537e9d) :
+            (entry->available ? UINT32_C(0xff242d3a) : UINT32_C(0xff302126)));
+    }
+    if (session->target_count != 0u) {
+        fixed_three_panel_fill_rectangle((uint32_t *)locked.bits, locked.pitch,
+            12u, PANEL_HEIGHT - 18u, 244u, PANEL_HEIGHT - 6u,
+            UINT32_C(0xff896b32));
+    }
+    if (FAILED(unlock_rect(texture, 0u))) return FALSE;
+    fixed_three_runtime.local_quick_menu_texture_revision[seat_index] = revision;
+    return TRUE;
+}
+
+static void fixed_three_draw_local_quick_menu_panels(void) {
+    void *device;
+    void **device_vtable;
+    D3DCreateTextureFunction create_texture;
+    D3DStretchRectFunction stretch_rect;
+    D3DGetRenderTargetFunction get_render_target;
+    void *target = NULL;
+    unsigned int seat_index;
+
+    if (!SudekiMpLocalQuickMenuAnyActive(&fixed_three_local_quick_menu) ||
+        fixed_three_runtime.frame_valid_mask != FIXED_THREE_HUMAN_MASK ||
+        d3d_device_global == NULL || !readable_memory(d3d_device_global,
+            sizeof(*d3d_device_global))) return;
+    device = *d3d_device_global;
+    if (!readable_memory(device, sizeof(void *))) return;
+    device_vtable = *(void ***)device;
+    if (!readable_memory(device_vtable,
+            (D3D_DEVICE_GET_RENDER_TARGET_INDEX + 1u) * sizeof(void *))) return;
+    create_texture = (D3DCreateTextureFunction)
+        device_vtable[D3D_DEVICE_CREATE_TEXTURE_INDEX];
+    stretch_rect = (D3DStretchRectFunction)
+        device_vtable[D3D_DEVICE_STRETCH_RECT_INDEX];
+    get_render_target = (D3DGetRenderTargetFunction)
+        device_vtable[D3D_DEVICE_GET_RENDER_TARGET_INDEX];
+    if (create_texture == NULL || stretch_rect == NULL ||
+        get_render_target == NULL || FAILED(get_render_target(device, 0u, &target)) ||
+        target == NULL) return;
+    for (seat_index = 0u; seat_index < FIXED_THREE_SEAT_COUNT; ++seat_index) {
+        const SudekiMpLocalSeatViewport *viewport;
+        void *source = NULL;
+        void **texture_vtable;
+        D3DTextureGetSurfaceLevelFunction get_surface;
+        RECT src = {0, 0, 256, 164};
+        RECT dst;
+
+        if (!SudekiMpLocalQuickMenuSeatActive(&fixed_three_local_quick_menu,
+                seat_index) || !fixed_three_update_local_quick_menu_texture(
+                seat_index, device, create_texture)) continue;
+        viewport = &fixed_three_runtime.layout.viewports[seat_index];
+        texture_vtable = *(void ***)fixed_three_runtime.local_quick_menu_textures[
+            seat_index];
+        get_surface = (D3DTextureGetSurfaceLevelFunction)
+            texture_vtable[D3D_TEXTURE_GET_SURFACE_LEVEL_INDEX];
+        if (get_surface == NULL || FAILED(get_surface(
+                fixed_three_runtime.local_quick_menu_textures[seat_index],
+                0u, &source)) || source == NULL) continue;
+        dst.left = (LONG)viewport->rectangle.x + 12;
+        dst.top = (LONG)viewport->rectangle.y + 12;
+        dst.right = dst.left + (LONG)((viewport->rectangle.width - 24u) <
+            256u ? (viewport->rectangle.width - 24u) : 256u);
+        dst.bottom = dst.top + (LONG)((viewport->rectangle.height - 24u) <
+            164u ? (viewport->rectangle.height - 24u) : 164u);
+        if (dst.right > dst.left && dst.bottom > dst.top) (void)stretch_rect(
+            device, source, &src, target, &dst, D3D_TEXTURE_FILTER_NONE);
+        release_com_object(&source);
+    }
+    release_com_object(&target);
+}
+
 static void compose_native_frame(void) {
     void *device;
     void **device_vtable;
@@ -13036,6 +13847,8 @@ static BOOL fixed_three_render_start_dispatch(BOOL runtime_authorized) {
     BOOL shared_modal_clear;
     BOOL presentation_clear;
     BOOL allow_user_orbit;
+    BOOL quick_menu_is_visible;
+    BOOL quick_menu_rising_edge;
 
     fixed_three_reset_render_owner_evidence();
     fixed_three_runtime.transaction_active = TRUE;
@@ -13070,16 +13883,28 @@ static BOOL fixed_three_render_start_dispatch(BOOL runtime_authorized) {
         (void)fixed_three_release_cameras("lease_changed");
     }
     original_render_start();
+    quick_menu_is_visible = genuine_quick_menu_visible();
+    quick_menu_rising_edge = quick_menu_is_visible &&
+        !quick_menu_genuine_visible_previous_frame;
+    (void)quick_menu_rising_edge;
+    quick_menu_genuine_visible_previous_frame = quick_menu_is_visible;
     shared_modal_clear = refresh_shared_interaction_modal() ==
         SUDEKIMP_SHARED_INTERACTION_MODAL_NONE;
     base_leases_exact = fixed_three_runtime.cameras_acquired &&
         fixed_three_base_leases_exact();
+    fixed_three_service_local_quick_menus(
+        base_leases_exact && shared_modal_clear &&
+        InterlockedCompareExchange(&native_save_modal_opening, 0, 0) == 0 &&
+        !pc_quit_screen_visible() && !quick_menu_visible() &&
+        !genuine_quick_menu_visible() &&
+        current_spirit_presentation_state() == 0 &&
+        !settled_temporary_zone_active() &&
+        !coop_roster_party_transition_active);
     presentation_clear = base_leases_exact &&
         shared_modal_clear &&
         InterlockedCompareExchange(&native_save_modal_opening, 0, 0) == 0 &&
         !pc_quit_screen_visible() &&
-        !quick_menu_visible() &&
-        !genuine_quick_menu_visible() &&
+        !quick_menu_visible() && !quick_menu_is_visible &&
         current_spirit_presentation_state() == 0 &&
         !settled_temporary_zone_active() &&
         !coop_roster_party_transition_active;
@@ -13144,6 +13969,9 @@ static void fixed_three_frame_end_dispatch(void) {
         capture_succeeded = compose_fixed_three_camera_frames(
             fixed_three_runtime.rendered_seat,
             owner_evidence_ready);
+    }
+    if (capture_succeeded) {
+        fixed_three_draw_local_quick_menu_panels();
     }
     if (!capture_succeeded) {
         fixed_three_invalidate_frame_cache();
@@ -15405,6 +16233,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     quick_menu_gate_last_state = -1;
     quick_menu_next_serial = 0u;
     reset_quick_menu_owner_session();
+    SudekiMpLocalQuickMenuInitialize(&fixed_three_local_quick_menu);
     spirit_presentation_last_state = -1;
     spirit_presentation_logged_views = 0u;
     spirit_player_two_presentation_last_trace_tick = 0u;
@@ -15422,6 +16251,7 @@ BOOL SudekiMpInstallSplitScreenRender(
     coop_locked_player_two = NULL;
     coop_locked_player_three = NULL;
     ZeroMemory(&fixed_three_runtime, sizeof(fixed_three_runtime));
+    SudekiMpLocalQuickMenuInitialize(&fixed_three_local_quick_menu);
     if (!coop_roster_valid) {
         SudekiMpCoopRosterAssignmentStoreInitialize(
             &coop_roster_assignment_store);
@@ -15604,6 +16434,7 @@ void SudekiMpUninstallSplitScreenRender(void) {
             "policy=do_not_remove_unproven_native_camera\r\n");
     }
     ZeroMemory(&fixed_three_runtime, sizeof(fixed_three_runtime));
+    SudekiMpLocalQuickMenuInitialize(&fixed_three_local_quick_menu);
     split_screen_render_installed = FALSE;
     /* Keep a fail-closed authorization state until both render hooks are
      * restored.  Clearing the optional query first would make the default

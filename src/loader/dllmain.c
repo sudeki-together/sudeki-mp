@@ -1,16 +1,24 @@
 #include "engine/build_identity.h"
+#include "cleanroom/engine.h"
 #include "cleanroom/menu.h"
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
 #include "engine/sha256.h"
 #include "engine/skill_activation_abi.h"
+#include "engine/spirit_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
+#include "engine/item_activation_abi.h"
+#include "engine/local_quick_menu.h"
 #include "hooks/accelerator_cache.h"
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
 #include "hooks/interaction_provenance.h"
+#include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_arena_pause_panel.h"
+#include "hooks/lan_arena_window_policy.h"
 #include "hooks/merchant_provenance_adapter.h"
 #include "hooks/pattern_scan.h"
 #include "hooks/player_input_trace.h"
@@ -32,6 +40,7 @@
 #include "input/key_binding.h"
 #include "input/local_input_hub.h"
 #include "loader/fixed_three_profile.h"
+#include "loader/lan_arena_profile.h"
 
 #include <windows.h>
 #include <wincrypt.h>
@@ -63,6 +72,7 @@
 #define SUDEKIMP_INIT_TALOS_LIFECYCLE_TRACE_FAILED 19u
 #define SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED 20u
 #define SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED 21u
+#define SUDEKIMP_INIT_LAN_ARENA_FAILED 22u
 #define SUDEKIMP_TALOS_EXACT_SOL_SHA256 \
     "e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9"
 
@@ -73,6 +83,7 @@ static char talos_staging_observation_owner;
 static SudekiMpControlUpdateObserverGate talos_staging_observation_gate;
 static volatile LONG talos_staging_observation_install_started;
 static uint64_t talos_staging_observation_last_logged_attempts;
+static uint8_t lan_arena_game_hash[32];
 
 static BOOL talos_post_movie_dual_camera_authorized(void) {
     DWORD entry_error = GetLastError();
@@ -237,6 +248,9 @@ static void cleanroom_control_update_observer(
 }
 
 static void uninstall_runtime_hooks(void) {
+    SudekiMpUninstallLanArenaPausePanel();
+    SudekiMpUninstallLanArenaRuntime();
+    (void)SudekiMpUninstallLanArenaWindowPolicy();
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
     SudekiMpControlUpdateObserverGateDisable(
@@ -264,6 +278,10 @@ static void uninstall_runtime_hooks(void) {
     SudekiMpUninstallCharacterSwitchTrace();
     SudekiMpUninstallQuickSkillInputTrace();
     SudekiMpUninstallSkillTrace();
+    SudekiMpResetItemActivationAbi();
+    SudekiMpResetWeaponActivationAbi();
+    SudekiMpResetSpiritActivationAbi();
+    SudekiMpResetSkillActivationAbi();
     (void)SudekiMpUninstallAcceleratorCache();
 }
 
@@ -384,6 +402,98 @@ static BOOL validate_fixed_three_enable_profile(
     HeapFree(GetProcessHeap(), 0u, section);
     if (!valid) SetLastError(ERROR_INVALID_DATA);
     return valid;
+}
+
+static BOOL validate_lan_arena_enable_profile(
+    const wchar_t *path,
+    SudekiMpLanArenaProfileFailure *failure,
+    wchar_t *failure_key,
+    size_t failure_key_capacity,
+    SudekiMpLanArenaProfileRole *role
+) {
+    enum { SECTION_CAPACITY = 32768u };
+    SudekiMpLanArenaProfileState state;
+    wchar_t *section;
+    wchar_t *entry;
+    DWORD section_length;
+    BOOL valid = TRUE;
+
+    if (failure != NULL) *failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_NONE;
+    if (role != NULL) *role = SUDEKIMP_LAN_ARENA_PROFILE_ROLE_NONE;
+    copy_fixed_three_profile_key(failure_key, failure_key_capacity, L"<none>");
+    if (path == NULL) {
+        if (failure != NULL) {
+            *failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_INVALID_ARGUMENT;
+        }
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    section = (wchar_t *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+        SECTION_CAPACITY * sizeof(section[0]));
+    if (section == NULL) {
+        if (failure != NULL) {
+            *failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_INVALID_ARGUMENT;
+        }
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    section_length = GetPrivateProfileSectionW(
+        L"SudekiMP", section, SECTION_CAPACITY, path);
+    SudekiMpLanArenaProfileInitialize(&state);
+    if (section_length >= SECTION_CAPACITY - 2u) {
+        state.failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_INVALID_ARGUMENT;
+        copy_fixed_three_profile_key(
+            failure_key, failure_key_capacity, L"<section_truncated>");
+        valid = FALSE;
+    }
+    entry = section;
+    while (valid && *entry != L'\0') {
+        size_t entry_length = wcslen(entry);
+        wchar_t *next = entry + entry_length + 1u;
+        wchar_t *separator = wcschr(entry, L'=');
+        if (separator == NULL) {
+            state.failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_INVALID_ARGUMENT;
+            copy_fixed_three_profile_key(failure_key, failure_key_capacity, entry);
+            valid = FALSE;
+            break;
+        }
+        *separator = L'\0';
+        if (!SudekiMpLanArenaProfileObserve(
+                &state, entry, SudekiMpConfigBooleanTextIsTrue(separator + 1u))) {
+            copy_fixed_three_profile_key(failure_key, failure_key_capacity, entry);
+            valid = FALSE;
+            break;
+        }
+        entry = next;
+    }
+    if (valid && !SudekiMpLanArenaProfileComplete(&state, role)) {
+        copy_fixed_three_profile_key(failure_key, failure_key_capacity,
+            L"<required_lan_profile_key>");
+        valid = FALSE;
+    }
+    if (failure != NULL) *failure = state.failure;
+    HeapFree(GetProcessHeap(), 0u, section);
+    if (!valid) SetLastError(ERROR_INVALID_DATA);
+    return valid;
+}
+
+static int hex_nibble(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static BOOL decode_sha256_text(const char text[65], uint8_t bytes[32]) {
+    size_t index;
+    if (text == NULL || bytes == NULL || strlen(text) != 64u) return FALSE;
+    for (index = 0u; index < 32u; ++index) {
+        int high = hex_nibble(text[index * 2u]);
+        int low = hex_nibble(text[index * 2u + 1u]);
+        if (high < 0 || low < 0) return FALSE;
+        bytes[index] = (uint8_t)((high << 4) | low);
+    }
+    return TRUE;
 }
 
 static BOOL read_config_float(
@@ -531,6 +641,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL expanded_talos_encounter_prototype_enabled;
     BOOL expanded_talos_lifecycle_trace_enabled;
     BOOL talos_post_movie_party_restore_enabled;
+    BOOL lan_arena_host_enabled;
+    BOOL lan_arena_client_enabled;
+    BOOL lan_arena_enabled;
     BOOL talos_companion_staging_observation_enabled;
     BOOL talos_defense_trace_enabled;
     BOOL control_separation_enabled;
@@ -578,6 +691,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL defer_integrated_roster;
     BOOL talos_exact_sol_authenticated = FALSE;
     BOOL talos_post_movie_dual_camera_enabled;
+    SudekiMpLanArenaProfileRole lan_arena_profile_role =
+        SUDEKIMP_LAN_ARENA_PROFILE_ROLE_NONE;
+    SudekiMpLanArenaSessionConfig lan_arena_config;
     unsigned int talos_post_movie_camera_bundle_mask;
     wchar_t spirit_strike_key_text[32];
     wchar_t control_separation_key_text[32];
@@ -588,6 +704,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     wchar_t cleanroom_menu_key_text[32];
     wchar_t zone_traversal_menu_key_text[32];
     wchar_t story_test_boost_key_text[32];
+    wchar_t lan_arena_host_text[64];
     UINT spirit_strike_virtual_key = 'G';
     UINT control_separation_virtual_key = 'J';
     UINT second_player_weak_attack_virtual_key = 'U';
@@ -604,6 +721,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     int input_bridge_port = 26760;
     int input_bridge_timeout_ms = 250;
     int xinput_player_two_slot = 0;
+    int lan_arena_port = 26770;
+    int lan_arena_timeout_ms = 1500;
+    char lan_arena_host_ipv4[64];
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
     float second_player_maximum_separation = 10.0f;
@@ -742,6 +862,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableTalosPostMoviePartyRestorePrototype"
     );
+    lan_arena_host_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableLanArenaHostPrototype"
+    );
+    lan_arena_client_enabled = read_config_boolean(
+        config_path,
+        L"SudekiMP",
+        L"EnableLanArenaClientPrototype"
+    );
+    lan_arena_enabled = lan_arena_host_enabled || lan_arena_client_enabled;
     talos_companion_staging_observation_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -967,6 +1098,83 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     );
     player_two_input_enabled = external_input_bridge_enabled ||
         three_seat_udp_transport_enabled || native_xinput_player_two_enabled;
+    if (lan_arena_enabled) {
+        SudekiMpLanArenaProfileFailure profile_failure;
+        wchar_t profile_failure_key[96];
+        char profile_failure_key_utf8[192];
+        int converted;
+
+        if (!validate_lan_arena_enable_profile(
+                config_path,
+                &profile_failure,
+                profile_failure_key,
+                sizeof(profile_failure_key) / sizeof(profile_failure_key[0]),
+                &lan_arena_profile_role) ||
+            zone_transition_trace_environment_enabled ||
+            !decode_sha256_text(build.actual_sha256, lan_arena_game_hash) ||
+            !read_config_integer(
+                config_path, L"SudekiMP", L"LanArenaPort", 26770,
+                1024, 65535, &lan_arena_port) ||
+            !read_config_integer(
+                config_path, L"SudekiMP", L"LanArenaTimeoutMs", 1500,
+                250, 10000, &lan_arena_timeout_ms)) {
+            converted = WideCharToMultiByte(
+                CP_UTF8, 0u, profile_failure_key, -1,
+                profile_failure_key_utf8, (int)sizeof(profile_failure_key_utf8),
+                NULL, NULL);
+            if (converted == 0) strcpy(profile_failure_key_utf8, "<conversion_failed>");
+            SudekiMpLogFormat(
+                "lan_arena_config=invalid reason=closed_profile_or_network_config "
+                "failure=%u key=%s zone_trace=%s\r\n",
+                (unsigned int)profile_failure,
+                profile_failure_key_utf8,
+                zone_transition_trace_environment_enabled ? "true" : "false");
+            SudekiMpLogWrite("status=bad_config\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        GetPrivateProfileStringW(
+            L"SudekiMP", L"LanArenaHost", L"127.0.0.1", lan_arena_host_text,
+            (DWORD)(sizeof(lan_arena_host_text) / sizeof(lan_arena_host_text[0])),
+            config_path);
+        if (WideCharToMultiByte(
+                CP_UTF8, WC_ERR_INVALID_CHARS, lan_arena_host_text, -1,
+                lan_arena_host_ipv4, (int)sizeof(lan_arena_host_ipv4), NULL, NULL) == 0) {
+            SudekiMpLogWrite("lan_arena_config=invalid reason=host_utf8\r\n");
+            SudekiMpLogWrite("status=bad_config\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if ((lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST &&
+             !lan_arena_host_enabled) ||
+            (lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_CLIENT &&
+             !lan_arena_client_enabled) ||
+            !control_separation_enabled) {
+            SudekiMpLogWrite(
+                "lan_arena_config=invalid reason=role_control_ownership_contract\r\n");
+            SudekiMpLogWrite("status=bad_config\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        memset(&lan_arena_config, 0, sizeof(lan_arena_config));
+        lan_arena_config.local_role =
+            lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST ?
+                SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL :
+                SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+        lan_arena_config.remote_ipv4 =
+            lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
+                lan_arena_host_ipv4 : NULL;
+        lan_arena_config.port = (unsigned int)lan_arena_port;
+        lan_arena_config.timeout_ms = (uint32_t)lan_arena_timeout_ms;
+        lan_arena_config.game_hash = lan_arena_game_hash;
+        SudekiMpLogFormat(
+            "lan_arena_requested=true role=%s port=%d host=%s "
+            "policy=cleanroom_only_host_authoritative_no_campaign_state\r\n",
+            lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
+                "Tal_host" : "Ailish_client",
+            lan_arena_port,
+            lan_arena_config.remote_ipv4 == NULL ? "bind_any" : lan_arena_host_ipv4);
+    }
     /* This is a deliberately closed, ordinary-world observation profile.
      * Even passive sibling traces and the startup-movie bypass would change
      * the provenance of a captured frame, so every optional path must remain
@@ -2351,12 +2559,64 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
         }
-        if (realtime_multiplayer_skill_combat_enabled &&
+        if ((realtime_multiplayer_skill_combat_enabled ||
+             fixed_three_seat_renderer_enabled) &&
             !SudekiMpInitializeSkillActivationAbi(game_module)) {
             SudekiMpLogFormat(
                 "realtime_skill_activation_abi_error=%lu\r\n",
                 (unsigned long)GetLastError()
             );
+            SudekiMpUninstallXInputPlayerTwoReservation();
+            SudekiMpInputBridgeStop();
+            SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+        }
+        if (fixed_three_seat_renderer_enabled &&
+            !SudekiMpInitializeSpiritActivationAbi(game_module)) {
+            SudekiMpLogFormat(
+                "local_quick_menu_adapter_preflight adapter=spirit error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
+            SudekiMpUninstallXInputPlayerTwoReservation();
+            SudekiMpInputBridgeStop();
+            SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+        }
+        if (fixed_three_seat_renderer_enabled &&
+            !SudekiMpInitializeWeaponActivationAbi(game_module)) {
+            SudekiMpLogFormat(
+                "local_quick_menu_adapter_preflight adapter=weapon error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
+            SudekiMpUninstallXInputPlayerTwoReservation();
+            SudekiMpInputBridgeStop();
+            SudekiMpLogWrite("status=control_separation_error\r\n");
+            SudekiMpUninstallInteractionProvenance();
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+        }
+        if (fixed_three_seat_renderer_enabled &&
+            !SudekiMpInitializeItemActivationAbi(game_module)) {
+            SudekiMpLogFormat(
+                "local_quick_menu_adapter_preflight adapter=item error=%lu\r\n",
+                (unsigned long)GetLastError()
+            );
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
             SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("status=control_separation_error\r\n");
@@ -2381,6 +2641,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 input_bridge_deadzone)) {
             SudekiMpLogFormat("control_separation_error=%lu\r\n",
                 (unsigned long)GetLastError());
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
             SudekiMpUninstallXInputPlayerTwoReservation();
             SudekiMpInputBridgeStop();
             SudekiMpLogWrite("control_separation_applied=false\r\n");
@@ -2394,6 +2658,25 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("control_separation_applied=true\r\n");
     } else {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
+    }
+    if (lan_arena_enabled) {
+        if (!SudekiMpCleanroomEngineInitialize(game_module) ||
+            !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            !SudekiMpInstallLanArenaRuntime(game_module, &lan_arena_config) ||
+            !SudekiMpInstallLanArenaPausePanel(game_module)) {
+            DWORD lan_error = GetLastError();
+            SudekiMpLogFormat(
+                "lan_arena_runtime_error=%lu phase=cleanroom_engine_window_network_or_pause_panel_install\r\n",
+                (unsigned long)lan_error);
+            SudekiMpLogWrite("status=lan_arena_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(lan_error);
+            return SUDEKIMP_INIT_LAN_ARENA_FAILED;
+        }
+        SudekiMpLogWrite(
+            "lan_arena_runtime_applied=true "
+            "state=cleanroom_waiting_for_authenticated_peer\r\n");
     }
     SudekiMpLogFormat(
         "split_screen_render_prototype_requested=%s layout=%s camera_policy=%s dual_camera_frame_cache=%s fixed_three_seat_renderer=%s skill_camera_routing=%s second_player_controller_camera=%s native_second_player_camera_collision=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
@@ -2452,6 +2735,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (void)SudekiMpSplitScreenSetFixedThreeSeatEnabled(FALSE);
             SudekiMpUninstallSplitScreenRender();
             SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
             if (control_separation_enabled) {
                 (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
                     FALSE);
@@ -2474,6 +2761,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             SetLastError(split_screen_error);
             return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
+        }
+        if (fixed_three_seat_renderer_enabled) {
+            SudekiMpSplitScreenSetFixedThreeCustomQuickMenuActionCapabilities(
+                SUDEKIMP_LOCAL_QUICK_MENU_ALL_CATEGORIES);
+            SudekiMpLogWrite(
+                "fixed_three_local_quick_menu=true "
+                "categories=skills,weapons,items,spirit "
+                "presentation=per_viewport_compositor_panel "
+                "policy=mod_owned_per_seat_no_native_singleton\r\n"
+            );
         }
         SudekiMpLogWrite("split_screen_render_applied=true\r\n");
         SudekiMpLogFormat(
@@ -2884,6 +3181,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !player_movement_trace_enabled &&
         !expanded_talos_lifecycle_trace_enabled &&
         !talos_post_movie_party_restore_enabled &&
+        !lan_arena_enabled &&
         !talos_companion_staging_observation_enabled &&
         !zone_transition_trace_enabled &&
         !zone_traversal_enabled) {
@@ -2898,6 +3196,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
+            SudekiMpUninstallLanArenaPausePanel();
+            SudekiMpUninstallLanArenaRuntime();
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
             SudekiMpUninstallTalosPostMoviePartyRestore();
             uninstall_talos_staging_observation();
             SudekiMpUninstallTalosNativeLifecycleTrace();

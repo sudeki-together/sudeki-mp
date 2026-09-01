@@ -19,6 +19,16 @@ typedef enum SudekiMpCleanroomActor {
     SUDEKIMP_CLEANROOM_ACTOR_COUNT = 5
 } SudekiMpCleanroomActor;
 
+#define SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS 5u
+#define SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS 4u
+typedef struct SudekiMpCleanroomActorPresentation {
+    uint32_t submodel_count;
+    int32_t selector[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
+    uint8_t state[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
+    float rate[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
+    float blend[SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS];
+} SudekiMpCleanroomActorPresentation;
+
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor);
 const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);
 
@@ -75,6 +85,30 @@ BOOL SudekiMpCleanroomEngineActorPosition(
     SudekiMpCleanroomActor actor,
     float position[3]
 );
+BOOL SudekiMpCleanroomEngineActorFacing(
+    SudekiMpCleanroomActor actor,
+    float facing[2]
+);
+/* Read the attached native world presentation without advancing or mutating
+ * its animation clock. This remains process-local diagnostic state and must
+ * never be copied directly into an unauthenticated network packet. */
+BOOL SudekiMpCleanroomEngineActorPresentation(
+    SudekiMpCleanroomActor actor,
+    SudekiMpCleanroomActorPresentation *presentation
+);
+/* Read/write the same named current HP/SP values the native HUD/stat code
+ * exposes. The setter is reserved for an authenticated, non-authoritative LAN
+ * presentation replica; gameplay authority must never call it on the host. */
+BOOL SudekiMpCleanroomEngineActorResources(
+    SudekiMpCleanroomActor actor,
+    float *hit_points,
+    float *skill_points
+);
+BOOL SudekiMpCleanroomEngineSetActorResources(
+    SudekiMpCleanroomActor actor,
+    float hit_points,
+    float skill_points
+);
 BOOL SudekiMpCleanroomEngineSpawnActor(
     SudekiMpCleanroomActor actor,
     const float position[3]
@@ -88,6 +122,11 @@ BOOL SudekiMpCleanroomEngineInitializePartyActor(
 );
 BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor);
 BOOL SudekiMpCleanroomEngineDummyPresent(void);
+BOOL SudekiMpCleanroomEngineDummySnapshot(
+    float position[3],
+    float *hit_points
+);
+BOOL SudekiMpCleanroomEngineSetDummyHitPoints(float hit_points);
 BOOL SudekiMpCleanroomEngineSpawnDummy(const float position[3]);
 BOOL SudekiMpCleanroomEngineRemoveDummy(void);
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled);

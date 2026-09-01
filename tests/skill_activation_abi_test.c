@@ -59,11 +59,12 @@ static uint8_t __attribute__((fastcall)) use_mock(
 int main(void) {
     uint8_t character[0x100];
     uint8_t skill[0x80];
-    uint8_t skill_data[6][0x20];
+    uint8_t skill_data[6][0xa0];
     uint8_t skill_context[4];
     uint8_t include_unavailable = 0u;
     SudekiMpSkillActivationApi api;
     SudekiMpSkillActivationResult result;
+    SudekiMpSkillQuickSkillList list;
     unsigned int index;
 
     ZeroMemory(character, sizeof(character));
@@ -81,11 +82,19 @@ int main(void) {
             index;
         skill_data[index][0x08u] = 1u;
         *(int *)(skill_data[index] + 0x0cu) = (int)(10u + index);
+        *(uint32_t *)(skill_data[index] + 0x94u) = 20u + index;
     }
     api.availability_target = availability_mock;
     api.validate = validate_mock;
     api.use = use_mock;
     api.include_unavailable_skills = &include_unavailable;
+
+    check(SudekiMpDescribeCharacterQuickSkillsWithApi(
+              character, &api, &list) && list.row_count == 6u,
+        "custom-menu Skills snapshot uses the native filtered CSkill order");
+    check(list.rows[2].ordinal == 2u && list.rows[2].slot == 12 &&
+            list.rows[2].cost == 22u && list.rows[2].available != 0u,
+        "custom-menu Skills row retains native execute ordinal, slot, cost, and availability");
 
     SudekiMpCombatContextsReset();
     SudekiMpCombatContextSetCharacter(1u, character);

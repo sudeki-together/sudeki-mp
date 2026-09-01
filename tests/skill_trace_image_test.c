@@ -1,4 +1,7 @@
 #include "engine/skill_activation_abi.h"
+#include "engine/spirit_activation_abi.h"
+#include "engine/item_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
 #include "hooks/accelerator_cache.h"
@@ -7,6 +10,13 @@
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
+#include "hooks/lan_arena_client_input.h"
+#include "hooks/lan_arena_client_replica.h"
+#include "hooks/lan_arena_campaign_guard.h"
+#include "hooks/lan_arena_host_input.h"
+#include "hooks/lan_arena_pause_panel.h"
+#include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_arena_window_policy.h"
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_skill_input.h"
 #include "hooks/save_book_intercept.h"
@@ -44,15 +54,18 @@ enum {
     RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL = 0x000998dcu,
     RVA_SPIRIT_STRIKE_VALIDATE = 0x00010940u,
     RVA_SPIRIT_STRIKE_ACTIVATE = 0x0000fba0u,
+    RVA_SPIRIT_STRIKE_VALIDATION_FLAG = 0x00349570u,
     RVA_CHARACTER_INPUT_HANDLER = 0x000277b0u,
     RVA_CHARACTER_INPUT_VTABLE_SLOT = 0x002c9f84u,
     RVA_APPLY_DAMAGE = 0x000d21d0u,
     RVA_COLLISION_DAMAGE = 0x00138870u,
+    RVA_CONTROLLER_COMBAT = 0x000286c0u,
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
     RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER = 0x00023f60u,
     RVA_GROUP_PLAYERS_NEXT_CHARACTER = 0x00024060u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
+    RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_MAIN_FRAME_UPDATE_CALL = 0x0028ddbau,
@@ -69,6 +82,7 @@ enum {
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
+    RVA_UI_TEXT_SUBMIT = 0x00009930u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
     RVA_QUICK_MENU_CLOSE = 0x0009c360u,
     RVA_QUICK_MENU_START = 0x0009c3a0u,
@@ -80,6 +94,14 @@ enum {
     RVA_QUICK_MENU_INPUT_VTABLE_SLOT = 0x002caf48u,
     RVA_QUICK_MENU_NATIVE_TOGGLE = 0x0000a080u,
     RVA_QUICK_MENU_NATIVE_TOGGLE_CALL = 0x00028228u,
+    RVA_KILL_FOCUS_SHOW_COMMAND = 0x0028d784u,
+    RVA_WINDOW_ACTIVE_COMPARE_IMMEDIATE = 0x0028d6a7u,
+    RVA_FOCUS_LOSS_BOOL_OPCODE = 0x0028d74au,
+    RVA_FOCUS_LOSS_BOOL_VALUE = 0x0028d74bu,
+    RVA_FOCUS_LOSS_STATE_VALUE = 0x0028d752u,
+    RVA_FOCUS_DEVICE_STATE_GLOBAL = 0x003c3110u,
+    RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE = 0x0028d7d1u,
+    RVA_SHOW_WINDOW_IAT = 0x0029a224u,
     RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE = 0x0000aff1u,
     RVA_QUICK_MENU_OWNER_COPY_SELECTION = 0x00099341u,
     RVA_QUICK_MENU_OWNER_COPY_SELECTION_WEAPON = 0x000995d6u,
@@ -102,6 +124,7 @@ enum {
     RVA_WORLD_SCENE_GLOBAL = 0x00408d1cu,
     RVA_SAVE_MENU_SHOW = 0x00084f10u,
     RVA_LOAD_GAME_SAVE = 0x00101690u,
+    RVA_LOADING_FLAG = 0x00409df8u,
     RVA_SHOP_IS_ACTIVE = 0x0008d1c0u,
     RVA_BLACKSMITH_START = 0x00092c40u,
     RVA_BLACKSMITH_IS_ACTIVE = 0x00092c60u,
@@ -205,6 +228,7 @@ enum {
     RVA_SKILL_DATA_AVAILABLE = 0x000da2a0u,
     RVA_SKILL_AVAILABILITY_FLAG = 0x003c2fd9u,
     RVA_SKILL_VALIDATE_FLAG = 0x0034a8b0u,
+    RVA_QUICK_ITEM_APPLY_TO_PARTY_SLOT = 0x000dc110u,
     RVA_ZONE_SET_NOW = 0x00007910u,
     RVA_ZONE_ENTER = 0x00007970u,
     RVA_ZONE_SWITCH_NOW = 0x00007990u,
@@ -226,6 +250,24 @@ enum {
     RVA_ZONE_HIDE_PARTY_MEMBERS = 0x00024a70u,
     RVA_ZONE_AI_MANAGER_GLOBAL = 0x00409de4u
 };
+
+/* The exact-image harness links the pause adapter without the live arena
+ * runtime. Render callbacks are never invoked here; these stubs isolate hook
+ * preflight/install/restore from network or native gameplay state. */
+BOOL SudekiMpLanArenaRuntimeEndSession(void) { return FALSE; }
+BOOL SudekiMpLanArenaRuntimeJoinAddress(const char *remote_ipv4) {
+    (void)remote_ipv4;
+    return FALSE;
+}
+BOOL SudekiMpLanArenaRuntimeJoinEndpoint(const char *endpoint) {
+    (void)endpoint;
+    return FALSE;
+}
+BOOL SudekiMpLanArenaRuntimeHostArena(void) { return FALSE; }
+BOOL SudekiMpLanArenaRuntimeGetStatus(SudekiMpLanArenaSessionStatus *status) {
+    if (status != NULL) memset(status, 0, sizeof(*status));
+    return FALSE;
+}
 
 static const uint32_t quick_menu_owner_copy_call_rvas[] = {
     RVA_QUICK_MENU_OWNER_COPY_UI_ACTIVE,
@@ -2763,6 +2805,365 @@ int wmain(int argc, wchar_t **argv) {
         fputs("failed to map PE image\n", stderr);
         return 1;
     }
+    /* The harness maps sections without applying PE base relocations.  Put the
+     * exact animation methods used by the LAN replica at their mapped-image
+     * addresses before asking its supported-image preflight to inspect them. */
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
+        image + RVA_ANIMATION_RENDERER_COUNT;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xfcu) =
+        image + RVA_ANIMATION_RENDERER_SELECTOR_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x100u) =
+        image + RVA_ANIMATION_RENDERER_SELECTOR_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x104u) =
+        image + RVA_ANIMATION_RENDERER_RATE_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x108u) =
+        image + RVA_ANIMATION_RENDERER_RATE_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x10cu) =
+        image + RVA_ANIMATION_RENDERER_TIME_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x114u) =
+        image + RVA_ANIMATION_RENDERER_STATE_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x118u) =
+        image + RVA_ANIMATION_RENDERER_STATE_GET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x144u) =
+        image + RVA_ANIMATION_RENDERER_BLEND_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x148u) =
+        image + RVA_ANIMATION_RENDERER_BLEND_GET;
+    if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+        fputs("FAIL: LAN client replica exact native seams rejected\n", stderr);
+        ++failures;
+    }
+    SudekiMpResetLanArenaClientReplica();
+    {
+        uint8_t saved_position_setter_byte = image[RVA_INTERNAL_POSITION_SETTER];
+        image[RVA_INTERNAL_POSITION_SETTER] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched position setter\n", stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_INTERNAL_POSITION_SETTER] = saved_position_setter_byte;
+    }
+    {
+        void *saved_animation_count = *(void **)(
+            image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u);
+        *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
+            image + RVA_INTERNAL_POSITION_SETTER;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched animation renderer\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
+            saved_animation_count;
+    }
+    {
+        uint8_t saved_prefix = image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u];
+        uint32_t raw_focus_state_operand;
+        uint32_t relocated_focus_state_operand = (uint32_t)(uintptr_t)(
+            image + RVA_FOCUS_DEVICE_STATE_GLOBAL);
+        uint32_t raw_show_window_operand;
+        uint32_t relocated_show_window_operand = (uint32_t)(uintptr_t)(
+            image + RVA_SHOW_WINDOW_IAT);
+        memcpy(&raw_focus_state_operand,
+            image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
+            sizeof(raw_focus_state_operand));
+        memcpy(image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
+            &relocated_focus_state_operand,
+            sizeof(relocated_focus_state_operand));
+        memcpy(&raw_show_window_operand,
+            image + RVA_KILL_FOCUS_SHOW_COMMAND + 4u,
+            sizeof(raw_show_window_operand));
+        memcpy(image + RVA_KILL_FOCUS_SHOW_COMMAND + 4u,
+            &relocated_show_window_operand,
+            sizeof(relocated_show_window_operand));
+        if (!SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN window policy exact focus-loss seam rejected\n",
+                stderr);
+            ++failures;
+        } else {
+            if (!SudekiMpLanArenaWindowPolicyInstalled() ||
+                image[RVA_KILL_FOCUS_SHOW_COMMAND] != 8u ||
+                image[RVA_WINDOW_ACTIVE_COMPARE_IMMEDIATE] != 0xffu ||
+                image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] != 0xffu ||
+                image[RVA_FOCUS_LOSS_BOOL_OPCODE] != 0xb2u ||
+                image[RVA_FOCUS_LOSS_BOOL_VALUE] != 0x01u ||
+                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0x01u) {
+                fputs("FAIL: LAN window policy did not enable background presentation\n",
+                    stderr);
+                ++failures;
+            }
+            if (!SudekiMpUninstallLanArenaWindowPolicy() ||
+                image[RVA_KILL_FOCUS_SHOW_COMMAND] != 6u ||
+                image[RVA_WINDOW_ACTIVE_COMPARE_IMMEDIATE] != 0u ||
+                image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] != 0u ||
+                image[RVA_FOCUS_LOSS_BOOL_OPCODE] != 0x32u ||
+                image[RVA_FOCUS_LOSS_BOOL_VALUE] != 0xd2u ||
+                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0u) {
+                fputs("FAIL: LAN window policy did not restore native focus policy\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        image[RVA_FOCUS_LOSS_STATE_VALUE] = 1u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN window policy accepted mismatched graphics focus context\n",
+                stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   image[RVA_KILL_FOCUS_SHOW_COMMAND] != 6u) {
+            fputs("FAIL: LAN graphics focus mismatch was not fail-closed\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_FOCUS_LOSS_STATE_VALUE] = 0u;
+        image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] = 1u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN window policy accepted mismatched WM_ACTIVATEAPP context\n",
+                stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   image[RVA_KILL_FOCUS_SHOW_COMMAND] != 6u) {
+            fputs("FAIL: LAN WM_ACTIVATEAPP mismatch was not fail-closed\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] = 0u;
+        image[RVA_WINDOW_ACTIVE_COMPARE_IMMEDIATE] = 1u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN window policy accepted mismatched activation context\n",
+                stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   image[RVA_KILL_FOCUS_SHOW_COMMAND] != 6u) {
+            fputs("FAIL: LAN activation mismatch was not fail-closed\n", stderr);
+            ++failures;
+        }
+        image[RVA_WINDOW_ACTIVE_COMPARE_IMMEDIATE] = 0u;
+        image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN window policy accepted mismatched WndProc context\n",
+                stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   image[RVA_KILL_FOCUS_SHOW_COMMAND] != 6u) {
+            fputs("FAIL: LAN window mismatch was not fail-closed\n", stderr);
+            ++failures;
+        }
+        image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u] = saved_prefix;
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            image[RVA_KILL_FOCUS_SHOW_COMMAND] = 9u;
+            SetLastError(ERROR_SUCCESS);
+            if (SudekiMpUninstallLanArenaWindowPolicy() ||
+                GetLastError() != ERROR_BUSY ||
+                !SudekiMpLanArenaWindowPolicyInstalled()) {
+                fputs("FAIL: LAN window policy lost byte-patch ownership\n",
+                    stderr);
+                ++failures;
+            }
+            image[RVA_KILL_FOCUS_SHOW_COMMAND] = 8u;
+            if (!SudekiMpUninstallLanArenaWindowPolicy()) {
+                fputs("FAIL: LAN window policy could not retry exact restore\n",
+                    stderr);
+                ++failures;
+            }
+        } else {
+            fputs("FAIL: LAN window policy retry install rejected\n", stderr);
+            ++failures;
+        }
+        memcpy(image + RVA_KILL_FOCUS_SHOW_COMMAND + 4u,
+            &raw_show_window_operand, sizeof(raw_show_window_operand));
+        memcpy(image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
+            &raw_focus_state_operand, sizeof(raw_focus_state_operand));
+    }
+    if (!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+        fputs("FAIL: LAN client input exact seams rejected\n", stderr);
+        ++failures;
+    } else {
+        if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) ==
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
+                image + RVA_ARBITER_MOVEMENT) {
+            fputs("FAIL: LAN client input hooks were not installed\n", stderr);
+            ++failures;
+        }
+        SudekiMpUninstallLanArenaClientInput();
+        if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
+                image + RVA_ARBITER_MOVEMENT) {
+            fputs("FAIL: LAN client input hooks were not restored\n", stderr);
+            ++failures;
+        }
+    }
+    {
+        uint8_t saved_quick_menu_entry = image[RVA_QUICK_MENU_NATIVE_TOGGLE];
+        image[RVA_QUICK_MENU_NATIVE_TOGGLE] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: LAN client input accepted a mismatched QuickMenu entry\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaClientInput();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: LAN QuickMenu mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE) {
+            fputs("FAIL: LAN QuickMenu mismatch mutated input hooks\n", stderr);
+            ++failures;
+        }
+        image[RVA_QUICK_MENU_NATIVE_TOGGLE] = saved_quick_menu_entry;
+    }
+    {
+        uint8_t controller_entry[12];
+        memcpy(controller_entry, image + RVA_CONTROLLER_COMBAT,
+            sizeof(controller_entry));
+        if (!SudekiMpInstallLanArenaHostInput((HMODULE)image)) {
+            fputs("FAIL: LAN host input exact combat seam rejected\n", stderr);
+            ++failures;
+        } else {
+            if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
+                    sizeof(controller_entry)) == 0) {
+                fputs("FAIL: LAN host input observer was not installed\n", stderr);
+                ++failures;
+            }
+            SudekiMpUninstallLanArenaHostInput();
+            if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
+                    sizeof(controller_entry)) != 0) {
+                fputs("FAIL: LAN host input observer was not restored\n", stderr);
+                ++failures;
+            }
+        }
+    }
+    {
+        uint8_t raw_save_entry[5];
+        uint8_t raw_slot_entry[7];
+        uint8_t raw_previous_character =
+            image[RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER];
+        uint8_t raw_next_character =
+            image[RVA_GROUP_PLAYERS_NEXT_CHARACTER];
+        uint8_t relocated_save_entry[5];
+        uint8_t relocated_slot_entry[7];
+        memcpy(raw_save_entry, image + RVA_SAVE_MENU_SHOW,
+            sizeof(raw_save_entry));
+        memcpy(raw_slot_entry, image + RVA_LOAD_GAME_SAVE,
+            sizeof(raw_slot_entry));
+        *(uint32_t *)(image + RVA_SAVE_MENU_SHOW + 1u) =
+            (uint32_t)(uintptr_t)(image + RVA_WORLD_SCENE_GLOBAL);
+        *(uint32_t *)(image + RVA_LOAD_GAME_SAVE + 2u) =
+            (uint32_t)(uintptr_t)(image + RVA_LOADING_FLAG);
+        memcpy(relocated_save_entry, image + RVA_SAVE_MENU_SHOW,
+            sizeof(relocated_save_entry));
+        memcpy(relocated_slot_entry, image + RVA_LOAD_GAME_SAVE,
+            sizeof(relocated_slot_entry));
+        if (!SudekiMpInstallLanArenaCampaignGuard((HMODULE)image)) {
+            fputs("FAIL: LAN campaign guard exact seams rejected\n", stderr);
+            ++failures;
+        } else {
+            if (memcmp(image + RVA_SAVE_MENU_SHOW, relocated_save_entry,
+                    sizeof(relocated_save_entry)) == 0 ||
+                memcmp(image + RVA_LOAD_GAME_SAVE, relocated_slot_entry,
+                    sizeof(relocated_slot_entry)) == 0 ||
+                image[RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER] != 0xc3u ||
+                image[RVA_GROUP_PLAYERS_NEXT_CHARACTER] != 0xc3u) {
+                fputs("FAIL: LAN campaign guard hooks were not installed\n",
+                    stderr);
+                ++failures;
+            }
+            SudekiMpUninstallLanArenaCampaignGuard();
+            if (memcmp(image + RVA_SAVE_MENU_SHOW, relocated_save_entry,
+                    sizeof(relocated_save_entry)) != 0 ||
+                memcmp(image + RVA_LOAD_GAME_SAVE, relocated_slot_entry,
+                    sizeof(relocated_slot_entry)) != 0 ||
+                image[RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER] !=
+                    raw_previous_character ||
+                image[RVA_GROUP_PLAYERS_NEXT_CHARACTER] !=
+                    raw_next_character) {
+                fputs("FAIL: LAN campaign guard hooks were not restored\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        image[RVA_LOAD_GAME_SAVE] ^= 0x01u;
+        if (SudekiMpInstallLanArenaCampaignGuard((HMODULE)image)) {
+            fputs("FAIL: LAN campaign guard accepted mismatched slot seam\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaCampaignGuard();
+        }
+        if (memcmp(image + RVA_SAVE_MENU_SHOW, relocated_save_entry,
+                sizeof(relocated_save_entry)) != 0 ||
+            image[RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER] !=
+                raw_previous_character ||
+            image[RVA_GROUP_PLAYERS_NEXT_CHARACTER] !=
+                raw_next_character) {
+            fputs("FAIL: LAN campaign mismatch mutated save-menu seam\n",
+                stderr);
+            ++failures;
+        }
+        memcpy(image + RVA_SAVE_MENU_SHOW, raw_save_entry,
+            sizeof(raw_save_entry));
+        memcpy(image + RVA_LOAD_GAME_SAVE, raw_slot_entry,
+            sizeof(raw_slot_entry));
+    }
+    if (!SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
+        fputs("FAIL: LAN pause panel exact seams rejected\n", stderr);
+        ++failures;
+    } else {
+        if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) ==
+                image + RVA_PC_QUIT_SCREEN_RENDER) {
+            fputs("FAIL: LAN pause-panel render hook was not installed\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpUninstallLanArenaPausePanel();
+        if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_RENDER) {
+            fputs("FAIL: LAN pause-panel render hook was not restored\n",
+                stderr);
+            ++failures;
+        }
+    }
+    {
+        uint8_t saved_text_submit_entry = image[RVA_UI_TEXT_SUBMIT];
+        image[RVA_UI_TEXT_SUBMIT] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
+            fputs("FAIL: LAN pause panel accepted a mismatched text submitter\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaPausePanel();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: LAN pause text mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_RENDER) {
+            fputs("FAIL: LAN pause text mismatch mutated render hook\n", stderr);
+            ++failures;
+        }
+        image[RVA_UI_TEXT_SUBMIT] = saved_text_submit_entry;
+    }
     memcpy(
         minimap_snapshot_call_original,
         image + RVA_MINIMAP_SNAPSHOT_POINTER_CALL,
@@ -4103,6 +4504,8 @@ int wmain(int argc, wchar_t **argv) {
         (uint32_t)(uintptr_t)(image + RVA_SKILL_AVAILABILITY_FLAG);
     *(uint32_t *)(image + RVA_SKILL_VALIDATE + 2u) =
         (uint32_t)(uintptr_t)(image + RVA_SKILL_VALIDATE_FLAG);
+    *(uint32_t *)(image + RVA_SPIRIT_STRIKE_VALIDATE + 5u) =
+        (uint32_t)(uintptr_t)(image + RVA_SPIRIT_STRIKE_VALIDATION_FLAG);
 
     check_blacksmith_ui_adapter_exact_image(image, &failures);
     check_blacksmith_roster_actor_identity_policy(&failures);
@@ -4180,6 +4583,35 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (!SudekiMpInitializeSkillActivationAbi((HMODULE)image)) {
         fprintf(stderr, "skill activation ABI rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    if (!SudekiMpInitializeSpiritActivationAbi((HMODULE)image)) {
+        fprintf(stderr, "spirit activation ABI rejected image (error=%lu)\n",
+            (unsigned long)GetLastError());
+        SudekiMpUninstallSkillTrace();
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 1;
+    }
+    {
+        uint8_t saved_item_apply =
+            image[RVA_QUICK_ITEM_APPLY_TO_PARTY_SLOT];
+
+        image[RVA_QUICK_ITEM_APPLY_TO_PARTY_SLOT] ^= 0x01u;
+        if (SudekiMpInitializeItemActivationAbi((HMODULE)image) ||
+            GetLastError() != ERROR_BAD_EXE_FORMAT) {
+            fputs("FAIL: item activation ABI accepted a changed native apply entry\n",
+                stderr);
+            ++failures;
+            SudekiMpResetItemActivationAbi();
+        }
+        image[RVA_QUICK_ITEM_APPLY_TO_PARTY_SLOT] = saved_item_apply;
+    }
+    if (!SudekiMpInitializeWeaponActivationAbi((HMODULE)image) ||
+        !SudekiMpInitializeItemActivationAbi((HMODULE)image)) {
+        fprintf(stderr, "weapon activation ABI rejected image (error=%lu)\n",
             (unsigned long)GetLastError());
         SudekiMpUninstallSkillTrace();
         VirtualFree(image, 0, MEM_RELEASE);
@@ -6043,6 +6475,9 @@ int wmain(int argc, wchar_t **argv) {
     }
     SudekiMpUninstallSkillTrace();
     SudekiMpResetSkillActivationAbi();
+    SudekiMpResetSpiritActivationAbi();
+    SudekiMpResetWeaponActivationAbi();
+    SudekiMpResetItemActivationAbi();
     if (relative_call_target(image + RVA_USE_CALL) != image + RVA_USE) {
         fputs("FAIL: Use call was not restored\n", stderr);
         ++failures;

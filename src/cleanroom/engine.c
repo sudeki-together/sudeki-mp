@@ -132,6 +132,10 @@ typedef unsigned int (__attribute__((thiscall))
         int channel,
         unsigned int submodel
     );
+typedef float (__attribute__((thiscall)) *AnimationBlendGetFunction)(
+    void *renderer,
+    int channel
+);
 
 enum {
     RVA_INTERNAL_SPAWN_PC = 0x000b1b00u,
@@ -187,6 +191,7 @@ enum {
     RVA_ANIMATION_RENDERER_RATE_GET = 0x00223160u,
     RVA_ANIMATION_RENDERER_TIME_GET = 0x00223220u,
     RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
+    RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
     RVA_NO_SP_NEEDED_FLAG = 0x003c2fccu,
     RVA_NO_SSP_NEEDED_FLAG = 0x003c2f23u,
     RVA_SPIRIT_STRIKE_MANAGER_GLOBAL = 0x00408d30u,
@@ -3910,6 +3915,171 @@ BOOL SudekiMpCleanroomEngineActorPosition(
         fabsf(position[2]) < 1000000.0f;
 }
 
+BOOL SudekiMpCleanroomEngineActorFacing(
+    SudekiMpCleanroomActor actor,
+    float facing[2]
+) {
+    uint8_t *character;
+    uint8_t *transform;
+    float length;
+
+    if (facing == NULL) return FALSE;
+    character = (uint8_t *)actor_pointer(actor);
+    if (!readable_memory(character, 0x48u)) return FALSE;
+    transform = *(uint8_t **)(character + 0x44u);
+    /* Position::SetForward reads the current native forward at +0x50..+0x58.
+     * Export only its horizontal unit direction; never a process pointer. */
+    if (!readable_memory(transform, 0x5cu)) return FALSE;
+    facing[0] = *(float *)(transform + 0x50u);
+    facing[1] = *(float *)(transform + 0x58u);
+    if (!isfinite(facing[0]) || !isfinite(facing[1])) return FALSE;
+    length = sqrtf(facing[0] * facing[0] + facing[1] * facing[1]);
+    if (!isfinite(length) || length < 0.0001f || length > 1000.0f) return FALSE;
+    facing[0] /= length;
+    facing[1] /= length;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineActorPresentation(
+    SudekiMpCleanroomActor actor,
+    SudekiMpCleanroomActorPresentation *presentation
+) {
+    uint8_t *character;
+    uint8_t *position;
+    uint8_t *wrapper;
+    void *renderer;
+    void **vtable;
+    CafuAnimationCountFunction get_count;
+    CafuAnimationSelectorGetFunction get_selector;
+    CafuAnimationFloatGetFunction get_rate;
+    CafuAnimationStateGetFunction get_state;
+    AnimationBlendGetFunction get_blend;
+    unsigned int channel;
+    unsigned int channel_limit;
+
+    if (presentation == NULL || game_base == NULL || actor < 0 ||
+        actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) return FALSE;
+    ZeroMemory(presentation, sizeof(*presentation));
+    character = (uint8_t *)actor_pointer(actor);
+    position = readable_memory(character, 0x48u) ?
+        *(uint8_t **)(character + 0x44u) : NULL;
+    wrapper = readable_memory(position, 0xb8u) ?
+        *(uint8_t **)(position + 0xb4u) : NULL;
+    renderer = readable_memory(wrapper, 0x14u) ?
+        *(void **)((uint8_t *)wrapper + 0x10u) : NULL;
+    if (!readable_memory(renderer, sizeof(void *)) ||
+        *(void **)renderer != game_base + RVA_ANIMATION_RENDERER_VTABLE) {
+        return FALSE;
+    }
+    vtable = *(void ***)renderer;
+    if (!readable_memory(vtable, 0x14cu) ||
+        vtable[0xf8u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_COUNT ||
+        vtable[0x100u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_SELECTOR_GET ||
+        vtable[0x108u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_RATE_GET ||
+        vtable[0x118u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_STATE_GET ||
+        vtable[0x148u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_BLEND_GET) {
+        return FALSE;
+    }
+    get_count = (CafuAnimationCountFunction)
+        vtable[0xf8u / sizeof(void *)];
+    get_selector = (CafuAnimationSelectorGetFunction)
+        vtable[0x100u / sizeof(void *)];
+    get_rate = (CafuAnimationFloatGetFunction)
+        vtable[0x108u / sizeof(void *)];
+    get_state = (CafuAnimationStateGetFunction)
+        vtable[0x118u / sizeof(void *)];
+    get_blend = (AnimationBlendGetFunction)
+        vtable[0x148u / sizeof(void *)];
+    presentation->submodel_count = get_count(renderer);
+    if (presentation->submodel_count == 0u ||
+        presentation->submodel_count > 32u) return FALSE;
+    /* The melee renderers share the vtable but do not expose valid backing
+     * storage for the ranged auxiliary channels. Tal's proven surface is
+     * channels 0-1 only; Ailish's world renderer owns all five. */
+    channel_limit = actor == SUDEKIMP_CLEANROOM_AILISH ?
+        SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS : 2u;
+    for (channel = 0u;
+         channel < channel_limit;
+         ++channel) {
+        presentation->selector[channel] =
+            get_selector(renderer, (int)channel, 0u);
+        presentation->state[channel] =
+            (uint8_t)get_state(renderer, (int)channel, 0u);
+        presentation->rate[channel] =
+            get_rate(renderer, (int)channel, 0u);
+        if (!isfinite(presentation->rate[channel])) return FALSE;
+    }
+    if (actor == SUDEKIMP_CLEANROOM_AILISH) {
+        for (channel = 0u;
+             channel < SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS;
+             ++channel) {
+            presentation->blend[channel] = get_blend(renderer, (int)channel);
+            if (!isfinite(presentation->blend[channel])) return FALSE;
+        }
+    } else {
+        presentation->blend[0] = get_blend(renderer, 0);
+        presentation->blend[3] = get_blend(renderer, 3);
+        if (!isfinite(presentation->blend[0]) ||
+            !isfinite(presentation->blend[3])) return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineActorResources(
+    SudekiMpCleanroomActor actor,
+    float *hit_points,
+    float *skill_points
+) {
+    void *gel_pointer;
+    float hp;
+    float sp;
+
+    if (hit_points == NULL || skill_points == NULL || get_pc == NULL ||
+        get_character_number_stat == NULL || actor < 0 ||
+        actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT ||
+        !SudekiMpCleanroomEngineWorldReady()) {
+        return FALSE;
+    }
+    gel_pointer = get_pc(actor_resources[actor]);
+    if (!readable_memory(gel_pointer, 0x10u)) return FALSE;
+    hp = get_character_number_stat(gel_pointer, "HitPoints");
+    sp = get_character_number_stat(gel_pointer, "SkillPoints");
+    if (!isfinite(hp) || !isfinite(sp) || hp < 0.0f || sp < 0.0f ||
+        hp > 100000000.0f || sp > 100000000.0f) {
+        return FALSE;
+    }
+    *hit_points = hp;
+    *skill_points = sp;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetActorResources(
+    SudekiMpCleanroomActor actor,
+    float hit_points,
+    float skill_points
+) {
+    void *gel_pointer;
+    if (get_pc == NULL || set_character_number_stat == NULL || actor < 0 ||
+        actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT ||
+        !isfinite(hit_points) || !isfinite(skill_points) ||
+        hit_points < 0.0f || skill_points < 0.0f ||
+        hit_points > 100000000.0f || skill_points > 100000000.0f ||
+        !SudekiMpCleanroomEngineWorldReady()) {
+        return FALSE;
+    }
+    gel_pointer = get_pc(actor_resources[actor]);
+    if (!readable_memory(gel_pointer, 0x10u)) return FALSE;
+    if (set_character_number_stat(
+            gel_pointer, "HitPoints", hit_points) == 0u) return FALSE;
+    return set_character_number_stat(
+        gel_pointer, "SkillPoints", skill_points) != 0u;
+}
+
 BOOL SudekiMpCleanroomEngineSpawnActor(
     SudekiMpCleanroomActor actor,
     const float position[3]
@@ -3968,6 +4138,46 @@ BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor) {
 
 BOOL SudekiMpCleanroomEngineDummyPresent(void) {
     return lookup_entity(get_generic_entity, dummy_resource) != NULL;
+}
+
+BOOL SudekiMpCleanroomEngineDummySnapshot(
+    float position[3],
+    float *hit_points
+) {
+    uint8_t *entity;
+    uint8_t *transform;
+    void *gel_pointer;
+    float hp;
+    if (position == NULL || hit_points == NULL || get_generic_entity == NULL ||
+        get_character_number_stat == NULL ||
+        !SudekiMpCleanroomEngineWorldReady()) return FALSE;
+    entity = (uint8_t *)lookup_entity(get_generic_entity, dummy_resource);
+    if (!readable_memory(entity, 0x48u)) return FALSE;
+    transform = *(uint8_t **)(entity + 0x44u);
+    if (!readable_memory(transform, 0x24u)) return FALSE;
+    gel_pointer = get_generic_entity(dummy_resource);
+    if (!readable_memory(gel_pointer, 0x10u)) return FALSE;
+    hp = get_character_number_stat(gel_pointer, "HitPoints");
+    if (!isfinite(hp) || hp < 0.0f || hp > 100000000.0f) return FALSE;
+    position[0] = *(float *)(transform + 0x18u);
+    position[1] = *(float *)(transform + 0x1cu);
+    position[2] = *(float *)(transform + 0x20u);
+    if (!isfinite(position[0]) || !isfinite(position[1]) ||
+        !isfinite(position[2])) return FALSE;
+    *hit_points = hp;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetDummyHitPoints(float hit_points) {
+    void *gel_pointer;
+    if (get_generic_entity == NULL || set_character_number_stat == NULL ||
+        !isfinite(hit_points) || hit_points < 0.0f ||
+        hit_points > 100000000.0f ||
+        !SudekiMpCleanroomEngineWorldReady()) return FALSE;
+    gel_pointer = get_generic_entity(dummy_resource);
+    return readable_memory(gel_pointer, 0x10u) &&
+        set_character_number_stat(
+            gel_pointer, "HitPoints", hit_points) != 0u;
 }
 
 BOOL SudekiMpCleanroomEngineSpawnDummy(const float position[3]) {

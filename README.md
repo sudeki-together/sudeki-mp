@@ -48,6 +48,17 @@ research copy; the complete 394-file baseline is hashed and reproducible.
 
 ## Current status
 
+### LAN arena foundation
+
+The first host-authoritative network slice is now available as a closed
+cleanroom experiment. It runs Tal on a host process and Ailish on a separate
+client process, with direct IPv4 UDP, independent full-screen native cameras,
+client movement and weak attacks, and host-authored actor/enemy snapshots.
+Campaign saves, transitions, native client QuickMenu actions, and the local
+split-screen hooks are excluded from both profiles. See
+[LAN arena development guide](docs/lan-arena.md) for launch commands, controls,
+protocol guarantees, and the two-prefix loopback tests.
+
 ### Confirmed foundations
 
 - The GOG installer, installed files, executable, and vanilla Wine baseline

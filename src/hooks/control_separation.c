@@ -16,6 +16,7 @@
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
 #include "input/local_input_hub.h"
+#include "network/lan_arena_authority.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -211,6 +212,7 @@ static SudekiMpCompanionControlRuntime
 #define weak_attack_was_down (companion_controls[0].keyboard_weak_was_down)
 static UINT selected_virtual_key;
 static BOOL hotkey_was_down;
+static BOOL manual_toggle_enabled;
 static BOOL second_player_movement_enabled;
 static BOOL camera_relative_movement_enabled;
 static BOOL separation_guard_enabled;
@@ -242,6 +244,7 @@ static DWORD tal_character_update_last_trace_tick;
 static BOOL second_player_facing_valid;
 static float second_player_last_facing[3];
 static BOOL input_bridge_enabled;
+static BOOL lan_arena_remote_input_enabled;
 static float input_bridge_deadzone;
 static BOOL interaction_requests_enabled;
 static SudekiMpControllerActionRouter controller_action_router;
@@ -2156,6 +2159,14 @@ static BOOL controller_intent_quick_menu_action(
     case SUDEKIMP_CONTROLLER_INTENT_MODAL_DOWN:
         *action = SUDEKIMP_QUICK_MENU_ACTION_DOWN;
         return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_LEFT:
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_PREVIOUS_PAGE:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_PREVIOUS_CATEGORY;
+        return TRUE;
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_RIGHT:
+    case SUDEKIMP_CONTROLLER_INTENT_MODAL_NEXT_PAGE:
+        *action = SUDEKIMP_QUICK_MENU_ACTION_NEXT_CATEGORY;
+        return TRUE;
     default:
         return FALSE;
     }
@@ -2189,14 +2200,17 @@ static void service_second_player_controller_actions(
     BOOL seat_quick_menu_controls_modal;
     BOOL input_lease_active;
     BOOL quick_menu_opened = FALSE;
+    BOOL custom_three_seat_menu;
     const char *quick_menu_open_reason = "seat_quick_menu_open_rejected";
 
     ZeroMemory(&context, sizeof(context));
-    any_quick_menu_active =
-        SudekiMpSplitScreenQuickMenuAnyActive();
+    custom_three_seat_menu =
+        SudekiMpSplitScreenFixedThreeCustomQuickMenuEnabled();
+    any_quick_menu_active = SudekiMpSplitScreenQuickMenuAnyActive();
     seat_quick_menu_active =
         SudekiMpSplitScreenQuickMenuActive(1u);
-    other_seat_quick_menu_active = any_quick_menu_active &&
+    other_seat_quick_menu_active = !custom_three_seat_menu &&
+        any_quick_menu_active &&
         !seat_quick_menu_active;
     seat_quick_menu_controls_modal = seat_quick_menu_active &&
         !modal_active && !transition_vote_active;
@@ -2207,7 +2221,8 @@ static void service_second_player_controller_actions(
         input_lease_active &&
         overridden_character_is_in_active_group();
     context.modal_active = modal_active != FALSE ||
-        any_quick_menu_active;
+        (custom_three_seat_menu ? seat_quick_menu_active :
+            any_quick_menu_active);
     context.transition_vote_active = transition_vote_active != FALSE;
     context.interaction_target_known =
         second_player_exact_interaction_target_known();
@@ -2229,7 +2244,8 @@ static void service_second_player_controller_actions(
     if (result_count > SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS) {
         result_count = SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS;
     }
-    if (!any_quick_menu_active) {
+    if (!seat_quick_menu_active &&
+        (custom_three_seat_menu || !any_quick_menu_active)) {
         for (result_index = 0u;
              result_index < result_count;
              ++result_index) {
@@ -2394,10 +2410,27 @@ static void service_player_three_controller_actions(
         results[SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS];
     size_t result_count;
     size_t result_index;
+    size_t quick_menu_result_index = SIZE_MAX;
     BOOL view_ready = companion_seat_view_ready(2u, companion);
     BOOL input_ready = companion_active_input_lease(2u, companion);
+    BOOL any_quick_menu_active;
+    BOOL seat_quick_menu_active;
+    BOOL other_seat_quick_menu_active;
+    BOOL seat_quick_menu_controls_modal;
+    BOOL quick_menu_opened = FALSE;
+    BOOL custom_three_seat_menu;
+    const char *quick_menu_open_reason = "seat_quick_menu_open_rejected";
 
     ZeroMemory(&context, sizeof(context));
+    custom_three_seat_menu =
+        SudekiMpSplitScreenFixedThreeCustomQuickMenuEnabled();
+    any_quick_menu_active = SudekiMpSplitScreenQuickMenuAnyActive();
+    seat_quick_menu_active = SudekiMpSplitScreenQuickMenuActive(2u);
+    other_seat_quick_menu_active = !custom_three_seat_menu &&
+        any_quick_menu_active &&
+        !seat_quick_menu_active;
+    seat_quick_menu_controls_modal = seat_quick_menu_active &&
+        !modal_active && !transition_vote_active;
     context.seat_active =
         SudekiMpControlSeparationSeatSubmissionReadyPolicy(
             2u,
@@ -2407,7 +2440,8 @@ static void service_player_three_controller_actions(
             view_ready) &&
         companion_character_is_in_active_group(companion);
     context.modal_active = modal_active != FALSE ||
-        SudekiMpSplitScreenQuickMenuAnyActive();
+        (custom_three_seat_menu ? seat_quick_menu_active :
+            any_quick_menu_active);
     context.transition_vote_active = transition_vote_active != FALSE;
     context.combat_active = second_player_combat_active();
     result_count = SudekiMpControllerActionRouterAdvance(
@@ -2421,6 +2455,28 @@ static void service_player_three_controller_actions(
     if (result_count > SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS) {
         result_count = SUDEKIMP_CONTROLLER_ACTION_MAX_RESULTS;
     }
+    if (!seat_quick_menu_active &&
+        (custom_three_seat_menu || !any_quick_menu_active)) {
+        for (result_index = 0u;
+             result_index < result_count;
+             ++result_index) {
+            if (results[result_index].intent ==
+                    SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+                quick_menu_result_index = result_index;
+                break;
+            }
+        }
+    }
+    if (quick_menu_result_index != SIZE_MAX) {
+        if (!owns_foreground) {
+            quick_menu_open_reason = "game_window_not_foreground";
+        } else if (!context.seat_active) {
+            quick_menu_open_reason = "seat_input_lease_inactive";
+        } else if (SudekiMpSplitScreenQuickMenuRequest(2u)) {
+            quick_menu_opened = TRUE;
+            quick_menu_open_reason = "seat_quick_menu_opened";
+        }
+    }
     for (result_index = 0u; result_index < result_count; ++result_index) {
         SudekiMpControllerActionResolution *resolution =
             &results[result_index];
@@ -2433,7 +2489,36 @@ static void service_player_three_controller_actions(
         uint32_t state_58 = 0u;
         uint8_t flags_60 = 0u;
 
-        if (resolution->intent ==
+        if (other_seat_quick_menu_active) {
+            delivery = "blocked";
+            reason = "other_seat_quick_menu_active";
+        } else if (quick_menu_result_index != SIZE_MAX &&
+                   result_index != quick_menu_result_index) {
+            delivery = "blocked";
+            reason = "menu_open_edge_consumed";
+        } else if (resolution->intent ==
+                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
+            delivery = quick_menu_opened ? "submitted" : "rejected";
+            reason = quick_menu_open_reason;
+        } else if (context.modal_active &&
+                   seat_quick_menu_controls_modal) {
+            SudekiMpSplitScreenQuickMenuAction action;
+
+            if (!owns_foreground) {
+                delivery = "rejected";
+                reason = "game_window_not_foreground";
+            } else if (!controller_intent_quick_menu_action(
+                           resolution->intent, &action)) {
+                delivery = "blocked";
+                reason = "seat_quick_menu_action_not_supported";
+            } else if (SudekiMpSplitScreenQuickMenuSubmit(2u, action)) {
+                delivery = "submitted";
+                reason = "seat_quick_menu_action_submitted";
+            } else {
+                delivery = "rejected";
+                reason = "seat_quick_menu_action_rejected";
+            }
+        } else if (resolution->intent ==
                 SUDEKIMP_CONTROLLER_INTENT_PRIMARY_ATTACK_WEAK) {
             if (submit_companion_controller_combat_action(
                     2u,
@@ -2454,16 +2539,13 @@ static void service_player_three_controller_actions(
                 SUDEKIMP_CONTROLLER_INTENT_NONE) {
             reason = context.seat_active ?
                 "no_action_in_current_context" : reason;
-        } else if (resolution->intent ==
-                SUDEKIMP_CONTROLLER_INTENT_QUICK_MENU) {
-            reason = "p3_quick_menu_consumer_not_connected";
         }
         SudekiMpLogFormat(
             "control_separation event=controller_action_edge phase=rising "
             "player=3 protocol_button=%s intent=%s layer=%s combat=%s "
             "view_ready=%s delivery=%s reason=%s character=0x%08lx "
             "arbiter=0x%08lx flags_50=0x%08lx state_58=0x%08lx "
-            "flags_60=0x%02x policy=first_p3_slice_weak_attack_only\r\n",
+            "flags_60=0x%02x policy=seat_owned_local_quick_menu\r\n",
             SudekiMpControllerProtocolButtonName(
                 resolution->protocol_button),
             SudekiMpControllerActionIntentName(resolution->intent),
@@ -2528,7 +2610,8 @@ BOOL SudekiMpControlSeparationGameplayInputFrozen(void) {
     return SudekiMpInputBridgeGameplaySuppressed() ||
         transition_vote_escape_release_pending ||
         SudekiMpSplitScreenSharedInteractionModalActive() ||
-        SudekiMpSplitScreenQuickMenuAnyActive();
+        (!SudekiMpSplitScreenFixedThreeCustomQuickMenuEnabled() &&
+         SudekiMpSplitScreenQuickMenuAnyActive());
 }
 
 static BOOL service_transition_vote_input_freeze(
@@ -3195,6 +3278,16 @@ static void poll_second_player_movement(
     float frame_delta;
     float direct_move_speed;
 
+    /* Authenticated LAN input is submitted by the post-controller LAN
+     * observer.  The legacy local-P2 poll must not stop that native arbiter
+     * lease first merely because its own keyboard/bridge movement feature is
+     * disabled; doing so alternates stop/submit every controller frame and
+     * presents as Ailish stumbling.  Session timeout and teardown remain the
+     * sole LAN stop authorities through Submit(...0,0...) and
+     * SetLanArenaRemoteInputEnabled(FALSE). */
+    if (lan_arena_remote_input_enabled) {
+        return;
+    }
     if (!player_two_requested) {
         stop_second_player_movement();
         return;
@@ -4345,6 +4438,8 @@ static void poll_control_separation_hotkey_body(
     BOOL hotkey_is_down;
     BOOL owns_foreground;
     BOOL gameplay_input_allowed;
+    BOOL player_two_gameplay_allowed;
+    BOOL player_three_gameplay_allowed;
     uint8_t *player_two_character = (uint8_t *)overridden_character;
     uint32_t *player_two_arbiter_flags = NULL;
     uint32_t saved_player_two_arbiter_flags;
@@ -4490,7 +4585,7 @@ static void poll_control_separation_hotkey_body(
             (void *)companion_controls[1].input_identity
     );
     SudekiMpCombatContextsPollGame((HMODULE)game_base);
-    hotkey_is_down =
+    hotkey_is_down = manual_toggle_enabled &&
         (GetAsyncKeyState((int)selected_virtual_key) & 0x8000) != 0;
     foreground = GetForegroundWindow();
     if (foreground != NULL) {
@@ -4589,30 +4684,37 @@ static void poll_control_separation_hotkey_body(
         controller, owns_foreground, FALSE, FALSE);
     gameplay_input_allowed =
         !SudekiMpControlSeparationGameplayInputFrozen();
+    /* The custom fixed-three panel is deliberately per-seat.  Legacy native
+     * QuickMenu retains its singleton/global freeze; a P2 or P3 panel only
+     * stops that same companion's movement, combat, and orbit submissions. */
+    player_two_gameplay_allowed = gameplay_input_allowed &&
+        !SudekiMpSplitScreenQuickMenuActive(1u);
+    player_three_gameplay_allowed = gameplay_input_allowed &&
+        !SudekiMpSplitScreenQuickMenuActive(2u);
     update_roaming_boundary(controller);
     poll_second_player_movement(
         controller,
         update_data,
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_two_gameplay_allowed
     );
     poll_player_three_movement(
         controller,
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_three_gameplay_allowed
     );
     poll_second_player_camera_facing(
         controller,
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_two_gameplay_allowed
     );
     poll_second_player_weak_attack(
         controller,
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_two_gameplay_allowed
     );
     poll_second_player_skills(
         controller,
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_two_gameplay_allowed
     );
     poll_second_player_target_trace(
-        owns_foreground && gameplay_input_allowed
+        owns_foreground && player_two_gameplay_allowed
     );
     poll_shared_group_camera(controller);
     notify_update_observers(
@@ -5014,6 +5116,124 @@ BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index) {
     return companion != NULL && companion->requested &&
         companion->lease_exact && companion->character != NULL &&
         companion_active_input_lease(seat_index, companion);
+}
+
+BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    lan_arena_remote_input_enabled = enabled != FALSE;
+    if (!lan_arena_remote_input_enabled) {
+        stop_companion_movement(1u, &companion_controls[0]);
+    }
+    SudekiMpLogFormat(
+        "control_separation event=lan_arena_remote_input state=%s "
+        "policy=authenticated_host_only_native_ailish_arbiter\r\n",
+        lan_arena_remote_input_enabled ? "enabled" : "disabled"
+    );
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSetManualToggleEnabled(BOOL enabled) {
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    manual_toggle_enabled = enabled != FALSE;
+    hotkey_was_down = FALSE;
+    SudekiMpLogFormat(
+        "control_separation event=manual_toggle state=%s "
+        "policy=lan_named_actor_lease_cannot_be_retargeted_by_local_hotkey\r\n",
+        manual_toggle_enabled ? "enabled" : "disabled");
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
+    BOOL remote_session_authenticated,
+    BOOL player_two_requested_value,
+    BOOL player_two_lease_exact,
+    BOOL character_in_active_group,
+    BOOL native_control_state_exact,
+    BOOL direction_finite,
+    BOOL weak_attack_edge
+) {
+    (void)weak_attack_edge;
+    return SudekiMpLanArenaHostRemoteInputAllowed(
+        remote_session_authenticated,
+        player_two_requested_value,
+        player_two_lease_exact,
+        character_in_active_group,
+        native_control_state_exact,
+        direction_finite);
+}
+
+BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
+    float world_direction_x,
+    float world_direction_z,
+    BOOL weak_attack_edge
+) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    uint8_t *character = (uint8_t *)companion->character;
+    uint8_t *component;
+    uint8_t *mode_state;
+    uint8_t *controller;
+    void *arbiter;
+    void *controller_target;
+    float direction[3];
+    float magnitude;
+    BOOL native_control_state_exact;
+
+    if (!isfinite(world_direction_x) || !isfinite(world_direction_z) ||
+        fabsf(world_direction_x) > 1.0f || fabsf(world_direction_z) > 1.0f) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    component = character == NULL ? NULL : *(uint8_t **)(character + 0x94u);
+    mode_state = component == NULL ? NULL : *(uint8_t **)(component + 0x3cu);
+    arbiter = character == NULL ? NULL : *(void **)(character + 0x90u);
+    controller = game_base == NULL ? NULL : *(uint8_t **)(
+        game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    controller_target = controller == NULL ? NULL :
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET);
+    native_control_state_exact = component != NULL &&
+        component == companion->ai_component && mode_state != NULL &&
+        arbiter != NULL && *(void **)(character + 0xacu) != NULL &&
+        *(int16_t *)(component + 0x16au) == 1 && *(mode_state + 0x0bu) == 0u &&
+        character != controller_target && arbiter_movement != NULL;
+    if (!SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
+            lan_arena_remote_input_enabled,
+            companion->requested,
+            companion->lease_exact && character != NULL,
+            companion_character_is_in_active_group(companion),
+            native_control_state_exact,
+            TRUE,
+            weak_attack_edge)) {
+        SetLastError(ERROR_NOT_READY);
+        return FALSE;
+    }
+    direction[0] = world_direction_x;
+    direction[1] = 0.0f;
+    direction[2] = world_direction_z;
+    magnitude = sqrtf(direction[0] * direction[0] + direction[2] * direction[2]);
+    if (magnitude > 0.0001f) {
+        direction[0] /= magnitude;
+        direction[2] /= magnitude;
+        if (magnitude > 1.0f) magnitude = 1.0f;
+        arbiter_movement(arbiter, direction, magnitude, 1.0f, 0u);
+        companion->movement_active = TRUE;
+        companion->movement_magnitude = magnitude;
+    } else {
+        stop_companion_movement(1u, companion);
+    }
+    if (weak_attack_edge) {
+        SudekiMpSubmitArbiterCombatInput(
+            game_base + RVA_ARBITER_COMBAT_INPUT, arbiter,
+            1, 0, 0, 0, 0, 0);
+    }
+    return TRUE;
 }
 
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void) {
@@ -5421,6 +5641,7 @@ BOOL SudekiMpInstallControlSeparation(
     service_only_mode = FALSE;
     selected_virtual_key = toggle_virtual_key;
     hotkey_was_down = FALSE;
+    manual_toggle_enabled = TRUE;
     ZeroMemory(companion_controls, sizeof(companion_controls));
     overridden_character = NULL;
     overridden_ai_component = NULL;
@@ -5441,6 +5662,7 @@ BOOL SudekiMpInstallControlSeparation(
         sizeof(roaming_boundary_player_blocked));
     roaming_boundary_overlay_ready = FALSE;
     second_player_weak_attack_enabled = enable_second_player_weak_attack;
+    lan_arena_remote_input_enabled = FALSE;
     weak_attack_virtual_key = attack_virtual_key;
     weak_attack_was_down = FALSE;
     input_bridge_enabled = enable_input_bridge;
@@ -5688,6 +5910,7 @@ void SudekiMpUninstallControlSeparation(void) {
     service_only_mode = FALSE;
     selected_virtual_key = 0;
     hotkey_was_down = FALSE;
+    manual_toggle_enabled = TRUE;
     second_player_movement_enabled = FALSE;
     camera_relative_movement_enabled = FALSE;
     separation_guard_enabled = FALSE;
@@ -5702,6 +5925,7 @@ void SudekiMpUninstallControlSeparation(void) {
     second_player_weak_attack_enabled = FALSE;
     weak_attack_virtual_key = 0;
     input_bridge_enabled = FALSE;
+    lan_arena_remote_input_enabled = FALSE;
     input_bridge_deadzone = 0.0f;
     interaction_requests_enabled = FALSE;
     SudekiMpControllerActionRouterInitialize(&controller_action_router);

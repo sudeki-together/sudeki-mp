@@ -18,6 +18,7 @@ set(SUDEKIMP_COMMON_SOURCES
 add_library(SudekiMP SHARED
     src/loader/dllmain.c
     src/loader/fixed_three_profile.c
+    src/loader/lan_arena_profile.c
     src/cleanroom/audio.c
     src/cleanroom/engine.c
     src/cleanroom/menu.c
@@ -35,6 +36,8 @@ add_library(SudekiMP SHARED
     src/engine/render_phase_abi.c
     src/engine/log.c
     src/engine/local_viewport_layout.c
+    src/engine/local_quick_menu.c
+    src/engine/item_activation_abi.c
     src/engine/merchant_provenance.c
     src/engine/merchant_checkout.c
     src/engine/orbit_camera.c
@@ -46,6 +49,8 @@ add_library(SudekiMP SHARED
     src/engine/save_book_vote.c
     src/engine/save_book_vote_input.c
     src/engine/skill_activation_abi.c
+    src/engine/spirit_activation_abi.c
+    src/engine/weapon_activation_abi.c
     src/engine/talos_companion_carry.c
     src/engine/talos_companion_staging.c
     src/engine/talos_companion_staging_research.c
@@ -56,11 +61,23 @@ add_library(SudekiMP SHARED
     src/input/bridge_receiver.c
     src/input/local_input_hub.c
     src/input/key_binding.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_endpoint.c
+    src/network/lan_arena_authority.c
+    src/network/lan_arena_replica.c
+    src/network/lan_arena_session.c
     src/hooks/accelerator_cache.c
     src/hooks/blacksmith_read_adapter.c
     src/hooks/blacksmith_ui_adapter.c
     src/hooks/call_hook.c
     src/hooks/interaction_provenance.c
+    src/hooks/lan_arena_campaign_guard.c
+    src/hooks/lan_arena_window_policy.c
+    src/hooks/lan_arena_runtime.c
+    src/hooks/lan_arena_client_input.c
+    src/hooks/lan_arena_client_replica.c
+    src/hooks/lan_arena_host_input.c
+    src/hooks/lan_arena_pause_panel.c
     src/hooks/merchant_provenance_adapter.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
@@ -231,6 +248,17 @@ add_executable(SudekiMP.SaveBookVoteInputTest
     tests/save_book_vote_input_test.c
     src/engine/save_book_vote_input.c
 )
+
+add_executable(SudekiMP.LocalQuickMenuTest
+    tests/local_quick_menu_test.c
+    src/engine/local_quick_menu.c
+)
+target_include_directories(SudekiMP.LocalQuickMenuTest PRIVATE src)
+target_compile_definitions(SudekiMP.LocalQuickMenuTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LocalQuickMenuTest PRIVATE -Wall -Wextra -Wpedantic -Werror)
+set_target_properties(SudekiMP.LocalQuickMenuTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 target_include_directories(SudekiMP.SaveBookVoteInputTest PRIVATE src)
 target_compile_options(SudekiMP.SaveBookVoteInputTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
@@ -329,6 +357,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/arbiter_combat_input.c
     src/engine/controller_action_router.c
     src/engine/coop_roster_assignment.c
+    src/engine/local_quick_menu.c
     src/engine/blacksmith_read_model.c
     src/engine/blacksmith_shadow.c
     src/engine/blacksmith_ui_session.c
@@ -342,10 +371,17 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/engine/roaming_boundary.c
     src/engine/save_book_vote.c
     src/engine/skill_activation_abi.c
+    src/engine/spirit_activation_abi.c
+    src/engine/weapon_activation_abi.c
+    src/engine/item_activation_abi.c
     src/engine/transition_vote.c
     src/input/bridge_protocol.c
     src/input/bridge_receiver.c
     src/input/local_input_hub.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_replica.c
+    src/network/lan_arena_session.c
+    src/network/lan_arena_authority.c
     src/hooks/call_hook.c
     src/hooks/blacksmith_read_adapter.c
     src/hooks/blacksmith_ui_adapter.c
@@ -353,6 +389,12 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
     src/hooks/interaction_provenance.c
+    src/hooks/lan_arena_campaign_guard.c
+    src/hooks/lan_arena_window_policy.c
+    src/hooks/lan_arena_client_input.c
+    src/hooks/lan_arena_client_replica.c
+    src/hooks/lan_arena_host_input.c
+    src/hooks/lan_arena_pause_panel.c
     src/hooks/player_input_trace.c
     src/hooks/quick_skill_input.c
     src/hooks/save_book_intercept.c
@@ -409,6 +451,26 @@ add_executable(SudekiMP.SkillActivationAbiTest
     src/engine/player_combat_context.c
     src/engine/log.c
 )
+
+add_executable(SudekiMP.SpiritActivationAbiTest
+    tests/spirit_activation_abi_test.c
+    src/engine/spirit_activation_abi.c
+)
+target_include_directories(SudekiMP.SpiritActivationAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.SpiritActivationAbiTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.SpiritActivationAbiTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_source_files_properties(
+    tests/spirit_activation_abi_test.c
+    src/engine/spirit_activation_abi.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.SpiritActivationAbiTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 target_include_directories(SudekiMP.SkillActivationAbiTest PRIVATE src)
 target_compile_definitions(SudekiMP.SkillActivationAbiTest PRIVATE
     WIN32_LEAN_AND_MEAN
@@ -453,6 +515,81 @@ target_compile_options(SudekiMP.InputBridgeProtocolTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 set_target_properties(SudekiMP.InputBridgeProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaProtocolTest
+    tests/lan_arena_protocol_test.c
+    src/network/lan_arena_endpoint.c
+    src/network/lan_arena_protocol.c
+)
+target_include_directories(SudekiMP.LanArenaProtocolTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaProtocolTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaReplicaTest
+    tests/lan_arena_replica_test.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_replica.c
+)
+target_include_directories(SudekiMP.LanArenaReplicaTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaReplicaTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaReplicaTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaAuthorityTest
+    tests/lan_arena_authority_test.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_authority.c
+)
+target_include_directories(SudekiMP.LanArenaAuthorityTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaAuthorityTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaAuthorityTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaSessionTest
+    tests/lan_arena_session_test.c
+    src/engine/log.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_session.c
+)
+target_include_directories(SudekiMP.LanArenaSessionTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaSessionTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaSessionTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+target_link_libraries(SudekiMP.LanArenaSessionTest PRIVATE ws2_32)
+set_target_properties(SudekiMP.LanArenaSessionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaLoopbackPeerTest
+    tests/lan_arena_loopback_peer_test.c
+    src/engine/log.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_session.c
+)
+target_include_directories(SudekiMP.LanArenaLoopbackPeerTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaLoopbackPeerTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaLoopbackPeerTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+target_link_libraries(SudekiMP.LanArenaLoopbackPeerTest PRIVATE ws2_32)
+set_target_properties(SudekiMP.LanArenaLoopbackPeerTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -511,6 +648,18 @@ add_executable(SudekiMP.CoopRosterAssignmentTest
 add_executable(SudekiMP.FixedThreeProfileTest
     tests/fixed_three_profile_test.c
     src/loader/fixed_three_profile.c
+)
+
+add_executable(SudekiMP.LanArenaProfileTest
+    tests/lan_arena_profile_test.c
+    src/loader/lan_arena_profile.c
+)
+target_include_directories(SudekiMP.LanArenaProfileTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaProfileTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaProfileTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
 add_executable(SudekiMP.TalosEncounterSessionTest
