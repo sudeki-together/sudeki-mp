@@ -77,6 +77,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_client_input.c
     src/hooks/lan_arena_client_replica.c
     src/hooks/lan_arena_host_input.c
+    src/hooks/lan_arena_collision_debug.c
     src/hooks/lan_arena_pause_panel.c
     src/hooks/merchant_provenance_adapter.c
     src/hooks/character_switch_trace.c
@@ -203,6 +204,25 @@ target_include_directories(SudekiMP.CallHookTest PRIVATE src)
 target_compile_definitions(SudekiMP.CallHookTest PRIVATE WIN32_LEAN_AND_MEAN)
 target_compile_options(SudekiMP.CallHookTest PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(SudekiMP.CallHookTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaRuntimeHookTest
+    tests/lan_arena_runtime_hook_test.c
+    src/hooks/call_hook.c
+)
+target_include_directories(SudekiMP.LanArenaRuntimeHookTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaRuntimeHookTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaRuntimeHookTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_source_files_properties(
+    tests/lan_arena_runtime_hook_test.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.LanArenaRuntimeHookTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -529,6 +549,24 @@ target_compile_options(SudekiMP.LanArenaProtocolTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
 )
 set_target_properties(SudekiMP.LanArenaProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaCollisionDebugTest
+    tests/lan_arena_collision_debug_test.c
+    src/engine/log.c
+    src/hooks/lan_arena_collision_debug.c
+)
+target_include_directories(SudekiMP.LanArenaCollisionDebugTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaCollisionDebugTest PRIVATE
+    WIN32_LEAN_AND_MEAN UNICODE _UNICODE
+    SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_TESTING=1
+)
+target_compile_options(SudekiMP.LanArenaCollisionDebugTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+target_link_options(SudekiMP.LanArenaCollisionDebugTest PRIVATE -municode)
+set_target_properties(SudekiMP.LanArenaCollisionDebugTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

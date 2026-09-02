@@ -4680,3 +4680,87 @@ per-seat skill-menu opening and population: Tal's native menu must appear only
 on Tal's viewport with Tal's skills, and Ailish must be able to open and use a
 separate menu containing Ailish's skills. The older final-fight camera-doubling
 issue follows after that menu ownership work.
+
+## 2026-09-01 — LAN session UI belongs to the Esc layer
+
+The first LAN status panel hooked the native Quit renderer at callsite RVA
+`0x0028D572`, invoked the unchanged renderer, and then queued `MULTIPLAYER`
+text through `CUIScene`. Live capture proved that ordering is not a foreground
+overlay: the queued text drains on the following frame before
+`CPCQuitScreen`, so Sudeki's native center dialog paints over it. The result is
+status text visible behind the dialog and no selectable Multiplayer row.
+
+The exact-hash `QuitMenuInteractionReport.java` resolved the shipped menu's
+full interaction path. Main state is `CPCQuitScreen+0x10 == 1`; cursor is
+`+0x1C4`. Its text renderer uses a fixed three-element localized-ID array
+`{0x52, 300, 0xDD}`. Navigation clamps the cursor to the maximum derived from
+`+0x1C0`, yielding two or three native rows. Confirm dispatch handles only
+indices 0, 1, and 2: Back closes the screen, index 1 enters the Exit-to-Windows
+confirmation state 3, and index 2 enters the Quit-to-Title confirmation state
+2. A fourth native row therefore requires a coordinated render, cursor-bound,
+and confirm-dispatch extension; appending deferred text cannot create it.
+
+The Q/QuickMenu is a worse LAN-session owner. It is one actor/gameplay
+singleton, changes native UI/gameplay state, binds category and action data to
+the active party actor, and is intentionally blocked on the authoritative LAN
+client until host-routed gameplay actions exist. Its category/detail/action
+paths contain many exhaustive state switches rather than an unused generic
+tab slot. Hosting, joining, leaving, protocol errors, and peer status are
+session-global pause operations, not actor inventory/skill operations.
+
+The selected direction is therefore a real Multiplayer page under `Esc`.
+Sudeki's ordinary Quit page remains the parent. A discoverable Multiplayer row
+must either extend all three native main-page seams together or, for the closed
+LAN arena where Quit-to-Title has no campaign value, replace that row and open
+a mod-owned native-styled sibling page. The sibling page owns Host/Join,
+editable `IP[:port]`, status/error text, End/Leave, and Back; it renders after
+the native dialog or temporarily suppresses the parent while active, rather
+than submitting deferred text behind it. The Q menu remains exclusively for
+future host-authoritative skills, weapons, items, and Spirit work.
+
+### LAN Esc-page rough draft
+
+The first interactive draft replaces the LAN cleanroom profile's third Quit
+row (`Quit To Title Screen`) with `MULTIPLAYER`. The native Back and
+Exit-to-Windows rows remain untouched. Selection, navigation, and back use the
+shipped Quit dispatch calls at RVAs `0x1DB71`, `0x1DBA4`, and `0x1DB64`; only
+the selected third-row action is redirected.
+
+Selecting Multiplayer suppresses the parent Quit renderer while a mod-owned
+foreground sibling page is active. That page uses a dynamic ARGB texture and
+an immediate post-native D3D draw, rather than the deferred CUIScene text queue
+that caused the earlier status text to appear underneath the opaque Quit
+dialog. Host/Join or End/Leave and Back are selectable with the same native
+Enter/A, arrows/D-pad, and Esc/B events. Q/QuickMenu is unchanged.
+
+## 2026-09-01 — LAN replica interpolation and visible-transform timing
+
+The first client replica used the newest two snapshots with a 25 ms delay even
+though the host publishes every 50 ms. It therefore advanced for half an
+interval and stalled for the other half. The replacement is an ordered,
+wrap-safe four-snapshot queue with a monotonic render clock and a two-interval
+(approximately 100 ms) buffer. Facing uses normalized shortest-arc
+interpolation, and a client-native movement-controller reset keeps both target
+and current speed at zero while the host remains the sole movement authority.
+
+Live synchronized traces then separated network state from native presentation.
+The sampled position/facing and CPosition were correct, but Sudeki's attached
+visible render matrix retained the prior native basis. The client now applies
+one sampled transform before the first RenderStart and publishes it through the
+exact native CPosition world-matrix path both before and after that boundary.
+A final publication after the second RenderStart verifies the same transform
+immediately before the world pass. The native updater, actor pointer, Position
+pointer, wrapper, render object, writable generation/matrix storage, and
+unparented cleanroom-root policy are all exact-leased and fail closed.
+
+The accepted live build held both publication stages active without a reject,
+disconnect, crash, or R6025. Across movement in every world quadrant,
+authenticated sample, final CPosition, and visible render translation/facing
+matched. This materially improved Ailish's client locomotion. One presentation
+imperfection remains: the native movement-component accepted direction can
+stay near default world +Z while the host-facing vector turns elsewhere. In
+558 moving samples its average agreement with travel was about 0.57, compared
+with about 0.95 for the replicated root; +Z was the visually strongest
+direction. That follow-up must use a separately verified native direction
+adapter rather than a raw field write, and is intentionally not included in
+this accepted checkpoint.

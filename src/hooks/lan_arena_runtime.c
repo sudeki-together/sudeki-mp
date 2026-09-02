@@ -7,28 +7,39 @@
 #include "hooks/lan_arena_client_input.h"
 #include "hooks/lan_arena_client_replica.h"
 #include "hooks/lan_arena_campaign_guard.h"
+#include "hooks/lan_arena_collision_debug.h"
 #include "hooks/lan_arena_host_input.h"
 #include "network/lan_arena_authority.h"
 #include "network/lan_arena_endpoint.h"
+#include "network/lan_arena_replica.h"
 
 #include <string.h>
 #include <stdint.h>
 
 typedef void (*FrameEndFunction)(void);
+typedef void (*RenderStartFunction)(void);
 
 enum {
+    RVA_RENDER_START = 0x001dce30u,
+    RVA_RENDER_START_CALL = 0x0028d443u,
+    RVA_RENDER_PRE_WORLD_CALL = 0x0028d539u,
     RVA_FRAME_END = 0x001dd540u,
     RVA_FRAME_END_CALL = 0x0028d58cu,
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
     TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR = 10,
     TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR = 11,
+    AILISH_WORLD_MOVE_PRIMARY_SELECTOR = 7,
+    AILISH_WORLD_MOVE_SECONDARY_SELECTOR = 8,
     AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
     AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5
 };
 
 static SudekiMpRelativeCallHook lan_arena_frame_end_hook;
+static SudekiMpRelativeCallHook lan_arena_render_start_hook;
+static SudekiMpRelativeCallHook lan_arena_render_pre_world_hook;
 static FrameEndFunction original_frame_end;
+static RenderStartFunction original_render_start;
 static BOOL runtime_installed;
 static BOOL host_remote_ailish_owned;
 static BOOL host_ailish_spawn_attempted;
@@ -43,6 +54,10 @@ static BOOL client_replica_stream_logged;
 static BOOL client_replica_discard_logged;
 static BOOL host_release_pending_logged;
 static BOOL client_release_pending_logged;
+static int client_replica_stop_state = -1;
+static int client_animation_basis_publish_state = -1;
+static int client_visible_transform_publish_state = -1;
+static BOOL runtime_hook_restore_failed_logged;
 static BOOL dummy_release_pending_logged;
 static float host_previous_actor_position[2][3];
 static BOOL host_previous_actor_position_valid[2];
@@ -53,12 +68,16 @@ static BOOL host_remote_input_quiesced;
 static BOOL host_remote_input_logged;
 static BOOL host_remote_weak_logged;
 static BOOL host_remote_ailish_moving;
+static BOOL host_auto_rehost_enabled;
 static int16_t host_remote_direction_x;
 static int16_t host_remote_direction_z;
 static SudekiMpCleanroomActorPresentation host_actor_presentation[2];
 static BOOL host_actor_presentation_valid[2];
+static DWORD host_actor_presentation_last_trace_at[2];
 static SudekiMpCleanroomActorPresentation client_actor_presentation[2];
 static BOOL client_actor_presentation_valid[2];
+static DWORD client_actor_presentation_last_trace_at[2];
+static DWORD client_replica_diagnostics_last_trace_at;
 static char lan_arena_control_observer_owner;
 static SudekiMpControlUpdateObserverGate lan_arena_control_observer_gate;
 static SudekiMpLanArenaSessionConfig runtime_config;
@@ -107,6 +126,54 @@ static void stop_network_pump(void) {
     if (network_pump_stop_event != NULL) CloseHandle(network_pump_stop_event);
     network_pump_thread = NULL;
     network_pump_stop_event = NULL;
+}
+
+static BOOL restore_lan_arena_frame_hooks(void) {
+    DWORD first_error = ERROR_SUCCESS;
+    if (!SudekiMpRestoreRelativeCallHook(
+            &lan_arena_render_pre_world_hook)) {
+        first_error = GetLastError();
+    }
+    if (!SudekiMpRestoreRelativeCallHook(&lan_arena_render_start_hook) &&
+        first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    if (!SudekiMpRestoreRelativeCallHook(&lan_arena_frame_end_hook) &&
+        first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    if (first_error != ERROR_SUCCESS) {
+        SetLastError(first_error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void retain_runtime_after_hook_restore_failure(DWORD error) {
+    HMODULE pinned_module = NULL;
+    BOOL pinned = GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_PIN,
+        (LPCSTR)(uintptr_t)&SudekiMpUninstallLanArenaRuntime,
+        &pinned_module);
+    if (!runtime_hook_restore_failed_logged) {
+        runtime_hook_restore_failed_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=frame_hook_restore state=quarantined "
+            "win32_error=%lu module_pinned=%s "
+            "policy=retain_callbacks_and_runtime_ownership_no_dangling_detour\r\n",
+            (unsigned long)error,
+            pinned ? "true" : "false");
+    }
+    SetLastError(error);
+}
+
+static BOOL rollback_lan_arena_frame_hooks(void) {
+    DWORD restore_error;
+    if (restore_lan_arena_frame_hooks()) return TRUE;
+    restore_error = GetLastError();
+    retain_runtime_after_hook_restore_failure(restore_error);
+    return FALSE;
 }
 
 static uint32_t resource_snapshot_value(float value) {
@@ -169,7 +236,25 @@ static void host_apply_presentation_state(
             host_actor_presentation[actor_index].selector[1] ==
                 TAL_WORLD_MOVE_SECONDARY_SELECTOR;
     } else if (actor_index == 1u && host_remote_ailish_owned) {
-        moving = host_remote_ailish_moving;
+        /* The authenticated input edge can lead Ailish's native locomotion by
+         * one controller tick, but it is not a presentation lease: it may be
+         * cleared by packet freshness while Sudeki is still advancing the
+         * settled run pair.  Publish MOVING whenever either the fresh input
+         * requests motion or the host renderer proves Ailish is actually in
+         * either half of her exact double-buffered locomotion pair (channels
+         * 0/1 or 2/3).  This keeps the client replica's animation coupled to
+         * the same host presentation the player sees instead of translating
+         * her through an idle pose. */
+        moving = host_remote_ailish_moving ||
+            (host_actor_presentation_valid[actor_index] &&
+             ((host_actor_presentation[actor_index].selector[0] ==
+                   AILISH_WORLD_MOVE_PRIMARY_SELECTOR &&
+               host_actor_presentation[actor_index].selector[1] ==
+                   AILISH_WORLD_MOVE_SECONDARY_SELECTOR) ||
+              (host_actor_presentation[actor_index].selector[2] ==
+                   AILISH_WORLD_MOVE_PRIMARY_SELECTOR &&
+               host_actor_presentation[actor_index].selector[3] ==
+                   AILISH_WORLD_MOVE_SECONDARY_SELECTOR)));
     }
     host_previous_actor_position[actor_index][0] = snapshot->x;
     host_previous_actor_position[actor_index][1] = snapshot->y;
@@ -214,13 +299,18 @@ static void host_trace_native_presentation(
     SudekiMpCleanroomActor actor
 ) {
     SudekiMpCleanroomActorPresentation current;
+    DWORD now = GetTickCount();
     if (actor_index >= 2u ||
         !SudekiMpCleanroomEngineActorPresentation(actor, &current)) return;
     if (host_actor_presentation_valid[actor_index] &&
         memcmp(&host_actor_presentation[actor_index],
             &current, sizeof(current)) == 0) return;
+    if (host_actor_presentation_last_trace_at[actor_index] != 0u &&
+        (DWORD)(now - host_actor_presentation_last_trace_at[actor_index]) <
+            100u) return;
     host_actor_presentation[actor_index] = current;
     host_actor_presentation_valid[actor_index] = TRUE;
+    host_actor_presentation_last_trace_at[actor_index] = now;
     SudekiMpLogFormat(
         "lan_arena_runtime event=host_native_presentation actor=%s "
         "submodels=%lu selectors=%ld,%ld,%ld,%ld,%ld "
@@ -247,13 +337,18 @@ static void client_trace_native_presentation(
     SudekiMpCleanroomActor actor
 ) {
     SudekiMpCleanroomActorPresentation current;
+    DWORD now = GetTickCount();
     if (actor_index >= 2u ||
         !SudekiMpCleanroomEngineActorPresentation(actor, &current)) return;
     if (client_actor_presentation_valid[actor_index] &&
         memcmp(&client_actor_presentation[actor_index],
             &current, sizeof(current)) == 0) return;
+    if (client_actor_presentation_last_trace_at[actor_index] != 0u &&
+        (DWORD)(now - client_actor_presentation_last_trace_at[actor_index]) <
+            100u) return;
     client_actor_presentation[actor_index] = current;
     client_actor_presentation_valid[actor_index] = TRUE;
+    client_actor_presentation_last_trace_at[actor_index] = now;
     SudekiMpLogFormat(
         "lan_arena_runtime event=client_native_presentation actor=%s "
         "submodels=%lu selectors=%ld,%ld,%ld,%ld,%ld "
@@ -280,7 +375,8 @@ static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSnapshot snapshot;
 
     if (host_last_snapshot_at_ms != 0u &&
-        (DWORD)(now_ms - host_last_snapshot_at_ms) < 50u) return;
+        (DWORD)(now_ms - host_last_snapshot_at_ms) <
+            SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS) return;
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
     if (SudekiMpLanArenaHostInputTakeTalWeakAttack()) {
@@ -366,6 +462,11 @@ static BOOL release_host_remote_ailish(const char *reason) {
 
 static BOOL release_client_remote_tal(const char *reason) {
     if (client_remote_tal_owned) {
+        void *tal = SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_TAL);
+        if (tal != NULL) {
+            (void)SudekiMpControlSeparationForceStopCharacter(tal);
+        }
         if (!SudekiMpControlSeparationReleasePlayerTwoNow()) {
             if (!client_release_pending_logged) {
                 client_release_pending_logged = TRUE;
@@ -377,6 +478,7 @@ static BOOL release_client_remote_tal(const char *reason) {
             return FALSE;
         }
         client_remote_tal_owned = FALSE;
+        client_replica_stop_state = -1;
         client_release_pending_logged = FALSE;
         SudekiMpLogFormat(
             "lan_arena_runtime event=client_tal_replica_release phase=confirmed reason=%s "
@@ -422,25 +524,51 @@ static void lan_arena_control_update_observer(
     void *ailish;
     SudekiMpLanArenaInput input;
     BOOL remote_weak_requested = FALSE;
+    BOOL witness_exact;
+    BOOL status_available;
     (void)controller;
     (void)update_data;
     if (!SudekiMpControlUpdateObserverGateTryEnter(
             &lan_arena_control_observer_gate)) return;
-    if (!SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness) ||
-        !SudekiMpLanArenaSessionGetStatus(&status) ||
-        !status.peer_connected) {
-        release_host_remote_ailish("session_not_authenticated");
-        release_client_remote_tal("session_not_authenticated");
-        release_arena_dummy();
+    witness_exact =
+        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
+    status_available = SudekiMpLanArenaSessionGetStatus(&status);
+    if (!witness_exact || !status_available || !status.peer_connected) {
+        BOOL actors_released =
+            release_host_remote_ailish("session_not_authenticated") &&
+            release_client_remote_tal("session_not_authenticated");
+        BOOL dummy_released = release_arena_dummy();
         if (runtime_config.local_role ==
                 SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
             SudekiMpLanArenaClientReplicaDiscardSnapshots();
+            client_replica_stop_state = -1;
             if (!client_replica_discard_logged) {
                 client_replica_discard_logged = TRUE;
                 SudekiMpLogWrite(
                     "lan_arena_runtime event=client_snapshot_replica phase=discarded "
                     "reason=transport_authority_inactive "
                     "policy=no_stale_snapshot_sampling\r\n");
+            }
+        }
+        /* A remote END or timeout is a transport interruption, not a request
+         * to shut down the host.  Once game-thread actor cleanup is exact,
+         * reopen the authoritative socket with a fresh session token so the
+         * client can Join again without visiting the host menu.  A local End
+         * Session explicitly clears host_auto_rehost_enabled below. */
+        if (witness_exact && status_available && actors_released &&
+            dummy_released && host_auto_rehost_enabled &&
+            runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+            (status.phase == SUDEKIMP_LAN_ARENA_CONNECTION_ENDED ||
+             status.phase == SUDEKIMP_LAN_ARENA_CONNECTION_TIMED_OUT ||
+             status.phase == SUDEKIMP_LAN_ARENA_CONNECTION_REJECTED)) {
+            if (SudekiMpLanArenaRuntimeHostArena()) {
+                SudekiMpLogWrite(
+                    "lan_arena_runtime event=host_auto_rehost state=hosting "
+                    "reason=remote_session_ended policy=fresh_token\r\n");
+            } else {
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_auto_rehost state=rejected "
+                    "error=%lu\r\n", (unsigned long)GetLastError());
             }
         }
         SudekiMpControlUpdateObserverGateLeave(&lan_arena_control_observer_gate);
@@ -500,6 +628,23 @@ static void lan_arena_control_update_observer(
             ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
                 SUDEKIMP_CLEANROOM_AILISH);
         }
+        if (tal_initialized && ailish_initialized) {
+            BOOL tal_stopped =
+                SudekiMpControlSeparationForceStopCharacter(tal);
+            BOOL ailish_stopped =
+                SudekiMpControlSeparationForceStopCharacter(ailish_actor);
+            BOOL stopped = tal_stopped && ailish_stopped;
+            if ((int)stopped != client_replica_stop_state) {
+                client_replica_stop_state = (int)stopped;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=client_replica_native_movement "
+                    "state=%s tal=%s ailish=%s "
+                    "policy=native_target_and_current_speed_zero_residual_state_traced\r\n",
+                    stopped ? "target_current_speed_quiesced" : "stop_rejected",
+                    tal_stopped ? "stopped" : "rejected",
+                    ailish_stopped ? "stopped" : "rejected");
+            }
+        }
         if (!SudekiMpCleanroomEngineDummyPresent() &&
             !arena_dummy_spawn_attempted &&
             SudekiMpCleanroomEngineActorPosition(
@@ -515,19 +660,10 @@ static void lan_arena_control_update_observer(
          * selector setter dereferences those tables, so presentation and
          * transform replication must wait for both native setup transactions
          * to complete rather than treating a non-NULL wrapper as readiness. */
-        if (tal_initialized && ailish_initialized &&
-            SudekiMpLanArenaClientReplicaApplyLatest()) {
-            client_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
-            client_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
-            if (!client_replica_stream_logged) {
-                client_replica_stream_logged = TRUE;
-                SudekiMpLogWrite(
-                    "lan_arena_runtime event=client_snapshot_replica phase=active "
-                    "apply_boundary=post_controller_pre_render "
-                    "interpolation_delay_ms=25 actors=Tal,Ailish enemy=training_dummy "
-                    "policy=no_client_combat_or_enemy_authority\r\n");
-            }
-        }
+        /* Consume and apply the replica once before native scene traversal.
+         * Applying it
+         * here too dirties CPosition twice per frame and lets the intervening
+         * native camera/AI update fight a pose that is not client simulation. */
         SudekiMpControlUpdateObserverGateLeave(
             &lan_arena_control_observer_gate);
         return;
@@ -661,7 +797,167 @@ static void lan_arena_frame_end_entry(void) {
      * touch game memory here; later actor adapters consume authenticated state
      * from their dedicated post-controller observer. */
     original_frame_end();
+    SudekiMpLanArenaCollisionDebugServiceHotkey();
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        SudekiMpLanArenaReplicaDiagnostics diagnostics;
+        DWORD now = GetTickCount();
+        unsigned int collision_debug_mode =
+            SudekiMpLanArenaCollisionDebugMode();
+        DWORD trace_interval_ms = collision_debug_mode ==
+                SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_OFF ? 1000u : 100u;
+        SudekiMpLanArenaClientReplicaRefreshDiagnostics();
+        if ((client_replica_diagnostics_last_trace_at == 0u ||
+             (DWORD)(now - client_replica_diagnostics_last_trace_at) >=
+                trace_interval_ms) &&
+            SudekiMpLanArenaClientReplicaGetDiagnostics(&diagnostics)) {
+            unsigned int actor_index;
+            client_replica_diagnostics_last_trace_at = now;
+            SudekiMpLogFormat(
+                "lan_arena_replica_camera_diagnostics mode=%u sequence=%lu "
+                "render_host_tick=%lu camera_pos=%.5f,%.5f,%.5f "
+                "camera_fwd=%.5f,%.5f,%.5f valid=%u "
+                "policy=client_camera_basis_witness\r\n",
+                collision_debug_mode,
+                (unsigned long)diagnostics.sequence,
+                (unsigned long)diagnostics.render_host_tick,
+                diagnostics.camera_position[0],
+                diagnostics.camera_position[1],
+                diagnostics.camera_position[2],
+                diagnostics.camera_facing[0],
+                diagnostics.camera_facing[1],
+                diagnostics.camera_facing[2],
+                (unsigned int)diagnostics.camera_valid);
+            for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+                const SudekiMpLanArenaReplicaActorDiagnostics *actor =
+                    &diagnostics.actor[actor_index];
+                SudekiMpLogFormat(
+                    "lan_arena_replica_diagnostics actor=%s mode=%u "
+                    "sequence=%lu render_host_tick=%lu upper_host_tick=%lu "
+                    "sample_pos=%.5f,%.5f,%.5f sample_fwd=%.5f,%.5f "
+                    "pre_pos=%.5f,%.5f,%.5f pre_fwd=%.5f,%.5f,%.5f "
+                    "pre_speed=%.5f,%.5f,%.5f "
+                    "post_pos=%.5f,%.5f,%.5f post_fwd=%.5f,%.5f,%.5f "
+                    "final_pos=%.5f,%.5f,%.5f final_fwd=%.5f,%.5f,%.5f "
+                    "render_pos=%.5f,%.5f,%.5f render_fwd=%.5f,%.5f,%.5f "
+                    "movement=%.5f,%.5f,%.5f,%.5f mode_id=%lu "
+                    "accepted_dir=%.5f,%.5f,%.5f generation=%u dirty=%u "
+                    "valid=%u,%u,%u policy=network_to_visible_model_witness\r\n",
+                    actor_index == 0u ? "Tal" : "Ailish",
+                    collision_debug_mode,
+                    (unsigned long)diagnostics.sequence,
+                    (unsigned long)diagnostics.render_host_tick,
+                    (unsigned long)diagnostics.upper_snapshot_host_tick,
+                    actor->sampled_position[0], actor->sampled_position[1],
+                    actor->sampled_position[2], actor->sampled_facing[0],
+                    actor->sampled_facing[1],
+                    actor->pre_apply_position[0], actor->pre_apply_position[1],
+                    actor->pre_apply_position[2], actor->pre_apply_facing[0],
+                    actor->pre_apply_facing[1], actor->pre_apply_facing[2],
+                    actor->pre_apply_target_speed,
+                    actor->pre_apply_smoothed_speed,
+                    actor->pre_apply_current_speed,
+                    actor->post_apply_position[0], actor->post_apply_position[1],
+                    actor->post_apply_position[2], actor->post_apply_facing[0],
+                    actor->post_apply_facing[1], actor->post_apply_facing[2],
+                    actor->native_position[0], actor->native_position[1],
+                    actor->native_position[2], actor->native_facing[0],
+                    actor->native_facing[1], actor->native_facing[2],
+                    actor->render_position[0], actor->render_position[1],
+                    actor->render_position[2], actor->render_facing[0],
+                    actor->render_facing[1], actor->render_facing[2],
+                    actor->movement_target_speed,
+                    actor->movement_smoothed_speed,
+                    actor->movement_current_speed,
+                    actor->movement_run_blend,
+                    (unsigned long)actor->movement_mode,
+                    actor->accepted_direction[0], actor->accepted_direction[1],
+                    actor->accepted_direction[2],
+                    (unsigned int)actor->native_generation,
+                    (unsigned int)actor->native_dirty,
+                    (unsigned int)actor->position_valid,
+                    (unsigned int)actor->render_valid,
+                    (unsigned int)actor->movement_valid);
+            }
+        }
+    }
     host_publish_snapshot(GetTickCount());
+}
+
+static void lan_arena_render_start_entry(void) {
+    BOOL replica_applied = FALSE;
+    BOOL published_before_start = FALSE;
+    BOOL published_after_start = FALSE;
+    DWORD publish_error = ERROR_SUCCESS;
+    /* Commit and publish immediately before the first native RenderStart,
+     * then publish the same sample once more after it. The primary component
+     * update at the following 0x28d45b boundary rotates animation root motion
+     * through CPosition's world basis; letting that update see the stale +Z
+     * basis made only one world-cardinal locomotion direction look correct.
+     * This wrapper never samples the network a second time. */
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        tal_initialized && ailish_initialized) {
+        replica_applied = SudekiMpLanArenaClientReplicaApplyLatest();
+        if (replica_applied) {
+            published_before_start =
+                SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
+            if (!published_before_start) publish_error = GetLastError();
+        }
+    }
+    original_render_start();
+    if (replica_applied) {
+        published_after_start =
+            SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
+        if (!published_after_start && publish_error == ERROR_SUCCESS) {
+            publish_error = GetLastError();
+        }
+        if ((int)(published_before_start && published_after_start) !=
+                client_animation_basis_publish_state) {
+            client_animation_basis_publish_state =
+                (int)(published_before_start && published_after_start);
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=client_animation_basis_publish "
+                "state=%s boundary=before_and_after_first_render_start "
+                "win32_error=%lu "
+                "policy=publish_authoritative_world_basis_before_native_root_motion\r\n",
+                published_before_start && published_after_start ?
+                    "active" : "rejected",
+                published_before_start && published_after_start ?
+                    0ul : (unsigned long)publish_error);
+        }
+        client_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
+        client_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        if (!client_replica_stream_logged) {
+            client_replica_stream_logged = TRUE;
+            SudekiMpLogWrite(
+                "lan_arena_runtime event=client_snapshot_replica phase=active "
+                "apply_boundary=pre_first_render_start jitter_buffer_ms=100 "
+                "visible_publish=before_and_after_first_plus_pre_world "
+                "actors=Tal,Ailish enemy=training_dummy "
+                "policy=single_network_sample_native_basis_before_root_motion_no_client_combat_authority\r\n");
+        }
+    }
+}
+
+static void lan_arena_render_pre_world_entry(void) {
+    BOOL published = FALSE;
+    original_render_start();
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        tal_initialized && ailish_initialized) {
+        published = SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
+        if ((int)published != client_visible_transform_publish_state) {
+            client_visible_transform_publish_state = (int)published;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=client_visible_transform_publish "
+                "state=%s boundary=post_second_render_start_pre_world "
+                "win32_error=%lu "
+                "policy=native_cposition_transform_publication_no_second_sample\r\n",
+                published ? "active" : "rejected",
+                published ? 0ul : (unsigned long)GetLastError());
+        }
+    }
 }
 
 BOOL SudekiMpInstallLanArenaRuntime(
@@ -700,17 +996,63 @@ BOOL SudekiMpInstallLanArenaRuntime(
         SetLastError(error);
         return FALSE;
     }
+    if (!SudekiMpInstallLanArenaCollisionDebug(game_module)) {
+        DWORD error = GetLastError();
+        SudekiMpUninstallLanArenaCampaignGuard();
+        (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
+        SudekiMpLanArenaSessionStop(FALSE);
+        SetLastError(error);
+        return FALSE;
+    }
     original_frame_end = (FrameEndFunction)(base + RVA_FRAME_END);
+    original_render_start = (RenderStartFunction)(base + RVA_RENDER_START);
     if (!SudekiMpInstallRelativeCallHook(
             &lan_arena_frame_end_hook,
             base + RVA_FRAME_END_CALL,
             original_frame_end,
             lan_arena_frame_end_entry)) {
         DWORD error = GetLastError();
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
         SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
+        original_render_start = NULL;
+        SetLastError(error);
+        return FALSE;
+    }
+    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        !SudekiMpInstallRelativeCallHook(
+            &lan_arena_render_start_hook,
+            base + RVA_RENDER_START_CALL,
+            original_render_start,
+            lan_arena_render_start_entry)) {
+        DWORD error = GetLastError();
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
+        SudekiMpUninstallLanArenaCampaignGuard();
+        (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
+        original_frame_end = NULL;
+        original_render_start = NULL;
+        SetLastError(error);
+        return FALSE;
+    }
+    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        !SudekiMpInstallRelativeCallHook(
+            &lan_arena_render_pre_world_hook,
+            base + RVA_RENDER_PRE_WORLD_CALL,
+            original_render_start,
+            lan_arena_render_pre_world_entry)) {
+        DWORD error = GetLastError();
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
+        SudekiMpUninstallLanArenaCampaignGuard();
+        (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
+        original_frame_end = NULL;
+        original_render_start = NULL;
         SetLastError(error);
         return FALSE;
     }
@@ -720,14 +1062,16 @@ BOOL SudekiMpInstallLanArenaRuntime(
          (!SudekiMpInstallLanArenaClientInput(game_module) ||
           !SudekiMpInitializeLanArenaClientReplica(game_module)))) {
         DWORD error = GetLastError();
-        SudekiMpRestoreRelativeCallHook(&lan_arena_frame_end_hook);
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
         SudekiMpUninstallLanArenaClientInput();
         SudekiMpUninstallLanArenaHostInput();
         SudekiMpResetLanArenaClientReplica();
         SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
         SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
+        original_render_start = NULL;
         SetLastError(error);
         return FALSE;
     }
@@ -741,14 +1085,16 @@ BOOL SudekiMpInstallLanArenaRuntime(
             &lan_arena_control_observer_gate);
         SudekiMpControlUpdateObserverGateDrain(
             &lan_arena_control_observer_gate);
-        SudekiMpRestoreRelativeCallHook(&lan_arena_frame_end_hook);
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
         SudekiMpUninstallLanArenaClientInput();
         SudekiMpUninstallLanArenaHostInput();
         SudekiMpResetLanArenaClientReplica();
         SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
         SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
+        original_render_start = NULL;
         SetLastError(error);
         return FALSE;
     }
@@ -759,6 +1105,10 @@ BOOL SudekiMpInstallLanArenaRuntime(
     client_replica_discard_logged = FALSE;
     host_release_pending_logged = FALSE;
     client_release_pending_logged = FALSE;
+    client_replica_stop_state = -1;
+    client_animation_basis_publish_state = -1;
+    client_visible_transform_publish_state = -1;
+    runtime_hook_restore_failed_logged = FALSE;
     dummy_release_pending_logged = FALSE;
     ZeroMemory(host_previous_actor_position,
         sizeof(host_previous_actor_position));
@@ -768,10 +1118,15 @@ BOOL SudekiMpInstallLanArenaRuntime(
         sizeof(host_actor_presentation));
     ZeroMemory(host_actor_presentation_valid,
         sizeof(host_actor_presentation_valid));
+    ZeroMemory(host_actor_presentation_last_trace_at,
+        sizeof(host_actor_presentation_last_trace_at));
     ZeroMemory(client_actor_presentation,
         sizeof(client_actor_presentation));
     ZeroMemory(client_actor_presentation_valid,
         sizeof(client_actor_presentation_valid));
+    ZeroMemory(client_actor_presentation_last_trace_at,
+        sizeof(client_actor_presentation_last_trace_at));
+    client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
     host_last_remote_input_at_ms = 0u;
@@ -779,6 +1134,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_ailish_moving = FALSE;
+    host_auto_rehost_enabled =
+        config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
     host_ailish_spawn_attempted = FALSE;
     client_tal_spawn_attempted = FALSE;
     client_remote_tal_owned = FALSE;
@@ -792,14 +1149,26 @@ BOOL SudekiMpInstallLanArenaRuntime(
         return FALSE;
     }
     SudekiMpLogFormat(
-        "lan_arena_runtime event=install frame_end_call_rva=0x%08lx "
+        "lan_arena_runtime event=install render_start_call_rva=0x%08lx "
+        "render_pre_world_call_rva=0x%08lx "
+        "frame_end_call_rva=0x%08lx "
+        "render_start_replica_reassert=%s "
         "policy=game_thread_actor_adapters_plus_synchronized_socket_worker\r\n",
-        (unsigned long)RVA_FRAME_END_CALL
+        (unsigned long)RVA_RENDER_START_CALL,
+        (unsigned long)RVA_RENDER_PRE_WORLD_CALL,
+        (unsigned long)RVA_FRAME_END_CALL,
+        config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
+            "client_only" : "disabled_on_host"
     );
     return TRUE;
 }
 
 void SudekiMpUninstallLanArenaRuntime(void) {
+    /* Detours are the lifetime boundary. Remove them before releasing any
+     * callback/resource they can reach. If even one callsite cannot be
+     * restored, keep the complete runtime and original callbacks alive and
+     * pin this DLL rather than leaving a dangling game-code call. */
+    if (!rollback_lan_arena_frame_hooks()) return;
     SudekiMpControlUpdateObserverGateDisable(&lan_arena_control_observer_gate);
     (void)SudekiMpControlSeparationUnregisterUpdateObserver(
         &lan_arena_control_observer_owner);
@@ -811,11 +1180,12 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     SudekiMpUninstallLanArenaClientInput();
     SudekiMpUninstallLanArenaHostInput();
     SudekiMpResetLanArenaClientReplica();
+    SudekiMpUninstallLanArenaCollisionDebug();
     SudekiMpUninstallLanArenaCampaignGuard();
     stop_network_pump();
     SudekiMpLanArenaSessionStop(runtime_installed);
-    SudekiMpRestoreRelativeCallHook(&lan_arena_frame_end_hook);
     original_frame_end = NULL;
+    original_render_start = NULL;
     runtime_installed = FALSE;
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
@@ -823,6 +1193,10 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     client_replica_discard_logged = FALSE;
     host_release_pending_logged = FALSE;
     client_release_pending_logged = FALSE;
+    client_replica_stop_state = -1;
+    client_animation_basis_publish_state = -1;
+    client_visible_transform_publish_state = -1;
+    runtime_hook_restore_failed_logged = FALSE;
     dummy_release_pending_logged = FALSE;
     ZeroMemory(host_previous_actor_position,
         sizeof(host_previous_actor_position));
@@ -832,10 +1206,15 @@ void SudekiMpUninstallLanArenaRuntime(void) {
         sizeof(host_actor_presentation));
     ZeroMemory(host_actor_presentation_valid,
         sizeof(host_actor_presentation_valid));
+    ZeroMemory(host_actor_presentation_last_trace_at,
+        sizeof(host_actor_presentation_last_trace_at));
     ZeroMemory(client_actor_presentation,
         sizeof(client_actor_presentation));
     ZeroMemory(client_actor_presentation_valid,
         sizeof(client_actor_presentation_valid));
+    ZeroMemory(client_actor_presentation_last_trace_at,
+        sizeof(client_actor_presentation_last_trace_at));
+    client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
     host_last_remote_input_at_ms = 0u;
@@ -843,6 +1222,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_ailish_moving = FALSE;
+    host_auto_rehost_enabled = FALSE;
     host_ailish_spawn_attempted = FALSE;
     client_tal_spawn_attempted = FALSE;
     client_remote_tal_owned = FALSE;
@@ -864,6 +1244,9 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     if (!runtime_installed) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
+    }
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        host_auto_rehost_enabled = FALSE;
     }
     SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE);
     actors_released = release_host_remote_ailish("local_end_session") &&
@@ -947,6 +1330,7 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
+    host_auto_rehost_enabled = TRUE;
     if (!release_host_remote_ailish("host_restart") ||
         !release_arena_dummy()) {
         SetLastError(ERROR_RETRY);

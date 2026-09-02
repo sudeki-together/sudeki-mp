@@ -76,6 +76,10 @@ BOOL SudekiMpInstallRelativeCallHook(
             instruction + 1,
             &replacement_displacement,
             sizeof(replacement_displacement))) {
+        /* A FALSE result guarantees that write_protected_memory either never
+         * changed the displacement or rolled it back.  Clear the ownership
+         * record so callers can safely retry the install. */
+        ZeroMemory(hook, sizeof(*hook));
         return FALSE;
     }
     return TRUE;

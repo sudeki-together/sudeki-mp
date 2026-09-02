@@ -12,6 +12,9 @@ typedef void (__attribute__((fastcall)) *PositionSetterFunction)(
     void *position,
     const float *coordinates
 );
+typedef const float *(__attribute__((thiscall)) *PositionWorldMatrixFunction)(
+    void *position
+);
 typedef unsigned int (__attribute__((thiscall)) *AnimationCountFunction)(void *renderer);
 typedef int (__attribute__((thiscall)) *AnimationSelectorGetFunction)(
     void *renderer, int channel, unsigned int submodel);
@@ -55,6 +58,9 @@ typedef struct LanArenaPresentationLease {
 
 enum {
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
+    RVA_POSITION_UPDATE = 0x00110d40u,
+    RVA_POSITION_WORLD_MATRIX = 0x00111cc0u,
+    RVA_POSITION_WORLD_MATRIX_UPDATE_CALL = 0x00111cdau,
     RVA_POSITION_SET_FORWARD = 0x001114d0u,
     RVA_ANIMATION_RENDERER_VTABLE = 0x002df8ecu,
     RVA_ANIMATION_RENDERER_COUNT = 0x0021bb10u,
@@ -67,9 +73,8 @@ enum {
     RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
     RVA_ANIMATION_RENDERER_BLEND_SET = 0x002234c0u,
     RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
+    RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
     CHARACTER_POSITION_OFFSET = 0x44u,
-    CHARACTER_PRESENTATION_COMPONENT_OFFSET = 0x134u,
-    AILISH_WORLD_WRAPPER_OFFSET = 0x164u,
     POSITION_ATTACHED_WRAPPER_OFFSET = 0xb4u,
     /* Exact cleanroom-world presentation captured from the supported retail
      * image.  These are renderer selectors, not protocol values: the LAN
@@ -101,15 +106,27 @@ static const uint8_t expected_position_set_forward_entry[] = {
     0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf0u, 0x83u, 0xecu,
     0x60u, 0xd9u, 0xeeu, 0xd9u, 0x54u, 0x24u, 0x14u
 };
+static const uint8_t expected_position_world_matrix_entry[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u, 0x51u, 0x56u,
+    0x8bu, 0xf1u, 0x8bu, 0x86u, 0x94u, 0x00u, 0x00u, 0x00u,
+    0x85u, 0xc0u, 0x74u, 0x05u, 0x83u, 0xc0u, 0xfcu, 0x75u, 0x11u
+};
+static const uint8_t expected_position_update_entry[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf0u, 0x81u, 0xecu,
+    0xe4u, 0x00u, 0x00u, 0x00u, 0x53u, 0x8bu, 0x5du, 0x08u
+};
 
 static PositionSetterFunction set_position;
+static PositionWorldMatrixFunction position_world_matrix;
 static void *set_forward;
 static uint8_t *game_base;
 static SudekiMpLanArenaReplica replica;
-static DWORD latest_snapshot_received_at;
+static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
 static LanArenaPresentationLease presentation_leases[2];
-
-enum { REPLICA_INTERPOLATION_DELAY_MS = 25u };
+static SudekiMpLanArenaReplicaDiagnostics replica_diagnostics;
+static SudekiMpLanArenaSnapshot last_applied_snapshot;
+static void *last_applied_characters[2];
+static void *last_applied_positions[2];
 
 BOOL SudekiMpLanArenaClientIdleVariantSelector(
     uint8_t actor_type,
@@ -149,6 +166,49 @@ static BOOL readable_memory(const void *pointer, size_t length) {
         return FALSE;
     }
     return TRUE;
+}
+
+static BOOL writable_memory(void *pointer, size_t length) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t address = (uintptr_t)pointer;
+    DWORD protection;
+    if (!readable_memory(pointer, length) ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0u ||
+        address + length < address ||
+        address + length >
+            (uintptr_t)information.BaseAddress + information.RegionSize) {
+        return FALSE;
+    }
+    protection = information.Protect & 0xffu;
+    return protection == PAGE_READWRITE || protection == PAGE_WRITECOPY ||
+        protection == PAGE_EXECUTE_READWRITE ||
+        protection == PAGE_EXECUTE_WRITECOPY;
+}
+
+static BOOL relative_call_targets(
+    const uint8_t *instruction,
+    const uint8_t *expected_target
+) {
+    int32_t displacement;
+    if (!readable_memory(instruction, 5u) || instruction[0] != 0xe8u) {
+        return FALSE;
+    }
+    memcpy(&displacement, instruction + 1u, sizeof(displacement));
+    return instruction + 5u + displacement == expected_target;
+}
+
+static BOOL client_session_authenticated(void) {
+    SudekiMpLanArenaSessionStatus status;
+    return SudekiMpLanArenaSessionGetStatus(&status) &&
+        status.peer_connected &&
+        status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+}
+
+static void clear_last_applied_frame(void) {
+    memset(&last_applied_snapshot, 0, sizeof(last_applied_snapshot));
+    memset(last_applied_characters, 0, sizeof(last_applied_characters));
+    memset(last_applied_positions, 0, sizeof(last_applied_positions));
+    replica_diagnostics.valid = 0u;
 }
 
 static BOOL finite_position(const SudekiMpLanArenaActorSnapshot *actor) {
@@ -359,7 +419,6 @@ static BOOL apply_actor_presentation(
     unsigned int actor_index
 ) {
     uint8_t *position;
-    uint8_t *component;
     uint8_t *wrapper;
     void *renderer;
     LanArenaAnimationMethods methods;
@@ -386,17 +445,15 @@ static BOOL apply_actor_presentation(
     }
     position = readable_memory(character, CHARACTER_POSITION_OFFSET + sizeof(void *)) ?
         *(uint8_t **)(character + CHARACTER_POSITION_OFFSET) : NULL;
-    component = readable_memory(
-        character, CHARACTER_PRESENTATION_COMPONENT_OFFSET + sizeof(void *)) ?
-        *(uint8_t **)(character + CHARACTER_PRESENTATION_COMPONENT_OFFSET) : NULL;
-    if (actor_index == 1u && readable_memory(
-            component, AILISH_WORLD_WRAPPER_OFFSET + sizeof(void *))) {
-        wrapper = *(uint8_t **)(component + AILISH_WORLD_WRAPPER_OFFSET);
-    } else {
-        wrapper = readable_memory(position,
-            POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *)) ?
-            *(uint8_t **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) : NULL;
-    }
+    /* Both retail world actors expose the live renderer through the wrapper
+     * attached to Position.  CleanroomEngineActorPresentation reads this same
+     * lease successfully on host and client.  The former Ailish-only
+     * character-component path names a different presentation object on a
+     * client-owned Ailish, so writes there left the visible model in idle while
+     * snapshot transforms moved it through the arena. */
+    wrapper = readable_memory(position,
+        POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *)) ?
+        *(uint8_t **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) : NULL;
     renderer = readable_memory(wrapper, 0x14u) ? *(void **)(wrapper + 0x10u) : NULL;
     if (!animation_methods(renderer, &methods)) return FALSE;
     submodels = methods.count(renderer);
@@ -535,13 +592,25 @@ static void call_position_set_forward(
 static BOOL apply_actor(
     const SudekiMpLanArenaActorSnapshot *snapshot,
     SudekiMpCleanroomActor actor,
-    uint8_t expected_type
+    uint8_t expected_type,
+    void **applied_character,
+    void **applied_position
 ) {
     uint8_t *character;
     void *position;
     float coordinates[3];
     float facing[3];
+    float current_facing_x;
+    float current_facing_z;
+    float current_facing_length;
+    float facing_dot;
+    float dx;
+    float dy;
+    float dz;
     BOOL resources_applied;
+    if (applied_character == NULL || applied_position == NULL) return FALSE;
+    *applied_character = NULL;
+    *applied_position = NULL;
     if (snapshot == NULL || snapshot->actor_type != expected_type ||
         snapshot->native_entity_id != expected_type ||
         !finite_position(snapshot) || !finite_facing(snapshot)) return FALSE;
@@ -557,14 +626,34 @@ static BOOL apply_actor(
     facing[0] = snapshot->facing_x;
     facing[1] = 0.0f;
     facing[2] = snapshot->facing_z;
-    set_position(position, coordinates);
-    call_position_set_forward(position, facing);
+    dx = coordinates[0] - *(float *)((uint8_t *)position + 0x18u);
+    dy = coordinates[1] - *(float *)((uint8_t *)position + 0x1cu);
+    dz = coordinates[2] - *(float *)((uint8_t *)position + 0x20u);
+    if (dx * dx + dy * dy + dz * dz > 0.00000001f) {
+        set_position(position, coordinates);
+    }
+    current_facing_x = *(float *)((uint8_t *)position + 0x50u);
+    current_facing_z = *(float *)((uint8_t *)position + 0x58u);
+    current_facing_length = sqrtf(
+        current_facing_x * current_facing_x +
+        current_facing_z * current_facing_z);
+    facing_dot = current_facing_length > 0.0001f ?
+        (current_facing_x * facing[0] + current_facing_z * facing[2]) /
+            current_facing_length : -1.0f;
+    /* SetForward rebuilds and dirties the complete CPosition basis. Apply a
+     * mod-owned 0.5-degree hysteresis so interpolation noise cannot force a
+     * rebuild on every rendered frame. */
+    if (!isfinite(facing_dot) || facing_dot <= 0.99996f) {
+        call_position_set_forward(position, facing);
+    }
     resources_applied = SudekiMpCleanroomEngineSetActorResources(
         actor, (float)snapshot->hp, (float)snapshot->sp);
     if (resources_applied) {
         (void)apply_actor_presentation(
             character, snapshot,
             expected_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ? 0u : 1u);
+        *applied_character = character;
+        *applied_position = position;
     }
     return resources_applied;
 }
@@ -595,12 +684,130 @@ static BOOL apply_training_dummy(
     return SudekiMpCleanroomEngineSetDummyHitPoints((float)snapshot->hp);
 }
 
+static void capture_actor_diagnostics(
+    unsigned int actor_index,
+    SudekiMpCleanroomActor actor,
+    const SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    SudekiMpLanArenaReplicaActorDiagnostics *diagnostics;
+    uint8_t *character;
+    uint8_t *position;
+    uint8_t *wrapper;
+    uint8_t *render_object;
+    uint8_t *movement_controller;
+    uint8_t *movement_component;
+    const float *matrix;
+    if (actor_index >= 2u || snapshot == NULL) return;
+    diagnostics = &replica_diagnostics.actor[actor_index];
+    diagnostics->position_valid = 0u;
+    diagnostics->render_valid = 0u;
+    diagnostics->movement_valid = 0u;
+    diagnostics->sampled_position[0] = snapshot->x;
+    diagnostics->sampled_position[1] = snapshot->y;
+    diagnostics->sampled_position[2] = snapshot->z;
+    diagnostics->sampled_facing[0] = snapshot->facing_x;
+    diagnostics->sampled_facing[1] = snapshot->facing_z;
+    character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(actor);
+    if (!readable_memory(character, CHARACTER_POSITION_OFFSET + sizeof(void *))) {
+        return;
+    }
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+    if (!readable_memory(position, 0xbcu)) return;
+    diagnostics->native_position[0] = *(float *)(position + 0x18u);
+    diagnostics->native_position[1] = *(float *)(position + 0x1cu);
+    diagnostics->native_position[2] = *(float *)(position + 0x20u);
+    diagnostics->native_facing[0] = *(float *)(position + 0x50u);
+    diagnostics->native_facing[1] = *(float *)(position + 0x54u);
+    diagnostics->native_facing[2] = *(float *)(position + 0x58u);
+    diagnostics->local_yaw = *(float *)(position + 0x88u);
+    diagnostics->native_dirty = *(uint8_t *)(position + 0xb8u);
+    diagnostics->native_generation = *(uint16_t *)(position + 0xbau);
+    diagnostics->position_valid = 1u;
+    if (readable_memory(character, 0xb0u)) {
+        movement_controller = *(uint8_t **)(character + 0x80u);
+        movement_component = *(uint8_t **)(character + 0xacu);
+        if (readable_memory(movement_controller, 0x6cu) &&
+            readable_memory(movement_component, 0x54u)) {
+            diagnostics->movement_target_speed =
+                *(float *)(movement_controller + 0x24u);
+            diagnostics->movement_smoothed_speed =
+                *(float *)(movement_controller + 0x28u);
+            diagnostics->movement_current_speed =
+                *(float *)(movement_controller + 0x5cu);
+            diagnostics->movement_run_blend =
+                *(float *)(movement_controller + 0x60u);
+            diagnostics->movement_mode =
+                *(uint32_t *)(movement_controller + 0x68u);
+            diagnostics->accepted_direction[0] =
+                *(float *)(movement_component + 0x48u);
+            diagnostics->accepted_direction[1] =
+                *(float *)(movement_component + 0x4cu);
+            diagnostics->accepted_direction[2] =
+                *(float *)(movement_component + 0x50u);
+            diagnostics->movement_valid = 1u;
+        }
+    }
+    wrapper = *(uint8_t **)(position + POSITION_ATTACHED_WRAPPER_OFFSET);
+    if (!readable_memory(wrapper, 0x0cu)) return;
+    render_object = *(uint8_t **)(wrapper + 0x08u);
+    if (!readable_memory(render_object, 0x90u + 16u * sizeof(float))) return;
+    matrix = (const float *)(render_object + 0x90u);
+    diagnostics->render_facing[0] = matrix[8];
+    diagnostics->render_facing[1] = matrix[9];
+    diagnostics->render_facing[2] = matrix[10];
+    diagnostics->render_position[0] = matrix[12];
+    diagnostics->render_position[1] = matrix[13];
+    diagnostics->render_position[2] = matrix[14];
+    diagnostics->render_valid = 1u;
+}
+
+static void capture_camera_diagnostics(void) {
+    uint8_t *mode;
+    uint8_t *camera_member;
+    uint8_t *camera;
+    uint8_t *render_state;
+    const float *matrix;
+    unsigned int index;
+
+    replica_diagnostics.camera_valid = 0u;
+    if (game_base == NULL || !readable_memory(
+            game_base + RVA_GAME_CAMERA_MODE_GLOBAL, sizeof(mode))) return;
+    mode = *(uint8_t **)(game_base + RVA_GAME_CAMERA_MODE_GLOBAL);
+    if (!readable_memory(mode, 0x10u)) return;
+    camera_member = *(uint8_t **)(mode + 0x0cu);
+    if ((uintptr_t)camera_member < 0x2cu) return;
+    camera = camera_member - 0x2cu;
+    if (!readable_memory(camera, 0x38u)) return;
+    render_state = *(uint8_t **)(camera + 0x34u);
+    if (!readable_memory(render_state, 0xd0u)) return;
+    matrix = (const float *)(render_state + 0x90u);
+    for (index = 0u; index < 3u; ++index) {
+        replica_diagnostics.camera_facing[index] = matrix[8u + index];
+        replica_diagnostics.camera_position[index] = matrix[12u + index];
+        if (!isfinite(replica_diagnostics.camera_facing[index]) ||
+            !isfinite(replica_diagnostics.camera_position[index])) {
+            return;
+        }
+    }
+    replica_diagnostics.camera_valid = 1u;
+}
+
 BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     uint8_t *base = (uint8_t *)game_module;
-    if (base == NULL || set_position != NULL || set_forward != NULL ||
+    if (base == NULL || set_position != NULL ||
+        position_world_matrix != NULL || set_forward != NULL ||
         memcmp(base + RVA_INTERNAL_POSITION_SETTER,
             expected_position_setter_prefix,
             sizeof(expected_position_setter_prefix)) != 0 ||
+        memcmp(base + RVA_POSITION_WORLD_MATRIX,
+            expected_position_world_matrix_entry,
+            sizeof(expected_position_world_matrix_entry)) != 0 ||
+        !relative_call_targets(
+            base + RVA_POSITION_WORLD_MATRIX_UPDATE_CALL,
+            base + RVA_POSITION_UPDATE) ||
+        memcmp(base + RVA_POSITION_UPDATE,
+            expected_position_update_entry,
+            sizeof(expected_position_update_entry)) != 0 ||
         memcmp(base + RVA_POSITION_SET_FORWARD,
             expected_position_set_forward_entry,
             sizeof(expected_position_set_forward_entry)) != 0 ||
@@ -609,27 +816,36 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         return FALSE;
     }
     set_position = (PositionSetterFunction)(base + RVA_INTERNAL_POSITION_SETTER);
+    position_world_matrix = (PositionWorldMatrixFunction)(
+        base + RVA_POSITION_WORLD_MATRIX);
     set_forward = base + RVA_POSITION_SET_FORWARD;
     game_base = base;
     SudekiMpLanArenaReplicaReset(&replica);
-    latest_snapshot_received_at = 0u;
+    SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
+    memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
+    clear_last_applied_frame();
     return TRUE;
 }
 
 void SudekiMpResetLanArenaClientReplica(void) {
     SudekiMpLanArenaReplicaReset(&replica);
     set_position = NULL;
+    position_world_matrix = NULL;
     set_forward = NULL;
     game_base = NULL;
-    latest_snapshot_received_at = 0u;
+    SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
+    memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
+    clear_last_applied_frame();
 }
 
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {
     SudekiMpLanArenaReplicaReset(&replica);
-    latest_snapshot_received_at = 0u;
+    SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
+    memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
+    clear_last_applied_frame();
 }
 
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
@@ -637,33 +853,285 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     SudekiMpLanArenaSnapshot snapshot;
     DWORD now = GetTickCount();
     uint32_t render_host_tick;
-    if (set_position == NULL || set_forward == NULL) {
+    if (set_position == NULL || set_forward == NULL ||
+        !client_session_authenticated()) {
+        SudekiMpLanArenaClientReplicaDiscardSnapshots();
+        SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (SudekiMpLanArenaSessionTakeRemoteSnapshot(&received)) {
+    while (SudekiMpLanArenaSessionTakeRemoteSnapshot(&received)) {
         if (!SudekiMpLanArenaReplicaPush(&replica, &received)) return FALSE;
-        latest_snapshot_received_at = now;
     }
-    if (!replica.latest_valid || latest_snapshot_received_at == 0u) return FALSE;
-    render_host_tick = replica.latest.host_tick +
-        (uint32_t)(now - latest_snapshot_received_at);
-    if (render_host_tick > REPLICA_INTERPOLATION_DELAY_MS) {
-        render_host_tick -= REPLICA_INTERPOLATION_DELAY_MS;
-    } else {
-        render_host_tick = 0u;
+    if (!SudekiMpLanArenaReplicaRenderClockAdvance(
+            &replica, &replica_render_clock, now, &render_host_tick)) {
+        return FALSE;
     }
     if (!SudekiMpLanArenaReplicaSample(
             &replica, render_host_tick, &snapshot) ||
         snapshot.match_state != 1u) {
         return FALSE;
     }
-    if (!apply_actor(
+    replica_diagnostics.valid = 0u;
+    memset(replica_diagnostics.actor, 0,
+        sizeof(replica_diagnostics.actor));
+    capture_actor_diagnostics(
+        0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal);
+    capture_actor_diagnostics(
+        1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish);
+    {
+        unsigned int actor_index;
+        for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+            SudekiMpLanArenaReplicaActorDiagnostics *diagnostics =
+                &replica_diagnostics.actor[actor_index];
+            memcpy(diagnostics->pre_apply_position,
+                diagnostics->native_position,
+                sizeof(diagnostics->pre_apply_position));
+            memcpy(diagnostics->pre_apply_facing,
+                diagnostics->native_facing,
+                sizeof(diagnostics->pre_apply_facing));
+            diagnostics->pre_apply_target_speed =
+                diagnostics->movement_target_speed;
+            diagnostics->pre_apply_smoothed_speed =
+                diagnostics->movement_smoothed_speed;
+            diagnostics->pre_apply_current_speed =
+                diagnostics->movement_current_speed;
+        }
+    }
+    /* Each actor is independently validated and applied before the combined
+     * frame is admitted. This avoids short-circuiting Tal diagnostics merely
+     * because Ailish failed, while still refusing a partially valid frame. */
+    {
+        BOOL ailish_applied = apply_actor(
             &snapshot.ailish, SUDEKIMP_CLEANROOM_AILISH,
-            SUDEKIMP_LAN_ARENA_AILISH_TYPE) ||
-        !apply_actor(
+            SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+            &last_applied_characters[1],
+            &last_applied_positions[1]);
+        BOOL tal_applied = apply_actor(
             &snapshot.tal, SUDEKIMP_CLEANROOM_TAL,
-            SUDEKIMP_LAN_ARENA_TAL_TYPE)) return FALSE;
+            SUDEKIMP_LAN_ARENA_TAL_TYPE,
+            &last_applied_characters[0],
+            &last_applied_positions[0]);
+        if (!ailish_applied || !tal_applied) {
+            clear_last_applied_frame();
+            return FALSE;
+        }
+    }
+    if (last_applied_characters[0] == NULL ||
+        last_applied_characters[1] == NULL ||
+        last_applied_positions[0] == NULL ||
+        last_applied_positions[1] == NULL) {
+        clear_last_applied_frame();
+        return FALSE;
+    }
+    last_applied_snapshot = snapshot;
+    replica_diagnostics.sequence = snapshot.sequence;
+    replica_diagnostics.upper_snapshot_host_tick = snapshot.host_tick;
+    replica_diagnostics.render_host_tick = render_host_tick;
+    replica_diagnostics.sampled_at_ms = now;
+    capture_camera_diagnostics();
+    capture_actor_diagnostics(
+        0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal);
+    capture_actor_diagnostics(
+        1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish);
+    {
+        unsigned int actor_index;
+        for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+            SudekiMpLanArenaReplicaActorDiagnostics *diagnostics =
+                &replica_diagnostics.actor[actor_index];
+            memcpy(diagnostics->post_apply_position,
+                diagnostics->native_position,
+                sizeof(diagnostics->post_apply_position));
+            memcpy(diagnostics->post_apply_facing,
+                diagnostics->native_facing,
+                sizeof(diagnostics->post_apply_facing));
+        }
+    }
+    replica_diagnostics.valid = 1u;
     if (snapshot.enemy_count == 0u) return TRUE;
     return snapshot.enemy_count == 1u &&
         apply_training_dummy(&snapshot.enemies[0]);
+}
+
+static BOOL actor_visible_transform_matches_position(
+    uint8_t *position,
+    uint8_t *render_object
+) {
+    const float *matrix;
+    float position_x;
+    float position_y;
+    float position_z;
+    float render_x;
+    float render_y;
+    float render_z;
+    float position_facing_x;
+    float position_facing_z;
+    float render_facing_x;
+    float render_facing_z;
+    float position_facing_length;
+    float render_facing_length;
+    float facing_dot;
+    if (!readable_memory(position, 0x104u) ||
+        !readable_memory(render_object, 0x90u + 16u * sizeof(float))) {
+        return FALSE;
+    }
+    matrix = (const float *)(render_object + 0x90u);
+    position_x = *(float *)(position + 0x18u);
+    position_y = *(float *)(position + 0x1cu);
+    position_z = *(float *)(position + 0x20u);
+    render_x = matrix[12];
+    render_y = matrix[13];
+    render_z = matrix[14];
+    position_facing_x = *(float *)(position + 0x50u);
+    position_facing_z = *(float *)(position + 0x58u);
+    render_facing_x = matrix[8];
+    render_facing_z = matrix[10];
+    position_facing_length = sqrtf(
+        position_facing_x * position_facing_x +
+        position_facing_z * position_facing_z);
+    render_facing_length = sqrtf(
+        render_facing_x * render_facing_x +
+        render_facing_z * render_facing_z);
+    if (!isfinite(position_x) || !isfinite(position_y) ||
+        !isfinite(position_z) || !isfinite(render_x) ||
+        !isfinite(render_y) || !isfinite(render_z) ||
+        !isfinite(position_facing_length) ||
+        !isfinite(render_facing_length) ||
+        position_facing_length < 0.5f || render_facing_length < 0.5f) {
+        return FALSE;
+    }
+    facing_dot =
+        (position_facing_x * render_facing_x +
+         position_facing_z * render_facing_z) /
+        (position_facing_length * render_facing_length);
+    return fabsf(position_x - render_x) <= 0.01f &&
+        fabsf(position_y - render_y) <= 0.01f &&
+        fabsf(position_z - render_z) <= 0.01f &&
+        isfinite(facing_dot) && facing_dot >= 0.9995f;
+}
+
+BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void) {
+    static const SudekiMpCleanroomActor actors[2] = {
+        SUDEKIMP_CLEANROOM_TAL,
+        SUDEKIMP_CLEANROOM_AILISH
+    };
+    static const uint8_t expected_types[2] = {
+        SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE
+    };
+    const SudekiMpLanArenaActorSnapshot *snapshots[2];
+    uint8_t *positions[2];
+    uint8_t *render_objects[2];
+    unsigned int actor_index;
+    if (position_world_matrix == NULL || !client_session_authenticated() ||
+        !replica_diagnostics.valid || last_applied_snapshot.match_state != 1u) {
+        clear_last_applied_frame();
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    snapshots[0] = &last_applied_snapshot.tal;
+    snapshots[1] = &last_applied_snapshot.ailish;
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        uint8_t *character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(
+            actors[actor_index]);
+        uint8_t *wrapper;
+        if (snapshots[actor_index]->actor_type != expected_types[actor_index] ||
+            snapshots[actor_index]->native_entity_id !=
+                expected_types[actor_index] ||
+            last_applied_characters[actor_index] != character ||
+            !readable_memory(character,
+                CHARACTER_POSITION_OFFSET + sizeof(void *))) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        positions[actor_index] = *(uint8_t **)(
+            character + CHARACTER_POSITION_OFFSET);
+        if (positions[actor_index] != last_applied_positions[actor_index] ||
+            !readable_memory(positions[actor_index], 0x104u) ||
+            !writable_memory(positions[actor_index] + 0xb8u, 1u)) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        /* The current verifier compares the local CPosition transform with
+         * the attached world render object. Cleanroom Tal and Ailish are
+         * unparented roots (NULL or retail sentinel 4). Reject a newly
+         * parented/locator-bound actor instead of repeatedly dirtying a valid
+         * composed world matrix with a local-space comparison. */
+        {
+            uintptr_t parent_link = *(uintptr_t *)(positions[actor_index] + 0x94u);
+            if (parent_link != 0u && parent_link != 4u) {
+                SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
+            }
+        }
+        wrapper = *(uint8_t **)(
+            positions[actor_index] + POSITION_ATTACHED_WRAPPER_OFFSET);
+        if (!readable_memory(wrapper, 0x0cu)) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        render_objects[actor_index] = *(uint8_t **)(wrapper + 0x08u);
+        if (!readable_memory(render_objects[actor_index],
+                0x90u + 16u * sizeof(float)) ||
+            !writable_memory(render_objects[actor_index] + 0x2cu,
+                sizeof(uint32_t)) ||
+            !writable_memory(render_objects[actor_index] + 0x90u,
+                16u * sizeof(float))) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+    }
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        const float *world_matrix = position_world_matrix(
+            positions[actor_index]);
+        if (!readable_memory(
+                world_matrix, 16u * sizeof(float))) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        if (!actor_visible_transform_matches_position(
+                positions[actor_index], render_objects[actor_index])) {
+            /* Sudeki may consume CPosition's dirty flag and then regenerate a
+             * stale attached model basis from its accepted-direction state.
+             * Re-arm only this proven native flag and let the parent-aware
+             * world-matrix getter rebuild, compose, publish, and update all
+             * native generations. The verification deliberately owns only
+             * translation and horizontal forward: animation/presentation may
+             * legitimately change other world-matrix components. */
+            *(uint8_t *)(positions[actor_index] + 0xb8u) = 1u;
+            world_matrix = position_world_matrix(positions[actor_index]);
+            if (!readable_memory(
+                    world_matrix, 16u * sizeof(float)) ||
+                !actor_visible_transform_matches_position(
+                    positions[actor_index], render_objects[actor_index])) {
+                SetLastError(ERROR_INVALID_DATA);
+                return FALSE;
+            }
+        }
+    }
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        if (!actor_visible_transform_matches_position(
+                positions[actor_index], render_objects[actor_index])) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+    }
+    SudekiMpLanArenaClientReplicaRefreshDiagnostics();
+    return TRUE;
+}
+
+void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void) {
+    if (!replica_diagnostics.valid) return;
+    capture_actor_diagnostics(
+        0u, SUDEKIMP_CLEANROOM_TAL, &last_applied_snapshot.tal);
+    capture_actor_diagnostics(
+        1u, SUDEKIMP_CLEANROOM_AILISH, &last_applied_snapshot.ailish);
+    capture_camera_diagnostics();
+}
+
+BOOL SudekiMpLanArenaClientReplicaGetDiagnostics(
+    SudekiMpLanArenaReplicaDiagnostics *diagnostics
+) {
+    if (diagnostics == NULL || !replica_diagnostics.valid) return FALSE;
+    *diagnostics = replica_diagnostics;
+    return TRUE;
 }

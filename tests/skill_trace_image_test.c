@@ -65,7 +65,12 @@ enum {
     RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER = 0x00023f60u,
     RVA_GROUP_PLAYERS_NEXT_CHARACTER = 0x00024060u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
+    RVA_ARBITER_SET_SPEED = 0x000db070u,
+    RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE = 0x000c3870u,
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
+    RVA_POSITION_UPDATE = 0x00110d40u,
+    RVA_POSITION_WORLD_MATRIX = 0x00111cc0u,
+    RVA_POSITION_WORLD_MATRIX_UPDATE_CALL = 0x00111cdau,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_MAIN_FRAME_UPDATE_CALL = 0x0028ddbau,
@@ -82,7 +87,12 @@ enum {
     RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
-    RVA_UI_TEXT_SUBMIT = 0x00009930u,
+    RVA_PC_QUIT_SCREEN_SELECT = 0x0001d780u,
+    RVA_PC_QUIT_SCREEN_SELECT_CALL = 0x0001db71u,
+    RVA_PC_QUIT_SCREEN_BACK = 0x0001d860u,
+    RVA_PC_QUIT_SCREEN_BACK_CALL = 0x0001db64u,
+    RVA_PC_QUIT_SCREEN_NAVIGATE = 0x0001d9f0u,
+    RVA_PC_QUIT_SCREEN_NAVIGATE_CALL = 0x0001dba4u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
     RVA_QUICK_MENU_CLOSE = 0x0009c360u,
     RVA_QUICK_MENU_START = 0x0009c3a0u,
@@ -2864,6 +2874,65 @@ int wmain(int argc, wchar_t **argv) {
             SudekiMpResetLanArenaClientReplica();
         }
         image[RVA_INTERNAL_POSITION_SETTER] = saved_position_setter_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica position-setter mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_world_matrix_byte = image[RVA_POSITION_WORLD_MATRIX];
+        image[RVA_POSITION_WORLD_MATRIX] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched position world-matrix getter\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_POSITION_WORLD_MATRIX] = saved_world_matrix_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica world-matrix mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_call_displacement =
+            image[RVA_POSITION_WORLD_MATRIX_UPDATE_CALL + 1u];
+        image[RVA_POSITION_WORLD_MATRIX_UPDATE_CALL + 1u] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched world-matrix updater call\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_POSITION_WORLD_MATRIX_UPDATE_CALL + 1u] =
+            saved_call_displacement;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica updater-call mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_update_byte = image[RVA_POSITION_UPDATE];
+        image[RVA_POSITION_UPDATE] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched position updater\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_POSITION_UPDATE] = saved_update_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica position-updater mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
     }
     {
         void *saved_animation_count = *(void **)(
@@ -2878,6 +2947,12 @@ int wmain(int argc, wchar_t **argv) {
         }
         *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
             saved_animation_count;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica animation mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
     }
     {
         uint8_t saved_prefix = image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u];
@@ -3151,40 +3226,59 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     } else {
         if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) ==
-                image + RVA_PC_QUIT_SCREEN_RENDER) {
-            fputs("FAIL: LAN pause-panel render hook was not installed\n",
+                image + RVA_PC_QUIT_SCREEN_RENDER ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_SELECT_CALL) ==
+                image + RVA_PC_QUIT_SCREEN_SELECT ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) ==
+                image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) ==
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
+            fputs("FAIL: LAN pause-panel interaction hooks were not installed\n",
                 stderr);
             ++failures;
         }
         SudekiMpUninstallLanArenaPausePanel();
         if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
-                image + RVA_PC_QUIT_SCREEN_RENDER) {
-            fputs("FAIL: LAN pause-panel render hook was not restored\n",
+                image + RVA_PC_QUIT_SCREEN_RENDER ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_SELECT_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_SELECT ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
+            fputs("FAIL: LAN pause-panel interaction hooks were not restored\n",
                 stderr);
             ++failures;
         }
     }
     {
-        uint8_t saved_text_submit_entry = image[RVA_UI_TEXT_SUBMIT];
-        image[RVA_UI_TEXT_SUBMIT] ^= 0x01u;
+        uint8_t saved_select_displacement =
+            image[RVA_PC_QUIT_SCREEN_SELECT_CALL + 1u];
+        image[RVA_PC_QUIT_SCREEN_SELECT_CALL + 1u] ^= 0x01u;
         SetLastError(ERROR_SUCCESS);
         if (SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
-            fputs("FAIL: LAN pause panel accepted a mismatched text submitter\n",
+            fputs("FAIL: LAN pause panel accepted a mismatched select seam\n",
                 stderr);
             ++failures;
             SudekiMpUninstallLanArenaPausePanel();
         } else if (GetLastError() != ERROR_INVALID_DATA) {
             fprintf(stderr,
-                "FAIL: LAN pause text mismatch returned error=%lu\n",
+                "FAIL: LAN pause select mismatch returned error=%lu\n",
                 (unsigned long)GetLastError());
             ++failures;
         }
         if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
-                image + RVA_PC_QUIT_SCREEN_RENDER) {
-            fputs("FAIL: LAN pause text mismatch mutated render hook\n", stderr);
+                image + RVA_PC_QUIT_SCREEN_RENDER ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
+            fputs("FAIL: LAN pause mismatch rollback left hooks installed\n",
+                stderr);
             ++failures;
         }
-        image[RVA_UI_TEXT_SUBMIT] = saved_text_submit_entry;
+        image[RVA_PC_QUIT_SCREEN_SELECT_CALL + 1u] =
+            saved_select_displacement;
     }
     memcpy(
         minimap_snapshot_call_original,
@@ -5453,6 +5547,47 @@ int wmain(int argc, wchar_t **argv) {
                 SudekiMpUninstallControlSeparation();
             }
         }
+    }
+    {
+        uint8_t saved_set_speed = image[RVA_ARBITER_SET_SPEED];
+        void *saved_update_slot = *(void **)(
+            image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+        image[RVA_ARBITER_SET_SPEED] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: control separation accepted mismatched native stop entry\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                       saved_update_slot) {
+            fputs("FAIL: native stop mismatch did not fail closed before hook mutation\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_ARBITER_SET_SPEED] = saved_set_speed;
+    }
+    {
+        uint8_t saved_set_speed =
+            image[RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE];
+        void *saved_update_slot = *(void **)(
+            image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+        image[RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: control separation accepted mismatched immediate native stop entry\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                       saved_update_slot) {
+            fputs("FAIL: immediate native stop mismatch did not fail closed before hook mutation\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE] = saved_set_speed;
     }
     if (!SudekiMpInstallControlSeparation(
             (HMODULE)image,

@@ -8,6 +8,8 @@ host_prefix="${SUDEKIMP_LAN_HOST_WINEPREFIX:-${HOME}/Games/sudeki-lan-host-win32
 client_prefix="${SUDEKIMP_LAN_CLIENT_WINEPREFIX:-${HOME}/Games/sudeki-lan-client-win32-prefix}"
 port="${SUDEKIMP_LAN_ARENA_PORT:-26770}"
 loopback_timeout_ms="${SUDEKIMP_LAN_ARENA_LOOPBACK_TIMEOUT_MS:-5000}"
+host_monitor_product="${SUDEKIMP_LAN_HOST_MONITOR_PRODUCT:-Acer X233}"
+client_monitor_product="${SUDEKIMP_LAN_CLIENT_MONITOR_PRODUCT:-LG FHD}"
 action="${1:---start}"
 stage_root="${project_dir}/build/mingw32/lan-loopback"
 host_stage="${stage_root}/host"
@@ -321,11 +323,87 @@ resolve_game_window() {
         '$3 == pid && $0 ~ /Sudeki/ { print $1; exit }'
 }
 
+monitor_geometry_by_product() {
+    local product_needle="$1"
+    local status_file connector_dir connector product line
+    if [[ -z "${product_needle}" ]] || ! command -v edid-decode >/dev/null 2>&1; then
+        return 1
+    fi
+    for status_file in /sys/class/drm/card*-*/status; do
+        [[ -r "${status_file}" ]] || continue
+        grep -Fqx connected "${status_file}" || continue
+        connector_dir="${status_file%/status}"
+        product="$(edid-decode "${connector_dir}/edid" 2>/dev/null |
+            sed -n "s/.*Display Product Name: '\([^']*\)'.*/\1/p" |
+            head -n 1)"
+        [[ "${product}" == *"${product_needle}"* ]] || continue
+        connector="${connector_dir##*/}"
+        connector="${connector#card*-}"
+        line="$(xrandr --query 2>/dev/null |
+            awk -v connector="${connector}" \
+                '$1 == connector && $2 == "connected" { print; exit }')"
+        if [[ "${line}" =~ ([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+) ]]; then
+            printf '%s %s %s %s' \
+                "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
+                "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+place_window_geometry() {
+    local window_id="$1"
+    local requested_x="$2"
+    local requested_y="$3"
+    local requested_width="$4"
+    local requested_height="$5"
+    local actual_x actual_y corrected_x corrected_y attempt
+    wmctrl -i -r "${window_id}" \
+        -e "0,${requested_x},${requested_y},${requested_width},${requested_height}" \
+        2>/dev/null || return
+    # KWin can expose Wine's top-level coordinates through a 2x logical-
+    # desktop transform even though XRandR reports physical output geometry.
+    # Detect that exact transform and compensate once; ordinary 1x desktops
+    # keep the first placement unchanged.
+    # Wine applies the EWMH configure asynchronously after its top-level GL
+    # window settles; a shorter sample can still observe the pre-move frame.
+    sleep 1
+    read -r actual_x actual_y < <(wmctrl -l -G 2>/dev/null |
+        awk -v id="${window_id}" '$1 == id { print $4, $5; exit }')
+    corrected_x="${requested_x}"
+    corrected_y="${requested_y}"
+    if [[ "${actual_x:-}" == "$((requested_x * 2))" ]]; then
+        corrected_x=$((requested_x / 2))
+    fi
+    if [[ "${actual_y:-}" == "$((requested_y * 2))" ]]; then
+        corrected_y=$((requested_y / 2))
+    fi
+    if (( corrected_x != requested_x || corrected_y != requested_y )); then
+        # The first asynchronous configure may land after the correction and
+        # overwrite it. Reassert the compensated coordinates until the window
+        # manager reports the intended physical output position.
+        for attempt in {1..4}; do
+            wmctrl -i -r "${window_id}" \
+                -e "0,${corrected_x},${corrected_y},${requested_width},${requested_height}" \
+                2>/dev/null || true
+            sleep 1
+            read -r actual_x actual_y < <(wmctrl -l -G 2>/dev/null |
+                awk -v id="${window_id}" '$1 == id { print $4, $5; exit }')
+            if [[ "${actual_x:-}" == "${requested_x}" &&
+                  "${actual_y:-}" == "${requested_y}" ]]; then
+                break
+            fi
+        done
+    fi
+}
+
 place_loopback_windows() {
     local host_window_id="$1"
     local client_window_id="$2"
     local line width height x y
     local host_width host_height client_width client_height
+    local host_display client_display
     local -a displays=()
 
     if ! command -v xrandr >/dev/null 2>&1 ||
@@ -355,6 +433,26 @@ place_loopback_windows() {
         -b remove,hidden,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
     wmctrl -i -r "${client_window_id}" \
         -b remove,hidden,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
+
+    host_display="$(monitor_geometry_by_product "${host_monitor_product}" || true)"
+    client_display="$(monitor_geometry_by_product "${client_monitor_product}" || true)"
+    if [[ -n "${host_display}" && -n "${client_display}" &&
+          "${host_display}" != "${client_display}" ]]; then
+        read -r width height x y <<<"${host_display}"
+        host_width=$(( width > 1406 ? 1366 : width - 40 ))
+        host_height=$(( height > 819 ? 739 : height - 80 ))
+        place_window_geometry "${host_window_id}" \
+            "$((x + 20))" "$((y + 40))" "${host_width}" "${host_height}"
+
+        read -r width height x y <<<"${client_display}"
+        client_width=$(( width > 1406 ? 1366 : width - 40 ))
+        client_height=$(( height > 819 ? 739 : height - 80 ))
+        place_window_geometry "${client_window_id}" \
+            "$((x + 20))" "$((y + 40))" "${client_width}" "${client_height}"
+        printf '%s\n' \
+            "Placed Host on ${host_monitor_product} and Client on ${client_monitor_product} without changing focus."
+        return
+    fi
 
     if (( ${#displays[@]} >= 2 )); then
         read -r width height x y <<<"${displays[0]}"

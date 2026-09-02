@@ -215,6 +215,10 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_z,
     BOOL weak_attack_edge
 );
+/* Game-thread kinematic-replica helper. It invokes the exact native immediate
+ * movement-controller setter even when this module did not submit movement,
+ * then verifies both target and current speed reached zero. */
+BOOL SudekiMpControlSeparationForceStopCharacter(void *character);
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void);
 BOOL SudekiMpControlSeparationPlayerTwoActive(void);
 void *SudekiMpControlSeparationPlayerTwoCharacter(void);

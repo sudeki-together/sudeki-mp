@@ -3,9 +3,10 @@
 
 #include <windows.h>
 
-/* LAN-only augmentation of the shipped Esc screen. The native pause renderer
- * remains the owner; this adapter adds status text and a local End/Leave
- * command without installing any split-screen or custom QuickMenu hooks. */
+/* LAN-only sibling page on the shipped Esc screen.  The Multiplayer option
+ * replaces Quit To Title in the closed cleanroom profile and opens a mod-owned
+ * foreground page.  Back and Exit to Windows remain native; Q/QuickMenu is
+ * not part of this adapter. */
 BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module);
 void SudekiMpUninstallLanArenaPausePanel(void);
 

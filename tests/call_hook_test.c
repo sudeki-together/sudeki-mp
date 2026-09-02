@@ -22,6 +22,7 @@ int main(void) {
     uint8_t *replacement_target;
     int32_t displacement;
     SudekiMpRelativeCallHook call_hook = {0};
+    SudekiMpRelativeCallHook call_install_failure_hook = {0};
     SudekiMpExportHook export_hook = {0};
     SudekiMpPointerHook pointer_hook = {0};
     SudekiMpPointerHook restore_failure_hook = {0};
@@ -30,8 +31,11 @@ int main(void) {
     void **pointer_slot;
     void *foreign_target;
     HANDLE mapping;
+    HANDLE call_mapping;
     void **writable_view;
     void **read_only_view;
+    uint8_t *writable_call_view;
+    uint8_t *read_only_call_view;
     uint8_t *inline_target;
     uint8_t *inline_trampoline;
     static const uint8_t inline_expected[] = {
@@ -66,6 +70,69 @@ int main(void) {
     check(!SudekiMpInstallRelativeCallHook(
         &call_hook, call_instruction, original_target, replacement_target
     ), "reject non-CALL instruction");
+
+    /* A read-only mapped CALL lets validation succeed while its displacement
+     * remains impossible for write_protected_memory to patch. */
+    call_mapping = CreateFileMappingA(
+        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0u, 0x1000u, NULL
+    );
+    writable_call_view = call_mapping != NULL ? (uint8_t *)MapViewOfFile(
+        call_mapping, FILE_MAP_WRITE, 0u, 0u, 0x1000u) : NULL;
+    check(call_mapping != NULL && writable_call_view != NULL,
+        "create mapped CALL for install-write failure");
+    if (writable_call_view != NULL) {
+        writable_call_view[0x100u] = 0xe8u;
+        displacement = 0;
+        memcpy(
+            writable_call_view + 0x101u,
+            &displacement,
+            sizeof(displacement)
+        );
+        UnmapViewOfFile(writable_call_view);
+    }
+    read_only_call_view = call_mapping != NULL ? (uint8_t *)MapViewOfFile(
+        call_mapping, FILE_MAP_READ, 0u, 0u, 0x1000u) : NULL;
+    check(read_only_call_view != NULL,
+        "map read-only CALL for install-write failure");
+    if (read_only_call_view != NULL) {
+        SetLastError(ERROR_SUCCESS);
+        check(!SudekiMpInstallRelativeCallHook(
+            &call_install_failure_hook,
+            read_only_call_view + 0x100u,
+            read_only_call_view + 0x105u,
+            read_only_call_view + 0x180u
+        ), "relative-call install reports a protected-write failure");
+        memcpy(
+            &displacement,
+            read_only_call_view + 0x101u,
+            sizeof(displacement)
+        );
+        check(displacement == 0,
+            "failed relative-call install preserves the original target");
+        check(!call_install_failure_hook.installed &&
+            call_install_failure_hook.instruction == NULL &&
+            call_install_failure_hook.original_displacement == 0,
+            "failed relative-call install clears ownership bookkeeping");
+        UnmapViewOfFile(read_only_call_view);
+    }
+    if (call_mapping != NULL) {
+        CloseHandle(call_mapping);
+    }
+
+    call_instruction[0] = 0xe8u;
+    displacement = (int32_t)(original_target - (call_instruction + 5));
+    memcpy(call_instruction + 1, &displacement, sizeof(displacement));
+    check(SudekiMpInstallRelativeCallHook(
+        &call_install_failure_hook,
+        call_instruction,
+        original_target,
+        replacement_target
+    ), "retry relative-call install after a protected-write failure");
+    check(SudekiMpRestoreRelativeCallHook(&call_install_failure_hook),
+        "restore retried relative-call hook");
+    memcpy(&displacement, call_instruction + 1, sizeof(displacement));
+    check(call_instruction + 5 + displacement == original_target,
+        "retried relative-call hook restores its original target");
 
     export_slot = (uint32_t *)(memory + 0x800);
     *export_slot = 0x300u;

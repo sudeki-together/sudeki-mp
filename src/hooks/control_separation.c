@@ -45,6 +45,11 @@ typedef void (SUDEKIMP_THISCALL *ArbiterSetSpeedFunction)(
     float speed,
     float turn_rate
 );
+typedef void (SUDEKIMP_THISCALL *MovementControllerSetSpeedImmediateFunction)(
+    void *movement_controller,
+    float speed,
+    float turn_rate
+);
 typedef int (SUDEKIMP_THISCALL *CameraManagerGetCameraModeFunction)(
     void *manager,
     const char *name
@@ -94,6 +99,7 @@ enum {
     RVA_MOVEMENT_CAMERA_TRANSFORM = 0x000291a0u,
     RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA = 0x000030a0u,
     RVA_MOVEMENT_CONTROLLER_UPDATE = 0x000c3200u,
+    RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE = 0x000c3870u,
     RVA_TAL_CHARACTER_UPDATE = 0x00153240u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
@@ -186,6 +192,8 @@ static AiControlFunction ai_override_control;
 static AiControlFunction ai_default_control;
 static ArbiterMovementFunction arbiter_movement;
 static ArbiterSetSpeedFunction arbiter_set_speed;
+static MovementControllerSetSpeedImmediateFunction
+    movement_controller_set_speed_immediate;
 static CameraManagerGetCameraModeFunction camera_manager_get_camera_mode;
 static GroupPlayersInCombatFunction group_players_in_combat;
 static MovementCameraTransformFunction movement_camera_transform;
@@ -299,6 +307,19 @@ static const uint8_t expected_controller_update_entry[] = {
 };
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
+};
+static const uint8_t expected_arbiter_set_speed_entry[] = {
+    0x8b, 0x41, 0x10, 0x56, 0x8b, 0xb0, 0x80, 0x00,
+    0x00, 0x00, 0x85, 0xf6, 0x74, 0x5e, 0x8b, 0xd1
+};
+static const uint8_t expected_movement_controller_set_speed_immediate_entry[] = {
+    0x83, 0x79, 0x68, 0x01, 0x75, 0x15, 0xd9, 0xe8,
+    0xd8, 0x54, 0x24, 0x04, 0xdf, 0xe0, 0xf6, 0xc4,
+    0x41, 0x74, 0x06, 0xd9, 0x5c, 0x24, 0x04, 0xeb,
+    0x02, 0xdd, 0xd8, 0xf6, 0x81, 0xbe, 0x00, 0x00,
+    0x00, 0x08, 0x74, 0x11, 0xd9, 0x44, 0x24, 0x04,
+    0xd9, 0x51, 0x24, 0xd9, 0x59, 0x28, 0xd9, 0x44,
+    0x24, 0x08, 0xd9, 0x59, 0x30, 0xc2, 0x08, 0x00
 };
 static const uint8_t expected_movement_camera_transform_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x8b, 0x55, 0x08, 0xd9, 0xee
@@ -5236,6 +5257,38 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationForceStopCharacter(void *character) {
+    uint8_t *bytes = (uint8_t *)character;
+    uint8_t *arbiter;
+    uint8_t *movement_controller;
+    float target_speed;
+    float current_speed;
+    if (movement_controller_set_speed_immediate == NULL ||
+        !readable_memory(bytes, 0x94u)) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    arbiter = *(uint8_t **)(bytes + 0x90u);
+    movement_controller = *(uint8_t **)(bytes + 0x80u);
+    if (!readable_memory(arbiter, 0x14u) ||
+        *(void **)(arbiter + 0x10u) != character ||
+        !readable_memory(movement_controller, 0xc0u) ||
+        (movement_controller[0xbeu] & 0x08u) == 0u) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    movement_controller_set_speed_immediate(
+        movement_controller, 0.0f, 1.0f);
+    target_speed = *(float *)(movement_controller + 0x24u);
+    current_speed = *(float *)(movement_controller + 0x28u);
+    if (!isfinite(target_speed) || !isfinite(current_speed) ||
+        fabsf(target_speed) > 0.0001f || fabsf(current_speed) > 0.0001f) {
+        SetLastError(ERROR_RETRY);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpControlSeparationPlayerTwoRequested(void) {
     return SudekiMpControlSeparationSeatRequested(1u);
 }
@@ -5540,6 +5593,21 @@ BOOL SudekiMpInstallControlSeparation(
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    if (memcmp(
+            base + RVA_ARBITER_SET_SPEED,
+            expected_arbiter_set_speed_entry,
+            sizeof(expected_arbiter_set_speed_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(
+            base + RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE,
+            expected_movement_controller_set_speed_immediate_entry,
+            sizeof(expected_movement_controller_set_speed_immediate_entry)) !=
+            0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
     if ((enable_separation_guard &&
          memcmp(
              base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE,
@@ -5731,6 +5799,9 @@ BOOL SudekiMpInstallControlSeparation(
     arbiter_set_speed = (ArbiterSetSpeedFunction)(
         base + RVA_ARBITER_SET_SPEED
     );
+    movement_controller_set_speed_immediate =
+        (MovementControllerSetSpeedImmediateFunction)(
+            base + RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE);
     camera_manager_get_camera_mode = enable_separation_guard ?
         (CameraManagerGetCameraModeFunction)(
             base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE) : NULL;
@@ -5897,6 +5968,7 @@ void SudekiMpUninstallControlSeparation(void) {
     ai_default_control = NULL;
     arbiter_movement = NULL;
     arbiter_set_speed = NULL;
+    movement_controller_set_speed_immediate = NULL;
     camera_manager_get_camera_mode = NULL;
     group_players_in_combat = NULL;
     movement_camera_transform = NULL;

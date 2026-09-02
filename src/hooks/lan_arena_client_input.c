@@ -170,6 +170,9 @@ static void __stdcall capture_client_movement(
     if (!isfinite(speed) || speed <= 0.0f) speed = 0.0f;
     if (speed > 1.0f) speed = 1.0f;
     now = GetTickCount();
+    /* This direction is already the retail controller's live camera-relative
+     * world vector. Preserve it exactly: recomputing or latching it in the LAN
+     * layer breaks native mouse-steered arcs around actors and scenery. */
     direction_x = normalized_axis(direction[0] * speed);
     direction_z = normalized_axis(direction[2] * speed);
     changed = direction_x != last_direction_x || direction_z != last_direction_z;
@@ -183,7 +186,7 @@ static void __stdcall capture_client_movement(
         movement_send_logged = TRUE;
         SudekiMpLogFormat(
             "lan_arena_client_input event=movement_send phase=confirmed "
-            "world_direction=%d,%d policy=client_capture_host_authority\r\n",
+            "world_direction=%d,%d policy=native_live_camera_relative_vector\r\n",
             (int)last_direction_x, (int)last_direction_z);
     }
     /* Do not call the local native arbiter. The host is the sole combat and

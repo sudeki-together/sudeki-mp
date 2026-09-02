@@ -13,7 +13,8 @@ enum {
     LAN_ARENA_DEFAULT_TIMEOUT_MS = 1500u,
     LAN_ARENA_HELLO_INTERVAL_MS = 300u,
     LAN_ARENA_KEEPALIVE_INTERVAL_MS = 250u,
-    LAN_ARENA_MAX_PACKETS_PER_POLL = 64u
+    LAN_ARENA_MAX_PACKETS_PER_POLL = 64u,
+    LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY = 8u
 };
 
 typedef struct SudekiMpLanArenaSession {
@@ -33,10 +34,11 @@ typedef struct SudekiMpLanArenaSession {
     uint8_t winsock_started;
     uint8_t peer_pinned;
     uint8_t input_pending;
-    uint8_t snapshot_pending;
+    uint8_t snapshot_queue_head;
+    uint8_t snapshot_queue_count;
     uint8_t keepalive_logged;
     SudekiMpLanArenaInput latest_input;
-    SudekiMpLanArenaSnapshot latest_snapshot;
+    SudekiMpLanArenaSnapshot snapshot_queue[LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY];
 } SudekiMpLanArenaSession;
 
 static SudekiMpLanArenaSession session = {.socket = INVALID_SOCKET};
@@ -103,7 +105,8 @@ static void set_failed(SudekiMpLanArenaRejectReason reason, const char *event) {
         SUDEKIMP_LAN_ARENA_CONNECTION_TIMED_OUT :
         SUDEKIMP_LAN_ARENA_CONNECTION_REJECTED;
     session.input_pending = 0u;
-    session.snapshot_pending = 0u;
+    session.snapshot_queue_head = 0u;
+    session.snapshot_queue_count = 0u;
     SudekiMpLogFormat(
         "lan_arena_session event=%s phase=%u reason=%u policy=fail_closed_no_reconnect\r\n",
         event == NULL ? "failed" : event,
@@ -400,8 +403,21 @@ static void session_poll_unlocked(uint32_t now_ms) {
                         "snapshot_ack_ahead_of_client");
                     return;
                 }
-                session.latest_snapshot = packet.body.snapshot;
-                session.snapshot_pending = 1u;
+                if (session.snapshot_queue_count ==
+                        LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY) {
+                    session.snapshot_queue_head = (uint8_t)(
+                        (session.snapshot_queue_head + 1u) %
+                        LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY);
+                    --session.snapshot_queue_count;
+                    SudekiMpLogWrite(
+                        "lan_arena_session event=snapshot_queue phase=drop_oldest "
+                        "reason=game_thread_stall capacity=8 "
+                        "policy=retain_newest_ordered_history\r\n");
+                }
+                session.snapshot_queue[(session.snapshot_queue_head +
+                    session.snapshot_queue_count) %
+                    LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY] = packet.body.snapshot;
+                ++session.snapshot_queue_count;
                 session.last_snapshot_sequence = packet.sequence;
             } else if (packet.type != SUDEKIMP_LAN_ARENA_PACKET_END &&
                        packet.type != SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE) {
@@ -461,11 +477,14 @@ static BOOL session_take_remote_input_unlocked(SudekiMpLanArenaInput *input) {
 }
 
 static BOOL session_take_remote_snapshot_unlocked(SudekiMpLanArenaSnapshot *snapshot) {
-    if (snapshot == NULL || !session.snapshot_pending ||
+    if (snapshot == NULL || session.snapshot_queue_count == 0u ||
         session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
-    *snapshot = session.latest_snapshot;
-    session.snapshot_pending = 0u;
+    *snapshot = session.snapshot_queue[session.snapshot_queue_head];
+    session.snapshot_queue_head = (uint8_t)(
+        (session.snapshot_queue_head + 1u) %
+        LAN_ARENA_SNAPSHOT_QUEUE_CAPACITY);
+    --session.snapshot_queue_count;
     return TRUE;
 }
 
