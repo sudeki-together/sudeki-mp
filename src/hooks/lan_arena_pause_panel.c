@@ -1,5 +1,6 @@
 #include "hooks/lan_arena_pause_panel.h"
 
+#include "cleanroom/engine.h"
 #include "engine/log.h"
 #include "hooks/call_hook.h"
 #include "hooks/lan_arena_runtime.h"
@@ -11,6 +12,7 @@
 
 typedef void (*QuitScreenRenderFunction)(void);
 typedef void (*QuitScreenActionFunction)(void);
+typedef void (__cdecl *QuitScreenShowFunction)(BOOL visible);
 
 typedef struct SudekiMpD3DSurfaceDesc {
     int format;
@@ -61,6 +63,8 @@ typedef ULONG (__stdcall *ComReleaseFunction)(void *);
 
 enum {
     RVA_PC_QUIT_SCREEN_GLOBAL = 0x00408d68u,
+    RVA_PC_QUIT_SCREEN_SHOW = 0x0001dbe0u,
+    RVA_PC_QUIT_SCREEN_SHOW_INTERNAL = 0x0001d700u,
     RVA_PC_QUIT_SCREEN_RENDER = 0x0001d690u,
     RVA_PC_QUIT_SCREEN_RENDER_CALL = 0x0028d572u,
     RVA_PC_QUIT_SCREEN_SELECT = 0x0001d780u,
@@ -68,16 +72,17 @@ enum {
     RVA_PC_QUIT_SCREEN_BACK = 0x0001d860u,
     RVA_PC_QUIT_SCREEN_BACK_CALL = 0x0001db64u,
     RVA_PC_QUIT_SCREEN_NAVIGATE = 0x0001d9f0u,
+    RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL = 0x0001d9dfu,
     RVA_PC_QUIT_SCREEN_NAVIGATE_CALL = 0x0001dba4u,
     RVA_D3D_DEVICE_GLOBAL = 0x003c31dcu,
     PC_QUIT_SCREEN_STATE_OFFSET = 0x10u,
     PC_QUIT_SCREEN_VISIBLE_OFFSET = 0x1c2u,
     PC_QUIT_SCREEN_CURSOR_OFFSET = 0x1c4u,
     PC_QUIT_SCREEN_STATE_MAIN = 1u,
-    PC_QUIT_SCREEN_MULTIPLAYER_CURSOR = 2u,
     MULTIPLAYER_PAGE_PRIMARY = 0u,
-    MULTIPLAYER_PAGE_BACK = 1u,
-    MULTIPLAYER_PAGE_ROW_COUNT = 2u,
+    MULTIPLAYER_PAGE_COMBAT = 1u,
+    MULTIPLAYER_PAGE_BACK = 2u,
+    MULTIPLAYER_PAGE_ROW_COUNT = 3u,
     OVERLAY_WIDTH = 640u,
     OVERLAY_HEIGHT = 480u,
     D3D_DEVICE_CREATE_TEXTURE_INDEX = 23u,
@@ -153,19 +158,26 @@ static SudekiMpRelativeCallHook quit_render_hook;
 static SudekiMpRelativeCallHook quit_select_hook;
 static SudekiMpRelativeCallHook quit_back_hook;
 static SudekiMpRelativeCallHook quit_navigate_hook;
+static SudekiMpRelativeCallHook quit_analog_navigate_hook;
 static QuitScreenRenderFunction original_quit_render;
 static QuitScreenActionFunction original_quit_select;
 static QuitScreenActionFunction original_quit_back;
 static QuitScreenActionFunction original_quit_navigate;
+static QuitScreenShowFunction native_quit_show;
 static uint8_t *game_base;
 static void **d3d_device_global;
 static void *overlay_texture;
 static void *overlay_texture_device;
 static BOOL multiplayer_page_active __attribute__((used));
+static BOOL parent_close_requested __attribute__((used));
 static unsigned int multiplayer_page_cursor;
 static BOOL action_handled __attribute__((used));
 static BOOL backspace_was_down;
 static BOOL edit_key_was_down[12];
+static BOOL page_up_was_down;
+static BOOL page_down_was_down;
+static BOOL page_select_was_down;
+static BOOL page_back_was_down;
 static char client_address_edit[32];
 static char last_endpoint_address[16];
 static unsigned int last_endpoint_port;
@@ -177,6 +189,37 @@ static const uint8_t expected_quit_render_entry[] = {
     0x57u, 0x8bu, 0xf8u, 0x80u, 0xbfu,
     0xc2u, 0x01u, 0x00u, 0x00u, 0x00u
 };
+
+static BOOL relative_call_targets(
+    const uint8_t *instruction,
+    const uint8_t *expected_target
+) {
+    int32_t displacement;
+    if (instruction == NULL || expected_target == NULL ||
+        instruction[0] != 0xe8u) return FALSE;
+    memcpy(&displacement, instruction + 1u, sizeof(displacement));
+    return instruction + 5u + displacement == expected_target;
+}
+
+static BOOL quit_show_signature_matches(const uint8_t *base) {
+    static const uint8_t prefix[] = {0x56u,0x8bu,0x35u};
+    static const uint8_t body[] = {
+        0x85u,0xf6u,0x74u,0x0au,0x8bu,0x44u,0x24u,0x08u,0x50u
+    };
+    static const uint8_t suffix[] = {0x5eu,0xc3u};
+    const uint8_t *entry;
+    uint32_t global_address;
+    if (base == NULL) return FALSE;
+    entry = base + RVA_PC_QUIT_SCREEN_SHOW;
+    memcpy(&global_address, entry + sizeof(prefix), sizeof(global_address));
+    return memcmp(entry, prefix, sizeof(prefix)) == 0 &&
+        global_address == (uint32_t)(uintptr_t)(
+            base + RVA_PC_QUIT_SCREEN_GLOBAL) &&
+        memcmp(entry + 7u, body, sizeof(body)) == 0 &&
+        relative_call_targets(
+            entry + 16u, base + RVA_PC_QUIT_SCREEN_SHOW_INTERNAL) &&
+        memcmp(entry + 21u, suffix, sizeof(suffix)) == 0;
+}
 
 static BOOL readable_memory(const void *pointer, size_t size) {
     MEMORY_BASIC_INFORMATION region;
@@ -211,6 +254,12 @@ static uint8_t *quit_screen(void) {
 static BOOL quit_screen_visible(void) {
     uint8_t *screen = quit_screen();
     return screen != NULL && screen[PC_QUIT_SCREEN_VISIBLE_OFFSET] != 0u;
+}
+
+static unsigned int multiplayer_cursor_for_screen(const uint8_t *screen) {
+    /* +0x1c0 is the shipped optional Quit-to-title row.  Native row count is
+     * two or three, so the appended Multiplayer index is exactly that count. */
+    return screen != NULL && screen[0x1c0u] != 0u ? 3u : 2u;
 }
 
 static void fill_rectangle(
@@ -339,7 +388,17 @@ static void reset_edit_edges(void) {
     memset(edit_key_was_down, 0, sizeof(edit_key_was_down));
 }
 
+static void capture_page_key_edges(void) {
+    page_up_was_down = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+    page_down_was_down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+    page_select_was_down =
+        (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0 ||
+        (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    page_back_was_down = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+}
+
 static void close_multiplayer_page(void) {
+    BOOL was_active = multiplayer_page_active;
     if (multiplayer_page_active) {
         SudekiMpLogWrite(
             "lan_arena_pause_panel event=page state=closed return=quit_menu\r\n");
@@ -347,6 +406,10 @@ static void close_multiplayer_page(void) {
     multiplayer_page_active = FALSE;
     multiplayer_page_cursor = MULTIPLAYER_PAGE_PRIMARY;
     reset_edit_edges();
+    capture_page_key_edges();
+    if (was_active && native_quit_show != NULL) {
+        native_quit_show(TRUE);
+    }
 }
 
 static void poll_client_address_edit(void) {
@@ -390,6 +453,20 @@ static const char *primary_action_label(
         "LEAVE SESSION" : "JOIN ARENA";
 }
 
+static const char *combat_action_label(
+    const SudekiMpLanArenaSessionStatus *status
+) {
+    BOOL enabled = FALSE;
+    if (status->local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        return "COMBAT HOST CONTROLLED";
+    }
+    if (!status->peer_connected) return "COMBAT NEEDS CLIENT";
+    if (!SudekiMpCleanroomEngineCombatMode(&enabled)) {
+        return "COMBAT NOT READY";
+    }
+    return enabled ? "END COMBAT" : "START COMBAT";
+}
+
 static BOOL run_primary_action(void) {
     SudekiMpLanArenaSessionStatus status;
     BOOL result;
@@ -417,6 +494,98 @@ static BOOL run_primary_action(void) {
         primary_action_label(&status), result ? "success" : "rejected",
         (unsigned long)last_action_error);
     return result;
+}
+
+static BOOL run_combat_action(void) {
+    SudekiMpLanArenaSessionStatus status;
+    BOOL enabled = FALSE;
+    BOOL result = FALSE;
+    if (!SudekiMpLanArenaRuntimeGetStatus(&status)) {
+        last_action_error = GetLastError();
+    } else if (status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        last_action_error = ERROR_ACCESS_DENIED;
+    } else if (!status.peer_connected) {
+        last_action_error = ERROR_NOT_CONNECTED;
+    } else if (!SudekiMpCleanroomEngineCombatMode(&enabled)) {
+        last_action_error = GetLastError();
+        if (last_action_error == ERROR_SUCCESS) {
+            last_action_error = ERROR_NOT_READY;
+        }
+    } else {
+        result = SudekiMpCleanroomEngineSetCombatMode(!enabled);
+        last_action_error = result ? ERROR_SUCCESS : GetLastError();
+    }
+    SudekiMpLogFormat(
+        "lan_arena_pause_panel event=combat_action result=%s error=%lu "
+        "policy=host_only_native_group_transition\r\n",
+        result ? "success" : "rejected",
+        (unsigned long)last_action_error);
+    return result;
+}
+
+static void activate_multiplayer_page_row(void) {
+    DWORD now;
+    if (!multiplayer_page_active) return;
+    if (multiplayer_page_cursor == MULTIPLAYER_PAGE_BACK) {
+        close_multiplayer_page();
+        return;
+    }
+    now = GetTickCount();
+    if ((int32_t)(now-primary_action_blocked_until_ms) < 0) {
+        SudekiMpLogWrite(
+            "lan_arena_pause_panel event=action result=suppressed "
+            "reason=select_edge_fence\r\n");
+        return;
+    }
+    primary_action_blocked_until_ms = now+500u;
+    if (multiplayer_page_cursor == MULTIPLAYER_PAGE_PRIMARY) {
+        (void)run_primary_action();
+    } else {
+        (void)run_combat_action();
+    }
+}
+
+static void service_sibling_page_keyboard(void) {
+    DWORD foreground_process_id = 0u;
+    HWND foreground;
+    BOOL up;
+    BOOL down;
+    BOOL select;
+    BOOL back;
+    BOOL up_rising;
+    BOOL down_rising;
+    BOOL select_rising;
+    BOOL back_rising;
+    if (!multiplayer_page_active || quit_screen_visible()) return;
+    foreground = GetForegroundWindow();
+    if (foreground != NULL) {
+        GetWindowThreadProcessId(foreground, &foreground_process_id);
+    }
+    up = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+    down = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+    select = (GetAsyncKeyState(VK_RETURN) & 0x8000) != 0 ||
+        (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+    back = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    up_rising = up && !page_up_was_down;
+    down_rising = down && !page_down_was_down;
+    select_rising = select && !page_select_was_down;
+    back_rising = back && !page_back_was_down;
+    page_up_was_down = up;
+    page_down_was_down = down;
+    page_select_was_down = select;
+    page_back_was_down = back;
+    if (foreground_process_id != GetCurrentProcessId()) return;
+    if (back_rising) {
+        close_multiplayer_page();
+    } else if (up_rising) {
+        multiplayer_page_cursor = multiplayer_page_cursor == 0u ?
+            MULTIPLAYER_PAGE_ROW_COUNT-1u : multiplayer_page_cursor-1u;
+    } else if (down_rising) {
+        multiplayer_page_cursor =
+            (multiplayer_page_cursor+1u)%MULTIPLAYER_PAGE_ROW_COUNT;
+    } else if (select_rising) {
+        activate_multiplayer_page_row();
+    }
 }
 
 static BOOL update_overlay_texture(void *device) {
@@ -465,16 +634,25 @@ static BOOL update_overlay_texture(void *device) {
         screen = quit_screen();
         if (screen != NULL && *(uint32_t *)(screen+PC_QUIT_SCREEN_STATE_OFFSET) ==
                 PC_QUIT_SCREEN_STATE_MAIN) {
+            unsigned int multiplayer_cursor =
+                multiplayer_cursor_for_screen(screen);
             BOOL selected = *(uint32_t *)(screen+PC_QUIT_SCREEN_CURSOR_OFFSET) ==
-                PC_QUIT_SCREEN_MULTIPLAYER_CURSOR;
+                multiplayer_cursor;
+            int top = 242 + ((int)multiplayer_cursor - 2) * 40;
+            /* Extend the stock dialog with one native-sized fourth row.  The
+             * translucent surround prevents the old detached black-label
+             * prototype while leaving all three shipped rows untouched. */
             fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
-                174, 242, 467, 267, 12,
+                104, top - 5, 536, top + 31, 16,
+                UINT32_C(0xd52a2b31));
+            fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
+                116, top, 524, top + 26, 13,
                 selected ? UINT32_C(0xff31dfe4) : UINT32_C(0xff17191e));
             fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
-                176, 244, 465, 265, 10,
+                119, top + 3, 521, top + 23, 10,
                 selected ? UINT32_C(0xff205d68) : UINT32_C(0xff25252a));
             draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-                320, 247, "MULTIPLAYER", selected ? UINT32_C(0xffffffff) :
+                320, top + 6, "MULTIPLAYER", selected ? UINT32_C(0xffffffff) :
                 UINT32_C(0xffffd778), 2);
         }
     } else if (SudekiMpLanArenaRuntimeGetStatus(&status)) {
@@ -505,21 +683,21 @@ static BOOL update_overlay_texture(void *device) {
         snprintf(endpoint, sizeof(endpoint), "%s:%u",
             address[0] == '\0' ? "0.0.0.0" : address, port);
         fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
-            92, 70, 548, 410, 22, UINT32_C(0xf210141d));
+            92, 60, 548, 432, 22, UINT32_C(0xf210141d));
         fill_rectangle((uint32_t *)locked.bits, locked.pitch,
-            112, 70, 528, 75, UINT32_C(0xff38e8ed));
+            112, 60, 528, 65, UINT32_C(0xff38e8ed));
         fill_rectangle((uint32_t *)locked.bits, locked.pitch,
-            112, 405, 528, 410, UINT32_C(0xff735a2d));
+            112, 427, 528, 432, UINT32_C(0xff735a2d));
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 92, "MULTIPLAYER", UINT32_C(0xffffdc72), 3);
+            320, 78, "MULTIPLAYER", UINT32_C(0xffffdc72), 3);
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 130, status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
+            320, 116, status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
             "HOST ARENA - TAL" : "JOIN ARENA - AILISH",
             UINT32_C(0xffcfe8ff), 2);
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 160, endpoint, UINT32_C(0xffffffff), 2);
+            320, 146, endpoint, UINT32_C(0xffffffff), 2);
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 186, phase_label(status.phase),
+            320, 172, phase_label(status.phase),
             status.peer_connected ? UINT32_C(0xff80ff80) :
             UINT32_C(0xffffff80), 2);
         if (status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
@@ -528,32 +706,42 @@ static BOOL update_overlay_texture(void *device) {
                 client_address_edit[0] == '\0' ? "TYPE IP" :
                 client_address_edit);
             draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-                320, 218, error_line, UINT32_C(0xffcfe8ff), 2);
+                320, 202, error_line, UINT32_C(0xffcfe8ff), 2);
         }
         network_error = failure_label(status.failure);
         if (network_error != NULL) {
             draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-                320, 244, network_error, UINT32_C(0xffff8080), 1);
+                320, 230, network_error, UINT32_C(0xffff8080), 1);
         } else if (last_action_error != ERROR_SUCCESS) {
             snprintf(error_line, sizeof(error_line), "LOCAL ERROR %lu",
                 (unsigned long)last_action_error);
             draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-                320, 244, error_line, UINT32_C(0xffff8080), 1);
+                320, 230, error_line, UINT32_C(0xffff8080), 1);
         }
         fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
-            145, 282, 495, 320, 18, multiplayer_page_cursor ==
+            145, 260, 495, 294, 16, multiplayer_page_cursor ==
             MULTIPLAYER_PAGE_PRIMARY ? UINT32_C(0xff236875) :
             UINT32_C(0xff262a32));
         fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
-            145, 330, 495, 368, 18, multiplayer_page_cursor ==
+            145, 304, 495, 338, 16, multiplayer_page_cursor ==
+            MULTIPLAYER_PAGE_COMBAT ? UINT32_C(0xff236875) :
+            UINT32_C(0xff262a32));
+        fill_rounded_rectangle((uint32_t *)locked.bits, locked.pitch,
+            145, 348, 495, 382, 16, multiplayer_page_cursor ==
             MULTIPLAYER_PAGE_BACK ? UINT32_C(0xff236875) :
             UINT32_C(0xff262a32));
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 292, primary_action_label(&status), UINT32_C(0xffffffff), 2);
+            320, 268, primary_action_label(&status), UINT32_C(0xffffffff), 2);
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 340, "BACK", UINT32_C(0xffffffff), 2);
+            320, 312, combat_action_label(&status), UINT32_C(0xffffffff), 2);
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
-            320, 384, "SELECT     ESC BACK", UINT32_C(0xffb9c0cc), 1);
+            320, 356, "BACK", UINT32_C(0xffffffff), 2);
+        draw_centered_text((uint32_t *)locked.bits, locked.pitch,
+            320, 404,
+            status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
+                "ENTER SELECT  F8 COMBAT  ESC BACK" :
+                "ENTER SELECT  ESC BACK",
+            UINT32_C(0xffb9c0cc), 1);
     }
     result = unlock_rect(overlay_texture, 0u);
     return SUCCEEDED(result);
@@ -679,10 +867,8 @@ restore:
 
 __attribute__((noinline, used))
 static void render_panel(void) {
-    if (!quit_screen_visible()) {
-        close_multiplayer_page();
-        return;
-    }
+    if (!multiplayer_page_active && !quit_screen_visible()) return;
+    service_sibling_page_keyboard();
     if (!draw_overlay()) {
         if (!render_failure_logged) {
             render_failure_logged = TRUE;
@@ -701,29 +887,19 @@ static void handle_select(uint8_t *screen) {
     if (screen == NULL || screen != quit_screen()) return;
     if (multiplayer_page_active) {
         action_handled = TRUE;
-        if (multiplayer_page_cursor == MULTIPLAYER_PAGE_BACK) {
-            close_multiplayer_page();
-        } else {
-            DWORD now = GetTickCount();
-            if ((int32_t)(now-primary_action_blocked_until_ms) >= 0) {
-                primary_action_blocked_until_ms = now+500u;
-                (void)run_primary_action();
-            } else {
-                SudekiMpLogWrite(
-                    "lan_arena_pause_panel event=action result=suppressed "
-                    "reason=select_edge_fence\r\n");
-            }
-        }
+        activate_multiplayer_page_row();
         return;
     }
     if (*(uint32_t *)(screen+PC_QUIT_SCREEN_STATE_OFFSET) ==
             PC_QUIT_SCREEN_STATE_MAIN &&
         *(uint32_t *)(screen+PC_QUIT_SCREEN_CURSOR_OFFSET) ==
-            PC_QUIT_SCREEN_MULTIPLAYER_CURSOR) {
+            multiplayer_cursor_for_screen(screen)) {
         multiplayer_page_active = TRUE;
         multiplayer_page_cursor = MULTIPLAYER_PAGE_PRIMARY;
         primary_action_blocked_until_ms = GetTickCount()+250u;
+        capture_page_key_edges();
         action_handled = TRUE;
+        parent_close_requested = TRUE;
         SudekiMpLogWrite(
             "lan_arena_pause_panel event=page state=open source=quit_menu_multiplayer\r\n");
     }
@@ -743,7 +919,24 @@ static void handle_navigation(
     uint8_t *screen, unsigned int command, unsigned int pressed
 ) {
     action_handled = FALSE;
-    if (!multiplayer_page_active || screen != quit_screen()) return;
+    if (screen != quit_screen()) return;
+    if (!multiplayer_page_active) {
+        unsigned int *cursor;
+        unsigned int multiplayer_cursor;
+        if (*(uint32_t *)(screen+PC_QUIT_SCREEN_STATE_OFFSET) !=
+                PC_QUIT_SCREEN_STATE_MAIN ||
+            (command != 0x1eu && command != 0x1fu)) return;
+        action_handled = TRUE;
+        if (pressed == 0u) return;
+        cursor = (unsigned int *)(screen+PC_QUIT_SCREEN_CURSOR_OFFSET);
+        multiplayer_cursor = multiplayer_cursor_for_screen(screen);
+        if (command == 0x1eu) {
+            if (*cursor > 0u) --*cursor;
+        } else if (*cursor < multiplayer_cursor) {
+            ++*cursor;
+        }
+        return;
+    }
     action_handled = TRUE;
     if (pressed == 0u) return;
     if (command == 0x1eu) {
@@ -760,7 +953,15 @@ static void quit_select_entry(void) {
     __asm__ volatile(
         "pushfl\n\tpushal\n\tpushl %esi\n\tcall _handle_select\n\taddl $4, %esp\n\t"
         "popal\n\tpopfl\n\tcmpb $0, _action_handled\n\tjne 1f\n\t"
-        "jmp *_original_quit_select\n\t1: ret\n\t");
+        "jmp *_original_quit_select\n\t1:\n\t"
+        "cmpb $0, _parent_close_requested\n\tje 2f\n\t"
+        "movb $0, _parent_close_requested\n\t"
+        "call *_original_quit_back\n\t"
+        /* Keep the native event dispatcher in its main state while hidden;
+         * select/navigation/back callsites therefore remain available to the
+         * unpaused sibling page. */
+        "movl $1, 0x10(%esi)\n\t"
+        "2: ret\n\t");
 }
 
 __attribute__((naked, noinline, used))
@@ -796,7 +997,8 @@ BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module) {
         return FALSE;
     }
     game_base = (uint8_t *)game_module;
-    if (memcmp(game_base+RVA_PC_QUIT_SCREEN_RENDER,
+    if (!quit_show_signature_matches(game_base) ||
+        memcmp(game_base+RVA_PC_QUIT_SCREEN_RENDER,
             expected_quit_render_entry,
             sizeof(expected_quit_render_entry)) != 0) {
         game_base = NULL;
@@ -820,6 +1022,9 @@ BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module) {
         !SudekiMpInstallRelativeCallHook(&quit_back_hook,
             game_base+RVA_PC_QUIT_SCREEN_BACK_CALL,
             original_quit_back, quit_back_entry) ||
+        !SudekiMpInstallRelativeCallHook(&quit_analog_navigate_hook,
+            game_base+RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL,
+            original_quit_navigate, quit_navigate_entry) ||
         !SudekiMpInstallRelativeCallHook(&quit_navigate_hook,
             game_base+RVA_PC_QUIT_SCREEN_NAVIGATE_CALL,
             original_quit_navigate, quit_navigate_entry)) {
@@ -829,7 +1034,9 @@ BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module) {
         return FALSE;
     }
     d3d_device_global = (void **)(game_base+RVA_D3D_DEVICE_GLOBAL);
+    native_quit_show = (QuitScreenShowFunction)(game_base+RVA_PC_QUIT_SCREEN_SHOW);
     multiplayer_page_active = FALSE;
+    parent_close_requested = FALSE;
     multiplayer_page_cursor = MULTIPLAYER_PAGE_PRIMARY;
     action_handled = FALSE;
     client_address_edit[0] = '\0';
@@ -839,15 +1046,22 @@ BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module) {
     render_failure_logged = FALSE;
     primary_action_blocked_until_ms = 0u;
     reset_edit_edges();
+    capture_page_key_edges();
     SudekiMpLogWrite(
         "lan_arena_pause_panel event=install layer=native_pc_quit_screen "
-        "option=multiplayer replaces=quit_to_title sibling_page=true "
+        "option=multiplayer native_rows=preserved appended_row=true "
+        "sibling_page=true sibling_pause=disabled local_input=owner_gated "
         "native_quick_menu=unchanged\r\n");
     return TRUE;
 }
 
+BOOL SudekiMpLanArenaPausePanelActive(void) {
+    return multiplayer_page_active;
+}
+
 void SudekiMpUninstallLanArenaPausePanel(void) {
     SudekiMpRestoreRelativeCallHook(&quit_navigate_hook);
+    SudekiMpRestoreRelativeCallHook(&quit_analog_navigate_hook);
     SudekiMpRestoreRelativeCallHook(&quit_back_hook);
     SudekiMpRestoreRelativeCallHook(&quit_select_hook);
     SudekiMpRestoreRelativeCallHook(&quit_render_hook);
@@ -858,8 +1072,10 @@ void SudekiMpUninstallLanArenaPausePanel(void) {
     original_quit_select = NULL;
     original_quit_back = NULL;
     original_quit_navigate = NULL;
+    native_quit_show = NULL;
     game_base = NULL;
     multiplayer_page_active = FALSE;
+    parent_close_requested = FALSE;
     multiplayer_page_cursor = MULTIPLAYER_PAGE_PRIMARY;
     action_handled = FALSE;
     client_address_edit[0] = '\0';
@@ -869,4 +1085,5 @@ void SudekiMpUninstallLanArenaPausePanel(void) {
     render_failure_logged = FALSE;
     primary_action_blocked_until_ms = 0u;
     reset_edit_edges();
+    capture_page_key_edges();
 }

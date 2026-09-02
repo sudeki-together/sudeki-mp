@@ -15,21 +15,30 @@ experiments.
 - Protocol/build: `LAN4`, exact GOG executable hash only.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
-- Client actions: camera-relative movement and weak attack.
+- Client actions: camera-relative movement and host-validated weak attack.
 - Host snapshots: Tal, Ailish, the fixed training dummy, HP/SP, transforms,
   facing, presentation/combat state, and match state at 20 Hz.
 - Presentation: each process uses a separate full-screen native camera and HUD.
-- Replica locomotion: continuous movement retains a 25 ms interpolation
-  buffer. A moving-to-idle edge consumes that final buffered distance in its
-  run pose instead of snapping or sliding. Tal's two verified native idle
+- Replica locomotion: continuous movement retains a 100 ms interpolation
+  buffer (two 50 ms host snapshots). A moving-to-idle edge consumes that final
+  buffered distance in its run pose instead of snapping or sliding. Tal's two
+  verified native idle
   variants and Ailish's verified selector-4/selector-5 idle variants cross the
   wire as actor-neutral semantic states. Each client maps those semantics back
   to its actor-local native clips; native selector numbers never cross the
   network. A generic Ailish idle also suppresses client-only fidgets, while her
   renderer still owns animation-clock and blend progression inside the
   authenticated semantic clip.
-- Client native QuickMenu, skills, items, Spirit, save/load, transitions,
-  dialogue, shops, and loot are blocked in this slice.
+- Combat is entered and left only by the host through Sudeki's native group
+  transition. Out-of-combat attack edges are consumed without native execution
+  or a replicated attack pose. The host may toggle that same verified native
+  transition from the Multiplayer page or directly with `F8`; both paths
+  require an authenticated client and confirm the resulting combat state.
+- The client may open and browse Ailish's native QuickMenu. Native confirm/use
+  commands are consumed locally until category-specific requests can be
+  validated and executed by the host. Skills, items, weapons, Spirit,
+  save/load, transitions, dialogue, shops, and loot remain non-authoritative
+  or blocked in this slice.
 
 Packets are versioned and sequenced. The handshake validates the exact game
 hash, mod build, cleanroom map, fixed Tal/Ailish role tuple, and a fresh session
@@ -58,11 +67,14 @@ SUDEKIMP_LAN_ARENA_PORT=26770 \
 Allow inbound UDP `26770` on the host firewall. Network discovery and
 matchmaking are intentionally outside this milestone.
 
-Press `Esc` to expose Sudeki's unchanged native pause layer with the mod-owned
-`MULTIPLAYER` status panel over it. The host uses `F9` to host and `F10` to end
-the session. The client may type an `IP[:port]`, use `F9` to join, and `F10` to
-leave. The panel reports protocol, hash, build, map, role, token, sequence,
-malformed-packet, authority, busy, and timeout failures.
+Press `Esc` to open Sudeki's native Quit menu. `MULTIPLAYER` is appended as a
+new row after the shipped entries. Its sibling page releases the native pause
+transaction so both processes continue rendering and consuming authoritative
+snapshots while either player reads it; gameplay input is neutralized only in
+the process that owns the page. The host page can start/end the session and
+enter/leave native arena combat. The client page can join/leave and reports
+combat as host-controlled. It also reports protocol, hash, build, map, role,
+token, sequence, malformed-packet, authority, busy, and timeout failures.
 
 ## Same-machine validation
 

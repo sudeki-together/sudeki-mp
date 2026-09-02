@@ -3,6 +3,7 @@
 #include "cleanroom/engine.h"
 #include "engine/log.h"
 #include "hooks/call_hook.h"
+#include "hooks/lan_arena_pause_panel.h"
 #include "network/lan_arena_session.h"
 
 #include <math.h>
@@ -14,6 +15,15 @@ typedef void (__stdcall *ArbiterMovementFunction)(
     uint32_t movement_mode
 );
 typedef void (__stdcall *ControllerCombatFunction)(void *controller);
+#if defined(__GNUC__) && defined(__i386__)
+#define SUDEKIMP_THISCALL __attribute__((thiscall))
+#endif
+typedef uint8_t (SUDEKIMP_THISCALL *QuickMenuInputFunction)(
+    void *quick_menu,
+    unsigned int event_kind,
+    unsigned int command,
+    unsigned int value
+);
 
 enum {
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
@@ -23,15 +33,26 @@ enum {
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
     RVA_QUICK_MENU_NATIVE_TOGGLE = 0x0000a080u,
     RVA_QUICK_MENU_NATIVE_TOGGLE_CALL = 0x00028228u,
+    RVA_QUICK_MENU_INPUT = 0x00098b40u,
+    RVA_QUICK_MENU_INPUT_VTABLE_SLOT = 0x002caf48u,
+    RVA_QUICK_MENU_GLOBAL = 0x003c2f84u,
+    RVA_QUICK_MENU_VTABLE = 0x002caf1cu,
     CHARACTER_ARBITER_OWNER_OFFSET = 0x10u,
     CONTROLLER_TARGET_OFFSET = 0x248u,
     CONTROLLER_WEAK_OFFSET = 0x8cu,
     CONTROLLER_STRONG_OFFSET = 0x94u,
     CONTROLLER_SWEEP_OFFSET = 0x9cu,
-    CONTROLLER_BLOCK_OFFSET = 0xacu,
-    CONTROLLER_WEAPON_NEXT_OFFSET = 0xb4u,
+    CONTROLLER_BLOCK_OFFSET = 0xa4u,
+    CONTROLLER_WEAPON_NEXT_OFFSET = 0xacu,
+    CONTROLLER_WEAPON_PREVIOUS_OFFSET = 0xb4u,
     CONTROLLER_MOVE_X_OFFSET = 0x1a0u,
-    CONTROLLER_MOVE_Y_OFFSET = 0x1a4u
+    CONTROLLER_MOVE_Y_OFFSET = 0x1a4u,
+    QUICK_MENU_INPUT_EVENT_DOWN = 5u,
+    QUICK_MENU_INPUT_EVENT_UP = 6u,
+    QUICK_MENU_INPUT_EVENT_POINTER = 0x19u,
+    QUICK_MENU_COMMAND_CONFIRM = 0u,
+    QUICK_MENU_COMMAND_SECONDARY_CONFIRM = 2u,
+    QUICK_MENU_ACTIVE_OFFSET = 0x29u
 };
 
 static const uint8_t expected_controller_combat_entry[] = {
@@ -42,19 +63,25 @@ static const uint8_t expected_quick_menu_native_toggle_entry[] = {
     0x80u, 0xb8u, 0x8cu, 0x00u, 0x00u,
     0x00u, 0x00u, 0x74u, 0x46u
 };
+static const uint8_t expected_quick_menu_input_entry[] = {
+    0x8bu, 0x44u, 0x24u, 0x04u, 0x55u, 0x56u, 0x57u, 0x8bu,
+    0xe9u, 0x83u, 0xf8u, 0x19u
+};
 
 static SudekiMpRelativeCallHook alternate_movement_hook;
 static SudekiMpRelativeCallHook normal_movement_hook;
 static SudekiMpInlineHook controller_combat_hook;
-static SudekiMpRelativeCallHook quick_menu_native_toggle_hook;
+static SudekiMpPointerHook quick_menu_input_hook;
 static ArbiterMovementFunction original_arbiter_movement;
 static ControllerCombatFunction original_controller_combat;
-static void *original_quick_menu_native_toggle;
+static QuickMenuInputFunction original_quick_menu_input;
 static int16_t last_direction_x;
 static int16_t last_direction_z;
 static BOOL weak_was_down;
 static BOOL movement_send_logged;
 static BOOL weak_send_logged;
+static BOOL quick_menu_action_block_logged;
+static int quick_menu_visible_state;
 static DWORD last_input_send_at;
 static int16_t last_transmitted_direction_x;
 static int16_t last_transmitted_direction_z;
@@ -79,36 +106,56 @@ static BOOL readable_memory(const void *pointer, size_t length) {
     return TRUE;
 }
 
-/* A LAN client is a presentation/input terminal, never an independent native
- * gameplay authority.  In particular, opening Sudeki's singleton QuickMenu
- * would pause or mutate only the client process and could execute unverified
- * item/skill actions.  Consume its sole gameplay toggle call unconditionally
- * for this profile; the host retains its ordinary native pause/QuickMenu UI. */
-__attribute__((noinline, used))
-static BOOL lan_arena_client_quick_menu_suppressed(void) {
-    return TRUE;
-}
-
-__attribute__((naked, noinline, used))
-static void lan_arena_client_quick_menu_toggle_entry(void) {
-    __asm__ volatile(
-        "pushl %eax\n\t"
-        "call _lan_arena_client_quick_menu_suppressed\n\t"
-        "testl %eax, %eax\n\t"
-        "popl %eax\n\t"
-        "jnz 1f\n\t"
-        "call *_original_quick_menu_native_toggle\n\t"
-        "ret\n\t"
-        "1:\n\t"
-        "xorl %eax, %eax\n\t"
-        "ret\n\t"
-    );
+/* The client may browse Ailish's own native full-screen QuickMenu, but it is
+ * a presentation terminal rather than an action authority.  Consume both
+ * native confirm commands until each category has a verified host-routed
+ * adapter. Navigation, category changes, Q toggle, and close remain retail. */
+static uint8_t SUDEKIMP_THISCALL route_client_quick_menu_input(
+    void *quick_menu,
+    unsigned int event_kind,
+    unsigned int command,
+    unsigned int value
+) {
+    BOOL action_event = event_kind == QUICK_MENU_INPUT_EVENT_DOWN ||
+        event_kind == QUICK_MENU_INPUT_EVENT_UP ||
+        event_kind == QUICK_MENU_INPUT_EVENT_POINTER;
+    if (action_event &&
+        (command == QUICK_MENU_COMMAND_CONFIRM ||
+         command == QUICK_MENU_COMMAND_SECONDARY_CONFIRM)) {
+        if (!quick_menu_action_block_logged) {
+            quick_menu_action_block_logged = TRUE;
+            SudekiMpLogWrite(
+                "lan_arena_client_input event=quick_menu_action "
+                "phase=rejected reason=host_adapter_not_implemented "
+                "policy=native_browse_and_close_allowed_execution_blocked\r\n");
+        }
+        return 1u;
+    }
+    return original_quick_menu_input == NULL ? 0u :
+        original_quick_menu_input(
+            quick_menu, event_kind, command, value);
 }
 
 static BOOL authenticated_client(void) {
     SudekiMpLanArenaSessionStatus status;
     return SudekiMpLanArenaSessionGetStatus(&status) && status.peer_connected &&
         status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+}
+
+static BOOL client_quick_menu_visible(void) {
+    uint8_t *menu;
+    if (client_game_base == NULL || !readable_memory(
+            client_game_base + RVA_QUICK_MENU_GLOBAL, sizeof(menu))) {
+        return FALSE;
+    }
+    menu = *(uint8_t **)(client_game_base + RVA_QUICK_MENU_GLOBAL);
+    return readable_memory(menu, QUICK_MENU_ACTIVE_OFFSET + 1u) &&
+        *(void **)menu == client_game_base + RVA_QUICK_MENU_VTABLE &&
+        menu[QUICK_MENU_ACTIVE_OFFSET] != 0u;
+}
+
+static BOOL client_local_modal_active(void) {
+    return SudekiMpLanArenaPausePanelActive() || client_quick_menu_visible();
 }
 
 static int16_t normalized_axis(float value) {
@@ -167,6 +214,16 @@ static void __stdcall capture_client_movement(
         original_arbiter_movement(arbiter, direction, speed, turn_rate, movement_mode);
         return;
     }
+    if (client_local_modal_active()) {
+        now = GetTickCount();
+        last_direction_x = 0;
+        last_direction_z = 0;
+        if (last_transmitted_direction_x != 0 ||
+            last_transmitted_direction_z != 0 || last_input_send_at == 0u) {
+            (void)send_client_input_at(0, 0, FALSE, now);
+        }
+        return;
+    }
     if (!isfinite(speed) || speed <= 0.0f) speed = 0.0f;
     if (speed > 1.0f) speed = 1.0f;
     now = GetTickCount();
@@ -207,6 +264,26 @@ void SudekiMpLanArenaClientInputService(void) {
     int16_t desired_z;
     if (!authenticated_client()) return;
     now = GetTickCount();
+    {
+        BOOL visible = client_quick_menu_visible();
+        if ((int)visible != quick_menu_visible_state) {
+            quick_menu_visible_state = (int)visible;
+            if (!visible) quick_menu_action_block_logged = FALSE;
+            SudekiMpLogFormat(
+                "lan_arena_client_input event=native_quick_menu state=%s "
+                "authority=browse_only local_gameplay=quiesced\r\n",
+                visible ? "open" : "closed");
+        }
+    }
+    if (client_local_modal_active()) {
+        last_direction_x = 0;
+        last_direction_z = 0;
+        if (last_transmitted_direction_x != 0 ||
+            last_transmitted_direction_z != 0 || last_input_send_at == 0u) {
+            (void)send_client_input_at(0, 0, FALSE, now);
+        }
+        return;
+    }
     foreground = GetForegroundWindow();
     if (foreground != NULL) {
         GetWindowThreadProcessId(foreground, &foreground_process_id);
@@ -255,7 +332,8 @@ static void __stdcall capture_client_combat(void *controller) {
     void *ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
     BOOL owns_ailish = state != NULL && ailish != NULL &&
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == ailish;
-    BOOL weak_edge = owns_ailish && *(int *)(state + CONTROLLER_WEAK_OFFSET) == 1;
+    BOOL weak_edge = owns_ailish && !client_local_modal_active() &&
+        *(int *)(state + CONTROLLER_WEAK_OFFSET) == 1;
     if (!authenticated_client() || !owns_ailish) {
         original_controller_combat(controller);
         return;
@@ -276,6 +354,7 @@ static void __stdcall capture_client_combat(void *controller) {
     *(int *)(state + CONTROLLER_SWEEP_OFFSET) = 0;
     *(int *)(state + CONTROLLER_BLOCK_OFFSET) = 0;
     *(int *)(state + CONTROLLER_WEAPON_NEXT_OFFSET) = 0;
+    *(int *)(state + CONTROLLER_WEAPON_PREVIOUS_OFFSET) = 0;
     original_controller_combat(controller);
 }
 
@@ -283,7 +362,7 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     uint8_t *base;
     if (game_module == NULL || original_arbiter_movement != NULL ||
         original_controller_combat != NULL ||
-        original_quick_menu_native_toggle != NULL) {
+        original_quick_menu_input != NULL) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -292,12 +371,18 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
             sizeof(expected_controller_combat_entry)) != 0 ||
         memcmp(base + RVA_QUICK_MENU_NATIVE_TOGGLE,
             expected_quick_menu_native_toggle_entry,
-            sizeof(expected_quick_menu_native_toggle_entry)) != 0) {
+            sizeof(expected_quick_menu_native_toggle_entry)) != 0 ||
+        memcmp(base + RVA_QUICK_MENU_INPUT,
+            expected_quick_menu_input_entry,
+            sizeof(expected_quick_menu_input_entry)) != 0 ||
+        *(void **)(base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+            base + RVA_QUICK_MENU_INPUT) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
     original_arbiter_movement = (ArbiterMovementFunction)(base + RVA_ARBITER_MOVEMENT);
-    original_quick_menu_native_toggle = base + RVA_QUICK_MENU_NATIVE_TOGGLE;
+    original_quick_menu_input =
+        (QuickMenuInputFunction)(base + RVA_QUICK_MENU_INPUT);
     if (!SudekiMpInstallRelativeCallHook(&alternate_movement_hook,
             base + RVA_PLAYER_MOVE_CALL_ALTERNATE, original_arbiter_movement,
             capture_client_movement) ||
@@ -307,10 +392,10 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
         !SudekiMpInstallInlineHook(&controller_combat_hook,
             base + RVA_CONTROLLER_COMBAT, expected_controller_combat_entry,
             sizeof(expected_controller_combat_entry), capture_client_combat) ||
-        !SudekiMpInstallRelativeCallHook(&quick_menu_native_toggle_hook,
-            base + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL,
-            original_quick_menu_native_toggle,
-            lan_arena_client_quick_menu_toggle_entry)) {
+        !SudekiMpInstallPointerHook(&quick_menu_input_hook,
+            (void **)(base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT),
+            original_quick_menu_input,
+            route_client_quick_menu_input)) {
         SudekiMpUninstallLanArenaClientInput();
         return FALSE;
     }
@@ -320,6 +405,8 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     weak_was_down = FALSE;
     movement_send_logged = FALSE;
     weak_send_logged = FALSE;
+    quick_menu_action_block_logged = FALSE;
+    quick_menu_visible_state = -1;
     last_input_send_at = 0u;
     last_transmitted_direction_x = 0;
     last_transmitted_direction_z = 0;
@@ -328,18 +415,20 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
 }
 
 void SudekiMpUninstallLanArenaClientInput(void) {
-    SudekiMpRestoreRelativeCallHook(&quick_menu_native_toggle_hook);
+    SudekiMpRestorePointerHook(&quick_menu_input_hook);
     SudekiMpRestoreInlineHook(&controller_combat_hook);
     SudekiMpRestoreRelativeCallHook(&normal_movement_hook);
     SudekiMpRestoreRelativeCallHook(&alternate_movement_hook);
     original_controller_combat = NULL;
     original_arbiter_movement = NULL;
-    original_quick_menu_native_toggle = NULL;
+    original_quick_menu_input = NULL;
     last_direction_x = 0;
     last_direction_z = 0;
     weak_was_down = FALSE;
     movement_send_logged = FALSE;
     weak_send_logged = FALSE;
+    quick_menu_action_block_logged = FALSE;
+    quick_menu_visible_state = -1;
     last_input_send_at = 0u;
     last_transmitted_direction_x = 0;
     last_transmitted_direction_z = 0;

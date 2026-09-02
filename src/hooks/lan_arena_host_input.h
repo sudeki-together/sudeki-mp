@@ -8,6 +8,7 @@
  * process-local edge for the next host snapshot. */
 BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module);
 void SudekiMpUninstallLanArenaHostInput(void);
+void SudekiMpLanArenaHostInputServiceCombatToggle(void);
 BOOL SudekiMpLanArenaHostInputTakeTalWeakAttack(void);
 
 #endif

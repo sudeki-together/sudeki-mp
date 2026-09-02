@@ -589,6 +589,8 @@ void SudekiMpUninstallLanArenaHostInput(void) {
     ++host_input_uninstall_count;
 }
 
+void SudekiMpLanArenaHostInputServiceCombatToggle(void) {}
+
 BOOL SudekiMpLanArenaHostInputTakeTalWeakAttack(void) {
     return FALSE;
 }
@@ -779,6 +781,11 @@ void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor) {
     (void)actor;
     return FALSE;
+}
+
+BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled) {
+    if (enabled != NULL) *enabled = FALSE;
+    return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineActorPosition(

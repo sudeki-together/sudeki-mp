@@ -92,6 +92,7 @@ enum {
     RVA_PC_QUIT_SCREEN_BACK = 0x0001d860u,
     RVA_PC_QUIT_SCREEN_BACK_CALL = 0x0001db64u,
     RVA_PC_QUIT_SCREEN_NAVIGATE = 0x0001d9f0u,
+    RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL = 0x0001d9dfu,
     RVA_PC_QUIT_SCREEN_NAVIGATE_CALL = 0x0001dba4u,
     RVA_QUICK_MENU_IS_ACTIVE = 0x0009c330u,
     RVA_QUICK_MENU_CLOSE = 0x0009c360u,
@@ -2552,6 +2553,8 @@ int wmain(int argc, wchar_t **argv) {
     int player_two_character_marker = 0;
     int other_character_marker = 0;
     uint8_t minimap_snapshot_call_original[5];
+    uint32_t raw_lan_client_quick_menu_input;
+    uint32_t raw_lan_pause_quit_show_global;
     const UINT second_player_skill_keys[4] = {
         VK_F1, VK_F2, VK_F3, VK_F4
     };
@@ -3101,12 +3104,20 @@ int wmain(int argc, wchar_t **argv) {
         memcpy(image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
             &raw_focus_state_operand, sizeof(raw_focus_state_operand));
     }
+    /* Simulate the loader relocation for the native QuickMenu input vtable
+     * before exercising the LAN client's read-only browsing hook. */
+    raw_lan_client_quick_menu_input =
+        *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT);
+    *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
+        image + RVA_QUICK_MENU_INPUT;
     if (!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
         fputs("FAIL: LAN client input exact seams rejected\n", stderr);
         ++failures;
     } else {
-        if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) ==
+        if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) ==
+                image + RVA_QUICK_MENU_INPUT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
@@ -3117,6 +3128,8 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpUninstallLanArenaClientInput();
         if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
@@ -3126,8 +3139,8 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
     {
-        uint8_t saved_quick_menu_entry = image[RVA_QUICK_MENU_NATIVE_TOGGLE];
-        image[RVA_QUICK_MENU_NATIVE_TOGGLE] ^= 0x01u;
+        uint8_t saved_quick_menu_entry = image[RVA_QUICK_MENU_INPUT];
+        image[RVA_QUICK_MENU_INPUT] ^= 0x01u;
         SetLastError(ERROR_SUCCESS);
         if (SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
             fputs("FAIL: LAN client input accepted a mismatched QuickMenu entry\n",
@@ -3143,12 +3156,16 @@ int wmain(int argc, wchar_t **argv) {
         if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
-                image + RVA_QUICK_MENU_NATIVE_TOGGLE) {
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT) {
             fputs("FAIL: LAN QuickMenu mismatch mutated input hooks\n", stderr);
             ++failures;
         }
-        image[RVA_QUICK_MENU_NATIVE_TOGGLE] = saved_quick_menu_entry;
+        image[RVA_QUICK_MENU_INPUT] = saved_quick_menu_entry;
     }
+    *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
+        raw_lan_client_quick_menu_input;
     {
         uint8_t controller_entry[12];
         memcpy(controller_entry, image + RVA_CONTROLLER_COMBAT,
@@ -3158,13 +3175,23 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         } else {
             if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
-                    sizeof(controller_entry)) == 0) {
+                    sizeof(controller_entry)) == 0 ||
+                relative_call_target(
+                    image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
+                    image + RVA_ARBITER_MOVEMENT ||
+                relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
+                    image + RVA_ARBITER_MOVEMENT) {
                 fputs("FAIL: LAN host input observer was not installed\n", stderr);
                 ++failures;
             }
             SudekiMpUninstallLanArenaHostInput();
             if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
-                    sizeof(controller_entry)) != 0) {
+                    sizeof(controller_entry)) != 0 ||
+                relative_call_target(
+                    image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
+                    image + RVA_ARBITER_MOVEMENT ||
+                relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
+                    image + RVA_ARBITER_MOVEMENT) {
                 fputs("FAIL: LAN host input observer was not restored\n", stderr);
                 ++failures;
             }
@@ -3241,16 +3268,27 @@ int wmain(int argc, wchar_t **argv) {
         memcpy(image + RVA_LOAD_GAME_SAVE, raw_slot_entry,
             sizeof(raw_slot_entry));
     }
+    raw_lan_pause_quit_show_global =
+        *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u);
+    *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
+        (uint32_t)(uintptr_t)(image + RVA_PC_QUIT_SCREEN_GLOBAL);
     if (!SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
         fputs("FAIL: LAN pause panel exact seams rejected\n", stderr);
         ++failures;
     } else {
+        if (SudekiMpLanArenaPausePanelActive()) {
+            fputs("FAIL: LAN pause panel began active\n", stderr);
+            ++failures;
+        }
         if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) ==
                 image + RVA_PC_QUIT_SCREEN_RENDER ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_SELECT_CALL) ==
                 image + RVA_PC_QUIT_SCREEN_SELECT ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) ==
                 image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(
+                image + RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL) ==
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) ==
                 image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
             fputs("FAIL: LAN pause-panel interaction hooks were not installed\n",
@@ -3258,17 +3296,49 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
         SudekiMpUninstallLanArenaPausePanel();
+        if (SudekiMpLanArenaPausePanelActive()) {
+            fputs("FAIL: LAN pause panel remained active after uninstall\n",
+                stderr);
+            ++failures;
+        }
         if (relative_call_target(image + RVA_PC_QUIT_SCREEN_RENDER_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_RENDER ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_SELECT_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_SELECT ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(
+                image + RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
             fputs("FAIL: LAN pause-panel interaction hooks were not restored\n",
                 stderr);
             ++failures;
+        }
+    }
+    {
+        uint8_t saved_show_entry = image[RVA_PC_QUIT_SCREEN_SHOW];
+        image[RVA_PC_QUIT_SCREEN_SHOW] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
+            fputs("FAIL: LAN pause panel accepted a mismatched show seam\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaPausePanel();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: LAN pause show mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        image[RVA_PC_QUIT_SCREEN_SHOW] = saved_show_entry;
+        if (!SudekiMpInstallLanArenaPausePanel((HMODULE)image)) {
+            fputs("FAIL: LAN pause panel could not reinstall after show mismatch\n",
+                stderr);
+            ++failures;
+        } else {
+            SudekiMpUninstallLanArenaPausePanel();
         }
     }
     {
@@ -3291,6 +3361,9 @@ int wmain(int argc, wchar_t **argv) {
                 image + RVA_PC_QUIT_SCREEN_RENDER ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_BACK_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_BACK ||
+            relative_call_target(
+                image + RVA_PC_QUIT_SCREEN_ANALOG_NAVIGATE_CALL) !=
+                image + RVA_PC_QUIT_SCREEN_NAVIGATE ||
             relative_call_target(image + RVA_PC_QUIT_SCREEN_NAVIGATE_CALL) !=
                 image + RVA_PC_QUIT_SCREEN_NAVIGATE) {
             fputs("FAIL: LAN pause mismatch rollback left hooks installed\n",
@@ -3300,6 +3373,8 @@ int wmain(int argc, wchar_t **argv) {
         image[RVA_PC_QUIT_SCREEN_SELECT_CALL + 1u] =
             saved_select_displacement;
     }
+    *(uint32_t *)(image + RVA_PC_QUIT_SCREEN_SHOW + 3u) =
+        raw_lan_pause_quit_show_global;
     memcpy(
         minimap_snapshot_call_original,
         image + RVA_MINIMAP_SNAPSHOT_POINTER_CALL,

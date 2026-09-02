@@ -76,6 +76,8 @@ static DWORD host_last_remote_input_at_ms;
 static BOOL host_remote_input_quiesced;
 static BOOL host_remote_input_logged;
 static BOOL host_remote_weak_logged;
+static BOOL host_remote_weak_blocked_logged;
+static BOOL host_tal_weak_blocked_logged;
 static BOOL host_remote_ailish_moving;
 static BOOL host_auto_rehost_enabled;
 static int16_t host_remote_direction_x;
@@ -491,14 +493,26 @@ static void client_trace_native_presentation(
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
+    BOOL tal_weak_requested;
+    BOOL combat_enabled = FALSE;
 
     if (host_last_snapshot_at_ms != 0u &&
         (DWORD)(now_ms - host_last_snapshot_at_ms) <
             SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS) return;
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
-    if (SudekiMpLanArenaHostInputTakeTalWeakAttack()) {
+    tal_weak_requested = SudekiMpLanArenaHostInputTakeTalWeakAttack();
+    if (tal_weak_requested &&
+        SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
+        combat_enabled) {
         host_tal_weak_attack_until_ms = now_ms + 250u;
+        host_tal_weak_blocked_logged = FALSE;
+    } else if (tal_weak_requested && !host_tal_weak_blocked_logged) {
+        host_tal_weak_blocked_logged = TRUE;
+        SudekiMpLogWrite(
+            "lan_arena_runtime event=host_tal_weak_attack phase=rejected "
+            "reason=native_combat_inactive "
+            "policy=host_authority_never_fabricates_out_of_combat_attack\r\n");
     }
     memset(&snapshot, 0, sizeof(snapshot));
     if (!fill_actor_snapshot(
@@ -567,6 +581,7 @@ static BOOL release_host_remote_ailish(const char *reason) {
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
+    host_remote_weak_blocked_logged = FALSE;
     host_remote_ailish_moving = FALSE;
     host_remote_direction_x = 0;
     host_remote_direction_z = 0;
@@ -642,12 +657,14 @@ static void lan_arena_control_update_observer(
     void *ailish;
     SudekiMpLanArenaInput input;
     BOOL remote_weak_requested = FALSE;
+    BOOL remote_weak_allowed = FALSE;
     BOOL witness_exact;
     BOOL status_available;
     (void)controller;
     (void)update_data;
     if (!SudekiMpControlUpdateObserverGateTryEnter(
             &lan_arena_control_observer_gate)) return;
+    SudekiMpLanArenaHostInputServiceCombatToggle();
     witness_exact =
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
     status_available = SudekiMpLanArenaSessionGetStatus(&status);
@@ -862,6 +879,19 @@ static void lan_arena_control_update_observer(
         remote_weak_requested = remote_weak_requested ||
             input.weak_attack_pressed != 0u;
     }
+    if (remote_weak_requested) {
+        BOOL combat_enabled = FALSE;
+        remote_weak_allowed =
+            SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
+            combat_enabled;
+        if (!remote_weak_allowed && !host_remote_weak_blocked_logged) {
+            host_remote_weak_blocked_logged = TRUE;
+            SudekiMpLogWrite(
+                "lan_arena_runtime event=host_remote_weak_attack phase=rejected "
+                "reason=native_combat_inactive "
+                "policy=movement_preserved_attack_edge_consumed_no_replica_pose\r\n");
+        }
+    }
     if (host_remote_ailish_owned &&
         SudekiMpLanArenaRemoteInputFresh(
             host_last_remote_input_at_ms, GetTickCount(), 250u)) {
@@ -869,7 +899,7 @@ static void lan_arena_control_update_observer(
             SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
                 (float)host_remote_direction_x / 32767.0f,
                 (float)host_remote_direction_z / 32767.0f,
-                remote_weak_requested);
+                remote_weak_allowed);
         if (submitted) {
             host_remote_ailish_moving = host_remote_direction_x != 0 ||
                 host_remote_direction_z != 0;
@@ -884,8 +914,9 @@ static void lan_arena_control_update_observer(
                 (int)host_remote_direction_x,
                 (int)host_remote_direction_z);
         }
-        if (submitted && remote_weak_requested) {
+        if (submitted && remote_weak_allowed) {
             host_ailish_weak_attack_until_ms = GetTickCount() + 250u;
+            host_remote_weak_blocked_logged = FALSE;
             if (!host_remote_weak_logged) {
                 host_remote_weak_logged = TRUE;
                 SudekiMpLogWrite(
@@ -1279,6 +1310,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
+    host_remote_weak_blocked_logged = FALSE;
+    host_tal_weak_blocked_logged = FALSE;
     host_remote_ailish_moving = FALSE;
     host_auto_rehost_enabled =
         config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
@@ -1377,6 +1410,8 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
+    host_remote_weak_blocked_logged = FALSE;
+    host_tal_weak_blocked_logged = FALSE;
     host_remote_ailish_moving = FALSE;
     host_auto_rehost_enabled = FALSE;
     host_ailish_spawn_attempted = FALSE;
@@ -1434,6 +1469,8 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
+    host_remote_weak_blocked_logged = FALSE;
+    host_tal_weak_blocked_logged = FALSE;
     SudekiMpLogFormat(
         "lan_arena_runtime event=local_end_session cleanup=%s "
         "policy=stop_network_discard_replica_retry_any_unconfirmed_native_release\r\n",
@@ -1524,6 +1561,8 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
+    host_remote_weak_blocked_logged = FALSE;
+    host_tal_weak_blocked_logged = FALSE;
     arena_dummy_spawn_attempted = FALSE;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
