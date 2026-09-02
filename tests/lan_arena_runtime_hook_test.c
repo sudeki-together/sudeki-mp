@@ -324,55 +324,67 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     memset(host_actor_presentation_valid, 0,
         sizeof(host_actor_presentation_valid));
 
-    host_apply_presentation_state(0u, 100u, &tal);
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
         "first Tal sample begins idle without fabricated translation");
     tal.x = 0.01f;
-    host_apply_presentation_state(0u, 150u, &tal);
+    host_apply_presentation_state(0u, 150u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
         "authoritative Tal horizontal translation starts locomotion");
-    host_apply_presentation_state(0u, 300u, &tal);
+    host_apply_presentation_state(0u, 300u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
         "Tal stop grace includes its exact bounded endpoint");
-    host_apply_presentation_state(0u, 301u, &tal);
+    host_apply_presentation_state(0u, 301u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
         "Tal becomes idle immediately after bounded stop grace");
     tal.x = 0.012f;
-    host_apply_presentation_state(0u, 351u, &tal);
+    host_apply_presentation_state(0u, 351u, FALSE, &tal);
     check(fabsf(tal.x - 0.01f) < 0.00001f,
         "stationary Tal replica suppresses sub-threshold native settling");
     tal.x = 0.014f;
-    host_apply_presentation_state(0u, 376u, &tal);
+    host_apply_presentation_state(0u, 376u, FALSE, &tal);
     check(fabsf(tal.x - 0.01f) < 0.00001f,
         "successive sub-threshold Tal steps remain bounded by idle latch");
     tal.x = 0.016f;
-    host_apply_presentation_state(0u, 401u, &tal);
+    host_apply_presentation_state(0u, 401u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
           fabsf(tal.x - 0.016f) < 0.00001f,
         "cumulative Tal translation releases latch without hidden backlog");
 
+    host_actor_presentation_valid[0] = TRUE;
+    host_actor_presentation[0].selector[0] = TAL_WORLD_IDLE_SELECTOR;
+    tal.x = 0.03f;
+    host_apply_presentation_state(0u, 451u, FALSE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "native Tal idle selector ends replica locomotion despite root motion");
+    host_actor_presentation[0].selector[0] = TAL_WORLD_MOVE_PRIMARY_SELECTOR;
+    host_apply_presentation_state(0u, 1000u, FALSE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+        "native Tal movement selector preserves visible host locomotion");
+    host_actor_presentation_valid[0] = FALSE;
+
     host_remote_ailish_owned = TRUE;
     host_remote_ailish_moving = TRUE;
-    host_apply_presentation_state(1u, 1000u, &ailish);
+    host_apply_presentation_state(1u, 1000u, FALSE, &ailish);
     ailish.y = 1.0f;
-    host_apply_presentation_state(1u, 1050u, &ailish);
+    host_apply_presentation_state(1u, 1050u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
         "held Ailish input and vertical floor motion cannot fabricate running");
     ailish.z = 0.01f;
-    host_apply_presentation_state(1u, 1100u, &ailish);
+    host_apply_presentation_state(1u, 1100u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
         "authoritative Ailish horizontal translation starts locomotion");
-    host_apply_presentation_state(1u, 1251u, &ailish);
+    host_apply_presentation_state(1u, 1251u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
         "Ailish stops against a wall despite continuously held input");
     ailish.z = 0.012f;
-    host_apply_presentation_state(1u, 1301u, &ailish);
+    host_apply_presentation_state(1u, 1301u, FALSE, &ailish);
     check(fabsf(ailish.z - 0.01f) < 0.00001f,
         "stationary Ailish replica suppresses native root-motion settling");
     host_remote_ailish_owned = FALSE;
     host_remote_ailish_moving = FALSE;
     ailish.z = 0.25f;
-    host_apply_presentation_state(1u, 1351u, &ailish);
+    host_apply_presentation_state(1u, 1351u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
           fabsf(ailish.z - 0.01f) < 0.00001f,
         "Ailish idle root-motion lunge cannot release latch without input");
@@ -387,30 +399,30 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     host_actor_presentation[1].selector[2] =
         AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR;
     host_actor_presentation[1].state[2] = 1u;
-    host_apply_presentation_state(1u, 2000u, &ailish);
+    host_apply_presentation_state(1u, 2000u, FALSE, &ailish);
     check(ailish.animation_state ==
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
         "Ailish idle variant is recognized while cross-fading on channel two");
     host_actor_presentation[1].selector[2] = 0;
     host_actor_presentation[1].state[2] = 192u;
-    host_apply_presentation_state(1u, 2250u, &ailish);
+    host_apply_presentation_state(1u, 2250u, FALSE, &ailish);
     check(ailish.animation_state ==
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
         "Ailish idle variant survives exact channel-transition grace endpoint");
-    host_apply_presentation_state(1u, 2251u, &ailish);
+    host_apply_presentation_state(1u, 2251u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
         "Ailish idle variant retires after stable base-idle evidence");
     host_actor_presentation[1].selector[0] =
         AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
     host_actor_presentation[1].state[0] = 1u;
-    host_apply_presentation_state(1u, 2300u, &ailish);
+    host_apply_presentation_state(1u, 2300u, FALSE, &ailish);
     check(ailish.animation_state ==
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO,
         "Ailish second idle variant remains recognized on channel zero");
 
     host_remote_ailish_moving = TRUE;
     ailish.z += 0.02f;
-    host_apply_presentation_state(1u, 2350u, &ailish);
+    host_apply_presentation_state(1u, 2350u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
           !host_ailish_idle_variant_armed,
         "Ailish movement cancels and disarms the active idle variant");
@@ -420,23 +432,81 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     host_actor_presentation[1].selector[2] =
         AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
     host_actor_presentation[1].state[2] = 65u;
-    host_apply_presentation_state(1u, 2400u, &ailish);
+    host_apply_presentation_state(1u, 2400u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
           !host_ailish_idle_variant_armed,
         "hidden state-65 Ailish variant cannot resume after movement");
     host_actor_presentation[1].selector[2] = 0;
     host_actor_presentation[1].state[2] = 192u;
-    host_apply_presentation_state(1u, 2450u, &ailish);
+    host_apply_presentation_state(1u, 2450u, FALSE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
           host_ailish_idle_variant_armed,
         "clean Ailish base idle rearms future native variants");
     host_actor_presentation[1].selector[2] =
         AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR;
     host_actor_presentation[1].state[2] = 1u;
-    host_apply_presentation_state(1u, 2500u, &ailish);
+    host_apply_presentation_state(1u, 2500u, FALSE, &ailish);
     check(ailish.animation_state ==
             SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
         "new native state-1 Ailish variant starts after clean rearm");
+
+    memset(host_actor_presentation, 0, sizeof(host_actor_presentation));
+    memset(host_actor_presentation_valid, 0,
+        sizeof(host_actor_presentation_valid));
+    host_actor_presentation_valid[0] = TRUE;
+    host_actor_presentation[0].selector[0] = TAL_COMBAT_IDLE_SELECTOR;
+    host_actor_presentation[0].state[0] = 128u;
+    tal.x += 0.03f;
+    host_apply_presentation_state(0u, 3000u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "Tal combat idle overrides residual authoritative root translation");
+    host_actor_presentation[0].selector[0] =
+        TAL_COMBAT_MOVE_PRIMARY_SELECTOR;
+    host_actor_presentation[0].state[0] = 65u;
+    host_apply_presentation_state(0u, 3050u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+        "Tal combat locomotion maps to semantic movement");
+    host_actor_presentation[0].selector[0] = TAL_COMBAT_ENTRY_SELECTOR;
+    host_actor_presentation[0].state[0] = 1u;
+    host_apply_presentation_state(0u, 3100u, TRUE, &tal);
+    check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE,
+        "Tal draw-weapon transition is not mislabeled as a weak attack");
+    host_actor_presentation[0].selector[0] =
+        TAL_COMBAT_WEAK_ONE_SELECTOR;
+    host_actor_presentation[0].state[0] = 65u;
+    host_apply_presentation_state(0u, 3350u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+        "Tal first native weak variant is transmitted semantically");
+    host_actor_presentation[0].selector[0] =
+        TAL_COMBAT_WEAK_TWO_SELECTOR;
+    host_actor_presentation[0].state[0] = 1u;
+    host_apply_presentation_state(0u, 3375u, TRUE, &tal);
+    check(tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO,
+        "Tal second native weak variant remains distinct");
+    host_actor_presentation[0].state[0] = 128u;
+    host_apply_presentation_state(0u, 3400u, TRUE, &tal);
+    check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+        "Tal combat action retires when the native clip retires");
+
+    host_actor_presentation_valid[1] = TRUE;
+    host_actor_presentation[1].selector[4] = AILISH_COMBAT_WEAK_SELECTOR;
+    host_actor_presentation[1].state[4] = 1u;
+    host_apply_presentation_state(1u, 3500u, TRUE, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          ailish.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK &&
+          ailish.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+        "Ailish combat shot remains active for its native clip");
+    host_actor_presentation[1].state[4] = 65u;
+    host_apply_presentation_state(1u, 3800u, TRUE, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+        "Ailish combat shot survives beyond the old 250ms pulse");
+    host_actor_presentation[1].selector[4] = 0;
+    host_actor_presentation[1].state[4] = 192u;
+    host_apply_presentation_state(1u, 3850u, TRUE, &ailish);
+    check(ailish.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+        "Ailish combat shot retires with the native action layer");
 }
 
 int main(void) {

@@ -26,6 +26,7 @@ static void fill_snapshot(SudekiMpLanArenaSnapshot *snapshot, DWORD now) {
     snapshot->ailish.sp = 440u;
     snapshot->ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
     snapshot->ailish.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    snapshot->ailish.action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
     snapshot->enemy_count = 1u;
     snapshot->enemies[0].native_entity_id = 1u;
     snapshot->enemies[0].z = 6.0f;

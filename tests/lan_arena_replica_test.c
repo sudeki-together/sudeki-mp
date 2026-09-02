@@ -26,6 +26,9 @@ static SudekiMpLanArenaSnapshot make_snapshot(uint32_t sequence, uint32_t tick, 
     snapshot.tal.combat_state = sequence == 1u ?
         SUDEKIMP_LAN_ARENA_COMBAT_IDLE :
         SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    snapshot.tal.action_variant = sequence == 1u ?
+        SUDEKIMP_LAN_ARENA_ACTION_NONE :
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
     snapshot.ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     snapshot.ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     snapshot.ailish.x = x * 2.0f;
@@ -37,6 +40,9 @@ static SudekiMpLanArenaSnapshot make_snapshot(uint32_t sequence, uint32_t tick, 
     snapshot.ailish.combat_state = sequence == 1u ?
         SUDEKIMP_LAN_ARENA_COMBAT_IDLE :
         SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    snapshot.ailish.action_variant = sequence == 1u ?
+        SUDEKIMP_LAN_ARENA_ACTION_NONE :
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
     snapshot.enemy_count = 1u;
     snapshot.enemies[0].native_entity_id =
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
@@ -87,13 +93,29 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
     CHECK(sample.enemy_count == 0u);
+    /* Combat mode is a discrete native presentation boundary. Never blend
+     * exploration and combat snapshots into one client frame. */
+    SudekiMpLanArenaReplicaReset(&replica);
+    first = make_snapshot(4u, 300u, 1.0f);
+    second = make_snapshot(5u, 350u, 2.0f);
+    first.combat_enabled = 0u;
+    second.combat_enabled = 1u;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(replica.stream_generation == 2u);
+    CHECK(!replica.previous_valid);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 325u, &sample));
+    CHECK(sample.sequence == 5u);
+    CHECK(sample.combat_enabled == 1u);
     SudekiMpLanArenaReplicaReset(&replica);
     first = make_snapshot(10u, 1000u, 2.0f);
     second = make_snapshot(11u, 1100u, 12.0f);
     first.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
     first.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    first.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
     second.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
     second.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    second.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1050u, &sample));

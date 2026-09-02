@@ -12,7 +12,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LAN4`, exact GOG executable hash only.
+- Protocol/build: `LAN6`, exact GOG executable hash only.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
 - Client actions: camera-relative movement and host-validated weak attack.
@@ -33,7 +33,20 @@ experiments.
   transition. Out-of-combat attack edges are consumed without native execution
   or a replicated attack pose. The host may toggle that same verified native
   transition from the Multiplayer page or directly with `F8`; both paths
-  require an authenticated client and confirm the resulting combat state.
+  require an authenticated client and confirm the resulting combat state. The
+  host serializes that mode in every snapshot; the client mirrors the verified
+  native transition for camera, HUD, and actor presentation only, while damage,
+  AI, and action execution remain host-authoritative.
+- Replica presentation maps semantic states to the verified actor-local combat
+  clips while combat is active: Tal's combat idle/paired locomotion and three
+  observed weak-attack variants, plus Ailish's combat idle/run/weak-shot layer.
+  A bounded semantic action variant crosses the wire; each process keeps its
+  native selector numbers local. Entering and leaving combat temporarily
+  suspends replica animation writes until Sudeki's own Tal/Ailish weapon-draw
+  or sheath transition reaches its verified idle stance, so the replica cannot
+  interrupt a sword/staff attachment transaction. The host keeps an action
+  semantic active until its native renderer retires the clip, so the client no
+  longer truncates attacks to a fixed 250 ms pulse.
 - The client may open and browse Ailish's native QuickMenu. Native confirm/use
   commands are consumed locally until category-specific requests can be
   validated and executed by the host. Skills, items, weapons, Spirit,

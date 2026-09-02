@@ -25,6 +25,7 @@ enum {
     RVA_RENDER_PRE_WORLD_CALL = 0x0028d539u,
     RVA_FRAME_END = 0x001dd540u,
     RVA_FRAME_END_CALL = 0x0028d58cu,
+    TAL_WORLD_IDLE_SELECTOR = 4,
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
     TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR = 10,
@@ -33,7 +34,21 @@ enum {
     AILISH_WORLD_MOVE_SECONDARY_SELECTOR = 8,
     AILISH_WORLD_IDLE_SELECTOR = 1,
     AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
-    AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5
+    AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5,
+    /* Exact native presentation captured from the supported cleanroom combat
+     * transition. These renderer selectors remain local to each process. */
+    TAL_COMBAT_ENTRY_SELECTOR = 3,
+    TAL_COMBAT_IDLE_SELECTOR = 17,
+    TAL_COMBAT_MOVE_PRIMARY_SELECTOR = 36,
+    TAL_COMBAT_MOVE_SECONDARY_SELECTOR = 32,
+    TAL_COMBAT_WEAK_ONE_SELECTOR = 50,
+    TAL_COMBAT_WEAK_TWO_SELECTOR = 51,
+    TAL_COMBAT_WEAK_THREE_SELECTOR = 62,
+    AILISH_COMBAT_ENTRY_SELECTOR = 12,
+    AILISH_COMBAT_IDLE_SELECTOR = 20,
+    AILISH_COMBAT_MOVE_PRIMARY_SELECTOR = 22,
+    AILISH_COMBAT_MOVE_SECONDARY_SELECTOR = 23,
+    AILISH_COMBAT_WEAK_SELECTOR = 59
 };
 
 static SudekiMpRelativeCallHook lan_arena_frame_end_hook;
@@ -72,6 +87,7 @@ static DWORD host_ailish_idle_variant_seen_at_ms;
 static BOOL host_ailish_idle_variant_armed = TRUE;
 static DWORD host_ailish_weak_attack_until_ms;
 static DWORD host_tal_weak_attack_until_ms;
+static uint8_t host_actor_action_variant[2];
 static DWORD host_last_remote_input_at_ms;
 static BOOL host_remote_input_quiesced;
 static BOOL host_remote_input_logged;
@@ -292,6 +308,70 @@ static uint8_t host_actor_idle_variant_state(
         host_ailish_idle_variant_state : SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
 }
 
+static BOOL host_tal_native_locomotion_state(
+    BOOL combat_enabled,
+    BOOL *moving
+) {
+    const SudekiMpCleanroomActorPresentation *presentation;
+    int selector;
+    if (moving == NULL || !host_actor_presentation_valid[0]) return FALSE;
+    presentation = &host_actor_presentation[0];
+    selector = presentation->selector[0];
+    if (selector == (combat_enabled ? TAL_COMBAT_MOVE_PRIMARY_SELECTOR :
+            TAL_WORLD_MOVE_PRIMARY_SELECTOR)) {
+        *moving = TRUE;
+        return TRUE;
+    }
+    if ((combat_enabled && selector == TAL_COMBAT_IDLE_SELECTOR) ||
+        (!combat_enabled && (selector == TAL_WORLD_IDLE_SELECTOR ||
+        selector == TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR ||
+        selector == TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR))) {
+        *moving = FALSE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static uint8_t host_actor_native_action_variant(
+    unsigned int actor_index,
+    BOOL combat_enabled
+) {
+    const SudekiMpCleanroomActorPresentation *presentation;
+    int selector;
+    uint8_t state;
+    if (!combat_enabled || actor_index >= 2u ||
+        !host_actor_presentation_valid[actor_index]) {
+        return SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    }
+    presentation = &host_actor_presentation[actor_index];
+    if (actor_index == 0u) {
+        selector = presentation->selector[0];
+        state = presentation->state[0];
+        if (state != 1u && state != 65u) {
+            return SUDEKIMP_LAN_ARENA_ACTION_NONE;
+        }
+        if (selector == TAL_COMBAT_WEAK_ONE_SELECTOR) {
+            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+        }
+        if (selector == TAL_COMBAT_WEAK_TWO_SELECTOR) {
+            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
+        }
+        if (selector == TAL_COMBAT_WEAK_THREE_SELECTOR) {
+            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE;
+        }
+        /* Selector 3 is the native draw/enter-combat transition, not a weak
+         * attack. Treating it as an action made Tal attack while merely
+         * moving and interrupted the weapon attachment transaction. */
+        return SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    }
+    selector = presentation->selector[4];
+    state = presentation->state[4];
+    return selector == AILISH_COMBAT_WEAK_SELECTOR &&
+            (state == 1u || state == 65u) ?
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE :
+        SUDEKIMP_LAN_ARENA_ACTION_NONE;
+}
+
 static BOOL host_actor_translation_moving(
     unsigned int actor_index,
     DWORD now_ms,
@@ -355,9 +435,14 @@ static void host_filter_stationary_replica_position(
 static void host_apply_presentation_state(
     unsigned int actor_index,
     DWORD now_ms,
+    BOOL combat_enabled,
     SudekiMpLanArenaActorSnapshot *snapshot
 ) {
     BOOL moving;
+    BOOL native_tal_moving;
+    BOOL action_active;
+    uint8_t native_action_variant;
+    uint8_t action_variant;
     uint8_t idle_variant_state;
     if (snapshot == NULL || actor_index >= 2u) return;
     /* Locomotion is an authoritative presentation fact, not an input fact.
@@ -367,6 +452,17 @@ static void host_apply_presentation_state(
      * Horizontal host translation plus a bounded grace gives both replicas
      * the same deterministic stop edge. */
     moving = host_actor_translation_moving(actor_index, now_ms, snapshot);
+    /* Tal's native idle and idle-variant animation can carry small root
+     * translation after the player releases movement. Translation-only
+     * classification therefore kept the remote Tal running until that native
+     * animation settled. When the verified host renderer exposes a known Tal
+     * locomotion selector, mirror that visible state immediately; retain the
+     * collision-safe translation classifier for unrecognized action states. */
+    if (actor_index == 0u &&
+        host_tal_native_locomotion_state(
+            combat_enabled, &native_tal_moving)) {
+        moving = native_tal_moving;
+    }
     /* Ailish's native idle variants can contain a short root-motion lunge.
      * It changes the host CPosition enough to look like movement, then returns
      * to the idle origin. Do not transmit that as player locomotion unless an
@@ -375,36 +471,58 @@ static void host_apply_presentation_state(
     if (actor_index == 1u && !host_remote_ailish_moving) {
         moving = FALSE;
     }
+    native_action_variant = host_actor_native_action_variant(
+        actor_index, combat_enabled);
+    if (native_action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE) {
+        host_actor_action_variant[actor_index] = native_action_variant;
+    }
+    action_active = native_action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE ||
+        (actor_index == 0u &&
+            (LONG)(host_tal_weak_attack_until_ms - now_ms) > 0) ||
+        (actor_index == 1u &&
+            (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0);
+    action_variant = action_active ? host_actor_action_variant[actor_index] :
+        SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    if (action_active && action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE) {
+        action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+        host_actor_action_variant[actor_index] = action_variant;
+    } else if (!action_active) {
+        host_actor_action_variant[actor_index] =
+            SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    }
     if (actor_index == 1u &&
-        (moving || snapshot->hp == 0u ||
-         (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0)) {
+        (moving || snapshot->hp == 0u || action_active || combat_enabled)) {
         host_ailish_idle_variant_state = 0u;
         host_ailish_idle_variant_seen_at_ms = 0u;
         host_ailish_idle_variant_armed = FALSE;
     }
-    host_filter_stationary_replica_position(actor_index, moving, snapshot);
+    host_filter_stationary_replica_position(
+        actor_index, moving || action_active, snapshot);
     if (snapshot->hp == 0u) {
+        snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
         snapshot->animation_state =
             SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED;
         snapshot->combat_state =
             SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED;
-    } else if ((actor_index == 0u &&
-                (LONG)(host_tal_weak_attack_until_ms - now_ms) > 0) ||
-               (actor_index == 1u &&
-                (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0)) {
+    } else if (action_active) {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+        snapshot->action_variant = action_variant;
     } else if (moving) {
+        snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    } else if ((idle_variant_state = host_actor_idle_variant_state(
+    } else if (!combat_enabled &&
+               (idle_variant_state = host_actor_idle_variant_state(
                     actor_index, now_ms)) !=
                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE) {
         snapshot->animation_state = idle_variant_state;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+        snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
     } else {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+        snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
     }
 }
 
@@ -501,10 +619,9 @@ static void host_publish_snapshot(DWORD now_ms) {
             SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS) return;
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
+    if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
     tal_weak_requested = SudekiMpLanArenaHostInputTakeTalWeakAttack();
-    if (tal_weak_requested &&
-        SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
-        combat_enabled) {
+    if (tal_weak_requested && combat_enabled) {
         host_tal_weak_attack_until_ms = now_ms + 250u;
         host_tal_weak_blocked_logged = FALSE;
     } else if (tal_weak_requested && !host_tal_weak_blocked_logged) {
@@ -529,10 +646,13 @@ static void host_publish_snapshot(DWORD now_ms) {
     if (ailish_initialized) {
         host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
     }
-    host_apply_presentation_state(0u, now_ms, &snapshot.tal);
-    host_apply_presentation_state(1u, now_ms, &snapshot.ailish);
+    host_apply_presentation_state(
+        0u, now_ms, combat_enabled, &snapshot.tal);
+    host_apply_presentation_state(
+        1u, now_ms, combat_enabled, &snapshot.ailish);
     snapshot.host_tick = now_ms;
     snapshot.match_state = 1u;
+    snapshot.combat_enabled = combat_enabled ? 1u : 0u;
     {
         float dummy_position[3];
         float dummy_hp;
@@ -557,7 +677,7 @@ static void host_publish_snapshot(DWORD now_ms) {
             SudekiMpLogFormat(
                 "lan_arena_runtime event=host_snapshot_stream phase=active "
                 "cadence_ms=50 actors=Tal,Ailish enemies=%u "
-                "policy=host_authoritative_resources_transforms_facing_match_state\r\n",
+                "policy=host_authoritative_resources_transforms_facing_match_and_combat_mode\r\n",
                 (unsigned int)snapshot.enemy_count);
         }
     }
@@ -1306,6 +1426,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
     client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
+    ZeroMemory(host_actor_action_variant,
+        sizeof(host_actor_action_variant));
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -1406,6 +1528,8 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
+    ZeroMemory(host_actor_action_variant,
+        sizeof(host_actor_action_variant));
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -1465,6 +1589,8 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
         sizeof(client_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
+    ZeroMemory(host_actor_action_variant,
+        sizeof(host_actor_action_variant));
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -1557,6 +1683,8 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         sizeof(host_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;
     host_tal_weak_attack_until_ms = 0u;
+    ZeroMemory(host_actor_action_variant,
+        sizeof(host_actor_action_variant));
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;

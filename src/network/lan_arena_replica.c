@@ -108,6 +108,7 @@ static BOOL snapshot_stream_continuous(
     return before != NULL && after != NULL &&
         tick_after(after->host_tick, before->host_tick) &&
         before->match_state == after->match_state &&
+        before->combat_enabled == after->combat_enabled &&
         before->tal.actor_type == after->tal.actor_type &&
         before->tal.native_entity_id == after->tal.native_entity_id &&
         before->ailish.actor_type == after->ailish.actor_type &&

@@ -8,7 +8,8 @@
 #define LAN_INPUT_SIZE 17u
 #define LAN_ACTOR_SIZE 36u
 #define LAN_ENEMY_SIZE 21u
-#define LAN_SNAPSHOT_FIXED_SIZE (13u + (2u * LAN_ACTOR_SIZE) + 1u)
+#define LAN_SNAPSHOT_ACTORS_OFFSET 14u
+#define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE) + 1u)
 
 static const uint8_t lan_magic[4] = {'S', 'M', 'P', 'N'};
 
@@ -85,7 +86,8 @@ static int valid_actor_snapshot(
 ) {
     float facing_length;
     if (actor == NULL || actor->actor_type != expected_type ||
-        actor->native_entity_id != expected_type || actor->reserved != 0u ||
+        actor->native_entity_id != expected_type ||
+        actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
         actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
@@ -102,7 +104,11 @@ static int valid_actor_snapshot(
               SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED ||
           actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED)) ||
         ((actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) !=
-         (actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK))) {
+         (actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK)) ||
+        ((actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) !=
+         (actor->action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE)) ||
+        (expected_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE)) {
         return 0;
     }
     facing_length = sqrtf(actor->facing_x * actor->facing_x +
@@ -118,6 +124,7 @@ int SudekiMpLanArenaSnapshotValid(
     unsigned int other;
     if (snapshot == NULL ||
         snapshot->match_state > SUDEKIMP_LAN_ARENA_MATCH_ENDED ||
+        snapshot->combat_enabled > 1u ||
         snapshot->enemy_count > 1u ||
         !valid_actor_snapshot(&snapshot->tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
         !valid_actor_snapshot(
@@ -150,7 +157,7 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     output[0] = actor->actor_type;
     output[1] = actor->animation_state;
     output[2] = actor->combat_state;
-    output[3] = 0u;
+    output[3] = actor->action_variant;
     write_u32(output + 4u, actor->native_entity_id);
     write_float(output + 8u, actor->x);
     write_float(output + 12u, actor->y);
@@ -165,13 +172,13 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
 static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor) {
     if (input == NULL || actor == NULL ||
         (input[0] != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
-         input[0] != SUDEKIMP_LAN_ARENA_AILISH_TYPE) || input[3] != 0u) {
+         input[0] != SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
         return 0;
     }
     actor->actor_type = input[0];
     actor->animation_state = input[1];
     actor->combat_state = input[2];
-    actor->reserved = 0u;
+    actor->action_variant = input[3];
     actor->native_entity_id = read_u32(input + 4u);
     actor->x = read_float(input + 8u);
     actor->y = read_float(input + 12u);
@@ -229,8 +236,10 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
             if (!SudekiMpLanArenaSnapshotValid(&packet->body.snapshot) ||
-                !write_actor(output + 13u, &packet->body.snapshot.tal) ||
-                !write_actor(output + 13u + LAN_ACTOR_SIZE, &packet->body.snapshot.ailish) ||
+                !write_actor(output + LAN_SNAPSHOT_ACTORS_OFFSET,
+                    &packet->body.snapshot.tal) ||
+                !write_actor(output + LAN_SNAPSHOT_ACTORS_OFFSET + LAN_ACTOR_SIZE,
+                    &packet->body.snapshot.ailish) ||
                 packet->body.snapshot.tal.actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
                 packet->body.snapshot.ailish.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE) {
                 return 0;
@@ -239,7 +248,9 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             write_u32(output + 4u, packet->body.snapshot.acknowledged_input);
             write_u32(output + 8u, packet->body.snapshot.host_tick);
             output[12] = packet->body.snapshot.match_state;
-            output[13u + (2u * LAN_ACTOR_SIZE)] = packet->body.snapshot.enemy_count;
+            output[13] = packet->body.snapshot.combat_enabled;
+            output[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)] =
+                packet->body.snapshot.enemy_count;
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 const SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
                 uint8_t *entry = output + LAN_SNAPSHOT_FIXED_SIZE + (i * LAN_ENEMY_SIZE);
@@ -346,20 +357,27 @@ int SudekiMpLanArenaDecodePacket(
             return packet->body.input.sequence == packet->sequence;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
             if (payload_size < LAN_SNAPSHOT_FIXED_SIZE ||
-                !read_actor(payload + 13u, &packet->body.snapshot.tal) ||
-                !read_actor(payload + 13u + LAN_ACTOR_SIZE, &packet->body.snapshot.ailish) ||
+                payload[13] > 1u ||
+                !read_actor(payload + LAN_SNAPSHOT_ACTORS_OFFSET,
+                    &packet->body.snapshot.tal) ||
+                !read_actor(payload + LAN_SNAPSHOT_ACTORS_OFFSET + LAN_ACTOR_SIZE,
+                    &packet->body.snapshot.ailish) ||
                 packet->body.snapshot.tal.actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
                 packet->body.snapshot.ailish.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-                payload[13u + (2u * LAN_ACTOR_SIZE)] > SUDEKIMP_LAN_ARENA_MAX_ENEMIES ||
+                payload[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)] >
+                    SUDEKIMP_LAN_ARENA_MAX_ENEMIES ||
                 payload_size != LAN_SNAPSHOT_FIXED_SIZE +
-                    ((size_t)payload[13u + (2u * LAN_ACTOR_SIZE)] * LAN_ENEMY_SIZE)) {
+                    ((size_t)payload[LAN_SNAPSHOT_ACTORS_OFFSET +
+                        (2u * LAN_ACTOR_SIZE)] * LAN_ENEMY_SIZE)) {
                 return 0;
             }
             packet->body.snapshot.sequence = read_u32(payload);
             packet->body.snapshot.acknowledged_input = read_u32(payload + 4u);
             packet->body.snapshot.host_tick = read_u32(payload + 8u);
             packet->body.snapshot.match_state = payload[12];
-            packet->body.snapshot.enemy_count = payload[13u + (2u * LAN_ACTOR_SIZE)];
+            packet->body.snapshot.combat_enabled = payload[13];
+            packet->body.snapshot.enemy_count =
+                payload[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)];
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
                 const uint8_t *entry = payload + LAN_SNAPSHOT_FIXED_SIZE + (i * LAN_ENEMY_SIZE);

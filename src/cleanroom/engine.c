@@ -118,19 +118,19 @@ typedef unsigned int (__attribute__((thiscall))
     *CafuAnimationCountFunction)(void *renderer);
 typedef int (__attribute__((thiscall)) *CafuAnimationSelectorGetFunction)(
     void *renderer,
-    int channel,
-    unsigned int submodel
+    unsigned int submodel,
+    int channel
 );
 typedef float (__attribute__((thiscall)) *CafuAnimationFloatGetFunction)(
     void *renderer,
-    int channel,
-    unsigned int submodel
+    unsigned int submodel,
+    int channel
 );
 typedef unsigned int (__attribute__((thiscall))
     *CafuAnimationStateGetFunction)(
         void *renderer,
-        int channel,
-        unsigned int submodel
+        unsigned int submodel,
+        int channel
     );
 typedef float (__attribute__((thiscall)) *AnimationBlendGetFunction)(
     void *renderer,
@@ -1144,10 +1144,10 @@ static void trace_cafu_weapon_presentation(void) {
             "rate=%.5f time=%.5f\r\n",
             cafu_weapon_presentation_sample_count,
             channel,
-            get_selector(renderer, (int)channel, 0u),
-            get_state(renderer, (int)channel, 0u),
-            get_rate(renderer, (int)channel, 0u),
-            get_time(renderer, (int)channel, 0u)
+            get_selector(renderer, 0u, (int)channel),
+            get_state(renderer, 0u, (int)channel),
+            get_rate(renderer, 0u, (int)channel),
+            get_time(renderer, 0u, (int)channel)
         );
     }
 }
@@ -4007,11 +4007,11 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
          channel < channel_limit;
          ++channel) {
         presentation->selector[channel] =
-            get_selector(renderer, (int)channel, 0u);
+            get_selector(renderer, 0u, (int)channel);
         presentation->state[channel] =
-            (uint8_t)get_state(renderer, (int)channel, 0u);
+            (uint8_t)get_state(renderer, 0u, (int)channel);
         presentation->rate[channel] =
-            get_rate(renderer, (int)channel, 0u);
+            get_rate(renderer, 0u, (int)channel);
         if (!isfinite(presentation->rate[channel])) return FALSE;
     }
     if (actor == SUDEKIMP_CLEANROOM_AILISH) {

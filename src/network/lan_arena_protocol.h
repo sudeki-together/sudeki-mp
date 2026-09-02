@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 4u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 6u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c414e34u /* "LAN4" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c414e36u /* "LAN6" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -43,6 +43,16 @@ typedef enum SudekiMpLanArenaCombatState {
     SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK = 1,
     SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED = 2
 } SudekiMpLanArenaCombatState;
+
+/* Bounded action variants remain process-independent. The host translates
+ * verified native selectors into these values and each client translates
+ * them back through its actor-specific presentation adapter. */
+typedef enum SudekiMpLanArenaActionVariant {
+    SUDEKIMP_LAN_ARENA_ACTION_NONE = 0,
+    SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE = 1,
+    SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO = 2,
+    SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE = 3
+} SudekiMpLanArenaActionVariant;
 
 typedef enum SudekiMpLanArenaRole {
     SUDEKIMP_LAN_ARENA_ROLE_INVALID = 0,
@@ -100,7 +110,7 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t actor_type;
     uint8_t animation_state;
     uint8_t combat_state;
-    uint8_t reserved;
+    uint8_t action_variant;
     uint32_t native_entity_id;
     float x;
     float y;
@@ -125,6 +135,7 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint32_t acknowledged_input;
     uint32_t host_tick;
     uint8_t match_state;
+    uint8_t combat_enabled;
     SudekiMpLanArenaActorSnapshot tal;
     SudekiMpLanArenaActorSnapshot ailish;
     uint8_t enemy_count;

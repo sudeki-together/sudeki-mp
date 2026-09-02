@@ -2978,6 +2978,25 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpResetLanArenaClientReplica();
     }
     {
+        uint8_t saved_selector_get_byte =
+            image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u];
+        image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched native animation addressing\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u] =
+            saved_selector_get_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN animation-address mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
         uint8_t saved_prefix = image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u];
         uint32_t raw_focus_state_operand;
         uint32_t relocated_focus_state_operand = (uint32_t)(uintptr_t)(
