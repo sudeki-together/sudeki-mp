@@ -279,6 +279,8 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
 ) {
     uint32_t elapsed;
     uint32_t candidate;
+    uint32_t catchup;
+    uint32_t target;
     if (replica == NULL || clock == NULL || host_tick == NULL ||
         !replica->oldest_valid || !replica->previous_valid ||
         !replica->latest_valid ||
@@ -290,7 +292,10 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
     }
     if (!clock->initialized ||
         clock->stream_generation != replica->stream_generation) {
-        clock->host_tick = replica->oldest.host_tick;
+        /* Start one host interval behind the newest packet.  The retained
+         * oldest sample still gives an interval of arrival-jitter headroom,
+         * but beginning two intervals behind adds avoidable control latency. */
+        clock->host_tick = replica->previous.host_tick;
         clock->local_tick = local_tick;
         clock->stream_generation = replica->stream_generation;
         clock->initialized = 1u;
@@ -302,6 +307,18 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
     candidate = clock->host_tick + elapsed;
     if (tick_after(candidate, replica->latest.host_tick)) {
         candidate = replica->latest.host_tick;
+    }
+
+    /* Local elapsed time alone preserves any backlog accumulated while this
+     * process is throttled.  Converge at at most 2x real time toward the
+     * previous authoritative sample (normally 50 ms behind latest).  This is
+     * monotonic and bounded: it never rewinds and never extrapolates beyond a
+     * packet the host actually sent. */
+    target = replica->previous.host_tick;
+    if (tick_before(candidate, target)) {
+        catchup = target - candidate;
+        if (catchup > elapsed) catchup = elapsed;
+        candidate += catchup;
     }
     clock->host_tick = candidate;
     *host_tick = candidate;

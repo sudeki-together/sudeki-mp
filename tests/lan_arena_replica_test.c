@@ -138,8 +138,8 @@ int main(void) {
     CHECK(sample.ailish.facing_x == -1.0f);
     CHECK(sample.ailish.facing_z == 0.0f);
 
-    /* Packet arrivals may be early or late, but presentation advances only by
-     * local elapsed time from the oldest buffered host sample. */
+    /* Packet arrivals may be early or late. Presentation starts one snapshot
+     * behind latest, advances monotonically, and never jumps to arrival time. */
     SudekiMpLanArenaReplicaReset(&replica);
     SudekiMpLanArenaReplicaRenderClockReset(&clock);
     first = make_snapshot(40u, 4000u, 0.0f);
@@ -152,18 +152,38 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 1017u, &first.host_tick));
-    CHECK(first.host_tick == 4000u);
+    CHECK(first.host_tick == 4050u);
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 1042u, &first.host_tick));
-    CHECK(first.host_tick == 4025u);
+    CHECK(first.host_tick == 4075u);
     /* A new packet arriving at this point cannot jump or rewind the clock. */
     invalid = make_snapshot(43u, 4150u, 15.0f);
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 1052u, &first.host_tick));
-    CHECK(first.host_tick == 4035u);
+    CHECK(first.host_tick == 4095u);
     CHECK(SudekiMpLanArenaReplicaSample(&replica, first.host_tick, &sample));
-    CHECK(sample.tal.x > 3.49f && sample.tal.x < 3.51f);
+    CHECK(sample.tal.x > 9.49f && sample.tal.x < 9.51f);
+
+    /* A client that has accumulated a large backlog catches up at a bounded
+     * 2x rate instead of preserving that visible delay forever. */
+    clock.host_tick = 4000u;
+    clock.local_tick = 1100u;
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
+        &replica, &clock, 1116u, &first.host_tick));
+    CHECK(first.host_tick == 4032u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
+        &replica, &clock, 1132u, &first.host_tick));
+    CHECK(first.host_tick == 4064u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
+        &replica, &clock, 1148u, &first.host_tick));
+    CHECK(first.host_tick == 4096u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
+        &replica, &clock, 1164u, &first.host_tick));
+    CHECK(first.host_tick == 4112u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
+        &replica, &clock, 1180u, &first.host_tick));
+    CHECK(first.host_tick == 4128u);
 
     /* Both the host and local clocks are GetTickCount values. Their natural
      * 32-bit wrap must preserve ordering and interpolation. */
@@ -177,12 +197,12 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 0xfffffff8u, &first.host_tick));
-    CHECK(first.host_tick == 0xfffffff0u);
+    CHECK(first.host_tick == 0x00000022u);
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 0x00000018u, &first.host_tick));
-    CHECK(first.host_tick == 0x00000010u);
+    CHECK(first.host_tick == 0x00000042u);
     CHECK(SudekiMpLanArenaReplicaSample(&replica, first.host_tick, &sample));
-    CHECK(sample.tal.x > 3.19f && sample.tal.x < 3.21f);
+    CHECK(sample.tal.x > 8.19f && sample.tal.x < 8.21f);
     if (failures != 0) return 1;
     puts("lan arena replica tests passed");
     return 0;

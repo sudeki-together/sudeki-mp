@@ -45,8 +45,10 @@ BOOL SudekiMpLanArenaReplicaSample(
 void SudekiMpLanArenaReplicaRenderClockReset(
     SudekiMpLanArenaReplicaRenderClock *clock
 );
-/* Advances strictly by local elapsed time and never re-anchors to packet
- * arrival. Returns FALSE until a full three-snapshot jitter buffer exists. */
+/* Advances monotonically from local elapsed time, with bounded catch-up toward
+ * one authoritative snapshot behind latest after client throttling. It never
+ * rewinds or extrapolates. Returns FALSE until a full three-snapshot jitter
+ * buffer exists. */
 BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
     const SudekiMpLanArenaReplica *replica,
     SudekiMpLanArenaReplicaRenderClock *clock,

@@ -31,6 +31,7 @@ enum {
     TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR = 11,
     AILISH_WORLD_MOVE_PRIMARY_SELECTOR = 7,
     AILISH_WORLD_MOVE_SECONDARY_SELECTOR = 8,
+    AILISH_WORLD_IDLE_SELECTOR = 1,
     AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
     AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR = 5
 };
@@ -56,11 +57,19 @@ static BOOL host_release_pending_logged;
 static BOOL client_release_pending_logged;
 static int client_replica_stop_state = -1;
 static int client_animation_basis_publish_state = -1;
+static int client_presentation_reassert_state = -1;
 static int client_visible_transform_publish_state = -1;
 static BOOL runtime_hook_restore_failed_logged;
 static BOOL dummy_release_pending_logged;
 static float host_previous_actor_position[2][3];
 static BOOL host_previous_actor_position_valid[2];
+static DWORD host_actor_last_translation_at_ms[2];
+static float host_replica_idle_position[2][2];
+static BOOL host_replica_idle_position_valid[2];
+static BOOL host_actor_was_moving[2];
+static uint8_t host_ailish_idle_variant_state;
+static DWORD host_ailish_idle_variant_seen_at_ms;
+static BOOL host_ailish_idle_variant_armed = TRUE;
 static DWORD host_ailish_weak_attack_until_ms;
 static DWORD host_tal_weak_attack_until_ms;
 static DWORD host_last_remote_input_at_ms;
@@ -214,52 +223,164 @@ static BOOL fill_actor_snapshot(
     return TRUE;
 }
 
-static void host_apply_presentation_state(
+enum {
+    /* Host snapshots are emitted every 50 ms.  Require at least 0.005 world
+     * units of horizontal displacement, then retain locomotion for three
+     * snapshots so collision settling cannot flicker RUN/IDLE at a wall. */
+    HOST_LOCOMOTION_STOP_GRACE_MS = 150u,
+    /* Native Ailish idle variants cross-fade between animation channels 0
+     * and 2 with short base-idle gaps between them. */
+    AILISH_IDLE_VARIANT_CHANNEL_GRACE_MS = 250u
+};
+
+static uint8_t host_actor_idle_variant_state(
+    unsigned int actor_index,
+    DWORD now_ms
+) {
+    const SudekiMpCleanroomActorPresentation *presentation;
+    int selector;
+    uint8_t selector_state;
+    if (actor_index >= 2u || !host_actor_presentation_valid[actor_index]) {
+        return SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    }
+    presentation = &host_actor_presentation[actor_index];
+    if (actor_index == 0u) {
+        if (presentation->selector[0] == TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR) {
+            return SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE;
+        }
+        if (presentation->selector[0] == TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR) {
+            return SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
+        }
+        return SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    }
+    selector = presentation->selector[0];
+    selector_state = presentation->state[0];
+    if (selector != AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR &&
+        selector != AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR) {
+        selector = presentation->selector[2];
+        selector_state = presentation->state[2];
+    }
+    if (selector == AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR ||
+        selector == AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR) {
+        uint8_t observed_variant = selector ==
+                AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR ?
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE :
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
+        /* Ailish keeps a retired idle variant on channel 2 underneath
+         * locomotion. After movement, state 65 is the old hidden animation,
+         * not a new request. Only a native state-1 entry may arm a fresh
+         * variant; an already-latched variant may continue through state 65. */
+        if (host_ailish_idle_variant_state == observed_variant ||
+            (host_ailish_idle_variant_armed && selector_state == 1u)) {
+            host_ailish_idle_variant_state = observed_variant;
+            host_ailish_idle_variant_seen_at_ms = now_ms;
+        }
+    } else if (host_ailish_idle_variant_state != 0u &&
+        (DWORD)(now_ms - host_ailish_idle_variant_seen_at_ms) >
+            AILISH_IDLE_VARIANT_CHANNEL_GRACE_MS) {
+        host_ailish_idle_variant_state = 0u;
+        host_ailish_idle_variant_seen_at_ms = 0u;
+    } else if (host_ailish_idle_variant_state == 0u &&
+               !host_ailish_idle_variant_armed) {
+        /* A clean base-idle witness separates a cancelled variant from the
+         * next native state-1 start. */
+        host_ailish_idle_variant_armed = TRUE;
+    }
+    return host_ailish_idle_variant_state != 0u ?
+        host_ailish_idle_variant_state : SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+}
+
+static BOOL host_actor_translation_moving(
     unsigned int actor_index,
     DWORD now_ms,
-    SudekiMpLanArenaActorSnapshot *snapshot
+    const SudekiMpLanArenaActorSnapshot *snapshot
 ) {
     float dx;
-    float dy;
     float dz;
-    BOOL moving = FALSE;
-    if (snapshot == NULL || actor_index >= 2u) return;
+    if (snapshot == NULL || actor_index >= 2u) return FALSE;
     if (host_previous_actor_position_valid[actor_index]) {
         dx = snapshot->x - host_previous_actor_position[actor_index][0];
-        dy = snapshot->y - host_previous_actor_position[actor_index][1];
         dz = snapshot->z - host_previous_actor_position[actor_index][2];
-        moving = dx * dx + dy * dy + dz * dz > 0.000025f;
+        if (dx * dx + dz * dz > 0.000025f) {
+            host_actor_last_translation_at_ms[actor_index] = now_ms;
+        }
     }
-    if (actor_index == 0u && host_actor_presentation_valid[actor_index]) {
-        moving = host_actor_presentation[actor_index].selector[0] ==
-                TAL_WORLD_MOVE_PRIMARY_SELECTOR &&
-            host_actor_presentation[actor_index].selector[1] ==
-                TAL_WORLD_MOVE_SECONDARY_SELECTOR;
-    } else if (actor_index == 1u && host_remote_ailish_owned) {
-        /* The authenticated input edge can lead Ailish's native locomotion by
-         * one controller tick, but it is not a presentation lease: it may be
-         * cleared by packet freshness while Sudeki is still advancing the
-         * settled run pair.  Publish MOVING whenever either the fresh input
-         * requests motion or the host renderer proves Ailish is actually in
-         * either half of her exact double-buffered locomotion pair (channels
-         * 0/1 or 2/3).  This keeps the client replica's animation coupled to
-         * the same host presentation the player sees instead of translating
-         * her through an idle pose. */
-        moving = host_remote_ailish_moving ||
-            (host_actor_presentation_valid[actor_index] &&
-             ((host_actor_presentation[actor_index].selector[0] ==
-                   AILISH_WORLD_MOVE_PRIMARY_SELECTOR &&
-               host_actor_presentation[actor_index].selector[1] ==
-                   AILISH_WORLD_MOVE_SECONDARY_SELECTOR) ||
-              (host_actor_presentation[actor_index].selector[2] ==
-                   AILISH_WORLD_MOVE_PRIMARY_SELECTOR &&
-               host_actor_presentation[actor_index].selector[3] ==
-                   AILISH_WORLD_MOVE_SECONDARY_SELECTOR)));
+    /* Slow authoritative movement can advance less than 0.005 units during
+     * every 50 ms snapshot while accumulating a large distance overall. The
+     * old per-snapshot-only test kept the replica latched for meters, then
+     * released that entire backlog as one teleport. Also measure from the
+     * last position actually exposed to the client while stationary. */
+    if (host_replica_idle_position_valid[actor_index] &&
+        !host_actor_was_moving[actor_index]) {
+        dx = snapshot->x - host_replica_idle_position[actor_index][0];
+        dz = snapshot->z - host_replica_idle_position[actor_index][1];
+        if (dx * dx + dz * dz > 0.000025f) {
+            host_actor_last_translation_at_ms[actor_index] = now_ms;
+        }
     }
     host_previous_actor_position[actor_index][0] = snapshot->x;
     host_previous_actor_position[actor_index][1] = snapshot->y;
     host_previous_actor_position[actor_index][2] = snapshot->z;
     host_previous_actor_position_valid[actor_index] = TRUE;
+    return host_actor_last_translation_at_ms[actor_index] != 0u &&
+        (DWORD)(now_ms - host_actor_last_translation_at_ms[actor_index]) <=
+            HOST_LOCOMOTION_STOP_GRACE_MS;
+}
+
+static void host_filter_stationary_replica_position(
+    unsigned int actor_index,
+    BOOL moving,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    if (snapshot == NULL || actor_index >= 2u) return;
+    /* Native animation/collision settling can continue to alter X/Z by a few
+     * thousandths after gameplay movement has stopped. Sending every one of
+     * those changes makes a kinematic client replica rock forward and back.
+     * Capture the final authoritative stop point once, then hold it until
+     * host translation becomes real movement again. */
+    if (moving || !host_replica_idle_position_valid[actor_index] ||
+        host_actor_was_moving[actor_index]) {
+        host_replica_idle_position[actor_index][0] = snapshot->x;
+        host_replica_idle_position[actor_index][1] = snapshot->z;
+        host_replica_idle_position_valid[actor_index] = TRUE;
+    } else {
+        snapshot->x = host_replica_idle_position[actor_index][0];
+        snapshot->z = host_replica_idle_position[actor_index][1];
+    }
+    host_actor_was_moving[actor_index] = moving;
+}
+
+static void host_apply_presentation_state(
+    unsigned int actor_index,
+    DWORD now_ms,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    BOOL moving;
+    uint8_t idle_variant_state;
+    if (snapshot == NULL || actor_index >= 2u) return;
+    /* Locomotion is an authoritative presentation fact, not an input fact.
+     * A held client stick can keep requesting movement forever against a
+     * wall, while Sudeki's host collision has already stopped the actor.
+     * Likewise native selector retirement can trail Tal's visible stop.
+     * Horizontal host translation plus a bounded grace gives both replicas
+     * the same deterministic stop edge. */
+    moving = host_actor_translation_moving(actor_index, now_ms, snapshot);
+    /* Ailish's native idle variants can contain a short root-motion lunge.
+     * It changes the host CPosition enough to look like movement, then returns
+     * to the idle origin. Do not transmit that as player locomotion unless an
+     * authenticated client movement direction is actually active. Collision
+     * still decides whether held input produces host translation. */
+    if (actor_index == 1u && !host_remote_ailish_moving) {
+        moving = FALSE;
+    }
+    if (actor_index == 1u &&
+        (moving || snapshot->hp == 0u ||
+         (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0)) {
+        host_ailish_idle_variant_state = 0u;
+        host_ailish_idle_variant_seen_at_ms = 0u;
+        host_ailish_idle_variant_armed = FALSE;
+    }
+    host_filter_stationary_replica_position(actor_index, moving, snapshot);
     if (snapshot->hp == 0u) {
         snapshot->animation_state =
             SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED;
@@ -274,19 +395,10 @@ static void host_apply_presentation_state(
     } else if (moving) {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    } else if (host_actor_presentation_valid[actor_index] &&
-               host_actor_presentation[actor_index].selector[0] ==
-                   (actor_index == 0u ? TAL_WORLD_IDLE_VARIANT_ONE_SELECTOR :
-                       AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR)) {
-        snapshot->animation_state =
-            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE;
-        snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    } else if (host_actor_presentation_valid[actor_index] &&
-               host_actor_presentation[actor_index].selector[0] ==
-                   (actor_index == 0u ? TAL_WORLD_IDLE_VARIANT_TWO_SELECTOR :
-                       AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR)) {
-        snapshot->animation_state =
-            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
+    } else if ((idle_variant_state = host_actor_idle_variant_state(
+                    actor_index, now_ms)) !=
+               SUDEKIMP_LAN_ARENA_ANIMATION_IDLE) {
+        snapshot->animation_state = idle_variant_state;
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
     } else {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
@@ -300,16 +412,19 @@ static void host_trace_native_presentation(
 ) {
     SudekiMpCleanroomActorPresentation current;
     DWORD now = GetTickCount();
+    DWORD trace_interval_ms;
     if (actor_index >= 2u ||
         !SudekiMpCleanroomEngineActorPresentation(actor, &current)) return;
     if (host_actor_presentation_valid[actor_index] &&
         memcmp(&host_actor_presentation[actor_index],
             &current, sizeof(current)) == 0) return;
-    if (host_actor_presentation_last_trace_at[actor_index] != 0u &&
-        (DWORD)(now - host_actor_presentation_last_trace_at[actor_index]) <
-            100u) return;
     host_actor_presentation[actor_index] = current;
     host_actor_presentation_valid[actor_index] = TRUE;
+    trace_interval_ms = SudekiMpLanArenaCollisionDebugMode() ==
+            SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_OFF ? 1000u : 100u;
+    if (host_actor_presentation_last_trace_at[actor_index] != 0u &&
+        (DWORD)(now - host_actor_presentation_last_trace_at[actor_index]) <
+            trace_interval_ms) return;
     host_actor_presentation_last_trace_at[actor_index] = now;
     SudekiMpLogFormat(
         "lan_arena_runtime event=host_native_presentation actor=%s "
@@ -338,16 +453,19 @@ static void client_trace_native_presentation(
 ) {
     SudekiMpCleanroomActorPresentation current;
     DWORD now = GetTickCount();
+    DWORD trace_interval_ms;
     if (actor_index >= 2u ||
         !SudekiMpCleanroomEngineActorPresentation(actor, &current)) return;
     if (client_actor_presentation_valid[actor_index] &&
         memcmp(&client_actor_presentation[actor_index],
             &current, sizeof(current)) == 0) return;
-    if (client_actor_presentation_last_trace_at[actor_index] != 0u &&
-        (DWORD)(now - client_actor_presentation_last_trace_at[actor_index]) <
-            100u) return;
     client_actor_presentation[actor_index] = current;
     client_actor_presentation_valid[actor_index] = TRUE;
+    trace_interval_ms = SudekiMpLanArenaCollisionDebugMode() ==
+            SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_OFF ? 1000u : 100u;
+    if (client_actor_presentation_last_trace_at[actor_index] != 0u &&
+        (DWORD)(now - client_actor_presentation_last_trace_at[actor_index]) <
+            trace_interval_ms) return;
     client_actor_presentation_last_trace_at[actor_index] = now;
     SudekiMpLogFormat(
         "lan_arena_runtime event=client_native_presentation actor=%s "
@@ -941,11 +1059,27 @@ static void lan_arena_render_start_entry(void) {
 }
 
 static void lan_arena_render_pre_world_entry(void) {
+    BOOL presentation_reasserted = FALSE;
     BOOL published = FALSE;
     original_render_start();
     if (runtime_config.local_role ==
             SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
         tal_initialized && ailish_initialized) {
+        presentation_reasserted =
+            SudekiMpLanArenaClientReplicaReassertPresentation();
+        if ((int)presentation_reasserted !=
+                client_presentation_reassert_state) {
+            client_presentation_reassert_state =
+                (int)presentation_reasserted;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=client_presentation_reassert "
+                "state=%s boundary=post_second_render_start_pre_world "
+                "win32_error=%lu "
+                "policy=authoritative_selector_without_resample_or_time_rewind\r\n",
+                presentation_reasserted ? "active" : "rejected",
+                presentation_reasserted ? 0ul :
+                    (unsigned long)GetLastError());
+        }
         published = SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
         if ((int)published != client_visible_transform_publish_state) {
             client_visible_transform_publish_state = (int)published;
@@ -1107,6 +1241,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     client_release_pending_logged = FALSE;
     client_replica_stop_state = -1;
     client_animation_basis_publish_state = -1;
+    client_presentation_reassert_state = -1;
     client_visible_transform_publish_state = -1;
     runtime_hook_restore_failed_logged = FALSE;
     dummy_release_pending_logged = FALSE;
@@ -1114,6 +1249,17 @@ BOOL SudekiMpInstallLanArenaRuntime(
         sizeof(host_previous_actor_position));
     ZeroMemory(host_previous_actor_position_valid,
         sizeof(host_previous_actor_position_valid));
+    ZeroMemory(host_actor_last_translation_at_ms,
+        sizeof(host_actor_last_translation_at_ms));
+    ZeroMemory(host_replica_idle_position,
+        sizeof(host_replica_idle_position));
+    ZeroMemory(host_replica_idle_position_valid,
+        sizeof(host_replica_idle_position_valid));
+    ZeroMemory(host_actor_was_moving,
+        sizeof(host_actor_was_moving));
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
     ZeroMemory(host_actor_presentation,
         sizeof(host_actor_presentation));
     ZeroMemory(host_actor_presentation_valid,
@@ -1195,6 +1341,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     client_release_pending_logged = FALSE;
     client_replica_stop_state = -1;
     client_animation_basis_publish_state = -1;
+    client_presentation_reassert_state = -1;
     client_visible_transform_publish_state = -1;
     runtime_hook_restore_failed_logged = FALSE;
     dummy_release_pending_logged = FALSE;
@@ -1202,6 +1349,15 @@ void SudekiMpUninstallLanArenaRuntime(void) {
         sizeof(host_previous_actor_position));
     ZeroMemory(host_previous_actor_position_valid,
         sizeof(host_previous_actor_position_valid));
+    ZeroMemory(host_actor_last_translation_at_ms,
+        sizeof(host_actor_last_translation_at_ms));
+    ZeroMemory(host_replica_idle_position_valid,
+        sizeof(host_replica_idle_position_valid));
+    ZeroMemory(host_actor_was_moving,
+        sizeof(host_actor_was_moving));
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
     ZeroMemory(host_actor_presentation,
         sizeof(host_actor_presentation));
     ZeroMemory(host_actor_presentation_valid,
@@ -1259,6 +1415,15 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     client_replica_discard_logged = FALSE;
     ZeroMemory(host_previous_actor_position_valid,
         sizeof(host_previous_actor_position_valid));
+    ZeroMemory(host_actor_last_translation_at_ms,
+        sizeof(host_actor_last_translation_at_ms));
+    ZeroMemory(host_replica_idle_position_valid,
+        sizeof(host_replica_idle_position_valid));
+    ZeroMemory(host_actor_was_moving,
+        sizeof(host_actor_was_moving));
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
     ZeroMemory(host_actor_presentation_valid,
         sizeof(host_actor_presentation_valid));
     ZeroMemory(client_actor_presentation_valid,
@@ -1342,6 +1507,15 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
     host_ailish_spawn_attempted = FALSE;
     ZeroMemory(host_previous_actor_position_valid,
         sizeof(host_previous_actor_position_valid));
+    ZeroMemory(host_actor_last_translation_at_ms,
+        sizeof(host_actor_last_translation_at_ms));
+    ZeroMemory(host_replica_idle_position_valid,
+        sizeof(host_replica_idle_position_valid));
+    ZeroMemory(host_actor_was_moving,
+        sizeof(host_actor_was_moving));
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
     ZeroMemory(host_actor_presentation_valid,
         sizeof(host_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;

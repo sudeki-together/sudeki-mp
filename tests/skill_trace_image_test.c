@@ -2836,6 +2836,26 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN idle-variant semantic mapping mismatch\n", stderr);
             ++failures;
         }
+        if (SudekiMpLanArenaClientAnimationShouldResetTime(
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                FALSE) ||
+            SudekiMpLanArenaClientAnimationShouldResetTime(
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+                TRUE) ||
+            !SudekiMpLanArenaClientAnimationShouldResetTime(
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+                FALSE) ||
+            !SudekiMpLanArenaClientAnimationShouldResetTime(
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+                FALSE)) {
+            fprintf(stderr,
+                "LAN client animation time-reset policy mismatch\n");
+            ++failures;
+        }
     }
     /* The harness maps sections without applying PE base relocations.  Put the
      * exact animation methods used by the LAN replica at their mapped-image

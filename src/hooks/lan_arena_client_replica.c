@@ -154,6 +154,19 @@ BOOL SudekiMpLanArenaClientIdleVariantSelector(
     return TRUE;
 }
 
+BOOL SudekiMpLanArenaClientAnimationShouldResetTime(
+    uint8_t previous_animation_state,
+    uint8_t next_animation_state,
+    BOOL renderer_already_matches_target
+) {
+    if (renderer_already_matches_target ||
+        previous_animation_state == next_animation_state ||
+        next_animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL readable_memory(const void *pointer, size_t length) {
     MEMORY_BASIC_INFORMATION information;
     uintptr_t address = (uintptr_t)pointer;
@@ -286,12 +299,26 @@ static void set_animation_channel(
 ) {
     unsigned int submodel;
     for (submodel = 0u; submodel < submodels; ++submodel) {
-        methods->set_selector(renderer, channel, submodel, selector);
-        methods->set_state(renderer, channel, submodel, state);
-        if (reset_time) {
+        int current_selector = methods->get_selector(
+            renderer, channel, submodel);
+        int current_state = methods->get_state(
+            renderer, channel, submodel);
+        float current_rate = methods->get_rate(
+            renderer, channel, submodel);
+        BOOL selector_changed = current_selector != selector;
+        BOOL state_changed = current_state != state;
+        if (selector_changed) {
+            methods->set_selector(renderer, channel, submodel, selector);
+        }
+        if (state_changed) {
+            methods->set_state(renderer, channel, submodel, state);
+        }
+        if (reset_time && (selector_changed || state_changed)) {
             methods->set_time(renderer, channel, submodel, 0.0f, 0);
         }
-        methods->set_rate(renderer, channel, submodel, rate);
+        if (!isfinite(current_rate) || fabsf(current_rate - rate) > 0.001f) {
+            methods->set_rate(renderer, channel, submodel, rate);
+        }
     }
 }
 
@@ -438,6 +465,8 @@ static BOOL apply_actor_presentation(
     float action_rate;
     BOOL weak_attack;
     BOOL logical_transition;
+    BOOL base_target_already_matches;
+    BOOL reset_base_time;
     BOOL preserve_ailish_auxiliary = FALSE;
     if (character == NULL || snapshot == NULL || actor_index >= 2u ||
         snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED) {
@@ -491,7 +520,11 @@ static BOOL apply_actor_presentation(
             return TRUE;
         }
     }
-    state_zero = 0;
+    /* A completed native idle variant retires into state 128 on both retail
+     * actors. Sending state 0 here briefly starts the base idle from its
+     * entry pose before Sudeki advances it, which is visible as an end snap.
+     * Movement and variant branches below retain their proven start states. */
+    state_zero = moving ? 0 : 128;
     if (actor_index == 0u) {
         selector_zero = moving ?
             TAL_WORLD_MOVE_PRIMARY_SELECTOR : TAL_WORLD_IDLE_SELECTOR;
@@ -524,10 +557,19 @@ static BOOL apply_actor_presentation(
             state_zero = 1;
         }
     }
+    base_target_already_matches = animation_channel_matches(
+        renderer, &methods, submodels, 0, selector_zero, rate_zero);
+    reset_base_time = logical_transition &&
+        SudekiMpLanArenaClientAnimationShouldResetTime(
+            lease->valid ? lease->animation_state :
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+            snapshot->animation_state,
+            base_target_already_matches);
     set_animation_channel(renderer, &methods, submodels, 0,
-        selector_zero, state_zero, rate_zero, logical_transition);
+        selector_zero, state_zero, rate_zero, reset_base_time);
     set_animation_channel(renderer, &methods, submodels, 1,
-        selector_one, state_one, rate_one, logical_transition);
+        selector_one, state_one, rate_one,
+        logical_transition && moving && !base_target_already_matches);
     expected_blend_zero = moving ? 0.99f : 0.0f;
     expected_blend_three = 0.0f;
     action_selector = 0;
@@ -950,6 +992,52 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     if (snapshot.enemy_count == 0u) return TRUE;
     return snapshot.enemy_count == 1u &&
         apply_training_dummy(&snapshot.enemies[0]);
+}
+
+BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
+    static const SudekiMpCleanroomActor actors[2] = {
+        SUDEKIMP_CLEANROOM_TAL,
+        SUDEKIMP_CLEANROOM_AILISH
+    };
+    static const uint8_t expected_types[2] = {
+        SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE
+    };
+    const SudekiMpLanArenaActorSnapshot *snapshots[2];
+    uint8_t *characters[2];
+    unsigned int actor_index;
+    BOOL applied[2] = { FALSE, FALSE };
+    if (!client_session_authenticated() || !replica_diagnostics.valid ||
+        last_applied_snapshot.match_state != 1u) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    snapshots[0] = &last_applied_snapshot.tal;
+    snapshots[1] = &last_applied_snapshot.ailish;
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        characters[actor_index] = (uint8_t *)
+            SudekiMpCleanroomEngineActorEntity(actors[actor_index]);
+        if (snapshots[actor_index]->actor_type != expected_types[actor_index] ||
+            snapshots[actor_index]->native_entity_id !=
+                expected_types[actor_index] ||
+            characters[actor_index] != last_applied_characters[actor_index] ||
+            !readable_memory(characters[actor_index],
+                CHARACTER_POSITION_OFFSET + sizeof(void *)) ||
+            *(void **)(characters[actor_index] + CHARACTER_POSITION_OFFSET) !=
+                last_applied_positions[actor_index]) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+    }
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        applied[actor_index] = apply_actor_presentation(
+            characters[actor_index], snapshots[actor_index], actor_index);
+    }
+    if (!applied[0] || !applied[1]) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL actor_visible_transform_matches_position(

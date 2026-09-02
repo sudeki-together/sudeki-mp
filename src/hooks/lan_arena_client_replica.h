@@ -52,6 +52,15 @@ BOOL SudekiMpLanArenaClientIdleVariantSelector(
     int *selector
 );
 
+/* Pure client presentation policy. Native idle is a loop, so returning to it
+ * must not rewind its clock. If Sudeki has already entered the requested
+ * selector, adopting that clock also avoids a visible start-frame restart. */
+BOOL SudekiMpLanArenaClientAnimationShouldResetTime(
+    uint8_t previous_animation_state,
+    uint8_t next_animation_state,
+    BOOL renderer_already_matches_target
+);
+
 /* Applies authenticated host transforms/facing/resources for local Ailish,
  * the AI-disabled Tal replica, and the fixed training dummy. */
 BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module);
@@ -60,6 +69,11 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module);
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void);
 void SudekiMpResetLanArenaClientReplica(void);
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void);
+/* Reasserts only the presentation semantics from the already-sampled frame.
+ * This runs after Sudeki's native animation update so a client-local idle
+ * scheduler cannot briefly replace the host-authoritative selector before
+ * world draw. It consumes no packet and does not touch transforms/resources. */
+BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void);
 /* Publish the already-authoritative CPosition basis through Sudeki's native
  * world-matrix path. The LAN runtime uses this at its early animation-basis
  * boundaries and again as a late visible-transform verification; it consumes

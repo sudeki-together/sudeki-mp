@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -281,8 +282,8 @@ static void verify_callback_order(void) {
     callback_event_count = 0u;
     callback_events[0] = '\0';
     lan_arena_render_pre_world_entry();
-    check(strcmp(callback_events, "RP") == 0,
-        "pre-world callback orders native render before final publish");
+    check(strcmp(callback_events, "RSP") == 0,
+        "pre-world callback orders native render, semantic reassert, publish");
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -296,6 +297,146 @@ static void verify_callback_order(void) {
     original_frame_end = NULL;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
+}
+
+static void verify_authoritative_locomotion_stop_policy(void) {
+    SudekiMpLanArenaActorSnapshot tal;
+    SudekiMpLanArenaActorSnapshot ailish;
+    memset(&tal, 0, sizeof(tal));
+    memset(&ailish, 0, sizeof(ailish));
+    tal.hp = 100u;
+    ailish.hp = 100u;
+    memset(host_previous_actor_position, 0,
+        sizeof(host_previous_actor_position));
+    memset(host_previous_actor_position_valid, 0,
+        sizeof(host_previous_actor_position_valid));
+    memset(host_actor_last_translation_at_ms, 0,
+        sizeof(host_actor_last_translation_at_ms));
+    memset(host_replica_idle_position, 0,
+        sizeof(host_replica_idle_position));
+    memset(host_replica_idle_position_valid, 0,
+        sizeof(host_replica_idle_position_valid));
+    memset(host_actor_was_moving, 0,
+        sizeof(host_actor_was_moving));
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
+    memset(host_actor_presentation_valid, 0,
+        sizeof(host_actor_presentation_valid));
+
+    host_apply_presentation_state(0u, 100u, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "first Tal sample begins idle without fabricated translation");
+    tal.x = 0.01f;
+    host_apply_presentation_state(0u, 150u, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+        "authoritative Tal horizontal translation starts locomotion");
+    host_apply_presentation_state(0u, 300u, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+        "Tal stop grace includes its exact bounded endpoint");
+    host_apply_presentation_state(0u, 301u, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "Tal becomes idle immediately after bounded stop grace");
+    tal.x = 0.012f;
+    host_apply_presentation_state(0u, 351u, &tal);
+    check(fabsf(tal.x - 0.01f) < 0.00001f,
+        "stationary Tal replica suppresses sub-threshold native settling");
+    tal.x = 0.014f;
+    host_apply_presentation_state(0u, 376u, &tal);
+    check(fabsf(tal.x - 0.01f) < 0.00001f,
+        "successive sub-threshold Tal steps remain bounded by idle latch");
+    tal.x = 0.016f;
+    host_apply_presentation_state(0u, 401u, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
+          fabsf(tal.x - 0.016f) < 0.00001f,
+        "cumulative Tal translation releases latch without hidden backlog");
+
+    host_remote_ailish_owned = TRUE;
+    host_remote_ailish_moving = TRUE;
+    host_apply_presentation_state(1u, 1000u, &ailish);
+    ailish.y = 1.0f;
+    host_apply_presentation_state(1u, 1050u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "held Ailish input and vertical floor motion cannot fabricate running");
+    ailish.z = 0.01f;
+    host_apply_presentation_state(1u, 1100u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+        "authoritative Ailish horizontal translation starts locomotion");
+    host_apply_presentation_state(1u, 1251u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "Ailish stops against a wall despite continuously held input");
+    ailish.z = 0.012f;
+    host_apply_presentation_state(1u, 1301u, &ailish);
+    check(fabsf(ailish.z - 0.01f) < 0.00001f,
+        "stationary Ailish replica suppresses native root-motion settling");
+    host_remote_ailish_owned = FALSE;
+    host_remote_ailish_moving = FALSE;
+    ailish.z = 0.25f;
+    host_apply_presentation_state(1u, 1351u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+          fabsf(ailish.z - 0.01f) < 0.00001f,
+        "Ailish idle root-motion lunge cannot release latch without input");
+
+    memset(&host_actor_presentation[1], 0,
+        sizeof(host_actor_presentation[1]));
+    host_actor_presentation_valid[1] = TRUE;
+    host_ailish_idle_variant_state = 0u;
+    host_ailish_idle_variant_seen_at_ms = 0u;
+    host_ailish_idle_variant_armed = TRUE;
+    host_actor_presentation[1].selector[0] = AILISH_WORLD_IDLE_SELECTOR;
+    host_actor_presentation[1].selector[2] =
+        AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR;
+    host_actor_presentation[1].state[2] = 1u;
+    host_apply_presentation_state(1u, 2000u, &ailish);
+    check(ailish.animation_state ==
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+        "Ailish idle variant is recognized while cross-fading on channel two");
+    host_actor_presentation[1].selector[2] = 0;
+    host_actor_presentation[1].state[2] = 192u;
+    host_apply_presentation_state(1u, 2250u, &ailish);
+    check(ailish.animation_state ==
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+        "Ailish idle variant survives exact channel-transition grace endpoint");
+    host_apply_presentation_state(1u, 2251u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+        "Ailish idle variant retires after stable base-idle evidence");
+    host_actor_presentation[1].selector[0] =
+        AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    host_actor_presentation[1].state[0] = 1u;
+    host_apply_presentation_state(1u, 2300u, &ailish);
+    check(ailish.animation_state ==
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO,
+        "Ailish second idle variant remains recognized on channel zero");
+
+    host_remote_ailish_moving = TRUE;
+    ailish.z += 0.02f;
+    host_apply_presentation_state(1u, 2350u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
+          !host_ailish_idle_variant_armed,
+        "Ailish movement cancels and disarms the active idle variant");
+    host_remote_ailish_moving = FALSE;
+    host_actor_presentation[1].selector[0] = AILISH_WORLD_IDLE_SELECTOR;
+    host_actor_presentation[1].state[0] = 128u;
+    host_actor_presentation[1].selector[2] =
+        AILISH_WORLD_IDLE_VARIANT_TWO_SELECTOR;
+    host_actor_presentation[1].state[2] = 65u;
+    host_apply_presentation_state(1u, 2400u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+          !host_ailish_idle_variant_armed,
+        "hidden state-65 Ailish variant cannot resume after movement");
+    host_actor_presentation[1].selector[2] = 0;
+    host_actor_presentation[1].state[2] = 192u;
+    host_apply_presentation_state(1u, 2450u, &ailish);
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+          host_ailish_idle_variant_armed,
+        "clean Ailish base idle rearms future native variants");
+    host_actor_presentation[1].selector[2] =
+        AILISH_WORLD_IDLE_VARIANT_ONE_SELECTOR;
+    host_actor_presentation[1].state[2] = 1u;
+    host_apply_presentation_state(1u, 2500u, &ailish);
+    check(ailish.animation_state ==
+            SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
+        "new native state-1 Ailish variant starts after clean rearm");
 }
 
 int main(void) {
@@ -317,6 +458,7 @@ int main(void) {
     verify_second_render_mismatch_rollback(image);
     verify_downstream_failure_rollback(image);
     verify_callback_order();
+    verify_authoritative_locomotion_stop_policy();
 
     VirtualFree(image, 0u, MEM_RELEASE);
     if (failures != 0) {
@@ -478,6 +620,11 @@ void SudekiMpResetLanArenaClientReplica(void) {
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     record_callback_event('A');
     return replica_apply_result;
+}
+
+BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
+    record_callback_event('S');
+    return TRUE;
 }
 
 BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void) {
