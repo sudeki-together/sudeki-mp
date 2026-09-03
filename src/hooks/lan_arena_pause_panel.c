@@ -458,13 +458,13 @@ static const char *combat_action_label(
 ) {
     BOOL enabled = FALSE;
     if (status->local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
-        return "COMBAT HOST CONTROLLED";
+        return "COMBAT FOLLOWS WORLD";
     }
-    if (!status->peer_connected) return "COMBAT NEEDS CLIENT";
+    if (!status->peer_connected) return "TEST COMBAT NEEDS CLIENT";
     if (!SudekiMpCleanroomEngineCombatMode(&enabled)) {
-        return "COMBAT NOT READY";
+        return "TEST COMBAT NOT READY";
     }
-    return enabled ? "END COMBAT" : "START COMBAT";
+    return enabled ? "TEST: END COMBAT" : "TEST: START COMBAT";
 }
 
 static BOOL run_primary_action(void) {
@@ -517,7 +517,7 @@ static BOOL run_combat_action(void) {
     }
     SudekiMpLogFormat(
         "lan_arena_pause_panel event=combat_action result=%s error=%lu "
-        "policy=host_only_native_group_transition\r\n",
+        "policy=cleanroom_test_only_native_world_flag_replicated\r\n",
         result ? "success" : "rejected",
         (unsigned long)last_action_error);
     return result;
@@ -739,7 +739,7 @@ static BOOL update_overlay_texture(void *device) {
         draw_centered_text((uint32_t *)locked.bits, locked.pitch,
             320, 404,
             status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
-                "ENTER SELECT  F8 COMBAT  ESC BACK" :
+                "ENTER SELECT  F8 TEST COMBAT  ESC BACK" :
                 "ENTER SELECT  ESC BACK",
             UINT32_C(0xffb9c0cc), 1);
     }

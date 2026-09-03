@@ -1,9 +1,16 @@
 # LAN arena development guide
 
-The LAN arena is a closed, host-authoritative two-process experiment. The host
-controls Tal and owns simulation, AI, damage, resources, the training dummy,
-and all native action execution. The client controls Ailish and renders
-authenticated host snapshots through its own full-screen Sudeki process.
+The LAN arena is a closed, authoritative shared-simulation two-process
+experiment. The host process currently runs that shared simulation: it
+controls Tal and resolves AI, damage, resources, the training dummy, and
+native action execution. The client controls Ailish and renders authenticated
+snapshots through its own full-screen Sudeki process. Combat mode itself is
+not invented by the host networking layer; Sudeki's native dungeon/world
+trigger changes that state and the shared simulation replicates the result.
+
+The cross-module input-to-authority-to-wire-to-replay contract and its next
+research targets are maintained in the
+[LAN arena combat synchronization graph](lan-arena-combat-graph.md).
 
 This profile never reads, writes, copies, or transfers campaign saves. It
 always launches Sudeki's cleanroom `testroom`, and it does not share hooks or
@@ -12,7 +19,12 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LAN6`, exact GOG executable hash only.
+- Protocol/build: `LA14`, exact GOG executable hash only. Actor snapshots
+  include a bounded four-edge action journal so rapid Tal combo stages are
+  presented once instead of being collapsed by the 20 Hz snapshot cadence.
+  The currently active semantic action also carries a 1/256-unit host phase;
+  clients interpolate that phase instead of independently running a terminal
+  attack clock.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
 - Client actions: camera-relative movement and host-validated weak attack.
@@ -29,24 +41,58 @@ experiments.
   network. A generic Ailish idle also suppresses client-only fidgets, while her
   renderer still owns animation-clock and blend progression inside the
   authenticated semantic clip.
-- Combat is entered and left only by the host through Sudeki's native group
-  transition. Out-of-combat attack edges are consumed without native execution
-  or a replicated attack pose. The host may toggle that same verified native
-  transition from the Multiplayer page or directly with `F8`; both paths
-  require an authenticated client and confirm the resulting combat state. The
-  host serializes that mode in every snapshot; the client mirrors the verified
-  native transition for camera, HUD, and actor presentation only, while damage,
-  AI, and action execution remain host-authoritative.
-- Replica presentation maps semantic states to the verified actor-local combat
-  clips while combat is active: Tal's combat idle/paired locomotion and three
-  observed weak-attack variants, plus Ailish's combat idle/run/weak-shot layer.
-  A bounded semantic action variant crosses the wire; each process keeps its
-  native selector numbers local. Entering and leaving combat temporarily
-  suspends replica animation writes until Sudeki's own Tal/Ailish weapon-draw
-  or sheath transition reaches its verified idle stance, so the replica cannot
-  interrupt a sword/staff attachment transaction. The host keeps an action
-  semantic active until its native renderer retires the clip, so the client no
-  longer truncates attacks to a fixed 250 ms pulse.
+- Combat is native world state. In campaign play, Sudeki's authored
+  dungeon/world trigger changes the group combat flag; the shared simulation
+  observes that result and serializes it in every snapshot. Each client mirrors
+  the same verified native transition for camera, HUD, weapons, and actor
+  presentation. Out-of-combat attack edges are consumed without native
+  execution or a replicated attack pose. Because the cleanroom has no authored
+  dungeon trigger, the Multiplayer page and `F8` expose an explicitly
+  test-only way to invoke the same native transition. They are not the
+  production combat-state source. Damage, AI, targeting, and action execution
+  remain canonical shared-simulation outcomes.
+- A bounded semantic action variant crosses the wire; each process keeps its
+  native selector numbers local. The host captures and executes those actions.
+  After `F8`, Sudeki's native Tal/Ailish weapon-draw transition first attaches
+  the weapons; replica animation resumes only after that transition reaches
+  its verified idle. Ailish's first-person and world renderers are treated as
+  distinct tables, and every world selector is resolved through the active
+  actor-local animation bank before it may be written. Leaving combat likewise
+  waits for the native sheath transition before world presentation resumes.
+- Tal's melee presentation now follows the native combo transition graph, not
+  inferred mouse edges. `W` means native Weak/Mouse1 and `S` means native
+  Strong/Mouse2. The first two stages and all eight observed three-input
+  branches are represented independently:
+
+  | Native input history | Host selector | LAN semantic |
+  | --- | ---: | --- |
+  | `W` | 50 | Weak 1 |
+  | `S` | 52 | Strong 1 |
+  | `WW` | 51 | Weak 2 |
+  | `WS` | 53 | Strong 2 |
+  | `WWW` | 62 | Weak 3 |
+  | `WWS` | 54 | WWS finisher |
+  | `SWW` | 60 | SWW finisher |
+  | `SSS` | 61 | SSS finisher |
+  | `SWS` | 63 | SWS finisher |
+  | `SSW` | 65 | SSW finisher |
+  | `WSW` | 68 | WSW finisher |
+  | `WSS` | 69 | WSS finisher |
+  | `WSS` (native alternate) | 70 | WSS alternate finisher |
+
+  Sweep and block retain separate semantic variants. Inputs rejected by
+  Sudeki's timing/state gates do not create a LAN action: the host transmits
+  only an observed native selector transition. This prevents an ignored late
+  click from fabricating another attack on the client. Selector `70` is kept
+  distinct because the same acknowledged `WSS` history selected both `69`
+  and `70` under different native timing/target/direction conditions; the
+  exact transition lookup confirms those conditions remain host-owned.
+- Action retirement is also part of the shared timeline. While a native action
+  is active, the host quantizes its actor-local animation clock into the LA14
+  semantic snapshot. Clients interpolate and verify that phase on their own
+  actor-local selector. The first host IDLE snapshot is the retirement edge;
+  there is no client-only timeout or fixed crossfade deciding when an attack
+  ends.
 - The client may open and browse Ailish's native QuickMenu. Native confirm/use
   commands are consumed locally until category-specific requests can be
   validated and executed by the host. Skills, items, weapons, Spirit,
@@ -86,8 +132,9 @@ transaction so both processes continue rendering and consuming authoritative
 snapshots while either player reads it; gameplay input is neutralized only in
 the process that owns the page. The host page can start/end the session and
 enter/leave native arena combat. The client page can join/leave and reports
-combat as host-controlled. It also reports protocol, hash, build, map, role,
-token, sequence, malformed-packet, authority, busy, and timeout failures.
+combat as native world state synchronized by the shared simulation. It also
+reports protocol, hash, build, map, role, token, sequence, malformed-packet,
+authority, busy, and timeout failures.
 
 ## Same-machine validation
 
@@ -102,6 +149,43 @@ tools/lan-arena-loopback.sh --network-test
 tools/lan-arena-loopback.sh --start
 tools/lan-arena-loopback.sh --stop
 ```
+
+For bounded local diagnostics, `tools/lan-arena-live-control.sh` resolves only
+the exact named host/client windows. It can report state, request client combat,
+exercise Tal's weak/strong/sweep/block inputs, hold client movement briefly,
+move the client mouse, or capture both windows while recording each action in
+`build/mingw32/lan-loopback/live-control.log`. It is an opt-in test tool and is
+never started by either LAN profile. The client-combat command uses
+`SudekiMP.LanArenaOperator.exe` and an auto-reset event in that client's
+isolated Wine/NT namespace. It therefore cannot leak an F8 edge into the host
+or depend on desktop-global Wine key state.
+
+The same local operator API can exercise the current combat slice without
+moving desktop focus or synthesizing cross-prefix mouse state:
+
+```sh
+tools/lan-arena-live-control.sh --status
+tools/lan-arena-live-control.sh --client-combat
+tools/lan-arena-live-control.sh --client-turn-right
+tools/lan-arena-live-control.sh --client-fire-hold 3000
+tools/lan-arena-live-control.sh --host-combo 450
+tools/lan-arena-live-control.sh --host-sequence WWS 450
+tools/lan-arena-live-control.sh --host-sequence WSW 450
+tools/lan-arena-live-control.sh --host-strong
+tools/lan-arena-live-control.sh --host-sweep
+tools/lan-arena-live-control.sh --host-block 500
+tools/lan-arena-live-control.sh --capture
+```
+
+The operator executable opens named, prefix-local Win32 events; it is not a
+network service and cannot be reached by the LAN peer. The shell wrapper also
+requires exactly one window with each role-specific title before it performs
+any focus-sensitive action. `--host-combo` contains no intermediate image
+capture, because a Wine screenshot can take long enough to miss Sudeki's
+native second/third-hit timing window. Use `--host-combo-capture` only for
+presentation snapshots, not timing acceptance. The current supported image
+accepts all three native Tal stages across the verified 350–550 ms interval;
+the command defaults to 450 ms when no interval is supplied.
 
 The LAN socket pump runs on a synchronized transport-only worker. It never
 reads or writes Sudeki game objects, and it keeps the handshake/keepalive alive

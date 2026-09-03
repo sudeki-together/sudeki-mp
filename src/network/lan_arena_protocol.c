@@ -5,8 +5,11 @@
 
 #define LAN_HEADER_SIZE 20u
 #define LAN_HELLO_SIZE 52u
-#define LAN_INPUT_SIZE 17u
-#define LAN_ACTOR_SIZE 36u
+#define LAN_INPUT_SIZE 26u
+#define LAN_ACTION_EVENT_SIZE 7u
+#define LAN_ACTOR_ACTION_HISTORY_OFFSET 42u
+#define LAN_ACTOR_SIZE (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
+    (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
 #define LAN_ENEMY_SIZE 21u
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
 #define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE) + 1u)
@@ -80,6 +83,84 @@ static int valid_coordinate(float value) {
     return isfinite(value) && value > -1000000.0f && value < 1000000.0f;
 }
 
+static int valid_input_aim(const SudekiMpLanArenaInput *input) {
+    double x;
+    double y;
+    double z;
+    double length_squared;
+    if (input == NULL) return 0;
+    x = (double)input->aim_direction_x / 32767.0;
+    y = (double)input->aim_direction_y / 32767.0;
+    z = (double)input->aim_direction_z / 32767.0;
+    length_squared = x * x + y * y + z * z;
+    /* An all-zero vector explicitly means that the client camera was not yet
+     * available. Otherwise accept only a bounded near-unit direction. */
+    return length_squared == 0.0 ||
+        (length_squared >= 0.25 && length_squared <= 2.25);
+}
+
+static int valid_actor_action_pair(
+    uint8_t combat_state,
+    uint8_t action_variant
+) {
+    switch (combat_state) {
+    case SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK:
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWW ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSW ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSW;
+    case SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK:
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_STRONG ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_STRONG_TWO ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS ||
+            action_variant ==
+                SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWS ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSS;
+    case SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK:
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_SWEEP;
+    case SUDEKIMP_LAN_ARENA_COMBAT_BLOCK:
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK;
+    default:
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    }
+}
+
+static int action_sequence_newer(uint16_t candidate, uint16_t previous) {
+    return candidate != previous &&
+        (uint16_t)(candidate - previous) < 0x8000u;
+}
+
+static int valid_actor_action_history(
+    const SudekiMpLanArenaActorSnapshot *actor,
+    uint8_t expected_type
+) {
+    unsigned int index;
+    if (actor == NULL ||
+        actor->action_history_count >
+            SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) return 0;
+    for (index = 0u; index < actor->action_history_count; ++index) {
+        const SudekiMpLanArenaActionEvent *event =
+            &actor->action_history[index];
+        if (event->sequence == 0u ||
+            event->variant < SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE ||
+            event->variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
+            (expected_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+             event->variant != SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
+            (index != 0u && !action_sequence_newer(
+                event->sequence,
+                actor->action_history[index - 1u].sequence))) {
+            return 0;
+        }
+    }
+    return actor->action_history_count == 0u ||
+        actor->action_history[actor->action_history_count - 1u].sequence ==
+            actor->action_sequence;
+}
+
 static int valid_actor_snapshot(
     const SudekiMpLanArenaActorSnapshot *actor,
     uint8_t expected_type
@@ -87,9 +168,10 @@ static int valid_actor_snapshot(
     float facing_length;
     if (actor == NULL || actor->actor_type != expected_type ||
         actor->native_entity_id != expected_type ||
-        actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE ||
+        actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
+        actor->action_phase_valid > 1u ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
-        actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED ||
+        actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_BLOCK ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         actor->sp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         !valid_coordinate(actor->x) || !valid_coordinate(actor->y) ||
@@ -104,11 +186,20 @@ static int valid_actor_snapshot(
               SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED ||
           actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED)) ||
         ((actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) !=
-         (actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK)) ||
+         (actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK ||
+          actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK ||
+          actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK ||
+          actor->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_BLOCK)) ||
         ((actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) !=
          (actor->action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE)) ||
+        !valid_actor_action_pair(
+            actor->combat_state, actor->action_variant) ||
         (expected_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
-         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE)) {
+         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
+        !valid_actor_action_history(actor, expected_type) ||
+        (actor->action_phase_valid &&
+         actor->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) ||
+        (!actor->action_phase_valid && actor->action_phase_q8 != 0u)) {
         return 0;
     }
     facing_length = sqrtf(actor->facing_x * actor->facing_x +
@@ -149,6 +240,7 @@ int SudekiMpLanArenaSnapshotValid(
 }
 
 static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *actor) {
+    unsigned int index;
     if (output == NULL || actor == NULL ||
         (actor->actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
          actor->actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
@@ -166,10 +258,27 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     write_float(output + 24u, actor->facing_z);
     write_u32(output + 28u, actor->hp);
     write_u32(output + 32u, actor->sp);
+    write_u16(output + 36u, actor->action_sequence);
+    write_u16(output + 38u, actor->action_phase_q8);
+    output[40] = actor->action_phase_valid;
+    output[41] = actor->action_history_count;
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
+         ++index) {
+        uint8_t *entry = output + LAN_ACTOR_ACTION_HISTORY_OFFSET +
+            index * LAN_ACTION_EVENT_SIZE;
+        if (index < actor->action_history_count) {
+            write_u16(entry, actor->action_history[index].sequence);
+            entry[2] = actor->action_history[index].variant;
+            write_u32(entry + 3u, actor->action_history[index].host_tick);
+        } else {
+            memset(entry, 0, LAN_ACTION_EVENT_SIZE);
+        }
+    }
     return 1;
 }
 
 static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor) {
+    unsigned int index;
     if (input == NULL || actor == NULL ||
         (input[0] != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
          input[0] != SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
@@ -187,6 +296,20 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->facing_z = read_float(input + 24u);
     actor->hp = read_u32(input + 28u);
     actor->sp = read_u32(input + 32u);
+    actor->action_sequence = read_u16(input + 36u);
+    actor->action_phase_q8 = read_u16(input + 38u);
+    actor->action_phase_valid = input[40];
+    actor->action_history_count = input[41];
+    if (actor->action_history_count >
+            SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) return 0;
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
+         ++index) {
+        const uint8_t *entry = input + LAN_ACTOR_ACTION_HISTORY_OFFSET +
+            index * LAN_ACTION_EVENT_SIZE;
+        actor->action_history[index].sequence = read_u16(entry);
+        actor->action_history[index].variant = entry[2];
+        actor->action_history[index].host_tick = read_u32(entry + 3u);
+    }
     return 1;
 }
 
@@ -223,7 +346,11 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             *size = 4u;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_INPUT:
-            if (packet->body.input.weak_attack_pressed > 1u) {
+            if (packet->body.input.weak_attack_pressed > 1u ||
+                packet->body.input.weak_attack_held > 1u ||
+                packet->body.input.ranged_first_person_active > 1u ||
+                packet->body.input.cleanroom_combat_test_pressed > 1u ||
+                !valid_input_aim(&packet->body.input)) {
                 return 0;
             }
             write_u32(output, packet->body.input.sequence);
@@ -231,7 +358,13 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             write_u32(output + 8u, packet->body.input.client_tick);
             write_s16(output + 12u, packet->body.input.world_direction_x);
             write_s16(output + 14u, packet->body.input.world_direction_z);
-            output[16] = packet->body.input.weak_attack_pressed;
+            write_s16(output + 16u, packet->body.input.aim_direction_x);
+            write_s16(output + 18u, packet->body.input.aim_direction_y);
+            write_s16(output + 20u, packet->body.input.aim_direction_z);
+            output[22] = packet->body.input.weak_attack_pressed;
+            output[23] = packet->body.input.weak_attack_held;
+            output[24] = packet->body.input.ranged_first_person_active;
+            output[25] = packet->body.input.cleanroom_combat_test_pressed;
             *size = LAN_INPUT_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
@@ -345,7 +478,8 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.reject_reason = (SudekiMpLanArenaRejectReason)read_u32(payload);
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_INPUT:
-            if (payload_size != LAN_INPUT_SIZE || payload[16] > 1u) {
+            if (payload_size != LAN_INPUT_SIZE || payload[22] > 1u ||
+                payload[23] > 1u || payload[24] > 1u || payload[25] > 1u) {
                 return 0;
             }
             packet->body.input.sequence = read_u32(payload);
@@ -353,8 +487,15 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.input.client_tick = read_u32(payload + 8u);
             packet->body.input.world_direction_x = read_s16(payload + 12u);
             packet->body.input.world_direction_z = read_s16(payload + 14u);
-            packet->body.input.weak_attack_pressed = payload[16];
-            return packet->body.input.sequence == packet->sequence;
+            packet->body.input.aim_direction_x = read_s16(payload + 16u);
+            packet->body.input.aim_direction_y = read_s16(payload + 18u);
+            packet->body.input.aim_direction_z = read_s16(payload + 20u);
+            packet->body.input.weak_attack_pressed = payload[22];
+            packet->body.input.weak_attack_held = payload[23];
+            packet->body.input.ranged_first_person_active = payload[24];
+            packet->body.input.cleanroom_combat_test_pressed = payload[25];
+            return packet->body.input.sequence == packet->sequence &&
+                valid_input_aim(&packet->body.input);
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
             if (payload_size < LAN_SNAPSHOT_FIXED_SIZE ||
                 payload[13] > 1u ||

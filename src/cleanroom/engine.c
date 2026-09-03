@@ -118,19 +118,19 @@ typedef unsigned int (__attribute__((thiscall))
     *CafuAnimationCountFunction)(void *renderer);
 typedef int (__attribute__((thiscall)) *CafuAnimationSelectorGetFunction)(
     void *renderer,
-    unsigned int submodel,
-    int channel
+    int channel,
+    unsigned int submodel
 );
 typedef float (__attribute__((thiscall)) *CafuAnimationFloatGetFunction)(
     void *renderer,
-    unsigned int submodel,
-    int channel
+    int channel,
+    unsigned int submodel
 );
 typedef unsigned int (__attribute__((thiscall))
     *CafuAnimationStateGetFunction)(
         void *renderer,
-        unsigned int submodel,
-        int channel
+        int channel,
+        unsigned int submodel
     );
 typedef float (__attribute__((thiscall)) *AnimationBlendGetFunction)(
     void *renderer,
@@ -1144,10 +1144,10 @@ static void trace_cafu_weapon_presentation(void) {
             "rate=%.5f time=%.5f\r\n",
             cafu_weapon_presentation_sample_count,
             channel,
-            get_selector(renderer, 0u, (int)channel),
-            get_state(renderer, 0u, (int)channel),
-            get_rate(renderer, 0u, (int)channel),
-            get_time(renderer, 0u, (int)channel)
+            get_selector(renderer, (int)channel, 0u),
+            get_state(renderer, (int)channel, 0u),
+            get_rate(renderer, (int)channel, 0u),
+            get_time(renderer, (int)channel, 0u)
         );
     }
 }
@@ -3952,6 +3952,7 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
     CafuAnimationCountFunction get_count;
     CafuAnimationSelectorGetFunction get_selector;
     CafuAnimationFloatGetFunction get_rate;
+    CafuAnimationFloatGetFunction get_time;
     CafuAnimationStateGetFunction get_state;
     AnimationBlendGetFunction get_blend;
     unsigned int channel;
@@ -3979,6 +3980,8 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
             game_base + RVA_ANIMATION_RENDERER_SELECTOR_GET ||
         vtable[0x108u / sizeof(void *)] !=
             game_base + RVA_ANIMATION_RENDERER_RATE_GET ||
+        vtable[0x110u / sizeof(void *)] !=
+            game_base + RVA_ANIMATION_RENDERER_TIME_GET ||
         vtable[0x118u / sizeof(void *)] !=
             game_base + RVA_ANIMATION_RENDERER_STATE_GET ||
         vtable[0x148u / sizeof(void *)] !=
@@ -3991,6 +3994,8 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
         vtable[0x100u / sizeof(void *)];
     get_rate = (CafuAnimationFloatGetFunction)
         vtable[0x108u / sizeof(void *)];
+    get_time = (CafuAnimationFloatGetFunction)
+        vtable[0x110u / sizeof(void *)];
     get_state = (CafuAnimationStateGetFunction)
         vtable[0x118u / sizeof(void *)];
     get_blend = (AnimationBlendGetFunction)
@@ -4007,12 +4012,15 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
          channel < channel_limit;
          ++channel) {
         presentation->selector[channel] =
-            get_selector(renderer, 0u, (int)channel);
+            get_selector(renderer, (int)channel, 0u);
         presentation->state[channel] =
-            (uint8_t)get_state(renderer, 0u, (int)channel);
+            (uint8_t)get_state(renderer, (int)channel, 0u);
         presentation->rate[channel] =
-            get_rate(renderer, 0u, (int)channel);
-        if (!isfinite(presentation->rate[channel])) return FALSE;
+            get_rate(renderer, (int)channel, 0u);
+        presentation->time[channel] =
+            get_time(renderer, (int)channel, 0u);
+        if (!isfinite(presentation->rate[channel]) ||
+            !isfinite(presentation->time[channel])) return FALSE;
     }
     if (actor == SUDEKIMP_CLEANROOM_AILISH) {
         for (channel = 0u;

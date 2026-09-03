@@ -195,10 +195,38 @@ Because party entries share the same character layout, the two position objects 
 | Controller combat-state consumer | `0x000286C0` / `0x004286C0` | Resolves `controller+0x248`, obtains that character's arbiter at `character+0x90`, performs controller/camera handling, and calls the per-arbiter submission at RVA `0x0002891F` |
 | Character-arbiter combat-input submission | `0x000DB0E0` / `0x004DB0E0` | Accepts a chosen arbiter plus Weak, Strong, Sweep, Block, Weapon Next, and Weapon Previous states; enforces the arbiter's native owner, capability, weapon/attack-state, and action-transition rules before dispatch |
 | Provisional native melee dispatch | `0x000DAC00` / `0x004DAC00` | Receives attack kind `1` weak, `2` strong, or `3` sweep from the per-arbiter submission; deeper target/animation behavior remains to be traced |
+| Native melee combo dispatcher | `0x000D0730` / `0x004D0730` | Appends an admitted weak/strong attack kind to the bounded native history through RVA `0x000D0640`, resolves the authored transition, and commits the accepted combo result |
+| Native combo transition lookup | `0x000D04F0` / `0x004D04F0` | Compares the current attack history (bounded at six entries) with authored combo transitions and calls RVA `0x000D13E0` for native timing, distance, and direction eligibility |
+| Accepted combo transition commit | `0x000D14D0` / `0x004D14D0` | Updates the native combo-result/UI state after a transition passes its authored gates; rejected inputs do not reach a new presentation selector |
 
 RVA `0x000DB0E0` uses an unusual exact-build i386 ABI: `ECX` is the target `CCharacterArbiter`, `EAX` is Block, and five callee-cleaned stack arguments are Weak, Strong, Sweep, Weapon Next, and Weapon Previous. At the controller call site, those states come from `+0x8C`, `+0x94`, `+0x9C`, `+0xAC`, and `+0xB4`, with Block loaded from `+0xA4`. Its entry bytes are `55 8B 6C 24 08 56 57 8B F8 8B F1` on the supported executable.
 
 This is a real per-character boundary: the arbiter is explicitly supplied rather than recovered from the global controller target, and another native caller exists at RVA `0x000DA816`. A one-shot weak request is therefore represented by Weak `1` and zero for the other five states. The disabled prototype uses a small isolated assembly adapter to reproduce the ABI and leaves targeting and every native rejection path unchanged. The adapter's register/stack/cleanup test and the inert exact-image hook test pass. The live battle kept one Buki arbiter and repeatedly changed `+0x50` from idle values into `0x00001002`; exported `CCharacterArbiter::IsAttacking()` at RVA `0x000088D0` tests exactly bit `0x1000`. Independent Buki attack input is therefore confirmed. The observed nearest-target lock remains native, although its underlying pointer/writer is not yet traced.
+
+The supported Tal renderer exposes the accepted melee history as distinct
+selectors. Live operator traces mapped stage 1/2 as Weak `50/51` and Strong
+`52/53`; the eight three-input histories resolve to `WWW=62`, `WWS=54`,
+`SWW=60`, `SSS=61`, `SWS=63`, `SSW=65`, `WSW=68`, and `WSS=69`. These are
+presentation results after native admission, not inputs that should be
+re-executed remotely. The LAN host therefore translates only observed native
+selectors into actor-neutral action variants. The client maps those variants
+back to its local Tal animation bank, while the host remains authoritative for
+targeting, hit detection, movement impulse, and damage.
+
+The same acknowledged `WSS` history also produced selector `70` in a separate
+native context. RVA `0x000D04F0` searches multiple authored candidates and
+calls RVA `0x000D13E0` with each candidate's timing, target-distance, and
+direction gates, so input history alone is not a unique presentation key.
+LAN protocol `LA14` therefore carries selectors `69` and `70` as separate WSS
+presentation variants while preserving the host's native choice.
+
+The exact property parser at RVA `0x00103190` recognizes `AttackWeak`,
+`AttackStrong`, and `AttackSweep` when loading authored transition data. The
+read-only reconstruction is repeatable with
+`tools/ghidra/TalMeleeComboReport.java`; future combat work should extend this
+same chain from input action, through native admission/transition, to the
+client presentation adapter instead of assigning meaning from a single input
+edge.
 
 The same exact function also establishes the ranged capability boundary. When
 the low state nibble at arbiter `+0x58` is melee mode `1`, Weak, Strong, and

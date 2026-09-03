@@ -11,6 +11,7 @@
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
 #include "hooks/lan_arena_client_input.h"
+#include "network/lan_arena_operator.h"
 #include "hooks/lan_arena_client_replica.h"
 #include "hooks/lan_arena_campaign_guard.h"
 #include "hooks/lan_arena_host_input.h"
@@ -30,6 +31,7 @@
 
 #include <windows.h>
 #include <float.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +62,7 @@ enum {
     RVA_APPLY_DAMAGE = 0x000d21d0u,
     RVA_COLLISION_DAMAGE = 0x00138870u,
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
+    RVA_CONTROLLER_AIM_UPDATE = 0x00028b00u,
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
     RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER = 0x00023f60u,
@@ -67,6 +70,8 @@ enum {
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
     RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE = 0x000c3870u,
+    RVA_MISSILE_MANAGER_IS_FIRING = 0x000c7990u,
+    RVA_MISSILE_MANAGER_CAN_FIRE = 0x000c79a0u,
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
     RVA_POSITION_UPDATE = 0x00110d40u,
     RVA_POSITION_WORLD_MATRIX = 0x00111cc0u,
@@ -2554,6 +2559,8 @@ int wmain(int argc, wchar_t **argv) {
     int other_character_marker = 0;
     uint8_t minimap_snapshot_call_original[5];
     uint32_t raw_lan_client_quick_menu_input;
+    uint32_t raw_lan_client_camera_input;
+    uint32_t raw_lan_client_character_input;
     uint32_t raw_lan_pause_quit_show_global;
     const UINT second_player_skill_keys[4] = {
         VK_F1, VK_F2, VK_F3, VK_F4
@@ -2840,29 +2847,235 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
         if (SudekiMpLanArenaClientAnimationShouldResetTime(
+                0u,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
                 FALSE) ||
             SudekiMpLanArenaClientAnimationShouldResetTime(
+                0u,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
                 TRUE) ||
             !SudekiMpLanArenaClientAnimationShouldResetTime(
+                0u,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE,
                 FALSE) ||
             !SudekiMpLanArenaClientAnimationShouldResetTime(
+                0u,
                 SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+                FALSE) ||
+            !SudekiMpLanArenaClientAnimationShouldResetTime(
+                0u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                FALSE) ||
+            SudekiMpLanArenaClientAnimationShouldResetTime(
+                1u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                FALSE) ||
+            SudekiMpLanArenaClientAnimationShouldResetTime(
+                2u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
                 SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
                 FALSE)) {
             fprintf(stderr,
                 "LAN client animation time-reset policy mismatch\n");
             ++failures;
         }
+        if (SudekiMpLanArenaClientAnimationTransitionState(
+                0u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                128) != 0 ||
+            SudekiMpLanArenaClientAnimationTransitionState(
+                1u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                128) != 128 ||
+            SudekiMpLanArenaClientAnimationTransitionState(
+                0u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                128) != 128 ||
+            SudekiMpLanArenaClientAnimationTransitionState(
+                0u,
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+                SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
+                0) != 0) {
+            fprintf(stderr,
+                "LAN client animation transition-state policy mismatch\n");
+            ++failures;
+        }
+        if (!SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                0u, TRUE, FALSE, TRUE) ||
+            !SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                0u, TRUE, TRUE, FALSE) ||
+            SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                0u, FALSE, FALSE, FALSE) ||
+            SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                0u, TRUE, TRUE, TRUE) ||
+            SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                1u, TRUE, FALSE, FALSE) ||
+            !SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
+                1u, TRUE, TRUE, FALSE)) {
+            fprintf(stderr,
+                "LAN client secondary animation reset policy mismatch\n");
+            ++failures;
+        }
+        if (!SudekiMpLanArenaClientPresentationOverrideAllowed(FALSE) ||
+            !SudekiMpLanArenaClientPresentationOverrideAllowed(TRUE)) {
+            fputs("FAIL: LAN client exact-mapped presentation policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpLanArenaClientActorPresentationAllowed(
+                0u, TRUE, TRUE, FALSE) ||
+            SudekiMpLanArenaClientActorPresentationAllowed(
+                1u, TRUE, TRUE, FALSE) ||
+            !SudekiMpLanArenaClientActorPresentationAllowed(
+                1u, TRUE, FALSE, TRUE) ||
+            !SudekiMpLanArenaClientActorPresentationAllowed(
+                0u, FALSE, FALSE, FALSE) ||
+            SudekiMpLanArenaClientActorPresentationAllowed(
+                2u, FALSE, TRUE, TRUE)) {
+            fputs("FAIL: LAN client actor-local presentation gate mismatch\n",
+                stderr);
+            ++failures;
+        }
+        {
+            static const struct {
+                uint8_t action;
+                int selector;
+                int state;
+            } tal_actions[] = {
+                { SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE, 50, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO, 51, 1 },
+                { SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE, 62, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_STRONG, 52, 1 },
+                { SUDEKIMP_LAN_ARENA_ACTION_STRONG_TWO, 53, 1 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS, 54, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWW, 60, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSS, 61, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWS, 63, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSW, 65, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSW, 68, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS, 69, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE, 70, 65 },
+                { SUDEKIMP_LAN_ARENA_ACTION_SWEEP, 71, 1 },
+                { SUDEKIMP_LAN_ARENA_ACTION_BLOCK, 20, 65 }
+            };
+            unsigned int action_index;
+            int action_selector = -1;
+            int action_state = -1;
+            for (action_index = 0u;
+                 action_index < sizeof(tal_actions) / sizeof(tal_actions[0]);
+                 ++action_index) {
+                if (!SudekiMpLanArenaClientTalActionPresentation(
+                        tal_actions[action_index].action,
+                        &action_selector, &action_state) ||
+                    action_selector != tal_actions[action_index].selector ||
+                    action_state != tal_actions[action_index].state) {
+                    fputs("FAIL: LAN client Tal semantic action mapping\n",
+                        stderr);
+                    ++failures;
+                    break;
+                }
+            }
+            if (SudekiMpLanArenaClientTalActionPresentation(
+                    SUDEKIMP_LAN_ARENA_ACTION_NONE,
+                    &action_selector, &action_state) ||
+                SudekiMpLanArenaClientTalActionPresentation(
+                    SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+                    NULL, &action_state) ||
+                SudekiMpLanArenaClientTalActionPresentation(
+                    SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+                    &action_selector, NULL)) {
+                fputs("FAIL: LAN client Tal semantic action rejection\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        if (!SudekiMpLanArenaClientShouldApplyHostFacing(0u, FALSE) ||
+            !SudekiMpLanArenaClientShouldApplyHostFacing(0u, TRUE) ||
+            !SudekiMpLanArenaClientShouldApplyHostFacing(1u, FALSE) ||
+            SudekiMpLanArenaClientShouldApplyHostFacing(1u, TRUE) ||
+            SudekiMpLanArenaClientShouldApplyHostFacing(2u, FALSE)) {
+            fputs("FAIL: LAN client first-person facing ownership policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        {
+            SudekiMpLanArenaActorSnapshot phased_action;
+            float phase_time = -1.0f;
+            memset(&phased_action, 0, sizeof(phased_action));
+            phased_action.animation_state =
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+            phased_action.action_phase_valid = 1u;
+            phased_action.action_phase_q8 = 35u * 256u + 128u;
+            if (!SudekiMpLanArenaClientActionPhaseTime(
+                    &phased_action, &phase_time) ||
+                fabsf(phase_time - 35.5f) > 0.0001f ||
+                SudekiMpLanArenaClientActionPhaseTime(NULL, &phase_time) ||
+                SudekiMpLanArenaClientActionPhaseTime(
+                    &phased_action, NULL)) {
+                fputs("FAIL: LAN client authoritative action phase policy\n",
+                    stderr);
+                ++failures;
+            }
+            phased_action.action_phase_valid = 0u;
+            if (SudekiMpLanArenaClientActionPhaseTime(
+                    &phased_action, &phase_time)) {
+                fputs("FAIL: LAN client accepted missing action phase\n",
+                    stderr);
+                ++failures;
+            }
+            phased_action.action_phase_valid = 1u;
+            phased_action.animation_state =
+                SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+            if (SudekiMpLanArenaClientActionPhaseTime(
+                    &phased_action, &phase_time)) {
+                fputs("FAIL: LAN client accepted idle action phase\n",
+                    stderr);
+                ++failures;
+            }
+        }
+        if (SudekiMpLanArenaClientNativeWeakHeld(0) ||
+            !SudekiMpLanArenaClientNativeWeakHeld(1) ||
+            !SudekiMpLanArenaClientNativeWeakHeld(2) ||
+            SudekiMpLanArenaClientNativeWeakHeld(3) ||
+            SudekiMpLanArenaClientNativeWeakHeld(-1) ||
+            SudekiMpLanArenaClientNativeWeakHeld(4)) {
+            fputs("FAIL: LAN client native weak transition policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientSuppressedWeakNextState(0) != 0 ||
+            SudekiMpLanArenaClientSuppressedWeakNextState(1) != 2 ||
+            SudekiMpLanArenaClientSuppressedWeakNextState(2) != 2 ||
+            SudekiMpLanArenaClientSuppressedWeakNextState(3) != 0 ||
+            SudekiMpLanArenaClientSuppressedWeakNextState(-1) != 0 ||
+            SudekiMpLanArenaClientSuppressedWeakNextState(4) != 0) {
+            fputs("FAIL: LAN client suppressed weak state did not advance\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientRangedWeakHeld(FALSE, FALSE) ||
+            SudekiMpLanArenaClientRangedWeakHeld(FALSE, TRUE) ||
+            SudekiMpLanArenaClientRangedWeakHeld(TRUE, FALSE) ||
+            !SudekiMpLanArenaClientRangedWeakHeld(TRUE, TRUE)) {
+            fputs("FAIL: LAN client ranged weak readiness gate mismatch\n",
+                stderr);
+            ++failures;
+        }
     }
     /* The harness maps sections without applying PE base relocations.  Put the
      * exact animation methods used by the LAN replica at their mapped-image
      * addresses before asking its supported-image preflight to inspect them. */
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u) =
+        image + RVA_ANIMATION_RENDERER_LOOKUP;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xf8u) =
         image + RVA_ANIMATION_RENDERER_COUNT;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0xfcu) =
@@ -2875,6 +3088,8 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_ANIMATION_RENDERER_RATE_GET;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x10cu) =
         image + RVA_ANIMATION_RENDERER_TIME_SET;
+    *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x110u) =
+        image + RVA_ANIMATION_RENDERER_TIME_GET;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x114u) =
         image + RVA_ANIMATION_RENDERER_STATE_SET;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x118u) =
@@ -2888,6 +3103,26 @@ int wmain(int argc, wchar_t **argv) {
         ++failures;
     }
     SudekiMpResetLanArenaClientReplica();
+    {
+        void *saved_animation_lookup = *(void **)(
+            image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u);
+        *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u) =
+            image + RVA_INTERNAL_POSITION_SETTER;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched animation lookup\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u) =
+            saved_animation_lookup;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client animation-lookup mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
     {
         uint8_t saved_position_setter_byte = image[RVA_INTERNAL_POSITION_SETTER];
         image[RVA_INTERNAL_POSITION_SETTER] ^= 0x01u;
@@ -2972,25 +3207,6 @@ int wmain(int argc, wchar_t **argv) {
             saved_animation_count;
         if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
             fputs("FAIL: LAN client replica animation mismatch restore was sticky\n",
-                stderr);
-            ++failures;
-        }
-        SudekiMpResetLanArenaClientReplica();
-    }
-    {
-        uint8_t saved_selector_get_byte =
-            image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u];
-        image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u] ^= 0x01u;
-        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
-            fputs("FAIL: LAN client replica accepted mismatched native animation addressing\n",
-                stderr);
-            ++failures;
-            SudekiMpResetLanArenaClientReplica();
-        }
-        image[RVA_ANIMATION_RENDERER_SELECTOR_GET + 13u] =
-            saved_selector_get_byte;
-        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
-            fputs("FAIL: LAN animation-address mismatch restore was sticky\n",
                 stderr);
             ++failures;
         }
@@ -3127,16 +3343,43 @@ int wmain(int argc, wchar_t **argv) {
      * before exercising the LAN client's read-only browsing hook. */
     raw_lan_client_quick_menu_input =
         *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT);
+    raw_lan_client_camera_input =
+        *(uint32_t *)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT);
+    raw_lan_client_character_input =
+        *(uint32_t *)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT);
     *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
         image + RVA_QUICK_MENU_INPUT;
+    *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
+        image + RVA_CAMERA_INPUT_EVENT;
+    *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) =
+        image + RVA_CHARACTER_INPUT_HANDLER;
     if (!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
         fputs("FAIL: LAN client input exact seams rejected\n", stderr);
         ++failures;
     } else {
+        HANDLE operator_event = OpenEventW(
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+            SUDEKIMP_LAN_ARENA_CLIENT_COMBAT_TOGGLE_EVENT);
+        HANDLE operator_weak_event = OpenEventW(
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+            SUDEKIMP_LAN_ARENA_WEAK_ATTACK_EVENT);
+        HANDLE operator_weak_hold_event = OpenEventW(
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+            SUDEKIMP_LAN_ARENA_CLIENT_WEAK_HOLD_EVENT);
+        HANDLE operator_camera_left_event = OpenEventW(
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+            SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_LEFT_EVENT);
+        HANDLE operator_camera_right_event = OpenEventW(
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+            SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_RIGHT_EVENT);
         if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
             *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) ==
                 image + RVA_QUICK_MENU_INPUT ||
+            *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) ==
+                image + RVA_CAMERA_INPUT_EVENT ||
+            *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) ==
+                image + RVA_CHARACTER_INPUT_HANDLER ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
@@ -3144,11 +3387,39 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN client input hooks were not installed\n", stderr);
             ++failures;
         }
+        if (operator_event == NULL || !SetEvent(operator_event) ||
+            operator_weak_event == NULL || !SetEvent(operator_weak_event) ||
+            operator_weak_hold_event == NULL ||
+                !SetEvent(operator_weak_hold_event) ||
+                !ResetEvent(operator_weak_hold_event) ||
+            operator_camera_left_event == NULL ||
+                !SetEvent(operator_camera_left_event) ||
+            operator_camera_right_event == NULL ||
+                !SetEvent(operator_camera_right_event)) {
+            fputs("FAIL: LAN client local operator endpoint is unavailable\n",
+                stderr);
+            ++failures;
+        }
+        if (operator_event != NULL) CloseHandle(operator_event);
+        if (operator_weak_event != NULL) CloseHandle(operator_weak_event);
+        if (operator_weak_hold_event != NULL) {
+            CloseHandle(operator_weak_hold_event);
+        }
+        if (operator_camera_left_event != NULL) {
+            CloseHandle(operator_camera_left_event);
+        }
+        if (operator_camera_right_event != NULL) {
+            CloseHandle(operator_camera_right_event);
+        }
         SudekiMpUninstallLanArenaClientInput();
         if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
             *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
                 image + RVA_QUICK_MENU_INPUT ||
+            *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
+                image + RVA_CAMERA_INPUT_EVENT ||
+            *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) !=
+                image + RVA_CHARACTER_INPUT_HANDLER ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
@@ -3177,14 +3448,58 @@ int wmain(int argc, wchar_t **argv) {
             relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
             *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
-                image + RVA_QUICK_MENU_INPUT) {
+                image + RVA_QUICK_MENU_INPUT ||
+            *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) !=
+                image + RVA_CHARACTER_INPUT_HANDLER) {
             fputs("FAIL: LAN QuickMenu mismatch mutated input hooks\n", stderr);
             ++failures;
         }
         image[RVA_QUICK_MENU_INPUT] = saved_quick_menu_entry;
     }
+    {
+        uint8_t saved_aim_update_entry = image[RVA_CONTROLLER_AIM_UPDATE];
+        image[RVA_CONTROLLER_AIM_UPDATE] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: LAN client input accepted a mismatched first-person aim updater\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaClientInput();
+        } else if (GetLastError() != ERROR_INVALID_DATA) {
+            fprintf(stderr,
+                "FAIL: LAN first-person aim mismatch returned error=%lu\n",
+                (unsigned long)GetLastError());
+            ++failures;
+        }
+        if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
+                image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT ||
+            *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
+                image + RVA_CAMERA_INPUT_EVENT ||
+            *(void **)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) !=
+                image + RVA_CHARACTER_INPUT_HANDLER) {
+            fputs("FAIL: LAN first-person aim mismatch mutated input hooks\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_CONTROLLER_AIM_UPDATE] = saved_aim_update_entry;
+        if (!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: LAN client input could not reinstall after first-person aim mismatch\n",
+                stderr);
+            ++failures;
+        } else {
+            SudekiMpUninstallLanArenaClientInput();
+        }
+    }
     *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
         raw_lan_client_quick_menu_input;
+    *(uint32_t *)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
+        raw_lan_client_camera_input;
+    *(uint32_t *)(image + RVA_CHARACTER_INPUT_VTABLE_SLOT) =
+        raw_lan_client_character_input;
     {
         uint8_t controller_entry[12];
         memcpy(controller_entry, image + RVA_CONTROLLER_COMBAT,
@@ -3193,6 +3508,21 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN host input exact combat seam rejected\n", stderr);
             ++failures;
         } else {
+            HANDLE weak_event = OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+                SUDEKIMP_LAN_ARENA_WEAK_ATTACK_EVENT);
+            HANDLE strong_event = OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+                SUDEKIMP_LAN_ARENA_HOST_STRONG_ATTACK_EVENT);
+            HANDLE sweep_event = OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+                SUDEKIMP_LAN_ARENA_HOST_SWEEP_ATTACK_EVENT);
+            HANDLE block_event = OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+                SUDEKIMP_LAN_ARENA_HOST_BLOCK_EVENT);
+            HANDLE action_ack_event = OpenEventW(
+                SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE,
+                SUDEKIMP_LAN_ARENA_HOST_ACTION_ACK_EVENT);
             if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
                     sizeof(controller_entry)) == 0 ||
                 relative_call_target(
@@ -3203,6 +3533,20 @@ int wmain(int argc, wchar_t **argv) {
                 fputs("FAIL: LAN host input observer was not installed\n", stderr);
                 ++failures;
             }
+            if (weak_event == NULL || !SetEvent(weak_event) ||
+                strong_event == NULL || !SetEvent(strong_event) ||
+                sweep_event == NULL || !SetEvent(sweep_event) ||
+                block_event == NULL || !SetEvent(block_event) ||
+                action_ack_event == NULL) {
+                fputs("FAIL: LAN host local operator endpoint is unavailable\n",
+                    stderr);
+                ++failures;
+            }
+            if (weak_event != NULL) CloseHandle(weak_event);
+            if (strong_event != NULL) CloseHandle(strong_event);
+            if (sweep_event != NULL) CloseHandle(sweep_event);
+            if (block_event != NULL) CloseHandle(block_event);
+            if (action_ack_event != NULL) CloseHandle(action_ack_event);
             SudekiMpUninstallLanArenaHostInput();
             if (memcmp(image + RVA_CONTROLLER_COMBAT, controller_entry,
                     sizeof(controller_entry)) != 0 ||
@@ -5702,6 +6046,66 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
         image[RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE] = saved_set_speed;
+    }
+    {
+        uint8_t saved_set_forward = image[RVA_POSITION_SET_FORWARD];
+        void *saved_update_slot = *(void **)(
+            image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+        image[RVA_POSITION_SET_FORWARD] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: LAN control accepted mismatched native facing entry\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                       saved_update_slot) {
+            fputs("FAIL: native facing mismatch did not fail closed before hook mutation\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_POSITION_SET_FORWARD] = saved_set_forward;
+    }
+    {
+        uint8_t saved_is_firing = image[RVA_MISSILE_MANAGER_IS_FIRING];
+        void *saved_update_slot = *(void **)(
+            image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+        image[RVA_MISSILE_MANAGER_IS_FIRING] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: LAN control accepted mismatched missile firing predicate\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                       saved_update_slot) {
+            fputs("FAIL: missile firing mismatch did not fail closed before hook mutation\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_MISSILE_MANAGER_IS_FIRING] = saved_is_firing;
+    }
+    {
+        uint8_t saved_can_fire = image[RVA_MISSILE_MANAGER_CAN_FIRE];
+        void *saved_update_slot = *(void **)(
+            image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
+        image[RVA_MISSILE_MANAGER_CAN_FIRE] ^= 0x01u;
+        SetLastError(ERROR_SUCCESS);
+        if (install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: LAN control accepted mismatched missile readiness predicate\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallControlSeparation();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   *(void **)(image + RVA_CONTROLLER_UPDATE_VTABLE_SLOT) !=
+                       saved_update_slot) {
+            fputs("FAIL: missile readiness mismatch did not fail closed before hook mutation\n",
+                stderr);
+            ++failures;
+        }
+        image[RVA_MISSILE_MANAGER_CAN_FIRE] = saved_can_fire;
     }
     if (!SudekiMpInstallControlSeparation(
             (HMODULE)image,

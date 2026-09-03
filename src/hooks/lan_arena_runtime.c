@@ -12,7 +12,9 @@
 #include "network/lan_arena_authority.h"
 #include "network/lan_arena_endpoint.h"
 #include "network/lan_arena_replica.h"
+#include "network/lan_arena_tal_combo_graph.h"
 
+#include <math.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -41,9 +43,6 @@ enum {
     TAL_COMBAT_IDLE_SELECTOR = 17,
     TAL_COMBAT_MOVE_PRIMARY_SELECTOR = 36,
     TAL_COMBAT_MOVE_SECONDARY_SELECTOR = 32,
-    TAL_COMBAT_WEAK_ONE_SELECTOR = 50,
-    TAL_COMBAT_WEAK_TWO_SELECTOR = 51,
-    TAL_COMBAT_WEAK_THREE_SELECTOR = 62,
     AILISH_COMBAT_ENTRY_SELECTOR = 12,
     AILISH_COMBAT_IDLE_SELECTOR = 20,
     AILISH_COMBAT_MOVE_PRIMARY_SELECTOR = 22,
@@ -86,18 +85,34 @@ static uint8_t host_ailish_idle_variant_state;
 static DWORD host_ailish_idle_variant_seen_at_ms;
 static BOOL host_ailish_idle_variant_armed = TRUE;
 static DWORD host_ailish_weak_attack_until_ms;
-static DWORD host_tal_weak_attack_until_ms;
 static uint8_t host_actor_action_variant[2];
+static uint16_t host_actor_action_sequence[2];
+static SudekiMpLanArenaActionEvent
+    host_actor_action_history[2][SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY];
+static uint8_t host_actor_action_history_count[2];
+static uint8_t host_actor_previous_action_variant[2];
+static uint8_t host_actor_previous_native_action_state[2];
+static BOOL host_actor_previous_action_active[2];
+static BOOL host_actor_previous_native_action_active[2];
 static DWORD host_last_remote_input_at_ms;
 static BOOL host_remote_input_quiesced;
 static BOOL host_remote_input_logged;
 static BOOL host_remote_weak_logged;
 static BOOL host_remote_weak_blocked_logged;
-static BOOL host_tal_weak_blocked_logged;
 static BOOL host_remote_ailish_moving;
 static BOOL host_auto_rehost_enabled;
 static int16_t host_remote_direction_x;
 static int16_t host_remote_direction_z;
+static int16_t host_remote_aim_x;
+static int16_t host_remote_aim_y;
+static int16_t host_remote_aim_z;
+static BOOL host_remote_weak_held;
+static BOOL host_remote_first_person_active;
+static BOOL host_remote_weak_cycle_pending;
+static BOOL host_remote_weak_cycle_seen_active;
+static BOOL host_remote_weak_cycle_timeout_logged;
+static DWORD host_remote_weak_cycle_started_at_ms;
+static DWORD host_remote_ranged_repeat_not_before_ms;
 static SudekiMpCleanroomActorPresentation host_actor_presentation[2];
 static BOOL host_actor_presentation_valid[2];
 static DWORD host_actor_presentation_last_trace_at[2];
@@ -248,8 +263,42 @@ enum {
     HOST_LOCOMOTION_STOP_GRACE_MS = 150u,
     /* Native Ailish idle variants cross-fade between animation channels 0
      * and 2 with short base-idle gaps between them. */
-    AILISH_IDLE_VARIANT_CHANNEL_GRACE_MS = 250u
+    AILISH_IDLE_VARIANT_CHANNEL_GRACE_MS = 250u,
+    HOST_REMOTE_WEAK_START_TIMEOUT_MS = 1000u,
+    /* Fail-safe used only if the selected weapon's exact authored half-float
+     * delay is absent or malformed. The supported Ailish weapon reports 2.0
+     * seconds (0x4000); never return to the old guessed 500 ms cadence. */
+    HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS = 2000u
 };
+
+BOOL SudekiMpLanArenaRangedRepeatReady(
+    uint32_t now_ms,
+    uint32_t not_before_ms
+) {
+    return not_before_ms == 0u ||
+        (int32_t)(now_ms - not_before_ms) >= 0;
+}
+
+uint32_t SudekiMpLanArenaRangedRepeatIntervalMs(
+    uint16_t encoded_half_seconds
+) {
+    uint32_t exponent = (encoded_half_seconds >> 10u) & 0x1fu;
+    uint32_t mantissa = encoded_half_seconds & 0x03ffu;
+    float seconds;
+    if ((encoded_half_seconds & 0x8000u) != 0u || exponent == 0x1fu) {
+        return HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
+    }
+    if (exponent == 0u) {
+        seconds = ldexpf((float)mantissa, -24);
+    } else {
+        seconds = ldexpf(1.0f + (float)mantissa / 1024.0f,
+            (int)exponent - 15);
+    }
+    if (!isfinite(seconds) || seconds < 0.1f || seconds > 10.0f) {
+        return HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
+    }
+    return (uint32_t)(seconds * 1000.0f + 0.5f);
+}
 
 static uint8_t host_actor_idle_variant_state(
     unsigned int actor_index,
@@ -345,20 +394,11 @@ static uint8_t host_actor_native_action_variant(
     }
     presentation = &host_actor_presentation[actor_index];
     if (actor_index == 0u) {
+        uint8_t action_variant;
         selector = presentation->selector[0];
         state = presentation->state[0];
-        if (state != 1u && state != 65u) {
-            return SUDEKIMP_LAN_ARENA_ACTION_NONE;
-        }
-        if (selector == TAL_COMBAT_WEAK_ONE_SELECTOR) {
-            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
-        }
-        if (selector == TAL_COMBAT_WEAK_TWO_SELECTOR) {
-            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
-        }
-        if (selector == TAL_COMBAT_WEAK_THREE_SELECTOR) {
-            return SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE;
-        }
+        if (SudekiMpLanArenaTalActionFromNativePresentation(
+                selector, state, &action_variant)) return action_variant;
         /* Selector 3 is the native draw/enter-combat transition, not a weak
          * attack. Treating it as an action made Tal attack while merely
          * moving and interrupted the weapon attachment transaction. */
@@ -366,10 +406,132 @@ static uint8_t host_actor_native_action_variant(
     }
     selector = presentation->selector[4];
     state = presentation->state[4];
-    return selector == AILISH_COMBAT_WEAK_SELECTOR &&
-            (state == 1u || state == 65u) ?
+    /* Ailish's authored ranged clip moves through state 0 while blending,
+     * then 1/65 while playing. The selector remains 59 for the complete
+     * native action. Treating state 0 as an action gap generated a new LAN
+     * action edge every few snapshots and made a held shot restart rapidly. */
+    return selector == AILISH_COMBAT_WEAK_SELECTOR && state != 192u ?
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE :
         SUDEKIMP_LAN_ARENA_ACTION_NONE;
+}
+
+static uint8_t combat_state_for_action(uint8_t action_variant) {
+    uint8_t combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    (void)SudekiMpLanArenaTalActionCombatState(
+        action_variant, &combat_state);
+    return combat_state;
+}
+
+static uint8_t host_actor_native_action_state(unsigned int actor_index) {
+    if (actor_index >= 2u || !host_actor_presentation_valid[actor_index]) {
+        return 0u;
+    }
+    return actor_index == 0u ? host_actor_presentation[0].state[0] :
+        host_actor_presentation[1].state[4];
+}
+
+static void host_advance_actor_action_sequence(
+    unsigned int actor_index,
+    uint8_t action_variant,
+    DWORD now_ms
+) {
+    uint8_t count;
+    SudekiMpLanArenaActionEvent *event;
+    if (actor_index >= 2u ||
+        action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE) return;
+    ++host_actor_action_sequence[actor_index];
+    if (host_actor_action_sequence[actor_index] == 0u) {
+        host_actor_action_sequence[actor_index] = 1u;
+    }
+    count = host_actor_action_history_count[actor_index];
+    if (count == SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) {
+        memmove(&host_actor_action_history[actor_index][0],
+            &host_actor_action_history[actor_index][1],
+            (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY - 1u) *
+                sizeof(host_actor_action_history[actor_index][0]));
+        --count;
+    }
+    event = &host_actor_action_history[actor_index][count++];
+    event->sequence = host_actor_action_sequence[actor_index];
+    event->variant = action_variant;
+    event->host_tick = now_ms;
+    host_actor_action_history_count[actor_index] = count;
+    host_actor_previous_action_active[actor_index] = TRUE;
+    host_actor_previous_action_variant[actor_index] = action_variant;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_action_sequence actor=%s "
+        "sequence=%u variant=%u host_tick=%lu "
+        "policy=native_presentation_edge\r\n",
+        actor_index == 0u ? "Tal" : "Ailish",
+        (unsigned int)host_actor_action_sequence[actor_index],
+        (unsigned int)action_variant,
+        (unsigned long)now_ms);
+    if (actor_index == 0u) {
+        SudekiMpLanArenaHostInputNotifyNativeActionObserved();
+    }
+}
+
+static void host_track_actor_action_sequence(
+    unsigned int actor_index,
+    DWORD now_ms,
+    BOOL action_active,
+    BOOL native_action_active,
+    uint8_t action_variant,
+    uint8_t native_action_state,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    BOOL new_action = FALSE;
+    if (actor_index >= 2u || snapshot == NULL) return;
+    if (action_active) {
+        new_action = !host_actor_previous_action_active[actor_index] ||
+            action_variant != host_actor_previous_action_variant[actor_index];
+        if (new_action) {
+            host_advance_actor_action_sequence(
+                actor_index, action_variant, now_ms);
+        }
+        host_actor_previous_action_active[actor_index] = TRUE;
+        host_actor_previous_action_variant[actor_index] = action_variant;
+    } else {
+        host_actor_previous_action_active[actor_index] = FALSE;
+        host_actor_previous_action_variant[actor_index] =
+            SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    }
+    host_actor_previous_native_action_active[actor_index] =
+        native_action_active;
+    host_actor_previous_native_action_state[actor_index] =
+        native_action_active ? native_action_state : 0u;
+    snapshot->action_sequence = host_actor_action_sequence[actor_index];
+    snapshot->action_history_count =
+        host_actor_action_history_count[actor_index];
+    memcpy(snapshot->action_history,
+        host_actor_action_history[actor_index],
+        sizeof(snapshot->action_history));
+}
+
+static void reset_host_action_tracking(void) {
+    ZeroMemory(host_actor_action_variant,
+        sizeof(host_actor_action_variant));
+    ZeroMemory(host_actor_action_sequence,
+        sizeof(host_actor_action_sequence));
+    ZeroMemory(host_actor_action_history,
+        sizeof(host_actor_action_history));
+    ZeroMemory(host_actor_action_history_count,
+        sizeof(host_actor_action_history_count));
+    ZeroMemory(host_actor_previous_action_variant,
+        sizeof(host_actor_previous_action_variant));
+    ZeroMemory(host_actor_previous_native_action_state,
+        sizeof(host_actor_previous_native_action_state));
+    ZeroMemory(host_actor_previous_action_active,
+        sizeof(host_actor_previous_action_active));
+    ZeroMemory(host_actor_previous_native_action_active,
+        sizeof(host_actor_previous_native_action_active));
+}
+
+static void reset_host_remote_weak_cycle(void) {
+    host_remote_weak_cycle_pending = FALSE;
+    host_remote_weak_cycle_seen_active = FALSE;
+    host_remote_weak_cycle_timeout_logged = FALSE;
+    host_remote_weak_cycle_started_at_ms = 0u;
 }
 
 static BOOL host_actor_translation_moving(
@@ -442,6 +604,7 @@ static void host_apply_presentation_state(
     BOOL native_tal_moving;
     BOOL action_active;
     uint8_t native_action_variant;
+    uint8_t native_action_state;
     uint8_t action_variant;
     uint8_t idle_variant_state;
     if (snapshot == NULL || actor_index >= 2u) return;
@@ -473,12 +636,11 @@ static void host_apply_presentation_state(
     }
     native_action_variant = host_actor_native_action_variant(
         actor_index, combat_enabled);
+    native_action_state = host_actor_native_action_state(actor_index);
     if (native_action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE) {
         host_actor_action_variant[actor_index] = native_action_variant;
     }
     action_active = native_action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE ||
-        (actor_index == 0u &&
-            (LONG)(host_tal_weak_attack_until_ms - now_ms) > 0) ||
         (actor_index == 1u &&
             (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0);
     action_variant = action_active ? host_actor_action_variant[actor_index] :
@@ -506,7 +668,7 @@ static void host_apply_presentation_state(
             SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED;
     } else if (action_active) {
         snapshot->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
-        snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+        snapshot->combat_state = combat_state_for_action(action_variant);
         snapshot->action_variant = action_variant;
     } else if (moving) {
         snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
@@ -524,6 +686,30 @@ static void host_apply_presentation_state(
         snapshot->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
         snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
     }
+    host_track_actor_action_sequence(
+        actor_index,
+        now_ms,
+        snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+        native_action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE,
+        snapshot->action_variant,
+        native_action_state,
+        snapshot);
+    snapshot->action_phase_valid = 0u;
+    snapshot->action_phase_q8 = 0u;
+    if (snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        native_action_variant == snapshot->action_variant &&
+        host_actor_presentation_valid[actor_index]) {
+        float phase_time = actor_index == 0u ?
+            host_actor_presentation[0].time[0] :
+            host_actor_presentation[1].time[4];
+        if (isfinite(phase_time) && phase_time >= 0.0f &&
+            phase_time <= 65535.0f /
+                SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE) {
+            snapshot->action_phase_q8 = (uint16_t)(phase_time *
+                SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE + 0.5f);
+            snapshot->action_phase_valid = 1u;
+        }
+    }
 }
 
 static void host_trace_native_presentation(
@@ -540,8 +726,10 @@ static void host_trace_native_presentation(
             &current, sizeof(current)) == 0) return;
     host_actor_presentation[actor_index] = current;
     host_actor_presentation_valid[actor_index] = TRUE;
-    trace_interval_ms = SudekiMpLanArenaCollisionDebugMode() ==
-            SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_OFF ? 1000u : 100u;
+    trace_interval_ms =
+        SudekiMpLanArenaCollisionDebugMode() !=
+            SUDEKIMP_LAN_ARENA_COLLISION_DEBUG_OFF ||
+        SudekiMpLanArenaHostInputDiagnosticTraceActive() ? 50u : 1000u;
     if (host_actor_presentation_last_trace_at[actor_index] != 0u &&
         (DWORD)(now - host_actor_presentation_last_trace_at[actor_index]) <
             trace_interval_ms) return;
@@ -551,6 +739,7 @@ static void host_trace_native_presentation(
         "submodels=%lu selectors=%ld,%ld,%ld,%ld,%ld "
         "states=%u,%u,%u,%u,%u "
         "rates=%.5f,%.5f,%.5f,%.5f,%.5f "
+        "times=%.5f,%.5f,%.5f,%.5f,%.5f "
         "blends=%.5f,%.5f,%.5f,%.5f "
         "policy=read_only_semantic_mapping_capture_not_network_payload\r\n",
         SudekiMpCleanroomActorLabel(actor),
@@ -562,6 +751,8 @@ static void host_trace_native_presentation(
         current.state[3], current.state[4],
         current.rate[0], current.rate[1], current.rate[2],
         current.rate[3], current.rate[4],
+        current.time[0], current.time[1], current.time[2],
+        current.time[3], current.time[4],
         current.blend[0], current.blend[1],
         current.blend[2], current.blend[3]
     );
@@ -592,6 +783,7 @@ static void client_trace_native_presentation(
         "submodels=%lu selectors=%ld,%ld,%ld,%ld,%ld "
         "states=%u,%u,%u,%u,%u "
         "rates=%.5f,%.5f,%.5f,%.5f,%.5f "
+        "times=%.5f,%.5f,%.5f,%.5f,%.5f "
         "blends=%.5f,%.5f,%.5f,%.5f "
         "policy=read_only_replica_blend_validation\r\n",
         SudekiMpCleanroomActorLabel(actor),
@@ -603,15 +795,60 @@ static void client_trace_native_presentation(
         current.state[3], current.state[4],
         current.rate[0], current.rate[1], current.rate[2],
         current.rate[3], current.rate[4],
+        current.time[0], current.time[1], current.time[2],
+        current.time[3], current.time[4],
         current.blend[0], current.blend[1],
         current.blend[2], current.blend[3]
     );
 }
 
+static void host_capture_native_action_edges(DWORD now_ms) {
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpLanArenaActorSnapshot scratch;
+    BOOL combat_enabled = FALSE;
+    unsigned int actor_index;
+    if (runtime_config.local_role !=
+            SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        !SudekiMpLanArenaSessionGetStatus(&status) ||
+        !status.peer_connected ||
+        status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        !SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
+    if (tal_initialized) {
+        host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
+    }
+    if (ailish_initialized) {
+        host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+    }
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        uint8_t variant = host_actor_native_action_variant(
+            actor_index, combat_enabled);
+        uint8_t state = host_actor_native_action_state(actor_index);
+        BOOL synthetic_action_active = actor_index == 0u ? FALSE :
+            (LONG)(host_ailish_weak_attack_until_ms - now_ms) > 0;
+        BOOL action_active =
+            variant != SUDEKIMP_LAN_ARENA_ACTION_NONE ||
+            synthetic_action_active;
+        if (synthetic_action_active &&
+            variant == SUDEKIMP_LAN_ARENA_ACTION_NONE) {
+            variant = host_actor_action_variant[actor_index];
+            if (variant == SUDEKIMP_LAN_ARENA_ACTION_NONE) {
+                variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+            }
+        }
+        ZeroMemory(&scratch, sizeof(scratch));
+        host_track_actor_action_sequence(
+            actor_index, now_ms,
+            action_active,
+            host_actor_native_action_variant(
+                actor_index, combat_enabled) !=
+                SUDEKIMP_LAN_ARENA_ACTION_NONE,
+            variant, state, &scratch);
+    }
+}
+
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
-    BOOL tal_weak_requested;
     BOOL combat_enabled = FALSE;
 
     if (host_last_snapshot_at_ms != 0u &&
@@ -620,17 +857,6 @@ static void host_publish_snapshot(DWORD now_ms) {
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
     if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
-    tal_weak_requested = SudekiMpLanArenaHostInputTakeTalWeakAttack();
-    if (tal_weak_requested && combat_enabled) {
-        host_tal_weak_attack_until_ms = now_ms + 250u;
-        host_tal_weak_blocked_logged = FALSE;
-    } else if (tal_weak_requested && !host_tal_weak_blocked_logged) {
-        host_tal_weak_blocked_logged = TRUE;
-        SudekiMpLogWrite(
-            "lan_arena_runtime event=host_tal_weak_attack phase=rejected "
-            "reason=native_combat_inactive "
-            "policy=host_authority_never_fabricates_out_of_combat_attack\r\n");
-    }
     memset(&snapshot, 0, sizeof(snapshot));
     if (!fill_actor_snapshot(
             SUDEKIMP_CLEANROOM_TAL, SUDEKIMP_LAN_ARENA_TAL_TYPE,
@@ -677,7 +903,7 @@ static void host_publish_snapshot(DWORD now_ms) {
             SudekiMpLogFormat(
                 "lan_arena_runtime event=host_snapshot_stream phase=active "
                 "cadence_ms=50 actors=Tal,Ailish enemies=%u "
-                "policy=host_authoritative_resources_transforms_facing_match_and_combat_mode\r\n",
+                "policy=shared_simulation_outcomes_native_world_combat_flag_replicated\r\n",
                 (unsigned int)snapshot.enemy_count);
         }
     }
@@ -705,6 +931,13 @@ static BOOL release_host_remote_ailish(const char *reason) {
     host_remote_ailish_moving = FALSE;
     host_remote_direction_x = 0;
     host_remote_direction_z = 0;
+    host_remote_aim_x = 0;
+    host_remote_aim_y = 0;
+    host_remote_aim_z = 0;
+    host_remote_weak_held = FALSE;
+    host_remote_first_person_active = FALSE;
+    host_remote_ranged_repeat_not_before_ms = 0u;
+    reset_host_remote_weak_cycle();
     host_release_pending_logged = FALSE;
     SudekiMpLogFormat(
         "lan_arena_runtime event=host_ailish_release phase=confirmed reason=%s "
@@ -778,8 +1011,18 @@ static void lan_arena_control_update_observer(
     SudekiMpLanArenaInput input;
     BOOL remote_weak_requested = FALSE;
     BOOL remote_weak_allowed = FALSE;
+    BOOL remote_weak_active = FALSE;
+    BOOL remote_native_weak_active = FALSE;
+    BOOL remote_aim_valid = FALSE;
+    BOOL remote_combat_toggle_requested = FALSE;
+    BOOL ranged_native_ready = TRUE;
+    BOOL ranged_native_ready_known = FALSE;
+    uint16_t ranged_authored_delay_half = 0u;
+    uint32_t ranged_repeat_interval_ms =
+        HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
     BOOL witness_exact;
     BOOL status_available;
+    DWORD now_ms;
     (void)controller;
     (void)update_data;
     if (!SudekiMpControlUpdateObserverGateTryEnter(
@@ -965,6 +1208,13 @@ static void lan_arena_control_update_observer(
         host_remote_input_quiesced = FALSE;
         host_remote_direction_x = 0;
         host_remote_direction_z = 0;
+        host_remote_aim_x = 0;
+        host_remote_aim_y = 0;
+        host_remote_aim_z = 0;
+        host_remote_weak_held = FALSE;
+        host_remote_first_person_active = FALSE;
+        host_remote_ranged_repeat_not_before_ms = 0u;
+        reset_host_remote_weak_cycle();
         SudekiMpLogWrite(
             "lan_arena_runtime event=host_ailish_claim state=active "
             "policy=authenticated_client_input_native_host_arbiter\r\n");
@@ -996,14 +1246,64 @@ static void lan_arena_control_update_observer(
         host_remote_input_quiesced = FALSE;
         host_remote_direction_x = input.world_direction_x;
         host_remote_direction_z = input.world_direction_z;
+        host_remote_aim_x = input.aim_direction_x;
+        host_remote_aim_y = input.aim_direction_y;
+        host_remote_aim_z = input.aim_direction_z;
+        host_remote_weak_held = input.weak_attack_held != 0u;
+        host_remote_first_person_active =
+            input.ranged_first_person_active != 0u;
         remote_weak_requested = remote_weak_requested ||
             input.weak_attack_pressed != 0u;
+        remote_combat_toggle_requested = remote_combat_toggle_requested ||
+            input.cleanroom_combat_test_pressed != 0u;
     }
-    if (remote_weak_requested) {
+    if (remote_combat_toggle_requested &&
+        !SudekiMpLanArenaHostInputRequestRemoteCombatToggle()) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_remote_cleanroom_combat_test "
+            "phase=rejected win32_error=%lu\r\n",
+            (unsigned long)GetLastError());
+    }
+    remote_aim_valid = host_remote_aim_x != 0 || host_remote_aim_y != 0 ||
+        host_remote_aim_z != 0;
+    now_ms = GetTickCount();
+    remote_native_weak_active =
+        host_actor_native_action_variant(1u, TRUE) ==
+            SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    if (host_remote_weak_cycle_pending) {
+        if (remote_native_weak_active) {
+            host_remote_weak_cycle_seen_active = TRUE;
+        } else if (host_remote_weak_cycle_seen_active) {
+            reset_host_remote_weak_cycle();
+        } else if ((DWORD)(now_ms - host_remote_weak_cycle_started_at_ms) >=
+                HOST_REMOTE_WEAK_START_TIMEOUT_MS &&
+            !host_remote_weak_cycle_timeout_logged) {
+            host_remote_weak_cycle_timeout_logged = TRUE;
+            SudekiMpLogWrite(
+                "lan_arena_runtime event=host_remote_weak_cycle phase=blocked "
+                "reason=native_action_not_observed_within_1000ms "
+                "policy=held_input_never_spams_native_combat_entry\r\n");
+        }
+    }
+    if (!host_remote_weak_held && !remote_weak_requested &&
+        host_remote_weak_cycle_timeout_logged) {
+        reset_host_remote_weak_cycle();
+    }
+    if (remote_weak_requested || host_remote_weak_held) {
         BOOL combat_enabled = FALSE;
         remote_weak_allowed =
             SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
             combat_enabled;
+        if (remote_weak_allowed && host_remote_first_person_active) {
+            ranged_native_ready_known =
+                SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
+                    &ranged_native_ready, &ranged_authored_delay_half);
+            if (ranged_native_ready_known) {
+                ranged_repeat_interval_ms =
+                    SudekiMpLanArenaRangedRepeatIntervalMs(
+                        ranged_authored_delay_half);
+            }
+        }
         if (!remote_weak_allowed && !host_remote_weak_blocked_logged) {
             host_remote_weak_blocked_logged = TRUE;
             SudekiMpLogWrite(
@@ -1012,14 +1312,53 @@ static void lan_arena_control_update_observer(
                 "policy=movement_preserved_attack_edge_consumed_no_replica_pose\r\n");
         }
     }
+    remote_weak_active = remote_weak_allowed &&
+        !host_remote_weak_cycle_pending &&
+        (!host_remote_first_person_active ||
+         (SudekiMpLanArenaRangedRepeatReady(
+              now_ms, host_remote_ranged_repeat_not_before_ms) &&
+          (!ranged_native_ready_known || ranged_native_ready))) &&
+        (remote_weak_requested || host_remote_weak_held);
     if (host_remote_ailish_owned &&
         SudekiMpLanArenaRemoteInputFresh(
             host_last_remote_input_at_ms, GetTickCount(), 250u)) {
+        BOOL ranged_first_person_fire = remote_weak_active &&
+            host_remote_first_person_active;
+        BOOL ranged_world_fallback = FALSE;
+        BOOL weak_submitted = !remote_weak_active;
         BOOL submitted =
             SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
                 (float)host_remote_direction_x / 32767.0f,
                 (float)host_remote_direction_z / 32767.0f,
-                remote_weak_allowed);
+                (float)host_remote_aim_x / 32767.0f,
+                (float)host_remote_aim_z / 32767.0f,
+                remote_aim_valid && host_remote_first_person_active,
+                remote_weak_active && !ranged_first_person_fire);
+        if (submitted && ranged_first_person_fire) {
+            weak_submitted =
+                SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire();
+            /* Only the locally camera-owned Ailish receives Sudeki's
+             * first-person weapon graph at character+0xf0.  The host keeps
+             * Tal as its native camera owner, so its authoritative Ailish
+             * legitimately has no graph for the first-person-only helper.
+             * Fall back solely for that exact validation failure to the
+             * already-proven actor-scoped world combat input.  The outer
+             * native-action cycle admits one shot at a time, preventing a
+             * held mouse button from submitting every controller tick. */
+            if (!weak_submitted && GetLastError() == ERROR_INVALID_DATA) {
+                weak_submitted =
+                    SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
+                        (float)host_remote_direction_x / 32767.0f,
+                        (float)host_remote_direction_z / 32767.0f,
+                        (float)host_remote_aim_x / 32767.0f,
+                        (float)host_remote_aim_z / 32767.0f,
+                        remote_aim_valid,
+                        TRUE);
+                ranged_world_fallback = weak_submitted;
+            }
+        } else if (submitted && remote_weak_active) {
+            weak_submitted = TRUE;
+        }
         if (submitted) {
             host_remote_ailish_moving = host_remote_direction_x != 0 ||
                 host_remote_direction_z != 0;
@@ -1034,25 +1373,69 @@ static void lan_arena_control_update_observer(
                 (int)host_remote_direction_x,
                 (int)host_remote_direction_z);
         }
-        if (submitted && remote_weak_allowed) {
+        if (submitted && remote_weak_active && weak_submitted) {
+            if (ranged_first_person_fire) {
+                host_remote_ranged_repeat_not_before_ms =
+                    GetTickCount() + ranged_repeat_interval_ms;
+            }
             host_ailish_weak_attack_until_ms = GetTickCount() + 250u;
+            if (ranged_world_fallback) {
+                /* The host's non-camera-owned Ailish has no first-person
+                 * weapon graph, so selector 59 cannot acknowledge this
+                 * actor-scoped fallback. Its exact missile-manager readiness
+                 * plus the authored/fail-safe interval owns repeat cadence. */
+                reset_host_remote_weak_cycle();
+            } else {
+                host_remote_weak_cycle_pending = TRUE;
+                host_remote_weak_cycle_seen_active = FALSE;
+                host_remote_weak_cycle_timeout_logged = FALSE;
+                host_remote_weak_cycle_started_at_ms = GetTickCount();
+            }
             host_remote_weak_blocked_logged = FALSE;
             if (!host_remote_weak_logged) {
                 host_remote_weak_logged = TRUE;
-                SudekiMpLogWrite(
+                SudekiMpLogFormat(
                     "lan_arena_runtime event=host_remote_weak_attack "
-                    "phase=submitted policy=native_host_execution\r\n");
+                    "phase=submitted path=%s repeat_interval_ms=%lu "
+                    "authored_delay_half=0x%04x "
+                    "policy=native_host_execution\r\n",
+                    ranged_world_fallback ?
+                        "native_world_arbiter_ranged_fallback" :
+                    ranged_first_person_fire ?
+                        "verified_first_person_weapon_gate" :
+                        "native_arbiter_combat_input",
+                    (unsigned long)(ranged_first_person_fire ?
+                        ranged_repeat_interval_ms : 0u),
+                    (unsigned int)(ranged_first_person_fire ?
+                        ranged_authored_delay_half : 0u));
             }
+        } else if (submitted && ranged_first_person_fire &&
+            !weak_submitted && !host_remote_weak_blocked_logged) {
+            DWORD fire_error = GetLastError();
+            host_remote_weak_blocked_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_remote_weak_attack "
+                "phase=rejected path=verified_first_person_weapon_gate "
+                "win32_error=%lu "
+                "policy=held_input_may_retry_native_cooldown_no_action_edge\r\n",
+                (unsigned long)fire_error);
         }
     } else if (host_remote_ailish_owned && !host_remote_input_quiesced &&
         !SudekiMpLanArenaRemoteInputFresh(
             host_last_remote_input_at_ms, GetTickCount(), 250u) &&
         SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
-            0.0f, 0.0f, FALSE)) {
+            0.0f, 0.0f, 0.0f, 0.0f, FALSE, FALSE)) {
         host_remote_input_quiesced = TRUE;
         host_remote_ailish_moving = FALSE;
         host_remote_direction_x = 0;
         host_remote_direction_z = 0;
+        host_remote_aim_x = 0;
+        host_remote_aim_y = 0;
+        host_remote_aim_z = 0;
+        host_remote_weak_held = FALSE;
+        host_remote_first_person_active = FALSE;
+        host_remote_ranged_repeat_not_before_ms = 0u;
+        reset_host_remote_weak_cycle();
         SudekiMpLogWrite(
             "lan_arena_runtime event=host_remote_input phase=quiesced "
             "reason=no_fresh_gameplay_packet_250ms "
@@ -1150,7 +1533,14 @@ static void lan_arena_frame_end_entry(void) {
             }
         }
     }
-    host_publish_snapshot(GetTickCount());
+    {
+        DWORD now_ms = GetTickCount();
+        /* Native action selectors may enter and retire between 20 Hz network
+         * snapshots. Observe them at the render cadence and journal only the
+         * semantic edge; packets still publish at the fixed 50 ms cadence. */
+        host_capture_native_action_edges(now_ms);
+        host_publish_snapshot(now_ms);
+    }
 }
 
 static void lan_arena_render_start_entry(void) {
@@ -1204,7 +1594,7 @@ static void lan_arena_render_start_entry(void) {
                 "apply_boundary=pre_first_render_start jitter_buffer_ms=100 "
                 "visible_publish=before_and_after_first_plus_pre_world "
                 "actors=Tal,Ailish enemy=training_dummy "
-                "policy=single_network_sample_native_basis_before_root_motion_no_client_combat_authority\r\n");
+                "policy=single_network_sample_native_basis_before_root_motion_native_world_combat_state_replicated\r\n");
         }
     }
 }
@@ -1425,16 +1815,22 @@ BOOL SudekiMpInstallLanArenaRuntime(
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
-    host_tal_weak_attack_until_ms = 0u;
-    ZeroMemory(host_actor_action_variant,
-        sizeof(host_actor_action_variant));
+    reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_weak_blocked_logged = FALSE;
-    host_tal_weak_blocked_logged = FALSE;
     host_remote_ailish_moving = FALSE;
+    host_remote_direction_x = 0;
+    host_remote_direction_z = 0;
+    host_remote_aim_x = 0;
+    host_remote_aim_y = 0;
+    host_remote_aim_z = 0;
+    host_remote_weak_held = FALSE;
+    host_remote_first_person_active = FALSE;
+    host_remote_ranged_repeat_not_before_ms = 0u;
+    reset_host_remote_weak_cycle();
     host_auto_rehost_enabled =
         config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
     host_ailish_spawn_attempted = FALSE;
@@ -1527,16 +1923,22 @@ void SudekiMpUninstallLanArenaRuntime(void) {
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
     host_ailish_weak_attack_until_ms = 0u;
-    host_tal_weak_attack_until_ms = 0u;
-    ZeroMemory(host_actor_action_variant,
-        sizeof(host_actor_action_variant));
+    reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_weak_blocked_logged = FALSE;
-    host_tal_weak_blocked_logged = FALSE;
     host_remote_ailish_moving = FALSE;
+    host_remote_direction_x = 0;
+    host_remote_direction_z = 0;
+    host_remote_aim_x = 0;
+    host_remote_aim_y = 0;
+    host_remote_aim_z = 0;
+    host_remote_weak_held = FALSE;
+    host_remote_first_person_active = FALSE;
+    host_remote_ranged_repeat_not_before_ms = 0u;
+    reset_host_remote_weak_cycle();
     host_auto_rehost_enabled = FALSE;
     host_ailish_spawn_attempted = FALSE;
     client_tal_spawn_attempted = FALSE;
@@ -1588,15 +1990,21 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     ZeroMemory(client_actor_presentation_valid,
         sizeof(client_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;
-    host_tal_weak_attack_until_ms = 0u;
-    ZeroMemory(host_actor_action_variant,
-        sizeof(host_actor_action_variant));
+    reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_weak_blocked_logged = FALSE;
-    host_tal_weak_blocked_logged = FALSE;
+    host_remote_direction_x = 0;
+    host_remote_direction_z = 0;
+    host_remote_aim_x = 0;
+    host_remote_aim_y = 0;
+    host_remote_aim_z = 0;
+    host_remote_weak_held = FALSE;
+    host_remote_first_person_active = FALSE;
+    host_remote_ranged_repeat_not_before_ms = 0u;
+    reset_host_remote_weak_cycle();
     SudekiMpLogFormat(
         "lan_arena_runtime event=local_end_session cleanup=%s "
         "policy=stop_network_discard_replica_retry_any_unconfirmed_native_release\r\n",
@@ -1682,15 +2090,21 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
     ZeroMemory(host_actor_presentation_valid,
         sizeof(host_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;
-    host_tal_weak_attack_until_ms = 0u;
-    ZeroMemory(host_actor_action_variant,
-        sizeof(host_actor_action_variant));
+    reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
     host_remote_weak_logged = FALSE;
     host_remote_weak_blocked_logged = FALSE;
-    host_tal_weak_blocked_logged = FALSE;
+    host_remote_direction_x = 0;
+    host_remote_direction_z = 0;
+    host_remote_aim_x = 0;
+    host_remote_aim_y = 0;
+    host_remote_aim_z = 0;
+    host_remote_weak_held = FALSE;
+    host_remote_first_person_active = FALSE;
+    host_remote_ranged_repeat_not_before_ms = 0u;
+    reset_host_remote_weak_cycle();
     arena_dummy_spawn_attempted = FALSE;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;

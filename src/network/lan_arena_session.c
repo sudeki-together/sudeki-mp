@@ -377,6 +377,8 @@ static void session_poll_unlocked(uint32_t now_ms) {
                 session.config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
                 uint8_t latched_weak_attack = session.input_pending ?
                     session.latest_input.weak_attack_pressed : 0u;
+                uint8_t latched_combat_toggle = session.input_pending ?
+                    session.latest_input.cleanroom_combat_test_pressed : 0u;
                 if ((packet.body.input.acknowledged_snapshot != 0u &&
                      session.last_sent_snapshot_sequence == 0u) ||
                     SudekiMpLanArenaSequenceNewer(
@@ -389,6 +391,9 @@ static void session_poll_unlocked(uint32_t now_ms) {
                 session.latest_input = packet.body.input;
                 if (latched_weak_attack != 0u) {
                     session.latest_input.weak_attack_pressed = 1u;
+                }
+                if (latched_combat_toggle != 0u) {
+                    session.latest_input.cleanroom_combat_test_pressed = 1u;
                 }
                 session.input_pending = 1u;
                 session.last_input_sequence = packet.sequence;

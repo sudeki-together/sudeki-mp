@@ -5,9 +5,29 @@
 
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module);
 void SudekiMpUninstallLanArenaClientInput(void);
-/* Called once from the post-controller game-thread observer. A held native
- * direction is refreshed at a bounded cadence; missing controller samples
- * become an explicit neutral packet before the host's safety timeout. */
+/* Called once from the post-controller game-thread observer. Held movement,
+ * held fire, and the native client-camera aim are refreshed at a bounded
+ * cadence; missing controller samples become an explicit neutral packet
+ * before the host's safety timeout. */
 void SudekiMpLanArenaClientInputService(void);
+
+/* Sudeki's controller keeps each digital action as a four-state transition:
+ * 0=up, 1=pressed, 2=held, 3=released.  LAN input samples this per-window
+ * state instead of GetAsyncKeyState, whose Wine implementation is shared by
+ * unrelated prefixes/windows on the same X display. */
+BOOL SudekiMpLanArenaClientNativeWeakHeld(int transition_state);
+int SudekiMpLanArenaClientSuppressedWeakNextState(int transition_state);
+/* Ailish's LAN weak input is a ranged trigger.  Do not transmit it while the
+ * native client is still entering/leaving its verified first-person graph;
+ * otherwise the host can interpret the same held click as a third-person
+ * combat action at the wrong cadence. */
+BOOL SudekiMpLanArenaClientRangedWeakHeld(
+    BOOL first_person_active,
+    BOOL raw_weak_held
+);
+
+/* Cleanroom-only test control. Campaign combat is authored by Sudeki's
+ * dungeon/world triggers and the resulting native flag is replicated. */
+void SudekiMpLanArenaClientRequestCombatToggle(void);
 
 #endif

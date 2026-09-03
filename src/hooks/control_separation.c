@@ -83,6 +83,9 @@ typedef void (__stdcall *MatrixTargetCreateFunction)(
 typedef const float *(SUDEKIMP_THISCALL *CameraTargetMatrixFunction)(
     void *target
 );
+typedef uint8_t (SUDEKIMP_THISCALL *MissileManagerPredicateFunction)(
+    const void *missile_manager
+);
 enum {
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
@@ -103,10 +106,15 @@ enum {
     RVA_TAL_CHARACTER_UPDATE = 0x00153240u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
+    RVA_POSITION_SET_FORWARD = 0x001114d0u,
     RVA_GROUP_PLAYERS_IN_COMBAT = 0x00004fa0u,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
+    RVA_FIRST_PERSON_HELD_FIRE = 0x00134410u,
+    RVA_MISSILE_MANAGER_CAN_FIRE = 0x000c79a0u,
+    RVA_MISSILE_MANAGER_IS_FIRING = 0x000c7990u,
+    RVA_MISSILE_MANAGER_VTABLE = 0x002d4c8cu,
     RVA_CAMERA_TARGET_INSTALL = 0x000e84c0u,
     RVA_MATRIX_TARGET_CREATE = 0x00134fb0u,
     RVA_CAMERA_TARGET_RELEASE = 0x00135340u,
@@ -191,6 +199,14 @@ static ControllerUpdateFunction original_controller_update;
 static AiControlFunction ai_override_control;
 static AiControlFunction ai_default_control;
 static ArbiterMovementFunction arbiter_movement;
+static void *position_set_forward;
+static void *lan_arena_first_person_held_fire;
+static MissileManagerPredicateFunction missile_manager_can_fire;
+static MissileManagerPredicateFunction missile_manager_is_firing;
+static void *lan_arena_cached_missile_manager;
+static void *lan_arena_cached_missile_owner;
+static int lan_arena_missile_ready_trace_state = -1;
+static int lan_arena_ranged_fire_validation_state = -1;
 static ArbiterSetSpeedFunction arbiter_set_speed;
 static MovementControllerSetSpeedImmediateFunction
     movement_controller_set_speed_immediate;
@@ -311,6 +327,27 @@ static const uint8_t expected_arbiter_combat_input_entry[] = {
 static const uint8_t expected_arbiter_set_speed_entry[] = {
     0x8b, 0x41, 0x10, 0x56, 0x8b, 0xb0, 0x80, 0x00,
     0x00, 0x00, 0x85, 0xf6, 0x74, 0x5e, 0x8b, 0xd1
+};
+static const uint8_t expected_position_set_forward_entry[] = {
+    0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x83, 0xec,
+    0x60, 0xd9, 0xee, 0xd9, 0x54, 0x24, 0x14
+};
+static const uint8_t expected_first_person_held_fire_entry[] = {
+    0x83, 0x78, 0x2c, 0x00, 0x56, 0x74, 0x29, 0x8b,
+    0x40, 0x2c, 0x8b, 0x70, 0x70, 0x85, 0xf6, 0x74,
+    0x1f, 0x8b, 0x46, 0x3c, 0x85, 0xc0, 0x74, 0x18,
+    0x83, 0x78, 0x50, 0x08, 0x0f, 0x94, 0xc0, 0x84,
+    0xc0, 0x74, 0x0d, 0xe8, 0x48, 0x59, 0xf9, 0xff,
+    0x84, 0xc0, 0x74, 0x04, 0xb0, 0x01, 0x5e, 0xc3
+};
+static const uint8_t expected_missile_manager_can_fire_entry[] = {
+    0x8au, 0x81u, 0xe0u, 0x00u, 0x00u, 0x00u, 0x84u, 0xc0u,
+    0x74u, 0x07u, 0x3cu, 0x06u, 0x74u, 0x03u, 0x33u, 0xc0u,
+    0xc3u, 0xb8u, 0x01u, 0x00u, 0x00u, 0x00u, 0xc3u
+};
+static const uint8_t expected_missile_manager_is_firing_entry[] = {
+    0x33u, 0xc0u, 0x80u, 0xb9u, 0xe0u, 0x00u, 0x00u, 0x00u,
+    0x02u, 0x0fu, 0x94u, 0xc0u, 0xc3u
 };
 static const uint8_t expected_movement_controller_set_speed_immediate_entry[] = {
     0x83, 0x79, 0x68, 0x01, 0x75, 0x15, 0xd9, 0xe8,
@@ -5191,10 +5228,144 @@ BOOL SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
         direction_finite);
 }
 
+__attribute__((naked, noinline, used))
+static void call_position_set_forward(
+    void *position __attribute__((unused)),
+    const float direction[3] __attribute__((unused))
+) {
+    __asm__ volatile(
+        "pushl %esi\n\t"
+        "movl 8(%esp), %esi\n\t"
+        "movl 12(%esp), %ecx\n\t"
+        "call *_position_set_forward\n\t"
+        "popl %esi\n\t"
+        "ret\n\t"
+    );
+}
+
+__attribute__((naked, noinline, used))
+static uint8_t call_first_person_held_fire(
+    void *ranged_state __attribute__((unused))
+) {
+    __asm__ volatile(
+        "movl 4(%esp), %eax\n\t"
+        "call *_lan_arena_first_person_held_fire\n\t"
+        "ret\n\t"
+    );
+}
+
+static uint8_t *lan_arena_player_two_missile_manager(void) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    uint8_t *character = (uint8_t *)companion->character;
+    uint8_t *candidate;
+    uint8_t *resolved = NULL;
+    size_t offset;
+    unsigned int matches = 0u;
+    if (game_base == NULL || character == NULL || !companion->requested ||
+        !companion->lease_exact ||
+        !companion_character_is_in_active_group(companion)) {
+        lan_arena_cached_missile_manager = NULL;
+        lan_arena_cached_missile_owner = NULL;
+        return NULL;
+    }
+    candidate = (uint8_t *)lan_arena_cached_missile_manager;
+    if (lan_arena_cached_missile_owner == character &&
+        readable_memory(candidate, 0xe1u) &&
+        *(void **)candidate == game_base + RVA_MISSILE_MANAGER_VTABLE &&
+        *(void **)(candidate + 0x10u) == character) {
+        return candidate;
+    }
+    /* Player entity subclasses place CMissileManager at different offsets.
+     * Resolve the exact subobject structurally: its supported-build vtable and
+     * native owner backpointer must both name this immutable actor lease. */
+    for (offset = 0u; offset < 0x2000u; offset += sizeof(void *)) {
+        candidate = character + offset;
+        if (!readable_memory(candidate, 0xe1u)) continue;
+        if (*(void **)candidate == game_base + RVA_MISSILE_MANAGER_VTABLE &&
+            *(void **)(candidate + 0x10u) == character) {
+            resolved = candidate;
+            ++matches;
+        }
+    }
+    if (matches != 1u) {
+        lan_arena_cached_missile_manager = NULL;
+        lan_arena_cached_missile_owner = NULL;
+        return NULL;
+    }
+    lan_arena_cached_missile_manager = resolved;
+    lan_arena_cached_missile_owner = character;
+    SudekiMpLogFormat(
+        "control_separation event=lan_arena_missile_manager state=resolved "
+        "character=0x%08lx manager=0x%08lx actor_offset=0x%04lx "
+        "policy=unique_vtable_and_owner_backpointer_read_only_gate\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)resolved,
+        (unsigned long)(resolved - character));
+    return resolved;
+}
+
+BOOL SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
+    BOOL *ready,
+    uint16_t *authored_delay_half_result
+) {
+    uint8_t *manager;
+    uint8_t *selected_weapon;
+    BOOL can_fire;
+    BOOL is_firing;
+    uint16_t authored_delay_half = 0u;
+    uint16_t authored_cycle_half = 0u;
+    float native_cooldown = NAN;
+    int trace_state;
+    if (ready == NULL || authored_delay_half_result == NULL ||
+        missile_manager_can_fire == NULL ||
+        missile_manager_is_firing == NULL) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    manager = lan_arena_player_two_missile_manager();
+    if (manager == NULL) {
+        SetLastError(ERROR_NOT_READY);
+        return FALSE;
+    }
+    can_fire = missile_manager_can_fire(manager) != 0u;
+    is_firing = missile_manager_is_firing(manager) != 0u;
+    selected_weapon = readable_memory(manager, 0x64u) ?
+        *(uint8_t **)(manager + 0x60u) : NULL;
+    if (readable_memory(selected_weapon, 0xc4u)) {
+        authored_delay_half = *(uint16_t *)(selected_weapon + 0xb8u);
+        authored_cycle_half = *(uint16_t *)(selected_weapon + 0xbau);
+        native_cooldown = *(float *)(selected_weapon + 0xc0u);
+    }
+    *ready = can_fire && !is_firing;
+    *authored_delay_half_result = authored_delay_half;
+    trace_state = *ready ? 1 : 0;
+    if (trace_state != lan_arena_missile_ready_trace_state) {
+        lan_arena_missile_ready_trace_state = trace_state;
+        SudekiMpLogFormat(
+            "control_separation event=lan_arena_missile_cadence "
+            "state=%s native_state=%u can_fire=%s is_firing=%s "
+            "selected=0x%08lx authored_delay_half=0x%04x "
+            "authored_cycle_half=0x%04x cooldown=%.6f "
+            "policy=retail_CMissileManager_predicates_and_read_only_weapon_timing\r\n",
+            *ready ? "ready" : "busy",
+            (unsigned int)manager[0xe0u],
+            can_fire ? "true" : "false",
+            is_firing ? "true" : "false",
+            (unsigned long)(uintptr_t)selected_weapon,
+            (unsigned int)authored_delay_half,
+            (unsigned int)authored_cycle_half,
+            native_cooldown);
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_x,
     float world_direction_z,
-    BOOL weak_attack_edge
+    float aim_direction_x,
+    float aim_direction_z,
+    BOOL aim_direction_valid,
+    BOOL weak_attack_active
 ) {
     SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
     uint8_t *character = (uint8_t *)companion->character;
@@ -5203,12 +5374,18 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     uint8_t *controller;
     void *arbiter;
     void *controller_target;
+    void *position;
     float direction[3];
+    float aim_direction[3];
     float magnitude;
+    float aim_magnitude;
     BOOL native_control_state_exact;
 
     if (!isfinite(world_direction_x) || !isfinite(world_direction_z) ||
-        fabsf(world_direction_x) > 1.0f || fabsf(world_direction_z) > 1.0f) {
+        fabsf(world_direction_x) > 1.0f || fabsf(world_direction_z) > 1.0f ||
+        (aim_direction_valid &&
+         (!isfinite(aim_direction_x) || !isfinite(aim_direction_z) ||
+          fabsf(aim_direction_x) > 1.0f || fabsf(aim_direction_z) > 1.0f))) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -5221,7 +5398,8 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
         *(void **)(controller + CONTROLLER_TARGET_OFFSET);
     native_control_state_exact = component != NULL &&
         component == companion->ai_component && mode_state != NULL &&
-        arbiter != NULL && *(void **)(character + 0xacu) != NULL &&
+        readable_memory(arbiter, 0x64u) &&
+        *(void **)(character + 0xacu) != NULL &&
         *(int16_t *)(component + 0x16au) == 1 && *(mode_state + 0x0bu) == 0u &&
         character != controller_target && arbiter_movement != NULL;
     if (!SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
@@ -5231,7 +5409,7 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
             companion_character_is_in_active_group(companion),
             native_control_state_exact,
             TRUE,
-            weak_attack_edge)) {
+            weak_attack_active)) {
         SetLastError(ERROR_NOT_READY);
         return FALSE;
     }
@@ -5249,10 +5427,123 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     } else {
         stop_companion_movement(1u, companion);
     }
-    if (weak_attack_edge) {
+    /* The authenticated remote first-person bit is folded into
+     * aim_direction_valid by the LAN runtime. Preserve ordinary third-person
+     * turning and replace body forward only while that remote camera owns
+     * Ailish's aim; the host need not own the same local camera mode. */
+    if (aim_direction_valid && position_set_forward != NULL) {
+        position = *(void **)(character + 0x44u);
+        aim_direction[0] = aim_direction_x;
+        aim_direction[1] = 0.0f;
+        aim_direction[2] = aim_direction_z;
+        aim_magnitude = sqrtf(
+            aim_direction[0] * aim_direction[0] +
+            aim_direction[2] * aim_direction[2]);
+        if (readable_memory(position, 0x5cu) &&
+            isfinite(aim_magnitude) && aim_magnitude > 0.0001f) {
+            aim_direction[0] /= aim_magnitude;
+            aim_direction[2] /= aim_magnitude;
+            /* At rest, enter through the same native arbiter direction path
+             * used by an AI-controlled companion. This updates the actor's
+             * accepted facing state as well as CPosition, so the next native
+             * update cannot immediately restore the old cardinal direction.
+             * Moving remains owned by the preceding world-direction submit;
+             * forcing a zero-speed aim submit there would cancel translation. */
+            if (magnitude <= 0.0001f) {
+                arbiter_movement(
+                    arbiter, aim_direction, 0.0f, 1.0f, 0u);
+            }
+            call_position_set_forward(position, aim_direction);
+        }
+    }
+    if (weak_attack_active) {
         SudekiMpSubmitArbiterCombatInput(
             game_base + RVA_ARBITER_COMBAT_INPUT, arbiter,
             1, 0, 0, 0, 0, 0);
+    }
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire(void) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    uint8_t *character = (uint8_t *)companion->character;
+    uint8_t *component = NULL;
+    uint8_t *mode_state = NULL;
+    uint8_t *ranged_state = NULL;
+    uint8_t *weapon_owner = NULL;
+    uint8_t *weapon = NULL;
+    uint8_t *weapon_state = NULL;
+    int validation_state;
+    const char *validation_reason;
+
+    if (lan_arena_first_person_held_fire == NULL) {
+        validation_state = 0;
+        validation_reason = "native_entry_unavailable";
+    } else if (!lan_arena_remote_input_enabled ||
+        !companion->requested || !companion->lease_exact ||
+        !companion_character_is_in_active_group(companion) ||
+        !readable_memory(character, 0xf4u)) {
+        validation_state = 1;
+        validation_reason = "actor_lease_not_exact";
+    } else {
+        component = *(uint8_t **)(character + 0x94u);
+        mode_state = readable_memory(component, 0x40u) ?
+            *(uint8_t **)(component + 0x3cu) : NULL;
+        ranged_state = *(uint8_t **)(character + 0xf0u);
+        weapon_owner = readable_memory(ranged_state, 0x30u) ?
+            *(uint8_t **)(ranged_state + 0x2cu) : NULL;
+        weapon = readable_memory(weapon_owner, 0x74u) ?
+            *(uint8_t **)(weapon_owner + 0x70u) : NULL;
+        weapon_state = readable_memory(weapon, 0x40u) ?
+            *(uint8_t **)(weapon + 0x3cu) : NULL;
+        if (component == NULL || component != companion->ai_component ||
+            !readable_memory(component, 0x16cu) ||
+            !readable_memory(mode_state, 0x0cu)) {
+            validation_state = 2;
+            validation_reason = "ai_component_graph_not_exact";
+        } else if (*(int16_t *)(component + 0x16au) != 1 ||
+            *(mode_state + 0x0bu) != 0u) {
+            validation_state = 3;
+            validation_reason = "ai_control_lease_not_active";
+        } else if (!readable_memory(weapon_state, 0x54u)) {
+            validation_state = 4;
+            validation_reason = "ranged_weapon_graph_not_ready";
+        } else if (*(uint32_t *)(weapon_state + 0x50u) != 8u) {
+            validation_state = 5;
+            validation_reason = "ranged_weapon_type_not_firearm";
+        } else {
+            validation_state = 6;
+            validation_reason = "exact_native_weapon_gate_ready";
+        }
+    }
+    if (validation_state != lan_arena_ranged_fire_validation_state) {
+        lan_arena_ranged_fire_validation_state = validation_state;
+        SudekiMpLogFormat(
+            "control_separation event=lan_arena_ranged_fire_validation "
+            "state=%s reason=%s character=0x%08lx component=0x%08lx "
+            "ranged_state=0x%08lx weapon_owner=0x%08lx "
+            "weapon=0x%08lx weapon_state=0x%08lx "
+            "policy=exact_Ailish_first_person_native_weapon_gate\r\n",
+            validation_state == 6 ? "ready" : "rejected",
+            validation_reason,
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)(uintptr_t)component,
+            (unsigned long)(uintptr_t)ranged_state,
+            (unsigned long)(uintptr_t)weapon_owner,
+            (unsigned long)(uintptr_t)weapon,
+            (unsigned long)(uintptr_t)weapon_state);
+    }
+    if (validation_state != 6) {
+        SetLastError(validation_state <= 1 ?
+            ERROR_NOT_READY : ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (call_first_person_held_fire(ranged_state) == 0u) {
+        /* Native weapon eligibility/cooldown rejected this control tick.  A
+         * held LAN input may retry; no action edge is published until the
+         * exact retail routine accepts and begins the shot. */
+        SetLastError(ERROR_RETRY);
+        return FALSE;
     }
     return TRUE;
 }
@@ -5601,6 +5892,31 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     if (memcmp(
+            base + RVA_POSITION_SET_FORWARD,
+            expected_position_set_forward_entry,
+            sizeof(expected_position_set_forward_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(
+            base + RVA_FIRST_PERSON_HELD_FIRE,
+            expected_first_person_held_fire_entry,
+            sizeof(expected_first_person_held_fire_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(
+            base + RVA_MISSILE_MANAGER_CAN_FIRE,
+            expected_missile_manager_can_fire_entry,
+            sizeof(expected_missile_manager_can_fire_entry)) != 0 ||
+        memcmp(
+            base + RVA_MISSILE_MANAGER_IS_FIRING,
+            expected_missile_manager_is_firing_entry,
+            sizeof(expected_missile_manager_is_firing_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(
             base + RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE,
             expected_movement_controller_set_speed_immediate_entry,
             sizeof(expected_movement_controller_set_speed_immediate_entry)) !=
@@ -5796,6 +6112,17 @@ BOOL SudekiMpInstallControlSeparation(
     ai_override_control = (AiControlFunction)(base + RVA_AI_OVERRIDE_CONTROL);
     ai_default_control = (AiControlFunction)(base + RVA_AI_DEFAULT_CONTROL);
     arbiter_movement = (ArbiterMovementFunction)(base + RVA_ARBITER_MOVEMENT);
+    position_set_forward = base + RVA_POSITION_SET_FORWARD;
+    lan_arena_first_person_held_fire =
+        base + RVA_FIRST_PERSON_HELD_FIRE;
+    missile_manager_can_fire = (MissileManagerPredicateFunction)(
+        base + RVA_MISSILE_MANAGER_CAN_FIRE);
+    missile_manager_is_firing = (MissileManagerPredicateFunction)(
+        base + RVA_MISSILE_MANAGER_IS_FIRING);
+    lan_arena_cached_missile_manager = NULL;
+    lan_arena_cached_missile_owner = NULL;
+    lan_arena_missile_ready_trace_state = -1;
+    lan_arena_ranged_fire_validation_state = -1;
     arbiter_set_speed = (ArbiterSetSpeedFunction)(
         base + RVA_ARBITER_SET_SPEED
     );
@@ -5967,6 +6294,14 @@ void SudekiMpUninstallControlSeparation(void) {
     ai_override_control = NULL;
     ai_default_control = NULL;
     arbiter_movement = NULL;
+    position_set_forward = NULL;
+    lan_arena_first_person_held_fire = NULL;
+    missile_manager_can_fire = NULL;
+    missile_manager_is_firing = NULL;
+    lan_arena_cached_missile_manager = NULL;
+    lan_arena_cached_missile_owner = NULL;
+    lan_arena_missile_ready_trace_state = -1;
+    lan_arena_ranged_fire_validation_state = -1;
     arbiter_set_speed = NULL;
     movement_controller_set_speed_immediate = NULL;
     camera_manager_get_camera_mode = NULL;

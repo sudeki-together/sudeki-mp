@@ -62,6 +62,7 @@ add_library(SudekiMP SHARED
     src/input/local_input_hub.c
     src/input/key_binding.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_endpoint.c
     src/network/lan_arena_authority.c
     src/network/lan_arena_replica.c
@@ -169,6 +170,21 @@ add_executable(SudekiMP.Launcher
     ${SUDEKIMP_COMMON_SOURCES}
 )
 
+add_executable(SudekiMP.LanArenaOperator
+    src/tools/lan_arena_operator.c
+)
+target_include_directories(SudekiMP.LanArenaOperator PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaOperator PRIVATE
+    WIN32_LEAN_AND_MEAN UNICODE _UNICODE
+)
+target_compile_options(SudekiMP.LanArenaOperator PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+target_link_options(SudekiMP.LanArenaOperator PRIVATE -municode)
+set_target_properties(SudekiMP.LanArenaOperator PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
 target_include_directories(SudekiMP.Launcher PRIVATE src)
 target_compile_definitions(SudekiMP.Launcher PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(SudekiMP.Launcher PRIVATE -Wall -Wextra -Wpedantic)
@@ -210,6 +226,7 @@ set_target_properties(SudekiMP.CallHookTest PROPERTIES
 add_executable(SudekiMP.LanArenaRuntimeHookTest
     tests/lan_arena_runtime_hook_test.c
     src/hooks/call_hook.c
+    src/network/lan_arena_tal_combo_graph.c
 )
 target_include_directories(SudekiMP.LanArenaRuntimeHookTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaRuntimeHookTest PRIVATE
@@ -400,6 +417,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/input/bridge_receiver.c
     src/input/local_input_hub.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_replica.c
     src/network/lan_arena_session.c
     src/network/lan_arena_authority.c
@@ -573,6 +591,7 @@ set_target_properties(SudekiMP.LanArenaCollisionDebugTest PROPERTIES
 add_executable(SudekiMP.LanArenaReplicaTest
     tests/lan_arena_replica_test.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_replica.c
 )
 target_include_directories(SudekiMP.LanArenaReplicaTest PRIVATE src)
@@ -580,6 +599,21 @@ target_compile_options(SudekiMP.LanArenaReplicaTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
 )
 set_target_properties(SudekiMP.LanArenaReplicaTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaTalComboGraphTest
+    tests/lan_arena_tal_combo_graph_test.c
+    src/network/lan_arena_tal_combo_graph.c
+)
+target_include_directories(SudekiMP.LanArenaTalComboGraphTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaTalComboGraphTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaTalComboGraphTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaTalComboGraphTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

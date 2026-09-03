@@ -4,6 +4,7 @@
 #include "engine/log.h"
 #include "hooks/call_hook.h"
 #include "hooks/lan_arena_pause_panel.h"
+#include "network/lan_arena_operator.h"
 #include "network/lan_arena_session.h"
 
 #include <stdint.h>
@@ -17,6 +18,7 @@ typedef void (__stdcall *ArbiterMovementFunction)(
 
 enum {
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
+    RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
@@ -40,9 +42,22 @@ static SudekiMpRelativeCallHook alternate_movement_hook;
 static SudekiMpRelativeCallHook normal_movement_hook;
 static ControllerCombatFunction original_controller_combat;
 static ArbiterMovementFunction original_arbiter_movement;
-static BOOL tal_weak_was_down;
-static BOOL tal_weak_pending;
 static BOOL combat_toggle_was_down;
+static HANDLE operator_weak_attack_event;
+static HANDLE operator_strong_attack_event;
+static HANDLE operator_sweep_attack_event;
+static HANDLE operator_block_event;
+static HANDLE operator_action_ack_event;
+static DWORD operator_trace_until_ms;
+static uint8_t *host_game_base;
+
+typedef enum LanArenaHostOperatorAction {
+    LAN_ARENA_HOST_OPERATOR_NONE = 0,
+    LAN_ARENA_HOST_OPERATOR_WEAK,
+    LAN_ARENA_HOST_OPERATOR_STRONG,
+    LAN_ARENA_HOST_OPERATOR_SWEEP,
+    LAN_ARENA_HOST_OPERATOR_BLOCK
+} LanArenaHostOperatorAction;
 
 static BOOL local_process_owns_foreground(void) {
     DWORD process_id = 0u;
@@ -51,39 +66,157 @@ static BOOL local_process_owns_foreground(void) {
     return process_id == GetCurrentProcessId();
 }
 
-void SudekiMpLanArenaHostInputServiceCombatToggle(void) {
+static BOOL readable_memory(const void *pointer, size_t length) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t address = (uintptr_t)pointer;
+    return pointer != NULL && length != 0u &&
+        VirtualQuery(pointer, &information, sizeof(information)) != 0u &&
+        information.State == MEM_COMMIT &&
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0u &&
+        address + length >= address &&
+        address + length <=
+            (uintptr_t)information.BaseAddress + information.RegionSize;
+}
+
+static LanArenaHostOperatorAction take_operator_action(void) {
+    LanArenaHostOperatorAction action = LAN_ARENA_HOST_OPERATOR_NONE;
+#define TAKE_OPERATOR_EVENT(handle, candidate) \
+    do { \
+        if ((handle) != NULL && \
+            WaitForSingleObject((handle), 0u) == WAIT_OBJECT_0 && \
+            action == LAN_ARENA_HOST_OPERATOR_NONE) { \
+            action = (candidate); \
+        } \
+    } while (0)
+    TAKE_OPERATOR_EVENT(operator_weak_attack_event,
+        LAN_ARENA_HOST_OPERATOR_WEAK);
+    TAKE_OPERATOR_EVENT(operator_strong_attack_event,
+        LAN_ARENA_HOST_OPERATOR_STRONG);
+    TAKE_OPERATOR_EVENT(operator_sweep_attack_event,
+        LAN_ARENA_HOST_OPERATOR_SWEEP);
+    TAKE_OPERATOR_EVENT(operator_block_event,
+        LAN_ARENA_HOST_OPERATOR_BLOCK);
+#undef TAKE_OPERATOR_EVENT
+    return action;
+}
+
+static void service_operator_action(void) {
+    LanArenaHostOperatorAction action = take_operator_action();
+    uint8_t *controller;
+    void *tal;
+    size_t offset;
+    int saved_state;
+    const char *label;
+    SudekiMpLanArenaSessionStatus status;
+    if (action == LAN_ARENA_HOST_OPERATOR_NONE) return;
+    if (SudekiMpLanArenaPausePanelActive() ||
+        !SudekiMpLanArenaSessionGetStatus(&status) ||
+        !status.peer_connected ||
+        status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        host_game_base == NULL || original_controller_combat == NULL ||
+        !readable_memory(host_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
+            sizeof(controller))) {
+        SudekiMpLogWrite(
+            "lan_arena_host_input event=operator_action phase=rejected "
+            "reason=host_controller_not_ready\r\n");
+        return;
+    }
+    controller = *(uint8_t **)(
+        host_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    if (!readable_memory(
+            controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        tal == NULL || *(void **)(controller + CONTROLLER_TARGET_OFFSET) != tal) {
+        SudekiMpLogWrite(
+            "lan_arena_host_input event=operator_action phase=rejected "
+            "reason=tal_controller_lease_mismatch\r\n");
+        return;
+    }
+    switch (action) {
+    case LAN_ARENA_HOST_OPERATOR_WEAK:
+        offset = CONTROLLER_WEAK_OFFSET;
+        label = "weak";
+        break;
+    case LAN_ARENA_HOST_OPERATOR_STRONG:
+        offset = CONTROLLER_STRONG_OFFSET;
+        label = "strong";
+        break;
+    case LAN_ARENA_HOST_OPERATOR_SWEEP:
+        offset = CONTROLLER_SWEEP_OFFSET;
+        label = "sweep";
+        break;
+    case LAN_ARENA_HOST_OPERATOR_BLOCK:
+        offset = CONTROLLER_BLOCK_OFFSET;
+        label = "block";
+        break;
+    default:
+        return;
+    }
+    saved_state = *(int *)(controller + offset);
+    *(int *)(controller + offset) = 1;
+    operator_trace_until_ms = GetTickCount() + 1500u;
+    SudekiMpLogFormat(
+        "lan_arena_host_input event=operator_action phase=submitted "
+        "action=%s policy=one_native_controller_transition\r\n",
+        label);
+    original_controller_combat(controller);
+    *(int *)(controller + offset) = saved_state;
+}
+
+void SudekiMpLanArenaHostInputNotifyNativeActionObserved(void) {
+    if (operator_action_ack_event != NULL) {
+        SetEvent(operator_action_ack_event);
+    }
+}
+
+static BOOL apply_combat_toggle(const char *source) {
     SudekiMpLanArenaSessionStatus status;
     BOOL enabled = FALSE;
-    BOOL down = (GetAsyncKeyState(VK_F8) & (SHORT)0x8000) != 0;
-    BOOL rising = down && !combat_toggle_was_down;
-    combat_toggle_was_down = down;
-    if (!rising || !local_process_owns_foreground()) return;
     if (!SudekiMpLanArenaSessionGetStatus(&status) ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
         !status.peer_connected) {
         SudekiMpLogWrite(
-            "lan_arena_host_input event=combat_toggle result=rejected "
+            "lan_arena_host_input event=cleanroom_combat_test result=rejected "
             "reason=authenticated_client_required key=F8\r\n");
-        return;
+        return FALSE;
     }
     if (!SudekiMpCleanroomEngineCombatMode(&enabled)) {
         SudekiMpLogWrite(
-            "lan_arena_host_input event=combat_toggle result=rejected "
+            "lan_arena_host_input event=cleanroom_combat_test result=rejected "
             "reason=native_combat_not_ready key=F8\r\n");
-        return;
+        return FALSE;
     }
     if (!SudekiMpCleanroomEngineSetCombatMode(!enabled)) {
         SudekiMpLogFormat(
-            "lan_arena_host_input event=combat_toggle result=rejected "
+            "lan_arena_host_input event=cleanroom_combat_test result=rejected "
             "reason=native_transition_failed requested=%s key=F8 error=%lu\r\n",
             enabled ? "disabled" : "enabled",
             (unsigned long)GetLastError());
-        return;
+        return FALSE;
     }
     SudekiMpLogFormat(
-        "lan_arena_host_input event=combat_toggle result=confirmed "
-        "state=%s key=F8 policy=host_only_native_group_transition\r\n",
-        enabled ? "disabled" : "enabled");
+        "lan_arena_host_input event=cleanroom_combat_test result=confirmed "
+        "state=%s source=%s "
+        "policy=test_only_native_group_transition_not_combat_authority\r\n",
+        enabled ? "disabled" : "enabled", source);
+    return TRUE;
+}
+
+void SudekiMpLanArenaHostInputServiceCombatToggle(void) {
+    /* GetKeyState follows this process' message queue. GetAsyncKeyState is a
+     * desktop-global query under Wine and can leak keys between the isolated
+     * host/client prefixes. */
+    BOOL down = (GetKeyState(VK_F8) & (SHORT)0x8000) != 0;
+    BOOL rising = down && !combat_toggle_was_down;
+    combat_toggle_was_down = down;
+    if (rising && local_process_owns_foreground()) {
+        (void)apply_combat_toggle("local_F8");
+    }
+    service_operator_action();
+}
+
+BOOL SudekiMpLanArenaHostInputRequestRemoteCombatToggle(void) {
+    return apply_combat_toggle("authenticated_client_F8_test");
 }
 
 static void __stdcall gate_host_movement(
@@ -109,12 +242,9 @@ static void __stdcall gate_host_movement(
 
 static void __stdcall observe_host_combat(void *controller) {
     uint8_t *state = (uint8_t *)controller;
-    void *tal;
-    tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    void *tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
     BOOL owns_tal = state != NULL && tal != NULL &&
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == tal;
-    BOOL weak_down = owns_tal &&
-        *(int *)(state + CONTROLLER_WEAK_OFFSET) == 1;
     if (owns_tal && SudekiMpLanArenaPausePanelActive()) {
         *(int *)(state + CONTROLLER_WEAK_OFFSET) = 0;
         *(int *)(state + CONTROLLER_STRONG_OFFSET) = 0;
@@ -122,10 +252,7 @@ static void __stdcall observe_host_combat(void *controller) {
         *(int *)(state + CONTROLLER_BLOCK_OFFSET) = 0;
         *(int *)(state + CONTROLLER_WEAPON_NEXT_OFFSET) = 0;
         *(int *)(state + CONTROLLER_WEAPON_PREVIOUS_OFFSET) = 0;
-        weak_down = FALSE;
     }
-    if (weak_down && !tal_weak_was_down) tal_weak_pending = TRUE;
-    tal_weak_was_down = weak_down;
     original_controller_combat(controller);
 }
 
@@ -163,10 +290,27 @@ BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module) {
     }
     original_controller_combat =
         (ControllerCombatFunction)controller_combat_hook.trampoline;
-    tal_weak_was_down = FALSE;
-    tal_weak_pending = FALSE;
+    operator_weak_attack_event = CreateEventW(
+        NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_WEAK_ATTACK_EVENT);
+    operator_strong_attack_event = CreateEventW(
+        NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_STRONG_ATTACK_EVENT);
+    operator_sweep_attack_event = CreateEventW(
+        NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_SWEEP_ATTACK_EVENT);
+    operator_block_event = CreateEventW(
+        NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_BLOCK_EVENT);
+    operator_action_ack_event = CreateEventW(
+        NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_ACTION_ACK_EVENT);
+    if (operator_weak_attack_event == NULL ||
+        operator_strong_attack_event == NULL ||
+        operator_sweep_attack_event == NULL || operator_block_event == NULL ||
+        operator_action_ack_event == NULL) {
+        SudekiMpUninstallLanArenaHostInput();
+        return FALSE;
+    }
     combat_toggle_was_down =
-        (GetAsyncKeyState(VK_F8) & (SHORT)0x8000) != 0;
+        (GetKeyState(VK_F8) & (SHORT)0x8000) != 0;
+    operator_trace_until_ms = 0u;
+    host_game_base = base;
     return TRUE;
 }
 
@@ -176,13 +320,32 @@ void SudekiMpUninstallLanArenaHostInput(void) {
     SudekiMpRestoreRelativeCallHook(&alternate_movement_hook);
     original_controller_combat = NULL;
     original_arbiter_movement = NULL;
-    tal_weak_was_down = FALSE;
-    tal_weak_pending = FALSE;
     combat_toggle_was_down = FALSE;
+    operator_trace_until_ms = 0u;
+    host_game_base = NULL;
+    if (operator_action_ack_event != NULL) {
+        CloseHandle(operator_action_ack_event);
+        operator_action_ack_event = NULL;
+    }
+    if (operator_block_event != NULL) {
+        CloseHandle(operator_block_event);
+        operator_block_event = NULL;
+    }
+    if (operator_sweep_attack_event != NULL) {
+        CloseHandle(operator_sweep_attack_event);
+        operator_sweep_attack_event = NULL;
+    }
+    if (operator_strong_attack_event != NULL) {
+        CloseHandle(operator_strong_attack_event);
+        operator_strong_attack_event = NULL;
+    }
+    if (operator_weak_attack_event != NULL) {
+        CloseHandle(operator_weak_attack_event);
+        operator_weak_attack_event = NULL;
+    }
 }
 
-BOOL SudekiMpLanArenaHostInputTakeTalWeakAttack(void) {
-    BOOL pending = tal_weak_pending;
-    tal_weak_pending = FALSE;
-    return pending;
+BOOL SudekiMpLanArenaHostInputDiagnosticTraceActive(void) {
+    return operator_trace_until_ms != 0u &&
+        (LONG)(operator_trace_until_ms - GetTickCount()) > 0;
 }

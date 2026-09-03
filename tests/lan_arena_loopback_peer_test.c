@@ -27,6 +27,8 @@ static void fill_snapshot(SudekiMpLanArenaSnapshot *snapshot, DWORD now) {
     snapshot->ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
     snapshot->ailish.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
     snapshot->ailish.action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    snapshot->ailish.action_phase_valid = 1u;
+    snapshot->ailish.action_phase_q8 = 18u * 256u;
     snapshot->enemy_count = 1u;
     snapshot->enemies[0].native_entity_id = 1u;
     snapshot->enemies[0].z = 6.0f;
@@ -53,7 +55,11 @@ static int run_host(unsigned int port) {
         if (SudekiMpLanArenaSessionTakeRemoteInput(&input)) {
             if (input.world_direction_x != 16384 ||
                 input.world_direction_z != -8192 ||
-                input.weak_attack_pressed != 1u) {
+                input.aim_direction_x != 32767 ||
+                input.weak_attack_pressed != 1u ||
+                input.weak_attack_held != 1u ||
+                input.ranged_first_person_active != 1u ||
+                input.cleanroom_combat_test_pressed != 1u) {
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 11;
             }
@@ -110,7 +116,11 @@ static int run_client(unsigned int port) {
             input.client_tick = GetTickCount();
             input.world_direction_x = 16384;
             input.world_direction_z = -8192;
+            input.aim_direction_x = 32767;
             input.weak_attack_pressed = 1u;
+            input.weak_attack_held = 1u;
+            input.ranged_first_person_active = 1u;
+            input.cleanroom_combat_test_pressed = 1u;
             if (!SudekiMpLanArenaSessionSendInput(&input)) {
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 22;

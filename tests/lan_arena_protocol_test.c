@@ -79,15 +79,41 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.client_tick = 123u;
     source.body.input.world_direction_x = -32767;
     source.body.input.world_direction_z = 32767;
+    source.body.input.aim_direction_x = 16384;
+    source.body.input.aim_direction_y = -4096;
+    source.body.input.aim_direction_z = 28000;
     source.body.input.weak_attack_pressed = 1u;
+    source.body.input.weak_attack_held = 1u;
+    source.body.input.ranged_first_person_active = 1u;
+    source.body.input.cleanroom_combat_test_pressed = 1u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(size == 46u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.input.world_direction_x == -32767);
+    CHECK(decoded.body.input.aim_direction_x == 16384);
+    CHECK(decoded.body.input.aim_direction_y == -4096);
+    CHECK(decoded.body.input.aim_direction_z == 28000);
     CHECK(decoded.body.input.weak_attack_pressed == 1u);
+    CHECK(decoded.body.input.weak_attack_held == 1u);
+    CHECK(decoded.body.input.ranged_first_person_active == 1u);
+    CHECK(decoded.body.input.cleanroom_combat_test_pressed == 1u);
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size - 1u, &decoded));
     bytes[20] ^= 0xffu;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[20] ^= 0xffu;
+    source.body.input.weak_attack_held = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.weak_attack_held = 1u;
+    source.body.input.ranged_first_person_active = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.ranged_first_person_active = 1u;
+    source.body.input.cleanroom_combat_test_pressed = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.cleanroom_combat_test_pressed = 1u;
+    source.body.input.aim_direction_x = 1;
+    source.body.input.aim_direction_y = 0;
+    source.body.input.aim_direction_z = 0;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     memset(&source, 0, sizeof(source));
     source.type = SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT;
     source.sequence = 20u;
@@ -102,16 +128,20 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.snapshot.ailish.facing_z = 1.0f;
     source.body.snapshot.tal.hp = 10u;
     source.body.snapshot.ailish.hp = 20u;
+    source.body.snapshot.tal.action_sequence = 0x1234u;
+    source.body.snapshot.ailish.action_sequence = 0xabcdu;
     source.body.snapshot.enemy_count = 1u;
     source.body.snapshot.enemies[0].native_entity_id =
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 128u);
+    CHECK(size == 196u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.tal.action_variant ==
         SUDEKIMP_LAN_ARENA_ACTION_NONE);
+    CHECK(decoded.body.snapshot.tal.action_sequence == 0x1234u);
+    CHECK(decoded.body.snapshot.ailish.action_sequence == 0xabcdu);
     CHECK(decoded.body.snapshot.enemy_count == 1u);
     CHECK(decoded.body.snapshot.enemies[0].native_entity_id ==
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID);
@@ -145,7 +175,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
     source.body.snapshot.tal.animation_state =
         SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
-    source.body.snapshot.ailish.combat_state = 3u;
+    source.body.snapshot.ailish.combat_state = 6u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.ailish.combat_state =
         SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
@@ -154,15 +184,29 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
     source.body.snapshot.ailish.action_variant =
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    source.body.snapshot.ailish.action_phase_valid = 1u;
+    source.body.snapshot.ailish.action_phase_q8 = 18u * 256u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.ailish.action_variant ==
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE);
+    CHECK(decoded.body.snapshot.ailish.action_phase_valid == 1u);
+    CHECK(decoded.body.snapshot.ailish.action_phase_q8 == 18u * 256u);
+    source.body.snapshot.ailish.action_phase_valid = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.ailish.action_phase_valid = 1u;
     source.body.snapshot.ailish.action_variant =
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.ailish.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_STRONG;
+    source.body.snapshot.ailish.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.ailish.action_variant =
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    source.body.snapshot.ailish.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
     source.body.snapshot.ailish.animation_state =
         SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
     source.body.snapshot.ailish.combat_state =
@@ -170,6 +214,95 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.ailish.action_variant =
         SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    source.body.snapshot.ailish.action_phase_valid = 0u;
+    source.body.snapshot.ailish.action_phase_q8 = 0u;
+    source.body.snapshot.ailish.action_phase_q8 = 1u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.ailish.action_phase_q8 = 0u;
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    source.body.snapshot.tal.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK;
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    source.body.snapshot.tal.action_phase_valid = 1u;
+    source.body.snapshot.tal.action_phase_q8 = 35u * 256u;
+    source.body.snapshot.tal.action_sequence = 0x1237u;
+    source.body.snapshot.tal.action_history_count = 3u;
+    source.body.snapshot.tal.action_history[0].sequence = 0x1235u;
+    source.body.snapshot.tal.action_history[0].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    source.body.snapshot.tal.action_history[0].host_tick = 100u;
+    source.body.snapshot.tal.action_history[1].sequence = 0x1236u;
+    source.body.snapshot.tal.action_history[1].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
+    source.body.snapshot.tal.action_history[1].host_tick = 120u;
+    source.body.snapshot.tal.action_history[2].sequence = 0x1237u;
+    source.body.snapshot.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    source.body.snapshot.tal.action_history[2].host_tick = 140u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.tal.combat_state ==
+        SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK);
+    CHECK(decoded.body.snapshot.tal.action_variant ==
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS);
+    CHECK(decoded.body.snapshot.tal.action_phase_valid == 1u);
+    CHECK(decoded.body.snapshot.tal.action_phase_q8 == 35u * 256u);
+    CHECK(decoded.body.snapshot.tal.action_history_count == 3u);
+    CHECK(decoded.body.snapshot.tal.action_history[1].sequence == 0x1236u);
+    CHECK(decoded.body.snapshot.tal.action_history[1].variant ==
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO);
+    CHECK(decoded.body.snapshot.tal.action_history[2].host_tick == 140u);
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE;
+    source.body.snapshot.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.tal.action_variant ==
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE);
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    source.body.snapshot.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    source.body.snapshot.tal.action_history[1].sequence = 0x1235u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.action_history[1].sequence = 0x1236u;
+    source.body.snapshot.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_MAX + 1u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    source.body.snapshot.tal.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_SWEEP;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.tal.combat_state ==
+        SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK);
+    CHECK(decoded.body.snapshot.tal.action_variant ==
+        SUDEKIMP_LAN_ARENA_ACTION_SWEEP);
+    source.body.snapshot.tal.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_BLOCK;
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_BLOCK;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.tal.combat_state ==
+        SUDEKIMP_LAN_ARENA_COMBAT_BLOCK);
+    CHECK(decoded.body.snapshot.tal.action_variant ==
+        SUDEKIMP_LAN_ARENA_ACTION_BLOCK);
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO;
+    source.body.snapshot.tal.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    source.body.snapshot.tal.action_phase_valid = 0u;
+    source.body.snapshot.tal.action_phase_q8 = 0u;
     source.body.snapshot.ailish.hp =
         SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE + 1u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));

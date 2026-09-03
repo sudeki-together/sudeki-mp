@@ -26,6 +26,7 @@ typedef struct SudekiMpCleanroomActorPresentation {
     int32_t selector[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
     uint8_t state[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
     float rate[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
+    float time[SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS];
     float blend[SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS];
 } SudekiMpCleanroomActorPresentation;
 

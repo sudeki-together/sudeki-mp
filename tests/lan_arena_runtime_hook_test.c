@@ -323,6 +323,7 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     host_ailish_idle_variant_armed = TRUE;
     memset(host_actor_presentation_valid, 0,
         sizeof(host_actor_presentation_valid));
+    reset_host_action_tracking();
 
     host_apply_presentation_state(0u, 100u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
@@ -472,41 +473,134 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
           tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE,
         "Tal draw-weapon transition is not mislabeled as a weak attack");
-    host_actor_presentation[0].selector[0] =
-        TAL_COMBAT_WEAK_ONE_SELECTOR;
+    host_actor_presentation[0].selector[0] = 50;
     host_actor_presentation[0].state[0] = 65u;
     host_apply_presentation_state(0u, 3350u, TRUE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
-          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE &&
+          tal.action_sequence == 1u && tal.action_phase_valid == 1u &&
+          tal.action_phase_q8 == 0u,
         "Tal first native weak variant is transmitted semantically");
-    host_actor_presentation[0].selector[0] =
-        TAL_COMBAT_WEAK_TWO_SELECTOR;
+    host_actor_presentation[0].state[0] = 1u;
+    host_actor_presentation[0].time[0] = 17.5f;
+    host_apply_presentation_state(0u, 3360u, TRUE, &tal);
+    check(tal.action_sequence == 1u && tal.action_phase_valid == 1u &&
+          tal.action_phase_q8 == 17u * 256u + 128u,
+        "Tal internal clip state cycling preserves one action and host phase");
+    host_actor_presentation[0].selector[0] = 51;
     host_actor_presentation[0].state[0] = 1u;
     host_apply_presentation_state(0u, 3375u, TRUE, &tal);
-    check(tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO,
+    check(tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO &&
+          tal.action_sequence == 2u,
         "Tal second native weak variant remains distinct");
     host_actor_presentation[0].state[0] = 128u;
     host_apply_presentation_state(0u, 3400u, TRUE, &tal);
-    check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+    check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          tal.action_sequence == 2u && tal.action_phase_valid == 0u &&
+          tal.action_phase_q8 == 0u,
         "Tal combat action retires when the native clip retires");
+    host_actor_presentation[0].selector[0] = 52;
+    host_actor_presentation[0].state[0] = 1u;
+    host_apply_presentation_state(0u, 3425u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_STRONG &&
+          tal.action_sequence == 3u,
+        "Tal native strong attack is transmitted semantically");
+    host_actor_presentation[0].selector[0] = 53;
+    host_apply_presentation_state(0u, 3435u, TRUE, &tal);
+    check(tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_STRONG_TWO &&
+          tal.action_sequence == 4u,
+        "Tal native second-stage strong attack remains distinct");
+    host_actor_presentation[0].selector[0] = 54;
+    host_actor_presentation[0].state[0] = 65u;
+    host_apply_presentation_state(0u, 3440u, TRUE, &tal);
+    check(tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS &&
+          tal.action_sequence == 5u,
+        "Tal WWS heavy finisher is transmitted by exact combo identity");
+    host_actor_presentation[0].selector[0] = 71;
+    host_actor_presentation[0].state[0] = 1u;
+    host_actor_presentation[0].state[0] = 1u;
+    host_apply_presentation_state(0u, 3450u, TRUE, &tal);
+    check(tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_SWEEP &&
+          tal.action_sequence == 6u,
+        "Tal native sweep attack is transmitted semantically");
+    host_actor_presentation[0].selector[0] = 20;
+    host_actor_presentation[0].state[0] = 65u;
+    host_apply_presentation_state(0u, 3475u, TRUE, &tal);
+    check(tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_BLOCK &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK &&
+          tal.action_sequence == 7u,
+        "Tal native block entry is transmitted semantically");
+    host_actor_presentation[0].selector[0] = 21;
+    host_actor_presentation[0].state[0] = 128u;
+    host_apply_presentation_state(0u, 3490u, TRUE, &tal);
+    check(tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_BLOCK &&
+          tal.action_sequence == 7u,
+        "Tal native block hold preserves the same semantic action edge");
 
     host_actor_presentation_valid[1] = TRUE;
     host_actor_presentation[1].selector[4] = AILISH_COMBAT_WEAK_SELECTOR;
     host_actor_presentation[1].state[4] = 1u;
+    host_actor_presentation[1].time[4] = 9.25f;
     host_apply_presentation_state(1u, 3500u, TRUE, &ailish);
     check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
           ailish.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK &&
-          ailish.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+          ailish.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE &&
+          ailish.action_sequence == 1u && ailish.action_phase_valid == 1u &&
+          ailish.action_phase_q8 == 9u * 256u + 64u,
         "Ailish combat shot remains active for its native clip");
     host_actor_presentation[1].state[4] = 65u;
     host_apply_presentation_state(1u, 3800u, TRUE, &ailish);
-    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+    check(ailish.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          ailish.action_sequence == 1u,
         "Ailish combat shot survives beyond the old 250ms pulse");
     host_actor_presentation[1].selector[4] = 0;
     host_actor_presentation[1].state[4] = 192u;
     host_apply_presentation_state(1u, 3850u, TRUE, &ailish);
-    check(ailish.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION,
+    check(ailish.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          ailish.action_sequence == 1u,
         "Ailish combat shot retires with the native action layer");
+
+    reset_host_action_tracking();
+    memset(&ailish, 0, sizeof(ailish));
+    host_track_actor_action_sequence(
+        1u, 4000u, TRUE, FALSE,
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE, 0u, &ailish);
+    host_track_actor_action_sequence(
+        1u, 4050u, TRUE, FALSE,
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE, 0u, &ailish);
+    host_track_actor_action_sequence(
+        1u, 4100u, TRUE, FALSE,
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE, 0u, &ailish);
+    check(host_actor_action_sequence[1] == 1u &&
+          host_actor_action_history_count[1] == 1u,
+        "one fallback ranged pulse journals one Ailish action edge");
+    host_track_actor_action_sequence(
+        1u, 4300u, FALSE, FALSE,
+        SUDEKIMP_LAN_ARENA_ACTION_NONE, 0u, &ailish);
+    host_track_actor_action_sequence(
+        1u, 4350u, TRUE, FALSE,
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE, 0u, &ailish);
+    check(host_actor_action_sequence[1] == 2u &&
+          host_actor_action_history_count[1] == 2u,
+        "a later fallback ranged pulse journals exactly one new edge");
+
+    check(SudekiMpLanArenaRangedRepeatReady(5000u, 0u) &&
+          !SudekiMpLanArenaRangedRepeatReady(5499u, 5500u) &&
+          SudekiMpLanArenaRangedRepeatReady(5500u, 5500u) &&
+          !SudekiMpLanArenaRangedRepeatReady(0xfffffff0u, 0x00000010u) &&
+          SudekiMpLanArenaRangedRepeatReady(0x00000010u, 0x00000010u),
+        "Ailish ranged repeat cadence is wrap-safe and inclusive");
+    check(SudekiMpLanArenaRangedRepeatIntervalMs(0x4000u) == 2000u &&
+          SudekiMpLanArenaRangedRepeatIntervalMs(0x3c00u) == 1000u &&
+          SudekiMpLanArenaRangedRepeatIntervalMs(0x0000u) == 2000u &&
+          SudekiMpLanArenaRangedRepeatIntervalMs(0x7c00u) == 2000u &&
+          SudekiMpLanArenaRangedRepeatIntervalMs(0xbc00u) == 2000u,
+        "Ailish ranged cadence decodes safe authored half-float seconds");
 }
 
 int main(void) {
@@ -661,7 +755,9 @@ void SudekiMpUninstallLanArenaHostInput(void) {
 
 void SudekiMpLanArenaHostInputServiceCombatToggle(void) {}
 
-BOOL SudekiMpLanArenaHostInputTakeTalWeakAttack(void) {
+void SudekiMpLanArenaHostInputNotifyNativeActionObserved(void) {}
+
+BOOL SudekiMpLanArenaHostInputDiagnosticTraceActive(void) {
     return FALSE;
 }
 
@@ -804,11 +900,31 @@ BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_x,
     float world_direction_z,
-    BOOL weak_attack_edge
+    float aim_direction_x,
+    float aim_direction_z,
+    BOOL aim_direction_valid,
+    BOOL weak_attack_active
 ) {
     (void)world_direction_x;
     (void)world_direction_z;
-    (void)weak_attack_edge;
+    (void)aim_direction_x;
+    (void)aim_direction_z;
+    (void)aim_direction_valid;
+    (void)weak_attack_active;
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire(void) {
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
+    BOOL *ready,
+    uint16_t *authored_delay_half
+) {
+    if (ready == NULL || authored_delay_half == NULL) return FALSE;
+    *ready = TRUE;
+    *authored_delay_half = 0x4000u;
     return TRUE;
 }
 

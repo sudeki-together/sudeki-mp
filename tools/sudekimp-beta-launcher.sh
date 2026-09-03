@@ -285,7 +285,7 @@ run_gui() {
             --column='Option' --column='What it does' \
             'Local co-op — 2 players' 'Keyboard/mouse host plus one local controller.' \
             'Local co-op — 3 players' 'Keyboard/mouse host plus two distinct local controllers.' \
-            'LAN arena — Host as Tal' 'Host-authoritative cleanroom arena on a direct UDP port.' \
+            'LAN arena — Host as Tal' 'Run the canonical shared cleanroom simulation on a direct UDP port.' \
             'LAN arena — Join as Ailish' 'Join a host with a separate full-screen camera and HUD.' \
             'Cleanroom' 'Save-free sandbox; optional F8 tools spawn actors/dummy and expose combat, camera, inventory, and infinite-meter controls.' \
             'Safe launch' 'Launch with optional hooks disabled.' \

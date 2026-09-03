@@ -1169,7 +1169,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         lan_arena_config.game_hash = lan_arena_game_hash;
         SudekiMpLogFormat(
             "lan_arena_requested=true role=%s port=%d host=%s "
-            "policy=cleanroom_only_host_authoritative_no_campaign_state\r\n",
+            "policy=cleanroom_only_shared_simulation_no_campaign_state\r\n",
             lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
                 "Tal_host" : "Ailish_client",
             lan_arena_port,

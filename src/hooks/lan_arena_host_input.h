@@ -3,12 +3,14 @@
 
 #include <windows.h>
 
-/* Read-only observation of Tal's already-authoritative native weak attack.
- * The hook never consumes or changes controller state; it only emits a
- * process-local edge for the next host snapshot. */
+/* Host-only native Tal input and presentation-trace adapter. */
 BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module);
 void SudekiMpUninstallLanArenaHostInput(void);
 void SudekiMpLanArenaHostInputServiceCombatToggle(void);
-BOOL SudekiMpLanArenaHostInputTakeTalWeakAttack(void);
+BOOL SudekiMpLanArenaHostInputRequestRemoteCombatToggle(void);
+BOOL SudekiMpLanArenaHostInputDiagnosticTraceActive(void);
+/* Test/operator acknowledgement is emitted only after Sudeki exposes a new
+ * native Tal action selector, never merely because an input was submitted. */
+void SudekiMpLanArenaHostInputNotifyNativeActionObserved(void);
 
 #endif

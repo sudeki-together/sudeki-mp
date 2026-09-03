@@ -29,6 +29,9 @@ static SudekiMpLanArenaSnapshot make_snapshot(uint32_t sequence, uint32_t tick, 
     snapshot.tal.action_variant = sequence == 1u ?
         SUDEKIMP_LAN_ARENA_ACTION_NONE :
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
+    snapshot.tal.action_phase_valid = sequence == 1u ? 0u : 1u;
+    snapshot.tal.action_phase_q8 = sequence == 1u ? 0u :
+        (uint16_t)(tick / 10u);
     snapshot.ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     snapshot.ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     snapshot.ailish.x = x * 2.0f;
@@ -43,6 +46,9 @@ static SudekiMpLanArenaSnapshot make_snapshot(uint32_t sequence, uint32_t tick, 
     snapshot.ailish.action_variant = sequence == 1u ?
         SUDEKIMP_LAN_ARENA_ACTION_NONE :
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    snapshot.ailish.action_phase_valid = sequence == 1u ? 0u : 1u;
+    snapshot.ailish.action_phase_q8 = sequence == 1u ? 0u :
+        (uint16_t)(tick / 10u);
     snapshot.enemy_count = 1u;
     snapshot.enemies[0].native_entity_id =
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
@@ -75,6 +81,8 @@ int main(void) {
     CHECK(sample.ailish.x > 9.99f && sample.ailish.x < 10.01f);
     CHECK(sample.enemies[0].z > 14.99f && sample.enemies[0].z < 15.01f);
     CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION);
+    CHECK(sample.tal.action_phase_valid == 1u);
+    CHECK(sample.tal.action_phase_q8 == 20u);
     CHECK(sample.ailish.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK);
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 200u, &sample));
     CHECK(sample.sequence == 2u);
@@ -113,9 +121,13 @@ int main(void) {
     first.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
     first.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
     first.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    first.tal.action_phase_valid = 0u;
+    first.tal.action_phase_q8 = 0u;
     second.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
     second.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
     second.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    second.tal.action_phase_valid = 0u;
+    second.tal.action_phase_q8 = 0u;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1050u, &sample));
@@ -125,6 +137,43 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1100u, &sample));
     CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE);
     CHECK(sample.tal.x == 12.0f);
+
+    /* A 20 Hz snapshot may contain several host-observed action edges. The
+     * render clock must present every journaled stage at its host tick rather
+     * than collapsing a fast Tal chain to the newest selector. */
+    SudekiMpLanArenaReplicaReset(&replica);
+    first = make_snapshot(12u, 1200u, 0.0f);
+    second = make_snapshot(13u, 1300u, 1.0f);
+    first.tal.action_sequence = 20u;
+    second.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    second.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK;
+    second.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    second.tal.action_sequence = 23u;
+    second.tal.action_history_count = 3u;
+    second.tal.action_history[0].sequence = 21u;
+    second.tal.action_history[0].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    second.tal.action_history[0].host_tick = 1220u;
+    second.tal.action_history[1].sequence = 22u;
+    second.tal.action_history[1].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO;
+    second.tal.action_history[1].host_tick = 1250u;
+    second.tal.action_history[2].sequence = 23u;
+    second.tal.action_history[2].variant =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS;
+    second.tal.action_history[2].host_tick = 1280u;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1230u, &sample));
+    CHECK(sample.tal.action_sequence == 21u);
+    CHECK(sample.tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1260u, &sample));
+    CHECK(sample.tal.action_sequence == 22u);
+    CHECK(sample.tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1290u, &sample));
+    CHECK(sample.tal.action_sequence == 23u);
+    CHECK(sample.tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS);
+    CHECK(sample.tal.combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK);
 
     CHECK(SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS == 50u);
     SudekiMpLanArenaReplicaReset(&replica);
@@ -141,6 +190,32 @@ int main(void) {
     CHECK(fabsf(sample.tal.facing_z - 0.7071067f) < 0.0002f);
     CHECK(fabsf(sample.tal.facing_x * sample.tal.facing_x +
         sample.tal.facing_z * sample.tal.facing_z - 1.0f) < 0.0002f);
+    CHECK(sample.tal.action_phase_valid == 1u);
+    CHECK(sample.tal.action_phase_q8 == 205u);
+
+    /* The host's first idle snapshot is the semantic action-retirement edge.
+     * Hold the last authoritative action phase through the buffered segment,
+     * then retire exactly at the host endpoint without a client timer. */
+    SudekiMpLanArenaReplicaReset(&replica);
+    first = make_snapshot(22u, 2200u, 0.0f);
+    second = make_snapshot(23u, 2250u, 0.0f);
+    first.tal.action_sequence = 7u;
+    first.tal.action_phase_q8 = 35u * 256u + 128u;
+    second.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    second.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    second.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    second.tal.action_sequence = 7u;
+    second.tal.action_phase_valid = 0u;
+    second.tal.action_phase_q8 = 0u;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 2249u, &sample));
+    CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION);
+    CHECK(sample.tal.action_phase_valid == 1u);
+    CHECK(sample.tal.action_phase_q8 == 35u * 256u + 128u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 2250u, &sample));
+    CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE);
+    CHECK(sample.tal.action_phase_valid == 0u);
 
     /* A 180-degree wall/contact correction has no unique arc. It must never
      * create the zero vector that made the client reject an entire frame. */

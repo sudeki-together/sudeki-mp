@@ -195,8 +195,9 @@ BOOL SudekiMpControlSeparationSeatActiveInputLeasePolicy(
 BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index);
 /* LAN host-only ingress. The runtime must enable this only after the UDP
  * session has authenticated a fixed Ailish client; local keyboard/bridge
- * input remains a separate path. Inputs are world-relative and are submitted
- * through the same native Ailish AI lease and arbiter ABI as local co-op. */
+ * input remains a separate path. Movement is world-relative, first-person
+ * aim is client-camera-relative, and held fire is replayed through the same
+ * native Ailish AI lease and arbiter ABI as local co-op. */
 BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled);
 /* LAN profiles name their replica/remote actor explicitly and must not allow
  * the ordinary local drop-in hotkey to retarget that lease. */
@@ -213,7 +214,22 @@ BOOL SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_x,
     float world_direction_z,
-    BOOL weak_attack_edge
+    float aim_direction_x,
+    float aim_direction_z,
+    BOOL aim_direction_valid,
+    BOOL weak_attack_active
+);
+/* Host-only ranged action adapter. Calls the exact retail first-person weapon
+ * gate for the currently leased Ailish actor, so weapon cooldown/projectile
+ * policy remains native instead of replaying the generic arbiter attack each
+ * control tick. */
+BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire(void);
+/* Resolve Ailish's exact embedded CMissileManager from the leased actor and
+ * expose only its native CanFire/IsFiring decision. The LAN runtime uses this
+ * as an additional cadence gate; it never writes missile-manager state. */
+BOOL SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
+    BOOL *ready,
+    uint16_t *authored_delay_half
 );
 /* Game-thread kinematic-replica helper. It invokes the exact native immediate
  * movement-controller setter even when this module did not submit movement,

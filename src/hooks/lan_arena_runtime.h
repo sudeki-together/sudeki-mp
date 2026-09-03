@@ -26,5 +26,13 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void);
 BOOL SudekiMpLanArenaRuntimeGetStatus(
     SudekiMpLanArenaSessionStatus *status
 );
+/* Wrap-safe admission used by the host's held Ailish fire route.  The
+ * non-front world-combat fallback retires much faster than Ailish's authored
+ * first-person weapon cycle, so a separate cadence gate is required. */
+BOOL SudekiMpLanArenaRangedRepeatReady(
+    uint32_t now_ms,
+    uint32_t not_before_ms
+);
+uint32_t SudekiMpLanArenaRangedRepeatIntervalMs(uint16_t encoded_half_seconds);
 
 #endif

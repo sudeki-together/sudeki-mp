@@ -1,4 +1,5 @@
 #include "network/lan_arena_replica.h"
+#include "network/lan_arena_tal_combo_graph.h"
 
 #include <math.h>
 #include <string.h>
@@ -19,6 +20,66 @@ static BOOL tick_before(uint32_t candidate, uint32_t reference) {
 
 static float interpolate_float(float before, float after, float alpha) {
     return before + (after - before) * alpha;
+}
+
+static BOOL action_sequence16_newer(uint16_t candidate, uint16_t reference) {
+    return candidate != reference &&
+        (uint16_t)(candidate - reference) < 0x8000u;
+}
+
+static uint8_t combat_state_for_action_event(uint8_t variant) {
+    uint8_t combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    (void)SudekiMpLanArenaTalActionCombatState(variant, &combat_state);
+    return combat_state;
+}
+
+static void replay_action_history(
+    const SudekiMpLanArenaActorSnapshot *before,
+    const SudekiMpLanArenaActorSnapshot *after,
+    uint32_t host_tick,
+    uint32_t after_host_tick,
+    SudekiMpLanArenaActorSnapshot *output
+) {
+    const SudekiMpLanArenaActionEvent *selected = NULL;
+    BOOL has_new_event = FALSE;
+    unsigned int index;
+    if (before == NULL || after == NULL || output == NULL) return;
+    for (index = 0u; index < after->action_history_count; ++index) {
+        const SudekiMpLanArenaActionEvent *event =
+            &after->action_history[index];
+        if (!action_sequence16_newer(
+                event->sequence, before->action_sequence)) continue;
+        has_new_event = TRUE;
+        if (!tick_after(event->host_tick, host_tick)) selected = event;
+    }
+    if (!has_new_event) return;
+    if (selected == NULL) {
+        output->animation_state = before->animation_state;
+        output->combat_state = before->combat_state;
+        output->action_variant = before->action_variant;
+        output->action_sequence = before->action_sequence;
+        return;
+    }
+    output->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    output->combat_state = combat_state_for_action_event(selected->variant);
+    output->action_variant = selected->variant;
+    output->action_sequence = selected->sequence;
+    if (selected->sequence == after->action_sequence &&
+        after->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        after->action_phase_valid &&
+        tick_after(after_host_tick, selected->host_tick)) {
+        uint32_t action_span = after_host_tick - selected->host_tick;
+        uint32_t action_elapsed = host_tick - selected->host_tick;
+        float action_alpha = clamp01(
+            (float)action_elapsed / (float)action_span);
+        output->action_phase_valid = 1u;
+        output->action_phase_q8 = (uint16_t)(
+            (float)after->action_phase_q8 * action_alpha + 0.5f);
+    } else if (selected->sequence != after->action_sequence ||
+        after->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) {
+        output->action_phase_valid = 0u;
+        output->action_phase_q8 = 0u;
+    }
 }
 
 static void normalized_facing(
@@ -65,6 +126,8 @@ static void interpolate_actor(
     const SudekiMpLanArenaActorSnapshot *before,
     const SudekiMpLanArenaActorSnapshot *after,
     float alpha,
+    uint32_t host_tick,
+    uint32_t after_host_tick,
     SudekiMpLanArenaActorSnapshot *output
 ) {
     *output = *after;
@@ -79,11 +142,42 @@ static void interpolate_actor(
         output->animation_state = before->animation_state;
         output->combat_state = before->combat_state;
     }
+    /* The host's first non-action snapshot is the retirement boundary. Keep
+     * the last authoritative action pose until that endpoint instead of
+     * asking the client renderer to guess when the native clip has ended. */
+    if (alpha < 1.0f &&
+        before->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        after->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        before->action_sequence == after->action_sequence) {
+        output->animation_state = before->animation_state;
+        output->combat_state = before->combat_state;
+        output->action_variant = before->action_variant;
+        output->action_sequence = before->action_sequence;
+        output->action_phase_valid = before->action_phase_valid;
+        output->action_phase_q8 = before->action_phase_q8;
+    }
     output->x = interpolate_float(before->x, after->x, alpha);
     output->y = interpolate_float(before->y, after->y, alpha);
     output->z = interpolate_float(before->z, after->z, alpha);
     normalized_facing(before, after, alpha,
         &output->facing_x, &output->facing_z);
+    replay_action_history(
+        before, after, host_tick, after_host_tick, output);
+    if (output->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        before->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        after->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        before->action_sequence == after->action_sequence &&
+        output->action_sequence == after->action_sequence &&
+        before->action_phase_valid && after->action_phase_valid) {
+        output->action_phase_valid = 1u;
+        output->action_phase_q8 = (uint16_t)(interpolate_float(
+            (float)before->action_phase_q8,
+            (float)after->action_phase_q8, alpha) + 0.5f);
+    } else if (output->animation_state !=
+            SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) {
+        output->action_phase_valid = 0u;
+        output->action_phase_q8 = 0u;
+    }
 }
 
 static BOOL enemy_layout_matches(
@@ -188,9 +282,9 @@ BOOL SudekiMpLanArenaReplicaSample(
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->oldest;
         interpolate_actor(&replica->earliest.tal, &replica->oldest.tal,
-            alpha, &sample->tal);
+            alpha, host_tick, replica->oldest.host_tick, &sample->tal);
         interpolate_actor(&replica->earliest.ailish, &replica->oldest.ailish,
-            alpha, &sample->ailish);
+            alpha, host_tick, replica->oldest.host_tick, &sample->ailish);
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->earliest.enemies[index].x,
@@ -218,9 +312,9 @@ BOOL SudekiMpLanArenaReplicaSample(
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->previous;
         interpolate_actor(&replica->oldest.tal, &replica->previous.tal,
-            alpha, &sample->tal);
+            alpha, host_tick, replica->previous.host_tick, &sample->tal);
         interpolate_actor(&replica->oldest.ailish, &replica->previous.ailish,
-            alpha, &sample->ailish);
+            alpha, host_tick, replica->previous.host_tick, &sample->ailish);
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->oldest.enemies[index].x,
@@ -249,9 +343,9 @@ BOOL SudekiMpLanArenaReplicaSample(
     elapsed = host_tick - replica->previous.host_tick;
     alpha = clamp01((float)elapsed / (float)span);
     interpolate_actor(&replica->previous.tal, &replica->latest.tal,
-        alpha, &sample->tal);
+        alpha, host_tick, replica->latest.host_tick, &sample->tal);
     interpolate_actor(&replica->previous.ailish, &replica->latest.ailish,
-        alpha, &sample->ailish);
+        alpha, host_tick, replica->latest.host_tick, &sample->ailish);
     for (index = 0u; index < sample->enemy_count; ++index) {
         sample->enemies[index].x = interpolate_float(
             replica->previous.enemies[index].x,

@@ -7,17 +7,19 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 6u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 14u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c414e36u /* "LAN6" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413134u /* "LA14" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
+#define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
 #define SUDEKIMP_LAN_ARENA_MAP_CLEANROOM 1u
 #define SUDEKIMP_LAN_ARENA_TAL_TYPE 0x23u
 #define SUDEKIMP_LAN_ARENA_AILISH_TYPE 0x01u
 #define SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID 1u
+#define SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY 4u
 
 typedef enum SudekiMpLanArenaMatchState {
     SUDEKIMP_LAN_ARENA_MATCH_WAITING = 0,
@@ -41,7 +43,10 @@ typedef enum SudekiMpLanArenaAnimationState {
 typedef enum SudekiMpLanArenaCombatState {
     SUDEKIMP_LAN_ARENA_COMBAT_IDLE = 0,
     SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK = 1,
-    SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED = 2
+    SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED = 2,
+    SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK = 3,
+    SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK = 4,
+    SUDEKIMP_LAN_ARENA_COMBAT_BLOCK = 5
 } SudekiMpLanArenaCombatState;
 
 /* Bounded action variants remain process-independent. The host translates
@@ -51,7 +56,26 @@ typedef enum SudekiMpLanArenaActionVariant {
     SUDEKIMP_LAN_ARENA_ACTION_NONE = 0,
     SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE = 1,
     SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO = 2,
-    SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE = 3
+    SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE = 3,
+    SUDEKIMP_LAN_ARENA_ACTION_STRONG = 4,
+    SUDEKIMP_LAN_ARENA_ACTION_SWEEP = 5,
+    SUDEKIMP_LAN_ARENA_ACTION_BLOCK = 6,
+    /* Sudeki resolves melee clips from the complete W/S history. These are
+     * presentation identities, not requests to execute another attack. */
+    SUDEKIMP_LAN_ARENA_ACTION_STRONG_TWO = 7,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_WWS = 8,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWW = 9,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSS = 10,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWS = 11,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_SSW = 12,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSW = 13,
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS = 14,
+    /* The same WSS history has a second authored result selected by native
+     * timing/target/direction gates. Preserve its distinct presentation
+     * identity without pretending the client executed another attack. */
+    SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE = 15,
+    SUDEKIMP_LAN_ARENA_ACTION_MAX =
+        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE
 } SudekiMpLanArenaActionVariant;
 
 typedef enum SudekiMpLanArenaRole {
@@ -103,8 +127,24 @@ typedef struct SudekiMpLanArenaInput {
     uint32_t client_tick;
     int16_t world_direction_x;
     int16_t world_direction_z;
+    int16_t aim_direction_x;
+    int16_t aim_direction_y;
+    int16_t aim_direction_z;
     uint8_t weak_attack_pressed;
+    uint8_t weak_attack_held;
+    uint8_t ranged_first_person_active;
+    /* Cleanroom-only test edge. Campaign combat begins from Sudeki's native
+     * dungeon/world triggers; snapshots then replicate the observed native
+     * flag. This field merely lets either arena window exercise that same
+     * transition without pretending a player owns combat state. */
+    uint8_t cleanroom_combat_test_pressed;
 } SudekiMpLanArenaInput;
+
+typedef struct SudekiMpLanArenaActionEvent {
+    uint16_t sequence;
+    uint8_t variant;
+    uint32_t host_tick;
+} SudekiMpLanArenaActionEvent;
 
 typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t actor_type;
@@ -119,6 +159,23 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     float facing_z;
     uint32_t hp;
     uint32_t sp;
+    /* Monotonic per actor and authored only by the shared simulation. This
+     * distinguishes repeated clips that reuse the same semantic variant. */
+    uint16_t action_sequence;
+    /* Host-observed clock for the current semantic action. The exact game
+     * hash in the handshake makes these presentation-time units compatible,
+     * while the selector itself remains actor-local and never crosses the
+     * wire. A synthetic/history-only action may leave this invalid. */
+    uint16_t action_phase_q8;
+    uint8_t action_phase_valid;
+    uint8_t action_history_count;
+    /* The latest semantic state alone can skip a fast combo stage between
+     * 20 Hz snapshots. Keep a bounded chronological journal of host-observed
+     * native action edges so the client can present every authored move once.
+     * Four entries cover Tal's three-hit weak chain plus an adjacent action
+     * while keeping a maximum-enemy packet below 512 bytes. */
+    SudekiMpLanArenaActionEvent
+        action_history[SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY];
 } SudekiMpLanArenaActorSnapshot;
 
 typedef struct SudekiMpLanArenaEnemySnapshot {

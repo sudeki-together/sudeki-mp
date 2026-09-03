@@ -4764,3 +4764,175 @@ with about 0.95 for the replicated root; +Z was the visually strongest
 direction. That follow-up must use a separately verified native direction
 adapter rather than a raw field write, and is intentionally not included in
 this accepted checkpoint.
+
+## 2026-09-02 — Tal's LAN action identity is the native combo transition
+
+The first LAN combat pass treated Mouse1 as a generic weak-action edge and
+recognized only one isolated Mouse2 selector. That was insufficient for Tal:
+Sudeki keeps a bounded weak/strong history and chooses the next authored
+transition from the entire prefix. A client receiving only `weak` or `strong`
+could show the correct first swing but not the heavy branches that follow it.
+Worse, the synthetic Mouse1 fallback could transmit an extra attack when a
+late fourth input had already been rejected by the native combo state.
+
+Read-only analysis of the exact supported executable now follows controller
+actions Weak `0x2C`, Strong `0x2D`, and Sweep `0x2E` through the per-arbiter
+submission at RVA `0x000DB0E0`, attack-kind admission at `0x000DAC00`, combo
+dispatch at `0x000D0730`, transition lookup at `0x000D04F0`, authored gate at
+`0x000D13E0`, and accepted-result commit at `0x000D14D0`. The property loader
+at RVA `0x00103190` parses `AttackWeak`, `AttackStrong`, and `AttackSweep`.
+`tools/ghidra/TalMeleeComboReport.java` reproduces that evidence and refuses
+any executable other than SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+A deterministic prefix-local operator then exercised every three-input W/S
+history without desktop mouse ambiguity. Live host selectors were
+`WWW=62`, `WWS=54`, `SWW=60`, `SSS=61`, `SWS=63`, `SSW=65`, `WSW=68`, and
+`WSS=69`, with stage selectors `W=50`, `S=52`, `WW=51`, and `WS=53`.
+The LAN protocol first became `LA12` and carried each result as its own bounded
+semantic variant in the four-edge journal. Host capture is native-result-only;
+the old Tal synthetic weak timer/pending edge is gone. Client replay maps the
+semantic result back to Tal's local selector/state without executing combat a
+second time. A fourth click after a terminal selector therefore produces no
+false network action.
+
+The new `lan_arena_tal_combo_graph` module is the single translation table
+used by host capture, protocol validation, interpolation combat state, and
+client replay. Its pure truth-table test, protocol/replica tests, runtime hook
+test, exact-image test, and full MinGW build pass. This also establishes the
+graph rule for later combat features: add a path linking physical input,
+native authority transition, semantic wire identity, and actor-local replay,
+with exact static evidence and a deterministic live command. Do not add a LAN
+action from an input binding alone.
+
+The acknowledged follow-up exposed why even the complete W/S history is not
+always a unique presentation key. A submitted `WSS` produced selector `70`
+in one native context and selector `69` after a clean retirement interval.
+The exact transition lookup iterates multiple authored candidates and applies
+timing, target-distance, and direction gates before selecting one. Protocol
+`LA13` therefore preserves selector `70` as a distinct WSS alternate instead
+of dropping it or guessing that every WSS must replay selector `69`.
+
+The same run exposed a separate client gating bug: one global presentation
+boolean waited for both Tal and Ailish's combat render graphs. When Ailish's
+first-person transition temporarily had no world renderer, Tal's valid combo
+journal was received but suppressed. Combat transition readiness is now
+actor-local. Tal replay proceeds after Tal's own armed renderer verifies;
+Ailish remains fail-closed until her independent world/first-person graph is
+ready. The live host/client journal then matched isolated `WSS` as
+`1,7,14 -> 50,53,69` and `SWW` as `4,2,9 -> 52,51,60` one-for-one.
+
+A fresh `LA13` host/client run then verified the complete three-input matrix
+with a native retirement interval between patterns. Host semantic variants
+and client selectors matched without a missing or duplicate action:
+`WWW 1,2,3 -> 50,51,62`, `WWS 1,2,8 -> 50,51,54`,
+`WSW 1,7,13 -> 50,53,68`, `WSS 1,7,14 -> 50,53,69`,
+`SWW 4,2,9 -> 52,51,60`, `SWS 4,2,11 -> 52,51,63`,
+`SSW 4,7,12 -> 52,53,65`, and `SSS 4,7,10 -> 52,53,61`.
+Block also matched variant `6` to selector `20`. Selector `70` did not recur
+in this clean arena state, so it remains a separately preserved,
+exact-image-tested alternate from the earlier live native gate rather than an
+assumed replacement for selector `69`.
+
+The same replay initially exposed a distinct retirement defect. After the
+host had returned from a terminal combo to Tal's combat-idle selector
+`17/state 128`, the client retained the last finisher at state `65` until a
+movement edge arrived. State `65` does not retire inside Tal's standalone
+renderer; the native gameplay arbiter performs that transition, and the LAN
+client intentionally does not run the authoritative arbiter. Tal now treats
+the host snapshot's `ACTION -> IDLE` edge as authoritative. A fresh WSS run
+verified client selectors `50 -> 53 -> 69 -> 17` and stable state `128`
+without any client movement input. Ailish retains her separate bounded
+first-person clip-completion policy because that renderer does self-retire.
+
+Read-only animation-time telemetry then isolated the remaining visible Tal
+retirement clip. The host's terminal WSS selector `69` reached time `34.392`,
+then its native combat graph entered selector `17` on a separate idle clock.
+The client changed to the same selector but inherited the terminal action
+clock (the first observed idle time was `37.724`), so its correct semantic
+state began from the wrong pose. The client now resets time only for Tal's
+authoritative `ACTION -> IDLE` edge; ordinary movement endings, idle variants,
+and Ailish retain their established clock policies. A rebuilt live WSS replay
+verified `53 -> 69 -> 17`, with the first client idle witness at exactly time
+`0.000` and subsequent idle time advancing normally. No movement edge was
+needed to complete the transition.
+
+That first fix also made a previously hidden two-stage retirement visible:
+the client entered selector `17` at state `128`, then native animation changed
+the same selector to running state `0`. On screen this looked like Tal settling
+toward idle and then jumping into idle again. Tal's `ACTION -> IDLE` edge now
+selects state `0` directly while restarting the clock. The next live WSS
+replay retired from selector `69` straight to `17/state 0`; its throttled first
+idle witness was time `6.396`, followed by continuous `18.432`, `30.408`, and
+`42.564` samples, with no intervening state `128`.
+
+A higher-rate comparison of Tal's native host transition showed that Sudeki
+does not use a renderer crossfade for this handoff. During a WSW replay the
+host advanced terminal selector `68/state 1` through time `35.256`, then
+changed directly to selector `17/state 0` with a separate idle time near
+`1.608`; channel 1 and the blend weight remained zero. The buffered LAN
+client did not observe the semantic idle edge until its copied terminal clip
+had advanced to roughly time `42`-`50`. A first 160 ms client-only retirement
+blend removed the hard cut but visibly froze that late terminal pose. The
+first calibrated bridge reduced that interval to 64 ms. A live WSW trace on
+that build recorded start at selector `68/time 49.99990` and complete
+retirement after 67 ms, followed by continuous selector `17/state 0` time,
+but the terminal pose remained faintly visible. The final bounded experiment
+therefore uses only 32 ms: idle starts immediately on channel 0 while the last
+action pose occupies channel 1 and fades from `0.99` to zero over roughly two
+rendered frames, after which channel 1 is reset. This is presentation
+smoothing only; the host remains the sole action and combo authority.
+
+The final four-case comparison proves why a fixed retirement blend cannot
+fully match the host. Isolated Weak selector `50` and Strong selector `52`
+both reach `state 65/time 17.99990` on the host, then enter idle selector
+`17` at time `0.192` and `0.204`, respectively. WSW finishes through
+`50 -> 53 -> 68`; the host leaves selector `68` at time `35.568` and enters
+idle near `1.596`, while the client reaches the buffered idle edge with its
+copied finisher already clamped at `49.99990`. SWS finishes through
+`52 -> 51 -> 63`; the host leaves selector `63` at time `35.616`, while the
+client reaches the edge at terminal time `37.99990`. The 32 ms bridge then
+retires either client finisher in about 40-41 ms, but it cannot recover the
+host phase that was lost before that bridge began. Action identities and
+journal sequences match in all four cases. A complete fix must transmit an
+authoritative action phase or retirement host tick on the same interpolation
+timeline as transforms; further tuning of one presentation-only duration
+would only trade terminal-pose hold against a hard cut.
+
+Protocol `LA14` implements that conclusion. A current semantic action now
+carries its host-observed animation phase as an unsigned 1/256-unit value;
+native selector and state enums remain process-local. The replica interpolates
+phase only across the same actor/action sequence, holds the last authoritative
+phase until the first host IDLE endpoint, and retires at that endpoint. Client
+presentation writes and immediately verifies the sampled phase on Tal's base
+action channel and Ailish's world/first-person action channels. The fixed
+32 ms Tal retirement bridge and its local clip-completion guess were removed.
+Protocol, replica, runtime-hook, and exact-image tests pass on the initial
+implementation.
+
+This also corrects an authority-language error exposed during review. The
+group `InCombat` bit is native world state: authored dungeon/world triggers
+change it in normal gameplay. The shared simulation observes that state and
+snapshots distribute it; a player role does not own the decision to enter
+combat. The cleanroom has no authored dungeon trigger, so its Multiplayer/F8
+control remains an explicitly test-only invocation of the same native group
+transition. It must not be generalized into a campaign client combat toggle.
+
+The first LA14 live trace also corrected the deterministic operator's notion
+of acknowledgement. It previously acknowledged the synthetic controller
+submission immediately, before Sudeki exposed the resulting selector. Under
+Wine's background cadence, a following mixed W/S input could therefore reach
+the native combo gate before the preceding stage existed and be rejected;
+the LAN journal correctly omitted it. Sequence commands now wait for the
+host-observed Tal selector edge before timing the next input. This affects
+only the local research operator, never the LAN protocol or player input.
+
+The rebuilt selector-ack operator then completed two three-stage native traces
+without a guessed admission delay. `WSW` produced host semantic variants
+`1 -> 7 -> 13` (actor-local selectors `50 -> 53 -> 68`), and `SWS` produced
+`4 -> 2 -> 11` (selectors `52 -> 51 -> 63`). The LA14 client verified all six
+semantic stages with nonzero host-phase samples on its own actor-local Tal
+renderer. The same run entered combat through the cleanroom-only native group
+transition and the client mirrored the resulting combat bit; no network role
+authored a separate combat state. Both processes remained connected with no
+fatal, exception, or `R6025` event through the trace.
