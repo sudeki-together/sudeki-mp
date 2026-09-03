@@ -115,7 +115,7 @@ BOOL SudekiMpLanArenaClientShouldApplyHostFacing(
     BOOL local_first_person_active
 );
 
-/* Converts the bounded LA16 action phase to Sudeki's local animation-time
+/* Converts the bounded LA17 action phase to Sudeki's local animation-time
  * units. It rejects non-action or unphased snapshots before any renderer
  * method is called. */
 BOOL SudekiMpLanArenaClientActionPhaseTime(

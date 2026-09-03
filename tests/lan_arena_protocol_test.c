@@ -100,6 +100,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.sequence = 19u;
     source.body.input.acknowledged_snapshot = 18u;
     source.body.input.client_tick = 123u;
+    source.body.input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     source.body.input.world_direction_x = -32767;
     source.body.input.world_direction_z = 32767;
     source.body.input.aim_direction_x = 16384;
@@ -110,8 +111,9 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.ranged_first_person_active = 1u;
     source.body.input.cleanroom_combat_test_pressed = 1u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 46u);
+    CHECK(size == 47u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.input.actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
     CHECK(decoded.body.input.world_direction_x == -32767);
     CHECK(decoded.body.input.aim_direction_x == 16384);
     CHECK(decoded.body.input.aim_direction_y == -4096);
@@ -133,6 +135,9 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.cleanroom_combat_test_pressed = 2u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.input.cleanroom_combat_test_pressed = 1u;
+    source.body.input.actor_type = 0xffu;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     source.body.input.aim_direction_x = 1;
     source.body.input.aim_direction_y = 0;
     source.body.input.aim_direction_z = 0;

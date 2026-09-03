@@ -217,7 +217,7 @@ The same acknowledged `WSS` history also produced selector `70` in a separate
 native context. RVA `0x000D04F0` searches multiple authored candidates and
 calls RVA `0x000D13E0` with each candidate's timing, target-distance, and
 direction gates, so input history alone is not a unique presentation key.
-LAN protocol `LA16` therefore carries selectors `69` and `70` as separate WSS
+LAN protocol `LA17` therefore carries selectors `69` and `70` as separate WSS
 presentation variants while preserving the host's native choice.
 
 The exact property parser at RVA `0x00103190` recognizes `AttackWeak`,

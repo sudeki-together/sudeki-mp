@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 16u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 17u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413136u /* "LA16" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413137u /* "LA17" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -135,6 +135,9 @@ typedef struct SudekiMpLanArenaInput {
     uint32_t sequence;
     uint32_t acknowledged_snapshot;
     uint32_t client_tick;
+    /* Every contribution names its player-owned actor. The authenticated
+     * session role must match this field before canonical admission. */
+    uint8_t actor_type;
     int16_t world_direction_x;
     int16_t world_direction_z;
     int16_t aim_direction_x;

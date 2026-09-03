@@ -35,6 +35,26 @@ int main(void) {
     CHECK(!SudekiMpLanArenaPacketAllowedForNode(
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_INVALID,
         SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE));
+    CHECK(SudekiMpLanArenaActorTypeForPlayerRole(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) ==
+        SUDEKIMP_LAN_ARENA_TAL_TYPE);
+    CHECK(SudekiMpLanArenaActorTypeForPlayerRole(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) ==
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    CHECK(SudekiMpLanArenaActorTypeForPlayerRole(
+        SUDEKIMP_LAN_ARENA_ROLE_INVALID) == 0u);
+    CHECK(SudekiMpLanArenaPlayerOwnsActor(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL,
+        SUDEKIMP_LAN_ARENA_TAL_TYPE));
+    CHECK(!SudekiMpLanArenaPlayerOwnsActor(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE));
+    CHECK(SudekiMpLanArenaPlayerOwnsActor(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE));
+    CHECK(!SudekiMpLanArenaPlayerOwnsActor(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH,
+        SUDEKIMP_LAN_ARENA_TAL_TYPE));
     CHECK(SudekiMpLanArenaRemoteInputFresh(100u, 350u, 250u));
     CHECK(!SudekiMpLanArenaRemoteInputFresh(100u, 351u, 250u));
     CHECK(!SudekiMpLanArenaRemoteInputFresh(0u, 100u, 250u));

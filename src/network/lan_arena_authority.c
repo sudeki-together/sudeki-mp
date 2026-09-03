@@ -31,6 +31,27 @@ BOOL SudekiMpLanArenaPacketAllowedForNode(
     return FALSE;
 }
 
+uint8_t SudekiMpLanArenaActorTypeForPlayerRole(
+    SudekiMpLanArenaRole player_role
+) {
+    if (player_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        return SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    }
+    if (player_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        return SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    }
+    return 0u;
+}
+
+BOOL SudekiMpLanArenaPlayerOwnsActor(
+    SudekiMpLanArenaRole player_role,
+    uint8_t actor_type
+) {
+    uint8_t owned_actor =
+        SudekiMpLanArenaActorTypeForPlayerRole(player_role);
+    return owned_actor != 0u && actor_type == owned_actor;
+}
+
 BOOL SudekiMpLanArenaRemoteInputFresh(
     uint32_t last_input_at_ms,
     uint32_t now_ms,

@@ -625,6 +625,7 @@ static BOOL send_client_input(
     input.sequence = 0u;
     input.acknowledged_snapshot = 0u;
     input.client_tick = GetTickCount();
+    input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     input.world_direction_x = direction_x;
     input.world_direction_z = direction_z;
     input.aim_direction_x = last_aim_x;

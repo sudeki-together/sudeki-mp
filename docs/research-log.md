@@ -4999,3 +4999,15 @@ a wrong-direction packet after connection terminates the session without
 advancing its accepted sequence. This closes the transport side of the
 dedicated-node migration seam while preserving the existing playable listen
 server.
+
+Protocol `LA17` makes player ownership explicit on every input contribution,
+not only during the handshake. The client stamps its fixed Ailish actor type
+into the normalized input payload. The synchronized transport rejects a
+packet whose actor does not belong to the authenticated peer role before it
+can replace the pending input, and the game-thread shared-simulation reducer
+requires the same actor identity again before admission or acknowledgement.
+Send-side role ownership is enforced as well. This preserves the current
+Tal/canonical and Ailish/replica listen-server behavior while establishing a
+bounded actor-owned contribution contract for later role negotiation; node
+authority still owns packet direction and native-world consequences remain
+canonical-only.

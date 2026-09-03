@@ -1309,9 +1309,9 @@ static void lan_arena_control_update_observer(
         if (!ensure_canonical_simulation(status.session_token) ||
             !SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
                 &canonical_simulation, status.session_token,
-                SUDEKIMP_LAN_ARENA_AILISH_TYPE, &input) ||
+                input.actor_type, &input) ||
             !SudekiMpLanArenaSharedSimulationReadPlayerInput(
-                &canonical_simulation, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                &canonical_simulation, input.actor_type,
                 &admitted_input, NULL)) {
             SudekiMpLogFormat(
                 "lan_arena_runtime event=remote_player_input phase=rejected "

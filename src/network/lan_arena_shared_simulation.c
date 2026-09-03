@@ -118,7 +118,8 @@ int SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
     if (!SudekiMpLanArenaSharedSimulationSessionExact(
             simulation,
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
-            session_token) || index < 0 ||
+            session_token) || index < 0 || input == NULL ||
+        input->actor_type != actor_type ||
         !SudekiMpLanArenaInputValid(input) ||
         (simulation->frame_valid &&
          simulation->frame.match_state ==

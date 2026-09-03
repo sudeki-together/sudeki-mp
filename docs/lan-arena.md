@@ -38,7 +38,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA16`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA17`, exact GOG executable hash only. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
@@ -108,17 +108,19 @@ experiments.
   exact transition lookup confirms those conditions remain host-owned.
 - Action retirement is also part of the shared timeline. While a native action
   is active, the canonical simulation quantizes its actor-local animation
-  clock into the LA16
+  clock into the LA17
   semantic snapshot. Clients interpolate and verify that phase on their own
   actor-local selector. The first host IDLE snapshot is the retirement edge;
   there is no client-only timeout or fixed crossfade deciding when an attack
   ends.
-- Input acknowledgement is also simulation-owned in LA16. The socket layer
+- Input acknowledgement is also simulation-owned in LA17. The socket layer
   may receive and coalesce packets, but it cannot acknowledge one merely for
   reaching the host process. The canonical reducer validates and admits the
-  actor-scoped contribution first; only that admitted sequence may appear in
-  a later snapshot. Tal and Ailish input histories are independent, while
-  neither can contribute match, enemy, resource, or native combat state.
+  actor-scoped contribution first. Its wire actor must match the authenticated
+  player role at both the transport and reducer boundaries; only that admitted
+  sequence may appear in a later snapshot. Tal and Ailish input histories are
+  independent, while neither can contribute match, enemy, resource, or native
+  combat state.
 - Match lifecycle is one-way within a session token: waiting may become
   active or ended, active may become ended, and ended cannot reactivate.
   Waiting/ended frames must carry combat disabled. Starting again requires a
@@ -129,7 +131,7 @@ experiments.
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The `LA16` handshake validates the exact
+Packets are versioned and sequenced. The `LA17` handshake validates the exact
 game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
 independent canonical/replica simulation-node tuple, and a fresh session
 token. Connected packet direction is authorized by simulation node rather

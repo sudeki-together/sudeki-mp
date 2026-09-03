@@ -438,6 +438,13 @@ static void session_poll_unlocked(uint32_t now_ms) {
                     session.latest_input.weak_attack_pressed : 0u;
                 uint8_t latched_combat_toggle = session.input_pending ?
                     session.latest_input.cleanroom_combat_test_pressed : 0u;
+                if (!SudekiMpLanArenaPlayerOwnsActor(
+                        (SudekiMpLanArenaRole)session.connection.peer_role,
+                        packet.body.input.actor_type)) {
+                    set_failed(SUDEKIMP_LAN_ARENA_REJECT_AUTHORITY,
+                        "input_actor_authority");
+                    return;
+                }
                 if ((packet.body.input.acknowledged_snapshot != 0u &&
                      session.last_sent_snapshot_sequence == 0u) ||
                     SudekiMpLanArenaSequenceNewer(
@@ -567,7 +574,9 @@ static BOOL session_send_input_unlocked(const SudekiMpLanArenaInput *input) {
         session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
         session.config.local_simulation_node_role !=
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
-        session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
+        session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED ||
+        !SudekiMpLanArenaPlayerOwnsActor(
+            session.config.local_role, input->actor_type)) return FALSE;
     memset(&packet, 0, sizeof(packet));
     packet.type = SUDEKIMP_LAN_ARENA_PACKET_INPUT;
     packet.sequence = ++session.next_sequence;

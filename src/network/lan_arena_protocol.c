@@ -5,7 +5,7 @@
 
 #define LAN_HEADER_SIZE 20u
 #define LAN_HELLO_SIZE 53u
-#define LAN_INPUT_SIZE 26u
+#define LAN_INPUT_SIZE 27u
 #define LAN_ACTION_EVENT_SIZE 7u
 #define LAN_ACTOR_ACTION_HISTORY_OFFSET 42u
 #define LAN_ACTOR_SIZE (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
@@ -106,7 +106,10 @@ static int valid_input_aim(const SudekiMpLanArenaInput *input) {
 }
 
 int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input) {
-    return input != NULL && input->weak_attack_pressed <= 1u &&
+    return input != NULL &&
+        (input->actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+         input->actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) &&
+        input->weak_attack_pressed <= 1u &&
         input->weak_attack_held <= 1u &&
         input->ranged_first_person_active <= 1u &&
         input->cleanroom_combat_test_pressed <= 1u &&
@@ -371,15 +374,16 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             write_u32(output, packet->body.input.sequence);
             write_u32(output + 4u, packet->body.input.acknowledged_snapshot);
             write_u32(output + 8u, packet->body.input.client_tick);
-            write_s16(output + 12u, packet->body.input.world_direction_x);
-            write_s16(output + 14u, packet->body.input.world_direction_z);
-            write_s16(output + 16u, packet->body.input.aim_direction_x);
-            write_s16(output + 18u, packet->body.input.aim_direction_y);
-            write_s16(output + 20u, packet->body.input.aim_direction_z);
-            output[22] = packet->body.input.weak_attack_pressed;
-            output[23] = packet->body.input.weak_attack_held;
-            output[24] = packet->body.input.ranged_first_person_active;
-            output[25] = packet->body.input.cleanroom_combat_test_pressed;
+            output[12] = packet->body.input.actor_type;
+            write_s16(output + 13u, packet->body.input.world_direction_x);
+            write_s16(output + 15u, packet->body.input.world_direction_z);
+            write_s16(output + 17u, packet->body.input.aim_direction_x);
+            write_s16(output + 19u, packet->body.input.aim_direction_y);
+            write_s16(output + 21u, packet->body.input.aim_direction_z);
+            output[23] = packet->body.input.weak_attack_pressed;
+            output[24] = packet->body.input.weak_attack_held;
+            output[25] = packet->body.input.ranged_first_person_active;
+            output[26] = packet->body.input.cleanroom_combat_test_pressed;
             *size = LAN_INPUT_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
@@ -495,22 +499,23 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.reject_reason = (SudekiMpLanArenaRejectReason)read_u32(payload);
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_INPUT:
-            if (payload_size != LAN_INPUT_SIZE || payload[22] > 1u ||
-                payload[23] > 1u || payload[24] > 1u || payload[25] > 1u) {
+            if (payload_size != LAN_INPUT_SIZE || payload[23] > 1u ||
+                payload[24] > 1u || payload[25] > 1u || payload[26] > 1u) {
                 return 0;
             }
             packet->body.input.sequence = read_u32(payload);
             packet->body.input.acknowledged_snapshot = read_u32(payload + 4u);
             packet->body.input.client_tick = read_u32(payload + 8u);
-            packet->body.input.world_direction_x = read_s16(payload + 12u);
-            packet->body.input.world_direction_z = read_s16(payload + 14u);
-            packet->body.input.aim_direction_x = read_s16(payload + 16u);
-            packet->body.input.aim_direction_y = read_s16(payload + 18u);
-            packet->body.input.aim_direction_z = read_s16(payload + 20u);
-            packet->body.input.weak_attack_pressed = payload[22];
-            packet->body.input.weak_attack_held = payload[23];
-            packet->body.input.ranged_first_person_active = payload[24];
-            packet->body.input.cleanroom_combat_test_pressed = payload[25];
+            packet->body.input.actor_type = payload[12];
+            packet->body.input.world_direction_x = read_s16(payload + 13u);
+            packet->body.input.world_direction_z = read_s16(payload + 15u);
+            packet->body.input.aim_direction_x = read_s16(payload + 17u);
+            packet->body.input.aim_direction_y = read_s16(payload + 19u);
+            packet->body.input.aim_direction_z = read_s16(payload + 21u);
+            packet->body.input.weak_attack_pressed = payload[23];
+            packet->body.input.weak_attack_held = payload[24];
+            packet->body.input.ranged_first_person_active = payload[25];
+            packet->body.input.cleanroom_combat_test_pressed = payload[26];
             return packet->body.input.sequence == packet->sequence &&
                 SudekiMpLanArenaInputValid(&packet->body.input);
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:

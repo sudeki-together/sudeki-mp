@@ -57,6 +57,7 @@ static int run_host(unsigned int port) {
         if (SudekiMpLanArenaSessionTakeRemoteInput(&input)) {
             if (input.world_direction_x != 16384 ||
                 input.world_direction_z != -8192 ||
+                input.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
                 input.aim_direction_x != 32767 ||
                 input.weak_attack_pressed != 1u ||
                 input.weak_attack_held != 1u ||
@@ -118,6 +119,7 @@ static int run_client(unsigned int port) {
         if (status.peer_connected && !input_sent) {
             memset(&input, 0, sizeof(input));
             input.client_tick = GetTickCount();
+            input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
             input.world_direction_x = 16384;
             input.world_direction_z = -8192;
             input.aim_direction_x = 32767;

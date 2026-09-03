@@ -17,6 +17,13 @@ BOOL SudekiMpLanArenaPacketAllowedForNode(
     SudekiMpLanArenaSimulationNodeRole local_node_role,
     SudekiMpLanArenaPacketType packet_type
 );
+uint8_t SudekiMpLanArenaActorTypeForPlayerRole(
+    SudekiMpLanArenaRole player_role
+);
+BOOL SudekiMpLanArenaPlayerOwnsActor(
+    SudekiMpLanArenaRole player_role,
+    uint8_t actor_type
+);
 BOOL SudekiMpLanArenaRemoteInputFresh(
     uint32_t last_input_at_ms,
     uint32_t now_ms,

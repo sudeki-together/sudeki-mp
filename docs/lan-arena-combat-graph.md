@@ -13,13 +13,13 @@ every combat feature added to LAN arena mode.
 | Native admission | RVA `0x000DAC00` admits attack kinds; combo dispatcher `0x000D0730` appends the accepted kind. |
 | Authored transition | Lookup `0x000D04F0` searches the bounded history and gate `0x000D13E0` checks timing, target distance, and direction. Commit `0x000D14D0` records only an accepted result. |
 | Host observation | `host_actor_native_action_variant()` reads the resulting Tal renderer selector and calls `SudekiMpLanArenaTalActionFromNativePresentation()`. It never manufactures an action from the input edge. |
-| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA16 carries the host-observed action phase plus canonical-simulation input acknowledgement; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
+| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA17 carries the host-observed action phase plus canonical-simulation input acknowledgement; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
 | Client replay | The replica drains journal events in sequence, interpolates the current host phase, and `apply_actor_presentation()` calls `SudekiMpLanArenaTalActionToNativePresentation()` for Tal's independently leased renderer. No client damage or attack execution occurs. |
 
 The semantic key must preserve the native result, not merely the input
 history. In particular, `WSS` selected both renderer `69` and renderer `70`
 under different native gates. Both are valid strong-finisher presentation
-identities in protocol `LA16`.
+identities in protocol `LA17`.
 
 ## Reused co-op foundations
 
@@ -34,10 +34,14 @@ identities in protocol `LA16`.
   observation before committing a canonical frame; replicas can only accept
   authenticated newer frames. This is the migration seam for a later
   dedicated simulation process.
-- Protocol `LA16` carries player identity and simulation-node authority as
+- Protocol `LA17` carries player identity and simulation-node authority as
   separate handshake fields. Connected INPUT/SNAPSHOT direction is admitted
   by the node role, while the current live profile separately requires the
   fixed Tal/canonical and Ailish/replica pairing.
+- Every INPUT also carries an actor identity. The authenticated player role,
+  transport session, and canonical reducer each independently require that
+  identity to match the player's assigned actor before the contribution can
+  advance or be acknowledged.
 - The native-world observation also replaces both players' HP/SP and the
   complete bounded enemy set. Tal and Ailish presentation/transforms arrive as
   separate actor observations, and the reducer composes a fresh frame instead

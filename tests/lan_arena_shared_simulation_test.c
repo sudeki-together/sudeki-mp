@@ -35,11 +35,15 @@ static SudekiMpLanArenaSnapshot frame(uint32_t host_tick) {
     return result;
 }
 
-static SudekiMpLanArenaInput player_input(uint32_t sequence) {
+static SudekiMpLanArenaInput player_input(
+    uint8_t actor_type,
+    uint32_t sequence
+) {
     SudekiMpLanArenaInput result;
     memset(&result, 0, sizeof(result));
     result.sequence = sequence;
     result.client_tick = sequence * 10u;
+    result.actor_type = actor_type;
     result.world_direction_z = 32767;
     return result;
 }
@@ -261,8 +265,10 @@ static void test_player_input_admission_owns_snapshot_ack(void) {
     SudekiMpLanArenaSharedSimulation canonical;
     SudekiMpLanArenaSharedSimulation replica;
     SudekiMpLanArenaNativeWorldObservation observation;
-    SudekiMpLanArenaInput ailish = player_input(20u);
-    SudekiMpLanArenaInput tal = player_input(4u);
+    SudekiMpLanArenaInput ailish = player_input(
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE, 20u);
+    SudekiMpLanArenaInput tal = player_input(
+        SUDEKIMP_LAN_ARENA_TAL_TYPE, 4u);
     SudekiMpLanArenaInput output_input;
     SudekiMpLanArenaSnapshot source = frame(100u);
     SudekiMpLanArenaSnapshot output_frame;
@@ -278,6 +284,8 @@ static void test_player_input_admission_owns_snapshot_ack(void) {
         &canonical, 54u, SUDEKIMP_LAN_ARENA_AILISH_TYPE, &ailish));
     CHECK(!SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
         &canonical, 55u, 0xffu, &ailish));
+    CHECK(!SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
+        &canonical, 55u, SUDEKIMP_LAN_ARENA_TAL_TYPE, &ailish));
     ailish.weak_attack_pressed = 2u;
     CHECK(!SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
         &canonical, 55u, SUDEKIMP_LAN_ARENA_AILISH_TYPE, &ailish));
@@ -336,7 +344,8 @@ static void test_match_lifecycle_is_monotonic(void) {
     SudekiMpLanArenaNativeWorldObservation observation;
     SudekiMpLanArenaSnapshot source = frame(100u);
     SudekiMpLanArenaSnapshot output;
-    SudekiMpLanArenaInput input = player_input(1u);
+    SudekiMpLanArenaInput input = player_input(
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE, 1u);
     CHECK(SudekiMpLanArenaSharedSimulationBegin(
         &simulation,
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 99u));

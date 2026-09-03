@@ -181,6 +181,7 @@ static void test_host_session(void) {
     packet.sequence = 2u;
     packet.session_token = token;
     packet.body.input.sequence = 2u;
+    packet.body.input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     packet.body.input.world_direction_x = 1234;
     packet.body.input.world_direction_z = -2345;
     packet.body.input.aim_direction_x = 32767;
@@ -202,6 +203,7 @@ static void test_host_session(void) {
     CHECK(send_packet(peer, &host_address, &packet));
     SudekiMpLanArenaSessionPoll(110u);
     CHECK(SudekiMpLanArenaSessionTakeRemoteInput(&input));
+    CHECK(input.actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
     CHECK(input.world_direction_x == 4321);
     CHECK(input.aim_direction_x == 0);
     CHECK(input.aim_direction_z == 32767);
@@ -239,7 +241,12 @@ static void test_host_session(void) {
     SudekiMpLanArenaSessionPoll(410u);
     CHECK(SudekiMpLanArenaSessionGetStatus(&status));
     CHECK(status.peer_connected);
-    fill_snapshot(&packet, 5u, token, 0u);
+    memset(&packet, 0, sizeof(packet));
+    packet.type = SUDEKIMP_LAN_ARENA_PACKET_INPUT;
+    packet.sequence = 5u;
+    packet.session_token = token;
+    packet.body.input.sequence = 5u;
+    packet.body.input.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     CHECK(send_packet(peer, &host_address, &packet));
     SudekiMpLanArenaSessionPoll(420u);
     CHECK(SudekiMpLanArenaSessionGetStatus(&status));
@@ -289,10 +296,15 @@ static void test_client_session(void) {
     CHECK(status.peer_simulation_node_role ==
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD);
     memset(&input, 0, sizeof(input));
+    input.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    input.world_direction_z = 32767;
+    CHECK(!SudekiMpLanArenaSessionSendInput(&input));
+    input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     input.world_direction_z = 32767;
     CHECK(SudekiMpLanArenaSessionSendInput(&input));
     CHECK(receive_packet(host, &packet, &client_address));
     CHECK(packet.type == SUDEKIMP_LAN_ARENA_PACKET_INPUT);
+    CHECK(packet.body.input.actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
     fill_snapshot(&packet, 11u, token, packet.sequence);
     CHECK(send_packet(host, &client_address, &packet));
     fill_snapshot(&packet, 12u, token, packet.body.snapshot.acknowledged_input);
