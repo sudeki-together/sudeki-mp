@@ -20,7 +20,10 @@ static int valid_observation(
     return observation != NULL &&
         observation->match_state <= SUDEKIMP_LAN_ARENA_MATCH_ENDED &&
         observation->combat_enabled <= 1u &&
-        observation->native_combat_observed == 1u;
+        observation->enemy_count <= SUDEKIMP_LAN_ARENA_MAX_ENEMIES &&
+        observation->native_combat_observed == 1u &&
+        observation->native_resources_observed == 1u &&
+        observation->native_enemies_observed == 1u;
 }
 
 static int next_tick_allowed(
@@ -167,6 +170,13 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     committed.host_tick = observation->host_tick;
     committed.match_state = observation->match_state;
     committed.combat_enabled = observation->combat_enabled;
+    committed.tal.hp = observation->tal_hp;
+    committed.tal.sp = observation->tal_sp;
+    committed.ailish.hp = observation->ailish_hp;
+    committed.ailish.sp = observation->ailish_sp;
+    committed.enemy_count = observation->enemy_count;
+    memcpy(committed.enemies, observation->enemies,
+        sizeof(committed.enemies));
     if ((simulation->player_input_valid_mask & 0x02u) != 0u) {
         committed.acknowledged_input =
             simulation->player_input[1].sequence;

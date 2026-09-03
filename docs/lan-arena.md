@@ -23,6 +23,13 @@ Ailish input, nor a client presentation adapter can author combat mode. The
 listen server currently places the canonical node in Tal's process, but the
 contract has no Tal/host dependency and can move to a dedicated process.
 
+The native-world observation now owns the complete shared consequence domain:
+match/combat state, Tal and Ailish HP/SP, and the bounded enemy set. A candidate
+snapshot supplies presentation and transforms, but those world fields are
+replaced from the verified observation before the frame can commit. This keeps
+future actor-owned input or movement contributions from quietly becoming
+damage, resource, enemy-spawn, or match authority.
+
 This profile never reads, writes, copies, or transfers campaign saves. It
 always launches Sudeki's cleanroom `testroom`, and it does not share hooks or
 state with the local split-screen, fixed-three, roster, or custom QuickMenu

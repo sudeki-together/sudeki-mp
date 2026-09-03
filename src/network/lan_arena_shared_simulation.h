@@ -16,9 +16,18 @@ typedef enum SudekiMpLanArenaSimulationNodeRole {
 
 typedef struct SudekiMpLanArenaNativeWorldObservation {
     uint32_t host_tick;
+    uint32_t tal_hp;
+    uint32_t tal_sp;
+    uint32_t ailish_hp;
+    uint32_t ailish_sp;
+    SudekiMpLanArenaEnemySnapshot
+        enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
     uint8_t match_state;
     uint8_t combat_enabled;
+    uint8_t enemy_count;
     uint8_t native_combat_observed;
+    uint8_t native_resources_observed;
+    uint8_t native_enemies_observed;
 } SudekiMpLanArenaNativeWorldObservation;
 
 typedef struct SudekiMpLanArenaSharedSimulation {
@@ -66,8 +75,9 @@ int SudekiMpLanArenaSharedSimulationReadPlayerInput(
 );
 
 /* Canonical frames are admitted only with a matching native-world
- * observation.  The observation overwrites match/combat fields so neither a
- * player input nor an adapter-generated candidate can author those states. */
+ * observation.  The observation overwrites match/combat, actor resources,
+ * and enemy state so neither a player input nor an adapter-generated
+ * candidate can author those domains. */
 int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     SudekiMpLanArenaSharedSimulation *simulation,
     uint64_t session_token,

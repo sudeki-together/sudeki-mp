@@ -4969,3 +4969,12 @@ while waiting), but it cannot regress to waiting or revive after ending under
 the same token. Non-active frames are invalid when combat remains enabled.
 Both canonical commits and replica admissions use this rule, so a delayed or
 malformed snapshot cannot resurrect an old arena transaction.
+
+World-consequence ownership is now explicit rather than implied by where the
+snapshot builder runs. Every canonical commit requires native observations for
+Tal/Ailish HP and SP plus the bounded enemy set, in addition to combat and
+match state. Those fields replace the candidate snapshot before the ordinary
+wire validator runs. Tests deliberately forge candidate resources and omit
+each observation capability; only the complete native observation commits.
+This lets later actor-owned movement/presentation contributions remain narrow
+without accidentally granting them damage, healing, enemy, or match authority.

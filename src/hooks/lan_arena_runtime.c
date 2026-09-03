@@ -911,10 +911,20 @@ static void host_publish_snapshot(DWORD now_ms) {
         }
     }
     if (!ensure_canonical_simulation(status.session_token)) return;
+    ZeroMemory(&world_observation, sizeof(world_observation));
     world_observation.host_tick = now_ms;
+    world_observation.tal_hp = snapshot.tal.hp;
+    world_observation.tal_sp = snapshot.tal.sp;
+    world_observation.ailish_hp = snapshot.ailish.hp;
+    world_observation.ailish_sp = snapshot.ailish.sp;
     world_observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     world_observation.combat_enabled = combat_enabled ? 1u : 0u;
+    world_observation.enemy_count = snapshot.enemy_count;
+    memcpy(world_observation.enemies, snapshot.enemies,
+        sizeof(world_observation.enemies));
     world_observation.native_combat_observed = 1u;
+    world_observation.native_resources_observed = 1u;
+    world_observation.native_enemies_observed = 1u;
     if (!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
             &canonical_simulation, status.session_token,
             &world_observation, &snapshot) ||
