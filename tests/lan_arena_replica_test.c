@@ -164,6 +164,12 @@ int main(void) {
     second.tal.action_history[2].host_tick = 1280u;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1210u, &sample));
+    CHECK(sample.tal.action_sequence == 20u);
+    CHECK(sample.tal.action_variant == first.tal.action_variant);
+    CHECK(sample.tal.action_phase_valid == 1u);
+    CHECK(sample.tal.action_phase_q8 ==
+        (uint16_t)(first.tal.action_phase_q8 + 61u));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1230u, &sample));
     CHECK(sample.tal.action_sequence == 21u);
     CHECK(sample.tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE);
@@ -207,15 +213,22 @@ int main(void) {
     second.tal.action_sequence = 7u;
     second.tal.action_phase_valid = 0u;
     second.tal.action_phase_q8 = 0u;
+    second.tal.action_terminal_phase_q8 = 40u * 256u;
+    second.tal.idle_entry_phase_q8 = 2u * 256u;
+    second.tal.action_retirement_valid = 1u;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
-    CHECK(SudekiMpLanArenaReplicaSample(&replica, 2249u, &sample));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 2225u, &sample));
     CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION);
     CHECK(sample.tal.action_phase_valid == 1u);
-    CHECK(sample.tal.action_phase_q8 == 35u * 256u + 128u);
+    CHECK(sample.tal.action_phase_q8 == 37u * 256u + 192u);
+    CHECK(sample.tal.action_retirement_valid == 0u);
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 2250u, &sample));
     CHECK(sample.tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE);
     CHECK(sample.tal.action_phase_valid == 0u);
+    CHECK(sample.tal.action_retirement_valid == 1u);
+    CHECK(sample.tal.action_terminal_phase_q8 == 40u * 256u);
+    CHECK(sample.tal.idle_entry_phase_q8 == 2u * 256u);
 
     /* A 180-degree wall/contact correction has no unique arc. It must never
      * create the zero vector that made the client reject an entire frame. */
@@ -281,6 +294,33 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaRenderClockAdvance(
         &replica, &clock, 1180u, &first.host_tick));
     CHECK(first.host_tick == 4128u);
+
+    /* Backlog convergence is forbidden while an authoritative action is in
+     * the interpolation window. One local millisecond must remain one host
+     * animation millisecond so catch-up cannot visibly skip combo frames. */
+    clock.host_tick = 4000u;
+    clock.local_tick = 1200u;
+    replica.oldest.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    CHECK(SudekiMpLanArenaReplicaActionTimelineBuffered(&replica));
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1216u, FALSE, &first.host_tick));
+    CHECK(first.host_tick == 4016u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1232u, FALSE, &first.host_tick));
+    CHECK(first.host_tick == 4032u);
+    replica.oldest.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.previous.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.latest.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.earliest.tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.oldest.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.previous.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.latest.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    replica.earliest.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    CHECK(!SudekiMpLanArenaReplicaActionTimelineBuffered(&replica));
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1248u, TRUE, &first.host_tick));
+    CHECK(first.host_tick == 4064u);
 
     /* Both the host and local clocks are GetTickCount values. Their natural
      * 32-bit wrap must preserve ordering and interpolation. */

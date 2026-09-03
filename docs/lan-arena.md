@@ -38,12 +38,15 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA17`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA18`, exact GOG executable hash only. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
   clients interpolate that phase instead of independently running a terminal
-  attack clock.
+  attack clock. Post-action snapshots retain the host-observed terminal action
+  phase and first idle phase until the next action, so a lost/coalesced packet
+  cannot omit the authored tail or restart idle at a client-invented zero
+  timestamp.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
 - Client actions: camera-relative movement and host-validated weak attack.
@@ -108,12 +111,19 @@ experiments.
   exact transition lookup confirms those conditions remain host-owned.
 - Action retirement is also part of the shared timeline. While a native action
   is active, the canonical simulation quantizes its actor-local animation
-  clock into the LA17
-  semantic snapshot. Clients interpolate and verify that phase on their own
-  actor-local selector. The first host IDLE snapshot is the retirement edge;
-  there is no client-only timeout or fixed crossfade deciding when an attack
-  ends.
-- Input acknowledgement is also simulation-owned in LA17. The socket layer
+  clock into the LA18 semantic snapshot. The first host IDLE snapshot remains
+  a latched retirement witness, so traces and bounded fallback presentation do
+  not lose the authored tail when snapshots coalesce.
+- Tal's normal client presentation no longer forces those renderer clocks.
+  Each new authenticated semantic action is replayed as the corresponding
+  weak/strong/sweep/block input on the client Tal arbiter. Sudeki's own combat
+  graph chooses the expected host-observed selector and performs its native
+  transition back to combat idle. The client installs an authenticated
+  `ApplyDamage` guard around this presentation-only replay; HP, reactions, and
+  world consequences continue to come only from host snapshots. If native
+  admission never reaches the expected selector within the bounded lease, the
+  existing low-level snapshot presenter resumes as a fail-safe.
+- Input acknowledgement is also simulation-owned in LA18. The socket layer
   may receive and coalesce packets, but it cannot acknowledge one merely for
   reaching the host process. The canonical reducer validates and admits the
   actor-scoped contribution first. Its wire actor must match the authenticated
@@ -131,7 +141,7 @@ experiments.
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The `LA17` handshake validates the exact
+Packets are versioned and sequenced. The `LA18` handshake validates the exact
 game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
 independent canonical/replica simulation-node tuple, and a fresh session
 token. Connected packet direction is authorized by simulation node rather

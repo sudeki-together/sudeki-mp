@@ -41,6 +41,17 @@ typedef struct SudekiMpLanArenaReplicaDiagnostics {
     uint32_t sampled_at_ms;
     float camera_position[3];
     float camera_facing[3];
+    uint32_t render_clock_local_elapsed_ms;
+    uint32_t render_clock_advance_ms;
+    uint32_t tal_action_sequence;
+    uint16_t tal_action_phase_q8;
+    uint16_t tal_action_terminal_phase_q8;
+    uint16_t tal_idle_entry_phase_q8;
+    uint8_t tal_animation_state;
+    uint8_t tal_action_variant;
+    uint8_t tal_action_phase_valid;
+    uint8_t tal_action_retirement_valid;
+    uint8_t action_clock_protected;
     uint8_t camera_valid;
     SudekiMpLanArenaReplicaActorDiagnostics actor[2];
     uint8_t valid;
@@ -74,7 +85,6 @@ int SudekiMpLanArenaClientAnimationTransitionState(
     uint8_t next_animation_state,
     int requested_state
 );
-
 /* Tal's inactive secondary channel must not retain a native locomotion clock
  * across replicated action/idle edges. Movement used to clear this state by
  * accident, making the same combo look different before and after walking. */
@@ -98,6 +108,32 @@ BOOL SudekiMpLanArenaClientActorPresentationAllowed(
     BOOL tal_ready,
     BOOL ailish_ready);
 
+/* A native Tal combat transition may settle in armed idle or armed run,
+ * depending on the host motion snapshot visible when the transition begins.
+ * Both are proven combat-bank states and therefore safe handoff points for
+ * actor-local authoritative presentation. */
+BOOL SudekiMpLanArenaClientTalTransitionSelectorReady(
+    BOOL combat_target,
+    int selector
+);
+
+/* Sudeki's ranged arm helper closes its native UI lease after 75 ms. The
+ * client retries the party-wide arm transition once after that boundary so
+ * replica-owned actors cannot remain in an exploration/run graph forever. */
+BOOL SudekiMpLanArenaClientCombatTransitionRefreshDue(
+    BOOL combat_target,
+    BOOL refresh_attempted,
+    uint32_t elapsed_ms
+);
+
+/* Renderer time setters are stateful, not passive assignments. Reasserting a
+ * matching terminal action clock every frame prevents Sudeki's native
+ * action-to-idle blend from advancing. Correct only measurable drift. */
+BOOL SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+    float actual_phase,
+    float authoritative_phase
+);
+
 /* Pure Tal combat presentation mapping. LAN packets carry semantic actions,
  * never retail selector numbers; this exact-image adapter resolves them only
  * inside the client process. */
@@ -105,6 +141,18 @@ BOOL SudekiMpLanArenaClientTalActionPresentation(
     uint8_t action_variant,
     int *selector,
     int *state
+);
+
+/* Converts a host-observed semantic Tal action into one native client
+ * presentation input edge. Exactly one output is asserted. The host remains
+ * the world/damage authority; this edge exists only to let the client's own
+ * CGameModel/arbiter animation state perform the transition. */
+BOOL SudekiMpLanArenaClientTalNativeCombatInput(
+    uint8_t action_variant,
+    int *weak,
+    int *strong,
+    int *sweep,
+    int *block
 );
 
 /* Preserve the local Ailish camera's immediate facing only while it owns the
@@ -115,11 +163,28 @@ BOOL SudekiMpLanArenaClientShouldApplyHostFacing(
     BOOL local_first_person_active
 );
 
-/* Converts the bounded LA17 action phase to Sudeki's local animation-time
+/* Converts the bounded LAN action phase to Sudeki's local animation-time
  * units. It rejects non-action or unphased snapshots before any renderer
  * method is called. */
 BOOL SudekiMpLanArenaClientActionPhaseTime(
     const struct SudekiMpLanArenaActorSnapshot *snapshot,
+    float *phase_time
+);
+
+/* Converts the host-observed first idle timestamp on an action-retirement
+ * snapshot. This is deliberately distinct from the live action clock: it is
+ * consumed once at the semantic ACTION -> IDLE edge. */
+BOOL SudekiMpLanArenaClientRetirementIdlePhaseTime(
+    const struct SudekiMpLanArenaActorSnapshot *snapshot,
+    float *phase_time
+);
+
+/* Converts the host's first post-update idle clock into the clock that must
+ * be installed immediately before the client's native animation update. */
+BOOL SudekiMpLanArenaClientRetirementPreUpdatePhase(
+    float host_idle_entry_phase,
+    uint32_t local_frame_elapsed_ms,
+    BOOL final_presentation_boundary,
     float *phase_time
 );
 

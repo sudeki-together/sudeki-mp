@@ -37,6 +37,7 @@ static void replay_action_history(
     const SudekiMpLanArenaActorSnapshot *before,
     const SudekiMpLanArenaActorSnapshot *after,
     uint32_t host_tick,
+    uint32_t before_host_tick,
     uint32_t after_host_tick,
     SudekiMpLanArenaActorSnapshot *output
 ) {
@@ -54,10 +55,37 @@ static void replay_action_history(
     }
     if (!has_new_event) return;
     if (selected == NULL) {
+        uint32_t continued_phase_q8 = before->action_phase_q8;
         output->animation_state = before->animation_state;
         output->combat_state = before->combat_state;
         output->action_variant = before->action_variant;
         output->action_sequence = before->action_sequence;
+        output->action_phase_valid = before->action_phase_valid;
+        output->action_phase_q8 = before->action_phase_q8;
+        output->action_terminal_phase_q8 =
+            before->action_terminal_phase_q8;
+        output->idle_entry_phase_q8 = before->idle_entry_phase_q8;
+        output->action_retirement_valid =
+            before->action_retirement_valid;
+        /* The packet already knows about a future combo edge, but the render
+         * clock has not reached it yet. Never inherit that next selector's
+         * freshly-reset phase while retaining the current selector: doing so
+         * rewound the visible swing for one or two frames. Tal's verified
+         * native action channels run at 24 units/second, so continue the
+         * current phase up to the exact journaled edge. */
+        if (before->animation_state ==
+                SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+            before->action_phase_valid &&
+            tick_after(host_tick, before_host_tick)) {
+            uint32_t elapsed_ms = host_tick - before_host_tick;
+            uint32_t phase_advance_q8 =
+                (elapsed_ms * 24u * 256u + 500u) / 1000u;
+            continued_phase_q8 += phase_advance_q8;
+            if (continued_phase_q8 > 0xffffu) {
+                continued_phase_q8 = 0xffffu;
+            }
+            output->action_phase_q8 = (uint16_t)continued_phase_q8;
+        }
         return;
     }
     output->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
@@ -127,6 +155,7 @@ static void interpolate_actor(
     const SudekiMpLanArenaActorSnapshot *after,
     float alpha,
     uint32_t host_tick,
+    uint32_t before_host_tick,
     uint32_t after_host_tick,
     SudekiMpLanArenaActorSnapshot *output
 ) {
@@ -155,6 +184,17 @@ static void interpolate_actor(
         output->action_sequence = before->action_sequence;
         output->action_phase_valid = before->action_phase_valid;
         output->action_phase_q8 = before->action_phase_q8;
+        if (before->action_phase_valid &&
+            after->action_retirement_valid &&
+            after->action_terminal_phase_q8 >= before->action_phase_q8) {
+            output->action_phase_q8 = (uint16_t)(interpolate_float(
+                (float)before->action_phase_q8,
+                (float)after->action_terminal_phase_q8,
+                alpha) + 0.5f);
+        }
+        output->action_terminal_phase_q8 = 0u;
+        output->idle_entry_phase_q8 = 0u;
+        output->action_retirement_valid = 0u;
     }
     output->x = interpolate_float(before->x, after->x, alpha);
     output->y = interpolate_float(before->y, after->y, alpha);
@@ -162,7 +202,8 @@ static void interpolate_actor(
     normalized_facing(before, after, alpha,
         &output->facing_x, &output->facing_z);
     replay_action_history(
-        before, after, host_tick, after_host_tick, output);
+        before, after, host_tick, before_host_tick,
+        after_host_tick, output);
     if (output->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
         before->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
         after->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
@@ -177,6 +218,11 @@ static void interpolate_actor(
             SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) {
         output->action_phase_valid = 0u;
         output->action_phase_q8 = 0u;
+    }
+    if (output->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) {
+        output->action_terminal_phase_q8 = 0u;
+        output->idle_entry_phase_q8 = 0u;
+        output->action_retirement_valid = 0u;
     }
 }
 
@@ -282,9 +328,11 @@ BOOL SudekiMpLanArenaReplicaSample(
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->oldest;
         interpolate_actor(&replica->earliest.tal, &replica->oldest.tal,
-            alpha, host_tick, replica->oldest.host_tick, &sample->tal);
+            alpha, host_tick, replica->earliest.host_tick,
+            replica->oldest.host_tick, &sample->tal);
         interpolate_actor(&replica->earliest.ailish, &replica->oldest.ailish,
-            alpha, host_tick, replica->oldest.host_tick, &sample->ailish);
+            alpha, host_tick, replica->earliest.host_tick,
+            replica->oldest.host_tick, &sample->ailish);
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->earliest.enemies[index].x,
@@ -312,9 +360,11 @@ BOOL SudekiMpLanArenaReplicaSample(
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->previous;
         interpolate_actor(&replica->oldest.tal, &replica->previous.tal,
-            alpha, host_tick, replica->previous.host_tick, &sample->tal);
+            alpha, host_tick, replica->oldest.host_tick,
+            replica->previous.host_tick, &sample->tal);
         interpolate_actor(&replica->oldest.ailish, &replica->previous.ailish,
-            alpha, host_tick, replica->previous.host_tick, &sample->ailish);
+            alpha, host_tick, replica->oldest.host_tick,
+            replica->previous.host_tick, &sample->ailish);
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->oldest.enemies[index].x,
@@ -343,9 +393,11 @@ BOOL SudekiMpLanArenaReplicaSample(
     elapsed = host_tick - replica->previous.host_tick;
     alpha = clamp01((float)elapsed / (float)span);
     interpolate_actor(&replica->previous.tal, &replica->latest.tal,
-        alpha, host_tick, replica->latest.host_tick, &sample->tal);
+        alpha, host_tick, replica->previous.host_tick,
+        replica->latest.host_tick, &sample->tal);
     interpolate_actor(&replica->previous.ailish, &replica->latest.ailish,
-        alpha, host_tick, replica->latest.host_tick, &sample->ailish);
+        alpha, host_tick, replica->previous.host_tick,
+        replica->latest.host_tick, &sample->ailish);
     for (index = 0u; index < sample->enemy_count; ++index) {
         sample->enemies[index].x = interpolate_float(
             replica->previous.enemies[index].x,
@@ -366,10 +418,31 @@ void SudekiMpLanArenaReplicaRenderClockReset(
     if (clock != NULL) memset(clock, 0, sizeof(*clock));
 }
 
-BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
+BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
+    const SudekiMpLanArenaReplica *replica
+) {
+    if (replica == NULL) return FALSE;
+#define SNAPSHOT_ACTION_ACTIVE(snapshot_, valid_) \
+    ((valid_) && \
+     ((snapshot_).tal.animation_state == \
+          SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
+      (snapshot_).ailish.animation_state == \
+          SUDEKIMP_LAN_ARENA_ANIMATION_ACTION))
+    if (SNAPSHOT_ACTION_ACTIVE(replica->earliest, replica->earliest_valid) ||
+        SNAPSHOT_ACTION_ACTIVE(replica->oldest, replica->oldest_valid) ||
+        SNAPSHOT_ACTION_ACTIVE(replica->previous, replica->previous_valid) ||
+        SNAPSHOT_ACTION_ACTIVE(replica->latest, replica->latest_valid)) {
+        return TRUE;
+    }
+#undef SNAPSHOT_ACTION_ACTIVE
+    return FALSE;
+}
+
+BOOL SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
     const SudekiMpLanArenaReplica *replica,
     SudekiMpLanArenaReplicaRenderClock *clock,
     uint32_t local_tick,
+    BOOL allow_catchup,
     uint32_t *host_tick
 ) {
     uint32_t elapsed;
@@ -410,7 +483,7 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
      * monotonic and bounded: it never rewinds and never extrapolates beyond a
      * packet the host actually sent. */
     target = replica->previous.host_tick;
-    if (tick_before(candidate, target)) {
+    if (allow_catchup && tick_before(candidate, target)) {
         catchup = target - candidate;
         if (catchup > elapsed) catchup = elapsed;
         candidate += catchup;
@@ -418,4 +491,14 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
     clock->host_tick = candidate;
     *host_tick = candidate;
     return TRUE;
+}
+
+BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
+    const SudekiMpLanArenaReplica *replica,
+    SudekiMpLanArenaReplicaRenderClock *clock,
+    uint32_t local_tick,
+    uint32_t *host_tick
+) {
+    return SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        replica, clock, local_tick, TRUE, host_tick);
 }

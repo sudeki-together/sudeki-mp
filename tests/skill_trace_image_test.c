@@ -62,6 +62,7 @@ enum {
     RVA_APPLY_DAMAGE = 0x000d21d0u,
     RVA_COLLISION_DAMAGE = 0x00138870u,
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
+    RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
     RVA_CONTROLLER_AIM_UPDATE = 0x00028b00u,
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
@@ -2909,6 +2910,28 @@ int wmain(int argc, wchar_t **argv) {
                 "LAN client animation transition-state policy mismatch\n");
             ++failures;
         }
+        {
+            float phase = -1.0f;
+            if (!SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    0.204f, 13u, FALSE, &phase) ||
+                fabsf(phase - 0.048f) > 0.0001f ||
+                !SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    0.204f, 13u, TRUE, &phase) ||
+                fabsf(phase - 0.204f) > 0.0001f ||
+                !SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    0.100f, 17u, FALSE, &phase) ||
+                fabsf(phase) > 0.0001f ||
+                SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    -1.0f, 13u, FALSE, &phase) ||
+                SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    0.204f, 51u, FALSE, &phase) ||
+                SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                    0.204f, 13u, FALSE, NULL)) {
+                fprintf(stderr,
+                    "LAN client retirement pre-update phase policy mismatch\n");
+                ++failures;
+            }
+        }
         if (!SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
                 0u, TRUE, FALSE, TRUE) ||
             !SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
@@ -2945,6 +2968,40 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+        if (!SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 17) ||
+            !SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 36) ||
+            SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 4) ||
+            !SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 4) ||
+            !SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 8) ||
+            SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 36)) {
+            fputs("FAIL: LAN client Tal transition selector gate mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientCombatTransitionRefreshDue(
+                TRUE, FALSE, 99u) ||
+            !SudekiMpLanArenaClientCombatTransitionRefreshDue(
+                TRUE, FALSE, 100u) ||
+            SudekiMpLanArenaClientCombatTransitionRefreshDue(
+                TRUE, TRUE, 1000u) ||
+            SudekiMpLanArenaClientCombatTransitionRefreshDue(
+                FALSE, FALSE, 1000u)) {
+            fputs("FAIL: LAN client combat transition refresh policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+                12.0f, 12.009f) ||
+            !SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+                12.0f, 12.011f) ||
+            !SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+                NAN, 12.0f) ||
+            !SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+                12.0f, -1.0f)) {
+            fputs("FAIL: LAN client animation phase correction policy mismatch\n",
+                stderr);
+            ++failures;
+        }
         {
             static const struct {
                 uint8_t action;
@@ -2970,6 +3027,10 @@ int wmain(int argc, wchar_t **argv) {
             unsigned int action_index;
             int action_selector = -1;
             int action_state = -1;
+            int weak = -1;
+            int strong = -1;
+            int sweep = -1;
+            int block = -1;
             for (action_index = 0u;
                  action_index < sizeof(tal_actions) / sizeof(tal_actions[0]);
                  ++action_index) {
@@ -2979,6 +3040,15 @@ int wmain(int argc, wchar_t **argv) {
                     action_selector != tal_actions[action_index].selector ||
                     action_state != tal_actions[action_index].state) {
                     fputs("FAIL: LAN client Tal semantic action mapping\n",
+                        stderr);
+                    ++failures;
+                    break;
+                }
+                if (!SudekiMpLanArenaClientTalNativeCombatInput(
+                        tal_actions[action_index].action,
+                        &weak, &strong, &sweep, &block) ||
+                    weak + strong + sweep + block != 1) {
+                    fputs("FAIL: LAN client Tal native action input mapping\n",
                         stderr);
                     ++failures;
                     break;
@@ -2994,6 +3064,16 @@ int wmain(int argc, wchar_t **argv) {
                     SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
                     &action_selector, NULL)) {
                 fputs("FAIL: LAN client Tal semantic action rejection\n",
+                    stderr);
+                ++failures;
+            }
+            if (SudekiMpLanArenaClientTalNativeCombatInput(
+                    SUDEKIMP_LAN_ARENA_ACTION_NONE,
+                    &weak, &strong, &sweep, &block) ||
+                SudekiMpLanArenaClientTalNativeCombatInput(
+                    SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+                    NULL, &strong, &sweep, &block)) {
+                fputs("FAIL: LAN client Tal native action input rejection\n",
                     stderr);
                 ++failures;
             }
@@ -3038,6 +3118,25 @@ int wmain(int argc, wchar_t **argv) {
             if (SudekiMpLanArenaClientActionPhaseTime(
                     &phased_action, &phase_time)) {
                 fputs("FAIL: LAN client accepted idle action phase\n",
+                    stderr);
+                ++failures;
+            }
+            phased_action.action_sequence = 9u;
+            phased_action.action_phase_q8 = 0u;
+            phased_action.action_retirement_valid = 1u;
+            phased_action.action_terminal_phase_q8 = 49u * 256u;
+            phased_action.idle_entry_phase_q8 = 2u * 256u + 64u;
+            if (!SudekiMpLanArenaClientRetirementIdlePhaseTime(
+                    &phased_action, &phase_time) ||
+                fabsf(phase_time - 2.25f) > 0.0001f) {
+                fputs("FAIL: LAN client action-retirement idle phase policy\n",
+                    stderr);
+                ++failures;
+            }
+            phased_action.action_retirement_valid = 0u;
+            if (SudekiMpLanArenaClientRetirementIdlePhaseTime(
+                    &phased_action, &phase_time)) {
+                fputs("FAIL: LAN client accepted missing retirement phase\n",
                     stderr);
                 ++failures;
             }
@@ -3187,6 +3286,40 @@ int wmain(int argc, wchar_t **argv) {
         image[RVA_POSITION_UPDATE] = saved_update_byte;
         if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
             fputs("FAIL: LAN client replica position-updater mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_combat_input_byte = image[RVA_ARBITER_COMBAT_INPUT];
+        image[RVA_ARBITER_COMBAT_INPUT] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched arbiter combat input\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_ARBITER_COMBAT_INPUT] = saved_combat_input_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client arbiter-input mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_apply_damage_byte = image[RVA_APPLY_DAMAGE];
+        image[RVA_APPLY_DAMAGE] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched damage authority\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_APPLY_DAMAGE] = saved_apply_damage_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client damage-authority mismatch restore was sticky\n",
                 stderr);
             ++failures;
         }

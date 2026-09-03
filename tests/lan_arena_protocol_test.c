@@ -164,7 +164,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 196u);
+    CHECK(size == 206u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.tal.action_variant ==
@@ -174,6 +174,38 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(decoded.body.snapshot.enemy_count == 1u);
     CHECK(decoded.body.snapshot.enemies[0].native_entity_id ==
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID);
+    source.body.snapshot.tal.action_terminal_phase_q8 = 49u * 256u;
+    source.body.snapshot.tal.idle_entry_phase_q8 = 2u * 256u;
+    source.body.snapshot.tal.action_retirement_valid = 1u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.tal.action_terminal_phase_q8 ==
+        49u * 256u);
+    CHECK(decoded.body.snapshot.tal.idle_entry_phase_q8 == 2u * 256u);
+    CHECK(decoded.body.snapshot.tal.action_retirement_valid == 1u);
+    source.body.snapshot.tal.action_retirement_valid = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.action_retirement_valid = 0u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.tal.action_terminal_phase_q8 = 0u;
+    source.body.snapshot.tal.idle_entry_phase_q8 = 0u;
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    source.body.snapshot.tal.combat_state =
+        SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    source.body.snapshot.tal.action_variant =
+        SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    source.body.snapshot.tal.action_phase_valid = 1u;
+    source.body.snapshot.tal.action_phase_q8 = 18u * 256u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    source.body.snapshot.tal.animation_state =
+        SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    source.body.snapshot.tal.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    source.body.snapshot.tal.action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    source.body.snapshot.tal.action_phase_valid = 0u;
+    source.body.snapshot.tal.action_phase_q8 = 0u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     bytes[33] = 2u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[33] = 1u;

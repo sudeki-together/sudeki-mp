@@ -497,12 +497,39 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     check(tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO &&
           tal.action_sequence == 2u,
         "Tal second native weak variant remains distinct");
-    host_actor_presentation[0].state[0] = 128u;
+    host_actor_presentation[0].time[0] = 49.5f;
+    host_apply_presentation_state(0u, 3390u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+          tal.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO &&
+          tal.action_sequence == 2u,
+        "Tal terminal action remains sequenced before retirement");
+    {
+        SudekiMpCleanroomActorPresentation terminal =
+            host_actor_presentation[0];
+        SudekiMpCleanroomActorPresentation idle;
+        terminal.time[0] = 49.5f;
+        memset(&idle, 0, sizeof(idle));
+        idle.selector[0] = TAL_COMBAT_IDLE_SELECTOR;
+        idle.state[0] = 0u;
+        idle.time[0] = 2.25f;
+        host_capture_actor_action_retirement(0u, &terminal, &idle);
+        host_actor_presentation[0] = idle;
+    }
     host_apply_presentation_state(0u, 3400u, TRUE, &tal);
     check(tal.animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
           tal.action_sequence == 2u && tal.action_phase_valid == 0u &&
-          tal.action_phase_q8 == 0u,
-        "Tal combat action retires when the native clip retires");
+          tal.action_phase_q8 == 0u &&
+          tal.action_retirement_valid == 1u &&
+          tal.action_terminal_phase_q8 == 49u * 256u + 128u &&
+          tal.idle_entry_phase_q8 == 2u * 256u + 64u,
+        "Tal combat action retirement carries terminal and idle clocks");
+    host_apply_presentation_state(0u, 3410u, TRUE, &tal);
+    check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+          tal.action_sequence == 2u &&
+          tal.action_retirement_valid == 1u &&
+          tal.action_terminal_phase_q8 == 49u * 256u + 128u &&
+          tal.idle_entry_phase_q8 == 2u * 256u + 64u,
+        "Tal retirement handoff remains latched throughout idle");
     host_actor_presentation[0].selector[0] = 52;
     host_actor_presentation[0].state[0] = 1u;
     host_apply_presentation_state(0u, 3425u, TRUE, &tal);

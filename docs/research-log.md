@@ -5011,3 +5011,87 @@ Tal/canonical and Ailish/replica listen-server behavior while establishing a
 bounded actor-owned contribution contract for later role negotiation; node
 authority still owns packet direction and native-world consequences remain
 canonical-only.
+
+### 2026-09-03: LAN action retirement preserves both host animation clocks
+
+Live Tal combo traces isolated the remaining client end-snap to the buffered
+ACTION-to-IDLE boundary rather than packet loss. The replica held the last
+sampled action phase for the whole final 50 ms segment, then forced combat
+idle state `0` at time `0`. That omitted the tail of the authored action and
+discarded the host's already-running idle entry.
+
+Protocol `LA18` adds a latched retirement witness to idle actor snapshots: the
+last host-observed action phase and the first host-observed idle phase, bound
+to the unchanged actor action sequence. The host repeats that witness until a
+new action begins, so render stalls, UDP loss, or mailbox coalescing cannot
+erase the only handoff packet. The replica interpolates through the terminal
+action phase while it consumes the buffered segment. At the endpoint the
+actor-local client adapter selects idle and adopts the transmitted idle clock
+exactly once. Invalid retirement flags, non-idle retirement snapshots,
+unsequenced retirement data, and nonzero data without its validity witness are
+rejected at the protocol boundary.
+
+### 2026-09-03: Replica combat entry requires a post-arm native refresh
+
+The first live LA18 combat-entry trace explained Tal moving while permanently
+drawn in a running pose. The canonical snapshot had already entered combat and
+continued to replicate translation, but the client Tal renderer remained in
+the exploration idle (`4`) or combat run (`36`) selector. The client correctly
+refused to write combat action selectors until Sudeki had attached the combat
+weapon/animation graphs, so that missing readiness transition latched the last
+native pose even though networking and transforms remained healthy.
+
+The client now lets Sudeki finish its existing 75 ms ranged/UI arm cycle and
+then reuses the proven native party combat refresh exactly once. It does not
+guess a selector and does not refresh every frame. Live verification moved Tal
+from selector `4` to armed idle `17`, resolved Ailish's world and first-person
+combat renderers, and emitted `client_combat_presentation state=ready`. Until
+those actor-local witnesses are present, presentation continues to fail closed
+while position and resource replication remain active.
+
+### 2026-09-03: Tal retirement must enter before animation evaluation
+
+An exact live WSW trace disproved the proposed extra completed-action wire
+edge. On the supported build, all three Tal submodels move directly from
+selector `68`, state `65`, time `49.99990` to combat-idle selector `17`, state
+`0`, time about `0.204`. No intermediate state `128` occurs. Protocol LA18's
+terminal and idle clocks already describe the complete observable handoff, so
+no native state enum was added to the process-independent packet.
+
+The remaining mismatch was a local scheduling error. Installing the host's
+post-update idle time before the client's first RenderStart advanced that
+clock twice and made its first drawable idle witness roughly `0.35`. Moving
+the write to the late pre-world seam produced the correct numeric clock but
+changed the selector after Sudeki had evaluated the skeleton, leaving the
+visible pose one frame behind. The client now installs selector `17/state 0`
+before animation evaluation and backs the transmitted idle clock up by the
+measured local frame duration at rate `12`. Sudeki's ordinary update then
+advances the skeleton to the host-observed entry clock; the pre-world seam is
+verification only and never samples the network again.
+
+### 2026-09-03: native Tal presentation removes the replica idle snap
+
+Repeated live traces showed that phase-perfect low-level renderer replay was
+still visually inferior to the host. Selector, state, terminal clock, idle
+entry clock, position, and visible root matrix could all match while the client
+still exposed a terminal pose or a clipped transition. The missing owner was
+Sudeki's higher-level combat animation state machine: direct renderer writes
+bypassed the native transition that merges an authored attack back into combat
+idle.
+
+The client now treats the host action journal as semantic input to that native
+state machine. A new Tal action sequence is mapped to exactly one native
+weak/strong/sweep/block pulse on the exact leased arbiter. Presentation remains
+client-local, while an authenticated inline guard at `ApplyDamage` RVA
+`0x000D21D0` suppresses client combat consequences; the canonical host remains
+the sole HP and world authority. The lease waits for the host-observed native
+selector and then lets Sudeki retire naturally to selector `17`. A bounded
+timeout restores the low-level snapshot presenter if native admission fails.
+
+A live WSW sequence proved selectors `50`, `53`, and `68` were admitted on the
+client and that selector `68` retired natively to selector `17`. Visual
+acceptance confirmed the previous end snap was gone. This is the preferred
+architecture for future player actions: transmit authenticated semantic
+results, replay presentation through native client state machines, and guard
+all client-side gameplay consequences instead of trying to network every
+private animation blend field.

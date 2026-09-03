@@ -1,7 +1,9 @@
 #include "hooks/lan_arena_client_replica.h"
 
 #include "cleanroom/engine.h"
+#include "engine/arbiter_combat_input.h"
 #include "engine/log.h"
+#include "hooks/call_hook.h"
 #include "network/lan_arena_replica.h"
 #include "network/lan_arena_session.h"
 #include "network/lan_arena_shared_simulation.h"
@@ -39,6 +41,8 @@ typedef float (__attribute__((thiscall)) *AnimationBlendGetFunction)(
     void *renderer, int channel);
 typedef void (__attribute__((thiscall)) *AnimationBlendSetFunction)(
     void *renderer, int channel, float blend);
+typedef void (__attribute__((thiscall)) *ApplyDamageFunction)(
+    void *combat, void *damage_structure);
 
 typedef struct LanArenaAnimationMethods {
     AnimationCountFunction count;
@@ -61,6 +65,7 @@ typedef struct LanArenaPresentationLease {
     uint8_t combat_state;
     uint8_t action_variant;
     uint16_t action_sequence;
+    DWORD last_early_apply_at;
     BOOL combat_mode;
     BOOL valid;
 } LanArenaPresentationLease;
@@ -73,6 +78,18 @@ typedef struct LanArenaFirstPersonLease {
     BOOL weak_attack;
     BOOL valid;
 } LanArenaFirstPersonLease;
+
+typedef struct LanArenaTalNativePresentationLease {
+    void *character;
+    void *arbiter;
+    void *renderer;
+    uint16_t submitted_sequence;
+    uint8_t submitted_variant;
+    int expected_selector;
+    DWORD submitted_at_ms;
+    BOOL expected_selector_seen;
+    BOOL active;
+} LanArenaTalNativePresentationLease;
 
 enum {
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
@@ -93,8 +110,12 @@ enum {
     RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
     RVA_ANIMATION_RENDERER_BLEND_SET = 0x002234c0u,
     RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
+    RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
+    RVA_APPLY_DAMAGE = 0x000d21d0u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
     CHARACTER_POSITION_OFFSET = 0x44u,
+    CHARACTER_ARBITER_OFFSET = 0x90u,
+    ARBITER_CHARACTER_OFFSET = 0x10u,
     AILISH_RANGED_COMPONENT_OFFSET = 0x134u,
     AILISH_ANIMATION_TABLE_OFFSET = 0xdcu,
     AILISH_ANIMATION_BANK_OFFSET = 0x133u,
@@ -156,6 +177,13 @@ static const uint8_t expected_position_update_entry[] = {
     0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf0u, 0x81u, 0xecu,
     0xe4u, 0x00u, 0x00u, 0x00u, 0x53u, 0x8bu, 0x5du, 0x08u
 };
+static const uint8_t expected_arbiter_combat_input_entry[] = {
+    0x55u, 0x8bu, 0x6cu, 0x24u, 0x08u, 0x56u, 0x57u,
+    0x8bu, 0xf8u, 0x8bu, 0xf1u
+};
+static const uint8_t expected_apply_damage_entry[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u
+};
 
 static PositionSetterFunction set_position;
 static PositionWorldMatrixFunction position_world_matrix;
@@ -166,6 +194,10 @@ static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
 static SudekiMpLanArenaSharedSimulation replica_simulation;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
+static LanArenaTalNativePresentationLease tal_native_presentation_lease;
+static SudekiMpInlineHook client_apply_damage_hook;
+static ApplyDamageFunction original_apply_damage;
+static BOOL client_damage_block_logged;
 static const char *ailish_first_person_failure;
 static SudekiMpLanArenaReplicaDiagnostics replica_diagnostics;
 static SudekiMpLanArenaSnapshot last_applied_snapshot;
@@ -177,6 +209,7 @@ static int client_combat_mode_trace_state = -1;
 static BOOL client_combat_transition_pending;
 static BOOL client_combat_transition_target;
 static DWORD client_combat_transition_started_at;
+static BOOL client_combat_transition_refresh_attempted;
 static int client_combat_transition_trace_state = -1;
 static const char *client_ailish_combat_graph_failure;
 
@@ -189,6 +222,24 @@ BOOL SudekiMpLanArenaClientTalActionPresentation(
 ) {
     return SudekiMpLanArenaTalActionToNativePresentation(
         action_variant, selector, state);
+}
+
+BOOL SudekiMpLanArenaClientTalNativeCombatInput(
+    uint8_t action_variant,
+    int *weak,
+    int *strong,
+    int *sweep,
+    int *block
+) {
+    uint8_t combat_state;
+    if (weak == NULL || strong == NULL || sweep == NULL || block == NULL ||
+        !SudekiMpLanArenaTalActionCombatState(
+            action_variant, &combat_state)) return FALSE;
+    *weak = combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK ? 1 : 0;
+    *strong = combat_state == SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK ? 1 : 0;
+    *sweep = combat_state == SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK ? 1 : 0;
+    *block = combat_state == SUDEKIMP_LAN_ARENA_COMBAT_BLOCK ? 1 : 0;
+    return *weak != 0 || *strong != 0 || *sweep != 0 || *block != 0;
 }
 
 BOOL SudekiMpLanArenaClientIdleVariantSelector(
@@ -275,6 +326,37 @@ BOOL SudekiMpLanArenaClientActorPresentationAllowed(
     return actor_index == 0u ? tal_ready : ailish_ready;
 }
 
+BOOL SudekiMpLanArenaClientTalTransitionSelectorReady(
+    BOOL combat_target,
+    int selector
+) {
+    return combat_target ?
+        (selector == TAL_COMBAT_IDLE_SELECTOR ||
+         selector == TAL_COMBAT_MOVE_PRIMARY_SELECTOR) :
+        (selector == TAL_WORLD_IDLE_SELECTOR ||
+         selector == TAL_WORLD_MOVE_PRIMARY_SELECTOR);
+}
+
+BOOL SudekiMpLanArenaClientCombatTransitionRefreshDue(
+    BOOL combat_target,
+    BOOL refresh_attempted,
+    uint32_t elapsed_ms
+) {
+    return combat_target != FALSE && refresh_attempted == FALSE &&
+        elapsed_ms >= 100u;
+}
+
+BOOL SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+    float actual_phase,
+    float authoritative_phase
+) {
+    const float tolerance =
+        (float)ACTION_PHASE_TIME_TOLERANCE_MILLI / 1000.0f;
+    return !isfinite(actual_phase) || !isfinite(authoritative_phase) ||
+        authoritative_phase < 0.0f ||
+        fabsf(actual_phase - authoritative_phase) > tolerance;
+}
+
 BOOL SudekiMpLanArenaClientShouldApplyHostFacing(
     unsigned int actor_index,
     BOOL local_first_person_active
@@ -292,6 +374,42 @@ BOOL SudekiMpLanArenaClientActionPhaseTime(
         !snapshot->action_phase_valid) return FALSE;
     *phase_time = (float)snapshot->action_phase_q8 /
         SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE;
+    return isfinite(*phase_time);
+}
+
+BOOL SudekiMpLanArenaClientRetirementIdlePhaseTime(
+    const SudekiMpLanArenaActorSnapshot *snapshot,
+    float *phase_time
+) {
+    if (snapshot == NULL || phase_time == NULL ||
+        snapshot->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_IDLE ||
+        snapshot->action_sequence == 0u ||
+        !snapshot->action_retirement_valid) return FALSE;
+    *phase_time = (float)snapshot->idle_entry_phase_q8 /
+        SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE;
+    return isfinite(*phase_time);
+}
+
+BOOL SudekiMpLanArenaClientRetirementPreUpdatePhase(
+    float host_idle_entry_phase,
+    uint32_t local_frame_elapsed_ms,
+    BOOL final_presentation_boundary,
+    float *phase_time
+) {
+    float expected_advance;
+    if (phase_time == NULL || !isfinite(host_idle_entry_phase) ||
+        host_idle_entry_phase < 0.0f || local_frame_elapsed_ms > 50u) {
+        return FALSE;
+    }
+    if (final_presentation_boundary) {
+        *phase_time = host_idle_entry_phase;
+        return TRUE;
+    }
+    if (local_frame_elapsed_ms == 0u) local_frame_elapsed_ms = 1u;
+    expected_advance =
+        12.0f * (float)local_frame_elapsed_ms / 1000.0f;
+    *phase_time = host_idle_entry_phase > expected_advance ?
+        host_idle_entry_phase - expected_advance : 0.0f;
     return isfinite(*phase_time);
 }
 
@@ -371,6 +489,25 @@ static BOOL client_session_authenticated(void) {
     return client_session_status(&status);
 }
 
+static void __attribute__((thiscall)) block_client_replica_damage(
+    void *combat,
+    void *damage_structure
+) {
+    if (client_session_authenticated()) {
+        if (!client_damage_block_logged) {
+            client_damage_block_logged = TRUE;
+            SudekiMpLogWrite(
+                "lan_arena_client_replica event=client_native_damage "
+                "state=blocked "
+                "policy=host_snapshot_is_sole_hp_and_world_authority\r\n");
+        }
+        return;
+    }
+    if (original_apply_damage != NULL) {
+        original_apply_damage(combat, damage_structure);
+    }
+}
+
 static void trace_client_combat_mode(
     BOOL active,
     BOOL combat_enabled,
@@ -422,6 +559,7 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
         client_combat_transition_pending = TRUE;
         client_combat_transition_target = desired;
         client_combat_transition_started_at = GetTickCount();
+        client_combat_transition_refresh_attempted = !desired;
         client_combat_transition_trace_state = 0;
         memset(presentation_leases, 0, sizeof(presentation_leases));
         memset(&ailish_first_person_lease, 0,
@@ -441,22 +579,47 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
 static unsigned int client_combat_presentation_ready_mask(void) {
     SudekiMpCleanroomActorPresentation tal;
     SudekiMpCleanroomActorPresentation ailish;
-    int expected_tal;
     int expected_ailish;
     BOOL tal_ready;
     BOOL ailish_ready;
     unsigned int ready_mask;
     DWORD elapsed;
     if (!client_combat_transition_pending) return 0x03u;
-    expected_tal = client_combat_transition_target ?
-        TAL_COMBAT_IDLE_SELECTOR : TAL_WORLD_IDLE_SELECTOR;
+    elapsed = GetTickCount() - client_combat_transition_started_at;
+    /* SetCombatMode starts Sudeki's asynchronous native ranged/UI arm pass.
+     * A replica-owned actor can miss the first party event while that pass is
+     * rebuilding its weapon graph.  Re-run the already-proven native group
+     * transition once after the 75 ms arm window; never synthesize selectors
+     * against an unconfirmed graph and never refresh every frame. */
+    if (SudekiMpLanArenaClientCombatTransitionRefreshDue(
+            client_combat_transition_target,
+            client_combat_transition_refresh_attempted,
+            elapsed)) {
+        client_combat_transition_refresh_attempted = TRUE;
+        if (SudekiMpCleanroomEngineRefreshCombatMode()) {
+            client_combat_transition_started_at = GetTickCount();
+            elapsed = 0u;
+            SudekiMpLogWrite(
+                "lan_arena_client_replica event=client_combat_presentation "
+                "state=native_refresh target=armed status=confirmed "
+                "policy=one_shot_post_arm_group_transition\r\n");
+        } else {
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_combat_presentation "
+                "state=native_refresh target=armed status=rejected "
+                "win32_error=%lu "
+                "policy=fail_closed_no_selector_override\r\n",
+                (unsigned long)GetLastError());
+        }
+    }
     expected_ailish = client_combat_transition_target ?
         AILISH_COMBAT_IDLE_SELECTOR : AILISH_WORLD_IDLE_SELECTOR;
     ZeroMemory(&tal, sizeof(tal));
     ZeroMemory(&ailish, sizeof(ailish));
     tal_ready = SudekiMpCleanroomEngineActorPresentation(
             SUDEKIMP_CLEANROOM_TAL, &tal) &&
-        tal.selector[0] == expected_tal;
+        SudekiMpLanArenaClientTalTransitionSelectorReady(
+            client_combat_transition_target, tal.selector[0]);
     /* In first person, ActorPresentation observes Ailish's two-submodel arms
      * renderer, whose native idle selector is 1. Requiring world selector 20
      * from that surface can never settle and used to leave all client combat
@@ -549,6 +712,7 @@ static BOOL restore_client_combat_mode(void) {
     client_combat_transition_pending = FALSE;
     client_combat_transition_target = FALSE;
     client_combat_transition_started_at = 0u;
+    client_combat_transition_refresh_attempted = FALSE;
     client_combat_transition_trace_state = -1;
     SudekiMpLogWrite(
         verified ?
@@ -946,6 +1110,36 @@ static void set_animation_channel(
     }
 }
 
+static BOOL synchronize_channel_phase(
+    void *renderer,
+    const LanArenaAnimationMethods *methods,
+    unsigned int submodels,
+    int channel,
+    float phase_time
+) {
+    unsigned int submodel;
+    const float tolerance =
+        (float)ACTION_PHASE_TIME_TOLERANCE_MILLI / 1000.0f;
+    if (renderer == NULL || methods == NULL ||
+        submodels == 0u || submodels > 32u ||
+        !isfinite(phase_time) || phase_time < 0.0f) return FALSE;
+    for (submodel = 0u; submodel < submodels; ++submodel) {
+        float actual = methods->get_time(
+            renderer, channel, submodel);
+        if (SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
+                actual, phase_time)) {
+            methods->set_time(renderer, channel, submodel,
+                phase_time, 0);
+            actual = methods->get_time(renderer, channel, submodel);
+        }
+        if (!isfinite(actual) ||
+            fabsf(actual - phase_time) > tolerance) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL synchronize_action_phase(
     void *renderer,
     const LanArenaAnimationMethods *methods,
@@ -953,27 +1147,14 @@ static BOOL synchronize_action_phase(
     int channel,
     const SudekiMpLanArenaActorSnapshot *snapshot
 ) {
-    unsigned int submodel;
     float phase_time;
-    const float tolerance =
-        (float)ACTION_PHASE_TIME_TOLERANCE_MILLI / 1000.0f;
-    if (renderer == NULL || methods == NULL || snapshot == NULL ||
-        submodels == 0u || submodels > 32u) return FALSE;
+    if (snapshot == NULL) return FALSE;
     if (!snapshot->action_phase_valid) return TRUE;
     if (!SudekiMpLanArenaClientActionPhaseTime(snapshot, &phase_time)) {
         return FALSE;
     }
-    for (submodel = 0u; submodel < submodels; ++submodel) {
-        float actual;
-        methods->set_time(renderer, channel, submodel,
-            phase_time, 0);
-        actual = methods->get_time(renderer, channel, submodel);
-        if (!isfinite(actual) ||
-            fabsf(actual - phase_time) > tolerance) {
-            return FALSE;
-        }
-    }
-    return TRUE;
+    return synchronize_channel_phase(
+        renderer, methods, submodels, channel, phase_time);
 }
 
 static BOOL animation_channel_matches(
@@ -1105,6 +1286,128 @@ static BOOL animation_channel_matches(
         if (methods->get_selector(renderer, channel, submodel) != selector ||
             fabsf(methods->get_rate(renderer, channel, submodel) - rate) >
                 0.001f) return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL service_tal_native_action_presentation(
+    uint8_t *character,
+    void *renderer,
+    const LanArenaAnimationMethods *methods,
+    const SudekiMpLanArenaActorSnapshot *snapshot,
+    BOOL combat_mode,
+    BOOL final_presentation_boundary,
+    BOOL *native_owns_presentation
+) {
+    LanArenaTalNativePresentationLease *lease =
+        &tal_native_presentation_lease;
+    uint8_t *arbiter;
+    int weak;
+    int strong;
+    int sweep;
+    int block;
+    int expected_selector;
+    int expected_state;
+    int current_selector;
+    int current_state;
+    DWORD now_ms;
+
+    if (native_owns_presentation == NULL || character == NULL ||
+        renderer == NULL || methods == NULL || snapshot == NULL) return FALSE;
+    *native_owns_presentation = FALSE;
+    if (!combat_mode) {
+        ZeroMemory(lease, sizeof(*lease));
+        return TRUE;
+    }
+    if (lease->active &&
+        (lease->character != character || lease->renderer != renderer)) {
+        ZeroMemory(lease, sizeof(*lease));
+    }
+    if (!final_presentation_boundary &&
+        snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        snapshot->action_sequence != 0u &&
+        snapshot->action_sequence != lease->submitted_sequence) {
+        if (!SudekiMpLanArenaClientTalNativeCombatInput(
+                snapshot->action_variant,
+                &weak, &strong, &sweep, &block) ||
+            !SudekiMpLanArenaClientTalActionPresentation(
+                snapshot->action_variant,
+                &expected_selector, &expected_state) ||
+            !readable_memory(character,
+                CHARACTER_ARBITER_OFFSET + sizeof(void *))) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        (void)expected_state;
+        arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+        if (!readable_memory(arbiter, 0x64u) ||
+            *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        SudekiMpSubmitArbiterCombatInput(
+            game_base + RVA_ARBITER_COMBAT_INPUT,
+            arbiter, weak, strong, sweep, block, 0, 0);
+        lease->character = character;
+        lease->arbiter = arbiter;
+        lease->renderer = renderer;
+        lease->submitted_sequence = snapshot->action_sequence;
+        lease->submitted_variant = snapshot->action_variant;
+        lease->expected_selector = expected_selector;
+        lease->submitted_at_ms = GetTickCount();
+        lease->expected_selector_seen = FALSE;
+        lease->active = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_tal_native_action "
+            "state=submitted sequence=%u variant=%u expected_selector=%d "
+            "input=%s "
+            "policy=authenticated_presentation_edge_client_damage_blocked\r\n",
+            (unsigned int)lease->submitted_sequence,
+            (unsigned int)lease->submitted_variant,
+            lease->expected_selector,
+            weak ? "weak" : strong ? "strong" : sweep ? "sweep" : "block");
+    }
+    if (!lease->active) return TRUE;
+    if (!readable_memory(lease->arbiter, 0x64u) ||
+        *(void **)((uint8_t *)lease->arbiter + ARBITER_CHARACTER_OFFSET) !=
+            character) {
+        ZeroMemory(lease, sizeof(*lease));
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    current_selector = methods->get_selector(renderer, 0, 0u);
+    current_state = methods->get_state(renderer, 0, 0u);
+    if (current_selector == lease->expected_selector) {
+        lease->expected_selector_seen = TRUE;
+    }
+    *native_owns_presentation = TRUE;
+    if (snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) {
+        return TRUE;
+    }
+    if (lease->expected_selector_seen &&
+        current_selector == TAL_COMBAT_IDLE_SELECTOR &&
+        current_state != 192) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_tal_native_action "
+            "state=retired sequence=%u selector=%d state_value=%d "
+            "policy=native_client_animation_state_machine_handoff\r\n",
+            (unsigned int)lease->submitted_sequence,
+            current_selector, current_state);
+        ZeroMemory(lease, sizeof(*lease));
+        return TRUE;
+    }
+    now_ms = GetTickCount();
+    if ((DWORD)(now_ms - lease->submitted_at_ms) >= 3000u) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_tal_native_action "
+            "state=fallback sequence=%u expected_selector=%d "
+            "current_selector=%d current_state=%d observed=%u "
+            "reason=native_retirement_timeout\r\n",
+            (unsigned int)lease->submitted_sequence,
+            lease->expected_selector, current_selector, current_state,
+            lease->expected_selector_seen ? 1u : 0u);
+        ZeroMemory(lease, sizeof(*lease));
+        *native_owns_presentation = FALSE;
     }
     return TRUE;
 }
@@ -1249,7 +1552,8 @@ static BOOL apply_actor_presentation(
     uint8_t *character,
     const SudekiMpLanArenaActorSnapshot *snapshot,
     unsigned int actor_index,
-    BOOL combat_mode
+    BOOL combat_mode,
+    BOOL final_presentation_boundary
 ) {
     uint8_t *ailish_component;
     void *renderer;
@@ -1275,6 +1579,13 @@ static BOOL apply_actor_presentation(
     BOOL reset_base_time;
     BOOL ailish_first_person_applied = TRUE;
     BOOL preserve_ailish_auxiliary = FALSE;
+    BOOL tal_native_owns_presentation = FALSE;
+    BOOL tal_action_retirement;
+    float retirement_idle_phase = 0.0f;
+    float retirement_pre_update_phase = 0.0f;
+    DWORD previous_early_apply_at;
+    DWORD early_apply_at = 0u;
+    DWORD early_elapsed_ms = 17u;
     if (character == NULL || snapshot == NULL || actor_index >= 2u ||
         snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED) {
         return FALSE;
@@ -1315,6 +1626,34 @@ static BOOL apply_actor_presentation(
         return FALSE;
     }
     lease = &presentation_leases[actor_index];
+    if (actor_index == 0u &&
+        !service_tal_native_action_presentation(
+            character, renderer, &methods, snapshot, combat_mode,
+            final_presentation_boundary,
+            &tal_native_owns_presentation)) {
+        return FALSE;
+    }
+    if (tal_native_owns_presentation) {
+        lease->character = character;
+        lease->renderer = renderer;
+        lease->animation_state = snapshot->animation_state;
+        lease->combat_state = snapshot->combat_state;
+        lease->action_variant = snapshot->action_variant;
+        lease->action_sequence = snapshot->action_sequence;
+        lease->combat_mode = combat_mode;
+        lease->valid = TRUE;
+        return TRUE;
+    }
+    previous_early_apply_at = lease->last_early_apply_at;
+    if (!final_presentation_boundary) {
+        early_apply_at = GetTickCount();
+        if (previous_early_apply_at != 0u) {
+            early_elapsed_ms = early_apply_at - previous_early_apply_at;
+            if (early_elapsed_ms == 0u) early_elapsed_ms = 1u;
+            if (early_elapsed_ms > 50u) early_elapsed_ms = 50u;
+        }
+        lease->last_early_apply_at = early_apply_at;
+    }
     moving = snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING;
     /* This flag names the pre-LA10 action path historically.  It now means
      * any validated semantic action; Ailish remains protocol-limited to weak
@@ -1331,6 +1670,25 @@ static BOOL apply_actor_presentation(
         lease->action_variant != snapshot->action_variant ||
         lease->action_sequence != snapshot->action_sequence ||
         lease->combat_mode != combat_mode;
+    tal_action_retirement = actor_index == 0u && lease->valid &&
+        lease->character == character && lease->renderer == renderer &&
+        lease->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+        snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+        lease->action_sequence == snapshot->action_sequence &&
+        SudekiMpLanArenaClientRetirementIdlePhaseTime(
+            snapshot, &retirement_idle_phase);
+    if (tal_action_retirement) {
+        /* idle_entry_phase is observed after the host's native animation
+         * update. The client installs this selector before its corresponding
+         * update so the skeleton, root motion, and renderer all consume the
+         * edge together. Back the clock up by the measured local frame step;
+         * the following native update advances it to the transmitted host
+         * witness instead of advancing that witness a second time. */
+        if (!SudekiMpLanArenaClientRetirementPreUpdatePhase(
+                retirement_idle_phase, early_elapsed_ms,
+                final_presentation_boundary,
+                &retirement_pre_update_phase)) return FALSE;
+    }
     if (!logical_transition) {
         /* Ailish's native renderer advances locomotion through a double-
          * buffered channel pair. Reasserting our settled pair whenever that
@@ -1373,7 +1731,8 @@ static BOOL apply_actor_presentation(
     if (actor_index == 0u) {
         if (combat_mode) {
             if (weak_attack && !SudekiMpLanArenaClientTalActionPresentation(
-                    snapshot->action_variant, &selector_zero, &state_zero)) {
+                    snapshot->action_variant,
+                    &selector_zero, &state_zero)) {
                 return FALSE;
             }
             if (!weak_attack) {
@@ -1447,6 +1806,9 @@ static BOOL apply_actor_presentation(
         SudekiMpLanArenaClientSecondaryAnimationShouldResetTime(
             actor_index, logical_transition, moving,
             base_target_already_matches));
+    if (tal_action_retirement && !synchronize_channel_phase(
+            renderer, &methods, submodels, 0,
+            retirement_pre_update_phase)) return FALSE;
     if (actor_index == 0u && weak_attack &&
         !synchronize_action_phase(
             renderer, &methods, submodels, 0, snapshot)) return FALSE;
@@ -1515,6 +1877,21 @@ static BOOL apply_actor_presentation(
     lease->action_sequence = snapshot->action_sequence;
     lease->combat_mode = combat_mode;
     lease->valid = TRUE;
+    if (tal_action_retirement) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_tal_action_retirement "
+            "state=verified action_sequence=%u terminal_phase_q8=%u "
+            "idle_entry_phase_q8=%u installed_phase=%.5f "
+            "boundary=%s frame_step_ms=%lu "
+            "policy=pre_update_host_idle_clock_handoff\r\n",
+            (unsigned int)snapshot->action_sequence,
+            (unsigned int)snapshot->action_terminal_phase_q8,
+            (unsigned int)snapshot->idle_entry_phase_q8,
+            retirement_pre_update_phase,
+            final_presentation_boundary ? "pre_world" : "pre_animation",
+            (unsigned long)(final_presentation_boundary ? 0u :
+                early_elapsed_ms));
+    }
     if (actor_index == 0u && weak_attack && new_action_sequence) {
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_tal_action_presentation "
@@ -1619,7 +1996,7 @@ static BOOL apply_actor(
         (void)apply_actor_presentation(
             character, snapshot,
             expected_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ? 0u : 1u,
-            combat_mode);
+            combat_mode, FALSE);
     }
     if (resources_applied) {
         *applied_character = character;
@@ -1767,6 +2144,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     if ((client_combat_mode_lease_valid && !restore_client_combat_mode()) ||
         base == NULL || set_position != NULL ||
         position_world_matrix != NULL || set_forward != NULL ||
+        client_apply_damage_hook.installed || original_apply_damage != NULL ||
         memcmp(base + RVA_INTERNAL_POSITION_SETTER,
             expected_position_setter_prefix,
             sizeof(expected_position_setter_prefix)) != 0 ||
@@ -1782,10 +2160,26 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         memcmp(base + RVA_POSITION_SET_FORWARD,
             expected_position_set_forward_entry,
             sizeof(expected_position_set_forward_entry)) != 0 ||
+        memcmp(base + RVA_ARBITER_COMBAT_INPUT,
+            expected_arbiter_combat_input_entry,
+            sizeof(expected_arbiter_combat_input_entry)) != 0 ||
+        memcmp(base + RVA_APPLY_DAMAGE,
+            expected_apply_damage_entry,
+            sizeof(expected_apply_damage_entry)) != 0 ||
         !animation_renderer_signatures_match(base)) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    if (!SudekiMpInstallInlineHook(
+            &client_apply_damage_hook,
+            base + RVA_APPLY_DAMAGE,
+            expected_apply_damage_entry,
+            sizeof(expected_apply_damage_entry),
+            block_client_replica_damage)) {
+        return FALSE;
+    }
+    original_apply_damage =
+        (ApplyDamageFunction)client_apply_damage_hook.trampoline;
     set_position = (PositionSetterFunction)(base + RVA_INTERNAL_POSITION_SETTER);
     position_world_matrix = (PositionWorldMatrixFunction)(
         base + RVA_POSITION_WORLD_MATRIX);
@@ -1797,6 +2191,9 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
         sizeof(ailish_first_person_lease));
+    memset(&tal_native_presentation_lease, 0,
+        sizeof(tal_native_presentation_lease));
+    client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
@@ -1805,6 +2202,14 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
 }
 
 void SudekiMpResetLanArenaClientReplica(void) {
+    if (!SudekiMpRestoreInlineHook(&client_apply_damage_hook)) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_damage_guard_restore "
+            "state=failed win32_error=%lu policy=retain_live_callbacks\r\n",
+            (unsigned long)GetLastError());
+        return;
+    }
+    original_apply_damage = NULL;
     (void)restore_client_combat_mode();
     SudekiMpLanArenaReplicaReset(&replica);
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
@@ -1816,6 +2221,9 @@ void SudekiMpResetLanArenaClientReplica(void) {
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
         sizeof(ailish_first_person_lease));
+    memset(&tal_native_presentation_lease, 0,
+        sizeof(tal_native_presentation_lease));
+    client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
@@ -1830,6 +2238,9 @@ void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
         sizeof(ailish_first_person_lease));
+    memset(&tal_native_presentation_lease, 0,
+        sizeof(tal_native_presentation_lease));
+    client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
@@ -1843,6 +2254,12 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     SudekiMpLanArenaSessionStatus status;
     DWORD now = GetTickCount();
     uint32_t render_host_tick;
+    uint32_t previous_render_host_tick = replica_render_clock.host_tick;
+    uint32_t previous_render_local_tick = replica_render_clock.local_tick;
+    uint32_t previous_render_generation = replica_render_clock.stream_generation;
+    BOOL previous_render_clock_initialized =
+        replica_render_clock.initialized != 0u;
+    BOOL action_clock_protected;
     unsigned int presentation_ready_mask;
     if (set_position == NULL || set_forward == NULL ||
         !client_session_status(&status)) {
@@ -1868,8 +2285,11 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
                 &replica_simulation, &accepted, NULL) ||
             !SudekiMpLanArenaReplicaPush(&replica, &accepted)) return FALSE;
     }
-    if (!SudekiMpLanArenaReplicaRenderClockAdvance(
-            &replica, &replica_render_clock, now, &render_host_tick)) {
+    action_clock_protected =
+        SudekiMpLanArenaReplicaActionTimelineBuffered(&replica);
+    if (!SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+            &replica, &replica_render_clock, now,
+            !action_clock_protected, &render_host_tick)) {
         return FALSE;
     }
     if (!SudekiMpLanArenaReplicaSample(
@@ -1940,6 +2360,28 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     replica_diagnostics.upper_snapshot_host_tick = snapshot.host_tick;
     replica_diagnostics.render_host_tick = render_host_tick;
     replica_diagnostics.sampled_at_ms = now;
+    replica_diagnostics.render_clock_local_elapsed_ms =
+        previous_render_clock_initialized &&
+        previous_render_generation == replica_render_clock.stream_generation ?
+            now - previous_render_local_tick : 0u;
+    replica_diagnostics.render_clock_advance_ms =
+        previous_render_clock_initialized &&
+        previous_render_generation == replica_render_clock.stream_generation ?
+            render_host_tick - previous_render_host_tick : 0u;
+    replica_diagnostics.tal_action_sequence = snapshot.tal.action_sequence;
+    replica_diagnostics.tal_action_phase_q8 = snapshot.tal.action_phase_q8;
+    replica_diagnostics.tal_action_terminal_phase_q8 =
+        snapshot.tal.action_terminal_phase_q8;
+    replica_diagnostics.tal_idle_entry_phase_q8 =
+        snapshot.tal.idle_entry_phase_q8;
+    replica_diagnostics.tal_animation_state = snapshot.tal.animation_state;
+    replica_diagnostics.tal_action_variant = snapshot.tal.action_variant;
+    replica_diagnostics.tal_action_phase_valid =
+        snapshot.tal.action_phase_valid;
+    replica_diagnostics.tal_action_retirement_valid =
+        snapshot.tal.action_retirement_valid;
+    replica_diagnostics.action_clock_protected =
+        action_clock_protected ? 1u : 0u;
     capture_camera_diagnostics();
     capture_actor_diagnostics(
         0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal);
@@ -2009,7 +2451,7 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
         }
         applied[actor_index] = apply_actor_presentation(
             characters[actor_index], snapshots[actor_index], actor_index,
-            last_applied_snapshot.combat_enabled != 0u);
+            last_applied_snapshot.combat_enabled != 0u, TRUE);
     }
     if (!applied[0] || !applied[1]) {
         SetLastError(ERROR_INVALID_DATA);

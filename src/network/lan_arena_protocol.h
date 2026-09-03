@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 17u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 18u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413137u /* "LA17" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413138u /* "LA18" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 576u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -181,12 +181,19 @@ typedef struct SudekiMpLanArenaActorSnapshot {
      * wire. A synthetic/history-only action may leave this invalid. */
     uint16_t action_phase_q8;
     uint8_t action_phase_valid;
+    /* The first non-action snapshot after a native clip carries both sides
+     * of the host-observed handoff. The replica advances to the terminal
+     * action pose during the buffered segment, then enters idle at the same
+     * clock the host used instead of freezing and restarting from zero. */
+    uint16_t action_terminal_phase_q8;
+    uint16_t idle_entry_phase_q8;
+    uint8_t action_retirement_valid;
     uint8_t action_history_count;
     /* The latest semantic state alone can skip a fast combo stage between
      * 20 Hz snapshots. Keep a bounded chronological journal of host-observed
      * native action edges so the client can present every authored move once.
      * Four entries cover Tal's three-hit weak chain plus an adjacent action
-     * while keeping a maximum-enemy packet below 512 bytes. */
+     * while keeping a maximum-enemy packet below the bounded LAN datagram. */
     SudekiMpLanArenaActionEvent
         action_history[SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY];
 } SudekiMpLanArenaActorSnapshot;

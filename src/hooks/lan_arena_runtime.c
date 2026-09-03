@@ -96,6 +96,17 @@ static uint8_t host_actor_previous_action_variant[2];
 static uint8_t host_actor_previous_native_action_state[2];
 static BOOL host_actor_previous_action_active[2];
 static BOOL host_actor_previous_native_action_active[2];
+typedef struct HostActorActionRetirement {
+    uint16_t action_sequence;
+    uint16_t action_terminal_phase_q8;
+    uint16_t idle_entry_phase_q8;
+    int32_t action_terminal_selector;
+    int32_t idle_entry_selector;
+    uint8_t action_terminal_state;
+    uint8_t idle_entry_state;
+    BOOL pending;
+} HostActorActionRetirement;
+static HostActorActionRetirement host_actor_action_retirement[2];
 static DWORD host_last_remote_input_at_ms;
 static BOOL host_remote_input_quiesced;
 static BOOL host_remote_input_logged;
@@ -122,6 +133,9 @@ static SudekiMpCleanroomActorPresentation client_actor_presentation[2];
 static BOOL client_actor_presentation_valid[2];
 static DWORD client_actor_presentation_last_trace_at[2];
 static DWORD client_replica_diagnostics_last_trace_at;
+static uint32_t client_tal_timeline_action_sequence;
+static uint32_t client_tal_timeline_last_render_host_tick;
+static unsigned int client_tal_timeline_idle_samples_remaining;
 static char lan_arena_control_observer_owner;
 static SudekiMpControlUpdateObserverGate lan_arena_control_observer_gate;
 static SudekiMpLanArenaSessionConfig runtime_config;
@@ -401,6 +415,17 @@ static uint8_t host_actor_native_action_variant(
         state = presentation->state[0];
         if (SudekiMpLanArenaTalActionFromNativePresentation(
                 selector, state, &action_variant)) return action_variant;
+        /* State 128 is Tal's completed/terminal pose, but the action selector
+         * is still the visible native clip until Sudeki replaces it with
+         * combat idle. Preserve the already-admitted semantic action through
+         * that terminal frame so the wire cannot retire before the host. */
+        if (state == 128u && host_actor_previous_action_active[actor_index] &&
+            SudekiMpLanArenaTalActionFromNativePresentation(
+                selector, 1u, &action_variant) &&
+            action_variant ==
+                host_actor_previous_action_variant[actor_index]) {
+            return action_variant;
+        }
         /* Selector 3 is the native draw/enter-combat transition, not a weak
          * attack. Treating it as an action made Tal attack while merely
          * moving and interrupted the weapon attachment transaction. */
@@ -445,6 +470,8 @@ static void host_advance_actor_action_sequence(
     if (host_actor_action_sequence[actor_index] == 0u) {
         host_actor_action_sequence[actor_index] = 1u;
     }
+    ZeroMemory(&host_actor_action_retirement[actor_index],
+        sizeof(host_actor_action_retirement[actor_index]));
     count = host_actor_action_history_count[actor_index];
     if (count == SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) {
         memmove(&host_actor_action_history[actor_index][0],
@@ -527,6 +554,61 @@ static void reset_host_action_tracking(void) {
         sizeof(host_actor_previous_action_active));
     ZeroMemory(host_actor_previous_native_action_active,
         sizeof(host_actor_previous_native_action_active));
+    ZeroMemory(host_actor_action_retirement,
+        sizeof(host_actor_action_retirement));
+}
+
+static BOOL encode_animation_phase(float phase_time, uint16_t *encoded) {
+    if (encoded == NULL || !isfinite(phase_time) || phase_time < 0.0f ||
+        phase_time > 65535.0f / SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE) {
+        return FALSE;
+    }
+    *encoded = (uint16_t)(phase_time *
+        SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE + 0.5f);
+    return TRUE;
+}
+
+static void host_capture_actor_action_retirement(
+    unsigned int actor_index,
+    const SudekiMpCleanroomActorPresentation *previous,
+    const SudekiMpCleanroomActorPresentation *current
+) {
+    HostActorActionRetirement retirement;
+    uint8_t previous_variant;
+    if (actor_index != 0u || previous == NULL || current == NULL ||
+        host_actor_action_sequence[actor_index] == 0u ||
+        current->selector[0] != TAL_COMBAT_IDLE_SELECTOR ||
+        !SudekiMpLanArenaTalActionFromNativePresentation(
+            previous->selector[0], 1u, &previous_variant)) {
+        return;
+    }
+    ZeroMemory(&retirement, sizeof(retirement));
+    if (!encode_animation_phase(
+            previous->time[0], &retirement.action_terminal_phase_q8) ||
+        !encode_animation_phase(
+            current->time[0], &retirement.idle_entry_phase_q8)) {
+        return;
+    }
+    retirement.action_sequence = host_actor_action_sequence[actor_index];
+    retirement.action_terminal_selector = previous->selector[0];
+    retirement.idle_entry_selector = current->selector[0];
+    retirement.action_terminal_state = previous->state[0];
+    retirement.idle_entry_state = current->state[0];
+    retirement.pending = TRUE;
+    host_actor_action_retirement[actor_index] = retirement;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_action_retirement actor=Tal "
+        "action_sequence=%u terminal_phase_q8=%u idle_entry_phase_q8=%u "
+        "terminal_selector=%ld terminal_state=%u "
+        "idle_selector=%ld idle_state=%u "
+        "policy=host_observed_terminal_and_idle_handoff\r\n",
+        (unsigned int)retirement.action_sequence,
+        (unsigned int)retirement.action_terminal_phase_q8,
+        (unsigned int)retirement.idle_entry_phase_q8,
+        (long)retirement.action_terminal_selector,
+        (unsigned int)retirement.action_terminal_state,
+        (long)retirement.idle_entry_selector,
+        (unsigned int)retirement.idle_entry_state);
 }
 
 static void reset_host_remote_weak_cycle(void) {
@@ -704,13 +786,23 @@ static void host_apply_presentation_state(
         float phase_time = actor_index == 0u ?
             host_actor_presentation[0].time[0] :
             host_actor_presentation[1].time[4];
-        if (isfinite(phase_time) && phase_time >= 0.0f &&
-            phase_time <= 65535.0f /
-                SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE) {
-            snapshot->action_phase_q8 = (uint16_t)(phase_time *
-                SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE + 0.5f);
+        if (encode_animation_phase(
+                phase_time, &snapshot->action_phase_q8)) {
             snapshot->action_phase_valid = 1u;
         }
+    }
+    snapshot->action_terminal_phase_q8 = 0u;
+    snapshot->idle_entry_phase_q8 = 0u;
+    snapshot->action_retirement_valid = 0u;
+    if (snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+        host_actor_action_retirement[actor_index].pending &&
+        host_actor_action_retirement[actor_index].action_sequence ==
+            snapshot->action_sequence) {
+        snapshot->action_terminal_phase_q8 =
+            host_actor_action_retirement[actor_index].action_terminal_phase_q8;
+        snapshot->idle_entry_phase_q8 =
+            host_actor_action_retirement[actor_index].idle_entry_phase_q8;
+        snapshot->action_retirement_valid = 1u;
     }
 }
 
@@ -726,6 +818,10 @@ static void host_trace_native_presentation(
     if (host_actor_presentation_valid[actor_index] &&
         memcmp(&host_actor_presentation[actor_index],
             &current, sizeof(current)) == 0) return;
+    if (host_actor_presentation_valid[actor_index]) {
+        host_capture_actor_action_retirement(
+            actor_index, &host_actor_presentation[actor_index], &current);
+    }
     host_actor_presentation[actor_index] = current;
     host_actor_presentation_valid[actor_index] = TRUE;
     trace_interval_ms =
@@ -802,6 +898,70 @@ static void client_trace_native_presentation(
         current.blend[0], current.blend[1],
         current.blend[2], current.blend[3]
     );
+}
+
+static void reset_client_tal_action_timeline(void) {
+    client_tal_timeline_action_sequence = 0u;
+    client_tal_timeline_last_render_host_tick = 0u;
+    client_tal_timeline_idle_samples_remaining = 0u;
+}
+
+static void client_trace_tal_action_timeline(void) {
+    SudekiMpLanArenaReplicaDiagnostics diagnostics;
+    SudekiMpCleanroomActorPresentation presentation;
+    BOOL action_active;
+    BOOL retirement_tail;
+    if (!SudekiMpLanArenaClientReplicaGetDiagnostics(&diagnostics) ||
+        !SudekiMpCleanroomEngineActorPresentation(
+            SUDEKIMP_CLEANROOM_TAL, &presentation)) return;
+    action_active = diagnostics.tal_animation_state ==
+        SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    if (action_active && diagnostics.tal_action_sequence !=
+            client_tal_timeline_action_sequence) {
+        client_tal_timeline_action_sequence =
+            diagnostics.tal_action_sequence;
+        client_tal_timeline_idle_samples_remaining = 8u;
+    }
+    retirement_tail = !action_active &&
+        diagnostics.tal_action_retirement_valid != 0u &&
+        diagnostics.tal_action_sequence ==
+            client_tal_timeline_action_sequence &&
+        client_tal_timeline_idle_samples_remaining != 0u;
+    if ((!action_active && !retirement_tail) ||
+        diagnostics.render_host_tick ==
+            client_tal_timeline_last_render_host_tick) return;
+    client_tal_timeline_last_render_host_tick =
+        diagnostics.render_host_tick;
+    if (retirement_tail) {
+        --client_tal_timeline_idle_samples_remaining;
+    }
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=client_tal_action_timeline "
+        "local_tick=%lu render_host_tick=%lu upper_host_tick=%lu "
+        "local_elapsed_ms=%lu render_advance_ms=%lu clock_protected=%u "
+        "animation=%u action_sequence=%lu variant=%u "
+        "sample_phase_q8=%u phase_valid=%u retirement=%u "
+        "terminal_phase_q8=%u idle_entry_phase_q8=%u "
+        "native_selector=%ld native_state=%u native_time=%.5f "
+        "native_rate=%.5f boundary=post_second_render_start_pre_world "
+        "policy=bounded_action_sample_to_native_phase_witness\r\n",
+        (unsigned long)diagnostics.sampled_at_ms,
+        (unsigned long)diagnostics.render_host_tick,
+        (unsigned long)diagnostics.upper_snapshot_host_tick,
+        (unsigned long)diagnostics.render_clock_local_elapsed_ms,
+        (unsigned long)diagnostics.render_clock_advance_ms,
+        (unsigned int)diagnostics.action_clock_protected,
+        (unsigned int)diagnostics.tal_animation_state,
+        (unsigned long)diagnostics.tal_action_sequence,
+        (unsigned int)diagnostics.tal_action_variant,
+        (unsigned int)diagnostics.tal_action_phase_q8,
+        (unsigned int)diagnostics.tal_action_phase_valid,
+        (unsigned int)diagnostics.tal_action_retirement_valid,
+        (unsigned int)diagnostics.tal_action_terminal_phase_q8,
+        (unsigned int)diagnostics.tal_idle_entry_phase_q8,
+        (long)presentation.selector[0],
+        (unsigned int)presentation.state[0],
+        presentation.time[0], presentation.rate[0]);
 }
 
 static void host_capture_native_action_edges(DWORD now_ms) {
@@ -950,6 +1110,12 @@ static void host_publish_snapshot(DWORD now_ms) {
     }
     if (SudekiMpLanArenaSessionSendSnapshot(&snapshot)) {
         host_last_snapshot_at_ms = now_ms;
+        /* Keep the most recent retirement handoff latched through the idle
+         * interval. A render stall or an overwritten UDP snapshot must not
+         * make the replica miss the only ACTION -> IDLE clock transition.
+         * The next admitted action clears this record, and the client
+         * consumes it only when its presentation lease crosses that exact
+         * sequence boundary. */
         if (!host_snapshot_stream_logged) {
             host_snapshot_stream_logged = TRUE;
             SudekiMpLogFormat(
@@ -1711,6 +1877,7 @@ static void lan_arena_render_pre_world_entry(void) {
                 published ? "active" : "rejected",
                 published ? 0ul : (unsigned long)GetLastError());
         }
+        client_trace_tal_action_timeline();
     }
 }
 
@@ -1900,6 +2067,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     ZeroMemory(client_actor_presentation_last_trace_at,
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
+    reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
@@ -2009,6 +2177,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     ZeroMemory(client_actor_presentation_last_trace_at,
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
+    reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
@@ -2077,6 +2246,7 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
         sizeof(host_actor_presentation_valid));
     ZeroMemory(client_actor_presentation_valid,
         sizeof(client_actor_presentation_valid));
+    reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
     host_last_remote_input_at_ms = 0u;
@@ -2139,6 +2309,7 @@ BOOL SudekiMpLanArenaRuntimeJoinEndpoint(const char *endpoint) {
     client_replica_discard_logged = FALSE;
     ZeroMemory(client_actor_presentation_valid,
         sizeof(client_actor_presentation_valid));
+    reset_client_tal_action_timeline();
     arena_dummy_spawn_attempted = FALSE;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;

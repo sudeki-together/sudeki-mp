@@ -13,13 +13,13 @@ every combat feature added to LAN arena mode.
 | Native admission | RVA `0x000DAC00` admits attack kinds; combo dispatcher `0x000D0730` appends the accepted kind. |
 | Authored transition | Lookup `0x000D04F0` searches the bounded history and gate `0x000D13E0` checks timing, target distance, and direction. Commit `0x000D14D0` records only an accepted result. |
 | Host observation | `host_actor_native_action_variant()` reads the resulting Tal renderer selector and calls `SudekiMpLanArenaTalActionFromNativePresentation()`. It never manufactures an action from the input edge. |
-| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA17 carries the host-observed action phase plus canonical-simulation input acknowledgement; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
-| Client replay | The replica drains journal events in sequence, interpolates the current host phase, and `apply_actor_presentation()` calls `SudekiMpLanArenaTalActionToNativePresentation()` for Tal's independently leased renderer. No client damage or attack execution occurs. |
+| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA18 carries the host-observed action phase, action-retirement clocks, and canonical-simulation input acknowledgement; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
+| Client replay | The replica drains journal events in sequence and converts each new Tal semantic result back into the corresponding weak/strong/sweep/block input for the client actor's native arbiter. Sudeki's own combat-animation state machine selects and retires the clip; an authenticated client-only `ApplyDamage` guard prevents that presentation replay from becoming combat authority. The low-level renderer writer remains a bounded fallback if native admission never reaches the host-observed selector. |
 
 The semantic key must preserve the native result, not merely the input
 history. In particular, `WSS` selected both renderer `69` and renderer `70`
 under different native gates. Both are valid strong-finisher presentation
-identities in protocol `LA17`.
+identities in protocol `LA18`.
 
 ## Reused co-op foundations
 
@@ -34,7 +34,7 @@ identities in protocol `LA17`.
   observation before committing a canonical frame; replicas can only accept
   authenticated newer frames. This is the migration seam for a later
   dedicated simulation process.
-- Protocol `LA17` carries player identity and simulation-node authority as
+- Protocol `LA18` carries player identity and simulation-node authority as
   separate handshake fields. Connected INPUT/SNAPSHOT direction is admitted
   by the node role, while the current live profile separately requires the
   fixed Tal/canonical and Ailish/replica pairing.

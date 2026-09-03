@@ -7,7 +7,7 @@
 #define LAN_HELLO_SIZE 53u
 #define LAN_INPUT_SIZE 27u
 #define LAN_ACTION_EVENT_SIZE 7u
-#define LAN_ACTOR_ACTION_HISTORY_OFFSET 42u
+#define LAN_ACTOR_ACTION_HISTORY_OFFSET 47u
 #define LAN_ACTOR_SIZE (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
     (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
 #define LAN_ENEMY_SIZE 21u
@@ -187,6 +187,7 @@ static int valid_actor_snapshot(
         actor->native_entity_id != expected_type ||
         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
         actor->action_phase_valid > 1u ||
+        actor->action_retirement_valid > 1u ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
         actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_BLOCK ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
@@ -216,7 +217,15 @@ static int valid_actor_snapshot(
         !valid_actor_action_history(actor, expected_type) ||
         (actor->action_phase_valid &&
          actor->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) ||
-        (!actor->action_phase_valid && actor->action_phase_q8 != 0u)) {
+        (!actor->action_phase_valid && actor->action_phase_q8 != 0u) ||
+        (actor->action_retirement_valid &&
+         (actor->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_IDLE ||
+          actor->combat_state != SUDEKIMP_LAN_ARENA_COMBAT_IDLE ||
+          actor->action_variant != SUDEKIMP_LAN_ARENA_ACTION_NONE ||
+          actor->action_sequence == 0u)) ||
+        (!actor->action_retirement_valid &&
+         (actor->action_terminal_phase_q8 != 0u ||
+          actor->idle_entry_phase_q8 != 0u))) {
         return 0;
     }
     facing_length = sqrtf(actor->facing_x * actor->facing_x +
@@ -280,7 +289,10 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     write_u16(output + 36u, actor->action_sequence);
     write_u16(output + 38u, actor->action_phase_q8);
     output[40] = actor->action_phase_valid;
-    output[41] = actor->action_history_count;
+    write_u16(output + 41u, actor->action_terminal_phase_q8);
+    write_u16(output + 43u, actor->idle_entry_phase_q8);
+    output[45] = actor->action_retirement_valid;
+    output[46] = actor->action_history_count;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
          ++index) {
         uint8_t *entry = output + LAN_ACTOR_ACTION_HISTORY_OFFSET +
@@ -318,7 +330,10 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->action_sequence = read_u16(input + 36u);
     actor->action_phase_q8 = read_u16(input + 38u);
     actor->action_phase_valid = input[40];
-    actor->action_history_count = input[41];
+    actor->action_terminal_phase_q8 = read_u16(input + 41u);
+    actor->idle_entry_phase_q8 = read_u16(input + 43u);
+    actor->action_retirement_valid = input[45];
+    actor->action_history_count = input[46];
     if (actor->action_history_count >
             SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) return 0;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;

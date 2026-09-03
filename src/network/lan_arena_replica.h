@@ -55,5 +55,18 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvance(
     uint32_t local_tick,
     uint32_t *host_tick
 );
+/* The replica adapter disables backlog catch-up while an authoritative action
+ * is buffered. That keeps one local millisecond equal to one host animation
+ * millisecond instead of visibly compressing a combo at up to 2x speed. */
+BOOL SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+    const SudekiMpLanArenaReplica *replica,
+    SudekiMpLanArenaReplicaRenderClock *clock,
+    uint32_t local_tick,
+    BOOL allow_catchup,
+    uint32_t *host_tick
+);
+BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
+    const SudekiMpLanArenaReplica *replica
+);
 
 #endif
