@@ -194,10 +194,14 @@ static void test_host_session(void) {
     snapshot.ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     snapshot.ailish.facing_z = 1.0f;
     snapshot.ailish.hp = 1u;
+    snapshot.acknowledged_input = 2u;
     CHECK(SudekiMpLanArenaSessionSendSnapshot(&snapshot));
     CHECK(receive_packet(peer, &packet, &source));
     CHECK(packet.type == SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT);
-    CHECK(packet.body.snapshot.acknowledged_input == 3u);
+    CHECK(packet.body.snapshot.acknowledged_input == 2u);
+    snapshot.acknowledged_input = 4u;
+    CHECK(!SudekiMpLanArenaSessionSendSnapshot(&snapshot));
+    CHECK(GetLastError() == ERROR_INVALID_DATA);
 
     SudekiMpLanArenaSessionPoll(400u);
     CHECK(receive_packet(peer, &packet, &source));

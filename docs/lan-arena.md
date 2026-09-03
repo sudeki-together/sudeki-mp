@@ -30,7 +30,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA14`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA15`, exact GOG executable hash only. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
@@ -99,11 +99,22 @@ experiments.
   and `70` under different native timing/target/direction conditions; the
   exact transition lookup confirms those conditions remain host-owned.
 - Action retirement is also part of the shared timeline. While a native action
-  is active, the host quantizes its actor-local animation clock into the LA14
+  is active, the canonical simulation quantizes its actor-local animation
+  clock into the LA15
   semantic snapshot. Clients interpolate and verify that phase on their own
   actor-local selector. The first host IDLE snapshot is the retirement edge;
   there is no client-only timeout or fixed crossfade deciding when an attack
   ends.
+- Input acknowledgement is also simulation-owned in LA15. The socket layer
+  may receive and coalesce packets, but it cannot acknowledge one merely for
+  reaching the host process. The canonical reducer validates and admits the
+  actor-scoped contribution first; only that admitted sequence may appear in
+  a later snapshot. Tal and Ailish input histories are independent, while
+  neither can contribute match, enemy, resource, or native combat state.
+- Match lifecycle is one-way within a session token: waiting may become
+  active or ended, active may become ended, and ended cannot reactivate.
+  Waiting/ended frames must carry combat disabled. Starting again requires a
+  fresh handshake and token rather than reviving stale shared-world state.
 - The client may open and browse Ailish's native QuickMenu. Native confirm/use
   commands are consumed locally until category-specific requests can be
   validated and executed by the host. Skills, items, weapons, Spirit,

@@ -848,6 +848,17 @@ static void host_capture_native_action_edges(DWORD now_ms) {
     }
 }
 
+static BOOL ensure_canonical_simulation(uint64_t session_token) {
+    return SudekiMpLanArenaSharedSimulationSessionExact(
+            &canonical_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+            session_token) ||
+        SudekiMpLanArenaSharedSimulationBegin(
+            &canonical_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+            session_token);
+}
+
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
@@ -899,16 +910,7 @@ static void host_publish_snapshot(DWORD now_ms) {
                 SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
         }
     }
-    if (!SudekiMpLanArenaSharedSimulationSessionExact(
-            &canonical_simulation,
-            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
-            status.session_token) &&
-        !SudekiMpLanArenaSharedSimulationBegin(
-            &canonical_simulation,
-            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
-            status.session_token)) {
-        return;
-    }
+    if (!ensure_canonical_simulation(status.session_token)) return;
     world_observation.host_tick = now_ms;
     world_observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     world_observation.combat_enabled = combat_enabled ? 1u : 0u;
@@ -927,7 +929,8 @@ static void host_publish_snapshot(DWORD now_ms) {
             SudekiMpLogFormat(
                 "lan_arena_runtime event=host_snapshot_stream phase=active "
                 "cadence_ms=50 actors=Tal,Ailish enemies=%u "
-                "policy=canonical_simulation_native_world_observation_replicated\r\n",
+                "policy=canonical_simulation_native_world_observation_"
+                "and_admitted_player_input_ack_replicated\r\n",
                 (unsigned int)snapshot.enemy_count);
         }
     }
@@ -1266,6 +1269,22 @@ static void lan_arena_control_update_observer(
     }
     while (host_remote_ailish_owned &&
            SudekiMpLanArenaSessionTakeRemoteInput(&input)) {
+        SudekiMpLanArenaInput admitted_input;
+        if (!ensure_canonical_simulation(status.session_token) ||
+            !SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
+                &canonical_simulation, status.session_token,
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE, &input) ||
+            !SudekiMpLanArenaSharedSimulationReadPlayerInput(
+                &canonical_simulation, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+                &admitted_input, NULL)) {
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=remote_player_input phase=rejected "
+                "actor=Ailish sequence=%lu "
+                "policy=canonical_simulation_admission_required\r\n",
+                (unsigned long)input.sequence);
+            continue;
+        }
+        input = admitted_input;
         host_last_remote_input_at_ms = GetTickCount();
         host_remote_input_quiesced = FALSE;
         host_remote_direction_x = input.world_direction_x;

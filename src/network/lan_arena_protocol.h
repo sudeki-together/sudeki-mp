@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 14u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 15u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413134u /* "LA14" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413135u /* "LA15" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -255,6 +255,7 @@ int SudekiMpLanArenaDecodePacket(
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
 );
+int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input);
 int SudekiMpLanArenaHandshakeValid(
     const SudekiMpLanArenaHello *hello,
     const SudekiMpLanArenaHandshakeExpectation *expectation,

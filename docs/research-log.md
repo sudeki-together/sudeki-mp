@@ -4948,3 +4948,24 @@ state. The current host and client snapshot paths now pass through those two
 respective nodes. Transaction, role, token, malformed-frame, stale-tick, and
 tick-wrap tests pass, establishing a dedicated-server migration seam without
 changing the current listen-server transport.
+
+The next extraction changes acknowledgement ownership in protocol `LA15`.
+The synchronized UDP worker may still validate, sequence, and coalesce an
+input packet, but receipt no longer makes that sequence eligible for a
+snapshot acknowledgement. The game-thread canonical simulation now admits a
+bounded actor-scoped Tal or Ailish contribution, keeps their sequences and
+revisions independent, and projects only the latest admitted Ailish sequence
+into the current two-player snapshot. Duplicate, stale, malformed,
+wrong-token, wrong-actor, and replica-side admissions fail transactionally.
+The transport verifies that this simulation-owned acknowledgement never
+points ahead of the receive stream, while replica admission rejects an
+acknowledgement regression. This establishes the input side of the shared
+simulation boundary without granting either player authority over native
+combat, match, enemy, damage, or resource state.
+
+The same reducer now enforces the native match lifecycle as a one-way state
+machine. A session may progress from waiting to active to ended (or terminate
+while waiting), but it cannot regress to waiting or revive after ending under
+the same token. Non-active frames are invalid when combat remains enabled.
+Both canonical commits and replica admissions use this rule, so a delayed or
+malformed snapshot cannot resurrect an old arena transaction.

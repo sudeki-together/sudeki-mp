@@ -99,6 +99,14 @@ static int valid_input_aim(const SudekiMpLanArenaInput *input) {
         (length_squared >= 0.25 && length_squared <= 2.25);
 }
 
+int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input) {
+    return input != NULL && input->weak_attack_pressed <= 1u &&
+        input->weak_attack_held <= 1u &&
+        input->ranged_first_person_active <= 1u &&
+        input->cleanroom_combat_test_pressed <= 1u &&
+        valid_input_aim(input);
+}
+
 static int valid_actor_action_pair(
     uint8_t combat_state,
     uint8_t action_variant
@@ -216,6 +224,8 @@ int SudekiMpLanArenaSnapshotValid(
     if (snapshot == NULL ||
         snapshot->match_state > SUDEKIMP_LAN_ARENA_MATCH_ENDED ||
         snapshot->combat_enabled > 1u ||
+        (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
+         snapshot->combat_enabled != 0u) ||
         snapshot->enemy_count > 1u ||
         !valid_actor_snapshot(&snapshot->tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
         !valid_actor_snapshot(
@@ -346,11 +356,7 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             *size = 4u;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_INPUT:
-            if (packet->body.input.weak_attack_pressed > 1u ||
-                packet->body.input.weak_attack_held > 1u ||
-                packet->body.input.ranged_first_person_active > 1u ||
-                packet->body.input.cleanroom_combat_test_pressed > 1u ||
-                !valid_input_aim(&packet->body.input)) {
+            if (!SudekiMpLanArenaInputValid(&packet->body.input)) {
                 return 0;
             }
             write_u32(output, packet->body.input.sequence);
@@ -495,7 +501,7 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.input.ranged_first_person_active = payload[24];
             packet->body.input.cleanroom_combat_test_pressed = payload[25];
             return packet->body.input.sequence == packet->sequence &&
-                valid_input_aim(&packet->body.input);
+                SudekiMpLanArenaInputValid(&packet->body.input);
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
             if (payload_size < LAN_SNAPSHOT_FIXED_SIZE ||
                 payload[13] > 1u ||

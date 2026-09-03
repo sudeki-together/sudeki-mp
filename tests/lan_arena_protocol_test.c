@@ -119,6 +119,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.sequence = 20u;
     source.session_token = 42u;
     source.body.snapshot.sequence = 20u;
+    source.body.snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     source.body.snapshot.combat_enabled = 1u;
     source.body.snapshot.tal.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     source.body.snapshot.ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
@@ -159,6 +160,11 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.combat_enabled = 1u;
+    source.body.snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_WAITING;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ENDED;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     source.body.snapshot.tal.animation_state =
         SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_ONE;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));

@@ -8,6 +8,12 @@ static int valid_node_role(SudekiMpLanArenaSimulationNodeRole node_role) {
         node_role == SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
 }
 
+static int actor_index(uint8_t actor_type) {
+    if (actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE) return 0;
+    if (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) return 1;
+    return -1;
+}
+
 static int valid_observation(
     const SudekiMpLanArenaNativeWorldObservation *observation
 ) {
@@ -23,6 +29,29 @@ static int next_tick_allowed(
 ) {
     return !simulation->tick_initialized ||
         SudekiMpLanArenaSequenceNewer(host_tick, simulation->last_host_tick);
+}
+
+static int next_match_state_allowed(
+    const SudekiMpLanArenaSharedSimulation *simulation,
+    uint8_t match_state
+) {
+    uint8_t previous;
+    if (!simulation->frame_valid) {
+        return match_state == SUDEKIMP_LAN_ARENA_MATCH_WAITING ||
+            match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
+    }
+    previous = simulation->frame.match_state;
+    if (previous == SUDEKIMP_LAN_ARENA_MATCH_WAITING) {
+        return match_state == SUDEKIMP_LAN_ARENA_MATCH_WAITING ||
+            match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
+            match_state == SUDEKIMP_LAN_ARENA_MATCH_ENDED;
+    }
+    if (previous == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE) {
+        return match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
+            match_state == SUDEKIMP_LAN_ARENA_MATCH_ENDED;
+    }
+    return previous == SUDEKIMP_LAN_ARENA_MATCH_ENDED &&
+        match_state == SUDEKIMP_LAN_ARENA_MATCH_ENDED;
 }
 
 static void commit_frame(
@@ -66,6 +95,59 @@ int SudekiMpLanArenaSharedSimulationSessionExact(
         simulation->session_token == session_token;
 }
 
+int SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
+    SudekiMpLanArenaSharedSimulation *simulation,
+    uint64_t session_token,
+    uint8_t actor_type,
+    const SudekiMpLanArenaInput *input
+) {
+    int index = actor_index(actor_type);
+    uint8_t mask;
+    if (!SudekiMpLanArenaSharedSimulationSessionExact(
+            simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+            session_token) || index < 0 ||
+        !SudekiMpLanArenaInputValid(input) ||
+        (simulation->frame_valid &&
+         simulation->frame.match_state ==
+             SUDEKIMP_LAN_ARENA_MATCH_ENDED)) return 0;
+    mask = (uint8_t)(1u << (unsigned int)index);
+    if ((simulation->player_input_valid_mask & mask) != 0u &&
+        !SudekiMpLanArenaSequenceNewer(
+            input->sequence,
+            simulation->player_input[index].sequence)) return 0;
+    simulation->player_input[index] = *input;
+    simulation->player_input_valid_mask |= mask;
+    ++simulation->player_input_revision[index];
+    if (simulation->player_input_revision[index] == 0u) {
+        simulation->player_input_revision[index] = 1u;
+    }
+    return 1;
+}
+
+int SudekiMpLanArenaSharedSimulationReadPlayerInput(
+    const SudekiMpLanArenaSharedSimulation *simulation,
+    uint8_t actor_type,
+    SudekiMpLanArenaInput *input,
+    uint32_t *revision
+) {
+    int index = actor_index(actor_type);
+    uint8_t mask;
+    if (simulation == NULL || input == NULL || index < 0 ||
+        simulation->session_token == 0u ||
+        simulation->node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) {
+        return 0;
+    }
+    mask = (uint8_t)(1u << (unsigned int)index);
+    if ((simulation->player_input_valid_mask & mask) == 0u) return 0;
+    *input = simulation->player_input[index];
+    if (revision != NULL) {
+        *revision = simulation->player_input_revision[index];
+    }
+    return 1;
+}
+
 int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     SudekiMpLanArenaSharedSimulation *simulation,
     uint64_t session_token,
@@ -79,11 +161,18 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
             session_token) ||
         !valid_observation(observation) || candidate == NULL ||
         candidate->host_tick != observation->host_tick ||
+        !next_match_state_allowed(simulation, observation->match_state) ||
         !next_tick_allowed(simulation, observation->host_tick)) return 0;
     committed = *candidate;
     committed.host_tick = observation->host_tick;
     committed.match_state = observation->match_state;
     committed.combat_enabled = observation->combat_enabled;
+    if ((simulation->player_input_valid_mask & 0x02u) != 0u) {
+        committed.acknowledged_input =
+            simulation->player_input[1].sequence;
+    } else {
+        committed.acknowledged_input = 0u;
+    }
     if (!SudekiMpLanArenaSnapshotValid(&committed)) return 0;
     commit_frame(simulation, &committed);
     return 1;
@@ -98,6 +187,14 @@ int SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
             simulation, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
             session_token) || frame == NULL ||
         !SudekiMpLanArenaSnapshotValid(frame) ||
+        !next_match_state_allowed(simulation, frame->match_state) ||
+        (simulation->frame_valid &&
+         simulation->frame.acknowledged_input != 0u &&
+         frame->acknowledged_input !=
+             simulation->frame.acknowledged_input &&
+         !SudekiMpLanArenaSequenceNewer(
+             frame->acknowledged_input,
+             simulation->frame.acknowledged_input)) ||
         !next_tick_allowed(simulation, frame->host_tick)) return 0;
     commit_frame(simulation, frame);
     return 1;

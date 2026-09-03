@@ -13,13 +13,13 @@ every combat feature added to LAN arena mode.
 | Native admission | RVA `0x000DAC00` admits attack kinds; combo dispatcher `0x000D0730` appends the accepted kind. |
 | Authored transition | Lookup `0x000D04F0` searches the bounded history and gate `0x000D13E0` checks timing, target distance, and direction. Commit `0x000D14D0` records only an accepted result. |
 | Host observation | `host_actor_native_action_variant()` reads the resulting Tal renderer selector and calls `SudekiMpLanArenaTalActionFromNativePresentation()`. It never manufactures an action from the input edge. |
-| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA14 adds the host-observed action phase; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
+| Wire identity | `host_track_actor_action_sequence()` appends the actor-local semantic result to the bounded action journal and LA15 carries the host-observed action phase plus canonical-simulation input acknowledgement; `SudekiMpLanArenaValidateSnapshot()` rejects invalid state/variant/phase pairs. |
 | Client replay | The replica drains journal events in sequence, interpolates the current host phase, and `apply_actor_presentation()` calls `SudekiMpLanArenaTalActionToNativePresentation()` for Tal's independently leased renderer. No client damage or attack execution occurs. |
 
 The semantic key must preserve the native result, not merely the input
 history. In particular, `WSS` selected both renderer `69` and renderer `70`
 under different native gates. Both are valid strong-finisher presentation
-identities in protocol `LA14`.
+identities in protocol `LA15`.
 
 ## Reused co-op foundations
 
@@ -34,6 +34,11 @@ identities in protocol `LA14`.
   observation before committing a canonical frame; replicas can only accept
   authenticated newer frames. This is the migration seam for a later
   dedicated simulation process.
+- Player input crosses a separate actor-scoped contribution boundary. Socket
+  receipt alone is not acknowledged: the canonical reducer must validate and
+  admit a monotonically newer Tal or Ailish input before its sequence can be
+  projected into a snapshot. Contributions never carry combat, enemy, damage,
+  resource, or match-state authority.
 - Cleanup follows the established camera/control/AI reverse-release order.
 - Renderer readiness is actor-local. Ailish's unavailable first-person/world
   graph cannot suppress Tal, and Tal readiness cannot authorize Ailish.

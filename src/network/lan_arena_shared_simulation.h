@@ -23,9 +23,12 @@ typedef struct SudekiMpLanArenaNativeWorldObservation {
 
 typedef struct SudekiMpLanArenaSharedSimulation {
     SudekiMpLanArenaSnapshot frame;
+    SudekiMpLanArenaInput player_input[2];
     uint64_t session_token;
     uint32_t revision;
     uint32_t last_host_tick;
+    uint32_t player_input_revision[2];
+    uint8_t player_input_valid_mask;
     uint8_t node_role;
     uint8_t frame_valid;
     uint8_t tick_initialized;
@@ -43,6 +46,23 @@ int SudekiMpLanArenaSharedSimulationSessionExact(
     const SudekiMpLanArenaSharedSimulation *simulation,
     SudekiMpLanArenaSimulationNodeRole node_role,
     uint64_t session_token
+);
+
+/* Player processes contribute bounded intent, never world state.  Admission
+ * belongs to the canonical simulation and is tracked independently for Tal
+ * and Ailish so a later transport can carry either participant without
+ * changing native-world ownership. */
+int SudekiMpLanArenaSharedSimulationAdmitPlayerInput(
+    SudekiMpLanArenaSharedSimulation *simulation,
+    uint64_t session_token,
+    uint8_t actor_type,
+    const SudekiMpLanArenaInput *input
+);
+int SudekiMpLanArenaSharedSimulationReadPlayerInput(
+    const SudekiMpLanArenaSharedSimulation *simulation,
+    uint8_t actor_type,
+    SudekiMpLanArenaInput *input,
+    uint32_t *revision
 );
 
 /* Canonical frames are admitted only with a matching native-world

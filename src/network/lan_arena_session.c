@@ -513,13 +513,23 @@ static BOOL session_send_snapshot_unlocked(const SudekiMpLanArenaSnapshot *snaps
     SudekiMpLanArenaPacket packet;
     if (snapshot == NULL || session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
+    /* Receipt is not simulation admission.  The canonical game-thread
+     * reducer supplies the newest input it actually admitted; transport only
+     * verifies that acknowledgement cannot point beyond the receive stream. */
+    if ((snapshot->acknowledged_input != 0u &&
+         session.last_input_sequence == 0u) ||
+        SudekiMpLanArenaSequenceNewer(
+            snapshot->acknowledged_input,
+            session.last_input_sequence)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
     memset(&packet, 0, sizeof(packet));
     packet.type = SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT;
     packet.sequence = ++session.next_sequence;
     packet.session_token = session.connection.session_token;
     packet.body.snapshot = *snapshot;
     packet.body.snapshot.sequence = packet.sequence;
-    packet.body.snapshot.acknowledged_input = session.last_input_sequence;
     if (!socket_send_packet(&packet)) return FALSE;
     session.last_sent_snapshot_sequence = packet.sequence;
     return TRUE;
