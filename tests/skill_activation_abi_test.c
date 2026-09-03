@@ -52,6 +52,7 @@ static uint8_t __attribute__((fastcall)) use_mock(
     seen_use_slot = slot;
     if (use_result != 0u) {
         *((uint8_t *)skill + 0x6cu) = 1u;
+        *(int *)((uint8_t *)skill + 0x70u) = slot;
     }
     return use_result;
 }
@@ -65,6 +66,8 @@ int main(void) {
     SudekiMpSkillActivationApi api;
     SudekiMpSkillActivationResult result;
     SudekiMpSkillQuickSkillList list;
+    SudekiMpSkillQuickSkillRow row;
+    SudekiMpCharacterSkillState state;
     unsigned int index;
 
     ZeroMemory(character, sizeof(character));
@@ -112,6 +115,39 @@ int main(void) {
         "native Use receives CSkill and selected slot");
 
     skill[0x6cu] = 0u;
+    ZeroMemory(&row, sizeof(row));
+    check(SudekiMpDescribeCharacterSkillSlotWithApi(
+              character, 14, &api, &row),
+        "exact actor-local skill slot can be described for LAN transport");
+    check(row.slot == 14 && row.cost == 24u && row.available != 0u,
+        "exact slot description retains native cost and availability");
+    result = SudekiMpActivateCharacterSkillSlotWithApi(
+        character, 14, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED &&
+            result.skill_data == skill_data[4] && result.slot == 14,
+        "exact actor-local slot starts through the native validator and Use");
+    check(seen_validate_slot == 14 && seen_use_slot == 14,
+        "slot activation does not reinterpret the wire value as a UI ordinal");
+    check(SudekiMpObserveCharacterSkillWithApi(character, &api, &state) &&
+            state.active != 0u && state.skill == skill &&
+            state.slot == 14 && state.cost == 24u,
+        "host observation exposes only the exact active slot and authored cost");
+    skill[0x6cu] = 0u;
+    check(SudekiMpObserveCharacterSkillWithApi(character, &api, &state) &&
+            state.active == 0u && state.slot == -1,
+        "inactive actor skill state is explicit and pointer-local");
+
+    *(int *)(skill_data[5] + 0x0cu) = 14;
+    check(!SudekiMpDescribeCharacterSkillSlotWithApi(
+              character, 14, &api, &row),
+        "duplicate native slot identities are rejected instead of guessed");
+    result = SudekiMpActivateCharacterSkillSlotWithApi(
+        character, 14, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT,
+        "duplicate slot activation fails closed");
+    *(int *)(skill_data[5] + 0x0cu) = 15;
+
+    skill[0x6cu] = 0u;
     validate_result = 3;
     result = SudekiMpActivateCharacterQuickSkillWithApi(character, 0u, &api);
     check(result.status == SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED &&
@@ -129,6 +165,9 @@ int main(void) {
     result = SudekiMpActivateCharacterQuickSkillWithApi(character, 0u, &api);
     check(result.status == SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE,
         "unavailable authored skills remain unavailable");
+    result = SudekiMpActivateCharacterSkillSlotWithApi(character, 10, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE,
+        "exact slot activation also preserves native availability rejection");
 
     if (failures != 0) {
         fprintf(stderr, "%d skill activation ABI test(s) failed\n", failures);

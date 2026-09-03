@@ -110,8 +110,10 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.weak_attack_held = 1u;
     source.body.input.ranged_first_person_active = 1u;
     source.body.input.cleanroom_combat_test_pressed = 1u;
+    source.body.input.skill_pressed = 1u;
+    source.body.input.skill_slot = 4u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 47u);
+    CHECK(size == 49u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.input.actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
     CHECK(decoded.body.input.world_direction_x == -32767);
@@ -122,6 +124,8 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(decoded.body.input.weak_attack_held == 1u);
     CHECK(decoded.body.input.ranged_first_person_active == 1u);
     CHECK(decoded.body.input.cleanroom_combat_test_pressed == 1u);
+    CHECK(decoded.body.input.skill_pressed == 1u);
+    CHECK(decoded.body.input.skill_slot == 4u);
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size - 1u, &decoded));
     bytes[20] ^= 0xffu;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
@@ -135,6 +139,15 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.input.cleanroom_combat_test_pressed = 2u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.input.cleanroom_combat_test_pressed = 1u;
+    source.body.input.skill_pressed = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.skill_pressed = 1u;
+    source.body.input.skill_slot = 6u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.skill_pressed = 0u;
+    source.body.input.skill_slot = 1u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.input.skill_slot = 0u;
     source.body.input.actor_type = 0xffu;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
@@ -159,18 +172,26 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     source.body.snapshot.ailish.hp = 20u;
     source.body.snapshot.tal.action_sequence = 0x1234u;
     source.body.snapshot.ailish.action_sequence = 0xabcdu;
+    source.body.snapshot.tal.skill_sequence = 7u;
+    source.body.snapshot.tal.skill_slot = 2u;
+    source.body.snapshot.tal.skill_active = 1u;
+    source.body.snapshot.tal.skill_cost = 125u;
     source.body.snapshot.enemy_count = 1u;
     source.body.snapshot.enemies[0].native_entity_id =
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 206u);
+    CHECK(size == 222u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.tal.action_variant ==
         SUDEKIMP_LAN_ARENA_ACTION_NONE);
     CHECK(decoded.body.snapshot.tal.action_sequence == 0x1234u);
     CHECK(decoded.body.snapshot.ailish.action_sequence == 0xabcdu);
+    CHECK(decoded.body.snapshot.tal.skill_sequence == 7u);
+    CHECK(decoded.body.snapshot.tal.skill_slot == 2u);
+    CHECK(decoded.body.snapshot.tal.skill_active == 1u);
+    CHECK(decoded.body.snapshot.tal.skill_cost == 125u);
     CHECK(decoded.body.snapshot.enemy_count == 1u);
     CHECK(decoded.body.snapshot.enemies[0].native_entity_id ==
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID);

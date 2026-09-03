@@ -189,6 +189,8 @@ static void test_host_session(void) {
     packet.body.input.weak_attack_held = 1u;
     packet.body.input.ranged_first_person_active = 1u;
     packet.body.input.cleanroom_combat_test_pressed = 1u;
+    packet.body.input.skill_pressed = 1u;
+    packet.body.input.skill_slot = 3u;
     CHECK(send_packet(peer, &host_address, &packet));
     packet.sequence = 3u;
     packet.body.input.sequence = 3u;
@@ -200,6 +202,8 @@ static void test_host_session(void) {
     packet.body.input.weak_attack_held = 0u;
     packet.body.input.ranged_first_person_active = 0u;
     packet.body.input.cleanroom_combat_test_pressed = 0u;
+    packet.body.input.skill_pressed = 0u;
+    packet.body.input.skill_slot = 0u;
     CHECK(send_packet(peer, &host_address, &packet));
     SudekiMpLanArenaSessionPoll(110u);
     CHECK(SudekiMpLanArenaSessionTakeRemoteInput(&input));
@@ -211,6 +215,8 @@ static void test_host_session(void) {
     CHECK(input.weak_attack_held == 0u);
     CHECK(input.ranged_first_person_active == 0u);
     CHECK(input.cleanroom_combat_test_pressed == 1u);
+    CHECK(input.skill_pressed == 1u);
+    CHECK(input.skill_slot == 3u);
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.tal.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;

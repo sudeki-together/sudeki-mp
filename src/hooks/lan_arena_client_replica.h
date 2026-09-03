@@ -206,6 +206,10 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void);
  * boundaries and again as a late visible-transform verification; it consumes
  * no network sample and never runs host-side simulation. */
 BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void);
+/* True only while Ailish's host-approved native skill task owns the client
+ * process camera. The input adapter uses this to keep ordinary first-person
+ * orbit events from steering the cinematic camera. */
+BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void);
 /* Refreshes the visible render-object witness after scene traversal without
  * consuming another network sample or mutating game state. */
 void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void);

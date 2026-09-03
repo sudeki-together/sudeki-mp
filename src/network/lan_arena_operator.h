@@ -24,5 +24,17 @@
     L"Local\\SudekiMpLanArenaClientCameraLeftV1"
 #define SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_RIGHT_EVENT \
     L"Local\\SudekiMpLanArenaClientCameraRightV1"
+#define SUDEKIMP_LAN_ARENA_SKILL_ZERO_EVENT \
+    L"Local\\SudekiMpLanArenaSkill0V1"
+#define SUDEKIMP_LAN_ARENA_SKILL_ONE_EVENT \
+    L"Local\\SudekiMpLanArenaSkill1V1"
+#define SUDEKIMP_LAN_ARENA_SKILL_TWO_EVENT \
+    L"Local\\SudekiMpLanArenaSkill2V1"
+#define SUDEKIMP_LAN_ARENA_SKILL_THREE_EVENT \
+    L"Local\\SudekiMpLanArenaSkill3V1"
+#define SUDEKIMP_LAN_ARENA_SKILL_FOUR_EVENT \
+    L"Local\\SudekiMpLanArenaSkill4V1"
+#define SUDEKIMP_LAN_ARENA_SKILL_FIVE_EVENT \
+    L"Local\\SudekiMpLanArenaSkill5V1"
 
 #endif

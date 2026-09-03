@@ -20,6 +20,8 @@ enum {
     CHARACTER_SKILL_OFFSET = 0xd8u,
     CSKILL_DATA_ARRAY_OFFSET = 0x3cu,
     CSKILL_ORDER_ARRAY_OFFSET = 0x54u,
+    CSKILL_ACTIVE_OFFSET = 0x6cu,
+    CSKILL_ACTIVE_SLOT_OFFSET = 0x70u,
     SKILL_DATA_ENABLED_OFFSET = 0x08u,
     SKILL_DATA_SLOT_OFFSET = 0x0cu,
     SKILL_DATA_COST_OFFSET = 0x94u,
@@ -250,6 +252,113 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkillWithApi(
     return result;
 }
 
+BOOL SudekiMpDescribeCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpSkillQuickSkillRow *row
+) {
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *skill;
+    void *skill_context;
+    unsigned int index;
+    BOOL found = FALSE;
+
+    if (row == NULL) return FALSE;
+    ZeroMemory(row, sizeof(*row));
+    row->slot = -1;
+    if (character_bytes == NULL || slot < 0 || api == NULL ||
+        api->availability_target == NULL ||
+        !readable_memory(character_bytes,
+            CHARACTER_SKILL_OFFSET + sizeof(skill))) return FALSE;
+    skill_context = *(void **)(character_bytes +
+        CHARACTER_SKILL_CONTEXT_OFFSET);
+    skill = *(uint8_t **)(character_bytes + CHARACTER_SKILL_OFFSET);
+    if (skill_context == NULL || !readable_memory(skill,
+            CSKILL_ORDER_ARRAY_OFFSET +
+            NATIVE_QUICK_SKILL_COUNT * sizeof(unsigned int)) ||
+        *(void **)(skill + 0x10u) != character) return FALSE;
+    for (index = 0u; index < NATIVE_QUICK_SKILL_COUNT; ++index) {
+        void *skill_data = *(void **)(skill + CSKILL_DATA_ARRAY_OFFSET +
+            index * sizeof(void *));
+        if (!readable_memory(skill_data,
+                SKILL_DATA_COST_OFFSET + sizeof(uint32_t)) ||
+            *(int *)((uint8_t *)skill_data + SKILL_DATA_SLOT_OFFSET) !=
+                slot) continue;
+        if (found) return FALSE;
+        found = TRUE;
+        row->ordinal = index;
+        row->slot = slot;
+        row->cost = *(uint32_t *)((uint8_t *)skill_data +
+            SKILL_DATA_COST_OFFSET);
+        row->available =
+            *((uint8_t *)skill_data + SKILL_DATA_ENABLED_OFFSET) != 0u &&
+            SudekiMpCallSkillAvailability(
+                api->availability_target, skill_data, skill_context) != 0u;
+    }
+    return found;
+}
+
+SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api
+) {
+    SudekiMpSkillActivationResult result = empty_result(
+        SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT);
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *skill;
+    void *skill_context;
+    unsigned int index;
+    void *selected_data = NULL;
+
+    if (character_bytes == NULL || slot < 0 || api == NULL ||
+        api->availability_target == NULL || api->validate == NULL ||
+        api->use == NULL || !readable_memory(character_bytes,
+            CHARACTER_SKILL_OFFSET + sizeof(skill))) return result;
+    skill_context = *(void **)(character_bytes +
+        CHARACTER_SKILL_CONTEXT_OFFSET);
+    skill = *(uint8_t **)(character_bytes + CHARACTER_SKILL_OFFSET);
+    if (skill_context == NULL || !readable_memory(skill,
+            CSKILL_ORDER_ARRAY_OFFSET +
+            NATIVE_QUICK_SKILL_COUNT * sizeof(unsigned int)) ||
+        *(void **)(skill + 0x10u) != character) return result;
+    result.skill = skill;
+    for (index = 0u; index < NATIVE_QUICK_SKILL_COUNT; ++index) {
+        void *skill_data = *(void **)(skill + CSKILL_DATA_ARRAY_OFFSET +
+            index * sizeof(void *));
+        if (!readable_memory(skill_data,
+                SKILL_DATA_SLOT_OFFSET + sizeof(int)) ||
+            *(int *)((uint8_t *)skill_data + SKILL_DATA_SLOT_OFFSET) !=
+                slot) continue;
+        if (selected_data != NULL) return result;
+        selected_data = skill_data;
+    }
+    if (selected_data == NULL || !readable_memory(selected_data,
+            SKILL_DATA_ENABLED_OFFSET + 1u) ||
+        *((uint8_t *)selected_data + SKILL_DATA_ENABLED_OFFSET) == 0u ||
+        SudekiMpCallSkillAvailability(api->availability_target,
+            selected_data, skill_context) == 0u) {
+        result.status = SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE;
+        return result;
+    }
+    result.skill_data = selected_data;
+    result.slot = slot;
+    result.validation_result = api->validate(skill, slot);
+    if (result.validation_result != 0) {
+        result.status = SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED;
+        return result;
+    }
+    result.use_result = api->use(skill, NULL, slot);
+    if (result.use_result == 0u) {
+        result.status = SUDEKIMP_SKILL_ACTIVATION_USE_REJECTED;
+        return result;
+    }
+    result.status = SUDEKIMP_SKILL_ACTIVATION_STARTED;
+    SudekiMpCombatContextSkillStarted(character, skill);
+    return result;
+}
+
 BOOL SudekiMpDescribeCharacterQuickSkillsWithApi(
     void *character,
     const SudekiMpSkillActivationApi *api,
@@ -326,6 +435,56 @@ BOOL SudekiMpDescribeCharacterQuickSkills(
         SudekiMpDescribeCharacterQuickSkillsWithApi(character, &native_api, list);
 }
 
+BOOL SudekiMpDescribeCharacterSkillSlot(
+    void *character,
+    int slot,
+    SudekiMpSkillQuickSkillRow *row
+) {
+    return native_module != NULL &&
+        SudekiMpDescribeCharacterSkillSlotWithApi(
+            character, slot, &native_api, row);
+}
+
+BOOL SudekiMpObserveCharacterSkillWithApi(
+    void *character,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpCharacterSkillState *state
+) {
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *skill;
+    SudekiMpSkillQuickSkillRow row;
+
+    if (state == NULL) return FALSE;
+    ZeroMemory(state, sizeof(*state));
+    state->slot = -1;
+    if (api == NULL || character_bytes == NULL ||
+        !readable_memory(character_bytes,
+            CHARACTER_SKILL_OFFSET + sizeof(skill))) return FALSE;
+    skill = *(uint8_t **)(character_bytes + CHARACTER_SKILL_OFFSET);
+    if (!readable_memory(skill, CSKILL_ACTIVE_SLOT_OFFSET + sizeof(int)) ||
+        *(void **)(skill + 0x10u) != character) return FALSE;
+    state->skill = skill;
+    state->active = *(uint8_t *)(skill + CSKILL_ACTIVE_OFFSET) != 0u;
+    if (!state->active) return TRUE;
+    state->slot = *(int *)(skill + CSKILL_ACTIVE_SLOT_OFFSET);
+    if (!SudekiMpDescribeCharacterSkillSlotWithApi(
+            character, state->slot, api, &row)) {
+        ZeroMemory(state, sizeof(*state));
+        state->slot = -1;
+        return FALSE;
+    }
+    state->cost = row.cost;
+    return TRUE;
+}
+
+BOOL SudekiMpObserveCharacterSkill(
+    void *character,
+    SudekiMpCharacterSkillState *state
+) {
+    return native_module != NULL && SudekiMpObserveCharacterSkillWithApi(
+        character, &native_api, state);
+}
+
 SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkill(
     void *character,
     unsigned int ordinal
@@ -338,6 +497,17 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkill(
         ordinal,
         &native_api
     );
+}
+
+SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlot(
+    void *character,
+    int slot
+) {
+    if (native_module == NULL) {
+        return empty_result(SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT);
+    }
+    return SudekiMpActivateCharacterSkillSlotWithApi(
+        character, slot, &native_api);
 }
 
 const char *SudekiMpSkillActivationStatusName(

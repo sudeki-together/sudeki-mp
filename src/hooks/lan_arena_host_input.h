@@ -12,5 +12,6 @@ BOOL SudekiMpLanArenaHostInputDiagnosticTraceActive(void);
 /* Test/operator acknowledgement is emitted only after Sudeki exposes a new
  * native Tal action selector, never merely because an input was submitted. */
 void SudekiMpLanArenaHostInputNotifyNativeActionObserved(void);
+BOOL SudekiMpLanArenaHostInputTakeSkillSlot(unsigned int *slot);
 
 #endif

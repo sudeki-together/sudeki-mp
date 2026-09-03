@@ -438,6 +438,10 @@ static void session_poll_unlocked(uint32_t now_ms) {
                     session.latest_input.weak_attack_pressed : 0u;
                 uint8_t latched_combat_toggle = session.input_pending ?
                     session.latest_input.cleanroom_combat_test_pressed : 0u;
+                uint8_t latched_skill = session.input_pending ?
+                    session.latest_input.skill_pressed : 0u;
+                uint8_t latched_skill_slot = session.input_pending ?
+                    session.latest_input.skill_slot : 0u;
                 if (!SudekiMpLanArenaPlayerOwnsActor(
                         (SudekiMpLanArenaRole)session.connection.peer_role,
                         packet.body.input.actor_type)) {
@@ -460,6 +464,10 @@ static void session_poll_unlocked(uint32_t now_ms) {
                 }
                 if (latched_combat_toggle != 0u) {
                     session.latest_input.cleanroom_combat_test_pressed = 1u;
+                }
+                if (latched_skill != 0u) {
+                    session.latest_input.skill_pressed = 1u;
+                    session.latest_input.skill_slot = latched_skill_slot;
                 }
                 session.input_pending = 1u;
                 session.last_input_sequence = packet.sequence;

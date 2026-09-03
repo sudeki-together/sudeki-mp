@@ -59,6 +59,14 @@ typedef struct SudekiMpSkillQuickSkillList {
         rows[SUDEKIMP_SKILL_ACTIVATION_MAX_QUICK_SKILLS];
 } SudekiMpSkillQuickSkillList;
 
+typedef struct SudekiMpCharacterSkillState {
+    void *skill;
+    int slot;
+    uint32_t cost;
+    uint8_t active;
+    uint8_t reserved[3];
+} SudekiMpCharacterSkillState;
+
 uint8_t SudekiMpCallSkillAvailability(
     void *target,
     void *skill_data,
@@ -75,6 +83,18 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkillWithApi(
     unsigned int ordinal,
     const SudekiMpSkillActivationApi *api
 );
+/* Starts one exact actor-local CSkill slot. This is the stable semantic used
+ * by the exact-hash LAN profile after the host has observed native admission;
+ * it is never a pointer received from the network. */
+SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlot(
+    void *character,
+    int slot
+);
+SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api
+);
 BOOL SudekiMpDescribeCharacterQuickSkills(
     void *character,
     SudekiMpSkillQuickSkillList *list
@@ -83,6 +103,28 @@ BOOL SudekiMpDescribeCharacterQuickSkillsWithApi(
     void *character,
     const SudekiMpSkillActivationApi *api,
     SudekiMpSkillQuickSkillList *list
+);
+BOOL SudekiMpDescribeCharacterSkillSlot(
+    void *character,
+    int slot,
+    SudekiMpSkillQuickSkillRow *row
+);
+BOOL SudekiMpDescribeCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpSkillQuickSkillRow *row
+);
+/* Reads only the exact actor-owned CSkill transaction state. Native pointers
+ * remain process-local; callers serialize only slot/cost/active semantics. */
+BOOL SudekiMpObserveCharacterSkill(
+    void *character,
+    SudekiMpCharacterSkillState *state
+);
+BOOL SudekiMpObserveCharacterSkillWithApi(
+    void *character,
+    const SudekiMpSkillActivationApi *api,
+    SudekiMpCharacterSkillState *state
 );
 const char *SudekiMpSkillActivationStatusName(
     SudekiMpSkillActivationStatus status

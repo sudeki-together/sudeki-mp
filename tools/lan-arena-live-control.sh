@@ -53,7 +53,9 @@ usage() {
         '  --client-fire [ms]       Queue one client weak-fire pulse' \
         '  --client-fire-hold [ms]  Hold client fire through the local operator API' \
         '  --client-fire-capture [ms]  Queue fire and capture after delay' \
+        '  --client-skill SLOT      Queue Ailish native skill slot 0..5 on host' \
         '  --host-weak              Queue one native Tal weak transition' \
+        '  --host-skill SLOT        Start Tal native skill slot 0..5' \
         '  --host-combo [ms]        Queue three timed Tal weak transitions' \
         '  --host-sequence PATTERN [ms]  Queue Tal W/S transitions (for example WWS)' \
         '  --host-combo-capture [ms]  Queue three Tal weak transitions/captures' \
@@ -70,7 +72,7 @@ case "${action}" in
     --status|--skip-startup|--advance-startup|--advance-host|--advance-client|\
     --focus-host|--focus-client|\
     --host-confirm|--client-confirm|\
-    --client-combat|--client-fire|--client-fire-capture|--client-fire-hold|--host-weak|\
+    --client-combat|--client-fire|--client-fire-capture|--client-fire-hold|--client-skill|--host-weak|--host-skill|\
     --host-combo|--host-combo-capture|--host-sequence|--host-strong|--host-sweep|--host-block|\
     --client-forward|\
     --client-turn-left|--client-turn-right|--capture) ;;
@@ -206,7 +208,7 @@ case "${action}" in
             'index($0, host) || index($0, client)'
         printf '%s\n' '--- host state ---'
         tail -n 300 "${host_log}" 2>/dev/null | rg \
-            'host_connected|combat_toggle|host_remote_weak|lan_arena_missile_cadence|process_detach' | tail -n 12 || true
+            'host_connected|combat_toggle|host_remote_weak|host_skill|host_remote_skill|lan_arena_missile_cadence|process_detach' | tail -n 16 || true
         printf '%s\n' '--- host action journal ---'
         rg 'host_action_sequence' "${host_log}" 2>/dev/null | tail -n 12 || true
         printf '%s\n' '--- client state ---'
@@ -215,6 +217,9 @@ case "${action}" in
         printf '%s\n' '--- client action presentation ---'
         rg 'client_tal_action_presentation|client_first_person_fire_presentation' \
             "${client_log}" 2>/dev/null | tail -n 12 || true
+        printf '%s\n' '--- client skill presentation ---'
+        rg 'client_skill phase|client_skill_camera|client_skill_speed' \
+            "${client_log}" 2>/dev/null | tail -n 16 || true
         ;;
     --skip-startup)
         trace_action 'key=Escape windows=host,client'
@@ -287,6 +292,21 @@ case "${action}" in
         validate_duration
         trace_action "command=weak-down duration_ms=${duration_ms} source=local_operator_api"
         run_operator "${client_prefix}" weak-hold "${duration_ms}"
+        ;;
+    --client-skill|--host-skill)
+        skill_slot="${2:-}"
+        if [[ ! "${skill_slot}" =~ ^[0-5]$ ]]; then
+            printf 'Skill slot must be 0..5: %s\n' "${skill_slot}" >&2
+            exit 2
+        fi
+        skill_prefix="${client_prefix}"
+        skill_actor='Ailish'
+        if [[ "${action}" == '--host-skill' ]]; then
+            skill_prefix="${host_prefix}"
+            skill_actor='Tal'
+        fi
+        trace_action "command=skill actor=${skill_actor} slot=${skill_slot} source=local_operator_api"
+        run_operator "${skill_prefix}" skill "${skill_slot}"
         ;;
     --host-weak)
         trace_action 'command=weak source=local_operator_api foreground=host'

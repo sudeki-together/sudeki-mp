@@ -2567,7 +2567,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             return SUDEKIMP_INIT_INPUT_BRIDGE_FAILED;
         }
         if ((realtime_multiplayer_skill_combat_enabled ||
-             fixed_three_seat_renderer_enabled) &&
+             fixed_three_seat_renderer_enabled || lan_arena_enabled) &&
             !SudekiMpInitializeSkillActivationAbi(game_module)) {
             SudekiMpLogFormat(
                 "realtime_skill_activation_abi_error=%lu\r\n",

@@ -2,6 +2,7 @@
 
 #include "cleanroom/engine.h"
 #include "engine/log.h"
+#include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_arena_client_input.h"
@@ -21,6 +22,10 @@
 
 typedef void (*FrameEndFunction)(void);
 typedef void (*RenderStartFunction)(void);
+typedef BOOL (__attribute__((thiscall)) *CameraManagerSetRenderCameraFunction)(
+    void *manager, const char *name);
+typedef void (__attribute__((thiscall)) *GameSpeedSetModeFunction)(
+    void *game_speed, int mode);
 
 enum {
     RVA_RENDER_START = 0x001dce30u,
@@ -28,6 +33,9 @@ enum {
     RVA_RENDER_PRE_WORLD_CALL = 0x0028d539u,
     RVA_FRAME_END = 0x001dd540u,
     RVA_FRAME_END_CALL = 0x0028d58cu,
+    RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_GAME_SPEED_SET_MODE = 0x00207560u,
+    RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
     TAL_WORLD_IDLE_SELECTOR = 4,
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
@@ -54,6 +62,8 @@ enum {
 static SudekiMpRelativeCallHook lan_arena_frame_end_hook;
 static SudekiMpRelativeCallHook lan_arena_render_start_hook;
 static SudekiMpRelativeCallHook lan_arena_render_pre_world_hook;
+static SudekiMpInlineHook host_skill_camera_hook;
+static SudekiMpInlineHook host_skill_speed_hook;
 static FrameEndFunction original_frame_end;
 static RenderStartFunction original_render_start;
 static BOOL runtime_installed;
@@ -96,6 +106,10 @@ static uint8_t host_actor_previous_action_variant[2];
 static uint8_t host_actor_previous_native_action_state[2];
 static BOOL host_actor_previous_action_active[2];
 static BOOL host_actor_previous_native_action_active[2];
+static uint16_t host_actor_skill_sequence[2];
+static uint8_t host_actor_skill_slot[2];
+static uint32_t host_actor_skill_cost[2];
+static BOOL host_actor_previous_skill_active[2];
 typedef struct HostActorActionRetirement {
     uint16_t action_sequence;
     uint16_t action_terminal_phase_q8;
@@ -143,6 +157,22 @@ static char runtime_remote_ipv4[64];
 static HMODULE runtime_game_module;
 static HANDLE network_pump_stop_event;
 static HANDLE network_pump_thread;
+static volatile LONG host_remote_skill_activation_depth;
+static BOOL host_remote_skill_camera_active;
+static BOOL host_remote_skill_camera_suppression_logged;
+static BOOL host_skill_speed_override_active;
+static uint32_t host_skill_original_alternate_speed_bits;
+static int host_skill_speed_trace_state = -1;
+
+static const uint8_t expected_camera_manager_set_render_camera_entry[] = {
+    0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u
+};
+static const uint8_t expected_game_speed_set_mode_entry[] = {
+    0x8bu, 0x44u, 0x24u, 0x04u, 0x89u, 0x41u, 0x24u
+};
+static const uint8_t expected_fixed_alternate_speed[] = {
+    0x29u, 0x5cu, 0x8fu, 0x3du
+};
 
 static DWORD WINAPI lan_arena_network_pump(void *context) {
     HANDLE stop_event = (HANDLE)context;
@@ -184,6 +214,157 @@ static void stop_network_pump(void) {
     if (network_pump_stop_event != NULL) CloseHandle(network_pump_stop_event);
     network_pump_thread = NULL;
     network_pump_stop_event = NULL;
+}
+
+static BOOL set_host_skill_realtime_scale(BOOL enabled) {
+    uint32_t *scale;
+    uint32_t desired;
+    DWORD old_protection;
+    DWORD ignored_protection;
+    BOOL protection_restored;
+
+    if (runtime_game_module == NULL) return FALSE;
+    scale = (uint32_t *)((uint8_t *)runtime_game_module +
+        RVA_FIXED_ALTERNATE_SPEED);
+    desired = enabled ? 0x3f800000u :
+        host_skill_original_alternate_speed_bits;
+    if (*scale == desired) {
+        host_skill_speed_override_active = enabled;
+        return TRUE;
+    }
+    if (!VirtualProtect(scale, sizeof(*scale), PAGE_EXECUTE_READWRITE,
+            &old_protection)) return FALSE;
+    *scale = desired;
+    FlushInstructionCache(GetCurrentProcess(), scale, sizeof(*scale));
+    protection_restored = VirtualProtect(scale, sizeof(*scale),
+        old_protection, &ignored_protection);
+    if (protection_restored && *scale == desired) {
+        host_skill_speed_override_active = enabled;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL host_remote_skill_camera_owned(void) {
+    return InterlockedCompareExchange(
+            &host_remote_skill_activation_depth, 0, 0) > 0 ||
+        host_remote_skill_camera_active;
+}
+
+static BOOL __attribute__((thiscall)) preserve_host_tal_camera(
+    void *manager,
+    const char *name
+) {
+    CameraManagerSetRenderCameraFunction original =
+        (CameraManagerSetRenderCameraFunction)
+            host_skill_camera_hook.trampoline;
+    if (!host_remote_skill_camera_owned()) {
+        host_remote_skill_camera_suppression_logged = FALSE;
+        return original(manager, name);
+    }
+    if (!host_remote_skill_camera_suppression_logged) {
+        host_remote_skill_camera_suppression_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_remote_skill_camera "
+            "state=preserved owner=Tal remote_caster=Ailish requested=%s "
+            "policy=authoritative_effect_does_not_steal_other_players_view\r\n",
+            name == NULL ? "(null)" : name);
+    }
+    return TRUE;
+}
+
+static void __attribute__((thiscall)) preserve_host_realtime(
+    void *game_speed,
+    int requested_mode
+) {
+    GameSpeedSetModeFunction original =
+        (GameSpeedSetModeFunction)host_skill_speed_hook.trampoline;
+    BOOL success = set_host_skill_realtime_scale(TRUE);
+    int trace_state = success ? 1 : 0;
+
+    if (trace_state != host_skill_speed_trace_state || requested_mode != 0) {
+        host_skill_speed_trace_state = trace_state;
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_skill_speed state=%s "
+            "requested_mode=%d applied_scale=1.0 "
+            "policy=lan_world_and_all_player_views_remain_realtime\r\n",
+            success ? "realtime" : "rejected", requested_mode);
+    }
+    original(game_speed, requested_mode);
+}
+
+static BOOL install_host_skill_isolation(uint8_t *base) {
+    uint32_t initial_scale_bits;
+    if (base == NULL || host_skill_camera_hook.installed ||
+        host_skill_speed_hook.installed ||
+        memcmp(base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            expected_camera_manager_set_render_camera_entry,
+            sizeof(expected_camera_manager_set_render_camera_entry)) != 0 ||
+        memcmp(base + RVA_GAME_SPEED_SET_MODE,
+            expected_game_speed_set_mode_entry,
+            sizeof(expected_game_speed_set_mode_entry)) != 0 ||
+        memcmp(base + RVA_FIXED_ALTERNATE_SPEED,
+            expected_fixed_alternate_speed,
+            sizeof(expected_fixed_alternate_speed)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    memcpy(&initial_scale_bits, base + RVA_FIXED_ALTERNATE_SPEED,
+        sizeof(initial_scale_bits));
+    host_skill_original_alternate_speed_bits = initial_scale_bits;
+    host_skill_speed_override_active = FALSE;
+    host_remote_skill_camera_active = FALSE;
+    host_remote_skill_camera_suppression_logged = FALSE;
+    host_skill_speed_trace_state = -1;
+    InterlockedExchange(&host_remote_skill_activation_depth, 0);
+    if (!SudekiMpInstallInlineHook(
+            &host_skill_camera_hook,
+            base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            expected_camera_manager_set_render_camera_entry,
+            sizeof(expected_camera_manager_set_render_camera_entry),
+            preserve_host_tal_camera) ||
+        !SudekiMpInstallInlineHook(
+            &host_skill_speed_hook,
+            base + RVA_GAME_SPEED_SET_MODE,
+            expected_game_speed_set_mode_entry,
+            sizeof(expected_game_speed_set_mode_entry),
+            preserve_host_realtime)) {
+        DWORD error = GetLastError();
+        (void)SudekiMpRestoreInlineHook(&host_skill_speed_hook);
+        (void)SudekiMpRestoreInlineHook(&host_skill_camera_hook);
+        SetLastError(error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL restore_host_skill_isolation(void) {
+    BOOL speed_restored;
+    BOOL camera_restored;
+    DWORD first_error = ERROR_SUCCESS;
+
+    InterlockedExchange(&host_remote_skill_activation_depth, 0);
+    host_remote_skill_camera_active = FALSE;
+    if (host_skill_speed_override_active &&
+        !set_host_skill_realtime_scale(FALSE)) {
+        return FALSE;
+    }
+    speed_restored = SudekiMpRestoreInlineHook(&host_skill_speed_hook);
+    if (!speed_restored) first_error = GetLastError();
+    camera_restored = SudekiMpRestoreInlineHook(&host_skill_camera_hook);
+    if (!camera_restored && first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    if (!speed_restored || !camera_restored) {
+        SetLastError(first_error == ERROR_SUCCESS ?
+            ERROR_WRITE_FAULT : first_error);
+        return FALSE;
+    }
+    host_skill_original_alternate_speed_bits = 0u;
+    host_skill_speed_override_active = FALSE;
+    host_remote_skill_camera_suppression_logged = FALSE;
+    host_skill_speed_trace_state = -1;
+    return TRUE;
 }
 
 static BOOL restore_lan_arena_frame_hooks(void) {
@@ -270,6 +451,75 @@ static BOOL fill_actor_snapshot(
     snapshot->hp = resource_snapshot_value(hit_points);
     snapshot->sp = resource_snapshot_value(skill_points);
     return TRUE;
+}
+
+static void host_apply_skill_state(
+    unsigned int actor_index,
+    SudekiMpCleanroomActor actor,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    void *character;
+    SudekiMpCharacterSkillState state;
+    BOOL active;
+
+    if (actor_index >= 2u || snapshot == NULL) return;
+    character = SudekiMpCleanroomEngineActorEntity(actor);
+    if (character == NULL ||
+        !SudekiMpObserveCharacterSkill(character, &state)) {
+        if (actor_index == 1u) {
+            host_remote_skill_camera_active = FALSE;
+            host_remote_skill_camera_suppression_logged = FALSE;
+        }
+        host_actor_previous_skill_active[actor_index] = FALSE;
+        return;
+    }
+    active = state.active != 0u && state.slot >= 0 && state.slot < 6;
+    if (active && (!host_actor_previous_skill_active[actor_index] ||
+                   host_actor_skill_slot[actor_index] !=
+                       (uint8_t)state.slot)) {
+        ++host_actor_skill_sequence[actor_index];
+        if (host_actor_skill_sequence[actor_index] == 0u) {
+            host_actor_skill_sequence[actor_index] = 1u;
+        }
+        host_actor_skill_slot[actor_index] = (uint8_t)state.slot;
+        host_actor_skill_cost[actor_index] = state.cost;
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_skill phase=started actor=%s "
+            "sequence=%u slot=%u cost=%lu "
+            "policy=native_cskill_observation_host_authoritative\r\n",
+            actor_index == 0u ? "Tal" : "Ailish",
+            (unsigned int)host_actor_skill_sequence[actor_index],
+            (unsigned int)host_actor_skill_slot[actor_index],
+            (unsigned long)host_actor_skill_cost[actor_index]);
+    }
+    if (actor_index == 1u && host_remote_skill_camera_active && !active &&
+        host_actor_previous_skill_active[actor_index]) {
+        host_remote_skill_camera_active = FALSE;
+        host_remote_skill_camera_suppression_logged = FALSE;
+        SudekiMpLogWrite(
+            "lan_arena_runtime event=host_remote_skill_camera "
+            "state=released owner=Tal remote_caster=Ailish "
+            "policy=native_remote_skill_task_completed\r\n");
+    }
+    host_actor_previous_skill_active[actor_index] = active;
+    snapshot->skill_sequence = host_actor_skill_sequence[actor_index];
+    if (snapshot->skill_sequence != 0u) {
+        snapshot->skill_slot = host_actor_skill_slot[actor_index];
+        snapshot->skill_cost = host_actor_skill_cost[actor_index];
+        snapshot->skill_active = active ? 1u : 0u;
+    }
+}
+
+static void reset_host_skill_tracking(void) {
+    ZeroMemory(host_actor_skill_sequence,
+        sizeof(host_actor_skill_sequence));
+    ZeroMemory(host_actor_skill_slot, sizeof(host_actor_skill_slot));
+    ZeroMemory(host_actor_skill_cost, sizeof(host_actor_skill_cost));
+    ZeroMemory(host_actor_previous_skill_active,
+        sizeof(host_actor_previous_skill_active));
+    host_remote_skill_camera_active = FALSE;
+    host_remote_skill_camera_suppression_logged = FALSE;
+    InterlockedExchange(&host_remote_skill_activation_depth, 0);
 }
 
 enum {
@@ -1060,6 +1310,10 @@ static void host_publish_snapshot(DWORD now_ms) {
         0u, now_ms, combat_enabled, &snapshot.tal);
     host_apply_presentation_state(
         1u, now_ms, combat_enabled, &snapshot.ailish);
+    host_apply_skill_state(
+        0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal);
+    host_apply_skill_state(
+        1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
@@ -1234,11 +1488,14 @@ static void lan_arena_control_update_observer(
     BOOL remote_native_weak_active = FALSE;
     BOOL remote_aim_valid = FALSE;
     BOOL remote_combat_toggle_requested = FALSE;
+    BOOL remote_skill_requested = FALSE;
+    uint8_t remote_skill_slot = 0u;
     BOOL ranged_native_ready = TRUE;
     BOOL ranged_native_ready_known = FALSE;
     uint16_t ranged_authored_delay_half = 0u;
     uint32_t ranged_repeat_interval_ms =
         HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
+    unsigned int operator_skill_slot;
     BOOL witness_exact;
     BOOL status_available;
     DWORD now_ms;
@@ -1456,6 +1713,20 @@ static void lan_arena_control_update_observer(
         ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
             SUDEKIMP_CLEANROOM_AILISH);
     }
+    if (SudekiMpLanArenaHostInputTakeSkillSlot(&operator_skill_slot)) {
+        void *tal = SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_TAL);
+        SudekiMpSkillActivationResult skill_result =
+            SudekiMpActivateCharacterSkillSlot(
+                tal, (int)operator_skill_slot);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_skill phase=%s actor=Tal "
+            "slot=%u validation=%d use=%u "
+            "policy=local_test_rail_same_native_slot_adapter\r\n",
+            SudekiMpSkillActivationStatusName(skill_result.status),
+            operator_skill_slot, skill_result.validation_result,
+            (unsigned int)skill_result.use_result);
+    }
     if (!SudekiMpCleanroomEngineDummyPresent() &&
         !arena_dummy_spawn_attempted) {
         float tal_position[3];
@@ -1501,6 +1772,10 @@ static void lan_arena_control_update_observer(
             input.weak_attack_pressed != 0u;
         remote_combat_toggle_requested = remote_combat_toggle_requested ||
             input.cleanroom_combat_test_pressed != 0u;
+        if (!remote_skill_requested && input.skill_pressed != 0u) {
+            remote_skill_requested = TRUE;
+            remote_skill_slot = input.skill_slot;
+        }
     }
     if (remote_combat_toggle_requested &&
         !SudekiMpLanArenaHostInputRequestRemoteCombatToggle()) {
@@ -1508,6 +1783,25 @@ static void lan_arena_control_update_observer(
             "lan_arena_runtime event=host_remote_cleanroom_combat_test "
             "phase=rejected win32_error=%lu\r\n",
             (unsigned long)GetLastError());
+    }
+    if (remote_skill_requested) {
+        SudekiMpSkillActivationResult skill_result;
+        host_remote_skill_camera_suppression_logged = FALSE;
+        InterlockedIncrement(&host_remote_skill_activation_depth);
+        skill_result = SudekiMpActivateCharacterSkillSlot(
+            ailish, remote_skill_slot);
+        InterlockedDecrement(&host_remote_skill_activation_depth);
+        if (skill_result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED) {
+            host_remote_skill_camera_active = TRUE;
+        }
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_remote_skill phase=%s actor=Ailish "
+            "slot=%u validation=%d use=%u "
+            "policy=host_resolves_actor_slot_runs_native_validator_and_use\r\n",
+            SudekiMpSkillActivationStatusName(skill_result.status),
+            (unsigned int)remote_skill_slot,
+            skill_result.validation_result,
+            (unsigned int)skill_result.use_result);
     }
     remote_aim_valid = host_remote_aim_x != 0 || host_remote_aim_y != 0 ||
         host_remote_aim_z != 0;
@@ -1983,12 +2277,26 @@ BOOL SudekiMpInstallLanArenaRuntime(
         SetLastError(error);
         return FALSE;
     }
+    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+        !install_host_skill_isolation(base)) {
+        DWORD error = GetLastError();
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
+        SudekiMpUninstallLanArenaCampaignGuard();
+        (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
+        original_frame_end = NULL;
+        original_render_start = NULL;
+        SetLastError(error);
+        return FALSE;
+    }
     if ((config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
          !SudekiMpInstallLanArenaHostInput(game_module)) ||
         (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
          (!SudekiMpInstallLanArenaClientInput(game_module) ||
           !SudekiMpInitializeLanArenaClientReplica(game_module)))) {
         DWORD error = GetLastError();
+        if (!restore_host_skill_isolation()) return FALSE;
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
         SudekiMpUninstallLanArenaClientInput();
         SudekiMpUninstallLanArenaHostInput();
@@ -2012,6 +2320,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
             &lan_arena_control_observer_gate);
         SudekiMpControlUpdateObserverGateDrain(
             &lan_arena_control_observer_gate);
+        if (!restore_host_skill_isolation()) return FALSE;
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
         SudekiMpUninstallLanArenaClientInput();
         SudekiMpUninstallLanArenaHostInput();
@@ -2070,6 +2379,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
+    reset_host_skill_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -2120,6 +2430,10 @@ void SudekiMpUninstallLanArenaRuntime(void) {
      * restored, keep the complete runtime and original callbacks alive and
      * pin this DLL rather than leaving a dangling game-code call. */
     if (!rollback_lan_arena_frame_hooks()) return;
+    if (!restore_host_skill_isolation()) {
+        retain_runtime_after_hook_restore_failure(GetLastError());
+        return;
+    }
     SudekiMpControlUpdateObserverGateDisable(&lan_arena_control_observer_gate);
     (void)SudekiMpControlSeparationUnregisterUpdateObserver(
         &lan_arena_control_observer_owner);
@@ -2180,6 +2494,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
+    reset_host_skill_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -2249,6 +2564,7 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
+    reset_host_skill_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;
@@ -2352,6 +2668,7 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         sizeof(host_actor_presentation_valid));
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
+    reset_host_skill_tracking();
     host_last_remote_input_at_ms = 0u;
     host_remote_input_quiesced = FALSE;
     host_remote_input_logged = FALSE;

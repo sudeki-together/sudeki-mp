@@ -5,9 +5,9 @@
 
 #define LAN_HEADER_SIZE 20u
 #define LAN_HELLO_SIZE 53u
-#define LAN_INPUT_SIZE 27u
+#define LAN_INPUT_SIZE 29u
 #define LAN_ACTION_EVENT_SIZE 7u
-#define LAN_ACTOR_ACTION_HISTORY_OFFSET 47u
+#define LAN_ACTOR_ACTION_HISTORY_OFFSET 55u
 #define LAN_ACTOR_SIZE (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
     (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
 #define LAN_ENEMY_SIZE 21u
@@ -113,6 +113,9 @@ int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input) {
         input->weak_attack_held <= 1u &&
         input->ranged_first_person_active <= 1u &&
         input->cleanroom_combat_test_pressed <= 1u &&
+        input->skill_pressed <= 1u &&
+        input->skill_slot < 6u &&
+        (input->skill_pressed != 0u || input->skill_slot == 0u) &&
         valid_input_aim(input);
 }
 
@@ -188,6 +191,9 @@ static int valid_actor_snapshot(
         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
         actor->action_phase_valid > 1u ||
         actor->action_retirement_valid > 1u ||
+        actor->skill_active > 1u ||
+        actor->skill_slot >= 6u ||
+        actor->skill_cost > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
         actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_BLOCK ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
@@ -225,7 +231,10 @@ static int valid_actor_snapshot(
           actor->action_sequence == 0u)) ||
         (!actor->action_retirement_valid &&
          (actor->action_terminal_phase_q8 != 0u ||
-          actor->idle_entry_phase_q8 != 0u))) {
+          actor->idle_entry_phase_q8 != 0u)) ||
+        (actor->skill_sequence == 0u &&
+         (actor->skill_active != 0u || actor->skill_slot != 0u ||
+          actor->skill_cost != 0u))) {
         return 0;
     }
     facing_length = sqrtf(actor->facing_x * actor->facing_x +
@@ -292,7 +301,11 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     write_u16(output + 41u, actor->action_terminal_phase_q8);
     write_u16(output + 43u, actor->idle_entry_phase_q8);
     output[45] = actor->action_retirement_valid;
-    output[46] = actor->action_history_count;
+    write_u16(output + 46u, actor->skill_sequence);
+    output[48] = actor->skill_slot;
+    output[49] = actor->skill_active;
+    write_u32(output + 50u, actor->skill_cost);
+    output[54] = actor->action_history_count;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
          ++index) {
         uint8_t *entry = output + LAN_ACTOR_ACTION_HISTORY_OFFSET +
@@ -333,7 +346,11 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->action_terminal_phase_q8 = read_u16(input + 41u);
     actor->idle_entry_phase_q8 = read_u16(input + 43u);
     actor->action_retirement_valid = input[45];
-    actor->action_history_count = input[46];
+    actor->skill_sequence = read_u16(input + 46u);
+    actor->skill_slot = input[48];
+    actor->skill_active = input[49];
+    actor->skill_cost = read_u32(input + 50u);
+    actor->action_history_count = input[54];
     if (actor->action_history_count >
             SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) return 0;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
@@ -399,6 +416,8 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             output[24] = packet->body.input.weak_attack_held;
             output[25] = packet->body.input.ranged_first_person_active;
             output[26] = packet->body.input.cleanroom_combat_test_pressed;
+            output[27] = packet->body.input.skill_pressed;
+            output[28] = packet->body.input.skill_slot;
             *size = LAN_INPUT_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
@@ -515,7 +534,8 @@ int SudekiMpLanArenaDecodePacket(
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_INPUT:
             if (payload_size != LAN_INPUT_SIZE || payload[23] > 1u ||
-                payload[24] > 1u || payload[25] > 1u || payload[26] > 1u) {
+                payload[24] > 1u || payload[25] > 1u || payload[26] > 1u ||
+                payload[27] > 1u || payload[28] >= 6u) {
                 return 0;
             }
             packet->body.input.sequence = read_u32(payload);
@@ -531,6 +551,8 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.input.weak_attack_held = payload[24];
             packet->body.input.ranged_first_person_active = payload[25];
             packet->body.input.cleanroom_combat_test_pressed = payload[26];
+            packet->body.input.skill_pressed = payload[27];
+            packet->body.input.skill_slot = payload[28];
             return packet->body.input.sequence == packet->sequence &&
                 SudekiMpLanArenaInputValid(&packet->body.input);
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:

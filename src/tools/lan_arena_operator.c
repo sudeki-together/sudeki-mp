@@ -35,6 +35,18 @@ static BOOL valid_melee_sequence(const wchar_t *pattern) {
     return TRUE;
 }
 
+static const wchar_t *skill_event_name(unsigned int slot) {
+    static const wchar_t *const names[6] = {
+        SUDEKIMP_LAN_ARENA_SKILL_ZERO_EVENT,
+        SUDEKIMP_LAN_ARENA_SKILL_ONE_EVENT,
+        SUDEKIMP_LAN_ARENA_SKILL_TWO_EVENT,
+        SUDEKIMP_LAN_ARENA_SKILL_THREE_EVENT,
+        SUDEKIMP_LAN_ARENA_SKILL_FOUR_EVENT,
+        SUDEKIMP_LAN_ARENA_SKILL_FIVE_EVENT
+    };
+    return slot < 6u ? names[slot] : NULL;
+}
+
 int wmain(int argc, wchar_t **argv) {
     HANDLE event;
     DWORD error;
@@ -45,6 +57,7 @@ int wmain(int argc, wchar_t **argv) {
     const wchar_t *sequence_pattern = NULL;
     unsigned int pulse_count = 1u;
     DWORD duration_ms = 0u;
+    DWORD skill_slot = 0u;
     if (argc == 2 && wcscmp(argv[1], L"combat-toggle") == 0) {
         command = L"combat-toggle";
         event_name = SUDEKIMP_LAN_ARENA_CLIENT_COMBAT_TOGGLE_EVENT;
@@ -88,13 +101,17 @@ int wmain(int argc, wchar_t **argv) {
     } else if (argc == 2 && wcscmp(argv[1], L"camera-right") == 0) {
         command = L"camera-right";
         event_name = SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_RIGHT_EVENT;
+    } else if (argc == 3 && wcscmp(argv[1], L"skill") == 0 &&
+               parse_duration(argv[2], 0u, 5u, &skill_slot)) {
+        command = L"skill";
+        event_name = skill_event_name((unsigned int)skill_slot);
     } else {
         fwprintf(stderr,
             L"usage: SudekiMP.LanArenaOperator.exe "
             L"combat-toggle|weak|weak-down|weak-up|weak-hold MS|combo MS|"
             L"sequence WWS MS|"
             L"strong|sweep|block|"
-            L"camera-left|camera-right\n");
+            L"camera-left|camera-right|skill SLOT(0-5)\n");
         return 2;
     }
     if (sequence_pattern != NULL) {
@@ -218,7 +235,12 @@ int wmain(int argc, wchar_t **argv) {
         wprintf(L"LAN operator command %ls completed (%u pulses, %lu ms).\n",
             command, pulse_count, (unsigned long)duration_ms);
     } else {
-        wprintf(L"LAN operator command %ls queued.\n", command);
+        if (wcscmp(command, L"skill") == 0) {
+            wprintf(L"LAN operator command %ls queued (slot %lu).\n",
+                command, (unsigned long)skill_slot);
+        } else {
+            wprintf(L"LAN operator command %ls queued.\n", command);
+        }
     }
     return 0;
 }

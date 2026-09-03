@@ -136,6 +136,9 @@ BOOL SudekiMpCleanroomEngineSetCombatMode(BOOL enabled);
 BOOL SudekiMpCleanroomEngineRefreshCombatMode(void);
 /* Hold Sudeki's native UI/control transition long enough to arm ranged actors. */
 BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void);
+/* True only while the native ranged-arm transition still owns its timer/UI
+ * lease. Callers may retry unchanged native validation after it clears. */
+BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void);
 BOOL SudekiMpCleanroomEngineFirstPersonMode(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetFirstPersonMode(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteSp(BOOL *enabled);

@@ -4309,6 +4309,10 @@ BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void) {
     return TRUE;
 }
 
+BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) {
+    return ranged_prime_pending || ranged_prime_ui_active;
+}
+
 BOOL SudekiMpCleanroomEngineFirstPersonMode(BOOL *enabled) {
     uint8_t **controller_global;
     uint8_t *controller;

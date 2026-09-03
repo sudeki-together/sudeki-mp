@@ -40,12 +40,15 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #undef CreateEventW
 
 enum {
-    TEST_IMAGE_SIZE = 0x00290000u,
+    TEST_IMAGE_SIZE = 0x002d0000u,
     TEST_RVA_RENDER_START = 0x001dce30u,
     TEST_RVA_RENDER_START_CALL = 0x0028d443u,
     TEST_RVA_RENDER_PRE_WORLD_CALL = 0x0028d539u,
     TEST_RVA_FRAME_END = 0x001dd540u,
-    TEST_RVA_FRAME_END_CALL = 0x0028d58cu
+    TEST_RVA_FRAME_END_CALL = 0x0028d58cu,
+    TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    TEST_RVA_GAME_SPEED_SET_MODE = 0x00207560u,
+    TEST_RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u
 };
 
 static int failures;
@@ -123,11 +126,26 @@ static uint8_t *call_target(uint8_t *image, uint32_t call_rva) {
 }
 
 static void prepare_native_calls(uint8_t *image) {
+    static const uint8_t camera_entry[] = {
+        0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u
+    };
+    static const uint8_t speed_entry[] = {
+        0x8bu, 0x44u, 0x24u, 0x04u, 0x89u, 0x41u, 0x24u
+    };
+    static const uint8_t native_scale[] = {
+        0x29u, 0x5cu, 0x8fu, 0x3du
+    };
     write_call(
         image, TEST_RVA_RENDER_START_CALL, TEST_RVA_RENDER_START);
     write_call(
         image, TEST_RVA_RENDER_PRE_WORLD_CALL, TEST_RVA_RENDER_START);
     write_call(image, TEST_RVA_FRAME_END_CALL, TEST_RVA_FRAME_END);
+    memcpy(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+        camera_entry, sizeof(camera_entry));
+    memcpy(image + TEST_RVA_GAME_SPEED_SET_MODE,
+        speed_entry, sizeof(speed_entry));
+    memcpy(image + TEST_RVA_FIXED_ALTERNATE_SPEED,
+        native_scale, sizeof(native_scale));
 }
 
 static SudekiMpLanArenaSessionConfig make_config(
@@ -186,9 +204,17 @@ static void verify_client_install_and_uninstall(uint8_t *image) {
 }
 
 static void verify_host_hook_scope(uint8_t *image) {
+    uint8_t original_camera[sizeof(expected_camera_manager_set_render_camera_entry)];
+    uint8_t original_speed[sizeof(expected_game_speed_set_mode_entry)];
     SudekiMpLanArenaSessionConfig config = make_config(
         SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
     prepare_native_calls(image);
+    memcpy(original_camera,
+        image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+        sizeof(original_camera));
+    memcpy(original_speed,
+        image + TEST_RVA_GAME_SPEED_SET_MODE,
+        sizeof(original_speed));
     check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
         "host runtime installs over exact native calls");
     check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
@@ -200,10 +226,20 @@ static void verify_host_hook_scope(uint8_t *image) {
     check(call_target(image, TEST_RVA_FRAME_END_CALL) ==
             (uint8_t *)(uintptr_t)&lan_arena_frame_end_entry,
         "host redirects frame-end call only");
+    check(memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            original_camera, sizeof(original_camera)) != 0 &&
+          memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
+            original_speed, sizeof(original_speed)) != 0,
+        "host redirects remote-skill camera and realtime speed seams");
     SudekiMpUninstallLanArenaRuntime();
     check(call_target(image, TEST_RVA_FRAME_END_CALL) ==
             image + TEST_RVA_FRAME_END,
         "host uninstall restores frame-end call");
+    check(memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            original_camera, sizeof(original_camera)) == 0 &&
+          memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
+            original_speed, sizeof(original_speed)) == 0,
+        "host uninstall restores remote-skill camera and speed seams");
 }
 
 static void verify_second_render_mismatch_rollback(uint8_t *image) {

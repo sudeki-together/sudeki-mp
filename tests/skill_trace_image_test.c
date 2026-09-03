@@ -60,6 +60,9 @@ enum {
     RVA_CHARACTER_INPUT_HANDLER = 0x000277b0u,
     RVA_CHARACTER_INPUT_VTABLE_SLOT = 0x002c9f84u,
     RVA_APPLY_DAMAGE = 0x000d21d0u,
+    RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
+    RVA_GAME_SPEED_SET_MODE = 0x00207560u,
+    RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
     RVA_COLLISION_DAMAGE = 0x00138870u,
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
     RVA_ARBITER_COMBAT_INPUT = 0x000db0e0u,
@@ -213,7 +216,6 @@ enum {
     RVA_LIFECYCLE_AI_MANAGER_GLOBAL = 0x00409de4u,
     RVA_SCRIPT_METHOD_BINDING_CALL = 0x001c4c2fu,
     RVA_SCRIPT_BINDING_INVOKE = 0x002351c0u,
-    RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
     RVA_GROUP_PLAYERS_GET_PLAYER_GROUP = 0x000246d0u,
     RVA_GEL_POINTER_RESOLVE_ENTITY = 0x001bf4e0u,
     RVA_TRACKED_ENTITY_CLEANUP = 0x000015e0u,
@@ -3169,6 +3171,14 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+        if (!SudekiMpLanArenaClientCameraInputAllowed(FALSE, FALSE) ||
+            !SudekiMpLanArenaClientCameraInputAllowed(FALSE, TRUE) ||
+            !SudekiMpLanArenaClientCameraInputAllowed(TRUE, FALSE) ||
+            SudekiMpLanArenaClientCameraInputAllowed(TRUE, TRUE)) {
+            fputs("FAIL: LAN client skill-camera input ownership mismatch\n",
+                stderr);
+            ++failures;
+        }
     }
     /* The harness maps sections without applying PE base relocations.  Put the
      * exact animation methods used by the LAN replica at their mapped-image
@@ -3320,6 +3330,58 @@ int wmain(int argc, wchar_t **argv) {
         image[RVA_APPLY_DAMAGE] = saved_apply_damage_byte;
         if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
             fputs("FAIL: LAN client damage-authority mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_camera_byte =
+            image[RVA_CAMERA_MANAGER_SET_RENDER_CAMERA];
+        image[RVA_CAMERA_MANAGER_SET_RENDER_CAMERA] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched skill camera isolation\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_CAMERA_MANAGER_SET_RENDER_CAMERA] = saved_camera_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client skill-camera mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_speed_byte = image[RVA_GAME_SPEED_SET_MODE];
+        image[RVA_GAME_SPEED_SET_MODE] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched skill speed isolation\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_GAME_SPEED_SET_MODE] = saved_speed_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client skill-speed mismatch restore was sticky\n",
+                stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_scale_byte = image[RVA_FIXED_ALTERNATE_SPEED];
+        image[RVA_FIXED_ALTERNATE_SPEED] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched skill time scale\n",
+                stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_FIXED_ALTERNATE_SPEED] = saved_scale_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client skill-time mismatch restore was sticky\n",
                 stderr);
             ++failures;
         }
@@ -3516,7 +3578,10 @@ int wmain(int argc, wchar_t **argv) {
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
-                image + RVA_ARBITER_MOVEMENT) {
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) ==
+                image + RVA_QUICK_SKILL_ACTION ||
+            relative_call_target(image + RVA_USE_CALL) == image + RVA_USE) {
             fputs("FAIL: LAN client input hooks were not installed\n", stderr);
             ++failures;
         }
@@ -3556,10 +3621,34 @@ int wmain(int argc, wchar_t **argv) {
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
-                image + RVA_ARBITER_MOVEMENT) {
+                image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) !=
+                image + RVA_QUICK_SKILL_ACTION ||
+            relative_call_target(image + RVA_USE_CALL) != image + RVA_USE) {
             fputs("FAIL: LAN client input hooks were not restored\n", stderr);
             ++failures;
         }
+    }
+    {
+        int32_t saved_use_displacement =
+            *(int32_t *)(image + RVA_USE_CALL + 1u);
+        *(int32_t *)(image + RVA_USE_CALL + 1u) ^= 1;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: LAN client input accepted mismatched skill Use call\n",
+                stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaClientInput();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+            relative_call_target(image + RVA_QUICK_SKILL_ACTION_CALL) !=
+                image + RVA_QUICK_SKILL_ACTION ||
+            *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
+                image + RVA_QUICK_MENU_INPUT) {
+            fputs("FAIL: LAN skill Use mismatch did not roll back prior hooks\n",
+                stderr);
+            ++failures;
+        }
+        *(int32_t *)(image + RVA_USE_CALL + 1u) = saved_use_displacement;
     }
     {
         uint8_t saved_quick_menu_entry = image[RVA_QUICK_MENU_INPUT];

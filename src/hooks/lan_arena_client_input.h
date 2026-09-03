@@ -25,9 +25,16 @@ BOOL SudekiMpLanArenaClientRangedWeakHeld(
     BOOL first_person_active,
     BOOL raw_weak_held
 );
+/* Pure camera ownership policy: during Ailish's authenticated native skill
+ * camera, ordinary first-person/orbit events must not reach that camera. */
+BOOL SudekiMpLanArenaClientCameraInputAllowed(
+    BOOL authenticated,
+    BOOL local_skill_camera_active
+);
 
 /* Cleanroom-only test control. Campaign combat is authored by Sudeki's
  * dungeon/world triggers and the resulting native flag is replicated. */
 void SudekiMpLanArenaClientRequestCombatToggle(void);
+BOOL SudekiMpLanArenaClientRequestSkillSlot(unsigned int slot);
 
 #endif

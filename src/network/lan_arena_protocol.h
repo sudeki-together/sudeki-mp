@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 18u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 19u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413138u /* "LA18" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413139u /* "LA19" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 576u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -151,6 +151,10 @@ typedef struct SudekiMpLanArenaInput {
      * flag. This field merely lets either arena window exercise that same
      * transition without pretending a player owns combat state. */
     uint8_t cleanroom_combat_test_pressed;
+    /* One edge names a bounded actor-local CSkill slot. The host resolves it
+     * against its own Ailish object and still runs Sudeki's validator. */
+    uint8_t skill_pressed;
+    uint8_t skill_slot;
 } SudekiMpLanArenaInput;
 
 typedef struct SudekiMpLanArenaActionEvent {
@@ -188,6 +192,13 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     uint16_t action_terminal_phase_q8;
     uint16_t idle_entry_phase_q8;
     uint8_t action_retirement_valid;
+    /* Host-observed native CSkill state. `skill_sequence` advances once per
+     * admitted activation; the replica resolves the slot locally and runs
+     * the same native presentation task without gaining damage authority. */
+    uint16_t skill_sequence;
+    uint8_t skill_slot;
+    uint8_t skill_active;
+    uint32_t skill_cost;
     uint8_t action_history_count;
     /* The latest semantic state alone can skip a fast combo stage between
      * 20 Hz snapshots. Keep a bounded chronological journal of host-observed

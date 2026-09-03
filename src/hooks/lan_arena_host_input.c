@@ -48,6 +48,7 @@ static HANDLE operator_strong_attack_event;
 static HANDLE operator_sweep_attack_event;
 static HANDLE operator_block_event;
 static HANDLE operator_action_ack_event;
+static HANDLE operator_skill_events[6];
 static DWORD operator_trace_until_ms;
 static uint8_t *host_game_base;
 
@@ -98,6 +99,20 @@ static LanArenaHostOperatorAction take_operator_action(void) {
         LAN_ARENA_HOST_OPERATOR_BLOCK);
 #undef TAKE_OPERATOR_EVENT
     return action;
+}
+
+BOOL SudekiMpLanArenaHostInputTakeSkillSlot(unsigned int *slot) {
+    unsigned int index;
+    if (slot == NULL) return FALSE;
+    for (index = 0u; index < 6u; ++index) {
+        if (operator_skill_events[index] != NULL &&
+            WaitForSingleObject(
+                operator_skill_events[index], 0u) == WAIT_OBJECT_0) {
+            *slot = index;
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 static void service_operator_action(void) {
@@ -300,10 +315,31 @@ BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module) {
         NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_BLOCK_EVENT);
     operator_action_ack_event = CreateEventW(
         NULL, FALSE, FALSE, SUDEKIMP_LAN_ARENA_HOST_ACTION_ACK_EVENT);
+    {
+        static const wchar_t *const skill_names[6] = {
+            SUDEKIMP_LAN_ARENA_SKILL_ZERO_EVENT,
+            SUDEKIMP_LAN_ARENA_SKILL_ONE_EVENT,
+            SUDEKIMP_LAN_ARENA_SKILL_TWO_EVENT,
+            SUDEKIMP_LAN_ARENA_SKILL_THREE_EVENT,
+            SUDEKIMP_LAN_ARENA_SKILL_FOUR_EVENT,
+            SUDEKIMP_LAN_ARENA_SKILL_FIVE_EVENT
+        };
+        unsigned int index;
+        for (index = 0u; index < 6u; ++index) {
+            operator_skill_events[index] = CreateEventW(
+                NULL, FALSE, FALSE, skill_names[index]);
+        }
+    }
     if (operator_weak_attack_event == NULL ||
         operator_strong_attack_event == NULL ||
         operator_sweep_attack_event == NULL || operator_block_event == NULL ||
-        operator_action_ack_event == NULL) {
+        operator_action_ack_event == NULL ||
+        operator_skill_events[0] == NULL ||
+        operator_skill_events[1] == NULL ||
+        operator_skill_events[2] == NULL ||
+        operator_skill_events[3] == NULL ||
+        operator_skill_events[4] == NULL ||
+        operator_skill_events[5] == NULL) {
         SudekiMpUninstallLanArenaHostInput();
         return FALSE;
     }
@@ -315,6 +351,7 @@ BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module) {
 }
 
 void SudekiMpUninstallLanArenaHostInput(void) {
+    unsigned int skill_index;
     SudekiMpRestoreInlineHook(&controller_combat_hook);
     SudekiMpRestoreRelativeCallHook(&normal_movement_hook);
     SudekiMpRestoreRelativeCallHook(&alternate_movement_hook);
@@ -323,6 +360,12 @@ void SudekiMpUninstallLanArenaHostInput(void) {
     combat_toggle_was_down = FALSE;
     operator_trace_until_ms = 0u;
     host_game_base = NULL;
+    for (skill_index = 0u; skill_index < 6u; ++skill_index) {
+        if (operator_skill_events[skill_index] != NULL) {
+            CloseHandle(operator_skill_events[skill_index]);
+            operator_skill_events[skill_index] = NULL;
+        }
+    }
     if (operator_action_ack_event != NULL) {
         CloseHandle(operator_action_ack_event);
         operator_action_ack_event = NULL;
