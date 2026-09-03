@@ -12,6 +12,7 @@
 #include "network/lan_arena_authority.h"
 #include "network/lan_arena_endpoint.h"
 #include "network/lan_arena_replica.h"
+#include "network/lan_arena_shared_simulation.h"
 #include "network/lan_arena_tal_combo_graph.h"
 
 #include <math.h>
@@ -56,6 +57,7 @@ static SudekiMpRelativeCallHook lan_arena_render_pre_world_hook;
 static FrameEndFunction original_frame_end;
 static RenderStartFunction original_render_start;
 static BOOL runtime_installed;
+static SudekiMpLanArenaSharedSimulation canonical_simulation;
 static BOOL host_remote_ailish_owned;
 static BOOL host_ailish_spawn_attempted;
 static BOOL client_remote_tal_owned;
@@ -849,6 +851,7 @@ static void host_capture_native_action_edges(DWORD now_ms) {
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
+    SudekiMpLanArenaNativeWorldObservation world_observation;
     BOOL combat_enabled = FALSE;
 
     if (host_last_snapshot_at_ms != 0u &&
@@ -877,7 +880,7 @@ static void host_publish_snapshot(DWORD now_ms) {
     host_apply_presentation_state(
         1u, now_ms, combat_enabled, &snapshot.ailish);
     snapshot.host_tick = now_ms;
-    snapshot.match_state = 1u;
+    snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
     {
         float dummy_position[3];
@@ -896,6 +899,27 @@ static void host_publish_snapshot(DWORD now_ms) {
                 SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
         }
     }
+    if (!SudekiMpLanArenaSharedSimulationSessionExact(
+            &canonical_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+            status.session_token) &&
+        !SudekiMpLanArenaSharedSimulationBegin(
+            &canonical_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+            status.session_token)) {
+        return;
+    }
+    world_observation.host_tick = now_ms;
+    world_observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
+    world_observation.combat_enabled = combat_enabled ? 1u : 0u;
+    world_observation.native_combat_observed = 1u;
+    if (!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+            &canonical_simulation, status.session_token,
+            &world_observation, &snapshot) ||
+        !SudekiMpLanArenaSharedSimulationReadFrame(
+            &canonical_simulation, &snapshot, NULL)) {
+        return;
+    }
     if (SudekiMpLanArenaSessionSendSnapshot(&snapshot)) {
         host_last_snapshot_at_ms = now_ms;
         if (!host_snapshot_stream_logged) {
@@ -903,7 +927,7 @@ static void host_publish_snapshot(DWORD now_ms) {
             SudekiMpLogFormat(
                 "lan_arena_runtime event=host_snapshot_stream phase=active "
                 "cadence_ms=50 actors=Tal,Ailish enemies=%u "
-                "policy=shared_simulation_outcomes_native_world_combat_flag_replicated\r\n",
+                "policy=canonical_simulation_native_world_observation_replicated\r\n",
                 (unsigned int)snapshot.enemy_count);
         }
     }
@@ -1774,6 +1798,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
         return FALSE;
     }
     runtime_installed = TRUE;
+    SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
     client_replica_stream_logged = FALSE;
@@ -1884,6 +1909,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     original_frame_end = NULL;
     original_render_start = NULL;
     runtime_installed = FALSE;
+    SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
     client_replica_stream_logged = FALSE;
@@ -1971,6 +1997,7 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     dummy_released = release_arena_dummy();
     SudekiMpLanArenaSessionStop(TRUE);
     SudekiMpResetLanArenaClientReplica();
+    SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_snapshot_stream_logged = FALSE;
     client_replica_stream_logged = FALSE;
     client_replica_discard_logged = FALSE;
@@ -2041,6 +2068,7 @@ BOOL SudekiMpLanArenaRuntimeJoinEndpoint(const char *endpoint) {
         return FALSE;
     }
     SudekiMpLanArenaSessionStop(TRUE);
+    SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     strcpy(runtime_remote_ipv4, parsed_ipv4);
     runtime_config.remote_ipv4 = runtime_remote_ipv4;
     runtime_config.port = parsed_port;
@@ -2073,6 +2101,7 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         return FALSE;
     }
     SudekiMpLanArenaSessionStop(TRUE);
+    SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
     host_ailish_spawn_attempted = FALSE;

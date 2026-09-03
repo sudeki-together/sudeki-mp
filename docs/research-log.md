@@ -4936,3 +4936,15 @@ renderer. The same run entered combat through the cleanroom-only native group
 transition and the client mirrored the resulting combat bit; no network role
 authored a separate combat state. Both processes remained connected with no
 fatal, exception, or `R6025` event through the trace.
+
+Development then moved to `codex/shared-simulation`. The first extraction adds
+a process-independent `lan_arena_shared_simulation` reducer with canonical
+native-world and read-only replica node roles that are separate from Tal and
+Ailish player roles. Canonical commits require a fresh session token, a
+wrap-safe newer host tick, a valid frame, and an explicit native combat
+observation; that observation overwrites the candidate combat bit. Replica
+nodes can accept authenticated newer frames but cannot commit native world
+state. The current host and client snapshot paths now pass through those two
+respective nodes. Transaction, role, token, malformed-frame, stale-tick, and
+tick-wrap tests pass, establishing a dedicated-server migration seam without
+changing the current listen-server transport.

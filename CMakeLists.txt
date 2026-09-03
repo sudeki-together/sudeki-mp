@@ -62,6 +62,7 @@ add_library(SudekiMP SHARED
     src/input/local_input_hub.c
     src/input/key_binding.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_endpoint.c
     src/network/lan_arena_authority.c
@@ -226,6 +227,8 @@ set_target_properties(SudekiMP.CallHookTest PROPERTIES
 add_executable(SudekiMP.LanArenaRuntimeHookTest
     tests/lan_arena_runtime_hook_test.c
     src/hooks/call_hook.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
 )
 target_include_directories(SudekiMP.LanArenaRuntimeHookTest PRIVATE src)
@@ -417,6 +420,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/input/bridge_receiver.c
     src/input/local_input_hub.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_replica.c
     src/network/lan_arena_session.c
@@ -567,6 +571,19 @@ target_compile_options(SudekiMP.LanArenaProtocolTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
 )
 set_target_properties(SudekiMP.LanArenaProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaSharedSimulationTest
+    tests/lan_arena_shared_simulation_test.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_shared_simulation.c
+)
+target_include_directories(SudekiMP.LanArenaSharedSimulationTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaSharedSimulationTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaSharedSimulationTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

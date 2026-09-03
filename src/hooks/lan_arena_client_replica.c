@@ -4,6 +4,7 @@
 #include "engine/log.h"
 #include "network/lan_arena_replica.h"
 #include "network/lan_arena_session.h"
+#include "network/lan_arena_shared_simulation.h"
 #include "network/lan_arena_tal_combo_graph.h"
 
 #include <math.h>
@@ -162,6 +163,7 @@ static void *set_forward;
 static uint8_t *game_base;
 static SudekiMpLanArenaReplica replica;
 static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
+static SudekiMpLanArenaSharedSimulation replica_simulation;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
 static const char *ailish_first_person_failure;
@@ -348,11 +350,21 @@ static BOOL relative_call_targets(
     return instruction + 5u + displacement == expected_target;
 }
 
+static BOOL client_session_status(
+    SudekiMpLanArenaSessionStatus *status
+) {
+    SudekiMpLanArenaSessionStatus local_status;
+    SudekiMpLanArenaSessionStatus *result =
+        status == NULL ? &local_status : status;
+    return SudekiMpLanArenaSessionGetStatus(result) &&
+        result->peer_connected &&
+        result->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        result->session_token != 0u;
+}
+
 static BOOL client_session_authenticated(void) {
     SudekiMpLanArenaSessionStatus status;
-    return SudekiMpLanArenaSessionGetStatus(&status) &&
-        status.peer_connected &&
-        status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    return client_session_status(&status);
 }
 
 static void trace_client_combat_mode(
@@ -1776,6 +1788,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     set_forward = base + RVA_POSITION_SET_FORWARD;
     game_base = base;
     SudekiMpLanArenaReplicaReset(&replica);
+    SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
@@ -1790,6 +1803,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
 void SudekiMpResetLanArenaClientReplica(void) {
     (void)restore_client_combat_mode();
     SudekiMpLanArenaReplicaReset(&replica);
+    SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     set_position = NULL;
     position_world_matrix = NULL;
     set_forward = NULL;
@@ -1807,6 +1821,7 @@ void SudekiMpResetLanArenaClientReplica(void) {
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {
     (void)restore_client_combat_mode();
     SudekiMpLanArenaReplicaReset(&replica);
+    SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
@@ -1819,18 +1834,35 @@ void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {
 
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     SudekiMpLanArenaSnapshot received;
+    SudekiMpLanArenaSnapshot accepted;
     SudekiMpLanArenaSnapshot snapshot;
+    SudekiMpLanArenaSessionStatus status;
     DWORD now = GetTickCount();
     uint32_t render_host_tick;
     unsigned int presentation_ready_mask;
     if (set_position == NULL || set_forward == NULL ||
-        !client_session_authenticated()) {
+        !client_session_status(&status)) {
         SudekiMpLanArenaClientReplicaDiscardSnapshots();
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
+    if (!SudekiMpLanArenaSharedSimulationSessionExact(
+            &replica_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
+            status.session_token) &&
+        !SudekiMpLanArenaSharedSimulationBegin(
+            &replica_simulation,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
+            status.session_token)) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
     while (SudekiMpLanArenaSessionTakeRemoteSnapshot(&received)) {
-        if (!SudekiMpLanArenaReplicaPush(&replica, &received)) return FALSE;
+        if (!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+                &replica_simulation, status.session_token, &received) ||
+            !SudekiMpLanArenaSharedSimulationReadFrame(
+                &replica_simulation, &accepted, NULL) ||
+            !SudekiMpLanArenaReplicaPush(&replica, &accepted)) return FALSE;
     }
     if (!SudekiMpLanArenaReplicaRenderClockAdvance(
             &replica, &replica_render_clock, now, &render_host_tick)) {

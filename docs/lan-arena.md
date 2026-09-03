@@ -12,6 +12,17 @@ The cross-module input-to-authority-to-wire-to-replay contract and its next
 research targets are maintained in the
 [LAN arena combat synchronization graph](lan-arena-combat-graph.md).
 
+The first shared-simulation extraction is now explicit in
+`lan_arena_shared_simulation`. Player identity and simulation authority are
+separate concepts. A canonical native-world node commits validated frames;
+replica nodes may only accept authenticated, monotonically newer frames for
+presentation. Both are pinned to a fresh session token. A canonical commit
+requires an explicit native combat observation, which replaces the candidate
+frame's combat bit before validation. Consequently, neither Tal input,
+Ailish input, nor a client presentation adapter can author combat mode. The
+listen server currently places the canonical node in Tal's process, but the
+contract has no Tal/host dependency and can move to a dedicated process.
+
 This profile never reads, writes, copies, or transfers campaign saves. It
 always launches Sudeki's cleanroom `testroom`, and it does not share hooks or
 state with the local split-screen, fixed-three, roster, or custom QuickMenu

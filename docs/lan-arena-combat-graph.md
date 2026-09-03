@@ -29,6 +29,11 @@ identities in protocol `LA14`.
   damage paths run once in the shared simulation, as they do in the proven
   local co-op path. Sudeki's world trigger—not a player role—authors the combat
   flag, and snapshots distribute that observed state to every client.
+- `lan_arena_shared_simulation` distinguishes the canonical native-world node
+  from player roles. It requires a session-token-exact native combat
+  observation before committing a canonical frame; replicas can only accept
+  authenticated newer frames. This is the migration seam for a later
+  dedicated simulation process.
 - Cleanup follows the established camera/control/AI reverse-release order.
 - Renderer readiness is actor-local. Ailish's unavailable first-person/world
   graph cannot suppress Tal, and Tal readiness cannot authorize Ailish.
