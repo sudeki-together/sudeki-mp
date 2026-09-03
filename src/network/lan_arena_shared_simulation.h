@@ -30,6 +30,11 @@ typedef struct SudekiMpLanArenaNativeWorldObservation {
     uint8_t native_enemies_observed;
 } SudekiMpLanArenaNativeWorldObservation;
 
+typedef struct SudekiMpLanArenaActorObservation {
+    SudekiMpLanArenaActorSnapshot actor;
+    uint8_t native_actor_observed;
+} SudekiMpLanArenaActorObservation;
+
 typedef struct SudekiMpLanArenaSharedSimulation {
     SudekiMpLanArenaSnapshot frame;
     SudekiMpLanArenaInput player_input[2];
@@ -74,15 +79,16 @@ int SudekiMpLanArenaSharedSimulationReadPlayerInput(
     uint32_t *revision
 );
 
-/* Canonical frames are admitted only with a matching native-world
- * observation.  The observation overwrites match/combat, actor resources,
- * and enemy state so neither a player input nor an adapter-generated
- * candidate can author those domains. */
+/* The reducer composes a canonical frame from two independently observed
+ * actors and the native-world consequence domain.  The world observation
+ * owns match/combat, actor resources, and enemy state; actor observations own
+ * only their transforms and process-independent presentation. */
 int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     SudekiMpLanArenaSharedSimulation *simulation,
     uint64_t session_token,
     const SudekiMpLanArenaNativeWorldObservation *observation,
-    const SudekiMpLanArenaSnapshot *candidate
+    const SudekiMpLanArenaActorObservation *tal,
+    const SudekiMpLanArenaActorObservation *ailish
 );
 
 /* Replicas may consume authenticated canonical frames but cannot commit a

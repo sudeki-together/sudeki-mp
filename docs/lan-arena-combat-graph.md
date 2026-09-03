@@ -35,9 +35,11 @@ identities in protocol `LA15`.
   authenticated newer frames. This is the migration seam for a later
   dedicated simulation process.
 - The native-world observation also replaces both players' HP/SP and the
-  complete bounded enemy set before a candidate frame commits. Actor input and
-  presentation adapters therefore cannot manufacture damage, healing,
-  resource use, enemy identity, spawn/despawn, or incapacitation.
+  complete bounded enemy set. Tal and Ailish presentation/transforms arrive as
+  separate actor observations, and the reducer composes a fresh frame instead
+  of trusting a monolithic candidate. Actor input and presentation adapters
+  therefore cannot manufacture damage, healing, resource use, enemy identity,
+  spawn/despawn, or incapacitation.
 - Player input crosses a separate actor-scoped contribution boundary. Socket
   receipt alone is not acknowledged: the canonical reducer must validate and
   admit a monotonically newer Tal or Ailish input before its sequence can be

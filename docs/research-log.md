@@ -4978,3 +4978,12 @@ wire validator runs. Tests deliberately forge candidate resources and omit
 each observation capability; only the complete native observation commits.
 This lets later actor-owned movement/presentation contributions remain narrow
 without accidentally granting them damage, healing, enemy, or match authority.
+
+Canonical frame composition is now structurally split as well. The runtime no
+longer hands the reducer one mostly complete candidate snapshot. It supplies a
+Tal actor observation, an Ailish actor observation, and the native-world
+observation independently; the reducer builds a zeroed frame and copies only
+the domain each source owns. Both actor observations must be present, exact,
+and actor-typed before any commit. Focused tests reject missing observation
+proof and verify that actor transforms survive while forged actor-resource
+fields are replaced by native-world values.

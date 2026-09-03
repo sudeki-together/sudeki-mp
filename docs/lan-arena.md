@@ -25,8 +25,9 @@ contract has no Tal/host dependency and can move to a dedicated process.
 
 The native-world observation now owns the complete shared consequence domain:
 match/combat state, Tal and Ailish HP/SP, and the bounded enemy set. A candidate
-snapshot supplies presentation and transforms, but those world fields are
-replaced from the verified observation before the frame can commit. This keeps
+snapshot no longer exists at the canonical boundary. Independent Tal and
+Ailish actor observations supply only presentation and transforms; the reducer
+combines them with the world observation into a fresh frame. This keeps
 future actor-owned input or movement contributions from quietly becoming
 damage, resource, enemy-spawn, or match authority.
 

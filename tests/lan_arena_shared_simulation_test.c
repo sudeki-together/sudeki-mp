@@ -66,9 +66,35 @@ static SudekiMpLanArenaNativeWorldObservation native_observation(
     return result;
 }
 
+static SudekiMpLanArenaActorObservation actor_observation(
+    const SudekiMpLanArenaActorSnapshot *source
+) {
+    SudekiMpLanArenaActorObservation result;
+    memset(&result, 0, sizeof(result));
+    result.actor = *source;
+    result.native_actor_observed = 1u;
+    return result;
+}
+
+static int commit_native_frame(
+    SudekiMpLanArenaSharedSimulation *simulation,
+    uint64_t session_token,
+    const SudekiMpLanArenaNativeWorldObservation *world,
+    const SudekiMpLanArenaSnapshot *source
+) {
+    SudekiMpLanArenaActorObservation tal =
+        actor_observation(&source->tal);
+    SudekiMpLanArenaActorObservation ailish =
+        actor_observation(&source->ailish);
+    return SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+        simulation, session_token, world, &tal, &ailish);
+}
+
 static void test_native_world_owns_combat_state(void) {
     SudekiMpLanArenaSharedSimulation simulation;
     SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaActorObservation tal_observation;
+    SudekiMpLanArenaActorObservation ailish_observation;
     SudekiMpLanArenaSnapshot candidate = frame(100u);
     SudekiMpLanArenaSnapshot result;
     uint32_t revision = 0u;
@@ -88,7 +114,15 @@ static void test_native_world_owns_combat_state(void) {
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     observation.enemies[0].hp = 50u;
     observation.enemies[0].combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    tal_observation = actor_observation(&candidate.tal);
+    ailish_observation = actor_observation(&candidate.ailish);
+    tal_observation.native_actor_observed = 0u;
+    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+        &simulation, 77u, &observation,
+        &tal_observation, &ailish_observation));
+    candidate.tal.x = 3.0f;
+    candidate.ailish.x = -4.0f;
+    CHECK(commit_native_frame(
         &simulation, 77u, &observation, &candidate));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
         &simulation, &result, &revision));
@@ -101,6 +135,8 @@ static void test_native_world_owns_combat_state(void) {
     CHECK(result.enemies[0].native_entity_id ==
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID);
     CHECK(result.enemies[0].hp == 50u);
+    CHECK(result.tal.x == 3.0f);
+    CHECK(result.ailish.x == -4.0f);
     CHECK(revision == 1u);
 }
 
@@ -123,7 +159,7 @@ static void test_roles_tokens_and_ticks_fail_closed(void) {
         &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 1u));
     observation = native_observation(
         &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 0u);
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &replica, 1u, &observation, &source));
     CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
         &canonical, 1u, &source));
@@ -156,20 +192,20 @@ static void test_rejected_frame_is_transactional(void) {
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 9u));
     observation = native_observation(
         &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 0u);
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &simulation, 9u, &observation, &source));
     source.host_tick = 101u;
     observation.host_tick = 101u;
     observation.native_combat_observed = 0u;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 9u, &observation, &source));
     observation.native_combat_observed = 1u;
     observation.native_resources_observed = 0u;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 9u, &observation, &source));
     observation.native_resources_observed = 1u;
     observation.native_enemies_observed = 0u;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 9u, &observation, &source));
     observation.native_enemies_observed = 1u;
     source.host_tick = 101u;
@@ -177,7 +213,7 @@ static void test_rejected_frame_is_transactional(void) {
     source.tal.facing_z = 0.0f;
     observation.host_tick = 101u;
     observation.combat_enabled = 1u;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 9u, &observation, &source));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
         &simulation, &output, &revision));
@@ -200,20 +236,20 @@ static void test_fresh_session_invalidates_old_frame(void) {
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 11u));
     observation = native_observation(
         &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &simulation, 11u, &observation, &source));
     CHECK(SudekiMpLanArenaSharedSimulationBegin(
         &simulation,
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 12u));
     CHECK(!SudekiMpLanArenaSharedSimulationReadFrame(
         &simulation, &output, &revision));
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 11u, &observation, &source));
     source.host_tick = 1u;
     source.combat_enabled = 1u;
     observation.host_tick = 1u;
     observation.combat_enabled = 0u;
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &simulation, 12u, &observation, &source));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
         &simulation, &output, &revision));
@@ -266,7 +302,7 @@ static void test_player_input_admission_owns_snapshot_ack(void) {
     source.acknowledged_input = 999u;
     observation = native_observation(
         &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 0u);
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &canonical, 55u, &observation, &source));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
         &canonical, &output_frame, NULL));
@@ -306,21 +342,21 @@ static void test_match_lifecycle_is_monotonic(void) {
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 99u));
     observation = native_observation(
         &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &simulation, 99u, &observation, &source));
     source.host_tick = 101u;
     observation.host_tick = 101u;
     observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_WAITING;
     observation.combat_enabled = 0u;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 99u, &observation, &source));
     observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ENDED;
-    CHECK(SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(commit_native_frame(
         &simulation, 99u, &observation, &source));
     source.host_tick = 102u;
     observation.host_tick = 102u;
     observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
-    CHECK(!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
+    CHECK(!commit_native_frame(
         &simulation, 99u, &observation, &source));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
         &simulation, &output, NULL));

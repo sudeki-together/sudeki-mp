@@ -863,6 +863,8 @@ static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
     SudekiMpLanArenaNativeWorldObservation world_observation;
+    SudekiMpLanArenaActorObservation tal_observation;
+    SudekiMpLanArenaActorObservation ailish_observation;
     BOOL combat_enabled = FALSE;
 
     if (host_last_snapshot_at_ms != 0u &&
@@ -925,9 +927,15 @@ static void host_publish_snapshot(DWORD now_ms) {
     world_observation.native_combat_observed = 1u;
     world_observation.native_resources_observed = 1u;
     world_observation.native_enemies_observed = 1u;
+    ZeroMemory(&tal_observation, sizeof(tal_observation));
+    ZeroMemory(&ailish_observation, sizeof(ailish_observation));
+    tal_observation.actor = snapshot.tal;
+    tal_observation.native_actor_observed = 1u;
+    ailish_observation.actor = snapshot.ailish;
+    ailish_observation.native_actor_observed = 1u;
     if (!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
             &canonical_simulation, status.session_token,
-            &world_observation, &snapshot) ||
+            &world_observation, &tal_observation, &ailish_observation) ||
         !SudekiMpLanArenaSharedSimulationReadFrame(
             &canonical_simulation, &snapshot, NULL)) {
         return;

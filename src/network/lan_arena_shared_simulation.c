@@ -26,6 +26,15 @@ static int valid_observation(
         observation->native_enemies_observed == 1u;
 }
 
+static int valid_actor_observation(
+    const SudekiMpLanArenaActorObservation *observation,
+    uint8_t expected_actor_type
+) {
+    return observation != NULL &&
+        observation->native_actor_observed == 1u &&
+        observation->actor.actor_type == expected_actor_type;
+}
+
 static int next_tick_allowed(
     const SudekiMpLanArenaSharedSimulation *simulation,
     uint32_t host_tick
@@ -155,21 +164,25 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     SudekiMpLanArenaSharedSimulation *simulation,
     uint64_t session_token,
     const SudekiMpLanArenaNativeWorldObservation *observation,
-    const SudekiMpLanArenaSnapshot *candidate
+    const SudekiMpLanArenaActorObservation *tal,
+    const SudekiMpLanArenaActorObservation *ailish
 ) {
     SudekiMpLanArenaSnapshot committed;
     if (!SudekiMpLanArenaSharedSimulationSessionExact(
             simulation,
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
             session_token) ||
-        !valid_observation(observation) || candidate == NULL ||
-        candidate->host_tick != observation->host_tick ||
+        !valid_observation(observation) ||
+        !valid_actor_observation(tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
+        !valid_actor_observation(ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE) ||
         !next_match_state_allowed(simulation, observation->match_state) ||
         !next_tick_allowed(simulation, observation->host_tick)) return 0;
-    committed = *candidate;
+    memset(&committed, 0, sizeof(committed));
     committed.host_tick = observation->host_tick;
     committed.match_state = observation->match_state;
     committed.combat_enabled = observation->combat_enabled;
+    committed.tal = tal->actor;
+    committed.ailish = ailish->actor;
     committed.tal.hp = observation->tal_hp;
     committed.tal.sp = observation->tal_sp;
     committed.ailish.hp = observation->ailish_hp;
