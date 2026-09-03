@@ -1,6 +1,7 @@
 #include "network/lan_arena_session.h"
 
 #include "engine/log.h"
+#include "network/lan_arena_authority.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -67,6 +68,36 @@ static BOOL remote_role_for_local(
         return TRUE;
     }
     return FALSE;
+}
+
+static BOOL remote_simulation_node_role_for_local(
+    SudekiMpLanArenaSimulationNodeRole local_role,
+    uint8_t *remote_role
+) {
+    if (remote_role == NULL) return FALSE;
+    if (local_role ==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) {
+        *remote_role = SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+        return TRUE;
+    }
+    if (local_role == SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) {
+        *remote_role =
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL local_topology_supported(
+    const SudekiMpLanArenaSessionConfig *config
+) {
+    return config != NULL &&
+        ((config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+          config->local_simulation_node_role ==
+              SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) ||
+         (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+          config->local_simulation_node_role ==
+              SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA));
 }
 
 static void reset_session(void) {
@@ -136,6 +167,8 @@ static void fill_hello(SudekiMpLanArenaPacket *packet, SudekiMpLanArenaPacketTyp
         SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE);
     packet->body.hello.map_id = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
     packet->body.hello.role = (uint8_t)session.config.local_role;
+    packet->body.hello.simulation_node_role =
+        (uint8_t)session.config.local_simulation_node_role;
     packet->body.hello.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     packet->body.hello.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     packet->body.hello.session_token = packet->session_token;
@@ -148,7 +181,12 @@ static BOOL handshake_valid_for_local(
 ) {
     SudekiMpLanArenaHandshakeExpectation expectation;
     uint8_t remote_role;
-    if (packet == NULL || !remote_role_for_local(session.config.local_role, &remote_role)) {
+    uint8_t remote_simulation_node_role;
+    if (packet == NULL ||
+        !remote_role_for_local(session.config.local_role, &remote_role) ||
+        !remote_simulation_node_role_for_local(
+            session.config.local_simulation_node_role,
+            &remote_simulation_node_role)) {
         if (reason != NULL) *reason = SUDEKIMP_LAN_ARENA_REJECT_MALFORMED;
         return FALSE;
     }
@@ -156,6 +194,8 @@ static BOOL handshake_valid_for_local(
     expectation.game_hash = session.config.game_hash;
     expectation.map_id = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
     expectation.expected_sender_role = remote_role;
+    expectation.expected_sender_simulation_node_role =
+        remote_simulation_node_role;
     expectation.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     expectation.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     expectation.expected_session_token = expected_token;
@@ -192,6 +232,8 @@ static void accept_host_hello(
     session.peer_pinned = 1u;
     session.connection.session_token = packet->session_token;
     session.connection.peer_role = packet->body.hello.role;
+    session.connection.peer_simulation_node_role =
+        packet->body.hello.simulation_node_role;
     session.connection.phase = SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED;
     session.connection.last_received_sequence = packet->sequence;
     session.connection.last_received_at_ms = now_ms;
@@ -203,7 +245,9 @@ static void accept_host_hello(
         return;
     }
     SudekiMpLogFormat(
-        "lan_arena_session event=host_connected token=0x%08lx%08lx port=%u role=Tal_host peer=Ailish_client\r\n",
+        "lan_arena_session event=host_connected token=0x%08lx%08lx port=%u "
+        "role=Tal_host node=canonical_native_world peer=Ailish_client "
+        "peer_node=replica\r\n",
         (unsigned long)(session.connection.session_token >> 32),
         (unsigned long)session.connection.session_token,
         session.config.port
@@ -217,13 +261,17 @@ static void accept_client_ack(const SudekiMpLanArenaPacket *packet, uint32_t now
         return;
     }
     session.connection.peer_role = packet->body.hello.role;
+    session.connection.peer_simulation_node_role =
+        packet->body.hello.simulation_node_role;
     session.connection.phase = SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED;
     session.connection.last_received_sequence = packet->sequence;
     session.connection.last_received_at_ms = now_ms;
     session.connection.sequence_initialized = 1u;
     session.last_keepalive_at_ms = now_ms;
     SudekiMpLogFormat(
-        "lan_arena_session event=client_connected token=0x%08lx%08lx role=Ailish_client peer=Tal_host\r\n",
+        "lan_arena_session event=client_connected token=0x%08lx%08lx "
+        "role=Ailish_client node=replica peer=Tal_host "
+        "peer_node=canonical_native_world\r\n",
         (unsigned long)(session.connection.session_token >> 32),
         (unsigned long)session.connection.session_token
     );
@@ -234,8 +282,7 @@ static BOOL session_start_unlocked(const SudekiMpLanArenaSessionConfig *config) 
     struct sockaddr_in bind_address;
     u_long nonblocking = 1u;
     if (config == NULL || config->game_hash == NULL ||
-        (config->local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
-         config->local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) ||
+        !local_topology_supported(config) ||
         config->port == 0u || config->port > 65535u ||
         (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
          (config->remote_ipv4 == NULL || config->remote_ipv4[0] == '\0'))) {
@@ -294,8 +341,12 @@ static BOOL session_start_unlocked(const SudekiMpLanArenaSessionConfig *config) 
         session.peer_pinned = 1u;
     }
     SudekiMpLogFormat(
-        "lan_arena_session event=start role=%s port=%u policy=direct_ipv4_udp_cleanroom_only\r\n",
+        "lan_arena_session event=start role=%s node=%s port=%u "
+        "policy=direct_ipv4_udp_cleanroom_only\r\n",
         config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ? "Tal_host" : "Ailish_client",
+        config->local_simulation_node_role ==
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ?
+            "canonical_native_world" : "replica",
         config->port
     );
     return TRUE;
@@ -370,11 +421,19 @@ static void session_poll_unlocked(uint32_t now_ms) {
         }
         if (session.connection.phase == SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) {
             SudekiMpLanArenaRejectReason reason;
+            if (!SudekiMpLanArenaPacketAllowedForNode(
+                    session.config.local_simulation_node_role,
+                    packet.type)) {
+                set_failed(SUDEKIMP_LAN_ARENA_REJECT_AUTHORITY,
+                    "packet_node_authority");
+                return;
+            }
             if (!SudekiMpLanArenaConnectionAcceptPacket(&session.connection, &packet, now_ms, &reason)) {
                 continue;
             }
             if (packet.type == SUDEKIMP_LAN_ARENA_PACKET_INPUT &&
-                session.config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+                session.config.local_simulation_node_role ==
+                    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) {
                 uint8_t latched_weak_attack = session.input_pending ?
                     session.latest_input.weak_attack_pressed : 0u;
                 uint8_t latched_combat_toggle = session.input_pending ?
@@ -398,7 +457,8 @@ static void session_poll_unlocked(uint32_t now_ms) {
                 session.input_pending = 1u;
                 session.last_input_sequence = packet.sequence;
             } else if (packet.type == SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT &&
-                       session.config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+                       session.config.local_simulation_node_role ==
+                           SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) {
                 if ((packet.body.snapshot.acknowledged_input != 0u &&
                      session.last_sent_input_sequence == 0u) ||
                     SudekiMpLanArenaSequenceNewer(
@@ -469,12 +529,18 @@ static BOOL session_get_status_unlocked(SudekiMpLanArenaSessionStatus *status) {
     status->session_token = session.connection.session_token;
     status->peer_connected = session.connection.phase == SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED;
     status->local_role = (uint8_t)session.config.local_role;
+    status->local_simulation_node_role =
+        (uint8_t)session.config.local_simulation_node_role;
+    status->peer_simulation_node_role =
+        session.connection.peer_simulation_node_role;
     return session.socket != INVALID_SOCKET;
 }
 
 static BOOL session_take_remote_input_unlocked(SudekiMpLanArenaInput *input) {
     if (input == NULL || !session.input_pending ||
         session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        session.config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
     *input = session.latest_input;
     session.input_pending = 0u;
@@ -484,6 +550,8 @@ static BOOL session_take_remote_input_unlocked(SudekiMpLanArenaInput *input) {
 static BOOL session_take_remote_snapshot_unlocked(SudekiMpLanArenaSnapshot *snapshot) {
     if (snapshot == NULL || session.snapshot_queue_count == 0u ||
         session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
+        session.config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
     *snapshot = session.snapshot_queue[session.snapshot_queue_head];
     session.snapshot_queue_head = (uint8_t)(
@@ -495,7 +563,10 @@ static BOOL session_take_remote_snapshot_unlocked(SudekiMpLanArenaSnapshot *snap
 
 static BOOL session_send_input_unlocked(const SudekiMpLanArenaInput *input) {
     SudekiMpLanArenaPacket packet;
-    if (input == NULL || session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
+    if (input == NULL ||
+        session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
+        session.config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
     memset(&packet, 0, sizeof(packet));
     packet.type = SUDEKIMP_LAN_ARENA_PACKET_INPUT;
@@ -511,7 +582,10 @@ static BOOL session_send_input_unlocked(const SudekiMpLanArenaInput *input) {
 
 static BOOL session_send_snapshot_unlocked(const SudekiMpLanArenaSnapshot *snapshot) {
     SudekiMpLanArenaPacket packet;
-    if (snapshot == NULL || session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+    if (snapshot == NULL ||
+        session.config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        session.config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
         session.connection.phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED) return FALSE;
     /* Receipt is not simulation admission.  The canonical game-thread
      * reducer supplies the newest input it actually admitted; transport only

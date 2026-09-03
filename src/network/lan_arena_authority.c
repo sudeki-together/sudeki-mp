@@ -13,20 +13,18 @@ BOOL SudekiMpLanArenaHostRemoteInputAllowed(
         native_control_state_exact && direction_finite;
 }
 
-BOOL SudekiMpLanArenaPacketAllowedForRole(
-    SudekiMpLanArenaRole local_role,
+BOOL SudekiMpLanArenaPacketAllowedForNode(
+    SudekiMpLanArenaSimulationNodeRole local_node_role,
     SudekiMpLanArenaPacketType packet_type
 ) {
-    if (local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
-        return packet_type == SUDEKIMP_LAN_ARENA_PACKET_HELLO ||
-            packet_type == SUDEKIMP_LAN_ARENA_PACKET_INPUT ||
+    if (local_node_role ==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) {
+        return packet_type == SUDEKIMP_LAN_ARENA_PACKET_INPUT ||
             packet_type == SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE ||
             packet_type == SUDEKIMP_LAN_ARENA_PACKET_END;
     }
-    if (local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
-        return packet_type == SUDEKIMP_LAN_ARENA_PACKET_HELLO_ACK ||
-            packet_type == SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT ||
-            packet_type == SUDEKIMP_LAN_ARENA_PACKET_REJECT ||
+    if (local_node_role == SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) {
+        return packet_type == SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT ||
             packet_type == SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE ||
             packet_type == SUDEKIMP_LAN_ARENA_PACKET_END;
     }

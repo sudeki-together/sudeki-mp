@@ -8,6 +8,7 @@
 
 typedef struct SudekiMpLanArenaSessionConfig {
     SudekiMpLanArenaRole local_role;
+    SudekiMpLanArenaSimulationNodeRole local_simulation_node_role;
     const char *remote_ipv4; /* client only; host binds INADDR_ANY */
     unsigned int port;
     uint32_t timeout_ms;
@@ -20,6 +21,8 @@ typedef struct SudekiMpLanArenaSessionStatus {
     uint64_t session_token;
     uint8_t peer_connected;
     uint8_t local_role;
+    uint8_t local_simulation_node_role;
+    uint8_t peer_simulation_node_role;
 } SudekiMpLanArenaSessionStatus;
 
 /* Lifecycle is deliberately independent from local input bridge sockets. The

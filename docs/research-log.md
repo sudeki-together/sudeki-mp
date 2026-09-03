@@ -4987,3 +4987,15 @@ the domain each source owns. Both actor observations must be present, exact,
 and actor-typed before any commit. Focused tests reject missing observation
 proof and verify that actor transforms survive while forged actor-resource
 fields are replaced by native-world values.
+
+Protocol `LA16` separates the handshake's player identity from its simulation
+authority. Tal/Ailish remain the fixed playable role tuple, while a second
+field identifies the canonical native-world node and the read-only replica.
+The current session profile deliberately accepts only Tal/canonical and
+Ailish/replica, but connected INPUT and SNAPSHOT direction is now authorized
+from the node role rather than inferred from the character. A peer advertising
+the correct actor with the wrong node authority is rejected during handshake;
+a wrong-direction packet after connection terminates the session without
+advancing its accepted sequence. This closes the transport side of the
+dedicated-node migration seam while preserving the existing playable listen
+server.

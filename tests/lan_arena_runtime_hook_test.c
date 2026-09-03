@@ -136,6 +136,10 @@ static SudekiMpLanArenaSessionConfig make_config(
     SudekiMpLanArenaSessionConfig config;
     memset(&config, 0, sizeof(config));
     config.local_role = role;
+    config.local_simulation_node_role =
+        role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD :
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     config.port = SUDEKIMP_LAN_ARENA_DEFAULT_PORT;
     config.timeout_ms = 1000u;
     return config;

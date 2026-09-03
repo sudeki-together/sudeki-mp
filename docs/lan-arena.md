@@ -38,7 +38,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA15`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA16`, exact GOG executable hash only. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
@@ -108,12 +108,12 @@ experiments.
   exact transition lookup confirms those conditions remain host-owned.
 - Action retirement is also part of the shared timeline. While a native action
   is active, the canonical simulation quantizes its actor-local animation
-  clock into the LA15
+  clock into the LA16
   semantic snapshot. Clients interpolate and verify that phase on their own
   actor-local selector. The first host IDLE snapshot is the retirement edge;
   there is no client-only timeout or fixed crossfade deciding when an attack
   ends.
-- Input acknowledgement is also simulation-owned in LA15. The socket layer
+- Input acknowledgement is also simulation-owned in LA16. The socket layer
   may receive and coalesce packets, but it cannot acknowledge one merely for
   reaching the host process. The canonical reducer validates and admits the
   actor-scoped contribution first; only that admitted sequence may appear in
@@ -129,12 +129,17 @@ experiments.
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The handshake validates the exact game
-hash, mod build, cleanroom map, fixed Tal/Ailish role tuple, and a fresh session
-token. Stale, duplicate, malformed, mismatched, or wrong-authority packets are
-rejected. A timeout ends the session; it never silently reconnects into the old
-session. Cleanup stops inputs, discards client replicas, and restores Ailish's
-native AI lease on the host.
+Packets are versioned and sequenced. The `LA16` handshake validates the exact
+game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
+independent canonical/replica simulation-node tuple, and a fresh session
+token. Connected packet direction is authorized by simulation node rather
+than character identity. The current playable topology still admits only
+Tal/canonical and Ailish/replica; the separation is a safe migration seam, not
+a claim that arbitrary role assignment is playable. Stale, duplicate,
+malformed, mismatched, or wrong-authority packets are rejected. A timeout ends
+the session; it never silently reconnects into the old session. Cleanup stops
+inputs, discards client replicas, and restores Ailish's native AI lease on the
+host.
 
 ## Two machines
 

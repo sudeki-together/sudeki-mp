@@ -45,6 +45,8 @@ static int run_host(unsigned int port) {
     BOOL snapshot_sent = FALSE;
     memset(&config, 0, sizeof(config));
     config.local_role = SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    config.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
     config.port = port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
@@ -100,6 +102,8 @@ static int run_client(unsigned int port) {
     BOOL input_sent = FALSE;
     memset(&config, 0, sizeof(config));
     config.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    config.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     config.remote_ipv4 = "127.0.0.1";
     config.port = port;
     config.timeout_ms = 1500u;

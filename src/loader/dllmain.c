@@ -1161,6 +1161,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST ?
                 SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL :
                 SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+        lan_arena_config.local_simulation_node_role =
+            lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD :
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
         lan_arena_config.remote_ipv4 =
             lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
                 lan_arena_host_ipv4 : NULL;
@@ -1168,10 +1172,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         lan_arena_config.timeout_ms = (uint32_t)lan_arena_timeout_ms;
         lan_arena_config.game_hash = lan_arena_game_hash;
         SudekiMpLogFormat(
-            "lan_arena_requested=true role=%s port=%d host=%s "
+            "lan_arena_requested=true role=%s node=%s port=%d host=%s "
             "policy=cleanroom_only_shared_simulation_no_campaign_state\r\n",
             lan_arena_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
                 "Tal_host" : "Ailish_client",
+            lan_arena_config.local_simulation_node_role ==
+                    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ?
+                "canonical_native_world" : "replica",
             lan_arena_port,
             lan_arena_config.remote_ipv4 == NULL ? "bind_any" : lan_arena_host_ipv4);
     }

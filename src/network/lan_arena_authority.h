@@ -13,8 +13,8 @@ BOOL SudekiMpLanArenaHostRemoteInputAllowed(
     BOOL native_control_state_exact,
     BOOL direction_finite
 );
-BOOL SudekiMpLanArenaPacketAllowedForRole(
-    SudekiMpLanArenaRole local_role,
+BOOL SudekiMpLanArenaPacketAllowedForNode(
+    SudekiMpLanArenaSimulationNodeRole local_node_role,
     SudekiMpLanArenaPacketType packet_type
 );
 BOOL SudekiMpLanArenaRemoteInputFresh(

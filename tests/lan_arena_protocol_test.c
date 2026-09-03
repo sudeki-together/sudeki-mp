@@ -14,7 +14,11 @@ static int failures;
     } \
 } while (0)
 
-static SudekiMpLanArenaPacket make_hello(uint8_t role, uint64_t token) {
+static SudekiMpLanArenaPacket make_hello(
+    uint8_t role,
+    uint8_t simulation_node_role,
+    uint64_t token
+) {
     SudekiMpLanArenaPacket packet;
     size_t i;
     memset(&packet, 0, sizeof(packet));
@@ -28,6 +32,7 @@ static SudekiMpLanArenaPacket make_hello(uint8_t role, uint64_t token) {
     }
     packet.body.hello.map_id = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
     packet.body.hello.role = role;
+    packet.body.hello.simulation_node_role = simulation_node_role;
     packet.body.hello.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     packet.body.hello.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     packet.body.hello.session_token = token;
@@ -37,12 +42,15 @@ static SudekiMpLanArenaPacket make_hello(uint8_t role, uint64_t token) {
 static void test_hello_round_trip_and_rejection(void) {
     uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
     size_t size = 0u;
-    SudekiMpLanArenaPacket source = make_hello(SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH, 0x0123456789abcdefULL);
+    SudekiMpLanArenaPacket source = make_hello(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
+        0x0123456789abcdefULL);
     SudekiMpLanArenaPacket decoded;
     SudekiMpLanArenaHandshakeExpectation expectation;
     SudekiMpLanArenaRejectReason reason = SUDEKIMP_LAN_ARENA_REJECT_NONE;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 72u);
+    CHECK(size == 73u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.type == SUDEKIMP_LAN_ARENA_PACKET_HELLO);
     CHECK(decoded.session_token == source.session_token);
@@ -50,10 +58,19 @@ static void test_hello_round_trip_and_rejection(void) {
     expectation.game_hash = source.body.hello.game_hash;
     expectation.map_id = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
     expectation.expected_sender_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    expectation.expected_sender_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     expectation.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     expectation.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     expectation.expected_session_token = source.session_token;
     CHECK(SudekiMpLanArenaHandshakeValid(&decoded.body.hello, &expectation, &reason));
+    decoded.body.hello.simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    CHECK(!SudekiMpLanArenaHandshakeValid(
+        &decoded.body.hello, &expectation, &reason));
+    CHECK(reason == SUDEKIMP_LAN_ARENA_REJECT_AUTHORITY);
+    decoded.body.hello.simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     decoded.body.hello.map_id = 99u;
     CHECK(!SudekiMpLanArenaHandshakeValid(&decoded.body.hello, &expectation, &reason));
     CHECK(reason == SUDEKIMP_LAN_ARENA_REJECT_MAP);
@@ -61,6 +78,12 @@ static void test_hello_round_trip_and_rejection(void) {
     decoded.body.hello.game_hash[0] ^= 0xffu;
     CHECK(!SudekiMpLanArenaHandshakeValid(&decoded.body.hello, &expectation, &reason));
     CHECK(reason == SUDEKIMP_LAN_ARENA_REJECT_GAME_HASH);
+    source.body.hello.simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_INVALID;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    source.body.hello.simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     bytes[7] = 1u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
 }

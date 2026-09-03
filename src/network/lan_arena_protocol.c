@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define LAN_HEADER_SIZE 20u
-#define LAN_HELLO_SIZE 52u
+#define LAN_HELLO_SIZE 53u
 #define LAN_INPUT_SIZE 26u
 #define LAN_ACTION_EVENT_SIZE 7u
 #define LAN_ACTOR_ACTION_HISTORY_OFFSET 42u
@@ -77,6 +77,12 @@ static float read_float(const uint8_t *input) {
 static int valid_role(uint8_t role) {
     return role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
         role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+}
+
+static int valid_simulation_node_role(uint8_t role) {
+    return role ==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        role == SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
 }
 
 static int valid_coordinate(float value) {
@@ -332,6 +338,8 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
         case SUDEKIMP_LAN_ARENA_PACKET_HELLO:
         case SUDEKIMP_LAN_ARENA_PACKET_HELLO_ACK:
             if (!valid_role(packet->body.hello.role) ||
+                !valid_simulation_node_role(
+                    packet->body.hello.simulation_node_role) ||
                 packet->body.hello.map_id != SUDEKIMP_LAN_ARENA_MAP_CLEANROOM ||
                 packet->body.hello.tal_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
                 packet->body.hello.ailish_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE) {
@@ -342,9 +350,10 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             memcpy(output + 8u, packet->body.hello.game_hash, SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE);
             output[40] = packet->body.hello.map_id;
             output[41] = packet->body.hello.role;
-            output[42] = packet->body.hello.tal_type;
-            output[43] = packet->body.hello.ailish_type;
-            write_u64(output + 44u, packet->body.hello.session_token);
+            output[42] = packet->body.hello.simulation_node_role;
+            output[43] = packet->body.hello.tal_type;
+            output[44] = packet->body.hello.ailish_type;
+            write_u64(output + 45u, packet->body.hello.session_token);
             *size = LAN_HELLO_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_REJECT:
@@ -461,10 +470,11 @@ int SudekiMpLanArenaDecodePacket(
         case SUDEKIMP_LAN_ARENA_PACKET_HELLO:
         case SUDEKIMP_LAN_ARENA_PACKET_HELLO_ACK:
             if (payload_size != LAN_HELLO_SIZE || !valid_role(payload[41]) ||
+                !valid_simulation_node_role(payload[42]) ||
                 payload[40] != SUDEKIMP_LAN_ARENA_MAP_CLEANROOM ||
-                payload[42] != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
-                payload[43] != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-                read_u64(payload + 44u) != packet->session_token) {
+                payload[43] != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+                payload[44] != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+                read_u64(payload + 45u) != packet->session_token) {
                 return 0;
             }
             packet->body.hello.sequence = read_u32(payload);
@@ -472,8 +482,9 @@ int SudekiMpLanArenaDecodePacket(
             memcpy(packet->body.hello.game_hash, payload + 8u, SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE);
             packet->body.hello.map_id = payload[40];
             packet->body.hello.role = payload[41];
-            packet->body.hello.tal_type = payload[42];
-            packet->body.hello.ailish_type = payload[43];
+            packet->body.hello.simulation_node_role = payload[42];
+            packet->body.hello.tal_type = payload[43];
+            packet->body.hello.ailish_type = payload[44];
             packet->body.hello.session_token = packet->session_token;
             return packet->body.hello.sequence == packet->sequence;
         case SUDEKIMP_LAN_ARENA_PACKET_REJECT:
@@ -562,6 +573,10 @@ int SudekiMpLanArenaHandshakeValid(
     } else if (hello->role != expectation->expected_sender_role || !valid_role(hello->role) ||
                hello->tal_type != expectation->tal_type || hello->ailish_type != expectation->ailish_type) {
         result = SUDEKIMP_LAN_ARENA_REJECT_ROLE;
+    } else if (hello->simulation_node_role !=
+                   expectation->expected_sender_simulation_node_role ||
+               !valid_simulation_node_role(hello->simulation_node_role)) {
+        result = SUDEKIMP_LAN_ARENA_REJECT_AUTHORITY;
     } else if (hello->session_token == 0u ||
                (expectation->expected_session_token != 0u &&
                 hello->session_token != expectation->expected_session_token)) {

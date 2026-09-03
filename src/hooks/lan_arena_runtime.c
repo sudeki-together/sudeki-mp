@@ -814,6 +814,10 @@ static void host_capture_native_action_edges(DWORD now_ms) {
         !SudekiMpLanArenaSessionGetStatus(&status) ||
         !status.peer_connected ||
         status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status.peer_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
         !SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
     if (tal_initialized) {
         host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
@@ -871,7 +875,11 @@ static void host_publish_snapshot(DWORD now_ms) {
         (DWORD)(now_ms - host_last_snapshot_at_ms) <
             SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS) return;
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
-        status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
+        status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status.peer_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) return;
     if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
     memset(&snapshot, 0, sizeof(snapshot));
     if (!fill_actor_snapshot(
@@ -1076,7 +1084,17 @@ static void lan_arena_control_update_observer(
     witness_exact =
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
     status_available = SudekiMpLanArenaSessionGetStatus(&status);
-    if (!witness_exact || !status_available || !status.peer_connected) {
+    if (!witness_exact || !status_available || !status.peer_connected ||
+        !((status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+           status.local_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD &&
+           status.peer_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) ||
+          (status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+           status.local_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA &&
+           status.peer_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD))) {
         BOOL actors_released =
             release_host_remote_ailish("session_not_authenticated") &&
             release_client_remote_tal("session_not_authenticated");
@@ -1702,6 +1720,12 @@ BOOL SudekiMpInstallLanArenaRuntime(
 ) {
     uint8_t *base;
     if (game_module == NULL || config == NULL || runtime_installed ||
+        !((config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+           config->local_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) ||
+          (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+           config->local_simulation_node_role ==
+               SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA)) ||
         !SudekiMpLanArenaSessionStart(config)) {
         if (GetLastError() == ERROR_SUCCESS) SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;

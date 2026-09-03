@@ -651,6 +651,7 @@ add_executable(SudekiMP.LanArenaSessionTest
     tests/lan_arena_session_test.c
     src/engine/log.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_authority.c
     src/network/lan_arena_session.c
 )
 target_include_directories(SudekiMP.LanArenaSessionTest PRIVATE src)
@@ -669,6 +670,7 @@ add_executable(SudekiMP.LanArenaLoopbackPeerTest
     tests/lan_arena_loopback_peer_test.c
     src/engine/log.c
     src/network/lan_arena_protocol.c
+    src/network/lan_arena_authority.c
     src/network/lan_arena_session.c
 )
 target_include_directories(SudekiMP.LanArenaLoopbackPeerTest PRIVATE src)

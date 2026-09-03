@@ -5,15 +5,6 @@
 
 #include <stdint.h>
 
-/* The simulation role is deliberately independent of the player role.  The
- * current listen server gives the canonical role to Tal's process, but a
- * later dedicated process can own it without changing actor ownership. */
-typedef enum SudekiMpLanArenaSimulationNodeRole {
-    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_INVALID = 0,
-    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD = 1,
-    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA = 2
-} SudekiMpLanArenaSimulationNodeRole;
-
 typedef struct SudekiMpLanArenaNativeWorldObservation {
     uint32_t host_tick;
     uint32_t tal_hp;

@@ -359,6 +359,10 @@ static BOOL client_session_status(
     return SudekiMpLanArenaSessionGetStatus(result) &&
         result->peer_connected &&
         result->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        result->local_simulation_node_role ==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA &&
+        result->peer_simulation_node_role ==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD &&
         result->session_token != 0u;
 }
 

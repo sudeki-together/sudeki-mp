@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 15u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 16u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413135u /* "LA15" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413136u /* "LA16" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 512u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -84,6 +84,15 @@ typedef enum SudekiMpLanArenaRole {
     SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH = 2
 } SudekiMpLanArenaRole;
 
+/* Simulation authority is deliberately independent of player identity. The
+ * current listen-server topology pairs Tal with the canonical native world
+ * and Ailish with a replica, but the wire contract does not conflate them. */
+typedef enum SudekiMpLanArenaSimulationNodeRole {
+    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_INVALID = 0,
+    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD = 1,
+    SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA = 2
+} SudekiMpLanArenaSimulationNodeRole;
+
 typedef enum SudekiMpLanArenaPacketType {
     SUDEKIMP_LAN_ARENA_PACKET_INVALID = 0,
     SUDEKIMP_LAN_ARENA_PACKET_HELLO = 1,
@@ -116,6 +125,7 @@ typedef struct SudekiMpLanArenaHello {
     uint8_t game_hash[SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE];
     uint8_t map_id;
     uint8_t role;
+    uint8_t simulation_node_role;
     uint8_t tal_type;
     uint8_t ailish_type;
     uint64_t session_token;
@@ -216,6 +226,7 @@ typedef struct SudekiMpLanArenaHandshakeExpectation {
     const uint8_t *game_hash;
     uint8_t map_id;
     uint8_t expected_sender_role;
+    uint8_t expected_sender_simulation_node_role;
     uint8_t tal_type;
     uint8_t ailish_type;
     uint64_t expected_session_token;
@@ -237,6 +248,7 @@ typedef struct SudekiMpLanArenaConnectionState {
     uint32_t last_received_at_ms;
     uint64_t session_token;
     uint8_t peer_role;
+    uint8_t peer_simulation_node_role;
     uint8_t sequence_initialized;
 } SudekiMpLanArenaConnectionState;
 

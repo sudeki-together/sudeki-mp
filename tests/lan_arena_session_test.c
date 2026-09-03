@@ -71,6 +71,7 @@ static void fill_hello(
     SudekiMpLanArenaPacket *packet,
     SudekiMpLanArenaPacketType type,
     SudekiMpLanArenaRole role,
+    SudekiMpLanArenaSimulationNodeRole simulation_node_role,
     uint32_t sequence,
     uint64_t token
 ) {
@@ -83,6 +84,8 @@ static void fill_hello(
     memcpy(packet->body.hello.game_hash, game_hash, sizeof(game_hash));
     packet->body.hello.map_id = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
     packet->body.hello.role = (uint8_t)role;
+    packet->body.hello.simulation_node_role =
+        (uint8_t)simulation_node_role;
     packet->body.hello.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
     packet->body.hello.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     packet->body.hello.session_token = token;
@@ -133,16 +136,34 @@ static void test_host_session(void) {
     closesocket(reservation);
     memset(&config, 0, sizeof(config));
     config.local_role = SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    config.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     config.port = host_port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
+    CHECK(!SudekiMpLanArenaSessionStart(&config));
+    CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
+    config.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
     CHECK(SudekiMpLanArenaSessionStart(&config));
     memset(&host_address, 0, sizeof(host_address));
     host_address.sin_family = AF_INET;
     host_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     host_address.sin_port = htons((u_short)host_port);
     fill_hello(&packet, SUDEKIMP_LAN_ARENA_PACKET_HELLO,
-        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH, 1u, token);
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+        1u, token);
+    CHECK(send_packet(peer, &host_address, &packet));
+    SudekiMpLanArenaSessionPoll(90u);
+    CHECK(receive_packet(peer, &packet, &source));
+    CHECK(packet.type == SUDEKIMP_LAN_ARENA_PACKET_REJECT);
+    CHECK(packet.body.reject_reason == SUDEKIMP_LAN_ARENA_REJECT_AUTHORITY);
+    CHECK(SudekiMpLanArenaSessionGetStatus(&status));
+    CHECK(!status.peer_connected);
+    fill_hello(&packet, SUDEKIMP_LAN_ARENA_PACKET_HELLO,
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 1u, token);
     CHECK(send_packet(peer, &host_address, &packet));
     SudekiMpLanArenaSessionPoll(100u);
     CHECK(receive_packet(peer, &packet, &source));
@@ -150,6 +171,10 @@ static void test_host_session(void) {
     CHECK(packet.session_token == token);
     CHECK(SudekiMpLanArenaSessionGetStatus(&status));
     CHECK(status.peer_connected);
+    CHECK(status.local_simulation_node_role ==
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD);
+    CHECK(status.peer_simulation_node_role ==
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA);
 
     memset(&packet, 0, sizeof(packet));
     packet.type = SUDEKIMP_LAN_ARENA_PACKET_INPUT;
@@ -240,6 +265,8 @@ static void test_client_session(void) {
     if (host == INVALID_SOCKET) return;
     memset(&config, 0, sizeof(config));
     config.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    config.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     config.remote_ipv4 = "127.0.0.1";
     config.port = host_port;
     config.timeout_ms = 1500u;
@@ -250,11 +277,17 @@ static void test_client_session(void) {
     CHECK(packet.type == SUDEKIMP_LAN_ARENA_PACKET_HELLO);
     token = packet.session_token;
     fill_hello(&packet, SUDEKIMP_LAN_ARENA_PACKET_HELLO_ACK,
-        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL, 10u, token);
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+        10u, token);
     CHECK(send_packet(host, &client_address, &packet));
     SudekiMpLanArenaSessionPoll(10u);
     CHECK(SudekiMpLanArenaSessionGetStatus(&status));
     CHECK(status.peer_connected);
+    CHECK(status.local_simulation_node_role ==
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA);
+    CHECK(status.peer_simulation_node_role ==
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD);
     memset(&input, 0, sizeof(input));
     input.world_direction_z = 32767;
     CHECK(SudekiMpLanArenaSessionSendInput(&input));
@@ -293,7 +326,9 @@ static void test_client_session(void) {
     CHECK(status.phase == SUDEKIMP_LAN_ARENA_CONNECTION_TIMED_OUT);
     CHECK(status.failure == SUDEKIMP_LAN_ARENA_REJECT_TIMEOUT);
     fill_hello(&packet, SUDEKIMP_LAN_ARENA_PACKET_HELLO_ACK,
-        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL, 13u, token);
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
+        13u, token);
     CHECK(send_packet(host, &client_address, &packet));
     SudekiMpLanArenaSessionPoll(1820u);
     CHECK(SudekiMpLanArenaSessionGetStatus(&status));
