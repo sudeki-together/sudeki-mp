@@ -5,6 +5,10 @@
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
+#include "hooks/control_separation.h"
+#include "hooks/lan_arena_owner_view.h"
+#include "hooks/lan_arena_client_skill_handoff.h"
+#include "hooks/lan_arena_spirit_audio.h"
 #include "network/lan_arena_replica.h"
 #include "network/lan_arena_session.h"
 #include "network/lan_arena_shared_simulation.h"
@@ -48,6 +52,10 @@ typedef BOOL (__attribute__((thiscall)) *CameraManagerSetRenderCameraFunction)(
     void *manager, const char *name);
 typedef void (__attribute__((thiscall)) *GameSpeedSetModeFunction)(
     void *game_speed, int mode);
+typedef unsigned char (__attribute__((regparm(1)))
+    *AilishRangedPresentationRefreshFunction)(void *component);
+typedef void (__attribute__((thiscall)) *WeaponSetVisibleFunction)(
+    void *weapon, int visible);
 
 typedef struct LanArenaAnimationMethods {
     AnimationCountFunction count;
@@ -93,6 +101,7 @@ typedef struct LanArenaTalNativePresentationLease {
     int expected_selector;
     DWORD submitted_at_ms;
     BOOL expected_selector_seen;
+    BOOL timeout_logged;
     BOOL active;
 } LanArenaTalNativePresentationLease;
 
@@ -102,9 +111,24 @@ typedef struct LanArenaNativeSkillPresentationLease {
     uint16_t seen_sequence;
     uint8_t slot;
     BOOL native_started;
+    BOOL active_seen;
     BOOL completion_logged;
     BOOL ranged_prime_requested;
+    SudekiMpLanArenaClientSkillRetryGate retry_gate;
+    BOOL retry_exhaustion_logged;
+    BOOL host_presentation_logged;
+    int32_t host_presentation_selector;
+    uint8_t host_presentation_state;
+    BOOL drain_pending;
+    BOOL drain_logged;
+    uint16_t pending_sequence;
+    uint8_t pending_kind;
 } LanArenaNativeSkillPresentationLease;
+
+typedef struct LanArenaClientViewLease {
+    SudekiMpLanArenaOwnerViewLease owner_view;
+    uint16_t skill_sequence;
+} LanArenaClientViewLease;
 
 enum {
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
@@ -130,9 +154,15 @@ enum {
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
     RVA_GAME_SPEED_SET_MODE = 0x00207560u,
     RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
+    RVA_AILISH_RANGED_PRESENTATION_REFRESH = 0x001888f0u,
+    RVA_AILISH_RANGED_WEAPON_REATTACH_CALL = 0x00188a76u,
+    RVA_RANGED_WEAPON_REATTACH = 0x000d8280u,
+    RVA_WEAPON_SET_VISIBLE = 0x000d7e30u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
+    RVA_SCENE_MANAGER_GLOBAL = 0x00408d58u,
     CHARACTER_POSITION_OFFSET = 0x44u,
     CHARACTER_ARBITER_OFFSET = 0x90u,
+    CHARACTER_WEAPON_OFFSET = 0xc0u,
     ARBITER_CHARACTER_OFFSET = 0x10u,
     AILISH_RANGED_COMPONENT_OFFSET = 0x134u,
     AILISH_ANIMATION_TABLE_OFFSET = 0xdcu,
@@ -140,6 +170,14 @@ enum {
     AILISH_FIRST_PERSON_WRAPPER_OFFSET = 0x160u,
     AILISH_WORLD_WRAPPER_OFFSET = 0x164u,
     AILISH_FIRST_PERSON_ARBITER_FLAG = 0x00400000u,
+    WEAPON_PRIMARY_PARENT_OFFSET = 0xd4u,
+    WEAPON_PRIMARY_LOCATOR_OFFSET = 0xecu,
+    WEAPON_PRIMARY_WRAPPER_OFFSET = 0xf4u,
+    WEAPON_CURRENT_ITEM_OFFSET = 0x268u,
+    WEAPON_ACTIVE_MODEL_OFFSET = 0x3acu,
+    WEAPON_FLAGS_OFFSET = 0x3b8u,
+    WEAPON_VISIBLE_FLAG = 0x02u,
+    RENDER_OBJECT_HIDDEN_FLAG = 0x04u,
     POSITION_ATTACHED_WRAPPER_OFFSET = 0xb4u,
     /* Exact cleanroom-world presentation captured from the supported retail
      * image.  These are renderer selectors, not protocol values: the LAN
@@ -211,29 +249,53 @@ static const uint8_t expected_game_speed_set_mode_entry[] = {
 static const uint8_t expected_fixed_alternate_speed[] = {
     0x29u, 0x5cu, 0x8fu, 0x3du
 };
+static const uint8_t expected_ailish_ranged_presentation_refresh_entry[] = {
+    0x83u, 0xecu, 0x08u, 0x55u, 0x56u, 0x8bu, 0xf0u, 0x8bu,
+    0x46u, 0x10u, 0x8bu, 0xa8u, 0x90u, 0x00u, 0x00u, 0x00u
+};
+static const uint8_t expected_ranged_weapon_reattach_entry[] = {
+    0x53u, 0x55u, 0x8bu, 0x6cu, 0x24u, 0x0cu, 0x56u, 0x57u,
+    0x85u, 0xc0u, 0x74u, 0x6au
+};
+static const uint8_t expected_weapon_set_visible_entry[] = {
+    0x8au, 0x44u, 0x24u, 0x04u, 0x8bu, 0x91u, 0x04u, 0x02u,
+    0x00u, 0x00u, 0x02u, 0xc0u, 0x32u, 0x81u, 0xb8u, 0x03u,
+    0x00u, 0x00u
+};
 
 static PositionSetterFunction set_position;
 static PositionWorldMatrixFunction position_world_matrix;
+static AilishRangedPresentationRefreshFunction
+    ailish_ranged_presentation_refresh;
+static WeaponSetVisibleFunction weapon_set_visible;
+static void *ranged_weapon_reattach;
 static void *set_forward;
 static uint8_t *game_base;
 static SudekiMpLanArenaReplica replica;
 static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
 static SudekiMpLanArenaSharedSimulation replica_simulation;
+static SudekiMpLanArenaSpiritAudioCursor spirit_audio_cursor;
+static BOOL spirit_audio_replay_failure_logged;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
 static LanArenaTalNativePresentationLease tal_native_presentation_lease;
 static LanArenaNativeSkillPresentationLease native_skill_leases[2];
+static LanArenaClientViewLease remote_tal_skill_view_lease;
 static SudekiMpInlineHook client_apply_damage_hook;
 static SudekiMpInlineHook client_skill_camera_hook;
 static SudekiMpInlineHook client_skill_speed_hook;
 static ApplyDamageFunction original_apply_damage;
 static volatile LONG client_skill_activation_depth;
 static int client_skill_activation_actor_index = -1;
+static BOOL client_remote_tal_skill_input_isolation_active;
 static uint32_t client_skill_original_alternate_speed_bits;
 static BOOL client_skill_speed_override_active;
 static BOOL client_skill_camera_suppression_logged;
 static int client_skill_speed_trace_state = -1;
+static int remote_tal_skill_view_trace_state = -1;
 static BOOL client_damage_block_logged;
+static BOOL client_replica_reset_pending;
+static BOOL client_replica_containment_pinned;
 static const char *ailish_first_person_failure;
 static SudekiMpLanArenaReplicaDiagnostics replica_diagnostics;
 static SudekiMpLanArenaSnapshot last_applied_snapshot;
@@ -246,10 +308,22 @@ static BOOL client_combat_transition_pending;
 static BOOL client_combat_transition_target;
 static DWORD client_combat_transition_started_at;
 static BOOL client_combat_transition_refresh_attempted;
+static BOOL client_ailish_ranged_refresh_attempted;
+static BOOL client_ailish_weapon_attachment_ready;
 static int client_combat_transition_trace_state = -1;
 static const char *client_ailish_combat_graph_failure;
 
 static BOOL client_ailish_combat_graph_ready(void);
+static BOOL client_session_authenticated(void);
+
+static int replay_client_spirit_audio(
+    void *context,
+    SudekiMpLanArenaSpiritAudioCue cue
+) {
+    (void)context;
+    return SudekiMpLanArenaSpiritAudioReplayLocalCue(
+        (HMODULE)game_base, cue) ? 1 : 0;
+}
 
 BOOL SudekiMpLanArenaClientTalActionPresentation(
     uint8_t action_variant,
@@ -480,6 +554,148 @@ static BOOL writable_memory(void *pointer, size_t length) {
         protection == PAGE_EXECUTE_WRITECOPY;
 }
 
+static void clear_remote_tal_skill_view_lease(void) {
+    SudekiMpLanArenaOwnerViewClear(
+        &remote_tal_skill_view_lease.owner_view);
+    memset(&remote_tal_skill_view_lease, 0,
+        sizeof(remote_tal_skill_view_lease));
+}
+
+static BOOL current_client_owner_view(
+    void **camera_mode,
+    void **scene_manager
+) {
+    if (camera_mode == NULL || scene_manager == NULL || game_base == NULL ||
+        !readable_memory(game_base + RVA_GAME_CAMERA_MODE_GLOBAL,
+            sizeof(*camera_mode)) ||
+        !readable_memory(game_base + RVA_SCENE_MANAGER_GLOBAL,
+            sizeof(*scene_manager))) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    *camera_mode = *(void **)(game_base + RVA_GAME_CAMERA_MODE_GLOBAL);
+    *scene_manager = *(void **)(game_base + RVA_SCENE_MANAGER_GLOBAL);
+    if (*camera_mode == NULL || *scene_manager == NULL) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL service_remote_tal_skill_view_storage(
+    SudekiMpLanArenaOwnerViewBoundary boundary
+) {
+    void *camera_mode;
+    void *scene_manager;
+    if (!remote_tal_skill_view_lease.owner_view.valid) return TRUE;
+    if (!current_client_owner_view(&camera_mode, &scene_manager)) {
+        return FALSE;
+    }
+    return SudekiMpLanArenaOwnerViewService(
+        &remote_tal_skill_view_lease.owner_view,
+        camera_mode, scene_manager, boundary);
+}
+
+static BOOL capture_remote_tal_skill_view_lease(uint16_t skill_sequence) {
+    void *camera_mode;
+    void *scene_manager;
+
+    if (skill_sequence == 0u ||
+        remote_tal_skill_view_lease.owner_view.valid ||
+        !current_client_owner_view(
+            &camera_mode, &scene_manager)) {
+        return FALSE;
+    }
+    if (!SudekiMpLanArenaOwnerViewCapture(
+            &remote_tal_skill_view_lease.owner_view,
+            camera_mode, scene_manager)) {
+        return FALSE;
+    }
+    remote_tal_skill_view_lease.skill_sequence = skill_sequence;
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_remote_skill_view "
+        "state=captured owner=Ailish remote_caster=Tal sequence=%u "
+        "camera=0x%08lx render_state=0x%08lx revision=%lu "
+        "policy=exact_render_only_owner_view_lease_dynamic_basis\r\n",
+        (unsigned int)skill_sequence,
+        (unsigned long)(uintptr_t)
+            remote_tal_skill_view_lease.owner_view.camera,
+        (unsigned long)(uintptr_t)
+            remote_tal_skill_view_lease.owner_view.render_state,
+        (unsigned long)
+            remote_tal_skill_view_lease.owner_view.refresh_revision);
+    return TRUE;
+}
+
+static BOOL restore_remote_tal_skill_view_storage(void) {
+    return service_remote_tal_skill_view_storage(
+        SUDEKIMP_LAN_ARENA_OWNER_VIEW_REASSERT_AFTER_REMOTE_MUTATION);
+}
+
+static BOOL verify_remote_tal_skill_view(void) {
+    return service_remote_tal_skill_view_storage(
+        SUDEKIMP_LAN_ARENA_OWNER_VIEW_VERIFY_BEFORE_RENDER);
+}
+
+static BOOL refresh_remote_tal_skill_view(void) {
+    if (!remote_tal_skill_view_lease.owner_view.valid) return TRUE;
+    if (!native_skill_leases[0].native_started ||
+        native_skill_leases[0].seen_sequence !=
+            remote_tal_skill_view_lease.skill_sequence) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    return service_remote_tal_skill_view_storage(
+        SUDEKIMP_LAN_ARENA_OWNER_VIEW_REFRESH_AFTER_OWNER_RENDER);
+}
+
+static BOOL reassert_remote_tal_skill_view(void) {
+    if (!remote_tal_skill_view_lease.owner_view.valid) return TRUE;
+    if (!native_skill_leases[0].native_started ||
+        native_skill_leases[0].seen_sequence !=
+            remote_tal_skill_view_lease.skill_sequence) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    return restore_remote_tal_skill_view_storage();
+}
+
+static BOOL retire_remote_tal_skill_view_lease(const char *reason) {
+    BOOL restored;
+    uint16_t sequence;
+    void *camera_mode;
+    void *scene_manager;
+    if (!remote_tal_skill_view_lease.owner_view.valid) return TRUE;
+    sequence = remote_tal_skill_view_lease.skill_sequence;
+    restored = current_client_owner_view(&camera_mode, &scene_manager) &&
+        SudekiMpLanArenaOwnerViewService(
+            &remote_tal_skill_view_lease.owner_view,
+            camera_mode, scene_manager,
+            SUDEKIMP_LAN_ARENA_OWNER_VIEW_RETIRE);
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_remote_skill_view "
+        "state=%s owner=Ailish remote_caster=Tal sequence=%u reason=%s "
+        "policy=restore_exact_owner_view_before_releasing_lease\r\n",
+        restored ? "restored" : "restore_rejected",
+        (unsigned int)sequence,
+        reason != NULL ? reason : "unspecified");
+    if (!restored) {
+        SetLastError(ERROR_RETRY);
+        return FALSE;
+    }
+    clear_remote_tal_skill_view_lease();
+    remote_tal_skill_view_trace_state = -1;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender(void) {
+    return refresh_remote_tal_skill_view();
+}
+
+BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void) {
+    return reassert_remote_tal_skill_view();
+}
+
 static BOOL client_ailish_first_person_camera_owns_facing(
     uint8_t *character
 ) {
@@ -504,6 +720,195 @@ static BOOL relative_call_targets(
     return instruction + 5u + displacement == expected_target;
 }
 
+__attribute__((naked, noinline, used))
+static unsigned char call_ranged_weapon_reattach(
+    void *weapon __attribute__((unused)),
+    const char *locator_name __attribute__((unused)),
+    void *function __attribute__((unused))
+) {
+    __asm__ volatile(
+        "movl 8(%esp), %eax\n\t"
+        "movl 12(%esp), %edx\n\t"
+        "pushl 4(%esp)\n\t"
+        "call *%edx\n\t"
+        "ret\n\t"
+    );
+}
+
+static const char *ranged_weapon_primary_locator_name(uint8_t *weapon) {
+    const char *locator_name;
+    unsigned int length;
+    if (!readable_memory(weapon, 0x278u)) return NULL;
+    locator_name = (*(uint32_t *)(weapon + 0x270u) & 0x80000000u) != 0u ?
+        (const char *)(weapon + 0x274u) :
+        *(const char **)(weapon + 0x274u);
+    if (locator_name == NULL) return NULL;
+    for (length = 0u; length < 64u; ++length) {
+        if (!readable_memory(locator_name + length, 1u)) return NULL;
+        if (locator_name[length] == '\0') {
+            return length == 0u ? NULL : locator_name;
+        }
+    }
+    return NULL;
+}
+
+static BOOL ailish_weapon_attachment_witness(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t **weapon_result,
+    uint8_t **render_object_result
+) {
+    uint8_t *weapon;
+    uint8_t *wrapper;
+    uint8_t *render_object;
+    if (weapon_result != NULL) *weapon_result = NULL;
+    if (render_object_result != NULL) *render_object_result = NULL;
+    if (!readable_memory(character,
+            CHARACTER_WEAPON_OFFSET + sizeof(void *)) ||
+        !readable_memory(component, 0x170u) ||
+        *(void **)(component + 0x10u) != character) {
+        return FALSE;
+    }
+    weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (!readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
+        !readable_memory(
+            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *)) ||
+        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) == NULL ||
+        *(void **)(weapon + WEAPON_PRIMARY_PARENT_OFFSET) == NULL ||
+        *(int *)(weapon + WEAPON_PRIMARY_LOCATOR_OFFSET) < 0 ||
+        (*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET) & WEAPON_VISIBLE_FLAG) == 0u) {
+        return FALSE;
+    }
+    wrapper = *(uint8_t **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET);
+    if (!readable_memory(wrapper, 0x0cu)) return FALSE;
+    render_object = *(uint8_t **)(wrapper + 0x08u);
+    if (!readable_memory(render_object, 0x38u) ||
+        (*(uint32_t *)(render_object + 0x34u) &
+         RENDER_OBJECT_HIDDEN_FLAG) != 0u) {
+        return FALSE;
+    }
+    if (weapon_result != NULL) *weapon_result = weapon;
+    if (render_object_result != NULL) *render_object_result = render_object;
+    return TRUE;
+}
+
+static BOOL refresh_ailish_ranged_presentation(void) {
+    uint8_t *character = (uint8_t *)
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    uint8_t *weapon;
+    uint8_t *render_object = NULL;
+    uint8_t *desired_wrapper;
+    const char *locator_name;
+    unsigned char refreshed;
+    unsigned char reattached;
+    BOOL desired_model_already_active;
+    const char *failure = NULL;
+    if (!client_session_authenticated() || game_base == NULL ||
+        ailish_ranged_presentation_refresh == NULL ||
+        weapon_set_visible == NULL ||
+        ranged_weapon_reattach == NULL ||
+        !readable_memory(character, 0x138u)) {
+        failure = "client_actor_unavailable";
+        goto rejected;
+    }
+    component = *(uint8_t **)(character + AILISH_RANGED_COMPONENT_OFFSET);
+    arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+    weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (!readable_memory(component, 0x170u) ||
+        *(void **)(component + 0x10u) != character) {
+        failure = "ranged_component_lease";
+        goto rejected;
+    }
+    if (!readable_memory(arbiter, 0x54u) ||
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
+        failure = "arbiter_lease";
+        goto rejected;
+    }
+    if (!readable_memory(
+            position, POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *))) {
+        failure = "position_lease";
+        goto rejected;
+    }
+    if (!readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
+        !readable_memory(
+            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *)) ||
+        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) == NULL) {
+        failure = "equipped_weapon_lease";
+        goto rejected;
+    }
+    desired_wrapper = *(uint8_t **)(component +
+        (((*(uint32_t *)(arbiter + 0x50u) &
+           AILISH_FIRST_PERSON_ARBITER_FLAG) != 0u) ?
+            AILISH_FIRST_PERSON_WRAPPER_OFFSET : AILISH_WORLD_WRAPPER_OFFSET));
+    desired_model_already_active = desired_wrapper != NULL &&
+        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) ==
+            desired_wrapper;
+    refreshed = ailish_ranged_presentation_refresh(component);
+    if ((refreshed == 0u && !desired_model_already_active) ||
+        !readable_memory(character, 0x138u) ||
+        *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
+        *(void **)(character + CHARACTER_ARBITER_OFFSET) != arbiter ||
+        *(void **)(character + CHARACTER_WEAPON_OFFSET) != weapon ||
+        *(void **)(component + 0x10u) != character ||
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
+        failure = refreshed == 0u ?
+            "native_model_switch_rejected" : "post_refresh_lease_changed";
+        goto rejected;
+    }
+    locator_name = ranged_weapon_primary_locator_name(weapon);
+    if (locator_name == NULL) {
+        failure = "weapon_locator_name";
+        goto rejected;
+    }
+    reattached = call_ranged_weapon_reattach(
+        weapon, locator_name, ranged_weapon_reattach);
+    if (reattached == 0u) {
+        failure = "native_weapon_reattach_rejected";
+        goto rejected;
+    }
+    /* The native ranged refresh owns model selection and locator attachment.
+     * Ask the native weapon object to expose the selected attachment; never
+     * write wrapper pointers, locator indices, or render flags directly. */
+    weapon_set_visible(weapon, 1);
+    if (!ailish_weapon_attachment_witness(
+            character, component, NULL, &render_object)) {
+        failure = "weapon_attachment_not_visible";
+        goto rejected;
+    }
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_ailish_weapon_attachment "
+        "state=ready character=0x%08lx component=0x%08lx weapon=0x%08lx "
+        "parent=0x%08lx locator=%ld wrapper=0x%08lx render_object=0x%08lx "
+        "weapon_flags=0x%02x model_switch=%s locator_name=%s "
+        "policy=native_actor_ranged_refresh_and_visibility_only\r\n",
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)component,
+        (unsigned long)(uintptr_t)weapon,
+        (unsigned long)(uintptr_t)*(void **)(
+            weapon + WEAPON_PRIMARY_PARENT_OFFSET),
+        (long)*(int *)(weapon + WEAPON_PRIMARY_LOCATOR_OFFSET),
+        (unsigned long)(uintptr_t)*(void **)(
+            weapon + WEAPON_PRIMARY_WRAPPER_OFFSET),
+        (unsigned long)(uintptr_t)render_object,
+        (unsigned int)*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET),
+        refreshed != 0u ? "changed" : "already_active",
+        locator_name);
+    return TRUE;
+
+rejected:
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_ailish_weapon_attachment "
+        "state=waiting reason=%s character=0x%08lx "
+        "policy=fail_closed_until_native_attachment_is_visible\r\n",
+        failure != NULL ? failure : "unknown",
+        (unsigned long)(uintptr_t)character);
+    return FALSE;
+}
+
 static BOOL client_session_status(
     SudekiMpLanArenaSessionStatus *status
 ) {
@@ -523,6 +928,36 @@ static BOOL client_session_status(
 static BOOL client_session_authenticated(void) {
     SudekiMpLanArenaSessionStatus status;
     return client_session_status(&status);
+}
+
+static BOOL set_client_remote_tal_skill_input_isolation(
+    BOOL enabled,
+    const char *reason
+) {
+    BOOL next_enabled = enabled != FALSE;
+    if (client_remote_tal_skill_input_isolation_active == next_enabled) {
+        return TRUE;
+    }
+    if (!SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(
+            next_enabled)) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_noncaster_input "
+            "state=rejected owner=Ailish remote_caster=Tal enabled=%u "
+            "reason=%s win32_error=%lu "
+            "policy=never_cross_native_tal_skill_mode_without_exact_seat0_isolation\r\n",
+            next_enabled ? 1u : 0u,
+            reason != NULL ? reason : "unspecified",
+            (unsigned long)GetLastError());
+        return FALSE;
+    }
+    client_remote_tal_skill_input_isolation_active = next_enabled;
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_noncaster_input "
+        "state=%s owner=Ailish remote_caster=Tal reason=%s "
+        "policy=local_seat0_remains_live_during_remote_native_cskill_replay\r\n",
+        next_enabled ? "isolated" : "released",
+        reason != NULL ? reason : "unspecified");
+    return TRUE;
 }
 
 static BOOL client_skill_replay_active(void) {
@@ -548,6 +983,10 @@ static int client_skill_replay_caster_index(void) {
 BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void) {
     return client_skill_replay_active() &&
         client_skill_replay_caster_index() == 1;
+}
+
+BOOL SudekiMpLanArenaClientReplicaAnySkillReplayActive(void) {
+    return client_skill_replay_active();
 }
 
 static BOOL set_client_skill_realtime_scale(BOOL enabled) {
@@ -577,6 +1016,24 @@ static BOOL set_client_skill_realtime_scale(BOOL enabled) {
         return TRUE;
     }
     return FALSE;
+}
+
+static BOOL client_native_transaction_retained(void) {
+    return InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) > 0 ||
+        native_skill_leases[0].native_started ||
+        native_skill_leases[1].native_started ||
+        tal_native_presentation_lease.active ||
+        SudekiMpCleanroomEngineRangedCombatPrimePending();
+}
+
+static BOOL client_realtime_containment_active(void) {
+    return SudekiMpLanArenaClientSkillRealtimeContainmentRequired(
+        client_session_authenticated(),
+        InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) > 0,
+        client_native_transaction_retained(),
+        client_replica_reset_pending) != 0;
 }
 
 static BOOL __attribute__((thiscall)) preserve_client_skill_camera(
@@ -619,7 +1076,7 @@ static void __attribute__((thiscall)) preserve_client_skill_realtime(
 ) {
     GameSpeedSetModeFunction original =
         (GameSpeedSetModeFunction)client_skill_speed_hook.trampoline;
-    BOOL active = client_session_authenticated();
+    BOOL active = client_realtime_containment_active();
     BOOL success = TRUE;
     int trace_state;
 
@@ -632,7 +1089,7 @@ static void __attribute__((thiscall)) preserve_client_skill_realtime(
             SudekiMpLogFormat(
                 "lan_arena_client_replica event=client_skill_speed "
                 "state=%s requested_mode=%d applied_scale=1.0 "
-                "policy=all_lan_world_and_player_views_remain_realtime\r\n",
+                "policy=authenticated_or_retained_native_transaction_remains_realtime\r\n",
                 success ? "realtime" : "rejected", requested_mode);
         }
     } else if (client_skill_speed_override_active) {
@@ -649,9 +1106,14 @@ static void __attribute__((thiscall)) preserve_client_skill_realtime(
 
 static void retire_client_skill_isolation_if_idle(void) {
     if (client_skill_replay_active()) return;
+    if (client_remote_tal_skill_input_isolation_active &&
+        !set_client_remote_tal_skill_input_isolation(
+            FALSE, "no_native_skill_replay")) {
+        return;
+    }
     client_skill_camera_suppression_logged = FALSE;
     if (client_skill_speed_override_active &&
-        !client_session_authenticated()) {
+        !client_realtime_containment_active()) {
         if (!set_client_skill_realtime_scale(FALSE)) {
             SudekiMpLogFormat(
                 "lan_arena_client_replica event=client_skill_speed "
@@ -663,17 +1125,179 @@ static void retire_client_skill_isolation_if_idle(void) {
     client_skill_speed_trace_state = -1;
 }
 
+static BOOL observe_native_skill_lease(
+    unsigned int actor_index,
+    BOOL *native_active
+) {
+    LanArenaNativeSkillPresentationLease *lease;
+    SudekiMpCharacterSkillState state;
+
+    if (actor_index >= 2u || native_active == NULL) return FALSE;
+    *native_active = FALSE;
+    lease = &native_skill_leases[actor_index];
+    if (!lease->native_started) return TRUE;
+    if (lease->character == NULL ||
+        !SudekiMpObserveCharacterSkill(lease->character, &state)) {
+        return FALSE;
+    }
+    if (state.skill != lease->skill ||
+        (state.active != 0u && state.slot != (int)lease->slot)) {
+        return FALSE;
+    }
+    *native_active = state.active != 0u;
+    if (*native_active) lease->active_seen = TRUE;
+    return TRUE;
+}
+
+static void clear_native_skill_activation_retry(
+    LanArenaNativeSkillPresentationLease *lease
+) {
+    if (lease == NULL) return;
+    lease->ranged_prime_requested = FALSE;
+    SudekiMpLanArenaClientSkillRetryReset(&lease->retry_gate);
+    lease->retry_exhaustion_logged = FALSE;
+}
+
+static void clear_native_skill_drain_marker(
+    LanArenaNativeSkillPresentationLease *lease
+) {
+    if (lease == NULL) return;
+    lease->drain_pending = FALSE;
+    lease->drain_logged = FALSE;
+    lease->pending_sequence = 0u;
+    lease->pending_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE;
+}
+
+static void mark_native_skill_drain(
+    unsigned int actor_index,
+    uint16_t pending_sequence,
+    uint8_t pending_kind,
+    const char *reason
+) {
+    LanArenaNativeSkillPresentationLease *lease;
+    if (actor_index >= 2u) return;
+    lease = &native_skill_leases[actor_index];
+    lease->drain_pending = TRUE;
+    if (!lease->drain_logged ||
+        lease->pending_sequence != pending_sequence ||
+        lease->pending_kind != pending_kind) {
+        lease->drain_logged = TRUE;
+        lease->pending_sequence = pending_sequence;
+        lease->pending_kind = pending_kind;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill_handoff "
+            "state=draining actor=%s current_sequence=%u "
+            "incoming_sequence=%u incoming_kind=%u reason=%s "
+            "policy=retain_native_task_and_damage_guard_until_positive_inactive_observation\r\n",
+            actor_index == 0u ? "Tal" : "Ailish",
+            (unsigned int)lease->seen_sequence,
+            (unsigned int)pending_sequence,
+            (unsigned int)pending_kind,
+            reason != NULL ? reason : "unspecified");
+    }
+}
+
+static BOOL retire_native_skill_lease(
+    unsigned int actor_index,
+    const char *reason
+) {
+    LanArenaNativeSkillPresentationLease *lease;
+    uint16_t sequence;
+    uint8_t slot;
+    if (actor_index >= 2u) return FALSE;
+    lease = &native_skill_leases[actor_index];
+    if (!lease->native_started) {
+        clear_native_skill_drain_marker(lease);
+        return TRUE;
+    }
+    sequence = lease->seen_sequence;
+    slot = lease->slot;
+    if (actor_index == 0u &&
+        !set_client_remote_tal_skill_input_isolation(
+            FALSE, reason != NULL ? reason : "native_task_drained")) {
+        return FALSE;
+    }
+    if (actor_index == 0u &&
+        remote_tal_skill_view_lease.owner_view.valid) {
+        if (!retire_remote_tal_skill_view_lease(
+                reason != NULL ? reason : "native_task_drained")) {
+            return FALSE;
+        }
+    }
+    lease->native_started = FALSE;
+    lease->active_seen = FALSE;
+    lease->skill = NULL;
+    lease->completion_logged = TRUE;
+    clear_native_skill_activation_retry(lease);
+    lease->host_presentation_logged = FALSE;
+    clear_native_skill_drain_marker(lease);
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_skill_handoff "
+        "state=retired actor=%s sequence=%u slot=%u reason=%s "
+        "policy=positive_native_inactive_observation_before_lease_release\r\n",
+        actor_index == 0u ? "Tal" : "Ailish",
+        (unsigned int)sequence,
+        (unsigned int)slot,
+        reason != NULL ? reason : "unspecified");
+    retire_client_skill_isolation_if_idle();
+    return TRUE;
+}
+
+static BOOL drain_native_skill_leases(const char *reason) {
+    BOOL all_drained = TRUE;
+    unsigned int actor_index;
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        LanArenaNativeSkillPresentationLease *lease =
+            &native_skill_leases[actor_index];
+        BOOL observed_active = FALSE;
+        BOOL observed;
+        if (!lease->native_started) {
+            clear_native_skill_drain_marker(lease);
+            continue;
+        }
+        observed = observe_native_skill_lease(actor_index, &observed_active);
+        if (SudekiMpLanArenaClientSkillNativeLeaseMayRetire(
+                lease->native_started, lease->active_seen,
+                observed, observed_active)) {
+            if (retire_native_skill_lease(actor_index, reason)) continue;
+            mark_native_skill_drain(
+                actor_index, lease->seen_sequence,
+                SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER,
+                "owner_view_restore_unconfirmed");
+            all_drained = FALSE;
+            continue;
+        }
+        mark_native_skill_drain(
+            actor_index, lease->seen_sequence,
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER,
+            !observed ? "native_state_unconfirmed" :
+            observed_active ? "native_task_active" :
+                "native_task_startup_gap");
+        all_drained = FALSE;
+    }
+    return all_drained;
+}
+
+static BOOL client_damage_containment_active(void) {
+    return SudekiMpLanArenaClientSkillDamageContainmentRequired(
+        client_session_authenticated(),
+        InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) > 0,
+        client_native_transaction_retained(),
+        client_replica_reset_pending) != 0;
+}
+
 static void __attribute__((thiscall)) block_client_replica_damage(
     void *combat,
     void *damage_structure
 ) {
-    if (client_session_authenticated()) {
+    if (client_damage_containment_active()) {
         if (!client_damage_block_logged) {
             client_damage_block_logged = TRUE;
             SudekiMpLogWrite(
                 "lan_arena_client_replica event=client_native_damage "
                 "state=blocked "
-                "policy=host_snapshot_is_sole_hp_and_world_authority\r\n");
+                "policy=host_authority_or_retained_native_skill_drain_owns_damage_guard\r\n");
         }
         return;
     }
@@ -702,6 +1326,7 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
     BOOL current;
     BOOL desired;
     BOOL changed;
+    BOOL lease_started;
     BOOL verified;
     DWORD error;
     if (combat_enabled > 1u ||
@@ -711,7 +1336,8 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
         SetLastError(error);
         return FALSE;
     }
-    if (!client_combat_mode_lease_valid) {
+    lease_started = !client_combat_mode_lease_valid;
+    if (lease_started) {
         client_original_combat_mode = current;
         client_combat_mode_lease_valid = TRUE;
     }
@@ -729,11 +1355,13 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (changed) {
+    if (changed || (lease_started && desired)) {
         client_combat_transition_pending = TRUE;
         client_combat_transition_target = desired;
         client_combat_transition_started_at = GetTickCount();
         client_combat_transition_refresh_attempted = !desired;
+        client_ailish_ranged_refresh_attempted = !desired;
+        client_ailish_weapon_attachment_ready = !desired;
         client_combat_transition_trace_state = 0;
         memset(presentation_leases, 0, sizeof(presentation_leases));
         memset(&ailish_first_person_lease, 0,
@@ -804,6 +1432,17 @@ static unsigned int client_combat_presentation_ready_mask(void) {
         (SudekiMpCleanroomEngineActorPresentation(
              SUDEKIMP_CLEANROOM_AILISH, &ailish) &&
          ailish.selector[0] == expected_ailish);
+    if (client_combat_transition_target && ailish_ready &&
+        client_combat_transition_refresh_attempted &&
+        !client_ailish_ranged_refresh_attempted) {
+        client_ailish_ranged_refresh_attempted = TRUE;
+        client_ailish_weapon_attachment_ready =
+            refresh_ailish_ranged_presentation();
+    }
+    if (client_combat_transition_target) {
+        ailish_ready = ailish_ready &&
+            client_ailish_weapon_attachment_ready;
+    }
     ready_mask =
         (SudekiMpLanArenaClientActorPresentationAllowed(
              0u, TRUE, tal_ready, ailish_ready) ? 0x01u : 0u) |
@@ -845,7 +1484,8 @@ static unsigned int client_combat_presentation_ready_mask(void) {
             client_combat_transition_target ? "armed" : "sheathed",
             (long)tal.selector[0], (long)ailish.selector[0],
             client_combat_transition_target ?
-                "verified_world_and_first_person_graphs" : "attached_world");
+                "verified_graphs_and_native_weapon_attachment" :
+                "attached_world");
         return 0x03u;
     }
     elapsed = GetTickCount() - client_combat_transition_started_at;
@@ -887,6 +1527,8 @@ static BOOL restore_client_combat_mode(void) {
     client_combat_transition_target = FALSE;
     client_combat_transition_started_at = 0u;
     client_combat_transition_refresh_attempted = FALSE;
+    client_ailish_ranged_refresh_attempted = FALSE;
+    client_ailish_weapon_attachment_ready = FALSE;
     client_combat_transition_trace_state = -1;
     SudekiMpLogWrite(
         verified ?
@@ -902,6 +1544,19 @@ static void clear_last_applied_frame(void) {
     memset(last_applied_characters, 0, sizeof(last_applied_characters));
     memset(last_applied_positions, 0, sizeof(last_applied_positions));
     replica_diagnostics.valid = 0u;
+}
+
+BOOL SudekiMpLanArenaClientReplicaHostCombatState(BOOL *enabled) {
+    if (enabled == NULL || !client_session_authenticated() ||
+        !replica_diagnostics.valid ||
+        last_applied_snapshot.match_state != 1u ||
+        last_applied_snapshot.combat_enabled > 1u) {
+        if (enabled != NULL) *enabled = FALSE;
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    *enabled = last_applied_snapshot.combat_enabled != 0u;
+    return TRUE;
 }
 
 static BOOL finite_position(const SudekiMpLanArenaActorSnapshot *actor) {
@@ -1153,15 +1808,58 @@ static BOOL actor_presentation_renderer(
     *ailish_component_result = NULL;
     position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
     if (actor_index == 1u) {
+        uint8_t *attached_wrapper;
+        uint8_t *first_person_wrapper;
+        uint8_t *saved_world_wrapper;
+
         if (!readable_memory(character,
                 AILISH_RANGED_COMPONENT_OFFSET + sizeof(void *))) {
             return FALSE;
         }
         component = *(uint8_t **)(
             character + AILISH_RANGED_COMPONENT_OFFSET);
-        if (!readable_memory(component, 0x168u)) return FALSE;
-        wrapper = *(uint8_t **)(
+        if (!readable_memory(component, 0x168u) ||
+            *(void **)(component + 0x10u) != character) return FALSE;
+        saved_world_wrapper = *(uint8_t **)(
             component + AILISH_WORLD_WRAPPER_OFFSET);
+        if (saved_world_wrapper != NULL) {
+            /* Retail Ailish retains the detached world presentation here.
+             * Do not let the currently attached first-person/world choice
+             * displace that exact native lease when it exists. */
+            wrapper = saved_world_wrapper;
+        } else {
+            /* The LAN cleanroom's native Player-2 construction can omit the
+             * saved +0x164 lease while leaving its world renderer attached at
+             * CPosition+0xB4. Admit only that exact out-of-combat topology:
+             * the attached and +0x160 wrappers must both exist, be readable,
+             * and be distinct. Re-read every owning slot and the component
+             * backpointer before exposing the fallback so an asynchronous
+             * native presentation switch fails closed. */
+            if (!readable_memory(position,
+                    POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *))) {
+                return FALSE;
+            }
+            attached_wrapper = *(uint8_t **)(
+                position + POSITION_ATTACHED_WRAPPER_OFFSET);
+            first_person_wrapper = *(uint8_t **)(
+                component + AILISH_FIRST_PERSON_WRAPPER_OFFSET);
+            if (!readable_memory(attached_wrapper, 0x14u) ||
+                !readable_memory(first_person_wrapper, 0x14u) ||
+                attached_wrapper == first_person_wrapper ||
+                *(void **)(character + CHARACTER_POSITION_OFFSET) !=
+                    position ||
+                *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) !=
+                    component ||
+                *(void **)(component + 0x10u) != character ||
+                *(void **)(component + AILISH_FIRST_PERSON_WRAPPER_OFFSET) !=
+                    first_person_wrapper ||
+                *(void **)(component + AILISH_WORLD_WRAPPER_OFFSET) != NULL ||
+                *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) !=
+                    attached_wrapper) {
+                return FALSE;
+            }
+            wrapper = attached_wrapper;
+        }
         *ailish_component_result = component;
     } else {
         wrapper = readable_memory(position,
@@ -1172,6 +1870,24 @@ static BOOL actor_presentation_renderer(
     *renderer_result = *(void **)(wrapper + 0x10u);
     return *renderer_result != NULL;
 }
+
+#ifdef SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING
+BOOL SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
+    void *character,
+    unsigned int actor_index,
+    void **renderer_result,
+    void **ailish_component_result
+) {
+    uint8_t *component = NULL;
+    BOOL result;
+    if (ailish_component_result == NULL) return FALSE;
+    *ailish_component_result = NULL;
+    result = actor_presentation_renderer(
+        (uint8_t *)character, actor_index, renderer_result, &component);
+    *ailish_component_result = component;
+    return result;
+}
+#endif
 
 static BOOL client_ailish_combat_graph_ready(void) {
     uint8_t *character = (uint8_t *)
@@ -1361,7 +2077,8 @@ static BOOL apply_ailish_first_person_presentation(
     if (!readable_memory(character,
             AILISH_RANGED_COMPONENT_OFFSET + sizeof(void *)) ||
         !readable_memory(component, 0x168u) ||
-        *(uint8_t **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component) {
+        *(uint8_t **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
+        *(void **)(component + 0x10u) != character) {
         return ailish_first_person_reject(
             "component_lease", component, NULL,
             idle_handle, idle_selector, fire_handle, fire_selector);
@@ -1489,13 +2206,15 @@ static BOOL service_tal_native_action_presentation(
     if (native_owns_presentation == NULL || character == NULL ||
         renderer == NULL || methods == NULL || snapshot == NULL) return FALSE;
     *native_owns_presentation = FALSE;
-    if (!combat_mode) {
-        ZeroMemory(lease, sizeof(*lease));
-        return TRUE;
-    }
+    if (!combat_mode && !lease->active) return TRUE;
     if (lease->active &&
         (lease->character != character || lease->renderer != renderer)) {
-        ZeroMemory(lease, sizeof(*lease));
+        /* A changed actor or renderer is not evidence that the asynchronous
+         * native action completed. Retain its exact lease so teardown cannot
+         * remove the actor or damage hook underneath a still-running task. */
+        *native_owns_presentation = TRUE;
+        SetLastError(ERROR_BUSY);
+        return FALSE;
     }
     if (!final_presentation_boundary &&
         snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
@@ -1530,6 +2249,7 @@ static BOOL service_tal_native_action_presentation(
         lease->expected_selector = expected_selector;
         lease->submitted_at_ms = GetTickCount();
         lease->expected_selector_seen = FALSE;
+        lease->timeout_logged = FALSE;
         lease->active = TRUE;
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_tal_native_action "
@@ -1545,8 +2265,9 @@ static BOOL service_tal_native_action_presentation(
     if (!readable_memory(lease->arbiter, 0x64u) ||
         *(void **)((uint8_t *)lease->arbiter + ARBITER_CHARACTER_OFFSET) !=
             character) {
-        ZeroMemory(lease, sizeof(*lease));
-        SetLastError(ERROR_INVALID_DATA);
+        /* Unknown/foreign ownership is fail-closed, never a retirement edge. */
+        *native_owns_presentation = TRUE;
+        SetLastError(ERROR_BUSY);
         return FALSE;
     }
     current_selector = methods->get_selector(renderer, 0, 0u);
@@ -1571,18 +2292,66 @@ static BOOL service_tal_native_action_presentation(
         return TRUE;
     }
     now_ms = GetTickCount();
-    if ((DWORD)(now_ms - lease->submitted_at_ms) >= 3000u) {
+    if ((DWORD)(now_ms - lease->submitted_at_ms) >= 3000u &&
+        !lease->timeout_logged) {
+        lease->timeout_logged = TRUE;
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_tal_native_action "
-            "state=fallback sequence=%u expected_selector=%d "
+            "state=draining sequence=%u expected_selector=%d "
             "current_selector=%d current_state=%d observed=%u "
-            "reason=native_retirement_timeout\r\n",
+            "reason=native_retirement_timeout "
+            "policy=retain_actor_damage_guard_and_hooks_until_positive_idle\r\n",
             (unsigned int)lease->submitted_sequence,
             lease->expected_selector, current_selector, current_state,
             lease->expected_selector_seen ? 1u : 0u);
-        ZeroMemory(lease, sizeof(*lease));
-        *native_owns_presentation = FALSE;
     }
+    return TRUE;
+}
+
+static BOOL drain_tal_native_action_lease(void) {
+    LanArenaAnimationMethods methods;
+    int current_selector;
+    int current_state;
+    if (!tal_native_presentation_lease.active) return TRUE;
+    if (tal_native_presentation_lease.character == NULL ||
+        tal_native_presentation_lease.renderer == NULL ||
+        tal_native_presentation_lease.arbiter == NULL ||
+        !readable_memory(tal_native_presentation_lease.character,
+            CHARACTER_ARBITER_OFFSET + sizeof(void *)) ||
+        *(void **)((uint8_t *)tal_native_presentation_lease.character +
+            CHARACTER_ARBITER_OFFSET) !=
+            tal_native_presentation_lease.arbiter ||
+        !readable_memory(tal_native_presentation_lease.arbiter, 0x64u) ||
+        *(void **)((uint8_t *)tal_native_presentation_lease.arbiter +
+            ARBITER_CHARACTER_OFFSET) !=
+            tal_native_presentation_lease.character ||
+        !animation_methods(
+            tal_native_presentation_lease.renderer, &methods)) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    current_selector = methods.get_selector(
+        tal_native_presentation_lease.renderer, 0, 0u);
+    current_state = methods.get_state(
+        tal_native_presentation_lease.renderer, 0, 0u);
+    if (current_selector ==
+            tal_native_presentation_lease.expected_selector) {
+        tal_native_presentation_lease.expected_selector_seen = TRUE;
+    }
+    if (!tal_native_presentation_lease.expected_selector_seen ||
+        current_selector != TAL_COMBAT_IDLE_SELECTOR ||
+        current_state == 192) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_tal_native_action "
+        "state=retired sequence=%u selector=%d state_value=%d "
+        "reason=authority_teardown_positive_idle\r\n",
+        (unsigned int)tal_native_presentation_lease.submitted_sequence,
+        current_selector, current_state);
+    ZeroMemory(&tal_native_presentation_lease,
+        sizeof(tal_native_presentation_lease));
     return TRUE;
 }
 
@@ -1722,33 +2491,347 @@ static BOOL ailish_idle_variant_base_matches(
         isfinite(blend_zero) && fabsf(blend_zero) <= 0.001f;
 }
 
+static BOOL apply_host_skill_presentation(
+    uint8_t *character,
+    const SudekiMpLanArenaActorSnapshot *snapshot,
+    unsigned int actor_index,
+    BOOL synchronize_phase
+) {
+    LanArenaNativeSkillPresentationLease *lease;
+    LanArenaAnimationMethods methods;
+    uint8_t *ailish_component;
+    void *renderer;
+    unsigned int submodels;
+    unsigned int channel;
+    unsigned int expected_channels;
+    SudekiMpCharacterSkillState local_skill;
+    if (character == NULL || snapshot == NULL || actor_index >= 2u) {
+        return FALSE;
+    }
+    if (snapshot->skill_presentation_valid == 0u) return TRUE;
+    expected_channels = actor_index == 0u ? 2u :
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+    if (snapshot->skill_sequence == 0u || snapshot->skill_active == 0u ||
+        snapshot->skill_presentation_channel_count != expected_channels ||
+        !actor_presentation_renderer(
+            character, actor_index, &renderer, &ailish_component) ||
+        !animation_methods(renderer, &methods)) {
+        return FALSE;
+    }
+    lease = &native_skill_leases[actor_index];
+    submodels = methods.count(renderer);
+    if (submodels == 0u || submodels > 32u) return FALSE;
+    /* Character skills already have a real local CSkill task. Never let wire
+     * values select, transition, or phase-steer its native animation bank.
+     * Treat the host tuple only as a witness when the exact actor/CSkill/
+     * sequence/slot and every current local selector/state/rate already match.
+     * A delayed replacement therefore cannot overwrite the task being drained. */
+    if (snapshot->skill_kind ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER) {
+        if (!lease->native_started || lease->character != character ||
+            lease->skill == NULL ||
+            lease->seen_sequence != snapshot->skill_sequence ||
+            lease->slot != snapshot->skill_slot ||
+            !SudekiMpObserveCharacterSkill(character, &local_skill) ||
+            local_skill.skill != lease->skill || local_skill.active == 0u ||
+            local_skill.slot != (int)lease->slot) {
+            return TRUE;
+        }
+        for (channel = 0u; channel < expected_channels; ++channel) {
+            unsigned int submodel;
+            for (submodel = 0u; submodel < submodels; ++submodel) {
+                float local_rate = methods.get_rate(
+                    renderer, (int)channel, submodel);
+                if (methods.get_selector(
+                        renderer, (int)channel, submodel) !=
+                        snapshot->skill_presentation_selector[channel] ||
+                    methods.get_state(
+                        renderer, (int)channel, submodel) !=
+                        snapshot->skill_presentation_state[channel] ||
+                    !isfinite(local_rate) || fabsf(local_rate -
+                        snapshot->skill_presentation_rate[channel]) > 0.001f) {
+                    return TRUE;
+                }
+            }
+        }
+        (void)synchronize_phase;
+        return TRUE;
+    } else if (snapshot->skill_kind ==
+                   SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) {
+        if (lease->native_started || actor_index != 0u ||
+            expected_channels != 2u ||
+            !SudekiMpLanArenaSpiritPresentationSelectorValid(
+                snapshot->skill_presentation_selector[0]) ||
+            snapshot->skill_presentation_selector[1] != 0 ||
+            snapshot->skill_presentation_state[0] != 1u ||
+            snapshot->skill_presentation_state[1] != 192u ||
+            fabsf(snapshot->skill_presentation_rate[0] - 24.0f) > 0.001f ||
+            fabsf(snapshot->skill_presentation_rate[1]) > 0.001f) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+    } else {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    for (channel = 0u; channel < expected_channels; ++channel) {
+        unsigned int submodel;
+        set_animation_channel(
+            renderer, &methods, submodels, (int)channel,
+            snapshot->skill_presentation_selector[channel],
+            channel == 0u ? 1 : 192,
+            channel == 0u ? 24.0f : 0.0f, FALSE);
+        if (synchronize_phase && !synchronize_channel_phase(
+                renderer, &methods, submodels, (int)channel,
+                snapshot->skill_presentation_time[channel])) {
+            return FALSE;
+        }
+        for (submodel = 0u; submodel < submodels; ++submodel) {
+            float actual_rate = methods.get_rate(
+                renderer, (int)channel, submodel);
+            if (methods.get_selector(
+                    renderer, (int)channel, submodel) !=
+                    snapshot->skill_presentation_selector[channel] ||
+                methods.get_state(
+                    renderer, (int)channel, submodel) !=
+                    (channel == 0u ? 1 : 192) ||
+                !isfinite(actual_rate) || fabsf(actual_rate -
+                    (channel == 0u ? 24.0f : 0.0f)) > 0.001f) {
+                return FALSE;
+            }
+        }
+    }
+    if (actor_index == 0u) {
+        const int blend_channels[2] = { 0, 3 };
+        for (channel = 0u; channel < 2u; ++channel) {
+            int blend_channel = blend_channels[channel];
+            float expected =
+                snapshot->skill_presentation_blend[blend_channel];
+            float actual;
+            methods.set_blend(renderer, blend_channel, expected);
+            actual = methods.get_blend(renderer, blend_channel);
+            if (!isfinite(actual) || fabsf(actual - expected) > 0.001f) {
+                return FALSE;
+            }
+        }
+    } else {
+        for (channel = 0u;
+             channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+             ++channel) {
+            float expected = snapshot->skill_presentation_blend[channel];
+            float actual;
+            methods.set_blend(renderer, (int)channel, expected);
+            actual = methods.get_blend(renderer, (int)channel);
+            if (!isfinite(actual) || fabsf(actual - expected) > 0.001f) {
+                return FALSE;
+            }
+        }
+    }
+    if (!lease->host_presentation_logged ||
+        lease->host_presentation_selector !=
+            snapshot->skill_presentation_selector[0] ||
+        lease->host_presentation_state !=
+            snapshot->skill_presentation_state[0]) {
+        lease->host_presentation_logged = TRUE;
+        lease->host_presentation_selector =
+            snapshot->skill_presentation_selector[0];
+        lease->host_presentation_state =
+            snapshot->skill_presentation_state[0];
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill_presentation "
+            "state=channel_transition actor=%s sequence=%u kind=%u slot=%u channels=%u "
+            "selector0=%ld state0=%u rate0=%.5f "
+            "policy=host_observed_exact_build_render_channels_no_gameplay_authority\r\n",
+            actor_index == 0u ? "Tal" : "Ailish",
+            (unsigned int)snapshot->skill_sequence,
+            (unsigned int)snapshot->skill_kind,
+            (unsigned int)snapshot->skill_slot,
+            expected_channels,
+            (long)snapshot->skill_presentation_selector[0],
+            (unsigned int)snapshot->skill_presentation_state[0],
+            snapshot->skill_presentation_rate[0]);
+    }
+    return TRUE;
+}
+
 static BOOL service_native_skill_presentation(
     uint8_t *character,
     const SudekiMpLanArenaActorSnapshot *snapshot,
     unsigned int actor_index,
+    BOOL host_combat_authorized,
     BOOL *native_owns_presentation
 ) {
     LanArenaNativeSkillPresentationLease *lease;
     SudekiMpCharacterSkillState state;
     SudekiMpSkillActivationResult result;
     SudekiMpCleanroomActor actor;
+    SudekiMpLanArenaClientSkillHandoffDecision handoff;
+    SudekiMpLanArenaClientSkillRetryDecision retry_decision;
     uint32_t topped_sp;
-    BOOL local_active;
-    BOOL retry_after_ranged_prime = FALSE;
+    BOOL local_state_observed = TRUE;
+    BOOL local_native_active = FALSE;
+    BOOL host_resources_restored;
 
     if (native_owns_presentation == NULL || character == NULL ||
         snapshot == NULL || actor_index >= 2u) return FALSE;
     *native_owns_presentation = FALSE;
     lease = &native_skill_leases[actor_index];
-    local_active = lease->native_started &&
-        lease->character == character &&
-        SudekiMpObserveCharacterSkill(character, &state) &&
-        state.active != 0u && state.skill == lease->skill &&
-        state.slot == (int)lease->slot;
+    if (snapshot->skill_sequence != 0u &&
+        snapshot->skill_kind !=
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
+        snapshot->skill_kind !=
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) {
+        return FALSE;
+    }
+    if (lease->native_started) {
+        local_state_observed = observe_native_skill_lease(
+            actor_index, &local_native_active);
+    }
+    handoff = SudekiMpLanArenaClientSkillHandoffDecide(
+        lease->native_started,
+        lease->active_seen,
+        lease->seen_sequence,
+        snapshot->skill_sequence,
+        snapshot->skill_kind,
+        local_state_observed,
+        local_native_active);
+    if (handoff == SUDEKIMP_LAN_ARENA_CLIENT_SKILL_DRAIN) {
+        mark_native_skill_drain(
+            actor_index, snapshot->skill_sequence, snapshot->skill_kind,
+            local_state_observed ? "prior_native_task_active" :
+                "prior_native_state_unconfirmed");
+        /* Do not run another native task over the retained CSkill. Host
+         * channels may still present the incoming transaction while the old
+         * task drains under the damage guard. */
+        *native_owns_presentation = TRUE;
+        return TRUE;
+    }
+    if (handoff ==
+            SUDEKIMP_LAN_ARENA_CLIENT_SKILL_RETIRE_THEN_ACCEPT) {
+        if (!retire_native_skill_lease(
+                actor_index, "implicit_host_handoff")) {
+            mark_native_skill_drain(
+                actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                "owner_view_restore_unconfirmed");
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
+        local_state_observed = TRUE;
+        local_native_active = FALSE;
+    }
 
+    /* Spirit Strike owns one retail-global transaction on the canonical
+     * world. The replica must never call CSkill::Use for it: consume only the
+     * host-observed actor-local renderer channels while leaving Ailish input,
+     * camera, resources, and gameplay simulation independent. */
+    if (snapshot->skill_kind ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) {
+        BOOL new_sequence = snapshot->skill_sequence != 0u &&
+            snapshot->skill_sequence != lease->seen_sequence;
+        if (new_sequence) {
+            lease->seen_sequence = snapshot->skill_sequence;
+            lease->character = character;
+            lease->slot = 0u;
+            lease->completion_logged = FALSE;
+            lease->ranged_prime_requested = FALSE;
+            lease->host_presentation_logged = FALSE;
+            lease->native_started = FALSE;
+            lease->active_seen = FALSE;
+            lease->skill = NULL;
+            clear_native_skill_activation_retry(lease);
+            clear_native_skill_drain_marker(lease);
+            memset(&presentation_leases[actor_index], 0,
+                sizeof(presentation_leases[actor_index]));
+            if (actor_index == 0u) {
+                memset(&tal_native_presentation_lease, 0,
+                    sizeof(tal_native_presentation_lease));
+            }
+            if (snapshot->skill_active != 0u) {
+                SudekiMpLogFormat(
+                    "lan_arena_client_replica event=client_spirit "
+                    "phase=started actor=%s sequence=%u "
+                    "policy=host_global_transaction_actor_local_presentation_only\r\n",
+                    actor_index == 0u ? "Tal" : "Ailish",
+                    (unsigned int)snapshot->skill_sequence);
+            }
+        }
+        if (snapshot->skill_sequence != 0u &&
+            snapshot->skill_sequence == lease->seen_sequence &&
+            snapshot->skill_active == 0u && !lease->completion_logged) {
+            lease->completion_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_spirit "
+                "phase=completed actor=%s sequence=%u "
+                "policy=host_global_transaction_retired_without_local_task\r\n",
+                actor_index == 0u ? "Tal" : "Ailish",
+                (unsigned int)lease->seen_sequence);
+        }
+        *native_owns_presentation = snapshot->skill_sequence != 0u &&
+            snapshot->skill_active != 0u;
+        return TRUE;
+    }
+    /* The authenticated fixed-role client may run a presentation-only native
+     * task for Tal as well as its local Ailish. Camera selection, game speed,
+     * damage, and resources are independently contained below; this is what
+     * creates native skill effects that animation-channel replication alone
+     * cannot display. Unknown actors remain snapshot-only and fail closed. */
+    if (!SudekiMpLanArenaClientNativeSkillTaskAllowed(
+            snapshot->actor_type, SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
+        BOOL new_sequence = snapshot->skill_sequence != 0u &&
+            snapshot->skill_sequence != lease->seen_sequence;
+        if (new_sequence) {
+            lease->seen_sequence = snapshot->skill_sequence;
+            lease->character = character;
+            lease->slot = snapshot->skill_slot;
+            lease->completion_logged = FALSE;
+            lease->ranged_prime_requested = FALSE;
+            lease->host_presentation_logged = FALSE;
+            lease->native_started = FALSE;
+            lease->active_seen = FALSE;
+            lease->skill = NULL;
+            clear_native_skill_activation_retry(lease);
+            clear_native_skill_drain_marker(lease);
+            if (snapshot->skill_active != 0u) {
+                SudekiMpLogFormat(
+                    "lan_arena_client_replica event=client_skill phase=started "
+                    "actor=Tal sequence=%u slot=%u cost=%lu "
+                    "policy=remote_snapshot_channels_no_process_global_native_task\r\n",
+                    (unsigned int)snapshot->skill_sequence,
+                    (unsigned int)snapshot->skill_slot,
+                    (unsigned long)snapshot->skill_cost);
+            }
+        }
+        if (snapshot->skill_sequence != 0u &&
+            snapshot->skill_sequence == lease->seen_sequence &&
+            snapshot->skill_active == 0u && !lease->completion_logged) {
+            lease->completion_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_skill phase=completed "
+                "actor=Tal sequence=%u slot=%u "
+                "policy=host_snapshot_channels_retired_without_global_task\r\n",
+                (unsigned int)lease->seen_sequence,
+                (unsigned int)lease->slot);
+        }
+        *native_owns_presentation = snapshot->skill_sequence != 0u &&
+            snapshot->skill_active != 0u;
+        return TRUE;
+    }
     if (lease->native_started &&
         lease->seen_sequence == snapshot->skill_sequence) {
-        if (local_active || snapshot->skill_active != 0u) {
+        if (local_native_active || snapshot->skill_active != 0u) {
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
+        if (!SudekiMpLanArenaClientSkillNativeLeaseMayRetire(
+                lease->native_started, lease->active_seen,
+                local_state_observed, local_native_active)) {
+            mark_native_skill_drain(
+                actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                !local_state_observed ?
+                    "same_sequence_retirement_unconfirmed" :
+                    "same_sequence_native_startup_gap");
             *native_owns_presentation = TRUE;
             return TRUE;
         }
@@ -1762,38 +2845,170 @@ static BOOL service_native_skill_presentation(
                 (unsigned int)lease->seen_sequence,
                 (unsigned int)lease->slot);
         }
-        lease->native_started = FALSE;
-        lease->skill = NULL;
-        retire_client_skill_isolation_if_idle();
+        if (!retire_native_skill_lease(
+                actor_index, "skill_completed")) {
+            mark_native_skill_drain(
+                actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                "owner_view_restore_unconfirmed");
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
     }
 
     if (snapshot->skill_sequence == 0u) return TRUE;
     if (snapshot->skill_sequence == lease->seen_sequence) {
-        if (!lease->ranged_prime_requested ||
-            snapshot->skill_active == 0u) {
-            lease->ranged_prime_requested = FALSE;
-            return TRUE;
+        if (snapshot->skill_active == 0u) {
+            clear_native_skill_activation_retry(lease);
         }
-        *native_owns_presentation = TRUE;
-        if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
-            return TRUE;
-        }
-        retry_after_ranged_prime = TRUE;
+        return TRUE;
     }
 
     /* An inactive first sighting is a baseline from before this replica's
-     * authenticated stream. Do not manufacture a historical skill. */
-    if (!retry_after_ranged_prime) {
-        lease->seen_sequence = snapshot->skill_sequence;
+     * authenticated stream. It is safe to commit because no client-native
+     * action is manufactured. Active sequences remain uncommitted until the
+     * exact local CSkill::Use call positively returns STARTED. */
+    if (snapshot->skill_active == 0u) {
+        if (lease->ranged_prime_requested &&
+            SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
+        clear_native_skill_activation_retry(lease);
+        lease->seen_sequence =
+            SudekiMpLanArenaClientSkillAdvanceCommittedSequence(
+                lease->seen_sequence, snapshot->skill_sequence, 0, 0);
         lease->character = character;
         lease->slot = snapshot->skill_slot;
+        lease->native_started = FALSE;
+        lease->active_seen = FALSE;
+        lease->skill = NULL;
         lease->completion_logged = FALSE;
-        lease->ranged_prime_requested = FALSE;
-        if (snapshot->skill_active == 0u) return TRUE;
+        lease->host_presentation_logged = FALSE;
+        clear_native_skill_drain_marker(lease);
+        return TRUE;
+    }
+
+    /* The retry gate is intentionally distinct from the committed sequence.
+     * It binds a delayed ranged-prime cycle and a finite activation budget to
+     * one authenticated transaction. Never abandon an in-flight 75 ms UI
+     * prime merely because a newer host transaction reached this renderer. */
+    if (lease->retry_gate.bound &&
+        (lease->retry_gate.sequence != snapshot->skill_sequence ||
+         lease->retry_gate.slot != snapshot->skill_slot)) {
+        if (lease->ranged_prime_requested &&
+            SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
+        clear_native_skill_activation_retry(lease);
+    }
+
+    if (snapshot->skill_active != 0u) {
+        unsigned int other_actor_index = actor_index ^ 1u;
+        LanArenaNativeSkillPresentationLease *other_lease =
+            &native_skill_leases[other_actor_index];
+        BOOL other_state_observed = TRUE;
+        BOOL other_native_active = FALSE;
+        SudekiMpLanArenaClientOtherSkillDecision other_decision;
+        if (other_lease->native_started) {
+            other_state_observed = observe_native_skill_lease(
+                other_actor_index, &other_native_active);
+        }
+        other_decision = SudekiMpLanArenaClientOtherSkillDecide(
+            other_lease->native_started,
+            other_lease->active_seen,
+            other_state_observed,
+            other_native_active);
+        if (other_decision ==
+                SUDEKIMP_LAN_ARENA_CLIENT_OTHER_SKILL_DRAIN) {
+            mark_native_skill_drain(
+                other_actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                other_state_observed ? "cross_actor_native_task_active" :
+                    "cross_actor_native_state_unconfirmed");
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
+        if (other_decision ==
+                SUDEKIMP_LAN_ARENA_CLIENT_OTHER_SKILL_RETIRE &&
+            !retire_native_skill_lease(
+                other_actor_index, "cross_actor_handoff")) {
+            mark_native_skill_drain(
+                other_actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                "cross_actor_retirement_unconfirmed");
+            *native_owns_presentation = TRUE;
+            return TRUE;
+        }
     }
 
     actor = actor_index == 0u ?
         SUDEKIMP_CLEANROOM_TAL : SUDEKIMP_CLEANROOM_AILISH;
+    if (lease->ranged_prime_requested &&
+        SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        *native_owns_presentation = TRUE;
+        return TRUE;
+    }
+    retry_decision = SudekiMpLanArenaClientSkillRetryDecide(
+        &lease->retry_gate,
+        snapshot->skill_sequence,
+        snapshot->skill_slot,
+        GetTickCount(),
+        lease->native_started);
+    if (retry_decision == SUDEKIMP_LAN_ARENA_CLIENT_SKILL_RETRY_WAIT) {
+        *native_owns_presentation = TRUE;
+        return TRUE;
+    }
+    if (retry_decision ==
+            SUDEKIMP_LAN_ARENA_CLIENT_SKILL_RETRY_EXHAUSTED) {
+        *native_owns_presentation = TRUE;
+        if (!lease->retry_exhaustion_logged) {
+            lease->retry_exhaustion_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_skill phase=failed_closed "
+                "actor=%s sequence=%u slot=%u attempts=%u "
+                "reason=activation_retry_exhausted "
+                "policy=retain_uncommitted_sequence_and_never_spin_or_bypass_native_validation\r\n",
+                actor_index == 0u ? "Tal" : "Ailish",
+                (unsigned int)snapshot->skill_sequence,
+                (unsigned int)snapshot->skill_slot,
+                (unsigned int)lease->retry_gate.attempt_count);
+        }
+        return TRUE;
+    }
+    if (retry_decision !=
+            SUDEKIMP_LAN_ARENA_CLIENT_SKILL_RETRY_ATTEMPT) {
+        *native_owns_presentation = TRUE;
+        return TRUE;
+    }
+    if (actor_index == 0u &&
+        !remote_tal_skill_view_lease.owner_view.valid &&
+        !capture_remote_tal_skill_view_lease(
+            snapshot->skill_sequence)) {
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill phase=deferred "
+            "actor=Tal sequence=%u slot=%u reason=owner_view_lease "
+            "policy=leave_sequence_uncommitted_and_retry_while_host_active\r\n",
+            (unsigned int)snapshot->skill_sequence,
+            (unsigned int)snapshot->skill_slot);
+        return TRUE;
+    }
+    if (actor_index == 0u &&
+        !set_client_remote_tal_skill_input_isolation(
+            TRUE, "before_remote_tal_native_skill")) {
+        if (!retire_remote_tal_skill_view_lease(
+                "noncaster_input_isolation_rejected")) {
+            return FALSE;
+        }
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill phase=deferred "
+            "actor=Tal sequence=%u slot=%u reason=input_isolation "
+            "policy=leave_sequence_uncommitted_and_retry_while_host_active\r\n",
+            (unsigned int)snapshot->skill_sequence,
+            (unsigned int)snapshot->skill_slot);
+        return TRUE;
+    }
     topped_sp = snapshot->sp;
     if (snapshot->skill_cost <=
             SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE - topped_sp) {
@@ -1806,39 +3021,124 @@ static BOOL service_native_skill_presentation(
      * build its presentation task, then immediately restore host resources.
      * Client ApplyDamage remains blocked by the authenticated replica guard. */
     if (!SudekiMpCleanroomEngineSetActorResources(
-            actor, (float)snapshot->hp, (float)topped_sp)) return FALSE;
+            actor, (float)snapshot->hp, (float)topped_sp)) {
+        if (actor_index == 0u) {
+            BOOL isolation_released =
+                set_client_remote_tal_skill_input_isolation(
+                    FALSE, "resource_lease_rejected");
+            BOOL view_retired = retire_remote_tal_skill_view_lease(
+                "resource_lease_rejected");
+            if (!isolation_released || !view_retired) return FALSE;
+        }
+        retire_client_skill_isolation_if_idle();
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill phase=deferred "
+            "actor=%s sequence=%u slot=%u reason=resource_lease "
+            "policy=leave_sequence_uncommitted_and_retry_while_host_active\r\n",
+            actor_index == 0u ? "Tal" : "Ailish",
+            (unsigned int)snapshot->skill_sequence,
+            (unsigned int)snapshot->skill_slot);
+        return TRUE;
+    }
     client_skill_camera_suppression_logged = FALSE;
     client_skill_activation_actor_index = (int)actor_index;
     InterlockedIncrement(&client_skill_activation_depth);
-    result = SudekiMpActivateCharacterSkillSlot(
+    result = SudekiMpReplayHostApprovedCharacterSkillSlot(
         character, (int)snapshot->skill_slot);
     InterlockedDecrement(&client_skill_activation_depth);
     client_skill_activation_actor_index = -1;
-    (void)SudekiMpCleanroomEngineSetActorResources(
+    host_resources_restored = SudekiMpCleanroomEngineSetActorResources(
         actor, (float)snapshot->hp, (float)snapshot->sp);
+
+    /* STARTED is the first point at which this active host sequence is
+     * consumed. Establish the conservative native lease before observing the
+     * asynchronous task so an unreadable or initially inactive state cannot
+     * release its view/input/damage ownership. */
+    if (result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED) {
+        lease->seen_sequence =
+            SudekiMpLanArenaClientSkillAdvanceCommittedSequence(
+                lease->seen_sequence, snapshot->skill_sequence, 1, 1);
+        lease->character = character;
+        lease->slot = snapshot->skill_slot;
+        lease->skill = result.skill;
+        lease->native_started = TRUE;
+        lease->active_seen = FALSE;
+        lease->completion_logged = FALSE;
+        lease->host_presentation_logged = FALSE;
+        clear_native_skill_activation_retry(lease);
+        memset(&presentation_leases[actor_index], 0,
+            sizeof(presentation_leases[actor_index]));
+        if (actor_index == 0u) {
+            memset(&tal_native_presentation_lease, 0,
+                sizeof(tal_native_presentation_lease));
+        }
+    }
+    if (!host_resources_restored) {
+        if (result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED) {
+            mark_native_skill_drain(
+                actor_index, snapshot->skill_sequence,
+                snapshot->skill_kind,
+                "post_start_resource_restore_unconfirmed");
+            *native_owns_presentation = TRUE;
+        } else if (actor_index == 0u) {
+            (void)set_client_remote_tal_skill_input_isolation(
+                FALSE, "resource_restore_unconfirmed");
+            (void)retire_remote_tal_skill_view_lease(
+                "resource_restore_unconfirmed");
+        }
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
+    /* CSkill::Use may synchronously mutate the active render camera's basis
+     * without going through the camera-manager hook. Restore Ailish's exact
+     * owner view before any later presentation work; STARTED already owns a
+     * conservative lease, so failure retains containment and fails closed. */
+    if (result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED &&
+        actor_index == 0u && !reassert_remote_tal_skill_view()) {
+        mark_native_skill_drain(
+            actor_index, snapshot->skill_sequence,
+            snapshot->skill_kind,
+            "post_start_owner_view_reassert_unconfirmed");
+        *native_owns_presentation = TRUE;
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
     if (result.status != SUDEKIMP_SKILL_ACTIVATION_STARTED &&
-        actor_index == 1u && result.validation_result == 2 &&
+        actor_index == 1u &&
+        SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(
+            result.validation_result, host_combat_authorized) &&
         !lease->ranged_prime_requested &&
+        (result.validation_result != 3 ||
+            SudekiMpCleanroomEngineRefreshCombatMode()) &&
         SudekiMpCleanroomEnginePrimeRangedCombat()) {
         lease->ranged_prime_requested = TRUE;
         *native_owns_presentation = TRUE;
         retire_client_skill_isolation_if_idle();
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_skill phase=arming "
-            "actor=Ailish sequence=%u slot=%u validation=2 delay_ms=75 "
-            "policy=native_ui_cycle_then_retry_same_host_approved_cast\r\n",
+            "actor=Ailish sequence=%u slot=%u validation=%d delay_ms=75 "
+            "policy=native_combat_refresh_and_ui_cycle_then_retry_without_validator_bypass\r\n",
             (unsigned int)snapshot->skill_sequence,
-            (unsigned int)snapshot->skill_slot);
+            (unsigned int)snapshot->skill_slot,
+            result.validation_result);
         return TRUE;
     }
-    if (result.status != SUDEKIMP_SKILL_ACTIVATION_STARTED ||
-        !SudekiMpObserveCharacterSkill(character, &state) ||
-        state.active == 0u || state.slot != (int)snapshot->skill_slot) {
+    if (result.status != SUDEKIMP_SKILL_ACTIVATION_STARTED) {
+        if (actor_index == 0u) {
+            if (!set_client_remote_tal_skill_input_isolation(
+                    FALSE, "native_task_rejected")) {
+                return FALSE;
+            }
+            if (!retire_remote_tal_skill_view_lease(
+                    "native_task_rejected")) {
+                return FALSE;
+            }
+        }
         retire_client_skill_isolation_if_idle();
         SudekiMpLogFormat(
-            "lan_arena_client_replica event=client_skill phase=rejected "
+            "lan_arena_client_replica event=client_skill phase=deferred "
             "actor=%s sequence=%u slot=%u status=%s validation=%d use=%u "
-            "policy=native_client_presentation_requires_exact_local_task\r\n",
+            "policy=leave_sequence_uncommitted_and_retry_while_host_active\r\n",
             actor_index == 0u ? "Tal" : "Ailish",
             (unsigned int)snapshot->skill_sequence,
             (unsigned int)snapshot->skill_slot,
@@ -1846,20 +3146,36 @@ static BOOL service_native_skill_presentation(
             result.validation_result, (unsigned int)result.use_result);
         return TRUE;
     }
-    lease->ranged_prime_requested = FALSE;
-    lease->skill = state.skill;
-    lease->native_started = TRUE;
-    memset(&presentation_leases[actor_index], 0,
-        sizeof(presentation_leases[actor_index]));
-    if (actor_index == 0u) {
-        memset(&tal_native_presentation_lease, 0,
-            sizeof(tal_native_presentation_lease));
+
+    if (!SudekiMpObserveCharacterSkill(character, &state) ||
+        state.skill != result.skill || state.active == 0u ||
+        state.slot != (int)snapshot->skill_slot) {
+        /* Use reported STARTED, so absence of an immediate exact observation
+         * cannot be treated as cancellation. Retain the returned CSkill
+         * identity, camera, damage guard, and actor until a later positive
+         * inactive observation proves the asynchronous task drained. */
+        mark_native_skill_drain(
+            actor_index, snapshot->skill_sequence,
+            snapshot->skill_kind,
+            "post_start_native_state_unconfirmed");
+        *native_owns_presentation = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_skill phase=draining "
+            "actor=%s sequence=%u slot=%u reason=post_start_observation "
+            "policy=started_result_retains_native_task_until_positive_inactive_observation\r\n",
+            actor_index == 0u ? "Tal" : "Ailish",
+            (unsigned int)snapshot->skill_sequence,
+            (unsigned int)snapshot->skill_slot);
+        return TRUE;
     }
+    lease->skill = state.skill;
+    lease->active_seen = TRUE;
+    clear_native_skill_drain_marker(lease);
     *native_owns_presentation = TRUE;
     SudekiMpLogFormat(
         "lan_arena_client_replica event=client_skill phase=started "
         "actor=%s sequence=%u slot=%u cost=%lu "
-        "policy=native_cskill_presentation_host_resources_restored_camera_preserved_realtime\r\n",
+        "policy=host_approved_native_cskill_presentation_local_unlock_restored_host_resources_restored_camera_preserved_realtime\r\n",
         actor_index == 0u ? "Tal" : "Ailish",
         (unsigned int)snapshot->skill_sequence,
         (unsigned int)snapshot->skill_slot,
@@ -1906,18 +3222,29 @@ static BOOL apply_actor_presentation(
     DWORD previous_early_apply_at;
     DWORD early_apply_at = 0u;
     DWORD early_elapsed_ms = 17u;
-    if (character == NULL || snapshot == NULL || actor_index >= 2u ||
-        snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED) {
+    if (character == NULL || snapshot == NULL || actor_index >= 2u) {
         return FALSE;
     }
     if (!service_native_skill_presentation(
-            character, snapshot, actor_index,
+            character, snapshot, actor_index, combat_mode,
             &native_skill_owns_presentation)) return FALSE;
-    if (native_skill_owns_presentation) return TRUE;
+    if (native_skill_owns_presentation) {
+        return apply_host_skill_presentation(
+            character, snapshot, actor_index,
+            !final_presentation_boundary);
+    }
+    /* Death/incapacitation is a presentation terminal, not proof that an
+     * asynchronous local CSkill is gone. Service and positively retire the
+     * retained native lease first; only then suppress ordinary channels. */
+    if (snapshot->animation_state ==
+            SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED) {
+        return FALSE;
+    }
     /* Combat swaps Ailish's Position attachment to her two-submodel
      * first-person renderer. World selectors 20/22/23/59 are not valid in
-     * that table. Always resolve her presentation through the distinct world
-     * wrapper at ranged-component+0x164; Tal keeps the ordinary attached
+     * that table. Prefer the distinct saved-world wrapper at component+0x164;
+     * the resolver admits Position+0xB4 only for the exact cleanroom NULL-
+     * saved-world/out-of-combat topology. Tal keeps the ordinary attached
      * world renderer. */
     if (!actor_presentation_renderer(
             character, actor_index, &renderer, &ailish_component)) {
@@ -2316,11 +3643,32 @@ static BOOL apply_actor(
     }
     resources_applied = SudekiMpCleanroomEngineSetActorResources(
         actor, (float)snapshot->hp, (float)snapshot->sp);
-    if (resources_applied && presentation_allowed) {
-        (void)apply_actor_presentation(
-            character, snapshot,
-            expected_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ? 0u : 1u,
-            combat_mode, FALSE);
+    if (resources_applied) {
+        unsigned int actor_index =
+            expected_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ? 0u : 1u;
+        if (presentation_allowed) {
+            if (!apply_actor_presentation(
+                    character, snapshot, actor_index,
+                    combat_mode, FALSE)) {
+                /* A frame with an unverified presentation boundary is not a
+                 * valid replica frame. Keep the applied pointers null so
+                 * ApplyLatest cannot publish diagnostics or admit this
+                 * partially applied sample as its new render source. */
+                resources_applied = FALSE;
+            }
+        } else {
+            BOOL native_skill_owns_presentation = FALSE;
+            /* Renderer readiness may disappear during a combat transition,
+             * actor swap, or native modal. It is not permission to stop
+             * observing an already-started CSkill: keep its exact lease,
+             * input isolation, owner view, and damage containment serviced
+             * even while ordinary presentation writes are fail-closed. */
+            if (!service_native_skill_presentation(
+                    character, snapshot, actor_index, combat_mode,
+                    &native_skill_owns_presentation)) {
+                resources_applied = FALSE;
+            }
+        }
     }
     if (resources_applied) {
         *applied_character = character;
@@ -2463,12 +3811,73 @@ static void capture_camera_diagnostics(void) {
     replica_diagnostics.camera_valid = 1u;
 }
 
+static void discard_client_replica_frame_state(void) {
+    SudekiMpLanArenaReplicaReset(&replica);
+    SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
+    SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
+    spirit_audio_replay_failure_logged = FALSE;
+    SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
+    memset(presentation_leases, 0, sizeof(presentation_leases));
+    memset(&ailish_first_person_lease, 0,
+        sizeof(ailish_first_person_lease));
+    ailish_first_person_failure = NULL;
+    client_ailish_combat_graph_failure = NULL;
+    client_ailish_ranged_refresh_attempted = FALSE;
+    client_ailish_weapon_attachment_ready = FALSE;
+    memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
+    clear_last_applied_frame();
+}
+
+static void retain_client_replica_callbacks(
+    const char *reason,
+    DWORD error
+) {
+    HMODULE pinned_module = NULL;
+    BOOL pinned = client_replica_containment_pinned;
+    if (!pinned) {
+        pinned = GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCSTR)(uintptr_t)&SudekiMpResetLanArenaClientReplica,
+            &pinned_module);
+        if (pinned) client_replica_containment_pinned = TRUE;
+    }
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_replica_containment "
+        "state=retained reason=%s win32_error=%lu module_pinned=%u "
+        "policy=keep_live_hooks_dependencies_and_damage_guard_until_confirmed_drain\r\n",
+        reason != NULL ? reason : "unspecified",
+        (unsigned long)error,
+        pinned ? 1u : 0u);
+    SetLastError(error);
+}
+
 BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     uint8_t *base = (uint8_t *)game_module;
     uint32_t initial_alternate_speed_bits;
+    if (client_replica_reset_pending &&
+        !SudekiMpResetLanArenaClientReplica()) {
+        return FALSE;
+    }
+    /* Keep the new audio-only exact-image dependency separately observable.
+     * No other in-tree LAN hook owns either sound entry, so a mismatch here
+     * is not an expected consequence of campaign, collision, frame, or input
+     * installation and must fail closed before any replica hook is added. */
+    if (base != NULL &&
+        !SudekiMpLanArenaSpiritAudioReplayImageMatches(game_module)) {
+        SudekiMpLogWrite(
+            "lan_arena_client_replica event=exact_preflight state=rejected "
+            "reason=spirit_audio_replay_signature_mismatch "
+            "get_sound_rva=0x000170b0 play_cue_rva=0x00017090\r\n");
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
     if ((client_combat_mode_lease_valid && !restore_client_combat_mode()) ||
         base == NULL || set_position != NULL ||
-        position_world_matrix != NULL || set_forward != NULL ||
+        position_world_matrix != NULL ||
+        ailish_ranged_presentation_refresh != NULL ||
+        weapon_set_visible != NULL || ranged_weapon_reattach != NULL ||
+        set_forward != NULL ||
         client_apply_damage_hook.installed ||
         client_skill_camera_hook.installed ||
         client_skill_speed_hook.installed || original_apply_damage != NULL ||
@@ -2502,7 +3911,23 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         memcmp(base + RVA_FIXED_ALTERNATE_SPEED,
             expected_fixed_alternate_speed,
             sizeof(expected_fixed_alternate_speed)) != 0 ||
+        memcmp(base + RVA_AILISH_RANGED_PRESENTATION_REFRESH,
+            expected_ailish_ranged_presentation_refresh_entry,
+            sizeof(expected_ailish_ranged_presentation_refresh_entry)) != 0 ||
+        !relative_call_targets(
+            base + RVA_AILISH_RANGED_WEAPON_REATTACH_CALL,
+            base + RVA_RANGED_WEAPON_REATTACH) ||
+        memcmp(base + RVA_RANGED_WEAPON_REATTACH,
+            expected_ranged_weapon_reattach_entry,
+            sizeof(expected_ranged_weapon_reattach_entry)) != 0 ||
+        memcmp(base + RVA_WEAPON_SET_VISIBLE,
+            expected_weapon_set_visible_entry,
+            sizeof(expected_weapon_set_visible_entry)) != 0 ||
         !animation_renderer_signatures_match(base)) {
+        SudekiMpLogWrite(
+            "lan_arena_client_replica event=exact_preflight state=rejected "
+            "reason=non_audio_signature_or_existing_ownership_mismatch "
+            "spirit_audio_replay=exact\r\n");
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -2515,8 +3940,11 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     client_skill_speed_override_active = FALSE;
     client_skill_camera_suppression_logged = FALSE;
     client_skill_speed_trace_state = -1;
+    remote_tal_skill_view_trace_state = -1;
+    clear_remote_tal_skill_view_lease();
     InterlockedExchange(&client_skill_activation_depth, 0);
     client_skill_activation_actor_index = -1;
+    client_remote_tal_skill_input_isolation_active = FALSE;
     if (!SudekiMpInstallInlineHook(
             &client_apply_damage_hook,
             base + RVA_APPLY_DAMAGE,
@@ -2541,9 +3969,30 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
             sizeof(expected_game_speed_set_mode_entry),
             preserve_client_skill_realtime)) {
         DWORD error = GetLastError();
-        (void)SudekiMpRestoreInlineHook(&client_skill_speed_hook);
-        (void)SudekiMpRestoreInlineHook(&client_skill_camera_hook);
-        (void)SudekiMpRestoreInlineHook(&client_apply_damage_hook);
+        DWORD restore_error = ERROR_SUCCESS;
+        BOOL speed_restored = SudekiMpRestoreInlineHook(
+            &client_skill_speed_hook);
+        BOOL camera_restored;
+        BOOL damage_restored;
+        if (!speed_restored) restore_error = GetLastError();
+        camera_restored = SudekiMpRestoreInlineHook(
+            &client_skill_camera_hook);
+        if (!camera_restored && restore_error == ERROR_SUCCESS) {
+            restore_error = GetLastError();
+        }
+        damage_restored = SudekiMpRestoreInlineHook(
+            &client_apply_damage_hook);
+        if (!damage_restored && restore_error == ERROR_SUCCESS) {
+            restore_error = GetLastError();
+        }
+        if (!speed_restored || !camera_restored || !damage_restored) {
+            client_replica_reset_pending = TRUE;
+            retain_client_replica_callbacks(
+                "install_rollback_unconfirmed",
+                restore_error == ERROR_SUCCESS ?
+                    ERROR_WRITE_FAULT : restore_error);
+            return FALSE;
+        }
         original_apply_damage = NULL;
         game_base = NULL;
         SetLastError(error);
@@ -2552,9 +4001,17 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     set_position = (PositionSetterFunction)(base + RVA_INTERNAL_POSITION_SETTER);
     position_world_matrix = (PositionWorldMatrixFunction)(
         base + RVA_POSITION_WORLD_MATRIX);
+    ailish_ranged_presentation_refresh =
+        (AilishRangedPresentationRefreshFunction)(
+            base + RVA_AILISH_RANGED_PRESENTATION_REFRESH);
+    weapon_set_visible = (WeaponSetVisibleFunction)(
+        base + RVA_WEAPON_SET_VISIBLE);
+    ranged_weapon_reattach = base + RVA_RANGED_WEAPON_REATTACH;
     set_forward = base + RVA_POSITION_SET_FORWARD;
     SudekiMpLanArenaReplicaReset(&replica);
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
+    SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
+    spirit_audio_replay_failure_logged = FALSE;
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
@@ -2562,23 +4019,83 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     memset(&tal_native_presentation_lease, 0,
         sizeof(tal_native_presentation_lease));
     memset(native_skill_leases, 0, sizeof(native_skill_leases));
+    client_replica_reset_pending = FALSE;
     client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
+    client_ailish_ranged_refresh_attempted = FALSE;
+    client_ailish_weapon_attachment_ready = FALSE;
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
     clear_last_applied_frame();
     return TRUE;
 }
 
-void SudekiMpResetLanArenaClientReplica(void) {
-    BOOL speed_restored;
-    BOOL camera_restored;
-    BOOL damage_restored;
+BOOL SudekiMpResetLanArenaClientReplica(void) {
     DWORD restore_error = ERROR_SUCCESS;
 
-    InterlockedExchange(&client_skill_activation_depth, 0);
+    if (InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) > 0) {
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "activation_entry_in_flight", ERROR_BUSY);
+        return FALSE;
+    }
     client_skill_activation_actor_index = -1;
-    memset(native_skill_leases, 0, sizeof(native_skill_leases));
+    if (!drain_tal_native_action_lease()) {
+        client_replica_reset_pending = TRUE;
+        discard_client_replica_frame_state();
+        retain_client_replica_callbacks(
+            "native_tal_action_drain_pending", ERROR_BUSY);
+        return FALSE;
+    }
+    if (!drain_native_skill_leases("replica_reset")) {
+        client_replica_reset_pending = TRUE;
+        discard_client_replica_frame_state();
+        retain_client_replica_callbacks(
+            "native_skill_drain_pending", ERROR_BUSY);
+        return FALSE;
+    }
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        client_replica_reset_pending = TRUE;
+        discard_client_replica_frame_state();
+        retain_client_replica_callbacks(
+            "ranged_combat_prime_timer_pending", ERROR_BUSY);
+        return FALSE;
+    }
+    if (!set_client_remote_tal_skill_input_isolation(
+            FALSE, "replica_reset")) {
+        restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "noncaster_input_isolation_restore_unconfirmed",
+            restore_error);
+        return FALSE;
+    }
+    if (!retire_remote_tal_skill_view_lease("replica_reset")) {
+        restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "owner_view_restore_unconfirmed", restore_error);
+        return FALSE;
+    }
+    if (client_combat_mode_lease_valid && !restore_client_combat_mode()) {
+        restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "combat_mode_restore_unconfirmed", restore_error);
+        return FALSE;
+    }
+    /* Restoring an originally enabled combat state uses Sudeki's ordinary
+     * transition and may arm the ranged UI prime. Recheck after restoration;
+     * never remove hooks or admit a new session while that game-thread work
+     * is still pending. */
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        client_replica_reset_pending = TRUE;
+        discard_client_replica_frame_state();
+        retain_client_replica_callbacks(
+            "post_combat_restore_ranged_prime_pending", ERROR_BUSY);
+        return FALSE;
+    }
     if (client_skill_speed_override_active &&
         !set_client_skill_realtime_scale(FALSE)) {
         restore_error = GetLastError();
@@ -2587,41 +4104,44 @@ void SudekiMpResetLanArenaClientReplica(void) {
             "state=failed speed_scale=0 camera=0 damage=0 win32_error=%lu "
             "policy=retain_live_callbacks_and_reject_reinstall\r\n",
             (unsigned long)restore_error);
-        SetLastError(restore_error);
-        return;
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "speed_scale_restore_unconfirmed", restore_error);
+        return FALSE;
     }
-    speed_restored = SudekiMpRestoreInlineHook(&client_skill_speed_hook);
-    if (!speed_restored && restore_error == ERROR_SUCCESS) {
+    if (!SudekiMpRestoreInlineHook(&client_skill_speed_hook)) {
         restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "speed_hook_restore_unconfirmed", restore_error);
+        return FALSE;
     }
-    camera_restored = SudekiMpRestoreInlineHook(&client_skill_camera_hook);
-    if (!camera_restored && restore_error == ERROR_SUCCESS) {
+    if (!SudekiMpRestoreInlineHook(&client_skill_camera_hook)) {
         restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "camera_hook_restore_unconfirmed", restore_error);
+        return FALSE;
     }
-    damage_restored = SudekiMpRestoreInlineHook(&client_apply_damage_hook);
-    if (!damage_restored && restore_error == ERROR_SUCCESS) {
+    /* Damage is restored last. Any earlier failure therefore leaves the
+     * authority guard installed while its callback dependencies are retained. */
+    if (!SudekiMpRestoreInlineHook(&client_apply_damage_hook)) {
         restore_error = GetLastError();
-    }
-    if (!speed_restored || !camera_restored || !damage_restored ||
-        restore_error != ERROR_SUCCESS) {
-        SudekiMpLogFormat(
-            "lan_arena_client_replica event=client_replica_hook_restore "
-            "state=failed speed=%u camera=%u damage=%u win32_error=%lu "
-            "policy=retain_live_callbacks_and_reject_reinstall\r\n",
-            speed_restored ? 1u : 0u,
-            camera_restored ? 1u : 0u,
-            damage_restored ? 1u : 0u,
-            (unsigned long)restore_error);
-        SetLastError(restore_error == ERROR_SUCCESS ?
-            ERROR_WRITE_FAULT : restore_error);
-        return;
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "damage_hook_restore_unconfirmed", restore_error);
+        return FALSE;
     }
     original_apply_damage = NULL;
-    (void)restore_client_combat_mode();
     SudekiMpLanArenaReplicaReset(&replica);
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
+    SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
+    spirit_audio_replay_failure_logged = FALSE;
     set_position = NULL;
     position_world_matrix = NULL;
+    ailish_ranged_presentation_refresh = NULL;
+    weapon_set_visible = NULL;
+    ranged_weapon_reattach = NULL;
     set_forward = NULL;
     game_base = NULL;
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
@@ -2631,36 +4151,42 @@ void SudekiMpResetLanArenaClientReplica(void) {
     memset(&tal_native_presentation_lease, 0,
         sizeof(tal_native_presentation_lease));
     memset(native_skill_leases, 0, sizeof(native_skill_leases));
+    client_replica_reset_pending = FALSE;
+    client_remote_tal_skill_input_isolation_active = FALSE;
     client_skill_original_alternate_speed_bits = 0u;
     client_skill_speed_override_active = FALSE;
     client_skill_camera_suppression_logged = FALSE;
     client_skill_speed_trace_state = -1;
+    remote_tal_skill_view_trace_state = -1;
     client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
+    client_ailish_ranged_refresh_attempted = FALSE;
+    client_ailish_weapon_attachment_ready = FALSE;
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
     clear_last_applied_frame();
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
 }
 
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {
-    (void)restore_client_combat_mode();
-    InterlockedExchange(&client_skill_activation_depth, 0);
-    client_skill_activation_actor_index = -1;
-    memset(native_skill_leases, 0, sizeof(native_skill_leases));
+    BOOL all_native_skills_drained;
+    if (InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) == 0) {
+        client_skill_activation_actor_index = -1;
+    }
+    all_native_skills_drained = drain_native_skill_leases(
+        "snapshot_discard");
+    if (all_native_skills_drained &&
+        !retire_remote_tal_skill_view_lease("snapshot_discard")) {
+        all_native_skills_drained = FALSE;
+    }
     retire_client_skill_isolation_if_idle();
-    SudekiMpLanArenaReplicaReset(&replica);
-    SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
-    SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
-    memset(presentation_leases, 0, sizeof(presentation_leases));
-    memset(&ailish_first_person_lease, 0,
-        sizeof(ailish_first_person_lease));
-    memset(&tal_native_presentation_lease, 0,
-        sizeof(tal_native_presentation_lease));
-    client_damage_block_logged = FALSE;
-    ailish_first_person_failure = NULL;
-    client_ailish_combat_graph_failure = NULL;
-    memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
-    clear_last_applied_frame();
+    discard_client_replica_frame_state();
+    if (all_native_skills_drained) client_damage_block_logged = FALSE;
+    if (client_replica_reset_pending && all_native_skills_drained) {
+        (void)SudekiMpResetLanArenaClientReplica();
+    }
 }
 
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
@@ -2677,29 +4203,66 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
         replica_render_clock.initialized != 0u;
     BOOL action_clock_protected;
     unsigned int presentation_ready_mask;
-    if (set_position == NULL || set_forward == NULL ||
+    if (client_replica_reset_pending ||
+        set_position == NULL || set_forward == NULL ||
         !client_session_status(&status)) {
         SudekiMpLanArenaClientReplicaDiscardSnapshots();
-        SetLastError(ERROR_INVALID_STATE);
+        SetLastError(client_replica_reset_pending ?
+            ERROR_BUSY : ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    /* Never write the preceding frame's basis here: Ailish's local mouse may
+     * already have rotated her camera. Validate only. The RenderStart wrapper
+     * refreshes the lease from the newly published owner basis, then the
+     * presentation boundary reasserts it after remote-skill mutations. */
+    if (remote_tal_skill_view_lease.owner_view.valid &&
+        !verify_remote_tal_skill_view()) {
+        SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
     if (!SudekiMpLanArenaSharedSimulationSessionExact(
             &replica_simulation,
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
-            status.session_token) &&
-        !SudekiMpLanArenaSharedSimulationBegin(
-            &replica_simulation,
-            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
             status.session_token)) {
-        SetLastError(ERROR_INVALID_STATE);
-        return FALSE;
+        SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
+        if (!SudekiMpLanArenaSharedSimulationBegin(
+                &replica_simulation,
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
+                status.session_token)) {
+            SetLastError(ERROR_INVALID_STATE);
+            return FALSE;
+        }
     }
     while (SudekiMpLanArenaSessionTakeRemoteSnapshot(&received)) {
+        unsigned int audio_replayed = 0u;
         if (!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
                 &replica_simulation, status.session_token, &received) ||
             !SudekiMpLanArenaSharedSimulationReadFrame(
                 &replica_simulation, &accepted, NULL) ||
             !SudekiMpLanArenaReplicaPush(&replica, &accepted)) return FALSE;
+        if (!SudekiMpLanArenaSpiritAudioConsumeSnapshot(
+                &spirit_audio_cursor, &accepted,
+                replay_client_spirit_audio, NULL, &audio_replayed)) {
+            if (!spirit_audio_replay_failure_logged) {
+                spirit_audio_replay_failure_logged = TRUE;
+                SudekiMpLogFormat(
+                    "lan_arena_client_replica event=spirit_audio "
+                    "state=rejected snapshot_sequence=%lu skill_sequence=%u "
+                    "win32_error=%lu "
+                    "policy=presentation_only_retry_without_frame_rejection\r\n",
+                    (unsigned long)accepted.sequence,
+                    (unsigned int)accepted.tal.skill_sequence,
+                    (unsigned long)GetLastError());
+            }
+        } else if (audio_replayed != 0u) {
+            spirit_audio_replay_failure_logged = FALSE;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=spirit_audio state=replayed "
+                "snapshot_sequence=%lu skill_sequence=%u cue=start "
+                "policy=local_csound_only_exact_sequence_once\r\n",
+                (unsigned long)accepted.sequence,
+                (unsigned int)accepted.tal.skill_sequence);
+        }
     }
     action_clock_protected =
         SudekiMpLanArenaReplicaActionTimelineBuffered(&replica);
@@ -2842,7 +4405,9 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
         return FALSE;
     }
     presentation_ready_mask = client_combat_presentation_ready_mask();
-    if (presentation_ready_mask == 0u) return TRUE;
+    if (presentation_ready_mask == 0u) {
+        return reassert_remote_tal_skill_view();
+    }
     snapshots[0] = &last_applied_snapshot.tal;
     snapshots[1] = &last_applied_snapshot.ailish;
     for (actor_index = 0u; actor_index < 2u; ++actor_index) {
@@ -2856,6 +4421,9 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
                 CHARACTER_POSITION_OFFSET + sizeof(void *)) ||
             *(void **)(characters[actor_index] + CHARACTER_POSITION_OFFSET) !=
                 last_applied_positions[actor_index]) {
+            if (remote_tal_skill_view_lease.owner_view.valid) {
+                (void)reassert_remote_tal_skill_view();
+            }
             SetLastError(ERROR_INVALID_DATA);
             return FALSE;
         }
@@ -2870,8 +4438,31 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
             last_applied_snapshot.combat_enabled != 0u, TRUE);
     }
     if (!applied[0] || !applied[1]) {
+        if (remote_tal_skill_view_lease.owner_view.valid) {
+            (void)reassert_remote_tal_skill_view();
+        }
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
+    }
+    if (remote_tal_skill_view_lease.owner_view.valid) {
+        BOOL view_reasserted = reassert_remote_tal_skill_view();
+        int trace_state = view_reasserted ? 1 : 0;
+        if (trace_state != remote_tal_skill_view_trace_state) {
+            remote_tal_skill_view_trace_state = trace_state;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_remote_skill_view "
+                "state=%s owner=Ailish remote_caster=Tal sequence=%u "
+                "revision=%lu boundary=post_native_render_pre_world "
+                "policy=refresh_live_owner_basis_then_reassert_after_remote_mutation\r\n",
+                view_reasserted ? "active" : "rejected",
+                (unsigned int)remote_tal_skill_view_lease.skill_sequence,
+                (unsigned long)remote_tal_skill_view_lease.owner_view.
+                    refresh_revision);
+        }
+        if (!view_reasserted) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
     }
     return TRUE;
 }

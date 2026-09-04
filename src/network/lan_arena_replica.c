@@ -18,6 +18,23 @@ static BOOL tick_before(uint32_t candidate, uint32_t reference) {
     return tick_after(reference, candidate);
 }
 
+BOOL SudekiMpLanArenaClientNativeSkillTaskAllowed(
+    uint8_t actor_type,
+    uint8_t local_actor_type
+) {
+    return local_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+        (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+         actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE);
+}
+
+BOOL SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(
+    int native_result,
+    BOOL host_combat_authorized
+) {
+    return native_result == 2 ||
+        (native_result == 3 && host_combat_authorized != FALSE);
+}
+
 static float interpolate_float(float before, float after, float alpha) {
     return before + (after - before) * alpha;
 }
@@ -150,6 +167,122 @@ static void normalized_facing(
     *output_z = z / length;
 }
 
+static void copy_actor_skill_state(
+    SudekiMpLanArenaActorSnapshot *output,
+    const SudekiMpLanArenaActorSnapshot *source
+) {
+    if (output == NULL || source == NULL) return;
+    output->skill_sequence = source->skill_sequence;
+    output->skill_kind = source->skill_kind;
+    output->skill_slot = source->skill_slot;
+    output->skill_active = source->skill_active;
+    output->skill_cost = source->skill_cost;
+    output->skill_presentation_valid = source->skill_presentation_valid;
+    output->skill_presentation_channel_count =
+        source->skill_presentation_channel_count;
+    memcpy(output->skill_presentation_selector,
+        source->skill_presentation_selector,
+        sizeof(output->skill_presentation_selector));
+    memcpy(output->skill_presentation_state,
+        source->skill_presentation_state,
+        sizeof(output->skill_presentation_state));
+    memcpy(output->skill_presentation_rate,
+        source->skill_presentation_rate,
+        sizeof(output->skill_presentation_rate));
+    memcpy(output->skill_presentation_time,
+        source->skill_presentation_time,
+        sizeof(output->skill_presentation_time));
+    memcpy(output->skill_presentation_blend,
+        source->skill_presentation_blend,
+        sizeof(output->skill_presentation_blend));
+}
+
+static BOOL skill_presentation_topology_matches(
+    const SudekiMpLanArenaActorSnapshot *before,
+    const SudekiMpLanArenaActorSnapshot *after
+) {
+    unsigned int channel;
+    if (before == NULL || after == NULL ||
+        before->skill_presentation_valid == 0u ||
+        after->skill_presentation_valid == 0u ||
+        before->skill_kind != after->skill_kind ||
+        before->skill_presentation_channel_count !=
+            after->skill_presentation_channel_count) return FALSE;
+    for (channel = 0u;
+         channel < before->skill_presentation_channel_count;
+         ++channel) {
+        if (before->skill_presentation_selector[channel] !=
+                after->skill_presentation_selector[channel] ||
+            before->skill_presentation_state[channel] !=
+                after->skill_presentation_state[channel]) return FALSE;
+    }
+    return TRUE;
+}
+
+static void interpolate_skill_presentation(
+    const SudekiMpLanArenaActorSnapshot *before,
+    const SudekiMpLanArenaActorSnapshot *after,
+    float alpha,
+    SudekiMpLanArenaActorSnapshot *output
+) {
+    unsigned int channel;
+    if (before == NULL || after == NULL || output == NULL) return;
+    /* Skill start/stop is an authoritative edge. Do not expose the later
+     * endpoint merely because its packet is already in the jitter buffer. */
+    if (alpha < 1.0f &&
+        (before->skill_sequence != after->skill_sequence ||
+         before->skill_kind != after->skill_kind ||
+         before->skill_active != after->skill_active)) {
+        copy_actor_skill_state(output, before);
+        return;
+    }
+    if (before->skill_sequence == 0u ||
+        before->skill_sequence != after->skill_sequence ||
+        before->skill_kind != after->skill_kind ||
+        before->skill_active == 0u || after->skill_active == 0u) return;
+    if (!skill_presentation_topology_matches(before, after)) {
+        if (alpha < 1.0f) {
+            output->skill_presentation_valid =
+                before->skill_presentation_valid;
+            output->skill_presentation_channel_count =
+                before->skill_presentation_channel_count;
+            memcpy(output->skill_presentation_selector,
+                before->skill_presentation_selector,
+                sizeof(output->skill_presentation_selector));
+            memcpy(output->skill_presentation_state,
+                before->skill_presentation_state,
+                sizeof(output->skill_presentation_state));
+            memcpy(output->skill_presentation_rate,
+                before->skill_presentation_rate,
+                sizeof(output->skill_presentation_rate));
+            memcpy(output->skill_presentation_time,
+                before->skill_presentation_time,
+                sizeof(output->skill_presentation_time));
+            memcpy(output->skill_presentation_blend,
+                before->skill_presentation_blend,
+                sizeof(output->skill_presentation_blend));
+        }
+        return;
+    }
+    for (channel = 0u;
+         channel < after->skill_presentation_channel_count;
+         ++channel) {
+        output->skill_presentation_rate[channel] = interpolate_float(
+            before->skill_presentation_rate[channel],
+            after->skill_presentation_rate[channel], alpha);
+        output->skill_presentation_time[channel] = interpolate_float(
+            before->skill_presentation_time[channel],
+            after->skill_presentation_time[channel], alpha);
+    }
+    for (channel = 0u;
+         channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+         ++channel) {
+        output->skill_presentation_blend[channel] = interpolate_float(
+            before->skill_presentation_blend[channel],
+            after->skill_presentation_blend[channel], alpha);
+    }
+}
+
 static void interpolate_actor(
     const SudekiMpLanArenaActorSnapshot *before,
     const SudekiMpLanArenaActorSnapshot *after,
@@ -201,6 +334,7 @@ static void interpolate_actor(
     output->z = interpolate_float(before->z, after->z, alpha);
     normalized_facing(before, after, alpha,
         &output->facing_x, &output->facing_z);
+    interpolate_skill_presentation(before, after, alpha, output);
     replay_action_history(
         before, after, host_tick, before_host_tick,
         after_host_tick, output);
@@ -427,7 +561,9 @@ BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
      ((snapshot_).tal.animation_state == \
           SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
       (snapshot_).ailish.animation_state == \
-          SUDEKIMP_LAN_ARENA_ANIMATION_ACTION))
+          SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
+      (snapshot_).tal.skill_active != 0u || \
+      (snapshot_).ailish.skill_active != 0u))
     if (SNAPSHOT_ACTION_ACTIVE(replica->earliest, replica->earliest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->oldest, replica->oldest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->previous, replica->previous_valid) ||

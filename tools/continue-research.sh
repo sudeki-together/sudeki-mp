@@ -326,9 +326,11 @@ case "${mode}" in
             sed -i -E \
                 -e 's/^EnableLanArenaHostPrototype=false$/EnableLanArenaHostPrototype=true/' \
                 -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
+                -e 's/^EnableCleanroomMenu=false$/EnableCleanroomMenu=true/' \
                 "${generated_config}"
             lan_expected_one='EnableLanArenaHostPrototype'
             lan_expected_two='EnableControlSeparationPrototype'
+            lan_expected_three='EnableCleanroomMenu'
         else
             sed -i -E \
                 -e 's/^EnableLanArenaClientPrototype=false$/EnableLanArenaClientPrototype=true/' \
@@ -336,13 +338,15 @@ case "${mode}" in
                 "${generated_config}"
             lan_expected_one='EnableLanArenaClientPrototype'
             lan_expected_two='EnableControlSeparationPrototype'
+            lan_expected_three=''
         fi
-        lan_unexpected_enabled="$(awk -F= -v one="${lan_expected_one}" -v two="${lan_expected_two}" '
-            $1 ~ /^Enable/ && $2 == "true" && $1 != one && $1 != two { print }
+        lan_unexpected_enabled="$(awk -F= -v one="${lan_expected_one}" -v two="${lan_expected_two}" -v three="${lan_expected_three}" '
+            $1 ~ /^Enable/ && $2 == "true" && $1 != one && $1 != two && $1 != three { print }
         ' "${generated_config}")"
         if [[ -n "${lan_unexpected_enabled}" ]] ||
            ! grep -Fqx "${lan_expected_one}=true" "${generated_config}" ||
            { [[ -n "${lan_expected_two}" ]] && ! grep -Fqx "${lan_expected_two}=true" "${generated_config}"; } ||
+           { [[ -n "${lan_expected_three}" ]] && ! grep -Fqx "${lan_expected_three}=true" "${generated_config}"; } ||
            ! grep -Fqx "LanArenaHost=${lan_arena_host}" "${generated_config}" ||
            ! grep -Fqx "LanArenaPort=${lan_arena_port}" "${generated_config}" ||
            ! grep -Fqx 'EnableExternalInputBridgePrototype=false' "${generated_config}" ||

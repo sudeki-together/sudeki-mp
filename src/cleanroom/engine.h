@@ -134,15 +134,26 @@ BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetCombatMode(BOOL enabled);
 /* Re-run the native party arm pass after a control-owner handoff. */
 BOOL SudekiMpCleanroomEngineRefreshCombatMode(void);
-/* Hold Sudeki's native UI/control transition long enough to arm ranged actors. */
+/* Hold Sudeki's native UI/control transition for at least 75 ms so ranged
+ * actors observe the retail arm cycle. Completion is serviced synchronously
+ * on the game thread; no TimerProc remains callable after teardown. */
 BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void);
-/* True only while the native ranged-arm transition still owns its timer/UI
- * lease. Callers may retry unchanged native validation after it clears. */
+/* Pure witness for the native UI lease. MaintainResources retires due work on
+ * its owner game thread; teardown callers must defer while this returns TRUE. */
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void);
 BOOL SudekiMpCleanroomEngineFirstPersonMode(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetFirstPersonMode(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteSp(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSp(BOOL enabled);
+/* Cleanroom-only reversible lease over each present retail hero's six native
+ * SkillData availability bytes. Native validators and CSkill::Use still own
+ * every activation. */
+BOOL SudekiMpCleanroomEngineTrainingSkills(BOOL *enabled);
+BOOL SudekiMpCleanroomEngineSetTrainingSkills(BOOL enabled);
+/* Read-only witness for Sudeki's retail-global Spirit presentation
+ * transaction. Zero is inactive; nonzero values are native internal stages
+ * and must not be interpreted as actor-local CSkill slots. */
+BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state);
 BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);
@@ -157,5 +168,30 @@ BOOL SudekiMpCleanroomEngineSetStoryTestSpeed(
 );
 void SudekiMpCleanroomEngineMaintainResources(void);
 void SudekiMpCleanroomEngineReset(void);
+
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+typedef struct SudekiMpCleanroomEngineRangedPrimeTestBackend {
+    BOOL (*set_native_ui_active)(BOOL active);
+    BOOL (*combat_mode)(BOOL *enabled);
+    DWORD (*tick_count)(void);
+    DWORD (*thread_id)(void);
+} SudekiMpCleanroomEngineRangedPrimeTestBackend;
+
+BOOL SudekiMpCleanroomEngineSetRangedPrimeTestBackend(
+    const SudekiMpCleanroomEngineRangedPrimeTestBackend *backend
+);
+void SudekiMpCleanroomEngineResetRangedPrimeForTesting(void);
+uint32_t SudekiMpCleanroomEngineRangedPrimeGenerationForTesting(void);
+BOOL SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+    uint32_t generation
+);
+BOOL SudekiMpCleanroomEngineCancelRangedPrimeForTesting(void);
+/* Exact cached CSkill allocation/owner/readability gate used by the live
+ * training-skill lease before any SkillData array dereference. */
+BOOL SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+    const void *actor,
+    const void *skill
+);
+#endif
 
 #endif

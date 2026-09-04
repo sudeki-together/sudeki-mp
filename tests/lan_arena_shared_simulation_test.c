@@ -64,6 +64,11 @@ static SudekiMpLanArenaNativeWorldObservation native_observation(
     result.combat_enabled = combat_enabled;
     result.enemy_count = source->enemy_count;
     memcpy(result.enemies, source->enemies, sizeof(result.enemies));
+    result.spirit_audio_history_count =
+        source->spirit_audio_history_count;
+    memcpy(result.spirit_audio_history,
+        source->spirit_audio_history,
+        sizeof(result.spirit_audio_history));
     result.native_combat_observed = 1u;
     result.native_resources_observed = 1u;
     result.native_enemies_observed = 1u;
@@ -376,6 +381,439 @@ static void test_match_lifecycle_is_monotonic(void) {
         &simulation, 99u, SUDEKIMP_LAN_ARENA_AILISH_TYPE, &input));
 }
 
+static void set_character_skill(
+    SudekiMpLanArenaActorSnapshot *value,
+    uint16_t sequence,
+    uint8_t slot,
+    uint32_t cost,
+    uint8_t active
+) {
+    value->skill_sequence = sequence;
+    value->skill_kind = sequence == 0u ?
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE :
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    value->skill_slot = sequence == 0u ? 0u : slot;
+    value->skill_cost = sequence == 0u ? 0u : cost;
+    value->skill_active = sequence == 0u ? 0u : active;
+}
+
+static void set_spirit_skill(
+    SudekiMpLanArenaActorSnapshot *value,
+    uint16_t sequence,
+    int32_t selector,
+    uint8_t active
+) {
+    value->skill_sequence = sequence;
+    value->skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    value->skill_slot = 0u;
+    value->skill_cost = 0u;
+    value->skill_active = active;
+    value->skill_presentation_valid = active;
+    value->skill_presentation_channel_count = active ? 2u : 0u;
+    memset(value->skill_presentation_selector, 0,
+        sizeof(value->skill_presentation_selector));
+    memset(value->skill_presentation_state, 0,
+        sizeof(value->skill_presentation_state));
+    memset(value->skill_presentation_rate, 0,
+        sizeof(value->skill_presentation_rate));
+    memset(value->skill_presentation_time, 0,
+        sizeof(value->skill_presentation_time));
+    memset(value->skill_presentation_blend, 0,
+        sizeof(value->skill_presentation_blend));
+    if (!active) return;
+    value->skill_presentation_selector[0] = selector;
+    value->skill_presentation_state[0] = 1u;
+    value->skill_presentation_state[1] = 192u;
+    value->skill_presentation_rate[0] = 24.0f;
+}
+
+static void test_spirit_middle_stage_frames_continue(void) {
+    SudekiMpLanArenaSharedSimulation canonical;
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaSnapshot source = frame(300u);
+    SudekiMpLanArenaSnapshot output;
+    uint32_t canonical_revision = 0u;
+    uint32_t replica_revision = 0u;
+
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 147u));
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 147u));
+
+    set_spirit_skill(&source.tal, 12u, 75, 1u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(
+        &canonical, 147u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, &canonical_revision));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 147u, &output));
+
+    source.host_tick = 350u;
+    set_spirit_skill(&source.tal, 12u, 113, 1u);
+    source.tal.skill_presentation_time[0] = 1.0f;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(
+        &canonical, 147u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, &canonical_revision));
+    CHECK(output.host_tick == 350u &&
+          output.tal.skill_sequence == 12u &&
+          output.tal.skill_active == 1u &&
+          output.tal.skill_presentation_selector[0] == 113);
+    CHECK(canonical_revision == 2u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 147u, &output));
+
+    source.host_tick = 400u;
+    set_spirit_skill(&source.tal, 12u, 112, 1u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(
+        &canonical, 147u, &observation, &source));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 147u, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, &canonical_revision));
+    CHECK(output.host_tick == 350u &&
+          output.tal.skill_presentation_selector[0] == 113 &&
+          canonical_revision == 2u);
+
+    set_spirit_skill(&source.tal, 12u, 114, 1u);
+    source.tal.skill_presentation_time[0] = 2.0f;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(
+        &canonical, 147u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, &canonical_revision));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 147u, &output));
+
+    source.host_tick = 450u;
+    set_spirit_skill(&source.tal, 12u, 0, 0u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(
+        &canonical, 147u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, &canonical_revision));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 147u, &output));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &replica, &output, &replica_revision));
+    CHECK(output.host_tick == 450u &&
+          output.tal.skill_sequence == 12u &&
+          output.tal.skill_active == 0u &&
+          output.tal.skill_presentation_valid == 0u);
+    CHECK(canonical_revision == 4u && replica_revision == 4u);
+}
+
+static void append_spirit_audio(
+    SudekiMpLanArenaSnapshot *value,
+    uint16_t event_sequence,
+    uint16_t skill_sequence
+) {
+    SudekiMpLanArenaSpiritAudioSemanticEvent *event;
+    if (value->spirit_audio_history_count ==
+            SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY) {
+        memmove(&value->spirit_audio_history[0],
+            &value->spirit_audio_history[1],
+            (SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY - 1u) *
+                sizeof(value->spirit_audio_history[0]));
+        --value->spirit_audio_history_count;
+    }
+    event = &value->spirit_audio_history[
+        value->spirit_audio_history_count++];
+    memset(event, 0, sizeof(*event));
+    event->event_sequence = event_sequence;
+    event->skill_sequence = skill_sequence;
+    event->cue = SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START;
+}
+
+static void test_spirit_audio_journal_lifecycle(void) {
+    SudekiMpLanArenaSharedSimulation canonical;
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaSnapshot source = frame(100u);
+    SudekiMpLanArenaSnapshot output;
+    unsigned int sequence;
+
+    source.combat_enabled = 1u;
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 151u));
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 151u));
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &output));
+
+    source.host_tick = 101u;
+    set_spirit_skill(&source.tal, UINT16_MAX, 75, 1u);
+    append_spirit_audio(&source, UINT16_MAX, UINT16_MAX);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &output));
+
+    source.host_tick = 102u;
+    source.tal.skill_presentation_time[0] = 1.0f;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &output));
+
+    source.host_tick = 103u;
+    source.spirit_audio_history[0].skill_sequence = UINT16_MAX - 1u;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &source));
+    source.spirit_audio_history[0].skill_sequence = UINT16_MAX;
+
+    set_spirit_skill(&source.tal, 1u, 75, 1u);
+    append_spirit_audio(&source, 1u, 1u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &output));
+
+    source.host_tick = 104u;
+    set_spirit_skill(&source.tal, 3u, 75, 1u);
+    append_spirit_audio(&source, 2u, 2u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(&canonical, 151u, &observation, &source));
+    /* Replica late-retained recovery intentionally differs here and is
+     * exercised in test_replica_accepts_late_retained_spirit_audio(). */
+    --source.spirit_audio_history_count;
+
+    set_spirit_skill(&source.tal, 2u, 75, 1u);
+    append_spirit_audio(&source, 2u, 2u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &output));
+
+    /* Fill and then roll the bounded suffix. The latest accepted entry must
+     * remain the overlap anchor when the oldest entry is evicted. */
+    for (sequence = 3u; sequence <= 9u; ++sequence) {
+        source.host_tick = 103u + sequence;
+        set_spirit_skill(
+            &source.tal, (uint16_t)sequence, 75, 1u);
+        append_spirit_audio(
+            &source, (uint16_t)sequence, (uint16_t)sequence);
+        observation = native_observation(
+            &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+        CHECK(commit_native_frame(
+            &canonical, 151u, &observation, &source));
+        CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+            &canonical, &output, NULL));
+        CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+            &replica, 151u, &output));
+    }
+    CHECK(output.spirit_audio_history_count ==
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY);
+    CHECK(output.spirit_audio_history[0].event_sequence == 2u);
+    CHECK(output.spirit_audio_history[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY - 1u]
+            .event_sequence == 9u);
+
+    source.host_tick = 113u;
+    source.spirit_audio_history[0].skill_sequence = 1u;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &source));
+    source.spirit_audio_history[0].skill_sequence = 2u;
+    source.spirit_audio_history_count = 0u;
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(&canonical, 151u, &observation, &source));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 151u, &source));
+
+    /* A new token resets both reducers, including their journal generation. */
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 152u));
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 152u));
+    source = frame(1u);
+    source.combat_enabled = 1u;
+    set_spirit_skill(&source.tal, 1u, 75, 1u);
+    append_spirit_audio(&source, 1u, 1u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(commit_native_frame(&canonical, 152u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &canonical, &output, NULL));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 152u, &output));
+}
+
+static void test_replica_accepts_late_retained_spirit_audio(void) {
+    SudekiMpLanArenaSharedSimulation canonical;
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaSnapshot baseline = frame(200u);
+    SudekiMpLanArenaSnapshot retired = frame(201u);
+    SudekiMpLanArenaSnapshot stale_window;
+    unsigned int index;
+
+    baseline.combat_enabled = 1u;
+    retired.combat_enabled = 1u;
+    set_spirit_skill(&retired.tal, 7u, 75, 0u);
+    append_spirit_audio(&retired, 4u, 7u);
+
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 153u));
+    observation = native_observation(
+        &retired, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
+    CHECK(!commit_native_frame(
+        &canonical, 153u, &observation, &retired));
+
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 153u));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 153u, &baseline));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 153u, &retired));
+    retired.host_tick = 202u;
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 153u, &retired));
+
+    /* A wholly replaced packet-gap window must advance both sequence
+     * domains. A newer event window cannot smuggle stale skill identities. */
+    stale_window = retired;
+    stale_window.host_tick = 203u;
+    set_spirit_skill(&stale_window.tal, 9u, 0, 0u);
+    stale_window.spirit_audio_history_count = 0u;
+    for (index = 0u;
+         index < SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY;
+         ++index) {
+        append_spirit_audio(
+            &stale_window, (uint16_t)(12u + index),
+            (uint16_t)(1u + index));
+    }
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 153u, &stale_window));
+
+    /* A join-in-progress replica may receive the same retained journal in
+     * its first datagram after the native Spirit transaction has retired. */
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 154u));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 154u, &retired));
+}
+
+static void test_replica_skill_lifecycle_is_monotonic(void) {
+    SudekiMpLanArenaSharedSimulation canonical;
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaSnapshot source = frame(100u);
+    SudekiMpLanArenaSnapshot output;
+    uint32_t revision = 0u;
+
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 144u));
+    set_character_skill(&source.tal, 10u, 2u, 20u, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+
+    source.host_tick = 101u;
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    source.host_tick = 102u;
+    source.tal.skill_slot = 3u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    source.tal.skill_slot = 2u;
+    source.tal.skill_cost = 21u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    source.tal.skill_cost = 20u;
+    source.tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    source.tal.skill_slot = 0u;
+    source.tal.skill_cost = 0u;
+    source.tal.skill_active = 0u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+
+    set_character_skill(&source.tal, 10u, 2u, 20u, 0u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    source.host_tick = 103u;
+    source.tal.skill_active = 1u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+
+    set_character_skill(&source.tal, 11u, 2u, 20u, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    source.host_tick = 104u;
+    set_character_skill(&source.tal, 10u, 2u, 20u, 1u);
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 144u, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
+        &replica, &output, &revision));
+    CHECK(output.host_tick == 103u && output.tal.skill_sequence == 11u);
+    CHECK(revision == 4u);
+
+    /* Skill sequences reserve zero and wrap in their own 16-bit domain. */
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &replica, SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 145u));
+    source = frame(0xfffffff0u);
+    set_character_skill(&source.ailish, UINT16_MAX, 5u, 40u, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 145u, &source));
+    source.host_tick = 0x20u;
+    set_character_skill(&source.ailish, 1u, 5u, 40u, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 145u, &source));
+
+    /* The canonical reducer enforces the same rule before a malformed local
+     * observation can be serialized for any replica. */
+    source = frame(200u);
+    set_character_skill(&source.tal, 7u, 1u, 15u, 1u);
+    observation = native_observation(
+        &source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 0u);
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(
+        &canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 146u));
+    CHECK(commit_native_frame(
+        &canonical, 146u, &observation, &source));
+    source.host_tick = 201u;
+    source.tal.skill_cost = 16u;
+    observation.host_tick = 201u;
+    CHECK(!commit_native_frame(
+        &canonical, 146u, &observation, &source));
+}
+
 int main(void) {
     test_native_world_owns_combat_state();
     test_roles_tokens_and_ticks_fail_closed();
@@ -384,6 +822,10 @@ int main(void) {
     test_player_input_admission_owns_snapshot_ack();
     test_replica_rejects_acknowledgement_regression();
     test_match_lifecycle_is_monotonic();
+    test_spirit_middle_stage_frames_continue();
+    test_spirit_audio_journal_lifecycle();
+    test_replica_accepts_late_retained_spirit_audio();
+    test_replica_skill_lifecycle_is_monotonic();
     if (failures != 0) {
         fprintf(stderr, "%d shared simulation test(s) failed\n", failures);
         return 1;

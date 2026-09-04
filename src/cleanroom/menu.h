@@ -8,6 +8,12 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     HMODULE game_module,
     UINT toggle_key
 );
+/* LAN host owns controller/render hooks elsewhere. This installs only the
+ * host-authoritative cleanroom tools UI and never enables local split roles. */
+BOOL SudekiMpInstallLanArenaHostCleanroomMenu(
+    HMODULE game_module,
+    UINT toggle_key
+);
 BOOL SudekiMpInstallZoneTraversalMenu(
     HMODULE game_module,
     UINT toggle_key,
@@ -28,6 +34,8 @@ BOOL SudekiMpInstallCoopRosterMenu(
 void SudekiMpCleanroomMenuSetLoadedSaveCoopAutostart(BOOL enabled);
 void SudekiMpCleanroomMenuUpdate(void);
 void SudekiMpCleanroomMenuRender(void);
+BOOL SudekiMpCleanroomMenuInstalled(void);
+BOOL SudekiMpCleanroomMenuActive(void);
 /* Read-only bridge for code that already depends on the cleanroom presenter;
  * the save-book interceptor owns exact native opening/closed observation. */
 BOOL SudekiMpCleanroomNativeSaveModalActive(void);

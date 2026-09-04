@@ -12,7 +12,10 @@ BOOL SudekiMpInstallLanArenaRuntime(
     HMODULE game_module,
     const SudekiMpLanArenaSessionConfig *config
 );
-void SudekiMpUninstallLanArenaRuntime(void);
+/* FALSE means a native task, actor lease, or hook restoration is still
+ * pending. Callers must retain every downstream dependency and retry from a
+ * game-thread boundary; treating it as uninstalled is unsafe. */
+BOOL SudekiMpUninstallLanArenaRuntime(void);
 BOOL SudekiMpLanArenaRuntimeInstalled(void);
 /* Pause-panel/UI adapters call this only on the game thread. It sends one END
  * packet when connected, stops client ingress immediately, and leaves both

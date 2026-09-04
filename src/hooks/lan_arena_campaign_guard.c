@@ -37,6 +37,9 @@ static SudekiMpBytePatch next_character_patch;
 static uint8_t *game_base;
 static BOOL save_block_logged;
 static BOOL slot_block_logged;
+static BOOL restore_quarantined;
+static BOOL restore_failure_logged;
+static BOOL guard_module_pinned;
 
 static BOOL signatures_match(uint8_t *base) {
     uint32_t operand;
@@ -79,15 +82,80 @@ static void __attribute__((cdecl)) block_load_game_save(int save_slot) {
     }
 }
 
+static void retain_campaign_guard_after_restore_failure(DWORD error) {
+    HMODULE pinned_module = NULL;
+    BOOL pinned = guard_module_pinned;
+
+    if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+    restore_quarantined = TRUE;
+    if (!pinned) {
+        pinned = GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCSTR)(uintptr_t)&SudekiMpUninstallLanArenaCampaignGuard,
+            &pinned_module);
+        guard_module_pinned = pinned;
+    }
+    if (!restore_failure_logged) {
+        restore_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_campaign_guard event=restore state=quarantined "
+            "win32_error=%lu module_pinned=%s "
+            "policy=retain_callbacks_base_and_patch_ownership_for_retry\r\n",
+            (unsigned long)error,
+            pinned ? "true" : "false");
+    }
+    SetLastError(error);
+}
+
+static BOOL restore_campaign_guard_hooks(void) {
+    DWORD first_error = ERROR_SUCCESS;
+    BOOL next_restored;
+    BOOL previous_restored;
+    BOOL load_restored;
+    BOOL save_restored;
+
+    /* Reverse installation order, but aggregate every result. A successful
+     * individual restore clears only that hook's ownership record; any failed
+     * record remains intact and can be retried on the next teardown pass. */
+    next_restored = SudekiMpRestoreBytePatch(&next_character_patch);
+    if (!next_restored) first_error = GetLastError();
+    previous_restored = SudekiMpRestoreBytePatch(&previous_character_patch);
+    if (!previous_restored && first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    load_restored = SudekiMpRestoreInlineHook(&load_game_save_hook);
+    if (!load_restored && first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    save_restored = SudekiMpRestoreInlineHook(&save_menu_show_hook);
+    if (!save_restored && first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    if (!next_restored || !previous_restored ||
+        !load_restored || !save_restored) {
+        retain_campaign_guard_after_restore_failure(first_error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
     uint8_t expected_save[SAVE_MENU_SHOW_HOOK_LENGTH];
     uint8_t expected_slot[LOAD_GAME_SAVE_HOOK_LENGTH];
     uint8_t *base = (uint8_t *)game_module;
     if (base == NULL || game_base != NULL || !signatures_match(base)) {
-        SetLastError(base == NULL || game_base != NULL ?
-            ERROR_INVALID_PARAMETER : ERROR_INVALID_DATA);
+        SetLastError(base == NULL ? ERROR_INVALID_PARAMETER :
+            (game_base != NULL ?
+                (restore_quarantined ? ERROR_BUSY : ERROR_ALREADY_EXISTS) :
+                ERROR_INVALID_DATA));
         return FALSE;
     }
+    game_base = base;
+    save_block_logged = FALSE;
+    slot_block_logged = FALSE;
+    restore_quarantined = FALSE;
+    restore_failure_logged = FALSE;
     memcpy(expected_save, base + RVA_SAVE_MENU_SHOW, sizeof(expected_save));
     memcpy(expected_slot, base + RVA_LOAD_GAME_SAVE, sizeof(expected_slot));
     if (!SudekiMpInstallInlineHook(
@@ -102,15 +170,16 @@ BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
         !SudekiMpInstallBytePatch(
             &next_character_patch,
             base + RVA_GROUP_PLAYERS_NEXT_CHARACTER, 0x55u, 0xc3u)) {
-        SudekiMpRestoreBytePatch(&next_character_patch);
-        SudekiMpRestoreBytePatch(&previous_character_patch);
-        SudekiMpRestoreInlineHook(&load_game_save_hook);
-        SudekiMpRestoreInlineHook(&save_menu_show_hook);
+        DWORD install_error = GetLastError();
+        if (!restore_campaign_guard_hooks()) return FALSE;
+        game_base = NULL;
+        save_block_logged = FALSE;
+        slot_block_logged = FALSE;
+        restore_quarantined = FALSE;
+        restore_failure_logged = FALSE;
+        SetLastError(install_error);
         return FALSE;
     }
-    game_base = base;
-    save_block_logged = FALSE;
-    slot_block_logged = FALSE;
     SudekiMpLogWrite(
         "lan_arena_campaign_guard event=install state=active "
         "character_switch=blocked roles=Tal_host_Ailish_client "
@@ -118,12 +187,13 @@ BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
     return TRUE;
 }
 
-void SudekiMpUninstallLanArenaCampaignGuard(void) {
-    SudekiMpRestoreBytePatch(&next_character_patch);
-    SudekiMpRestoreBytePatch(&previous_character_patch);
-    SudekiMpRestoreInlineHook(&load_game_save_hook);
-    SudekiMpRestoreInlineHook(&save_menu_show_hook);
+BOOL SudekiMpUninstallLanArenaCampaignGuard(void) {
+    if (!restore_campaign_guard_hooks()) return FALSE;
     game_base = NULL;
     save_block_logged = FALSE;
     slot_block_logged = FALSE;
+    restore_quarantined = FALSE;
+    restore_failure_logged = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
 }

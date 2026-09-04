@@ -8,6 +8,7 @@
 typedef struct SudekiMpRelativeCallHook {
     uint8_t *instruction;
     int32_t original_displacement;
+    int32_t replacement_displacement;
     BOOL installed;
 } SudekiMpRelativeCallHook;
 

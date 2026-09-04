@@ -71,6 +71,7 @@ BOOL SudekiMpInstallRelativeCallHook(
     );
     hook->instruction = instruction;
     hook->original_displacement = current_displacement;
+    hook->replacement_displacement = replacement_displacement;
     hook->installed = TRUE;
     if (!write_protected_memory(
             instruction + 1,
@@ -86,8 +87,24 @@ BOOL SudekiMpInstallRelativeCallHook(
 }
 
 BOOL SudekiMpRestoreRelativeCallHook(SudekiMpRelativeCallHook *hook) {
+    int32_t current_displacement;
+
     if (hook == NULL || !hook->installed || hook->instruction == NULL) {
         return TRUE;
+    }
+    memcpy(&current_displacement, hook->instruction + 1,
+        sizeof(current_displacement));
+    if (current_displacement == hook->original_displacement) {
+        /* A prior pass in a larger teardown transaction may already have
+         * restored this call before a later hook reported BUSY. */
+        ZeroMemory(hook, sizeof(*hook));
+        return TRUE;
+    }
+    if (current_displacement != hook->replacement_displacement) {
+        /* Another hook owns the CALL now. Retain our complete transaction so
+         * its owner can put our replacement back and teardown can retry. */
+        SetLastError(ERROR_BUSY);
+        return FALSE;
     }
     if (!write_protected_memory(
             hook->instruction + 1,
@@ -95,8 +112,7 @@ BOOL SudekiMpRestoreRelativeCallHook(SudekiMpRelativeCallHook *hook) {
             sizeof(hook->original_displacement))) {
         return FALSE;
     }
-    hook->installed = FALSE;
-    hook->instruction = NULL;
+    ZeroMemory(hook, sizeof(*hook));
     return TRUE;
 }
 

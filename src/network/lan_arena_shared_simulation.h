@@ -13,9 +13,12 @@ typedef struct SudekiMpLanArenaNativeWorldObservation {
     uint32_t ailish_sp;
     SudekiMpLanArenaEnemySnapshot
         enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
+    SudekiMpLanArenaSpiritAudioSemanticEvent spirit_audio_history[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
     uint8_t match_state;
     uint8_t combat_enabled;
     uint8_t enemy_count;
+    uint8_t spirit_audio_history_count;
     uint8_t native_combat_observed;
     uint8_t native_resources_observed;
     uint8_t native_enemies_observed;
@@ -83,7 +86,9 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
 );
 
 /* Replicas may consume authenticated canonical frames but cannot commit a
- * native-world observation of their own. */
+ * native-world observation of their own. Admission also enforces each
+ * actor's modular 16-bit skill sequence and immutable kind/slot/cost tuple;
+ * an inactive transaction cannot reactivate without a newer sequence. */
 int SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
     SudekiMpLanArenaSharedSimulation *simulation,
     uint64_t session_token,

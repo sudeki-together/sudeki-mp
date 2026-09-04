@@ -9,6 +9,9 @@
  * They also suppress native Previous/Next rotation: v1 roles remain Tal host
  * and Ailish client for the complete authenticated session. */
 BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module);
-void SudekiMpUninstallLanArenaCampaignGuard(void);
+/* FALSE means at least one exact patch or detour still owns its native seam.
+ * The guard pins its module and retains all callback/base state so teardown can
+ * be retried without leaving a live jump into unloaded code. */
+BOOL SudekiMpUninstallLanArenaCampaignGuard(void);
 
 #endif

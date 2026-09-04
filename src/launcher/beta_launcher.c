@@ -502,6 +502,9 @@ static BOOL configure_launcher_profile(
                                          config_path) ||
             !WritePrivateProfileStringW(L"SudekiMP", L"EnableControlSeparationPrototype",
                                          L"true", config_path) ||
+            !WritePrivateProfileStringW(L"SudekiMP", L"EnableCleanroomMenu",
+                profile == SUDEKIMP_PROFILE_LAN_HOST ? L"true" : L"false",
+                config_path) ||
             !WritePrivateProfileStringW(L"SudekiMP",
                 profile == SUDEKIMP_PROFILE_LAN_HOST ?
                     L"EnableLanArenaHostPrototype" :

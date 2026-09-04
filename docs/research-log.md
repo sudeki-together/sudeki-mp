@@ -5095,3 +5095,59 @@ architecture for future player actions: transmit authenticated semantic
 results, replay presentation through native client state machines, and guard
 all client-side gameplay consequences instead of trying to network every
 private animation blend field.
+
+### 2026-09-04: the dual-instance slow clock is NVIDIA WineD3D throughput
+
+Fresh exact LAN instances disproved a network or game-speed cause for the
+roughly `0.2x` native animation cadence. Under the NVIDIA WineD3D/OpenGL path,
+a rate-12 Tal animation advanced only `28.8` units in 12 seconds (`2.4/s`).
+Both native speed globals remained exactly `1.0`, neither CPU nor disk was
+saturated, and moving the two windows onto separate physical outputs did not
+change the result. The main game threads spent their idle time behind Wine's
+NT synchronization while the WineD3D command-stream thread waited in DRM
+synchronization. This is render throughput feeding Sudeki's capped frame
+delta, not a replicated animation clock running slowly.
+
+The controlled Mesa software run advanced the same rate-12 animation by
+`147.372` units in `12.016` seconds (`12.26/s`). Its client packet sequence
+also rose from about `5/s` to `16.4/s`, while presentation generations rose
+from about `10/s` to `146/s`. The loopback launcher now exposes the explicit
+`SUDEKIMP_LAN_GRAPHICS_BACKEND=wined3d|software|dxvk` choice. `wined3d`
+remains the default pending live DXVK acceptance; `software` injects the two
+Mesa software-rendering variables into both game processes; and `dxvk`
+verifies and transactionally installs the exact GE-Proton11-3 32-bit D3D9 DLL
+after the normal runtime seed. DXVK pins both `wine` and `wineserver` to that
+same GE-Proton build. Its preflight parses the NVIDIA i686 ICD's
+`library_path` and ELF32-checks both that library and the host Vulkan loader,
+rather than accepting any filename containing `i686`. The D3D9 override uses
+role-local verified backups and atomic target replacement, restores WineD3D on
+success, failure, or interruption, and retains its sole recovery copy until
+the restored target checksum passes. Host/client DXVK log and state-cache
+directories remain separate. The preceding baseline seed also stages,
+checksum-verifies, and atomically renames every DirectX runtime DLL; it never
+truncates a live target in place. A plain `--stop` probes at most eight
+deduplicated pinned, ambient, or installed GE wineserver runners across the
+two exact prefixes, so stopping a DXVK run does not depend on repeating its
+backend environment variable.
+
+The first DXVK run proved that this host's Vulkan path itself is viable: the
+preserved host log selected `NVIDIA GeForce RTX 3050 (NVIDIA 610.43.3)` and
+created its cache. The client failed later during exact LAN runtime
+initialization, before producing a DXVK log. Therefore this is not yet live
+two-process DXVK acceptance. The launcher archives existing console, runtime,
+and DXVK logs before a later start can overwrite that evidence. The original
+failed-run bundle is preserved at
+`build/mingw32/lan-loopback/evidence/20260904T104505Z-3295298-28631/`; its
+archived and source host DXVK logs both hash to
+`8ef07b951a6586bb81385b38fde371aec9290850565518df827ee8e36714d749`.
+
+The monitor audit identified DP-2 (`Acer X233H`) as
+`1920x1080+0+360` and HDMI-A-1 (`LG FHD`) as
+`1920x1080+1920+360`. KScreen and XWayland currently report scale 1, so the
+launcher's observed 2x configure compensation is a Wine/KWin event rather
+than a persistent desktop scale. A client window could still return to the
+host output after the initial move because Wine completed another asynchronous
+top-level configure during its 12-second D3D warmup. The harness now reasserts
+the same compensated product placement after that warmup, logs each final
+window geometry against its intended output, and warns without stealing focus
+if a window remains outside that output.

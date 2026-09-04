@@ -12,9 +12,13 @@ uint8_t availability_result = 1u;
 static void *seen_validate_skill;
 static int seen_validate_slot;
 static int validate_result;
+static const uint8_t *validate_host_approval_flag;
+static uint8_t seen_validate_host_approval;
 static void *seen_use_skill;
 static int seen_use_slot;
+static uint8_t seen_use_host_approval;
 static uint8_t use_result = 1u;
+static unsigned int use_calls;
 
 static void check(BOOL condition, const char *message) {
     if (!condition) {
@@ -39,6 +43,8 @@ static int __attribute__((regparm(2))) validate_mock(
 ) {
     seen_validate_skill = skill;
     seen_validate_slot = slot;
+    seen_validate_host_approval = validate_host_approval_flag != NULL ?
+        *validate_host_approval_flag : 0u;
     return validate_result;
 }
 
@@ -48,8 +54,11 @@ static uint8_t __attribute__((fastcall)) use_mock(
     int slot
 ) {
     (void)ignored_edx;
+    ++use_calls;
     seen_use_skill = skill;
     seen_use_slot = slot;
+    seen_use_host_approval = validate_host_approval_flag != NULL ?
+        *validate_host_approval_flag : 0u;
     if (use_result != 0u) {
         *((uint8_t *)skill + 0x6cu) = 1u;
         *(int *)((uint8_t *)skill + 0x70u) = slot;
@@ -91,6 +100,7 @@ int main(void) {
     api.validate = validate_mock;
     api.use = use_mock;
     api.include_unavailable_skills = &include_unavailable;
+    validate_host_approval_flag = &include_unavailable;
 
     check(SudekiMpDescribeCharacterQuickSkillsWithApi(
               character, &api, &list) && list.row_count == 6u,
@@ -168,6 +178,43 @@ int main(void) {
     result = SudekiMpActivateCharacterSkillSlotWithApi(character, 10, &api);
     check(result.status == SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE,
         "exact slot activation also preserves native availability rejection");
+
+    skill[0x6cu] = 0u;
+    availability_result = 0u;
+    skill_data[0][0x08u] = 0u;
+    validate_result = 0;
+    use_result = 1u;
+    result = SudekiMpReplayHostApprovedCharacterSkillSlotWithApi(
+        character, 10, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED &&
+            result.skill_data == skill_data[0] && result.slot == 10,
+        "host-approved replay resolves the stable native slot despite a different client unlock state");
+    check(skill_data[0][0x08u] == 0u,
+        "host-approved replay restores the client's authored enable byte");
+    check(seen_validate_host_approval == 1u &&
+            seen_use_host_approval == 1u && include_unavailable == 0u,
+        "host-approved replay scopes and restores the native unavailable/no-SP admission byte");
+    check(seen_validate_slot == 10 && seen_use_slot == 10,
+        "host-approved replay retains the native validator and Use path");
+
+    skill[0x6cu] = 0u;
+    validate_result = 3;
+    use_calls = 0u;
+    result = SudekiMpReplayHostApprovedCharacterSkillSlotWithApi(
+        character, 10, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED &&
+            result.validation_result == 3 && use_calls == 0u,
+        "host-approved replay never bypasses an invalid local actor state");
+    check(skill_data[0][0x08u] == 0u && include_unavailable == 0u,
+        "rejected host-approved replay restores the client's authored skill bytes");
+
+    skill[0x6cu] = 0u;
+    validate_result = 4;
+    result = SudekiMpReplayHostApprovedCharacterSkillSlotWithApi(
+        character, 10, &api);
+    check(result.status == SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED &&
+            skill_data[0][0x08u] == 0u && include_unavailable == 0u,
+        "host-approved replay fails closed and restores local state when the native task validator rejects");
 
     if (failures != 0) {
         fprintf(stderr, "%d skill activation ABI test(s) failed\n", failures);

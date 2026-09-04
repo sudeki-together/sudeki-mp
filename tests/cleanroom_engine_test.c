@@ -2,12 +2,342 @@
 
 #include <stdio.h>
 
+static DWORD ranged_prime_test_tick;
+static BOOL ranged_prime_test_combat_enabled;
+static BOOL ranged_prime_test_combat_known;
+static BOOL ranged_prime_test_ui_active;
+static BOOL ranged_prime_test_ui_enter_fails;
+static BOOL ranged_prime_test_ui_exit_fails;
+static unsigned int ranged_prime_test_ui_enter_count;
+static unsigned int ranged_prime_test_ui_exit_count;
+static DWORD ranged_prime_test_thread_id;
+
+enum {
+    TEST_CHARACTER_SKILL_OFFSET = 0x00d8u,
+    TEST_CSKILL_OWNER_OFFSET = 0x0010u,
+    TEST_CSKILL_DATA_ARRAY_OFFSET = 0x003cu
+};
+
 static int require_true(int condition, const char *message) {
     if (!condition) {
         fprintf(stderr, "cleanroom_engine_test: %s\n", message);
         return 0;
     }
     return 1;
+}
+
+static BOOL set_ranged_prime_test_ui_active(BOOL active) {
+    if ((active && ranged_prime_test_ui_enter_fails) ||
+        (!active && ranged_prime_test_ui_exit_fails)) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
+    ranged_prime_test_ui_active = active != FALSE;
+    if (active) {
+        ++ranged_prime_test_ui_enter_count;
+    } else {
+        ++ranged_prime_test_ui_exit_count;
+    }
+    return TRUE;
+}
+
+static BOOL ranged_prime_test_combat_mode(BOOL *enabled) {
+    if (enabled == NULL || !ranged_prime_test_combat_known) {
+        return FALSE;
+    }
+    *enabled = ranged_prime_test_combat_enabled;
+    return TRUE;
+}
+
+static DWORD ranged_prime_test_tick_count(void) {
+    return ranged_prime_test_tick;
+}
+
+static DWORD ranged_prime_test_current_thread_id(void) {
+    return ranged_prime_test_thread_id;
+}
+
+static int verify_ranged_prime_deadline_lifecycle(void) {
+    SudekiMpCleanroomEngineRangedPrimeTestBackend backend = {
+        set_ranged_prime_test_ui_active,
+        ranged_prime_test_combat_mode,
+        ranged_prime_test_tick_count,
+        ranged_prime_test_current_thread_id
+    };
+    uint32_t first_generation;
+    uint32_t stale_generation;
+
+    SudekiMpCleanroomEngineResetRangedPrimeForTesting();
+    ranged_prime_test_tick = UINT32_C(0xfffffff0);
+    ranged_prime_test_combat_enabled = TRUE;
+    ranged_prime_test_combat_known = TRUE;
+    ranged_prime_test_ui_active = FALSE;
+    ranged_prime_test_ui_enter_fails = FALSE;
+    ranged_prime_test_ui_exit_fails = FALSE;
+    ranged_prime_test_ui_enter_count = 0u;
+    ranged_prime_test_ui_exit_count = 0u;
+    ranged_prime_test_thread_id = 10u;
+
+    if (!require_true(
+            SudekiMpCleanroomEngineSetRangedPrimeTestBackend(&backend),
+            "ranged-prime test backend was rejected") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "ranged-prime lease began pending") ||
+        !require_true(
+            SudekiMpCleanroomEnginePrimeRangedCombat(),
+            "ranged-prime deadline did not arm") ||
+        !require_true(ranged_prime_test_ui_active &&
+                ranged_prime_test_ui_enter_count == 1u,
+            "ranged-prime deadline did not acquire native UI") ||
+        !require_true(
+            SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "ranged-prime deadline retired before 75 ms")) {
+        return 0;
+    }
+
+    first_generation =
+        SudekiMpCleanroomEngineRangedPrimeGenerationForTesting();
+    stale_generation = first_generation == UINT32_MAX ?
+        first_generation - 1u : first_generation + 1u;
+    ranged_prime_test_tick += 74u;
+    if (!require_true(
+            SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "ranged-prime wrap-safe deadline retired at 74 ms") ||
+        !require_true(
+            !SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+                stale_generation),
+            "stale ranged-prime generation was accepted") ||
+        !require_true(ranged_prime_test_ui_active &&
+                ranged_prime_test_ui_exit_count == 0u,
+            "stale ranged-prime generation changed native UI")) {
+        return 0;
+    }
+
+    ranged_prime_test_tick += 1u;
+    if (!require_true(
+            SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "pure ranged-prime witness retired due work off service path") ||
+        !require_true(
+            SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+                first_generation),
+            "ranged-prime deadline service failed at 75 ms") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "ranged-prime deadline remained pending at 75 ms") ||
+        !require_true(!ranged_prime_test_ui_active &&
+                ranged_prime_test_ui_exit_count == 1u,
+            "ranged-prime deadline did not release native UI") ||
+        !require_true(
+            SudekiMpCleanroomEngineRangedPrimeGenerationForTesting() !=
+                first_generation,
+            "ranged-prime retirement did not invalidate its generation")) {
+        return 0;
+    }
+
+    ranged_prime_test_tick = 1000u;
+    if (!require_true(
+            SudekiMpCleanroomEnginePrimeRangedCombat(),
+            "second ranged-prime deadline did not arm")) {
+        return 0;
+    }
+    first_generation =
+        SudekiMpCleanroomEngineRangedPrimeGenerationForTesting();
+    ranged_prime_test_ui_exit_fails = TRUE;
+    if (!require_true(
+            !SudekiMpCleanroomEngineCancelRangedPrimeForTesting(),
+            "failed native UI release was reported quiesced") ||
+        !require_true(
+            SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "failed native UI release cleared pending witness") ||
+        !require_true(ranged_prime_test_ui_active,
+            "failed native UI release dropped UI ownership") ||
+        !require_true(
+            !SudekiMpCleanroomEnginePrimeRangedCombat() &&
+                GetLastError() == ERROR_BUSY,
+            "new ranged-prime lease entered during retryable cancellation")) {
+        return 0;
+    }
+    ranged_prime_test_ui_exit_fails = FALSE;
+    if (!require_true(
+            SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+                first_generation),
+            "retryable ranged-prime cancellation service failed") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "retryable ranged-prime cancellation did not quiesce") ||
+        !require_true(!ranged_prime_test_ui_active,
+            "retryable ranged-prime cancellation retained native UI")) {
+        return 0;
+    }
+
+    ranged_prime_test_combat_enabled = FALSE;
+    ranged_prime_test_tick = 2000u;
+    if (!require_true(
+            SudekiMpCleanroomEnginePrimeRangedCombat(),
+            "combat-disabled ranged-prime deadline did not arm")) {
+        return 0;
+    }
+    first_generation =
+        SudekiMpCleanroomEngineRangedPrimeGenerationForTesting();
+    ranged_prime_test_tick += 75u;
+    if (!require_true(
+            SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+                first_generation),
+            "combat-disabled ranged-prime service failed") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "combat-disabled ranged-prime deadline did not cancel") ||
+        !require_true(!ranged_prime_test_ui_active,
+            "combat-disabled ranged-prime retained native UI")) {
+        return 0;
+    }
+
+    ranged_prime_test_combat_enabled = TRUE;
+    ranged_prime_test_tick = 3000u;
+    if (!require_true(
+            SudekiMpCleanroomEnginePrimeRangedCombat(),
+            "thread-affinity ranged-prime deadline did not arm")) {
+        return 0;
+    }
+    first_generation =
+        SudekiMpCleanroomEngineRangedPrimeGenerationForTesting();
+    ranged_prime_test_thread_id = 11u;
+    if (!require_true(
+            !SudekiMpCleanroomEngineCancelRangedPrimeForTesting() &&
+                GetLastError() == ERROR_BUSY,
+            "foreign-thread ranged-prime cancellation was accepted") ||
+        !require_true(
+            SudekiMpCleanroomEngineRangedCombatPrimePending() &&
+                ranged_prime_test_ui_active,
+            "foreign-thread cancellation dropped the pending UI lease")) {
+        return 0;
+    }
+    ranged_prime_test_thread_id = 10u;
+    if (!require_true(
+            SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+                first_generation),
+            "owner-thread ranged-prime cancellation service failed") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
+                !ranged_prime_test_ui_active,
+            "owner-thread ranged-prime cancellation did not quiesce")) {
+        return 0;
+    }
+
+    ranged_prime_test_combat_enabled = TRUE;
+    ranged_prime_test_ui_enter_fails = TRUE;
+    if (!require_true(
+            !SudekiMpCleanroomEnginePrimeRangedCombat(),
+            "failed native UI acquire armed a ranged-prime lease") ||
+        !require_true(
+            !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+            "failed native UI acquire left a pending lease")) {
+        return 0;
+    }
+
+    ranged_prime_test_ui_enter_fails = FALSE;
+    SudekiMpCleanroomEngineResetRangedPrimeForTesting();
+    return require_true(
+        !SudekiMpCleanroomEngineRangedCombatPrimePending(),
+        "ranged-prime test reset did not quiesce");
+}
+
+static int verify_training_skill_allocation_gate(void) {
+    uint8_t *actor;
+    uint8_t *skill_allocation;
+    uint8_t *skill;
+    DWORD old_protection;
+    int result = 0;
+
+    actor = (uint8_t *)VirtualAlloc(
+        NULL, 4096u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    skill_allocation = (uint8_t *)VirtualAlloc(
+        NULL, 8192u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!require_true(actor != NULL && skill_allocation != NULL,
+            "training-skill validation allocation failed")) {
+        goto cleanup;
+    }
+
+    skill = skill_allocation;
+    *(void **)(actor + TEST_CHARACTER_SKILL_OFFSET) = skill;
+    *(void **)(skill + TEST_CSKILL_OWNER_OFFSET) = actor;
+    if (!require_true(
+            SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+                actor, skill),
+            "valid exact CSkill allocation/owner tuple was rejected")) {
+        goto cleanup;
+    }
+
+    *(void **)(skill + TEST_CSKILL_OWNER_OFFSET) = skill;
+    if (!require_true(
+            !SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+                actor, skill),
+            "foreign CSkill owner was accepted")) {
+        goto cleanup;
+    }
+    *(void **)(skill + TEST_CSKILL_OWNER_OFFSET) = actor;
+    *(void **)(actor + TEST_CHARACTER_SKILL_OFFSET) = actor;
+    if (!require_true(
+            !SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+                actor, skill),
+            "stale actor-to-CSkill backlink was accepted")) {
+        goto cleanup;
+    }
+    *(void **)(actor + TEST_CHARACTER_SKILL_OFFSET) = skill;
+    if (!require_true(VirtualProtect(
+            skill_allocation, 4096u, PAGE_NOACCESS, &old_protection),
+            "training-skill unreadable allocation protection failed")) {
+        goto cleanup;
+    }
+    if (!require_true(
+            !SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+                actor, skill),
+            "unreadable cached CSkill allocation was accepted")) {
+        VirtualProtect(skill_allocation, 4096u,
+            old_protection, &old_protection);
+        goto cleanup;
+    }
+    if (!require_true(VirtualProtect(
+            skill_allocation, 4096u, old_protection, &old_protection),
+            "training-skill allocation protection restore failed")) {
+        goto cleanup;
+    }
+
+    /* Keep the owner field readable in page one while forcing the six-entry
+     * SkillData array to cross into a no-access second page. */
+    skill = skill_allocation + 4096u -
+        TEST_CSKILL_DATA_ARRAY_OFFSET - sizeof(void *);
+    *(void **)(actor + TEST_CHARACTER_SKILL_OFFSET) = skill;
+    *(void **)(skill + TEST_CSKILL_OWNER_OFFSET) = actor;
+    if (!require_true(VirtualProtect(
+            skill_allocation + 4096u, 4096u, PAGE_NOACCESS,
+            &old_protection),
+            "training-skill unreadable array protection failed")) {
+        goto cleanup;
+    }
+    if (!require_true(
+            !SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+                actor, skill),
+            "partially unreadable CSkill data array was accepted")) {
+        VirtualProtect(skill_allocation + 4096u, 4096u,
+            old_protection, &old_protection);
+        goto cleanup;
+    }
+    if (!require_true(VirtualProtect(
+            skill_allocation + 4096u, 4096u, old_protection,
+            &old_protection),
+            "training-skill array protection restore failed")) {
+        goto cleanup;
+    }
+    result = 1;
+
+cleanup:
+    if (skill_allocation != NULL) {
+        VirtualFree(skill_allocation, 0u, MEM_RELEASE);
+    }
+    if (actor != NULL) VirtualFree(actor, 0u, MEM_RELEASE);
+    return result;
 }
 
 int main(void) {
@@ -23,7 +353,12 @@ int main(void) {
     };
     SudekiMpResourceName resource_copy;
 
-    if (!require_true(
+    if (!verify_ranged_prime_deadline_lifecycle() ||
+        !verify_training_skill_allocation_gate() ||
+        !require_true(
+            !SudekiMpCleanroomEngineTrainingSkills(&mode),
+            "training skills were available before initialization") ||
+        !require_true(
             SudekiMpCleanroomEnginePostRestoreControlTupleActive(
                 0, 0u, 1, 0u, 0, 1u, 0, 1u),
             "exact post-restore control tuple was rejected") ||

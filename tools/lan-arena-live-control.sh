@@ -17,6 +17,8 @@ duration_ms="${2:-250}"
 held_key=''
 held_button=''
 operator_weak_held=''
+operator_forward_release_prefix=''
+operator_forward_release_command=''
 
 release_synthetic_input() {
     if [[ -n "${held_key}" ]]; then
@@ -30,6 +32,13 @@ release_synthetic_input() {
     if [[ -n "${operator_weak_held}" ]]; then
         run_operator "${client_prefix}" weak-up >/dev/null 2>&1 || true
         operator_weak_held=''
+    fi
+    if [[ -n "${operator_forward_release_prefix}" &&
+          -n "${operator_forward_release_command}" ]]; then
+        run_operator "${operator_forward_release_prefix}" \
+            "${operator_forward_release_command}" >/dev/null 2>&1 || true
+        operator_forward_release_prefix=''
+        operator_forward_release_command=''
     fi
 }
 
@@ -49,20 +58,24 @@ usage() {
         '  --focus-client [ms]      Give client foreground time without input' \
         '  --host-confirm           Tap Enter in the exact host window' \
         '  --client-confirm         Tap Enter in the exact client window' \
-        '  --client-combat          Queue client combat toggle in-process' \
+        '  --host-combat            Toggle authoritative host arena combat (legacy)' \
+        '  --host-combat-on         Ensure authoritative host combat is enabled' \
+        '  --host-combat-off        Ensure authoritative host combat is disabled' \
         '  --client-fire [ms]       Queue one client weak-fire pulse' \
         '  --client-fire-hold [ms]  Hold client fire through the local operator API' \
         '  --client-fire-capture [ms]  Queue fire and capture after delay' \
         '  --client-skill SLOT      Queue Ailish native skill slot 0..5 on host' \
         '  --host-weak              Queue one native Tal weak transition' \
         '  --host-skill SLOT        Start Tal native skill slot 0..5' \
+        '  --host-spirit VARIANT    Start Tal native Spirit variant 1 or 2' \
         '  --host-combo [ms]        Queue three timed Tal weak transitions' \
         '  --host-sequence PATTERN [ms]  Queue Tal W/S transitions (for example WWS)' \
         '  --host-combo-capture [ms]  Queue three Tal weak transitions/captures' \
         '  --host-strong            Queue one native Tal strong transition' \
         '  --host-sweep             Queue one native Tal sweep transition' \
         '  --host-block [ms]        Queue block and observe for duration' \
-        '  --client-forward [ms]    Hold client W (50..3000 ms)' \
+        '  --host-forward [ms]      Hold in-process Tal forward (50..3000 ms)' \
+        '  --client-forward [ms]    Hold in-process Ailish forward (50..3000 ms)' \
         '  --client-turn-left       Queue native client camera-left input' \
         '  --client-turn-right      Queue native client camera-right input' \
         '  --capture                Capture both exact LAN windows'
@@ -72,9 +85,9 @@ case "${action}" in
     --status|--skip-startup|--advance-startup|--advance-host|--advance-client|\
     --focus-host|--focus-client|\
     --host-confirm|--client-confirm|\
-    --client-combat|--client-fire|--client-fire-capture|--client-fire-hold|--client-skill|--host-weak|--host-skill|\
-    --host-combo|--host-combo-capture|--host-sequence|--host-strong|--host-sweep|--host-block|\
-    --client-forward|\
+    --host-combat|--host-combat-on|--host-combat-off|--client-fire|--client-fire-capture|--client-fire-hold|--client-skill|--host-weak|--host-skill|\
+    --host-combo|--host-combo-capture|--host-sequence|--host-strong|--host-sweep|--host-block|--host-spirit|\
+    --host-forward|--client-forward|\
     --client-turn-left|--client-turn-right|--capture) ;;
     --help|-h) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
@@ -271,9 +284,17 @@ case "${action}" in
         trace_action 'key=Return'
         activate_and_tap_key "${confirm_window}" Return
         ;;
-    --client-combat)
-        trace_action 'command=combat-toggle source=local_operator_api'
-        run_operator "${client_prefix}" combat-toggle
+    --host-combat)
+        trace_action 'command=combat-toggle authority=host source=local_operator_api'
+        run_operator "${host_prefix}" combat-toggle
+        ;;
+    --host-combat-on)
+        trace_action 'command=combat-on authority=host source=local_operator_api'
+        run_operator "${host_prefix}" combat-on
+        ;;
+    --host-combat-off)
+        trace_action 'command=combat-off authority=host source=local_operator_api'
+        run_operator "${host_prefix}" combat-off
         ;;
     --client-fire|--client-fire-capture)
         validate_duration
@@ -307,6 +328,16 @@ case "${action}" in
         fi
         trace_action "command=skill actor=${skill_actor} slot=${skill_slot} source=local_operator_api"
         run_operator "${skill_prefix}" skill "${skill_slot}"
+        ;;
+    --host-spirit)
+        spirit_variant="${2:-}"
+        if [[ ! "${spirit_variant}" =~ ^[12]$ ]]; then
+            printf 'Spirit variant must be 1 or 2: %s\n' \
+                "${spirit_variant}" >&2
+            exit 2
+        fi
+        trace_action "command=spirit actor=Tal variant=${spirit_variant} source=local_operator_api"
+        run_operator "${host_prefix}" spirit "${spirit_variant}"
         ;;
     --host-weak)
         trace_action 'command=weak source=local_operator_api foreground=host'
@@ -380,10 +411,25 @@ case "${action}" in
         done
         printf '%s\n' "${stage_root}/${stamp}"-tal-combo-{1,2,3}.png
         ;;
-    --client-forward)
+    --host-forward|--client-forward)
         validate_duration
-        trace_action "key=W duration_ms=${duration_ms}"
-        activate_and_hold_key "${client_window}" w "${duration_ms}"
+        movement_prefix="${client_prefix}"
+        movement_actor='Ailish'
+        movement_command='client-forward-hold'
+        movement_release_command='client-forward-up'
+        if [[ "${action}" == '--host-forward' ]]; then
+            movement_prefix="${host_prefix}"
+            movement_actor='Tal'
+            movement_command='host-forward-hold'
+            movement_release_command='host-forward-up'
+        fi
+        trace_action "command=${movement_command} actor=${movement_actor} duration_ms=${duration_ms} source=local_operator_api"
+        operator_forward_release_prefix="${movement_prefix}"
+        operator_forward_release_command="${movement_release_command}"
+        run_operator "${movement_prefix}" "${movement_command}" \
+            "${duration_ms}"
+        operator_forward_release_prefix=''
+        operator_forward_release_command=''
         ;;
     --client-turn-left|--client-turn-right)
         camera_command=camera-right

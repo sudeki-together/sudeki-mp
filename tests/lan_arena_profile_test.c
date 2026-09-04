@@ -11,46 +11,63 @@ static void observe_pair(
     SudekiMpLanArenaProfileState *state,
     BOOL host,
     BOOL client,
-    BOOL control
+    BOOL control,
+    BOOL cleanroom
 ) {
     CHECK(SudekiMpLanArenaProfileObserve(state, L"EnableLanArenaHostPrototype", host));
     CHECK(SudekiMpLanArenaProfileObserve(state, L"EnableLanArenaClientPrototype", client));
     CHECK(SudekiMpLanArenaProfileObserve(
         state, L"EnableControlSeparationPrototype", control));
+    CHECK(SudekiMpLanArenaProfileObserve(
+        state, L"EnableCleanroomMenu", cleanroom));
 }
 
 int main(void) {
     SudekiMpLanArenaProfileState state;
     SudekiMpLanArenaProfileRole role;
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, TRUE, FALSE, TRUE);
+    CHECK(SudekiMpLanArenaProfileObserve(
+        &state, L"SkipStartupMovies", TRUE));
+    observe_pair(&state, TRUE, FALSE, TRUE, TRUE);
     CHECK(SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST);
 
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, FALSE, TRUE, TRUE);
+    observe_pair(&state, FALSE, TRUE, TRUE, FALSE);
     CHECK(SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_CLIENT);
 
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, TRUE, TRUE, TRUE);
+    observe_pair(&state, TRUE, TRUE, TRUE, TRUE);
     CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(state.failure == SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_BOTH_ROLES_ENABLED);
 
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, FALSE, FALSE, FALSE);
+    observe_pair(&state, FALSE, FALSE, FALSE, FALSE);
     CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(state.failure == SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_ROLE_MISSING);
 
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, TRUE, FALSE, FALSE);
+    observe_pair(&state, TRUE, FALSE, FALSE, TRUE);
     CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(state.failure == SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_FORBIDDEN_KEY_ENABLED);
 
     SudekiMpLanArenaProfileInitialize(&state);
-    observe_pair(&state, FALSE, TRUE, FALSE);
+    observe_pair(&state, FALSE, TRUE, FALSE, FALSE);
     CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
     CHECK(state.failure == SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_FORBIDDEN_KEY_ENABLED);
+
+    SudekiMpLanArenaProfileInitialize(&state);
+    observe_pair(&state, TRUE, FALSE, TRUE, FALSE);
+    CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
+    CHECK(state.failure ==
+        SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_HOST_TOOLS_MISMATCH);
+
+    SudekiMpLanArenaProfileInitialize(&state);
+    observe_pair(&state, FALSE, TRUE, TRUE, TRUE);
+    CHECK(!SudekiMpLanArenaProfileComplete(&state, &role));
+    CHECK(state.failure ==
+        SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_HOST_TOOLS_MISMATCH);
 
     SudekiMpLanArenaProfileInitialize(&state);
     CHECK(!SudekiMpLanArenaProfileObserve(&state, L"EnableSplitScreenRenderPrototype", TRUE));

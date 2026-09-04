@@ -69,4 +69,22 @@ BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
     const SudekiMpLanArenaReplica *replica
 );
 
+/* The fixed Ailish client may create presentation-only native skill tasks for
+ * either arena actor after host authorization. Damage and resources remain
+ * host-owned; the client skill hooks keep world time realtime and preserve
+ * Ailish's camera when the remote Tal task requests its cinematic camera. */
+BOOL SudekiMpLanArenaClientNativeSkillTaskAllowed(
+    uint8_t actor_type,
+    uint8_t local_actor_type
+);
+
+/* A host-approved cast still has to enter CSkill::Use through a genuinely
+ * valid local actor state. Result 2 is the known ranged-strafe case; result 3
+ * may be repaired only when the authenticated host says combat is active.
+ * Neither result is safe to bypass inside CSkill::Use. */
+BOOL SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(
+    int native_result,
+    BOOL host_combat_authorized
+);
+
 #endif

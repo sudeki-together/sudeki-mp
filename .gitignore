@@ -30,6 +30,7 @@
 /.cache/
 __pycache__/
 *.pyc
+.agent-local/
 
 # Local generated Graphify knowledge graph and live activity state.
 /graphify-out/

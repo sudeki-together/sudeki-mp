@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
+# shellcheck source=lib/lan-arena-loopback-common.sh
+source "${script_dir}/lib/lan-arena-loopback-common.sh"
 game="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
 host_prefix="${SUDEKIMP_LAN_HOST_WINEPREFIX:-${HOME}/Games/sudeki-lan-host-win32-prefix}"
 client_prefix="${SUDEKIMP_LAN_CLIENT_WINEPREFIX:-${HOME}/Games/sudeki-lan-client-win32-prefix}"
@@ -10,35 +12,30 @@ port="${SUDEKIMP_LAN_ARENA_PORT:-26770}"
 loopback_timeout_ms="${SUDEKIMP_LAN_ARENA_LOOPBACK_TIMEOUT_MS:-5000}"
 host_monitor_product="${SUDEKIMP_LAN_HOST_MONITOR_PRODUCT:-Acer X233}"
 client_monitor_product="${SUDEKIMP_LAN_CLIENT_MONITOR_PRODUCT:-LG FHD}"
+graphics_backend="${SUDEKIMP_LAN_GRAPHICS_BACKEND:-wined3d}"
 action="${1:---start}"
 stage_root="${project_dir}/build/mingw32/lan-loopback"
 host_stage="${stage_root}/host"
 client_stage="${stage_root}/client"
+dxvk_root="${HOME}/.steam/root/compatibilitytools.d/GE-Proton11-3/files"
+dxvk_d3d9_sha256='480a8b8831f31ccaa246cb5d0d7e59a094f07fcc651f2c531b814f8c54dc45a0'
 launcher="${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe"
 source_dll="${project_dir}/build/mingw32/bin/SudekiMP.dll"
 source_config="${project_dir}/config/SudekiMP.ini"
 supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
-wineserver_runner=""
-
-for candidate in "${HOME}"/.steam/root/compatibilitytools.d/GE-Proton*/files/bin/wineserver; do
-    if [[ -x "${candidate}" ]]; then
-        wineserver_runner="${candidate}"
-    fi
-done
-if [[ -z "${wineserver_runner}" ]]; then
-    wineserver_runner="$(command -v wineserver || true)"
-fi
-if [[ -z "${wineserver_runner}" ]]; then
-    printf '%s\n' 'No GE-Proton or system wineserver executable was found.' >&2
-    exit 127
-fi
 
 usage() {
     printf '%s\n' \
         'usage: tools/lan-arena-loopback.sh [--start|--check|--network-test|--stop]' \
         '' \
         'Starts host and client Sudeki processes with isolated Wine prefixes,' \
-        'DLLs, and closed LAN configs. No campaign saves are read or copied.'
+        'DLLs, and closed LAN configs. No campaign saves are read or copied.' \
+        '' \
+        'Graphics backend (default: wined3d):' \
+        '  SUDEKIMP_LAN_GRAPHICS_BACKEND=wined3d|software|dxvk' \
+        '  software uses Mesa llvmpipe for a diagnostic fallback.' \
+        '  dxvk pins GE-Proton11-3 and requires NVIDIA 32-bit Vulkan.' \
+        '  its temporary d3d9 override restores to WineD3D on every exit.'
 }
 
 case "${action}" in
@@ -51,6 +48,17 @@ if [[ "${host_prefix}" == "${client_prefix}" ]]; then
     printf '%s\n' 'Host and client Wine prefixes must be different.' >&2
     exit 2
 fi
+
+# Stopping the two exact prefixes does not depend on launch-only graphics or
+# network settings. Keep this path available even if a stale environment has
+# an invalid backend, port, or timeout value.
+if [[ "${action}" == "--stop" ]]; then
+    lan_stop_prefixes_with_known_runners \
+        "${host_prefix}" "${client_prefix}" "${dxvk_root}"
+    printf '%s\n' 'Stopped the isolated LAN arena Wine servers.'
+    exit 0
+fi
+
 if [[ ! "${port}" =~ ^[0-9]+$ ]] || (( port < 1024 || port > 65535 )); then
     printf 'Invalid LAN arena port: %s\n' "${port}" >&2
     exit 2
@@ -61,11 +69,19 @@ if [[ ! "${loopback_timeout_ms}" =~ ^[0-9]+$ ]] ||
     exit 2
 fi
 
-if [[ "${action}" == "--stop" ]]; then
-    env WINEPREFIX="${client_prefix}" "${wineserver_runner}" -k 2>/dev/null || true
-    env WINEPREFIX="${host_prefix}" "${wineserver_runner}" -k 2>/dev/null || true
-    printf '%s\n' 'Stopped the isolated LAN arena Wine servers.'
-    exit 0
+lan_validate_graphics_backend "${graphics_backend}" || exit $?
+
+if [[ "${action}" == "--start" ]]; then
+    lan_warn_locked_graphical_session "${graphics_backend}"
+fi
+
+lan_select_wine_runners "${graphics_backend}" "${dxvk_root}" || exit $?
+
+if [[ "${action}" != "--network-test" ]]; then
+    printf '%s\n' \
+        "LAN graphics backend: ${graphics_backend}" \
+        "Wine runner: ${wine_runner}" \
+        "Wineserver runner: ${wineserver_runner}"
 fi
 
 if [[ "${action}" != "--network-test" && ! -f "${game}" ]]; then
@@ -77,7 +93,8 @@ initialize_win32_prefix() {
     local destination="$1"
     local attempt
     if [[ ! -f "${destination}/system.reg" ]]; then
-        env WINEARCH=win32 WINEPREFIX="${destination}" wine cmd /c exit
+        env WINEARCH=win32 WINEPREFIX="${destination}" \
+            "${wine_runner}" cmd /c exit
         for attempt in {1..200}; do
             [[ -f "${destination}/system.reg" ]] && break
             sleep 0.1
@@ -114,12 +131,14 @@ if [[ "${action}" == "--network-test" ]]; then
     mkdir -p -- "${network_log_root}"
     host_save_before="$(save_fingerprint "${host_prefix}")"
     client_save_before="$(save_fingerprint "${client_prefix}")"
-    env WINEPREFIX="${host_prefix}" wine "${peer_test}" host "${port}" \
+    env WINEPREFIX="${host_prefix}" \
+        "${wine_runner}" "${peer_test}" host "${port}" \
         >"${host_network_log}" 2>&1 &
     host_network_pid="$!"
     trap 'kill "${host_network_pid}" 2>/dev/null || true' EXIT INT TERM
     sleep 0.2
-    if ! env WINEPREFIX="${client_prefix}" wine "${peer_test}" client "${port}" \
+    if ! env WINEPREFIX="${client_prefix}" \
+        "${wine_runner}" "${peer_test}" client "${port}" \
         >"${client_network_log}" 2>&1; then
         cat "${client_network_log}" >&2
         cat "${host_network_log}" >&2
@@ -172,13 +191,64 @@ seed_graphics_runtime() {
                 "${source_system32}/${runtime}" >&2
             exit 1
         fi
-        cp --reflink=auto "${source_system32}/${runtime}" \
-            "${destination_system32}/${runtime}"
+        if ! lan_atomic_copy_verified "${source_system32}/${runtime}" \
+            "${destination_system32}/${runtime}"; then
+            exit 1
+        fi
     done
 }
 
+host_pid=""
+client_pid=""
+host_game_pid=""
+client_game_pid=""
+
+stop_children() {
+    if [[ -n "${client_pid}" ]]; then
+        kill "${client_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${host_pid}" ]]; then
+        kill "${host_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${client_game_pid}" ]]; then
+        kill "${client_game_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${host_game_pid}" ]]; then
+        kill "${host_game_pid}" 2>/dev/null || true
+    fi
+    return 0
+}
+
+cleanup_loopback() {
+    local status="$?"
+    trap - EXIT HUP INT TERM
+    stop_children
+    if ! lan_cleanup_atomic_seed_temps; then
+        printf '%s\n' \
+            'WARNING: one or more incomplete runtime seed files could not be removed.' >&2
+    fi
+    if ! lan_restore_dxvk_transaction; then
+        printf '%s\n' \
+            'ERROR: automatic WineD3D restoration was incomplete; see recovery path above.' >&2
+        if (( status == 0 )); then
+            status=1
+        fi
+    fi
+    exit "${status}"
+}
+
+trap cleanup_loopback EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 seed_graphics_runtime "${host_prefix}"
 seed_graphics_runtime "${client_prefix}"
+if ! lan_prepare_graphics_backend \
+    "${graphics_backend}" "${stage_root}" "${dxvk_root}" \
+    "${dxvk_d3d9_sha256}" "${host_prefix}" "${client_prefix}"; then
+    exit 1
+fi
 
 seed_windowed_options() {
     local destination="$1"
@@ -220,19 +290,24 @@ write_role_config() {
         "${destination}"
     if [[ "${role}" == "host" ]]; then
         enabled_key='EnableLanArenaHostPrototype'
+        cleanroom_tools='true'
     else
         enabled_key='EnableLanArenaClientPrototype'
+        cleanroom_tools='false'
     fi
     sed -i -E \
         -e "s/^${enabled_key}=false$/${enabled_key}=true/" \
+        -e "s/^EnableCleanroomMenu=false$/EnableCleanroomMenu=${cleanroom_tools}/" \
         "${destination}"
-    unexpected="$(awk -F= -v role_key="${enabled_key}" '
+    unexpected="$(awk -F= -v role_key="${enabled_key}" -v tools="${cleanroom_tools}" '
         $1 ~ /^Enable/ && $2 == "true" &&
-        $1 != role_key && $1 != "EnableControlSeparationPrototype" { print }
+        $1 != role_key && $1 != "EnableControlSeparationPrototype" &&
+        !(tools == "true" && $1 == "EnableCleanroomMenu") { print }
     ' "${destination}")"
     if [[ -n "${unexpected}" ]] ||
        ! grep -Fqx "${enabled_key}=true" "${destination}" ||
        ! grep -Fqx 'EnableControlSeparationPrototype=true' "${destination}" ||
+       ! grep -Fqx "EnableCleanroomMenu=${cleanroom_tools}" "${destination}" ||
        ! grep -Fqx "LanArenaPort=${port}" "${destination}" ||
        ! grep -Fqx "LanArenaTimeoutMs=${loopback_timeout_ms}" "${destination}"; then
         printf 'Failed to generate exact %s LAN profile.\n' "${role}" >&2
@@ -254,37 +329,20 @@ client_dll="$(to_wine_path "${client_stage}/SudekiMP.dll")"
 game_windows="$(to_wine_path "${game}")"
 
 if [[ "${action}" == "--check" ]]; then
-    env WINEPREFIX="${host_prefix}" wine "${launcher}" --check \
+    lan_run_with_graphics_environment host \
+        WINEPREFIX="${host_prefix}" "${wine_runner}" "${launcher}" --check \
         "${game_windows}" "${host_dll}"
-    env WINEPREFIX="${client_prefix}" wine "${launcher}" --check \
+    lan_run_with_graphics_environment client \
+        WINEPREFIX="${client_prefix}" "${wine_runner}" "${launcher}" --check \
         "${game_windows}" "${client_dll}"
     printf '%s\n' 'LAN host/client isolated-profile checks passed.'
     exit 0
 fi
 
-host_pid=""
-client_pid=""
-host_game_pid=""
-client_game_pid=""
 host_console="${stage_root}/host-console.log"
 client_console="${stage_root}/client-console.log"
 host_runtime_log="${stage_root}/host-runtime.log"
 client_runtime_log="${stage_root}/client-runtime.log"
-stop_children() {
-    if [[ -n "${client_pid}" ]]; then
-        kill "${client_pid}" 2>/dev/null || true
-    fi
-    if [[ -n "${host_pid}" ]]; then
-        kill "${host_pid}" 2>/dev/null || true
-    fi
-    if [[ -n "${client_game_pid}" ]]; then
-        kill "${client_game_pid}" 2>/dev/null || true
-    fi
-    if [[ -n "${host_game_pid}" ]]; then
-        kill "${host_game_pid}" 2>/dev/null || true
-    fi
-}
-trap stop_children EXIT INT TERM
 
 printf '%s\n' \
     "Starting Tal host on UDP ${port} with prefix ${host_prefix}" \
@@ -296,10 +354,12 @@ host_save_before="$(save_fingerprint "${host_prefix}")"
 client_save_before="$(save_fingerprint "${client_prefix}")"
 host_runtime_log_windows="$(to_wine_path "${host_runtime_log}")"
 client_runtime_log_windows="$(to_wine_path "${client_runtime_log}")"
+lan_archive_existing_evidence "${stage_root}"
 truncate -s 0 "${host_runtime_log}" "${client_runtime_log}"
-env WINEPREFIX="${host_prefix}" WINEDLLOVERRIDES='d3d9,d3dx9_30=n,b' \
+lan_run_with_graphics_environment host \
+    WINEPREFIX="${host_prefix}" WINEDLLOVERRIDES='d3d9,d3dx9_30=n,b' \
     SUDEKIMP_LOG_PATH="${host_runtime_log_windows}" \
-    wine "${launcher}" \
+    "${wine_runner}" "${launcher}" \
     "${game_windows}" "${host_dll}" \
     -Level testroom -DT 1 -Tal 1 >"${host_console}" 2>&1 &
 host_pid="$!"
@@ -321,173 +381,6 @@ resolve_game_window() {
     local game_pid="$1"
     wmctrl -l -p 2>/dev/null | awk -v pid="${game_pid}" \
         '$3 == pid && $0 ~ /Sudeki/ { print $1; exit }'
-}
-
-monitor_geometry_by_product() {
-    local product_needle="$1"
-    local status_file connector_dir connector product line
-    if [[ -z "${product_needle}" ]] || ! command -v edid-decode >/dev/null 2>&1; then
-        return 1
-    fi
-    for status_file in /sys/class/drm/card*-*/status; do
-        [[ -r "${status_file}" ]] || continue
-        grep -Fqx connected "${status_file}" || continue
-        connector_dir="${status_file%/status}"
-        product="$(edid-decode "${connector_dir}/edid" 2>/dev/null |
-            sed -n "s/.*Display Product Name: '\([^']*\)'.*/\1/p" |
-            head -n 1)"
-        [[ "${product}" == *"${product_needle}"* ]] || continue
-        connector="${connector_dir##*/}"
-        connector="${connector#card*-}"
-        line="$(xrandr --query 2>/dev/null |
-            awk -v connector="${connector}" \
-                '$1 == connector && $2 == "connected" { print; exit }')"
-        if [[ "${line}" =~ ([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+) ]]; then
-            printf '%s %s %s %s' \
-                "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
-                "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-place_window_geometry() {
-    local window_id="$1"
-    local requested_x="$2"
-    local requested_y="$3"
-    local requested_width="$4"
-    local requested_height="$5"
-    local actual_x actual_y corrected_x corrected_y attempt
-    wmctrl -i -r "${window_id}" \
-        -e "0,${requested_x},${requested_y},${requested_width},${requested_height}" \
-        2>/dev/null || return
-    # KWin can expose Wine's top-level coordinates through a 2x logical-
-    # desktop transform even though XRandR reports physical output geometry.
-    # Detect that exact transform and compensate once; ordinary 1x desktops
-    # keep the first placement unchanged.
-    # Wine applies the EWMH configure asynchronously after its top-level GL
-    # window settles; a shorter sample can still observe the pre-move frame.
-    sleep 1
-    read -r actual_x actual_y < <(wmctrl -l -G 2>/dev/null |
-        awk -v id="${window_id}" '$1 == id { print $4, $5; exit }')
-    corrected_x="${requested_x}"
-    corrected_y="${requested_y}"
-    if [[ "${actual_x:-}" == "$((requested_x * 2))" ]]; then
-        corrected_x=$((requested_x / 2))
-    fi
-    if [[ "${actual_y:-}" == "$((requested_y * 2))" ]]; then
-        corrected_y=$((requested_y / 2))
-    fi
-    if (( corrected_x != requested_x || corrected_y != requested_y )); then
-        # The first asynchronous configure may land after the correction and
-        # overwrite it. Reassert the compensated coordinates until the window
-        # manager reports the intended physical output position.
-        for attempt in {1..4}; do
-            wmctrl -i -r "${window_id}" \
-                -e "0,${corrected_x},${corrected_y},${requested_width},${requested_height}" \
-                2>/dev/null || true
-            sleep 1
-            read -r actual_x actual_y < <(wmctrl -l -G 2>/dev/null |
-                awk -v id="${window_id}" '$1 == id { print $4, $5; exit }')
-            if [[ "${actual_x:-}" == "${requested_x}" &&
-                  "${actual_y:-}" == "${requested_y}" ]]; then
-                break
-            fi
-        done
-    fi
-}
-
-place_loopback_windows() {
-    local host_window_id="$1"
-    local client_window_id="$2"
-    local line width height x y
-    local host_width host_height client_width client_height
-    local host_display client_display
-    local -a displays=()
-
-    if ! command -v xrandr >/dev/null 2>&1 ||
-       ! command -v wmctrl >/dev/null 2>&1; then
-        printf '%s\n' \
-            'Window placement tools are unavailable; leaving native positions.'
-        return
-    fi
-    while IFS= read -r line; do
-        if [[ "${line}" =~ connected[[:space:]]+(primary[[:space:]]+)?([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+) ]]; then
-            displays+=(
-                "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]} ${BASH_REMATCH[5]}"
-            )
-        fi
-    done < <(xrandr --query 2>/dev/null)
-
-    wmctrl -i -r "${host_window_id}" -T 'Sudeki LAN Host - Tal' \
-        2>/dev/null || true
-    wmctrl -i -r "${client_window_id}" -T 'Sudeki LAN Client - Ailish' \
-        2>/dev/null || true
-    printf '%s\n' \
-        'Named windows: Sudeki LAN Host - Tal / Sudeki LAN Client - Ailish.'
-
-    # Clear stale presentation state once. Neither operation activates a
-    # window and this is never repeated as a focus pump.
-    wmctrl -i -r "${host_window_id}" \
-        -b remove,hidden,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
-    wmctrl -i -r "${client_window_id}" \
-        -b remove,hidden,maximized_vert,maximized_horz,fullscreen 2>/dev/null || true
-
-    host_display="$(monitor_geometry_by_product "${host_monitor_product}" || true)"
-    client_display="$(monitor_geometry_by_product "${client_monitor_product}" || true)"
-    if [[ -n "${host_display}" && -n "${client_display}" &&
-          "${host_display}" != "${client_display}" ]]; then
-        read -r width height x y <<<"${host_display}"
-        host_width=$(( width > 1406 ? 1366 : width - 40 ))
-        host_height=$(( height > 819 ? 739 : height - 80 ))
-        place_window_geometry "${host_window_id}" \
-            "$((x + 20))" "$((y + 40))" "${host_width}" "${host_height}"
-
-        read -r width height x y <<<"${client_display}"
-        client_width=$(( width > 1406 ? 1366 : width - 40 ))
-        client_height=$(( height > 819 ? 739 : height - 80 ))
-        place_window_geometry "${client_window_id}" \
-            "$((x + 20))" "$((y + 40))" "${client_width}" "${client_height}"
-        printf '%s\n' \
-            "Placed Host on ${host_monitor_product} and Client on ${client_monitor_product} without changing focus."
-        return
-    fi
-
-    if (( ${#displays[@]} >= 2 )); then
-        read -r width height x y <<<"${displays[0]}"
-        host_width=$(( width > 1406 ? 1366 : width - 40 ))
-        host_height=$(( height > 819 ? 739 : height - 80 ))
-        wmctrl -i -r "${host_window_id}" \
-            -e "0,$((x + 20)),$((y + 40)),${host_width},${host_height}" \
-            2>/dev/null || true
-
-        read -r width height x y <<<"${displays[1]}"
-        client_width=$(( width > 1406 ? 1366 : width - 40 ))
-        client_height=$(( height > 819 ? 739 : height - 80 ))
-        wmctrl -i -r "${client_window_id}" \
-            -e "0,$((x + 20)),$((y + 40)),${client_width},${client_height}" \
-            2>/dev/null || true
-        printf '%s\n' \
-            'Placed Host and Client on separate monitors without changing focus.'
-        return
-    fi
-
-    if (( ${#displays[@]} == 1 )); then
-        read -r width height x y <<<"${displays[0]}"
-        host_width=$(( width / 2 - 30 ))
-        client_width="${host_width}"
-        host_height=$(( height - 80 ))
-        client_height="${host_height}"
-        wmctrl -i -r "${host_window_id}" \
-            -e "0,$((x + 20)),$((y + 40)),${host_width},${host_height}" \
-            2>/dev/null || true
-        wmctrl -i -r "${client_window_id}" \
-            -e "0,$((x + width / 2 + 10)),$((y + 40)),${client_width},${client_height}" \
-            2>/dev/null || true
-        printf '%s\n' \
-            'Tiled Host and Client side by side without changing focus.'
-    fi
 }
 
 host_window=""
@@ -519,9 +412,10 @@ if ! kill -0 "${host_game_pid}" 2>/dev/null; then
     exit 1
 fi
 
-env WINEPREFIX="${client_prefix}" WINEDLLOVERRIDES='d3d9,d3dx9_30=n,b' \
+lan_run_with_graphics_environment client \
+    WINEPREFIX="${client_prefix}" WINEDLLOVERRIDES='d3d9,d3dx9_30=n,b' \
     SUDEKIMP_LOG_PATH="${client_runtime_log_windows}" \
-    wine "${launcher}" \
+    "${wine_runner}" "${launcher}" \
     "${game_windows}" "${client_dll}" \
     -Level testroom -DT 1 -Ailish 1 >"${client_console}" 2>&1 &
 client_pid="$!"
@@ -538,7 +432,7 @@ if [[ -z "${client_window}" ]]; then
     tail -n 40 "${client_console}" >&2 || true
     exit 1
 fi
-place_loopback_windows "${host_window}" "${client_window}"
+place_loopback_windows "${host_window}" "${client_window}" initial
 sleep 12
 if ! kill -0 "${host_game_pid}" 2>/dev/null ||
    ! kill -0 "${client_game_pid}" 2>/dev/null; then
@@ -549,6 +443,25 @@ if ! kill -0 "${host_game_pid}" 2>/dev/null ||
     tail -n 40 "${client_runtime_log}" >&2 || true
     exit 1
 fi
+
+# Wine can issue a late top-level configure while its client-side D3D device
+# finishes initializing. Reassert the compensated product geometry only after
+# that bounded warmup, then record the final window/output relationship.
+post_warmup_host_window="$(resolve_game_window "${host_game_pid}")"
+post_warmup_client_window="$(resolve_game_window "${client_game_pid}")"
+if [[ -n "${post_warmup_host_window}" ]]; then
+    host_window="${post_warmup_host_window}"
+else
+    printf '%s\n' \
+        'WARNING: could not refresh the host window ID after graphics warmup.' >&2
+fi
+if [[ -n "${post_warmup_client_window}" ]]; then
+    client_window="${post_warmup_client_window}"
+else
+    printf '%s\n' \
+        'WARNING: could not refresh the client window ID after graphics warmup.' >&2
+fi
+place_loopback_windows "${host_window}" "${client_window}" post_warmup
 
 printf 'Loopback windows active without automated focus changes: host_pid=%s client_pid=%s\n' \
     "${host_game_pid}" "${client_game_pid}"

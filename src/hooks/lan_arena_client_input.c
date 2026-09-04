@@ -39,6 +39,8 @@ typedef void (__attribute__((regparm(1))) *QuickSkillActionFunction)(
     uint32_t action_id);
 typedef uint8_t (__attribute__((fastcall)) *QuickMenuSkillUseFunction)(
     void *skill, void *ignored_edx, int slot);
+typedef int (__attribute__((regparm(2))) *SkillValidateFunction)(
+    void *skill, int slot);
 
 typedef struct LanArenaNativeCameraInputEvent {
     uint32_t action;
@@ -70,7 +72,9 @@ enum {
     RVA_QUICK_MENU_VTABLE = 0x002caf1cu,
     RVA_QUICK_SKILL_ACTION_CALL = 0x00027acfu,
     RVA_QUICK_SKILL_ACTION = 0x00027bf0u,
+    RVA_QUICK_MENU_SKILL_VALIDATE_CALL = 0x00099867u,
     RVA_QUICK_MENU_SKILL_USE_CALL = 0x000998a1u,
+    RVA_SKILL_VALIDATE = 0x000b4bc0u,
     RVA_SKILL_USE = 0x000b4810u,
     CHARACTER_ARBITER_OWNER_OFFSET = 0x10u,
     CONTROLLER_TARGET_OFFSET = 0x248u,
@@ -128,6 +132,7 @@ static SudekiMpPointerHook quick_menu_input_hook;
 static SudekiMpPointerHook camera_input_event_hook;
 static SudekiMpPointerHook character_input_hook;
 static SudekiMpRelativeCallHook quick_skill_action_hook;
+static SudekiMpRelativeCallHook quick_menu_skill_validate_hook;
 static SudekiMpRelativeCallHook quick_menu_skill_use_hook;
 static ArbiterMovementFunction original_arbiter_movement;
 static ControllerCombatFunction original_controller_combat;
@@ -135,6 +140,7 @@ static QuickMenuInputFunction original_quick_menu_input;
 static CameraInputEventFunction original_camera_input_event;
 static CharacterInputHandler original_character_input_handler;
 static QuickSkillActionFunction original_quick_skill_action;
+static SkillValidateFunction original_skill_validate;
 static QuickMenuSkillUseFunction original_quick_menu_skill_use;
 static int16_t last_direction_x;
 static int16_t last_direction_z;
@@ -155,18 +161,17 @@ static BOOL last_transmitted_weak_held;
 static BOOL last_transmitted_first_person_active;
 static BOOL native_weak_held;
 static DWORD native_weak_sample_at_ms;
-static BOOL combat_toggle_pending;
 static BOOL skill_pending;
 static uint8_t pending_skill_slot;
-static BOOL combat_toggle_was_down;
 static uint8_t *client_game_base;
-static HANDLE operator_combat_toggle_event;
 static HANDLE operator_weak_attack_event;
 static HANDLE operator_weak_hold_event;
+static HANDLE operator_forward_hold_event;
 static HANDLE operator_camera_left_event;
 static HANDLE operator_camera_right_event;
 static HANDLE operator_skill_events[6];
 static DWORD operator_weak_attack_until_ms;
+static int operator_forward_effective_state;
 static DWORD operator_camera_until_ms;
 static int operator_camera_direction;
 static BOOL operator_camera_release_pending;
@@ -178,6 +183,7 @@ static DWORD pending_character_camera_event_at_ms;
 static int client_camera_route_trace_state = -1;
 static int client_first_person_aim_bridge_trace_state = -1;
 static int client_skill_camera_input_trace_state = -1;
+static int client_quick_menu_combat_validation_trace_state = -1;
 
 enum {
     CLIENT_INPUT_SEND_INTERVAL_MS = 50u,
@@ -207,6 +213,14 @@ BOOL SudekiMpLanArenaClientCameraInputAllowed(
     return !authenticated || !local_skill_camera_active;
 }
 
+BOOL SudekiMpLanArenaClientOperatorForwardPolicy(
+    BOOL physical_direction_held,
+    BOOL operator_forward_held
+) {
+    return physical_direction_held == FALSE &&
+        operator_forward_held != FALSE;
+}
+
 static BOOL authenticated_client(void);
 static BOOL readable_memory(const void *pointer, size_t length);
 static BOOL client_ailish_first_person_active(void);
@@ -221,8 +235,7 @@ static BOOL queue_client_skill_slot(
         SUDEKIMP_CLEANROOM_AILISH);
     if (!authenticated_client() || character == NULL || character != ailish ||
         slot < 0 || slot >= 6 || skill_pending ||
-        !SudekiMpDescribeCharacterSkillSlot(character, slot, &row) ||
-        row.available == 0u) {
+        !SudekiMpDescribeCharacterSkillSlot(character, slot, &row)) {
         SetLastError(skill_pending ? ERROR_BUSY : ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -230,11 +243,12 @@ static BOOL queue_client_skill_slot(
     pending_skill_slot = (uint8_t)slot;
     SudekiMpLogFormat(
         "lan_arena_client_input event=skill phase=requested actor=Ailish "
-        "slot=%u cost=%lu source=%s "
-        "policy=semantic_slot_host_validator_owns_execution\r\n",
+        "slot=%u cost=%lu source=%s availability=%u "
+        "policy=cleanroom_training_slot_host_validator_owns_execution\r\n",
         (unsigned int)pending_skill_slot,
         (unsigned long)row.cost,
-        source == NULL ? "unknown" : source);
+        source == NULL ? "unknown" : source,
+        (unsigned int)row.available);
     return TRUE;
 }
 
@@ -283,6 +297,40 @@ static uint8_t __attribute__((fastcall)) route_client_quick_menu_skill_use(
     return 0u;
 }
 
+static int __attribute__((regparm(2)))
+route_client_quick_menu_skill_validate(void *skill, int slot) {
+    void *owner;
+    void *ailish;
+    BOOL host_combat = FALSE;
+    int result = original_skill_validate == NULL ? 5 :
+        original_skill_validate(skill, slot);
+    owner = readable_memory(skill, 0x14u) ?
+        *(void **)((uint8_t *)skill + 0x10u) : NULL;
+    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    if (result == 3 && authenticated_client() && owner != NULL &&
+        owner == ailish &&
+        SudekiMpLanArenaClientReplicaHostCombatState(&host_combat) &&
+        host_combat) {
+        if (client_quick_menu_combat_validation_trace_state != 1) {
+            client_quick_menu_combat_validation_trace_state = 1;
+            SudekiMpLogFormat(
+                "lan_arena_client_input event=quick_menu_skill_validate "
+                "phase=host_authorized native_result=%d slot=%d "
+                "policy=host_combat_snapshot_allows_authoritative_request\r\n",
+                result, slot);
+        }
+        return 0;
+    }
+    if (client_quick_menu_combat_validation_trace_state != 0) {
+        client_quick_menu_combat_validation_trace_state = 0;
+        SudekiMpLogFormat(
+            "lan_arena_client_input event=quick_menu_skill_validate "
+            "phase=native result=%d slot=%d host_combat=%u\r\n",
+            result, slot, host_combat ? 1u : 0u);
+    }
+    return result;
+}
+
 static uint8_t *active_native_camera(void) {
     uint8_t *mode;
     uint8_t *camera_member;
@@ -295,10 +343,6 @@ static uint8_t *active_native_camera(void) {
     if ((uintptr_t)camera_member < 0x2cu ||
         !readable_memory(camera_member - 0x2cu, 0x108u)) return NULL;
     return camera_member - 0x2cu;
-}
-
-void SudekiMpLanArenaClientRequestCombatToggle(void) {
-    if (authenticated_client()) combat_toggle_pending = TRUE;
 }
 
 static BOOL readable_memory(const void *pointer, size_t length) {
@@ -775,12 +819,12 @@ static BOOL send_client_input(
     input.weak_attack_held = weak_held ? 1u : 0u;
     input.ranged_first_person_active =
         client_ailish_first_person_active() ? 1u : 0u;
-    input.cleanroom_combat_test_pressed =
-        combat_toggle_pending ? 1u : 0u;
+    /* Combat state is host/world authority. Keep the legacy wire byte zero so
+     * an older host cannot mistake client-local input for permission. */
+    input.cleanroom_combat_test_pressed = 0u;
     input.skill_pressed = skill_pending ? 1u : 0u;
     input.skill_slot = skill_pending ? pending_skill_slot : 0u;
     if (!SudekiMpLanArenaSessionSendInput(&input)) return FALSE;
-    combat_toggle_pending = FALSE;
     skill_pending = FALSE;
     pending_skill_slot = 0u;
     return TRUE;
@@ -882,19 +926,14 @@ void SudekiMpLanArenaClientInputService(void) {
     int16_t desired_z;
     BOOL aim_changed;
     BOOL first_person_active;
-    BOOL combat_toggle_down =
-        (GetKeyState(VK_F8) & (SHORT)0x8000) != 0;
-    BOOL cleanroom_combat_test_pressed =
-        combat_toggle_down && !combat_toggle_was_down;
-    BOOL operator_toggle_requested = operator_combat_toggle_event != NULL &&
-        WaitForSingleObject(operator_combat_toggle_event, 0u) == WAIT_OBJECT_0;
     BOOL operator_weak_requested = operator_weak_attack_event != NULL &&
         WaitForSingleObject(operator_weak_attack_event, 0u) == WAIT_OBJECT_0;
     BOOL operator_weak_held = operator_weak_hold_event != NULL &&
         WaitForSingleObject(operator_weak_hold_event, 0u) == WAIT_OBJECT_0;
-    combat_toggle_was_down = combat_toggle_down;
+    BOOL operator_forward_held = operator_forward_hold_event != NULL &&
+        WaitForSingleObject(operator_forward_hold_event, 0u) == WAIT_OBJECT_0;
     if (!authenticated_client()) {
-        if (operator_toggle_requested || operator_weak_requested) {
+        if (operator_weak_requested) {
             SudekiMpLogWrite(
                 "lan_arena_client_input event=operator_action phase=rejected "
                 "reason=session_not_authenticated\r\n");
@@ -911,13 +950,6 @@ void SudekiMpLanArenaClientInputService(void) {
                 break;
             }
         }
-    }
-    if (cleanroom_combat_test_pressed || operator_toggle_requested) {
-        combat_toggle_pending = TRUE;
-        SudekiMpLogFormat(
-            "lan_arena_client_input event=cleanroom_combat_test phase=requested "
-            "source=%s policy=test_edge_only_native_world_flag_replicated\r\n",
-            operator_toggle_requested ? "local_operator_api" : "native_F8");
     }
     now = GetTickCount();
     {
@@ -939,8 +971,7 @@ void SudekiMpLanArenaClientInputService(void) {
         refresh_client_camera_aim();
         if (last_transmitted_direction_x != 0 ||
             last_transmitted_direction_z != 0 ||
-            last_transmitted_weak_held || combat_toggle_pending ||
-            skill_pending ||
+            last_transmitted_weak_held || skill_pending ||
             last_input_send_at == 0u) {
             (void)send_client_input_at(0, 0, FALSE, FALSE, now);
         }
@@ -987,8 +1018,29 @@ void SudekiMpLanArenaClientInputService(void) {
     weak_pressed = local_weak_held && !weak_was_down;
     weak_changed = local_weak_held != weak_was_down;
     weak_was_down = local_weak_held;
-    desired_x = local_direction_held ? last_direction_x : 0;
-    desired_z = local_direction_held ? last_direction_z : 0;
+    if (SudekiMpLanArenaClientOperatorForwardPolicy(
+            local_direction_held, operator_forward_held)) {
+        desired_x = 0;
+        desired_z = INT16_MAX;
+        if (operator_forward_effective_state != 1) {
+            operator_forward_effective_state = 1;
+            SudekiMpLogWrite(
+                "lan_arena_client_input event=operator_forward state=active "
+                "world_direction=0,32767 "
+                "policy=manual_reset_test_rail_neutral_physical_axes_only\r\n");
+        }
+    } else {
+        desired_x = local_direction_held ? last_direction_x : 0;
+        desired_z = local_direction_held ? last_direction_z : 0;
+        if (operator_forward_effective_state == 1) {
+            operator_forward_effective_state = 0;
+            SudekiMpLogFormat(
+                "lan_arena_client_input event=operator_forward state=%s "
+                "policy=manual_reset_test_rail_neutral_physical_axes_only\r\n",
+                operator_forward_held ?
+                    "physical_input_precedence" : "released");
+        }
+    }
     refresh_client_camera_aim();
     if (first_person_active != last_transmitted_first_person_active) {
         SudekiMpLogFormat(
@@ -1005,7 +1057,6 @@ void SudekiMpLanArenaClientInputService(void) {
         weak_changed || weak_was_down != last_transmitted_weak_held ||
         aim_changed ||
         first_person_active != last_transmitted_first_person_active ||
-        combat_toggle_pending ||
         skill_pending ||
         ((desired_x != 0 || desired_z != 0) &&
             (DWORD)(now - last_input_send_at) >=
@@ -1099,6 +1150,8 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
         (CharacterInputHandler)(base + RVA_CHARACTER_INPUT_HANDLER);
     original_quick_skill_action =
         (QuickSkillActionFunction)(base + RVA_QUICK_SKILL_ACTION);
+    original_skill_validate =
+        (SkillValidateFunction)(base + RVA_SKILL_VALIDATE);
     original_quick_menu_skill_use =
         (QuickMenuSkillUseFunction)(base + RVA_SKILL_USE);
     if (!SudekiMpInstallRelativeCallHook(&alternate_movement_hook,
@@ -1109,8 +1162,19 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
             capture_client_movement) ||
         !SudekiMpInstallInlineHook(&controller_combat_hook,
             base + RVA_CONTROLLER_COMBAT, expected_controller_combat_entry,
-            sizeof(expected_controller_combat_entry), capture_client_combat) ||
-        !SudekiMpInstallPointerHook(&quick_menu_input_hook,
+            sizeof(expected_controller_combat_entry), capture_client_combat)) {
+        DWORD install_error = GetLastError();
+        if (!SudekiMpUninstallLanArenaClientInput()) return FALSE;
+        SetLastError(install_error == ERROR_SUCCESS ?
+            ERROR_GEN_FAILURE : install_error);
+        return FALSE;
+    }
+    /* Publish the trampoline before installing any later seam. If a later
+     * install and its rollback both fail, the live combat detour must still
+     * have a valid native continuation. */
+    original_controller_combat =
+        (ControllerCombatFunction)controller_combat_hook.trampoline;
+    if (!SudekiMpInstallPointerHook(&quick_menu_input_hook,
             (void **)(base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT),
             original_quick_menu_input,
             route_client_quick_menu_input) ||
@@ -1126,23 +1190,29 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
             base + RVA_QUICK_SKILL_ACTION_CALL,
             original_quick_skill_action,
             route_client_quick_skill_action) ||
+        !SudekiMpInstallRelativeCallHook(&quick_menu_skill_validate_hook,
+            base + RVA_QUICK_MENU_SKILL_VALIDATE_CALL,
+            original_skill_validate,
+            route_client_quick_menu_skill_validate) ||
         !SudekiMpInstallRelativeCallHook(&quick_menu_skill_use_hook,
             base + RVA_QUICK_MENU_SKILL_USE_CALL,
             original_quick_menu_skill_use,
             route_client_quick_menu_skill_use)) {
-        SudekiMpUninstallLanArenaClientInput();
+        DWORD install_error = GetLastError();
+        if (!SudekiMpUninstallLanArenaClientInput()) return FALSE;
+        SetLastError(install_error == ERROR_SUCCESS ?
+            ERROR_GEN_FAILURE : install_error);
         return FALSE;
     }
-    original_controller_combat = (ControllerCombatFunction)controller_combat_hook.trampoline;
-    operator_combat_toggle_event = CreateEventW(
-        NULL, FALSE, FALSE,
-        SUDEKIMP_LAN_ARENA_CLIENT_COMBAT_TOGGLE_EVENT);
     operator_weak_attack_event = CreateEventW(
         NULL, FALSE, FALSE,
         SUDEKIMP_LAN_ARENA_WEAK_ATTACK_EVENT);
     operator_weak_hold_event = CreateEventW(
         NULL, TRUE, FALSE,
         SUDEKIMP_LAN_ARENA_CLIENT_WEAK_HOLD_EVENT);
+    operator_forward_hold_event = CreateEventW(
+        NULL, TRUE, FALSE,
+        SUDEKIMP_LAN_ARENA_CLIENT_FORWARD_HOLD_EVENT);
     operator_camera_left_event = CreateEventW(
         NULL, FALSE, FALSE,
         SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_LEFT_EVENT);
@@ -1164,9 +1234,9 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
                 NULL, FALSE, FALSE, skill_names[index]);
         }
     }
-    if (operator_combat_toggle_event == NULL ||
-        operator_weak_attack_event == NULL ||
+    if (operator_weak_attack_event == NULL ||
         operator_weak_hold_event == NULL ||
+        operator_forward_hold_event == NULL ||
         operator_camera_left_event == NULL ||
         operator_camera_right_event == NULL ||
         operator_skill_events[0] == NULL ||
@@ -1175,10 +1245,14 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
         operator_skill_events[3] == NULL ||
         operator_skill_events[4] == NULL ||
         operator_skill_events[5] == NULL) {
-        SudekiMpUninstallLanArenaClientInput();
+        DWORD install_error = GetLastError();
+        if (!SudekiMpUninstallLanArenaClientInput()) return FALSE;
+        SetLastError(install_error == ERROR_SUCCESS ?
+            ERROR_GEN_FAILURE : install_error);
         return FALSE;
     }
     ResetEvent(operator_weak_hold_event);
+    ResetEvent(operator_forward_hold_event);
     last_direction_x = 0;
     last_direction_z = 0;
     last_aim_x = 0;
@@ -1198,10 +1272,10 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     last_transmitted_first_person_active = FALSE;
     native_weak_held = FALSE;
     native_weak_sample_at_ms = 0u;
-    combat_toggle_pending = FALSE;
     skill_pending = FALSE;
     pending_skill_slot = 0u;
     operator_weak_attack_until_ms = 0u;
+    operator_forward_effective_state = 0;
     operator_camera_until_ms = 0u;
     operator_camera_direction = 0;
     operator_camera_release_pending = FALSE;
@@ -1214,28 +1288,56 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     client_camera_route_trace_state = -1;
     client_first_person_aim_bridge_trace_state = -1;
     client_skill_camera_input_trace_state = -1;
-    combat_toggle_was_down =
-        (GetKeyState(VK_F8) & (SHORT)0x8000) != 0;
+    client_quick_menu_combat_validation_trace_state = -1;
     client_game_base = base;
     return TRUE;
 }
 
-void SudekiMpUninstallLanArenaClientInput(void) {
+BOOL SudekiMpUninstallLanArenaClientInput(void) {
+    BOOL restored = TRUE;
+    DWORD restore_error = ERROR_SUCCESS;
     unsigned int skill_index;
-    SudekiMpRestoreRelativeCallHook(&quick_menu_skill_use_hook);
-    SudekiMpRestoreRelativeCallHook(&quick_skill_action_hook);
-    SudekiMpRestorePointerHook(&character_input_hook);
-    SudekiMpRestorePointerHook(&camera_input_event_hook);
-    SudekiMpRestorePointerHook(&quick_menu_input_hook);
-    SudekiMpRestoreInlineHook(&controller_combat_hook);
-    SudekiMpRestoreRelativeCallHook(&normal_movement_hook);
-    SudekiMpRestoreRelativeCallHook(&alternate_movement_hook);
+#define RECORD_RESTORE_RESULT(expression) do { \
+        if (!(expression)) { \
+            DWORD current_error = GetLastError(); \
+            if (restored) { \
+                restore_error = current_error == ERROR_SUCCESS ? \
+                    ERROR_WRITE_FAULT : current_error; \
+            } \
+            restored = FALSE; \
+        } \
+    } while (0)
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &quick_menu_skill_use_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &quick_menu_skill_validate_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &quick_skill_action_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(&character_input_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(
+        &camera_input_event_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(&quick_menu_input_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(&controller_combat_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &normal_movement_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &alternate_movement_hook));
+#undef RECORD_RESTORE_RESULT
+    if (!restored) {
+        SudekiMpLogFormat(
+            "lan_arena_client_input event=uninstall phase=restore_failed "
+            "error=%lu policy=retain_callbacks_and_events_for_retry\r\n",
+            (unsigned long)restore_error);
+        SetLastError(restore_error);
+        return FALSE;
+    }
     original_controller_combat = NULL;
     original_arbiter_movement = NULL;
     original_quick_menu_input = NULL;
     original_camera_input_event = NULL;
     original_character_input_handler = NULL;
     original_quick_skill_action = NULL;
+    original_skill_validate = NULL;
     original_quick_menu_skill_use = NULL;
     last_direction_x = 0;
     last_direction_z = 0;
@@ -1256,10 +1358,10 @@ void SudekiMpUninstallLanArenaClientInput(void) {
     last_transmitted_first_person_active = FALSE;
     native_weak_held = FALSE;
     native_weak_sample_at_ms = 0u;
-    combat_toggle_pending = FALSE;
     skill_pending = FALSE;
     pending_skill_slot = 0u;
     operator_weak_attack_until_ms = 0u;
+    operator_forward_effective_state = 0;
     operator_camera_until_ms = 0u;
     operator_camera_direction = 0;
     operator_camera_release_pending = FALSE;
@@ -1272,16 +1374,12 @@ void SudekiMpUninstallLanArenaClientInput(void) {
     client_camera_route_trace_state = -1;
     client_first_person_aim_bridge_trace_state = -1;
     client_skill_camera_input_trace_state = -1;
-    combat_toggle_was_down = FALSE;
+    client_quick_menu_combat_validation_trace_state = -1;
     for (skill_index = 0u; skill_index < 6u; ++skill_index) {
         if (operator_skill_events[skill_index] != NULL) {
             CloseHandle(operator_skill_events[skill_index]);
             operator_skill_events[skill_index] = NULL;
         }
-    }
-    if (operator_combat_toggle_event != NULL) {
-        CloseHandle(operator_combat_toggle_event);
-        operator_combat_toggle_event = NULL;
     }
     if (operator_weak_attack_event != NULL) {
         CloseHandle(operator_weak_attack_event);
@@ -1292,6 +1390,11 @@ void SudekiMpUninstallLanArenaClientInput(void) {
         CloseHandle(operator_weak_hold_event);
         operator_weak_hold_event = NULL;
     }
+    if (operator_forward_hold_event != NULL) {
+        ResetEvent(operator_forward_hold_event);
+        CloseHandle(operator_forward_hold_event);
+        operator_forward_hold_event = NULL;
+    }
     if (operator_camera_right_event != NULL) {
         CloseHandle(operator_camera_right_event);
         operator_camera_right_event = NULL;
@@ -1301,4 +1404,5 @@ void SudekiMpUninstallLanArenaClientInput(void) {
         operator_camera_left_event = NULL;
     }
     client_game_base = NULL;
+    return TRUE;
 }

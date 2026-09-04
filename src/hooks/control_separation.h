@@ -199,6 +199,46 @@ BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index);
  * aim is client-camera-relative, and held fire is replayed through the same
  * native Ailish AI lease and arbiter ABI as local co-op. */
 BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled);
+/* Remote Ailish skills retain Sudeki's process-global native task mode.  Once
+ * mode 2 has applied its native seat-0 disable transition, the host invokes
+ * Sudeki's exact inverse seat transition once and presents mode 0 only during
+ * Tal's controller update. The task-owned skill mode is restored immediately
+ * afterward, so simulation and native skill cleanup retain their real state. */
+BOOL SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
+    BOOL enabled,
+    int current_mode,
+    int requested_mode,
+    BOOL paused
+);
+BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled);
+/* Host-local diagnostic movement may provide a camera-local direction only
+ * when the native controller reports neutral axes.  Registration is process
+ * local and does not widen the authenticated remote-skill scope below. */
+typedef BOOL (*SudekiMpLanArenaPlayerOneSkillDirectionOverride)(
+    float local_direction[3]
+);
+BOOL SudekiMpControlSeparationPlayerOneSkillDirectionOverridePolicy(
+    BOOL physical_direction_held,
+    BOOL operator_direction_held
+);
+void SudekiMpControlSeparationSetLanArenaPlayerOneSkillDirectionOverride(
+    SudekiMpLanArenaPlayerOneSkillDirectionOverride source
+);
+/* Submit one collision-aware Tal movement delta from the LAN host's existing
+ * Player-1 movement owner. The call is accepted only inside the exact
+ * controller update for an authenticated remote Ailish skill. */
+BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
+    void *arbiter,
+    const float direction[3],
+    float speed
+);
+/* While Tal owns a native skill task, the authenticated host keeps Ailish's
+ * exact AI lease responsive through her ordinary remote-input transaction.
+ * A matching native arbiter lock is virtualized when present; the scoped
+ * absolute-delta fallback also handles skill paths that omit that flag. */
+BOOL SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+    BOOL enabled
+);
 /* LAN profiles name their replica/remote actor explicitly and must not allow
  * the ordinary local drop-in hotkey to retarget that lease. */
 BOOL SudekiMpControlSeparationSetManualToggleEnabled(BOOL enabled);
@@ -217,7 +257,8 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float aim_direction_x,
     float aim_direction_z,
     BOOL aim_direction_valid,
-    BOOL weak_attack_active
+    BOOL weak_attack_active,
+    float frame_delta_seconds
 );
 /* Host-only ranged action adapter. Calls the exact retail first-person weapon
  * gate for the currently leased Ailish actor, so weapon cooldown/projectile
@@ -270,6 +311,10 @@ BOOL SudekiMpControlSeparationUnregisterUpdateObserver(
 BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(
     const SudekiMpControlUpdateDispatchWitness *witness
 );
-void SudekiMpUninstallControlSeparation(void);
+/* Teardown is retryable. A FALSE result means at least one owned native
+ * lease or hook could not be restored exactly. All callback dependencies and
+ * observer state remain alive so the caller can retry without leaving a
+ * dangling native entry point. */
+BOOL SudekiMpUninstallControlSeparation(void);
 
 #endif

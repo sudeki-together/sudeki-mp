@@ -184,6 +184,11 @@ static unsigned int last_endpoint_port;
 static DWORD last_action_error;
 static BOOL render_failure_logged;
 static DWORD primary_action_blocked_until_ms;
+static BOOL hook_restore_failure_logged;
+static BOOL containment_module_pinned;
+#if defined(SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING)
+static unsigned int injected_restore_failure_id;
+#endif
 
 static const uint8_t expected_quit_render_entry[] = {
     0x57u, 0x8bu, 0xf8u, 0x80u, 0xbfu,
@@ -1029,7 +1034,10 @@ BOOL SudekiMpInstallLanArenaPausePanel(HMODULE game_module) {
             game_base+RVA_PC_QUIT_SCREEN_NAVIGATE_CALL,
             original_quit_navigate, quit_navigate_entry)) {
         error = GetLastError();
-        SudekiMpUninstallLanArenaPausePanel();
+        if (error == ERROR_SUCCESS) error = ERROR_GEN_FAILURE;
+        if (!SudekiMpUninstallLanArenaPausePanel()) {
+            return FALSE;
+        }
         SetLastError(error);
         return FALSE;
     }
@@ -1059,12 +1067,89 @@ BOOL SudekiMpLanArenaPausePanelActive(void) {
     return multiplayer_page_active;
 }
 
-void SudekiMpUninstallLanArenaPausePanel(void) {
-    SudekiMpRestoreRelativeCallHook(&quit_navigate_hook);
-    SudekiMpRestoreRelativeCallHook(&quit_analog_navigate_hook);
-    SudekiMpRestoreRelativeCallHook(&quit_back_hook);
-    SudekiMpRestoreRelativeCallHook(&quit_select_hook);
-    SudekiMpRestoreRelativeCallHook(&quit_render_hook);
+static BOOL restore_pause_panel_hook(
+    SudekiMpRelativeCallHook *hook,
+    unsigned int restore_id
+) {
+#if defined(SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING)
+    if (hook != NULL && hook->installed &&
+        injected_restore_failure_id == restore_id) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
+#else
+    (void)restore_id;
+#endif
+    return SudekiMpRestoreRelativeCallHook(hook);
+}
+
+static BOOL restore_pause_panel_hooks(void) {
+    BOOL restored = TRUE;
+    DWORD first_error = ERROR_SUCCESS;
+#define RECORD_RESTORE_RESULT(expression) do { \
+        if (!(expression)) { \
+            DWORD current_error = GetLastError(); \
+            if (restored) { \
+                first_error = current_error == ERROR_SUCCESS ? \
+                    ERROR_WRITE_FAULT : current_error; \
+            } \
+            restored = FALSE; \
+        } \
+    } while (0)
+    RECORD_RESTORE_RESULT(restore_pause_panel_hook(
+        &quit_navigate_hook,
+        SUDEKIMP_LAN_ARENA_PAUSE_PANEL_RESTORE_NAVIGATE));
+    RECORD_RESTORE_RESULT(restore_pause_panel_hook(
+        &quit_analog_navigate_hook,
+        SUDEKIMP_LAN_ARENA_PAUSE_PANEL_RESTORE_ANALOG_NAVIGATE));
+    RECORD_RESTORE_RESULT(restore_pause_panel_hook(
+        &quit_back_hook,
+        SUDEKIMP_LAN_ARENA_PAUSE_PANEL_RESTORE_BACK));
+    RECORD_RESTORE_RESULT(restore_pause_panel_hook(
+        &quit_select_hook,
+        SUDEKIMP_LAN_ARENA_PAUSE_PANEL_RESTORE_SELECT));
+    RECORD_RESTORE_RESULT(restore_pause_panel_hook(
+        &quit_render_hook,
+        SUDEKIMP_LAN_ARENA_PAUSE_PANEL_RESTORE_RENDER));
+#undef RECORD_RESTORE_RESULT
+    if (!restored) {
+        SetLastError(first_error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void retain_pause_panel_after_hook_restore_failure(DWORD error) {
+    HMODULE pinned_module = NULL;
+    BOOL pinned = containment_module_pinned;
+    if (!pinned) {
+        pinned = GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCSTR)(uintptr_t)&SudekiMpUninstallLanArenaPausePanel,
+            &pinned_module);
+        if (pinned) containment_module_pinned = TRUE;
+    }
+    if (!hook_restore_failure_logged) {
+        hook_restore_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_pause_panel event=hook_restore state=quarantined "
+            "win32_error=%lu module_pinned=%s "
+            "policy=retain_callbacks_resources_and_base_for_retry\r\n",
+            (unsigned long)error,
+            pinned ? "true" : "false");
+    }
+    SetLastError(error);
+}
+
+BOOL SudekiMpUninstallLanArenaPausePanel(void) {
+    DWORD error;
+    if (!restore_pause_panel_hooks()) {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+        retain_pause_panel_after_hook_restore_failure(error);
+        return FALSE;
+    }
     release_com_object(&overlay_texture);
     overlay_texture_device = NULL;
     d3d_device_global = NULL;
@@ -1084,6 +1169,17 @@ void SudekiMpUninstallLanArenaPausePanel(void) {
     last_action_error = ERROR_SUCCESS;
     render_failure_logged = FALSE;
     primary_action_blocked_until_ms = 0u;
+    hook_restore_failure_logged = FALSE;
     reset_edit_edges();
     capture_page_key_edges();
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
 }
+
+#if defined(SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING)
+void SudekiMpLanArenaPausePanelInjectRestoreFailureForTest(
+    unsigned int restore_id
+) {
+    injected_restore_failure_id = restore_id;
+}
+#endif

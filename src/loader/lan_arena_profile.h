@@ -17,16 +17,19 @@ typedef enum SudekiMpLanArenaProfileFailure {
     SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_DUPLICATE_KEY,
     SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_FORBIDDEN_KEY_ENABLED,
     SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_ROLE_MISSING,
-    SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_BOTH_ROLES_ENABLED
+    SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_BOTH_ROLES_ENABLED,
+    SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_HOST_TOOLS_MISMATCH
 } SudekiMpLanArenaProfileFailure;
 
 typedef struct SudekiMpLanArenaProfileState {
     uint8_t host_seen;
     uint8_t client_seen;
     uint8_t control_seen;
+    uint8_t cleanroom_seen;
     uint8_t host_enabled;
     uint8_t client_enabled;
     uint8_t control_enabled;
+    uint8_t cleanroom_enabled;
     SudekiMpLanArenaProfileFailure failure;
 } SudekiMpLanArenaProfileState;
 

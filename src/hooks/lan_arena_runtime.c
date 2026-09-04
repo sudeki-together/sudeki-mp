@@ -1,8 +1,10 @@
 #include "hooks/lan_arena_runtime.h"
 
 #include "cleanroom/engine.h"
+#include "cleanroom/menu.h"
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
+#include "engine/spirit_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_arena_client_input.h"
@@ -10,6 +12,10 @@
 #include "hooks/lan_arena_campaign_guard.h"
 #include "hooks/lan_arena_collision_debug.h"
 #include "hooks/lan_arena_host_input.h"
+#include "hooks/lan_arena_owner_view.h"
+#include "hooks/lan_arena_pause_panel.h"
+#include "hooks/lan_arena_spirit_audio.h"
+#include "hooks/noncaster_skill_locomotion.h"
 #include "network/lan_arena_authority.h"
 #include "network/lan_arena_endpoint.h"
 #include "network/lan_arena_replica.h"
@@ -27,6 +33,28 @@ typedef BOOL (__attribute__((thiscall)) *CameraManagerSetRenderCameraFunction)(
 typedef void (__attribute__((thiscall)) *GameSpeedSetModeFunction)(
     void *game_speed, int mode);
 
+typedef enum HostSnapshotFailureStage {
+    HOST_SNAPSHOT_FAILURE_NONE = 0,
+    HOST_SNAPSHOT_FAILURE_COMBAT_OBSERVATION,
+    HOST_SNAPSHOT_FAILURE_TAL_ACTOR_FILL,
+    HOST_SNAPSHOT_FAILURE_AILISH_ACTOR_FILL,
+    HOST_SNAPSHOT_FAILURE_TAL_SKILL_OBSERVATION,
+    HOST_SNAPSHOT_FAILURE_AILISH_SKILL_OBSERVATION,
+    HOST_SNAPSHOT_FAILURE_SPIRIT_OBSERVATION,
+    HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION,
+    HOST_SNAPSHOT_FAILURE_CANONICAL_BEGIN,
+    HOST_SNAPSHOT_FAILURE_CANONICAL_COMMIT,
+    HOST_SNAPSHOT_FAILURE_CANONICAL_READ,
+    HOST_SNAPSHOT_FAILURE_SEND
+} HostSnapshotFailureStage;
+
+typedef struct HostSnapshotFailureTelemetry {
+    uint64_t session_token;
+    DWORD last_logged_at_ms;
+    uint32_t consecutive_failures;
+    HostSnapshotFailureStage stage;
+} HostSnapshotFailureTelemetry;
+
 enum {
     RVA_RENDER_START = 0x001dce30u,
     RVA_RENDER_START_CALL = 0x0028d443u,
@@ -36,6 +64,8 @@ enum {
     RVA_CAMERA_MANAGER_SET_RENDER_CAMERA = 0x00036fb0u,
     RVA_GAME_SPEED_SET_MODE = 0x00207560u,
     RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
+    RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
+    RVA_SCENE_MANAGER_GLOBAL = 0x00408d58u,
     TAL_WORLD_IDLE_SELECTOR = 4,
     TAL_WORLD_MOVE_PRIMARY_SELECTOR = 8,
     TAL_WORLD_MOVE_SECONDARY_SELECTOR = 9,
@@ -77,6 +107,7 @@ static BOOL tal_initialized;
 static BOOL ailish_initialized;
 static DWORD host_last_snapshot_at_ms;
 static BOOL host_snapshot_stream_logged;
+static HostSnapshotFailureTelemetry host_snapshot_failure_telemetry;
 static BOOL client_replica_stream_logged;
 static BOOL client_replica_discard_logged;
 static BOOL host_release_pending_logged;
@@ -93,6 +124,7 @@ static DWORD host_actor_last_translation_at_ms[2];
 static float host_replica_idle_position[2][2];
 static BOOL host_replica_idle_position_valid[2];
 static BOOL host_actor_was_moving[2];
+static BOOL host_actor_locomotion_moving[2];
 static uint8_t host_ailish_idle_variant_state;
 static DWORD host_ailish_idle_variant_seen_at_ms;
 static BOOL host_ailish_idle_variant_armed = TRUE;
@@ -107,9 +139,48 @@ static uint8_t host_actor_previous_native_action_state[2];
 static BOOL host_actor_previous_action_active[2];
 static BOOL host_actor_previous_native_action_active[2];
 static uint16_t host_actor_skill_sequence[2];
+static uint8_t host_actor_skill_kind[2];
 static uint8_t host_actor_skill_slot[2];
 static uint32_t host_actor_skill_cost[2];
 static BOOL host_actor_previous_skill_active[2];
+static BOOL host_spirit_previous_active;
+static int host_spirit_previous_state;
+static SudekiMpLanArenaSpiritAudioSemanticEvent
+    host_spirit_audio_history[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
+static uint8_t host_spirit_audio_history_count;
+static uint16_t host_spirit_audio_event_sequence;
+static uint32_t host_spirit_audio_trace_sequence;
+static BOOL host_spirit_audio_trace_sequence_initialized;
+typedef struct HostSpiritAudioStage {
+    SudekiMpLanArenaSpiritAudioSemanticEvent history[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
+    uint8_t history_count;
+    uint16_t event_sequence;
+    uint32_t trace_sequence;
+    uint32_t journaled_raw_trace_sequence;
+    BOOL trace_sequence_initialized;
+} HostSpiritAudioStage;
+typedef struct HostOperatorSpiritIntent {
+    void *tal;
+    void *ailish;
+    uint64_t session_token;
+    unsigned int variant;
+    BOOL pending;
+} HostOperatorSpiritIntent;
+static HostOperatorSpiritIntent host_operator_spirit_intent;
+static uint64_t host_operator_spirit_session_token;
+static volatile LONG host_operator_spirit_activation_depth;
+typedef struct HostNativeSkillLease {
+    void *character;
+    void *skill;
+    int slot;
+    uint16_t wire_sequence;
+    BOOL pending;
+    BOOL active_seen;
+    BOOL sequence_allocated;
+} HostNativeSkillLease;
+static HostNativeSkillLease host_native_skill_leases[2];
 typedef struct HostActorActionRetirement {
     uint16_t action_sequence;
     uint16_t action_terminal_phase_q8;
@@ -147,6 +218,7 @@ static SudekiMpCleanroomActorPresentation client_actor_presentation[2];
 static BOOL client_actor_presentation_valid[2];
 static DWORD client_actor_presentation_last_trace_at[2];
 static DWORD client_replica_diagnostics_last_trace_at;
+static DWORD client_cleanroom_maintenance_last_at;
 static uint32_t client_tal_timeline_action_sequence;
 static uint32_t client_tal_timeline_last_render_host_tick;
 static unsigned int client_tal_timeline_idle_samples_remaining;
@@ -160,9 +232,16 @@ static HANDLE network_pump_thread;
 static volatile LONG host_remote_skill_activation_depth;
 static BOOL host_remote_skill_camera_active;
 static BOOL host_remote_skill_camera_suppression_logged;
+static SudekiMpLanArenaOwnerViewLease host_tal_skill_view_lease;
+static uint8_t host_tal_skill_view_slot;
+static BOOL host_tal_skill_view_basis_safe_this_frame;
+static int host_tal_skill_view_trace_state = -1;
 static BOOL host_skill_speed_override_active;
 static uint32_t host_skill_original_alternate_speed_bits;
 static int host_skill_speed_trace_state = -1;
+static SudekiMpNoncasterSkillLocomotionLease
+    host_noncaster_locomotion_leases[2];
+static int host_noncaster_locomotion_trace_state[2] = { -1, -1 };
 
 static const uint8_t expected_camera_manager_set_render_camera_entry[] = {
     0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u
@@ -248,7 +327,107 @@ static BOOL set_host_skill_realtime_scale(BOOL enabled) {
 static BOOL host_remote_skill_camera_owned(void) {
     return InterlockedCompareExchange(
             &host_remote_skill_activation_depth, 0, 0) > 0 ||
-        host_remote_skill_camera_active;
+        host_remote_skill_camera_active || host_tal_skill_view_lease.valid;
+}
+
+static BOOL runtime_readable_memory(const void *pointer, size_t length) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t address = (uintptr_t)pointer;
+    return pointer != NULL && length != 0u &&
+        VirtualQuery(pointer, &information, sizeof(information)) != 0u &&
+        information.State == MEM_COMMIT &&
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0u &&
+        address + length >= address &&
+        address + length <=
+            (uintptr_t)information.BaseAddress + information.RegionSize;
+}
+
+static BOOL current_host_owner_view(
+    void **camera_mode,
+    void **scene_manager
+) {
+    uint8_t *base = (uint8_t *)runtime_game_module;
+    if (camera_mode == NULL || scene_manager == NULL || base == NULL ||
+        !runtime_readable_memory(
+            base + RVA_GAME_CAMERA_MODE_GLOBAL, sizeof(*camera_mode)) ||
+        !runtime_readable_memory(
+            base + RVA_SCENE_MANAGER_GLOBAL, sizeof(*scene_manager))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    *camera_mode = *(void **)(base + RVA_GAME_CAMERA_MODE_GLOBAL);
+    *scene_manager = *(void **)(base + RVA_SCENE_MANAGER_GLOBAL);
+    if (*camera_mode == NULL || *scene_manager == NULL) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL service_host_tal_skill_view(
+    SudekiMpLanArenaOwnerViewBoundary boundary
+) {
+    void *camera_mode;
+    void *scene_manager;
+    if (!host_tal_skill_view_lease.valid) return TRUE;
+    if (!current_host_owner_view(&camera_mode, &scene_manager)) return FALSE;
+    return SudekiMpLanArenaOwnerViewService(
+        &host_tal_skill_view_lease,
+        camera_mode, scene_manager, boundary);
+}
+
+static BOOL capture_host_tal_skill_view(uint8_t remote_skill_slot) {
+    void *camera_mode;
+    void *scene_manager;
+    if (host_tal_skill_view_lease.valid) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (!current_host_owner_view(&camera_mode, &scene_manager) ||
+        !SudekiMpLanArenaOwnerViewCapture(
+            &host_tal_skill_view_lease,
+            camera_mode, scene_manager)) {
+        return FALSE;
+    }
+    host_tal_skill_view_slot = remote_skill_slot;
+    /* Capture happens immediately before the bounded remote Use call, so it
+     * is a valid fallback if activation begins between the two RenderStarts. */
+    host_tal_skill_view_basis_safe_this_frame = TRUE;
+    host_tal_skill_view_trace_state = -1;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_remote_skill_view state=captured "
+        "owner=Tal remote_caster=Ailish slot=%u camera=0x%08lx "
+        "render_state=0x%08lx revision=%lu "
+        "policy=exact_render_only_owner_view_lease_dynamic_basis\r\n",
+        (unsigned int)remote_skill_slot,
+        (unsigned long)(uintptr_t)host_tal_skill_view_lease.camera,
+        (unsigned long)(uintptr_t)host_tal_skill_view_lease.render_state,
+        (unsigned long)host_tal_skill_view_lease.refresh_revision);
+    return TRUE;
+}
+
+static BOOL retire_host_tal_skill_view(const char *reason) {
+    BOOL restored;
+    uint8_t slot;
+    if (!host_tal_skill_view_lease.valid) return TRUE;
+    slot = host_tal_skill_view_slot;
+    restored = service_host_tal_skill_view(
+        SUDEKIMP_LAN_ARENA_OWNER_VIEW_RETIRE);
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_remote_skill_view state=%s "
+        "owner=Tal remote_caster=Ailish slot=%u reason=%s "
+        "policy=restore_exact_latest_owner_basis_before_releasing_lease\r\n",
+        restored ? "restored" : "restore_rejected",
+        (unsigned int)slot,
+        reason != NULL ? reason : "unspecified");
+    if (!restored) {
+        SetLastError(ERROR_RETRY);
+        return FALSE;
+    }
+    host_tal_skill_view_slot = 0u;
+    host_tal_skill_view_basis_safe_this_frame = FALSE;
+    host_tal_skill_view_trace_state = -1;
+    return TRUE;
 }
 
 static BOOL __attribute__((thiscall)) preserve_host_tal_camera(
@@ -295,6 +474,8 @@ static void __attribute__((thiscall)) preserve_host_realtime(
 
 static BOOL install_host_skill_isolation(uint8_t *base) {
     uint32_t initial_scale_bits;
+    BOOL speed_restored;
+    BOOL camera_restored;
     if (base == NULL || host_skill_camera_hook.installed ||
         host_skill_speed_hook.installed ||
         memcmp(base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
@@ -315,6 +496,10 @@ static BOOL install_host_skill_isolation(uint8_t *base) {
     host_skill_speed_override_active = FALSE;
     host_remote_skill_camera_active = FALSE;
     host_remote_skill_camera_suppression_logged = FALSE;
+    SudekiMpLanArenaOwnerViewClear(&host_tal_skill_view_lease);
+    host_tal_skill_view_slot = 0u;
+    host_tal_skill_view_basis_safe_this_frame = FALSE;
+    host_tal_skill_view_trace_state = -1;
     host_skill_speed_trace_state = -1;
     InterlockedExchange(&host_remote_skill_activation_depth, 0);
     if (!SudekiMpInstallInlineHook(
@@ -322,17 +507,29 @@ static BOOL install_host_skill_isolation(uint8_t *base) {
             base + RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
             expected_camera_manager_set_render_camera_entry,
             sizeof(expected_camera_manager_set_render_camera_entry),
-            preserve_host_tal_camera) ||
-        !SudekiMpInstallInlineHook(
+            preserve_host_tal_camera)) {
+        return FALSE;
+    }
+    if (!SudekiMpInstallInlineHook(
             &host_skill_speed_hook,
             base + RVA_GAME_SPEED_SET_MODE,
             expected_game_speed_set_mode_entry,
             sizeof(expected_game_speed_set_mode_entry),
             preserve_host_realtime)) {
         DWORD error = GetLastError();
-        (void)SudekiMpRestoreInlineHook(&host_skill_speed_hook);
-        (void)SudekiMpRestoreInlineHook(&host_skill_camera_hook);
-        SetLastError(error);
+        DWORD restore_error = ERROR_SUCCESS;
+        speed_restored = SudekiMpRestoreInlineHook(&host_skill_speed_hook);
+        if (!speed_restored) restore_error = GetLastError();
+        camera_restored = SudekiMpRestoreInlineHook(&host_skill_camera_hook);
+        if (!camera_restored && restore_error == ERROR_SUCCESS) {
+            restore_error = GetLastError();
+        }
+        if (!speed_restored || !camera_restored) {
+            SetLastError(restore_error == ERROR_SUCCESS ?
+                ERROR_WRITE_FAULT : restore_error);
+        } else {
+            SetLastError(error);
+        }
         return FALSE;
     }
     return TRUE;
@@ -343,8 +540,24 @@ static BOOL restore_host_skill_isolation(void) {
     BOOL camera_restored;
     DWORD first_error = ERROR_SUCCESS;
 
-    InterlockedExchange(&host_remote_skill_activation_depth, 0);
-    host_remote_skill_camera_active = FALSE;
+    if (InterlockedCompareExchange(
+            &host_remote_skill_activation_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (host_tal_skill_view_lease.valid &&
+        !retire_host_tal_skill_view("host_skill_isolation_restore")) {
+        return FALSE;
+    }
     if (host_skill_speed_override_active &&
         !set_host_skill_realtime_scale(FALSE)) {
         return FALSE;
@@ -362,6 +575,7 @@ static BOOL restore_host_skill_isolation(void) {
     }
     host_skill_original_alternate_speed_bits = 0u;
     host_skill_speed_override_active = FALSE;
+    host_remote_skill_camera_active = host_tal_skill_view_lease.valid;
     host_remote_skill_camera_suppression_logged = FALSE;
     host_skill_speed_trace_state = -1;
     return TRUE;
@@ -407,11 +621,86 @@ static void retain_runtime_after_hook_restore_failure(DWORD error) {
     SetLastError(error);
 }
 
+static BOOL rollback_host_spirit_audio_trace(void) {
+    DWORD error;
+    if (!SudekiMpLanArenaSpiritAudioTraceInstalled()) return TRUE;
+    if (SudekiMpUninstallLanArenaSpiritAudioTrace()) return TRUE;
+    error = GetLastError();
+    retain_runtime_after_hook_restore_failure(
+        error == ERROR_SUCCESS ? ERROR_WRITE_FAULT : error);
+    return FALSE;
+}
+
 static BOOL rollback_lan_arena_frame_hooks(void) {
     DWORD restore_error;
     if (restore_lan_arena_frame_hooks()) return TRUE;
     restore_error = GetLastError();
     retain_runtime_after_hook_restore_failure(restore_error);
+    return FALSE;
+}
+
+static BOOL rollback_lan_arena_campaign_guard(void) {
+    DWORD restore_error;
+    if (SudekiMpUninstallLanArenaCampaignGuard()) return TRUE;
+    restore_error = GetLastError();
+    retain_runtime_after_hook_restore_failure(
+        restore_error == ERROR_SUCCESS ? ERROR_WRITE_FAULT : restore_error);
+    return FALSE;
+}
+
+static BOOL uninstall_lan_arena_input_adapters(void) {
+    BOOL client_restored;
+    BOOL host_restored;
+    DWORD first_error = ERROR_SUCCESS;
+
+    client_restored = SudekiMpUninstallLanArenaClientInput();
+    if (!client_restored) first_error = GetLastError();
+    host_restored = SudekiMpUninstallLanArenaHostInput();
+    if (!host_restored && first_error == ERROR_SUCCESS) {
+        first_error = GetLastError();
+    }
+    if (!client_restored || !host_restored) {
+        SetLastError(first_error == ERROR_SUCCESS ?
+            ERROR_WRITE_FAULT : first_error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL host_spirit_audio_active_witness(
+    void *context,
+    int *native_state
+) {
+    int state;
+    if (context != &runtime_config || native_state == NULL ||
+        runtime_game_module == NULL || !runtime_installed ||
+        runtime_config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        runtime_config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        !tal_initialized ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&state)) {
+        return FALSE;
+    }
+    *native_state = state;
+    return state != 0;
+}
+
+static BOOL reset_client_replica_for_teardown(const char *reason) {
+    DWORD error;
+    if (runtime_config.local_role !=
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        return TRUE;
+    }
+    SudekiMpLanArenaClientReplicaDiscardSnapshots();
+    if (SudekiMpResetLanArenaClientReplica()) return TRUE;
+    error = GetLastError();
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=client_replica_teardown state=deferred "
+        "reason=%s win32_error=%lu "
+        "policy=retain_actor_frame_callbacks_and_damage_containment_until_native_skill_drains\r\n",
+        reason != NULL ? reason : "unspecified",
+        (unsigned long)error);
+    SetLastError(error);
     return FALSE;
 }
 
@@ -421,6 +710,84 @@ static uint32_t resource_snapshot_value(float value) {
         return SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE;
     }
     return (uint32_t)value;
+}
+
+static uint16_t host_advance_skill_sequence(unsigned int actor_index) {
+    if (actor_index >= 2u) return 0u;
+    ++host_actor_skill_sequence[actor_index];
+    if (host_actor_skill_sequence[actor_index] == 0u) {
+        host_actor_skill_sequence[actor_index] = 1u;
+    }
+    return host_actor_skill_sequence[actor_index];
+}
+
+static BOOL host_begin_character_skill_sequence(
+    unsigned int actor_index,
+    void *character,
+    void *skill,
+    int slot,
+    uint32_t cost,
+    BOOL active_seen,
+    const char *source
+) {
+    static const SudekiMpCleanroomActor actors[2] = {
+        SUDEKIMP_CLEANROOM_TAL,
+        SUDEKIMP_CLEANROOM_AILISH
+    };
+    HostNativeSkillLease *lease;
+    uint16_t sequence;
+    if (actor_index >= 2u || character == NULL || skill == NULL ||
+        slot < 0 || slot >= 6 ||
+        SudekiMpCleanroomEngineActorEntity(actors[actor_index]) != character) {
+        return FALSE;
+    }
+    sequence = host_advance_skill_sequence(actor_index);
+    if (sequence == 0u) return FALSE;
+    lease = &host_native_skill_leases[actor_index];
+    lease->character = character;
+    lease->skill = skill;
+    lease->slot = slot;
+    lease->wire_sequence = sequence;
+    lease->pending = TRUE;
+    lease->active_seen = active_seen;
+    lease->sequence_allocated = TRUE;
+    host_actor_skill_kind[actor_index] =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    host_actor_skill_slot[actor_index] = (uint8_t)slot;
+    host_actor_skill_cost[actor_index] = cost;
+    if (actor_index == 0u) {
+        (void)SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+            TRUE);
+    }
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_skill phase=started actor=%s "
+        "sequence=%u slot=%u cost=%lu source=%s "
+        "policy=exact_start_allocates_once_snapshot_observation_adopts_lease\r\n",
+        actor_index == 0u ? "Tal" : "Ailish",
+        (unsigned int)sequence,
+        (unsigned int)slot,
+        (unsigned long)cost,
+        source != NULL ? source : "unknown");
+    return TRUE;
+}
+
+static BOOL host_native_skill_startup_pending(
+    unsigned int actor_index,
+    void *character,
+    const SudekiMpCharacterSkillState *state
+) {
+    HostNativeSkillLease *lease;
+    if (actor_index >= 2u || character == NULL || state == NULL) return FALSE;
+    lease = &host_native_skill_leases[actor_index];
+    return lease->pending && !lease->active_seen &&
+        lease->sequence_allocated && lease->character == character &&
+        lease->skill != NULL && state->skill == lease->skill &&
+        state->active == 0u && lease->slot >= 0 && lease->slot < 6 &&
+        lease->wire_sequence != 0u &&
+        lease->wire_sequence == host_actor_skill_sequence[actor_index] &&
+        host_actor_skill_kind[actor_index] ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
+        host_actor_skill_slot[actor_index] == (uint8_t)lease->slot;
 }
 
 static BOOL fill_actor_snapshot(
@@ -453,7 +820,80 @@ static BOOL fill_actor_snapshot(
     return TRUE;
 }
 
-static void host_apply_skill_state(
+static void host_track_started_native_skill(
+    unsigned int actor_index,
+    void *character,
+    const SudekiMpSkillActivationResult *result
+) {
+    if (actor_index >= 2u || character == NULL || result == NULL ||
+        result->status != SUDEKIMP_SKILL_ACTIVATION_STARTED) return;
+    (void)host_begin_character_skill_sequence(
+        actor_index, character, result->skill, result->slot, 0u,
+        FALSE, actor_index == 0u ?
+            "host_operator_started" : "remote_operator_started");
+}
+
+static void host_native_tal_skill_started(
+    void *character,
+    void *skill,
+    int slot,
+    uint32_t cost,
+    BOOL active_seen
+) {
+    if (runtime_config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) return;
+    (void)host_begin_character_skill_sequence(
+        0u, character, skill, slot, cost, active_seen,
+        "native_tal_admission_callsite");
+}
+
+static BOOL host_reconcile_native_skill_lease(
+    unsigned int actor_index,
+    void *character,
+    const SudekiMpCharacterSkillState *state
+) {
+    HostNativeSkillLease *lease;
+    BOOL active;
+    if (actor_index >= 2u || character == NULL || state == NULL) return FALSE;
+    active = state->active != 0u;
+    if (active && (state->slot < 0 || state->slot >= 6)) return FALSE;
+    lease = &host_native_skill_leases[actor_index];
+    if (!lease->pending) {
+        if (!active) return TRUE;
+        lease->character = character;
+        lease->skill = state->skill;
+        lease->slot = state->slot;
+        lease->pending = TRUE;
+        lease->active_seen = TRUE;
+        lease->sequence_allocated = FALSE;
+        lease->wire_sequence = 0u;
+        return state->skill != NULL;
+    }
+    if (lease->character != character || lease->skill == NULL ||
+        state->skill != lease->skill) return FALSE;
+    if (active) {
+        if (state->slot != lease->slot) {
+            /* A different exact active slot is a positive new transaction
+             * even if an unhooked native source hid the intervening inactive
+             * edge.  Same-slot cycles are covered by the two exact host input
+             * admission callsites. */
+            lease->slot = state->slot;
+            lease->wire_sequence = 0u;
+            lease->active_seen = TRUE;
+            lease->sequence_allocated = FALSE;
+            return TRUE;
+        }
+        lease->active_seen = TRUE;
+        return TRUE;
+    }
+    /* A STARTED return followed by an early inactive read is a startup gap,
+     * not completion. Require the exact task to have been observed active
+     * before its later inactive state may retire the host lease. */
+    if (!lease->active_seen) return FALSE;
+    ZeroMemory(lease, sizeof(*lease));
+    return TRUE;
+}
+
+static BOOL host_apply_skill_state(
     unsigned int actor_index,
     SudekiMpCleanroomActor actor,
     SudekiMpLanArenaActorSnapshot *snapshot
@@ -462,64 +902,717 @@ static void host_apply_skill_state(
     SudekiMpCharacterSkillState state;
     BOOL active;
 
-    if (actor_index >= 2u || snapshot == NULL) return;
+    if (actor_index >= 2u || snapshot == NULL) return FALSE;
     character = SudekiMpCleanroomEngineActorEntity(actor);
     if (character == NULL ||
         !SudekiMpObserveCharacterSkill(character, &state)) {
-        if (actor_index == 1u) {
-            host_remote_skill_camera_active = FALSE;
-            host_remote_skill_camera_suppression_logged = FALSE;
-        }
-        host_actor_previous_skill_active[actor_index] = FALSE;
-        return;
+        /* Unknown is not an inactive edge. Preserve the current sequence,
+         * camera/input isolation, and ownership until a readable native
+         * observation proves retirement. The caller drops this snapshot. */
+        return FALSE;
     }
     active = state.active != 0u && state.slot >= 0 && state.slot < 6;
-    if (active && (!host_actor_previous_skill_active[actor_index] ||
-                   host_actor_skill_slot[actor_index] !=
-                       (uint8_t)state.slot)) {
-        ++host_actor_skill_sequence[actor_index];
-        if (host_actor_skill_sequence[actor_index] == 0u) {
-            host_actor_skill_sequence[actor_index] = 1u;
+    if (!host_reconcile_native_skill_lease(
+            actor_index, character, &state)) return FALSE;
+    if (active) {
+        HostNativeSkillLease *lease =
+            &host_native_skill_leases[actor_index];
+        if (!lease->sequence_allocated) {
+            if (!host_begin_character_skill_sequence(
+                    actor_index, character, state.skill, state.slot,
+                    state.cost, TRUE, "snapshot_active_fallback")) {
+                return FALSE;
+            }
+            lease = &host_native_skill_leases[actor_index];
         }
-        host_actor_skill_slot[actor_index] = (uint8_t)state.slot;
+        if (lease->wire_sequence == 0u ||
+            lease->wire_sequence != host_actor_skill_sequence[actor_index] ||
+            host_actor_skill_kind[actor_index] !=
+                SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER ||
+            host_actor_skill_slot[actor_index] != (uint8_t)state.slot) {
+            return FALSE;
+        }
+        /* STARTED may precede the first readable active/cost observation.
+         * Fill the exact native cost without allocating another sequence. */
         host_actor_skill_cost[actor_index] = state.cost;
-        SudekiMpLogFormat(
-            "lan_arena_runtime event=host_skill phase=started actor=%s "
-            "sequence=%u slot=%u cost=%lu "
-            "policy=native_cskill_observation_host_authoritative\r\n",
-            actor_index == 0u ? "Tal" : "Ailish",
-            (unsigned int)host_actor_skill_sequence[actor_index],
-            (unsigned int)host_actor_skill_slot[actor_index],
-            (unsigned long)host_actor_skill_cost[actor_index]);
     }
     if (actor_index == 1u && host_remote_skill_camera_active && !active &&
         host_actor_previous_skill_active[actor_index]) {
+        if (!retire_host_tal_skill_view("native_remote_skill_completed")) {
+            /* The native task is gone, but camera/input ownership remains
+             * leased until the exact latest Tal basis is restored. */
+            return FALSE;
+        }
         host_remote_skill_camera_active = FALSE;
         host_remote_skill_camera_suppression_logged = FALSE;
+        (void)SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(FALSE);
         SudekiMpLogWrite(
             "lan_arena_runtime event=host_remote_skill_camera "
             "state=released owner=Tal remote_caster=Ailish "
             "policy=native_remote_skill_task_completed\r\n");
     }
+    if (actor_index == 0u && !active &&
+        host_actor_previous_skill_active[actor_index]) {
+        (void)SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+            FALSE);
+    }
     host_actor_previous_skill_active[actor_index] = active;
     snapshot->skill_sequence = host_actor_skill_sequence[actor_index];
     if (snapshot->skill_sequence != 0u) {
+        snapshot->skill_kind = host_actor_skill_kind[actor_index];
         snapshot->skill_slot = host_actor_skill_slot[actor_index];
         snapshot->skill_cost = host_actor_skill_cost[actor_index];
         snapshot->skill_active = active ? 1u : 0u;
     }
+    return TRUE;
+}
+
+static BOOL host_apply_spirit_state(
+    SudekiMpLanArenaActorSnapshot *tal_snapshot
+) {
+    int state;
+    BOOL active;
+    if (tal_snapshot == NULL ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&state)) return FALSE;
+    active = state != 0;
+    if (active && !host_spirit_previous_active) {
+        ++host_actor_skill_sequence[0];
+        if (host_actor_skill_sequence[0] == 0u) {
+            host_actor_skill_sequence[0] = 1u;
+        }
+        host_actor_skill_kind[0] =
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+        host_actor_skill_slot[0] = 0u;
+        host_actor_skill_cost[0] = 0u;
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_spirit phase=started actor=Tal "
+            "sequence=%u native_state=%d "
+            "policy=global_host_transaction_distinct_from_cskill\r\n",
+            (unsigned int)host_actor_skill_sequence[0], state);
+    }
+    if (active) {
+        host_actor_skill_kind[0] =
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+        host_actor_skill_slot[0] = 0u;
+        host_actor_skill_cost[0] = 0u;
+        (void)SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+            TRUE);
+    } else if (host_spirit_previous_active) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_spirit phase=completed actor=Tal "
+            "sequence=%u previous_native_state=%d "
+            "policy=global_host_transaction_retired\r\n",
+            (unsigned int)host_actor_skill_sequence[0],
+            host_spirit_previous_state);
+    }
+    host_spirit_previous_active = active;
+    host_spirit_previous_state = state;
+    if (host_actor_skill_sequence[0] != 0u &&
+        host_actor_skill_kind[0] ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) {
+        tal_snapshot->skill_sequence = host_actor_skill_sequence[0];
+        tal_snapshot->skill_kind =
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+        tal_snapshot->skill_slot = 0u;
+        tal_snapshot->skill_cost = 0u;
+        tal_snapshot->skill_active = active ? 1u : 0u;
+    }
+    return TRUE;
+}
+
+static void reset_host_operator_spirit_intent(void) {
+    ZeroMemory(&host_operator_spirit_intent,
+        sizeof(host_operator_spirit_intent));
+}
+
+static void discard_host_operator_spirit_requests(const char *reason) {
+    BOOL retained_intent = host_operator_spirit_intent.pending;
+    BOOL raw_request = SudekiMpLanArenaHostInputDiscardSpiritRequests();
+    reset_host_operator_spirit_intent();
+    if (retained_intent || raw_request) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=discarded "
+            "reason=%s retained_intent=%s raw_request=%s "
+            "policy=no_cross_session_operator_admission\r\n",
+            reason != NULL ? reason : "authority_reset",
+            retained_intent ? "true" : "false",
+            raw_request ? "true" : "false");
+    }
+}
+
+static BOOL host_operator_spirit_session_ready(
+    const SudekiMpLanArenaSessionStatus *status
+) {
+    if (status == NULL ||
+        status->phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED ||
+        !status->peer_connected || status->session_token == 0u ||
+        status->local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status->local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status->peer_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) {
+        host_operator_spirit_session_token = 0u;
+        discard_host_operator_spirit_requests(
+            "authenticated_session_generation_inactive");
+        return FALSE;
+    }
+    if (host_operator_spirit_session_token == status->session_token) {
+        return TRUE;
+    }
+    discard_host_operator_spirit_requests(
+        "authenticated_session_generation_changed");
+    host_operator_spirit_session_token = status->session_token;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_operator_spirit "
+        "phase=session_armed session_token=%08lx%08lx "
+        "policy=first_authenticated_pass_discards_pre_session_events\r\n",
+        (unsigned long)(status->session_token >> 32),
+        (unsigned long)status->session_token);
+    return FALSE;
+}
+
+static const char *host_operator_spirit_context_rejection(
+    const SudekiMpLanArenaSessionStatus *status,
+    void *expected_tal,
+    void *expected_ailish,
+    uint64_t expected_session_token,
+    LONG expected_activation_depth,
+    void **tal_result,
+    void **ailish_result
+) {
+    void *tal;
+    void *ailish;
+    SudekiMpCharacterSkillState tal_skill;
+    SudekiMpCharacterSkillState ailish_skill;
+    BOOL combat_enabled = FALSE;
+    int spirit_state = 0;
+
+    if (tal_result != NULL) *tal_result = NULL;
+    if (ailish_result != NULL) *ailish_result = NULL;
+    if (!runtime_installed || runtime_game_module == NULL || status == NULL ||
+        runtime_config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        runtime_config.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status->phase != SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED ||
+        !status->peer_connected || status->session_token == 0u ||
+        status->local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status->local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status->peer_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) {
+        return "authenticated_canonical_host_required";
+    }
+    if (host_operator_spirit_session_token != status->session_token) {
+        return "session_generation_not_armed";
+    }
+    if (expected_session_token != 0u &&
+        status->session_token != expected_session_token) {
+        return "session_token_changed";
+    }
+    if (!tal_initialized || !ailish_initialized ||
+        !host_remote_ailish_owned) {
+        return "party_control_lease_not_ready";
+    }
+    if (SudekiMpLanArenaPausePanelActive() ||
+        SudekiMpCleanroomMenuActive()) {
+        return "menu_or_pause_active";
+    }
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        return "native_ui_transition_active";
+    }
+    if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled) ||
+        !combat_enabled) {
+        return "native_combat_inactive";
+    }
+    tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    if (tal == NULL || ailish == NULL) {
+        return "party_identity_unavailable";
+    }
+    if (expected_tal != NULL && tal != expected_tal) {
+        return "tal_identity_changed";
+    }
+    if (expected_ailish != NULL && ailish != expected_ailish) {
+        return "ailish_identity_changed";
+    }
+    if (!SudekiMpLanArenaHostInputTalControllerLeaseExact(tal)) {
+        return "tal_controller_lease_not_exact";
+    }
+    if (!SudekiMpControlSeparationPlayerTwoActive() ||
+        SudekiMpControlSeparationPlayerTwoCharacter() != ailish) {
+        return "ailish_player_two_lease_not_exact";
+    }
+    if (InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0) !=
+                expected_activation_depth) {
+        return "operator_spirit_activation_in_progress";
+    }
+    if (InterlockedCompareExchange(
+            &host_remote_skill_activation_depth, 0, 0) != 0 ||
+        host_native_skill_leases[0].pending ||
+        host_native_skill_leases[1].pending ||
+        host_actor_previous_skill_active[0] ||
+        host_actor_previous_skill_active[1] ||
+        !SudekiMpObserveCharacterSkill(tal, &tal_skill) ||
+        !SudekiMpObserveCharacterSkill(ailish, &ailish_skill) ||
+        tal_skill.active != 0u || ailish_skill.active != 0u) {
+        return "native_character_skill_active_or_unknown";
+    }
+    if (!SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) ||
+        spirit_state != 0 || host_spirit_previous_active) {
+        return "native_spirit_active_or_unknown";
+    }
+    if (tal_result != NULL) *tal_result = tal;
+    if (ailish_result != NULL) *ailish_result = ailish;
+    return NULL;
+}
+
+static void service_host_operator_spirit(
+    const SudekiMpLanArenaSessionStatus *status
+) {
+    HostOperatorSpiritIntent intent;
+    SudekiMpSpiritQuickOptionList options;
+    SudekiMpSpiritActivationResult result;
+    unsigned int requested_variant;
+    void *tal = NULL;
+    void *ailish = NULL;
+    const char *rejection;
+
+    if (host_operator_spirit_intent.pending) {
+        if (SudekiMpLanArenaHostInputTakeSpiritVariant(&requested_variant)) {
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_operator_spirit phase=rejected "
+                "variant=%u reason=concurrent_request "
+                "policy=one_two_phase_native_intent_at_a_time\r\n",
+                requested_variant);
+        }
+        if (SudekiMpCleanroomEngineRangedCombatPrimePending()) return;
+        if (InterlockedCompareExchange(
+                &host_operator_spirit_activation_depth, 0, 0) != 0) {
+            return;
+        }
+
+        /* The cleanroom engine positively retired its game-thread UI lease.
+         * Publish a distinct in-flight barrier before any native reproof call.
+         * Keep the intent visible through reproof, then erase it immediately
+         * before activation; either witness independently blocks teardown. */
+        intent = host_operator_spirit_intent;
+        InterlockedIncrement(&host_operator_spirit_activation_depth);
+        rejection = host_operator_spirit_context_rejection(
+            status, intent.tal, intent.ailish, intent.session_token,
+            1, &tal, &ailish);
+        if (rejection == NULL &&
+            (!host_operator_spirit_intent.pending ||
+             host_operator_spirit_intent.tal != intent.tal ||
+             host_operator_spirit_intent.ailish != intent.ailish ||
+             host_operator_spirit_intent.session_token !=
+                 intent.session_token ||
+             host_operator_spirit_intent.variant != intent.variant)) {
+            rejection = "intent_revoked_during_reproof";
+        }
+        if (rejection != NULL) {
+            reset_host_operator_spirit_intent();
+            InterlockedDecrement(&host_operator_spirit_activation_depth);
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_operator_spirit phase=rejected "
+                "variant=%u reason=%s stage=post_prime_reproof "
+                "policy=no_stale_or_reentrant_native_entry\r\n",
+                intent.variant, rejection);
+            return;
+        }
+        reset_host_operator_spirit_intent();
+        result = SudekiMpActivateCharacterSpirit(tal, intent.variant);
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=%s "
+            "actor=Tal variant=%u strike_id=%d validation=%d activation=%d "
+            "policy=native_second_validation_and_activation_wire_edge_observed_later\r\n",
+            SudekiMpSpiritActivationStatusName(result.status),
+            intent.variant, result.strike_id, result.validation_result,
+            result.activation_result);
+        return;
+    }
+
+    if (!SudekiMpLanArenaHostInputTakeSpiritVariant(&requested_variant)) return;
+    if (InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 1, 0) != 0) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=operator_spirit_entry_in_progress "
+            "stage=initial_admission\r\n",
+            requested_variant);
+        return;
+    }
+    rejection = host_operator_spirit_context_rejection(
+        status, NULL, NULL, 0u, 1, &tal, &ailish);
+    if (rejection != NULL) {
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=%s stage=initial_admission\r\n",
+            requested_variant, rejection);
+        return;
+    }
+    ZeroMemory(&options, sizeof(options));
+    if (!SudekiMpDescribeCharacterSpiritOptions(tal, &options) ||
+        options.resource_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+        options.option_count != 2u || requested_variant < 1u ||
+        requested_variant > options.option_count ||
+        options.options[requested_variant - 1u].variant != requested_variant ||
+        options.options[requested_variant - 1u].available == 0u ||
+        options.options[requested_variant - 1u].validation_result != 0) {
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=native_option_unavailable "
+            "resource_type=%u option_count=%u validation=%d\r\n",
+            requested_variant, options.resource_type, options.option_count,
+            requested_variant >= 1u && requested_variant <= 2u ?
+                options.options[requested_variant - 1u].validation_result : -1);
+        return;
+    }
+    /* Native option validation is a synchronous manager entry. Re-prove the
+     * entire actor/session/control context after it returns and before the UI
+     * lease is acquired; the in-flight depth keeps teardown fail-closed for
+     * both validation passes. */
+    rejection = host_operator_spirit_context_rejection(
+        status, tal, ailish, status->session_token, 1, &tal, &ailish);
+    if (rejection != NULL) {
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=%s stage=pre_prime_reproof\r\n",
+            requested_variant, rejection);
+        return;
+    }
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEnginePrimeRangedCombat() ||
+        !SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=native_ui_prime_not_owned error=%lu\r\n",
+            requested_variant, (unsigned long)GetLastError());
+        return;
+    }
+    if (!runtime_installed || runtime_game_module == NULL ||
+        host_operator_spirit_session_token != status->session_token) {
+        InterlockedDecrement(&host_operator_spirit_activation_depth);
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_operator_spirit phase=rejected "
+            "variant=%u reason=authority_revoked_during_ui_prime "
+            "policy=engine_prime_remains_teardown_barrier_until_retired\r\n",
+            requested_variant);
+        return;
+    }
+    host_operator_spirit_intent.tal = tal;
+    host_operator_spirit_intent.ailish = ailish;
+    host_operator_spirit_intent.session_token = status->session_token;
+    host_operator_spirit_intent.variant = requested_variant;
+    host_operator_spirit_intent.pending = TRUE;
+    InterlockedDecrement(&host_operator_spirit_activation_depth);
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_operator_spirit phase=primed "
+        "actor=Tal variant=%u session_token=%08lx%08lx delay_ms=75 "
+        "policy=callback_free_game_thread_positive_retirement_required\r\n",
+        requested_variant,
+        (unsigned long)(status->session_token >> 32),
+        (unsigned long)status->session_token);
+}
+
+static void host_apply_skill_presentation(
+    unsigned int actor_index,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    const SudekiMpCleanroomActorPresentation *presentation;
+    unsigned int channel;
+    unsigned int channel_count;
+    if (actor_index >= 2u || snapshot == NULL ||
+        snapshot->skill_sequence == 0u || snapshot->skill_active == 0u ||
+        !host_actor_presentation_valid[actor_index]) return;
+    presentation = &host_actor_presentation[actor_index];
+    channel_count = actor_index == 0u ? 2u :
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+    snapshot->skill_presentation_valid = 1u;
+    snapshot->skill_presentation_channel_count = (uint8_t)channel_count;
+    for (channel = 0u; channel < channel_count; ++channel) {
+        snapshot->skill_presentation_selector[channel] =
+            presentation->selector[channel];
+        snapshot->skill_presentation_state[channel] =
+            presentation->state[channel];
+        snapshot->skill_presentation_rate[channel] =
+            presentation->rate[channel];
+        snapshot->skill_presentation_time[channel] =
+            presentation->time[channel];
+    }
+    for (channel = 0u;
+         channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+         ++channel) {
+        snapshot->skill_presentation_blend[channel] =
+            presentation->blend[channel];
+    }
+    /* Character CSkill runs locally on the replica; this host renderer sample
+     * is only an optional witness. A long-lived dormant native channel can
+     * exceed the bounded wire clock even while a new skill is healthy. Never
+     * let that optional value suppress the authoritative sequence/start edge.
+     * Spirit is different: its client path is presentation-only, so retain
+     * the strict invalid snapshot behavior when its required sidecar is bad. */
+    if (snapshot->skill_kind ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
+        !SudekiMpLanArenaSkillPresentationValid(
+            snapshot,
+            actor_index == 0u ? SUDEKIMP_LAN_ARENA_TAL_TYPE :
+                SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
+        snapshot->skill_presentation_valid = 0u;
+        snapshot->skill_presentation_channel_count = 0u;
+        ZeroMemory(snapshot->skill_presentation_selector,
+            sizeof(snapshot->skill_presentation_selector));
+        ZeroMemory(snapshot->skill_presentation_state,
+            sizeof(snapshot->skill_presentation_state));
+        ZeroMemory(snapshot->skill_presentation_rate,
+            sizeof(snapshot->skill_presentation_rate));
+        ZeroMemory(snapshot->skill_presentation_time,
+            sizeof(snapshot->skill_presentation_time));
+        ZeroMemory(snapshot->skill_presentation_blend,
+            sizeof(snapshot->skill_presentation_blend));
+    }
+}
+
+static BOOL host_spirit_audio_raw_start(
+    const SudekiMpLanArenaSpiritAudioEvent *event
+) {
+    static const char cue[] = "spiritstrike_start";
+    return event != NULL && event->native_state != 0 &&
+        event->cue_length == sizeof(cue) - 1u &&
+        memcmp(event->cue, cue, sizeof(cue) - 1u) == 0;
+}
+
+static void reset_host_spirit_audio_tracking(void) {
+    SudekiMpLanArenaSpiritAudioEvent events[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY];
+    size_t count = 0u;
+    if (SudekiMpLanArenaSpiritAudioTraceInstalled()) {
+        count = SudekiMpLanArenaSpiritAudioTraceSnapshot(
+            events, SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY, NULL);
+    }
+    ZeroMemory(host_spirit_audio_history,
+        sizeof(host_spirit_audio_history));
+    host_spirit_audio_history_count = 0u;
+    host_spirit_audio_event_sequence = 0u;
+    host_spirit_audio_trace_sequence =
+        count != 0u ? events[count - 1u].sequence : 0u;
+    host_spirit_audio_trace_sequence_initialized = count != 0u;
+}
+
+static void host_capture_spirit_audio(
+    SudekiMpLanArenaActorSnapshot *tal_snapshot,
+    SudekiMpLanArenaSnapshot *snapshot,
+    HostSpiritAudioStage *stage
+) {
+    SudekiMpLanArenaSpiritAudioEvent events[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY];
+    const SudekiMpLanArenaSpiritAudioEvent *latest_start = NULL;
+    size_t count;
+    size_t index;
+
+    if (tal_snapshot == NULL || snapshot == NULL || stage == NULL) return;
+    ZeroMemory(stage, sizeof(*stage));
+    memcpy(stage->history, host_spirit_audio_history,
+        sizeof(stage->history));
+    stage->history_count = host_spirit_audio_history_count;
+    stage->event_sequence = host_spirit_audio_event_sequence;
+    stage->trace_sequence = host_spirit_audio_trace_sequence;
+    stage->trace_sequence_initialized =
+        host_spirit_audio_trace_sequence_initialized;
+    count = SudekiMpLanArenaSpiritAudioTraceSnapshot(
+        events, SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY, NULL);
+    for (index = 0u; index < count; ++index) {
+        const SudekiMpLanArenaSpiritAudioEvent *event = &events[index];
+        BOOL fresh = !stage->trace_sequence_initialized ||
+            SudekiMpLanArenaSequenceNewer(
+                event->sequence, stage->trace_sequence);
+        if (!fresh) continue;
+        stage->trace_sequence = event->sequence;
+        stage->trace_sequence_initialized = TRUE;
+        if (host_spirit_audio_raw_start(event)) latest_start = event;
+    }
+    if (latest_start != NULL && tal_snapshot->skill_active != 0u &&
+        tal_snapshot->skill_kind ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+        tal_snapshot->skill_sequence != 0u &&
+        (stage->history_count == 0u ||
+         stage->history[
+             stage->history_count - 1u].skill_sequence !=
+                tal_snapshot->skill_sequence)) {
+        SudekiMpLanArenaSpiritAudioSemanticEvent *wire_event;
+        if (stage->history_count ==
+                SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY) {
+            memmove(&stage->history[0],
+                &stage->history[1],
+                (SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY - 1u) *
+                    sizeof(stage->history[0]));
+            --stage->history_count;
+        }
+        wire_event = &stage->history[stage->history_count++];
+        ZeroMemory(wire_event, sizeof(*wire_event));
+        ++stage->event_sequence;
+        if (stage->event_sequence == 0u) ++stage->event_sequence;
+        wire_event->event_sequence = stage->event_sequence;
+        wire_event->skill_sequence = tal_snapshot->skill_sequence;
+        wire_event->cue = SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START;
+        stage->journaled_raw_trace_sequence = latest_start->sequence;
+    }
+    snapshot->spirit_audio_history_count =
+        stage->history_count;
+    memcpy(snapshot->spirit_audio_history,
+        stage->history,
+        sizeof(snapshot->spirit_audio_history));
+}
+
+static void commit_host_spirit_audio_stage(
+    const HostSpiritAudioStage *stage
+) {
+    const SudekiMpLanArenaSpiritAudioSemanticEvent *wire_event;
+    if (stage == NULL) return;
+    wire_event = stage->history_count != 0u ?
+        &stage->history[stage->history_count - 1u] : NULL;
+    if (stage->journaled_raw_trace_sequence != 0u && wire_event != NULL) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_spirit_audio state=journaled "
+            "event_sequence=%u skill_sequence=%u raw_trace_sequence=%lu "
+            "cue=start policy=canonical_commit_semantic_allowlist_no_wire_string\r\n",
+            (unsigned int)wire_event->event_sequence,
+            (unsigned int)wire_event->skill_sequence,
+            (unsigned long)stage->journaled_raw_trace_sequence);
+    }
+    memcpy(host_spirit_audio_history, stage->history,
+        sizeof(host_spirit_audio_history));
+    host_spirit_audio_history_count = stage->history_count;
+    host_spirit_audio_event_sequence = stage->event_sequence;
+    host_spirit_audio_trace_sequence = stage->trace_sequence;
+    host_spirit_audio_trace_sequence_initialized =
+        stage->trace_sequence_initialized;
 }
 
 static void reset_host_skill_tracking(void) {
+    unsigned int actor_index;
     ZeroMemory(host_actor_skill_sequence,
         sizeof(host_actor_skill_sequence));
+    ZeroMemory(host_actor_skill_kind, sizeof(host_actor_skill_kind));
     ZeroMemory(host_actor_skill_slot, sizeof(host_actor_skill_slot));
     ZeroMemory(host_actor_skill_cost, sizeof(host_actor_skill_cost));
     ZeroMemory(host_actor_previous_skill_active,
         sizeof(host_actor_previous_skill_active));
-    host_remote_skill_camera_active = FALSE;
+    host_spirit_previous_active = FALSE;
+    host_spirit_previous_state = 0;
+    reset_host_spirit_audio_tracking();
+    reset_host_operator_spirit_intent();
+    host_operator_spirit_session_token = 0u;
+    ZeroMemory(host_native_skill_leases,
+        sizeof(host_native_skill_leases));
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        SudekiMpNoncasterSkillLocomotionRelease(
+            &host_noncaster_locomotion_leases[actor_index]);
+        host_noncaster_locomotion_trace_state[actor_index] = -1;
+    }
+    host_remote_skill_camera_active = host_tal_skill_view_lease.valid;
     host_remote_skill_camera_suppression_logged = FALSE;
+    if (!host_tal_skill_view_lease.valid) {
+        (void)SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(FALSE);
+    }
+    (void)SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+        FALSE);
     InterlockedExchange(&host_remote_skill_activation_depth, 0);
+    /* Every production caller reaches this reset only before hook publication
+     * or after host_native_tasks_drained positively proved no native entry. */
+    InterlockedExchange(&host_operator_spirit_activation_depth, 0);
+}
+
+static BOOL host_native_tasks_drained(void) {
+    SudekiMpCharacterSkillState state;
+    const SudekiMpCleanroomActor actors[2] = {
+        SUDEKIMP_CLEANROOM_TAL,
+        SUDEKIMP_CLEANROOM_AILISH
+    };
+    int spirit_state = 0;
+    BOOL tal_present = FALSE;
+    unsigned int actor_index;
+
+    if (runtime_config.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        return TRUE;
+    }
+    if (host_operator_spirit_intent.pending) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (InterlockedCompareExchange(
+            &host_remote_skill_activation_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    /* Actor presence, not our later initialization flags, is the native-task
+     * lifetime witness. Tal can start a local skill or Spirit while the arena
+     * is still waiting for its peer. */
+    for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+        HostNativeSkillLease *lease =
+            &host_native_skill_leases[actor_index];
+        void *character = SudekiMpCleanroomEngineActorEntity(
+            actors[actor_index]);
+        if (actor_index == 0u && character != NULL) tal_present = TRUE;
+        if (character == NULL && !lease->pending) continue;
+        if (character == NULL ||
+            !SudekiMpObserveCharacterSkill(character, &state) ||
+            !host_reconcile_native_skill_lease(
+                actor_index, character, &state) ||
+            host_native_skill_leases[actor_index].pending ||
+            state.active != 0u) {
+            SetLastError(ERROR_BUSY);
+            return FALSE;
+        }
+    }
+    if ((tal_present || host_spirit_previous_active) &&
+        (!SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) ||
+         spirit_state != 0)) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (host_tal_skill_view_lease.valid &&
+        !retire_host_tal_skill_view("host_native_tasks_drained")) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void refresh_host_player_two_skill_isolation(void *tal) {
+    SudekiMpCharacterSkillState state;
+    int spirit_state = 0;
+    BOOL active;
+
+    if (tal == NULL || !SudekiMpObserveCharacterSkill(tal, &state) ||
+        (state.active != 0u && (state.slot < 0 || state.slot >= 6)) ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state)) {
+        /* Unknown is not a retirement edge. Preserve the previous isolation
+         * until both native owners are readable again. */
+        return;
+    }
+    /* A successful native STARTED return owns a conservative lease before
+     * CSkill's active byte becomes observable. Do not briefly release the
+     * non-caster during that startup gap; host_apply_skill_state retires the
+     * lease only after the exact task has been seen active and later inactive. */
+    active = state.active != 0u || spirit_state != 0 ||
+        host_native_skill_startup_pending(0u, tal, &state);
+
+    (void)SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+        active);
 }
 
 enum {
@@ -956,6 +2049,7 @@ static void host_apply_presentation_state(
      * locomotion selector, mirror that visible state immediately; retain the
      * collision-safe translation classifier for unrecognized action states. */
     if (actor_index == 0u &&
+        !host_actor_previous_skill_active[1] &&
         host_tal_native_locomotion_state(
             combat_enabled, &native_tal_moving)) {
         moving = native_tal_moving;
@@ -968,6 +2062,10 @@ static void host_apply_presentation_state(
     if (actor_index == 1u && !host_remote_ailish_moving) {
         moving = FALSE;
     }
+    /* Preserve the host-authoritative locomotion fact before ACTION is folded
+     * into the stationary-position filter below. The non-caster compositor
+     * owns only RUN/IDLE and must never infer locomotion from an attack. */
+    host_actor_locomotion_moving[actor_index] = moving;
     native_action_variant = host_actor_native_action_variant(
         actor_index, combat_enabled);
     native_action_state = host_actor_native_action_state(actor_index);
@@ -1089,7 +2187,7 @@ static void host_trace_native_presentation(
         "rates=%.5f,%.5f,%.5f,%.5f,%.5f "
         "times=%.5f,%.5f,%.5f,%.5f,%.5f "
         "blends=%.5f,%.5f,%.5f,%.5f "
-        "policy=read_only_semantic_mapping_capture_not_network_payload\r\n",
+        "policy=read_only_semantic_default_exact_skill_payload_only_while_active\r\n",
         SudekiMpCleanroomActorLabel(actor),
         (unsigned long)current.submodel_count,
         (long)current.selector[0], (long)current.selector[1],
@@ -1273,12 +2371,120 @@ static BOOL ensure_canonical_simulation(uint64_t session_token) {
             session_token);
 }
 
+static const char *host_snapshot_failure_stage_name(
+    HostSnapshotFailureStage stage
+) {
+    switch (stage) {
+        case HOST_SNAPSHOT_FAILURE_COMBAT_OBSERVATION:
+            return "combat_observation";
+        case HOST_SNAPSHOT_FAILURE_TAL_ACTOR_FILL:
+            return "tal_actor_fill";
+        case HOST_SNAPSHOT_FAILURE_AILISH_ACTOR_FILL:
+            return "ailish_actor_fill";
+        case HOST_SNAPSHOT_FAILURE_TAL_SKILL_OBSERVATION:
+            return "tal_skill_observation";
+        case HOST_SNAPSHOT_FAILURE_AILISH_SKILL_OBSERVATION:
+            return "ailish_skill_observation";
+        case HOST_SNAPSHOT_FAILURE_SPIRIT_OBSERVATION:
+            return "spirit_observation";
+        case HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION:
+            return "snapshot_validation";
+        case HOST_SNAPSHOT_FAILURE_CANONICAL_BEGIN:
+            return "canonical_begin";
+        case HOST_SNAPSHOT_FAILURE_CANONICAL_COMMIT:
+            return "canonical_commit";
+        case HOST_SNAPSHOT_FAILURE_CANONICAL_READ:
+            return "canonical_read";
+        case HOST_SNAPSHOT_FAILURE_SEND:
+            return "send";
+        default:
+            return "none";
+    }
+}
+
+static void host_snapshot_publish_failed(
+    DWORD now_ms,
+    uint64_t session_token,
+    HostSnapshotFailureStage stage,
+    const SudekiMpLanArenaSnapshot *snapshot
+) {
+    BOOL transition;
+    BOOL should_log;
+    if (stage == HOST_SNAPSHOT_FAILURE_NONE) return;
+    transition = host_snapshot_failure_telemetry.session_token !=
+            session_token ||
+        host_snapshot_failure_telemetry.stage != stage;
+    if (transition) {
+        host_snapshot_failure_telemetry.session_token = session_token;
+        host_snapshot_failure_telemetry.stage = stage;
+        host_snapshot_failure_telemetry.consecutive_failures = 1u;
+    } else if (host_snapshot_failure_telemetry.consecutive_failures !=
+            UINT32_MAX) {
+        ++host_snapshot_failure_telemetry.consecutive_failures;
+    }
+    should_log = transition ||
+        (DWORD)(now_ms -
+            host_snapshot_failure_telemetry.last_logged_at_ms) >= 1000u;
+    if (!should_log) return;
+    host_snapshot_failure_telemetry.last_logged_at_ms = now_ms;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=host_snapshot_publish phase=suppressed "
+        "stage=%s consecutive=%lu session_token=%08lx%08lx "
+        "tal_skill_sequence=%u tal_skill_kind=%u tal_skill_active=%u "
+        "tal_selector0=%ld ailish_skill_sequence=%u "
+        "ailish_skill_kind=%u ailish_skill_active=%u ailish_selector0=%ld "
+        "policy=first_failed_stage_transition_or_one_second_aggregate\r\n",
+        host_snapshot_failure_stage_name(stage),
+        (unsigned long)
+            host_snapshot_failure_telemetry.consecutive_failures,
+        (unsigned long)(session_token >> 32),
+        (unsigned long)session_token,
+        snapshot != NULL ?
+            (unsigned int)snapshot->tal.skill_sequence : 0u,
+        snapshot != NULL ?
+            (unsigned int)snapshot->tal.skill_kind : 0u,
+        snapshot != NULL ?
+            (unsigned int)snapshot->tal.skill_active : 0u,
+        snapshot != NULL ?
+            (long)snapshot->tal.skill_presentation_selector[0] : 0l,
+        snapshot != NULL ?
+            (unsigned int)snapshot->ailish.skill_sequence : 0u,
+        snapshot != NULL ?
+            (unsigned int)snapshot->ailish.skill_kind : 0u,
+        snapshot != NULL ?
+            (unsigned int)snapshot->ailish.skill_active : 0u,
+        snapshot != NULL ?
+            (long)snapshot->ailish.skill_presentation_selector[0] : 0l);
+}
+
+static void host_snapshot_publish_succeeded(
+    DWORD now_ms,
+    uint64_t session_token
+) {
+    if (host_snapshot_failure_telemetry.stage !=
+            HOST_SNAPSHOT_FAILURE_NONE &&
+        host_snapshot_failure_telemetry.session_token == session_token) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_snapshot_publish phase=recovered "
+            "previous_stage=%s consecutive=%lu recovery_tick=%lu "
+            "policy=first_successful_send_closes_failure_interval\r\n",
+            host_snapshot_failure_stage_name(
+                host_snapshot_failure_telemetry.stage),
+            (unsigned long)
+                host_snapshot_failure_telemetry.consecutive_failures,
+            (unsigned long)now_ms);
+    }
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
+}
+
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
     SudekiMpLanArenaNativeWorldObservation world_observation;
     SudekiMpLanArenaActorObservation tal_observation;
     SudekiMpLanArenaActorObservation ailish_observation;
+    HostSpiritAudioStage spirit_audio_stage;
     BOOL combat_enabled = FALSE;
 
     if (host_last_snapshot_at_ms != 0u &&
@@ -1290,14 +2496,27 @@ static void host_publish_snapshot(DWORD now_ms) {
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
         status.peer_simulation_node_role !=
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) return;
-    if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
     memset(&snapshot, 0, sizeof(snapshot));
+    if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_COMBAT_OBSERVATION, &snapshot);
+        return;
+    }
     if (!fill_actor_snapshot(
             SUDEKIMP_CLEANROOM_TAL, SUDEKIMP_LAN_ARENA_TAL_TYPE,
-            &snapshot.tal) ||
-        !fill_actor_snapshot(
+            &snapshot.tal)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_TAL_ACTOR_FILL, &snapshot);
+        return;
+    }
+    if (!fill_actor_snapshot(
             SUDEKIMP_CLEANROOM_AILISH, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
             &snapshot.ailish)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_AILISH_ACTOR_FILL, &snapshot);
         return;
     }
     if (tal_initialized) {
@@ -1306,14 +2525,36 @@ static void host_publish_snapshot(DWORD now_ms) {
     if (ailish_initialized) {
         host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
     }
+    if (!host_apply_skill_state(
+            0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_TAL_SKILL_OBSERVATION, &snapshot);
+        return;
+    }
+    if (!host_apply_skill_state(
+            1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_AILISH_SKILL_OBSERVATION, &snapshot);
+        return;
+    }
+    /* An unreadable global Spirit manager is unknown, not inactive. Do not
+     * emit an artificial retirement edge or stale actor presentation. */
+    if (!host_apply_spirit_state(&snapshot.tal)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_SPIRIT_OBSERVATION, &snapshot);
+        return;
+    }
+    host_capture_spirit_audio(
+        &snapshot.tal, &snapshot, &spirit_audio_stage);
     host_apply_presentation_state(
         0u, now_ms, combat_enabled, &snapshot.tal);
     host_apply_presentation_state(
         1u, now_ms, combat_enabled, &snapshot.ailish);
-    host_apply_skill_state(
-        0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal);
-    host_apply_skill_state(
-        1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish);
+    host_apply_skill_presentation(0u, &snapshot.tal);
+    host_apply_skill_presentation(1u, &snapshot.ailish);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
@@ -1334,7 +2575,21 @@ static void host_publish_snapshot(DWORD now_ms) {
                 SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
         }
     }
-    if (!ensure_canonical_simulation(status.session_token)) return;
+    /* Commit validates again, but naming this boundary separately makes a
+     * future authored renderer stage omission visible immediately instead of
+     * masquerading as a quiet UDP or interpolation stall. */
+    if (!SudekiMpLanArenaSnapshotValid(&snapshot)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION, &snapshot);
+        return;
+    }
+    if (!ensure_canonical_simulation(status.session_token)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_CANONICAL_BEGIN, &snapshot);
+        return;
+    }
     ZeroMemory(&world_observation, sizeof(world_observation));
     world_observation.host_tick = now_ms;
     world_observation.tal_hp = snapshot.tal.hp;
@@ -1346,6 +2601,11 @@ static void host_publish_snapshot(DWORD now_ms) {
     world_observation.enemy_count = snapshot.enemy_count;
     memcpy(world_observation.enemies, snapshot.enemies,
         sizeof(world_observation.enemies));
+    world_observation.spirit_audio_history_count =
+        snapshot.spirit_audio_history_count;
+    memcpy(world_observation.spirit_audio_history,
+        snapshot.spirit_audio_history,
+        sizeof(world_observation.spirit_audio_history));
     world_observation.native_combat_observed = 1u;
     world_observation.native_resources_observed = 1u;
     world_observation.native_enemies_observed = 1u;
@@ -1357,12 +2617,27 @@ static void host_publish_snapshot(DWORD now_ms) {
     ailish_observation.native_actor_observed = 1u;
     if (!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
             &canonical_simulation, status.session_token,
-            &world_observation, &tal_observation, &ailish_observation) ||
-        !SudekiMpLanArenaSharedSimulationReadFrame(
+            &world_observation, &tal_observation, &ailish_observation)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_CANONICAL_COMMIT, &snapshot);
+        return;
+    }
+    /* The canonical reducer now owns this exact journal version. Publish the
+     * trace cursor/history immediately so even a later read/send failure is
+     * retried from state consistent with the already-committed frame. No
+     * pre-commit validation failure can leak a retained event into the next
+     * native observation. */
+    commit_host_spirit_audio_stage(&spirit_audio_stage);
+    if (!SudekiMpLanArenaSharedSimulationReadFrame(
             &canonical_simulation, &snapshot, NULL)) {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_CANONICAL_READ, &snapshot);
         return;
     }
     if (SudekiMpLanArenaSessionSendSnapshot(&snapshot)) {
+        host_snapshot_publish_succeeded(now_ms, status.session_token);
         host_last_snapshot_at_ms = now_ms;
         /* Keep the most recent retirement handoff latched through the idle
          * interval. A render stall or an overwritten UDP snapshot must not
@@ -1379,6 +2654,10 @@ static void host_publish_snapshot(DWORD now_ms) {
                 "and_admitted_player_input_ack_replicated\r\n",
                 (unsigned int)snapshot.enemy_count);
         }
+    } else {
+        host_snapshot_publish_failed(
+            now_ms, status.session_token,
+            HOST_SNAPSHOT_FAILURE_SEND, &snapshot);
     }
 }
 
@@ -1487,7 +2766,7 @@ static void lan_arena_control_update_observer(
     BOOL remote_weak_active = FALSE;
     BOOL remote_native_weak_active = FALSE;
     BOOL remote_aim_valid = FALSE;
-    BOOL remote_combat_toggle_requested = FALSE;
+    BOOL remote_combat_toggle_rejected = FALSE;
     BOOL remote_skill_requested = FALSE;
     uint8_t remote_skill_slot = 0u;
     BOOL ranged_native_ready = TRUE;
@@ -1499,10 +2778,37 @@ static void lan_arena_control_update_observer(
     BOOL witness_exact;
     BOOL status_available;
     DWORD now_ms;
+    float frame_delta_seconds = 0.0f;
     (void)controller;
-    (void)update_data;
+    if (update_data != NULL) {
+        float candidate = *(float *)((uint8_t *)update_data + 0x0cu);
+        if (isfinite(candidate) && candidate > 0.0f && candidate <= 0.25f) {
+            frame_delta_seconds = candidate;
+        }
+    }
     if (!SudekiMpControlUpdateObserverGateTryEnter(
             &lan_arena_control_observer_gate)) return;
+    /* The callback-free ranged-prime lease is owned by this native game
+     * thread. Service it on every host observer pass, including passes that
+     * later discover a lost session, so teardown can obtain a positive UI
+     * retirement without leaving a TimerProc behind. */
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+        SudekiMpCleanroomEngineRangedCombatPrimePending()) {
+        SudekiMpCleanroomEngineMaintainResources();
+    }
+    /* Client-side skill records and inventory are presentation metadata only.
+     * Keep them populated so Ailish can browse every authored training slot;
+     * activation still crosses the authenticated input packet and executes
+     * only in the host's native world. */
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        now_ms = GetTickCount();
+        if (client_cleanroom_maintenance_last_at == 0u ||
+            (DWORD)(now_ms - client_cleanroom_maintenance_last_at) >= 150u) {
+            client_cleanroom_maintenance_last_at = now_ms;
+            SudekiMpCleanroomEngineMaintainResources();
+        }
+    }
     SudekiMpLanArenaHostInputServiceCombatToggle();
     witness_exact =
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
@@ -1518,10 +2824,13 @@ static void lan_arena_control_update_observer(
                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA &&
            status.peer_simulation_node_role ==
                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD))) {
-        BOOL actors_released =
-            release_host_remote_ailish("session_not_authenticated") &&
-            release_client_remote_tal("session_not_authenticated");
-        BOOL dummy_released = release_arena_dummy();
+        BOOL actors_released = TRUE;
+        BOOL dummy_released = TRUE;
+        if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+            host_operator_spirit_session_token = 0u;
+            discard_host_operator_spirit_requests(
+                "transport_authority_inactive");
+        }
         if (runtime_config.local_role ==
                 SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
             SudekiMpLanArenaClientReplicaDiscardSnapshots();
@@ -1532,6 +2841,27 @@ static void lan_arena_control_update_observer(
                     "lan_arena_runtime event=client_snapshot_replica phase=discarded "
                     "reason=transport_authority_inactive "
                     "policy=no_stale_snapshot_sampling\r\n");
+            }
+            /* A client-replayed CSkill is an asynchronous native task. Keep
+             * Tal/Ailish and every containment hook alive until Sudeki itself
+             * positively reports that task inactive; removing Tal first can
+             * turn a routine UDP timeout into a use-after-free. */
+            if (SudekiMpResetLanArenaClientReplica()) {
+                actors_released =
+                    release_client_remote_tal("session_not_authenticated");
+                dummy_released = release_arena_dummy();
+            } else {
+                actors_released = FALSE;
+                dummy_released = FALSE;
+            }
+        } else {
+            if (host_native_tasks_drained()) {
+                actors_released = release_host_remote_ailish(
+                    "session_not_authenticated");
+                dummy_released = release_arena_dummy();
+            } else {
+                actors_released = FALSE;
+                dummy_released = FALSE;
             }
         }
         /* A remote END or timeout is a transport interruption, not a request
@@ -1557,6 +2887,15 @@ static void lan_arena_control_update_observer(
         }
         SudekiMpControlUpdateObserverGateLeave(&lan_arena_control_observer_gate);
         return;
+    }
+    if (status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        /* This is the only Spirit operator service point: an exact native
+         * control-update dispatch on the authenticated canonical host. It runs
+         * before actor-role early returns so a stale pending intent is rejected
+         * rather than surviving a changed party/control identity. */
+        if (host_operator_spirit_session_ready(&status)) {
+            service_host_operator_spirit(&status);
+        }
     }
     if (status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
         void *tal;
@@ -1713,19 +3052,23 @@ static void lan_arena_control_update_observer(
         ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
             SUDEKIMP_CLEANROOM_AILISH);
     }
+    refresh_host_player_two_skill_isolation(
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL));
     if (SudekiMpLanArenaHostInputTakeSkillSlot(&operator_skill_slot)) {
         void *tal = SudekiMpCleanroomEngineActorEntity(
             SUDEKIMP_CLEANROOM_TAL);
         SudekiMpSkillActivationResult skill_result =
-            SudekiMpActivateCharacterSkillSlot(
+            SudekiMpReplayHostApprovedCharacterSkillSlot(
                 tal, (int)operator_skill_slot);
+        host_track_started_native_skill(0u, tal, &skill_result);
         SudekiMpLogFormat(
             "lan_arena_runtime event=host_operator_skill phase=%s actor=Tal "
             "slot=%u validation=%d use=%u "
-            "policy=local_test_rail_same_native_slot_adapter\r\n",
+            "policy=local_test_rail_host_approved_slot_native_validator_and_use\r\n",
             SudekiMpSkillActivationStatusName(skill_result.status),
             operator_skill_slot, skill_result.validation_result,
             (unsigned int)skill_result.use_result);
+        refresh_host_player_two_skill_isolation(tal);
     }
     if (!SudekiMpCleanroomEngineDummyPresent() &&
         !arena_dummy_spawn_attempted) {
@@ -1770,38 +3113,61 @@ static void lan_arena_control_update_observer(
             input.ranged_first_person_active != 0u;
         remote_weak_requested = remote_weak_requested ||
             input.weak_attack_pressed != 0u;
-        remote_combat_toggle_requested = remote_combat_toggle_requested ||
+        remote_combat_toggle_rejected = remote_combat_toggle_rejected ||
             input.cleanroom_combat_test_pressed != 0u;
         if (!remote_skill_requested && input.skill_pressed != 0u) {
             remote_skill_requested = TRUE;
             remote_skill_slot = input.skill_slot;
         }
     }
-    if (remote_combat_toggle_requested &&
-        !SudekiMpLanArenaHostInputRequestRemoteCombatToggle()) {
-        SudekiMpLogFormat(
+    if (remote_combat_toggle_rejected) {
+        SudekiMpLogWrite(
             "lan_arena_runtime event=host_remote_cleanroom_combat_test "
-            "phase=rejected win32_error=%lu\r\n",
-            (unsigned long)GetLastError());
+            "phase=rejected reason=host_world_authority "
+            "policy=ignore_legacy_client_toggle_without_dropping_movement\r\n");
     }
     if (remote_skill_requested) {
         SudekiMpSkillActivationResult skill_result;
+        BOOL owner_view_captured = FALSE;
+        BOOL owner_view_restored = TRUE;
         host_remote_skill_camera_suppression_logged = FALSE;
-        InterlockedIncrement(&host_remote_skill_activation_depth);
-        skill_result = SudekiMpActivateCharacterSkillSlot(
-            ailish, remote_skill_slot);
-        InterlockedDecrement(&host_remote_skill_activation_depth);
+        ZeroMemory(&skill_result, sizeof(skill_result));
+        skill_result.status = SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT;
+        if (SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(TRUE) &&
+            capture_host_tal_skill_view(remote_skill_slot)) {
+            owner_view_captured = TRUE;
+            InterlockedIncrement(&host_remote_skill_activation_depth);
+            skill_result = SudekiMpReplayHostApprovedCharacterSkillSlot(
+                ailish, remote_skill_slot);
+            InterlockedDecrement(&host_remote_skill_activation_depth);
+        }
         if (skill_result.status == SUDEKIMP_SKILL_ACTIVATION_STARTED) {
+            host_track_started_native_skill(1u, ailish, &skill_result);
             host_remote_skill_camera_active = TRUE;
+            owner_view_restored = service_host_tal_skill_view(
+                SUDEKIMP_LAN_ARENA_OWNER_VIEW_REASSERT_AFTER_REMOTE_MUTATION);
+        } else {
+            if (owner_view_captured) {
+                owner_view_restored = retire_host_tal_skill_view(
+                    "remote_skill_activation_rejected");
+            }
+            if (owner_view_restored &&
+                !host_tal_skill_view_lease.valid) {
+                (void)SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(
+                    FALSE);
+            } else {
+                host_remote_skill_camera_active = TRUE;
+            }
         }
         SudekiMpLogFormat(
             "lan_arena_runtime event=host_remote_skill phase=%s actor=Ailish "
-            "slot=%u validation=%d use=%u "
-            "policy=host_resolves_actor_slot_runs_native_validator_and_use\r\n",
+            "slot=%u validation=%d use=%u owner_view=%s "
+            "policy=host_resolves_actor_slot_runs_native_validator_and_use_exact_tal_view_bracket\r\n",
             SudekiMpSkillActivationStatusName(skill_result.status),
             (unsigned int)remote_skill_slot,
             skill_result.validation_result,
-            (unsigned int)skill_result.use_result);
+            (unsigned int)skill_result.use_result,
+            owner_view_restored ? "preserved" : "restore_pending");
     }
     remote_aim_valid = host_remote_aim_x != 0 || host_remote_aim_y != 0 ||
         host_remote_aim_z != 0;
@@ -1872,7 +3238,8 @@ static void lan_arena_control_update_observer(
                 (float)host_remote_aim_x / 32767.0f,
                 (float)host_remote_aim_z / 32767.0f,
                 remote_aim_valid && host_remote_first_person_active,
-                remote_weak_active && !ranged_first_person_fire);
+                remote_weak_active && !ranged_first_person_fire,
+                frame_delta_seconds);
         if (submitted && ranged_first_person_fire) {
             weak_submitted =
                 SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire();
@@ -1892,7 +3259,8 @@ static void lan_arena_control_update_observer(
                         (float)host_remote_aim_x / 32767.0f,
                         (float)host_remote_aim_z / 32767.0f,
                         remote_aim_valid,
-                        TRUE);
+                        TRUE,
+                        frame_delta_seconds);
                 ranged_world_fallback = weak_submitted;
             }
         } else if (submitted && remote_weak_active) {
@@ -1963,7 +3331,8 @@ static void lan_arena_control_update_observer(
         !SudekiMpLanArenaRemoteInputFresh(
             host_last_remote_input_at_ms, GetTickCount(), 250u) &&
         SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
-            0.0f, 0.0f, 0.0f, 0.0f, FALSE, FALSE)) {
+            0.0f, 0.0f, 0.0f, 0.0f, FALSE, FALSE,
+            frame_delta_seconds)) {
         host_remote_input_quiesced = TRUE;
         host_remote_ailish_moving = FALSE;
         host_remote_direction_x = 0;
@@ -1987,6 +3356,9 @@ static void lan_arena_frame_end_entry(void) {
     /* Preserve native presentation ordering. Networking has no authority to
      * touch game memory here; later actor adapters consume authenticated state
      * from their dedicated post-controller observer. */
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        SudekiMpCleanroomMenuRender();
+    }
     original_frame_end();
     SudekiMpLanArenaCollisionDebugServiceHotkey();
     if (runtime_config.local_role ==
@@ -2086,6 +3458,7 @@ static void lan_arena_render_start_entry(void) {
     BOOL replica_applied = FALSE;
     BOOL published_before_start = FALSE;
     BOOL published_after_start = FALSE;
+    BOOL client_owner_view_refreshed = TRUE;
     DWORD publish_error = ERROR_SUCCESS;
     /* Commit and publish immediately before the first native RenderStart,
      * then publish the same sample once more after it. The primary component
@@ -2103,7 +3476,31 @@ static void lan_arena_render_start_entry(void) {
             if (!published_before_start) publish_error = GetLastError();
         }
     }
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        host_tal_skill_view_basis_safe_this_frame = FALSE;
+    }
     original_render_start();
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+        host_tal_skill_view_lease.valid) {
+        /* This first RenderStart precedes the primary component/CSkill update
+         * at 0x28d45b. It is the only per-frame basis we may refresh from. */
+        host_tal_skill_view_basis_safe_this_frame =
+            service_host_tal_skill_view(
+                SUDEKIMP_LAN_ARENA_OWNER_VIEW_REFRESH_AFTER_OWNER_RENDER);
+    }
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        client_owner_view_refreshed =
+            SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender();
+    }
+    if (replica_applied && client_owner_view_refreshed) {
+        (void)SudekiMpLanArenaClientReplicaReassertPresentation();
+    }
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+        client_owner_view_refreshed) {
+        (void)SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation();
+    }
     if (replica_applied) {
         published_after_start =
             SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
@@ -2142,11 +3539,155 @@ static void lan_arena_render_pre_world_entry(void) {
     BOOL presentation_reasserted = FALSE;
     BOOL published = FALSE;
     original_render_start();
+    /* Do not refresh a camera lease here. The primary component/CSkill update
+     * at 0x28d45b ran after the first RenderStart and may have replaced the
+     * active render-state basis without selecting a camera. Reassert only the
+     * basis proven at the first RenderStart (or captured immediately before a
+     * remote Use that began between the two calls). */
+    if (runtime_config.local_role ==
+            SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+        tal_initialized && ailish_initialized) {
+        SudekiMpLanArenaSessionStatus status;
+        SudekiMpCharacterSkillState tal_skill_state;
+        SudekiMpCharacterSkillState ailish_skill_state;
+        void *tal_character = SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_TAL);
+        void *ailish_character = SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_AILISH);
+        BOOL combat_enabled = FALSE;
+        float tal_hp = 0.0f;
+        float tal_sp = 0.0f;
+        float ailish_hp = 0.0f;
+        float ailish_sp = 0.0f;
+        int spirit_state = 0;
+        /* Refresh at the ownership boundary itself. A 20 Hz snapshot cache
+         * is too old to protect native channels from an attack/reaction that
+         * began later in the same frame. */
+        host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
+        host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        BOOL host_exact = SudekiMpLanArenaSessionGetStatus(&status) &&
+            status.peer_connected &&
+            status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+            status.local_simulation_node_role ==
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD &&
+            status.peer_simulation_node_role ==
+                SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA &&
+            SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
+            combat_enabled;
+        BOOL tal_alive = host_exact &&
+            SudekiMpCleanroomEngineActorResources(
+                SUDEKIMP_CLEANROOM_TAL, &tal_hp, &tal_sp) && tal_hp > 0.0f;
+        BOOL ailish_alive = host_exact &&
+            SudekiMpCleanroomEngineActorResources(
+                SUDEKIMP_CLEANROOM_AILISH,
+                &ailish_hp, &ailish_sp) && ailish_hp > 0.0f;
+        BOOL tal_skill_known = host_exact && tal_character != NULL &&
+            SudekiMpObserveCharacterSkill(tal_character, &tal_skill_state) &&
+            (tal_skill_state.active == 0u ||
+             (tal_skill_state.slot >= 0 && tal_skill_state.slot < 6));
+        BOOL ailish_skill_known = host_exact && ailish_character != NULL &&
+            SudekiMpObserveCharacterSkill(
+                ailish_character, &ailish_skill_state) &&
+            (ailish_skill_state.active == 0u ||
+             (ailish_skill_state.slot >= 0 &&
+              ailish_skill_state.slot < 6));
+        BOOL spirit_known = host_exact &&
+            SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state);
+        BOOL tal_skill_active = tal_skill_known &&
+            tal_skill_state.active != 0u;
+        BOOL ailish_skill_active = ailish_skill_known &&
+            ailish_skill_state.active != 0u;
+        BOOL tal_skill_startup_pending = tal_skill_known &&
+            host_native_skill_startup_pending(
+                0u, tal_character, &tal_skill_state);
+        BOOL ailish_skill_startup_pending = ailish_skill_known &&
+            host_native_skill_startup_pending(
+                1u, ailish_character, &ailish_skill_state);
+        BOOL tal_skill_owned = tal_skill_active ||
+            tal_skill_startup_pending;
+        BOOL ailish_skill_owned = ailish_skill_active ||
+            ailish_skill_startup_pending;
+        BOOL spirit_active = spirit_known && spirit_state != 0;
+        BOOL tal_action_active = host_exact &&
+            host_actor_native_action_variant(0u, combat_enabled) !=
+                SUDEKIMP_LAN_ARENA_ACTION_NONE;
+        BOOL ailish_action_active = host_exact &&
+            host_actor_native_action_variant(1u, combat_enabled) !=
+                SUDEKIMP_LAN_ARENA_ACTION_NONE;
+        const BOOL ownership_active[2] = {
+            host_exact && tal_skill_known && ailish_skill_known &&
+                spirit_known && tal_alive && ailish_skill_owned &&
+                !tal_skill_owned && !spirit_active && !tal_action_active,
+            host_exact && tal_skill_known && ailish_skill_known &&
+                spirit_known && ailish_alive && host_remote_ailish_owned &&
+                (tal_skill_owned || spirit_active) &&
+                !ailish_skill_owned && !ailish_action_active
+        };
+        const SudekiMpCleanroomActor actors[2] = {
+            SUDEKIMP_CLEANROOM_TAL,
+            SUDEKIMP_CLEANROOM_AILISH
+        };
+        unsigned int actor_index;
+        for (actor_index = 0u; actor_index < 2u; ++actor_index) {
+            const char *reason = NULL;
+            SudekiMpNoncasterSkillLocomotionResult result =
+                SudekiMpNoncasterSkillLocomotionService(
+                    runtime_game_module,
+                    SudekiMpCleanroomEngineActorEntity(actors[actor_index]),
+                    actor_index == 0u ?
+                        SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TAL :
+                        SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH,
+                    ownership_active[actor_index],
+                    host_actor_locomotion_moving[actor_index],
+                    &host_noncaster_locomotion_leases[actor_index],
+                    &reason);
+            int state = result ==
+                SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_REJECTED ? -1 :
+                (ownership_active[actor_index] ?
+                    (host_actor_locomotion_moving[actor_index] ? 2 : 1) : 0);
+            if (state != host_noncaster_locomotion_trace_state[actor_index]) {
+                host_noncaster_locomotion_trace_state[actor_index] = state;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_noncaster_locomotion "
+                    "state=%s actor=%s moving=%u result=%u reason=%s "
+                    "boundary=post_second_render_start_pre_world "
+                    "policy=actor_local_base_channels_realtime_shared_simulation\r\n",
+                    state < 0 ? "rejected" :
+                        (state == 0 ? "inactive" : "active"),
+                    actor_index == 0u ? "Tal" : "Ailish",
+                    host_actor_locomotion_moving[actor_index] ? 1u : 0u,
+                    (unsigned int)result,
+                    reason != NULL ? reason : "unknown");
+            }
+        }
+        if (host_tal_skill_view_lease.valid) {
+            BOOL owner_view_reasserted =
+                host_tal_skill_view_basis_safe_this_frame &&
+                service_host_tal_skill_view(
+                    SUDEKIMP_LAN_ARENA_OWNER_VIEW_REASSERT_AFTER_REMOTE_MUTATION);
+            int owner_view_state = owner_view_reasserted ? 1 : -1;
+            if (owner_view_state != host_tal_skill_view_trace_state) {
+                host_tal_skill_view_trace_state = owner_view_state;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_remote_skill_view "
+                    "state=%s owner=Tal remote_caster=Ailish slot=%u "
+                    "revision=%lu boundary=post_second_render_start_pre_world "
+                    "policy=refresh_live_owner_basis_then_reassert_after_remote_mutation\r\n",
+                    owner_view_reasserted ? "active" : "rejected",
+                    (unsigned int)host_tal_skill_view_slot,
+                    (unsigned long)
+                        host_tal_skill_view_lease.refresh_revision);
+            }
+        }
+    }
     if (runtime_config.local_role ==
             SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
         tal_initialized && ailish_initialized) {
         presentation_reasserted =
             SudekiMpLanArenaClientReplicaReassertPresentation();
+        if (!SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation()) {
+            presentation_reasserted = FALSE;
+        }
         if ((int)presentation_reasserted !=
                 client_presentation_reassert_state) {
             client_presentation_reassert_state =
@@ -2173,6 +3714,9 @@ static void lan_arena_render_pre_world_entry(void) {
         }
         client_trace_tal_action_timeline();
     }
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        host_tal_skill_view_basis_safe_this_frame = FALSE;
+    }
 }
 
 BOOL SudekiMpInstallLanArenaRuntime(
@@ -2180,6 +3724,10 @@ BOOL SudekiMpInstallLanArenaRuntime(
     const SudekiMpLanArenaSessionConfig *config
 ) {
     uint8_t *base;
+    if (!runtime_installed) {
+        reset_host_operator_spirit_intent();
+        host_operator_spirit_session_token = 0u;
+    }
     if (game_module == NULL || config == NULL || runtime_installed ||
         !((config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
            config->local_simulation_node_role ==
@@ -2219,7 +3767,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     }
     if (!SudekiMpInstallLanArenaCollisionDebug(game_module)) {
         DWORD error = GetLastError();
-        SudekiMpUninstallLanArenaCampaignGuard();
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         SudekiMpLanArenaSessionStop(FALSE);
         SetLastError(error);
@@ -2234,43 +3782,41 @@ BOOL SudekiMpInstallLanArenaRuntime(
             lan_arena_frame_end_entry)) {
         DWORD error = GetLastError();
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
         SetLastError(error);
         return FALSE;
     }
-    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
-        !SudekiMpInstallRelativeCallHook(
+    if (!SudekiMpInstallRelativeCallHook(
             &lan_arena_render_start_hook,
             base + RVA_RENDER_START_CALL,
             original_render_start,
             lan_arena_render_start_entry)) {
         DWORD error = GetLastError();
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
         SetLastError(error);
         return FALSE;
     }
-    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
-        !SudekiMpInstallRelativeCallHook(
+    if (!SudekiMpInstallRelativeCallHook(
             &lan_arena_render_pre_world_hook,
             base + RVA_RENDER_PRE_WORLD_CALL,
             original_render_start,
             lan_arena_render_pre_world_entry)) {
         DWORD error = GetLastError();
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
@@ -2280,10 +3826,36 @@ BOOL SudekiMpInstallLanArenaRuntime(
     if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
         !install_host_skill_isolation(base)) {
         DWORD error = GetLastError();
+        if (host_skill_camera_hook.installed ||
+            host_skill_speed_hook.installed) {
+            retain_runtime_after_hook_restore_failure(error);
+            return FALSE;
+        }
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
+        (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
+        original_frame_end = NULL;
+        original_render_start = NULL;
+        SetLastError(error);
+        return FALSE;
+    }
+    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
+        !SudekiMpInstallLanArenaSpiritAudioTrace(
+            game_module,
+            host_spirit_audio_active_witness,
+            &runtime_config)) {
+        DWORD error = GetLastError();
+        if (!rollback_host_spirit_audio_trace()) return FALSE;
+        if (!restore_host_skill_isolation()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
+        if (!rollback_lan_arena_frame_hooks()) return FALSE;
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
+        SudekiMpLanArenaSessionStop(FALSE);
+        SudekiMpUninstallLanArenaCollisionDebug();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
@@ -2296,19 +3868,33 @@ BOOL SudekiMpInstallLanArenaRuntime(
          (!SudekiMpInstallLanArenaClientInput(game_module) ||
           !SudekiMpInitializeLanArenaClientReplica(game_module)))) {
         DWORD error = GetLastError();
-        if (!restore_host_skill_isolation()) return FALSE;
+        if (!uninstall_lan_arena_input_adapters()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
+        if (!rollback_host_spirit_audio_trace()) return FALSE;
+        if (!restore_host_skill_isolation()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
-        SudekiMpUninstallLanArenaClientInput();
-        SudekiMpUninstallLanArenaHostInput();
-        SudekiMpResetLanArenaClientReplica();
+        if (!SudekiMpResetLanArenaClientReplica()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
         SetLastError(error);
         return FALSE;
+    }
+    if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
+        discard_host_operator_spirit_requests("runtime_install");
+        SudekiMpLanArenaHostInputSetNativeSkillStartObserver(
+            host_native_tal_skill_started);
     }
     if (!SudekiMpControlUpdateObserverGateEnable(
              &lan_arena_control_observer_gate) ||
@@ -2320,14 +3906,23 @@ BOOL SudekiMpInstallLanArenaRuntime(
             &lan_arena_control_observer_gate);
         SudekiMpControlUpdateObserverGateDrain(
             &lan_arena_control_observer_gate);
-        if (!restore_host_skill_isolation()) return FALSE;
+        if (!uninstall_lan_arena_input_adapters()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
+        if (!rollback_host_spirit_audio_trace()) return FALSE;
+        if (!restore_host_skill_isolation()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
         if (!rollback_lan_arena_frame_hooks()) return FALSE;
-        SudekiMpUninstallLanArenaClientInput();
-        SudekiMpUninstallLanArenaHostInput();
-        SudekiMpResetLanArenaClientReplica();
+        if (!SudekiMpResetLanArenaClientReplica()) {
+            retain_runtime_after_hook_restore_failure(GetLastError());
+            return FALSE;
+        }
+        if (!rollback_lan_arena_campaign_guard()) return FALSE;
         SudekiMpLanArenaSessionStop(FALSE);
         SudekiMpUninstallLanArenaCollisionDebug();
-        SudekiMpUninstallLanArenaCampaignGuard();
         (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
         original_frame_end = NULL;
         original_render_start = NULL;
@@ -2338,6 +3933,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
     SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
     client_replica_stream_logged = FALSE;
     client_replica_discard_logged = FALSE;
     host_release_pending_logged = FALSE;
@@ -2346,6 +3943,10 @@ BOOL SudekiMpInstallLanArenaRuntime(
     client_animation_basis_publish_state = -1;
     client_presentation_reassert_state = -1;
     client_visible_transform_publish_state = -1;
+    ZeroMemory(host_noncaster_locomotion_leases,
+        sizeof(host_noncaster_locomotion_leases));
+    host_noncaster_locomotion_trace_state[0] = -1;
+    host_noncaster_locomotion_trace_state[1] = -1;
     runtime_hook_restore_failed_logged = FALSE;
     dummy_release_pending_logged = FALSE;
     ZeroMemory(host_previous_actor_position,
@@ -2360,6 +3961,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
         sizeof(host_replica_idle_position_valid));
     ZeroMemory(host_actor_was_moving,
         sizeof(host_actor_was_moving));
+    ZeroMemory(host_actor_locomotion_moving,
+        sizeof(host_actor_locomotion_moving));
     host_ailish_idle_variant_state = 0u;
     host_ailish_idle_variant_seen_at_ms = 0u;
     host_ailish_idle_variant_armed = TRUE;
@@ -2376,6 +3979,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     ZeroMemory(client_actor_presentation_last_trace_at,
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
+    client_cleanroom_maintenance_last_at = 0u;
     reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
@@ -2405,7 +4009,7 @@ BOOL SudekiMpInstallLanArenaRuntime(
     ailish_initialized = FALSE;
     if (!start_network_pump()) {
         DWORD error = GetLastError();
-        SudekiMpUninstallLanArenaRuntime();
+        if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
         SetLastError(error);
         return FALSE;
     }
@@ -2413,48 +4017,75 @@ BOOL SudekiMpInstallLanArenaRuntime(
         "lan_arena_runtime event=install render_start_call_rva=0x%08lx "
         "render_pre_world_call_rva=0x%08lx "
         "frame_end_call_rva=0x%08lx "
-        "render_start_replica_reassert=%s "
+        "first_render_owner_basis=%s second_render_policy=reassert_only "
         "policy=game_thread_actor_adapters_plus_synchronized_socket_worker\r\n",
         (unsigned long)RVA_RENDER_START_CALL,
         (unsigned long)RVA_RENDER_PRE_WORLD_CALL,
         (unsigned long)RVA_FRAME_END_CALL,
         config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
-            "client_only" : "disabled_on_host"
+            "client_ailish" : "host_tal"
     );
     return TRUE;
 }
 
-void SudekiMpUninstallLanArenaRuntime(void) {
-    /* Detours are the lifetime boundary. Remove them before releasing any
-     * callback/resource they can reach. If even one callsite cannot be
-     * restored, keep the complete runtime and original callbacks alive and
-     * pin this DLL rather than leaving a dangling game-code call. */
-    if (!rollback_lan_arena_frame_hooks()) return;
+BOOL SudekiMpUninstallLanArenaRuntime(void) {
+    BOOL actors_released;
+    BOOL dummy_released;
+    DWORD error;
+
+    /* An operator intent is not a native task and must never outlive local
+     * authority. The native UI prime that it may have started remains an
+     * independent engine-owned teardown barrier until positively retired. */
+    host_operator_spirit_session_token = 0u;
+    discard_host_operator_spirit_requests("runtime_uninstall");
+    /* Close transport admission first, but keep the observer and render
+     * callbacks alive while a client-replayed native CSkill drains. */
+    SudekiMpLanArenaSessionStop(runtime_installed);
+    if (!reset_client_replica_for_teardown("runtime_uninstall")) return FALSE;
+    if (!host_native_tasks_drained()) {
+        error = GetLastError();
+        retain_runtime_after_hook_restore_failure(error);
+        return FALSE;
+    }
+    if (!uninstall_lan_arena_input_adapters()) {
+        error = GetLastError();
+        retain_runtime_after_hook_restore_failure(error);
+        return FALSE;
+    }
+    if (!rollback_host_spirit_audio_trace()) return FALSE;
     if (!restore_host_skill_isolation()) {
         retain_runtime_after_hook_restore_failure(GetLastError());
-        return;
+        return FALSE;
     }
+    actors_released =
+        release_host_remote_ailish("runtime_uninstall") &&
+        release_client_remote_tal("runtime_uninstall");
+    dummy_released = release_arena_dummy();
+    if (!actors_released || !dummy_released) {
+        SetLastError(ERROR_RETRY);
+        retain_runtime_after_hook_restore_failure(ERROR_RETRY);
+        return FALSE;
+    }
+    /* Detours are the lifetime boundary. Remove them only after every native
+     * task and actor lease is safely retired, and before clearing any callback
+     * or resource they can reach. A failed restore retains all dependencies. */
+    if (!rollback_lan_arena_frame_hooks()) return FALSE;
+    if (!rollback_lan_arena_campaign_guard()) return FALSE;
     SudekiMpControlUpdateObserverGateDisable(&lan_arena_control_observer_gate);
     (void)SudekiMpControlSeparationUnregisterUpdateObserver(
         &lan_arena_control_observer_owner);
     SudekiMpControlUpdateObserverGateDrain(&lan_arena_control_observer_gate);
-    release_host_remote_ailish("runtime_uninstall");
-    release_client_remote_tal("runtime_uninstall");
-    release_arena_dummy();
     (void)SudekiMpControlSeparationSetManualToggleEnabled(TRUE);
-    SudekiMpUninstallLanArenaClientInput();
-    SudekiMpUninstallLanArenaHostInput();
-    SudekiMpResetLanArenaClientReplica();
     SudekiMpUninstallLanArenaCollisionDebug();
-    SudekiMpUninstallLanArenaCampaignGuard();
     stop_network_pump();
-    SudekiMpLanArenaSessionStop(runtime_installed);
     original_frame_end = NULL;
     original_render_start = NULL;
     runtime_installed = FALSE;
     SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
     client_replica_stream_logged = FALSE;
     client_replica_discard_logged = FALSE;
     host_release_pending_logged = FALSE;
@@ -2475,6 +4106,8 @@ void SudekiMpUninstallLanArenaRuntime(void) {
         sizeof(host_replica_idle_position_valid));
     ZeroMemory(host_actor_was_moving,
         sizeof(host_actor_was_moving));
+    ZeroMemory(host_actor_locomotion_moving,
+        sizeof(host_actor_locomotion_moving));
     host_ailish_idle_variant_state = 0u;
     host_ailish_idle_variant_seen_at_ms = 0u;
     host_ailish_idle_variant_armed = TRUE;
@@ -2491,6 +4124,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     ZeroMemory(client_actor_presentation_last_trace_at,
         sizeof(client_actor_presentation_last_trace_at));
     client_replica_diagnostics_last_trace_at = 0u;
+    client_cleanroom_maintenance_last_at = 0u;
     reset_client_tal_action_timeline();
     host_ailish_weak_attack_until_ms = 0u;
     reset_host_action_tracking();
@@ -2520,6 +4154,7 @@ void SudekiMpUninstallLanArenaRuntime(void) {
     ZeroMemory(&runtime_config, sizeof(runtime_config));
     runtime_remote_ipv4[0] = '\0';
     runtime_game_module = NULL;
+    return TRUE;
 }
 
 BOOL SudekiMpLanArenaRuntimeInstalled(void) {
@@ -2536,14 +4171,29 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
         host_auto_rehost_enabled = FALSE;
     }
+    host_operator_spirit_session_token = 0u;
+    discard_host_operator_spirit_requests("local_end_session");
     SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE);
+    SudekiMpLanArenaSessionStop(TRUE);
+    if (!reset_client_replica_for_teardown("local_end_session")) {
+        SudekiMpLogWrite(
+            "lan_arena_runtime event=local_end_session cleanup=deferred "
+            "policy=wait_for_client_native_skill_drain_before_actor_release\r\n");
+        return FALSE;
+    }
+    if (!host_native_tasks_drained()) {
+        SudekiMpLogWrite(
+            "lan_arena_runtime event=local_end_session cleanup=deferred "
+            "policy=wait_for_host_native_skill_and_spirit_drain_before_actor_release\r\n");
+        return FALSE;
+    }
     actors_released = release_host_remote_ailish("local_end_session") &&
         release_client_remote_tal("local_end_session");
     dummy_released = release_arena_dummy();
-    SudekiMpLanArenaSessionStop(TRUE);
-    SudekiMpResetLanArenaClientReplica();
     SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_snapshot_stream_logged = FALSE;
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
     client_replica_stream_logged = FALSE;
     client_replica_discard_logged = FALSE;
     ZeroMemory(host_previous_actor_position_valid,
@@ -2554,6 +4204,8 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
         sizeof(host_replica_idle_position_valid));
     ZeroMemory(host_actor_was_moving,
         sizeof(host_actor_was_moving));
+    ZeroMemory(host_actor_locomotion_moving,
+        sizeof(host_actor_locomotion_moving));
     host_ailish_idle_variant_state = 0u;
     host_ailish_idle_variant_seen_at_ms = 0u;
     host_ailish_idle_variant_armed = TRUE;
@@ -2605,16 +4257,19 @@ BOOL SudekiMpLanArenaRuntimeJoinEndpoint(const char *endpoint) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE);
+    SudekiMpLanArenaSessionStop(TRUE);
+    if (!reset_client_replica_for_teardown("client_rejoin")) {
+        return FALSE;
+    }
     if (!release_client_remote_tal("client_rejoin") ||
         !release_arena_dummy()) {
         SetLastError(ERROR_RETRY);
         return FALSE;
     }
-    SudekiMpResetLanArenaClientReplica();
     if (!SudekiMpInitializeLanArenaClientReplica(runtime_game_module)) {
         return FALSE;
     }
-    SudekiMpLanArenaSessionStop(TRUE);
     SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     strcpy(runtime_remote_ipv4, parsed_ipv4);
     runtime_config.remote_ipv4 = runtime_remote_ipv4;
@@ -2643,15 +4298,21 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         return FALSE;
     }
     host_auto_rehost_enabled = TRUE;
+    host_operator_spirit_session_token = 0u;
+    discard_host_operator_spirit_requests("host_restart");
+    SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE);
+    SudekiMpLanArenaSessionStop(TRUE);
+    if (!host_native_tasks_drained()) return FALSE;
     if (!release_host_remote_ailish("host_restart") ||
         !release_arena_dummy()) {
         SetLastError(ERROR_RETRY);
         return FALSE;
     }
-    SudekiMpLanArenaSessionStop(TRUE);
     SudekiMpLanArenaSharedSimulationReset(&canonical_simulation);
     host_last_snapshot_at_ms = 0u;
     host_snapshot_stream_logged = FALSE;
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
     host_ailish_spawn_attempted = FALSE;
     ZeroMemory(host_previous_actor_position_valid,
         sizeof(host_previous_actor_position_valid));
@@ -2661,6 +4322,8 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
         sizeof(host_replica_idle_position_valid));
     ZeroMemory(host_actor_was_moving,
         sizeof(host_actor_was_moving));
+    ZeroMemory(host_actor_locomotion_moving,
+        sizeof(host_actor_locomotion_moving));
     host_ailish_idle_variant_state = 0u;
     host_ailish_idle_variant_seen_at_ms = 0u;
     host_ailish_idle_variant_armed = TRUE;

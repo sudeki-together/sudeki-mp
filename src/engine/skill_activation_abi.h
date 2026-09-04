@@ -95,6 +95,23 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlotWithApi(
     int slot,
     const SudekiMpSkillActivationApi *api
 );
+/* Replays a skill whose exact actor-local slot has already been admitted by
+ * the authoritative LAN host.  The client may not have the host's learned
+ * skill flags, so this presentation-only path temporarily enables the exact
+ * resolved SkillData record and the native unavailable/no-SP admission byte
+ * while retaining the native validator and Use entry.  Both authored bytes
+ * are restored before this call returns. */
+SudekiMpSkillActivationResult
+SudekiMpReplayHostApprovedCharacterSkillSlot(
+    void *character,
+    int slot
+);
+SudekiMpSkillActivationResult
+SudekiMpReplayHostApprovedCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api
+);
 BOOL SudekiMpDescribeCharacterQuickSkills(
     void *character,
     SudekiMpSkillQuickSkillList *list

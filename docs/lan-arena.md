@@ -38,7 +38,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA18`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA22`, exact GOG executable hash only. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
@@ -50,9 +50,63 @@ experiments.
 - Roles: Tal host, Ailish client.
 - Transport: direct IPv4 UDP, default port `26770`.
 - Client actions: camera-relative movement and host-validated weak attack.
+- Host tools: `F8` opens the cleanroom tools overlay in the host process. The
+  LAN runtime retains actor/dummy lifecycle ownership, while Combat Mode,
+  Infinite SP, Infinite Spirit, Infinite Jetpack, and All Party Skills use the
+  existing native cleanroom adapters. Resource and skill cheats cover every
+  present retail party actor; the client may browse the mirrored training
+  catalog, but only the host executes an activation.
 - Host snapshots: Tal, Ailish, the fixed training dummy, HP/SP, transforms,
   facing, presentation/combat state, and match state at 20 Hz.
 - Presentation: each process uses a separate full-screen native camera and HUD.
+- Remote Tal skills on the Ailish client run a presentation-only native
+  `CSkill::Use` for the authenticated host-approved slot. Client damage and
+  resource authority remain blocked, the Ailish-owned camera is retained, and
+  native time-stop requests are held at realtime. The matching host snapshot
+  retires the task and restores the exact owner-view lease.
+- Remote Ailish skills still execute their native task on the authoritative
+  host for gameplay effects. Their native game-speed mode lifecycle remains
+  intact. After mode 2 applies its native Player 1 disable transition, the
+  host invokes Sudeki's exact inverse seat-0 transition once and presents mode
+  0 only while Tal's controller update runs. The task-owned mode is restored
+  immediately afterward. This keeps Tal independently mobile without
+  preventing the remote native skill task from reaching its cleanup. Because
+  Sudeki omits the ordinary Player-1 movement call while mode 2 owns the task,
+  the controller boundary reads Tal's live axes and uses the verified native
+  camera transform plus collision-aware absolute-delta movement path.
+- While Tal owns a native skill task, authenticated Ailish input remains live
+  through the same native remote actor lease. If Sudeki omits or rejects its
+  usual non-caster movement path, the host uses the same bounded
+  absolute-delta fallback. In both directions only the caster is skill-locked;
+  the other player remains independently mobile.
+- Tal's retail-global Spirit transaction is a distinct wire presentation,
+  never a fabricated `CSkill` slot. The host sends the verified Tal renderer
+  channels under one Spirit sequence, the client presents those channels
+  without starting another gameplay task, and Ailish remains independently
+  mobile. During either actor's skill, a host-side non-caster compositor owns
+  only that other actor's base RUN/IDLE channels so Sudeki's global skill mode
+  cannot visually freeze a player who is still moving in real time.
+- Spirit audio is presentation-only and deliberately narrower than the native
+  transaction. Fresh traces of both variants showed `spiritstrike_start`
+  followed by six `stop_*` cues. LA22 journals only the semantic START edge,
+  bound to Tal's exact active Spirit sequence; the client maps that enum to a
+  compiled-in cue name and calls only its local `CSound::PlayCue`. Stop cues,
+  raw strings, Spirit-manager entry, effects, camera, time, and damage never
+  cross this adapter. The client preflight verifies the relocated `GetSound`
+  singleton operand against its live module base and the complete `PlayCue`
+  body before enabling replay. Eight bounded events make the theoretical
+  maximum snapshot 746 bytes, below the fixed 768-byte datagram limit.
+- The host-only `--host-spirit 1|2` diagnostic enters that same retail
+  transaction through a callback-free two-phase rail. The exact game-thread
+  observer requires an authenticated canonical session, stable initialized Tal
+  and Ailish identities, Tal's exact Player-1 controller target, Ailish's exact
+  Player-2 lease, native combat, no menus/skills/Spirit transaction, and an
+  available Tal option. A teardown barrier spans native option validation and
+  the existing 75 ms UI prime. After positive retirement, it re-proves the
+  session token, roles, both actor identities/control leases, and native state
+  before calling the retail validator/activation under the same barrier. The
+  operator request never allocates a wire sequence; only the later observed
+  native Spirit-manager edge does so.
 - Replica locomotion: continuous movement retains a 100 ms interpolation
   buffer (two 50 ms host snapshots). A moving-to-idle edge consumes that final
   buffered distance in its run pose instead of snapping or sliding. Tal's two
@@ -77,10 +131,20 @@ experiments.
   native selector numbers local. The host captures and executes those actions.
   After `F8`, Sudeki's native Tal/Ailish weapon-draw transition first attaches
   the weapons; replica animation resumes only after that transition reaches
-  its verified idle. Ailish's first-person and world renderers are treated as
-  distinct tables, and every world selector is resolved through the active
+  its verified idle. On the Ailish client, readiness also requires Sudeki's
+  actor-scoped ranged model refresh, a successful native `WeaponFollow`
+  reattachment, and a visible weapon render object; summon particles alone do
+  not satisfy the gate. Ailish's first-person and world renderers are treated
+  as distinct tables, and every world selector is resolved through the active
   actor-local animation bank before it may be written. Leaving combat likewise
   waits for the native sheath transition before world presentation resumes.
+- Host approval of an Ailish skill does not override an invalid client actor
+  state. Native validator results `2` and authenticated combat result `3`
+  trigger Sudeki's ranged combat/UI priming and a delayed retry; both the outer
+  validator and the validator nested inside `CSkill::Use` must then return
+  zero. This keeps sound, camera ownership, task completion, and movement
+  release on one valid native skill lifetime instead of admitting a partial
+  presentation task.
 - Tal's melee presentation now follows the native combo transition graph, not
   inferred mouse edges. `W` means native Weak/Mouse1 and `S` means native
   Strong/Mouse2. The first two stages and all eight observed three-input
@@ -137,11 +201,12 @@ experiments.
   fresh handshake and token rather than reviving stale shared-world state.
 - The client may open and browse Ailish's native QuickMenu. Native confirm/use
   commands are consumed locally until category-specific requests can be
-  validated and executed by the host. Skills, items, weapons, Spirit,
+  validated and executed by the host. Skills, items, weapons, client-originated
+  Spirit,
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The `LA18` handshake validates the exact
+Packets are versioned and sequenced. The `LA22` handshake validates the exact
 game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
 independent canonical/replica simulation-node tuple, and a fresh session
 token. Connected packet direction is authorized by simulation node rather
@@ -198,21 +263,25 @@ tools/lan-arena-loopback.sh --stop
 ```
 
 For bounded local diagnostics, `tools/lan-arena-live-control.sh` resolves only
-the exact named host/client windows. It can report state, request client combat,
+the exact named host/client windows. It can report state, request host combat,
 exercise Tal's weak/strong/sweep/block inputs, hold client movement briefly,
 move the client mouse, or capture both windows while recording each action in
 `build/mingw32/lan-loopback/live-control.log`. It is an opt-in test tool and is
-never started by either LAN profile. The client-combat command uses
-`SudekiMP.LanArenaOperator.exe` and an auto-reset event in that client's
-isolated Wine/NT namespace. It therefore cannot leak an F8 edge into the host
-or depend on desktop-global Wine key state.
+never started by either LAN profile. The host-combat commands use
+`SudekiMP.LanArenaOperator.exe` and an auto-reset event in the host's isolated
+Wine/NT namespace. Prefer the explicit, idempotent `--host-combat-on` and
+`--host-combat-off` commands; the legacy `--host-combat` command remains a
+manual toggle. The client never emits a combat toggle; it only mirrors the
+authenticated host snapshot.
 
 The same local operator API can exercise the current combat slice without
 moving desktop focus or synthesizing cross-prefix mouse state:
 
 ```sh
 tools/lan-arena-live-control.sh --status
-tools/lan-arena-live-control.sh --client-combat
+tools/lan-arena-live-control.sh --host-combat-on
+tools/lan-arena-live-control.sh --host-spirit 1
+tools/lan-arena-live-control.sh --host-spirit 2
 tools/lan-arena-live-control.sh --client-turn-right
 tools/lan-arena-live-control.sh --client-fire-hold 3000
 tools/lan-arena-live-control.sh --host-combo 450
@@ -251,14 +320,63 @@ physical keyboard/mouse and DirectInput focus. The harness then places the two
 ordinary windows on separate connected monitors, or tiles them on one monitor.
 The harness titles them `Sudeki LAN Host - Tal` and
 `Sudeki LAN Client - Ailish` so every live report identifies the exact
-role/process.
-All other launch profiles retain the original focus-loss behavior. On this NVIDIA
-development host, two concurrent WineD3D contexts require Mesa software GL:
+role/process. Wine may recreate a top-level window while D3D initializes, so
+the harness resolves and titles both current HWNDs again after the client
+warmup. Placement remains best-effort: `wmctrl` failures produce a warning and
+never terminate an otherwise healthy LAN session.
+
+All other launch profiles retain the original focus-loss behavior. The
+same-machine harness has an explicit graphics backend selector:
+
+- `wined3d` is the default and restores the known WineD3D runtime during every
+  seed. Every seeded runtime DLL is copied to a same-directory temporary,
+  checksum-verified, and atomically renamed over its target, so interruption
+  cannot truncate the active baseline DLL. On this NVIDIA development host it
+  currently advances both native simulations at about `0.2x` because two
+  WineD3D/OpenGL contexts reach only about five frames per second.
+- `software` injects Mesa software GL into the two game processes. It is the
+  proven real-time diagnostic fallback, not an implicit global environment
+  change.
+- `dxvk` is an experimental acceptance path. It is pinned as one unit to the
+  exact GE-Proton11-3 `wine`, `wineserver`, Wine Vulkan bridge, and verified
+  i386 DXVK D3D9 DLL. Its preflight parses the NVIDIA i686 ICD's
+  `library_path` and requires both that library and the Vulkan loader to be
+  ELF32. The D3D9 replacement is staged and checksum-verified before an atomic
+  install in each prefix. Every normal exit, failure, or interrupt restores
+  WineD3D from a retained verified backup; DXVK never persists after the
+  harness exits.
+
+Select a non-default backend per invocation:
 
 ```sh
-__GLX_VENDOR_LIBRARY_NAME=mesa LIBGL_ALWAYS_SOFTWARE=1 \
+SUDEKIMP_LAN_GRAPHICS_BACKEND=software \
+  tools/lan-arena-loopback.sh --start
+
+SUDEKIMP_LAN_GRAPHICS_BACKEND=dxvk \
   tools/lan-arena-loopback.sh --start
 ```
+
+Before a hardware-backed `--start`, the harness checks the current
+systemd-logind session. If that active X11/Wayland session reports itself
+locked, it warns that WineD3D/DXVK performance measurements may be
+compositor-throttled while locked and continues launching. An unavailable
+lock hint never blocks launch, and the Mesa software diagnostic does not emit
+the hardware-performance warning.
+
+Plain `tools/lan-arena-loopback.sh --stop` does not require the backend
+variable used at startup. It tries a bounded, deduplicated list containing the
+pinned GE-Proton11-3 wineserver, the ambient wineserver, and installed GE
+siblings against both exact isolated prefixes.
+
+Host and client DXVK logs and shader caches are isolated under
+`build/mingw32/lan-loopback/dxvk/{host,client}`. Before a new live start can
+truncate the console/runtime logs or replace a DXVK log, the harness copies
+the previous evidence into a timestamped
+`build/mingw32/lan-loopback/evidence/` directory. The first DXVK attempt is
+therefore retained: its host log selected `NVIDIA GeForce RTX 3050
+(610.43.3)` successfully, while the client failed later during LAN runtime
+initialization. That attempt proves host Vulkan device selection, not yet a
+two-process DXVK acceptance.
 
 `--network-test` is headless and deterministic. It proves handshake, movement,
 weak attack, authoritative snapshots, timeout/disconnect handling, and no save

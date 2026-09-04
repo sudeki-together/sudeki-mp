@@ -50,6 +50,9 @@ typedef void (SUDEKIMP_THISCALL *MovementControllerSetSpeedImmediateFunction)(
     float speed,
     float turn_rate
 );
+typedef void (SUDEKIMP_THISCALL *GameSpeedPlayerInputEnableFunction)(
+    void *seat_index
+);
 typedef int (SUDEKIMP_THISCALL *CameraManagerGetCameraModeFunction)(
     void *manager,
     const char *name
@@ -90,6 +93,8 @@ enum {
     RVA_CONTROLLER_UPDATE = 0x00027cf0u,
     RVA_CONTROLLER_UPDATE_VTABLE_SLOT = 0x002c9f60u,
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
+    RVA_GAME_SPEED_GLOBAL = 0x00408da0u,
+    RVA_GAME_SPEED_PLAYER_INPUT_ENABLE = 0x00027120u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
     RVA_CAMERA_MANAGER_GLOBAL = 0x00409d7cu,
@@ -210,6 +215,7 @@ static int lan_arena_ranged_fire_validation_state = -1;
 static ArbiterSetSpeedFunction arbiter_set_speed;
 static MovementControllerSetSpeedImmediateFunction
     movement_controller_set_speed_immediate;
+static GameSpeedPlayerInputEnableFunction game_speed_player_input_enable;
 static CameraManagerGetCameraModeFunction camera_manager_get_camera_mode;
 static GroupPlayersInCombatFunction group_players_in_combat;
 static MovementCameraTransformFunction movement_camera_transform;
@@ -261,6 +267,20 @@ static DWORD last_movement_pipeline_sample_tick;
 static BOOL last_movement_pipeline_position_valid;
 static float last_movement_pipeline_position[3];
 static BOOL controller_update_spirit_virtualization_logged;
+static BOOL player_one_skill_input_isolation_enabled;
+static BOOL player_one_skill_native_input_restored;
+static int player_one_skill_input_isolation_trace_state = -1;
+static BOOL player_one_skill_arbiter_virtualization_logged;
+static BOOL player_one_skill_direct_movement_scope_active;
+static BOOL player_one_skill_direct_movement_submitted;
+static BOOL player_one_skill_direct_movement_operator_override;
+static float player_one_skill_frame_delta;
+static DWORD player_one_skill_direct_movement_last_trace_tick;
+static SudekiMpLanArenaPlayerOneSkillDirectionOverride
+    player_one_skill_direction_override;
+static BOOL lan_arena_player_two_skill_input_isolation_enabled;
+static BOOL lan_arena_player_two_skill_virtualization_logged;
+static DWORD lan_arena_player_two_skill_direct_movement_last_trace_tick;
 static BOOL spirit_direct_movement_active;
 static DWORD spirit_direct_movement_last_trace_tick;
 static DWORD movement_controller_update_last_trace_tick;
@@ -307,6 +327,8 @@ static DWORD control_update_dispatch_tls = TLS_OUT_OF_INDEXES;
 static volatile LONG control_update_dispatch_serial;
 static volatile LONG active_control_update_dispatches;
 static volatile LONG control_update_overlap_generation;
+static BOOL control_separation_containment_pinned;
+static BOOL control_separation_restore_failure_logged;
 
 static void SUDEKIMP_THISCALL service_control_update_observers(
     void *controller,
@@ -320,6 +342,10 @@ static void SUDEKIMP_THISCALL poll_control_separation_hotkey(
 static const uint8_t expected_controller_update_entry[] = {
     0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec,
     0x24, 0x53, 0x8b, 0xd9, 0x80, 0xbb, 0xc7, 0x01
+};
+static const uint8_t expected_game_speed_player_input_enable_entry[] = {
+    0x83, 0xec, 0x0c, 0x85, 0xc0, 0x74, 0x52, 0x8d,
+    0x4c, 0x49, 0x24
 };
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
@@ -532,6 +558,30 @@ BOOL SudekiMpControlSeparationSeatActiveInputLeasePolicy(
         leased_generation,
         current_identity,
         current_generation);
+}
+
+BOOL SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
+    BOOL enabled,
+    int current_mode,
+    int requested_mode,
+    BOOL paused
+) {
+    (void)requested_mode;
+    return enabled != FALSE && paused == FALSE && current_mode == 2;
+}
+
+BOOL SudekiMpControlSeparationPlayerOneSkillDirectionOverridePolicy(
+    BOOL physical_direction_held,
+    BOOL operator_direction_held
+) {
+    return physical_direction_held == FALSE &&
+        operator_direction_held != FALSE;
+}
+
+void SudekiMpControlSeparationSetLanArenaPlayerOneSkillDirectionOverride(
+    SudekiMpLanArenaPlayerOneSkillDirectionOverride source
+) {
+    player_one_skill_direction_override = source;
 }
 
 static void acquire_update_observer_registry(void) {
@@ -987,6 +1037,237 @@ static BOOL readable_memory(const void *pointer, size_t size) {
     region_end = (uintptr_t)information.BaseAddress +
         information.RegionSize;
     return end >= start && end <= region_end;
+}
+
+static BOOL writable_memory(void *pointer, size_t size) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t start;
+    uintptr_t end;
+    uintptr_t region_end;
+    DWORD protection;
+
+    if (pointer == NULL || size == 0u ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0 ||
+        information.State != MEM_COMMIT ||
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return FALSE;
+    }
+    protection = information.Protect & 0xffu;
+    if (protection != PAGE_READWRITE && protection != PAGE_WRITECOPY &&
+        protection != PAGE_EXECUTE_READWRITE &&
+        protection != PAGE_EXECUTE_WRITECOPY) {
+        return FALSE;
+    }
+    start = (uintptr_t)pointer;
+    end = start + size;
+    region_end = (uintptr_t)information.BaseAddress +
+        information.RegionSize;
+    return end >= start && end <= region_end;
+}
+
+static void service_player_one_skill_direct_movement(void *controller) {
+    uint8_t *character;
+    void *arbiter;
+    float local_direction[3];
+    float world_direction[3];
+    float magnitude;
+    float horizontal_length;
+    BOOL physical_direction_held;
+    BOOL operator_direction_held = FALSE;
+
+    if (!player_one_skill_direct_movement_scope_active ||
+        player_one_skill_direct_movement_submitted ||
+        movement_camera_transform == NULL ||
+        !readable_memory(controller, 0x1a8u)) {
+        return;
+    }
+    character = *(uint8_t **)(
+        (uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
+    arbiter = readable_memory(character, 0x94u) ?
+        *(void **)(character + 0x90u) : NULL;
+    if (!readable_memory(arbiter, 0x54u) ||
+        *(void **)((uint8_t *)arbiter + 0x10u) != character) {
+        return;
+    }
+    local_direction[0] = *(float *)((uint8_t *)controller + 0x1a0u);
+    local_direction[1] = 0.0f;
+    local_direction[2] = *(float *)((uint8_t *)controller + 0x1a4u);
+    if (!isfinite(local_direction[0]) || !isfinite(local_direction[2])) {
+        return;
+    }
+    magnitude = sqrtf(
+        local_direction[0] * local_direction[0] +
+        local_direction[2] * local_direction[2]);
+    if (!isfinite(magnitude)) return;
+    physical_direction_held = magnitude > 0.0001f;
+    if (!physical_direction_held &&
+        player_one_skill_direction_override != NULL) {
+        float override_direction[3] = {0.0f, 0.0f, 0.0f};
+        operator_direction_held = player_one_skill_direction_override(
+            override_direction);
+        if (SudekiMpControlSeparationPlayerOneSkillDirectionOverridePolicy(
+                physical_direction_held, operator_direction_held)) {
+            if (!isfinite(override_direction[0]) ||
+                !isfinite(override_direction[2])) return;
+            local_direction[0] = override_direction[0];
+            local_direction[2] = override_direction[2];
+            magnitude = sqrtf(
+                local_direction[0] * local_direction[0] +
+                local_direction[2] * local_direction[2]);
+            if (!isfinite(magnitude) || magnitude <= 0.0001f) return;
+            player_one_skill_direct_movement_operator_override = TRUE;
+        }
+    }
+    if (!physical_direction_held &&
+        !player_one_skill_direct_movement_operator_override) return;
+    movement_camera_transform(controller, world_direction, local_direction);
+    world_direction[1] = 0.0f;
+    horizontal_length = sqrtf(
+        world_direction[0] * world_direction[0] +
+        world_direction[2] * world_direction[2]);
+    if (!isfinite(horizontal_length) || horizontal_length <= 0.0001f) {
+        return;
+    }
+    world_direction[0] /= horizontal_length;
+    world_direction[2] /= horizontal_length;
+    if (magnitude > 1.0f) magnitude = 1.0f;
+    (void)SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
+        arbiter, world_direction, magnitude);
+}
+
+static void call_original_controller_update_with_skill_input_isolation(
+    void *controller,
+    void *update_data
+) {
+    uint8_t *game_speed = NULL;
+    int current_mode = 0;
+    int requested_mode = 0;
+    BOOL paused = FALSE;
+    BOOL restore_player_input = FALSE;
+    BOOL isolate_controller_mode = FALSE;
+    uint8_t *player_one_character = NULL;
+    uint8_t *player_one_arbiter = NULL;
+    uint32_t *player_one_arbiter_flags = NULL;
+    uint32_t saved_player_one_arbiter_flags = 0u;
+    DWORD native_last_error;
+    DWORD incoming_last_error = GetLastError();
+
+    player_one_skill_direct_movement_scope_active = FALSE;
+    player_one_skill_direct_movement_submitted = FALSE;
+    player_one_skill_direct_movement_operator_override = FALSE;
+    player_one_skill_frame_delta = 0.0f;
+
+    if (player_one_skill_input_isolation_enabled && game_base != NULL &&
+        readable_memory(game_base + RVA_GAME_SPEED_GLOBAL,
+            sizeof(game_speed))) {
+        game_speed = *(uint8_t **)(game_base + RVA_GAME_SPEED_GLOBAL);
+    }
+    if (readable_memory(game_speed, 0x29u)) {
+        current_mode = *(int *)(game_speed + 0x20u);
+        requested_mode = *(int *)(game_speed + 0x24u);
+        paused = *(game_speed + 0x28u) != 0u;
+        restore_player_input =
+            SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
+            player_one_skill_input_isolation_enabled,
+            current_mode,
+            requested_mode,
+            paused);
+    }
+    if (restore_player_input && !player_one_skill_native_input_restored &&
+        game_speed_player_input_enable != NULL) {
+        /* Native mode 2 disables active-party seat 0 at RVA 0x270a0.  Use
+         * Sudeki's exact inverse transition once, rather than spoofing the
+         * process-global skill mode that owns the CSkill task. */
+        game_speed_player_input_enable(NULL);
+        player_one_skill_native_input_restored = TRUE;
+    }
+    isolate_controller_mode = restore_player_input &&
+        writable_memory(game_speed + 0x20u, 8u);
+    if (isolate_controller_mode) {
+        *(int *)(game_speed + 0x20u) = 0;
+        *(int *)(game_speed + 0x24u) = 0;
+        if (player_one_skill_input_isolation_trace_state != 1) {
+            player_one_skill_input_isolation_trace_state = 1;
+            SudekiMpLogFormat(
+                "control_separation event=player_one_skill_input_isolation "
+                "state=active current=%d requested=%d "
+                "policy=native_seat0_restore_plus_controller_local_mode0_"
+                "preserve_skill_task\r\n",
+                current_mode, requested_mode);
+        }
+    } else if (player_one_skill_input_isolation_enabled &&
+               !player_one_skill_native_input_restored &&
+               player_one_skill_input_isolation_trace_state != 0) {
+        player_one_skill_input_isolation_trace_state = 0;
+        SudekiMpLogFormat(
+            "control_separation event=player_one_skill_input_isolation "
+            "state=waiting reason=%s policy=native_modes_untouched\r\n",
+            paused ? "native_pause" :
+                (game_speed == NULL ? "game_speed_unavailable" :
+                    "skill_mode_inactive"));
+    }
+    if (restore_player_input && readable_memory(
+            controller, CONTROLLER_TARGET_OFFSET + sizeof(void *))) {
+        player_one_character = *(uint8_t **)(
+            (uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
+    }
+    if (readable_memory(player_one_character, 0x94u)) {
+        player_one_arbiter = *(uint8_t **)(player_one_character + 0x90u);
+    }
+    if (readable_memory(player_one_arbiter, 0x54u) &&
+        *(void **)(player_one_arbiter + 0x10u) == player_one_character) {
+        player_one_arbiter_flags = (uint32_t *)(player_one_arbiter + 0x50u);
+    }
+    if (restore_player_input && isolate_controller_mode &&
+        readable_memory(
+            player_one_arbiter_flags, sizeof(*player_one_arbiter_flags))) {
+        float frame_delta = readable_memory(update_data, 0x10u) ?
+            *(float *)((uint8_t *)update_data + 0x0cu) : 0.0f;
+
+        player_one_skill_direct_movement_scope_active = TRUE;
+        if (isfinite(frame_delta) && frame_delta > 0.0f &&
+            frame_delta <= 0.25f) {
+            player_one_skill_frame_delta = frame_delta;
+        }
+    }
+    if (player_one_skill_direct_movement_scope_active &&
+        (*player_one_arbiter_flags & 0x0289e568u) == 0x00080000u) {
+        saved_player_one_arbiter_flags = *player_one_arbiter_flags;
+        *player_one_arbiter_flags =
+            saved_player_one_arbiter_flags & ~0x00080000u;
+        if (!player_one_skill_arbiter_virtualization_logged) {
+            player_one_skill_arbiter_virtualization_logged = TRUE;
+            SudekiMpLogFormat(
+                "control_separation event=player_one_skill_input_isolation "
+                "state=arbiter_lock_virtualized character=0x%08lx "
+                "flags_before=0x%08lx virtualized_flag=0x00080000 "
+                "policy=remote_Ailish_skill_non_caster_Tal_only\r\n",
+                (unsigned long)(uintptr_t)player_one_character,
+                (unsigned long)saved_player_one_arbiter_flags);
+        }
+    }
+    SetLastError(incoming_last_error);
+    original_controller_update(controller, update_data);
+    native_last_error = GetLastError();
+    /* A native skill removes the ordinary controller-to-arbiter callsite
+     * entirely. If that callsite did not already submit through the LAN
+     * wrapper, consume the same current controller axes here and use the
+     * proven camera transform plus absolute-delta movement boundary. */
+    service_player_one_skill_direct_movement(controller);
+    player_one_skill_direct_movement_scope_active = FALSE;
+    player_one_skill_direct_movement_operator_override = FALSE;
+    player_one_skill_frame_delta = 0.0f;
+    if (saved_player_one_arbiter_flags != 0u && readable_memory(
+            player_one_arbiter_flags, sizeof(*player_one_arbiter_flags))) {
+        *player_one_arbiter_flags =
+            (*player_one_arbiter_flags & ~0x00080000u) |
+            (saved_player_one_arbiter_flags & 0x00080000u);
+    }
+    if (isolate_controller_mode) {
+        *(int *)(game_speed + 0x20u) = current_mode;
+        *(int *)(game_speed + 0x24u) = requested_mode;
+    }
+    SetLastError(native_last_error);
 }
 
 static BOOL game_code_pointer(const void *pointer) {
@@ -4520,7 +4801,8 @@ static void poll_control_separation_hotkey_body(
         service_player_three_controller_actions(
             controller, FALSE, TRUE, FALSE);
         quiesce_for_shared_interaction_modal();
-        original_controller_update(controller, update_data);
+        call_original_controller_update_with_skill_input_isolation(
+            controller, update_data);
         ++dispatch_frame->original_call_count;
         publish_runtime_player_leases(controller);
         SudekiMpPlayerStatehoodService(
@@ -4549,7 +4831,8 @@ static void poll_control_separation_hotkey_body(
             (unsigned long)saved_player_two_arbiter_flags
         );
     }
-    original_controller_update(controller, update_data);
+    call_original_controller_update_with_skill_input_isolation(
+        controller, update_data);
     ++dispatch_frame->original_call_count;
     end_spirit_noncaster_arbiter_virtualization(
         player_two_character,
@@ -5194,6 +5477,141 @@ BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled) {
+    BOOL next_enabled;
+
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    next_enabled = enabled != FALSE;
+    if (player_one_skill_input_isolation_enabled == next_enabled) {
+        return TRUE;
+    }
+    player_one_skill_input_isolation_enabled = next_enabled;
+    player_one_skill_native_input_restored = FALSE;
+    player_one_skill_input_isolation_trace_state = -1;
+    if (!next_enabled) {
+        player_one_skill_arbiter_virtualization_logged = FALSE;
+        player_one_skill_direct_movement_scope_active = FALSE;
+        player_one_skill_direct_movement_submitted = FALSE;
+        player_one_skill_direct_movement_operator_override = FALSE;
+        player_one_skill_frame_delta = 0.0f;
+        player_one_skill_direct_movement_last_trace_tick = 0u;
+    }
+    SudekiMpLogFormat(
+        "control_separation event=player_one_skill_input_isolation "
+        "state=%s policy=remote_Ailish_skill_only_Tal_controller_boundary\r\n",
+        next_enabled ? "enabled" : "disabled");
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
+    void *arbiter,
+    const float direction[3],
+    float speed
+) {
+    uint8_t *controller;
+    uint8_t *character;
+    uint8_t *movement_controller;
+    float direct_move_speed;
+    float horizontal_length;
+    float normalized_x;
+    float normalized_z;
+    float direct_scale;
+    DWORD now;
+
+    if (!player_one_skill_input_isolation_enabled ||
+        !player_one_skill_direct_movement_scope_active ||
+        player_one_skill_direct_movement_submitted ||
+        game_base == NULL || movement_controller_set_absolute_delta == NULL ||
+        direction == NULL || !readable_memory(arbiter, 0x54u) ||
+        !isfinite(direction[0]) || !isfinite(direction[2]) ||
+        !isfinite(speed) || speed <= 0.0f || speed > 4.0f ||
+        player_one_skill_frame_delta <= 0.0f) {
+        SetLastError(ERROR_NOT_READY);
+        return FALSE;
+    }
+    character = *(uint8_t **)((uint8_t *)arbiter + 0x10u);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    movement_controller = readable_memory(character, 0x84u) ?
+        *(uint8_t **)(character + 0x80u) : NULL;
+    if (!readable_memory(controller,
+            CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != character ||
+        !readable_memory(movement_controller, 0xbfu)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    direct_move_speed = *(float *)(controller + 0x1d4u);
+    horizontal_length = sqrtf(
+        direction[0] * direction[0] + direction[2] * direction[2]);
+    if (!isfinite(direct_move_speed) || direct_move_speed <= 0.0f ||
+        direct_move_speed > 100.0f || !isfinite(horizontal_length) ||
+        horizontal_length <= 0.0001f) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    normalized_x = direction[0] / horizontal_length;
+    normalized_z = direction[2] / horizontal_length;
+    direct_scale = speed * direct_move_speed *
+        spirit_noncaster_direct_movement_pace *
+        player_one_skill_frame_delta;
+    movement_controller_set_absolute_delta(
+        movement_controller,
+        normalized_x * direct_scale,
+        0.0f,
+        normalized_z * direct_scale);
+    player_one_skill_direct_movement_submitted = TRUE;
+    now = GetTickCount();
+    if (player_one_skill_direct_movement_last_trace_tick == 0u ||
+        (DWORD)(now -
+            player_one_skill_direct_movement_last_trace_tick) >= 500u) {
+        player_one_skill_direct_movement_last_trace_tick = now;
+        SudekiMpLogFormat(
+            "control_separation event=player_one_skill_direct_movement "
+            "phase=submit character=0x%08lx direction_bits=%08lx,%08lx "
+            "frame_delta_bits=0x%08lx direct_scale_bits=0x%08lx source=%s "
+            "policy=LAN_host_Tal_absolute_delta_only_during_authenticated_remote_skill_scope\r\n",
+            (unsigned long)(uintptr_t)character,
+            (unsigned long)float_bits(normalized_x),
+            (unsigned long)float_bits(normalized_z),
+            (unsigned long)float_bits(player_one_skill_frame_delta),
+            (unsigned long)float_bits(direct_scale),
+            player_one_skill_direct_movement_operator_override ?
+                "local_operator_forward" : "native_physical_axes");
+    }
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+    BOOL enabled
+) {
+    BOOL next_enabled;
+
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    next_enabled = enabled != FALSE;
+    if (lan_arena_player_two_skill_input_isolation_enabled == next_enabled) {
+        return TRUE;
+    }
+    lan_arena_player_two_skill_input_isolation_enabled = next_enabled;
+    if (!next_enabled) {
+        lan_arena_player_two_skill_virtualization_logged = FALSE;
+        lan_arena_player_two_skill_direct_movement_last_trace_tick = 0u;
+    }
+    SudekiMpLogFormat(
+        "control_separation event=lan_arena_player_two_skill_input_isolation "
+        "state=%s policy=Tal_skill_non_caster_Ailish_remote_input_boundary\r\n",
+        next_enabled ? "enabled" : "disabled");
+    return TRUE;
+}
+
 BOOL SudekiMpControlSeparationSetManualToggleEnabled(BOOL enabled) {
     if (original_controller_update == NULL || game_base == NULL ||
         service_only_mode) {
@@ -5365,7 +5783,8 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float aim_direction_x,
     float aim_direction_z,
     BOOL aim_direction_valid,
-    BOOL weak_attack_active
+    BOOL weak_attack_active,
+    float frame_delta_seconds
 ) {
     SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
     uint8_t *character = (uint8_t *)companion->character;
@@ -5380,12 +5799,22 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float magnitude;
     float aim_magnitude;
     BOOL native_control_state_exact;
+    uint32_t *arbiter_flags = NULL;
+    uint32_t saved_arbiter_flags = 0u;
+    uint8_t *movement_controller = NULL;
+    float direct_move_speed = 0.0f;
+    BOOL skill_input_scope_exact = FALSE;
 
     if (!isfinite(world_direction_x) || !isfinite(world_direction_z) ||
         fabsf(world_direction_x) > 1.0f || fabsf(world_direction_z) > 1.0f ||
         (aim_direction_valid &&
          (!isfinite(aim_direction_x) || !isfinite(aim_direction_z) ||
           fabsf(aim_direction_x) > 1.0f || fabsf(aim_direction_z) > 1.0f))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (!isfinite(frame_delta_seconds) || frame_delta_seconds < 0.0f ||
+        frame_delta_seconds > 0.25f) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -5417,11 +5846,68 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     direction[1] = 0.0f;
     direction[2] = world_direction_z;
     magnitude = sqrtf(direction[0] * direction[0] + direction[2] * direction[2]);
+    if (lan_arena_player_two_skill_input_isolation_enabled &&
+        readable_memory(arbiter, 0x54u) &&
+        *(void **)((uint8_t *)arbiter + 0x10u) == character) {
+        skill_input_scope_exact = TRUE;
+        arbiter_flags = (uint32_t *)((uint8_t *)arbiter + 0x50u);
+        if (readable_memory(arbiter_flags, sizeof(*arbiter_flags)) &&
+            (*arbiter_flags & 0x0289e568u) == 0x00080000u) {
+            saved_arbiter_flags = *arbiter_flags;
+            *arbiter_flags = saved_arbiter_flags & ~0x00080000u;
+            if (!lan_arena_player_two_skill_virtualization_logged) {
+                lan_arena_player_two_skill_virtualization_logged = TRUE;
+                SudekiMpLogFormat(
+                    "control_separation event=lan_arena_player_two_skill_input_isolation "
+                    "state=arbiter_lock_virtualized character=0x%08lx "
+                    "flags_before=0x%08lx virtualized_flag=0x00080000 "
+                    "policy=Tal_skill_non_caster_Ailish_only\r\n",
+                    (unsigned long)(uintptr_t)character,
+                    (unsigned long)saved_arbiter_flags);
+            }
+        }
+    }
     if (magnitude > 0.0001f) {
         direction[0] /= magnitude;
         direction[2] /= magnitude;
         if (magnitude > 1.0f) magnitude = 1.0f;
         arbiter_movement(arbiter, direction, magnitude, 1.0f, 0u);
+        movement_controller = readable_memory(character, 0x84u) ?
+            *(uint8_t **)(character + 0x80u) : NULL;
+        direct_move_speed = readable_memory(controller, 0x1d8u) ?
+            *(float *)(controller + 0x1d4u) : 0.0f;
+        if (skill_input_scope_exact &&
+            readable_memory(movement_controller, 0xbfu) &&
+            movement_controller_set_absolute_delta != NULL &&
+            frame_delta_seconds > 0.0f &&
+            isfinite(direct_move_speed) && direct_move_speed > 0.0f &&
+            direct_move_speed <= 100.0f) {
+            float direct_scale = magnitude * direct_move_speed *
+                spirit_noncaster_direct_movement_pace * frame_delta_seconds;
+            DWORD now = GetTickCount();
+            movement_controller_set_absolute_delta(
+                movement_controller,
+                direction[0] * direct_scale,
+                0.0f,
+                direction[2] * direct_scale);
+            if (lan_arena_player_two_skill_direct_movement_last_trace_tick ==
+                    0u ||
+                (DWORD)(now -
+                    lan_arena_player_two_skill_direct_movement_last_trace_tick) >=
+                    500u) {
+                lan_arena_player_two_skill_direct_movement_last_trace_tick = now;
+                SudekiMpLogFormat(
+                    "control_separation event=lan_arena_player_two_skill_direct_movement "
+                    "phase=submit character=0x%08lx direction_bits=%08lx,%08lx "
+                    "frame_delta_bits=0x%08lx direct_scale_bits=0x%08lx "
+                    "policy=native_absolute_delta_only_during_authenticated_Tal_skill_scope\r\n",
+                    (unsigned long)(uintptr_t)character,
+                    (unsigned long)float_bits(direction[0]),
+                    (unsigned long)float_bits(direction[2]),
+                    (unsigned long)float_bits(frame_delta_seconds),
+                    (unsigned long)float_bits(direct_scale));
+            }
+        }
         companion->movement_active = TRUE;
         companion->movement_magnitude = magnitude;
     } else {
@@ -5460,6 +5946,11 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
         SudekiMpSubmitArbiterCombatInput(
             game_base + RVA_ARBITER_COMBAT_INPUT, arbiter,
             1, 0, 0, 0, 0, 0);
+    }
+    if (saved_arbiter_flags != 0u &&
+        readable_memory(arbiter_flags, sizeof(*arbiter_flags))) {
+        *arbiter_flags = (*arbiter_flags & ~0x00080000u) |
+            (saved_arbiter_flags & 0x00080000u);
     }
     return TRUE;
 }
@@ -5885,6 +6376,13 @@ BOOL SudekiMpInstallControlSeparation(
         return FALSE;
     }
     if (memcmp(
+            base + RVA_GAME_SPEED_PLAYER_INPUT_ENABLE + 5u,
+            expected_game_speed_player_input_enable_entry,
+            sizeof(expected_game_speed_player_input_enable_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(
             base + RVA_ARBITER_SET_SPEED,
             expected_arbiter_set_speed_entry,
             sizeof(expected_arbiter_set_speed_entry)) != 0) {
@@ -5945,8 +6443,7 @@ BOOL SudekiMpInstallControlSeparation(
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
-    if (enable_second_player_movement &&
-        memcmp(
+    if (memcmp(
             base + RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA,
             expected_movement_controller_set_absolute_delta_entry,
             sizeof(expected_movement_controller_set_absolute_delta_entry)) != 0) {
@@ -6008,7 +6505,11 @@ BOOL SudekiMpInstallControlSeparation(
                 slot,
                 original_controller_update,
                 service_control_update_observers)) {
-            SudekiMpUninstallControlSeparation();
+            DWORD install_error = GetLastError();
+            if (SudekiMpUninstallControlSeparation()) {
+                SetLastError(install_error == ERROR_SUCCESS ?
+                    ERROR_GEN_FAILURE : install_error);
+            }
             return FALSE;
         }
         acquire_control_update_lifecycle();
@@ -6047,6 +6548,19 @@ BOOL SudekiMpInstallControlSeparation(
     roaming_boundary_overlay_ready = FALSE;
     second_player_weak_attack_enabled = enable_second_player_weak_attack;
     lan_arena_remote_input_enabled = FALSE;
+    player_one_skill_input_isolation_enabled = FALSE;
+    player_one_skill_native_input_restored = FALSE;
+    player_one_skill_input_isolation_trace_state = -1;
+    player_one_skill_arbiter_virtualization_logged = FALSE;
+    player_one_skill_direct_movement_scope_active = FALSE;
+    player_one_skill_direct_movement_submitted = FALSE;
+    player_one_skill_direct_movement_operator_override = FALSE;
+    player_one_skill_frame_delta = 0.0f;
+    player_one_skill_direct_movement_last_trace_tick = 0u;
+    player_one_skill_direction_override = NULL;
+    lan_arena_player_two_skill_input_isolation_enabled = FALSE;
+    lan_arena_player_two_skill_virtualization_logged = FALSE;
+    lan_arena_player_two_skill_direct_movement_last_trace_tick = 0u;
     weak_attack_virtual_key = attack_virtual_key;
     weak_attack_was_down = FALSE;
     input_bridge_enabled = enable_input_bridge;
@@ -6129,6 +6643,9 @@ BOOL SudekiMpInstallControlSeparation(
     movement_controller_set_speed_immediate =
         (MovementControllerSetSpeedImmediateFunction)(
             base + RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE);
+    game_speed_player_input_enable =
+        (GameSpeedPlayerInputEnableFunction)(
+            base + RVA_GAME_SPEED_PLAYER_INPUT_ENABLE);
     camera_manager_get_camera_mode = enable_separation_guard ?
         (CameraManagerGetCameraModeFunction)(
             base + RVA_CAMERA_MANAGER_GET_CAMERA_MODE) : NULL;
@@ -6153,7 +6670,11 @@ BOOL SudekiMpInstallControlSeparation(
             expected_movement_controller_update_entry,
             sizeof(expected_movement_controller_update_entry),
             trace_movement_controller_update)) {
-        SudekiMpUninstallControlSeparation();
+        DWORD install_error = GetLastError();
+        if (SudekiMpUninstallControlSeparation()) {
+            SetLastError(install_error == ERROR_SUCCESS ?
+                ERROR_GEN_FAILURE : install_error);
+        }
         return FALSE;
     }
     if (enable_second_player_movement &&
@@ -6163,7 +6684,11 @@ BOOL SudekiMpInstallControlSeparation(
             expected_tal_character_update_entry,
             sizeof(expected_tal_character_update_entry),
             trace_tal_character_update)) {
-        SudekiMpUninstallControlSeparation();
+        DWORD install_error = GetLastError();
+        if (SudekiMpUninstallControlSeparation()) {
+            SetLastError(install_error == ERROR_SUCCESS ?
+                ERROR_GEN_FAILURE : install_error);
+        }
         return FALSE;
     }
 
@@ -6173,7 +6698,11 @@ BOOL SudekiMpInstallControlSeparation(
             base + RVA_PLAYER_MOVE_CALL_ALTERNATE,
             arbiter_movement,
             enforce_player_one_roaming_boundary)) {
-        SudekiMpUninstallControlSeparation();
+        DWORD install_error = GetLastError();
+        if (SudekiMpUninstallControlSeparation()) {
+            SetLastError(install_error == ERROR_SUCCESS ?
+                ERROR_GEN_FAILURE : install_error);
+        }
         return FALSE;
     }
     if (enable_separation_guard &&
@@ -6182,7 +6711,11 @@ BOOL SudekiMpInstallControlSeparation(
             base + RVA_PLAYER_MOVE_CALL_NORMAL,
             arbiter_movement,
             enforce_player_one_roaming_boundary)) {
-        SudekiMpUninstallControlSeparation();
+        DWORD install_error = GetLastError();
+        if (SudekiMpUninstallControlSeparation()) {
+            SetLastError(install_error == ERROR_SUCCESS ?
+                ERROR_GEN_FAILURE : install_error);
+        }
         return FALSE;
     }
 
@@ -6191,7 +6724,11 @@ BOOL SudekiMpInstallControlSeparation(
             slot,
             original_controller_update,
             poll_control_separation_hotkey)) {
-        SudekiMpUninstallControlSeparation();
+        DWORD install_error = GetLastError();
+        if (SudekiMpUninstallControlSeparation()) {
+            SetLastError(install_error == ERROR_SUCCESS ?
+                ERROR_GEN_FAILURE : install_error);
+        }
         return FALSE;
     }
     acquire_control_update_lifecycle();
@@ -6221,6 +6758,7 @@ BOOL SudekiMpInstallControlSeparation(
 
 static BOOL release_companion_leases_for_uninstall(void) {
     unsigned int seat_index;
+    BOOL released = TRUE;
 
     role_lock_active = FALSE;
     for (seat_index = CONTROL_COMPANION_FIRST_SEAT;
@@ -6246,49 +6784,92 @@ static BOOL release_companion_leases_for_uninstall(void) {
                 "status=pending reason=owned_ai_lease_restore_not_exact "
                 "policy=preserve_live_hook_and_retry_reverse_order\r\n",
                 seat_index + 1u);
-            return FALSE;
+            released = FALSE;
         }
         if (seat_index == CONTROL_COMPANION_FIRST_SEAT) {
             break;
         }
     }
-    return TRUE;
+    return released;
 }
 
-void SudekiMpUninstallControlSeparation(void) {
-    DWORD teardown_error;
+static void retain_control_separation_dependencies(
+    const char *reason,
+    DWORD error
+) {
+    HMODULE pinned_module = NULL;
+    BOOL pinned = control_separation_containment_pinned;
+
+    if (!pinned) {
+        pinned = GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+            (LPCSTR)(uintptr_t)&SudekiMpUninstallControlSeparation,
+            &pinned_module);
+        if (pinned) control_separation_containment_pinned = TRUE;
+    }
+    if (!control_separation_restore_failure_logged) {
+        control_separation_restore_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "control_separation event=module_uninstall status=quarantined "
+            "reason=%s error=%lu module_pinned=%s "
+            "policy=retain_callbacks_observers_and_dependencies_for_retry\r\n",
+            reason == NULL ? "unspecified" : reason,
+            (unsigned long)error,
+            pinned ? "true" : "false");
+    }
+    SetLastError(error);
+}
+
+BOOL SudekiMpUninstallControlSeparation(void) {
+    BOOL restored = TRUE;
+    DWORD teardown_error = ERROR_SUCCESS;
+#define RECORD_RESTORE_RESULT(expression) do { \
+        if (!(expression)) { \
+            DWORD current_error = GetLastError(); \
+            if (restored) { \
+                teardown_error = current_error == ERROR_SUCCESS ? \
+                    ERROR_WRITE_FAULT : current_error; \
+            } \
+            restored = FALSE; \
+        } \
+    } while (0)
 
     acquire_control_update_lifecycle();
     if (InterlockedCompareExchange(
             &active_control_update_dispatches, 0, 0) != 0) {
         release_control_update_lifecycle();
-        SetLastError(ERROR_BUSY);
-        return;
+        retain_control_separation_dependencies(
+            "controller_update_dispatch_in_flight", ERROR_BUSY);
+        return FALSE;
     }
     if (!release_companion_leases_for_uninstall()) {
         release_control_update_lifecycle();
-        SetLastError(ERROR_BUSY);
-        return;
+        retain_control_separation_dependencies(
+            "owned_ai_lease_restore_not_exact", ERROR_BUSY);
+        return FALSE;
     }
-    if (!SudekiMpRestorePointerHook(&controller_update_vtable_hook)) {
-        /* The controller wrapper may still be reachable either directly or
-         * through the foreign slot owner.  Keep its native callback,
-         * observers, and all supporting state alive until ownership is
-         * returned and teardown can be retried. */
-        teardown_error = GetLastError();
-        release_control_update_lifecycle();
-        SetLastError(teardown_error);
-        return;
-    }
-    control_update_wrapper_enabled = FALSE;
+    RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(
+        &controller_update_vtable_hook));
+    control_update_wrapper_enabled =
+        controller_update_vtable_hook.installed != FALSE;
     release_control_update_lifecycle();
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &player_one_normal_movement_call_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &player_one_alternate_movement_call_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(
+        &tal_character_update_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(
+        &movement_controller_update_hook));
+#undef RECORD_RESTORE_RESULT
+    if (!restored) {
+        retain_control_separation_dependencies(
+            "native_hook_restore_failed", teardown_error);
+        return FALSE;
+    }
+
     clear_update_observers();
-    SudekiMpRestoreRelativeCallHook(
-        &player_one_normal_movement_call_hook);
-    SudekiMpRestoreRelativeCallHook(
-        &player_one_alternate_movement_call_hook);
-    SudekiMpRestoreInlineHook(&tal_character_update_hook);
-    SudekiMpRestoreInlineHook(&movement_controller_update_hook);
     restore_group_camera("module_uninstall");
     original_controller_update = NULL;
     ai_override_control = NULL;
@@ -6304,6 +6885,7 @@ void SudekiMpUninstallControlSeparation(void) {
     lan_arena_ranged_fire_validation_state = -1;
     arbiter_set_speed = NULL;
     movement_controller_set_speed_immediate = NULL;
+    game_speed_player_input_enable = NULL;
     camera_manager_get_camera_mode = NULL;
     group_players_in_combat = NULL;
     movement_camera_transform = NULL;
@@ -6333,6 +6915,19 @@ void SudekiMpUninstallControlSeparation(void) {
     weak_attack_virtual_key = 0;
     input_bridge_enabled = FALSE;
     lan_arena_remote_input_enabled = FALSE;
+    player_one_skill_input_isolation_enabled = FALSE;
+    player_one_skill_native_input_restored = FALSE;
+    player_one_skill_input_isolation_trace_state = -1;
+    player_one_skill_arbiter_virtualization_logged = FALSE;
+    player_one_skill_direct_movement_scope_active = FALSE;
+    player_one_skill_direct_movement_submitted = FALSE;
+    player_one_skill_direct_movement_operator_override = FALSE;
+    player_one_skill_frame_delta = 0.0f;
+    player_one_skill_direct_movement_last_trace_tick = 0u;
+    player_one_skill_direction_override = NULL;
+    lan_arena_player_two_skill_input_isolation_enabled = FALSE;
+    lan_arena_player_two_skill_virtualization_logged = FALSE;
+    lan_arena_player_two_skill_direct_movement_last_trace_tick = 0u;
     input_bridge_deadzone = 0.0f;
     interaction_requests_enabled = FALSE;
     SudekiMpControllerActionRouterInitialize(&controller_action_router);
@@ -6380,4 +6975,5 @@ void SudekiMpUninstallControlSeparation(void) {
         (void)TlsFree(control_update_dispatch_tls);
         control_update_dispatch_tls = TLS_OUT_OF_INDEXES;
     }
+    return TRUE;
 }

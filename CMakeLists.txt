@@ -76,12 +76,17 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_campaign_guard.c
     src/hooks/lan_arena_window_policy.c
     src/hooks/lan_arena_runtime.c
+    src/hooks/lan_arena_spirit_audio.c
+    src/hooks/lan_arena_startup_movie_skip.c
     src/hooks/lan_arena_client_input.c
     src/hooks/lan_arena_client_replica.c
+    src/hooks/lan_arena_client_skill_handoff.c
+    src/hooks/lan_arena_owner_view.c
     src/hooks/lan_arena_host_input.c
     src/hooks/lan_arena_collision_debug.c
     src/hooks/lan_arena_pause_panel.c
     src/hooks/merchant_provenance_adapter.c
+    src/hooks/noncaster_skill_locomotion.c
     src/hooks/character_switch_trace.c
     src/hooks/control_separation.c
     src/hooks/freeroam_camera_input.c
@@ -227,6 +232,8 @@ set_target_properties(SudekiMP.CallHookTest PROPERTIES
 add_executable(SudekiMP.LanArenaRuntimeHookTest
     tests/lan_arena_runtime_hook_test.c
     src/hooks/call_hook.c
+    src/hooks/lan_arena_owner_view.c
+    src/hooks/noncaster_skill_locomotion.c
     src/network/lan_arena_protocol.c
     src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
@@ -243,6 +250,65 @@ set_source_files_properties(
     PROPERTIES COMPILE_OPTIONS -Wno-pedantic
 )
 set_target_properties(SudekiMP.LanArenaRuntimeHookTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaOwnerViewTest
+    tests/lan_arena_owner_view_test.c
+    src/hooks/lan_arena_owner_view.c
+)
+target_include_directories(SudekiMP.LanArenaOwnerViewTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaOwnerViewTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaOwnerViewTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaOwnerViewTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaSpiritAudioTest
+    tests/lan_arena_spirit_audio_test.c
+    src/hooks/lan_arena_spirit_audio.c
+    src/hooks/call_hook.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.LanArenaSpiritAudioTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaSpiritAudioTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaSpiritAudioTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_source_files_properties(
+    tests/lan_arena_spirit_audio_test.c
+    src/hooks/lan_arena_spirit_audio.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.LanArenaSpiritAudioTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaStartupMovieSkipTest
+    tests/lan_arena_startup_movie_skip_test.c
+    src/hooks/lan_arena_startup_movie_skip.c
+    src/hooks/call_hook.c
+    src/engine/log.c
+)
+target_include_directories(SudekiMP.LanArenaStartupMovieSkipTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaStartupMovieSkipTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaStartupMovieSkipTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_source_files_properties(
+    tests/lan_arena_startup_movie_skip_test.c
+    src/hooks/lan_arena_startup_movie_skip.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.LanArenaStartupMovieSkipTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -436,6 +502,9 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_window_policy.c
     src/hooks/lan_arena_client_input.c
     src/hooks/lan_arena_client_replica.c
+    src/hooks/lan_arena_client_skill_handoff.c
+    src/hooks/lan_arena_owner_view.c
+    src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_host_input.c
     src/hooks/lan_arena_pause_panel.c
     src/hooks/player_input_trace.c
@@ -452,6 +521,8 @@ target_include_directories(SudekiMP.SkillTraceImageTest PRIVATE src)
 target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE
     WIN32_LEAN_AND_MEAN UNICODE _UNICODE
     SUDEKIMP_BLACKSMITH_UI_ADAPTER_TESTING=1
+    SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING=1
+    SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING=1
     SUDEKIMP_SAVE_BOOK_INTERCEPT_TESTING=1
 )
 target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
@@ -616,6 +687,18 @@ target_compile_options(SudekiMP.LanArenaReplicaTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror
 )
 set_target_properties(SudekiMP.LanArenaReplicaTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanArenaClientSkillHandoffTest
+    tests/lan_arena_client_skill_handoff_test.c
+    src/hooks/lan_arena_client_skill_handoff.c
+)
+target_include_directories(SudekiMP.LanArenaClientSkillHandoffTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaClientSkillHandoffTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_target_properties(SudekiMP.LanArenaClientSkillHandoffTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -1218,6 +1301,7 @@ add_executable(SudekiMP.CleanroomEngineTest
 target_include_directories(SudekiMP.CleanroomEngineTest PRIVATE src)
 target_compile_definitions(SudekiMP.CleanroomEngineTest PRIVATE
     WIN32_LEAN_AND_MEAN
+    SUDEKIMP_CLEANROOM_ENGINE_TESTING=1
 )
 target_compile_options(SudekiMP.CleanroomEngineTest PRIVATE
     -Wall -Wextra -Wpedantic
@@ -1228,6 +1312,22 @@ set_source_files_properties(
     PROPERTIES COMPILE_OPTIONS -Wno-pedantic
 )
 set_target_properties(SudekiMP.CleanroomEngineTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.NoncasterSkillLocomotionTest
+    tests/noncaster_skill_locomotion_test.c
+    src/hooks/noncaster_skill_locomotion.c
+)
+target_include_directories(SudekiMP.NoncasterSkillLocomotionTest PRIVATE src)
+target_compile_definitions(SudekiMP.NoncasterSkillLocomotionTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+    SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TESTING=1
+)
+target_compile_options(SudekiMP.NoncasterSkillLocomotionTest PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+set_target_properties(SudekiMP.NoncasterSkillLocomotionTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

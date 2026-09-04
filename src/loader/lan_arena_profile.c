@@ -7,6 +7,7 @@ static int role_key(const wchar_t *key) {
     if (_wcsicmp(key, L"EnableLanArenaHostPrototype") == 0) return 1;
     if (_wcsicmp(key, L"EnableLanArenaClientPrototype") == 0) return 2;
     if (_wcsicmp(key, L"EnableControlSeparationPrototype") == 0) return 3;
+    if (_wcsicmp(key, L"EnableCleanroomMenu") == 0) return 4;
     return 0;
 }
 
@@ -15,9 +16,11 @@ void SudekiMpLanArenaProfileInitialize(SudekiMpLanArenaProfileState *state) {
     state->host_seen = 0u;
     state->client_seen = 0u;
     state->control_seen = 0u;
+    state->cleanroom_seen = 0u;
     state->host_enabled = 0u;
     state->client_enabled = 0u;
     state->control_enabled = 0u;
+    state->cleanroom_enabled = 0u;
     state->failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_NONE;
 }
 
@@ -42,7 +45,8 @@ BOOL SudekiMpLanArenaProfileObserve(
         return FALSE;
     }
     if ((index == 1 && state->host_seen) || (index == 2 && state->client_seen) ||
-        (index == 3 && state->control_seen)) {
+        (index == 3 && state->control_seen) ||
+        (index == 4 && state->cleanroom_seen)) {
         state->failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_DUPLICATE_KEY;
         return FALSE;
     }
@@ -52,9 +56,12 @@ BOOL SudekiMpLanArenaProfileObserve(
     } else if (index == 2) {
         state->client_seen = 1u;
         state->client_enabled = enabled ? 1u : 0u;
-    } else {
+    } else if (index == 3) {
         state->control_seen = 1u;
         state->control_enabled = enabled ? 1u : 0u;
+    } else {
+        state->cleanroom_seen = 1u;
+        state->cleanroom_enabled = enabled ? 1u : 0u;
     }
     return TRUE;
 }
@@ -67,6 +74,7 @@ BOOL SudekiMpLanArenaProfileComplete(
     if (state == NULL) return FALSE;
     if (state->failure != SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_NONE) return FALSE;
     if (!state->host_seen || !state->client_seen || !state->control_seen ||
+        !state->cleanroom_seen ||
         (!state->host_enabled && !state->client_enabled)) {
         state->failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_ROLE_MISSING;
         return FALSE;
@@ -77,6 +85,12 @@ BOOL SudekiMpLanArenaProfileComplete(
     }
     if (!state->control_enabled) {
         state->failure = SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_FORBIDDEN_KEY_ENABLED;
+        return FALSE;
+    }
+    if ((state->host_enabled && !state->cleanroom_enabled) ||
+        (state->client_enabled && state->cleanroom_enabled)) {
+        state->failure =
+            SUDEKIMP_LAN_ARENA_PROFILE_FAILURE_HOST_TOOLS_MISMATCH;
         return FALSE;
     }
     if (role != NULL) {

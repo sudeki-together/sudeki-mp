@@ -88,6 +88,20 @@ static BOOL readable_memory(const void *pointer, size_t size) {
     return end >= start && end <= region_end;
 }
 
+static BOOL writable_memory(void *pointer, size_t size) {
+    MEMORY_BASIC_INFORMATION information;
+    DWORD protection;
+
+    if (!readable_memory(pointer, size) ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0) {
+        return FALSE;
+    }
+    protection = information.Protect & 0xffu;
+    return protection == PAGE_READWRITE || protection == PAGE_WRITECOPY ||
+        protection == PAGE_EXECUTE_READWRITE ||
+        protection == PAGE_EXECUTE_WRITECOPY;
+}
+
 __attribute__((naked, noinline))
 uint8_t SudekiMpCallSkillAvailability(
     void *target,
@@ -359,6 +373,84 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlotWithApi(
     return result;
 }
 
+static SudekiMpSkillActivationResult
+replay_host_approved_character_skill_slot(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api
+) {
+    SudekiMpSkillActivationResult result = empty_result(
+        SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT);
+    uint8_t *character_bytes = (uint8_t *)character;
+    uint8_t *skill;
+    unsigned int index;
+    uint8_t *selected_data = NULL;
+    uint8_t saved_enabled;
+    uint8_t *host_approval_flag;
+    uint8_t saved_host_approval;
+
+    if (character_bytes == NULL || slot < 0 || api == NULL ||
+        api->validate == NULL || api->use == NULL ||
+        api->include_unavailable_skills == NULL ||
+        !readable_memory(character_bytes,
+            CHARACTER_SKILL_OFFSET + sizeof(skill))) return result;
+    skill = *(uint8_t **)(character_bytes + CHARACTER_SKILL_OFFSET);
+    if (!readable_memory(skill, CSKILL_ORDER_ARRAY_OFFSET +
+            NATIVE_QUICK_SKILL_COUNT * sizeof(unsigned int)) ||
+        *(void **)(skill + 0x10u) != character) return result;
+    result.skill = skill;
+    for (index = 0u; index < NATIVE_QUICK_SKILL_COUNT; ++index) {
+        uint8_t *skill_data = *(uint8_t **)(
+            skill + CSKILL_DATA_ARRAY_OFFSET + index * sizeof(void *));
+        if (!readable_memory(skill_data,
+                SKILL_DATA_SLOT_OFFSET + sizeof(int)) ||
+            *(int *)(skill_data + SKILL_DATA_SLOT_OFFSET) != slot) continue;
+        if (selected_data != NULL) return result;
+        selected_data = skill_data;
+    }
+    host_approval_flag = (uint8_t *)(uintptr_t)
+        api->include_unavailable_skills;
+    if (selected_data == NULL || !writable_memory(
+            selected_data + SKILL_DATA_ENABLED_OFFSET, 1u) ||
+        !writable_memory(host_approval_flag, 1u)) {
+        result.status = SUDEKIMP_SKILL_ACTIVATION_ORDINAL_UNAVAILABLE;
+        return result;
+    }
+    result.skill_data = selected_data;
+    result.slot = slot;
+    saved_enabled = selected_data[SKILL_DATA_ENABLED_OFFSET];
+    saved_host_approval = *host_approval_flag;
+    selected_data[SKILL_DATA_ENABLED_OFFSET] = 1u;
+    *host_approval_flag = 1u;
+    result.validation_result = api->validate(skill, slot);
+    if (result.validation_result != 0) {
+        *host_approval_flag = saved_host_approval;
+        selected_data[SKILL_DATA_ENABLED_OFFSET] = saved_enabled;
+        result.status = SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED;
+        return result;
+    }
+    result.use_result = api->use(skill, NULL, slot);
+    *host_approval_flag = saved_host_approval;
+    selected_data[SKILL_DATA_ENABLED_OFFSET] = saved_enabled;
+    if (result.use_result == 0u) {
+        result.status = SUDEKIMP_SKILL_ACTIVATION_USE_REJECTED;
+        return result;
+    }
+    result.status = SUDEKIMP_SKILL_ACTIVATION_STARTED;
+    SudekiMpCombatContextSkillStarted(character, skill);
+    return result;
+}
+
+SudekiMpSkillActivationResult
+SudekiMpReplayHostApprovedCharacterSkillSlotWithApi(
+    void *character,
+    int slot,
+    const SudekiMpSkillActivationApi *api
+) {
+    return replay_host_approved_character_skill_slot(
+        character, slot, api);
+}
+
 BOOL SudekiMpDescribeCharacterQuickSkillsWithApi(
     void *character,
     const SudekiMpSkillActivationApi *api,
@@ -507,6 +599,18 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlot(
         return empty_result(SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT);
     }
     return SudekiMpActivateCharacterSkillSlotWithApi(
+        character, slot, &native_api);
+}
+
+SudekiMpSkillActivationResult
+SudekiMpReplayHostApprovedCharacterSkillSlot(
+    void *character,
+    int slot
+) {
+    if (native_module == NULL) {
+        return empty_result(SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT);
+    }
+    return replay_host_approved_character_skill_slot(
         character, slot, &native_api);
 }
 

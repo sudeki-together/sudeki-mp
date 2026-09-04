@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 19u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 22u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413139u /* "LA19" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413232u /* "LA22" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 576u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 768u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -20,6 +20,10 @@
 #define SUDEKIMP_LAN_ARENA_AILISH_TYPE 0x01u
 #define SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID 1u
 #define SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY 4u
+#define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS 5u
+#define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
+#define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 746u
 
 typedef enum SudekiMpLanArenaMatchState {
     SUDEKIMP_LAN_ARENA_MATCH_WAITING = 0,
@@ -27,10 +31,12 @@ typedef enum SudekiMpLanArenaMatchState {
     SUDEKIMP_LAN_ARENA_MATCH_ENDED = 2
 } SudekiMpLanArenaMatchState;
 
-/* Process-independent presentation states. Never send native animation
- * selectors or arbiter enums across the wire: those are engine-owned and can
- * differ by actor. The client maps these bounded states through verified
- * presentation adapters only. */
+/* Ordinary locomotion/action presentation remains process-independent: never
+ * send arbiter enums or use a native selector as gameplay authority. The one
+ * exact-build exception is an authenticated active CSkill or Spirit Strike,
+ * whose bounded actor-local renderer channels are copied below as
+ * presentation-only data.
+ * The client still maps all ordinary states through verified adapters. */
 typedef enum SudekiMpLanArenaAnimationState {
     SUDEKIMP_LAN_ARENA_ANIMATION_IDLE = 0,
     SUDEKIMP_LAN_ARENA_ANIMATION_MOVING = 1,
@@ -48,6 +54,24 @@ typedef enum SudekiMpLanArenaCombatState {
     SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK = 4,
     SUDEKIMP_LAN_ARENA_COMBAT_BLOCK = 5
 } SudekiMpLanArenaCombatState;
+
+/* Character skills and Spirit Strikes share an exact-build presentation
+ * payload, but they do not share an execution path. A character skill may
+ * start a validated local CSkill presentation task. A Spirit Strike is a
+ * host-owned global transaction and is presentation-only on the client. */
+typedef enum SudekiMpLanArenaSkillPresentationKind {
+    SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE = 0,
+    SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER = 1,
+    SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT = 2
+} SudekiMpLanArenaSkillPresentationKind;
+
+/* Spirit audio crosses the LAN only as this closed semantic allowlist. Raw
+ * XACT cue strings remain host-process trace evidence and can never become
+ * packet-controlled arguments to the replica's sound engine. */
+typedef enum SudekiMpLanArenaSpiritAudioCue {
+    SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_NONE = 0,
+    SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START = 1
+} SudekiMpLanArenaSpiritAudioCue;
 
 /* Bounded action variants remain process-independent. The host translates
  * verified native selectors into these values and each client translates
@@ -192,13 +216,34 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     uint16_t action_terminal_phase_q8;
     uint16_t idle_entry_phase_q8;
     uint8_t action_retirement_valid;
-    /* Host-observed native CSkill state. `skill_sequence` advances once per
-     * admitted activation; the replica resolves the slot locally and runs
-     * the same native presentation task without gaining damage authority. */
+    /* Host-observed skill presentation transaction. `skill_sequence`
+     * advances once per admitted CSkill or Spirit activation. `skill_kind`
+     * decides whether the replica may run a local CSkill task or must remain
+     * presentation-only for the host-owned global Spirit transaction. */
     uint16_t skill_sequence;
+    uint8_t skill_kind;
     uint8_t skill_slot;
     uint8_t skill_active;
     uint32_t skill_cost;
+    /* Exact-build, actor-local presentation sampled from the authoritative
+     * renderer while the corresponding native CSkill or host-owned Spirit
+     * transaction is active. The
+     * handshake pins both peers to the same executable and actor tuple, so
+     * these selectors never cross a build or actor boundary.  They carry no
+     * gameplay authority; the client may use them only for the matching
+     * host-approved skill_sequence. */
+    uint8_t skill_presentation_valid;
+    uint8_t skill_presentation_channel_count;
+    int32_t skill_presentation_selector[
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS];
+    uint8_t skill_presentation_state[
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS];
+    float skill_presentation_rate[
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS];
+    float skill_presentation_time[
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS];
+    float skill_presentation_blend[
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS];
     uint8_t action_history_count;
     /* The latest semantic state alone can skip a fast combo stage between
      * 20 Hz snapshots. Keep a bounded chronological journal of host-observed
@@ -218,6 +263,22 @@ typedef struct SudekiMpLanArenaEnemySnapshot {
     uint8_t combat_state;
 } SudekiMpLanArenaEnemySnapshot;
 
+typedef struct SudekiMpLanArenaSpiritAudioSemanticEvent {
+    uint16_t event_sequence;
+    uint16_t skill_sequence;
+    uint8_t cue;
+} SudekiMpLanArenaSpiritAudioSemanticEvent;
+
+typedef struct SudekiMpLanArenaSpiritAudioCursor {
+    uint16_t last_event_sequence;
+    uint8_t initialized;
+} SudekiMpLanArenaSpiritAudioCursor;
+
+typedef int (*SudekiMpLanArenaSpiritAudioSink)(
+    void *context,
+    SudekiMpLanArenaSpiritAudioCue cue
+);
+
 typedef struct SudekiMpLanArenaSnapshot {
     uint32_t sequence;
     uint32_t acknowledged_input;
@@ -226,6 +287,13 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t combat_enabled;
     SudekiMpLanArenaActorSnapshot tal;
     SudekiMpLanArenaActorSnapshot ailish;
+    /* Bounded presentation-only journal. Every event is immutable, uses a
+     * session-local nonzero modular sequence, and names the exact Tal Spirit
+     * transaction that emitted it. Only the transaction's start edge is
+     * admitted, so no redundant timing value crosses the wire. */
+    uint8_t spirit_audio_history_count;
+    SudekiMpLanArenaSpiritAudioSemanticEvent spirit_audio_history[
+        SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
     uint8_t enemy_count;
     SudekiMpLanArenaEnemySnapshot enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
 } SudekiMpLanArenaSnapshot;
@@ -287,6 +355,36 @@ int SudekiMpLanArenaDecodePacket(
  * client snapshot enters interpolation history. */
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
+);
+/* The supported executable uses three channel-zero renderer selectors while
+ * one native Spirit transaction remains active. Keep this exact-build
+ * allowlist shared by the untrusted wire gate and the client presentation
+ * sink so an authored stage cannot disappear between those boundaries. */
+int SudekiMpLanArenaSpiritPresentationSelectorValid(int32_t selector);
+/* Presentation fields are optional renderer witnesses for character skills,
+ * but mandatory for an active Spirit transaction.  Expose the exact wire
+ * predicate so a producer can omit an unsafe optional witness without
+ * suppressing the authoritative lifecycle snapshot that contains it. */
+int SudekiMpLanArenaSkillPresentationValid(
+    const SudekiMpLanArenaActorSnapshot *actor,
+    uint8_t expected_type
+);
+int SudekiMpLanArenaSpiritAudioJournalValid(
+    const SudekiMpLanArenaSnapshot *snapshot
+);
+void SudekiMpLanArenaSpiritAudioCursorReset(
+    SudekiMpLanArenaSpiritAudioCursor *cursor
+);
+/* Consumes only the newest not-yet-seen journal edge. The sink is called at
+ * most once and only while that event names the snapshot's exact active Tal
+ * Spirit transaction. Older retained journal entries are recovery evidence,
+ * not delayed audio work. */
+int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
+    SudekiMpLanArenaSpiritAudioCursor *cursor,
+    const SudekiMpLanArenaSnapshot *snapshot,
+    SudekiMpLanArenaSpiritAudioSink sink,
+    void *sink_context,
+    unsigned int *replayed_count
 );
 int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input);
 int SudekiMpLanArenaHandshakeValid(

@@ -194,8 +194,22 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module);
 /* Discard interpolation history without removing the exact-image native
  * adapters. Used synchronously when transport authority is lost. */
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void);
-void SudekiMpResetLanArenaClientReplica(void);
+/* Restores the exact-image hooks only after every locally-started native
+ * presentation CSkill is positively observed inactive. ERROR_BUSY means the
+ * task and damage-containment hook remain owned and the caller must retain the
+ * runtime/DLL and retry; other failures likewise retain all still-live hook
+ * dependencies. */
+BOOL SudekiMpResetLanArenaClientReplica(void);
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void);
+/* The first native RenderStart precedes the primary component/CSkill update.
+ * Capture the locally-owned Ailish basis only at that safe boundary; never
+ * refresh from the second RenderStart after a remote task may have mutated
+ * the active render state. */
+BOOL SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender(void);
+/* Restores the most recently first-RenderStart-published Ailish basis after a
+ * bounded remote Tal CSkill mutation. Exact identity mismatch retains the
+ * lease and fails closed so teardown can retry. */
+BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void);
 /* Reasserts only the presentation semantics from the already-sampled frame.
  * This runs after Sudeki's native animation update so a client-local idle
  * scheduler cannot briefly replace the canonical shared-simulation selector before
@@ -206,10 +220,17 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void);
  * boundaries and again as a late visible-transform verification; it consumes
  * no network sample and never runs host-side simulation. */
 BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void);
-/* True only while Ailish's host-approved native skill task owns the client
- * process camera. The input adapter uses this to keep ordinary first-person
- * orbit events from steering the cinematic camera. */
+/* True only while locally-owned Ailish's host-approved native skill task owns
+ * the client process camera. A remote Tal task may run for native effects,
+ * but its camera writes are contained by Ailish's dynamic owner-view lease. */
 BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void);
+/* True while either host-approved native presentation replay is active.
+ * Camera input is held at neutral only when LocalSkillCameraActive is true. */
+BOOL SudekiMpLanArenaClientReplicaAnySkillReplayActive(void);
+/* Returns the last authenticated host combat state only while a live replica
+ * frame is installed. Client UI may use this as a read-only availability
+ * witness; it never grants the client authority to change combat mode. */
+BOOL SudekiMpLanArenaClientReplicaHostCombatState(BOOL *enabled);
 /* Refreshes the visible render-object witness after scene traversal without
  * consuming another network sample or mutating game state. */
 void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void);
@@ -219,5 +240,16 @@ void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void);
 BOOL SudekiMpLanArenaClientReplicaGetDiagnostics(
     SudekiMpLanArenaReplicaDiagnostics *diagnostics
 );
+
+#ifdef SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING
+/* Direct topology seam for the exact-image regression harness. It exposes no
+ * runtime mutation and still exercises the production renderer resolver. */
+BOOL SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
+    void *character,
+    unsigned int actor_index,
+    void **renderer_result,
+    void **ailish_component_result
+);
+#endif
 
 #endif

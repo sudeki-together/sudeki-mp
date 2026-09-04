@@ -47,6 +47,14 @@ static const wchar_t *skill_event_name(unsigned int slot) {
     return slot < 6u ? names[slot] : NULL;
 }
 
+static const wchar_t *spirit_event_name(unsigned int variant) {
+    static const wchar_t *const names[2] = {
+        SUDEKIMP_LAN_ARENA_HOST_SPIRIT_VARIANT_ONE_EVENT,
+        SUDEKIMP_LAN_ARENA_HOST_SPIRIT_VARIANT_TWO_EVENT
+    };
+    return variant >= 1u && variant <= 2u ? names[variant - 1u] : NULL;
+}
+
 int wmain(int argc, wchar_t **argv) {
     HANDLE event;
     DWORD error;
@@ -58,9 +66,16 @@ int wmain(int argc, wchar_t **argv) {
     unsigned int pulse_count = 1u;
     DWORD duration_ms = 0u;
     DWORD skill_slot = 0u;
+    DWORD spirit_variant = 0u;
     if (argc == 2 && wcscmp(argv[1], L"combat-toggle") == 0) {
         command = L"combat-toggle";
-        event_name = SUDEKIMP_LAN_ARENA_CLIENT_COMBAT_TOGGLE_EVENT;
+        event_name = SUDEKIMP_LAN_ARENA_HOST_COMBAT_TOGGLE_EVENT;
+    } else if (argc == 2 && wcscmp(argv[1], L"combat-on") == 0) {
+        command = L"combat-on";
+        event_name = SUDEKIMP_LAN_ARENA_HOST_COMBAT_ON_EVENT;
+    } else if (argc == 2 && wcscmp(argv[1], L"combat-off") == 0) {
+        command = L"combat-off";
+        event_name = SUDEKIMP_LAN_ARENA_HOST_COMBAT_OFF_EVENT;
     } else if (argc == 2 && wcscmp(argv[1], L"weak") == 0) {
         command = L"weak";
         event_name = SUDEKIMP_LAN_ARENA_WEAK_ATTACK_EVENT;
@@ -75,6 +90,32 @@ int wmain(int argc, wchar_t **argv) {
                parse_duration(argv[2], 50u, 30000u, &duration_ms)) {
         command = L"weak-hold";
         event_name = SUDEKIMP_LAN_ARENA_CLIENT_WEAK_HOLD_EVENT;
+        timed_hold = TRUE;
+    } else if (argc == 2 && wcscmp(argv[1], L"host-forward-down") == 0) {
+        command = L"host-forward-down";
+        event_name = SUDEKIMP_LAN_ARENA_HOST_FORWARD_HOLD_EVENT;
+    } else if (argc == 2 && wcscmp(argv[1], L"host-forward-up") == 0) {
+        command = L"host-forward-up";
+        event_name = SUDEKIMP_LAN_ARENA_HOST_FORWARD_HOLD_EVENT;
+        reset_event = TRUE;
+    } else if (argc == 3 &&
+               wcscmp(argv[1], L"host-forward-hold") == 0 &&
+               parse_duration(argv[2], 50u, 30000u, &duration_ms)) {
+        command = L"host-forward-hold";
+        event_name = SUDEKIMP_LAN_ARENA_HOST_FORWARD_HOLD_EVENT;
+        timed_hold = TRUE;
+    } else if (argc == 2 && wcscmp(argv[1], L"client-forward-down") == 0) {
+        command = L"client-forward-down";
+        event_name = SUDEKIMP_LAN_ARENA_CLIENT_FORWARD_HOLD_EVENT;
+    } else if (argc == 2 && wcscmp(argv[1], L"client-forward-up") == 0) {
+        command = L"client-forward-up";
+        event_name = SUDEKIMP_LAN_ARENA_CLIENT_FORWARD_HOLD_EVENT;
+        reset_event = TRUE;
+    } else if (argc == 3 &&
+               wcscmp(argv[1], L"client-forward-hold") == 0 &&
+               parse_duration(argv[2], 50u, 30000u, &duration_ms)) {
+        command = L"client-forward-hold";
+        event_name = SUDEKIMP_LAN_ARENA_CLIENT_FORWARD_HOLD_EVENT;
         timed_hold = TRUE;
     } else if (argc == 3 && wcscmp(argv[1], L"combo") == 0 &&
                parse_duration(argv[2], 80u, 750u, &duration_ms)) {
@@ -105,13 +146,21 @@ int wmain(int argc, wchar_t **argv) {
                parse_duration(argv[2], 0u, 5u, &skill_slot)) {
         command = L"skill";
         event_name = skill_event_name((unsigned int)skill_slot);
+    } else if (argc == 3 && wcscmp(argv[1], L"spirit") == 0 &&
+               parse_duration(argv[2], 1u, 2u, &spirit_variant)) {
+        command = L"spirit";
+        event_name = spirit_event_name((unsigned int)spirit_variant);
     } else {
         fwprintf(stderr,
             L"usage: SudekiMP.LanArenaOperator.exe "
-            L"combat-toggle|weak|weak-down|weak-up|weak-hold MS|combo MS|"
+            L"combat-toggle|combat-on|combat-off|"
+            L"weak|weak-down|weak-up|weak-hold MS|combo MS|"
+            L"host-forward-down|host-forward-up|host-forward-hold MS|"
+            L"client-forward-down|client-forward-up|client-forward-hold MS|"
             L"sequence WWS MS|"
             L"strong|sweep|block|"
-            L"camera-left|camera-right|skill SLOT(0-5)\n");
+            L"camera-left|camera-right|skill SLOT(0-5)|"
+            L"spirit VARIANT(1-2)\n");
         return 2;
     }
     if (sequence_pattern != NULL) {
@@ -238,6 +287,9 @@ int wmain(int argc, wchar_t **argv) {
         if (wcscmp(command, L"skill") == 0) {
             wprintf(L"LAN operator command %ls queued (slot %lu).\n",
                 command, (unsigned long)skill_slot);
+        } else if (wcscmp(command, L"spirit") == 0) {
+            wprintf(L"LAN operator command %ls queued (variant %lu).\n",
+                command, (unsigned long)spirit_variant);
         } else {
             wprintf(L"LAN operator command %ls queued.\n", command);
         }

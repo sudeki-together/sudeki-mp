@@ -54,22 +54,76 @@ enum {
 static int failures;
 static BOOL session_start_result = TRUE;
 static BOOL campaign_guard_install_result = TRUE;
+static BOOL campaign_guard_uninstall_result = TRUE;
 static BOOL collision_debug_install_result = TRUE;
+static BOOL spirit_audio_install_result = TRUE;
+static BOOL spirit_audio_installed;
+static BOOL spirit_audio_physically_installed;
 static BOOL host_input_install_result = TRUE;
 static BOOL client_input_install_result = TRUE;
 static BOOL client_replica_initialize_result = TRUE;
+static BOOL client_replica_reset_result = TRUE;
 static BOOL observer_gate_enable_result = TRUE;
 static BOOL observer_register_result = TRUE;
 static BOOL replica_apply_result = TRUE;
 static BOOL visible_publish_result = TRUE;
+static BOOL spirit_presentation_state_result = TRUE;
+static BOOL character_skill_observe_result = TRUE;
+static BOOL ranged_combat_prime_pending;
+static BOOL ranged_combat_prime_result = TRUE;
+static BOOL cleanroom_combat_enabled;
+static BOOL cleanroom_pause_active;
+static BOOL cleanroom_menu_active;
+static BOOL host_spirit_request_available;
+static unsigned int host_spirit_request_variant;
+static BOOL host_spirit_options_result = TRUE;
+static BOOL host_spirit_option_available = TRUE;
+static BOOL host_spirit_activation_started = TRUE;
+static BOOL host_tal_controller_lease_exact = TRUE;
+static BOOL player_two_active;
+static void *player_two_character;
+static BOOL host_spirit_activation_probe_teardown;
+static BOOL host_spirit_activation_probe_saw_busy;
+static LONG host_spirit_activation_probe_depth;
+static BOOL host_spirit_reproof_probe_teardown;
+static BOOL host_spirit_reproof_probe_saw_busy;
+static LONG host_spirit_reproof_probe_depth;
+static BOOL host_spirit_describe_probe_teardown;
+static BOOL host_spirit_describe_probe_saw_busy;
+static LONG host_spirit_describe_probe_depth;
+static int spirit_presentation_state;
+static SudekiMpCharacterSkillState character_skill_observation;
+static void *cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ACTOR_COUNT];
+static BOOL player_two_skill_isolation_enabled;
+static unsigned int player_two_skill_isolation_call_count;
+static unsigned int ranged_combat_prime_call_count;
+static unsigned int maintain_resources_call_count;
+static unsigned int host_spirit_request_take_count;
+static unsigned int host_spirit_request_discard_count;
+static unsigned int host_spirit_activation_call_count;
+static unsigned int host_spirit_last_activated_variant;
+static SudekiMpLanArenaHostNativeSkillStartObserver
+    host_native_skill_start_observer;
+static unsigned int session_start_count;
 static unsigned int session_stop_count;
+static unsigned int replica_initialize_count;
 static unsigned int client_input_uninstall_count;
 static unsigned int host_input_uninstall_count;
 static unsigned int replica_reset_count;
+static unsigned int release_player_two_count;
 static unsigned int campaign_guard_uninstall_count;
 static unsigned int collision_debug_uninstall_count;
+static unsigned int spirit_audio_install_count;
+static unsigned int spirit_audio_uninstall_count;
+static unsigned int spirit_audio_physical_patch_count;
+static SudekiMpLanArenaSpiritActiveWitness spirit_audio_witness;
+static void *spirit_audio_witness_context;
+static SudekiMpLanArenaSpiritAudioEvent spirit_audio_events[
+    SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY];
+static size_t spirit_audio_event_count;
 static char callback_events[32];
 static size_t callback_event_count;
+static unsigned int log_format_call_count;
 
 static void check(BOOL condition, const char *message) {
     if (!condition) {
@@ -89,23 +143,71 @@ static void record_callback_event(char event) {
 static void reset_stub_policy(void) {
     session_start_result = TRUE;
     campaign_guard_install_result = TRUE;
+    campaign_guard_uninstall_result = TRUE;
     collision_debug_install_result = TRUE;
+    spirit_audio_install_result = TRUE;
     host_input_install_result = TRUE;
     client_input_install_result = TRUE;
     client_replica_initialize_result = TRUE;
+    client_replica_reset_result = TRUE;
     observer_gate_enable_result = TRUE;
     observer_register_result = TRUE;
     replica_apply_result = TRUE;
     visible_publish_result = TRUE;
+    spirit_presentation_state_result = TRUE;
+    character_skill_observe_result = TRUE;
+    ranged_combat_prime_pending = FALSE;
+    ranged_combat_prime_result = TRUE;
+    cleanroom_combat_enabled = FALSE;
+    cleanroom_pause_active = FALSE;
+    cleanroom_menu_active = FALSE;
+    host_spirit_request_available = FALSE;
+    host_spirit_request_variant = 0u;
+    host_spirit_options_result = TRUE;
+    host_spirit_option_available = TRUE;
+    host_spirit_activation_started = TRUE;
+    host_tal_controller_lease_exact = TRUE;
+    player_two_active = FALSE;
+    player_two_character = NULL;
+    host_spirit_activation_probe_teardown = FALSE;
+    host_spirit_activation_probe_saw_busy = FALSE;
+    host_spirit_activation_probe_depth = 0;
+    host_spirit_reproof_probe_teardown = FALSE;
+    host_spirit_reproof_probe_saw_busy = FALSE;
+    host_spirit_reproof_probe_depth = 0;
+    host_spirit_describe_probe_teardown = FALSE;
+    host_spirit_describe_probe_saw_busy = FALSE;
+    host_spirit_describe_probe_depth = 0;
+    spirit_presentation_state = 0;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    memset(cleanroom_actor_entities, 0, sizeof(cleanroom_actor_entities));
+    player_two_skill_isolation_enabled = FALSE;
+    host_native_skill_start_observer = NULL;
 }
 
 static void reset_stub_counts(void) {
+    session_start_count = 0u;
     session_stop_count = 0u;
+    replica_initialize_count = 0u;
     client_input_uninstall_count = 0u;
     host_input_uninstall_count = 0u;
     replica_reset_count = 0u;
+    release_player_two_count = 0u;
     campaign_guard_uninstall_count = 0u;
     collision_debug_uninstall_count = 0u;
+    spirit_audio_install_count = 0u;
+    spirit_audio_uninstall_count = 0u;
+    player_two_skill_isolation_call_count = 0u;
+    ranged_combat_prime_call_count = 0u;
+    maintain_resources_call_count = 0u;
+    host_spirit_request_take_count = 0u;
+    host_spirit_request_discard_count = 0u;
+    host_spirit_activation_call_count = 0u;
+    host_spirit_last_activated_variant = 0u;
+    spirit_audio_event_count = 0u;
+    memset(spirit_audio_events, 0, sizeof(spirit_audio_events));
+    log_format_call_count = 0u;
 }
 
 static void write_call(
@@ -188,6 +290,8 @@ static void verify_client_install_and_uninstall(uint8_t *image) {
     check(call_target(image, TEST_RVA_FRAME_END_CALL) ==
             (uint8_t *)(uintptr_t)&lan_arena_frame_end_entry,
         "client redirects frame-end call");
+    check(spirit_audio_install_count == 0u && !spirit_audio_installed,
+        "client profile never installs the host-only Spirit audio trace");
 
     SudekiMpUninstallLanArenaRuntime();
     check(!SudekiMpLanArenaRuntimeInstalled(),
@@ -218,20 +322,45 @@ static void verify_host_hook_scope(uint8_t *image) {
     check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
         "host runtime installs over exact native calls");
     check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
-            image + TEST_RVA_RENDER_START,
-        "host leaves first RenderStart call native");
+            (uint8_t *)(uintptr_t)&lan_arena_render_start_entry,
+        "host redirects first RenderStart for safe owner-basis capture");
     check(call_target(image, TEST_RVA_RENDER_PRE_WORLD_CALL) ==
-            image + TEST_RVA_RENDER_START,
-        "host leaves pre-world RenderStart call native");
+            (uint8_t *)(uintptr_t)&lan_arena_render_pre_world_entry,
+        "host redirects pre-world RenderStart call");
     check(call_target(image, TEST_RVA_FRAME_END_CALL) ==
             (uint8_t *)(uintptr_t)&lan_arena_frame_end_entry,
-        "host redirects frame-end call only");
+        "host redirects frame-end call");
     check(memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
             original_camera, sizeof(original_camera)) != 0 &&
           memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
             original_speed, sizeof(original_speed)) != 0,
         "host redirects remote-skill camera and realtime speed seams");
+    check(host_native_skill_start_observer ==
+            host_native_tal_skill_started,
+        "host runtime registers the exact native Tal skill-start observer");
+    check(spirit_audio_install_count == 1u && spirit_audio_installed &&
+          spirit_audio_physical_patch_count == 1u &&
+          spirit_audio_witness == host_spirit_audio_active_witness &&
+          spirit_audio_witness_context == &runtime_config,
+        "host runtime installs the exact Spirit-active PlayCue witness");
+    tal_initialized = TRUE;
+    spirit_presentation_state = 4;
+    {
+        int native_state = 0;
+        check(spirit_audio_witness != NULL &&
+              spirit_audio_witness(spirit_audio_witness_context,
+                  &native_state) && native_state == 4,
+            "host Spirit audio witness admits only readable active native state");
+    }
+    spirit_presentation_state = 0;
+    tal_initialized = FALSE;
     SudekiMpUninstallLanArenaRuntime();
+    check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
+            image + TEST_RVA_RENDER_START,
+        "host uninstall restores first RenderStart call");
+    check(call_target(image, TEST_RVA_RENDER_PRE_WORLD_CALL) ==
+            image + TEST_RVA_RENDER_START,
+        "host uninstall restores pre-world RenderStart call");
     check(call_target(image, TEST_RVA_FRAME_END_CALL) ==
             image + TEST_RVA_FRAME_END,
         "host uninstall restores frame-end call");
@@ -240,6 +369,92 @@ static void verify_host_hook_scope(uint8_t *image) {
           memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
             original_speed, sizeof(original_speed)) == 0,
         "host uninstall restores remote-skill camera and speed seams");
+    check(host_native_skill_start_observer == NULL,
+        "host input teardown releases the native skill-start observer");
+    check(!spirit_audio_installed && spirit_audio_uninstall_count == 1u,
+        "host uninstall restores the Spirit PlayCue trace exactly once");
+}
+
+static void verify_host_spirit_audio_rollback(uint8_t *image) {
+    uint8_t original_camera[
+        sizeof(expected_camera_manager_set_render_camera_entry)];
+    uint8_t original_speed[sizeof(expected_game_speed_set_mode_entry)];
+    SudekiMpLanArenaSessionConfig config = make_config(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    memcpy(original_camera,
+        image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+        sizeof(original_camera));
+    memcpy(original_speed,
+        image + TEST_RVA_GAME_SPEED_SET_MODE,
+        sizeof(original_speed));
+    spirit_audio_install_result = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpInstallLanArenaRuntime((HMODULE)image, &config) &&
+          GetLastError() == ERROR_INVALID_DATA,
+        "Spirit audio preflight failure rejects the host runtime");
+    check(!SudekiMpLanArenaRuntimeInstalled() &&
+          spirit_audio_install_count == 1u &&
+          spirit_audio_uninstall_count == 0u &&
+          !spirit_audio_installed,
+        "failed Spirit audio install leaves no false hook ownership");
+    check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
+            image + TEST_RVA_RENDER_START &&
+          call_target(image, TEST_RVA_RENDER_PRE_WORLD_CALL) ==
+            image + TEST_RVA_RENDER_START &&
+          call_target(image, TEST_RVA_FRAME_END_CALL) ==
+            image + TEST_RVA_FRAME_END &&
+          memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            original_camera, sizeof(original_camera)) == 0 &&
+          memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
+            original_speed, sizeof(original_speed)) == 0,
+        "Spirit audio preflight failure restores earlier host hooks");
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    host_input_install_result = FALSE;
+    check(!SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "host input failure rolls the earlier Spirit trace back");
+    check(spirit_audio_install_count == 1u &&
+          spirit_audio_uninstall_count == 1u &&
+          !spirit_audio_installed &&
+          host_input_uninstall_count == 1u,
+        "downstream host failure releases input then Spirit trace");
+    check(memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            original_camera, sizeof(original_camera)) == 0 &&
+          memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
+            original_speed, sizeof(original_speed)) == 0,
+        "downstream host failure restores skill isolation after Spirit trace");
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "host runtime reinstalls before Spirit restore retry test");
+    check(SudekiMpUninstallLanArenaRuntime(),
+        "host runtime logically unbinds the pinned Spirit trace");
+    check(!SudekiMpLanArenaRuntimeInstalled() && !spirit_audio_installed &&
+          spirit_audio_uninstall_count == 1u &&
+          spirit_audio_physical_patch_count == 1u &&
+          memcmp(image + TEST_RVA_CAMERA_MANAGER_SET_RENDER_CAMERA,
+            original_camera, sizeof(original_camera)) == 0 &&
+          memcmp(image + TEST_RVA_GAME_SPEED_SET_MODE,
+            original_speed, sizeof(original_speed)) == 0,
+        "logical Spirit unbind releases every ordinary host hook");
+
+    prepare_native_calls(image);
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "later host runtime rebinds the process-lifetime Spirit trace");
+    check(spirit_audio_installed &&
+          spirit_audio_physical_patch_count == 1u,
+        "host rebind does not install a second physical PlayCue patch");
+    check(SudekiMpUninstallLanArenaRuntime(),
+        "rebound host runtime unbinds cleanly");
+    reset_stub_policy();
 }
 
 static void verify_second_render_mismatch_rollback(uint8_t *image) {
@@ -306,6 +521,127 @@ static void verify_downstream_failure_rollback(uint8_t *image) {
     SudekiMpUninstallLanArenaRuntime();
 }
 
+static void verify_campaign_guard_teardown_containment(uint8_t *image) {
+    SudekiMpLanArenaSessionConfig config = make_config(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH);
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "client runtime installs before campaign teardown containment");
+    campaign_guard_uninstall_result = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpUninstallLanArenaRuntime() &&
+          GetLastError() == ERROR_BUSY,
+        "campaign restore failure rejects runtime uninstall");
+    check(SudekiMpLanArenaRuntimeInstalled() &&
+          runtime_game_module == (HMODULE)image &&
+          runtime_config.local_role ==
+              SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+          campaign_guard_uninstall_count == 1u,
+        "campaign restore failure retains runtime base config and ownership");
+
+    campaign_guard_uninstall_result = TRUE;
+    check(SudekiMpUninstallLanArenaRuntime(),
+        "campaign restore retry completes runtime uninstall");
+    check(!SudekiMpLanArenaRuntimeInstalled() &&
+          runtime_game_module == NULL &&
+          runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_INVALID &&
+          campaign_guard_uninstall_count == 2u,
+        "successful campaign retry clears retained runtime state once safe");
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    collision_debug_install_result = FALSE;
+    campaign_guard_uninstall_result = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpInstallLanArenaRuntime((HMODULE)image, &config) &&
+          GetLastError() == ERROR_BUSY,
+        "campaign rollback failure supersedes downstream install error");
+    check(!SudekiMpLanArenaRuntimeInstalled() &&
+          runtime_game_module == (HMODULE)image &&
+          runtime_config.local_role ==
+              SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
+          campaign_guard_uninstall_count == 1u &&
+          session_stop_count == 0u,
+        "failed install rollback retains runtime state and live session lease");
+
+    campaign_guard_uninstall_result = TRUE;
+    collision_debug_install_result = TRUE;
+    check(SudekiMpUninstallLanArenaRuntime(),
+        "public runtime uninstall retries partial-install campaign rollback");
+    check(runtime_game_module == NULL &&
+          runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_INVALID &&
+          campaign_guard_uninstall_count == 2u,
+        "partial-install rollback retry clears retained runtime state");
+    reset_stub_policy();
+}
+
+static void verify_client_busy_reset_containment(uint8_t *image) {
+    SudekiMpLanArenaSessionConfig config = make_config(
+        SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH);
+    unsigned int start_count;
+    unsigned int initialize_count;
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "client runtime installs before BUSY reset containment checks");
+    start_count = session_start_count;
+    initialize_count = replica_initialize_count;
+    client_remote_tal_owned = TRUE;
+    client_tal_spawn_attempted = TRUE;
+    client_replica_reset_result = FALSE;
+
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpLanArenaRuntimeEndSession() &&
+          GetLastError() == ERROR_BUSY,
+        "End Session reports BUSY while the client CSkill drain is pending");
+    check(SudekiMpLanArenaRuntimeInstalled() && client_remote_tal_owned &&
+          release_player_two_count == 0u &&
+          replica_initialize_count == initialize_count &&
+          session_start_count == start_count,
+        "BUSY End Session retains Tal and cannot reinitialize the session");
+
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpLanArenaRuntimeJoinEndpoint("127.0.0.1:26770") &&
+          GetLastError() == ERROR_BUSY,
+        "Join reports BUSY while the prior client CSkill drain is pending");
+    check(SudekiMpLanArenaRuntimeInstalled() && client_remote_tal_owned &&
+          release_player_two_count == 0u &&
+          replica_initialize_count == initialize_count &&
+          session_start_count == start_count,
+        "BUSY Join retains Tal and admits no replica or session reinit");
+
+    SetLastError(ERROR_SUCCESS);
+    SudekiMpUninstallLanArenaRuntime();
+    check(GetLastError() == ERROR_BUSY &&
+          SudekiMpLanArenaRuntimeInstalled() && client_remote_tal_owned &&
+          release_player_two_count == 0u &&
+          client_input_uninstall_count == 0u &&
+          host_input_uninstall_count == 0u,
+        "BUSY uninstall retains Tal, input adapters, and runtime ownership");
+    check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
+            (uint8_t *)(uintptr_t)&lan_arena_render_start_entry &&
+          call_target(image, TEST_RVA_RENDER_PRE_WORLD_CALL) ==
+            (uint8_t *)(uintptr_t)&lan_arena_render_pre_world_entry &&
+          call_target(image, TEST_RVA_FRAME_END_CALL) ==
+            (uint8_t *)(uintptr_t)&lan_arena_frame_end_entry,
+        "BUSY uninstall leaves all client frame callbacks installed");
+
+    client_replica_reset_result = TRUE;
+    SudekiMpUninstallLanArenaRuntime();
+    check(!SudekiMpLanArenaRuntimeInstalled() &&
+          !client_remote_tal_owned && release_player_two_count == 1u,
+        "confirmed drain permits exactly one Tal release and final uninstall");
+    check(replica_initialize_count == initialize_count &&
+          session_start_count == start_count,
+        "final uninstall still performs no client session reinitialization");
+}
+
 static void verify_callback_order(void) {
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -316,14 +652,14 @@ static void verify_callback_order(void) {
     replica_apply_result = TRUE;
     visible_publish_result = TRUE;
     lan_arena_render_start_entry();
-    check(strcmp(callback_events, "APRP") == 0,
-        "first render callback orders apply/publish/native/publish");
+    check(strcmp(callback_events, "APRVSCP") == 0,
+        "first render orders native owner refresh before remote reassert");
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
     lan_arena_render_pre_world_entry();
-    check(strcmp(callback_events, "RSP") == 0,
-        "pre-world callback orders native render, semantic reassert, publish");
+    check(strcmp(callback_events, "RSCP") == 0,
+        "pre-world reasserts first-render basis without second refresh");
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -337,6 +673,1000 @@ static void verify_callback_order(void) {
     original_frame_end = NULL;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
+}
+
+static void verify_host_spirit_lifecycle(void) {
+    static uint8_t tal_character;
+    SudekiMpLanArenaActorSnapshot tal;
+
+    memset(&tal, 0, sizeof(tal));
+    memset(host_actor_skill_sequence, 0, sizeof(host_actor_skill_sequence));
+    memset(host_actor_skill_kind, 0, sizeof(host_actor_skill_kind));
+    memset(host_actor_skill_slot, 0, sizeof(host_actor_skill_slot));
+    memset(host_actor_skill_cost, 0, sizeof(host_actor_skill_cost));
+    memset(host_actor_previous_skill_active, 0,
+        sizeof(host_actor_previous_skill_active));
+    host_spirit_previous_active = FALSE;
+    host_spirit_previous_state = 0;
+    spirit_presentation_state_result = TRUE;
+    spirit_presentation_state = 0;
+    character_skill_observe_result = TRUE;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    player_two_skill_isolation_enabled = FALSE;
+    player_two_skill_isolation_call_count = 0u;
+
+    check(host_apply_spirit_state(&tal) &&
+          host_actor_skill_sequence[0] == 0u &&
+          tal.skill_sequence == 0u &&
+          player_two_skill_isolation_call_count == 0u,
+        "inactive Spirit observation does not fabricate a transaction");
+
+    spirit_presentation_state = 1;
+    check(host_apply_spirit_state(&tal) &&
+          host_actor_skill_sequence[0] == 1u &&
+          tal.skill_sequence == 1u &&
+          tal.skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+          tal.skill_slot == 0u && tal.skill_cost == 0u &&
+          tal.skill_active == 1u &&
+          player_two_skill_isolation_enabled,
+        "Spirit start publishes one host-authoritative Tal transaction");
+
+    memset(&tal, 0, sizeof(tal));
+    spirit_presentation_state = 2;
+    check(host_apply_spirit_state(&tal) &&
+          host_actor_skill_sequence[0] == 1u &&
+          tal.skill_sequence == 1u && tal.skill_active == 1u,
+        "Spirit native phase changes preserve one transaction sequence");
+
+    memset(&tal, 0, sizeof(tal));
+    spirit_presentation_state = 0;
+    check(host_apply_spirit_state(&tal) &&
+          tal.skill_sequence == 1u &&
+          tal.skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+          tal.skill_active == 0u,
+        "Spirit completion publishes retirement for the same sequence");
+    refresh_host_player_two_skill_isolation(&tal_character);
+    check(!player_two_skill_isolation_enabled,
+        "Spirit completion releases Ailish input isolation on refresh");
+
+    memset(&tal, 0, sizeof(tal));
+    spirit_presentation_state = 3;
+    check(host_apply_spirit_state(&tal) &&
+          tal.skill_sequence == 2u && tal.skill_active == 1u &&
+          player_two_skill_isolation_enabled,
+        "a later Spirit activation advances exactly one sequence");
+
+    memset(&tal, 0, sizeof(tal));
+    spirit_presentation_state_result = FALSE;
+    check(!host_apply_spirit_state(&tal) &&
+          tal.skill_sequence == 0u &&
+          host_actor_skill_sequence[0] == 2u,
+        "failed Spirit observation neither publishes nor advances state");
+
+    spirit_presentation_state_result = TRUE;
+    spirit_presentation_state = 0;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    reset_host_skill_tracking();
+}
+
+static void append_spirit_audio_event(
+    uint32_t sequence,
+    int native_state,
+    const char *cue
+) {
+    SudekiMpLanArenaSpiritAudioEvent *event;
+    size_t length = strlen(cue);
+    check(spirit_audio_event_count <
+            SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY &&
+          length < SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_CUE_CAPACITY,
+        "Spirit audio fixture remains bounded");
+    if (spirit_audio_event_count >=
+            SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY ||
+        length >= SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_CUE_CAPACITY) return;
+    event = &spirit_audio_events[spirit_audio_event_count++];
+    memset(event, 0, sizeof(*event));
+    event->sequence = sequence;
+    event->native_state = native_state;
+    event->cue_length = (uint8_t)length;
+    memcpy(event->cue, cue, length + 1u);
+}
+
+static void verify_host_spirit_audio_semantic_journal(void) {
+    BOOL previous_installed = spirit_audio_installed;
+    SudekiMpLanArenaActorSnapshot tal;
+    SudekiMpLanArenaSnapshot snapshot;
+    HostSpiritAudioStage stage;
+
+    spirit_audio_installed = TRUE;
+    spirit_audio_event_count = 0u;
+    memset(spirit_audio_events, 0, sizeof(spirit_audio_events));
+    reset_host_spirit_audio_tracking();
+    memset(&tal, 0, sizeof(tal));
+    tal.skill_sequence = 7u;
+    tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    tal.skill_active = 1u;
+    append_spirit_audio_event(1u, 2, "stop_tal");
+    append_spirit_audio_event(2u, 2, "spiritstrike_start");
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u &&
+          snapshot.spirit_audio_history[0].event_sequence == 1u &&
+          snapshot.spirit_audio_history[0].skill_sequence == 7u &&
+          snapshot.spirit_audio_history[0].cue ==
+              SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START,
+        "host maps only the allowlisted raw start cue to exact Spirit sequence 7");
+    check(host_spirit_audio_history_count == 0u,
+        "host audio capture remains staged before canonical commit");
+    commit_host_spirit_audio_stage(&stage);
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u,
+        "re-reading the trace cannot duplicate a semantic start event");
+    commit_host_spirit_audio_stage(&stage);
+    append_spirit_audio_event(3u, 2, "spiritstrike_start");
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u,
+        "a repeated raw start cannot duplicate one Spirit transaction");
+    commit_host_spirit_audio_stage(&stage);
+
+    tal.skill_sequence = 8u;
+    tal.skill_active = 0u;
+    append_spirit_audio_event(4u, 2, "spiritstrike_start");
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u,
+        "raw start without the matching active Spirit transaction is discarded");
+    commit_host_spirit_audio_stage(&stage);
+    tal.skill_active = 1u;
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u,
+        "discarded raw start cannot be rebound to a later active state");
+    commit_host_spirit_audio_stage(&stage);
+    append_spirit_audio_event(5u, 2, "spiritstrike_start");
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 2u &&
+          snapshot.spirit_audio_history[1].event_sequence == 2u &&
+          snapshot.spirit_audio_history[1].skill_sequence == 8u,
+        "a later Spirit transaction receives one newer semantic start event");
+    commit_host_spirit_audio_stage(&stage);
+
+    reset_host_spirit_audio_tracking();
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 0u,
+        "session reset drains old raw cues and clears the wire journal");
+    commit_host_spirit_audio_stage(&stage);
+    append_spirit_audio_event(6u, 2, "spiritstrike_start");
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u &&
+          snapshot.spirit_audio_history[0].event_sequence == 1u &&
+          snapshot.spirit_audio_history[0].skill_sequence == 8u,
+        "fresh post-reset raw cue starts a fresh semantic sequence");
+    commit_host_spirit_audio_stage(&stage);
+
+    /* If every active snapshot fails, its staged start must not poison the
+     * persistent journal. The first retired frame consumes the raw trace edge
+     * without audio, commits an empty journal, and later frames continue. */
+    reset_host_spirit_audio_tracking();
+    tal.skill_sequence = 9u;
+    tal.skill_active = 1u;
+    append_spirit_audio_event(7u, 2, "spiritstrike_start");
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 1u &&
+          host_spirit_audio_history_count == 0u,
+        "failed active snapshot leaves persistent audio journal unchanged");
+    tal.skill_active = 0u;
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 0u,
+        "retired snapshot drops a start never admitted while active");
+    commit_host_spirit_audio_stage(&stage);
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    check(snapshot.spirit_audio_history_count == 0u,
+        "post-retirement snapshots continue after failed active publication");
+    commit_host_spirit_audio_stage(&stage);
+    spirit_audio_installed = previous_installed;
+    reset_host_spirit_audio_tracking();
+}
+
+static SudekiMpLanArenaSessionStatus prepare_host_spirit_operator_fixture(
+    void *tal,
+    void *ailish,
+    uint64_t session_token
+) {
+    SudekiMpLanArenaSessionStatus status;
+    reset_stub_policy();
+    reset_stub_counts();
+    runtime_installed = TRUE;
+    runtime_game_module = (HMODULE)(uintptr_t)1u;
+    runtime_config = make_config(SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+    tal_initialized = TRUE;
+    ailish_initialized = TRUE;
+    host_remote_ailish_owned = TRUE;
+    player_two_active = TRUE;
+    player_two_character = ailish;
+    cleanroom_combat_enabled = TRUE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = tal;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = ailish;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    reset_host_skill_tracking();
+    host_operator_spirit_session_token = session_token;
+    memset(&status, 0, sizeof(status));
+    status.phase = SUDEKIMP_LAN_ARENA_CONNECTION_CONNECTED;
+    status.peer_connected = 1u;
+    status.local_role = SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    status.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    status.peer_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    status.session_token = session_token;
+    return status;
+}
+
+static void queue_host_spirit_request(unsigned int variant) {
+    host_spirit_request_available = TRUE;
+    host_spirit_request_variant = variant;
+}
+
+static void verify_host_spirit_operator_two_phase(void) {
+    char tal_one;
+    char tal_two;
+    char ailish;
+    char ailish_two;
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpLanArenaActorSnapshot snapshot;
+    const uint64_t token = UINT64_C(0x1122334455667788);
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    host_operator_spirit_session_token = 0u;
+    queue_host_spirit_request(2u);
+    check(!host_operator_spirit_session_ready(&status) &&
+          host_operator_spirit_session_token == token &&
+          !host_spirit_request_available &&
+          host_spirit_request_discard_count == 1u,
+        "first authenticated Spirit generation discards a pre-session request");
+    queue_host_spirit_request(1u);
+    check(host_operator_spirit_session_ready(&status) &&
+          host_spirit_request_available,
+        "armed Spirit generation preserves a later same-session request");
+    discard_host_operator_spirit_requests("test_generation_cleanup");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    host_spirit_describe_probe_teardown = TRUE;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(host_operator_spirit_intent.pending &&
+          host_operator_spirit_intent.tal == &tal_one &&
+          host_operator_spirit_intent.ailish == &ailish &&
+          host_operator_spirit_intent.session_token == token &&
+          host_operator_spirit_intent.variant == 1u &&
+          ranged_combat_prime_pending &&
+          ranged_combat_prime_call_count == 1u &&
+          host_spirit_activation_call_count == 0u &&
+          host_spirit_describe_probe_saw_busy &&
+          host_spirit_describe_probe_depth == 1,
+        "host Spirit operator admits one exact intent and starts only the UI prime");
+    service_host_operator_spirit(&status);
+    check(host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "host Spirit operator cannot activate while native UI prime is pending");
+    ranged_combat_prime_pending = FALSE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 1u &&
+          host_spirit_last_activated_variant == 1u &&
+          host_actor_skill_sequence[0] == 0u,
+        "positive UI retirement activates exactly once without fabricating a wire edge");
+    service_host_operator_spirit(&status);
+    check(host_spirit_activation_call_count == 1u,
+        "retired host Spirit intent cannot execute twice");
+    memset(&snapshot, 0, sizeof(snapshot));
+    spirit_presentation_state = 3;
+    check(host_apply_spirit_state(&snapshot) &&
+          host_actor_skill_sequence[0] == 1u &&
+          snapshot.skill_sequence == 1u &&
+          snapshot.skill_active == 1u,
+        "only the later positive native manager edge starts the Spirit wire transaction");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    host_spirit_activation_probe_teardown = TRUE;
+    host_spirit_reproof_probe_teardown = TRUE;
+    service_host_operator_spirit(&status);
+    check(host_spirit_activation_call_count == 1u &&
+          host_spirit_reproof_probe_saw_busy &&
+          host_spirit_reproof_probe_depth == 1 &&
+          host_spirit_activation_probe_saw_busy &&
+          host_spirit_activation_probe_depth == 1 &&
+          InterlockedCompareExchange(
+              &host_operator_spirit_activation_depth, 0, 0) == 0,
+        "native Spirit activation publishes an in-flight teardown barrier until return");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    host_spirit_option_available = FALSE;
+    queue_host_spirit_request(2u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          ranged_combat_prime_call_count == 0u &&
+          host_spirit_activation_call_count == 0u,
+        "unavailable Tal Spirit variant is rejected before UI prime");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    spirit_presentation_state = 1;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "already-active native Spirit manager rejects operator admission");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    status.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "wrong LAN role rejects host Spirit operator admission");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    cleanroom_menu_active = TRUE;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending,
+        "active cleanroom menu rejects host Spirit operator admission");
+    cleanroom_menu_active = FALSE;
+    cleanroom_pause_active = TRUE;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending,
+        "active LAN pause panel rejects host Spirit operator admission");
+    cleanroom_pause_active = FALSE;
+    ranged_combat_prime_pending = TRUE;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          ranged_combat_prime_call_count == 0u,
+        "an existing native UI transition rejects a new Spirit intent");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    queue_host_spirit_request(2u);
+    service_host_operator_spirit(&status);
+    check(host_operator_spirit_intent.pending &&
+          host_spirit_request_take_count == 2u &&
+          host_spirit_activation_call_count == 0u,
+        "concurrent Spirit request is consumed without replacing pending intent");
+    ranged_combat_prime_pending = FALSE;
+    service_host_operator_spirit(&status);
+    check(host_spirit_activation_call_count == 1u &&
+          host_spirit_last_activated_variant == 1u,
+        "concurrent request cannot change the admitted Spirit variant");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    status.session_token = token + 1u;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "changed session token cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    status.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "changed authority role cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_two;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "changed Tal identity cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = &ailish_two;
+    player_two_character = &ailish_two;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "changed Ailish identity cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    player_two_active = FALSE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "lost Ailish Player-2 lease cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    host_tal_controller_lease_exact = FALSE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "changed Tal controller lease cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    cleanroom_menu_active = TRUE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "menu entry after prime cancels Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    cleanroom_pause_active = TRUE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "pause entry after prime cancels Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    ranged_combat_prime_pending = FALSE;
+    cleanroom_combat_enabled = FALSE;
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "combat retirement cancels primed Spirit intent before activation");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    host_native_skill_leases[0].pending = TRUE;
+    queue_host_spirit_request(1u);
+    service_host_operator_spirit(&status);
+    check(!host_operator_spirit_intent.pending &&
+          host_spirit_activation_call_count == 0u,
+        "concurrent native CSkill lease rejects Spirit operator admission");
+
+    status = prepare_host_spirit_operator_fixture(
+        &tal_one, &ailish, token);
+    host_operator_spirit_intent.pending = TRUE;
+    host_operator_spirit_intent.tal = &tal_one;
+    host_operator_spirit_intent.ailish = &ailish;
+    host_operator_spirit_intent.session_token = token;
+    host_operator_spirit_intent.variant = 1u;
+    queue_host_spirit_request(2u);
+    discard_host_operator_spirit_requests("test_session_loss");
+    check(!host_operator_spirit_intent.pending &&
+          !host_spirit_request_available &&
+          host_spirit_request_discard_count == 1u,
+        "authority reset clears retained and raw Spirit operator requests");
+
+    host_operator_spirit_intent.pending = TRUE;
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
+        "retained Spirit operator intent is a host teardown barrier");
+    reset_host_operator_spirit_intent();
+    ranged_combat_prime_pending = TRUE;
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
+        "engine-owned Spirit UI prime remains a teardown barrier after intent clear");
+
+    reset_host_skill_tracking();
+    runtime_installed = FALSE;
+    runtime_game_module = NULL;
+    host_remote_ailish_owned = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = NULL;
+    ranged_combat_prime_pending = FALSE;
+    spirit_presentation_state = 0;
+}
+
+static void verify_host_character_skill_observation_gap(void) {
+    static uint8_t tal_character;
+    SudekiMpLanArenaActorSnapshot tal;
+
+    memset(&tal, 0, sizeof(tal));
+    memset(host_actor_skill_sequence, 0, sizeof(host_actor_skill_sequence));
+    memset(host_actor_skill_kind, 0, sizeof(host_actor_skill_kind));
+    memset(host_actor_skill_slot, 0, sizeof(host_actor_skill_slot));
+    memset(host_actor_skill_cost, 0, sizeof(host_actor_skill_cost));
+    memset(host_actor_previous_skill_active, 0,
+        sizeof(host_actor_previous_skill_active));
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    character_skill_observe_result = TRUE;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    character_skill_observation.skill = &tal_character;
+    character_skill_observation.slot = 2;
+    character_skill_observation.cost = 45u;
+    character_skill_observation.active = 1u;
+    player_two_skill_isolation_enabled = FALSE;
+    player_two_skill_isolation_call_count = 0u;
+
+    check(host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 1u && tal.skill_active == 1u &&
+          host_actor_skill_sequence[0] == 1u &&
+          host_actor_previous_skill_active[0] &&
+          player_two_skill_isolation_enabled,
+        "host starts one Tal CSkill sequence from an exact active observation");
+
+    memset(&tal, 0, sizeof(tal));
+    character_skill_observe_result = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    check(!host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          host_actor_skill_sequence[0] == 1u &&
+          host_actor_previous_skill_active[0] &&
+          host_actor_skill_slot[0] == 2u &&
+          player_two_skill_isolation_enabled,
+        "failed host CSkill observation preserves sequence and active ownership");
+
+    memset(&tal, 0, sizeof(tal));
+    character_skill_observe_result = TRUE;
+    check(host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 1u && tal.skill_active == 1u &&
+          host_actor_skill_sequence[0] == 1u &&
+          player_two_skill_isolation_call_count == 1u,
+        "active observation after a gap resumes the original CSkill sequence");
+
+    memset(&tal, 0, sizeof(tal));
+    character_skill_observation.active = 0u;
+    check(host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 1u && tal.skill_active == 0u &&
+          !host_actor_previous_skill_active[0] &&
+          !player_two_skill_isolation_enabled,
+        "positive inactive observation retires the retained Tal sequence");
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    character_skill_observe_result = TRUE;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    reset_host_skill_tracking();
+}
+
+static void verify_host_exact_character_skill_sequences(void) {
+    static uint8_t tal_character;
+    static uint8_t tal_skill;
+    static uint8_t ailish_character;
+    static uint8_t ailish_skill;
+    static uint8_t foreign_character;
+    SudekiMpSkillActivationResult started;
+    SudekiMpLanArenaActorSnapshot tal;
+
+    reset_host_skill_tracking();
+    memset(&tal, 0, sizeof(tal));
+    memset(&started, 0, sizeof(started));
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    character_skill_observe_result = TRUE;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    character_skill_observation.skill = &tal_skill;
+    character_skill_observation.slot = 2;
+    character_skill_observation.cost = 45u;
+    character_skill_observation.active = 1u;
+    started.status = SUDEKIMP_SKILL_ACTIVATION_STARTED;
+    started.skill = &tal_skill;
+    started.slot = 2;
+
+    host_track_started_native_skill(0u, &tal_character, &started);
+    check(host_actor_skill_sequence[0] == 1u &&
+          host_native_skill_leases[0].sequence_allocated &&
+          host_native_skill_leases[0].wire_sequence == 1u &&
+          !host_native_skill_leases[0].active_seen,
+        "exact STARTED return allocates the first Tal wire sequence before observation");
+    check(host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 1u && tal.skill_active == 1u &&
+          tal.skill_cost == 45u &&
+          host_actor_skill_sequence[0] == 1u,
+        "active snapshot adopts an exact STARTED sequence without double increment");
+
+    /* This is the problematic 1 -> 0 -> 1 same-slot cycle with both the
+     * inactive edge and the second active edge hidden between snapshots.
+     * The second exact admission must still create a distinct transaction. */
+    host_track_started_native_skill(0u, &tal_character, &started);
+    memset(&tal, 0, sizeof(tal));
+    check(host_actor_skill_sequence[0] == 2u &&
+          host_native_skill_leases[0].wire_sequence == 2u &&
+          host_native_skill_leases[0].sequence_allocated &&
+          host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 2u && tal.skill_active == 1u &&
+          host_actor_skill_sequence[0] == 2u,
+        "same-slot activation hidden between 20 Hz samples keeps its exact second sequence");
+
+    character_skill_observation.active = 0u;
+    host_native_tal_skill_started(
+        &tal_character, &tal_skill, 2, 45u, FALSE);
+    check(host_actor_skill_sequence[0] == 3u &&
+          host_native_skill_leases[0].pending &&
+          !host_native_skill_leases[0].active_seen &&
+          host_native_skill_startup_pending(
+              0u, &tal_character, &character_skill_observation),
+        "native Tal Use STARTED allocates during the inactive-byte startup gap");
+    character_skill_observation.active = 1u;
+    memset(&tal, 0, sizeof(tal));
+    check(host_actor_skill_sequence[0] == 3u &&
+          host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          host_native_skill_leases[0].active_seen &&
+          tal.skill_sequence == 3u &&
+          host_actor_skill_sequence[0] == 3u,
+        "host native UI startup-gap sequence is adopted once active appears");
+    host_native_tal_skill_started(
+        &foreign_character, &tal_skill, 2, 45u, TRUE);
+    check(host_actor_skill_sequence[0] == 3u,
+        "host native UI admission rejects a foreign actor identity");
+
+    character_skill_observation.active = 0u;
+    memset(&tal, 0, sizeof(tal));
+    check(host_apply_skill_state(
+              0u, SUDEKIMP_CLEANROOM_TAL, &tal) &&
+          tal.skill_sequence == 3u && tal.skill_active == 0u &&
+          !host_native_skill_leases[0].pending,
+        "exact inactive observation retires the latest admitted sequence");
+
+    reset_host_skill_tracking();
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = &ailish_character;
+    character_skill_observation.skill = &ailish_skill;
+    character_skill_observation.slot = 4;
+    character_skill_observation.cost = 30u;
+    character_skill_observation.active = 1u;
+    started.skill = &ailish_skill;
+    started.slot = 4;
+    host_track_started_native_skill(1u, &ailish_character, &started);
+    memset(&tal, 0, sizeof(tal));
+    check(host_actor_skill_sequence[1] == 1u &&
+          host_native_skill_leases[1].wire_sequence == 1u &&
+          host_apply_skill_state(
+              1u, SUDEKIMP_CLEANROOM_AILISH, &tal) &&
+          tal.skill_sequence == 1u && tal.skill_cost == 30u &&
+          host_actor_skill_sequence[1] == 1u,
+        "remote Ailish exact STARTED sequence is adopted without snapshot double increment");
+    host_track_started_native_skill(1u, &ailish_character, &started);
+    memset(&tal, 0, sizeof(tal));
+    check(host_actor_skill_sequence[1] == 2u &&
+          host_apply_skill_state(
+              1u, SUDEKIMP_CLEANROOM_AILISH, &tal) &&
+          tal.skill_sequence == 2u &&
+          host_actor_skill_sequence[1] == 2u,
+        "remote Ailish same-slot replay hidden between snapshots gets a distinct sequence");
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = NULL;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    reset_host_skill_tracking();
+}
+
+static void verify_host_snapshot_failure_telemetry_policy(void) {
+    SudekiMpLanArenaSnapshot snapshot;
+    unsigned int baseline;
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.tal.skill_sequence = 7u;
+    snapshot.tal.skill_kind =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot.tal.skill_active = 1u;
+    snapshot.tal.skill_presentation_selector[0] = 112;
+    ZeroMemory(&host_snapshot_failure_telemetry,
+        sizeof(host_snapshot_failure_telemetry));
+    baseline = log_format_call_count;
+
+    host_snapshot_publish_failed(
+        100u, 33u, HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION, &snapshot);
+    check(log_format_call_count == baseline + 1u &&
+          host_snapshot_failure_telemetry.stage ==
+              HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION &&
+          host_snapshot_failure_telemetry.consecutive_failures == 1u,
+        "first unsupported Spirit selector snapshot logs its validation stage");
+    host_snapshot_publish_failed(
+        200u, 33u, HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION, &snapshot);
+    host_snapshot_publish_failed(
+        1099u, 33u, HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION, &snapshot);
+    check(log_format_call_count == baseline + 1u &&
+          host_snapshot_failure_telemetry.consecutive_failures == 3u,
+        "repeated snapshot validation failures are quiet inside one second");
+    host_snapshot_publish_failed(
+        1100u, 33u, HOST_SNAPSHOT_FAILURE_SNAPSHOT_VALIDATION, &snapshot);
+    check(log_format_call_count == baseline + 2u &&
+          host_snapshot_failure_telemetry.consecutive_failures == 4u,
+        "sustained snapshot validation failures aggregate once per second");
+
+    host_snapshot_publish_failed(
+        1101u, 33u, HOST_SNAPSHOT_FAILURE_SEND, &snapshot);
+    check(log_format_call_count == baseline + 3u &&
+          host_snapshot_failure_telemetry.stage ==
+              HOST_SNAPSHOT_FAILURE_SEND &&
+          host_snapshot_failure_telemetry.consecutive_failures == 1u,
+        "a changed first-failure stage logs its transition immediately");
+    host_snapshot_publish_succeeded(1102u, 33u);
+    check(log_format_call_count == baseline + 4u &&
+          host_snapshot_failure_telemetry.stage ==
+              HOST_SNAPSHOT_FAILURE_NONE,
+        "the first successful send closes and clears failure telemetry");
+    host_snapshot_publish_succeeded(1103u, 33u);
+    check(log_format_call_count == baseline + 4u,
+        "an already-healthy snapshot stream emits no recovery spam");
+}
+
+static void verify_host_character_skill_sidecar_wire_fallback(void) {
+    SudekiMpLanArenaActorSnapshot snapshot;
+    SudekiMpLanArenaActorSnapshot zero;
+    unsigned int channel;
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    memset(&zero, 0, sizeof(zero));
+    memset(host_actor_presentation, 0, sizeof(host_actor_presentation));
+    memset(host_actor_presentation_valid, 0,
+        sizeof(host_actor_presentation_valid));
+    host_actor_presentation_valid[1] = TRUE;
+    for (channel = 0u;
+         channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+         ++channel) {
+        host_actor_presentation[1].selector[channel] =
+            channel == 0u ? AILISH_COMBAT_IDLE_SELECTOR : 0;
+        host_actor_presentation[1].state[channel] =
+            channel == 0u ? 0u : 192u;
+        host_actor_presentation[1].rate[channel] = 24.0f;
+        host_actor_presentation[1].time[channel] = 40.8f;
+    }
+    snapshot.skill_sequence = 6u;
+    snapshot.skill_kind =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    snapshot.skill_slot = 5u;
+    snapshot.skill_active = 1u;
+    snapshot.skill_cost = 40u;
+    host_actor_presentation[1].time[4] = 4096.0f;
+    host_apply_skill_presentation(1u, &snapshot);
+    check(snapshot.skill_presentation_valid == 1u &&
+          snapshot.skill_presentation_channel_count == 5u &&
+          snapshot.skill_presentation_time[4] == 4096.0f &&
+          SudekiMpLanArenaSkillPresentationValid(
+              &snapshot, SUDEKIMP_LAN_ARENA_AILISH_TYPE),
+        "bounded Ailish character-skill renderer sidecar survives at the exact wire clock limit");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    snapshot.skill_sequence = 6u;
+    snapshot.skill_kind =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    snapshot.skill_slot = 5u;
+    snapshot.skill_active = 1u;
+    snapshot.skill_cost = 40u;
+    host_actor_presentation[1].time[4] = 4161.93896f;
+    host_apply_skill_presentation(1u, &snapshot);
+    check(snapshot.skill_sequence == 6u &&
+          snapshot.skill_kind ==
+              SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
+          snapshot.skill_slot == 5u && snapshot.skill_active == 1u &&
+          snapshot.skill_cost == 40u &&
+          snapshot.skill_presentation_valid == 0u &&
+          snapshot.skill_presentation_channel_count == 0u &&
+          memcmp(snapshot.skill_presentation_selector,
+              zero.skill_presentation_selector,
+              sizeof(snapshot.skill_presentation_selector)) == 0 &&
+          memcmp(snapshot.skill_presentation_state,
+              zero.skill_presentation_state,
+              sizeof(snapshot.skill_presentation_state)) == 0 &&
+          memcmp(snapshot.skill_presentation_rate,
+              zero.skill_presentation_rate,
+              sizeof(snapshot.skill_presentation_rate)) == 0 &&
+          memcmp(snapshot.skill_presentation_time,
+              zero.skill_presentation_time,
+              sizeof(snapshot.skill_presentation_time)) == 0 &&
+          memcmp(snapshot.skill_presentation_blend,
+              zero.skill_presentation_blend,
+              sizeof(snapshot.skill_presentation_blend)) == 0 &&
+          SudekiMpLanArenaSkillPresentationValid(
+              &snapshot, SUDEKIMP_LAN_ARENA_AILISH_TYPE),
+        "out-of-range dormant Ailish channel omits only the optional sidecar and preserves sequence 6 slot 5");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    memset(&host_actor_presentation[0], 0,
+        sizeof(host_actor_presentation[0]));
+    host_actor_presentation_valid[0] = TRUE;
+    host_actor_presentation[0].selector[0] = 113;
+    host_actor_presentation[0].state[0] = 1u;
+    host_actor_presentation[0].state[1] = 192u;
+    host_actor_presentation[0].rate[0] = 24.0f;
+    host_actor_presentation[0].time[0] = 64.0f;
+    snapshot.skill_sequence = 7u;
+    snapshot.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot.skill_active = 1u;
+    host_apply_skill_presentation(0u, &snapshot);
+    check(snapshot.skill_presentation_valid == 1u &&
+          snapshot.skill_presentation_selector[0] == 113 &&
+          SudekiMpLanArenaSkillPresentationValid(
+              &snapshot, SUDEKIMP_LAN_ARENA_TAL_TYPE),
+        "host keeps authored Spirit selector 113 publishable during the active middle stage");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_actor_presentation[0].selector[0] = 112;
+    snapshot.skill_sequence = 7u;
+    snapshot.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot.skill_active = 1u;
+    host_apply_skill_presentation(0u, &snapshot);
+    check(snapshot.skill_presentation_valid == 1u &&
+          !SudekiMpLanArenaSkillPresentationValid(
+              &snapshot, SUDEKIMP_LAN_ARENA_TAL_TYPE),
+        "host retains a future unsupported Spirit selector for fail-closed snapshot diagnostics");
+
+    memset(&snapshot, 0, sizeof(snapshot));
+    host_actor_presentation[0].selector[0] = 75;
+    host_actor_presentation[0].time[0] = 4161.93896f;
+    snapshot.skill_sequence = 7u;
+    snapshot.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot.skill_active = 1u;
+    host_apply_skill_presentation(0u, &snapshot);
+    check(snapshot.skill_presentation_valid == 1u,
+        "active Spirit retains its required host renderer sidecar");
+    check(snapshot.skill_presentation_time[0] > 4096.0f,
+        "active Spirit keeps the observed out-of-range renderer clock");
+    check(!SudekiMpLanArenaSkillPresentationValid(
+              &snapshot, SUDEKIMP_LAN_ARENA_TAL_TYPE),
+        "active Spirit keeps its required sidecar fail-closed instead of silently degrading");
+
+    memset(host_actor_presentation, 0, sizeof(host_actor_presentation));
+    memset(host_actor_presentation_valid, 0,
+        sizeof(host_actor_presentation_valid));
+}
+
+static void verify_host_noncaster_startup_gap_ownership(void) {
+    static uint8_t tal_character;
+    static uint8_t ailish_character;
+    static uint8_t ailish_skill;
+    static uint8_t foreign_skill;
+    SudekiMpSkillActivationResult started;
+    SudekiMpCharacterSkillState state;
+
+    reset_host_skill_tracking();
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = &ailish_character;
+    memset(&started, 0, sizeof(started));
+    started.status = SUDEKIMP_SKILL_ACTIVATION_STARTED;
+    started.skill = &ailish_skill;
+    started.slot = 4;
+    host_track_started_native_skill(1u, &ailish_character, &started);
+    memset(&state, 0, sizeof(state));
+    state.skill = &ailish_skill;
+    state.slot = -1;
+    state.active = 0u;
+
+    check(host_native_skill_startup_pending(
+              1u, &ailish_character, &state),
+        "pre-world ownership retains Tal locomotion during Ailish STARTED active-byte gap");
+    state.skill = &foreign_skill;
+    check(!host_native_skill_startup_pending(
+              1u, &ailish_character, &state),
+        "pre-world startup ownership rejects a mismatched native skill lease");
+    state.skill = &ailish_skill;
+    check(!host_native_skill_startup_pending(
+              1u, &tal_character, &state),
+        "pre-world startup ownership rejects a mismatched caster actor");
+    host_native_skill_leases[1].active_seen = TRUE;
+    check(!host_native_skill_startup_pending(
+              1u, &ailish_character, &state),
+        "pre-world startup-only ownership ends after exact active observation");
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = NULL;
+    reset_host_skill_tracking();
+}
+
+static void verify_host_native_task_drain_without_peer(void) {
+    static uint8_t tal_character;
+    static uint8_t tal_skill;
+    SudekiMpSkillActivationResult started;
+
+    runtime_config.local_role = SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    tal_initialized = FALSE;
+    ailish_initialized = FALSE;
+    host_remote_ailish_owned = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = NULL;
+    character_skill_observe_result = TRUE;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    character_skill_observation.skill = &tal_skill;
+    character_skill_observation.slot = 2;
+    character_skill_observation.active = 1u;
+    spirit_presentation_state_result = TRUE;
+    spirit_presentation_state = 0;
+    reset_host_skill_tracking();
+
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
+        "present no-peer Tal CSkill blocks host teardown");
+
+    memset(&started, 0, sizeof(started));
+    started.status = SUDEKIMP_SKILL_ACTIVATION_STARTED;
+    started.skill = &tal_skill;
+    started.slot = 2u;
+    host_track_started_native_skill(0u, &tal_character, &started);
+    character_skill_observation.active = 0u;
+    player_two_skill_isolation_enabled = FALSE;
+    refresh_host_player_two_skill_isolation(&tal_character);
+    check(player_two_skill_isolation_enabled,
+        "Tal STARTED lease retains Ailish input through the active-byte startup gap");
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY &&
+          host_native_skill_leases[0].pending &&
+          !host_native_skill_leases[0].active_seen,
+        "STARTED followed by an early inactive read retains the host task lease");
+
+    character_skill_observation.active = 1u;
+    check(!host_native_tasks_drained() &&
+          host_native_skill_leases[0].pending &&
+          host_native_skill_leases[0].active_seen,
+        "exact active observation arms host task retirement");
+    character_skill_observation.active = 0u;
+    check(host_native_tasks_drained() &&
+          !host_native_skill_leases[0].pending,
+        "exact inactive observation after active retires host task lease");
+    refresh_host_player_two_skill_isolation(&tal_character);
+    check(!player_two_skill_isolation_enabled,
+        "retired Tal task releases Ailish input isolation");
+
+    spirit_presentation_state = 1;
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
+        "present no-peer Tal Spirit transaction blocks host teardown");
+    spirit_presentation_state = 0;
+    check(host_native_tasks_drained(),
+        "positive inactive no-peer Tal and Spirit observations permit teardown");
+
+    ranged_combat_prime_pending = TRUE;
+    SetLastError(ERROR_SUCCESS);
+    check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
+        "pending native ranged-prime timer blocks host teardown");
+    ranged_combat_prime_pending = FALSE;
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    memset(&character_skill_observation, 0,
+        sizeof(character_skill_observation));
+    reset_host_skill_tracking();
 }
 
 static void verify_authoritative_locomotion_stop_policy(void) {
@@ -686,9 +2016,21 @@ int main(void) {
     verify_client_install_and_uninstall(image);
     verify_client_install_and_uninstall(image);
     verify_host_hook_scope(image);
+    verify_host_spirit_audio_rollback(image);
     verify_second_render_mismatch_rollback(image);
     verify_downstream_failure_rollback(image);
+    verify_campaign_guard_teardown_containment(image);
+    verify_client_busy_reset_containment(image);
     verify_callback_order();
+    verify_host_spirit_lifecycle();
+    verify_host_spirit_audio_semantic_journal();
+    verify_host_spirit_operator_two_phase();
+    verify_host_character_skill_observation_gap();
+    verify_host_exact_character_skill_sequences();
+    verify_host_snapshot_failure_telemetry_policy();
+    verify_host_character_skill_sidecar_wire_fallback();
+    verify_host_noncaster_startup_gap_ownership();
+    verify_host_native_task_drain_without_peer();
     verify_authoritative_locomotion_stop_policy();
 
     VirtualFree(image, 0u, MEM_RELEASE);
@@ -752,6 +2094,7 @@ BOOL SudekiMpLanArenaSessionStart(
     const SudekiMpLanArenaSessionConfig *config
 ) {
     (void)config;
+    ++session_start_count;
     if (!session_start_result) SetLastError(ERROR_NOT_READY);
     return session_start_result;
 }
@@ -788,8 +2131,10 @@ BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
     return campaign_guard_install_result;
 }
 
-void SudekiMpUninstallLanArenaCampaignGuard(void) {
+BOOL SudekiMpUninstallLanArenaCampaignGuard(void) {
     ++campaign_guard_uninstall_count;
+    if (!campaign_guard_uninstall_result) SetLastError(ERROR_BUSY);
+    return campaign_guard_uninstall_result;
 }
 
 BOOL SudekiMpInstallLanArenaCollisionDebug(HMODULE game_module) {
@@ -810,14 +2155,90 @@ void SudekiMpUninstallLanArenaCollisionDebug(void) {
     ++collision_debug_uninstall_count;
 }
 
+BOOL SudekiMpInstallLanArenaSpiritAudioTrace(
+    HMODULE game_module,
+    SudekiMpLanArenaSpiritActiveWitness active_witness,
+    void *witness_context
+) {
+    (void)game_module;
+    ++spirit_audio_install_count;
+    if (!spirit_audio_install_result) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (!spirit_audio_physically_installed) {
+        spirit_audio_physically_installed = TRUE;
+        ++spirit_audio_physical_patch_count;
+    }
+    spirit_audio_installed = TRUE;
+    spirit_audio_witness = active_witness;
+    spirit_audio_witness_context = witness_context;
+    return TRUE;
+}
+
+BOOL SudekiMpUninstallLanArenaSpiritAudioTrace(void) {
+    if (!spirit_audio_installed) return TRUE;
+    ++spirit_audio_uninstall_count;
+    spirit_audio_installed = FALSE;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaSpiritAudioTraceInstalled(void) {
+    return spirit_audio_installed;
+}
+
+size_t SudekiMpLanArenaSpiritAudioTraceSnapshot(
+    SudekiMpLanArenaSpiritAudioEvent *events,
+    size_t capacity,
+    uint32_t *dropped_count
+) {
+    size_t copied = spirit_audio_event_count < capacity ?
+        spirit_audio_event_count : capacity;
+    if (events != NULL && copied != 0u) {
+        memcpy(events,
+            spirit_audio_events + spirit_audio_event_count - copied,
+            copied * sizeof(*events));
+    }
+    if (dropped_count != NULL) *dropped_count = 0u;
+    return copied;
+}
+
 BOOL SudekiMpInstallLanArenaHostInput(HMODULE game_module) {
     (void)game_module;
     if (!host_input_install_result) SetLastError(ERROR_INVALID_DATA);
     return host_input_install_result;
 }
 
-void SudekiMpUninstallLanArenaHostInput(void) {
+BOOL SudekiMpUninstallLanArenaHostInput(void) {
     ++host_input_uninstall_count;
+    host_native_skill_start_observer = NULL;
+    return TRUE;
+}
+
+void SudekiMpLanArenaHostInputSetNativeSkillStartObserver(
+    SudekiMpLanArenaHostNativeSkillStartObserver observer
+) {
+    host_native_skill_start_observer = observer;
+}
+
+BOOL SudekiMpLanArenaHostInputTakeSpiritVariant(unsigned int *variant) {
+    if (!host_spirit_request_available || variant == NULL) return FALSE;
+    ++host_spirit_request_take_count;
+    host_spirit_request_available = FALSE;
+    *variant = host_spirit_request_variant;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaHostInputDiscardSpiritRequests(void) {
+    BOOL discarded = host_spirit_request_available;
+    if (discarded) ++host_spirit_request_discard_count;
+    host_spirit_request_available = FALSE;
+    return discarded;
+}
+
+BOOL SudekiMpLanArenaHostInputTalControllerLeaseExact(void *tal) {
+    return host_tal_controller_lease_exact &&
+        tal == cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL];
 }
 
 void SudekiMpLanArenaHostInputServiceCombatToggle(void) {}
@@ -828,33 +2249,55 @@ BOOL SudekiMpLanArenaHostInputDiagnosticTraceActive(void) {
     return FALSE;
 }
 
+BOOL SudekiMpLanArenaPausePanelActive(void) {
+    return cleanroom_pause_active;
+}
+
+BOOL SudekiMpCleanroomMenuActive(void) {
+    return cleanroom_menu_active;
+}
+
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     (void)game_module;
     if (!client_input_install_result) SetLastError(ERROR_INVALID_DATA);
     return client_input_install_result;
 }
 
-void SudekiMpUninstallLanArenaClientInput(void) {
+BOOL SudekiMpUninstallLanArenaClientInput(void) {
     ++client_input_uninstall_count;
+    return TRUE;
 }
 
 void SudekiMpLanArenaClientInputService(void) {}
 
 BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     (void)game_module;
+    ++replica_initialize_count;
     if (!client_replica_initialize_result) SetLastError(ERROR_NOT_READY);
     return client_replica_initialize_result;
 }
 
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {}
 
-void SudekiMpResetLanArenaClientReplica(void) {
+BOOL SudekiMpResetLanArenaClientReplica(void) {
     ++replica_reset_count;
+    if (!client_replica_reset_result) SetLastError(ERROR_BUSY);
+    return client_replica_reset_result;
 }
 
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     record_callback_event('A');
     return replica_apply_result;
+}
+
+BOOL SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender(void) {
+    record_callback_event('V');
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void) {
+    record_callback_event('C');
+    return TRUE;
 }
 
 BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
@@ -942,7 +2385,21 @@ BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled) {
+    (void)enabled;
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
+    BOOL enabled
+) {
+    player_two_skill_isolation_enabled = enabled != FALSE;
+    ++player_two_skill_isolation_call_count;
+    return TRUE;
+}
+
 BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
+    ++release_player_two_count;
     return TRUE;
 }
 
@@ -952,11 +2409,11 @@ BOOL SudekiMpControlSeparationForceStopCharacter(void *character) {
 }
 
 BOOL SudekiMpControlSeparationPlayerTwoActive(void) {
-    return FALSE;
+    return player_two_active;
 }
 
 void *SudekiMpControlSeparationPlayerTwoCharacter(void) {
-    return NULL;
+    return player_two_character;
 }
 
 BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
@@ -970,7 +2427,8 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float aim_direction_x,
     float aim_direction_z,
     BOOL aim_direction_valid,
-    BOOL weak_attack_active
+    BOOL weak_attack_active,
+    float frame_delta_seconds
 ) {
     (void)world_direction_x;
     (void)world_direction_z;
@@ -978,6 +2436,7 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     (void)aim_direction_z;
     (void)aim_direction_valid;
     (void)weak_attack_active;
+    (void)frame_delta_seconds;
     return TRUE;
 }
 
@@ -1013,12 +2472,12 @@ int SudekiMpLanArenaParseEndpoint(
     size_t ipv4_capacity,
     uint16_t *port
 ) {
-    (void)text;
-    (void)default_port;
-    (void)ipv4;
-    (void)ipv4_capacity;
-    (void)port;
-    return 0;
+    static const char loopback[] = "127.0.0.1";
+    if (text == NULL || ipv4 == NULL || port == NULL ||
+        ipv4_capacity < sizeof(loopback)) return 0;
+    memcpy(ipv4, loopback, sizeof(loopback));
+    *port = default_port;
+    return 1;
 }
 
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor) {
@@ -1027,8 +2486,23 @@ const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor) {
 }
 
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
-    (void)actor;
-    return NULL;
+    if ((unsigned int)actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) return NULL;
+    return cleanroom_actor_entities[actor];
+}
+
+BOOL SudekiMpObserveCharacterSkill(
+    void *character,
+    SudekiMpCharacterSkillState *state
+) {
+    if (!character_skill_observe_result || character == NULL || state == NULL) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    *state = character_skill_observation;
+    return TRUE;
+}
+
+void SudekiMpCleanroomMenuRender(void) {
 }
 
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor) {
@@ -1037,8 +2511,100 @@ BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor) {
 }
 
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled) {
-    if (enabled != NULL) *enabled = FALSE;
+    if (enabled == NULL) return FALSE;
+    if (host_spirit_reproof_probe_teardown) {
+        host_spirit_reproof_probe_depth = InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0);
+        SetLastError(ERROR_SUCCESS);
+        host_spirit_reproof_probe_saw_busy =
+            !host_native_tasks_drained() && GetLastError() == ERROR_BUSY;
+    }
+    *enabled = cleanroom_combat_enabled;
     return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
+    if (!spirit_presentation_state_result || state == NULL) return FALSE;
+    *state = spirit_presentation_state;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) {
+    return ranged_combat_prime_pending;
+}
+
+BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void) {
+    ++ranged_combat_prime_call_count;
+    if (!ranged_combat_prime_result) return FALSE;
+    ranged_combat_prime_pending = TRUE;
+    return TRUE;
+}
+
+void SudekiMpCleanroomEngineMaintainResources(void) {
+    ++maintain_resources_call_count;
+}
+
+BOOL SudekiMpDescribeCharacterSpiritOptions(
+    void *character,
+    SudekiMpSpiritQuickOptionList *options
+) {
+    unsigned int variant;
+    if (!host_spirit_options_result || character == NULL || options == NULL) {
+        return FALSE;
+    }
+    if (host_spirit_describe_probe_teardown) {
+        host_spirit_describe_probe_depth = InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0);
+        SetLastError(ERROR_SUCCESS);
+        host_spirit_describe_probe_saw_busy =
+            !host_native_tasks_drained() && GetLastError() == ERROR_BUSY;
+    }
+    memset(options, 0, sizeof(*options));
+    options->resource_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    options->option_count = 2u;
+    for (variant = 1u; variant <= 2u; ++variant) {
+        options->options[variant - 1u].variant = variant;
+        options->options[variant - 1u].strike_id = (int)variant - 1;
+        options->options[variant - 1u].validation_result =
+            host_spirit_option_available ? 0 : 7;
+        options->options[variant - 1u].available =
+            host_spirit_option_available ? 1u : 0u;
+    }
+    return TRUE;
+}
+
+SudekiMpSpiritActivationResult SudekiMpActivateCharacterSpirit(
+    void *character,
+    unsigned int variant
+) {
+    SudekiMpSpiritActivationResult result;
+    memset(&result, 0, sizeof(result));
+    ++host_spirit_activation_call_count;
+    host_spirit_last_activated_variant = variant;
+    if (host_spirit_activation_probe_teardown) {
+        host_spirit_activation_probe_depth = InterlockedCompareExchange(
+            &host_operator_spirit_activation_depth, 0, 0);
+        SetLastError(ERROR_SUCCESS);
+        host_spirit_activation_probe_saw_busy =
+            !host_native_tasks_drained() && GetLastError() == ERROR_BUSY;
+    }
+    result.strike_id = (int)variant - 1;
+    if (character != cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL]) {
+        result.status = SUDEKIMP_SPIRIT_ACTIVATION_INVALID_CONTEXT;
+    } else if (host_spirit_activation_started) {
+        result.status = SUDEKIMP_SPIRIT_ACTIVATION_STARTED;
+        result.activation_result = 1;
+    } else {
+        result.status = SUDEKIMP_SPIRIT_ACTIVATION_ACTIVATION_REJECTED;
+    }
+    return result;
+}
+
+const char *SudekiMpSpiritActivationStatusName(
+    SudekiMpSpiritActivationStatus status
+) {
+    return status == SUDEKIMP_SPIRIT_ACTIVATION_STARTED ?
+        "started" : "rejected";
 }
 
 BOOL SudekiMpCleanroomEngineActorPosition(
@@ -1128,4 +2694,5 @@ void SudekiMpLogWrite(const char *message) {
 
 void SudekiMpLogFormat(const char *format, ...) {
     (void)format;
+    ++log_format_call_count;
 }

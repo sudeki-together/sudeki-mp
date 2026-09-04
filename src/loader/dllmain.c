@@ -18,6 +18,7 @@
 #include "hooks/interaction_provenance.h"
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_pause_panel.h"
+#include "hooks/lan_arena_startup_movie_skip.h"
 #include "hooks/lan_arena_window_policy.h"
 #include "hooks/merchant_provenance_adapter.h"
 #include "hooks/pattern_scan.h"
@@ -219,7 +220,6 @@ static void uninstall_talos_staging_observation(void) {
         &talos_staging_observation_gate);
     (void)SudekiMpTalosCompanionStagingNativeCaptureReset();
     SudekiMpUninstallTalosCompanionStagingResearchAdapter();
-    SudekiMpUninstallControlSeparation();
     (void)InterlockedExchange(
         &talos_staging_observation_install_started, 0);
     talos_staging_observation_last_logged_attempts = 0u;
@@ -247,10 +247,11 @@ static void cleanroom_control_update_observer(
         &cleanroom_update_observer_gate);
 }
 
-static void uninstall_runtime_hooks(void) {
-    SudekiMpUninstallLanArenaPausePanel();
-    SudekiMpUninstallLanArenaRuntime();
+static BOOL uninstall_runtime_hooks(void) {
+    if (!SudekiMpUninstallLanArenaPausePanel()) return FALSE;
+    if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
     (void)SudekiMpUninstallLanArenaWindowPolicy();
+    if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
     SudekiMpControlUpdateObserverGateDisable(
@@ -259,6 +260,10 @@ static void uninstall_runtime_hooks(void) {
         &cleanroom_update_observer_owner);
     SudekiMpControlUpdateObserverGateDrain(
         &cleanroom_update_observer_gate);
+    /* ControlSeparation is the shared native controller dispatch and calls
+     * several of the adapters below. If even one of its hooks remains live,
+     * retain all of those dependencies and let the caller retry teardown. */
+    if (!SudekiMpUninstallControlSeparation()) return FALSE;
     SudekiMpUninstallTalosNativeLifecycleTrace();
     SudekiMpUninstallSaveBookIntercept();
     SudekiMpUninstallMerchantProvenanceAdapter();
@@ -268,7 +273,6 @@ static void uninstall_runtime_hooks(void) {
     SudekiMpUninstallPlayerInputTrace();
     SudekiMpUninstallCleanroomMenu();
     SudekiMpUninstallSplitScreenRender();
-    SudekiMpUninstallControlSeparation();
     SudekiMpUninstallXInputPlayerTwoReservation();
     SudekiMpInputBridgeStop();
     SudekiMpUninstallInteractionProvenance();
@@ -283,6 +287,7 @@ static void uninstall_runtime_hooks(void) {
     SudekiMpResetSpiritActivationAbi();
     SudekiMpResetSkillActivationAbi();
     (void)SudekiMpUninstallAcceleratorCache();
+    return TRUE;
 }
 
 static uint32_t float_bits(float value) {
@@ -688,6 +693,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL skip_startup_movies;
     BOOL story_test_boost_enabled;
     BOOL cleanroom_multiplayer_integration;
+    BOOL cleanroom_external_driver;
     BOOL defer_integrated_roster;
     BOOL talos_exact_sol_authenticated = FALSE;
     BOOL talos_post_movie_dual_camera_enabled;
@@ -1317,6 +1323,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     cleanroom_multiplayer_integration =
         (cleanroom_menu_enabled || coop_roster_menu_enabled) &&
         control_separation_enabled && split_screen_render_enabled;
+    cleanroom_external_driver = cleanroom_menu_enabled &&
+        lan_arena_host_enabled;
     defer_integrated_roster = coop_roster_menu_enabled &&
         cleanroom_multiplayer_integration;
     if (loaded_save_coop_autostart_enabled &&
@@ -1633,7 +1641,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if (cleanroom_menu_enabled &&
         (player_movement_trace_enabled ||
-         (control_separation_enabled != split_screen_render_enabled))) {
+         (!cleanroom_external_driver &&
+          control_separation_enabled != split_screen_render_enabled))) {
         SudekiMpLogWrite(
             "cleanroom_menu_config=requires_standalone_or_complete_multiplayer_hook_pair\r\n"
         );
@@ -2421,7 +2430,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpInstallZoneTraversalMenu(
                 game_module, zone_traversal_menu_virtual_key,
                 skip_startup_movies) :
-            (cleanroom_multiplayer_integration ?
+            (cleanroom_external_driver ?
+            SudekiMpInstallLanArenaHostCleanroomMenu(
+                game_module,
+                cleanroom_menu_virtual_key
+            ) : cleanroom_multiplayer_integration ?
             SudekiMpInstallIntegratedCleanroomMenu(
                 game_module,
                 cleanroom_menu_virtual_key
@@ -2580,10 +2593,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
-        if (fixed_three_seat_renderer_enabled &&
+        if ((fixed_three_seat_renderer_enabled ||
+             (lan_arena_enabled &&
+              lan_arena_profile_role ==
+                  SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST)) &&
             !SudekiMpInitializeSpiritActivationAbi(game_module)) {
             SudekiMpLogFormat(
-                "local_quick_menu_adapter_preflight adapter=spirit error=%lu\r\n",
+                "local_quick_menu_adapter_preflight adapter=spirit "
+                "scope=%s error=%lu\r\n",
+                fixed_three_seat_renderer_enabled ?
+                    "fixed_three" : "lan_host_only",
                 (unsigned long)GetLastError()
             );
             SudekiMpResetItemActivationAbi();
@@ -2646,8 +2665,21 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 shared_group_camera_enabled,
                 player_two_input_enabled,
                 input_bridge_deadzone)) {
+            DWORD control_install_error = GetLastError();
             SudekiMpLogFormat("control_separation_error=%lu\r\n",
-                (unsigned long)GetLastError());
+                (unsigned long)control_install_error);
+            if (!SudekiMpUninstallControlSeparation()) {
+                DWORD teardown_error = GetLastError();
+                SudekiMpLogFormat(
+                    "control_separation_rollback_error=%lu "
+                    "policy=retain_input_bridge_xinput_activation_abis_and_"
+                    "interaction_provenance\r\n",
+                    (unsigned long)teardown_error);
+                SudekiMpLogWrite("control_separation_applied=quarantined\r\n");
+                SudekiMpLogWrite("status=control_separation_error\r\n");
+                SetLastError(teardown_error);
+                return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
+            }
             SudekiMpResetItemActivationAbi();
             SudekiMpResetWeaponActivationAbi();
             SudekiMpResetSpiritActivationAbi();
@@ -2658,6 +2690,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogWrite("status=control_separation_error\r\n");
             SudekiMpUninstallInteractionProvenance();
             SudekiMpLogClose();
+            SetLastError(control_install_error);
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
         SudekiMpControlSeparationSetInteractionRequestsEnabled(
@@ -2667,13 +2700,20 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("control_separation_applied=false\r\n");
     }
     if (lan_arena_enabled) {
-        if (!SudekiMpCleanroomEngineInitialize(game_module) ||
+        if ((!cleanroom_external_driver &&
+             !SudekiMpCleanroomEngineInitialize(game_module)) ||
+            (lan_arena_client_enabled &&
+             !SudekiMpCleanroomEngineSetTrainingSkills(TRUE)) ||
+            (skip_startup_movies &&
+             !SudekiMpInstallLanArenaStartupMovieSkip(game_module)) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
             !SudekiMpInstallLanArenaRuntime(game_module, &lan_arena_config) ||
             !SudekiMpInstallLanArenaPausePanel(game_module)) {
             DWORD lan_error = GetLastError();
             SudekiMpLogFormat(
-                "lan_arena_runtime_error=%lu phase=cleanroom_engine_window_network_or_pause_panel_install\r\n",
+                "lan_arena_runtime_error=%lu "
+                "phase=cleanroom_engine_startup_movie_window_network_or_"
+                "pause_panel_install\r\n",
                 (unsigned long)lan_error);
             SudekiMpLogWrite("status=lan_arena_error\r\n");
             uninstall_runtime_hooks();
@@ -2684,6 +2724,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite(
             "lan_arena_runtime_applied=true "
             "state=cleanroom_waiting_for_authenticated_peer\r\n");
+        SudekiMpLogFormat(
+            "lan_arena_startup_movie_requested=%s applied=%s "
+            "scope=both_lan_roles\r\n",
+            skip_startup_movies ? "true" : "false",
+            SudekiMpLanArenaStartupMovieSkipInstalled() ? "true" : "false");
     }
     SudekiMpLogFormat(
         "split_screen_render_prototype_requested=%s layout=%s camera_policy=%s dual_camera_frame_cache=%s fixed_three_seat_renderer=%s skill_camera_routing=%s second_player_controller_camera=%s native_second_player_camera_collision=%s split_screen_ranged_model_isolation=%s spirit_strike_viewport_effect_isolation=%s controller_camera_yaw_speed_bits=0x%08lx controller_camera_pitch_speed_bits=0x%08lx controller_camera_maximum_pitch_bits=0x%08lx second_player_camera_toggle_virtual_key=0x%02lx\r\n",
@@ -2742,14 +2787,27 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (void)SudekiMpSplitScreenSetFixedThreeSeatEnabled(FALSE);
             SudekiMpUninstallSplitScreenRender();
             SudekiMpSplitScreenSetRuntimeAuthorizationQuery(NULL);
-            SudekiMpResetItemActivationAbi();
-            SudekiMpResetWeaponActivationAbi();
-            SudekiMpResetSpiritActivationAbi();
-            SudekiMpResetSkillActivationAbi();
             if (control_separation_enabled) {
                 (void)SudekiMpControlSeparationSetInteractionRequestsEnabled(
                     FALSE);
-                SudekiMpUninstallControlSeparation();
+                if (!SudekiMpUninstallControlSeparation()) {
+                    DWORD teardown_error = GetLastError();
+                    SudekiMpLogFormat(
+                        "control_separation_rollback_error=%lu "
+                        "phase=split_screen_install_rollback "
+                        "policy=retain_input_bridge_xinput_activation_abis_"
+                        "and_interaction_provenance\r\n",
+                        (unsigned long)teardown_error);
+                    SudekiMpLogFormat(
+                        "split_screen_render_error=%lu\r\n",
+                        (unsigned long)split_screen_error);
+                    SudekiMpLogWrite(
+                        "split_screen_render_applied=false\r\n");
+                    SudekiMpLogWrite(
+                        "status=split_screen_render_error\r\n");
+                    SetLastError(teardown_error);
+                    return SUDEKIMP_INIT_SPLIT_SCREEN_RENDER_FAILED;
+                }
                 SudekiMpUninstallXInputPlayerTwoReservation();
                 SudekiMpInputBridgeStop();
                 SudekiMpLogWrite(
@@ -2758,6 +2816,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                     "policy=remove_controller_hook_and_runtime_interaction_state\r\n"
                 );
             }
+            SudekiMpResetItemActivationAbi();
+            SudekiMpResetWeaponActivationAbi();
+            SudekiMpResetSpiritActivationAbi();
+            SudekiMpResetSkillActivationAbi();
             SudekiMpLogFormat(
                 "split_screen_render_error=%lu\r\n",
                 (unsigned long)split_screen_error
@@ -2828,7 +2890,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         "loaded_save_coop_autostart_requested=%s "
         "policy=Tal_host_Ailish_player_two_after_loaded_party_settles\r\n",
         loaded_save_coop_autostart_enabled ? "true" : "false");
-    if (cleanroom_multiplayer_integration) {
+    if (cleanroom_multiplayer_integration || cleanroom_external_driver) {
         if (!SudekiMpControlUpdateObserverGateEnable(
                 &cleanroom_update_observer_gate) ||
             !SudekiMpControlSeparationRegisterUpdateObserver(
@@ -2854,12 +2916,15 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SetLastError(observer_error);
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
-        SudekiMpSplitScreenSetOverlayRenderer(
-            SudekiMpCleanroomMenuRender
-        );
+        if (cleanroom_multiplayer_integration) {
+            SudekiMpSplitScreenSetOverlayRenderer(
+                SudekiMpCleanroomMenuRender
+            );
+        }
         SudekiMpLogWrite(
             "menu_multiplayer_integration=ready "
-            "default=disabled input=external_razer_bridge\r\n"
+            "default=disabled input=external_controller_observer "
+            "scope=split_or_lan_host_tools\r\n"
         );
     }
     SudekiMpLogFormat("player_movement_trace_requested=%s\r\n",
@@ -3203,24 +3268,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
         if (reserved == NULL) {
-            SudekiMpUninstallLanArenaPausePanel();
-            SudekiMpUninstallLanArenaRuntime();
-            (void)SudekiMpUninstallLanArenaWindowPolicy();
-            SudekiMpUninstallTalosPostMoviePartyRestore();
-            uninstall_talos_staging_observation();
-            SudekiMpUninstallTalosNativeLifecycleTrace();
-            SudekiMpUninstallSaveBookIntercept();
-            SudekiMpUninstallMerchantProvenanceAdapter();
-            SudekiMpSplitScreenSetModOwnedBlacksmithActiveQuery(NULL);
-            SudekiMpUninstallBlacksmithUiAdapter();
-            SudekiMpUninstallTalosDefenseTrace();
-            SudekiMpUninstallInteractionProvenance();
-            SudekiMpUninstallZoneTransitionTrace();
-            SudekiMpUninstallSplitScreenRender();
-            SudekiMpUninstallControlSeparation();
-            SudekiMpUninstallXInputPlayerTwoReservation();
-            SudekiMpInputBridgeStop();
-            SudekiMpUninstallAcceleratorCache();
+            if (!uninstall_runtime_hooks()) return TRUE;
         }
         SudekiMpLogClose();
     }

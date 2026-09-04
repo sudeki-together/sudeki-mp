@@ -57,9 +57,35 @@ static SudekiMpLanArenaSnapshot make_snapshot(uint32_t sequence, uint32_t tick, 
     return snapshot;
 }
 
+static void clear_actor_action(SudekiMpLanArenaActorSnapshot *actor) {
+    actor->animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    actor->combat_state = SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    actor->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    actor->action_sequence = 0u;
+    actor->action_phase_q8 = 0u;
+    actor->action_phase_valid = 0u;
+    actor->action_terminal_phase_q8 = 0u;
+    actor->idle_entry_phase_q8 = 0u;
+    actor->action_retirement_valid = 0u;
+    actor->action_history_count = 0u;
+    memset(actor->action_history, 0, sizeof(actor->action_history));
+}
+
 int main(void) {
     SudekiMpLanArenaReplica replica;
     SudekiMpLanArenaReplicaRenderClock clock;
+
+    CHECK(SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(2, FALSE));
+    CHECK(SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(2, TRUE));
+    CHECK(!SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(3, FALSE));
+    CHECK(SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(3, TRUE));
+    CHECK(!SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(0, TRUE));
+    CHECK(!SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(4, TRUE));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0u, 0x01u));
+    CHECK(SudekiMpLanArenaClientNativeSkillTaskAllowed(0x23u, 0x01u));
+    CHECK(SudekiMpLanArenaClientNativeSkillTaskAllowed(0x01u, 0x01u));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x01u, 0x23u));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x05u, 0x01u));
     SudekiMpLanArenaSnapshot first = make_snapshot(1u, 100u, 0.0f);
     SudekiMpLanArenaSnapshot second = make_snapshot(2u, 200u, 10.0f);
     SudekiMpLanArenaSnapshot invalid;
@@ -247,6 +273,208 @@ int main(void) {
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 3050u, &sample));
     CHECK(sample.ailish.facing_x == -1.0f);
     CHECK(sample.ailish.facing_z == 0.0f);
+
+    /* Host-approved native skills carry an exact-build renderer witness.
+     * Start/stop remain discrete at their authoritative snapshot boundary,
+     * while one stable selector topology interpolates its native clock. */
+    SudekiMpLanArenaReplicaReset(&replica);
+    first = make_snapshot(60u, 6000u, 0.0f);
+    second = make_snapshot(61u, 6050u, 0.0f);
+    second.tal.skill_sequence = 1u;
+    second.tal.skill_kind =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    second.tal.skill_slot = 0u;
+    second.tal.skill_active = 1u;
+    second.tal.skill_cost = 40u;
+    second.tal.skill_presentation_valid = 1u;
+    second.tal.skill_presentation_channel_count = 2u;
+    second.tal.skill_presentation_selector[0] = 103;
+    second.tal.skill_presentation_state[0] = 1u;
+    second.tal.skill_presentation_rate[0] = 24.0f;
+    second.tal.skill_presentation_time[0] = 10.0f;
+    second.tal.skill_presentation_blend[0] = 1.0f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6025u, &sample));
+    CHECK(sample.tal.skill_sequence == 0u);
+    CHECK(sample.tal.skill_presentation_valid == 0u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6050u, &sample));
+    CHECK(sample.tal.skill_sequence == 1u);
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER);
+    CHECK(sample.tal.skill_presentation_selector[0] == 103);
+    invalid = second;
+    invalid.sequence = 62u;
+    invalid.host_tick = 6100u;
+    invalid.tal.skill_presentation_time[0] = 20.0f;
+    invalid.tal.skill_presentation_blend[0] = 0.5f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6075u, &sample));
+    CHECK(fabsf(sample.tal.skill_presentation_time[0] - 15.0f) < 0.001f);
+    CHECK(fabsf(sample.tal.skill_presentation_blend[0] - 0.75f) < 0.001f);
+    CHECK(SudekiMpLanArenaReplicaActionTimelineBuffered(&replica));
+    /* A character CSkill sidecar is optional. If its exact renderer witness
+     * becomes unavailable, keep the same live transaction and switch to the
+     * absent sidecar only at that snapshot's endpoint. */
+    first = invalid;
+    first.sequence = 63u;
+    first.host_tick = 6150u;
+    first.tal.skill_presentation_valid = 0u;
+    first.tal.skill_presentation_channel_count = 0u;
+    memset(first.tal.skill_presentation_selector, 0,
+        sizeof(first.tal.skill_presentation_selector));
+    memset(first.tal.skill_presentation_state, 0,
+        sizeof(first.tal.skill_presentation_state));
+    memset(first.tal.skill_presentation_rate, 0,
+        sizeof(first.tal.skill_presentation_rate));
+    memset(first.tal.skill_presentation_time, 0,
+        sizeof(first.tal.skill_presentation_time));
+    memset(first.tal.skill_presentation_blend, 0,
+        sizeof(first.tal.skill_presentation_blend));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6125u, &sample));
+    CHECK(sample.tal.skill_active == 1u);
+    CHECK(sample.tal.skill_presentation_valid == 1u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6150u, &sample));
+    CHECK(sample.tal.skill_sequence == 1u);
+    CHECK(sample.tal.skill_active == 1u);
+    CHECK(sample.tal.skill_presentation_valid == 0u);
+
+    second = first;
+    second.sequence = 64u;
+    second.host_tick = 6200u;
+    second.tal.skill_active = 0u;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6175u, &sample));
+    CHECK(sample.tal.skill_sequence == 1u);
+    CHECK(sample.tal.skill_active == 1u);
+    CHECK(sample.tal.skill_presentation_valid == 0u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 6200u, &sample));
+    CHECK(sample.tal.skill_active == 0u);
+    CHECK(sample.tal.skill_presentation_valid == 0u);
+
+    /* Spirit is a separate presentation transaction even though it reuses
+     * the bounded exact-build renderer payload. Start, selector topology,
+     * and retirement remain discrete; only a sustained topology interpolates
+     * clocks/blends. The SPIRIT discriminator and zero slot/cost are retained
+     * throughout so a client dispatcher cannot mistake this for CSkill::Use. */
+    SudekiMpLanArenaReplicaReset(&replica);
+    first = make_snapshot(80u, 8000u, 0.0f);
+    second = make_snapshot(81u, 8050u, 0.0f);
+    clear_actor_action(&first.tal);
+    clear_actor_action(&first.ailish);
+    clear_actor_action(&second.tal);
+    clear_actor_action(&second.ailish);
+    second.tal.skill_sequence = 9u;
+    second.tal.skill_kind =
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    second.tal.skill_active = 1u;
+    second.tal.skill_presentation_valid = 1u;
+    second.tal.skill_presentation_channel_count = 2u;
+    second.tal.skill_presentation_selector[0] = 75;
+    second.tal.skill_presentation_state[0] = 1u;
+    second.tal.skill_presentation_state[1] = 192u;
+    second.tal.skill_presentation_rate[0] = 24.0f;
+    second.tal.skill_presentation_time[0] = 10.0f;
+    second.tal.skill_presentation_blend[0] = 0.25f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8025u, &sample));
+    CHECK(sample.tal.skill_sequence == 0u);
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE);
+    CHECK(sample.tal.skill_active == 0u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8050u, &sample));
+    CHECK(sample.tal.skill_sequence == 9u);
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT);
+    CHECK(sample.tal.skill_slot == 0u);
+    CHECK(sample.tal.skill_cost == 0u);
+    CHECK(sample.tal.skill_active == 1u);
+    CHECK(sample.tal.skill_presentation_selector[0] == 75);
+    CHECK(SudekiMpLanArenaReplicaActionTimelineBuffered(&replica));
+
+    invalid = second;
+    invalid.sequence = 82u;
+    invalid.host_tick = 8100u;
+    invalid.tal.skill_presentation_time[0] = 20.0f;
+    invalid.tal.skill_presentation_blend[0] = 0.75f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8075u, &sample));
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT);
+    CHECK(sample.tal.skill_presentation_selector[0] == 75);
+    CHECK(fabsf(sample.tal.skill_presentation_time[0] - 15.0f) <
+        0.001f);
+    CHECK(fabsf(sample.tal.skill_presentation_blend[0] - 0.5f) <
+        0.001f);
+
+    first = invalid;
+    first.sequence = 83u;
+    first.host_tick = 8150u;
+    first.tal.skill_presentation_selector[0] = 112;
+    first.tal.skill_presentation_time[0] = 2.0f;
+    CHECK(!SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(replica.latest.sequence == 82u);
+
+    /* Selector 113 is an authored topology edge inside the same live Spirit
+     * transaction. It must enter replica history instead of creating the
+     * multi-second snapshot blackout seen when this frame was rejected. */
+    first.tal.skill_presentation_selector[0] = 113;
+    first.tal.skill_presentation_time[0] = 2.0f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8125u, &sample));
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT);
+    CHECK(sample.tal.skill_presentation_selector[0] == 75);
+    CHECK(fabsf(sample.tal.skill_presentation_time[0] - 20.0f) <
+        0.001f);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8150u, &sample));
+    CHECK(sample.tal.skill_presentation_selector[0] == 113);
+    CHECK(fabsf(sample.tal.skill_presentation_time[0] - 2.0f) <
+        0.001f);
+
+    second = first;
+    second.sequence = 84u;
+    second.host_tick = 8200u;
+    second.tal.skill_presentation_selector[0] = 114;
+    second.tal.skill_presentation_time[0] = 3.0f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8175u, &sample));
+    CHECK(sample.tal.skill_presentation_selector[0] == 113);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8200u, &sample));
+    CHECK(sample.tal.skill_presentation_selector[0] == 114);
+    CHECK(fabsf(sample.tal.skill_presentation_time[0] - 3.0f) <
+        0.001f);
+
+    invalid = second;
+    invalid.sequence = 85u;
+    invalid.host_tick = 8250u;
+    invalid.tal.skill_active = 0u;
+    invalid.tal.skill_presentation_valid = 0u;
+    invalid.tal.skill_presentation_channel_count = 0u;
+    memset(invalid.tal.skill_presentation_selector, 0,
+        sizeof(invalid.tal.skill_presentation_selector));
+    memset(invalid.tal.skill_presentation_state, 0,
+        sizeof(invalid.tal.skill_presentation_state));
+    memset(invalid.tal.skill_presentation_rate, 0,
+        sizeof(invalid.tal.skill_presentation_rate));
+    memset(invalid.tal.skill_presentation_time, 0,
+        sizeof(invalid.tal.skill_presentation_time));
+    memset(invalid.tal.skill_presentation_blend, 0,
+        sizeof(invalid.tal.skill_presentation_blend));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &invalid));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8225u, &sample));
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT);
+    CHECK(sample.tal.skill_active == 1u);
+    CHECK(sample.tal.skill_presentation_selector[0] == 114);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 8250u, &sample));
+    CHECK(sample.tal.skill_sequence == 9u);
+    CHECK(sample.tal.skill_kind ==
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT);
+    CHECK(sample.tal.skill_active == 0u);
+    CHECK(sample.tal.skill_presentation_valid == 0u);
 
     /* Packet arrivals may be early or late. Presentation starts one snapshot
      * behind latest, advances monotonically, and never jumps to arrival time. */

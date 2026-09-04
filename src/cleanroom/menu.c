@@ -731,6 +731,7 @@ static BOOL infinite_spirit_valid;
 static BOOL infinite_jetpack_fuel;
 static BOOL infinite_jetpack_fuel_valid;
 static BOOL integrated_multiplayer_mode;
+static BOOL lan_host_tools_mode;
 static BOOL zone_traversal_mode;
 static unsigned int zone_traversal_page;
 static unsigned int zone_traversal_selection;
@@ -899,7 +900,8 @@ static BOOL command_line_is_cleanroom(void) {
     return command_line != NULL &&
         strstr(command_line, "-Level testroom") != NULL &&
         strstr(command_line, "-DT 1") != NULL &&
-        strstr(command_line, "-Ailish 1") != NULL;
+        (strstr(command_line, "-Ailish 1") != NULL ||
+         strstr(command_line, "-Tal 1") != NULL);
 }
 
 static BOOL menu_memory_readable(const void *pointer, size_t size) {
@@ -4507,6 +4509,13 @@ static void activate_selected_item(void) {
         menu_open = FALSE;
         return;
     }
+    if (lan_host_tools_mode && selected_item <= MENU_DUMMY_INDEX) {
+        SudekiMpLogWrite(
+            "cleanroom_menu event=lan_host_tools status=rejected "
+            "reason=network_runtime_owns_actor_and_dummy_lifecycle\r\n"
+        );
+        return;
+    }
     if (selected_item == MENU_COOP_READY_INDEX) {
         void *player_one;
         void *player_two;
@@ -4611,6 +4620,18 @@ static void activate_selected_item(void) {
         return;
     }
     if (selected_item == MENU_MULTIPLAYER_INDEX) {
+        if (lan_host_tools_mode) {
+            if (SudekiMpCleanroomEngineTrainingSkills(&mode)) {
+                accepted = SudekiMpCleanroomEngineSetTrainingSkills(!mode);
+            }
+            menu_texture_dirty = TRUE;
+            if (!accepted) {
+                SudekiMpLogWrite(
+                    "cleanroom_menu event=training_skills status=rejected\r\n"
+                );
+            }
+            return;
+        }
         if (coop_role_lock_active) {
             SudekiMpLogWrite(
                 "cleanroom_menu event=multiplayer_toggle status=rejected "
@@ -6190,8 +6211,9 @@ static BOOL update_menu_texture(void *texture) {
     }
     draw_text(
         pixels, locked.pitch, 32, 24,
-        integrated_multiplayer_mode && !coop_role_lock_active ?
-            "SUDEKIMP CO-OP ROLE LOBBY" : "SUDEKIMP CLEANROOM",
+        lan_host_tools_mode ? "SUDEKIMP LAN HOST TOOLS" :
+        (integrated_multiplayer_mode && !coop_role_lock_active ?
+            "SUDEKIMP CO-OP ROLE LOBBY" : "SUDEKIMP CLEANROOM"),
         UINT32_C(0xff5ef7f0), 3);
     draw_text(
         pixels, locked.pitch, 32, 56,
@@ -6217,10 +6239,12 @@ static BOOL update_menu_texture(void *texture) {
             label = SudekiMpCleanroomActorLabel(
                 (SudekiMpCleanroomActor)index
             );
-            status = item_status(index);
+            status = lan_host_tools_mode ? "LAN ROLE LOCKED" :
+                item_status(index);
         } else if (index == MENU_DUMMY_INDEX) {
             label = "TRAINING DUMMY";
-            status = item_status(index);
+            status = lan_host_tools_mode ? "LAN RUNTIME OWNED" :
+                item_status(index);
         } else if (index == MENU_COMBAT_INDEX) {
             label = "COMBAT MODE";
             status = combat_mode_valid ?
@@ -6244,10 +6268,19 @@ static BOOL update_menu_texture(void *texture) {
                 status_color = UINT32_C(0xff7cf29a);
             }
         } else if (index == MENU_MULTIPLAYER_INDEX) {
-            label = "SPLIT SCREEN P2";
-            if (!integrated_multiplayer_mode) {
+            if (lan_host_tools_mode) {
+                BOOL training_enabled = FALSE;
+                label = "ALL PARTY SKILLS";
+                status = SudekiMpCleanroomEngineTrainingSkills(
+                        &training_enabled) ?
+                    (training_enabled ? "ENABLED" : "DISABLED") :
+                    "UNAVAILABLE";
+                if (training_enabled) status_color = UINT32_C(0xff7cf29a);
+            } else if (!integrated_multiplayer_mode) {
+                label = "SPLIT SCREEN P2";
                 status = "UNAVAILABLE";
             } else if (!coop_role_lock_active) {
+                label = "SPLIT SCREEN P2";
                 status = "USE CO-OP READY";
                 status_color = UINT32_C(0xffffd166);
             } else if (!multiplayer_requested) {
@@ -6259,6 +6292,7 @@ static BOOL update_menu_texture(void *texture) {
                 status = "RAZER WAITING";
                 status_color = UINT32_C(0xffffd166);
             } else {
+                label = "SPLIT SCREEN P2";
                 status = "P2 READY";
                 status_color = UINT32_C(0xff7cf29a);
             }
@@ -8075,6 +8109,8 @@ static BOOL install_cleanroom_menu_internal(
     HMODULE game_module,
     UINT toggle_key,
     BOOL integrated,
+    BOOL external_hooks,
+    BOOL lan_host_tools,
     BOOL roster,
     BOOL skip_startup_movies,
     BOOL traversal,
@@ -8105,7 +8141,8 @@ static BOOL install_cleanroom_menu_internal(
     if (!roster && !traversal &&
         (!SudekiMpCleanroomEngineSetInfiniteSp(TRUE) ||
         !SudekiMpCleanroomEngineSetInfiniteSpirit(TRUE) ||
-        !SudekiMpCleanroomEngineSetInfiniteJetpackFuel(TRUE))) {
+        !SudekiMpCleanroomEngineSetInfiniteJetpackFuel(TRUE) ||
+        !SudekiMpCleanroomEngineSetTrainingSkills(TRUE))) {
         SudekiMpCleanroomEngineReset();
         return FALSE;
     }
@@ -8113,9 +8150,9 @@ static BOOL install_cleanroom_menu_internal(
     controller_slot = (void **)(base + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
     game_base = base;
     d3d_device_global = (void **)(base + RVA_D3D_DEVICE_GLOBAL);
-    original_controller_update = integrated ? NULL :
+    original_controller_update = external_hooks ? NULL :
         (ControllerUpdateFunction)(base + RVA_CONTROLLER_UPDATE);
-    original_frame_end = integrated ? NULL :
+    original_frame_end = external_hooks ? NULL :
         (FrameEndFunction)(base + RVA_FRAME_END);
     menu_toggle_key = toggle_key;
     story_test_boost_enabled = enable_story_test_boost;
@@ -8176,6 +8213,7 @@ static BOOL install_cleanroom_menu_internal(
     infinite_jetpack_fuel = TRUE;
     infinite_jetpack_fuel_valid = TRUE;
     integrated_multiplayer_mode = integrated;
+    lan_host_tools_mode = lan_host_tools;
     roster_mode = roster;
     loaded_save_coop_autostart_enabled = FALSE;
     loaded_save_coop_autostart_roster_published = FALSE;
@@ -8475,7 +8513,7 @@ static BOOL install_cleanroom_menu_internal(
          * without changing the title controller's logical state. */
     }
 
-    if (!integrated && (!SudekiMpInstallPointerHook(
+    if (!external_hooks && (!SudekiMpInstallPointerHook(
             &controller_update_hook,
             controller_slot,
             original_controller_update,
@@ -8504,7 +8542,8 @@ static BOOL install_cleanroom_menu_internal(
         "controls=combat_camera_infinite_sp_infinite_spirit "
         "resource_defaults=enabled multiplayer_integration=%s traversal=%s\r\n",
         (unsigned long)menu_toggle_key,
-        integrated ? "external_control_and_render_hooks" :
+        external_hooks ? (lan_host_tools ? "lan_host_external_hooks" :
+            "external_control_and_render_hooks") :
             (roster ? "title_roster_hooks" :
                 (traversal ? "world_aware_traversal" : "standalone_hooks")),
         traversal ? "true" : "false"
@@ -8514,7 +8553,7 @@ static BOOL install_cleanroom_menu_internal(
 
 BOOL SudekiMpInstallCleanroomMenu(HMODULE game_module, UINT toggle_key) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE,
+        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
         FALSE, 0u, 1.0f);
 }
 
@@ -8523,7 +8562,16 @@ BOOL SudekiMpInstallIntegratedCleanroomMenu(
     UINT toggle_key
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, TRUE, FALSE, FALSE, FALSE,
+        game_module, toggle_key, TRUE, TRUE, FALSE, FALSE, FALSE, FALSE,
+        FALSE, 0u, 1.0f);
+}
+
+BOOL SudekiMpInstallLanArenaHostCleanroomMenu(
+    HMODULE game_module,
+    UINT toggle_key
+) {
+    return install_cleanroom_menu_internal(
+        game_module, toggle_key, FALSE, TRUE, TRUE, FALSE, FALSE, FALSE,
         FALSE, 0u, 1.0f);
 }
 
@@ -8533,7 +8581,8 @@ BOOL SudekiMpInstallZoneTraversalMenu(
     BOOL skip_startup_movies
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, FALSE, FALSE, skip_startup_movies, TRUE,
+        game_module, toggle_key, FALSE, FALSE, FALSE, FALSE,
+        skip_startup_movies, TRUE,
         FALSE, 0u, 1.0f);
 }
 
@@ -8547,11 +8596,20 @@ BOOL SudekiMpInstallCoopRosterMenu(
     float configured_story_test_boost_multiplier
 ) {
     return install_cleanroom_menu_internal(
-        game_module, toggle_key, integrated_multiplayer, TRUE,
+        game_module, toggle_key, integrated_multiplayer,
+        integrated_multiplayer, FALSE, TRUE,
         skip_startup_movies, FALSE,
         enable_story_test_boost,
         configured_story_test_boost_key,
         configured_story_test_boost_multiplier);
+}
+
+BOOL SudekiMpCleanroomMenuInstalled(void) {
+    return game_base != NULL;
+}
+
+BOOL SudekiMpCleanroomMenuActive(void) {
+    return game_base != NULL && menu_open;
 }
 
 void SudekiMpUninstallCleanroomMenu(void) {
@@ -8700,6 +8758,7 @@ void SudekiMpUninstallCleanroomMenu(void) {
     infinite_jetpack_fuel = FALSE;
     infinite_jetpack_fuel_valid = FALSE;
     integrated_multiplayer_mode = FALSE;
+    lan_host_tools_mode = FALSE;
     zone_traversal_mode = FALSE;
     zone_traversal_page = ZONE_TRAVERSAL_PAGE_WORLDS;
     zone_traversal_selection = 0u;

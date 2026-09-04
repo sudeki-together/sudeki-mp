@@ -56,7 +56,13 @@ void SudekiMpLogWrite(const char *message) {
         return;
     }
     WriteFile(log_file, message, (DWORD)strlen(message), &written, NULL);
-    FlushFileBuffers(log_file);
+    /* WriteFile makes appended records immediately visible to live readers.
+     * Do not force a physical filesystem flush for every diagnostic line:
+     * LAN presentation tracing emits several records per second and Wine's
+     * FlushFileBuffers maps to a synchronous fsync, which can stall the game
+     * thread long enough to starve snapshot consumption.  CloseHandle still
+     * closes the stream normally, while a process crash retains completed
+     * writes in the host kernel cache. */
 }
 
 void SudekiMpLogFormat(const char *format, ...) {

@@ -50,6 +50,15 @@ at its confirmed maximum of `200`, so its HUD display remains full. Disabling a
 menu entry clears only its corresponding developer flag. Unloading the mod
 restores both flags to the values captured before cleanroom installation.
 
+The same host-only overlay is available in the LAN arena. There, actor and
+dummy rows are visibly locked because the authenticated LAN runtime owns their
+lifecycle, and the otherwise unused Split Screen row becomes `ALL PARTY
+SKILLS`. It leases the six authored native `SkillData` records for every
+present retail hero and restores their captured availability bytes on disable
+or teardown. Infinite SP also refills each present hero's named `SkillPoints`
+stat to its existing native maximum, so an already-drained test actor recovers
+immediately. Native skill validation and `CSkill::Use` remain authoritative.
+
 Infinite Jetpack also defaults to `ENABLED`. Elco's live actor owns a
 `CElcoAbility*` at `actor+0x104`; its native maximum and current fuel are the
 floats at `ability+0x68` and `ability+0x6C`. The maintenance pass calls the

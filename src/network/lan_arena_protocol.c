@@ -8,11 +8,35 @@
 #define LAN_INPUT_SIZE 29u
 #define LAN_ACTION_EVENT_SIZE 7u
 #define LAN_ACTOR_ACTION_HISTORY_OFFSET 55u
-#define LAN_ACTOR_SIZE (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
-    (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
+#define LAN_ACTOR_SKILL_PRESENTATION_OFFSET \
+    (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
+     (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
+#define LAN_ACTOR_SKILL_PRESENTATION_SIZE 83u
+#define LAN_ACTOR_SKILL_KIND_OFFSET (LAN_ACTOR_SKILL_PRESENTATION_OFFSET + \
+    LAN_ACTOR_SKILL_PRESENTATION_SIZE)
+#define LAN_ACTOR_SIZE (LAN_ACTOR_SKILL_KIND_OFFSET + 1u)
 #define LAN_ENEMY_SIZE 21u
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
-#define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE) + 1u)
+#define LAN_SPIRIT_AUDIO_EVENT_SIZE 5u
+#define LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET \
+    (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE))
+#define LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET \
+    (LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET + 1u)
+#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET \
+    (LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET + \
+     (SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY * \
+      LAN_SPIRIT_AUDIO_EVENT_SIZE))
+#define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ENEMY_COUNT_OFFSET + 1u)
+
+_Static_assert(
+    LAN_HEADER_SIZE + LAN_SNAPSHOT_FIXED_SIZE +
+        (SUDEKIMP_LAN_ARENA_MAX_ENEMIES * LAN_ENEMY_SIZE) ==
+            SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE,
+    "LAN snapshot size contract changed");
+_Static_assert(
+    SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE <=
+        SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE,
+    "LAN snapshot exceeds the bounded datagram");
 
 static const uint8_t lan_magic[4] = {'S', 'M', 'P', 'N'};
 
@@ -70,6 +94,19 @@ static void write_float(uint8_t *output, float value) {
 static float read_float(const uint8_t *input) {
     uint32_t encoded = read_u32(input);
     float value;
+    memcpy(&value, &encoded, sizeof(value));
+    return value;
+}
+
+static void write_s32(uint8_t *output, int32_t value) {
+    uint32_t encoded;
+    memcpy(&encoded, &value, sizeof(encoded));
+    write_u32(output, encoded);
+}
+
+static int32_t read_s32(const uint8_t *input) {
+    uint32_t encoded = read_u32(input);
+    int32_t value;
     memcpy(&value, &encoded, sizeof(value));
     return value;
 }
@@ -181,6 +218,79 @@ static int valid_actor_action_history(
             actor->action_sequence;
 }
 
+int SudekiMpLanArenaSpiritPresentationSelectorValid(int32_t selector) {
+    /* Exact-build host captures observe 75 -> 113 within one positive native
+     * Spirit-manager generation; 114 is the other already-proven topology. */
+    return selector == 75 || selector == 113 || selector == 114;
+}
+
+int SudekiMpLanArenaSkillPresentationValid(
+    const SudekiMpLanArenaActorSnapshot *actor,
+    uint8_t expected_type
+) {
+    unsigned int channel;
+    unsigned int expected_skill_channels;
+    if (actor == NULL ||
+        (expected_type != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+         expected_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE) ||
+        actor->skill_presentation_valid > 1u) return 0;
+    expected_skill_channels = expected_type == SUDEKIMP_LAN_ARENA_TAL_TYPE ?
+        2u : SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+    if ((actor->skill_presentation_valid != 0u &&
+         actor->skill_presentation_channel_count != expected_skill_channels) ||
+        (actor->skill_presentation_valid == 0u &&
+         actor->skill_presentation_channel_count != 0u)) return 0;
+    for (channel = 0u;
+         channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+         ++channel) {
+        int used = actor->skill_presentation_valid != 0u &&
+            channel < actor->skill_presentation_channel_count;
+        if ((used &&
+             (actor->skill_presentation_selector[channel] < 0 ||
+              actor->skill_presentation_selector[channel] > 4095 ||
+              (actor->skill_presentation_state[channel] != 0u &&
+               actor->skill_presentation_state[channel] != 1u &&
+               actor->skill_presentation_state[channel] != 64u &&
+               actor->skill_presentation_state[channel] != 65u &&
+               actor->skill_presentation_state[channel] != 128u &&
+               actor->skill_presentation_state[channel] != 192u) ||
+              !isfinite(actor->skill_presentation_rate[channel]) ||
+              actor->skill_presentation_rate[channel] < 0.0f ||
+              actor->skill_presentation_rate[channel] > 256.0f ||
+              !isfinite(actor->skill_presentation_time[channel]) ||
+              actor->skill_presentation_time[channel] < 0.0f ||
+              actor->skill_presentation_time[channel] > 4096.0f)) ||
+            (!used &&
+             (actor->skill_presentation_selector[channel] != 0 ||
+              actor->skill_presentation_state[channel] != 0u ||
+              actor->skill_presentation_rate[channel] != 0.0f ||
+              actor->skill_presentation_time[channel] != 0.0f))) return 0;
+    }
+    if (actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+        actor->skill_active != 0u &&
+         (actor->skill_presentation_valid == 0u ||
+         !SudekiMpLanArenaSpiritPresentationSelectorValid(
+             actor->skill_presentation_selector[0]) ||
+         actor->skill_presentation_selector[1] != 0 ||
+         actor->skill_presentation_state[0] != 1u ||
+         actor->skill_presentation_state[1] != 192u ||
+         actor->skill_presentation_rate[0] != 24.0f ||
+         actor->skill_presentation_rate[1] != 0.0f)) {
+        return 0;
+    }
+    for (channel = 0u;
+         channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+         ++channel) {
+        if ((actor->skill_presentation_valid != 0u &&
+             (!isfinite(actor->skill_presentation_blend[channel]) ||
+              actor->skill_presentation_blend[channel] < -1.0f ||
+              actor->skill_presentation_blend[channel] > 2.0f)) ||
+            (actor->skill_presentation_valid == 0u &&
+             actor->skill_presentation_blend[channel] != 0.0f)) return 0;
+    }
+    return 1;
+}
+
 static int valid_actor_snapshot(
     const SudekiMpLanArenaActorSnapshot *actor,
     uint8_t expected_type
@@ -192,6 +302,8 @@ static int valid_actor_snapshot(
         actor->action_phase_valid > 1u ||
         actor->action_retirement_valid > 1u ||
         actor->skill_active > 1u ||
+        actor->skill_kind > SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
+        actor->skill_presentation_valid > 1u ||
         actor->skill_slot >= 6u ||
         actor->skill_cost > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
@@ -233,14 +345,99 @@ static int valid_actor_snapshot(
          (actor->action_terminal_phase_q8 != 0u ||
           actor->idle_entry_phase_q8 != 0u)) ||
         (actor->skill_sequence == 0u &&
-         (actor->skill_active != 0u || actor->skill_slot != 0u ||
-          actor->skill_cost != 0u))) {
+         (actor->skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE ||
+          actor->skill_active != 0u || actor->skill_slot != 0u ||
+          actor->skill_cost != 0u)) ||
+        (actor->skill_sequence != 0u &&
+         actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE) ||
+        (actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+         (expected_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+          actor->skill_slot != 0u || actor->skill_cost != 0u)) ||
+        (actor->skill_presentation_valid != 0u &&
+         (actor->skill_sequence == 0u || actor->skill_active == 0u))) {
+        return 0;
+    }
+    if (!SudekiMpLanArenaSkillPresentationValid(actor, expected_type)) {
         return 0;
     }
     facing_length = sqrtf(actor->facing_x * actor->facing_x +
         actor->facing_z * actor->facing_z);
     return isfinite(facing_length) && facing_length >= 0.5f &&
         facing_length <= 1.5f;
+}
+
+int SudekiMpLanArenaSpiritAudioJournalValid(
+    const SudekiMpLanArenaSnapshot *snapshot
+) {
+    unsigned int index;
+    if (snapshot == NULL ||
+        snapshot->spirit_audio_history_count >
+            SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY) return 0;
+    for (index = 0u; index < snapshot->spirit_audio_history_count; ++index) {
+        const SudekiMpLanArenaSpiritAudioSemanticEvent *event =
+            &snapshot->spirit_audio_history[index];
+        if (event->event_sequence == 0u || event->skill_sequence == 0u ||
+            event->cue != SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START ||
+            (index != 0u &&
+             (!action_sequence_newer(
+                  event->event_sequence,
+                  snapshot->spirit_audio_history[index - 1u].event_sequence) ||
+              !action_sequence_newer(
+                  event->skill_sequence,
+                  snapshot->spirit_audio_history[index - 1u].skill_sequence)))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void SudekiMpLanArenaSpiritAudioCursorReset(
+    SudekiMpLanArenaSpiritAudioCursor *cursor
+) {
+    if (cursor != NULL) memset(cursor, 0, sizeof(*cursor));
+}
+
+int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
+    SudekiMpLanArenaSpiritAudioCursor *cursor,
+    const SudekiMpLanArenaSnapshot *snapshot,
+    SudekiMpLanArenaSpiritAudioSink sink,
+    void *sink_context,
+    unsigned int *replayed_count
+) {
+    const SudekiMpLanArenaSpiritAudioSemanticEvent *event;
+    unsigned int count;
+    int exact_current_spirit;
+
+    if (replayed_count != NULL) *replayed_count = 0u;
+    if (cursor == NULL || snapshot == NULL ||
+        !SudekiMpLanArenaSpiritAudioJournalValid(snapshot)) return 0;
+    count = snapshot->spirit_audio_history_count;
+    if (count == 0u) return cursor->initialized == 0u;
+    event = &snapshot->spirit_audio_history[count - 1u];
+    if (cursor->initialized != 0u) {
+        if (event->event_sequence == cursor->last_event_sequence) return 1;
+        if (!action_sequence_newer(
+                event->event_sequence,
+                cursor->last_event_sequence)) return 0;
+    }
+    exact_current_spirit =
+        snapshot->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
+        snapshot->combat_enabled == 1u &&
+        snapshot->tal.skill_active == 1u &&
+        snapshot->tal.skill_kind ==
+            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+        snapshot->tal.skill_sequence == event->skill_sequence;
+    if (exact_current_spirit &&
+        (sink == NULL || !sink(
+            sink_context, (SudekiMpLanArenaSpiritAudioCue)event->cue))) {
+        return 0;
+    }
+    cursor->last_event_sequence = event->event_sequence;
+    cursor->initialized = 1u;
+    if (exact_current_spirit && replayed_count != NULL) {
+        *replayed_count = 1u;
+    }
+    return 1;
 }
 
 int SudekiMpLanArenaSnapshotValid(
@@ -254,6 +451,7 @@ int SudekiMpLanArenaSnapshotValid(
         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
          snapshot->combat_enabled != 0u) ||
         snapshot->enemy_count > 1u ||
+        !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
         !valid_actor_snapshot(&snapshot->tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
         !valid_actor_snapshot(
             &snapshot->ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE)) return 0;
@@ -318,6 +516,31 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
             memset(entry, 0, LAN_ACTION_EVENT_SIZE);
         }
     }
+    {
+        uint8_t *presentation = output +
+            LAN_ACTOR_SKILL_PRESENTATION_OFFSET;
+        presentation[0] = actor->skill_presentation_valid;
+        presentation[1] = actor->skill_presentation_channel_count;
+        for (index = 0u;
+             index < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+             ++index) {
+            write_s32(presentation + 2u + index * 4u,
+                actor->skill_presentation_selector[index]);
+            presentation[22u + index] =
+                actor->skill_presentation_state[index];
+            write_float(presentation + 27u + index * 4u,
+                actor->skill_presentation_rate[index]);
+            write_float(presentation + 47u + index * 4u,
+                actor->skill_presentation_time[index]);
+        }
+        for (index = 0u;
+             index < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+             ++index) {
+            write_float(presentation + 67u + index * 4u,
+                actor->skill_presentation_blend[index]);
+        }
+    }
+    output[LAN_ACTOR_SKILL_KIND_OFFSET] = actor->skill_kind;
     return 1;
 }
 
@@ -361,6 +584,31 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
         actor->action_history[index].variant = entry[2];
         actor->action_history[index].host_tick = read_u32(entry + 3u);
     }
+    {
+        const uint8_t *presentation = input +
+            LAN_ACTOR_SKILL_PRESENTATION_OFFSET;
+        actor->skill_presentation_valid = presentation[0];
+        actor->skill_presentation_channel_count = presentation[1];
+        for (index = 0u;
+             index < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+             ++index) {
+            actor->skill_presentation_selector[index] =
+                read_s32(presentation + 2u + index * 4u);
+            actor->skill_presentation_state[index] =
+                presentation[22u + index];
+            actor->skill_presentation_rate[index] =
+                read_float(presentation + 27u + index * 4u);
+            actor->skill_presentation_time[index] =
+                read_float(presentation + 47u + index * 4u);
+        }
+        for (index = 0u;
+             index < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
+             ++index) {
+            actor->skill_presentation_blend[index] =
+                read_float(presentation + 67u + index * 4u);
+        }
+    }
+    actor->skill_kind = input[LAN_ACTOR_SKILL_KIND_OFFSET];
     return 1;
 }
 
@@ -435,7 +683,25 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             write_u32(output + 8u, packet->body.snapshot.host_tick);
             output[12] = packet->body.snapshot.match_state;
             output[13] = packet->body.snapshot.combat_enabled;
-            output[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)] =
+            output[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET] =
+                packet->body.snapshot.spirit_audio_history_count;
+            for (i = 0u;
+                 i < SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY;
+                 ++i) {
+                uint8_t *entry = output +
+                    LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET +
+                    i * LAN_SPIRIT_AUDIO_EVENT_SIZE;
+                if (i < packet->body.snapshot.spirit_audio_history_count) {
+                    const SudekiMpLanArenaSpiritAudioSemanticEvent *event =
+                        &packet->body.snapshot.spirit_audio_history[i];
+                    write_u16(entry, event->event_sequence);
+                    write_u16(entry + 2u, event->skill_sequence);
+                    entry[4] = event->cue;
+                } else {
+                    memset(entry, 0, LAN_SPIRIT_AUDIO_EVENT_SIZE);
+                }
+            }
+            output[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] =
                 packet->body.snapshot.enemy_count;
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 const SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
@@ -564,11 +830,13 @@ int SudekiMpLanArenaDecodePacket(
                     &packet->body.snapshot.ailish) ||
                 packet->body.snapshot.tal.actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
                 packet->body.snapshot.ailish.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-                payload[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)] >
+                payload[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET] >
+                    SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY ||
+                payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] >
                     SUDEKIMP_LAN_ARENA_MAX_ENEMIES ||
                 payload_size != LAN_SNAPSHOT_FIXED_SIZE +
-                    ((size_t)payload[LAN_SNAPSHOT_ACTORS_OFFSET +
-                        (2u * LAN_ACTOR_SIZE)] * LAN_ENEMY_SIZE)) {
+                    ((size_t)payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] *
+                     LAN_ENEMY_SIZE)) {
                 return 0;
             }
             packet->body.snapshot.sequence = read_u32(payload);
@@ -576,8 +844,22 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.snapshot.host_tick = read_u32(payload + 8u);
             packet->body.snapshot.match_state = payload[12];
             packet->body.snapshot.combat_enabled = payload[13];
+            packet->body.snapshot.spirit_audio_history_count =
+                payload[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET];
+            for (i = 0u;
+                 i < SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY;
+                 ++i) {
+                SudekiMpLanArenaSpiritAudioSemanticEvent *event =
+                    &packet->body.snapshot.spirit_audio_history[i];
+                const uint8_t *entry = payload +
+                    LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET +
+                    i * LAN_SPIRIT_AUDIO_EVENT_SIZE;
+                event->event_sequence = read_u16(entry);
+                event->skill_sequence = read_u16(entry + 2u);
+                event->cue = entry[4];
+            }
             packet->body.snapshot.enemy_count =
-                payload[LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE)];
+                payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET];
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
                 const uint8_t *entry = payload + LAN_SNAPSHOT_FIXED_SIZE + (i * LAN_ENEMY_SIZE);

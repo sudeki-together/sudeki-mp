@@ -66,6 +66,26 @@ int main(void) {
     check(call_instruction + 5 + displacement == original_target,
         "relative call targets original after restore");
 
+    check(SudekiMpInstallRelativeCallHook(
+        &call_hook, call_instruction, original_target, replacement_target
+    ), "reinstall relative call hook for ownership loss");
+    displacement = (int32_t)((memory + 0x700) - (call_instruction + 5));
+    memcpy(call_instruction + 1, &displacement, sizeof(displacement));
+    SetLastError(ERROR_SUCCESS);
+    check(!SudekiMpRestoreRelativeCallHook(&call_hook) &&
+        GetLastError() == ERROR_BUSY && call_hook.installed,
+        "relative call teardown retains foreign ownership for retry");
+    memcpy(call_instruction + 1, &call_hook.replacement_displacement,
+        sizeof(call_hook.replacement_displacement));
+    check(SudekiMpRestoreRelativeCallHook(&call_hook) &&
+        !call_hook.installed && call_hook.instruction == NULL &&
+        call_hook.original_displacement == 0 &&
+        call_hook.replacement_displacement == 0,
+        "relative call teardown retries after replacement ownership returns");
+    memcpy(&displacement, call_instruction + 1, sizeof(displacement));
+    check(call_instruction + 5 + displacement == original_target,
+        "relative call retry restores the original target");
+
     call_instruction[0] = 0x90;
     check(!SudekiMpInstallRelativeCallHook(
         &call_hook, call_instruction, original_target, replacement_target
@@ -111,7 +131,8 @@ int main(void) {
             "failed relative-call install preserves the original target");
         check(!call_install_failure_hook.installed &&
             call_install_failure_hook.instruction == NULL &&
-            call_install_failure_hook.original_displacement == 0,
+            call_install_failure_hook.original_displacement == 0 &&
+            call_install_failure_hook.replacement_displacement == 0,
             "failed relative-call install clears ownership bookkeeping");
         UnmapViewOfFile(read_only_call_view);
     }

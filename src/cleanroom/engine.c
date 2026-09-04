@@ -232,6 +232,11 @@ enum {
     CHARACTER_POSITION_OFFSET = 0x0044u,
     CHARACTER_COMBAT_DATA_OFFSET = 0x004cu,
     CHARACTER_ARBITER_OFFSET = 0x0090u,
+    CHARACTER_SKILL_OFFSET = 0x00d8u,
+    CSKILL_OWNER_OFFSET = 0x0010u,
+    CSKILL_DATA_ARRAY_OFFSET = 0x003cu,
+    SKILL_DATA_ENABLED_OFFSET = 0x0008u,
+    TRAINING_SKILL_COUNT = 6u,
     ARBITER_OWNER_OFFSET = 0x0010u,
     ARBITER_FLAGS_OFFSET = 0x0050u,
     ARBITER_INVULNERABILITY_REF_OFFSET = 0x0054u,
@@ -348,14 +353,32 @@ static GelPointerToEntityFunction gel_pointer_to_entity;
 static EntityPointerCleanupFunction entity_pointer_cleanup;
 static void *resource_name_from_text;
 static void *resource_name_release_reference;
-static BOOL ranged_prime_pending;
-static BOOL ranged_prime_ui_active;
-static UINT_PTR ranged_prime_timer;
+static volatile LONG ranged_prime_pending;
+static volatile LONG ranged_prime_ui_active;
+static volatile LONG ranged_prime_cancel_requested;
+static DWORD ranged_prime_deadline;
+static DWORD ranged_prime_owner_thread_id;
+static uint32_t ranged_prime_generation;
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+static SudekiMpCleanroomEngineRangedPrimeTestBackend
+    ranged_prime_test_backend;
+static BOOL ranged_prime_test_backend_active;
+#endif
 static uint8_t *no_sp_needed_flag;
 static uint8_t *no_ssp_needed_flag;
 static uint8_t saved_no_sp_needed;
 static uint8_t saved_no_ssp_needed;
 static BOOL resource_flags_captured;
+typedef struct SudekiMpTrainingSkillLease {
+    void *actor;
+    uint8_t *skill;
+    uint8_t *skill_data[TRAINING_SKILL_COUNT];
+    uint8_t saved_enabled[TRAINING_SKILL_COUNT];
+    BOOL active;
+} SudekiMpTrainingSkillLease;
+static SudekiMpTrainingSkillLease training_skill_leases[4];
+static BOOL training_skills_enabled;
+static void *sp_refill_logged_entities[4];
 static BOOL inventory_filled;
 static BOOL spirit_strikes_unlocked;
 static BOOL infinite_jetpack_fuel;
@@ -1191,6 +1214,12 @@ static BOOL set_native_ui_active(BOOL active) {
     void *ui_manager;
     void *function;
 
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+    if (ranged_prime_test_backend_active &&
+        ranged_prime_test_backend.set_native_ui_active != NULL) {
+        return ranged_prime_test_backend.set_native_ui_active(active);
+    }
+#endif
     if (game_base == NULL ||
         !matches_entry(
             game_base + RVA_SET_UI_ACTIVE,
@@ -1219,57 +1248,155 @@ static BOOL set_native_ui_active(BOOL active) {
     return TRUE;
 }
 
-static void cancel_ranged_prime(void) {
-    if (ranged_prime_timer != 0u) {
-        KillTimer(NULL, ranged_prime_timer);
-        ranged_prime_timer = 0u;
+static DWORD ranged_prime_tick_count(void) {
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+    if (ranged_prime_test_backend_active &&
+        ranged_prime_test_backend.tick_count != NULL) {
+        return ranged_prime_test_backend.tick_count();
     }
-    if (ranged_prime_ui_active) {
-        (void)set_native_ui_active(FALSE);
-        ranged_prime_ui_active = FALSE;
-    }
-    ranged_prime_pending = FALSE;
+#endif
+    return GetTickCount();
 }
 
-static void CALLBACK complete_ranged_prime(
-    HWND window,
-    UINT message,
-    UINT_PTR timer_id,
-    DWORD time
-) {
-    BOOL combat_enabled = FALSE;
+static BOOL ranged_prime_flag(const volatile LONG *flag) {
+    return InterlockedCompareExchange((volatile LONG *)flag, 0, 0) != 0;
+}
 
-    (void)window;
-    (void)message;
-    (void)time;
-    KillTimer(NULL, timer_id);
-    if (ranged_prime_timer == timer_id) {
-        ranged_prime_timer = 0u;
+static void set_ranged_prime_flag(volatile LONG *flag, BOOL enabled) {
+    InterlockedExchange(flag, enabled ? TRUE : FALSE);
+}
+
+static DWORD ranged_prime_thread_id(void) {
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+    if (ranged_prime_test_backend_active &&
+        ranged_prime_test_backend.thread_id != NULL) {
+        return ranged_prime_test_backend.thread_id();
     }
-    ranged_prime_pending = FALSE;
-    if (!SudekiMpCleanroomEngineCombatMode(&combat_enabled) ||
-        !combat_enabled) {
-        (void)set_native_ui_active(FALSE);
-        ranged_prime_ui_active = FALSE;
-        SudekiMpLogWrite(
+#endif
+    return GetCurrentThreadId();
+}
+
+static uint32_t next_ranged_prime_generation(void) {
+    ++ranged_prime_generation;
+    if (ranged_prime_generation == 0u) {
+        ++ranged_prime_generation;
+    }
+    return ranged_prime_generation;
+}
+
+static BOOL ranged_prime_deadline_reached(DWORD now) {
+    return (LONG)(now - ranged_prime_deadline) >= 0;
+}
+
+static void clear_ranged_prime_lease(void) {
+    set_ranged_prime_flag(&ranged_prime_ui_active, FALSE);
+    set_ranged_prime_flag(&ranged_prime_cancel_requested, FALSE);
+    ranged_prime_deadline = 0u;
+    ranged_prime_owner_thread_id = 0u;
+    (void)next_ranged_prime_generation();
+    /* Publish quiescence last, after no engine-owned UI work remains. */
+    set_ranged_prime_flag(&ranged_prime_pending, FALSE);
+}
+
+/* There is intentionally no TimerProc here. A SetTimer callback can already
+ * be queued when KillTimer succeeds, leaving an instruction pointer into this
+ * module after reset or FreeLibrary. The ranged arm pulse is instead retired
+ * from the game-thread services that already own this native UI transition. */
+static BOOL retire_ranged_prime_ui(const char *reason) {
+    DWORD current_thread_id = ranged_prime_thread_id();
+
+    if ((ranged_prime_flag(&ranged_prime_pending) ||
+            ranged_prime_flag(&ranged_prime_ui_active)) &&
+        ranged_prime_owner_thread_id != 0u &&
+        current_thread_id != ranged_prime_owner_thread_id) {
+        set_ranged_prime_flag(&ranged_prime_cancel_requested, TRUE);
+        set_ranged_prime_flag(&ranged_prime_pending, TRUE);
+        SetLastError(ERROR_BUSY);
+        SudekiMpLogFormat(
             "cleanroom_engine event=ranged_combat_prime phase=exit "
-            "status=cancelled reason=combat_disabled\r\n"
+            "status=deferred reason=wrong_thread requested_by=%s "
+            "owner_thread=%lu current_thread=%lu generation=%lu\r\n",
+            reason,
+            (unsigned long)ranged_prime_owner_thread_id,
+            (unsigned long)current_thread_id,
+            (unsigned long)ranged_prime_generation
         );
-        return;
+        return FALSE;
     }
-    if (!set_native_ui_active(FALSE)) {
-        ranged_prime_ui_active = FALSE;
-        SudekiMpLogWrite(
+    if (ranged_prime_flag(&ranged_prime_ui_active) &&
+        !set_native_ui_active(FALSE)) {
+        set_ranged_prime_flag(&ranged_prime_cancel_requested, TRUE);
+        set_ranged_prime_flag(&ranged_prime_pending, TRUE);
+        SudekiMpLogFormat(
             "cleanroom_engine event=ranged_combat_prime phase=exit "
-            "status=rejected reason=native_ui_transition_unavailable\r\n"
+            "status=deferred reason=native_ui_transition_unavailable "
+            "requested_by=%s generation=%lu\r\n",
+            reason,
+            (unsigned long)ranged_prime_generation
         );
-        return;
+        return FALSE;
     }
-    ranged_prime_ui_active = FALSE;
+    clear_ranged_prime_lease();
+    return TRUE;
+}
+
+static BOOL cancel_ranged_prime(void) {
+    if (!ranged_prime_flag(&ranged_prime_pending) &&
+        !ranged_prime_flag(&ranged_prime_ui_active)) {
+        set_ranged_prime_flag(&ranged_prime_cancel_requested, FALSE);
+        ranged_prime_deadline = 0u;
+        ranged_prime_owner_thread_id = 0u;
+        return TRUE;
+    }
+    set_ranged_prime_flag(&ranged_prime_cancel_requested, TRUE);
+    if (!retire_ranged_prime_ui("cancel")) {
+        return FALSE;
+    }
     SudekiMpLogWrite(
         "cleanroom_engine event=ranged_combat_prime phase=exit "
-        "status=confirmed state=idle_armed policy=native_ui_cycle\r\n"
+        "status=cancelled policy=game_thread_deadline\r\n"
     );
+    return TRUE;
+}
+
+static BOOL service_ranged_prime(uint32_t generation) {
+    BOOL combat_enabled = FALSE;
+    BOOL combat_known;
+
+    if (!ranged_prime_flag(&ranged_prime_pending) &&
+        !ranged_prime_flag(&ranged_prime_ui_active)) {
+        return TRUE;
+    }
+    if (generation == 0u || generation != ranged_prime_generation) {
+        return FALSE;
+    }
+    if (!ranged_prime_flag(&ranged_prime_cancel_requested) &&
+        !ranged_prime_deadline_reached(ranged_prime_tick_count())) {
+        return TRUE;
+    }
+    if (ranged_prime_flag(&ranged_prime_cancel_requested)) {
+        return cancel_ranged_prime();
+    }
+    combat_known = SudekiMpCleanroomEngineCombatMode(&combat_enabled);
+    if (!retire_ranged_prime_ui(
+            combat_known && combat_enabled ? "deadline" :
+            (combat_known ? "combat_disabled" : "combat_unavailable"))) {
+        return FALSE;
+    }
+    if (!combat_known || !combat_enabled) {
+        SudekiMpLogWrite(
+            "cleanroom_engine event=ranged_combat_prime phase=exit "
+            "status=cancelled reason=combat_disabled_or_unavailable "
+            "policy=game_thread_deadline\r\n"
+        );
+        return TRUE;
+    }
+    SudekiMpLogWrite(
+        "cleanroom_engine event=ranged_combat_prime phase=exit "
+        "status=confirmed state=idle_armed "
+        "policy=game_thread_deadline\r\n"
+    );
+    return TRUE;
 }
 
 /*
@@ -4232,6 +4359,12 @@ BOOL SudekiMpCleanroomEngineRemoveDummy(void) {
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled) {
     void *group_players;
 
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+    if (ranged_prime_test_backend_active &&
+        ranged_prime_test_backend.combat_mode != NULL) {
+        return ranged_prime_test_backend.combat_mode(enabled);
+    }
+#endif
     if (enabled == NULL || get_group_players == NULL ||
         group_players_in_combat == NULL ||
         !SudekiMpCleanroomEngineWorldReady()) {
@@ -4253,7 +4386,9 @@ BOOL SudekiMpCleanroomEngineSetCombatMode(BOOL enabled) {
         NULL
     );
     if (!enabled) {
-        cancel_ranged_prime();
+        if (!cancel_ranged_prime()) {
+            return FALSE;
+        }
     } else if (accepted) {
         (void)SudekiMpCleanroomEnginePrimeRangedCombat();
     }
@@ -4279,39 +4414,94 @@ BOOL SudekiMpCleanroomEngineRefreshCombatMode(void) {
 }
 
 BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void) {
-    if (game_base == NULL || ranged_prime_pending ||
-        ranged_prime_ui_active) {
-        return ranged_prime_pending || ranged_prime_ui_active;
+    if (
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+        !ranged_prime_test_backend_active &&
+#endif
+        game_base == NULL) {
+        return FALSE;
     }
+    if (ranged_prime_flag(&ranged_prime_pending) ||
+        ranged_prime_flag(&ranged_prime_ui_active)) {
+        if (ranged_prime_flag(&ranged_prime_cancel_requested)) {
+            SetLastError(ERROR_BUSY);
+            return FALSE;
+        }
+        return TRUE;
+    }
+    ranged_prime_owner_thread_id = ranged_prime_thread_id();
+    (void)next_ranged_prime_generation();
+    ranged_prime_deadline = ranged_prime_tick_count() + 75u;
+    set_ranged_prime_flag(&ranged_prime_cancel_requested, FALSE);
+    /* Publish the lease before entering native UI code so a foreign teardown
+     * thread can only observe BUSY, never a false quiescent window. */
+    set_ranged_prime_flag(&ranged_prime_pending, TRUE);
     if (!set_native_ui_active(TRUE)) {
+        clear_ranged_prime_lease();
         SudekiMpLogWrite(
             "cleanroom_engine event=ranged_combat_prime phase=enter "
             "status=rejected reason=native_ui_transition_unavailable\r\n"
         );
         return FALSE;
     }
-    ranged_prime_ui_active = TRUE;
-    ranged_prime_pending = TRUE;
+    set_ranged_prime_flag(&ranged_prime_ui_active, TRUE);
     SudekiMpLogWrite(
         "cleanroom_engine event=ranged_combat_prime phase=enter "
         "status=confirmed state=ui_active delay_ms=75 "
-        "policy=native_ui_cycle\r\n"
+        "policy=game_thread_deadline\r\n"
     );
-    ranged_prime_timer = SetTimer(NULL, 0u, 75u, complete_ranged_prime);
-    if (ranged_prime_timer == 0u) {
-        cancel_ranged_prime();
-        SudekiMpLogWrite(
-            "cleanroom_engine event=ranged_combat_prime phase=schedule "
-            "status=rejected reason=timer_error\r\n"
-        );
-        return FALSE;
-    }
     return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) {
-    return ranged_prime_pending || ranged_prime_ui_active;
+    return ranged_prime_flag(&ranged_prime_pending) ||
+        ranged_prime_flag(&ranged_prime_ui_active);
 }
+
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+BOOL SudekiMpCleanroomEngineSetRangedPrimeTestBackend(
+    const SudekiMpCleanroomEngineRangedPrimeTestBackend *backend
+) {
+    if (backend == NULL || backend->set_native_ui_active == NULL ||
+        backend->combat_mode == NULL || backend->tick_count == NULL ||
+        backend->thread_id == NULL ||
+        ranged_prime_flag(&ranged_prime_pending) ||
+        ranged_prime_flag(&ranged_prime_ui_active)) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    ranged_prime_test_backend = *backend;
+    ranged_prime_test_backend_active = TRUE;
+    return TRUE;
+}
+
+void SudekiMpCleanroomEngineResetRangedPrimeForTesting(void) {
+    (void)cancel_ranged_prime();
+    set_ranged_prime_flag(&ranged_prime_pending, FALSE);
+    set_ranged_prime_flag(&ranged_prime_ui_active, FALSE);
+    set_ranged_prime_flag(&ranged_prime_cancel_requested, FALSE);
+    ranged_prime_deadline = 0u;
+    ranged_prime_owner_thread_id = 0u;
+    (void)next_ranged_prime_generation();
+    ZeroMemory(&ranged_prime_test_backend,
+        sizeof(ranged_prime_test_backend));
+    ranged_prime_test_backend_active = FALSE;
+}
+
+uint32_t SudekiMpCleanroomEngineRangedPrimeGenerationForTesting(void) {
+    return ranged_prime_generation;
+}
+
+BOOL SudekiMpCleanroomEngineServiceRangedPrimeForTesting(
+    uint32_t generation
+) {
+    return service_ranged_prime(generation);
+}
+
+BOOL SudekiMpCleanroomEngineCancelRangedPrimeForTesting(void) {
+    return cancel_ranged_prime();
+}
+#endif
 
 BOOL SudekiMpCleanroomEngineFirstPersonMode(BOOL *enabled) {
     uint8_t **controller_global;
@@ -4393,6 +4583,197 @@ BOOL SudekiMpCleanroomEngineSetInfiniteSp(BOOL enabled) {
         "cleanroom_engine event=infinite_sp status=confirmed state=%s\r\n",
         enabled ? "enabled" : "disabled"
     );
+    return TRUE;
+}
+
+static BOOL training_skill_allocation_matches(
+    const void *actor_pointer_value,
+    const uint8_t *skill
+) {
+    const uint8_t *actor = (const uint8_t *)actor_pointer_value;
+
+    /* A CSkill cached across a party/level transition is not safe merely
+     * because its numeric address still matches.  Prove both sides of the
+     * native ownership relation and the complete SkillData pointer array
+     * before reading even one slot from the allocation. */
+    return readable_memory(
+            actor, CHARACTER_SKILL_OFFSET + sizeof(void *)) &&
+        *(void *const *)(actor + CHARACTER_SKILL_OFFSET) == skill &&
+        readable_memory(
+            skill,
+            CSKILL_DATA_ARRAY_OFFSET +
+                TRAINING_SKILL_COUNT * sizeof(void *)) &&
+        *(void *const *)(skill + CSKILL_OWNER_OFFSET) == actor;
+}
+
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+BOOL SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
+    const void *actor,
+    const void *skill
+) {
+    return training_skill_allocation_matches(
+        actor, (const uint8_t *)skill);
+}
+#endif
+
+static void release_training_skill_lease(unsigned int actor_index) {
+    SudekiMpTrainingSkillLease *lease;
+    unsigned int slot;
+    if (actor_index >= 4u) return;
+    lease = &training_skill_leases[actor_index];
+    if (!lease->active) {
+        ZeroMemory(lease, sizeof(*lease));
+        return;
+    }
+    if (training_skill_allocation_matches(
+            lease->actor, lease->skill)) {
+        for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
+            uint8_t *current = *(uint8_t **)(lease->skill +
+                CSKILL_DATA_ARRAY_OFFSET + slot * sizeof(void *));
+            if (current == lease->skill_data[slot] &&
+                writable_memory(current + SKILL_DATA_ENABLED_OFFSET, 1u) &&
+                current[SKILL_DATA_ENABLED_OFFSET] == 1u) {
+                current[SKILL_DATA_ENABLED_OFFSET] =
+                    lease->saved_enabled[slot];
+            }
+        }
+    }
+    ZeroMemory(lease, sizeof(*lease));
+}
+
+static BOOL maintain_training_skill_lease(unsigned int actor_index) {
+    SudekiMpTrainingSkillLease *lease;
+    uint8_t *actor;
+    uint8_t *skill;
+    unsigned int slot;
+    if (actor_index >= 4u) return FALSE;
+    lease = &training_skill_leases[actor_index];
+    actor = (uint8_t *)actor_pointer((SudekiMpCleanroomActor)actor_index);
+    if (actor == NULL) {
+        release_training_skill_lease(actor_index);
+        return TRUE;
+    }
+    skill = readable_memory(actor, CHARACTER_SKILL_OFFSET + sizeof(void *)) ?
+        *(uint8_t **)(actor + CHARACTER_SKILL_OFFSET) : NULL;
+    if (lease->active && lease->actor == actor && lease->skill == skill) {
+        if (!training_skill_allocation_matches(actor, skill)) {
+            release_training_skill_lease(actor_index);
+            return FALSE;
+        }
+        for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
+            if (*(uint8_t **)(skill + CSKILL_DATA_ARRAY_OFFSET +
+                    slot * sizeof(void *)) != lease->skill_data[slot] ||
+                !writable_memory(
+                    lease->skill_data[slot] + SKILL_DATA_ENABLED_OFFSET, 1u)) {
+                release_training_skill_lease(actor_index);
+                return FALSE;
+            }
+            lease->skill_data[slot][SKILL_DATA_ENABLED_OFFSET] = 1u;
+        }
+        return TRUE;
+    }
+    release_training_skill_lease(actor_index);
+    if (!training_skill_allocation_matches(actor, skill)) return FALSE;
+    for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
+        uint8_t *skill_data = *(uint8_t **)(skill +
+            CSKILL_DATA_ARRAY_OFFSET + slot * sizeof(void *));
+        if (!writable_memory(skill_data + SKILL_DATA_ENABLED_OFFSET, 1u)) {
+            ZeroMemory(lease, sizeof(*lease));
+            return FALSE;
+        }
+        lease->skill_data[slot] = skill_data;
+        lease->saved_enabled[slot] = skill_data[SKILL_DATA_ENABLED_OFFSET];
+    }
+    lease->actor = actor;
+    lease->skill = skill;
+    lease->active = TRUE;
+    for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
+        lease->skill_data[slot][SKILL_DATA_ENABLED_OFFSET] = 1u;
+    }
+    SudekiMpLogFormat(
+        "cleanroom_engine event=training_skills actor=%s status=enabled "
+        "slots=6 policy=native_skilldata_reversible_lease\r\n",
+        actor_labels[actor_index]);
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineTrainingSkills(BOOL *enabled) {
+    if (enabled == NULL || game_base == NULL) return FALSE;
+    *enabled = training_skills_enabled;
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetTrainingSkills(BOOL enabled) {
+    unsigned int actor_index;
+    enabled = enabled != FALSE;
+    training_skills_enabled = enabled;
+    if (!enabled) {
+        for (actor_index = 4u; actor_index-- > 0u;) {
+            release_training_skill_lease(actor_index);
+        }
+    } else if (SudekiMpCleanroomEngineWorldReady()) {
+        for (actor_index = 0u; actor_index < 4u; ++actor_index) {
+            if (!maintain_training_skill_lease(actor_index)) return FALSE;
+        }
+    }
+    SudekiMpLogFormat(
+        "cleanroom_engine event=training_skills status=confirmed state=%s "
+        "scope=all_present_retail_party_actors\r\n",
+        enabled ? "enabled" : "disabled");
+    return TRUE;
+}
+
+static void maintain_party_skill_points(void) {
+    unsigned int actor_index;
+    BOOL infinite_sp_active = FALSE;
+    if (!SudekiMpCleanroomEngineInfiniteSp(&infinite_sp_active) ||
+        !infinite_sp_active || get_pc == NULL ||
+        get_character_number_stat == NULL ||
+        set_character_number_stat == NULL) return;
+    for (actor_index = 0u; actor_index < 4u; ++actor_index) {
+        void *actor = actor_pointer((SudekiMpCleanroomActor)actor_index);
+        void *gel_pointer;
+        float current;
+        float maximum;
+        if (actor == NULL) {
+            sp_refill_logged_entities[actor_index] = NULL;
+            continue;
+        }
+        gel_pointer = get_pc(actor_resources[actor_index]);
+        if (!readable_memory(gel_pointer, 0x10u)) continue;
+        current = get_character_number_stat(gel_pointer, "SkillPoints");
+        maximum = get_character_number_stat(
+            gel_pointer, "Maximum SkillPoints");
+        if (isfinite(current) && isfinite(maximum) && maximum > 0.0f &&
+            current < maximum && set_character_number_stat(
+                gel_pointer, "SkillPoints", maximum) != 0u &&
+            sp_refill_logged_entities[actor_index] != actor) {
+            sp_refill_logged_entities[actor_index] = actor;
+            SudekiMpLogFormat(
+                "cleanroom_engine event=infinite_sp action=refill actor=%s "
+                "previous_bits=0x%08lx maximum_bits=0x%08lx\r\n",
+                actor_labels[actor_index],
+                (unsigned long)float_bits(current),
+                (unsigned long)float_bits(maximum));
+        }
+        (void)entity_from_gel_pointer(gel_pointer);
+    }
+}
+
+BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
+    uint8_t *manager;
+    if (state == NULL || game_base == NULL || !readable_memory(
+            game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL,
+            sizeof(manager))) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    manager = *(uint8_t **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
+    if (!readable_memory(manager, 0x60u)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    *state = *(int *)(manager + 0x5cu);
     return TRUE;
 }
 
@@ -4611,6 +4992,10 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
     void *elco_ability;
     float cafu_position[3];
 
+    if (ranged_prime_flag(&ranged_prime_pending) ||
+        ranged_prime_flag(&ranged_prime_ui_active)) {
+        (void)service_ranged_prime(ranged_prime_generation);
+    }
     if (game_base == NULL) {
         return;
     }
@@ -4645,6 +5030,13 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
         );
     }
     initialize_present_actors();
+    if (training_skills_enabled) {
+        unsigned int actor_index;
+        for (actor_index = 0u; actor_index < 4u; ++actor_index) {
+            (void)maintain_training_skill_lease(actor_index);
+        }
+    }
+    maintain_party_skill_points();
     if (infinite_jetpack_fuel && elco_get_fuel != NULL &&
         elco_set_fuel != NULL) {
         elco_ability = elco_ability_pointer();
@@ -4712,6 +5104,18 @@ void SudekiMpCleanroomEngineReset(void) {
     SudekiMpCafuMissileModelPatch *missile_patch;
     unsigned int missile_patch_index;
 
+    /* The native UI lease must be quiesced while every exact engine pointer
+     * is still valid. A failed transition is retryable: leave the engine
+     * initialized and keep the public pending witness asserted. */
+    if (!cancel_ranged_prime()) {
+        SudekiMpLogWrite(
+            "cleanroom_engine event=reset status=deferred "
+            "reason=ranged_combat_prime_not_quiesced\r\n"
+        );
+        SetLastError(ERROR_BUSY);
+        return;
+    }
+    (void)SudekiMpCleanroomEngineSetTrainingSkills(FALSE);
     party_invulnerability_enabled = FALSE;
     (void)maintain_party_invulnerability_leases();
     if (party_invulnerability_lease_count != 0u) {
@@ -4728,7 +5132,6 @@ void SudekiMpCleanroomEngineReset(void) {
         sizeof(party_invulnerability_leases)
     );
     (void)SudekiMpCleanroomEngineSetStoryTestSpeed(FALSE, 1.0f);
-    cancel_ranged_prime();
     if (cafu_exception_handler != NULL) {
         (void)RemoveVectoredExceptionHandler(cafu_exception_handler);
         cafu_exception_handler = NULL;
@@ -4852,14 +5255,19 @@ void SudekiMpCleanroomEngineReset(void) {
     entity_pointer_cleanup = NULL;
     resource_name_from_text = NULL;
     resource_name_release_reference = NULL;
-    ranged_prime_pending = FALSE;
-    ranged_prime_ui_active = FALSE;
-    ranged_prime_timer = 0u;
+    set_ranged_prime_flag(&ranged_prime_pending, FALSE);
+    set_ranged_prime_flag(&ranged_prime_ui_active, FALSE);
+    set_ranged_prime_flag(&ranged_prime_cancel_requested, FALSE);
+    ranged_prime_deadline = 0u;
+    ranged_prime_owner_thread_id = 0u;
     no_sp_needed_flag = NULL;
     no_ssp_needed_flag = NULL;
     saved_no_sp_needed = 0u;
     saved_no_ssp_needed = 0u;
     resource_flags_captured = FALSE;
+    training_skills_enabled = FALSE;
+    ZeroMemory(training_skill_leases, sizeof(training_skill_leases));
+    ZeroMemory(sp_refill_logged_entities, sizeof(sp_refill_logged_entities));
     inventory_filled = FALSE;
     spirit_strikes_unlocked = FALSE;
     infinite_jetpack_fuel = FALSE;

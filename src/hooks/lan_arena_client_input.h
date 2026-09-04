@@ -4,7 +4,10 @@
 #include <windows.h>
 
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module);
-void SudekiMpUninstallLanArenaClientInput(void);
+/* Teardown is retryable. A FALSE result means at least one live hook could
+ * not be restored; callback trampolines and operator events remain owned so
+ * no surviving detour can observe cleared dependencies. */
+BOOL SudekiMpUninstallLanArenaClientInput(void);
 /* Called once from the post-controller game-thread observer. Held movement,
  * held fire, and the native client-camera aim are refreshed at a bounded
  * cadence; missing controller samples become an explicit neutral packet
@@ -31,10 +34,12 @@ BOOL SudekiMpLanArenaClientCameraInputAllowed(
     BOOL authenticated,
     BOOL local_skill_camera_active
 );
+/* A local diagnostic forward hold may replace only neutral native axes. */
+BOOL SudekiMpLanArenaClientOperatorForwardPolicy(
+    BOOL physical_direction_held,
+    BOOL operator_forward_held
+);
 
-/* Cleanroom-only test control. Campaign combat is authored by Sudeki's
- * dungeon/world triggers and the resulting native flag is replicated. */
-void SudekiMpLanArenaClientRequestCombatToggle(void);
 BOOL SudekiMpLanArenaClientRequestSkillSlot(unsigned int slot);
 
 #endif
