@@ -49,6 +49,9 @@ void SudekiMpCleanroomEngineReleaseResourceName(
     SudekiMpResourceName *resource_name
 );
 BOOL SudekiMpCleanroomEngineWorldReady(void);
+/* Opt-in single-player testroom comparison. Protects both party and Woluf
+ * with native invulnerability; no AI, movement, animation or speed override. */
+BOOL SudekiMpCleanroomEngineEnableNativeAiProbe(void);
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor);
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor);
 void *SudekiMpCleanroomEngineGenericEntity(const char *resource_name);
@@ -154,6 +157,7 @@ BOOL SudekiMpCleanroomEngineSetTrainingSkills(BOOL enabled);
  * transaction. Zero is inactive; nonzero values are native internal stages
  * and must not be interpreted as actor-local CSkill slots. */
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state);
+BOOL SudekiMpCleanroomEngineSpiritStrikeId(int *strike_id);
 BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);
@@ -170,6 +174,8 @@ void SudekiMpCleanroomEngineMaintainResources(void);
 void SudekiMpCleanroomEngineReset(void);
 
 #if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+BOOL SudekiMpCleanroomEngineTrainingSkillLeaseForTesting(
+    unsigned int actor_index, void *actor, BOOL enabled);
 typedef struct SudekiMpCleanroomEngineRangedPrimeTestBackend {
     BOOL (*set_native_ui_active)(BOOL active);
     BOOL (*combat_mode)(BOOL *enabled);

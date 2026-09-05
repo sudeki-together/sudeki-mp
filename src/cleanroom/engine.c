@@ -321,6 +321,11 @@ static const int actor_starter_weapon_slots[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
 };
 /* SpawnEntity appends .SOL; this is the monster definition, not its group. */
 static const char dummy_resource[] = "MON_TrainingDummy";
+static const char native_ai_enemy_resource[] = "MON_Woluf";
+static BOOL native_ai_probe_enabled;
+static unsigned int native_ai_probe_stage;
+static DWORD native_ai_probe_stage_at;
+static DWORD native_ai_probe_log_at;
 static uint8_t *game_base;
 static InternalSpawnPcFunction internal_spawn_pc;
 static RemovePcFunction remove_pc;
@@ -372,6 +377,9 @@ static BOOL resource_flags_captured;
 typedef struct SudekiMpTrainingSkillLease {
     void *actor;
     uint8_t *skill;
+    uint8_t *context;
+    int16_t *learned[TRAINING_SKILL_COUNT];
+    int16_t saved_learned[TRAINING_SKILL_COUNT];
     uint8_t *skill_data[TRAINING_SKILL_COUNT];
     uint8_t saved_enabled[TRAINING_SKILL_COUNT];
     BOOL active;
@@ -446,6 +454,7 @@ static BOOL party_invulnerability_enabled;
 static SudekiMpPartyInvulnerabilityLease
     party_invulnerability_leases[PARTY_SLOT_COUNT];
 static unsigned int party_invulnerability_lease_count;
+static SudekiMpPartyInvulnerabilityLease native_ai_enemy_protection;
 static BOOL story_test_speed_owned;
 static BOOL story_test_speed_conflicted;
 static uint32_t story_test_speed_saved_bits;
@@ -4606,6 +4615,15 @@ static BOOL training_skill_allocation_matches(
         *(void *const *)(skill + CSKILL_OWNER_OFFSET) == actor;
 }
 
+static BOOL training_skill_context_matches(const void *actor_value,
+    const uint8_t *context) {
+    const uint8_t *actor = (const uint8_t *)actor_value;
+    return readable_memory(actor, 0xd8u) &&
+        *(void *const *)(actor + 0xd4u) == context &&
+        readable_memory(context, 0x166u) &&
+        *(void *const *)(context + 0x10u) == actor;
+}
+
 #if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
 BOOL SudekiMpCleanroomEngineTrainingSkillAllocationValidForTesting(
     const void *actor,
@@ -4638,25 +4656,39 @@ static void release_training_skill_lease(unsigned int actor_index) {
             }
         }
     }
+    if (training_skill_context_matches(lease->actor, lease->context)) {
+        for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
+            if (writable_memory(lease->learned[slot], sizeof(int16_t)) &&
+                *lease->learned[slot] == 1 && lease->saved_learned[slot] == 0)
+                *lease->learned[slot] = 0;
+        }
+    }
     ZeroMemory(lease, sizeof(*lease));
 }
 
-static BOOL maintain_training_skill_lease(unsigned int actor_index) {
+static BOOL maintain_training_skill_lease_for_actor(unsigned int actor_index,
+    uint8_t *actor) {
     SudekiMpTrainingSkillLease *lease;
-    uint8_t *actor;
     uint8_t *skill;
+    uint8_t *context;
+    /* Native SkillData availability at RVA da2a0 indexes the actor's learned
+     * skill stats separately from SkillData+8. Enum order is Tal,Buki,Elco,Ailish. */
+    static const unsigned int learned_base[] = {0x136u, 0x13cu, 0x13au, 0x138u};
     unsigned int slot;
     if (actor_index >= 4u) return FALSE;
     lease = &training_skill_leases[actor_index];
-    actor = (uint8_t *)actor_pointer((SudekiMpCleanroomActor)actor_index);
     if (actor == NULL) {
         release_training_skill_lease(actor_index);
         return TRUE;
     }
     skill = readable_memory(actor, CHARACTER_SKILL_OFFSET + sizeof(void *)) ?
         *(uint8_t **)(actor + CHARACTER_SKILL_OFFSET) : NULL;
+    context = readable_memory(actor, 0xd8u) ?
+        *(uint8_t **)(actor + 0xd4u) : NULL;
     if (lease->active && lease->actor == actor && lease->skill == skill) {
-        if (!training_skill_allocation_matches(actor, skill)) {
+        if (!training_skill_allocation_matches(actor, skill) ||
+            lease->context != context ||
+            !training_skill_context_matches(actor, context)) {
             release_training_skill_lease(actor_index);
             return FALSE;
         }
@@ -4664,38 +4696,66 @@ static BOOL maintain_training_skill_lease(unsigned int actor_index) {
             if (*(uint8_t **)(skill + CSKILL_DATA_ARRAY_OFFSET +
                     slot * sizeof(void *)) != lease->skill_data[slot] ||
                 !writable_memory(
-                    lease->skill_data[slot] + SKILL_DATA_ENABLED_OFFSET, 1u)) {
+                    lease->skill_data[slot] + SKILL_DATA_ENABLED_OFFSET, 1u) ||
+                !writable_memory(lease->learned[slot], sizeof(int16_t))) {
                 release_training_skill_lease(actor_index);
                 return FALSE;
             }
             lease->skill_data[slot][SKILL_DATA_ENABLED_OFFSET] = 1u;
+            if (*lease->learned[slot] == 0) *lease->learned[slot] = 1;
         }
         return TRUE;
     }
     release_training_skill_lease(actor_index);
-    if (!training_skill_allocation_matches(actor, skill)) return FALSE;
+    if (!training_skill_allocation_matches(actor, skill) ||
+        !training_skill_context_matches(actor, context)) return FALSE;
     for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
         uint8_t *skill_data = *(uint8_t **)(skill +
             CSKILL_DATA_ARRAY_OFFSET + slot * sizeof(void *));
-        if (!writable_memory(skill_data + SKILL_DATA_ENABLED_OFFSET, 1u)) {
+        int16_t *learned = (int16_t *)(context + learned_base[actor_index] + slot * 8u);
+        if (!writable_memory(skill_data + SKILL_DATA_ENABLED_OFFSET, 1u) ||
+            !writable_memory(learned, sizeof(*learned)) ||
+            !readable_memory(skill_data + 0x0cu, sizeof(uint32_t)) ||
+            *(uint32_t *)(skill_data + 0x0cu) != slot) {
             ZeroMemory(lease, sizeof(*lease));
             return FALSE;
         }
         lease->skill_data[slot] = skill_data;
         lease->saved_enabled[slot] = skill_data[SKILL_DATA_ENABLED_OFFSET];
+        lease->learned[slot] = learned;
+        lease->saved_learned[slot] = *learned;
     }
     lease->actor = actor;
     lease->skill = skill;
+    lease->context = context;
     lease->active = TRUE;
     for (slot = 0u; slot < TRAINING_SKILL_COUNT; ++slot) {
         lease->skill_data[slot][SKILL_DATA_ENABLED_OFFSET] = 1u;
+        if (*lease->learned[slot] == 0) *lease->learned[slot] = 1;
     }
     SudekiMpLogFormat(
         "cleanroom_engine event=training_skills actor=%s status=enabled "
-        "slots=6 policy=native_skilldata_reversible_lease\r\n",
+        "slots=6 policy=native_skilldata_and_learned_stats_reversible_lease\r\n",
         actor_labels[actor_index]);
     return TRUE;
 }
+
+static BOOL maintain_training_skill_lease(unsigned int actor_index) {
+    return maintain_training_skill_lease_for_actor(actor_index,
+        (uint8_t *)actor_pointer((SudekiMpCleanroomActor)actor_index));
+}
+
+#if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
+BOOL SudekiMpCleanroomEngineTrainingSkillLeaseForTesting(
+    unsigned int actor_index, void *actor, BOOL enabled) {
+    if (actor_index >= 4u) return FALSE;
+    if (!enabled) {
+        release_training_skill_lease(actor_index);
+        return TRUE;
+    }
+    return maintain_training_skill_lease_for_actor(actor_index, actor);
+}
+#endif
 
 BOOL SudekiMpCleanroomEngineTrainingSkills(BOOL *enabled) {
     if (enabled == NULL || game_base == NULL) return FALSE;
@@ -4774,6 +4834,20 @@ BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
         return FALSE;
     }
     *state = *(int *)(manager + 0x5cu);
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSpiritStrikeId(int *strike_id) {
+    uint8_t *manager;
+    int id;
+    if (strike_id == NULL || game_base == NULL || !readable_memory(
+            game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL, sizeof(void *))) return FALSE;
+    manager = *(uint8_t **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
+    if (!readable_memory(manager, 0x9cu)) return FALSE;
+    /* Retail activation at RVA fba0 stores its validated selected id here. */
+    id = *(int *)(manager + 0x98u);
+    if (id < 0 || id > 15) return FALSE;
+    *strike_id = id;
     return TRUE;
 }
 
@@ -4983,6 +5057,133 @@ BOOL SudekiMpCleanroomEngineSetStoryTestSpeed(
     return TRUE;
 }
 
+/* The comparison enemy shares the native character arbiter contract, but is
+ * not a party member. Resolve its resource and full component/world identity
+ * separately; never add it to the party's invulnerability reconciliation. */
+static BOOL maintain_native_ai_enemy_protection(BOOL enabled) {
+    SudekiMpPartyInvulnerabilityLease current;
+    void *world_manager;
+    void *world_directory;
+    void *enemy;
+
+    if (!enabled && !native_ai_enemy_protection.owned) return TRUE;
+    if (!party_invulnerability_world(&world_manager, &world_directory))
+        return FALSE;
+    enemy = SudekiMpCleanroomEngineGenericEntity(native_ai_enemy_resource);
+    if (enemy == NULL ||
+        !capture_party_invulnerability_identity(
+            enemy, world_manager, world_directory, &current)) return FALSE;
+    if (native_ai_enemy_protection.owned) {
+        if (!same_party_invulnerability_identity(
+                &current, &native_ai_enemy_protection)) return FALSE;
+        if (!enabled)
+            return release_party_invulnerability_lease(
+                &native_ai_enemy_protection, "native_ai_probe_reset");
+        return party_invulnerability_native_state_present(
+            &native_ai_enemy_protection);
+    }
+    if (!acquire_party_invulnerability_lease(
+            &current, &native_ai_enemy_protection)) return FALSE;
+    SudekiMpLogWrite("cleanroom_native_ai state=enemy_protected resource=MON_Woluf policy=native_invulnerability_no_ai_override\r\n");
+    return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineEnableNativeAiProbe(void) {
+    const char *command = GetCommandLineA();
+    if (game_base == NULL || native_ai_enemy_protection.owned || command == NULL ||
+        strstr(command, "-Level testroom") == NULL ||
+        strstr(command, "-DT 1") == NULL ||
+        strstr(command, "-Tal 1") == NULL) return FALSE;
+    native_ai_probe_enabled = TRUE;
+    native_ai_probe_stage = 0u;
+    native_ai_probe_stage_at = 0u;
+    native_ai_probe_log_at = 0u;
+    SudekiMpLogWrite("cleanroom_native_ai state=enabled policy=single_player_native_ai_no_movement_or_clock_override\r\n");
+    return TRUE;
+}
+
+static void service_native_ai_probe(void) {
+    float anchor[3];
+    void *enemy;
+    DWORD now = GetTickCount();
+    if (!native_ai_probe_enabled || !SudekiMpCleanroomEngineWorldReady() ||
+        !SudekiMpCleanroomEngineActorPosition(SUDEKIMP_CLEANROOM_TAL, anchor))
+        return;
+    if (native_ai_probe_stage == 0u) {
+        native_ai_probe_stage = 1u;
+        native_ai_probe_stage_at = now;
+        if (!SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_AILISH)) {
+            anchor[0] += 2.0f;
+            /* Mark attempted before native entry; no blind spawn retries. */
+            (void)SudekiMpCleanroomEngineSpawnActor(SUDEKIMP_CLEANROOM_AILISH, anchor);
+            return;
+        }
+    }
+    if (!SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_AILISH)) {
+        if (native_ai_probe_stage == 1u &&
+            (DWORD)(now - native_ai_probe_stage_at) > 10000u) {
+            native_ai_probe_stage = 4u;
+            SudekiMpLogWrite("cleanroom_native_ai state=failed reason=ailish_spawn_timeout no_retry=true\r\n");
+        }
+        return;
+    }
+    /* Acquire protection before any enemy is created. Native refcounts
+     * compose with skill invulnerability and are restored by engine teardown. */
+    if (!SudekiMpCleanroomEngineMaintainPartyInvulnerability(TRUE)) return;
+    if (native_ai_probe_stage == 1u) {
+        native_ai_probe_stage = 2u;
+        native_ai_probe_stage_at = now;
+        anchor[2] += 6.0f;
+        spawn_entity(native_ai_enemy_resource, anchor[0], anchor[1], anchor[2]);
+        SudekiMpLogWrite("cleanroom_native_ai state=enemy_requested resource=MON_Woluf policy=native_spawn_once_party_protected\r\n");
+        return;
+    }
+    enemy = SudekiMpCleanroomEngineGenericEntity(native_ai_enemy_resource);
+    if (native_ai_probe_stage == 2u && enemy != NULL) {
+        /* Do not enable combat until both sides have verified protection. */
+        if (!maintain_native_ai_enemy_protection(TRUE)) {
+            if ((DWORD)(now - native_ai_probe_stage_at) > 10000u) {
+                native_ai_probe_stage = 4u;
+                SudekiMpLogWrite("cleanroom_native_ai state=failed reason=enemy_protection_timeout no_retry=true\r\n");
+            }
+            return;
+        }
+        native_ai_probe_stage = 3u;
+        (void)SudekiMpCleanroomEngineSetCombatMode(TRUE);
+        SudekiMpLogWrite("cleanroom_native_ai state=enemy_present resource=MON_Woluf policy=invulnerable_enemy_native_ai\r\n");
+    } else if (native_ai_probe_stage == 2u &&
+        (DWORD)(now - native_ai_probe_stage_at) > 10000u) {
+        native_ai_probe_stage = 4u;
+        SudekiMpLogWrite("cleanroom_native_ai state=failed reason=enemy_spawn_timeout no_retry=true\r\n");
+    }
+    if (native_ai_probe_stage == 3u &&
+        !maintain_native_ai_enemy_protection(TRUE)) {
+        native_ai_probe_stage = 4u;
+        SudekiMpLogWrite("cleanroom_native_ai state=failed reason=enemy_protection_identity_or_state_lost no_retry=true\r\n");
+        return;
+    }
+    if (native_ai_probe_stage == 3u &&
+        (native_ai_probe_log_at == 0u || (DWORD)(now-native_ai_probe_log_at) >= 1000u)) {
+        float tal_hp, tal_sp, ailish_hp, ailish_sp, enemy_hp = -1.0f;
+        void *enemy_gel = get_generic_entity(native_ai_enemy_resource);
+        SudekiMpCleanroomActorPresentation presentation;
+        if (readable_memory(enemy_gel, 0x10u)) {
+            float hp = get_character_number_stat(enemy_gel, "HitPoints");
+            if (isfinite(hp) && hp >= 0.0f) enemy_hp = hp;
+        }
+        native_ai_probe_log_at = now;
+        if (SudekiMpCleanroomEngineActorResources(SUDEKIMP_CLEANROOM_TAL, &tal_hp, &tal_sp) &&
+            SudekiMpCleanroomEngineActorResources(SUDEKIMP_CLEANROOM_AILISH, &ailish_hp, &ailish_sp) &&
+            SudekiMpCleanroomEngineActorPresentation(SUDEKIMP_CLEANROOM_AILISH, &presentation)) {
+            SudekiMpLogFormat("cleanroom_native_ai state=observed enemy_present=%u enemy_protected=1 enemy_hp=%.2f tal_hp=%.2f ailish_hp=%.2f ailish_selectors=%ld,%ld,%ld,%ld,%ld policy=read_only_native_presentation\r\n",
+                enemy != NULL, enemy_hp, tal_hp, ailish_hp,
+                (long)presentation.selector[0], (long)presentation.selector[1],
+                (long)presentation.selector[2], (long)presentation.selector[3],
+                (long)presentation.selector[4]);
+        }
+    }
+}
+
 void SudekiMpCleanroomEngineMaintainResources(void) {
     void **manager_global;
     void *manager;
@@ -5030,6 +5231,7 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
         );
     }
     initialize_present_actors();
+    service_native_ai_probe();
     if (training_skills_enabled) {
         unsigned int actor_index;
         for (actor_index = 0u; actor_index < 4u; ++actor_index) {
@@ -5112,6 +5314,11 @@ void SudekiMpCleanroomEngineReset(void) {
             "cleanroom_engine event=reset status=deferred "
             "reason=ranged_combat_prime_not_quiesced\r\n"
         );
+        SetLastError(ERROR_BUSY);
+        return;
+    }
+    if (!maintain_native_ai_enemy_protection(FALSE)) {
+        SudekiMpLogWrite("cleanroom_native_ai state=reset_deferred reason=enemy_protection_not_released\r\n");
         SetLastError(ERROR_BUSY);
         return;
     }
@@ -5270,6 +5477,8 @@ void SudekiMpCleanroomEngineReset(void) {
     ZeroMemory(sp_refill_logged_entities, sizeof(sp_refill_logged_entities));
     inventory_filled = FALSE;
     spirit_strikes_unlocked = FALSE;
+    native_ai_probe_enabled = FALSE;
+    native_ai_probe_stage = 0u;
     infinite_jetpack_fuel = FALSE;
     party_invulnerability_enabled = FALSE;
     story_test_speed_owned = FALSE;

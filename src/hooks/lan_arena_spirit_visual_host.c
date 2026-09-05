@@ -21,7 +21,8 @@ enum {
 static const uint32_t resource_ids[] = {
     0u, 0x3cef3b8fu, 0xb5a0cf01u, 0x03439ed3u, 0xb5661565u,
     0x903afa53u, 0x2e5a867bu, 0x4d727a05u, 0x449d201bu,
-    0xf007401bu, 0xc24c6a03u, 0xa8171ecfu, 0x62dcc5a3u, 0xaeec0c83u
+    0xf007401bu, 0xc24c6a03u, 0xa8171ecfu, 0x62dcc5a3u, 0xaeec0c83u,
+    0x423bad0du
 };
 static const char *const resource_names[] = {
     NULL, "SFXSS250_INITIATE", "SFXSS251_INITIATE_LOOP_WAIT",
@@ -30,7 +31,7 @@ static const char *const resource_names[] = {
     "SFXSS802_SPIRIT_END", "SFXSS300_TAL_SPIRIT_STRIKE",
     "SFXSS350_TAL_SPIRIT_STRIKE", "SFXSS110_LOOP_INVULNERABLE",
     "SFXSS111_END_INVULNERABLE", "SFXSS900_GENERIC_INITATE",
-    "SFXSS351_TAL_HIT_CHARACTER"
+    "SFXSS351_TAL_HIT_CHARACTER", "SFXSTA003_BOOST"
 };
 enum { RESOURCE_TEXT_CAPACITY = 64, DIAGNOSTIC_CAPACITY = 16 };
 static const uint8_t finalize_prefix[] = {
@@ -209,10 +210,23 @@ unsigned int SudekiMpSpiritVisualHostRegistryBegin(
     uint32_t tick, uint8_t kind, void *entity,
     const SudekiMpSpiritVisualHostApi *api
 ) {
+    return SudekiMpSpiritVisualHostRegistryBeginOwned(
+        r, session, skill, tick, kind, 0u, entity, api);
+}
+
+unsigned int SudekiMpSpiritVisualHostRegistryBeginOwned(
+    SudekiMpSpiritVisualHostRegistry *r, uint64_t session, uint16_t skill,
+    uint32_t tick, uint8_t kind, uint8_t owner_actor_type, void *entity,
+    const SudekiMpSpiritVisualHostApi *api
+) {
     unsigned int i, free_slot = SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY;
     SudekiMpSpiritVisualHostEntry *entry;
+    SudekiMpLanArenaSpiritVfxSnapshot identity = {0};
+    identity.kind = kind;
+    identity.skill_sequence = skill;
+    identity.owner_actor_type = owner_actor_type;
     if (r == NULL || !api_valid(api)) return 0u;
-    if (session == 0u || skill == 0u || entity == NULL || kind == 0u ||
+    if (session == 0u || !SudekiMpLanArenaVisualOwnerValid(&identity) || entity == NULL || kind == 0u ||
         kind >= sizeof(resource_ids)/sizeof(resource_ids[0]) ||
         (r->session != 0u && r->session != session)) {
         r->unknown = TRUE;
@@ -222,7 +236,8 @@ unsigned int SudekiMpSpiritVisualHostRegistryBegin(
     for (i = 0; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
         entry = &r->entries[i];
         if (entry->weak.entity == entity) {
-            if (entry->value.kind != kind || entry->value.skill_sequence != skill)
+            if (entry->value.kind != kind || entry->value.skill_sequence != skill ||
+                entry->value.owner_actor_type != owner_actor_type)
                 r->unknown = TRUE;
             return i + 1u; /* Repeated finalize does not create another instance. */
         }
@@ -241,6 +256,7 @@ unsigned int SudekiMpSpiritVisualHostRegistryBegin(
     entry->value.instance_sequence = ++r->next_instance;
     entry->value.skill_sequence = skill;
     entry->value.kind = kind;
+    entry->value.owner_actor_type = owner_actor_type;
     entry->value.emitted_host_tick = tick;
     if (!api->bind(api->context, &entry->weak, entity) ||
         entry->weak.entity != entity) {
@@ -559,7 +575,11 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                 } else {
                     kind = native_resource_kind(s + 0x28u);
                 }
-                if (!active && kind != 0u &&
+                if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+                    /* Status effects are discovered from the exact target's
+                     * status component after finalization, never attributed
+                     * to whichever Spirit happened to be running. */
+                } else if (!active && kind != 0u &&
                     (inactive_kind_mask & (uint16_t)(1u << kind)) == 0u) {
                     inactive_kind_mask |= (uint16_t)(1u << kind);
                     observed_kind = kind;
@@ -643,8 +663,10 @@ BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE module) {
     const uint8_t *base = (const uint8_t *)module;
     static const uint32_t calls[] = {0x18244u,0x182d5u,0x183d8u,0x18425u,0x18543u,0x18585u};
     static const uint8_t base_destructor_tail[] = {0xe9,0xdf,0x71,0xec,0xff};
+    static const uint8_t is_boost_body[] = {0x8b,0x41,0x54,0x8a,0x40,0x4c,0xc3};
     unsigned int i;
     if (base == NULL ||
+        !matches(base, 0x5070u, is_boost_body, sizeof(is_boost_body)) ||
         !matches(base, RVA_FINALIZE, finalize_prefix, sizeof(finalize_prefix)) ||
         !matches(base, RVA_WEAK_BIND, weak_bind_body, sizeof(weak_bind_body)) ||
         !matches(base, 0x4d72u, weak_null_tail, sizeof(weak_null_tail)) ||
@@ -707,8 +729,57 @@ BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {
     return SudekiMpSpiritVisualHostRegistryReset(&registry, native_api());
 }
 
+static BOOL discover_actor_status_visuals(
+    void *actor, uint8_t actor_type, uint64_t session, uint32_t tick
+) {
+    uint8_t *base = (uint8_t *)image;
+    void *manager, *owner, *status, *effect, *arbiter, *status_owner;
+    unsigned int i, token;
+    uint8_t active;
+    /* Exact CStatusEffectManager owner at +10; IsBoost at RVA5070 reads
+     * manager+54 (slot6) and BoostStatusEffect+4c. The shared native status
+     * visual helper owns StatusEffect+44, independent of any cast/source. */
+    sample_reason = "status_actor_or_component_identity";
+    if (actor == NULL || !pointer_at(actor, 0x90u, &arbiter) ||
+        !pointer_at(arbiter, 0x10u, &owner) || owner != actor ||
+        !pointer_at(actor, 0xa8u, &manager) ||
+        !memory_access(manager, 0x78u, FALSE) ||
+        *(void **)manager != base + 0x2d4abcu ||
+        !pointer_at(manager, 0x10u, &owner) || owner != actor ||
+        !pointer_at(manager, 0x54u, &status) ||
+        !memory_access(status, 0x50u, FALSE) ||
+        *(void **)status != base + 0x2cbf68u) return FALSE;
+    active = *((uint8_t *)status + 0x4cu);
+    if (active > 1u || !pointer_at(status, 0x44u, &effect) ||
+        !pointer_at(status, 0x38u, &status_owner) ||
+        (active && status_owner != (uint8_t *)manager + 4u)) return FALSE;
+    /* A replaced actor must not carry its predecessor's aura. Retain weak
+     * dependencies if unlink fails, just like session teardown. */
+    for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        SudekiMpSpiritVisualHostEntry *entry = &registry.entries[i];
+        if (entry->value.owner_actor_type == actor_type &&
+            entry->status_actor != NULL && entry->status_actor != actor) {
+            if (!native_bind(NULL, &entry->weak, NULL)) return FALSE;
+            memset(entry, 0, sizeof(*entry));
+        }
+    }
+    if (!active || effect == NULL) return TRUE;
+    sample_reason = "status_visual_identity";
+    if (!exact_effect(effect) || native_resource_kind(
+            (uint8_t *)effect + 0x29cu) != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST)
+        return FALSE;
+    token = SudekiMpSpiritVisualHostRegistryBeginOwned(
+        &registry, session, 0u, tick, SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST,
+        actor_type, effect, native_api());
+    if (token == 0u) return FALSE;
+    registry.entries[token - 1u].status_actor = actor;
+    SudekiMpSpiritVisualHostRegistryComplete(&registry, token, TRUE, native_api());
+    return registry.entries[token - 1u].state == ENTRY_READY;
+}
+
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     uint64_t session, uint16_t current_skill, uint32_t host_tick,
+    void *tal, void *ailish,
     SudekiMpLanArenaSnapshot *output
 ) {
     unsigned int i;
@@ -742,6 +813,13 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
         session_armed = TRUE;
     }
     sample_reason = NULL;
+    if (!discover_actor_status_visuals(tal, SUDEKIMP_LAN_ARENA_TAL_TYPE,
+            session, host_tick) ||
+        !discover_actor_status_visuals(ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+            session, host_tick)) {
+        reason = sample_reason != NULL ? sample_reason : "status_visual_discovery";
+        goto unknown;
+    }
     if (!SudekiMpSpiritVisualHostRegistryCapture(&registry, session, output, native_api())) {
         reason = registry.unknown ? "missed_or_unowned_native_lifetime" :
             (sample_reason != NULL ? sample_reason : "pending_or_overflow_roster");
@@ -751,10 +829,10 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
         const SudekiMpLanArenaSpiritVfxSnapshot *value = &output->spirit_vfx[i];
         uint16_t skill_delta = (uint16_t)(current_skill - value->skill_sequence);
         uint32_t tick_delta = host_tick - value->emitted_host_tick;
-        if (current_skill == 0u || skill_delta >= 0x8000u ||
-            tick_delta >= 0x80000000u ||
+        if (tick_delta >= 0x80000000u ||
+            (value->owner_actor_type == 0u && (current_skill == 0u || skill_delta >= 0x8000u ||
             (skill_delta == 0u && output->tal.skill_kind !=
-                SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT)) {
+                SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT)))) {
             unknown_output(output);
             reason = "publication_before_native_emission";
             goto unknown;

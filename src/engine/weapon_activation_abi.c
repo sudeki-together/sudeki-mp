@@ -106,7 +106,8 @@ static BOOL character_weapon_context(
     *inventory = *(void **)((uint8_t *)native_module + RVA_INVENTORY_GLOBAL);
     if (*weapon == NULL || *inventory == NULL ||
         !readable_memory(*weapon, WEAPON_CURRENT_ITEM_OFFSET + sizeof(void *)) ||
-        !readable_memory(*inventory, 0x130u)) {
+        !readable_memory(*inventory, 0x130u) ||
+        *(void **)((uint8_t *)*weapon + 0x10u) != character) {
         return FALSE;
     }
     *category = INVENTORY_WEAPON_CATEGORY;

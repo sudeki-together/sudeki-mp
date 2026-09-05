@@ -3818,6 +3818,98 @@ int wmain(int argc, wchar_t **argv) {
         fputs("FAIL: fixed-three active input lease policy\n", stderr);
         ++failures;
     }
+    {
+        const float input[3] = {1.0f, -0.25f, -2.0f};
+        float output[3] = {99.0f, 99.0f, 99.0f};
+        if (!SudekiMpControlSeparationFilterSpiritRootDelta(
+                TRUE, input, output) || output[0] != 0.0f ||
+            output[1] != input[1] || output[2] != 0.0f ||
+            !SudekiMpControlSeparationFilterSpiritRootDelta(
+                FALSE, input, output) ||
+            memcmp(input, output, sizeof(input)) != 0 ||
+            SudekiMpControlSeparationFilterSpiritRootDelta(
+                TRUE, NULL, output) ||
+            SudekiMpControlSeparationFilterSpiritRootDelta(
+                TRUE, input, NULL)) {
+            fputs("FAIL: Spirit root-delta filter and vertical preservation\n",
+                stderr);
+            ++failures;
+        }
+    }
+    if (!SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            TRUE, TRUE, 0x00080803u) ||
+        SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            FALSE, TRUE, 0x00080803u) ||
+        SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            TRUE, FALSE, 0x00080803u) ||
+        SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            TRUE, TRUE, 3u) ||
+        SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            TRUE, TRUE, 0x00080823u)) {
+        fputs("FAIL: Spirit non-caster single-source movement scope\n", stderr);
+        ++failures;
+    }
+    {
+        unsigned int bits;
+        for (bits = 0u; bits < 64u; ++bits) {
+            BOOL expected = bits == (1u | 2u | 8u | 16u);
+            unsigned int flag_case;
+            const uint32_t flags[] = {3u, 0x00080003u, 0x00080023u};
+            for (flag_case = 0u; flag_case < 3u; ++flag_case) {
+                BOOL admitted =
+                    SudekiMpControlSeparationTalSkillDirectMovementPolicy(
+                        (bits & 1u) != 0u, (bits & 2u) != 0u,
+                        (bits & 4u) != 0u, (bits & 8u) != 0u,
+                        (bits & 16u) != 0u, (bits & 32u) != 0u,
+                        flags[flag_case]);
+                if (admitted != (expected && flag_case < 2u)) {
+                    fputs("FAIL: Tal noncaster movement excludes own skill, Spirit, unknown and other locks\n", stderr);
+                    ++failures;
+                }
+            }
+        }
+    }
+    {
+        static const float inputs[] = {
+            0.0f, 0.25f, 0.75f, 1.0f, 1.5f, 1.803f, 2.121f, 4.0f,
+            -0.1f, 4.01f, INFINITY, -INFINITY, NAN
+        };
+        static const float expected[] = {
+            0.0f, 0.25f, 0.75f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+            0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+        };
+        size_t index;
+        for (index = 0u; index < sizeof(inputs) / sizeof(inputs[0]); ++index) {
+            if (SudekiMpControlSeparationTalSkillMovementMagnitude(
+                    inputs[index]) != expected[index]) {
+                fputs("FAIL: Tal skill movement saturates keyboard/diagonal speed and preserves analog input\n", stderr);
+                ++failures;
+            }
+        }
+    }
+    if (!SudekiMpLanArenaClientNativeArmingComplete(3u, 0x22u, 2u) ||
+        SudekiMpLanArenaClientNativeArmingComplete(1u, 0x21u, 2u) ||
+        SudekiMpLanArenaClientNativeArmingComplete(3u, 0x21u, 2u) ||
+        SudekiMpLanArenaClientNativeArmingComplete(3u, 0x23u, 2u) ||
+        SudekiMpLanArenaClientNativeArmingComplete(3u, 0x22u, 0u)) {
+        fputs("FAIL: Ailish native arming precedes replica selector ownership\n", stderr);
+        ++failures;
+    }
+    {
+        int current, requested;
+        for (current = 0; current <= 3; ++current) {
+            for (requested = 0; requested <= 3; ++requested) {
+                if (SudekiMpControlSeparationTalSkillFilterRestorePolicy(
+                        TRUE, current, requested) !=
+                        (current == 0 && requested == 0) ||
+                    SudekiMpControlSeparationTalSkillFilterRestorePolicy(
+                        FALSE, current, requested)) {
+                    fputs("FAIL: Tal noncaster filter preserves UI and foreign scopes\n", stderr);
+                    ++failures;
+                }
+            }
+        }
+    }
     if (SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
             FALSE, 2, 2, FALSE) ||
         SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
@@ -4108,6 +4200,54 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+        {
+            unsigned int previous, current, flags;
+            unsigned int stage, active, animation;
+            for (stage = 0u; stage < 7u; ++stage) {
+                for (active = 0u; active < 2u; ++active) {
+                    for (animation = 0u; animation < 256u; ++animation) {
+                        BOOL expected = stage == 0u && active == 0u &&
+                            (animation == 5u || animation == 2u);
+                        if (!!SudekiMpLanArenaClientNativeRangedIdle(
+                                stage, active, animation, 0.0f) != !!expected) {
+                            fputs("FAIL: ranged native terminal ownership\n", stderr);
+                            ++failures;
+                        }
+                    }
+                }
+            }
+            if (SudekiMpLanArenaClientNativeRangedIdle(0, FALSE, 5, NAN) ||
+                SudekiMpLanArenaClientNativeRangedIdle(0, FALSE, 5, INFINITY) ||
+                SudekiMpLanArenaClientNativeRangedIdle(0, FALSE, 5, 0.01f)) {
+                fputs("FAIL: ranged recovery must finish before retirement\n", stderr);
+                ++failures;
+            }
+            if (SudekiMpLanArenaClientWeaponSwapComplete(NAN) ||
+                SudekiMpLanArenaClientWeaponSwapComplete(INFINITY) ||
+                SudekiMpLanArenaClientWeaponSwapComplete(-1.0f) ||
+                SudekiMpLanArenaClientWeaponSwapComplete(0.0f) ||
+                SudekiMpLanArenaClientWeaponSwapComplete(13.998f) ||
+                !SudekiMpLanArenaClientWeaponSwapComplete(13.999899864196777f) ||
+                !SudekiMpLanArenaClientWeaponSwapComplete(14.0f)) {
+                fputs("FAIL: first-person swap native terminal clamp\n", stderr);
+                ++failures;
+            }
+            for (previous = 0u; previous <= 13u; ++previous) {
+                for (current = 0u; current <= 13u; ++current) {
+                    for (flags = 0u; flags < 8u; ++flags) {
+                        BOOL expected = flags == 3u && previous >= 1u &&
+                            previous <= 12u && current >= 1u &&
+                            current <= 12u && previous != current;
+                        if (!!SudekiMpLanArenaClientShouldStartWeaponSwap(
+                                flags & 1u, flags & 2u, flags & 4u,
+                                previous, current) != !!expected) {
+                            fputs("FAIL: first-person weapon swap admission\n", stderr);
+                            ++failures;
+                        }
+                    }
+                }
+            }
+        }
         if (SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
                 12.0f, 12.009f) ||
             !SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
@@ -4259,6 +4399,69 @@ int wmain(int argc, wchar_t **argv) {
                 ++failures;
             }
         }
+        {
+            static const float cases[][6] = {
+                {0, 1, 0, 1, 0, 1}, {0, -1, 0, 1, 0, -1},
+                {1, 0, 0, 1, -1, 0}, {-1, 0, 0, 1, 1, 0},
+                {0, 1, 1, 0, 1, 0}, {0, -1, 1, 0, -1, 0},
+                {1, 0, 1, 0, 0, 1}, {-1, 0, 1, 0, 0, -1},
+                {0.3f, 0.4f, 0, 0.5f, -0.3f, 0.4f},
+                {0.3f, -0.4f, 1, 0, -0.4f, 0.3f}
+            };
+            unsigned int i;
+            float x, z;
+            if (!SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 20u, FALSE, &x) ||
+                fabsf(x - 9.52f) > 0.0001f ||
+                !SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 20u, TRUE, &x) || x != 10.0f ||
+                !SudekiMpLanArenaClientLocomotionPhase(0.1f, 24.0f, 20u, FALSE, &x) || x != 0.0f ||
+                !SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 1000u, FALSE, &x) ||
+                fabsf(x - 8.8f) > 0.0001f ||
+                !SudekiMpLanArenaClientLocomotionPhase(10.0f, 0.0f, 20u, FALSE, &x) || x != 10.0f ||
+                SudekiMpLanArenaClientLocomotionPhase(NAN, 24.0f, 20u, FALSE, &x) ||
+                SudekiMpLanArenaClientLocomotionPhase(10.0f, -1.0f, 20u, FALSE, &x) ||
+                SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 20u, FALSE, NULL)) {
+                fputs("FAIL: LAN locomotion pre-update clock policy\n", stderr);
+                ++failures;
+            }
+            for (i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
+                if (!SudekiMpLanArenaClientMovementWorldDirection(TRUE,
+                        cases[i][0], cases[i][1], cases[i][2], cases[i][3],
+                        &x, &z) || fabsf(x-cases[i][4]) > 0.0001f ||
+                    fabsf(z-cases[i][5]) > 0.0001f) {
+                    fputs("FAIL: LAN first-person local/world direction\n", stderr);
+                    ++failures;
+                }
+            }
+            if (!SudekiMpLanArenaClientMovementWorldDirection(FALSE,
+                    -0.3f, 0.4f, 0, 0, &x, &z) ||
+                fabsf(x+0.3f) > 0.0001f || fabsf(z-0.4f) > 0.0001f ||
+                SudekiMpLanArenaClientMovementWorldDirection(TRUE,
+                    0, 1, 0, 0, &x, &z) ||
+                SudekiMpLanArenaClientMovementWorldDirection(TRUE,
+                    NAN, 1, 0, 1, &x, &z)) {
+                fputs("FAIL: LAN movement conversion guards\n", stderr);
+                ++failures;
+            }
+            for (i = 0; i < 4; ++i) {
+                static const float travel[4][2] = {{0,1},{0,-1},{1,0},{-1,0}};
+                unsigned int mode;
+                if (!SudekiMpControlSeparationDirectionalGait(
+                        travel[i][0], travel[i][1], 0, 1, &mode, &x, &z) ||
+                    mode != i || fabsf(x) > 0.0001f || fabsf(z-1) > 0.0001f) {
+                    fputs("FAIL: LAN directional native gait selection\n", stderr);
+                    ++failures;
+                }
+            }
+            {
+                unsigned int mode;
+                if (SudekiMpControlSeparationDirectionalGait(0,0,0,1,&mode,&x,&z) ||
+                    SudekiMpControlSeparationDirectionalGait(1,0,0,0,&mode,&x,&z) ||
+                    SudekiMpControlSeparationDirectionalGait(INFINITY,0,0,1,&mode,&x,&z)) {
+                    fputs("FAIL: LAN directional gait invalid input\n", stderr);
+                    ++failures;
+                }
+            }
+        }
         if (SudekiMpLanArenaClientNativeWeakHeld(0) ||
             !SudekiMpLanArenaClientNativeWeakHeld(1) ||
             !SudekiMpLanArenaClientNativeWeakHeld(2) ||
@@ -4269,6 +4472,37 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+        {
+            unsigned int slot, current;
+            int next, previous;
+            for (current = 0u; current < 12u; ++current) {
+                for (next = -1; next <= 4; ++next) {
+                    for (previous = -1; previous <= 4; ++previous) {
+                        BOOL expected = next >= 0 && next <= 3 &&
+                            previous >= 0 && previous <= 3 &&
+                            ((next == 1) != (previous == 1));
+                        slot = 99u;
+                        BOOL actual = SudekiMpLanArenaClientCycleWeaponSlot(
+                            12u, current, next, previous, &slot);
+                        unsigned int target = next == 1 ?
+                            (current + 1u) % 12u : (current + 11u) % 12u;
+                        if (actual != expected ||
+                            (expected ? slot != target : slot != 99u)) {
+                            fputs("FAIL: native weapon-cycle press/wrap policy\n", stderr);
+                            ++failures;
+                        }
+                    }
+                }
+            }
+            if (SudekiMpLanArenaClientCycleWeaponSlot(0,0,1,0,&slot) ||
+                SudekiMpLanArenaClientCycleWeaponSlot(1,0,1,0,&slot) ||
+                SudekiMpLanArenaClientCycleWeaponSlot(13,0,1,0,&slot) ||
+                SudekiMpLanArenaClientCycleWeaponSlot(12,12,1,0,&slot) ||
+                SudekiMpLanArenaClientCycleWeaponSlot(12,0,1,0,NULL)) {
+                fputs("FAIL: weapon-cycle invalid inventory rejected\n", stderr);
+                ++failures;
+            }
+        }
         if (SudekiMpLanArenaClientSuppressedWeakNextState(0) != 0 ||
             SudekiMpLanArenaClientSuppressedWeakNextState(1) != 2 ||
             SudekiMpLanArenaClientSuppressedWeakNextState(2) != 2 ||
@@ -4278,6 +4512,28 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN client suppressed weak state did not advance\n",
                 stderr);
             ++failures;
+        }
+        {
+            int owner, filter, state;
+            for (owner = 0; owner <= 1; ++owner) {
+                for (filter = 0; filter <= 3; ++filter) {
+                    for (state = -1; state <= 4; ++state) {
+                        BOOL expected = owner && filter == 1 &&
+                            (state == 1 || state == 2);
+                        if (SudekiMpLanArenaClientCurrentWeakHeld(
+                                owner, filter, state) != expected) {
+                            fputs("FAIL: current held fire requires exact gameplay controller state\n", stderr);
+                            ++failures;
+                        }
+                    }
+                }
+            }
+            /* A stable held state stays admitted across any number of frames
+             * without another edge callback; release still retires at once. */
+            for (state = 0; state < 1000; ++state) {
+                if (!SudekiMpLanArenaClientCurrentWeakHeld(TRUE, 1, 2))
+                    ++failures;
+            }
         }
         if (SudekiMpLanArenaClientRangedWeakHeld(FALSE, FALSE) ||
             SudekiMpLanArenaClientRangedWeakHeld(FALSE, TRUE) ||
@@ -4300,6 +4556,22 @@ int wmain(int argc, wchar_t **argv) {
             SudekiMpLanArenaClientOperatorForwardPolicy(FALSE, FALSE) ||
             !SudekiMpLanArenaClientOperatorForwardPolicy(FALSE, TRUE)) {
             fputs("FAIL: LAN client operator-forward precedence policy\n",
+                stderr);
+            ++failures;
+        }
+        if (!SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 1000u, 1000u) ||
+            !SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 1000u, 1125u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 1000u, 1126u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 1000u, 9000u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(TRUE, FALSE, 1000u, 1001u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(FALSE, TRUE, 1000u, 1001u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 0u, 1u) ||
+            SudekiMpLanArenaClientMovementSampleFresh(TRUE, TRUE, 1001u, 1000u) ||
+            !SudekiMpLanArenaClientMovementSampleFresh(
+                TRUE, TRUE, 0xfffffff0u, 0x6du) ||
+            SudekiMpLanArenaClientMovementSampleFresh(
+                TRUE, TRUE, 0xfffffff0u, 0x6eu)) {
+            fputs("FAIL: LAN client cached movement freshness/owner/release/wrap policy\n",
                 stderr);
             ++failures;
         }
@@ -8061,6 +8333,36 @@ int wmain(int argc, wchar_t **argv) {
             return 1;
         }
         installed_controller_update = *controller_slot;
+        {
+            uint8_t *root_call = image + 0x000e1a98u;
+            uint8_t saved_call[5];
+            uint8_t installed_call[5];
+            memcpy(saved_call, root_call, sizeof(saved_call));
+            root_call[1] ^= 1u;
+            if (SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(TRUE)) {
+                fputs("FAIL: Spirit root hook accepted a foreign call target\n", stderr);
+                ++failures;
+            }
+            memcpy(root_call, saved_call, sizeof(saved_call));
+            if (!SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(TRUE) ||
+                relative_call_target(root_call) == image + 0x000c3650u) {
+                fputs("FAIL: Spirit root hook did not install\n", stderr);
+                ++failures;
+            }
+            memcpy(installed_call, root_call, sizeof(installed_call));
+            root_call[1] ^= 1u;
+            if (SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE)) {
+                fputs("FAIL: Spirit root hook discarded foreign restore ownership\n", stderr);
+                ++failures;
+            }
+            memcpy(root_call, installed_call, sizeof(installed_call));
+            if (!SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(FALSE) ||
+                memcmp(root_call, saved_call, sizeof(saved_call)) != 0 ||
+                !SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(TRUE)) {
+                fputs("FAIL: Spirit root hook restore retry/reinstall\n", stderr);
+                ++failures;
+            }
+        }
         if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) ==
                 image + RVA_ARBITER_MOVEMENT ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) ==
@@ -8080,6 +8382,8 @@ int wmain(int argc, wchar_t **argv) {
         }
         if (relative_call_target(image + RVA_PLAYER_MOVE_CALL_ALTERNATE) !=
                 image + RVA_ARBITER_MOVEMENT ||
+            relative_call_target(image + 0x000e1a98u) !=
+                image + 0x000c3650u ||
             relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) !=
                 image + RVA_ARBITER_MOVEMENT ||
             memcmp(image + RVA_MOVEMENT_CONTROLLER_UPDATE,

@@ -6,6 +6,12 @@
 #include <stdint.h>
 #include <windows.h>
 
+/* Native four-way gait selection relative to aim. Outputs a normalized body
+ * heading, distinct from world travel, for the existing arbiter movement API. */
+BOOL SudekiMpControlSeparationDirectionalGait(
+    float travel_x, float travel_z, float aim_x, float aim_z,
+    unsigned int *mode, float *body_x, float *body_z);
+
 typedef enum SudekiMpControlUpdateDispatchSource {
     SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_UNKNOWN = 0,
     SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL,
@@ -211,6 +217,20 @@ BOOL SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
     BOOL paused
 );
 BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled);
+BOOL SudekiMpControlSeparationTalSkillFilterRestorePolicy(
+    BOOL scope_exact, int current_filter, int requested_filter);
+/* Native keyboard submissions can exceed unit magnitude. The direct fallback
+ * must saturate at full run pace while retaining partial analog input. */
+float SudekiMpControlSeparationTalSkillMovementMagnitude(float native_speed);
+BOOL SudekiMpControlSeparationTalSkillDirectMovementPolicy(
+    BOOL scope_exact,
+    BOOL skills_known,
+    BOOL own_skill_active,
+    BOOL remote_skill_active,
+    BOOL spirit_known,
+    BOOL spirit_active,
+    uint32_t arbiter_flags
+);
 /* Host-local diagnostic movement may provide a camera-local direction only
  * when the native controller reports neutral axes.  Registration is process
  * local and does not widen the authenticated remote-skill scope below. */
@@ -250,6 +270,18 @@ BOOL SudekiMpControlSeparationLanArenaRemoteSubmissionPolicy(
     BOOL native_control_state_exact,
     BOOL direction_finite,
     BOOL weak_attack_edge
+);
+/* Only the observed non-caster Spirit lock may use single-source direct
+ * locomotion. Other native movement blockers must not be bypassed. */
+BOOL SudekiMpControlSeparationSpiritDirectMovementPolicy(
+    BOOL skill_scope_exact,
+    BOOL spirit_active,
+    uint32_t arbiter_flags
+);
+BOOL SudekiMpControlSeparationFilterSpiritRootDelta(
+    BOOL direct_movement_owned,
+    const float input[3],
+    float output[3]
 );
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_x,

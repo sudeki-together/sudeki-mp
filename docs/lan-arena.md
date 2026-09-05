@@ -1,5 +1,83 @@
 # LAN arena development guide
 
+## LA26 weapon-presentation checkpoint
+
+The owner confirmed smooth first-person staff movement, mouse-wheel weapon
+cycling, and the corrected Shock Staff shot/recharge behavior in the matching
+Tal-host/Ailish-client testroom profile. These are bounded live confirmations,
+not campaign, all-weapon, reconnect, or two-machine acceptance.
+
+Client replica application now occurs once at the post-controller boundary,
+before camera-relative staff rendering. Wheel changes use the host-owned
+equipment request. First-person swap playback checks the native animation bank
+and handles the renderer's terminal clock clamp before returning to idle.
+
+First-person firing uses the equipped weapon's native shot/recharge sequence
+after host confirmation, rather than forcing every staff through one short
+clip and the host's third-person animation clock. An exact-owner lease retains
+the native sequence and client damage guard until the shot and cooldown finish.
+Skills, equipment changes, and teardown respect that drain boundary.
+
+The build, exact-image suite, and focused protocol, replica, shared-simulation,
+runtime-hook, Spirit visual/VFX, non-caster locomotion, and cleanroom suites
+passed for this checkpoint. Native-shot teardown during disconnect and rapid
+overlapping requests still need live testing. The host-side weapon-swap body
+turn and exact midpoint equipment timing remain unresolved. Ailish Spirit
+requests remain disabled. No new wire version beyond LA26 was added for the
+first-person firing correction.
+
+## LA26 directional-locomotion candidate
+
+The current wire/build is **LA26**. Matching host/client DLLs are
+required; LA25 and older packets are rejected. One 26-byte Ailish-only block
+follows the two actor records. The maximum snapshot is 1232 bytes, still within
+the existing datagram budget; the normal one-enemy snapshot is 917 bytes.
+
+The optional block carries four host-observed base-channel clip identities,
+states, rates (Q8), phases (Q4), and three blends (UNORM8). Its closed vocabulary
+is empty, armed idle, and forward/backward/left/right walk/run. It cannot name
+arbitrary animation assets. Epoch changes fence native channel swaps, clock
+restarts, and observation recovery. Invalid/unknown observations omit only this
+block, never the gameplay snapshot. Tal, incapacitated actors, noncombat frames,
+and an actor's own active skill cannot carry ordinary locomotion in this block.
+
+The replica interpolates matching epochs and holds discrete changes until the
+host boundary. Ailish's exact world animation bank must resolve every nonempty
+clip before replay. The first four channels and blends are separate from her
+weak-fire layer and first-person arms; character skills retain their native
+presentation owner. The early update installs post-host-update clocks minus
+one bounded local frame step. The final render boundary does not repeatedly
+seek the same sample. No additional movement, damage, or resource authority is
+granted to the client.
+
+The accompanying input candidate distinguishes native targeting-local movement
+axes from ordinary world-space movement. Host directional gait selection uses
+travel relative to aim outside the existing non-caster skill isolation scope.
+These are source contracts, not live acceptance: backward/strafe direction,
+diagonals, rotating aim, move-and-fire, native hop appearance, and skill/VFX
+regressions still need matching-build gameplay checks. Focused protocol,
+interpolation, shared-simulation, and exact-image policy tests cover this path.
+
+## LA25 training-kit candidate
+
+The earlier LA25 update added an Ailish-only weapon-selection request
+(inventory category 5, slots 0–11) and an observed equipped-slot snapshot field.
+Native host selection remains authoritative. A pending weapon request excludes
+skill and attack input in that contribution. Matching builds are required;
+LA24 packets are rejected. Ailish Spirit requests remain disabled until
+actor-specific presentation and cast provenance have been established.
+
+The cleanroom all-skills lease also covers the separate learned-skill ranks:
+zero ranks are temporarily promoted to one, existing higher ranks are retained,
+and owned promotions are restored on release. Saves are not modified.
+Held attack is sampled from the current owner-exact native controller state,
+including steady holds without a new input transition.
+
+These were candidate implementation contracts at LA25. Later bounded
+first-person acceptance is recorded in the LA26 checkpoint above.
+
+## Overview
+
 The LAN arena is a closed, authoritative shared-simulation two-process
 experiment. The host process currently runs that shared simulation: it
 controls Tal and resolves AI, damage, resources, the training dummy, and
@@ -11,6 +89,57 @@ trigger changes that state and the shared simulation replicates the result.
 The cross-module input-to-authority-to-wire-to-replay contract and its next
 research targets are maintained in the
 [LAN arena combat synchronization graph](lan-arena-combat-graph.md).
+
+## LA24 status-visual follow-up
+
+The earlier **LA24** update extended the LA23 visual roster described below
+with an immutable owner actor
+byte. A cast-owned effect uses owner zero and a nonzero Spirit sequence. A
+status-owned effect identifies its affected actor and uses Spirit sequence zero:
+it does not borrow the last cast's identity or disappear merely because that
+cast finishes. Records are now 57 bytes; the maximum snapshot is 1204 bytes,
+within a 1232-byte datagram budget. The shared visual capacity remains eight;
+overflow or failed observation remains UNKNOWN, not a truncated removal list.
+
+The first admitted status visual is Boost (`SFXSTA003_Boost.HOM`, kind 14).
+The host discovers its native visual through each exact actor's status manager,
+including a buff already active when observation begins. Native weak lifetime,
+world transform, and phase drive the existing parent-free client visual adapter.
+The client does not call a status-manager activation or reproduce buff gameplay.
+Owner identity cannot change for an existing visual instance. Actor replacement
+retires old clones and fences preceding status instances; failed cleanup keeps
+the corresponding native dependencies. Boost uses forward-only phase correction
+to avoid repeatedly rewinding particle playback, as does the accepted opening.
+
+This is a shared target-ownership mechanism, not a claim that every status asset,
+all four characters' abilities, or four-player LAN are supported. Only Tal and
+Ailish are in this launch profile, and only Boost is admitted as a status visual.
+Other resource types still need exact asset/event and native-lifetime validation.
+The protocol, host registry, replica interpolation, and VFX policy tests cover
+status ownership without a cast, immutable targets, repeated observation, and
+retirement. Visual parity and live expiry/reconnect remain acceptance checks.
+
+Client movement now expires a cached native world direction after 125 ms without
+a fresh controller-to-arbiter sample; resending a packet does not renew that
+sample. Owner changes, neutral physical axes, and local modal/skill-camera gates
+invalidate it. This closes a stale-input path but does not establish the cause
+or resolution of every reported Spirit-era camera/forced-running symptom.
+
+The non-caster Spirit movement adapter also commits the authenticated travel
+direction to Ailish's native position basis while the normal turning update is
+locked. Its collision-aware direct displacement is the horizontal movement
+source for that scope. A host-only adapter at the exact animation-root callsite
+filters the otherwise additive horizontal root delta, preserving its vertical
+component. It requires a fresh successful direct-movement/neutral transaction,
+the exact remote Ailish/component lease, no active Ailish character skill, and
+the observed Spirit lock without other movement blockers. Ordinary movement,
+the caster, and non-animation delta
+callers retain their native paths. Native speed is quiesced separately from the
+visible locomotion compositor. Exact-image tests cover call-target rejection,
+restore ownership failure/retry, and aggregate teardown; visual smoothness and
+disconnect-during-cast remain separate live acceptance checks.
+
+## Shared-simulation architecture
 
 The first shared-simulation extraction is now explicit in
 `lan_arena_shared_simulation`. Player identity and simulation authority are
@@ -38,7 +167,7 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA23` (owner-approved breaking research update), exact GOG
+- Protocol/build: `LA26` (owner-approved breaking research update), exact GOG
   executable hash only. Both peers must use the same build. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
@@ -271,7 +400,7 @@ experiments.
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The `LA23` handshake validates the exact
+Packets are versioned and sequenced. The `LA26` handshake validates the exact
 game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
 independent canonical/replica simulation-node tuple, and a fresh session
 token. Connected packet direction is authorized by simulation node rather

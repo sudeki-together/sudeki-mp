@@ -95,7 +95,7 @@ static void resource_tests(void) {
     CHECK(SudekiMpSpiritVisualKindForResource(0xaeec0c83u) ==
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT);
     CHECK(SudekiMpSpiritVisualKindForResource(0xef82dbb3u) == 0u);
-    CHECK(SudekiMpSpiritVisualKindForResource(0x423bad0du) == 0u);
+    CHECK(SudekiMpSpiritVisualKindForResource(0x423bad0du) == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST);
     memset(malformed, 'A', sizeof(malformed));
     CHECK(SudekiMpSpiritVisualKindForTypedResource(
         0xfa9u,0x15fef04du,malformed,sizeof(malformed)) == 0u);
@@ -103,6 +103,35 @@ static void resource_tests(void) {
     malformed[40] = '\0';
     CHECK(SudekiMpSpiritVisualKindForTypedResource(
         0xfa9u,0x15fef04du,malformed,41u) == 0u);
+}
+
+static void status_registry_tests(void) {
+    SudekiMpSpiritVisualHostRegistry r = {0};
+    SudekiMpLanArenaSnapshot output;
+    TestContext context = {0};
+    SudekiMpSpiritVisualHostApi api = {&context, bind_fake, sample_fake};
+    unsigned int a, b;
+    a = SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 100u,
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, SUDEKIMP_LAN_ARENA_TAL_TYPE, (void *)100u, &api);
+    b = SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 100u,
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, SUDEKIMP_LAN_ARENA_AILISH_TYPE, (void *)200u, &api);
+    CHECK(a != 0u && b != 0u && a != b);
+    SudekiMpSpiritVisualHostRegistryComplete(&r, a, TRUE, &api);
+    SudekiMpSpiritVisualHostRegistryComplete(&r, b, TRUE, &api);
+    CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r, 44u, &output, &api));
+    CHECK(output.spirit_vfx_count == 2u && output.spirit_vfx[0].skill_sequence == 0u);
+    CHECK(output.spirit_vfx[0].owner_actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE);
+    CHECK(output.spirit_vfx[1].owner_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 200u,
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, SUDEKIMP_LAN_ARENA_TAL_TYPE, (void *)100u, &api) == a);
+    CHECK(r.next_instance == 2u); /* Re-observing a long buff is not a new spawn. */
+    retire_fake(&r, a);
+    CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r, 44u, &output, &api));
+    CHECK(output.spirit_vfx_count == 1u && output.spirit_vfx[0].owner_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    CHECK(SudekiMpSpiritVisualHostRegistryReset(&r, &api));
+    CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 1u, 100u,
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, SUDEKIMP_LAN_ARENA_TAL_TYPE, (void *)100u, &api) == 0u);
+    CHECK(r.unknown);
 }
 
 static void registry_tests(void) {
@@ -330,12 +359,21 @@ static void native_weak_tests(uint8_t *mapped) {
 static void image_tests(const char *path) {
     uint8_t *mapped=map_image(path);
     uint8_t setup[0x90]={0};
+    uint8_t actor[0xacu]={0}, arbiter[0x14u]={0};
+    uint8_t manager[0x78u]={0}, status[0x50u]={0};
     SudekiMpLanArenaSnapshot output;
     uintptr_t eax;
     void *entry;
     uint8_t saved;
     CHECK(mapped!=NULL);
     if(!mapped) return;
+    *(void **)(actor+0x90u)=arbiter;
+    *(void **)(arbiter+0x10u)=actor;
+    *(void **)(actor+0xa8u)=manager;
+    *(void **)manager=mapped+0x2d4abcu;
+    *(void **)(manager+0x10u)=actor;
+    *(void **)(manager+0x54u)=status;
+    *(void **)status=mapped+0x2cbf68u;
     CHECK(SudekiMpLanArenaSpiritVisualHostImageMatches((HMODULE)mapped));
     saved=mapped[0x1750u]; mapped[0x1750u]^=1u;
     CHECK(!SudekiMpLanArenaSpiritVisualHostImageMatches((HMODULE)mapped));
@@ -348,11 +386,24 @@ static void image_tests(const char *path) {
     memset(&output,0,sizeof(output));
     output.tal.skill_kind=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
     output.tal.skill_active=1u;
-    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,&output));
+    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_observed==0u && output.spirit_vfx_count==0u);
     output.tal.skill_active=0u;
-    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,&output));
+    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_observed==1u && output.spirit_vfx_count==0u);
+    *(void **)(manager+0x10u)=NULL;
+    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
+    CHECK(output.spirit_vfx_observed==0u);
+    *(void **)(manager+0x10u)=actor;
+    status[0x4cu]=2u;
+    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
+    status[0x4cu]=0u;
+    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
+    status[0x4cu]=1u;
+    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
+    *(void **)(status+0x38u)=manager+4u;
+    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
+    status[0x4cu]=0u;
     eax=(uintptr_t)setup; entry=mapped+0x18830u;
     __asm__ volatile("pushl $1\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
     CHECK((unsigned char)eax==1u);
@@ -366,7 +417,7 @@ static void image_tests(const char *path) {
     CHECK((unsigned char)eax==1u);
     output.tal.skill_active=1u;
     output.tal.skill_sequence=1u;
-    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,1u,1u,&output));
+    CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,1u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_count==0u && output.spirit_vfx_observed==1u);
     /* Native observer rejects unreadable retained-string indirection and an
      * unterminated readable string without dereferencing outside its bound.
@@ -389,13 +440,13 @@ static void image_tests(const char *path) {
         eax=(uintptr_t)setup;
         __asm__ volatile("pushl $1\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
         CHECK((unsigned char)eax==1u);
-        CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,1u,1u,&output));
+        CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,1u,1u,actor,actor,&output));
         CHECK(output.spirit_vfx_observed==1u && output.spirit_vfx_count==0u);
         *(void **)(setup+0x30u)=NULL;
     }
     fixture_active=FALSE;
     CHECK(SudekiMpLanArenaSpiritVisualHostReset());
-    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,2u,&output));
+    CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,2u,actor,actor,&output));
     /* Physical hook stays valid and native-passthrough after logical Reset. */
     eax=(uintptr_t)setup;
     __asm__ volatile("pushl $2\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
@@ -408,6 +459,7 @@ static void image_tests(const char *path) {
 int main(int argc,char **argv) {
     resource_tests();
     registry_tests();
+    status_registry_tests();
     matrix_tests();
     if(argc>1) image_tests(argv[1]);
     if(failures) { fprintf(stderr,"%u failures\n",failures); return 1; }

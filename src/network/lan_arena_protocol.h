@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 23u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 26u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413233u /* "LA23" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413236u /* "LA26" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1200u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1232u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -24,7 +24,13 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1196u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1232u
+
+enum {
+    SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
+    SUDEKIMP_LAN_ARENA_KIT_WEAPON = 1,
+    SUDEKIMP_LAN_ARENA_KIT_SPIRIT = 2 /* Reserved; rejected until replay closure. */
+};
 
 typedef enum SudekiMpLanArenaMatchState {
     SUDEKIMP_LAN_ARENA_MATCH_WAITING = 0,
@@ -92,9 +98,10 @@ typedef enum SudekiMpLanArenaSpiritVfxKind {
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_RETURN = 11,
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE = 12,
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT = 13,
+    SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST = 14,
     /* Inclusive allowlist bound; not an additional wire identity. */
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST =
-        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST
 } SudekiMpLanArenaSpiritVfxKind;
 
 /* Bounded action variants remain process-independent. The host translates
@@ -203,6 +210,10 @@ typedef struct SudekiMpLanArenaInput {
      * against its own Ailish object and still runs Sudeki's validator. */
     uint8_t skill_pressed;
     uint8_t skill_slot;
+    /* Ailish-only testroom requests. Weapons use her inventory slots 0..11.
+     * Other action kinds are rejected. Never a native pointer. */
+    uint8_t kit_action;
+    uint8_t kit_slot;
 } SudekiMpLanArenaInput;
 
 typedef struct SudekiMpLanArenaActionEvent {
@@ -210,6 +221,25 @@ typedef struct SudekiMpLanArenaActionEvent {
     uint8_t variant;
     uint32_t host_tick;
 } SudekiMpLanArenaActionEvent;
+
+/* Ailish-only, presentation-only base channels. Closed clip identities:
+ * 0=empty, 1=armed idle, 2/3=forward walk/run, 4/5=backward,
+ * 6/7=left, 8/9=right. Wire rates use Q8, phases Q4, blends UNORM8.
+ * A generation fences channel swaps and native loop/clock restarts. */
+typedef struct SudekiMpLanArenaLocomotion {
+    uint8_t valid;
+    uint16_t sequence;
+    uint8_t clip[4];
+    uint8_t state[4];
+    float rate[4];
+    float time[4];
+    float blend[3];
+} SudekiMpLanArenaLocomotion;
+
+int SudekiMpLanArenaLocomotionValid(const SudekiMpLanArenaLocomotion *motion);
+int SudekiMpLanArenaLocomotionClip(int selector);
+int SudekiMpLanArenaLocomotionSelector(unsigned int clip);
+unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip);
 
 typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t actor_type;
@@ -276,6 +306,9 @@ typedef struct SudekiMpLanArenaActorSnapshot {
      * while keeping a maximum-enemy packet below the bounded LAN datagram. */
     SudekiMpLanArenaActionEvent
         action_history[SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY];
+    /* Zero means unobserved. Ailish native weapon slot plus one, 1..12. */
+    uint8_t weapon_slot_plus_one;
+    SudekiMpLanArenaLocomotion locomotion;
 } SudekiMpLanArenaActorSnapshot;
 
 typedef struct SudekiMpLanArenaEnemySnapshot {
@@ -293,7 +326,7 @@ typedef struct SudekiMpLanArenaSpiritAudioSemanticEvent {
     uint8_t cue;
 } SudekiMpLanArenaSpiritAudioSemanticEvent;
 
-/* Explicitly encoded as 56 bytes. Instance identity is session-local and
+/* Explicitly encoded as 57 bytes. Instance identity is session-local and
  * immutable; phase/transform are the current native visual observation.
  * Quaternion order is x,y,z,w. Phase may wrap for authored looping resources. */
 typedef struct SudekiMpLanArenaSpiritVfxSnapshot {
@@ -306,7 +339,14 @@ typedef struct SudekiMpLanArenaSpiritVfxSnapshot {
     float position[3];
     float rotation_xyzw[4];
     float scale[3];
+    /* Zero: cast-owned effect with nonzero skill_sequence. Otherwise this is
+     * a status-owned visual on the identified actor, with skill_sequence=0.
+     * No client status manager or gameplay buff is activated. */
+    uint8_t owner_actor_type;
 } SudekiMpLanArenaSpiritVfxSnapshot;
+
+int SudekiMpLanArenaVisualOwnerValid(
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 
 typedef struct SudekiMpLanArenaSpiritAudioCursor {
     uint16_t last_event_sequence;

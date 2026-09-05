@@ -4,6 +4,7 @@
 #include "engine/arbiter_combat_input.h"
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_arena_owner_view.h"
@@ -80,6 +81,7 @@ typedef struct LanArenaPresentationLease {
     uint8_t action_variant;
     uint16_t action_sequence;
     DWORD last_early_apply_at;
+    SudekiMpLanArenaLocomotion locomotion;
     BOOL combat_mode;
     BOOL valid;
 } LanArenaPresentationLease;
@@ -90,8 +92,20 @@ typedef struct LanArenaFirstPersonLease {
     void *renderer;
     uint16_t action_sequence;
     BOOL weak_attack;
+    uint8_t weapon_slot;
+    BOOL weapon_swap;
     BOOL valid;
 } LanArenaFirstPersonLease;
+
+typedef struct LanArenaNativeRangedLease {
+    uint8_t *character;
+    uint8_t *component;
+    uint8_t *combat;
+    uint8_t *arbiter;
+    void *renderer;
+    uint16_t sequence;
+    BOOL active;
+} LanArenaNativeRangedLease;
 
 typedef struct LanArenaTalNativePresentationLease {
     void *character;
@@ -352,6 +366,12 @@ static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
 static SudekiMpLanArenaSharedSimulation replica_simulation;
 static SudekiMpLanArenaSpiritAudioCursor spirit_audio_cursor;
 static BOOL spirit_audio_replay_failure_logged;
+/* An unverified SetWeapon return is not permission to repeat a native model
+ * mutation each render frame. Retry only for a different requested slot or
+ * native owner; confirmed equipment still follows ordinary readiness gates. */
+static void *client_weapon_attempt_actor;
+static void *client_weapon_attempt_component;
+static uint8_t client_weapon_attempt_slot;
 static BOOL spirit_vfx_replay_failure_logged;
 static BOOL spirit_vfx_cache_release_failure_logged;
 static uint64_t spirit_vfx_session_token;
@@ -359,8 +379,12 @@ static void *spirit_vfx_tal_actor;
 static uint32_t spirit_vfx_tal_generation;
 static BOOL spirit_vfx_generation_fenced;
 static uint16_t spirit_vfx_generation_skill_floor;
+static void *status_vfx_ailish_actor;
+static uint32_t status_vfx_instance_floor;
+static uint32_t status_vfx_newest_instance;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
+static LanArenaNativeRangedLease ailish_native_ranged_lease;
 static LanArenaTalNativePresentationLease tal_native_presentation_lease;
 static LanArenaNativeSkillPresentationLease native_skill_leases[2];
 static LanArenaClientViewLease remote_tal_skill_view_lease;
@@ -437,6 +461,9 @@ static void reset_client_spirit_vfx_replay(BOOL reset_binding) {
         spirit_vfx_tal_generation = 0u;
         spirit_vfx_generation_fenced = FALSE;
         spirit_vfx_generation_skill_floor = 0u;
+        status_vfx_ailish_actor = NULL;
+        status_vfx_instance_floor = 0u;
+        status_vfx_newest_instance = 0u;
     }
     spirit_vfx_replay_failure_logged = FALSE;
 }
@@ -697,6 +724,22 @@ BOOL SudekiMpLanArenaClientShouldApplyHostFacing(
 ) {
     return actor_index < 2u &&
         !(actor_index == 1u && local_first_person_active);
+}
+
+BOOL SudekiMpLanArenaClientLocomotionPhase(
+    float host_phase, float host_rate, uint32_t frame_ms,
+    BOOL final_boundary, float *phase
+) {
+    if (phase == NULL) return FALSE;
+    *phase = 0.0f;
+    if (!isfinite(host_phase) || host_phase < 0.0f || host_phase > 4095.9375f ||
+        !isfinite(host_rate) || host_rate < 0.0f || host_rate > 255.99609375f)
+        return FALSE;
+    if (frame_ms > 50u) frame_ms = 50u;
+    if (frame_ms == 0u) frame_ms = 1u;
+    *phase = final_boundary ? host_phase :
+        fmaxf(0.0f, host_phase - host_rate * (float)frame_ms / 1000.0f);
+    return TRUE;
 }
 
 BOOL SudekiMpLanArenaClientActionPhaseTime(
@@ -1976,6 +2019,7 @@ static BOOL client_native_transaction_retained(void) {
         native_skill_leases[0].native_started ||
         native_skill_leases[1].native_started ||
         tal_native_presentation_lease.active ||
+        ailish_native_ranged_lease.active ||
         SudekiMpCleanroomEngineRangedCombatPrimePending();
 }
 
@@ -2610,6 +2654,20 @@ static unsigned int client_combat_presentation_ready_mask(
                 "policy=bounded_native_model_refresh_fail_closed\r\n",
                 client_ailish_ranged_refresh_attempt_count);
         }
+    }
+    if (client_combat_transition_target && ailish_observed_ready) {
+        uint8_t *arbiter = *(uint8_t **)(
+            ailish_character + CHARACTER_ARBITER_OFFSET);
+        /* Do not admit replica selector writes while the native actor is
+         * still drawing its weapon. Those writes can replace the animation
+         * whose completion must publish the actual combat-ready state. Keep
+         * this at initial transition only: an admitted actor's later native
+         * skill/action owns its own temporary arbiter state. */
+        ailish_observed_ready = readable_memory(arbiter, 0x61u) &&
+            *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) == ailish_character &&
+            SudekiMpLanArenaClientNativeArmingComplete(
+                *(uint32_t *)(arbiter + 0x50u),
+                *(uint32_t *)(arbiter + 0x58u), arbiter[0x60u]);
     }
     client_combat_transition_actor_leases[0].ready =
         SudekiMpLanArenaClientActorTransitionReadinessRetained(
@@ -3261,6 +3319,16 @@ BOOL SudekiMpLanArenaClientReplicaTestRemoteTalReleaseActivationEntryBlocked(
 }
 #endif
 
+BOOL SudekiMpLanArenaClientNativeArmingComplete(
+    uint32_t arbiter_flags, uint32_t arbiter_state, uint8_t combat_request
+) {
+    uint32_t mode = arbiter_state & 0x0fu;
+    /* Same combat and pending-arm predicates used by retail skill readiness
+     * at RVA db9b0. Renderer availability alone does not complete arming. */
+    return (arbiter_flags & 2u) != 0u && (combat_request & 2u) != 0u &&
+        mode != 1u && mode != 3u;
+}
+
 static BOOL client_ailish_combat_graph_ready(
     uint8_t *expected_character
 ) {
@@ -3491,10 +3559,202 @@ static BOOL animation_channel_matches(
     float rate
 );
 
+BOOL SudekiMpLanArenaClientShouldStartWeaponSwap(
+    BOOL same_owner, BOOL first_person, BOOL attacking,
+    unsigned int previous_slot, unsigned int current_slot
+) {
+    return same_owner && first_person && !attacking &&
+        previous_slot >= 1u && previous_slot <= 12u &&
+        current_slot >= 1u && current_slot <= 12u &&
+        previous_slot != current_slot;
+}
+
+BOOL SudekiMpLanArenaClientWeaponSwapComplete(float native_time) {
+    /* The supported renderer clamps a 14-frame one-shot to 13.9999f.
+     * A sub-frame tolerance admits that terminal without waiting forever
+     * for the unreachable exact resource length. */
+    return isfinite(native_time) && native_time >= 14.0f - 0.001f;
+}
+
+static BOOL ailish_swap_resource_matches(void *renderer) {
+    uint8_t *bank;
+    uint8_t *entries;
+    uint8_t *resource;
+    /* Same read-only length layout as the supported renderer's native
+     * GetAnimationLength. Selector lookup must already have validated C1. */
+    if (!readable_memory(renderer, 0x0cu)) return FALSE;
+    bank = *(uint8_t **)((uint8_t *)renderer + 8u);
+    if (!readable_memory(bank, 0x24u)) return FALSE;
+    entries = *(uint8_t **)(bank + 0x20u);
+    if (!readable_memory(entries, 9u * 28u)) return FALSE;
+    resource = *(uint8_t **)(entries + 8u * 28u);
+    return readable_memory(resource, 8u) &&
+        *(float *)(resource + 4u) == 14.0f;
+}
+
+BOOL SudekiMpLanArenaClientNativeRangedIdle(
+    unsigned int stage, BOOL active_record, unsigned int animation_id,
+    float cooldown
+) {
+    return stage == 0u && !active_record &&
+        (animation_id == 5u || animation_id == 2u) &&
+        isfinite(cooldown) && cooldown <= 0.0f;
+}
+
+static BOOL observe_native_ranged(
+    const LanArenaNativeRangedLease *lease, BOOL *idle
+) {
+    uint8_t *record;
+    uint8_t *animation;
+    float cooldown = 0.0f;
+    if (idle == NULL || !readable_memory(lease->character, 0x138u) ||
+        *(uint8_t **)(lease->character + 0xbcu) != lease->combat ||
+        *(uint8_t **)(lease->character + 0x90u) != lease->arbiter ||
+        *(uint8_t **)(lease->character + 0x134u) != lease->component ||
+        !readable_memory(lease->combat, 0xe4u) ||
+        *(void **)lease->combat != game_base + 0x002d4c8cu ||
+        *(uint8_t **)(lease->combat + 0x10u) != lease->character ||
+        !readable_memory(lease->arbiter, 0x64u) ||
+        *(uint8_t **)(lease->arbiter + 0x10u) != lease->character ||
+        !readable_memory(lease->component, 0x168u) ||
+        *(uint8_t **)(lease->component + 0x10u) != lease->character)
+        return FALSE;
+    record = *(uint8_t **)(lease->combat + 0x60u);
+    if (record != NULL) {
+        uint8_t **rows = *(uint8_t ***)(lease->combat + 0x4cu);
+        unsigned int count = *(unsigned int *)(lease->combat + 0x44u);
+        unsigned int i;
+        if (count == 0u || count > 64u ||
+            !readable_memory(rows, count * sizeof(void *))) return FALSE;
+        for (i = 0u; i < count && rows[i] != record; ++i) {}
+        if (i == count || !readable_memory(record, 0xc4u)) return FALSE;
+        cooldown = *(float *)(record + 0xc0u);
+        if (!isfinite(cooldown)) return FALSE;
+    }
+    animation = *(uint8_t **)(lease->component + 0xf8u);
+    if (!readable_memory(animation, 4u)) return FALSE;
+    *idle = SudekiMpLanArenaClientNativeRangedIdle(
+        lease->combat[0xe0u],
+        *(void **)(lease->combat + 0x5cu) != NULL,
+        animation[2], cooldown);
+    return TRUE;
+}
+
+static BOOL drain_ailish_native_ranged(void) {
+    BOOL idle;
+    if (!ailish_native_ranged_lease.active) return TRUE;
+    if (!observe_native_ranged(&ailish_native_ranged_lease, &idle) || !idle) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_native_ranged phase=complete sequence=%u\r\n",
+        (unsigned int)ailish_native_ranged_lease.sequence);
+    ailish_native_ranged_lease.active = FALSE;
+    ZeroMemory(&ailish_first_person_lease, sizeof(ailish_first_person_lease));
+    return TRUE;
+}
+
+static BOOL service_ailish_native_ranged(
+    uint8_t *character, uint8_t *component, void *renderer,
+    const SudekiMpLanArenaActorSnapshot *snapshot, BOOL final_boundary,
+    BOOL *owns
+) {
+    LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
+    BOOL idle;
+    BOOL shot = snapshot->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    *owns = lease->active;
+    if (lease->active) {
+        if (lease->character != character || lease->component != component ||
+            lease->renderer != renderer) return FALSE;
+        if (!observe_native_ranged(lease, &idle)) return FALSE;
+        if (!idle) {
+            if (shot && snapshot->action_sequence != 0u)
+                lease->sequence = snapshot->action_sequence;
+            return TRUE;
+        }
+        if (!drain_ailish_native_ranged()) return FALSE;
+        *owns = FALSE;
+    }
+    if (!client_ailish_first_person_camera_owns_facing(character)) return TRUE;
+    if (!shot) {
+        LanArenaNativeRangedLease observed = {0};
+        observed.character = character;
+        observed.component = component;
+        observed.renderer = renderer;
+        observed.combat = *(uint8_t **)(character + 0xbcu);
+        observed.arbiter = *(uint8_t **)(character + 0x90u);
+        if (!observe_native_ranged(&observed, &idle)) return FALSE;
+        /* Native recovery can start during an equipment transition or just
+         * before the host action snapshot arrives. Do not overwrite an
+         * already-active CCombat sequence in either window. */
+        if (!idle && (observed.combat[0xe0u] != 0u ||
+                *(void **)(observed.combat + 0x5cu) != NULL ||
+                (*(uint32_t *)(observed.combat + 0xdcu) >= 0xc2u &&
+                 *(uint32_t *)(observed.combat + 0xdcu) <= 0xc3u))) {
+            observed.sequence = lease->character == character ? lease->sequence : 0u;
+            observed.active = TRUE;
+            *lease = observed;
+            *owns = TRUE;
+            return TRUE;
+        }
+    }
+    if (!shot || snapshot->action_sequence == 0u) return TRUE;
+    *owns = TRUE;
+    if (final_boundary || (lease->character == character &&
+            lease->sequence == snapshot->action_sequence)) return TRUE;
+    if (!readable_memory(character, 0x138u)) return FALSE;
+    lease->character = character;
+    lease->component = component;
+    lease->renderer = renderer;
+    lease->combat = *(uint8_t **)(character + 0xbcu);
+    lease->arbiter = *(uint8_t **)(character + 0x90u);
+    if (!observe_native_ranged(lease, &idle)) return FALSE;
+    /* A native shot/recharge may already be in flight. Yield to it rather
+     * than replacing its clip or manufacturing a second input edge. */
+    if (!idle) {
+        lease->sequence = snapshot->action_sequence;
+        lease->active = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_native_ranged phase=adopt sequence=%u\r\n",
+            (unsigned int)lease->sequence);
+        return TRUE;
+    }
+    /* Validate the native weapon-selected first-person animation. CCombat
+     * selects its row by the equipped item's ID, not the inventory slot. */
+    {
+        uint8_t *weapon = *(uint8_t **)(character + 0xc0u);
+        uint8_t *item;
+        uint8_t *record = *(uint8_t **)(lease->combat + 0x60u);
+        unsigned int id;
+        uint32_t handle;
+        int selector;
+        if (!readable_memory(weapon, 0x26cu) ||
+            *(uint8_t **)(weapon + 0x10u) != character) return FALSE;
+        item = *(uint8_t **)(weapon + 0x268u);
+        if (!readable_memory(item, 0x18u) || !readable_memory(record, 0xc4u) ||
+            *(uint32_t *)(record + 8u) != *(uint32_t *)(item + 0x14u)) return FALSE;
+        id = *(uint32_t *)(record + 0x9cu);
+        if (id < 0x8cu || id > 0x8eu ||
+            !resolve_ailish_first_person_selector(component, renderer,
+                id, (int)(id - 0x8cu + 2u), &handle, &selector)) return FALSE;
+    }
+    lease->sequence = snapshot->action_sequence;
+    lease->active = TRUE; /* Publish the teardown/damage barrier before entry. */
+    SudekiMpSubmitArbiterCombatInput(game_base + RVA_ARBITER_COMBAT_INPUT,
+        lease->arbiter, 1, 0, 0, 0, 0, 0);
+    SudekiMpLogFormat(
+        "lan_arena_client_replica event=client_native_ranged phase=submit sequence=%u "
+        "policy=host_confirmed_native_weapon_sequence_client_damage_blocked\r\n",
+        (unsigned int)lease->sequence);
+    return TRUE;
+}
+
 static BOOL apply_ailish_first_person_presentation(
     uint8_t *character,
     uint8_t *component,
-    const SudekiMpLanArenaActorSnapshot *snapshot
+    const SudekiMpLanArenaActorSnapshot *snapshot,
+    BOOL final_boundary
 ) {
     uint8_t *wrapper;
     void *renderer;
@@ -3508,6 +3768,10 @@ static BOOL apply_ailish_first_person_presentation(
     uint32_t fire_handle = 0u;
     int idle_selector = -1;
     int fire_selector = -1;
+    BOOL same_owner;
+    BOOL swap_transition;
+    BOOL swap_finished = FALSE;
+    BOOL native_ranged_owns;
 
     if (!readable_memory(character,
             AILISH_RANGED_COMPONENT_OFFSET + sizeof(void *)) ||
@@ -3554,13 +3818,74 @@ static BOOL apply_ailish_first_person_presentation(
     }
     weak_attack = snapshot->combat_state ==
         SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    if (!service_ailish_native_ranged(character, component, renderer,
+            snapshot, final_boundary, &native_ranged_owns)) return FALSE;
+    if (native_ranged_owns) return TRUE;
+    same_owner = ailish_first_person_lease.valid &&
+        ailish_first_person_lease.character == character &&
+        ailish_first_person_lease.component == component &&
+        ailish_first_person_lease.renderer == renderer;
+    swap_transition = SudekiMpLanArenaClientShouldStartWeaponSwap(
+        same_owner, client_ailish_first_person_camera_owns_facing(character),
+        weak_attack, ailish_first_person_lease.weapon_slot,
+        snapshot->weapon_slot_plus_one);
+    if (swap_transition || (same_owner &&
+            ailish_first_person_lease.weapon_swap && !weak_attack)) {
+        uint32_t swap_handle;
+        int swap_selector;
+        unsigned int submodel;
+        BOOL complete = !swap_transition;
+        /* C1 resolves only in the first-person bank. This is renderer-only
+         * playback after host equipment confirmation: no CArbiter state,
+         * animation event dispatch, inventory cycle, or native task starts.
+         * The supported C1 resource has 14 frames at its authored 24 fps. */
+        if (!resolve_ailish_first_person_selector(component, renderer,
+                0xc1u, 8, &swap_handle, &swap_selector) ||
+            !ailish_swap_resource_matches(renderer)) return FALSE;
+        if (swap_transition) {
+            set_animation_channel(renderer, &methods, submodels,
+                0, swap_selector, 1, 24.0f, TRUE);
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_weapon_swap "
+                "phase=start slot=%u selector=%d policy=host_confirmed_fp_visual_only\r\n",
+                (unsigned int)snapshot->weapon_slot_plus_one, swap_selector);
+        } else {
+            for (submodel = 0u; submodel < submodels; ++submodel) {
+                float time = methods.get_time(renderer, 0, submodel);
+                if (!isfinite(time) || time < 0.0f) return FALSE;
+                if (methods.get_selector(renderer, 0, submodel) != swap_selector) {
+                    /* Another presentation owner replaced this visual clip.
+                     * Do not reset its clock or restart it every frame. */
+                    complete = TRUE;
+                    break;
+                }
+                if (!SudekiMpLanArenaClientWeaponSwapComplete(time))
+                    complete = FALSE;
+            }
+        }
+        if (!complete) {
+            ailish_first_person_lease.character = character;
+            ailish_first_person_lease.component = component;
+            ailish_first_person_lease.renderer = renderer;
+            ailish_first_person_lease.weapon_slot = snapshot->weapon_slot_plus_one;
+            ailish_first_person_lease.weapon_swap = TRUE;
+            ailish_first_person_lease.valid = TRUE;
+            return TRUE;
+        }
+        swap_finished = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=client_weapon_swap phase=end slot=%u\r\n",
+            (unsigned int)snapshot->weapon_slot_plus_one);
+    }
     transition = !ailish_first_person_lease.valid ||
         ailish_first_person_lease.character != character ||
         ailish_first_person_lease.component != component ||
         ailish_first_person_lease.renderer != renderer ||
         ailish_first_person_lease.weak_attack != weak_attack ||
-        ailish_first_person_lease.action_sequence != snapshot->action_sequence;
+        ailish_first_person_lease.action_sequence != snapshot->action_sequence ||
+        swap_finished || ailish_first_person_lease.weapon_swap;
     if (!transition) {
+        ailish_first_person_lease.weapon_slot = snapshot->weapon_slot_plus_one;
         return !weak_attack || synchronize_action_phase(
             renderer, &methods, submodels, 0, snapshot);
     }
@@ -3569,7 +3894,7 @@ static BOOL apply_ailish_first_person_presentation(
     state = weak_attack ? 1 : 128;
     set_animation_channel(
         renderer, &methods, submodels, 0, selector, state, 24.0f,
-        weak_attack);
+        weak_attack || swap_finished);
     if (weak_attack && !synchronize_action_phase(
             renderer, &methods, submodels, 0, snapshot)) {
         return ailish_first_person_reject(
@@ -3588,6 +3913,8 @@ static BOOL apply_ailish_first_person_presentation(
     ailish_first_person_lease.renderer = renderer;
     ailish_first_person_lease.action_sequence = snapshot->action_sequence;
     ailish_first_person_lease.weak_attack = weak_attack;
+    ailish_first_person_lease.weapon_slot = snapshot->weapon_slot_plus_one;
+    ailish_first_person_lease.weapon_swap = FALSE;
     ailish_first_person_lease.valid = TRUE;
     SudekiMpLogFormat(
         "lan_arena_client_replica event=client_first_person_fire_presentation "
@@ -4141,6 +4468,12 @@ static BOOL service_native_skill_presentation(
     if (native_owns_presentation == NULL || character == NULL ||
         snapshot == NULL || actor_index >= 2u) return FALSE;
     *native_owns_presentation = FALSE;
+    if (actor_index == 1u && !drain_ailish_native_ranged()) {
+        /* Keep the native shot/recharge alive before considering a skill.
+         * Ordinary ranged presentation below still needs to service it. */
+        if (snapshot->skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE)
+            return FALSE;
+    }
     lease = &native_skill_leases[actor_index];
     if (snapshot->skill_sequence != 0u &&
         snapshot->skill_kind !=
@@ -4649,6 +4982,108 @@ static BOOL service_native_skill_presentation(
     return TRUE;
 }
 
+static BOOL apply_ailish_host_locomotion(
+    uint8_t *character,
+    uint8_t *component,
+    void *renderer,
+    const LanArenaAnimationMethods *methods,
+    unsigned int submodels,
+    const SudekiMpLanArenaActorSnapshot *snapshot,
+    BOOL final_boundary
+) {
+    const SudekiMpLanArenaLocomotion *motion = &snapshot->locomotion;
+    LanArenaPresentationLease *lease = &presentation_leases[1];
+    unsigned int channel;
+    BOOL new_owner = !lease->valid || lease->character != character ||
+        lease->renderer != renderer || !lease->combat_mode;
+    BOOL new_epoch = new_owner || !lease->locomotion.valid ||
+        lease->locomotion.sequence != motion->sequence;
+    BOOL firing = snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    BOOL new_fire = new_owner || lease->action_variant != snapshot->action_variant ||
+        lease->action_sequence != snapshot->action_sequence;
+    DWORD now = GetTickCount();
+    DWORD elapsed = !new_owner && lease->last_early_apply_at ?
+        now - lease->last_early_apply_at : 17u;
+    if (!motion->valid || !SudekiMpLanArenaLocomotionValid(motion) ||
+        snapshot->skill_active) return FALSE;
+    /* All nonempty identities must resolve in this exact actor's world bank
+     * before the first write. Never pass packet selectors to first-person
+     * arms or treat a readable renderer as the right animation resource. */
+    for (channel = 0u; channel < 4u; ++channel) {
+        unsigned int clip = motion->clip[channel];
+        if (clip && !resolve_ailish_world_selector(component, renderer,
+                SudekiMpLanArenaLocomotionAnimationId(clip),
+                SudekiMpLanArenaLocomotionSelector(clip))) return FALSE;
+    }
+    if (firing && !resolve_ailish_world_selector(component, renderer,
+            0x85u, AILISH_COMBAT_WEAK_SELECTOR)) return FALSE;
+    for (channel = 0u; channel < 4u; ++channel) {
+        unsigned int submodel;
+        int selector = SudekiMpLanArenaLocomotionSelector(motion->clip[channel]);
+        BOOL fresh_phase = new_epoch ||
+            motion->time[channel] != lease->locomotion.time[channel];
+        for (submodel = 0u; submodel < submodels; ++submodel) {
+            BOOL changed = methods->get_selector(renderer, (int)channel,
+                submodel) != selector;
+            float phase;
+            if (!SudekiMpLanArenaClientLocomotionPhase(motion->time[channel],
+                    motion->rate[channel], elapsed, final_boundary, &phase))
+                return FALSE;
+            if (changed) methods->set_selector(renderer, (int)channel,
+                submodel, selector);
+            if (methods->get_state(renderer, (int)channel, submodel) !=
+                    motion->state[channel])
+                methods->set_state(renderer, (int)channel, submodel,
+                    motion->state[channel]);
+            if (methods->get_rate(renderer, (int)channel, submodel) != motion->rate[channel])
+                methods->set_rate(renderer, (int)channel, submodel, motion->rate[channel]);
+            /* These are post-host-update clocks. Install before the local
+             * update with one measured frame subtracted; never seek again at
+             * the later render boundary, or replay a held packet each frame. */
+            if (!final_boundary && (fresh_phase || changed)) {
+                methods->set_time(renderer, (int)channel, submodel, phase, 0);
+            } else if (final_boundary && changed) {
+                methods->set_time(renderer, (int)channel, submodel, phase, 0);
+            }
+            if (methods->get_selector(renderer, (int)channel, submodel) != selector ||
+                methods->get_state(renderer, (int)channel, submodel) != motion->state[channel] ||
+                methods->get_rate(renderer, (int)channel, submodel) != motion->rate[channel])
+                return FALSE;
+        }
+    }
+    for (channel = 0u; channel < 3u; ++channel)
+        methods->set_blend(renderer, (int)channel, motion->blend[channel]);
+    /* Firing is an independent upper-body layer, including while a native
+     * backward/strafe pair is active. The wire never grants attack authority. */
+    set_animation_channel(renderer, methods, submodels, 4,
+        firing ? AILISH_COMBAT_WEAK_SELECTOR : 0, firing ? 1 : 192,
+        firing ? 24.0f : 0.0f, new_fire);
+    if (firing && !synchronize_action_phase(renderer, methods, submodels, 4,
+            snapshot)) return FALSE;
+    methods->set_blend(renderer, 3, firing ? 1.0f : 0.0f);
+    if (!final_boundary) {
+        if (new_owner || !lease->locomotion.valid) {
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_locomotion actor=Ailish "
+                "state=admitted epoch=%u clips=%u,%u,%u,%u "
+                "policy=exact_world_bank_host_timing_independent_fire_layer\r\n",
+                motion->sequence, motion->clip[0], motion->clip[1],
+                motion->clip[2], motion->clip[3]);
+        }
+        lease->last_early_apply_at = now;
+        lease->locomotion = *motion;
+    }
+    lease->character = character;
+    lease->renderer = renderer;
+    lease->animation_state = snapshot->animation_state;
+    lease->combat_state = snapshot->combat_state;
+    lease->action_variant = snapshot->action_variant;
+    lease->action_sequence = snapshot->action_sequence;
+    lease->combat_mode = TRUE;
+    lease->valid = TRUE;
+    return TRUE;
+}
+
 static BOOL apply_actor_presentation(
     uint8_t *character,
     const SudekiMpLanArenaActorSnapshot *snapshot,
@@ -4695,6 +5130,7 @@ static BOOL apply_actor_presentation(
             character, snapshot, actor_index, combat_mode,
             &native_skill_owns_presentation)) return FALSE;
     if (native_skill_owns_presentation) {
+        presentation_leases[actor_index].locomotion.valid = 0u;
         return apply_host_skill_presentation(
             character, snapshot, actor_index,
             !final_presentation_boundary);
@@ -4725,8 +5161,14 @@ static BOOL apply_actor_presentation(
     if (actor_index == 1u && combat_mode) {
         ailish_first_person_applied =
             apply_ailish_first_person_presentation(
-                character, ailish_component, snapshot);
+                character, ailish_component, snapshot, final_presentation_boundary);
     }
+    if (actor_index == 1u && combat_mode && snapshot->locomotion.valid) {
+        return apply_ailish_host_locomotion(character, ailish_component,
+            renderer, &methods, submodels, snapshot,
+            final_presentation_boundary) && ailish_first_person_applied;
+    }
+    presentation_leases[actor_index].locomotion.valid = 0u;
     if (actor_index == 1u && combat_mode &&
         (!resolve_ailish_world_selector(
              ailish_component, renderer, 0x02u,
@@ -5073,6 +5515,39 @@ static BOOL apply_actor(
     }
     position = *(void **)(character + CHARACTER_POSITION_OFFSET);
     if (!readable_memory(position, 0x5cu)) return FALSE;
+    if (actor == SUDEKIMP_CLEANROOM_AILISH && snapshot->weapon_slot_plus_one != 0u &&
+        snapshot->weapon_slot_plus_one <= 12u) {
+        SudekiMpWeaponQuickList weapons;
+        SudekiMpCharacterSkillState skill;
+        void *weapon = *(void **)(character + 0xc0u);
+        unsigned int slot = snapshot->weapon_slot_plus_one - 1u;
+        if (!SudekiMpDescribeCharacterWeapons(character, &weapons) ||
+            slot >= weapons.row_count) return FALSE;
+        if (!weapons.rows[slot].equipped) {
+            if (!SudekiMpObserveCharacterSkill(character, &skill) ||
+                skill.active || client_skill_replay_active() ||
+                !drain_ailish_native_ranged()) return FALSE;
+            if (client_weapon_attempt_actor == character &&
+                client_weapon_attempt_component == weapon &&
+                client_weapon_attempt_slot == snapshot->weapon_slot_plus_one)
+                return FALSE;
+            client_weapon_attempt_actor = character;
+            client_weapon_attempt_component = weapon;
+            client_weapon_attempt_slot = snapshot->weapon_slot_plus_one;
+            SudekiMpWeaponActivationResult result =
+                SudekiMpActivateCharacterWeapon(character, slot);
+            SudekiMpLogFormat("lan_arena_client_replica event=client_weapon slot=%u status=%s policy=host_observed_training_equipment\r\n",
+                slot, SudekiMpWeaponActivationStatusName(result.status));
+            if (result.status != SUDEKIMP_WEAPON_ACTIVATION_STARTED) return FALSE;
+            /* Keep the previous confirmed slot for a renderer-only swap.
+             * The presentation path revalidates actor/component/renderer;
+             * initial seeding and replaced owners never trigger a clip. */
+        } else {
+            client_weapon_attempt_actor = NULL;
+            client_weapon_attempt_component = NULL;
+            client_weapon_attempt_slot = 0u;
+        }
+    }
     coordinates[0] = snapshot->x;
     coordinates[1] = snapshot->y;
     coordinates[2] = snapshot->z;
@@ -5244,6 +5719,104 @@ static void capture_actor_diagnostics(
     diagnostics->render_position[1] = matrix[13];
     diagnostics->render_position[2] = matrix[14];
     diagnostics->render_valid = 1u;
+}
+
+typedef struct FirstPersonFrameSample {
+    uint32_t tick;
+    uint32_t actor;
+    uint32_t position;
+    uint32_t renderer;
+    uint32_t camera;
+    uint32_t valid;
+    float actor_position[3];
+    float model_matrix[16];
+    float camera_matrix[16];
+} FirstPersonFrameSample;
+
+typedef struct FirstPersonFrameTrace {
+    uint32_t frame;
+    FirstPersonFrameSample phase[6];
+} FirstPersonFrameTrace;
+
+/* Published only after all six game-thread boundaries, with an even/odd
+ * revision for external read-only sampling. No native pointer is retained
+ * for later dereference and no per-frame logging or allocation is needed. */
+static volatile LONG first_person_frame_trace_revision;
+static volatile FirstPersonFrameTrace first_person_frame_trace;
+
+void SudekiMpLanArenaClientObserveFirstPersonFrame(unsigned int phase) {
+    static int enabled = -1;
+    static FirstPersonFrameTrace pending;
+    FirstPersonFrameSample sample;
+    uint8_t *character, *position, *component, *wrapper, *renderer, *animation;
+    uint8_t *mode, *camera_member, *camera, *render_state;
+    DWORD saved_error = GetLastError();
+    unsigned int i;
+    if (phase >= 6u) return;
+    if (enabled < 0) {
+        char setting[8];
+        enabled = GetEnvironmentVariableA("SUDEKIMP_FP_FRAME_TRACE",
+            setting, sizeof(setting)) == 1u && setting[0] == '1';
+    }
+    if (!enabled) {
+        SetLastError(saved_error);
+        return;
+    }
+    if (phase == 0u) {
+        ++pending.frame;
+        ZeroMemory(pending.phase, sizeof(pending.phase));
+    }
+    ZeroMemory(&sample, sizeof(sample));
+    sample.tick = GetTickCount();
+    if (game_base == NULL || !client_session_authenticated()) goto publish;
+    character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    if (!client_ailish_first_person_camera_owns_facing(character) ||
+        !readable_memory(character, 0x138u)) goto publish;
+    position = *(uint8_t **)(character + 0x44u);
+    component = *(uint8_t **)(character + 0x134u);
+    if (!readable_memory(position, 0xb8u) ||
+        !readable_memory(component, 0x168u) ||
+        *(void **)(position + 0x10u) != character ||
+        *(void **)(component + 0x10u) != character) goto publish;
+    wrapper = *(uint8_t **)(component + AILISH_FIRST_PERSON_WRAPPER_OFFSET);
+    if (*(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) != wrapper ||
+        !readable_memory(wrapper, 0x14u)) goto publish;
+    renderer = *(uint8_t **)(wrapper + 8u);
+    animation = *(uint8_t **)(wrapper + 0x10u);
+    if (!readable_memory(renderer, 0xd0u) ||
+        !readable_memory(animation, sizeof(void *)) ||
+        *(void **)animation != game_base + RVA_ANIMATION_RENDERER_VTABLE ||
+        !readable_memory(game_base + RVA_GAME_CAMERA_MODE_GLOBAL, sizeof(void *)))
+        goto publish;
+    mode = *(uint8_t **)(game_base + RVA_GAME_CAMERA_MODE_GLOBAL);
+    if (!readable_memory(mode, 0x10u)) goto publish;
+    camera_member = *(uint8_t **)(mode + 0x0cu);
+    if ((uintptr_t)camera_member < 0x2cu) goto publish;
+    camera = camera_member - 0x2cu;
+    if (!readable_memory(camera, 0x38u)) goto publish;
+    render_state = *(uint8_t **)(camera + 0x34u);
+    if (!readable_memory(render_state, 0xd0u)) goto publish;
+    memcpy(sample.actor_position, position + 0x18u, sizeof(sample.actor_position));
+    memcpy(sample.model_matrix, renderer + 0x90u, sizeof(sample.model_matrix));
+    memcpy(sample.camera_matrix, render_state + 0x90u, sizeof(sample.camera_matrix));
+    for (i = 0u; i < 16u; ++i) {
+        if (!isfinite(sample.model_matrix[i]) || !isfinite(sample.camera_matrix[i]))
+            goto publish;
+    }
+    for (i = 0u; i < 3u; ++i) if (!isfinite(sample.actor_position[i])) goto publish;
+    sample.actor = (uint32_t)(uintptr_t)character;
+    sample.position = (uint32_t)(uintptr_t)position;
+    sample.renderer = (uint32_t)(uintptr_t)renderer;
+    sample.camera = (uint32_t)(uintptr_t)camera;
+    sample.valid = 1u;
+publish:
+    pending.phase[phase] = sample;
+    if (phase == 5u) {
+        InterlockedIncrement(&first_person_frame_trace_revision);
+        first_person_frame_trace = pending;
+        InterlockedIncrement(&first_person_frame_trace_revision);
+    }
+    SetLastError(saved_error);
 }
 
 static void capture_camera_diagnostics(void) {
@@ -5540,6 +6113,12 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
         return FALSE;
     }
     client_skill_activation_actor_index = -1;
+    if (!drain_ailish_native_ranged()) {
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks("native_ranged_drain_pending", ERROR_BUSY);
+        return FALSE;
+    }
+    ZeroMemory(&ailish_native_ranged_lease, sizeof(ailish_native_ranged_lease));
     if (!drain_tal_native_action_lease()) {
         client_replica_reset_pending = TRUE;
         discard_client_replica_frame_state();
@@ -6158,8 +6737,9 @@ BOOL SudekiMpLanArenaClientSpiritVisualFilterGeneration(
     if (!snapshot->spirit_vfx_observed) return TRUE;
     for (index = 0u; index < snapshot->spirit_vfx_count; ++index) {
         uint16_t sequence = snapshot->spirit_vfx[index].skill_sequence;
-        if (sequence != 0u && (skill_floor == 0u ||
-                (int16_t)(sequence - skill_floor) > 0)) {
+        if (snapshot->spirit_vfx[index].owner_actor_type != 0u ||
+            (sequence != 0u && (skill_floor == 0u ||
+                (int16_t)(sequence - skill_floor) > 0))) {
             snapshot->spirit_vfx[kept++] = snapshot->spirit_vfx[index];
         }
     }
@@ -6175,6 +6755,7 @@ BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
     SudekiMpLanArenaSnapshot visual_frame;
     const SudekiMpLanArenaActorSnapshot *tal = &last_applied_snapshot.tal;
     void *expected_tal;
+    void *expected_ailish;
     uint32_t expected_generation;
     uint64_t expected_session;
     BOOL serviced;
@@ -6196,6 +6777,7 @@ BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
      * The next successfully published frame will service retained clones. */
     if (!replica_diagnostics.valid) return TRUE;
     expected_tal = client_remote_tal_lease_actor;
+    expected_ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
     expected_generation = client_remote_tal_lease_generation;
     expected_session = status.session_token;
     if (!SudekiMpLanArenaClientTalLifecycleLeaseExact(
@@ -6203,17 +6785,29 @@ BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
             client_remote_tal_lease_generation,
             expected_tal, expected_generation) ||
         last_applied_characters[0] != expected_tal ||
+        expected_ailish == NULL || last_applied_characters[1] != expected_ailish ||
         tal->actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
         tal->native_entity_id != SUDEKIMP_LAN_ARENA_TAL_TYPE) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
+    if (last_applied_snapshot.spirit_vfx_observed) {
+        unsigned int index;
+        for (index = 0u; index < last_applied_snapshot.spirit_vfx_count; ++index) {
+            uint32_t instance = last_applied_snapshot.spirit_vfx[index].instance_sequence;
+            if (status_vfx_newest_instance == 0u ||
+                (int32_t)(instance - status_vfx_newest_instance) > 0)
+                status_vfx_newest_instance = instance;
+        }
+    }
     if (spirit_vfx_session_token != 0u &&
         (spirit_vfx_session_token != expected_session ||
          spirit_vfx_tal_actor != expected_tal ||
-         spirit_vfx_tal_generation != expected_generation)) {
+         spirit_vfx_tal_generation != expected_generation ||
+         status_vfx_ailish_actor != expected_ailish)) {
         if (!release_client_spirit_vfx_cache("visual_actor_generation_changed"))
             return FALSE;
+        status_vfx_instance_floor = status_vfx_newest_instance;
         /* Same-session replacement retires old clones, then fences every
          * effect belonging to the preceding cast. A later authenticated cast
          * can render normally without transferring old instances to Tal. */
@@ -6225,10 +6819,23 @@ BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
     spirit_vfx_session_token = expected_session;
     spirit_vfx_tal_actor = expected_tal;
     spirit_vfx_tal_generation = expected_generation;
+    status_vfx_ailish_actor = expected_ailish;
     visual_frame = last_applied_snapshot;
     if (spirit_vfx_generation_fenced &&
         !SudekiMpLanArenaClientSpiritVisualFilterGeneration(
             &visual_frame, spirit_vfx_generation_skill_floor)) return FALSE;
+    if (status_vfx_instance_floor != 0u && visual_frame.spirit_vfx_observed) {
+        unsigned int index, kept = 0u;
+        for (index = 0u; index < visual_frame.spirit_vfx_count; ++index) {
+            const SudekiMpLanArenaSpiritVfxSnapshot *value = &visual_frame.spirit_vfx[index];
+            if (value->owner_actor_type == 0u ||
+                (int32_t)(value->instance_sequence - status_vfx_instance_floor) > 0)
+                visual_frame.spirit_vfx[kept++] = *value;
+        }
+        visual_frame.spirit_vfx_count = (uint8_t)kept;
+        ZeroMemory(&visual_frame.spirit_vfx[kept],
+            (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY - kept) * sizeof(visual_frame.spirit_vfx[0]));
+    }
     InterlockedIncrement(&client_spirit_vfx_call_depth);
     serviced = SudekiMpLanArenaSpiritVfxServiceVisuals(
         (HMODULE)game_base, &visual_frame, expected_session);
@@ -6238,6 +6845,7 @@ BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
         !client_session_status(&status) || !replica_diagnostics.valid ||
         status.session_token != expected_session ||
         client_remote_tal_lease_actor != expected_tal ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) != expected_ailish ||
         client_remote_tal_lease_generation != expected_generation) {
         /* A reentrant invalidation cannot retire an in-flight native clone.
          * Complete that obligation now, before admitting another roster. */

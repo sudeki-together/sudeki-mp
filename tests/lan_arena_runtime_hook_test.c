@@ -33,6 +33,13 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #define WaitForSingleObject test_wait_for_single_object
 #define CloseHandle test_close_handle
 #include "../src/hooks/lan_arena_runtime.c"
+
+BOOL SudekiMpDescribeCharacterWeapons(void *character,
+    SudekiMpWeaponQuickList *weapons) {
+    (void)character;
+    (void)weapons;
+    return FALSE;
+}
 #undef CloseHandle
 #undef WaitForSingleObject
 #undef SetEvent
@@ -888,6 +895,12 @@ static void verify_callback_order(void) {
     original_render_start = fixture_render_start;
     replica_apply_result = TRUE;
     visible_publish_result = TRUE;
+    client_replica_frame_attempted = FALSE;
+    client_replica_frame_ready = FALSE;
+    prepare_client_replica_frame();
+    prepare_client_replica_frame();
+    check(strcmp(callback_events, "A") == 0,
+        "post-controller prepares exactly one replica sample per render frame");
     lan_arena_render_start_entry();
     check(strcmp(callback_events, "APXRVSCP") == 0,
         "first render orders visible Spirit VFX before native render and remote reassert");
@@ -901,6 +914,7 @@ static void verify_callback_order(void) {
     callback_event_count = 0u;
     callback_events[0] = '\0';
     visible_publish_result = FALSE;
+    prepare_client_replica_frame();
     lan_arena_render_start_entry();
     check(strcmp(callback_events, "APRVSCP") == 0,
         "failed visible publication skips Spirit VFX admission");
@@ -909,10 +923,17 @@ static void verify_callback_order(void) {
     callback_event_count = 0u;
     callback_events[0] = '\0';
     replica_apply_result = FALSE;
+    prepare_client_replica_frame();
     lan_arena_render_start_entry();
     check(strcmp(callback_events, "ARVC") == 0,
         "unapplied replica frame skips publication and Spirit VFX admission");
     replica_apply_result = TRUE;
+
+    callback_event_count = 0u;
+    callback_events[0] = '\0';
+    lan_arena_render_start_entry();
+    check(strcmp(callback_events, "RVC") == 0,
+        "render without a fresh controller sample never resamples or reuses a consumed frame");
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -2735,11 +2756,14 @@ BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {
 
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     uint64_t session, uint16_t skill, uint32_t tick,
+    void *tal, void *ailish,
     SudekiMpLanArenaSnapshot *snapshot
 ) {
     (void)session;
     (void)skill;
     (void)tick;
+    (void)tal;
+    (void)ailish;
     ++spirit_visual_capture_count;
     if (snapshot == NULL) return FALSE;
     snapshot->spirit_vfx_observed = spirit_visual_capture_observed ? 1u : 0u;
@@ -2911,6 +2935,10 @@ BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void) {
 BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
     record_callback_event('S');
     return TRUE;
+}
+
+void SudekiMpLanArenaClientObserveFirstPersonFrame(unsigned int phase) {
+    (void)phase;
 }
 
 BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void) {

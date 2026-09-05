@@ -283,6 +283,43 @@ static void interpolate_skill_presentation(
     }
 }
 
+static void interpolate_locomotion(
+    const SudekiMpLanArenaActorSnapshot *before,
+    const SudekiMpLanArenaActorSnapshot *after,
+    float alpha,
+    SudekiMpLanArenaActorSnapshot *output
+) {
+    const SudekiMpLanArenaLocomotion *a = &before->locomotion;
+    const SudekiMpLanArenaLocomotion *b = &after->locomotion;
+    unsigned int channel;
+    if (output->skill_active || !output->hp) {
+        memset(&output->locomotion, 0, sizeof(output->locomotion));
+        return;
+    }
+    if (!a->valid || !b->valid || a->sequence != b->sequence ||
+        memcmp(a->clip, b->clip, sizeof(a->clip)) != 0 ||
+        memcmp(a->state, b->state, sizeof(a->state)) != 0) {
+        if (alpha < 1.0f) output->locomotion = *a;
+        return;
+    }
+    for (channel = 0u; channel < 4u; ++channel) {
+        /* Even a malformed epoch must not blend a native wrap backwards. */
+        if (b->time[channel] < a->time[channel]) {
+            if (alpha < 1.0f) output->locomotion = *a;
+            return;
+        }
+    }
+    for (channel = 0u; channel < 4u; ++channel) {
+        output->locomotion.rate[channel] = interpolate_float(
+            a->rate[channel], b->rate[channel], alpha);
+        output->locomotion.time[channel] = interpolate_float(
+            a->time[channel], b->time[channel], alpha);
+    }
+    for (channel = 0u; channel < 3u; ++channel)
+        output->locomotion.blend[channel] = interpolate_float(
+            a->blend[channel], b->blend[channel], alpha);
+}
+
 static void interpolate_actor(
     const SudekiMpLanArenaActorSnapshot *before,
     const SudekiMpLanArenaActorSnapshot *after,
@@ -335,6 +372,7 @@ static void interpolate_actor(
     normalized_facing(before, after, alpha,
         &output->facing_x, &output->facing_z);
     interpolate_skill_presentation(before, after, alpha, output);
+    interpolate_locomotion(before, after, alpha, output);
     replay_action_history(
         before, after, host_tick, before_host_tick,
         after_host_tick, output);
@@ -494,6 +532,7 @@ static void interpolate_spirit_visuals(
          * boundary, not as soon as that newer packet arrives. */
         if (to == NULL) continue;
         if (to->kind != from->kind || to->skill_sequence != from->skill_sequence ||
+            to->owner_actor_type != from->owner_actor_type ||
             to->emitted_host_tick != from->emitted_host_tick) {
             sample->spirit_vfx_observed = 0u;
             sample->spirit_vfx_count = 0u;
@@ -567,6 +606,8 @@ BOOL SudekiMpLanArenaReplicaSample(
         interpolate_actor(&replica->earliest.ailish, &replica->oldest.ailish,
             alpha, host_tick, replica->earliest.host_tick,
             replica->oldest.host_tick, &sample->ailish);
+        if (!sample->combat_enabled)
+            memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->earliest.enemies[index].x,
@@ -601,6 +642,8 @@ BOOL SudekiMpLanArenaReplicaSample(
         interpolate_actor(&replica->oldest.ailish, &replica->previous.ailish,
             alpha, host_tick, replica->oldest.host_tick,
             replica->previous.host_tick, &sample->ailish);
+        if (!sample->combat_enabled)
+            memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->oldest.enemies[index].x,
@@ -636,6 +679,8 @@ BOOL SudekiMpLanArenaReplicaSample(
     interpolate_actor(&replica->previous.ailish, &replica->latest.ailish,
         alpha, host_tick, replica->previous.host_tick,
         replica->latest.host_tick, &sample->ailish);
+    if (!sample->combat_enabled)
+        memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
     for (index = 0u; index < sample->enemy_count; ++index) {
         sample->enemies[index].x = interpolate_float(
             replica->previous.enemies[index].x,

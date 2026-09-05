@@ -67,7 +67,8 @@ static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_ARENA_SPIRIT_VFX
     {"SFXSS110_Loop_Invulnerable.HOM", 0xc24c6a03u},
     {"SFXSS111_End_Invulnerable.HOM", 0xa8171ecfu},
     {"SFXSS900_generic_initate.HOM", 0x62dcc5a3u},
-    {"SFXSS351_Tal_Hit_Character.HOM", 0xaeec0c83u}
+    {"SFXSS351_Tal_Hit_Character.HOM", 0xaeec0c83u},
+    {"SFXSTA003_Boost.HOM", 0x423bad0du}
 };
 
 static const uint8_t expected_sfx_play_body[] = {
@@ -1119,7 +1120,8 @@ BOOL SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
      * phase back onto it repeatedly rewinds its particle timeline. Preserve
      * that progress, but allow initial/late forward catch-up. The complete
      * host roster still owns retirement, never this phase decision. */
-    *apply = kind != SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE ||
+    *apply = (kind != SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE &&
+              kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) ||
         host_phase > native_phase;
     return TRUE;
 }
@@ -1130,7 +1132,7 @@ BOOL SudekiMpLanArenaSpiritVfxVisualMatrix(
     float x, y, z, w, length;
     unsigned int index;
     if (visual == NULL || matrix == NULL || visual->instance_sequence == 0u ||
-        visual->skill_sequence == 0u || visual_resource(visual->kind) == NULL ||
+        !SudekiMpLanArenaVisualOwnerValid(visual) || visual_resource(visual->kind) == NULL ||
         visual->phase_valid > 1u || !isfinite(visual->phase) ||
         visual->phase < 0.0f || visual->phase > 1000000.0f) return FALSE;
     for (index = 0u; index < 3u; ++index) {
@@ -1218,6 +1220,7 @@ static BOOL same_visual_identity(const SudekiMpLanArenaSpiritVfxSnapshot *a,
     const SudekiMpLanArenaSpiritVfxSnapshot *b) {
     return a->instance_sequence == b->instance_sequence &&
         a->skill_sequence == b->skill_sequence && a->kind == b->kind &&
+        a->owner_actor_type == b->owner_actor_type &&
         a->emitted_host_tick == b->emitted_host_tick;
 }
 

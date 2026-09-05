@@ -5,6 +5,7 @@
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/spirit_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_arena_client_input.h"
@@ -119,6 +120,14 @@ static BOOL client_replica_discard_logged;
 static BOOL host_release_pending_logged;
 static BOOL client_release_pending_logged;
 static int client_replica_stop_state = -1;
+static BOOL client_replica_frame_attempted;
+static BOOL client_replica_frame_ready;
+
+static void prepare_client_replica_frame(void) {
+    if (client_replica_frame_attempted) return;
+    client_replica_frame_attempted = TRUE;
+    client_replica_frame_ready = SudekiMpLanArenaClientReplicaApplyLatest();
+}
 static int client_animation_basis_publish_state = -1;
 static int client_presentation_reassert_state = -1;
 static int client_visible_transform_publish_state = -1;
@@ -268,6 +277,12 @@ static DWORD host_remote_weak_cycle_started_at_ms;
 static DWORD host_remote_ranged_repeat_not_before_ms;
 static SudekiMpCleanroomActorPresentation host_actor_presentation[2];
 static BOOL host_actor_presentation_valid[2];
+static struct {
+    void *actor;
+    uint64_t session_token;
+    uint16_t sequence;
+    SudekiMpLanArenaLocomotion previous;
+} host_ailish_locomotion;
 static DWORD host_actor_presentation_last_trace_at[2];
 static SudekiMpCleanroomActorPresentation client_actor_presentation[2];
 static BOOL client_actor_presentation_valid[2];
@@ -913,6 +928,19 @@ static BOOL fill_actor_snapshot(
     snapshot->facing_z = facing[1];
     snapshot->hp = resource_snapshot_value(hit_points);
     snapshot->sp = resource_snapshot_value(skill_points);
+    if (actor == SUDEKIMP_CLEANROOM_AILISH) {
+        SudekiMpWeaponQuickList weapons;
+        unsigned int slot;
+        if (SudekiMpDescribeCharacterWeapons(
+                SudekiMpCleanroomEngineActorEntity(actor), &weapons)) {
+            for (slot = 0u; slot < weapons.row_count && slot < 12u; ++slot) {
+                if (weapons.rows[slot].equipped) {
+                    snapshot->weapon_slot_plus_one = (uint8_t)(slot + 1u);
+                    break;
+                }
+            }
+        }
+    }
     return TRUE;
 }
 
@@ -1592,6 +1620,7 @@ static void commit_host_spirit_audio_stage(
 
 static void reset_host_skill_tracking(void) {
     unsigned int actor_index;
+    ZeroMemory(&host_ailish_locomotion, sizeof(host_ailish_locomotion));
     ZeroMemory(host_actor_skill_sequence,
         sizeof(host_actor_skill_sequence));
     ZeroMemory(host_actor_skill_kind, sizeof(host_actor_skill_kind));
@@ -2574,6 +2603,79 @@ static void host_snapshot_publish_succeeded(
         sizeof(host_snapshot_failure_telemetry));
 }
 
+static void host_capture_ailish_locomotion(
+    uint64_t session_token,
+    BOOL combat_enabled,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    SudekiMpCleanroomActorPresentation native;
+    SudekiMpLanArenaLocomotion current;
+    void *actor = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    unsigned int channel;
+    BOOL transition;
+    ZeroMemory(&snapshot->locomotion, sizeof(snapshot->locomotion));
+    if (host_ailish_locomotion.actor != actor ||
+        host_ailish_locomotion.session_token != session_token) {
+        ZeroMemory(&host_ailish_locomotion, sizeof(host_ailish_locomotion));
+        host_ailish_locomotion.actor = actor;
+        host_ailish_locomotion.session_token = session_token;
+    }
+    /* Observe freshly here: the trace cache may retain a last-good frame on
+     * observation failure. Unknown ordinary presentation must not stall the
+     * gameplay snapshot or be mistaken for a fresh animation witness. */
+    if (!actor || !combat_enabled || snapshot->skill_active || !snapshot->hp ||
+        !SudekiMpCleanroomEngineActorPresentation(SUDEKIMP_CLEANROOM_AILISH,
+            &native) ||
+        actor != SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH)) {
+        host_ailish_locomotion.previous.valid = 0u;
+        return;
+    }
+    ZeroMemory(&current, sizeof(current));
+    current.valid = 1u;
+    current.sequence = 1u; /* Validate content before allocating an epoch. */
+    for (channel = 0u; channel < 4u; ++channel) {
+        int clip = SudekiMpLanArenaLocomotionClip(native.selector[channel]);
+        if (clip < 0) {
+            host_ailish_locomotion.previous.valid = 0u;
+            return;
+        }
+        current.clip[channel] = (uint8_t)clip;
+        current.state[channel] = native.state[channel];
+        if (clip != 0) {
+            current.rate[channel] = native.rate[channel];
+            current.time[channel] = native.time[channel];
+        }
+    }
+    memcpy(current.blend, native.blend, sizeof(current.blend));
+    if (!SudekiMpLanArenaLocomotionValid(&current)) {
+        host_ailish_locomotion.previous.valid = 0u;
+        return;
+    }
+    transition = !host_ailish_locomotion.previous.valid ||
+        memcmp(current.clip, host_ailish_locomotion.previous.clip,
+            sizeof(current.clip)) != 0 ||
+        memcmp(current.state, host_ailish_locomotion.previous.state,
+            sizeof(current.state)) != 0;
+    for (channel = 0u; channel < 4u; ++channel) {
+        if (current.time[channel] < host_ailish_locomotion.previous.time[channel])
+            transition = TRUE; /* Native loop/restart: never interpolate across it. */
+    }
+    if (transition && ++host_ailish_locomotion.sequence == 0u)
+        ++host_ailish_locomotion.sequence;
+    current.sequence = host_ailish_locomotion.sequence;
+    if (!host_ailish_locomotion.previous.valid ||
+        memcmp(current.clip, host_ailish_locomotion.previous.clip,
+            sizeof(current.clip)) != 0) {
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=host_locomotion actor=Ailish epoch=%u "
+            "clips=%u,%u,%u,%u policy=observed_native_base_channels\r\n",
+            current.sequence, current.clip[0], current.clip[1],
+            current.clip[2], current.clip[3]);
+    }
+    host_ailish_locomotion.previous = current;
+    snapshot->locomotion = current;
+}
+
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
@@ -2651,13 +2753,17 @@ static void host_publish_snapshot(DWORD now_ms) {
         1u, now_ms, combat_enabled, &snapshot.ailish);
     host_apply_skill_presentation(0u, &snapshot.tal);
     host_apply_skill_presentation(1u, &snapshot.ailish);
+    host_capture_ailish_locomotion(status.session_token, combat_enabled,
+        &snapshot.ailish);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
     /* A partial/failed visual observation is UNKNOWN, not an empty roster.
      * This optional presentation domain must not stall gameplay snapshots. */
     if (!SudekiMpLanArenaSpiritVisualHostCapture(status.session_token,
-            snapshot.tal.skill_sequence, now_ms, &snapshot)) {
+            snapshot.tal.skill_sequence, now_ms,
+            SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL),
+            SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH), &snapshot)) {
         snapshot.spirit_vfx_observed = 0u;
         snapshot.spirit_vfx_count = 0u;
         ZeroMemory(snapshot.spirit_vfx, sizeof(snapshot.spirit_vfx));
@@ -2953,6 +3059,8 @@ static void lan_arena_control_update_observer(
     BOOL remote_combat_toggle_rejected = FALSE;
     BOOL remote_skill_requested = FALSE;
     uint8_t remote_skill_slot = 0u;
+    uint8_t remote_kit_action = 0u;
+    uint8_t remote_kit_slot = 0u;
     BOOL ranged_native_ready = TRUE;
     BOOL ranged_native_ready_known = FALSE;
     uint16_t ranged_authored_delay_half = 0u;
@@ -3018,6 +3126,8 @@ static void lan_arena_control_update_observer(
         if (runtime_config.local_role ==
                 SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
             SudekiMpLanArenaClientReplicaDiscardSnapshots();
+            client_replica_frame_attempted = FALSE;
+            client_replica_frame_ready = FALSE;
             client_replica_stop_state = -1;
             if (!client_replica_discard_logged) {
                 client_replica_discard_logged = TRUE;
@@ -3193,10 +3303,12 @@ static void lan_arena_control_update_observer(
          * selector setter dereferences those tables, so presentation and
          * transform replication must wait for both native setup transactions
          * to complete rather than treating a non-NULL wrapper as readiness. */
-        /* Consume and apply the replica once before native scene traversal.
-         * Applying it
-         * here too dirties CPosition twice per frame and lets the intervening
-         * native camera/AI update fight a pose that is not client simulation. */
+        /* Publish one authoritative sample before the native camera consumes
+         * the local actor position. RenderStart must reuse it, not advance
+         * CPosition again after the camera has already followed this frame. */
+        if (tal_initialized && ailish_initialized) {
+            prepare_client_replica_frame();
+        }
         SudekiMpControlUpdateObserverGateLeave(
             &lan_arena_control_observer_gate);
         return;
@@ -3329,6 +3441,33 @@ static void lan_arena_control_update_observer(
             remote_skill_requested = TRUE;
             remote_skill_slot = input.skill_slot;
         }
+        if (remote_kit_action == 0u && input.kit_action != 0u) {
+            remote_kit_action = input.kit_action;
+            remote_kit_slot = input.kit_slot;
+        }
+    }
+    if (remote_kit_action != 0u) {
+        SudekiMpCharacterSkillState tal_skill, ailish_skill;
+        int spirit_state;
+        BOOL available = !remote_skill_requested &&
+            !host_remote_skill_camera_active &&
+            !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
+            SudekiMpObserveCharacterSkill(SudekiMpCleanroomEngineActorEntity(
+                SUDEKIMP_CLEANROOM_TAL), &tal_skill) && !tal_skill.active &&
+            SudekiMpObserveCharacterSkill(ailish, &ailish_skill) && !ailish_skill.active &&
+            SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) &&
+            spirit_state == 0;
+        if (available && remote_kit_action == SUDEKIMP_LAN_ARENA_KIT_WEAPON &&
+            remote_kit_slot < 12u) {
+            SudekiMpWeaponActivationResult result =
+                SudekiMpActivateCharacterWeapon(ailish, remote_kit_slot);
+            SudekiMpLogFormat("lan_arena_runtime event=host_kit kind=weapon slot=%u status=%s policy=native_host_equip_observed_snapshot\r\n",
+                remote_kit_slot, SudekiMpWeaponActivationStatusName(result.status));
+        } else {
+            SudekiMpLogWrite("lan_arena_runtime event=host_kit status=busy policy=no_action_during_native_task\r\n");
+        }
+        remote_weak_requested = FALSE;
+        host_remote_weak_held = FALSE;
     }
     if (remote_combat_toggle_rejected) {
         SudekiMpLogWrite(
@@ -3665,12 +3804,15 @@ static void lan_arena_frame_end_entry(void) {
 }
 
 static void lan_arena_render_start_entry(void) {
+    BOOL prepared = client_replica_frame_ready;
     BOOL replica_applied = FALSE;
     BOOL published_before_start = FALSE;
     BOOL published_after_start = FALSE;
     BOOL client_owner_view_refreshed = TRUE;
     DWORD publish_error = ERROR_SUCCESS;
-    /* Commit and publish immediately before the first native RenderStart,
+    client_replica_frame_ready = FALSE;
+    client_replica_frame_attempted = FALSE;
+    /* Publish the sample prepared by the exact post-controller observer,
      * then publish the same sample once more after it. The primary component
      * update at the following 0x28d45b boundary rotates animation root motion
      * through CPosition's world basis; letting that update see the stale +Z
@@ -3679,7 +3821,8 @@ static void lan_arena_render_start_entry(void) {
     if (runtime_config.local_role ==
             SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
         tal_initialized && ailish_initialized) {
-        replica_applied = SudekiMpLanArenaClientReplicaApplyLatest();
+        SudekiMpLanArenaClientObserveFirstPersonFrame(0u);
+        replica_applied = prepared;
         if (replica_applied) {
             published_before_start =
                 SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
@@ -3698,7 +3841,11 @@ static void lan_arena_render_start_entry(void) {
     if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
         host_tal_skill_view_basis_safe_this_frame = FALSE;
     }
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH)
+        SudekiMpLanArenaClientObserveFirstPersonFrame(1u);
     original_render_start();
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH)
+        SudekiMpLanArenaClientObserveFirstPersonFrame(2u);
     if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
         host_tal_skill_view_lease.valid) {
         /* This first RenderStart precedes the primary component/CSkill update
@@ -3746,7 +3893,7 @@ static void lan_arena_render_start_entry(void) {
             client_replica_stream_logged = TRUE;
             SudekiMpLogWrite(
                 "lan_arena_runtime event=client_snapshot_replica phase=active "
-                "apply_boundary=pre_first_render_start jitter_buffer_ms=100 "
+                "apply_boundary=post_controller_once jitter_buffer_ms=100 "
                 "visible_publish=before_and_after_first_plus_pre_world "
                 "actors=Tal,Ailish enemy=training_dummy "
                 "policy=single_network_sample_native_basis_before_root_motion_native_world_combat_state_replicated\r\n");
@@ -3757,7 +3904,11 @@ static void lan_arena_render_start_entry(void) {
 static void lan_arena_render_pre_world_entry(void) {
     BOOL presentation_reasserted = FALSE;
     BOOL published = FALSE;
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH)
+        SudekiMpLanArenaClientObserveFirstPersonFrame(3u);
     original_render_start();
+    if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH)
+        SudekiMpLanArenaClientObserveFirstPersonFrame(4u);
     /* Do not refresh a camera lease here. The primary component/CSkill update
      * at 0x28d45b ran after the first RenderStart and may have replaced the
      * active render-state basis without selecting a camera. Reassert only the
@@ -3932,6 +4083,7 @@ static void lan_arena_render_pre_world_entry(void) {
                 published ? 0ul : (unsigned long)GetLastError());
         }
         client_trace_tal_action_timeline();
+        SudekiMpLanArenaClientObserveFirstPersonFrame(5u);
     }
     if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
         host_tal_skill_view_basis_safe_this_frame = FALSE;

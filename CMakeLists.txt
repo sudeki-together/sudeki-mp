@@ -280,11 +280,13 @@ add_executable(SudekiMP.LanArenaSpiritAudioTest
 add_executable(SudekiMP.LanArenaSpiritVfxTest
     tests/lan_arena_spirit_vfx_test.c
     src/hooks/lan_arena_spirit_vfx.c
+    src/network/lan_arena_protocol.c
 )
 add_executable(SudekiMP.LanArenaSpiritVisualHostTest
     tests/lan_arena_spirit_visual_host_test.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/call_hook.c
+    src/network/lan_arena_protocol.c
 )
 target_include_directories(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE

@@ -23,6 +23,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostReset(void);
  * already active Spirit remains UNKNOWN until that baseline is observed. */
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     uint64_t session, uint16_t current_skill, uint32_t host_tick,
+    void *tal, void *ailish,
     SudekiMpLanArenaSnapshot *output);
 BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE game_module);
 
@@ -38,6 +39,7 @@ typedef struct SudekiMpSpiritVisualHostEntry {
     SudekiMpSpiritVisualWeakNode weak;
     SudekiMpLanArenaSpiritVfxSnapshot value;
     uint8_t state;
+    void *status_actor;
 } SudekiMpSpiritVisualHostEntry;
 typedef struct SudekiMpSpiritVisualHostRegistry {
     SudekiMpSpiritVisualHostEntry entries[
@@ -71,6 +73,10 @@ unsigned int SudekiMpSpiritVisualHostRegistryBegin(
     SudekiMpSpiritVisualHostRegistry *registry, uint64_t session,
     uint16_t skill, uint32_t tick, uint8_t kind, void *entity,
     const SudekiMpSpiritVisualHostApi *api);
+unsigned int SudekiMpSpiritVisualHostRegistryBeginOwned(
+    SudekiMpSpiritVisualHostRegistry *registry, uint64_t session,
+    uint16_t skill, uint32_t tick, uint8_t kind, uint8_t owner_actor_type,
+    void *entity, const SudekiMpSpiritVisualHostApi *api);
 void SudekiMpSpiritVisualHostRegistryComplete(
     SudekiMpSpiritVisualHostRegistry *registry, unsigned int token,
     BOOL native_success, const SudekiMpSpiritVisualHostApi *api);

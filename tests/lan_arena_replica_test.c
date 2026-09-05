@@ -154,9 +154,123 @@ static void test_spirit_visual_render_timeline(void) {
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 9u, &sample));
     CHECK(fabsf(sample.spirit_vfx[0].position[0] - 5.0f) < 0.001f);
     CHECK(sample.spirit_vfx[0].phase == 30.0f); /* native loop wrap */
+
+    first = make_snapshot(1u, 100u, 0.0f);
+    second = make_snapshot(2u, 200u, 10.0f);
+    add_spirit_visual(&first, 1u, 90u, 0.0f, 10.0f);
+    add_spirit_visual(&second, 1u, 90u, 10.0f, 30.0f);
+    first.spirit_vfx[0].kind = second.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST;
+    first.spirit_vfx[0].skill_sequence = second.spirit_vfx[0].skill_sequence = 0u;
+    first.spirit_vfx[0].owner_actor_type = second.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    replica.previous = first;
+    replica.latest = second;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.spirit_vfx_observed == 1u && sample.spirit_vfx_count == 1u);
+    CHECK(sample.spirit_vfx[0].owner_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    CHECK(fabsf(sample.spirit_vfx[0].position[0] - 5.0f) < 0.001f);
+    replica.latest.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.spirit_vfx_observed == 0u && sample.spirit_vfx_count == 0u);
+}
+
+static void test_directional_locomotion_timeline(void) {
+    SudekiMpLanArenaReplica replica;
+    SudekiMpLanArenaSnapshot first = make_snapshot(1u, 100u, 0.0f);
+    SudekiMpLanArenaSnapshot second, sample;
+    SudekiMpLanArenaLocomotion *motion = &first.ailish.locomotion;
+    unsigned int i;
+    clear_actor_action(&first.tal);
+    clear_actor_action(&first.ailish);
+    first.combat_enabled = 1u;
+    motion->valid = 1u;
+    motion->sequence = 1u;
+    for (i = 0u; i < 4u; ++i) {
+        motion->clip[i] = (uint8_t)(4u + i); /* Back pair blending into left. */
+        motion->rate[i] = 24.0f;
+        motion->time[i] = 10.0f;
+    }
+    motion->blend[0] = 0.25f;
+    second = first;
+    second.sequence = 2u;
+    second.host_tick = 200u;
+    for (i = 0u; i < 4u; ++i) {
+        second.ailish.locomotion.time[i] = 12.0f;
+        second.ailish.locomotion.rate[i] = 26.0f;
+    }
+    second.ailish.locomotion.blend[0] = 0.75f;
+    SudekiMpLanArenaReplicaReset(&replica);
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    CHECK(sample.ailish.locomotion.clip[0] == 4u);
+    CHECK(sample.ailish.locomotion.time[0] == 11.0f);
+    CHECK(sample.ailish.locomotion.rate[0] == 25.0f);
+    CHECK(sample.ailish.locomotion.blend[0] == 0.5f);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 999u, &sample));
+    CHECK(sample.ailish.locomotion.time[0] == 12.0f); /* No extrapolation. */
+
+    replica.latest.ailish.locomotion.sequence = 2u;
+    replica.latest.ailish.locomotion.time[0] = 0.5f;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.ailish.locomotion.time[0] == 10.0f);
+    CHECK(sample.ailish.locomotion.sequence == 1u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 200u, &sample));
+    CHECK(sample.ailish.locomotion.time[0] == 0.5f);
+    CHECK(sample.ailish.locomotion.sequence == 2u);
+    replica.latest.ailish.locomotion.sequence = 1u;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.ailish.locomotion.time[0] == 10.0f); /* Malformed wrap also fenced. */
+    replica.latest = second;
+    replica.latest.ailish.locomotion.clip[0] = 8u;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.ailish.locomotion.clip[0] == 4u);
+    replica.latest = second;
+    replica.latest.ailish.locomotion.state[0] = 128u;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.ailish.locomotion.state[0] == 0u);
+
+    memset(&replica.latest.ailish.locomotion, 0, sizeof(*motion));
+    replica.latest.ailish.skill_sequence = 1u;
+    replica.latest.ailish.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    replica.latest.ailish.skill_active = 1u;
+    CHECK(SudekiMpLanArenaSnapshotValid(&replica.latest));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(!sample.ailish.skill_active && sample.ailish.locomotion.valid);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 200u, &sample));
+    CHECK(sample.ailish.skill_active && !sample.ailish.locomotion.valid);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+
+    replica.latest.ailish.skill_active = 0u;
+    replica.latest.combat_enabled = 0u;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(!sample.ailish.locomotion.valid);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    replica.latest = second;
+    replica.latest.ailish.hp = 0u;
+    replica.latest.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED;
+    replica.latest.ailish.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED;
+    memset(&replica.latest.ailish.locomotion, 0, sizeof(*motion));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(!sample.ailish.locomotion.valid);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+
+    /* A firing layer must not replace the observed locomotion underneath. */
+    replica.latest = second;
+    replica.latest.ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    replica.latest.ailish.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    replica.latest.ailish.action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.ailish.locomotion.time[0] == 11.0f);
+    CHECK(sample.ailish.action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    SudekiMpLanArenaReplicaReset(&replica);
+    CHECK(!SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
 }
 
 int main(void) {
+    test_directional_locomotion_timeline();
     test_spirit_visual_render_timeline();
     SudekiMpLanArenaReplica replica;
     SudekiMpLanArenaReplicaRenderClock clock;

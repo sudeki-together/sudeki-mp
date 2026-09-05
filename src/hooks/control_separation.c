@@ -17,6 +17,7 @@
 #include "input/bridge_receiver.h"
 #include "input/local_input_hub.h"
 #include "network/lan_arena_authority.h"
+#include "network/lan_arena_tal_combo_graph.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -74,6 +75,8 @@ typedef void (SUDEKIMP_THISCALL *MovementControllerSetAbsoluteDeltaFunction)(
     float delta_y,
     float delta_z
 );
+typedef void (__attribute__((regparm(1), stdcall))
+    *MovementRelativeDeltaFunction)(const float *delta, void *controller);
 typedef void (SUDEKIMP_THISCALL *TalCharacterUpdateFunction)(
     void *character_update,
     void *update_data
@@ -95,6 +98,7 @@ enum {
     RVA_ACTIVE_GROUP_GLOBAL = 0x00408d94u,
     RVA_GAME_SPEED_GLOBAL = 0x00408da0u,
     RVA_GAME_SPEED_PLAYER_INPUT_ENABLE = 0x00027120u,
+    RVA_CONTROLLER_FILTER_ALL = 0x00008ae0u,
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x00408da4u,
     RVA_GAME_CAMERA_MODE_GLOBAL = 0x00408da8u,
     RVA_CAMERA_MANAGER_GLOBAL = 0x00409d7cu,
@@ -112,6 +116,8 @@ enum {
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
     RVA_ARBITER_SET_SPEED = 0x000db070u,
     RVA_POSITION_SET_FORWARD = 0x001114d0u,
+    RVA_ANIMATION_ROOT_MOVEMENT_CALL = 0x000e1a98u,
+    RVA_MOVEMENT_RELATIVE_DELTA = 0x000c3650u,
     RVA_GROUP_PLAYERS_IN_COMBAT = 0x00004fa0u,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
@@ -198,6 +204,12 @@ static const float spirit_noncaster_direct_movement_pace = 6.4f;
 static SudekiMpPointerHook controller_update_vtable_hook;
 static SudekiMpRelativeCallHook player_one_alternate_movement_call_hook;
 static SudekiMpRelativeCallHook player_one_normal_movement_call_hook;
+static SudekiMpRelativeCallHook lan_spirit_root_movement_call_hook;
+static MovementRelativeDeltaFunction original_animation_root_movement;
+static void *lan_spirit_direct_actor;
+static DWORD lan_spirit_direct_at_ms;
+static void *lan_tal_skill_direct_actor;
+static DWORD lan_tal_skill_direct_at_ms;
 static SudekiMpInlineHook movement_controller_update_hook;
 static SudekiMpInlineHook tal_character_update_hook;
 static ControllerUpdateFunction original_controller_update;
@@ -347,6 +359,11 @@ static const uint8_t expected_game_speed_player_input_enable_entry[] = {
     0x83, 0xec, 0x0c, 0x85, 0xc0, 0x74, 0x52, 0x8d,
     0x4c, 0x49, 0x24
 };
+static const uint8_t expected_controller_filter_all[] = {
+    0x56,0x8b,0xf1,0xc7,0x81,0x84,0x00,0x00,0x00,0x01,
+    0x00,0x00,0x00,0xe8,0xde,0x05,0x02,0x00,0x5e,0xc3
+};
+static BOOL tal_skill_direct_actor_exact(uint8_t *character);
 static const uint8_t expected_arbiter_combat_input_entry[] = {
     0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x57, 0x8b, 0xf8, 0x8b, 0xf1
 };
@@ -1065,6 +1082,39 @@ static BOOL writable_memory(void *pointer, size_t size) {
     return end >= start && end <= region_end;
 }
 
+BOOL SudekiMpControlSeparationDirectionalGait(
+    float travel_x, float travel_z, float aim_x, float aim_z,
+    unsigned int *mode, float *body_x, float *body_z
+) {
+    float length, aim_length, forward, lateral;
+    if (mode == NULL || body_x == NULL || body_z == NULL) return FALSE;
+    *mode = 0u;
+    *body_x = 0.0f;
+    *body_z = 0.0f;
+    if (!isfinite(travel_x) || !isfinite(travel_z) ||
+        !isfinite(aim_x) || !isfinite(aim_z)) return FALSE;
+    length = sqrtf(travel_x * travel_x + travel_z * travel_z);
+    aim_length = sqrtf(aim_x * aim_x + aim_z * aim_z);
+    if (!isfinite(length) || !isfinite(aim_length) ||
+        length < 0.0001f || aim_length < 0.0001f) return FALSE;
+    travel_x /= length;
+    travel_z /= length;
+    aim_x /= aim_length;
+    aim_z /= aim_length;
+    forward = travel_x * aim_x + travel_z * aim_z;
+    lateral = travel_x * aim_z - travel_z * aim_x;
+    if (fabsf(lateral) > fabsf(forward)) {
+        *mode = lateral > 0.0f ? 2u : 3u;
+        *body_x = lateral > 0.0f ? -travel_z : travel_z;
+        *body_z = lateral > 0.0f ? travel_x : -travel_x;
+    } else {
+        *mode = forward < 0.0f ? 1u : 0u;
+        *body_x = forward < 0.0f ? -travel_x : travel_x;
+        *body_z = forward < 0.0f ? -travel_z : travel_z;
+    }
+    return TRUE;
+}
+
 static void service_player_one_skill_direct_movement(void *controller) {
     uint8_t *character;
     void *arbiter;
@@ -1119,7 +1169,12 @@ static void service_player_one_skill_direct_movement(void *controller) {
         }
     }
     if (!physical_direction_held &&
-        !player_one_skill_direct_movement_operator_override) return;
+        !player_one_skill_direct_movement_operator_override) {
+        static const float neutral[3] = {0.0f, 0.0f, 0.0f};
+        (void)SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
+            arbiter, neutral, 0.0f);
+        return;
+    }
     movement_camera_transform(controller, world_direction, local_direction);
     world_direction[1] = 0.0f;
     horizontal_length = sqrtf(
@@ -1156,6 +1211,9 @@ static void call_original_controller_update_with_skill_input_isolation(
     player_one_skill_direct_movement_submitted = FALSE;
     player_one_skill_direct_movement_operator_override = FALSE;
     player_one_skill_frame_delta = 0.0f;
+
+    lan_tal_skill_direct_actor = NULL;
+    lan_tal_skill_direct_at_ms = 0u;
 
     if (player_one_skill_input_isolation_enabled && game_base != NULL &&
         readable_memory(game_base + RVA_GAME_SPEED_GLOBAL,
@@ -1229,6 +1287,20 @@ static void call_original_controller_update_with_skill_input_isolation(
             frame_delta <= 0.25f) {
             player_one_skill_frame_delta = frame_delta;
         }
+    }
+    if (restore_player_input && isolate_controller_mode &&
+        tal_skill_direct_actor_exact(player_one_character) &&
+        SudekiMpControlSeparationTalSkillFilterRestorePolicy(
+            TRUE, *(int *)((uint8_t *)controller + 0x80u),
+            *(int *)((uint8_t *)controller + 0x84u))) {
+        typedef void (SUDEKIMP_THISCALL *SetFilterAll)(void *);
+        /* The remote task also requests filter-none on the local controller.
+         * Seat-0 restore alone does not undo it. Use the native inverse once
+         * per disabled edge: the ordinary controller transition enables its
+         * camera and combat route. Never replace a UI-only filter (2/3). */
+        ((SetFilterAll)(game_base + RVA_CONTROLLER_FILTER_ALL))(controller);
+        SudekiMpLogWrite("control_separation event=tal_noncaster_filter "
+            "state=restore_requested policy=exact_remote_skill_native_filter_all\r\n");
     }
     if (player_one_skill_direct_movement_scope_active &&
         (*player_one_arbiter_flags & 0x0289e568u) == 0x00080000u) {
@@ -5459,15 +5531,175 @@ BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index) {
         companion_active_input_lease(seat_index, companion);
 }
 
+BOOL SudekiMpControlSeparationFilterSpiritRootDelta(
+    BOOL direct_movement_owned,
+    const float input[3],
+    float output[3]
+) {
+    if (input == NULL || output == NULL || !isfinite(input[0]) ||
+        !isfinite(input[1]) || !isfinite(input[2])) return FALSE;
+    output[0] = direct_movement_owned ? 0.0f : input[0];
+    output[1] = input[1];
+    output[2] = direct_movement_owned ? 0.0f : input[2];
+    return TRUE;
+}
+
+BOOL SudekiMpControlSeparationTalSkillDirectMovementPolicy(
+    BOOL scope_exact,
+    BOOL skills_known,
+    BOOL own_skill_active,
+    BOOL remote_skill_active,
+    BOOL spirit_known,
+    BOOL spirit_active,
+    uint32_t arbiter_flags
+) {
+    return scope_exact && skills_known && !own_skill_active &&
+        remote_skill_active && spirit_known && !spirit_active &&
+        (arbiter_flags & (0x0289e568u & ~0x00080000u)) == 0u;
+}
+
+BOOL SudekiMpControlSeparationTalSkillFilterRestorePolicy(
+    BOOL scope_exact, int current_filter, int requested_filter
+) {
+    return scope_exact && current_filter == 0 && requested_filter == 0;
+}
+
+float SudekiMpControlSeparationTalSkillMovementMagnitude(float native_speed) {
+    if (!isfinite(native_speed) || native_speed < 0.0f || native_speed > 4.0f)
+        return 0.0f;
+    return native_speed > 1.0f ? 1.0f : native_speed;
+}
+
+static BOOL tal_native_locomotion_owns_movement(void) {
+    SudekiMpCleanroomActorPresentation presentation;
+    uint8_t action;
+    if (!SudekiMpCleanroomEngineActorPresentation(
+            SUDEKIMP_CLEANROOM_TAL, &presentation)) return FALSE;
+    /* Never suppress an attack's authored movement, including its terminal
+     * selector before native idle retirement. Reuse the wire classifier. */
+    return !SudekiMpLanArenaTalActionFromNativePresentation(
+        presentation.selector[0], 1u, &action);
+}
+
+static BOOL tal_skill_direct_actor_exact(uint8_t *character) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    SudekiMpCharacterSkillState own_skill;
+    SudekiMpCharacterSkillState remote_skill;
+    uint8_t *arbiter;
+    uint8_t *controller;
+    int spirit_state = 0;
+    if (!lan_arena_remote_input_enabled ||
+        !player_one_skill_input_isolation_enabled ||
+        character == NULL || character != SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_TAL) ||
+        !character_is_in_active_group(character) ||
+        !companion->requested || !companion->lease_exact ||
+        !companion_character_is_in_active_group(companion) ||
+        companion->character != SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_AILISH) ||
+        !readable_memory(character, 0x94u)) return FALSE;
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    arbiter = *(uint8_t **)(character + 0x90u);
+    if (!readable_memory(controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != character ||
+        !readable_memory(arbiter, 0x54u) ||
+        *(void **)(arbiter + 0x10u) != character ||
+        !SudekiMpObserveCharacterSkill(character, &own_skill) ||
+        !SudekiMpObserveCharacterSkill(companion->character, &remote_skill) ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state)) {
+        return FALSE;
+    }
+    return SudekiMpControlSeparationTalSkillDirectMovementPolicy(
+        TRUE, TRUE, own_skill.active != 0u, remote_skill.active != 0u,
+        TRUE, spirit_state != 0, *(uint32_t *)(arbiter + 0x50u));
+}
+
+/* Only the animation-root callsite is adapted. Direct player deltas, ranged
+ * movement, collision response and every other caller retain the native path.
+ * EAX carries the vector; the controller is the one callee-cleaned argument. */
+static void __attribute__((regparm(1), stdcall))
+filter_lan_spirit_animation_root(const float *delta, void *movement) {
+    SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    uint8_t *character = companion->character;
+    uint8_t *arbiter = NULL;
+    float filtered[3];
+    int spirit_state = 0;
+    SudekiMpCharacterSkillState own_skill;
+    BOOL exact = lan_arena_remote_input_enabled &&
+        lan_arena_player_two_skill_input_isolation_enabled &&
+        companion->requested && companion->lease_exact &&
+        character != NULL && character == lan_spirit_direct_actor &&
+        lan_spirit_direct_at_ms != 0u &&
+        (DWORD)(GetTickCount() - lan_spirit_direct_at_ms) <= 125u &&
+        companion_character_is_in_active_group(companion) &&
+        character == SudekiMpCleanroomEngineActorEntity(
+            SUDEKIMP_CLEANROOM_AILISH) &&
+        readable_memory(character, 0x94u) &&
+        *(void **)(character + 0x80u) == movement &&
+        readable_memory(movement, 0x14u) &&
+        *(void **)((uint8_t *)movement + 0x10u) == character;
+    if (exact) {
+        arbiter = *(uint8_t **)(character + 0x90u);
+        exact = readable_memory(arbiter, 0x54u) &&
+            *(void **)(arbiter + 0x10u) == character &&
+            SudekiMpObserveCharacterSkill(character, &own_skill) &&
+            own_skill.active == 0u &&
+            SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) &&
+            SudekiMpControlSeparationSpiritDirectMovementPolicy(
+                TRUE, spirit_state != 0, *(uint32_t *)(arbiter + 0x50u));
+    }
+    if (!exact && lan_tal_skill_direct_actor != NULL &&
+        lan_tal_skill_direct_at_ms != 0u &&
+        (DWORD)(GetTickCount() - lan_tal_skill_direct_at_ms) <= 125u &&
+        tal_skill_direct_actor_exact(lan_tal_skill_direct_actor) &&
+        tal_native_locomotion_owns_movement()) {
+        character = lan_tal_skill_direct_actor;
+        exact = *(void **)(character + 0x80u) == movement &&
+            readable_memory(movement, 0x14u) &&
+            *(void **)((uint8_t *)movement + 0x10u) == character;
+    }
+    if (exact && readable_memory(delta, sizeof(filtered)) &&
+        SudekiMpControlSeparationFilterSpiritRootDelta(TRUE, delta, filtered)) {
+        original_animation_root_movement(filtered, movement);
+    } else {
+        original_animation_root_movement(delta, movement);
+    }
+}
+
 BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
     if (original_controller_update == NULL || game_base == NULL ||
         service_only_mode) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
+    if (enabled && !lan_spirit_root_movement_call_hook.installed) {
+        static const uint8_t entry[] = {
+            0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec,
+            0x94, 0x00, 0x00, 0x00
+        };
+        if (memcmp(game_base + RVA_MOVEMENT_RELATIVE_DELTA,
+                entry, sizeof(entry)) != 0) {
+            SetLastError(ERROR_INVALID_DATA);
+            return FALSE;
+        }
+        original_animation_root_movement = (MovementRelativeDeltaFunction)(
+            game_base + RVA_MOVEMENT_RELATIVE_DELTA);
+        if (!SudekiMpInstallRelativeCallHook(
+                &lan_spirit_root_movement_call_hook,
+                game_base + RVA_ANIMATION_ROOT_MOVEMENT_CALL,
+                original_animation_root_movement,
+                filter_lan_spirit_animation_root)) return FALSE;
+    }
     lan_arena_remote_input_enabled = enabled != FALSE;
     if (!lan_arena_remote_input_enabled) {
+        lan_tal_skill_direct_actor = NULL;
+        lan_tal_skill_direct_at_ms = 0u;
+        lan_spirit_direct_actor = NULL;
+        lan_spirit_direct_at_ms = 0u;
         stop_companion_movement(1u, &companion_controls[0]);
+        if (!SudekiMpRestoreRelativeCallHook(
+                &lan_spirit_root_movement_call_hook)) return FALSE;
+        original_animation_root_movement = NULL;
     }
     SudekiMpLogFormat(
         "control_separation event=lan_arena_remote_input state=%s "
@@ -5493,6 +5725,8 @@ BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled) {
     player_one_skill_native_input_restored = FALSE;
     player_one_skill_input_isolation_trace_state = -1;
     if (!next_enabled) {
+        lan_tal_skill_direct_actor = NULL;
+        lan_tal_skill_direct_at_ms = 0u;
         player_one_skill_arbiter_virtualization_logged = FALSE;
         player_one_skill_direct_movement_scope_active = FALSE;
         player_one_skill_direct_movement_submitted = FALSE;
@@ -5507,6 +5741,8 @@ BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled) {
     return TRUE;
 }
 
+static void call_position_set_forward(void *position, const float direction[3]);
+
 BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
     void *arbiter,
     const float direction[3],
@@ -5515,6 +5751,8 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
     uint8_t *controller;
     uint8_t *character;
     uint8_t *movement_controller;
+    void *position;
+    float facing[3];
     float direct_move_speed;
     float horizontal_length;
     float normalized_x;
@@ -5528,7 +5766,7 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
         game_base == NULL || movement_controller_set_absolute_delta == NULL ||
         direction == NULL || !readable_memory(arbiter, 0x54u) ||
         !isfinite(direction[0]) || !isfinite(direction[2]) ||
-        !isfinite(speed) || speed <= 0.0f || speed > 4.0f ||
+        !isfinite(speed) || speed < 0.0f || speed > 4.0f ||
         player_one_skill_frame_delta <= 0.0f) {
         SetLastError(ERROR_NOT_READY);
         return FALSE;
@@ -5540,7 +5778,10 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
     if (!readable_memory(controller,
             CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
         *(void **)(controller + CONTROLLER_TARGET_OFFSET) != character ||
-        !readable_memory(movement_controller, 0xbfu)) {
+        !readable_memory(movement_controller, 0xbfu) ||
+        *(void **)(movement_controller + 0x10u) != character ||
+        !tal_skill_direct_actor_exact(character) ||
+        !tal_native_locomotion_owns_movement()) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -5549,13 +5790,35 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
         direction[0] * direction[0] + direction[2] * direction[2]);
     if (!isfinite(direct_move_speed) || direct_move_speed <= 0.0f ||
         direct_move_speed > 100.0f || !isfinite(horizontal_length) ||
-        horizontal_length <= 0.0001f) {
+        (speed > 0.0f && horizontal_length <= 0.0001f)) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
-    normalized_x = direction[0] / horizontal_length;
-    normalized_z = direction[2] / horizontal_length;
-    direct_scale = speed * direct_move_speed *
+    position = *(void **)(character + 0x44u);
+    if (!readable_memory(position, 0xbcu) ||
+        *(void **)position != game_base + 0x002cdefcu ||
+        *(void **)((uint8_t *)position + 0x10u) != character ||
+        position_set_forward == NULL ||
+        !SudekiMpControlSeparationForceStopCharacter(character)) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    normalized_x = speed > 0.0f ? direction[0] / horizontal_length : 0.0f;
+    normalized_z = speed > 0.0f ? direction[2] / horizontal_length : 0.0f;
+    /* The task lock is restored before native turning/root movement runs.
+     * Commit the accepted world direction now, then let the shared root seam
+     * remove only duplicate horizontal animation movement for this lease. */
+    if (speed > 0.0f) {
+        facing[0] = normalized_x;
+        facing[1] = 0.0f;
+        facing[2] = normalized_z;
+        call_position_set_forward(position, facing);
+    }
+    /* The native movement callsite supplies keyboard magnitudes near 1.5
+     * (and 1.8 diagonally), not a world-speed multiplier. Both this callsite
+     * and the controller-tail fallback must saturate at the same run pace. */
+    direct_scale = SudekiMpControlSeparationTalSkillMovementMagnitude(speed) *
+        direct_move_speed *
         spirit_noncaster_direct_movement_pace *
         player_one_skill_frame_delta;
     movement_controller_set_absolute_delta(
@@ -5565,6 +5828,8 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
         normalized_z * direct_scale);
     player_one_skill_direct_movement_submitted = TRUE;
     now = GetTickCount();
+    lan_tal_skill_direct_actor = character;
+    lan_tal_skill_direct_at_ms = now;
     if (player_one_skill_direct_movement_last_trace_tick == 0u ||
         (DWORD)(now -
             player_one_skill_direct_movement_last_trace_tick) >= 500u) {
@@ -5604,6 +5869,8 @@ BOOL SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
     if (!next_enabled) {
         lan_arena_player_two_skill_virtualization_logged = FALSE;
         lan_arena_player_two_skill_direct_movement_last_trace_tick = 0u;
+        lan_spirit_direct_actor = NULL;
+        lan_spirit_direct_at_ms = 0u;
     }
     SudekiMpLogFormat(
         "control_separation event=lan_arena_player_two_skill_input_isolation "
@@ -5777,6 +6044,15 @@ BOOL SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationSpiritDirectMovementPolicy(
+    BOOL skill_scope_exact,
+    BOOL spirit_active,
+    uint32_t arbiter_flags
+) {
+    return skill_scope_exact && spirit_active &&
+        (arbiter_flags & 0x0289e568u) == 0x00080000u;
+}
+
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     float world_direction_x,
     float world_direction_z,
@@ -5804,6 +6080,15 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
     uint8_t *movement_controller = NULL;
     float direct_move_speed = 0.0f;
     BOOL skill_input_scope_exact = FALSE;
+    int spirit_state = 0;
+    BOOL spirit_active = FALSE;
+    BOOL spirit_direct_movement = FALSE;
+    BOOL submission_ok = TRUE;
+    BOOL spirit_direct_serviced = FALSE;
+    BOOL directional_gait = FALSE;
+    unsigned int gait_mode = 0u;
+    float gait_heading[3] = {0.0f, 0.0f, 0.0f};
+    SudekiMpCharacterSkillState own_skill;
 
     if (!isfinite(world_direction_x) || !isfinite(world_direction_z) ||
         fabsf(world_direction_x) > 1.0f || fabsf(world_direction_z) > 1.0f ||
@@ -5867,16 +6152,30 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
             }
         }
     }
+    spirit_active = skill_input_scope_exact &&
+        SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) &&
+        spirit_state != 0;
+    spirit_direct_movement =
+        SudekiMpControlSeparationSpiritDirectMovementPolicy(
+            skill_input_scope_exact, spirit_active, saved_arbiter_flags) &&
+        SudekiMpObserveCharacterSkill(character, &own_skill) &&
+        own_skill.active == 0u;
     if (magnitude > 0.0001f) {
         direction[0] /= magnitude;
         direction[2] /= magnitude;
         if (magnitude > 1.0f) magnitude = 1.0f;
-        arbiter_movement(arbiter, direction, magnitude, 1.0f, 0u);
+        directional_gait = aim_direction_valid && !skill_input_scope_exact &&
+            SudekiMpControlSeparationDirectionalGait(
+                direction[0], direction[2], aim_direction_x, aim_direction_z,
+                &gait_mode, &gait_heading[0], &gait_heading[2]);
+        arbiter_movement(arbiter, directional_gait ? gait_heading : direction,
+            magnitude, 1.0f, directional_gait ? gait_mode : 0u);
         movement_controller = readable_memory(character, 0x84u) ?
             *(uint8_t **)(character + 0x80u) : NULL;
         direct_move_speed = readable_memory(controller, 0x1d8u) ?
             *(float *)(controller + 0x1d4u) : 0.0f;
         if (skill_input_scope_exact &&
+            (!spirit_active || spirit_direct_movement) &&
             readable_memory(movement_controller, 0xbfu) &&
             movement_controller_set_absolute_delta != NULL &&
             frame_delta_seconds > 0.0f &&
@@ -5885,11 +6184,38 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
             float direct_scale = magnitude * direct_move_speed *
                 spirit_noncaster_direct_movement_pace * frame_delta_seconds;
             DWORD now = GetTickCount();
+            /* Spirit restores the arbiter lock before native world update:
+             * the normal turning update then rejects the direction just
+             * accepted above. Animation root displacement is independently
+             * additive (filtered at its own callsite for this lease). Quiesce
+             * the native speed request, not the animation compositor, and
+             * commit the same authenticated world direction to CPosition.
+             * Both native APIs are already exact-image validated owners. */
+            if (spirit_direct_movement) {
+                position = *(void **)(character + 0x44u);
+                if (!readable_memory(position, 0xbcu) ||
+                    *(void **)position != game_base + 0x002cdefcu ||
+                    *(void **)((uint8_t *)position + 0x10u) != character ||
+                    *(void **)(movement_controller + 0x10u) != character ||
+                    position_set_forward == NULL) {
+                    submission_ok = FALSE;
+                    SetLastError(ERROR_INVALID_DATA);
+                    goto restore_remote_arbiter_flags;
+                }
+                if (!SudekiMpControlSeparationForceStopCharacter(character)) {
+                    submission_ok = FALSE;
+                    goto restore_remote_arbiter_flags;
+                }
+                if (!aim_direction_valid && position_set_forward != NULL) {
+                    call_position_set_forward(position, direction);
+                }
+            }
             movement_controller_set_absolute_delta(
                 movement_controller,
                 direction[0] * direct_scale,
                 0.0f,
                 direction[2] * direct_scale);
+            spirit_direct_serviced = spirit_direct_movement;
             if (lan_arena_player_two_skill_direct_movement_last_trace_tick ==
                     0u ||
                 (DWORD)(now -
@@ -5912,12 +6238,17 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
         companion->movement_magnitude = magnitude;
     } else {
         stop_companion_movement(1u, companion);
+        if (spirit_direct_movement) {
+            submission_ok = SudekiMpControlSeparationForceStopCharacter(
+                character);
+            spirit_direct_serviced = submission_ok;
+        }
     }
     /* The authenticated remote first-person bit is folded into
      * aim_direction_valid by the LAN runtime. Preserve ordinary third-person
      * turning and replace body forward only while that remote camera owns
      * Ailish's aim; the host need not own the same local camera mode. */
-    if (aim_direction_valid && position_set_forward != NULL) {
+    if (aim_direction_valid && !directional_gait && position_set_forward != NULL) {
         position = *(void **)(character + 0x44u);
         aim_direction[0] = aim_direction_x;
         aim_direction[1] = 0.0f;
@@ -5947,12 +6278,20 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
             game_base + RVA_ARBITER_COMBAT_INPUT, arbiter,
             1, 0, 0, 0, 0, 0);
     }
+restore_remote_arbiter_flags:
+    if (spirit_direct_serviced && submission_ok) {
+        lan_spirit_direct_actor = character;
+        lan_spirit_direct_at_ms = GetTickCount();
+    } else {
+        lan_spirit_direct_actor = NULL;
+        lan_spirit_direct_at_ms = 0u;
+    }
     if (saved_arbiter_flags != 0u &&
         readable_memory(arbiter_flags, sizeof(*arbiter_flags))) {
         *arbiter_flags = (*arbiter_flags & ~0x00080000u) |
             (saved_arbiter_flags & 0x00080000u);
     }
-    return TRUE;
+    return submission_ok;
 }
 
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire(void) {
@@ -6379,6 +6718,12 @@ BOOL SudekiMpInstallControlSeparation(
             base + RVA_GAME_SPEED_PLAYER_INPUT_ENABLE + 5u,
             expected_game_speed_player_input_enable_entry,
             sizeof(expected_game_speed_player_input_enable_entry)) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (memcmp(base + RVA_CONTROLLER_FILTER_ALL,
+            expected_controller_filter_all,
+            sizeof(expected_controller_filter_all)) != 0) {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -6857,6 +7202,8 @@ BOOL SudekiMpUninstallControlSeparation(void) {
     RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
         &player_one_normal_movement_call_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &lan_spirit_root_movement_call_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
         &player_one_alternate_movement_call_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(
         &tal_character_update_hook));
@@ -6872,6 +7219,11 @@ BOOL SudekiMpUninstallControlSeparation(void) {
     clear_update_observers();
     restore_group_camera("module_uninstall");
     original_controller_update = NULL;
+    original_animation_root_movement = NULL;
+    lan_tal_skill_direct_actor = NULL;
+    lan_tal_skill_direct_at_ms = 0u;
+    lan_spirit_direct_actor = NULL;
+    lan_spirit_direct_at_ms = 0u;
     ai_override_control = NULL;
     ai_default_control = NULL;
     arbiter_movement = NULL;

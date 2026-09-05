@@ -7,6 +7,10 @@
 
 struct SudekiMpLanArenaActorSnapshot;
 
+/* Optional read-only frame-boundary observation. Enabled only by the local
+ * SUDEKIMP_FP_FRAME_TRACE environment variable; no wire/gameplay authority. */
+void SudekiMpLanArenaClientObserveFirstPersonFrame(unsigned int phase);
+
 typedef struct SudekiMpLanArenaReplicaActorDiagnostics {
     float sampled_position[3];
     float sampled_facing[2];
@@ -76,6 +80,12 @@ BOOL SudekiMpLanArenaClientAnimationShouldResetTime(
     uint8_t next_animation_state,
     BOOL renderer_already_matches_target
 );
+
+/* Convert an observed post-update ordinary locomotion clock to the phase
+ * installed before native update; the render boundary uses it unchanged. */
+BOOL SudekiMpLanArenaClientLocomotionPhase(
+    float host_phase, float host_rate, uint32_t frame_ms,
+    BOOL final_boundary, float *phase);
 
 /* Tal's replicated combo retirement must enter the running idle state
  * directly. Passing through the completed-idle state makes the renderer
@@ -150,6 +160,8 @@ BOOL SudekiMpLanArenaClientTalTransitionSelectorReady(
     BOOL combat_target,
     int selector
 );
+BOOL SudekiMpLanArenaClientNativeArmingComplete(
+    uint32_t arbiter_flags, uint32_t arbiter_state, uint8_t combat_request);
 
 /* Sudeki's ranged arm helper closes its native UI lease after 75 ms. The
  * client retries the party-wide arm transition once after that boundary so
@@ -181,6 +193,19 @@ BOOL SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
     float actual_phase,
     float authoritative_phase
 );
+
+/* A confirmed slot transition may animate only an already-seeded owner's
+ * first-person view. Initial snapshots and attacks never start a swap. */
+BOOL SudekiMpLanArenaClientShouldStartWeaponSwap(
+    BOOL same_owner, BOOL first_person, BOOL attacking,
+    unsigned int previous_slot, unsigned int current_slot);
+
+/* Native one-shot clocks clamp just below the resource length. */
+BOOL SudekiMpLanArenaClientWeaponSwapComplete(float native_time);
+
+BOOL SudekiMpLanArenaClientNativeRangedIdle(
+    unsigned int stage, BOOL active_record, unsigned int animation_id,
+    float cooldown);
 
 /* Pure Tal combat presentation mapping. LAN packets carry semantic actions,
  * never retail selector numbers; this exact-image adapter resolves them only

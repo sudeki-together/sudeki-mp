@@ -688,6 +688,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL transition_vote_enabled;
     BOOL zone_traversal_enabled;
     BOOL cleanroom_menu_enabled;
+    BOOL cleanroom_native_ai_probe_enabled;
     BOOL coop_roster_menu_enabled;
     BOOL loaded_save_coop_autostart_enabled;
     BOOL skip_startup_movies;
@@ -1054,6 +1055,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableCleanroomMenu"
     );
+    cleanroom_native_ai_probe_enabled = read_config_boolean(
+        config_path, L"SudekiMP", L"EnableCleanroomNativeAiProbe");
     zone_traversal_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -1325,6 +1328,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         control_separation_enabled && split_screen_render_enabled;
     cleanroom_external_driver = cleanroom_menu_enabled &&
         lan_arena_host_enabled;
+    if (cleanroom_native_ai_probe_enabled &&
+        (!cleanroom_menu_enabled || control_separation_enabled ||
+         split_screen_render_enabled || lan_arena_enabled ||
+         coop_roster_menu_enabled || zone_traversal_enabled ||
+         animation_speed_enabled || camera_speed_enabled ||
+         story_test_boost_enabled)) {
+        SudekiMpLogWrite("cleanroom_native_ai_config=invalid reason=requires_single_player_cleanroom_without_movement_camera_or_clock_adapters\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
     defer_integrated_roster = coop_roster_menu_enabled &&
         cleanroom_multiplayer_integration;
     if (loaded_save_coop_autostart_enabled &&
@@ -2443,6 +2456,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 game_module,
                 cleanroom_menu_virtual_key));
 
+        if (cleanroom_installed && cleanroom_native_ai_probe_enabled &&
+            !SudekiMpCleanroomEngineEnableNativeAiProbe()) {
+            SudekiMpUninstallCleanroomMenu();
+            cleanroom_installed = FALSE;
+        }
         if (!cleanroom_installed) {
             SudekiMpLogFormat(
                 "cleanroom_menu_error=%lu\r\n",
@@ -2616,7 +2634,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_CONTROL_SEPARATION_FAILED;
         }
-        if (fixed_three_seat_renderer_enabled &&
+        if ((fixed_three_seat_renderer_enabled || lan_arena_enabled) &&
             !SudekiMpInitializeWeaponActivationAbi(game_module)) {
             SudekiMpLogFormat(
                 "local_quick_menu_adapter_preflight adapter=weapon error=%lu\r\n",

@@ -19,7 +19,19 @@ void SudekiMpLanArenaClientInputService(void);
  * state instead of GetAsyncKeyState, whose Wine implementation is shared by
  * unrelated prefixes/windows on the same X display. */
 BOOL SudekiMpLanArenaClientNativeWeakHeld(int transition_state);
+/* Retail targeting submits local strafe axes, unlike ordinary world movement.
+ * Convert only that branch, retaining analog magnitude and horizontal aim. */
+BOOL SudekiMpLanArenaClientMovementWorldDirection(
+    BOOL local_strafe, float x, float z, float forward_x, float forward_z,
+    float *world_x, float *world_z);
+/* Poll the current exact controller, not the age of the edge-only callback. */
+BOOL SudekiMpLanArenaClientCurrentWeakHeld(
+    BOOL owner_exact, int control_filter, int transition_state);
 int SudekiMpLanArenaClientSuppressedWeakNextState(int transition_state);
+/* Closed Ailish training inventory; only a fresh native press cycles it. */
+BOOL SudekiMpLanArenaClientCycleWeaponSlot(unsigned int count,
+    unsigned int current, int next_state, int previous_state,
+    unsigned int *selected);
 /* Ailish's LAN weak input is a ranged trigger.  Do not transmit it while the
  * native client is still entering/leaving its verified first-person graph;
  * otherwise the host can interpret the same held click as a third-person
@@ -38,6 +50,14 @@ BOOL SudekiMpLanArenaClientCameraInputAllowed(
 BOOL SudekiMpLanArenaClientOperatorForwardPolicy(
     BOOL physical_direction_held,
     BOOL operator_forward_held
+);
+/* A transport resend is not a new native movement sample. Missing controller
+ * callbacks must expire the cached world vector even if raw axes stay held. */
+BOOL SudekiMpLanArenaClientMovementSampleFresh(
+    BOOL owner_exact,
+    BOOL physical_direction_held,
+    DWORD sampled_at_ms,
+    DWORD now_ms
 );
 
 BOOL SudekiMpLanArenaClientRequestSkillSlot(unsigned int slot);

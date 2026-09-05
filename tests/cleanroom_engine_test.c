@@ -243,6 +243,51 @@ static int verify_ranged_prime_deadline_lifecycle(void) {
         "ranged-prime test reset did not quiesce");
 }
 
+static int verify_training_learned_skill_lease(void) {
+    uint32_t actor_words[64] = {0}, skill_words[32] = {0};
+    uint32_t context_words[96] = {0}, data_words[6][4] = {{0}};
+    uint8_t *actor = (uint8_t *)actor_words;
+    uint8_t *skill = (uint8_t *)skill_words;
+    uint8_t *context = (uint8_t *)context_words;
+    static const unsigned int bases[] = {0x136u, 0x13cu, 0x13au, 0x138u};
+    unsigned int hero, slot;
+    *(void **)(actor + 0xd8u) = skill;
+    *(void **)(actor + 0xd4u) = context;
+    *(void **)(skill + 0x10u) = actor;
+    *(void **)(context + 0x10u) = actor;
+    for (slot = 0; slot < 6; ++slot) {
+        *(void **)(skill + 0x3cu + slot * 4u) = data_words[slot];
+        data_words[slot][3] = slot;
+    }
+    for (hero = 0; hero < 4; ++hero) {
+        int16_t *learned[6];
+        for (slot = 0; slot < 6; ++slot) {
+            learned[slot] = (int16_t *)(context + bases[hero] + slot * 8u);
+            *learned[slot] = slot == 2 ? 3 : 0;
+        }
+        if (!require_true(SudekiMpCleanroomEngineTrainingSkillLeaseForTesting(
+                hero, actor, TRUE), "training learned-skill lease failed")) return 0;
+        for (slot = 0; slot < 6; ++slot) {
+            if (!require_true(*learned[slot] == (slot == 2 ? 3 : 1) &&
+                    ((uint8_t *)data_words[slot])[8] == 1,
+                    "training failed to learn all skills or changed learned rank")) return 0;
+        }
+        *learned[4] = 2; /* Another owner advanced this skill during the lease. */
+        if (!require_true(SudekiMpCleanroomEngineTrainingSkillLeaseForTesting(
+                hero, actor, FALSE), "training learned-skill release failed")) return 0;
+        for (slot = 0; slot < 6; ++slot) {
+            int expected = slot == 2 ? 3 : (slot == 4 ? 2 : 0);
+            if (!require_true(*learned[slot] == expected &&
+                    ((uint8_t *)data_words[slot])[8] == 0,
+                    "training release lost learned values or availability")) return 0;
+        }
+        for (slot = 0; slot < 6; ++slot) *learned[slot] = 0;
+    }
+    *(void **)(context + 0x10u) = NULL;
+    return require_true(!SudekiMpCleanroomEngineTrainingSkillLeaseForTesting(
+        3, actor, TRUE), "training accepted foreign skill context");
+}
+
 static int verify_training_skill_allocation_gate(void) {
     uint8_t *actor;
     uint8_t *skill_allocation;
@@ -354,6 +399,7 @@ int main(void) {
     SudekiMpResourceName resource_copy;
 
     if (!verify_ranged_prime_deadline_lifecycle() ||
+        !verify_training_learned_skill_lease() ||
         !verify_training_skill_allocation_gate() ||
         !require_true(
             !SudekiMpCleanroomEngineTrainingSkills(&mode),

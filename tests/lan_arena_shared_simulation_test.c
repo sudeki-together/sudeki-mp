@@ -134,6 +134,11 @@ static void test_native_world_owns_combat_state(void) {
         &tal_observation, &ailish_observation));
     candidate.tal.x = 3.0f;
     candidate.ailish.x = -4.0f;
+    candidate.ailish.locomotion.valid = 1u;
+    candidate.ailish.locomotion.sequence = 17u;
+    candidate.ailish.locomotion.clip[0] = 4u;
+    candidate.ailish.locomotion.time[0] = 12.0f;
+    candidate.ailish.locomotion.rate[0] = 24.0f;
     CHECK(commit_native_frame(
         &simulation, 77u, &observation, &candidate));
     CHECK(SudekiMpLanArenaSharedSimulationReadFrame(
@@ -149,6 +154,10 @@ static void test_native_world_owns_combat_state(void) {
     CHECK(result.enemies[0].hp == 50u);
     CHECK(result.tal.x == 3.0f);
     CHECK(result.ailish.x == -4.0f);
+    CHECK(result.ailish.locomotion.sequence == 17u);
+    CHECK(result.ailish.locomotion.clip[0] == 4u);
+    CHECK(result.ailish.locomotion.time[0] == 12.0f);
+    CHECK(result.ailish.locomotion.rate[0] == 24.0f);
     CHECK(revision == 1u);
 }
 

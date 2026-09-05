@@ -1128,10 +1128,15 @@ static void test_visual_matrix_and_native_null(void) {
     setup_visual_test(&test, &state, &api, &snapshot);
     for (kind = 1u; kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++kind) {
         snapshot.spirit_vfx[0].kind = (uint8_t)kind;
+        snapshot.spirit_vfx[0].owner_actor_type = kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ?
+            SUDEKIMP_LAN_ARENA_AILISH_TYPE : 0u;
+        snapshot.spirit_vfx[0].skill_sequence = kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ? 0u : 1u;
         CHECK(SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
         CHECK(matrix[0] == 1.0f && matrix[5] == 1.0f && matrix[15] == 1.0f);
     }
     snapshot.spirit_vfx[0].kind = 1u;
+    snapshot.spirit_vfx[0].owner_actor_type = 0u;
+    snapshot.spirit_vfx[0].skill_sequence = 1u;
     snapshot.spirit_vfx[0].position[0] = 12.0f;
     snapshot.spirit_vfx[0].rotation_xyzw[1] = 0.70710678f;
     snapshot.spirit_vfx[0].rotation_xyzw[3] = 0.70710678f;
@@ -1156,6 +1161,10 @@ static void test_visual_fixed_resource_lifecycle(
     float matrix[16];
     setup_visual_test(&test, &state, &api, &snapshot);
     snapshot.spirit_vfx[0].kind = kind;
+    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+        snapshot.spirit_vfx[0].skill_sequence = 0u;
+    }
     test.cache.resource_identifier = identifier;
     test.cache.constructed_resource_identifier = identifier;
     test.cache.after_pre_cache.pending = TRUE;
@@ -1170,6 +1179,12 @@ static void test_visual_fixed_resource_lifecycle(
     CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(test.spawn_calls == 1u && test.cache.pre_cache_calls == 1u);
     before = state;
+    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+        CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
+        CHECK(memcmp(&before, &state, sizeof(state)) == 0);
+        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    }
     snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
     CHECK(!SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
     CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
@@ -1188,6 +1203,10 @@ static void test_visual_fixed_resource_lifecycle(
     snapshot.spirit_vfx[0].kind = kind;
     test.cache.resource_identifier = identifier;
     /* The old opening hash must never be accepted for a different kind. */
+    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+        snapshot.spirit_vfx[0].skill_sequence = 0u;
+    }
     CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(test.cache.pre_cache_calls == 0u && test.spawn_calls == 0u);
     CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state, &api));
@@ -1303,8 +1322,15 @@ static void test_visual_opening_phase_never_rewinds(void) {
     CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE, 181.0f, 180.0f, &apply));
     CHECK(!apply); /* Tail cleanup belongs to positive roster removal. */
+    CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, 125.0f, 124.0f, &apply));
+    CHECK(!apply);
+    CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, 125.0f, 126.0f, &apply));
+    CHECK(apply);
     for (kind = 1u; kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++kind) {
-        if (kind == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE) continue;
+        if (kind == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE ||
+            kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) continue;
         CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(kind, 125.0f, 0.0f, &apply));
         CHECK(apply); /* Other authored wrap/correction contracts unchanged. */
     }
@@ -1334,6 +1360,9 @@ int main(int argc, char **argv) {
     test_visual_fixed_resource_lifecycle(
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT, UINT32_C(0xaeec0c83),
         "SFXSS351_Tal_Hit_Character.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, UINT32_C(0x423bad0d),
+        "SFXSTA003_Boost.HOM");
     test_new_lease_polls_then_replays_once();
     test_existing_ready_lease_and_explicit_release();
     test_acquisition_requires_exact_refcount_witness();
