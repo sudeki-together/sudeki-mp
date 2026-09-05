@@ -4,9 +4,10 @@ This document has one purpose: it is the proposed canonical summary of current
 feature status and evidence. It does not replace subsystem guides, the research
 log, architecture documentation, or the roadmap.
 
-Audit baseline: commit `b957afee197d` on `codex/shared-simulation`, with a large
-uncommitted LAN/skill/lifecycle working tree inspected on 2026-09-04. No build or
-live test was run as part of this documentation draft.
+Audit baseline: commit `53623a0a2ad4` on `codex/shared-simulation`, with an
+uncommitted LAN/skill/lifecycle working tree inspected and tested on 2026-09-04.
+The exact supported-image suites and one bounded two-process software-backend
+LAN Spirit run were completed against that dirty tree.
 
 ## Controlled vocabulary
 
@@ -72,8 +73,8 @@ profile, actor, map, revision, transition, or teardown case.
 | LAN shared-simulation authority model | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, POLICY_TESTED, UNVERIFIED_DIRTY_WORK | Shared-simulation commits through `b957afe`; dirty changes inspected 2026-09-04 | Canonical node currently runs in host process; dedicated node absent | Core current work | Human authority decision and end-to-end consequence validation |
 | LAN Tal/Ailish movement | LAN arena | PARTIAL | EXPERIMENTAL | CODE_EXISTS, POLICY_TESTED, LIVE_PROVEN | LAN guide and live research records | Fixed roles/map; client collision, idle, and presentation required repeated tuning | Core playable slice | Repeatable two-machine movement, wall, idle, latency, and disconnect acceptance |
 | LAN weak attacks and Tal actions | LAN arena | PARTIAL | EXPERIMENTAL | CODE_EXISTS, POLICY_TESTED, PROTOCOL_TESTED, LIVE_PROVEN | LAN combat graph, 2026-09-03 | Not all combo transitions or gameplay consequences are represented | Core current work | Complete native-result graph, hit consequences, retirement, and disconnect tests |
-| LAN Ailish ranged combat | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, HISTORICAL_CLAIM, UNVERIFIED_DIRTY_WORK | Dirty LAN work and prior live observations, 2026-09-04 | Aim, hold cadence, projectile, resource, impact, and presentation are not fully joined | High | End-to-end canonical admission, projectile consequence, and replica presentation proof |
-| LAN skills and Spirit | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, POLICY_TESTED, PROTOCOL_TESTED, UNVERIFIED_DIRTY_WORK | Dirty protocol/runtime/replica work inspected 2026-09-04 | Async task lifetime, camera, audio, non-caster motion, disconnect, and teardown remain active research | Highest current work | Lifecycle and exact-image matrix followed by two-process live acceptance |
+| LAN Ailish ranged combat | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, EXACT_IMAGE_TESTED, HISTORICAL_CLAIM, UNVERIFIED_DIRTY_WORK | Exact-image combat-entry model/weapon readiness tests on 2026-09-04 | Only the combat-entry presentation boundary was tested here; aim, hold cadence, projectile, resource, impact, and full ranged presentation are not joined | High | End-to-end canonical admission, projectile consequence, and replica presentation proof |
+| LAN skills and Spirit | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, POLICY_TESTED, PROTOCOL_TESTED, EXACT_IMAGE_TESTED, LIVE_PROVEN, UNVERIFIED_DIRTY_WORK | LA23 retail opening/summon/character-effect lifecycle verified; owner confirms eight-orb flicker resolved after forward-only opening correction, with client backward phase steps reduced from 204 to zero; see “owner-approved LA23 Spirit visual roster” | Exact phase parity, generic hit/status provenance, two-machine behavior and reconnect remain incomplete | Highest current work | Preserve accepted opening playback and lifecycle; prove generic effect origin before extending coverage |
 | LAN damage and enemy convergence | LAN arena | FOUNDATION | RESEARCH-ONLY | CODE_EXISTS, POLICY_TESTED | LAN guide and combat graph | Complete hit, stagger, enemy action, spawn/despawn, and recovery convergence are absent | Required for playability | Canonical damage/enemy event and snapshot acceptance |
 | LAN pause/multiplayer panel | LAN arena | PARTIAL | RESEARCH-ONLY | CODE_EXISTS, EXACT_IMAGE_TESTED, UNVERIFIED_DIRTY_WORK | Dirty implementation and rollback tests inspected 2026-09-04 | UI quality, native pause interaction, reconnect, and simulation continuity are not final | Active UX/tooling | Visual acceptance plus reconnect and no-desync proof |
 | Campaign LAN multiplayer | Campaign | PLANNED | NOT-SUPPORTED | NONE | Explicitly excluded by current LAN guide | Saves, quests, dialogue, shops, loot, transitions, and arbitrary maps are unsynchronized | Long-term priority unknown | Human roadmap decision and state-ownership design |

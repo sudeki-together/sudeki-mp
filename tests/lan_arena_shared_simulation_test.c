@@ -69,6 +69,9 @@ static SudekiMpLanArenaNativeWorldObservation native_observation(
     memcpy(result.spirit_audio_history,
         source->spirit_audio_history,
         sizeof(result.spirit_audio_history));
+    result.spirit_vfx_observed = source->spirit_vfx_observed;
+    result.spirit_vfx_count = source->spirit_vfx_count;
+    memcpy(result.spirit_vfx, source->spirit_vfx, sizeof(result.spirit_vfx));
     result.native_combat_observed = 1u;
     result.native_resources_observed = 1u;
     result.native_enemies_observed = 1u;
@@ -814,6 +817,191 @@ static void test_replica_skill_lifecycle_is_monotonic(void) {
         &canonical, 146u, &observation, &source));
 }
 
+static SudekiMpLanArenaSpiritVfxSnapshot vfx_instance(uint32_t sequence) {
+    SudekiMpLanArenaSpiritVfxSnapshot result;
+    memset(&result, 0, sizeof(result));
+    result.instance_sequence = sequence;
+    result.skill_sequence = 7u;
+    result.kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SOUL_TRANSFER;
+    result.emitted_host_tick = 90u;
+    result.phase_valid = 1u;
+    result.phase = 10.0f;
+    result.position[1] = 5.0f;
+    result.rotation_xyzw[3] = 1.0f;
+    result.scale[0] = result.scale[1] = result.scale[2] = 1.0f;
+    return result;
+}
+
+static void clear_vfx_roster(SudekiMpLanArenaSnapshot *value, uint8_t observed) {
+    value->spirit_vfx_observed = observed;
+    value->spirit_vfx_count = 0u;
+    memset(value->spirit_vfx, 0, sizeof(value->spirit_vfx));
+}
+
+static void test_spirit_vfx_world_provenance(void) {
+    SudekiMpLanArenaSharedSimulation canonical;
+    SudekiMpLanArenaSharedSimulation before;
+    SudekiMpLanArenaNativeWorldObservation observation;
+    SudekiMpLanArenaSnapshot source = frame(100u);
+    SudekiMpLanArenaSnapshot output;
+    set_spirit_skill(&source.tal, 7u, 0, 0u);
+    observation = native_observation(&source, source.match_state, 1u);
+    observation.spirit_vfx_observed = 1u;
+    observation.spirit_vfx_count = 1u;
+    observation.spirit_vfx[0] = vfx_instance(10u);
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(&canonical,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD, 211u));
+    CHECK(commit_native_frame(&canonical, 211u, &observation, &source));
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(&canonical, &output, NULL));
+    CHECK(source.spirit_vfx_count == 0u);
+    CHECK(output.spirit_vfx_count == 1u);
+    CHECK(output.spirit_vfx[0].instance_sequence == 10u);
+    CHECK(canonical.spirit_vfx_instance_high_watermark == 10u);
+
+    before = canonical;
+    observation.host_tick = 101u;
+    observation.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_MORPH;
+    CHECK(!commit_native_frame(&canonical, 211u, &observation, &source));
+    CHECK(memcmp(&canonical, &before, sizeof(before)) == 0);
+    observation.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SOUL_TRANSFER;
+    observation.spirit_vfx_observed = 0u;
+    CHECK(!commit_native_frame(&canonical, 211u, &observation, &source));
+    observation.spirit_vfx_count = 0u;
+    memset(observation.spirit_vfx, 0, sizeof(observation.spirit_vfx));
+    CHECK(commit_native_frame(&canonical, 211u, &observation, &source));
+    CHECK(canonical.spirit_vfx_last_observed_count == 1u);
+    CHECK(canonical.spirit_vfx_instance_high_watermark == 10u);
+    CHECK(SudekiMpLanArenaSharedSimulationReadFrame(&canonical, &output, NULL));
+    CHECK(output.spirit_vfx_observed == 0u);
+    CHECK(output.spirit_vfx_count == 0u);
+}
+
+static void test_spirit_vfx_roster_identity_and_unknown(void) {
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaSharedSimulation before;
+    SudekiMpLanArenaSnapshot original = frame(100u);
+    SudekiMpLanArenaSnapshot candidate;
+    set_spirit_skill(&original.tal, 7u, 0, 0u);
+    original.spirit_vfx_observed = 1u;
+    original.spirit_vfx_count = 2u;
+    original.spirit_vfx[0] = vfx_instance(10u);
+    original.spirit_vfx[1] = vfx_instance(11u);
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(&replica,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 212u));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &original));
+    CHECK(replica.spirit_vfx_last_observed_count == 2u);
+    CHECK(replica.spirit_vfx_instance_high_watermark == 11u);
+
+    candidate = original;
+    candidate.host_tick = 101u;
+    clear_vfx_roster(&candidate, 0u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(replica.spirit_vfx_last_observed_count == 2u);
+    CHECK(replica.spirit_vfx_instance_high_watermark == 11u);
+    before = replica;
+    candidate = original;
+    candidate.host_tick = 102u;
+    candidate.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_END;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(memcmp(&replica, &before, sizeof(before)) == 0);
+    candidate.spirit_vfx[0] = original.spirit_vfx[0];
+    candidate.spirit_vfx[0].skill_sequence = 6u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    candidate.spirit_vfx[0] = original.spirit_vfx[0];
+    candidate.spirit_vfx[0].emitted_host_tick = 89u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    candidate.spirit_vfx[0] = original.spirit_vfx[0];
+    candidate.spirit_vfx[0].phase = 1.0f; /* Authored loops may wrap. */
+    candidate.spirit_vfx[0].position[0] = 99.0f;
+    candidate.spirit_vfx[0].scale[1] = 2.0f;
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+
+    candidate.host_tick = 103u;
+    clear_vfx_roster(&candidate, 1u);
+    candidate.spirit_vfx_count = 1u;
+    candidate.spirit_vfx[0] = original.spirit_vfx[1];
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(replica.spirit_vfx_last_observed_count == 1u);
+    candidate = original;
+    candidate.host_tick = 104u;
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate)); /* Removed 10 cannot reappear. */
+    candidate.spirit_vfx[0] = vfx_instance(12u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate)); /* Array order is not serial order. */
+    CHECK(replica.spirit_vfx_instance_high_watermark == 12u);
+    candidate.host_tick = 105u;
+    clear_vfx_roster(&candidate, 0u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(replica.spirit_vfx_last_observed_count == 2u);
+    candidate.host_tick = 106u;
+    clear_vfx_roster(&candidate, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(replica.spirit_vfx_last_observed_count == 0u);
+    CHECK(replica.spirit_vfx_instance_high_watermark == 12u);
+    candidate.host_tick = 107u;
+    candidate.spirit_vfx_count = 1u;
+    candidate.spirit_vfx[0] = vfx_instance(12u);
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    candidate.spirit_vfx[0] = vfx_instance(13u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &candidate));
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(&replica,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 213u));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 212u, &original));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 213u, &original));
+}
+
+static void test_spirit_vfx_instance_wraparound(void) {
+    SudekiMpLanArenaSharedSimulation replica;
+    SudekiMpLanArenaSnapshot candidate = frame(100u);
+    set_spirit_skill(&candidate.tal, 7u, 0, 0u);
+    candidate.spirit_vfx_observed = 1u;
+    candidate.spirit_vfx_count = 2u;
+    candidate.spirit_vfx[0] = vfx_instance(UINT32_MAX);
+    candidate.spirit_vfx[1] = vfx_instance(UINT32_MAX - 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(&replica,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 214u));
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 214u, &candidate));
+    CHECK(replica.spirit_vfx_instance_high_watermark == UINT32_MAX);
+    candidate.host_tick = 101u;
+    candidate.spirit_vfx[1] = vfx_instance(1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 214u, &candidate));
+    CHECK(replica.spirit_vfx_instance_high_watermark == 1u);
+    candidate.host_tick = 102u;
+    clear_vfx_roster(&candidate, 1u);
+    CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 214u, &candidate));
+    candidate.host_tick = 103u;
+    candidate.spirit_vfx_count = 1u;
+    candidate.spirit_vfx[0] = vfx_instance(UINT32_MAX);
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 214u, &candidate));
+    candidate.spirit_vfx[0] = vfx_instance(UINT32_C(0x80000001));
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 214u, &candidate));
+    CHECK(SudekiMpLanArenaSharedSimulationBegin(&replica,
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA, 215u));
+    candidate.spirit_vfx_count = 2u;
+    candidate.spirit_vfx[1] = vfx_instance(1u);
+    CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(
+        &replica, 215u, &candidate));
+}
+
 int main(void) {
     test_native_world_owns_combat_state();
     test_roles_tokens_and_ticks_fail_closed();
@@ -826,6 +1014,9 @@ int main(void) {
     test_spirit_audio_journal_lifecycle();
     test_replica_accepts_late_retained_spirit_audio();
     test_replica_skill_lifecycle_is_monotonic();
+    test_spirit_vfx_world_provenance();
+    test_spirit_vfx_roster_identity_and_unknown();
+    test_spirit_vfx_instance_wraparound();
     if (failures != 0) {
         fprintf(stderr, "%d shared simulation test(s) failed\n", failures);
         return 1;

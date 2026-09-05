@@ -15,10 +15,14 @@ typedef struct SudekiMpLanArenaNativeWorldObservation {
         enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
     SudekiMpLanArenaSpiritAudioSemanticEvent spirit_audio_history[
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
+    SudekiMpLanArenaSpiritVfxSnapshot spirit_vfx[
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
     uint8_t match_state;
     uint8_t combat_enabled;
     uint8_t enemy_count;
     uint8_t spirit_audio_history_count;
+    uint8_t spirit_vfx_observed;
+    uint8_t spirit_vfx_count;
     uint8_t native_combat_observed;
     uint8_t native_resources_observed;
     uint8_t native_enemies_observed;
@@ -36,6 +40,13 @@ typedef struct SudekiMpLanArenaSharedSimulation {
     uint32_t revision;
     uint32_t last_host_tick;
     uint32_t player_input_revision[2];
+    /* Retain the last complete VFX roster across UNKNOWN frames. The high
+     * watermark survives positive removals so an old instance cannot respawn. */
+    SudekiMpLanArenaSpiritVfxSnapshot spirit_vfx_last_observed[
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
+    uint32_t spirit_vfx_instance_high_watermark;
+    uint8_t spirit_vfx_last_observed_count;
+    uint8_t spirit_vfx_instance_initialized;
     uint8_t player_input_valid_mask;
     uint8_t node_role;
     uint8_t frame_valid;
@@ -75,7 +86,8 @@ int SudekiMpLanArenaSharedSimulationReadPlayerInput(
 
 /* The reducer composes a canonical frame from two independently observed
  * actors and the native-world consequence domain.  The world observation
- * owns match/combat, actor resources, and enemy state; actor observations own
+ * owns match/combat, actor resources, enemies and the observed VFX roster;
+ * actor observations own
  * only their transforms and process-independent presentation. */
 int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     SudekiMpLanArenaSharedSimulation *simulation,

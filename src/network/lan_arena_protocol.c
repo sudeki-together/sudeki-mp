@@ -22,10 +22,18 @@
     (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE))
 #define LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET \
     (LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET + 1u)
-#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET \
+#define LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET \
     (LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET + \
      (SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY * \
       LAN_SPIRIT_AUDIO_EVENT_SIZE))
+#define LAN_SPIRIT_VFX_SIZE 56u
+#define LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET \
+    (LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET + 1u)
+#define LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET \
+    (LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET + 1u)
+#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET \
+    (LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET + \
+     (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * LAN_SPIRIT_VFX_SIZE))
 #define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ENEMY_COUNT_OFFSET + 1u)
 
 _Static_assert(
@@ -440,6 +448,125 @@ int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
     return 1;
 }
 
+static int spirit_vfx_entry_empty(
+    const SudekiMpLanArenaSpiritVfxSnapshot *entry
+) {
+    unsigned int component;
+    if (entry->instance_sequence != 0u || entry->skill_sequence != 0u ||
+        entry->kind != 0u || entry->phase_valid != 0u ||
+        entry->emitted_host_tick != 0u || entry->phase != 0.0f) return 0;
+    for (component = 0u; component < 3u; ++component) {
+        if (entry->position[component] != 0.0f ||
+            entry->scale[component] != 0.0f) return 0;
+    }
+    for (component = 0u; component < 4u; ++component) {
+        if (entry->rotation_xyzw[component] != 0.0f) return 0;
+    }
+    return 1;
+}
+
+int SudekiMpLanArenaSpiritVfxRosterValid(
+    const SudekiMpLanArenaSnapshot *snapshot
+) {
+    unsigned int index;
+    unsigned int other;
+    if (snapshot == NULL || snapshot->spirit_vfx_observed > 1u ||
+        snapshot->spirit_vfx_count > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY ||
+        (!snapshot->spirit_vfx_observed && snapshot->spirit_vfx_count != 0u)) {
+        return 0;
+    }
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY; ++index) {
+        const SudekiMpLanArenaSpiritVfxSnapshot *entry =
+            &snapshot->spirit_vfx[index];
+        unsigned int component;
+        double norm_squared = 0.0;
+        if (index >= snapshot->spirit_vfx_count) {
+            if (!spirit_vfx_entry_empty(entry)) return 0;
+            continue;
+        }
+        if (entry->instance_sequence == 0u || entry->skill_sequence == 0u ||
+            entry->kind < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE ||
+            entry->kind > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST ||
+            entry->phase_valid > 1u || !isfinite(entry->phase) ||
+            entry->phase < 0.0f || entry->phase > 1000000.0f ||
+            (!entry->phase_valid && entry->phase != 0.0f) ||
+            snapshot->tal.skill_sequence == 0u ||
+            (entry->skill_sequence == snapshot->tal.skill_sequence &&
+             snapshot->tal.skill_kind !=
+                 SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) ||
+            (entry->skill_sequence != snapshot->tal.skill_sequence &&
+             !action_sequence_newer(
+                 snapshot->tal.skill_sequence, entry->skill_sequence)) ||
+            (entry->emitted_host_tick != snapshot->host_tick &&
+             !SudekiMpLanArenaSequenceNewer(
+                 snapshot->host_tick, entry->emitted_host_tick))) return 0;
+        for (other = 0u; other < index; ++other) {
+            if (snapshot->spirit_vfx[other].instance_sequence ==
+                    entry->instance_sequence) return 0;
+        }
+        for (component = 0u; component < 3u; ++component) {
+            if (!valid_coordinate(entry->position[component]) ||
+                !isfinite(entry->scale[component]) ||
+                entry->scale[component] <= 0.0f ||
+                entry->scale[component] > 1000.0f) return 0;
+        }
+        for (component = 0u; component < 4u; ++component) {
+            double value = entry->rotation_xyzw[component];
+            if (!isfinite(value)) return 0;
+            norm_squared += value * value;
+        }
+        if (!isfinite(norm_squared) || norm_squared < 0.98 ||
+            norm_squared > 1.02) return 0;
+    }
+    return 1;
+}
+
+static void write_spirit_vfx(
+    uint8_t *output,
+    const SudekiMpLanArenaSpiritVfxSnapshot *entry
+) {
+    unsigned int component;
+    write_u32(output, entry->instance_sequence);
+    write_u16(output + 4u, entry->skill_sequence);
+    output[6] = entry->kind;
+    output[7] = entry->phase_valid;
+    write_u32(output + 8u, entry->emitted_host_tick);
+    write_float(output + 12u, entry->phase);
+    for (component = 0u; component < 3u; ++component) {
+        write_float(output + 16u + component * 4u, entry->position[component]);
+    }
+    for (component = 0u; component < 4u; ++component) {
+        write_float(output + 28u + component * 4u,
+            entry->rotation_xyzw[component]);
+    }
+    for (component = 0u; component < 3u; ++component) {
+        write_float(output + 44u + component * 4u, entry->scale[component]);
+    }
+}
+
+static void read_spirit_vfx(
+    const uint8_t *input,
+    SudekiMpLanArenaSpiritVfxSnapshot *entry
+) {
+    unsigned int component;
+    entry->instance_sequence = read_u32(input);
+    entry->skill_sequence = read_u16(input + 4u);
+    entry->kind = input[6];
+    entry->phase_valid = input[7];
+    entry->emitted_host_tick = read_u32(input + 8u);
+    entry->phase = read_float(input + 12u);
+    for (component = 0u; component < 3u; ++component) {
+        entry->position[component] = read_float(input + 16u + component * 4u);
+    }
+    for (component = 0u; component < 4u; ++component) {
+        entry->rotation_xyzw[component] =
+            read_float(input + 28u + component * 4u);
+    }
+    for (component = 0u; component < 3u; ++component) {
+        entry->scale[component] = read_float(input + 44u + component * 4u);
+    }
+}
+
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
 ) {
@@ -452,6 +579,7 @@ int SudekiMpLanArenaSnapshotValid(
          snapshot->combat_enabled != 0u) ||
         snapshot->enemy_count > 1u ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
+        !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
         !valid_actor_snapshot(&snapshot->tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
         !valid_actor_snapshot(
             &snapshot->ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE)) return 0;
@@ -701,6 +829,19 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
                     memset(entry, 0, LAN_SPIRIT_AUDIO_EVENT_SIZE);
                 }
             }
+            output[LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET] =
+                packet->body.snapshot.spirit_vfx_observed;
+            output[LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET] =
+                packet->body.snapshot.spirit_vfx_count;
+            for (i = 0u; i < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY; ++i) {
+                uint8_t *entry = output + LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET +
+                    i * LAN_SPIRIT_VFX_SIZE;
+                if (i < packet->body.snapshot.spirit_vfx_count) {
+                    write_spirit_vfx(entry, &packet->body.snapshot.spirit_vfx[i]);
+                } else {
+                    memset(entry, 0, LAN_SPIRIT_VFX_SIZE);
+                }
+            }
             output[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] =
                 packet->body.snapshot.enemy_count;
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
@@ -832,6 +973,9 @@ int SudekiMpLanArenaDecodePacket(
                 packet->body.snapshot.ailish.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
                 payload[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET] >
                     SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY ||
+                payload[LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET] > 1u ||
+                payload[LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET] >
+                    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY ||
                 payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] >
                     SUDEKIMP_LAN_ARENA_MAX_ENEMIES ||
                 payload_size != LAN_SNAPSHOT_FIXED_SIZE +
@@ -857,6 +1001,19 @@ int SudekiMpLanArenaDecodePacket(
                 event->event_sequence = read_u16(entry);
                 event->skill_sequence = read_u16(entry + 2u);
                 event->cue = entry[4];
+            }
+            packet->body.snapshot.spirit_vfx_observed =
+                payload[LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET];
+            packet->body.snapshot.spirit_vfx_count =
+                payload[LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET];
+            for (i = 0u; i < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY; ++i) {
+                const uint8_t *entry = payload +
+                    LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET + i * LAN_SPIRIT_VFX_SIZE;
+                if (i >= packet->body.snapshot.spirit_vfx_count) {
+                    static const uint8_t empty[LAN_SPIRIT_VFX_SIZE] = {0};
+                    if (memcmp(entry, empty, sizeof(empty)) != 0) return 0;
+                }
+                read_spirit_vfx(entry, &packet->body.snapshot.spirit_vfx[i]);
             }
             packet->body.snapshot.enemy_count =
                 payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET];

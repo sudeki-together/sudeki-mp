@@ -38,7 +38,8 @@ experiments.
 
 ## Current playable slice
 
-- Protocol/build: `LA22`, exact GOG executable hash only. Actor snapshots
+- Protocol/build: `LA23` (owner-approved breaking research update), exact GOG
+  executable hash only. Both peers must use the same build. Actor snapshots
   include a bounded four-edge action journal so rapid Tal combo stages are
   presented once instead of being collapsed by the 20 Hz snapshot cadence.
   The currently active semantic action also carries a 1/256-unit host phase;
@@ -95,7 +96,55 @@ experiments.
   cross this adapter. The client preflight verifies the relocated `GetSound`
   singleton operand against its live module base and the complete `PlayCue`
   body before enabling replay. Eight bounded events make the theoretical
-  maximum snapshot 746 bytes, below the fixed 768-byte datagram limit.
+  old LA22 maximum was 746 bytes. LA23 preserves that audio journal and adds
+  the visual roster, making the maximum snapshot 1196 bytes within a
+  1200-byte datagram limit.
+- The owner-approved dirty `LA23` research implementation replaces the
+  opening-only VFX cursor with a host-owned active visual roster. It observes
+  the native SFX finalizer, including the matrix and soul paths that bypass
+  `PlaySfx`; the client never runs the Spirit manager or FireSoul. Eight
+  records carry bounded semantic kind/instance/cast identity, actual emission
+  tick, world position, quaternion, scale, and observed animation phase.
+  Native pointers, handles, resource names and damage do not cross the wire.
+- UNKNOWN visual observations retain the preceding native leases. Only a
+  complete positive roster can retire an omitted instance; overflow is
+  UNKNOWN, never a truncated roster. A larger host-side weak registry follows
+  native destruction without mistaking address reuse for the same instance.
+  Matching visual poses/phases use the replica render clock; birth and removal
+  boundaries are not applied merely because a packet arrived. The first
+  observed pose is retained when no earlier pose exists.
+- The retail opening (kind 12) uses forward-only phase correction after a live
+  trace exposed repeated backward seeks fighting native particle playback.
+  Initial/late catch-up is allowed; equal or older host targets leave native
+  progression alone. Other kinds keep their absolute host-phase behavior.
+  The owner confirmed the eight rotating orbs stopped flickering after this
+  change, and measured client backward steps dropped from 204 to zero. Exact
+  phase equality is not claimed; complete host-roster removal still retires
+  the effect.
+- Client clones use the verified parent-free matrix factory and host phase,
+  not actor-bound animation-event forwarding. The fixed thirteen-resource
+  allowlist covers retail generic initiation, sample-script initiation,
+  wait/floor, transfer/morph/link/end, both Tal summon clips, the second
+  strike's character effect and return/invulnerability visuals. Source
+  presence is not proof that a live
+  cast emits every admitted kind: the observed retail variant-one cast used
+  resource 900 for the opening and 300 for the summon, not the sample-script
+  250 initiation chain. Numeric event-channel
+  inspection and exact native listener isolation are required for admission;
+  no global camera/damage event path is authorized. Clone weak leases and
+  cache references must retire/unlink successfully before reset releases
+  dependencies. Same-session actor replacement fences effects from the old
+  cast but permits a later cast.
+- This uncommitted path is still research-only. Focused protocol, shared-state,
+  interpolation, lifecycle and exact-image tests are distinct from live
+  acceptance. The earlier `LA22` run proved only opening rings (slightly late);
+  the first `LA23` run showed a summon but failed cleanup and omitted rings.
+  The retail-opening build passed native spawn/cleanup checks for three casts
+  (variants one, two, one), with cleared weak slots and drained retirement
+  queues. Pixel/timing parity, generic hit/status provenance, disconnect and
+  two-machine behavior remain incomplete. See
+  `research/signatures/spirit-strike-presentation.md` for exact native ABI
+  and resource evidence.
 - The host-only `--host-spirit 1|2` diagnostic enters that same retail
   transaction through a callback-free two-phase rail. The exact game-thread
   observer requires an authenticated canonical session, stable initialized Tal
@@ -138,6 +187,22 @@ experiments.
   as distinct tables, and every world selector is resolved through the active
   actor-local animation bank before it may be written. Leaving combat likewise
   waits for the native sheath transition before world presentation resumes.
+- Combat-entry recovery is actor-local. On the supported image, Ailish's
+  ranged model-switch path can clear animation channels before reporting that
+  the desired world model was already attached. The replica classifies the
+  attachment as desired, opposite, or unknown: desired skips that destructive
+  switch, only an exact opposite topology may invoke it, and unknown fails
+  closed. Native `WeaponFollow` reattachment and weapon visibility then require
+  exact actor, model, weapon, wrapper, executable-method, writable-target, and
+  post-mutation witnesses. Recovery is limited to 20 attempts at 100 ms within
+  one combat transition.
+- Tal's combat readiness remains valid only while the authenticated session,
+  transition, runtime actor generation, and renderer identity remain exact.
+  Ailish may continue her independent recovery without suppressing Tal's
+  already-valid Spirit presentation. Native Tal action and `CSkill` leases must
+  reach positively observed retirement before Tal is released. Runtime spawn,
+  PlayerTwo request, actor generation, and asynchronous removal leases also
+  retire in order, so a pending spawn/removal cannot be duplicated or reclaimed.
 - Host approval of an Ailish skill does not override an invalid client actor
   state. Native validator results `2` and authenticated combat result `3`
   trigger Sudeki's ranged combat/UI priming and a delayed retry; both the outer
@@ -206,7 +271,7 @@ experiments.
   save/load, transitions, dialogue, shops, and loot remain non-authoritative
   or blocked in this slice.
 
-Packets are versioned and sequenced. The `LA22` handshake validates the exact
+Packets are versioned and sequenced. The `LA23` handshake validates the exact
 game hash, mod build, cleanroom map, fixed Tal/Ailish player-role tuple,
 independent canonical/replica simulation-node tuple, and a fresh session
 token. Connected packet direction is authorized by simulation node rather
@@ -401,8 +466,14 @@ families, not simply the number of NPC instances.
 
 ## Acceptance boundary
 
-The foundation is not complete online co-op. The next native authority slices
-are damage/enemy-state convergence under a full live graphics run, followed by
-host-routed skill, item, weapon, and Spirit actions. Client-side native actions
-remain blocked until their host adapters and transaction arbitration are
-verified; no client prediction is used in this version.
+The foundation is not complete online co-op. A bounded Spirit presentation
+slice now carries authenticated Tal animation channels and one allowlisted
+START sound. The dirty research implementation adds one fixed opening VFX
+replay, `SFXSS250_Initiate`; the owner observed client rings with a small delay,
+while all later effects remained absent. Its timing and live lifecycle still
+require acceptance. It does not replicate the remaining Spirit effects or
+Spirit gameplay consequences. The next native authority slices are
+damage/enemy-state convergence under a full live graphics run, then the
+remaining host-routed skill, item, weapon, and Spirit outcomes. Other client-side
+native actions remain blocked until their host adapters and transaction
+arbitration are verified; no client prediction is used in this version.

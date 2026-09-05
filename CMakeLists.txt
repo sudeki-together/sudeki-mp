@@ -77,6 +77,8 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_window_policy.c
     src/hooks/lan_arena_runtime.c
     src/hooks/lan_arena_spirit_audio.c
+    src/hooks/lan_arena_spirit_visual_host.c
+    src/hooks/lan_arena_spirit_vfx.c
     src/hooks/lan_arena_startup_movie_skip.c
     src/hooks/lan_arena_client_input.c
     src/hooks/lan_arena_client_replica.c
@@ -273,6 +275,41 @@ add_executable(SudekiMP.LanArenaSpiritAudioTest
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/call_hook.c
     src/engine/log.c
+)
+
+add_executable(SudekiMP.LanArenaSpiritVfxTest
+    tests/lan_arena_spirit_vfx_test.c
+    src/hooks/lan_arena_spirit_vfx.c
+)
+add_executable(SudekiMP.LanArenaSpiritVisualHostTest
+    tests/lan_arena_spirit_visual_host_test.c
+    src/hooks/lan_arena_spirit_visual_host.c
+    src/hooks/call_hook.c
+)
+target_include_directories(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE
+    -Wall -Wextra -Werror
+)
+set_target_properties(SudekiMP.LanArenaSpiritVisualHostTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+target_include_directories(SudekiMP.LanArenaSpiritVfxTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaSpiritVfxTest PRIVATE
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(SudekiMP.LanArenaSpiritVfxTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+set_source_files_properties(
+    tests/lan_arena_spirit_vfx_test.c
+    src/hooks/lan_arena_spirit_vfx.c
+    PROPERTIES COMPILE_OPTIONS -Wno-pedantic
+)
+set_target_properties(SudekiMP.LanArenaSpiritVfxTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 target_include_directories(SudekiMP.LanArenaSpiritAudioTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaSpiritAudioTest PRIVATE
@@ -505,6 +542,8 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_client_skill_handoff.c
     src/hooks/lan_arena_owner_view.c
     src/hooks/lan_arena_spirit_audio.c
+    src/hooks/lan_arena_spirit_visual_host.c
+    src/hooks/lan_arena_spirit_vfx.c
     src/hooks/lan_arena_host_input.c
     src/hooks/lan_arena_pause_panel.c
     src/hooks/player_input_trace.c

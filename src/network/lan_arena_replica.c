@@ -437,6 +437,104 @@ BOOL SudekiMpLanArenaReplicaPush(
     return TRUE;
 }
 
+static const SudekiMpLanArenaSpiritVfxSnapshot *find_spirit_visual(
+    const SudekiMpLanArenaSnapshot *frame, uint32_t instance_sequence
+) {
+    unsigned int index;
+    for (index = 0u; index < frame->spirit_vfx_count; ++index) {
+        if (frame->spirit_vfx[index].instance_sequence == instance_sequence)
+            return &frame->spirit_vfx[index];
+    }
+    return NULL;
+}
+
+static void interpolate_spirit_visual_rotation(
+    const float lower[4], const float upper[4], float alpha, float output[4]
+) {
+    float dot = 0.0f;
+    float length_squared = 0.0f;
+    float sign;
+    unsigned int axis;
+    for (axis = 0u; axis < 4u; ++axis) dot += lower[axis] * upper[axis];
+    sign = dot < 0.0f ? -1.0f : 1.0f;
+    for (axis = 0u; axis < 4u; ++axis) {
+        output[axis] = interpolate_float(lower[axis], upper[axis] * sign, alpha);
+        length_squared += output[axis] * output[axis];
+    }
+    if (length_squared > 0.000001f) {
+        float inverse_length = 1.0f / sqrtf(length_squared);
+        for (axis = 0u; axis < 4u; ++axis) output[axis] *= inverse_length;
+    } else {
+        memcpy(output, lower, 4u * sizeof(float));
+    }
+}
+
+static void interpolate_spirit_visuals(
+    const SudekiMpLanArenaSnapshot *lower,
+    const SudekiMpLanArenaSnapshot *upper,
+    uint32_t host_tick, float alpha, SudekiMpLanArenaSnapshot *sample
+) {
+    unsigned int index;
+    sample->spirit_vfx_count = 0u;
+    sample->spirit_vfx_observed = 0u;
+    memset(sample->spirit_vfx, 0, sizeof(sample->spirit_vfx));
+    /* Observation failure is not an empty roster. The native adapter retains
+     * its last proven leases without creating/removing anything on UNKNOWN. */
+    if (!lower->spirit_vfx_observed || !upper->spirit_vfx_observed) return;
+    sample->spirit_vfx_observed = 1u;
+    for (index = 0u; index < lower->spirit_vfx_count; ++index) {
+        const SudekiMpLanArenaSpiritVfxSnapshot *from = &lower->spirit_vfx[index];
+        const SudekiMpLanArenaSpiritVfxSnapshot *to = find_spirit_visual(
+            upper, from->instance_sequence);
+        SudekiMpLanArenaSpiritVfxSnapshot *out =
+            &sample->spirit_vfx[sample->spirit_vfx_count++];
+        unsigned int axis;
+        *out = *from;
+        /* A disappearance is applied only at its positively observed upper
+         * boundary, not as soon as that newer packet arrives. */
+        if (to == NULL) continue;
+        if (to->kind != from->kind || to->skill_sequence != from->skill_sequence ||
+            to->emitted_host_tick != from->emitted_host_tick) {
+            sample->spirit_vfx_observed = 0u;
+            sample->spirit_vfx_count = 0u;
+            memset(sample->spirit_vfx, 0, sizeof(sample->spirit_vfx));
+            return;
+        }
+        for (axis = 0u; axis < 3u; ++axis) {
+            out->position[axis] = interpolate_float(
+                from->position[axis], to->position[axis], alpha);
+            out->scale[axis] = interpolate_float(
+                from->scale[axis], to->scale[axis], alpha);
+        }
+        interpolate_spirit_visual_rotation(from->rotation_xyzw,
+            to->rotation_xyzw, alpha, out->rotation_xyzw);
+        if (from->phase_valid && to->phase_valid && to->phase >= from->phase)
+            out->phase = interpolate_float(from->phase, to->phase, alpha);
+        /* A native loop wrap is a boundary, never interpolation backwards
+         * through the entire clip or an inferred gameplay event. */
+    }
+    for (index = 0u; index < upper->spirit_vfx_count; ++index) {
+        const SudekiMpLanArenaSpiritVfxSnapshot *to = &upper->spirit_vfx[index];
+        SudekiMpLanArenaSpiritVfxSnapshot *out;
+        if (find_spirit_visual(lower, to->instance_sequence) != NULL ||
+            tick_before(host_tick, to->emitted_host_tick)) continue;
+        if (sample->spirit_vfx_count == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY) {
+            /* A removal and replacement can straddle this segment. Never
+             * publish a truncated complete roster, which would retire the
+             * unrepresented native visual on the client. */
+            sample->spirit_vfx_observed = 0u;
+            sample->spirit_vfx_count = 0u;
+            memset(sample->spirit_vfx, 0, sizeof(sample->spirit_vfx));
+            return;
+        }
+        out = &sample->spirit_vfx[sample->spirit_vfx_count++];
+        *out = *to;
+        /* Retain the earliest observed pose and phase. Emission is a birth
+         * fence, not proof of clip progression: loops can wrap before the
+         * first sample. Never invent a source/target path or reverse phase. */
+    }
+}
+
 BOOL SudekiMpLanArenaReplicaSample(
     const SudekiMpLanArenaReplica *replica,
     uint32_t host_tick,
@@ -461,6 +559,8 @@ BOOL SudekiMpLanArenaReplicaSample(
         elapsed = host_tick - replica->earliest.host_tick;
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->oldest;
+        interpolate_spirit_visuals(&replica->earliest, &replica->oldest,
+            host_tick, alpha, sample);
         interpolate_actor(&replica->earliest.tal, &replica->oldest.tal,
             alpha, host_tick, replica->earliest.host_tick,
             replica->oldest.host_tick, &sample->tal);
@@ -493,6 +593,8 @@ BOOL SudekiMpLanArenaReplicaSample(
         elapsed = host_tick - replica->oldest.host_tick;
         alpha = clamp01((float)elapsed / (float)span);
         *sample = replica->previous;
+        interpolate_spirit_visuals(&replica->oldest, &replica->previous,
+            host_tick, alpha, sample);
         interpolate_actor(&replica->oldest.tal, &replica->previous.tal,
             alpha, host_tick, replica->oldest.host_tick,
             replica->previous.host_tick, &sample->tal);
@@ -526,6 +628,8 @@ BOOL SudekiMpLanArenaReplicaSample(
     span = replica->latest.host_tick - replica->previous.host_tick;
     elapsed = host_tick - replica->previous.host_tick;
     alpha = clamp01((float)elapsed / (float)span);
+    interpolate_spirit_visuals(&replica->previous, &replica->latest,
+        host_tick, alpha, sample);
     interpolate_actor(&replica->previous.tal, &replica->latest.tal,
         alpha, host_tick, replica->previous.host_tick,
         replica->latest.host_tick, &sample->tal);

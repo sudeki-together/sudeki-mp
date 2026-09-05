@@ -71,7 +71,93 @@ static void clear_actor_action(SudekiMpLanArenaActorSnapshot *actor) {
     memset(actor->action_history, 0, sizeof(actor->action_history));
 }
 
+static void add_spirit_visual(
+    SudekiMpLanArenaSnapshot *snapshot, uint32_t instance, uint32_t emitted,
+    float x, float phase
+) {
+    SudekiMpLanArenaSpiritVfxSnapshot *visual;
+    snapshot->tal.skill_sequence = 1u;
+    snapshot->tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot->spirit_vfx_observed = 1u;
+    visual = &snapshot->spirit_vfx[snapshot->spirit_vfx_count++];
+    memset(visual, 0, sizeof(*visual));
+    visual->instance_sequence = instance;
+    visual->skill_sequence = 1u;
+    visual->kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE;
+    visual->emitted_host_tick = emitted;
+    visual->phase_valid = 1u;
+    visual->phase = phase;
+    visual->position[0] = x;
+    visual->rotation_xyzw[3] = 1.0f;
+    visual->scale[0] = visual->scale[1] = visual->scale[2] = 1.0f;
+}
+
+static void test_spirit_visual_render_timeline(void) {
+    SudekiMpLanArenaReplica replica;
+    SudekiMpLanArenaSnapshot first = make_snapshot(1u, 100u, 0.0f);
+    SudekiMpLanArenaSnapshot second = make_snapshot(2u, 200u, 0.0f);
+    SudekiMpLanArenaSnapshot sample;
+    unsigned int index;
+    add_spirit_visual(&first, 1u, 90u, 0.0f, 10.0f);
+    add_spirit_visual(&second, 1u, 90u, 10.0f, 30.0f);
+    second.spirit_vfx[0].rotation_xyzw[3] = -1.0f;
+    second.spirit_vfx[0].scale[0] = 3.0f;
+    SudekiMpLanArenaReplicaReset(&replica);
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.spirit_vfx_observed == 1u && sample.spirit_vfx_count == 1u);
+    CHECK(fabsf(sample.spirit_vfx[0].position[0] - 5.0f) < 0.001f);
+    CHECK(fabsf(sample.spirit_vfx[0].phase - 20.0f) < 0.001f);
+    CHECK(fabsf(sample.spirit_vfx[0].scale[0] - 2.0f) < 0.001f);
+    CHECK(fabsf(sample.spirit_vfx[0].rotation_xyzw[3]) > 0.999f);
+
+    /* An effect's captured birth, rather than packet arrival, controls its
+     * first eligible render time; unknown observation never means stop. */
+    add_spirit_visual(&second, 2u, 175u, 7.0f, 5.0f);
+    replica.latest = second;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.spirit_vfx_count == 1u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 180u, &sample));
+    CHECK(sample.spirit_vfx_count == 2u);
+    CHECK(fabsf(sample.spirit_vfx[1].phase - 5.0f) < 0.001f);
+    replica.latest.spirit_vfx_observed = 0u;
+    replica.latest.spirit_vfx_count = 0u;
+    memset(replica.latest.spirit_vfx, 0, sizeof(replica.latest.spirit_vfx));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 180u, &sample));
+    CHECK(sample.spirit_vfx_observed == 0u && sample.spirit_vfx_count == 0u);
+    replica.latest.spirit_vfx_observed = 1u;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 180u, &sample));
+    CHECK(sample.spirit_vfx_observed == 1u && sample.spirit_vfx_count == 1u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 200u, &sample));
+    CHECK(sample.spirit_vfx_observed == 1u && sample.spirit_vfx_count == 0u);
+
+    /* Replacing an entire full roster inside one segment cannot truncate
+     * its union into a purportedly complete list. */
+    first.spirit_vfx_count = second.spirit_vfx_count = 0u;
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY; ++index) {
+        add_spirit_visual(&first, index + 1u, 90u, 0.0f, 10.0f);
+        add_spirit_visual(&second, index + 9u, 125u, 1.0f, 15.0f);
+    }
+    replica.previous = first;
+    replica.latest = second;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
+    CHECK(sample.spirit_vfx_observed == 0u && sample.spirit_vfx_count == 0u);
+
+    first.spirit_vfx_count = second.spirit_vfx_count = 0u;
+    first.host_tick = 0xfffffff0u;
+    second.host_tick = 0x22u;
+    add_spirit_visual(&first, 20u, 0xffffff00u, 0.0f, 30.0f);
+    add_spirit_visual(&second, 20u, 0xffffff00u, 10.0f, 5.0f);
+    replica.previous = first;
+    replica.latest = second;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 9u, &sample));
+    CHECK(fabsf(sample.spirit_vfx[0].position[0] - 5.0f) < 0.001f);
+    CHECK(sample.spirit_vfx[0].phase == 30.0f); /* native loop wrap */
+}
+
 int main(void) {
+    test_spirit_visual_render_timeline();
     SudekiMpLanArenaReplica replica;
     SudekiMpLanArenaReplicaRenderClock clock;
 

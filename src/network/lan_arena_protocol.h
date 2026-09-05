@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 22u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 23u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413232u /* "LA22" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413233u /* "LA23" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 768u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1200u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -23,7 +23,8 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS 5u
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 746u
+#define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1196u
 
 typedef enum SudekiMpLanArenaMatchState {
     SUDEKIMP_LAN_ARENA_MATCH_WAITING = 0,
@@ -72,6 +73,29 @@ typedef enum SudekiMpLanArenaSpiritAudioCue {
     SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_NONE = 0,
     SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START = 1
 } SudekiMpLanArenaSpiritAudioCue;
+
+/* Closed presentation identities, never archive hashes or native pointers.
+ * Wire acceptance does not authorize a native replay adapter: each kind still
+ * requires its own exact resource, transform, lifetime, and side-effect proof. */
+typedef enum SudekiMpLanArenaSpiritVfxKind {
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_NONE = 0,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE = 1,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_WAIT_LOOP = 2,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SMALL_FLOOR = 3,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SOUL_TRANSFER = 4,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_MORPH = 5,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LINK = 6,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_END = 7,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_ONE = 8,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_TWO = 9,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INVULNERABLE_LOOP = 10,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_RETURN = 11,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE = 12,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT = 13,
+    /* Inclusive allowlist bound; not an additional wire identity. */
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST =
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT
+} SudekiMpLanArenaSpiritVfxKind;
 
 /* Bounded action variants remain process-independent. The host translates
  * verified native selectors into these values and each client translates
@@ -269,6 +293,21 @@ typedef struct SudekiMpLanArenaSpiritAudioSemanticEvent {
     uint8_t cue;
 } SudekiMpLanArenaSpiritAudioSemanticEvent;
 
+/* Explicitly encoded as 56 bytes. Instance identity is session-local and
+ * immutable; phase/transform are the current native visual observation.
+ * Quaternion order is x,y,z,w. Phase may wrap for authored looping resources. */
+typedef struct SudekiMpLanArenaSpiritVfxSnapshot {
+    uint32_t instance_sequence;
+    uint16_t skill_sequence;
+    uint8_t kind;
+    uint8_t phase_valid;
+    uint32_t emitted_host_tick;
+    float phase;
+    float position[3];
+    float rotation_xyzw[4];
+    float scale[3];
+} SudekiMpLanArenaSpiritVfxSnapshot;
+
 typedef struct SudekiMpLanArenaSpiritAudioCursor {
     uint16_t last_event_sequence;
     uint8_t initialized;
@@ -294,6 +333,14 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t spirit_audio_history_count;
     SudekiMpLanArenaSpiritAudioSemanticEvent spirit_audio_history[
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY];
+    /* observed=0,count=0,zero entries means UNKNOWN, never an empty scene.
+     * observed=1 is a complete roster: absence positively retires an instance.
+     * An overflowing or incomplete native sample must publish UNKNOWN rather
+     * than a truncated roster. Finite effects may outlive their Spirit task. */
+    uint8_t spirit_vfx_observed;
+    uint8_t spirit_vfx_count;
+    SudekiMpLanArenaSpiritVfxSnapshot spirit_vfx[
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
     uint8_t enemy_count;
     SudekiMpLanArenaEnemySnapshot enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
 } SudekiMpLanArenaSnapshot;
@@ -370,6 +417,9 @@ int SudekiMpLanArenaSkillPresentationValid(
     uint8_t expected_type
 );
 int SudekiMpLanArenaSpiritAudioJournalValid(
+    const SudekiMpLanArenaSnapshot *snapshot
+);
+int SudekiMpLanArenaSpiritVfxRosterValid(
     const SudekiMpLanArenaSnapshot *snapshot
 );
 void SudekiMpLanArenaSpiritAudioCursorReset(

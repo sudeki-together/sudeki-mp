@@ -9,6 +9,7 @@
 #include "hooks/lan_arena_owner_view.h"
 #include "hooks/lan_arena_client_skill_handoff.h"
 #include "hooks/lan_arena_spirit_audio.h"
+#include "hooks/lan_arena_spirit_vfx.h"
 #include "network/lan_arena_replica.h"
 #include "network/lan_arena_session.h"
 #include "network/lan_arena_shared_simulation.h"
@@ -130,6 +131,66 @@ typedef struct LanArenaClientViewLease {
     uint16_t skill_sequence;
 } LanArenaClientViewLease;
 
+
+typedef struct LanArenaCombatTransitionActorLease {
+    void *character;
+    void *position;
+    void *attached_wrapper;
+    void *attached_renderer;
+    void *renderer;
+    void *component;
+    void *first_person_wrapper;
+    void *first_person_renderer;
+    uint64_t session_token;
+    uint32_t transition_generation;
+    uint32_t actor_generation;
+    BOOL ready;
+} LanArenaCombatTransitionActorLease;
+
+typedef struct LanArenaAilishModelWitness {
+    uint8_t *position;
+    uint8_t *attached_wrapper;
+    uint8_t *first_person_wrapper;
+    uint8_t *saved_world_wrapper;
+    void *attached_renderer;
+    void *first_person_renderer;
+    void *saved_world_renderer;
+    BOOL first_person;
+    BOOL fallback_world;
+} LanArenaAilishModelWitness;
+
+typedef struct LanArenaAilishWeaponReattachWitness {
+    uint8_t *attached_wrapper;
+    void *attached_renderer;
+    uint8_t *model_interface;
+    uint8_t *model_interface_vtable;
+    void *matrix_method;
+    void *locator_method;
+    uint8_t *primary_wrapper;
+    uint8_t *primary_render_object;
+} LanArenaAilishWeaponReattachWitness;
+
+typedef struct LanArenaAilishWeaponVisibilityWitness {
+    uint8_t *primary_wrapper;
+    uint8_t *primary_render_object;
+    uint32_t primary_render_flags;
+    uint8_t *primary_callback;
+    uint8_t *primary_callback_vtable;
+    void *primary_callback_method;
+    uint8_t *secondary_wrapper;
+    uint8_t *secondary_render_object;
+    uint32_t secondary_render_flags;
+    uint8_t *secondary_callback;
+    uint8_t *secondary_callback_vtable;
+    void *secondary_callback_method;
+} LanArenaAilishWeaponVisibilityWitness;
+
+typedef enum LanArenaAilishModelAttachmentState {
+    LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN = 0,
+    LAN_ARENA_AILISH_MODEL_ATTACHMENT_DESIRED = 1,
+    LAN_ARENA_AILISH_MODEL_ATTACHMENT_OPPOSITE = 2
+} LanArenaAilishModelAttachmentState;
+
 enum {
     RVA_INTERNAL_POSITION_SETTER = 0x00003050u,
     RVA_POSITION_UPDATE = 0x00110d40u,
@@ -170,15 +231,30 @@ enum {
     AILISH_FIRST_PERSON_WRAPPER_OFFSET = 0x160u,
     AILISH_WORLD_WRAPPER_OFFSET = 0x164u,
     AILISH_FIRST_PERSON_ARBITER_FLAG = 0x00400000u,
+    WEAPON_OWNER_OFFSET = 0x10u,
+    WEAPON_PRIMARY_POSITION_OFFSET = 0x40u,
+    WEAPON_PRIMARY_RENDER_OBJECT_OFFSET = 0xccu,
     WEAPON_PRIMARY_PARENT_OFFSET = 0xd4u,
     WEAPON_PRIMARY_LOCATOR_OFFSET = 0xecu,
     WEAPON_PRIMARY_WRAPPER_OFFSET = 0xf4u,
+    WEAPON_SECONDARY_WRAPPER_OFFSET = 0x204u,
     WEAPON_CURRENT_ITEM_OFFSET = 0x268u,
     WEAPON_ACTIVE_MODEL_OFFSET = 0x3acu,
     WEAPON_FLAGS_OFFSET = 0x3b8u,
     WEAPON_VISIBLE_FLAG = 0x02u,
     RENDER_OBJECT_HIDDEN_FLAG = 0x04u,
+    RENDER_OBJECT_VISIBILITY_CALLBACK_FLAG = 0x04000000u,
+    WRAPPER_RENDER_OBJECT_OFFSET = 0x08u,
+    WRAPPER_MODEL_INTERFACE_OFFSET = 0x0cu,
+    WRAPPER_RENDERER_OFFSET = 0x10u,
+    RENDER_OBJECT_CALLBACK_OFFSET = 0x14u,
+    RENDER_OBJECT_FLAGS_OFFSET = 0x34u,
+    VISIBILITY_CALLBACK_METHOD_OFFSET = 0x14u,
     POSITION_ATTACHED_WRAPPER_OFFSET = 0xb4u,
+    /* CPosition stores its intrusive attachment link as position + 4, not
+     * as the containing CPosition address. FUN_00511960 installs this exact
+     * biased pointer in a child position's +0x94 parent slot. */
+    POSITION_PARENT_LINK_BIAS = 0x04u,
     /* Exact cleanroom-world presentation captured from the supported retail
      * image.  These are renderer selectors, not protocol values: the LAN
      * snapshot remains semantic (idle/moving/action) across the wire. */
@@ -276,6 +352,13 @@ static SudekiMpLanArenaReplicaRenderClock replica_render_clock;
 static SudekiMpLanArenaSharedSimulation replica_simulation;
 static SudekiMpLanArenaSpiritAudioCursor spirit_audio_cursor;
 static BOOL spirit_audio_replay_failure_logged;
+static BOOL spirit_vfx_replay_failure_logged;
+static BOOL spirit_vfx_cache_release_failure_logged;
+static uint64_t spirit_vfx_session_token;
+static void *spirit_vfx_tal_actor;
+static uint32_t spirit_vfx_tal_generation;
+static BOOL spirit_vfx_generation_fenced;
+static uint16_t spirit_vfx_generation_skill_floor;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
 static LanArenaTalNativePresentationLease tal_native_presentation_lease;
@@ -286,6 +369,7 @@ static SudekiMpInlineHook client_skill_camera_hook;
 static SudekiMpInlineHook client_skill_speed_hook;
 static ApplyDamageFunction original_apply_damage;
 static volatile LONG client_skill_activation_depth;
+static volatile LONG client_spirit_vfx_call_depth;
 static int client_skill_activation_actor_index = -1;
 static BOOL client_remote_tal_skill_input_isolation_active;
 static uint32_t client_skill_original_alternate_speed_bits;
@@ -306,15 +390,31 @@ static BOOL client_original_combat_mode;
 static int client_combat_mode_trace_state = -1;
 static BOOL client_combat_transition_pending;
 static BOOL client_combat_transition_target;
+static uint64_t client_combat_transition_session_token;
+static uint32_t client_combat_transition_generation;
 static DWORD client_combat_transition_started_at;
 static BOOL client_combat_transition_refresh_attempted;
-static BOOL client_ailish_ranged_refresh_attempted;
-static BOOL client_ailish_weapon_attachment_ready;
+static unsigned int client_ailish_ranged_refresh_attempt_count;
+static DWORD client_ailish_ranged_refresh_last_attempt_at;
+static BOOL client_ailish_ranged_refresh_exhaustion_logged;
+static LanArenaCombatTransitionActorLease
+    client_combat_transition_actor_leases[2];
+static void *client_remote_tal_lease_actor;
+static uint32_t client_remote_tal_lease_generation;
 static int client_combat_transition_trace_state = -1;
 static const char *client_ailish_combat_graph_failure;
 
-static BOOL client_ailish_combat_graph_ready(void);
+static BOOL client_ailish_combat_graph_ready(uint8_t *expected_character);
+static BOOL client_ailish_visible_combat_ready(
+    uint8_t *expected_character);
 static BOOL client_session_authenticated(void);
+static BOOL drain_tal_native_action_lease(void);
+static BOOL actor_presentation_renderer(
+    uint8_t *character,
+    unsigned int actor_index,
+    void **renderer_result,
+    uint8_t **ailish_component_result
+);
 
 static int replay_client_spirit_audio(
     void *context,
@@ -324,6 +424,65 @@ static int replay_client_spirit_audio(
     return SudekiMpLanArenaSpiritAudioReplayLocalCue(
         (HMODULE)game_base, cue) ? 1 : 0;
 }
+
+static void reset_client_spirit_vfx_replay(BOOL reset_binding) {
+    /* Native clone/cache entry can synchronously invalidate a frame. Keep
+     * its actor/session binding until the outer call returns and retires the
+     * exact native leases. Reset never clears the backend's dependencies. */
+    if (InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) > 0) return;
+    if (reset_binding && !spirit_vfx_cache_release_failure_logged) {
+        spirit_vfx_session_token = 0u;
+        spirit_vfx_tal_actor = NULL;
+        spirit_vfx_tal_generation = 0u;
+        spirit_vfx_generation_fenced = FALSE;
+        spirit_vfx_generation_skill_floor = 0u;
+    }
+    spirit_vfx_replay_failure_logged = FALSE;
+}
+
+static BOOL release_client_spirit_vfx_cache(const char *reason) {
+    HMODULE module;
+    BOOL released;
+    DWORD error;
+
+    if (game_base == NULL) {
+        spirit_vfx_cache_release_failure_logged = FALSE;
+        return TRUE;
+    }
+    if (InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    module = (HMODULE)game_base;
+    InterlockedIncrement(&client_spirit_vfx_call_depth);
+    released = SudekiMpLanArenaSpiritVfxResetVisuals(module);
+    error = released ? ERROR_SUCCESS : GetLastError();
+    /* The old opening-only adapter may still own a prewarm lease during an
+     * installation rollback. Never uncache anything while clones remain. */
+    if (released) {
+        released = SudekiMpLanArenaSpiritVfxReleaseTalInitiateCache(module);
+        error = released ? ERROR_SUCCESS : GetLastError();
+    }
+    InterlockedDecrement(&client_spirit_vfx_call_depth);
+    if (released) {
+        spirit_vfx_cache_release_failure_logged = FALSE;
+        return TRUE;
+    }
+    if (!spirit_vfx_cache_release_failure_logged) {
+        spirit_vfx_cache_release_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=spirit_vfx_cache state=release_rejected "
+            "reason=%s win32_error=%lu "
+            "policy=retain_same_generation_lease_and_retry_without_double_uncache\r\n",
+            reason != NULL ? reason : "unspecified",
+            (unsigned long)error);
+    }
+    SetLastError(error == ERROR_SUCCESS ? ERROR_INVALID_STATE : error);
+    return FALSE;
+}
+
 
 BOOL SudekiMpLanArenaClientTalActionPresentation(
     uint8_t action_variant,
@@ -436,6 +595,61 @@ BOOL SudekiMpLanArenaClientActorPresentationAllowed(
     return actor_index == 0u ? tal_ready : ailish_ready;
 }
 
+BOOL SudekiMpLanArenaClientActorTransitionReadinessRetained(
+    BOOL previously_ready,
+    BOOL identity_exact,
+    BOOL currently_observed_ready
+) {
+    return identity_exact != FALSE &&
+        (currently_observed_ready != FALSE || previously_ready != FALSE);
+}
+
+BOOL SudekiMpLanArenaClientTalLifecycleLeaseExact(
+    void *current_actor,
+    uint32_t current_generation,
+    void *leased_actor,
+    uint32_t leased_generation
+) {
+    return current_actor != NULL && current_generation != 0u &&
+        current_actor == leased_actor &&
+        current_generation == leased_generation;
+}
+
+void SudekiMpLanArenaClientReplicaSetRemoteTalLease(
+    void *actor,
+    uint32_t actor_generation
+) {
+    BOOL valid = actor != NULL && actor_generation != 0u;
+    void *next_actor = valid ? actor : NULL;
+    uint32_t next_generation = valid ? actor_generation : 0u;
+    LanArenaCombatTransitionActorLease *transition_lease =
+        &client_combat_transition_actor_leases[0];
+
+    if (client_remote_tal_lease_actor == next_actor &&
+        client_remote_tal_lease_generation == next_generation) {
+        return;
+    }
+    if (transition_lease->ready) {
+        SudekiMpLogWrite(
+            "lan_arena_client_replica event=client_combat_presentation "
+            "state=actor_readiness_revoked actor=Tal "
+            "reason=runtime_actor_generation_changed "
+            "policy=runtime_lifecycle_generation_plus_renderer_identity\r\n");
+    }
+    client_remote_tal_lease_actor = next_actor;
+    client_remote_tal_lease_generation = next_generation;
+    /* Preserve the visual binding: retained instances cannot migrate to a
+     * replacement that happens to reuse the same native actor address. */
+    reset_client_spirit_vfx_replay(FALSE);
+    ZeroMemory(transition_lease, sizeof(*transition_lease));
+    ZeroMemory(&presentation_leases[0], sizeof(presentation_leases[0]));
+    /* A replacement may reuse every native address. Force the next
+     * authenticated combat snapshot through the native handoff again. */
+    client_combat_transition_session_token = 0u;
+    client_combat_transition_pending = FALSE;
+    client_combat_transition_trace_state = -1;
+}
+
 BOOL SudekiMpLanArenaClientTalTransitionSelectorReady(
     BOOL combat_target,
     int selector
@@ -454,6 +668,16 @@ BOOL SudekiMpLanArenaClientCombatTransitionRefreshDue(
 ) {
     return combat_target != FALSE && refresh_attempted == FALSE &&
         elapsed_ms >= 100u;
+}
+
+BOOL SudekiMpLanArenaClientAilishRangedRefreshDue(
+    unsigned int attempt_count,
+    uint32_t elapsed_since_attempt_ms
+) {
+    return attempt_count <
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_MAX_ATTEMPTS &&
+        elapsed_since_attempt_ms >=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS;
 }
 
 BOOL SudekiMpLanArenaClientAnimationPhaseCorrectionRequired(
@@ -550,6 +774,25 @@ static BOOL writable_memory(void *pointer, size_t length) {
     }
     protection = information.Protect & 0xffu;
     return protection == PAGE_READWRITE || protection == PAGE_WRITECOPY ||
+        protection == PAGE_EXECUTE_READWRITE ||
+        protection == PAGE_EXECUTE_WRITECOPY;
+}
+
+static BOOL executable_memory(const void *pointer, size_t length) {
+    MEMORY_BASIC_INFORMATION information;
+    uintptr_t address = (uintptr_t)pointer;
+    DWORD protection;
+    if (pointer == NULL || length == 0u ||
+        VirtualQuery(pointer, &information, sizeof(information)) == 0u ||
+        information.State != MEM_COMMIT ||
+        (information.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0u ||
+        address + length < address ||
+        address + length >
+            (uintptr_t)information.BaseAddress + information.RegionSize) {
+        return FALSE;
+    }
+    protection = information.Protect & 0xffu;
+    return protection == PAGE_EXECUTE || protection == PAGE_EXECUTE_READ ||
         protection == PAGE_EXECUTE_READWRITE ||
         protection == PAGE_EXECUTE_WRITECOPY;
 }
@@ -752,59 +995,687 @@ static const char *ranged_weapon_primary_locator_name(uint8_t *weapon) {
     return NULL;
 }
 
+/* Observe the actual model attachment independently of the arbiter's desired
+ * view. FUN_00588a90 is destructive before it discovers a no-op, so callers
+ * may invoke it only for a fully proven opposite topology; an observation
+ * failure remains unknown and must fail closed. In the LAN cleanroom's world
+ * view, Ailish can legitimately have no retained +0x164 pointer:
+ * CPosition+0xB4 is then the world wrapper and +0x160 is the distinct
+ * first-person wrapper. */
+static LanArenaAilishModelAttachmentState ailish_model_attachment_state(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    LanArenaAilishModelWitness *result
+) {
+    LanArenaAilishModelWitness witness;
+    uint32_t arbiter_flags;
+    BOOL expected_first_person;
+
+    if (result != NULL) ZeroMemory(result, sizeof(*result));
+    ZeroMemory(&witness, sizeof(witness));
+    if (!readable_memory(character, 0x138u) ||
+        !readable_memory(component, 0x168u) ||
+        !readable_memory(arbiter, 0x54u) ||
+        !readable_memory(
+            position, POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *)) ||
+        *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
+        *(void **)(character + CHARACTER_ARBITER_OFFSET) != arbiter ||
+        *(void **)(character + CHARACTER_POSITION_OFFSET) != position ||
+        *(void **)(component + 0x10u) != character ||
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
+        return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+    }
+    arbiter_flags = *(uint32_t *)(arbiter + 0x50u);
+    expected_first_person =
+        (arbiter_flags & AILISH_FIRST_PERSON_ARBITER_FLAG) != 0u;
+    witness.position = position;
+    witness.attached_wrapper = *(uint8_t **)(
+        position + POSITION_ATTACHED_WRAPPER_OFFSET);
+    witness.first_person_wrapper = *(uint8_t **)(
+        component + AILISH_FIRST_PERSON_WRAPPER_OFFSET);
+    witness.saved_world_wrapper = *(uint8_t **)(
+        component + AILISH_WORLD_WRAPPER_OFFSET);
+    if (!readable_memory(witness.attached_wrapper, 0x14u) ||
+        !readable_memory(witness.first_person_wrapper, 0x14u)) {
+        return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+    }
+    witness.attached_renderer = *(void **)(
+        witness.attached_wrapper + 0x10u);
+    witness.first_person_renderer = *(void **)(
+        witness.first_person_wrapper + 0x10u);
+    if (witness.attached_renderer == NULL ||
+        witness.first_person_renderer == NULL) {
+        return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+    }
+    if (witness.attached_wrapper == witness.first_person_wrapper) {
+        witness.first_person = TRUE;
+        /* A native world-to-first-person switch always saves a distinct world
+         * wrapper at +0x164 before attaching +0x160. Requiring that retained
+         * lease also keeps the world combat graph available for replication. */
+        if (!readable_memory(witness.saved_world_wrapper, 0x14u) ||
+            witness.saved_world_wrapper == witness.first_person_wrapper ||
+            *(void **)(witness.saved_world_wrapper + 0x10u) == NULL) {
+            return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+        }
+        witness.saved_world_renderer = *(void **)(
+            witness.saved_world_wrapper + 0x10u);
+    } else if (witness.saved_world_wrapper != NULL) {
+        witness.first_person = FALSE;
+        if (!readable_memory(witness.saved_world_wrapper, 0x14u) ||
+            witness.attached_wrapper != witness.saved_world_wrapper ||
+            witness.saved_world_wrapper == witness.first_person_wrapper) {
+            return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+        }
+        witness.saved_world_renderer = *(void **)(
+            witness.saved_world_wrapper + 0x10u);
+        if (witness.saved_world_renderer == NULL ||
+            witness.saved_world_renderer != witness.attached_renderer) {
+            return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+        }
+    } else {
+        witness.first_person = FALSE;
+        witness.fallback_world = TRUE;
+    }
+    if (*(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
+        *(void **)(character + CHARACTER_ARBITER_OFFSET) != arbiter ||
+        *(void **)(character + CHARACTER_POSITION_OFFSET) != position ||
+        *(void **)(component + 0x10u) != character ||
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character ||
+        *(uint32_t *)(arbiter + 0x50u) != arbiter_flags ||
+        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) !=
+            witness.attached_wrapper ||
+        *(void **)(component + AILISH_FIRST_PERSON_WRAPPER_OFFSET) !=
+            witness.first_person_wrapper ||
+        *(void **)(component + AILISH_WORLD_WRAPPER_OFFSET) !=
+            witness.saved_world_wrapper ||
+        *(void **)(witness.attached_wrapper + 0x10u) !=
+            witness.attached_renderer ||
+        *(void **)(witness.first_person_wrapper + 0x10u) !=
+            witness.first_person_renderer ||
+        (witness.saved_world_wrapper != NULL &&
+            *(void **)(witness.saved_world_wrapper + 0x10u) !=
+                witness.saved_world_renderer)) {
+        return LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+    }
+    if (result != NULL) *result = witness;
+    return witness.first_person == expected_first_person ?
+        LAN_ARENA_AILISH_MODEL_ATTACHMENT_DESIRED :
+        LAN_ARENA_AILISH_MODEL_ATTACHMENT_OPPOSITE;
+}
+
+static BOOL ailish_desired_model_attached(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    LanArenaAilishModelWitness *result
+) {
+    return ailish_model_attachment_state(
+        character, component, arbiter, position, result) ==
+        LAN_ARENA_AILISH_MODEL_ATTACHMENT_DESIRED;
+}
+
+static BOOL weapon_primary_parent_matches_position(
+    uint8_t *weapon,
+    uint8_t *position
+) {
+    return readable_memory(position, POSITION_PARENT_LINK_BIAS) &&
+        readable_memory(
+            weapon, WEAPON_PRIMARY_PARENT_OFFSET + sizeof(void *)) &&
+        *(void **)(weapon + WEAPON_PRIMARY_PARENT_OFFSET) ==
+            (void *)(position + POSITION_PARENT_LINK_BIAS);
+}
+
+static BOOL ailish_ranged_pointer_graph_exact(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner
+) {
+    if (!readable_memory(character, 0x138u) ||
+        !readable_memory(component, 0x170u) ||
+        !readable_memory(arbiter, 0x54u) ||
+        !readable_memory(
+            position, POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *)) ||
+        !readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
+        !readable_memory(active_model, 0x10u) ||
+        !readable_memory(active_owner, 0x48u)) {
+        return FALSE;
+    }
+    return *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) == component &&
+        *(void **)(character + CHARACTER_ARBITER_OFFSET) == arbiter &&
+        *(void **)(character + CHARACTER_POSITION_OFFSET) == position &&
+        *(void **)(character + CHARACTER_WEAPON_OFFSET) == weapon &&
+        *(void **)(component + 0x10u) == character &&
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) == character &&
+        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) == active_model &&
+        *(void **)(active_model + 0x0cu) == active_owner &&
+        active_owner == character &&
+        *(void **)(active_owner + CHARACTER_POSITION_OFFSET) == position &&
+        readable_memory(
+            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *));
+}
+
+static BOOL ailish_ranged_pointer_lease_exact(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner
+) {
+    return SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) ==
+            character &&
+        ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner);
+}
+
+static BOOL ailish_model_switch_mutation_writable(
+    uint8_t *component,
+    uint8_t *position,
+    const LanArenaAilishModelWitness *witness
+) {
+    uint8_t *wrappers[3];
+    unsigned int index;
+
+    if (witness == NULL ||
+        !writable_memory(component, 0x170u) ||
+        !writable_memory(position, 0x104u)) {
+        return FALSE;
+    }
+    wrappers[0] = witness->attached_wrapper;
+    wrappers[1] = witness->first_person_wrapper;
+    wrappers[2] = witness->saved_world_wrapper;
+    for (index = 0u; index < 3u; ++index) {
+        uint8_t *wrapper = wrappers[index];
+        uint8_t *render_object;
+        unsigned int prior;
+        if (wrapper == NULL) continue;
+        for (prior = 0u; prior < index; ++prior) {
+            if (wrappers[prior] == wrapper) break;
+        }
+        if (prior != index) continue;
+        if (!writable_memory(wrapper, 0x19u)) return FALSE;
+        render_object = *(uint8_t **)(wrapper + 0x08u);
+        if (!writable_memory(render_object, 0x38u) ||
+            !readable_memory(*(void **)(wrapper + 0x10u), sizeof(void *))) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* WeaponFollow (FUN_004d8280) is not a passive lookup. On success its
+ * FUN_004d8630 installer rewrites the weapon's embedded primary CPosition
+ * and render-object attachment graph. Prove every exact pointer that the
+ * supported body traverses before allowing the call; readable-but-foreign
+ * topology is never mutation authority. */
+static BOOL ailish_weapon_reattach_graph_writable(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner,
+    const LanArenaAilishModelWitness *model,
+    LanArenaAilishWeaponReattachWitness *result
+) {
+    LanArenaAilishWeaponReattachWitness witness;
+
+    ZeroMemory(&witness, sizeof(witness));
+    if (result != NULL) ZeroMemory(result, sizeof(*result));
+    if (model == NULL ||
+        !ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        !writable_memory(position, 0x104u) ||
+        !writable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) !=
+            model->attached_wrapper) {
+        return FALSE;
+    }
+
+    witness.attached_wrapper = model->attached_wrapper;
+    witness.attached_renderer = model->attached_renderer;
+    if (!readable_memory(witness.attached_wrapper, 0x14u) ||
+        *(void **)(witness.attached_wrapper + WRAPPER_RENDERER_OFFSET) !=
+            witness.attached_renderer ||
+        witness.attached_renderer == NULL) {
+        return FALSE;
+    }
+    witness.model_interface = *(uint8_t **)(
+        witness.attached_wrapper + WRAPPER_MODEL_INTERFACE_OFFSET);
+    if (!readable_memory(witness.model_interface, sizeof(void *))) {
+        return FALSE;
+    }
+    witness.model_interface_vtable = *(uint8_t **)witness.model_interface;
+    if (!readable_memory(witness.model_interface_vtable, 0x2cu)) {
+        return FALSE;
+    }
+    witness.matrix_method = *(void **)(witness.model_interface_vtable + 0x24u);
+    witness.locator_method = *(void **)(witness.model_interface_vtable + 0x28u);
+    if (!executable_memory(witness.matrix_method, 1u) ||
+        !executable_memory(witness.locator_method, 1u)) {
+        return FALSE;
+    }
+
+    witness.primary_wrapper = *(uint8_t **)(
+        weapon + WEAPON_PRIMARY_WRAPPER_OFFSET);
+    if (!readable_memory(witness.primary_wrapper, 0x14u)) return FALSE;
+    witness.primary_render_object = *(uint8_t **)(
+        witness.primary_wrapper + WRAPPER_RENDER_OBJECT_OFFSET);
+    if (!readable_memory(witness.primary_render_object, 0x110u) ||
+        !writable_memory(witness.primary_render_object + 0x18u, 0x34u) ||
+        *(void **)(weapon + WEAPON_PRIMARY_RENDER_OBJECT_OFFSET) !=
+            witness.primary_render_object) {
+        return FALSE;
+    }
+
+    if (!ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) !=
+            witness.attached_wrapper ||
+        *(void **)(witness.attached_wrapper + WRAPPER_MODEL_INTERFACE_OFFSET) !=
+            witness.model_interface ||
+        *(void **)(witness.attached_wrapper + WRAPPER_RENDERER_OFFSET) !=
+            witness.attached_renderer ||
+        *(void **)witness.model_interface != witness.model_interface_vtable ||
+        *(void **)(witness.model_interface_vtable + 0x24u) !=
+            witness.matrix_method ||
+        *(void **)(witness.model_interface_vtable + 0x28u) !=
+            witness.locator_method ||
+        *(void **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET) !=
+            witness.primary_wrapper ||
+        *(void **)(witness.primary_wrapper + WRAPPER_RENDER_OBJECT_OFFSET) !=
+            witness.primary_render_object ||
+        *(void **)(weapon + WEAPON_PRIMARY_RENDER_OBJECT_OFFSET) !=
+            witness.primary_render_object) {
+        return FALSE;
+    }
+    if (result != NULL) *result = witness;
+    return TRUE;
+}
+
+static BOOL ailish_weapon_reattach_mutation_writable(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner,
+    const LanArenaAilishModelWitness *model,
+    LanArenaAilishWeaponReattachWitness *result
+) {
+    if (SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character ||
+        !ailish_weapon_reattach_graph_writable(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner, model, result) ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character) {
+        if (result != NULL) ZeroMemory(result, sizeof(*result));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL capture_visibility_render_object(
+    uint8_t *wrapper,
+    uint8_t **render_object_result,
+    uint32_t *render_flags_result,
+    uint8_t **callback_result,
+    uint8_t **callback_vtable_result,
+    void **callback_method_result
+) {
+    uint8_t *render_object;
+    uint32_t render_flags;
+    uint8_t *callback = NULL;
+    uint8_t *callback_vtable = NULL;
+    void *callback_method = NULL;
+
+    if (render_object_result == NULL || render_flags_result == NULL ||
+        callback_result == NULL || callback_vtable_result == NULL ||
+        callback_method_result == NULL ||
+        !readable_memory(wrapper, 0x0cu)) {
+        return FALSE;
+    }
+    render_object = *(uint8_t **)(
+        wrapper + WRAPPER_RENDER_OBJECT_OFFSET);
+    if (!writable_memory(render_object, 0x38u)) return FALSE;
+    render_flags = *(uint32_t *)(render_object + RENDER_OBJECT_FLAGS_OFFSET);
+    if ((render_flags & (RENDER_OBJECT_VISIBILITY_CALLBACK_FLAG |
+            RENDER_OBJECT_HIDDEN_FLAG)) ==
+            (RENDER_OBJECT_VISIBILITY_CALLBACK_FLAG |
+             RENDER_OBJECT_HIDDEN_FLAG)) {
+        callback = *(uint8_t **)(
+            render_object + RENDER_OBJECT_CALLBACK_OFFSET);
+        if (!readable_memory(callback, sizeof(void *))) return FALSE;
+        callback_vtable = *(uint8_t **)callback;
+        if (!readable_memory(
+                callback_vtable,
+                VISIBILITY_CALLBACK_METHOD_OFFSET + sizeof(void *))) {
+            return FALSE;
+        }
+        callback_method = *(void **)(
+            callback_vtable + VISIBILITY_CALLBACK_METHOD_OFFSET);
+        if (!executable_memory(callback_method, 1u)) return FALSE;
+    }
+    *render_object_result = render_object;
+    *render_flags_result = render_flags;
+    *callback_result = callback;
+    *callback_vtable_result = callback_vtable;
+    *callback_method_result = callback_method;
+    return TRUE;
+}
+
+/* SetWeaponVisible(TRUE) mutates both weapon state and every installed
+ * weapon render object, including the optional secondary model. Capture a
+ * fresh exact graph only after WeaponFollow has returned, and validate the
+ * conditional visibility callback before native code can dispatch it. */
+static BOOL ailish_weapon_visibility_graph_writable(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner,
+    LanArenaAilishWeaponVisibilityWitness *result
+) {
+    LanArenaAilishWeaponVisibilityWitness witness;
+
+    ZeroMemory(&witness, sizeof(witness));
+    if (result != NULL) ZeroMemory(result, sizeof(*result));
+    if (!ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        !writable_memory(weapon + WEAPON_FLAGS_OFFSET, sizeof(uint8_t)) ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(character + CHARACTER_ARBITER_OFFSET) != arbiter ||
+        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
+        return FALSE;
+    }
+
+    witness.primary_wrapper = *(uint8_t **)(
+        weapon + WEAPON_PRIMARY_WRAPPER_OFFSET);
+    if (!capture_visibility_render_object(
+            witness.primary_wrapper,
+            &witness.primary_render_object,
+            &witness.primary_render_flags,
+            &witness.primary_callback,
+            &witness.primary_callback_vtable,
+            &witness.primary_callback_method)) {
+        return FALSE;
+    }
+    witness.secondary_wrapper = *(uint8_t **)(
+        weapon + WEAPON_SECONDARY_WRAPPER_OFFSET);
+    if (witness.secondary_wrapper != NULL &&
+        witness.secondary_wrapper != witness.primary_wrapper) {
+        if (!capture_visibility_render_object(
+                witness.secondary_wrapper,
+                &witness.secondary_render_object,
+                &witness.secondary_render_flags,
+                &witness.secondary_callback,
+                &witness.secondary_callback_vtable,
+                &witness.secondary_callback_method)) {
+            return FALSE;
+        }
+    } else if (witness.secondary_wrapper == witness.primary_wrapper) {
+        witness.secondary_render_object = witness.primary_render_object;
+        witness.secondary_render_flags = witness.primary_render_flags;
+        witness.secondary_callback = witness.primary_callback;
+        witness.secondary_callback_vtable = witness.primary_callback_vtable;
+        witness.secondary_callback_method = witness.primary_callback_method;
+    }
+
+    if (!ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET) !=
+            witness.primary_wrapper ||
+        *(void **)(weapon + WEAPON_SECONDARY_WRAPPER_OFFSET) !=
+            witness.secondary_wrapper ||
+        *(void **)(witness.primary_wrapper + WRAPPER_RENDER_OBJECT_OFFSET) !=
+            witness.primary_render_object ||
+        *(uint32_t *)(witness.primary_render_object +
+            RENDER_OBJECT_FLAGS_OFFSET) != witness.primary_render_flags) {
+        return FALSE;
+    }
+    if (witness.secondary_wrapper != NULL &&
+        (*(void **)(witness.secondary_wrapper +
+                WRAPPER_RENDER_OBJECT_OFFSET) !=
+                witness.secondary_render_object ||
+         *(uint32_t *)(witness.secondary_render_object +
+                RENDER_OBJECT_FLAGS_OFFSET) !=
+                witness.secondary_render_flags)) {
+        return FALSE;
+    }
+    if ((witness.primary_callback != NULL &&
+            (*(void **)(witness.primary_render_object +
+                    RENDER_OBJECT_CALLBACK_OFFSET) !=
+                    witness.primary_callback ||
+             *(void **)witness.primary_callback !=
+                    witness.primary_callback_vtable ||
+             *(void **)(witness.primary_callback_vtable +
+                    VISIBILITY_CALLBACK_METHOD_OFFSET) !=
+                    witness.primary_callback_method)) ||
+        (witness.secondary_callback != NULL &&
+            (*(void **)(witness.secondary_render_object +
+                    RENDER_OBJECT_CALLBACK_OFFSET) !=
+                    witness.secondary_callback ||
+             *(void **)witness.secondary_callback !=
+                    witness.secondary_callback_vtable ||
+             *(void **)(witness.secondary_callback_vtable +
+                    VISIBILITY_CALLBACK_METHOD_OFFSET) !=
+                    witness.secondary_callback_method))) {
+        return FALSE;
+    }
+    if (result != NULL) *result = witness;
+    return TRUE;
+}
+
+static BOOL ailish_weapon_visibility_mutation_writable(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner,
+    LanArenaAilishWeaponVisibilityWitness *result
+) {
+    if (SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character ||
+        !ailish_weapon_visibility_graph_writable(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner, result) ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character) {
+        if (result != NULL) ZeroMemory(result, sizeof(*result));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL ailish_weapon_visibility_postcondition(
+    uint8_t *character,
+    uint8_t *component,
+    uint8_t *arbiter,
+    uint8_t *position,
+    uint8_t *weapon,
+    uint8_t *active_model,
+    uint8_t *active_owner,
+    const LanArenaAilishWeaponVisibilityWitness *witness
+) {
+    if (witness == NULL ||
+        !ailish_ranged_pointer_lease_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET) !=
+            witness->primary_wrapper ||
+        *(void **)(weapon + WEAPON_SECONDARY_WRAPPER_OFFSET) !=
+            witness->secondary_wrapper ||
+        !readable_memory(witness->primary_wrapper, 0x0cu) ||
+        *(void **)(witness->primary_wrapper + WRAPPER_RENDER_OBJECT_OFFSET) !=
+            witness->primary_render_object ||
+        !readable_memory(witness->primary_render_object, 0x38u) ||
+        (*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET) &
+            WEAPON_VISIBLE_FLAG) == 0u ||
+        (*(uint32_t *)(witness->primary_render_object +
+            RENDER_OBJECT_FLAGS_OFFSET) & RENDER_OBJECT_HIDDEN_FLAG) != 0u) {
+        return FALSE;
+    }
+    if (witness->secondary_wrapper != NULL &&
+        (!readable_memory(witness->secondary_wrapper, 0x0cu) ||
+         *(void **)(witness->secondary_wrapper +
+                WRAPPER_RENDER_OBJECT_OFFSET) !=
+                witness->secondary_render_object ||
+         !readable_memory(witness->secondary_render_object, 0x38u) ||
+         (*(uint32_t *)(witness->secondary_render_object +
+                RENDER_OBJECT_FLAGS_OFFSET) &
+                RENDER_OBJECT_HIDDEN_FLAG) != 0u)) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL ailish_weapon_attachment_witness(
     uint8_t *character,
     uint8_t *component,
     uint8_t **weapon_result,
-    uint8_t **render_object_result
+    uint8_t **render_object_result,
+    const char **failure_result
 ) {
+    uint8_t *position;
     uint8_t *weapon;
+    uint8_t *active_model;
+    uint8_t *active_owner;
     uint8_t *wrapper;
     uint8_t *render_object;
+    const char *failure = NULL;
     if (weapon_result != NULL) *weapon_result = NULL;
     if (render_object_result != NULL) *render_object_result = NULL;
-    if (!readable_memory(character,
-            CHARACTER_WEAPON_OFFSET + sizeof(void *)) ||
+    if (failure_result != NULL) *failure_result = NULL;
+    if (!readable_memory(character, 0x138u) ||
         !readable_memory(component, 0x170u) ||
         *(void **)(component + 0x10u) != character) {
-        return FALSE;
+        failure = "weapon_character_component_lease";
+        goto rejected;
     }
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
     weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (!readable_memory(position,
+            POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *))) {
+        failure = "weapon_position_lease";
+        goto rejected;
+    }
     if (!readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
         !readable_memory(
-            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *)) ||
-        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) == NULL ||
-        *(void **)(weapon + WEAPON_PRIMARY_PARENT_OFFSET) == NULL ||
-        *(int *)(weapon + WEAPON_PRIMARY_LOCATOR_OFFSET) < 0 ||
-        (*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET) & WEAPON_VISIBLE_FLAG) == 0u) {
-        return FALSE;
+            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *))) {
+        failure = "weapon_object_or_item_lease";
+        goto rejected;
+    }
+    if (*(void **)(weapon + WEAPON_OWNER_OFFSET) != character) {
+        failure = "weapon_owner_backpointer";
+        goto rejected;
+    }
+    if (!weapon_primary_parent_matches_position(weapon, position)) {
+        failure = "weapon_primary_parent";
+        goto rejected;
+    }
+    if (*(int *)(weapon + WEAPON_PRIMARY_LOCATOR_OFFSET) < 0) {
+        failure = "weapon_primary_locator";
+        goto rejected;
+    }
+    if ((*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET) &
+            WEAPON_VISIBLE_FLAG) == 0u) {
+        failure = "weapon_visible_flag";
+        goto rejected;
+    }
+    active_model = *(uint8_t **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET);
+    if (!readable_memory(active_model, 0x10u)) {
+        failure = "weapon_active_model_lease";
+        goto rejected;
+    }
+    active_owner = *(uint8_t **)(active_model + 0x0cu);
+    if (active_owner != character || !readable_memory(active_owner, 0x48u) ||
+        *(void **)(active_owner + CHARACTER_POSITION_OFFSET) != position) {
+        failure = "weapon_active_owner_lease";
+        goto rejected;
     }
     wrapper = *(uint8_t **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET);
-    if (!readable_memory(wrapper, 0x0cu)) return FALSE;
+    if (!readable_memory(wrapper, 0x0cu)) {
+        failure = "weapon_primary_wrapper";
+        goto rejected;
+    }
     render_object = *(uint8_t **)(wrapper + 0x08u);
-    if (!readable_memory(render_object, 0x38u) ||
-        (*(uint32_t *)(render_object + 0x34u) &
-         RENDER_OBJECT_HIDDEN_FLAG) != 0u) {
-        return FALSE;
+    if (!readable_memory(render_object, 0x38u)) {
+        failure = "weapon_render_object";
+        goto rejected;
+    }
+    if ((*(uint32_t *)(render_object + 0x34u) &
+            RENDER_OBJECT_HIDDEN_FLAG) != 0u) {
+        failure = "weapon_render_object_hidden";
+        goto rejected;
+    }
+    if (*(void **)(character + CHARACTER_POSITION_OFFSET) != position ||
+        *(void **)(character + CHARACTER_WEAPON_OFFSET) != weapon ||
+        *(void **)(component + 0x10u) != character ||
+        *(void **)(weapon + WEAPON_OWNER_OFFSET) != character ||
+        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) != active_model ||
+        *(void **)(active_model + 0x0cu) != active_owner ||
+        *(void **)(active_owner + CHARACTER_POSITION_OFFSET) != position ||
+        !weapon_primary_parent_matches_position(weapon, position) ||
+        *(void **)(weapon + WEAPON_PRIMARY_WRAPPER_OFFSET) != wrapper ||
+        *(void **)(wrapper + 0x08u) != render_object) {
+        failure = "weapon_post_witness_lease_changed";
+        goto rejected;
     }
     if (weapon_result != NULL) *weapon_result = weapon;
     if (render_object_result != NULL) *render_object_result = render_object;
     return TRUE;
+
+rejected:
+    if (failure_result != NULL) *failure_result = failure;
+    return FALSE;
 }
 
 static BOOL refresh_ailish_ranged_presentation(void) {
     uint8_t *character = (uint8_t *)
         SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
-    uint8_t *component;
-    uint8_t *arbiter;
-    uint8_t *position;
-    uint8_t *weapon;
+    uint8_t *component = NULL;
+    uint8_t *arbiter = NULL;
+    uint8_t *position = NULL;
+    uint8_t *weapon = NULL;
+    uint8_t *active_model = NULL;
+    uint8_t *active_owner = NULL;
+    uint8_t *witness_weapon = NULL;
     uint8_t *render_object = NULL;
-    uint8_t *desired_wrapper;
+    LanArenaAilishModelWitness before_model;
+    LanArenaAilishModelWitness after_model;
+    LanArenaAilishWeaponReattachWitness reattach_witness;
+    LanArenaAilishWeaponVisibilityWitness visibility_witness;
+    LanArenaAilishModelAttachmentState before_model_state;
     const char *locator_name;
-    unsigned char refreshed;
+    unsigned char refreshed = 0u;
     unsigned char reattached;
-    BOOL desired_model_already_active;
+    BOOL expected_first_person;
+    const char *model_switch_state;
+    const char *attachment_failure = NULL;
     const char *failure = NULL;
     if (!client_session_authenticated() || game_base == NULL ||
         ailish_ranged_presentation_refresh == NULL ||
@@ -835,28 +1706,60 @@ static BOOL refresh_ailish_ranged_presentation(void) {
     }
     if (!readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t)) ||
         !readable_memory(
-            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *)) ||
-        *(void **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET) == NULL) {
+            *(void **)(weapon + WEAPON_CURRENT_ITEM_OFFSET), sizeof(void *))) {
         failure = "equipped_weapon_lease";
         goto rejected;
     }
-    desired_wrapper = *(uint8_t **)(component +
-        (((*(uint32_t *)(arbiter + 0x50u) &
-           AILISH_FIRST_PERSON_ARBITER_FLAG) != 0u) ?
-            AILISH_FIRST_PERSON_WRAPPER_OFFSET : AILISH_WORLD_WRAPPER_OFFSET));
-    desired_model_already_active = desired_wrapper != NULL &&
-        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) ==
-            desired_wrapper;
-    refreshed = ailish_ranged_presentation_refresh(component);
-    if ((refreshed == 0u && !desired_model_already_active) ||
-        !readable_memory(character, 0x138u) ||
-        *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
-        *(void **)(character + CHARACTER_ARBITER_OFFSET) != arbiter ||
-        *(void **)(character + CHARACTER_WEAPON_OFFSET) != weapon ||
-        *(void **)(component + 0x10u) != character ||
-        *(void **)(arbiter + ARBITER_CHARACTER_OFFSET) != character) {
-        failure = refreshed == 0u ?
-            "native_model_switch_rejected" : "post_refresh_lease_changed";
+    active_model = *(uint8_t **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET);
+    if (!readable_memory(active_model, 0x10u)) {
+        failure = "active_weapon_model_lease";
+        goto rejected;
+    }
+    active_owner = *(uint8_t **)(active_model + 0x0cu);
+    if (active_owner != character || !readable_memory(active_owner, 0x48u) ||
+        *(void **)(active_owner + CHARACTER_POSITION_OFFSET) != position) {
+        failure = "active_weapon_owner_lease";
+        goto rejected;
+    }
+    before_model_state = ailish_model_attachment_state(
+        character, component, arbiter, position, &before_model);
+    expected_first_person =
+        (*(uint32_t *)(arbiter + 0x50u) &
+         AILISH_FIRST_PERSON_ARBITER_FLAG) != 0u;
+    if (before_model_state == LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN) {
+        failure = "native_model_topology_unknown";
+        goto rejected;
+    }
+    /* The native model-switch helper returns one only when it replaces an
+     * exact opposite model. Its wrapper resets animation channels before
+     * learning that an already-attached desired model is a no-op, so unknown
+     * and desired observations can never authorize that mutation. */
+    if (before_model_state == LAN_ARENA_AILISH_MODEL_ATTACHMENT_OPPOSITE) {
+        if (!ailish_model_switch_mutation_writable(
+                component, position, &before_model)) {
+            failure = "native_model_switch_memory_not_writable";
+            goto rejected;
+        }
+        refreshed = ailish_ranged_presentation_refresh(component);
+        if (refreshed == 0u) {
+            failure = "native_model_switch_rejected";
+            goto rejected;
+        }
+    }
+    if (!ailish_ranged_pointer_lease_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        !ailish_desired_model_attached(
+            character, component, arbiter, position, &after_model) ||
+        after_model.first_person != expected_first_person) {
+        failure = "post_refresh_model_lease_changed";
+        goto rejected;
+    }
+    if (!ailish_weapon_reattach_mutation_writable(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner, &after_model,
+            &reattach_witness)) {
+        failure = "native_weapon_reattach_memory_not_writable";
         goto rejected;
     }
     locator_name = ranged_weapon_primary_locator_name(weapon);
@@ -870,21 +1773,59 @@ static BOOL refresh_ailish_ranged_presentation(void) {
         failure = "native_weapon_reattach_rejected";
         goto rejected;
     }
-    /* The native ranged refresh owns model selection and locator attachment.
-     * Ask the native weapon object to expose the selected attachment; never
-     * write wrapper pointers, locator indices, or render flags directly. */
-    weapon_set_visible(weapon, 1);
-    if (!ailish_weapon_attachment_witness(
-            character, component, NULL, &render_object)) {
-        failure = "weapon_attachment_not_visible";
+    if (!ailish_ranged_pointer_lease_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner) ||
+        !ailish_desired_model_attached(
+            character, component, arbiter, position, &after_model) ||
+        after_model.first_person != expected_first_person ||
+        after_model.attached_wrapper != reattach_witness.attached_wrapper ||
+        after_model.attached_renderer != reattach_witness.attached_renderer) {
+        failure = "post_weapon_reattach_lease_changed";
         goto rejected;
     }
+    if (!ailish_weapon_visibility_mutation_writable(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner, &visibility_witness)) {
+        failure = "native_weapon_visibility_memory_not_writable";
+        goto rejected;
+    }
+    /* The exact fallback skips only the destructive model-switch wrapper.
+     * Native WeaponFollow reattachment and visibility still own the weapon;
+     * never write wrapper pointers, locator indices, or render flags. */
+    weapon_set_visible(weapon, 1);
+    if (!ailish_weapon_visibility_postcondition(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner, &visibility_witness) ||
+        !ailish_weapon_attachment_witness(
+            character, component, &witness_weapon, &render_object,
+            &attachment_failure) ||
+        witness_weapon != weapon ||
+        !ailish_desired_model_attached(
+            character, component, arbiter, position, &after_model) ||
+        after_model.first_person != expected_first_person) {
+        failure = attachment_failure != NULL ? attachment_failure :
+            "weapon_attachment_not_visible";
+        goto rejected;
+    }
+    /* SetVisible may traverse the current weapon item. Resolve the borrowed
+     * locator string only after every native mutation and final graph witness,
+     * immediately before the diagnostic consumes it. */
+    locator_name = ranged_weapon_primary_locator_name(weapon);
+    if (locator_name == NULL) {
+        failure = "post_visibility_locator_name";
+        goto rejected;
+    }
+    model_switch_state = refreshed != 0u ? "changed" :
+        (after_model.fallback_world ?
+            "already_active_world_fallback" : "already_active");
     SudekiMpLogFormat(
         "lan_arena_client_replica event=client_ailish_weapon_attachment "
         "state=ready character=0x%08lx component=0x%08lx weapon=0x%08lx "
         "parent=0x%08lx locator=%ld wrapper=0x%08lx render_object=0x%08lx "
+        "character_wrapper=0x%08lx character_renderer=0x%08lx "
         "weapon_flags=0x%02x model_switch=%s locator_name=%s "
-        "policy=native_actor_ranged_refresh_and_visibility_only\r\n",
+        "policy=exact_native_model_noop_or_switch_then_weapon_visibility\r\n",
         (unsigned long)(uintptr_t)character,
         (unsigned long)(uintptr_t)component,
         (unsigned long)(uintptr_t)weapon,
@@ -894,18 +1835,29 @@ static BOOL refresh_ailish_ranged_presentation(void) {
         (unsigned long)(uintptr_t)*(void **)(
             weapon + WEAPON_PRIMARY_WRAPPER_OFFSET),
         (unsigned long)(uintptr_t)render_object,
+        (unsigned long)(uintptr_t)after_model.attached_wrapper,
+        (unsigned long)(uintptr_t)after_model.attached_renderer,
         (unsigned int)*(uint8_t *)(weapon + WEAPON_FLAGS_OFFSET),
-        refreshed != 0u ? "changed" : "already_active",
+        model_switch_state,
         locator_name);
     return TRUE;
 
 rejected:
     SudekiMpLogFormat(
         "lan_arena_client_replica event=client_ailish_weapon_attachment "
-        "state=waiting reason=%s character=0x%08lx "
+        "state=waiting reason=%s character=0x%08lx position=0x%08lx "
+        "weapon=0x%08lx parent_link=0x%08lx expected_parent_link=0x%08lx "
         "policy=fail_closed_until_native_attachment_is_visible\r\n",
         failure != NULL ? failure : "unknown",
-        (unsigned long)(uintptr_t)character);
+        (unsigned long)(uintptr_t)character,
+        (unsigned long)(uintptr_t)position,
+        (unsigned long)(uintptr_t)weapon,
+        (unsigned long)(uintptr_t)(readable_memory(
+                weapon, WEAPON_PRIMARY_PARENT_OFFSET + sizeof(void *)) ?
+            *(void **)(weapon + WEAPON_PRIMARY_PARENT_OFFSET) : NULL),
+        (unsigned long)(uintptr_t)(readable_memory(
+                position, POSITION_PARENT_LINK_BIAS) ?
+            position + POSITION_PARENT_LINK_BIAS : NULL));
     return FALSE;
 }
 
@@ -1322,16 +2274,168 @@ static void trace_client_combat_mode(
         (unsigned long)error);
 }
 
-static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
+static void reset_client_ailish_ranged_refresh(DWORD now) {
+    client_ailish_ranged_refresh_attempt_count = 0u;
+    client_ailish_ranged_refresh_last_attempt_at = now;
+    client_ailish_ranged_refresh_exhaustion_logged = FALSE;
+}
+
+static void reset_client_combat_transition_actor_leases(DWORD now) {
+    ++client_combat_transition_generation;
+    if (client_combat_transition_generation == 0u) {
+        ++client_combat_transition_generation;
+    }
+    ZeroMemory(client_combat_transition_actor_leases,
+        sizeof(client_combat_transition_actor_leases));
+    reset_client_ailish_ranged_refresh(now);
+}
+
+static BOOL bind_client_combat_transition_actor(
+    unsigned int actor_index,
+    uint64_t session_token,
+    uint8_t **character_result
+) {
+    static const SudekiMpCleanroomActor actors[2] = {
+        SUDEKIMP_CLEANROOM_TAL,
+        SUDEKIMP_CLEANROOM_AILISH
+    };
+    LanArenaCombatTransitionActorLease *lease;
+    uint8_t *character;
+    uint8_t *position = NULL;
+    uint8_t *attached_wrapper = NULL;
+    void *attached_renderer = NULL;
+    uint8_t *component = NULL;
+    uint8_t *first_person_wrapper = NULL;
+    void *first_person_renderer = NULL;
+    void *renderer = NULL;
+    void *tal_lifecycle_actor = NULL;
+    uint32_t actor_generation = 0u;
+    BOOL available;
+    BOOL identity_exact;
+
+    if (actor_index >= 2u || character_result == NULL) return FALSE;
+    *character_result = NULL;
+    lease = &client_combat_transition_actor_leases[actor_index];
+    character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(
+        actors[actor_index]);
+    available = session_token != 0u &&
+        session_token == client_combat_transition_session_token &&
+        client_combat_transition_generation != 0u &&
+        readable_memory(character, 0x138u);
+    if (available && actor_index == 0u) {
+        tal_lifecycle_actor = client_remote_tal_lease_actor;
+        actor_generation = client_remote_tal_lease_generation;
+        available = SudekiMpLanArenaClientTalLifecycleLeaseExact(
+            character, actor_generation,
+            tal_lifecycle_actor, actor_generation);
+    }
+    if (available) {
+        position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+        available = readable_memory(position,
+            POSITION_ATTACHED_WRAPPER_OFFSET + sizeof(void *));
+    }
+    if (available) {
+        attached_wrapper = *(uint8_t **)(
+            position + POSITION_ATTACHED_WRAPPER_OFFSET);
+        available = readable_memory(attached_wrapper, 0x14u);
+    }
+    if (available) {
+        attached_renderer = *(void **)(attached_wrapper + 0x10u);
+        available = attached_renderer != NULL && actor_presentation_renderer(
+            character, actor_index, &renderer, &component);
+    }
+    if (available && actor_index == 1u) {
+        first_person_wrapper = *(uint8_t **)(
+            component + AILISH_FIRST_PERSON_WRAPPER_OFFSET);
+        available = readable_memory(first_person_wrapper, 0x14u);
+        if (available) {
+            first_person_renderer = *(void **)(
+                first_person_wrapper + 0x10u);
+            available = first_person_renderer != NULL;
+        }
+    }
+    available = available &&
+        SudekiMpCleanroomEngineActorEntity(actors[actor_index]) == character &&
+        *(void **)(character + CHARACTER_POSITION_OFFSET) == position &&
+        *(void **)(position + POSITION_ATTACHED_WRAPPER_OFFSET) ==
+            attached_wrapper &&
+        *(void **)(attached_wrapper + 0x10u) == attached_renderer &&
+        (actor_index != 0u ||
+         (client_remote_tal_lease_actor == tal_lifecycle_actor &&
+          client_remote_tal_lease_generation == actor_generation &&
+          SudekiMpLanArenaClientTalLifecycleLeaseExact(
+              character, actor_generation,
+              tal_lifecycle_actor, actor_generation))) &&
+        (actor_index != 1u ||
+         (*(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) == component &&
+          *(void **)(component + 0x10u) == character &&
+          *(void **)(component + AILISH_FIRST_PERSON_WRAPPER_OFFSET) ==
+              first_person_wrapper &&
+          *(void **)(first_person_wrapper + 0x10u) ==
+              first_person_renderer));
+    if (!available) {
+        character = NULL;
+        position = NULL;
+        attached_wrapper = NULL;
+        attached_renderer = NULL;
+        renderer = NULL;
+        component = NULL;
+        first_person_wrapper = NULL;
+        first_person_renderer = NULL;
+    }
+    identity_exact = available && lease->character == character &&
+        lease->position == position &&
+        lease->attached_wrapper == attached_wrapper &&
+        lease->attached_renderer == attached_renderer &&
+        lease->renderer == renderer && lease->component == component &&
+        lease->first_person_wrapper == first_person_wrapper &&
+        lease->first_person_renderer == first_person_renderer &&
+        lease->session_token == session_token &&
+        lease->transition_generation == client_combat_transition_generation &&
+        lease->actor_generation == actor_generation;
+    if (!identity_exact) {
+        if (lease->ready) {
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_combat_presentation "
+                "state=actor_readiness_revoked actor=%s "
+                "policy=session_transition_and_full_renderer_identity_changed_or_unknown\r\n",
+                actor_index == 0u ? "Tal" : "Ailish");
+        }
+        lease->character = character;
+        lease->position = position;
+        lease->attached_wrapper = attached_wrapper;
+        lease->attached_renderer = attached_renderer;
+        lease->renderer = renderer;
+        lease->component = component;
+        lease->first_person_wrapper = first_person_wrapper;
+        lease->first_person_renderer = first_person_renderer;
+        lease->session_token = available ? session_token : 0u;
+        lease->transition_generation = available ?
+            client_combat_transition_generation : 0u;
+        lease->actor_generation = available ? actor_generation : 0u;
+        lease->ready = FALSE;
+    }
+    if (!available) return FALSE;
+    *character_result = character;
+    return TRUE;
+}
+
+static BOOL synchronize_client_combat_mode(
+    uint8_t combat_enabled,
+    uint64_t session_token
+) {
     BOOL current;
     BOOL desired;
     BOOL changed;
     BOOL lease_started;
+    BOOL session_changed;
+    BOOL transition_required;
     BOOL verified;
     DWORD error;
-    if (combat_enabled > 1u ||
+    if (combat_enabled > 1u || session_token == 0u ||
         !SudekiMpCleanroomEngineCombatMode(&current)) {
-        error = combat_enabled > 1u ? ERROR_INVALID_DATA : ERROR_INVALID_STATE;
+        error = combat_enabled > 1u || session_token == 0u ?
+            ERROR_INVALID_DATA : ERROR_INVALID_STATE;
         trace_client_combat_mode(FALSE, combat_enabled != 0u, error);
         SetLastError(error);
         return FALSE;
@@ -1343,6 +2447,8 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
     }
     desired = combat_enabled != 0u;
     changed = current != desired;
+    session_changed =
+        client_combat_transition_session_token != session_token;
     if (current != desired && !SudekiMpCleanroomEngineSetCombatMode(desired)) {
         error = GetLastError();
         if (error == ERROR_SUCCESS) error = ERROR_INVALID_STATE;
@@ -1355,13 +2461,16 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    if (changed || (lease_started && desired)) {
+    transition_required = changed || (lease_started && desired) ||
+        (session_changed && desired);
+    if (transition_required) {
+        DWORD transition_started_at = GetTickCount();
+        client_combat_transition_session_token = session_token;
         client_combat_transition_pending = TRUE;
         client_combat_transition_target = desired;
-        client_combat_transition_started_at = GetTickCount();
+        client_combat_transition_started_at = transition_started_at;
         client_combat_transition_refresh_attempted = !desired;
-        client_ailish_ranged_refresh_attempted = !desired;
-        client_ailish_weapon_attachment_ready = !desired;
+        reset_client_combat_transition_actor_leases(transition_started_at);
         client_combat_transition_trace_state = 0;
         memset(presentation_leases, 0, sizeof(presentation_leases));
         memset(&ailish_first_person_lease, 0,
@@ -1373,21 +2482,45 @@ static BOOL synchronize_client_combat_mode(uint8_t combat_enabled) {
             "state=native_transition target=%s "
             "policy=allow_weapon_attachment_before_replica_animation_override\r\n",
             desired ? "armed" : "sheathed");
+    } else if (session_changed) {
+        /* A new authenticated stream may reuse process-local addresses. Drop
+         * every readiness lease even when both streams begin sheathed. If the
+         * new stream is armed, transition_required above also re-proves the
+         * native handoff before admitting presentation. */
+        client_combat_transition_session_token = session_token;
+        client_combat_transition_pending = FALSE;
+        reset_client_combat_transition_actor_leases(GetTickCount());
     }
     trace_client_combat_mode(TRUE, desired, ERROR_SUCCESS);
     return TRUE;
 }
 
-static unsigned int client_combat_presentation_ready_mask(void) {
+static unsigned int client_combat_presentation_ready_mask(
+    uint64_t session_token
+) {
     SudekiMpCleanroomActorPresentation tal;
     SudekiMpCleanroomActorPresentation ailish;
+    uint8_t *tal_character = NULL;
+    uint8_t *ailish_character = NULL;
     int expected_ailish;
+    BOOL tal_identity_available;
+    BOOL ailish_identity_available;
+    BOOL ailish_graph_ready;
+    BOOL tal_observed_ready;
+    BOOL ailish_observed_ready;
     BOOL tal_ready;
     BOOL ailish_ready;
+    int observed_ailish_selector = -1;
     unsigned int ready_mask;
+    DWORD now;
     DWORD elapsed;
+    if (session_token == 0u ||
+        session_token != client_combat_transition_session_token) {
+        return 0u;
+    }
     if (!client_combat_transition_pending) return 0x03u;
-    elapsed = GetTickCount() - client_combat_transition_started_at;
+    now = GetTickCount();
+    elapsed = now - client_combat_transition_started_at;
     /* SetCombatMode starts Sudeki's asynchronous native ranged/UI arm pass.
      * A replica-owned actor can miss the first party event while that pass is
      * rebuilding its weapon graph.  Re-run the already-proven native group
@@ -1399,7 +2532,8 @@ static unsigned int client_combat_presentation_ready_mask(void) {
             elapsed)) {
         client_combat_transition_refresh_attempted = TRUE;
         if (SudekiMpCleanroomEngineRefreshCombatMode()) {
-            client_combat_transition_started_at = GetTickCount();
+            now = GetTickCount();
+            client_combat_transition_started_at = now;
             elapsed = 0u;
             SudekiMpLogWrite(
                 "lan_arena_client_replica event=client_combat_presentation "
@@ -1413,13 +2547,24 @@ static unsigned int client_combat_presentation_ready_mask(void) {
                 "policy=fail_closed_no_selector_override\r\n",
                 (unsigned long)GetLastError());
         }
+        /* The group refresh itself starts another asynchronous native pass.
+         * Do not call Ailish's actor-local model switch in this same frame. */
+        client_ailish_ranged_refresh_last_attempt_at = GetTickCount();
     }
     expected_ailish = client_combat_transition_target ?
         AILISH_COMBAT_IDLE_SELECTOR : AILISH_WORLD_IDLE_SELECTOR;
     ZeroMemory(&tal, sizeof(tal));
     ZeroMemory(&ailish, sizeof(ailish));
-    tal_ready = SudekiMpCleanroomEngineActorPresentation(
+    now = GetTickCount();
+    tal_identity_available = bind_client_combat_transition_actor(
+        0u, session_token, &tal_character);
+    ailish_identity_available = bind_client_combat_transition_actor(
+        1u, session_token, &ailish_character);
+    tal_observed_ready = tal_identity_available &&
+        SudekiMpCleanroomEngineActorPresentation(
             SUDEKIMP_CLEANROOM_TAL, &tal) &&
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL) ==
+            tal_character &&
         SudekiMpLanArenaClientTalTransitionSelectorReady(
             client_combat_transition_target, tal.selector[0]);
     /* In first person, ActorPresentation observes Ailish's two-submodel arms
@@ -1427,28 +2572,72 @@ static unsigned int client_combat_presentation_ready_mask(void) {
      * from that surface can never settle and used to leave all client combat
      * replay disabled. Validate both of her independently resolved renderer
      * banks instead; apply_actor_presentation still verifies every write. */
-    ailish_ready = client_combat_transition_target ?
-        client_ailish_combat_graph_ready() :
-        (SudekiMpCleanroomEngineActorPresentation(
-             SUDEKIMP_CLEANROOM_AILISH, &ailish) &&
-         ailish.selector[0] == expected_ailish);
-    if (client_combat_transition_target && ailish_ready &&
+    ailish_graph_ready = ailish_identity_available &&
+        client_combat_transition_target &&
+        client_ailish_combat_graph_ready(ailish_character);
+    ailish_observed_ready = ailish_identity_available &&
+        (client_combat_transition_target ?
+            client_ailish_visible_combat_ready(ailish_character) :
+            (SudekiMpCleanroomEngineActorPresentation(
+                 SUDEKIMP_CLEANROOM_AILISH, &ailish) &&
+             ailish.selector[0] == expected_ailish));
+    if (client_combat_transition_target && ailish_identity_available &&
+        ailish_graph_ready && !ailish_observed_ready &&
         client_combat_transition_refresh_attempted &&
-        !client_ailish_ranged_refresh_attempted) {
-        client_ailish_ranged_refresh_attempted = TRUE;
-        client_ailish_weapon_attachment_ready =
-            refresh_ailish_ranged_presentation();
+        SudekiMpLanArenaClientAilishRangedRefreshDue(
+            client_ailish_ranged_refresh_attempt_count,
+            now - client_ailish_ranged_refresh_last_attempt_at)) {
+        BOOL refreshed;
+        ++client_ailish_ranged_refresh_attempt_count;
+        client_ailish_ranged_refresh_last_attempt_at = now;
+        refreshed = refresh_ailish_ranged_presentation();
+        if (refreshed) {
+            /* The model switch may replace a renderer/component lease. Bind
+             * and re-prove the complete visible topology before admission. */
+            ailish_identity_available = bind_client_combat_transition_actor(
+                1u, session_token, &ailish_character);
+            ailish_observed_ready = ailish_identity_available &&
+                client_ailish_visible_combat_ready(ailish_character);
+        }
+        if (!ailish_observed_ready &&
+            client_ailish_ranged_refresh_attempt_count >=
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_MAX_ATTEMPTS &&
+            !client_ailish_ranged_refresh_exhaustion_logged) {
+            client_ailish_ranged_refresh_exhaustion_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_client_replica event=client_ailish_weapon_attachment "
+                "state=retry_exhausted attempts=%u "
+                "policy=bounded_native_model_refresh_fail_closed\r\n",
+                client_ailish_ranged_refresh_attempt_count);
+        }
     }
-    if (client_combat_transition_target) {
-        ailish_ready = ailish_ready &&
-            client_ailish_weapon_attachment_ready;
-    }
+    client_combat_transition_actor_leases[0].ready =
+        SudekiMpLanArenaClientActorTransitionReadinessRetained(
+            client_combat_transition_actor_leases[0].ready,
+            tal_identity_available, tal_observed_ready);
+    /* Ailish's admission is never sticky: her active character wrapper,
+     * first-person renderer, combat graphs, and visible weapon witness are
+     * all re-proved in the current frame. */
+    client_combat_transition_actor_leases[1].ready =
+        ailish_identity_available && ailish_observed_ready;
+    tal_ready = client_combat_transition_actor_leases[0].ready;
+    ailish_ready = client_combat_transition_actor_leases[1].ready;
     ready_mask =
         (SudekiMpLanArenaClientActorPresentationAllowed(
              0u, TRUE, tal_ready, ailish_ready) ? 0x01u : 0u) |
         (SudekiMpLanArenaClientActorPresentationAllowed(
              1u, TRUE, tal_ready, ailish_ready) ? 0x02u : 0u);
     if (tal_ready && ailish_ready) {
+        if (client_combat_transition_target) {
+            if (SudekiMpCleanroomEngineActorPresentation(
+                    SUDEKIMP_CLEANROOM_AILISH, &ailish) &&
+                SudekiMpCleanroomEngineActorEntity(
+                    SUDEKIMP_CLEANROOM_AILISH) == ailish_character) {
+                observed_ailish_selector = ailish.selector[0];
+            }
+        } else {
+            observed_ailish_selector = ailish.selector[0];
+        }
         if (!SudekiMpLanArenaClientPresentationOverrideAllowed(
                 client_combat_transition_target)) {
             /* The native transition has safely attached both weapons and put
@@ -1466,7 +2655,7 @@ static unsigned int client_combat_presentation_ready_mask(void) {
                     "state=native_owned target=armed tal_selector=%ld "
                     "ailish_selector=%ld "
                     "policy=fail_closed_no_unsafe_combat_selector_override\r\n",
-                    (long)tal.selector[0], (long)ailish.selector[0]);
+                    (long)tal.selector[0], (long)observed_ailish_selector);
             }
             return 0u;
         }
@@ -1482,7 +2671,7 @@ static unsigned int client_combat_presentation_ready_mask(void) {
             "ailish_surface=%s "
             "policy=native_weapon_transition_completed_before_replica_override\r\n",
             client_combat_transition_target ? "armed" : "sheathed",
-            (long)tal.selector[0], (long)ailish.selector[0],
+            (long)tal.selector[0], (long)observed_ailish_selector,
             client_combat_transition_target ?
                 "verified_graphs_and_native_weapon_attachment" :
                 "attached_world");
@@ -1494,12 +2683,13 @@ static unsigned int client_combat_presentation_ready_mask(void) {
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_combat_presentation "
             "state=waiting target=%s elapsed_ms=%lu ready_mask=0x%02x "
-            "tal_ready=%s ailish_ready=%s "
+            "tal_ready=%s ailish_ready=%s ailish_refresh_attempts=%u "
             "policy=actor_local_override_only_after_native_weapon_ready\r\n",
             client_combat_transition_target ? "armed" : "sheathed",
             (unsigned long)elapsed, ready_mask,
             tal_ready ? "true" : "false",
-            ailish_ready ? "true" : "false");
+            ailish_ready ? "true" : "false",
+            client_ailish_ranged_refresh_attempt_count);
     }
     return ready_mask;
 }
@@ -1525,10 +2715,10 @@ static BOOL restore_client_combat_mode(void) {
     client_combat_mode_trace_state = -1;
     client_combat_transition_pending = FALSE;
     client_combat_transition_target = FALSE;
+    client_combat_transition_session_token = 0u;
     client_combat_transition_started_at = 0u;
     client_combat_transition_refresh_attempted = FALSE;
-    client_ailish_ranged_refresh_attempted = FALSE;
-    client_ailish_weapon_attachment_ready = FALSE;
+    reset_client_combat_transition_actor_leases(0u);
     client_combat_transition_trace_state = -1;
     SudekiMpLogWrite(
         verified ?
@@ -1887,11 +3077,194 @@ BOOL SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
     *ailish_component_result = component;
     return result;
 }
+
+BOOL SudekiMpLanArenaClientReplicaTestAilishDesiredModelAttached(
+    void *character_value,
+    void **attached_wrapper_result,
+    void **attached_renderer_result,
+    BOOL *first_person_result,
+    BOOL *fallback_world_result
+) {
+    uint8_t *character = (uint8_t *)character_value;
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    LanArenaAilishModelWitness witness;
+
+    if (attached_wrapper_result == NULL || attached_renderer_result == NULL ||
+        first_person_result == NULL || fallback_world_result == NULL) {
+        return FALSE;
+    }
+    *attached_wrapper_result = NULL;
+    *attached_renderer_result = NULL;
+    *first_person_result = FALSE;
+    *fallback_world_result = FALSE;
+    if (!readable_memory(character, 0x138u)) return FALSE;
+    component = *(uint8_t **)(character + AILISH_RANGED_COMPONENT_OFFSET);
+    arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+    if (!ailish_desired_model_attached(
+            character, component, arbiter, position, &witness)) {
+        return FALSE;
+    }
+    *attached_wrapper_result = witness.attached_wrapper;
+    *attached_renderer_result = witness.attached_renderer;
+    *first_person_result = witness.first_person;
+    *fallback_world_result = witness.fallback_world;
+    return TRUE;
+}
+
+int SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+    void *character_value
+) {
+    uint8_t *character = (uint8_t *)character_value;
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+
+    if (!readable_memory(character, 0x138u)) {
+        return (int)LAN_ARENA_AILISH_MODEL_ATTACHMENT_UNKNOWN;
+    }
+    component = *(uint8_t **)(character + AILISH_RANGED_COMPONENT_OFFSET);
+    arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+    return (int)ailish_model_attachment_state(
+        character, component, arbiter, position, NULL);
+}
+
+BOOL SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+    void *character
+) {
+    return SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+        character) == (int)LAN_ARENA_AILISH_MODEL_ATTACHMENT_OPPOSITE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaTestWeaponParentMatchesPosition(
+    void *weapon,
+    void *position
+) {
+    return weapon_primary_parent_matches_position(
+        (uint8_t *)weapon, (uint8_t *)position);
+}
+
+static BOOL test_ailish_weapon_mutation_anchors(
+    void *character_value,
+    uint8_t **component_result,
+    uint8_t **arbiter_result,
+    uint8_t **position_result,
+    uint8_t **weapon_result,
+    uint8_t **active_model_result,
+    uint8_t **active_owner_result,
+    LanArenaAilishModelWitness *model_result
+) {
+    uint8_t *character = (uint8_t *)character_value;
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    uint8_t *weapon;
+    uint8_t *active_model;
+    uint8_t *active_owner;
+
+    if (component_result == NULL || arbiter_result == NULL ||
+        position_result == NULL || weapon_result == NULL ||
+        active_model_result == NULL || active_owner_result == NULL ||
+        model_result == NULL || !readable_memory(character, 0x138u)) {
+        return FALSE;
+    }
+    component = *(uint8_t **)(
+        character + AILISH_RANGED_COMPONENT_OFFSET);
+    arbiter = *(uint8_t **)(character + CHARACTER_ARBITER_OFFSET);
+    position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
+    weapon = *(uint8_t **)(character + CHARACTER_WEAPON_OFFSET);
+    if (!readable_memory(weapon, WEAPON_FLAGS_OFFSET + sizeof(uint8_t))) {
+        return FALSE;
+    }
+    active_model = *(uint8_t **)(weapon + WEAPON_ACTIVE_MODEL_OFFSET);
+    if (!readable_memory(active_model, 0x10u)) return FALSE;
+    active_owner = *(uint8_t **)(active_model + 0x0cu);
+    if (!ailish_desired_model_attached(
+            character, component, arbiter, position, model_result) ||
+        !ailish_ranged_pointer_graph_exact(
+            character, component, arbiter, position, weapon,
+            active_model, active_owner)) {
+        return FALSE;
+    }
+    *component_result = component;
+    *arbiter_result = arbiter;
+    *position_result = position;
+    *weapon_result = weapon;
+    *active_model_result = active_model;
+    *active_owner_result = active_owner;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+    void *character_value
+) {
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    uint8_t *weapon;
+    uint8_t *active_model;
+    uint8_t *active_owner;
+    LanArenaAilishModelWitness model;
+    if (!test_ailish_weapon_mutation_anchors(
+            character_value, &component, &arbiter, &position, &weapon,
+            &active_model, &active_owner, &model)) {
+        return FALSE;
+    }
+    return ailish_weapon_reattach_graph_writable(
+        (uint8_t *)character_value, component, arbiter, position, weapon,
+        active_model, active_owner, &model, NULL);
+}
+
+BOOL SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+    void *character_value
+) {
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    uint8_t *weapon;
+    uint8_t *active_model;
+    uint8_t *active_owner;
+    LanArenaAilishModelWitness model;
+    if (!test_ailish_weapon_mutation_anchors(
+            character_value, &component, &arbiter, &position, &weapon,
+            &active_model, &active_owner, &model)) {
+        return FALSE;
+    }
+    return ailish_weapon_visibility_graph_writable(
+        (uint8_t *)character_value, component, arbiter, position, weapon,
+        active_model, active_owner, NULL);
+}
+
+BOOL SudekiMpLanArenaClientReplicaTestRemoteTalReleaseActivationEntryBlocked(
+    void
+) {
+    LONG prior_depth;
+    int prior_actor_index;
+    BOOL blocked;
+
+    if (native_skill_leases[0].native_started ||
+        tal_native_presentation_lease.active) {
+        return FALSE;
+    }
+    prior_actor_index = client_skill_activation_actor_index;
+    client_skill_activation_actor_index = 0;
+    prior_depth = InterlockedExchange(&client_skill_activation_depth, 1);
+    SetLastError(ERROR_SUCCESS);
+    blocked = !SudekiMpLanArenaClientReplicaRemoteTalReleaseReady() &&
+        GetLastError() == ERROR_BUSY;
+    InterlockedExchange(&client_skill_activation_depth, prior_depth);
+    client_skill_activation_actor_index = prior_actor_index;
+    return blocked;
+}
 #endif
 
-static BOOL client_ailish_combat_graph_ready(void) {
-    uint8_t *character = (uint8_t *)
-        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+static BOOL client_ailish_combat_graph_ready(
+    uint8_t *expected_character
+) {
+    uint8_t *character = expected_character;
     uint8_t *component = NULL;
     uint8_t *first_person_wrapper = NULL;
     void *world_renderer = NULL;
@@ -1901,7 +3274,10 @@ static BOOL client_ailish_combat_graph_ready(void) {
     int selector;
     const char *failure = NULL;
 
-    if (!actor_presentation_renderer(
+    if (character == NULL ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character ||
+        !actor_presentation_renderer(
             character, 1u, &world_renderer, &component) ||
         !animation_methods(world_renderer, &methods) ||
         methods.count(world_renderer) == 0u) {
@@ -1961,7 +3337,66 @@ rejected:
         }
         return FALSE;
     }
+    if (SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            character ||
+        *(void **)(character + AILISH_RANGED_COMPONENT_OFFSET) != component ||
+        *(void **)(component + 0x10u) != character ||
+        *(void **)(component + AILISH_FIRST_PERSON_WRAPPER_OFFSET) !=
+            first_person_wrapper ||
+        *(void **)(first_person_wrapper + 0x10u) != first_person_renderer) {
+        failure = "post_graph_identity";
+        goto rejected;
+    }
     client_ailish_combat_graph_failure = NULL;
+    return TRUE;
+}
+
+static BOOL client_ailish_visible_combat_ready(
+    uint8_t *expected_character
+) {
+    uint8_t *component;
+    uint8_t *arbiter;
+    uint8_t *position;
+    uint8_t *weapon = NULL;
+    uint8_t *render_object = NULL;
+    LanArenaAilishModelWitness before_model;
+    LanArenaAilishModelWitness after_model;
+
+    if (expected_character == NULL ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            expected_character ||
+        !readable_memory(expected_character, 0x138u)) {
+        return FALSE;
+    }
+    component = *(uint8_t **)(
+        expected_character + AILISH_RANGED_COMPONENT_OFFSET);
+    arbiter = *(uint8_t **)(expected_character + CHARACTER_ARBITER_OFFSET);
+    position = *(uint8_t **)(expected_character + CHARACTER_POSITION_OFFSET);
+    if (!ailish_desired_model_attached(
+            expected_character, component, arbiter, position, &before_model) ||
+        !client_ailish_combat_graph_ready(expected_character) ||
+        !ailish_weapon_attachment_witness(
+            expected_character, component, &weapon, &render_object, NULL) ||
+        !ailish_desired_model_attached(
+            expected_character, component, arbiter, position, &after_model) ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) !=
+            expected_character ||
+        before_model.position != after_model.position ||
+        before_model.attached_wrapper != after_model.attached_wrapper ||
+        before_model.first_person_wrapper !=
+            after_model.first_person_wrapper ||
+        before_model.saved_world_wrapper != after_model.saved_world_wrapper ||
+        before_model.attached_renderer != after_model.attached_renderer ||
+        before_model.first_person_renderer !=
+            after_model.first_person_renderer ||
+        before_model.saved_world_renderer !=
+            after_model.saved_world_renderer ||
+        before_model.first_person != after_model.first_person ||
+        before_model.fallback_world != after_model.fallback_world ||
+        *(void **)(expected_character + CHARACTER_WEAPON_OFFSET) != weapon ||
+        render_object == NULL) {
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -2238,9 +3673,9 @@ static BOOL service_tal_native_action_presentation(
             SetLastError(ERROR_INVALID_DATA);
             return FALSE;
         }
-        SudekiMpSubmitArbiterCombatInput(
-            game_base + RVA_ARBITER_COMBAT_INPUT,
-            arbiter, weak, strong, sweep, block, 0, 0);
+        /* The native combat-input call may synchronously re-enter lifecycle
+         * observation. Publish the exact drain barrier before dispatch so a
+         * Tal loss cannot release this actor during the call-entry window. */
         lease->character = character;
         lease->arbiter = arbiter;
         lease->renderer = renderer;
@@ -2251,6 +3686,9 @@ static BOOL service_tal_native_action_presentation(
         lease->expected_selector_seen = FALSE;
         lease->timeout_logged = FALSE;
         lease->active = TRUE;
+        SudekiMpSubmitArbiterCombatInput(
+            game_base + RVA_ARBITER_COMBAT_INPUT,
+            arbiter, weak, strong, sweep, block, 0, 0);
         SudekiMpLogFormat(
             "lan_arena_client_replica event=client_tal_native_action "
             "state=submitted sequence=%u variant=%u expected_selector=%d "
@@ -2353,6 +3791,34 @@ static BOOL drain_tal_native_action_lease(void) {
     ZeroMemory(&tal_native_presentation_lease,
         sizeof(tal_native_presentation_lease));
     return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaRemoteTalReleaseReady(void) {
+    /* The native replay entry owns its character before STARTED can publish
+     * the asynchronous CSkill lease below. A reentrant lifecycle observer in
+     * that window must not mistake the empty lease for permission to remove
+     * Tal out from under the call. */
+    if (InterlockedCompareExchange(
+            &client_skill_activation_depth, 0, 0) > 0 ||
+        InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (native_skill_leases[0].native_started) {
+        BOOL observed_active = FALSE;
+        BOOL observed = observe_native_skill_lease(0u, &observed_active);
+        if (!SudekiMpLanArenaClientSkillNativeLeaseMayRetire(
+                native_skill_leases[0].native_started,
+                native_skill_leases[0].active_seen,
+                observed, observed_active) ||
+            !retire_native_skill_lease(0u, "remote_tal_release")) {
+            SetLastError(ERROR_BUSY);
+            return FALSE;
+        }
+    }
+    if (!release_client_spirit_vfx_cache("remote_tal_release")) return FALSE;
+    return drain_tal_native_action_lease();
 }
 
 static BOOL actor_presentation_matches(
@@ -3812,18 +5278,28 @@ static void capture_camera_diagnostics(void) {
 }
 
 static void discard_client_replica_frame_state(void) {
+    /* Retire exact visual clones before releasing their resource caches.
+     * Synchronous native entry defers cleanup to the outer service call;
+     * failed cleanup retains backend leases for retry, never forgetting
+     * observers that native destruction may still touch. */
+    if (InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) == 0) {
+        (void)release_client_spirit_vfx_cache("snapshot_discard");
+    }
     SudekiMpLanArenaReplicaReset(&replica);
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
     spirit_audio_replay_failure_logged = FALSE;
+    reset_client_spirit_vfx_replay(TRUE);
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
         sizeof(ailish_first_person_lease));
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
-    client_ailish_ranged_refresh_attempted = FALSE;
-    client_ailish_weapon_attachment_ready = FALSE;
+    client_combat_transition_pending = FALSE;
+    client_combat_transition_session_token = 0u;
+    reset_client_combat_transition_actor_leases(GetTickCount());
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
     clear_last_applied_frame();
 }
@@ -3859,16 +5335,24 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         !SudekiMpResetLanArenaClientReplica()) {
         return FALSE;
     }
-    /* Keep the new audio-only exact-image dependency separately observable.
-     * No other in-tree LAN hook owns either sound entry, so a mismatch here
-     * is not an expected consequence of campaign, collision, frame, or input
-     * installation and must fail closed before any replica hook is added. */
+    /* Keep the audio and VFX replay dependencies separately observable. No
+     * other LAN hook owns these native entries, so either mismatch must fail
+     * closed before any replica hook is added. */
     if (base != NULL &&
         !SudekiMpLanArenaSpiritAudioReplayImageMatches(game_module)) {
         SudekiMpLogWrite(
             "lan_arena_client_replica event=exact_preflight state=rejected "
             "reason=spirit_audio_replay_signature_mismatch "
             "get_sound_rva=0x000170b0 play_cue_rva=0x00017090\r\n");
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (base != NULL &&
+        !SudekiMpLanArenaSpiritVfxVisualImageMatches(game_module)) {
+        SudekiMpLogWrite(
+            "lan_arena_client_replica event=exact_preflight state=rejected "
+            "reason=spirit_vfx_replay_signature_mismatch "
+            "policy=no_native_sfx_entry_on_unknown_image\r\n");
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -3927,7 +5411,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         SudekiMpLogWrite(
             "lan_arena_client_replica event=exact_preflight state=rejected "
             "reason=non_audio_signature_or_existing_ownership_mismatch "
-            "spirit_audio_replay=exact\r\n");
+            "spirit_audio_replay=exact spirit_vfx_replay=exact\r\n");
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
@@ -3943,6 +5427,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     remote_tal_skill_view_trace_state = -1;
     clear_remote_tal_skill_view_lease();
     InterlockedExchange(&client_skill_activation_depth, 0);
+    InterlockedExchange(&client_spirit_vfx_call_depth, 0);
     client_skill_activation_actor_index = -1;
     client_remote_tal_skill_input_isolation_active = FALSE;
     if (!SudekiMpInstallInlineHook(
@@ -4012,6 +5497,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
     spirit_audio_replay_failure_logged = FALSE;
+    reset_client_spirit_vfx_replay(TRUE);
     SudekiMpLanArenaReplicaRenderClockReset(&replica_render_clock);
     memset(presentation_leases, 0, sizeof(presentation_leases));
     memset(&ailish_first_person_lease, 0,
@@ -4023,8 +5509,12 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
-    client_ailish_ranged_refresh_attempted = FALSE;
-    client_ailish_weapon_attachment_ready = FALSE;
+    client_combat_transition_pending = FALSE;
+    client_combat_transition_target = FALSE;
+    client_combat_transition_session_token = 0u;
+    client_remote_tal_lease_actor = NULL;
+    client_remote_tal_lease_generation = 0u;
+    reset_client_combat_transition_actor_leases(GetTickCount());
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
     clear_last_applied_frame();
     return TRUE;
@@ -4034,10 +5524,19 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
     DWORD restore_error = ERROR_SUCCESS;
 
     if (InterlockedCompareExchange(
-            &client_skill_activation_depth, 0, 0) > 0) {
+            &client_skill_activation_depth, 0, 0) > 0 ||
+        InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) > 0) {
         client_replica_reset_pending = TRUE;
         retain_client_replica_callbacks(
-            "activation_entry_in_flight", ERROR_BUSY);
+            "native_presentation_entry_in_flight", ERROR_BUSY);
+        return FALSE;
+    }
+    if (!release_client_spirit_vfx_cache("replica_reset")) {
+        restore_error = GetLastError();
+        client_replica_reset_pending = TRUE;
+        retain_client_replica_callbacks(
+            "spirit_vfx_cache_release_unconfirmed", restore_error);
         return FALSE;
     }
     client_skill_activation_actor_index = -1;
@@ -4137,6 +5636,7 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
     SudekiMpLanArenaSharedSimulationReset(&replica_simulation);
     SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
     spirit_audio_replay_failure_logged = FALSE;
+    reset_client_spirit_vfx_replay(TRUE);
     set_position = NULL;
     position_world_matrix = NULL;
     ailish_ranged_presentation_refresh = NULL;
@@ -4161,10 +5661,15 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
     client_damage_block_logged = FALSE;
     ailish_first_person_failure = NULL;
     client_ailish_combat_graph_failure = NULL;
-    client_ailish_ranged_refresh_attempted = FALSE;
-    client_ailish_weapon_attachment_ready = FALSE;
+    client_combat_transition_pending = FALSE;
+    client_combat_transition_target = FALSE;
+    client_combat_transition_session_token = 0u;
+    client_remote_tal_lease_actor = NULL;
+    client_remote_tal_lease_generation = 0u;
+    reset_client_combat_transition_actor_leases(0u);
     memset(&replica_diagnostics, 0, sizeof(replica_diagnostics));
     clear_last_applied_frame();
+    InterlockedExchange(&client_spirit_vfx_call_depth, 0);
     SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
@@ -4224,7 +5729,11 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
             &replica_simulation,
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
             status.session_token)) {
+        if (!release_client_spirit_vfx_cache("session_generation_changed")) {
+            return FALSE;
+        }
         SudekiMpLanArenaSpiritAudioCursorReset(&spirit_audio_cursor);
+        reset_client_spirit_vfx_replay(TRUE);
         if (!SudekiMpLanArenaSharedSimulationBegin(
                 &replica_simulation,
                 SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,
@@ -4274,10 +5783,12 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     if (!SudekiMpLanArenaReplicaSample(
             &replica, render_host_tick, &snapshot) ||
         snapshot.match_state != 1u ||
-        !synchronize_client_combat_mode(snapshot.combat_enabled)) {
+        !synchronize_client_combat_mode(
+            snapshot.combat_enabled, status.session_token)) {
         return FALSE;
     }
-    presentation_ready_mask = client_combat_presentation_ready_mask();
+    presentation_ready_mask = client_combat_presentation_ready_mask(
+        status.session_token);
     replica_diagnostics.valid = 0u;
     memset(replica_diagnostics.actor, 0,
         sizeof(replica_diagnostics.actor));
@@ -4396,15 +5907,17 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
     };
     const SudekiMpLanArenaActorSnapshot *snapshots[2];
     uint8_t *characters[2];
+    SudekiMpLanArenaSessionStatus status;
     unsigned int actor_index;
     unsigned int presentation_ready_mask;
     BOOL applied[2] = { FALSE, FALSE };
-    if (!client_session_authenticated() || !replica_diagnostics.valid ||
+    if (!client_session_status(&status) || !replica_diagnostics.valid ||
         last_applied_snapshot.match_state != 1u) {
         SetLastError(ERROR_INVALID_STATE);
         return FALSE;
     }
-    presentation_ready_mask = client_combat_presentation_ready_mask();
+    presentation_ready_mask = client_combat_presentation_ready_mask(
+        status.session_token);
     if (presentation_ready_mask == 0u) {
         return reassert_remote_tal_skill_view();
     }
@@ -4632,6 +6145,122 @@ BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void) {
     }
     SudekiMpLanArenaClientReplicaRefreshDiagnostics();
     return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientSpiritVisualFilterGeneration(
+    SudekiMpLanArenaSnapshot *snapshot, uint16_t skill_floor
+) {
+    unsigned int index, kept = 0u;
+    if (snapshot == NULL || snapshot->spirit_vfx_observed > 1u ||
+        snapshot->spirit_vfx_count > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY ||
+        (!snapshot->spirit_vfx_observed && snapshot->spirit_vfx_count != 0u))
+        return FALSE;
+    if (!snapshot->spirit_vfx_observed) return TRUE;
+    for (index = 0u; index < snapshot->spirit_vfx_count; ++index) {
+        uint16_t sequence = snapshot->spirit_vfx[index].skill_sequence;
+        if (sequence != 0u && (skill_floor == 0u ||
+                (int16_t)(sequence - skill_floor) > 0)) {
+            snapshot->spirit_vfx[kept++] = snapshot->spirit_vfx[index];
+        }
+    }
+    snapshot->spirit_vfx_count = (uint8_t)kept;
+    ZeroMemory(&snapshot->spirit_vfx[kept],
+        (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY - kept) *
+            sizeof(snapshot->spirit_vfx[0]));
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpLanArenaSnapshot visual_frame;
+    const SudekiMpLanArenaActorSnapshot *tal = &last_applied_snapshot.tal;
+    void *expected_tal;
+    uint32_t expected_generation;
+    uint64_t expected_session;
+    BOOL serviced;
+    DWORD error;
+
+    if (InterlockedCompareExchange(
+            &client_spirit_vfx_call_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (client_replica_reset_pending || game_base == NULL ||
+        !client_session_status(&status)) {
+        if (game_base != NULL)
+            (void)release_client_spirit_vfx_cache("authority_lost");
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    /* A failed frame/unknown observation is not an authoritative removal.
+     * The next successfully published frame will service retained clones. */
+    if (!replica_diagnostics.valid) return TRUE;
+    expected_tal = client_remote_tal_lease_actor;
+    expected_generation = client_remote_tal_lease_generation;
+    expected_session = status.session_token;
+    if (!SudekiMpLanArenaClientTalLifecycleLeaseExact(
+            SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL),
+            client_remote_tal_lease_generation,
+            expected_tal, expected_generation) ||
+        last_applied_characters[0] != expected_tal ||
+        tal->actor_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+        tal->native_entity_id != SUDEKIMP_LAN_ARENA_TAL_TYPE) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    if (spirit_vfx_session_token != 0u &&
+        (spirit_vfx_session_token != expected_session ||
+         spirit_vfx_tal_actor != expected_tal ||
+         spirit_vfx_tal_generation != expected_generation)) {
+        if (!release_client_spirit_vfx_cache("visual_actor_generation_changed"))
+            return FALSE;
+        /* Same-session replacement retires old clones, then fences every
+         * effect belonging to the preceding cast. A later authenticated cast
+         * can render normally without transferring old instances to Tal. */
+        spirit_vfx_generation_fenced = TRUE;
+        spirit_vfx_generation_skill_floor = tal->skill_sequence;
+    }
+    /* These clones have no parent/actor renderer dependency. In particular,
+     * Tal's combat readiness must not block an authoritative loop removal. */
+    spirit_vfx_session_token = expected_session;
+    spirit_vfx_tal_actor = expected_tal;
+    spirit_vfx_tal_generation = expected_generation;
+    visual_frame = last_applied_snapshot;
+    if (spirit_vfx_generation_fenced &&
+        !SudekiMpLanArenaClientSpiritVisualFilterGeneration(
+            &visual_frame, spirit_vfx_generation_skill_floor)) return FALSE;
+    InterlockedIncrement(&client_spirit_vfx_call_depth);
+    serviced = SudekiMpLanArenaSpiritVfxServiceVisuals(
+        (HMODULE)game_base, &visual_frame, expected_session);
+    error = serviced ? ERROR_SUCCESS : GetLastError();
+    InterlockedDecrement(&client_spirit_vfx_call_depth);
+    if (client_replica_reset_pending || game_base == NULL ||
+        !client_session_status(&status) || !replica_diagnostics.valid ||
+        status.session_token != expected_session ||
+        client_remote_tal_lease_actor != expected_tal ||
+        client_remote_tal_lease_generation != expected_generation) {
+        /* A reentrant invalidation cannot retire an in-flight native clone.
+         * Complete that obligation now, before admitting another roster. */
+        (void)release_client_spirit_vfx_cache("authority_lost_during_visual_service");
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if (serviced || error == ERROR_IO_PENDING || error == ERROR_NOT_READY) {
+        if (serviced) spirit_vfx_replay_failure_logged = FALSE;
+        return TRUE;
+    }
+    if (!spirit_vfx_replay_failure_logged) {
+        spirit_vfx_replay_failure_logged = TRUE;
+        SudekiMpLogFormat(
+            "lan_arena_client_replica event=spirit_vfx state=roster_rejected "
+            "snapshot_sequence=%lu visual_count=%u win32_error=%lu "
+            "policy=retain_exact_native_leases_without_gameplay_rejection\r\n",
+            (unsigned long)last_applied_snapshot.sequence,
+            (unsigned int)last_applied_snapshot.spirit_vfx_count,
+            (unsigned long)error);
+    }
+    SetLastError(error == ERROR_SUCCESS ? ERROR_INVALID_STATE : error);
+    return FALSE;
 }
 
 void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void) {

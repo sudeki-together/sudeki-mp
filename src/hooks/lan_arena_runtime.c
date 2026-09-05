@@ -15,6 +15,7 @@
 #include "hooks/lan_arena_owner_view.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_spirit_audio.h"
+#include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/noncaster_skill_locomotion.h"
 #include "network/lan_arena_authority.h"
 #include "network/lan_arena_endpoint.h"
@@ -102,6 +103,11 @@ static BOOL host_remote_ailish_owned;
 static BOOL host_ailish_spawn_attempted;
 static BOOL client_remote_tal_owned;
 static BOOL client_tal_spawn_attempted;
+static BOOL client_remote_tal_request_owned;
+static BOOL client_remote_tal_remove_pending;
+static uint32_t client_remote_tal_generation_counter;
+static uint32_t client_remote_tal_active_generation;
+static void *client_remote_tal_generation_actor;
 static BOOL arena_dummy_spawn_attempted;
 static BOOL tal_initialized;
 static BOOL ailish_initialized;
@@ -123,6 +129,55 @@ static BOOL host_previous_actor_position_valid[2];
 static DWORD host_actor_last_translation_at_ms[2];
 static float host_replica_idle_position[2][2];
 static BOOL host_replica_idle_position_valid[2];
+
+static uint32_t advance_client_remote_tal_generation(void) {
+    ++client_remote_tal_generation_counter;
+    if (client_remote_tal_generation_counter == 0u) {
+        ++client_remote_tal_generation_counter;
+    }
+    return client_remote_tal_generation_counter;
+}
+
+static void invalidate_client_remote_tal_generation(const char *reason) {
+    BOOL had_lifecycle = client_remote_tal_generation_actor != NULL ||
+        client_remote_tal_active_generation != 0u;
+    if (!had_lifecycle) return;
+    SudekiMpLanArenaClientReplicaSetRemoteTalLease(NULL, 0u);
+    client_remote_tal_generation_actor = NULL;
+    client_remote_tal_active_generation = 0u;
+    tal_initialized = FALSE;
+    SudekiMpLogFormat(
+        "lan_arena_runtime event=client_tal_lifecycle state=invalidated "
+        "reason=%s policy=release_before_address_reuse\r\n",
+        reason != NULL ? reason : "unspecified");
+}
+
+static BOOL claim_client_remote_tal_generation(void *tal) {
+    uint32_t generation;
+    if (tal == NULL) return FALSE;
+    if (client_remote_tal_generation_actor == tal &&
+        client_remote_tal_active_generation != 0u) {
+        return TRUE;
+    }
+    invalidate_client_remote_tal_generation("actor_identity_changed");
+    generation = advance_client_remote_tal_generation();
+    client_remote_tal_generation_actor = tal;
+    client_remote_tal_active_generation = generation;
+    tal_initialized = FALSE;
+    SudekiMpLanArenaClientReplicaSetRemoteTalLease(tal, generation);
+    return TRUE;
+}
+
+static BOOL client_tal_missing_actor_requires_release(void) {
+    /* SpawnActor is asynchronous. A successful request with no published Tal
+     * yet is pending creation, not a lost actor: clearing its attempt flag and
+     * requesting another spawn can enqueue duplicate group insertions. */
+    return client_remote_tal_owned ||
+        client_remote_tal_request_owned ||
+        client_remote_tal_remove_pending ||
+        client_remote_tal_generation_actor != NULL ||
+        client_remote_tal_active_generation != 0u;
+}
 static BOOL host_actor_was_moving[2];
 static BOOL host_actor_locomotion_moving[2];
 static uint8_t host_ailish_idle_variant_state;
@@ -622,13 +677,23 @@ static void retain_runtime_after_hook_restore_failure(DWORD error) {
 }
 
 static BOOL rollback_host_spirit_audio_trace(void) {
-    DWORD error;
-    if (!SudekiMpLanArenaSpiritAudioTraceInstalled()) return TRUE;
-    if (SudekiMpUninstallLanArenaSpiritAudioTrace()) return TRUE;
-    error = GetLastError();
-    retain_runtime_after_hook_restore_failure(
-        error == ERROR_SUCCESS ? ERROR_WRITE_FAULT : error);
-    return FALSE;
+    DWORD error = ERROR_SUCCESS;
+    /* Both observers are independent restoration obligations. Never clear
+     * either one's callback dependency if its native lease is still live. */
+    if (!SudekiMpLanArenaSpiritVisualHostReset()) {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+    }
+    if (SudekiMpLanArenaSpiritAudioTraceInstalled() &&
+        !SudekiMpUninstallLanArenaSpiritAudioTrace() && error == ERROR_SUCCESS) {
+        error = GetLastError();
+        if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+    }
+    if (error != ERROR_SUCCESS) {
+        retain_runtime_after_hook_restore_failure(error);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL rollback_lan_arena_frame_hooks(void) {
@@ -683,6 +748,37 @@ static BOOL host_spirit_audio_active_witness(
     }
     *native_state = state;
     return state != 0;
+}
+
+static BOOL host_spirit_visual_active_witness(
+    void *context, uint64_t *session_token, uint16_t *skill_sequence,
+    uint32_t *host_tick
+) {
+    SudekiMpLanArenaSessionStatus status;
+    uint16_t sequence;
+    int native_state;
+    if (session_token == NULL || skill_sequence == NULL || host_tick == NULL ||
+        !ailish_initialized ||
+        !host_spirit_audio_active_witness(context, &native_state) ||
+        !SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        status.session_token == 0u ||
+        status.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD ||
+        status.peer_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) return FALSE;
+    sequence = host_actor_skill_sequence[0];
+    if (!host_spirit_previous_active) {
+        /* Native creation may precede the next 20Hz observation. Predict
+         * exactly the same next nonzero sequence host_apply_spirit_state
+         * will allocate, without changing native gameplay in an observer. */
+        ++sequence;
+        if (sequence == 0u) sequence = 1u;
+    }
+    if (sequence == 0u) return FALSE;
+    *session_token = status.session_token;
+    *skill_sequence = sequence;
+    *host_tick = GetTickCount();
+    return TRUE;
 }
 
 static BOOL reset_client_replica_for_teardown(const char *reason) {
@@ -2558,6 +2654,14 @@ static void host_publish_snapshot(DWORD now_ms) {
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
+    /* A partial/failed visual observation is UNKNOWN, not an empty roster.
+     * This optional presentation domain must not stall gameplay snapshots. */
+    if (!SudekiMpLanArenaSpiritVisualHostCapture(status.session_token,
+            snapshot.tal.skill_sequence, now_ms, &snapshot)) {
+        snapshot.spirit_vfx_observed = 0u;
+        snapshot.spirit_vfx_count = 0u;
+        ZeroMemory(snapshot.spirit_vfx, sizeof(snapshot.spirit_vfx));
+    }
     {
         float dummy_position[3];
         float dummy_hp;
@@ -2606,6 +2710,10 @@ static void host_publish_snapshot(DWORD now_ms) {
     memcpy(world_observation.spirit_audio_history,
         snapshot.spirit_audio_history,
         sizeof(world_observation.spirit_audio_history));
+    world_observation.spirit_vfx_observed = snapshot.spirit_vfx_observed;
+    world_observation.spirit_vfx_count = snapshot.spirit_vfx_count;
+    memcpy(world_observation.spirit_vfx, snapshot.spirit_vfx,
+        sizeof(world_observation.spirit_vfx));
     world_observation.native_combat_observed = 1u;
     world_observation.native_resources_observed = 1u;
     world_observation.native_enemies_observed = 1u;
@@ -2699,10 +2807,68 @@ static BOOL release_host_remote_ailish(const char *reason) {
 }
 
 static BOOL release_client_remote_tal(const char *reason) {
-    if (client_remote_tal_owned) {
+    BOOL had_client_tal = client_remote_tal_owned ||
+        client_tal_spawn_attempted ||
+        client_remote_tal_request_owned ||
+        client_remote_tal_remove_pending ||
+        client_remote_tal_generation_actor != NULL ||
+        client_remote_tal_active_generation != 0u;
+    if (client_remote_tal_remove_pending) {
+        if (SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL)) {
+            SetLastError(ERROR_BUSY);
+            return FALSE;
+        }
+        client_remote_tal_remove_pending = FALSE;
+        client_tal_spawn_attempted = FALSE;
+        client_release_pending_logged = FALSE;
+        ZeroMemory(client_actor_presentation_valid,
+            sizeof(client_actor_presentation_valid));
+        SudekiMpLogFormat(
+            "lan_arena_runtime event=client_tal_replica_remove phase=confirmed "
+            "reason=%s policy=positive_native_absence_before_restart\r\n",
+            reason == NULL ? "session_inactive" : reason);
+        return TRUE;
+    }
+    /* SpawnActor publishes its entity asynchronously. Until publication is
+     * positively observed there is nothing native that can be removed, but
+     * the request itself is still live. Retiring its flag would let a later
+     * Join/observer enqueue a duplicate Tal into the native intrusive list. */
+    if (client_tal_spawn_attempted &&
+        !SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL) &&
+        !client_tal_missing_actor_requires_release()) {
+        if (!client_release_pending_logged) {
+            client_release_pending_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=client_tal_replica_release phase=pending "
+                "reason=%s blocker=native_spawn_publication "
+                "policy=retain_spawn_request_and_retry_before_restart\r\n",
+                reason == NULL ? "session_inactive" : reason);
+        }
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    if (had_client_tal &&
+        !SudekiMpLanArenaClientReplicaRemoteTalReleaseReady()) {
+        if (!client_release_pending_logged) {
+            client_release_pending_logged = TRUE;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=client_tal_replica_release phase=pending "
+                "reason=%s blocker=native_presentation_lease "
+                "policy=retain_actor_until_exact_native_retirement\r\n",
+                reason == NULL ? "session_inactive" : reason);
+        }
+        return FALSE;
+    }
+    if (had_client_tal) {
+        /* Revoke presentation before native ownership or allocation can be
+         * released. A later same-address claim receives a fresh generation. */
+        invalidate_client_remote_tal_generation(reason);
+        tal_initialized = FALSE;
+    }
+    if (client_remote_tal_owned || client_remote_tal_request_owned) {
         void *tal = SudekiMpCleanroomEngineActorEntity(
             SUDEKIMP_CLEANROOM_TAL);
-        if (tal != NULL) {
+        if (tal != NULL && client_remote_tal_owned) {
             (void)SudekiMpControlSeparationForceStopCharacter(tal);
         }
         if (!SudekiMpControlSeparationReleasePlayerTwoNow()) {
@@ -2716,6 +2882,7 @@ static BOOL release_client_remote_tal(const char *reason) {
             return FALSE;
         }
         client_remote_tal_owned = FALSE;
+        client_remote_tal_request_owned = FALSE;
         client_replica_stop_state = -1;
         client_release_pending_logged = FALSE;
         SudekiMpLogFormat(
@@ -2723,10 +2890,27 @@ static BOOL release_client_remote_tal(const char *reason) {
             "policy=native_ai_restore_before_replica_discard\r\n",
             reason == NULL ? "session_inactive" : reason);
     }
-    if (client_tal_spawn_attempted &&
-        SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL)) {
-        if (!SudekiMpCleanroomEngineRemoveActor(SUDEKIMP_CLEANROOM_TAL)) {
-            return FALSE;
+    if (client_tal_spawn_attempted) {
+        if (SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL)) {
+            if (!SudekiMpCleanroomEngineRemoveActor(
+                    SUDEKIMP_CLEANROOM_TAL)) {
+                return FALSE;
+            }
+            client_remote_tal_remove_pending = TRUE;
+            if (SudekiMpCleanroomEngineActorPresent(
+                    SUDEKIMP_CLEANROOM_TAL)) {
+                if (!client_release_pending_logged) {
+                    client_release_pending_logged = TRUE;
+                    SudekiMpLogFormat(
+                        "lan_arena_runtime event=client_tal_replica_remove "
+                        "phase=pending reason=%s "
+                        "policy=retain_spawn_lease_until_positive_native_absence\r\n",
+                        reason == NULL ? "session_inactive" : reason);
+                }
+                SetLastError(ERROR_BUSY);
+                return FALSE;
+            }
+            client_remote_tal_remove_pending = FALSE;
         }
     }
     client_tal_spawn_attempted = FALSE;
@@ -2905,14 +3089,26 @@ static void lan_arena_control_update_observer(
         client_replica_discard_logged = FALSE;
         release_host_remote_ailish("client_role");
         SudekiMpLanArenaClientInputService();
+        /* A transient inexact observer pass can begin Tal removal without
+         * ending the authenticated transport. Do not reclaim that still-
+         * published actor while its asynchronous RemovePC request is live. */
+        if (client_remote_tal_remove_pending) {
+            (void)release_client_remote_tal("pending_remove");
+            SudekiMpControlUpdateObserverGateLeave(
+                &lan_arena_control_observer_gate);
+            return;
+        }
         tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
         ailish_actor = SudekiMpCleanroomEngineActorEntity(
             SUDEKIMP_CLEANROOM_AILISH);
         if (tal == NULL) {
-            if (client_remote_tal_owned) {
-                release_client_remote_tal("client_tal_lost");
+            BOOL tal_released = TRUE;
+            if (client_tal_missing_actor_requires_release()) {
+                tal_released =
+                    release_client_remote_tal("client_tal_lost");
             }
-            if (!client_tal_spawn_attempted && ailish_actor != NULL &&
+            if (tal_released && !client_remote_tal_owned &&
+                !client_tal_spawn_attempted && ailish_actor != NULL &&
                 SudekiMpCleanroomEngineActorPosition(
                     SUDEKIMP_CLEANROOM_AILISH, ailish_position)) {
                 tal_position[0] = ailish_position[0] - 1.5f;
@@ -2932,16 +3128,30 @@ static void lan_arena_control_update_observer(
         }
         if (!SudekiMpControlSeparationPlayerTwoActive() ||
             SudekiMpControlSeparationPlayerTwoCharacter() != tal) {
-            (void)SudekiMpControlSeparationRequestPlayerTwoCharacter(tal);
+            if (SudekiMpControlSeparationRequestPlayerTwoCharacter(tal)) {
+                /* RequestPlayerTwoCharacter can succeed one or more frames
+                 * before PlayerTwoActive publishes the exact lease. Track
+                 * that intervening native control reference so teardown must
+                 * release it before removing Tal. */
+                client_remote_tal_request_owned = TRUE;
+            }
+            SudekiMpControlUpdateObserverGateLeave(
+                &lan_arena_control_observer_gate);
+            return;
+        }
+        if (!claim_client_remote_tal_generation(tal)) {
             SudekiMpControlUpdateObserverGateLeave(
                 &lan_arena_control_observer_gate);
             return;
         }
         if (!client_remote_tal_owned) {
             client_remote_tal_owned = TRUE;
-            SudekiMpLogWrite(
+            client_remote_tal_request_owned = TRUE;
+            SudekiMpLogFormat(
                 "lan_arena_runtime event=client_tal_replica_claim state=active "
-                "policy=native_ai_disabled_snapshot_transform_only\r\n");
+                "actor_generation=%lu "
+                "policy=native_ai_disabled_snapshot_transform_only\r\n",
+                (unsigned long)client_remote_tal_active_generation);
         }
         if (!tal_initialized) {
             tal_initialized = SudekiMpCleanroomEngineInitializePartyActor(
@@ -3473,7 +3683,16 @@ static void lan_arena_render_start_entry(void) {
         if (replica_applied) {
             published_before_start =
                 SudekiMpLanArenaClientReplicaPublishVisibleTransforms();
-            if (!published_before_start) publish_error = GetLastError();
+            if (!published_before_start) {
+                publish_error = GetLastError();
+            } else {
+                /* START arrives ahead of the interpolation clock. Fire the
+                 * one-shot only after Tal's matching selector and visible
+                 * transform are installed, still on the proven game-thread
+                 * boundary before native RenderStart. Presentation failure
+                 * never rejects the authenticated replica frame. */
+                (void)SudekiMpLanArenaClientReplicaServiceSpiritVfx();
+            }
         }
     }
     if (runtime_config.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
@@ -3842,10 +4061,12 @@ BOOL SudekiMpInstallLanArenaRuntime(
         return FALSE;
     }
     if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
-        !SudekiMpInstallLanArenaSpiritAudioTrace(
+        (!SudekiMpInstallLanArenaSpiritAudioTrace(
             game_module,
             host_spirit_audio_active_witness,
-            &runtime_config)) {
+            &runtime_config) ||
+         !SudekiMpLanArenaSpiritVisualHostInitialize(game_module,
+            host_spirit_visual_active_witness, &runtime_config))) {
         DWORD error = GetLastError();
         if (!rollback_host_spirit_audio_trace()) return FALSE;
         if (!restore_host_skill_isolation()) {
@@ -4004,6 +4225,11 @@ BOOL SudekiMpInstallLanArenaRuntime(
     host_ailish_spawn_attempted = FALSE;
     client_tal_spawn_attempted = FALSE;
     client_remote_tal_owned = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
+    client_remote_tal_active_generation = 0u;
+    client_remote_tal_generation_actor = NULL;
+    SudekiMpLanArenaClientReplicaSetRemoteTalLease(NULL, 0u);
     arena_dummy_spawn_attempted = FALSE;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
@@ -4148,6 +4374,8 @@ BOOL SudekiMpUninstallLanArenaRuntime(void) {
     host_ailish_spawn_attempted = FALSE;
     client_tal_spawn_attempted = FALSE;
     client_remote_tal_owned = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
     arena_dummy_spawn_attempted = FALSE;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;

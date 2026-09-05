@@ -2,6 +2,7 @@
 #define SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_H
 
 #include <windows.h>
+#include "network/lan_arena_protocol.h"
 #include <stdint.h>
 
 struct SudekiMpLanArenaActorSnapshot;
@@ -108,6 +109,39 @@ BOOL SudekiMpLanArenaClientActorPresentationAllowed(
     BOOL tal_ready,
     BOOL ailish_ready);
 
+/* Once an exact actor/renderer has reached its native transition handoff,
+ * later authenticated presentation may legitimately replace the idle/run
+ * selector with an action or Spirit selector. Preserve that actor-local
+ * readiness while the same identity remains exact; a changed or unreadable
+ * identity revokes it immediately. */
+BOOL SudekiMpLanArenaClientActorTransitionReadinessRetained(
+    BOOL previously_ready,
+    BOOL identity_exact,
+    BOOL currently_observed_ready
+);
+
+/* Runtime-owned lifecycle identity for the client-only Tal replica. Native
+ * object addresses may be reused after a same-session remove/spawn cycle, so
+ * an address tuple alone cannot retain presentation readiness. */
+BOOL SudekiMpLanArenaClientTalLifecycleLeaseExact(
+    void *current_actor,
+    uint32_t current_generation,
+    void *leased_actor,
+    uint32_t leased_generation
+);
+
+/* Published only by the LAN runtime at the exact PlayerTwo claim/release
+ * boundary. A NULL/zero pair invalidates Tal presentation immediately. */
+void SudekiMpLanArenaClientReplicaSetRemoteTalLease(
+    void *actor,
+    uint32_t actor_generation
+);
+/* A Tal actor may not be released/replaced while its client-started native
+ * combat-input transition is still owned or while the synchronous Spirit VFX
+ * entry is on the game-thread stack. This positively drains the exact native
+ * lease or returns ERROR_BUSY without weakening containment. */
+BOOL SudekiMpLanArenaClientReplicaRemoteTalReleaseReady(void);
+
 /* A native Tal combat transition may settle in armed idle or armed run,
  * depending on the host motion snapshot visible when the transition begins.
  * Both are proven combat-bank states and therefore safe handoff points for
@@ -124,6 +158,20 @@ BOOL SudekiMpLanArenaClientCombatTransitionRefreshDue(
     BOOL combat_target,
     BOOL refresh_attempted,
     uint32_t elapsed_ms
+);
+
+enum {
+    SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS = 100u,
+    SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_MAX_ATTEMPTS = 20u
+};
+
+/* The party combat transition and its ranged/UI work are asynchronous. Delay
+ * Ailish's actor-local model/weapon refresh until that native window closes,
+ * then retry at a bounded cadence instead of making one permanently decisive
+ * call during a transient wrapper topology. */
+BOOL SudekiMpLanArenaClientAilishRangedRefreshDue(
+    unsigned int attempt_count,
+    uint32_t elapsed_since_attempt_ms
 );
 
 /* Renderer time setters are stateful, not passive assignments. Reasserting a
@@ -195,8 +243,9 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module);
  * adapters. Used synchronously when transport authority is lost. */
 void SudekiMpLanArenaClientReplicaDiscardSnapshots(void);
 /* Restores the exact-image hooks only after every locally-started native
- * presentation CSkill is positively observed inactive. ERROR_BUSY means the
- * task and damage-containment hook remain owned and the caller must retain the
+ * presentation CSkill is positively observed inactive and no synchronous
+ * Spirit VFX entry remains on the game-thread stack. ERROR_BUSY means the task
+ * and damage-containment hook remain owned and the caller must retain the
  * runtime/DLL and retry; other failures likewise retain all still-live hook
  * dependencies. */
 BOOL SudekiMpResetLanArenaClientReplica(void);
@@ -220,6 +269,16 @@ BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void);
  * boundaries and again as a late visible-transform verification; it consumes
  * no network sample and never runs host-side simulation. */
 BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void);
+/* Services the authenticated, generation-bound host visual roster on the
+ * replica render clock, including bounded resource prewarm and native clone
+ * retirement. Call only at the first pre-RenderStart game-thread boundary
+ * after successful visible-transform publication. Clones are parent-free;
+ * complete roster removals, not actor combat readiness, end their lifetime. */
+BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void);
+/* Pure same-session actor-generation fence. Keeps only effects belonging to
+ * a positively newer cast, preserving UNKNOWN and positive-empty semantics. */
+BOOL SudekiMpLanArenaClientSpiritVisualFilterGeneration(
+    SudekiMpLanArenaSnapshot *snapshot, uint16_t skill_floor);
 /* True only while locally-owned Ailish's host-approved native skill task owns
  * the client process camera. A remote Tal task may run for native effects,
  * but its camera writes are contained by Ailish's dynamic owner-view lease. */
@@ -242,6 +301,11 @@ BOOL SudekiMpLanArenaClientReplicaGetDiagnostics(
 );
 
 #ifdef SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING
+enum {
+    SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_UNKNOWN = 0,
+    SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_DESIRED = 1,
+    SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_OPPOSITE = 2
+};
 /* Direct topology seam for the exact-image regression harness. It exposes no
  * runtime mutation and still exercises the production renderer resolver. */
 BOOL SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
@@ -249,6 +313,44 @@ BOOL SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
     unsigned int actor_index,
     void **renderer_result,
     void **ailish_component_result
+);
+/* Exact test seam for the attached-world/first-person model witness used by
+ * the bounded Ailish combat transition. */
+BOOL SudekiMpLanArenaClientReplicaTestAilishDesiredModelAttached(
+    void *character,
+    void **attached_wrapper_result,
+    void **attached_renderer_result,
+    BOOL *first_person_result,
+    BOOL *fallback_world_result
+);
+/* Read-only admission seam: only OPPOSITE may enter the destructive native
+ * model-switch wrapper; UNKNOWN and DESIRED both reject that mutation. */
+int SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+    void *character
+);
+BOOL SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+    void *character
+);
+/* CPosition's native parent slot is an intrusive link biased four bytes from
+ * the owning position address. */
+BOOL SudekiMpLanArenaClientReplicaTestWeaponParentMatchesPosition(
+    void *weapon,
+    void *position
+);
+/* Read-only seams for the exact native mutation-admission graphs. They do not
+ * invoke WeaponFollow or SetWeaponVisible and intentionally omit only the
+ * runtime cleanroom-actor lookup so isolated fixtures can exercise every
+ * pointer, writability, and callback precondition. */
+BOOL SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+    void *character
+);
+BOOL SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+    void *character
+);
+/* Exercises the otherwise lease-empty reentrant window while native CSkill
+ * activation still owns Tal on the call stack. */
+BOOL SudekiMpLanArenaClientReplicaTestRemoteTalReleaseActivationEntryBlocked(
+    void
 );
 #endif
 

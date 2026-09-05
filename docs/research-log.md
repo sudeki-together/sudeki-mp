@@ -5151,3 +5151,383 @@ top-level configure during its 12-second D3D warmup. The harness now reasserts
 the same compensated product placement after that warmup, logs each final
 window geometry against its intended output, and warns without stealing focus
 if a window remains outside that output.
+
+### 2026-09-04: LAN Spirit client presentation deadlock and recovery
+
+A bounded LA22 Tal-host/Ailish-client trace reproduced a presentation-only
+deadlock. The host completed Tal's Spirit selectors `75 -> 114 -> 17`; the
+client applied `75` and retained its terminal pre-vanish frame. Ailish
+transforms continued advancing, but her renderer remained unavailable. Combat
+telemetry reported Tal ready and Ailish not ready while transport and native
+world time remained healthy. This was log/state evidence, not visual
+acceptance.
+
+Read-only supported-image analysis identified the initiating failure. The
+ranged presentation wrapper at RVA `0x001888f0`, through the model switch at
+RVA `0x00188a90`, resets animation channels before discovering that the desired
+world model is already attached and returning zero. In the observed fallback,
+`component+0x164` is null while `CPosition+0xb4` owns the world wrapper,
+distinct from the first-person wrapper at `component+0x160`. Treating that
+valid fallback as a failed one-shot transition left Ailish T-posed and kept the
+shared readiness gate pending.
+
+The replica now classifies the model topology as desired, opposite, or unknown.
+Desired skips the destructive model switch, opposite permits it only with exact
+writable ownership proof, and unknown fails closed. Native weapon reattachment
+at RVA `0x000d8280` and `SetWeaponVisible` at RVA `0x000d7e30` remain required.
+Admission proves actor/component/arbiter/model backpointers, the primary-parent
+invariant `weapon+0xd4 == position+4`, locator and wrapper identities,
+executable model/callback methods, writable mutation targets, and exact
+postconditions. Recovery is scoped to one combat transition and bounded at 20
+attempts separated by 100 ms.
+
+Tal readiness is independent and survives only while its authenticated session,
+transition, renderer, actor address, and runtime lifecycle generation remain
+exact. Ailish recovery therefore cannot collapse an already valid Tal Spirit
+presentation. Native action and `CSkill` barriers are armed before reentrant
+native entry and drain positively before actor removal. Tal's asynchronous
+spawn, pre-active PlayerTwo request, active generation, and asynchronous remove
+are separate ordered leases; an unpublished spawn or pending removal cannot be
+forgotten, duplicated, or reclaimed.
+
+Automated verification against dirty HEAD `53623a0a2ad4` comprised the PE32
+build, the exact supported-image `SkillTraceImageTest`,
+`LanArenaRuntimeHookTest`, and the LAN protocol, replica, shared-simulation,
+skill-handoff, Spirit-audio, owner-view, session, combo-graph, cleanroom, and
+non-caster locomotion regressions. All passed on 2026-09-04.
+
+Live evidence `LA22-20260904-ffa1abb913d4a1fc-software-logstate` used the
+supported image, `testroom`, Tal/canonical host, Ailish/replica client, and the
+Mesa software backend. After six bounded fail-closed observations while the
+native weapon graph settled, combat reached
+`client_combat_presentation state=ready` with Tal selector `17` and Ailish
+selector `20`; Ailish movement then produced selectors `22,23`. Spirit sequence
+1 produced client transitions `75 -> 114 -> 17`, exactly one authenticated
+`spiritstrike_start` replay, and no retry exhaustion, model-switch rejection,
+timeout, crash, or fatal event. Both game processes remained alive after the
+sequence and the harness subsequently stopped both. The current evidence is in
+`build/mingw32/lan-loopback/host-runtime.log` and
+`build/mingw32/lan-loopback/client-runtime.log`. This is log/state-only
+`CONFIRMED_LIVE`; the raw logs were preserved under local evidence key
+`20260904T160725Z-2-30419`. It does not establish visual appearance, reconnect
+behavior, or native teardown acceptance.
+
+Visual Spirit VFX remain deferred. `CSpiritStrikeManager::FireSoul` owns
+manager state and dynamically selected resources whose collision, damage,
+script, camera, time, and lifecycle behavior is not closed. LA22 adds no raw
+resource identifier or visual-effect event.
+
+### 2026-09-04: LAN Tal opening Spirit VFX preload and replay
+
+Claim: the fixed client opening effect reaches native playback during the
+matching Tal Spirit animation, and the user confirms its rings are visible.
+Classification: `CONFIRMED_STATIC`, `CONFIRMED_TEST`,
+`CONFIRMED_EXACT_IMAGE`, and bounded log/state-only `CONFIRMED_LIVE`.
+Profile/revision: LA22 `testroom`, Tal canonical host and Ailish replica client,
+DXVK, dirty HEAD `53623a0a2ad4`; tested DLL SHA-256
+`9d44b6ae07df0e5c74d7737469f6dfa0440e148edf24d330e77061932937d96e`.
+Supported executable SHA-256 remains
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+The earlier VFX deferral above is narrowed only for `SFXSS250_Initiate`.
+The exact native/resource closure and exclusions are documented in
+`research/signatures/spirit-strike-presentation.md`, under "Fixed opening
+VFX". A separate cursor maps the existing authenticated START journal to this
+fixed finite effect. Replay requires the same session, Tal runtime generation,
+active Spirit sequence, actor-local combat readiness, selector `75` with two
+channels, and successful visible-transform publication before RenderStart.
+Late events are skipped. No resource identifier, native address, camera, damage,
+or new VFX event is added to the protocol.
+
+The first live attempt exposed a preload identity error missed by seam tests.
+The extensionless script name hashes to `0x15fef04d`, which has no backing
+archive entry. Native PreCache at RVA `0x00019540` uses that identifier
+directly; unlike typed graphics loading it does not append `.hom`. The client
+therefore held one reference with neither a pending request nor a loaded
+object, while the animation advanced and the late VFX event was skipped.
+The corrected fixed request is `SFXSS250_Initiate.HOM`, identifier
+`0x3cef3b8f`. Construction rejects any other identifier; the generic resource
+helper and strict loaded-without-pending readiness predicate are unchanged.
+
+One native pre-cache reference is owned per exact manager identity. Replay
+consumes its START on native call entry, even if subsequent observation fails.
+A same-manager unconfirmed post-call release remains `RELEASE_PENDING` and
+must complete before reacquisition; it cannot replay or silently abandon the
+reference. Native effects retain their own resources and retirement ownership.
+
+Verification: the full PE32 build, `LanArenaSpiritVfxTest` against the supported
+image, `SkillTraceImageTest`, and `LanArenaRuntimeHookTest` passed. Focused
+coverage includes wrong basename identifiers, acquired-reference accounting,
+pending/ready/poisoned states, reentrant callbacks, retained release obligations,
+and no replay before successful visible publication. The mapped-image fixture
+also relocates both GetSound and GetSFXManager operands, matching the loader;
+production image validation was not weakened to accommodate that fixture.
+
+Live procedure/result: restart both DXVK instances, enable combat, and observe
+one accepted Tal Spirit sequence. The client logged cache loading then ready,
+one START/pending event, exactly one `spirit_vfx state=fired` at selector `75`,
+cache loading then ready again, and animation recovery `75 -> 114 -> 17`.
+The host's sequence completed. A further operator request during the active
+native Spirit was correctly rejected, not treated as a second cast. A
+non-pausing read-only post-cast observation confirmed the unique cache entry
+`0x3cef3b8f` had loaded storage, no pending request, and reference count one.
+Both game processes remained live; no disconnect, timeout, or crash was observed
+in this bounded sequence.
+
+Evidence snapshot: `20260904-spirit-vfx-hom-aal3VC`, with host runtime SHA-256
+`192fa8401884d777926245bfa3677adab86eb942ef9941fc1a904af0e20c10cf`
+and client runtime SHA-256
+`a507780143e312b4f7fa37e1d78e7205a236f0198655098be456605cfc6f3368`.
+This trace proves native call entry and cache accounting. In the same run the
+user separately confirmed visible client rings, slightly later than the host,
+and reported that the other Spirit effects remain absent. This is bounded
+visual `CONFIRMED_LIVE` for the rings only, not full summon/effect parity.
+Precise timing, repeat casts, effect retirement, disconnect/reconnect, native
+teardown, and two-machine acceptance remain unproved.
+
+Follow-up inspection corrects two preliminary resource claims: the last sound
+cue at frame 40 does not establish the opening clip's duration, and its
+floor/logo/pattern/cylinder mesh inventory does not establish the overhead
+summon. The later variant resources contain the articulated summon mesh.
+The duration field remains unverified. Later resources also include authored
+attack events, visibility events, camera-related nodes, and manager-owned
+moving effects; generic replay of the full Spirit transaction is not admitted.
+
+LA22 currently omits Spirit variant, target/soul identities, and actual effect
+emission timestamps. Its START-only journal requires a newer Spirit sequence
+per entry and consumes only the newest event, so it cannot represent multiple
+phases of one Spirit unchanged. The opening replay waits for the accepted
+snapshot tick on the client render timeline rather than the native emission
+time. These are concrete timing/coverage limits, not transport loss. A future
+host-observed visual event format needs an owner-approved protocol change and
+separate presentation-only resource/lifetime closure before implementation.
+
+### 2026-09-04: owner-approved LA23 Spirit visual roster
+
+Evidence level: `CONFIRMED_STATIC`, `CONFIRMED_TEST`, and
+`CONFIRMED_EXACT_IMAGE`; full visual acceptance remains `UNKNOWN`.
+Profile: experimental LAN arena, canonical Tal host and Ailish replica, exact
+supported executable. Revision: `53623a0a2ad4ace2622f71334c121148552bd172`
+with uncommitted work. The owner approved the breaking protocol change before
+implementation; host gameplay/damage authority is unchanged.
+
+LA23 preserves the START-only audio journal and adds eight bounded 56-byte
+visual records. Each carries instance and cast identity, semantic resource
+kind, native emission tick, position, orientation, scale, and animation phase.
+Maximum encoded snapshot is 1196 bytes within a 1200-byte datagram. No native
+pointers, cache handles, resource names, or gameplay events are transmitted.
+Protocol/shared-state tests cover malformed fields, clock/sequence wrap,
+immutable identity, complete removals, UNKNOWN retention, and session reset.
+
+The host observes the unified native SFX finalizer at RVA `0x18830`, including
+matrix and soul paths outside PlaySfx. Stable intrusive weak nodes use native
+assignment at `0x1750`; native base destruction nulls them before free. A
+32-entry local registry reports UNKNOWN rather than truncating a roster above
+eight. Native sampling follows composed CPosition world matrices and proved
+renderer channel storage. An inactive Spirit baseline is required on a new
+session; joining midway through a cast does not fabricate an empty effect set.
+
+The client now services the visual roster after visible actor publication.
+Matching instances interpolate on the existing render clock; births obey
+emission time and omissions retire at the complete-roster boundary. Missing
+observations do not remove visuals. Parent-free clones avoid native event
+forwarding to actor/gameplay listeners; authored numeric event types require
+separate inspection, recorded in the Spirit presentation signature document.
+Reset retains dependencies on failed retirement/unlink/cache cleanup, and
+native-call barriers protect reentrant actor release. Actor replacement
+fences the preceding cast while allowing a later authenticated cast.
+
+Verification so far: protocol, shared simulation, replica interpolation,
+runtime lifecycle, opening-cache and exact-image suites pass under MinGW/Wine.
+The new host suite additionally executes the exact finalizer hook passthrough,
+logical reset/rebind, weak insertion/unlink and native weak-null destruction
+against isolated fixture objects. These checks do not prove client pixels,
+complete phase coverage, repeated live casts, or two-machine latency. The
+prior live evidence remains rings-only until the LA23 acceptance run.
+
+Commands for the combined check (using a configured isolated Wine prefix and
+the user's supported executable, not a committed game fixture):
+
+```sh
+tools/build-linux.sh
+for test in LanArenaProtocolTest LanArenaSharedSimulationTest LanArenaReplicaTest \
+    LanArenaRuntimeHookTest LanArenaSpiritVisualHostTest LanArenaSpiritVfxTest \
+    SkillTraceImageTest; do
+    wine "build/mingw32/bin/SudekiMP.${test}.exe" '<supported_SUDEKI.exe>' || exit
+done
+```
+
+Expected and observed: all seven selected targets exit zero with PASS/passed;
+this is a selected regression set, not the entire repository test collection.
+
+First LA23 live attempt used DLL SHA-256
+`d0d2cad37dcb3793d78a4a357b020014739e80aaaa1e2e949fac97de33cec915`
+and the existing two-instance DXVK profile. Both peers connected and all eleven
+client cache requests reached ready. Four manual casts were observed: three
+variant-one summon resources (kind 8), then one variant-two resource (kind 9).
+The host roster captured those native lifetimes and later removed them; the
+client logged one successful factory result per instance. This is native-call
+and cache `CONFIRMED_LIVE`, not visual parity.
+
+The run exposed two gaps: host capture missed the other opening/transfer
+resources, and the client rejected synchronization and retirement with error
+13. Non-pausing read-only inspection isolated the latter to an incorrect
+zero-listener assumption: each factory-created effect has one built-in sound
+listener. The owned entity, weak links, resource identity, wrapper/interface,
+model and clip checks otherwise matched. Failed cleanup correctly retained
+the native weak/cache obligations, but repeated casts accumulated visuals.
+The test processes were therefore closed through the scoped harness; this is
+not evidence of successful in-process visual cleanup. The sound-listener
+contract requires correction and a fresh live acceptance run before claiming
+that the effects or retirement are resolved.
+
+First-attempt log hashes: host
+`6e2fc8cfba0fd17a94a46e9705570d122290be45356c35297b9011b8d4700908`;
+client `86d26b0fd077a314f46b80e16098cac35e29d9d672ee144e374dfa11cbbc72be`.
+
+The owner subsequently confirmed that the overhead summon appeared on Ailish's
+client as Tal moved/vanished, but the floor circles/sigil were absent and the
+summon replayed indefinitely after Tal returned. This adds bounded visual
+`CONFIRMED_LIVE` for a client summon, together with confirmed missing-opening
+and retirement failures; it does not prove either variant's complete sequence.
+
+The corrected listener build, DLL SHA-256
+`3952e957ba0fe6b4255531e7d0ac5f0cefdeae1aa737733ae6ce95b6be804b09`,
+passed the same seven selected targets and was launched with matching peers
+on the same DXVK profile. One operator-driven variant-one cast produced one
+client summon spawn and one retirement entry, with no synchronization rejection
+or pending retirement. Non-pausing read-only native inspection then found all
+eight local visual slots and weak observers cleared and the native retirement
+queue empty. This is bounded `CONFIRMED_LIVE` for the corrected native cleanup
+path; user-visible disappearance and repeated-cast acceptance remain separate.
+Closed-run log hashes: host
+`8e3ca18d3f36d6c9b15e53de7118995db51f6c5b785b3dd0724b49b2c13e1ef6`;
+client `172b36003c171c3df28d4e2157dac7d75cada165fe62c68d2b34c021bbd59c84`.
+
+The host still omitted the opening. Bounded finalizer diagnostics identified
+the actual request as `SFXSS900_generic_initate.HOM`, identifier `0x62dcc5a3`
+(the spelling is authored), rather than sample-script resource 250. A second
+unrecognized request was generic hit resource `SFXHT201_Hit_Magic.HOM`,
+identifier `0x94b4876b`; it is not admitted merely because a Spirit cast is
+active. No inactive-cast-witness rejection occurred in this cast. This narrows
+the missing opening to resource coverage, not an observed late state witness.
+
+The fixed retail opening was then admitted as semantic kind 12 without changing
+existing kind numbers or packet layout. Its selected clip has duration 180
+native units and one numeric type-22 sound channel (keys at 0, 7, 45, 55, 80),
+with no type-23 global event or actor/gameplay channel. Full indexed resource
+SHA-256 is `82bdcc5ed28e5e245ff0497ba5319e8af1f93f879bde4f91fcb77d2e37d0f955`.
+Host and client retain fixed local name/hash mappings; no packet-controlled
+asset string is introduced. This is static admission evidence, not yet visual
+proof that the missing rings have returned.
+
+Actual serialized Tal state resources differ from the sample Spirit script:
+charge uses 900, morph-in uses 300, morph-out uses 350, and wait/receive name
+teleport-out/in resources. The observed variant-one cast finalized only the
+900 opening, 300 summon and generic magic hit above. The sample
+250/251/112/800/252/801/802 chain must not be described as a confirmed retail
+cast sequence; neither hypothetical teleport emissions nor unrelated generic
+hits are admitted without their own bounded evidence.
+
+The retail-opening build, DLL SHA-256
+`bfc366e5486b0c8e930afa24220143da4030f7ff14771ae0193aa4dd8ab0090f`,
+passed the same seven selected tests. Three operator-driven live casts ran in
+order: variant one, variant two, variant one again. Each produced one opening
+kind 12 plus one summon (kind 8, 9, 8 respectively). Client instances 1–6 each
+logged exactly one spawn and one retirement, without synchronization rejection
+or pending cleanup. Non-pausing post-cast inspection found cleared client slots
+and an empty native retirement queue after each cast; after the third, the host
+registry and both native queues were also empty. This establishes repeat-cast
+native lifecycle behavior for these two visual components, not pixel/timing
+parity or complete coverage.
+Closed-run log hashes: host
+`76061b3443f74f5cb7fcd4773f53eb9fcfd68ff0eec5aa7808e8c6a9596120f6`;
+client `c6ff06c71a2db2f80aea80c855a6fe23182377b3ebda7fc35df7488f9b80b1b2`.
+
+Variant two additionally emitted a Tal-specific secondary effect through a
+typed extensionless request: `SFXSS351_Tal_Hit_Character`, identifier
+`0x6696ab0a`. Its canonical `.HOM` backing identifier is `0xaeec0c83`.
+Other skipped requests mapped to generic material miss and status-boost
+resources. These observations identify remaining coverage gaps; generic
+effects must not be treated as Spirit-owned solely because the global Spirit
+transaction is active.
+
+The Tal-specific secondary asset was admitted as fixed semantic kind 13 after
+inspection: duration 180, one type-2 sound channel, no type-23 global event or
+gameplay channel. Its full indexed resource SHA-256 is
+`4b317e5009b49a3a0e861d4d0ddaf4c25200b6eea4ac15bc90eb3fdabe8da99a`.
+The combined DLL SHA-256
+`4f16a50502ae81cd32bcb5147f3ef4ba02e46bbf732d88e064ad6884c7119ac6`
+passed the same seven selected tests before the next live run. Typed-name
+normalization accepts only the exact fixed spelling/hash, and native cloning
+uses the canonical backing resource; packet layout and earlier kind IDs remain
+unchanged. Static admission and focused lifecycle tests alone do not establish
+its visible world position or native parent-to-world behavior.
+
+That final build then completed one operator-driven variant-two cast on the
+matching DXVK pair. The host observed opening kind 12, summon kind 9, and two
+kind-13 character-effect instances. The client spawned and retired each of
+those four exactly once, without synchronization rejection or pending cleanup.
+A bounded six-second, non-pausing dual-process inspection after the cast found
+an empty host visual registry, no client-owned visual slots, and both native
+retirement queues empty. This is `CONFIRMED_LIVE` for the bounded observed
+lifecycles, including secondary effects that outlive the Spirit transaction.
+Active pose/phase comparison was not captured, and no new user pixel/timing
+confirmation had been received. Both games were left open for that acceptance.
+
+Remaining generic magic/material hit and boost resources have safe-looking
+clip event inventories, but the present global cast witness does not prove
+their origin. They remain excluded rather than attributing unrelated effects
+to Spirit by timing. Complete VFX coverage, latency quality, movement smoothness,
+and disconnect/reconnect acceptance are not established by these checks.
+
+### Client opening-orb phase rewind investigation
+
+The owner subsequently reported that the attack was largely present, but its
+eight rotating opening orbs were smooth on the host and severely flickered on
+the client. Eight visible orbs is the owner's visual reference, not a count
+inferred from emitter names. The fixed opening asset contains four named torus
+emitter paths, three sphere paths and eight other emitter paths; emitter-node
+count must not be confused with visible particle count.
+
+On the same dirty revision and `4f16a505...` DLL above, non-pausing read-only
+sampling of one user-triggered opening (instance 25) captured 1456 host samples
+over 7.527 seconds and 1459 client samples over 7.542 seconds. Both reported one
+animation submodel with no rejected identity reads. Host absolute phase advanced
+from 0.384 to 179.9999 with 450 observed changes and zero backward steps. Client
+phase advanced overall from 0.384 to 179.8805, but 204 of its 553 observed
+changes went backward, including -0.024 and -0.312 native-unit steps. Existing
+logs showed one opening spawn per cast, not repeated creation. This is
+`CONFIRMED_LIVE` for client clock rewinds; their causal contribution to visible
+flicker is a strong `INFERENCE` pending an A/B visual check.
+
+The adapter had applied the interpolated host phase before RenderStart every
+frame while native effect playback also advanced. The targeted correction now
+allows only forward phase seeks for retail opening kind 12. Equal/older targets
+leave native playback untouched. Other kinds retain their absolute phase and
+loop-wrap behavior. Native identity checks and complete-roster retirement are
+unchanged; this policy neither extends a cast nor authorizes client gameplay.
+Forward-only progress can run slightly ahead of the interpolated host clock,
+so exact phase equality is not claimed and visible end timing still needs
+acceptance.
+
+DLL `4568aaf0ca984fd4d25d69b050c544f18cc01ff0cbadfed4ee2e44889427fc9c`
+passed the same seven selected suites, including new observed-rewind,
+forward-catch-up, repeated-target, native-progress, tail, other-kind-wrap and
+invalid-input policy tests. Graphify was refreshed after the code changes.
+Pre-correction closed-run log hashes: host
+`f1be942a933849b6fcfde06352aef4c07550db44be2b1973e0a6460998b3f4ce`;
+client `864e845eb7597b617705f9eeeefb20b1f0d5b8098ad9fbc0375891902702c901`.
+Corrected live timing and visual acceptance remain pending at this checkpoint.
+
+The subsequent corrected user cast (opening instance 3) captured 1454 host
+samples over 7.512 seconds and 1460 client samples over 7.542 seconds, with
+zero backward phase steps on both peers and no rejected identity reads. Host
+phase ended at 179.9999; client phase ended at 181.9196, consistent with native
+progress continuing until the interpolated host removal. Thus monotonic
+progress is proven, not exact host/client phase equality. The corrected client
+opening and summon each logged one spawn and one retirement without pending
+cleanup or rejection. The owner explicitly confirmed that the eight rotating
+orbs' flicker was resolved. This adds bounded visual `CONFIRMED_LIVE` for the
+client opening correction in this DXVK LAN profile; it does not establish
+generic effect coverage, adverse-network timing or disconnect behavior.

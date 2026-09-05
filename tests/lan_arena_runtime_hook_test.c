@@ -57,12 +57,20 @@ static BOOL campaign_guard_install_result = TRUE;
 static BOOL campaign_guard_uninstall_result = TRUE;
 static BOOL collision_debug_install_result = TRUE;
 static BOOL spirit_audio_install_result = TRUE;
+static BOOL spirit_audio_uninstall_result = TRUE;
 static BOOL spirit_audio_installed;
 static BOOL spirit_audio_physically_installed;
+static BOOL spirit_visual_install_result = TRUE;
+static BOOL spirit_visual_reset_result = TRUE;
+static BOOL spirit_visual_capture_result = TRUE;
+static BOOL spirit_visual_capture_observed;
+static BOOL spirit_visual_install_leaves_lease;
+static BOOL spirit_visual_installed;
 static BOOL host_input_install_result = TRUE;
 static BOOL client_input_install_result = TRUE;
 static BOOL client_replica_initialize_result = TRUE;
 static BOOL client_replica_reset_result = TRUE;
+static BOOL client_tal_release_ready_result = TRUE;
 static BOOL observer_gate_enable_result = TRUE;
 static BOOL observer_register_result = TRUE;
 static BOOL replica_apply_result = TRUE;
@@ -80,8 +88,20 @@ static BOOL host_spirit_options_result = TRUE;
 static BOOL host_spirit_option_available = TRUE;
 static BOOL host_spirit_activation_started = TRUE;
 static BOOL host_tal_controller_lease_exact = TRUE;
+static BOOL session_status_result;
+static SudekiMpLanArenaSessionStatus session_status;
 static BOOL player_two_active;
 static void *player_two_character;
+static BOOL player_two_request_result = TRUE;
+static BOOL player_two_release_result = TRUE;
+static BOOL actor_position_result;
+static BOOL actor_facing_result;
+static BOOL actor_resources_result;
+static BOOL snapshot_send_result;
+static BOOL actor_present_results[SUDEKIMP_CLEANROOM_ACTOR_COUNT];
+static BOOL spawn_actor_result;
+static BOOL remove_actor_result = TRUE;
+static BOOL remove_actor_clears_presence = TRUE;
 static BOOL host_spirit_activation_probe_teardown;
 static BOOL host_spirit_activation_probe_saw_busy;
 static LONG host_spirit_activation_probe_depth;
@@ -110,12 +130,31 @@ static unsigned int replica_initialize_count;
 static unsigned int client_input_uninstall_count;
 static unsigned int host_input_uninstall_count;
 static unsigned int replica_reset_count;
+static unsigned int client_tal_lease_publish_count;
+static unsigned int client_tal_release_ready_count;
+static void *client_tal_published_actor;
+static uint32_t client_tal_published_generation;
+static unsigned int request_player_two_count;
 static unsigned int release_player_two_count;
+static unsigned int spawn_actor_count;
+static unsigned int remove_actor_count;
+static unsigned int initialize_party_actor_count;
+static char client_tal_teardown_events[8];
+static size_t client_tal_teardown_event_count;
 static unsigned int campaign_guard_uninstall_count;
 static unsigned int collision_debug_uninstall_count;
 static unsigned int spirit_audio_install_count;
 static unsigned int spirit_audio_uninstall_count;
 static unsigned int spirit_audio_physical_patch_count;
+static unsigned int spirit_visual_install_count;
+static unsigned int spirit_visual_reset_count;
+static unsigned int spirit_visual_capture_count;
+static unsigned int snapshot_send_count;
+static SudekiMpLanArenaSnapshot last_sent_snapshot;
+static SudekiMpLanArenaSpiritVisualHostWitness spirit_visual_witness;
+static void *spirit_visual_witness_context;
+static char spirit_observer_teardown_events[16];
+static size_t spirit_observer_teardown_event_count;
 static SudekiMpLanArenaSpiritActiveWitness spirit_audio_witness;
 static void *spirit_audio_witness_context;
 static SudekiMpLanArenaSpiritAudioEvent spirit_audio_events[
@@ -140,16 +179,39 @@ static void record_callback_event(char event) {
     }
 }
 
+static void record_client_tal_teardown_event(char event) {
+    if (client_tal_teardown_event_count + 1u <
+            sizeof(client_tal_teardown_events)) {
+        client_tal_teardown_events[client_tal_teardown_event_count++] = event;
+        client_tal_teardown_events[client_tal_teardown_event_count] = '\0';
+    }
+}
+
+static void record_spirit_observer_teardown(char event) {
+    if (spirit_observer_teardown_event_count + 1u <
+            sizeof(spirit_observer_teardown_events)) {
+        spirit_observer_teardown_events[spirit_observer_teardown_event_count++] = event;
+        spirit_observer_teardown_events[spirit_observer_teardown_event_count] = '\0';
+    }
+}
+
 static void reset_stub_policy(void) {
     session_start_result = TRUE;
     campaign_guard_install_result = TRUE;
     campaign_guard_uninstall_result = TRUE;
     collision_debug_install_result = TRUE;
     spirit_audio_install_result = TRUE;
+    spirit_audio_uninstall_result = TRUE;
+    spirit_visual_install_result = TRUE;
+    spirit_visual_reset_result = TRUE;
+    spirit_visual_capture_result = TRUE;
+    spirit_visual_capture_observed = FALSE;
+    spirit_visual_install_leaves_lease = FALSE;
     host_input_install_result = TRUE;
     client_input_install_result = TRUE;
     client_replica_initialize_result = TRUE;
     client_replica_reset_result = TRUE;
+    client_tal_release_ready_result = TRUE;
     observer_gate_enable_result = TRUE;
     observer_register_result = TRUE;
     replica_apply_result = TRUE;
@@ -167,8 +229,20 @@ static void reset_stub_policy(void) {
     host_spirit_option_available = TRUE;
     host_spirit_activation_started = TRUE;
     host_tal_controller_lease_exact = TRUE;
+    session_status_result = FALSE;
+    memset(&session_status, 0, sizeof(session_status));
     player_two_active = FALSE;
     player_two_character = NULL;
+    player_two_request_result = TRUE;
+    player_two_release_result = TRUE;
+    actor_position_result = FALSE;
+    actor_facing_result = FALSE;
+    actor_resources_result = FALSE;
+    snapshot_send_result = FALSE;
+    memset(actor_present_results, 0, sizeof(actor_present_results));
+    spawn_actor_result = FALSE;
+    remove_actor_result = TRUE;
+    remove_actor_clears_presence = TRUE;
     host_spirit_activation_probe_teardown = FALSE;
     host_spirit_activation_probe_saw_busy = FALSE;
     host_spirit_activation_probe_depth = 0;
@@ -193,11 +267,28 @@ static void reset_stub_counts(void) {
     client_input_uninstall_count = 0u;
     host_input_uninstall_count = 0u;
     replica_reset_count = 0u;
+    client_tal_lease_publish_count = 0u;
+    client_tal_release_ready_count = 0u;
+    client_tal_published_actor = NULL;
+    client_tal_published_generation = 0u;
+    request_player_two_count = 0u;
     release_player_two_count = 0u;
+    spawn_actor_count = 0u;
+    remove_actor_count = 0u;
+    initialize_party_actor_count = 0u;
+    client_tal_teardown_event_count = 0u;
+    client_tal_teardown_events[0] = '\0';
     campaign_guard_uninstall_count = 0u;
     collision_debug_uninstall_count = 0u;
     spirit_audio_install_count = 0u;
     spirit_audio_uninstall_count = 0u;
+    spirit_visual_install_count = 0u;
+    spirit_visual_reset_count = 0u;
+    spirit_visual_capture_count = 0u;
+    snapshot_send_count = 0u;
+    memset(&last_sent_snapshot, 0, sizeof(last_sent_snapshot));
+    spirit_observer_teardown_event_count = 0u;
+    spirit_observer_teardown_events[0] = '\0';
     player_two_skill_isolation_call_count = 0u;
     ranged_combat_prime_call_count = 0u;
     maintain_resources_call_count = 0u;
@@ -292,6 +383,8 @@ static void verify_client_install_and_uninstall(uint8_t *image) {
         "client redirects frame-end call");
     check(spirit_audio_install_count == 0u && !spirit_audio_installed,
         "client profile never installs the host-only Spirit audio trace");
+    check(spirit_visual_install_count == 0u && !spirit_visual_installed,
+        "client profile never installs the host-only Spirit visual observer");
 
     SudekiMpUninstallLanArenaRuntime();
     check(!SudekiMpLanArenaRuntimeInstalled(),
@@ -343,6 +436,10 @@ static void verify_host_hook_scope(uint8_t *image) {
           spirit_audio_witness == host_spirit_audio_active_witness &&
           spirit_audio_witness_context == &runtime_config,
         "host runtime installs the exact Spirit-active PlayCue witness");
+    check(spirit_visual_install_count == 1u && spirit_visual_installed &&
+          spirit_visual_witness == host_spirit_visual_active_witness &&
+          spirit_visual_witness_context == &runtime_config,
+        "host runtime installs the exact Spirit visual sequence witness");
     tal_initialized = TRUE;
     spirit_presentation_state = 4;
     {
@@ -373,6 +470,8 @@ static void verify_host_hook_scope(uint8_t *image) {
         "host input teardown releases the native skill-start observer");
     check(!spirit_audio_installed && spirit_audio_uninstall_count == 1u,
         "host uninstall restores the Spirit PlayCue trace exactly once");
+    check(!spirit_visual_installed,
+        "host uninstall releases the Spirit visual observer");
 }
 
 static void verify_host_spirit_audio_rollback(uint8_t *image) {
@@ -454,6 +553,144 @@ static void verify_host_spirit_audio_rollback(uint8_t *image) {
         "host rebind does not install a second physical PlayCue patch");
     check(SudekiMpUninstallLanArenaRuntime(),
         "rebound host runtime unbinds cleanly");
+    reset_stub_policy();
+}
+
+static void verify_host_spirit_visual_rollback(uint8_t *image) {
+    SudekiMpLanArenaSessionConfig config = make_config(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    spirit_visual_install_result = FALSE;
+    check(!SudekiMpInstallLanArenaRuntime((HMODULE)image, &config) &&
+          GetLastError() == ERROR_BAD_FORMAT,
+        "visual observer preflight failure preserves its install error");
+    check(spirit_audio_install_count == 1u &&
+          spirit_audio_uninstall_count == 1u &&
+          spirit_visual_install_count == 1u && spirit_visual_reset_count == 1u &&
+          !spirit_audio_installed && !spirit_visual_installed,
+        "failed visual install resets partial visual state and unbinds prior audio");
+    check(call_target(image, TEST_RVA_RENDER_START_CALL) ==
+              image + TEST_RVA_RENDER_START &&
+          call_target(image, TEST_RVA_FRAME_END_CALL) ==
+              image + TEST_RVA_FRAME_END,
+        "visual preflight rollback restores earlier runtime callsites");
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    spirit_visual_install_result = FALSE;
+    spirit_visual_install_leaves_lease = TRUE;
+    spirit_visual_reset_result = FALSE;
+    check(!SudekiMpInstallLanArenaRuntime((HMODULE)image, &config) &&
+          GetLastError() == ERROR_BUSY,
+        "visual partial-install reset failure supersedes the install error");
+    check(spirit_visual_installed && !spirit_audio_installed &&
+          spirit_audio_uninstall_count == 1u &&
+          strcmp(spirit_observer_teardown_events, "VA") == 0 &&
+          original_render_start != NULL && original_frame_end != NULL &&
+          call_target(image, TEST_RVA_RENDER_START_CALL) !=
+              image + TEST_RVA_RENDER_START,
+        "visual rollback failure still attempts audio and retains live dependencies");
+    spirit_visual_reset_result = TRUE;
+    spirit_visual_install_result = TRUE;
+    check(SudekiMpUninstallLanArenaRuntime() && !spirit_visual_installed,
+        "public uninstall retries retained partial visual installation");
+
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "host installs before independent observer restoration failures");
+    spirit_visual_reset_result = FALSE;
+    spirit_audio_uninstall_result = FALSE;
+    check(!SudekiMpUninstallLanArenaRuntime() && GetLastError() == ERROR_BUSY,
+        "combined observer teardown preserves the first visual reset failure");
+    check(spirit_visual_reset_count == 1u && spirit_audio_uninstall_count == 1u &&
+          spirit_visual_installed && spirit_audio_installed &&
+          strcmp(spirit_observer_teardown_events, "VA") == 0 &&
+          SudekiMpLanArenaRuntimeInstalled() && original_render_start != NULL,
+        "both independent observer restorations run before runtime quarantine");
+    spirit_visual_reset_result = TRUE;
+    check(!SudekiMpUninstallLanArenaRuntime() &&
+          GetLastError() == ERROR_WRITE_FAULT &&
+          !spirit_visual_installed && spirit_audio_installed,
+        "retry releases visual ownership but preserves failed audio ownership");
+    spirit_audio_uninstall_result = TRUE;
+    check(SudekiMpUninstallLanArenaRuntime() &&
+          !spirit_visual_installed && !spirit_audio_installed &&
+          !SudekiMpLanArenaRuntimeInstalled(),
+        "final observer retry completes runtime teardown");
+    reset_stub_policy();
+}
+
+static void verify_host_visual_witness_and_capture(uint8_t *image) {
+    static uint8_t tal_character;
+    static uint8_t ailish_character;
+    SudekiMpLanArenaSessionConfig config = make_config(
+        SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+    uint64_t token = 0u;
+    uint16_t skill = 0u;
+    uint32_t tick = 0u;
+    SudekiMpLanArenaSpiritVfxSnapshot empty[SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
+    prepare_native_calls(image);
+    reset_stub_policy();
+    reset_stub_counts();
+    check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+        "host installs before visual witness and optional capture checks");
+    session_status_result = TRUE;
+    session_status.peer_connected = TRUE;
+    session_status.local_role = SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    session_status.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    session_status.peer_simulation_node_role = SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    session_status.session_token = 456u;
+    tal_initialized = TRUE;
+    ailish_initialized = TRUE;
+    spirit_presentation_state = 4;
+    host_actor_skill_sequence[0] = UINT16_MAX;
+    host_spirit_previous_active = FALSE;
+    check(spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick) &&
+          token == 456u && skill == 1u && host_actor_skill_sequence[0] == UINT16_MAX,
+        "visual witness predicts the next nonzero Spirit sequence without mutation");
+    host_actor_skill_sequence[0] = 7u;
+    host_spirit_previous_active = TRUE;
+    check(spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick) &&
+          skill == 7u,
+        "visual witness preserves the current observed Spirit sequence");
+    session_status.peer_connected = FALSE;
+    check(!spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick),
+        "visual witness rejects disconnected authority");
+    session_status.peer_connected = TRUE;
+    spirit_presentation_state = 0;
+    check(!spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick),
+        "visual witness rejects an inactive native Spirit");
+    tal_initialized = FALSE;
+    ailish_initialized = FALSE;
+    reset_host_skill_tracking();
+    actor_position_result = actor_facing_result = actor_resources_result = TRUE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] = &ailish_character;
+    snapshot_send_result = TRUE;
+    spirit_visual_capture_result = FALSE;
+    host_last_snapshot_at_ms = 0u;
+    host_publish_snapshot(1000u);
+    memset(empty, 0, sizeof(empty));
+    check(spirit_visual_capture_count == 1u && snapshot_send_count == 1u &&
+          last_sent_snapshot.spirit_vfx_observed == 0u &&
+          last_sent_snapshot.spirit_vfx_count == 0u &&
+          memcmp(last_sent_snapshot.spirit_vfx, empty, sizeof(empty)) == 0,
+        "failed partially written visual sample becomes UNKNOWN without blocking gameplay");
+    spirit_visual_capture_result = TRUE;
+    spirit_visual_capture_observed = TRUE;
+    host_publish_snapshot(1050u);
+    check(spirit_visual_capture_count == 2u && snapshot_send_count == 2u &&
+          last_sent_snapshot.spirit_vfx_observed == 1u &&
+          last_sent_snapshot.spirit_vfx_count == 0u,
+        "complete empty visual roster reaches the canonical snapshot as positive removal");
+    check(SudekiMpUninstallLanArenaRuntime(),
+        "visual witness/capture fixture tears down cleanly");
     reset_stub_policy();
 }
 
@@ -652,14 +889,30 @@ static void verify_callback_order(void) {
     replica_apply_result = TRUE;
     visible_publish_result = TRUE;
     lan_arena_render_start_entry();
-    check(strcmp(callback_events, "APRVSCP") == 0,
-        "first render orders native owner refresh before remote reassert");
+    check(strcmp(callback_events, "APXRVSCP") == 0,
+        "first render orders visible Spirit VFX before native render and remote reassert");
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
     lan_arena_render_pre_world_entry();
     check(strcmp(callback_events, "RSCP") == 0,
         "pre-world reasserts first-render basis without second refresh");
+
+    callback_event_count = 0u;
+    callback_events[0] = '\0';
+    visible_publish_result = FALSE;
+    lan_arena_render_start_entry();
+    check(strcmp(callback_events, "APRVSCP") == 0,
+        "failed visible publication skips Spirit VFX admission");
+    visible_publish_result = TRUE;
+
+    callback_event_count = 0u;
+    callback_events[0] = '\0';
+    replica_apply_result = FALSE;
+    lan_arena_render_start_entry();
+    check(strcmp(callback_events, "ARVC") == 0,
+        "unapplied replica frame skips publication and Spirit VFX admission");
+    replica_apply_result = TRUE;
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -673,6 +926,248 @@ static void verify_callback_order(void) {
     original_frame_end = NULL;
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
+}
+
+static void verify_client_tal_lifecycle_generation(void) {
+    static uint8_t tal_character;
+    uint32_t first_generation;
+    uint32_t rearmed_generation;
+    unsigned int publish_count;
+
+    client_remote_tal_owned = FALSE;
+    client_tal_spawn_attempted = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
+    client_remote_tal_generation_counter = 0u;
+    client_remote_tal_active_generation = 0u;
+    client_remote_tal_generation_actor = NULL;
+    client_tal_release_ready_result = TRUE;
+    client_tal_lease_publish_count = 0u;
+    client_tal_published_actor = NULL;
+    client_tal_published_generation = 0u;
+    tal_initialized = TRUE;
+
+    client_tal_spawn_attempted = TRUE;
+    check(!client_tal_missing_actor_requires_release(),
+        "pending asynchronous Tal spawn is not misclassified as actor loss");
+    client_remote_tal_owned = TRUE;
+    check(client_tal_missing_actor_requires_release(),
+        "owned missing Tal requires lifecycle release");
+    client_remote_tal_owned = FALSE;
+    client_tal_spawn_attempted = FALSE;
+
+    check(claim_client_remote_tal_generation(&tal_character) &&
+          client_remote_tal_active_generation != 0u &&
+          client_tal_published_actor == &tal_character &&
+          client_tal_published_generation ==
+              client_remote_tal_active_generation &&
+          !tal_initialized,
+        "Tal claim publishes a nonzero runtime lifecycle generation");
+    first_generation = client_remote_tal_active_generation;
+    publish_count = client_tal_lease_publish_count;
+    tal_initialized = TRUE;
+    check(claim_client_remote_tal_generation(&tal_character) &&
+          client_remote_tal_active_generation == first_generation &&
+          client_tal_lease_publish_count == publish_count &&
+          tal_initialized,
+        "repeated exact Tal claim preserves one lifecycle generation");
+
+    invalidate_client_remote_tal_generation("test_loss");
+    check(client_remote_tal_active_generation == 0u &&
+          client_remote_tal_generation_actor == NULL &&
+          client_tal_published_actor == NULL &&
+          client_tal_published_generation == 0u &&
+          !tal_initialized,
+        "Tal loss invalidates presentation before address reuse");
+    check(claim_client_remote_tal_generation(&tal_character) &&
+          client_remote_tal_active_generation != first_generation,
+        "same-address Tal replacement receives a fresh generation");
+
+    invalidate_client_remote_tal_generation("test_wrap");
+    client_remote_tal_generation_counter = UINT32_MAX;
+    check(claim_client_remote_tal_generation(&tal_character) &&
+          client_remote_tal_active_generation == 1u,
+        "Tal lifecycle generation skips zero on wrap");
+
+    first_generation = client_remote_tal_active_generation;
+    client_remote_tal_owned = TRUE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    player_two_release_result = FALSE;
+    check(!release_client_remote_tal("test_native_release_retry") &&
+          client_remote_tal_owned &&
+          client_remote_tal_active_generation == 0u &&
+          client_tal_published_actor == NULL,
+        "failed native Tal release keeps ownership but revokes presentation");
+    check(claim_client_remote_tal_generation(&tal_character) &&
+          client_remote_tal_active_generation != first_generation &&
+          client_tal_published_actor == &tal_character,
+        "an exact retained PlayerTwo claim rearms a revoked Tal generation");
+    rearmed_generation = client_remote_tal_active_generation;
+
+    tal_initialized = TRUE;
+    client_tal_release_ready_result = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    check(!release_client_remote_tal("test_busy") &&
+          GetLastError() == ERROR_BUSY &&
+          client_remote_tal_active_generation == rearmed_generation &&
+          tal_initialized,
+        "busy native presentation defers Tal lifecycle invalidation");
+    client_tal_release_ready_result = TRUE;
+    player_two_release_result = TRUE;
+    check(release_client_remote_tal("test_release") &&
+          client_remote_tal_active_generation == 0u &&
+          !tal_initialized,
+        "confirmed Tal release invalidates generation and initialization");
+
+    tal_initialized = TRUE;
+    check(release_client_remote_tal("host_role") && tal_initialized,
+        "no-client Tal release leaves host initialization unchanged");
+}
+
+static void verify_client_tal_pending_request_teardown(void) {
+    static uint8_t tal_character;
+    static uint8_t ailish_character;
+    SudekiMpControlUpdateDispatchWitness witness;
+
+    reset_stub_policy();
+    reset_stub_counts();
+    memset(&witness, 0, sizeof(witness));
+    runtime_config.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status_result = TRUE;
+    session_status.peer_connected = TRUE;
+    session_status.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    session_status.peer_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH] =
+        &ailish_character;
+    actor_position_result = TRUE;
+    spawn_actor_result = TRUE;
+    client_remote_tal_owned = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
+    client_tal_spawn_attempted = FALSE;
+    client_remote_tal_generation_actor = NULL;
+    client_remote_tal_active_generation = 0u;
+    client_release_pending_logged = FALSE;
+
+    lan_arena_control_update_observer(NULL, NULL, &witness);
+    check(client_tal_spawn_attempted && spawn_actor_count == 1u &&
+          cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] == NULL &&
+          !client_remote_tal_request_owned,
+        "accepted asynchronous Tal spawn remains pending before publication");
+
+    SetLastError(ERROR_SUCCESS);
+    check(!release_client_remote_tal("test_spawn_publication_pending") &&
+          GetLastError() == ERROR_BUSY && client_tal_spawn_attempted &&
+          spawn_actor_count == 1u && release_player_two_count == 0u &&
+          remove_actor_count == 0u,
+        "unpublished Tal spawn blocks release without clearing its request");
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    actor_present_results[SUDEKIMP_CLEANROOM_TAL] = TRUE;
+    check(release_client_remote_tal("test_spawn_published") &&
+          !client_tal_spawn_attempted &&
+          !client_remote_tal_remove_pending && remove_actor_count == 1u &&
+          release_player_two_count == 0u &&
+          cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] == NULL &&
+          strcmp(client_tal_teardown_events, "R") == 0,
+        "published pending Tal spawn permits immediate confirmed removal");
+
+    reset_stub_policy();
+    reset_stub_counts();
+    runtime_config.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status_result = TRUE;
+    session_status.peer_connected = TRUE;
+    session_status.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    session_status.peer_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    client_tal_spawn_attempted = TRUE;
+    client_remote_tal_owned = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
+    client_remote_tal_generation_actor = NULL;
+    client_remote_tal_active_generation = 0u;
+    client_release_pending_logged = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    actor_present_results[SUDEKIMP_CLEANROOM_TAL] = TRUE;
+    remove_actor_clears_presence = FALSE;
+
+    SetLastError(ERROR_SUCCESS);
+    check(!release_client_remote_tal("test_remove_disappearance_pending") &&
+          GetLastError() == ERROR_BUSY && client_tal_spawn_attempted &&
+          client_remote_tal_remove_pending && remove_actor_count == 1u &&
+          strcmp(client_tal_teardown_events, "R") == 0,
+        "successful Tal remove request waits for positive native disappearance");
+
+    SetLastError(ERROR_SUCCESS);
+    lan_arena_control_update_observer(NULL, NULL, &witness);
+    check(GetLastError() == ERROR_BUSY && client_tal_spawn_attempted &&
+          client_remote_tal_remove_pending && remove_actor_count == 1u &&
+          request_player_two_count == 0u &&
+          client_tal_lease_publish_count == 0u &&
+          initialize_party_actor_count == 0u && spawn_actor_count == 0u &&
+          strcmp(client_tal_teardown_events, "R") == 0,
+        "authenticated observer services pending removal without reclaiming Tal");
+
+    actor_present_results[SUDEKIMP_CLEANROOM_TAL] = FALSE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+    check(release_client_remote_tal("test_remove_disappeared") &&
+          !client_tal_spawn_attempted &&
+          !client_remote_tal_remove_pending && remove_actor_count == 1u &&
+          strcmp(client_tal_teardown_events, "R") == 0,
+        "positive Tal disappearance retires pending spawn and remove state");
+
+    reset_stub_policy();
+    reset_stub_counts();
+    runtime_config.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status_result = TRUE;
+    session_status.peer_connected = TRUE;
+    session_status.local_role = SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    session_status.local_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+    session_status.peer_simulation_node_role =
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = &tal_character;
+    actor_present_results[SUDEKIMP_CLEANROOM_TAL] = TRUE;
+    client_tal_spawn_attempted = TRUE;
+    client_remote_tal_owned = FALSE;
+    client_remote_tal_request_owned = FALSE;
+    client_remote_tal_remove_pending = FALSE;
+    client_remote_tal_generation_actor = NULL;
+    client_remote_tal_active_generation = 0u;
+    client_release_pending_logged = FALSE;
+    player_two_active = FALSE;
+    player_two_character = NULL;
+    player_two_request_result = TRUE;
+
+    lan_arena_control_update_observer(NULL, NULL, &witness);
+    check(request_player_two_count == 1u &&
+          client_remote_tal_request_owned &&
+          !client_remote_tal_owned &&
+          client_remote_tal_active_generation == 0u,
+        "accepted pre-publication PlayerTwo request acquires teardown ownership");
+
+    player_two_release_result = FALSE;
+    check(!release_client_remote_tal("test_player_two_request_pending") &&
+          client_remote_tal_request_owned && client_tal_spawn_attempted &&
+          release_player_two_count == 1u && remove_actor_count == 0u &&
+          strcmp(client_tal_teardown_events, "L") == 0,
+        "failed pre-publication PlayerTwo release retains request before actor removal");
+
+    player_two_release_result = TRUE;
+    check(release_client_remote_tal("test_player_two_request_released") &&
+          !client_remote_tal_request_owned &&
+          !client_remote_tal_owned && !client_tal_spawn_attempted &&
+          !client_remote_tal_remove_pending &&
+          release_player_two_count == 2u && remove_actor_count == 1u &&
+          strcmp(client_tal_teardown_events, "LLR") == 0,
+        "confirmed pre-publication PlayerTwo release precedes Tal removal");
+    reset_stub_policy();
+    reset_stub_counts();
 }
 
 static void verify_host_spirit_lifecycle(void) {
@@ -2017,11 +2512,15 @@ int main(void) {
     verify_client_install_and_uninstall(image);
     verify_host_hook_scope(image);
     verify_host_spirit_audio_rollback(image);
+    verify_host_spirit_visual_rollback(image);
+    verify_host_visual_witness_and_capture(image);
     verify_second_render_mismatch_rollback(image);
     verify_downstream_failure_rollback(image);
     verify_campaign_guard_teardown_containment(image);
     verify_client_busy_reset_containment(image);
     verify_callback_order();
+    verify_client_tal_lifecycle_generation();
+    verify_client_tal_pending_request_teardown();
     verify_host_spirit_lifecycle();
     verify_host_spirit_audio_semantic_journal();
     verify_host_spirit_operator_two_phase();
@@ -2109,8 +2608,14 @@ void SudekiMpLanArenaSessionPoll(uint32_t now_ms) {
 }
 
 BOOL SudekiMpLanArenaSessionGetStatus(SudekiMpLanArenaSessionStatus *status) {
-    if (status != NULL) memset(status, 0, sizeof(*status));
-    return FALSE;
+    if (status != NULL) {
+        if (session_status_result) {
+            *status = session_status;
+        } else {
+            memset(status, 0, sizeof(*status));
+        }
+    }
+    return session_status_result;
 }
 
 BOOL SudekiMpLanArenaSessionTakeRemoteInput(SudekiMpLanArenaInput *input) {
@@ -2121,8 +2626,9 @@ BOOL SudekiMpLanArenaSessionTakeRemoteInput(SudekiMpLanArenaInput *input) {
 BOOL SudekiMpLanArenaSessionSendSnapshot(
     const SudekiMpLanArenaSnapshot *snapshot
 ) {
-    (void)snapshot;
-    return FALSE;
+    ++snapshot_send_count;
+    if (snapshot != NULL) last_sent_snapshot = *snapshot;
+    return snapshot_send_result;
 }
 
 BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
@@ -2179,12 +2685,76 @@ BOOL SudekiMpInstallLanArenaSpiritAudioTrace(
 BOOL SudekiMpUninstallLanArenaSpiritAudioTrace(void) {
     if (!spirit_audio_installed) return TRUE;
     ++spirit_audio_uninstall_count;
+    record_spirit_observer_teardown('A');
+    if (!spirit_audio_uninstall_result) {
+        SetLastError(ERROR_WRITE_FAULT);
+        return FALSE;
+    }
     spirit_audio_installed = FALSE;
     return TRUE;
 }
 
 BOOL SudekiMpLanArenaSpiritAudioTraceInstalled(void) {
     return spirit_audio_installed;
+}
+
+BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE game_module) {
+    return game_module != NULL && spirit_visual_install_result;
+}
+
+BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
+    HMODULE game_module,
+    SudekiMpLanArenaSpiritVisualHostWitness witness,
+    void *context
+) {
+    ++spirit_visual_install_count;
+    if (!SudekiMpLanArenaSpiritVisualHostImageMatches(game_module)) {
+        spirit_visual_installed = spirit_visual_install_leaves_lease;
+        SetLastError(ERROR_BAD_FORMAT);
+        return FALSE;
+    }
+    spirit_visual_installed = TRUE;
+    spirit_visual_witness = witness;
+    spirit_visual_witness_context = context;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {
+    ++spirit_visual_reset_count;
+    if (!spirit_visual_installed) return TRUE;
+    record_spirit_observer_teardown('V');
+    if (!spirit_visual_reset_result) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    spirit_visual_installed = FALSE;
+    spirit_visual_witness = NULL;
+    spirit_visual_witness_context = NULL;
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaSpiritVisualHostCapture(
+    uint64_t session, uint16_t skill, uint32_t tick,
+    SudekiMpLanArenaSnapshot *snapshot
+) {
+    (void)session;
+    (void)skill;
+    (void)tick;
+    ++spirit_visual_capture_count;
+    if (snapshot == NULL) return FALSE;
+    snapshot->spirit_vfx_observed = spirit_visual_capture_observed ? 1u : 0u;
+    snapshot->spirit_vfx_count = 0u;
+    memset(snapshot->spirit_vfx, 0, sizeof(snapshot->spirit_vfx));
+    if (!spirit_visual_capture_result) {
+        /* Inject a partially written failed sample: runtime must sanitize it
+         * before the optional domain reaches canonical snapshot validation. */
+        snapshot->spirit_vfx_observed = 1u;
+        snapshot->spirit_vfx_count = 9u;
+        snapshot->spirit_vfx[0].instance_sequence = 99u;
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 size_t SudekiMpLanArenaSpiritAudioTraceSnapshot(
@@ -2219,6 +2789,29 @@ void SudekiMpLanArenaHostInputSetNativeSkillStartObserver(
     SudekiMpLanArenaHostNativeSkillStartObserver observer
 ) {
     host_native_skill_start_observer = observer;
+}
+
+BOOL SudekiMpLanArenaHostInputTakeSkillSlot(unsigned int *slot) {
+    (void)slot;
+    return FALSE;
+}
+
+SudekiMpSkillActivationResult SudekiMpReplayHostApprovedCharacterSkillSlot(
+    void *character,
+    int slot
+) {
+    SudekiMpSkillActivationResult result;
+    (void)character;
+    (void)slot;
+    memset(&result, 0, sizeof(result));
+    return result;
+}
+
+const char *SudekiMpSkillActivationStatusName(
+    SudekiMpSkillActivationStatus status
+) {
+    (void)status;
+    return "inactive";
 }
 
 BOOL SudekiMpLanArenaHostInputTakeSpiritVariant(unsigned int *variant) {
@@ -2285,6 +2878,21 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
     return client_replica_reset_result;
 }
 
+void SudekiMpLanArenaClientReplicaSetRemoteTalLease(
+    void *actor,
+    uint32_t actor_generation
+) {
+    ++client_tal_lease_publish_count;
+    client_tal_published_actor = actor;
+    client_tal_published_generation = actor_generation;
+}
+
+BOOL SudekiMpLanArenaClientReplicaRemoteTalReleaseReady(void) {
+    ++client_tal_release_ready_count;
+    if (!client_tal_release_ready_result) SetLastError(ERROR_BUSY);
+    return client_tal_release_ready_result;
+}
+
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     record_callback_event('A');
     return replica_apply_result;
@@ -2309,6 +2917,11 @@ BOOL SudekiMpLanArenaClientReplicaPublishVisibleTransforms(void) {
     record_callback_event('P');
     if (!visible_publish_result) SetLastError(ERROR_INVALID_STATE);
     return visible_publish_result;
+}
+
+BOOL SudekiMpLanArenaClientReplicaServiceSpiritVfx(void) {
+    record_callback_event('X');
+    return TRUE;
 }
 
 void SudekiMpLanArenaClientReplicaRefreshDiagnostics(void) {}
@@ -2400,7 +3013,8 @@ BOOL SudekiMpControlSeparationSetLanArenaPlayerTwoSkillInputIsolation(
 
 BOOL SudekiMpControlSeparationReleasePlayerTwoNow(void) {
     ++release_player_two_count;
-    return TRUE;
+    record_client_tal_teardown_event('L');
+    return player_two_release_result;
 }
 
 BOOL SudekiMpControlSeparationForceStopCharacter(void *character) {
@@ -2418,7 +3032,8 @@ void *SudekiMpControlSeparationPlayerTwoCharacter(void) {
 
 BOOL SudekiMpControlSeparationRequestPlayerTwoCharacter(void *character) {
     (void)character;
-    return TRUE;
+    ++request_player_two_count;
+    return player_two_request_result;
 }
 
 BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
@@ -2506,8 +3121,8 @@ void SudekiMpCleanroomMenuRender(void) {
 }
 
 BOOL SudekiMpCleanroomEngineActorPresent(SudekiMpCleanroomActor actor) {
-    (void)actor;
-    return FALSE;
+    if ((unsigned int)actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) return FALSE;
+    return actor_present_results[actor];
 }
 
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled) {
@@ -2612,8 +3227,11 @@ BOOL SudekiMpCleanroomEngineActorPosition(
     float position[3]
 ) {
     (void)actor;
-    (void)position;
-    return FALSE;
+    if (!actor_position_result || position == NULL) return FALSE;
+    position[0] = 1.0f;
+    position[1] = 2.0f;
+    position[2] = 3.0f;
+    return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineActorFacing(
@@ -2621,8 +3239,10 @@ BOOL SudekiMpCleanroomEngineActorFacing(
     float facing[2]
 ) {
     (void)actor;
-    (void)facing;
-    return FALSE;
+    if (!actor_facing_result || facing == NULL) return FALSE;
+    facing[0] = 0.0f;
+    facing[1] = 1.0f;
+    return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineActorResources(
@@ -2631,9 +3251,12 @@ BOOL SudekiMpCleanroomEngineActorResources(
     float *skill_points
 ) {
     (void)actor;
-    (void)hit_points;
-    (void)skill_points;
-    return FALSE;
+    if (!actor_resources_result || hit_points == NULL || skill_points == NULL) {
+        return FALSE;
+    }
+    *hit_points = 100.0f;
+    *skill_points = 50.0f;
+    return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineActorPresentation(
@@ -2651,19 +3274,27 @@ BOOL SudekiMpCleanroomEngineSpawnActor(
 ) {
     (void)actor;
     (void)position;
-    return FALSE;
+    ++spawn_actor_count;
+    return spawn_actor_result;
 }
 
 BOOL SudekiMpCleanroomEngineInitializePartyActor(
     SudekiMpCleanroomActor actor
 ) {
     (void)actor;
+    ++initialize_party_actor_count;
     return FALSE;
 }
 
 BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor) {
-    (void)actor;
-    return TRUE;
+    ++remove_actor_count;
+    record_client_tal_teardown_event('R');
+    if (remove_actor_result && remove_actor_clears_presence &&
+        (unsigned int)actor < SUDEKIMP_CLEANROOM_ACTOR_COUNT) {
+        actor_present_results[actor] = FALSE;
+        cleanroom_actor_entities[actor] = NULL;
+    }
+    return remove_actor_result;
 }
 
 BOOL SudekiMpCleanroomEngineDummyPresent(void) {

@@ -190,7 +190,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 431u);
+    CHECK(size == 881u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.tal.action_variant ==
@@ -708,7 +708,7 @@ static void test_spirit_audio_semantic_journal(void) {
     SpiritAudioSinkState sink = {0u, SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_NONE, 1};
     unsigned int replayed = 99u;
 
-    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 746u);
+    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 1196u);
     CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE <=
         SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE);
     set_active_tal_spirit(snapshot, 41u);
@@ -723,7 +723,7 @@ static void test_spirit_audio_semantic_journal(void) {
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START;
     CHECK(SudekiMpLanArenaSpiritAudioJournalValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 410u);
+    CHECK(size == 860u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_audio_history_count == 2u);
     CHECK(decoded.body.snapshot.spirit_audio_history[0].event_sequence ==
@@ -809,6 +809,244 @@ static void test_spirit_audio_semantic_journal(void) {
     snapshot->spirit_audio_history_count =
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY + 1u;
     CHECK(!SudekiMpLanArenaSpiritAudioJournalValid(snapshot));
+}
+
+static SudekiMpLanArenaSpiritVfxSnapshot make_spirit_vfx(uint32_t instance) {
+    SudekiMpLanArenaSpiritVfxSnapshot result;
+    memset(&result, 0, sizeof(result));
+    result.instance_sequence = instance;
+    result.skill_sequence = 7u;
+    result.kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SOUL_TRANSFER;
+    result.emitted_host_tick = 90u;
+    result.phase_valid = 1u;
+    result.phase = 3.5f;
+    result.position[0] = -10.0f;
+    result.position[1] = 20.0f;
+    result.position[2] = 30.0f;
+    result.rotation_xyzw[3] = 1.0f;
+    result.scale[0] = 1.0f;
+    result.scale[1] = 2.0f;
+    result.scale[2] = 3.0f;
+    return result;
+}
+
+static void test_spirit_vfx_roster_wire(void) {
+    SudekiMpLanArenaPacket source = make_minimal_snapshot_packet(93u);
+    SudekiMpLanArenaPacket decoded;
+    SudekiMpLanArenaSnapshot *snapshot = &source.body.snapshot;
+    SudekiMpLanArenaSpiritVfxSnapshot valid = make_spirit_vfx(100u);
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
+    size_t size = 0u;
+    size_t entries_offset;
+    unsigned int index;
+
+    CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 23u);
+    CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413233));
+    CHECK(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE == 1200u);
+    snapshot->host_tick = 100u;
+    snapshot->tal.skill_sequence = 7u;
+    snapshot->tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    /* A finite tail is valid after the originating native transaction ends. */
+    snapshot->tal.skill_active = 0u;
+    snapshot->spirit_vfx_observed = 1u;
+    snapshot->spirit_vfx_count = 1u;
+    snapshot->spirit_vfx[0] = valid;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(size == 860u);
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.spirit_vfx_observed == 1u);
+    CHECK(decoded.body.snapshot.spirit_vfx_count == 1u);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].instance_sequence == 100u);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].skill_sequence == 7u);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].kind == valid.kind);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].emitted_host_tick == 90u);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].phase == 3.5f);
+    CHECK(memcmp(decoded.body.snapshot.spirit_vfx[0].position,
+        valid.position, sizeof(valid.position)) == 0);
+    CHECK(memcmp(decoded.body.snapshot.spirit_vfx[0].rotation_xyzw,
+        valid.rotation_xyzw, sizeof(valid.rotation_xyzw)) == 0);
+    CHECK(memcmp(decoded.body.snapshot.spirit_vfx[0].scale,
+        valid.scale, sizeof(valid.scale)) == 0);
+
+    entries_offset = size - 1u - SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * 56u;
+    bytes[entries_offset + 56u] = 1u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entries_offset + 56u] = 0u;
+    /* Even a nonzero sign bit in an inactive floating field is noncanonical. */
+    bytes[entries_offset + 56u + 15u] = 0x80u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entries_offset + 56u + 15u] = 0u;
+    bytes[entries_offset - 2u] = 0u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entries_offset - 2u] = 1u;
+    bytes[entries_offset - 1u] = 9u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entries_offset - 1u] = 1u;
+    bytes[4] = 22u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[4] = 23u;
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size - 1u, &decoded));
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size + 1u, &decoded));
+
+#define REJECT_VFX_CHANGE(statement) do { \
+    snapshot->spirit_vfx[0] = valid; \
+    statement; \
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source)); \
+} while (0)
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].instance_sequence = 0u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].skill_sequence = 0u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].skill_sequence = 8u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].skill_sequence = 0x8007u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].kind = 0u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].kind =
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase_valid = 2u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase_valid = 0u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase = NAN);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase = INFINITY);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase = -1.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].phase = 1000001.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].emitted_host_tick = 101u);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].emitted_host_tick =
+        snapshot->host_tick + UINT32_C(0x80000000));
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].position[0] = NAN);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].position[2] = 1000000.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].rotation_xyzw[1] = INFINITY);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].rotation_xyzw[3] = 0.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].rotation_xyzw[3] = 2.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].scale[0] = 0.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].scale[1] = -1.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].scale[2] = 1001.0f);
+    REJECT_VFX_CHANGE(snapshot->spirit_vfx[0].scale[2] = NAN);
+#undef REJECT_VFX_CHANGE
+    snapshot->spirit_vfx[0] = valid;
+    snapshot->spirit_vfx[0].phase_valid = 0u;
+    snapshot->spirit_vfx[0].phase = 0.0f;
+    snapshot->spirit_vfx[0].rotation_xyzw[3] = -1.0f;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    snapshot->spirit_vfx[0] = valid;
+    snapshot->spirit_vfx_count = 2u;
+    snapshot->spirit_vfx[1] = valid;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    snapshot->spirit_vfx_count = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY;
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY; ++index) {
+        snapshot->spirit_vfx[index] = make_spirit_vfx(100u + index);
+    }
+    for (index = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE;
+         index <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++index) {
+        snapshot->spirit_vfx[0].kind = (uint8_t)index;
+        CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+        CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+        CHECK(decoded.body.snapshot.spirit_vfx_count == 8u);
+    }
+    snapshot->spirit_vfx_count = 9u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    snapshot->spirit_vfx_count = 1u;
+    memset(snapshot->spirit_vfx, 0, sizeof(snapshot->spirit_vfx));
+    snapshot->spirit_vfx[0] = valid;
+    snapshot->host_tick = 5u;
+    snapshot->tal.skill_sequence = 1u;
+    snapshot->spirit_vfx[0].skill_sequence = UINT16_MAX;
+    snapshot->spirit_vfx[0].emitted_host_tick = UINT32_MAX - 4u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    snapshot->spirit_vfx_count = 0u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    memset(snapshot->spirit_vfx, 0, sizeof(snapshot->spirit_vfx));
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.spirit_vfx_observed == 1u);
+    CHECK(decoded.body.snapshot.spirit_vfx_count == 0u);
+    snapshot->spirit_vfx_observed = 0u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.spirit_vfx_observed == 0u);
+    snapshot->spirit_vfx_observed = 2u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+}
+
+static void test_spirit_vfx_generic_initiate_wire(void) {
+    SudekiMpLanArenaPacket source = make_minimal_snapshot_packet(94u);
+    SudekiMpLanArenaPacket decoded;
+    SudekiMpLanArenaSnapshot *snapshot = &source.body.snapshot;
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
+    size_t size = 0u;
+    size_t entry_offset;
+
+    CHECK(SUDEKIMP_LAN_ARENA_SPIRIT_VFX_RETURN == 11u);
+    CHECK(SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE == 12u);
+    snapshot->host_tick = 100u;
+    snapshot->tal.skill_sequence = 7u;
+    snapshot->tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot->spirit_vfx_observed = 1u;
+    snapshot->spirit_vfx_count = 1u;
+    snapshot->spirit_vfx[0] = make_spirit_vfx(101u);
+    snapshot->spirit_vfx[0].kind =
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
+    CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(size == 860u);
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE);
+    CHECK(memcmp(&decoded.body.snapshot.spirit_vfx[0], &snapshot->spirit_vfx[0],
+        sizeof(snapshot->spirit_vfx[0])) == 0);
+
+    /* The extension keeps the 56-byte record layout and its strict next-kind
+     * rejection on both encoding and decoding; no archive identity is sent. */
+    entry_offset = size - 1u - SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * 56u;
+    CHECK(bytes[entry_offset + 6u] == 12u);
+    bytes[entry_offset + 6u] = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entry_offset + 6u] = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    snapshot->spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
+    CHECK(!SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+}
+
+static void test_spirit_vfx_tal_strike_hit_wire(void) {
+    SudekiMpLanArenaPacket source = make_minimal_snapshot_packet(95u);
+    SudekiMpLanArenaPacket decoded;
+    SudekiMpLanArenaSnapshot *snapshot = &source.body.snapshot;
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
+    size_t size = 0u;
+    size_t entry_offset;
+
+    CHECK(SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT == 13u);
+    CHECK(SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST ==
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT);
+    snapshot->host_tick = 100u;
+    snapshot->tal.skill_sequence = 7u;
+    snapshot->tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    snapshot->spirit_vfx_observed = 1u;
+    snapshot->spirit_vfx_count = 2u;
+    snapshot->spirit_vfx[0] = make_spirit_vfx(102u);
+    snapshot->spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT;
+    snapshot->spirit_vfx[1] = make_spirit_vfx(103u);
+    snapshot->spirit_vfx[1].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
+    CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(size == 860u);
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.spirit_vfx_count == 2u);
+    CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT);
+    CHECK(decoded.body.snapshot.spirit_vfx[1].kind ==
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE);
+    CHECK(memcmp(decoded.body.snapshot.spirit_vfx, snapshot->spirit_vfx,
+        sizeof(snapshot->spirit_vfx)) == 0);
+
+    entry_offset = size - 1u - SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * 56u;
+    CHECK(bytes[entry_offset + 6u] == 13u);
+    CHECK(bytes[entry_offset + 56u + 6u] == 12u);
+    bytes[entry_offset + 6u] = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[entry_offset + 6u] = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT;
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    snapshot->spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
+    CHECK(!SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
 }
 
 static void test_connection_sequence_timeout_and_authority(void) {
@@ -906,6 +1144,9 @@ int main(void) {
     test_character_presentation_optional_sidecar();
     test_spirit_presentation_wire_lifecycle();
     test_spirit_audio_semantic_journal();
+    test_spirit_vfx_roster_wire();
+    test_spirit_vfx_generic_initiate_wire();
+    test_spirit_vfx_tal_strike_hit_wire();
     test_connection_sequence_timeout_and_authority();
     test_keepalive_round_trip();
     test_direct_endpoint_parser();

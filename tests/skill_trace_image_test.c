@@ -17,6 +17,8 @@
 #include "hooks/lan_arena_host_input.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_arena_spirit_vfx.h"
+#include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/lan_arena_window_policy.h"
 #include "hooks/player_input_trace.h"
 #include "hooks/quick_skill_input.h"
@@ -76,6 +78,12 @@ enum {
     RVA_FIXED_ALTERNATE_SPEED = 0x002c4018u,
     RVA_SOUND_GET = 0x000170b0u,
     RVA_SOUND_GLOBAL = 0x00408d40u,
+    RVA_SFX_PLAY = 0x00018de0u,
+    RVA_SFX_PRE_CACHE = 0x00019540u,
+    RVA_SFX_UN_CACHE = 0x00019650u,
+    RVA_SFX_GET_MANAGER = 0x00019770u,
+    RVA_SFX_MANAGER_GLOBAL = 0x00408d48u,
+    RVA_SFX_SOUND_LISTENER_VTABLE = 0x002cd0f4u,
     RVA_AILISH_RANGED_PRESENTATION_REFRESH = 0x001888f0u,
     RVA_AILISH_RANGED_WEAPON_REATTACH_CALL = 0x00188a76u,
     RVA_RANGED_WEAPON_REATTACH = 0x000d8280u,
@@ -2582,13 +2590,23 @@ typedef union PointerAlignedPositionFixture {
 
 typedef union PointerAlignedComponentFixture {
     void *alignment;
-    uint8_t bytes[0x168u];
+    uint8_t bytes[0x170u];
 } PointerAlignedComponentFixture;
+
+typedef union PointerAlignedArbiterFixture {
+    void *alignment;
+    uint8_t bytes[0x54u];
+} PointerAlignedArbiterFixture;
 
 typedef union PointerAlignedWrapperFixture {
     void *alignment;
     uint8_t bytes[0x14u];
 } PointerAlignedWrapperFixture;
+
+typedef union PointerAlignedWeaponParentFixture {
+    void *alignment;
+    uint8_t bytes[0xd8u];
+} PointerAlignedWeaponParentFixture;
 
 static void store_fixture_pointer(
     uint8_t *storage,
@@ -2602,26 +2620,40 @@ static void exercise_client_ailish_renderer_fallback(int *failures) {
     PointerAlignedCharacterFixture character;
     PointerAlignedPositionFixture position;
     PointerAlignedComponentFixture component;
+    PointerAlignedArbiterFixture arbiter;
     PointerAlignedWrapperFixture attached_wrapper;
     PointerAlignedWrapperFixture first_person_wrapper;
     PointerAlignedWrapperFixture saved_world_wrapper;
+    PointerAlignedWeaponParentFixture weapon_parent;
     int attached_renderer;
+    int first_person_renderer;
     int saved_world_renderer;
     int foreign_owner;
     void *renderer;
     void *resolved_component;
+    void *attached_model_wrapper;
+    void *attached_model_renderer;
+    BOOL first_person;
+    BOOL fallback_world;
+    uint32_t arbiter_flags = 0u;
 
     ZeroMemory(&character, sizeof(character));
     ZeroMemory(&position, sizeof(position));
     ZeroMemory(&component, sizeof(component));
+    ZeroMemory(&arbiter, sizeof(arbiter));
     ZeroMemory(&attached_wrapper, sizeof(attached_wrapper));
     ZeroMemory(&first_person_wrapper, sizeof(first_person_wrapper));
     ZeroMemory(&saved_world_wrapper, sizeof(saved_world_wrapper));
+    ZeroMemory(&weapon_parent, sizeof(weapon_parent));
     store_fixture_pointer(character.bytes, 0x44u, position.bytes);
+    store_fixture_pointer(character.bytes, 0x90u, arbiter.bytes);
     store_fixture_pointer(character.bytes, 0x134u, component.bytes);
     store_fixture_pointer(component.bytes, 0x10u, character.bytes);
+    store_fixture_pointer(arbiter.bytes, 0x10u, character.bytes);
     store_fixture_pointer(component.bytes, 0x160u,
         first_person_wrapper.bytes);
+    store_fixture_pointer(first_person_wrapper.bytes, 0x10u,
+        &first_person_renderer);
     store_fixture_pointer(component.bytes, 0x164u, NULL);
     store_fixture_pointer(position.bytes, 0xb4u, attached_wrapper.bytes);
     store_fixture_pointer(attached_wrapper.bytes, 0x10u,
@@ -2637,6 +2669,61 @@ static void exercise_client_ailish_renderer_fallback(int *failures) {
         renderer != &attached_renderer ||
         resolved_component != component.bytes) {
         fputs("FAIL: LAN client Ailish NULL saved-world fallback rejected exact idle topology\n",
+            stderr);
+        ++*failures;
+    }
+    attached_model_wrapper = NULL;
+    attached_model_renderer = NULL;
+    first_person = TRUE;
+    fallback_world = FALSE;
+    if (!SudekiMpLanArenaClientReplicaTestAilishDesiredModelAttached(
+            character.bytes, &attached_model_wrapper,
+            &attached_model_renderer, &first_person, &fallback_world) ||
+        attached_model_wrapper != attached_wrapper.bytes ||
+        attached_model_renderer != &attached_renderer || first_person ||
+        !fallback_world) {
+        fputs("FAIL: LAN client Ailish exact world-model no-op witness mismatch\n",
+            stderr);
+        ++*failures;
+    }
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_DESIRED ||
+        SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client desired Ailish world model admitted destructive refresh\n",
+            stderr);
+        ++*failures;
+    }
+
+    arbiter_flags = 0x00400000u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_OPPOSITE ||
+        !SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client rejected exact NULL-saved-world first-person entry\n",
+            stderr);
+        ++*failures;
+    }
+    arbiter_flags = 0u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+
+    /* FUN_00511960 stores the intrusive parent link (position + 4), not the
+     * containing CPosition base, in weapon+0xd4. */
+    store_fixture_pointer(weapon_parent.bytes, 0xd4u,
+        position.bytes + 4u);
+    if (!SudekiMpLanArenaClientReplicaTestWeaponParentMatchesPosition(
+            weapon_parent.bytes, position.bytes)) {
+        fputs("FAIL: LAN client rejected exact biased weapon parent link\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(weapon_parent.bytes, 0xd4u, position.bytes);
+    if (SudekiMpLanArenaClientReplicaTestWeaponParentMatchesPosition(
+            weapon_parent.bytes, position.bytes)) {
+        fputs("FAIL: LAN client accepted un-biased weapon parent address\n",
             stderr);
         ++*failures;
     }
@@ -2657,14 +2744,102 @@ static void exercise_client_ailish_renderer_fallback(int *failures) {
             stderr);
         ++*failures;
     }
+    store_fixture_pointer(component.bytes, 0x160u,
+        first_person_wrapper.bytes);
+    store_fixture_pointer(position.bytes, 0xb4u,
+        saved_world_wrapper.bytes);
+    if (!SudekiMpLanArenaClientReplicaTestAilishDesiredModelAttached(
+            character.bytes, &attached_model_wrapper,
+            &attached_model_renderer, &first_person, &fallback_world) ||
+        attached_model_wrapper != saved_world_wrapper.bytes ||
+        attached_model_renderer != &saved_world_renderer || first_person ||
+        fallback_world) {
+        fputs("FAIL: LAN client Ailish saved-world model witness mismatch\n",
+            stderr);
+        ++*failures;
+    }
+
+    /* A first-person attachment is exact only with the distinct retained
+     * world wrapper that the native switch saves at +0x164. */
+    arbiter_flags = 0x00400000u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_OPPOSITE ||
+        !SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client rejected proven world-to-first-person model transition\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(position.bytes, 0xb4u,
+        first_person_wrapper.bytes);
+    if (!SudekiMpLanArenaClientReplicaTestAilishDesiredModelAttached(
+            character.bytes, &attached_model_wrapper,
+            &attached_model_renderer, &first_person, &fallback_world) ||
+        attached_model_wrapper != first_person_wrapper.bytes ||
+        attached_model_renderer != &first_person_renderer ||
+        first_person == FALSE || fallback_world) {
+        fputs("FAIL: LAN client Ailish first-person model witness mismatch\n",
+            stderr);
+        ++*failures;
+    }
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_DESIRED ||
+        SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client desired first-person model admitted destructive refresh\n",
+            stderr);
+        ++*failures;
+    }
+
+    arbiter_flags = 0u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_OPPOSITE ||
+        !SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client rejected proven first-person-to-world model transition\n",
+            stderr);
+        ++*failures;
+    }
 
     /* Restore the NULL-only fallback, then reject each unsafe ownership
      * shape before any renderer/vtable/count consumer can run. */
+    arbiter_flags = 0u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
     store_fixture_pointer(component.bytes, 0x164u, NULL);
     store_fixture_pointer(position.bytes, 0xb4u, attached_wrapper.bytes);
     store_fixture_pointer(component.bytes, 0x160u,
         first_person_wrapper.bytes);
+    arbiter_flags = 0x00400000u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+    store_fixture_pointer(component.bytes, 0x164u,
+        saved_world_wrapper.bytes);
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_UNKNOWN ||
+        SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client stale third model wrapper admitted native mutation\n",
+            stderr);
+        ++*failures;
+    }
+    arbiter_flags = 0u;
+    memcpy(arbiter.bytes + 0x50u, &arbiter_flags, sizeof(arbiter_flags));
+    store_fixture_pointer(component.bytes, 0x164u, NULL);
     store_fixture_pointer(component.bytes, 0x10u, &foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_UNKNOWN ||
+        SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client foreign model backpointer admitted native mutation\n",
+            stderr);
+        ++*failures;
+    }
     if (SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
             character.bytes, 1u, &renderer, &resolved_component)) {
         fputs("FAIL: LAN client Ailish fallback accepted foreign component backpointer\n",
@@ -2673,6 +2848,15 @@ static void exercise_client_ailish_renderer_fallback(int *failures) {
     }
     store_fixture_pointer(component.bytes, 0x10u, character.bytes);
     store_fixture_pointer(component.bytes, 0x160u, attached_wrapper.bytes);
+    if (SudekiMpLanArenaClientReplicaTestAilishModelAttachmentState(
+            character.bytes) !=
+            SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_UNKNOWN ||
+        SudekiMpLanArenaClientReplicaTestAilishModelRefreshAllowed(
+            character.bytes)) {
+        fputs("FAIL: LAN client unknown Ailish topology admitted native model mutation\n",
+            stderr);
+        ++*failures;
+    }
     if (SudekiMpLanArenaClientReplicaTestActorPresentationRenderer(
             character.bytes, 1u, &renderer, &resolved_component)) {
         fputs("FAIL: LAN client Ailish fallback accepted first-person alias\n",
@@ -2715,6 +2899,658 @@ static void exercise_client_ailish_renderer_fallback(int *failures) {
         fputs("FAIL: LAN client Ailish accepted unreadable saved-world wrapper\n",
             stderr);
         ++*failures;
+    }
+}
+
+typedef union PointerAlignedMutationPositionFixture {
+    void *alignment;
+    uint8_t bytes[0x104u];
+} PointerAlignedMutationPositionFixture;
+
+typedef union PointerAlignedMutationWeaponFixture {
+    void *alignment;
+    uint8_t bytes[0x3b9u];
+} PointerAlignedMutationWeaponFixture;
+
+typedef union PointerAlignedActiveModelFixture {
+    void *alignment;
+    uint8_t bytes[0x10u];
+} PointerAlignedActiveModelFixture;
+
+typedef union PointerAlignedRenderObjectFixture {
+    void *alignment;
+    uint8_t bytes[0x110u];
+} PointerAlignedRenderObjectFixture;
+
+typedef union PointerAlignedModelVtableFixture {
+    void *alignment;
+    uint8_t bytes[0x2cu];
+} PointerAlignedModelVtableFixture;
+
+typedef union PointerAlignedCallbackVtableFixture {
+    void *alignment;
+    uint8_t bytes[0x18u];
+} PointerAlignedCallbackVtableFixture;
+
+typedef union PointerAlignedPointerTargetFixture {
+    void *alignment;
+    uint8_t bytes[sizeof(void *)];
+} PointerAlignedPointerTargetFixture;
+
+typedef void (*MutationAdmissionFixtureMethod)(void);
+
+typedef struct AilishWeaponMutationAdmissionFixture {
+    PointerAlignedCharacterFixture character;
+    PointerAlignedMutationPositionFixture position;
+    PointerAlignedComponentFixture component;
+    PointerAlignedArbiterFixture arbiter;
+    PointerAlignedMutationWeaponFixture weapon;
+    PointerAlignedActiveModelFixture active_model;
+    PointerAlignedWrapperFixture attached_wrapper;
+    PointerAlignedWrapperFixture first_person_wrapper;
+    PointerAlignedWrapperFixture primary_wrapper;
+    PointerAlignedWrapperFixture secondary_wrapper;
+    PointerAlignedRenderObjectFixture primary_render_object;
+    PointerAlignedRenderObjectFixture secondary_render_object;
+    PointerAlignedPointerTargetFixture model_interface;
+    PointerAlignedModelVtableFixture model_vtable;
+    PointerAlignedPointerTargetFixture callback;
+    PointerAlignedCallbackVtableFixture callback_vtable;
+    PointerAlignedPointerTargetFixture current_item;
+    int attached_renderer;
+    int first_person_renderer;
+    int foreign_owner;
+} AilishWeaponMutationAdmissionFixture;
+
+static void mutation_admission_fixture_method(void) {
+}
+
+static void store_fixture_method(
+    uint8_t *storage,
+    size_t offset,
+    MutationAdmissionFixtureMethod method
+) {
+    memcpy(storage + offset, &method, sizeof(method));
+}
+
+static void initialize_ailish_weapon_mutation_admission_fixture(
+    AilishWeaponMutationAdmissionFixture *fixture
+) {
+    MutationAdmissionFixtureMethod executable_method =
+        mutation_admission_fixture_method;
+
+    ZeroMemory(fixture, sizeof(*fixture));
+    store_fixture_pointer(fixture->character.bytes, 0x44u,
+        fixture->position.bytes);
+    store_fixture_pointer(fixture->character.bytes, 0x90u,
+        fixture->arbiter.bytes);
+    store_fixture_pointer(fixture->character.bytes, 0xc0u,
+        fixture->weapon.bytes);
+    store_fixture_pointer(fixture->character.bytes, 0x134u,
+        fixture->component.bytes);
+    store_fixture_pointer(fixture->component.bytes, 0x10u,
+        fixture->character.bytes);
+    store_fixture_pointer(fixture->component.bytes, 0x160u,
+        fixture->first_person_wrapper.bytes);
+    store_fixture_pointer(fixture->component.bytes, 0x164u, NULL);
+    store_fixture_pointer(fixture->arbiter.bytes, 0x10u,
+        fixture->character.bytes);
+    store_fixture_pointer(fixture->position.bytes, 0xb4u,
+        fixture->attached_wrapper.bytes);
+    store_fixture_pointer(fixture->attached_wrapper.bytes, 0x0cu,
+        fixture->model_interface.bytes);
+    store_fixture_pointer(fixture->attached_wrapper.bytes, 0x10u,
+        &fixture->attached_renderer);
+    store_fixture_pointer(fixture->first_person_wrapper.bytes, 0x10u,
+        &fixture->first_person_renderer);
+    store_fixture_pointer(fixture->model_interface.bytes, 0u,
+        fixture->model_vtable.bytes);
+    store_fixture_method(fixture->model_vtable.bytes, 0x24u,
+        executable_method);
+    store_fixture_method(fixture->model_vtable.bytes, 0x28u,
+        executable_method);
+    store_fixture_pointer(fixture->weapon.bytes, 0x10u,
+        fixture->character.bytes);
+    store_fixture_pointer(fixture->weapon.bytes, 0xccu,
+        fixture->primary_render_object.bytes);
+    store_fixture_pointer(fixture->weapon.bytes, 0xf4u,
+        fixture->primary_wrapper.bytes);
+    store_fixture_pointer(fixture->weapon.bytes, 0x204u, NULL);
+    store_fixture_pointer(fixture->weapon.bytes, 0x268u,
+        fixture->current_item.bytes);
+    store_fixture_pointer(fixture->weapon.bytes, 0x3acu,
+        fixture->active_model.bytes);
+    store_fixture_pointer(fixture->active_model.bytes, 0x0cu,
+        fixture->character.bytes);
+    store_fixture_pointer(fixture->primary_wrapper.bytes, 0x08u,
+        fixture->primary_render_object.bytes);
+}
+
+static void exercise_client_ailish_weapon_mutation_admission(
+    int *failures
+) {
+    AilishWeaponMutationAdmissionFixture fixture;
+    MutationAdmissionFixtureMethod executable_method =
+        mutation_admission_fixture_method;
+    DWORD old_protection;
+    DWORD ignored_protection;
+    uint8_t *protected_memory;
+    uint32_t render_flags;
+
+    initialize_ailish_weapon_mutation_admission_fixture(&fixture);
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        !SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client rejected exact Ailish weapon mutation graph\n",
+            stderr);
+        ++*failures;
+    }
+
+    store_fixture_pointer(fixture.weapon.bytes, 0x10u,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon mutation admitted foreign weapon owner\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0x10u,
+        fixture.character.bytes);
+
+    store_fixture_pointer(fixture.arbiter.bytes, 0x10u,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon mutation admitted foreign arbiter backpointer\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.arbiter.bytes, 0x10u,
+        fixture.character.bytes);
+
+    store_fixture_pointer(fixture.active_model.bytes, 0x0cu,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon mutation admitted foreign active-model owner\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.active_model.bytes, 0x0cu,
+        fixture.character.bytes);
+
+    store_fixture_pointer(fixture.weapon.bytes, 0x268u, NULL);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon mutation admitted missing current item\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0x268u,
+        fixture.current_item.bytes);
+
+    store_fixture_pointer(fixture.attached_wrapper.bytes, 0x0cu, NULL);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon reattach admitted missing model interface\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.attached_wrapper.bytes, 0x0cu,
+        fixture.model_interface.bytes);
+
+    store_fixture_pointer(fixture.model_vtable.bytes, 0x24u,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon reattach admitted non-executable matrix method\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_method(fixture.model_vtable.bytes, 0x24u,
+        executable_method);
+    store_fixture_pointer(fixture.model_vtable.bytes, 0x28u,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon reattach admitted non-executable locator method\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_method(fixture.model_vtable.bytes, 0x28u,
+        executable_method);
+
+    store_fixture_pointer(fixture.weapon.bytes, 0xf4u, NULL);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes) ||
+        SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon mutation admitted missing primary wrapper\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0xf4u,
+        fixture.primary_wrapper.bytes);
+
+    store_fixture_pointer(fixture.weapon.bytes, 0xccu,
+        fixture.secondary_render_object.bytes);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish weapon reattach admitted primary render-object identity drift\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0xccu,
+        fixture.primary_render_object.bytes);
+
+    /* The secondary wrapper is optional, and an alias of the primary is a
+     * single native object rather than two independent mutation grants. */
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility rejected NULL secondary wrapper\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0x204u,
+        fixture.primary_wrapper.bytes);
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility rejected aliased secondary wrapper\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.weapon.bytes, 0x204u,
+        fixture.secondary_wrapper.bytes);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility admitted invalid secondary wrapper\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.secondary_wrapper.bytes, 0x08u,
+        fixture.secondary_render_object.bytes);
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility rejected exact secondary render object\n",
+            stderr);
+        ++*failures;
+    }
+
+    /* Native SetVisible dispatches the render callback only when both the
+     * callback and hidden bits are present. A lone bit needs no callback. */
+    render_flags = 0x04000000u;
+    memcpy(fixture.secondary_render_object.bytes + 0x34u,
+        &render_flags, sizeof(render_flags));
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility required callback for lone render flag\n",
+            stderr);
+        ++*failures;
+    }
+    render_flags = 0x04000004u;
+    memcpy(fixture.secondary_render_object.bytes + 0x34u,
+        &render_flags, sizeof(render_flags));
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility admitted missing required secondary callback\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_pointer(fixture.secondary_render_object.bytes, 0x14u,
+        fixture.callback.bytes);
+    store_fixture_pointer(fixture.callback.bytes, 0u,
+        fixture.callback_vtable.bytes);
+    store_fixture_pointer(fixture.callback_vtable.bytes, 0x14u,
+        &fixture.foreign_owner);
+    if (SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility admitted non-executable secondary callback\n",
+            stderr);
+        ++*failures;
+    }
+    store_fixture_method(fixture.callback_vtable.bytes, 0x14u,
+        executable_method);
+    if (!SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+            fixture.character.bytes)) {
+        fputs("FAIL: LAN client Ailish visibility rejected exact secondary callback chain\n",
+            stderr);
+        ++*failures;
+    }
+    render_flags = 0u;
+    memcpy(fixture.secondary_render_object.bytes + 0x34u,
+        &render_flags, sizeof(render_flags));
+    store_fixture_pointer(fixture.weapon.bytes, 0x204u, NULL);
+
+    protected_memory = (uint8_t *)VirtualAlloc(
+        NULL, 0x1000u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (protected_memory == NULL) {
+        fputs("FAIL: could not allocate read-only Ailish weapon fixture\n",
+            stderr);
+        ++*failures;
+    } else {
+        memcpy(protected_memory, fixture.weapon.bytes,
+            sizeof(fixture.weapon.bytes));
+        store_fixture_pointer(fixture.character.bytes, 0xc0u,
+            protected_memory);
+        if (!VirtualProtect(protected_memory, 0x1000u, PAGE_READONLY,
+                &old_protection)) {
+            fputs("FAIL: could not protect Ailish weapon fixture\n", stderr);
+            ++*failures;
+        } else {
+            if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+                    fixture.character.bytes) ||
+                SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+                    fixture.character.bytes)) {
+                fputs("FAIL: LAN client Ailish weapon mutation admitted read-only weapon\n",
+                    stderr);
+                ++*failures;
+            }
+            VirtualProtect(protected_memory, 0x1000u, old_protection,
+                &ignored_protection);
+        }
+        store_fixture_pointer(fixture.character.bytes, 0xc0u,
+            fixture.weapon.bytes);
+        VirtualFree(protected_memory, 0u, MEM_RELEASE);
+    }
+
+    protected_memory = (uint8_t *)VirtualAlloc(
+        NULL, 0x1000u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (protected_memory == NULL) {
+        fputs("FAIL: could not allocate read-only Ailish render-object fixture\n",
+            stderr);
+        ++*failures;
+    } else {
+        store_fixture_pointer(fixture.primary_wrapper.bytes, 0x08u,
+            protected_memory);
+        store_fixture_pointer(fixture.weapon.bytes, 0xccu,
+            protected_memory);
+        if (!VirtualProtect(protected_memory, 0x1000u, PAGE_READONLY,
+                &old_protection)) {
+            fputs("FAIL: could not protect Ailish render-object fixture\n",
+                stderr);
+            ++*failures;
+        } else {
+            if (SudekiMpLanArenaClientReplicaTestAilishWeaponReattachMutationAllowed(
+                    fixture.character.bytes) ||
+                SudekiMpLanArenaClientReplicaTestAilishWeaponVisibilityMutationAllowed(
+                    fixture.character.bytes)) {
+                fputs("FAIL: LAN client Ailish weapon mutation admitted read-only render object\n",
+                    stderr);
+                ++*failures;
+            }
+            VirtualProtect(protected_memory, 0x1000u, old_protection,
+                &ignored_protection);
+        }
+        store_fixture_pointer(fixture.primary_wrapper.bytes, 0x08u,
+            fixture.primary_render_object.bytes);
+        store_fixture_pointer(fixture.weapon.bytes, 0xccu,
+            fixture.primary_render_object.bytes);
+        VirtualFree(protected_memory, 0u, MEM_RELEASE);
+    }
+}
+
+static void expect_spirit_visual_generation_filter(
+    SudekiMpLanArenaSnapshot *snapshot, uint16_t skill_floor,
+    BOOL expected_result, const SudekiMpLanArenaSnapshot *expected,
+    const char *description, int *failures
+) {
+    BOOL result = SudekiMpLanArenaClientSpiritVisualFilterGeneration(
+        snapshot, skill_floor);
+    if (result != expected_result ||
+        memcmp(snapshot, expected, sizeof(*snapshot)) != 0) {
+        fprintf(stderr, "FAIL: Spirit visual generation filter %s\n",
+            description);
+        ++*failures;
+    }
+}
+
+static void test_spirit_visual_generation_filter(int *failures) {
+    SudekiMpLanArenaSnapshot snapshot;
+    SudekiMpLanArenaSnapshot expected;
+    unsigned int index;
+
+    ZeroMemory(&snapshot, sizeof(snapshot));
+    snapshot.sequence = 101u;
+    snapshot.host_tick = 1000u;
+    snapshot.tal.skill_sequence = 12u;
+    expected = snapshot;
+    expect_spirit_visual_generation_filter(&snapshot, 10u, TRUE, &expected,
+        "preserves UNKNOWN and unrelated snapshot fields", failures);
+
+    snapshot.spirit_vfx_observed = 1u;
+    expected = snapshot;
+    expect_spirit_visual_generation_filter(&snapshot, 10u, TRUE, &expected,
+        "preserves positive-empty removal", failures);
+
+    snapshot.spirit_vfx_count = 5u;
+    for (index = 0u; index < snapshot.spirit_vfx_count; ++index) {
+        SudekiMpLanArenaSpiritVfxSnapshot *visual = &snapshot.spirit_vfx[index];
+        visual->instance_sequence = 20u + index;
+        visual->skill_sequence = (uint16_t)(8u + index);
+        visual->kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE;
+        visual->emitted_host_tick = 900u + index;
+        visual->phase_valid = 1u;
+        visual->phase = (float)index + 0.25f;
+        visual->position[0] = (float)index + 1.0f;
+        visual->position[1] = (float)index + 2.0f;
+        visual->position[2] = (float)index + 3.0f;
+        visual->rotation_xyzw[3] = 1.0f;
+        visual->scale[0] = 1.0f;
+        visual->scale[1] = 2.0f;
+        visual->scale[2] = 3.0f;
+    }
+    /* Mix the retained records among old/same-cast records so both stable
+     * compaction and clearing every vacated slot are observable. */
+    snapshot.spirit_vfx[0].skill_sequence = 9u;
+    snapshot.spirit_vfx[1].skill_sequence = 11u;
+    snapshot.spirit_vfx[2].skill_sequence = 10u;
+    snapshot.spirit_vfx[3].skill_sequence = 8u;
+    snapshot.spirit_vfx[4].skill_sequence = 12u;
+    expected = snapshot;
+    expected.spirit_vfx_count = 2u;
+    expected.spirit_vfx[0] = snapshot.spirit_vfx[1];
+    expected.spirit_vfx[1] = snapshot.spirit_vfx[4];
+    ZeroMemory(&expected.spirit_vfx[2],
+        (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY - 2u) *
+            sizeof(expected.spirit_vfx[0]));
+    expect_spirit_visual_generation_filter(&snapshot, 10u, TRUE, &expected,
+        "drops same/older casts, retains newer payloads and zeros unused slots",
+        failures);
+
+    expected = snapshot;
+    expected.spirit_vfx_count = 0u;
+    ZeroMemory(expected.spirit_vfx, sizeof(expected.spirit_vfx));
+    expect_spirit_visual_generation_filter(&snapshot, 12u, TRUE, &expected,
+        "all filtered becomes positive-empty rather than UNKNOWN", failures);
+
+    snapshot.spirit_vfx_count = 3u;
+    snapshot.spirit_vfx[0].instance_sequence = 30u;
+    snapshot.spirit_vfx[0].skill_sequence = UINT16_MAX;
+    snapshot.spirit_vfx[1].instance_sequence = 31u;
+    snapshot.spirit_vfx[1].skill_sequence = 0u;
+    snapshot.spirit_vfx[2].instance_sequence = 32u;
+    snapshot.spirit_vfx[2].skill_sequence = 1u;
+    expected = snapshot;
+    expected.spirit_vfx_count = 2u;
+    expected.spirit_vfx[1] = snapshot.spirit_vfx[2];
+    ZeroMemory(&expected.spirit_vfx[2],
+        (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY - 2u) *
+            sizeof(expected.spirit_vfx[0]));
+    expect_spirit_visual_generation_filter(&snapshot, 0u, TRUE, &expected,
+        "zero baseline keeps nonzero casts on either side of wrap", failures);
+
+    snapshot.spirit_vfx_count = 5u;
+    snapshot.spirit_vfx[0].skill_sequence = UINT16_MAX - 1u;
+    snapshot.spirit_vfx[1].skill_sequence = UINT16_MAX;
+    snapshot.spirit_vfx[2].instance_sequence = 33u;
+    snapshot.spirit_vfx[2].skill_sequence = 1u;
+    snapshot.spirit_vfx[3].instance_sequence = 34u;
+    snapshot.spirit_vfx[3].skill_sequence = 32767u;
+    snapshot.spirit_vfx[4].instance_sequence = 35u;
+    snapshot.spirit_vfx[4].skill_sequence = 2u;
+    expected = snapshot;
+    expected.spirit_vfx_count = 2u;
+    expected.spirit_vfx[0] = snapshot.spirit_vfx[2];
+    expected.spirit_vfx[1] = snapshot.spirit_vfx[4];
+    ZeroMemory(&expected.spirit_vfx[2],
+        (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY - 2u) *
+            sizeof(expected.spirit_vfx[0]));
+    expect_spirit_visual_generation_filter(&snapshot, UINT16_MAX, TRUE,
+        &expected, "65535 to 1 wrap rejects old and ambiguous half-range casts",
+        failures);
+
+    snapshot.spirit_vfx_count = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY + 1u;
+    expected = snapshot;
+    expect_spirit_visual_generation_filter(&snapshot, 1u, FALSE, &expected,
+        "rejects overflowing count transactionally", failures);
+    snapshot.spirit_vfx_count = 1u;
+    snapshot.spirit_vfx_observed = 0u;
+    expected = snapshot;
+    expect_spirit_visual_generation_filter(&snapshot, 1u, FALSE, &expected,
+        "rejects UNKNOWN with a count transactionally", failures);
+    snapshot.spirit_vfx_observed = 2u;
+    expected = snapshot;
+    expect_spirit_visual_generation_filter(&snapshot, 1u, FALSE, &expected,
+        "rejects malformed observed flag transactionally", failures);
+    if (SudekiMpLanArenaClientSpiritVisualFilterGeneration(NULL, 1u)) {
+        fputs("FAIL: Spirit visual generation filter accepted null snapshot\n",
+            stderr);
+        ++*failures;
+    }
+}
+
+static void test_spirit_visual_roster_exact_image(uint8_t *image, int *failures) {
+    static const uint32_t client_mismatch[] = {
+        0x17da0u, 0x17e49u, 0x1750u, 0x131df0u, 0x110a40u, 0x110f90u,
+        RVA_ANIMATION_RENDERER_VTABLE + 0xf8u,
+        RVA_ANIMATION_RENDERER_VTABLE + 0x10cu,
+        RVA_ANIMATION_RENDERER_VTABLE + 0x110u,
+        /* Verify every embedded-sound callback, including every slot whose
+         * exact supported target is the shared no-op implementation. */
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x04u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x08u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x0cu,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x10u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x14u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x18u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x1cu,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x20u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x24u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x28u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x2cu,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x30u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x34u,
+        RVA_SFX_SOUND_LISTENER_VTABLE + 0x38u
+    };
+    static const uint32_t host_mismatch[] = {
+        0x18830u, 0x1750u, 0x4d72u, 0x111cc0u, 0x111cdau, 0x111cebu,
+        0x131908u, 0x13db4cu, 0x18244u, 0x182d5u, 0x183d8u,
+        0x18425u, 0x18543u, 0x18585u,
+        RVA_ANIMATION_RENDERER_VTABLE + 0xf8u,
+        RVA_ANIMATION_RENDERER_VTABLE + 0x100u,
+        RVA_ANIMATION_RENDERER_VTABLE + 0x110u
+    };
+    unsigned int adapter;
+    for (adapter = 0u; adapter < 2u; ++adapter) {
+        BOOL (*matches)(HMODULE) = adapter == 0u ?
+            SudekiMpLanArenaSpiritVfxVisualImageMatches :
+            SudekiMpLanArenaSpiritVisualHostImageMatches;
+        const uint32_t *cases = adapter == 0u ? client_mismatch : host_mismatch;
+        size_t count = adapter == 0u ?
+            sizeof(client_mismatch) / sizeof(client_mismatch[0]) :
+            sizeof(host_mismatch) / sizeof(host_mismatch[0]);
+        size_t index;
+        if (matches(NULL) || !matches((HMODULE)image)) {
+            fprintf(stderr, "FAIL: Spirit visual adapter %u exact-image gate error=%lu\n",
+                adapter, (unsigned long)GetLastError());
+            ++*failures;
+            continue;
+        }
+        for (index = 0u; index < count; ++index) {
+            uint8_t saved = image[cases[index]];
+            image[cases[index]] ^= 1u;
+            if (matches((HMODULE)image)) {
+                fprintf(stderr, "FAIL: Spirit visual adapter %u accepted mismatch RVA %lx\n",
+                    adapter, (unsigned long)cases[index]);
+                ++*failures;
+            }
+            image[cases[index]] = saved;
+            if (!matches((HMODULE)image)) {
+                fputs("FAIL: Spirit visual preflight restore was sticky\n", stderr);
+                ++*failures;
+            }
+        }
+    }
+}
+
+static void test_spirit_vfx_exact_image(uint8_t *image, int *failures) {
+    static const struct {
+        uint32_t rva;
+        const char *description;
+    } mismatch_cases[] = {
+        { RVA_SFX_GET_MANAGER, "GetSFXManager opcode" },
+        { RVA_SFX_GET_MANAGER + 1u, "GetSFXManager relocated singleton" },
+        { RVA_SFX_GET_MANAGER + 5u, "GetSFXManager return" },
+        { RVA_SFX_PLAY, "PlaySfx entry" },
+        { RVA_SFX_PLAY + 0x3eu, "PlaySfx native call target" },
+        { RVA_SFX_PLAY + 0x43u, "PlaySfx stack cleanup" },
+        { RVA_SFX_PRE_CACHE, "PreCacheEffect entry" },
+        { RVA_SFX_PRE_CACHE + 0xc6u, "PreCacheEffect new-resource call" },
+        { RVA_SFX_PRE_CACHE + 0xe0u, "PreCacheEffect new-reference increment" },
+        { RVA_SFX_PRE_CACHE + 0xf7u, "PreCacheEffect existing-reference increment" },
+        { RVA_SFX_PRE_CACHE + 0x10eu, "PreCacheEffect stack cleanup" },
+        { RVA_SFX_UN_CACHE, "UnCacheEffect entry" },
+        { RVA_SFX_UN_CACHE + 0x2eu, "UnCacheEffect reference decrement" },
+        { RVA_SFX_UN_CACHE + 0x5eu, "UnCacheEffect reference reset" },
+        { RVA_SFX_UN_CACHE + 0x6du, "UnCacheEffect stack cleanup" }
+    };
+    size_t index;
+
+    if (SudekiMpLanArenaSpiritVfxReplayImageMatches(NULL)) {
+        fputs("FAIL: Spirit VFX accepted a null image\n", stderr);
+        ++*failures;
+    }
+    if (!SudekiMpLanArenaSpiritVfxReplayImageMatches((HMODULE)image)) {
+        fputs("FAIL: Spirit VFX exact native seams rejected\n", stderr);
+        ++*failures;
+        return;
+    }
+    for (index = 0u;
+         index < sizeof(mismatch_cases) / sizeof(mismatch_cases[0]);
+         ++index) {
+        uint8_t saved = image[mismatch_cases[index].rva];
+        image[mismatch_cases[index].rva] ^= 0x01u;
+        if (SudekiMpLanArenaSpiritVfxReplayImageMatches((HMODULE)image)) {
+            fprintf(stderr, "FAIL: Spirit VFX accepted mismatched %s\n",
+                mismatch_cases[index].description);
+            ++*failures;
+        }
+        image[mismatch_cases[index].rva] = saved;
+        if (!SudekiMpLanArenaSpiritVfxReplayImageMatches((HMODULE)image)) {
+            fprintf(stderr, "FAIL: Spirit VFX %s restore was sticky\n",
+                mismatch_cases[index].description);
+            ++*failures;
+        }
+    }
+    {
+        uint8_t saved = image[RVA_SFX_GET_MANAGER + 1u];
+        image[RVA_SFX_GET_MANAGER + 1u] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted mismatched Spirit VFX singleton\n",
+                stderr);
+            ++*failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_SFX_GET_MANAGER + 1u] = saved;
     }
 }
 
@@ -3013,6 +3849,13 @@ int wmain(int argc, wchar_t **argv) {
         return 2;
     }
     exercise_client_ailish_renderer_fallback(&failures);
+    exercise_client_ailish_weapon_mutation_admission(&failures);
+    test_spirit_visual_generation_filter(&failures);
+    if (!SudekiMpLanArenaClientReplicaTestRemoteTalReleaseActivationEntryBlocked()) {
+        fputs("FAIL: LAN client Tal release ignored in-flight native activation entry\n",
+            stderr);
+        ++failures;
+    }
     file = read_file(argv[1], &file_size);
     if (file == NULL) {
         fwprintf(stderr, L"failed to read PE image (error=%lu)\n",
@@ -3167,6 +4010,68 @@ int wmain(int argc, wchar_t **argv) {
                 stderr);
             ++failures;
         }
+        {
+            BOOL tal_readiness = FALSE;
+            void *tal_actor = (void *)(uintptr_t)0x12340000u;
+            if (!SudekiMpLanArenaClientTalLifecycleLeaseExact(
+                    tal_actor, 7u, tal_actor, 7u) ||
+                SudekiMpLanArenaClientTalLifecycleLeaseExact(
+                    tal_actor, 0u, tal_actor, 0u) ||
+                SudekiMpLanArenaClientTalLifecycleLeaseExact(
+                    tal_actor, 8u, tal_actor, 7u) ||
+                SudekiMpLanArenaClientTalLifecycleLeaseExact(
+                    tal_actor, 7u,
+                    (void *)(uintptr_t)0x12341000u, 7u)) {
+                fputs("FAIL: LAN client Tal lifecycle generation lease mismatch\n",
+                    stderr);
+                ++failures;
+            }
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, TRUE, TRUE);
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, TRUE, FALSE);
+            if (!tal_readiness ||
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, FALSE, FALSE) ||
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    FALSE, FALSE, TRUE)) {
+                fputs("FAIL: LAN client actor-local transition readiness lease mismatch\n",
+                    stderr);
+                ++failures;
+            }
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    FALSE, TRUE,
+                    SudekiMpLanArenaClientTalTransitionSelectorReady(
+                        TRUE, 17));
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, TRUE,
+                    SudekiMpLanArenaClientTalTransitionSelectorReady(
+                        TRUE, 75));
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, TRUE,
+                    SudekiMpLanArenaClientTalTransitionSelectorReady(
+                        TRUE, 114));
+            tal_readiness =
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness, TRUE,
+                    SudekiMpLanArenaClientTalTransitionSelectorReady(
+                        TRUE, 17));
+            if (!tal_readiness ||
+                SudekiMpLanArenaClientActorTransitionReadinessRetained(
+                    tal_readiness,
+                    SudekiMpLanArenaClientTalLifecycleLeaseExact(
+                        tal_actor, 8u, tal_actor, 7u),
+                    FALSE)) {
+                fputs("FAIL: LAN client Tal 17-to-75-to-114-to-idle readiness sequence mismatch\n",
+                    stderr);
+                ++failures;
+            }
+        }
         if (!SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 17) ||
             !SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 36) ||
             SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 4) ||
@@ -3186,6 +4091,20 @@ int wmain(int argc, wchar_t **argv) {
             SudekiMpLanArenaClientCombatTransitionRefreshDue(
                 FALSE, FALSE, 1000u)) {
             fputs("FAIL: LAN client combat transition refresh policy mismatch\n",
+                stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientAilishRangedRefreshDue(0u,
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS - 1u) ||
+            !SudekiMpLanArenaClientAilishRangedRefreshDue(0u,
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS) ||
+            !SudekiMpLanArenaClientAilishRangedRefreshDue(
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_MAX_ATTEMPTS - 1u,
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS) ||
+            SudekiMpLanArenaClientAilishRangedRefreshDue(
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_MAX_ATTEMPTS,
+                SUDEKIMP_LAN_ARENA_CLIENT_AILISH_REFRESH_BACKOFF_MS)) {
+            fputs("FAIL: LAN client Ailish ranged refresh retry policy mismatch\n",
                 stderr);
             ++failures;
         }
@@ -3385,14 +4304,36 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
     }
-    /* The harness maps sections without applying PE base relocations.  Put the
-     * exact animation methods used by the LAN replica at their mapped-image
-     * addresses before asking its supported-image preflight to inspect them. */
+    /* The harness maps sections without applying PE base relocations. Put the
+     * audio/VFX singleton operands, embedded sound callbacks and exact animation
+     * methods at their mapped-image addresses before inspecting the LAN seams. */
     {
         uint32_t relocated_sound_global = (uint32_t)(uintptr_t)(
             image + RVA_SOUND_GLOBAL);
+        uint32_t relocated_sfx_manager_global = (uint32_t)(uintptr_t)(
+            image + RVA_SFX_MANAGER_GLOBAL);
         memcpy(image + RVA_SOUND_GET + 1u, &relocated_sound_global,
             sizeof(relocated_sound_global));
+        memcpy(image + RVA_SFX_GET_MANAGER + 1u,
+            &relocated_sfx_manager_global, sizeof(relocated_sfx_manager_global));
+    }
+    {
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)image;
+        const IMAGE_NT_HEADERS32 *nt = (const IMAGE_NT_HEADERS32 *)(
+            image + dos->e_lfanew);
+        uint32_t relocation_delta = (uint32_t)(uintptr_t)image -
+            nt->OptionalHeader.ImageBase;
+        unsigned int offset;
+        /* Relocate the original retail targets; do not synthesize the values
+         * expected by production, which would conceal a wrong callback table. */
+        for (offset = 4u; offset < 0x3cu; offset += 4u) {
+            uint32_t target;
+            memcpy(&target, image + RVA_SFX_SOUND_LISTENER_VTABLE + offset,
+                sizeof(target));
+            target += relocation_delta;
+            memcpy(image + RVA_SFX_SOUND_LISTENER_VTABLE + offset, &target,
+                sizeof(target));
+        }
     }
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x40u) =
         image + RVA_ANIMATION_RENDERER_LOOKUP;
@@ -3418,6 +4359,8 @@ int wmain(int argc, wchar_t **argv) {
         image + RVA_ANIMATION_RENDERER_BLEND_SET;
     *(void **)(image + RVA_ANIMATION_RENDERER_VTABLE + 0x148u) =
         image + RVA_ANIMATION_RENDERER_BLEND_GET;
+    test_spirit_vfx_exact_image(image, &failures);
+    test_spirit_visual_roster_exact_image(image, &failures);
     if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
         fputs("FAIL: LAN client replica exact native seams rejected\n", stderr);
         ++failures;
