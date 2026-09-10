@@ -13,6 +13,10 @@ typedef struct SudekiMpLanArenaSessionConfig {
     unsigned int port;
     uint32_t timeout_ms;
     const uint8_t *game_hash;
+    /* Native actor type code for each seat (Tal=0x23, Buki=0x05, Elco=0x0e,
+     * Ailish=0x01). seat 0 = host/canonical, seat 1 = client/replica. */
+    uint8_t host_actor_type;
+    uint8_t client_actor_type;
 } SudekiMpLanArenaSessionConfig;
 
 typedef struct SudekiMpLanArenaSessionStatus {

@@ -34,11 +34,14 @@ BOOL SudekiMpLanArenaPacketAllowedForNode(
 uint8_t SudekiMpLanArenaActorTypeForPlayerRole(
     SudekiMpLanArenaRole player_role
 ) {
+    uint8_t host_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    uint8_t client_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    (void)SudekiMpLanArenaSeatActorTypes(&host_type, &client_type);
     if (player_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL) {
-        return SUDEKIMP_LAN_ARENA_TAL_TYPE;
+        return host_type;
     }
     if (player_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
-        return SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+        return client_type;
     }
     return 0u;
 }

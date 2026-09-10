@@ -12,23 +12,23 @@ static void fill_snapshot(SudekiMpLanArenaSnapshot *snapshot, DWORD now) {
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->host_tick = now;
     snapshot->match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
-    snapshot->tal.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    snapshot->tal.native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    snapshot->tal.facing_z = 1.0f;
-    snapshot->tal.hp = 6850u;
-    snapshot->tal.sp = 440u;
-    snapshot->tal.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
-    snapshot->ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    snapshot->ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    snapshot->ailish.x = 3.0f;
-    snapshot->ailish.facing_x = 1.0f;
-    snapshot->ailish.hp = 3300u;
-    snapshot->ailish.sp = 440u;
-    snapshot->ailish.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
-    snapshot->ailish.combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
-    snapshot->ailish.action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
-    snapshot->ailish.action_phase_valid = 1u;
-    snapshot->ailish.action_phase_q8 = 18u * 256u;
+    snapshot->seat[0].actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    snapshot->seat[0].native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    snapshot->seat[0].facing_z = 1.0f;
+    snapshot->seat[0].hp = 6850u;
+    snapshot->seat[0].sp = 440u;
+    snapshot->seat[0].animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    snapshot->seat[1].actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    snapshot->seat[1].native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    snapshot->seat[1].x = 3.0f;
+    snapshot->seat[1].facing_x = 1.0f;
+    snapshot->seat[1].hp = 3300u;
+    snapshot->seat[1].sp = 440u;
+    snapshot->seat[1].animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    snapshot->seat[1].combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    snapshot->seat[1].action_variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
+    snapshot->seat[1].action_phase_valid = 1u;
+    snapshot->seat[1].action_phase_q8 = 18u * 256u;
     snapshot->enemy_count = 1u;
     snapshot->enemies[0].native_entity_id = 1u;
     snapshot->enemies[0].z = 6.0f;
@@ -50,6 +50,8 @@ static int run_host(unsigned int port) {
     config.port = port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
+    config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     if (!SudekiMpLanArenaSessionStart(&config)) return 10;
     while ((DWORD)(GetTickCount() - started) < 5000u) {
         DWORD now = GetTickCount();
@@ -109,6 +111,8 @@ static int run_client(unsigned int port) {
     config.port = port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
+    config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     if (!SudekiMpLanArenaSessionStart(&config)) return 20;
     while ((DWORD)(GetTickCount() - started) < 5000u) {
         SudekiMpLanArenaSessionPoll(GetTickCount());
@@ -135,10 +139,10 @@ static int run_client(unsigned int port) {
         }
         if (SudekiMpLanArenaSessionTakeRemoteSnapshot(&snapshot)) {
             if (!input_sent || snapshot.match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
-                snapshot.tal.hp != 6850u || snapshot.ailish.hp != 3300u ||
-                snapshot.ailish.animation_state !=
+                snapshot.seat[0].hp != 6850u || snapshot.seat[1].hp != 3300u ||
+                snapshot.seat[1].animation_state !=
                     SUDEKIMP_LAN_ARENA_ANIMATION_ACTION ||
-                snapshot.ailish.combat_state !=
+                snapshot.seat[1].combat_state !=
                     SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK ||
                 snapshot.enemy_count != 1u || snapshot.enemies[0].hp != 950u) {
                 SudekiMpLanArenaSessionStop(FALSE);

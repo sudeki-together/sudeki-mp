@@ -6168,6 +6168,22 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoInput(
             SudekiMpControlSeparationDirectionalGait(
                 direction[0], direction[2], aim_direction_x, aim_direction_z,
                 &gait_mode, &gait_heading[0], &gait_heading[2]);
+        {   /* TEMPORARY diagnostic: throttled host movement apply values. */
+            static DWORD last_player_two_movement_trace;
+            DWORD trace_now = GetTickCount();
+            if (last_player_two_movement_trace == 0u ||
+                (DWORD)(trace_now - last_player_two_movement_trace) >= 500u) {
+                last_player_two_movement_trace = trace_now;
+                SudekiMpLogFormat(
+                    "control_separation event=player_two_movement_diag "
+                    "dir_x=%.3f dir_z=%.3f mag=%.3f aim_valid=%u gait=%u mode=%u "
+                    "gait_x=%.3f gait_z=%.3f character=0x%08lx\r\n",
+                    (double)direction[0], (double)direction[2], (double)magnitude,
+                    aim_direction_valid ? 1u : 0u, directional_gait ? 1u : 0u,
+                    gait_mode, (double)gait_heading[0], (double)gait_heading[2],
+                    (unsigned long)(uintptr_t)character);
+            }
+        }
         arbiter_movement(arbiter, directional_gait ? gait_heading : direction,
             magnitude, 1.0f, directional_gait ? gait_mode : 0u);
         movement_controller = readable_memory(character, 0x84u) ?

@@ -6,6 +6,19 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "cleanroom/engine.h"
+#include "network/lan_arena_protocol.h"
+
+static SudekiMpCleanroomActor seat_host_actor(void) {
+    uint8_t host_type = 0u, client_type = 0u;
+    SudekiMpCleanroomActor actor;
+    if (SudekiMpLanArenaSeatActorTypes(&host_type, &client_type) &&
+        SudekiMpCleanroomActorFromType(host_type, &actor)) {
+        return actor;
+    }
+    return SUDEKIMP_CLEANROOM_TAL;
+}
+
 enum {
     RVA_SFX_PLAY = 0x00018de0u,
     RVA_SFX_PRE_CACHE = 0x00019540u,
@@ -329,7 +342,7 @@ static BOOL native_tal_ready(void *context, void *tal) {
 
 static void *native_resolve_tal(void *context) {
     (void)context;
-    return SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    return SudekiMpCleanroomEngineActorEntity(seat_host_actor());
 }
 
 static void *native_get_sfx_manager(void *context) {

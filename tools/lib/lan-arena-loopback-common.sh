@@ -731,12 +731,12 @@ title_loopback_windows() {
     local host_window_id="$1"
     local client_window_id="$2"
     local phase="$3"
-    if ! wmctrl -i -r "${host_window_id}" -T 'Sudeki LAN Host - Tal' \
+    if ! wmctrl -i -r "${host_window_id}" -T "Sudeki LAN Host - ${lan_arena_host_actor:-Tal}" \
         2>/dev/null; then
         printf 'WARNING: could not title refreshed host window %s.\n' \
             "${host_window_id}" >&2
     fi
-    if ! wmctrl -i -r "${client_window_id}" -T 'Sudeki LAN Client - Ailish' \
+    if ! wmctrl -i -r "${client_window_id}" -T "Sudeki LAN Client - ${lan_arena_client_actor:-Ailish}" \
         2>/dev/null; then
         printf 'WARNING: could not title refreshed client window %s.\n' \
             "${client_window_id}" >&2

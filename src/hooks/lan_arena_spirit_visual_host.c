@@ -5,6 +5,19 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "network/lan_arena_protocol.h"
+
+static uint8_t seat_host_type(void) {
+    uint8_t host_type = 0u, client_type = 0u;
+    return SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)
+        ? host_type : SUDEKIMP_LAN_ARENA_TAL_TYPE;
+}
+static uint8_t seat_client_type(void) {
+    uint8_t host_type = 0u, client_type = 0u;
+    return SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)
+        ? client_type : SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+}
+
 enum {
     RVA_FINALIZE = 0x18830u,
     RVA_WEAK_BIND = 0x1750u,
@@ -804,18 +817,18 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
         /* Capture follows a positively observed native Spirit manager state
          * in the host publisher. Late join during a cast cannot reconstruct
          * effects created before this observer owned the session. */
-        if (output->tal.skill_active > 1u ||
-            (output->tal.skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-             output->tal.skill_active != 0u)) {
+        if (output->seat[0].skill_active > 1u ||
+            (output->seat[0].skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+             output->seat[0].skill_active != 0u)) {
             reason = "awaiting_inactive_spirit_baseline";
             goto unknown;
         }
         session_armed = TRUE;
     }
     sample_reason = NULL;
-    if (!discover_actor_status_visuals(tal, SUDEKIMP_LAN_ARENA_TAL_TYPE,
+    if (!discover_actor_status_visuals(tal, seat_host_type(),
             session, host_tick) ||
-        !discover_actor_status_visuals(ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
+        !discover_actor_status_visuals(ailish, seat_client_type(),
             session, host_tick)) {
         reason = sample_reason != NULL ? sample_reason : "status_visual_discovery";
         goto unknown;
@@ -831,7 +844,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
         uint32_t tick_delta = host_tick - value->emitted_host_tick;
         if (tick_delta >= 0x80000000u ||
             (value->owner_actor_type == 0u && (current_skill == 0u || skill_delta >= 0x8000u ||
-            (skill_delta == 0u && output->tal.skill_kind !=
+            (skill_delta == 0u && output->seat[0].skill_kind !=
                 SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT)))) {
             unknown_output(output);
             reason = "publication_before_native_emission";

@@ -13,6 +13,16 @@
 #include <stdint.h>
 #include <string.h>
 
+static SudekiMpCleanroomActor seat_host_actor(void) {
+    uint8_t host_type = 0u, client_type = 0u;
+    SudekiMpCleanroomActor actor;
+    if (SudekiMpLanArenaSeatActorTypes(&host_type, &client_type) &&
+        SudekiMpCleanroomActorFromType(host_type, &actor)) {
+        return actor;
+    }
+    return SUDEKIMP_CLEANROOM_TAL;
+}
+
 typedef void (__stdcall *ControllerCombatFunction)(void *controller);
 typedef void (__stdcall *ArbiterMovementFunction)(
     void *arbiter, const float *direction, float speed, float turn_rate,
@@ -160,7 +170,7 @@ static uint8_t __attribute__((fastcall)) observe_host_quick_menu_skill_use(
 ) {
     void *owner = readable_memory(skill, 0x14u) ?
         *(void **)((uint8_t *)skill + 0x10u) : NULL;
-    void *tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    void *tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
     SudekiMpCharacterSkillState before;
     SudekiMpSkillQuickSkillRow row;
     BOOL admission_exact = owner != NULL && owner == tal &&
@@ -287,7 +297,7 @@ static void service_operator_action(void) {
     }
     controller = *(uint8_t **)(
         host_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
-    tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
     if (!readable_memory(
             controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
         tal == NULL || *(void **)(controller + CONTROLLER_TARGET_OFFSET) != tal) {
@@ -424,7 +434,7 @@ static void __stdcall gate_host_movement(
     static const float stopped_direction[3] = {0.0f, 0.0f, 0.0f};
     void *character = arbiter == NULL ? NULL :
         *(void **)((uint8_t *)arbiter + CHARACTER_ARBITER_OWNER_OFFSET);
-    void *tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    void *tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
     if ((SudekiMpLanArenaPausePanelActive() ||
          SudekiMpCleanroomMenuActive()) && character != NULL &&
         character == tal) {
@@ -445,7 +455,7 @@ static void __stdcall gate_host_movement(
 
 static void __stdcall observe_host_combat(void *controller) {
     uint8_t *state = (uint8_t *)controller;
-    void *tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+    void *tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
     BOOL owns_tal = state != NULL && tal != NULL &&
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == tal;
     if (owns_tal && (SudekiMpLanArenaPausePanelActive() ||

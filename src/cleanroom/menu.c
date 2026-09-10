@@ -901,7 +901,9 @@ static BOOL command_line_is_cleanroom(void) {
         strstr(command_line, "-Level testroom") != NULL &&
         strstr(command_line, "-DT 1") != NULL &&
         (strstr(command_line, "-Ailish 1") != NULL ||
-         strstr(command_line, "-Tal 1") != NULL);
+         strstr(command_line, "-Tal 1") != NULL ||
+         strstr(command_line, "-Buki 1") != NULL ||
+         strstr(command_line, "-Elco 1") != NULL);
 }
 
 static BOOL menu_memory_readable(const void *pointer, size_t size) {
@@ -1015,10 +1017,8 @@ static BOOL native_roster_prepare_page_contract(void) {
 }
 
 static unsigned int roster_actor_type(unsigned int actor) {
-    static const unsigned int types[MENU_ACTOR_COUNT] = {
-        0x23u, 0x05u, 0x0eu, 0x01u
-    };
-    return actor < MENU_ACTOR_COUNT ? types[actor] : 0u;
+    return actor < MENU_ACTOR_COUNT ?
+        SudekiMpCleanroomActorNativeType((SudekiMpCleanroomActor)actor) : 0u;
 }
 
 static BOOL roster_three_seat_available(void) {
@@ -1168,18 +1168,17 @@ static BOOL roster_actor_from_label_exact(
     const char *label,
     unsigned int *actor_result
 ) {
-    unsigned int actor;
+    SudekiMpCleanroomActor actor;
 
-    if (label == NULL || actor_result == NULL) {
+    if (!SudekiMpCleanroomActorFromLabel(label, &actor)) {
         return FALSE;
     }
-    for (actor = 0u; actor < MENU_ACTOR_COUNT; ++actor) {
-        if (_stricmp(label, roster_actor_label(actor)) == 0) {
-            *actor_result = actor;
-            return TRUE;
-        }
+    /* Cafu (developer test PC) is outside the retail four-card roster. */
+    if ((unsigned int)actor >= MENU_ACTOR_COUNT) {
+        return FALSE;
     }
-    return FALSE;
+    *actor_result = (unsigned int)actor;
+    return TRUE;
 }
 
 static void roster_build_persistence_path(void) {

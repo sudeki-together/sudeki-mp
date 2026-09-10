@@ -86,6 +86,7 @@ typedef struct AnimationMethods {
 
 typedef struct LocomotionProfile {
     unsigned int resource_type;
+    unsigned int resource_type_alt;
     int idle_selector;
     int moving_primary_selector;
     int moving_secondary_selector;
@@ -124,6 +125,7 @@ enum {
 static const LocomotionProfile locomotion_profiles[] = {
     {
         0x23u,
+        0x05u,
         17,
         36,
         32,
@@ -133,6 +135,7 @@ static const LocomotionProfile locomotion_profiles[] = {
     },
     {
         0x01u,
+        0x0eu,
         20,
         22,
         23,
@@ -729,7 +732,8 @@ SudekiMpNoncasterSkillLocomotionService(
         return SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_REJECTED;
     }
     profile = &locomotion_profiles[(unsigned int)actor];
-    if (!actor_resource_type_matches(character, profile->resource_type)) {
+    if (!actor_resource_type_matches(character, profile->resource_type) &&
+        !actor_resource_type_matches(character, profile->resource_type_alt)) {
         SudekiMpNoncasterSkillLocomotionRelease(lease);
         set_reason(reason_result, "actor_identity_mismatch");
         SetLastError(ERROR_INVALID_DATA);

@@ -17,7 +17,10 @@
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
 #define SUDEKIMP_LAN_ARENA_MAP_CLEANROOM 1u
 #define SUDEKIMP_LAN_ARENA_TAL_TYPE 0x23u
+#define SUDEKIMP_LAN_ARENA_BUKI_TYPE 0x05u
+#define SUDEKIMP_LAN_ARENA_ELCO_TYPE 0x0eu
 #define SUDEKIMP_LAN_ARENA_AILISH_TYPE 0x01u
+#define SUDEKIMP_LAN_ARENA_SEAT_COUNT 2u
 #define SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID 1u
 #define SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY 4u
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS 5u
@@ -181,8 +184,7 @@ typedef struct SudekiMpLanArenaHello {
     uint8_t map_id;
     uint8_t role;
     uint8_t simulation_node_role;
-    uint8_t tal_type;
-    uint8_t ailish_type;
+    uint8_t seat_type[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     uint64_t session_token;
 } SudekiMpLanArenaHello;
 
@@ -364,8 +366,7 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint32_t host_tick;
     uint8_t match_state;
     uint8_t combat_enabled;
-    SudekiMpLanArenaActorSnapshot tal;
-    SudekiMpLanArenaActorSnapshot ailish;
+    SudekiMpLanArenaActorSnapshot seat[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     /* Bounded presentation-only journal. Every event is immutable, uses a
      * session-local nonzero modular sequence, and names the exact Tal Spirit
      * transaction that emitted it. Only the transaction's start edge is
@@ -403,8 +404,7 @@ typedef struct SudekiMpLanArenaHandshakeExpectation {
     uint8_t map_id;
     uint8_t expected_sender_role;
     uint8_t expected_sender_simulation_node_role;
-    uint8_t tal_type;
-    uint8_t ailish_type;
+    uint8_t seat_type[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     uint64_t expected_session_token;
 } SudekiMpLanArenaHandshakeExpectation;
 
@@ -442,6 +442,17 @@ int SudekiMpLanArenaDecodePacket(
  * client snapshot enters interpolation history. */
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
+);
+/* Set the per-seat native actor type codes (host=seat0, client=seat1) that wire
+ * validation enforces. Defaults to Tal/Ailish. Call once at session start with
+ * the resolved [LanArena] config. Invalid types are ignored (fail-closed). */
+void SudekiMpLanArenaSetSeatTypes(uint8_t host_type, uint8_t client_type);
+/* Read the per-seat native actor type codes the wire validator currently
+ * enforces (host=seat0, client=seat1). Always succeeds and defaults to the
+ * Tal/Ailish pairing until SudekiMpLanArenaSetSeatTypes is called. */
+int SudekiMpLanArenaSeatActorTypes(
+    uint8_t *host_type,
+    uint8_t *client_type
 );
 /* The supported executable uses three channel-zero renderer selectors while
  * one native Spirit transaction remains active. Keep this exact-build

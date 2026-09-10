@@ -86,8 +86,8 @@ static void fill_hello(
     packet->body.hello.role = (uint8_t)role;
     packet->body.hello.simulation_node_role =
         (uint8_t)simulation_node_role;
-    packet->body.hello.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    packet->body.hello.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    packet->body.hello.seat_type[0] = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    packet->body.hello.seat_type[1] = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     packet->body.hello.session_token = token;
 }
 
@@ -104,14 +104,14 @@ static void fill_snapshot(
     packet->body.snapshot.sequence = sequence;
     packet->body.snapshot.acknowledged_input = acknowledged_input;
     packet->body.snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
-    packet->body.snapshot.tal.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    packet->body.snapshot.tal.native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    packet->body.snapshot.tal.facing_z = 1.0f;
-    packet->body.snapshot.tal.hp = 1u;
-    packet->body.snapshot.ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    packet->body.snapshot.ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    packet->body.snapshot.ailish.facing_z = 1.0f;
-    packet->body.snapshot.ailish.hp = 1u;
+    packet->body.snapshot.seat[0].actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    packet->body.snapshot.seat[0].native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    packet->body.snapshot.seat[0].facing_z = 1.0f;
+    packet->body.snapshot.seat[0].hp = 1u;
+    packet->body.snapshot.seat[1].actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    packet->body.snapshot.seat[1].native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    packet->body.snapshot.seat[1].facing_z = 1.0f;
+    packet->body.snapshot.seat[1].hp = 1u;
 }
 
 static void test_host_session(void) {
@@ -141,6 +141,8 @@ static void test_host_session(void) {
     config.port = host_port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
+    config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     CHECK(!SudekiMpLanArenaSessionStart(&config));
     CHECK(GetLastError() == ERROR_INVALID_PARAMETER);
     config.local_simulation_node_role =
@@ -219,14 +221,14 @@ static void test_host_session(void) {
     CHECK(input.skill_slot == 3u);
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
-    snapshot.tal.actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    snapshot.tal.native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    snapshot.tal.facing_z = 1.0f;
-    snapshot.tal.hp = 1u;
-    snapshot.ailish.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    snapshot.ailish.native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-    snapshot.ailish.facing_z = 1.0f;
-    snapshot.ailish.hp = 1u;
+    snapshot.seat[0].actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    snapshot.seat[0].native_entity_id = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    snapshot.seat[0].facing_z = 1.0f;
+    snapshot.seat[0].hp = 1u;
+    snapshot.seat[1].actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    snapshot.seat[1].native_entity_id = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    snapshot.seat[1].facing_z = 1.0f;
+    snapshot.seat[1].hp = 1u;
     snapshot.acknowledged_input = 2u;
     CHECK(SudekiMpLanArenaSessionSendSnapshot(&snapshot));
     CHECK(receive_packet(peer, &packet, &source));
@@ -284,6 +286,8 @@ static void test_client_session(void) {
     config.port = host_port;
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
+    config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     CHECK(SudekiMpLanArenaSessionStart(&config));
     SudekiMpLanArenaSessionPoll(1u);
     CHECK(receive_packet(host, &packet, &client_address));

@@ -360,6 +360,8 @@ static SudekiMpLanArenaSessionConfig make_config(
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
     config.port = SUDEKIMP_LAN_ARENA_DEFAULT_PORT;
     config.timeout_ms = 1000u;
+    config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     return config;
 }
 
@@ -1459,8 +1461,8 @@ static void verify_host_spirit_operator_two_phase(void) {
     queue_host_spirit_request(1u);
     service_host_operator_spirit(&status);
     check(host_operator_spirit_intent.pending &&
-          host_operator_spirit_intent.tal == &tal_one &&
-          host_operator_spirit_intent.ailish == &ailish &&
+          host_operator_spirit_intent.seat[0] == &tal_one &&
+          host_operator_spirit_intent.seat[1] == &ailish &&
           host_operator_spirit_intent.session_token == token &&
           host_operator_spirit_intent.variant == 1u &&
           ranged_combat_prime_pending &&
@@ -1685,8 +1687,8 @@ static void verify_host_spirit_operator_two_phase(void) {
     status = prepare_host_spirit_operator_fixture(
         &tal_one, &ailish, token);
     host_operator_spirit_intent.pending = TRUE;
-    host_operator_spirit_intent.tal = &tal_one;
-    host_operator_spirit_intent.ailish = &ailish;
+    host_operator_spirit_intent.seat[0] = &tal_one;
+    host_operator_spirit_intent.seat[1] = &ailish;
     host_operator_spirit_intent.session_token = token;
     host_operator_spirit_intent.variant = 1u;
     queue_host_spirit_request(2u);
@@ -1902,11 +1904,11 @@ static void verify_host_snapshot_failure_telemetry_policy(void) {
     unsigned int baseline;
 
     memset(&snapshot, 0, sizeof(snapshot));
-    snapshot.tal.skill_sequence = 7u;
-    snapshot.tal.skill_kind =
+    snapshot.seat[0].skill_sequence = 7u;
+    snapshot.seat[0].skill_kind =
         SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
-    snapshot.tal.skill_active = 1u;
-    snapshot.tal.skill_presentation_selector[0] = 112;
+    snapshot.seat[0].skill_active = 1u;
+    snapshot.seat[0].skill_presentation_selector[0] = 112;
     ZeroMemory(&host_snapshot_failure_telemetry,
         sizeof(host_snapshot_failure_telemetry));
     baseline = log_format_call_count;
@@ -3131,6 +3133,24 @@ const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor) {
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
     if ((unsigned int)actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) return NULL;
     return cleanroom_actor_entities[actor];
+}
+
+BOOL SudekiMpCleanroomActorFromType(unsigned int type, SudekiMpCleanroomActor *actor) {
+    if (actor == NULL) {
+        return FALSE;
+    }
+    switch (type) {
+    case 0x23u: *actor = SUDEKIMP_CLEANROOM_TAL; return TRUE;
+    case 0x05u: *actor = SUDEKIMP_CLEANROOM_BUKI; return TRUE;
+    case 0x0eu: *actor = SUDEKIMP_CLEANROOM_ELCO; return TRUE;
+    case 0x01u: *actor = SUDEKIMP_CLEANROOM_AILISH; return TRUE;
+    default: return FALSE;
+    }
+}
+
+BOOL SudekiMpCleanroomActorIsRanged(SudekiMpCleanroomActor actor) {
+    return actor == SUDEKIMP_CLEANROOM_AILISH ||
+        actor == SUDEKIMP_CLEANROOM_ELCO;
 }
 
 BOOL SudekiMpObserveCharacterSkill(

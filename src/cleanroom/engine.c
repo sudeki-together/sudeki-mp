@@ -2503,7 +2503,8 @@ static BOOL repair_actor_stat_maxima(SudekiMpCleanroomActor actor) {
         "Maximum SkillPoints"
     );
     if (isfinite(hit_points) && hit_points > 0.0f &&
-        (!isfinite(maximum_hit_points) || maximum_hit_points <= 0.0f)) {
+        (!isfinite(maximum_hit_points) || maximum_hit_points <= 0.0f ||
+         hit_points > maximum_hit_points)) {
         repaired_hit_points = set_character_number_stat(
             gel_pointer,
             "Maximum HitPoints",
@@ -3443,11 +3444,13 @@ static BOOL invoke_combat_transition(
     }
     SudekiMpLogFormat(
         "cleanroom_engine event=combat_mode phase=%s state=%s actor=%s "
-        "reason=%s\r\n",
+        "reason=%s caller=%p current=%s\r\n",
         force ? "refresh" : "begin",
         enabled ? "enabled" : "disabled",
         actor_label == NULL ? "none" : actor_label,
-        reason == NULL ? "unspecified" : reason
+        reason == NULL ? "unspecified" : reason,
+        (void *)__builtin_return_address(0),
+        current ? "enabled" : "disabled"
     );
     group_players_combat_transition(
         combat_event_sink,
@@ -3593,6 +3596,62 @@ const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor) {
         return NULL;
     }
     return actor_resources[actor];
+}
+
+BOOL SudekiMpCleanroomActorFromLabel(
+    const char *label,
+    SudekiMpCleanroomActor *actor
+) {
+    int index;
+
+    if (label == NULL || actor == NULL) {
+        return FALSE;
+    }
+    for (index = 0; index < SUDEKIMP_CLEANROOM_ACTOR_COUNT; ++index) {
+        if (_stricmp(label, actor_labels[index]) == 0) {
+            *actor = (SudekiMpCleanroomActor)index;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+unsigned int SudekiMpCleanroomActorNativeType(SudekiMpCleanroomActor actor) {
+    static const unsigned int types[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
+        0x23u, /* Tal   */
+        0x05u, /* Buki  */
+        0x0eu, /* Elco  */
+        0x01u, /* Ailish */
+        0u     /* Cafu — developer test PC, no native type */
+    };
+
+    if (actor < 0 || actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) {
+        return 0u;
+    }
+    return types[actor];
+}
+
+BOOL SudekiMpCleanroomActorFromType(
+    unsigned int type,
+    SudekiMpCleanroomActor *actor
+) {
+    SudekiMpCleanroomActor index;
+
+    if (actor == NULL) {
+        return FALSE;
+    }
+    for (index = 0; index < SUDEKIMP_CLEANROOM_ACTOR_COUNT; ++index) {
+        if (SudekiMpCleanroomActorNativeType(index) == type) {
+            *actor = index;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOL SudekiMpCleanroomActorIsRanged(SudekiMpCleanroomActor actor) {
+    return actor == SUDEKIMP_CLEANROOM_AILISH ||
+        actor == SUDEKIMP_CLEANROOM_ELCO;
 }
 
 BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {

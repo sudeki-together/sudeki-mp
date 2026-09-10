@@ -10,8 +10,13 @@ static int valid_node_role(SudekiMpLanArenaSimulationNodeRole node_role) {
 }
 
 static int actor_index(uint8_t actor_type) {
-    if (actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE) return 0;
-    if (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) return 1;
+    uint8_t host_type;
+    uint8_t client_type;
+    if (!SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)) {
+        return -1;
+    }
+    if (actor_type == host_type) return 0;
+    if (actor_type == client_type) return 1;
     return -1;
 }
 
@@ -118,9 +123,9 @@ static int next_skill_lifecycle_allowed(
     return simulation != NULL && candidate != NULL &&
         (!simulation->frame_valid ||
          (next_actor_skill_allowed(
-              &simulation->frame.tal, &candidate->tal) &&
+              &simulation->frame.seat[0], &candidate->seat[0]) &&
           next_actor_skill_allowed(
-              &simulation->frame.ailish, &candidate->ailish)));
+              &simulation->frame.seat[1], &candidate->seat[1])));
 }
 
 static int spirit_audio_event_equal(
@@ -139,10 +144,10 @@ static int spirit_audio_event_matches_current_spirit(
 ) {
     return frame != NULL && event != NULL &&
         frame->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
-        frame->combat_enabled == 1u && frame->tal.skill_active == 1u &&
-        frame->tal.skill_kind ==
+        frame->combat_enabled == 1u && frame->seat[0].skill_active == 1u &&
+        frame->seat[0].skill_kind ==
             SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-        frame->tal.skill_sequence == event->skill_sequence;
+        frame->seat[0].skill_sequence == event->skill_sequence;
 }
 
 static int next_spirit_audio_journal_allowed(
@@ -393,25 +398,28 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
     const SudekiMpLanArenaActorObservation *ailish
 ) {
     SudekiMpLanArenaSnapshot committed;
-    if (!SudekiMpLanArenaSharedSimulationSessionExact(
+    uint8_t host_type;
+    uint8_t client_type;
+    if (!SudekiMpLanArenaSeatActorTypes(&host_type, &client_type) ||
+        !SudekiMpLanArenaSharedSimulationSessionExact(
             simulation,
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,
             session_token) ||
         !valid_observation(observation) ||
-        !valid_actor_observation(tal, SUDEKIMP_LAN_ARENA_TAL_TYPE) ||
-        !valid_actor_observation(ailish, SUDEKIMP_LAN_ARENA_AILISH_TYPE) ||
+        !valid_actor_observation(tal, host_type) ||
+        !valid_actor_observation(ailish, client_type) ||
         !next_match_state_allowed(simulation, observation->match_state) ||
         !next_tick_allowed(simulation, observation->host_tick)) return 0;
     memset(&committed, 0, sizeof(committed));
     committed.host_tick = observation->host_tick;
     committed.match_state = observation->match_state;
     committed.combat_enabled = observation->combat_enabled;
-    committed.tal = tal->actor;
-    committed.ailish = ailish->actor;
-    committed.tal.hp = observation->tal_hp;
-    committed.tal.sp = observation->tal_sp;
-    committed.ailish.hp = observation->ailish_hp;
-    committed.ailish.sp = observation->ailish_sp;
+    committed.seat[0] = tal->actor;
+    committed.seat[1] = ailish->actor;
+    committed.seat[0].hp = observation->tal_hp;
+    committed.seat[0].sp = observation->tal_sp;
+    committed.seat[1].hp = observation->ailish_hp;
+    committed.seat[1].sp = observation->ailish_sp;
     committed.enemy_count = observation->enemy_count;
     memcpy(committed.enemies, observation->enemies,
         sizeof(committed.enemies));

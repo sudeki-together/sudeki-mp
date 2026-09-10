@@ -421,10 +421,10 @@ static BOOL snapshot_stream_continuous(
         tick_after(after->host_tick, before->host_tick) &&
         before->match_state == after->match_state &&
         before->combat_enabled == after->combat_enabled &&
-        before->tal.actor_type == after->tal.actor_type &&
-        before->tal.native_entity_id == after->tal.native_entity_id &&
-        before->ailish.actor_type == after->ailish.actor_type &&
-        before->ailish.native_entity_id == after->ailish.native_entity_id &&
+        before->seat[0].actor_type == after->seat[0].actor_type &&
+        before->seat[0].native_entity_id == after->seat[0].native_entity_id &&
+        before->seat[1].actor_type == after->seat[1].actor_type &&
+        before->seat[1].native_entity_id == after->seat[1].native_entity_id &&
         enemy_layout_matches(before, after);
 }
 
@@ -600,14 +600,14 @@ BOOL SudekiMpLanArenaReplicaSample(
         *sample = replica->oldest;
         interpolate_spirit_visuals(&replica->earliest, &replica->oldest,
             host_tick, alpha, sample);
-        interpolate_actor(&replica->earliest.tal, &replica->oldest.tal,
+        interpolate_actor(&replica->earliest.seat[0], &replica->oldest.seat[0],
             alpha, host_tick, replica->earliest.host_tick,
-            replica->oldest.host_tick, &sample->tal);
-        interpolate_actor(&replica->earliest.ailish, &replica->oldest.ailish,
+            replica->oldest.host_tick, &sample->seat[0]);
+        interpolate_actor(&replica->earliest.seat[1], &replica->oldest.seat[1],
             alpha, host_tick, replica->earliest.host_tick,
-            replica->oldest.host_tick, &sample->ailish);
+            replica->oldest.host_tick, &sample->seat[1]);
         if (!sample->combat_enabled)
-            memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
+            memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->earliest.enemies[index].x,
@@ -636,14 +636,14 @@ BOOL SudekiMpLanArenaReplicaSample(
         *sample = replica->previous;
         interpolate_spirit_visuals(&replica->oldest, &replica->previous,
             host_tick, alpha, sample);
-        interpolate_actor(&replica->oldest.tal, &replica->previous.tal,
+        interpolate_actor(&replica->oldest.seat[0], &replica->previous.seat[0],
             alpha, host_tick, replica->oldest.host_tick,
-            replica->previous.host_tick, &sample->tal);
-        interpolate_actor(&replica->oldest.ailish, &replica->previous.ailish,
+            replica->previous.host_tick, &sample->seat[0]);
+        interpolate_actor(&replica->oldest.seat[1], &replica->previous.seat[1],
             alpha, host_tick, replica->oldest.host_tick,
-            replica->previous.host_tick, &sample->ailish);
+            replica->previous.host_tick, &sample->seat[1]);
         if (!sample->combat_enabled)
-            memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
+            memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
                 replica->oldest.enemies[index].x,
@@ -673,14 +673,14 @@ BOOL SudekiMpLanArenaReplicaSample(
     alpha = clamp01((float)elapsed / (float)span);
     interpolate_spirit_visuals(&replica->previous, &replica->latest,
         host_tick, alpha, sample);
-    interpolate_actor(&replica->previous.tal, &replica->latest.tal,
+    interpolate_actor(&replica->previous.seat[0], &replica->latest.seat[0],
         alpha, host_tick, replica->previous.host_tick,
-        replica->latest.host_tick, &sample->tal);
-    interpolate_actor(&replica->previous.ailish, &replica->latest.ailish,
+        replica->latest.host_tick, &sample->seat[0]);
+    interpolate_actor(&replica->previous.seat[1], &replica->latest.seat[1],
         alpha, host_tick, replica->previous.host_tick,
-        replica->latest.host_tick, &sample->ailish);
+        replica->latest.host_tick, &sample->seat[1]);
     if (!sample->combat_enabled)
-        memset(&sample->ailish.locomotion, 0, sizeof(sample->ailish.locomotion));
+        memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
     for (index = 0u; index < sample->enemy_count; ++index) {
         sample->enemies[index].x = interpolate_float(
             replica->previous.enemies[index].x,
@@ -707,12 +707,12 @@ BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
     if (replica == NULL) return FALSE;
 #define SNAPSHOT_ACTION_ACTIVE(snapshot_, valid_) \
     ((valid_) && \
-     ((snapshot_).tal.animation_state == \
+     ((snapshot_).seat[0].animation_state == \
           SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
-      (snapshot_).ailish.animation_state == \
+      (snapshot_).seat[1].animation_state == \
           SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
-      (snapshot_).tal.skill_active != 0u || \
-      (snapshot_).ailish.skill_active != 0u))
+      (snapshot_).seat[0].skill_active != 0u || \
+      (snapshot_).seat[1].skill_active != 0u))
     if (SNAPSHOT_ACTION_ACTIVE(replica->earliest, replica->earliest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->oldest, replica->oldest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->previous, replica->previous_valid) ||

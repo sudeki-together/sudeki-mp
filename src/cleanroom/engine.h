@@ -33,6 +33,26 @@ typedef struct SudekiMpCleanroomActorPresentation {
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor);
 const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);
 
+/* Resolve a case-insensitive actor label ("Tal"/"Buki"/"Elco"/"Ailish") to its
+ * SUDEKIMP_CLEANROOM_* type. Returns FALSE for NULL arguments or unknown
+ * labels. Matches every authored actor including Cafu (developer test PC). */
+BOOL SudekiMpCleanroomActorFromLabel(
+    const char *label,
+    SudekiMpCleanroomActor *actor
+);
+/* Map a SUDEKIMP_CLEANROOM_* actor to its native character type code
+ * (Tal=0x23, Buki=0x05, Elco=0x0e, Ailish=0x01). Returns 0 for unknown. */
+unsigned int SudekiMpCleanroomActorNativeType(SudekiMpCleanroomActor actor);
+/* Inverse of the above: map a native character type code back to its
+ * SUDEKIMP_CLEANROOM_* actor. Returns FALSE for NULL or unknown codes. */
+BOOL SudekiMpCleanroomActorFromType(
+    unsigned int type,
+    SudekiMpCleanroomActor *actor
+);
+/* TRUE for ranged actors (Ailish/Elco) that use weapon slots and first-person
+ * fire instead of melee Weak/Strong/Sweep combos. */
+BOOL SudekiMpCleanroomActorIsRanged(SudekiMpCleanroomActor actor);
+
 BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module);
 BOOL SudekiMpCleanroomEngineResourceNameFromText(
     SudekiMpResourceName *resource_name,

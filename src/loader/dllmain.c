@@ -731,6 +731,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     int lan_arena_port = 26770;
     int lan_arena_timeout_ms = 1500;
     char lan_arena_host_ipv4[64];
+    wchar_t lan_arena_host_actor_text[32];
+    wchar_t lan_arena_client_actor_text[32];
+    char lan_arena_host_actor_label[32];
+    char lan_arena_client_actor_label[32];
+    SudekiMpCleanroomActor lan_arena_host_actor;
+    SudekiMpCleanroomActor lan_arena_client_actor;
     float plasmatica_animation_speed = 1.0f;
     float plasmatica_camera_speed = 1.0f;
     float second_player_maximum_separation = 10.0f;
@@ -1154,6 +1160,39 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SudekiMpLogClose();
             return SUDEKIMP_INIT_BAD_CONFIG;
         }
+        GetPrivateProfileStringW(
+            L"LanArena", L"HostActor", L"Tal", lan_arena_host_actor_text,
+            (DWORD)(sizeof(lan_arena_host_actor_text) /
+                sizeof(lan_arena_host_actor_text[0])),
+            config_path);
+        GetPrivateProfileStringW(
+            L"LanArena", L"ClientActor", L"Ailish", lan_arena_client_actor_text,
+            (DWORD)(sizeof(lan_arena_client_actor_text) /
+                sizeof(lan_arena_client_actor_text[0])),
+            config_path);
+        if (WideCharToMultiByte(
+                CP_UTF8, WC_ERR_INVALID_CHARS, lan_arena_host_actor_text, -1,
+                lan_arena_host_actor_label,
+                (int)sizeof(lan_arena_host_actor_label), NULL, NULL) == 0 ||
+            WideCharToMultiByte(
+                CP_UTF8, WC_ERR_INVALID_CHARS, lan_arena_client_actor_text, -1,
+                lan_arena_client_actor_label,
+                (int)sizeof(lan_arena_client_actor_label), NULL, NULL) == 0) {
+            SudekiMpLogWrite("lan_arena_config=invalid reason=actor_label_utf8\r\n");
+            SudekiMpLogWrite("status=bad_config\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if (!SudekiMpCleanroomActorFromLabel(
+                lan_arena_host_actor_label, &lan_arena_host_actor) ||
+            !SudekiMpCleanroomActorFromLabel(
+                lan_arena_client_actor_label, &lan_arena_client_actor)) {
+            SudekiMpLogWrite(
+                "lan_arena_config=invalid reason=unknown_actor_label\r\n");
+            SudekiMpLogWrite("status=bad_config\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
         if ((lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_HOST &&
              !lan_arena_host_enabled) ||
             (lan_arena_profile_role == SUDEKIMP_LAN_ARENA_PROFILE_ROLE_CLIENT &&
@@ -1180,6 +1219,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         lan_arena_config.port = (unsigned int)lan_arena_port;
         lan_arena_config.timeout_ms = (uint32_t)lan_arena_timeout_ms;
         lan_arena_config.game_hash = lan_arena_game_hash;
+        lan_arena_config.host_actor_type =
+            (uint8_t)SudekiMpCleanroomActorNativeType(lan_arena_host_actor);
+        lan_arena_config.client_actor_type =
+            (uint8_t)SudekiMpCleanroomActorNativeType(lan_arena_client_actor);
         SudekiMpLogFormat(
             "lan_arena_requested=true role=%s node=%s port=%d host=%s "
             "policy=cleanroom_only_shared_simulation_no_campaign_state\r\n",

@@ -23,6 +23,18 @@ launcher="${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe"
 source_dll="${project_dir}/build/mingw32/bin/SudekiMP.dll"
 source_config="${project_dir}/config/SudekiMP.ini"
 supported_game_sha256='8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94'
+lan_arena_host_actor="${LAN_ARENA_HOST_ACTOR:-Tal}"
+lan_arena_client_actor="${LAN_ARENA_CLIENT_ACTOR:-Ailish}"
+case "${lan_arena_host_actor}" in
+    Tal|Buki|Elco|Ailish) ;;
+    *) printf 'Invalid LAN host actor: %s (Tal|Buki|Elco|Ailish)\n' \
+           "${lan_arena_host_actor}" >&2; exit 2 ;;
+esac
+case "${lan_arena_client_actor}" in
+    Tal|Buki|Elco|Ailish) ;;
+    *) printf 'Invalid LAN client actor: %s (Tal|Buki|Elco|Ailish)\n' \
+           "${lan_arena_client_actor}" >&2; exit 2 ;;
+esac
 
 usage() {
     printf '%s\n' \
@@ -35,7 +47,11 @@ usage() {
         '  SUDEKIMP_LAN_GRAPHICS_BACKEND=wined3d|software|dxvk' \
         '  software uses Mesa llvmpipe for a diagnostic fallback.' \
         '  dxvk pins GE-Proton11-3 and requires NVIDIA 32-bit Vulkan.' \
-        '  its temporary d3d9 override restores to WineD3D on every exit.'
+        '  its temporary d3d9 override restores to WineD3D on every exit.' \
+        '' \
+        'Seat actors (default Tal host / Ailish client):' \
+        '  LAN_ARENA_HOST_ACTOR=Tal|Buki|Elco|Ailish' \
+        '  LAN_ARENA_CLIENT_ACTOR=Tal|Buki|Elco|Ailish'
 }
 
 case "${action}" in
@@ -286,6 +302,8 @@ write_role_config() {
         -e 's/^LanArenaHost=.*/LanArenaHost=127.0.0.1/' \
         -e "s/^LanArenaPort=.*$/LanArenaPort=${port}/" \
         -e "s/^LanArenaTimeoutMs=.*$/LanArenaTimeoutMs=${loopback_timeout_ms}/" \
+        -e "s/^HostActor=.*$/HostActor=${lan_arena_host_actor}/" \
+        -e "s/^ClientActor=.*$/ClientActor=${lan_arena_client_actor}/" \
         -e 's/^EnableControlSeparationPrototype=false$/EnableControlSeparationPrototype=true/' \
         "${destination}"
     if [[ "${role}" == "host" ]]; then
@@ -309,7 +327,9 @@ write_role_config() {
        ! grep -Fqx 'EnableControlSeparationPrototype=true' "${destination}" ||
        ! grep -Fqx "EnableCleanroomMenu=${cleanroom_tools}" "${destination}" ||
        ! grep -Fqx "LanArenaPort=${port}" "${destination}" ||
-       ! grep -Fqx "LanArenaTimeoutMs=${loopback_timeout_ms}" "${destination}"; then
+       ! grep -Fqx "LanArenaTimeoutMs=${loopback_timeout_ms}" "${destination}" ||
+       ! grep -Fqx "HostActor=${lan_arena_host_actor}" "${destination}" ||
+       ! grep -Fqx "ClientActor=${lan_arena_client_actor}" "${destination}"; then
         printf 'Failed to generate exact %s LAN profile.\n' "${role}" >&2
         exit 1
     fi
@@ -345,8 +365,8 @@ host_runtime_log="${stage_root}/host-runtime.log"
 client_runtime_log="${stage_root}/client-runtime.log"
 
 printf '%s\n' \
-    "Starting Tal host on UDP ${port} with prefix ${host_prefix}" \
-    "Starting Ailish client through 127.0.0.1 with prefix ${client_prefix}" \
+    "Starting ${lan_arena_host_actor} host on UDP ${port} with prefix ${host_prefix}" \
+    "Starting ${lan_arena_client_actor} client through 127.0.0.1 with prefix ${client_prefix}" \
     "Host runtime log: ${host_runtime_log}" \
     "Client runtime log: ${client_runtime_log}" \
     'The harness never changes physical focus; switch between the two ordinary windows manually.'
@@ -361,7 +381,7 @@ lan_run_with_graphics_environment host \
     SUDEKIMP_LOG_PATH="${host_runtime_log_windows}" \
     "${wine_runner}" "${launcher}" \
     "${game_windows}" "${host_dll}" \
-    -Level testroom -DT 1 -Tal 1 >"${host_console}" 2>&1 &
+    -Level testroom -DT 1 -${lan_arena_host_actor} 1 >"${host_console}" 2>&1 &
 host_pid="$!"
 
 resolve_game_pid() {
@@ -417,7 +437,7 @@ lan_run_with_graphics_environment client \
     SUDEKIMP_LOG_PATH="${client_runtime_log_windows}" \
     "${wine_runner}" "${launcher}" \
     "${game_windows}" "${client_dll}" \
-    -Level testroom -DT 1 -Ailish 1 >"${client_console}" 2>&1 &
+    -Level testroom -DT 1 -${lan_arena_client_actor} 1 >"${client_console}" 2>&1 &
 client_pid="$!"
 for attempt in {1..300}; do
     client_game_pid="$(resolve_game_pid "${client_prefix}" || true)"

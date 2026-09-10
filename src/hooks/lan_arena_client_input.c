@@ -14,6 +14,17 @@
 #include <stdint.h>
 #include <string.h>
 
+static uint8_t seat_client_type(void) {
+    uint8_t host_type = 0u, client_type = 0u;
+    return SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)
+        ? client_type : SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+}
+static SudekiMpCleanroomActor seat_client_actor(void) {
+    SudekiMpCleanroomActor actor;
+    return SudekiMpCleanroomActorFromType(seat_client_type(), &actor)
+        ? actor : SUDEKIMP_CLEANROOM_AILISH;
+}
+
 typedef void (__stdcall *ArbiterMovementFunction)(
     void *arbiter, const float *direction, float speed, float turn_rate,
     uint32_t movement_mode
@@ -264,7 +275,7 @@ static BOOL queue_client_skill_slot(
 ) {
     SudekiMpSkillQuickSkillRow row;
     void *ailish = SudekiMpCleanroomEngineActorEntity(
-        SUDEKIMP_CLEANROOM_AILISH);
+        seat_client_actor());
     if (!authenticated_client() || character == NULL || character != ailish ||
         slot < 0 || slot >= 6 || skill_pending || pending_kit_action != 0u ||
         !SudekiMpDescribeCharacterSkillSlot(character, slot, &row)) {
@@ -286,7 +297,7 @@ static BOOL queue_client_skill_slot(
 
 BOOL SudekiMpLanArenaClientRequestSkillSlot(unsigned int slot) {
     void *ailish = SudekiMpCleanroomEngineActorEntity(
-        SUDEKIMP_CLEANROOM_AILISH);
+        seat_client_actor());
     return slot < 6u && queue_client_skill_slot(
         ailish, (int)slot, "local_operator_api");
 }
@@ -296,7 +307,7 @@ static void __attribute__((regparm(1))) route_client_quick_skill_action(
 ) {
     SudekiMpSkillQuickSkillList list;
     void *ailish = SudekiMpCleanroomEngineActorEntity(
-        SUDEKIMP_CLEANROOM_AILISH);
+        seat_client_actor());
     unsigned int ordinal;
     if (!authenticated_client()) return;
     if (action_id < QUICK_SKILL_ACTION_FIRST ||
@@ -338,7 +349,7 @@ route_client_quick_menu_skill_validate(void *skill, int slot) {
         original_skill_validate(skill, slot);
     owner = readable_memory(skill, 0x14u) ?
         *(void **)((uint8_t *)skill + 0x10u) : NULL;
-    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     if (result == 3 && authenticated_client() && owner != NULL &&
         owner == ailish &&
         SudekiMpLanArenaClientReplicaHostCombatState(&host_combat) &&
@@ -857,34 +868,50 @@ static void refresh_client_camera_aim(void) {
     float y;
     float z;
     float length;
+    int stage;
     last_aim_x = 0;
     last_aim_y = 0;
     last_aim_z = 0;
+    stage = 0;
     if (client_game_base == NULL || !readable_memory(
             client_game_base + RVA_GAME_CAMERA_MODE_GLOBAL,
-            sizeof(mode))) return;
+            sizeof(mode))) { stage = 1; goto aim_capture_done; }
     mode = *(uint8_t **)(client_game_base + RVA_GAME_CAMERA_MODE_GLOBAL);
-    if (!readable_memory(mode, 0x10u)) return;
+    if (!readable_memory(mode, 0x10u)) { stage = 2; goto aim_capture_done; }
     camera_member = *(uint8_t **)(mode + 0x0cu);
-    if ((uintptr_t)camera_member < 0x2cu) return;
+    if ((uintptr_t)camera_member < 0x2cu) { stage = 3; goto aim_capture_done; }
     camera = camera_member - 0x2cu;
-    if (!readable_memory(camera, 0x38u)) return;
+    if (!readable_memory(camera, 0x38u)) { stage = 4; goto aim_capture_done; }
     render_state = *(uint8_t **)(camera + 0x34u);
-    if (!readable_memory(render_state, 0xd0u)) return;
+    if (!readable_memory(render_state, 0xd0u)) { stage = 5; goto aim_capture_done; }
     matrix = (const float *)(render_state + 0x90u);
     x = matrix[8];
     y = matrix[9];
     z = matrix[10];
     length = sqrtf(x * x + y * y + z * z);
-    if (!isfinite(length) || length < 0.0001f) return;
+    if (!isfinite(length) || length < 0.0001f) { stage = 6; goto aim_capture_done; }
     last_aim_x = normalized_axis(x / length);
     last_aim_y = normalized_axis(y / length);
     last_aim_z = normalized_axis(z / length);
+aim_capture_done:
+    {   /* TEMPORARY diagnostic: throttled camera-aim capture. */
+        static DWORD last_aim_capture_trace;
+        DWORD aim_now = GetTickCount();
+        if (last_aim_capture_trace == 0u ||
+            (DWORD)(aim_now - last_aim_capture_trace) >= 500u) {
+            last_aim_capture_trace = aim_now;
+            SudekiMpLogFormat(
+                "lan_arena_client_input event=camera_aim_capture_diag "
+                "stage=%d aim=%d,%d,%d mode=0x%08lx\r\n",
+                stage, (int)last_aim_x, (int)last_aim_y, (int)last_aim_z,
+                (unsigned long)(uintptr_t)mode);
+        }
+    }
 }
 
 static BOOL client_ailish_first_person_active(void) {
     uint8_t *character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(
-        SUDEKIMP_CLEANROOM_AILISH);
+        seat_client_actor());
     uint8_t *arbiter;
     if (!readable_memory(character, 0x94u)) return FALSE;
     arbiter = *(uint8_t **)(character + 0x90u);
@@ -906,7 +933,7 @@ static BOOL send_client_input(
     input.sequence = 0u;
     input.acknowledged_snapshot = 0u;
     input.client_tick = GetTickCount();
-    input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    input.actor_type = seat_client_type();
     input.world_direction_x = direction_x;
     input.world_direction_z = direction_z;
     input.aim_direction_x = last_aim_x;
@@ -974,7 +1001,7 @@ static void __stdcall capture_client_movement(
     float world_z;
     void *character = arbiter == NULL ? NULL :
         *(void **)((uint8_t *)arbiter + CHARACTER_ARBITER_OWNER_OFFSET);
-    void *ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    void *ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     (void)turn_rate;
     (void)movement_mode;
     if (!authenticated_client() || direction == NULL || character == NULL ||
@@ -1014,6 +1041,18 @@ static void __stdcall capture_client_movement(
     native_movement_sample_owner = character;
     last_direction_x = direction_x;
     last_direction_z = direction_z;
+    {   /* TEMPORARY diagnostic: throttled native movement capture values. */
+        static DWORD last_movement_capture_trace;
+        if (last_movement_capture_trace == 0u ||
+            (DWORD)(now - last_movement_capture_trace) >= 250u) {
+            last_movement_capture_trace = now;
+            SudekiMpLogFormat(
+                "lan_arena_client_input event=movement_capture_diag "
+                "dir0=%.4f dir2=%.4f speed=%.4f turn=%.4f sent=%d,%d\r\n",
+                (double)direction[0], (double)direction[2], (double)speed,
+                (double)turn_rate, (int)direction_x, (int)direction_z);
+        }
+    }
     if ((changed || last_input_send_at == 0u ||
          (DWORD)(now - last_input_send_at) >= CLIENT_INPUT_SEND_INTERVAL_MS) &&
         send_client_input_at(
@@ -1113,7 +1152,7 @@ void SudekiMpLanArenaClientInputService(void) {
             client_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL,
             sizeof(controller)) ?
         *(uint8_t **)(client_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL) : NULL;
-    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     if (readable_memory(
             controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) &&
         *(void **)(controller + CONTROLLER_TARGET_OFFSET) == ailish) {
@@ -1270,7 +1309,7 @@ static void queue_client_weapon_cycle(void *ailish, int next, int previous) {
 
 static void __stdcall capture_client_combat(void *controller) {
     uint8_t *state = (uint8_t *)controller;
-    void *ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    void *ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     BOOL owns_ailish = state != NULL && ailish != NULL &&
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == ailish;
     int native_weak_state;

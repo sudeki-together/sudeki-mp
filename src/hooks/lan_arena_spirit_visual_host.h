@@ -19,7 +19,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
  * until process exit. Failed unlink retains the node and fails closed. */
 BOOL SudekiMpLanArenaSpiritVisualHostReset(void);
 /* Call only after the host positively observed native Spirit state into
- * output->tal. A new session first requires an inactive baseline; joining an
+ * output->seat[0]. A new session first requires an inactive baseline; joining an
  * already active Spirit remains UNKNOWN until that baseline is observed. */
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     uint64_t session, uint16_t current_skill, uint32_t host_tick,

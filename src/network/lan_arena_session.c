@@ -169,8 +169,8 @@ static void fill_hello(SudekiMpLanArenaPacket *packet, SudekiMpLanArenaPacketTyp
     packet->body.hello.role = (uint8_t)session.config.local_role;
     packet->body.hello.simulation_node_role =
         (uint8_t)session.config.local_simulation_node_role;
-    packet->body.hello.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    packet->body.hello.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    packet->body.hello.seat_type[0] = session.config.host_actor_type;
+    packet->body.hello.seat_type[1] = session.config.client_actor_type;
     packet->body.hello.session_token = packet->session_token;
 }
 
@@ -196,8 +196,8 @@ static BOOL handshake_valid_for_local(
     expectation.expected_sender_role = remote_role;
     expectation.expected_sender_simulation_node_role =
         remote_simulation_node_role;
-    expectation.tal_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    expectation.ailish_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    expectation.seat_type[0] = session.config.host_actor_type;
+    expectation.seat_type[1] = session.config.client_actor_type;
     expectation.expected_session_token = expected_token;
     return SudekiMpLanArenaHandshakeValid(&packet->body.hello, &expectation, reason);
 }
@@ -325,6 +325,15 @@ static BOOL session_start_unlocked(const SudekiMpLanArenaSessionConfig *config) 
     }
     session.config.timeout_ms = config->timeout_ms == 0u ?
         LAN_ARENA_DEFAULT_TIMEOUT_MS : config->timeout_ms;
+    /* Default the per-seat native actor type codes and register them with the
+     * wire validator once per session. dllmain resolves labels to valid codes;
+     * a zero (unset) code falls back to the original Tal/Ailish pairing. */
+    session.config.host_actor_type = config->host_actor_type == 0u ?
+        SUDEKIMP_LAN_ARENA_TAL_TYPE : config->host_actor_type;
+    session.config.client_actor_type = config->client_actor_type == 0u ?
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE : config->client_actor_type;
+    SudekiMpLanArenaSetSeatTypes(
+        session.config.host_actor_type, session.config.client_actor_type);
     session.connection.phase = config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ?
         SUDEKIMP_LAN_ARENA_CONNECTION_HOSTING : SUDEKIMP_LAN_ARENA_CONNECTION_JOINING;
     session.next_sequence = 0u;

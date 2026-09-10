@@ -226,8 +226,7 @@ typedef struct HostSpiritAudioStage {
     BOOL trace_sequence_initialized;
 } HostSpiritAudioStage;
 typedef struct HostOperatorSpiritIntent {
-    void *tal;
-    void *ailish;
+    void *seat[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     uint64_t session_token;
     unsigned int variant;
     BOOL pending;
@@ -295,6 +294,25 @@ static unsigned int client_tal_timeline_idle_samples_remaining;
 static char lan_arena_control_observer_owner;
 static SudekiMpControlUpdateObserverGate lan_arena_control_observer_gate;
 static SudekiMpLanArenaSessionConfig runtime_config;
+
+static uint8_t seat_host_type(void) {
+    return runtime_config.host_actor_type == 0u
+        ? SUDEKIMP_LAN_ARENA_TAL_TYPE : runtime_config.host_actor_type;
+}
+static uint8_t seat_client_type(void) {
+    return runtime_config.client_actor_type == 0u
+        ? SUDEKIMP_LAN_ARENA_AILISH_TYPE : runtime_config.client_actor_type;
+}
+static SudekiMpCleanroomActor seat_host_actor(void) {
+    SudekiMpCleanroomActor actor;
+    return SudekiMpCleanroomActorFromType(seat_host_type(), &actor)
+        ? actor : SUDEKIMP_CLEANROOM_TAL;
+}
+static SudekiMpCleanroomActor seat_client_actor(void) {
+    SudekiMpCleanroomActor actor;
+    return SudekiMpCleanroomActorFromType(seat_client_type(), &actor)
+        ? actor : SUDEKIMP_CLEANROOM_AILISH;
+}
 static char runtime_remote_ipv4[64];
 static HMODULE runtime_game_module;
 static HANDLE network_pump_stop_event;
@@ -841,9 +859,9 @@ static BOOL host_begin_character_skill_sequence(
     BOOL active_seen,
     const char *source
 ) {
-    static const SudekiMpCleanroomActor actors[2] = {
-        SUDEKIMP_CLEANROOM_TAL,
-        SUDEKIMP_CLEANROOM_AILISH
+    const SudekiMpCleanroomActor actors[2] = {
+        seat_host_actor(),
+        seat_client_actor()
     };
     HostNativeSkillLease *lease;
     uint16_t sequence;
@@ -928,7 +946,7 @@ static BOOL fill_actor_snapshot(
     snapshot->facing_z = facing[1];
     snapshot->hp = resource_snapshot_value(hit_points);
     snapshot->sp = resource_snapshot_value(skill_points);
-    if (actor == SUDEKIMP_CLEANROOM_AILISH) {
+    if (SudekiMpCleanroomActorIsRanged(actor)) {
         SudekiMpWeaponQuickList weapons;
         unsigned int slot;
         if (SudekiMpDescribeCharacterWeapons(
@@ -1248,8 +1266,8 @@ static const char *host_operator_spirit_context_rejection(
         !combat_enabled) {
         return "native_combat_inactive";
     }
-    tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
-    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
+    ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     if (tal == NULL || ailish == NULL) {
         return "party_identity_unavailable";
     }
@@ -1323,12 +1341,12 @@ static void service_host_operator_spirit(
         intent = host_operator_spirit_intent;
         InterlockedIncrement(&host_operator_spirit_activation_depth);
         rejection = host_operator_spirit_context_rejection(
-            status, intent.tal, intent.ailish, intent.session_token,
+            status, intent.seat[0], intent.seat[1], intent.session_token,
             1, &tal, &ailish);
         if (rejection == NULL &&
             (!host_operator_spirit_intent.pending ||
-             host_operator_spirit_intent.tal != intent.tal ||
-             host_operator_spirit_intent.ailish != intent.ailish ||
+             host_operator_spirit_intent.seat[0] != intent.seat[0] ||
+             host_operator_spirit_intent.seat[1] != intent.seat[1] ||
              host_operator_spirit_intent.session_token !=
                  intent.session_token ||
              host_operator_spirit_intent.variant != intent.variant)) {
@@ -1429,8 +1447,8 @@ static void service_host_operator_spirit(
             requested_variant);
         return;
     }
-    host_operator_spirit_intent.tal = tal;
-    host_operator_spirit_intent.ailish = ailish;
+    host_operator_spirit_intent.seat[0] = tal;
+    host_operator_spirit_intent.seat[1] = ailish;
     host_operator_spirit_intent.session_token = status->session_token;
     host_operator_spirit_intent.variant = requested_variant;
     host_operator_spirit_intent.pending = TRUE;
@@ -1455,8 +1473,9 @@ static void host_apply_skill_presentation(
         snapshot->skill_sequence == 0u || snapshot->skill_active == 0u ||
         !host_actor_presentation_valid[actor_index]) return;
     presentation = &host_actor_presentation[actor_index];
-    channel_count = actor_index == 0u ? 2u :
-        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS;
+    channel_count = SudekiMpCleanroomActorIsRanged(
+            actor_index == 0u ? seat_host_actor() : seat_client_actor()) ?
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS : 2u;
     snapshot->skill_presentation_valid = 1u;
     snapshot->skill_presentation_channel_count = (uint8_t)channel_count;
     for (channel = 0u; channel < channel_count; ++channel) {
@@ -1485,8 +1504,8 @@ static void host_apply_skill_presentation(
             SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
         !SudekiMpLanArenaSkillPresentationValid(
             snapshot,
-            actor_index == 0u ? SUDEKIMP_LAN_ARENA_TAL_TYPE :
-                SUDEKIMP_LAN_ARENA_AILISH_TYPE)) {
+            actor_index == 0u ? seat_host_type() :
+                seat_client_type())) {
         snapshot->skill_presentation_valid = 0u;
         snapshot->skill_presentation_channel_count = 0u;
         ZeroMemory(snapshot->skill_presentation_selector,
@@ -1656,8 +1675,8 @@ static void reset_host_skill_tracking(void) {
 static BOOL host_native_tasks_drained(void) {
     SudekiMpCharacterSkillState state;
     const SudekiMpCleanroomActor actors[2] = {
-        SUDEKIMP_CLEANROOM_TAL,
-        SUDEKIMP_CLEANROOM_AILISH
+        seat_host_actor(),
+        seat_client_actor()
     };
     int spirit_state = 0;
     BOOL tal_present = FALSE;
@@ -2386,7 +2405,7 @@ static void client_trace_tal_action_timeline(void) {
     BOOL retirement_tail;
     if (!SudekiMpLanArenaClientReplicaGetDiagnostics(&diagnostics) ||
         !SudekiMpCleanroomEngineActorPresentation(
-            SUDEKIMP_CLEANROOM_TAL, &presentation)) return;
+            seat_host_actor(), &presentation)) return;
     action_active = diagnostics.tal_animation_state ==
         SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
     if (action_active && diagnostics.tal_action_sequence !=
@@ -2453,10 +2472,10 @@ static void host_capture_native_action_edges(DWORD now_ms) {
             SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
         !SudekiMpCleanroomEngineCombatMode(&combat_enabled)) return;
     if (tal_initialized) {
-        host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
+        host_trace_native_presentation(0u, seat_host_actor());
     }
     if (ailish_initialized) {
-        host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        host_trace_native_presentation(1u, seat_client_actor());
     }
     for (actor_index = 0u; actor_index < 2u; ++actor_index) {
         uint8_t variant = host_actor_native_action_variant(
@@ -2565,21 +2584,21 @@ static void host_snapshot_publish_failed(
         (unsigned long)(session_token >> 32),
         (unsigned long)session_token,
         snapshot != NULL ?
-            (unsigned int)snapshot->tal.skill_sequence : 0u,
+            (unsigned int)snapshot->seat[0].skill_sequence : 0u,
         snapshot != NULL ?
-            (unsigned int)snapshot->tal.skill_kind : 0u,
+            (unsigned int)snapshot->seat[0].skill_kind : 0u,
         snapshot != NULL ?
-            (unsigned int)snapshot->tal.skill_active : 0u,
+            (unsigned int)snapshot->seat[0].skill_active : 0u,
         snapshot != NULL ?
-            (long)snapshot->tal.skill_presentation_selector[0] : 0l,
+            (long)snapshot->seat[0].skill_presentation_selector[0] : 0l,
         snapshot != NULL ?
-            (unsigned int)snapshot->ailish.skill_sequence : 0u,
+            (unsigned int)snapshot->seat[1].skill_sequence : 0u,
         snapshot != NULL ?
-            (unsigned int)snapshot->ailish.skill_kind : 0u,
+            (unsigned int)snapshot->seat[1].skill_kind : 0u,
         snapshot != NULL ?
-            (unsigned int)snapshot->ailish.skill_active : 0u,
+            (unsigned int)snapshot->seat[1].skill_active : 0u,
         snapshot != NULL ?
-            (long)snapshot->ailish.skill_presentation_selector[0] : 0l);
+            (long)snapshot->seat[1].skill_presentation_selector[0] : 0l);
 }
 
 static void host_snapshot_publish_succeeded(
@@ -2610,7 +2629,7 @@ static void host_capture_ailish_locomotion(
 ) {
     SudekiMpCleanroomActorPresentation native;
     SudekiMpLanArenaLocomotion current;
-    void *actor = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    void *actor = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     unsigned int channel;
     BOOL transition;
     ZeroMemory(&snapshot->locomotion, sizeof(snapshot->locomotion));
@@ -2624,9 +2643,9 @@ static void host_capture_ailish_locomotion(
      * observation failure. Unknown ordinary presentation must not stall the
      * gameplay snapshot or be mistaken for a fresh animation witness. */
     if (!actor || !combat_enabled || snapshot->skill_active || !snapshot->hp ||
-        !SudekiMpCleanroomEngineActorPresentation(SUDEKIMP_CLEANROOM_AILISH,
+        !SudekiMpCleanroomEngineActorPresentation(seat_client_actor(),
             &native) ||
-        actor != SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH)) {
+        actor != SudekiMpCleanroomEngineActorEntity(seat_client_actor())) {
         host_ailish_locomotion.previous.valid = 0u;
         return;
     }
@@ -2702,36 +2721,36 @@ static void host_publish_snapshot(DWORD now_ms) {
         return;
     }
     if (!fill_actor_snapshot(
-            SUDEKIMP_CLEANROOM_TAL, SUDEKIMP_LAN_ARENA_TAL_TYPE,
-            &snapshot.tal)) {
+            seat_host_actor(), seat_host_type(),
+            &snapshot.seat[0])) {
         host_snapshot_publish_failed(
             now_ms, status.session_token,
             HOST_SNAPSHOT_FAILURE_TAL_ACTOR_FILL, &snapshot);
         return;
     }
     if (!fill_actor_snapshot(
-            SUDEKIMP_CLEANROOM_AILISH, SUDEKIMP_LAN_ARENA_AILISH_TYPE,
-            &snapshot.ailish)) {
+            seat_client_actor(), seat_client_type(),
+            &snapshot.seat[1])) {
         host_snapshot_publish_failed(
             now_ms, status.session_token,
             HOST_SNAPSHOT_FAILURE_AILISH_ACTOR_FILL, &snapshot);
         return;
     }
     if (tal_initialized) {
-        host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
+        host_trace_native_presentation(0u, seat_host_actor());
     }
     if (ailish_initialized) {
-        host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        host_trace_native_presentation(1u, seat_client_actor());
     }
     if (!host_apply_skill_state(
-            0u, SUDEKIMP_CLEANROOM_TAL, &snapshot.tal)) {
+            0u, seat_host_actor(), &snapshot.seat[0])) {
         host_snapshot_publish_failed(
             now_ms, status.session_token,
             HOST_SNAPSHOT_FAILURE_TAL_SKILL_OBSERVATION, &snapshot);
         return;
     }
     if (!host_apply_skill_state(
-            1u, SUDEKIMP_CLEANROOM_AILISH, &snapshot.ailish)) {
+            1u, seat_client_actor(), &snapshot.seat[1])) {
         host_snapshot_publish_failed(
             now_ms, status.session_token,
             HOST_SNAPSHOT_FAILURE_AILISH_SKILL_OBSERVATION, &snapshot);
@@ -2739,31 +2758,31 @@ static void host_publish_snapshot(DWORD now_ms) {
     }
     /* An unreadable global Spirit manager is unknown, not inactive. Do not
      * emit an artificial retirement edge or stale actor presentation. */
-    if (!host_apply_spirit_state(&snapshot.tal)) {
+    if (!host_apply_spirit_state(&snapshot.seat[0])) {
         host_snapshot_publish_failed(
             now_ms, status.session_token,
             HOST_SNAPSHOT_FAILURE_SPIRIT_OBSERVATION, &snapshot);
         return;
     }
     host_capture_spirit_audio(
-        &snapshot.tal, &snapshot, &spirit_audio_stage);
+        &snapshot.seat[0], &snapshot, &spirit_audio_stage);
     host_apply_presentation_state(
-        0u, now_ms, combat_enabled, &snapshot.tal);
+        0u, now_ms, combat_enabled, &snapshot.seat[0]);
     host_apply_presentation_state(
-        1u, now_ms, combat_enabled, &snapshot.ailish);
-    host_apply_skill_presentation(0u, &snapshot.tal);
-    host_apply_skill_presentation(1u, &snapshot.ailish);
+        1u, now_ms, combat_enabled, &snapshot.seat[1]);
+    host_apply_skill_presentation(0u, &snapshot.seat[0]);
+    host_apply_skill_presentation(1u, &snapshot.seat[1]);
     host_capture_ailish_locomotion(status.session_token, combat_enabled,
-        &snapshot.ailish);
+        &snapshot.seat[1]);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
     /* A partial/failed visual observation is UNKNOWN, not an empty roster.
      * This optional presentation domain must not stall gameplay snapshots. */
     if (!SudekiMpLanArenaSpiritVisualHostCapture(status.session_token,
-            snapshot.tal.skill_sequence, now_ms,
-            SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL),
-            SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH), &snapshot)) {
+            snapshot.seat[0].skill_sequence, now_ms,
+            SudekiMpCleanroomEngineActorEntity(seat_host_actor()),
+            SudekiMpCleanroomEngineActorEntity(seat_client_actor()), &snapshot)) {
         snapshot.spirit_vfx_observed = 0u;
         snapshot.spirit_vfx_count = 0u;
         ZeroMemory(snapshot.spirit_vfx, sizeof(snapshot.spirit_vfx));
@@ -2802,10 +2821,10 @@ static void host_publish_snapshot(DWORD now_ms) {
     }
     ZeroMemory(&world_observation, sizeof(world_observation));
     world_observation.host_tick = now_ms;
-    world_observation.tal_hp = snapshot.tal.hp;
-    world_observation.tal_sp = snapshot.tal.sp;
-    world_observation.ailish_hp = snapshot.ailish.hp;
-    world_observation.ailish_sp = snapshot.ailish.sp;
+    world_observation.tal_hp = snapshot.seat[0].hp;
+    world_observation.tal_sp = snapshot.seat[0].sp;
+    world_observation.ailish_hp = snapshot.seat[1].hp;
+    world_observation.ailish_sp = snapshot.seat[1].sp;
     world_observation.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     world_observation.combat_enabled = combat_enabled ? 1u : 0u;
     world_observation.enemy_count = snapshot.enemy_count;
@@ -2825,9 +2844,9 @@ static void host_publish_snapshot(DWORD now_ms) {
     world_observation.native_enemies_observed = 1u;
     ZeroMemory(&tal_observation, sizeof(tal_observation));
     ZeroMemory(&ailish_observation, sizeof(ailish_observation));
-    tal_observation.actor = snapshot.tal;
+    tal_observation.actor = snapshot.seat[0];
     tal_observation.native_actor_observed = 1u;
-    ailish_observation.actor = snapshot.ailish;
+    ailish_observation.actor = snapshot.seat[1];
     ailish_observation.native_actor_observed = 1u;
     if (!SudekiMpLanArenaSharedSimulationCommitNativeFrame(
             &canonical_simulation, status.session_token,
@@ -2920,7 +2939,7 @@ static BOOL release_client_remote_tal(const char *reason) {
         client_remote_tal_generation_actor != NULL ||
         client_remote_tal_active_generation != 0u;
     if (client_remote_tal_remove_pending) {
-        if (SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL)) {
+        if (SudekiMpCleanroomEngineActorPresent(seat_host_actor())) {
             SetLastError(ERROR_BUSY);
             return FALSE;
         }
@@ -2940,7 +2959,7 @@ static BOOL release_client_remote_tal(const char *reason) {
      * the request itself is still live. Retiring its flag would let a later
      * Join/observer enqueue a duplicate Tal into the native intrusive list. */
     if (client_tal_spawn_attempted &&
-        !SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL) &&
+        !SudekiMpCleanroomEngineActorPresent(seat_host_actor()) &&
         !client_tal_missing_actor_requires_release()) {
         if (!client_release_pending_logged) {
             client_release_pending_logged = TRUE;
@@ -2973,7 +2992,7 @@ static BOOL release_client_remote_tal(const char *reason) {
     }
     if (client_remote_tal_owned || client_remote_tal_request_owned) {
         void *tal = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_TAL);
+            seat_host_actor());
         if (tal != NULL && client_remote_tal_owned) {
             (void)SudekiMpControlSeparationForceStopCharacter(tal);
         }
@@ -2997,14 +3016,14 @@ static BOOL release_client_remote_tal(const char *reason) {
             reason == NULL ? "session_inactive" : reason);
     }
     if (client_tal_spawn_attempted) {
-        if (SudekiMpCleanroomEngineActorPresent(SUDEKIMP_CLEANROOM_TAL)) {
+        if (SudekiMpCleanroomEngineActorPresent(seat_host_actor())) {
             if (!SudekiMpCleanroomEngineRemoveActor(
-                    SUDEKIMP_CLEANROOM_TAL)) {
+                    seat_host_actor())) {
                 return FALSE;
             }
             client_remote_tal_remove_pending = TRUE;
             if (SudekiMpCleanroomEngineActorPresent(
-                    SUDEKIMP_CLEANROOM_TAL)) {
+                    seat_host_actor())) {
                 if (!client_release_pending_logged) {
                     client_release_pending_logged = TRUE;
                     SudekiMpLogFormat(
@@ -3208,9 +3227,9 @@ static void lan_arena_control_update_observer(
                 &lan_arena_control_observer_gate);
             return;
         }
-        tal = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL);
+        tal = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
         ailish_actor = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_AILISH);
+            seat_client_actor());
         if (tal == NULL) {
             BOOL tal_released = TRUE;
             if (client_tal_missing_actor_requires_release()) {
@@ -3220,13 +3239,13 @@ static void lan_arena_control_update_observer(
             if (tal_released && !client_remote_tal_owned &&
                 !client_tal_spawn_attempted && ailish_actor != NULL &&
                 SudekiMpCleanroomEngineActorPosition(
-                    SUDEKIMP_CLEANROOM_AILISH, ailish_position)) {
+                    seat_client_actor(), ailish_position)) {
                 tal_position[0] = ailish_position[0] - 1.5f;
                 tal_position[1] = ailish_position[1];
                 tal_position[2] = ailish_position[2] + 1.5f;
                 client_tal_spawn_attempted =
                     SudekiMpCleanroomEngineSpawnActor(
-                        SUDEKIMP_CLEANROOM_TAL, tal_position);
+                        seat_host_actor(), tal_position);
                 SudekiMpLogFormat(
                     "lan_arena_runtime event=client_tal_replica_spawn status=%s "
                     "policy=authenticated_then_wait_for_native_group_and_ai_lease\r\n",
@@ -3265,11 +3284,11 @@ static void lan_arena_control_update_observer(
         }
         if (!tal_initialized) {
             tal_initialized = SudekiMpCleanroomEngineInitializePartyActor(
-                SUDEKIMP_CLEANROOM_TAL);
+                seat_host_actor());
         }
         if (!ailish_initialized) {
             ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
-                SUDEKIMP_CLEANROOM_AILISH);
+                seat_client_actor());
         }
         if (tal_initialized && ailish_initialized) {
             BOOL tal_stopped =
@@ -3291,7 +3310,7 @@ static void lan_arena_control_update_observer(
         if (!SudekiMpCleanroomEngineDummyPresent() &&
             !arena_dummy_spawn_attempted &&
             SudekiMpCleanroomEngineActorPosition(
-                SUDEKIMP_CLEANROOM_AILISH, ailish_position)) {
+                seat_client_actor(), ailish_position)) {
             tal_position[0] = ailish_position[0];
             tal_position[1] = ailish_position[1];
             tal_position[2] = ailish_position[2] + 6.0f;
@@ -3320,19 +3339,19 @@ static void lan_arena_control_update_observer(
         return;
     }
     release_client_remote_tal("host_role");
-    ailish = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH);
+    ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     if (ailish == NULL) {
         float tal_position[3];
         float ailish_position[3];
         if (!host_ailish_spawn_attempted &&
             SudekiMpCleanroomEngineActorPosition(
-                SUDEKIMP_CLEANROOM_TAL, tal_position)) {
+                seat_host_actor(), tal_position)) {
             ailish_position[0] = tal_position[0] + 1.5f;
             ailish_position[1] = tal_position[1];
             ailish_position[2] = tal_position[2] - 1.5f;
             host_ailish_spawn_attempted =
                 SudekiMpCleanroomEngineSpawnActor(
-                    SUDEKIMP_CLEANROOM_AILISH, ailish_position);
+                    seat_client_actor(), ailish_position);
             SudekiMpLogFormat(
                 "lan_arena_runtime event=host_ailish_spawn status=%s "
                 "policy=authenticated_cleanroom_only_then_wait_for_native_group\r\n",
@@ -3368,17 +3387,17 @@ static void lan_arena_control_update_observer(
     }
     if (!tal_initialized) {
         tal_initialized = SudekiMpCleanroomEngineInitializePartyActor(
-            SUDEKIMP_CLEANROOM_TAL);
+            seat_host_actor());
     }
     if (!ailish_initialized) {
         ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
-            SUDEKIMP_CLEANROOM_AILISH);
+            seat_client_actor());
     }
     refresh_host_player_two_skill_isolation(
-        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_TAL));
+        SudekiMpCleanroomEngineActorEntity(seat_host_actor()));
     if (SudekiMpLanArenaHostInputTakeSkillSlot(&operator_skill_slot)) {
         void *tal = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_TAL);
+            seat_host_actor());
         SudekiMpSkillActivationResult skill_result =
             SudekiMpReplayHostApprovedCharacterSkillSlot(
                 tal, (int)operator_skill_slot);
@@ -3397,7 +3416,7 @@ static void lan_arena_control_update_observer(
         float tal_position[3];
         float dummy_position[3];
         if (SudekiMpCleanroomEngineActorPosition(
-                SUDEKIMP_CLEANROOM_TAL, tal_position)) {
+                seat_host_actor(), tal_position)) {
             dummy_position[0] = tal_position[0];
             dummy_position[1] = tal_position[1];
             dummy_position[2] = tal_position[2] + 6.0f;
@@ -3453,7 +3472,7 @@ static void lan_arena_control_update_observer(
             !host_remote_skill_camera_active &&
             !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
             SudekiMpObserveCharacterSkill(SudekiMpCleanroomEngineActorEntity(
-                SUDEKIMP_CLEANROOM_TAL), &tal_skill) && !tal_skill.active &&
+                seat_host_actor()), &tal_skill) && !tal_skill.active &&
             SudekiMpObserveCharacterSkill(ailish, &ailish_skill) && !ailish_skill.active &&
             SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) &&
             spirit_state == 0;
@@ -3586,7 +3605,7 @@ static void lan_arena_control_update_observer(
                 (float)host_remote_direction_z / 32767.0f,
                 (float)host_remote_aim_x / 32767.0f,
                 (float)host_remote_aim_z / 32767.0f,
-                remote_aim_valid && host_remote_first_person_active,
+                remote_aim_valid,
                 remote_weak_active && !ranged_first_person_fire,
                 frame_delta_seconds);
         if (submitted && ranged_first_person_fire) {
@@ -3887,8 +3906,8 @@ static void lan_arena_render_start_entry(void) {
                 published_before_start && published_after_start ?
                     0ul : (unsigned long)publish_error);
         }
-        client_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
-        client_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        client_trace_native_presentation(0u, seat_host_actor());
+        client_trace_native_presentation(1u, seat_client_actor());
         if (!client_replica_stream_logged) {
             client_replica_stream_logged = TRUE;
             SudekiMpLogWrite(
@@ -3921,9 +3940,9 @@ static void lan_arena_render_pre_world_entry(void) {
         SudekiMpCharacterSkillState tal_skill_state;
         SudekiMpCharacterSkillState ailish_skill_state;
         void *tal_character = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_TAL);
+            seat_host_actor());
         void *ailish_character = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_AILISH);
+            seat_client_actor());
         BOOL combat_enabled = FALSE;
         float tal_hp = 0.0f;
         float tal_sp = 0.0f;
@@ -3933,8 +3952,8 @@ static void lan_arena_render_pre_world_entry(void) {
         /* Refresh at the ownership boundary itself. A 20 Hz snapshot cache
          * is too old to protect native channels from an attack/reaction that
          * began later in the same frame. */
-        host_trace_native_presentation(0u, SUDEKIMP_CLEANROOM_TAL);
-        host_trace_native_presentation(1u, SUDEKIMP_CLEANROOM_AILISH);
+        host_trace_native_presentation(0u, seat_host_actor());
+        host_trace_native_presentation(1u, seat_client_actor());
         BOOL host_exact = SudekiMpLanArenaSessionGetStatus(&status) &&
             status.peer_connected &&
             status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
@@ -3946,10 +3965,10 @@ static void lan_arena_render_pre_world_entry(void) {
             combat_enabled;
         BOOL tal_alive = host_exact &&
             SudekiMpCleanroomEngineActorResources(
-                SUDEKIMP_CLEANROOM_TAL, &tal_hp, &tal_sp) && tal_hp > 0.0f;
+                seat_host_actor(), &tal_hp, &tal_sp) && tal_hp > 0.0f;
         BOOL ailish_alive = host_exact &&
             SudekiMpCleanroomEngineActorResources(
-                SUDEKIMP_CLEANROOM_AILISH,
+                seat_client_actor(),
                 &ailish_hp, &ailish_sp) && ailish_hp > 0.0f;
         BOOL tal_skill_known = host_exact && tal_character != NULL &&
             SudekiMpObserveCharacterSkill(tal_character, &tal_skill_state) &&
@@ -3994,8 +4013,8 @@ static void lan_arena_render_pre_world_entry(void) {
                 !ailish_skill_owned && !ailish_action_active
         };
         const SudekiMpCleanroomActor actors[2] = {
-            SUDEKIMP_CLEANROOM_TAL,
-            SUDEKIMP_CLEANROOM_AILISH
+            seat_host_actor(),
+            seat_client_actor()
         };
         unsigned int actor_index;
         for (actor_index = 0u; actor_index < 2u; ++actor_index) {

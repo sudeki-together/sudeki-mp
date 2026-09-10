@@ -3321,7 +3321,7 @@ static void test_spirit_visual_generation_filter(int *failures) {
     ZeroMemory(&snapshot, sizeof(snapshot));
     snapshot.sequence = 101u;
     snapshot.host_tick = 1000u;
-    snapshot.tal.skill_sequence = 12u;
+    snapshot.seat[0].skill_sequence = 12u;
     expected = snapshot;
     expect_spirit_visual_generation_filter(&snapshot, 10u, TRUE, &expected,
         "preserves UNKNOWN and unrelated snapshot fields", failures);

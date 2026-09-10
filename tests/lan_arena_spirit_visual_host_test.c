@@ -384,11 +384,11 @@ static void image_tests(const char *path) {
     native_weak_tests(mapped);
     CHECK(SudekiMpLanArenaSpiritVisualHostInitialize((HMODULE)mapped,inactive_witness,NULL));
     memset(&output,0,sizeof(output));
-    output.tal.skill_kind=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
-    output.tal.skill_active=1u;
+    output.seat[0].skill_kind=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    output.seat[0].skill_active=1u;
     CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_observed==0u && output.spirit_vfx_count==0u);
-    output.tal.skill_active=0u;
+    output.seat[0].skill_active=0u;
     CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_observed==1u && output.spirit_vfx_count==0u);
     *(void **)(manager+0x10u)=NULL;
@@ -415,8 +415,8 @@ static void image_tests(const char *path) {
     eax=(uintptr_t)setup;
     __asm__ volatile("pushl $1\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
     CHECK((unsigned char)eax==1u);
-    output.tal.skill_active=1u;
-    output.tal.skill_sequence=1u;
+    output.seat[0].skill_active=1u;
+    output.seat[0].skill_sequence=1u;
     CHECK(SudekiMpLanArenaSpiritVisualHostCapture(1u,1u,1u,actor,actor,&output));
     CHECK(output.spirit_vfx_count==0u && output.spirit_vfx_observed==1u);
     /* Native observer rejects unreadable retained-string indirection and an

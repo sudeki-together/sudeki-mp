@@ -136,6 +136,19 @@ void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
     return actor == SUDEKIMP_CLEANROOM_TAL ? native_stub_tal : NULL;
 }
 
+BOOL SudekiMpCleanroomActorFromType(unsigned int type, SudekiMpCleanroomActor *actor) {
+    if (actor == NULL) {
+        return FALSE;
+    }
+    switch (type) {
+    case 0x23u: *actor = SUDEKIMP_CLEANROOM_TAL; return TRUE;
+    case 0x05u: *actor = SUDEKIMP_CLEANROOM_BUKI; return TRUE;
+    case 0x0eu: *actor = SUDEKIMP_CLEANROOM_ELCO; return TRUE;
+    case 0x01u: *actor = SUDEKIMP_CLEANROOM_AILISH; return TRUE;
+    default: return FALSE;
+    }
+}
+
 BOOL SudekiMpCleanroomEngineResourceNameFromText(
     SudekiMpResourceName *resource_name,
     const char *text
