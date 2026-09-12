@@ -142,6 +142,26 @@ static const LocomotionProfile locomotion_profiles[] = {
         12.0f,
         41.22882f,
         30.92161f
+    },
+    {
+        0x23u,
+        0x05u,
+        20,
+        23,
+        24,
+        12.0f,
+        37.17093f,
+        30.97577f
+    },
+    {
+        0x01u,
+        0x0eu,
+        22,
+        24,
+        25,
+        12.0f,
+        34.33f,
+        28.608f
     }
 };
 
@@ -336,7 +356,8 @@ static BOOL resolve_actor_renderer(
     *wrapper_result = NULL;
     *renderer_result = NULL;
     position = *(uint8_t **)(character + CHARACTER_POSITION_OFFSET);
-    if (actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH) {
+    if (actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH ||
+        actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_ELCO) {
         uint8_t *attached_wrapper;
         uint8_t *first_person_wrapper;
         uint8_t *saved_world_wrapper;
@@ -716,7 +737,7 @@ SudekiMpNoncasterSkillLocomotionService(
 
     set_reason(reason_result, "invalid_parameter");
     if (lease == NULL || actor < SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TAL ||
-        actor > SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH) {
+        actor > SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_ELCO) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_REJECTED;
     }
@@ -764,7 +785,8 @@ SudekiMpNoncasterSkillLocomotionService(
         SetLastError(ERROR_INVALID_DATA);
         return SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_REJECTED;
     }
-    if (actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH &&
+    if ((actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH ||
+         actor == SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_ELCO) &&
         (!ailish_selector_resolves(
              component, renderer, &methods, 0x02u,
              profile->idle_selector) ||

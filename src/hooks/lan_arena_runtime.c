@@ -88,7 +88,18 @@ enum {
     AILISH_COMBAT_IDLE_SELECTOR = 20,
     AILISH_COMBAT_MOVE_PRIMARY_SELECTOR = 22,
     AILISH_COMBAT_MOVE_SECONDARY_SELECTOR = 23,
-    AILISH_COMBAT_WEAK_SELECTOR = 59
+    AILISH_COMBAT_WEAK_SELECTOR = 59,
+    /* Buki (melee) resolves her own renderer ids over the same gait shape:
+     * world idle 1 (variants 4/3/2), world move 6/7, combat idle 20,
+     * combat move 23/24. Captured live via move_selector_diag. */
+    BUKI_WORLD_IDLE_SELECTOR = 1,
+    BUKI_WORLD_IDLE_VARIANT_ONE_SELECTOR = 4,
+    BUKI_WORLD_IDLE_VARIANT_TWO_SELECTOR = 3,
+    BUKI_WORLD_MOVE_PRIMARY_SELECTOR = 6,
+    BUKI_WORLD_MOVE_SECONDARY_SELECTOR = 7,
+    BUKI_COMBAT_IDLE_SELECTOR = 20,
+    BUKI_COMBAT_MOVE_PRIMARY_SELECTOR = 23,
+    BUKI_COMBAT_MOVE_SECONDARY_SELECTOR = 24
 };
 
 static SudekiMpRelativeCallHook lan_arena_frame_end_hook;
@@ -282,6 +293,12 @@ static struct {
     uint16_t sequence;
     SudekiMpLanArenaLocomotion previous;
 } host_ailish_locomotion;
+static struct {
+    void *actor;
+    uint64_t session_token;
+    uint16_t sequence;
+    SudekiMpLanArenaLocomotion previous;
+} host_tal_locomotion;
 static DWORD host_actor_presentation_last_trace_at[2];
 static SudekiMpCleanroomActorPresentation client_actor_presentation[2];
 static BOOL client_actor_presentation_valid[2];
@@ -428,6 +445,122 @@ static BOOL runtime_readable_memory(const void *pointer, size_t length) {
         address + length >= address &&
         address + length <=
             (uintptr_t)information.BaseAddress + information.RegionSize;
+}
+
+/* ANIMID read offsets (CONFIRMED_STATIC). The model is CNewGameModelAnimation,
+ * reached from the character entity at +0x134 and verified by its +0x10
+ * backpointer to the character. Its per-channel state array is at +0xF8 (4-byte
+ * records, byte +2 = current ANIMID); +0x131 == 3 is the animation-mode flag the
+ * game itself checks in TsaGetCurrentAnimation (0x43AF10), bound < 0xC4. */
+enum {
+    /* +0x130 is the uniform character->model link (Ghidra FUN_00561960 loads it
+     * as MOV EDI,[param+0x130]; live scan confirmed 0x130 for BOTH melee and
+     * ranged, while 0x134 is ranged-only). */
+    HOST_CHARACTER_ANIMATION_COMPONENT_OFFSET = 0x130u,
+    HOST_COMPONENT_CHARACTER_BACKPOINTER_OFFSET = 0x10u,
+    HOST_MODEL_ANIMATION_MODE_OFFSET = 0x131u,
+    HOST_MODEL_ANIMATION_STATE_ARRAY_OFFSET = 0xF8u,
+    HOST_MODEL_ANIMATION_MODE_READY = 3u,
+    HOST_ANIM_ID_UPPER_BOUND = 0xC4u
+};
+
+/* Read the host actor's current semantic ANIMID from its model, mirroring the
+ * game's own preconditions. Every failure path returns 0 (UNKNOWN), never a
+ * synthesised id -- observation failure is unknown, not inactive. */
+static uint8_t host_read_actor_anim_id(SudekiMpCleanroomActor actor) {
+    uint8_t *character;
+    uint8_t *model;
+    uint8_t *state;
+    uint8_t anim_id;
+    unsigned int stage = 0u;
+    if (actor < 0 || actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) return 0u;
+    character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(actor);
+    if (character == NULL) { stage = 1u; goto done; }
+    if (!runtime_readable_memory(character, 0x138u)) { stage = 2u; goto done; }
+    model = *(uint8_t **)(character + HOST_CHARACTER_ANIMATION_COMPONENT_OFFSET);
+    if (model == NULL) { stage = 3u; goto done; }
+    if (!runtime_readable_memory(model, 0x138u)) { stage = 4u; goto done; }
+    if (*(uint8_t **)(model + HOST_COMPONENT_CHARACTER_BACKPOINTER_OFFSET) !=
+            character) { stage = 5u; goto done; }
+    /* NOTE: no model[0x131]==3 gate here. TsaGetCurrentAnimation (0x43AF10)
+     * uses that guard for its own "current animation" concept, but live capture
+     * showed 0x131 never latches during combat while channel 0 (state[2]) DOES
+     * carry the combat ANIMID (0x72..0x7F) — so the guard would wrongly force
+     * UNKNOWN during every combo. Read channel 0 directly instead. */
+    state = *(uint8_t **)(model + HOST_MODEL_ANIMATION_STATE_ARRAY_OFFSET);
+    if (state == NULL) { stage = 6u; goto done; }
+    if (!runtime_readable_memory(state, 3u)) { stage = 7u; goto done; }
+    anim_id = state[2u]; /* channel 0: [[model+0xF8] + channel*4 + 2] */
+    if (anim_id >= HOST_ANIM_ID_UPPER_BOUND) { stage = 8u; goto done; }
+    return anim_id;
+done:
+    {
+        /* TEMPORARY diagnostic: which hop of the model read failed. stage=0 is
+         * full success (unreachable here); 1..9 name the exact guard that
+         * bailed. REMOVE after Phase 5 capture. */
+        static DWORD last_host_anim_stage_diag[SUDEKIMP_CLEANROOM_ACTOR_COUNT];
+        DWORD stage_now = GetTickCount();
+        unsigned int slot = (unsigned int)actor;
+        if (slot >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) slot = 0u;
+        if (last_host_anim_stage_diag[slot] == 0u ||
+            (DWORD)(stage_now - last_host_anim_stage_diag[slot]) >= 1000u) {
+            last_host_anim_stage_diag[slot] = stage_now;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_anim_id_stage actor=%u stage=%u "
+                "character=%p model=%p model_0x131=%u state=%p\r\n",
+                (unsigned)actor, stage, (void *)character, (void *)model,
+                model != NULL ? (unsigned)model[
+                    HOST_MODEL_ANIMATION_MODE_OFFSET] : 0u,
+                (void *)state);
+            /* TEMPORARY: scan the character entity for every field whose
+             * pointer has the model's +0x10 backpointer, so the real
+             * character->model offset is found empirically (Ghidra pointed at
+             * 0x130; this confirms it). REMOVE after Phase 5 capture. */
+            {
+                unsigned int scan_x;
+                for (scan_x = 0u; scan_x <= 0x200u; scan_x += 4u) {
+                    uint8_t *candidate;
+                    if (!runtime_readable_memory(
+                            character + scan_x, sizeof(void *))) continue;
+                    candidate = *(uint8_t **)(character + scan_x);
+                    if (candidate == NULL ||
+                        !runtime_readable_memory(candidate, 0x138u)) continue;
+                    if (*(void **)(candidate + 0x10u) != character) continue;
+                    SudekiMpLogFormat(
+                        "lan_arena_runtime event=host_model_scan actor=%u "
+                        "offset=0x%x model=%p mode_131=%u state=%p\r\n",
+                        (unsigned)actor, scan_x, (void *)candidate,
+                        (unsigned)candidate[HOST_MODEL_ANIMATION_MODE_OFFSET],
+                        (void *)(runtime_readable_memory(candidate, 0xFCu) ?
+                            *(uint8_t **)(
+                                candidate + HOST_MODEL_ANIMATION_STATE_ARRAY_OFFSET) :
+                            NULL));
+                }
+            }
+            /* TEMPORARY: dump per-channel ANIMIDs (byte+2) + flags (byte+3) of
+             * the state array to find which channel carries the combat combo
+             * (play writes channel 2; TsaGetCurrentAnimation reads channel 0).
+             * REMOVE after Phase 5 capture. */
+            if (model != NULL && runtime_readable_memory(
+                    model, HOST_MODEL_ANIMATION_STATE_ARRAY_OFFSET + 4u)) {
+                uint8_t *sarr = *(uint8_t **)(
+                    model + HOST_MODEL_ANIMATION_STATE_ARRAY_OFFSET);
+                if (sarr != NULL) {
+                    unsigned int ch;
+                    for (ch = 0u; ch < 8u; ++ch) {
+                        if (!runtime_readable_memory(sarr + ch * 4u, 4u)) break;
+                        SudekiMpLogFormat(
+                            "lan_arena_runtime event=host_anim_channel actor=%u "
+                            "ch=%u id=%u flags=%u\r\n",
+                            (unsigned)actor, ch,
+                            (unsigned)sarr[ch * 4u + 2u],
+                            (unsigned)sarr[ch * 4u + 3u]);
+                    }
+                }
+            }
+        }
+    }
+    return 0u;
 }
 
 static BOOL current_host_owner_view(
@@ -928,6 +1061,8 @@ static BOOL fill_actor_snapshot(
     float facing[2];
     float hit_points;
     float skill_points;
+    SudekiMpWeaponQuickList weapons;
+    unsigned int slot;
     if (snapshot == NULL ||
         !SudekiMpCleanroomEngineActorPosition(actor, position) ||
         !SudekiMpCleanroomEngineActorFacing(actor, facing) ||
@@ -946,16 +1081,65 @@ static BOOL fill_actor_snapshot(
     snapshot->facing_z = facing[1];
     snapshot->hp = resource_snapshot_value(hit_points);
     snapshot->sp = resource_snapshot_value(skill_points);
-    if (SudekiMpCleanroomActorIsRanged(actor)) {
-        SudekiMpWeaponQuickList weapons;
-        unsigned int slot;
-        if (SudekiMpDescribeCharacterWeapons(
-                SudekiMpCleanroomEngineActorEntity(actor), &weapons)) {
-            for (slot = 0u; slot < weapons.row_count && slot < 12u; ++slot) {
-                if (weapons.rows[slot].equipped) {
-                    snapshot->weapon_slot_plus_one = (uint8_t)(slot + 1u);
-                    break;
-                }
+    if (SudekiMpDescribeCharacterWeapons(
+            SudekiMpCleanroomEngineActorEntity(actor), &weapons)) {
+        uint8_t equipped_slot_plus_one = 0u;
+        for (slot = 0u; slot < weapons.row_count && slot < 12u; ++slot) {
+            if (weapons.rows[slot].equipped) {
+                equipped_slot_plus_one = (uint8_t)(slot + 1u);
+                snapshot->weapon_slot_plus_one = equipped_slot_plus_one;
+                break;
+            }
+        }
+        /* TEMPORARY diagnostic: identify each actor's actually-equipped
+         * weapon slot (Buki's hooks vs the starter-slot table's Tal value).
+         * REMOVE after capture. */
+        {
+            static DWORD last_weapon_diag;
+            static uint8_t last_actor_type;
+            static uint8_t last_equipped;
+            DWORD now = GetTickCount();
+            if (last_weapon_diag == 0u || last_actor_type != actor_type ||
+                last_equipped != equipped_slot_plus_one ||
+                (DWORD)(now - last_weapon_diag) >= 2000u) {
+                last_weapon_diag = now;
+                last_actor_type = actor_type;
+                last_equipped = equipped_slot_plus_one;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_weapon_slot_diag "
+                    "actor_type=%u row_count=%u equipped_slot_plus_one=%u\r\n",
+                    (unsigned int)actor_type,
+                    (unsigned int)weapons.row_count,
+                    (unsigned int)equipped_slot_plus_one);
+            }
+        }
+    }
+    /* TEMPORARY diagnostic: read the character weapon's own item-definition
+     * ID (+0x264) and resolved pointer (+0x268) to identify what is actually
+     * equipped, independent of the category-index machinery. REMOVE after. */
+    {
+        uint8_t *character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(actor);
+        void *weapon_obj;
+        if (character != NULL &&
+            runtime_readable_memory(character + 0xc0u, sizeof(void *)) &&
+            (weapon_obj = *(void **)(character + 0xc0u)) != NULL &&
+            runtime_readable_memory((uint8_t *)weapon_obj + 0x268u, sizeof(void *))) {
+            uint32_t item_id = runtime_readable_memory((uint8_t *)weapon_obj + 0x264u,
+                sizeof(uint32_t)) ? *(uint32_t *)((uint8_t *)weapon_obj + 0x264u) : 0u;
+            void *item_ptr = *(void **)((uint8_t *)weapon_obj + 0x268u);
+            static DWORD last_item_diag;
+            static uint8_t last_item_actor;
+            static uint32_t last_item_id;
+            DWORD now = GetTickCount();
+            if (last_item_diag == 0u || last_item_actor != actor_type ||
+                last_item_id != item_id || (DWORD)(now - last_item_diag) >= 2000u) {
+                last_item_diag = now;
+                last_item_actor = actor_type;
+                last_item_id = item_id;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_weapon_item_diag "
+                    "actor_type=%u item_id=%u item_ptr=%p\r\n",
+                    (unsigned int)actor_type, (unsigned int)item_id, item_ptr);
             }
         }
     }
@@ -1640,6 +1824,7 @@ static void commit_host_spirit_audio_stage(
 static void reset_host_skill_tracking(void) {
     unsigned int actor_index;
     ZeroMemory(&host_ailish_locomotion, sizeof(host_ailish_locomotion));
+    ZeroMemory(&host_tal_locomotion, sizeof(host_tal_locomotion));
     ZeroMemory(host_actor_skill_sequence,
         sizeof(host_actor_skill_sequence));
     ZeroMemory(host_actor_skill_kind, sizeof(host_actor_skill_kind));
@@ -1869,6 +2054,21 @@ static BOOL host_tal_native_locomotion_state(
     if (moving == NULL || !host_actor_presentation_valid[0]) return FALSE;
     presentation = &host_actor_presentation[0];
     selector = presentation->selector[0];
+    if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) {
+        if (selector == (combat_enabled ? BUKI_COMBAT_MOVE_PRIMARY_SELECTOR :
+                BUKI_WORLD_MOVE_PRIMARY_SELECTOR)) {
+            *moving = TRUE;
+            return TRUE;
+        }
+        if ((combat_enabled && selector == BUKI_COMBAT_IDLE_SELECTOR) ||
+            (!combat_enabled && (selector == BUKI_WORLD_IDLE_SELECTOR ||
+            selector == BUKI_WORLD_IDLE_VARIANT_ONE_SELECTOR ||
+            selector == BUKI_WORLD_IDLE_VARIANT_TWO_SELECTOR))) {
+            *moving = FALSE;
+            return TRUE;
+        }
+        return FALSE;
+    }
     if (selector == (combat_enabled ? TAL_COMBAT_MOVE_PRIMARY_SELECTOR :
             TAL_WORLD_MOVE_PRIMARY_SELECTOR)) {
         *moving = TRUE;
@@ -1900,6 +2100,37 @@ static uint8_t host_actor_native_action_variant(
         uint8_t action_variant;
         selector = presentation->selector[0];
         state = presentation->state[0];
+        /* Read-only edge capture: the renderer alone cannot distinguish
+         * Buki's first weak/strong swings. Observe the semantic channel from
+         * the same actor, without invoking generic native animation play. */
+        if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) {
+            static int last_selector = -1, last_state = -1, last_anim_id = -1;
+            uint8_t anim_id = host_read_actor_anim_id(seat_host_actor());
+            if (last_selector != selector || last_state != state ||
+                last_anim_id != anim_id) {
+                last_selector = selector;
+                last_state = state;
+                last_anim_id = anim_id;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=host_buki_action_selector_diag "
+                    "selector=%d state=%u anim_id=%u tick=%lu\r\n",
+                    selector, (unsigned)state, (unsigned)anim_id,
+                    (unsigned long)GetTickCount());
+            }
+        }
+        if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) {
+            /* Preserve Buki's own bank and distinguish her shared 53/54
+             * selectors using the same actor's observed semantic channel. */
+            if (selector == 20) {
+                return SUDEKIMP_LAN_ARENA_ACTION_NONE;
+            }
+            if (SudekiMpLanArenaBukiActionFromNativeAnimation(
+                    host_read_actor_anim_id(seat_host_actor()),
+                    selector, state, &action_variant)) {
+                return action_variant;
+            }
+            return SUDEKIMP_LAN_ARENA_ACTION_NONE;
+        }
         if (SudekiMpLanArenaTalActionFromNativePresentation(
                 selector, state, &action_variant)) return action_variant;
         /* State 128 is Tal's completed/terminal pose, but the action selector
@@ -1924,7 +2155,8 @@ static uint8_t host_actor_native_action_variant(
      * then 1/65 while playing. The selector remains 59 for the complete
      * native action. Treating state 0 as an action gap generated a new LAN
      * action edge every few snapshots and made a held shot restart rapidly. */
-    return selector == AILISH_COMBAT_WEAK_SELECTOR && state != 192u ?
+    return selector == SudekiMpLanArenaRangedCombatSelector(
+            seat_client_type(), 0x85u) && state != 192u ?
         SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE :
         SUDEKIMP_LAN_ARENA_ACTION_NONE;
 }
@@ -2179,6 +2411,27 @@ static void host_apply_presentation_state(
     uint8_t action_variant;
     uint8_t idle_variant_state;
     if (snapshot == NULL || actor_index >= 2u) return;
+    /* The ANIMID is the character-independent semantic animation id, read from
+     * the host actor's model with the game's own guard (TsaGetCurrentAnimation).
+     * Any failure yields UNKNOWN (0), never a synthesised id. */
+    snapshot->anim_id = host_read_actor_anim_id(
+        actor_index == 0u ? seat_host_actor() : seat_client_actor());
+    {
+        /* TEMPORARY diagnostic: is the host model resolving, and what ANIMID is
+         * it playing? Answers whether character+0x134 reaches the model for a
+         * melee host actor (anim_id stuck at 0 = offset wrong). REMOVE after
+         * Phase 5 capture. */
+        static DWORD last_host_anim_id_diag[2];
+        DWORD anim_diag_now = GetTickCount();
+        if (last_host_anim_id_diag[actor_index] == 0u ||
+            (DWORD)(anim_diag_now - last_host_anim_id_diag[actor_index]) >= 300u) {
+            last_host_anim_id_diag[actor_index] = anim_diag_now;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_anim_id_diag actor=%s anim_id=%u\r\n",
+                actor_index == 0u ? "host" : "client",
+                (unsigned)snapshot->anim_id);
+        }
+    }
     /* Locomotion is an authoritative presentation fact, not an input fact.
      * A held client stick can keep requesting movement forever against a
      * wall, while Sudeki's host collision has already stopped the actor.
@@ -2236,6 +2489,20 @@ static void host_apply_presentation_state(
     }
     host_filter_stationary_replica_position(
         actor_index, moving || action_active, snapshot);
+    if (actor_index == 0u) {
+        static DWORD last_host_pos_diag;
+        DWORD pos_now = GetTickCount();
+        if (last_host_pos_diag == 0u ||
+            (DWORD)(pos_now - last_host_pos_diag) >= 300u) {
+            last_host_pos_diag = pos_now;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=host_pos_diag actor=0 moving=%u "
+                "action=%u anim=%u x=%.3f z=%.3f\r\n",
+                moving ? 1u : 0u, action_active ? 1u : 0u,
+                (unsigned)snapshot->animation_state,
+                (double)snapshot->x, (double)snapshot->z);
+        }
+    }
     if (snapshot->hp == 0u) {
         snapshot->action_variant = SUDEKIMP_LAN_ARENA_ACTION_NONE;
         snapshot->animation_state =
@@ -2295,6 +2562,46 @@ static void host_apply_presentation_state(
         snapshot->idle_entry_phase_q8 =
             host_actor_action_retirement[actor_index].idle_entry_phase_q8;
         snapshot->action_retirement_valid = 1u;
+    }
+    {
+        /* TEMPORARY diagnostic: correlate the SEMANTIC moving/action state with
+         * the raw renderer selector/state/rate PLUS the remote (client-actor)
+         * movement direction, to map Elco's directional walk/strafe/block ids.
+         * REMOVE after capture. */
+        if ((snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING ||
+             snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) &&
+            host_actor_presentation_valid[actor_index]) {
+            static DWORD last_move_selector_diag[2];
+            DWORD diag_now = GetTickCount();
+            const SudekiMpCleanroomActorPresentation *diag_p =
+                &host_actor_presentation[actor_index];
+            if (last_move_selector_diag[actor_index] == 0u ||
+                (DWORD)(diag_now - last_move_selector_diag[actor_index]) >= 300u) {
+                int dir_x = 0;
+                int dir_z = 0;
+                if (actor_index == 1u) {
+                    dir_x = (int)host_remote_direction_x;
+                    dir_z = (int)host_remote_direction_z;
+                }
+                last_move_selector_diag[actor_index] = diag_now;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=move_selector_diag actor=%s "
+                    "combat=%u dir=%d,%d action=%u sel=%ld,%ld,%ld,%ld,%ld "
+                    "state=%u,%u,%u,%u,%u rate=%.3f,%.3f,%.3f,%.3f,%.3f\r\n",
+                    actor_index == 0u ? "host" : "client",
+                    combat_enabled ? 1u : 0u,
+                    dir_x, dir_z,
+                    (unsigned)snapshot->action_variant,
+                    (long)diag_p->selector[0], (long)diag_p->selector[1],
+                    (long)diag_p->selector[2], (long)diag_p->selector[3],
+                    (long)diag_p->selector[4],
+                    diag_p->state[0], diag_p->state[1], diag_p->state[2],
+                    diag_p->state[3], diag_p->state[4],
+                    (double)diag_p->rate[0], (double)diag_p->rate[1],
+                    (double)diag_p->rate[2], (double)diag_p->rate[3],
+                    (double)diag_p->rate[4]);
+            }
+        }
     }
 }
 
@@ -2653,7 +2960,8 @@ static void host_capture_ailish_locomotion(
     current.valid = 1u;
     current.sequence = 1u; /* Validate content before allocating an epoch. */
     for (channel = 0u; channel < 4u; ++channel) {
-        int clip = SudekiMpLanArenaLocomotionClip(native.selector[channel]);
+        int clip = SudekiMpLanArenaLocomotionClip(native.selector[channel],
+            seat_client_type() == SUDEKIMP_LAN_ARENA_ELCO_TYPE);
         if (clip < 0) {
             host_ailish_locomotion.previous.valid = 0u;
             return;
@@ -2693,6 +3001,112 @@ static void host_capture_ailish_locomotion(
     }
     host_ailish_locomotion.previous = current;
     snapshot->locomotion = current;
+}
+
+static void host_capture_tal_locomotion(
+    uint64_t session_token,
+    BOOL combat_enabled,
+    SudekiMpLanArenaActorSnapshot *snapshot
+) {
+    SudekiMpCleanroomActorPresentation native;
+    SudekiMpLanArenaLocomotion current;
+    void *actor = SudekiMpCleanroomEngineActorEntity(seat_host_actor());
+    unsigned int channel;
+    BOOL transition;
+    ZeroMemory(&snapshot->locomotion, sizeof(snapshot->locomotion));
+    /* The host-actor locomotion replay is Buki-only for now; Tal keeps the
+     * verified single-selector presentation path. */
+    if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return;
+    if (host_tal_locomotion.actor != actor ||
+        host_tal_locomotion.session_token != session_token) {
+        ZeroMemory(&host_tal_locomotion, sizeof(host_tal_locomotion));
+        host_tal_locomotion.actor = actor;
+        host_tal_locomotion.session_token = session_token;
+    }
+    if (!actor || !combat_enabled || snapshot->skill_active || !snapshot->hp ||
+        snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION ||
+        !SudekiMpCleanroomEngineActorPresentation(seat_host_actor(), &native) ||
+        actor != SudekiMpCleanroomEngineActorEntity(seat_host_actor())) {
+        static DWORD last_tal_loco_diag;
+        DWORD ln = GetTickCount();
+        if (last_tal_loco_diag == 0u ||
+            (DWORD)(ln - last_tal_loco_diag) >= 500u) {
+            last_tal_loco_diag = ln;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=tal_loco_diag state=bail "
+                "actor=%u combat=%u skill_active=%u hp=%u pres=%u "
+                "policy=host_actor_locomotion_capture\r\n",
+                actor ? 1u : 0u, combat_enabled ? 1u : 0u,
+                (unsigned)snapshot->skill_active, (unsigned)snapshot->hp,
+                (unsigned)SudekiMpCleanroomEngineActorPresentation(
+                    seat_host_actor(), &native));
+        }
+        host_tal_locomotion.previous.valid = 0u;
+        return;
+    }
+    ZeroMemory(&current, sizeof(current));
+    current.valid = 1u;
+    current.sequence = 1u;
+    for (channel = 0u; channel < 4u; ++channel) {
+        int clip = SudekiMpLanArenaLocomotionClip(
+            native.selector[channel], 2u);
+        if (clip < 0) {
+            static DWORD last_tal_loco_unmapped;
+            DWORD un = GetTickCount();
+            if (last_tal_loco_unmapped == 0u ||
+                (DWORD)(un - last_tal_loco_unmapped) >= 500u) {
+                last_tal_loco_unmapped = un;
+                SudekiMpLogFormat(
+                    "lan_arena_runtime event=tal_loco_diag state=unmapped "
+                    "channel=%u selector=%ld state=%u "
+                    "policy=host_actor_locomotion_capture\r\n",
+                    channel, (long)native.selector[channel],
+                    (unsigned)native.state[channel]);
+            }
+            host_tal_locomotion.previous.valid = 0u;
+            return;
+        }
+        current.clip[channel] = (uint8_t)clip;
+        current.state[channel] = native.state[channel];
+        if (clip != 0) {
+            current.rate[channel] = native.rate[channel];
+            current.time[channel] = native.time[channel];
+        }
+    }
+    memcpy(current.blend, native.blend, sizeof(current.blend));
+    if (!SudekiMpLanArenaLocomotionValid(&current)) {
+        host_tal_locomotion.previous.valid = 0u;
+        return;
+    }
+    transition = !host_tal_locomotion.previous.valid ||
+        memcmp(current.clip, host_tal_locomotion.previous.clip,
+            sizeof(current.clip)) != 0 ||
+        memcmp(current.state, host_tal_locomotion.previous.state,
+            sizeof(current.state)) != 0;
+    for (channel = 0u; channel < 4u; ++channel) {
+        if (current.time[channel] < host_tal_locomotion.previous.time[channel])
+            transition = TRUE;
+    }
+    if (transition && ++host_tal_locomotion.sequence == 0u)
+        ++host_tal_locomotion.sequence;
+    current.sequence = host_tal_locomotion.sequence;
+    host_tal_locomotion.previous = current;
+    snapshot->locomotion = current;
+    {
+        static DWORD last_tal_loco_ok;
+        DWORD on = GetTickCount();
+        if (last_tal_loco_ok == 0u ||
+            (DWORD)(on - last_tal_loco_ok) >= 500u) {
+            last_tal_loco_ok = on;
+            SudekiMpLogFormat(
+                "lan_arena_runtime event=tal_loco_diag state=ok "
+                "clips=%u,%u,%u,%u states=%u,%u,%u,%u "
+                "policy=host_actor_locomotion_capture\r\n",
+                current.clip[0], current.clip[1], current.clip[2],
+                current.clip[3], current.state[0], current.state[1],
+                current.state[2], current.state[3]);
+        }
+    }
 }
 
 static void host_publish_snapshot(DWORD now_ms) {
@@ -2774,6 +3188,8 @@ static void host_publish_snapshot(DWORD now_ms) {
     host_apply_skill_presentation(1u, &snapshot.seat[1]);
     host_capture_ailish_locomotion(status.session_token, combat_enabled,
         &snapshot.seat[1]);
+    host_capture_tal_locomotion(status.session_token, combat_enabled,
+        &snapshot.seat[0]);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
@@ -4024,8 +4440,12 @@ static void lan_arena_render_pre_world_entry(void) {
                     runtime_game_module,
                     SudekiMpCleanroomEngineActorEntity(actors[actor_index]),
                     actor_index == 0u ?
-                        SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TAL :
-                        SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH,
+                        (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE ?
+                            SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_BUKI :
+                            SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TAL) :
+                        (seat_client_type() == SUDEKIMP_LAN_ARENA_ELCO_TYPE ?
+                            SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_ELCO :
+                            SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH),
                     ownership_active[actor_index],
                     host_actor_locomotion_moving[actor_index],
                     &host_noncaster_locomotion_leases[actor_index],

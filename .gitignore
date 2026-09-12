@@ -32,5 +32,8 @@ __pycache__/
 *.pyc
 .agent-local/
 
+# Private alternate-agent operating guide and handoff.
+/DEEPSEEK.md
+
 # Local generated Graphify knowledge graph and live activity state.
 /graphify-out/

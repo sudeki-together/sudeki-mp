@@ -152,10 +152,12 @@ void SudekiMpLanArenaClientReplicaSetRemoteTalLease(
  * lease or returns ERROR_BUSY without weakening containment. */
 BOOL SudekiMpLanArenaClientReplicaRemoteTalReleaseReady(void);
 
-/* A native Tal combat transition may settle in armed idle or armed run,
+/* A native host-seat combat transition may settle in armed idle or armed run,
  * depending on the host motion snapshot visible when the transition begins.
  * Both are proven combat-bank states and therefore safe handoff points for
- * actor-local authoritative presentation. */
+ * actor-local authoritative presentation.  The host seat resolves per actor:
+ * Tal uses her 17/36 (armed) and 4/8 (sheathed) ids; Buki uses 20 (armed) and
+ * 1/4/6 (sheathed). */
 BOOL SudekiMpLanArenaClientTalTransitionSelectorReady(
     BOOL combat_target,
     int selector
@@ -210,6 +212,11 @@ BOOL SudekiMpLanArenaClientNativeRangedIdle(
 /* Pure Tal combat presentation mapping. LAN packets carry semantic actions,
  * never retail selector numbers; this exact-image adapter resolves them only
  * inside the client process. */
+/* Expected world selector for a supported ranged actor's semantic base id.
+ * Returns -1 for an unsupported actor/id; not a native ownership witness. */
+int SudekiMpLanArenaClientRangedCombatSelector(
+    uint8_t actor_type, uint8_t animation_id
+);
 BOOL SudekiMpLanArenaClientTalActionPresentation(
     uint8_t action_variant,
     int *selector,

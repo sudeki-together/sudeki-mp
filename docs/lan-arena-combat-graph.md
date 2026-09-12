@@ -4,6 +4,13 @@ This document is the cross-module edge that an AST-only call graph cannot
 infer through serialized packets. It records the required proof chain for
 every combat feature added to LAN arena mode.
 
+For the configurable two-seat Buki/Elco branch, see the
+[2026-09-12 native-bank and presentation-ownership findings](research-log.md#2026-09-12--bukielco-native-bank-and-presentation-ownership-corrections).
+In particular, do not reuse Ailish's idle/fire selectors for Elco, identify
+Buki's shared opening-swing selectors without her semantic channel, or let
+locomotion overwrite an active native attack lease. Older fixed-pair/protocol
+labels below describe their historical evidence baseline.
+
 ## Proven Tal melee path
 
 | Stage | Evidence / implementation |

@@ -2480,6 +2480,28 @@ static void verify_authoritative_locomotion_stop_policy(void) {
           ailish.action_sequence == 1u,
         "Ailish combat shot retires with the native action layer");
 
+    {
+        uint8_t saved_type = runtime_config.client_actor_type;
+        runtime_config.client_actor_type = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        host_actor_presentation[1].selector[4] = 53;
+        host_actor_presentation[1].state[4] = 0u;
+        check(host_actor_native_action_variant(1u, TRUE) ==
+                SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+            "Elco firing blend entry uses Elco world selector, not Ailish");
+        host_actor_presentation[1].state[4] = 192u;
+        check(host_actor_native_action_variant(1u, TRUE) ==
+                SUDEKIMP_LAN_ARENA_ACTION_NONE,
+            "Elco inactive firing layer retires");
+        host_actor_presentation[1].selector[4] = 59;
+        host_actor_presentation[1].state[4] = 1u;
+        check(host_actor_native_action_variant(1u, TRUE) ==
+                SUDEKIMP_LAN_ARENA_ACTION_NONE,
+            "Elco never classifies Ailish's selector as a shot");
+        runtime_config.client_actor_type = saved_type;
+        host_actor_presentation[1].selector[4] = 0;
+        host_actor_presentation[1].state[4] = 192u;
+    }
+
     reset_host_action_tracking();
     memset(&ailish, 0, sizeof(ailish));
     host_track_actor_action_sequence(
@@ -2518,6 +2540,61 @@ static void verify_authoritative_locomotion_stop_policy(void) {
         "Ailish ranged cadence decodes safe authored half-float seconds");
 }
 
+static void verify_host_anim_id_read(void) {
+    /* Synthetic CNewGameModelAnimation chain laid out as the game does:
+     * character+0x130 -> model (the uniform offset), model+0x10 -> character
+     * backpointer, model+0x131 -> mode flag, model+0xF8 -> per-channel state
+     * array (4-byte records, byte +2 = current ANIMID). */
+    static uint8_t character_bytes[0x200];
+    static uint8_t model_bytes[0x200];
+    static uint8_t state_bytes[32u];
+    uint8_t *character = character_bytes;
+    uint8_t *model = model_bytes;
+    uint8_t *state = state_bytes;
+    SudekiMpLanArenaActorSnapshot tal;
+
+    memset(character, 0, sizeof(character_bytes));
+    memset(model, 0, sizeof(model_bytes));
+    memset(state, 0, sizeof(state_bytes));
+    memset(&tal, 0, sizeof(tal));
+    tal.hp = 100u;
+    runtime_config.host_actor_type = 0u; /* default -> Tal host seat */
+
+    *(uint8_t **)(character + 0x130u) = model;
+    *(uint8_t **)(model + 0x10u) = character;
+    model[0x131u] = 3u;
+    *(uint8_t **)(model + 0xF8u) = state;
+    state[2u] = 0x72u; /* ANIMID_ATTACK_WEAK */
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = character;
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
+    check(tal.anim_id == 0x72u,
+        "host reads the model's current ANIMID (0x72 ATTACK_WEAK)");
+
+    model[0x131u] = 0u; /* mode flag is NOT a gate: channel 0 is still read */
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
+    check(tal.anim_id == 0x72u,
+        "0x131 mode flag is ignored; channel 0 ANIMID still reported");
+    model[0x131u] = 3u;
+
+    state[2u] = 0xC4u; /* first out-of-range id */
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
+    check(tal.anim_id == 0u, "out-of-range ANIMID yields UNKNOWN");
+    state[2u] = 0x72u;
+
+    *(uint8_t **)(model + 0x10u) = NULL; /* backpointer mismatch */
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
+    check(tal.anim_id == 0u,
+        "model/character backpointer mismatch yields UNKNOWN");
+    *(uint8_t **)(model + 0x10u) = character;
+
+    *(uint8_t **)(model + 0xF8u) = NULL; /* unreadable state array */
+    host_apply_presentation_state(0u, 100u, FALSE, &tal);
+    check(tal.anim_id == 0u, "unreadable state array yields UNKNOWN");
+
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
+}
+
 int main(void) {
     uint8_t *image = (uint8_t *)VirtualAlloc(
         NULL,
@@ -2554,6 +2631,7 @@ int main(void) {
     verify_host_noncaster_startup_gap_ownership();
     verify_host_native_task_drain_without_peer();
     verify_authoritative_locomotion_stop_policy();
+    verify_host_anim_id_read();
 
     VirtualFree(image, 0u, MEM_RELEASE);
     if (failures != 0) {

@@ -11,7 +11,7 @@
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
 #define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413236u /* "LA26" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1232u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1260u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -27,7 +27,7 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1232u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1260u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
@@ -239,9 +239,12 @@ typedef struct SudekiMpLanArenaLocomotion {
 } SudekiMpLanArenaLocomotion;
 
 int SudekiMpLanArenaLocomotionValid(const SudekiMpLanArenaLocomotion *motion);
-int SudekiMpLanArenaLocomotionClip(int selector);
-int SudekiMpLanArenaLocomotionSelector(unsigned int clip);
+int SudekiMpLanArenaLocomotionClip(int selector, uint8_t elco);
+int SudekiMpLanArenaLocomotionSelector(unsigned int clip, uint8_t elco);
 unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip);
+/* Verified ranged world selector, or -1 for unsupported actor/semantic id.
+ * This mapping is not a substitute for a native model ownership witness. */
+int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_id);
 
 typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t actor_type;
@@ -310,6 +313,10 @@ typedef struct SudekiMpLanArenaActorSnapshot {
         action_history[SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY];
     /* Zero means unobserved. Ailish native weapon slot plus one, 1..12. */
     uint8_t weapon_slot_plus_one;
+    /* Semantic animation id (ANIMID_*, 0..0xC3) the host actor's model is
+     * currently playing; 0 = unobserved. Character-independent, unlike the
+     * per-character native renderer selector. */
+    uint8_t anim_id;
     SudekiMpLanArenaLocomotion locomotion;
 } SudekiMpLanArenaActorSnapshot;
 

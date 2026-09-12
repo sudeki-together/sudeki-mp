@@ -79,6 +79,41 @@ int main(void) {
         CHECK(!SudekiMpLanArenaTalActionToNativePresentation(
             SUDEKIMP_LAN_ARENA_ACTION_NONE, NULL, NULL));
     }
+    {
+        static const uint8_t ids[] = { 0x72u, 0x73u, 0x74u, 0x75u };
+        static const int selectors[] = { 53, 54, 53, 54 };
+        static const uint8_t variants[] = {
+            SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE,
+            SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO,
+            SUDEKIMP_LAN_ARENA_ACTION_STRONG,
+            SUDEKIMP_LAN_ARENA_ACTION_STRONG_TWO
+        };
+        uint8_t variant = 0u;
+        for (index = 0u; index < sizeof(ids); ++index) {
+            int selector = -1, state = -1;
+            CHECK(SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[index], selectors[index], 1u, &variant));
+            CHECK(variant == variants[index]);
+            CHECK(SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[index], selectors[index], 65u, &variant));
+            CHECK(variant == variants[index]);
+            CHECK(SudekiMpLanArenaBukiActionToNativePresentation(
+                variant, &selector, &state));
+            CHECK(selector == selectors[index] && state == 1);
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[index], selectors[index], 192u, &variant));
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[index], selectors[index] == 53 ? 54 : 53, 1u, &variant));
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[index], selectors[index], 1u, NULL));
+            CHECK(!SudekiMpLanArenaBukiActionFromNativePresentation(
+                selectors[index], 1u, &variant));
+        }
+        CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(0u, 53, 1u, &variant));
+        CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(2u, 20, 0u, &variant));
+        CHECK(SudekiMpLanArenaBukiActionFromNativeAnimation(0x7fu, 64, 65u, &variant));
+        CHECK(variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE);
+    }
     if (failures != 0) return 1;
     puts("LAN Tal combo graph checks passed");
     return 0;

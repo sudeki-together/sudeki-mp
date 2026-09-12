@@ -271,6 +271,9 @@ enum {
     RVA_ANIMATION_RENDERER_STATE_SET = 0x00223240u,
     RVA_ANIMATION_RENDERER_STATE_GET = 0x00223290u,
     RVA_ANIMATION_RENDERER_BLEND_SET = 0x002234c0u,
+    RVA_MODEL_GET_CURRENT_ANIM = 0x0003af10u,
+    RVA_MODEL_RESOLVE_ANIM = 0x000e42f0u,
+    RVA_MODEL_PLAY_ANIM = 0x000e4f50u,
     RVA_ANIMATION_RENDERER_BLEND_GET = 0x002234e0u,
     RVA_SKILL_DATA_AVAILABLE = 0x000da2a0u,
     RVA_SKILL_AVAILABILITY_FLAG = 0x003c2fd9u,
@@ -4164,6 +4167,35 @@ int wmain(int argc, wchar_t **argv) {
                 ++failures;
             }
         }
+        {
+            static const uint8_t ids[] = {
+                0x02u, 0x06u, 0x07u, 0x85u, 0x05u, 0x8cu, 0x8du, 0x8eu
+            };
+            static const int ailish_selectors[] = { 20, 22, 23, 59, 1, 2, 3, 4 };
+            static const int elco_selectors[] = { 22, 24, 25, 53, 5, 2, 3, 4 };
+            size_t index;
+            for (index = 0u; index < sizeof(ids); ++index) {
+                if (SudekiMpLanArenaClientRangedCombatSelector(
+                        SUDEKIMP_LAN_ARENA_AILISH_TYPE, ids[index]) !=
+                            ailish_selectors[index] ||
+                    SudekiMpLanArenaClientRangedCombatSelector(
+                        SUDEKIMP_LAN_ARENA_ELCO_TYPE, ids[index]) !=
+                            elco_selectors[index] ||
+                    SudekiMpLanArenaClientRangedCombatSelector(
+                        SUDEKIMP_LAN_ARENA_BUKI_TYPE, ids[index]) != -1 ||
+                    SudekiMpLanArenaClientRangedCombatSelector(
+                        SUDEKIMP_LAN_ARENA_TAL_TYPE, ids[index]) != -1) {
+                    fputs("FAIL: ranged actor combat selector crossed banks\n", stderr);
+                    ++failures;
+                }
+            }
+            if (SudekiMpLanArenaClientRangedCombatSelector(
+                    SUDEKIMP_LAN_ARENA_ELCO_TYPE, 0xffu) != -1 ||
+                SudekiMpLanArenaClientRangedCombatSelector(0xffu, 2u) != -1) {
+                fputs("FAIL: unknown ranged actor/id admitted\n", stderr);
+                ++failures;
+            }
+        }
         if (!SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 17) ||
             !SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 36) ||
             SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 4) ||
@@ -4173,6 +4205,26 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN client Tal transition selector gate mismatch\n",
                 stderr);
             ++failures;
+        }
+        {
+            uint8_t saved_host = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+            uint8_t saved_client = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+            SudekiMpLanArenaSeatActorTypes(&saved_host, &saved_client);
+            SudekiMpLanArenaSetSeatTypes(
+                SUDEKIMP_LAN_ARENA_BUKI_TYPE, SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+            if (!SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 20) ||
+                !SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 1) ||
+                !SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 4) ||
+                !SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 6) ||
+                SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 17) ||
+                SudekiMpLanArenaClientTalTransitionSelectorReady(TRUE, 1) ||
+                SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 8) ||
+                SudekiMpLanArenaClientTalTransitionSelectorReady(FALSE, 20)) {
+                fputs("FAIL: LAN client Buki transition selector gate mismatch\n",
+                    stderr);
+                ++failures;
+            }
+            SudekiMpLanArenaSetSeatTypes(saved_host, saved_client);
         }
         if (SudekiMpLanArenaClientCombatTransitionRefreshDue(
                 TRUE, FALSE, 99u) ||
@@ -4740,6 +4792,60 @@ int wmain(int argc, wchar_t **argv) {
         if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
             fputs("FAIL: LAN client arbiter-input mismatch restore was sticky\n",
                 stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        /* Character-independent ANIMID path: each pinned prologue must be
+         * load-bearing, i.e. corrupting it must make the image identity gate
+         * reject the module (fail closed), and restoring it must recover. */
+        uint8_t saved_current_anim_byte = image[RVA_MODEL_GET_CURRENT_ANIM];
+        image[RVA_MODEL_GET_CURRENT_ANIM] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched "
+                "current-animation entry\n", stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_MODEL_GET_CURRENT_ANIM] = saved_current_anim_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client current-animation mismatch restore was "
+                "sticky\n", stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_resolve_anim_byte = image[RVA_MODEL_RESOLVE_ANIM];
+        image[RVA_MODEL_RESOLVE_ANIM] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched "
+                "animation-resolve entry\n", stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_MODEL_RESOLVE_ANIM] = saved_resolve_anim_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client animation-resolve mismatch restore was "
+                "sticky\n", stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
+        uint8_t saved_play_anim_byte = image[RVA_MODEL_PLAY_ANIM];
+        image[RVA_MODEL_PLAY_ANIM] ^= 0x01u;
+        if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client replica accepted a mismatched "
+                "animation-play entry\n", stderr);
+            ++failures;
+            SudekiMpResetLanArenaClientReplica();
+        }
+        image[RVA_MODEL_PLAY_ANIM] = saved_play_anim_byte;
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: LAN client animation-play mismatch restore was "
+                "sticky\n", stderr);
             ++failures;
         }
         SudekiMpResetLanArenaClientReplica();

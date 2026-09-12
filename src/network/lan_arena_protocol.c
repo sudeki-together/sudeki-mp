@@ -7,7 +7,11 @@
 #define LAN_HELLO_SIZE 53u
 #define LAN_INPUT_SIZE 31u
 #define LAN_ACTION_EVENT_SIZE 7u
-#define LAN_ACTOR_ACTION_HISTORY_OFFSET 55u
+/* Semantic animation id (ANIMID_*, 0..0xC4) the host actor's model is
+ * currently playing; 0 = unobserved. Character-independent, unlike the
+ * per-character renderer selector. */
+#define LAN_ACTOR_ANIM_ID_OFFSET 55u
+#define LAN_ACTOR_ACTION_HISTORY_OFFSET 56u
 #define LAN_ACTOR_SKILL_PRESENTATION_OFFSET \
     (LAN_ACTOR_ACTION_HISTORY_OFFSET + \
      (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY * LAN_ACTION_EVENT_SIZE))
@@ -20,8 +24,10 @@
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
 #define LAN_SPIRIT_AUDIO_EVENT_SIZE 5u
 #define LAN_LOCOMOTION_SIZE 26u
-#define LAN_SNAPSHOT_LOCOMOTION_OFFSET \
+#define LAN_SNAPSHOT_TAL_LOCOMOTION_OFFSET \
     (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE))
+#define LAN_SNAPSHOT_LOCOMOTION_OFFSET \
+    (LAN_SNAPSHOT_TAL_LOCOMOTION_OFFSET + LAN_LOCOMOTION_SIZE)
 #define LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET \
     (LAN_SNAPSHOT_LOCOMOTION_OFFSET + LAN_LOCOMOTION_SIZE)
 #define LAN_SNAPSHOT_SPIRIT_AUDIO_HISTORY_OFFSET \
@@ -345,17 +351,56 @@ int SudekiMpLanArenaSkillPresentationValid(
     return 1;
 }
 
-static const int locomotion_selectors[10] = {0,20,22,23,66,67,71,69,72,70};
+static const int ailish_locomotion_selectors[10] = {0,20,22,23,66,67,71,69,72,70};
+static const int elco_locomotion_selectors[10] = {0,22,24,25,63,64,67,65,68,66};
+int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_id) {
+    const int *table;
+    if (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) {
+        table = ailish_locomotion_selectors;
+    } else if (actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE) {
+        table = elco_locomotion_selectors;
+    } else {
+        return -1;
+    }
+    switch (animation_id) {
+        case 0x02u: return table[1];
+        case 0x06u: return table[2];
+        case 0x07u: return table[3];
+        /* First-person idle differs even though the three fire resources
+         * share selector numbers. Verified against each native model bank. */
+        case 0x05u: return actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE ? 5 : 1;
+        case 0x8cu: return 2;
+        case 0x8du: return 3;
+        case 0x8eu: return 4;
+        /* Elco's own model table resolves ANIMID 0x85 to world selector 53.
+         * Ailish resolves the same semantic id to 59. */
+        case 0x85u: return actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE ? 53 : 59;
+        default: return -1;
+    }
+}
+/* Buki's model resolves combat 02/06/07 to 20/23/24. It has no 08..0d
+ * locomotion resources. In particular 64 (WWW) and 67 (SWS) are attacks,
+ * not settled idles. Never admit those into the movement writer. */
+static const int buki_locomotion_selectors[10] = {0,20,23,24,0,0,0,0,0,0};
 static const unsigned int locomotion_ids[10] = {0,2,6,7,8,9,10,11,12,13};
 static const uint8_t locomotion_states[6] = {0,1,64,65,128,192};
 
-int SudekiMpLanArenaLocomotionClip(int selector) {
+static const int *locomotion_selector_table(uint8_t actor_kind) {
+    if (actor_kind == 2u) return buki_locomotion_selectors;
+    return actor_kind == 1u ? elco_locomotion_selectors :
+        ailish_locomotion_selectors;
+}
+
+int SudekiMpLanArenaLocomotionClip(int selector, uint8_t actor_kind) {
     unsigned int i;
-    for (i=0; i<10; ++i) if (locomotion_selectors[i] == selector) return (int)i;
+    const int *table = locomotion_selector_table(actor_kind);
+    for (i=0; i<10; ++i) if (table[i] == selector) return (int)i;
     return -1;
 }
-int SudekiMpLanArenaLocomotionSelector(unsigned int clip) {
-    return clip < 10u ? locomotion_selectors[clip] : -1;
+int SudekiMpLanArenaLocomotionSelector(unsigned int clip, uint8_t actor_kind) {
+    const int *table = locomotion_selector_table(actor_kind);
+    if (clip >= 10u || (clip != 0u && table[clip] == 0)) return -1;
+    return table[clip];
 }
 unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip) {
     return clip < 10u ? locomotion_ids[clip] : 0u;
@@ -427,6 +472,7 @@ static int valid_actor_snapshot(
         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
         actor->action_phase_valid > 1u ||
         actor->action_retirement_valid > 1u ||
+        actor->anim_id > 0xC3u ||
         actor->skill_active > 1u || actor->weapon_slot_plus_one > 12u ||
         (!ranged_actor_type(expected_type) &&
          actor->weapon_slot_plus_one != 0u) ||
@@ -488,8 +534,7 @@ static int valid_actor_snapshot(
     }
     if (!SudekiMpLanArenaLocomotionValid(&actor->locomotion) ||
         (actor->locomotion.valid &&
-         (!ranged_actor_type(expected_type) ||
-          actor->skill_active || actor->hp == 0u)) ||
+         (actor->skill_active || actor->hp == 0u)) ||
         !SudekiMpLanArenaSkillPresentationValid(actor, expected_type)) {
         return 0;
     }
@@ -716,6 +761,7 @@ int SudekiMpLanArenaSnapshotValid(
     if (snapshot == NULL ||
         snapshot->match_state > SUDEKIMP_LAN_ARENA_MATCH_ENDED ||
         snapshot->combat_enabled > 1u ||
+        (snapshot->seat[0].locomotion.valid && !snapshot->combat_enabled) ||
         (snapshot->seat[1].locomotion.valid && !snapshot->combat_enabled) ||
         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
          snapshot->combat_enabled != 0u) ||
@@ -768,6 +814,7 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     write_u16(output + 41u, actor->action_terminal_phase_q8);
     write_u16(output + 43u, actor->idle_entry_phase_q8);
     output[45] = actor->action_retirement_valid;
+    output[LAN_ACTOR_ANIM_ID_OFFSET] = actor->anim_id;
     write_u16(output + 46u, actor->skill_sequence);
     output[48] = actor->skill_slot;
     output[49] = actor->skill_active;
@@ -839,6 +886,7 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->action_terminal_phase_q8 = read_u16(input + 41u);
     actor->idle_entry_phase_q8 = read_u16(input + 43u);
     actor->action_retirement_valid = input[45];
+    actor->anim_id = input[LAN_ACTOR_ANIM_ID_OFFSET];
     actor->skill_sequence = read_u16(input + 46u);
     actor->skill_slot = input[48];
     actor->skill_active = input[49];
@@ -955,6 +1003,8 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             write_u32(output + 8u, packet->body.snapshot.host_tick);
             output[12] = packet->body.snapshot.match_state;
             output[13] = packet->body.snapshot.combat_enabled;
+            write_locomotion(output + LAN_SNAPSHOT_TAL_LOCOMOTION_OFFSET,
+                &packet->body.snapshot.seat[0].locomotion);
             write_locomotion(output + LAN_SNAPSHOT_LOCOMOTION_OFFSET,
                 &packet->body.snapshot.seat[1].locomotion);
             output[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET] =
@@ -1136,6 +1186,8 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.snapshot.host_tick = read_u32(payload + 8u);
             packet->body.snapshot.match_state = payload[12];
             packet->body.snapshot.combat_enabled = payload[13];
+            if (!read_locomotion(payload + LAN_SNAPSHOT_TAL_LOCOMOTION_OFFSET,
+                    &packet->body.snapshot.seat[0].locomotion)) return 0;
             if (!read_locomotion(payload + LAN_SNAPSHOT_LOCOMOTION_OFFSET,
                     &packet->body.snapshot.seat[1].locomotion)) return 0;
             packet->body.snapshot.spirit_audio_history_count =

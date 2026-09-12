@@ -190,7 +190,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 917u);
+    CHECK(size == 945u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.seat[0].action_variant ==
@@ -216,6 +216,20 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(decoded.body.snapshot.enemy_count == 1u);
     CHECK(decoded.body.snapshot.enemies[0].native_entity_id ==
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID);
+    /* anim_id is the character-independent semantic id (0x72 = ATTACK_WEAK);
+     * it must survive the wire exactly. */
+    source.body.snapshot.seat[0].anim_id = 0x72u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.seat[0].anim_id == 0x72u);
+    /* the game's own bound is anim_id < 0xC4, so 0xC4 is the first invalid id. */
+    source.body.snapshot.seat[0].anim_id = 0xC4u;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    /* anim_id == 0 means "unobserved" and is accepted, never a synthesised id. */
+    source.body.snapshot.seat[0].anim_id = 0u;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    CHECK(decoded.body.snapshot.seat[0].anim_id == 0u);
     source.body.snapshot.seat[0].skill_kind = 3u;
     CHECK(!SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     source.body.snapshot.seat[0].skill_kind =
@@ -708,7 +722,7 @@ static void test_spirit_audio_semantic_journal(void) {
     SpiritAudioSinkState sink = {0u, SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_NONE, 1};
     unsigned int replayed = 99u;
 
-    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 1232u);
+    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 1260u);
     CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE <=
         SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE);
     set_active_tal_spirit(snapshot, 41u);
@@ -723,7 +737,7 @@ static void test_spirit_audio_semantic_journal(void) {
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START;
     CHECK(SudekiMpLanArenaSpiritAudioJournalValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 896u);
+    CHECK(size == 924u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_audio_history_count == 2u);
     CHECK(decoded.body.snapshot.spirit_audio_history[0].event_sequence ==
@@ -880,7 +894,7 @@ static void test_spirit_vfx_roster_wire(void) {
 
     CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 26u);
     CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413236));
-    CHECK(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE == 1232u);
+    CHECK(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE == 1260u);
     snapshot->host_tick = 100u;
     snapshot->seat[0].skill_sequence = 7u;
     snapshot->seat[0].skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
@@ -890,7 +904,7 @@ static void test_spirit_vfx_roster_wire(void) {
     snapshot->spirit_vfx_count = 1u;
     snapshot->spirit_vfx[0] = valid;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 896u);
+    CHECK(size == 924u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx_observed == 1u);
     CHECK(decoded.body.snapshot.spirit_vfx_count == 1u);
@@ -1032,7 +1046,7 @@ static void test_spirit_vfx_generic_initiate_wire(void) {
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
     CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 896u);
+    CHECK(size == 924u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE);
@@ -1074,7 +1088,7 @@ static void test_spirit_vfx_tal_strike_hit_wire(void) {
     snapshot->spirit_vfx[1].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
     CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 896u);
+    CHECK(size == 924u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx_count == 2u);
     CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
@@ -1246,22 +1260,22 @@ static void test_directional_locomotion_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
     size_t size = 0u;
     /* Header + fixed snapshot prefix + two unchanged 168-byte actors. */
-    const size_t offset = 20u + 14u + 2u * 168u;
+    const size_t offset = 20u + 14u + 2u * 169u + 26u;
     const int selectors[] = {0,20,22,23,66,67,71,69,72,70};
     const unsigned int ids[] = {0,2,6,7,8,9,10,11,12,13};
     const uint8_t states[] = {0,1,64,65,128,192};
     unsigned int clip, i;
     CHECK(SudekiMpLanArenaLocomotionValid(motion));
-    CHECK(SudekiMpLanArenaLocomotionClip(75) == -1);
-    CHECK(SudekiMpLanArenaLocomotionSelector(10) == -1);
+    CHECK(SudekiMpLanArenaLocomotionClip(75, 0) == -1);
+    CHECK(SudekiMpLanArenaLocomotionSelector(10, 0) == -1);
     motion->valid = 1u;
     motion->sequence = UINT16_MAX;
     motion->blend[0] = 0.25f;
     motion->blend[1] = 0.5f;
     motion->blend[2] = 1.0f;
     for (clip = 1u; clip < 10u; ++clip) {
-        CHECK(SudekiMpLanArenaLocomotionClip(selectors[clip]) == (int)clip);
-        CHECK(SudekiMpLanArenaLocomotionSelector(clip) == selectors[clip]);
+        CHECK(SudekiMpLanArenaLocomotionClip(selectors[clip], 0) == (int)clip);
+        CHECK(SudekiMpLanArenaLocomotionSelector(clip, 0) == selectors[clip]);
         CHECK(SudekiMpLanArenaLocomotionAnimationId(clip) == ids[clip]);
         for (i = 0u; i < 4u; ++i) {
             motion->clip[i] = (uint8_t)clip;
@@ -1270,7 +1284,7 @@ static void test_directional_locomotion_wire(void) {
             motion->time[i] = 17.133f + (float)i;
         }
         CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &packet));
-        CHECK(size == 896u);
+        CHECK(size == 924u);
         CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
         CHECK(decoded.body.snapshot.seat[1].locomotion.sequence == UINT16_MAX);
         for (i = 0u; i < 4u; ++i) {
@@ -1280,6 +1294,35 @@ static void test_directional_locomotion_wire(void) {
             CHECK(fabsf(result->time[i] - motion->time[i]) <= 1.0f / 32.0f);
         }
         CHECK(fabsf(decoded.body.snapshot.seat[1].locomotion.blend[1] - 0.5f) < 0.002f);
+    }
+    {
+        /* Elco resolves her own selectors over the same canonical clip ids and
+         * shared animation-table indices (captured via world_anim_table_dump). */
+        const int elco_selectors[] = {0,22,24,25,63,64,67,65,68,66};
+        for (clip = 1u; clip < 10u; ++clip) {
+            CHECK(SudekiMpLanArenaLocomotionClip(elco_selectors[clip], 1) == (int)clip);
+            CHECK(SudekiMpLanArenaLocomotionSelector(clip, 1) == elco_selectors[clip]);
+            CHECK(SudekiMpLanArenaLocomotionAnimationId(clip) == ids[clip]);
+        }
+        CHECK(SudekiMpLanArenaLocomotionClip(75, 1) == -1);
+        CHECK(SudekiMpLanArenaLocomotionSelector(10, 1) == -1);
+    }
+    {
+        /* Exact Buki model lookup: only 02/06/07 have combat locomotion
+         * resources. Prior 64/67 "idle" expectations were attack aliases. */
+        const int buki_selectors[] = {0,20,23,24,0,0,0,0,0,0};
+        for (clip = 1u; clip < 10u; ++clip) {
+            if (buki_selectors[clip] == 0) continue;
+            CHECK(SudekiMpLanArenaLocomotionClip(buki_selectors[clip], 2) == (int)clip);
+            CHECK(SudekiMpLanArenaLocomotionSelector(clip, 2) == buki_selectors[clip]);
+        }
+        CHECK(SudekiMpLanArenaLocomotionClip(0, 2) == 0);
+        CHECK(SudekiMpLanArenaLocomotionClip(64, 2) == -1);
+        CHECK(SudekiMpLanArenaLocomotionClip(67, 2) == -1);
+        for (clip = 4u; clip < 10u; ++clip)
+            CHECK(SudekiMpLanArenaLocomotionSelector(clip, 2) == -1);
+        CHECK(SudekiMpLanArenaLocomotionClip(75, 2) == -1);
+        CHECK(SudekiMpLanArenaLocomotionSelector(10, 2) == -1);
     }
     motion->rate[0] = 255.99609375f;
     motion->time[0] = 4095.9375f;
@@ -1302,10 +1345,16 @@ static void test_directional_locomotion_wire(void) {
     CHECK(!SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
     motion->sequence = 1u;
     packet.body.snapshot.seat[0].locomotion = *motion;
-    CHECK(!SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
+    /* Melee host actors (Tal/Buki) now carry the observed base-channel
+     * locomotion on seat[0] too, so a valid block in combat is accepted;
+     * only an out-of-combat block is rejected (checked just below). */
+    CHECK(SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
     memset(&packet.body.snapshot.seat[0].locomotion, 0, sizeof(*motion));
     packet.body.snapshot.combat_enabled = 0u;
     CHECK(!SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
+    packet.body.snapshot.seat[0].locomotion = *motion;
+    CHECK(!SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
+    memset(&packet.body.snapshot.seat[0].locomotion, 0, sizeof(*motion));
     packet.body.snapshot.combat_enabled = 1u;
     packet.body.snapshot.seat[1].skill_sequence = 1u;
     packet.body.snapshot.seat[1].skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;

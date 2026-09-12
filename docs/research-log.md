@@ -1,5 +1,90 @@
 # Research log
 
+## 2026-09-12 — Buki/Elco native bank and presentation ownership corrections
+
+Scope: configurable **two-seat** checkout at `239bcf0` plus preserved dirty
+work. Tal/Elco and Buki/Elco isolated Wine test pairs; not four-character F1
+switching. Supported executable SHA256:
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Both running instances must use the identical rebuilt DLL; LA26 labels alone
+do not distinguish the existing dirty wire changes.
+
+### CONFIRMED_LIVE — native observations, not complete gameplay acceptance
+
+- Elco combat readiness stopped first at `world_idle`, then `world_fire`, then
+  `first_person_idle`: the checks and writers still expected Ailish's bank.
+  Exact model-table lookup gives these semantic ID / selector mappings:
+
+  | Semantic ID | Ailish | Elco | Renderer |
+  | --- | --- | --- | --- |
+  | `02` idle | 20 | 22 | World |
+  | `06`, `07` movement | 22, 23 | 24, 25 | World |
+  | `85` fire | 59 | 53 | World |
+  | `05` idle | 1 | 5 | First person |
+  | `8C`, `8D`, `8E` fire | 2, 3, 4 | 2, 3, 4 | First person |
+
+- Elco's first-person `C1` weapon swap resolves to selector 8, length 14;
+  `8C/8D/8E` lengths are 5/12/24. The actual model/renderer bank was inspected
+  read-only with owner links rechecked and the relocated exact lookup code
+  verified. No generic ANIMID play call was enabled.
+- With corrected Elco readiness, an operator-held input produced client
+  native ranged submissions and completions for host sequences 2, 3, 4.
+  Physical-input pacing, every weapon, skills and Spirit Strikes are **not**
+  accepted by that observation. The host used its existing world-arbiter
+  fallback; its first-person-only object graph was absent.
+- Buki's single weak and strong both use selector 53, but native semantic
+  IDs are `72` and `74`. Second swings share selector 54, with IDs `73` and
+  `75`. Both have observed playing states 1 and 65. Selector-only detection
+  omitted these events entirely; observe the semantic channel AND matching
+  renderer rather than guessing the input from selector 53/54.
+- Buki's native locomotion table resolves only `02/06/07` to 20/23/24;
+  `08..0D` have no loaded matching resources. Previous entries 64/67 labeled
+  as settled idle were incorrect: 64 is WWW and 67 is SWS. An initial corrected
+  journal run submitted the opening swings, but the locomotion writer still
+  overwrote the combo and bypassed native action retirement.
+
+### Correction and regression boundary
+
+`SudekiMpLanArenaRangedCombatSelector` centralizes the verified ranged bank
+mapping. `SudekiMpLanArenaBukiActionFromNativeAnimation` requires matching
+semantic and renderer observations for opening swings; ambiguous selector-only
+calls still reject them. Each journal edge submits **one** native input, as in
+the proven Tal path, not a reconstructed full combo spaced at 450 ms.
+
+Buki attacks are excluded from locomotion capture. Client native melee leases
+are serviced before locomotion and retain presentation until positive native
+idle; no forced lease clearing or weaker damage/owner guards were added.
+Unsupported Buki locomotion clips reject rather than resolving to selector 0.
+
+The focused combo/protocol/replica/authority/session/runtime-hook/owner-view
+and exact-image suites passed on the final build. Component tests do not imply
+complete gameplay acceptance; the native playback evidence and remaining
+acceptance boundaries are recorded below.
+
+### CONFIRMED_LIVE — final native playback spot checks
+
+DLL SHA256 `469f46245c7f7930c6c14e4941a111e2510f86dddc45db7db8f81a9aa259d737`
+was identical in both stages. The Buki/Elco run observed all eight three-input
+patterns reach their expected native client final selectors and retire to
+idle 20: WWW64, SSS65, WWS60, SWS67, SWW68, SSW56, WSW55, WSS66. Every opening
+swing was journaled and submitted once. Commands made before native host
+recovery could reject; the affected pattern was retried after idle. This is
+not a claim of lossless input at arbitrary timing or every blend being ideal.
+
+A final Tal/Ailish regression spot check on the same DLL observed client
+WWW `50 -> 51 -> 62 -> 17` and WWS `50 -> 51 -> 54 -> 17`, including positive
+retirement, plus Ailish native ranged submit/complete sequences. Elco likewise
+completed repeated host-confirmed ranged sequences with first-person idle 5.
+Full skill/Spirit/effect, weapon, physical-input pacing, disconnect/reconnect,
+and arbitrary host/client character-role acceptance remain outside this proof.
+
+Ordinary W-key movement in the final Buki host window changed host position
+and produced matching host/client run selectors 6/7 at 37.17093/30.97577,
+followed by idle 1. Elco's local movement similarly played 5/6 then idle 1.
+Do not use `host-forward-hold` as an ordinary-walking test: that operator
+rail supplies skill-aim direction. Subjective smoothness and exact cross-window
+phase alignment still require dedicated capture/visual acceptance.
+
 ## 2026-08-12 — Phase 0 installer inspection
 
 ### Confirmed

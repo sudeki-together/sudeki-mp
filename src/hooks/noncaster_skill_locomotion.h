@@ -5,7 +5,9 @@
 
 typedef enum SudekiMpNoncasterSkillLocomotionActor {
     SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_TAL = 0,
-    SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH = 1
+    SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_AILISH = 1,
+    SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_BUKI = 2,
+    SUDEKIMP_NONCASTER_SKILL_LOCOMOTION_ELCO = 3
 } SudekiMpNoncasterSkillLocomotionActor;
 
 typedef enum SudekiMpNoncasterSkillLocomotionResult {
