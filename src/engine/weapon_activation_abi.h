@@ -4,8 +4,8 @@
 #include <windows.h>
 #include <stdint.h>
 
-/* Category 5 contains the ordered weapon families for all four heroes. */
-enum { SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS = 64u };
+/* Native weapon categories each have twelve actor-local slots. */
+enum { SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS = 12u };
 
 typedef enum SudekiMpWeaponActivationStatus {
     SUDEKIMP_WEAPON_ACTIVATION_STARTED = 0,
@@ -36,7 +36,23 @@ typedef struct SudekiMpWeaponActivationResult {
 } SudekiMpWeaponActivationResult;
 
 BOOL SudekiMpInitializeWeaponActivationAbi(HMODULE game_module);
+BOOL SudekiMpWeaponActivationAbiInitialized(void);
 void SudekiMpResetWeaponActivationAbi(void);
+BOOL SudekiMpWeaponFamily(unsigned int resource_type,
+    unsigned int *category, unsigned int *starter_item_id);
+/* Startup only: preserve an equipped owned-family item, otherwise equip the
+ * owned starter. Never grants inventory, cancels a pending swap, or resets kit. */
+BOOL SudekiMpEnsureCharacterStarterWeapon(void *character);
+/* Host game-thread only, after the remote actor lease is validated. Proton
+ * Phaser misses FP recharge/blend while the local camera owns another
+ * hero. Uses native recharge, never resets charge or forces reload complete.
+ * Other weapons/rates return FALSE and retain their native admission path. */
+BOOL SudekiMpServiceRemoteRapidWeapon(void *character, void *local_character,
+    float delta, uint32_t *repeat_ms);
+float SudekiMpRapidWeaponRechargeAmount(uint16_t rate, uint16_t charge,
+    uint8_t flags, float cooldown, float delta);
+uint32_t SudekiMpRapidWeaponCycleMs(unsigned int item_id, float frames,
+    float delta);
 BOOL SudekiMpDescribeCharacterWeapons(void *character,
     SudekiMpWeaponQuickList *weapons);
 SudekiMpWeaponActivationResult SudekiMpActivateCharacterWeapon(

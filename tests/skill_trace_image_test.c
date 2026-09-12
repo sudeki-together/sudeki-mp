@@ -2612,11 +2612,11 @@ typedef union PointerAlignedWeaponParentFixture {
 } PointerAlignedWeaponParentFixture;
 
 static void store_fixture_pointer(
-    uint8_t *storage,
+    void *storage,
     size_t offset,
     void *value
 ) {
-    memcpy(storage + offset, &value, sizeof(value));
+    memcpy((uint8_t *)storage + offset, &value, sizeof(value));
 }
 
 static void exercise_client_ailish_renderer_fallback(int *failures) {
@@ -3557,6 +3557,207 @@ static void test_spirit_vfx_exact_image(uint8_t *image, int *failures) {
     }
 }
 
+static unsigned int weapon_family_test_set_calls;
+static void exercise_rapid_weapon_policy(int *failures) {
+    if (SudekiMpRapidWeaponCycleMs(12u, 4.0f, 1.0f/60.0f) != 0u ||
+        SudekiMpRapidWeaponCycleMs(24u, 5.0f, 1.0f/60.0f) != 342u ||
+        SudekiMpRapidWeaponCycleMs(35u, 5.0f, 1.0f/60.0f) != 0u ||
+        SudekiMpRapidWeaponCycleMs(24u, 4.0f, 1.0f/60.0f) != 0u ||
+        SudekiMpRapidWeaponCycleMs(24u, 5.0f, NAN) != 0u ||
+        SudekiMpRapidWeaponCycleMs(24u, 5.0f, 0.0f) != 0u ||
+        SudekiMpRapidWeaponCycleMs(24u, 5.0f, 0.251f) != 0u) {
+        fputs("FAIL: native rapid-weapon cycle family/resource/delta gates\n", stderr);
+        ++*failures;
+    }
+    if (SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x55f0u, 3u, 0.0f, .01f) != 1.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x5640u, 3u, 0.0f, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x55f0u, 0u, 0.0f, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x55f0u, 3u, 2.0f, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x7c00u, 0x55f0u, 3u, 0.0f, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0xbc00u, 3u, 0.0f, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x55f0u, 3u, NAN, .01f) != 0.0f ||
+        SudekiMpRapidWeaponRechargeAmount(0x5640u, 0x55f0u, 3u, 0.0f, -.01f) != 0.0f) {
+        fputs("FAIL: native recharge preserves full charge/flags/reload/invalid values\n", stderr);
+        ++*failures;
+    }
+}
+static void __attribute__((thiscall)) weapon_family_test_set_item(void *weapon, void *item) {
+    ++weapon_family_test_set_calls;
+    store_fixture_pointer(weapon, 0x268u, item);
+}
+
+static void exercise_rapid_weapon_context(uint8_t *image, uint8_t *actor,
+    uint8_t *weapon, void *item, unsigned int id, int *failures) {
+    uint32_t local[96] = {0}, local_weapon[192] = {0}, controller[160] = {0};
+    uint32_t combat[64] = {0}, component[96] = {0}, arbiter[32] = {0};
+    uint32_t record[64] = {0}, wrapper[8] = {0}, renderer[8] = {0};
+    uint32_t bank[12] = {0}, entries[21] = {0}, resource[4] = {0};
+    void *rows[1] = {record};
+    uint32_t saved_controller, interval = 0u;
+    uint8_t saved_entry = image[0xc8b90u];
+    memcpy(&saved_controller, image + 0x408da4u, 4u);
+    store_fixture_pointer(local, 0, image + lifecycle_hero_fixtures[0].main_vtable_rva);
+    store_fixture_pointer(local, 0x2c, image + lifecycle_hero_fixtures[0].resource_vtable_rva);
+    store_fixture_pointer(local, 0xc0, local_weapon);
+    store_fixture_pointer(local_weapon, 0x10, local);
+    store_fixture_pointer(controller, 0x248, local);
+    store_fixture_pointer(image, 0x408da4, controller);
+    store_fixture_pointer(actor, 0xbc, combat);
+    store_fixture_pointer(actor, 0x134, component);
+    store_fixture_pointer(actor, 0x90, arbiter);
+    store_fixture_pointer(weapon, 0x268, item);
+    store_fixture_pointer(combat, 0, image + 0x2d4c8c);
+    store_fixture_pointer(combat, 0x10, actor);
+    store_fixture_pointer(combat, 0x60, record);
+    store_fixture_pointer(combat, 0x4c, rows);
+    combat[0x44/4] = 1;
+    record[8/4] = id; record[0x9c/4] = 140;
+    *(uint16_t *)((uint8_t *)record + 0xba) = 0x5640; /* full: no native write */
+    store_fixture_pointer(component, 0, image + 0x2d5464);
+    store_fixture_pointer(component, 0x10, actor);
+    *(float *)((uint8_t *)component + 0x50) = 1.0f;
+    *(float *)((uint8_t *)component + 0x54) = 1.0f;
+    store_fixture_pointer(component, 0x160, wrapper);
+    store_fixture_pointer(arbiter, 0x10, actor);
+    ((uint8_t *)arbiter)[0x58] = 0x20;
+    store_fixture_pointer(wrapper, 0x10, renderer);
+    store_fixture_pointer(renderer, 0, image + 0x2df8ec);
+    store_fixture_pointer(renderer, 8, bank);
+    store_fixture_pointer(bank, 0x20, entries);
+    store_fixture_pointer(entries, 2*28, resource);
+    *(float *)((uint8_t *)resource + 4) = id == 12 ? 4.0f : 5.0f;
+#define CHECK_RAPID_CONTEXT(expr) do { if (!(expr)) { \
+    fprintf(stderr, "FAIL: rapid weapon context: %s\n", #expr); ++*failures; } } while (0)
+    CHECK_RAPID_CONTEXT(!!SudekiMpServiceRemoteRapidWeapon(actor, local, 1.0f/60.0f,
+        &interval) == (id == 24u) && interval == (id == 24u ? 342u : 0u));
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, actor, .01f, &interval));
+    store_fixture_pointer(controller, 0x248, actor);
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    store_fixture_pointer(controller, 0x248, local);
+    store_fixture_pointer(weapon, 0x26c, item);
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    store_fixture_pointer(weapon, 0x26c, NULL);
+    record[8/4] = 35;
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    record[8/4] = id;
+    rows[0] = NULL;
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    rows[0] = record;
+    *(float *)((uint8_t *)component + 0x50) = 2.0f;
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    *(float *)((uint8_t *)component + 0x50) = 1.0f;
+    image[0xc8b90u] ^= 1;
+    CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval));
+    image[0xc8b90u] = saved_entry;
+    CHECK_RAPID_CONTEXT(!!SudekiMpServiceRemoteRapidWeapon(actor, local, .01f, &interval) ==
+        (id == 24u));
+#undef CHECK_RAPID_CONTEXT
+    memcpy(image + 0x408da4, &saved_controller, 4u);
+    store_fixture_pointer(actor, 0xbc, NULL);
+    store_fixture_pointer(actor, 0x134, NULL);
+    store_fixture_pointer(actor, 0x90, NULL);
+}
+
+/* Execute the exact native count/lookup against bounded synthetic inventory.
+ * Only the mutating model installer is replaced with a thiscall recorder. */
+static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
+    union { uint32_t align; uint8_t b[0x140]; } inventory;
+    union { uint32_t align; uint8_t b[0x180]; } character;
+    union { uint32_t align; uint8_t b[0x400]; } weapon;
+    uint32_t database[51] = {0};
+    uint32_t category_ptrs[4];
+    uint32_t categories[4][5] = {{0}};
+    uint32_t slots[4][12] = {{0}};
+    uint32_t items[4][2][8] = {{{0}}};
+    static const uint32_t ids[4][2] = {{0, 1}, {12, 17}, {36, 37}, {24, 35}};
+    uint8_t saved_setter[5], saved_globals[8], saved_lookup_global[4];
+    uint32_t saved_type_methods[4];
+    int32_t jump;
+    unsigned int hero, j;
+    memcpy(saved_globals, image + 0x408d80u, 8u);
+    memcpy(saved_lookup_global, image + 0x21ceau, 4u);
+    memcpy(saved_setter, image + 0xd7c10u, 5u);
+    ZeroMemory(&inventory, sizeof(inventory));
+    store_fixture_pointer(inventory.b, 0x0cu, category_ptrs);
+    *(uint32_t *)(inventory.b + 0x12cu) = 4u;
+    store_fixture_pointer(image, 0x408d80u, database);
+    store_fixture_pointer(image, 0x408d84u, inventory.b);
+    store_fixture_pointer(image, 0x21ceau, image + 0x408d80u);
+    jump = (int32_t)((uintptr_t)weapon_family_test_set_item -
+        (uintptr_t)(image + 0xd7c10u + 5u));
+    image[0xd7c10u] = 0xe9u;
+    memcpy(image + 0xd7c11u, &jump, 4u);
+    for (hero = 0u; hero < 4u; ++hero) {
+        const LifecycleHeroIdentityFixture *identity = &lifecycle_hero_fixtures[hero];
+        memcpy(&saved_type_methods[hero], image + identity->resource_vtable_rva + 16u, 4u);
+        store_fixture_pointer(image, identity->resource_vtable_rva + 16u,
+            image + identity->type_method_rva);
+        category_ptrs[hero] = (uint32_t)(uintptr_t)categories[hero];
+        categories[hero][1] = (uint32_t)(uintptr_t)slots[hero];
+        categories[hero][2] = hero + 4u;
+        categories[hero][3] = (1u << 16) | 2u; /* last valid slot=1, count=2 */
+        categories[hero][4] = 12u;
+        for (j = 0u; j < 2u; ++j) {
+            slots[hero][j] = (1u << 16) | ids[hero][j];
+            items[hero][j][5] = ids[hero][j];
+            database[3u + ids[hero][j]] = (uint32_t)(uintptr_t)items[hero][j];
+        }
+    }
+#define CHECK_WEAPON_FAMILY(expr) do { if (!(expr)) { \
+    fprintf(stderr, "FAIL: weapon family fixture: %s\n", #expr); ++*failures; } } while (0)
+    for (hero = 0u; hero < 4u; ++hero) {
+        const LifecycleHeroIdentityFixture *identity = &lifecycle_hero_fixtures[hero];
+        SudekiMpWeaponQuickList list;
+        SudekiMpWeaponActivationResult result;
+        ZeroMemory(&character, sizeof(character));
+        ZeroMemory(&weapon, sizeof(weapon));
+        store_fixture_pointer(character.b, 0u, image + identity->main_vtable_rva);
+        store_fixture_pointer(character.b, 0x2cu, image + identity->resource_vtable_rva);
+        store_fixture_pointer(character.b, 0xc0u, weapon.b);
+        store_fixture_pointer(weapon.b, 0x10u, character.b);
+        weapon_family_test_set_calls = 0u;
+        CHECK_WEAPON_FAMILY(SudekiMpDescribeCharacterWeapons(character.b, &list));
+        CHECK_WEAPON_FAMILY(list.inventory_category == hero + 4u && list.row_count == 2u);
+        CHECK_WEAPON_FAMILY(list.rows[1].native_item == items[hero][1]);
+        CHECK_WEAPON_FAMILY(SudekiMpEnsureCharacterStarterWeapon(character.b));
+        CHECK_WEAPON_FAMILY(*(void **)(weapon.b + 0x268u) == items[hero][0]);
+        CHECK_WEAPON_FAMILY(weapon_family_test_set_calls == 1u);
+        result = SudekiMpActivateCharacterWeapon(character.b, 1u);
+        CHECK_WEAPON_FAMILY(result.status == SUDEKIMP_WEAPON_ACTIVATION_STARTED);
+        CHECK_WEAPON_FAMILY(*(void **)(weapon.b + 0x268u) == items[hero][1]);
+        CHECK_WEAPON_FAMILY(SudekiMpEnsureCharacterStarterWeapon(character.b));
+        CHECK_WEAPON_FAMILY(weapon_family_test_set_calls == 2u); /* keep user's selection */
+        result = SudekiMpActivateCharacterWeapon(character.b, 2u);
+        CHECK_WEAPON_FAMILY(result.status == SUDEKIMP_WEAPON_ACTIVATION_INVALID_SELECTION);
+        store_fixture_pointer(weapon.b, 0x26cu, items[hero][0]);
+        result = SudekiMpActivateCharacterWeapon(character.b, 0u);
+        CHECK_WEAPON_FAMILY(result.status == SUDEKIMP_WEAPON_ACTIVATION_UNVERIFIED);
+        CHECK_WEAPON_FAMILY(weapon_family_test_set_calls == 2u);
+        store_fixture_pointer(weapon.b, 0x26cu, NULL);
+        slots[hero][0] = (1u << 16) | ids[(hero + 1u) % 4u][0];
+        result = SudekiMpActivateCharacterWeapon(character.b, 0u);
+        CHECK_WEAPON_FAMILY(result.status == SUDEKIMP_WEAPON_ACTIVATION_NOT_AVAILABLE);
+        CHECK_WEAPON_FAMILY(!SudekiMpDescribeCharacterWeapons(character.b, &list));
+        slots[hero][0] = (1u << 16) | ids[hero][0];
+        categories[hero][3] = (12u << 16) | 13u;
+        CHECK_WEAPON_FAMILY(!SudekiMpDescribeCharacterWeapons(character.b, &list));
+        categories[hero][3] = (1u << 16) | 2u;
+        if (hero == 1u || hero == 3u)
+            exercise_rapid_weapon_context(image, character.b, weapon.b,
+                items[hero][0], ids[hero][0], failures);
+        store_fixture_pointer(weapon.b, 0x10u, inventory.b);
+        CHECK_WEAPON_FAMILY(!SudekiMpEnsureCharacterStarterWeapon(character.b));
+        CHECK_WEAPON_FAMILY(weapon_family_test_set_calls == 2u);
+    }
+#undef CHECK_WEAPON_FAMILY
+    for (hero = 0u; hero < 4u; ++hero)
+        memcpy(image + lifecycle_hero_fixtures[hero].resource_vtable_rva + 16u,
+            &saved_type_methods[hero], 4u);
+    memcpy(image + 0x408d80u, saved_globals, 8u);
+    memcpy(image + 0x21ceau, saved_lookup_global, 4u);
+    memcpy(image + 0xd7c10u, saved_setter, 5u);
+}
+
 int wmain(int argc, wchar_t **argv) {
     uint8_t *file;
     uint8_t *image;
@@ -4462,6 +4663,24 @@ int wmain(int argc, wchar_t **argv) {
             };
             unsigned int i;
             float x, z;
+            BOOL seek;
+            if (!SudekiMpLanArenaClientBukiLocomotionClock(10.04f, 10.0f, 37.0f, FALSE, &x, &seek) ||
+                seek || x != 37.0f ||
+                !SudekiMpLanArenaClientBukiLocomotionClock(11.0f, 10.0f, 37.0f, FALSE, &x, &seek) ||
+                seek || fabsf(x - 33.3f) > 0.0001f ||
+                !SudekiMpLanArenaClientBukiLocomotionClock(9.0f, 10.0f, 37.0f, FALSE, &x, &seek) ||
+                seek || fabsf(x - 40.7f) > 0.0001f ||
+                !SudekiMpLanArenaClientBukiLocomotionClock(10.0f, 0.0f, 37.0f, TRUE, &x, &seek) ||
+                !seek || x != 37.0f ||
+                !SudekiMpLanArenaClientBukiLocomotionClock(30.0f, 10.0f, 37.0f, FALSE, &x, &seek) || !seek ||
+                !SudekiMpLanArenaClientBukiLocomotionClock(0.0f, 0.0f, 0.0f, FALSE, &x, &seek) || seek || x != 0.0f ||
+                SudekiMpLanArenaClientBukiLocomotionClock(NAN, 0.0f, 24.0f, FALSE, &x, &seek) ||
+                SudekiMpLanArenaClientBukiLocomotionClock(0.0f, INFINITY, 24.0f, FALSE, &x, &seek) ||
+                SudekiMpLanArenaClientBukiLocomotionClock(0.0f, 0.0f, -1.0f, FALSE, &x, &seek) ||
+                SudekiMpLanArenaClientBukiLocomotionClock(0.0f, 0.0f, 24.0f, FALSE, NULL, &seek)) {
+                fputs("FAIL: Buki continuous locomotion clock policy\n", stderr);
+                ++failures;
+            }
             if (!SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 20u, FALSE, &x) ||
                 fabsf(x - 9.52f) > 0.0001f ||
                 !SudekiMpLanArenaClientLocomotionPhase(10.0f, 24.0f, 20u, TRUE, &x) || x != 10.0f ||
@@ -7409,6 +7628,42 @@ int wmain(int argc, wchar_t **argv) {
         }
         image[RVA_QUICK_ITEM_APPLY_TO_PARTY_SLOT] = saved_item_apply;
     }
+    {
+        static const unsigned int types[] = {0x23u, 0x01u, 0x05u, 0x0eu};
+        static const unsigned int categories[] = {4u, 5u, 6u, 7u};
+        static const unsigned int starters[] = {0u, 12u, 36u, 24u};
+        unsigned int i, category = 99u, starter = 99u;
+        uint8_t saved_item_set_entry = image[0xd7c10u];
+        uint8_t saved_item_set_call = image[0xd87bau];
+        for (i = 0u; i < 4u; ++i) {
+            if (!SudekiMpWeaponFamily(types[i], &category, &starter) ||
+                category != categories[i] || starter != starters[i]) {
+                fputs("FAIL: actor-specific weapon category/starter mismatch\n", stderr);
+                ++failures;
+            }
+        }
+        if (SudekiMpWeaponFamily(0x0bu, &category, &starter) ||
+            SudekiMpWeaponFamily(0u, &category, &starter) ||
+            SudekiMpWeaponFamily(0x05u, NULL, &starter) ||
+            SudekiMpWeaponFamily(0x0eu, &category, NULL)) {
+            fputs("FAIL: unsupported weapon family admitted\n", stderr);
+            ++failures;
+        }
+        image[0xd7c10u] ^= 1u;
+        if (SudekiMpInitializeWeaponActivationAbi((HMODULE)image)) {
+            fputs("FAIL: changed native item setter admitted\n", stderr);
+            ++failures;
+            SudekiMpResetWeaponActivationAbi();
+        }
+        image[0xd7c10u] = saved_item_set_entry;
+        image[0xd87bau] ^= 1u;
+        if (SudekiMpInitializeWeaponActivationAbi((HMODULE)image)) {
+            fputs("FAIL: wrong native item setter call target admitted\n", stderr);
+            ++failures;
+            SudekiMpResetWeaponActivationAbi();
+        }
+        image[0xd87bau] = saved_item_set_call;
+    }
     if (!SudekiMpInitializeWeaponActivationAbi((HMODULE)image) ||
         !SudekiMpInitializeItemActivationAbi((HMODULE)image)) {
         fprintf(stderr, "weapon activation ABI rejected image (error=%lu)\n",
@@ -7417,6 +7672,8 @@ int wmain(int argc, wchar_t **argv) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
     }
+    exercise_weapon_family_inventory(image, &failures);
+    exercise_rapid_weapon_policy(&failures);
     if (!SudekiMpInstallQuickSkillInputTrace((HMODULE)image, TRUE, TRUE)) {
         fprintf(stderr, "quick-skill install rejected image (error=%lu)\n",
             (unsigned long)GetLastError());

@@ -385,6 +385,53 @@ cleanup:
     return result;
 }
 
+static int verify_buki_animation_storage(void) {
+    uint8_t renderer[0xa8] = {0};
+    uint8_t channels[4 * 36] = {0};
+    uint8_t blends[3 * 20] = {0};
+    uint8_t *rows = VirtualAlloc(NULL, 4096u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    unsigned int i;
+    DWORD old_protection;
+    int ok = 1;
+    if (rows == NULL) return 0;
+    *(void **)(renderer + 0x98) = channels;
+    *(void **)(renderer + 0x9c) = blends;
+    *(uint32_t *)(renderer + 0xa0) = 4;
+    *(uint32_t *)(renderer + 0xa4) = 3;
+    for (i = 0; i < 4; ++i) *(void **)(channels + 36 * i) = rows + 24 * i;
+    *(uint16_t *)(blends + 2) = 1;
+    *(uint16_t *)(blends + 20) = 2;
+    *(uint16_t *)(blends + 22) = 3;
+    *(uint16_t *)(blends + 40) = 0x8000;
+    *(uint16_t *)(blends + 42) = 0x8001;
+#define STORAGE_CHECK(condition) do { if (!require_true((condition), \
+    "Buki four-channel/three-blend storage guard")) ok = 0; } while (0)
+    STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
+    STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(NULL, 1, FALSE));
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 0, FALSE));
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 33, FALSE));
+    *(uint32_t *)(renderer + 0xa0) = 2;
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
+    *(uint32_t *)(renderer + 0xa0) = 4;
+    *(uint32_t *)(renderer + 0xa4) = 4;
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+    *(uint32_t *)(renderer + 0xa4) = 3;
+    *(void **)(channels + 72) = NULL;
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
+    *(void **)(channels + 72) = rows + 48;
+    *(uint16_t *)(blends + 40) = 4;
+    STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+    *(uint16_t *)(blends + 40) = 0x8000;
+    if (VirtualProtect(rows, 4096u, PAGE_READONLY, &old_protection)) {
+        STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
+        STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+    } else ok = 0;
+#undef STORAGE_CHECK
+    VirtualFree(rows, 0, MEM_RELEASE);
+    return ok;
+}
+
 int main(void) {
     unsigned int actor;
     BOOL mode = FALSE;
@@ -398,7 +445,8 @@ int main(void) {
     };
     SudekiMpResourceName resource_copy;
 
-    if (!verify_ranged_prime_deadline_lifecycle() ||
+    if (!verify_buki_animation_storage() ||
+        !verify_ranged_prime_deadline_lifecycle() ||
         !verify_training_learned_skill_lease() ||
         !verify_training_skill_allocation_gate() ||
         !require_true(

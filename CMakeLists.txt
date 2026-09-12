@@ -1336,6 +1336,7 @@ set_target_properties(SudekiMP.OrbitCameraTest PROPERTIES
 add_executable(SudekiMP.CleanroomEngineTest
     tests/cleanroom_engine_test.c
     src/cleanroom/engine.c
+    src/engine/weapon_activation_abi.c
     src/engine/log.c
     src/hooks/call_hook.c
 )

@@ -905,6 +905,27 @@ BOOL SudekiMpLanArenaClientLocomotionPhase(
     return TRUE;
 }
 
+BOOL SudekiMpLanArenaClientBukiLocomotionClock(
+    float actual_phase, float target_phase, float host_rate, BOOL restart,
+    float *playback_rate, BOOL *seek
+) {
+    float error;
+    if (playback_rate == NULL || seek == NULL ||
+        !isfinite(actual_phase) || actual_phase < 0.0f ||
+        !isfinite(target_phase) || target_phase < 0.0f ||
+        target_phase > 4095.9375f || !isfinite(host_rate) ||
+        host_rate < 0.0f || host_rate > 255.99609375f) return FALSE;
+    error = target_phase - actual_phase;
+    *seek = restart || fabsf(error) > fmaxf(1.0f, host_rate * 0.25f);
+    *playback_rate = host_rate;
+    if (!*seek && host_rate > 0.0f &&
+        fabsf(error) > fmaxf(0.125f, host_rate * 0.02f)) {
+        *playback_rate += fmaxf(-host_rate * 0.1f,
+            fminf(host_rate * 0.1f, error * 5.0f));
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpLanArenaClientActionPhaseTime(
     const SudekiMpLanArenaActorSnapshot *snapshot,
     float *phase_time
@@ -4510,6 +4531,7 @@ static BOOL actor_presentation_matches(
      * every auxiliary channel.  His base channels are proven, and hiding the
      * stale native action layer only requires its blend to be zero. */
     if (actor_index == 0u) {
+        if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) return TRUE;
         float blend_three = methods->get_blend(renderer, 3);
         return isfinite(blend_three) && fabsf(blend_three) <= 0.001f;
     }
@@ -4608,6 +4630,9 @@ static BOOL apply_host_skill_presentation(
     lease = &native_skill_leases[actor_index];
     submodels = methods.count(renderer);
     if (submodels == 0u || submodels > 32u) return FALSE;
+    if (actor_index == 0u && seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+        !SudekiMpCleanroomBukiAnimationStorageValid(renderer, submodels, TRUE))
+        return FALSE;
     /* Character skills already have a real local CSkill task. Never let wire
      * values select, transition, or phase-steer its native animation bank.
      * Treat the host tuple only as a witness when the exact actor/CSkill/
@@ -5380,7 +5405,7 @@ static BOOL apply_ailish_host_locomotion(
     return TRUE;
 }
 
-static BOOL apply_tal_host_locomotion(
+static BOOL apply_buki_host_locomotion(
     uint8_t *character,
     void *renderer,
     const LanArenaAnimationMethods *methods,
@@ -5393,23 +5418,37 @@ static BOOL apply_tal_host_locomotion(
     unsigned int channel;
     BOOL new_owner = !lease->valid || lease->character != character ||
         lease->renderer != renderer || !lease->combat_mode;
-    BOOL new_epoch = new_owner || !lease->locomotion.valid ||
-        lease->locomotion.sequence != motion->sequence;
     DWORD now = GetTickCount();
     DWORD elapsed = !new_owner && lease->last_early_apply_at ?
         now - lease->last_early_apply_at : 17u;
     if (!motion->valid || !SudekiMpLanArenaLocomotionValid(motion) ||
         snapshot->skill_active) return FALSE;
+    /* This path currently admits only Buki. Preflight every packet clip before
+     * mutating any channel: her bank has no ranged strafe/fire resources. */
+    if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+        !SudekiMpCleanroomBukiAnimationStorageValid(renderer, submodels, TRUE))
+        return FALSE;
+    for (channel = 0u; channel < 4u; ++channel) {
+        if (SudekiMpLanArenaLocomotionSelector(motion->clip[channel], 2u) < 0)
+            return FALSE;
+    }
     for (channel = 0u; channel < 4u; ++channel) {
         unsigned int submodel;
         int selector = SudekiMpLanArenaLocomotionSelector(
             motion->clip[channel], 2u);
-        BOOL fresh_phase = new_epoch ||
-            motion->time[channel] != lease->locomotion.time[channel];
+        BOOL fresh_phase = new_owner || !lease->locomotion.valid ||
+            motion->time[channel] != lease->locomotion.time[channel] ||
+            motion->rate[channel] != lease->locomotion.rate[channel];
+        BOOL restart = new_owner || !lease->locomotion.valid ||
+            motion->clip[channel] != lease->locomotion.clip[channel] ||
+            motion->time[channel] < lease->locomotion.time[channel];
         for (submodel = 0u; submodel < submodels; ++submodel) {
             BOOL changed = methods->get_selector(renderer, (int)channel,
                 submodel) != selector;
             float phase;
+            float playback_rate = motion->rate[channel];
+            float actual_rate;
+            BOOL seek = FALSE;
             if (!SudekiMpLanArenaClientLocomotionPhase(motion->time[channel],
                     motion->rate[channel], elapsed, final_boundary, &phase))
                 return FALSE;
@@ -5419,21 +5458,27 @@ static BOOL apply_tal_host_locomotion(
                     motion->state[channel])
                 methods->set_state(renderer, (int)channel, submodel,
                     motion->state[channel]);
-            if (methods->get_rate(renderer, (int)channel, submodel) !=
-                    motion->rate[channel])
-                methods->set_rate(renderer, (int)channel, submodel,
-                    motion->rate[channel]);
             if (!final_boundary && (fresh_phase || changed)) {
+                if (!SudekiMpLanArenaClientBukiLocomotionClock(
+                        methods->get_time(renderer, (int)channel, submodel),
+                        phase, motion->rate[channel], restart || changed,
+                        &playback_rate, &seek)) return FALSE;
+                if (seek) methods->set_time(renderer, (int)channel,
+                    submodel, phase, 0);
+                methods->set_rate(renderer, (int)channel, submodel, playback_rate);
+            } else if (changed) {
                 methods->set_time(renderer, (int)channel, submodel, phase, 0);
-            } else if (final_boundary && changed) {
-                methods->set_time(renderer, (int)channel, submodel, phase, 0);
+                methods->set_rate(renderer, (int)channel, submodel, playback_rate);
             }
+            actual_rate = methods->get_rate(renderer, (int)channel, submodel);
             if (methods->get_selector(renderer, (int)channel, submodel) !=
                     selector ||
                 methods->get_state(renderer, (int)channel, submodel) !=
-                    motion->state[channel] ||
-                methods->get_rate(renderer, (int)channel, submodel) !=
-                    motion->rate[channel])
+                    motion->state[channel] || !isfinite(actual_rate) ||
+                fabsf(actual_rate - motion->rate[channel]) >
+                    motion->rate[channel] * 0.1001f + 0.001f ||
+                (((!final_boundary && fresh_phase) || changed) &&
+                 fabsf(actual_rate - playback_rate) > 0.001f))
                 return FALSE;
         }
     }
@@ -5442,7 +5487,7 @@ static BOOL apply_tal_host_locomotion(
     if (!final_boundary) {
         if (new_owner || !lease->locomotion.valid) {
             SudekiMpLogFormat(
-                "lan_arena_client_replica event=client_tal_locomotion actor=Tal "
+                "lan_arena_client_replica event=client_buki_locomotion actor=Buki "
                 "state=admitted epoch=%u clips=%u,%u,%u,%u "
                 "policy=host_observed_base_channels\r\n",
                 motion->sequence, motion->clip[0], motion->clip[1],
@@ -5662,6 +5707,9 @@ static BOOL apply_actor_presentation(
     if (actor_index == 1u) {
         dump_client_world_animation_table(ailish_component, renderer);
     }
+    if (actor_index == 0u && seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+        !SudekiMpCleanroomBukiAnimationStorageValid(renderer, submodels, TRUE))
+        return FALSE;
     /* The first-person arms renderer is the owner's visible surface and is
      * independent from Ailish's retained world renderer. Validate/apply it
      * before any conservative world-bank lookup can fail. */
@@ -5692,7 +5740,7 @@ static BOOL apply_actor_presentation(
         return TRUE;
     }
     if (actor_index == 0u && combat_mode && snapshot->locomotion.valid) {
-        return apply_tal_host_locomotion(character, renderer, &methods,
+        return apply_buki_host_locomotion(character, renderer, &methods,
             submodels, snapshot, final_presentation_boundary);
     }
     if (actor_index == 1u && combat_mode && snapshot->locomotion.valid) {
@@ -5895,7 +5943,8 @@ static BOOL apply_actor_presentation(
     action_rate = 0.0f;
     methods.set_blend(renderer, 0, expected_blend_zero);
     if (actor_index == 0u) {
-        methods.set_blend(renderer, 3, 0.0f);
+        if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE)
+            methods.set_blend(renderer, 3, 0.0f);
     } else if (!preserve_ailish_auxiliary) {
         set_animation_channel(renderer, &methods, submodels, 2,
             0, 192, 0.0f, logical_transition);

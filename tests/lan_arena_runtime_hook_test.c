@@ -34,10 +34,23 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #define CloseHandle test_close_handle
 #include "../src/hooks/lan_arena_runtime.c"
 
+static BOOL describe_equipped_weapon;
 BOOL SudekiMpDescribeCharacterWeapons(void *character,
     SudekiMpWeaponQuickList *weapons) {
     (void)character;
-    (void)weapons;
+    if (!describe_equipped_weapon || weapons == NULL) return FALSE;
+    memset(weapons, 0, sizeof(*weapons));
+    weapons->row_count = 1u;
+    weapons->rows[0].equipped = TRUE;
+    return TRUE;
+}
+BOOL SudekiMpEnsureCharacterStarterWeapon(void *character) {
+    return character != NULL;
+}
+BOOL SudekiMpServiceRemoteRapidWeapon(void *character, void *local_character,
+    float delta, uint32_t *repeat_ms) {
+    (void)character; (void)local_character; (void)delta;
+    if (repeat_ms != NULL) *repeat_ms = 0u;
     return FALSE;
 }
 #undef CloseHandle
@@ -2595,6 +2608,25 @@ static void verify_host_anim_id_read(void) {
     cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL] = NULL;
 }
 
+static void verify_weapon_snapshot_family(void) {
+    static const SudekiMpCleanroomActor actors[] = {
+        SUDEKIMP_CLEANROOM_TAL, SUDEKIMP_CLEANROOM_AILISH,
+        SUDEKIMP_CLEANROOM_BUKI, SUDEKIMP_CLEANROOM_ELCO
+    };
+    static const uint8_t types[] = {0x23u, 0x01u, 0x05u, 0x0eu};
+    unsigned int i;
+    SudekiMpLanArenaActorSnapshot snapshot;
+    actor_position_result = actor_facing_result = actor_resources_result = TRUE;
+    describe_equipped_weapon = TRUE;
+    for (i = 0u; i < 4u; ++i) {
+        check(fill_actor_snapshot(actors[i], types[i], &snapshot),
+            "equipped actor snapshot is captured for every hero");
+        check(snapshot.weapon_slot_plus_one == ((i == 1u || i == 3u) ? 1u : 0u),
+            "ranged-only wire slot never publishes an equipped melee weapon");
+    }
+    describe_equipped_weapon = FALSE;
+}
+
 int main(void) {
     uint8_t *image = (uint8_t *)VirtualAlloc(
         NULL,
@@ -2608,6 +2640,7 @@ int main(void) {
     reset_stub_policy();
     reset_stub_counts();
 
+    verify_weapon_snapshot_family();
     verify_client_install_and_uninstall(image);
     verify_client_install_and_uninstall(image);
     verify_host_hook_scope(image);

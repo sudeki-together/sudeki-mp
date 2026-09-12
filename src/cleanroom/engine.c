@@ -1,6 +1,7 @@
 #include "cleanroom/engine.h"
 
 #include "engine/log.h"
+#include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
 
 #include <limits.h>
@@ -311,10 +312,10 @@ static const char *const actor_resources[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
     "PC_Tal", "PC_Buki", "PC_Elco", "PC_Ailish", "PC_Cafu"
 };
 /*
- * CCharacterWeapon::SetWeapon takes an index in inventory category 5, not
- * the global SOLData item ID. FillInventory orders that category by the
- * Ailish, Elco, Tal, then Buki weapon families. The matching starter slots
- * are therefore different from global item IDs 12, 24, 0, and 36.
+ * Legacy non-LAN bootstrap only. This old flat-category assumption is NOT
+ * valid for the current actor-local inventory. LAN/fixed-seat launches
+ * initialize the validated weapon ABI first and never use these indices.
+ * Other legacy launch modes need separate bootstrap migration/acceptance.
  */
 static const int actor_starter_weapon_slots[SUDEKIMP_CLEANROOM_ACTOR_COUNT] = {
     24, 36, 12, 0, -1
@@ -2551,6 +2552,12 @@ static BOOL initialize_actor_weapon(
     uint8_t *character_weapon;
     void *current_item;
 
+    /* SpawnActor also calls this before the LAN coordinator's ready check.
+     * Do not transiently equip a foreign item through the old category-5
+     * export and then repair it after the wrong model has been attached. */
+    if (SudekiMpWeaponActivationAbiInitialized())
+        return SudekiMpEnsureCharacterStarterWeapon(character);
+
     if (!readable_memory(
             character,
             CHARACTER_WEAPON_OFFSET + sizeof(void *))) {
@@ -4135,6 +4142,37 @@ BOOL SudekiMpCleanroomEngineActorFacing(
     return TRUE;
 }
 
+BOOL SudekiMpCleanroomBukiAnimationStorageValid(
+    void *renderer, unsigned int submodels, BOOL for_write
+) {
+    uint8_t *channels;
+    uint8_t *blends;
+    unsigned int channel;
+    BOOL (*accessible)(const void *, size_t) =
+        for_write ? writable_memory : readable_memory;
+    if (!submodels || submodels > 32u ||
+        !readable_memory(renderer, 0xa8u) ||
+        *(uint32_t *)((uint8_t *)renderer + 0xa0u) != 4u ||
+        *(uint32_t *)((uint8_t *)renderer + 0xa4u) != 3u) return FALSE;
+    channels = *(uint8_t **)((uint8_t *)renderer + 0x98u);
+    blends = *(uint8_t **)((uint8_t *)renderer + 0x9cu);
+    if (!accessible(channels, 4u * 36u) ||
+        !accessible(blends, 3u * 20u)) return FALSE;
+    /* The third blend combines the two base pairs. Never assume a readable
+     * adjacent allocation constitutes a fourth (ranged attack) blend. */
+    if (*(uint16_t *)(blends + 0u) != 0u ||
+        *(uint16_t *)(blends + 2u) != 1u ||
+        *(uint16_t *)(blends + 20u) != 2u ||
+        *(uint16_t *)(blends + 22u) != 3u ||
+        *(uint16_t *)(blends + 40u) != 0x8000u ||
+        *(uint16_t *)(blends + 42u) != 0x8001u) return FALSE;
+    for (channel = 0u; channel < 4u; ++channel) {
+        if (!accessible(*(void **)(channels + channel * 36u),
+                submodels * 24u)) return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpCleanroomEngineActorPresentation(
     SudekiMpCleanroomActor actor,
     SudekiMpCleanroomActorPresentation *presentation
@@ -4198,11 +4236,16 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
     presentation->submodel_count = get_count(renderer);
     if (presentation->submodel_count == 0u ||
         presentation->submodel_count > 32u) return FALSE;
-    /* The melee renderers share the vtable but do not expose valid backing
-     * storage for the ranged auxiliary channels. Tal's proven surface is
-     * channels 0-1 only; Ailish's world renderer owns all five. */
+    /* Buki's native transition uses BOTH base pairs and their crossfade.
+     * Reading only 0-1 silently dropped every incoming/outgoing pose. Her
+     * fourth blend and fifth channel do not exist; preserve Tal's separate
+     * restricted observation contract rather than borrowing ranged bounds. */
+    if (actor == SUDEKIMP_CLEANROOM_BUKI &&
+        !SudekiMpCleanroomBukiAnimationStorageValid(renderer,
+            presentation->submodel_count, FALSE)) return FALSE;
     channel_limit = actor == SUDEKIMP_CLEANROOM_AILISH ?
-        SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS : 2u;
+        SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS :
+        actor == SUDEKIMP_CLEANROOM_BUKI ? 4u : 2u;
     for (channel = 0u;
          channel < channel_limit;
          ++channel) {
@@ -4217,9 +4260,11 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
         if (!isfinite(presentation->rate[channel]) ||
             !isfinite(presentation->time[channel])) return FALSE;
     }
-    if (actor == SUDEKIMP_CLEANROOM_AILISH) {
+    if (actor == SUDEKIMP_CLEANROOM_AILISH ||
+        actor == SUDEKIMP_CLEANROOM_BUKI) {
         for (channel = 0u;
-             channel < SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS;
+             channel < (actor == SUDEKIMP_CLEANROOM_BUKI ? 3u :
+                 SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS);
              ++channel) {
             presentation->blend[channel] = get_blend(renderer, (int)channel);
             if (!isfinite(presentation->blend[channel])) return FALSE;

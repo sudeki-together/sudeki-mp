@@ -974,6 +974,14 @@ static uint32_t resource_snapshot_value(float value) {
     return (uint32_t)value;
 }
 
+static BOOL initialize_party_actor_equipment(SudekiMpCleanroomActor actor) {
+    void *character = SudekiMpCleanroomEngineActorEntity(actor);
+    /* Equip from this hero's bounded category before the legacy cleanroom
+     * initializer can invoke the exported Ailish-only SetWeapon(int). */
+    return character != NULL && SudekiMpEnsureCharacterStarterWeapon(character) &&
+        SudekiMpCleanroomEngineInitializePartyActor(actor);
+}
+
 static uint16_t host_advance_skill_sequence(unsigned int actor_index) {
     if (actor_index >= 2u) return 0u;
     ++host_actor_skill_sequence[actor_index];
@@ -1081,65 +1089,17 @@ static BOOL fill_actor_snapshot(
     snapshot->facing_z = facing[1];
     snapshot->hp = resource_snapshot_value(hit_points);
     snapshot->sp = resource_snapshot_value(skill_points);
-    if (SudekiMpDescribeCharacterWeapons(
+    /* The existing wire slot is ranged-only. Melee starters are validated
+     * independently on both games; publishing their slot rejects the entire
+     * frame, including unrelated movement and combat transitions. */
+    if ((actor == SUDEKIMP_CLEANROOM_AILISH ||
+         actor == SUDEKIMP_CLEANROOM_ELCO) &&
+        SudekiMpDescribeCharacterWeapons(
             SudekiMpCleanroomEngineActorEntity(actor), &weapons)) {
-        uint8_t equipped_slot_plus_one = 0u;
         for (slot = 0u; slot < weapons.row_count && slot < 12u; ++slot) {
             if (weapons.rows[slot].equipped) {
-                equipped_slot_plus_one = (uint8_t)(slot + 1u);
-                snapshot->weapon_slot_plus_one = equipped_slot_plus_one;
+                snapshot->weapon_slot_plus_one = (uint8_t)(slot + 1u);
                 break;
-            }
-        }
-        /* TEMPORARY diagnostic: identify each actor's actually-equipped
-         * weapon slot (Buki's hooks vs the starter-slot table's Tal value).
-         * REMOVE after capture. */
-        {
-            static DWORD last_weapon_diag;
-            static uint8_t last_actor_type;
-            static uint8_t last_equipped;
-            DWORD now = GetTickCount();
-            if (last_weapon_diag == 0u || last_actor_type != actor_type ||
-                last_equipped != equipped_slot_plus_one ||
-                (DWORD)(now - last_weapon_diag) >= 2000u) {
-                last_weapon_diag = now;
-                last_actor_type = actor_type;
-                last_equipped = equipped_slot_plus_one;
-                SudekiMpLogFormat(
-                    "lan_arena_runtime event=host_weapon_slot_diag "
-                    "actor_type=%u row_count=%u equipped_slot_plus_one=%u\r\n",
-                    (unsigned int)actor_type,
-                    (unsigned int)weapons.row_count,
-                    (unsigned int)equipped_slot_plus_one);
-            }
-        }
-    }
-    /* TEMPORARY diagnostic: read the character weapon's own item-definition
-     * ID (+0x264) and resolved pointer (+0x268) to identify what is actually
-     * equipped, independent of the category-index machinery. REMOVE after. */
-    {
-        uint8_t *character = (uint8_t *)SudekiMpCleanroomEngineActorEntity(actor);
-        void *weapon_obj;
-        if (character != NULL &&
-            runtime_readable_memory(character + 0xc0u, sizeof(void *)) &&
-            (weapon_obj = *(void **)(character + 0xc0u)) != NULL &&
-            runtime_readable_memory((uint8_t *)weapon_obj + 0x268u, sizeof(void *))) {
-            uint32_t item_id = runtime_readable_memory((uint8_t *)weapon_obj + 0x264u,
-                sizeof(uint32_t)) ? *(uint32_t *)((uint8_t *)weapon_obj + 0x264u) : 0u;
-            void *item_ptr = *(void **)((uint8_t *)weapon_obj + 0x268u);
-            static DWORD last_item_diag;
-            static uint8_t last_item_actor;
-            static uint32_t last_item_id;
-            DWORD now = GetTickCount();
-            if (last_item_diag == 0u || last_item_actor != actor_type ||
-                last_item_id != item_id || (DWORD)(now - last_item_diag) >= 2000u) {
-                last_item_diag = now;
-                last_item_actor = actor_type;
-                last_item_id = item_id;
-                SudekiMpLogFormat(
-                    "lan_arena_runtime event=host_weapon_item_diag "
-                    "actor_type=%u item_id=%u item_ptr=%p\r\n",
-                    (unsigned int)actor_type, (unsigned int)item_id, item_ptr);
             }
         }
     }
@@ -1953,9 +1913,9 @@ enum {
      * and 2 with short base-idle gaps between them. */
     AILISH_IDLE_VARIANT_CHANNEL_GRACE_MS = 250u,
     HOST_REMOTE_WEAK_START_TIMEOUT_MS = 1000u,
-    /* Fail-safe used only if the selected weapon's exact authored half-float
-     * delay is absent or malformed. The supported Ailish weapon reports 2.0
-     * seconds (0x4000); never return to the old guessed 500 ms cadence. */
+    /* Conservative fallback for weapons without a validated FP cycle.
+     * Record B8 is reload duration, not rapid-fire shot spacing; the guarded
+     * base-weapon path below uses the actor's own FP animation instead. */
     HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS = 2000u
 };
 
@@ -3498,6 +3458,7 @@ static void lan_arena_control_update_observer(
     uint8_t remote_kit_slot = 0u;
     BOOL ranged_native_ready = TRUE;
     BOOL ranged_native_ready_known = FALSE;
+    BOOL rapid_weapon_cycle_known = FALSE;
     uint16_t ranged_authored_delay_half = 0u;
     uint32_t ranged_repeat_interval_ms =
         HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
@@ -3699,11 +3660,11 @@ static void lan_arena_control_update_observer(
                 (unsigned long)client_remote_tal_active_generation);
         }
         if (!tal_initialized) {
-            tal_initialized = SudekiMpCleanroomEngineInitializePartyActor(
+            tal_initialized = initialize_party_actor_equipment(
                 seat_host_actor());
         }
         if (!ailish_initialized) {
-            ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
+            ailish_initialized = initialize_party_actor_equipment(
                 seat_client_actor());
         }
         if (tal_initialized && ailish_initialized) {
@@ -3802,11 +3763,11 @@ static void lan_arena_control_update_observer(
             "policy=authenticated_client_input_native_host_arbiter\r\n");
     }
     if (!tal_initialized) {
-        tal_initialized = SudekiMpCleanroomEngineInitializePartyActor(
+        tal_initialized = initialize_party_actor_equipment(
             seat_host_actor());
     }
     if (!ailish_initialized) {
-        ailish_initialized = SudekiMpCleanroomEngineInitializePartyActor(
+        ailish_initialized = initialize_party_actor_equipment(
             seat_client_actor());
     }
     refresh_host_player_two_skill_isolation(
@@ -3955,6 +3916,15 @@ static void lan_arena_control_update_observer(
     }
     remote_aim_valid = host_remote_aim_x != 0 || host_remote_aim_y != 0 ||
         host_remote_aim_z != 0;
+    if (host_remote_ailish_owned && host_remote_first_person_active &&
+        !host_actor_previous_skill_active[1]) {
+        rapid_weapon_cycle_known = SudekiMpServiceRemoteRapidWeapon(
+            SudekiMpCleanroomEngineActorEntity(seat_client_actor()),
+            SudekiMpCleanroomEngineActorEntity(seat_host_actor()),
+            frame_delta_seconds, &ranged_repeat_interval_ms);
+        if (!rapid_weapon_cycle_known)
+            ranged_repeat_interval_ms = HOST_REMOTE_RANGED_REPEAT_FALLBACK_MS;
+    }
     now_ms = GetTickCount();
     remote_native_weak_active =
         host_actor_native_action_variant(1u, TRUE) ==
@@ -3987,7 +3957,7 @@ static void lan_arena_control_update_observer(
             ranged_native_ready_known =
                 SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
                     &ranged_native_ready, &ranged_authored_delay_half);
-            if (ranged_native_ready_known) {
+            if (ranged_native_ready_known && !rapid_weapon_cycle_known) {
                 ranged_repeat_interval_ms =
                     SudekiMpLanArenaRangedRepeatIntervalMs(
                         ranged_authored_delay_half);
@@ -4088,7 +4058,7 @@ static void lan_arena_control_update_observer(
                 SudekiMpLogFormat(
                     "lan_arena_runtime event=host_remote_weak_attack "
                     "phase=submitted path=%s repeat_interval_ms=%lu "
-                    "authored_delay_half=0x%04x "
+                    "reload_delay_half=0x%04x cadence=%s "
                     "policy=native_host_execution\r\n",
                     ranged_world_fallback ?
                         "native_world_arbiter_ranged_fallback" :
@@ -4098,7 +4068,9 @@ static void lan_arena_control_update_observer(
                     (unsigned long)(ranged_first_person_fire ?
                         ranged_repeat_interval_ms : 0u),
                     (unsigned int)(ranged_first_person_fire ?
-                        ranged_authored_delay_half : 0u));
+                        ranged_authored_delay_half : 0u),
+                    rapid_weapon_cycle_known ? "equipped_native_fp_cycle" :
+                        "conservative_reload_gate");
             }
         } else if (submitted && ranged_first_person_fire &&
             !weak_submitted && !host_remote_weak_blocked_logged) {

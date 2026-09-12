@@ -269,7 +269,58 @@ static void test_directional_locomotion_timeline(void) {
     CHECK(!SudekiMpLanArenaReplicaSample(&replica, 150u, &sample));
 }
 
+static void test_buki_combat_stop_crossfade(void) {
+    SudekiMpLanArenaReplica replica;
+    SudekiMpLanArenaSnapshot a = make_snapshot(1u, 100u, 0.0f), b, sample;
+    SudekiMpLanArenaLocomotion *m = &a.seat[0].locomotion;
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    clear_actor_action(&a.seat[0]);
+    clear_actor_action(&a.seat[1]);
+    a.seat[0].actor_type = a.seat[0].native_entity_id = SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    a.combat_enabled = 1u;
+    m->valid = 1u;
+    m->sequence = 8u;
+    /* The moving pair remains alive while channel 2 brings in combat idle. */
+    m->clip[0] = 2; m->clip[1] = 3; m->clip[2] = 1;
+    m->state[3] = 192;
+    m->rate[0] = 37.0f; m->rate[1] = 31.0f;
+    m->time[0] = 35.0f; m->time[1] = 29.0f;
+    m->blend[0] = 0.99f; m->blend[2] = 0.1f;
+    b = a; b.sequence = 2u; b.host_tick = 150u;
+    b.seat[0].locomotion.time[0] += 1.85f;
+    b.seat[0].locomotion.time[1] += 1.55f;
+    b.seat[0].locomotion.blend[2] = 0.9f;
+    SudekiMpLanArenaReplicaReset(&replica);
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &a));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 125u, &sample));
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    CHECK(sample.seat[0].locomotion.clip[2] == 1u);
+    CHECK(fabsf(sample.seat[0].locomotion.blend[2] - 0.5f) < 0.0001f);
+    CHECK(sample.seat[0].locomotion.rate[2] == 0.0f);
+    /* The settled pair is a discrete handoff, never an interpolation into
+     * empty/foreign channels or a replay of the outgoing attack. */
+    a = b; b.sequence = 3u; b.host_tick = 200u;
+    memset(&b.seat[0].locomotion, 0, sizeof(*m));
+    m = &b.seat[0].locomotion;
+    m->valid = 1; m->sequence = 9; m->clip[0] = 1;
+    m->rate[0] = 12; m->time[0] = 0.2f;
+    m->state[1] = m->state[2] = m->state[3] = 192;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 175u, &sample));
+    CHECK(sample.seat[0].locomotion.sequence == 8u);
+    CHECK(sample.seat[0].locomotion.clip[2] == 1u);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 200u, &sample));
+    CHECK(sample.seat[0].locomotion.sequence == 9u);
+    CHECK(sample.seat[0].locomotion.clip[0] == 1u);
+    CHECK(sample.seat[0].locomotion.clip[2] == 0u);
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+
 int main(void) {
+    test_buki_combat_stop_crossfade();
     test_directional_locomotion_timeline();
     test_spirit_visual_render_timeline();
     SudekiMpLanArenaReplica replica;

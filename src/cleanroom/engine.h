@@ -30,6 +30,12 @@ typedef struct SudekiMpCleanroomActorPresentation {
     float blend[SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS];
 } SudekiMpCleanroomActorPresentation;
 
+/* Storage bounds only: callers must separately prove the actor, attached
+ * world renderer and exact native methods. Buki has four channels and three
+ * blends, not the ranged five/four surface. No pointers are retained. */
+BOOL SudekiMpCleanroomBukiAnimationStorageValid(
+    void *renderer, unsigned int submodels, BOOL for_write);
+
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor);
 const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);
 

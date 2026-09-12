@@ -87,6 +87,13 @@ BOOL SudekiMpLanArenaClientLocomotionPhase(
     float host_phase, float host_rate, uint32_t frame_ms,
     BOOL final_boundary, float *phase);
 
+/* Buki's continuous base-channel clock: small scheduling/quantization errors
+ * change playback rate by at most 10%, never seek backwards every frame.
+ * Real channel restarts and large discontinuities still seek exactly. */
+BOOL SudekiMpLanArenaClientBukiLocomotionClock(
+    float actual_phase, float target_phase, float host_rate, BOOL restart,
+    float *playback_rate, BOOL *seek);
+
 /* Tal's replicated combo retirement must enter the running idle state
  * directly. Passing through the completed-idle state makes the renderer
  * settle once, then visibly restart the same idle clip. */
