@@ -88,7 +88,21 @@ static const TalComboTransition buki_combo_transitions[] = {
     { SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS, 66, 65,
       SUDEKIMP_LAN_ARENA_COMBAT_STRONG_ATTACK },
     { SUDEKIMP_LAN_ARENA_ACTION_SWEEP, 71, 1,
-      SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK }
+      SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK },
+    { SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK, 69, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK },
+    { SUDEKIMP_LAN_ARENA_ACTION_BLOCK, 44, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK },
+    { SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD, 45, 0,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK },
+    { SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE, 46, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK },
+    { SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP, 49, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK },
+    { SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT, 47, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK },
+    { SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT, 48, 1,
+      SUDEKIMP_LAN_ARENA_COMBAT_BLOCK }
 };
 
 static const TalComboTransition *buki_transition_for_variant(uint8_t variant) {
@@ -167,7 +181,9 @@ BOOL SudekiMpLanArenaBukiActionFromNativePresentation(
          index < sizeof(buki_combo_transitions) /
              sizeof(buki_combo_transitions[0]);
          ++index) {
-        if (buki_combo_transitions[index].selector == selector) {
+        if (buki_combo_transitions[index].selector == selector &&
+            !SudekiMpLanArenaBukiBodyAction(
+                buki_combo_transitions[index].action_variant)) {
             *action_variant = buki_combo_transitions[index].action_variant;
             return TRUE;
         }
@@ -180,6 +196,30 @@ BOOL SudekiMpLanArenaBukiActionFromNativeAnimation(
 ) {
     uint8_t variant;
     const TalComboTransition *transition;
+    /* Positive semantic AND bank witnesses. The hold loop legitimately uses
+     * state0/128; inactive192 is never an action. Keep the combo rules below
+     * unchanged, especially ambiguous weak/strong selectors53/54. */
+    if (action_variant != NULL &&
+        (state == 0u || state == 1u || state == 64u || state == 65u ||
+         state == 128u)) {
+        switch (animation_id) {
+        case 0x6au: variant = SUDEKIMP_LAN_ARENA_ACTION_BLOCK; break;
+        case 0x6bu: variant = SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD; break;
+        case 0x6cu: variant = SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE; break;
+        case 0x82u: variant = SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK; break;
+        case 0x6fu: variant = SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP; break;
+        case 0x6du: variant = SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT; break;
+        case 0x6eu: variant = SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT; break;
+        default: variant = SUDEKIMP_LAN_ARENA_ACTION_NONE; break;
+        }
+        if (variant != SUDEKIMP_LAN_ARENA_ACTION_NONE) {
+            transition = buki_transition_for_variant(variant);
+            if (transition == NULL || transition->selector != selector)
+                return FALSE;
+            *action_variant = variant;
+            return TRUE;
+        }
+    }
     if (action_variant == NULL || (state != 1u && state != 65u)) return FALSE;
     switch (animation_id) {
         case 0x72u: variant = SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE; break;
@@ -194,6 +234,34 @@ BOOL SudekiMpLanArenaBukiActionFromNativeAnimation(
     if (transition == NULL || transition->selector != selector) return FALSE;
     *action_variant = variant;
     return TRUE;
+}
+
+BOOL SudekiMpLanArenaBukiBodyAction(uint8_t variant) {
+    return variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT;
+}
+
+BOOL SudekiMpLanArenaActionCombatState(uint8_t variant, uint8_t *state) {
+    if (state == NULL) return FALSE;
+    if (SudekiMpLanArenaTalActionCombatState(variant, state)) return TRUE;
+    if (variant == SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK) {
+        *state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+        return TRUE;
+    }
+    if (variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT ||
+        variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT) {
+        *state = SUDEKIMP_LAN_ARENA_COMBAT_BLOCK;
+        return TRUE;
+    }
+    return FALSE;
 }
 
 BOOL SudekiMpLanArenaBukiActionToNativePresentation(

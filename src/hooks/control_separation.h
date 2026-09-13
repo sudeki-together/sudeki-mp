@@ -219,6 +219,11 @@ BOOL SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
 BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled);
 BOOL SudekiMpControlSeparationTalSkillFilterRestorePolicy(
     BOOL scope_exact, int current_filter, int requested_filter);
+BOOL SudekiMpControlSeparationNoncasterUnlockAllowed(uint32_t flags);
+BOOL SudekiMpControlSeparationNoncasterMovementModePolicy(
+    BOOL scope_exact, BOOL paused, int filter, int pending_filter, int mode);
+float SudekiMpControlSeparationNoncasterMovementDelta(
+    float magnitude, float frame_delta_seconds);
 /* Native keyboard submissions can exceed unit magnitude. The direct fallback
  * must saturate at full run pace while retaining partial analog input. */
 float SudekiMpControlSeparationTalSkillMovementMagnitude(float native_speed);
@@ -277,6 +282,17 @@ BOOL SudekiMpControlSeparationSpiritDirectMovementPolicy(
     BOOL skill_scope_exact,
     BOOL spirit_active,
     uint32_t arbiter_flags
+);
+/* Current two-seat melee-host/ranged-client movement adapters. Native callers
+ * additionally prove the live roster, controller and companion leases. */
+BOOL SudekiMpControlSeparationSkillMovementRosterPolicy(
+    unsigned int local_type, unsigned int remote_type,
+    BOOL local_identity_exact, BOOL remote_identity_exact
+);
+/* Call on the game thread before enabling authenticated remote input. An
+ * enabled lease cannot be rebound; disable/drain it before a new assignment. */
+BOOL SudekiMpControlSeparationBindLanArenaMovementActors(
+    unsigned int local_type, unsigned int remote_type
 );
 BOOL SudekiMpControlSeparationFilterSpiritRootDelta(
     BOOL direct_movement_owned,

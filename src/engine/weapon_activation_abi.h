@@ -43,6 +43,10 @@ BOOL SudekiMpWeaponFamily(unsigned int resource_type,
 /* Startup only: preserve an equipped owned-family item, otherwise equip the
  * owned starter. Never grants inventory, cancels a pending swap, or resets kit. */
 BOOL SudekiMpEnsureCharacterStarterWeapon(void *character);
+/* Testroom bootstrap only, game thread. Add missing authored Buki/Elco weapons
+ * through native inventory; preserve equipped items and existing quantities.
+ * The caller supplies the actual process command line, never a network string. */
+BOOL SudekiMpGrantTestroomCharacterWeapons(void *character, const char *command);
 /* Host game-thread only, after the remote actor lease is validated. Proton
  * Phaser misses FP recharge/blend while the local camera owns another
  * hero. Uses native recharge, never resets charge or forces reload complete.

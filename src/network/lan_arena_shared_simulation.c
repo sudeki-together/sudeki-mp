@@ -42,6 +42,8 @@ static int valid_observation(
         observation->native_combat_observed == 1u &&
         observation->native_resources_observed == 1u &&
         observation->native_enemies_observed == 1u &&
+        SudekiMpLanArenaSpiritViewValid(&observation->spirit_view) &&
+        SudekiMpLanArenaSkillFadeValid(&observation->skill_fade) &&
         SudekiMpLanArenaSpiritAudioJournalValid(&audio);
 }
 
@@ -135,7 +137,7 @@ static int spirit_audio_event_equal(
     return left != NULL && right != NULL &&
         left->event_sequence == right->event_sequence &&
         left->skill_sequence == right->skill_sequence &&
-        left->cue == right->cue;
+        left->cue == right->cue && left->owner_seat == right->owner_seat;
 }
 
 static int spirit_audio_event_matches_current_spirit(
@@ -143,11 +145,12 @@ static int spirit_audio_event_matches_current_spirit(
     const SudekiMpLanArenaSpiritAudioSemanticEvent *event
 ) {
     return frame != NULL && event != NULL &&
+        event->owner_seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT &&
         frame->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
-        frame->combat_enabled == 1u && frame->seat[0].skill_active == 1u &&
-        frame->seat[0].skill_kind ==
+        frame->combat_enabled == 1u && frame->seat[event->owner_seat].skill_active == 1u &&
+        frame->seat[event->owner_seat].skill_kind ==
             SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-        frame->seat[0].skill_sequence == event->skill_sequence;
+        frame->seat[event->owner_seat].skill_sequence == event->skill_sequence;
 }
 
 static int next_spirit_audio_journal_allowed(
@@ -229,9 +232,10 @@ static int next_spirit_audio_journal_allowed(
     return skill_sequence_newer(
             candidate->spirit_audio_history[0].event_sequence,
             previous_latest->event_sequence) &&
-        skill_sequence_newer(
+        (candidate->spirit_audio_history[0].owner_seat != previous_latest->owner_seat ||
+         skill_sequence_newer(
             candidate->spirit_audio_history[0].skill_sequence,
-            previous_latest->skill_sequence);
+            previous_latest->skill_sequence));
 }
 
 static int next_spirit_vfx_roster_allowed(
@@ -429,6 +433,8 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
         observation->spirit_audio_history,
         sizeof(committed.spirit_audio_history));
     committed.spirit_vfx_observed = observation->spirit_vfx_observed;
+    committed.spirit_view = observation->spirit_view;
+    committed.skill_fade = observation->skill_fade;
     committed.spirit_vfx_count = observation->spirit_vfx_count;
     memcpy(committed.spirit_vfx, observation->spirit_vfx,
         sizeof(committed.spirit_vfx));

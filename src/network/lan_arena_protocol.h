@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 26u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 35u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413236u /* "LA26" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413335u /* "LA35" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1260u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1365u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -27,12 +27,12 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1260u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1365u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
     SUDEKIMP_LAN_ARENA_KIT_WEAPON = 1,
-    SUDEKIMP_LAN_ARENA_KIT_SPIRIT = 2 /* Reserved; rejected until replay closure. */
+    SUDEKIMP_LAN_ARENA_KIT_SPIRIT = 2 /* Elco's actor-local variant, slot 0/1. */
 };
 
 typedef enum SudekiMpLanArenaMatchState {
@@ -102,9 +102,25 @@ typedef enum SudekiMpLanArenaSpiritVfxKind {
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE = 12,
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT = 13,
     SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST = 14,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_STRIKE = 15,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_SPELL = 16,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_STRIKE_HIT = 17,
+    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_SPELL_HIT = 18,
+    SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR = 19,
+    SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP = 20,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE = 21,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_WAIT = 22,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_MORPH = 23,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_INVULNERABLE = 24,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_RETURN = 25,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_FLOOR = 26,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_STRIKE = 27,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_HIT = 28,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_SPELL = 29,
+    SUDEKIMP_LAN_ARENA_ELCO_VFX_HASTE = 30,
     /* Inclusive allowlist bound; not an additional wire identity. */
     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST =
-        SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST
+        SUDEKIMP_LAN_ARENA_ELCO_VFX_HASTE
 } SudekiMpLanArenaSpiritVfxKind;
 
 /* Bounded action variants remain process-independent. The host translates
@@ -132,8 +148,17 @@ typedef enum SudekiMpLanArenaActionVariant {
      * timing/target/direction gates. Preserve its distinct presentation
      * identity without pretending the client executed another attack. */
     SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE = 15,
+    /* LA30: Buki's running attack is not the standing sweep. The existing
+     * BLOCK identity is her entry; hold and release are separate host phases,
+     * not instructions to grant blocking or hit authority on the replica. */
+    SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK = 16,
+    SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD = 17,
+    SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE = 18,
+    SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP = 19,
+    SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT = 20,
+    SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT = 21,
     SUDEKIMP_LAN_ARENA_ACTION_MAX =
-        SUDEKIMP_LAN_ARENA_ACTION_COMBO_WSS_ALTERNATE
+        SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT
 } SudekiMpLanArenaActionVariant;
 
 typedef enum SudekiMpLanArenaRole {
@@ -224,9 +249,13 @@ typedef struct SudekiMpLanArenaActionEvent {
     uint32_t host_tick;
 } SudekiMpLanArenaActionEvent;
 
-/* Ailish-only, presentation-only base channels. Closed clip identities:
+/* Presentation-only base channels. Closed clip identities:
  * 0=empty, 1=armed idle, 2/3=forward walk/run, 4/5=backward,
- * 6/7=left, 8/9=right. Wire rates use Q8, phases Q4, blends UNORM8.
+ * 6/7=left, 8/9=right (ranged only); LA30 adds Buki-only10=block entry,
+ * 11=block hold, 12=block release, 13=running attack; LA31 adds
+ * 14=backflip, 15=left roll, 16=right roll (Buki only). LA32 adds 17..27
+ * for Buki's outgoing combo blend channels. Ordinary Buki combos remain on
+ * their native action path. Rates use Q8, phases Q4, blends UNORM8.
  * A generation fences channel swaps and native loop/clock restarts. */
 typedef struct SudekiMpLanArenaLocomotion {
     uint8_t valid;
@@ -333,6 +362,7 @@ typedef struct SudekiMpLanArenaSpiritAudioSemanticEvent {
     uint16_t event_sequence;
     uint16_t skill_sequence;
     uint8_t cue;
+    uint8_t owner_seat;
 } SudekiMpLanArenaSpiritAudioSemanticEvent;
 
 /* Explicitly encoded as 57 bytes. Instance identity is session-local and
@@ -348,8 +378,9 @@ typedef struct SudekiMpLanArenaSpiritVfxSnapshot {
     float position[3];
     float rotation_xyzw[4];
     float scale[3];
-    /* Zero: cast-owned effect with nonzero skill_sequence. Otherwise this is
-     * a status-owned visual on the identified actor, with skill_sequence=0.
+    /* Zero: host-seat cast-owned effect with nonzero skill_sequence. Elco's
+     * cast visuals carry his type and nonzero sequence. A nonzero type with
+     * skill_sequence=0 identifies a status-owned visual on that actor.
      * No client status manager or gameplay buff is activated. */
     uint8_t owner_actor_type;
 } SudekiMpLanArenaSpiritVfxSnapshot;
@@ -366,6 +397,30 @@ typedef int (*SudekiMpLanArenaSpiritAudioSink)(
     void *context,
     SudekiMpLanArenaSpiritAudioCue cue
 );
+
+/* Render-only native camera observation. No native pointer or camera name
+ * crosses the wire. kind: 0 absent, 1 InitCam, 2 SkillCam. */
+typedef struct SudekiMpLanArenaSpiritView {
+    uint16_t skill_sequence;
+    uint8_t owner_seat;
+    uint8_t kind;
+    uint8_t body_hidden;
+    float matrix[16];
+    float projection[3];
+} SudekiMpLanArenaSpiritView;
+
+int SudekiMpLanArenaSpiritViewValid(const SudekiMpLanArenaSpiritView *view);
+
+/* Native light-group-seven multiplier, scoped to one observed cast. kind=0
+ * is UNKNOWN/absent, never a fabricated neutral fade. An inactive matching
+ * actor transaction can retain this record while its authored fade returns. */
+typedef struct SudekiMpLanArenaSkillFade {
+    uint16_t skill_sequence;
+    uint8_t owner_seat;
+    uint8_t kind;
+    float rgb[3];
+} SudekiMpLanArenaSkillFade;
+int SudekiMpLanArenaSkillFadeValid(const SudekiMpLanArenaSkillFade *fade);
 
 typedef struct SudekiMpLanArenaSnapshot {
     uint32_t sequence;
@@ -389,6 +444,8 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t spirit_vfx_count;
     SudekiMpLanArenaSpiritVfxSnapshot spirit_vfx[
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
+    SudekiMpLanArenaSpiritView spirit_view;
+    SudekiMpLanArenaSkillFade skill_fade;
     uint8_t enemy_count;
     SudekiMpLanArenaEnemySnapshot enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
 } SudekiMpLanArenaSnapshot;

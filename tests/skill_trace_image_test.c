@@ -2,6 +2,7 @@
 #include "engine/spirit_activation_abi.h"
 #include "engine/item_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
+#include "engine/buki_replica_native.h"
 #include "engine/player_combat_context.h"
 #include "engine/player_statehood.h"
 #include "hooks/accelerator_cache.h"
@@ -17,6 +18,7 @@
 #include "hooks/lan_arena_host_input.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_spirit_vfx.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/lan_arena_window_policy.h"
@@ -3558,6 +3560,28 @@ static void test_spirit_vfx_exact_image(uint8_t *image, int *failures) {
 }
 
 static unsigned int weapon_family_test_set_calls;
+static unsigned int training_weapon_add_calls;
+static BOOL training_weapon_add_fail;
+static void __attribute__((thiscall)) training_weapon_add_item(
+    void *inventory, int id, int quantity, int feedback) {
+    uint32_t *categories = *(uint32_t **)((uint8_t *)inventory + 12u);
+    unsigned int i;
+    ++training_weapon_add_calls;
+    if (training_weapon_add_fail || quantity != 1 || feedback != 0) return;
+    for (i = 0u; i < 4u; ++i) {
+        uint8_t *category = (uint8_t *)(uintptr_t)categories[i];
+        unsigned int wanted = id >= 36 ? 6u : 7u;
+        if (*(uint32_t *)(category + 8u) == wanted) {
+            int16_t *count = (int16_t *)(category + 12u);
+            int16_t *last = (int16_t *)(category + 14u);
+            uint32_t *rows = *(uint32_t **)(category + 4u);
+            if (*last >= 11) return;
+            rows[++*last] = (1u << 16) | (unsigned int)id;
+            ++*count;
+            return;
+        }
+    }
+}
 static void exercise_rapid_weapon_policy(int *failures) {
     if (SudekiMpRapidWeaponCycleMs(12u, 4.0f, 1.0f/60.0f) != 0u ||
         SudekiMpRapidWeaponCycleMs(24u, 5.0f, 1.0f/60.0f) != 342u ||
@@ -3668,15 +3692,27 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
     uint32_t category_ptrs[4];
     uint32_t categories[4][5] = {{0}};
     uint32_t slots[4][12] = {{0}};
-    uint32_t items[4][2][8] = {{{0}}};
+    uint32_t items[4][2][36] = {{{0}}};
     static const uint32_t ids[4][2] = {{0, 1}, {12, 17}, {36, 37}, {24, 35}};
     uint8_t saved_setter[5], saved_globals[8], saved_lookup_global[4];
+    uint8_t saved_add_body[12], saved_add_global[4], saved_item_type[4];
     uint32_t saved_type_methods[4];
     int32_t jump;
     unsigned int hero, j;
     memcpy(saved_globals, image + 0x408d80u, 8u);
     memcpy(saved_lookup_global, image + 0x21ceau, 4u);
     memcpy(saved_setter, image + 0xd7c10u, 5u);
+    memcpy(saved_add_body, image + 0x217eeu, sizeof(saved_add_body));
+    memcpy(saved_add_global, image + 0x217e1u, 4u);
+    memcpy(saved_item_type, image + 0x2d3a30u, 4u);
+    store_fixture_pointer(image, 0x217e1u, image + 0x408d80u);
+    store_fixture_pointer(image, 0x2d3a30u, image + 0x21be80u);
+    /* Retain exact AddItem prologue, unwind its saved registers/local space,
+     * then tail-call the recorder. Do not execute game allocation/UI paths. */
+    memcpy(image + 0x217eeu, "\x5f\x5e\x5d\x5b\x83\xc4\x08\xe9", 8u);
+    jump = (int32_t)((uintptr_t)training_weapon_add_item -
+        (uintptr_t)(image + 0x217eeu + 12u));
+    memcpy(image + 0x217eeu + 8u, &jump, 4u);
     ZeroMemory(&inventory, sizeof(inventory));
     store_fixture_pointer(inventory.b, 0x0cu, category_ptrs);
     *(uint32_t *)(inventory.b + 0x12cu) = 4u;
@@ -3700,11 +3736,18 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
         for (j = 0u; j < 2u; ++j) {
             slots[hero][j] = (1u << 16) | ids[hero][j];
             items[hero][j][5] = ids[hero][j];
+            items[hero][j][0] = (uint32_t)(uintptr_t)(image + 0x2d3a28u);
+            items[hero][j][0x88u / 4u] = hero + 4u;
             database[3u + ids[hero][j]] = (uint32_t)(uintptr_t)items[hero][j];
         }
     }
 #define CHECK_WEAPON_FAMILY(expr) do { if (!(expr)) { \
     fprintf(stderr, "FAIL: weapon family fixture: %s\n", #expr); ++*failures; } } while (0)
+    CHECK_WEAPON_FAMILY(*(uint32_t *)(image + 0x30c064u) == 0x217e0u);
+    CHECK_WEAPON_FAMILY(memcmp(image + 0x217e5u,
+        "\x83\xec\x08\x53\x55\x56\x57\x8b\xf1", 9u) == 0);
+    CHECK_WEAPON_FAMILY(memcmp(image + 0x21be80u,
+        "\x8b\x81\x88\x00\x00\x00\xc3", 7u) == 0);
     for (hero = 0u; hero < 4u; ++hero) {
         const LifecycleHeroIdentityFixture *identity = &lifecycle_hero_fixtures[hero];
         SudekiMpWeaponQuickList list;
@@ -3715,6 +3758,41 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
         store_fixture_pointer(character.b, 0x2cu, image + identity->resource_vtable_rva);
         store_fixture_pointer(character.b, 0xc0u, weapon.b);
         store_fixture_pointer(weapon.b, 0x10u, character.b);
+        training_weapon_add_calls = 0u;
+        training_weapon_add_fail = FALSE;
+        CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b,
+            "Sudeki.exe -Level ill_cy -DT 1"));
+        CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b,
+            "Sudeki.exe -Level testroom_extra -DT 1"));
+        CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b,
+            "Sudeki.exe -Level testroom -DT 10"));
+        CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b, NULL));
+        CHECK_WEAPON_FAMILY(training_weapon_add_calls == 0u);
+        if (hero >= 2u) {
+            categories[hero][3] = 1u; /* only starter, missing second */
+            slots[hero][1] = 0xffffu;
+            items[hero][1][0x88u / 4u] = 5u;
+            CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b,
+                "Sudeki.exe -Level testroom -DT 1"));
+            CHECK_WEAPON_FAMILY(training_weapon_add_calls == 0u);
+            items[hero][1][0x88u / 4u] = hero + 4u;
+            training_weapon_add_fail = TRUE;
+            CHECK_WEAPON_FAMILY(!SudekiMpGrantTestroomCharacterWeapons(character.b,
+                "Sudeki.exe -Level testroom -DT 1"));
+            CHECK_WEAPON_FAMILY(training_weapon_add_calls == 1u);
+            training_weapon_add_fail = FALSE;
+            CHECK_WEAPON_FAMILY(SudekiMpGrantTestroomCharacterWeapons(character.b,
+                "Sudeki.exe -Level testroom -DT 1"));
+            CHECK_WEAPON_FAMILY(training_weapon_add_calls == 2u);
+            CHECK_WEAPON_FAMILY(SudekiMpGrantTestroomCharacterWeapons(character.b,
+                "Sudeki.exe -Level testroom -DT 1"));
+            CHECK_WEAPON_FAMILY(training_weapon_add_calls == 2u);
+            CHECK_WEAPON_FAMILY(*(void **)(weapon.b + 0x268u) == NULL);
+        } else {
+            CHECK_WEAPON_FAMILY(SudekiMpGrantTestroomCharacterWeapons(character.b,
+                "Sudeki.exe -Level testroom -DT 1"));
+            CHECK_WEAPON_FAMILY(training_weapon_add_calls == 0u);
+        }
         weapon_family_test_set_calls = 0u;
         CHECK_WEAPON_FAMILY(SudekiMpDescribeCharacterWeapons(character.b, &list));
         CHECK_WEAPON_FAMILY(list.inventory_category == hero + 4u && list.row_count == 2u);
@@ -3756,7 +3834,12 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
     memcpy(image + 0x408d80u, saved_globals, 8u);
     memcpy(image + 0x21ceau, saved_lookup_global, 4u);
     memcpy(image + 0xd7c10u, saved_setter, 5u);
+    memcpy(image + 0x217eeu, saved_add_body, sizeof(saved_add_body));
+    memcpy(image + 0x217e1u, saved_add_global, 4u);
+    memcpy(image + 0x2d3a30u, saved_item_type, 4u);
 }
+
+static BOOL no_caster_fade(float rgb[3]) { (void)rgb; return FALSE; }
 
 int wmain(int argc, wchar_t **argv) {
     uint8_t *file;
@@ -4040,6 +4123,24 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
     }
+    {
+        const unsigned int types[] = {0x23u, 0x01u, 0x05u, 0x0eu, 0u, 0xffu};
+        unsigned int local, remote, proof;
+        for (local = 0u; local < 6u; ++local) {
+            for (remote = 0u; remote < 6u; ++remote) {
+                for (proof = 0u; proof < 4u; ++proof) {
+                    BOOL expected = (local == 0u || local == 2u) &&
+                        (remote == 1u || remote == 3u) && proof == 3u;
+                    if (SudekiMpControlSeparationSkillMovementRosterPolicy(
+                            types[local], types[remote],
+                            (proof & 1u) != 0u, (proof & 2u) != 0u) != expected) {
+                        fputs("FAIL: noncaster movement requires the assigned melee/ranged identities\n", stderr);
+                        ++failures;
+                    }
+                }
+            }
+        }
+    }
     if (!SudekiMpControlSeparationSpiritDirectMovementPolicy(
             TRUE, TRUE, 0x00080803u) ||
         SudekiMpControlSeparationSpiritDirectMovementPolicy(
@@ -4105,10 +4206,59 @@ int wmain(int argc, wchar_t **argv) {
             for (requested = 0; requested <= 3; ++requested) {
                 if (SudekiMpControlSeparationTalSkillFilterRestorePolicy(
                         TRUE, current, requested) !=
-                        (current == 0 && requested == 0) ||
+                        ((current == 0 || current == 1) && requested == 0) ||
                     SudekiMpControlSeparationTalSkillFilterRestorePolicy(
                         FALSE, current, requested)) {
                     fputs("FAIL: Tal noncaster filter preserves UI and foreign scopes\n", stderr);
+                    ++failures;
+                }
+            }
+        }
+    }
+    if (!SudekiMpControlSeparationNoncasterUnlockAllowed(0x00080000u) ||
+        SudekiMpControlSeparationNoncasterUnlockAllowed(0x00480000u) ||
+        SudekiMpControlSeparationNoncasterUnlockAllowed(0u) ||
+        SudekiMpControlSeparationNoncasterUnlockAllowed(0x00080008u)) {
+        fputs("FAIL: noncaster unlock must preserve FPS rotation and other locks\n", stderr);
+        ++failures;
+    }
+    {
+        unsigned int proof;
+        int filter, pending, mode;
+        for (proof = 0; proof < 4u; ++proof) {
+            for (filter = -1; filter <= 3; ++filter) {
+                for (pending = -1; pending <= 3; ++pending) {
+                    for (mode = -1; mode <= 3; ++mode) {
+                        BOOL expected = proof == 1u && filter == 1 &&
+                            pending == 1 && mode == 1;
+                        if (SudekiMpControlSeparationNoncasterMovementModePolicy(
+                                (proof & 1u) != 0u, (proof & 2u) != 0u,
+                                filter, pending, mode) != expected) {
+                            fputs("FAIL: noncaster direct mode must preserve caster, pause, UI and unknown modes\n", stderr);
+                            ++failures;
+                        }
+                    }
+                }
+            }
+        }
+        {
+            const float magnitudes[] = {0.0f, 0.5f, 1.0f, 1.5f, 3.0f,
+                -1.0f, 4.01f, NAN, INFINITY};
+            const float expected[] = {0.0f, 0.32f, 0.64f, 0.64f, 0.64f,
+                0.0f, 0.0f, 0.0f, 0.0f};
+            const float invalid_deltas[] = {0.0f, -0.01f, 0.251f, NAN, INFINITY};
+            unsigned int index;
+            for (index = 0; index < sizeof(magnitudes)/sizeof(magnitudes[0]); ++index) {
+                if (fabsf(SudekiMpControlSeparationNoncasterMovementDelta(
+                        magnitudes[index], 0.1f) - expected[index]) > 0.00001f) {
+                    fputs("FAIL: noncaster pace must not scale with a caster's direct speed\n", stderr);
+                    ++failures;
+                }
+            }
+            for (index = 0; index < sizeof(invalid_deltas)/sizeof(invalid_deltas[0]); ++index) {
+                if (SudekiMpControlSeparationNoncasterMovementDelta(
+                        1.0f, invalid_deltas[index]) != 0.0f) {
+                    fputs("FAIL: noncaster delta rejects invalid frame time\n", stderr);
                     ++failures;
                 }
             }
@@ -5122,6 +5272,43 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpResetLanArenaClientReplica();
     }
     {
+        uint8_t saved_call[5];
+        memcpy(saved_call,image+0x28d473,5);
+        if(!SudekiMpInstallLanArenaSkillFade((HMODULE)image,no_caster_fade) ||
+            !SudekiMpUninstallLanArenaSkillFade() || memcmp(saved_call,image+0x28d473,5)) {
+            fputs("FAIL: exact caster lighting draw seam install/restore\n",stderr); ++failures;
+        }
+        image[0x103890]^=1;
+        if(SudekiMpInstallLanArenaSkillFade((HMODULE)image,no_caster_fade)) {
+            fputs("FAIL: altered light setter admitted\n",stderr); ++failures;
+            SudekiMpUninstallLanArenaSkillFade();
+        }
+        image[0x103890]^=1;
+        const unsigned int sites[] = {0xdae80u,0xd0840u,0xdae8eu,
+            0xdaed5u,0xdacdbu,0xd08f4u,0xd08fbu};
+        unsigned int i;
+        if (!SudekiMpBukiReplicaNativeImageMatches((HMODULE)image)) {
+            fputs("FAIL: exact Buki facing/block-cleanup ABI rejected\n", stderr);
+            ++failures;
+        }
+        for (i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
+            uint8_t saved=image[sites[i]];
+            image[sites[i]]^=1;
+            if (SudekiMpBukiReplicaNativeImageMatches((HMODULE)image) ||
+                SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+                fputs("FAIL: mutated Buki native seam admitted\n", stderr);
+                ++failures;
+                SudekiMpResetLanArenaClientReplica();
+            }
+            image[sites[i]]=saved;
+        }
+        if (!SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
+            fputs("FAIL: Buki native seam restoration was sticky\n", stderr);
+            ++failures;
+        }
+        SudekiMpResetLanArenaClientReplica();
+    }
+    {
         uint8_t saved_scale_byte = image[RVA_FIXED_ALTERNATE_SPEED];
         image[RVA_FIXED_ALTERNATE_SPEED] ^= 0x01u;
         if (SudekiMpInitializeLanArenaClientReplica((HMODULE)image)) {
@@ -5231,12 +5418,39 @@ int wmain(int argc, wchar_t **argv) {
     }
     {
         uint8_t saved_prefix = image[RVA_KILL_FOCUS_SHOW_COMMAND - 4u];
+        uint8_t saved_reset_call[5];
+        uint8_t saved_reset_mode = image[0x00027711u];
+        uint32_t raw_reset_controller_operand;
+        uint32_t relocated_reset_controller_operand =
+            (uint32_t)(uintptr_t)(image + 0x00408da4u);
+        unsigned int proof;
+        int mode;
         uint32_t raw_focus_state_operand;
         uint32_t relocated_focus_state_operand = (uint32_t)(uintptr_t)(
             image + RVA_FOCUS_DEVICE_STATE_GLOBAL);
         uint32_t raw_show_window_operand;
         uint32_t relocated_show_window_operand = (uint32_t)(uintptr_t)(
             image + RVA_SHOW_WINDOW_IAT);
+        memcpy(saved_reset_call, image + 0x0028c432u, sizeof(saved_reset_call));
+        memcpy(&raw_reset_controller_operand, image + 0x0028c42au, 4u);
+        memcpy(image + 0x0028c42au, &relocated_reset_controller_operand, 4u);
+        for (proof = 0u; proof < 4u; ++proof) {
+            for (mode = -1; mode <= 2; ++mode) {
+                if (SudekiMpLanArenaWindowPreserveCastMovementPolicy(
+                        (proof & 1u) != 0u, (proof & 2u) != 0u, mode, 3.0f) !=
+                        (proof == 3u && mode == 1)) {
+                    fputs("FAIL: focus reset must preserve only exact active cast movement\n", stderr);
+                    ++failures;
+                }
+            }
+        }
+        if (SudekiMpLanArenaWindowPreserveCastMovementPolicy(TRUE, TRUE, 1, NAN) ||
+            SudekiMpLanArenaWindowPreserveCastMovementPolicy(TRUE, TRUE, 1, INFINITY) ||
+            SudekiMpLanArenaWindowPreserveCastMovementPolicy(TRUE, TRUE, 1, 0.0f) ||
+            SudekiMpLanArenaWindowPreserveCastMovementPolicy(TRUE, TRUE, 1, -1.0f)) {
+            fputs("FAIL: focus reset accepted invalid direct speed\n", stderr);
+            ++failures;
+        }
         memcpy(&raw_focus_state_operand,
             image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
             sizeof(raw_focus_state_operand));
@@ -5260,7 +5474,8 @@ int wmain(int argc, wchar_t **argv) {
                 image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] != 0xffu ||
                 image[RVA_FOCUS_LOSS_BOOL_OPCODE] != 0xb2u ||
                 image[RVA_FOCUS_LOSS_BOOL_VALUE] != 0x01u ||
-                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0x01u) {
+                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0x01u ||
+                memcmp(image + 0x0028c432u, saved_reset_call, sizeof(saved_reset_call)) == 0) {
                 fputs("FAIL: LAN window policy did not enable background presentation\n",
                     stderr);
                 ++failures;
@@ -5271,11 +5486,58 @@ int wmain(int argc, wchar_t **argv) {
                 image[RVA_WINDOW_ACTIVATE_APP_COMPARE_IMMEDIATE] != 0u ||
                 image[RVA_FOCUS_LOSS_BOOL_OPCODE] != 0x32u ||
                 image[RVA_FOCUS_LOSS_BOOL_VALUE] != 0xd2u ||
-                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0u) {
+                image[RVA_FOCUS_LOSS_STATE_VALUE] != 0u ||
+                memcmp(image + 0x0028c432u, saved_reset_call, sizeof(saved_reset_call)) != 0) {
                 fputs("FAIL: LAN window policy did not restore native focus policy\n",
                     stderr);
                 ++failures;
             }
+        }
+        image[0x00027711u] ^= 1u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN focus accepted changed movement reset instruction\n", stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+            SudekiMpLanArenaWindowPolicyInstalled() ||
+            memcmp(image + 0x0028c432u, saved_reset_call, sizeof(saved_reset_call)) != 0) {
+            fputs("FAIL: LAN focus reset mismatch did not fail closed\n", stderr);
+            ++failures;
+        }
+        image[0x00027711u] = saved_reset_mode;
+        image[0x0028c433u] ^= 1u;
+        SetLastError(ERROR_SUCCESS);
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            fputs("FAIL: LAN focus accepted a foreign reset call target\n", stderr);
+            ++failures;
+            (void)SudekiMpUninstallLanArenaWindowPolicy();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+                   SudekiMpLanArenaWindowPolicyInstalled()) {
+            fputs("FAIL: LAN focus foreign reset target did not fail closed\n", stderr);
+            ++failures;
+        }
+        memcpy(image + 0x0028c432u, saved_reset_call, sizeof(saved_reset_call));
+        if (SudekiMpInstallLanArenaWindowPolicy((HMODULE)image)) {
+            uint8_t replacement[5];
+            memcpy(replacement, image + 0x0028c432u, sizeof(replacement));
+            image[0x0028c433u] ^= 1u;
+            SetLastError(ERROR_SUCCESS);
+            if (SudekiMpUninstallLanArenaWindowPolicy() ||
+                GetLastError() != ERROR_BUSY ||
+                !SudekiMpLanArenaWindowPolicyInstalled()) {
+                fputs("FAIL: LAN focus reset lost call-hook ownership\n", stderr);
+                ++failures;
+            }
+            memcpy(image + 0x0028c432u, replacement, sizeof(replacement));
+            if (!SudekiMpUninstallLanArenaWindowPolicy() ||
+                memcmp(image + 0x0028c432u, saved_reset_call, sizeof(saved_reset_call)) != 0) {
+                fputs("FAIL: LAN focus reset did not retain callback for restore retry\n", stderr);
+                ++failures;
+            }
+        } else {
+            fputs("FAIL: LAN focus reset ownership test install failed\n", stderr);
+            ++failures;
         }
         image[RVA_FOCUS_LOSS_STATE_VALUE] = 1u;
         SetLastError(ERROR_SUCCESS);
@@ -5355,6 +5617,7 @@ int wmain(int argc, wchar_t **argv) {
             &raw_show_window_operand, sizeof(raw_show_window_operand));
         memcpy(image + RVA_FOCUS_LOSS_BOOL_OPCODE + 4u,
             &raw_focus_state_operand, sizeof(raw_focus_state_operand));
+        memcpy(image + 0x0028c42au, &raw_reset_controller_operand, 4u);
     }
     /* Simulate the loader relocation for the native QuickMenu input vtable
      * before exercising the LAN client's read-only browsing hook. */
@@ -7715,6 +7978,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     {
         uint8_t controller_update_original[16];
+        uint8_t hold_facing_original[5];
         char observer_owner_one;
         char observer_owner_two;
         unsigned int feature;
@@ -7724,6 +7988,35 @@ int wmain(int argc, wchar_t **argv) {
         uint64_t first_dispatch_serial = 0u;
         uint32_t first_registry_generation = 0u;
 
+        memcpy(hold_facing_original, image + 0x28031u, 5u);
+        if (!install_control_separation_profile(image, 'J', 0u) ||
+            !SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(TRUE) ||
+            memcmp(hold_facing_original, image + 0x28031u, 5u) == 0) {
+            fputs("FAIL: exact noncaster hold-facing callsite installation\n", stderr);
+            ++failures;
+        }
+        if (!SudekiMpUninstallControlSeparation() ||
+            memcmp(hold_facing_original, image + 0x28031u, 5u) != 0) {
+            fputs("FAIL: exact noncaster hold-facing callsite restoration\n", stderr);
+            ++failures;
+        }
+        if (!install_control_separation_profile(image, 'J', 0u)) {
+            fputs("FAIL: movement mode negative fixture installation\n", stderr);
+            ++failures;
+        } else {
+            image[0x28df4u] ^= 1u; /* controller+23c operand */
+            if (SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(TRUE) ||
+                GetLastError() != ERROR_INVALID_DATA ||
+                memcmp(hold_facing_original, image + 0x28031u, 5u) != 0) {
+                fputs("FAIL: isolation accepted unknown native movement-mode layout\n", stderr);
+                ++failures;
+            }
+            image[0x28df4u] ^= 1u;
+            if (!SudekiMpUninstallControlSeparation()) {
+                fputs("FAIL: movement mode negative fixture restoration\n", stderr);
+                ++failures;
+            }
+        }
         memcpy(
             controller_update_original,
             image + RVA_CONTROLLER_UPDATE,

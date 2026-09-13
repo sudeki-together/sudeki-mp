@@ -1,4 +1,5 @@
 #include "hooks/lan_arena_spirit_visual_host.h"
+#include "cleanroom/engine.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,14 @@
 /* Diagnostics are not an acceptance assertion and do not need disk I/O in
  * this deterministic standalone fixture. */
 void SudekiMpLogFormat(const char *format, ...) { (void)format; }
+
+/* This standalone fixture has no spawned cleanroom actors. Native shield
+ * parent admission must consequently fail closed; registry tests below use
+ * the explicit fake API and do not claim native actor ownership. */
+void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {
+    (void)actor;
+    return NULL;
+}
 
 static unsigned int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); ++failures; } } while (0)
@@ -62,7 +71,14 @@ static void resource_tests(void) {
         {"SFXSS110_Loop_Invulnerable",0x928165fau,0xc24c6a03u},
         {"SFXSS111_End_Invulnerable",0x4c44c2edu,0xa8171ecfu},
         {"SFXSS900_generic_initate",0x18c4a81eu,0x62dcc5a3u},
-        {"SFXSS351_Tal_Hit_Character",0x6696ab0au,0xaeec0c83u}
+        {"SFXSS351_Tal_Hit_Character",0x6696ab0au,0xaeec0c83u},
+        {"SFXSTA003_Boost",0x017f61e4u,0x423bad0du},
+        {"SFXSS450_Buki_SS_Strike",0xc28dd974u,0xc198e72du},
+        {"SFXSS500_Buki_SS_Spell",0x7d191118u,0x26de2bb3u},
+        {"SFXSS451_Projectile_Hit_Character",0xfcac5e13u,0xc6cf803bu},
+        {"SFXSS501_Hit",0x87404674u,0x07f9bc13u},
+        {"SFXB200_Shield_Appear",0xf85c91c7u,0x920d7163u},
+        {"SFXB201_Shield_Loop",0x50e04a0du,0x0fdb430fu}
     };
     unsigned int i;
     char malformed[64];
@@ -95,6 +111,8 @@ static void resource_tests(void) {
     CHECK(SudekiMpSpiritVisualKindForResource(0xaeec0c83u) ==
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT);
     CHECK(SudekiMpSpiritVisualKindForResource(0xef82dbb3u) == 0u);
+    CHECK(SudekiMpSpiritVisualKindForResource(0xc104fa1bu) == 0u); /* Buki camera */
+    CHECK(SudekiMpSpiritVisualKindForResource(0x1bce3ca3u) == 0u); /* Spell camera */
     CHECK(SudekiMpSpiritVisualKindForResource(0x423bad0du) == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST);
     memset(malformed, 'A', sizeof(malformed));
     CHECK(SudekiMpSpiritVisualKindForTypedResource(
@@ -132,6 +150,50 @@ static void status_registry_tests(void) {
     CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 1u, 100u,
         SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, SUDEKIMP_LAN_ARENA_TAL_TYPE, (void *)100u, &api) == 0u);
     CHECK(r.unknown);
+}
+
+static void shield_registry_tests(void) {
+    SudekiMpSpiritVisualHostRegistry r = {0};
+    SudekiMpLanArenaSnapshot output;
+    TestContext context = {0};
+    SudekiMpSpiritVisualHostApi api = {&context, bind_fake, sample_fake};
+    unsigned int appear, loop, kind;
+    appear = SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 100u,
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR, SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        (void *)100u, &api);
+    CHECK(appear != 0u);
+    SudekiMpSpiritVisualHostRegistryComplete(&r, appear, TRUE, &api);
+    CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r, 44u, &output, &api));
+    CHECK(output.spirit_vfx_count == 1u && output.spirit_vfx[0].skill_sequence == 0u);
+    CHECK(output.spirit_vfx[0].owner_actor_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE);
+    CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 101u,
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR, SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        (void *)100u, &api) == appear);
+    CHECK(context.binds == 1u && r.next_instance == 1u);
+    loop = SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 102u,
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP, SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        (void *)200u, &api);
+    CHECK(loop != 0u && loop != appear);
+    SudekiMpSpiritVisualHostRegistryComplete(&r, loop, TRUE, &api);
+    retire_fake(&r, appear);
+    CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r, 44u, &output, &api));
+    CHECK(output.spirit_vfx_count == 1u && output.spirit_vfx[0].kind ==
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP);
+    retire_fake(&r, loop);
+    CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r, 44u, &output, &api));
+    CHECK(output.spirit_vfx_count == 0u);
+    CHECK(SudekiMpSpiritVisualHostRegistryReset(&r, &api));
+    for (kind = SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR;
+         kind <= SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP; ++kind) {
+        CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 0u, 100u,
+            kind, SUDEKIMP_LAN_ARENA_TAL_TYPE, (void *)100u, &api) == 0u);
+        CHECK(r.unknown);
+        CHECK(SudekiMpSpiritVisualHostRegistryReset(&r, &api));
+        CHECK(SudekiMpSpiritVisualHostRegistryBeginOwned(&r, 44u, 1u, 100u,
+            kind, SUDEKIMP_LAN_ARENA_BUKI_TYPE, (void *)100u, &api) == 0u);
+        CHECK(r.unknown);
+        CHECK(SudekiMpSpiritVisualHostRegistryReset(&r, &api));
+    }
 }
 
 static void registry_tests(void) {
@@ -323,9 +385,10 @@ static uint8_t *map_image(const char *path) {
 }
 
 static BOOL fixture_active;
-static BOOL inactive_witness(void *context,uint64_t *session,uint16_t *skill,uint32_t *tick) {
+static BOOL inactive_witness(void *context,uint64_t *session,uint16_t *skill,uint32_t *tick,uint8_t *owner) {
     (void)context;
     *session=1u; *skill=1u; *tick=1u;
+    *owner=0u;
     return fixture_active;
 }
 
@@ -460,6 +523,7 @@ int main(int argc,char **argv) {
     resource_tests();
     registry_tests();
     status_registry_tests();
+    shield_registry_tests();
     matrix_tests();
     if(argc>1) image_tests(argv[1]);
     if(failures) { fprintf(stderr,"%u failures\n",failures); return 1; }

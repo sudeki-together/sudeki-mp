@@ -175,7 +175,39 @@ static void test_camera_identity_change_never_overwrites_foreign_view(void) {
     CHECK(!lease.valid && basis_equals(&fixture, 10.0f));
 }
 
+static void test_render_state_borrow_preserves_live_camera(void) {
+    OwnerViewFixture fixture;
+    SudekiMpLanArenaOwnerViewLease lease = {0};
+    uint8_t borrowed[0xd0] = {0}, foreign[0xd0] = {0};
+    void **slot;
+    prepare_fixture(&fixture);
+    slot = (void **)(fixture.scene_renderer + 0x7cu);
+    CHECK(SudekiMpLanArenaOwnerViewCapture(&lease, fixture.camera_mode, fixture.scene_manager));
+    CHECK(SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, fixture.render_state, borrowed));
+    CHECK(*slot == borrowed && lease.valid && basis_equals(&fixture, 10.0f));
+    set_basis(&fixture, 80.0f); /* Native FPS updates must survive our cast. */
+    CHECK(SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, borrowed, borrowed));
+    *slot = foreign;
+    CHECK(!SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, borrowed, fixture.render_state));
+    CHECK(*slot == foreign && lease.valid && basis_equals(&fixture, 80.0f));
+    *slot = borrowed;
+    *(void **)(fixture.camera + 0x34u) = foreign;
+    CHECK(!SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, borrowed, fixture.render_state));
+    CHECK(*slot == borrowed);
+    *(void **)(fixture.camera + 0x34u) = fixture.render_state;
+    CHECK(SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, borrowed, fixture.render_state));
+    CHECK(*slot == fixture.render_state && basis_equals(&fixture, 80.0f));
+    CHECK(!SudekiMpLanArenaOwnerViewSwapRenderState(&lease, fixture.camera_mode,
+        fixture.scene_manager, fixture.render_state, NULL));
+}
+
 int main(void) {
+    test_render_state_borrow_preserves_live_camera();
     test_first_render_refresh_survives_between_render_mutation();
     test_exact_slot_rejection_is_retryable();
     test_camera_identity_change_never_overwrites_foreign_view();

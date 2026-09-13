@@ -50,4 +50,13 @@ void SudekiMpLanArenaOwnerViewClear(
     SudekiMpLanArenaOwnerViewLease *lease
 );
 
+/* Render-thread-only slot exchange. The original local camera identity stays
+ * leased; caller separately leases any borrowed render state. NULL/foreign
+ * slots reject without writes. Passing expected == desired is read-only. */
+BOOL SudekiMpLanArenaOwnerViewSwapRenderState(
+    const SudekiMpLanArenaOwnerViewLease *lease,
+    void *camera_mode, void *scene_manager,
+    void *expected, void *desired
+);
+
 #endif

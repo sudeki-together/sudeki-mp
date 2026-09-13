@@ -114,6 +114,49 @@ int main(void) {
         CHECK(SudekiMpLanArenaBukiActionFromNativeAnimation(0x7fu, 64, 65u, &variant));
         CHECK(variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE);
     }
+    {
+        const uint8_t ids[] = {0x6a,0x6b,0x6c,0x82,0x6f,0x6d,0x6e};
+        const int selectors[] = {44,45,46,69,49,47,48};
+        const uint8_t variants[] = {SUDEKIMP_LAN_ARENA_ACTION_BLOCK,
+            SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD,
+            SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE,
+            SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK,
+            SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP,
+            SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT,
+            SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT};
+        const uint8_t states[] = {0,1,64,65,128};
+        unsigned int i,j;
+        for (i=0; i<7; ++i) {
+            uint8_t variant=0, combat=0;
+            int selector=0,state=0;
+            CHECK(SudekiMpLanArenaBukiBodyAction(variants[i]));
+            CHECK(SudekiMpLanArenaBukiActionToNativePresentation(
+                variants[i], &selector, &state));
+            CHECK(selector == selectors[i]);
+            CHECK(SudekiMpLanArenaActionCombatState(variants[i], &combat));
+            CHECK(combat == (i==3 ? SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK :
+                SUDEKIMP_LAN_ARENA_COMBAT_BLOCK));
+            for (j=0; j<sizeof(states); ++j) {
+                CHECK(SudekiMpLanArenaBukiActionFromNativeAnimation(
+                    ids[i], selectors[i], states[j], &variant));
+                CHECK(variant == variants[i]);
+                CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                    ids[i], 20, states[j], &variant));
+                CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                    0, selectors[i], states[j], &variant));
+            }
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[i], selectors[i], 192, &variant));
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[i], selectors[i], 2, &variant));
+            CHECK(!SudekiMpLanArenaBukiActionFromNativeAnimation(
+                ids[i], selectors[i], 1, NULL));
+            if (i != 0) CHECK(!SudekiMpLanArenaTalActionToNativePresentation(
+                variants[i], &selector, &state));
+        }
+        CHECK(!SudekiMpLanArenaBukiBodyAction(SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE));
+        CHECK(!SudekiMpLanArenaBukiBodyAction(SUDEKIMP_LAN_ARENA_ACTION_SWEEP));
+    }
     if (failures != 0) return 1;
     puts("LAN Tal combo graph checks passed");
     return 0;

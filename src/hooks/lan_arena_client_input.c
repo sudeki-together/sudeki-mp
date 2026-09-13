@@ -405,8 +405,8 @@ static BOOL readable_memory(const void *pointer, size_t length) {
 
 /* Skills may reach their normal native validation and selected-slot seam; the
  * hooked Use call converts that exact selection into a host request. The
- * weapon category sends a bounded host request. Other categories, including
- * Ailish Spirit until its actor-specific replay is proved, remain blocked. */
+ * weapon category and Elco's two proved Spirit selections send bounded host
+ * requests. Other Spirit actors remain blocked until their replay is proved. */
 static uint8_t SUDEKIMP_THISCALL route_client_quick_menu_input(
     void *quick_menu,
     unsigned int event_kind,
@@ -430,22 +430,26 @@ static uint8_t SUDEKIMP_THISCALL route_client_quick_menu_input(
         *(void **)(client_game_base + RVA_QUICK_MENU_GLOBAL) == quick_menu) {
         uint32_t category = *(uint32_t *)((uint8_t *)quick_menu + 0x204u);
         uint8_t *list = *(uint8_t **)((uint8_t *)quick_menu + 0x214u);
-        if (category == 2u && readable_memory(list, 0x480u)) {
+        if ((category == 2u || (category == 1u &&
+                seat_client_type() == SUDEKIMP_LAN_ARENA_ELCO_TYPE)) &&
+            readable_memory(list, 0x480u)) {
             int index = *(int *)(list + 0x448u);
             uint8_t **rows = *(uint8_t ***)(list + 0x47cu);
             if (index >= 0 && index < 48 &&
                 readable_memory(rows, ((size_t)index + 1u) * sizeof(void *)) &&
                 readable_memory(rows[index], 0x88u)) {
                 int selection = *(int *)(rows[index] + 0x84u);
-                if (selection >= 0 && selection < 12) {
+                if ((category == 2u && selection >= 0 && selection < 12) ||
+                    (category == 1u && selection >= 6 && selection <= 7)) {
                     typedef void (SUDEKIMP_THISCALL *DeactivateMenu)(void *);
                     void **vtable = *(void ***)quick_menu;
                     /* Retail successful selections perform this same pair of
                      * UI transitions before executing the selected action. */
                     if (vtable[0x44u / sizeof(void *)] ==
                             client_game_base + 0x00099180u) {
-                        pending_kit_action = SUDEKIMP_LAN_ARENA_KIT_WEAPON;
-                        pending_kit_slot = (uint8_t)selection;
+                        pending_kit_action = category == 2u ?
+                            SUDEKIMP_LAN_ARENA_KIT_WEAPON : SUDEKIMP_LAN_ARENA_KIT_SPIRIT;
+                        pending_kit_slot = (uint8_t)(category == 2u ? selection : selection - 6);
                         weapon_cycle_actor = NULL;
                         original_quick_menu_input(quick_menu, 4u, 0u, 0u);
                         ((DeactivateMenu)vtable[0x44u / sizeof(void *)])(quick_menu);

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <math.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "engine/log.h"
 
@@ -433,6 +434,84 @@ BOOL SudekiMpEnsureCharacterStarterWeapon(void *character) {
         }
     }
     return FALSE;
+}
+
+static BOOL exact_launch_option(const char *command, const char *option) {
+    const char *found;
+    size_t length = strlen(option);
+    if (command == NULL) return FALSE;
+    found = strstr(command, option);
+    return found != NULL &&
+        (found == command || isspace((unsigned char)found[-1])) &&
+        (found[length] == '\0' || isspace((unsigned char)found[length]));
+}
+
+BOOL SudekiMpGrantTestroomCharacterWeapons(void *character, const char *command) {
+    typedef void (__attribute__((thiscall)) *AddItemFunction)(void *, int, int, int);
+    static const uint8_t add_entry[] = {0x83,0xec,0x08,0x53,0x55,0x56,0x57,0x8b,0xf1};
+    uint8_t *base = (uint8_t *)native_module;
+    void *weapon, *inventory, *database, *items[12] = {0};
+    SudekiMpWeaponQuickList owned;
+    unsigned int category, first, i, j, added = 0u, available = 0u;
+    if (!exact_launch_option(command, "-Level testroom") ||
+        !exact_launch_option(command, "-DT 1") || !base ||
+        !character_weapon_context(character, &weapon, &inventory, &category))
+        return FALSE;
+    /* Other heroes retain their current kit. This opt-in does not silently
+     * broaden old Tal/Ailish regression profiles or grant consumables/money. */
+    if (category != 6u && category != 7u) return TRUE;
+    if (*(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL ||
+        !SudekiMpDescribeCharacterWeapons(character, &owned)) return FALSE;
+    first = category == 6u ? 36u : 24u;
+    database = *(void **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    if (!readable_memory(database, 12u + (first + 12u) * 4u) ||
+        /* Exact supported-image export slot for CInventory::AddItem. Checking
+         * its RVA works for both loaded and independently mapped test images. */
+        *(uint32_t *)(base + 0x30c064u) != 0x217e0u ||
+        base[0x217e0u] != 0xa1u ||
+        *(void **)(base + 0x217e1u) != base + RVA_ITEM_DATABASE_GLOBAL ||
+        memcmp(base + 0x217e5u, add_entry, sizeof(add_entry)) != 0 ||
+        memcmp(base + 0x21be80u, "\x8b\x81\x88\x00\x00\x00\xc3", 7u) != 0 ||
+        *(void **)(base + 0x2d3a30u) != base + 0x21be80u) return FALSE;
+    /* Preflight the whole sparse family before the first native mutation.
+     * Item type uses CItem's exact data getter, not an arbitrary virtual call. */
+    for (i = 0u; i < 12u; ++i) {
+        items[i] = *(void **)((uint8_t *)database + 12u + (first + i) * 4u);
+        if (items[i] == NULL) continue;
+        if (!item_matches_family(items[i], category) ||
+            !readable_memory(items[i], 0x8cu) ||
+            *(uint32_t *)((uint8_t *)items[i] + ITEM_ID_OFFSET) != first + i ||
+            *(void **)items[i] != base + 0x2d3a28u ||
+            *(uint32_t *)((uint8_t *)items[i] + 0x88u) != category) return FALSE;
+        ++available;
+    }
+    if (available == 0u) return FALSE;
+    for (i = 0u; i < 12u; ++i) {
+        void *fresh_weapon, *fresh_inventory;
+        unsigned int fresh_category;
+        if (items[i] == NULL) continue;
+        for (j = 0u; j < owned.row_count; ++j)
+            if (owned.rows[j].native_item == items[i]) break;
+        if (j < owned.row_count) continue;
+        if (!character_weapon_context(character, &fresh_weapon,
+                &fresh_inventory, &fresh_category) || fresh_weapon != weapon ||
+            fresh_inventory != inventory || fresh_category != category ||
+            *(void **)(base + RVA_ITEM_DATABASE_GLOBAL) != database ||
+            *(void **)((uint8_t *)database + 12u + (first + i) * 4u) != items[i] ||
+            !item_matches_family(items[i], category) ||
+            *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL)
+            return FALSE;
+        ((AddItemFunction)(base + 0x217e0u))(inventory, (int)(first + i), 1, 0);
+        if (!SudekiMpDescribeCharacterWeapons(character, &owned)) return FALSE;
+        for (j = 0u; j < owned.row_count; ++j)
+            if (owned.rows[j].native_item == items[i]) break;
+        if (j == owned.row_count) return FALSE;
+        ++added;
+    }
+    if (added) SudekiMpLogFormat(
+        "training_weapons category=%u available=%u added=%u scope=testroom_only policy=native_add_missing_preserve_equipment\r\n",
+        category, available, added);
+    return TRUE;
 }
 
 SudekiMpWeaponActivationResult SudekiMpActivateCharacterWeapon(

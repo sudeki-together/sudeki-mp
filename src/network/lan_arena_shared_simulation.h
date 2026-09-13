@@ -6,6 +6,8 @@
 #include <stdint.h>
 
 typedef struct SudekiMpLanArenaNativeWorldObservation {
+    SudekiMpLanArenaSpiritView spirit_view;
+    SudekiMpLanArenaSkillFade skill_fade;
     uint32_t host_tick;
     uint32_t tal_hp;
     uint32_t tal_sp;

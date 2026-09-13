@@ -48,6 +48,7 @@ static BOOL writable_memory(void *pointer, size_t length) {
 static BOOL resolve_owner_view(
     void *camera_mode_pointer,
     void *scene_manager_pointer,
+    void *expected_scene_state,
     void **camera_out,
     void **render_state_out,
     void **scene_renderer_out,
@@ -91,7 +92,7 @@ static BOOL resolve_owner_view(
     }
     render_state = *(uint8_t **)(camera + CAMERA_RENDER_STATE_OFFSET);
     if (!readable_memory(render_state, RENDER_STATE_READ_SIZE) ||
-        *scene_slot != render_state) {
+        *scene_slot != (expected_scene_state != NULL ? expected_scene_state : render_state)) {
         SetLastError(ERROR_BUSY);
         return FALSE;
     }
@@ -106,7 +107,8 @@ static BOOL exact_owner_view(
     const SudekiMpLanArenaOwnerViewLease *lease,
     void *camera_mode,
     void *scene_manager,
-    BOOL require_basis_write
+    BOOL require_basis_write,
+    void *expected_scene_state
 ) {
     void *camera;
     void *render_state;
@@ -117,7 +119,7 @@ static BOOL exact_owner_view(
     if (lease == NULL || !lease->valid ||
         camera_mode != lease->camera_mode ||
         scene_manager != lease->scene_manager ||
-        !resolve_owner_view(camera_mode, scene_manager,
+        !resolve_owner_view(camera_mode, scene_manager, expected_scene_state,
             &camera, &render_state, &scene_renderer, &scene_slot) ||
         camera != lease->camera || render_state != lease->render_state ||
         scene_renderer != lease->scene_renderer ||
@@ -156,7 +158,7 @@ BOOL SudekiMpLanArenaOwnerViewCapture(
         SetLastError(lease != NULL ? ERROR_BUSY : ERROR_INVALID_PARAMETER);
         return FALSE;
     }
-    if (!resolve_owner_view(camera_mode, scene_manager,
+    if (!resolve_owner_view(camera_mode, scene_manager, NULL,
             &camera, &render_state, &scene_renderer, &scene_slot)) {
         return FALSE;
     }
@@ -199,7 +201,7 @@ BOOL SudekiMpLanArenaOwnerViewService(
     if (!exact_owner_view(lease, camera_mode, scene_manager,
             boundary ==
                 SUDEKIMP_LAN_ARENA_OWNER_VIEW_REASSERT_AFTER_REMOTE_MUTATION ||
-            boundary == SUDEKIMP_LAN_ARENA_OWNER_VIEW_RETIRE)) {
+            boundary == SUDEKIMP_LAN_ARENA_OWNER_VIEW_RETIRE, NULL)) {
         return FALSE;
     }
     basis = (uint8_t *)lease->render_state + RENDER_STATE_BASIS_OFFSET;
@@ -230,4 +232,17 @@ BOOL SudekiMpLanArenaOwnerViewService(
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+}
+
+BOOL SudekiMpLanArenaOwnerViewSwapRenderState(
+    const SudekiMpLanArenaOwnerViewLease *lease,
+    void *camera_mode, void *scene_manager,
+    void *expected, void *desired
+) {
+    if (expected == NULL || desired == NULL ||
+        !readable_memory(desired, RENDER_STATE_READ_SIZE) ||
+        !exact_owner_view(lease, camera_mode, scene_manager, FALSE, expected) ||
+        !writable_memory(lease->scene_render_state_slot, sizeof(void *))) return FALSE;
+    if (expected != desired) *lease->scene_render_state_slot = desired;
+    return TRUE;
 }

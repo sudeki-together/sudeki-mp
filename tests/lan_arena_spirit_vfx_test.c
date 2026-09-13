@@ -1134,6 +1134,19 @@ static void test_visual_pending_cleanup_and_invalid_roster(void) {
     CHECK(test.cache.un_cache_calls == 1u);
 }
 
+static void set_visual_owner(SudekiMpLanArenaSpiritVfxSnapshot *visual) {
+    visual->owner_actor_type = visual->kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ?
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE :
+        (visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+         visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) ?
+        SUDEKIMP_LAN_ARENA_BUKI_TYPE : 0u;
+    visual->skill_sequence = visual->owner_actor_type != 0u ? 0u : 1u;
+    if (visual->kind >= SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE) {
+        visual->owner_actor_type = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        visual->skill_sequence = 1u;
+    }
+}
+
 static void test_visual_matrix_and_native_null(void) {
     VisualTestContext test; SudekiMpLanArenaSpiritVfxVisualState state;
     SudekiMpLanArenaSpiritVfxVisualApi api; SudekiMpLanArenaSnapshot snapshot;
@@ -1141,9 +1154,7 @@ static void test_visual_matrix_and_native_null(void) {
     setup_visual_test(&test, &state, &api, &snapshot);
     for (kind = 1u; kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++kind) {
         snapshot.spirit_vfx[0].kind = (uint8_t)kind;
-        snapshot.spirit_vfx[0].owner_actor_type = kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ?
-            SUDEKIMP_LAN_ARENA_AILISH_TYPE : 0u;
-        snapshot.spirit_vfx[0].skill_sequence = kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ? 0u : 1u;
+        set_visual_owner(&snapshot.spirit_vfx[0]);
         CHECK(SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
         CHECK(matrix[0] == 1.0f && matrix[5] == 1.0f && matrix[15] == 1.0f);
     }
@@ -1174,10 +1185,7 @@ static void test_visual_fixed_resource_lifecycle(
     float matrix[16];
     setup_visual_test(&test, &state, &api, &snapshot);
     snapshot.spirit_vfx[0].kind = kind;
-    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
-        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-        snapshot.spirit_vfx[0].skill_sequence = 0u;
-    }
+    set_visual_owner(&snapshot.spirit_vfx[0]);
     test.cache.resource_identifier = identifier;
     test.cache.constructed_resource_identifier = identifier;
     test.cache.after_pre_cache.pending = TRUE;
@@ -1192,11 +1200,11 @@ static void test_visual_fixed_resource_lifecycle(
     CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(test.spawn_calls == 1u && test.cache.pre_cache_calls == 1u);
     before = state;
-    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+    if (snapshot.spirit_vfx[0].owner_actor_type != 0u) {
         snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
         CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
         CHECK(memcmp(&before, &state, sizeof(state)) == 0);
-        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+        set_visual_owner(&snapshot.spirit_vfx[0]);
     }
     snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
     CHECK(!SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
@@ -1216,10 +1224,7 @@ static void test_visual_fixed_resource_lifecycle(
     snapshot.spirit_vfx[0].kind = kind;
     test.cache.resource_identifier = identifier;
     /* The old opening hash must never be accepted for a different kind. */
-    if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
-        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
-        snapshot.spirit_vfx[0].skill_sequence = 0u;
-    }
+    set_visual_owner(&snapshot.spirit_vfx[0]);
     CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(test.cache.pre_cache_calls == 0u && test.spawn_calls == 0u);
     CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state, &api));
@@ -1342,6 +1347,14 @@ static void test_visual_opening_phase_never_rewinds(void) {
         SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, 125.0f, 126.0f, &apply));
     CHECK(apply);
     for (kind = 1u; kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++kind) {
+        if (kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+            kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) {
+            CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(kind, 125.0f, 124.0f, &apply));
+            CHECK(!apply);
+            CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(kind, 125.0f, 126.0f, &apply));
+            CHECK(apply);
+            continue;
+        }
         if (kind == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE ||
             kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) continue;
         CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(kind, 125.0f, 0.0f, &apply));
@@ -1376,6 +1389,24 @@ int main(int argc, char **argv) {
     test_visual_fixed_resource_lifecycle(
         SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, UINT32_C(0x423bad0d),
         "SFXSTA003_Boost.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_STRIKE, UINT32_C(0xc198e72d),
+        "SFXSS450_Buki_SS_Strike.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_SPELL, UINT32_C(0x26de2bb3),
+        "SFXSS500_Buki_SS_Spell.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_STRIKE_HIT, UINT32_C(0xc6cf803b),
+        "SFXSS451_Projectile_Hit_Character.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_BUKI_SPELL_HIT, UINT32_C(0x07f9bc13),
+        "SFXSS501_Hit.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR, UINT32_C(0x920d7163),
+        "SFXB200_Shield_Appear.HOM");
+    test_visual_fixed_resource_lifecycle(
+        SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP, UINT32_C(0x0fdb430f),
+        "SFXB201_Shield_Loop.HOM");
     test_new_lease_polls_then_replays_once();
     test_existing_ready_lease_and_explicit_release();
     test_acquisition_requires_exact_refcount_witness();

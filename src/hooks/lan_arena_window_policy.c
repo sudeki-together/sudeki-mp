@@ -1,8 +1,10 @@
 #include "hooks/lan_arena_window_policy.h"
 
 #include "engine/log.h"
+#include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -13,6 +15,10 @@ enum {
     RVA_KILL_FOCUS_SHOW_WINDOW = 0x0028d780u,
     RVA_DEVICE_FOCUS_STATE_GLOBAL = 0x003c3110u,
     RVA_SHOW_WINDOW_IAT = 0x0029a224u,
+    RVA_FOCUS_CONTROLLER_RESET_CALL = 0x0028c432u,
+    RVA_CONTROLLER_RESET = 0x000276c0u,
+    RVA_CONTROLLER_GLOBAL = 0x00408da4u,
+    RVA_GROUP_GLOBAL = 0x00408d94u,
     ACTIVE_COMPARE_OFFSET = 4u,
     DEVICE_BOOL_OPCODE_OFFSET = 0u,
     DEVICE_BOOL_VALUE_OFFSET = 1u,
@@ -62,12 +68,139 @@ static SudekiMpBytePatch device_bool_opcode_patch;
 static SudekiMpBytePatch device_bool_value_patch;
 static SudekiMpBytePatch activate_app_compare_patch;
 static SudekiMpBytePatch show_command_patch;
+static SudekiMpRelativeCallHook focus_reset_hook;
+static uint8_t *focus_reset_base;
+static void *original_focus_reset __attribute__((used));
+
+static BOOL memory_range(const void *pointer, size_t size, BOOL write) {
+    MEMORY_BASIC_INFORMATION info;
+    uintptr_t start = (uintptr_t)pointer;
+    if (pointer == NULL || size == 0u || start + size < start ||
+        VirtualQuery(pointer, &info, sizeof(info)) == 0 ||
+        info.State != MEM_COMMIT ||
+        (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 ||
+        (write && (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
+            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0)) return FALSE;
+    return start + size <= (uintptr_t)info.BaseAddress + info.RegionSize;
+}
+
+BOOL SudekiMpLanArenaWindowPreserveCastMovementPolicy(
+    BOOL owner_exact, BOOL skill_active, int movement_mode, float direct_speed
+) {
+    return owner_exact && skill_active && movement_mode == 1 &&
+        isfinite(direct_speed) && direct_speed > 0.0f;
+}
+
+static BOOL focus_cast_owner(uint8_t *controller, void **actor,
+    SudekiMpCharacterSkillState *skill) {
+    uint8_t *group;
+    uint8_t *character;
+    uintptr_t vtable;
+    if (focus_reset_base == NULL ||
+        !memory_range(controller, 0x24cu, TRUE) ||
+        *(void **)(focus_reset_base + RVA_CONTROLLER_GLOBAL) != controller)
+        return FALSE;
+    group = *(uint8_t **)(focus_reset_base + RVA_GROUP_GLOBAL);
+    character = *(uint8_t **)(controller + 0x248u);
+    if (!memory_range(group, 0xd0u, FALSE) ||
+        *(unsigned int *)(group + 0xccu) == 0u ||
+        *(unsigned int *)(group + 0xccu) > 4u ||
+        *(void **)(group + 0x90u) != character ||
+        !memory_range(character, 0xdcu, FALSE)) return FALSE;
+    vtable = (uintptr_t)*(void **)character - (uintptr_t)focus_reset_base;
+    /* Supported-image hero vtables, shared with lifecycle identity evidence. */
+    if (vtable != 0x002d5010u && vtable != 0x002d555cu &&
+        vtable != 0x002d5a88u && vtable != 0x002d66fcu) return FALSE;
+    if (!SudekiMpObserveCharacterSkill(character, skill) || !skill->active)
+        return FALSE;
+    *actor = character;
+    return TRUE;
+}
+
+__attribute__((naked, noinline))
+static void call_focus_reset(void *controller __attribute__((unused))) {
+    __asm__ volatile(
+        "pushl %esi\n\t"
+        "movl 8(%esp), %esi\n\t"
+        "call *_original_focus_reset\n\t"
+        "popl %esi\n\t"
+        "ret\n\t");
+}
+
+static void __attribute__((stdcall, used)) focus_reset_scoped(uint8_t *controller) {
+    DWORD incoming_error = GetLastError();
+    SudekiMpCharacterSkillState before, after;
+    void *actor = NULL;
+    void *after_actor = NULL;
+    int mode = 0;
+    float speed = 0.0f;
+    void *task = NULL;
+    void *thread = NULL;
+    BOOL preserve = focus_cast_owner(controller, &actor, &before);
+    DWORD native_error;
+    if (preserve) {
+        mode = *(int *)(controller + 0x23cu);
+        speed = *(float *)(controller + 0x1d4u);
+        preserve = SudekiMpLanArenaWindowPreserveCastMovementPolicy(
+            TRUE, before.active, mode, speed) &&
+            memory_range(before.skill, 0x78u, FALSE);
+        if (preserve) {
+            task = *(void **)((uint8_t *)before.skill + 0x74u);
+            preserve = memory_range(task, sizeof(void *), FALSE);
+            if (preserve) {
+                thread = *(void **)task;
+                preserve = thread != NULL;
+            }
+        }
+    }
+    SetLastError(incoming_error);
+    /* Always clear held keys, mouse transitions, axes and wheel state through
+     * retail's reset. Only the two script-authored settings are restored, and
+     * only across this synchronous focus callback for the same active cast. */
+    call_focus_reset(controller);
+    native_error = GetLastError();
+    if (preserve && focus_cast_owner(controller, &after_actor, &after) &&
+        after_actor == actor && after.skill == before.skill &&
+        after.slot == before.slot &&
+        memory_range(after.skill, 0x78u, FALSE) &&
+        *(void **)((uint8_t *)after.skill + 0x74u) == task &&
+        memory_range(task, sizeof(void *), FALSE) && *(void **)task == thread &&
+        *(int *)(controller + 0x23cu) == 0 &&
+        *(float *)(controller + 0x1d4u) == 1.0f) {
+        *(int *)(controller + 0x23cu) = mode;
+        *(float *)(controller + 0x1d4u) = speed;
+        SudekiMpLogWrite("lan_arena_window_policy event=focus_reset "
+            "cast_movement=preserved physical_input=cleared\r\n");
+    }
+    SetLastError(native_error);
+}
+
+__attribute__((naked, noinline, used))
+static void focus_reset_adapter(void) {
+    __asm__ volatile(
+        "pushl %esi\n\t"
+        "call _focus_reset_scoped@4\n\t"
+        "ret\n\t");
+}
 
 static BOOL signature_matches(uint8_t *base) {
     uint32_t device_focus_state;
     uint32_t show_window_slot;
     uint8_t *instruction;
     if (base == NULL) return FALSE;
+    /* Retail focus callback passes the singleton controller in ESI. Its
+     * reset clears physical input AND +23c/+1d4, unlike normal cast cleanup.
+     * This callsite is not the reset's constructor or gameplay callers. */
+    if (memcmp(base + 0x0028c428u, "\x8b\x35", 2u) != 0 ||
+        *(void **)(base + 0x0028c42au) != base + RVA_CONTROLLER_GLOBAL ||
+        memcmp(base + 0x0028c42eu, "\x85\xf6\x74\x05", 4u) != 0 ||
+        memcmp(base + RVA_FOCUS_CONTROLLER_RESET_CALL,
+            "\xe8\x89\xb2\xd9\xff\x5e\xc3", 7u) != 0 ||
+        memcmp(base + RVA_CONTROLLER_RESET,
+            "\xd9\xee\x53\xd9\x96\xa0\x01\x00\x00\x33\xdb", 11u) != 0 ||
+        memcmp(base + 0x0002770fu, "\x89\x9e\x3c\x02\x00\x00", 6u) != 0 ||
+        memcmp(base + 0x00027753u, "\xd9\xe8\xd9\x9e\xd4\x01\x00\x00", 8u) != 0)
+        return FALSE;
     if (memcmp(base + RVA_WINDOW_ACTIVATE_POLICY,
             expected_activation_policy,
             sizeof(expected_activation_policy)) != 0) return FALSE;
@@ -98,6 +231,7 @@ static BOOL signature_matches(uint8_t *base) {
 }
 
 static BOOL restore_patches(void) {
+    if (!SudekiMpRestoreRelativeCallHook(&focus_reset_hook)) return FALSE;
     if (!SudekiMpRestoreBytePatch(&show_command_patch)) return FALSE;
     if (!SudekiMpRestoreBytePatch(&activate_app_compare_patch)) return FALSE;
     /* While the opcode is B2, both D2 and 01 are valid nonzero immediates.
@@ -107,6 +241,8 @@ static BOOL restore_patches(void) {
     if (!SudekiMpRestoreBytePatch(&device_bool_opcode_patch)) return FALSE;
     if (!SudekiMpRestoreBytePatch(&device_focus_state_patch)) return FALSE;
     if (!SudekiMpRestoreBytePatch(&active_compare_patch)) return FALSE;
+    original_focus_reset = NULL;
+    focus_reset_base = NULL;
     return TRUE;
 }
 
@@ -117,7 +253,8 @@ BOOL SudekiMpInstallLanArenaWindowPolicy(HMODULE game_module) {
         device_focus_state_patch.installed ||
         device_bool_opcode_patch.installed ||
         device_bool_value_patch.installed ||
-        activate_app_compare_patch.installed || show_command_patch.installed) {
+        activate_app_compare_patch.installed || show_command_patch.installed ||
+        focus_reset_hook.installed) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
@@ -158,13 +295,18 @@ BOOL SudekiMpInstallLanArenaWindowPolicy(HMODULE game_module) {
             base + RVA_KILL_FOCUS_SHOW_WINDOW + SHOW_COMMAND_OFFSET,
             NATIVE_SW_MINIMIZE,
             LAN_SW_SHOWNA)) goto rollback;
+    focus_reset_base = base;
+    original_focus_reset = base + RVA_CONTROLLER_RESET;
+    if (!SudekiMpInstallRelativeCallHook(&focus_reset_hook,
+            base + RVA_FOCUS_CONTROLLER_RESET_CALL,
+            original_focus_reset, (const void *)(uintptr_t)focus_reset_adapter)) goto rollback;
     SudekiMpLogWrite(
         "lan_arena_window_policy event=install state=active "
         "wm_killfocus=stay_visible_no_activate native_command=6 "
         "replacement_command=8 wm_activate=background_updates_enabled "
         "wm_activateapp=background_updates_enabled "
         "graphics_devices=background_present_enabled inactive_sleep_ms=0 "
-        "input_focus=native "
+        "input_focus=native cast_movement=preserved_across_focus_reset "
         "policy=lan_profiles_only_exact_image\r\n");
     return TRUE;
 
@@ -180,7 +322,8 @@ BOOL SudekiMpUninstallLanArenaWindowPolicy(void) {
         device_focus_state_patch.installed ||
         device_bool_opcode_patch.installed ||
         device_bool_value_patch.installed || show_command_patch.installed;
-    was_installed = was_installed || activate_app_compare_patch.installed;
+    was_installed = was_installed || activate_app_compare_patch.installed ||
+        focus_reset_hook.installed;
     if (!restore_patches()) return FALSE;
     if (was_installed) {
         SudekiMpLogWrite(
@@ -197,5 +340,6 @@ BOOL SudekiMpLanArenaWindowPolicyInstalled(void) {
         device_focus_state_patch.installed ||
         device_bool_opcode_patch.installed ||
         device_bool_value_patch.installed ||
-        activate_app_compare_patch.installed || show_command_patch.installed;
+        activate_app_compare_patch.installed || show_command_patch.installed ||
+        focus_reset_hook.installed;
 }

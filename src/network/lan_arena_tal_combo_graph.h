@@ -53,6 +53,13 @@ BOOL SudekiMpLanArenaBukiActionCombatState(
     uint8_t *combat_state
 );
 
+/* Host-authored Buki body phases use the bounded channel frame, not another
+ * native combat-input submission. Ordinary combo admission remains separate. */
+BOOL SudekiMpLanArenaBukiBodyAction(uint8_t action_variant);
+BOOL SudekiMpLanArenaActionCombatState(
+    uint8_t action_variant, uint8_t *combat_state
+);
+
 /* Character-independent: decompose a variant into the ordered melee attack
  * kinds (1 weak / 2 strong / 3 sweep / 4 block) that produce it. */
 BOOL SudekiMpLanArenaActionInputSequence(

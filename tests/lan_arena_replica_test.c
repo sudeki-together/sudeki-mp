@@ -71,6 +71,52 @@ static void clear_actor_action(SudekiMpLanArenaActorSnapshot *actor) {
     memset(actor->action_history, 0, sizeof(actor->action_history));
 }
 
+static void test_protected_clock_recovers_discarded_history(void) {
+    SudekiMpLanArenaReplica replica = {0};
+    SudekiMpLanArenaReplicaRenderClock clock = {0};
+    SudekiMpLanArenaSnapshot frame, sample;
+    uint32_t tick, i;
+    for (i = 0; i < 4u; ++i) {
+        frame = make_snapshot(i + 10u, 4000u + i * 50u, (float)i);
+        CHECK(SudekiMpLanArenaReplicaPush(&replica, &frame));
+    }
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1000u, FALSE, &tick));
+    clock.host_tick = 3700u; /* No remaining sample can represent this time. */
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1013u, FALSE, &tick));
+    CHECK(tick == 4100u);
+    CHECK(tick <= replica.latest.host_tick);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1026u, FALSE, &tick));
+    CHECK(tick == 4113u); /* Not a persistent 2x catch-up during the cast. */
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, tick, &sample));
+    CHECK(fabsf(sample.seat[1].x - 4.52f) < 0.001f);
+    /* The inclusive earliest boundary is still usable; no lost-frame reset. */
+    clock.host_tick = 3987u;
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1039u, FALSE, &tick));
+    CHECK(tick == 4000u);
+    /* An elapsed frame already returning to buffered history needs no reset. */
+    clock.host_tick = 3990u;
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 1052u, FALSE, &tick));
+    CHECK(tick == 4003u);
+    /* Same recovery across the GetTickCount wrap. */
+    replica.earliest.host_tick = UINT32_MAX - 99u;
+    replica.oldest.host_tick = UINT32_MAX - 49u;
+    replica.previous.host_tick = 0u;
+    replica.latest.host_tick = 50u;
+    clock.host_tick = UINT32_MAX - 300u;
+    clock.local_tick = UINT32_MAX - 5u;
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 7u, FALSE, &tick));
+    CHECK(tick == 0u);
+    CHECK(SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
+        &replica, &clock, 20u, FALSE, &tick));
+    CHECK(tick == 13u);
+}
+
 static void add_spirit_visual(
     SudekiMpLanArenaSnapshot *snapshot, uint32_t instance, uint32_t emitted,
     float x, float phase
@@ -319,7 +365,133 @@ static void test_buki_combat_stop_crossfade(void) {
         SUDEKIMP_LAN_ARENA_AILISH_TYPE);
 }
 
+static void test_buki_block_phase_timeline(void) {
+    SudekiMpLanArenaReplica r;
+    SudekiMpLanArenaSnapshot a=make_snapshot(1,100,0),b,c,sample;
+    SudekiMpLanArenaActorSnapshot *actor=&a.seat[0];
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    clear_actor_action(actor); clear_actor_action(&a.seat[1]);
+    actor->actor_type=actor->native_entity_id=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    a.combat_enabled=1;
+    actor->animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    actor->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_BLOCK;
+    actor->action_variant=SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD;
+    actor->action_sequence=10; actor->action_history_count=1;
+    actor->action_history[0].sequence=10;
+    actor->action_history[0].variant=actor->action_variant;
+    actor->action_history[0].host_tick=100;
+    actor->locomotion.valid=1; actor->locomotion.sequence=4;
+    actor->locomotion.clip[0]=11; actor->locomotion.rate[0]=24;
+    actor->locomotion.time[0]=30;
+    actor->locomotion.state[1]=actor->locomotion.state[2]=actor->locomotion.state[3]=192;
+    b=a; b.sequence=2; b.host_tick=150;
+    b.seat[0].locomotion.time[0]=31.2f;
+    SudekiMpLanArenaReplicaReset(&r);
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&a));
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&b));
+    CHECK(SudekiMpLanArenaReplicaSample(&r,125,&sample));
+    CHECK(fabsf(sample.seat[0].locomotion.time[0]-30.6f)<0.001f);
+    CHECK(sample.seat[0].action_sequence==10); /* Hold is not repeated presses. */
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    b.seat[0].locomotion.sequence=5; b.seat[0].locomotion.time[0]=0.1f;
+    SudekiMpLanArenaReplicaReset(&r);
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&a));
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&b));
+    CHECK(SudekiMpLanArenaReplicaSample(&r,125,&sample));
+    CHECK(sample.seat[0].locomotion.time[0]==30); /* Do not rewind a loop early. */
+    b.seat[0].locomotion.clip[0]=12;
+    b.seat[0].action_variant=SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE;
+    b.seat[0].action_sequence=11; b.seat[0].action_history_count=2;
+    b.seat[0].action_history[1].sequence=11;
+    b.seat[0].action_history[1].variant=b.seat[0].action_variant;
+    b.seat[0].action_history[1].host_tick=150;
+    SudekiMpLanArenaReplicaReset(&r);
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&a));
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&b));
+    CHECK(SudekiMpLanArenaReplicaSample(&r,125,&sample));
+    CHECK(sample.seat[0].action_variant==SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD);
+    CHECK(sample.seat[0].locomotion.clip[0]==11);
+    CHECK(sample.seat[0].combat_state==SUDEKIMP_LAN_ARENA_COMBAT_BLOCK);
+    CHECK(SudekiMpLanArenaReplicaSample(&r,150,&sample));
+    CHECK(sample.seat[0].action_variant==SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE);
+    CHECK(sample.seat[0].combat_state==SUDEKIMP_LAN_ARENA_COMBAT_BLOCK);
+    CHECK(sample.seat[0].locomotion.clip[0]==12);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    c=b; c.sequence=3; c.host_tick=200;
+    c.seat[0].animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    c.seat[0].combat_state=SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    c.seat[0].action_variant=SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    c.seat[0].locomotion.sequence=6; c.seat[0].locomotion.clip[0]=1;
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&c));
+    CHECK(SudekiMpLanArenaReplicaSample(&r,175,&sample));
+    CHECK(sample.seat[0].action_variant==SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE);
+    CHECK(sample.seat[0].locomotion.clip[0]==12);
+    CHECK(SudekiMpLanArenaReplicaSample(&r,200,&sample));
+    CHECK(sample.seat[0].action_variant==SUDEKIMP_LAN_ARENA_ACTION_NONE);
+    CHECK(sample.seat[0].locomotion.clip[0]==1);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    /* Resetting the replica discards the old session's hold timeline. */
+    SudekiMpLanArenaReplicaReset(&r);
+    CHECK(!SudekiMpLanArenaReplicaSample(&r,210,&sample));
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+
+static void test_elco_spirit_view_interpolation(void) {
+    SudekiMpLanArenaReplica replica = {0};
+    SudekiMpLanArenaSnapshot a = make_snapshot(1u, 1000u, 0.0f), b, sample;
+    unsigned int i;
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE, SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+    a.combat_enabled = 1u;
+    clear_actor_action(&a.seat[0]); clear_actor_action(&a.seat[1]);
+    a.seat[1].actor_type = a.seat[1].native_entity_id = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    a.seat[1].skill_sequence = 1u; a.seat[1].skill_active = 1u;
+    a.seat[1].skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    a.seat[1].skill_presentation_valid = 1u; a.seat[1].skill_presentation_channel_count = 5u;
+    a.seat[1].skill_presentation_selector[0] = 73; a.seat[1].skill_presentation_rate[0] = 24.0f;
+    for (i = 1u; i < 5u; ++i) a.seat[1].skill_presentation_state[i] = 192u;
+    a.spirit_view.kind = 1u; a.spirit_view.owner_seat = 1u; a.spirit_view.skill_sequence = 1u;
+    a.spirit_view.matrix[0] = -1.0f;
+    a.spirit_view.matrix[5] = a.spirit_view.matrix[10] = a.spirit_view.matrix[15] = 1.0f;
+    a.spirit_view.matrix[12] = 2.0f;
+    a.spirit_view.projection[0] = 1.0f; a.spirit_view.projection[1] = .1f; a.spirit_view.projection[2] = 100.0f;
+    a.skill_fade.kind=2; a.skill_fade.owner_seat=1; a.skill_fade.skill_sequence=1;
+    a.skill_fade.rgb[0]=a.skill_fade.rgb[1]=a.skill_fade.rgb[2]=1.f;
+    b = a; b.sequence = 2u; b.host_tick = 1050u;
+    b.skill_fade.rgb[0]=b.skill_fade.rgb[1]=b.skill_fade.rgb[2]=.2f;
+    b.spirit_view.matrix[12] = 4.0f; b.spirit_view.body_hidden = 1u;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &a));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1025u, &sample));
+    CHECK(fabsf(sample.spirit_view.matrix[12] - 3.0f) < .001f);
+    CHECK(sample.spirit_view.body_hidden == 0u);
+    CHECK(fabsf(sample.skill_fade.rgb[0]-.6f)<.001f && sample.skill_fade.owner_seat==1);
+    CHECK(SudekiMpLanArenaSpiritViewValid(&sample.spirit_view));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1050u, &sample));
+    CHECK(sample.spirit_view.body_hidden == 1u);
+    b.sequence = 3u; b.host_tick = 1100u; b.spirit_view.kind = 2u;
+    b.spirit_view.matrix[12] = 10.0f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1075u, &sample));
+    CHECK(sample.spirit_view.kind == 1u && sample.spirit_view.matrix[12] == 4.0f);
+    CHECK(SudekiMpLanArenaReplicaSample(&replica, 1100u, &sample));
+    CHECK(sample.spirit_view.kind == 2u && sample.spirit_view.matrix[12] == 10.0f);
+    b.sequence=4; b.host_tick=1150;
+    b.seat[1].skill_sequence=2; b.spirit_view.skill_sequence=2;
+    b.skill_fade.skill_sequence=2; b.skill_fade.rgb[0]=1.f;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica,&b));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica,1125,&sample));
+    CHECK(sample.skill_fade.skill_sequence==1 &&
+        !memcmp(&sample.skill_fade.rgb[0],&b.skill_fade.rgb[1],sizeof(float)));
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE, SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+
 int main(void) {
+    test_elco_spirit_view_interpolation();
+    test_buki_block_phase_timeline();
+    test_protected_clock_recovers_discarded_history();
     test_buki_combat_stop_crossfade();
     test_directional_locomotion_timeline();
     test_spirit_visual_render_timeline();
@@ -337,6 +509,12 @@ int main(void) {
     CHECK(SudekiMpLanArenaClientNativeSkillTaskAllowed(0x01u, 0x01u));
     CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x01u, 0x23u));
     CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x05u, 0x01u));
+    CHECK(SudekiMpLanArenaClientNativeSkillTaskAllowed(0x05u, 0x0eu));
+    CHECK(SudekiMpLanArenaClientNativeSkillTaskAllowed(0x0eu, 0x0eu));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0u, 0x0eu));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x23u, 0x0eu));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x01u, 0x0eu));
+    CHECK(!SudekiMpLanArenaClientNativeSkillTaskAllowed(0x0eu, 0x05u));
     SudekiMpLanArenaSnapshot first = make_snapshot(1u, 100u, 0.0f);
     SudekiMpLanArenaSnapshot second = make_snapshot(2u, 200u, 10.0f);
     SudekiMpLanArenaSnapshot invalid;

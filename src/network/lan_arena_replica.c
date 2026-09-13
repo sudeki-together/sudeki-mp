@@ -22,9 +22,15 @@ BOOL SudekiMpLanArenaClientNativeSkillTaskAllowed(
     uint8_t actor_type,
     uint8_t local_actor_type
 ) {
-    return local_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
-        (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-         actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE);
+    /* Admission only: the native caller still proves the configured actor,
+     * CSkill owner, session, camera lease and damage-containment hooks. Keep
+     * the accepted Tal/Ailish profile separate from the Buki/Elco test pair. */
+    return (local_actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+            (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+             actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE)) ||
+        (local_actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+            (actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+             actor_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE));
 }
 
 BOOL SudekiMpLanArenaClientSkillValidationNeedsRangedPrime(
@@ -46,7 +52,7 @@ static BOOL action_sequence16_newer(uint16_t candidate, uint16_t reference) {
 
 static uint8_t combat_state_for_action_event(uint8_t variant) {
     uint8_t combat_state = SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
-    (void)SudekiMpLanArenaTalActionCombatState(variant, &combat_state);
+    (void)SudekiMpLanArenaActionCombatState(variant, &combat_state);
     return combat_state;
 }
 
@@ -507,11 +513,52 @@ static void interpolate_spirit_visual_rotation(
     }
 }
 
+static void interpolate_spirit_view(
+    const SudekiMpLanArenaSnapshot *lower,
+    const SudekiMpLanArenaSnapshot *upper,
+    float alpha, SudekiMpLanArenaSnapshot *sample
+) {
+    const SudekiMpLanArenaSpiritView *a = &lower->spirit_view, *b = &upper->spirit_view;
+    SudekiMpLanArenaSpiritView value = *a;
+    float length, dot;
+    unsigned int i;
+    sample->spirit_view = *a;
+    if (!a->kind || a->kind != b->kind || a->skill_sequence != b->skill_sequence ||
+        a->owner_seat != b->owner_seat) return; /* Authored camera cut. */
+    for (i = 0u; i < 16u; ++i) value.matrix[i] = interpolate_float(a->matrix[i], b->matrix[i], alpha);
+    /* Orthonormalize the blended up/forward rows; native cameras use a
+     * reflected right row. Never introduce scale/shear into the view. */
+    length = sqrtf(value.matrix[8]*value.matrix[8] + value.matrix[9]*value.matrix[9] + value.matrix[10]*value.matrix[10]);
+    if (length < .001f) return;
+    for (i = 0u; i < 3u; ++i) value.matrix[8u+i] /= length;
+    dot = value.matrix[4]*value.matrix[8] + value.matrix[5]*value.matrix[9] + value.matrix[6]*value.matrix[10];
+    for (i = 0u; i < 3u; ++i) value.matrix[4u+i] -= dot*value.matrix[8u+i];
+    length = sqrtf(value.matrix[4]*value.matrix[4] + value.matrix[5]*value.matrix[5] + value.matrix[6]*value.matrix[6]);
+    if (length < .001f) return;
+    for (i = 0u; i < 3u; ++i) value.matrix[4u+i] /= length;
+    value.matrix[0] = value.matrix[9]*value.matrix[6] - value.matrix[10]*value.matrix[5];
+    value.matrix[1] = value.matrix[10]*value.matrix[4] - value.matrix[8]*value.matrix[6];
+    value.matrix[2] = value.matrix[8]*value.matrix[5] - value.matrix[9]*value.matrix[4];
+    for (i = 0u; i < 3u; ++i) value.projection[i] = interpolate_float(a->projection[i], b->projection[i], alpha);
+    if (SudekiMpLanArenaSpiritViewValid(&value)) sample->spirit_view = value;
+}
+
 static void interpolate_spirit_visuals(
     const SudekiMpLanArenaSnapshot *lower,
     const SudekiMpLanArenaSnapshot *upper,
     uint32_t host_tick, float alpha, SudekiMpLanArenaSnapshot *sample
 ) {
+    interpolate_spirit_view(lower, upper, alpha, sample);
+    sample->skill_fade = lower->skill_fade;
+    if (lower->skill_fade.kind &&
+        lower->skill_fade.kind == upper->skill_fade.kind &&
+        lower->skill_fade.owner_seat == upper->skill_fade.owner_seat &&
+        lower->skill_fade.skill_sequence == upper->skill_fade.skill_sequence) {
+        unsigned int c;
+        for (c = 0u; c < 3u; ++c)
+            sample->skill_fade.rgb[c] = lower->skill_fade.rgb[c] + alpha *
+                (upper->skill_fade.rgb[c] - lower->skill_fade.rgb[c]);
+    }
     unsigned int index;
     sample->spirit_vfx_count = 0u;
     sample->spirit_vfx_observed = 0u;
@@ -760,6 +807,17 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
     candidate = clock->host_tick + elapsed;
     if (tick_after(candidate, replica->latest.host_tick)) {
         candidate = replica->latest.host_tick;
+    }
+
+    /* Action protection can retain a clock older than every available
+     * sample after a publication or load gap. Sample() then clamps to earliest,
+     * changing positions only on packet arrivals for the entire cast.
+     * Those discarded frames cannot be replayed. Recover once inside the
+     * observed window, then resume 1x action time; never accelerate a
+     * still-buffered action or extrapolate beyond an authenticated frame. */
+    if (!allow_catchup && replica->earliest_valid &&
+        tick_before(candidate, replica->earliest.host_tick)) {
+        candidate = replica->previous.host_tick;
     }
 
     /* Local elapsed time alone preserves any backlog accumulated while this

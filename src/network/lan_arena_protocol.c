@@ -22,7 +22,7 @@
 #define LAN_ACTOR_SIZE (LAN_ACTOR_WEAPON_OFFSET + 1u)
 #define LAN_ENEMY_SIZE 21u
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
-#define LAN_SPIRIT_AUDIO_EVENT_SIZE 5u
+#define LAN_SPIRIT_AUDIO_EVENT_SIZE 6u
 #define LAN_LOCOMOTION_SIZE 26u
 #define LAN_SNAPSHOT_TAL_LOCOMOTION_OFFSET \
     (LAN_SNAPSHOT_ACTORS_OFFSET + (2u * LAN_ACTOR_SIZE))
@@ -41,9 +41,11 @@
     (LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET + 1u)
 #define LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET \
     (LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET + 1u)
-#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET \
+#define LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET \
     (LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET + \
      (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * LAN_SPIRIT_VFX_SIZE))
+#define LAN_SNAPSHOT_SKILL_FADE_OFFSET (LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + 81u)
+#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET (LAN_SNAPSHOT_SKILL_FADE_OFFSET + 16u)
 #define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ENEMY_COUNT_OFFSET + 1u)
 
 _Static_assert(
@@ -208,11 +210,13 @@ int SudekiMpLanArenaInputValid(const SudekiMpLanArenaInput *input) {
         (input->skill_pressed != 0u || input->skill_slot == 0u) &&
         ((input->kit_action == SUDEKIMP_LAN_ARENA_KIT_NONE &&
           input->kit_slot == 0u) ||
-         (ranged_actor_type(input->actor_type) &&
-          input->skill_pressed == 0u && input->weak_attack_pressed == 0u &&
+         (input->skill_pressed == 0u && input->weak_attack_pressed == 0u &&
           input->weak_attack_held == 0u &&
-          input->kit_action == SUDEKIMP_LAN_ARENA_KIT_WEAPON &&
-          input->kit_slot < 12u)) &&
+          ((input->kit_action == SUDEKIMP_LAN_ARENA_KIT_WEAPON &&
+            input->kit_slot < 12u) ||
+           (input->kit_action == SUDEKIMP_LAN_ARENA_KIT_SPIRIT &&
+            input->actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+            input->kit_slot < 2u)))) &&
         valid_input_aim(input);
 }
 
@@ -223,6 +227,7 @@ static int valid_actor_action_pair(
     switch (combat_state) {
     case SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK:
         return action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK ||
             action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_TWO ||
             action_variant == SUDEKIMP_LAN_ARENA_ACTION_WEAK_THREE ||
             action_variant == SUDEKIMP_LAN_ARENA_ACTION_COMBO_SWW ||
@@ -240,7 +245,12 @@ static int valid_actor_action_pair(
     case SUDEKIMP_LAN_ARENA_COMBAT_SWEEP_ATTACK:
         return action_variant == SUDEKIMP_LAN_ARENA_ACTION_SWEEP;
     case SUDEKIMP_LAN_ARENA_COMBAT_BLOCK:
-        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK;
+        return action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT ||
+            action_variant == SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT;
     default:
         return action_variant == SUDEKIMP_LAN_ARENA_ACTION_NONE;
     }
@@ -265,6 +275,8 @@ static int valid_actor_action_history(
         if (event->sequence == 0u ||
             event->variant < SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE ||
             event->variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
+            (event->variant >= SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK &&
+             expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) ||
             (ranged_actor_type(expected_type) &&
              event->variant != SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
             (index != 0u && !action_sequence_newer(
@@ -284,6 +296,44 @@ int SudekiMpLanArenaSpiritPresentationSelectorValid(int32_t selector) {
     return selector == 75 || selector == 113 || selector == 114;
 }
 
+static int buki_spirit_presentation_valid(
+    const SudekiMpLanArenaActorSnapshot *actor
+) {
+    int32_t primary = actor->skill_presentation_selector[0];
+    int32_t incoming = actor->skill_presentation_selector[2];
+    uint8_t state = actor->skill_presentation_state[0];
+    unsigned int channel;
+    /* Exact Buki bank: idle 20 -> incoming charge 75 -> charge 75 ->
+     * strike 110 / spell 109 -> incoming idle 20. Native terminal state 65
+     * remains visible until cleanup; rejecting it stalls the WHOLE stream.
+     * Incoming channel 2 is a held pose (rate 0), mixed by blend 2. */
+    if (!actor->skill_presentation_valid ||
+        actor->skill_presentation_blend[0] != 0.0f ||
+        actor->skill_presentation_blend[1] != 0.0f ||
+        actor->skill_presentation_blend[3] != 0.0f ||
+        actor->skill_presentation_blend[2] < 0.0f ||
+        actor->skill_presentation_blend[2] > 1.0f) return 0;
+    for (channel = 1u; channel < 4u; ++channel) {
+        if (actor->skill_presentation_rate[channel] != 0.0f) return 0;
+        if (channel != 2u &&
+            (actor->skill_presentation_selector[channel] != 0 ||
+             actor->skill_presentation_state[channel] != 192u)) return 0;
+    }
+    if (primary == 20) {
+        if ((state != 0u && state != 128u) ||
+            actor->skill_presentation_rate[0] != 12.0f) return 0;
+    } else if ((primary != 75 && primary != 109 && primary != 110) ||
+               (state != 1u && state != 65u) ||
+               actor->skill_presentation_rate[0] != 24.0f) return 0;
+    if (incoming == 0)
+        return actor->skill_presentation_state[2] == 192u &&
+            actor->skill_presentation_blend[2] == 0.0f;
+    if (primary == 20 && incoming == 75)
+        return actor->skill_presentation_state[2] == 1u;
+    return (primary == 109 || primary == 110) && state == 65u &&
+        incoming == 20 && actor->skill_presentation_state[2] == 0u;
+}
+
 int SudekiMpLanArenaSkillPresentationValid(
     const SudekiMpLanArenaActorSnapshot *actor,
     uint8_t expected_type
@@ -294,7 +344,8 @@ int SudekiMpLanArenaSkillPresentationValid(
         !valid_actor_type(expected_type) ||
         actor->skill_presentation_valid > 1u) return 0;
     expected_skill_channels = ranged_actor_type(expected_type) ?
-        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS : 2u;
+        SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS :
+        expected_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE ? 4u : 2u;
     if ((actor->skill_presentation_valid != 0u &&
          actor->skill_presentation_channel_count != expected_skill_channels) ||
         (actor->skill_presentation_valid == 0u &&
@@ -338,6 +389,21 @@ int SudekiMpLanArenaSkillPresentationValid(
          actor->skill_presentation_rate[1] != 0.0f)) {
         return 0;
     }
+    if (actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+        expected_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE && actor->skill_active &&
+        !buki_spirit_presentation_valid(actor)) return 0;
+    if (actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+        expected_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE && actor->skill_active) {
+        /* Original ELCO.HOM: lock idle 22, aim/held arm 50/54,
+         * initiation 73, spell 116, strike 117. Never borrow ALICE's bank.
+         * Each renderer mutation additionally proves the loaded local bank. */
+        for (channel = 0u; channel < expected_skill_channels; ++channel) {
+            int32_t selector = actor->skill_presentation_selector[channel];
+            if (selector != 0 && selector != 22 && selector != 50 &&
+                selector != 54 && selector != 73 && selector != 116 &&
+                selector != 117) return 0;
+        }
+    }
     for (channel = 0u;
          channel < SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS;
          ++channel) {
@@ -351,8 +417,8 @@ int SudekiMpLanArenaSkillPresentationValid(
     return 1;
 }
 
-static const int ailish_locomotion_selectors[10] = {0,20,22,23,66,67,71,69,72,70};
-static const int elco_locomotion_selectors[10] = {0,22,24,25,63,64,67,65,68,66};
+static const int ailish_locomotion_selectors[28] = {0,20,22,23,66,67,71,69,72,70};
+static const int elco_locomotion_selectors[28] = {0,22,24,25,63,64,67,65,68,66};
 int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_id) {
     const int *table;
     if (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) {
@@ -380,9 +446,16 @@ int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_i
 }
 /* Buki's model resolves combat 02/06/07 to 20/23/24. It has no 08..0d
  * locomotion resources. In particular 64 (WWW) and 67 (SWS) are attacks,
- * not settled idles. Never admit those into the movement writer. */
-static const int buki_locomotion_selectors[10] = {0,20,23,24,0,0,0,0,0,0};
-static const unsigned int locomotion_ids[10] = {0,2,6,7,8,9,10,11,12,13};
+ * not settled idles. LA32 carries them only as native blend context when
+ * a host-confirmed body/idle frame is replacing the ordinary action lease. */
+/* LA30 appends Buki-only body phases; never alias her block or running attack
+ * to Tal's bank, or consume the reserved ranged directional identities4..9.
+ * Same bounded four channels/three blends; no packet-size growth. */
+static const int buki_locomotion_selectors[28] =
+    {0,20,23,24,0,0,0,0,0,0,44,45,46,69,49,47,48,
+     53,54,64,60,68,65,67,56,55,66,71};
+static const unsigned int locomotion_ids[17] =
+    {0,2,6,7,8,9,10,11,12,13,0x6a,0x6b,0x6c,0x82,0x6f,0x6d,0x6e};
 static const uint8_t locomotion_states[6] = {0,1,64,65,128,192};
 
 static const int *locomotion_selector_table(uint8_t actor_kind) {
@@ -394,16 +467,16 @@ static const int *locomotion_selector_table(uint8_t actor_kind) {
 int SudekiMpLanArenaLocomotionClip(int selector, uint8_t actor_kind) {
     unsigned int i;
     const int *table = locomotion_selector_table(actor_kind);
-    for (i=0; i<10; ++i) if (table[i] == selector) return (int)i;
+    for (i=0; i<28; ++i) if (table[i] == selector) return (int)i;
     return -1;
 }
 int SudekiMpLanArenaLocomotionSelector(unsigned int clip, uint8_t actor_kind) {
     const int *table = locomotion_selector_table(actor_kind);
-    if (clip >= 10u || (clip != 0u && table[clip] == 0)) return -1;
+    if (clip >= 28u || (clip != 0u && table[clip] == 0)) return -1;
     return table[clip];
 }
 unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip) {
-    return clip < 10u ? locomotion_ids[clip] : 0u;
+    return clip < 17u ? locomotion_ids[clip] : 0u;
 }
 static int locomotion_state_index(uint8_t state) {
     unsigned int i;
@@ -415,7 +488,7 @@ int SudekiMpLanArenaLocomotionValid(const SudekiMpLanArenaLocomotion *m) {
     if (m == NULL || m->valid > 1u || (m->valid && !m->sequence) ||
         (!m->valid && m->sequence)) return 0;
     for (i=0; i<4; ++i) {
-        if (m->clip[i] > 9u || locomotion_state_index(m->state[i]) < 0 ||
+        if (m->clip[i] > 27u || locomotion_state_index(m->state[i]) < 0 ||
             !isfinite(m->rate[i]) || m->rate[i] < 0 || m->rate[i] > 255.99609375f ||
             !isfinite(m->time[i]) || m->time[i] < 0 || m->time[i] > 4095.9375f ||
             (!m->clip[i] && (m->rate[i] != 0 || m->time[i] != 0)) ||
@@ -435,7 +508,10 @@ static void write_locomotion(uint8_t *out, const SudekiMpLanArenaLocomotion *m) 
     out[0]=m->valid;
     write_u16(out+1,m->sequence);
     for (i=0; i<4; ++i) {
-        clips |= (uint16_t)(m->clip[i] << (i*4));
+        clips |= (uint16_t)((m->clip[i] & 15u) << (i*4));
+        /* LA31: the four formerly reserved state bits carry bit4 of each
+         * clip. No growth or aliasing with the three-bit native states. */
+        states |= (uint16_t)(((m->clip[i] >> 4) & 1u) << (12+i));
         states |= (uint16_t)(locomotion_state_index(m->state[i]) << (i*3));
         write_u16(out+7+i*2,(uint16_t)(m->rate[i]*256.0f+0.5f));
         write_u16(out+15+i*2,(uint16_t)(m->time[i]*16.0f+0.5f));
@@ -448,12 +524,12 @@ static int read_locomotion(const uint8_t *in, SudekiMpLanArenaLocomotion *m) {
     unsigned int i;
     uint16_t clips=read_u16(in+3), states=read_u16(in+5);
     memset(m,0,sizeof(*m));
-    if (states & 0xf000u) return 0;
     m->valid=in[0]; m->sequence=read_u16(in+1);
     for (i=0; i<4; ++i) {
         unsigned int state=(states>>(i*3))&7u;
         if (state>=6u) return 0;
-        m->clip[i]=(uint8_t)((clips>>(i*4))&15u);
+        m->clip[i]=(uint8_t)(((clips>>(i*4))&15u) |
+            (((states>>(12+i))&1u)<<4));
         m->state[i]=locomotion_states[state];
         m->rate[i]=(float)read_u16(in+7+i*2)/256.0f;
         m->time[i]=(float)read_u16(in+15+i*2)/16.0f;
@@ -467,6 +543,21 @@ static int valid_actor_snapshot(
     uint8_t expected_type
 ) {
     float facing_length;
+    unsigned int channel;
+    if (actor == NULL) return 0;
+    /* Only Buki owns the new body clips and phase identities. Preserve the
+     * original movement contract for other actors, including its tests. */
+    if (actor->action_variant >= SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK &&
+        expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return 0;
+    for (channel = 0; channel < 4u; ++channel) {
+        if (actor->locomotion.clip[channel] >= 10u &&
+            expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return 0;
+        if (actor->locomotion.clip[channel] >= 17u &&
+            actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
+            actor->action_variant != SUDEKIMP_LAN_ARENA_ACTION_BLOCK &&
+            actor->action_variant < SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK)
+            return 0;
+    }
     if (actor == NULL || actor->actor_type != expected_type ||
         actor->native_entity_id != expected_type ||
         actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
@@ -474,8 +565,6 @@ static int valid_actor_snapshot(
         actor->action_retirement_valid > 1u ||
         actor->anim_id > 0xC3u ||
         actor->skill_active > 1u || actor->weapon_slot_plus_one > 12u ||
-        (!ranged_actor_type(expected_type) &&
-         actor->weapon_slot_plus_one != 0u) ||
         actor->skill_kind > SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
         actor->skill_presentation_valid > 1u ||
         actor->skill_slot >= 6u ||
@@ -525,7 +614,9 @@ static int valid_actor_snapshot(
         (actor->skill_sequence != 0u &&
          actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_NONE) ||
         (actor->skill_kind == SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-         (expected_type != SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+         ((expected_type != SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+           expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+           expected_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE) ||
           actor->skill_slot != 0u || actor->skill_cost != 0u ||
           (actor->skill_active != 0u && actor->skill_presentation_valid == 0u))) ||
         (actor->skill_presentation_valid != 0u &&
@@ -554,16 +645,24 @@ int SudekiMpLanArenaSpiritAudioJournalValid(
     for (index = 0u; index < snapshot->spirit_audio_history_count; ++index) {
         const SudekiMpLanArenaSpiritAudioSemanticEvent *event =
             &snapshot->spirit_audio_history[index];
+        unsigned int prior;
         if (event->event_sequence == 0u || event->skill_sequence == 0u ||
             event->cue != SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START ||
+            event->owner_seat >= SUDEKIMP_LAN_ARENA_SEAT_COUNT ||
             (index != 0u &&
              (!action_sequence_newer(
                   event->event_sequence,
                   snapshot->spirit_audio_history[index - 1u].event_sequence) ||
-              !action_sequence_newer(
+              (event->owner_seat == snapshot->spirit_audio_history[index - 1u].owner_seat &&
+               !action_sequence_newer(
                   event->skill_sequence,
-                  snapshot->spirit_audio_history[index - 1u].skill_sequence)))) {
+                  snapshot->spirit_audio_history[index - 1u].skill_sequence))))) {
             return 0;
+        }
+        for (prior = 0u; prior < index; ++prior) {
+            const SudekiMpLanArenaSpiritAudioSemanticEvent *earlier = &snapshot->spirit_audio_history[prior];
+            if (event->owner_seat == earlier->owner_seat &&
+                !action_sequence_newer(event->skill_sequence, earlier->skill_sequence)) return 0;
         }
     }
     return 1;
@@ -601,10 +700,10 @@ int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
     exact_current_spirit =
         snapshot->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
         snapshot->combat_enabled == 1u &&
-        snapshot->seat[0].skill_active == 1u &&
-        snapshot->seat[0].skill_kind ==
+        snapshot->seat[event->owner_seat].skill_active == 1u &&
+        snapshot->seat[event->owner_seat].skill_kind ==
             SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-        snapshot->seat[0].skill_sequence == event->skill_sequence;
+        snapshot->seat[event->owner_seat].skill_sequence == event->skill_sequence;
     if (exact_current_spirit &&
         (sink == NULL || !sink(
             sink_context, (SudekiMpLanArenaSpiritAudioCue)event->cue))) {
@@ -622,14 +721,27 @@ int SudekiMpLanArenaVisualOwnerValid(
     const SudekiMpLanArenaSpiritVfxSnapshot *visual
 ) {
     if (visual == NULL) return 0;
+    if (visual->owner_actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+        visual->skill_sequence != 0u)
+        return (visual->kind >= SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE &&
+                visual->kind <= SUDEKIMP_LAN_ARENA_ELCO_VFX_HASTE) ||
+            (visual->kind >= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_SOUL_TRANSFER &&
+             visual->kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_END) ||
+            visual->kind == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
     if (visual->owner_actor_type == 0u) {
         return visual->skill_sequence != 0u &&
             visual->kind >= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE &&
-            visual->kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT;
+            visual->kind < SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE &&
+            visual->kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
+            visual->kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR &&
+            visual->kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP;
     }
     return valid_actor_type(visual->owner_actor_type) &&
         visual->skill_sequence == 0u &&
-        visual->kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST;
+        (visual->kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST ||
+         (visual->owner_actor_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+          (visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+           visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP)));
 }
 
 static int spirit_vfx_entry_empty(
@@ -663,10 +775,16 @@ int SudekiMpLanArenaSpiritVfxRosterValid(
         const SudekiMpLanArenaSpiritVfxSnapshot *entry =
             &snapshot->spirit_vfx[index];
         unsigned int component;
+        unsigned int owner_seat = 0u;
         double norm_squared = 0.0;
         if (index >= snapshot->spirit_vfx_count) {
             if (!spirit_vfx_entry_empty(entry)) return 0;
             continue;
+        }
+        if (entry->skill_sequence != 0u && entry->owner_actor_type != 0u) {
+            for (owner_seat = 0u; owner_seat < 2u; ++owner_seat)
+                if (snapshot->seat[owner_seat].actor_type == entry->owner_actor_type) break;
+            if (owner_seat == 2u) return 0;
         }
         if (entry->instance_sequence == 0u || !SudekiMpLanArenaVisualOwnerValid(entry) ||
             entry->kind < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE ||
@@ -674,13 +792,13 @@ int SudekiMpLanArenaSpiritVfxRosterValid(
             entry->phase_valid > 1u || !isfinite(entry->phase) ||
             entry->phase < 0.0f || entry->phase > 1000000.0f ||
             (!entry->phase_valid && entry->phase != 0.0f) ||
-            (entry->owner_actor_type == 0u && (snapshot->seat[0].skill_sequence == 0u ||
-            (entry->skill_sequence == snapshot->seat[0].skill_sequence &&
-             snapshot->seat[0].skill_kind !=
+            (entry->skill_sequence != 0u && (snapshot->seat[owner_seat].skill_sequence == 0u ||
+            (entry->skill_sequence == snapshot->seat[owner_seat].skill_sequence &&
+             snapshot->seat[owner_seat].skill_kind !=
                  SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) ||
-            (entry->skill_sequence != snapshot->seat[0].skill_sequence &&
+            (entry->skill_sequence != snapshot->seat[owner_seat].skill_sequence &&
              !action_sequence_newer(
-                 snapshot->seat[0].skill_sequence, entry->skill_sequence)))) ||
+                 snapshot->seat[owner_seat].skill_sequence, entry->skill_sequence)))) ||
             (entry->emitted_host_tick != snapshot->host_tick &&
              !SudekiMpLanArenaSequenceNewer(
                  snapshot->host_tick, entry->emitted_host_tick))) return 0;
@@ -753,6 +871,44 @@ static void read_spirit_vfx(
     }
 }
 
+int SudekiMpLanArenaSpiritViewValid(const SudekiMpLanArenaSpiritView *view) {
+    unsigned int i, j, k;
+    if (view == NULL || view->kind > 2u || view->body_hidden > 1u) return 0;
+    if (view->kind == 0u) {
+        if (view->skill_sequence || view->owner_seat || view->body_hidden) return 0;
+        for (i = 0u; i < 16u; ++i) if (view->matrix[i] != 0.0f) return 0;
+        for (i = 0u; i < 3u; ++i) if (view->projection[i] != 0.0f) return 0;
+        return 1;
+    }
+    if (view->owner_seat != 1u || view->skill_sequence == 0u) return 0;
+    for (i = 0u; i < 16u; ++i) if (!valid_coordinate(view->matrix[i])) return 0;
+    for (i = 0u; i < 3u; ++i)
+        if (!isfinite(view->projection[i]) || view->projection[i] <= 0.0f ||
+            view->projection[i] > 100000.0f) return 0;
+    if (fabsf(view->matrix[3]) > .001f || fabsf(view->matrix[7]) > .001f ||
+        fabsf(view->matrix[11]) > .001f || fabsf(view->matrix[15]-1.0f) > .001f) return 0;
+    for (i = 0u; i < 3u; ++i) for (j = i; j < 3u; ++j) {
+        float dot = 0.0f;
+        for (k = 0u; k < 3u; ++k) dot += view->matrix[i*4u+k]*view->matrix[j*4u+k];
+        if (fabsf(dot - (i == j ? 1.0f : 0.0f)) > .02f) return 0;
+    }
+    return 1;
+}
+
+int SudekiMpLanArenaSkillFadeValid(const SudekiMpLanArenaSkillFade *fade) {
+    unsigned int i;
+    if (!fade || fade->owner_seat >= 2u || fade->kind > 2u) return 0;
+    if (!fade->kind) {
+        if (fade->skill_sequence || fade->owner_seat) return 0;
+        for (i = 0; i < 3u; ++i) if (fade->rgb[i] != 0.0f) return 0;
+        return 1;
+    }
+    if (!fade->skill_sequence) return 0;
+    for (i = 0; i < 3u; ++i)
+        if (!isfinite(fade->rgb[i]) || fade->rgb[i] < 0.0f || fade->rgb[i] > 1.0f) return 0;
+    return 1;
+}
+
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
 ) {
@@ -768,6 +924,20 @@ int SudekiMpLanArenaSnapshotValid(
         snapshot->enemy_count > 1u ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
         !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
+        !SudekiMpLanArenaSpiritViewValid(&snapshot->spirit_view) ||
+        !SudekiMpLanArenaSkillFadeValid(&snapshot->skill_fade) ||
+        (snapshot->skill_fade.kind != 0u &&
+         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
+          snapshot->combat_enabled != 1u ||
+          snapshot->skill_fade.skill_sequence != snapshot->seat[snapshot->skill_fade.owner_seat].skill_sequence ||
+          snapshot->skill_fade.kind != snapshot->seat[snapshot->skill_fade.owner_seat].skill_kind)) ||
+        (snapshot->spirit_view.kind != 0u &&
+         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
+          snapshot->combat_enabled != 1u ||
+          snapshot->seat[1].actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+          snapshot->seat[1].skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
+          snapshot->seat[1].skill_active != 1u ||
+          snapshot->spirit_view.skill_sequence != snapshot->seat[1].skill_sequence)) ||
         !valid_actor_snapshot(&snapshot->seat[0], expected_host_actor_type) ||
         !valid_actor_snapshot(
             &snapshot->seat[1], expected_client_actor_type)) return 0;
@@ -1021,6 +1191,7 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
                     write_u16(entry, event->event_sequence);
                     write_u16(entry + 2u, event->skill_sequence);
                     entry[4] = event->cue;
+                    entry[5] = event->owner_seat;
                 } else {
                     memset(entry, 0, LAN_SPIRIT_AUDIO_EVENT_SIZE);
                 }
@@ -1039,7 +1210,22 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
                 }
             }
             output[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] =
-                packet->body.snapshot.enemy_count;
+            packet->body.snapshot.enemy_count;
+            {
+                const SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.spirit_view;
+                uint8_t *entry = output + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET;
+                write_u16(entry, view->skill_sequence);
+                entry[2] = view->owner_seat; entry[3] = view->kind; entry[4] = view->body_hidden;
+                for (i = 0u; i < 16u; ++i) write_float(entry + 5u + 4u*i, view->matrix[i]);
+                for (i = 0u; i < 3u; ++i) write_float(entry + 69u + 4u*i, view->projection[i]);
+            }
+            {
+                const SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.skill_fade;
+                uint8_t *entry = output + LAN_SNAPSHOT_SKILL_FADE_OFFSET;
+                write_u16(entry, fade->skill_sequence);
+                entry[2] = fade->owner_seat; entry[3] = fade->kind;
+                for (i = 0u; i < 3u; ++i) write_float(entry + 4u + 4u*i, fade->rgb[i]);
+            }
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 const SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
                 uint8_t *entry = output + LAN_SNAPSHOT_FIXED_SIZE + (i * LAN_ENEMY_SIZE);
@@ -1203,6 +1389,7 @@ int SudekiMpLanArenaDecodePacket(
                 event->event_sequence = read_u16(entry);
                 event->skill_sequence = read_u16(entry + 2u);
                 event->cue = entry[4];
+                event->owner_seat = entry[5];
             }
             packet->body.snapshot.spirit_vfx_observed =
                 payload[LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET];
@@ -1219,6 +1406,29 @@ int SudekiMpLanArenaDecodePacket(
             }
             packet->body.snapshot.enemy_count =
                 payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET];
+            {
+                SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.spirit_view;
+                const uint8_t *entry = payload + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET;
+                if (entry[3] == 0u) {
+                    static const uint8_t empty_view[81] = {0};
+                    if (memcmp(entry, empty_view, sizeof(empty_view)) != 0) return 0;
+                }
+                view->skill_sequence = read_u16(entry);
+                view->owner_seat = entry[2]; view->kind = entry[3]; view->body_hidden = entry[4];
+                for (i = 0u; i < 16u; ++i) view->matrix[i] = read_float(entry + 5u + 4u*i);
+                for (i = 0u; i < 3u; ++i) view->projection[i] = read_float(entry + 69u + 4u*i);
+            }
+            {
+                SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.skill_fade;
+                const uint8_t *entry = payload + LAN_SNAPSHOT_SKILL_FADE_OFFSET;
+                if (!entry[3]) {
+                    static const uint8_t empty[16] = {0};
+                    if (memcmp(entry, empty, sizeof(empty))) return 0;
+                }
+                fade->skill_sequence = read_u16(entry);
+                fade->owner_seat = entry[2]; fade->kind = entry[3];
+                for (i = 0u; i < 3u; ++i) fade->rgb[i] = read_float(entry + 4u + 4u*i);
+            }
             for (i = 0u; i < packet->body.snapshot.enemy_count; ++i) {
                 SudekiMpLanArenaEnemySnapshot *enemy = &packet->body.snapshot.enemies[i];
                 const uint8_t *entry = payload + LAN_SNAPSHOT_FIXED_SIZE + (i * LAN_ENEMY_SIZE);

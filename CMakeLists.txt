@@ -23,6 +23,7 @@ add_library(SudekiMP SHARED
     src/cleanroom/engine.c
     src/cleanroom/menu.c
     src/engine/arbiter_combat_input.c
+    src/engine/buki_replica_native.c
     src/engine/controller_action_router.c
     src/engine/coop_roster_assignment.c
     src/engine/economy_coordinator.c
@@ -84,6 +85,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_client_replica.c
     src/hooks/lan_arena_client_skill_handoff.c
     src/hooks/lan_arena_owner_view.c
+    src/hooks/lan_arena_skill_fade.c
     src/hooks/lan_arena_host_input.c
     src/hooks/lan_arena_collision_debug.c
     src/hooks/lan_arena_pause_panel.c
@@ -259,6 +261,15 @@ add_executable(SudekiMP.LanArenaOwnerViewTest
     tests/lan_arena_owner_view_test.c
     src/hooks/lan_arena_owner_view.c
 )
+add_executable(SudekiMP.LanArenaSkillFadeTest
+    tests/lan_arena_skill_fade_test.c
+    src/hooks/call_hook.c
+)
+target_include_directories(SudekiMP.LanArenaSkillFadeTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaSkillFadeTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LanArenaSkillFadeTest PRIVATE -Wall -Wextra)
+set_target_properties(SudekiMP.LanArenaSkillFadeTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.LanArenaOwnerViewTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaOwnerViewTest PRIVATE
     WIN32_LEAN_AND_MEAN
@@ -501,6 +512,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
     src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
+    src/engine/buki_replica_native.c
     src/engine/controller_action_router.c
     src/engine/coop_roster_assignment.c
     src/engine/local_quick_menu.c
@@ -543,6 +555,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_client_replica.c
     src/hooks/lan_arena_client_skill_handoff.c
     src/hooks/lan_arena_owner_view.c
+    src/hooks/lan_arena_skill_fade.c
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/lan_arena_spirit_vfx.c
@@ -1325,6 +1338,16 @@ add_executable(SudekiMP.OrbitCameraTest
     tests/orbit_camera_test.c
     src/engine/orbit_camera.c
 )
+add_executable(SudekiMP.BukiReplicaNativeTest
+    tests/buki_replica_native_test.c
+    src/engine/buki_replica_native.c
+)
+target_include_directories(SudekiMP.BukiReplicaNativeTest PRIVATE src)
+target_compile_definitions(SudekiMP.BukiReplicaNativeTest PRIVATE
+    WIN32_LEAN_AND_MEAN SUDEKIMP_BUKI_REPLICA_NATIVE_TESTING=1)
+target_compile_options(SudekiMP.BukiReplicaNativeTest PRIVATE -Wall -Wextra)
+set_target_properties(SudekiMP.BukiReplicaNativeTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.OrbitCameraTest PRIVATE src)
 target_compile_options(SudekiMP.OrbitCameraTest PRIVATE
     -Wall -Wextra -Wpedantic

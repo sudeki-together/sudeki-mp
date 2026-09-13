@@ -10,7 +10,8 @@
  * thread; Initialize itself may run on the loader thread. No native objects
  * are inspected by the hook before the first Capture. */
 typedef BOOL (*SudekiMpLanArenaSpiritVisualHostWitness)(
-    void *context, uint64_t *session, uint16_t *skill, uint32_t *host_tick);
+    void *context, uint64_t *session, uint16_t *skill, uint32_t *host_tick,
+    uint8_t *owner_actor_type);
 
 BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
     HMODULE game_module, SudekiMpLanArenaSpiritVisualHostWitness witness,

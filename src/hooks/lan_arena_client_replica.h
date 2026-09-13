@@ -298,6 +298,10 @@ BOOL SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender(void);
  * bounded remote Tal CSkill mutation. Exact identity mismatch retains the
  * lease and fails closed so teardown can retry. */
 BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void);
+/* Render-only caster view; restore before leaving the same native frame. */
+BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void);
+BOOL SudekiMpLanArenaClientReplicaGetSkillFade(SudekiMpLanArenaSkillFade *fade);
+BOOL SudekiMpLanArenaClientSpiritViewEndFrame(void);
 /* Reasserts only the presentation semantics from the already-sampled frame.
  * This runs after Sudeki's native animation update so a client-local idle
  * scheduler cannot briefly replace the canonical shared-simulation selector before

@@ -81,7 +81,32 @@ static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_ARENA_SPIRIT_VFX
     {"SFXSS111_End_Invulnerable.HOM", 0xa8171ecfu},
     {"SFXSS900_generic_initate.HOM", 0x62dcc5a3u},
     {"SFXSS351_Tal_Hit_Character.HOM", 0xaeec0c83u},
-    {"SFXSTA003_Boost.HOM", 0x423bad0du}
+    {"SFXSTA003_Boost.HOM", 0x423bad0du},
+    /* Buki's original clip zero: strike/spell contain type-22 sound only;
+     * both hit clips have no event channels. The same parent-free factory,
+     * exact sound-only listener and host-roster retirement contract applies. */
+    {"SFXSS450_Buki_SS_Strike.HOM", 0xc198e72du},
+    {"SFXSS500_Buki_SS_Spell.HOM", 0x26de2bb3u},
+    {"SFXSS451_Projectile_Hit_Character.HOM", 0xc6cf803bu},
+    {"SFXSS501_Hit.HOM", 0x07f9bc13u},
+    /* Original shield appear has type-2 actor events; loop has none. The
+     * exact parent-free clone has only the embedded sound listener and no
+     * actor-forwarding listener. The host alone handles those actor events. */
+    {"SFXB200_Shield_Appear.HOM", 0x920d7163u},
+    {"SFXB201_Shield_Loop.HOM", 0x0fdb430fu},
+    /* Original Elco clip-zero banks contain sound (22), actor-forwarded
+     * hit notifications (2), or no events. The parent-free sound-only factory
+     * does not deliver actor events, status changes or Spirit-manager calls. */
+    {"SFXSS550_INITIATE.HOM", 0x18a0da0fu},
+    {"SFXSS551_INITIATE_LOOP_WAIT.HOM", 0x34b6a981u},
+    {"SFXSS552_MORPH_INTO_SPIRIT.HOM", 0xafbcfa53u},
+    {"SFXSS560_LOOP_INVULNERABLE.HOM", 0x55f90a03u},
+    {"SFXSS561_END_INVULNERABLE.HOM", 0xf3c381cfu},
+    {"SFXSS562_SMALL_FLOOR_PATTERN.HOM", 0xe2711ed3u},
+    {"SFXSS600_RAFFI_SPIRIT_STRIKE.HOM", 0xec9a809bu},
+    {"SFXSS601_HIT.HOM", 0xb0a51d13u},
+    {"SFXSS650_RAFFI_SS_SPELL.HOM", 0xa85bf815u},
+    {"SFXSS651_HASTE_PCS.HOM", 0x4ed84d5bu}
 };
 
 static const uint8_t expected_sfx_play_body[] = {
@@ -1134,7 +1159,9 @@ BOOL SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
      * that progress, but allow initial/late forward catch-up. The complete
      * host roster still owns retirement, never this phase decision. */
     *apply = (kind != SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE &&
-              kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) ||
+              kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
+              kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR &&
+              kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) ||
         host_phase > native_phase;
     return TRUE;
 }
