@@ -21,6 +21,20 @@ typedef struct SudekiMpSkillActivationApi {
     const uint8_t *include_unavailable_skills;
 } SudekiMpSkillActivationApi;
 
+/* Optional exact-owner routing shared by native menu/direct-call adapters and
+ * the actor activation API. Validation and Use each revalidate their owner;
+ * a successful query is not a lease for a later mutation. NULL callbacks
+ * restore normal native behavior, only at the registered idle boundary. */
+typedef BOOL (*SudekiMpSkillRoutingIdleWitness)(void);
+typedef uint32_t (*SudekiMpSkillRoutingEnter)(void *skill,int slot,BOOL using_skill);
+typedef BOOL (*SudekiMpSkillRoutingLeave)(uint32_t cookie);
+BOOL SudekiMpSetSkillActivationRouting(SudekiMpSkillRoutingIdleWitness idle,
+    SudekiMpSkillRoutingEnter enter,SudekiMpSkillRoutingLeave leave);
+BOOL SudekiMpSkillActivationRoutingHealthy(void);
+BOOL SudekiMpRetrySkillActivationRoutingLeave(void);
+int SudekiMpInvokeSkillValidate(void *skill,int slot,SudekiMpSkillValidateFunction original);
+uint8_t SudekiMpInvokeSkillUse(void *skill,void *edx,int slot,SudekiMpSkillUseFunction original);
+
 typedef enum SudekiMpSkillActivationStatus {
     SUDEKIMP_SKILL_ACTIVATION_STARTED = 0,
     SUDEKIMP_SKILL_ACTIVATION_INVALID_CONTEXT = 1,

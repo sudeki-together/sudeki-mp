@@ -234,6 +234,7 @@ BOOL SudekiMpControlSeparationTalSkillDirectMovementPolicy(
     BOOL remote_skill_active,
     BOOL spirit_known,
     BOOL spirit_active,
+    BOOL remote_spirit_owned,
     uint32_t arbiter_flags
 );
 /* Host-local diagnostic movement may provide a camera-local direction only

@@ -59,6 +59,27 @@ BOOL SudekiMpResolveSpiritStrikeId(unsigned int resource_type,
     unsigned int variant, int *strike_id);
 BOOL SudekiMpInitializeSpiritActivationAbi(HMODULE game_module);
 void SudekiMpResetSpiritActivationAbi(void);
+/* Shared entry routing for the native Q-menu adapter and explicit actor API.
+ * actor==NULL identifies a native-menu call; the host resolver must validate
+ * the local menu owner, not trust strike_id as an ownership grant. The resolver
+ * validates actor/session/authority and supplies an exact scoped manager.
+ * Registration/removal requires a positively idle game-thread boundary. */
+typedef BOOL (*SudekiMpSpiritRoutingIdleWitness)(void);
+typedef uint32_t (*SudekiMpSpiritRoutingEnter)(void *actor,int strike_id,
+    BOOL activating,void **manager);
+typedef BOOL (*SudekiMpSpiritRoutingLeave)(uint32_t cookie);
+BOOL SudekiMpSetSpiritActivationRouting(SudekiMpSpiritRoutingIdleWitness idle,
+    SudekiMpSpiritRoutingEnter enter,SudekiMpSpiritRoutingLeave leave);
+BOOL SudekiMpSpiritActivationRoutingHealthy(void);
+/* Failed restoration retains LIFO cookies and blocks new calls. Retry only
+ * restoration, never activation. After recovery, remove/re-register at idle to
+ * clear quarantine. A successful native start still returns STARTED even when
+ * restoration fails, so callers retain its asynchronous lifetime obligation. */
+BOOL SudekiMpRetrySpiritActivationRoutingLeave(void);
+int SudekiMpInvokeSpiritValidate(void *actor,void *manager,int strike_id,
+    SudekiMpSpiritValidateFunction original);
+int SudekiMpInvokeSpiritActivate(void *actor,void *manager,int strike_id,
+    SudekiMpSpiritActivateFunction original);
 /* Read-only actor-specific snapshot.  It uses the same retail strike
  * validator as execution and never opens the global QuickMenu singleton. */
 BOOL SudekiMpDescribeCharacterSpiritOptions(

@@ -2,6 +2,8 @@
 
 #include "engine/log.h"
 #include "engine/player_combat_context.h"
+#include "engine/spirit_activation_abi.h"
+#include "engine/skill_activation_abi.h"
 #include "hooks/call_hook.h"
 
 #include <stdint.h>
@@ -34,6 +36,7 @@ enum {
     RVA_QUICK_SKILL_VALIDATE = 0x000b4bc0u,
     RVA_QUICK_MENU_SPIRIT_VALIDATE_CALL = 0x000998b9u,
     RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL = 0x000998dcu,
+    RVA_QUICK_MENU_SPIRIT_LIST_VALIDATE_CALL = 0x0009b862u,
     RVA_SPIRIT_STRIKE_VALIDATE = 0x00010940u,
     RVA_SPIRIT_STRIKE_ACTIVATE = 0x0000fba0u,
     RVA_SET_UI_ACTIVE = 0x0000afd0u,
@@ -56,6 +59,8 @@ static SudekiMpRelativeCallHook quick_menu_skill_validate_call_hook;
 static SudekiMpRelativeCallHook cskill_use_validate_call_hook;
 static SudekiMpRelativeCallHook quick_menu_spirit_validate_call_hook;
 static SudekiMpRelativeCallHook quick_menu_spirit_activate_call_hook;
+static SudekiMpRelativeCallHook quick_menu_spirit_list_validate_call_hook;
+static unsigned int spirit_call_depth;
 static QuickSkillActionFunction original_quick_skill_action;
 static QuickSkillValidateFunction original_quick_skill_validate;
 static SpiritStrikeFunction original_spirit_strike_validate;
@@ -236,7 +241,7 @@ static int __attribute__((regparm(2))) trace_quick_skill_validate(
 ) {
     SkillReadinessSnapshot snapshot;
     capture_skill_readiness(skill, &snapshot);
-    int result = original_quick_skill_validate(skill, slot);
+    int result = SudekiMpInvokeSkillValidate(skill, slot, original_quick_skill_validate);
 
     current_action_validation_seen = TRUE;
     current_action_validation_result = result;
@@ -262,7 +267,7 @@ static int __attribute__((regparm(2))) trace_quick_menu_skill_validate(
     int result;
 
     capture_skill_readiness(skill, &snapshot);
-    result = original_quick_skill_validate(skill, slot);
+    result = SudekiMpInvokeSkillValidate(skill, slot, original_quick_skill_validate);
     log_skill_readiness("quick_menu", skill, slot, result, &snapshot);
     return result;
 }
@@ -275,7 +280,7 @@ static int __attribute__((regparm(2))) trace_cskill_use_validate(
     int result;
 
     capture_skill_readiness(skill, &snapshot);
-    result = original_quick_skill_validate(skill, slot);
+    result = SudekiMpInvokeSkillValidate(skill, slot, original_quick_skill_validate);
     log_skill_readiness("use_internal", skill, slot, result, &snapshot);
     return result;
 }
@@ -284,7 +289,10 @@ static int __stdcall trace_spirit_strike_validate(
     void *manager,
     int strike_id
 ) {
-    int result = original_spirit_strike_validate(manager, strike_id);
+    int result;
+    ++spirit_call_depth;
+    result = SudekiMpInvokeSpiritValidate(NULL,manager,strike_id,original_spirit_strike_validate);
+    --spirit_call_depth;
     SudekiMpLogFormat(
         "spirit_strike_input event=quick_menu_validate manager=0x%08lx strike_id=%d result=%d\r\n",
         (unsigned long)(uintptr_t)manager,
@@ -304,13 +312,29 @@ static int __stdcall trace_spirit_strike_activate(
         (unsigned long)(uintptr_t)manager,
         strike_id
     );
-    result = original_spirit_strike_activate(manager, strike_id);
+    ++spirit_call_depth;
+    result = SudekiMpInvokeSpiritActivate(NULL,manager,strike_id,original_spirit_strike_activate);
+    --spirit_call_depth;
     SudekiMpLogFormat(
         "spirit_strike_input event=quick_menu_activate_end strike_id=%d result=%d\r\n",
         strike_id,
         result
     );
     return result;
+}
+
+static int __stdcall route_spirit_list_validate(void *manager,int strike_id) {
+    int result;
+    ++spirit_call_depth;
+    result=SudekiMpInvokeSpiritValidate(NULL,manager,strike_id,original_spirit_strike_validate);
+    --spirit_call_depth;
+    return result;
+}
+
+BOOL SudekiMpQuickSkillSpiritRoutingReady(void) {
+    return game_base && original_spirit_strike_validate && original_spirit_strike_activate &&
+        quick_menu_spirit_validate_call_hook.installed &&
+        quick_menu_spirit_activate_call_hook.installed && quick_menu_spirit_list_validate_call_hook.installed;
 }
 
 static void SUDEKIMP_EAX_ARGUMENT trace_quick_skill_action(uint32_t action_id) {
@@ -408,8 +432,8 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
 ) {
     uint8_t *base;
 
-    if (game_module == NULL) {
-        SetLastError(ERROR_INVALID_PARAMETER);
+    if (game_module == NULL || game_base != NULL) {
+        SetLastError(game_module == NULL ? ERROR_INVALID_PARAMETER:ERROR_ALREADY_INITIALIZED);
         return FALSE;
     }
 
@@ -458,12 +482,16 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
             &quick_menu_spirit_activate_call_hook,
             base + RVA_QUICK_MENU_SPIRIT_ACTIVATE_CALL,
             original_spirit_strike_activate,
-            trace_spirit_strike_activate)) {
-        SudekiMpUninstallQuickSkillInputTrace();
-        original_quick_skill_action = NULL;
-        original_quick_skill_validate = NULL;
-        original_spirit_strike_validate = NULL;
-        original_spirit_strike_activate = NULL;
+            trace_spirit_strike_activate) ||
+        !SudekiMpInstallRelativeCallHook(
+            &quick_menu_spirit_list_validate_call_hook,
+            base + RVA_QUICK_MENU_SPIRIT_LIST_VALIDATE_CALL,
+            original_spirit_strike_validate,route_spirit_list_validate)) {
+        DWORD error=GetLastError();
+        /* A failed rollback retains its callbacks for retry. Preserve the
+         * original installation error even when restoration also fails. */
+        (void)SudekiMpUninstallQuickSkillInputTrace();
+        SetLastError(error);
         return FALSE;
     }
 
@@ -479,16 +507,29 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
     return TRUE;
 }
 
-void SudekiMpUninstallQuickSkillInputTrace(void) {
+BOOL SudekiMpUninstallQuickSkillInputTrace(void) {
+    BOOL restored=TRUE;
+    DWORD error=ERROR_SUCCESS;
+    if(spirit_call_depth || ranged_transition_pending) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
     if (ranged_transition_timer != 0) {
         KillTimer(NULL, ranged_transition_timer);
     }
-    SudekiMpRestoreRelativeCallHook(&quick_menu_spirit_activate_call_hook);
-    SudekiMpRestoreRelativeCallHook(&quick_menu_spirit_validate_call_hook);
-    SudekiMpRestoreRelativeCallHook(&cskill_use_validate_call_hook);
-    SudekiMpRestoreRelativeCallHook(&quick_menu_skill_validate_call_hook);
-    SudekiMpRestoreRelativeCallHook(&quick_skill_validate_call_hook);
-    SudekiMpRestoreRelativeCallHook(&quick_skill_action_call_hook);
+#define RESTORE_SKILL_CALL(hook) do { \
+    if(!SudekiMpRestoreRelativeCallHook(&(hook))) { \
+        if(restored) { error=GetLastError(); } restored=FALSE; \
+    } \
+} while(0)
+    RESTORE_SKILL_CALL(quick_menu_spirit_list_validate_call_hook);
+    RESTORE_SKILL_CALL(quick_menu_spirit_activate_call_hook);
+    RESTORE_SKILL_CALL(quick_menu_spirit_validate_call_hook);
+    RESTORE_SKILL_CALL(cskill_use_validate_call_hook);
+    RESTORE_SKILL_CALL(quick_menu_skill_validate_call_hook);
+    RESTORE_SKILL_CALL(quick_skill_validate_call_hook);
+    RESTORE_SKILL_CALL(quick_skill_action_call_hook);
+#undef RESTORE_SKILL_CALL
+    if(!restored) { SetLastError(error); return FALSE; }
     original_quick_skill_action = NULL;
     original_quick_skill_validate = NULL;
     original_spirit_strike_validate = NULL;
@@ -504,4 +545,5 @@ void SudekiMpUninstallQuickSkillInputTrace(void) {
     current_action_skill = NULL;
     current_action_validation_seen = FALSE;
     current_action_validation_result = -1;
+    return TRUE;
 }

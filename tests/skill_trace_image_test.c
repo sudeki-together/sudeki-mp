@@ -18,6 +18,8 @@
 #include "hooks/lan_arena_host_input.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_arena_cast_context.h"
+#include "engine/spirit_instance_abi.h"
 #include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_spirit_vfx.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
@@ -41,6 +43,12 @@
 #include <string.h>
 
 static BOOL split_runtime_authorization_result;
+/* Only permits pointer-hook install/restore in the inert PE mapping. No
+ * constructor, object update or other native game function is called here. */
+static BOOL inert_spirit_hook_boundary(void) { return TRUE; }
+static BOOL no_cast_owner(void *actor,uint8_t kind,uint64_t *session,uint8_t *type) {
+    (void)actor; (void)kind; (void)session; (void)type; return FALSE;
+}
 
 /* The exact-image harness links the LAN input adapters without the large
  * cleanroom menu presenter. Keep its read-only modal contract inert here. */
@@ -4156,8 +4164,12 @@ int wmain(int argc, wchar_t **argv) {
     }
     {
         unsigned int bits;
-        for (bits = 0u; bits < 64u; ++bits) {
-            BOOL expected = bits == (1u | 2u | 8u | 16u);
+        for (bits = 0u; bits < 128u; ++bits) {
+            /* Ordinary remote skill, or either remote Spirit with/without
+             * CSkill. Never own/unknown Spirit, own skill or stale ownership. */
+            BOOL expected = bits == (1u | 2u | 8u | 16u) ||
+                bits == (1u | 2u | 16u | 32u | 64u) ||
+                bits == (1u | 2u | 8u | 16u | 32u | 64u);
             unsigned int flag_case;
             const uint32_t flags[] = {3u, 0x00080003u, 0x00080023u};
             for (flag_case = 0u; flag_case < 3u; ++flag_case) {
@@ -4166,9 +4178,10 @@ int wmain(int argc, wchar_t **argv) {
                         (bits & 1u) != 0u, (bits & 2u) != 0u,
                         (bits & 4u) != 0u, (bits & 8u) != 0u,
                         (bits & 16u) != 0u, (bits & 32u) != 0u,
+                        (bits & 64u) != 0u,
                         flags[flag_case]);
                 if (admitted != (expected && flag_case < 2u)) {
-                    fputs("FAIL: Tal noncaster movement excludes own skill, Spirit, unknown and other locks\n", stderr);
+                    fputs("FAIL: local noncaster movement requires remote action ownership and excludes own/unknown actions and other locks\n", stderr);
                     ++failures;
                 }
             }
@@ -7850,8 +7863,166 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
     }
+    {
+        /* Inert mapping: validate the original PE values before simulating
+         * loader relocations for the factory's exact singleton/vtable checks.
+         * This does NOT execute native constructors inside the test harness. */
+        const uint32_t sites[]={0x79290,0x11847,0x2ca30c,0x2c5630,0x2c5544,0x2c5634,0x2c5548,
+            0x2ca310,0xf902,0xf90f,0xf95c,
+            0x2f8da,0x2f8e1,0x10a1e,0xb4bd1,0x10157,0xb4b69,0x11115,0xb47f4,
+            0x9c52b,0x9c5df,0x100d3,0x10fe8,0xe45ab,0xe46ce,
+            0xb4836,0xb4844,0xb4e8d,0xb4e99,0xf5e2};
+        const uint32_t expected[]={0x808d30,0x808d38,0x479600,0x4118c0,0x40efc0,0x411bd0,0x52adf0,
+            0x40f900,0x808d34,0x808d34,0x808da0,
+            0x808dd0,0x6c7ad0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,
+            0x6caf9c,0x7c2f88,0x7c2f88,0x7c2f88,0x808d1c,0x808d1c,
+            0x808da4,0x809d78,0x808da4,0x809d78,0x808d30};
+        uint32_t saved[sizeof(sites)/sizeof(sites[0])];
+        uint8_t participant_calls[2][5];
+        uint8_t skill_ui_bytes[2][8];
+        const uint32_t skill_ui_sites[2]={0xb4944,0xb4f4e};
+        uint8_t skill_input_bytes[2][7];
+        uint8_t state_ui_bytes[2][7];
+        const uint32_t skill_input_sites[2]={0xb483c,0xb4e91};
+        const uint32_t participant_sites[2]={0xfcd6,0x10f36};
+        unsigned int c;
+        /* The common harness already relocated this input vtable above.
+         * It is an observed dependency, NOT one of this adapter's seams. */
+        void *input_handler=*(void **)(image+RVA_CHARACTER_INPUT_VTABLE_SLOT);
+        if(input_handler!=image+RVA_CHARACTER_INPUT_HANDLER) {
+            fputs("FAIL: Spirit instance input handler dependency\n",stderr); ++failures;
+        }
+        for(c=0;c<2;++c) memcpy(participant_calls[c],image+participant_sites[c],5);
+        for(c=0;c<2;++c) memcpy(skill_ui_bytes[c],image+skill_ui_sites[c],8);
+        for(c=0;c<2;++c) memcpy(skill_input_bytes[c],image+skill_input_sites[c],7);
+        memcpy(state_ui_bytes[0],image+0xe45aa,5);
+        memcpy(state_ui_bytes[1],image+0xe46c6,7);
+        for(c=0;c<sizeof(sites)/sizeof(sites[0]);++c) {
+            uint32_t relocated;
+            memcpy(&saved[c],image+sites[c],4);
+            if(saved[c]!=expected[c]) {
+                fprintf(stderr,"FAIL: Spirit instance original operand %u\n",c); ++failures;
+            }
+            relocated=saved[c]+(uint32_t)(uintptr_t)image-0x400000u;
+            memcpy(image+sites[c],&relocated,4);
+        }
+        if(!SudekiMpInitializeSpiritInstanceAbi((HMODULE)image,inert_spirit_hook_boundary) ||
+            !SudekiMpSpiritInstanceNamedCameraAbiReady() ||
+            !SudekiMpSpiritInstanceSharedSspAbiReady() ||
+            !SudekiMpInstallSpiritInstanceUpdates() ||
+            !SudekiMpResetSpiritInstanceAbi()) {
+            fprintf(stderr,"FAIL: Spirit instance exact ABI error=%lu\n",(unsigned long)GetLastError());
+            ++failures;
+        }
+        if(!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: client input setup for shared UI ownership\n",stderr); ++failures;
+        } else {
+            void **slot=(void **)(image+RVA_CHARACTER_INPUT_VTABLE_SLOT);
+            void *replacement=*slot;
+            if(!SudekiMpLanArenaClientCharacterInputOwnerExact((HMODULE)image) ||
+                SudekiMpInitializeSpiritInstanceAbi((HMODULE)image,inert_spirit_hook_boundary)) {
+                fputs("FAIL: foreign input needs explicit retained owner witness\n",stderr); ++failures;
+            }
+            *slot=image+RVA_CHARACTER_INPUT_HANDLER+1;
+            if(SudekiMpLanArenaClientCharacterInputOwnerExact((HMODULE)image) ||
+                SudekiMpInitializeSpiritInstanceAbiWithInputOwner((HMODULE)image,inert_spirit_hook_boundary,
+                    SudekiMpLanArenaClientCharacterInputOwnerExact)) {
+                fputs("FAIL: replaced client input hook admitted UI isolation\n",stderr); ++failures;
+            }
+            *slot=replacement;
+            if(!SudekiMpInitializeSpiritInstanceAbiWithInputOwner((HMODULE)image,inert_spirit_hook_boundary,
+                    SudekiMpLanArenaClientCharacterInputOwnerExact) ||
+                !SudekiMpInstallSpiritInstanceUpdates() || !SudekiMpResetSpiritInstanceAbi() ||
+                *slot!=replacement || !SudekiMpLanArenaClientCharacterInputOwnerExact((HMODULE)image)) {
+                fputs("FAIL: client input and UI hooks must retain independent exact owners\n",stderr); ++failures;
+            }
+            if(!SudekiMpUninstallLanArenaClientInput() ||
+                SudekiMpLanArenaClientCharacterInputOwnerExact((HMODULE)image)) {
+                fputs("FAIL: restored client input must retire its owner witness\n",stderr); ++failures;
+            }
+        }
+        for(c=0;c<sizeof(sites)/sizeof(sites[0]);++c) {
+            uint32_t actual;
+            memcpy(&actual,image+sites[c],4);
+            if(actual!=saved[c]+(uint32_t)(uintptr_t)image-0x400000u) {
+                fprintf(stderr,"FAIL: Spirit instance slot not restored %u\n",c); ++failures;
+            }
+            memcpy(image+sites[c],&saved[c],4);
+        }
+        for(c=0;c<2;++c) if(memcmp(participant_calls[c],image+participant_sites[c],5)) {
+            fputs("FAIL: Spirit participant call not restored\n",stderr); ++failures;
+        }
+        for(c=0;c<2;++c) if(memcmp(skill_ui_bytes[c],image+skill_ui_sites[c],8)) {
+            fputs("FAIL: CSkill UI increment/recompute not restored\n",stderr); ++failures;
+        }
+        for(c=0;c<2;++c) if(memcmp(skill_input_bytes[c],image+skill_input_sites[c],7)) {
+            fputs("FAIL: CSkill input disable/enable not restored\n",stderr); ++failures;
+        }
+        if(memcmp(state_ui_bytes[0],image+0xe45aa,5) || memcmp(state_ui_bytes[1],image+0xe46c6,7)) {
+            fputs("FAIL: script CState UI lock seams not restored\n",stderr); ++failures;
+        }
+        if(*(void **)(image+RVA_CHARACTER_INPUT_VTABLE_SLOT)!=input_handler) {
+            fputs("FAIL: Spirit instance changed input handler owner\n",stderr); ++failures;
+        }
+        if(image[0x100d1]!=0x8b || image[0x100d2]!=0x35 ||
+            image[0x10fe6]!=0x8b || image[0x10fe7]!=0x35) {
+            fputs("FAIL: Spirit UI load not restored\n",stderr); ++failures;
+        }
+    }
     test_zone_transition_exact_image(image, &failures);
     test_talos_native_lifecycle_exact_image(image, &failures);
+    {
+        static const uint32_t cast_sites[]={0xb49f2,0x10de5,0x1c38f2,0x1c4db8,0xb4b63,0xb47ee,0xb4b0a,
+            0x1c3968,0x1c338f};
+        uint8_t cast_calls[sizeof(cast_sites)/sizeof(cast_sites[0])][5];
+        void *opcode_slots[3];
+        uint32_t camera_operands[2];
+        uint32_t skill_update_original,skill_update_relocated;
+        const uint32_t camera_sites[2]={0xb5331,0xb5451};
+        unsigned int c;
+        /* The jump table has now had its actual loader relocations applied. */
+        for(c=0;c<sizeof(cast_sites)/sizeof(cast_sites[0]);++c)
+            memcpy(cast_calls[c],image+cast_sites[c],5);
+        memcpy(opcode_slots,image+0x323fa0,12);
+        /* The update vtable is a separate loader relocation, not an opcode
+         * table entry. Validate its real on-disk value before rebasing it. */
+        memcpy(&skill_update_original,image+0x2cbae0,4);
+        if(skill_update_original!=0x004b47a0u) {
+            fputs("FAIL: CSkill update original vtable target mismatch\n",stderr); ++failures;
+        }
+        skill_update_relocated=skill_update_original+(uint32_t)(uintptr_t)image-0x00400000u;
+        memcpy(image+0x2cbae0,&skill_update_relocated,4);
+        for(c=0;c<2;++c) {
+            uint32_t relocated;
+            memcpy(&camera_operands[c],image+camera_sites[c],4);
+            if(camera_operands[c]!=0x00808d94u) {
+                fputs("FAIL: skill camera original group operand mismatch\n",stderr); ++failures;
+            }
+            relocated=camera_operands[c]+(uint32_t)(uintptr_t)image-0x00400000u;
+            memcpy(image+camera_sites[c],&relocated,4);
+        }
+        if(!SudekiMpInstallLanCastContext((HMODULE)image,no_cast_owner) ||
+            !SudekiMpLanCastContextPoll() ||
+            !SudekiMpLanCastContextEnableUiTrace() ||
+            !SudekiMpUninstallLanCastContext()) {
+            fprintf(stderr,"FAIL: exact cast-task lineage seams install/restore error=%lu\n",
+                (unsigned long)GetLastError()); ++failures;
+        }
+        if(memcmp(image+0x9e560,"\x55\x8b\xec\x83\xe4\xf8",6)) {
+            fputs("FAIL: UI observation prologue not restored\n",stderr); ++failures;
+        }
+        for(c=0;c<sizeof(cast_sites)/sizeof(cast_sites[0]);++c) if(memcmp(cast_calls[c],image+cast_sites[c],5)) {
+            fputs("FAIL: cast submission/constructor not restored\n",stderr); ++failures;
+        }
+        if(memcmp(opcode_slots,image+0x323fa0,12)) {
+            fputs("FAIL: cast binding dispatch not restored\n",stderr); ++failures;
+        }
+        if(memcmp(image+0x2cbae0,&skill_update_relocated,4)) {
+            fputs("FAIL: CSkill update vtable not restored\n",stderr); ++failures;
+        }
+        memcpy(image+0x2cbae0,&skill_update_original,4);
+        for(c=0;c<2;++c) memcpy(image+camera_sites[c],&camera_operands[c],4);
+    }
     if (failures != 0) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
@@ -7943,6 +8114,44 @@ int wmain(int argc, wchar_t **argv) {
         SudekiMpUninstallSkillTrace();
         VirtualFree(image, 0, MEM_RELEASE);
         return 1;
+    }
+    {
+        uint8_t owned[5];
+        memcpy(owned,image+0x9b862,5);
+        if(!SudekiMpQuickSkillSpiritRoutingReady()) {
+            fputs("FAIL: native Spirit list/confirm/activation routing incomplete\n",stderr); ++failures;
+        }
+        image[0x9b862]=0x90; /* Foreign non-CALL must retain the adapter, not clear callbacks. */
+        if(SudekiMpUninstallQuickSkillInputTrace() || SudekiMpQuickSkillSpiritRoutingReady() ||
+            SudekiMpInstallQuickSkillInputTrace((HMODULE)image,TRUE,TRUE)) {
+            fputs("FAIL: quick-skill foreign-owner restoration was not retained\n",stderr); ++failures;
+        }
+        memcpy(image+0x9b862,owned,5);
+        if(!SudekiMpUninstallQuickSkillInputTrace() ||
+            !SudekiMpInstallQuickSkillInputTrace((HMODULE)image,TRUE,TRUE)) {
+            fputs("FAIL: quick-skill restoration retry/reinstall\n",stderr); ++failures;
+        }
+        {
+            const uint32_t seams[]={0x27acf,0x27c8c,0x99867,0xb4828,0x998b9,0x998dc,0x9b862};
+            uint8_t originals[7][5];
+            unsigned int failed,k;
+            if(!SudekiMpUninstallQuickSkillInputTrace()) { ++failures; }
+            for(k=0;k<7;++k) memcpy(originals[k],image+seams[k],5);
+            for(failed=0;failed<7;++failed) {
+                image[seams[failed]]=0x90;
+                if(SudekiMpInstallQuickSkillInputTrace((HMODULE)image,TRUE,TRUE) ||
+                    SudekiMpQuickSkillSpiritRoutingReady()) {
+                    fputs("FAIL: mismatched quick-skill callsite admitted\n",stderr); ++failures;
+                }
+                for(k=0;k<7;++k) if(k!=failed && memcmp(originals[k],image+seams[k],5)) {
+                    fputs("FAIL: partial quick-skill installation did not roll back\n",stderr); ++failures;
+                }
+                memcpy(image+seams[failed],originals[failed],5);
+            }
+            if(!SudekiMpInstallQuickSkillInputTrace((HMODULE)image,TRUE,TRUE)) {
+                fputs("FAIL: quick-skill reinstall after rollback matrix\n",stderr); ++failures;
+            }
+        }
     }
     if (!SudekiMpInstallSpiritStrikeInput((HMODULE)image, -1, 1u, 'G')) {
         fprintf(stderr, "Spirit Strike input install rejected image (error=%lu)\n",

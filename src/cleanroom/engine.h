@@ -184,6 +184,15 @@ BOOL SudekiMpCleanroomEngineSetTrainingSkills(BOOL enabled);
  * and must not be interpreted as actor-local CSkill slots. */
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state);
 BOOL SudekiMpCleanroomEngineSpiritStrikeId(int *strike_id);
+/* LAN's constructor-owned Spirit managers may replace the retail-global
+ * observation source. Register/remove only at the provider's positively idle
+ * game-thread boundary. An installed provider's failure stays UNKNOWN: never
+ * fall back to the inactive original singleton. The serialized wire consumer
+ * must reject ambiguity until it can represent more than one active cast. */
+typedef BOOL (*SudekiMpSpiritPresentationObserver)(int *state,int *strike_id);
+typedef BOOL (*SudekiMpSpiritPresentationIdle)(void);
+BOOL SudekiMpCleanroomEngineSetSpiritPresentationObserver(
+    SudekiMpSpiritPresentationObserver observer,SudekiMpSpiritPresentationIdle idle);
 BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);

@@ -9,6 +9,11 @@ endif()
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+option(SUDEKIMP_CAST_INSTANCE_PROBE "Private idle-only native Spirit lifetime probe (no overlapping activation)" OFF)
+option(SUDEKIMP_CAST_ACTIVE_PROBE "Private single-cast native instance integration test (no overlap admission)" OFF)
+if(SUDEKIMP_CAST_INSTANCE_PROBE AND SUDEKIMP_CAST_ACTIVE_PROBE)
+    message(FATAL_ERROR "Select only one native Spirit instance probe")
+endif()
 
 set(SUDEKIMP_COMMON_SOURCES
     src/engine/build_identity.c
@@ -77,6 +82,8 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_campaign_guard.c
     src/hooks/lan_arena_window_policy.c
     src/hooks/lan_arena_runtime.c
+    src/hooks/lan_arena_cast_context.c
+    src/engine/spirit_instance_abi.c
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/lan_arena_spirit_vfx.c
@@ -222,6 +229,13 @@ set_target_properties(SudekiMP.BetaLauncher PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+if(SUDEKIMP_CAST_INSTANCE_PROBE)
+    target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_INSTANCE_PROBE=1)
+endif()
+if(SUDEKIMP_CAST_ACTIVE_PROBE)
+    target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_ACTIVE_PROBE=1)
+endif()
+
 add_executable(SudekiMP.CallHookTest
     tests/call_hook_test.c
     src/hooks/call_hook.c
@@ -232,6 +246,21 @@ target_compile_options(SudekiMP.CallHookTest PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(SudekiMP.CallHookTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+add_executable(SudekiMP.LanCastContextTest
+    tests/lan_arena_cast_context_test.c
+    src/hooks/call_hook.c
+)
+target_include_directories(SudekiMP.LanCastContextTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanCastContextTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LanCastContextTest PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.LanCastContextTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.SpiritInstanceAbiTest tests/spirit_instance_abi_test.c src/hooks/call_hook.c)
+target_include_directories(SudekiMP.SpiritInstanceAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.SpiritInstanceAbiTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.SpiritInstanceAbiTest PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.SpiritInstanceAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.LanArenaRuntimeHookTest
     tests/lan_arena_runtime_hook_test.c
@@ -556,6 +585,8 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_client_skill_handoff.c
     src/hooks/lan_arena_owner_view.c
     src/hooks/lan_arena_skill_fade.c
+    src/hooks/lan_arena_cast_context.c
+    src/engine/spirit_instance_abi.c
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/lan_arena_spirit_vfx.c

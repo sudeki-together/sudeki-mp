@@ -328,6 +328,9 @@ static unsigned int native_ai_probe_stage;
 static DWORD native_ai_probe_stage_at;
 static DWORD native_ai_probe_log_at;
 static uint8_t *game_base;
+static SudekiMpSpiritPresentationObserver spirit_presentation_observer;
+static SudekiMpSpiritPresentationIdle spirit_presentation_idle;
+static DWORD spirit_presentation_thread;
 static InternalSpawnPcFunction internal_spawn_pc;
 static RemovePcFunction remove_pc;
 static SpawnEntityFunction spawn_entity;
@@ -4924,8 +4927,26 @@ static void maintain_party_skill_points(void) {
     }
 }
 
+BOOL SudekiMpCleanroomEngineSetSpiritPresentationObserver(
+    SudekiMpSpiritPresentationObserver observer,SudekiMpSpiritPresentationIdle idle) {
+    if((observer==NULL)!=(idle==NULL) ||
+        (spirit_presentation_thread && spirit_presentation_thread!=GetCurrentThreadId()) ||
+        (observer ? (spirit_presentation_observer || !idle()):
+            (spirit_presentation_idle && !spirit_presentation_idle()))) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    spirit_presentation_observer=observer; spirit_presentation_idle=idle;
+    spirit_presentation_thread=observer ? GetCurrentThreadId():0;
+    return TRUE;
+}
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
     uint8_t *manager;
+    if(spirit_presentation_observer) {
+        int observed,id;
+        if(!state || GetCurrentThreadId()!=spirit_presentation_thread ||
+            !spirit_presentation_observer(&observed,&id)) return FALSE;
+        *state=observed; return TRUE;
+    }
     if (state == NULL || game_base == NULL || !readable_memory(
             game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL,
             sizeof(manager))) {
@@ -4944,6 +4965,12 @@ BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
 BOOL SudekiMpCleanroomEngineSpiritStrikeId(int *strike_id) {
     uint8_t *manager;
     int id;
+    if(spirit_presentation_observer) {
+        int state;
+        if(!strike_id || GetCurrentThreadId()!=spirit_presentation_thread ||
+            !spirit_presentation_observer(&state,&id)) return FALSE;
+        *strike_id=id; return TRUE;
+    }
     if (strike_id == NULL || game_base == NULL || !readable_memory(
             game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL, sizeof(void *))) return FALSE;
     manager = *(uint8_t **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
@@ -5409,6 +5436,11 @@ void SudekiMpCleanroomEngineReset(void) {
     SudekiMpResourceName *current_cafu_model;
     SudekiMpCafuMissileModelPatch *missile_patch;
     unsigned int missile_patch_index;
+
+    if(spirit_presentation_observer) {
+        SudekiMpLogWrite("cleanroom_engine event=reset status=deferred reason=retained_spirit_observer\r\n");
+        return;
+    }
 
     /* The native UI lease must be quiesced while every exact engine pointer
      * is still valid. A failed transition is retryable: leave the engine

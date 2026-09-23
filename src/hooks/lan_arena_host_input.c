@@ -179,8 +179,8 @@ static uint8_t __attribute__((fastcall)) observe_host_quick_menu_skill_use(
         before.active == 0u && before.skill == skill &&
         SudekiMpDescribeCharacterSkillSlot(tal, slot, &row) &&
         row.slot == slot;
-    uint8_t result = original_quick_menu_skill_use(
-        skill, ignored_edx, slot);
+    uint8_t result = SudekiMpInvokeSkillUse(
+        skill, ignored_edx, slot, original_quick_menu_skill_use);
     /* The native nonzero Use return is the exact STARTED edge.  Do not wait
      * for CSkill.active: Sudeki can expose it on a later frame. */
     if (result != 0u && admission_exact) {

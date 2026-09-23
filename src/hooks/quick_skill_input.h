@@ -8,6 +8,7 @@ BOOL SudekiMpInstallQuickSkillInputTrace(
     BOOL enable_ranged_prototype,
     BOOL enable_realtime_targeting_guard
 );
-void SudekiMpUninstallQuickSkillInputTrace(void);
+BOOL SudekiMpUninstallQuickSkillInputTrace(void);
+BOOL SudekiMpQuickSkillSpiritRoutingReady(void);
 
 #endif

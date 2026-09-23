@@ -432,6 +432,39 @@ static int verify_buki_animation_storage(void) {
     return ok;
 }
 
+static BOOL observer_idle=TRUE,observer_known=TRUE;
+static BOOL test_spirit_idle(void) { return observer_idle; }
+static BOOL test_spirit_observer(int *state,int *id) {
+    if(!observer_known) return FALSE;
+    *state=10; *id=6; return TRUE;
+}
+static int verify_spirit_observer_lifetime(void) {
+    int state=77,id=77;
+    observer_idle=FALSE;
+    if(!require_true(!SudekiMpCleanroomEngineSetSpiritPresentationObserver(
+            test_spirit_observer,test_spirit_idle),"nonidle Spirit provider installation rejected")) return 0;
+    observer_idle=TRUE;
+    if(!require_true(SudekiMpCleanroomEngineSetSpiritPresentationObserver(
+            test_spirit_observer,test_spirit_idle),"install Spirit presentation provider") ||
+        !require_true(!SudekiMpCleanroomEngineSetSpiritPresentationObserver(
+            test_spirit_observer,test_spirit_idle),"cannot replace an installed Spirit provider") ||
+        !require_true(SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==10 &&
+            SudekiMpCleanroomEngineSpiritStrikeId(&id) && id==6,"owned manager feeds both Spirit observations")) return 0;
+    observer_known=FALSE; state=id=77;
+    if(!require_true(!SudekiMpCleanroomEngineSpiritPresentationState(&state) &&
+            !SudekiMpCleanroomEngineSpiritStrikeId(&id) && state==77 && id==77,
+            "unknown provider never fabricates idle or changes output")) return 0;
+    observer_known=TRUE; observer_idle=FALSE;
+    if(!require_true(!SudekiMpCleanroomEngineSetSpiritPresentationObserver(NULL,NULL),
+            "active provider retains cleanup callback")) return 0;
+    SudekiMpCleanroomEngineReset();
+    if(!require_true(SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==10,
+            "engine reset retains provider until coordinator retires it")) return 0;
+    observer_idle=TRUE;
+    return require_true(SudekiMpCleanroomEngineSetSpiritPresentationObserver(NULL,NULL) &&
+        !SudekiMpCleanroomEngineSpiritPresentationState(&state),"drained provider removal restores native observation");
+}
+
 int main(void) {
     unsigned int actor;
     BOOL mode = FALSE;
@@ -445,7 +478,8 @@ int main(void) {
     };
     SudekiMpResourceName resource_copy;
 
-    if (!verify_buki_animation_storage() ||
+    if (!verify_spirit_observer_lifetime() ||
+        !verify_buki_animation_storage() ||
         !verify_ranged_prime_deadline_lifecycle() ||
         !verify_training_learned_skill_lease() ||
         !verify_training_skill_allocation_gate() ||

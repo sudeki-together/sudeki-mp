@@ -86,6 +86,20 @@ int main(void) {
     check(call_instruction + 5 + displacement == original_target,
         "relative call retry restores the original target");
 
+    check(SudekiMpInstallRelativeCallHook(
+        &call_hook, call_instruction, original_target, replacement_target
+    ), "reinstall relative call hook for opcode ownership loss");
+    call_instruction[0] = 0x90;
+    check(!SudekiMpRestoreRelativeCallHook(&call_hook) &&
+        GetLastError() == ERROR_BUSY && call_hook.installed,
+        "foreign opcode retains the hook even with matching displacement");
+    memcpy(&displacement, call_instruction + 1, sizeof(displacement));
+    check(displacement == call_hook.replacement_displacement,
+        "foreign instruction operands are not overwritten");
+    call_instruction[0] = 0xe8;
+    check(SudekiMpRestoreRelativeCallHook(&call_hook),
+        "restoration retries after CALL opcode ownership returns");
+
     call_instruction[0] = 0x90;
     check(!SudekiMpInstallRelativeCallHook(
         &call_hook, call_instruction, original_target, replacement_target
@@ -273,7 +287,15 @@ int main(void) {
             "inline trampoline returns after stolen instructions"
         );
     }
-    check(SudekiMpRestoreInlineHook(&inline_hook), "restore inline hook");
+    inline_target[1] ^= 1;
+    check(!SudekiMpRestoreInlineHook(&inline_hook), "reject foreign inline replacement");
+    check(inline_hook.installed && inline_hook.trampoline == inline_trampoline,
+        "failed inline restore retains callback storage");
+    inline_target[1] ^= 1;
+    inline_target[5] = 0xcc;
+    check(!SudekiMpRestoreInlineHook(&inline_hook), "reject changed inline padding");
+    inline_target[5] = 0x90;
+    check(SudekiMpRestoreInlineHook(&inline_hook), "restore inline hook after exact-owner retry");
     check(memcmp(
             inline_target,
             inline_expected,

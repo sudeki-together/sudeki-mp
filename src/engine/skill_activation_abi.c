@@ -47,6 +47,83 @@ static const uint8_t expected_use_entry[] = {
 
 static SudekiMpSkillActivationApi native_api;
 static HMODULE native_module;
+static SudekiMpSkillRoutingIdleWitness routing_idle;
+static SudekiMpSkillRoutingEnter routing_enter;
+static SudekiMpSkillRoutingLeave routing_leave;
+static DWORD routing_thread;
+static uint32_t routing_cookies[16];
+static unsigned int routing_depth,routing_calls;
+static BOOL routing_fault,routing_callback;
+
+BOOL SudekiMpSetSkillActivationRouting(SudekiMpSkillRoutingIdleWitness idle,
+    SudekiMpSkillRoutingEnter enter,SudekiMpSkillRoutingLeave leave) {
+    BOOL enabling=idle && enter && leave;
+    if(!native_module || (!enabling && (idle || enter || leave)) ||
+        routing_depth || routing_calls || routing_callback ||
+        (routing_thread && routing_thread!=GetCurrentThreadId()) ||
+        (enabling ? (routing_enter || !idle()):(routing_idle && !routing_idle()))) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    routing_idle=idle; routing_enter=enter; routing_leave=leave;
+    routing_thread=enabling ? GetCurrentThreadId():0;
+    routing_fault=FALSE;
+    return TRUE;
+}
+BOOL SudekiMpSkillActivationRoutingHealthy(void) { return !routing_fault; }
+static BOOL leave_skill_route(uint32_t cookie) {
+    BOOL result;
+    routing_callback=TRUE;
+    result=routing_leave(cookie);
+    routing_callback=FALSE;
+    return result;
+}
+BOOL SudekiMpRetrySkillActivationRoutingLeave(void) {
+    if(!routing_leave) return TRUE;
+    if(GetCurrentThreadId()!=routing_thread || routing_calls || routing_callback) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    while(routing_depth) {
+        if(!leave_skill_route(routing_cookies[routing_depth-1])) return FALSE;
+        routing_cookies[--routing_depth]=0;
+    }
+    return TRUE;
+}
+static int invoke_skill(void *skill,void *edx,int slot,
+    SudekiMpSkillValidateFunction validate,SudekiMpSkillUseFunction use) {
+    int result,rejected=use ? 0:4;
+    uint32_t cookie;
+    unsigned int frame;
+    DWORD error;
+    if(!validate && !use) { SetLastError(ERROR_INVALID_PARAMETER); return rejected; }
+    if(!routing_enter) return use ? use(skill,edx,slot):validate(skill,slot);
+    if(routing_fault || routing_callback || GetCurrentThreadId()!=routing_thread ||
+        routing_depth==16 || slot<0 || slot>=6) {
+        SetLastError(ERROR_BUSY); return rejected;
+    }
+    routing_callback=TRUE;
+    cookie=routing_enter(skill,slot,use!=NULL);
+    routing_callback=FALSE;
+    if(!cookie) return rejected; /* Never fall back to a foreign busy bank. */
+    frame=routing_depth++;
+    routing_cookies[frame]=cookie;
+    ++routing_calls;
+    result=use ? use(skill,edx,slot):validate(skill,slot);
+    error=GetLastError();
+    --routing_calls;
+    if(routing_depth!=frame+1 || !leave_skill_route(cookie)) routing_fault=TRUE;
+    else routing_cookies[--routing_depth]=0;
+    /* Preserve the actual result: native Use may already have charged SP or
+     * launched a task. A restore fault must never replay that mutation. */
+    SetLastError(error);
+    return result;
+}
+int SudekiMpInvokeSkillValidate(void *skill,int slot,SudekiMpSkillValidateFunction original) {
+    return invoke_skill(skill,NULL,slot,original,NULL);
+}
+uint8_t SudekiMpInvokeSkillUse(void *skill,void *edx,int slot,SudekiMpSkillUseFunction original) {
+    if(!original) { SetLastError(ERROR_INVALID_PARAMETER); return 0; }
+    return (uint8_t)invoke_skill(skill,edx,slot,NULL,original);
+}
 
 static BOOL relocated_entry_matches(
     const uint8_t *entry,
@@ -162,6 +239,11 @@ BOOL SudekiMpInitializeSkillActivationAbi(HMODULE game_module) {
 }
 
 void SudekiMpResetSkillActivationAbi(void) {
+    /* A registered router owns native scopes and asynchronous dependencies.
+     * Its coordinator must drain and unregister it before the ABI is reset. */
+    if(routing_enter || routing_depth || routing_calls || routing_callback) {
+        SetLastError(ERROR_BUSY); return;
+    }
     ZeroMemory(&native_api, sizeof(native_api));
     native_module = NULL;
 }
@@ -248,12 +330,12 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterQuickSkillWithApi(
         result.skill_data = skill_data;
         result.slot = *(int *)((uint8_t *)skill_data +
             SKILL_DATA_SLOT_OFFSET);
-        result.validation_result = api->validate(skill, result.slot);
+        result.validation_result = SudekiMpInvokeSkillValidate(skill, result.slot, api->validate);
         if (result.validation_result != 0) {
             result.status = SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED;
             return result;
         }
-        result.use_result = api->use(skill, NULL, result.slot);
+        result.use_result = SudekiMpInvokeSkillUse(skill, NULL, result.slot, api->use);
         if (result.use_result == 0u) {
             result.status = SUDEKIMP_SKILL_ACTIVATION_USE_REJECTED;
             return result;
@@ -358,12 +440,12 @@ SudekiMpSkillActivationResult SudekiMpActivateCharacterSkillSlotWithApi(
     }
     result.skill_data = selected_data;
     result.slot = slot;
-    result.validation_result = api->validate(skill, slot);
+    result.validation_result = SudekiMpInvokeSkillValidate(skill, slot, api->validate);
     if (result.validation_result != 0) {
         result.status = SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED;
         return result;
     }
-    result.use_result = api->use(skill, NULL, slot);
+    result.use_result = SudekiMpInvokeSkillUse(skill, NULL, slot, api->use);
     if (result.use_result == 0u) {
         result.status = SUDEKIMP_SKILL_ACTIVATION_USE_REJECTED;
         return result;
@@ -422,14 +504,14 @@ replay_host_approved_character_skill_slot(
     saved_host_approval = *host_approval_flag;
     selected_data[SKILL_DATA_ENABLED_OFFSET] = 1u;
     *host_approval_flag = 1u;
-    result.validation_result = api->validate(skill, slot);
+    result.validation_result = SudekiMpInvokeSkillValidate(skill, slot, api->validate);
     if (result.validation_result != 0) {
         *host_approval_flag = saved_host_approval;
         selected_data[SKILL_DATA_ENABLED_OFFSET] = saved_enabled;
         result.status = SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED;
         return result;
     }
-    result.use_result = api->use(skill, NULL, slot);
+    result.use_result = SudekiMpInvokeSkillUse(skill, NULL, slot, api->use);
     *host_approval_flag = saved_host_approval;
     selected_data[SKILL_DATA_ENABLED_OFFSET] = saved_enabled;
     if (result.use_result == 0u) {

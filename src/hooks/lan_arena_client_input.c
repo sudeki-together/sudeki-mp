@@ -1351,6 +1351,17 @@ static void __stdcall capture_client_combat(void *controller) {
     }
 }
 
+BOOL SudekiMpLanArenaClientCharacterInputOwnerExact(HMODULE game_module) {
+    uint8_t *base=(uint8_t *)game_module;
+    return base && character_input_hook.installed &&
+        character_input_hook.slot==(void **)(base+RVA_CHARACTER_INPUT_VTABLE_SLOT) &&
+        character_input_hook.original_value==base+RVA_CHARACTER_INPUT_HANDLER &&
+        original_character_input_handler==(CharacterInputHandler)(base+RVA_CHARACTER_INPUT_HANDLER) &&
+        character_input_hook.replacement_value==(void *)route_client_character_input &&
+        readable_memory(character_input_hook.slot,sizeof(void *)) &&
+        *character_input_hook.slot==character_input_hook.replacement_value;
+}
+
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     uint8_t *base;
     if (game_module == NULL || original_arbiter_movement != NULL ||

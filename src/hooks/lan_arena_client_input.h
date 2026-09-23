@@ -8,6 +8,9 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module);
  * not be restored; callback trampolines and operator events remain owned so
  * no surviving detour can observe cleared dependencies. */
 BOOL SudekiMpUninstallLanArenaClientInput(void);
+/* Exact retained ownership witness for adapters sharing the native input
+ * reader. This grants no authority and never patches the vtable itself. */
+BOOL SudekiMpLanArenaClientCharacterInputOwnerExact(HMODULE game_module);
 /* Called once from the post-controller game-thread observer. Held movement,
  * held fire, and the native client-camera aim are refreshed at a bounded
  * cadence; missing controller samples become an explicit neutral packet

@@ -20,11 +20,108 @@ static uint8_t seen_use_host_approval;
 static uint8_t use_result = 1u;
 static unsigned int use_calls;
 
+static uint8_t routed_skills[2][0x78];
+static BOOL route_idle=TRUE,route_deny_enter,route_deny_leave,route_nested,route_lose_owner;
+static unsigned int route_depth,route_stack[16],route_calls,route_uses;
+static BOOL route_idle_witness(void) { return route_idle; }
+static uint32_t route_enter(void *skill,int slot,BOOL using_skill) {
+    unsigned int i=skill==routed_skills[0] ? 0:1;
+    (void)slot; (void)using_skill;
+    if(route_deny_enter || route_depth==16 || skill!=routed_skills[i]) return 0;
+    route_stack[route_depth++]=i;
+    return route_depth;
+}
+static BOOL route_leave(uint32_t cookie) {
+    if(route_deny_leave || cookie!=route_depth || !route_depth) return FALSE;
+    --route_depth; return TRUE;
+}
+
 static void check(BOOL condition, const char *message) {
     if (!condition) {
         fprintf(stderr, "FAIL: %s\n", message);
         ++failures;
     }
+}
+static int __attribute__((regparm(2))) routed_validate(void *skill,int slot) {
+    unsigned int i=skill==routed_skills[0] ? 0:1;
+    check(slot==2 && route_depth && route_stack[route_depth-1]==i,
+        "native skill validation sees its actor context");
+    ++route_calls;
+    if(route_lose_owner) route_deny_enter=TRUE;
+    return 0;
+}
+static uint8_t __attribute__((fastcall)) routed_use(void *skill,void *edx,int slot) {
+    unsigned int i=skill==routed_skills[0] ? 0:1;
+    check(edx==(void *)0x5678 && slot==2 && route_depth && route_stack[route_depth-1]==i,
+        "native Use retains ECX actor, EDX and slot within its own scope");
+    ++route_uses;
+    if(route_nested) {
+        check(SudekiMpInvokeSkillValidate(routed_skills[1-i],2,routed_validate)==0,
+            "nested other-owner query succeeds");
+        check(route_depth==1 && route_stack[0]==i,"nested query restores outer skill owner");
+    }
+    SetLastError(1234); return 1;
+}
+static DWORD WINAPI route_wrong_thread(void *unused) {
+    (void)unused;
+    check(SudekiMpInvokeSkillValidate(routed_skills[0],2,routed_validate)==4,
+        "off-thread skill validation rejected");
+    check(SudekiMpInvokeSkillUse(routed_skills[0],(void *)0x5678,2,routed_use)==0,
+        "off-thread skill Use rejected before mutation");
+    check(!SudekiMpSetSkillActivationRouting(NULL,NULL,NULL),"off-thread unregister rejected");
+    return 0;
+}
+static void test_owner_routing(void) {
+    uint8_t *image=VirtualAlloc(NULL,0x45f000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    const uint8_t use_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x81,0xec,
+        0xcc,0,0,0,0x53,0x56,0x8b,0x75};
+    const uint8_t avail_tail[]={0,0x53,0x8b,0x58,0x0c},validate_tail[]={0,0x75,6,0xb8,5};
+    HANDLE thread;
+    unsigned int before;
+    check(image!=NULL,"routing image allocated");
+    if(!image) return;
+    image[0xda2a0]=image[0xb4bc0]=0x80; image[0xda2a1]=image[0xb4bc1]=0x3d;
+    *(void **)(image+0xda2a2)=image+0x3c2fd9;
+    *(void **)(image+0xb4bc2)=image+0x34a8b0;
+    memcpy(image+0xda2a6,avail_tail,sizeof(avail_tail));
+    memcpy(image+0xb4bc6,validate_tail,sizeof(validate_tail));
+    memcpy(image+0xb4810,use_entry,sizeof(use_entry));
+    check(SudekiMpInitializeSkillActivationAbi((HMODULE)image),"routing image ABI initialized");
+    check(!SudekiMpSetSkillActivationRouting(route_idle_witness,route_enter,NULL),"partial router rejected");
+    check(SudekiMpSetSkillActivationRouting(route_idle_witness,route_enter,route_leave),"routing registered idle");
+    route_nested=TRUE;
+    check(SudekiMpInvokeSkillUse(routed_skills[0],(void *)0x5678,2,routed_use)==1 &&
+        GetLastError()==1234 && !route_depth,"full native Use routed and restored exactly once");
+    route_nested=FALSE;
+    check(SudekiMpInvokeSkillUse(routed_skills[1],(void *)0x5678,2,routed_use)==1,
+        "second actor uses the same routing path");
+    before=route_uses;
+    route_lose_owner=TRUE;
+    check(SudekiMpInvokeSkillValidate(routed_skills[0],2,routed_validate)==0,"query initially eligible");
+    check(!SudekiMpInvokeSkillUse(routed_skills[0],(void *)0x5678,2,routed_use) && route_uses==before,
+        "Use revalidates ownership after eligibility query");
+    route_lose_owner=FALSE; route_deny_enter=FALSE;
+    thread=CreateThread(NULL,0,route_wrong_thread,NULL,0,NULL);
+    check(thread!=NULL,"off-thread fixture launched");
+    if(thread) { check(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0,"off-thread fixture finished"); CloseHandle(thread); }
+    check(route_uses==before,"off-thread path did not invoke Use");
+    route_deny_leave=TRUE;
+    check(SudekiMpInvokeSkillUse(routed_skills[0],(void *)0x5678,2,routed_use)==1 && route_uses==before+1,
+        "restore failure preserves already-executed native Use result");
+    check(!SudekiMpSkillActivationRoutingHealthy() && route_depth==1,"failed scope retained");
+    check(!SudekiMpSetSkillActivationRouting(NULL,NULL,NULL),"live failed scope blocks unregister");
+    SudekiMpResetSkillActivationAbi();
+    check(!SudekiMpInvokeSkillUse(routed_skills[0],(void *)0x5678,2,routed_use) && route_uses==before+1,
+        "ABI reset cannot remove retained routing or replay charged action");
+    route_deny_leave=FALSE;
+    check(SudekiMpRetrySkillActivationRoutingLeave() && !route_depth,"restore retry unwinds scope only");
+    route_idle=FALSE;
+    check(!SudekiMpSetSkillActivationRouting(NULL,NULL,NULL),"asynchronous owner prevents unregister");
+    route_idle=TRUE;
+    check(SudekiMpSetSkillActivationRouting(NULL,NULL,NULL),"idle owner unregisters");
+    check(SudekiMpSkillActivationRoutingHealthy(),"full idle retirement clears routing fault");
+    SudekiMpResetSkillActivationAbi();
+    VirtualFree(image,0,MEM_RELEASE);
 }
 
 __attribute__((naked, noinline))
@@ -216,6 +313,7 @@ int main(void) {
             skill_data[0][0x08u] == 0u && include_unavailable == 0u,
         "host-approved replay fails closed and restores local state when the native task validator rejects");
 
+    test_owner_routing();
     if (failures != 0) {
         fprintf(stderr, "%d skill activation ABI test(s) failed\n", failures);
         return 1;

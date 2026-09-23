@@ -30,6 +30,89 @@ static const uint8_t expected_activate_entry[] = {
 static HMODULE native_module;
 static SudekiMpSpiritActivationApi native_api;
 static volatile LONG activation_in_progress;
+static SudekiMpSpiritRoutingIdleWitness routing_idle;
+static SudekiMpSpiritRoutingEnter routing_enter;
+static SudekiMpSpiritRoutingLeave routing_leave;
+static DWORD routing_thread;
+static uint32_t routing_cookies[16];
+static unsigned int routing_depth,routing_active_calls;
+static BOOL routing_fault,routing_entering;
+
+BOOL SudekiMpSetSpiritActivationRouting(SudekiMpSpiritRoutingIdleWitness idle,
+    SudekiMpSpiritRoutingEnter enter,SudekiMpSpiritRoutingLeave leave) {
+    BOOL enabling=idle && enter && leave;
+    if(!native_module || (!enabling && (idle || enter || leave)) ||
+        routing_depth || routing_active_calls || routing_entering || activation_in_progress ||
+        (routing_thread && routing_thread!=GetCurrentThreadId()) ||
+        (enabling ? (routing_enter!=NULL || !idle()):(routing_idle && !routing_idle()))) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    routing_idle=idle; routing_enter=enter; routing_leave=leave;
+    routing_thread=enabling ? GetCurrentThreadId():0;
+    routing_fault=FALSE;
+    return TRUE;
+}
+BOOL SudekiMpSpiritActivationRoutingHealthy(void) { return !routing_fault; }
+static BOOL leave_routed_spirit(uint32_t cookie) {
+    BOOL left;
+    routing_entering=TRUE;
+    left=routing_leave(cookie);
+    routing_entering=FALSE;
+    return left;
+}
+BOOL SudekiMpRetrySpiritActivationRoutingLeave(void) {
+    if(!routing_leave) return TRUE;
+    if(GetCurrentThreadId()!=routing_thread || routing_active_calls || routing_entering) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    while(routing_depth) {
+        if(!leave_routed_spirit(routing_cookies[routing_depth-1])) return FALSE;
+        routing_cookies[--routing_depth]=0;
+    }
+    return TRUE;
+}
+static int invoke_spirit(void *actor,void *manager,int strike_id,
+    SudekiMpSpiritValidateFunction original,BOOL activating) {
+    int result,rejected=activating ? 0:2; /* Native validator's busy result. */
+    unsigned int frame;
+    uint32_t cookie;
+    DWORD result_error;
+    if(!original) { SetLastError(ERROR_INVALID_PARAMETER); return rejected; }
+    if(!routing_enter) return original(manager,strike_id);
+    if(routing_fault || routing_entering || GetCurrentThreadId()!=routing_thread ||
+        routing_depth==16 || strike_id<0 || strike_id>=8) {
+        SetLastError(ERROR_BUSY); return rejected;
+    }
+    routing_entering=TRUE;
+    cookie=routing_enter(actor,strike_id,activating,&manager);
+    routing_entering=FALSE;
+    if(!cookie) return rejected; /* No fallback to the supplied singleton. */
+    frame=routing_depth++;
+    routing_cookies[frame]=cookie;
+    if(!manager) {
+        routing_fault=TRUE;
+        (void)SudekiMpRetrySpiritActivationRoutingLeave();
+        SetLastError(ERROR_INVALID_DATA); return rejected;
+    }
+    ++routing_active_calls;
+    result=original(manager,strike_id);
+    result_error=GetLastError();
+    --routing_active_calls;
+    /* An inner failure leaves its own cookie above ours. Retain both rather
+     * than trying to unwind an outer frame through a foreign current owner. */
+    if(routing_depth!=frame+1 || !leave_routed_spirit(cookie)) routing_fault=TRUE;
+    else { routing_cookies[--routing_depth]=0; }
+    SetLastError(result_error);
+    return result;
+}
+int SudekiMpInvokeSpiritValidate(void *actor,void *manager,int strike_id,
+    SudekiMpSpiritValidateFunction original) {
+    return invoke_spirit(actor,manager,strike_id,original,FALSE);
+}
+int SudekiMpInvokeSpiritActivate(void *actor,void *manager,int strike_id,
+    SudekiMpSpiritActivateFunction original) {
+    return invoke_spirit(actor,manager,strike_id,original,TRUE);
+}
 
 static BOOL readable_memory(const void *pointer, size_t size) {
     MEMORY_BASIC_INFORMATION information;
@@ -134,6 +217,9 @@ BOOL SudekiMpInitializeSpiritActivationAbi(HMODULE game_module) {
 }
 
 void SudekiMpResetSpiritActivationAbi(void) {
+    if(routing_enter || routing_depth || routing_active_calls || activation_in_progress) {
+        SetLastError(ERROR_BUSY); return; /* Hooks/scopes still depend on this module. */
+    }
     ZeroMemory(&native_api, sizeof(native_api));
     native_module = NULL;
     InterlockedExchange(&activation_in_progress, 0);
@@ -178,8 +264,9 @@ BOOL SudekiMpDescribeCharacterSpiritOptionsWithApi(
             ZeroMemory(options, sizeof(*options));
             return FALSE;
         }
-        option->validation_result = api->validate(api->manager,
-            option->strike_id);
+        option->validation_result = SudekiMpInvokeSpiritValidate(character,api->manager,
+            option->strike_id,api->validate);
+        if(routing_fault) { ZeroMemory(options,sizeof(*options)); return FALSE; }
         option->available = option->validation_result == 0 ? 1u : 0u;
     }
     options->option_count = 2u;
@@ -193,6 +280,7 @@ BOOL SudekiMpDescribeCharacterSpiritOptions(
     uint8_t *component;
     void **vtable;
     BOOL described;
+    SudekiMpSpiritActivationApi api;
 
     if (native_module == NULL || character == NULL ||
         !readable_memory((uint8_t *)character + CHARACTER_COMPONENT_OFFSET,
@@ -209,13 +297,13 @@ BOOL SudekiMpDescribeCharacterSpiritOptions(
             (uint8_t *)native_module + SUPPORTED_IMAGE_SIZE) {
         return FALSE;
     }
-    native_api.manager = *(void **)((uint8_t *)native_module +
+    api=native_api; /* Nested actor queries must not rewrite an outer API. */
+    api.manager = *(void **)((uint8_t *)native_module +
         RVA_SPIRIT_MANAGER_GLOBAL);
-    native_api.resource_type = (SudekiMpSpiritResourceTypeFunction)
+    api.resource_type = (SudekiMpSpiritResourceTypeFunction)
         vtable[RESOURCE_TYPE_VTABLE_SLOT];
     described = SudekiMpDescribeCharacterSpiritOptionsWithApi(
-        character, &native_api, options);
-    native_api.resource_type = NULL;
+        character, &api, options);
     return described;
 }
 
@@ -258,12 +346,13 @@ SudekiMpSpiritActivationResult SudekiMpActivateCharacterSpiritWithApi(
         result.status = SUDEKIMP_SPIRIT_ACTIVATION_BUSY;
         return result;
     }
-    result.validation_result = api->validate(api->manager, result.strike_id);
+    result.validation_result = SudekiMpInvokeSpiritValidate(character,api->manager,
+        result.strike_id,api->validate);
     if (result.validation_result != 0) {
         result.status = SUDEKIMP_SPIRIT_ACTIVATION_VALIDATION_REJECTED;
     } else {
-        result.activation_result = api->activate(api->manager,
-            result.strike_id);
+        result.activation_result = SudekiMpInvokeSpiritActivate(character,api->manager,
+            result.strike_id,api->activate);
         result.status = result.activation_result != 0 ?
             SUDEKIMP_SPIRIT_ACTIVATION_STARTED :
             SUDEKIMP_SPIRIT_ACTIVATION_ACTIVATION_REJECTED;
@@ -279,6 +368,7 @@ SudekiMpSpiritActivationResult SudekiMpActivateCharacterSpirit(
     SudekiMpSpiritActivationResult result;
     uint8_t *component;
     void **vtable;
+    SudekiMpSpiritActivationApi api;
 
     if (native_module == NULL || character == NULL ||
         !readable_memory((uint8_t *)character + CHARACTER_COMPONENT_OFFSET,
@@ -295,13 +385,13 @@ SudekiMpSpiritActivationResult SudekiMpActivateCharacterSpirit(
             (uint8_t *)native_module + SUPPORTED_IMAGE_SIZE) {
         return empty_result(SUDEKIMP_SPIRIT_ACTIVATION_INVALID_CONTEXT);
     }
-    native_api.manager = *(void **)((uint8_t *)native_module +
+    api=native_api;
+    api.manager = *(void **)((uint8_t *)native_module +
         RVA_SPIRIT_MANAGER_GLOBAL);
-    native_api.resource_type = (SudekiMpSpiritResourceTypeFunction)
+    api.resource_type = (SudekiMpSpiritResourceTypeFunction)
         vtable[RESOURCE_TYPE_VTABLE_SLOT];
     result = SudekiMpActivateCharacterSpiritWithApi(character, variant,
-        &native_api);
-    native_api.resource_type = NULL;
+        &api);
     return result;
 }
 

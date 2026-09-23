@@ -35,6 +35,139 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #include "../src/hooks/lan_arena_runtime.c"
 
 static BOOL describe_equipped_weapon;
+static BOOL cast_context_drained=TRUE;
+static BOOL cast_context_current;
+static SudekiMpLanCastOwner cast_context_owner;
+BOOL SudekiMpInstallLanCastContext(HMODULE image, SudekiMpLanCastOwnerWitness witness) {
+    return image!=NULL && witness!=NULL;
+}
+BOOL SudekiMpUninstallLanCastContext(void) { return TRUE; }
+BOOL SudekiMpLanCastContextPoll(void) { return TRUE; }
+BOOL SudekiMpLanCastContextDrained(void) {
+    if (!cast_context_drained) SetLastError(ERROR_BUSY);
+    return cast_context_drained;
+}
+BOOL SudekiMpLanCastContextCurrent(SudekiMpLanCastOwner *owner) {
+    if (!cast_context_current || !owner) return FALSE;
+    *owner=cast_context_owner;
+    return TRUE;
+}
+BOOL SudekiMpLanCastContextCurrentRetained(SudekiMpLanCastOwner *owner) {
+    return SudekiMpLanCastContextCurrent(owner);
+}
+static BOOL ui_abi_reset_result=TRUE,ui_abi_bind_result=TRUE,ui_abi_healthy=TRUE;
+static unsigned int ui_abi_init_calls,ui_abi_bind_calls,ui_abi_reset_calls;
+static void *ui_abi_local,*ui_abi_remote;
+static uint64_t ui_abi_session;
+static uint8_t ui_abi_type;
+BOOL SudekiMpInitializeSpiritInstanceAbi(HMODULE image,SudekiMpSpiritInstanceIdleWitness idle) {
+    if(!image || !idle || !idle()) return FALSE;
+    ++ui_abi_init_calls; return TRUE;
+}
+BOOL SudekiMpInstallSpiritInstanceUpdates(void) { return TRUE; }
+BOOL SudekiMpLanArenaClientCharacterInputOwnerExact(HMODULE image) { return image!=NULL; }
+BOOL SudekiMpInitializeSpiritInstanceAbiWithInputOwner(HMODULE image,
+    SudekiMpSpiritInstanceIdleWitness idle,SudekiMpSpiritInputOwnerWitness input_owner) {
+    return input_owner && input_owner(image) && SudekiMpInitializeSpiritInstanceAbi(image,idle);
+}
+BOOL SudekiMpBindRemoteCharacterSkillUi(void *local,void *remote,uint8_t type,uint64_t session,
+    SudekiMpSpiritCasterWitness retained,SudekiMpSpiritCasterWitness task) {
+    if(!retained || !task || !retained(local,session) || !retained(remote,session)) return FALSE;
+    ++ui_abi_bind_calls; ui_abi_local=local; ui_abi_remote=remote;
+    ui_abi_session=session; ui_abi_type=type;
+    return ui_abi_bind_result;
+}
+BOOL SudekiMpRemoteCharacterSkillUiHealthy(void) { return ui_abi_healthy; }
+BOOL SudekiMpResetSpiritInstanceAbi(void) { ++ui_abi_reset_calls; return ui_abi_reset_result; }
+static SudekiMpSpiritInstance fake_spirit_instances[2];
+static SudekiMpSpiritInstanceState fake_spirit_states[2];
+static unsigned int fake_spirit_next_generation;
+static SudekiMpSpiritRoutingEnter fake_spirit_enter;
+static SudekiMpSkillRoutingEnter fake_owned_skill_enter;
+static SudekiMpLanCastTaskEnter fake_owned_task_enter;
+static SudekiMpSpiritPresentationObserver fake_spirit_observer;
+static BOOL fake_owned_menu;
+static uint32_t fake_scope_cookie;
+static unsigned int fake_destroy_calls;
+BOOL SudekiMpCreateSpiritInstance(SudekiMpSpiritInstance *instance) {
+    if(!ui_abi_bind_result) return FALSE;
+    for(unsigned int i=0;i<2;++i) if(!fake_spirit_instances[i].generation) {
+        *instance=(SudekiMpSpiritInstance){&fake_spirit_instances[i],&fake_spirit_states[i],++fake_spirit_next_generation};
+        fake_spirit_instances[i]=*instance;
+        fake_spirit_states[i]=(SudekiMpSpiritInstanceState){0,0,FALSE,TRUE};
+        return TRUE;
+    }
+    return FALSE;
+}
+BOOL SudekiMpBindSpiritInstanceCaster(const SudekiMpSpiritInstance *instance,void *actor,
+    uint8_t type,uint64_t session,SudekiMpSpiritCasterWitness witness) {
+    if(!instance || !witness || !witness(actor,session)) return FALSE;
+    if(instance->generation==fake_spirit_instances[0].generation) ui_abi_local=actor;
+    else { ui_abi_remote=actor; ui_abi_type=type; }
+    ui_abi_session=session; return TRUE;
+}
+BOOL SudekiMpEnableSpiritInstanceRemoteUi(const SudekiMpSpiritInstance *instance) {
+    ++ui_abi_bind_calls; return instance!=NULL;
+}
+BOOL SudekiMpEnableSpiritInstanceRemoteSkillUi(const SudekiMpSpiritInstance *instance) { return instance!=NULL; }
+BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *instance,
+    void *actor,SudekiMpSpiritCasterWitness witness) { return instance && witness(actor,ui_abi_session); }
+BOOL SudekiMpEnableSpiritInstanceCastGates(void) { return TRUE; }
+BOOL SudekiMpEnableSpiritInstanceSharedSsp(void) { return TRUE; }
+BOOL SudekiMpScheduleSpiritInstanceManager(const SudekiMpSpiritInstance *instance) { return instance!=NULL; }
+BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *instance,SudekiMpSpiritInstanceState *state) {
+    if(!ui_abi_healthy || !instance || !state) return FALSE;
+    for(unsigned int i=0;i<2;++i) if(instance->generation &&
+        instance->generation==fake_spirit_instances[i].generation) { *state=fake_spirit_states[i]; return TRUE; }
+    return FALSE;
+}
+BOOL SudekiMpResolveSpiritInstanceCaster(void *actor,uint64_t session,SudekiMpSpiritInstance *instance) {
+    if(session!=ui_abi_session || !instance) return FALSE;
+    if(actor==ui_abi_local) *instance=fake_spirit_instances[0];
+    else if(actor==ui_abi_remote) *instance=fake_spirit_instances[1];
+    else return FALSE;
+    return instance->generation!=0;
+}
+BOOL SudekiMpDestroySpiritInstance(SudekiMpSpiritInstance *instance) {
+    for(unsigned int i=0;i<2;++i) if(instance->generation &&
+        instance->generation==fake_spirit_instances[i].generation) {
+        if(!fake_spirit_states[i].idle) return FALSE;
+        memset(&fake_spirit_instances[i],0,sizeof(*instance));
+        memset(instance,0,sizeof(*instance)); ++fake_destroy_calls; return TRUE;
+    }
+    return FALSE;
+}
+uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
+    (void)instance; return ++fake_scope_cookie;
+}
+BOOL SudekiMpLeaveSpiritInstance(uint32_t cookie) { return cookie!=0; }
+BOOL SudekiMpQuickSkillSpiritRoutingReady(void) { return fake_owned_menu; }
+BOOL SudekiMpInstallQuickSkillInputTrace(HMODULE image,BOOL a,BOOL b) {
+    if(!image || a || b || fake_owned_menu) return FALSE;
+    fake_owned_menu=TRUE; return TRUE;
+}
+BOOL SudekiMpUninstallQuickSkillInputTrace(void) { fake_owned_menu=FALSE; return TRUE; }
+BOOL SudekiMpSetSpiritActivationRouting(SudekiMpSpiritRoutingIdleWitness idle,
+    SudekiMpSpiritRoutingEnter enter,SudekiMpSpiritRoutingLeave leave) {
+    if(enter && (!idle || !leave || !idle() || fake_spirit_enter)) return FALSE;
+    fake_spirit_enter=enter; return TRUE;
+}
+BOOL SudekiMpSetSkillActivationRouting(SudekiMpSkillRoutingIdleWitness idle,
+    SudekiMpSkillRoutingEnter enter,SudekiMpSkillRoutingLeave leave) {
+    if(enter && (!idle || !leave || !idle() || fake_owned_skill_enter)) return FALSE;
+    fake_owned_skill_enter=enter; return TRUE;
+}
+BOOL SudekiMpSpiritActivationRoutingHealthy(void) { return TRUE; }
+BOOL SudekiMpSkillActivationRoutingHealthy(void) { return TRUE; }
+BOOL SudekiMpLanCastContextSetTaskRouting(SudekiMpLanCastTaskEnter enter,SudekiMpLanCastTaskLeave leave) {
+    if(!cast_context_drained || (enter && (!leave || fake_owned_task_enter))) return FALSE;
+    fake_owned_task_enter=enter; return TRUE;
+}
+BOOL SudekiMpCleanroomEngineSetSpiritPresentationObserver(SudekiMpSpiritPresentationObserver observer,
+    SudekiMpSpiritPresentationIdle idle) {
+    if(observer && (!idle || !idle() || fake_spirit_observer)) return FALSE;
+    fake_spirit_observer=observer; return TRUE;
+}
 BOOL SudekiMpInstallLanArenaSkillFade(HMODULE image, SudekiMpLanArenaSkillFadeWitness witness) {
     return image!=NULL && witness!=NULL;
 }
@@ -230,6 +363,7 @@ static void record_spirit_observer_teardown(char event) {
 }
 
 static void reset_stub_policy(void) {
+    ui_abi_reset_result = ui_abi_bind_result = ui_abi_healthy = TRUE;
     session_start_result = TRUE;
     campaign_guard_install_result = TRUE;
     campaign_guard_uninstall_result = TRUE;
@@ -295,6 +429,10 @@ static void reset_stub_policy(void) {
 }
 
 static void reset_stub_counts(void) {
+    ui_abi_init_calls = ui_abi_bind_calls = ui_abi_reset_calls = 0u;
+    ui_abi_local = ui_abi_remote = NULL;
+    ui_abi_session = 0u;
+    ui_abi_type = 0u;
     session_start_count = 0u;
     session_stop_count = 0u;
     replica_initialize_count = 0u;
@@ -2246,6 +2384,26 @@ static void verify_host_native_task_drain_without_peer(void) {
     check(host_native_tasks_drained(),
         "positive inactive no-peer Tal and Spirit observations permit teardown");
 
+    cast_context_drained=FALSE;
+    check(!host_native_tasks_drained() && GetLastError()==ERROR_BUSY,
+        "completed actor and Spirit do not release a surviving child script");
+    cast_context_drained=TRUE;
+    check(host_native_tasks_drained(),
+        "positive child task drain permits native actor teardown");
+
+    host_remote_skill_camera_active=TRUE;
+    cast_context_current=TRUE;
+    cast_context_owner.actor_type=(uint8_t)seat_host_type();
+    check(!host_remote_skill_camera_owned(),
+        "host script camera is not suppressed by another remote cast");
+    cast_context_owner.actor_type=(uint8_t)seat_client_type();
+    host_remote_skill_camera_active=FALSE;
+    check(host_remote_skill_camera_owned(),
+        "remote child script cannot claim the host camera after root cleanup");
+    cast_context_current=FALSE;
+    check(!host_remote_skill_camera_owned(),
+        "ordinary unowned camera retains existing single-cast lease policy");
+
     ranged_combat_prime_pending = TRUE;
     SetLastError(ERROR_SUCCESS);
     check(!host_native_tasks_drained() && GetLastError() == ERROR_BUSY,
@@ -2321,6 +2479,44 @@ static void verify_authoritative_locomotion_stop_policy(void) {
     host_apply_presentation_state(0u, 1000u, FALSE, &tal);
     check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING,
         "native Tal movement selector preserves visible host locomotion");
+    {
+        uint8_t saved_host_type = runtime_config.host_actor_type;
+        const uint8_t types[] = {SUDEKIMP_LAN_ARENA_TAL_TYPE,
+            SUDEKIMP_LAN_ARENA_BUKI_TYPE};
+        unsigned int hero;
+        host_actor_previous_skill_active[1] = FALSE;
+        for (hero = 0u; hero < 2u; ++hero) {
+            DWORD tick = 1500u + hero * 1000u;
+            runtime_config.host_actor_type = types[hero];
+            host_actor_presentation[0].selector[0] = hero == 0u ?
+                TAL_COMBAT_IDLE_SELECTOR : BUKI_COMBAT_IDLE_SELECTOR;
+            host_spirit_previous_active = TRUE;
+            host_spirit_actor_index = 1u;
+            tal.x += 1.0f;
+            {
+                float translated_x = tal.x;
+                host_apply_presentation_state(0u, tick, TRUE, &tal);
+                check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_MOVING &&
+                    host_actor_locomotion_moving[0] && tal.x == translated_x,
+                    "remote Spirit with inactive CSkill releases noncaster idle position and drives run compositor");
+            }
+            host_apply_presentation_state(0u, tick + 151u, TRUE, &tal);
+            check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE &&
+                !host_actor_locomotion_moving[0],
+                "noncaster still stops after bounded grace during remote Spirit");
+            host_spirit_actor_index = 0u;
+            tal.x += 0.1f;
+            host_apply_presentation_state(0u, tick + 200u, TRUE, &tal);
+            check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                "own Spirit does not acquire remote noncaster translation exception");
+            host_spirit_previous_active = FALSE;
+            tal.x += 0.1f;
+            host_apply_presentation_state(0u, tick + 250u, TRUE, &tal);
+            check(tal.animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
+                "Spirit cleanup restores native idle/root-motion suppression");
+        }
+        runtime_config.host_actor_type = saved_host_type;
+    }
     host_actor_presentation_valid[0] = FALSE;
 
     host_remote_ailish_owned = TRUE;
@@ -2685,6 +2881,150 @@ static void verify_weapon_snapshot_family(void) {
     describe_equipped_weapon = FALSE;
 }
 
+static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
+    static unsigned char actors[2][0x138],skills[2][0x78];
+    unsigned int direction;
+    for(direction=0;direction<2;++direction) {
+        reset_stub_policy();
+        reset_stub_counts();
+        runtime_config=make_config(direction ? SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH :
+            SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+        runtime_config.host_actor_type=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+        runtime_config.client_actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        runtime_game_module=(HMODULE)image;
+        runtime_installed=tal_initialized=ailish_initialized=TRUE;
+        host_remote_ailish_owned=!direction;
+        client_remote_tal_owned=direction;
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_BUKI]=&actors[0];
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&actors[1];
+        session_status_result=TRUE;
+        session_status.session_token=701u;
+        session_status.peer_connected=TRUE;
+        session_status.local_simulation_node_role=runtime_config.local_simulation_node_role;
+        session_status.peer_simulation_node_role=direction ?
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD :
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA;
+        cast_context_drained=TRUE;
+        character_skill_observe_result=FALSE;
+        check(service_runtime_skill_ui() && !runtime_skill_ui_initialized,
+            "unknown skill observation cannot install persistent UI isolation");
+        character_skill_observe_result=TRUE;
+        character_skill_observation.active=TRUE;
+        check(service_runtime_skill_ui() && !runtime_skill_ui_initialized,
+            "active cast cannot bind persistent UI isolation mid-acquisition");
+        character_skill_observation.active=FALSE;
+        check(service_runtime_skill_ui() && runtime_skill_ui_bound &&
+              ui_abi_init_calls==1u && ui_abi_bind_calls==1u &&
+              ui_abi_local==&actors[direction] && ui_abi_remote==&actors[1u-direction] &&
+              ui_abi_type==(direction ? SUDEKIMP_LAN_ARENA_BUKI_TYPE : SUDEKIMP_LAN_ARENA_ELCO_TYPE) &&
+              ui_abi_session==701u,
+            "host and client bind only their assigned remote skill UI receiver");
+        check(service_runtime_skill_ui() && ui_abi_bind_calls==1u,
+            "ordinary frames do not rebind native UI ownership");
+        if(!direction) {
+            void *manager=NULL;
+            int state=-1,id=-1;
+            uint32_t cookie;
+            check(fake_spirit_enter && fake_owned_skill_enter && fake_owned_task_enter &&
+                fake_spirit_observer && runtime_spirit_instances[0].generation &&
+                runtime_spirit_instances[1].generation &&
+                runtime_spirit_instances[0].manager!=runtime_spirit_instances[1].manager,
+                "host installs both persistent native lifetimes and every entry/task/observation route");
+            cookie=fake_spirit_enter(NULL,4,TRUE,&manager);
+            check(cookie && manager==runtime_spirit_instances[0].manager,
+                "native Q selects the assigned local caster manager");
+            cookie=fake_spirit_enter(ui_abi_remote,6,TRUE,&manager);
+            check(cookie && manager==runtime_spirit_instances[1].manager,
+                "explicit client request selects the retained remote caster manager");
+            check(!fake_spirit_enter(NULL,6,TRUE,&manager) &&
+                !fake_spirit_enter((void *)1,4,TRUE,&manager),
+                "strike ID cannot grant another actor or foreign pointer authority");
+            *(void **)(skills[1]+0x10)=ui_abi_remote;
+            character_skill_observation.skill=skills[1];
+            check(fake_owned_skill_enter(skills[1],0,TRUE)!=0,
+                "ordinary skill uses the same retained caster namespace");
+            fake_spirit_states[1]=(SudekiMpSpiritInstanceState){10,6,TRUE,FALSE};
+            check(SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==10 &&
+                SudekiMpCleanroomEngineSpiritStrikeId(&id) && id==6,
+                "snapshot observers see active owned Elco manager, not inactive retail singleton");
+            check(!fake_spirit_enter(NULL,4,TRUE,&manager) &&
+                fake_spirit_enter(NULL,4,FALSE,&manager)!=0 &&
+                !fake_owned_skill_enter(skills[1],0,TRUE),
+                "menu eligibility can inspect local namespace but LA35 still rejects second activation");
+            fake_spirit_states[0]=(SudekiMpSpiritInstanceState){10,4,TRUE,FALSE};
+            state=77;
+            check(!SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==77,
+                "two live managers cannot silently collapse into one serialized snapshot");
+            fake_spirit_states[0]=(SudekiMpSpiritInstanceState){0,4,FALSE,TRUE};
+            fake_spirit_states[1]=(SudekiMpSpiritInstanceState){0,6,FALSE,TRUE};
+            character_skill_observation.skill=NULL;
+        }
+        check((direction ? release_host_remote_ailish("client_role"):
+                release_client_remote_tal("host_role")) && runtime_skill_ui_bound &&
+                ui_abi_reset_calls==0u,
+            "opposite-role no-op cleanup cannot unbind the live UI owner");
+        cast_context_current=TRUE;
+        cast_context_owner.actor=ui_abi_remote;
+        cast_context_owner.session=701u;
+        cast_context_owner.kind=1u;
+        check(runtime_skill_ui_task(ui_abi_remote,701u),
+            "retained remote CSkill lineage admits its scripted UI cleanup");
+        cast_context_owner.kind=2u;
+        check(!runtime_skill_ui_task(ui_abi_remote,701u),
+            "Spirit lineage cannot borrow the CSkill UI namespace");
+        cast_context_current=FALSE;
+        session_status.peer_connected=FALSE;
+        cast_context_drained=FALSE;
+        if(!direction) {
+            SudekiMpLanCastOwner retained={0};
+            void *manager=NULL;
+            retained.actor=ui_abi_remote; retained.session=701; retained.kind=2; retained.cast_id=3;
+            check(!fake_spirit_enter(ui_abi_remote,6,TRUE,&manager) && fake_owned_task_enter(&retained),
+                "disconnect closes activation but preserves the old Spirit task cleanup owner");
+            retained.session=702;
+            check(!fake_owned_task_enter(&retained),"new session cannot borrow retained task namespace");
+            check(fake_owned_task_enter(NULL)!=0,"unrelated task routes to neutral native context");
+        }
+        check(runtime_skill_ui_retained(ui_abi_remote,701u) &&
+              !runtime_skill_ui_retained(ui_abi_remote,702u) &&
+              !service_runtime_skill_ui() && runtime_skill_ui_bound && ui_abi_reset_calls==0u,
+            "disconnect retains old-session cleanup without admitting a replacement session");
+        cast_context_drained=TRUE;
+        ui_abi_reset_result=FALSE;
+        check(!service_runtime_skill_ui() && runtime_skill_ui_bound && runtime_skill_ui_initialized,
+            "failed native restoration retains UI callbacks and actor witnesses");
+        ui_abi_reset_result=TRUE;
+        check(service_runtime_skill_ui() && !runtime_skill_ui_bound && !runtime_skill_ui_initialized &&
+              !runtime_skill_ui_remote && !runtime_skill_ui_session,
+            "disconnect releases persistent UI only after native drain and restoration");
+        if(!direction) check(!fake_spirit_enter && !fake_owned_skill_enter && !fake_owned_task_enter &&
+            !fake_spirit_observer && !fake_owned_menu && fake_destroy_calls>=2,
+            "successful host drain restores routes/menu and destroys both native lifetimes");
+        session_status.peer_connected=TRUE;
+        session_status.session_token=702u;
+        ui_abi_bind_result=FALSE;
+        check(!service_runtime_skill_ui() && runtime_skill_ui_initialized && !runtime_skill_ui_bound,
+            "failed binding retains partial installed hooks for safe cleanup");
+        ui_abi_bind_result=TRUE;
+        check(service_runtime_skill_ui() && runtime_skill_ui_bound && ui_abi_session==702u,
+            "retry restores partial hook owner before fresh-session binding");
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=NULL;
+        check(!runtime_skill_ui_retained(ui_abi_remote,702u),
+            "actor replacement invalidates retained UI witness");
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&actors[1];
+        ui_abi_healthy=FALSE;
+        check(!service_runtime_skill_ui() && runtime_skill_ui_bound,
+            "faulted native UI owner prevents continued session servicing");
+        ui_abi_healthy=TRUE;
+        check(release_runtime_skill_ui(),"drained UI owner can release before actor removal");
+        runtime_installed=tal_initialized=ailish_initialized=FALSE;
+        host_remote_ailish_owned=client_remote_tal_owned=FALSE;
+        runtime_game_module=NULL;
+    }
+    reset_stub_policy();
+    reset_stub_counts();
+}
+
 int main(void) {
     uint8_t *image = (uint8_t *)VirtualAlloc(
         NULL,
@@ -2724,6 +3064,7 @@ int main(void) {
     verify_host_native_task_drain_without_peer();
     verify_authoritative_locomotion_stop_policy();
     verify_host_anim_id_read();
+    verify_persistent_skill_ui_lifecycle(image);
 
     VirtualFree(image, 0u, MEM_RELEASE);
     if (failures != 0) {
@@ -3367,12 +3708,14 @@ BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled) {
 }
 
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *state) {
+    if(fake_spirit_observer) { int id; return fake_spirit_observer(state,&id); }
     if (!spirit_presentation_state_result || state == NULL) return FALSE;
     *state = spirit_presentation_state;
     return TRUE;
 }
 
 BOOL SudekiMpCleanroomEngineSpiritStrikeId(int *id) {
+    if(fake_spirit_observer) { int state; return fake_spirit_observer(&state,id); }
     if (!spirit_presentation_state_result || id == NULL) return FALSE;
     *id = fixture_spirit_id;
     return TRUE;

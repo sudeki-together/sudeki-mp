@@ -37,6 +37,7 @@ typedef struct SudekiMpBytePatch {
 typedef struct SudekiMpInlineHook {
     uint8_t *target;
     uint8_t original[SUDEKIMP_INLINE_HOOK_MAX_BYTES];
+    uint8_t replacement[SUDEKIMP_INLINE_HOOK_MAX_BYTES];
     size_t length;
     void *trampoline;
     BOOL installed;

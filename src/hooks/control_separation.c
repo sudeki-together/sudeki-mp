@@ -9,6 +9,7 @@
 #include "engine/player_statehood.h"
 #include "engine/roaming_boundary.h"
 #include "engine/skill_activation_abi.h"
+#include "engine/spirit_activation_abi.h"
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/call_hook.h"
 #include "hooks/interaction_provenance.h"
@@ -5610,10 +5611,13 @@ BOOL SudekiMpControlSeparationTalSkillDirectMovementPolicy(
     BOOL remote_skill_active,
     BOOL spirit_known,
     BOOL spirit_active,
+    BOOL remote_spirit_owned,
     uint32_t arbiter_flags
 ) {
     return scope_exact && skills_known && !own_skill_active &&
-        remote_skill_active && spirit_known && !spirit_active &&
+        spirit_known &&
+        (spirit_active ? remote_spirit_owned :
+            (!remote_spirit_owned && remote_skill_active)) &&
         (arbiter_flags & (0x0289e568u & ~0x00080000u)) == 0u;
 }
 
@@ -5721,11 +5725,35 @@ static BOOL tal_native_locomotion_owns_movement(void) {
             presentation.selector[0], 1u, &action);
 }
 
-static BOOL local_noncaster_filter_exact(uint8_t *character) {
+/* Callers prove the current controller/group/input identities. Resolve native
+ * action ownership afresh at each mutation boundary: Spirit has no active
+ * CSkill, and its singleton state alone cannot identify the noncaster. */
+static BOOL local_noncaster_action_exact(
+    uint8_t *character, void *other, uint32_t arbiter_flags
+) {
     SudekiMpCharacterSkillState own_skill, other_skill;
+    int spirit_state, strike_id, remote_first_id;
+    BOOL remote_spirit_owned = FALSE;
+    if (!SudekiMpObserveCharacterSkill(character, &own_skill) ||
+        !SudekiMpObserveCharacterSkill(other, &other_skill) ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state))
+        return FALSE;
+    if (spirit_state != 0) {
+        if (!SudekiMpCleanroomEngineSpiritStrikeId(&strike_id) ||
+            !SudekiMpResolveSpiritStrikeId(
+                SudekiMpCleanroomActorNativeType(lan_movement_remote_actor),
+                1u, &remote_first_id)) return FALSE;
+        remote_spirit_owned = strike_id == remote_first_id ||
+            strike_id == remote_first_id + 1;
+    }
+    return SudekiMpControlSeparationTalSkillDirectMovementPolicy(
+        TRUE, TRUE, own_skill.active != 0u, other_skill.active != 0u,
+        TRUE, spirit_state != 0, remote_spirit_owned, arbiter_flags);
+}
+
+static BOOL local_noncaster_filter_exact(uint8_t *character) {
     uint8_t *controller;
     void *other;
-    int spirit_state;
     if (!player_one_skill_input_isolation_enabled || game_base == NULL ||
         character == NULL || character != SudekiMpCleanroomEngineActorEntity(
             lan_movement_local_actor) || !character_is_in_active_group(character) ||
@@ -5736,18 +5764,13 @@ static BOOL local_noncaster_filter_exact(uint8_t *character) {
     return other != NULL && other != character && character_is_in_active_group(other) &&
         readable_memory(controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) &&
         *(void **)(controller + CONTROLLER_TARGET_OFFSET) == character &&
-        SudekiMpObserveCharacterSkill(character, &own_skill) && !own_skill.active &&
-        SudekiMpObserveCharacterSkill(other, &other_skill) && other_skill.active &&
-        SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state) && spirit_state == 0;
+        local_noncaster_action_exact(character, other, 0u);
 }
 
 static BOOL tal_skill_direct_actor_exact(uint8_t *character) {
     SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
-    SudekiMpCharacterSkillState own_skill;
-    SudekiMpCharacterSkillState remote_skill;
     uint8_t *arbiter;
     uint8_t *controller;
-    int spirit_state = 0;
     if (!lan_arena_remote_input_enabled ||
         !player_one_skill_input_isolation_enabled ||
         character == NULL ||
@@ -5761,15 +5784,11 @@ static BOOL tal_skill_direct_actor_exact(uint8_t *character) {
     if (!readable_memory(controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
         *(void **)(controller + CONTROLLER_TARGET_OFFSET) != character ||
         !readable_memory(arbiter, 0x54u) ||
-        *(void **)(arbiter + 0x10u) != character ||
-        !SudekiMpObserveCharacterSkill(character, &own_skill) ||
-        !SudekiMpObserveCharacterSkill(companion->character, &remote_skill) ||
-        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit_state)) {
+        *(void **)(arbiter + 0x10u) != character) {
         return FALSE;
     }
-    return SudekiMpControlSeparationTalSkillDirectMovementPolicy(
-        TRUE, TRUE, own_skill.active != 0u, remote_skill.active != 0u,
-        TRUE, spirit_state != 0, *(uint32_t *)(arbiter + 0x50u));
+    return local_noncaster_action_exact(character, companion->character,
+        *(uint32_t *)(arbiter + 0x50u));
 }
 
 /* Only the animation-root callsite is adapted. Direct player deltas, ranged

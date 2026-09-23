@@ -92,6 +92,12 @@ BOOL SudekiMpRestoreRelativeCallHook(SudekiMpRelativeCallHook *hook) {
     if (hook == NULL || !hook->installed || hook->instruction == NULL) {
         return TRUE;
     }
+    if (hook->instruction[0] != 0xe8) {
+        /* Matching displacement bytes alone do not establish that this is
+         * still our CALL. Never rewrite a foreign instruction's operands. */
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
     memcpy(&current_displacement, hook->instruction + 1,
         sizeof(current_displacement));
     if (current_displacement == hook->original_displacement) {
@@ -314,6 +320,7 @@ BOOL SudekiMpInstallInlineHook(
 
     hook->target = target;
     memcpy(hook->original, target, length);
+    memcpy(hook->replacement, patch, length);
     hook->length = length;
     hook->trampoline = trampoline;
     if (!write_protected_memory(target, patch, length)) {
@@ -330,6 +337,11 @@ BOOL SudekiMpRestoreInlineHook(SudekiMpInlineHook *hook) {
 
     if (hook == NULL || !hook->installed || hook->target == NULL) {
         return TRUE;
+    }
+    if (hook->length < 5u || hook->length > SUDEKIMP_INLINE_HOOK_MAX_BYTES ||
+        memcmp(hook->target, hook->replacement, hook->length) != 0) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
     }
     restored = write_protected_memory(
         hook->target,
