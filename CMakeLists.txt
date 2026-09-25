@@ -11,6 +11,18 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 option(SUDEKIMP_CAST_INSTANCE_PROBE "Private idle-only native Spirit lifetime probe (no overlapping activation)" OFF)
 option(SUDEKIMP_CAST_ACTIVE_PROBE "Private single-cast native instance integration test (no overlap admission)" OFF)
+option(SUDEKIMP_CAST_CAMERA_PROBE "Private Buki-host/Elco-client scoped named-camera test (no overlap admission)" OFF)
+option(SUDEKIMP_CAST_LIGHT_PROBE "Private caster lighting lifetime test (requires camera probe; no overlap admission)" OFF)
+option(SUDEKIMP_CAST_SKILL_OVERLAP_PROBE "Private Buki/Elco ordinary-skill overlap test; Spirit overlap stays guarded" OFF)
+if(SUDEKIMP_CAST_SKILL_OVERLAP_PROBE AND NOT (SUDEKIMP_CAST_CAMERA_PROBE AND SUDEKIMP_CAST_LIGHT_PROBE))
+    message(FATAL_ERROR "Ordinary skill overlap requires scoped cameras and caster lighting")
+endif()
+if(SUDEKIMP_CAST_LIGHT_PROBE AND NOT SUDEKIMP_CAST_CAMERA_PROBE)
+    message(FATAL_ERROR "Caster lighting test requires the scoped camera test")
+endif()
+if(SUDEKIMP_CAST_CAMERA_PROBE AND (SUDEKIMP_CAST_INSTANCE_PROBE OR SUDEKIMP_CAST_ACTIVE_PROBE))
+    message(FATAL_ERROR "Scoped camera test must use persistent runtime, not a lifetime/whole-frame probe")
+endif()
 if(SUDEKIMP_CAST_INSTANCE_PROBE AND SUDEKIMP_CAST_ACTIVE_PROBE)
     message(FATAL_ERROR "Select only one native Spirit instance probe")
 endif()
@@ -84,6 +96,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_runtime.c
     src/hooks/lan_arena_cast_context.c
     src/engine/spirit_instance_abi.c
+    src/engine/cast_light_abi.c
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/lan_arena_spirit_vfx.c
@@ -235,6 +248,15 @@ endif()
 if(SUDEKIMP_CAST_ACTIVE_PROBE)
     target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_ACTIVE_PROBE=1)
 endif()
+if(SUDEKIMP_CAST_CAMERA_PROBE)
+    target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_CAMERA_PROBE=1)
+endif()
+if(SUDEKIMP_CAST_LIGHT_PROBE)
+    target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_LIGHT_PROBE=1)
+endif()
+if(SUDEKIMP_CAST_SKILL_OVERLAP_PROBE)
+    target_compile_definitions(SudekiMP PRIVATE SUDEKIMP_CAST_SKILL_OVERLAP_PROBE=1)
+endif()
 
 add_executable(SudekiMP.CallHookTest
     tests/call_hook_test.c
@@ -256,11 +278,21 @@ target_compile_definitions(SudekiMP.LanCastContextTest PRIVATE WIN32_LEAN_AND_ME
 target_compile_options(SudekiMP.LanCastContextTest PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(SudekiMP.LanCastContextTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-add_executable(SudekiMP.SpiritInstanceAbiTest tests/spirit_instance_abi_test.c src/hooks/call_hook.c)
+add_executable(SudekiMP.SpiritInstanceAbiTest tests/spirit_instance_abi_test.c src/hooks/call_hook.c src/engine/cast_light_abi.c)
+add_executable(SudekiMP.LanArenaWindowPolicyTest tests/lan_arena_window_policy_test.c src/hooks/call_hook.c)
+target_include_directories(SudekiMP.LanArenaWindowPolicyTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaWindowPolicyTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LanArenaWindowPolicyTest PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.LanArenaWindowPolicyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.SpiritInstanceAbiTest PRIVATE src)
 target_compile_definitions(SudekiMP.SpiritInstanceAbiTest PRIVATE WIN32_LEAN_AND_MEAN)
 target_compile_options(SudekiMP.SpiritInstanceAbiTest PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(SudekiMP.SpiritInstanceAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.CastLightAbiTest tests/cast_light_abi_test.c src/hooks/call_hook.c)
+target_include_directories(SudekiMP.CastLightAbiTest PRIVATE src)
+target_compile_definitions(SudekiMP.CastLightAbiTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.CastLightAbiTest PRIVATE -Wall -Wextra)
+set_target_properties(SudekiMP.CastLightAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.LanArenaRuntimeHookTest
     tests/lan_arena_runtime_hook_test.c
@@ -587,6 +619,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_skill_fade.c
     src/hooks/lan_arena_cast_context.c
     src/engine/spirit_instance_abi.c
+    src/engine/cast_light_abi.c
     src/hooks/lan_arena_spirit_audio.c
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/lan_arena_spirit_vfx.c
@@ -767,6 +800,16 @@ add_executable(SudekiMP.LanArenaReplicaTest
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_replica.c
 )
+add_executable(SudekiMP.LanArenaMultiCastTest
+    tests/lan_arena_multicast_test.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_arena_shared_simulation.c
+    src/network/lan_arena_tal_combo_graph.c
+    src/network/lan_arena_replica.c
+)
+target_include_directories(SudekiMP.LanArenaMultiCastTest PRIVATE src)
+target_compile_options(SudekiMP.LanArenaMultiCastTest PRIVATE -Wall -Wextra -Wpedantic -Werror)
+set_target_properties(SudekiMP.LanArenaMultiCastTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.LanArenaReplicaTest PRIVATE src)
 target_compile_options(SudekiMP.LanArenaReplicaTest PRIVATE
     -Wall -Wextra -Wpedantic -Werror

@@ -70,8 +70,7 @@ static SudekiMpLanArenaNativeWorldObservation native_observation(
         source->spirit_audio_history,
         sizeof(result.spirit_audio_history));
     result.spirit_vfx_observed = source->spirit_vfx_observed;
-    result.spirit_view = source->spirit_view;
-    result.skill_fade = source->skill_fade;
+    memcpy(result.cast, source->cast, sizeof(result.cast));
     result.spirit_vfx_count = source->spirit_vfx_count;
     memcpy(result.spirit_vfx, source->spirit_vfx, sizeof(result.spirit_vfx));
     result.native_combat_observed = 1u;
@@ -745,6 +744,42 @@ static void test_replica_accepts_late_retained_spirit_audio(void) {
         &replica, 154u, &retired));
 }
 
+static void test_skill_countdown_lifecycle(void) {
+    for(unsigned int seat=0;seat<2;++seat) {
+        SudekiMpLanArenaSharedSimulation canonical,replica;
+        SudekiMpLanArenaSnapshot s=frame(100),out;
+        SudekiMpLanArenaNativeWorldObservation observed;
+        uint32_t revision;
+        CHECK(SudekiMpLanArenaSharedSimulationBegin(&canonical,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD,144));
+        CHECK(SudekiMpLanArenaSharedSimulationBegin(&replica,
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA,144));
+        set_character_skill(&s.seat[seat],10,2,20,1);
+        s.seat[seat].skill_target_phase=1;
+        for(unsigned int step=0;step<5;++step) {
+            s.host_tick++;
+            if(step==1) { s.seat[seat].skill_target_phase=2; s.seat[seat].skill_target_remaining_ms=3000; }
+            if(step==2) s.seat[seat].skill_target_remaining_ms=1500;
+            if(step==3) { s.seat[seat].skill_target_phase=3; s.seat[seat].skill_target_remaining_ms=0; }
+            if(step==4) s.seat[seat].skill_active=0;
+            observed=native_observation(&s,SUDEKIMP_LAN_ARENA_MATCH_ACTIVE,1);
+            CHECK(commit_native_frame(&canonical,144,&observed,&s));
+            CHECK(SudekiMpLanArenaSharedSimulationReadFrame(&canonical,&out,&revision));
+            CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(&replica,144,&out));
+            CHECK(out.seat[seat].skill_target_phase==s.seat[seat].skill_target_phase);
+            if(step==2) {
+                s.seat[seat].skill_target_remaining_ms=1600;
+                CHECK(!commit_native_frame(&canonical,144,&observed,&s));
+                CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(&replica,144,&s));
+                s.seat[seat].skill_target_remaining_ms=1500;
+            }
+        }
+        s.host_tick++; s.seat[seat].skill_active=1;
+        s.seat[seat].skill_target_phase=2; s.seat[seat].skill_target_remaining_ms=500;
+        CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(&replica,144,&s));
+    }
+}
+
 static void test_replica_skill_lifecycle_is_monotonic(void) {
     SudekiMpLanArenaSharedSimulation canonical;
     SudekiMpLanArenaSharedSimulation replica;
@@ -1032,38 +1067,38 @@ static void test_client_owned_spirit_commit(void) {
         source.host_tick++;
         set_spirit_skill(&source.seat[1], (uint16_t)cast, cast == 1u ? 117 : 116, 1u);
         source.seat[1].skill_presentation_channel_count = 5u;
-        source.spirit_view.kind = (uint8_t)cast;
-        source.spirit_view.owner_seat = 1u;
-        source.spirit_view.skill_sequence = (uint16_t)cast;
-        source.spirit_view.body_hidden = (uint8_t)(cast - 1u);
-        source.spirit_view.matrix[0] = -1.0f;
-        source.spirit_view.matrix[5] = source.spirit_view.matrix[10] =
-            source.spirit_view.matrix[15] = 1.0f;
-        source.spirit_view.matrix[12] = 4.0f;
-        source.spirit_view.projection[0] = 1.1f;
-        source.spirit_view.projection[1] = .01f;
-        source.spirit_view.projection[2] = 1000.0f;
-        source.skill_fade.kind=2; source.skill_fade.owner_seat=1;
-        source.skill_fade.skill_sequence=(uint16_t)cast;
-        source.skill_fade.rgb[0]=source.skill_fade.rgb[1]=.15f; source.skill_fade.rgb[2]=.2f;
+        source.cast[1].spirit_view.kind = (uint8_t)cast;
+        source.cast[1].spirit_view.owner_seat = 1u;
+        source.cast[1].spirit_view.skill_sequence = (uint16_t)cast;
+        source.cast[1].spirit_view.body_hidden = (uint8_t)(cast - 1u);
+        source.cast[1].spirit_view.matrix[0] = -1.0f;
+        source.cast[1].spirit_view.matrix[5] = source.cast[1].spirit_view.matrix[10] =
+            source.cast[1].spirit_view.matrix[15] = 1.0f;
+        source.cast[1].spirit_view.matrix[12] = 4.0f;
+        source.cast[1].spirit_view.projection[0] = 1.1f;
+        source.cast[1].spirit_view.projection[1] = .01f;
+        source.cast[1].spirit_view.projection[2] = 1000.0f;
+        source.cast[1].skill_fade.kind=2; source.cast[1].skill_fade.owner_seat=1;
+        source.cast[1].skill_fade.skill_sequence=(uint16_t)cast;
+        source.cast[1].skill_fade.rgb[0]=source.cast[1].skill_fade.rgb[1]=.15f; source.cast[1].skill_fade.rgb[2]=.2f;
         append_spirit_audio(&source, (uint16_t)cast, (uint16_t)cast);
         source.spirit_audio_history[source.spirit_audio_history_count - 1u].owner_seat = 1u;
         observation = native_observation(&source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
         CHECK(commit_native_frame(&host, 153u, &observation, &source));
         CHECK(SudekiMpLanArenaSharedSimulationReadFrame(&host, &output, NULL));
         CHECK(output.seat[0].skill_active == 0u && output.seat[1].skill_active == 1u);
-        CHECK(memcmp(&output.spirit_view, &source.spirit_view,
-            sizeof(source.spirit_view)) == 0);
-        CHECK(!memcmp(&output.skill_fade,&source.skill_fade,sizeof(source.skill_fade)));
+        CHECK(memcmp(&output.cast[1].spirit_view, &source.cast[1].spirit_view,
+            sizeof(source.cast[1].spirit_view)) == 0);
+        CHECK(!memcmp(&output.cast[1].skill_fade,&source.cast[1].skill_fade,sizeof(source.cast[1].skill_fade)));
         CHECK(SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(&client, 153u, &output));
         observation.host_tick++; /* Fresh frame: reject the camera, not a stale tick. */
-        observation.skill_fade.skill_sequence++;
+        observation.cast[1].skill_fade.skill_sequence++;
         CHECK(!commit_native_frame(&host,153u,&observation,&source));
-        observation.skill_fade=source.skill_fade;
-        observation.spirit_view.owner_seat = 0u;
+        observation.cast[1].skill_fade=source.cast[1].skill_fade;
+        observation.cast[1].spirit_view.owner_seat = 0u;
         CHECK(!commit_native_frame(&host, 153u, &observation, &source));
-        observation.spirit_view.owner_seat = 1u;
-        observation.spirit_view.skill_sequence++;
+        observation.cast[1].spirit_view.owner_seat = 1u;
+        observation.cast[1].spirit_view.skill_sequence++;
         CHECK(!commit_native_frame(&host, 153u, &observation, &source));
         source.host_tick++;
         source.spirit_audio_history[source.spirit_audio_history_count - 1u].owner_seat = 0u;
@@ -1073,7 +1108,7 @@ static void test_client_owned_spirit_commit(void) {
         set_spirit_skill(&source.seat[1], (uint16_t)cast, 0, 0u);
         observation = native_observation(&source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
         CHECK(!commit_native_frame(&host, 153u, &observation, &source)); /* Stale camera. */
-        memset(&source.spirit_view, 0, sizeof(source.spirit_view));
+        memset(&source.cast[1].spirit_view, 0, sizeof(source.cast[1].spirit_view));
         observation = native_observation(&source, SUDEKIMP_LAN_ARENA_MATCH_ACTIVE, 1u);
         CHECK(commit_native_frame(&host, 153u, &observation, &source));
         CHECK(SudekiMpLanArenaSharedSimulationReadFrame(&host, &output, NULL));
@@ -1095,6 +1130,7 @@ int main(void) {
     test_spirit_audio_journal_lifecycle();
     test_replica_accepts_late_retained_spirit_audio();
     test_replica_skill_lifecycle_is_monotonic();
+    test_skill_countdown_lifecycle();
     test_spirit_vfx_world_provenance();
     test_spirit_vfx_roster_identity_and_unknown();
     test_spirit_vfx_instance_wraparound();

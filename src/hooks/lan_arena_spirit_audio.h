@@ -15,13 +15,21 @@ enum {
 
 typedef BOOL (*SudekiMpLanArenaSpiritActiveWitness)(
     void *context,
-    int *native_state
+    int *native_state,
+    uint64_t *session_token,
+    uint16_t *skill_sequence,
+    uint8_t *owner_seat
 );
 
 typedef struct SudekiMpLanArenaSpiritAudioEvent {
     uint32_t sequence;
     uint32_t elapsed_ms;
     int32_t native_state;
+    /* Captured at the native emission, not inferred later from whichever
+     * caster is active when a snapshot is published. Process-local only. */
+    uint64_t session_token;
+    uint16_t skill_sequence;
+    uint8_t owner_seat;
     uint8_t cue_length;
     char cue[SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_CUE_CAPACITY];
 } SudekiMpLanArenaSpiritAudioEvent;
@@ -33,7 +41,8 @@ typedef struct SudekiMpLanArenaSpiritAudioReplayApi {
 } SudekiMpLanArenaSpiritAudioReplayApi;
 
 /* This is an observation-only, host-side hook. `active_witness` must return
- * TRUE only for the LAN host's exact native Tal Spirit transaction. The hook
+ * TRUE only for a connected, scoped native caster transaction and supply its
+ * immutable session/seat/sequence at emission. The hook
  * never starts a Spirit transaction and never replays a cue. Install and
  * uninstall are game-thread boundaries, matching CSound::PlayCue ownership. */
 BOOL SudekiMpInstallLanArenaSpiritAudioTrace(

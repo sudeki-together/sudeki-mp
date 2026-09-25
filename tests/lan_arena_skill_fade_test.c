@@ -12,6 +12,17 @@ static int renderer;
 static float requested[3], expected[3];
 static const float native_rgb[3]={.15f,.15f,.2f};
 static BOOL admitted, replace_device;
+static int camera_value, expected_camera, begins, ends;
+static BOOL camera_scope, fail_camera_end, partial_camera_begin, nested_draw;
+static BOOL begin_camera(void) {
+    CHECK(!camera_scope); ++begins; camera_scope=TRUE; camera_value=2;
+    return !partial_camera_begin;
+}
+static BOOL end_camera(void) {
+    ++ends;
+    if(fail_camera_end) return FALSE;
+    camera_value=1; camera_scope=FALSE; return TRUE;
+}
 static void write_group(int group,float r,float g,float b) {
     float rgb[3]={r,g,b}; CHECK(group==7); ++writes;
     memcpy(image+GROUP_RGB,rgb,12);
@@ -21,6 +32,8 @@ static void __attribute__((regparm(1))) draw(void *ptr) {
     CHECK(ptr==&renderer); ++draws;
     CHECK(!memcmp(image+GROUP_RGB,expected,12));
     CHECK(!memcmp(light+0x34,native_rgb,sizeof(native_rgb))); /* Native easing clock not touched. */
+    if(expected_camera) CHECK(camera_value==expected_camera && camera_scope);
+    if(nested_draw) { nested_draw=FALSE; draw_local_view(ptr); }
     if(replace_device) *(void **)(image+DEVICE_GLOBAL)=NULL;
 }
 int main(void) {
@@ -65,6 +78,25 @@ int main(void) {
     CHECK(SudekiMpUninstallLanArenaSkillFade() && !lease.valid && !draw_hook.installed);
     CHECK(!memcmp(image+GROUP_RGB,normal,12));
     memcpy(&delta,image+DRAW_CALL+1,4); CHECK(image+DRAW_CALL+5+delta==image+DRAW);
+    replace_device=FALSE;
+    CHECK(!SudekiMpInstallLanArenaSkillFadeWithDrawView((HMODULE)image,witness,begin_camera,NULL));
+    CHECK(!draw_hook.installed);
+    CHECK(SudekiMpInstallLanArenaSkillFadeWithDrawView((HMODULE)image,witness,begin_camera,end_camera));
+    original_draw=draw; set_group=write_group; admitted=FALSE;
+    memcpy(expected,normal,12); camera_value=1; expected_camera=2;
+    nested_draw=TRUE; draw_local_view(&renderer);
+    CHECK(begins==1 && ends==1 && camera_value==1 && !camera_scope && !draw_view_pending);
+    /* A callback that partially stages then fails must still be drained. */
+    partial_camera_begin=TRUE; draw_local_view(&renderer);
+    CHECK(begins==2 && ends==2 && !camera_scope && !draw_view_pending);
+    partial_camera_begin=FALSE; fail_camera_end=TRUE; draw_local_view(&renderer);
+    CHECK(camera_scope && draw_view_pending && begins==3);
+    draw_local_view(&renderer); CHECK(begins==3 && camera_scope && draw_view_pending);
+    CHECK(!SudekiMpUninstallLanArenaSkillFade() && draw_hook.installed && draw_view_end==end_camera);
+    fail_camera_end=FALSE;
+    CHECK(SudekiMpUninstallLanArenaSkillFade() && !draw_hook.installed && !draw_view_pending && !camera_scope);
+    CHECK(!draw_view_begin && !draw_view_end && camera_value==1);
+    expected_camera=0;
     image[SET_GROUP]^=1;
     CHECK(!SudekiMpInstallLanArenaSkillFade((HMODULE)image,witness));
     CHECK(!draw_hook.installed);

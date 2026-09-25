@@ -1104,6 +1104,36 @@ static void test_visual_roster_once_unknown_and_retirement(void) {
     CHECK(test.cache.un_cache_calls == 1u && state.session_token == 0u);
 }
 
+static void test_concurrent_visual_owners_retire_independently(void) {
+    for(unsigned int first=0;first<2;++first) {
+        VisualTestContext test; SudekiMpLanArenaSpiritVfxVisualState state;
+        SudekiMpLanArenaSpiritVfxVisualApi api; SudekiMpLanArenaSnapshot snapshot;
+        setup_visual_test(&test,&state,&api,&snapshot);
+        /* Same native resource, two distinct owners: retiring one must not
+         * remove or uncache the other's instance. */
+        snapshot.spirit_vfx[0].kind=SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
+        test.cache.resource_identifier=test.cache.constructed_resource_identifier=0x62dcc5a3u;
+        snapshot.spirit_vfx_count=2;
+        snapshot.spirit_vfx[1]=snapshot.spirit_vfx[0];
+        snapshot.spirit_vfx[1].instance_sequence=2;
+        snapshot.spirit_vfx[1].owner_actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+        CHECK(test.spawn_calls==2 && test.sync_calls==2);
+        snapshot.spirit_vfx[0]=snapshot.spirit_vfx[first^1];
+        memset(&snapshot.spirit_vfx[1],0,sizeof(snapshot.spirit_vfx[1]));
+        snapshot.spirit_vfx_count=1;
+        CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+        CHECK(test.retire_calls==1 && test.detach_calls==1 && test.spawn_calls==2 && test.sync_calls==3);
+        CHECK(test.cache.un_cache_calls==0);
+        snapshot.spirit_vfx_observed=0; snapshot.spirit_vfx_count=0;
+        memset(snapshot.spirit_vfx,0,sizeof(snapshot.spirit_vfx));
+        CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+        CHECK(test.retire_calls==1); /* UNKNOWN is not peer cleanup. */
+        CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state,&api));
+        CHECK(test.retire_calls==2 && test.detach_calls==2);
+    }
+}
+
 static void test_visual_pending_cleanup_and_invalid_roster(void) {
     VisualTestContext test; SudekiMpLanArenaSpiritVfxVisualState state, before;
     SudekiMpLanArenaSpiritVfxVisualApi api; SudekiMpLanArenaSnapshot snapshot;
@@ -1376,6 +1406,7 @@ static void test_visual_opening_phase_never_rewinds(void) {
 int main(int argc, char **argv) {
     test_visual_opening_phase_never_rewinds();
     test_visual_roster_once_unknown_and_retirement();
+    test_concurrent_visual_owners_retire_independently();
     test_visual_pending_cleanup_and_invalid_roster();
     test_visual_matrix_and_native_null();
     test_visual_identity_preflight_precedes_any_retirement();

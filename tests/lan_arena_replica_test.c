@@ -451,44 +451,73 @@ static void test_elco_spirit_view_interpolation(void) {
     a.seat[1].skill_presentation_valid = 1u; a.seat[1].skill_presentation_channel_count = 5u;
     a.seat[1].skill_presentation_selector[0] = 73; a.seat[1].skill_presentation_rate[0] = 24.0f;
     for (i = 1u; i < 5u; ++i) a.seat[1].skill_presentation_state[i] = 192u;
-    a.spirit_view.kind = 1u; a.spirit_view.owner_seat = 1u; a.spirit_view.skill_sequence = 1u;
-    a.spirit_view.matrix[0] = -1.0f;
-    a.spirit_view.matrix[5] = a.spirit_view.matrix[10] = a.spirit_view.matrix[15] = 1.0f;
-    a.spirit_view.matrix[12] = 2.0f;
-    a.spirit_view.projection[0] = 1.0f; a.spirit_view.projection[1] = .1f; a.spirit_view.projection[2] = 100.0f;
-    a.skill_fade.kind=2; a.skill_fade.owner_seat=1; a.skill_fade.skill_sequence=1;
-    a.skill_fade.rgb[0]=a.skill_fade.rgb[1]=a.skill_fade.rgb[2]=1.f;
+    a.cast[1].spirit_view.kind = 1u; a.cast[1].spirit_view.owner_seat = 1u; a.cast[1].spirit_view.skill_sequence = 1u;
+    a.cast[1].spirit_view.matrix[0] = -1.0f;
+    a.cast[1].spirit_view.matrix[5] = a.cast[1].spirit_view.matrix[10] = a.cast[1].spirit_view.matrix[15] = 1.0f;
+    a.cast[1].spirit_view.matrix[12] = 2.0f;
+    a.cast[1].spirit_view.projection[0] = 1.0f; a.cast[1].spirit_view.projection[1] = .1f; a.cast[1].spirit_view.projection[2] = 100.0f;
+    a.cast[1].skill_fade.kind=2; a.cast[1].skill_fade.owner_seat=1; a.cast[1].skill_fade.skill_sequence=1;
+    a.cast[1].skill_fade.rgb[0]=a.cast[1].skill_fade.rgb[1]=a.cast[1].skill_fade.rgb[2]=1.f;
     b = a; b.sequence = 2u; b.host_tick = 1050u;
-    b.skill_fade.rgb[0]=b.skill_fade.rgb[1]=b.skill_fade.rgb[2]=.2f;
-    b.spirit_view.matrix[12] = 4.0f; b.spirit_view.body_hidden = 1u;
+    b.cast[1].skill_fade.rgb[0]=b.cast[1].skill_fade.rgb[1]=b.cast[1].skill_fade.rgb[2]=.2f;
+    b.cast[1].spirit_view.matrix[12] = 4.0f; b.cast[1].spirit_view.body_hidden = 1u;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &a));
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1025u, &sample));
-    CHECK(fabsf(sample.spirit_view.matrix[12] - 3.0f) < .001f);
-    CHECK(sample.spirit_view.body_hidden == 0u);
-    CHECK(fabsf(sample.skill_fade.rgb[0]-.6f)<.001f && sample.skill_fade.owner_seat==1);
-    CHECK(SudekiMpLanArenaSpiritViewValid(&sample.spirit_view));
+    CHECK(fabsf(sample.cast[1].spirit_view.matrix[12] - 3.0f) < .001f);
+    CHECK(sample.cast[1].spirit_view.body_hidden == 0u);
+    CHECK(fabsf(sample.cast[1].skill_fade.rgb[0]-.6f)<.001f && sample.cast[1].skill_fade.owner_seat==1);
+    CHECK(SudekiMpLanArenaSpiritViewValid(&sample.cast[1].spirit_view));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1050u, &sample));
-    CHECK(sample.spirit_view.body_hidden == 1u);
-    b.sequence = 3u; b.host_tick = 1100u; b.spirit_view.kind = 2u;
-    b.spirit_view.matrix[12] = 10.0f;
+    CHECK(sample.cast[1].spirit_view.body_hidden == 1u);
+    b.sequence = 3u; b.host_tick = 1100u; b.cast[1].spirit_view.kind = 2u;
+    b.cast[1].spirit_view.matrix[12] = 10.0f;
     CHECK(SudekiMpLanArenaReplicaPush(&replica, &b));
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1075u, &sample));
-    CHECK(sample.spirit_view.kind == 1u && sample.spirit_view.matrix[12] == 4.0f);
+    CHECK(sample.cast[1].spirit_view.kind == 1u && sample.cast[1].spirit_view.matrix[12] == 4.0f);
     CHECK(SudekiMpLanArenaReplicaSample(&replica, 1100u, &sample));
-    CHECK(sample.spirit_view.kind == 2u && sample.spirit_view.matrix[12] == 10.0f);
+    CHECK(sample.cast[1].spirit_view.kind == 2u && sample.cast[1].spirit_view.matrix[12] == 10.0f);
     b.sequence=4; b.host_tick=1150;
-    b.seat[1].skill_sequence=2; b.spirit_view.skill_sequence=2;
-    b.skill_fade.skill_sequence=2; b.skill_fade.rgb[0]=1.f;
+    b.seat[1].skill_sequence=2; b.cast[1].spirit_view.skill_sequence=2;
+    b.cast[1].skill_fade.skill_sequence=2; b.cast[1].skill_fade.rgb[0]=1.f;
     CHECK(SudekiMpLanArenaReplicaPush(&replica,&b));
     CHECK(SudekiMpLanArenaReplicaSample(&replica,1125,&sample));
-    CHECK(sample.skill_fade.skill_sequence==1 &&
-        !memcmp(&sample.skill_fade.rgb[0],&b.skill_fade.rgb[1],sizeof(float)));
+    CHECK(sample.cast[1].skill_fade.skill_sequence==1 &&
+        !memcmp(&sample.cast[1].skill_fade.rgb[0],&b.cast[1].skill_fade.rgb[1],sizeof(float)));
     CHECK(SudekiMpLanArenaSnapshotValid(&sample));
     SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE, SUDEKIMP_LAN_ARENA_AILISH_TYPE);
 }
 
+static void test_countdown_release_is_timeline_edge(void) {
+    SudekiMpLanArenaReplica r={0};
+    SudekiMpLanArenaSnapshot a=make_snapshot(1,1000,0),b,out;
+    a.combat_enabled=1;
+    clear_actor_action(&a.seat[0]); clear_actor_action(&a.seat[1]);
+    a.seat[0].skill_kind=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER;
+    a.seat[0].skill_sequence=7; a.seat[0].skill_active=1;
+    a.seat[0].skill_target_phase=2; a.seat[0].skill_target_remaining_ms=50;
+    b=a; b.sequence=2; b.host_tick=1050;
+    b.seat[0].skill_target_phase=3; b.seat[0].skill_target_remaining_ms=0;
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&a)); CHECK(SudekiMpLanArenaReplicaPush(&r,&b));
+    CHECK(SudekiMpLanArenaReplicaSample(&r,1025,&out));
+    CHECK(out.seat[0].skill_target_phase==2 && out.seat[0].skill_target_remaining_ms==50);
+    {
+        uint8_t phase=0; uint16_t ms=999;
+        CHECK(SudekiMpLanArenaReplicaLatestSkillTiming(&r,0,&out.seat[0],&phase,&ms));
+        CHECK(phase==3 && ms==0);
+        CHECK(out.seat[0].skill_target_phase==2); /* does not change pose timeline */
+        CHECK(!SudekiMpLanArenaReplicaLatestSkillTiming(&r,1,&out.seat[0],&phase,&ms));
+        out.seat[0].skill_sequence++;
+        CHECK(!SudekiMpLanArenaReplicaLatestSkillTiming(&r,0,&out.seat[0],&phase,&ms));
+        out.seat[0].skill_sequence--; out.seat[0].skill_slot++;
+        CHECK(!SudekiMpLanArenaReplicaLatestSkillTiming(&r,0,&out.seat[0],&phase,&ms));
+    }
+    CHECK(SudekiMpLanArenaReplicaSample(&r,1050,&out));
+    CHECK(out.seat[0].skill_target_phase==3 && out.seat[0].skill_target_remaining_ms==0);
+}
+
 int main(void) {
+    test_countdown_release_is_timeline_edge();
     test_elco_spirit_view_interpolation();
     test_buki_block_phase_timeline();
     test_protected_clock_recovers_discarded_history();

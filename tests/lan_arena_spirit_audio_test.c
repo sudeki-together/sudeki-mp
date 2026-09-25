@@ -43,11 +43,13 @@ static int failures;
     } \
 } while (0)
 
-static BOOL active_witness(void *context, int *native_state) {
+static BOOL active_witness(void *context, int *native_state,
+    uint64_t *session, uint16_t *sequence, uint8_t *owner) {
     WitnessState *state = (WitnessState *)context;
     if (state == NULL || native_state == NULL) return FALSE;
     ++state->calls;
     *native_state = state->native_state;
+    *session = 123u; *sequence = 7u; *owner = 0u;
     return state->active;
 }
 

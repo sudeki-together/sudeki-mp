@@ -42,6 +42,12 @@ BOOL SudekiMpLanCastContextCurrent(SudekiMpLanCastOwner *owner);
  * Unlike Current this is NOT a current network-authority witness. Callers
  * must separately validate their retained native actor/session lease. */
 BOOL SudekiMpLanCastContextCurrentRetained(SudekiMpLanCastOwner *owner);
+/* CSkill::Use may execute the freshly constructed task before assigning its
+ * handle to CSkill+74. Only during that exact, owned root submission, return
+ * the currently executing constructor-pinned task. Never infer a handle from
+ * the last cast or grant authority to submit another task. */
+BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
+    void *skill,void **handle,void **thread);
 /* Optional bounded diagnostic: observes native UI recomputation and its
  * caller/retained cast, without changing locks, menu admission or native flow.
  * Enable only at the drained game-thread boundary; removed with this adapter. */

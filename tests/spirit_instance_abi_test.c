@@ -16,6 +16,14 @@ static SudekiMpSpiritInstance *test_instances;
 static uint8_t unrelated_soul[SOUL_SIZE];
 static uint8_t caster_actors[2][0x134], caster_states[2][0x134];
 static uint8_t caster_skills[2][0x78];
+static BOOL starting_task_known;
+static void **starting_task_handle;
+BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
+    void *skill,void **handle,void **thread) {
+    if(!starting_task_known || actor!=entries[1].caster || session!=entries[1].caster_session ||
+        skill!=entries[1].skill || !starting_task_handle || !*starting_task_handle) return FALSE;
+    *handle=starting_task_handle; *thread=*starting_task_handle; return TRUE;
+}
 static uint8_t fake_ui[0xe4],fake_ui_root[0x178],foreign_ui[0xe4];
 static uint8_t fake_controller[0x260],foreign_controller[0x260];
 static BOOL local_witness_valid=TRUE;
@@ -387,6 +395,7 @@ static BOOL __attribute__((thiscall)) fake_named_add(void *manager,const char *n
     p=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,NAMED_CAMERA_SIZE);
     CHECK(p!=NULL); if(!p) return FALSE;
     *(void **)p=image+NAMED_CAMERA_VTABLE;
+    *(void **)(p+8)=image+0x2cce6c;
     *(void **)(p+0x34)=p+0x70; /* Unique fixture render-state identity. */
     strcpy((char *)p+NAMED_CAMERA_NAME,name);
     *named_slot(i)=p;
@@ -419,22 +428,188 @@ static void named_fixture(void) {
     put_call(0x36cd9,0x2484fa); put_call(0x36ce6,0xe7110); put_call(0x36d54,0x1061d0);
     put_call(0x36d72,0x249580); put_call(0x36d8b,0xe8360);
     put_call(0x36dfb,0x24ae0e); put_call(0x36ef3,0x24ae0e);
+    memcpy(image+0x36fbc,"\x8b\x43\x20",3);
+    memcpy(image+0x370d8,"\x8b\x4c\x24\x1c\x8b\x41\x40\x8b\x4a\x34\x89\x48\x7c",13);
+    memcpy(image+0x370ea,"\x89\x53\x20",3);
+    memcpy(image+0x370f0,"\x88\x8a\x05\x01\x00\x00",6);
+    memcpy(image+0x374fa,"\x8b\x75\x20",3);
+    memcpy(image+0xe7161,"\xc7\x45\x08",3); *(void **)(image+0xe7164)=image+0x2cce6c;
+    memcpy(image+0xe7660,"\x55\x8b\xec\x83\xe4\xc0\xa1",7);
+    *(void **)(image+0xe7667)=image+0x408da0;
+    memcpy(image+0xe768d,"\x8b\x55\x08\xd9\x5c\x24\x54\x8d\x73\xf8",10);
+    memcpy(image+0xe7948,"\xc2\x04\x00",3); *(void **)(image+0x2cce70)=image+0xe7660;
+    memcpy(image+0x11823,"\xc7\x46\x30",3); *(void **)(image+0x11826)=image+0x2c5660;
+    memcpy(image+0x1182a,"\xc7\x46\x44",3); *(void **)(image+0x1182d)=image+0x2c5674;
+    memcpy(image+0x121a0,"\x56\x8b\xf1\x83\xbe\x98\x01\x00\x00\x00",10);
+    memcpy(image+0x121ad,"\x8d\x7e\xbc",3); put_call(0x121b0,0x12060);
+    memcpy(image+0x121bd,"\xb0\x01\x5e\xc3",4);
+    memcpy(image+0x11ff0,"\x8b\x44\x24\x08\x56\x8b\xf1",7);
+    memcpy(image+0x12000,"\x8d\x7e\xd0",3); put_call(0x1204c,0x12060);
+    memcpy(image+0x12052,"\x5e\xc2\x08\x00",4);
+    *(void **)(image+0x2c5678)=image+0x121a0; *(void **)(image+0x2c566c)=image+0x11ff0;
     memset(named_test_manager,0,sizeof(named_test_manager));
     *(void **)named_test_manager=image+NAMED_MANAGER_VTABLE;
     *(void **)(image+NAMED_MANAGER_GLOBAL)=named_test_manager;
     for(i=0;i<6;++i) {
         memset(named_base[i],0,NAMED_CAMERA_SIZE);
         *(void **)named_base[i]=image+NAMED_CAMERA_VTABLE;
+        *(void **)(named_base[i]+8)=image+0x2cce6c;
         *(void **)(named_base[i]+0x34)=named_base[i]+0x70;
         strcpy((char *)named_base[i]+NAMED_CAMERA_NAME,names[i]);
         *(void **)(named_test_manager+0x24+4*i)=named_base[i];
     }
     *(void **)(named_test_manager+0x20)=named_base[0];
     *(void **)(image+0x408d58)=named_scene_manager;
+    *(void **)named_scene_manager=image+0x2c66b8;
     *(void **)(named_scene_manager+0x40)=named_scene;
     *(void **)(named_scene+0x7c)=named_base[0]+0x70;
     named_add_calls=named_delete_calls=named_fail_at=0;
     named_remove_blocked=named_block_after_delete=FALSE;
+}
+static unsigned int selection_update_count;
+static SudekiMpSpiritInstance selection_expected_scope;
+static void __attribute__((thiscall)) fake_named_update(void *node,void *args) {
+    SudekiMpSpiritInstance observed;
+    CHECK(node && args==&selection_update_count);
+    CHECK(SudekiMpObserveSpiritInstanceScope(&observed));
+    CHECK(observed.generation==selection_expected_scope.generation);
+    ++selection_update_count;
+}
+static unsigned char __attribute__((thiscall)) fake_camera_ready(void *member) {
+    SudekiMpSpiritInstance observed;
+    CHECK(member && update_depth && SudekiMpObserveSpiritInstanceScope(&observed));
+    CHECK(observed.generation==selection_expected_scope.generation);
+    Entry *e=generation_entry(observed.generation);
+    CHECK(named_lookup("InitCam",NULL)==(e ? e->named_cameras[0]:named_originals[0]));
+    ++selection_update_count;
+    SetLastError(91);
+    return 0x7b;
+}
+static void __attribute__((thiscall)) fake_camera_animation(void *member,void *source,uint32_t event) {
+    CHECK(source==&selection_update_count && event==0x11223344);
+    CHECK(fake_camera_ready(member)==0x7b);
+}
+static void selection_tests(void) {
+    SudekiMpSpiritInstance pair[2]={{0}},scope={0};
+    uint32_t a,b,n;
+    unsigned int kind=99;
+    void *saved,*render;
+    const uint32_t sites[]={0x36fbc,0x370d8,0x370ea,0x370f0,0x374fa,
+        0xe7161,0xe7164,0xe7660,0xe7667,0xe768d,0xe7948,0x2cce70,
+        0x11823,0x11826,0x1182a,0x1182d,0x121a0,0x121ad,0x121b0,0x121bd,
+        0x11ff0,0x12000,0x1204c,0x12052,0x2c5678,0x2c566c};
+    setup(); named_fixture();
+    for(unsigned int i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
+        image[sites[i]]^=1; CHECK(!SudekiMpSpiritInstanceCameraSelectionAbiReady());
+        image[sites[i]]^=1; CHECK(SudekiMpSpiritInstanceCameraSelectionAbiReady());
+    }
+    /* Native factory already has separate exact-image/idle-live coverage.
+     * Bind the synthetic registry and use controlled constructor doubles. */
+    named_manager=named_test_manager;
+    named_originals[0]=named_base[5]; named_original_slots[0]=5;
+    named_originals[1]=named_base[4]; named_original_slots[1]=4;
+    for(unsigned int k=0;k<2;++k)
+        memcpy(named_original_names[k],(uint8_t *)named_originals[k]+NAMED_CAMERA_NAME,NAMED_NAME_SIZE);
+    named_add=fake_named_add; named_remove=fake_named_remove;
+    for(unsigned int i=0;i<2;++i) {
+        CHECK(SudekiMpCreateSpiritInstance(&pair[i]));
+        *(void **)((uint8_t *)pair[i].camera+0x30)=image+0x2c5660;
+        *(void **)((uint8_t *)pair[i].camera+0x44)=image+0x2c5674;
+        CHECK(SudekiMpBindSpiritInstanceCaster(&pair[i],caster_actors[i],i ? 14:5,17,caster_witness));
+        CHECK(SudekiMpEnableSpiritInstanceNamedCameras(&pair[i]));
+    }
+    CHECK(!SudekiMpEnableSpiritInstanceRemoteCameraSelection(&pair[1]));
+    CHECK(SudekiMpInstallSpiritInstanceNamedCameraUpdates());
+    CHECK(!SudekiMpInstallSpiritInstanceNamedCameraUpdates());
+    CHECK(!SudekiMpEnableSpiritInstanceRemoteCameraSelection(&pair[1]));
+    CHECK(SudekiMpEnableSpiritInstanceRemoteUi(&pair[1]));
+    CHECK(SudekiMpEnableSpiritInstanceRemoteCameraSelection(&pair[1]));
+    CHECK(!SudekiMpEnableSpiritInstanceRemoteCameraSelection(&pair[1]));
+    CHECK(SudekiMpEnableSpiritInstanceCastGates());
+    render=*(void **)(named_scene+0x7c);
+    CHECK(SudekiMpObserveSpiritInstanceScope(&scope) && !scope.generation);
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"SkillCam",&kind)==0 && kind==99);
+    a=SudekiMpEnterSpiritInstance(&pair[0]); CHECK(a);
+    /* Simulate local native SetRenderCamera; its render view remains native. */
+    *(void **)(named_test_manager+0x20)=entries[0].named_cameras[1];
+    *(void **)(named_scene+0x7c)=*(void **)((uint8_t *)entries[0].named_cameras[1]+0x34);
+    b=SudekiMpEnterSpiritInstance(&pair[1]); CHECK(b);
+    CHECK(*(void **)(named_test_manager+0x20)==entries[1].named_cameras[0]);
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"SkillCam",&kind)==1 && kind==2);
+    CHECK(*(void **)(named_test_manager+0x20)==entries[1].named_cameras[1]);
+    CHECK(*(void **)(named_scene+0x7c)==*(void **)((uint8_t *)entries[0].named_cameras[1]+0x34));
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"",&kind)==1 && kind==2);
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,NULL,&kind)==1 && kind==2);
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(original_manager,"InitCam",&kind)==-1 && kind==2);
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"SpiritCam",&kind)==-1 && kind==2);
+    n=SudekiMpEnterSpiritInstance(NULL); CHECK(n);
+    CHECK(*(void **)(named_test_manager+0x20)==entries[0].named_cameras[1]);
+    /* A nested local/neutral request changes the real view. Leaving the
+     * remote scope must preserve this latest view, not its old saved pointer. */
+    *(void **)(named_test_manager+0x20)=named_base[0]; *(void **)(named_scene+0x7c)=render;
+    CHECK(SudekiMpLeaveSpiritInstance(n));
+    CHECK(*(void **)(named_test_manager+0x20)==entries[1].named_cameras[1]);
+    CHECK(!SudekiMpLeaveSpiritInstance(a));
+    CHECK(SudekiMpLeaveSpiritInstance(b));
+    CHECK(*(void **)(named_test_manager+0x20)==named_base[0]);
+    CHECK(SudekiMpLeaveSpiritInstance(a));
+    named_update_original=fake_named_update; selection_update_count=0;
+    a=SudekiMpEnterSpiritInstance(&pair[0]); CHECK(a);
+    selection_expected_scope=pair[1];
+    named_camera_update((uint8_t *)entries[1].named_cameras[1]+8,&selection_update_count);
+    CHECK(!update_fault && selection_update_count==1);
+    CHECK(SudekiMpObserveSpiritInstanceScope(&scope) && scope.generation==pair[0].generation);
+    selection_expected_scope=(SudekiMpSpiritInstance){0};
+    named_camera_update(named_base[0]+8,&selection_update_count);
+    CHECK(!update_fault && selection_update_count==2);
+    CHECK(SudekiMpLeaveSpiritInstance(a));
+    spirit_camera_ready_original=fake_camera_ready;
+    spirit_camera_animation_original=fake_camera_animation;
+    /* Completion outside a task/update still configures the owning private
+     * camera, not the retail shared pair. A nested other caster is restored. */
+    selection_expected_scope=pair[1];
+    CHECK(spirit_camera_ready((uint8_t *)pair[1].camera+0x44)==0x7b && GetLastError()==91);
+    CHECK(!scope_depth && !named_generation && !selection_generation && selection_update_count==3);
+    a=SudekiMpEnterSpiritInstance(&pair[0]); CHECK(a);
+    spirit_camera_animation((uint8_t *)pair[1].camera+0x30,&selection_update_count,0x11223344);
+    CHECK(!update_fault && selection_update_count==4 && named_generation==pair[0].generation);
+    CHECK(SudekiMpObserveSpiritInstanceScope(&scope) && scope.generation==pair[0].generation);
+    CHECK(SudekiMpLeaveSpiritInstance(a));
+    *(void **)(original_camera+0x44)=image+0x2c5674;
+    selection_expected_scope=(SudekiMpSpiritInstance){0};
+    b=SudekiMpEnterSpiritInstance(&pair[1]); CHECK(b);
+    CHECK(spirit_camera_ready(original_camera+0x44)==0x7b);
+    CHECK(!update_fault && selection_update_count==5 && named_generation==pair[1].generation);
+    CHECK(SudekiMpLeaveSpiritInstance(b));
+    b=SudekiMpEnterSpiritInstance(&pair[1]); CHECK(b);
+    saved=*(void **)(named_test_manager+0x20);
+    *(void **)(named_test_manager+0x20)=entries[0].named_cameras[0];
+    CHECK(!SudekiMpLeaveSpiritInstance(b) && scope_depth==1);
+    CHECK(!SudekiMpDestroySpiritInstance(&pair[1]));
+    *(void **)(named_test_manager+0x20)=saved; /* Fixture repair only. */
+    *(void **)(named_scene+0x7c)=(void *)1;
+    CHECK(!SudekiMpLeaveSpiritInstance(b) && scope_depth==1);
+    *(void **)(named_scene+0x7c)=render;
+    CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"default",&kind)==1 && kind==0);
+    CHECK(*(void **)(named_test_manager+0x20)==entries[1].named_cameras[0]);
+    CHECK(SudekiMpLeaveSpiritInstance(b));
+    for(unsigned int i=2;i>0;--i) CHECK(SudekiMpDestroySpiritInstance(&pair[i-1]));
+    /* Foreign callback must retain the adapter on teardown and allow retry. */
+    *(void **)(image+0x2cce70)=(void *)1;
+    *(void **)(image+0x2c5678)=(void *)1;
+    *(void **)(image+0x2c566c)=(void *)1;
+    CHECK(!SudekiMpResetSpiritInstanceAbi() && named_update_original && instance_image);
+    *(void **)(image+0x2cce70)=named_camera_update;
+    *(void **)(image+0x2c5678)=spirit_camera_ready;
+    CHECK(!SudekiMpResetSpiritInstanceAbi() && spirit_camera_animation_original &&
+        spirit_camera_ready_original && named_update_original && instance_image);
+    CHECK(*(void **)(image+0x2cce70)==image+0xe7660 && *(void **)(image+0x2c5678)==image+0x121a0);
+    CHECK(!SudekiMpInstallSpiritInstanceNamedCameraUpdates());
+    *(void **)(image+0x2c566c)=spirit_camera_animation;
+    CHECK(SudekiMpResetSpiritInstanceAbi());
+    CHECK(*(void **)(image+0x2cce70)==image+0xe7660 && !named_update_original && !selection_scene);
+    CHECK(*(void **)(image+0x2c5678)==image+0x121a0 && *(void **)(image+0x2c566c)==image+0x11ff0);
+    CHECK(!spirit_camera_ready_original && !spirit_camera_animation_original);
 }
 static void named_tests(void) {
     SudekiMpSpiritInstance pair[2]={{0}},stale;
@@ -1110,6 +1285,203 @@ int main(void) {
         CHECK(SudekiMpEnableSpiritInstanceRemoteSkillInput(&instances[1],caster_actors[0],local_input_witness));
         CHECK(!SudekiMpEnableSpiritInstanceRemoteSkillInput(&instances[1],caster_actors[0],local_input_witness));
         skill_input_resumes[0]=skill_input_resumes[1]=fake_input_resume;
+        {
+            const uint8_t code[]={0x80,0x7c,0x24,4,0,0x75,0x16,0xd9,5,0,0,0,0,
+                0x83,0x89,0xd0,1,0,0,2,0xd9,0x99,0xd8,1,0,0,0xc2,4,0,
+                0xa1,0,0,0,0,0x83,0xa1,0xd0,1,0,0,0xfd,0xd9,0x80,0,0xa,0,0,
+                0xd9,0x99,0xd8,1,0,0,0xc2,4,0};
+            SkillTargetingFunction target=(SkillTargetingFunction)(image+0x29570);
+            DWORD previous_protection,ignored_protection;
+            DWORD filter_protection,edge_protection;
+            for(unsigned int k=0;k<2;++k) {
+                skill_filter_entry(k,image+skill_filter_sites[k]);
+                image[skill_filter_sites[k]+13]=0xe8;
+                *(int32_t *)(image+skill_filter_sites[k]+14)=0x290d0-(skill_filter_sites[k]+18);
+                memcpy(image+skill_filter_sites[k]+18,"\x5e\xc3",2);
+            }
+            memcpy(image+0x290d0,"\xff\x86\x88\x00\x00\x00\xc3",7);
+            CHECK(VirtualProtect(image+0x8ac0,0x40,PAGE_EXECUTE_READWRITE,&filter_protection));
+            CHECK(VirtualProtect(image+0x290d0,7,PAGE_EXECUTE_READWRITE,&edge_protection));
+            memcpy(image+0x29570,code,sizeof(code));
+            memcpy(image+0x29610,target_predicate_body,sizeof(target_predicate_body));
+            *(void **)(image+0x29579)=image+0x2e35cc;
+            *(void **)(image+0x2958e)=image+CAST_GATE_GLOBAL;
+            *(float *)(image+0x2e35cc)=-1.f;
+            CHECK(VirtualProtect(image+0x29570,sizeof(code),PAGE_EXECUTE_READWRITE,&previous_protection));
+            image[0x29598]^=1;
+            CHECK(!SudekiMpEnableSpiritInstanceSkillTargeting());
+            image[0x29598]^=1;
+            image[0x8aed]^=1;
+            CHECK(!SudekiMpEnableSpiritInstanceSkillTargeting());
+            CHECK(!skill_targeting_hook.installed && !skill_filter_hooks[0].installed);
+            image[0x8aed]^=1;
+            CHECK(SudekiMpEnableSpiritInstanceSkillTargeting());
+            CHECK(!SudekiMpEnableSpiritInstanceSkillTargeting());
+            {
+                ControllerFilterFunction none=(ControllerFilterFunction)(image+0x8ac0);
+                ControllerFilterFunction all=(ControllerFilterFunction)(image+0x8ae0);
+                *(uint32_t *)(fake_controller+0x84)=2; *(uint32_t *)(fake_controller+0x88)=0;
+                remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+                none(fake_controller); all(fake_controller);
+                CHECK(*(uint32_t *)(fake_controller+0x84)==2 && !*(uint32_t *)(fake_controller+0x88));
+                local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+                none(fake_controller);
+                CHECK(!*(uint32_t *)(fake_controller+0x84) && *(uint32_t *)(fake_controller+0x88)==1);
+                CHECK(SudekiMpLeaveSpiritInstance(local));
+                all(fake_controller); /* A peer cannot release a local casting filter. */
+                CHECK(!*(uint32_t *)(fake_controller+0x84) && *(uint32_t *)(fake_controller+0x88)==1);
+                local_witness_valid=FALSE; none(fake_controller);
+                CHECK(update_fault && *(uint32_t *)(fake_controller+0x88)==1);
+                local_witness_valid=TRUE; update_fault=FALSE;
+                *(uint32_t *)(foreign_controller+0x84)=2; all(foreign_controller);
+                CHECK(update_fault && *(uint32_t *)(foreign_controller+0x84)==2);
+                update_fault=FALSE; CHECK(SudekiMpLeaveSpiritInstance(remote));
+                all(fake_controller);
+                CHECK(*(uint32_t *)(fake_controller+0x84)==1 && *(uint32_t *)(fake_controller+0x88)==2);
+            }
+            *(uint32_t *)(fake_controller+0x1d0)=11;
+            *(float *)(fake_controller+0x1d8)=19.f;
+            remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+            target(fake_controller,1); target(fake_controller,0);
+            CHECK(*(uint32_t *)(fake_controller+0x1d0)==11 && *(float *)(fake_controller+0x1d8)==19.f);
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            target(fake_controller,1);
+            CHECK(*(uint32_t *)(fake_controller+0x1d0)==9);
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            target(fake_controller,0); /* Remote cleanup cannot unlock local targeting. */
+            CHECK(*(uint32_t *)(fake_controller+0x1d0)==9);
+            local_witness_valid=FALSE;
+            target(fake_controller,0);
+            CHECK(update_fault && *(uint32_t *)(fake_controller+0x1d0)==9);
+            local_witness_valid=TRUE; update_fault=FALSE;
+            CHECK(SudekiMpLeaveSpiritInstance(remote));
+            target(fake_controller,0); /* Unrelated native setter remains native. */
+            CHECK(*(uint32_t *)(fake_controller+0x1d0)==11 && *(float *)(fake_controller+0x1d8)==-1.f);
+            remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+            target(fake_controller,1); target(fake_controller,0);
+            CHECK(*(uint32_t *)(fake_controller+0x1d0)==11 && *(float *)(fake_controller+0x1d8)==-1.f);
+            *(uint32_t *)(foreign_controller+0x1d0)=0x59;
+            target(foreign_controller,1);
+            CHECK(update_fault && *(uint32_t *)(foreign_controller+0x1d0)==0x59);
+            update_fault=FALSE;
+            CHECK(SudekiMpLeaveSpiritInstance(remote));
+            CHECK(VirtualProtect(image+0x29570,sizeof(code),previous_protection,&ignored_protection));
+            CHECK(VirtualProtect(image+0x8ac0,0x40,filter_protection,&ignored_protection));
+            CHECK(VirtualProtect(image+0x290d0,7,edge_protection,&ignored_protection));
+        }
+        {
+            void *tasks[2]={caster_skills[0],caster_skills[1]};
+            uint8_t phase=0; uint16_t remaining=0;
+            SkillTargetingFunction target=(SkillTargetingFunction)(image+0x29570);
+            SkillTargetPredicate wait=(SkillTargetPredicate)(image+0x29610);
+            DWORD protection,ignored;
+            CHECK(VirtualProtect(image+0x29570,0x100,PAGE_EXECUTE_READWRITE,&protection));
+            *(float *)(actor_manager+0xa00)=3.f;
+            for(unsigned int k=0;k<2;++k) {
+                *(void **)(caster_skills[k]+0x74)=&tasks[k];
+                CHECK(SudekiMpConfigureSpiritInstanceSkillTiming(&instances[k],FALSE));
+                CHECK(SudekiMpBeginSpiritInstanceSkillTiming(&instances[k],1));
+            }
+            remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+            /* Synchronous native startup has not yet published CSkill+74.
+             * Only the constructor-pinned executing task may bridge it. */
+            *(void **)(caster_skills[1]+0x74)=NULL;
+            starting_task_handle=&tasks[1]; starting_task_known=TRUE;
+            target(fake_controller,1); CHECK(wait(fake_controller));
+            CHECK(!update_fault);
+            starting_task_known=FALSE;
+            CHECK(!SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],1));
+            *(void **)(caster_skills[1]+0x74)=&tasks[0];
+            CHECK(!SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],1));
+            *(void **)(caster_skills[1]+0x74)=&tasks[1];
+            CHECK(SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],1));
+            CHECK(*(float *)(fake_controller+0x1d8)==-1.f);
+            CHECK(SudekiMpLeaveSpiritInstance(remote));
+            CHECK(!quiescent(&entries[1]));
+            CHECK(SudekiMpAdvanceSpiritInstanceSkillTiming(&instances[1],.25f));
+            CHECK(SudekiMpObserveSpiritInstanceSkillTiming(&instances[1],1,&phase,&remaining));
+            CHECK(phase==SUDEKIMP_SKILL_TARGET_AIMING && remaining==2750);
+            /* Native Use may start its script before the success observer:
+             * adopting the prepared ID must preserve the existing wait. */
+            CHECK(SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],1));
+            CHECK(SudekiMpObserveSpiritInstanceSkillTiming(&instances[1],1,&phase,&remaining));
+            CHECK(phase==SUDEKIMP_SKILL_TARGET_AIMING && remaining==2750);
+            tasks[1]=NULL;
+            CHECK(!SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],1));
+            tasks[1]=caster_skills[1];
+            CHECK(!SudekiMpAdvanceSpiritInstanceSkillTiming(&instances[1],NAN));
+            CHECK(!SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],2));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            target(fake_controller,1); CHECK(wait(fake_controller));
+            CHECK(*(float *)(fake_controller+0x1d8)==3.f);
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            for(unsigned int k=0;k<11;++k)
+                CHECK(SudekiMpAdvanceSpiritInstanceSkillTiming(&instances[1],.25f));
+            remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+            CHECK(!wait(fake_controller)); target(fake_controller,0);
+            CHECK(*(float *)(fake_controller+0x1d8)==3.f); /* no cross-caster release */
+            CHECK(SudekiMpLeaveSpiritInstance(remote));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            CHECK(wait(fake_controller));
+            *(float *)(fake_controller+0x1d8)=0.f;
+            CHECK(!wait(fake_controller)); target(fake_controller,0);
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            {
+                void *retired_thread=NULL;
+                CHECK(SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],2));
+                *(void **)(caster_skills[1]+0x74)=&retired_thread;
+                starting_task_known=TRUE;
+                remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
+                target(fake_controller,1); CHECK(wait(fake_controller) && !update_fault);
+                starting_task_known=FALSE;
+                CHECK(!SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],2));
+                *(void **)(caster_skills[1]+0x74)=&tasks[1];
+                CHECK(SudekiMpBeginSpiritInstanceSkillTiming(&instances[1],2));
+                target(fake_controller,0);
+                CHECK(SudekiMpLeaveSpiritInstance(remote));
+            }
+            /* Replica expiration cannot release a script; only the admitted
+             * host phase does. Duplicate/stale packets cannot restart a wait. */
+            entries[0].timing_replica=TRUE;
+            CHECK(SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,1,0));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            target(fake_controller,1); CHECK(wait(fake_controller));
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            CHECK(SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,2,1200));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],1,3,0));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,1,0));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,2,0));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,4,0));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],3,1,0));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            *(float *)(fake_controller+0x1d8)=-1.f;
+            CHECK(wait(fake_controller));
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            CHECK(SudekiMpApplySpiritInstanceSkillTiming(&instances[0],2,3,0));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            CHECK(!wait(fake_controller));
+            tasks[0]=NULL; CHECK(wait(fake_controller) && update_fault);
+            tasks[0]=caster_skills[0]; update_fault=FALSE;
+            target(fake_controller,0);
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            CHECK(SudekiMpApplySpiritInstanceSkillTiming(&instances[0],3,2,500));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            target(fake_controller,1); CHECK(wait(fake_controller));
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            CHECK(SudekiMpDrainSpiritInstanceSkillTiming(&instances[0]));
+            CHECK(!SudekiMpApplySpiritInstanceSkillTiming(&instances[0],3,3,0));
+            CHECK(SudekiMpAdvanceSpiritInstanceSkillTiming(&instances[0],.25f));
+            CHECK(entries[0].targeting_phase==2);
+            CHECK(SudekiMpAdvanceSpiritInstanceSkillTiming(&instances[0],.25f));
+            local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+            CHECK(!wait(fake_controller)); target(fake_controller,0);
+            CHECK(SudekiMpLeaveSpiritInstance(local));
+            for(unsigned int k=0;k<2;++k) {
+                entries[k].timing_configured=FALSE;
+                *(void **)(caster_skills[k]+0x74)=NULL;
+            }
+            CHECK(VirtualProtect(image+0x29570,0x100,protection,&ignored));
+        }
         for(j=0;j<2;++j) {
             *(uint32_t *)(fake_controller+0x1d0)=0x57;
             remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
@@ -1284,7 +1656,17 @@ int main(void) {
     }
     CHECK(SudekiMpDestroySpiritInstance(&instances[0]));
     CHECK(SudekiMpDestroySpiritInstance(&instances[1]));
+    CHECK(skill_targeting_hook.installed && native_skill_targeting);
+    image[0x29571]^=1;
+    image[0x8ae1]^=1;
+    CHECK(!SudekiMpResetSpiritInstanceAbi() && skill_targeting_hook.installed && native_skill_targeting && instance_image);
+    image[0x29571]^=1;
+    CHECK(!SudekiMpResetSpiritInstanceAbi() && !skill_targeting_hook.installed &&
+        skill_filter_hooks[1].installed && native_skill_filters[1] && instance_image);
+    image[0x8ae1]^=1;
     CHECK(SudekiMpResetSpiritInstanceAbi());
+    CHECK(!skill_filter_hooks[0].installed && !skill_filter_hooks[1].installed &&
+        !native_skill_filters[0] && !native_skill_filters[1]);
     /* A foreign hook blocks reset; original callbacks survive a partial
      * reverse restoration and reset can be retried without reinstalling. */
     setup();
@@ -1325,6 +1707,7 @@ int main(void) {
     persistent_ui_tests();
     shared_ssp_tests();
     named_tests();
+    selection_tests();
     {
         const uint32_t sites[]={MANAGER_CTOR,CAMERA_CTOR,MANAGER_INIT,CAMERA_INIT,
             MANAGER_DELETE,CAMERA_DELETE,SOUL_DELETE,0x78d0d,0x78d18,0x79c53,0x79c5e,

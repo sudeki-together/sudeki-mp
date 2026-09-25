@@ -19,7 +19,8 @@
 #define LAN_ACTOR_SKILL_KIND_OFFSET (LAN_ACTOR_SKILL_PRESENTATION_OFFSET + \
     LAN_ACTOR_SKILL_PRESENTATION_SIZE)
 #define LAN_ACTOR_WEAPON_OFFSET (LAN_ACTOR_SKILL_KIND_OFFSET + 1u)
-#define LAN_ACTOR_SIZE (LAN_ACTOR_WEAPON_OFFSET + 1u)
+#define LAN_ACTOR_TARGET_OFFSET (LAN_ACTOR_WEAPON_OFFSET + 1u)
+#define LAN_ACTOR_SIZE (LAN_ACTOR_TARGET_OFFSET + 3u)
 #define LAN_ENEMY_SIZE 21u
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
 #define LAN_SPIRIT_AUDIO_EVENT_SIZE 6u
@@ -44,8 +45,9 @@
 #define LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET \
     (LAN_SNAPSHOT_SPIRIT_VFX_ENTRIES_OFFSET + \
      (SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY * LAN_SPIRIT_VFX_SIZE))
-#define LAN_SNAPSHOT_SKILL_FADE_OFFSET (LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + 81u)
-#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET (LAN_SNAPSHOT_SKILL_FADE_OFFSET + 16u)
+#define LAN_CAST_PRESENTATION_SIZE (81u + 16u)
+#define LAN_SNAPSHOT_ENEMY_COUNT_OFFSET (LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + \
+    SUDEKIMP_LAN_ARENA_SEAT_COUNT * LAN_CAST_PRESENTATION_SIZE)
 #define LAN_SNAPSHOT_FIXED_SIZE (LAN_SNAPSHOT_ENEMY_COUNT_OFFSET + 1u)
 
 _Static_assert(
@@ -57,6 +59,8 @@ _Static_assert(
     SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE <=
         SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE,
     "LAN snapshot exceeds the bounded datagram");
+_Static_assert(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE <= 1472u,
+    "LAN datagram exceeds a 1500-byte IPv4/UDP path");
 
 static const uint8_t lan_magic[4] = {'S', 'M', 'P', 'N'};
 
@@ -569,6 +573,13 @@ static int valid_actor_snapshot(
         actor->skill_presentation_valid > 1u ||
         actor->skill_slot >= 6u ||
         actor->skill_cost > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
+        actor->skill_target_phase > 3u ||
+        (actor->skill_target_phase && (!actor->skill_sequence ||
+         actor->skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER)) ||
+        (actor->skill_target_phase == 2u ?
+            (!actor->skill_active || !actor->skill_target_remaining_ms ||
+             actor->skill_target_remaining_ms > 60000u) : actor->skill_target_remaining_ms != 0u) ||
+        (actor->skill_target_phase == 1u && !actor->skill_active) ||
         actor->animation_state > SUDEKIMP_LAN_ARENA_ANIMATION_IDLE_VARIANT_TWO ||
         actor->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_BLOCK ||
         actor->hp > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
@@ -682,7 +693,7 @@ int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
     unsigned int *replayed_count
 ) {
     const SudekiMpLanArenaSpiritAudioSemanticEvent *event;
-    unsigned int count;
+    unsigned int count, index;
     int exact_current_spirit;
 
     if (replayed_count != NULL) *replayed_count = 0u;
@@ -697,22 +708,25 @@ int SudekiMpLanArenaSpiritAudioConsumeSnapshot(
                 event->event_sequence,
                 cursor->last_event_sequence)) return 0;
     }
-    exact_current_spirit =
-        snapshot->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
-        snapshot->combat_enabled == 1u &&
-        snapshot->seat[event->owner_seat].skill_active == 1u &&
-        snapshot->seat[event->owner_seat].skill_kind ==
-            SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
-        snapshot->seat[event->owner_seat].skill_sequence == event->skill_sequence;
-    if (exact_current_spirit &&
-        (sink == NULL || !sink(
-            sink_context, (SudekiMpLanArenaSpiritAudioCue)event->cue))) {
-        return 0;
-    }
-    cursor->last_event_sequence = event->event_sequence;
-    cursor->initialized = 1u;
-    if (exact_current_spirit && replayed_count != NULL) {
-        *replayed_count = 1u;
+    /* Both casters can emit between snapshots. Consume each fresh event,
+     * committing only after its successful replay (or proven stale cast).
+     * A failed second sink must not replay the first sound on retry. */
+    for (index = 0u; index < count; ++index) {
+        event = &snapshot->spirit_audio_history[index];
+        if (cursor->initialized && !action_sequence_newer(
+                event->event_sequence, cursor->last_event_sequence)) continue;
+        exact_current_spirit =
+            snapshot->match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
+            snapshot->combat_enabled == 1u &&
+            snapshot->seat[event->owner_seat].skill_active == 1u &&
+            snapshot->seat[event->owner_seat].skill_kind ==
+                SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT &&
+            snapshot->seat[event->owner_seat].skill_sequence == event->skill_sequence;
+        if (exact_current_spirit && (sink == NULL || !sink(
+                sink_context, (SudekiMpLanArenaSpiritAudioCue)event->cue))) return 0;
+        cursor->last_event_sequence = event->event_sequence;
+        cursor->initialized = 1u;
+        if (exact_current_spirit && replayed_count != NULL) ++*replayed_count;
     }
     return 1;
 }
@@ -880,7 +894,7 @@ int SudekiMpLanArenaSpiritViewValid(const SudekiMpLanArenaSpiritView *view) {
         for (i = 0u; i < 3u; ++i) if (view->projection[i] != 0.0f) return 0;
         return 1;
     }
-    if (view->owner_seat != 1u || view->skill_sequence == 0u) return 0;
+    if (view->owner_seat >= SUDEKIMP_LAN_ARENA_SEAT_COUNT || view->skill_sequence == 0u) return 0;
     for (i = 0u; i < 16u; ++i) if (!valid_coordinate(view->matrix[i])) return 0;
     for (i = 0u; i < 3u; ++i)
         if (!isfinite(view->projection[i]) || view->projection[i] <= 0.0f ||
@@ -924,23 +938,22 @@ int SudekiMpLanArenaSnapshotValid(
         snapshot->enemy_count > 1u ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
         !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
-        !SudekiMpLanArenaSpiritViewValid(&snapshot->spirit_view) ||
-        !SudekiMpLanArenaSkillFadeValid(&snapshot->skill_fade) ||
-        (snapshot->skill_fade.kind != 0u &&
-         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
-          snapshot->combat_enabled != 1u ||
-          snapshot->skill_fade.skill_sequence != snapshot->seat[snapshot->skill_fade.owner_seat].skill_sequence ||
-          snapshot->skill_fade.kind != snapshot->seat[snapshot->skill_fade.owner_seat].skill_kind)) ||
-        (snapshot->spirit_view.kind != 0u &&
-         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE ||
-          snapshot->combat_enabled != 1u ||
-          snapshot->seat[1].actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
-          snapshot->seat[1].skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
-          snapshot->seat[1].skill_active != 1u ||
-          snapshot->spirit_view.skill_sequence != snapshot->seat[1].skill_sequence)) ||
         !valid_actor_snapshot(&snapshot->seat[0], expected_host_actor_type) ||
         !valid_actor_snapshot(
             &snapshot->seat[1], expected_client_actor_type)) return 0;
+    for (index = 0u; index < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++index) {
+        const SudekiMpLanArenaSpiritView *view = &snapshot->cast[index].spirit_view;
+        const SudekiMpLanArenaSkillFade *fade = &snapshot->cast[index].skill_fade;
+        const SudekiMpLanArenaActorSnapshot *actor = &snapshot->seat[index];
+        if (!SudekiMpLanArenaSpiritViewValid(view) || !SudekiMpLanArenaSkillFadeValid(fade)) return 0;
+        if ((view->kind || fade->kind) &&
+            (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE || !snapshot->combat_enabled)) return 0;
+        if (view->kind && (view->owner_seat != index ||
+            actor->skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
+            !actor->skill_active || view->skill_sequence != actor->skill_sequence)) return 0;
+        if (fade->kind && (fade->owner_seat != index ||
+            fade->skill_sequence != actor->skill_sequence || fade->kind != actor->skill_kind)) return 0;
+    }
     for (index = 0u; index < snapshot->enemy_count; ++index) {
         const SudekiMpLanArenaEnemySnapshot *enemy = &snapshot->enemies[index];
         if (enemy->native_entity_id !=
@@ -989,6 +1002,8 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     output[48] = actor->skill_slot;
     output[49] = actor->skill_active;
     write_u32(output + 50u, actor->skill_cost);
+    output[LAN_ACTOR_TARGET_OFFSET] = actor->skill_target_phase;
+    write_u16(output + LAN_ACTOR_TARGET_OFFSET + 1u, actor->skill_target_remaining_ms);
     output[54] = actor->action_history_count;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY;
          ++index) {
@@ -1061,6 +1076,8 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->skill_slot = input[48];
     actor->skill_active = input[49];
     actor->skill_cost = read_u32(input + 50u);
+    actor->skill_target_phase = input[LAN_ACTOR_TARGET_OFFSET];
+    actor->skill_target_remaining_ms = read_u16(input + LAN_ACTOR_TARGET_OFFSET + 1u);
     actor->action_history_count = input[54];
     if (actor->action_history_count >
             SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY) return 0;
@@ -1211,17 +1228,17 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             }
             output[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] =
             packet->body.snapshot.enemy_count;
-            {
-                const SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.spirit_view;
-                uint8_t *entry = output + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET;
+            for (unsigned int seat = 0u; seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++seat) {
+                const SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.cast[seat].spirit_view;
+                uint8_t *entry = output + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + seat * LAN_CAST_PRESENTATION_SIZE;
                 write_u16(entry, view->skill_sequence);
                 entry[2] = view->owner_seat; entry[3] = view->kind; entry[4] = view->body_hidden;
                 for (i = 0u; i < 16u; ++i) write_float(entry + 5u + 4u*i, view->matrix[i]);
                 for (i = 0u; i < 3u; ++i) write_float(entry + 69u + 4u*i, view->projection[i]);
             }
-            {
-                const SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.skill_fade;
-                uint8_t *entry = output + LAN_SNAPSHOT_SKILL_FADE_OFFSET;
+            for (unsigned int seat = 0u; seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++seat) {
+                const SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.cast[seat].skill_fade;
+                uint8_t *entry = output + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + seat * LAN_CAST_PRESENTATION_SIZE + 81u;
                 write_u16(entry, fade->skill_sequence);
                 entry[2] = fade->owner_seat; entry[3] = fade->kind;
                 for (i = 0u; i < 3u; ++i) write_float(entry + 4u + 4u*i, fade->rgb[i]);
@@ -1406,9 +1423,9 @@ int SudekiMpLanArenaDecodePacket(
             }
             packet->body.snapshot.enemy_count =
                 payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET];
-            {
-                SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.spirit_view;
-                const uint8_t *entry = payload + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET;
+            for (unsigned int seat = 0u; seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++seat) {
+                SudekiMpLanArenaSpiritView *view = &packet->body.snapshot.cast[seat].spirit_view;
+                const uint8_t *entry = payload + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + seat * LAN_CAST_PRESENTATION_SIZE;
                 if (entry[3] == 0u) {
                     static const uint8_t empty_view[81] = {0};
                     if (memcmp(entry, empty_view, sizeof(empty_view)) != 0) return 0;
@@ -1418,9 +1435,9 @@ int SudekiMpLanArenaDecodePacket(
                 for (i = 0u; i < 16u; ++i) view->matrix[i] = read_float(entry + 5u + 4u*i);
                 for (i = 0u; i < 3u; ++i) view->projection[i] = read_float(entry + 69u + 4u*i);
             }
-            {
-                SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.skill_fade;
-                const uint8_t *entry = payload + LAN_SNAPSHOT_SKILL_FADE_OFFSET;
+            for (unsigned int seat = 0u; seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++seat) {
+                SudekiMpLanArenaSkillFade *fade = &packet->body.snapshot.cast[seat].skill_fade;
+                const uint8_t *entry = payload + LAN_SNAPSHOT_SPIRIT_VIEW_OFFSET + seat * LAN_CAST_PRESENTATION_SIZE + 81u;
                 if (!entry[3]) {
                     static const uint8_t empty[16] = {0};
                     if (memcmp(entry, empty, sizeof(empty))) return 0;

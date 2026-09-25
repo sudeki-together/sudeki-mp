@@ -73,7 +73,7 @@ static struct { Cast *previous, *root; unsigned int prior_depth; } root_scopes[1
 static unsigned int root_scope_count;
 static SudekiMpLanCastTaskEnter task_enter;
 static SudekiMpLanCastTaskLeave task_leave;
-static struct { Cast *previous; unsigned int prior_depth; uint32_t cookie; } task_scopes[16];
+static struct { Cast *previous; unsigned int prior_depth; uint32_t cookie; void *thread; } task_scopes[16];
 static unsigned int task_scope_count;
 static BOOL task_route_fault;
 static SudekiMpInlineHook ui_trace_hook;
@@ -420,6 +420,22 @@ static Cast *task_owner(void *thread,BOOL *known,BOOL require_authority) {
     return NULL;
 }
 
+BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
+    void *skill,void **handle,void **thread) {
+    void *executing;
+    BOOL known;
+    if(!handle || !thread || !task_scope_count || !root_scope_count ||
+        lineage_fault || task_route_fault || !current_cast || !current_cast->launching ||
+        current_cast->skill_cleaned || current_cast->skill!=skill ||
+        current_cast->owner.actor!=actor || current_cast->owner.session!=session ||
+        !skill_exact(current_cast)) return FALSE;
+    executing=task_scopes[task_scope_count-1].thread;
+    if(!executing || task_owner(executing,&known,FALSE)!=current_cast || !known) return FALSE;
+    for(unsigned int i=0;i<MAX_TASKS;++i) if(tasks[i].thread==executing && tasks[i].handle) {
+        *handle=tasks[i].handle; *thread=executing; return TRUE;
+    }
+    return FALSE;
+}
 static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
     Cast *previous=current_cast, *owner;
     unsigned int n=task_scope_count;
@@ -448,6 +464,7 @@ static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
     task_scopes[n].previous=previous;
     task_scopes[n].prior_depth=depth;
     task_scopes[n].cookie=cookie;
+    task_scopes[n].thread=thread;
     ++task_scope_count; ++depth;
     SetLastError(error);
     result=original_step(thread,edx);

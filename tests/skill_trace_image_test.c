@@ -20,6 +20,7 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_cast_context.h"
 #include "engine/spirit_instance_abi.h"
+#include "engine/cast_light_abi.h"
 #include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_spirit_vfx.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
@@ -324,6 +325,14 @@ BOOL SudekiMpLanArenaRuntimeJoinEndpoint(const char *endpoint) {
     return FALSE;
 }
 BOOL SudekiMpLanArenaRuntimeHostArena(void) { return FALSE; }
+BOOL SudekiMpLanArenaClientPrivateCastCamerasOwned(void) { return FALSE; }
+BOOL SudekiMpLanArenaOrdinarySkillOverlapOwned(void) { return FALSE; }
+BOOL SudekiMpLanArenaApplyClientSkillTiming(unsigned int seat,const SudekiMpLanArenaActorSnapshot *s) {
+    return seat<2u && s!=NULL;
+}
+int SudekiMpLanArenaRouteCastCamera(void *manager,const char *name) {
+    (void)manager; (void)name; return 0;
+}
 BOOL SudekiMpLanArenaRuntimeGetStatus(SudekiMpLanArenaSessionStatus *status) {
     if (status != NULL) memset(status, 0, sizeof(*status));
     return FALSE;
@@ -7864,6 +7873,40 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
     {
+        /* Inert exact-image lighting test: only slots/hooks execute here,
+         * never native constructors, schedulers or GPU code. */
+        const uint32_t sites[]={0x76d09,0x76d1f,0x76d26,0x1f253,0x2ca030,0x2ca034,0x7712e,0x1f751,0x77c43};
+        const uint32_t expected[]={0x6ca030,0x808d7c,0x6ca06c,0x804cac,0x477110,0x41f350,0x808d7c,0x808d7c,0x6c3bfc};
+        uint32_t saved[9];
+        uint8_t world[0x6c]={0}, scheduler[16]={0}, saved_call[5];
+        void *saved_world=*(void **)(image+0x408d7c),*saved_scheduler=*(void **)(image+0x409e14);
+        memcpy(saved_call,image+0x1f53a,5);
+        for(unsigned int c=0;c<9;++c) {
+            memcpy(&saved[c],image+sites[c],4);
+            if(saved[c]!=expected[c]) { fprintf(stderr,"FAIL: lighting operand %u\n",c); ++failures; }
+            *(uint32_t *)(image+sites[c])=saved[c]+(uint32_t)(uintptr_t)image-0x400000u;
+        }
+        *(void **)world=image+0x2ca030; *(void **)scheduler=image;
+        *(void **)(image+0x408d7c)=world; *(void **)(image+0x409e14)=scheduler;
+        if(!SudekiMpInitializeCastLightAbi((HMODULE)image) || !SudekiMpResetCastLightAbi() ||
+            memcmp(saved_call,image+0x1f53a,5) || *(void **)(image+0x2ca034)!=image+0x1f350) {
+            fputs("FAIL: caster lighting exact-image install/restore\n",stderr); ++failures;
+        }
+        const uint32_t tamper[]={0x76cd0,0x76d1f,0x1f210,0x1f226,0x1f253,0x1f28d,
+            0x1f350,0x1f512,0x1f53a,0x77110,0x7712e,0x7714b,0x1f5c0,0x1f628,0x1f740,0x1f751,
+            0x1061d0,0x106266,0x106272,0x106281,0x10629c,0x77c53,0x77c66,0x77c43,0x2c3bfc};
+        for(unsigned int c=0;c<sizeof(tamper)/sizeof(tamper[0]);++c) {
+            image[tamper[c]]^=1;
+            if(SudekiMpInitializeCastLightAbi((HMODULE)image)) {
+                fprintf(stderr,"FAIL: altered lighting ABI %u accepted\n",c); ++failures;
+                SudekiMpResetCastLightAbi();
+            }
+            image[tamper[c]]^=1;
+        }
+        for(unsigned int c=0;c<9;++c) memcpy(image+sites[c],&saved[c],4);
+        *(void **)(image+0x408d7c)=saved_world; *(void **)(image+0x409e14)=saved_scheduler;
+    }
+    {
         /* Inert mapping: validate the original PE values before simulating
          * loader relocations for the factory's exact singleton/vtable checks.
          * This does NOT execute native constructors inside the test harness. */
@@ -7871,12 +7914,14 @@ int wmain(int argc, wchar_t **argv) {
             0x2ca310,0xf902,0xf90f,0xf95c,
             0x2f8da,0x2f8e1,0x10a1e,0xb4bd1,0x10157,0xb4b69,0x11115,0xb47f4,
             0x9c52b,0x9c5df,0x100d3,0x10fe8,0xe45ab,0xe46ce,
-            0xb4836,0xb4844,0xb4e8d,0xb4e99,0xf5e2};
+            0xb4836,0xb4844,0xb4e8d,0xb4e99,0xf5e2,0xe7164,0xe7667,0x2cce70,
+            0x11826,0x1182d,0x2c5678,0x2c566c,0x29579,0x2958e};
         const uint32_t expected[]={0x808d30,0x808d38,0x479600,0x4118c0,0x40efc0,0x411bd0,0x52adf0,
             0x40f900,0x808d34,0x808d34,0x808da0,
             0x808dd0,0x6c7ad0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,0x808dd0,
             0x6caf9c,0x7c2f88,0x7c2f88,0x7c2f88,0x808d1c,0x808d1c,
-            0x808da4,0x809d78,0x808da4,0x809d78,0x808d30};
+            0x808da4,0x809d78,0x808da4,0x809d78,0x808d30,0x6cce6c,0x808da0,0x4e7660,
+            0x6c5660,0x6c5674,0x4121a0,0x411ff0,0x6e35cc,0x808dd0};
         uint32_t saved[sizeof(sites)/sizeof(sites[0])];
         uint8_t participant_calls[2][5];
         uint8_t skill_ui_bytes[2][8];
@@ -7908,11 +7953,20 @@ int wmain(int argc, wchar_t **argv) {
         }
         if(!SudekiMpInitializeSpiritInstanceAbi((HMODULE)image,inert_spirit_hook_boundary) ||
             !SudekiMpSpiritInstanceNamedCameraAbiReady() ||
+            !SudekiMpSpiritInstanceCameraSelectionAbiReady() ||
             !SudekiMpSpiritInstanceSharedSspAbiReady() ||
             !SudekiMpInstallSpiritInstanceUpdates() ||
+            !SudekiMpEnableSpiritInstanceSkillTargeting() ||
+            !SudekiMpInstallSpiritInstanceNamedCameraUpdates() ||
             !SudekiMpResetSpiritInstanceAbi()) {
             fprintf(stderr,"FAIL: Spirit instance exact ABI error=%lu\n",(unsigned long)GetLastError());
             ++failures;
+        }
+        if(memcmp(image+0x29570,"\x80\x7c\x24\x04\x00",5) ||
+            memcmp(image+0x29610,"\xd9\xee\xd8\x99\xd8\x01\x00\x00",8) ||
+            memcmp(image+0x8ac0,"\x56\x8b\xf1\xc7\x81\x84\x00\x00\x00\x00\x00\x00\x00",13) ||
+            memcmp(image+0x8ae0,"\x56\x8b\xf1\xc7\x81\x84\x00\x00\x00\x01\x00\x00\x00",13)) {
+            fputs("FAIL: skill-targeting entry not restored\n",stderr); ++failures;
         }
         if(!SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
             fputs("FAIL: client input setup for shared UI ownership\n",stderr); ++failures;
@@ -8694,8 +8748,22 @@ int wmain(int argc, wchar_t **argv) {
                     service_update_observer_entry_errors[0] != 0x1234u ||
                     !service_update_witness_revalidated[0] ||
                     GetLastError() != 0x1234u) {
-                    fputs("FAIL: normal post-original notify forged or lost its dispatch witness\n",
-                        stderr);
+                    DWORD failure_error = GetLastError();
+                    fprintf(stderr,
+                        "FAIL: normal post-original notify forged or lost its dispatch witness "
+                        "(calls=%u context_failed=%d witnesses=%u matches=%d "
+                        "entry_error=%lu revalidated=%d return_error=%lu)\n",
+                        service_update_original_calls,
+                        (int)service_update_context_failed,
+                        service_update_witness_count,
+                        (int)service_update_witness_matches(
+                            &service_update_witnesses[0],
+                            SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_NORMAL_POST_ORIGINAL,
+                            1u, 1u, FALSE, TRUE, TRUE, TRUE, TRUE, TRUE,
+                            TRUE, FALSE),
+                        (unsigned long)service_update_observer_entry_errors[0],
+                        (int)service_update_witness_revalidated[0],
+                        (unsigned long)failure_error);
                     ++failures;
                 }
 

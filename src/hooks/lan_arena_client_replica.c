@@ -9,6 +9,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_arena_owner_view.h"
+#include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_client_skill_handoff.h"
 #include "hooks/lan_arena_spirit_audio.h"
 #include "hooks/lan_arena_spirit_vfx.h"
@@ -508,6 +509,8 @@ typedef struct SpiritViewFrameLease {
     uint8_t *borrowed_camera;
     uint8_t *borrowed_state;
     BOOL swapped;
+    BOOL in_place; /* Private-cast mode never borrows another native camera. */
+    BOOL preparation_only; /* Body participates in native animation/culling before draw. */
     uint8_t *weapon;
     uint8_t *weapon_wrappers[2];
     uint8_t *weapon_render[2];
@@ -553,6 +556,13 @@ static ApplyDamageFunction original_apply_damage;
 static volatile LONG client_skill_activation_depth;
 static volatile LONG client_spirit_vfx_call_depth;
 static int client_skill_activation_actor_index = -1;
+static struct {
+    void *actor;
+    uint64_t session;
+    uint16_t sequence;
+    uint8_t slot;
+    DWORD thread;
+} client_skill_replay_admission;
 static BOOL client_remote_tal_skill_input_isolation_active;
 static uint32_t client_skill_original_alternate_speed_bits;
 static BOOL client_skill_speed_override_active;
@@ -2133,6 +2143,20 @@ static BOOL client_session_authenticated(void) {
     return client_session_status(&status);
 }
 
+BOOL SudekiMpLanArenaClientSkillReplayAdmission(void *actor,int slot,uint64_t session) {
+    SudekiMpLanArenaSessionStatus status;
+    return actor && session && slot>=0 && slot<6 &&
+        !client_replica_reset_pending && client_skill_replay_admission.sequence &&
+        client_skill_replay_admission.actor==actor && client_skill_replay_admission.slot==slot &&
+        client_skill_replay_admission.session==session &&
+        client_skill_replay_admission.thread==GetCurrentThreadId() &&
+        InterlockedCompareExchange(&client_skill_activation_depth,0,0)==1 &&
+        (client_skill_activation_actor_index==0 || client_skill_activation_actor_index==1) &&
+        actor==SudekiMpCleanroomEngineActorEntity(client_skill_activation_actor_index==0 ?
+            seat_host_actor():seat_client_actor()) &&
+        client_session_status(&status) && status.session_token==session;
+}
+
 static BOOL set_client_remote_tal_skill_input_isolation(
     BOOL enabled,
     const char *reason
@@ -2186,8 +2210,11 @@ static int client_skill_replay_caster_index(void) {
 }
 
 BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void) {
-    return (client_skill_replay_active() &&
-        client_skill_replay_caster_index() == 1) ||
+    return (SudekiMpLanArenaClientPrivateCastCamerasOwned() ?
+        (native_skill_leases[1].native_started ||
+         (InterlockedCompareExchange(&client_skill_activation_depth,0,0)>0 &&
+          client_skill_activation_actor_index==1)):
+        (client_skill_replay_active() && client_skill_replay_caster_index()==1)) ||
         (client_session_authenticated() &&
          last_applied_snapshot.seat[1].actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
          last_applied_snapshot.seat[1].skill_active &&
@@ -2252,6 +2279,10 @@ static BOOL __attribute__((thiscall)) preserve_client_skill_camera(
 ) {
     CameraManagerSetRenderCameraFunction original =
         (CameraManagerSetRenderCameraFunction)client_skill_camera_hook.trampoline;
+    int routed=SudekiMpLanArenaRouteCastCamera(manager,name);
+    if(routed==1) return TRUE;
+    if(routed<0) return FALSE;
+    if(routed==2) return original(manager,name);
     int caster_index = client_skill_replay_caster_index();
     if (!client_skill_replay_active()) {
         client_skill_camera_suppression_logged = FALSE;
@@ -2486,6 +2517,14 @@ static BOOL drain_native_skill_leases(const char *reason) {
         all_drained = FALSE;
     }
     return all_drained;
+}
+
+BOOL SudekiMpLanArenaClientReplicaDrainSkillReplay(void) {
+    if (InterlockedCompareExchange(&client_skill_activation_depth, 0, 0) > 0) {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    return drain_native_skill_leases("private_cast_namespace_retirement");
 }
 
 static BOOL client_damage_containment_active(void) {
@@ -4848,6 +4887,7 @@ static BOOL service_native_skill_presentation(
     BOOL local_state_observed = TRUE;
     BOOL local_native_active = FALSE;
     BOOL host_resources_restored;
+    SudekiMpLanArenaSessionStatus replay_status;
 
     if (native_owns_presentation == NULL || character == NULL ||
         snapshot == NULL || actor_index >= 2u) return FALSE;
@@ -5000,6 +5040,12 @@ static BOOL service_native_skill_presentation(
             snapshot->skill_active != 0u;
         return TRUE;
     }
+    if(snapshot->skill_sequence && snapshot->skill_kind==SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER) {
+        SudekiMpLanArenaActorSnapshot timing=*snapshot;
+        (void)SudekiMpLanArenaReplicaLatestSkillTiming(&replica,actor_index,snapshot,
+            &timing.skill_target_phase,&timing.skill_target_remaining_ms);
+        if(!SudekiMpLanArenaApplyClientSkillTiming(actor_index,&timing)) return FALSE;
+    }
     if (lease->native_started &&
         lease->seen_sequence == snapshot->skill_sequence) {
         if (local_native_active || snapshot->skill_active != 0u) {
@@ -5087,7 +5133,8 @@ static BOOL service_native_skill_presentation(
         clear_native_skill_activation_retry(lease);
     }
 
-    if (snapshot->skill_active != 0u) {
+    if (snapshot->skill_active != 0u &&
+        !SudekiMpLanArenaOrdinarySkillOverlapOwned()) {
         unsigned int other_actor_index = actor_index ^ 1u;
         LanArenaNativeSkillPresentationLease *other_lease =
             &native_skill_leases[other_actor_index];
@@ -5165,7 +5212,9 @@ static BOOL service_native_skill_presentation(
         *native_owns_presentation = TRUE;
         return TRUE;
     }
-    if (actor_index == 0u &&
+    if(!client_session_status(&replay_status) ||
+        InterlockedCompareExchange(&client_skill_activation_depth,0,0)>0) return FALSE;
+    if (actor_index == 0u && !SudekiMpLanArenaClientPrivateCastCamerasOwned() &&
         !remote_tal_skill_view_lease.owner_view.valid &&
         !capture_remote_tal_skill_view_lease(
             snapshot->skill_sequence)) {
@@ -5225,11 +5274,17 @@ static BOOL service_native_skill_presentation(
     }
     client_skill_camera_suppression_logged = FALSE;
     client_skill_activation_actor_index = (int)actor_index;
+    client_skill_replay_admission.actor=character;
+    client_skill_replay_admission.session=replay_status.session_token;
+    client_skill_replay_admission.sequence=snapshot->skill_sequence;
+    client_skill_replay_admission.slot=snapshot->skill_slot;
+    client_skill_replay_admission.thread=GetCurrentThreadId();
     InterlockedIncrement(&client_skill_activation_depth);
     result = SudekiMpReplayHostApprovedCharacterSkillSlot(
         character, (int)snapshot->skill_slot);
     InterlockedDecrement(&client_skill_activation_depth);
     client_skill_activation_actor_index = -1;
+    ZeroMemory(&client_skill_replay_admission,sizeof(client_skill_replay_admission));
     host_resources_restored = SudekiMpCleanroomEngineSetActorResources(
         actor, (float)snapshot->hp, (float)snapshot->sp);
 
@@ -7643,18 +7698,23 @@ static BOOL spirit_view_frame_exact(void) {
         *(void **)(lease->world_wrapper + 8u) != lease->body ||
         *(void **)(lease->arms_wrapper + 8u) != lease->arms ||
         !writable_memory(lease->body + RENDER_OBJECT_FLAGS_OFFSET, 4u) ||
-        !writable_memory(lease->arms + RENDER_OBJECT_FLAGS_OFFSET, 4u) ||
+        !writable_memory(lease->arms + RENDER_OBJECT_FLAGS_OFFSET, 4u)) return FALSE;
+    if (!lease->preparation_only && (
         *(uint8_t **)(game_base + 0x409d7cu) != lease->camera_manager ||
         !readable_memory(lease->camera_manager, 0x4cu) ||
         *(void **)lease->camera_manager != game_base + 0x2c7b80u ||
-        *(uint8_t **)(lease->camera_manager + 0x2cu) != lease->borrowed_camera ||
+        (lease->in_place ?
+            (!SudekiMpLanArenaClientPrivateCastCamerasOwned() ||
+             lease->borrowed_camera!=lease->view.camera || lease->borrowed_state!=lease->view.render_state ||
+             *(void **)(lease->camera_manager+0x20u)!=lease->borrowed_camera):
+            (*(uint8_t **)(lease->camera_manager+0x2cu)!=lease->borrowed_camera)) ||
         !readable_memory(lease->borrowed_camera, 0x108u) ||
         *(void **)lease->borrowed_camera != game_base + 0x2cce5cu ||
-        memcmp(lease->borrowed_camera + 0x4cu, "SpiritCam", 10u) != 0 ||
+        (!lease->in_place && memcmp(lease->borrowed_camera + 0x4cu, "SpiritCam", 10u) != 0) ||
         *(uint8_t **)(lease->borrowed_camera + 0x34u) != lease->borrowed_state ||
         !writable_memory(lease->borrowed_state + 0x90u, 76u) ||
         !writable_memory(lease->borrowed_state + 0x2cu, 2u) ||
-        !current_client_owner_view(&mode, &scene)) return FALSE;
+        !current_client_owner_view(&mode, &scene))) return FALSE;
     if (*(uint8_t **)((uint8_t *)lease->character + CHARACTER_WEAPON_OFFSET) != lease->weapon ||
         !readable_memory(lease->weapon, WEAPON_SECONDARY_WRAPPER_OFFSET + sizeof(void *)) ||
         *(void **)(lease->weapon + WEAPON_OWNER_OFFSET) != lease->character) return FALSE;
@@ -7666,7 +7726,7 @@ static BOOL spirit_view_frame_exact(void) {
              *(uint8_t **)(lease->weapon_wrappers[i] + WRAPPER_RENDER_OBJECT_OFFSET) != lease->weapon_render[i] ||
              !writable_memory(lease->weapon_render[i] + RENDER_OBJECT_FLAGS_OFFSET, 4u))) return FALSE;
     }
-    return SudekiMpLanArenaOwnerViewSwapRenderState(&lease->view, mode, scene,
+    return lease->preparation_only || SudekiMpLanArenaOwnerViewSwapRenderState(&lease->view, mode, scene,
         lease->swapped ? lease->borrowed_state : lease->view.render_state,
         lease->swapped ? lease->borrowed_state : lease->view.render_state);
 }
@@ -7678,14 +7738,16 @@ BOOL SudekiMpLanArenaClientSpiritViewEndFrame(void) {
     unsigned int i;
     if (!lease->view.valid) return TRUE;
     if (!spirit_view_frame_exact()) return FALSE; /* Keep the teardown barrier. */
-    if (!current_client_owner_view(&mode, &scene) ||
-        !SudekiMpLanArenaOwnerViewSwapRenderState(&lease->view, mode, scene,
-            lease->swapped ? lease->borrowed_state : lease->view.render_state,
-            lease->view.render_state)) return FALSE;
-    lease->swapped = FALSE;
-    state = lease->borrowed_state;
-    memcpy(state + 0x90u, lease->saved_camera, sizeof(lease->saved_camera));
-    ++*(uint16_t *)(state + 0x2cu);
+    if (!lease->preparation_only) {
+        if (!current_client_owner_view(&mode, &scene) ||
+            !SudekiMpLanArenaOwnerViewSwapRenderState(&lease->view, mode, scene,
+                lease->swapped ? lease->borrowed_state : lease->view.render_state,
+                lease->view.render_state)) return FALSE;
+        lease->swapped = FALSE;
+        state = lease->borrowed_state;
+        memcpy(state + 0x90u, lease->saved_camera, sizeof(lease->saved_camera));
+        ++*(uint16_t *)(state + 0x2cu);
+    }
     *(uint32_t *)(lease->body + RENDER_OBJECT_FLAGS_OFFSET) =
         (*(uint32_t *)(lease->body + RENDER_OBJECT_FLAGS_OFFSET) & ~4u) | lease->body_hidden;
     *(uint32_t *)(lease->arms + RENDER_OBJECT_FLAGS_OFFSET) =
@@ -7705,15 +7767,15 @@ static BOOL spirit_view_trace(const char *reason, BOOL result) {
     if (reason != last_reason || (DWORD)(now - last_tick) >= 1000u) {
         last_reason = reason; last_tick = now;
         SudekiMpLogFormat("lan_arena_client_replica event=spirit_view reason=%s kind=%u sequence=%u hidden=%u\r\n",
-            reason, last_applied_snapshot.spirit_view.kind,
-            last_applied_snapshot.spirit_view.skill_sequence,
-            last_applied_snapshot.spirit_view.body_hidden);
+            reason, last_applied_snapshot.cast[1].spirit_view.kind,
+            last_applied_snapshot.cast[1].spirit_view.skill_sequence,
+            last_applied_snapshot.cast[1].spirit_view.body_hidden);
     }
     return result;
 }
 
-BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) {
-    const SudekiMpLanArenaSpiritView *view = &last_applied_snapshot.spirit_view;
+static BOOL begin_spirit_view_frame(BOOL preparation_only) {
+    const SudekiMpLanArenaSpiritView *view = &last_applied_snapshot.cast[1].spirit_view;
     SpiritViewFrameLease pending = {0};
     void *mode, *scene;
     uint8_t *state;
@@ -7726,7 +7788,8 @@ BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) {
         !last_applied_snapshot.seat[1].skill_active ||
         last_applied_snapshot.seat[1].skill_kind != SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT ||
         view->skill_sequence != last_applied_snapshot.seat[1].skill_sequence ||
-        native_skill_leases[0].native_started || native_skill_leases[1].native_started)
+        native_skill_leases[1].native_started ||
+        (native_skill_leases[0].native_started && !SudekiMpLanArenaClientPrivateCastCamerasOwned()))
         return spirit_view_trace("cast_identity", FALSE);
     pending.character = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     if (pending.character != last_applied_characters[1] ||
@@ -7749,10 +7812,18 @@ BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) {
         !SudekiMpLanArenaOwnerViewCapture(&pending.view, mode, scene)) return spirit_view_trace("owner_view", FALSE);
     pending.camera_manager = *(uint8_t **)(game_base + 0x409d7cu);
     if (!readable_memory(pending.camera_manager, 0x4cu)) return spirit_view_trace("camera_manager", FALSE);
-    pending.borrowed_camera = *(uint8_t **)(pending.camera_manager + 0x2cu);
+    /* Keep the native selected-camera/scene relationship intact so scoped
+     * peer callbacks can still validate their logical selection. Overlay only
+     * the local owner's current-frame matrices and restore before updates.
+     * The remote cast's private cameras are never borrowed or overwritten. */
+    pending.in_place=SudekiMpLanArenaClientPrivateCastCamerasOwned();
+    pending.preparation_only=preparation_only;
+    pending.borrowed_camera = pending.in_place ? pending.view.camera:
+        *(uint8_t **)(pending.camera_manager + 0x2cu);
     if (!readable_memory(pending.borrowed_camera, 0x108u)) return spirit_view_trace("borrowed_camera", FALSE);
     pending.borrowed_state = *(uint8_t **)(pending.borrowed_camera + 0x34u);
-    if (pending.borrowed_state == pending.view.render_state) return spirit_view_trace("borrowed_alias", FALSE);
+    if (!pending.in_place && pending.borrowed_state == pending.view.render_state)
+        return spirit_view_trace("borrowed_alias", FALSE);
     state = pending.borrowed_state;
     if (!writable_memory(state + 0x90u, 76u) || !writable_memory(state + 0x2cu, 2u)) return spirit_view_trace("camera_storage", FALSE);
     memcpy(pending.saved_camera, state + 0x90u, sizeof(pending.saved_camera));
@@ -7773,34 +7844,52 @@ BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) {
     }
     spirit_view_frame = pending;
     if (!spirit_view_frame_exact()) { ZeroMemory(&spirit_view_frame, sizeof(spirit_view_frame)); return spirit_view_trace("exact_lease", FALSE); }
-    memcpy(state + 0x90u, view->matrix, sizeof(view->matrix));
-    memcpy(state + 0xd0u, view->projection, sizeof(view->projection));
-    ++*(uint16_t *)(state + 0x2cu);
-    if (!SudekiMpLanArenaOwnerViewSwapRenderState(&spirit_view_frame.view,
-            mode, scene, pending.view.render_state, pending.borrowed_state)) {
-        (void)SudekiMpLanArenaClientSpiritViewEndFrame();
-        return spirit_view_trace("scene_swap", FALSE);
+    if (!preparation_only) {
+        memcpy(state + 0x90u, view->matrix, sizeof(view->matrix));
+        memcpy(state + 0xd0u, view->projection, sizeof(view->projection));
+        ++*(uint16_t *)(state + 0x2cu);
+        if (!SudekiMpLanArenaOwnerViewSwapRenderState(&spirit_view_frame.view,
+                mode, scene, pending.view.render_state, pending.borrowed_state)) {
+            (void)SudekiMpLanArenaClientSpiritViewEndFrame();
+            return spirit_view_trace("scene_swap", FALSE);
+        }
+        spirit_view_frame.swapped = TRUE;
     }
-    spirit_view_frame.swapped = TRUE;
     *(uint32_t *)(pending.body + RENDER_OBJECT_FLAGS_OFFSET) =
         (*(uint32_t *)(pending.body + RENDER_OBJECT_FLAGS_OFFSET) & ~4u) | (view->body_hidden ? 4u : 0u);
     *(uint32_t *)(pending.arms + RENDER_OBJECT_FLAGS_OFFSET) |= 4u;
     for (i = 0; i < 2u; ++i) if (pending.weapon_render[i])
         *(uint32_t *)(pending.weapon_render[i] + RENDER_OBJECT_FLAGS_OFFSET) |= RENDER_OBJECT_HIDDEN_FLAG;
-    return spirit_view_trace("applied", TRUE);
+    return preparation_only ? TRUE : spirit_view_trace("applied", TRUE);
+}
+
+BOOL SudekiMpLanArenaClientSpiritViewPrepareBody(void) {
+    /* A hidden first-person world model is not evaluated by the ordinary
+     * native preparation path. Making it visible only at Draw displays a
+     * frozen pose even though its replicated animation clock advances.
+     * Keep camera matrices untouched here; the primary draw owns those. */
+    return begin_spirit_view_frame(TRUE);
+}
+
+BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) {
+    return begin_spirit_view_frame(FALSE);
 }
 
 BOOL SudekiMpLanArenaClientReplicaGetSkillFade(SudekiMpLanArenaSkillFade *fade) {
     unsigned int i;
+    /* Prefer the local owner's record even when the peer is also casting.
+     * A peer-only record asks the renderer to suppress its local native fade;
+     * it never supplies RGB for this player's cast. */
+    unsigned int owner=last_applied_snapshot.cast[1].skill_fade.kind ? 1u:0u;
     if(!fade || client_replica_reset_pending || !client_session_authenticated() ||
-        !replica_diagnostics.valid || !last_applied_snapshot.skill_fade.kind ||
+        !replica_diagnostics.valid || !last_applied_snapshot.cast[owner].skill_fade.kind ||
         !SudekiMpLanArenaSnapshotValid(&last_applied_snapshot)) return FALSE;
     for(i=0u;i<2u;++i) {
         uint8_t *actor=SudekiMpCleanroomEngineActorEntity(i==0u ? seat_host_actor() : seat_client_actor());
         if(!actor || actor!=last_applied_characters[i] || !readable_memory(actor,0x48u) ||
             *(void **)(actor+0x44u)!=last_applied_positions[i]) return FALSE;
     }
-    *fade=last_applied_snapshot.skill_fade;
+    *fade=last_applied_snapshot.cast[owner].skill_fade;
     return TRUE;
 }
 

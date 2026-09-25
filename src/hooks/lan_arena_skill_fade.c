@@ -26,6 +26,8 @@ static SetGroupFunction set_group;
 static SudekiMpLanArenaSkillFadeWitness view_witness;
 static SudekiMpRelativeCallHook draw_hook;
 static unsigned int draw_depth;
+static SudekiMpLanArenaDrawViewBoundary draw_view_begin, draw_view_end;
+static BOOL draw_view_pending;
 static struct { BOOL valid; void *light, *scene, *renderer, *device, *device_vtable;
     float saved[3], applied[3]; } lease;
 
@@ -110,16 +112,34 @@ static void __attribute__((regparm(1))) draw_local_view(void *renderer) {
     float rgb[3];
     BOOL staged=FALSE;
     ++draw_depth;
+    /* RenderStart is too early for an in-place camera overlay: the primary
+     * component update runs between it and this call and can rewrite that
+     * same camera storage. Borrow only across the actual native world draw. */
+    if(draw_depth==1 && draw_view_begin) {
+        if(draw_view_pending && draw_view_end()) draw_view_pending=FALSE;
+        if(!draw_view_pending) {
+            draw_view_pending=TRUE;
+            (void)draw_view_begin();
+        }
+    }
     if(draw_depth==1 && restore_light() && view_witness && view_witness(rgb))
         staged=stage_light(renderer,rgb);
     original_draw(renderer);
     if(staged && !restore_light())
         SudekiMpLogWrite("lan_arena_skill_fade event=restore_deferred policy=retain_exact_render_lease\r\n");
+    if(draw_depth==1 && draw_view_pending && draw_view_end())
+        draw_view_pending=FALSE;
     --draw_depth;
 }
 BOOL SudekiMpInstallLanArenaSkillFade(HMODULE image, SudekiMpLanArenaSkillFadeWitness witness) {
+    return SudekiMpInstallLanArenaSkillFadeWithDrawView(image,witness,NULL,NULL);
+}
+BOOL SudekiMpInstallLanArenaSkillFadeWithDrawView(HMODULE image,
+    SudekiMpLanArenaSkillFadeWitness witness,
+    SudekiMpLanArenaDrawViewBoundary begin,
+    SudekiMpLanArenaDrawViewBoundary end) {
     uint8_t *candidate=(uint8_t *)image;
-    if(base || !image || !witness ||
+    if(base || !image || !witness || ((begin==NULL)!=(end==NULL)) ||
         !readable(candidate+SET_GROUP,sizeof(setter_prefix)) ||
         memcmp(candidate+SET_GROUP,setter_prefix,sizeof(setter_prefix)) ||
         !readable(candidate+DRAW,sizeof(draw_prefix)) ||
@@ -129,14 +149,21 @@ BOOL SudekiMpInstallLanArenaSkillFade(HMODULE image, SudekiMpLanArenaSkillFadeWi
     }
     base=candidate; original_draw=(DrawFunction)(base+DRAW);
     set_group=(SetGroupFunction)(base+SET_GROUP); view_witness=witness;
+    draw_view_begin=begin; draw_view_end=end; draw_view_pending=FALSE;
     if(!SudekiMpInstallRelativeCallHook(&draw_hook,base+DRAW_CALL,original_draw,draw_local_view)) {
-        base=NULL; original_draw=NULL; set_group=NULL; view_witness=NULL; return FALSE;
+        base=NULL; original_draw=NULL; set_group=NULL; view_witness=NULL;
+        draw_view_begin=draw_view_end=NULL; return FALSE;
     }
     return TRUE;
 }
 BOOL SudekiMpUninstallLanArenaSkillFade(void) {
     if(draw_depth || !restore_light()) { SetLastError(ERROR_BUSY); return FALSE; }
+    if(draw_view_pending) {
+        if(!draw_view_end || !draw_view_end()) { SetLastError(ERROR_BUSY); return FALSE; }
+        draw_view_pending=FALSE;
+    }
     if(!SudekiMpRestoreRelativeCallHook(&draw_hook)) return FALSE;
     base=NULL; original_draw=NULL; set_group=NULL; view_witness=NULL;
+    draw_view_begin=draw_view_end=NULL;
     return TRUE;
 }

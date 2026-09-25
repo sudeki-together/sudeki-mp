@@ -21,6 +21,9 @@ static uint8_t seat_client_type(void) {
 
 enum {
     RVA_FINALIZE = 0x18830u,
+    RVA_ANIMATION_EMIT = 0xe2810u,
+    RVA_SCRIPT_PARENT_CALL = 0x18f2bu,
+    RVA_PARENT_CREATE = 0x18c90u,
     RVA_WEAK_BIND = 0x1750u,
     RVA_WEAK_DESTROY = 0x4d30u,
     RVA_EFFECT_VTABLE = 0x2d3c7cu,
@@ -61,6 +64,12 @@ static const uint8_t finalize_prefix[] = {
     0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x14,0x53,0x56,0x57,
     0x8b,0xf8,0x8b,0x47,0x1c,0x85,0xc0,0x0f,0x84,0xd3,0x01,0x00,0x00
 };
+static const uint8_t animation_emit_prefix[] = {
+    0x55,0x8b,0xec,0x83,0xe4,0xf0,0x83,0xec,0x64,0x8b,0x44,0x24,0x08
+};
+static const uint8_t animation_emit_tail[] = {
+    0x5f,0x5e,0x5b,0x8b,0xe5,0x5d,0xc2,0x0c,0x00
+};
 static const uint8_t weak_bind_body[] = {
     0x8b,0x08,0x85,0xc9,0x74,0x35,0x57,0x39,0x41,0x04,0x75,0x06,
     0x8b,0x78,0x08,0x89,0x79,0x04,0x8b,0x48,0x04,0x85,0xc9,0x74,
@@ -80,6 +89,23 @@ static const uint8_t weak_null_tail[] = {
 };
 
 static SudekiMpInlineHook finalize_hook;
+static SudekiMpInlineHook animation_emit_hook;
+static SudekiMpRelativeCallHook script_parent_hook;
+typedef struct EmissionSource {
+    uint64_t session;
+    uint16_t sequence;
+    uint32_t tick;
+    uint8_t owner;
+    BOOL valid;
+} EmissionSource;
+typedef struct PendingEmission {
+    SudekiMpSpiritVisualWeakNode weak;
+    EmissionSource source;
+} PendingEmission;
+/* Stable native weak nodes retain attribution across asynchronous loading.
+ * Never cache a naked effect or infer its caster from whoever is active later. */
+static PendingEmission pending_emissions[SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY];
+static const EmissionSource *emission_source;
 static SudekiMpSpiritVisualHostRegistry registry;
 static HMODULE image;
 static DWORD game_thread;
@@ -587,6 +613,175 @@ static const SudekiMpSpiritVisualHostApi *native_api(void) {
     return &api;
 }
 
+static BOOL reset_pending_emissions(void) {
+    unsigned int i;
+    BOOL ok = TRUE;
+    for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        PendingEmission *p = &pending_emissions[i];
+        if ((p->weak.entity || p->weak.previous || p->weak.next) &&
+            !native_bind(image, &p->weak, NULL)) {
+            ok = FALSE;
+            continue;
+        }
+        memset(p, 0, sizeof(*p));
+    }
+    if (!ok) registry.unknown = TRUE;
+    return ok;
+}
+
+static BOOL same_source(const EmissionSource *a, const EmissionSource *b) {
+    return a->valid && b->valid && a->session == b->session &&
+        a->sequence == b->sequence && a->owner == b->owner;
+}
+
+static PendingEmission *pending_source_for(void *entity) {
+    unsigned int i;
+    if (!entity) return NULL;
+    for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        PendingEmission *p = &pending_emissions[i];
+        if (p->weak.entity == entity) {
+            if (p->source.session == registry.session && weak_links_valid(&p->weak)) return p;
+            registry.unknown = TRUE;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static BOOL registered_source_for(void *entity, EmissionSource *source) {
+    unsigned int i;
+    if (!entity || registry.session == 0u) return FALSE;
+    for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        SudekiMpSpiritVisualHostEntry *e = &registry.entries[i];
+        if (e->weak.entity != entity) continue;
+        if (!weak_links_valid(&e->weak) || !e->value.skill_sequence) return FALSE;
+        *source = (EmissionSource){registry.session, e->value.skill_sequence,
+            e->value.emitted_host_tick, e->value.owner_actor_type, TRUE};
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void retain_emission(void *entity, const EmissionSource *source) {
+    EmissionSource recorded = {0};
+    PendingEmission *existing;
+    unsigned int i;
+    if (!source->valid || !entity) return;
+    if (!exact_effect(entity) || source->session != registry.session) {
+        registry.unknown = TRUE;
+        return;
+    }
+    if (registered_source_for(entity, &recorded)) {
+        if (!same_source(source, &recorded)) registry.unknown = TRUE;
+        return; /* Immediate finalization already owns the native lifetime. */
+    }
+    existing = pending_source_for(entity);
+    if (existing) {
+        if (!same_source(source, &existing->source)) registry.unknown = TRUE;
+        return;
+    }
+    for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        PendingEmission *p = &pending_emissions[i];
+        if (p->weak.entity || p->weak.previous || p->weak.next) continue;
+        p->source = *source;
+        if (!native_bind(image, &p->weak, entity)) registry.unknown = TRUE;
+        return;
+    }
+    registry.unknown = TRUE; /* Never publish a truncated lifetime roster. */
+}
+
+typedef void (__attribute__((stdcall)) *AnimationEmit)(void *, void **, uint32_t);
+static void __attribute__((stdcall)) observe_animation_emit(
+    void *component, void **out_effect, uint32_t event_index
+) {
+    EmissionSource source = {0};
+    const EmissionSource *previous = NULL;
+    BOOL observing = FALSE;
+    InterlockedIncrement(&in_flight);
+    if (game_thread && session_armed && InterlockedCompareExchange(&admitted, 0, 0)) {
+        if (GetCurrentThreadId() != game_thread) InterlockedExchange(&unexpected_thread, 1);
+        else {
+            void *entity = NULL, *backlink = NULL;
+            PendingEmission *pending;
+            observing = TRUE;
+            previous = emission_source;
+            /* An explicit foreign source masks an enclosing caster scope. */
+            if (component && active_witness && active_witness(witness_context, component,
+                    &source.session, &source.sequence, &source.tick, &source.owner))
+                source.valid = source.session == registry.session;
+            else if (pointer_at(component, 0x10u, &entity) &&
+                exact_effect(entity) && pointer_at(entity, 0x58u, &backlink) && backlink == component) {
+                if (!registered_source_for(entity, &source) &&
+                    (pending = pending_source_for(entity)) != NULL) source = pending->source;
+            }
+            emission_source = &source;
+        }
+    }
+    ((AnimationEmit)animation_emit_hook.trampoline)(component, out_effect, event_index);
+    if (observing) {
+        if (source.valid) {
+            if (memory_access(out_effect, sizeof(*out_effect), FALSE)) retain_emission(*out_effect, &source);
+            else registry.unknown = TRUE;
+        }
+        emission_source = previous;
+    }
+    InterlockedDecrement(&in_flight);
+}
+
+/* The script-facing PlaySFXWithAll parent call passes eleven stack words and
+ * a bone selector in EDI. The constructor consumes both ResourceName values
+ * (including their existing reference counts) and returns the effect in EAX.
+ * Copy stack words without acquiring/releasing any extra resource reference.
+ * This bridge preserves all nonvolatile registers; the outer bridge also
+ * preserves ECX, as the exact native constructor does. */
+static void * __attribute__((naked, cdecl, used)) invoke_parent_create(
+    void *entry __attribute__((unused)), const uint32_t *args __attribute__((unused)),
+    uint32_t selector __attribute__((unused))
+) {
+    __asm__ volatile(
+        "pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %esi\n\tpushl %edi\n\t"
+        "movl 12(%ebp),%esi\n\tsubl $44,%esp\n\tmovl %esp,%edi\n\t"
+        "movl $11,%ecx\n\trep movsl\n\tmovl 16(%ebp),%edi\n\t"
+        "call *8(%ebp)\n\tpopl %edi\n\tpopl %esi\n\tpopl %ebp\n\tret");
+}
+
+static void * __attribute__((cdecl, used)) observe_script_parent_body(
+    const uint32_t *args, uint32_t selector
+) {
+    EmissionSource source = {0};
+    void *effect;
+    BOOL observing = FALSE;
+    InterlockedIncrement(&in_flight);
+    if (game_thread && session_armed && InterlockedCompareExchange(&admitted, 0, 0)) {
+        if (GetCurrentThreadId() != game_thread) InterlockedExchange(&unexpected_thread, 1);
+        else if (memory_access(args, 11u * sizeof(*args), FALSE)) {
+            uint8_t kind = native_resource_kind(args + 2u);
+            /* Status/shield effects have separate target-owned discovery.
+             * An unrelated script effect must not consume a pending slot. */
+            observing = kind != 0u && kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
+                kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR &&
+                kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP;
+            if (observing) {
+                if (emission_source) source = *emission_source;
+                else if (active_witness) source.valid = active_witness(witness_context, NULL,
+                    &source.session, &source.sequence, &source.tick, &source.owner);
+            }
+        }
+    }
+    effect = invoke_parent_create((uint8_t *)image + RVA_PARENT_CREATE, args, selector);
+    /* A parent is the effect's recipient, not necessarily its caster. Never
+     * attribute a party buff from args[1] or whichever cast is active later. */
+    if (observing && source.valid) retain_emission(effect, &source);
+    InterlockedDecrement(&in_flight);
+    return effect;
+}
+
+static void __attribute__((naked, used)) observe_script_parent(void) {
+    __asm__ volatile(
+        "pushl %ecx\n\tleal 8(%esp),%eax\n\tpushl %edi\n\tpushl %eax\n\t"
+        "call _observe_script_parent_body\n\taddl $8,%esp\n\tpopl %ecx\n\tret $44");
+}
+
 /* custom EAX SfxSetup*, one callee-cleaned stack mode. regparm(1) alone
  * would use caller cleanup, so both directions use explicit bridges. */
 static unsigned char invoke_finalize(void *setup, uint32_t mode) {
@@ -609,6 +804,7 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
     uint32_t requested_identifier = 0u, requested_type = 0u;
     uint8_t observed_kind = 0u;
     uint8_t owner_type = 0u;
+    PendingEmission *pending = NULL;
     const char *skip_reason = NULL;
     InterlockedIncrement(&in_flight);
     if (game_thread != 0u && session_armed &&
@@ -619,8 +815,25 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
         } else {
             uint8_t *s = (uint8_t *)setup;
             uint8_t kind = 0u;
-            BOOL active = active_witness != NULL &&
-                active_witness(witness_context, &session, &skill, &tick, &owner_type);
+            EmissionSource source = {0};
+            BOOL active;
+            if (emission_source) source = *emission_source;
+            else if (active_witness) source.valid = active_witness(witness_context, NULL,
+                &source.session, &source.sequence, &source.tick, &source.owner);
+            if (memory_access(s, 0x48u, FALSE) && mode <= 2u)
+                pending = pending_source_for(*(void **)(s + 0x1cu));
+            if (pending) {
+                /* A delayed native callback retains emission-time ownership,
+                 * including after its cast ends. Conflicting scopes fail closed. */
+                if ((source.valid && !same_source(&source, &pending->source)) ||
+                    (emission_source && !source.valid)) {
+                    registry.unknown = TRUE;
+                    source.valid = FALSE;
+                } else source = pending->source;
+            }
+            active = source.valid && source.session == registry.session;
+            session = source.session; skill = source.sequence;
+            tick = source.tick; owner_type = source.owner;
             if (!memory_access(s, 0x48u, FALSE) || mode > 2u) {
                 if (active) registry.unknown = TRUE;
             } else {
@@ -694,6 +907,10 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
         SudekiMpSpiritVisualHostRegistryComplete(
             &registry, token, result != 0u, native_api());
     }
+    if (pending) {
+        if (native_bind(image, &pending->weak, NULL)) memset(pending, 0, sizeof(*pending));
+        else registry.unknown = TRUE;
+    }
     InterlockedDecrement(&in_flight);
     /* This transition log follows native execution; no render-rate disk I/O. */
     if (skip_reason != NULL) SudekiMpLogFormat(
@@ -739,10 +956,21 @@ BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE module) {
     static const uint32_t calls[] = {0x18244u,0x182d5u,0x183d8u,0x18425u,0x18543u,0x18585u};
     static const uint8_t base_destructor_tail[] = {0xe9,0xdf,0x71,0xec,0xff};
     static const uint8_t is_boost_body[] = {0x8b,0x41,0x54,0x8a,0x40,0x4c,0xc3};
+    static const uint8_t parent_prefix[] = {0x51,0x8b,0x44,0x24,0x0c,0x8b,0x80,0xb4,0,0,0,0x53};
+    static const uint8_t parent_tail[] = {0x8b,0xc5,0x5e,0x5d,0x5b,0x59,0xc2,0x2c,0};
     unsigned int i;
     if (base == NULL ||
         !matches(base, 0x5070u, is_boost_body, sizeof(is_boost_body)) ||
         !matches(base, RVA_FINALIZE, finalize_prefix, sizeof(finalize_prefix)) ||
+        !matches(base, RVA_ANIMATION_EMIT, animation_emit_prefix, sizeof(animation_emit_prefix)) ||
+        !matches(base, 0xe2bbbu, animation_emit_tail, sizeof(animation_emit_tail)) ||
+        !call_matches(base, 0xe236au, RVA_ANIMATION_EMIT) ||
+        !call_matches(base, 0x1885a9u, RVA_ANIMATION_EMIT) ||
+        !call_matches(base, 0x1887f7u, RVA_ANIMATION_EMIT) ||
+        !call_matches(base, RVA_SCRIPT_PARENT_CALL, RVA_PARENT_CREATE) ||
+        !matches(base, RVA_PARENT_CREATE, parent_prefix, sizeof(parent_prefix)) ||
+        !matches(base, 0x18d9cu, parent_tail, sizeof(parent_tail)) ||
+        !call_matches(base, 0x18d4bu, 0x18140u) ||
         !matches(base, RVA_WEAK_BIND, weak_bind_body, sizeof(weak_bind_body)) ||
         !matches(base, 0x4d72u, weak_null_tail, sizeof(weak_null_tail)) ||
         !matches(base, RVA_WORLD_MATRIX, world_matrix_prefix, sizeof(world_matrix_prefix)) ||
@@ -767,8 +995,10 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
     HMODULE self;
     if (module == NULL || witness == NULL || InterlockedCompareExchange(&admitted, 0, 0))
         return FALSE;
-    if (finalize_hook.installed) {
+    if (finalize_hook.installed || animation_emit_hook.installed || script_parent_hook.installed) {
         if (image != module || InterlockedCompareExchange(&in_flight, 0, 0) != 0 ||
+            !finalize_hook.installed || !animation_emit_hook.installed || !script_parent_hook.installed ||
+            !reset_pending_emissions() ||
             !SudekiMpSpiritVisualHostRegistryReset(&registry, native_api())) return FALSE;
     } else {
         if (!SudekiMpLanArenaSpiritVisualHostImageMatches(module)) return FALSE;
@@ -780,6 +1010,20 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
         game_thread = 0u; /* First verified Capture binds the game thread. */
         if (!SudekiMpInstallInlineHook(&finalize_hook, (uint8_t *)module + RVA_FINALIZE,
             finalize_prefix, 6u, observe_finalize)) return FALSE;
+        if (!SudekiMpInstallInlineHook(&animation_emit_hook, (uint8_t *)module + RVA_ANIMATION_EMIT,
+            animation_emit_prefix, 6u, observe_animation_emit)) {
+            /* Pinned callbacks/trampolines survive a failed rollback. A partial
+             * install cannot be rebound or reported as fully initialized. */
+            SudekiMpRestoreInlineHook(&finalize_hook);
+            return FALSE;
+        }
+        if (!SudekiMpInstallRelativeCallHook(&script_parent_hook,
+                (uint8_t *)module + RVA_SCRIPT_PARENT_CALL,
+                (uint8_t *)module + RVA_PARENT_CREATE, observe_script_parent)) {
+            SudekiMpRestoreInlineHook(&animation_emit_hook);
+            SudekiMpRestoreInlineHook(&finalize_hook);
+            return FALSE;
+        }
     }
     active_witness = witness;
     witness_context = context;
@@ -801,6 +1045,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {
     if (InterlockedCompareExchange(&in_flight, 0, 0) != 0) return FALSE;
     /* Empty registries need no native call and can unbind at the loader seam.
      * A real linked node remains retained if native_bind rejects this thread. */
+    if (!reset_pending_emissions()) return FALSE;
     return SudekiMpSpiritVisualHostRegistryReset(&registry, native_api());
 }
 
@@ -869,6 +1114,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     reason = "session_lease_cleanup";
     if (registry.session != 0u && registry.session != session) {
         session_armed = FALSE;
+        if (!reset_pending_emissions()) goto unknown;
         if (!SudekiMpSpiritVisualHostRegistryReset(&registry, native_api())) goto unknown;
         diagnostic_count = 0u;
         diagnostic_skill = 0u;

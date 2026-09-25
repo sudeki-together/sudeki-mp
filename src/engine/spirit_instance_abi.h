@@ -49,6 +49,13 @@ BOOL SudekiMpEnableSpiritInstanceCastGates(void);
  * closed. This is resource continuity, not concurrency admission. */
 BOOL SudekiMpEnableSpiritInstanceSharedSsp(void);
 BOOL SudekiMpSpiritInstanceSharedSspAbiReady(void);
+/* Idle-only opt-in: constructor-owned CLightManagers per bound instance.
+ * Native effect handles/stacks/rates/easing are kept intact and tick once at
+ * native cadence. Scope transitions route the singleton; the world manager
+ * is restored outside scopes. Private ticks never publish global render RGB.
+ * Observer/retirement includes the fade tail and baseline-only native stack.
+ * No overlap admission or wire changes are implied. */
+BOOL SudekiMpEnableSpiritInstanceLighting(void);
 /* Host-only opt-in for a retained REMOTE caster. Omit this for the local
  * caster: its native menu transitions remain unchanged. Suppress this
  * instance's balanced Spirit UI acquisition/release and script-driven caster
@@ -68,6 +75,26 @@ BOOL SudekiMpEnableSpiritInstanceRemoteSkillUi(const SudekiMpSpiritInstance *ins
  * unrelated locks keep their native behavior. Does not admit overlapping casts. */
 BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *instance,
     void *local_actor,SudekiMpSpiritCasterWitness local_witness);
+/* Optional idle-boundary routing of EnableSkillTargettingMode. A remote
+ * ordinary script must not change the local controller's action bit/timer.
+ * Local and neutral calls retain the complete native function. */
+BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void);
+/* Ordinary-skill countdown routing. All calls are on the retained game thread.
+ * Host timers advance once per controller update; replicas only consume the
+ * admitted host phase. NONE is absent, PENDING precedes the script's setter,
+ * AIMING retains its wait, RELEASED permits the script to continue. */
+enum { SUDEKIMP_SKILL_TARGET_NONE, SUDEKIMP_SKILL_TARGET_PENDING,
+    SUDEKIMP_SKILL_TARGET_AIMING, SUDEKIMP_SKILL_TARGET_RELEASED };
+BOOL SudekiMpConfigureSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,BOOL replica);
+BOOL SudekiMpBeginSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,uint16_t sequence);
+BOOL SudekiMpApplySpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,uint16_t sequence,
+    uint8_t phase,uint16_t remaining_ms);
+BOOL SudekiMpObserveSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,uint16_t sequence,
+    uint8_t *phase,uint16_t *remaining_ms);
+BOOL SudekiMpAdvanceSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,float seconds);
+/* Ingress/admission must already be closed. Finish the last authored wait
+ * naturally after disconnect, under the retained presentation-only lease. */
+BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *);
 /* Persistent two-player CSkill UI/input isolation, without replacing the
  * native Spirit manager/camera or enabling overlapping admission. Uses the
  * SAME native hook owner as the instance experiment; mutually exclusive with
@@ -104,6 +131,29 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
  * to fall back to a different caster's global camera. */
 BOOL SudekiMpObserveSpiritInstanceNamedCamera(const SudekiMpSpiritInstance *instance,
     unsigned int kind,void **camera);
+/* Route a remote caster's logical current-camera pointer without selecting
+ * its camera for the local renderer or notifying local-view listeners.
+ * Requires its private named pair and remote UI lease. Empty-name native
+ * lookups then resolve to this private selection while its scope is active.
+ * "default" ends remote presentation and selects its private InitCam, not
+ * the local player's default camera. Other shared camera names are rejected.
+ * Local/neutral scopes retain native selection and listener behavior.
+ * Does NOT isolate lighting, TSACam/SpiritCam or enable concurrent admission. */
+BOOL SudekiMpSpiritInstanceCameraSelectionAbiReady(void);
+/* Route scheduled CCamera updates AND CSpiritCam resource-ready/animation
+ * callbacks by their retained native receiver. Those callbacks can start the
+ * camera outside a GEL task. Unrelated primary callbacks run neutral; they
+ * never borrow whichever caster happened to enclose their invocation. */
+BOOL SudekiMpInstallSpiritInstanceNamedCameraUpdates(void);
+BOOL SudekiMpEnableSpiritInstanceRemoteCameraSelection(const SudekiMpSpiritInstance *instance);
+/* Existing SetRenderCamera hook calls this; no second detour is installed.
+ * 0: native passthrough; 1: remote request handled; -1: unknown/rejected.
+ * On handled requests kind is 0=default, 1=InitCam, 2=SkillCam. */
+int SudekiMpRouteSpiritInstanceRenderCamera(void *manager,const char *name,unsigned int *kind);
+/* Observe the current native scope (including manager/camera update callbacks).
+ * Success with generation zero means positively neutral, NOT remote merely
+ * because another cast is active. Failure leaves the output untouched. */
+BOOL SudekiMpObserveSpiritInstanceScope(SudekiMpSpiritInstance *instance);
 /* Game-thread, strict-LIFO singleton routing. NULL selects the original game
  * context for unrelated nested work. Returns a nonzero cookie on success.
  * A failed leave retains its scope and blocks destruction/reset for retry.

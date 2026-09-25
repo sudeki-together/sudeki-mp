@@ -183,6 +183,8 @@ static void copy_actor_skill_state(
     output->skill_slot = source->skill_slot;
     output->skill_active = source->skill_active;
     output->skill_cost = source->skill_cost;
+    output->skill_target_phase = source->skill_target_phase;
+    output->skill_target_remaining_ms = source->skill_target_remaining_ms;
     output->skill_presentation_valid = source->skill_presentation_valid;
     output->skill_presentation_channel_count =
         source->skill_presentation_channel_count;
@@ -238,6 +240,7 @@ static void interpolate_skill_presentation(
     if (alpha < 1.0f &&
         (before->skill_sequence != after->skill_sequence ||
          before->skill_kind != after->skill_kind ||
+         before->skill_target_phase != after->skill_target_phase ||
          before->skill_active != after->skill_active)) {
         copy_actor_skill_state(output, before);
         return;
@@ -516,13 +519,13 @@ static void interpolate_spirit_visual_rotation(
 static void interpolate_spirit_view(
     const SudekiMpLanArenaSnapshot *lower,
     const SudekiMpLanArenaSnapshot *upper,
-    float alpha, SudekiMpLanArenaSnapshot *sample
+    float alpha, SudekiMpLanArenaSnapshot *sample, unsigned int seat
 ) {
-    const SudekiMpLanArenaSpiritView *a = &lower->spirit_view, *b = &upper->spirit_view;
+    const SudekiMpLanArenaSpiritView *a = &lower->cast[seat].spirit_view, *b = &upper->cast[seat].spirit_view;
     SudekiMpLanArenaSpiritView value = *a;
     float length, dot;
     unsigned int i;
-    sample->spirit_view = *a;
+    sample->cast[seat].spirit_view = *a;
     if (!a->kind || a->kind != b->kind || a->skill_sequence != b->skill_sequence ||
         a->owner_seat != b->owner_seat) return; /* Authored camera cut. */
     for (i = 0u; i < 16u; ++i) value.matrix[i] = interpolate_float(a->matrix[i], b->matrix[i], alpha);
@@ -540,7 +543,7 @@ static void interpolate_spirit_view(
     value.matrix[1] = value.matrix[10]*value.matrix[4] - value.matrix[8]*value.matrix[6];
     value.matrix[2] = value.matrix[8]*value.matrix[5] - value.matrix[9]*value.matrix[4];
     for (i = 0u; i < 3u; ++i) value.projection[i] = interpolate_float(a->projection[i], b->projection[i], alpha);
-    if (SudekiMpLanArenaSpiritViewValid(&value)) sample->spirit_view = value;
+    if (SudekiMpLanArenaSpiritViewValid(&value)) sample->cast[seat].spirit_view = value;
 }
 
 static void interpolate_spirit_visuals(
@@ -548,16 +551,17 @@ static void interpolate_spirit_visuals(
     const SudekiMpLanArenaSnapshot *upper,
     uint32_t host_tick, float alpha, SudekiMpLanArenaSnapshot *sample
 ) {
-    interpolate_spirit_view(lower, upper, alpha, sample);
-    sample->skill_fade = lower->skill_fade;
-    if (lower->skill_fade.kind &&
-        lower->skill_fade.kind == upper->skill_fade.kind &&
-        lower->skill_fade.owner_seat == upper->skill_fade.owner_seat &&
-        lower->skill_fade.skill_sequence == upper->skill_fade.skill_sequence) {
-        unsigned int c;
-        for (c = 0u; c < 3u; ++c)
-            sample->skill_fade.rgb[c] = lower->skill_fade.rgb[c] + alpha *
-                (upper->skill_fade.rgb[c] - lower->skill_fade.rgb[c]);
+    for (unsigned int seat = 0u; seat < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++seat) {
+        const SudekiMpLanArenaSkillFade *a = &lower->cast[seat].skill_fade;
+        const SudekiMpLanArenaSkillFade *b = &upper->cast[seat].skill_fade;
+        SudekiMpLanArenaSkillFade *out = &sample->cast[seat].skill_fade;
+        interpolate_spirit_view(lower, upper, alpha, sample, seat);
+        *out = *a;
+        if (a->kind && a->kind == b->kind && a->owner_seat == b->owner_seat &&
+            a->skill_sequence == b->skill_sequence) {
+            for (unsigned int c = 0u; c < 3u; ++c)
+                out->rgb[c] = a->rgb[c] + alpha * (b->rgb[c] - a->rgb[c]);
+        }
     }
     unsigned int index;
     sample->spirit_vfx_count = 0u;
@@ -739,6 +743,20 @@ BOOL SudekiMpLanArenaReplicaSample(
             replica->previous.enemies[index].z,
             replica->latest.enemies[index].z, alpha);
     }
+    return TRUE;
+}
+
+BOOL SudekiMpLanArenaReplicaLatestSkillTiming(const SudekiMpLanArenaReplica *r,
+    unsigned int seat,const SudekiMpLanArenaActorSnapshot *admitted,uint8_t *phase,uint16_t *ms) {
+    const SudekiMpLanArenaActorSnapshot *latest;
+    if(!r || !r->latest_valid || seat>=2u || !admitted || !phase || !ms) return FALSE;
+    latest=&r->latest.seat[seat];
+    if(!admitted->skill_sequence || admitted->skill_kind!=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER ||
+        latest->actor_type!=admitted->actor_type || latest->skill_sequence!=admitted->skill_sequence ||
+        latest->skill_kind!=admitted->skill_kind || latest->skill_slot!=admitted->skill_slot ||
+        latest->skill_cost!=admitted->skill_cost || !latest->skill_target_phase ||
+        latest->skill_target_phase<admitted->skill_target_phase) return FALSE;
+    *phase=latest->skill_target_phase; *ms=latest->skill_target_remaining_ms;
     return TRUE;
 }
 

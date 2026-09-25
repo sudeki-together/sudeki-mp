@@ -300,6 +300,7 @@ BOOL SudekiMpLanArenaClientReplicaRefreshOwnerViewAfterRender(void);
 BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void);
 /* Render-only caster view; restore before leaving the same native frame. */
 BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void);
+BOOL SudekiMpLanArenaClientSpiritViewPrepareBody(void);
 BOOL SudekiMpLanArenaClientReplicaGetSkillFade(SudekiMpLanArenaSkillFade *fade);
 BOOL SudekiMpLanArenaClientSpiritViewEndFrame(void);
 /* Reasserts only the presentation semantics from the already-sampled frame.
@@ -329,6 +330,12 @@ BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void);
 /* True while either host-approved native presentation replay is active.
  * Camera input is held at neutral only when LocalSkillCameraActive is true. */
 BOOL SudekiMpLanArenaClientReplicaAnySkillReplayActive(void);
+/* Game-thread teardown only. Observe/retire exact completed replay leases
+ * without removing the native namespaces still needed by pending cleanup. */
+BOOL SudekiMpLanArenaClientReplicaDrainSkillReplay(void);
+/* True only inside the synchronous, authenticated host-approved CSkill replay
+ * for this exact actor/slot/session. Native menu queries are not activation. */
+BOOL SudekiMpLanArenaClientSkillReplayAdmission(void *actor,int slot,uint64_t session);
 /* Returns the last authenticated host combat state only while a live replica
  * frame is installed. Client UI may use this as a read-only availability
  * witness; it never grants the client authority to change combat mode. */

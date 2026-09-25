@@ -32,10 +32,18 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #define SetEvent test_set_event
 #define WaitForSingleObject test_wait_for_single_object
 #define CloseHandle test_close_handle
+#define SUDEKIMP_CAST_CAMERA_PROBE 1
+#define SUDEKIMP_CAST_LIGHT_PROBE 1
+#define SUDEKIMP_CAST_SKILL_OVERLAP_PROBE 1
 #include "../src/hooks/lan_arena_runtime.c"
 
 static BOOL describe_equipped_weapon;
 static BOOL cast_context_drained=TRUE;
+static void *cast_context_actor_busy;
+static BOOL cast_context_actor_known=TRUE;
+BOOL SudekiMpLanCastContextActorDrained(void *actor,uint64_t session) {
+    return actor && session && cast_context_actor_known && actor!=cast_context_actor_busy;
+}
 static BOOL cast_context_current;
 static SudekiMpLanCastOwner cast_context_owner;
 BOOL SudekiMpInstallLanCastContext(HMODULE image, SudekiMpLanCastOwnerWitness witness) {
@@ -89,6 +97,42 @@ static SudekiMpSpiritPresentationObserver fake_spirit_observer;
 static BOOL fake_owned_menu;
 static uint32_t fake_scope_cookie;
 static unsigned int fake_destroy_calls;
+static BOOL fake_client_replay_active;
+static BOOL fake_client_replay_complete;
+static unsigned int fake_client_drain_calls;
+static void *fake_replay_actor;
+static int fake_replay_slot;
+BOOL SudekiMpLanArenaClientReplicaAnySkillReplayActive(void) { return fake_client_replay_active; }
+BOOL SudekiMpLanArenaClientReplicaDrainSkillReplay(void) {
+    ++fake_client_drain_calls;
+    if(fake_client_replay_complete) fake_client_replay_active=FALSE;
+    return !fake_client_replay_active;
+}
+BOOL SudekiMpLanArenaClientSkillReplayAdmission(void *actor,int slot,uint64_t session) {
+    return actor && actor==fake_replay_actor && slot==fake_replay_slot && session==ui_abi_session;
+}
+static SudekiMpSpiritInstance fake_camera_scope;
+static BOOL fake_camera_scope_known=TRUE;
+static int fake_camera_route_result=1;
+static unsigned int fake_camera_route_kind=2;
+BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *instance) { return instance!=NULL; }
+BOOL SudekiMpInstallSpiritInstanceNamedCameraUpdates(void) { return TRUE; }
+BOOL SudekiMpEnableSpiritInstanceRemoteCameraSelection(const SudekiMpSpiritInstance *instance) {
+    return instance && instance->generation==fake_spirit_instances[1].generation;
+}
+BOOL SudekiMpObserveSpiritInstanceNamedCamera(const SudekiMpSpiritInstance *instance,
+    unsigned int kind,void **camera) {
+    (void)instance; (void)kind; (void)camera; return FALSE;
+}
+BOOL SudekiMpObserveSpiritInstanceScope(SudekiMpSpiritInstance *scope) {
+    if(!scope || !fake_camera_scope_known) return FALSE;
+    *scope=fake_camera_scope; return TRUE;
+}
+int SudekiMpRouteSpiritInstanceRenderCamera(void *manager,const char *name,unsigned int *kind) {
+    (void)manager; (void)name;
+    if(fake_camera_route_result==1) *kind=fake_camera_route_kind;
+    return fake_camera_route_result;
+}
 BOOL SudekiMpCreateSpiritInstance(SudekiMpSpiritInstance *instance) {
     if(!ui_abi_bind_result) return FALSE;
     for(unsigned int i=0;i<2;++i) if(!fake_spirit_instances[i].generation) {
@@ -114,6 +158,30 @@ BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *
     void *actor,SudekiMpSpiritCasterWitness witness) { return instance && witness(actor,ui_abi_session); }
 BOOL SudekiMpEnableSpiritInstanceCastGates(void) { return TRUE; }
 BOOL SudekiMpEnableSpiritInstanceSharedSsp(void) { return TRUE; }
+BOOL SudekiMpEnableSpiritInstanceLighting(void) { return TRUE; }
+BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void) { return TRUE; }
+BOOL SudekiMpConfigureSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i,BOOL r) { (void)r; return i!=NULL; }
+static BOOL fake_timing_begin_result=TRUE;
+static unsigned int fake_timing_begin_calls;
+static SudekiMpSpiritInstance fake_timing_instance;
+static uint16_t fake_timing_sequence;
+BOOL SudekiMpBeginSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i,uint16_t s) {
+    ++fake_timing_begin_calls;
+    if(i) fake_timing_instance=*i;
+    fake_timing_sequence=s;
+    return i && s && fake_timing_begin_result;
+}
+BOOL SudekiMpApplySpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i,uint16_t s,uint8_t p,uint16_t ms) {
+    (void)ms; return i && s && p; }
+BOOL SudekiMpObserveSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i,uint16_t s,uint8_t *p,uint16_t *ms) {
+    if(!i || !s) return FALSE; *p=3; *ms=0; return TRUE; }
+BOOL SudekiMpAdvanceSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i,float dt) { (void)dt; return i!=NULL; }
+BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *i) { return i!=NULL; }
+BOOL SudekiMpReadCastLight(uint32_t key,float current[3],float baseline[3]) {
+    if(!key) return FALSE;
+    for(unsigned int i=0;i<3;++i) { current[i]=.6f; baseline[i]=1.f; }
+    return TRUE;
+}
 BOOL SudekiMpScheduleSpiritInstanceManager(const SudekiMpSpiritInstance *instance) { return instance!=NULL; }
 BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *instance,SudekiMpSpiritInstanceState *state) {
     if(!ui_abi_healthy || !instance || !state) return FALSE;
@@ -170,6 +238,14 @@ BOOL SudekiMpCleanroomEngineSetSpiritPresentationObserver(SudekiMpSpiritPresenta
 }
 BOOL SudekiMpInstallLanArenaSkillFade(HMODULE image, SudekiMpLanArenaSkillFadeWitness witness) {
     return image!=NULL && witness!=NULL;
+}
+BOOL SudekiMpInstallLanArenaSkillFadeWithDrawView(HMODULE image,
+    SudekiMpLanArenaSkillFadeWitness witness,
+    SudekiMpLanArenaDrawViewBoundary begin, SudekiMpLanArenaDrawViewBoundary end) {
+    BOOL client=runtime_config.local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
+    return image && witness &&
+        begin==(client ? begin_client_private_spirit_draw:NULL) &&
+        end==(client ? SudekiMpLanArenaClientSpiritViewEndFrame:NULL);
 }
 BOOL SudekiMpUninstallLanArenaSkillFade(void) { return TRUE; }
 BOOL SudekiMpLanArenaReadSkillLight(float current[3],float baseline[3]) {
@@ -236,6 +312,9 @@ static BOOL host_input_install_result = TRUE;
 static BOOL client_input_install_result = TRUE;
 static BOOL client_replica_initialize_result = TRUE;
 static BOOL client_replica_reset_result = TRUE;
+static BOOL replica_stub_initialized;
+static BOOL initialize_party_actor_result;
+static BOOL update_witness_exact = TRUE;
 static BOOL client_tal_release_ready_result = TRUE;
 static BOOL observer_gate_enable_result = TRUE;
 static BOOL observer_register_result = TRUE;
@@ -280,6 +359,8 @@ static LONG host_spirit_describe_probe_depth;
 static int spirit_presentation_state;
 static int fixture_spirit_id;
 static SudekiMpCharacterSkillState character_skill_observation;
+static void *paired_skill_actors[2];
+static SudekiMpCharacterSkillState paired_skill_observations[2];
 static void *cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ACTOR_COUNT];
 static BOOL player_two_skill_isolation_enabled;
 static unsigned int player_two_skill_isolation_call_count;
@@ -297,6 +378,7 @@ static unsigned int replica_initialize_count;
 static unsigned int client_input_uninstall_count;
 static unsigned int host_input_uninstall_count;
 static unsigned int replica_reset_count;
+static unsigned int replica_apply_count;
 static unsigned int client_tal_lease_publish_count;
 static unsigned int client_tal_release_ready_count;
 static void *client_tal_published_actor;
@@ -379,6 +461,9 @@ static void reset_stub_policy(void) {
     client_input_install_result = TRUE;
     client_replica_initialize_result = TRUE;
     client_replica_reset_result = TRUE;
+    replica_stub_initialized = FALSE;
+    initialize_party_actor_result = FALSE;
+    update_witness_exact = TRUE;
     client_tal_release_ready_result = TRUE;
     observer_gate_enable_result = TRUE;
     observer_register_result = TRUE;
@@ -439,6 +524,7 @@ static void reset_stub_counts(void) {
     client_input_uninstall_count = 0u;
     host_input_uninstall_count = 0u;
     replica_reset_count = 0u;
+    replica_apply_count = 0u;
     client_tal_lease_publish_count = 0u;
     client_tal_release_ready_count = 0u;
     client_tal_published_actor = NULL;
@@ -618,10 +704,13 @@ static void verify_host_hook_scope(uint8_t *image) {
     spirit_presentation_state = 4;
     {
         int native_state = 0;
+        uint64_t session=0;
+        uint16_t sequence=0;
+        uint8_t owner=0;
         check(spirit_audio_witness != NULL &&
-              spirit_audio_witness(spirit_audio_witness_context,
-                  &native_state) && native_state == 4,
-            "host Spirit audio witness admits only readable active native state");
+              !spirit_audio_witness(spirit_audio_witness_context,
+                  &native_state,&session,&sequence,&owner),
+            "active native state alone cannot authorize audio without a connected caster session");
     }
     spirit_presentation_state = 0;
     tal_initialized = FALSE;
@@ -826,20 +915,20 @@ static void verify_host_visual_witness_and_capture(uint8_t *image) {
     spirit_presentation_state = 4;
     host_actor_skill_sequence[0] = UINT16_MAX;
     host_spirit_previous_active = FALSE;
-    check(spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick, &owner_type) &&
+    check(spirit_visual_witness(spirit_visual_witness_context, NULL, &token, &skill, &tick, &owner_type) &&
           token == 456u && skill == 1u && host_actor_skill_sequence[0] == UINT16_MAX,
         "visual witness predicts the next nonzero Spirit sequence without mutation");
     host_actor_skill_sequence[0] = 7u;
     host_spirit_previous_active = TRUE;
-    check(spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick, &owner_type) &&
+    check(spirit_visual_witness(spirit_visual_witness_context, NULL, &token, &skill, &tick, &owner_type) &&
           skill == 7u,
         "visual witness preserves the current observed Spirit sequence");
     session_status.peer_connected = FALSE;
-    check(!spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick, &owner_type),
+    check(!spirit_visual_witness(spirit_visual_witness_context, NULL, &token, &skill, &tick, &owner_type),
         "visual witness rejects disconnected authority");
     session_status.peer_connected = TRUE;
     spirit_presentation_state = 0;
-    check(!spirit_visual_witness(spirit_visual_witness_context, &token, &skill, &tick, &owner_type),
+    check(!spirit_visual_witness(spirit_visual_witness_context, NULL, &token, &skill, &tick, &owner_type),
         "visual witness rejects an inactive native Spirit");
     tal_initialized = FALSE;
     ailish_initialized = FALSE;
@@ -1054,6 +1143,120 @@ static void verify_client_busy_reset_containment(uint8_t *image) {
         "final uninstall still performs no client session reinitialization");
 }
 
+static void verify_client_delayed_connection_recovery(uint8_t *image) {
+    static uint8_t host_actor, local_actor;
+    SudekiMpControlUpdateDispatchWitness witness = {0};
+    for (unsigned int pairing = 0; pairing < 2; ++pairing) {
+        SudekiMpLanArenaSessionConfig config = make_config(
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH);
+        unsigned int initialized, applied;
+        SudekiMpCleanroomActor host_kind, client_kind;
+        if (pairing) {
+            config.host_actor_type = SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+            config.client_actor_type = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        }
+        SudekiMpLanArenaSetSeatTypes(config.host_actor_type, config.client_actor_type);
+        prepare_native_calls(image);
+        reset_stub_policy(); reset_stub_counts();
+        check(SudekiMpInstallLanArenaRuntime((HMODULE)image, &config),
+            "delayed client installs replica before a host exists");
+        host_kind = seat_host_actor(); client_kind = seat_client_actor();
+        initialized = replica_initialize_count;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(!replica_stub_initialized && client_replica_recovery_pending &&
+              replica_initialize_count == initialized && replica_apply_count == 0u,
+            "waiting teardown is remembered without applying or repeatedly initializing");
+
+        session_status_result = TRUE;
+        session_status.peer_connected = TRUE;
+        session_status.local_role = config.local_role;
+        session_status.local_simulation_node_role = config.local_simulation_node_role;
+        session_status.peer_simulation_node_role =
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+        session_status.session_token = 123u;
+        update_witness_exact = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_initialize_count == initialized && !replica_stub_initialized,
+            "transport connection cannot reinitialize on an inexact native witness");
+        update_witness_exact = TRUE;
+        client_replica_initialize_result = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(client_replica_recovery_pending && !replica_stub_initialized &&
+              request_player_two_count == 0u && replica_apply_count == 0u,
+            "failed exact reinitialization admits neither actor takeover nor playback");
+        cleanroom_actor_entities[client_kind] = &local_actor;
+        actor_present_results[client_kind] = TRUE;
+        actor_position_result = TRUE;
+        spawn_actor_result = TRUE;
+        client_replica_initialize_result = TRUE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(!client_replica_recovery_pending && replica_stub_initialized &&
+              replica_initialize_count == initialized + 2u,
+            "late host connection retries and restores the torn-down replica");
+        check(client_tal_spawn_attempted && spawn_actor_count == 1u,
+            "recovery requests the remote actor before its asynchronous publication");
+
+        cleanroom_actor_entities[host_kind] = &host_actor;
+        cleanroom_actor_entities[client_kind] = &local_actor;
+        actor_present_results[host_kind] = TRUE;
+        actor_present_results[client_kind] = TRUE;
+        player_two_active = TRUE; player_two_character = &host_actor;
+        initialize_party_actor_result = TRUE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_apply_count == 1u && client_replica_frame_ready &&
+              client_remote_tal_owned && client_tal_published_generation != 0u,
+            "recovered replica claims fresh actor generation then applies snapshots");
+        initialized = replica_initialize_count;
+        client_replica_frame_attempted = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_initialize_count == initialized && replica_apply_count == 2u,
+            "healthy frames never reinstall an already-live replica");
+
+        applied = replica_apply_count;
+        session_status.peer_connected = FALSE;
+        client_replica_reset_result = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(client_replica_recovery_pending && client_remote_tal_owned &&
+              remove_actor_count == 0u && replica_apply_count == applied,
+            "disconnect with BUSY drain retains actor and stops playback");
+        session_status.peer_connected = TRUE;
+        session_status.session_token = 124u;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_initialize_count == initialized && client_remote_tal_owned &&
+              replica_apply_count == applied && remove_actor_count == 0u,
+            "reconnected transport cannot bypass a BUSY native drain");
+
+        client_replica_reset_result = TRUE;
+        remove_actor_clears_presence = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(client_replica_recovery_pending && client_remote_tal_remove_pending &&
+              replica_initialize_count == initialized && remove_actor_count == 1u,
+            "recovery waits for asynchronous native actor removal before reinstall");
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_initialize_count == initialized && remove_actor_count == 1u,
+            "pending actor removal neither reinstalls nor enqueues duplicate removals");
+        actor_present_results[host_kind] = FALSE;
+        cleanroom_actor_entities[host_kind] = NULL;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(!client_replica_recovery_pending && replica_stub_initialized &&
+              replica_initialize_count == initialized + 1u,
+            "positive actor disappearance permits one clean replica reinstall");
+        cleanroom_actor_entities[host_kind] = &host_actor;
+        actor_present_results[host_kind] = TRUE;
+        remove_actor_clears_presence = TRUE;
+        client_replica_frame_attempted = FALSE;
+        lan_arena_control_update_observer(NULL, NULL, &witness);
+        check(replica_apply_count == applied + 1u && client_replica_frame_ready,
+            "reconnect resumes playback with rebuilt actor ownership");
+        check(SudekiMpUninstallLanArenaRuntime() && !replica_stub_initialized,
+            "recovered client still tears down cleanly");
+    }
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    reset_stub_policy(); reset_stub_counts();
+}
+
 static void verify_callback_order(void) {
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -1072,6 +1275,22 @@ static void verify_callback_order(void) {
     lan_arena_render_start_entry();
     check(strcmp(callback_events, "APXRVSCP") == 0,
         "first render orders visible Spirit VFX before native render and remote reassert");
+
+    callback_event_count = 0u; callback_events[0] = '\0';
+    runtime_skill_ui_initialized=runtime_spirit_named_cameras=TRUE;
+    runtime_spirit_skill_routed=runtime_spirit_tasks_routed=TRUE;
+    prepare_client_replica_frame();
+    lan_arena_render_start_entry();
+    check(strcmp(callback_events,"APXBRVSCP")==0,
+        "private Spirit body preparation precedes native animation preparation without moving the camera draw boundary");
+    callback_event_count = 0u; callback_events[0] = '\0';
+    visible_publish_result=FALSE;
+    prepare_client_replica_frame(); lan_arena_render_start_entry();
+    check(strcmp(callback_events,"APRVSCP")==0,
+        "failed private publication cannot acquire a body visibility lease");
+    visible_publish_result=TRUE;
+    runtime_skill_ui_initialized=runtime_spirit_named_cameras=FALSE;
+    runtime_spirit_skill_routed=runtime_spirit_tasks_routed=FALSE;
 
     callback_event_count = 0u;
     callback_events[0] = '\0';
@@ -1481,7 +1700,7 @@ static void verify_remote_spirit_lifecycle(void) {
 static void append_spirit_audio_event(
     uint32_t sequence,
     int native_state,
-    const char *cue
+    const char *cue, uint16_t cast_sequence
 ) {
     SudekiMpLanArenaSpiritAudioEvent *event;
     size_t length = strlen(cue);
@@ -1496,6 +1715,8 @@ static void append_spirit_audio_event(
     memset(event, 0, sizeof(*event));
     event->sequence = sequence;
     event->native_state = native_state;
+    event->session_token=session_status.session_token;
+    event->skill_sequence=cast_sequence;
     event->cue_length = (uint8_t)length;
     memcpy(event->cue, cue, length + 1u);
 }
@@ -1505,6 +1726,12 @@ static void verify_host_spirit_audio_semantic_journal(void) {
     SudekiMpLanArenaActorSnapshot tal;
     SudekiMpLanArenaSnapshot snapshot;
     HostSpiritAudioStage stage;
+    SudekiMpLanArenaSessionStatus previous_status=session_status;
+    BOOL previous_status_result=session_status_result;
+
+    session_status_result=TRUE;
+    session_status.peer_connected=TRUE;
+    session_status.session_token=901u;
 
     spirit_audio_installed = TRUE;
     spirit_audio_event_count = 0u;
@@ -1514,10 +1741,11 @@ static void verify_host_spirit_audio_semantic_journal(void) {
     tal.skill_sequence = 7u;
     tal.skill_kind = SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
     tal.skill_active = 1u;
-    append_spirit_audio_event(1u, 2, "stop_tal");
-    append_spirit_audio_event(2u, 2, "spiritstrike_start");
+    append_spirit_audio_event(1u, 2, "stop_tal",7u);
+    append_spirit_audio_event(2u, 2, "spiritstrike_start",7u);
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u &&
           snapshot.spirit_audio_history[0].event_sequence == 1u &&
           snapshot.spirit_audio_history[0].skill_sequence == 7u &&
@@ -1529,30 +1757,35 @@ static void verify_host_spirit_audio_semantic_journal(void) {
     commit_host_spirit_audio_stage(&stage);
 
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u,
         "re-reading the trace cannot duplicate a semantic start event");
     commit_host_spirit_audio_stage(&stage);
-    append_spirit_audio_event(3u, 2, "spiritstrike_start");
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    append_spirit_audio_event(3u, 2, "spiritstrike_start",7u);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u,
         "a repeated raw start cannot duplicate one Spirit transaction");
     commit_host_spirit_audio_stage(&stage);
 
     tal.skill_sequence = 8u;
     tal.skill_active = 0u;
-    append_spirit_audio_event(4u, 2, "spiritstrike_start");
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    append_spirit_audio_event(4u, 2, "spiritstrike_start",8u);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u,
         "raw start without the matching active Spirit transaction is discarded");
     commit_host_spirit_audio_stage(&stage);
     tal.skill_active = 1u;
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u,
         "discarded raw start cannot be rebound to a later active state");
     commit_host_spirit_audio_stage(&stage);
-    append_spirit_audio_event(5u, 2, "spiritstrike_start");
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    append_spirit_audio_event(5u, 2, "spiritstrike_start",8u);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 2u &&
           snapshot.spirit_audio_history[1].event_sequence == 2u &&
           snapshot.spirit_audio_history[1].skill_sequence == 8u,
@@ -1561,12 +1794,14 @@ static void verify_host_spirit_audio_semantic_journal(void) {
 
     reset_host_spirit_audio_tracking();
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 0u,
         "session reset drains old raw cues and clears the wire journal");
     commit_host_spirit_audio_stage(&stage);
-    append_spirit_audio_event(6u, 2, "spiritstrike_start");
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    append_spirit_audio_event(6u, 2, "spiritstrike_start",8u);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u &&
           snapshot.spirit_audio_history[0].event_sequence == 1u &&
           snapshot.spirit_audio_history[0].skill_sequence == 8u,
@@ -1579,24 +1814,51 @@ static void verify_host_spirit_audio_semantic_journal(void) {
     reset_host_spirit_audio_tracking();
     tal.skill_sequence = 9u;
     tal.skill_active = 1u;
-    append_spirit_audio_event(7u, 2, "spiritstrike_start");
+    append_spirit_audio_event(7u, 2, "spiritstrike_start",9u);
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 1u &&
           host_spirit_audio_history_count == 0u,
         "failed active snapshot leaves persistent audio journal unchanged");
     tal.skill_active = 0u;
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 0u,
         "retired snapshot drops a start never admitted while active");
     commit_host_spirit_audio_stage(&stage);
     memset(&snapshot, 0, sizeof(snapshot));
-    host_capture_spirit_audio(&tal, &snapshot, &stage);
+    snapshot.seat[0]=tal;
+    host_capture_spirit_audio(&snapshot, &stage);
     check(snapshot.spirit_audio_history_count == 0u,
         "post-retirement snapshots continue after failed active publication");
     commit_host_spirit_audio_stage(&stage);
+    reset_host_spirit_audio_tracking();
+    memset(&snapshot,0,sizeof(snapshot));
+    tal.skill_sequence=10u; tal.skill_active=1u;
+    snapshot.seat[0]=snapshot.seat[1]=tal;
+    append_spirit_audio_event(8u,2,"spiritstrike_start",10u);
+    append_spirit_audio_event(9u,2,"spiritstrike_start",10u);
+    spirit_audio_events[spirit_audio_event_count-1u].owner_seat=1u;
+    host_capture_spirit_audio(&snapshot,&stage);
+    check(snapshot.spirit_audio_history_count==2 &&
+        snapshot.spirit_audio_history[0].owner_seat==0 &&
+        snapshot.spirit_audio_history[1].owner_seat==1 &&
+        snapshot.spirit_audio_history[0].skill_sequence==10 &&
+        snapshot.spirit_audio_history[1].skill_sequence==10,
+        "two native starts between frames survive as separate owner-exact audio events");
+    check(host_spirit_audio_history_count==0,"both audio events remain staged until canonical commit");
+    commit_host_spirit_audio_stage(&stage);
+    append_spirit_audio_event(10u,2,"spiritstrike_start",11u);
+    spirit_audio_events[spirit_audio_event_count-1u].session_token++;
+    snapshot.seat[0].skill_sequence=11u;
+    host_capture_spirit_audio(&snapshot,&stage);
+    check(snapshot.spirit_audio_history_count==2,"reconnected session cannot inherit another session's native audio emission");
+    commit_host_spirit_audio_stage(&stage);
     spirit_audio_installed = previous_installed;
+    session_status=previous_status;
+    session_status_result=previous_status_result;
     reset_host_spirit_audio_tracking();
 }
 
@@ -2930,6 +3192,27 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
                 runtime_spirit_instances[1].generation &&
                 runtime_spirit_instances[0].manager!=runtime_spirit_instances[1].manager,
                 "host installs both persistent native lifetimes and every entry/task/observation route");
+            check(runtime_spirit_named_cameras,"camera experiment binds after both actor namespaces exist");
+            check(runtime_spirit_lighting,"lighting experiment binds after private cameras and actor leases");
+            host_remote_skill_camera_active=TRUE;
+            fake_camera_scope=(SudekiMpSpiritInstance){0};
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"default")==2,
+                "positively neutral camera call is not suppressed by a live remote cast");
+            fake_camera_scope=runtime_spirit_instances[0];
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"SkillCam")==2,
+                "local cast keeps native camera selection while peer cast is alive");
+            fake_camera_scope=runtime_spirit_instances[1];
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"SkillCam")==1 && host_spirit_camera_kind==2,
+                "remote scheduled/VM camera request uses its owned selection and publication kind");
+            fake_camera_route_result=-1;
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"SpiritCam")==-1,
+                "unknown remote cinematic camera does not fall back to local rendering");
+            fake_camera_route_result=1; fake_camera_scope_known=FALSE;
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"default")==-1,"unknown scope cannot steal a camera");
+            fake_camera_scope_known=TRUE;
+            ++fake_camera_scope.generation;
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"default")==-1,"replaced camera generation rejected");
+            fake_camera_scope=(SudekiMpSpiritInstance){0}; host_remote_skill_camera_active=FALSE;
             cookie=fake_spirit_enter(NULL,4,TRUE,&manager);
             check(cookie && manager==runtime_spirit_instances[0].manager,
                 "native Q selects the assigned local caster manager");
@@ -2941,8 +3224,33 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
                 "strike ID cannot grant another actor or foreign pointer authority");
             *(void **)(skills[1]+0x10)=ui_abi_remote;
             character_skill_observation.skill=skills[1];
+            reset_host_skill_tracking();
+            fake_timing_begin_calls=0;
+            check(fake_owned_skill_enter(skills[1],0,FALSE)!=0 && !fake_timing_begin_calls,
+                "menu validation cannot prepare or publish a new timing transaction");
             check(fake_owned_skill_enter(skills[1],0,TRUE)!=0,
                 "ordinary skill uses the same retained caster namespace");
+            check(fake_timing_begin_calls==1 && fake_timing_sequence==1 &&
+                fake_timing_instance.generation==runtime_spirit_instances[1].generation &&
+                !host_actor_skill_sequence[1] && !host_native_skill_leases[1].pending,
+                "before native Use, prepare remote timing without claiming success or publishing a cast");
+            check(fake_owned_skill_enter(skills[1],0,TRUE)!=0 && fake_timing_sequence==1 &&
+                !host_actor_skill_sequence[1],"rejected Use can retry without consuming the wire sequence");
+            check(host_begin_character_skill_sequence(1,ui_abi_remote,skills[1],0,0,FALSE,"test") &&
+                fake_timing_sequence==1 && host_actor_skill_sequence[1]==1 &&
+                host_native_skill_leases[1].pending,
+                "successful Use adopts the prepared timing ID exactly once");
+            fake_timing_begin_result=FALSE;
+            check(!fake_owned_skill_enter(skills[1],0,TRUE) && host_actor_skill_sequence[1]==1,
+                "failed timing admission rejects Use without advancing sequence");
+            check(!host_begin_character_skill_sequence(1,ui_abi_remote,skills[1],0,0,FALSE,"test") &&
+                host_actor_skill_sequence[1]==1,
+                "failed timing adoption cannot publish a replacement sequence");
+            fake_timing_begin_result=TRUE;
+            host_actor_skill_sequence[1]=UINT16_MAX;
+            check(fake_owned_skill_enter(skills[1],0,TRUE)!=0 && fake_timing_sequence==1 &&
+                host_actor_skill_sequence[1]==UINT16_MAX,"preparation handles wrap without consuming it");
+            reset_host_skill_tracking();
             fake_spirit_states[1]=(SudekiMpSpiritInstanceState){10,6,TRUE,FALSE};
             check(SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==10 &&
                 SudekiMpCleanroomEngineSpiritStrikeId(&id) && id==6,
@@ -2950,15 +3258,193 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
             check(!fake_spirit_enter(NULL,4,TRUE,&manager) &&
                 fake_spirit_enter(NULL,4,FALSE,&manager)!=0 &&
                 !fake_owned_skill_enter(skills[1],0,TRUE),
-                "menu eligibility can inspect local namespace but LA35 still rejects second activation");
+                "menu eligibility can inspect local namespace but native overlap admission remains guarded");
             fake_spirit_states[0]=(SudekiMpSpiritInstanceState){10,4,TRUE,FALSE};
             state=77;
             check(!SudekiMpCleanroomEngineSpiritPresentationState(&state) && state==77,
                 "two live managers cannot silently collapse into one serialized snapshot");
+            {
+                SudekiMpLanArenaSnapshot paired={0};
+                uint64_t token=0; uint16_t sequence=0; uint8_t owner=9;
+                paired.seat[0].actor_type=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+                paired.seat[1].actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+                reset_host_skill_tracking();
+                check(host_apply_spirit_state(&paired) && paired.seat[0].skill_active &&
+                    paired.seat[1].skill_active && paired.seat[0].skill_sequence==1 &&
+                    paired.seat[1].skill_sequence==1,
+                    "multi-cast publisher independently observes both native managers with equal actor-local sequences");
+                fake_camera_scope=runtime_spirit_instances[0];
+                check(host_spirit_audio_active_witness(&runtime_config,&state,&token,&sequence,&owner) &&
+                    token==701 && sequence==1 && owner==0,
+                    "audio emission binds the scoped host caster rather than latest global owner");
+                fake_camera_scope=runtime_spirit_instances[1];
+                check(host_spirit_audio_active_witness(&runtime_config,&state,&token,&sequence,&owner) &&
+                    sequence==1 && owner==1,"audio emission distinguishes equal client cast sequence");
+                ++fake_camera_scope.generation;
+                check(!host_spirit_audio_active_witness(&runtime_config,&state,&token,&sequence,&owner),
+                    "replaced native generation cannot emit into a live caster's journal");
+                fake_camera_scope=runtime_spirit_instances[1];
+                ++session_status.session_token;
+                check(!host_spirit_audio_active_witness(&runtime_config,&state,&token,&sequence,&owner),
+                    "replaced session cannot reuse the retained native event owner");
+                --session_status.session_token;
+                fake_camera_scope=(SudekiMpSpiritInstance){0};
+                check(!host_spirit_audio_active_witness(&runtime_config,&state,&token,&sequence,&owner),
+                    "neutral native emissions never borrow an active caster");
+                {
+                    uint8_t components[2][0x14]={{0}};
+                    void *actors[2]={ui_abi_local,ui_abi_remote};
+                    void *saved_components[2];
+                    uint32_t tick=0;
+                    for(unsigned int i=0;i<2;++i) {
+                        saved_components[i]=*(void **)((uint8_t *)actors[i]+0x58u);
+                        *(void **)((uint8_t *)actors[i]+0x58u)=components[i];
+                        *(void **)(components[i]+0x10u)=actors[i];
+                    }
+                    check(host_spirit_visual_active_witness(&runtime_config,components[0],
+                        &token,&sequence,&tick,&owner) && token==701 && sequence==1 && owner==0,
+                        "unscoped animation emission uses exact host component ownership");
+                    check(host_spirit_visual_active_witness(&runtime_config,components[1],
+                        &token,&sequence,&tick,&owner) && sequence==1 && owner==SUDEKIMP_LAN_ARENA_ELCO_TYPE,
+                        "equal-sequence Elco animation emission cannot be attributed to Buki");
+                    *(void **)(components[1]+0x10u)=actors[0];
+                    fake_camera_scope=runtime_spirit_instances[0];
+                    check(!host_spirit_visual_active_witness(&runtime_config,components[1],
+                        &token,&sequence,&tick,&owner),"foreign animation component cannot borrow current caster scope");
+                    *(void **)(components[1]+0x10u)=actors[1];
+                    ++session_status.session_token;
+                    check(!host_spirit_visual_active_witness(&runtime_config,components[1],
+                        &token,&sequence,&tick,&owner),"source attribution rejects a replaced session");
+                    --session_status.session_token;
+                    ++runtime_spirit_instances[1].generation;
+                    check(!host_spirit_visual_active_witness(&runtime_config,components[1],
+                        &token,&sequence,&tick,&owner),"source attribution rejects a replaced native manager generation");
+                    --runtime_spirit_instances[1].generation;
+                    for(unsigned int i=0;i<2;++i)
+                        *(void **)((uint8_t *)actors[i]+0x58u)=saved_components[i];
+                    fake_camera_scope=(SudekiMpSpiritInstance){0};
+                }
+                host_capture_skill_fade(&paired);
+                check(paired.cast[0].skill_fade.kind==2 && paired.cast[0].skill_fade.owner_seat==0 &&
+                    paired.cast[1].skill_fade.kind==2 && paired.cast[1].skill_fade.owner_seat==1,
+                    "both private fade banks publish independently during overlapping lifetimes");
+                fake_spirit_states[0]=(SudekiMpSpiritInstanceState){0,4,FALSE,TRUE};
+                fake_spirit_states[1].strike_id=4u;
+                check(!host_apply_spirit_state(&paired) && host_private_spirit_active[0] &&
+                    host_private_spirit_active[1] && host_actor_skill_sequence[0]==1 &&
+                    host_actor_skill_sequence[1]==1,
+                    "wrong second manager identity cannot partially retire the first caster");
+                fake_spirit_states[1].strike_id=6u;
+                check(host_apply_spirit_state(&paired) && !paired.seat[0].skill_active && paired.seat[1].skill_active,
+                    "one Spirit completion cannot retire the other caster");
+                fake_spirit_states[1]=(SudekiMpSpiritInstanceState){0,6,FALSE,TRUE};
+                check(host_apply_spirit_state(&paired) && !paired.seat[0].skill_active && !paired.seat[1].skill_active,
+                    "both independent Spirit transactions finish without allocating extra sequences");
+                reset_host_skill_tracking();
+            }
             fake_spirit_states[0]=(SudekiMpSpiritInstanceState){0,4,FALSE,TRUE};
             fake_spirit_states[1]=(SudekiMpSpiritInstanceState){0,6,FALSE,TRUE};
             character_skill_observation.skill=NULL;
+        } else {
+            uint64_t session=0; uint8_t type=0;
+            check(SudekiMpLanArenaClientPrivateCastCamerasOwned() && fake_owned_skill_enter &&
+                fake_owned_task_enter && !fake_spirit_enter && !fake_spirit_observer &&
+                !fake_owned_menu && runtime_spirit_instances[0].generation &&
+                runtime_spirit_instances[1].generation,
+                "client owns two presentation namespaces but no Spirit activation or observer");
+            check(!runtime_cast_owner_witness(ui_abi_local,2,&session,&type),
+                "replica cannot acquire a native Spirit gameplay lineage");
+            fake_camera_scope=runtime_spirit_instances[0];
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"SkillCam")==2,
+                "client's local namespace keeps Elco's native camera selection");
+            fake_camera_scope=runtime_spirit_instances[1];
+            check(SudekiMpLanArenaRouteCastCamera(NULL,"SkillCam")==1,
+                "client remote Buki namespace does not change Elco's selected camera");
+            fake_camera_scope=(SudekiMpSpiritInstance){0};
+            for(unsigned int i=0;i<2u;++i) {
+                void *actor=i ? ui_abi_remote:ui_abi_local;
+                *(void **)(skills[i]+0x10)=actor;
+                character_skill_observation.skill=skills[i];
+                check(fake_owned_skill_enter(skills[i],2,FALSE)!=0 &&
+                    !fake_owned_skill_enter(skills[i],2,TRUE),
+                    "client can query a skill but cannot use it without host-approved replay");
+                fake_replay_actor=actor; fake_replay_slot=2;
+                check(fake_owned_skill_enter(skills[i],2,TRUE)!=0 &&
+                    !fake_owned_skill_enter(skills[i],1,TRUE),
+                    "client replay routes only the exact admitted actor and slot");
+                fake_replay_actor=NULL;
+            }
+            character_skill_observation.skill=NULL;
+            fake_client_replay_active=TRUE;
+            fake_client_drain_calls=0;
+            check(!release_runtime_skill_ui() && runtime_skill_ui_initialized &&
+                runtime_spirit_instances[0].generation && runtime_spirit_instances[1].generation &&
+                fake_client_drain_calls==1 && fake_client_replay_active,
+                "native client replay lease retains both namespaces even before active observation");
+            fake_client_replay_complete=TRUE;
+            cast_context_drained=FALSE;
+            check(!release_runtime_skill_ui() && !fake_client_replay_active &&
+                fake_client_drain_calls==2 && runtime_skill_ui_initialized,
+                "early teardown services terminal replay before snapshot reset, but retains pending native lineage");
+            fake_client_replay_complete=FALSE;
+            cast_context_drained=TRUE;
+            /* Re-open only this fixture's retirement flag to continue its
+             * disconnect tests; production teardown never revokes retirement. */
+            runtime_skill_ui_retiring=FALSE;
         }
+        /* Actor-specific ordinary admission must not turn the same native
+         * namespaces into Spirit overlap or weaken all-idle teardown. */
+        check(SudekiMpLanArenaOrdinarySkillOverlapOwned(),"closed ordinary overlap plumbing is owned");
+        for(unsigned int i=0;i<2u;++i) {
+            paired_skill_actors[i]=i ? ui_abi_remote:ui_abi_local;
+            *(void **)(skills[i]+0x10)=paired_skill_actors[i];
+            paired_skill_observations[i]=(SudekiMpCharacterSkillState){0};
+            paired_skill_observations[i].skill=skills[i];
+        }
+        for(unsigned int incoming=0;incoming<2u;++incoming) {
+            unsigned int peer=incoming^1u;
+            paired_skill_observations[peer].active=TRUE;
+            fake_spirit_states[peer].idle=FALSE; /* Ordinary UI/task obligation. */
+            cast_context_drained=FALSE; cast_context_actor_busy=paired_skill_actors[peer];
+            fake_replay_actor=paired_skill_actors[incoming]; fake_replay_slot=2;
+            check(!runtime_skill_ui_idle(),"live peer still blocks global teardown");
+            check(fake_owned_skill_enter(skills[incoming],2,TRUE)!=0,
+                "ready caster starts ordinary skill while the peer has an ordinary task, either process/order");
+            runtime_spirit_lighting=FALSE;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),
+                "incomplete isolation preserves serialized ordinary admission");
+            runtime_spirit_lighting=TRUE;
+            runtime_skill_targeting=FALSE;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),
+                "missing targeting isolation preserves serialized admission");
+            runtime_skill_targeting=TRUE;
+            cast_context_actor_busy=paired_skill_actors[incoming];
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"same actor's retained child blocks repeat cast");
+            cast_context_actor_busy=paired_skill_actors[peer]; cast_context_actor_known=FALSE;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"unknown lineage does not grant overlap");
+            cast_context_actor_known=TRUE;
+            paired_skill_observations[incoming].active=TRUE;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"active caster cannot start a second skill");
+            paired_skill_observations[incoming].active=FALSE;
+            fake_spirit_states[peer].state=10;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"ordinary skill plus Spirit remains guarded");
+            fake_spirit_states[peer].state=0;
+            if(!direction) {
+                void *manager=NULL;
+                check(!fake_spirit_enter(NULL,4,TRUE,&manager),"Spirit plus ordinary skill remains guarded");
+                check(capture_host_tal_skill_view(2) && !host_tal_skill_view_lease.valid,
+                    "overlap profile cannot capture a cast-long peer view");
+            } else {
+                fake_replay_actor=NULL;
+                check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"overlap never grants client authority");
+            }
+            ++session_status.session_token;
+            check(!fake_owned_skill_enter(skills[incoming],2,TRUE),"stale session rejects overlapping start");
+            --session_status.session_token;
+            paired_skill_observations[peer].active=FALSE; fake_spirit_states[peer].idle=TRUE;
+        }
+        memset(paired_skill_actors,0,sizeof(paired_skill_actors));
+        cast_context_drained=TRUE; cast_context_actor_busy=NULL; fake_replay_actor=NULL;
         check((direction ? release_host_remote_ailish("client_role"):
                 release_client_remote_tal("host_role")) && runtime_skill_ui_bound &&
                 ui_abi_reset_calls==0u,
@@ -2984,6 +3470,13 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
             retained.session=702;
             check(!fake_owned_task_enter(&retained),"new session cannot borrow retained task namespace");
             check(fake_owned_task_enter(NULL)!=0,"unrelated task routes to neutral native context");
+        } else {
+            SudekiMpLanCastOwner retained={0};
+            retained.actor=ui_abi_remote; retained.session=701; retained.kind=1; retained.cast_id=3;
+            check(fake_owned_task_enter(&retained)!=0,
+                "disconnected client retains ordinary skill cleanup namespace");
+            retained.kind=2;
+            check(!fake_owned_task_enter(&retained),"client cleanup cannot borrow native Spirit authority");
         }
         check(runtime_skill_ui_retained(ui_abi_remote,701u) &&
               !runtime_skill_ui_retained(ui_abi_remote,702u) &&
@@ -2998,8 +3491,12 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
               !runtime_skill_ui_remote && !runtime_skill_ui_session,
             "disconnect releases persistent UI only after native drain and restoration");
         if(!direction) check(!fake_spirit_enter && !fake_owned_skill_enter && !fake_owned_task_enter &&
-            !fake_spirit_observer && !fake_owned_menu && fake_destroy_calls>=2,
+            !fake_spirit_observer && !fake_owned_menu && fake_destroy_calls>=2 && !runtime_spirit_named_cameras,
             "successful host drain restores routes/menu and destroys both native lifetimes");
+        else check(!fake_owned_skill_enter && !fake_owned_task_enter &&
+            !runtime_spirit_named_cameras && !SudekiMpLanArenaClientPrivateCastCamerasOwned() &&
+            !runtime_spirit_instances[0].generation && !runtime_spirit_instances[1].generation,
+            "successful client drain restores routes before releasing retained actor witnesses");
         session_status.peer_connected=TRUE;
         session_status.session_token=702u;
         ui_abi_bind_result=FALSE;
@@ -3021,6 +3518,47 @@ static void verify_persistent_skill_ui_lifecycle(uint8_t *image) {
         host_remote_ailish_owned=client_remote_tal_owned=FALSE;
         runtime_game_module=NULL;
     }
+    reset_stub_policy();
+    reset_stub_counts();
+}
+
+static void verify_legacy_client_skill_ui(uint8_t *image) {
+    int actors[2]={0};
+    reset_stub_policy();
+    reset_stub_counts();
+    runtime_config=make_config(SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH);
+    runtime_config.host_actor_type=SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    runtime_config.client_actor_type=SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    runtime_game_module=(HMODULE)image;
+    runtime_installed=tal_initialized=ailish_initialized=TRUE;
+    client_remote_tal_owned=TRUE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL]=&actors[0];
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH]=&actors[1];
+    session_status_result=TRUE;
+    session_status.session_token=703u;
+    session_status.peer_connected=TRUE;
+    session_status.local_simulation_node_role=runtime_config.local_simulation_node_role;
+    session_status.peer_simulation_node_role=SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+    cast_context_drained=TRUE;
+    character_skill_observe_result=TRUE;
+    character_skill_observation.active=FALSE;
+    character_skill_observation.skill=NULL;
+    check(service_runtime_skill_ui() && runtime_skill_ui_bound &&
+        ui_abi_local==&actors[1] && ui_abi_remote==&actors[0] &&
+        ui_abi_type==SUDEKIMP_LAN_ARENA_TAL_TYPE && ui_abi_session==703u &&
+        !runtime_spirit_instances[0].generation && !runtime_spirit_instances[1].generation &&
+        !fake_owned_skill_enter && !fake_owned_task_enter &&
+        !SudekiMpLanArenaClientPrivateCastCamerasOwned() &&
+        SudekiMpLanArenaRouteCastCamera(NULL,"SkillCam")==0,
+        "original Tal/Ailish client retains its legacy binding without private probe cameras");
+    session_status.peer_connected=FALSE;
+    check(service_runtime_skill_ui() && !runtime_skill_ui_initialized,
+        "original client binding still drains and restores on disconnect");
+    client_remote_tal_owned=FALSE;
+    runtime_installed=tal_initialized=ailish_initialized=FALSE;
+    runtime_game_module=NULL;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_TAL]=NULL;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_AILISH]=NULL;
     reset_stub_policy();
     reset_stub_counts();
 }
@@ -3049,6 +3587,7 @@ int main(void) {
     verify_downstream_failure_rollback(image);
     verify_campaign_guard_teardown_containment(image);
     verify_client_busy_reset_containment(image);
+    verify_client_delayed_connection_recovery(image);
     verify_callback_order();
     verify_client_tal_lifecycle_generation();
     verify_client_tal_pending_request_teardown();
@@ -3065,6 +3604,7 @@ int main(void) {
     verify_authoritative_locomotion_stop_policy();
     verify_host_anim_id_read();
     verify_persistent_skill_ui_lifecycle(image);
+    verify_legacy_client_skill_ui(image);
 
     VirtualFree(image, 0u, MEM_RELEASE);
     if (failures != 0) {
@@ -3404,6 +3944,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     (void)game_module;
     ++replica_initialize_count;
     if (!client_replica_initialize_result) SetLastError(ERROR_NOT_READY);
+    if (client_replica_initialize_result) replica_stub_initialized = TRUE;
     return client_replica_initialize_result;
 }
 
@@ -3412,6 +3953,7 @@ void SudekiMpLanArenaClientReplicaDiscardSnapshots(void) {}
 BOOL SudekiMpResetLanArenaClientReplica(void) {
     ++replica_reset_count;
     if (!client_replica_reset_result) SetLastError(ERROR_BUSY);
+    if (client_replica_reset_result) replica_stub_initialized = FALSE;
     return client_replica_reset_result;
 }
 
@@ -3431,6 +3973,7 @@ BOOL SudekiMpLanArenaClientReplicaRemoteTalReleaseReady(void) {
 }
 
 BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
+    ++replica_apply_count;
     record_callback_event('A');
     return replica_apply_result;
 }
@@ -3445,6 +3988,7 @@ BOOL SudekiMpLanArenaClientReplicaReassertOwnerViewAfterRemoteMutation(void) {
     return TRUE;
 }
 BOOL SudekiMpLanArenaClientSpiritViewBeginFrame(void) { return TRUE; }
+BOOL SudekiMpLanArenaClientSpiritViewPrepareBody(void) { record_callback_event('B'); return TRUE; }
 BOOL SudekiMpLanArenaClientSpiritViewEndFrame(void) { return TRUE; }
 
 BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {
@@ -3528,7 +4072,7 @@ BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(
     const SudekiMpControlUpdateDispatchWitness *witness
 ) {
     (void)witness;
-    return TRUE;
+    return update_witness_exact;
 }
 
 BOOL SudekiMpControlSeparationSetManualToggleEnabled(BOOL enabled) {
@@ -3683,6 +4227,8 @@ BOOL SudekiMpObserveCharacterSkill(
         return FALSE;
     }
     *state = character_skill_observation;
+    for(unsigned int i=0;i<2u;++i)
+        if(character==paired_skill_actors[i]) *state=paired_skill_observations[i];
     return TRUE;
 }
 
@@ -3867,7 +4413,7 @@ BOOL SudekiMpCleanroomEngineInitializePartyActor(
 ) {
     (void)actor;
     ++initialize_party_actor_count;
-    return FALSE;
+    return initialize_party_actor_result;
 }
 
 BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor) {

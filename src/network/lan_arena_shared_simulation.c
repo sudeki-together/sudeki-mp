@@ -25,6 +25,10 @@ static int valid_observation(
 ) {
     SudekiMpLanArenaSnapshot audio;
     if (observation == NULL) return 0;
+    for (unsigned int i = 0u; i < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++i) {
+        if (!SudekiMpLanArenaSpiritViewValid(&observation->cast[i].spirit_view) ||
+            !SudekiMpLanArenaSkillFadeValid(&observation->cast[i].skill_fade)) return 0;
+    }
     memset(&audio, 0, sizeof(audio));
     audio.spirit_audio_history_count =
         observation->spirit_audio_history_count;
@@ -42,8 +46,6 @@ static int valid_observation(
         observation->native_combat_observed == 1u &&
         observation->native_resources_observed == 1u &&
         observation->native_enemies_observed == 1u &&
-        SudekiMpLanArenaSpiritViewValid(&observation->spirit_view) &&
-        SudekiMpLanArenaSkillFadeValid(&observation->skill_fade) &&
         SudekiMpLanArenaSpiritAudioJournalValid(&audio);
 }
 
@@ -115,6 +117,10 @@ static int next_actor_skill_allowed(
     return candidate->skill_kind == previous->skill_kind &&
         candidate->skill_slot == previous->skill_slot &&
         candidate->skill_cost == previous->skill_cost &&
+        (previous->skill_target_phase == 0u ? candidate->skill_target_phase == 0u :
+            candidate->skill_target_phase >= previous->skill_target_phase) &&
+        !(previous->skill_target_phase == 2u && candidate->skill_target_phase == 2u &&
+          candidate->skill_target_remaining_ms > previous->skill_target_remaining_ms) &&
         !(previous->skill_active == 0u && candidate->skill_active != 0u);
 }
 
@@ -170,6 +176,20 @@ static int next_spirit_audio_journal_allowed(
     require_current_match = simulation->node_role ==
         SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
     candidate_count = candidate->spirit_audio_history_count;
+    if (require_current_match) {
+        /* Validate every newly appended cue, not just the journal's newest
+         * entry. A valid second caster cannot launder a stale first one. */
+        for (index = 0u; index < candidate_count; ++index) {
+            const SudekiMpLanArenaSpiritAudioSemanticEvent *event =
+                &candidate->spirit_audio_history[index];
+            if (!simulation->frame_valid || !simulation->frame.spirit_audio_history_count ||
+                skill_sequence_newer(event->event_sequence,
+                    simulation->frame.spirit_audio_history[
+                        simulation->frame.spirit_audio_history_count - 1u].event_sequence)) {
+                if (!spirit_audio_event_matches_current_spirit(candidate, event)) return 0;
+            }
+        }
+    }
     if (!simulation->frame_valid) {
         return candidate_count == 0u || !require_current_match ||
             spirit_audio_event_matches_current_spirit(
@@ -433,8 +453,7 @@ int SudekiMpLanArenaSharedSimulationCommitNativeFrame(
         observation->spirit_audio_history,
         sizeof(committed.spirit_audio_history));
     committed.spirit_vfx_observed = observation->spirit_vfx_observed;
-    committed.spirit_view = observation->spirit_view;
-    committed.skill_fade = observation->skill_fade;
+    memcpy(committed.cast, observation->cast, sizeof(committed.cast));
     committed.spirit_vfx_count = observation->spirit_vfx_count;
     memcpy(committed.spirit_vfx, observation->spirit_vfx,
         sizeof(committed.spirit_vfx));

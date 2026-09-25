@@ -134,6 +134,8 @@ static void __attribute__((stdcall, used)) focus_reset_scoped(uint8_t *controlle
     void *after_actor = NULL;
     int mode = 0;
     float speed = 0.0f;
+    float targeting = -1.0f;
+    BOOL preserve_movement = FALSE, preserve_targeting = FALSE;
     void *task = NULL;
     void *thread = NULL;
     BOOL preserve = focus_cast_owner(controller, &actor, &before);
@@ -141,8 +143,12 @@ static void __attribute__((stdcall, used)) focus_reset_scoped(uint8_t *controlle
     if (preserve) {
         mode = *(int *)(controller + 0x23cu);
         speed = *(float *)(controller + 0x1d4u);
-        preserve = SudekiMpLanArenaWindowPreserveCastMovementPolicy(
-            TRUE, before.active, mode, speed) &&
+        targeting = *(float *)(controller + 0x1d8u);
+        preserve_movement = SudekiMpLanArenaWindowPreserveCastMovementPolicy(
+            TRUE, before.active, mode, speed);
+        preserve_targeting = isfinite(targeting) && targeting > 0.0f &&
+            (*(uint32_t *)(controller + 0x1d0u) & 2u) == 0u;
+        preserve = (preserve_movement || preserve_targeting) &&
             memory_range(before.skill, 0x78u, FALSE);
         if (preserve) {
             task = *(void **)((uint8_t *)before.skill + 0x74u);
@@ -155,7 +161,7 @@ static void __attribute__((stdcall, used)) focus_reset_scoped(uint8_t *controlle
     }
     SetLastError(incoming_error);
     /* Always clear held keys, mouse transitions, axes and wheel state through
-     * retail's reset. Only the two script-authored settings are restored, and
+     * retail's reset. Only script-authored movement/targeting are restored, and
      * only across this synchronous focus callback for the same active cast. */
     call_focus_reset(controller);
     native_error = GetLastError();
@@ -164,13 +170,20 @@ static void __attribute__((stdcall, used)) focus_reset_scoped(uint8_t *controlle
         after.slot == before.slot &&
         memory_range(after.skill, 0x78u, FALSE) &&
         *(void **)((uint8_t *)after.skill + 0x74u) == task &&
-        memory_range(task, sizeof(void *), FALSE) && *(void **)task == thread &&
-        *(int *)(controller + 0x23cu) == 0 &&
-        *(float *)(controller + 0x1d4u) == 1.0f) {
-        *(int *)(controller + 0x23cu) = mode;
-        *(float *)(controller + 0x1d4u) = speed;
+        memory_range(task, sizeof(void *), FALSE) && *(void **)task == thread) {
+        if (preserve_movement && *(int *)(controller + 0x23cu) == 0 &&
+            *(float *)(controller + 0x1d4u) == 1.0f) {
+            *(int *)(controller + 0x23cu) = mode;
+            *(float *)(controller + 0x1d4u) = speed;
+        }
+        if (preserve_targeting && *(float *)(controller + 0x1d8u) == -1.0f &&
+            *(uint32_t *)(controller + 0x1d0u) == 15u) {
+            *(float *)(controller + 0x1d8u) = targeting;
+            /* Restore only the targeting-owned action gate, never held input. */
+            *(uint32_t *)(controller + 0x1d0u) &= ~2u;
+        }
         SudekiMpLogWrite("lan_arena_window_policy event=focus_reset "
-            "cast_movement=preserved physical_input=cleared\r\n");
+            "cast_settings=preserved physical_input=cleared\r\n");
     }
     SetLastError(native_error);
 }
@@ -199,6 +212,8 @@ static BOOL signature_matches(uint8_t *base) {
         memcmp(base + RVA_CONTROLLER_RESET,
             "\xd9\xee\x53\xd9\x96\xa0\x01\x00\x00\x33\xdb", 11u) != 0 ||
         memcmp(base + 0x0002770fu, "\x89\x9e\x3c\x02\x00\x00", 6u) != 0 ||
+        memcmp(base + 0x000276f6u, "\xc7\x86\xd0\x01\x00\x00\x0f\x00\x00\x00", 10u) != 0 ||
+        memcmp(base + 0x00027740u, "\xd9\x96\xd8\x01\x00\x00", 6u) != 0 ||
         memcmp(base + 0x00027753u, "\xd9\xe8\xd9\x9e\xd4\x01\x00\x00", 8u) != 0)
         return FALSE;
     if (memcmp(base + RVA_WINDOW_ACTIVATE_POLICY,

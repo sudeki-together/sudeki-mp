@@ -7,11 +7,11 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 35u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 37u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413335u /* "LA35" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413337u /* "LA37" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
-#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1365u
+#define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1468u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
@@ -27,7 +27,7 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1365u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1468u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
@@ -313,6 +313,10 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t skill_slot;
     uint8_t skill_active;
     uint32_t skill_cost;
+    /* 0 absent, 1 awaiting native targeting, 2 aiming, 3 released.
+     * Same actor/skill_sequence as above; milliseconds are host-observed. */
+    uint8_t skill_target_phase;
+    uint16_t skill_target_remaining_ms;
     /* Exact-build, actor-local presentation sampled from the authoritative
      * renderer while the corresponding native CSkill or host-owned Spirit
      * transaction is active. The
@@ -422,6 +426,14 @@ typedef struct SudekiMpLanArenaSkillFade {
 } SudekiMpLanArenaSkillFade;
 int SudekiMpLanArenaSkillFadeValid(const SudekiMpLanArenaSkillFade *fade);
 
+/* LA36: slot index is the authenticated seat, never "the active caster".
+ * Sequence numbers are actor-local, so equal numbers in different slots are
+ * distinct lifetimes. A missing observation cannot borrow the peer's state. */
+typedef struct SudekiMpLanArenaCastPresentation {
+    SudekiMpLanArenaSpiritView spirit_view;
+    SudekiMpLanArenaSkillFade skill_fade;
+} SudekiMpLanArenaCastPresentation;
+
 typedef struct SudekiMpLanArenaSnapshot {
     uint32_t sequence;
     uint32_t acknowledged_input;
@@ -430,7 +442,7 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t combat_enabled;
     SudekiMpLanArenaActorSnapshot seat[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     /* Bounded presentation-only journal. Every event is immutable, uses a
-     * session-local nonzero modular sequence, and names the exact Tal Spirit
+     * session-local nonzero modular sequence, and names the exact caster's Spirit
      * transaction that emitted it. Only the transaction's start edge is
      * admitted, so no redundant timing value crosses the wire. */
     uint8_t spirit_audio_history_count;
@@ -444,8 +456,7 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t spirit_vfx_count;
     SudekiMpLanArenaSpiritVfxSnapshot spirit_vfx[
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
-    SudekiMpLanArenaSpiritView spirit_view;
-    SudekiMpLanArenaSkillFade skill_fade;
+    SudekiMpLanArenaCastPresentation cast[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
     uint8_t enemy_count;
     SudekiMpLanArenaEnemySnapshot enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
 } SudekiMpLanArenaSnapshot;

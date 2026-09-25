@@ -14,6 +14,7 @@ static uint64_t session=7;
 static unsigned int expected_actor;
 static BOOL spawn_child, nested;
 static BOOL refuse_enter, refuse_leave, nested_step, step_dispatch, retained_binding;
+static BOOL check_starting_task;
 static void *routed_actor, *saved_route[16];
 static unsigned int route_depth, step_calls;
 static uint32_t route_enter(const SudekiMpLanCastOwner *owner) {
@@ -34,6 +35,21 @@ static int __attribute__((fastcall)) fake_step(void *thread,void *edx) {
     void *expected=thread==threads[3] ? NULL:actors[expected_actor];
     CHECK(edx==(void *)0x13579);
     CHECK(routed_actor==expected);
+    if(check_starting_task) {
+        void *handle=NULL,*actual_thread=NULL;
+        BOOL starting=current_cast && current_cast->launching && current_cast->owner.kind==1;
+        CHECK(SudekiMpLanCastContextStartingSkillTask(actors[expected_actor],7,
+            skills[expected_actor],&handle,&actual_thread)==starting);
+        if(starting) {
+            CHECK(handle==handles[expected_actor] && actual_thread==thread);
+            CHECK(!SudekiMpLanCastContextStartingSkillTask(actors[expected_actor],8,
+                skills[expected_actor],&handle,&actual_thread));
+            CHECK(!SudekiMpLanCastContextStartingSkillTask(actors[expected_actor^1u],7,
+                skills[expected_actor],&handle,&actual_thread));
+            CHECK(!SudekiMpLanCastContextStartingSkillTask(actors[expected_actor],7,
+                skills[expected_actor^1u],&handle,&actual_thread));
+        }
+    }
     ++step_calls;
     ++*(uint32_t *)((uint8_t *)thread+0xc); /* Native fetch side effect. */
     if(nested_step) {
@@ -331,7 +347,15 @@ int main(void) {
     setup(); original_step=fake_step;
     CHECK(!SudekiMpLanCastContextSetTaskRouting(route_enter,NULL));
     CHECK(SudekiMpLanCastContextSetTaskRouting(route_enter,route_leave));
-    a=begin_root(scripts[0],2); create(0,11); end_root(a);
+    a=begin_root(scripts[0],1); create(0,11);
+    expected_actor=0; check_starting_task=TRUE;
+    CHECK(task_step(threads[0],(void *)0x13579)==93);
+    end_root(a);
+    CHECK(task_step(threads[0],(void *)0x13579)==93); /* No longer a starting task. */
+    check_starting_task=FALSE; step_calls=0;
+    skills[0][0x6c]=1; CHECK(SudekiMpLanCastContextPoll());
+    skills[0][0x6c]=0; CHECK(SudekiMpLanCastContextPoll());
+    CHECK(casts[0].skill_cleaned && casts[0].tasks==1); /* Task still pins lifetime. */
     b=begin_root(scripts[1],2); create(1,22); end_root(b);
     CHECK(!SudekiMpLanCastContextSetTaskRouting(NULL,NULL));
     expected_actor=0; nested_step=TRUE;

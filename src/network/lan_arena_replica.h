@@ -68,6 +68,10 @@ BOOL SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
 BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
     const SudekiMpLanArenaReplica *replica
 );
+/* Unbuffered control phase for an already admitted cast only. Does not start
+ * a new transaction, replace animation/position samples, or extrapolate time. */
+BOOL SudekiMpLanArenaReplicaLatestSkillTiming(const SudekiMpLanArenaReplica *,
+    unsigned int seat,const SudekiMpLanArenaActorSnapshot *admitted,uint8_t *phase,uint16_t *remaining_ms);
 
 /* The fixed Ailish client may create presentation-only native skill tasks for
  * either arena actor after host authorization. Damage and resources remain

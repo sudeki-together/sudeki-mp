@@ -5,12 +5,16 @@
 #include <windows.h>
 #include <stdint.h>
 
-/* TRUE means this exact host session currently owns a native Tal Spirit.
+/* TRUE attributes this native emission to its exact session/caster/sequence.
+ * A process-wide active flag is insufficient when both casters are active.
+ * NULL source requires an exact current native scope; a non-NULL animation
+ * component requires its own actor backlink/lease and must not borrow scope.
  * First Capture must run on the verified game/render seam and binds that
  * thread; Initialize itself may run on the loader thread. No native objects
  * are inspected by the hook before the first Capture. */
 typedef BOOL (*SudekiMpLanArenaSpiritVisualHostWitness)(
-    void *context, uint64_t *session, uint16_t *skill, uint32_t *host_tick,
+    void *context, void *source_component,
+    uint64_t *session, uint16_t *skill, uint32_t *host_tick,
     uint8_t *owner_actor_type);
 
 BOOL SudekiMpLanArenaSpiritVisualHostInitialize(

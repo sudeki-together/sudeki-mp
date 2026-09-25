@@ -29,6 +29,19 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void);
 BOOL SudekiMpLanArenaRuntimeGetStatus(
     SudekiMpLanArenaSessionStatus *status
 );
+/* Retained native presentation ownership, not authority to start a cast.
+ * Also remains true during disconnect drain until native namespaces retire. */
+BOOL SudekiMpLanArenaClientPrivateCastCamerasOwned(void);
+/* Closed Buki/Elco ordinary-skill experiment. This reports complete native
+ * ownership plumbing, not permission to Use or to overlap Spirit strikes.
+ * Activation still revalidates the specific actor/session and native state. */
+BOOL SudekiMpLanArenaOrdinarySkillOverlapOwned(void);
+/* Called only after replica sequence/previous-task handoff admission. */
+BOOL SudekiMpLanArenaApplyClientSkillTiming(unsigned int seat,
+    const SudekiMpLanArenaActorSnapshot *snapshot);
+/* Existing host/client camera detours share this router; no second hook.
+ * 0 legacy path, 1 handled remote, 2 positively local/neutral, -1 unknown. */
+int SudekiMpLanArenaRouteCastCamera(void *manager,const char *name);
 /* Wrap-safe admission used by the host's held Ailish fire route.  The
  * non-front world-combat fallback retires much faster than Ailish's authored
  * first-person weapon cycle, so a separate cadence gate is required. */

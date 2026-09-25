@@ -153,6 +153,7 @@ static void reset_event_ring_locked(void) {
 static BOOL record_cue_locked(
     const char *cue,
     int native_state,
+    uint64_t session_token, uint16_t skill_sequence, uint8_t owner_seat,
     SudekiMpLanArenaSpiritAudioEvent *logged_event
 ) {
     SudekiMpLanArenaSpiritAudioEvent event;
@@ -170,6 +171,9 @@ static BOOL record_cue_locked(
     event.sequence = next_event_sequence();
     event.elapsed_ms = (uint32_t)(now_ms - trace_started_at_ms);
     event.native_state = native_state;
+    event.session_token = session_token;
+    event.skill_sequence = skill_sequence;
+    event.owner_seat = owner_seat;
     write_index = event_write_index;
     observed_events[write_index] = event;
     event_write_index = (write_index + 1u) %
@@ -321,6 +325,9 @@ static void __attribute__((fastcall)) observe_sound_play_cue(
     LONG captured_generation;
     BOOL captured_admission;
     int native_state = 0;
+    uint64_t session_token = 0u;
+    uint16_t skill_sequence = 0u;
+    uint8_t owner_seat = 0u;
     BOOL active = FALSE;
     BOOL recorded = FALSE;
 
@@ -340,10 +347,11 @@ static void __attribute__((fastcall)) observe_sound_play_cue(
                 &binding_generation, 0, 0) &&
             spirit_active_witness != NULL) {
             active = spirit_active_witness(
-                spirit_active_witness_context, &native_state);
-            if (active && native_state != 0) {
+                spirit_active_witness_context, &native_state,
+                &session_token, &skill_sequence, &owner_seat);
+            if (active && native_state != 0 && session_token && skill_sequence && owner_seat < 2u) {
                 recorded = record_cue_locked(
-                    cue, native_state, &logged_event);
+                    cue, native_state, session_token, skill_sequence, owner_seat, &logged_event);
             }
         }
         LeaveCriticalSection(&event_lock);

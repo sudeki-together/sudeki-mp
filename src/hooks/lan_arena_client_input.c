@@ -7,6 +7,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/lan_arena_client_replica.h"
 #include "hooks/lan_arena_pause_panel.h"
+#include "hooks/lan_arena_runtime.h"
 #include "network/lan_arena_operator.h"
 #include "network/lan_arena_session.h"
 
@@ -345,8 +346,14 @@ route_client_quick_menu_skill_validate(void *skill, int slot) {
     void *owner;
     void *ailish;
     BOOL host_combat = FALSE;
+    /* In the private overlap profile the native busy bit outside scopes is
+     * the union of both casters. Query this menu's actor namespace rather
+     * than interpreting a peer's cast as this player's native cooldown.
+     * Use still only queues an authenticated request; host owns execution. */
     int result = original_skill_validate == NULL ? 5 :
-        original_skill_validate(skill, slot);
+        (SudekiMpLanArenaOrdinarySkillOverlapOwned() ?
+            SudekiMpInvokeSkillValidate(skill, slot, original_skill_validate) :
+            original_skill_validate(skill, slot));
     owner = readable_memory(skill, 0x14u) ?
         *(void **)((uint8_t *)skill + 0x10u) : NULL;
     ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());

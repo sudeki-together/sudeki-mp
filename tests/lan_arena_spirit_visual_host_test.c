@@ -385,11 +385,171 @@ static uint8_t *map_image(const char *path) {
 }
 
 static BOOL fixture_active;
-static BOOL inactive_witness(void *context,uint64_t *session,uint16_t *skill,uint32_t *tick,uint8_t *owner) {
+static uint8_t fixture_sources[2][0x14];
+static BOOL fixture_sources_active;
+static BOOL inactive_witness(void *context,void *source_component,uint64_t *session,uint16_t *skill,uint32_t *tick,uint8_t *owner) {
     (void)context;
     *session=1u; *skill=1u; *tick=1u;
     *owner=0u;
+    if(source_component) {
+        if(!fixture_sources_active) return FALSE;
+        if(source_component==fixture_sources[0]) return TRUE;
+        if(source_component==fixture_sources[1]) { *owner=SUDEKIMP_LAN_ARENA_ELCO_TYPE; return TRUE; }
+        return FALSE;
+    }
     return fixture_active;
+}
+
+static uint8_t *emission_image;
+static uint8_t fixture_effects[8][0x3e4];
+static unsigned int fixture_nested;
+static uint32_t parent_args[11];
+static void *parent_result;
+static uint32_t parent_selector;
+static void * __attribute__((cdecl,used)) fixture_parent_body(const uint32_t *args,uint32_t selector) {
+    CHECK(!memcmp(args,parent_args,sizeof(parent_args)));
+    CHECK(selector==parent_selector);
+    return parent_result;
+}
+static void __attribute__((naked,used)) fixture_parent_continuation(void) {
+    /* The exact constructor already pushed ECX and loaded its parent arg. */
+    __asm__ volatile("leal 8(%esp),%eax\n\tpushl %edi\n\tpushl %eax\n\t"
+        "call _fixture_parent_body\n\taddl $8,%esp\n\tpopl %ecx\n\tret $44");
+}
+static void * __attribute__((naked,cdecl,used)) call_parent_fixture(
+    void *entry __attribute__((unused)),const uint32_t *args __attribute__((unused))) {
+    __asm__ volatile(
+        "pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %esi\n\tpushl %edi\n\t"
+        "movl 12(%ebp),%esi\n\tsubl $44,%esp\n\tmovl %esp,%edi\n\t"
+        "movl $11,%ecx\n\trep movsl\n\tmovl _parent_selector,%edi\n\t"
+        "movl $0x12345678,%ecx\n\tcall *8(%ebp)\n\t"
+        "cmpl $0x12345678,%ecx\n\tjne 1f\n\tcmpl _parent_selector,%edi\n\tje 2f\n\t"
+        "1: xorl %eax,%eax\n\t2: popl %edi\n\tpopl %esi\n\tpopl %ebp\n\tret");
+}
+static void finish_effect(void *effect) {
+    uint8_t setup[0x90]={0};
+    uintptr_t eax=(uintptr_t)setup;
+    void *entry=emission_image+0x18830u;
+    *(void **)setup=emission_image+0x2c6308u;
+    *(void **)(setup+0x1cu)=effect;
+    *(uint32_t *)(setup+0x2cu)=0x62dcc5a3u; /* generic initiate: either caster */
+    __asm__ volatile("pushl $1\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
+    CHECK((unsigned char)eax==1u);
+}
+static void __attribute__((cdecl,used)) fixture_emit_body(void *component,void **out,uint32_t index) {
+    typedef void (__attribute__((stdcall)) *Emit)(void *,void **,uint32_t);
+    void *nested=NULL;
+    CHECK(index<6u);
+    if(index>=6u) return;
+    *out=fixture_effects[index];
+    if(fixture_nested && index==0u) {
+        ((Emit)(emission_image+0xe2810u))(fixture_sources[1],&nested,1u);
+        /* Foreign nested source must not borrow the enclosing Buki owner. */
+        ((Emit)(emission_image+0xe2810u))((void *)1,&nested,2u);
+    }
+    if(index!=3u && index!=4u) finish_effect(*out);
+    (void)component;
+}
+static void __attribute__((naked,used)) fixture_emit_continuation(void) {
+    __asm__ volatile("pushl 16(%ebp)\n\tpushl 12(%ebp)\n\tpushl 8(%ebp)\n\t"
+        "call _fixture_emit_body\n\taddl $12,%esp\n\tmovl %ebp,%esp\n\tpopl %ebp\n\tret $12");
+}
+static void fixture_jump(void *location,void *target) {
+    uint8_t *p=location;
+    int32_t d=(uint8_t *)target-p-5;
+    p[0]=0xe9; memcpy(p+1,&d,4);
+    FlushInstructionCache(GetCurrentProcess(),p,5);
+}
+static void emission_source_tests(uint8_t *mapped) {
+    typedef void (__attribute__((stdcall)) *Emit)(void *,void **,uint32_t);
+    static const uint8_t finish_return[]={0x8b,0xe5,0x5d,0xb8,1,0,0,0,0xc2,4,0};
+    Emit emit=(Emit)(mapped+0xe2810u);
+    void *out=NULL;
+    emission_image=mapped;
+    /* Exact image admission and both prologues already validated. Replace
+     * only fixture continuations to avoid executing an entire game scheduler. */
+    memcpy(mapped+0x18836u,finish_return,sizeof(finish_return));
+    fixture_jump(mapped+0xe2816u,fixture_emit_continuation);
+    for(unsigned int i=0;i<8;++i) {
+        uint8_t *e=fixture_effects[i];
+        *(void **)e=mapped+0x2d3c7cu;
+        *(void **)(e+0x44u)=e+0x160u; *(void **)(e+0x58u)=e+0x270u;
+        *(void **)(e+0x160u)=mapped+0x2cdefcu; *(void **)(e+0x170u)=e;
+        *(void **)(e+0x270u)=mapped+0x2c83f4u; *(void **)(e+0x280u)=e;
+    }
+    fixture_active=FALSE; fixture_sources_active=TRUE; fixture_nested=1;
+    emit(fixture_sources[0],&out,0u);
+    CHECK(out==fixture_effects[0]);
+    for(unsigned int i=0;i<2;++i) {
+        SudekiMpSpiritVisualHostEntry *e=*(void **)(fixture_effects[i]+4u);
+        CHECK(e && e->weak.entity==fixture_effects[i]);
+        if(e) CHECK(e->value.skill_sequence==1 && e->value.kind==12 &&
+            e->value.owner_actor_type==(i ? SUDEKIMP_LAN_ARENA_ELCO_TYPE:0u));
+    }
+    CHECK(*(void **)(fixture_effects[2]+4u)==NULL);
+    /* Script-origin parent effects finish outside their native caster scope.
+     * Execute the installed call replacement and real constructor prefix;
+     * only its downstream allocation continuation is fixture code. */
+    {
+        int32_t displacement;
+        void *parent_entry;
+        fixture_jump(mapped+0x18c95u,fixture_parent_continuation);
+        CHECK(mapped[0x18f2bu]==0xe8);
+        memcpy(&displacement,mapped+0x18f2cu,4u);
+        parent_entry=mapped+0x18f30u+displacement;
+        for(unsigned int i=0;i<11;++i) parent_args[i]=0x10203040u+i;
+        parent_args[2]=0xfa9u; parent_args[3]=0x62dcc5a3u; parent_args[4]=0;
+        parent_result=fixture_effects[6]; parent_selector=23u;
+        fixture_active=TRUE;
+        CHECK(call_parent_fixture(parent_entry,parent_args)==parent_result);
+        CHECK(*(void **)(fixture_effects[6]+4u)!=NULL);
+        fixture_active=FALSE;
+        finish_effect(fixture_effects[6]);
+        {
+            SudekiMpSpiritVisualHostEntry *e=*(void **)(fixture_effects[6]+4u);
+            CHECK(e && e->value.skill_sequence==1 && e->value.owner_actor_type==0u);
+            CHECK(e && !e->weak.previous && !e->weak.next);
+        }
+        parent_result=fixture_effects[7];
+        CHECK(call_parent_fixture(parent_entry,parent_args)==parent_result);
+        CHECK(*(void **)(fixture_effects[7]+4u)==NULL); /* no guessed caster */
+        fixture_active=TRUE;
+        parent_args[3]=0xdeadbeefu; /* unrelated script effect */
+        CHECK(call_parent_fixture(parent_entry,parent_args)==parent_result);
+        CHECK(*(void **)(fixture_effects[7]+4u)==NULL);
+        fixture_active=FALSE;
+    }
+    /* Attribution survives outside the synchronous hook and after casting
+     * eligibility ends, through an actual native intrusive weak lease. */
+    emit(fixture_sources[1],&out,3u);
+    CHECK(*(void **)(fixture_effects[3]+4u)!=NULL);
+    fixture_sources_active=FALSE;
+    finish_effect(fixture_effects[3]);
+    {
+        SudekiMpSpiritVisualHostEntry *e=*(void **)(fixture_effects[3]+4u);
+        CHECK(e && e->value.skill_sequence==1 && e->value.owner_actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+        CHECK(e && !e->weak.previous && !e->weak.next); /* pending node drained */
+    }
+    /* Exact already-owned effect is a source for its own animation children. */
+    emit(fixture_effects[3]+0x270u,&out,5u);
+    {
+        SudekiMpSpiritVisualHostEntry *e=*(void **)(fixture_effects[5]+4u);
+        CHECK(e && e->value.owner_actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+    }
+    fixture_sources_active=TRUE;
+    emit(fixture_sources[0],&out,4u); /* pending node included in logical drain */
+    {
+        void *saved_head=*(void **)(fixture_effects[4]+4u);
+        *(void **)(fixture_effects[4]+4u)=NULL; /* failed native unlink witness */
+        CHECK(!SudekiMpLanArenaSpiritVisualHostReset());
+        CHECK(((SudekiMpSpiritVisualWeakNode *)saved_head)->entity==fixture_effects[4]);
+        *(void **)(fixture_effects[4]+4u)=saved_head;
+    }
+    CHECK(SudekiMpLanArenaSpiritVisualHostReset());
+    for(unsigned int i=0;i<8;++i) CHECK(*(void **)(fixture_effects[i]+4u)==NULL);
+    finish_effect(fixture_effects[4]); /* late callback after reset cannot resurrect */
+    CHECK(*(void **)(fixture_effects[4]+4u)==NULL);
+    fixture_sources_active=FALSE;
 }
 
 static void bind_native_fixture(void *entry, SudekiMpSpiritVisualWeakNode *node, void *entity) {
@@ -444,6 +604,9 @@ static void image_tests(const char *path) {
     saved=mapped[0x183d8u]; mapped[0x183d8u]^=1u;
     CHECK(!SudekiMpLanArenaSpiritVisualHostImageMatches((HMODULE)mapped));
     mapped[0x183d8u]=saved;
+    saved=mapped[0x18f2bu]; mapped[0x18f2bu]^=1u;
+    CHECK(!SudekiMpLanArenaSpiritVisualHostImageMatches((HMODULE)mapped));
+    mapped[0x18f2bu]=saved;
     native_weak_tests(mapped);
     CHECK(SudekiMpLanArenaSpiritVisualHostInitialize((HMODULE)mapped,inactive_witness,NULL));
     memset(&output,0,sizeof(output));
@@ -508,6 +671,7 @@ static void image_tests(const char *path) {
         *(void **)(setup+0x30u)=NULL;
     }
     fixture_active=FALSE;
+    emission_source_tests(mapped);
     CHECK(SudekiMpLanArenaSpiritVisualHostReset());
     CHECK(!SudekiMpLanArenaSpiritVisualHostCapture(1u,0u,2u,actor,actor,&output));
     /* Physical hook stays valid and native-passthrough after logical Reset. */

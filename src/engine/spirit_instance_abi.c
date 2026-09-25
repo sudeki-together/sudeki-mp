@@ -1,5 +1,7 @@
 #include "engine/spirit_instance_abi.h"
+#include "engine/cast_light_abi.h"
 #include "hooks/call_hook.h"
+#include "hooks/lan_arena_cast_context.h"
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -52,6 +54,14 @@ typedef struct Entry {
     void *named_cameras[2];
     unsigned int named_slots[2];
     char named_names[2][NAMED_NAME_SIZE];
+    BOOL remote_camera_selection;
+    void *selected_camera;
+    unsigned int selected_kind;
+    BOOL timing_configured, timing_replica, targeting_open, timing_draining;
+    uint16_t timing_sequence;
+    uint8_t targeting_phase;
+    float targeting_remaining;
+    void *targeting_task, *targeting_thread;
 } Entry;
 typedef BOOL (__attribute__((thiscall)) *NamedCameraAdd)(void *,const char *,const char *);
 typedef void (__attribute__((thiscall)) *NamedCameraRemove)(void *,const char *);
@@ -62,6 +72,16 @@ static unsigned int named_original_slots[2];
 static char named_original_names[2][NAMED_NAME_SIZE];
 static const char named_parked[2][NAMED_NAME_SIZE]={"MP_BaseInit","MP_BaseSkill"};
 static uint32_t named_generation;
+static uint32_t selection_generation;
+static void *selection_view,*selection_scene_manager,*selection_scene;
+typedef void (__attribute__((thiscall)) *NamedCameraUpdate)(void *,void *);
+static NamedCameraUpdate named_update_original;
+static SudekiMpPointerHook named_update_hook;
+typedef unsigned char (__attribute__((thiscall)) *SpiritCameraReady)(void *);
+typedef void (__attribute__((thiscall)) *SpiritCameraAnimation)(void *,void *,uint32_t);
+static SpiritCameraReady spirit_camera_ready_original;
+static SpiritCameraAnimation spirit_camera_animation_original;
+static SudekiMpPointerHook spirit_camera_callback_hooks[2];
 static uint8_t *instance_image;
 static SudekiMpSpiritInstanceIdleWitness idle_witness;
 static SudekiMpSpiritInputOwnerWitness input_owner_witness;
@@ -110,6 +130,16 @@ static void *skill_ui_resumes[2] __attribute__((used));
 static void *native_ui_recompute __attribute__((used));
 static SudekiMpInlineHook skill_input_hooks[2];
 static void *skill_input_resumes[2] __attribute__((used));
+typedef void (__attribute__((thiscall)) *SkillTargetingFunction)(void *,unsigned char);
+static SudekiMpInlineHook skill_targeting_hook;
+static SkillTargetingFunction native_skill_targeting;
+typedef unsigned char (__attribute__((thiscall)) *SkillTargetPredicate)(void *);
+static SudekiMpInlineHook skill_target_predicate_hook;
+static SkillTargetPredicate native_skill_target_predicate;
+typedef void (__attribute__((thiscall)) *ControllerFilterFunction)(void *);
+static SudekiMpInlineHook skill_filter_hooks[2];
+static ControllerFilterFunction native_skill_filters[2];
+static const uint32_t skill_filter_sites[2]={0x8ac0,0x8ae0};
 static SudekiMpInlineHook state_ui_hooks[2];
 static void *state_ui_trampolines[2] __attribute__((used));
 static void *state_ui_acquire_resume __attribute__((used));
@@ -442,6 +472,144 @@ static BOOL named_namespace_exact(void) {
     }
     return !named_generation || (generation_entry(named_generation) && generation_entry(named_generation)->named_ready);
 }
+BOOL SudekiMpSpiritInstanceCameraSelectionAbiReady(void) {
+    uint8_t *b=instance_image;
+    /* SetRenderCamera's selected-pointer read/write, scene render publication,
+     * and empty-name lookup. Do not depend on the entry already owned by the
+     * runtime's SetRenderCamera hook. CCamera Update is thiscall(node+8,args),
+     * NOT the Spirit camera's Update(float) ABI. */
+    return b && bytes(b+0x36fbc,(const uint8_t *)"\x8b\x43\x20",3) &&
+        bytes(b+0x370d8,(const uint8_t *)"\x8b\x4c\x24\x1c\x8b\x41\x40\x8b\x4a\x34\x89\x48\x7c",13) &&
+        bytes(b+0x370ea,(const uint8_t *)"\x89\x53\x20",3) &&
+        bytes(b+0x370f0,(const uint8_t *)"\x88\x8a\x05\x01\x00\x00",6) &&
+        bytes(b+0x374fa,(const uint8_t *)"\x8b\x75\x20",3) &&
+        bytes(b+0xe7161,(const uint8_t *)"\xc7\x45\x08",3) && address(b+0xe7164,b+0x2cce6c) &&
+        bytes(b+0xe7660,(const uint8_t *)"\x55\x8b\xec\x83\xe4\xc0\xa1",7) &&
+        address(b+0xe7667,b+0x408da0) &&
+        bytes(b+0xe768d,(const uint8_t *)"\x8b\x55\x08\xd9\x5c\x24\x54\x8d\x73\xf8",10) &&
+        bytes(b+0xe7948,(const uint8_t *)"\xc2\x04\x00",3) &&
+        address(b+0x2cce70,named_update_hook.installed ? named_update_hook.replacement_value : b+0xe7660) &&
+        /* ResourceSetup::ready(this+44) and AnimationListener::event(this+30)
+         * call 12060 -> 124e0 -> 121d0 outside the scheduled Update. That path
+         * configures the named camera and selects it; it needs the SAME owner. */
+        bytes(b+0x11823,(const uint8_t *)"\xc7\x46\x30",3) && address(b+0x11826,b+0x2c5660) &&
+        bytes(b+0x1182a,(const uint8_t *)"\xc7\x46\x44",3) && address(b+0x1182d,b+0x2c5674) &&
+        bytes(b+0x121a0,(const uint8_t *)"\x56\x8b\xf1\x83\xbe\x98\x01\x00\x00\x00",10) &&
+        bytes(b+0x121ad,(const uint8_t *)"\x8d\x7e\xbc",3) && call(b,0x121b0,0x12060) &&
+        bytes(b+0x121bd,(const uint8_t *)"\xb0\x01\x5e\xc3",4) &&
+        bytes(b+0x11ff0,(const uint8_t *)"\x8b\x44\x24\x08\x56\x8b\xf1",7) &&
+        bytes(b+0x12000,(const uint8_t *)"\x8d\x7e\xd0",3) && call(b,0x1204c,0x12060) &&
+        bytes(b+0x12052,(const uint8_t *)"\x5e\xc2\x08\x00",4) &&
+        address(b+0x2c5678,spirit_camera_callback_hooks[0].installed ?
+            spirit_camera_callback_hooks[0].replacement_value:b+0x121a0) &&
+        address(b+0x2c566c,spirit_camera_callback_hooks[1].installed ?
+            spirit_camera_callback_hooks[1].replacement_value:b+0x11ff0);
+}
+static BOOL registered_camera(void *camera) {
+    for(unsigned int i=0;i<NAMED_SLOTS;++i) if(camera && *named_slot(i)==camera) return TRUE;
+    return FALSE;
+}
+static BOOL private_remote_camera(void *camera) {
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) if(entries[i].remote_camera_selection &&
+        (entries[i].named_cameras[0]==camera || entries[i].named_cameras[1]==camera)) return TRUE;
+    return FALSE;
+}
+static BOOL selection_exact(void) {
+    Entry *e=generation_entry(selection_generation);
+    void *view,*selected;
+    if(!selection_scene) return !selection_generation;
+    if(!named_namespace_exact() || !object_exact(selection_scene_manager,0x44,0x2c66b8) ||
+        !address(instance_image+0x408d58,selection_scene_manager) ||
+        !address((uint8_t *)selection_scene_manager+0x40,selection_scene) ||
+        !memory(selection_scene,0x80,FALSE) ||
+        (selection_generation && (!e || !e->remote_camera_selection || !caster_exact(e)))) return FALSE;
+    selected=*(void **)((uint8_t *)named_manager+0x20);
+    view=e ? selection_view:selected;
+    return registered_camera(view) && !private_remote_camera(view) &&
+        address((uint8_t *)selection_scene+0x7c,*(void **)((uint8_t *)view+0x34)) &&
+        (!e || (selected==e->selected_camera &&
+            (selected==e->named_cameras[0] || selected==e->named_cameras[1])));
+}
+static BOOL selection_transition_ready(uint32_t generation) {
+    Entry *next=generation_entry(generation);
+    if(!selection_scene) return TRUE;
+    return selection_exact() && (!next || !next->remote_camera_selection ||
+        (next->named_ready && caster_exact(next) &&
+            (next->selected_camera==next->named_cameras[0] || next->selected_camera==next->named_cameras[1])));
+}
+static void selection_transition_commit(uint32_t generation) {
+    Entry *next=generation_entry(generation);
+    if(!selection_scene) return;
+    if(!selection_generation) selection_view=*(void **)((uint8_t *)named_manager+0x20);
+    selection_generation=next && next->remote_camera_selection ? generation:0;
+    *(void **)((uint8_t *)named_manager+0x20)=selection_generation ? next->selected_camera:selection_view;
+}
+
+BOOL SudekiMpEnableSpiritInstanceRemoteCameraSelection(const SudekiMpSpiritInstance *instance) {
+    Entry *e=find(instance);
+    void *scene_manager,*scene,*view;
+    if(!e || !boundary() || update_fault || !quiescent(e) || !e->remote_ui ||
+        !e->named_ready || e->remote_camera_selection || !named_namespace_exact() ||
+        !named_update_hook.installed || !SudekiMpSpiritInstanceCameraSelectionAbiReady() ||
+        !memory(instance_image+0x408d58,4,FALSE)) return FALSE;
+    scene_manager=*(void **)(instance_image+0x408d58);
+    if(!object_exact(scene_manager,0x44,0x2c66b8)) return FALSE;
+    scene=*(void **)((uint8_t *)scene_manager+0x40);
+    view=*(void **)((uint8_t *)named_manager+0x20);
+    if(!memory(scene,0x80,FALSE) || !registered_camera(view) || private_remote_camera(view) ||
+        view==e->named_cameras[0] || view==e->named_cameras[1] ||
+        !address((uint8_t *)scene+0x7c,*(void **)((uint8_t *)view+0x34)) ||
+        (selection_scene && (!selection_exact() || selection_scene!=scene ||
+            selection_scene_manager!=scene_manager))) return FALSE;
+    selection_view=view; selection_scene=scene; selection_scene_manager=scene_manager;
+    e->selected_camera=e->named_cameras[0]; e->selected_kind=0;
+    e->remote_camera_selection=TRUE;
+    return TRUE;
+}
+
+int SudekiMpRouteSpiritInstanceRenderCamera(void *manager,const char *name,unsigned int *kind) {
+    Entry *e;
+    char bounded[NAMED_NAME_SIZE];
+    unsigned int n=0,k;
+    void *selected;
+    if(!selection_scene) return 0;
+    if(!kind || owner_thread!=GetCurrentThreadId() || update_fault || operation_depth ||
+        !selection_exact()) return -1;
+    if(!selection_generation) return 0;
+    e=generation_entry(selection_generation);
+    if(manager!=named_manager || !scope_depth || scopes[scope_depth-1].generation!=selection_generation ||
+        !e || !globals_exact(e->identity.manager,e->identity.camera)) return -1;
+    if(name) {
+        for(;n<NAMED_NAME_SIZE;++n) {
+            if(!memory(name+n,1,FALSE)) return -1;
+            bounded[n]=name[n]; if(!bounded[n]) break;
+        }
+        if(n==NAMED_NAME_SIZE) return -1;
+    } else bounded[0]=0;
+    k=e->selected_kind; selected=e->selected_camera;
+    if(bounded[0]) {
+        if(!_stricmp(bounded,"InitCam")) { k=1; selected=e->named_cameras[0]; }
+        else if(!_stricmp(bounded,"SkillCam")) { k=2; selected=e->named_cameras[1]; }
+        else if(!_stricmp(bounded,"default")) { k=0; selected=e->named_cameras[0]; }
+        else return -1; /* Never select another caster/shared cinematic camera. */
+    }
+    ((uint8_t *)selected)[0x105]=((uint8_t *)e->selected_camera)[0x105];
+    e->selected_camera=selected; e->selected_kind=k;
+    *(void **)((uint8_t *)named_manager+0x20)=selected;
+    *kind=k;
+    return 1;
+}
+
+BOOL SudekiMpObserveSpiritInstanceScope(SudekiMpSpiritInstance *instance) {
+    SudekiMpSpiritInstance observed={0};
+    Entry *e=scope_depth ? generation_entry(scopes[scope_depth-1].generation):NULL;
+    if(!instance || !instance_image || owner_thread!=GetCurrentThreadId() || update_fault || operation_depth ||
+        (scope_depth && scopes[scope_depth-1].generation && (!e || !caster_exact(e))) ||
+        !globals_exact(e ? e->identity.manager:primary_manager,e ? e->identity.camera:primary_camera)) return FALSE;
+    if(e) observed=e->identity;
+    *instance=observed;
+    return TRUE;
+}
 /* Preflight and commit are deliberately separate: busy-bit banking may reject
  * a scope too. Once all checks pass, these bounded copies make no callbacks. */
 static BOOL named_transition_ready(uint32_t generation) {
@@ -748,7 +916,8 @@ finished:
 static BOOL quiescent(const Entry *e) {
     const uint8_t *m=e->identity.manager,*c=e->identity.camera;
     unsigned int i;
-    if(!e->manager_constructed || !e->manager_initialized || !e->camera_constructed || e->caster_lock_owned || e->cast_busy || e->remote_ui_acquired || e->remote_skill_ui_acquired || e->remote_skill_input_acquired || e->remote_state_ui_acquired ||
+    if(e->targeting_open || !SudekiMpCastLightDrained(e->identity.generation) ||
+        !e->manager_constructed || !e->manager_initialized || !e->camera_constructed || e->caster_lock_owned || e->cast_busy || e->remote_ui_acquired || e->remote_skill_ui_acquired || e->remote_skill_input_acquired || e->remote_state_ui_acquired ||
         !object_exact((void *)m,MANAGER_SIZE,MANAGER_VTABLE) ||
         !object_exact((void *)c,CAMERA_SIZE,CAMERA_VTABLE) ||
         *(uint32_t *)(m+0x5c) || *(uint32_t *)(c+0x1a0) ||
@@ -827,6 +996,255 @@ static BOOL skill_input_exact(const Entry *e,void *controller) {
         e->local_actor_witness(e->local_actor,e->caster_session) &&
         memory(e->local_actor,0x134,FALSE) && *(void **)e->local_actor==e->local_actor_vtable &&
         *(void **)((uint8_t *)controller+0x248)==e->local_actor;
+}
+static Entry *scoped_participant_owner(void);
+static BOOL ui_context_exact(const Entry *e);
+static BOOL skill_targeting_image_exact(void) {
+    uint8_t expected[]={0x80,0x7c,0x24,4,0,0x75,0x16,0xd9,5,0,0,0,0,
+        0x83,0x89,0xd0,1,0,0,2,0xd9,0x99,0xd8,1,0,0,0xc2,4,0,
+        0xa1,0,0,0,0,0x83,0xa1,0xd0,1,0,0,0xfd,0xd9,0x80,0,0xa,0,0,
+        0xd9,0x99,0xd8,1,0,0,0xc2,4,0};
+    void *constant=instance_image+0x2e35cc,*gate=instance_image+CAST_GATE_GLOBAL;
+    memcpy(expected+9,&constant,4); memcpy(expected+30,&gate,4);
+    return bytes(instance_image+0x29570,expected,sizeof(expected));
+}
+static const uint8_t target_predicate_body[]={0xd9,0xee,0xd8,0x99,0xd8,1,0,0,
+    0xdf,0xe0,0xf6,0xc4,5,0x7a,6,0xb8,1,0,0,0,0xc3,0x33,0xc0,0xc3};
+static BOOL targeting_owner_exact(Entry *e,void *controller) {
+    return e && !update_fault && GetCurrentThreadId()==owner_thread &&
+        skill_ui_exact(e,e->skill) &&
+        (e->remote_skill_input ? skill_input_exact(e,controller) :
+         (object_exact(controller,0x24c,CONTROLLER_VTABLE) &&
+          address(instance_image+CONTROLLER_GLOBAL,controller) &&
+          *(void **)((uint8_t *)controller+0x248)==e->caster));
+}
+static BOOL targeting_task_exact(Entry *e) {
+    void *task=NULL,*thread=NULL,*published;
+    if(!skill_ui_exact(e,e->skill)) return FALSE;
+    published=*(void **)((uint8_t *)e->skill+0x74);
+    return skill_ui_exact(e,e->skill) &&
+        (published==e->targeting_task ||
+         ((!published || (memory(published,4,FALSE) && !*(void **)published)) &&
+          SudekiMpLanCastContextStartingSkillTask(e->caster,e->caster_session,e->skill,&task,&thread) &&
+          task==e->targeting_task && thread==e->targeting_thread)) &&
+        memory(e->targeting_task,4,FALSE) && e->targeting_thread &&
+        *(void **)e->targeting_task==e->targeting_thread;
+}
+BOOL SudekiMpConfigureSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance,BOOL replica) {
+    Entry *e=find(instance);
+    void *skill;
+    if(!e || !boundary() || update_fault || !quiescent(e) || !caster_exact(e) ||
+        e->timing_configured || !skill_targeting_hook.installed ||
+        !skill_target_predicate_hook.installed) return FALSE;
+    skill=*(void **)((uint8_t *)e->caster+0xd8);
+    if(!memory(skill,0x78,FALSE) || *(void **)((uint8_t *)skill+0x10)!=e->caster ||
+        *(void **)((uint8_t *)skill+0x18)!=instance_image+0x2cbadc ||
+        ((uint8_t *)skill)[0x6c] || (e->skill && e->skill!=skill)) return FALSE;
+    e->skill=skill; e->skill_vtable=*(void **)skill;
+    e->timing_configured=TRUE; e->timing_replica=replica;
+    return TRUE;
+}
+BOOL SudekiMpBeginSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance,uint16_t seq) {
+    Entry *e=find(instance);
+    if(!e || !seq || !e->timing_configured || e->timing_draining || update_fault ||
+        GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,e->skill)) return FALSE;
+    if(e->timing_sequence==seq)
+        return !e->targeting_open || targeting_task_exact(e);
+    if(e->targeting_open || (e->timing_sequence &&
+        (uint16_t)(seq-e->timing_sequence)>=0x8000u)) return FALSE;
+    e->timing_sequence=seq; e->targeting_phase=SUDEKIMP_SKILL_TARGET_PENDING;
+    e->targeting_remaining=0.f; e->targeting_task=e->targeting_thread=NULL;
+    return TRUE;
+}
+BOOL SudekiMpApplySpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance,uint16_t seq,
+    uint8_t phase,uint16_t ms) {
+    Entry *e=find(instance);
+    if(!e || !e->timing_replica || phase<SUDEKIMP_SKILL_TARGET_PENDING ||
+        phase>SUDEKIMP_SKILL_TARGET_RELEASED ||
+        (phase!=SUDEKIMP_SKILL_TARGET_AIMING && ms) ||
+        (phase==SUDEKIMP_SKILL_TARGET_AIMING && (!ms || ms>60000u)) ||
+        !SudekiMpBeginSpiritInstanceSkillTiming(instance,seq)) return FALSE;
+    if(phase<e->targeting_phase) return FALSE;
+    e->targeting_phase=phase; e->targeting_remaining=(float)ms*.001f;
+    return TRUE;
+}
+static BOOL sample_local_targeting(Entry *e) {
+    void *controller=*(void **)(instance_image+CONTROLLER_GLOBAL);
+    float remaining;
+    if(!targeting_owner_exact(e,controller) || !targeting_task_exact(e)) return FALSE;
+    remaining=*(float *)((uint8_t *)controller+0x1d8);
+    if(!isfinite(remaining) || remaining>60.f) return FALSE;
+    e->targeting_remaining=remaining>0.f ? remaining:0.f;
+    if(remaining<=0.f) e->targeting_phase=SUDEKIMP_SKILL_TARGET_RELEASED;
+    return TRUE;
+}
+BOOL SudekiMpObserveSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance,uint16_t seq,
+    uint8_t *phase,uint16_t *ms) {
+    Entry *e=find(instance);
+    if(!e || !phase || !ms || !seq || seq!=e->timing_sequence || !e->timing_configured ||
+        update_fault || GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,e->skill)) return FALSE;
+    if(e->targeting_open && !targeting_task_exact(e)) return FALSE;
+    if(!e->timing_replica && !e->remote_skill_input && e->targeting_open &&
+        e->targeting_phase==SUDEKIMP_SKILL_TARGET_AIMING && !sample_local_targeting(e)) return FALSE;
+    *phase=e->targeting_phase;
+    *ms=e->targeting_phase==SUDEKIMP_SKILL_TARGET_AIMING ?
+        (uint16_t)ceilf(e->targeting_remaining*1000.f):0u;
+    return TRUE;
+}
+BOOL SudekiMpAdvanceSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance,float dt) {
+    Entry *e=find(instance);
+    if(!e || !e->timing_configured || update_fault || GetCurrentThreadId()!=owner_thread ||
+        !skill_ui_exact(e,e->skill) || !isfinite(dt) || dt<0.f || dt>.25f) return FALSE;
+    if((!e->timing_draining && (e->timing_replica || !e->remote_skill_input)) || !e->targeting_open ||
+        e->targeting_phase!=SUDEKIMP_SKILL_TARGET_AIMING) return TRUE;
+    if(!targeting_task_exact(e)) return FALSE;
+    e->targeting_remaining=fmaxf(0.f,e->targeting_remaining-dt);
+    if(e->targeting_remaining==0.f) e->targeting_phase=SUDEKIMP_SKILL_TARGET_RELEASED;
+    return TRUE;
+}
+BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance) {
+    Entry *e=find(instance);
+    if(!e || !e->timing_configured || update_fault || GetCurrentThreadId()!=owner_thread ||
+        !skill_ui_exact(e,e->skill)) return FALSE;
+    if(e->timing_draining) return TRUE;
+    if(e->targeting_open && !targeting_task_exact(e)) return FALSE;
+    if(e->timing_replica && e->targeting_open && e->targeting_phase==SUDEKIMP_SKILL_TARGET_PENDING) {
+        void *gate=*(void **)(instance_image+CAST_GATE_GLOBAL);
+        float duration;
+        if(!object_exact(gate,0xa04,CAST_GATE_VTABLE)) return FALSE;
+        duration=*(float *)((uint8_t *)gate+0xa00);
+        if(!isfinite(duration) || duration<=0.f || duration>60.f) return FALSE;
+        e->targeting_remaining=duration; e->targeting_phase=SUDEKIMP_SKILL_TARGET_AIMING;
+    }
+    e->timing_draining=TRUE;
+    return TRUE;
+}
+static void __attribute__((thiscall)) route_skill_targeting(void *controller,unsigned char enabled) {
+    Entry *e=scoped_participant_owner();
+    if(e && e->timing_configured) {
+        if(!targeting_owner_exact(e,controller) || !e->timing_sequence) { update_fault=TRUE; return; }
+        if(enabled) {
+            void *task=*(void **)((uint8_t *)e->skill+0x74);
+            void *starting_thread=NULL;
+            void *gate=*(void **)(instance_image+CAST_GATE_GLOBAL);
+            float duration;
+            /* Repeated Use may still expose its previous, positively
+             * completed pool cell until the new submission returns. */
+            if((!task || (memory(task,4,FALSE) && !*(void **)task)) &&
+                !SudekiMpLanCastContextStartingSkillTask(
+                e->caster,e->caster_session,e->skill,&task,&starting_thread)) { update_fault=TRUE; return; }
+            if(e->targeting_open || !memory(task,4,FALSE) || !*(void **)task ||
+                (starting_thread && *(void **)task!=starting_thread) ||
+                !object_exact(gate,0xa04,CAST_GATE_VTABLE)) { update_fault=TRUE; return; }
+            duration=*(float *)((uint8_t *)gate+0xa00);
+            if(!isfinite(duration) || duration<=0.f || duration>60.f) { update_fault=TRUE; return; }
+            e->targeting_task=task; e->targeting_thread=*(void **)task; e->targeting_open=TRUE;
+            if(!e->timing_replica || e->timing_draining) {
+                e->targeting_phase=SUDEKIMP_SKILL_TARGET_AIMING; e->targeting_remaining=duration;
+            }
+        } else {
+            if(e->targeting_open && !targeting_task_exact(e)) { update_fault=TRUE; return; }
+            e->targeting_open=FALSE;
+            if(!e->timing_replica) { e->targeting_phase=SUDEKIMP_SKILL_TARGET_RELEASED; e->targeting_remaining=0.f; }
+        }
+        if(!e->remote_skill_input) {
+            native_skill_targeting(controller,enabled);
+            if(enabled && e->timing_replica)
+                *(float *)((uint8_t *)controller+0x1d8)=
+                    e->targeting_phase==SUDEKIMP_SKILL_TARGET_AIMING ? e->targeting_remaining:0.f;
+        }
+        return;
+    }
+    /* This setter creates no task or reference. Suppress the remote setter
+     * and its inverse at the source; never repair the local bit afterward,
+     * which would unlock a concurrently casting local player. */
+    if(e && e->remote_skill_input) {
+        if(update_fault || GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,e->skill) ||
+            !ui_context_exact(e) || !skill_input_exact(e,controller)) update_fault=TRUE;
+        return;
+    }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return; }
+    if(native_skill_targeting) native_skill_targeting(controller,enabled);
+}
+static unsigned char __attribute__((thiscall)) route_skill_target_predicate(void *controller) {
+    Entry *e=scoped_participant_owner();
+    if(e && e->timing_configured) {
+        if(!targeting_owner_exact(e,controller) || !e->targeting_open ||
+            !targeting_task_exact(e)) { update_fault=TRUE; return 1; }
+        if(!e->timing_replica && !e->remote_skill_input && !e->timing_draining && !sample_local_targeting(e)) {
+            update_fault=TRUE; return 1;
+        }
+        return e->targeting_phase!=SUDEKIMP_SKILL_TARGET_RELEASED;
+    }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return 1; }
+    return native_skill_target_predicate(controller);
+}
+static void route_skill_filter(void *controller,unsigned int filter) {
+    Entry *e=scoped_participant_owner();
+    /* The script's FilterNone/All pair addresses the singleton controller,
+     * not its caster. A remote cast must not erase the local player's UI
+     * preparation (2) or unlock a concurrent local cast (0). Preserve the
+     * entire native callback for local and unowned calls, including its
+     * input-edge cleanup; no post-write filter repair. */
+    if(e && e->remote_skill_input) {
+        if(update_fault || GetCurrentThreadId()!=owner_thread ||
+            !skill_ui_exact(e,e->skill) || !ui_context_exact(e) ||
+            !skill_input_exact(e,controller)) update_fault=TRUE;
+        return;
+    }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return; }
+    native_skill_filters[filter](controller);
+}
+static void __attribute__((thiscall)) route_skill_filter_none(void *controller) {
+    route_skill_filter(controller,0);
+}
+static void __attribute__((thiscall)) route_skill_filter_all(void *controller) {
+    route_skill_filter(controller,1);
+}
+static void skill_filter_entry(unsigned int filter,uint8_t expected[13]) {
+    static const uint8_t prefix[13]={0x56,0x8b,0xf1,0xc7,0x81,0x84,0,0,0,0,0,0,0};
+    memcpy(expected,prefix,13); expected[9]=(uint8_t)filter;
+}
+static BOOL skill_filter_image_exact(unsigned int filter) {
+    uint8_t expected[13]; uint8_t *site=instance_image+skill_filter_sites[filter];
+    skill_filter_entry(filter,expected);
+    return bytes(site,expected,13) &&
+        call(instance_image,skill_filter_sites[filter]+13,0x290d0) &&
+        bytes(site+18,(const uint8_t *)"\x5e\xc3",2);
+}
+BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void) {
+    static const uint8_t entry[]={0x80,0x7c,0x24,4,0};
+    if(!boundary() || update_fault || scope_depth || skill_targeting_hook.installed ||
+        !skill_input_hooks[0].installed || !skill_input_hooks[1].installed ||
+        skill_target_predicate_hook.installed || skill_filter_hooks[0].installed ||
+        skill_filter_hooks[1].installed || !skill_targeting_image_exact() ||
+        !skill_filter_image_exact(0) || !skill_filter_image_exact(1) ||
+        !bytes(instance_image+0x29610,target_predicate_body,sizeof(target_predicate_body))) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation &&
+        (!quiescent(&entries[i]) || !caster_exact(&entries[i]))) return FALSE;
+    if(!SudekiMpInstallInlineHook(&skill_target_predicate_hook,instance_image+0x29610,
+        target_predicate_body,8,route_skill_target_predicate)) return FALSE;
+    native_skill_target_predicate=(SkillTargetPredicate)skill_target_predicate_hook.trampoline;
+    if(!SudekiMpInstallInlineHook(&skill_targeting_hook,instance_image+0x29570,
+        entry,sizeof(entry),route_skill_targeting)) {
+        if(SudekiMpRestoreInlineHook(&skill_target_predicate_hook)) native_skill_target_predicate=NULL;
+        return FALSE;
+    }
+    native_skill_targeting=(SkillTargetingFunction)skill_targeting_hook.trampoline;
+    for(unsigned int i=0;i<2;++i) {
+        uint8_t expected[13]; skill_filter_entry(i,expected);
+        if(!SudekiMpInstallInlineHook(&skill_filter_hooks[i],instance_image+skill_filter_sites[i],
+                expected,sizeof(expected),i ? route_skill_filter_all:route_skill_filter_none)) {
+            DWORD error=GetLastError();
+            for(unsigned int j=i;j>0;--j) if(SudekiMpRestoreInlineHook(&skill_filter_hooks[j-1]))
+                native_skill_filters[j-1]=NULL;
+            if(SudekiMpRestoreInlineHook(&skill_targeting_hook)) native_skill_targeting=NULL;
+            if(SudekiMpRestoreInlineHook(&skill_target_predicate_hook)) native_skill_target_predicate=NULL;
+            SetLastError(error); return FALSE;
+        }
+        native_skill_filters[i]=(ControllerFilterFunction)skill_filter_hooks[i].trampoline;
+    }
+    return TRUE;
 }
 BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *instance,
     void *local_actor,SudekiMpSpiritCasterWitness local_witness) {
@@ -931,6 +1349,19 @@ BOOL SudekiMpBindSpiritInstanceCaster(const SudekiMpSpiritInstance *instance,
     return TRUE;
 }
 
+BOOL SudekiMpEnableSpiritInstanceLighting(void) {
+    if(!boundary() || update_fault) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation &&
+        (!caster_exact(&entries[i]) || !quiescent(&entries[i]))) return FALSE;
+    if(!SudekiMpInitializeCastLightAbi((HMODULE)instance_image)) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) {
+        Entry *e=&entries[i];
+        if(e->identity.generation && !SudekiMpCreateCastLight(e->identity.generation,
+            e->caster,e->caster_session,e->caster_witness)) return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpDestroySpiritInstance(SudekiMpSpiritInstance *instance) {
     Entry *e=find(instance);
     unsigned int i;
@@ -948,7 +1379,9 @@ BOOL SudekiMpDestroySpiritInstance(SudekiMpSpiritInstance *instance) {
         if(!originals(&e->saved_manager,&e->saved_camera) ||
             e->saved_manager==e->identity.manager || e->saved_camera==e->identity.camera ||
             !quiescent(e)) { SetLastError(ERROR_BUSY); return FALSE; }
-        if(!named_retire(e)) { SetLastError(ERROR_BUSY); return FALSE; }
+        if(!SudekiMpDestroyCastLight(e->identity.generation) || !named_retire(e)) {
+            SetLastError(ERROR_BUSY); return FALSE;
+        }
         e->destroying=TRUE;
     }
     if(!object_exact(e->saved_manager,MANAGER_SIZE,MANAGER_VTABLE) ||
@@ -1021,7 +1454,8 @@ BOOL SudekiMpResetSpiritInstanceAbi(void) {
     }
     if(cast_gate_manager && (!cast_gate_exact() || neutral_cast_busy ||
         (cast_gate_manager[CAST_GATE_OFFSET]&CAST_BUSY_BIT))) { SetLastError(ERROR_BUSY); return FALSE; }
-    if(!SudekiMpUnbindRemoteCharacterSkillUi() || !SudekiMpUninstallSpiritInstanceUpdates()) return FALSE;
+    if(!SudekiMpResetCastLightAbi() || !SudekiMpUnbindRemoteCharacterSkillUi() ||
+        !SudekiMpUninstallSpiritInstanceUpdates()) return FALSE;
     cast_gate_manager=NULL; neutral_cast_busy=0;
     shared_ssp_enabled=FALSE;
     instance_image=NULL; idle_witness=NULL; input_owner_witness=NULL; owner_thread=0;
@@ -1034,10 +1468,12 @@ BOOL SudekiMpResetSpiritInstanceAbi(void) {
     memset(ui_trampolines,0,sizeof(ui_trampolines)); memset(ui_resumes,0,sizeof(ui_resumes));
     memset(skill_ui_resumes,0,sizeof(skill_ui_resumes)); native_ui_recompute=NULL;
     memset(skill_input_resumes,0,sizeof(skill_input_resumes));
+    native_skill_targeting=NULL;
     memset(state_ui_trampolines,0,sizeof(state_ui_trampolines));
     state_ui_acquire_resume=state_ui_release_resume=NULL;
     update_fault=FALSE;
     named_manager=NULL; named_add=NULL; named_remove=NULL; named_generation=0;
+    selection_generation=0; selection_view=selection_scene_manager=selection_scene=NULL;
     memset(named_originals,0,sizeof(named_originals));
     memset(named_original_names,0,sizeof(named_original_names));
     /* Generations do not reset: an old external handle cannot match a new one. */
@@ -1064,11 +1500,15 @@ uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
         !object_exact(camera,CAMERA_SIZE,CAMERA_VTABLE)) {
         SetLastError(ERROR_INVALID_DATA); return 0;
     }
-    if(!shared_ssp_transition_ready(e ? e->identity.generation:0) ||
+    if(!SudekiMpCastLightTransitionReady(e ? e->identity.generation:0) ||
+        !shared_ssp_transition_ready(e ? e->identity.generation:0) ||
         !named_transition_ready(e ? e->identity.generation:0) ||
+        !selection_transition_ready(e ? e->identity.generation:0) ||
         !cast_gate_transition(e ? e->identity.generation:0,FALSE)) return 0;
     shared_ssp_transition_commit(e ? e->identity.generation:0);
     named_transition_commit(e ? e->identity.generation:0);
+    selection_transition_commit(e ? e->identity.generation:0);
+    SudekiMpCastLightTransitionCommit(e ? e->identity.generation:0);
     scopes[n].saved_manager=expected_manager; scopes[n].saved_camera=expected_camera;
     scopes[n].manager=manager; scopes[n].camera=camera;
     scopes[n].generation=e ? e->identity.generation:0;
@@ -1095,11 +1535,15 @@ BOOL SudekiMpLeaveSpiritInstance(uint32_t cookie) {
         !object_exact(scopes[n].saved_camera,CAMERA_SIZE,CAMERA_VTABLE)) {
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
-    if(!shared_ssp_transition_ready(n ? scopes[n-1].generation:0) ||
+    if(!SudekiMpCastLightTransitionReady(n ? scopes[n-1].generation:0) ||
+        !shared_ssp_transition_ready(n ? scopes[n-1].generation:0) ||
         !named_transition_ready(n ? scopes[n-1].generation:0) ||
+        !selection_transition_ready(n ? scopes[n-1].generation:0) ||
         !cast_gate_transition(n ? scopes[n-1].generation:0,n==0)) return FALSE;
     shared_ssp_transition_commit(n ? scopes[n-1].generation:0);
     named_transition_commit(n ? scopes[n-1].generation:0);
+    selection_transition_commit(n ? scopes[n-1].generation:0);
+    SudekiMpCastLightTransitionCommit(n ? scopes[n-1].generation:0);
     *(void **)(instance_image+MANAGER_GLOBAL)=scopes[n].saved_manager;
     *(void **)(instance_image+CAMERA_GLOBAL)=scopes[n].saved_camera;
     memset(&scopes[n],0,sizeof(scopes[n])); --scope_depth;
@@ -1403,6 +1847,106 @@ static void __attribute__((thiscall)) manager_update(void *object,float delta) {
     update_instance(object,delta,2);
 }
 
+static void __attribute__((thiscall)) named_camera_update(void *node,void *args) {
+    Entry *owner=NULL;
+    uint32_t cookie;
+    DWORD error=GetLastError();
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) for(unsigned int k=0;k<2;++k)
+        if(entries[i].named_cameras[k] &&
+            (uint8_t *)entries[i].named_cameras[k]+8==node) owner=&entries[i];
+    if(update_fault || owner_thread!=GetCurrentThreadId() || !named_namespace_exact() ||
+        !object_exact(node,4,0x2cce6c) ||
+        (owner && (!owner->named_ready || owner->destroying || !caster_exact(owner)))) {
+        update_fault=TRUE; return;
+    }
+    /* Other cameras tick in neutral context even when called from a caster's
+     * update. Never advance a camera twice or give it the enclosing owner. */
+    cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
+    if(!cookie) { update_fault=TRUE; return; }
+    ++update_depth;
+    SetLastError(error);
+    named_update_original(node,args);
+    error=GetLastError();
+    --update_depth;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    SetLastError(error);
+}
+static uint32_t spirit_camera_callback_enter(void *member,unsigned int offset,uint32_t vtable) {
+    Entry *owner=NULL;
+    uint8_t *camera;
+    if(update_fault || owner_thread!=GetCurrentThreadId() || (uintptr_t)member<offset ||
+        !object_exact(member,4,vtable)) { update_fault=TRUE; return 0; }
+    camera=(uint8_t *)member-offset;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i)
+        if(entries[i].identity.camera==camera) owner=&entries[i];
+    if(!object_exact(camera,CAMERA_SIZE,CAMERA_VTABLE) ||
+        (!owner && camera!=primary_camera) ||
+        (owner && (owner->destroying || !owner->named_ready || !caster_exact(owner)))) {
+        update_fault=TRUE; return 0;
+    }
+    uint32_t cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
+    if(!cookie) update_fault=TRUE;
+    return cookie;
+}
+static unsigned char __attribute__((thiscall)) spirit_camera_ready(void *member) {
+    DWORD error=GetLastError();
+    uint32_t cookie=spirit_camera_callback_enter(member,0x44,0x2c5674);
+    unsigned char result;
+    if(!cookie) return 0;
+    ++update_depth;
+    SetLastError(error);
+    result=spirit_camera_ready_original(member);
+    error=GetLastError();
+    --update_depth;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    SetLastError(error);
+    return result; /* Preserve the native result even after a restore fault. */
+}
+static void __attribute__((thiscall)) spirit_camera_animation(void *member,void *source,uint32_t event) {
+    DWORD error=GetLastError();
+    uint32_t cookie=spirit_camera_callback_enter(member,0x30,0x2c5660);
+    if(!cookie) return;
+    ++update_depth;
+    SetLastError(error);
+    spirit_camera_animation_original(member,source,event);
+    error=GetLastError();
+    --update_depth;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    SetLastError(error);
+}
+static BOOL restore_named_camera_hooks(void) {
+    BOOL restored=TRUE;
+    for(unsigned int i=2;i>0;--i)
+        if(!SudekiMpRestorePointerHook(&spirit_camera_callback_hooks[i-1])) restored=FALSE;
+    if(!SudekiMpRestorePointerHook(&named_update_hook)) restored=FALSE;
+    if(restored) {
+        spirit_camera_ready_original=NULL;
+        spirit_camera_animation_original=NULL;
+        named_update_original=NULL;
+    }
+    return restored;
+}
+BOOL SudekiMpInstallSpiritInstanceNamedCameraUpdates(void) {
+    if(!boundary() || update_fault || named_update_hook.installed ||
+        spirit_camera_callback_hooks[0].installed || spirit_camera_callback_hooks[1].installed ||
+        !SudekiMpSpiritInstanceCameraSelectionAbiReady()) return FALSE;
+    named_update_original=(NamedCameraUpdate)(instance_image+0xe7660);
+    spirit_camera_ready_original=(SpiritCameraReady)(instance_image+0x121a0);
+    spirit_camera_animation_original=(SpiritCameraAnimation)(instance_image+0x11ff0);
+    if(!SudekiMpInstallPointerHook(&named_update_hook,(void **)(instance_image+0x2cce70),
+            named_update_original,named_camera_update) ||
+        !SudekiMpInstallPointerHook(&spirit_camera_callback_hooks[0],(void **)(instance_image+0x2c5678),
+            spirit_camera_ready_original,spirit_camera_ready) ||
+        !SudekiMpInstallPointerHook(&spirit_camera_callback_hooks[1],(void **)(instance_image+0x2c566c),
+            spirit_camera_animation_original,spirit_camera_animation)) {
+        DWORD error=GetLastError();
+        (void)restore_named_camera_hooks();
+        SetLastError(error);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 BOOL SudekiMpInstallSpiritInstanceUpdates(void) {
     NativeUpdate replacements[3]={camera_update,soul_update,manager_update};
     const uint32_t ui_sites[2]={0x100d1,0x10fe6};
@@ -1501,6 +2045,10 @@ BOOL SudekiMpUninstallSpiritInstanceUpdates(void) {
     for(i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation) {
         SetLastError(ERROR_BUSY); return FALSE;
     }
+    if(!restore_named_camera_hooks()) restored=FALSE;
+    for(i=2;i>0;--i) if(!SudekiMpRestoreInlineHook(&skill_filter_hooks[i-1])) restored=FALSE;
+    if(!SudekiMpRestoreInlineHook(&skill_targeting_hook)) restored=FALSE;
+    if(!SudekiMpRestoreInlineHook(&skill_target_predicate_hook)) restored=FALSE;
     for(i=2;i>0;--i) if(!SudekiMpRestoreInlineHook(&state_ui_hooks[i-1])) restored=FALSE;
     for(i=2;i>0;--i) if(!SudekiMpRestoreInlineHook(&skill_input_hooks[i-1])) restored=FALSE;
     for(i=2;i>0;--i) if(!SudekiMpRestoreInlineHook(&skill_ui_hooks[i-1])) restored=FALSE;
@@ -1508,6 +2056,9 @@ BOOL SudekiMpUninstallSpiritInstanceUpdates(void) {
     for(i=2;i>0;--i) if(!SudekiMpRestoreRelativeCallHook(&participant_hooks[i-1])) restored=FALSE;
     for(i=3;i>0;--i) if(!SudekiMpRestorePointerHook(&update_hooks[i-1])) restored=FALSE;
     if(!restored) return FALSE;
+    native_skill_targeting=NULL;
+    native_skill_target_predicate=NULL;
+    memset(native_skill_filters,0,sizeof(native_skill_filters));
     memset(original_updates,0,sizeof(original_updates));
     return TRUE;
 }
