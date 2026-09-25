@@ -7,12 +7,15 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 37u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 38u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413337u /* "LA37" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413338u /* "LA38" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1468u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
+/* Storage capacity is not gameplay support: only the testroom dummy is admitted. */
+#define SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES 1u
+#define SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE 10000000u
 #define SUDEKIMP_LAN_ARENA_ACTION_PHASE_SCALE 256.0f
 #define SUDEKIMP_LAN_ARENA_MAP_CLEANROOM 1u
@@ -27,7 +30,7 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1468u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1342u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
@@ -353,6 +356,25 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     SudekiMpLanArenaLocomotion locomotion;
 } SudekiMpLanArenaActorSnapshot;
 
+enum {
+    SUDEKIMP_LAN_HIT_POPUP = 1u,
+    SUDEKIMP_LAN_HIT_REACTION = 2u
+};
+
+/* Host-observed presentation, never a client damage request or native pointer.
+ * Reaction is the host-selected ANIMID_GETHIT in the closed 0x2a..0x36 range.
+ * Popup color: 0 white, 1 red, 2 yellow; values are native UI queue parameters. */
+typedef struct SudekiMpLanArenaHitFeedback {
+    uint32_t sequence;
+    uint32_t host_tick;
+    int32_t amount;
+    float value_before;
+    float value_after;
+    uint8_t color;
+    uint8_t reaction;
+    uint8_t flags;
+} SudekiMpLanArenaHitFeedback;
+
 typedef struct SudekiMpLanArenaEnemySnapshot {
     uint32_t native_entity_id;
     float x;
@@ -360,7 +382,12 @@ typedef struct SudekiMpLanArenaEnemySnapshot {
     float z;
     uint32_t hp;
     uint8_t combat_state;
+    uint32_t feedback_generation;
+    uint8_t hit_count;
+    SudekiMpLanArenaHitFeedback hits[SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY];
 } SudekiMpLanArenaEnemySnapshot;
+
+int SudekiMpLanArenaHitFeedbackValid(const SudekiMpLanArenaHitFeedback *hit);
 
 typedef struct SudekiMpLanArenaSpiritAudioSemanticEvent {
     uint16_t event_sequence;

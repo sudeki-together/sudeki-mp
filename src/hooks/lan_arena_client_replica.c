@@ -1,4 +1,5 @@
 #include "hooks/lan_arena_client_replica.h"
+#include "hooks/lan_arena_hit_feedback.h"
 
 #include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
@@ -6386,6 +6387,13 @@ static BOOL apply_actor(
     return resources_applied;
 }
 
+static SudekiMpLanHitCursor dummy_hit_cursor;
+static BOOL replay_dummy_hit(void *context, const SudekiMpLanArenaHitFeedback *hit) {
+    SudekiMpLanHitTarget *target = context;
+    if (SudekiMpCleanroomEngineGenericEntity("MON_TrainingDummy") != target->entity) return FALSE;
+    return SudekiMpLanHitReplayNative((HMODULE)game_base, target, hit);
+}
+
 static BOOL apply_training_dummy(
     const SudekiMpLanArenaEnemySnapshot *snapshot
 ) {
@@ -6410,6 +6418,24 @@ static BOOL apply_training_dummy(
     coordinates[2] = snapshot->z;
     set_position(position, coordinates);
     return SudekiMpCleanroomEngineSetDummyHitPoints((float)snapshot->hp);
+}
+
+static BOOL apply_training_dummy_feedback(
+    const SudekiMpLanArenaSnapshot *confirmed, uint64_t session
+) {
+    SudekiMpLanHitTarget target;
+    void *entity;
+    if (confirmed->enemy_count == 0u) {
+        memset(&dummy_hit_cursor, 0, sizeof(dummy_hit_cursor));
+        return TRUE;
+    }
+    if (confirmed->enemy_count != 1u ||
+        confirmed->enemies[0].native_entity_id !=
+            SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID) return FALSE;
+    entity = SudekiMpCleanroomEngineGenericEntity("MON_TrainingDummy");
+    if (!SudekiMpLanHitResolveTarget(entity, session, &target)) return FALSE;
+    return SudekiMpLanHitConsume(&dummy_hit_cursor, session, (uintptr_t)entity,
+        confirmed->host_tick, &confirmed->enemies[0], replay_dummy_hit, &target);
 }
 
 static void capture_actor_diagnostics(
@@ -6619,6 +6645,7 @@ static void capture_camera_diagnostics(void) {
 }
 
 static void discard_client_replica_frame_state(void) {
+    memset(&dummy_hit_cursor, 0, sizeof(dummy_hit_cursor));
     /* Retire exact visual clones before releasing their resource caches.
      * Synchronous native entry defers cleanup to the outer service call;
      * failed cleanup retains backend leases for retry, never forgetting
@@ -6699,6 +6726,7 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
     }
     if ((client_combat_mode_lease_valid && !restore_client_combat_mode()) ||
         base == NULL || set_position != NULL ||
+        !SudekiMpLanHitImageMatches(game_module) ||
         !SudekiMpBukiReplicaNativeImageMatches(game_module) ||
         position_world_matrix != NULL ||
         ailish_ranged_presentation_refresh != NULL ||
@@ -7083,6 +7111,8 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
     BOOL previous_render_clock_initialized =
         replica_render_clock.initialized != 0u;
     BOOL action_clock_protected;
+    BOOL dummy_feedback_applied = TRUE;
+    BOOL dummy_state_applied;
     unsigned int presentation_ready_mask;
     if (client_replica_reset_pending ||
         set_position == NULL || set_forward == NULL ||
@@ -7149,6 +7179,17 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
                 audio_replayed);
         }
     }
+    /* A host-confirmed hit is an independently leased target event, not an
+     * actor animation. Service the latest admitted journal on the game thread
+     * before interpolation/readiness gates: a ranged-fire presentation gap
+     * must not delay (or expire) damage numbers already received from the host.
+     * Retry the same retained journal on later frames; its cursor deduplicates
+     * successful events. Never sample it back through the actor render clock. */
+    if (replica.latest_valid &&
+        replica.latest.match_state == SUDEKIMP_LAN_ARENA_MATCH_ACTIVE) {
+        dummy_feedback_applied = apply_training_dummy_feedback(
+            &replica.latest, status.session_token);
+    }
     action_clock_protected =
         SudekiMpLanArenaReplicaActionTimelineBuffered(&replica);
     if (!SudekiMpLanArenaReplicaRenderClockAdvanceWithCatchup(
@@ -7163,6 +7204,10 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
             snapshot.combat_enabled, status.session_token)) {
         return FALSE;
     }
+    /* Position/HP still use the sampled world frame, but do not wait for
+     * either player's independent animation writer to succeed. */
+    dummy_state_applied = snapshot.enemy_count == 0u ||
+        (snapshot.enemy_count == 1u && apply_training_dummy(&snapshot.enemies[0]));
     presentation_ready_mask = client_combat_presentation_ready_mask(
         status.session_token);
     replica_diagnostics.valid = 0u;
@@ -7267,9 +7312,7 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
         }
     }
     replica_diagnostics.valid = 1u;
-    if (snapshot.enemy_count == 0u) return TRUE;
-    return snapshot.enemy_count == 1u &&
-        apply_training_dummy(&snapshot.enemies[0]);
+    return dummy_feedback_applied && dummy_state_applied;
 }
 
 BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void) {

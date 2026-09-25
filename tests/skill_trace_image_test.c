@@ -14,6 +14,7 @@
 #include "hooks/lan_arena_client_input.h"
 #include "network/lan_arena_operator.h"
 #include "hooks/lan_arena_client_replica.h"
+#include "hooks/lan_arena_hit_feedback.h"
 #include "hooks/lan_arena_campaign_guard.h"
 #include "hooks/lan_arena_host_input.h"
 #include "hooks/lan_arena_pause_panel.h"
@@ -50,6 +51,7 @@ static BOOL inert_spirit_hook_boundary(void) { return TRUE; }
 static BOOL no_cast_owner(void *actor,uint8_t kind,uint64_t *session,uint8_t *type) {
     (void)actor; (void)kind; (void)session; (void)type; return FALSE;
 }
+static BOOL no_hit_target(SudekiMpLanHitTarget *target) { (void)target; return FALSE; }
 
 /* The exact-image harness links the LAN input adapters without the large
  * cleanroom menu presenter. Keep its read-only modal contract inert here. */
@@ -4335,6 +4337,23 @@ int wmain(int argc, wchar_t **argv) {
     if (image == NULL) {
         fputs("failed to map PE image\n", stderr);
         return 1;
+    }
+    {
+        uint8_t damage[6], popup[5];
+        memcpy(damage,image+0xd21d0u,sizeof(damage));
+        memcpy(popup,image+0x12969eu,sizeof(popup));
+        if (!SudekiMpLanHitImageMatches((HMODULE)image) ||
+            !SudekiMpLanHitHostInstall((HMODULE)image,no_hit_target) ||
+            !SudekiMpLanHitHostUninstall() ||
+            memcmp(damage,image+0xd21d0u,sizeof(damage)) ||
+            memcmp(popup,image+0x12969eu,sizeof(popup))) {
+            fputs("FAIL: dummy feedback exact-image install/restore\n",stderr); ++failures;
+        }
+        image[0xd20f0u] ^= 1u;
+        if (SudekiMpLanHitHostInstall((HMODULE)image,no_hit_target)) {
+            fputs("FAIL: dummy feedback accepted foreign reaction entry\n",stderr); ++failures;
+        }
+        image[0xd20f0u] ^= 1u;
     }
     {
         int selector = -1;

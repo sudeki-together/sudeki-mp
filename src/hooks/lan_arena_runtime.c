@@ -21,6 +21,7 @@
 #include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_spirit_audio.h"
+#include "hooks/lan_arena_hit_feedback.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/noncaster_skill_locomotion.h"
 #include "network/lan_arena_authority.h"
@@ -1321,6 +1322,7 @@ static void retain_runtime_after_hook_restore_failure(DWORD error) {
 
 static BOOL rollback_host_spirit_audio_trace(void) {
     DWORD error = ERROR_SUCCESS;
+    if (!SudekiMpLanHitHostUninstall()) error = GetLastError();
     /* Both observers are independent restoration obligations. Never clear
      * either one's callback dependency if its native lease is still live. */
     if (!SudekiMpLanArenaSpiritVisualHostReset()) {
@@ -4407,6 +4409,16 @@ static void host_capture_tal_locomotion(
     }
 }
 
+static BOOL host_hit_target_witness(SudekiMpLanHitTarget *target) {
+    SudekiMpLanArenaSessionStatus status;
+    if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        status.local_role != SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status.local_simulation_node_role !=
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) return FALSE;
+    return SudekiMpLanHitResolveTarget(
+        SudekiMpCleanroomEngineGenericEntity("MON_TrainingDummy"), status.session_token, target);
+}
+
 static void host_publish_snapshot(DWORD now_ms) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaSnapshot snapshot;
@@ -4517,6 +4529,7 @@ static void host_publish_snapshot(DWORD now_ms) {
             snapshot.enemies[0].combat_state = dummy_hp <= 0.0f ?
                 SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED :
                 SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+            SudekiMpLanHitHostSnapshot(&snapshot.enemies[0]);
         }
     }
     /* Commit validates again, but naming this boundary separately makes a
@@ -6072,7 +6085,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
         return FALSE;
     }
     if (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
-        (!SudekiMpInstallLanArenaSpiritAudioTrace(
+        (!SudekiMpLanHitHostInstall(game_module, host_hit_target_witness) ||
+         !SudekiMpInstallLanArenaSpiritAudioTrace(
             game_module,
             host_spirit_audio_active_witness,
             &runtime_config) ||

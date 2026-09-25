@@ -3735,6 +3735,17 @@ void SudekiMpUninstallLanArenaCollisionDebug(void) {
     ++collision_debug_uninstall_count;
 }
 
+/* New hit observer is independently covered by HitFeedbackTest and the exact
+ * image test. These stubs keep this coordinator fixture native-call-free. */
+BOOL SudekiMpLanHitHostInstall(HMODULE image, SudekiMpLanHitWitness witness) {
+    return image != NULL && witness != NULL;
+}
+BOOL SudekiMpLanHitHostUninstall(void) { return TRUE; }
+void SudekiMpLanHitHostSnapshot(SudekiMpLanArenaEnemySnapshot *enemy) { (void)enemy; }
+BOOL SudekiMpLanHitResolveTarget(void *entity, uint64_t session, SudekiMpLanHitTarget *target) {
+    (void)entity; (void)session; (void)target; return FALSE;
+}
+
 BOOL SudekiMpInstallLanArenaSpiritAudioTrace(
     HMODULE game_module,
     SudekiMpLanArenaSpiritActiveWitness active_witness,

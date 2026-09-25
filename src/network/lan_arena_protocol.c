@@ -21,7 +21,8 @@
 #define LAN_ACTOR_WEAPON_OFFSET (LAN_ACTOR_SKILL_KIND_OFFSET + 1u)
 #define LAN_ACTOR_TARGET_OFFSET (LAN_ACTOR_WEAPON_OFFSET + 1u)
 #define LAN_ACTOR_SIZE (LAN_ACTOR_TARGET_OFFSET + 3u)
-#define LAN_ENEMY_SIZE 21u
+#define LAN_HIT_SIZE 23u
+#define LAN_ENEMY_SIZE (26u + SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY * LAN_HIT_SIZE)
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
 #define LAN_SPIRIT_AUDIO_EVENT_SIZE 6u
 #define LAN_LOCOMOTION_SIZE 26u
@@ -52,7 +53,7 @@
 
 _Static_assert(
     LAN_HEADER_SIZE + LAN_SNAPSHOT_FIXED_SIZE +
-        (SUDEKIMP_LAN_ARENA_MAX_ENEMIES * LAN_ENEMY_SIZE) ==
+        (SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES * LAN_ENEMY_SIZE) ==
             SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE,
     "LAN snapshot size contract changed");
 _Static_assert(
@@ -923,6 +924,25 @@ int SudekiMpLanArenaSkillFadeValid(const SudekiMpLanArenaSkillFade *fade) {
     return 1;
 }
 
+int SudekiMpLanArenaHitFeedbackValid(const SudekiMpLanArenaHitFeedback *hit) {
+    if (hit == NULL || hit->sequence == 0u || hit->flags == 0u ||
+        (hit->flags & ~(SUDEKIMP_LAN_HIT_POPUP | SUDEKIMP_LAN_HIT_REACTION)) ||
+        hit->color > 2u ||
+        hit->amount < -(int32_t)SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
+        hit->amount > (int32_t)SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
+        !isfinite(hit->value_before) || !isfinite(hit->value_after) ||
+        hit->value_before < 0.0f || hit->value_after < 0.0f ||
+        hit->value_before > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
+        hit->value_after > SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE) return 0;
+    if (hit->flags & SUDEKIMP_LAN_HIT_REACTION) {
+        if (hit->reaction < 0x2au || hit->reaction > 0x36u) return 0;
+    } else if (hit->reaction != 0u) return 0;
+    if (!(hit->flags & SUDEKIMP_LAN_HIT_POPUP) &&
+        (hit->amount || hit->color || hit->value_before != 0.0f ||
+         hit->value_after != 0.0f)) return 0;
+    return 1;
+}
+
 int SudekiMpLanArenaSnapshotValid(
     const SudekiMpLanArenaSnapshot *snapshot
 ) {
@@ -935,7 +955,7 @@ int SudekiMpLanArenaSnapshotValid(
         (snapshot->seat[1].locomotion.valid && !snapshot->combat_enabled) ||
         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
          snapshot->combat_enabled != 0u) ||
-        snapshot->enemy_count > 1u ||
+        snapshot->enemy_count > SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
         !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
         !valid_actor_snapshot(&snapshot->seat[0], expected_host_actor_type) ||
@@ -956,6 +976,17 @@ int SudekiMpLanArenaSnapshotValid(
     }
     for (index = 0u; index < snapshot->enemy_count; ++index) {
         const SudekiMpLanArenaEnemySnapshot *enemy = &snapshot->enemies[index];
+        if (enemy->hit_count > SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY ||
+            (enemy->hit_count && !enemy->feedback_generation)) return 0;
+        for (unsigned int hit_index = 0; hit_index < enemy->hit_count; ++hit_index) {
+            const SudekiMpLanArenaHitFeedback *hit = &enemy->hits[hit_index];
+            if (!SudekiMpLanArenaHitFeedbackValid(hit) ||
+                (int32_t)(snapshot->host_tick - hit->host_tick) < 0 ||
+                (hit_index && (!SudekiMpLanArenaSequenceNewer(hit->sequence,
+                    enemy->hits[hit_index - 1u].sequence) ||
+                    (int32_t)(hit->host_tick - enemy->hits[hit_index - 1u].host_tick) < 0)))
+                return 0;
+        }
         if (enemy->native_entity_id !=
                 SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID ||
             enemy->combat_state > SUDEKIMP_LAN_ARENA_COMBAT_INCAPACITATED ||
@@ -1252,6 +1283,18 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
                 write_float(entry + 12u, enemy->z);
                 write_u32(entry + 16u, enemy->hp);
                 entry[20] = enemy->combat_state;
+                write_u32(entry + 21u, enemy->feedback_generation);
+                entry[25] = enemy->hit_count;
+                memset(entry + 26u, 0, SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY * LAN_HIT_SIZE);
+                for (unsigned int h = 0; h < enemy->hit_count; ++h) {
+                    const SudekiMpLanArenaHitFeedback *hit = &enemy->hits[h];
+                    uint8_t *dst = entry + 26u + h * LAN_HIT_SIZE;
+                    write_u32(dst, hit->sequence); write_u32(dst + 4u, hit->host_tick);
+                    write_u32(dst + 8u, (uint32_t)hit->amount);
+                    write_float(dst + 12u, hit->value_before);
+                    write_float(dst + 16u, hit->value_after);
+                    dst[20] = hit->color; dst[21] = hit->reaction; dst[22] = hit->flags;
+                }
             }
             *size = LAN_SNAPSHOT_FIXED_SIZE + (packet->body.snapshot.enemy_count * LAN_ENEMY_SIZE);
             return 1;
@@ -1378,7 +1421,7 @@ int SudekiMpLanArenaDecodePacket(
                 payload[LAN_SNAPSHOT_SPIRIT_VFX_COUNT_OFFSET] >
                     SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY ||
                 payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] >
-                    SUDEKIMP_LAN_ARENA_MAX_ENEMIES ||
+                    SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES ||
                 payload_size != LAN_SNAPSHOT_FIXED_SIZE +
                     ((size_t)payload[LAN_SNAPSHOT_ENEMY_COUNT_OFFSET] *
                      LAN_ENEMY_SIZE)) {
@@ -1455,6 +1498,24 @@ int SudekiMpLanArenaDecodePacket(
                 enemy->z = read_float(entry + 12u);
                 enemy->hp = read_u32(entry + 16u);
                 enemy->combat_state = entry[20];
+                enemy->feedback_generation = read_u32(entry + 21u);
+                enemy->hit_count = entry[25];
+                if (enemy->hit_count > SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY) return 0;
+                for (unsigned int h = enemy->hit_count;
+                     h < SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY; ++h) {
+                    static const uint8_t empty_hit[LAN_HIT_SIZE] = {0};
+                    if (memcmp(entry + 26u + h * LAN_HIT_SIZE,
+                               empty_hit, sizeof(empty_hit))) return 0;
+                }
+                for (unsigned int h = 0; h < enemy->hit_count; ++h) {
+                    SudekiMpLanArenaHitFeedback *hit = &enemy->hits[h];
+                    const uint8_t *src = entry + 26u + h * LAN_HIT_SIZE;
+                    hit->sequence = read_u32(src); hit->host_tick = read_u32(src + 4u);
+                    hit->amount = (int32_t)read_u32(src + 8u);
+                    hit->value_before = read_float(src + 12u);
+                    hit->value_after = read_float(src + 16u);
+                    hit->color = src[20]; hit->reaction = src[21]; hit->flags = src[22];
+                }
             }
             return packet->body.snapshot.sequence == packet->sequence &&
                 SudekiMpLanArenaSnapshotValid(&packet->body.snapshot);
