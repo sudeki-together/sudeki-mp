@@ -3099,6 +3099,22 @@ BOOL SudekiMpLanArenaClientReplicaHostCombatState(BOOL *enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpLanArenaClientReplicaRangedAim(void *actor, float direction[3]) {
+    if (!actor || !direction || !client_session_authenticated() ||
+        !replica_diagnostics.valid || !last_applied_snapshot.combat_enabled ||
+        (DWORD)(GetTickCount()-replica_diagnostics.sampled_at_ms)>250u) return FALSE;
+    for (unsigned seat=0;seat<2;++seat) {
+        const SudekiMpLanArenaActorSnapshot *sample=&last_applied_snapshot.seat[seat];
+        if (actor==last_applied_characters[seat] &&
+            actor==SudekiMpCleanroomEngineActorEntity(seat ? seat_client_actor():seat_host_actor()) &&
+            sample->ranged_aim_valid && !sample->skill_active && sample->hp) {
+            for (unsigned axis=0;axis<3;++axis) direction[axis]=sample->ranged_aim[axis]/32767.0f;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOL finite_position(const SudekiMpLanArenaActorSnapshot *actor) {
     return actor != NULL && isfinite(actor->x) && isfinite(actor->y) &&
         isfinite(actor->z) && fabsf(actor->x) < 1000000.0f &&

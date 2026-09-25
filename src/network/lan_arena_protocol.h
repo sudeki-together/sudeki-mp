@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 38u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 39u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413338u /* "LA38" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413339u /* "LA39" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1468u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -30,7 +30,7 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1342u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1356u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
@@ -289,6 +289,10 @@ typedef struct SudekiMpLanArenaActorSnapshot {
     float z;
     float facing_x;
     float facing_z;
+    /* World-space unit aim, quantized like player input. Separate from the
+     * upright root's facing. Absence is canonical zero, never a stale aim. */
+    uint8_t ranged_aim_valid;
+    int16_t ranged_aim[3];
     uint32_t hp;
     uint32_t sp;
     /* Monotonic per actor and authored only by the shared simulation. This

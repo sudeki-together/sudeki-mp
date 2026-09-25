@@ -380,6 +380,21 @@ static void interpolate_actor(
     output->z = interpolate_float(before->z, after->z, alpha);
     normalized_facing(before, after, alpha,
         &output->facing_x, &output->facing_z);
+    if (before->ranged_aim_valid && after->ranged_aim_valid) {
+        float direction[3],norm=0;
+        for (unsigned i=0;i<3;++i) {
+            direction[i]=interpolate_float(before->ranged_aim[i]/32767.0f,
+                after->ranged_aim[i]/32767.0f,alpha);
+            norm+=direction[i]*direction[i];
+        }
+        /* Opposite rays have no unique interpolation arc. Use the confirmed
+         * endpoint rather than normalizing a zero vector. */
+        if (norm>0.0001f) {
+            norm=sqrtf(norm);
+            for (unsigned i=0;i<3;++i)
+                output->ranged_aim[i]=(int16_t)lroundf(direction[i]/norm*32767.0f);
+        }
+    }
     interpolate_skill_presentation(before, after, alpha, output);
     interpolate_locomotion(before, after, alpha, output);
     replay_action_history(

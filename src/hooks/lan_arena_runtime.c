@@ -22,6 +22,7 @@
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_spirit_audio.h"
 #include "hooks/lan_arena_hit_feedback.h"
+#include "hooks/lan_arena_ranged_aim.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/noncaster_skill_locomotion.h"
 #include "network/lan_arena_authority.h"
@@ -1343,6 +1344,10 @@ static BOOL rollback_host_spirit_audio_trace(void) {
 
 static BOOL rollback_lan_arena_frame_hooks(void) {
     DWORD restore_error;
+    if (!SudekiMpLanAimUninstall()) {
+        retain_runtime_after_hook_restore_failure(GetLastError());
+        return FALSE;
+    }
     if (!SudekiMpUninstallLanArenaSkillFade()) {
         retain_runtime_after_hook_restore_failure(GetLastError());
         return FALSE;
@@ -4409,6 +4414,77 @@ static void host_capture_tal_locomotion(
     }
 }
 
+static BOOL runtime_ranged_aim(void *actor, BOOL projectile, float direction[3]) {
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpCharacterSkillState skill;
+    BOOL combat=FALSE;
+    unsigned seat;
+    float candidate[3];
+    if (!runtime_installed || !actor || !direction || !tal_initialized || !ailish_initialized ||
+        !SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        !status.session_token || !SudekiMpCleanroomEngineCombatMode(&combat) || !combat)
+        return FALSE;
+    if (actor==SudekiMpCleanroomEngineActorEntity(seat_host_actor())) seat=0;
+    else if (actor==SudekiMpCleanroomEngineActorEntity(seat_client_actor())) seat=1;
+    else return FALSE;
+    /* Elco is the accepted native-bank adapter in this pass. Do not borrow
+     * its clip identities for Ailish or any other character. */
+    if ((seat ? seat_client_type():seat_host_type()) != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active) return FALSE;
+    if (runtime_spirit_instances[seat].generation) {
+        SudekiMpSpiritInstanceState spirit;
+        if (!SudekiMpObserveSpiritInstance(&runtime_spirit_instances[seat],&spirit) ||
+            !spirit.idle) return FALSE;
+    }
+    if (status.local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        return !projectile && status.local_simulation_node_role==
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA &&
+            SudekiMpLanArenaClientReplicaRangedAim(actor,direction);
+    }
+    if (status.local_role!=SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL ||
+        status.local_simulation_node_role!=SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD)
+        return FALSE;
+    if (seat==1) {
+        if (!host_remote_ailish_owned || !host_remote_first_person_active ||
+            !SudekiMpControlSeparationLanArenaRemoteActorExact(actor) ||
+            !SudekiMpLanArenaRemoteInputFresh(host_last_remote_input_at_ms,GetTickCount(),250u)) return FALSE;
+        candidate[0]=host_remote_aim_x/32767.0f;
+        candidate[1]=host_remote_aim_y/32767.0f;
+        candidate[2]=host_remote_aim_z/32767.0f;
+    } else {
+        uint8_t *arbiter,*mode,*member,*camera,*render;
+        /* The local native shot already includes camera convergence. Only
+         * observe it for presentation; never replace its launch direction. */
+        if (projectile || !runtime_readable_memory(actor,0x94u)) return FALSE;
+        arbiter=*(uint8_t **)((uint8_t *)actor+0x90);
+        if (!runtime_readable_memory(arbiter,0x54) || *(void **)(arbiter+0x10)!=actor ||
+            !(*(uint32_t *)(arbiter+0x50)&0x400000u)) return FALSE;
+        mode=*(uint8_t **)((uint8_t *)runtime_game_module+0x408da8);
+        if (!runtime_readable_memory(mode,0x10)) return FALSE;
+        member=*(uint8_t **)(mode+0xc);
+        if ((uintptr_t)member<0x2c) return FALSE;
+        camera=member-0x2c;
+        if (!runtime_readable_memory(camera,0x38)) return FALSE;
+        render=*(uint8_t **)(camera+0x34);
+        if (!runtime_readable_memory(render,0xd0)) return FALSE;
+        memcpy(candidate,render+0xb0,12);
+    }
+    return SudekiMpLanAimNormalize(candidate,direction);
+}
+
+static void host_capture_ranged_aim(SudekiMpLanArenaSnapshot *snapshot) {
+    for (unsigned seat=0;seat<2;++seat) {
+        float direction[3];
+        if (!snapshot->seat[seat].skill_active && runtime_ranged_aim(
+            SudekiMpCleanroomEngineActorEntity(seat ? seat_client_actor():seat_host_actor()),
+            FALSE,direction)) {
+            snapshot->seat[seat].ranged_aim_valid=1;
+            for (unsigned axis=0;axis<3;++axis)
+                snapshot->seat[seat].ranged_aim[axis]=(int16_t)lroundf(direction[axis]*32767.0f);
+        }
+    }
+}
+
 static BOOL host_hit_target_witness(SudekiMpLanHitTarget *target) {
     SudekiMpLanArenaSessionStatus status;
     if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
@@ -4501,6 +4577,7 @@ static void host_publish_snapshot(DWORD now_ms) {
         &snapshot.seat[1]);
     host_capture_tal_locomotion(status.session_token, combat_enabled,
         &snapshot.seat[0]);
+    host_capture_ranged_aim(&snapshot);
     snapshot.host_tick = now_ms;
     snapshot.match_state = SUDEKIMP_LAN_ARENA_MATCH_ACTIVE;
     snapshot.combat_enabled = combat_enabled ? 1u : 0u;
@@ -4877,6 +4954,10 @@ static void lan_arena_control_update_observer(
     SudekiMpLanArenaHostInputServiceCombatToggle();
     witness_exact =
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness);
+    if (witness_exact)
+        SudekiMpLanAimActors(
+            tal_initialized ? SudekiMpCleanroomEngineActorEntity(seat_host_actor()):NULL,
+            ailish_initialized ? SudekiMpCleanroomEngineActorEntity(seat_client_actor()):NULL);
     status_available = SudekiMpLanArenaSessionGetStatus(&status);
     if (!witness_exact || !status_available || !status.peer_connected ||
         !((status.local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
@@ -6047,7 +6128,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
         SetLastError(error);
         return FALSE;
     }
-    if (!SudekiMpInstallLanArenaSkillFadeWithDrawView(game_module, caster_view_light,
+    if (!SudekiMpLanAimInstall(game_module,runtime_ranged_aim) ||
+        !SudekiMpInstallLanArenaSkillFadeWithDrawView(game_module, caster_view_light,
             config->local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
                 begin_client_private_spirit_draw:NULL,
             config->local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?

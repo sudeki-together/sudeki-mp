@@ -38,6 +38,25 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #include "../src/hooks/lan_arena_runtime.c"
 
 static BOOL describe_equipped_weapon;
+BOOL SudekiMpLanAimInstall(HMODULE image,SudekiMpLanAimWitness witness) {
+    return image && witness;
+}
+BOOL SudekiMpLanAimUninstall(void) { return TRUE; }
+void SudekiMpLanAimActors(void *a,void *b) { (void)a; (void)b; }
+BOOL SudekiMpLanAimNormalize(const float in[3],float out[3]) {
+    float n=sqrtf(in[0]*in[0]+in[1]*in[1]+in[2]*in[2]);
+    if(!isfinite(n) || n<0.5f || n>1.5f) return FALSE;
+    for(unsigned i=0;i<3;++i) out[i]=in[i]/n;
+    return TRUE;
+}
+BOOL SudekiMpLanArenaClientReplicaRangedAim(void *a,float d[3]) { (void)a;(void)d;return FALSE; }
+void *SudekiMpControlSeparationSeatCharacter(unsigned seat) { (void)seat;return NULL; }
+BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned seat) { (void)seat;return FALSE; }
+static void *ranged_remote_lease;
+static BOOL ranged_aim_fixture;
+BOOL SudekiMpControlSeparationLanArenaRemoteActorExact(void *actor) {
+    return actor && actor == ranged_remote_lease;
+}
 static BOOL cast_context_drained=TRUE;
 static void *cast_context_actor_busy;
 static BOOL cast_context_actor_known=TRUE;
@@ -3563,6 +3582,53 @@ static void verify_legacy_client_skill_ui(uint8_t *image) {
     reset_stub_counts();
 }
 
+static void verify_remote_ranged_aim(void) {
+    int actors[2]={0}; float direction[3];
+    reset_stub_policy(); reset_stub_counts();
+    runtime_config=make_config(SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL);
+    runtime_config.host_actor_type=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    runtime_config.client_actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    runtime_installed=tal_initialized=ailish_initialized=TRUE;
+    cleanroom_combat_enabled=TRUE;
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_BUKI]=&actors[0];
+    cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&actors[1];
+    session_status_result=TRUE;
+    session_status.local_role=runtime_config.local_role;
+    session_status.local_simulation_node_role=runtime_config.local_simulation_node_role;
+    session_status.peer_connected=TRUE; session_status.session_token=888;
+    character_skill_observation.active=FALSE;
+    memset(runtime_spirit_instances,0,sizeof(runtime_spirit_instances));
+    host_remote_ailish_owned=host_remote_first_person_active=TRUE;
+    host_remote_aim_x=0; host_remote_aim_y=19660; host_remote_aim_z=26214;
+    host_last_remote_input_at_ms=GetTickCount();
+    ranged_remote_lease=&actors[1];
+    ranged_aim_fixture=TRUE;
+    check(!SudekiMpControlSeparationSeatInputLeaseActive(1),
+        "fixture has no local controller bridge for LAN actor");
+    check(runtime_ranged_aim(&actors[1],TRUE,direction) && direction[1]>.59f && direction[2]>.79f,
+        "authenticated remote projectile receives vertical aim without local-controller bridge");
+    check(runtime_ranged_aim(&actors[1],FALSE,direction),
+        "same LAN aim reaches observer-pose publication");
+    ranged_remote_lease=NULL;
+    check(!runtime_ranged_aim(&actors[1],TRUE,direction),"lost native takeover rejects aim");
+    ranged_remote_lease=&actors[1];
+    host_last_remote_input_at_ms=GetTickCount()-300u;
+    check(!runtime_ranged_aim(&actors[1],TRUE,direction),"stale LAN aim rejects");
+    host_last_remote_input_at_ms=GetTickCount();
+    session_status.peer_connected=FALSE;
+    check(!runtime_ranged_aim(&actors[1],TRUE,direction),"disconnected LAN aim rejects");
+    session_status.peer_connected=TRUE;
+    character_skill_observation.active=TRUE;
+    check(!runtime_ranged_aim(&actors[1],FALSE,direction),"own cast rejects gun pose");
+    character_skill_observation.active=FALSE;
+    check(!runtime_ranged_aim(&actors[0],TRUE,direction),"non-ranged actor cannot borrow aim");
+    runtime_installed=tal_initialized=ailish_initialized=FALSE;
+    host_remote_ailish_owned=host_remote_first_person_active=FALSE;
+    ranged_remote_lease=NULL;
+    reset_stub_policy(); reset_stub_counts();
+    ranged_aim_fixture=FALSE;
+}
+
 int main(void) {
     uint8_t *image = (uint8_t *)VirtualAlloc(
         NULL,
@@ -3576,6 +3642,7 @@ int main(void) {
     reset_stub_policy();
     reset_stub_counts();
 
+    verify_remote_ranged_aim();
     verify_weapon_snapshot_family();
     verify_client_install_and_uninstall(image);
     verify_client_install_and_uninstall(image);
@@ -4180,10 +4247,8 @@ BOOL SudekiMpLanArenaRemoteInputFresh(
     uint32_t now_ms,
     uint32_t maximum_age_ms
 ) {
-    (void)last_input_at_ms;
-    (void)now_ms;
-    (void)maximum_age_ms;
-    return FALSE;
+    return ranged_aim_fixture && last_input_at_ms != 0u &&
+        (uint32_t)(now_ms-last_input_at_ms) <= maximum_age_ms;
 }
 
 int SudekiMpLanArenaParseEndpoint(

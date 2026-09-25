@@ -10,6 +10,7 @@ struct SudekiMpLanArenaActorSnapshot;
 /* Optional read-only frame-boundary observation. Enabled only by the local
  * SUDEKIMP_FP_FRAME_TRACE environment variable; no wire/gameplay authority. */
 void SudekiMpLanArenaClientObserveFirstPersonFrame(unsigned int phase);
+BOOL SudekiMpLanArenaClientReplicaRangedAim(void *actor, float direction[3]);
 
 typedef struct SudekiMpLanArenaReplicaActorDiagnostics {
     float sampled_position[3];

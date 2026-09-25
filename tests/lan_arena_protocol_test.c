@@ -190,7 +190,7 @@ static void test_input_snapshot_and_malformed_lengths(void) {
         SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID;
     source.body.snapshot.enemies[0].hp = 55u;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 1342u);
+    CHECK(size == 1356u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.combat_enabled == 1u);
     CHECK(decoded.body.snapshot.seat[0].action_variant ==
@@ -302,9 +302,9 @@ static void test_input_snapshot_and_malformed_lengths(void) {
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[33] = 1u;
     /* Dummy combat state precedes the LA38 feedback journal. */
-    bytes[1132u + 20u] = 2u;
+    bytes[1146u + 20u] = 2u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
-    bytes[1132u + 20u] = 3u;
+    bytes[1146u + 20u] = 3u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
     bytes[size - 1u] = 1u; /* unused journal entries must be canonical zero */
@@ -726,7 +726,7 @@ static void test_spirit_audio_semantic_journal(void) {
     SpiritAudioSinkState sink = {0u, SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_NONE, 1};
     unsigned int replayed = 99u;
 
-    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 1342u);
+    CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE == 1356u);
     CHECK(SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE <=
         SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE);
     set_active_tal_spirit(snapshot, 41u);
@@ -741,7 +741,7 @@ static void test_spirit_audio_semantic_journal(void) {
         SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START;
     CHECK(SudekiMpLanArenaSpiritAudioJournalValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 1132u);
+    CHECK(size == 1146u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_audio_history_count == 2u);
     CHECK(decoded.body.snapshot.spirit_audio_history[0].event_sequence ==
@@ -896,8 +896,8 @@ static void test_spirit_vfx_roster_wire(void) {
     size_t entries_offset;
     unsigned int index;
 
-    CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 38u);
-    CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413338));
+    CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 39u);
+    CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413339));
     CHECK(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE == 1468u);
     snapshot->host_tick = 100u;
     snapshot->seat[0].skill_sequence = 7u;
@@ -908,7 +908,7 @@ static void test_spirit_vfx_roster_wire(void) {
     snapshot->spirit_vfx_count = 1u;
     snapshot->spirit_vfx[0] = valid;
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 1132u);
+    CHECK(size == 1146u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx_observed == 1u);
     CHECK(decoded.body.snapshot.spirit_vfx_count == 1u);
@@ -965,6 +965,8 @@ static void test_spirit_vfx_roster_wire(void) {
     bytes[4] = 37u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[4] = 38u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[4] = 39u;
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size - 1u, &decoded));
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size + 1u, &decoded));
@@ -1084,7 +1086,7 @@ static void test_spirit_vfx_generic_initiate_wire(void) {
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
     CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 1132u);
+    CHECK(size == 1146u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE);
@@ -1126,7 +1128,7 @@ static void test_spirit_vfx_tal_strike_hit_wire(void) {
     snapshot->spirit_vfx[1].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE;
     CHECK(SudekiMpLanArenaSpiritVfxRosterValid(snapshot));
     CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-    CHECK(size == 1132u);
+    CHECK(size == 1146u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(decoded.body.snapshot.spirit_vfx_count == 2u);
     CHECK(decoded.body.snapshot.spirit_vfx[0].kind ==
@@ -1205,7 +1207,7 @@ static void test_buki_shield_visual_wire(void) {
         s->spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_BUKI_TYPE;
         s->spirit_vfx[0].skill_sequence = 0u;
         CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &source));
-        CHECK(size == 1132u);
+        CHECK(size == 1146u);
         CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
         CHECK(memcmp(&s->spirit_vfx[0], &decoded.body.snapshot.spirit_vfx[0],
             sizeof(s->spirit_vfx[0])) == 0);
@@ -1499,7 +1501,7 @@ static void test_directional_locomotion_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
     size_t size = 0u;
     /* Header + fixed snapshot prefix + two unchanged 168-byte actors. */
-    const size_t offset = 20u + 14u + 2u * 172u + 26u;
+    const size_t offset = 20u + 14u + 2u * 179u + 26u;
     const int selectors[] = {0,20,22,23,66,67,71,69,72,70};
     const unsigned int ids[] = {0,2,6,7,8,9,10,11,12,13};
     const uint8_t states[] = {0,1,64,65,128,192};
@@ -1523,7 +1525,7 @@ static void test_directional_locomotion_wire(void) {
             motion->time[i] = 17.133f + (float)i;
         }
         CHECK(SudekiMpLanArenaEncodePacket(bytes, &size, &packet));
-        CHECK(size == 1132u);
+        CHECK(size == 1146u);
         CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
         CHECK(decoded.body.snapshot.seat[1].locomotion.sequence == UINT16_MAX);
         for (i = 0u; i < 4u; ++i) {
@@ -1662,7 +1664,7 @@ static void test_buki_body_phases_wire(void) {
         for(j=0;j<sizeof(states);++j) {
             b->locomotion.state[2]=states[j];
             CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
-            CHECK(size==1132u); /* LA33 actor-owned audio adds eight bytes. */
+            CHECK(size==1146u); /* LA33 actor-owned audio adds eight bytes. */
             CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
             CHECK(decoded.body.snapshot.seat[0].action_variant==variants[i]);
             CHECK(decoded.body.snapshot.seat[0].locomotion.clip[2]==10+i);
@@ -1679,7 +1681,7 @@ static void test_buki_body_phases_wire(void) {
             b->locomotion.state[k]=states[k];
         }
         CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
-        CHECK(size==1132u);
+        CHECK(size==1146u);
         CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
         for(k=0;k<4;++k) {
             CHECK(decoded.body.snapshot.seat[0].locomotion.clip[k]==
@@ -1702,7 +1704,7 @@ static void test_buki_body_phases_wire(void) {
             CHECK(SudekiMpLanArenaLocomotionSelector(17+i,1)==-1);
             CHECK(SudekiMpLanArenaLocomotionAnimationId(17+i)==0); /* Not a guessed ANIMID. */
             CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
-            CHECK(size==1132u);
+            CHECK(size==1146u);
             CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
             CHECK(decoded.body.snapshot.seat[0].locomotion.clip[2]==17+i);
             CHECK(decoded.body.snapshot.seat[0].locomotion.clip[0]==10);
@@ -1927,7 +1929,7 @@ static void test_dummy_hit_feedback_wire(void) {
     for (unsigned int i = 0; i < 8; ++i)
         e->hits[i] = (SudekiMpLanArenaHitFeedback){i + 1,90 + i,-12,100,88,0,0x2a,3};
     CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
-    CHECK(size == 1342u && size <= 1472u);
+    CHECK(size == 1356u && size <= 1472u);
     CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
     CHECK(decoded.body.snapshot.enemies[0].hit_count == 8);
     CHECK(decoded.body.snapshot.enemies[0].hits[7].amount == -12);
@@ -1942,7 +1944,50 @@ static void test_dummy_hit_feedback_wire(void) {
     e->hits[7].value_before=NAN; CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&p));
 }
 
+static void test_ranged_aim_wire(void) {
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+    SudekiMpLanArenaPacket source=make_minimal_snapshot_packet(200u),decoded;
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE];
+    size_t size=0;
+    source.body.snapshot.seat[1].actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    source.body.snapshot.seat[1].native_entity_id=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    SudekiMpLanArenaActorSnapshot *actor=&source.body.snapshot.seat[1];
+    actor->ranged_aim_valid=1;
+    actor->ranged_aim[0]=0;actor->ranged_aim[1]=19660;actor->ranged_aim[2]=26214;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    CHECK(size==1146u);
+    CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
+    CHECK(decoded.body.snapshot.seat[1].ranged_aim_valid==1 &&
+        !memcmp(actor->ranged_aim,decoded.body.snapshot.seat[1].ranged_aim,sizeof(actor->ranged_aim)));
+    actor->ranged_aim[1]=-19660;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded) && decoded.body.snapshot.seat[1].ranged_aim[1]<0);
+    actor->ranged_aim_valid=0;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    memset(actor->ranged_aim,0,sizeof(actor->ranged_aim));
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    actor->ranged_aim_valid=1;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    actor->ranged_aim[1]=32767;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    actor->ranged_aim[0]=32767;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    actor->ranged_aim[0]=0;
+    actor->actor_type=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    actor->actor_type=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&source));
+    bytes[4]=38;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
+    bytes[4]=39;
+    /* First actor remains valid; reject a malformed second aim flag/vector. */
+    bytes[34+179+172]=2;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+
 int main(void) {
+    test_ranged_aim_wire();
     test_dummy_hit_feedback_wire();
     test_skill_target_timeline();
     test_caster_fade_wire();

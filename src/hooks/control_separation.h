@@ -205,6 +205,10 @@ BOOL SudekiMpControlSeparationSeatInputLeaseActive(unsigned int seat_index);
  * aim is client-camera-relative, and held fire is replayed through the same
  * native Ailish AI lease and arbiter ABI as local co-op. */
 BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled);
+/* Fresh native LAN takeover witness. A network-owned companion does not
+ * require the independent local-controller bridge to be connected. Caller
+ * must additionally prove authenticated session, assignment and input age. */
+BOOL SudekiMpControlSeparationLanArenaRemoteActorExact(void *actor);
 /* Remote Ailish skills retain Sudeki's process-global native task mode.  Once
  * mode 2 has applied its native seat-0 disable transition, the host invokes
  * Sudeki's exact inverse seat transition once and presents mode 0 only during

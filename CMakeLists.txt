@@ -95,6 +95,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_arena_window_policy.c
     src/hooks/lan_arena_runtime.c
     src/hooks/lan_arena_hit_feedback.c
+    src/hooks/lan_arena_ranged_aim.c
     src/hooks/lan_arena_cast_context.c
     src/engine/spirit_instance_abi.c
     src/engine/cast_light_abi.c
@@ -328,6 +329,14 @@ target_include_directories(SudekiMP.LanArenaHitFeedbackTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaHitFeedbackTest PRIVATE WIN32_LEAN_AND_MEAN)
 target_compile_options(SudekiMP.LanArenaHitFeedbackTest PRIVATE -Wall -Wextra)
 set_target_properties(SudekiMP.LanArenaHitFeedbackTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.LanArenaRangedAimTest tests/lan_arena_ranged_aim_test.c
+    src/hooks/call_hook.c src/engine/log.c)
+target_include_directories(SudekiMP.LanArenaRangedAimTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanArenaRangedAimTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LanArenaRangedAimTest PRIVATE -Wall -Wextra)
+set_target_properties(SudekiMP.LanArenaRangedAimTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.LanArenaOwnerViewTest
@@ -637,6 +646,7 @@ add_executable(SudekiMP.SkillTraceImageTest
     src/hooks/lan_arena_spirit_vfx.c
     src/hooks/lan_arena_host_input.c
     src/hooks/lan_arena_hit_feedback.c
+    src/hooks/lan_arena_ranged_aim.c
     src/hooks/lan_arena_pause_panel.c
     src/hooks/player_input_trace.c
     src/hooks/quick_skill_input.c

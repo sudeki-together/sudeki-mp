@@ -20,7 +20,8 @@
     LAN_ACTOR_SKILL_PRESENTATION_SIZE)
 #define LAN_ACTOR_WEAPON_OFFSET (LAN_ACTOR_SKILL_KIND_OFFSET + 1u)
 #define LAN_ACTOR_TARGET_OFFSET (LAN_ACTOR_WEAPON_OFFSET + 1u)
-#define LAN_ACTOR_SIZE (LAN_ACTOR_TARGET_OFFSET + 3u)
+#define LAN_ACTOR_AIM_OFFSET (LAN_ACTOR_TARGET_OFFSET + 3u)
+#define LAN_ACTOR_SIZE (LAN_ACTOR_AIM_OFFSET + 7u)
 #define LAN_HIT_SIZE 23u
 #define LAN_ENEMY_SIZE (26u + SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY * LAN_HIT_SIZE)
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
@@ -588,6 +589,19 @@ static int valid_actor_snapshot(
         !valid_coordinate(actor->x) || !valid_coordinate(actor->y) ||
         !valid_coordinate(actor->z) || !isfinite(actor->facing_x) ||
         !isfinite(actor->facing_z)) return 0;
+    if (actor->ranged_aim_valid > 1u) return 0;
+    if (actor->ranged_aim_valid) {
+        float norm = 0.0f;
+        if (actor->actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+            actor->actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE) return 0;
+        for (unsigned int i = 0; i < 3u; ++i) {
+            float v = actor->ranged_aim[i] / 32767.0f;
+            norm += v * v;
+        }
+        if (norm < 0.99f || norm > 1.01f) return 0;
+    } else if (actor->ranged_aim[0] || actor->ranged_aim[1] || actor->ranged_aim[2]) {
+        return 0;
+    }
     if ((actor->hp == 0u &&
          (actor->animation_state !=
               SUDEKIMP_LAN_ARENA_ANIMATION_INCAPACITATED ||
@@ -1074,6 +1088,10 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     }
     output[LAN_ACTOR_SKILL_KIND_OFFSET] = actor->skill_kind;
     output[LAN_ACTOR_WEAPON_OFFSET] = actor->weapon_slot_plus_one;
+    output[LAN_ACTOR_AIM_OFFSET] = actor->ranged_aim_valid;
+    for (index = 0u; index < 3u; ++index)
+        write_u16(output + LAN_ACTOR_AIM_OFFSET + 1u + index * 2u,
+            (uint16_t)actor->ranged_aim[index]);
     return 1;
 }
 
@@ -1085,6 +1103,10 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     }
     actor->actor_type = input[0];
     actor->weapon_slot_plus_one = input[LAN_ACTOR_WEAPON_OFFSET];
+    actor->ranged_aim_valid = input[LAN_ACTOR_AIM_OFFSET];
+    for (index = 0u; index < 3u; ++index)
+        actor->ranged_aim[index] = (int16_t)read_u16(
+            input + LAN_ACTOR_AIM_OFFSET + 1u + index * 2u);
     actor->animation_state = input[1];
     actor->combat_state = input[2];
     actor->action_variant = input[3];

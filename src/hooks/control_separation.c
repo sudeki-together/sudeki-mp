@@ -5898,6 +5898,27 @@ BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
     return TRUE;
 }
 
+BOOL SudekiMpControlSeparationLanArenaRemoteActorExact(void *actor) {
+    const SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
+    uint8_t *character = actor, *component, *mode, *controller;
+    if (!game_base || !lan_arena_remote_input_enabled || service_only_mode ||
+        !companion->requested || !companion->lease_exact || !character ||
+        companion->character != actor ||
+        !companion_character_is_in_active_group(companion) ||
+        actor != SudekiMpCleanroomEngineActorEntity(lan_movement_remote_actor) ||
+        !readable_memory(character, 0x98u)) return FALSE;
+    component = *(uint8_t **)(character + 0x94u);
+    if (component != companion->ai_component ||
+        !readable_memory(component, 0x16cu) ||
+        *(void **)(component + 0x10u) != actor) return FALSE;
+    mode = *(uint8_t **)(component + 0x3cu);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    return readable_memory(mode, 0x0cu) && mode[0x0bu] == 0u &&
+        *(int16_t *)(component + 0x16au) == 1 &&
+        readable_memory(controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) &&
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != actor;
+}
+
 BOOL SudekiMpControlSeparationSetPlayerOneSkillInputIsolation(BOOL enabled) {
     BOOL next_enabled;
 

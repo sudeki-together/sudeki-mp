@@ -15,6 +15,7 @@
 #include "network/lan_arena_operator.h"
 #include "hooks/lan_arena_client_replica.h"
 #include "hooks/lan_arena_hit_feedback.h"
+#include "hooks/lan_arena_ranged_aim.h"
 #include "hooks/lan_arena_campaign_guard.h"
 #include "hooks/lan_arena_host_input.h"
 #include "hooks/lan_arena_pause_panel.h"
@@ -52,6 +53,9 @@ static BOOL no_cast_owner(void *actor,uint8_t kind,uint64_t *session,uint8_t *ty
     (void)actor; (void)kind; (void)session; (void)type; return FALSE;
 }
 static BOOL no_hit_target(SudekiMpLanHitTarget *target) { (void)target; return FALSE; }
+static BOOL no_aim_actor(void *actor,BOOL projectile,float direction[3]) {
+    (void)actor;(void)projectile;(void)direction;return FALSE;
+}
 
 /* The exact-image harness links the LAN input adapters without the large
  * cleanroom menu presenter. Keep its read-only modal contract inert here. */
@@ -4356,6 +4360,19 @@ int wmain(int argc, wchar_t **argv) {
         image[0xd20f0u] ^= 1u;
     }
     {
+        uint8_t launch[5],pose[5];
+        memcpy(launch,image+0xc74e3,5); memcpy(pose,image+0x222434,5);
+        if(!SudekiMpLanAimImageMatches((HMODULE)image) ||
+            !SudekiMpLanAimInstall((HMODULE)image,no_aim_actor) ||
+            !SudekiMpLanAimUninstall() || memcmp(launch,image+0xc74e3,5) ||
+            memcmp(pose,image+0x222434,5)) {
+            fputs("FAIL: ranged aim exact-image install/restore\n",stderr); ++failures;
+        }
+        image[0x22242e]^=1;
+        if(SudekiMpLanAimImageMatches((HMODULE)image)) {
+            fputs("FAIL: ranged aim accepted foreign pose ABI\n",stderr); ++failures;
+        }
+        image[0x22242e]^=1;
         int selector = -1;
         if (!SudekiMpLanArenaClientIdleVariantSelector(
                 SUDEKIMP_LAN_ARENA_AILISH_TYPE,

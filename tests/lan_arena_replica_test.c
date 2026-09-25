@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int failures;
@@ -69,6 +70,34 @@ static void clear_actor_action(SudekiMpLanArenaActorSnapshot *actor) {
     actor->action_retirement_valid = 0u;
     actor->action_history_count = 0u;
     memset(actor->action_history, 0, sizeof(actor->action_history));
+}
+
+static void test_ranged_aim_interpolation(void) {
+    SudekiMpLanArenaReplica replica={0};
+    SudekiMpLanArenaSnapshot first=make_snapshot(1,100,0), second, sample;
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+    first.seat[1].actor_type=first.seat[1].native_entity_id=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+    first.seat[1].ranged_aim_valid=1;
+    first.seat[1].ranged_aim[2]=32767;
+    second=first; second.sequence=2; second.host_tick=200;
+    second.seat[1].ranged_aim[1]=32767; second.seat[1].ranged_aim[2]=0;
+    CHECK(SudekiMpLanArenaReplicaPush(&replica,&first));
+    CHECK(SudekiMpLanArenaReplicaPush(&replica,&second));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
+    CHECK(sample.seat[1].ranged_aim_valid && sample.seat[1].ranged_aim[0]==0);
+    CHECK(abs(sample.seat[1].ranged_aim[1]-23170)<=1 && abs(sample.seat[1].ranged_aim[2]-23170)<=1);
+    replica.latest.seat[1].ranged_aim[1]=0;
+    replica.latest.seat[1].ranged_aim[2]=-32767;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
+    CHECK(sample.seat[1].ranged_aim[2]==-32767); /* no zero ray at antipodal midpoint */
+    replica.latest.seat[1].native_entity_id++;
+    CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
+    CHECK(sample.seat[1].ranged_aim[2]==-32767); /* no blend across actor replacement */
+    replica.latest.seat[1].ranged_aim_valid=0;
+    memset(replica.latest.seat[1].ranged_aim,0,sizeof(replica.latest.seat[1].ranged_aim));
+    CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
+    CHECK(!sample.seat[1].ranged_aim_valid && sample.seat[1].ranged_aim[2]==0);
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,SUDEKIMP_LAN_ARENA_AILISH_TYPE);
 }
 
 static void test_protected_clock_recovers_discarded_history(void) {
@@ -517,6 +546,7 @@ static void test_countdown_release_is_timeline_edge(void) {
 }
 
 int main(void) {
+    test_ranged_aim_interpolation();
     test_countdown_release_is_timeline_edge();
     test_elco_spirit_view_interpolation();
     test_buki_block_phase_timeline();
