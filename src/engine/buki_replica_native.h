@@ -6,6 +6,10 @@
  * session/generation and damage-guard leases, and exclude a live CSkill.
  * These operations neither start attacks nor simulate world translation. */
 BOOL SudekiMpBukiReplicaNativeImageMatches(HMODULE module);
+/* Read-only positive task-drain witness before host body channels take over.
+ * Unknown ownership or any active/queued native combo returns FALSE. */
+BOOL SudekiMpBukiReplicaBodyAvailable(HMODULE module, void *character,
+    void *expected_arbiter);
 BOOL SudekiMpBukiReplicaSyncFacing(HMODULE module, void *character,
     void *expected_arbiter, const float direction[3]);
 BOOL SudekiMpBukiReplicaInterruptAttack(HMODULE module, void *character,

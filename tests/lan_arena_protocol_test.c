@@ -896,8 +896,8 @@ static void test_spirit_vfx_roster_wire(void) {
     size_t entries_offset;
     unsigned int index;
 
-    CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 39u);
-    CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413339));
+    CHECK(SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION == 40u);
+    CHECK(SUDEKIMP_LAN_ARENA_BUILD_ID == UINT32_C(0x4c413430));
     CHECK(SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE == 1468u);
     snapshot->host_tick = 100u;
     snapshot->seat[0].skill_sequence = 7u;
@@ -967,6 +967,8 @@ static void test_spirit_vfx_roster_wire(void) {
     bytes[4] = 38u;
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     bytes[4] = 39u;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
+    bytes[4] = 40u;
     CHECK(SudekiMpLanArenaDecodePacket(bytes, size, &decoded));
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size - 1u, &decoded));
     CHECK(!SudekiMpLanArenaDecodePacket(bytes, size + 1u, &decoded));
@@ -1564,7 +1566,8 @@ static void test_directional_locomotion_wire(void) {
         for (clip = 4u; clip < 10u; ++clip)
             CHECK(SudekiMpLanArenaLocomotionSelector(clip, 2) == -1);
         CHECK(SudekiMpLanArenaLocomotionClip(75, 2) == -1);
-        CHECK(SudekiMpLanArenaLocomotionSelector(28, 2) == -1);
+        CHECK(SudekiMpLanArenaLocomotionSelector(28, 2) == 70);
+        CHECK(SudekiMpLanArenaLocomotionSelector(29, 2) == -1);
     }
     motion->rate[0] = 255.99609375f;
     motion->time[0] = 4095.9375f;
@@ -1712,10 +1715,25 @@ static void test_buki_body_phases_wire(void) {
     }
     b->action_variant=b->action_history[0].variant=SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
     b->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
-    CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&p)); /* Blend-only clips cannot submit combos. */
+    /* LA40 deliberately carries combos as complete renderer results, never
+     * as commands to submit another native combo. Same bounded packet. */
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
+    CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
+    CHECK(decoded.body.snapshot.seat[0].locomotion.clip[2]==27u);
+    b->locomotion.clip[2]=28; /* Buki's authored failed-light result. */
+    CHECK(SudekiMpLanArenaLocomotionSelector(28,2)==70);
+    CHECK(SudekiMpLanArenaLocomotionClip(70,2)==28);
+    CHECK(SudekiMpLanArenaLocomotionSelector(28,0)==-1);
+    CHECK(SudekiMpLanArenaLocomotionSelector(28,1)==-1);
+    CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&p));
+    CHECK(size==1146u);
+    CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
+    CHECK(decoded.body.snapshot.seat[0].locomotion.clip[2]==28u);
+    bytes[4]=39;
+    CHECK(!SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
     b->action_variant=b->action_history[0].variant=SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT;
     b->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_BLOCK;
-    b->locomotion.clip[2]=28;
+    b->locomotion.clip[2]=29; /* Still-reserved identity remains rejected. */
     CHECK(!SudekiMpLanArenaEncodePacket(bytes,&size,&p));
     b->locomotion.clip[2]=13;
     b->locomotion.rate[2]=NAN;

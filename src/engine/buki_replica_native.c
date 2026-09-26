@@ -35,10 +35,17 @@ BOOL SudekiMpBukiReplicaNativeImageMatches(HMODULE module) {
         0x8b,0x6c,0x24,0x10,0x56,0x57,0x8b,0xd3};
     static const uint8_t interrupt[] = {0x55,0x8b,0xec,0x83,0xe4,0xf8,
         0x83,0xec,0x08,0x53,0x55,0x56,0x8b,0xf1};
+    static const uint8_t combo_window[] = {0x56,0x8b,0xf1,0x80,0x4e,0x75,0x04};
+    static const uint8_t timing_window[] = {0x51,0x56,0x8b,0xf1,0x8b,0x4e,0xd4,
+        0x80,0x4e,0x75,0x08};
     return b && readable(b + 0xdae80u, sizeof(facing)) &&
         readable(b + 0xd0840u, sizeof(interrupt)) &&
         !memcmp(b + 0xdae80u, facing, sizeof(facing)) &&
         !memcmp(b + 0xd0840u, interrupt, sizeof(interrupt)) &&
+        readable(b + 0xd0a10u, sizeof(combo_window)) &&
+        !memcmp(b + 0xd0a10u, combo_window, sizeof(combo_window)) &&
+        readable(b + 0xd0a80u, sizeof(timing_window)) &&
+        !memcmp(b + 0xd0a80u, timing_window, sizeof(timing_window)) &&
         call_matches(b, 0xdae8eu, 0xdb800u) &&
         call_matches(b, 0xdaed5u, 0xb6e50u) &&
         call_matches(b, 0xdacdbu, 0xd0840u) &&
@@ -57,6 +64,26 @@ static uint8_t *component(uint8_t *base, uint8_t *actor,
     return readable(p, size) && *(void **)p == base + vtable &&
         *(void **)(p + 0x10u) == actor ? p : NULL;
 }
+BOOL SudekiMpBukiReplicaBodyAvailable(HMODULE module, void *character,
+    void *expected_arbiter) {
+    uint8_t *b = (uint8_t *)module, *a = character;
+    uint8_t *arbiter, *combo, *combat;
+    if (!actor_matches(b, a, expected_arbiter)) return FALSE;
+    arbiter = component(b,a,0x90,0x2cc9ac,0x64);
+    combo = component(b,a,0xb8,0x2d4bd4,0xb2);
+    combat = component(b,a,0xa4,0x2c8754,0x74);
+    return arbiter && combo && combat &&
+        *(uint32_t *)(combo+0x64) == 0u &&
+        *(void **)(combo+0xa8) == NULL && *(void **)(combo+0xac) == NULL &&
+        /* Animation callbacks D0A10/D0A80 set B1 bits04/08 via the
+         * component's +3c event sink even with no native combo task. Those
+         * window flags are not ownership. Keep active/failure/script flags,
+         * history, both task pointers and attacking gates independently. */
+        combo[0xb0] == 0xffu && !(combo[0xb1] & 0x13u) &&
+        !(combat[0x72] & 0x10u) &&
+        !(*(uint32_t *)(arbiter+0x50) & 0x1000u);
+}
+
 BOOL SudekiMpBukiReplicaSyncFacing(HMODULE module, void *character,
     void *expected_arbiter, const float direction[3]) {
     uint8_t *b = (uint8_t *)module, *a = character;

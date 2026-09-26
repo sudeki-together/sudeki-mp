@@ -394,6 +394,58 @@ static void test_buki_combat_stop_crossfade(void) {
         SUDEKIMP_LAN_ARENA_AILISH_TYPE);
 }
 
+static void test_buki_failed_combo_retry_timeline(void) {
+    /* A failed host branch is an authored pose, not a new client combo.
+     * Follow failure, cleanup, a successful retry, then running again. */
+    static const int selectors[] = {53,54,70,20,53,54,55,20,23};
+    SudekiMpLanArenaReplica r;
+    SudekiMpLanArenaSnapshot a=make_snapshot(1,100,0), b, sample;
+    unsigned int i;
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+    clear_actor_action(&a.seat[0]); clear_actor_action(&a.seat[1]);
+    a.seat[0].actor_type=a.seat[0].native_entity_id=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    a.combat_enabled=1;
+    a.seat[0].locomotion.valid=1;
+    a.seat[0].locomotion.sequence=1;
+    a.seat[0].locomotion.clip[0]=(uint8_t)SudekiMpLanArenaLocomotionClip(selectors[0],2);
+    a.seat[0].locomotion.rate[0]=30;
+    a.seat[0].locomotion.time[0]=3;
+    a.seat[0].locomotion.state[1]=a.seat[0].locomotion.state[2]=
+        a.seat[0].locomotion.state[3]=192;
+    SudekiMpLanArenaReplicaReset(&r);
+    CHECK(SudekiMpLanArenaReplicaPush(&r,&a));
+    for (i=1; i<sizeof(selectors)/sizeof(selectors[0]); ++i) {
+        b=a; ++b.sequence; b.host_tick+=100;
+        ++b.seat[0].locomotion.sequence;
+        b.seat[0].locomotion.clip[0]=(uint8_t)SudekiMpLanArenaLocomotionClip(selectors[i],2);
+        b.seat[0].locomotion.time[0]=0.25f;
+        CHECK(SudekiMpLanArenaSnapshotValid(&b));
+        CHECK(SudekiMpLanArenaReplicaPush(&r,&b));
+        CHECK(!SudekiMpLanArenaReplicaPush(&r,&a)); /* A delayed pose cannot rewind. */
+        CHECK(!SudekiMpLanArenaReplicaPush(&r,&b)); /* Nor can a duplicate restart. */
+        if (selectors[i]==70)
+            CHECK(SudekiMpLanArenaReplicaActionTimelineBuffered(&r));
+        CHECK(SudekiMpLanArenaReplicaSample(&r,a.host_tick+50,&sample));
+        CHECK(sample.seat[0].locomotion.sequence==a.seat[0].locomotion.sequence);
+        CHECK(sample.seat[0].locomotion.clip[0]==a.seat[0].locomotion.clip[0]);
+        CHECK(sample.seat[0].locomotion.time[0]==a.seat[0].locomotion.time[0]);
+        CHECK(SudekiMpLanArenaReplicaSample(&r,b.host_tick,&sample));
+        CHECK(sample.seat[0].locomotion.clip[0]==b.seat[0].locomotion.clip[0]);
+        CHECK(sample.seat[0].locomotion.time[0]==0.25f);
+        CHECK(SudekiMpLanArenaSnapshotValid(&sample));
+        a=b;
+    }
+    /* Once only idle/run frames remain, normal backlog recovery is safe. */
+    for (i=0; i<4; ++i) {
+        ++a.sequence; a.host_tick+=100;
+        CHECK(SudekiMpLanArenaReplicaPush(&r,&a));
+    }
+    CHECK(!SudekiMpLanArenaReplicaActionTimelineBuffered(&r));
+    SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+
 static void test_buki_block_phase_timeline(void) {
     SudekiMpLanArenaReplica r;
     SudekiMpLanArenaSnapshot a=make_snapshot(1,100,0),b,c,sample;
@@ -552,6 +604,7 @@ int main(void) {
     test_buki_block_phase_timeline();
     test_protected_clock_recovers_discarded_history();
     test_buki_combat_stop_crossfade();
+    test_buki_failed_combo_retry_timeline();
     test_directional_locomotion_timeline();
     test_spirit_visual_render_timeline();
     SudekiMpLanArenaReplica replica;

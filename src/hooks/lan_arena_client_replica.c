@@ -4341,6 +4341,16 @@ static BOOL service_tal_native_action_presentation(
     if (native_owns_presentation == NULL || character == NULL ||
         renderer == NULL || methods == NULL || snapshot == NULL) return FALSE;
     *native_owns_presentation = FALSE;
+    if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) {
+        /* LA40 starts no native combo task for Buki. Her four host-observed
+         * channels own the outcome and its transition back to locomotion.
+         * A retained legacy task is NOT permission to cancel it: refuse the
+         * handoff rather than clearing a live lease on a timeout. Matching
+         * LA40 processes start with no such lease. Tal's path is unchanged. */
+        *native_owns_presentation = lease->active;
+        if (lease->active) SetLastError(ERROR_BUSY);
+        return !lease->active;
+    }
     host_body_phase = seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
         SudekiMpLanArenaBukiBodyAction(snapshot->action_variant);
     if (!combat_mode && !lease->active) return TRUE;
@@ -4502,6 +4512,28 @@ static BOOL service_tal_native_action_presentation(
     }
     return TRUE;
 }
+
+#ifdef SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING
+BOOL SudekiMpLanArenaClientReplicaTestBukiNoNativeCombo(
+    const SudekiMpLanArenaActorSnapshot *snapshot, BOOL retained,
+    BOOL final_boundary
+) {
+    uint8_t actor[0x180] = {0};
+    LanArenaAnimationMethods methods = {0};
+    LanArenaTalNativePresentationLease saved = tal_native_presentation_lease;
+    BOOL owns = FALSE, result, untouched;
+    if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return FALSE;
+    ZeroMemory(&tal_native_presentation_lease, sizeof(tal_native_presentation_lease));
+    tal_native_presentation_lease.active = retained;
+    result = service_tal_native_action_presentation(actor, actor, &methods,
+        snapshot, TRUE, final_boundary, &owns);
+    untouched = tal_native_presentation_lease.active == retained &&
+        tal_native_presentation_lease.character == NULL &&
+        tal_native_presentation_lease.submitted_sequence == 0u;
+    tal_native_presentation_lease = saved;
+    return result == !retained && owns == retained && untouched;
+}
+#endif
 
 static BOOL drain_tal_native_action_lease(void) {
     LanArenaAnimationMethods methods;
@@ -5563,7 +5595,10 @@ static BOOL apply_buki_host_locomotion(
     /* This path currently admits only Buki. Preflight every packet clip before
      * mutating any channel: her bank has no ranged strafe/fire resources. */
     if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
-        !SudekiMpCleanroomBukiAnimationStorageValid(renderer, submodels, TRUE))
+        !SudekiMpCleanroomBukiAnimationStorageValid(renderer, submodels, TRUE) ||
+        !readable_memory(character, CHARACTER_ARBITER_OFFSET + sizeof(void *)) ||
+        !SudekiMpBukiReplicaBodyAvailable((HMODULE)game_base, character,
+            *(void **)(character + CHARACTER_ARBITER_OFFSET)))
         return FALSE;
     for (channel = 0u; channel < 4u; ++channel) {
         if (SudekiMpLanArenaLocomotionSelector(motion->clip[channel], 2u) < 0)
@@ -5876,7 +5911,12 @@ static BOOL apply_actor_presentation(
         lease->valid = TRUE;
         return TRUE;
     }
-    if (actor_index == 0u && combat_mode && snapshot->locomotion.valid) {
+    if (actor_index == 0u && combat_mode &&
+        seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE) {
+        /* Missing/unknown body evidence must not fall back to synthetic
+         * combo input or a guessed selector. Keep the last pose until the
+         * next admitted host frame. This also covers fail->retry and
+         * running-attack->combo without a separate local combo history. */
         return apply_buki_host_locomotion(character, renderer, &methods,
             submodels, snapshot, final_presentation_boundary);
     }

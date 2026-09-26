@@ -781,6 +781,18 @@ void SudekiMpLanArenaReplicaRenderClockReset(
     if (clock != NULL) memset(clock, 0, sizeof(*clock));
 }
 
+static BOOL snapshot_buki_combo_pose(const SudekiMpLanArenaSnapshot *snapshot) {
+    const SudekiMpLanArenaActorSnapshot *actor = &snapshot->seat[0];
+    unsigned int i;
+    if (actor->actor_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+        !actor->locomotion.valid) return FALSE;
+    /* Failed combos have no accepted action variant, but their authored
+     * playback (including an outgoing blend) must still run at normal time. */
+    for (i=0; i<4; ++i)
+        if (actor->locomotion.clip[i] >= 17u) return TRUE;
+    return FALSE;
+}
+
 BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
     const SudekiMpLanArenaReplica *replica
 ) {
@@ -792,7 +804,8 @@ BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
       (snapshot_).seat[1].animation_state == \
           SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
       (snapshot_).seat[0].skill_active != 0u || \
-      (snapshot_).seat[1].skill_active != 0u))
+      (snapshot_).seat[1].skill_active != 0u || \
+      snapshot_buki_combo_pose(&(snapshot_))))
     if (SNAPSHOT_ACTION_ACTIVE(replica->earliest, replica->earliest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->oldest, replica->oldest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->previous, replica->previous_valid) ||

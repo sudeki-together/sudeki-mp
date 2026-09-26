@@ -4318,8 +4318,9 @@ static void host_capture_tal_locomotion(
     unsigned int channel;
     BOOL transition;
     ZeroMemory(&snapshot->locomotion, sizeof(snapshot->locomotion));
-    /* Buki's body frame includes movement plus LA30 block/run-attack phases.
-     * Ordinary combos retain their native action lease; Tal is unchanged. */
+    /* LA40: capture Buki's complete accepted body result, including combo
+     * wind-up, success/failure and cleanup. Do not ask the replica's native
+     * combo dispatcher to judge the same inputs again. Tal is unchanged. */
     if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return;
     if (host_tal_locomotion.actor != actor ||
         host_tal_locomotion.session_token != session_token) {
@@ -4328,8 +4329,6 @@ static void host_capture_tal_locomotion(
         host_tal_locomotion.session_token = session_token;
     }
     if (!actor || !combat_enabled || snapshot->skill_active || !snapshot->hp ||
-        (snapshot->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
-         !SudekiMpLanArenaBukiBodyAction(snapshot->action_variant)) ||
         !SudekiMpCleanroomEngineActorPresentation(seat_host_actor(), &native) ||
         actor != SudekiMpCleanroomEngineActorEntity(seat_host_actor())) {
         static DWORD last_tal_loco_diag;

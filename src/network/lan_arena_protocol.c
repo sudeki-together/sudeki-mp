@@ -423,8 +423,8 @@ int SudekiMpLanArenaSkillPresentationValid(
     return 1;
 }
 
-static const int ailish_locomotion_selectors[28] = {0,20,22,23,66,67,71,69,72,70};
-static const int elco_locomotion_selectors[28] = {0,22,24,25,63,64,67,65,68,66};
+static const int ailish_locomotion_selectors[29] = {0,20,22,23,66,67,71,69,72,70};
+static const int elco_locomotion_selectors[29] = {0,22,24,25,63,64,67,65,68,66};
 int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_id) {
     const int *table;
     if (actor_type == SUDEKIMP_LAN_ARENA_AILISH_TYPE) {
@@ -452,14 +452,15 @@ int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_i
 }
 /* Buki's model resolves combat 02/06/07 to 20/23/24. It has no 08..0d
  * locomotion resources. In particular 64 (WWW) and 67 (SWS) are attacks,
- * not settled idles. LA32 carries them only as native blend context when
- * a host-confirmed body/idle frame is replacing the ordinary action lease. */
+ * not settled idles. LA40 carries complete host-observed combo channels too:
+ * the replica must not re-evaluate the accepted combo as new button inputs.
+ * Identity28 is her native failed-light-combo selector70, not Tal's WSS. */
 /* LA30 appends Buki-only body phases; never alias her block or running attack
  * to Tal's bank, or consume the reserved ranged directional identities4..9.
  * Same bounded four channels/three blends; no packet-size growth. */
-static const int buki_locomotion_selectors[28] =
+static const int buki_locomotion_selectors[29] =
     {0,20,23,24,0,0,0,0,0,0,44,45,46,69,49,47,48,
-     53,54,64,60,68,65,67,56,55,66,71};
+     53,54,64,60,68,65,67,56,55,66,71,70};
 static const unsigned int locomotion_ids[17] =
     {0,2,6,7,8,9,10,11,12,13,0x6a,0x6b,0x6c,0x82,0x6f,0x6d,0x6e};
 static const uint8_t locomotion_states[6] = {0,1,64,65,128,192};
@@ -473,12 +474,12 @@ static const int *locomotion_selector_table(uint8_t actor_kind) {
 int SudekiMpLanArenaLocomotionClip(int selector, uint8_t actor_kind) {
     unsigned int i;
     const int *table = locomotion_selector_table(actor_kind);
-    for (i=0; i<28; ++i) if (table[i] == selector) return (int)i;
+    for (i=0; i<29; ++i) if (table[i] == selector) return (int)i;
     return -1;
 }
 int SudekiMpLanArenaLocomotionSelector(unsigned int clip, uint8_t actor_kind) {
     const int *table = locomotion_selector_table(actor_kind);
-    if (clip >= 28u || (clip != 0u && table[clip] == 0)) return -1;
+    if (clip >= 29u || (clip != 0u && table[clip] == 0)) return -1;
     return table[clip];
 }
 unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip) {
@@ -494,7 +495,7 @@ int SudekiMpLanArenaLocomotionValid(const SudekiMpLanArenaLocomotion *m) {
     if (m == NULL || m->valid > 1u || (m->valid && !m->sequence) ||
         (!m->valid && m->sequence)) return 0;
     for (i=0; i<4; ++i) {
-        if (m->clip[i] > 27u || locomotion_state_index(m->state[i]) < 0 ||
+        if (m->clip[i] > 28u || locomotion_state_index(m->state[i]) < 0 ||
             !isfinite(m->rate[i]) || m->rate[i] < 0 || m->rate[i] > 255.99609375f ||
             !isfinite(m->time[i]) || m->time[i] < 0 || m->time[i] > 4095.9375f ||
             (!m->clip[i] && (m->rate[i] != 0 || m->time[i] != 0)) ||
@@ -558,11 +559,9 @@ static int valid_actor_snapshot(
     for (channel = 0; channel < 4u; ++channel) {
         if (actor->locomotion.clip[channel] >= 10u &&
             expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return 0;
-        if (actor->locomotion.clip[channel] >= 17u &&
-            actor->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
-            actor->action_variant != SUDEKIMP_LAN_ARENA_ACTION_BLOCK &&
-            actor->action_variant < SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK)
-            return 0;
+        /* LA40: Buki's bounded body frame is also the combo result. These
+         * identities authorize renderer presentation, never native combat
+         * input, damage, or a second attempt at the timing judgement. */
     }
     if (actor == NULL || actor->actor_type != expected_type ||
         actor->native_entity_id != expected_type ||

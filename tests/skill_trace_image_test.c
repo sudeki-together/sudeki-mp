@@ -4872,6 +4872,27 @@ int wmain(int argc, wchar_t **argv) {
             unsigned int i;
             float x, z;
             BOOL seek;
+            {
+                SudekiMpLanArenaActorSnapshot body = {0};
+                unsigned variant, retained, boundary;
+                SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_BUKI_TYPE,
+                    SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+                body.actor_type = body.native_entity_id = SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+                body.animation_state = SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+                body.action_sequence = 1;
+                for (variant=0;variant<=SUDEKIMP_LAN_ARENA_ACTION_MAX;++variant)
+                    for (retained=0;retained<2;++retained)
+                        for (boundary=0;boundary<2;++boundary) {
+                            body.action_variant=(uint8_t)variant;
+                            if (!SudekiMpLanArenaClientReplicaTestBukiNoNativeCombo(
+                                    &body, retained, boundary)) {
+                                fputs("FAIL: Buki must not start or cancel a native combo lease\n",stderr);
+                                ++failures;
+                            }
+                        }
+                SudekiMpLanArenaSetSeatTypes(SUDEKIMP_LAN_ARENA_TAL_TYPE,
+                    SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+            }
             if (!SudekiMpLanArenaClientBukiLocomotionClock(10.04f, 10.0f, 37.0f, FALSE, &x, &seek) ||
                 seek || x != 37.0f ||
                 !SudekiMpLanArenaClientBukiLocomotionClock(11.0f, 10.0f, 37.0f, FALSE, &x, &seek) ||
@@ -5343,7 +5364,7 @@ int wmain(int argc, wchar_t **argv) {
         }
         image[0x103890]^=1;
         const unsigned int sites[] = {0xdae80u,0xd0840u,0xdae8eu,
-            0xdaed5u,0xdacdbu,0xd08f4u,0xd08fbu};
+            0xdaed5u,0xdacdbu,0xd08f4u,0xd08fbu,0xd0a10u,0xd0a80u};
         unsigned int i;
         if (!SudekiMpBukiReplicaNativeImageMatches((HMODULE)image)) {
             fputs("FAIL: exact Buki facing/block-cleanup ABI rejected\n", stderr);

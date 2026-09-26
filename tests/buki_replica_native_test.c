@@ -51,6 +51,38 @@ int main(void) {
     CHECK(calls==1); CHECK(!memcmp(parts[3]+0x48,d,12));
     seed(); CHECK(SudekiMpBukiReplicaInterruptAttack((HMODULE)image,actor,parts[0]));
     CHECK(calls==1);
+    CHECK(SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[0]));
+    CHECK(calls==1); /* The observation cannot call native cleanup. */
+    for(i=0;i<32;++i) {
+        seed(); interrupt(parts[4]); calls=0;
+        parts[4][0xb1]=(uint8_t)(0x20u|i);
+        CHECK(SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[0])
+            == ((i & 0x13u)==0));
+        CHECK(parts[4][0xb1]==(0x20u|i) && calls==0);
+        /* Even otherwise harmless window flags never mask a queued task. */
+        *(void **)(parts[4]+0xac)=actor;
+        CHECK(!SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[0]));
+    }
+    for(i=0;i<8;++i) {
+        seed(); interrupt(parts[4]); calls=0;
+        switch(i) {
+        case 0: *(uint32_t *)(parts[4]+0x64)=1; break;
+        case 1: *(void **)(parts[4]+0xa8)=actor; break;
+        case 2: *(void **)(parts[4]+0xac)=actor; break;
+        case 3: parts[4][0xb0]=0; break;
+        case 4: parts[4][0xb1]|=2; break;
+        case 5: parts[5][0x72]|=0x10; break;
+        case 6: *(uint32_t *)(parts[0]+0x50)=0x1000; break;
+        case 7: *(void **)(parts[4]+0x10)=image; break;
+        }
+        CHECK(!SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[0]));
+        CHECK(calls==0);
+    }
+    seed(); interrupt(parts[4]); calls=0;
+    CHECK(!SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[1]));
+    *(void **)actor=image+0x2d5010;
+    CHECK(!SudekiMpBukiReplicaBodyAvailable((HMODULE)image,actor,parts[0]));
+    CHECK(calls==0);
     for(i=0;i<8;++i) {
         seed(); *(void **)(parts[i]+0x10)=image;
         if(i<4) CHECK(!SudekiMpBukiReplicaSyncFacing((HMODULE)image,actor,parts[0],d));

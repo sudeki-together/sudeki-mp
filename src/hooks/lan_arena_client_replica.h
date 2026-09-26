@@ -352,6 +352,9 @@ BOOL SudekiMpLanArenaClientReplicaGetDiagnostics(
 );
 
 #ifdef SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING
+BOOL SudekiMpLanArenaClientReplicaTestBukiNoNativeCombo(
+    const struct SudekiMpLanArenaActorSnapshot *snapshot, BOOL retained,
+    BOOL final_boundary);
 enum {
     SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_UNKNOWN = 0,
     SUDEKIMP_LAN_ARENA_CLIENT_AILISH_MODEL_DESIRED = 1,

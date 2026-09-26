@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 39u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 40u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413339u /* "LA39" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413430u /* "LA40" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1468u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
