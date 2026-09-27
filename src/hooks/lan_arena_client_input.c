@@ -1,4 +1,5 @@
 #include "hooks/lan_arena_client_input.h"
+#include "hooks/lan_arena_ranged_aim.h"
 
 #include "cleanroom/engine.h"
 #include "engine/log.h"
@@ -76,6 +77,9 @@ enum {
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
+    RVA_SECONDARY_RANGED_FIRE_CALL = 0x000eaa23u,
+    RVA_ARBITER_RANGED_FIRE_CALL = 0x000db310u,
+    RVA_RANGED_FIRE_START = 0x000c6d80u,
     RVA_CONTROLLER_AIM_UPDATE = 0x00028b00u,
     RVA_QUICK_MENU_NATIVE_TOGGLE = 0x0000a080u,
     RVA_QUICK_MENU_NATIVE_TOGGLE_CALL = 0x00028228u,
@@ -120,6 +124,10 @@ static const uint8_t expected_controller_combat_entry[] = {
     0x55u, 0x8bu, 0x6cu, 0x24u, 0x08u,
     0x83u, 0xbdu, 0x48u, 0x02u, 0x00u, 0x00u, 0x00u
 };
+static const uint8_t expected_secondary_fire_context[] = {
+    0x8bu, 0x57u, 0x10u, 0x56u, 0x8bu, 0xb2u, 0xbcu, 0x00u,
+    0x00u, 0x00u, 0x85u, 0xf6u, 0x74u, 0x14u
+};
 static const uint8_t expected_controller_aim_update_entry[] = {
     0x55u, 0x8bu, 0xecu, 0x83u, 0xe4u, 0xf8u, 0x83u, 0xecu,
     0x34u, 0x53u, 0x8bu, 0x5du, 0x08u, 0x83u, 0xbbu, 0x48u,
@@ -141,6 +149,9 @@ static const uint8_t expected_camera_input_event_entry[] = {
 static SudekiMpRelativeCallHook alternate_movement_hook;
 static SudekiMpRelativeCallHook normal_movement_hook;
 static SudekiMpInlineHook controller_combat_hook;
+static SudekiMpRelativeCallHook secondary_ranged_fire_hook;
+static SudekiMpRelativeCallHook arbiter_ranged_fire_hook;
+static void *original_secondary_ranged_fire __attribute__((used));
 static SudekiMpPointerHook quick_menu_input_hook;
 static SudekiMpPointerHook camera_input_event_hook;
 static SudekiMpPointerHook character_input_hook;
@@ -233,6 +244,14 @@ BOOL SudekiMpLanArenaClientRangedWeakHeld(
     return first_person_active && raw_weak_held;
 }
 
+BOOL SudekiMpLanArenaClientAimRefreshDue(
+    BOOL gameplay_owner_exact, BOOL first_person_active,
+    DWORD last_sent_ms, DWORD now_ms
+) {
+    return gameplay_owner_exact && first_person_active &&
+        (DWORD)(now_ms-last_sent_ms)>=CLIENT_INPUT_SEND_INTERVAL_MS;
+}
+
 BOOL SudekiMpLanArenaClientCameraInputAllowed(
     BOOL authenticated,
     BOOL local_skill_camera_active
@@ -268,6 +287,46 @@ static void invalidate_native_movement_sample(void) {
 static BOOL authenticated_client(void);
 static BOOL readable_memory(const void *pointer, size_t length);
 static BOOL client_ailish_first_person_active(void);
+
+BOOL SudekiMpLanArenaClientSuppressSecondaryFire(
+    BOOL authenticated, BOOL elco, BOOL owner_exact, BOOL confirmed_start
+) {
+    return authenticated && elco && owner_exact && !confirmed_start;
+}
+
+static BOOL __attribute__((used, noinline)) suppress_secondary_ranged_fire(
+    uint8_t *combat
+) {
+    uint8_t *actor;
+    BOOL owner_exact;
+    if (!authenticated_client() || seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE)
+        return FALSE;
+    actor = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
+    owner_exact = client_game_base != NULL && readable_memory(actor, 0xc0u) &&
+        *(void **)actor == client_game_base + 0x002d66fcu &&
+        *(void **)(actor + 0xbcu) == combat &&
+        readable_memory(combat, 0xe4u) &&
+        *(void **)combat == client_game_base + 0x002d4c8cu &&
+        *(void **)(combat + 0x10u) == actor;
+    return SudekiMpLanArenaClientSuppressSecondaryFire(TRUE, TRUE, owner_exact,
+        owner_exact && SudekiMpLanArenaClientReplicaWeaponStartAuthorized(actor));
+}
+
+/* Both supported native FireStart callers carry CCombat in ESI. Consuming
+ * only the controller edge did not stop all local native firing. Authorize
+ * the synchronous host-confirmed replay, not another start merely because
+ * its earlier clip is still active. Do not cancel a running weapon task:
+ * only decline a new start at these exact callsites.
+ * Preserve the original register/flag context for all other owners. */
+static void __attribute__((naked, noinline)) secondary_ranged_fire_bridge(void) {
+    __asm__ volatile(
+        "pushfl\n\tpushal\n\tpushl %esi\n\t"
+        "call _suppress_secondary_ranged_fire\n\taddl $4,%esp\n\t"
+        "testl %eax,%eax\n\tjz 1f\n\t"
+        "popal\n\tpopfl\n\txorl %eax,%eax\n\tret\n\t"
+        "1: popal\n\tpopfl\n\tjmp *_original_secondary_ranged_fire\n\t"
+    );
+}
 
 static BOOL queue_client_skill_slot(
     void *character,
@@ -954,6 +1013,16 @@ static BOOL send_client_input(
     input.weak_attack_held = weak_held ? 1u : 0u;
     input.ranged_first_person_active =
         client_ailish_first_person_active() ? 1u : 0u;
+    if(input.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE && input.ranged_first_person_active) {
+        float direction[3],target[3];
+        if(SudekiMpLanAimCameraTarget(direction,target)) {
+            input.aim_direction_x=normalized_axis(direction[0]);
+            input.aim_direction_y=normalized_axis(direction[1]);
+            input.aim_direction_z=normalized_axis(direction[2]);
+            memcpy(input.aim_target,target,sizeof(target));
+            input.aim_target_valid=1u;
+        }
+    }
     /* Combat state is host/world authority. Keep the legacy wire byte zero so
      * an older host cannot mistake client-local input for permission. */
     input.cleanroom_combat_test_pressed = 0u;
@@ -1096,6 +1165,7 @@ void SudekiMpLanArenaClientInputService(void) {
     int16_t desired_z;
     BOOL aim_changed;
     BOOL first_person_active;
+    BOOL gameplay_owner_exact=FALSE;
     BOOL operator_weak_requested = operator_weak_attack_event != NULL &&
         WaitForSingleObject(operator_weak_attack_event, 0u) == WAIT_OBJECT_0;
     BOOL operator_weak_held = operator_weak_hold_event != NULL &&
@@ -1169,6 +1239,7 @@ void SudekiMpLanArenaClientInputService(void) {
         *(void **)(controller + CONTROLLER_TARGET_OFFSET) == ailish) {
         raw_x = *(float *)(controller + CONTROLLER_MOVE_X_OFFSET);
         raw_y = *(float *)(controller + CONTROLLER_MOVE_Y_OFFSET);
+        gameplay_owner_exact=ailish!=NULL && *(int *)(controller+0x80u)==1;
         /* Retail only calls its combat handler when controller+0x1c9 marks
          * an input transition. A stable held state does not refresh that
          * hook's timestamp. Observe the live window-owned state here instead
@@ -1253,6 +1324,9 @@ void SudekiMpLanArenaClientInputService(void) {
         weak_changed || weak_was_down != last_transmitted_weak_held ||
         aim_changed ||
         first_person_active != last_transmitted_first_person_active ||
+        (seat_client_type()==SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+            SudekiMpLanArenaClientAimRefreshDue(gameplay_owner_exact,
+                first_person_active,last_input_send_at,now)) ||
         skill_pending || pending_kit_action != 0u ||
         ((desired_x != 0 || desired_z != 0) &&
             (DWORD)(now - last_input_send_at) >=
@@ -1380,7 +1454,9 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
         return FALSE;
     }
     base = (uint8_t *)game_module;
-    if (memcmp(base + RVA_CONTROLLER_COMBAT, expected_controller_combat_entry,
+    if (memcmp(base + RVA_SECONDARY_RANGED_FIRE_CALL - 14u,
+            expected_secondary_fire_context, sizeof(expected_secondary_fire_context)) != 0 ||
+        memcmp(base + RVA_CONTROLLER_COMBAT, expected_controller_combat_entry,
             sizeof(expected_controller_combat_entry)) != 0 ||
         memcmp(base + RVA_CONTROLLER_AIM_UPDATE,
             expected_controller_aim_update_entry,
@@ -1416,6 +1492,7 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
         (SkillValidateFunction)(base + RVA_SKILL_VALIDATE);
     original_quick_menu_skill_use =
         (QuickMenuSkillUseFunction)(base + RVA_SKILL_USE);
+    original_secondary_ranged_fire = base + RVA_RANGED_FIRE_START;
     if (!SudekiMpInstallRelativeCallHook(&alternate_movement_hook,
             base + RVA_PLAYER_MOVE_CALL_ALTERNATE, original_arbiter_movement,
             capture_client_movement) ||
@@ -1436,7 +1513,13 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
      * have a valid native continuation. */
     original_controller_combat =
         (ControllerCombatFunction)controller_combat_hook.trampoline;
-    if (!SudekiMpInstallPointerHook(&quick_menu_input_hook,
+    if (!SudekiMpInstallRelativeCallHook(&secondary_ranged_fire_hook,
+            base + RVA_SECONDARY_RANGED_FIRE_CALL,
+            original_secondary_ranged_fire, secondary_ranged_fire_bridge) ||
+        !SudekiMpInstallRelativeCallHook(&arbiter_ranged_fire_hook,
+            base + RVA_ARBITER_RANGED_FIRE_CALL,
+            original_secondary_ranged_fire, secondary_ranged_fire_bridge) ||
+        !SudekiMpInstallPointerHook(&quick_menu_input_hook,
             (void **)(base + RVA_QUICK_MENU_INPUT_VTABLE_SLOT),
             original_quick_menu_input,
             route_client_quick_menu_input) ||
@@ -1582,6 +1665,10 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
     RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(
         &camera_input_event_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestorePointerHook(&quick_menu_input_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &arbiter_ranged_fire_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
+        &secondary_ranged_fire_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(&controller_combat_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
         &normal_movement_hook));
@@ -1597,6 +1684,7 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
         return FALSE;
     }
     original_controller_combat = NULL;
+    original_secondary_ranged_fire = NULL;
     original_arbiter_movement = NULL;
     original_quick_menu_input = NULL;
     original_camera_input_event = NULL;

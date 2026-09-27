@@ -38,9 +38,30 @@ static BOOL WINAPI test_close_handle(HANDLE handle);
 #include "../src/hooks/lan_arena_runtime.c"
 
 static BOOL describe_equipped_weapon;
-BOOL SudekiMpLanAimInstall(HMODULE image,SudekiMpLanAimWitness witness) {
-    return image && witness;
+static void *elco_weapon_fixture_owner;
+static SudekiMpElcoWeaponObservation elco_weapon_fixture;
+void SudekiMpLanAimSetShotObserver(SudekiMpLanWeaponShotObserver observer) { (void)observer; }
+void SudekiMpLanAimSetIdleWitness(SudekiMpLanIdleWitness witness) { (void)witness; }
+void SudekiMpLanArenaClientReplicaNativeWeaponFired(void *actor) { (void)actor; }
+BOOL SudekiMpObserveElcoWeapon(void *actor, SudekiMpElcoWeaponObservation *out) {
+    if (!actor || actor!=elco_weapon_fixture_owner || !out) return FALSE;
+    *out=elco_weapon_fixture; return TRUE;
 }
+BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *state) {
+    (void)state; return FALSE;
+}
+BOOL SudekiMpLanAimInstall(HMODULE image,SudekiMpLanAimWitness witness,
+    SudekiMpLanAimTargetWitness target,SudekiMpLanAimFireWitness fire) {
+    return image && witness && target && fire;
+}
+BOOL SudekiMpLanAimCameraTarget(float d[3],float t[3]) { (void)d;(void)t;return FALSE; }
+BOOL SudekiMpLanAimTargetNearActor(const float p[3],const float d[3],const float t[3]) {
+    float n=sqrtf(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]),distance=0;
+    if(!isfinite(n) || n<.5f || n>1.5f) return FALSE;
+    for(unsigned i=0;i<3;++i) { float x=t[i]-100*d[i]/n-p[i]; distance+=x*x; }
+    return isfinite(distance) && distance<=25;
+}
+BOOL SudekiMpLanArenaClientReplicaRangedTarget(void *a,float t[3]) { (void)a;(void)t;return FALSE; }
 BOOL SudekiMpLanAimUninstall(void) { return TRUE; }
 void SudekiMpLanAimActors(void *a,void *b) { (void)a; (void)b; }
 BOOL SudekiMpLanAimNormalize(const float in[3],float out[3]) {
@@ -3603,30 +3624,132 @@ static void verify_remote_ranged_aim(void) {
     host_last_remote_input_at_ms=GetTickCount();
     ranged_remote_lease=&actors[1];
     ranged_aim_fixture=TRUE;
+    reset_host_action_tracking();
+    elco_weapon_fixture_owner=&actors[1];
+    elco_weapon_fixture=(SudekiMpElcoWeaponObservation){34,0,100,50,0};
+    for (unsigned i=0;i<4;++i) runtime_weapon_shot(&actors[1]);
+    check(host_weapon_journal[1].shot_count==3 &&
+        host_weapon_journal[1].shots[0].sequence==2 &&
+        host_weapon_journal[1].shots[2].sequence==4 &&
+        host_weapon_journal[1].shots[2].pre_charge_q8==25600,
+        "actual native projectile observer journals bounded host-confirmed pre-shot resources");
+    elco_weapon_fixture.charge=0;
+    runtime_weapon_shot(&actors[1]);
+    check(host_weapon_sequences[1]==4,"empty-charge callback is not an executed gun shot");
+    elco_weapon_fixture.charge=100; character_skill_observation.active=TRUE;
+    runtime_weapon_shot(&actors[1]);
+    check(host_weapon_sequences[1]==4,"skill projectile cannot become gun feedback");
+    character_skill_observation.active=FALSE; ranged_remote_lease=NULL;
+    runtime_weapon_shot(&actors[1]);
+    check(host_weapon_sequences[1]==4,"lost remote actor lease rejects shot journal entry");
+    ranged_remote_lease=&actors[1]; session_status.peer_connected=FALSE;
+    runtime_weapon_shot(&actors[1]);
+    check(host_weapon_sequences[1]==4,"disconnect cannot publish weapon shots");
+    session_status.peer_connected=TRUE;
+    reset_host_action_tracking(); elco_weapon_fixture_owner=NULL;
     check(!SudekiMpControlSeparationSeatInputLeaseActive(1),
         "fixture has no local controller bridge for LAN actor");
     check(runtime_ranged_aim(&actors[1],TRUE,direction) && direction[1]>.59f && direction[2]>.79f,
         "authenticated remote projectile receives vertical aim without local-controller bridge");
     check(runtime_ranged_aim(&actors[1],FALSE,direction),
         "same LAN aim reaches observer-pose publication");
+    BOOL held=FALSE;host_remote_weak_held=TRUE;
+    check(runtime_ranged_held_fire(&actors[1],&held) && held,
+        "fresh authenticated trigger admits observer held stance");
+    host_remote_weak_held=FALSE;
+    check(runtime_ranged_held_fire(&actors[1],&held) && !held,
+        "release is observable independently of per-shot animation edges");
+    float target[3]; actor_position_result=TRUE;
+    host_remote_target_valid=TRUE;
+    memcpy(host_remote_target,(float[]){1,62,83},12);
+    check(runtime_ranged_target(&actors[1],target) && target[1]==62,
+        "host validates and preserves client's native convergence point");
+    host_remote_target[0]=50;
+    check(!runtime_ranged_target(&actors[1],target),"remote camera cannot be relocated away from actor");
+    host_remote_target[0]=1; host_remote_target_valid=FALSE;
+    check(!runtime_ranged_target(&actors[1],target),"missing target cannot admit host gun firing");
+    host_remote_target_valid=TRUE;
     ranged_remote_lease=NULL;
     check(!runtime_ranged_aim(&actors[1],TRUE,direction),"lost native takeover rejects aim");
     ranged_remote_lease=&actors[1];
     host_last_remote_input_at_ms=GetTickCount()-300u;
     check(!runtime_ranged_aim(&actors[1],TRUE,direction),"stale LAN aim rejects");
+    check(!runtime_ranged_held_fire(&actors[1],&held),"stale trigger cannot maintain held pose");
+    check(!runtime_ranged_target(&actors[1],target),"stale convergence point rejects too");
     host_last_remote_input_at_ms=GetTickCount();
     session_status.peer_connected=FALSE;
     check(!runtime_ranged_aim(&actors[1],TRUE,direction),"disconnected LAN aim rejects");
+    check(!runtime_ranged_held_fire(&actors[1],&held),"disconnect cannot retain held stance");
+    check(!runtime_ranged_target(&actors[1],target),"disconnected point cannot be reused");
     session_status.peer_connected=TRUE;
     character_skill_observation.active=TRUE;
     check(!runtime_ranged_aim(&actors[1],FALSE,direction),"own cast rejects gun pose");
+    check(!runtime_ranged_held_fire(&actors[1],&held),"own cast rejects held stance");
     character_skill_observation.active=FALSE;
     check(!runtime_ranged_aim(&actors[0],TRUE,direction),"non-ranged actor cannot borrow aim");
     runtime_installed=tal_initialized=ailish_initialized=FALSE;
     host_remote_ailish_owned=host_remote_first_person_active=FALSE;
+    host_remote_target_valid=FALSE; memset(host_remote_target,0,12);
     ranged_remote_lease=NULL;
     reset_stub_policy(); reset_stub_counts();
     ranged_aim_fixture=FALSE;
+}
+
+static void verify_local_gun_idle(void) {
+    int elco=0,buki=0,replacement=0;
+    for(unsigned host=0;host<2;++host) {
+        reset_stub_policy();reset_stub_counts();
+        runtime_config=make_config(host ? SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL:
+            SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH);
+        runtime_config.host_actor_type=host ? SUDEKIMP_LAN_ARENA_ELCO_TYPE:SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+        runtime_config.client_actor_type=host ? SUDEKIMP_LAN_ARENA_BUKI_TYPE:SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        runtime_installed=tal_initialized=ailish_initialized=TRUE;
+        cleanroom_combat_enabled=TRUE;
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&elco;
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_BUKI]=&buki;
+        session_status_result=TRUE;session_status.peer_connected=TRUE;
+        session_status.local_role=runtime_config.local_role;
+        session_status.local_simulation_node_role=runtime_config.local_simulation_node_role;
+        session_status.peer_simulation_node_role=host ? SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA:
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD;
+        session_status.session_token=777;
+        runtime_skill_ui_bound=TRUE;runtime_skill_ui_retiring=FALSE;
+        runtime_skill_ui_local=&elco;runtime_skill_ui_remote=&buki;runtime_skill_ui_session=777;
+        fake_spirit_instances[0]=(SudekiMpSpiritInstance){&elco,&elco,1};
+        fake_spirit_instances[1]=(SudekiMpSpiritInstance){&buki,&buki,2};
+        memcpy(runtime_spirit_instances,fake_spirit_instances,sizeof(runtime_spirit_instances));
+        fake_spirit_states[0]=(SudekiMpSpiritInstanceState){0,0,FALSE,TRUE};
+        fake_spirit_states[1]=(SudekiMpSpiritInstanceState){10,4,TRUE,FALSE};
+        character_skill_observation.active=FALSE;cast_context_actor_busy=NULL;cast_context_actor_known=TRUE;
+        check(runtime_local_gun_idle(&elco),"local idle uses its own manager; no observer aim snapshot needed");
+        check(!runtime_local_gun_idle(&buki),"remote/non-Elco actor cannot borrow local idle witness");
+        fake_spirit_states[0].idle=FALSE;
+        check(!runtime_local_gun_idle(&elco),"local strike tail blocks idle correction");
+        fake_spirit_states[0].idle=TRUE;ui_abi_healthy=FALSE;
+        check(!runtime_local_gun_idle(&elco),"unknown private manager is not idle");ui_abi_healthy=TRUE;
+        character_skill_observation.active=TRUE;
+        check(!runtime_local_gun_idle(&elco),"active ordinary cast blocks idle correction");
+        character_skill_observation.active=FALSE;cast_context_actor_busy=&elco;
+        check(!runtime_local_gun_idle(&elco),"undrained local cast blocks idle correction");cast_context_actor_busy=NULL;
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&replacement;
+        check(!runtime_local_gun_idle(&elco),"replaced local actor invalidates idle lease");
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=&elco;
+        session_status.session_token=778;
+        check(!runtime_local_gun_idle(&elco),"new session cannot reuse old idle lease");session_status.session_token=777;
+        session_status.peer_connected=FALSE;
+        check(!runtime_local_gun_idle(&elco),"disconnect rejects local correction");session_status.peer_connected=TRUE;
+        runtime_skill_ui_retiring=TRUE;
+        check(!runtime_local_gun_idle(&elco),"retiring ownership rejects local correction");runtime_skill_ui_retiring=FALSE;
+        cleanroom_combat_enabled=FALSE;
+        check(!runtime_local_gun_idle(&elco),"noncombat does not borrow FP idle correction");
+        runtime_installed=tal_initialized=ailish_initialized=runtime_skill_ui_bound=FALSE;
+        runtime_skill_ui_local=runtime_skill_ui_remote=NULL;runtime_skill_ui_session=0;
+        memset(runtime_spirit_instances,0,sizeof(runtime_spirit_instances));
+        memset(fake_spirit_instances,0,sizeof(fake_spirit_instances));
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_ELCO]=NULL;
+        cleanroom_actor_entities[SUDEKIMP_CLEANROOM_BUKI]=NULL;
+    }
+    reset_stub_policy();reset_stub_counts();
 }
 
 int main(void) {
@@ -3643,6 +3766,7 @@ int main(void) {
     reset_stub_counts();
 
     verify_remote_ranged_aim();
+    verify_local_gun_idle();
     verify_weapon_snapshot_family();
     verify_client_install_and_uninstall(image);
     verify_client_install_and_uninstall(image);

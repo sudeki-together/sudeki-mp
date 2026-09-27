@@ -194,6 +194,115 @@ static float positive_half(uint16_t half) {
         ldexpf(1.0f + (float)(half & 1023u) / 1024.0f, (int)exponent - 15);
 }
 
+static BOOL elco_item(unsigned id) {
+    return id == 24u || id == 26u || id == 27u || id == 30u ||
+        id == 31u || id == 34u || id == 35u;
+}
+
+static uint8_t *elco_weapon_record(void *character,
+    SudekiMpElcoWeaponObservation *out) {
+    uint8_t *base = (uint8_t *)native_module, *actor = character;
+    uint8_t *manager, *weapon, *item, *record, **rows;
+    unsigned count, i, id;
+    SudekiMpElcoWeaponObservation s;
+    if (!base || !out || !readable_memory(actor, 0x138u) ||
+        *(void **)actor != base + 0x2d66fcu) return NULL;
+    weapon = *(uint8_t **)(actor + 0xc0u);
+    manager = *(uint8_t **)(actor + 0xbcu);
+    if (!readable_memory(weapon, 0x270u) ||
+        *(void **)weapon != base + 0x2d4d3cu ||
+        *(void **)(weapon + 0x10u) != actor ||
+        *(void **)(weapon + 0x26cu) != NULL ||
+        !readable_memory(manager, 0xe4u) ||
+        *(void **)manager != base + 0x2d4c8cu ||
+        *(void **)(manager + 0x10u) != actor) return NULL;
+    item = *(uint8_t **)(weapon + 0x268u);
+    if (!item_matches_family(item, 7u)) return NULL;
+    id = *(uint32_t *)(item + 0x14u);
+    if (!elco_item(id)) return NULL;
+    record = *(uint8_t **)(manager + 0x60u);
+    count = *(unsigned *)(manager + 0x44u);
+    rows = *(uint8_t ***)(manager + 0x4cu);
+    if (!count || count > 64u || !readable_memory(rows, count * 4u) ||
+        !readable_memory(record, 0xc4u) || *(uint32_t *)(record + 8u) != id)
+        return NULL;
+    for (i = 0; i < count && rows[i] != record; ++i) {}
+    if (i == count) return NULL;
+    s.item = (uint8_t)id; s.stage = manager[0xe0u];
+    s.charge = positive_half(*(uint16_t *)(record + 0xbau));
+    s.required_charge = positive_half(*(uint16_t *)(record + 0xb4u));
+    s.reload_seconds = *(float *)(record + 0xc0u);
+    if (s.stage > 6u || !isfinite(s.charge) || s.charge > 100.0f ||
+        !isfinite(s.required_charge) || s.required_charge <= 0.0f ||
+        s.required_charge > 100.0f || !isfinite(s.reload_seconds) ||
+        s.reload_seconds < 0.0f || s.reload_seconds > 60.0f ||
+        *(void **)(actor + 0xbcu) != manager ||
+        *(void **)(manager + 0x60u) != record ||
+        *(void **)(weapon + 0x268u) != item) return NULL;
+    *out = s;
+    return record;
+}
+
+BOOL SudekiMpObserveElcoWeapon(void *character, SudekiMpElcoWeaponObservation *out) {
+    return elco_weapon_record(character, out) != NULL;
+}
+
+BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *s) {
+    return s && elco_item(s->item) && (s->stage == 0u || s->stage == 6u) &&
+        isfinite(s->charge) && s->charge >= 0.0f && s->charge <= 100.0f &&
+        isfinite(s->required_charge) && s->required_charge > 0.0f &&
+        s->required_charge <= 100.0f && s->charge >= s->required_charge &&
+        isfinite(s->reload_seconds) && s->reload_seconds == 0.0f;
+}
+
+static BOOL set_elco_presentation_resources(void *character, uint8_t item,
+    uint16_t charge_q8, uint16_t reload_ms, BOOL preserve_reload_edge) {
+    SudekiMpElcoWeaponObservation observed;
+    uint8_t *record, *controller;
+    MEMORY_BASIC_INFORMATION page;
+    float charge;
+    uint32_t bits, exponent;
+    uint16_t half;
+    if (charge_q8 > 25600u || reload_ms > 60000u || !native_module) return FALSE;
+    controller = *(uint8_t **)((uint8_t *)native_module + 0x408da4u);
+    if (!readable_memory(controller, 0x24cu) ||
+        *(void **)(controller + 0x248u) != character) return FALSE;
+    record = elco_weapon_record(character, &observed);
+    if (!record || observed.item != item ||
+        !VirtualQuery(record, &page, sizeof(page)) ||
+        !(page.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)))
+        return FALSE;
+    charge = charge_q8 / 256.0f;
+    memcpy(&bits, &charge, 4u);
+    exponent = (bits >> 23u) & 255u;
+    /* Q8 is either zero or >=1/256: every nonzero value is a normal half.
+     * Retail conversion truncates the mantissa in the same way. */
+    half = charge_q8 ? (uint16_t)(((exponent - 112u) << 10u) |
+        ((bits >> 13u) & 1023u)) : 0u;
+    *(uint16_t *)(record + 0xbau) = half;
+    /* Retail CMissileManager::Update (RVA c69fb..c6a9d) queues C3 and
+     * performs refill cleanup only when a POSITIVE timer crosses zero during
+     * its own update. Writing a received zero directly loses that event and
+     * leaves the FP C2 animation/lease busy indefinitely. Preserve at most
+     * one millisecond for the next native update, including repeated zero
+     * snapshots. Do not manufacture an edge for an already-zero timer, or
+     * invoke/cancel native tasks from this resource writer. */
+    *(float *)(record + 0xc0u) = preserve_reload_edge && !reload_ms &&
+        observed.reload_seconds > 0.0f ?
+        fminf(observed.reload_seconds, 1.0f / 1024.0f) : reload_ms / 1000.0f;
+    return TRUE;
+}
+
+BOOL SudekiMpSetElcoPresentationResources(void *character, uint8_t item,
+    uint16_t charge_q8, uint16_t reload_ms) {
+    return set_elco_presentation_resources(character, item, charge_q8, reload_ms, FALSE);
+}
+
+BOOL SudekiMpSyncElcoPresentationResources(void *character, uint8_t item,
+    uint16_t charge_q8, uint16_t reload_ms) {
+    return set_elco_presentation_resources(character, item, charge_q8, reload_ms, TRUE);
+}
+
 float SudekiMpRapidWeaponRechargeAmount(uint16_t rate_half, uint16_t charge_half,
     uint8_t flags, float cooldown, float delta) {
     float rate = positive_half(rate_half), charge = positive_half(charge_half);
@@ -205,11 +314,11 @@ float SudekiMpRapidWeaponRechargeAmount(uint16_t rate_half, uint16_t charge_half
 
 uint32_t SudekiMpRapidWeaponCycleMs(unsigned int item_id, float frames,
     float delta) {
-    /* Proton Phaser's exact native FP resource is five frames. The original
+    /* Items 24 and 27 share the exact five-frame native FP resource. The original
      * Ailish research supplied the dispatch/terminal-boundary model, but her
      * faster action journal is not accepted in this checkout: do not change
      * her existing cadence. B8 is reload duration, never this shot interval. */
-    if (item_id != 24u || frames != 5.0f ||
+    if ((item_id != 24u && item_id != 27u) || frames != 5.0f ||
         !isfinite(delta) || delta <= 0.0f || delta > 0.25f) return 0u;
     return (uint32_t)((0.1f + frames / 24.0f + 2.0f * delta) * 1000.0f + 0.5f);
 }
@@ -251,7 +360,7 @@ BOOL SudekiMpServiceRemoteRapidWeapon(void *character, void *local_character,
     if (!item_matches_family(item, category) ||
         *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL) return FALSE;
     id = *(uint32_t *)(item + ITEM_ID_OFFSET);
-    if (id != 24u) return FALSE;
+    if (id != 24u && id != 27u) return FALSE;
     combat = *(uint8_t **)(actor + 0xbcu);
     component = *(uint8_t **)(actor + 0x134u);
     arbiter = *(uint8_t **)(actor + 0x90u);

@@ -5,7 +5,7 @@
 
 #define LAN_HEADER_SIZE 20u
 #define LAN_HELLO_SIZE 53u
-#define LAN_INPUT_SIZE 31u
+#define LAN_INPUT_SIZE 44u
 #define LAN_ACTION_EVENT_SIZE 7u
 /* Semantic animation id (ANIMID_*, 0..0xC4) the host actor's model is
  * currently playing; 0 = unobserved. Character-independent, unlike the
@@ -21,7 +21,9 @@
 #define LAN_ACTOR_WEAPON_OFFSET (LAN_ACTOR_SKILL_KIND_OFFSET + 1u)
 #define LAN_ACTOR_TARGET_OFFSET (LAN_ACTOR_WEAPON_OFFSET + 1u)
 #define LAN_ACTOR_AIM_OFFSET (LAN_ACTOR_TARGET_OFFSET + 3u)
-#define LAN_ACTOR_SIZE (LAN_ACTOR_AIM_OFFSET + 7u)
+#define LAN_ACTOR_TARGET_POINT_OFFSET (LAN_ACTOR_AIM_OFFSET + 7u)
+#define LAN_ACTOR_WEAPON_STATE_OFFSET (LAN_ACTOR_TARGET_POINT_OFFSET + 13u)
+#define LAN_ACTOR_SIZE (LAN_ACTOR_WEAPON_STATE_OFFSET + 35u)
 #define LAN_HIT_SIZE 23u
 #define LAN_ENEMY_SIZE (26u + SUDEKIMP_LAN_ARENA_HIT_HISTORY_CAPACITY * LAN_HIT_SIZE)
 #define LAN_SNAPSHOT_ACTORS_OFFSET 14u
@@ -162,6 +164,17 @@ static int valid_input_aim(const SudekiMpLanArenaInput *input) {
     y = (double)input->aim_direction_y / 32767.0;
     z = (double)input->aim_direction_z / 32767.0;
     length_squared = x * x + y * y + z * z;
+    if (input->aim_target_valid > 1u) return 0;
+    if (input->aim_target_valid) {
+        if (input->actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+            !input->ranged_first_person_active ||
+            length_squared < 0.99 || length_squared > 1.01) return 0;
+        for (unsigned i=0;i<3;++i)
+            if (!valid_coordinate(input->aim_target[i])) return 0;
+    } else {
+        for (unsigned i=0;i<3;++i)
+            if (input->aim_target[i] != 0.0f || signbit(input->aim_target[i])) return 0;
+    }
     /* An all-zero vector explicitly means that the client camera was not yet
      * available. Otherwise accept only a bounded near-unit direction. */
     return length_squared == 0.0 ||
@@ -265,6 +278,31 @@ static int valid_actor_action_pair(
 static int action_sequence_newer(uint16_t candidate, uint16_t previous) {
     return candidate != previous &&
         (uint16_t)(candidate - previous) < 0x8000u;
+}
+
+static int elco_weapon_item(uint8_t item) {
+    return item == 24u || item == 26u || item == 27u || item == 30u ||
+        item == 31u || item == 34u || item == 35u;
+}
+
+int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *w, uint8_t type) {
+    if (!w || w->valid > 1u || w->shot_count > SUDEKIMP_LAN_WEAPON_SHOT_HISTORY)
+        return 0;
+    if (w->valid) {
+        if (type != SUDEKIMP_LAN_ARENA_ELCO_TYPE || !elco_weapon_item(w->item) ||
+            w->stage > 6u || w->charge_q8 > 25600u || w->reload_ms > 60000u) return 0;
+    } else if (w->item || w->stage || w->charge_q8 || w->reload_ms || w->shot_count)
+        return 0;
+    for (unsigned i = 0; i < SUDEKIMP_LAN_WEAPON_SHOT_HISTORY; ++i) {
+        const SudekiMpLanWeaponShot *s = &w->shots[i];
+        if (i < w->shot_count) {
+            if (!s->sequence || !elco_weapon_item(s->item) ||
+                !s->pre_charge_q8 || s->pre_charge_q8 > 25600u ||
+                (i && (!action_sequence_newer(s->sequence, w->shots[i-1].sequence) ||
+                 (int32_t)(s->host_tick - w->shots[i-1].host_tick) < 0))) return 0;
+        } else if (s->sequence || s->item || s->pre_charge_q8 || s->host_tick) return 0;
+    }
+    return 1;
 }
 
 static int valid_actor_action_history(
@@ -588,7 +626,15 @@ static int valid_actor_snapshot(
         !valid_coordinate(actor->x) || !valid_coordinate(actor->y) ||
         !valid_coordinate(actor->z) || !isfinite(actor->facing_x) ||
         !isfinite(actor->facing_z)) return 0;
+    if (!SudekiMpLanWeaponStateValid(&actor->weapon, actor->actor_type)) return 0;
     if (actor->ranged_aim_valid > 1u) return 0;
+    if (actor->ranged_target_valid > 1u) return 0;
+    for (unsigned i=0;i<3;++i) {
+        if (actor->ranged_target_valid) {
+            if (!actor->ranged_aim_valid || actor->actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+                !valid_coordinate(actor->ranged_target[i])) return 0;
+        } else if (actor->ranged_target[i] != 0.0f || signbit(actor->ranged_target[i])) return 0;
+    }
     if (actor->ranged_aim_valid) {
         float norm = 0.0f;
         if (actor->actor_type != SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
@@ -978,6 +1024,9 @@ int SudekiMpLanArenaSnapshotValid(
         const SudekiMpLanArenaSpiritView *view = &snapshot->cast[index].spirit_view;
         const SudekiMpLanArenaSkillFade *fade = &snapshot->cast[index].skill_fade;
         const SudekiMpLanArenaActorSnapshot *actor = &snapshot->seat[index];
+        for (unsigned shot = 0; shot < actor->weapon.shot_count; ++shot)
+            if ((int32_t)(snapshot->host_tick - actor->weapon.shots[shot].host_tick) < 0)
+                return 0;
         if (!SudekiMpLanArenaSpiritViewValid(view) || !SudekiMpLanArenaSkillFadeValid(fade)) return 0;
         if ((view->kind || fade->kind) &&
             (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE || !snapshot->combat_enabled)) return 0;
@@ -1088,6 +1137,21 @@ static int write_actor(uint8_t *output, const SudekiMpLanArenaActorSnapshot *act
     output[LAN_ACTOR_SKILL_KIND_OFFSET] = actor->skill_kind;
     output[LAN_ACTOR_WEAPON_OFFSET] = actor->weapon_slot_plus_one;
     output[LAN_ACTOR_AIM_OFFSET] = actor->ranged_aim_valid;
+    {
+        uint8_t *p = output + LAN_ACTOR_WEAPON_STATE_OFFSET;
+        const SudekiMpLanWeaponState *w = &actor->weapon;
+        p[0] = w->valid; p[1] = w->item; p[2] = w->stage; p[3] = w->shot_count;
+        write_u16(p+4, w->charge_q8); write_u16(p+6, w->reload_ms);
+        for (unsigned i = 0; i < SUDEKIMP_LAN_WEAPON_SHOT_HISTORY; ++i) {
+            uint8_t *e = p+8+i*9;
+            write_u16(e, w->shots[i].sequence); e[2] = w->shots[i].item;
+            write_u16(e+3, w->shots[i].pre_charge_q8);
+            write_u32(e+5, w->shots[i].host_tick);
+        }
+    }
+    output[LAN_ACTOR_TARGET_POINT_OFFSET] = actor->ranged_target_valid;
+    for (index=0u;index<3u;++index)
+        write_float(output+LAN_ACTOR_TARGET_POINT_OFFSET+1u+index*4u,actor->ranged_target[index]);
     for (index = 0u; index < 3u; ++index)
         write_u16(output + LAN_ACTOR_AIM_OFFSET + 1u + index * 2u,
             (uint16_t)actor->ranged_aim[index]);
@@ -1103,6 +1167,21 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     actor->actor_type = input[0];
     actor->weapon_slot_plus_one = input[LAN_ACTOR_WEAPON_OFFSET];
     actor->ranged_aim_valid = input[LAN_ACTOR_AIM_OFFSET];
+    {
+        const uint8_t *p = input + LAN_ACTOR_WEAPON_STATE_OFFSET;
+        SudekiMpLanWeaponState *w = &actor->weapon;
+        w->valid = p[0]; w->item = p[1]; w->stage = p[2]; w->shot_count = p[3];
+        w->charge_q8 = read_u16(p+4); w->reload_ms = read_u16(p+6);
+        for (unsigned i = 0; i < SUDEKIMP_LAN_WEAPON_SHOT_HISTORY; ++i) {
+            const uint8_t *e = p+8+i*9;
+            w->shots[i].sequence = read_u16(e); w->shots[i].item = e[2];
+            w->shots[i].pre_charge_q8 = read_u16(e+3);
+            w->shots[i].host_tick = read_u32(e+5);
+        }
+    }
+    actor->ranged_target_valid = input[LAN_ACTOR_TARGET_POINT_OFFSET];
+    for (index=0u;index<3u;++index)
+        actor->ranged_target[index]=read_float(input+LAN_ACTOR_TARGET_POINT_OFFSET+1u+index*4u);
     for (index = 0u; index < 3u; ++index)
         actor->ranged_aim[index] = (int16_t)read_u16(
             input + LAN_ACTOR_AIM_OFFSET + 1u + index * 2u);
@@ -1225,6 +1304,9 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             output[28] = packet->body.input.skill_slot;
             output[29] = packet->body.input.kit_action;
             output[30] = packet->body.input.kit_slot;
+            output[31] = packet->body.input.aim_target_valid;
+            for (unsigned i=0;i<3;++i)
+                write_float(output+32u+i*4u,packet->body.input.aim_target[i]);
             *size = LAN_INPUT_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
@@ -1425,6 +1507,9 @@ int SudekiMpLanArenaDecodePacket(
             packet->body.input.skill_slot = payload[28];
             packet->body.input.kit_action = payload[29];
             packet->body.input.kit_slot = payload[30];
+            packet->body.input.aim_target_valid = payload[31];
+            for (unsigned i=0;i<3;++i)
+                packet->body.input.aim_target[i] = read_float(payload+32u+i*4u);
             return packet->body.input.sequence == packet->sequence &&
                 SudekiMpLanArenaInputValid(&packet->body.input);
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:

@@ -72,6 +72,61 @@ static void clear_actor_action(SudekiMpLanArenaActorSnapshot *actor) {
     memset(actor->action_history, 0, sizeof(actor->action_history));
 }
 
+static void test_confirmed_weapon_cursor(void) {
+    SudekiMpLanWeaponState w = {0};
+    uint16_t cursor = 65534;
+    w.valid=1; w.item=24; w.charge_q8=25600; w.shot_count=3;
+    w.shots[0]=(SudekiMpLanWeaponShot){65535,24,25600,100};
+    w.shots[1]=(SudekiMpLanWeaponShot){1,24,25600,200};
+    w.shots[2]=(SudekiMpLanWeaponShot){2,34,25600,300};
+    CHECK(SudekiMpLanWeaponNextShot(&w,24,300,&cursor)==&w.shots[0]);
+    CHECK(cursor==65534); /* Busy native playback must not consume a shot. */
+    cursor=65535;
+    CHECK(SudekiMpLanWeaponNextShot(&w,24,300,&cursor)==&w.shots[1]);
+    cursor=1;
+    CHECK(!SudekiMpLanWeaponNextShot(&w,24,300,&cursor) && cursor==2);
+    CHECK(!SudekiMpLanWeaponNextShot(&w,24,300,&cursor)); /* duplicate packet */
+    cursor=1;
+    CHECK(SudekiMpLanWeaponNextShot(&w,34,300,&cursor)==&w.shots[2]);
+    CHECK(!SudekiMpLanWeaponNextShot(&w,34,299,&cursor) && cursor==1);
+    CHECK(!SudekiMpLanWeaponNextShot(&w,34,1801,&cursor) && cursor==2);
+    cursor=0; w.shots[2].sequence=1;
+    CHECK(!SudekiMpLanWeaponNextShot(&w,34,300,&cursor) && cursor==0);
+    w.shots[2].sequence=2; w.valid=0;
+    CHECK(!SudekiMpLanWeaponNextShot(&w,34,300,&cursor));
+}
+
+static void test_confirmed_weapon_reload_ownership(void) {
+    const uint8_t items[] = {24,26,27,30,31,34,35};
+    for (unsigned i=0; i<sizeof(items); ++i) {
+        SudekiMpLanWeaponState w = {0};
+        uint16_t remaining=12345;
+        w.valid=1; w.item=items[i]; w.reload_ms=6500; w.shot_count=1;
+        w.shots[0]=(SudekiMpLanWeaponShot){65535,items[i],25600,100};
+        CHECK(SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],65535,100,&remaining));
+        CHECK(remaining==6500); /* same shot retains real remaining reload */
+        w.shot_count=2; w.shots[1]=(SudekiMpLanWeaponShot){1,items[i],25600,200};
+        CHECK(SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],65535,200,&remaining));
+        CHECK(remaining==0); /* next shot must not prolong prior reload */
+        CHECK(SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],1,200,&remaining));
+        CHECK(remaining==6500); /* next shot owns its own reload */
+        w.shots[1].item=items[i]==24?34:24;
+        CHECK(SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],65535,200,&remaining));
+        CHECK(remaining==6500); /* another weapon is not completion proof */
+        remaining=12345;
+        CHECK(!SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],65535,199,&remaining));
+        CHECK(remaining==12345);
+        CHECK(!SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],0,200,&remaining));
+        CHECK(!SudekiMpLanWeaponPlaybackReloadMs(&w,w.shots[1].item,1,200,&remaining));
+        CHECK(!SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],1,200,NULL));
+        CHECK(remaining==12345);
+        w.valid=0;
+        CHECK(!SudekiMpLanWeaponPlaybackReloadMs(&w,items[i],1,200,&remaining));
+        CHECK(remaining==12345);
+    }
+    CHECK(!SudekiMpLanWeaponPlaybackReloadMs(NULL,24,1,100,NULL));
+}
+
 static void test_ranged_aim_interpolation(void) {
     SudekiMpLanArenaReplica replica={0};
     SudekiMpLanArenaSnapshot first=make_snapshot(1,100,0), second, sample;
@@ -79,12 +134,21 @@ static void test_ranged_aim_interpolation(void) {
     first.seat[1].actor_type=first.seat[1].native_entity_id=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
     first.seat[1].ranged_aim_valid=1;
     first.seat[1].ranged_aim[2]=32767;
+    first.seat[1].ranged_target_valid=1;first.seat[1].ranged_target[2]=100;
+    first.seat[1].weapon.valid=1; first.seat[1].weapon.item=24;
+    first.seat[1].weapon.charge_q8=25600;
     second=first; second.sequence=2; second.host_tick=200;
+    second.seat[1].weapon.charge_q8=24320; second.seat[1].weapon.shot_count=1;
+    second.seat[1].weapon.shots[0]=(SudekiMpLanWeaponShot){1,24,25600,190};
     second.seat[1].ranged_aim[1]=32767; second.seat[1].ranged_aim[2]=0;
+    second.seat[1].ranged_target[1]=100;second.seat[1].ranged_target[2]=0;
     CHECK(SudekiMpLanArenaReplicaPush(&replica,&first));
     CHECK(SudekiMpLanArenaReplicaPush(&replica,&second));
     CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
+    CHECK(sample.seat[1].weapon.shot_count==0 && sample.seat[1].weapon.charge_q8==25600);
+    CHECK(SudekiMpLanArenaSnapshotValid(&sample)); /* no future shot in buffered pose */
     CHECK(sample.seat[1].ranged_aim_valid && sample.seat[1].ranged_aim[0]==0);
+    CHECK(sample.seat[1].ranged_target_valid && sample.seat[1].ranged_target[1]==50 && sample.seat[1].ranged_target[2]==50);
     CHECK(abs(sample.seat[1].ranged_aim[1]-23170)<=1 && abs(sample.seat[1].ranged_aim[2]-23170)<=1);
     replica.latest.seat[1].ranged_aim[1]=0;
     replica.latest.seat[1].ranged_aim[2]=-32767;
@@ -93,7 +157,9 @@ static void test_ranged_aim_interpolation(void) {
     replica.latest.seat[1].native_entity_id++;
     CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
     CHECK(sample.seat[1].ranged_aim[2]==-32767); /* no blend across actor replacement */
+    CHECK(sample.seat[1].ranged_target[1]==100 && sample.seat[1].ranged_target[2]==0);
     replica.latest.seat[1].ranged_aim_valid=0;
+    replica.latest.seat[1].ranged_target_valid=0;memset(replica.latest.seat[1].ranged_target,0,12);
     memset(replica.latest.seat[1].ranged_aim,0,sizeof(replica.latest.seat[1].ranged_aim));
     CHECK(SudekiMpLanArenaReplicaSample(&replica,150,&sample));
     CHECK(!sample.seat[1].ranged_aim_valid && sample.seat[1].ranged_aim[2]==0);
@@ -598,6 +664,8 @@ static void test_countdown_release_is_timeline_edge(void) {
 }
 
 int main(void) {
+    test_confirmed_weapon_cursor();
+    test_confirmed_weapon_reload_ownership();
     test_ranged_aim_interpolation();
     test_countdown_release_is_timeline_edge();
     test_elco_spirit_view_interpolation();

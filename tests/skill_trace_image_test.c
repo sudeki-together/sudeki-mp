@@ -53,6 +53,8 @@ static BOOL no_cast_owner(void *actor,uint8_t kind,uint64_t *session,uint8_t *ty
     (void)actor; (void)kind; (void)session; (void)type; return FALSE;
 }
 static BOOL no_hit_target(SudekiMpLanHitTarget *target) { (void)target; return FALSE; }
+static BOOL no_aim_target(void *actor,float target[3]) { (void)actor;(void)target;return FALSE; }
+static BOOL no_aim_fire(void *actor,BOOL *held) { (void)actor;(void)held;return FALSE; }
 static BOOL no_aim_actor(void *actor,BOOL projectile,float direction[3]) {
     (void)actor;(void)projectile;(void)direction;return FALSE;
 }
@@ -3606,6 +3608,29 @@ static void __attribute__((thiscall)) training_weapon_add_item(
     }
 }
 static void exercise_rapid_weapon_policy(int *failures) {
+    {
+        const unsigned ids[] = {24,26,27,30,31,34,35};
+        const float costs[] = {5,20,10,50,20,50,100};
+        for (unsigned i = 0; i < 7; ++i) {
+            SudekiMpElcoWeaponObservation s = {(uint8_t)ids[i],0,100,costs[i],0};
+#define CHECK_ELCO_READY(expect) do { if (!!SudekiMpElcoWeaponReady(&s) != (expect)) { \
+    fprintf(stderr,"FAIL: Elco readiness item=%u stage=%u charge=%f reload=%f\n",s.item,s.stage,s.charge,s.reload_seconds); ++*failures; } } while(0)
+            CHECK_ELCO_READY(1);
+            s.charge = costs[i]; CHECK_ELCO_READY(1);
+            s.charge = costs[i]-.5f; CHECK_ELCO_READY(0);
+            s.charge = 100; s.reload_seconds = .001f; CHECK_ELCO_READY(0);
+            s.reload_seconds = NAN; CHECK_ELCO_READY(0);
+            s.reload_seconds = -1; CHECK_ELCO_READY(0);
+            s.reload_seconds = 0; s.stage = 2; CHECK_ELCO_READY(0);
+            s.stage = 6; CHECK_ELCO_READY(1);
+            s.stage = 0; s.charge = NAN; CHECK_ELCO_READY(0);
+            s.charge = 101; CHECK_ELCO_READY(0);
+            s.charge = 100; s.required_charge = 0; CHECK_ELCO_READY(0);
+            s.required_charge = costs[i]; s.item = 28; CHECK_ELCO_READY(0);
+#undef CHECK_ELCO_READY
+        }
+        if (SudekiMpRapidWeaponCycleMs(27u,5.0f,1.0f/60.0f) != 342u) ++*failures;
+    }
     if (SudekiMpRapidWeaponCycleMs(12u, 4.0f, 1.0f/60.0f) != 0u ||
         SudekiMpRapidWeaponCycleMs(24u, 5.0f, 1.0f/60.0f) != 342u ||
         SudekiMpRapidWeaponCycleMs(35u, 5.0f, 1.0f/60.0f) != 0u ||
@@ -3631,6 +3656,26 @@ static void exercise_rapid_weapon_policy(int *failures) {
 static void __attribute__((thiscall)) weapon_family_test_set_item(void *weapon, void *item) {
     ++weapon_family_test_set_calls;
     store_fixture_pointer(weapon, 0x268u, item);
+}
+
+/* Execute the retail countdown/finish tail with a synthetic native stack and
+ * owned manager/arbiter. Skip HUD and passive recharge paths; this tests the
+ * original positive->zero branch and native C3 dispatch, not a copied model of
+ * that branch. No live game process or asynchronous task is involved. */
+__attribute__((naked, noinline))
+static void exercise_native_reload_tail(void *target __attribute__((unused)),
+    void *manager __attribute__((unused)), void *arbiter __attribute__((unused)),
+    float delta __attribute__((unused))) {
+    __asm__ volatile(
+        "pushl %ebp\n\tmovl %esp, %ebp\n\t"
+        "pushl %ebx\n\tpushl %esi\n\tpushl %edi\n\t"
+        "movl 8(%ebp), %eax\n\tmovl 12(%ebp), %esi\n\t"
+        "movl 16(%ebp), %edx\n\tpushl 20(%ebp)\n\tcall 1f\n\t"
+        "popl %edi\n\tpopl %esi\n\tpopl %ebx\n\tpopl %ebp\n\tret\n\t"
+        "1: subl $0x1c, %esp\n\tpushl %ebp\n\tpushl %esi\n\t"
+        "pushl %edi\n\tpushl %ebx\n\tmovl %edx, %ebp\n\t"
+        "xorl %ebx, %ebx\n\tmovb $0, 0x12(%esp)\n\t"
+        "movl $0x3f800000, 0x18(%esp)\n\tjmp *%eax\n\t");
 }
 
 static void exercise_rapid_weapon_context(uint8_t *image, uint8_t *actor,
@@ -3675,6 +3720,89 @@ static void exercise_rapid_weapon_context(uint8_t *image, uint8_t *actor,
     *(float *)((uint8_t *)resource + 4) = id == 12 ? 4.0f : 5.0f;
 #define CHECK_RAPID_CONTEXT(expr) do { if (!(expr)) { \
     fprintf(stderr, "FAIL: rapid weapon context: %s\n", #expr); ++*failures; } } while (0)
+    if (id == 24u) {
+        SudekiMpElcoWeaponObservation observed = {0};
+        uint32_t saved_weapon_vtable = *(uint32_t *)weapon;
+        uint8_t **database = *(uint8_t ***)(image + 0x408d80u);
+        uint8_t *saved_27 = database[3u+27u];
+        store_fixture_pointer(weapon, 0, image + 0x2d4d3cu);
+        *(uint16_t *)((uint8_t *)record+0xb4u) = 0x4500u; /* five units */
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
+            observed.item==24 && observed.charge==100 && observed.required_charge==5 &&
+            observed.reload_seconds==0 && SudekiMpElcoWeaponReady(&observed));
+        CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,24,12800,2000));
+        store_fixture_pointer(controller, 0x248, actor);
+        CHECK_RAPID_CONTEXT(SudekiMpSetElcoPresentationResources(actor,24,12800,2000));
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
+            observed.charge==50 && observed.reload_seconds==2 && !SudekiMpElcoWeaponReady(&observed));
+        CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,34,25600,0));
+        CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,24,25601,0));
+        rows[0]=NULL;
+        CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,24,25600,0));
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeapon(actor,&observed));
+        CHECK_RAPID_CONTEXT(observed.charge==50); /* failed observation leaves output intact */
+        rows[0]=record;
+        store_fixture_pointer(weapon,0x26c,item);
+        CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,24,25600,0));
+        store_fixture_pointer(weapon,0x26c,NULL);
+        CHECK_RAPID_CONTEXT(SudekiMpSetElcoPresentationResources(actor,24,25600,0));
+        /* Raw zero reconciliation bypasses the game's finish branch: C2
+         * remains selected even though the displayed bar is already full. */
+        arbiter[0x50/4] = 0x400000u; /* native first-person request admission */
+        combat[0xdc/4] = 0xc2u;
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc69e2u,
+            "\x8b\x45\x50\xa9\x00\x10\x00\x00", 8u)==0);
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc6a7du,
+            "\xba\xc3\x00\x00\x00\x8b\xce\xe8\x67\x06\x00\x00",12u)==0);
+        exercise_native_reload_tail(image+0xc69e2u, combat, arbiter, 1.0f/60.0f);
+        CHECK_RAPID_CONTEXT(combat[0xdc/4] == 0xc2u);
+        CHECK_RAPID_CONTEXT(SudekiMpSetElcoPresentationResources(actor,24,0,80));
+        for (unsigned repeat=0; repeat<3; ++repeat) {
+            CHECK_RAPID_CONTEXT(SudekiMpSyncElcoPresentationResources(actor,24,25600,0));
+            CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
+                observed.charge==100 && observed.reload_seconds>0 &&
+                observed.reload_seconds==1.0f/1024.0f);
+        }
+        exercise_native_reload_tail(image+0xc69e2u, combat, arbiter, 1.0f/60.0f);
+        CHECK_RAPID_CONTEXT(combat[0xdc/4] == 0xc3u);
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
+            observed.reload_seconds==0 && observed.charge==100);
+        CHECK_RAPID_CONTEXT(SudekiMpSyncElcoPresentationResources(actor,24,25600,0));
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) && observed.reload_seconds==0);
+        /* Synchronization preserves an even smaller residual; repeated
+         * snapshots cannot restart it at one millisecond every frame. */
+        *(float *)((uint8_t *)record+0xc0u)=1.0f/4096.0f;
+        CHECK_RAPID_CONTEXT(SudekiMpSyncElcoPresentationResources(actor,24,25600,0));
+        CHECK_RAPID_CONTEXT(*(float *)((uint8_t *)record+0xc0u)==1.0f/4096.0f);
+        /* Native combat/UI blocking still wins. Synchronization must not
+         * bypass its gate or write C3 directly to the manager. */
+        arbiter[0x50/4]=0x401000u; combat[0xdc/4]=0xc2u;
+        exercise_native_reload_tail(image+0xc69e2u,combat,arbiter,1.0f/60.0f);
+        CHECK_RAPID_CONTEXT(combat[0xdc/4]==0xc2u &&
+            *(float *)((uint8_t *)record+0xc0u)>0);
+        arbiter[0x50/4]=0x400000u;
+        exercise_native_reload_tail(image+0xc69e2u,combat,arbiter,1.0f/60.0f);
+        CHECK_RAPID_CONTEXT(combat[0xdc/4]==0xc3u &&
+            *(float *)((uint8_t *)record+0xc0u)==0);
+        CHECK_RAPID_CONTEXT(!SudekiMpSyncElcoPresentationResources(actor,34,0,100));
+        CHECK_RAPID_CONTEXT(!SudekiMpSyncElcoPresentationResources(actor,24,25601,0));
+        CHECK_RAPID_CONTEXT(!SudekiMpSyncElcoPresentationResources(actor,24,0,60001));
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
+            observed.charge==100 && observed.reload_seconds==0);
+        arbiter[0x50/4] = 0; combat[0xdc/4] = 0;
+        store_fixture_pointer(controller,0x248,local);
+        CHECK_RAPID_CONTEXT(!SudekiMpSyncElcoPresentationResources(actor,24,0,100));
+        /* Prove the second passive-recharging gun uses its own selected row,
+         * database identity and measured five-frame FP resource. */
+        database[3u+27u]=item;
+        *(uint32_t *)((uint8_t *)item+0x14u)=27; record[8/4]=27;
+        CHECK_RAPID_CONTEXT(SudekiMpServiceRemoteRapidWeapon(actor,local,1.0f/60.0f,&interval) && interval==342);
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) && observed.item==27);
+        *(uint32_t *)((uint8_t *)item+0x14u)=24; record[8/4]=24;
+        database[3u+27u]=saved_27;
+        *(uint32_t *)weapon=saved_weapon_vtable;
+        interval=0;
+    }
     CHECK_RAPID_CONTEXT(!!SudekiMpServiceRemoteRapidWeapon(actor, local, 1.0f/60.0f,
         &interval) == (id == 24u) && interval == (id == 24u ? 342u : 0u));
     CHECK_RAPID_CONTEXT(!SudekiMpServiceRemoteRapidWeapon(actor, actor, .01f, &interval));
@@ -4360,12 +4488,13 @@ int wmain(int argc, wchar_t **argv) {
         image[0xd20f0u] ^= 1u;
     }
     {
-        uint8_t launch[5],pose[5];
+        uint8_t launch[5],pose[5],sample[5];
         memcpy(launch,image+0xc74e3,5); memcpy(pose,image+0x222434,5);
+        memcpy(sample,image+0x2221df,5);
         if(!SudekiMpLanAimImageMatches((HMODULE)image) ||
-            !SudekiMpLanAimInstall((HMODULE)image,no_aim_actor) ||
+            !SudekiMpLanAimInstall((HMODULE)image,no_aim_actor,no_aim_target,no_aim_fire) ||
             !SudekiMpLanAimUninstall() || memcmp(launch,image+0xc74e3,5) ||
-            memcmp(pose,image+0x222434,5)) {
+            memcmp(pose,image+0x222434,5) || memcmp(sample,image+0x2221df,5)) {
             fputs("FAIL: ranged aim exact-image install/restore\n",stderr); ++failures;
         }
         image[0x22242e]^=1;
@@ -4373,6 +4502,16 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: ranged aim accepted foreign pose ABI\n",stderr); ++failures;
         }
         image[0x22242e]^=1;
+        image[0x2221d9]^=1;
+        if(SudekiMpLanAimImageMatches((HMODULE)image)) {
+            fputs("FAIL: ranged hold accepted foreign sampler ABI\n",stderr); ++failures;
+        }
+        image[0x2221d9]^=1;
+        image[0x2234f0]^=1;
+        if(SudekiMpLanAimImageMatches((HMODULE)image)) {
+            fputs("FAIL: ranged hold accepted foreign blend-weight offset\n",stderr); ++failures;
+        }
+        image[0x2234f0]^=1;
         int selector = -1;
         if (!SudekiMpLanArenaClientIdleVariantSelector(
                 SUDEKIMP_LAN_ARENA_AILISH_TYPE,
@@ -4973,6 +5112,18 @@ int wmain(int argc, wchar_t **argv) {
             ++failures;
         }
         {
+            int auth, elco, owner, confirmed;
+            for (auth = 0; auth <= 1; ++auth)
+                for (elco = 0; elco <= 1; ++elco)
+                    for (owner = 0; owner <= 1; ++owner)
+                      for (confirmed = 0; confirmed <= 1; ++confirmed)
+                        if (SudekiMpLanArenaClientSuppressSecondaryFire(auth, elco, owner, confirmed) !=
+                                (auth && elco && owner && !confirmed)) {
+                            fputs("FAIL: secondary fire suppression changed another owner\n", stderr);
+                            ++failures;
+                        }
+        }
+        {
             unsigned int slot, current;
             int next, previous;
             for (current = 0u; current < 12u; ++current) {
@@ -5041,6 +5192,15 @@ int wmain(int argc, wchar_t **argv) {
             !SudekiMpLanArenaClientRangedWeakHeld(TRUE, TRUE)) {
             fputs("FAIL: LAN client ranged weak readiness gate mismatch\n",
                 stderr);
+            ++failures;
+        }
+        if (SudekiMpLanArenaClientAimRefreshDue(FALSE, TRUE,1000u,2000u) ||
+            SudekiMpLanArenaClientAimRefreshDue(TRUE,FALSE,1000u,2000u) ||
+            SudekiMpLanArenaClientAimRefreshDue(TRUE,TRUE,1000u,1049u) ||
+            !SudekiMpLanArenaClientAimRefreshDue(TRUE,TRUE,1000u,1050u) ||
+            !SudekiMpLanArenaClientAimRefreshDue(TRUE,TRUE,1000u,1251u) ||
+            !SudekiMpLanArenaClientAimRefreshDue(TRUE,TRUE,0xfffffff0u,0x22u)) {
+            fputs("FAIL: stationary aim refresh must preserve live ownership and cadence\n",stderr);
             ++failures;
         }
         if (!SudekiMpLanArenaClientCameraInputAllowed(FALSE, FALSE) ||
@@ -5733,6 +5893,8 @@ int wmain(int argc, wchar_t **argv) {
             SUDEKIMP_LAN_ARENA_CLIENT_CAMERA_RIGHT_EVENT);
         if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            relative_call_target(image + 0x000eaa23u) == image + 0x000c6d80u ||
+            relative_call_target(image + 0x000db310u) == image + 0x000c6d80u ||
             *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) ==
                 image + RVA_QUICK_MENU_INPUT ||
             *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) ==
@@ -5787,6 +5949,8 @@ int wmain(int argc, wchar_t **argv) {
         }
         if (relative_call_target(image + RVA_QUICK_MENU_NATIVE_TOGGLE_CALL) !=
                 image + RVA_QUICK_MENU_NATIVE_TOGGLE ||
+            relative_call_target(image + 0x000eaa23u) != image + 0x000c6d80u ||
+            relative_call_target(image + 0x000db310u) != image + 0x000c6d80u ||
             *(void **)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) !=
                 image + RVA_QUICK_MENU_INPUT ||
             *(void **)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) !=
@@ -5807,6 +5971,21 @@ int wmain(int argc, wchar_t **argv) {
             fputs("FAIL: LAN client input hooks were not restored\n", stderr);
             ++failures;
         }
+    }
+    {
+        int32_t saved = *(int32_t *)(image + 0x000eaa24u);
+        *(int32_t *)(image + 0x000eaa24u) ^= 1;
+        if (SudekiMpInstallLanArenaClientInput((HMODULE)image)) {
+            fputs("FAIL: secondary fire accepted a foreign call target\n", stderr);
+            ++failures;
+            SudekiMpUninstallLanArenaClientInput();
+        } else if (GetLastError() != ERROR_INVALID_DATA ||
+            relative_call_target(image + RVA_PLAYER_MOVE_CALL_NORMAL) != image + RVA_ARBITER_MOVEMENT ||
+            image[RVA_CONTROLLER_COMBAT] != 0x55u) {
+            fputs("FAIL: secondary fire mismatch did not roll back input hooks\n", stderr);
+            ++failures;
+        }
+        *(int32_t *)(image + 0x000eaa24u) = saved;
     }
     /* A pointer hook may legitimately lose slot ownership to another mod.
      * Teardown must keep every dependency alive, report ERROR_BUSY, and let

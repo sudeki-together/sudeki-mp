@@ -53,6 +53,22 @@ BOOL SudekiMpGrantTestroomCharacterWeapons(void *character, const char *command)
  * Other weapons/rates return FALSE and retain their native admission path. */
 BOOL SudekiMpServiceRemoteRapidWeapon(void *character, void *local_character,
     float delta, uint32_t *repeat_ms);
+typedef struct SudekiMpElcoWeaponObservation {
+    uint8_t item, stage;
+    float charge, required_charge, reload_seconds;
+} SudekiMpElcoWeaponObservation;
+/* Game-thread observations; callers retain the session/actor lease. */
+BOOL SudekiMpObserveElcoWeapon(void *character, SudekiMpElcoWeaponObservation *out);
+BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *state);
+/* Replica-only resource reconciliation, never called for authoritative actors.
+ * Also requires that this actor owns the native local controller. */
+BOOL SudekiMpSetElcoPresentationResources(void *character, uint8_t item,
+    uint16_t charge_q8, uint16_t reload_ms);
+/* Ongoing snapshot reconciliation must preserve the native positive-to-zero
+ * reload-completion edge. SetElcoPresentationResources remains the exact
+ * pre-shot seed, used only after the caller proves no native clip is active. */
+BOOL SudekiMpSyncElcoPresentationResources(void *character, uint8_t item,
+    uint16_t charge_q8, uint16_t reload_ms);
 float SudekiMpRapidWeaponRechargeAmount(uint16_t rate, uint16_t charge,
     uint8_t flags, float cooldown, float delta);
 uint32_t SudekiMpRapidWeaponCycleMs(unsigned int item_id, float frames,

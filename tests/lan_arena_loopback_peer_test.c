@@ -7,6 +7,9 @@
 #include <string.h>
 
 static uint8_t game_hash[SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE];
+/* Require bit-exact IEEE754 transport, without x87 excess-precision comparison
+ * of the non-exact decimal 1.6 literal. */
+static const uint32_t aim_point_bits[3]={0x42ce0000u,0x3fcccccdu,0u};
 
 static void fill_snapshot(SudekiMpLanArenaSnapshot *snapshot, DWORD now) {
     memset(snapshot, 0, sizeof(*snapshot));
@@ -35,7 +38,7 @@ static void fill_snapshot(SudekiMpLanArenaSnapshot *snapshot, DWORD now) {
     snapshot->enemies[0].hp = 950u;
 }
 
-static int run_host(unsigned int port) {
+static int run_host(unsigned int port, BOOL aim_point) {
     SudekiMpLanArenaSessionConfig config;
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaInput input;
@@ -51,7 +54,7 @@ static int run_host(unsigned int port) {
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
     config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    config.client_actor_type = aim_point ? SUDEKIMP_LAN_ARENA_ELCO_TYPE:SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     if (!SudekiMpLanArenaSessionStart(&config)) return 10;
     while ((DWORD)(GetTickCount() - started) < 5000u) {
         DWORD now = GetTickCount();
@@ -59,12 +62,18 @@ static int run_host(unsigned int port) {
         if (SudekiMpLanArenaSessionTakeRemoteInput(&input)) {
             if (input.world_direction_x != 16384 ||
                 input.world_direction_z != -8192 ||
-                input.actor_type != SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+                input.actor_type != config.client_actor_type ||
                 input.aim_direction_x != 32767 ||
                 input.weak_attack_pressed != 1u ||
                 input.weak_attack_held != 1u ||
                 input.ranged_first_person_active != 1u ||
-                input.cleanroom_combat_test_pressed != 1u) {
+                input.cleanroom_combat_test_pressed != 1u ||
+                input.aim_target_valid != (aim_point ? 1u:0u) ||
+                (aim_point && memcmp(input.aim_target,aim_point_bits,sizeof(aim_point_bits)))) {
+                fprintf(stderr,"input mismatch actor=%u expected=%u move=%d,%d aim=%d pressed=%u held=%u fp=%u toggle=%u point=%u %.9g,%.9g,%.9g\n",
+                    input.actor_type,config.client_actor_type,input.world_direction_x,input.world_direction_z,input.aim_direction_x,
+                    input.weak_attack_pressed,input.weak_attack_held,input.ranged_first_person_active,input.cleanroom_combat_test_pressed,
+                    input.aim_target_valid,input.aim_target[0],input.aim_target[1],input.aim_target[2]);
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 11;
             }
@@ -72,6 +81,19 @@ static int run_host(unsigned int port) {
         }
         if (input_received && !snapshot_sent) {
             fill_snapshot(&snapshot, now);
+            if(aim_point) {
+                snapshot.seat[1].actor_type=snapshot.seat[1].native_entity_id=SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+                snapshot.seat[1].ranged_aim_valid=snapshot.seat[1].ranged_target_valid=1u;
+                snapshot.seat[1].ranged_aim[0]=32767;
+                memcpy(snapshot.seat[1].ranged_target,input.aim_target,sizeof(input.aim_target));
+                snapshot.seat[1].weapon.valid=1;
+                snapshot.seat[1].weapon.item=34;
+                snapshot.seat[1].weapon.charge_q8=0;
+                snapshot.seat[1].weapon.reload_ms=6500;
+                snapshot.seat[1].weapon.shot_count=2;
+                snapshot.seat[1].weapon.shots[0]=(SudekiMpLanWeaponShot){7,34,25600,now-700};
+                snapshot.seat[1].weapon.shots[1]=(SudekiMpLanWeaponShot){8,34,12800,now};
+            }
             if (!SudekiMpLanArenaSessionSendSnapshot(&snapshot)) {
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 12;
@@ -96,7 +118,7 @@ static int run_host(unsigned int port) {
     return 14;
 }
 
-static int run_client(unsigned int port) {
+static int run_client(unsigned int port, BOOL aim_point) {
     SudekiMpLanArenaSessionConfig config;
     SudekiMpLanArenaSessionStatus status;
     SudekiMpLanArenaInput input;
@@ -112,7 +134,7 @@ static int run_client(unsigned int port) {
     config.timeout_ms = 1500u;
     config.game_hash = game_hash;
     config.host_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
-    config.client_actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+    config.client_actor_type = aim_point ? SUDEKIMP_LAN_ARENA_ELCO_TYPE:SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     if (!SudekiMpLanArenaSessionStart(&config)) return 20;
     while ((DWORD)(GetTickCount() - started) < 5000u) {
         SudekiMpLanArenaSessionPoll(GetTickCount());
@@ -123,7 +145,7 @@ static int run_client(unsigned int port) {
         if (status.peer_connected && !input_sent) {
             memset(&input, 0, sizeof(input));
             input.client_tick = GetTickCount();
-            input.actor_type = SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+            input.actor_type = config.client_actor_type;
             input.world_direction_x = 16384;
             input.world_direction_z = -8192;
             input.aim_direction_x = 32767;
@@ -131,6 +153,10 @@ static int run_client(unsigned int port) {
             input.weak_attack_held = 1u;
             input.ranged_first_person_active = 1u;
             input.cleanroom_combat_test_pressed = 1u;
+            if(aim_point) {
+                input.aim_target_valid=1u;
+                memcpy(input.aim_target,aim_point_bits,sizeof(aim_point_bits));
+            }
             if (!SudekiMpLanArenaSessionSendInput(&input)) {
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 22;
@@ -144,7 +170,18 @@ static int run_client(unsigned int port) {
                     SUDEKIMP_LAN_ARENA_ANIMATION_ACTION ||
                 snapshot.seat[1].combat_state !=
                     SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK ||
-                snapshot.enemy_count != 1u || snapshot.enemies[0].hp != 950u) {
+                snapshot.enemy_count != 1u || snapshot.enemies[0].hp != 950u ||
+                snapshot.seat[1].actor_type!=config.client_actor_type ||
+                (aim_point && (!snapshot.seat[1].ranged_aim_valid ||
+                    !snapshot.seat[1].ranged_target_valid || snapshot.seat[1].ranged_aim[0]!=32767 ||
+                    !snapshot.seat[1].weapon.valid || snapshot.seat[1].weapon.item!=34 ||
+                    snapshot.seat[1].weapon.charge_q8!=0 || snapshot.seat[1].weapon.reload_ms!=6500 ||
+                    snapshot.seat[1].weapon.shot_count!=2 ||
+                    snapshot.seat[1].weapon.shots[0].sequence!=7 ||
+                    snapshot.seat[1].weapon.shots[1].sequence!=8 ||
+                    snapshot.seat[1].weapon.shots[1].pre_charge_q8!=12800 ||
+                    snapshot.seat[1].weapon.shots[1].host_tick!=snapshot.host_tick ||
+                    memcmp(snapshot.seat[1].ranged_target,input.aim_target,sizeof(input.aim_target))))) {
                 SudekiMpLanArenaSessionStop(FALSE);
                 return 23;
             }
@@ -289,7 +326,7 @@ int main(int argc, char **argv) {
     unsigned long parsed_port;
     char *end = NULL;
     if (argc != 3) {
-        fputs("usage: SudekiMP.LanArenaLoopbackPeerTest.exe host|client|multicast-host|multicast-client PORT\n",
+        fputs("usage: SudekiMP.LanArenaLoopbackPeerTest.exe host|client|aim-host|aim-client|multicast-host|multicast-client PORT\n",
             stderr);
         return 2;
     }
@@ -299,8 +336,10 @@ int main(int argc, char **argv) {
     for (index = 0u; index < sizeof(game_hash); ++index) {
         game_hash[index] = (uint8_t)(0xa0u + index);
     }
-    if (strcmp(argv[1], "host") == 0) return run_host((unsigned int)parsed_port);
-    if (strcmp(argv[1], "client") == 0) return run_client((unsigned int)parsed_port);
+    if (strcmp(argv[1], "host") == 0) return run_host((unsigned int)parsed_port,FALSE);
+    if (strcmp(argv[1], "client") == 0) return run_client((unsigned int)parsed_port,FALSE);
+    if (strcmp(argv[1], "aim-host") == 0) return run_host((unsigned int)parsed_port,TRUE);
+    if (strcmp(argv[1], "aim-client") == 0) return run_client((unsigned int)parsed_port,TRUE);
     if (strcmp(argv[1], "multicast-host") == 0) return run_multicast_peer(TRUE,(unsigned int)parsed_port);
     if (strcmp(argv[1], "multicast-client") == 0) return run_multicast_peer(FALSE,(unsigned int)parsed_port);
     return 4;

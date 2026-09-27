@@ -74,7 +74,7 @@ static void test_network_and_independent_retirement(void) {
         packet.type=SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT; packet.sequence=1; packet.session_token=900;
         packet.body.snapshot=host.frame; packet.body.snapshot.sequence=1;
         CHECK(SudekiMpLanArenaEncodePacket(bytes,&size,&packet));
-        CHECK(size==1146u && size<=1472u); /* IPv4/UDP on a 1500-byte path. */
+        CHECK(size==1242u && size<=1472u); /* LA42 weapon journals still fit without fragmentation. */
         CHECK(SudekiMpLanArenaDecodePacket(bytes,size,&decoded));
         CHECK(!memcmp(s.cast,decoded.body.snapshot.cast,sizeof(s.cast)));
         CHECK(!SudekiMpLanArenaSharedSimulationAcceptReplicaFrame(&client,901,&decoded.body.snapshot));

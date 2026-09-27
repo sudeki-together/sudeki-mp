@@ -11,6 +11,11 @@ struct SudekiMpLanArenaActorSnapshot;
  * SUDEKIMP_FP_FRAME_TRACE environment variable; no wire/gameplay authority. */
 void SudekiMpLanArenaClientObserveFirstPersonFrame(unsigned int phase);
 BOOL SudekiMpLanArenaClientReplicaRangedAim(void *actor, float direction[3]);
+BOOL SudekiMpLanArenaClientReplicaRangedTarget(void *actor,float target[3]);
+void SudekiMpLanArenaClientReplicaNativeWeaponFired(void *actor);
+/* Game-thread synchronous host-confirmed shot-start scope; not permission to
+ * fire again during the retained asynchronous presentation lease. */
+BOOL SudekiMpLanArenaClientReplicaWeaponStartAuthorized(void *actor);
 
 typedef struct SudekiMpLanArenaReplicaActorDiagnostics {
     float sampled_position[3];

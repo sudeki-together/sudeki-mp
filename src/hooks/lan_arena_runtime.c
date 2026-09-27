@@ -303,6 +303,8 @@ static int16_t host_remote_direction_z;
 static int16_t host_remote_aim_x;
 static int16_t host_remote_aim_y;
 static int16_t host_remote_aim_z;
+static BOOL host_remote_target_valid;
+static float host_remote_target[3];
 static BOOL host_remote_weak_held;
 static BOOL host_remote_first_person_active;
 static BOOL host_remote_weak_cycle_pending;
@@ -3555,7 +3557,14 @@ static void host_track_actor_action_sequence(
         sizeof(snapshot->action_history));
 }
 
+static SudekiMpLanWeaponState host_weapon_journal[2];
+static void *host_weapon_owners[2];
+static uint16_t host_weapon_sequences[2];
+
 static void reset_host_action_tracking(void) {
+    ZeroMemory(host_weapon_journal, sizeof(host_weapon_journal));
+    ZeroMemory(host_weapon_owners, sizeof(host_weapon_owners));
+    ZeroMemory(host_weapon_sequences, sizeof(host_weapon_sequences));
     ZeroMemory(host_actor_action_variant,
         sizeof(host_actor_action_variant));
     ZeroMemory(host_actor_action_sequence,
@@ -4413,6 +4422,37 @@ static void host_capture_tal_locomotion(
     }
 }
 
+static BOOL runtime_local_gun_idle(void *actor) {
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpCharacterSkillState skill;
+    SudekiMpSpiritInstanceState spirit;
+    BOOL host,combat=FALSE;
+    /* The local FP idle is not an observer pose. A rejected whole-pair
+     * presentation sample must not intermittently turn its loop correction
+     * off. Use the retained local lifetime, never stale replicated aim. */
+    if(!runtime_installed || !actor || !tal_initialized || !ailish_initialized ||
+        !runtime_skill_ui_bound || runtime_skill_ui_retiring ||
+        !SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        !status.session_token || status.local_role!=runtime_config.local_role ||
+        actor!=runtime_skill_ui_local || !runtime_skill_ui_retained(actor,status.session_token))
+        return FALSE;
+    host=status.local_role==SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL;
+    if((!host && status.local_role!=SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) ||
+        status.local_simulation_node_role!=(host ?
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD:
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA) ||
+        status.peer_simulation_node_role!=(host ?
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA:
+            SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) ||
+        (host ? seat_host_type():seat_client_type())!=SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active ||
+        !SudekiMpLanCastContextActorDrained(actor,status.session_token)) return FALSE;
+    /* Private instances are local-first, not host-seat-first on a client. */
+    return runtime_spirit_instances[0].generation &&
+        SudekiMpObserveSpiritInstance(&runtime_spirit_instances[0],&spirit) && spirit.idle;
+}
+
 static BOOL runtime_ranged_aim(void *actor, BOOL projectile, float direction[3]) {
     SudekiMpLanArenaSessionStatus status;
     SudekiMpCharacterSkillState skill;
@@ -4471,15 +4511,102 @@ static BOOL runtime_ranged_aim(void *actor, BOOL projectile, float direction[3])
     return SudekiMpLanAimNormalize(candidate,direction);
 }
 
+static BOOL runtime_ranged_target(void *actor,float target[3]) {
+    float direction[3],position[3];
+    SudekiMpLanArenaSessionStatus status;
+    if(!target || !runtime_ranged_aim(actor,FALSE,direction) ||
+        !SudekiMpLanArenaSessionGetStatus(&status)) return FALSE;
+    if(status.local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH)
+        return SudekiMpLanArenaClientReplicaRangedTarget(actor,target);
+    if(actor==SudekiMpCleanroomEngineActorEntity(seat_client_actor())) {
+        if(!host_remote_target_valid ||
+            !SudekiMpCleanroomEngineActorPosition(seat_client_actor(),position) ||
+            !SudekiMpLanAimTargetNearActor(position,direction,host_remote_target)) return FALSE;
+        memcpy(target,host_remote_target,12); return TRUE;
+    }
+    return SudekiMpLanAimCameraTarget(direction,target);
+}
+
+static BOOL runtime_ranged_held_fire(void *actor,BOOL *held) {
+    float direction[3];
+    /* The current Proton observer lives on the authority for the remote seat.
+     * Reuse the fresh, authenticated actor/cast/FP gate. Do not poll keyboard
+     * state on this machine or infer a held trigger from repeated shot edges.
+     * Other view roles remain native until they carry confirmed hold intent. */
+    if(!held || !runtime_ranged_aim(actor,TRUE,direction)) return FALSE;
+    *held=host_remote_weak_held;return TRUE;
+}
+
+static void runtime_weapon_shot(void *actor) {
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpElcoWeaponObservation observed;
+    SudekiMpCharacterSkillState skill;
+    SudekiMpLanWeaponState *journal;
+    SudekiMpLanWeaponShot *shot;
+    unsigned seat;
+    if (!runtime_installed || !actor || !tal_initialized || !ailish_initialized ||
+        !SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        !status.session_token) return;
+    if (status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH) {
+        SudekiMpLanArenaClientReplicaNativeWeaponFired(actor);
+        return;
+    }
+    if (status.local_simulation_node_role !=
+        SUDEKIMP_LAN_ARENA_SIMULATION_NODE_CANONICAL_NATIVE_WORLD) return;
+    if (actor == SudekiMpCleanroomEngineActorEntity(seat_host_actor())) seat = 0;
+    else if (actor == SudekiMpCleanroomEngineActorEntity(seat_client_actor()) &&
+        host_remote_ailish_owned && SudekiMpControlSeparationLanArenaRemoteActorExact(actor)) seat = 1;
+    else return;
+    if (!SudekiMpObserveElcoWeapon(actor, &observed) ||
+        !SudekiMpObserveCharacterSkill(actor, &skill) || skill.active ||
+        observed.charge < observed.required_charge) return;
+    if (runtime_spirit_instances[seat].generation) {
+        SudekiMpSpiritInstanceState spirit;
+        if (!SudekiMpObserveSpiritInstance(&runtime_spirit_instances[seat], &spirit) ||
+            !spirit.idle) return;
+    }
+    journal = &host_weapon_journal[seat];
+    if (host_weapon_owners[seat] != actor) {
+        ZeroMemory(journal, sizeof(*journal));
+        host_weapon_sequences[seat] = 0;
+        host_weapon_owners[seat] = actor;
+    }
+    if (journal->shot_count == SUDEKIMP_LAN_WEAPON_SHOT_HISTORY) {
+        memmove(journal->shots, journal->shots+1,
+            (SUDEKIMP_LAN_WEAPON_SHOT_HISTORY-1u)*sizeof(journal->shots[0]));
+        --journal->shot_count;
+    }
+    shot = &journal->shots[journal->shot_count++];
+    if (++host_weapon_sequences[seat] == 0) ++host_weapon_sequences[seat];
+    shot->sequence = host_weapon_sequences[seat];
+    shot->item = observed.item;
+    shot->pre_charge_q8 = (uint16_t)lroundf(observed.charge*256.0f);
+    shot->host_tick = GetTickCount();
+    SudekiMpLogFormat("lan_weapon event=host_shot seat=%u item=%u sequence=%u charge=%.3f tick=%lu\r\n",
+        seat, observed.item, shot->sequence, observed.charge, (unsigned long)shot->host_tick);
+}
+
 static void host_capture_ranged_aim(SudekiMpLanArenaSnapshot *snapshot) {
     for (unsigned seat=0;seat<2;++seat) {
         float direction[3];
+        void *actor = SudekiMpCleanroomEngineActorEntity(seat ? seat_client_actor():seat_host_actor());
+        SudekiMpElcoWeaponObservation weapon;
+        if (SudekiMpObserveElcoWeapon(actor, &weapon)) {
+            SudekiMpLanWeaponState *w = &snapshot->seat[seat].weapon;
+            if (host_weapon_owners[seat] == actor) *w = host_weapon_journal[seat];
+            w->valid = 1; w->item = weapon.item; w->stage = weapon.stage;
+            w->charge_q8 = (uint16_t)lroundf(weapon.charge*256.0f);
+            w->reload_ms = (uint16_t)ceilf(weapon.reload_seconds*1000.0f);
+        }
         if (!snapshot->seat[seat].skill_active && runtime_ranged_aim(
             SudekiMpCleanroomEngineActorEntity(seat ? seat_client_actor():seat_host_actor()),
             FALSE,direction)) {
             snapshot->seat[seat].ranged_aim_valid=1;
             for (unsigned axis=0;axis<3;++axis)
                 snapshot->seat[seat].ranged_aim[axis]=(int16_t)lroundf(direction[axis]*32767.0f);
+            snapshot->seat[seat].ranged_target_valid=runtime_ranged_target(
+                SudekiMpCleanroomEngineActorEntity(seat ? seat_client_actor():seat_host_actor()),
+                snapshot->seat[seat].ranged_target) ? 1u:0u;
         }
     }
 }
@@ -4725,6 +4852,8 @@ static BOOL release_host_remote_ailish(const char *reason) {
     host_remote_aim_x = 0;
     host_remote_aim_y = 0;
     host_remote_aim_z = 0;
+    host_remote_target_valid = FALSE;
+    memset(host_remote_target, 0, sizeof(host_remote_target));
     host_remote_weak_held = FALSE;
     host_remote_first_person_active = FALSE;
     host_remote_ranged_repeat_not_before_ms = 0u;
@@ -5243,6 +5372,8 @@ static void lan_arena_control_update_observer(
         host_remote_aim_x = 0;
         host_remote_aim_y = 0;
         host_remote_aim_z = 0;
+        host_remote_target_valid = FALSE;
+        memset(host_remote_target, 0, sizeof(host_remote_target));
         host_remote_weak_held = FALSE;
         host_remote_first_person_active = FALSE;
         host_remote_ranged_repeat_not_before_ms = 0u;
@@ -5315,6 +5446,8 @@ static void lan_arena_control_update_observer(
         host_remote_aim_x = input.aim_direction_x;
         host_remote_aim_y = input.aim_direction_y;
         host_remote_aim_z = input.aim_direction_z;
+        host_remote_target_valid=input.aim_target_valid!=0u;
+        memcpy(host_remote_target,input.aim_target,sizeof(host_remote_target));
         host_remote_weak_held = input.weak_attack_held != 0u;
         host_remote_first_person_active =
             input.ranged_first_person_active != 0u;
@@ -5459,6 +5592,12 @@ static void lan_arena_control_update_observer(
         remote_weak_allowed =
             SudekiMpCleanroomEngineCombatMode(&combat_enabled) &&
             combat_enabled;
+        if(remote_weak_allowed && host_remote_first_person_active &&
+            seat_client_type()==SUDEKIMP_LAN_ARENA_ELCO_TYPE) {
+            float target[3];
+            remote_weak_allowed=runtime_ranged_target(
+                SudekiMpCleanroomEngineActorEntity(seat_client_actor()),target);
+        }
         if (remote_weak_allowed && host_remote_first_person_active) {
             ranged_native_ready_known =
                 SudekiMpControlSeparationLanArenaPlayerTwoRangedReady(
@@ -5467,6 +5606,16 @@ static void lan_arena_control_update_observer(
                 ranged_repeat_interval_ms =
                     SudekiMpLanArenaRangedRepeatIntervalMs(
                         ranged_authored_delay_half);
+            }
+            if (seat_client_type() == SUDEKIMP_LAN_ARENA_ELCO_TYPE) {
+                SudekiMpElcoWeaponObservation weapon;
+                BOOL exact = SudekiMpObserveElcoWeapon(
+                    SudekiMpCleanroomEngineActorEntity(seat_client_actor()), &weapon);
+                /* Unknown is not ready. Native CanFire does not check an
+                 * empty magazine/reload; neither does submission success. */
+                ranged_native_ready_known = TRUE;
+                ranged_native_ready = exact && SudekiMpElcoWeaponReady(&weapon);
+                if (!rapid_weapon_cycle_known) ranged_repeat_interval_ms = 0u;
             }
         }
         if (!remote_weak_allowed && !host_remote_weak_blocked_logged) {
@@ -5602,6 +5751,8 @@ static void lan_arena_control_update_observer(
         host_remote_aim_x = 0;
         host_remote_aim_y = 0;
         host_remote_aim_z = 0;
+        host_remote_target_valid = FALSE;
+        memset(host_remote_target, 0, sizeof(host_remote_target));
         host_remote_weak_held = FALSE;
         host_remote_first_person_active = FALSE;
         host_remote_ranged_repeat_not_before_ms = 0u;
@@ -6127,7 +6278,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
         SetLastError(error);
         return FALSE;
     }
-    if (!SudekiMpLanAimInstall(game_module,runtime_ranged_aim) ||
+    if (!SudekiMpLanAimInstall(game_module,runtime_ranged_aim,runtime_ranged_target,
+            runtime_ranged_held_fire) ||
         !SudekiMpInstallLanArenaSkillFadeWithDrawView(game_module, caster_view_light,
             config->local_role==SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ?
                 begin_client_private_spirit_draw:NULL,
@@ -6142,6 +6294,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
         original_frame_end=NULL; original_render_start=NULL;
         SetLastError(error); return FALSE;
     }
+    SudekiMpLanAimSetShotObserver(runtime_weapon_shot);
+    SudekiMpLanAimSetIdleWitness(runtime_local_gun_idle);
     if ((config->local_role == SUDEKIMP_LAN_ARENA_ROLE_HOST_TAL &&
          !install_host_skill_isolation(base)) ||
         (config->local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH &&
@@ -6324,6 +6478,8 @@ BOOL SudekiMpInstallLanArenaRuntime(
     host_remote_aim_x = 0;
     host_remote_aim_y = 0;
     host_remote_aim_z = 0;
+    host_remote_target_valid = FALSE;
+    memset(host_remote_target, 0, sizeof(host_remote_target));
     host_remote_weak_held = FALSE;
     host_remote_first_person_active = FALSE;
     host_remote_ranged_repeat_not_before_ms = 0u;
@@ -6476,6 +6632,8 @@ BOOL SudekiMpUninstallLanArenaRuntime(void) {
     host_remote_aim_x = 0;
     host_remote_aim_y = 0;
     host_remote_aim_z = 0;
+    host_remote_target_valid = FALSE;
+    memset(host_remote_target, 0, sizeof(host_remote_target));
     host_remote_weak_held = FALSE;
     host_remote_first_person_active = FALSE;
     host_remote_ranged_repeat_not_before_ms = 0u;
@@ -6565,6 +6723,8 @@ BOOL SudekiMpLanArenaRuntimeEndSession(void) {
     host_remote_aim_x = 0;
     host_remote_aim_y = 0;
     host_remote_aim_z = 0;
+    host_remote_target_valid = FALSE;
+    memset(host_remote_target, 0, sizeof(host_remote_target));
     host_remote_weak_held = FALSE;
     host_remote_first_person_active = FALSE;
     host_remote_ranged_repeat_not_before_ms = 0u;
@@ -6682,6 +6842,8 @@ BOOL SudekiMpLanArenaRuntimeHostArena(void) {
     host_remote_aim_x = 0;
     host_remote_aim_y = 0;
     host_remote_aim_z = 0;
+    host_remote_target_valid = FALSE;
+    memset(host_remote_target, 0, sizeof(host_remote_target));
     host_remote_weak_held = FALSE;
     host_remote_first_person_active = FALSE;
     host_remote_ranged_repeat_not_before_ms = 0u;

@@ -4,6 +4,44 @@
 #include <math.h>
 #include <string.h>
 
+BOOL SudekiMpLanWeaponPlaybackReloadMs(const SudekiMpLanWeaponState *state,
+    uint8_t item, uint16_t playback_sequence, uint32_t host_tick,
+    uint16_t *reload_ms) {
+    uint16_t remaining;
+    if (!reload_ms || !playback_sequence || !state || !state->valid ||
+        state->item != item ||
+        !SudekiMpLanWeaponStateValid(state, SUDEKIMP_LAN_ARENA_ELCO_TYPE))
+        return FALSE;
+    remaining = state->reload_ms;
+    for (unsigned i = 0; i < state->shot_count; ++i) {
+        const SudekiMpLanWeaponShot *shot = &state->shots[i];
+        if ((int32_t)(host_tick - shot->host_tick) < 0) return FALSE;
+        if (shot->item == item &&
+            (int16_t)(shot->sequence - playback_sequence) > 0)
+            remaining = 0;
+    }
+    *reload_ms = remaining;
+    return TRUE;
+}
+
+const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
+    const SudekiMpLanWeaponState *state, uint8_t item, uint32_t host_tick,
+    uint16_t *cursor) {
+    if (!cursor || !state || !state->valid ||
+        !SudekiMpLanWeaponStateValid(state, SUDEKIMP_LAN_ARENA_ELCO_TYPE)) return NULL;
+    for (unsigned i = 0; i < state->shot_count; ++i) {
+        const SudekiMpLanWeaponShot *event = &state->shots[i];
+        if (*cursor && (int16_t)(event->sequence - *cursor) <= 0) continue;
+        if ((int32_t)(host_tick - event->host_tick) < 0) return NULL;
+        if (event->item != item || (uint32_t)(host_tick - event->host_tick) > 1500u) {
+            *cursor = event->sequence;
+            continue;
+        }
+        return event;
+    }
+    return NULL;
+}
+
 static float clamp01(float value) {
     if (value < 0.0f) return 0.0f;
     if (value > 1.0f) return 1.0f;
@@ -341,6 +379,10 @@ static void interpolate_actor(
     *output = *after;
     if (before->native_entity_id != after->native_entity_id ||
         before->actor_type != after->actor_type) return;
+    /* Resource/shot events are discrete authority observations, not blended
+     * animation channels. Never publish a future shot in an older sample.
+     * Native local weapon replay consumes the authenticated latest frame. */
+    if (alpha < 1.0f) output->weapon = before->weapon;
     /* Keep the final locomotion pose while consuming the remaining buffered
      * distance. Switching to idle before the endpoint produces foot sliding;
      * snapping directly to the endpoint produces a visible position pop. */
@@ -395,6 +437,10 @@ static void interpolate_actor(
                 output->ranged_aim[i]=(int16_t)lroundf(direction[i]/norm*32767.0f);
         }
     }
+    if (before->ranged_target_valid && after->ranged_target_valid)
+        for (unsigned i=0;i<3;++i)
+            output->ranged_target[i]=interpolate_float(
+                before->ranged_target[i],after->ranged_target[i],alpha);
     interpolate_skill_presentation(before, after, alpha, output);
     interpolate_locomotion(before, after, alpha, output);
     replay_action_history(

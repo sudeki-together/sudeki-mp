@@ -33,6 +33,18 @@ enum { SUDEKIMP_LAN_ARENA_SNAPSHOT_INTERVAL_MS = 50u };
  * actor, or creates damage; it turns authenticated host snapshots into a
  * display sample for the eventual native replica adapter. */
 void SudekiMpLanArenaReplicaReset(SudekiMpLanArenaReplica *replica);
+/* Select, but do not consume, the next confirmed local weapon event. Only
+ * expired/wrong-weapon events advance the cursor here; native submission
+ * commits an accepted event. Reset/baseline the cursor on a new actor/session. */
+const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
+    const SudekiMpLanWeaponState *state, uint8_t item, uint32_t host_tick,
+    uint16_t *cursor);
+/* A later host-emitted shot proves the older shot's reload is over. Do not
+ * attach the next shot's countdown to a still-draining older native playback.
+ * Caller supplies a fresh authenticated frame; this never consumes a shot. */
+BOOL SudekiMpLanWeaponPlaybackReloadMs(const SudekiMpLanWeaponState *state,
+    uint8_t item, uint16_t playback_sequence, uint32_t host_tick,
+    uint16_t *reload_ms);
 BOOL SudekiMpLanArenaReplicaPush(
     SudekiMpLanArenaReplica *replica,
     const SudekiMpLanArenaSnapshot *snapshot

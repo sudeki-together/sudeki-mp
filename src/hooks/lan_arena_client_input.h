@@ -31,6 +31,10 @@ BOOL SudekiMpLanArenaClientMovementWorldDirection(
 BOOL SudekiMpLanArenaClientCurrentWeakHeld(
     BOOL owner_exact, int control_filter, int transition_state);
 int SudekiMpLanArenaClientSuppressedWeakNextState(int transition_state);
+/* Elco's confirmed journal owns playback. Neither native start route may
+ * independently start a shot for that replica outside confirmed entry. */
+BOOL SudekiMpLanArenaClientSuppressSecondaryFire(
+    BOOL authenticated, BOOL elco, BOOL owner_exact, BOOL confirmed_start);
 /* Closed Ailish training inventory; only a fresh native press cycles it. */
 BOOL SudekiMpLanArenaClientCycleWeaponSlot(unsigned int count,
     unsigned int current, int next_state, int previous_state,
@@ -42,6 +46,12 @@ BOOL SudekiMpLanArenaClientCycleWeaponSlot(unsigned int count,
 BOOL SudekiMpLanArenaClientRangedWeakHeld(
     BOOL first_person_active,
     BOOL raw_weak_held
+);
+/* Stationary first-person aim is still a live observation. Resend only with
+ * the current gameplay controller owner, independently of held-input caches. */
+BOOL SudekiMpLanArenaClientAimRefreshDue(
+    BOOL gameplay_owner_exact, BOOL first_person_active,
+    DWORD last_sent_ms, DWORD now_ms
 );
 /* Pure camera ownership policy: during Ailish's authenticated native skill
  * camera, ordinary first-person/orbit events must not reach that camera. */

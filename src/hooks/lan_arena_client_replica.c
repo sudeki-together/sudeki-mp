@@ -129,6 +129,9 @@ typedef struct LanArenaNativeRangedLease {
     void *renderer;
     uint16_t sequence;
     BOOL active;
+    BOOL weapon_shot;
+    BOOL weapon_fired;
+    uint8_t weapon_item;
 } LanArenaNativeRangedLease;
 
 typedef struct LanArenaTalNativePresentationLease {
@@ -547,6 +550,10 @@ static uint32_t status_vfx_newest_instance;
 static LanArenaPresentationLease presentation_leases[2];
 static LanArenaFirstPersonLease ailish_first_person_lease;
 static LanArenaNativeRangedLease ailish_native_ranged_lease;
+static void *elco_weapon_cursor_owner;
+static uint64_t elco_weapon_cursor_session;
+static uint16_t elco_weapon_cursor;
+static DWORD weapon_snapshot_received_at;
 static LanArenaTalNativePresentationLease tal_native_presentation_lease;
 static LanArenaNativeSkillPresentationLease native_skill_leases[2];
 static LanArenaClientViewLease remote_tal_skill_view_lease;
@@ -3115,6 +3122,18 @@ BOOL SudekiMpLanArenaClientReplicaRangedAim(void *actor, float direction[3]) {
     return FALSE;
 }
 
+BOOL SudekiMpLanArenaClientReplicaRangedTarget(void *actor,float target[3]) {
+    float direction[3];
+    if(!target || !SudekiMpLanArenaClientReplicaRangedAim(actor,direction)) return FALSE;
+    for(unsigned seat=0;seat<2;++seat) {
+        const SudekiMpLanArenaActorSnapshot *s=&last_applied_snapshot.seat[seat];
+        if(actor==last_applied_characters[seat] && s->ranged_target_valid) {
+            memcpy(target,s->ranged_target,12); return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static BOOL finite_position(const SudekiMpLanArenaActorSnapshot *actor) {
     return actor != NULL && isfinite(actor->x) && isfinite(actor->y) &&
         isfinite(actor->z) && fabsf(actor->x) < 1000000.0f &&
@@ -4029,11 +4048,145 @@ static BOOL drain_ailish_native_ranged(void) {
     return TRUE;
 }
 
+static void *elco_native_weapon_start_scope;
+static DWORD elco_native_weapon_start_thread;
+
+BOOL SudekiMpLanArenaClientReplicaWeaponStartAuthorized(void *actor) {
+    const LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
+    return actor && actor == elco_native_weapon_start_scope &&
+        GetCurrentThreadId() == elco_native_weapon_start_thread &&
+        lease->active && lease->weapon_shot && !lease->weapon_fired &&
+        lease->character == actor && client_apply_damage_hook.installed;
+}
+
+void SudekiMpLanArenaClientReplicaNativeWeaponFired(void *actor) {
+    LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
+    SudekiMpElcoWeaponObservation observed;
+    if (seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+        actor != SudekiMpCleanroomEngineActorEntity(seat_client_actor()) ||
+        !client_apply_damage_hook.installed ||
+        !SudekiMpObserveElcoWeapon(actor, &observed)) return;
+    if (lease->active && lease->weapon_shot && !lease->weapon_fired &&
+        lease->character == actor && observed.item == lease->weapon_item) {
+        lease->weapon_fired = TRUE;
+        SudekiMpLogFormat("lan_weapon event=client_shot item=%u sequence=%u\r\n",
+            observed.item, lease->sequence);
+    } else {
+        /* Count actual native emissions outside an admitted playback event,
+         * not charge drops (resource synchronization changes charge too). */
+        SudekiMpLogFormat("lan_weapon event=client_unconfirmed_shot item=%u lease_active=%u sequence=%u\r\n",
+            observed.item, (unsigned)lease->active, lease->sequence);
+    }
+}
+
+static BOOL service_elco_native_weapon(uint8_t *character, uint8_t *component,
+    void *renderer, BOOL final_boundary, BOOL *owns) {
+    LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
+    SudekiMpLanArenaSessionStatus status;
+    SudekiMpElcoWeaponObservation native;
+    const SudekiMpLanWeaponState *w = &replica.latest.seat[1].weapon;
+    BOOL idle, fresh;
+    *owns = lease->active;
+    if (!SudekiMpLanArenaSessionGetStatus(&status) || !status.peer_connected ||
+        !status.session_token || status.local_role != SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH ||
+        status.local_simulation_node_role != SUDEKIMP_LAN_ARENA_SIMULATION_NODE_REPLICA ||
+        !client_apply_damage_hook.installed || !replica.latest_valid) return FALSE;
+    fresh = weapon_snapshot_received_at &&
+        (DWORD)(GetTickCount()-weapon_snapshot_received_at) <= 500u &&
+        replica.latest.seat[1].actor_type == SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+        w->valid && SudekiMpLanWeaponStateValid(w, SUDEKIMP_LAN_ARENA_ELCO_TYPE);
+    if (elco_weapon_cursor_owner != character ||
+        elco_weapon_cursor_session != status.session_token) {
+        if (lease->active) return FALSE;
+        elco_weapon_cursor_owner = character;
+        elco_weapon_cursor_session = status.session_token;
+        /* Joining a running session must not fire its historical shots. */
+        elco_weapon_cursor = fresh && w->shot_count ? w->shots[w->shot_count-1].sequence : 0;
+    }
+    if (lease->active) {
+        if (lease->character != character || lease->component != component ||
+            lease->renderer != renderer) return FALSE;
+        if (!final_boundary && lease->weapon_fired && fresh && w->item == lease->weapon_item) {
+            uint16_t reload_ms;
+            if (!SudekiMpLanWeaponPlaybackReloadMs(w, lease->weapon_item,
+                    lease->sequence, replica.latest.host_tick, &reload_ms) ||
+                !SudekiMpSyncElcoPresentationResources(character,
+                    w->item, w->charge_q8, reload_ms)) return FALSE;
+        }
+        if (!observe_native_ranged(lease, &idle)) return FALSE;
+        if (!idle) return TRUE;
+        if (!drain_ailish_native_ranged()) return FALSE;
+        *owns = FALSE;
+    }
+    if (final_boundary || !fresh || !client_ailish_first_person_camera_owns_facing(character) ||
+        replica.latest.seat[1].skill_active ||
+        !SudekiMpObserveElcoWeapon(character, &native) || native.item != w->item)
+        return TRUE;
+    {
+        LanArenaNativeRangedLease observed = {0};
+        const SudekiMpLanWeaponShot *shot = NULL;
+        uint8_t *animation;
+        observed.character = character; observed.component = component;
+        observed.renderer = renderer;
+        observed.combat = *(uint8_t **)(character+0xbcu);
+        observed.arbiter = *(uint8_t **)(character+0x90u);
+        if (!observe_native_ranged(&observed, &idle)) return FALSE;
+        shot = SudekiMpLanWeaponNextShot(w, native.item, replica.latest.host_tick,
+            &elco_weapon_cursor);
+        animation = *(uint8_t **)(component+0xf8u); /* validated by observer */
+        /* A confirmed shot may begin after the previous native clip retires.
+         * The local resource display is not a second authority gate: the
+         * event supplies its exact pre-shot charge, even if the host is now
+         * reloading. Never interrupt an active native animation/task. */
+        if (shot && native.stage == 0u && !*(void **)(observed.combat+0x5cu) &&
+            (animation[2] == 5u || animation[2] == 2u)) {
+            uint32_t handle; int selector;
+            uint8_t *record = *(uint8_t **)(observed.combat+0x60u);
+            unsigned id = *(uint32_t *)(record+0x9cu);
+            if (elco_native_weapon_start_scope || id < 140u || id > 142u || shot->pre_charge_q8/256.0f < native.required_charge ||
+                !resolve_ailish_first_person_selector(component, renderer, id,
+                    SudekiMpLanArenaRangedCombatSelector(seat_client_type(), (uint8_t)id),
+                    &handle, &selector) ||
+                !SudekiMpSetElcoPresentationResources(character, shot->item, shot->pre_charge_q8, 0u))
+                return FALSE;
+            observed.sequence = shot->sequence;
+            observed.weapon_item = shot->item;
+            observed.weapon_shot = TRUE;
+            observed.active = TRUE;
+            *lease = observed; *owns = TRUE; /* retain damage/teardown barrier before entry */
+            elco_weapon_cursor = shot->sequence;
+            /* Permission exists only for this synchronous native start, not
+             * throughout its asynchronous animation/reload lifetime. */
+            elco_native_weapon_start_scope = character;
+            elco_native_weapon_start_thread = GetCurrentThreadId();
+            SudekiMpSubmitArbiterCombatInput(game_base+RVA_ARBITER_COMBAT_INPUT,
+                lease->arbiter, 1, 0, 0, 0, 0, 0);
+            elco_native_weapon_start_scope = NULL;
+            elco_native_weapon_start_thread = 0u;
+            SudekiMpLogFormat("lan_weapon event=client_submit item=%u sequence=%u precharge=%u\r\n",
+                shot->item, shot->sequence, shot->pre_charge_q8);
+            return TRUE;
+        }
+        if (!shot && !SudekiMpSyncElcoPresentationResources(character,
+                w->item, w->charge_q8, w->reload_ms)) return FALSE;
+        if (!idle && (native.stage != 0u || *(void **)(observed.combat+0x5cu) ||
+                (*(uint32_t *)(observed.combat+0xdcu) >= 0xc2u &&
+                 *(uint32_t *)(observed.combat+0xdcu) <= 0xc3u))) {
+            observed.sequence = lease->sequence;
+            observed.active = TRUE;
+            *lease = observed; *owns = TRUE;
+        }
+    }
+    return TRUE;
+}
+
 static BOOL service_ailish_native_ranged(
     uint8_t *character, uint8_t *component, void *renderer,
     const SudekiMpLanArenaActorSnapshot *snapshot, BOOL final_boundary,
     BOOL *owns
 ) {
+    if (seat_client_type() == SUDEKIMP_LAN_ARENA_ELCO_TYPE)
+        return service_elco_native_weapon(character, component, renderer, final_boundary, owns);
     LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
     BOOL idle;
     BOOL shot = snapshot->combat_state == SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
@@ -4192,7 +4345,7 @@ static BOOL apply_ailish_first_person_presentation(
             "fire_lookup", component, renderer,
             idle_handle, idle_selector, fire_handle, fire_selector);
     }
-    weak_attack = snapshot->combat_state ==
+    weak_attack = seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE && snapshot->combat_state ==
         SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
     if (!service_ailish_native_ranged(character, component, renderer,
             snapshot, final_boundary, &native_ranged_owns)) return FALSE;
@@ -6998,6 +7151,10 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
         return FALSE;
     }
     ZeroMemory(&ailish_native_ranged_lease, sizeof(ailish_native_ranged_lease));
+    elco_weapon_cursor_owner = NULL;
+    elco_weapon_cursor_session = 0;
+    elco_weapon_cursor = 0;
+    weapon_snapshot_received_at = 0;
     if (!drain_tal_native_action_lease()) {
         client_replica_reset_pending = TRUE;
         discard_client_replica_frame_state();
@@ -7211,6 +7368,7 @@ BOOL SudekiMpLanArenaClientReplicaApplyLatest(void) {
             !SudekiMpLanArenaSharedSimulationReadFrame(
                 &replica_simulation, &accepted, NULL) ||
             !SudekiMpLanArenaReplicaPush(&replica, &accepted)) return FALSE;
+        weapon_snapshot_received_at = GetTickCount();
         if (!SudekiMpLanArenaSpiritAudioConsumeSnapshot(
                 &spirit_audio_cursor, &accepted,
                 replay_client_spirit_audio, NULL, &audio_replayed)) {

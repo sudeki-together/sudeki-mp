@@ -7,9 +7,9 @@
 /* This protocol is deliberately separate from input/bridge_protocol.h.  The
  * latter is trusted loopback transport for local pads; LAN packets are
  * untrusted and must carry a session token, role, map, and build identity. */
-#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 40u
+#define SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION 42u
 #define SUDEKIMP_LAN_ARENA_DEFAULT_PORT 26770u
-#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413430u /* "LA40" */
+#define SUDEKIMP_LAN_ARENA_BUILD_ID 0x4c413432u /* "LA42" */
 #define SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE 32u
 #define SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE 1468u
 #define SUDEKIMP_LAN_ARENA_MAX_ENEMIES 16u
@@ -30,7 +30,8 @@
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
-#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1356u
+#define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1452u
+#define SUDEKIMP_LAN_WEAPON_SHOT_HISTORY 3u
 
 enum {
     SUDEKIMP_LAN_ARENA_KIT_NONE = 0,
@@ -228,6 +229,10 @@ typedef struct SudekiMpLanArenaInput {
     int16_t aim_direction_x;
     int16_t aim_direction_y;
     int16_t aim_direction_z;
+    /* LA41: camera-selected convergence point, not a hit/damage claim.
+     * The host bounds it against its actor and retains native collision. */
+    uint8_t aim_target_valid;
+    float aim_target[3];
     uint8_t weak_attack_pressed;
     uint8_t weak_attack_held;
     uint8_t ranged_first_person_active;
@@ -278,6 +283,21 @@ unsigned int SudekiMpLanArenaLocomotionAnimationId(unsigned int clip);
  * This mapping is not a substitute for a native model ownership witness. */
 int SudekiMpLanArenaRangedCombatSelector(uint8_t actor_type, uint8_t animation_id);
 
+typedef struct SudekiMpLanWeaponShot {
+    uint16_t sequence;
+    uint8_t item;
+    uint16_t pre_charge_q8;
+    uint32_t host_tick;
+} SudekiMpLanWeaponShot;
+
+typedef struct SudekiMpLanWeaponState {
+    uint8_t valid, item, stage, shot_count;
+    uint16_t charge_q8, reload_ms;
+    SudekiMpLanWeaponShot shots[SUDEKIMP_LAN_WEAPON_SHOT_HISTORY];
+} SudekiMpLanWeaponState;
+
+int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *state, uint8_t actor_type);
+
 typedef struct SudekiMpLanArenaActorSnapshot {
     uint8_t actor_type;
     uint8_t animation_state;
@@ -293,6 +313,11 @@ typedef struct SudekiMpLanArenaActorSnapshot {
      * upright root's facing. Absence is canonical zero, never a stale aim. */
     uint8_t ranged_aim_valid;
     int16_t ranged_aim[3];
+    uint8_t ranged_target_valid;
+    float ranged_target[3];
+    /* LA42: observed Elco weapon resources and actual native shot journal.
+     * Separate from input requests and third-person animation sequences. */
+    SudekiMpLanWeaponState weapon;
     uint32_t hp;
     uint32_t sp;
     /* Monotonic per actor and authored only by the shared simulation. This
