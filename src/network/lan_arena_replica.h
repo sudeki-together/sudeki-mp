@@ -49,11 +49,20 @@ BOOL SudekiMpLanArenaReplicaPush(
     SudekiMpLanArenaReplica *replica,
     const SudekiMpLanArenaSnapshot *snapshot
 );
+/* Explicit actor context for a chunk in the fixed-four frame. This does not
+ * alter the process-global legacy host/client pair. */
+BOOL SudekiMpLanArenaReplicaPushForRoster(SudekiMpLanArenaReplica *replica,
+    const SudekiMpLanArenaSnapshot *snapshot,
+    const SudekiMpLanArenaCodecRoster *roster);
 BOOL SudekiMpLanArenaReplicaSample(
     const SudekiMpLanArenaReplica *replica,
     uint32_t host_tick,
     SudekiMpLanArenaSnapshot *sample
 );
+/* Explicit SMP4 context: preserve validated noncombat channel records on
+ * both chunk actors. The legacy sample API retains its LA42 retirement. */
+BOOL SudekiMpLanArenaReplicaSampleAllActorMotion(const SudekiMpLanArenaReplica *,
+    uint32_t host_tick,SudekiMpLanArenaSnapshot *);
 void SudekiMpLanArenaReplicaRenderClockReset(
     SudekiMpLanArenaReplicaRenderClock *clock
 );

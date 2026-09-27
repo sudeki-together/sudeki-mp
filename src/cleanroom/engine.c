@@ -4176,9 +4176,31 @@ BOOL SudekiMpCleanroomBukiAnimationStorageValid(
     return TRUE;
 }
 
-BOOL SudekiMpCleanroomEngineActorPresentation(
+BOOL SudekiMpCleanroomWorldMotionStorageValid(SudekiMpCleanroomActor actor,
+    void *renderer, unsigned int submodels, BOOL for_write) {
+    uint8_t *channels, *blends;
+    BOOL (*accessible)(const void *, size_t) = for_write?writable_memory:readable_memory;
+    unsigned count = actor==SUDEKIMP_CLEANROOM_AILISH || actor==SUDEKIMP_CLEANROOM_ELCO?5u:4u;
+    if(actor!=SUDEKIMP_CLEANROOM_BUKI && actor!=SUDEKIMP_CLEANROOM_TAL &&
+        actor!=SUDEKIMP_CLEANROOM_AILISH && actor!=SUDEKIMP_CLEANROOM_ELCO) return FALSE;
+    if(!submodels || submodels>32 || !readable_memory(renderer,0xa8) ||
+        *(uint32_t *)((uint8_t *)renderer+0xa0)!=count ||
+        *(uint32_t *)((uint8_t *)renderer+0xa4)!=count-1) return FALSE;
+    channels=*(uint8_t **)((uint8_t *)renderer+0x98);
+    blends=*(uint8_t **)((uint8_t *)renderer+0x9c);
+    if(!accessible(channels,count*36u) || !accessible(blends,(count-1)*20u)) return FALSE;
+    if(*(uint16_t *)(blends)!=0 || *(uint16_t *)(blends+2)!=1 ||
+        *(uint16_t *)(blends+20)!=2 || *(uint16_t *)(blends+22)!=3 ||
+        *(uint16_t *)(blends+40)!=0x8000 || *(uint16_t *)(blends+42)!=0x8001) return FALSE;
+    for(unsigned c=0;c<count;++c)
+        if(!accessible(*(void **)(channels+c*36u),submodels*24u)) return FALSE;
+    return TRUE;
+}
+
+static BOOL actor_presentation(
     SudekiMpCleanroomActor actor,
-    SudekiMpCleanroomActorPresentation *presentation
+    SudekiMpCleanroomActorPresentation *presentation, BOOL full_world,
+    BOOL ranged_action
 ) {
     uint8_t *character;
     uint8_t *position;
@@ -4239,6 +4261,9 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
     presentation->submodel_count = get_count(renderer);
     if (presentation->submodel_count == 0u ||
         presentation->submodel_count > 32u) return FALSE;
+    if((full_world || ranged_action) &&
+        !SudekiMpCleanroomWorldMotionStorageValid(actor,renderer,
+            presentation->submodel_count,FALSE)) return FALSE;
     /* Buki's native transition uses BOTH base pairs and their crossfade.
      * Reading only 0-1 silently dropped every incoming/outgoing pose. Her
      * fourth blend and fifth channel do not exist; preserve Tal's separate
@@ -4246,7 +4271,7 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
     if (actor == SUDEKIMP_CLEANROOM_BUKI &&
         !SudekiMpCleanroomBukiAnimationStorageValid(renderer,
             presentation->submodel_count, FALSE)) return FALSE;
-    channel_limit = actor == SUDEKIMP_CLEANROOM_AILISH ?
+    channel_limit = ranged_action ? 5u : full_world ? 4u : actor == SUDEKIMP_CLEANROOM_AILISH ?
         SUDEKIMP_CLEANROOM_PRESENTATION_CHANNELS :
         actor == SUDEKIMP_CLEANROOM_BUKI ? 4u : 2u;
     for (channel = 0u;
@@ -4263,10 +4288,10 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
         if (!isfinite(presentation->rate[channel]) ||
             !isfinite(presentation->time[channel])) return FALSE;
     }
-    if (actor == SUDEKIMP_CLEANROOM_AILISH ||
+    if (full_world || actor == SUDEKIMP_CLEANROOM_AILISH ||
         actor == SUDEKIMP_CLEANROOM_BUKI) {
         for (channel = 0u;
-             channel < (actor == SUDEKIMP_CLEANROOM_BUKI ? 3u :
+             channel < (full_world || actor == SUDEKIMP_CLEANROOM_BUKI ? 3u :
                  SUDEKIMP_CLEANROOM_PRESENTATION_BLENDS);
              ++channel) {
             presentation->blend[channel] = get_blend(renderer, (int)channel);
@@ -4279,6 +4304,30 @@ BOOL SudekiMpCleanroomEngineActorPresentation(
             !isfinite(presentation->blend[3])) return FALSE;
     }
     return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineActorPresentation(SudekiMpCleanroomActor actor,
+    SudekiMpCleanroomActorPresentation *presentation) {
+    return actor_presentation(actor,presentation,FALSE,FALSE);
+}
+BOOL SudekiMpCleanroomEngineWorldMotion(SudekiMpCleanroomActor actor,
+    SudekiMpCleanroomActorPresentation *presentation) {
+    return actor_presentation(actor,presentation,TRUE,FALSE);
+}
+BOOL SudekiMpCleanroomEngineRangedActionPresentation(
+    SudekiMpCleanroomActor actor,void *expected_entity,int32_t *selector,
+    uint8_t *state,float *time) {
+    SudekiMpCleanroomActorPresentation presentation;
+    if((actor!=SUDEKIMP_CLEANROOM_ELCO && actor!=SUDEKIMP_CLEANROOM_AILISH) ||
+        !expected_entity || !selector || !state || !time ||
+        actor_pointer(actor)!=expected_entity ||
+        !actor_presentation(actor,&presentation,FALSE,TRUE) ||
+        actor_pointer(actor)!=expected_entity) return FALSE;
+    if(!isfinite(presentation.rate[4]) || !isfinite(presentation.time[4]) ||
+        presentation.time[4]<0.0f) return FALSE;
+    *selector=presentation.selector[4]; *state=presentation.state[4];
+    *time=presentation.time[4];
+    return actor_pointer(actor)==expected_entity;
 }
 
 BOOL SudekiMpCleanroomEngineActorResources(

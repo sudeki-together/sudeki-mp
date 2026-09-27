@@ -83,6 +83,14 @@ add_library(SudekiMP SHARED
     src/network/lan_arena_shared_simulation.c
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_endpoint.c
+    src/network/lan_party_session.c
+    src/network/lan_party_replica.c
+    src/hooks/lan_party_host_control.c
+    src/hooks/lan_party_client_control.c
+    src/hooks/lan_party_snapshot.c
+    src/hooks/lan_party_runtime.c
+    src/network/lan_party_motion.c
+    src/hooks/lan_party_roster.c
     src/network/lan_arena_authority.c
     src/network/lan_arena_replica.c
     src/network/lan_arena_session.c
@@ -189,7 +197,7 @@ set_source_files_properties(src/engine/arbiter_combat_input.c PROPERTIES
 set_source_files_properties(src/engine/skill_activation_abi.c PROPERTIES
     COMPILE_OPTIONS -Wno-pedantic
 )
-target_link_libraries(SudekiMP PRIVATE advapi32 ws2_32 winmm)
+target_link_libraries(SudekiMP PRIVATE advapi32 ws2_32 winmm bcrypt)
 set_target_properties(SudekiMP PROPERTIES
     PREFIX ""
     OUTPUT_NAME "SudekiMP"
@@ -592,6 +600,13 @@ set_target_properties(SudekiMP.KeyBindingTest PROPERTIES
 
 add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
+    tests/lan_party_control_image_fixture.c
+    src/network/lan_party_session.c
+    src/hooks/lan_party_host_control.c
+    src/hooks/lan_party_client_control.c
+    src/hooks/lan_party_snapshot.c
+    src/network/lan_party_motion.c
+    src/hooks/lan_party_roster.c
     src/cleanroom/engine.c
     src/engine/arbiter_combat_input.c
     src/engine/buki_replica_native.c
@@ -665,12 +680,17 @@ target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE
     SUDEKIMP_LAN_ARENA_CLIENT_REPLICA_TESTING=1
     SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING=1
     SUDEKIMP_SAVE_BOOK_INTERCEPT_TESTING=1
+    SUDEKIMP_LAN_PARTY_CONTROL_TESTING=1
 )
 target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 target_link_options(SudekiMP.SkillTraceImageTest PRIVATE -municode)
-target_link_libraries(SudekiMP.SkillTraceImageTest PRIVATE ws2_32)
+target_link_libraries(SudekiMP.SkillTraceImageTest PRIVATE ws2_32 bcrypt)
+# This fixture exercises the same GCC x86 thiscall/stdcall ABI as the adapter.
+set_source_files_properties(tests/lan_party_control_image_fixture.c PROPERTIES
+    COMPILE_OPTIONS -Wno-pedantic
+)
 set_target_properties(SudekiMP.SkillTraceImageTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -916,6 +936,25 @@ target_compile_options(SudekiMP.LanArenaLoopbackPeerTest PRIVATE
 )
 target_link_libraries(SudekiMP.LanArenaLoopbackPeerTest PRIVATE ws2_32)
 set_target_properties(SudekiMP.LanArenaLoopbackPeerTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.LanPartySessionTest
+    tests/lan_party_session_test.c
+    src/network/lan_party_motion.c
+    src/network/lan_party_replica.c
+    src/network/lan_arena_replica.c
+    src/network/lan_arena_tal_combo_graph.c
+    src/network/lan_arena_protocol.c
+    src/network/lan_party_session.c
+)
+target_include_directories(SudekiMP.LanPartySessionTest PRIVATE src)
+target_compile_definitions(SudekiMP.LanPartySessionTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.LanPartySessionTest PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+)
+target_link_libraries(SudekiMP.LanPartySessionTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.LanPartySessionTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

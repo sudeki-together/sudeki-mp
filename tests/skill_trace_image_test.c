@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <string.h>
 
+int SudekiMpLanPartyControlImageFixture(uint8_t *image);
 static BOOL split_runtime_authorization_result;
 /* Only permits pointer-hook install/restore in the inert PE mapping. No
  * constructor, object update or other native game function is called here. */
@@ -3835,6 +3836,205 @@ static void exercise_rapid_weapon_context(uint8_t *image, uint8_t *actor,
 
 /* Execute the exact native count/lookup against bounded synthetic inventory.
  * Only the mutating model installer is replaced with a thiscall recorder. */
+static void exercise_sheathed_visibility(uint8_t *image,uint8_t *actor,
+    uint8_t *weapon,unsigned hero,int *failures) {
+    uint32_t position[0x104/4]={0},arbiter[0x64/4]={0};
+    uint32_t wrappers[2][5]={{0}},objects[2][0x110/4]={{0}};
+    unsigned count=hero==2?2:1;
+    uint8_t entry=image[0xd7e30];
+#define CHECK_SHEATH(expr) do { if(!(expr)) { fprintf(stderr,"FAIL sheath: %s\n",#expr); ++*failures; } } while(0)
+    store_fixture_pointer(actor,0x44,position); store_fixture_pointer(position,0x10,actor);
+    store_fixture_pointer(actor,0x90,arbiter); store_fixture_pointer(arbiter,0x10,actor);
+    *(uint32_t *)(weapon+0x330)=3;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *slot=weapon+(i?0x150:0x40);
+        store_fixture_pointer(slot,0x94,(uint8_t *)position+4);
+        *(int *)(slot+0xac)=5+i;
+        store_fixture_pointer(slot,0xb4,wrappers[i]);
+        /* Attachment object and wrapper render object are distinct. */
+        store_fixture_pointer(slot,0x8c,position);
+        store_fixture_pointer(wrappers[i],8,objects[i]);
+        store_fixture_pointer(objects[i],0,image+0x2dd700);
+        objects[i][0x34/4]=4; /* hidden, no callback */
+    }
+    CHECK_SHEATH(SudekiMpInitializeSheathedWeaponVisibility(actor));
+    if(hero==1) { CHECK_SHEATH(!(weapon[0x3b8]&2)); }
+    else {
+        CHECK_SHEATH(weapon[0x3b8]&2);
+        for(unsigned i=0;i<count;++i) CHECK_SHEATH(!(objects[i][0x34/4]&4));
+        CHECK_SHEATH(SudekiMpInitializeSheathedWeaponVisibility(actor));
+        objects[0][0x34/4]=0x4000004;
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        objects[0][0x34/4]=0;
+        store_fixture_pointer(weapon,0xd4,NULL);
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        store_fixture_pointer(weapon,0xd4,(uint8_t *)position+4);
+        *(int *)(weapon+0xec)=-1;
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        *(int *)(weapon+0xec)=5;
+        arbiter[0x50/4]=0x400000;
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        arbiter[0x50/4]=0; arbiter[0x60/4]=2;
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        arbiter[0x60/4]=0;
+        store_fixture_pointer(weapon,0x26c,actor);
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        store_fixture_pointer(weapon,0x26c,NULL);
+        image[0xd7e30]^=1;
+        CHECK_SHEATH(!SudekiMpInitializeSheathedWeaponVisibility(actor));
+        image[0xd7e30]=entry;
+    }
+    store_fixture_pointer(actor,0x44,NULL); store_fixture_pointer(actor,0x90,NULL);
+    store_fixture_pointer(weapon,0xf4,NULL); store_fixture_pointer(weapon,0x204,NULL);
+#undef CHECK_SHEATH
+}
+
+static unsigned idle_attachment_calls __attribute__((used));
+static unsigned idle_attachment_secondary __attribute__((used));
+static void *idle_attachment_parent __attribute__((used));
+__attribute__((used,noinline))
+static uint32_t idle_fixture_hash(const char *name) {
+    uint32_t hash=0;
+    while(*name) {
+        unsigned char c=(unsigned char)*name++;
+        if(c>='A' && c<='Z') c+='a'-'A';
+        hash=c^(hash*33u);
+    }
+    return hash;
+}
+__attribute__((naked,noinline))
+static void idle_fixture_hash_entry(void) {
+    __asm__ volatile("pushl %eax\n\tcall _idle_fixture_hash\n\taddl $4,%esp\n\tret\n\t");
+}
+__attribute__((naked,noinline))
+static void idle_fixture_attach_entry(void) {
+    __asm__ volatile(
+        "incl _idle_attachment_calls\n\t"
+        "movl 4(%esp),%edx\n\tmovl %edx,0xec(%eax)\n\t"
+        "movl 8(%esp),%ecx\n\tmovl %ecx,_idle_attachment_parent\n\t"
+        "movl 12(%esp),%ecx\n\tmovl %ecx,_idle_attachment_secondary\n\t"
+        "ret $12\n\t");
+}
+/* Execute the retail idle-toggle body and retail locator lookup. Only CRT
+ * hashing and the graphics/scene installer are fixture leaves; this proves
+ * native toggle ABI, lookup, guards and idempotence, not a rendered holster. */
+static void exercise_idle_weapon_cleanup(uint8_t *image,uint8_t *actor,
+    uint8_t *weapon,int *failures) {
+    uint32_t position[0x104/4]={0},arbiter[0x64/4]={0},model[0x168/4]={0};
+    uint32_t wrapper[5]={0},gun_wrapper[5]={0},instance[4]={0};
+    uint32_t body[0x110/4]={0},gun[0x110/4]={0},attachment[0x110/4]={0};
+    uint32_t position_attachment[0x110/4]={0},matrix[16]={0},scene[4]={0};
+    uint32_t data[0x54/4]={0},header[6]={0},records[2][20]={{0}},names[4]={0};
+    void *names_handle=names,*saved_scene; uint8_t hash_entry[5],attach_entry[5];
+    uint32_t saved_vtable=*(uint32_t *)weapon, saved_methods[2];
+    int32_t jump;
+#define CHECK_IDLE(expr) do { if(!(expr)) { fprintf(stderr,"FAIL idle weapon: %s\n",#expr); ++*failures; } } while(0)
+    memcpy(hash_entry,image+0x1e3740,5); memcpy(attach_entry,image+0xd8630,5);
+    memcpy(&saved_scene,image+0x408dd4,4);
+    /* This harness maps sections without PE base relocations. Relocate only
+     * the two verified model-interface entries, and restore them below. */
+    memcpy(saved_methods,image+0x2df8ec+0x24,sizeof(saved_methods));
+    CHECK_IDLE(saved_methods[0]==0x61bd40 && saved_methods[1]==0x61bce0);
+    store_fixture_pointer(image,0x2df8ec+0x24,image+0x21bd40);
+    store_fixture_pointer(image,0x2df8ec+0x28,image+0x21bce0);
+    CHECK_IDLE(image[0xd83af]==0xe8 &&
+        image+0xd83b4+*(int32_t *)(image+0xd83b0)==image+0xd8630);
+    image[0x1e3740]=image[0xd8630]=0xe9;
+    jump=(int32_t)((uintptr_t)idle_fixture_hash_entry-(uintptr_t)(image+0x1e3745));
+    memcpy(image+0x1e3741,&jump,4);
+    jump=(int32_t)((uintptr_t)idle_fixture_attach_entry-(uintptr_t)(image+0xd8635));
+    memcpy(image+0xd8631,&jump,4);
+    store_fixture_pointer(weapon,0,image+0x2d4d3c);
+    store_fixture_pointer(actor,0x44,position); store_fixture_pointer(position,0,image+0x2cdefc);
+    store_fixture_pointer(position,0x10,actor); store_fixture_pointer(position,0xb4,wrapper);
+    store_fixture_pointer(position,0x8c,position_attachment);
+    store_fixture_pointer(actor,0x90,arbiter); store_fixture_pointer(arbiter,0x10,actor);
+    store_fixture_pointer(actor,0x130,model); store_fixture_pointer(actor,0x134,model);
+    store_fixture_pointer(model,0x10,actor); store_fixture_pointer(weapon,0x3ac,(uint8_t *)model+4);
+    store_fixture_pointer(wrapper,8,body); store_fixture_pointer(body,0,image+0x2dd700);
+    store_fixture_pointer(wrapper,0xc,instance); store_fixture_pointer(wrapper,0x10,instance);
+    store_fixture_pointer(instance,0,image+0x2df8ec); store_fixture_pointer(instance,8,data);
+    store_fixture_pointer(data,0x1c,header); header[0x14/4]=2;
+    store_fixture_pointer(data,0x24,&names_handle); store_fixture_pointer(data,0x50,records);
+    names[0]=idle_fixture_hash("WeaponLoc_Rhand"); names[2]=idle_fixture_hash("WeaponLoc_leg");
+    for(unsigned i=0;i<2;++i) {
+        records[i][0]=i;
+        for(unsigned j=0;j<4;++j) ((float *)records[i])[4+j*5]=1;
+    }
+    *(uint32_t *)(weapon+0x270)=0x8000000f;
+    memcpy(weapon+0x274,"WeaponLoc_Rhand",16);
+    *(uint32_t *)(weapon+0x2b0)=0x8000000d;
+    memcpy(weapon+0x2b4,"WeaponLoc_leg",14);
+    *(uint32_t *)(weapon+0x330)=3; weapon[0x3b8]=0x62;
+    store_fixture_pointer(weapon+0x40,0,image+0x2cdefc);
+    store_fixture_pointer(weapon+0x40,0x94,(uint8_t *)position+4);
+    store_fixture_pointer(weapon+0x40,0xb4,gun_wrapper);
+    store_fixture_pointer(weapon+0x40,0x8c,attachment);
+    weapon[0x40+0x101]=0; weapon[0x40+0x102]=1;
+    *(int *)(weapon+0xec)=0;
+    store_fixture_pointer(gun_wrapper,8,gun); store_fixture_pointer(gun,0,image+0x2dd700);
+    store_fixture_pointer(gun,0x18,body); store_fixture_pointer(gun,0x38,matrix);
+    ((uint8_t *)attachment)[0xf2]=1;
+    store_fixture_pointer(scene,0,image+0x2c7ae8); store_fixture_pointer(image,0x408dd4,scene);
+    idle_attachment_calls=0; idle_attachment_parent=NULL; idle_attachment_secondary=99;
+    CHECK_IDLE(SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    CHECK_IDLE(idle_attachment_calls==1 && idle_attachment_parent==position && idle_attachment_secondary==0);
+    CHECK_IDLE(*(int *)(weapon+0xec)==1 && weapon[0x3b8]==0x42);
+    CHECK_IDLE(SudekiMpRestoreElcoInterruptedIdleWeapon(actor) && idle_attachment_calls==1);
+    weapon[0x3b8]=0x62; *(int *)(weapon+0xec)=0;
+    store_fixture_pointer(weapon,0x26c,actor);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(weapon,0x26c,NULL);
+    store_fixture_pointer(weapon,0xd4,NULL);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(weapon,0xd4,(uint8_t *)position+4);
+    store_fixture_pointer(weapon,0x3ac,model);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(weapon,0x3ac,(uint8_t *)model+4);
+    arbiter[0x50/4]=0x400000;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    arbiter[0x50/4]=0; arbiter[0x60/4]=2;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    arbiter[0x60/4]=0;
+    store_fixture_pointer(model,0x160,wrapper);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(model,0x160,NULL);
+    names[2]=0;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    names[2]=idle_fixture_hash("WeaponLoc_leg");
+    header[0x14/4]=257;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    header[0x14/4]=2;
+    ((float *)records[1])[4]=NAN;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    ((float *)records[1])[4]=1;
+    store_fixture_pointer(image,0x2df8ec+0x28,image+0x21bd40);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(image,0x2df8ec+0x28,image+0x21bce0);
+    store_fixture_pointer(weapon,0x204,gun_wrapper);
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    store_fixture_pointer(weapon,0x204,NULL);
+    *(int *)(weapon+0xec)=1; /* flagged but not hand-attached: unknown, don't toggle INTO hand */
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    *(int *)(weapon+0xec)=0;
+    ((uint8_t *)attachment)[0xf2]=0;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    ((uint8_t *)attachment)[0xf2]=1;
+    image[0xd8300]^=1;
+    CHECK_IDLE(!SudekiMpRestoreElcoInterruptedIdleWeapon(actor));
+    image[0xd8300]^=1;
+    CHECK_IDLE(idle_attachment_calls==1 && weapon[0x3b8]==0x62 && *(int *)(weapon+0xec)==0);
+    CHECK_IDLE(SudekiMpRestoreElcoInterruptedIdleWeapon(actor) && idle_attachment_calls==2);
+    memcpy(image+0x1e3740,hash_entry,5); memcpy(image+0xd8630,attach_entry,5);
+    memcpy(image+0x408dd4,&saved_scene,4);
+    memcpy(image+0x2df8ec+0x24,saved_methods,sizeof(saved_methods));
+    store_fixture_pointer(actor,0x44,NULL); store_fixture_pointer(actor,0x90,NULL);
+    store_fixture_pointer(actor,0x130,NULL); store_fixture_pointer(actor,0x134,NULL);
+    store_fixture_pointer(weapon,0xf4,NULL); store_fixture_pointer(weapon,0x3ac,NULL);
+    *(uint32_t *)weapon=saved_vtable;
+#undef CHECK_IDLE
+}
+
 static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
     union { uint32_t align; uint8_t b[0x140]; } inventory;
     union { uint32_t align; uint8_t b[0x180]; } character;
@@ -3954,6 +4154,8 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
         result = SudekiMpActivateCharacterWeapon(character.b, 1u);
         CHECK_WEAPON_FAMILY(result.status == SUDEKIMP_WEAPON_ACTIVATION_STARTED);
         CHECK_WEAPON_FAMILY(*(void **)(weapon.b + 0x268u) == items[hero][1]);
+        exercise_sheathed_visibility(image,character.b,weapon.b,hero,failures);
+        if(hero==3) exercise_idle_weapon_cleanup(image,character.b,weapon.b,failures);
         CHECK_WEAPON_FAMILY(SudekiMpEnsureCharacterStarterWeapon(character.b));
         CHECK_WEAPON_FAMILY(weapon_family_test_set_calls == 2u); /* keep user's selection */
         result = SudekiMpActivateCharacterWeapon(character.b, 2u);
@@ -6181,6 +6383,21 @@ int wmain(int argc, wchar_t **argv) {
         } else {
             SudekiMpUninstallLanArenaClientInput();
         }
+    }
+    /* Same exact reader/replica seams, explicit local endpoint for every
+     * non-host hero. A joining client is contained before any host approval. */
+    for(unsigned party_seat=1;party_seat<4;++party_seat) {
+        SudekiMpLanPartyConfig cfg; memset(&cfg,0,sizeof(cfg));
+        cfg.local_seat=(uint8_t)party_seat; cfg.host_ipv4="127.0.0.1"; cfg.port=26889;
+        memset(cfg.game_hash,0x13,sizeof(cfg.game_hash));
+        SudekiMpLanPartySession *party_session=SudekiMpLanPartyCreate(&cfg);
+        if(!party_session || !SudekiMpInitializeLanPartyClientReplica((HMODULE)image,party_session) ||
+            !SudekiMpInstallLanPartyClientInput((HMODULE)image,party_session)) {
+            fputs("FAIL: fixed-four explicit client input/replica installation\n",stderr); ++failures;
+        }
+        if(!SudekiMpUninstallLanArenaClientInput() || !SudekiMpResetLanArenaClientReplica()) {
+            fputs("FAIL: fixed-four explicit client adapter teardown\n",stderr); ++failures;
+        } else if(party_session) SudekiMpLanPartyDestroy(party_session,FALSE);
     }
     *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
         raw_lan_client_quick_menu_input;
@@ -10632,6 +10849,7 @@ int wmain(int argc, wchar_t **argv) {
         }
     }
 
+    failures += SudekiMpLanPartyControlImageFixture(image);
     VirtualFree(image, 0, MEM_RELEASE);
     if (failures != 0) {
         fprintf(stderr, "%d image hook test(s) failed\n", failures);

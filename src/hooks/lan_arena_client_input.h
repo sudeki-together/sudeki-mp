@@ -2,8 +2,15 @@
 #define SUDEKIMP_LAN_ARENA_CLIENT_INPUT_H
 
 #include <windows.h>
+#include "network/lan_party_session.h"
 
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module);
+/* Explicit fixed-four endpoint, selected once at installation. The retained
+ * session outlives all input hooks. Native local execution stays contained
+ * even while joining/disconnected; only ACTIVE transport can send input.
+ * Uses the same exact native reader and window-local transition handling. */
+BOOL SudekiMpInstallLanPartyClientInput(HMODULE game_module,
+    SudekiMpLanPartySession *session);
 /* Teardown is retryable. A FALSE result means at least one live hook could
  * not be restored; callback trampolines and operator events remain owned so
  * no surviving detour can observe cleared dependencies. */

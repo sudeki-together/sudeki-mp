@@ -545,6 +545,184 @@ BOOL SudekiMpEnsureCharacterStarterWeapon(void *character) {
     return FALSE;
 }
 
+static BOOL visibility_writable(void *pointer,size_t size) {
+    MEMORY_BASIC_INFORMATION m;
+    return readable_memory(pointer,size) && VirtualQuery(pointer,&m,sizeof(m)) &&
+        (m.Protect&(PAGE_READWRITE|PAGE_WRITECOPY|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY));
+}
+
+__attribute__((naked, noinline))
+static void call_idle_weapon_toggle(void *weapon,void *method) {
+    (void)weapon; (void)method;
+    __asm__ volatile(
+        "pushl %esi\n\t"
+        "movl 8(%esp), %esi\n\t"
+        "call *12(%esp)\n\t"
+        "popl %esi\n\t"
+        "ret\n\t");
+}
+
+static uint32_t attachment_name_hash(const char *name) {
+    uint32_t hash=0;
+    while(*name) {
+        unsigned char c=(unsigned char)*name++;
+        if(c>='A' && c<='Z') c+=(unsigned char)('a'-'A');
+        hash=c^(hash*33u);
+    }
+    return hash;
+}
+
+static BOOL attachment_name_exact(uint8_t *weapon,unsigned offset,const char *name) {
+    unsigned size=*(uint32_t *)(weapon+offset),length=(unsigned)strlen(name);
+    const char *text=(size&0x80000000u)?(char *)weapon+offset+4:
+        *(const char **)(weapon+offset+4);
+    return (size&0x7fffffffu)==length && readable_memory(text,length+1) &&
+        !memcmp(text,name,length+1);
+}
+
+/* Bound the exact CModelInstance locator lookup and bind matrices used by
+ * 21bce0/21bd40. This is a transition-only check, not a cross-frame cache. */
+static BOOL idle_weapon_locators(uint8_t *base,uint8_t *instance,int *hand,int *hip) {
+    uint8_t *data,*header,*records,*names_handle,*names;
+    unsigned count;
+    if(!readable_memory(instance,0x10) || *(void **)instance!=base+0x2df8ec ||
+        *(void **)(base+0x2df8ec+0x24)!=base+0x21bd40 ||
+        *(void **)(base+0x2df8ec+0x28)!=base+0x21bce0) return FALSE;
+    data=*(uint8_t **)(instance+8);
+    if(!readable_memory(data,0x54)) return FALSE;
+    header=*(uint8_t **)(data+0x1c); names_handle=*(uint8_t **)(data+0x24);
+    if(!readable_memory(header,0x18) || !readable_memory(names_handle,4)) return FALSE;
+    count=*(unsigned *)(header+0x14); records=*(uint8_t **)(data+0x50);
+    names=*(uint8_t **)names_handle;
+    if(!count || count>256 || !readable_memory(records,count*0x50)) return FALSE;
+    *hand=*hip=-1;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *record=records+i*0x50;
+        unsigned index=*(unsigned *)record;
+        if(index>4095 || !readable_memory(names,(index+1)*8)) return FALSE;
+        uint32_t hash=*(uint32_t *)(names+index*8);
+        if(hash==attachment_name_hash("WeaponLoc_Rhand")) *hand=(int)i;
+        if(hash==attachment_name_hash("WeaponLoc_leg")) *hip=(int)i;
+        for(unsigned j=0;j<16;++j)
+            if(!isfinite(*(float *)(record+0x10+j*4))) return FALSE;
+        if(hash==attachment_name_hash("WeaponLoc_Rhand") ||
+            hash==attachment_name_hash("WeaponLoc_leg")) {
+            for(unsigned row=0;row<3;++row) {
+                const float *v=(const float *)(record+0x10+row*16);
+                float norm=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
+                if(!isfinite(norm) || norm<0.000001f) return FALSE;
+            }
+        }
+    }
+    return *hand>=0 && *hip>=0 && *hand!=*hip;
+}
+
+BOOL SudekiMpRestoreElcoInterruptedIdleWeapon(void *character) {
+    static const uint8_t toggle_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,
+        0x8b,0x86,0xac,0x03,0,0};
+    uint8_t *base=(uint8_t *)native_module,*actor=character,*weapon,*position,*arbiter;
+    uint8_t *model,*wrapper,*instance,*body,*slot,*gun_wrapper,*gun,*attachment,*scene;
+    void *record,*inventory; unsigned category; int hand,hip;
+    if(!base || !character_weapon_context(actor,&record,&inventory,&category) ||
+        category!=7 || !readable_memory(record,0x3b9)) return FALSE;
+    weapon=record;
+    /* The caller has already proved the session, actor and world-animation
+     * lease. Settled actors do not need another full native graph walk. */
+    if(!(weapon[0x3b8]&0x20)) return TRUE;
+    if(!readable_memory(actor,0x138) || !visibility_writable(weapon,0x3b9) ||
+        *(void **)weapon!=base+0x2d4d3c || (weapon[0x3b8]&4) ||
+        *(unsigned *)(weapon+0x330)!=3 || *(void **)(weapon+0x26c) ||
+        *(void **)(weapon+0x204) ||
+        !item_matches_family(*(void **)(weapon+0x268),7) ||
+        memcmp(base+0xd8300,toggle_entry,sizeof(toggle_entry)) ||
+        memcmp(base+0xd83af,"\xe8\x7c\x02\x00\x00",5) ||
+        memcmp(base+0xd83fb,"\xe8\x30\x02\x00\x00",5) ||
+        /* Exact native OnAnimationChange pending-idle cleanup edge. */
+        memcmp(base+0xd9956,"\xf6\x86\xb8\x03\x00\x00\x20\x74\x05\xe8\x9c\xe9\xff\xff",14) ||
+        !attachment_name_exact(weapon,0x270,"WeaponLoc_Rhand") ||
+        !attachment_name_exact(weapon,0x2b0,"WeaponLoc_leg")) return FALSE;
+    position=*(uint8_t **)(actor+0x44); arbiter=*(uint8_t **)(actor+0x90);
+    model=*(uint8_t **)(actor+0x134); slot=weapon+0x40;
+    if(!visibility_writable(position,0x104) || *(void **)position!=base+0x2cdefc ||
+        *(void **)(position+0x10)!=actor || *(void **)(position+0x94) ||
+        !readable_memory(arbiter,0x64) || *(void **)(arbiter+0x10)!=actor ||
+        (*(uint32_t *)(arbiter+0x50)&0x400000) || (arbiter[0x60]&2) ||
+        !readable_memory(model,0x168) || *(void **)(model+0x10)!=actor ||
+        *(void **)(actor+0x130)!=model || *(void **)(weapon+0x3ac)!=model+4 ||
+        *(void **)(slot+0x94)!=position+4 || *(void **)slot!=base+0x2cdefc ||
+        slot[0x101]!=0 || slot[0x102]!=1) return FALSE;
+    wrapper=*(uint8_t **)(position+0xb4); gun_wrapper=*(uint8_t **)(slot+0xb4);
+    if(!readable_memory(wrapper,0x14) || !readable_memory(gun_wrapper,0x14) ||
+        wrapper==*(void **)(model+0x160) ||
+        (*(void **)(model+0x164) && wrapper!=*(void **)(model+0x164))) return FALSE;
+    instance=*(uint8_t **)(wrapper+0xc); body=*(uint8_t **)(wrapper+8);
+    gun=*(uint8_t **)(gun_wrapper+8); attachment=*(uint8_t **)(slot+0x8c);
+    scene=*(uint8_t **)(base+0x408dd4);
+    if(*(void **)(wrapper+0x10)!=instance || !idle_weapon_locators(base,instance,&hand,&hip) ||
+        *(int *)(slot+0xac)!=hand ||
+        !visibility_writable(*(void **)(position+0x8c),0x110) ||
+        !visibility_writable(body,0xd0) || *(void **)body!=base+0x2dd700 ||
+        *(void **)(body+0x18) ||
+        !visibility_writable(gun,0xd0) || *(void **)gun!=base+0x2dd700 ||
+        *(void **)(gun+0x18)!=body || !readable_memory(*(void **)(gun+0x38),64) ||
+        !visibility_writable(attachment,0x110) || attachment[0xf2]!=1 ||
+        !readable_memory(scene,4) || *(void **)scene!=base+0x2c7ae8) return FALSE;
+    /* Already-parented weapon + scene-category 1: native cleanup changes the
+     * locator/matrices, but cannot reparent or mutate the scene registry. It
+     * also clears its own temporary-draw bit, exactly like interruption. */
+    call_idle_weapon_toggle(weapon,base+0xd8300);
+    return *(void **)(actor+0xc0)==weapon && *(void **)(weapon+0x10)==actor &&
+        *(void **)(actor+0x44)==position && *(void **)(position+0xb4)==wrapper &&
+        *(void **)(slot+0x94)==position+4 && *(void **)(slot+0xb4)==gun_wrapper &&
+        *(int *)(slot+0xac)==hip && !(weapon[0x3b8]&0x20);
+}
+
+BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
+    static const uint8_t entry[]={0x8a,0x44,0x24,0x04,0x8b,0x91,0x04,0x02,
+        0,0,0x02,0xc0,0x32,0x81,0xb8,0x03,0,0};
+    uint8_t *base=(uint8_t *)native_module,*actor=character,*weapon,*position,*arbiter;
+    uint8_t *wrappers[2]={0},*objects[2]={0}; void *inventory,*record;
+    unsigned category,count;
+    typedef void (__attribute__((thiscall)) *Show)(void *,int);
+    if(!base || !character_weapon_context(character,&record,&inventory,&category)) return FALSE;
+    /* Retail Ailish has no sheathe locator and intentionally hides her staff
+     * outside combat. Do not make a floating unattached staff visible. */
+    if(category==5) return TRUE;
+    weapon=record; count=category==6?2:1;
+    position=*(uint8_t **)(actor+0x44); arbiter=*(uint8_t **)(actor+0x90);
+    if(memcmp(base+0xd7e30,entry,sizeof(entry)) ||
+        !visibility_writable(weapon,0x3b9) || !readable_memory(position,0xb8) ||
+        *(void **)(position+0x10)!=actor || !readable_memory(arbiter,0x64) ||
+        *(void **)(arbiter+0x10)!=actor || (*(uint32_t *)(arbiter+0x50)&0x400000) ||
+        (arbiter[0x60]&2) || (weapon[0x3b8]&4) || *(uint32_t *)(weapon+0x330)!=3 ||
+        *(void **)(weapon+0x26c) ||
+        !item_matches_family(*(void **)(weapon+0x268),category)) return FALSE;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *slot=weapon+(i?0x150:0x40);
+        wrappers[i]=*(uint8_t **)(slot+0xb4);
+        if(!readable_memory(wrappers[i],0x14) ||
+            *(void **)(slot+0x94)!=position+4 || *(int *)(slot+0xac)<0) return FALSE;
+        objects[i]=*(uint8_t **)(wrappers[i]+8);
+        if(!visibility_writable(objects[i],0x38) ||
+            *(void **)objects[i]!=base+0x2dd700 ||
+            /* SetVisible uses wrapper+8, not CPosition+8c (a distinct
+             * attachment object). It never traverses or mutates that link. */
+            /* No unverified renderer callback during startup. */
+            (*(uint32_t *)(objects[i]+0x34)&0x4000000)) return FALSE;
+    }
+    if(count==1 && *(void **)(weapon+0x204)) return FALSE;
+    ((Show)(base+0xd7e30))(weapon,1);
+    if(*(void **)(actor+0xc0)!=weapon || *(void **)(weapon+0x10)!=actor ||
+        !(weapon[0x3b8]&2)) return FALSE;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *slot=weapon+(i?0x150:0x40);
+        if(*(void **)(slot+0xb4)!=wrappers[i] ||
+            *(void **)(wrappers[i]+8)!=objects[i] ||
+            (*(uint32_t *)(objects[i]+0x34)&4)) return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL exact_launch_option(const char *command, const char *option) {
     const char *found;
     size_t length = strlen(option);
@@ -681,6 +859,21 @@ SudekiMpWeaponActivationResult SudekiMpActivateCharacterWeapon(
         (unsigned long)*(uint32_t *)((uint8_t *)result.expected_item + ITEM_ID_OFFSET),
         SudekiMpWeaponActivationStatusName(result.status));
     return result;
+}
+
+BOOL SudekiMpWeaponActivationPending(void *character, BOOL *pending) {
+    void *weapon, *inventory;
+    unsigned int category;
+    if (!pending) return FALSE;
+    *pending = FALSE;
+    if (!character_weapon_context(character, &weapon, &inventory, &category) ||
+        !readable_memory((uint8_t *)weapon,
+            WEAPON_PENDING_ITEM_OFFSET + sizeof(void *)) ||
+        *(void **)((uint8_t *)weapon + 0x10u) != character) return FALSE;
+    (void)inventory;
+    (void)category;
+    *pending = *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL;
+    return TRUE;
 }
 
 const char *SudekiMpWeaponActivationStatusName(

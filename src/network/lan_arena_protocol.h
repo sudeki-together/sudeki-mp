@@ -569,6 +569,23 @@ int SudekiMpLanArenaDecodePacket(
     size_t packet_size,
     SudekiMpLanArenaPacket *packet
 );
+/* Immutable codec context. Multiparty transport must never change the global
+ * legacy pairing while a different peer or the game thread is validating a
+ * packet. These functions retain the LA42 byte layout and validation rules. */
+typedef struct SudekiMpLanArenaCodecRoster {
+    uint8_t actor_type[SUDEKIMP_LAN_ARENA_SEAT_COUNT];
+    uint8_t world_locomotion; /* SMP4 v2 only; never inferred from a packet. */
+} SudekiMpLanArenaCodecRoster;
+int SudekiMpLanArenaEncodeForRoster(
+    uint8_t output[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE], size_t *output_size,
+    const SudekiMpLanArenaPacket *packet,
+    const SudekiMpLanArenaCodecRoster *roster);
+int SudekiMpLanArenaDecodeForRoster(
+    const uint8_t *bytes, size_t size, SudekiMpLanArenaPacket *packet,
+    const SudekiMpLanArenaCodecRoster *roster);
+int SudekiMpLanArenaSnapshotValidForRoster(
+    const SudekiMpLanArenaSnapshot *snapshot,
+    const SudekiMpLanArenaCodecRoster *roster);
 /* Shared defense-in-depth gate used both at the wire boundary and before a
  * client snapshot enters interpolation history. */
 int SudekiMpLanArenaSnapshotValid(

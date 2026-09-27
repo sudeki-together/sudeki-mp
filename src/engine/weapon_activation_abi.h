@@ -43,6 +43,16 @@ BOOL SudekiMpWeaponFamily(unsigned int resource_type,
 /* Startup only: preserve an equipped owned-family item, otherwise equip the
  * owned starter. Never grants inventory, cancels a pending swap, or resets kit. */
 BOOL SudekiMpEnsureCharacterStarterWeapon(void *character);
+/* Four-player noncombat bootstrap only, on the caller's exact game-thread
+ * roster lease. Show already-attached native sheathed weapons without
+ * changing equipment, locators, animation, or Ailish's hidden staff policy.
+ * Unknown/pending/first-person attachment topology fails closed. */
+BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character);
+/* Replica-only, exact game/render-thread actor lease required at the caller.
+ * After the replicated Elco gun-play idle leaves both animation pairs,
+ * perform its native hand-to-holster interruption cleanup if still pending.
+ * No equipment, combat, resource, or animation changes; no-op when cleared. */
+BOOL SudekiMpRestoreElcoInterruptedIdleWeapon(void *character);
 /* Testroom bootstrap only, game thread. Add missing authored Buki/Elco weapons
  * through native inventory; preserve equipped items and existing quantities.
  * The caller supplies the actual process command line, never a network string. */
@@ -79,6 +89,9 @@ SudekiMpWeaponActivationResult SudekiMpActivateCharacterWeapon(
     void *character,
     unsigned int slot
 );
+/* Exact actor-local inventory observation used by borrowed-control drain:
+ * do not release/rejoin while Sudeki still owns an asynchronous weapon swap. */
+BOOL SudekiMpWeaponActivationPending(void *character, BOOL *pending);
 const char *SudekiMpWeaponActivationStatusName(
     SudekiMpWeaponActivationStatus status
 );

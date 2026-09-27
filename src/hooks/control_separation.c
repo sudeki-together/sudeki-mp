@@ -1,4 +1,5 @@
 #include "hooks/control_separation.h"
+#include "hooks/lan_party_control.h"
 
 #include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
@@ -10,6 +11,7 @@
 #include "engine/roaming_boundary.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/spirit_activation_abi.h"
+#include "engine/weapon_activation_abi.h"
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/call_hook.h"
 #include "hooks/interaction_provenance.h"
@@ -332,6 +334,24 @@ static unsigned int group_camera_last_rejection;
 static BOOL role_lock_active;
 static BOOL fixed_three_release_deferred_logged;
 static BOOL service_only_mode;
+typedef enum PartyNativePhase {
+    PARTY_NATIVE_EMPTY, PARTY_NATIVE_HELD, PARTY_NATIVE_DRAINING,
+    PARTY_NATIVE_RELEASE_VERIFY, PARTY_NATIVE_QUARANTINED
+} PartyNativePhase;
+typedef struct PartyNativeLease {
+    SudekiMpLanPartyLease key;
+    PartyNativePhase phase;
+    void *actor, *group, *controller, *host, *ai, *mode;
+} PartyNativeLease;
+typedef struct PartyMissileManagerCache {
+    SudekiMpLanPartyLease key;
+    void *actor, *manager;
+} PartyMissileManagerCache;
+static PartyNativeLease party_native_leases[4];
+static PartyMissileManagerCache party_missile_manager_cache[4];
+static uint32_t party_native_last_generation[4];
+static unsigned int party_local_seat;
+static volatile LONG party_native_retained_mask;
 static volatile LONG control_update_lifecycle_lock;
 static BOOL control_update_wrapper_enabled;
 static ControllerUpdateFunction retained_original_controller_update;
@@ -6612,6 +6632,738 @@ BOOL SudekiMpControlSeparationSubmitLanArenaPlayerTwoRangedFire(void) {
     return TRUE;
 }
 
+/* Explicit four-player adapter on the existing observer seam. In particular,
+ * this never aliases companion_controls[0] or publishes split-screen views. */
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+static SudekiMpLanPartyTestAiCall party_test_acquire, party_test_release;
+static SudekiMpLanPartyTestMoveCall party_test_movement;
+static SudekiMpLanPartyTestActorLookup party_test_lookup;
+static SudekiMpLanPartyTestCombatCall party_test_combat;
+static SudekiMpLanPartyTestCombatMode party_test_combat_mode;
+static SudekiMpLanPartyTestWorld party_test_world;
+static SudekiMpLanPartyTestSpawn party_test_spawn;
+static SudekiMpLanPartyTestInitialize party_test_initialize;
+void SudekiMpLanPartyControlTestRosterCalls(SudekiMpLanPartyTestWorld world,
+    SudekiMpLanPartyTestSpawn spawn, SudekiMpLanPartyTestInitialize initialize) {
+    party_test_world = world; party_test_spawn = spawn;
+    party_test_initialize = initialize;
+}
+void SudekiMpLanPartyControlTestCalls(SudekiMpLanPartyTestAiCall acquire,
+    SudekiMpLanPartyTestAiCall release, SudekiMpLanPartyTestMoveCall movement,
+    SudekiMpLanPartyTestActorLookup lookup) {
+    party_test_acquire = acquire; party_test_release = release;
+    party_test_movement = movement; party_test_lookup = lookup;
+}
+void SudekiMpLanPartyControlTestCombat(SudekiMpLanPartyTestCombatCall combat) {
+    party_test_combat = combat;
+}
+void SudekiMpLanPartyControlTestCombatMode(SudekiMpLanPartyTestCombatMode mode) {
+    party_test_combat_mode = mode;
+}
+#endif
+
+BOOL SudekiMpLanPartyControlHasLeases(void) {
+    return InterlockedCompareExchange(&party_native_retained_mask, 0, 0) != 0;
+}
+
+static SudekiMpRelativeCallHook party_render_hooks[2];
+static SudekiMpLanPartyPresentationObserver party_render_observer;
+static void (*party_original_render)(void);
+static DWORD party_native_thread, party_render_thread;
+static LONG party_render_depth, party_render_calls;
+BOOL SudekiMpLanPartyPresentationBoundary(void) {
+    return game_base && service_only_mode && party_render_observer &&
+        party_render_depth==1 && party_native_thread &&
+        GetCurrentThreadId()==party_native_thread && party_render_thread==party_native_thread;
+}
+static void party_present(unsigned phase) {
+    if(!party_native_thread || GetCurrentThreadId()!=party_native_thread ||
+        !party_render_observer || party_render_depth) return;
+    party_render_thread=GetCurrentThreadId(); ++party_render_depth;
+    party_render_observer(phase);
+    --party_render_depth; party_render_thread=0;
+}
+static void party_first_render(void) {
+    InterlockedIncrement(&party_render_calls);
+    party_present(0); party_original_render(); party_present(1);
+    InterlockedDecrement(&party_render_calls);
+}
+static void party_second_render(void) {
+    InterlockedIncrement(&party_render_calls);
+    party_original_render(); party_present(2);
+    InterlockedDecrement(&party_render_calls);
+}
+BOOL SudekiMpLanPartyRemovePresentationObserver(void) {
+    BOOL restored=TRUE;
+    if(InterlockedCompareExchange(&party_render_calls,0,0)) { SetLastError(ERROR_BUSY); return FALSE; }
+    for(unsigned i=2;i-- > 0;)
+        if(!SudekiMpRestoreRelativeCallHook(&party_render_hooks[i])) restored=FALSE;
+    if(!restored) return FALSE; /* retain callable dependencies on failure */
+    if(InterlockedCompareExchange(&party_render_calls,0,0)) { SetLastError(ERROR_BUSY); return FALSE; }
+    party_render_observer=NULL; party_original_render=NULL;
+    return TRUE;
+}
+BOOL SudekiMpLanPartyInstallPresentationObserver(SudekiMpLanPartyPresentationObserver fn) {
+    if(!game_base || !service_only_mode || !fn || party_render_observer ||
+        party_render_hooks[0].installed || party_render_hooks[1].installed) return FALSE;
+    party_original_render=(void (*)(void))(game_base+0x1dce30);
+    party_render_observer=fn;
+    if(!SudekiMpInstallRelativeCallHook(&party_render_hooks[0],game_base+0x28d443,
+            party_original_render,party_first_render) ||
+        !SudekiMpInstallRelativeCallHook(&party_render_hooks[1],game_base+0x28d539,
+            party_original_render,party_second_render)) {
+        (void)SudekiMpLanPartyRemovePresentationObserver(); return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL party_boundary(const SudekiMpControlUpdateDispatchWitness *w) {
+    return game_base && service_only_mode && w &&
+        w->source == SUDEKIMP_CONTROL_UPDATE_DISPATCH_SOURCE_SERVICE_POST_ORIGINAL &&
+        w->service_post_original_exact &&
+        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+}
+static BOOL party_observation_boundary(const SudekiMpControlUpdateDispatchWitness *w) {
+    return w?party_boundary(w):SudekiMpLanPartyPresentationBoundary();
+}
+
+BOOL SudekiMpLanPartyControlBeginSession(
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    if (!party_boundary(w) || SudekiMpLanPartyControlHasLeases()) return FALSE;
+    party_local_seat = 0u;
+    party_native_thread=GetCurrentThreadId();
+    ZeroMemory(party_native_last_generation,sizeof(party_native_last_generation));
+    return TRUE;
+}
+BOOL SudekiMpLanPartyControlBeginClientSession(
+    const SudekiMpControlUpdateDispatchWitness *w, unsigned int local_seat) {
+    if (!local_seat || local_seat >= 4u || !party_boundary(w) ||
+        SudekiMpLanPartyControlHasLeases()) return FALSE;
+    party_local_seat = local_seat;
+    party_native_thread=GetCurrentThreadId();
+    ZeroMemory(party_native_last_generation,sizeof(party_native_last_generation));
+    return TRUE;
+}
+
+static BOOL party_key_valid(const SudekiMpLanPartyLease *k) {
+    return k && k->seat < 4u && k->seat != party_local_seat && k->generation && k->token;
+}
+static BOOL party_key_equal(const SudekiMpLanPartyLease *a,
+    const SudekiMpLanPartyLease *b) {
+    return a->seat == b->seat && a->generation == b->generation &&
+        a->token == b->token;
+}
+static void *party_actor(unsigned int seat) {
+    static const SudekiMpCleanroomActor actors[4] = {
+        SUDEKIMP_CLEANROOM_BUKI, SUDEKIMP_CLEANROOM_ELCO,
+        SUDEKIMP_CLEANROOM_TAL, SUDEKIMP_CLEANROOM_AILISH
+    };
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_lookup) return party_test_lookup(seat);
+#endif
+    return seat < 4u ? SudekiMpCleanroomEngineActorEntity(actors[seat]) : NULL;
+}
+
+static BOOL party_launch_option(const char *command, const char *option) {
+    const char *found;
+    size_t n = strlen(option);
+    if (!command) return FALSE;
+    found = strstr(command,option);
+    return found && (found == command || found[-1] == ' ' || found[-1] == '\t') &&
+        (!found[n] || found[n] == ' ' || found[n] == '\t');
+}
+static BOOL party_startup_world(float anchor[3], BOOL *combat) {
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_world) return party_test_world(anchor,combat);
+#endif
+    /* This adapter cannot spawn or initialize a campaign party. The future
+     * opt-in loader must also validate its complete closed feature profile. */
+    static const char *launch[4] = {"-Buki 1","-Elco 1","-Tal 1","-Ailish 1"};
+    static const SudekiMpCleanroomActor actors[4] = {
+        SUDEKIMP_CLEANROOM_BUKI,SUDEKIMP_CLEANROOM_ELCO,
+        SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
+    return party_local_seat < 4u && party_launch_option(GetCommandLineA(),"-Level testroom") &&
+        party_launch_option(GetCommandLineA(),"-DT 1") &&
+        party_launch_option(GetCommandLineA(),launch[party_local_seat]) &&
+        SudekiMpCleanroomEngineWorldReady() &&
+        SudekiMpCleanroomEngineCombatMode(combat) &&
+        SudekiMpCleanroomEngineActorPosition(actors[party_local_seat],anchor);
+}
+BOOL SudekiMpLanPartyControlObserveRoster(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanPartyRosterObservation *out) {
+    SudekiMpLanPartyRosterObservation o;
+    uint8_t *group, *controller;
+    unsigned int count, i, j, seen = 0;
+    if (!out || !party_observation_boundary(w)) return FALSE;
+    memset(&o,0,sizeof(o));
+    if (!party_startup_world(o.anchor,&o.combat) ||
+        !isfinite(o.anchor[0]) || !isfinite(o.anchor[1]) || !isfinite(o.anchor[2]))
+        return FALSE;
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if (!readable_memory(group,0xd0u) ||
+        !readable_memory(controller,CONTROLLER_TARGET_OFFSET+sizeof(void *))) return FALSE;
+    count = *(unsigned int *)(group+0xccu);
+    if (!count || count > 4) return FALSE;
+    for (i=0; i<4; ++i) {
+        uint8_t *actor = party_actor(i), *ai;
+        o.actors[i] = actor;
+        if (!actor) continue;
+        if (!readable_memory(actor,0x98u)) return FALSE;
+        ai = *(uint8_t **)(actor+0x94u);
+        if (!readable_memory(ai,0x14u) || *(void **)(ai+0x10u) != actor) return FALSE;
+        for (j=0; j<i; ++j) if (o.actors[j] == actor) return FALSE;
+        o.present_mask |= (uint8_t)(1u << i);
+    }
+    if (!o.actors[party_local_seat] ||
+        *(void **)(group+PARTY_SLOT_FIRST_OFFSET) != o.actors[party_local_seat] ||
+        *(void **)(controller+CONTROLLER_TARGET_OFFSET) != o.actors[party_local_seat]) return FALSE;
+    for (i=0; i<count; ++i) {
+        void *actor = *(void **)(group+PARTY_SLOT_FIRST_OFFSET+i*PARTY_SLOT_STRIDE);
+        if (!actor) return FALSE;
+        for (j=0; j<4 && o.actors[j] != actor; ++j) {}
+        if (j == 4 || (seen & (1u << j))) return FALSE;
+        seen |= 1u << j;
+    }
+    if (seen != o.present_mask || count != *(unsigned int *)(group+0xccu) ||
+        group != *(void **)(game_base+RVA_ACTIVE_GROUP_GLOBAL) ||
+        controller != *(void **)(game_base+RVA_CHARACTER_CONTROLLER_GLOBAL) ||
+        !party_observation_boundary(w)) return FALSE;
+    o.group = group; o.controller = controller; *out = o; return TRUE;
+}
+static BOOL party_roster_mutation_ready(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyRosterObservation *expected) {
+    SudekiMpLanPartyRosterObservation fresh;
+    unsigned int i;
+    int spirit;
+    if (!party_boundary(w) || !expected || !SudekiMpLanPartyControlObserveRoster(w,&fresh) || fresh.combat ||
+        fresh.group != expected->group || fresh.controller != expected->controller ||
+        fresh.present_mask != expected->present_mask) return FALSE;
+    for (i=0; i<4; ++i) if (fresh.actors[i] != expected->actors[i]) return FALSE;
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_world) return TRUE;
+#endif
+    if (SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit != 0) return FALSE;
+    for (i=0; i<4; ++i) {
+        SudekiMpCharacterSkillState state;
+        if (fresh.actors[i] && (!SudekiMpObserveCharacterSkill(fresh.actors[i],&state) ||
+                state.active || !readable_memory(state.skill,0x78u) ||
+                *(void **)((uint8_t *)state.skill+0x74u) != NULL)) return FALSE;
+    }
+    return TRUE;
+}
+BOOL SudekiMpLanPartyControlSpawnActor(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyRosterObservation *expected, unsigned int seat,
+    const float position[3]) {
+    SudekiMpCleanroomActor actor;
+    if (seat > 3 || seat == party_local_seat || !position || !isfinite(position[0]) ||
+        !isfinite(position[1]) || !isfinite(position[2]) ||
+        !party_roster_mutation_ready(w,expected) || expected->actors[seat] ||
+        !SudekiMpCleanroomActorFromType(SudekiMpLanPartyActorType(seat),&actor)) return FALSE;
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_spawn) return party_test_spawn(seat,position);
+#endif
+    return SudekiMpCleanroomEngineSpawnActor(actor,position);
+}
+BOOL SudekiMpLanPartyControlInitializeActor(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyRosterObservation *expected, unsigned int seat) {
+    SudekiMpCleanroomActor actor;
+    if (seat > 3 || !party_roster_mutation_ready(w,expected) || !expected->actors[seat] ||
+        !SudekiMpCleanroomActorFromType(SudekiMpLanPartyActorType(seat),&actor)) return FALSE;
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_initialize) return party_test_initialize(seat);
+#endif
+    /* Same character-family helpers as the accepted two-player runtime.
+     * Neither valid current equipment nor valid HP/SP is reset by these APIs. */
+    return SudekiMpGrantTestroomCharacterWeapons(expected->actors[seat],GetCommandLineA()) &&
+        party_roster_mutation_ready(w,expected) &&
+        SudekiMpEnsureCharacterStarterWeapon(expected->actors[seat]) &&
+        party_roster_mutation_ready(w,expected) &&
+        SudekiMpCleanroomEngineInitializePartyActor(actor) &&
+        party_roster_mutation_ready(w,expected) &&
+        SudekiMpInitializeSheathedWeaponVisibility(expected->actors[seat]) &&
+        party_roster_mutation_ready(w,expected);
+}
+
+void *SudekiMpLanPartyControlObserveActor(
+    const SudekiMpControlUpdateDispatchWitness *w, unsigned int seat) {
+    return party_observation_boundary(w) && seat < 4u ? party_actor(seat) : NULL;
+}
+BOOL SudekiMpLanPartyControlRetains(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor) {
+    const PartyNativeLease *r;
+    if (!party_observation_boundary(w) || !party_key_valid(key)) return FALSE;
+    r = &party_native_leases[key->seat];
+    return r->phase != PARTY_NATIVE_EMPTY && r->actor == actor &&
+        party_key_equal(&r->key, key);
+}
+
+/* Validate both cdecl slot-pointer wrappers, including their relative call
+ * operands, not merely a plausible prologue. No new hook is installed here. */
+static BOOL party_native_entries_exact(void) {
+    static const uint8_t acquire[] = {
+        0x8b,0x44,0x24,0x04,0x85,0xc0,0x74,0x18,0x8b,0x00,0x85,0xc0,
+        0x74,0x12,0x8b,0x80,0x94,0x00,0x00,0x00,0x85,0xc0,0x74,0x08,
+        0x6a,0x01,0x50,0xe8,0x60,0x62,0xff,0xff,0xc3
+    };
+    static const uint8_t release[] = {
+        0x8b,0x44,0x24,0x04,0x85,0xc0,0x74,0x18,0x8b,0x00,0x85,0xc0,
+        0x74,0x12,0x8b,0x80,0x94,0x00,0x00,0x00,0x85,0xc0,0x74,0x08,
+        0x6a,0x00,0x50,0xe8,0x30,0x62,0xff,0xff,0xc3
+    };
+    static const uint8_t ref_entry[] = {
+        0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x1c,0x53,0x8b,0x5d,0x08
+    };
+    static const uint8_t movement[] = {
+        0x53,0x8b,0x5c,0x24,0x08,0x55,0x8b,0x6c,0x24,0x10,0x56,0x57,0x8b,0xd3
+    };
+    return game_base &&
+        !memcmp(game_base + RVA_AI_OVERRIDE_CONTROL, acquire, sizeof(acquire)) &&
+        !memcmp(game_base + RVA_AI_DEFAULT_CONTROL, release, sizeof(release)) &&
+        !memcmp(game_base + 0xec350u, ref_entry, sizeof(ref_entry)) &&
+        !memcmp(game_base + RVA_ARBITER_MOVEMENT, movement, sizeof(movement)) &&
+        !memcmp(game_base + RVA_ARBITER_COMBAT_INPUT,
+            expected_arbiter_combat_input_entry,
+            sizeof(expected_arbiter_combat_input_entry)) &&
+        !memcmp(game_base + RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE,
+            expected_movement_controller_set_speed_immediate_entry,
+            sizeof(expected_movement_controller_set_speed_immediate_entry));
+}
+
+static uint8_t *party_ailish_missile_manager(
+    const SudekiMpLanPartyLease *key, void *actor) {
+    PartyMissileManagerCache *cache;
+    uint8_t *character=(uint8_t *)actor, *candidate, *resolved=NULL;
+    unsigned matches=0;
+    if(!key || key->seat!=3u || !actor || !game_base ||
+        !readable_memory(actor,0x98u)) return NULL;
+    cache=&party_missile_manager_cache[key->seat];
+    candidate=(uint8_t *)cache->manager;
+    if(party_key_equal(&cache->key,key) && cache->actor==actor &&
+        readable_memory(candidate,0xe1u) &&
+        *(void **)candidate==game_base+RVA_MISSILE_MANAGER_VTABLE &&
+        *(void **)(candidate+0x10u)==actor) return candidate;
+    ZeroMemory(cache,sizeof(*cache));
+    /* Character subclasses place CMissileManager at different offsets.
+     * Require one unique supported-build vtable and owner backpointer. */
+    for(size_t offset=0;offset<0x2000u;offset+=sizeof(void *)) {
+        candidate=character+offset;
+        if(!readable_memory(candidate,0xe1u) ||
+            *(void **)candidate!=game_base+RVA_MISSILE_MANAGER_VTABLE ||
+            *(void **)(candidate+0x10u)!=actor) continue;
+        resolved=candidate;
+        ++matches;
+    }
+    if(matches!=1u) return NULL;
+    cache->key=*key;
+    cache->actor=actor;
+    cache->manager=resolved;
+    return resolved;
+}
+
+BOOL SudekiMpLanPartyControlAilishRangedReady(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor, BOOL *ready) {
+    uint8_t *manager;
+    BOOL can_fire,is_firing;
+    if(ready) *ready=FALSE;
+    if(!ready || party_local_seat!=0u || !party_boundary(w) ||
+        !party_key_valid(key) || key->seat!=3u || actor!=party_actor(3u) ||
+        !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !party_native_entries_exact() || !missile_manager_can_fire ||
+        !missile_manager_is_firing ||
+        memcmp(game_base+RVA_MISSILE_MANAGER_CAN_FIRE,
+            expected_missile_manager_can_fire_entry,
+            sizeof(expected_missile_manager_can_fire_entry))!=0 ||
+        memcmp(game_base+RVA_MISSILE_MANAGER_IS_FIRING,
+            expected_missile_manager_is_firing_entry,
+            sizeof(expected_missile_manager_is_firing_entry))!=0)
+        return FALSE;
+    manager=party_ailish_missile_manager(key,actor);
+    if(!manager) return FALSE;
+    can_fire=missile_manager_can_fire(manager)!=0u;
+    is_firing=missile_manager_is_firing(manager)!=0u;
+    if(!party_boundary(w) || !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !readable_memory(manager,0xe1u) ||
+        *(void **)manager!=game_base+RVA_MISSILE_MANAGER_VTABLE ||
+        *(void **)(manager+0x10u)!=actor) return FALSE;
+    *ready=can_fire && !is_firing;
+    return TRUE;
+}
+static float party_positive_half(uint16_t half) {
+    unsigned int exponent=(half>>10u)&31u;
+    if((half&0x8000u) || exponent==31u) return NAN;
+    return exponent==0u ? ldexpf((float)(half&1023u),-24) :
+        ldexpf(1.0f+(float)(half&1023u)/1024.0f,(int)exponent-15);
+}
+BOOL SudekiMpLanPartyControlObserveAilishWeapon(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor,
+    SudekiMpLanPartyAilishWeaponState *state) {
+    uint8_t *manager,*record,**rows;
+    unsigned count,item_id;
+    BOOL found=FALSE;
+    float charge,reload;
+    SudekiMpLanPartyAilishWeaponState observed;
+    if(state) ZeroMemory(state,sizeof(*state));
+    if(!state || party_local_seat!=0u || !party_boundary(w) ||
+        !party_key_valid(key) || key->seat!=3u || actor!=party_actor(3u) ||
+        !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !party_native_entries_exact()) return FALSE;
+    manager=party_ailish_missile_manager(key,actor);
+    if(!readable_memory(manager,0xe4u) || manager[0xe0u]>6u) return FALSE;
+    record=*(uint8_t **)(manager+0x60u);
+    count=*(unsigned int *)(manager+0x44u);
+    rows=*(uint8_t ***)(manager+0x4cu);
+    if(!count || count>64u || !readable_memory(rows,count*sizeof(void *)) ||
+        !readable_memory(record,0xc4u)) return FALSE;
+    for(unsigned i=0;i<count;++i) if(rows[i]==record) { found=TRUE; break; }
+    if(!found) return FALSE;
+    item_id=*(uint32_t *)(record+8u);
+    charge=party_positive_half(*(uint16_t *)(record+0xbau));
+    reload=*(float *)(record+0xc0u);
+    if(item_id<12u || item_id>=24u || !isfinite(charge) || charge>100.0f ||
+        !isfinite(reload) || reload<0.0f || reload>60.0f ||
+        !party_boundary(w) || !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !readable_memory(manager,0xe4u) || manager[0xe0u]>6u ||
+        *(uint8_t **)(manager+0x60u)!=record ||
+        *(void **)(manager+0x10u)!=actor) return FALSE;
+    ZeroMemory(&observed,sizeof(observed));
+    observed.valid=1u; observed.stage=manager[0xe0u];
+    observed.item=(uint8_t)item_id;
+    observed.charge_q8=(uint16_t)(charge*256.0f+0.5f);
+    observed.reload_ms=(uint16_t)ceilf(reload*1000.0f);
+    *state=observed;
+    return TRUE;
+}
+
+static BOOL party_observe(const SudekiMpLanPartyLease *key, void *actor,
+    PartyNativeLease *out, void ***slot_out) {
+    uint8_t *a = actor, *group, *controller, *ai, *mode;
+    void *host;
+    void **slot = NULL;
+    unsigned int i, matches = 0;
+    if (!party_key_valid(key) || !game_base ||
+        !readable_memory(game_base + RVA_ACTIVE_GROUP_GLOBAL, sizeof(void *)) ||
+        !readable_memory(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL, sizeof(void *)) ||
+        actor != party_actor(key->seat) || !readable_memory(a, 0x98u))
+        return FALSE;
+    host = party_actor(party_local_seat);
+    group = *(uint8_t **)(game_base + RVA_ACTIVE_GROUP_GLOBAL);
+    controller = *(uint8_t **)(game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if (!host || host == actor || !readable_memory(group, 0xd0u) ||
+        *(unsigned int *)(group + 0xccu) != 4u ||
+        *(void **)(group + PARTY_SLOT_FIRST_OFFSET) != host ||
+        !readable_memory(controller, CONTROLLER_TARGET_OFFSET + sizeof(void *)) ||
+        *(void **)(controller + CONTROLLER_TARGET_OFFSET) != host)
+        return FALSE;
+    for (i = 0; i < PARTY_SLOT_COUNT; ++i) {
+        void **candidate = (void **)(group + PARTY_SLOT_FIRST_OFFSET +
+            i * PARTY_SLOT_STRIDE);
+        if (*candidate == actor) { slot = candidate; ++matches; }
+    }
+    if (matches != 1u) return FALSE;
+    ai = *(uint8_t **)(a + 0x94u);
+    if (!readable_memory(ai, 0x16cu) || *(void **)(ai + 0x10u) != actor)
+        return FALSE;
+    mode = *(uint8_t **)(ai + 0x3cu);
+    if (!readable_memory(mode, 0x0cu)) return FALSE;
+    memset(out, 0, sizeof(*out)); out->key = *key;
+    out->actor = actor; out->group = group; out->controller = controller;
+    out->host = host; out->ai = ai; out->mode = mode;
+    if (slot_out) *slot_out = slot;
+    return TRUE;
+}
+
+static BOOL party_identity(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor, PartyNativeLease **owned,
+    void ***slot) {
+    PartyNativeLease observed, *r;
+    if (!party_observation_boundary(w) || !party_key_valid(key)) return FALSE;
+    r = &party_native_leases[key->seat];
+    if (r->phase == PARTY_NATIVE_EMPTY || !party_key_equal(&r->key, key) ||
+        !party_observe(key, actor, &observed, slot) ||
+        r->actor != actor || r->group != observed.group ||
+        r->controller != observed.controller || r->host != observed.host ||
+        r->ai != observed.ai || r->mode != observed.mode) return FALSE;
+    if (owned) *owned = r;
+    return TRUE;
+}
+static BOOL party_ai_owned(const PartyNativeLease *r) {
+    return *(int16_t *)((uint8_t *)r->ai + 0x16au) == 1 &&
+        ((uint8_t *)r->mode)[0x0bu] == 0u;
+}
+BOOL SudekiMpLanPartyControlRetainedNativeThreadExact(
+    const SudekiMpLanPartyLease *key, void *actor) {
+    PartyNativeLease observed, *r;
+    if (!party_key_valid(key) || key->seat == party_local_seat || !actor ||
+        !service_only_mode || !party_native_thread ||
+        GetCurrentThreadId() != party_native_thread || !party_native_entries_exact())
+        return FALSE;
+    r = &party_native_leases[key->seat];
+    if (r->phase != PARTY_NATIVE_HELD || !party_key_equal(&r->key,key) ||
+        r->actor != actor || !party_observe(key,actor,&observed,NULL) ||
+        r->group != observed.group || r->controller != observed.controller ||
+        r->host != observed.host || r->ai != observed.ai || r->mode != observed.mode ||
+        !party_ai_owned(r)) return FALSE;
+    return TRUE;
+}
+static void party_forget(PartyNativeLease *r) {
+    unsigned int index = r->key.seat;
+    /* Preserve tombstones for this transport session; reset only after its
+     * coordinator/worker and all native leases have positively retired. */
+    memset(r, 0, sizeof(*r));
+    InterlockedAnd(&party_native_retained_mask, ~(LONG)(1u << index));
+}
+static void party_call_ai(BOOL acquiring, void **slot) {
+    AiControlFunction call = (AiControlFunction)(game_base +
+        (acquiring ? RVA_AI_OVERRIDE_CONTROL : RVA_AI_DEFAULT_CONTROL));
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (acquiring && party_test_acquire) call = party_test_acquire;
+    if (!acquiring && party_test_release) call = party_test_release;
+#endif
+    call(slot);
+}
+
+BOOL SudekiMpLanPartyControlExact(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor) {
+    PartyNativeLease *r;
+    return party_identity(w, key, actor, &r, NULL) &&
+        r->phase == PARTY_NATIVE_HELD && party_ai_owned(r);
+}
+
+BOOL SudekiMpLanPartyControlAcquire(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor,
+    SudekiMpLanPartyControlDrainProbe ready) {
+    PartyNativeLease observed, fresh, *r;
+    void **slot;
+    uint32_t previous_generation;
+    if (!party_boundary(w) || !party_key_valid(key) || !ready ||
+        !party_native_entries_exact()) return FALSE;
+    r = &party_native_leases[key->seat];
+    if (r->phase != PARTY_NATIVE_EMPTY)
+        return SudekiMpLanPartyControlExact(w, key, actor);
+    if (key->generation <= party_native_last_generation[key->seat] ||
+        !party_observe(key, actor, &observed, &slot) ||
+        !ready(key, actor, w) || !party_boundary(w) ||
+        !party_observe(key, actor, &fresh, &slot) ||
+        observed.group != fresh.group || observed.controller != fresh.controller ||
+        observed.host != fresh.host || observed.ai != fresh.ai ||
+        observed.mode != fresh.mode || r->phase != PARTY_NATIVE_EMPTY ||
+        !party_native_entries_exact() ||
+        *(int16_t *)((uint8_t *)fresh.ai + 0x16au) != 0 ||
+        ((uint8_t *)fresh.mode)[0x0bu] != 1u) return FALSE;
+    *r = observed;
+    r->phase = PARTY_NATIVE_QUARANTINED; /* retain BEFORE native entry */
+    previous_generation = party_native_last_generation[key->seat];
+    party_native_last_generation[key->seat] = key->generation;
+    InterlockedOr(&party_native_retained_mask, (LONG)(1u << key->seat));
+    party_call_ai(TRUE, slot);
+    if (!party_identity(w, key, actor, NULL, NULL)) return FALSE;
+    if (party_ai_owned(r)) { r->phase = PARTY_NATIVE_HELD; return TRUE; }
+    if (*(int16_t *)((uint8_t *)r->ai + 0x16au) == 0 &&
+        ((uint8_t *)r->mode)[0x0bu] == 1u) {
+        party_forget(r);
+        party_native_last_generation[key->seat] = previous_generation;
+    }
+    /* Unknown partial acquisition remains quarantined; never blindly call
+     * Default and risk releasing someone else's native ref. */
+    return FALSE;
+}
+
+static uint8_t *party_component(void *actor, unsigned int offset,
+    unsigned int vtable, size_t size) {
+    uint8_t *p = *(uint8_t **)((uint8_t *)actor + offset);
+    return readable_memory(p, size) && *(void **)p == game_base + vtable &&
+        *(void **)(p + 0x10u) == actor ? p : NULL;
+}
+static BOOL party_stop(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor) {
+    PartyNativeLease *r;
+    uint8_t *movement;
+    MovementControllerSetSpeedImmediateFunction stop;
+    if (!party_identity(w, key, actor, &r, NULL) || !party_ai_owned(r) ||
+        !party_native_entries_exact()) return FALSE;
+    movement = party_component(actor, 0x80u, 0x2c8644u, 0xc0u);
+    if (!movement || !(movement[0xbeu] & 0x08u)) return FALSE;
+    stop = (MovementControllerSetSpeedImmediateFunction)(game_base +
+        RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE);
+    stop(movement, 0.0f, 1.0f);
+    return party_identity(w, key, actor, NULL, NULL) &&
+        party_component(actor, 0x80u, 0x2c8644u, 0xc0u) == movement &&
+        *(float *)(movement + 0x24u) == 0.0f &&
+        *(float *)(movement + 0x28u) == 0.0f;
+}
+BOOL SudekiMpLanPartyControlMove(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor,
+    float x, float z, float ax, float az, BOOL aiming) {
+    uint8_t *arbiter, *movement;
+    float heading[3] = {x, 0, z}, magnitude, aim_length;
+    unsigned int gait = 0;
+    ArbiterMovementFunction call;
+    if (!party_boundary(w) || !isfinite(x) || !isfinite(z) || fabsf(x) > 1 || fabsf(z) > 1 ||
+        (aiming && (!isfinite(ax) || !isfinite(az) ||
+            fabsf(ax) > 1 || fabsf(az) > 1)) ||
+        !SudekiMpLanPartyControlExact(w, key, actor) ||
+        !readable_memory(actor, 0xb0u) || !party_native_entries_exact())
+        return FALSE;
+    arbiter = party_component(actor, 0x90u, 0x2cc9acu, 0x64u);
+    movement = party_component(actor, 0x80u, 0x2c8644u, 0xc0u);
+    if (!arbiter || !movement || !(movement[0xbeu] & 0x08u) ||
+        !party_component(actor, 0x8cu, 0x2d48d4u, 0x14u) ||
+        !party_component(actor, 0xacu, 0x2d4b24u, 0x54u)) return FALSE;
+    magnitude = sqrtf(x*x + z*z);
+    if (magnitude > 0.0001f) {
+        heading[0] /= magnitude; heading[2] /= magnitude;
+        if (aiming && !SudekiMpControlSeparationDirectionalGait(
+                x, z, ax, az, &gait, &heading[0], &heading[2])) return FALSE;
+        if (magnitude > 1) magnitude = 1;
+    } else {
+        if (!party_stop(w, key, actor)) return FALSE;
+        if (!aiming) return TRUE;
+        aim_length = sqrtf(ax*ax + az*az);
+        if (aim_length < 0.0001f) return FALSE;
+        heading[0] = ax/aim_length; heading[2] = az/aim_length;
+        magnitude = 0;
+    }
+    if (!SudekiMpLanPartyControlExact(w, key, actor) ||
+        party_component(actor, 0x90u, 0x2cc9acu, 0x64u) != arbiter ||
+        party_component(actor, 0x80u, 0x2c8644u, 0xc0u) != movement) return FALSE;
+    call = (ArbiterMovementFunction)(game_base + RVA_ARBITER_MOVEMENT);
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    if (party_test_movement) call = party_test_movement;
+#endif
+    call(arbiter, heading, magnitude, 1.0f, gait);
+    return SudekiMpLanPartyControlExact(w, key, actor);
+}
+static BOOL party_submit_actor_combat_input(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor,
+    int weak,int strong,int sweep,int block_state) {
+    uint8_t *arbiter;
+    BOOL combat = FALSE;
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+    BOOL (*combat_mode)(BOOL *) = party_test_combat_mode;
+#else
+    BOOL (*combat_mode)(BOOL *) = NULL;
+#endif
+    if(!combat_mode) combat_mode=SudekiMpCleanroomEngineCombatMode;
+    if (party_local_seat != 0u || !party_boundary(w) || !key ||
+        key->seat == 0u || key->seat > 3u ||
+        (weak != 0 && weak != 1) || (strong != 0 && strong != 1) ||
+        (sweep != 0 && sweep != 1) || block_state < 0 || block_state > 3 ||
+        (strong && sweep) ||
+        ((strong || sweep) && key->seat != 2u) ||
+        actor != party_actor(key->seat) ||
+        !SudekiMpLanPartyControlExact(w, key, actor) ||
+        !combat_mode(&combat) || !combat ||
+        !party_native_entries_exact()) return FALSE;
+    arbiter = party_component(actor, 0x90u, 0x2cc9acu, 0x64u);
+    if (!arbiter || *(void **)(arbiter + 0x10u) != actor ||
+        !party_component(actor, 0x94u, 0x2d48d4u, 0x14u) ||
+        !party_component(actor, 0xacu, 0x2d4b24u, 0x54u)) return FALSE;
+    if (!party_boundary(w) ||
+        !SudekiMpLanPartyControlExact(w, key, actor) ||
+        party_component(actor, 0x90u, 0x2cc9acu, 0x64u) != arbiter ||
+        !combat_mode(&combat) || !combat) return FALSE;
+#ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
+        if (party_test_combat) party_test_combat(actor, arbiter);
+    else
+#endif
+        SudekiMpSubmitArbiterCombatInput(
+            game_base + RVA_ARBITER_COMBAT_INPUT, arbiter,
+            weak, strong, sweep, block_state, 0, 0);
+    return party_boundary(w) &&
+        SudekiMpLanPartyControlExact(w, key, actor) &&
+        party_component(actor, 0x90u, 0x2cc9acu, 0x64u) == arbiter;
+}
+BOOL SudekiMpLanPartyControlSubmitWeakAttack(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor) {
+    return party_submit_actor_combat_input(w,key,actor,1,0,0,0);
+}
+BOOL SudekiMpLanPartyControlSubmitMelee(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor,BOOL weak,
+    BOOL strong,BOOL sweep) {
+    if ((weak != FALSE && weak != TRUE) || (strong != FALSE && strong != TRUE) ||
+        (sweep != FALSE && sweep != TRUE) || (!weak && !strong && !sweep))
+        return FALSE;
+    if ((strong != FALSE && strong != TRUE) ||
+        (sweep != FALSE && sweep != TRUE) || (strong && sweep)) return FALSE;
+    return party_submit_actor_combat_input(w,key,actor,weak ? 1 : 0,
+        strong ? 1 : 0,sweep ? 1 : 0,0);
+}
+BOOL SudekiMpLanPartyControlSubmitBlockState(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor,unsigned int state) {
+    if(state>3u || !state) return FALSE;
+    return party_submit_actor_combat_input(w,key,actor,0,0,0,(int)state);
+}
+BOOL SudekiMpLanPartyControlPresentationFacing(const SudekiMpControlUpdateDispatchWitness *w,
+    unsigned seat, void *actor, const float direction[3]) {
+    uint8_t *arbiter,*accepted; float length,heading[3];
+    if(!party_local_seat || !party_boundary(w) || seat>=4 || !direction ||
+        party_actor(seat)!=actor || !isfinite(direction[0]) || direction[1]!=0 ||
+        !isfinite(direction[2]) || !party_native_entries_exact()) return FALSE;
+    length=sqrtf(direction[0]*direction[0]+direction[2]*direction[2]);
+    if(length<0.5f || length>1.5f) return FALSE;
+    arbiter=party_component(actor,0x90,0x2cc9ac,0x64);
+    accepted=party_component(actor,0xac,0x2d4b24,0x54);
+    if(!arbiter || !accepted || (*(uint32_t *)(arbiter+0x50)&0x400000) ||
+        !party_component(actor,0x80,0x2c8644,0xc0) ||
+        !party_component(actor,0x8c,0x2d48d4,0x14)) return FALSE;
+    heading[0]=direction[0]/length; heading[1]=0; heading[2]=direction[2]/length;
+    if(!memcmp(accepted+0x48,heading,sizeof(heading))) return TRUE;
+    ((ArbiterMovementFunction)(game_base+RVA_ARBITER_MOVEMENT))(arbiter,heading,0,1,0);
+    return party_boundary(w) && party_actor(seat)==actor &&
+        party_component(actor,0xac,0x2d4b24,0x54)==accepted &&
+        !memcmp(accepted+0x48,heading,sizeof(heading));
+}
+BOOL SudekiMpLanPartyControlQuiesce(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor) {
+    PartyNativeLease *r;
+    if (!party_boundary(w) || !party_key_valid(key)) return FALSE;
+    r = &party_native_leases[key->seat];
+    if (!party_key_equal(&r->key, key) || r->actor != actor ||
+        (r->phase != PARTY_NATIVE_HELD && r->phase != PARTY_NATIVE_DRAINING))
+        return FALSE;
+    /* Close admission using the retained key even when the native group has
+     * vanished. Unknown native state prevents writes, not admission closure. */
+    r->phase = PARTY_NATIVE_DRAINING;
+    return party_stop(w, key, actor);
+}
+BOOL SudekiMpLanPartyControlRelease(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key, void *actor,
+    SudekiMpLanPartyControlDrainProbe drained) {
+    PartyNativeLease *r;
+    void **slot;
+    if (!party_boundary(w) || !drained || !party_identity(w, key, actor, &r, &slot) ||
+        !party_native_entries_exact()) return FALSE;
+    if (r->phase == PARTY_NATIVE_RELEASE_VERIFY) {
+        /* Default already consumed our ref. Never decrement twice. */
+        if (*(int16_t *)((uint8_t *)r->ai + 0x16au) == 0 &&
+            ((uint8_t *)r->mode)[0x0bu] == 1u && drained(key, actor, w) &&
+            party_identity(w, key, actor, NULL, NULL)) {
+            party_forget(r); return TRUE;
+        }
+        return FALSE;
+    }
+    if (r->phase != PARTY_NATIVE_DRAINING || !drained(key, actor, w) ||
+        !party_stop(w, key, actor) ||
+        !party_identity(w, key, actor, &r, &slot) || !party_ai_owned(r))
+        return FALSE;
+    r->phase = PARTY_NATIVE_RELEASE_VERIFY;
+    party_call_ai(FALSE, slot);
+    if (!party_identity(w, key, actor, NULL, NULL)) return FALSE;
+    if (*(int16_t *)((uint8_t *)r->ai + 0x16au) == 0 &&
+        ((uint8_t *)r->mode)[0x0bu] == 1u) { party_forget(r); return TRUE; }
+    if (party_ai_owned(r)) r->phase = PARTY_NATIVE_DRAINING;
+    return FALSE;
+}
+
 BOOL SudekiMpControlSeparationForceStopCharacter(void *character) {
     uint8_t *bytes = (uint8_t *)character;
     uint8_t *arbiter;
@@ -7424,6 +8176,13 @@ BOOL SudekiMpUninstallControlSeparation(void) {
             "controller_update_dispatch_in_flight", ERROR_BUSY);
         return FALSE;
     }
+    if (SudekiMpLanPartyControlHasLeases() || party_render_observer ||
+        party_render_hooks[0].installed || party_render_hooks[1].installed) {
+        release_control_update_lifecycle();
+        retain_control_separation_dependencies(
+            "four_player_actor_leases_not_drained", ERROR_BUSY);
+        return FALSE;
+    }
     if (!release_companion_leases_for_uninstall()) {
         release_control_update_lifecycle();
         retain_control_separation_dependencies(
@@ -7485,6 +8244,10 @@ BOOL SudekiMpUninstallControlSeparation(void) {
     spirit_direct_movement_active = FALSE;
     spirit_direct_movement_last_trace_tick = 0u;
     game_base = NULL;
+    ZeroMemory(party_native_leases, sizeof(party_native_leases));
+    ZeroMemory(party_missile_manager_cache, sizeof(party_missile_manager_cache));
+    ZeroMemory(party_native_last_generation, sizeof(party_native_last_generation));
+    party_local_seat = 0u;
     ZeroMemory(companion_controls, sizeof(companion_controls));
     role_lock_active = FALSE;
     fixed_three_release_deferred_logged = FALSE;

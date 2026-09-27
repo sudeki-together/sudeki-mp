@@ -35,6 +35,19 @@ typedef struct SudekiMpCleanroomActorPresentation {
  * blends, not the ranged five/four surface. No pointers are retained. */
 BOOL SudekiMpCleanroomBukiAnimationStorageValid(
     void *renderer, unsigned int submodels, BOOL for_write);
+/* Exact world layout: melee four/three, ranged five/four. This helper checks
+ * every declared channel's storage; WorldMotion reads only the four shared
+ * locomotion channels, while RangedActionPresentation reads channel four. */
+BOOL SudekiMpCleanroomWorldMotionStorageValid(SudekiMpCleanroomActor actor,
+    void *renderer, unsigned int submodels, BOOL for_write);
+BOOL SudekiMpCleanroomEngineWorldMotion(SudekiMpCleanroomActor actor,
+    SudekiMpCleanroomActorPresentation *presentation);
+/* Read the fifth, actor-local ranged firing channel from the exact leased
+ * Elco/Ailish entity. WorldMotion exposes only the four shared locomotion
+ * channels. Unknown actor, renderer or storage identity fails. */
+BOOL SudekiMpCleanroomEngineRangedActionPresentation(
+    SudekiMpCleanroomActor actor, void *expected_entity,
+    int32_t *selector, uint8_t *state, float *time);
 
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor);
 const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);

@@ -387,8 +387,8 @@ cleanup:
 
 static int verify_buki_animation_storage(void) {
     uint8_t renderer[0xa8] = {0};
-    uint8_t channels[4 * 36] = {0};
-    uint8_t blends[3 * 20] = {0};
+    uint8_t channels[5 * 36] = {0};
+    uint8_t blends[4 * 20] = {0};
     uint8_t *rows = VirtualAlloc(NULL, 4096u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     unsigned int i;
     DWORD old_protection;
@@ -398,7 +398,7 @@ static int verify_buki_animation_storage(void) {
     *(void **)(renderer + 0x9c) = blends;
     *(uint32_t *)(renderer + 0xa0) = 4;
     *(uint32_t *)(renderer + 0xa4) = 3;
-    for (i = 0; i < 4; ++i) *(void **)(channels + 36 * i) = rows + 24 * i;
+    for (i = 0; i < 5; ++i) *(void **)(channels + 36 * i) = rows + 24 * i;
     *(uint16_t *)(blends + 2) = 1;
     *(uint16_t *)(blends + 20) = 2;
     *(uint16_t *)(blends + 22) = 3;
@@ -408,6 +408,16 @@ static int verify_buki_animation_storage(void) {
     "Buki four-channel/three-blend storage guard")) ok = 0; } while (0)
     STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
     STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+    STORAGE_CHECK(SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_TAL,renderer,1,TRUE));
+    STORAGE_CHECK(!SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_ELCO,renderer,1,TRUE));
+    *(uint32_t *)(renderer+0xa0)=5; *(uint32_t *)(renderer+0xa4)=4;
+    STORAGE_CHECK(SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_ELCO,renderer,1,TRUE));
+    STORAGE_CHECK(SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_AILISH,renderer,1,FALSE));
+    *(void **)(channels + 36 * 4) = NULL;
+    STORAGE_CHECK(!SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_ELCO,renderer,1,FALSE));
+    *(void **)(channels + 36 * 4) = rows + 24 * 4;
+    STORAGE_CHECK(!SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_TAL,renderer,1,TRUE));
+    *(uint32_t *)(renderer+0xa0)=4; *(uint32_t *)(renderer+0xa4)=3;
     STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(NULL, 1, FALSE));
     STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 0, FALSE));
     STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 33, FALSE));
@@ -419,6 +429,7 @@ static int verify_buki_animation_storage(void) {
     *(uint32_t *)(renderer + 0xa4) = 3;
     *(void **)(channels + 72) = NULL;
     STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
+    STORAGE_CHECK(!SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_TAL,renderer,1,TRUE));
     *(void **)(channels + 72) = rows + 48;
     *(uint16_t *)(blends + 40) = 4;
     STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
@@ -426,6 +437,7 @@ static int verify_buki_animation_storage(void) {
     if (VirtualProtect(rows, 4096u, PAGE_READONLY, &old_protection)) {
         STORAGE_CHECK(SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, FALSE));
         STORAGE_CHECK(!SudekiMpCleanroomBukiAnimationStorageValid(renderer, 1, TRUE));
+        STORAGE_CHECK(!SudekiMpCleanroomWorldMotionStorageValid(SUDEKIMP_CLEANROOM_TAL,renderer,1,TRUE));
     } else ok = 0;
 #undef STORAGE_CHECK
     VirtualFree(rows, 0, MEM_RELEASE);

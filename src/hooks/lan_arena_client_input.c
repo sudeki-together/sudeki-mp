@@ -11,13 +11,17 @@
 #include "hooks/lan_arena_runtime.h"
 #include "network/lan_arena_operator.h"
 #include "network/lan_arena_session.h"
+#include "network/lan_party_session.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 
+static SudekiMpLanPartySession *party_input_session;
 static uint8_t seat_client_type(void) {
     uint8_t host_type = 0u, client_type = 0u;
+    if (party_input_session)
+        return SudekiMpLanPartyActorType(SudekiMpLanPartyLocalSeat(party_input_session));
     return SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)
         ? client_type : SUDEKIMP_LAN_ARENA_AILISH_TYPE;
 }
@@ -185,8 +189,12 @@ static int16_t last_transmitted_aim_y;
 static int16_t last_transmitted_aim_z;
 static BOOL last_transmitted_weak_held;
 static BOOL last_transmitted_first_person_active;
+static BOOL last_transmitted_block_held;
 static BOOL native_weak_held;
 static DWORD native_weak_sample_at_ms;
+static BOOL pending_strong_pressed;
+static BOOL pending_sweep_pressed;
+static BOOL native_block_held;
 static BOOL skill_pending;
 static uint8_t pending_kit_action;
 static uint8_t pending_kit_slot;
@@ -720,6 +728,10 @@ static void service_pending_character_camera_input(void) {
 
 static BOOL authenticated_client(void) {
     SudekiMpLanArenaSessionStatus status;
+    /* This predicate also owns native containment in the existing hooks.
+     * A disconnected replica must not silently become an authoritative solo
+     * world. Transmission still checks ACTIVE token/generation separately. */
+    if (party_input_session) return TRUE;
     return SudekiMpLanArenaSessionGetStatus(&status) && status.peer_connected &&
         status.local_role == SUDEKIMP_LAN_ARENA_ROLE_CLIENT_AILISH;
 }
@@ -998,6 +1010,8 @@ static BOOL send_client_input(
     BOOL weak_held
 ) {
     SudekiMpLanArenaInput input;
+    SudekiMpLanPartyCombatInputExtension combat;
+    BOOL sent;
     refresh_client_camera_aim();
     ZeroMemory(&input, sizeof(input));
     input.sequence = 0u;
@@ -1013,7 +1027,8 @@ static BOOL send_client_input(
     input.weak_attack_held = weak_held ? 1u : 0u;
     input.ranged_first_person_active =
         client_ailish_first_person_active() ? 1u : 0u;
-    if(input.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE && input.ranged_first_person_active) {
+    if(input.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+        input.ranged_first_person_active) {
         float direction[3],target[3];
         if(SudekiMpLanAimCameraTarget(direction,target)) {
             input.aim_direction_x=normalized_axis(direction[0]);
@@ -1036,7 +1051,27 @@ static BOOL send_client_input(
         input.weak_attack_pressed = 0u;
         input.weak_attack_held = 0u;
     }
-    if (!SudekiMpLanArenaSessionSendInput(&input)) return FALSE;
+    ZeroMemory(&combat,sizeof(combat));
+    combat.strong_pressed=pending_strong_pressed ? 1u : 0u;
+    combat.sweep_pressed=pending_sweep_pressed ? 1u : 0u;
+    combat.block_held=native_block_held ? 1u : 0u;
+    if(input.skill_pressed || input.kit_action) ZeroMemory(&combat,sizeof(combat));
+    if(combat.block_held &&
+        (combat.strong_pressed || combat.sweep_pressed ||
+         input.weak_attack_pressed || input.weak_attack_held))
+        combat.block_held=0;
+    if(party_input_session) {
+        if(SudekiMpLanPartyExtensionReady(party_input_session))
+            sent=SudekiMpLanPartySendInputExtended(
+                party_input_session,&input,&combat);
+        else sent=SudekiMpLanPartySendInput(party_input_session,&input);
+    } else sent=SudekiMpLanArenaSessionSendInput(&input);
+    if(!sent) return FALSE;
+    if(party_input_session && SudekiMpLanPartyExtensionReady(party_input_session)) {
+        if(combat.strong_pressed) pending_strong_pressed=FALSE;
+        if(combat.sweep_pressed) pending_sweep_pressed=FALSE;
+        last_transmitted_block_held=combat.block_held!=0u;
+    }
     skill_pending = FALSE;
     pending_skill_slot = 0u;
     pending_kit_action = 0u;
@@ -1173,6 +1208,10 @@ void SudekiMpLanArenaClientInputService(void) {
     BOOL operator_forward_held = operator_forward_hold_event != NULL &&
         WaitForSingleObject(operator_forward_hold_event, 0u) == WAIT_OBJECT_0;
     if (!authenticated_client()) {
+        pending_strong_pressed=FALSE;
+        pending_sweep_pressed=FALSE;
+        native_block_held=FALSE;
+        last_transmitted_block_held=FALSE;
         pending_kit_action = 0u;
         pending_kit_slot = 0u;
         weapon_cycle_actor = NULL;
@@ -1212,10 +1251,14 @@ void SudekiMpLanArenaClientInputService(void) {
         pending_character_camera_event_valid = FALSE;
         invalidate_native_movement_sample();
         weak_was_down = FALSE;
+        pending_strong_pressed=FALSE;
+        pending_sweep_pressed=FALSE;
+        native_block_held=FALSE;
         refresh_client_camera_aim();
         if (last_transmitted_direction_x != 0 ||
             last_transmitted_direction_z != 0 ||
             last_transmitted_weak_held || skill_pending || pending_kit_action != 0u ||
+            last_transmitted_block_held ||
             last_input_send_at == 0u) {
             (void)send_client_input_at(0, 0, FALSE, FALSE, now);
         }
@@ -1240,6 +1283,8 @@ void SudekiMpLanArenaClientInputService(void) {
         raw_x = *(float *)(controller + CONTROLLER_MOVE_X_OFFSET);
         raw_y = *(float *)(controller + CONTROLLER_MOVE_Y_OFFSET);
         gameplay_owner_exact=ailish!=NULL && *(int *)(controller+0x80u)==1;
+        native_block_held=SudekiMpLanArenaClientNativeWeakHeld(
+            *(int *)(controller+CONTROLLER_BLOCK_OFFSET));
         /* Retail only calls its combat handler when controller+0x1c9 marks
          * an input transition. A stable held state does not refresh that
          * hook's timestamp. Observe the live window-owned state here instead
@@ -1253,6 +1298,7 @@ void SudekiMpLanArenaClientInputService(void) {
         raw_y = 0.0f;
         native_weak_held = FALSE;
         native_weak_sample_at_ms = 0u;
+        native_block_held=FALSE;
     }
     /* The native controller's axes and transition states are scoped to this
      * actual Sudeki window.  GetAsyncKeyState is not: under two isolated Wine
@@ -1274,14 +1320,16 @@ void SudekiMpLanArenaClientInputService(void) {
         invalidate_native_movement_sample();
     }
     first_person_active = client_ailish_first_person_active();
-    local_weak_held = SudekiMpLanArenaClientRangedWeakHeld(
-        first_person_active,
-        (native_weak_sample_at_ms != 0u &&
-         (DWORD)(now - native_weak_sample_at_ms) <=
-             CLIENT_NATIVE_INPUT_FRESH_MS && native_weak_held) ||
-        (operator_weak_attack_until_ms != 0u &&
-         (LONG)(operator_weak_attack_until_ms - now) > 0) ||
-        operator_weak_held);
+    {
+        BOOL native_held=native_weak_sample_at_ms!=0u &&
+            (DWORD)(now-native_weak_sample_at_ms)<=CLIENT_NATIVE_INPUT_FRESH_MS &&
+            native_weak_held;
+        BOOL operator_held=(operator_weak_attack_until_ms!=0u &&
+            (LONG)(operator_weak_attack_until_ms-now)>0) || operator_weak_held;
+        local_weak_held=first_person_active ?
+            SudekiMpLanArenaClientRangedWeakHeld(first_person_active,
+                native_held || operator_held) : native_held || operator_held;
+    }
     weak_pressed = local_weak_held && !weak_was_down;
     weak_changed = local_weak_held != weak_was_down;
     weak_was_down = local_weak_held;
@@ -1328,6 +1376,14 @@ void SudekiMpLanArenaClientInputService(void) {
             SudekiMpLanArenaClientAimRefreshDue(gameplay_owner_exact,
                 first_person_active,last_input_send_at,now)) ||
         skill_pending || pending_kit_action != 0u ||
+        ((pending_strong_pressed || pending_sweep_pressed) &&
+            (!party_input_session ||
+             SudekiMpLanPartyExtensionReady(party_input_session)) &&
+            (last_input_send_at==0u ||
+             (DWORD)(now-last_input_send_at)>=CLIENT_INPUT_SEND_INTERVAL_MS)) ||
+        native_block_held!=last_transmitted_block_held ||
+        (native_block_held && (DWORD)(now-last_input_send_at)>=
+            CLIENT_INPUT_SEND_INTERVAL_MS) ||
         ((desired_x != 0 || desired_z != 0) &&
             (DWORD)(now - last_input_send_at) >=
                 CLIENT_INPUT_SEND_INTERVAL_MS) ||
@@ -1335,7 +1391,8 @@ void SudekiMpLanArenaClientInputService(void) {
             CLIENT_INPUT_SEND_INTERVAL_MS) ||
         last_input_send_at == 0u) {
         if (send_client_input_at(
-                desired_x, desired_z, weak_pressed, weak_was_down, now) &&
+                desired_x, desired_z, weak_pressed,
+                first_person_active && weak_was_down, now) &&
             weak_changed) {
             SudekiMpLogFormat(
                 "lan_arena_client_input event=weak_attack_send phase=%s "
@@ -1366,10 +1423,10 @@ static void queue_client_weapon_cycle(void *ailish, int next, int previous) {
          pending_kit_action != SUDEKIMP_LAN_ARENA_KIT_WEAPON) ||
         client_local_modal_active() ||
         SudekiMpLanArenaClientReplicaLocalSkillCameraActive() ||
-        !client_ailish_first_person_active() ||
+        (!party_input_session && !client_ailish_first_person_active()) ||
         !SudekiMpDescribeCharacterWeapons(ailish, &weapons)) return;
-    /* Training replication admits the twelve Ailish slots only. Never cycle
-     * into another actor's inventory through an out-of-range wire request. */
+    /* The request names only this window's actor and is bounded to twelve
+     * slots. The host validates the actor family through native inventory. */
     if (weapons.row_count > 12u) weapons.row_count = 12u;
     for (current = 0u; current < weapons.row_count; ++current)
         if (weapons.rows[current].equipped) break;
@@ -1398,18 +1455,27 @@ static void __stdcall capture_client_combat(void *controller) {
     BOOL owns_ailish = state != NULL && ailish != NULL &&
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == ailish;
     int native_weak_state;
+    int native_strong_state,native_sweep_state,native_block_state;
     int native_next_state, native_previous_state;
     if (!authenticated_client() || !owns_ailish) {
         original_controller_combat(controller);
         return;
     }
     native_weak_state = *(int *)(state + CONTROLLER_WEAK_OFFSET);
+    native_strong_state = *(int *)(state + CONTROLLER_STRONG_OFFSET);
+    native_sweep_state = *(int *)(state + CONTROLLER_SWEEP_OFFSET);
+    native_block_state = *(int *)(state + CONTROLLER_BLOCK_OFFSET);
     native_next_state = *(int *)(state + CONTROLLER_WEAPON_NEXT_OFFSET);
     native_previous_state = *(int *)(state + CONTROLLER_WEAPON_PREVIOUS_OFFSET);
     queue_client_weapon_cycle(ailish, native_next_state, native_previous_state);
     native_weak_held =
         SudekiMpLanArenaClientNativeWeakHeld(native_weak_state);
     native_weak_sample_at_ms = GetTickCount();
+    if(party_input_session && native_strong_state==1 && !pending_sweep_pressed)
+        pending_strong_pressed=TRUE;
+    if(party_input_session && native_sweep_state==1 && !pending_strong_pressed)
+        pending_sweep_pressed=TRUE;
+    native_block_held=SudekiMpLanArenaClientNativeWeakHeld(native_block_state);
     /* Consume local execution while still advancing Sudeki's 0/1/2/3 input
      * transition. Restoring state 1 verbatim caused every later frame to
      * manufacture another press edge; state 3 likewise had to retire to 0.
@@ -1425,6 +1491,12 @@ static void __stdcall capture_client_combat(void *controller) {
         *(void **)(state + CONTROLLER_TARGET_OFFSET) == ailish) {
         *(int *)(state + CONTROLLER_WEAK_OFFSET) =
             SudekiMpLanArenaClientSuppressedWeakNextState(native_weak_state);
+        *(int *)(state + CONTROLLER_STRONG_OFFSET) =
+            SudekiMpLanArenaClientSuppressedWeakNextState(native_strong_state);
+        *(int *)(state + CONTROLLER_SWEEP_OFFSET) =
+            SudekiMpLanArenaClientSuppressedWeakNextState(native_sweep_state);
+        *(int *)(state + CONTROLLER_BLOCK_OFFSET) =
+            SudekiMpLanArenaClientSuppressedWeakNextState(native_block_state);
         *(int *)(state + CONTROLLER_WEAPON_NEXT_OFFSET) =
             SudekiMpLanArenaClientSuppressedWeakNextState(native_next_state);
         *(int *)(state + CONTROLLER_WEAPON_PREVIOUS_OFFSET) =
@@ -1441,6 +1513,23 @@ BOOL SudekiMpLanArenaClientCharacterInputOwnerExact(HMODULE game_module) {
         character_input_hook.replacement_value==(void *)route_client_character_input &&
         readable_memory(character_input_hook.slot,sizeof(void *)) &&
         *character_input_hook.slot==character_input_hook.replacement_value;
+}
+
+BOOL SudekiMpInstallLanPartyClientInput(HMODULE game_module,
+    SudekiMpLanPartySession *session) {
+    unsigned int seat=SudekiMpLanPartyLocalSeat(session);
+    if (!session || !seat || seat>=4u || party_input_session || client_game_base ||
+        original_arbiter_movement || original_controller_combat ||
+        original_quick_menu_input || original_camera_input_event ||
+        original_character_input_handler) return FALSE;
+    party_input_session=session;
+    if (SudekiMpInstallLanArenaClientInput(game_module)) return TRUE;
+    /* The common installer rolls back transactionally. On failed rollback,
+     * retain the endpoint as long as any reader can still reach it. */
+    if (!original_arbiter_movement && !original_controller_combat &&
+        !original_quick_menu_input && !original_camera_input_event &&
+        !original_character_input_handler) party_input_session=NULL;
+    return FALSE;
 }
 
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
@@ -1615,8 +1704,12 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
     last_transmitted_aim_z = 0;
     last_transmitted_weak_held = FALSE;
     last_transmitted_first_person_active = FALSE;
+    last_transmitted_block_held=FALSE;
     native_weak_held = FALSE;
     native_weak_sample_at_ms = 0u;
+    pending_strong_pressed=FALSE;
+    pending_sweep_pressed=FALSE;
+    native_block_held=FALSE;
     invalidate_native_movement_sample();
     skill_pending = FALSE;
     pending_skill_slot = 0u;
@@ -1709,8 +1802,12 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
     last_transmitted_aim_z = 0;
     last_transmitted_weak_held = FALSE;
     last_transmitted_first_person_active = FALSE;
+    last_transmitted_block_held=FALSE;
     native_weak_held = FALSE;
     native_weak_sample_at_ms = 0u;
+    pending_strong_pressed=FALSE;
+    pending_sweep_pressed=FALSE;
+    native_block_held=FALSE;
     invalidate_native_movement_sample();
     skill_pending = FALSE;
     pending_skill_slot = 0u;
@@ -1760,5 +1857,6 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
         operator_camera_left_event = NULL;
     }
     client_game_base = NULL;
+    party_input_session = NULL;
     return TRUE;
 }

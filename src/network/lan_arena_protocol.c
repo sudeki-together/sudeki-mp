@@ -191,6 +191,12 @@ static int valid_actor_type(uint8_t type) {
         type == SUDEKIMP_LAN_ARENA_AILISH_TYPE;
 }
 
+static int codec_roster_valid(const SudekiMpLanArenaCodecRoster *roster) {
+    return roster != NULL && roster->world_locomotion <= 1u && valid_actor_type(roster->actor_type[0]) &&
+        valid_actor_type(roster->actor_type[1]) &&
+        roster->actor_type[0] != roster->actor_type[1];
+}
+
 static int ranged_actor_type(uint8_t type) {
     return type == SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
         type == SUDEKIMP_LAN_ARENA_ELCO_TYPE;
@@ -1002,24 +1008,25 @@ int SudekiMpLanArenaHitFeedbackValid(const SudekiMpLanArenaHitFeedback *hit) {
     return 1;
 }
 
-int SudekiMpLanArenaSnapshotValid(
-    const SudekiMpLanArenaSnapshot *snapshot
+int SudekiMpLanArenaSnapshotValidForRoster(
+    const SudekiMpLanArenaSnapshot *snapshot,
+    const SudekiMpLanArenaCodecRoster *roster
 ) {
     unsigned int index;
     unsigned int other;
-    if (snapshot == NULL ||
+    if (!codec_roster_valid(roster) || snapshot == NULL ||
         snapshot->match_state > SUDEKIMP_LAN_ARENA_MATCH_ENDED ||
         snapshot->combat_enabled > 1u ||
-        (snapshot->seat[0].locomotion.valid && !snapshot->combat_enabled) ||
-        (snapshot->seat[1].locomotion.valid && !snapshot->combat_enabled) ||
+        (!roster->world_locomotion && snapshot->seat[0].locomotion.valid && !snapshot->combat_enabled) ||
+        (!roster->world_locomotion && snapshot->seat[1].locomotion.valid && !snapshot->combat_enabled) ||
         (snapshot->match_state != SUDEKIMP_LAN_ARENA_MATCH_ACTIVE &&
          snapshot->combat_enabled != 0u) ||
         snapshot->enemy_count > SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
         !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
-        !valid_actor_snapshot(&snapshot->seat[0], expected_host_actor_type) ||
+        !valid_actor_snapshot(&snapshot->seat[0], roster->actor_type[0]) ||
         !valid_actor_snapshot(
-            &snapshot->seat[1], expected_client_actor_type)) return 0;
+            &snapshot->seat[1], roster->actor_type[1])) return 0;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++index) {
         const SudekiMpLanArenaSpiritView *view = &snapshot->cast[index].spirit_view;
         const SudekiMpLanArenaSkillFade *fade = &snapshot->cast[index].skill_fade;
@@ -1248,7 +1255,8 @@ static int read_actor(const uint8_t *input, SudekiMpLanArenaActorSnapshot *actor
     return 1;
 }
 
-static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaPacket *packet) {
+static int encode_payload(uint8_t *output, size_t *size,
+    const SudekiMpLanArenaPacket *packet, const SudekiMpLanArenaCodecRoster *roster) {
     size_t i;
     if (output == NULL || size == NULL || packet == NULL) {
         return 0;
@@ -1260,8 +1268,8 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
                 !valid_simulation_node_role(
                     packet->body.hello.simulation_node_role) ||
                 packet->body.hello.map_id != SUDEKIMP_LAN_ARENA_MAP_CLEANROOM ||
-                packet->body.hello.seat_type[0] != expected_host_actor_type ||
-                packet->body.hello.seat_type[1] != expected_client_actor_type) {
+                packet->body.hello.seat_type[0] != roster->actor_type[0] ||
+                packet->body.hello.seat_type[1] != roster->actor_type[1]) {
                 return 0;
             }
             write_u32(output, packet->body.hello.sequence);
@@ -1310,13 +1318,13 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
             *size = LAN_INPUT_SIZE;
             return 1;
         case SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT:
-            if (!SudekiMpLanArenaSnapshotValid(&packet->body.snapshot) ||
+            if (!SudekiMpLanArenaSnapshotValidForRoster(&packet->body.snapshot, roster) ||
                 !write_actor(output + LAN_SNAPSHOT_ACTORS_OFFSET,
                     &packet->body.snapshot.seat[0]) ||
                 !write_actor(output + LAN_SNAPSHOT_ACTORS_OFFSET + LAN_ACTOR_SIZE,
                     &packet->body.snapshot.seat[1]) ||
-                packet->body.snapshot.seat[0].actor_type != expected_host_actor_type ||
-                packet->body.snapshot.seat[1].actor_type != expected_client_actor_type) {
+                packet->body.snapshot.seat[0].actor_type != roster->actor_type[0] ||
+                packet->body.snapshot.seat[1].actor_type != roster->actor_type[1]) {
                 return 0;
             }
             write_u32(output, packet->body.snapshot.sequence);
@@ -1410,17 +1418,19 @@ static int encode_payload(uint8_t *output, size_t *size, const SudekiMpLanArenaP
     }
 }
 
-int SudekiMpLanArenaEncodePacket(
+int SudekiMpLanArenaEncodeForRoster(
     uint8_t output[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE],
     size_t *output_size,
-    const SudekiMpLanArenaPacket *packet
+    const SudekiMpLanArenaPacket *packet,
+    const SudekiMpLanArenaCodecRoster *roster
 ) {
     size_t payload_size;
-    if (output == NULL || output_size == NULL || packet == NULL ||
+    if (!codec_roster_valid(roster) ||
+        output == NULL || output_size == NULL || packet == NULL ||
         packet->type == SUDEKIMP_LAN_ARENA_PACKET_INVALID ||
         packet->type > SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE ||
         packet->session_token == 0u ||
-        !encode_payload(output + LAN_HEADER_SIZE, &payload_size, packet) ||
+        !encode_payload(output + LAN_HEADER_SIZE, &payload_size, packet, roster) ||
         LAN_HEADER_SIZE + payload_size > SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE) {
         return 0;
     }
@@ -1434,15 +1444,17 @@ int SudekiMpLanArenaEncodePacket(
     return 1;
 }
 
-int SudekiMpLanArenaDecodePacket(
+int SudekiMpLanArenaDecodeForRoster(
     const uint8_t *packet_bytes,
     size_t packet_size,
-    SudekiMpLanArenaPacket *packet
+    SudekiMpLanArenaPacket *packet,
+    const SudekiMpLanArenaCodecRoster *roster
 ) {
     size_t payload_size;
     size_t i;
     const uint8_t *payload;
-    if (packet_bytes == NULL || packet == NULL || packet_size < LAN_HEADER_SIZE ||
+    if (!codec_roster_valid(roster) ||
+        packet_bytes == NULL || packet == NULL || packet_size < LAN_HEADER_SIZE ||
         packet_size > SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE ||
         memcmp(packet_bytes, lan_magic, sizeof(lan_magic)) != 0 ||
         read_u16(packet_bytes + 4u) != SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION ||
@@ -1462,8 +1474,8 @@ int SudekiMpLanArenaDecodePacket(
             if (payload_size != LAN_HELLO_SIZE || !valid_role(payload[41]) ||
                 !valid_simulation_node_role(payload[42]) ||
                 payload[40] != SUDEKIMP_LAN_ARENA_MAP_CLEANROOM ||
-                payload[43] != expected_host_actor_type ||
-                payload[44] != expected_client_actor_type ||
+                payload[43] != roster->actor_type[0] ||
+                payload[44] != roster->actor_type[1] ||
                 read_u64(payload + 45u) != packet->session_token) {
                 return 0;
             }
@@ -1519,8 +1531,8 @@ int SudekiMpLanArenaDecodePacket(
                     &packet->body.snapshot.seat[0]) ||
                 !read_actor(payload + LAN_SNAPSHOT_ACTORS_OFFSET + LAN_ACTOR_SIZE,
                     &packet->body.snapshot.seat[1]) ||
-                packet->body.snapshot.seat[0].actor_type != expected_host_actor_type ||
-                packet->body.snapshot.seat[1].actor_type != expected_client_actor_type ||
+                packet->body.snapshot.seat[0].actor_type != roster->actor_type[0] ||
+                packet->body.snapshot.seat[1].actor_type != roster->actor_type[1] ||
                 payload[LAN_SNAPSHOT_SPIRIT_AUDIO_COUNT_OFFSET] >
                     SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY ||
                 payload[LAN_SNAPSHOT_SPIRIT_VFX_OBSERVED_OFFSET] > 1u ||
@@ -1624,7 +1636,7 @@ int SudekiMpLanArenaDecodePacket(
                 }
             }
             return packet->body.snapshot.sequence == packet->sequence &&
-                SudekiMpLanArenaSnapshotValid(&packet->body.snapshot);
+                SudekiMpLanArenaSnapshotValidForRoster(&packet->body.snapshot, roster);
         case SUDEKIMP_LAN_ARENA_PACKET_END:
         case SUDEKIMP_LAN_ARENA_PACKET_KEEPALIVE:
             return payload_size == 0u;
@@ -1713,4 +1725,27 @@ int SudekiMpLanArenaConnectionTimedOut(
         return 0;
     }
     return (uint32_t)(now_ms - state->last_received_at_ms) > timeout_ms;
+}
+
+/* Legacy two-seat entry points keep their existing immutable-session setting.
+ * The multiparty caller uses only the explicit-context functions above. */
+int SudekiMpLanArenaEncodePacket(
+    uint8_t output[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE], size_t *size,
+    const SudekiMpLanArenaPacket *packet) {
+    const SudekiMpLanArenaCodecRoster roster = {{
+        expected_host_actor_type, expected_client_actor_type},0};
+    return SudekiMpLanArenaEncodeForRoster(output, size, packet, &roster);
+}
+
+int SudekiMpLanArenaDecodePacket(
+    const uint8_t *bytes, size_t size, SudekiMpLanArenaPacket *packet) {
+    const SudekiMpLanArenaCodecRoster roster = {{
+        expected_host_actor_type, expected_client_actor_type},0};
+    return SudekiMpLanArenaDecodeForRoster(bytes, size, packet, &roster);
+}
+
+int SudekiMpLanArenaSnapshotValid(const SudekiMpLanArenaSnapshot *snapshot) {
+    const SudekiMpLanArenaCodecRoster roster = {{
+        expected_host_actor_type, expected_client_actor_type},0};
+    return SudekiMpLanArenaSnapshotValidForRoster(snapshot, &roster);
 }

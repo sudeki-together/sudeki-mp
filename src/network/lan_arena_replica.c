@@ -506,8 +506,17 @@ BOOL SudekiMpLanArenaReplicaPush(
     SudekiMpLanArenaReplica *replica,
     const SudekiMpLanArenaSnapshot *snapshot
 ) {
+    SudekiMpLanArenaCodecRoster roster = {{0,0},0};
+    if (!SudekiMpLanArenaSeatActorTypes(&roster.actor_type[0],&roster.actor_type[1]))
+        return FALSE;
+    return SudekiMpLanArenaReplicaPushForRoster(replica,snapshot,&roster);
+}
+
+BOOL SudekiMpLanArenaReplicaPushForRoster(SudekiMpLanArenaReplica *replica,
+    const SudekiMpLanArenaSnapshot *snapshot,
+    const SudekiMpLanArenaCodecRoster *roster) {
     if (replica == NULL || snapshot == NULL ||
-        !SudekiMpLanArenaSnapshotValid(snapshot) ||
+        !SudekiMpLanArenaSnapshotValidForRoster(snapshot,roster) ||
         (replica->latest_valid &&
          !SudekiMpLanArenaSequenceNewer(snapshot->sequence, replica->latest.sequence))) {
         return FALSE;
@@ -686,10 +695,10 @@ static void interpolate_spirit_visuals(
     }
 }
 
-BOOL SudekiMpLanArenaReplicaSample(
+static BOOL replica_sample(
     const SudekiMpLanArenaReplica *replica,
     uint32_t host_tick,
-    SudekiMpLanArenaSnapshot *sample
+    SudekiMpLanArenaSnapshot *sample, BOOL all_actor_motion
 ) {
     float alpha;
     uint32_t elapsed;
@@ -718,7 +727,7 @@ BOOL SudekiMpLanArenaReplicaSample(
         interpolate_actor(&replica->earliest.seat[1], &replica->oldest.seat[1],
             alpha, host_tick, replica->earliest.host_tick,
             replica->oldest.host_tick, &sample->seat[1]);
-        if (!sample->combat_enabled)
+        if (!all_actor_motion && !sample->combat_enabled)
             memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
@@ -754,7 +763,7 @@ BOOL SudekiMpLanArenaReplicaSample(
         interpolate_actor(&replica->oldest.seat[1], &replica->previous.seat[1],
             alpha, host_tick, replica->oldest.host_tick,
             replica->previous.host_tick, &sample->seat[1]);
-        if (!sample->combat_enabled)
+        if (!all_actor_motion && !sample->combat_enabled)
             memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
             sample->enemies[index].x = interpolate_float(
@@ -791,7 +800,7 @@ BOOL SudekiMpLanArenaReplicaSample(
     interpolate_actor(&replica->previous.seat[1], &replica->latest.seat[1],
         alpha, host_tick, replica->previous.host_tick,
         replica->latest.host_tick, &sample->seat[1]);
-    if (!sample->combat_enabled)
+    if (!all_actor_motion && !sample->combat_enabled)
         memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
     for (index = 0u; index < sample->enemy_count; ++index) {
         sample->enemies[index].x = interpolate_float(
@@ -805,6 +814,15 @@ BOOL SudekiMpLanArenaReplicaSample(
             replica->latest.enemies[index].z, alpha);
     }
     return TRUE;
+}
+
+BOOL SudekiMpLanArenaReplicaSample(const SudekiMpLanArenaReplica *r,
+    uint32_t tick,SudekiMpLanArenaSnapshot *sample) {
+    return replica_sample(r,tick,sample,FALSE);
+}
+BOOL SudekiMpLanArenaReplicaSampleAllActorMotion(const SudekiMpLanArenaReplica *r,
+    uint32_t tick,SudekiMpLanArenaSnapshot *sample) {
+    return replica_sample(r,tick,sample,TRUE);
 }
 
 BOOL SudekiMpLanArenaReplicaLatestSkillTiming(const SudekiMpLanArenaReplica *r,

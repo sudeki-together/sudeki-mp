@@ -4,6 +4,31 @@
 #include <windows.h>
 #include "network/lan_arena_protocol.h"
 #include <stdint.h>
+#include "hooks/lan_party_control.h"
+
+BOOL SudekiMpInitializeLanPartyClientReplica(HMODULE,SudekiMpLanPartySession *);
+/* Initial four-player movement slice, at the borrowed post-controller seam.
+ * No combat, casts, first-person arms, weapon changes or local simulation.
+ * All four native identities are preflighted before the first mutation. */
+BOOL SudekiMpLanPartyClientApplyMovement(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *);
+BOOL SudekiMpLanPartyClientApplyBasicCombat(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *);
+/* Retire renderer-only party presentation after the old peer's native actor
+ * leases have drained, before a disconnected seat is admitted again. */
+BOOL SudekiMpLanPartyClientEndPresentation(
+    const SudekiMpControlUpdateDispatchWitness *);
+/* Read-only Elco aim sample for the Elco-specific authored pose adapter.
+ * This is observer presentation only; clients never receive projectile
+ * authority from it. */
+BOOL SudekiMpLanPartyClientRangedAim(void *actor,float direction[3],
+    float target[3],BOOL *target_valid,BOOL *firing);
+/* Drain the last locally applied actor action before releasing a replica-only
+ * native lease. It may return a terminal presentation to combat idle only
+ * after the exact actor's action selector and completion state are observed. */
+BOOL SudekiMpLanPartyClientActionDrain(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,void *actor);
+BOOL SudekiMpLanPartyClientRestoreCombatMode(void);
 
 struct SudekiMpLanArenaActorSnapshot;
 
@@ -314,6 +339,8 @@ BOOL SudekiMpLanArenaClientSpiritViewEndFrame(void);
  * scheduler cannot briefly replace the canonical shared-simulation selector before
  * world draw. It consumes no packet and does not touch transforms/resources. */
 BOOL SudekiMpLanArenaClientReplicaReassertPresentation(void);
+/* Same once-sampled private four-player frame, exact render callback only. */
+void SudekiMpLanPartyClientPresent(unsigned phase);
 /* Publish the already-authoritative CPosition basis through Sudeki's native
  * world-matrix path. The LAN runtime uses this at its early animation-basis
  * boundaries and again as a late visible-transform verification; it consumes

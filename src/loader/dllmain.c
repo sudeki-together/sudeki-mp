@@ -17,6 +17,7 @@
 #include "hooks/freeroam_camera_input.h"
 #include "hooks/interaction_provenance.h"
 #include "hooks/lan_arena_runtime.h"
+#include "hooks/lan_party_runtime.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_startup_movie_skip.h"
 #include "hooks/lan_arena_window_policy.h"
@@ -248,6 +249,7 @@ static void cleanroom_control_update_observer(
 }
 
 static BOOL uninstall_runtime_hooks(void) {
+    if (!SudekiMpUninstallLanPartyRuntime()) return FALSE;
     if (!SudekiMpUninstallLanArenaPausePanel()) return FALSE;
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
     (void)SudekiMpUninstallLanArenaWindowPolicy();
@@ -824,6 +826,42 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
+    }
+    /* Closed private integration probe. This branch returns before ALL legacy
+     * feature selection: never mix two network coordinators, local split views,
+     * moon/campaign experiments or native combat with the four-window movement
+     * validation. The supported executable/hash checks above are unchanged. */
+    if (read_config_boolean(config_path,L"FourPlayerTest",L"Enabled")) {
+        SudekiMpLanPartyConfig party; wchar_t scope[32],address[32]; char ipv4[32];
+        memset(&party,0,sizeof(party)); memset(ipv4,0,sizeof(ipv4));
+        GetPrivateProfileStringW(L"FourPlayerTest",L"Scope",L"",scope,32,config_path);
+        GetPrivateProfileStringW(L"FourPlayerTest",L"HostAddress",L"",address,32,config_path);
+        UINT seat=GetPrivateProfileIntW(L"FourPlayerTest",L"Seat",4,config_path);
+        UINT port=GetPrivateProfileIntW(L"FourPlayerTest",L"Port",0,config_path);
+        if(wcscmp(scope,L"basic-combat") || seat>=4 || !port || port>65535 ||
+            !decode_sha256_text(build.actual_sha256,party.game_hash) ||
+            (seat && !WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,address,-1,
+                ipv4,sizeof(ipv4),NULL,NULL))) {
+            SudekiMpLogWrite("lan_party config=invalid scope=private_basic_combat\r\n");
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        party.local_seat=(uint8_t)seat; party.host_ipv4=seat?ipv4:NULL;
+        party.port=port; party.timeout_ms=10000;
+        if(!SudekiMpInitializeSkillActivationAbi(game_module) ||
+            !SudekiMpInitializeWeaponActivationAbi(game_module) ||
+            !SudekiMpCleanroomEngineInitialize(game_module) ||
+            !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
+                FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
+            !SudekiMpInstallLanArenaStartupMovieSkip(game_module) ||
+            !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            !SudekiMpInstallLanPartyRuntime(game_module,&party)) {
+            DWORD error=GetLastError();
+            SudekiMpLogFormat("lan_party startup=failed error=%lu\r\n",(unsigned long)error);
+            (void)uninstall_runtime_hooks(); SetLastError(error);
+            return SUDEKIMP_INIT_LAN_ARENA_FAILED;
+        }
+        SudekiMpLogWrite("status=ok profile=four_player_movement_probe gameplay_acceptance=false\r\n");
+        return SUDEKIMP_INIT_OK;
     }
     patch_enabled = read_config_boolean(
         config_path,
