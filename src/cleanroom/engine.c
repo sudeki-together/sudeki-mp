@@ -394,6 +394,8 @@ static void *sp_refill_logged_entities[4];
 static BOOL inventory_filled;
 static BOOL spirit_strikes_unlocked;
 static BOOL infinite_jetpack_fuel;
+static void maintain_jetpack_resource(void);
+static void maintain_spirit_resource(void);
 static void *last_elco_ability;
 static BOOL elco_fuel_refill_logged;
 static BOOL spirit_strike_unlocks_captured;
@@ -1570,10 +1572,12 @@ static void *lookup_entity(
 }
 
 static void *actor_pointer(SudekiMpCleanroomActor actor) {
-    if (get_pc == NULL || !SudekiMpCleanroomEngineWorldReady() || actor < 0 ||
+    if (get_pc == NULL || actor < 0 ||
         actor >= SUDEKIMP_CLEANROOM_ACTOR_COUNT) {
         return NULL;
     }
+    /* lookup_entity validates the world immediately before native lookup.
+     * No native call or state change separates these two wrappers. */
     return lookup_entity(get_pc, actor_resources[actor]);
 }
 
@@ -3664,6 +3668,10 @@ BOOL SudekiMpCleanroomActorIsRanged(SudekiMpCleanroomActor actor) {
         actor == SUDEKIMP_CLEANROOM_ELCO;
 }
 
+BOOL SudekiMpCleanroomEngineImageExact(HMODULE game_module) {
+    return game_module && game_base==(uint8_t *)game_module && resource_flags_captured;
+}
+
 BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module) {
     void *resolved_internal_spawn_pc = NULL;
     void *resolved_remove_pc = NULL;
@@ -4287,6 +4295,30 @@ static BOOL actor_presentation(
             get_time(renderer, (int)channel, 0u);
         if (!isfinite(presentation->rate[channel]) ||
             !isfinite(presentation->time[channel])) return FALSE;
+        if((full_world || ranged_action) && !presentation->selector[channel]) {
+            /* An empty native channel can retain a nonzero rate and keep
+             * accumulating GetTime after its clip has been removed. There is
+             * no authored phase to serialize: use zero in the observation,
+             * as the locomotion codec already does for its empty clip. This
+             * also covers the fifth ranged channel, outside locomotion.
+             * Native renderer clocks and packet bounds remain unchanged. */
+            presentation->time[channel]=0.0f;
+        } else if((full_world || ranged_action) && presentation->selector[channel] &&
+            !(presentation->state[channel]&1u)) {
+            uint8_t *channels=*(uint8_t **)((uint8_t *)renderer+0x98u);
+            uint8_t *state=*(uint8_t **)(channels+channel*0x24u);
+            /* GetTime (223220) exposes the unbounded accumulator at +8.
+             * Native SetTime (223180) also keeps the sampled clip phase at
+             * +c. Serialize that already-resolved loop phase, preserving the
+             * visible pose and bounded wire clock after hours of idling. */
+            if(!readable_memory(state,0x18u) ||
+                *(uint16_t *)state!=presentation->selector[channel] ||
+                *(uint16_t *)(state+2u)!=presentation->state[channel] ||
+                *(float *)(state+8u)!=presentation->time[channel] ||
+                !isfinite(*(float *)(state+0xcu)) || *(float *)(state+0xcu)<0.0f)
+                return FALSE;
+            presentation->time[channel]=*(float *)(state+0xcu);
+        }
     }
     if (full_world || actor == SUDEKIMP_CLEANROOM_AILISH ||
         actor == SUDEKIMP_CLEANROOM_BUKI) {
@@ -4328,6 +4360,20 @@ BOOL SudekiMpCleanroomEngineRangedActionPresentation(
     *selector=presentation.selector[4]; *state=presentation.state[4];
     *time=presentation.time[4];
     return actor_pointer(actor)==expected_entity;
+}
+BOOL SudekiMpCleanroomEngineRangedWorldPresentation(SudekiMpCleanroomActor actor,
+    void *expected_entity,SudekiMpCleanroomActorPresentation *presentation) {
+    uint8_t *arbiter;
+    if(!readable_memory(expected_entity,0x94u)) return FALSE;
+    arbiter=*(uint8_t **)((uint8_t *)expected_entity+0x90u);
+    if(!readable_memory(arbiter,0x54u) || !game_base ||
+        *(void **)arbiter!=game_base+0x2cc9acu ||
+        *(void **)(arbiter+0x10u)!=expected_entity ||
+        (*(uint32_t *)(arbiter+0x50u)&0x00400000u)) return FALSE;
+    return (actor==SUDEKIMP_CLEANROOM_ELCO || actor==SUDEKIMP_CLEANROOM_AILISH) &&
+        expected_entity && presentation && actor_pointer(actor)==expected_entity &&
+        actor_presentation(actor,presentation,FALSE,TRUE) &&
+        actor_pointer(actor)==expected_entity;
 }
 
 BOOL SudekiMpCleanroomEngineActorResources(
@@ -4480,6 +4526,35 @@ BOOL SudekiMpCleanroomEngineSetDummyHitPoints(float hit_points) {
             gel_pointer, "HitPoints", hit_points) != 0u;
 }
 
+BOOL SudekiMpCleanroomEngineSpawnFlightPlatform(const float position[3]) {
+    if(!spawn_entity || !position || !SudekiMpCleanroomEngineWorldReady() ||
+        lookup_entity(get_generic_entity,"DB_PM_Jump_Pillar_S_B")) return FALSE;
+    for(unsigned i=0;i<3u;++i)
+        if(!isfinite(position[i]) || fabsf(position[i])>1000.0f) return FALSE;
+    spawn_entity("DB_PM_Jump_Pillar_S_B",position[0],position[1],position[2]);
+    return TRUE;
+}
+BOOL SudekiMpCleanroomEngineRemoveFlightPlatform(void *expected) {
+    if(!expected || !despawn_entity || !SudekiMpCleanroomEngineWorldReady() ||
+        lookup_entity(get_generic_entity,"DB_PM_Jump_Pillar_S_B")!=expected) return FALSE;
+    void *entity=expected; despawn_entity(&entity); return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSpawnFuelCrystal(const float position[3]) {
+    if(!spawn_entity || !position || !SudekiMpCleanroomEngineWorldReady() ||
+        lookup_entity(get_generic_entity,"GEN_FuelPoint")) return FALSE;
+    for(unsigned i=0;i<3u;++i)
+        if(!isfinite(position[i]) || fabsf(position[i])>1000.0f) return FALSE;
+    spawn_entity("GEN_FuelPoint",position[0],position[1],position[2]);
+    return TRUE; /* Request only; the caller must observe native appearance. */
+}
+BOOL SudekiMpCleanroomEngineRemoveFuelCrystal(void *expected) {
+    if(!expected || !despawn_entity || !SudekiMpCleanroomEngineWorldReady() ||
+        lookup_entity(get_generic_entity,"GEN_FuelPoint")!=expected) return FALSE;
+    void *entity=expected; despawn_entity(&entity);
+    return TRUE; /* Retain ownership until native lookup confirms absence. */
+}
+
 BOOL SudekiMpCleanroomEngineSpawnDummy(const float position[3]) {
     if (spawn_entity == NULL || position == NULL ||
         SudekiMpCleanroomEngineDummyPresent()) {
@@ -4621,6 +4696,9 @@ BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void) {
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) {
     return ranged_prime_flag(&ranged_prime_pending) ||
         ranged_prime_flag(&ranged_prime_ui_active);
+}
+BOOL SudekiMpCleanroomEngineServiceRangedPrime(void) {
+    return service_ranged_prime(ranged_prime_generation);
 }
 
 #if defined(SUDEKIMP_CLEANROOM_ENGINE_TESTING)
@@ -4974,6 +5052,13 @@ static void maintain_party_skill_points(void) {
         }
         (void)entity_from_gel_pointer(gel_pointer);
     }
+}
+
+void SudekiMpCleanroomEngineMaintainSkillResources(void) {
+    if(!SudekiMpCleanroomEngineWorldReady()) return;
+    if(training_skills_enabled)
+        for(unsigned i=0;i<4u;++i) (void)maintain_training_skill_lease(i);
+    maintain_party_skill_points();
 }
 
 BOOL SudekiMpCleanroomEngineSetSpiritPresentationObserver(
@@ -5364,13 +5449,69 @@ static void service_native_ai_probe(void) {
     }
 }
 
+static void maintain_jetpack_resource(void) {
+    void *elco_ability; float current,maximum;
+    if (infinite_jetpack_fuel && elco_get_fuel != NULL &&
+        elco_set_fuel != NULL) {
+        elco_ability = elco_ability_pointer();
+        if (elco_ability != last_elco_ability) {
+            last_elco_ability = elco_ability;
+            elco_fuel_refill_logged = FALSE;
+        }
+        if (elco_ability != NULL) {
+            maximum = *(const float *)((const uint8_t *)elco_ability + 0x68u);
+            current = elco_get_fuel(elco_ability);
+            if (isfinite(maximum) && isfinite(current) && maximum > 0.0f &&
+                current < maximum) {
+                elco_set_fuel(elco_ability, maximum);
+                if (!elco_fuel_refill_logged) {
+                    SudekiMpLogFormat(
+                        "cleanroom_engine event=infinite_jetpack_fuel "
+                        "action=refill ability=%p previous_bits=0x%08lx "
+                        "maximum_bits=0x%08lx\r\n",
+                        elco_ability,
+                        (unsigned long)float_bits(current),
+                        (unsigned long)float_bits(maximum)
+                    );
+                    elco_fuel_refill_logged = TRUE;
+                }
+            }
+        }
+    }
+}
+static void maintain_spirit_resource(void) {
+    void **manager_global; void *manager; BOOL enabled; float current;
+    if (get_ssp == NULL || set_ssp == NULL ||
+        !SudekiMpCleanroomEngineInfiniteSpirit(&enabled) || !enabled) {
+        return;
+    }
+    manager_global =
+        (void **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
+    if (!readable_memory(manager_global, sizeof(*manager_global))) {
+        return;
+    }
+    manager = *manager_global;
+    if (!readable_memory(manager, 0xacu)) {
+        return;
+    }
+    current = get_ssp();
+    if (isfinite(current) && current < 200.0f) {
+        set_ssp(200.0f);
+        SudekiMpLogFormat(
+            "cleanroom_engine event=infinite_spirit action=refill "
+            "previous_bits=0x%08lx value=200\r\n",
+            (unsigned long)float_bits(current)
+        );
+    }
+}
+void SudekiMpCleanroomEngineMaintainTrainingResources(void) {
+    if(!SudekiMpCleanroomEngineWorldReady()) return;
+    SudekiMpCleanroomEngineMaintainSkillResources();
+    maintain_jetpack_resource();
+    maintain_spirit_resource();
+}
+
 void SudekiMpCleanroomEngineMaintainResources(void) {
-    void **manager_global;
-    void *manager;
-    BOOL enabled;
-    float current;
-    float maximum;
-    void *elco_ability;
     float cafu_position[3];
 
     if (ranged_prime_flag(&ranged_prime_pending) ||
@@ -5419,33 +5560,7 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
         }
     }
     maintain_party_skill_points();
-    if (infinite_jetpack_fuel && elco_get_fuel != NULL &&
-        elco_set_fuel != NULL) {
-        elco_ability = elco_ability_pointer();
-        if (elco_ability != last_elco_ability) {
-            last_elco_ability = elco_ability;
-            elco_fuel_refill_logged = FALSE;
-        }
-        if (elco_ability != NULL) {
-            maximum = *(const float *)((const uint8_t *)elco_ability + 0x68u);
-            current = elco_get_fuel(elco_ability);
-            if (isfinite(maximum) && isfinite(current) && maximum > 0.0f &&
-                current < maximum) {
-                elco_set_fuel(elco_ability, maximum);
-                if (!elco_fuel_refill_logged) {
-                    SudekiMpLogFormat(
-                        "cleanroom_engine event=infinite_jetpack_fuel "
-                        "action=refill ability=%p previous_bits=0x%08lx "
-                        "maximum_bits=0x%08lx\r\n",
-                        elco_ability,
-                        (unsigned long)float_bits(current),
-                        (unsigned long)float_bits(maximum)
-                    );
-                    elco_fuel_refill_logged = TRUE;
-                }
-            }
-        }
-    }
+    maintain_jetpack_resource();
     if (cafu_probe_requested) {
         (void)prepare_cafu_missile_models();
         inspect_cafu_missile_manager_state();
@@ -5456,28 +5571,7 @@ void SudekiMpCleanroomEngineMaintainResources(void) {
         }
     }
 
-    if (get_ssp == NULL || set_ssp == NULL ||
-        !SudekiMpCleanroomEngineInfiniteSpirit(&enabled) || !enabled) {
-        return;
-    }
-    manager_global =
-        (void **)(game_base + RVA_SPIRIT_STRIKE_MANAGER_GLOBAL);
-    if (!readable_memory(manager_global, sizeof(*manager_global))) {
-        return;
-    }
-    manager = *manager_global;
-    if (!readable_memory(manager, 0xacu)) {
-        return;
-    }
-    current = get_ssp();
-    if (isfinite(current) && current < 200.0f) {
-        set_ssp(200.0f);
-        SudekiMpLogFormat(
-            "cleanroom_engine event=infinite_spirit action=refill "
-            "previous_bits=0x%08lx value=200\r\n",
-            (unsigned long)float_bits(current)
-        );
-    }
+    maintain_spirit_resource();
 }
 
 void SudekiMpCleanroomEngineReset(void) {

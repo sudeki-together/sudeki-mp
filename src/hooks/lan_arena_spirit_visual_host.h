@@ -17,6 +17,15 @@ typedef BOOL (*SudekiMpLanArenaSpiritVisualHostWitness)(
     uint64_t *session, uint16_t *skill, uint32_t *host_tick,
     uint8_t *owner_actor_type);
 
+/* SMP4 uses the same pinned native observer, with an actor-specific retained
+ * roster witness. No legacy seat globals or cast ownership are borrowed. */
+typedef BOOL (*SudekiMpLanPartyShieldHostWitness)(
+    void *context, uint8_t actor_type, void **actor);
+BOOL SudekiMpLanPartyShieldHostInitialize(HMODULE game_module,
+    SudekiMpLanPartyShieldHostWitness witness, void *context);
+BOOL SudekiMpLanPartyShieldHostCapture(uint64_t session, uint32_t host_tick,
+    SudekiMpLanArenaSnapshot *output);
+
 BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
     HMODULE game_module, SudekiMpLanArenaSpiritVisualHostWitness witness,
     void *context);

@@ -199,14 +199,15 @@ static BOOL elco_item(unsigned id) {
         id == 31u || id == 34u || id == 35u;
 }
 
-static uint8_t *elco_weapon_record(void *character,
+static uint8_t *ranged_weapon_record(void *character,uint8_t type,
     SudekiMpElcoWeaponObservation *out) {
     uint8_t *base = (uint8_t *)native_module, *actor = character;
     uint8_t *manager, *weapon, *item, *record, **rows;
     unsigned count, i, id;
     SudekiMpElcoWeaponObservation s;
-    if (!base || !out || !readable_memory(actor, 0x138u) ||
-        *(void **)actor != base + 0x2d66fcu) return NULL;
+    if (!base || !out || (type!=0x0eu && type!=0x01u) ||
+        !readable_memory(actor, 0x138u) ||
+        *(void **)actor != base + (type==0x0eu?0x2d66fcu:0x2d555cu)) return NULL;
     weapon = *(uint8_t **)(actor + 0xc0u);
     manager = *(uint8_t **)(actor + 0xbcu);
     if (!readable_memory(weapon, 0x270u) ||
@@ -217,9 +218,9 @@ static uint8_t *elco_weapon_record(void *character,
         *(void **)manager != base + 0x2d4c8cu ||
         *(void **)(manager + 0x10u) != actor) return NULL;
     item = *(uint8_t **)(weapon + 0x268u);
-    if (!item_matches_family(item, 7u)) return NULL;
+    if (!item_matches_family(item, type==0x0eu?7u:5u)) return NULL;
     id = *(uint32_t *)(item + 0x14u);
-    if (!elco_item(id)) return NULL;
+    if (type==0x0eu ? !elco_item(id) : (id<12u || id>=24u)) return NULL;
     record = *(uint8_t **)(manager + 0x60u);
     count = *(unsigned *)(manager + 0x44u);
     rows = *(uint8_t ***)(manager + 0x4cu);
@@ -244,7 +245,32 @@ static uint8_t *elco_weapon_record(void *character,
 }
 
 BOOL SudekiMpObserveElcoWeapon(void *character, SudekiMpElcoWeaponObservation *out) {
-    return elco_weapon_record(character, out) != NULL;
+    return ranged_weapon_record(character,0x0eu,out) != NULL;
+}
+
+BOOL SudekiMpObserveElcoWeaponEmission(void *character,
+    SudekiMpElcoWeaponObservation *out) {
+    SudekiMpElcoWeaponObservation observed;
+    uint8_t *record, *manager;
+    if (!out || !(record=ranged_weapon_record(character,0x0eu,&observed)))
+        return FALSE;
+    manager=*(uint8_t **)((uint8_t *)character+0xbcu);
+    /* Retail c6de0 admits a record as stage 1, with +5c=record and
+     * +58=record+0c. Direct fire c89f0 emits in stage 1; animation-driven
+     * fire c7140 emits in stage 2. c74e3 obtains direction before c7754
+     * spends charge. The ready-to-start stages (0/6) cannot witness this. */
+    if ((observed.stage!=1u && observed.stage!=2u) ||
+        *(void **)(manager+0x5cu)!=record ||
+        *(void **)(manager+0x58u)!=record+0x0cu ||
+        observed.charge<observed.required_charge || observed.reload_seconds!=0.0f)
+        return FALSE;
+    *out=observed;
+    return TRUE;
+}
+
+BOOL SudekiMpObserveRangedWeapon(void *character,uint8_t type,
+    SudekiMpElcoWeaponObservation *out) {
+    return ranged_weapon_record(character,type,out)!=NULL;
 }
 
 BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *s) {
@@ -255,7 +281,7 @@ BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *s) {
         isfinite(s->reload_seconds) && s->reload_seconds == 0.0f;
 }
 
-static BOOL set_elco_presentation_resources(void *character, uint8_t item,
+static BOOL set_ranged_presentation_resources(void *character,uint8_t type,void *local_actor,uint8_t item,
     uint16_t charge_q8, uint16_t reload_ms, BOOL preserve_reload_edge) {
     SudekiMpElcoWeaponObservation observed;
     uint8_t *record, *controller;
@@ -266,8 +292,8 @@ static BOOL set_elco_presentation_resources(void *character, uint8_t item,
     if (charge_q8 > 25600u || reload_ms > 60000u || !native_module) return FALSE;
     controller = *(uint8_t **)((uint8_t *)native_module + 0x408da4u);
     if (!readable_memory(controller, 0x24cu) ||
-        *(void **)(controller + 0x248u) != character) return FALSE;
-    record = elco_weapon_record(character, &observed);
+        !local_actor || *(void **)(controller + 0x248u) != local_actor) return FALSE;
+    record = ranged_weapon_record(character,type,&observed);
     if (!record || observed.item != item ||
         !VirtualQuery(record, &page, sizeof(page)) ||
         !(page.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)))
@@ -295,12 +321,31 @@ static BOOL set_elco_presentation_resources(void *character, uint8_t item,
 
 BOOL SudekiMpSetElcoPresentationResources(void *character, uint8_t item,
     uint16_t charge_q8, uint16_t reload_ms) {
-    return set_elco_presentation_resources(character, item, charge_q8, reload_ms, FALSE);
+    return set_ranged_presentation_resources(character,0x0eu,character,item,charge_q8,reload_ms,FALSE);
 }
 
 BOOL SudekiMpSyncElcoPresentationResources(void *character, uint8_t item,
     uint16_t charge_q8, uint16_t reload_ms) {
-    return set_elco_presentation_resources(character, item, charge_q8, reload_ms, TRUE);
+    return set_ranged_presentation_resources(character,0x0eu,character,item,charge_q8,reload_ms,TRUE);
+}
+BOOL SudekiMpSetObservedElcoPresentationResources(void *character,void *local_actor,
+    uint8_t item,uint16_t charge_q8,uint16_t reload_ms,BOOL preserve_reload_edge) {
+    void *weapon,*inventory;
+    unsigned category;
+    if(!local_actor || local_actor==character ||
+        !character_weapon_context(local_actor,&weapon,&inventory,&category)) return FALSE;
+    return set_ranged_presentation_resources(character,0x0eu,local_actor,item,charge_q8,
+        reload_ms,preserve_reload_edge);
+}
+
+BOOL SudekiMpSetRangedPresentationResources(void *character,uint8_t type,
+    void *local_actor,uint8_t item,uint16_t charge,uint16_t reload,BOOL preserve) {
+    void *weapon,*inventory;
+    unsigned category;
+    if(!local_actor || !character_weapon_context(local_actor,&weapon,&inventory,&category))
+        return FALSE;
+    return set_ranged_presentation_resources(character,type,local_actor,item,
+        charge,reload,preserve);
 }
 
 float SudekiMpRapidWeaponRechargeAmount(uint16_t rate_half, uint16_t charge_half,

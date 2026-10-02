@@ -35,6 +35,7 @@ BOOL SudekiMpLanPartyReplicaPush(SudekiMpLanPartyReplica *r,
     if (discontinuity) {
         /* Even a chunk-zero-only dummy reset resets BOTH actor histories. */
         SudekiMpLanArenaReplicaRenderClockReset(&next.clock);
+        next.presentation_count=0;
         for (i=0;i<2;++i) {
             SudekiMpLanArenaCodecRoster roster = {{
                 SudekiMpLanPartyActorType(i*2),SudekiMpLanPartyActorType(i*2+1)},1};
@@ -44,6 +45,14 @@ BOOL SudekiMpLanPartyReplicaPush(SudekiMpLanPartyReplica *r,
         }
     }
     next.ailish_weapon = frame->ailish_weapon;
+    if(next.presentation_count==32u) {
+        memmove(next.presentation,next.presentation+1,31u*sizeof(next.presentation[0]));
+        --next.presentation_count;
+    }
+    next.presentation[next.presentation_count].tick=frame->chunk[0].host_tick;
+    memcpy(next.presentation[next.presentation_count++].ranged,frame->ranged,
+        sizeof(frame->ranged));
+    next.latest_frame=*frame;
     *r = next; return TRUE;
 }
 BOOL SudekiMpLanPartyReplicaConsume(SudekiMpLanPartyReplica *r,
@@ -63,10 +72,22 @@ BOOL SudekiMpLanPartyReplicaConsume(SudekiMpLanPartyReplica *r,
             !SudekiMpLanPartyReplicaPush(r,&peer.lease,&frame)) {
             SudekiMpLanPartyReplicaReset(r); return FALSE;
         }
+        r->received_at=GetTickCount();
     }
     if (!SudekiMpLanPartyLeaseActive(session,&peer.lease)) {
         SudekiMpLanPartyReplicaReset(r); return FALSE;
     }
+    return TRUE;
+}
+BOOL SudekiMpLanPartyReplicaLatestFrame(const SudekiMpLanPartyReplica *r,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanPartyFrame *frame) {
+    if(!r || !frame || !valid_lease(lease) || !same_lease(&r->lease,lease) ||
+        !r->received_at || (uint32_t)(now-r->received_at)>500u ||
+        !r->chunks[0].latest_valid || !r->chunks[1].latest_valid ||
+        r->latest_frame.chunk[0].host_tick!=r->chunks[0].latest.host_tick ||
+        r->latest_frame.chunk[1].host_tick!=r->chunks[1].latest.host_tick ||
+        !SudekiMpLanPartyFrameValid(&r->latest_frame)) return FALSE;
+    *frame=r->latest_frame;
     return TRUE;
 }
 BOOL SudekiMpLanPartyReplicaSample(SudekiMpLanPartyReplica *r,
@@ -77,7 +98,8 @@ BOOL SudekiMpLanPartyReplicaSample(SudekiMpLanPartyReplica *r,
     uint32_t tick;
     BOOL action;
     if (!r || !sample || !render_tick || !valid_lease(lease) ||
-        !same_lease(&r->lease,lease)) return FALSE;
+        !same_lease(&r->lease,lease) ||
+        (r->received_at && (uint32_t)(now-r->received_at)>500u)) return FALSE;
     clock = r->clock;
     action = SudekiMpLanArenaReplicaActionTimelineBuffered(&r->chunks[0]) ||
         SudekiMpLanArenaReplicaActionTimelineBuffered(&r->chunks[1]);
@@ -87,6 +109,30 @@ BOOL SudekiMpLanPartyReplicaSample(SudekiMpLanPartyReplica *r,
         !SudekiMpLanArenaReplicaSampleAllActorMotion(&r->chunks[1],tick,&next.chunk[1]))
         return FALSE;
     next.ailish_weapon = r->ailish_weapon;
+    next.jetpack = r->latest_frame.jetpack;
+    memset(next.ranged,0,sizeof(next.ranged));
+    if(r->presentation_count) {
+        unsigned before=0,after=0;
+        for(unsigned i=0;i<r->presentation_count;++i) {
+            if((int32_t)(tick-r->presentation[i].tick)>=0) before=i;
+            else { after=i; break; }
+        }
+        memcpy(next.ranged,r->presentation[before].ranged,sizeof(next.ranged));
+        if(after>before) {
+            uint32_t span=r->presentation[after].tick-r->presentation[before].tick;
+            float fraction=(float)(tick-r->presentation[before].tick)/(float)span;
+            if(fraction>0.0f && fraction<1.0f) for(unsigned i=0;i<2u;++i) {
+                SudekiMpLanPartyRangedPresentation *v=&next.ranged[i];
+                const SudekiMpLanPartyRangedPresentation *b=&r->presentation[after].ranged[i];
+                if(v->valid && b->valid) {
+                    v->blend+=(b->blend-v->blend)*fraction;
+                    if(v->sequence==b->sequence && v->clip==b->clip &&
+                        v->state==b->state && b->time>=v->time)
+                        v->time+=(b->time-v->time)*fraction;
+                }
+            }
+        }
+    }
     if (!SudekiMpLanPartyFrameValid(&next)) return FALSE;
     r->clock = clock; *sample = next; *render_tick = tick; return TRUE;
 }

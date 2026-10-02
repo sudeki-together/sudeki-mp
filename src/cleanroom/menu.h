@@ -4,6 +4,23 @@
 #include <windows.h>
 
 BOOL SudekiMpInstallCleanroomMenu(HMODULE game_module, UINT toggle_key);
+enum { SUDEKIMP_PARTY_TOOL_COMBAT, SUDEKIMP_PARTY_TOOL_INFINITE_SP,
+    SUDEKIMP_PARTY_TOOL_TRAINING_SKILLS, SUDEKIMP_PARTY_TOOL_INFINITE_SPIRIT,
+    SUDEKIMP_PARTY_TOOL_INFINITE_JETPACK, SUDEKIMP_PARTY_TOOL_CAMERA,
+    SUDEKIMP_PARTY_TOOL_FUEL_CRYSTAL,
+    SUDEKIMP_PARTY_TOOL_FLIGHT_LEDGE, SUDEKIMP_PARTY_TOOL_HITBOXES, SUDEKIMP_PARTY_TOOL_CLOSE,
+    SUDEKIMP_PARTY_TOOL_COUNT };
+/* Presenter only: borrows the already initialized engine and existing
+ * game-thread update/render callbacks. Installs no native hooks and does not
+ * initialize/reset the engine, actors, audio, or any legacy menu subsystem. */
+BOOL SudekiMpInstallLanPartyToolsMenu(HMODULE game_module,UINT toggle_key,
+    unsigned local_seat, BOOL (*command)(unsigned action),
+    BOOL (*query)(unsigned action,BOOL *enabled),
+    void (*connection_status)(char *text,unsigned capacity));
+/* Local input only: never pauses the world or another network seat. */
+BOOL SudekiMpLanPartyToolsCaptureInput(void);
+BOOL SudekiMpLanPartyToolsRestoreRenderState(void);
+BOOL SudekiMpLanPartyToolsRenderDrained(void);
 BOOL SudekiMpInstallIntegratedCleanroomMenu(
     HMODULE game_module,
     UINT toggle_key

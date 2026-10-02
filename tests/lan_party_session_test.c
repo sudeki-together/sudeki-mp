@@ -25,6 +25,13 @@ static SudekiMpLanPartyPeerStatus status(unsigned node, unsigned seat) {
     CHECK(SudekiMpLanPartyPeerStatusGet(nodes[node], seat, &result));
     return result;
 }
+static void wait_transport(unsigned seat) {
+    DWORD started=GetTickCount();
+    while(!status(0,seat).transport_confirmed && GetTickCount()-started<1500u) {
+        Sleep(5); pump();
+    }
+    CHECK(status(0,seat).transport_confirmed);
+}
 static void fill_frame(SudekiMpLanPartyFrame *frame) {
     memset(frame, 0, sizeof(*frame));
     for (unsigned c = 0; c < 2; ++c) {
@@ -136,6 +143,138 @@ static void test_replica_clock_and_atomicity(void) {
     CHECK(SudekiMpLanArenaSeatActorTypes(&host,&client));
     CHECK(host==SUDEKIMP_LAN_ARENA_TAL_TYPE && client==SUDEKIMP_LAN_ARENA_AILISH_TYPE);
 }
+static void test_block_dodge_extension(void) {
+    const int selectors[]={21,22,30,31,29};
+    const uint8_t variants[]={SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD,
+        SUDEKIMP_LAN_ARENA_ACTION_BLOCK_RELEASE,SUDEKIMP_LAN_ARENA_ACTION_ROLL_LEFT,
+        SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT,SUDEKIMP_LAN_ARENA_ACTION_BACKFLIP};
+    SudekiMpLanPartyFrame f; fill_frame(&f);
+    for(unsigned i=0; i<5; ++i) {
+        int selector=-1,state=-1; uint8_t variant=0;
+        CHECK(SudekiMpLanPartyTalActionToPresentation(variants[i],&selector,&state));
+        CHECK(selector==selectors[i]);
+        CHECK(SudekiMpLanPartyTalActionObserve(selector,(uint8_t)state,&variant));
+        CHECK(variant==variants[i]);
+        BOOL found=FALSE;
+        for(unsigned clip=1;clip<=SUDEKIMP_LAN_ARENA_PARTY_TAL_MOTION_MAX;++clip)
+            if(SudekiMpLanPartyCombatMotionSelector(SUDEKIMP_LAN_ARENA_TAL_TYPE,clip)==selector)
+                found=TRUE;
+        CHECK(found);
+    }
+    for(unsigned c=0;c<2;++c) {
+        SudekiMpLanArenaSpiritVfxSnapshot *v=&f.chunk[c].spirit_vfx[0];
+        f.chunk[c].spirit_vfx_observed=1; f.chunk[c].spirit_vfx_count=1;
+        v->instance_sequence=c+1; v->owner_actor_type=SudekiMpLanPartyActorType(c*2);
+        v->kind=c?SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP:SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP;
+        v->emitted_host_tick=900; v->rotation_xyzw[3]=1;
+        v->scale[0]=v->scale[1]=v->scale[2]=1;
+    }
+    CHECK(SudekiMpLanPartyFrameValid(&f));
+    CHECK(!SudekiMpLanArenaSpiritVfxRosterValid(&f.chunk[1]));
+    CHECK(!SudekiMpLanArenaSnapshotValid(&f.chunk[1])); /* LA42 stays closed. */
+    SudekiMpLanArenaCodecRoster r={{SUDEKIMP_LAN_ARENA_TAL_TYPE,SUDEKIMP_LAN_ARENA_AILISH_TYPE},1};
+    SudekiMpLanArenaPacket packet={0},decoded={0};
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE]; size_t size=0;
+    packet.type=SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT; packet.session_token=99;
+    packet.body.snapshot=f.chunk[1];
+    CHECK(SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&r));
+    CHECK(SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&r));
+    CHECK(decoded.body.snapshot.spirit_vfx[0].kind==SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP);
+    for(unsigned i=0;i<5;++i) {
+        SudekiMpLanArenaActorSnapshot *tal=&packet.body.snapshot.seat[0];
+        tal->animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+        tal->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_BLOCK;
+        tal->action_variant=variants[i]; tal->action_sequence=1;
+        tal->action_phase_valid=1; tal->action_phase_q8=16;
+        tal->action_history_count=1;
+        /* Designated assignments do not depend on private struct packing. */
+        tal->action_history[0].sequence=1;
+        tal->action_history[0].variant=variants[i]; tal->action_history[0].host_tick=900;
+        CHECK(SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&r));
+        CHECK(SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&r));
+        CHECK(decoded.body.snapshot.seat[0].action_history[0].variant==variants[i]);
+        CHECK(!SudekiMpLanArenaSnapshotValid(&packet.body.snapshot));
+    }
+    r.world_locomotion=0;
+    CHECK(!SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&r));
+    f.chunk[1].spirit_vfx[0].owner_actor_type=SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    CHECK(!SudekiMpLanPartyFrameValid(&f));
+    f.chunk[1].spirit_vfx[0].owner_actor_type=SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    f.chunk[1].spirit_vfx[0].instance_sequence=1;
+    CHECK(!SudekiMpLanPartyFrameValid(&f));
+    f.chunk[1].spirit_vfx[0].instance_sequence=2;
+    f.chunk[1].spirit_vfx[0].skill_sequence=1;
+    CHECK(!SudekiMpLanPartyFrameValid(&f));
+}
+
+static void test_running_attack_extension(void) {
+    const uint8_t type=SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    const uint8_t attack=SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK;
+    int selector=-1,state=-1; uint8_t variant=0;
+    CHECK(SudekiMpLanPartyTalActionToPresentation(attack,&selector,&state));
+    CHECK(selector==38 && state==1);
+    CHECK(SudekiMpLanPartyTalActionObserve(38,1,&variant) && variant==attack);
+    CHECK(!SudekiMpLanPartyTalActionObserve(38,192,&variant));
+    CHECK(!SudekiMpLanPartyActionTerminalObserved(type,attack,38,1));
+    CHECK(SudekiMpLanPartyActionTerminalObserved(type,attack,38,128));
+    CHECK(SudekiMpLanPartyActionTerminalObserved(type,attack,17,128));
+    CHECK(!SudekiMpLanPartyActionTerminalObserved(type,attack,36,128));
+    CHECK(SudekiMpLanPartyCombatMotionSelector(type,25)==38);
+    CHECK(SudekiMpLanPartyCombatMotionSelector(type,26)==-1);
+    int selectors[4]={38,0,36,0};
+    uint8_t states[4]={1,192,0,192};
+    float rates[4]={24,0,24,0},times[4]={2,0,9,0},blends[3]={0,0,0.5f};
+    SudekiMpLanArenaLocomotion motion,next;
+    CHECK(SudekiMpLanPartyCombatMotionCapture(type,selectors,states,rates,times,
+        blends,NULL,&motion));
+    CHECK(motion.clip[0]==25 && motion.clip[2]==2 && motion.time[0]==2);
+    /* Repeated running attacks retain their own interpolation boundary. */
+    times[0]=0;
+    CHECK(SudekiMpLanPartyCombatMotionCapture(type,selectors,states,rates,times,
+        blends,&motion,&next));
+    CHECK(next.sequence==motion.sequence+1);
+    selectors[0]=17; selectors[2]=38; states[0]=0; states[2]=128;
+    times[0]=0; times[2]=19;
+    CHECK(SudekiMpLanPartyCombatMotionCapture(type,selectors,states,rates,times,
+        blends,&next,&motion));
+    CHECK(motion.clip[0]==1 && motion.clip[2]==25 && motion.time[2]==19);
+
+    SudekiMpLanPartyFrame frame; fill_frame(&frame);
+    SudekiMpLanArenaCodecRoster roster={{type,SUDEKIMP_LAN_ARENA_AILISH_TYPE},1};
+    SudekiMpLanArenaPacket packet={0},decoded={0};
+    uint8_t bytes[SUDEKIMP_LAN_ARENA_MAX_PACKET_SIZE]; size_t size=0;
+    packet.type=SUDEKIMP_LAN_ARENA_PACKET_SNAPSHOT; packet.session_token=99;
+    packet.body.snapshot=frame.chunk[1];
+    SudekiMpLanArenaActorSnapshot *tal=&packet.body.snapshot.seat[0];
+    tal->animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_ACTION;
+    tal->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_WEAK_ATTACK;
+    tal->action_variant=attack; tal->action_sequence=1;
+    tal->action_phase_valid=1; tal->action_phase_q8=16;
+    tal->action_history_count=1;
+    tal->action_history[0].sequence=1; tal->action_history[0].variant=attack;
+    tal->action_history[0].host_tick=900;
+    tal->locomotion=motion;
+    CHECK(SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&roster));
+    CHECK(SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&roster));
+    CHECK(decoded.body.snapshot.seat[0].locomotion.clip[2]==25);
+    CHECK(decoded.body.snapshot.seat[0].action_history[0].variant==attack);
+    roster.world_locomotion=0;
+    CHECK(!SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&roster));
+    memset(&tal->locomotion,0,sizeof(tal->locomotion));
+    CHECK(!SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&roster));
+    /* Retained history alone must stay legal in SMP4 after the attack ends,
+     * and must still be rejected by the unchanged legacy codec. */
+    tal->animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    tal->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    tal->action_variant=0; tal->action_phase_valid=0; tal->action_phase_q8=0;
+    CHECK(!SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&roster));
+    roster.world_locomotion=1;
+    CHECK(SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&roster));
+    CHECK(SudekiMpLanArenaDecodeForRoster(bytes,size,&decoded,&roster));
+    tal->locomotion=motion; tal->locomotion.clip[2]=26;
+    CHECK(!SudekiMpLanArenaEncodeForRoster(bytes,&size,&packet,&roster));
+}
+
 static void test_motion_catalog(void) {
     static const int move[]={6,5,8,7};
     static const uint8_t states[]={SUDEKIMP_LAN_ARENA_ANIMATION_IDLE,
@@ -280,7 +419,7 @@ static void test_transport_replica_consumption(void) {
     }
     for (unsigned seat=1;seat<4;++seat) {
         SudekiMpLanPartyPeerStatus peer=status(seat,seat);
-        CHECK(SudekiMpLanPartyReplicaSample(&replicas[seat-1],&peer.lease,3000,&sample,&tick));
+        CHECK(SudekiMpLanPartyReplicaSample(&replicas[seat-1],&peer.lease,GetTickCount(),&sample,&tick));
         CHECK(tick==2100 && SudekiMpLanPartyFrameValid(&sample));
     }
 }
@@ -296,6 +435,7 @@ static void test_three_clients(void) {
         CHECK(!SudekiMpLanPartySendInput(nodes[i], &request));
         CHECK(!SudekiMpLanPartyTakeInput(nodes[0], i, &input));
         CHECK(!SudekiMpLanPartyApprove(nodes[i], &c.lease));
+        wait_transport(i);
         CHECK(SudekiMpLanPartyApprove(nodes[0], &p.lease));
         CHECK(!SudekiMpLanPartyApprove(nodes[0], &p.lease));
     }
@@ -335,11 +475,73 @@ static void test_three_clients(void) {
         CHECK(!SudekiMpLanPartyTakeFrame(nodes[i], &copy));
     }
 }
+static void test_combat_mode_publication(void) {
+    SudekiMpLanPartyCombatMode mode={0};
+    SudekiMpLanPartyPeerStatus p=status(1,1);
+    CHECK(!SudekiMpLanPartyGetCombatMode(nodes[1],&p.lease,now,&mode));
+    CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[1],1,now));
+    CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[0],2,now));
+    CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],0,now)); pump();
+    for(unsigned i=1;i<4;++i) {
+        p=status(i,i);
+        CHECK(SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now,&mode));
+        CHECK(mode.sequence==1u && !mode.enabled);
+    }
+    Sleep(2); pump();
+    CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],1,now)); pump();
+    uint32_t transition=0;
+    for(unsigned i=1;i<4;++i) {
+        p=status(i,i);
+        CHECK(SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now,&mode));
+        CHECK(mode.sequence==2u && mode.enabled);
+        transition=mode.host_tick;
+        CHECK(!SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now+501u,&mode));
+        SudekiMpLanPartyLease old=p.lease; ++old.generation;
+        CHECK(!SudekiMpLanPartyGetCombatMode(nodes[i],&old,now,&mode));
+    }
+    CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[0],0,transition-1u));
+    CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[0],0,transition));
+    Sleep(110); pump();
+    CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],1,now)); pump();
+    for(unsigned i=1;i<4;++i) {
+        p=status(i,i);
+        CHECK(SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now,&mode));
+        CHECK(mode.sequence==2u && mode.host_tick==transition &&
+            mode.observed_tick!=transition);
+    }
+}
+static void test_combat_mode_frame_fence(void) {
+    SudekiMpLanPartyFrame frame; fill_frame(&frame);
+    SudekiMpLanPartyCombatMode mode={7u,1000u,1002u,0};
+    CHECK(SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    mode.host_tick=1001u;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    mode.host_tick=1000u; mode.enabled=1;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    frame.chunk[0].combat_enabled=frame.chunk[1].combat_enabled=1u;
+    CHECK(SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    frame.chunk[1].host_tick++;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    frame.chunk[1].host_tick--;
+    mode.sequence=0;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    mode.sequence=1; mode.enabled=2;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    mode.enabled=1; mode.host_tick=UINT32_MAX-10u; mode.observed_tick=5u;
+    frame.chunk[0].host_tick=frame.chunk[1].host_tick=3u;
+    CHECK(SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    frame.chunk[0].host_tick=frame.chunk[1].host_tick=UINT32_MAX-11u;
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,&frame));
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(NULL,&frame));
+    CHECK(!SudekiMpLanPartyCombatModeFrameReady(&mode,NULL));
+}
 static void test_independent_disconnect_rejoin(void) {
     SudekiMpLanPartyPeerStatus previous = status(0, 1);
     SudekiMpLanPartyLease lease = previous.lease;
     CHECK(!SudekiMpLanPartyReleaseDrained(nodes[0], &lease));
     CHECK(SudekiMpLanPartyDisconnect(nodes[1], &lease)); pump();
+    SudekiMpLanPartyCombatMode mode;
+    CHECK(!SudekiMpLanPartyGetCombatMode(nodes[1],&lease,now,&mode));
     CHECK(status(0, 1).phase == SUDEKIMP_LAN_PARTY_DRAINING);
     CHECK(!SudekiMpLanPartyLeaseActive(nodes[0], &lease));
     CHECK(status(0, 2).phase == SUDEKIMP_LAN_PARTY_ACTIVE);
@@ -358,7 +560,13 @@ static void test_independent_disconnect_rejoin(void) {
     CHECK(current.phase == SUDEKIMP_LAN_PARTY_PENDING);
     CHECK(current.lease.generation == 2 && current.lease.token != lease.token);
     CHECK(!SudekiMpLanPartyApprove(nodes[0], &lease));
+    wait_transport(1);
     CHECK(SudekiMpLanPartyApprove(nodes[0], &current.lease)); pump();
+    CHECK(!SudekiMpLanPartyGetCombatMode(nodes[1],&current.lease,now,&mode));
+    CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],1,now)); pump();
+    CHECK(SudekiMpLanPartyGetCombatMode(nodes[1],&current.lease,now,&mode));
+    CHECK(mode.sequence==2u && mode.enabled);
+    CHECK(!SudekiMpLanPartyGetCombatMode(nodes[1],&lease,now,&mode));
     SudekiMpLanPartyInput old_input; memset(&old_input, 0, sizeof(old_input));
     old_input.lease = lease; old_input.input.actor_type = SudekiMpLanPartyActorType(1);
     old_input.input.sequence = 1;
@@ -491,6 +699,13 @@ static void test_raw_authority_and_retry(void) {
     raw_input(sock, &host_address, &stale, 6, SUDEKIMP_LAN_ARENA_TAL_TYPE);
     SudekiMpLanPartyPoll(host, now); CHECK(!SudekiMpLanPartyTakeInput(host, 2, &input));
     CHECK(SudekiMpLanPartyLeaseActive(host, &lease));
+    /* A client cannot publish host mode or advance host transport admission
+     * with that message, even using its own valid endpoint/token/generation. */
+    uint8_t forged_mode[13]={0}; put32(forged_mode,1); put32(forged_mode+4,1000);
+    put32(forged_mode+8,1001); forged_mode[12]=1;
+    raw_send(sock,&host_address,17,lease.seat,lease.generation,lease.token,
+        1000,0,forged_mode,sizeof(forged_mode),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,now);
     raw_input(sock, &host_address, &lease, 7, SUDEKIMP_LAN_ARENA_TAL_TYPE);
     SudekiMpLanPartyPoll(host, now); CHECK(SudekiMpLanPartyTakeInput(host, 2, &input));
     CHECK(input.input.sequence == 7 && SudekiMpLanPartyAdmitInput(host, &input));
@@ -520,6 +735,92 @@ static void raw_frame(SOCKET sock, const struct sockaddr_in *to,
     CHECK(size - 20 + RAW_HEADER <= 1468);
     raw_send(sock, to, RAW_FRAME, lease->seat, lease->generation, lease->token,
         sequence, part, bytes + 20, size - 20, SUDEKIMP_LAN_PARTY_VERSION);
+}
+static void raw_mode(SOCKET sock,const struct sockaddr_in *to,
+    const SudekiMpLanPartyLease *lease,uint32_t packet,uint32_t sequence,
+    uint32_t tick,uint32_t observed,uint8_t enabled) {
+    uint8_t body[13]; put32(body,sequence); put32(body+4,tick);
+    put32(body+8,observed); body[12]=enabled;
+    raw_send(sock,to,17,lease->seat,lease->generation,lease->token,packet,
+        0,body,sizeof(body),SUDEKIMP_LAN_PARTY_VERSION);
+}
+static void test_raw_combat_mode(void) {
+    struct sockaddr_in address,source,foreign_address; uint8_t bytes[1468];
+    SOCKET server=raw_socket(&address),foreign=raw_socket(&foreign_address);
+    SudekiMpLanPartyConfig c=config; c.local_seat=1; c.port=ntohs(address.sin_port);
+    SudekiMpLanPartySession *client=SudekiMpLanPartyCreate(&c); CHECK(client!=NULL);
+    uint32_t local=GetTickCount(); SudekiMpLanPartyPoll(client,local);
+    CHECK(raw_read(server,bytes,&source)==RAW_HEADER+47);
+    uint64_t nonce=get64(bytes+RAW_HEADER);
+    SudekiMpLanPartyLease lease={UINT64_C(0x2030405060708090),23,1};
+    SudekiMpLanPartyCombatMode mode={0},saved;
+    raw_mode(server,&source,&lease,2,UINT32_MAX-1u,UINT32_MAX-20u,UINT32_MAX-10u,1);
+    SudekiMpLanPartyPoll(client,local);
+    CHECK(!SudekiMpLanPartyGetCombatMode(client,&lease,local,&mode));
+    uint8_t ack[9]; put64(ack,nonce); ack[8]=SUDEKIMP_LAN_PARTY_ACTIVE;
+    raw_send(server,&source,RAW_ACK,1,lease.generation,lease.token,1,0,ack,sizeof(ack),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(client,local);
+    CHECK(SudekiMpLanPartyLeaseActive(client,&lease));
+    raw_mode(server,&source,&lease,2,UINT32_MAX-1u,UINT32_MAX-20u,UINT32_MAX-10u,1);
+    SudekiMpLanPartyPoll(client,local);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local,&mode));
+    CHECK(mode.enabled && mode.sequence==UINT32_MAX-1u);
+    SudekiMpLanPartyFrame frame;
+    CHECK(!SudekiMpLanPartyTakeFrame(client,&frame)); /* No animation frame needed. */
+    raw_send(server,&source,RAW_KEEPALIVE,1,lease.generation,lease.token,100,0,NULL,0,SUDEKIMP_LAN_PARTY_VERSION);
+    raw_mode(server,&source,&lease,3,UINT32_MAX-1u,UINT32_MAX-20u,UINT32_MAX-5u,1);
+    SudekiMpLanPartyPoll(client,local); /* Independent mode ordering survives reordering. */
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local,&mode));
+    CHECK(mode.observed_tick==UINT32_MAX-5u); saved=mode;
+    SudekiMpLanPartyLease wrong=lease; ++wrong.generation;
+    raw_mode(server,&source,&wrong,101,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    wrong=lease; ++wrong.token;
+    raw_mode(server,&source,&wrong,102,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    wrong=lease; wrong.seat=2;
+    raw_mode(server,&source,&wrong,103,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    raw_mode(foreign,&source,&lease,104,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    /* Neither altered repeats, older events nor backward event times replace state. */
+    raw_mode(server,&source,&lease,105,UINT32_MAX-1u,UINT32_MAX-20u,UINT32_MAX-4u,0);
+    raw_mode(server,&source,&lease,106,UINT32_MAX-1u,UINT32_MAX-19u,UINT32_MAX-4u,1);
+    raw_mode(server,&source,&lease,107,UINT32_MAX-2u,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    raw_mode(server,&source,&lease,108,UINT32_MAX,UINT32_MAX-6u,UINT32_MAX-1u,0);
+    raw_mode(server,&source,&lease,109,0,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    raw_mode(server,&source,&lease,110,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,2);
+    uint8_t bad[14]={0}; put32(bad,UINT32_MAX); put32(bad+4,UINT32_MAX-2u); put32(bad+8,UINT32_MAX-1u);
+    raw_send(server,&source,17,1,lease.generation,lease.token,111,0,bad,12,SUDEKIMP_LAN_PARTY_VERSION);
+    raw_send(server,&source,17,1,lease.generation,lease.token,112,0,bad,14,SUDEKIMP_LAN_PARTY_VERSION);
+    raw_send(server,&source,17,1,lease.generation,lease.token,113,1,bad,13,SUDEKIMP_LAN_PARTY_VERSION);
+    raw_send(server,&source,17,1,lease.generation,lease.token,114,0,bad,13,7);
+    SudekiMpLanPartyPoll(client,local);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local,&mode));
+    CHECK(mode.sequence==saved.sequence && mode.observed_tick==saved.observed_tick && mode.enabled==saved.enabled);
+    /* Exact repetitions cannot keep a stopped host game clock fresh. */
+    raw_mode(server,&source,&lease,115,saved.sequence,saved.host_tick,saved.observed_tick,saved.enabled);
+    SudekiMpLanPartyPoll(client,local+400u);
+    mode.sequence=42;
+    CHECK(!SudekiMpLanPartyGetCombatMode(client,&lease,local+501u,&mode));
+    CHECK(mode.sequence==42u); /* Failure does not manufacture a noncombat output. */
+    raw_mode(server,&source,&lease,116,UINT32_MAX,UINT32_MAX-2u,UINT32_MAX-1u,0);
+    SudekiMpLanPartyPoll(client,local+501u);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local+501u,&mode));
+    CHECK(mode.sequence==UINT32_MAX && !mode.enabled);
+    raw_mode(server,&source,&lease,117,1u,0u,0u,1);
+    SudekiMpLanPartyPoll(client,local+502u);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local+502u,&mode));
+    CHECK(mode.sequence==1u && mode.host_tick==0u && mode.enabled);
+    raw_mode(server,&source,&lease,118,UINT32_MAX,UINT32_MAX-2u,1u,0);
+    SudekiMpLanPartyPoll(client,local+503u);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,local+503u,&mode));
+    CHECK(mode.sequence==1u && mode.enabled);
+    /* Local receive-age expiry also works through GetTickCount wrap. */
+    raw_mode(server,&source,&lease,119,1u,0u,1u,1);
+    SudekiMpLanPartyPoll(client,UINT32_MAX-100u);
+    CHECK(SudekiMpLanPartyGetCombatMode(client,&lease,399u,&mode));
+    CHECK(!SudekiMpLanPartyGetCombatMode(client,&lease,400u,&mode));
+    raw_send(server,&source,RAW_END,1,lease.generation,lease.token,200,0,NULL,0,SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(client,local+504u);
+    CHECK(!SudekiMpLanPartyGetCombatMode(client,&lease,local+504u,&mode));
+    closesocket(foreign); closesocket(server); SudekiMpLanPartyDestroy(client,FALSE);
 }
 static void test_fragment_admission(void) {
     struct sockaddr_in address, source; uint8_t bytes[1468];
@@ -591,12 +892,13 @@ static void test_fragment_admission(void) {
 }
 
 int main(void) {
-    test_context_isolation(); test_motion_catalog(); test_replica_clock_and_atomicity();
+    test_context_isolation(); test_block_dodge_extension(); test_running_attack_extension();
+    test_motion_catalog(); test_combat_mode_frame_fence(); test_replica_clock_and_atomicity();
     test_world_phase_replica();
     test_replica_fourth_actor_action_clock(); setup();
     if (!nodes[0] || !nodes[1] || !nodes[2] || !nodes[3]) return 1;
-    test_three_clients(); test_transport_replica_consumption(); test_independent_disconnect_rejoin();
-    test_raw_authority_and_retry(); test_fragment_admission(); test_busy_hash_and_timeouts();
+    test_three_clients(); test_transport_replica_consumption(); test_combat_mode_publication(); test_independent_disconnect_rejoin();
+    test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_busy_hash_and_timeouts();
     for (unsigned i = 0; i < 4; ++i) SudekiMpLanPartyDestroy(nodes[i], FALSE);
     if (failures) return 1;
     puts("party session: three real UDP clients, routing, four-actor frames and independent rejoin passed");

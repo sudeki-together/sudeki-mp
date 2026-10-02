@@ -59,6 +59,11 @@ BOOL SudekiMpLanPartyClientControlService(SudekiMpLanPartyClientControl *c,
         c->initialized=TRUE;
     }
     if (!SudekiMpLanPartyPeerStatusGet(c->session,c->local_seat,&p)) return FALSE;
+    /* No native ownership exists during the first handshake or a drained
+     * retry. JOINING must not permanently latch the retiring state. */
+    if(p.phase==SUDEKIMP_LAN_PARTY_JOINING && !c->lease.token &&
+        !c->retiring && !InterlockedCompareExchange(&c->stopping,0,0))
+        return TRUE;
     if (InterlockedCompareExchange(&c->stopping,0,0) ||
         (p.phase!=SUDEKIMP_LAN_PARTY_ACTIVE && p.phase!=SUDEKIMP_LAN_PARTY_PENDING) ||
         (c->lease.token && !same_lease(&c->lease,&p.lease))) c->retiring=TRUE;
@@ -108,5 +113,25 @@ BOOL SudekiMpLanPartyClientControlService(SudekiMpLanPartyClientControl *c,
     }
     out->ready=!c->retiring && out->owned_mask==(uint8_t)(15u&~(1u<<c->local_seat)) &&
         SudekiMpLanPartyLeaseActive(c->session,&c->lease);
+    return TRUE;
+}
+BOOL SudekiMpLanPartyClientControlRejoin(SudekiMpLanPartyClientControl *c,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyRosterObservation current;
+    if(!c || !w || !w->service_post_original_exact ||
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
+        !c->initialized || !c->retiring || c->roster.replaced ||
+        InterlockedCompareExchange(&c->stopping,0,0) ||
+        SudekiMpLanPartyControlHasLeases() ||
+        !SudekiMpLanPartyControlObserveRoster(w,&current)) return FALSE;
+    for(unsigned i=0;i<4;++i)
+        if(c->actors[i] || (c->roster.bound.actors[i] &&
+            c->roster.bound.actors[i]!=current.actors[i])) return FALSE;
+    if(c->roster.bound_valid &&
+        (current.group!=c->roster.bound.group ||
+         current.controller!=c->roster.bound.controller)) return FALSE;
+    if(!SudekiMpLanPartyClientRejoin(c->session)) return FALSE;
+    memset(&c->lease,0,sizeof(c->lease));
+    c->retiring=FALSE;
     return TRUE;
 }

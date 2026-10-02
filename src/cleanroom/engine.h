@@ -48,6 +48,10 @@ BOOL SudekiMpCleanroomEngineWorldMotion(SudekiMpCleanroomActor actor,
 BOOL SudekiMpCleanroomEngineRangedActionPresentation(
     SudekiMpCleanroomActor actor, void *expected_entity,
     int32_t *selector, uint8_t *state, float *time);
+/* Same exact world renderer witness, including its actual shot clock/rate and
+ * fourth blend. Never substitutes the attached first-person arms bank. */
+BOOL SudekiMpCleanroomEngineRangedWorldPresentation(SudekiMpCleanroomActor actor,
+    void *expected_entity,SudekiMpCleanroomActorPresentation *presentation);
 
 const char *SudekiMpCleanroomActorLabel(SudekiMpCleanroomActor actor);
 const char *SudekiMpCleanroomActorResource(SudekiMpCleanroomActor actor);
@@ -73,6 +77,12 @@ BOOL SudekiMpCleanroomActorFromType(
 BOOL SudekiMpCleanroomActorIsRanged(SudekiMpCleanroomActor actor);
 
 BOOL SudekiMpCleanroomEngineInitialize(HMODULE game_module);
+/* Read-only identity of the already initialized supported-image adapter. */
+BOOL SudekiMpCleanroomEngineImageExact(HMODULE game_module);
+/* Host training SP/slot upkeep without spawning, equipping or AI service. */
+void SudekiMpCleanroomEngineMaintainSkillResources(void);
+/* Host game-thread maintenance only; does not initialize actors or native AI. */
+void SudekiMpCleanroomEngineMaintainTrainingResources(void);
 BOOL SudekiMpCleanroomEngineResourceNameFromText(
     SudekiMpResourceName *resource_name,
     const char *text
@@ -170,6 +180,12 @@ BOOL SudekiMpCleanroomEngineDummySnapshot(
     float *hit_points
 );
 BOOL SudekiMpCleanroomEngineSetDummyHitPoints(float hit_points);
+/* Exact testroom fixture. The caller owns the game-thread spawn transaction;
+ * removal requires the positively observed entity from that transaction. */
+BOOL SudekiMpCleanroomEngineSpawnFlightPlatform(const float position[3]);
+BOOL SudekiMpCleanroomEngineRemoveFlightPlatform(void *expected);
+BOOL SudekiMpCleanroomEngineSpawnFuelCrystal(const float position[3]);
+BOOL SudekiMpCleanroomEngineRemoveFuelCrystal(void *expected);
 BOOL SudekiMpCleanroomEngineSpawnDummy(const float position[3]);
 BOOL SudekiMpCleanroomEngineRemoveDummy(void);
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *enabled);
@@ -183,6 +199,9 @@ BOOL SudekiMpCleanroomEnginePrimeRangedCombat(void);
 /* Pure witness for the native UI lease. MaintainResources retires due work on
  * its owner game thread; teardown callers must defer while this returns TRUE. */
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void);
+/* Service only the existing game-thread ranged-prime deadline. Does not
+ * enable training cheats or replenish actor resources. */
+BOOL SudekiMpCleanroomEngineServiceRangedPrime(void);
 BOOL SudekiMpCleanroomEngineFirstPersonMode(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetFirstPersonMode(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteSp(BOOL *enabled);

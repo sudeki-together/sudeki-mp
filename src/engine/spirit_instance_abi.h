@@ -3,6 +3,10 @@
 #include <windows.h>
 #include <stdint.h>
 
+/* First retained invariant failure in this exact build, or zero. Observation
+ * only; never clears the fault or releases a native owner. */
+unsigned int SudekiMpSpiritInstanceFaultSite(void);
+
 /* Native objects, NOT a copy of the active singleton and never wire data.
  * Construction/destruction is allowed only at the caller's verified idle
  * game-thread boundary. The witness must exclude casts, native tasks and
@@ -95,6 +99,10 @@ BOOL SudekiMpAdvanceSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *,flo
 /* Ingress/admission must already be closed. Finish the last authored wait
  * naturally after disconnect, under the retained presentation-only lease. */
 BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *);
+/* Rebind an admitted network generation only after this exact caster's task
+ * lineage, view, light and native locks are positively idle. Other actors keep
+ * their own timers. Never clears or shortens a live authored wait. */
+BOOL SudekiMpRearmSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *);
 /* Persistent two-player CSkill UI/input isolation, without replacing the
  * native Spirit manager/camera or enabling overlapping admission. Uses the
  * SAME native hook owner as the instance experiment; mutually exclusive with
@@ -125,6 +133,12 @@ BOOL SudekiMpInitializeSpiritInstanceAbiWithInputOwner(HMODULE image,
  * and is not permission to enable concurrent activation. Do not hold an owner
  * scope across unrelated game work; the old whole-frame probe is unsuitable. */
 BOOL SudekiMpSpiritInstanceNamedCameraAbiReady(void);
+/* Opt-in before creating any named pairs. Retain each constructor-owned pair
+ * outside the ten-slot native name registry and publish only the current
+ * strict-LIFO owner's pair through two reserved empty slots. Native objects,
+ * scheduled callbacks and intrusive references retain their own identities.
+ * The ordinary two-instance registered-name path remains the default. */
+BOOL SudekiMpEnableSpiritInstanceNamedCameraBanking(void);
 BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *instance);
 /* kind: 1=InitCam, 2=SkillCam. Borrowed pointer valid only at the caller's
  * retained game-thread boundary. FALSE is unknown/unavailable, never permission
@@ -179,11 +193,19 @@ typedef struct SudekiMpSpiritInstanceState {
     uint32_t state, strike_id;
     BOOL camera_active;
     BOOL idle; /* Includes native references, locks, and UI/busy obligations. */
+    /* Same native task/camera/lock/reference proof as idle, excluding the
+     * independently retained lighting fade. Never authorizes destruction. */
+    BOOL body_idle;
 } SudekiMpSpiritInstanceState;
 /* Observes the specified constructor-owned instance, not the currently routed
  * global manager. FALSE is unknown; callers must not treat it as completion. */
 BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *instance,
     SudekiMpSpiritInstanceState *state);
+/* Narrow native manager activity observation with the same thread, retained
+ * caster, generation, manager and camera identity checks. Does not calculate
+ * idle/body-idle: FALSE activity is never proof of task drain or safe release. */
+BOOL SudekiMpObserveSpiritInstanceActivity(const SudekiMpSpiritInstance *instance,
+    BOOL *active);
 /* Resolve an existing constructor-owned binding using the caller's retained
  * actor/session lease. Never constructs an object or grants new authority. */
 BOOL SudekiMpResolveSpiritInstanceCaster(void *actor,uint64_t session,

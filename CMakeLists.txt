@@ -39,10 +39,20 @@ add_library(SudekiMP SHARED
     src/cleanroom/audio.c
     src/cleanroom/engine.c
     src/cleanroom/menu.c
+    src/ui/menu_button.c
+    src/ui/title_button.c
+    src/ui/title_menu_view.c
+    src/ui/title_lobby.c
+    src/network/title_lobby.c
+    src/loader/lobby_launch.c
+    src/hooks/lobby_instance.c
+    src/hooks/lobby_gameplay.c
+    src/hooks/title_multiplayer.c
     src/engine/arbiter_combat_input.c
     src/engine/buki_replica_native.c
     src/engine/controller_action_router.c
     src/engine/coop_roster_assignment.c
+    src/engine/party_ownership.c
     src/engine/economy_coordinator.c
     src/engine/economy_sidecar.c
     src/engine/blacksmith_commit_adapter.c
@@ -84,11 +94,19 @@ add_library(SudekiMP SHARED
     src/network/lan_arena_tal_combo_graph.c
     src/network/lan_arena_endpoint.c
     src/network/lan_party_session.c
+    src/network/lan_party_story.c
     src/network/lan_party_replica.c
     src/hooks/lan_party_host_control.c
     src/hooks/lan_party_client_control.c
     src/hooks/lan_party_snapshot.c
+    src/hooks/lan_party_jetpack.c
     src/hooks/lan_party_runtime.c
+    src/hooks/lan_story_runtime.c
+    src/hooks/lan_story_observer.c
+    src/hooks/lan_party_cast.c
+    src/engine/cast_motion_blur_abi.c
+    src/hooks/lan_party_combo_hud.c
+    src/hooks/lan_party_dummy_overlay.c
     src/network/lan_party_motion.c
     src/hooks/lan_party_roster.c
     src/network/lan_arena_authority.c
@@ -207,6 +225,7 @@ set_target_properties(SudekiMP PROPERTIES
 
 add_executable(SudekiMP.Launcher
     src/loader/launcher.c
+    src/loader/lobby_launch.c
     ${SUDEKIMP_COMMON_SOURCES}
 )
 
@@ -229,7 +248,7 @@ target_include_directories(SudekiMP.Launcher PRIVATE src)
 target_compile_definitions(SudekiMP.Launcher PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(SudekiMP.Launcher PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP.Launcher PRIVATE -municode)
-target_link_libraries(SudekiMP.Launcher PRIVATE advapi32)
+target_link_libraries(SudekiMP.Launcher PRIVATE advapi32 bcrypt)
 set_target_properties(SudekiMP.Launcher PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -602,9 +621,15 @@ add_executable(SudekiMP.SkillTraceImageTest
     tests/skill_trace_image_test.c
     tests/lan_party_control_image_fixture.c
     src/network/lan_party_session.c
+    src/network/lan_party_story.c
     src/hooks/lan_party_host_control.c
     src/hooks/lan_party_client_control.c
+    src/hooks/lan_party_jetpack.c
     src/hooks/lan_party_snapshot.c
+    src/hooks/lan_party_cast.c
+    src/engine/cast_motion_blur_abi.c
+    src/hooks/lan_party_combo_hud.c
+    src/hooks/lan_party_dummy_overlay.c
     src/network/lan_party_motion.c
     src/hooks/lan_party_roster.c
     src/cleanroom/engine.c
@@ -709,6 +734,12 @@ add_executable(SudekiMP.PlayerCombatContextTest
     src/engine/player_combat_context.c
     src/engine/log.c
 )
+add_executable(SudekiMP.PartyOwnershipTest
+    tests/party_ownership_test.c src/engine/party_ownership.c)
+target_include_directories(SudekiMP.PartyOwnershipTest PRIVATE src)
+target_compile_options(SudekiMP.PartyOwnershipTest PRIVATE -Wall -Wextra -Wpedantic -Werror)
+set_target_properties(SudekiMP.PartyOwnershipTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.PlayerCombatContextTest PRIVATE src)
 target_compile_definitions(SudekiMP.PlayerCombatContextTest PRIVATE
     WIN32_LEAN_AND_MEAN
@@ -940,6 +971,7 @@ set_target_properties(SudekiMP.LanArenaLoopbackPeerTest PROPERTIES
 )
 
 add_executable(SudekiMP.LanPartySessionTest
+    src/network/lan_party_story.c
     tests/lan_party_session_test.c
     src/network/lan_party_motion.c
     src/network/lan_party_replica.c

@@ -36,6 +36,12 @@ void SudekiMpLanArenaReplicaReset(SudekiMpLanArenaReplica *replica);
 /* Select, but do not consume, the next confirmed local weapon event. Only
  * expired/wrong-weapon events advance the cursor here; native submission
  * commits an accepted event. Reset/baseline the cursor on a new actor/session. */
+const SudekiMpLanWeaponShot *SudekiMpLanRangedWeaponNextShot(
+    uint8_t actor_type,const SudekiMpLanWeaponState *state,uint8_t item,
+    uint32_t host_tick,uint16_t *cursor);
+BOOL SudekiMpLanRangedWeaponPlaybackReloadMs(uint8_t actor_type,
+    const SudekiMpLanWeaponState *state,uint8_t item,uint16_t playback_sequence,
+    uint32_t host_tick,uint16_t *reload_ms);
 const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
     const SudekiMpLanWeaponState *state, uint8_t item, uint32_t host_tick,
     uint16_t *cursor);

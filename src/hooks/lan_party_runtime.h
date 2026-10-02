@@ -7,4 +7,5 @@
 BOOL SudekiMpInstallLanPartyRuntime(HMODULE,const SudekiMpLanPartyConfig *);
 /* Retry while native cleanup is pending. Never unload retained dependencies. */
 BOOL SudekiMpUninstallLanPartyRuntime(void);
+unsigned SudekiMpLanPartyRuntimePort(void);
 #endif

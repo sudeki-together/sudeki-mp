@@ -5,6 +5,9 @@
 #include "network/lan_party_session.h"
 
 BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module);
+/* Same game-thread callbacks as the retained SMP4 input hooks. The function
+ * must outlive those hooks; it suppresses only this seat's new input. */
+void SudekiMpLanPartyClientInputSetConsoleGate(BOOL (*gate)(void));
 /* Explicit fixed-four endpoint, selected once at installation. The retained
  * session outlives all input hooks. Native local execution stays contained
  * even while joining/disconnected; only ACTIVE transport can send input.

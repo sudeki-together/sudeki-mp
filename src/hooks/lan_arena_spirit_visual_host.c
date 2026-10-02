@@ -42,7 +42,7 @@ static const uint32_t resource_ids[] = {
     0x423bad0du, 0xc198e72du, 0x26de2bb3u, 0xc6cf803bu, 0x07f9bc13u,
     0x920d7163u, 0x0fdb430fu,
     0x18a0da0fu, 0x34b6a981u, 0xafbcfa53u, 0x55f90a03u, 0xf3c381cfu,
-    0xe2711ed3u, 0xec9a809bu, 0xb0a51d13u, 0xa85bf815u, 0x4ed84d5bu
+    0xe2711ed3u, 0xec9a809bu, 0xb0a51d13u, 0xa85bf815u, 0x4ed84d5bu, 0x7eae7163u, 0x8e21830fu
 };
 static const char *const resource_names[] = {
     NULL, "SFXSS250_INITIATE", "SFXSS251_INITIATE_LOOP_WAIT",
@@ -57,7 +57,8 @@ static const char *const resource_names[] = {
     "SFXB200_SHIELD_APPEAR", "SFXB201_SHIELD_LOOP",
     "SFXSS550_INITIATE", "SFXSS551_INITIATE_LOOP_WAIT", "SFXSS552_MORPH_INTO_SPIRIT",
     "SFXSS560_LOOP_INVULNERABLE", "SFXSS561_END_INVULNERABLE", "SFXSS562_SMALL_FLOOR_PATTERN",
-    "SFXSS600_RAFFI_SPIRIT_STRIKE", "SFXSS601_HIT", "SFXSS650_RAFFI_SS_SPELL", "SFXSS651_HASTE_PCS"
+    "SFXSS600_RAFFI_SPIRIT_STRIKE", "SFXSS601_HIT", "SFXSS650_RAFFI_SS_SPELL", "SFXSS651_HASTE_PCS",
+    "SFXT200_SHIELD_APPEAR", "SFXT201_SHIELD_LOOP"
 };
 enum { RESOURCE_TEXT_CAPACITY = 64, DIAGNOSTIC_CAPACITY = 16 };
 static const uint8_t finalize_prefix[] = {
@@ -111,6 +112,7 @@ static HMODULE image;
 static DWORD game_thread;
 static SudekiMpLanArenaSpiritVisualHostWitness active_witness;
 static void *witness_context;
+static SudekiMpLanPartyShieldHostWitness shield_witness;
 static volatile LONG admitted;
 static volatile LONG in_flight;
 static volatile LONG unexpected_thread;
@@ -123,13 +125,13 @@ static uint32_t diagnostic_ids[DIAGNOSTIC_CAPACITY];
 static uint32_t diagnostic_types[DIAGNOSTIC_CAPACITY];
 static unsigned int diagnostic_count;
 static uint16_t diagnostic_skill;
-static uint32_t inactive_kind_mask;
-_Static_assert(SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST < 32u,
+static uint64_t inactive_kind_mask;
+_Static_assert(SUDEKIMP_LAN_PARTY_VFX_LAST < 64u,
     "inactive diagnostics need one bit per closed visual kind");
 _Static_assert(sizeof(resource_ids) / sizeof(resource_ids[0]) ==
-    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u, "closed visual ID table mismatch");
+    SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, "closed visual ID table mismatch");
 _Static_assert(sizeof(resource_names) / sizeof(resource_names[0]) ==
-    SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u, "closed visual name table mismatch");
+    SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, "closed visual name table mismatch");
 
 uint8_t SudekiMpSpiritVisualKindForResource(uint32_t identifier) {
     unsigned int i;
@@ -281,7 +283,7 @@ unsigned int SudekiMpSpiritVisualHostRegistryBeginOwned(
     identity.skill_sequence = skill;
     identity.owner_actor_type = owner_actor_type;
     if (r == NULL || !api_valid(api)) return 0u;
-    if (session == 0u || !SudekiMpLanArenaVisualOwnerValid(&identity) || entity == NULL || kind == 0u ||
+    if (session == 0u || !SudekiMpLanArenaVisualOwnerValidForParty(&identity) || entity == NULL || kind == 0u ||
         kind >= sizeof(resource_ids)/sizeof(resource_ids[0]) ||
         (r->session != 0u && r->session != session)) {
         r->unknown = TRUE;
@@ -521,6 +523,25 @@ static BOOL native_phase(void *renderer, SudekiMpLanArenaSpiritVfxSnapshot *valu
     return TRUE;
 }
 
+static uint8_t shield_owner(uint8_t kind) {
+    if(kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+       kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP)
+        return SUDEKIMP_LAN_ARENA_BUKI_TYPE;
+    if(kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR ||
+       kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP)
+        return SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    return 0u;
+}
+static BOOL shield_actor_exact(uint8_t kind, void **actor) {
+    uint8_t owner = shield_owner(kind);
+    if(!owner || !actor) return FALSE;
+    if(shield_witness) return shield_witness(witness_context, owner, actor);
+    if(owner != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+        seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return FALSE;
+    *actor = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_BUKI);
+    return *actor != NULL;
+}
+
 static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *node,
     uint8_t kind, SudekiMpLanArenaSpiritVfxSnapshot *value) {
     uint8_t *e = (uint8_t *)node->entity;
@@ -533,22 +554,22 @@ static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *nod
     if (GetCurrentThreadId() != game_thread || !weak_links_valid(node) ||
         !exact_effect(e) || kind == 0u || kind >= sizeof(resource_ids)/sizeof(resource_ids[0]))
         return FALSE;
-    if (kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
-        kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) {
-        uint8_t *actor = SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_BUKI);
+    if (shield_owner(kind)) {
+        void *actor = NULL;
         void *actor_position, *owner;
         uint8_t *p = e + 0x160u;
         unsigned int depth;
         BOOL matched = FALSE;
-        sample_reason = "buki_shield_parent_identity";
-        if (seat_host_type() != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
-            value->owner_actor_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+        sample_reason = "shield_parent_identity";
+        if (!shield_actor_exact(kind, &actor) ||
+            value->owner_actor_type != shield_owner(kind) ||
+            ((const SudekiMpSpiritVisualHostEntry *)node)->status_actor != actor ||
             !pointer_at(actor, 0x44u, &actor_position) ||
             !pointer_at(actor_position, 0x10u, &owner) || owner != actor)
             return FALSE;
         /* Finalize is observed before its caller finishes attaching the
          * effect. Admission at capture requires the completed native parent
-         * chain to reach this session's exact Buki, never just proximity. */
+         * chain to reach this session's exact actor, never just proximity. */
         for (depth = 0u; depth < 16u; ++depth) {
             void *parent;
             if (p == actor_position) { matched = TRUE; break; }
@@ -759,8 +780,7 @@ static void * __attribute__((cdecl, used)) observe_script_parent_body(
             /* Status/shield effects have separate target-owned discovery.
              * An unrelated script effect must not consume a pending slot. */
             observing = kind != 0u && kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
-                kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR &&
-                kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP;
+                !shield_owner(kind);
             if (observing) {
                 if (emission_source) source = *emission_source;
                 else if (active_witness) source.valid = active_witness(witness_context, NULL,
@@ -845,31 +865,29 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                 } else {
                     kind = native_resource_kind(s + 0x28u);
                 }
-                if (kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
-                    kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) {
+                if (shield_owner(kind)) {
                     /* A candidate native lifetime, not yet a published
                      * owner claim. native_sample validates the final parent
-                     * chain against the exact Buki before any transmission. */
-                    void *entity = *(void **)(s + 0x1cu);
-                    if (seat_host_type() == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+                     * chain against the exact actor before any transmission. */
+                    void *entity = *(void **)(s + 0x1cu), *actor = NULL;
+                    if (shield_actor_exact(kind, &actor) &&
                         registry.session != 0u && entity != NULL) {
                         observed_kind = kind;
                         if (!exact_effect(entity)) registry.unknown = TRUE;
                         else {
                             token = SudekiMpSpiritVisualHostRegistryBeginOwned(
                                 &registry, registry.session, 0u, GetTickCount(), kind,
-                                SUDEKIMP_LAN_ARENA_BUKI_TYPE, entity, native_api());
-                            if (token != 0u) registry.entries[token - 1u].status_actor =
-                                SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_BUKI);
+                                shield_owner(kind), entity, native_api());
+                            if (token != 0u) registry.entries[token - 1u].status_actor = actor;
                         }
                     }
                 } else if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
                     /* Status effects are discovered from the exact target's
                      * status component after finalization, never attributed
                      * to whichever Spirit happened to be running. */
-                } else if (!active && kind != 0u &&
-                    (inactive_kind_mask & (UINT32_C(1) << kind)) == 0u) {
-                    inactive_kind_mask |= (UINT32_C(1) << kind);
+                } else if (!shield_witness && !active && kind != 0u &&
+                    (inactive_kind_mask & (UINT64_C(1) << kind)) == 0u) {
+                    inactive_kind_mask |= (UINT64_C(1) << kind);
                     observed_kind = kind;
                     skip_reason = "native_spirit_witness_inactive";
                 } else if (active && kind == 0u &&
@@ -1026,6 +1044,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
         }
     }
     active_witness = witness;
+    shield_witness = NULL;
     witness_context = context;
     InterlockedExchange(&unexpected_thread, 0);
     session_armed = FALSE;
@@ -1036,6 +1055,72 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
     inactive_kind_mask = 0u;
     InterlockedExchange(&admitted, 1);
     return TRUE;
+}
+
+static BOOL no_spirit_scope(void *context, void *source, uint64_t *session,
+    uint16_t *skill, uint32_t *tick, uint8_t *owner) {
+    (void)context; (void)source; (void)session; (void)skill; (void)tick; (void)owner;
+    return FALSE;
+}
+BOOL SudekiMpLanPartyShieldHostInitialize(HMODULE module,
+    SudekiMpLanPartyShieldHostWitness witness, void *context) {
+    if(!witness || !SudekiMpLanArenaSpiritVisualHostInitialize(
+            module, no_spirit_scope, context)) return FALSE;
+    shield_witness = witness;
+    return TRUE;
+}
+BOOL SudekiMpLanPartyShieldHostCapture(uint64_t session, uint32_t host_tick,
+    SudekiMpLanArenaSnapshot *output) {
+    const char *reason = "shield_session_or_thread";
+    void *buki, *tal;
+    unknown_output(output);
+    if(!shield_witness || !session || !output ||
+        !InterlockedCompareExchange(&admitted, 0, 0)) return FALSE;
+    if(game_thread == 0u) game_thread = GetCurrentThreadId();
+    if(GetCurrentThreadId() != game_thread) return FALSE;
+    if(InterlockedCompareExchange(&unexpected_thread, 0, 0)) registry.unknown = TRUE;
+    if(registry.session && registry.session != session) {
+        session_armed = FALSE;
+        if(!reset_pending_emissions() ||
+           !SudekiMpSpiritVisualHostRegistryReset(&registry, native_api())) goto unknown;
+    }
+    registry.session = session;
+    if(!shield_actor_exact(SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP, &buki) ||
+       !shield_actor_exact(SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP, &tal)) goto unknown;
+    /* Initialized before combat admission. Replaced actors cannot inherit a
+     * previous native effect even if their network seat remains the same. */
+    for(unsigned i=0; i<SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
+        SudekiMpSpiritVisualHostEntry *entry=&registry.entries[i];
+        void *actor=entry->value.owner_actor_type==SUDEKIMP_LAN_ARENA_BUKI_TYPE?buki:tal;
+        if(entry->status_actor && entry->status_actor!=actor) {
+            if(!native_bind(image, &entry->weak, NULL)) goto unknown;
+            memset(entry, 0, sizeof(*entry));
+        }
+    }
+    session_armed = TRUE;
+    sample_reason = NULL;
+    if(!SudekiMpSpiritVisualHostRegistryCapture(&registry, session, output, native_api())) {
+        reason = sample_reason ? sample_reason : "shield_lifetime_unknown";
+        goto unknown;
+    }
+    for(unsigned i=0; i<output->spirit_vfx_count; ++i)
+        if(!SudekiMpLanPartyShieldOwnerValid(&output->spirit_vfx[i]) ||
+           (int32_t)(host_tick-output->spirit_vfx[i].emitted_host_tick)<0) {
+            reason="shield_publication_identity"; goto unknown;
+        }
+    if(last_capture_reason || last_capture_count != output->spirit_vfx_count) {
+        SudekiMpLogFormat("lan_party event=shield_roster observed=1 count=%u\r\n",
+            output->spirit_vfx_count);
+        last_capture_reason=NULL; last_capture_count=output->spirit_vfx_count;
+    }
+    return TRUE;
+unknown:
+    unknown_output(output);
+    if(!last_capture_reason || strcmp(last_capture_reason,reason)) {
+        SudekiMpLogFormat("lan_party event=shield_roster observed=0 reason=%s\r\n",reason);
+        last_capture_reason=reason; last_capture_count=-1;
+    }
+    return FALSE;
 }
 
 BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {

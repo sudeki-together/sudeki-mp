@@ -1,9 +1,13 @@
 #include "hooks/lan_party_host_control.h"
 #include "hooks/lan_party_control.h"
+#include "hooks/lan_party_cast.h"
+#include "hooks/lan_party_jetpack.h"
 #include "cleanroom/engine.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
+#include "engine/log.h"
 #include "network/lan_party_motion.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,8 +15,10 @@ typedef struct HostActor {
     SudekiMpLanPartyLease lease;
     void *actor;
     SudekiMpLanPartyInput input;
-    BOOL have_input, draining, stopped, action_serviced, block_held;
+    BOOL have_input, draining, stopped, action_serviced, block_held, movement_busy;
     uint32_t next_held_fire_at;
+    BOOL weapon_swap;
+    uint32_t weapon_swap_started;
 } HostActor;
 struct SudekiMpLanPartyHostControl {
     SudekiMpLanPartySession *session;
@@ -47,12 +53,14 @@ static BOOL ordinary_input(const SudekiMpLanArenaInput *i,
         i->actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE;
     return combat && combat->strong_pressed<=1u &&
         combat->sweep_pressed<=1u && combat->block_held<=1u &&
+        combat->flight_held<=1u && (!combat->flight_held ||
+            i->actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE) &&
         (!i->weak_attack_held ||
             (ranged && i->ranged_first_person_active)) &&
         !i->cleanroom_combat_test_pressed &&
-        !i->skill_pressed &&
         (i->kit_action==SUDEKIMP_LAN_ARENA_KIT_NONE ||
-         i->kit_action==SUDEKIMP_LAN_ARENA_KIT_WEAPON);
+         i->kit_action==SUDEKIMP_LAN_ARENA_KIT_WEAPON ||
+         i->kit_action==SUDEKIMP_LAN_ARENA_KIT_SPIRIT);
 }
 static BOOL ranged_action_active(void *actor,uint8_t type) {
     SudekiMpCleanroomActor cleanroom_actor;
@@ -76,21 +84,26 @@ static BOOL ranged_weapon_ready(const SudekiMpControlUpdateDispatchWitness *w,
     return TRUE;
 }
 static BOOL submit_weapon_selection(const SudekiMpControlUpdateDispatchWitness *w,
-    const SudekiMpLanPartyLease *lease,void *actor,unsigned slot) {
+    const SudekiMpLanPartyLease *lease,void *actor,unsigned slot,BOOL *changed) {
     SudekiMpCharacterSkillState skill; BOOL combat=FALSE; int spirit=0;
     SudekiMpWeaponActivationResult result;
-    if(!w || !lease || !actor || slot>=12u ||
+    SudekiMpWeaponQuickList weapons;
+    if(changed) *changed=FALSE;
+    if(!w || !lease || !actor || !changed || slot>=12u ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
         !SudekiMpLanPartyControlExact(w,lease,actor) ||
         !SudekiMpCleanroomEngineCombatMode(&combat) || !combat ||
         SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active ||
-        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0)
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
+        !SudekiMpDescribeCharacterWeapons(actor,&weapons) || slot>=weapons.row_count)
         return FALSE;
     result=SudekiMpActivateCharacterWeapon(actor,slot);
-    return result.status==SUDEKIMP_WEAPON_ACTIVATION_STARTED &&
+    BOOL accepted=result.status==SUDEKIMP_WEAPON_ACTIVATION_STARTED &&
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) &&
         SudekiMpLanPartyControlExact(w,lease,actor);
+    *changed=accepted && !weapons.rows[slot].equipped;
+    return accepted;
 }
 static float axis(int16_t value) {
     return value == INT16_MIN ? -1.0f : value / 32767.0f;
@@ -151,7 +164,7 @@ BOOL SudekiMpLanPartyHostControlDestroy(SudekiMpLanPartyHostControl *h) {
 }
 static BOOL retire(SudekiMpLanPartyHostControl *h, HostActor *a,
     const SudekiMpControlUpdateDispatchWitness *w) {
-    if(!release_block(w,a)) return FALSE;
+    if(!release_block(w,a) || !SudekiMpLanPartyJetpackDrained(a->actor)) return FALSE;
     a->have_input = FALSE; a->draining = TRUE;
     /* Quiesce may fail because Default consumed the reference on an earlier
      * pass. Release retains its own retry/verification state in that case. */
@@ -163,9 +176,9 @@ static BOOL retire(SudekiMpLanPartyHostControl *h, HostActor *a,
     (void)SudekiMpLanPartyReleaseDrained(h->session,&a->lease);
     memset(a,0,sizeof(*a)); return TRUE;
 }
-BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
+BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
     const SudekiMpControlUpdateDispatchWitness *w, uint32_t now,
-    SudekiMpLanPartyHostControlReport *report) {
+    float frame_delta, SudekiMpLanPartyHostControlReport *report) {
     unsigned int seat;
     if (!h || !report || !w || !w->service_post_original_exact ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
@@ -187,6 +200,7 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
         SudekiMpLanPartyPeerStatus p;
         SudekiMpLanPartyInput next;
         uint8_t bit = (uint8_t)(1u << seat);
+        uint32_t repeat_ms=seat==1u?0u:250u;
         BOOL fresh, admitted = FALSE, new_input=FALSE;
         if (!SudekiMpLanPartyPeerStatusGet(h->session,seat,&p)) {
             report->failed_mask |= bit; continue;
@@ -237,6 +251,8 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
             continue;
         }
         if (!SudekiMpLanPartyControlExact(w,&a->lease,a->actor)) {
+            SudekiMpLogFormat("lan_party event=host_disconnect seat=%u reason=native_lease_not_exact tick=%lu\r\n",
+                seat,(unsigned long)now);
             a->draining = TRUE;
             (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
             report->failed_mask |= bit; continue;
@@ -276,28 +292,37 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
             }
         }
         fresh = a->have_input && input_fresh(now,a->input.received_at_ms);
+        if(a->weapon_swap && now-a->weapon_swap_started>=SUDEKIMP_RANGED_WEAPON_SWAP_MS)
+            a->weapon_swap=FALSE;
         if (!SudekiMpLanPartyLeaseActive(h->session,&a->lease)) {
             a->draining = TRUE;
-            (void)SudekiMpLanPartyControlQuiesce(w,&a->lease,a->actor);
+            (void)retire(h,a,w);
             continue;
         }
-        if (fresh || !a->stopped) {
-            const SudekiMpLanArenaInput *i = &a->input.input;
-            BOOL ok = SudekiMpLanPartyControlMove(w,&a->lease,a->actor,
-                fresh ? axis(i->world_direction_x) : 0,
-                fresh ? axis(i->world_direction_z) : 0,
-                fresh ? axis(i->aim_direction_x) : 0,
-                fresh ? axis(i->aim_direction_z) : 0,
-                fresh && i->ranged_first_person_active && seat != 2u &&
-                    (i->aim_direction_x != 0 || i->aim_direction_z != 0));
-            if (!ok) {
-                a->draining = TRUE;
-                (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
-                report->failed_mask |= bit; continue;
-            }
-            a->stopped = !fresh;
+        /* Retail recharges only the local controller's gun. Elco is remote
+         * on this host: reuse the exact two-seat rapid-weapon adapter once
+         * per native update, including frames with the trigger released.
+         * It verifies the actual item, authored rate/cycle and Buki controller
+         * before entering native recharge. Other guns retain native readiness
+         * and reload gates; their full reload duration is not a shot interval. */
+        if(seat==1u && fresh && a->input.input.ranged_first_person_active &&
+            !SudekiMpLanPartyCastActive(a->actor) &&
+            isfinite(frame_delta) && frame_delta>0.0f && frame_delta<=0.25f) {
+            BOOL combat=FALSE;
+            if(host_combat_mode(&combat) && combat)
+                (void)SudekiMpServiceRemoteRapidWeapon(a->actor,
+                    h->roster.bound.actors[0],frame_delta,&repeat_ms);
         }
-        if(new_input && fresh) {
+        if(seat==1u) {
+            BOOL held=fresh && a->input.combat.flight_held;
+            if(!SudekiMpLanPartyJetpackInput(w,&a->lease,a->actor,held) && held) {
+                admitted=FALSE;
+                report->unsupported_input_mask|=bit;
+            }
+        }
+        /* Retail handles block transitions before movement. In particular,
+         * a native movement lock must never swallow the release transition. */
+        if(new_input && fresh && !SudekiMpLanPartyCastActive(a->actor)) {
             BOOL combat=FALSE;
             BOOL requested=a->input.combat.block_held!=0u;
             unsigned int block_state=requested ? (a->block_held?2u:1u) :
@@ -320,6 +345,64 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
                 continue;
             }
         }
+        if(fresh && SudekiMpLanPartyCastTargeting(a->actor)) {
+            const SudekiMpLanArenaInput *i=&a->input.input;
+            if((i->aim_direction_x || i->aim_direction_z) &&
+                !SudekiMpLanPartyControlSkillFacing(w,&a->lease,a->actor,
+                    axis(i->aim_direction_x),axis(i->aim_direction_z))) {
+                admitted=FALSE;
+                report->unsupported_input_mask|=bit;
+            }
+        }
+        if ((fresh || !a->stopped) && !SudekiMpLanPartyCastActive(a->actor)) {
+            const SudekiMpLanArenaInput *i = &a->input.input;
+            BOOL ok = fresh && seat==2u && a->block_held ?
+                SudekiMpLanPartyControlSubmitDodge(w,&a->lease,a->actor,
+                    axis(i->world_direction_x),axis(i->world_direction_z)) :
+                SudekiMpLanPartyControlMove(w,&a->lease,a->actor,
+                fresh ? axis(i->world_direction_x) : 0,
+                fresh ? axis(i->world_direction_z) : 0,
+                fresh ? axis(i->aim_direction_x) : 0,
+                fresh ? axis(i->aim_direction_z) : 0,
+                fresh && i->ranged_first_person_active && seat != 2u &&
+                    (i->aim_direction_x != 0 || i->aim_direction_z != 0));
+            if (!ok) {
+                DWORD error=GetLastError();
+                if(error==ERROR_BUSY &&
+                    SudekiMpLanPartyControlExact(w,&a->lease,a->actor)) {
+                    if(!a->movement_busy)
+                        SudekiMpLogFormat("lan_party event=movement_deferred seat=%u reason=native_movement_disabled tick=%lu\r\n",
+                            seat,(unsigned long)now);
+                    a->movement_busy=TRUE;
+                    /* Consume no gameplay edges or ACK while blocked. Require
+                     * a new fresh packet when the native controller resumes. */
+                    a->have_input=FALSE;
+                    a->stopped=FALSE;
+                    report->waiting_mask|=bit;
+                    continue;
+                }
+                SudekiMpLogFormat("lan_party event=host_disconnect seat=%u reason=movement_validation_failed error=%lu tick=%lu\r\n",
+                    seat,(unsigned long)error,(unsigned long)now);
+                a->draining = TRUE;
+                (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
+                report->failed_mask |= bit; continue;
+            }
+            if(a->movement_busy)
+                SudekiMpLogFormat("lan_party event=movement_resumed seat=%u tick=%lu\r\n",
+                    seat,(unsigned long)now);
+            a->movement_busy=FALSE;
+            a->stopped = !fresh;
+        }
+        if(new_input && fresh && (a->input.input.skill_pressed ||
+            a->input.input.kit_action==SUDEKIMP_LAN_ARENA_KIT_SPIRIT)) {
+            BOOL spirit=a->input.input.kit_action==SUDEKIMP_LAN_ARENA_KIT_SPIRIT;
+            BOOL combat=FALSE;
+            BOOL started=host_combat_mode(&combat) && combat && release_block(w,a) &&
+                SudekiMpLanPartyCastSubmit(w,&a->lease,a->actor,spirit,
+                    spirit?a->input.input.kit_slot:a->input.input.skill_slot);
+            a->action_serviced=TRUE;
+            if(!started) { admitted=FALSE; report->unsupported_input_mask|=bit; }
+        }
         if(fresh && new_input && !a->action_serviced &&
             (a->input.combat.strong_pressed || a->input.combat.sweep_pressed)) {
             BOOL combat=FALSE;
@@ -336,11 +419,11 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
         }
         if (fresh && a->input.input.weak_attack_pressed && !a->action_serviced) {
             BOOL combat = FALSE;
-            BOOL ranged_ready=TRUE;
+            BOOL ranged_ready=!a->weapon_swap;
             if(a->input.input.ranged_first_person_active &&
                 (a->input.input.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
                  a->input.input.actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE))
-                ranged_ready=!ranged_action_active(a->actor,a->input.input.actor_type) &&
+                ranged_ready=ranged_ready && !ranged_action_active(a->actor,a->input.input.actor_type) &&
                     ranged_weapon_ready(w,&a->lease,a->actor,
                         a->input.input.actor_type);
             BOOL action_admitted = ranged_ready &&
@@ -348,7 +431,7 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
                 SudekiMpLanPartyControlSubmitWeakAttack(w, &a->lease, a->actor);
             a->action_serviced = TRUE;
             if(action_admitted && a->input.input.ranged_first_person_active)
-                a->next_held_fire_at=now+250u;
+                a->next_held_fire_at=now+repeat_ms;
             if (!action_admitted) {
                 /* The actor-local native arbiter is the action validator.
                  * Keep locomotion alive,
@@ -362,12 +445,12 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
             if(!a->next_held_fire_at) a->next_held_fire_at=now;
             if((int32_t)(now-a->next_held_fire_at)>=0) {
                 BOOL combat=FALSE;
-                if(!ranged_action_active(a->actor,a->input.input.actor_type) &&
+                if(!a->weapon_swap && !ranged_action_active(a->actor,a->input.input.actor_type) &&
                     ranged_weapon_ready(w,&a->lease,a->actor,
                         a->input.input.actor_type) &&
                     host_combat_mode(&combat) && combat &&
                     SudekiMpLanPartyControlSubmitWeakAttack(w,&a->lease,a->actor))
-                    a->next_held_fire_at=now+250u;
+                    a->next_held_fire_at=now+repeat_ms;
                 else a->next_held_fire_at=now+50u;
                 a->action_serviced=TRUE;
             }
@@ -376,8 +459,20 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
             !a->input.input.weak_attack_held)) a->next_held_fire_at=0;
         if(fresh && a->input.input.kit_action==SUDEKIMP_LAN_ARENA_KIT_WEAPON &&
             !a->action_serviced) {
+            BOOL changed=FALSE;
             BOOL selected=submit_weapon_selection(w,&a->lease,a->actor,
-                a->input.input.kit_slot);
+                a->input.input.kit_slot,&changed);
+            if(changed && seat==1u) {
+                /* Remote equipment activation lacks Elco's local C1 input
+                 * interval. Reserve its authored duration on the host too;
+                 * the client independently plays the validated native clip. */
+                a->weapon_swap=TRUE;
+                a->weapon_swap_started=now;
+                a->next_held_fire_at=now+SUDEKIMP_RANGED_WEAPON_SWAP_MS;
+                SudekiMpLogFormat("lan_party event=weapon_swap seat=%u slot=%u duration_ms=%u tick=%lu\r\n",
+                    seat,a->input.input.kit_slot,SUDEKIMP_RANGED_WEAPON_SWAP_MS,
+                    (unsigned long)now);
+            }
             a->action_serviced=TRUE;
             if(!selected) {
                 admitted=FALSE;
@@ -394,6 +489,11 @@ BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
             report->failed_mask |= bit;
     }
     return TRUE;
+}
+BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *h,
+    const SudekiMpControlUpdateDispatchWitness *w,uint32_t now,
+    SudekiMpLanPartyHostControlReport *report) {
+    return SudekiMpLanPartyHostControlServiceFrame(h,w,now,0.0f,report);
 }
 BOOL SudekiMpLanPartyHostControlLatestInput(SudekiMpLanPartyHostControl *h,
     const SudekiMpControlUpdateDispatchWitness *w,unsigned seat,uint32_t now,

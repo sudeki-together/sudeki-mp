@@ -28,6 +28,10 @@
 #define SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY 4u
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHANNELS 5u
 #define SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_BLENDS 4u
+/* Explicit SMP4 roster context only (v7 appends Tal's running attack).
+ * Legacy LA42 Tal clips stay below10; the party motion module statically
+ * checks its dense actor-local mapping. */
+#define SUDEKIMP_LAN_ARENA_PARTY_TAL_MOTION_MAX 25u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_HISTORY_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY 8u
 #define SUDEKIMP_LAN_ARENA_MAX_SNAPSHOT_PACKET_SIZE 1452u
@@ -296,6 +300,9 @@ typedef struct SudekiMpLanWeaponState {
     SudekiMpLanWeaponShot shots[SUDEKIMP_LAN_WEAPON_SHOT_HISTORY];
 } SudekiMpLanWeaponState;
 
+/* SMP4 sidecars admit both exact ranged families. The legacy embedded
+ * weapon validator remains Elco-only. */
+int SudekiMpLanRangedWeaponStateValid(const SudekiMpLanWeaponState *state, uint8_t actor_type);
 int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *state, uint8_t actor_type);
 
 typedef struct SudekiMpLanArenaActorSnapshot {
@@ -445,6 +452,16 @@ typedef struct SudekiMpLanArenaSpiritVfxSnapshot {
     uint8_t owner_actor_type;
 } SudekiMpLanArenaSpiritVfxSnapshot;
 
+/* SMP4 v6 extends the closed native resource set without widening LA42. */
+enum {
+    SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR = 31,
+    SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP = 32,
+    SUDEKIMP_LAN_PARTY_VFX_LAST = SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP
+};
+int SudekiMpLanPartyShieldOwnerValid(
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual);
+int SudekiMpLanArenaVisualOwnerValidForParty(
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 int SudekiMpLanArenaVisualOwnerValid(
     const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 

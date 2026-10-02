@@ -1,5 +1,6 @@
 #include "hooks/control_separation.h"
 #include "hooks/lan_party_control.h"
+#include "hooks/lan_party_cast.h"
 
 #include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
@@ -184,6 +185,7 @@ typedef struct ControlUpdateObserverEntry {
 typedef struct ControlUpdateDispatchFrame {
     struct ControlUpdateDispatchFrame *previous;
     const SudekiMpControlUpdateDispatchWitness *active_witness;
+    void *observer_update_data; /* borrowed only while active_witness is live */
     uint64_t dispatch_serial;
     DWORD native_thread_id;
     uint32_t update_depth;
@@ -350,6 +352,14 @@ typedef struct PartyMissileManagerCache {
 static PartyNativeLease party_native_leases[4];
 static PartyMissileManagerCache party_missile_manager_cache[4];
 static uint32_t party_native_last_generation[4];
+static struct {
+    SudekiMpLanPartyLease key;
+    void *actor, *movement;
+    DWORD at, last_trace;
+    uint64_t submitted_dispatch;
+    BOOL active;
+} party_skill_movement[4];
+static BOOL party_skill_root_owned(void *movement);
 static unsigned int party_local_seat;
 static volatile LONG party_native_retained_mask;
 static volatile LONG control_update_lifecycle_lock;
@@ -1051,11 +1061,15 @@ static void notify_update_observers(
 
             build_control_update_dispatch_witness(
                 frame, source, observer_count, registry_generation, &witness);
-            if (frame != NULL) frame->active_witness = &witness;
+            if (frame != NULL) {
+                frame->active_witness = &witness;
+                frame->observer_update_data = update_data;
+            }
             SetLastError(incoming_last_error);
             snapshot[index](controller, update_data, &witness);
             if (frame != NULL && frame->active_witness == &witness) {
                 frame->active_witness = NULL;
+                frame->observer_update_data = NULL;
             }
             SetLastError(incoming_last_error);
         }
@@ -1250,6 +1264,12 @@ static void call_original_controller_update_with_skill_input_isolation(
     int *borrowed_movement_mode = NULL;
     DWORD native_last_error;
     DWORD incoming_last_error = GetLastError();
+    void *party_local=service_only_mode && readable_memory(controller,
+        CONTROLLER_TARGET_OFFSET+sizeof(void *)) ?
+        *(void **)((uint8_t *)controller+CONTROLLER_TARGET_OFFSET):NULL;
+    BOOL input_isolation=player_one_skill_input_isolation_enabled ||
+        (service_only_mode && SudekiMpLanPartyCastLocalNoncaster(party_local));
+    if(service_only_mode && !input_isolation) player_one_skill_native_input_restored=FALSE;
 
     player_one_skill_direct_movement_scope_active = FALSE;
     player_one_skill_direct_movement_submitted = FALSE;
@@ -1259,7 +1279,7 @@ static void call_original_controller_update_with_skill_input_isolation(
     lan_tal_skill_direct_actor = NULL;
     lan_tal_skill_direct_at_ms = 0u;
 
-    if (player_one_skill_input_isolation_enabled && game_base != NULL &&
+    if (input_isolation && game_base != NULL &&
         readable_memory(game_base + RVA_GAME_SPEED_GLOBAL,
             sizeof(game_speed))) {
         game_speed = *(uint8_t **)(game_base + RVA_GAME_SPEED_GLOBAL);
@@ -1270,7 +1290,7 @@ static void call_original_controller_update_with_skill_input_isolation(
         paused = *(game_speed + 0x28u) != 0u;
         restore_player_input =
             SudekiMpControlSeparationPlayerOneSkillInputIsolationPolicy(
-            player_one_skill_input_isolation_enabled,
+            input_isolation,
             current_mode,
             requested_mode,
             paused);
@@ -1297,7 +1317,7 @@ static void call_original_controller_update_with_skill_input_isolation(
                 "preserve_skill_task\r\n",
                 current_mode, requested_mode);
         }
-    } else if (player_one_skill_input_isolation_enabled &&
+    } else if (input_isolation &&
                !player_one_skill_native_input_restored &&
                player_one_skill_input_isolation_trace_state != 0) {
         player_one_skill_input_isolation_trace_state = 0;
@@ -1308,7 +1328,7 @@ static void call_original_controller_update_with_skill_input_isolation(
                 (game_speed == NULL ? "game_speed_unavailable" :
                     "skill_mode_inactive"));
     }
-    if (player_one_skill_input_isolation_enabled && readable_memory(
+    if (input_isolation && readable_memory(
             controller, CONTROLLER_TARGET_OFFSET + sizeof(void *))) {
         player_one_character = *(uint8_t **)(
             (uint8_t *)controller + CONTROLLER_TARGET_OFFSET);
@@ -1332,7 +1352,7 @@ static void call_original_controller_update_with_skill_input_isolation(
             player_one_skill_frame_delta = frame_delta;
         }
     }
-    if (player_one_skill_input_isolation_enabled &&
+    if (input_isolation &&
         local_noncaster_filter_exact(player_one_character) &&
         SudekiMpControlSeparationTalSkillFilterRestorePolicy(
             TRUE, *(int *)((uint8_t *)controller + 0x80u),
@@ -4906,7 +4926,7 @@ static void SUDEKIMP_THISCALL service_control_update_observers(
         }
         return;
     }
-    original_controller_update(controller, update_data);
+    call_original_controller_update_with_skill_input_isolation(controller, update_data);
     ++dispatch_frame.original_call_count;
     native_last_error = GetLastError();
     notify_update_observers(
@@ -5727,10 +5747,35 @@ static BOOL lan_skill_movement_roster_exact(
                 lan_movement_remote_actor));
 }
 
+static BOOL buki_native_locomotion_observed(
+    const SudekiMpCleanroomActorPresentation *presentation
+) {
+    uint8_t state = presentation->state[0];
+    if (state != 0u && state != 1u && state != 64u &&
+        state != 65u && state != 128u) return FALSE;
+    /* The combo classifier intentionally cannot distinguish weak/strong
+     * selectors 53/54 without the semantic animation id, and excludes body
+     * actions. Its negative result is NOT evidence of locomotion. Admit
+     * only Buki's known combat idle/walk/run primary; attacks (including
+     * their terminal selector), blocks, dodges and unknowns keep native
+     * movement and root ownership. This gate also guards the root filter. */
+    for (unsigned int clip = 1u; clip <= 3u; ++clip) {
+        if (presentation->selector[0] ==
+            SudekiMpLanArenaLocomotionSelector(clip, 2u)) return TRUE;
+    }
+    return FALSE;
+}
+
 static BOOL tal_native_locomotion_owns_movement(void) {
     SudekiMpCleanroomActorPresentation presentation;
     unsigned int local_type = SudekiMpCleanroomActorNativeType(lan_movement_local_actor);
     uint8_t action;
+    if(service_only_mode) {
+        void *actor=SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_BUKI);
+        return SudekiMpLanPartyCastLocalNoncaster(actor) &&
+            SudekiMpCleanroomEngineWorldMotion(SUDEKIMP_CLEANROOM_BUKI,&presentation) &&
+            buki_native_locomotion_observed(&presentation);
+    }
     if (!SudekiMpControlSeparationSkillMovementRosterPolicy(
             local_type, SudekiMpCleanroomActorNativeType(lan_movement_remote_actor),
             TRUE, TRUE) ||
@@ -5739,8 +5784,7 @@ static BOOL tal_native_locomotion_owns_movement(void) {
     /* Never suppress an attack's authored movement, including its terminal
      * selector before native idle retirement. Reuse the wire classifier. */
     return local_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE ?
-        !SudekiMpLanArenaBukiActionFromNativePresentation(
-            presentation.selector[0], 1u, &action) :
+        buki_native_locomotion_observed(&presentation) :
         !SudekiMpLanArenaTalActionFromNativePresentation(
             presentation.selector[0], 1u, &action);
 }
@@ -5774,6 +5818,7 @@ static BOOL local_noncaster_action_exact(
 static BOOL local_noncaster_filter_exact(uint8_t *character) {
     uint8_t *controller;
     void *other;
+    if(service_only_mode) return SudekiMpLanPartyCastLocalNoncaster(character);
     if (!player_one_skill_input_isolation_enabled || game_base == NULL ||
         character == NULL || character != SudekiMpCleanroomEngineActorEntity(
             lan_movement_local_actor) || !character_is_in_active_group(character) ||
@@ -5791,6 +5836,13 @@ static BOOL tal_skill_direct_actor_exact(uint8_t *character) {
     SudekiMpCompanionControlRuntime *companion = &companion_controls[0];
     uint8_t *arbiter;
     uint8_t *controller;
+    if(service_only_mode) {
+        arbiter=readable_memory(character,0x94u) ? *(uint8_t **)(character+0x90u):NULL;
+        return character==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_BUKI) &&
+            SudekiMpLanPartyCastLocalNoncaster(character) &&
+            readable_memory(arbiter,0x64u) && *(void **)(arbiter+0x10u)==character &&
+            (*(uint32_t *)(arbiter+0x50u)&0x0281e568u)==0 && !(arbiter[0x60u]&4u);
+    }
     if (!lan_arena_remote_input_enabled ||
         !player_one_skill_input_isolation_enabled ||
         character == NULL ||
@@ -5855,6 +5907,10 @@ filter_lan_spirit_animation_root(const float *delta, void *movement) {
             readable_memory(movement, 0x14u) &&
             *(void **)((uint8_t *)movement + 0x10u) == character;
     }
+    if(!exact && party_skill_root_owned(movement)) {
+        exact=TRUE;
+        character=*(uint8_t **)((uint8_t *)movement+0x10u);
+    }
     if (exact && readable_memory(delta, sizeof(filtered)) &&
         SudekiMpControlSeparationFilterSpiritRootDelta(TRUE, delta, filtered)) {
         static DWORD last_root_trace;
@@ -5873,13 +5929,8 @@ filter_lan_spirit_animation_root(const float *delta, void *movement) {
     }
 }
 
-BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
-    if (original_controller_update == NULL || game_base == NULL ||
-        service_only_mode) {
-        SetLastError(ERROR_INVALID_STATE);
-        return FALSE;
-    }
-    if (enabled && !lan_spirit_root_movement_call_hook.installed) {
+static BOOL install_animation_root_filter(void) {
+    if (!lan_spirit_root_movement_call_hook.installed) {
         static const uint8_t entry[] = {
             0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec,
             0x94, 0x00, 0x00, 0x00
@@ -5897,6 +5948,15 @@ BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
                 original_animation_root_movement,
                 filter_lan_spirit_animation_root)) return FALSE;
     }
+    return TRUE;
+}
+BOOL SudekiMpControlSeparationSetLanArenaRemoteInputEnabled(BOOL enabled) {
+    if (original_controller_update == NULL || game_base == NULL ||
+        service_only_mode) {
+        SetLastError(ERROR_INVALID_STATE);
+        return FALSE;
+    }
+    if(enabled && !install_animation_root_filter()) return FALSE;
     lan_arena_remote_input_enabled = enabled != FALSE;
     if (!lan_arena_remote_input_enabled) {
         lan_tal_skill_direct_actor = NULL;
@@ -6006,7 +6066,7 @@ BOOL SudekiMpControlSeparationApplyLanArenaPlayerOneSkillMovement(
     float direct_scale;
     DWORD now;
 
-    if (!player_one_skill_input_isolation_enabled ||
+    if ((!player_one_skill_input_isolation_enabled && !service_only_mode) ||
         !player_one_skill_direct_movement_scope_active ||
         player_one_skill_direct_movement_submitted ||
         game_base == NULL || movement_controller_set_absolute_delta == NULL ||
@@ -6723,16 +6783,52 @@ static BOOL party_boundary(const SudekiMpControlUpdateDispatchWitness *w) {
         w->service_post_original_exact &&
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
 }
+BOOL SudekiMpLanPartyControlEnableCastInputIsolation(
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    uint8_t *input_enable;
+    if(!party_boundary(w)) { SetLastError(ERROR_BUSY); return FALSE; }
+    input_enable=game_base+RVA_GAME_SPEED_PLAYER_INPUT_ENABLE;
+    /* The first instruction loads the relocated active-group global. The
+     * established native body signature starts after that five-byte load. */
+    if(input_enable[0]!=0xa1 ||
+        *(void **)(input_enable+1)!=game_base+RVA_ACTIVE_GROUP_GLOBAL ||
+        memcmp(input_enable+5,expected_game_speed_player_input_enable_entry,
+            sizeof(expected_game_speed_player_input_enable_entry)) ||
+        memcmp(game_base+RVA_CONTROLLER_FILTER_ALL,expected_controller_filter_all,
+            sizeof(expected_controller_filter_all)) ||
+        memcmp(game_base+RVA_MOVEMENT_CAMERA_TRANSFORM,expected_movement_camera_transform_entry,
+            sizeof(expected_movement_camera_transform_entry)) ||
+        memcmp(game_base+RVA_POSITION_SET_FORWARD,expected_position_set_forward_entry,
+            sizeof(expected_position_set_forward_entry)) ||
+        memcmp(game_base+RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE,
+            expected_movement_controller_set_speed_immediate_entry,
+            sizeof(expected_movement_controller_set_speed_immediate_entry)) ||
+        memcmp(game_base+RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA,
+            expected_movement_controller_set_absolute_delta_entry,sizeof(expected_movement_controller_set_absolute_delta_entry))) {
+        SetLastError(ERROR_INVALID_DATA); return FALSE;
+    }
+    game_speed_player_input_enable=(GameSpeedPlayerInputEnableFunction)(game_base+RVA_GAME_SPEED_PLAYER_INPUT_ENABLE);
+    movement_camera_transform=(MovementCameraTransformFunction)(game_base+RVA_MOVEMENT_CAMERA_TRANSFORM);
+    /* Service-only installation returns before the legacy movement bindings.
+     * Both local and remote noncaster deltas still need this validated entry. */
+    position_set_forward=game_base+RVA_POSITION_SET_FORWARD;
+    movement_controller_set_speed_immediate=(MovementControllerSetSpeedImmediateFunction)(
+        game_base+RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE);
+    movement_controller_set_absolute_delta=(MovementControllerSetAbsoluteDeltaFunction)(game_base+RVA_MOVEMENT_CONTROLLER_SET_ABSOLUTE_DELTA);
+    return TRUE;
+}
 static BOOL party_observation_boundary(const SudekiMpControlUpdateDispatchWitness *w) {
     return w?party_boundary(w):SudekiMpLanPartyPresentationBoundary();
 }
 
 BOOL SudekiMpLanPartyControlBeginSession(
     const SudekiMpControlUpdateDispatchWitness *w) {
-    if (!party_boundary(w) || SudekiMpLanPartyControlHasLeases()) return FALSE;
+    if (!party_boundary(w) || SudekiMpLanPartyControlHasLeases() ||
+        !install_animation_root_filter()) return FALSE;
     party_local_seat = 0u;
     party_native_thread=GetCurrentThreadId();
     ZeroMemory(party_native_last_generation,sizeof(party_native_last_generation));
+    ZeroMemory(party_skill_movement,sizeof(party_skill_movement));
     return TRUE;
 }
 BOOL SudekiMpLanPartyControlBeginClientSession(
@@ -6772,6 +6868,16 @@ static BOOL party_launch_option(const char *command, const char *option) {
     return found && (found == command || found[-1] == ' ' || found[-1] == '\t') &&
         (!found[n] || found[n] == ' ' || found[n] == '\t');
 }
+static BOOL (*party_testroom_probe)(unsigned seat);
+BOOL SudekiMpLanPartyControlSetTestroomProbe(BOOL (*probe)(unsigned seat)) {
+    if (SudekiMpLanPartyControlHasLeases()) return FALSE;
+    if (probe && party_testroom_probe && party_testroom_probe!=probe) return FALSE;
+    party_testroom_probe=probe; return TRUE;
+}
+static const char *party_testroom_command(void) {
+    return party_testroom_probe && party_testroom_probe(party_local_seat)?
+        "-Level testroom -DT 1":GetCommandLineA();
+}
 static BOOL party_startup_world(float anchor[3], BOOL *combat) {
 #ifdef SUDEKIMP_LAN_PARTY_CONTROL_TESTING
     if (party_test_world) return party_test_world(anchor,combat);
@@ -6782,12 +6888,59 @@ static BOOL party_startup_world(float anchor[3], BOOL *combat) {
     static const SudekiMpCleanroomActor actors[4] = {
         SUDEKIMP_CLEANROOM_BUKI,SUDEKIMP_CLEANROOM_ELCO,
         SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
-    return party_local_seat < 4u && party_launch_option(GetCommandLineA(),"-Level testroom") &&
-        party_launch_option(GetCommandLineA(),"-DT 1") &&
-        party_launch_option(GetCommandLineA(),launch[party_local_seat]) &&
+    return party_local_seat < 4u &&
+        ((party_testroom_probe && party_testroom_probe(party_local_seat)) ||
+         (party_launch_option(GetCommandLineA(),"-Level testroom") &&
+          party_launch_option(GetCommandLineA(),"-DT 1") &&
+          party_launch_option(GetCommandLineA(),launch[party_local_seat]))) &&
         SudekiMpCleanroomEngineWorldReady() &&
         SudekiMpCleanroomEngineCombatMode(combat) &&
         SudekiMpCleanroomEngineActorPosition(actors[party_local_seat],anchor);
+}
+BOOL SudekiMpLanPartyControlNativeRosterExact(
+    const SudekiMpLanPartyRosterObservation *r) {
+    uint8_t *group,*controller;
+    unsigned seen=0;
+    if(!r || r->present_mask!=15u || !game_base || !service_only_mode ||
+        !party_native_thread || GetCurrentThreadId()!=party_native_thread ||
+        party_local_seat>=4u ||
+        !readable_memory(game_base+RVA_ACTIVE_GROUP_GLOBAL,sizeof(void *)) ||
+        !readable_memory(game_base+RVA_CHARACTER_CONTROLLER_GLOBAL,sizeof(void *))) return FALSE;
+    group=*(uint8_t **)(game_base+RVA_ACTIVE_GROUP_GLOBAL);
+    controller=*(uint8_t **)(game_base+RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if(group!=r->group || controller!=r->controller ||
+        !readable_memory(group,0xd0u) || *(unsigned *)(group+0xccu)!=4u ||
+        !readable_memory(controller,CONTROLLER_TARGET_OFFSET+sizeof(void *)) ||
+        *(void **)(controller+CONTROLLER_TARGET_OFFSET)!=r->actors[party_local_seat] ||
+        *(void **)(group+PARTY_SLOT_FIRST_OFFSET)!=r->actors[party_local_seat]) return FALSE;
+    for(unsigned i=0;i<4u;++i) {
+        unsigned j; void *actor=*(void **)(group+PARTY_SLOT_FIRST_OFFSET+i*PARTY_SLOT_STRIDE);
+        if(!r->actors[i] || party_actor(i)!=r->actors[i]) return FALSE;
+        for(j=0;j<4u && r->actors[j]!=actor;++j) {}
+        if(j==4u || (seen&(1u<<j))) return FALSE;
+        seen|=1u<<j;
+    }
+    return seen==15u;
+}
+BOOL SudekiMpLanPartyControlNativeActorExact(
+    const SudekiMpLanPartyRosterObservation *r,unsigned seat) {
+    uint8_t *group,*controller; unsigned found=0;
+    if(!r || seat>=4u || r->present_mask!=15u || !r->actors[seat] ||
+        !game_base || !service_only_mode || !party_native_thread ||
+        GetCurrentThreadId()!=party_native_thread || party_local_seat>=4u ||
+        !readable_memory(game_base+RVA_ACTIVE_GROUP_GLOBAL,sizeof(void *)) ||
+        !readable_memory(game_base+RVA_CHARACTER_CONTROLLER_GLOBAL,sizeof(void *))) return FALSE;
+    group=*(uint8_t **)(game_base+RVA_ACTIVE_GROUP_GLOBAL);
+    controller=*(uint8_t **)(game_base+RVA_CHARACTER_CONTROLLER_GLOBAL);
+    if(group!=r->group || controller!=r->controller || !readable_memory(group,0xd0u) ||
+        *(unsigned *)(group+0xccu)!=4u ||
+        !readable_memory(controller,CONTROLLER_TARGET_OFFSET+sizeof(void *)) ||
+        *(void **)(controller+CONTROLLER_TARGET_OFFSET)!=r->actors[party_local_seat] ||
+        *(void **)(group+PARTY_SLOT_FIRST_OFFSET)!=r->actors[party_local_seat] ||
+        party_actor(seat)!=r->actors[seat]) return FALSE;
+    for(unsigned i=0;i<4u;++i)
+        if(*(void **)(group+PARTY_SLOT_FIRST_OFFSET+i*PARTY_SLOT_STRIDE)==r->actors[seat]) ++found;
+    return found==1u;
 }
 BOOL SudekiMpLanPartyControlObserveRoster(
     const SudekiMpControlUpdateDispatchWitness *w,
@@ -6877,7 +7030,7 @@ BOOL SudekiMpLanPartyControlInitializeActor(const SudekiMpControlUpdateDispatchW
 #endif
     /* Same character-family helpers as the accepted two-player runtime.
      * Neither valid current equipment nor valid HP/SP is reset by these APIs. */
-    return SudekiMpGrantTestroomCharacterWeapons(expected->actors[seat],GetCommandLineA()) &&
+    return SudekiMpGrantTestroomCharacterWeapons(expected->actors[seat],party_testroom_command()) &&
         party_roster_mutation_ready(w,expected) &&
         SudekiMpEnsureCharacterStarterWeapon(expected->actors[seat]) &&
         party_roster_mutation_ready(w,expected) &&
@@ -7134,6 +7287,32 @@ BOOL SudekiMpLanPartyControlExact(const SudekiMpControlUpdateDispatchWitness *w,
         r->phase == PARTY_NATIVE_HELD && party_ai_owned(r);
 }
 
+BOOL SudekiMpLanPartyControlHostAiExact(
+    const SudekiMpControlUpdateDispatchWitness *w,unsigned int seat,void *actor) {
+    SudekiMpLanPartyRosterObservation roster;
+    uint8_t *ai,*mode;
+    if(party_local_seat!=0u || seat==0u || seat>=4u || !actor ||
+        !party_boundary(w) ||
+        party_native_leases[seat].phase!=PARTY_NATIVE_EMPTY ||
+        (InterlockedCompareExchange(&party_native_retained_mask,0,0)&(1u<<seat)) ||
+        !SudekiMpLanPartyControlObserveRoster(w,&roster) ||
+        roster.actors[seat]!=actor ||
+        !SudekiMpLanPartyControlNativeActorExact(&roster,seat) ||
+        !readable_memory(actor,0x98u)) return FALSE;
+    ai=*(uint8_t **)((uint8_t *)actor+0x94u);
+    if(!readable_memory(ai,0x16cu) || *(void **)(ai+0x10u)!=actor) return FALSE;
+    mode=*(uint8_t **)(ai+0x3cu);
+    /* Same native default-control state required before ControlAcquire.
+     * A FREE socket alone cannot prove that a native lease has retired. */
+    return readable_memory(mode,0x0cu) &&
+        *(int16_t *)(ai+0x16au)==0 && mode[0x0bu]==1u &&
+        *(void **)((uint8_t *)actor+0x94u)==ai &&
+        *(void **)(ai+0x3cu)==mode &&
+        party_native_leases[seat].phase==PARTY_NATIVE_EMPTY &&
+        party_boundary(w) &&
+        SudekiMpLanPartyControlNativeActorExact(&roster,seat);
+}
+
 BOOL SudekiMpLanPartyControlAcquire(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *key, void *actor,
     SudekiMpLanPartyControlDrainProbe ready) {
@@ -7179,6 +7358,19 @@ static uint8_t *party_component(void *actor, unsigned int offset,
     return readable_memory(p, size) && *(void **)p == game_base + vtable &&
         *(void **)(p + 0x10u) == actor ? p : NULL;
 }
+BOOL SudekiMpLanPartyControlGameplayReady(
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyRosterObservation roster;
+    uint8_t *speed,*arbiter;
+    if(!party_boundary(w) || !SudekiMpLanPartyControlObserveRoster(w,&roster) ||
+        roster.present_mask!=15u ||
+        !readable_memory(game_base+RVA_GAME_SPEED_GLOBAL,sizeof(void *))) return FALSE;
+    speed=*(uint8_t **)(game_base+RVA_GAME_SPEED_GLOBAL);
+    arbiter=party_component(roster.actors[party_local_seat],0x90u,0x2cc9acu,0x64u);
+    /* Supported-image IsUsingUI (RVA 8850) tests arbiter+60 bit 2. */
+    return arbiter && !(arbiter[0x60u]&4u) && readable_memory(speed,0x29u) &&
+        !speed[0x28u] && *(int *)(speed+0x20u)==0 && *(int *)(speed+0x24u)==0;
+}
 static BOOL party_stop(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *key, void *actor) {
     PartyNativeLease *r;
@@ -7188,6 +7380,7 @@ static BOOL party_stop(const SudekiMpControlUpdateDispatchWitness *w,
         !party_native_entries_exact()) return FALSE;
     movement = party_component(actor, 0x80u, 0x2c8644u, 0xc0u);
     if (!movement || !(movement[0xbeu] & 0x08u)) return FALSE;
+    party_skill_movement[key->seat].active=FALSE;
     stop = (MovementControllerSetSpeedImmediateFunction)(game_base +
         RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE);
     stop(movement, 0.0f, 1.0f);
@@ -7196,6 +7389,38 @@ static BOOL party_stop(const SudekiMpControlUpdateDispatchWitness *w,
         *(float *)(movement + 0x24u) == 0.0f &&
         *(float *)(movement + 0x28u) == 0.0f;
 }
+static BOOL party_skill_noncaster_exact(const SudekiMpLanPartyLease *key,void *actor) {
+    SudekiMpCharacterSkillState own,caster;
+    uint8_t *arbiter,*speed;
+    BOOL combat=FALSE;
+    int spirit;
+    if(party_local_seat || !key || key->seat==0u || key->seat>=4u ||
+        !SudekiMpLanPartyControlRetainedNativeThreadExact(key,actor) ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat ||
+        !SudekiMpObserveCharacterSkill(actor,&own) || own.active ||
+        !(SudekiMpLanPartyCastReady() ? SudekiMpLanPartyCastNoncaster(actor):
+            (SudekiMpObserveCharacterSkill(party_actor(0u),&caster) && caster.active &&
+             SudekiMpCleanroomEngineSpiritPresentationState(&spirit) && spirit==0)) ||
+        !(arbiter=party_component(actor,0x90u,0x2cc9acu,0x64u)) ||
+        /* Ordinary skills need the same direct-motion owner even when the
+         * Spirit lock is absent. Match the established local noncaster gate:
+         * tolerate that one script-owned bit, reject every other blocker. */
+        (*(uint32_t *)(arbiter+0x50u)&0x0281e568u)!=0u ||
+        !readable_memory(game_base+RVA_GAME_SPEED_GLOBAL,4u)) return FALSE;
+    speed=*(uint8_t **)(game_base+RVA_GAME_SPEED_GLOBAL);
+    return readable_memory(speed,0x29u) && !speed[0x28u] &&
+        !(arbiter[0x60u]&4u);
+}
+static BOOL party_skill_root_owned(void *movement) {
+    for(unsigned i=1u;i<4u;++i)
+        if(party_skill_movement[i].active && party_skill_movement[i].movement==movement &&
+            (DWORD)(GetTickCount()-party_skill_movement[i].at)<=125u &&
+            party_skill_noncaster_exact(&party_skill_movement[i].key,
+                party_skill_movement[i].actor) &&
+            party_component(party_skill_movement[i].actor,0x80u,0x2c8644u,0xc0u)==movement)
+            return TRUE;
+    return FALSE;
+}
 BOOL SudekiMpLanPartyControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *key, void *actor,
     float x, float z, float ax, float az, BOOL aiming) {
@@ -7203,6 +7428,10 @@ BOOL SudekiMpLanPartyControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     float heading[3] = {x, 0, z}, magnitude, aim_length;
     unsigned int gait = 0;
     ArbiterMovementFunction call;
+    DWORD now=GetTickCount();
+    /* Distinguish an intact actor whose native movement is temporarily
+     * disabled from a lost identity. Never reuse a stale last-error value. */
+    SetLastError(ERROR_INVALID_DATA);
     if (!party_boundary(w) || !isfinite(x) || !isfinite(z) || fabsf(x) > 1 || fabsf(z) > 1 ||
         (aiming && (!isfinite(ax) || !isfinite(az) ||
             fabsf(ax) > 1 || fabsf(az) > 1)) ||
@@ -7211,9 +7440,69 @@ BOOL SudekiMpLanPartyControlMove(const SudekiMpControlUpdateDispatchWitness *w,
         return FALSE;
     arbiter = party_component(actor, 0x90u, 0x2cc9acu, 0x64u);
     movement = party_component(actor, 0x80u, 0x2c8644u, 0xc0u);
-    if (!arbiter || !movement || !(movement[0xbeu] & 0x08u) ||
+    if (!arbiter || !movement ||
         !party_component(actor, 0x8cu, 0x2d48d4u, 0x14u) ||
         !party_component(actor, 0xacu, 0x2d4b24u, 0x54u)) return FALSE;
+    if (!(movement[0xbeu] & 0x08u)) {
+        /* Retail RVA DAE80/ C3870 also decline speed writes in this state.
+         * It is not evidence that the peer or its AI lease disconnected. */
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+    /* A repeated observer call must not erase root ownership for the delta
+     * already submitted by this actor in the same native update. */
+    if(party_skill_movement[key->seat].actor==actor &&
+        party_key_equal(&party_skill_movement[key->seat].key,key) &&
+        party_skill_movement[key->seat].submitted_dispatch==w->dispatch_serial)
+        return FALSE;
+    party_skill_movement[key->seat].key=*key;
+    party_skill_movement[key->seat].actor=actor;
+    party_skill_movement[key->seat].active=FALSE;
+    if(party_skill_noncaster_exact(key,actor)) {
+        ControlUpdateDispatchFrame *dispatch=TlsGetValue(control_update_dispatch_tls);
+        uint8_t *position=party_component(actor,0x44u,0x2cdefcu,0xbcu);
+        float delta[3]={0},forward[3]={x,0,z};
+        float length=sqrtf(x*x+z*z);
+        float frame_delta;
+        /* Use the same native CUpdateData as two-seat movement. Packet or
+         * wall-clock intervals are not the engine's simulation step. The
+         * existing exact dispatch witness fences this borrowed pointer. */
+        if(!dispatch || dispatch->active_witness!=w ||
+            !readable_memory(dispatch->observer_update_data,0x10u)) return FALSE;
+        frame_delta=*(float *)((uint8_t *)dispatch->observer_update_data+0x0cu);
+        if(!isfinite(frame_delta) || frame_delta<=0.0f || frame_delta>0.25f)
+            return FALSE;
+        if(!position || !position_set_forward || !movement_controller_set_absolute_delta ||
+            !party_stop(w,key,actor)) return FALSE;
+        if(length>0.0001f) {
+            float distance=SudekiMpControlSeparationNoncasterMovementDelta(
+                fminf(length,1.0f),frame_delta);
+            delta[0]=x/length*distance; delta[2]=z/length*distance;
+            forward[0]=x/length; forward[2]=z/length;
+        }
+        if(aiming) {
+            float aim=sqrtf(ax*ax+az*az);
+            if(aim>0.0001f) { forward[0]=ax/aim; forward[2]=az/aim; }
+        }
+        if(length>0.0001f || aiming) call_position_set_forward(position,forward);
+        /* The same native collision-aware absolute-delta API and root filter
+         * used by two-seat noncasters, now with an independent actor lease.
+         * The caster's global lock and every actor's arbiter flags stay owned
+         * by their native task throughout this submission. */
+        party_skill_movement[key->seat].movement=movement;
+        party_skill_movement[key->seat].at=now;
+        party_skill_movement[key->seat].active=TRUE;
+        party_skill_movement[key->seat].submitted_dispatch=w->dispatch_serial;
+        movement_controller_set_absolute_delta(movement,delta[0],0.0f,delta[2]);
+        if(!party_skill_movement[key->seat].last_trace ||
+            now-party_skill_movement[key->seat].last_trace>=1000u) {
+            party_skill_movement[key->seat].last_trace=now;
+            SudekiMpLogFormat("lan_party event=noncaster_movement seat=%u tick=%lu frame_ms=%.3f input=%.3f,%.3f delta=%.4f,%.4f flags=%08lx policy=exact_native_frame_single_delta\r\n",
+                key->seat,(unsigned long)now,frame_delta*1000.0f,x,z,delta[0],delta[2],
+                (unsigned long)*(uint32_t *)(arbiter+0x50u));
+        }
+        return SudekiMpLanPartyControlExact(w,key,actor);
+    }
     magnitude = sqrtf(x*x + z*z);
     if (magnitude > 0.0001f) {
         heading[0] /= magnitude; heading[2] /= magnitude;
@@ -7238,6 +7527,23 @@ BOOL SudekiMpLanPartyControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     call(arbiter, heading, magnitude, 1.0f, gait);
     return SudekiMpLanPartyControlExact(w, key, actor);
 }
+BOOL SudekiMpLanPartyControlSkillFacing(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor,float x,float z) {
+    uint8_t *position;
+    float length,forward[3];
+    if(party_local_seat || !party_boundary(w) || !key || !key->seat ||
+        key->seat>=4u || !isfinite(x) || !isfinite(z) || fabsf(x)>1.f || fabsf(z)>1.f ||
+        !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !SudekiMpLanPartyCastTargeting(actor) || !position_set_forward ||
+        !party_native_entries_exact() ||
+        !(position=party_component(actor,0x44u,0x2cdefcu,0xbcu))) return FALSE;
+    length=sqrtf(x*x+z*z);
+    if(length<0.5f || length>1.5f) return FALSE;
+    forward[0]=x/length; forward[1]=0; forward[2]=z/length;
+    call_position_set_forward(position,forward);
+    return SudekiMpLanPartyControlExact(w,key,actor) &&
+        party_component(actor,0x44u,0x2cdefcu,0xbcu)==position;
+}
 static BOOL party_submit_actor_combat_input(
     const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *key, void *actor,
@@ -7261,8 +7567,10 @@ static BOOL party_submit_actor_combat_input(
         !combat_mode(&combat) || !combat ||
         !party_native_entries_exact()) return FALSE;
     arbiter = party_component(actor, 0x90u, 0x2cc9acu, 0x64u);
+    /* +94 owns the event/task component; the turning component is at +8c.
+     * Keep the actor-local event identity required by the native arbiter. */
     if (!arbiter || *(void **)(arbiter + 0x10u) != actor ||
-        !party_component(actor, 0x94u, 0x2d48d4u, 0x14u) ||
+        !party_component(actor, 0x94u, 0x2d4924u, 0x12cu) ||
         !party_component(actor, 0xacu, 0x2d4b24u, 0x54u)) return FALSE;
     if (!party_boundary(w) ||
         !SudekiMpLanPartyControlExact(w, key, actor) ||
@@ -7301,6 +7609,33 @@ BOOL SudekiMpLanPartyControlSubmitBlockState(
     const SudekiMpLanPartyLease *key,void *actor,unsigned int state) {
     if(state>3u || !state) return FALSE;
     return party_submit_actor_combat_input(w,key,actor,0,0,0,(int)state);
+}
+BOOL SudekiMpLanPartyControlSubmitDodge(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor,float x,float z) {
+    uint8_t *arbiter;
+    float direction[3]={x,0,z},length;
+    BOOL combat=FALSE;
+    SetLastError(ERROR_INVALID_DATA);
+    if(!party_boundary(w) || party_local_seat || !key || key->seat!=2u ||
+        !isfinite(x) || !isfinite(z) || fabsf(x)>1.0f || fabsf(z)>1.0f ||
+        !SudekiMpLanPartyControlExact(w,key,actor) ||
+        !SudekiMpArbiterDodgeImageMatches((HMODULE)game_base) ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat ||
+        !readable_memory(actor,0x138u) || *(void **)((uint8_t *)actor+0x134u) ||
+        !party_component(actor,0xd0u,0x2d4e64u,0x20u) ||
+        !party_component(actor,0xb4u,0x2d4b8cu,0x20u) ||
+        !party_component(actor,0x44u,0x2cdefcu,0xbcu) ||
+        !(arbiter=party_component(actor,0x90u,0x2cc9acu,0x64u))) return FALSE;
+    length=sqrtf(x*x+z*z);
+    if(length>0.0001f) {
+        direction[0]/=length; direction[2]/=length;
+        /* Native DAE00 repeats the retail DBC50 admission checks and invokes
+         * this actor's CDodge only when its state is idle. A normal cooldown
+         * rejection consumes no action and does not invalidate the lease. */
+        (void)SudekiMpSubmitArbiterDodgeInput(game_base+0xdae00u,arbiter,direction);
+    }
+    return SudekiMpLanPartyControlExact(w,key,actor);
 }
 BOOL SudekiMpLanPartyControlPresentationFacing(const SudekiMpControlUpdateDispatchWitness *w,
     unsigned seat, void *actor, const float direction[3]) {
@@ -7823,6 +8158,13 @@ BOOL SudekiMpInstallControlSeparation(
     }
     slot = (void **)(base + RVA_CONTROLLER_UPDATE_VTABLE_SLOT);
     if (!ensure_control_update_dispatch_tls()) return FALSE;
+    /* Both profiles use the exact actor-local missile readiness predicates.
+     * Their signatures were validated above; bind them before service-only
+     * installation returns or SMP4 Ailish can never pass the firing gate. */
+    missile_manager_can_fire = (MissileManagerPredicateFunction)(
+        base + RVA_MISSILE_MANAGER_CAN_FIRE);
+    missile_manager_is_firing = (MissileManagerPredicateFunction)(
+        base + RVA_MISSILE_MANAGER_IS_FIRING);
     if (service_only) {
         game_base = base;
         selected_virtual_key = 0u;
@@ -7962,10 +8304,6 @@ BOOL SudekiMpInstallControlSeparation(
     position_set_forward = base + RVA_POSITION_SET_FORWARD;
     lan_arena_first_person_held_fire =
         base + RVA_FIRST_PERSON_HELD_FIRE;
-    missile_manager_can_fire = (MissileManagerPredicateFunction)(
-        base + RVA_MISSILE_MANAGER_CAN_FIRE);
-    missile_manager_is_firing = (MissileManagerPredicateFunction)(
-        base + RVA_MISSILE_MANAGER_IS_FIRING);
     lan_arena_cached_missile_manager = NULL;
     lan_arena_cached_missile_owner = NULL;
     lan_arena_missile_ready_trace_state = -1;

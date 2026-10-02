@@ -1,4 +1,5 @@
 #include "cleanroom/menu.h"
+#include "ui/menu_button.h"
 
 #include "cleanroom/audio.h"
 #include "cleanroom/engine.h"
@@ -20,6 +21,7 @@
 #include "input/local_input_hub.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <limits.h>
 #include <math.h>
 #include <string.h>
@@ -732,6 +734,31 @@ static BOOL infinite_jetpack_fuel;
 static BOOL infinite_jetpack_fuel_valid;
 static BOOL integrated_multiplayer_mode;
 static BOOL lan_host_tools_mode;
+static BOOL (*party_tools_command)(unsigned action);
+static BOOL party_tools_enabled[SUDEKIMP_PARTY_TOOL_COUNT];
+static BOOL party_tools_valid[SUDEKIMP_PARTY_TOOL_COUNT];
+static BOOL (*party_tools_query)(unsigned action,BOOL *enabled);
+static void (*party_tools_status)(char *text,unsigned capacity);
+static unsigned party_tools_seat;
+static BOOL party_tools_release_guard;
+static void *party_tools_pending_state;
+static BOOL console_keys[256];
+static DWORD console_backspace_at;
+static char console_input[48],console_history[7][48],party_tools_message[80];
+/* Same native tools as the LAN host menu. Session-owned lifecycle rows are
+ * visible but cannot dispatch a spawn/remove request. */
+static const char *const party_tool_labels[15]={
+    "TAL","BUKI","ELCO","AILISH","TRAINING DUMMY","COMBAT MODE",
+    "CAMERA MODE","ALL PARTY SKILLS","INFINITE SP","INFINITE SPIRIT",
+    "JETPACK CRYSTAL","INFINITE JETPACK","ELCO TO LEDGE","HITBOXES - THIS WINDOW","CLOSE"};
+static const unsigned party_tool_actions[15]={
+    SUDEKIMP_PARTY_TOOL_COUNT,SUDEKIMP_PARTY_TOOL_COUNT,
+    SUDEKIMP_PARTY_TOOL_COUNT,SUDEKIMP_PARTY_TOOL_COUNT,SUDEKIMP_PARTY_TOOL_COUNT,
+    SUDEKIMP_PARTY_TOOL_COMBAT,SUDEKIMP_PARTY_TOOL_CAMERA,
+    SUDEKIMP_PARTY_TOOL_TRAINING_SKILLS,SUDEKIMP_PARTY_TOOL_INFINITE_SP,
+    SUDEKIMP_PARTY_TOOL_INFINITE_SPIRIT,SUDEKIMP_PARTY_TOOL_FUEL_CRYSTAL,
+    SUDEKIMP_PARTY_TOOL_INFINITE_JETPACK,SUDEKIMP_PARTY_TOOL_FLIGHT_LEDGE,
+    SUDEKIMP_PARTY_TOOL_HITBOXES,SUDEKIMP_PARTY_TOOL_CLOSE};
 static BOOL zone_traversal_mode;
 static unsigned int zone_traversal_page;
 static unsigned int zone_traversal_selection;
@@ -4767,8 +4794,107 @@ static void activate_selected_item(void) {
     }
 }
 
+static void party_tools_close(void) {
+    menu_open=FALSE;
+    party_tools_release_guard=TRUE;
+    menu_texture_dirty=TRUE;
+}
+BOOL SudekiMpLanPartyToolsCaptureInput(void) {
+    return party_tools_command && (menu_open || party_tools_release_guard ||
+        ((GetKeyState((int)menu_toggle_key)&0x8000)!=0 && owns_foreground()));
+}
+static void console_line(const char *text) {
+    memmove(console_history,console_history+1,6u*sizeof(console_history[0]));
+    snprintf(console_history[6],sizeof(console_history[6]),"%s",text);
+    menu_texture_dirty=TRUE;
+}
+static void console_submit(void) {
+    char command[sizeof(console_input)],echo[sizeof(console_input)];
+    unsigned n=0; BOOL space=FALSE;
+    for(unsigned i=0;console_input[i];++i) {
+        char c=console_input[i];
+        if(c==' ') { if(n) space=TRUE; continue; }
+        if(space && n+1<sizeof(command)) command[n++]=' ';
+        space=FALSE;
+        if(n+1<sizeof(command)) command[n++]=c;
+    }
+    command[n]=0;
+    snprintf(echo,sizeof(echo),"> %.44s",command);
+    if(n) console_line(echo);
+    console_input[0]=0;
+    if(!n) return;
+    if(!strcmp(command,"help")) {
+        console_line("HELP  STATUS  CLEAR  CLOSE");
+        console_line("HITBOXES ON / OFF / TOGGLE");
+        console_line("DISPLAY IS LOCAL. GAME RULES BELONG TO HOST.");
+    } else if(!strcmp(command,"status")) {
+        char status[48]={0}; party_tools_status(status,sizeof(status));
+        status[sizeof(status)-1]=0; console_line(status);
+    } else if(!strcmp(command,"clear")) {
+        ZeroMemory(console_history,sizeof(console_history));
+    } else if(!strcmp(command,"close")) {
+        party_tools_close();
+    } else if(!strcmp(command,"hitboxes") || !strcmp(command,"hitboxes on") ||
+        !strcmp(command,"hitboxes off") || !strcmp(command,"hitboxes toggle")) {
+        BOOL enabled=FALSE;
+        if(!party_tools_query(SUDEKIMP_PARTY_TOOL_HITBOXES,&enabled)) {
+            console_line("HITBOX DISPLAY UNAVAILABLE"); return;
+        }
+        BOOL desired=(!strcmp(command,"hitboxes on")) ? TRUE :
+            (!strcmp(command,"hitboxes off")) ? FALSE : !enabled;
+        if(desired!=enabled && !party_tools_command(SUDEKIMP_PARTY_TOOL_HITBOXES))
+            console_line("HITBOX DISPLAY UNAVAILABLE");
+        else console_line(desired?"LOCAL HITBOX DISPLAY ON":"LOCAL HITBOX DISPLAY OFF");
+    } else console_line("COMMAND NOT ALLOWED. TYPE HELP.");
+    SudekiMpLogWrite("lan_party_console event=submit policy=local_allowlist_only\r\n");
+}
+static void poll_party_console(void) {
+    BOOL focus=owns_foreground(),editing=menu_open && focus;
+    DWORD now=GetTickCount();
+    for(unsigned key=0;key<256u;++key) {
+        BOOL down=(GetKeyState((int)key)&0x8000)!=0;
+        BOOL edge=down && !console_keys[key];
+        console_keys[key]=down;
+        if(!editing) continue;
+        if(key==VK_BACK && down && (edge || (LONG)(now-console_backspace_at)>=0)) {
+            size_t n=strlen(console_input); if(n) console_input[n-1]=0;
+            console_backspace_at=now+(edge?350u:45u); menu_texture_dirty=TRUE;
+        }
+        if(!edge) continue;
+        if(key==menu_toggle_key || key==VK_ESCAPE) {
+            party_tools_close(); editing=FALSE;
+        } else if(key==VK_RETURN) console_submit();
+        else {
+            char c=key>='A' && key<='Z'?(char)('a'+key-'A'):
+                key>='0' && key<='9'?(char)key:key==VK_SPACE?' ':0;
+            size_t n=strlen(console_input);
+            if(c && n+1<sizeof(console_input)) {
+                console_input[n]=c; console_input[n+1]=0; menu_texture_dirty=TRUE;
+            }
+        }
+    }
+    /* Opening uses its own edge after the snapshot, so the F8 that opened
+     * the console cannot close it again in this pass. */
+    BOOL down=(GetKeyState((int)menu_toggle_key)&0x8000)!=0;
+    BOOL edge=down && !key_was_down[0]; key_was_down[0]=down;
+    if(!menu_open && !party_tools_release_guard && focus && edge) {
+        menu_open=TRUE; menu_texture_dirty=TRUE;
+        SudekiMpLogWrite("lan_party_console event=visibility state=open\r\n");
+    }
+}
+static void service_party_release_guard(void) {
+    if(!party_tools_release_guard) return;
+    for(unsigned k=1u;k<256u;++k) {
+        if(k==VK_LWIN || k==VK_RWIN || k==VK_CAPITAL || k==VK_NUMLOCK ||
+            k==VK_SCROLL) continue;
+        if(GetKeyState((int)k)&0x8000) return;
+    }
+    party_tools_release_guard=FALSE;
+}
+
 static BOOL rising_key(unsigned int slot, UINT key) {
-    BOOL down = (GetAsyncKeyState((int)key) & 0x8000) != 0;
+    BOOL down = ((party_tools_command ? GetKeyState((int)key) :
+        GetAsyncKeyState((int)key)) & 0x8000) != 0;
     BOOL rising = down && !key_was_down[slot];
     key_was_down[slot] = down;
     return rising;
@@ -4789,7 +4915,8 @@ static void poll_menu_input(void) {
         return;
     }
     if (toggle) {
-        menu_open = !menu_open;
+        if(party_tools_command && menu_open) party_tools_close();
+        else menu_open = !menu_open;
         menu_texture_dirty = TRUE;
         SudekiMpLogFormat(
             "cleanroom_menu event=visibility state=%s\r\n",
@@ -4800,10 +4927,29 @@ static void poll_menu_input(void) {
         return;
     }
     if (escape) {
-        menu_open = FALSE;
+        if(party_tools_command) party_tools_close();
+        else menu_open = FALSE;
         SudekiMpLogWrite(
             "cleanroom_menu event=visibility state=closed reason=escape\r\n"
         );
+        return;
+    }
+    if(party_tools_command) {
+        if(party_tools_seat) return; /* Clients never dispatch host menu rows. */
+        const unsigned count=sizeof(party_tool_actions)/sizeof(party_tool_actions[0]);
+        if(up) selected_item=(selected_item+count-1u)%count;
+        if(down) selected_item=(selected_item+1u)%count;
+        if(up || down) { menu_texture_dirty=TRUE; party_tools_message[0]=0; }
+        if(activate) {
+            unsigned action=party_tool_actions[selected_item];
+            if(action==SUDEKIMP_PARTY_TOOL_CLOSE) party_tools_close();
+            else if(action==SUDEKIMP_PARTY_TOOL_COUNT)
+                snprintf(party_tools_message,sizeof(party_tools_message),"SESSION OWNS ACTORS AND DUMMY");
+            else if(!party_tools_command(action))
+                snprintf(party_tools_message,sizeof(party_tools_message),"UNAVAILABLE: WAIT FOR ALL PLAYERS TO BE READY AND IDLE");
+            else snprintf(party_tools_message,sizeof(party_tools_message),"SETTING UPDATED");
+            menu_texture_dirty=TRUE;
+        }
         return;
     }
     if (zone_traversal_mode) {
@@ -5044,6 +5190,20 @@ void SudekiMpCleanroomMenuUpdate(void) {
     if (game_base == NULL) {
         return;
     }
+    if(party_tools_command) {
+        service_party_release_guard();
+        for(unsigned i=0;i<SUDEKIMP_PARTY_TOOL_CLOSE;++i) {
+            BOOL enabled=FALSE,valid=FALSE;
+            if(!party_tools_seat || i==SUDEKIMP_PARTY_TOOL_HITBOXES)
+                valid=party_tools_query(i,&enabled);
+            if(valid!=party_tools_valid[i] || enabled!=party_tools_enabled[i])
+                menu_texture_dirty=TRUE;
+            party_tools_valid[i]=valid; party_tools_enabled[i]=enabled;
+        }
+        if(party_tools_seat) poll_party_console();
+        else poll_menu_input();
+        return;
+    }
     /* The control-separation freeze path deliberately keeps this update
      * observer alive. Service the save-book owner and consent edges before
      * any frozen-input early return. */
@@ -5139,193 +5299,11 @@ static void fill_rectangle(
     }
 }
 
-static unsigned int roster_color_channel(
-    unsigned int base,
-    unsigned int cyan,
-    unsigned int gold,
-    unsigned int cyan_weight,
-    unsigned int gold_weight
-) {
-    unsigned int value = base;
-    value += cyan * cyan_weight / 255u;
-    value += gold * gold_weight / 255u;
-    return value > 255u ? 255u : value;
-}
-
-/* Return 0..4 covered quarter-pixel samples for a rounded rectangle.  The
- * stock title row is layered: a soft capsule-shaped shadow/rim surrounds a
- * tighter, squarer inset bar.  A shared coverage routine lets both contours
- * remain smooth without baking any original game artwork into the mod. */
-static unsigned int roster_rounded_rect_coverage(
-    int pixel_x,
-    int pixel_y,
-    int left,
-    int top,
-    int right,
-    int bottom,
-    int radius
-) {
-    static const int sample_offsets[2] = {1, 3};
-    const int center_y_x4 = (top + bottom) * 2;
-    int radius_x4;
-    int max_radius;
-    int cap_left_x4;
-    int cap_right_x4;
-    int radius_squared;
-    unsigned int coverage = 0u;
-    int sample_y;
-
-    if (right <= left || bottom <= top || radius <= 0) {
-        return 0u;
-    }
-    max_radius = (bottom - top) / 2;
-    if (radius > max_radius) {
-        radius = max_radius;
-    }
-    if (radius > (right - left) / 2) {
-        radius = (right - left) / 2;
-    }
-    radius_x4 = radius * 4;
-    cap_left_x4 = left * 4 + radius_x4;
-    cap_right_x4 = right * 4 - radius_x4;
-    radius_squared = radius_x4 * radius_x4;
-    for (sample_y = 0; sample_y < 2; ++sample_y) {
-        const int y_x4 = pixel_y * 4 + sample_offsets[sample_y];
-        const int delta_y = y_x4 - center_y_x4;
-        int sample_x;
-        for (sample_x = 0; sample_x < 2; ++sample_x) {
-            const int x_x4 = pixel_x * 4 + sample_offsets[sample_x];
-            int delta_x = 0;
-
-            if (x_x4 < cap_left_x4) {
-                delta_x = x_x4 - cap_left_x4;
-            }
-            else if (x_x4 > cap_right_x4) {
-                delta_x = x_x4 - cap_right_x4;
-            }
-            if (delta_x * delta_x + delta_y * delta_y <= radius_squared) {
-                ++coverage;
-            }
-        }
-    }
-    return coverage;
-}
-
 static void draw_roster_button_capsule(
-    uint32_t *pixels,
-    int pitch,
-    int top,
-    BOOL highlighted
+    uint32_t *pixels, int pitch, int top, BOOL highlighted
 ) {
-    /* The first prototype copied the near-full-width proportions of the
-     * title page.  On an independent roster page that read as an empty rail
-     * rather than a button.  Keep the native capsule language but give each
-     * choice a deliberate, centered 368-pixel footprint. */
-    const int left = 136;
-    const int right = 504;
-    const int bottom = top + (int)ROSTER_CAPSULE_HEIGHT;
-    const int border_inset = 2;
-    const int inner_radius = 8;
-    int y;
-    int first_x;
-    int last_x_exclusive;
-    int first_y;
-    int last_y_exclusive;
-
-    first_x = left - 3;
-    last_x_exclusive = right + 3;
-    first_y = top - (int)ROSTER_CAPSULE_DRAW_TOP_MARGIN;
-    last_y_exclusive = bottom +
-        (int)ROSTER_CAPSULE_DRAW_BOTTOM_EXCLUSIVE;
-    if (first_x < 0) first_x = 0;
-    if (last_x_exclusive > (int)MENU_TEXTURE_WIDTH) {
-        last_x_exclusive = MENU_TEXTURE_WIDTH;
-    }
-    if (first_y < 0) first_y = 0;
-    if (last_y_exclusive > (int)MENU_TEXTURE_HEIGHT) {
-        last_y_exclusive = MENU_TEXTURE_HEIGHT;
-    }
-
-    for (y = first_y; y < last_y_exclusive; ++y) {
-        uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
-        int x;
-        for (x = first_x; x < last_x_exclusive; ++x) {
-            int local_x = x - left;
-            unsigned int shadow_coverage = roster_rounded_rect_coverage(
-                x, y, left - 2, top + 1, right + 2, bottom + 4, 16);
-            unsigned int outer_coverage = roster_rounded_rect_coverage(
-                x, y, left, top, right, bottom, 15);
-            unsigned int inner_coverage;
-            unsigned int vertical;
-            unsigned int cyan_weight = 0u;
-            unsigned int gold_weight = 0u;
-            unsigned int fill_red;
-            unsigned int fill_green;
-            unsigned int fill_blue;
-            unsigned int red;
-            unsigned int green;
-            unsigned int blue;
-            unsigned int alpha;
-
-            if (outer_coverage == 0u) {
-                if (shadow_coverage != 0u) {
-                    row[x] = ((82u * shadow_coverage / 4u) << 24) |
-                        UINT32_C(0x00050406);
-                }
-                continue;
-            }
-            inner_coverage = roster_rounded_rect_coverage(
-                x,
-                y,
-                left + border_inset,
-                top + border_inset,
-                right - border_inset,
-                bottom - border_inset,
-                inner_radius);
-            vertical = (unsigned int)(bottom - y) * 24u /
-                (unsigned int)(bottom - top);
-            if (highlighted) {
-                if (local_x < 120) {
-                    cyan_weight = (unsigned int)(120 - local_x) * 190u / 120u;
-                }
-                if (local_x > right - left - 121) {
-                    gold_weight = (unsigned int)(local_x -
-                        (right - left - 121)) * 175u / 120u;
-                }
-            }
-            fill_red = roster_color_channel(29u + vertical, 0u, 65u,
-                cyan_weight, gold_weight);
-            fill_green = roster_color_channel(27u + vertical, 105u, 49u,
-                cyan_weight, gold_weight);
-            fill_blue = roster_color_channel(30u + vertical, 118u, 0u,
-                cyan_weight, gold_weight);
-            if (y < top + 5) {
-                fill_red = fill_red + 15u > 255u ? 255u : fill_red + 15u;
-                fill_green = fill_green + 15u > 255u ? 255u :
-                    fill_green + 15u;
-                fill_blue = fill_blue + 15u > 255u ? 255u :
-                    fill_blue + 15u;
-            }
-            else if (y >= bottom - 5) {
-                fill_red = fill_red > 8u ? fill_red - 8u : 0u;
-                fill_green = fill_green > 8u ? fill_green - 8u : 0u;
-                fill_blue = fill_blue > 8u ? fill_blue - 8u : 0u;
-            }
-
-            /* Blend the antialiased inner contour against the dark outer
-             * shell.  Fully covered inner pixels get the gradient; edge
-             * samples keep a softly rounded, two-pixel frame. */
-            red = (14u * (4u - inner_coverage) +
-                fill_red * inner_coverage) / 4u;
-            green = (13u * (4u - inner_coverage) +
-                fill_green * inner_coverage) / 4u;
-            blue = (15u * (4u - inner_coverage) +
-                fill_blue * inner_coverage) / 4u;
-            alpha = 244u * outer_coverage / 4u;
-            row[x] = (alpha << 24) |
-                (red << 16) | (green << 8) | blue;
-        }
-    }
+    SudekiMpDrawMenuButton(pixels, pitch, MENU_TEXTURE_WIDTH, MENU_TEXTURE_HEIGHT,
+        136, top, 504, top + ROSTER_CAPSULE_HEIGHT, highlighted);
 }
 
 static void draw_text(
@@ -5850,11 +5828,11 @@ static void draw_roster_character_card(
         uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
         int x;
         for (x = left - 3; x < right + 4; ++x) {
-            const unsigned int outer = roster_rounded_rect_coverage(
+            const unsigned int outer = SudekiMpButtonCoverage(
                 x, y, left, top, right, bottom, 13);
-            const unsigned int inner = roster_rounded_rect_coverage(
+            const unsigned int inner = SudekiMpButtonCoverage(
                 x, y, left + 3, top + 3, right - 3, bottom - 3, 10);
-            const unsigned int shadow = roster_rounded_rect_coverage(
+            const unsigned int shadow = SudekiMpButtonCoverage(
                 x, y, left + 2, top + 4, right + 3, bottom + 4, 13);
             uint32_t fill;
 
@@ -5951,9 +5929,9 @@ static void draw_roster_character_back_button(
         uint32_t *row = (uint32_t *)((uint8_t *)pixels + y * pitch);
         int x;
         for (x = left - 2; x < right + 3; ++x) {
-            const unsigned int outer = roster_rounded_rect_coverage(
+            const unsigned int outer = SudekiMpButtonCoverage(
                 x, y, left, top, right, bottom, 14);
-            const unsigned int inner = roster_rounded_rect_coverage(
+            const unsigned int inner = SudekiMpButtonCoverage(
                 x, y, left + 3, top + 3, right - 3, bottom - 3, 10);
 
             if (outer == 0u) {
@@ -6135,6 +6113,43 @@ static BOOL update_menu_texture(void *texture) {
             return FALSE;
         }
         menu_texture_dirty = FALSE;
+        return TRUE;
+    }
+    if(party_tools_command) {
+        draw_text(pixels,locked.pitch,32,24,party_tools_seat?
+            "SUDEKIMP CLIENT CONSOLE":"SUDEKIMP HOST TOOLS",UINT32_C(0xff5ef7f0),3);
+        draw_text(pixels,locked.pitch,32,62,party_tools_seat?
+            "TYPE HELP - ENTER RUNS - F8 OR ESC CLOSES":
+            "F8 OR ESC CLOSE - ARROWS SELECT - ENTER TOGGLES",UINT32_C(0xffaab8c8),2);
+        if(party_tools_seat) {
+            draw_text(pixels,locked.pitch,32,94,
+                party_tools_enabled[SUDEKIMP_PARTY_TOOL_HITBOXES]?
+                "LOCAL HITBOX DISPLAY: ON":"LOCAL HITBOX DISPLAY: OFF",UINT32_C(0xff7cf29a),2);
+            for(unsigned i=0;i<7u;++i)
+                draw_text(pixels,locked.pitch,32,145+(int)i*32,console_history[i],UINT32_C(0xffd6dce5),2);
+            fill_rectangle(pixels,locked.pitch,20,405,620,447,UINT32_C(0xff142332));
+            draw_text(pixels,locked.pitch,30,418,">",UINT32_C(0xff5ef7f0),2);
+            draw_text(pixels,locked.pitch,54,418,console_input,UINT32_C(0xffffffff),2);
+        } else {
+            for(unsigned i=0;i<sizeof(party_tool_actions)/sizeof(party_tool_actions[0]);++i) {
+                unsigned action=party_tool_actions[i]; int y=108+(int)i*21;
+                const char *status=action==SUDEKIMP_PARTY_TOOL_COUNT?"SESSION OWNED":
+                    action==SUDEKIMP_PARTY_TOOL_CLOSE?"":!party_tools_valid[action]?"UNAVAILABLE":
+                    action==SUDEKIMP_PARTY_TOOL_FLIGHT_LEDGE?(party_tools_enabled[action]?"READY":"WAIT"):
+                    action==SUDEKIMP_PARTY_TOOL_CAMERA?(party_tools_enabled[action]?"FIRST PERSON":"THIRD PERSON"):
+                    party_tools_enabled[action]?"ENABLED":"DISABLED";
+                if(selected_item==i) fill_rectangle(pixels,locked.pitch,20,y-4,620,y+20,UINT32_C(0x90324962));
+                draw_text(pixels,locked.pitch,30,y,selected_item==i?">":" ",UINT32_C(0xffffffff),2);
+                draw_text(pixels,locked.pitch,54,y,party_tool_labels[i],UINT32_C(0xffffffff),2);
+                draw_text(pixels,locked.pitch,440,y,status,action==SUDEKIMP_PARTY_TOOL_COUNT?
+                    UINT32_C(0xffaab8c8):UINT32_C(0xff7cf29a),2);
+            }
+            draw_text(pixels,locked.pitch,32,435,party_tools_message,UINT32_C(0xffffd166),1);
+        }
+        draw_text(pixels,locked.pitch,32,461,"HITBOXES: CYAN BODY / MAGENTA DAMAGE TEST / GOLD DEFAULT SHOT FILTER",UINT32_C(0xffaab8c8),1);
+        result=unlock_rectangle(texture,0u);
+        if(FAILED(result)) return FALSE;
+        menu_texture_dirty=FALSE;
         return TRUE;
     }
     if (roster_mode) {
@@ -7457,7 +7472,10 @@ static BOOL draw_texture_overlay(
 
 restore_state:
     restore_result = apply_state_block(state_block);
-    release_com_object(&state_block);
+    if(party_tools_command && FAILED(restore_result)) {
+        party_tools_pending_state=state_block;
+        SudekiMpLogWrite("lan_party_tools event=restore_failed policy=retain_and_retry_render_thread\r\n");
+    } else release_com_object(&state_block);
     return SUCCEEDED(result) && SUCCEEDED(restore_result);
 }
 
@@ -7857,6 +7875,14 @@ void SudekiMpCleanroomMenuRender(void) {
     BOOL blacksmith_snapshot_valid;
 
     if (game_base == NULL) {
+        return;
+    }
+    if(party_tools_command) {
+        if(!SudekiMpLanPartyToolsRestoreRenderState()) return;
+        if(menu_open && !draw_menu_overlay() && !overlay_failure_logged) {
+            overlay_failure_logged=TRUE;
+            SudekiMpLogWrite("lan_party_tools event=overlay result=unavailable\r\n");
+        }
         return;
     }
     vote_snapshot_valid = SudekiMpZoneTransitionGetVoteSnapshot(
@@ -8607,12 +8633,58 @@ BOOL SudekiMpCleanroomMenuInstalled(void) {
     return game_base != NULL;
 }
 
+BOOL SudekiMpInstallLanPartyToolsMenu(HMODULE module,UINT key,unsigned seat,
+    BOOL (*command)(unsigned action),BOOL (*query)(unsigned action,BOOL *enabled),
+    void (*status)(char *text,unsigned capacity)) {
+    if(game_base || menu_texture || party_tools_command || !command || !query || !status ||
+        seat>=4u || party_tools_pending_state || !key || key>0xffu ||
+        !SudekiMpCleanroomEngineImageExact(module)) return FALSE;
+    game_base=(uint8_t *)module;
+    d3d_device_global=(void **)(game_base+RVA_D3D_DEVICE_GLOBAL);
+    menu_toggle_key=key; party_tools_command=command; party_tools_query=query;
+    party_tools_status=status; party_tools_seat=seat; party_tools_release_guard=FALSE;
+    menu_open=FALSE; menu_texture_dirty=TRUE; overlay_failure_logged=FALSE;
+    selected_item=5u; menu_texture_device=NULL; console_input[0]=party_tools_message[0]=0;
+    ZeroMemory(key_was_down,sizeof(key_was_down));
+    ZeroMemory(console_history,sizeof(console_history));
+    for(unsigned k=0;k<256u;++k) console_keys[k]=(GetKeyState((int)k)&0x8000)!=0;
+    key_was_down[0]=console_keys[key];
+    ZeroMemory(party_tools_enabled,sizeof(party_tools_enabled));
+    ZeroMemory(party_tools_valid,sizeof(party_tools_valid));
+    if(seat) { console_line("TYPE HELP FOR AVAILABLE COMMANDS."); console_line("HOST GAME SETTINGS ARE NOT CLIENT COMMANDS."); }
+    SudekiMpLogFormat("lan_party_tools event=installed seat=%u ui=%s policy=presenter_only_existing_engine_and_dispatch\r\n",
+        seat,seat?"client_console":"host_tools");
+    return TRUE;
+}
+
+BOOL SudekiMpLanPartyToolsRenderDrained(void) { return party_tools_pending_state==NULL; }
+BOOL SudekiMpLanPartyToolsRestoreRenderState(void) {
+    if(!party_tools_pending_state) return TRUE;
+    void **vtable=*(void ***)party_tools_pending_state;
+    D3DStateBlockApplyFunction apply=(D3DStateBlockApplyFunction)vtable[D3D_STATE_BLOCK_APPLY_INDEX];
+    if(!apply || FAILED(apply(party_tools_pending_state))) return FALSE;
+    release_com_object(&party_tools_pending_state);
+    return TRUE;
+}
+
 BOOL SudekiMpCleanroomMenuActive(void) {
     return game_base != NULL && menu_open;
 }
 
 void SudekiMpUninstallCleanroomMenu(void) {
     HANDLE trace_thread = pc_front_end_trace_thread_handle;
+
+    if(party_tools_command) {
+        /* The runtime closes and drains its callbacks before this release.
+         * This presenter owns only its overlay texture and local UI state. */
+        if(!SudekiMpLanPartyToolsRenderDrained()) return;
+        release_com_object(&menu_texture); menu_texture_device=NULL;
+        party_tools_command=NULL; party_tools_query=NULL; party_tools_status=NULL;
+        party_tools_release_guard=FALSE; party_tools_seat=0;
+        game_base=NULL; d3d_device_global=NULL;
+        menu_open=FALSE; menu_texture_dirty=FALSE; menu_toggle_key=0;
+        return;
+    }
 
     SudekiMpControlSeparationReportRoamingBoundaryOverlay(FALSE);
     InterlockedExchange(&pc_front_end_trace_stop, 1);

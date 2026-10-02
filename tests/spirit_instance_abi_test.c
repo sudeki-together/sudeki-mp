@@ -1,6 +1,14 @@
 #include <stdio.h>
+#include <windows.h>
+static unsigned int observed_memory_queries;
+static SIZE_T WINAPI counted_virtual_query(LPCVOID p,PMEMORY_BASIC_INFORMATION m,SIZE_T n) {
+    ++observed_memory_queries;
+    return VirtualQuery(p,m,n);
+}
+#define VirtualQuery counted_virtual_query
 #define SUDEKIMP_CAST_INSTANCE_PROBE 1
 #include "../src/engine/spirit_instance_abi.c"
+#undef VirtualQuery
 
 static int failures;
 #define CHECK(x) do { if(!(x)) { printf("FAIL %d: %s error=%lu\n",__LINE__,#x,(unsigned long)GetLastError()); ++failures; } } while(0)
@@ -18,6 +26,13 @@ static uint8_t caster_actors[2][0x134], caster_states[2][0x134];
 static uint8_t caster_skills[2][0x78];
 static BOOL starting_task_known;
 static void **starting_task_handle;
+BOOL SudekiMpLanCastContextActorDrained(void *actor,uint64_t session) {
+    for(unsigned int i=0;i<MAX_INSTANCES;++i)
+        if(actor && session && entries[i].caster==actor &&
+            entries[i].caster_session==session)
+            return !starting_task_known;
+    return FALSE;
+}
 BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
     void *skill,void **handle,void **thread) {
     if(!starting_task_known || actor!=entries[1].caster || session!=entries[1].caster_session ||
@@ -329,6 +344,12 @@ static void fixture(void) {
     *(void **)(image+update_slots[2])=image+update_rvas[2];
     memcpy(image+update_rvas[0],cu,sizeof(cu));
     memcpy(image+update_rvas[1],su,sizeof(su));
+    memcpy(image+0x11be0,"\x55\x8b\xec\x83\xe4\xf0\x81\xec\xf4\x00\x00\x00"
+        "\x53\x8b\x5d\x08\x8b\x83\xa0\x01\x00\x00\x83\xe8\x02\x56\x57"
+        "\x0f\x85\x1e\x02\x00\x00",33);
+    memcpy(image+0x12ae03,"\x56\x57\x89\x5c\x24\x24\x0f\x84\x39\x02\x00\x00",12);
+    memcpy(image+0x11e1f,"\x5f\x5e\x5b\x8b\xe5\x5d\xc2\x04\x00",9);
+    memcpy(image+0x12b048,"\x5f\x5e\x5b\x8b\xe5\x5d\xc2\x04\x00",9);
     {
         const uint8_t mt[]={0,0x56,0x57,0x8b,0xf9,0x74,7,0xc6,5};
         const uint8_t ret4[]={0xc2,4,0};
@@ -853,6 +874,42 @@ static void shared_ssp_tests(void) {
     for(unsigned int i=0;i<2;++i) CHECK(SudekiMpDestroySpiritInstance(&pair[i]));
     CHECK(SudekiMpResetSpiritInstanceAbi() && !shared_ssp_enabled);
 }
+static void inactive_native_update_tests(void) {
+    SudekiMpSpiritInstance instance={0};
+    DWORD camera_protect,soul_protect,ignored;
+    uint32_t cookie,cameras,souls;
+    setup();
+    CHECK(SudekiMpCreateSpiritInstance(&instance));
+    Entry *e=find(&instance);
+    CHECK(e && object_exact(instance.camera,CAMERA_SIZE,CAMERA_VTABLE));
+    /* Execute only the fully checked no-op paths in the synthetic image.
+     * Active/substituted updates retain the existing context-routing tests. */
+    CHECK(VirtualProtect(image+0x11000,0x1000,PAGE_EXECUTE_READ,&camera_protect));
+    CHECK(VirtualProtect(image+0x12a000,0x2000,PAGE_EXECUTE_READ,&soul_protect));
+    original_updates[0]=(NativeUpdate)(image+update_rvas[0]);
+    original_updates[1]=(NativeUpdate)(image+update_rvas[1]);
+    cookie=next_scope_cookie;
+    SetLastError(1234);
+    camera_update(instance.camera,0.125f);
+    CHECK(GetLastError()==1234 && !update_fault && !scope_depth && !update_depth);
+    CHECK(next_scope_cookie==cookie && globals_exact(original_manager,original_camera));
+    SetLastError(2345);
+    soul_update(e->souls[0],0.125f);
+    CHECK(GetLastError()==2345 && !update_fault && !scope_depth && !update_depth);
+    CHECK(next_scope_cookie==cookie && globals_exact(original_manager,original_camera));
+    CHECK(SudekiMpObserveSpiritInstanceUpdates(&instance,&cameras,&souls));
+    CHECK(cameras==1 && souls==1);
+    CHECK(VirtualProtect(image+0x11000,0x1000,camera_protect,&ignored));
+    CHECK(VirtualProtect(image+0x12a000,0x2000,soul_protect,&ignored));
+    original_updates[0]=fake_camera_update;
+    original_updates[1]=fake_soul_update;
+    /* State zero is insufficient when the callback is not the exact body. */
+    camera_update(instance.camera,0.125f);
+    CHECK(next_scope_cookie>cookie && !update_fault && !scope_depth);
+    CHECK(SudekiMpDestroySpiritInstance(&instance));
+    CHECK(SudekiMpResetSpiritInstanceAbi());
+}
+
 int main(void) {
     SudekiMpSpiritInstance instances[4]={{0}}, extra={0}, stale;
     unsigned int i,j;
@@ -913,8 +970,17 @@ int main(void) {
         NativeUpdate soul=(NativeUpdate)*(void **)(image+SOUL_VTABLE+4);
         uint32_t cameras,souls;
         SudekiMpSpiritInstanceState state;
+        BOOL active=TRUE;
+        observed_memory_queries=0;
+        CHECK(SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && !active);
+        unsigned activity_queries=observed_memory_queries;
+        observed_memory_queries=0;
         CHECK(SudekiMpObserveSpiritInstance(&instances[0],&state) && state.idle && !state.state);
+        CHECK(activity_queries==2 && observed_memory_queries>=activity_queries+6);
+        printf("Activity observation: %u memory queries vs %u for full drain observation\n",
+            activity_queries,observed_memory_queries);
         *(uint32_t *)((uint8_t *)instances[0].manager+0x5c)=10;
+        CHECK(SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && active);
         *(uint32_t *)((uint8_t *)instances[0].manager+0x98)=4;
         CHECK(SudekiMpObserveSpiritInstance(&instances[0],&state) && state.state==10 &&
             state.strike_id==4 && !state.idle);
@@ -922,9 +988,30 @@ int main(void) {
         *(uint32_t *)((uint8_t *)instances[0].manager+0x5c)=0;
         *(uint32_t *)((uint8_t *)instances[0].camera+0x1a0)=1;
         CHECK(SudekiMpObserveSpiritInstance(&instances[0],&state) && !state.idle && state.camera_active);
+        CHECK(SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && !active);
+        /* Manager inactivity cannot authorize releasing a camera or soul. */
         *(uint32_t *)((uint8_t *)instances[0].camera+0x1a0)=0;
+        ((uint8_t *)entries[0].souls[0])[0x48]=1;
+        CHECK(SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && !active);
+        CHECK(SudekiMpObserveSpiritInstance(&instances[0],&state) && !state.body_idle);
+        ((uint8_t *)entries[0].souls[0])[0x48]=0;
+        void *saved_vtable=*(void **)instances[0].manager;
+        *(void **)instances[0].manager=NULL; active=TRUE;
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && active);
+        *(void **)instances[0].manager=saved_vtable;
+        saved_vtable=*(void **)instances[0].camera; *(void **)instances[0].camera=NULL;
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && active);
+        *(void **)instances[0].camera=saved_vtable;
+        DWORD saved_owner=owner_thread; owner_thread=0;
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && active);
+        owner_thread=saved_owner;
+        update_fault=TRUE;
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[0],&active) && active);
+        update_fault=FALSE;
         stale=instances[0]; ++stale.generation;
         CHECK(!SudekiMpObserveSpiritInstance(&stale,&state));
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&stale,&active) && active);
+        CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[0],NULL));
         CHECK(!SudekiMpObserveSpiritInstance(&instances[0],NULL));
         test_instances=instances; nested_updates=TRUE;
         CHECK(SudekiMpScheduleIdleSpiritInstanceProbe(&instances[0]));
@@ -1084,6 +1171,13 @@ int main(void) {
         if(i) CHECK(!SudekiMpBindSpiritInstanceCaster(&instances[i],caster_actors[0],5,17,caster_witness));
         CHECK(SudekiMpBindSpiritInstanceCaster(&instances[i],caster_actors[i],i ? 14:5,17,caster_witness));
         CHECK(!SudekiMpBindSpiritInstanceCaster(&instances[i],caster_actors[1-i],i ? 5:14,17,caster_witness));
+        {
+            BOOL active=TRUE;
+            CHECK(SudekiMpObserveSpiritInstanceActivity(&instances[i],&active) && !active);
+            *(void **)(caster_actors[i]+0x130)=NULL; active=TRUE;
+            CHECK(!SudekiMpObserveSpiritInstanceActivity(&instances[i],&active) && active);
+            *(void **)(caster_actors[i]+0x130)=caster_states[i];
+        }
         {
             SudekiMpSpiritInstance resolved={0};
             CHECK(SudekiMpResolveSpiritInstanceCaster(caster_actors[i],17,&resolved));
@@ -1708,12 +1802,14 @@ int main(void) {
     shared_ssp_tests();
     named_tests();
     selection_tests();
+    inactive_native_update_tests();
     {
         const uint32_t sites[]={MANAGER_CTOR,CAMERA_CTOR,MANAGER_INIT,CAMERA_INIT,
             MANAGER_DELETE,CAMERA_DELETE,SOUL_DELETE,0x78d0d,0x78d18,0x79c53,0x79c5e,
             MANAGER_CTOR+0x40,CAMERA_CTOR+0x97,MANAGER_VTABLE,CAMERA_VTABLE,SOUL_VTABLE,
             MANAGER_DELETE+5,CAMERA_DELETE+3,SOUL_DELETE+5,
             CAMERA_VTABLE+4,SOUL_VTABLE+4,0x11bd0,0x12adf0,
+            0x11be0,0x11bf0,0x11bfb,0x11e1f,0x12ae03,0x12ae09,0x12b048,
             MANAGER_VTABLE+4,0xf900,0xf902,0xf906,0xf90f,0xf921,0xf977,0xf969,
             0x1061d0,0x106266,0x106272,0x106281,0x79df7,
             0xfcd6,0x10f36,0xe4460,0xe45d0,0xf914,0xf95b,0xf95c,0xf960,0xf96e,

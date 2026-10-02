@@ -41,6 +41,10 @@ BOOL SudekiMpLanPartyControlBeginSession(
  * represented actor seat (including Buki/zero), never transport authority. */
 BOOL SudekiMpLanPartyControlBeginClientSession(
     const SudekiMpControlUpdateDispatchWitness *witness, unsigned int local_seat);
+/* Read-only guard for local operator commands: exact local actor/controller,
+ * native UsingUI clear and an unpaused normal-speed world. */
+BOOL SudekiMpLanPartyControlGameplayReady(
+    const SudekiMpControlUpdateDispatchWitness *witness);
 
 BOOL SudekiMpLanPartyControlAcquire(
     const SudekiMpControlUpdateDispatchWitness *witness,
@@ -49,6 +53,12 @@ BOOL SudekiMpLanPartyControlAcquire(
 BOOL SudekiMpLanPartyControlExact(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanPartyLease *lease, void *actor);
+/* Host-only observation for an unoccupied companion: exact roster/actor,
+ * no retained multiplayer lease, and native default AI positively enabled.
+ * Does not acquire control or confer a player lease. */
+BOOL SudekiMpLanPartyControlHostAiExact(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    unsigned int seat, void *actor);
 /* Game-thread observations, not permission to mutate the returned actor. */
 void *SudekiMpLanPartyControlObserveActor(
     const SudekiMpControlUpdateDispatchWitness *witness, unsigned int seat);
@@ -66,6 +76,11 @@ BOOL SudekiMpLanPartyControlMove(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanPartyLease *lease, void *actor,
     float world_x, float world_z, float aim_x, float aim_z, BOOL aiming);
+/* Host-only facing during the exact actor's admitted native targeting phase.
+ * No speed, position, task, resource, or combat flag mutation. */
+BOOL SudekiMpLanPartyControlSkillFacing(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyLease *lease, void *actor, float aim_x, float aim_z);
 /* One weak-action edge on an exact remote actor lease, admitted only in the
  * host-observed native combat mode. Each actor's own native arbiter remains
  * the validator and damage remains host-owned. */
@@ -81,6 +96,9 @@ BOOL SudekiMpLanPartyControlSubmitMelee(
 BOOL SudekiMpLanPartyControlSubmitBlockState(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanPartyLease *lease, void *actor, unsigned int state);
+BOOL SudekiMpLanPartyControlSubmitDodge(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyLease *lease, void *actor, float x, float z);
 /* Read-only Ailish ranged cadence gate. Resolves that exact leased actor's
  * native CMissileManager and requires retail CanFire && !IsFiring. FALSE
  * means the manager or lease could not be proved on this host callback. */
@@ -110,6 +128,9 @@ BOOL SudekiMpLanPartyControlRelease(
 /* Pointer-free teardown barrier, safe to query outside the game callback.
  * The owning control hook refuses uninstall while ANY lease is retained. */
 BOOL SudekiMpLanPartyControlHasLeases(void);
+/* A same-process lobby may supply independently validated native Test Room
+ * evidence. Installed only with no actor leases; never replaces roster checks. */
+BOOL SudekiMpLanPartyControlSetTestroomProbe(BOOL (*probe)(unsigned seat));
 
 /* Read-only startup observation, on the same borrowed controller seam. Slots
  * may be missing while InternalSpawnPC completes. Every present slot must
@@ -124,6 +145,15 @@ typedef struct SudekiMpLanPartyRosterObservation {
 BOOL SudekiMpLanPartyControlObserveRoster(
     const SudekiMpControlUpdateDispatchWitness *witness,
     SudekiMpLanPartyRosterObservation *observation);
+/* Read-only retained identity check for scheduled native cast callbacks on
+ * the previously established game thread. Does not grant a dispatch witness
+ * or permit acquisition, movement, release or new actor mutation. */
+BOOL SudekiMpLanPartyControlNativeRosterExact(
+    const SudekiMpLanPartyRosterObservation *expected);
+BOOL SudekiMpLanPartyControlNativeActorExact(
+    const SudekiMpLanPartyRosterObservation *expected,unsigned seat);
+BOOL SudekiMpLanPartyControlEnableCastInputIsolation(
+    const SudekiMpControlUpdateDispatchWitness *witness);
 /* Revalidate the complete observation immediately before each existing native
  * API call. Spawn TRUE means submitted, NOT present. Initialization preserves
  * an already-equipped weapon and valid resources; no global FillInventory. */

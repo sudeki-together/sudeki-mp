@@ -162,6 +162,8 @@ BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(
     uint64_t session_token
 );
 BOOL SudekiMpLanArenaSpiritVfxResetVisuals(HMODULE game_module);
+BOOL SudekiMpLanPartyShieldServiceVisuals(HMODULE game_module,
+    const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token);
 BOOL SudekiMpLanArenaSpiritVfxVisualImageMatches(HMODULE game_module);
 /* Read-only exact owned-effect shape, including its isolated sound listener. */
 BOOL SudekiMpLanArenaSpiritVfxVisualIdentityMatches(HMODULE game_module, void *effect);
@@ -181,7 +183,7 @@ typedef struct SudekiMpLanArenaSpiritVfxVisualState {
     uint32_t newest_instance_sequence;
     SudekiMpLanArenaSpiritVfxVisualSlot slots[
         SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
-    SudekiMpLanArenaSpiritVfxCacheLease caches[SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST];
+    SudekiMpLanArenaSpiritVfxCacheLease caches[SUDEKIMP_LAN_PARTY_VFX_LAST];
 } SudekiMpLanArenaSpiritVfxVisualState;
 
 typedef struct SudekiMpLanArenaSpiritVfxVisualApi {

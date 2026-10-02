@@ -291,18 +291,23 @@ static int elco_weapon_item(uint8_t item) {
         item == 31u || item == 34u || item == 35u;
 }
 
-int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *w, uint8_t type) {
+static int ranged_weapon_item(uint8_t type,uint8_t item) {
+    return type==SUDEKIMP_LAN_ARENA_ELCO_TYPE ? elco_weapon_item(item) :
+        type==SUDEKIMP_LAN_ARENA_AILISH_TYPE && item>=12u && item<24u;
+}
+
+int SudekiMpLanRangedWeaponStateValid(const SudekiMpLanWeaponState *w, uint8_t type) {
     if (!w || w->valid > 1u || w->shot_count > SUDEKIMP_LAN_WEAPON_SHOT_HISTORY)
         return 0;
     if (w->valid) {
-        if (type != SUDEKIMP_LAN_ARENA_ELCO_TYPE || !elco_weapon_item(w->item) ||
+        if (!ranged_weapon_item(type,w->item) ||
             w->stage > 6u || w->charge_q8 > 25600u || w->reload_ms > 60000u) return 0;
     } else if (w->item || w->stage || w->charge_q8 || w->reload_ms || w->shot_count)
         return 0;
     for (unsigned i = 0; i < SUDEKIMP_LAN_WEAPON_SHOT_HISTORY; ++i) {
         const SudekiMpLanWeaponShot *s = &w->shots[i];
         if (i < w->shot_count) {
-            if (!s->sequence || !elco_weapon_item(s->item) ||
+            if (!s->sequence || !ranged_weapon_item(type,s->item) ||
                 !s->pre_charge_q8 || s->pre_charge_q8 > 25600u ||
                 (i && (!action_sequence_newer(s->sequence, w->shots[i-1].sequence) ||
                  (int32_t)(s->host_tick - w->shots[i-1].host_tick) < 0))) return 0;
@@ -311,9 +316,25 @@ int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *w, uint8_t type) {
     return 1;
 }
 
+int SudekiMpLanWeaponStateValid(const SudekiMpLanWeaponState *w,uint8_t type) {
+    return w && (!w->valid || type==SUDEKIMP_LAN_ARENA_ELCO_TYPE) &&
+        SudekiMpLanRangedWeaponStateValid(w,type);
+}
+
+static int extended_actor_action_allowed(uint8_t type,uint8_t variant,int party_motion) {
+    /* Keep the legacy LA42 actor boundary. SMP4 alone extends Tal, and the
+     * current action and retained history must agree on the same whitelist. */
+    return variant<SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK ||
+        type==SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+        (party_motion && type==SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+         (variant==SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK ||
+          (variant>=SUDEKIMP_LAN_ARENA_ACTION_BLOCK_HOLD &&
+           variant<=SUDEKIMP_LAN_ARENA_ACTION_ROLL_RIGHT)));
+}
+
 static int valid_actor_action_history(
     const SudekiMpLanArenaActorSnapshot *actor,
-    uint8_t expected_type
+    uint8_t expected_type, int party_motion
 ) {
     unsigned int index;
     if (actor == NULL ||
@@ -325,8 +346,7 @@ static int valid_actor_action_history(
         if (event->sequence == 0u ||
             event->variant < SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE ||
             event->variant > SUDEKIMP_LAN_ARENA_ACTION_MAX ||
-            (event->variant >= SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK &&
-             expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) ||
+            !extended_actor_action_allowed(expected_type,event->variant,party_motion) ||
             (ranged_actor_type(expected_type) &&
              event->variant != SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
             (index != 0u && !action_sequence_newer(
@@ -591,18 +611,23 @@ static int read_locomotion(const uint8_t *in, SudekiMpLanArenaLocomotion *m) {
 
 static int valid_actor_snapshot(
     const SudekiMpLanArenaActorSnapshot *actor,
-    uint8_t expected_type
+    uint8_t expected_type,
+    int party_motion
 ) {
     float facing_length;
     unsigned int channel;
     if (actor == NULL) return 0;
-    /* Only Buki owns the new body clips and phase identities. Preserve the
-     * original movement contract for other actors, including its tests. */
-    if (actor->action_variant >= SUDEKIMP_LAN_ARENA_ACTION_RUNNING_ATTACK &&
-        expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return 0;
+    /* Legacy LA42 keeps its original body clip contract. Only the explicit
+     * SMP4 roster context admits Tal's closed v4 body namespace; the party
+     * motion validator resolves each of those clips against Tal's own bank. */
+    if (!extended_actor_action_allowed(expected_type,actor->action_variant,party_motion)) return 0;
     for (channel = 0; channel < 4u; ++channel) {
         if (actor->locomotion.clip[channel] >= 10u &&
-            expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE) return 0;
+            expected_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+            !(party_motion && expected_type==SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+              actor->locomotion.clip[channel]<=SUDEKIMP_LAN_ARENA_PARTY_TAL_MOTION_MAX) &&
+            !(party_motion && expected_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+              actor->locomotion.clip[channel]<=11u)) return 0;
         /* LA40: Buki's bounded body frame is also the combo result. These
          * identities authorize renderer presentation, never native combat
          * input, damage, or a second attempt at the timing judgement. */
@@ -672,7 +697,7 @@ static int valid_actor_snapshot(
             actor->combat_state, actor->action_variant) ||
         (ranged_actor_type(expected_type) &&
          actor->action_variant > SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
-        !valid_actor_action_history(actor, expected_type) ||
+        !valid_actor_action_history(actor, expected_type, party_motion) ||
         (actor->action_phase_valid &&
          actor->animation_state != SUDEKIMP_LAN_ARENA_ANIMATION_ACTION) ||
         (!actor->action_phase_valid && actor->action_phase_q8 != 0u) ||
@@ -824,6 +849,24 @@ int SudekiMpLanArenaVisualOwnerValid(
            visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP)));
 }
 
+int SudekiMpLanPartyShieldOwnerValid(
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual
+) {
+    return visual && visual->skill_sequence == 0u &&
+        ((visual->owner_actor_type == SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+          (visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+           visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP)) ||
+         (visual->owner_actor_type == SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+          (visual->kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR ||
+           visual->kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP)));
+}
+int SudekiMpLanArenaVisualOwnerValidForParty(
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual
+) {
+    return SudekiMpLanArenaVisualOwnerValid(visual) ||
+        SudekiMpLanPartyShieldOwnerValid(visual);
+}
+
 static int spirit_vfx_entry_empty(
     const SudekiMpLanArenaSpiritVfxSnapshot *entry
 ) {
@@ -841,8 +884,8 @@ static int spirit_vfx_entry_empty(
     return 1;
 }
 
-int SudekiMpLanArenaSpiritVfxRosterValid(
-    const SudekiMpLanArenaSnapshot *snapshot
+static int spirit_vfx_roster_valid(
+    const SudekiMpLanArenaSnapshot *snapshot, int party
 ) {
     unsigned int index;
     unsigned int other;
@@ -866,9 +909,12 @@ int SudekiMpLanArenaSpiritVfxRosterValid(
                 if (snapshot->seat[owner_seat].actor_type == entry->owner_actor_type) break;
             if (owner_seat == 2u) return 0;
         }
-        if (entry->instance_sequence == 0u || !SudekiMpLanArenaVisualOwnerValid(entry) ||
+        if (entry->instance_sequence == 0u ||
+            !(party ? SudekiMpLanArenaVisualOwnerValidForParty(entry) :
+                SudekiMpLanArenaVisualOwnerValid(entry)) ||
             entry->kind < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE ||
-            entry->kind > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST ||
+            entry->kind > (party ? SUDEKIMP_LAN_PARTY_VFX_LAST :
+                SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST) ||
             entry->phase_valid > 1u || !isfinite(entry->phase) ||
             entry->phase < 0.0f || entry->phase > 1000000.0f ||
             (!entry->phase_valid && entry->phase != 0.0f) ||
@@ -902,6 +948,10 @@ int SudekiMpLanArenaSpiritVfxRosterValid(
     }
     return 1;
 }
+
+int SudekiMpLanArenaSpiritVfxRosterValid(
+    const SudekiMpLanArenaSnapshot *snapshot
+) { return spirit_vfx_roster_valid(snapshot, 0); }
 
 static void write_spirit_vfx(
     uint8_t *output,
@@ -1023,10 +1073,10 @@ int SudekiMpLanArenaSnapshotValidForRoster(
          snapshot->combat_enabled != 0u) ||
         snapshot->enemy_count > SUDEKIMP_LAN_ARENA_SUPPORTED_ENEMIES ||
         !SudekiMpLanArenaSpiritAudioJournalValid(snapshot) ||
-        !SudekiMpLanArenaSpiritVfxRosterValid(snapshot) ||
-        !valid_actor_snapshot(&snapshot->seat[0], roster->actor_type[0]) ||
+        !spirit_vfx_roster_valid(snapshot, roster->world_locomotion) ||
+        !valid_actor_snapshot(&snapshot->seat[0], roster->actor_type[0],roster->world_locomotion) ||
         !valid_actor_snapshot(
-            &snapshot->seat[1], roster->actor_type[1])) return 0;
+            &snapshot->seat[1], roster->actor_type[1],roster->world_locomotion)) return 0;
     for (index = 0u; index < SUDEKIMP_LAN_ARENA_SEAT_COUNT; ++index) {
         const SudekiMpLanArenaSpiritView *view = &snapshot->cast[index].spirit_view;
         const SudekiMpLanArenaSkillFade *fade = &snapshot->cast[index].skill_fade;

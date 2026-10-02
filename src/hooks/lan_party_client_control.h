@@ -20,6 +20,10 @@ SudekiMpLanPartyClientControl *SudekiMpLanPartyClientControlCreate(
 BOOL SudekiMpLanPartyClientControlService(SudekiMpLanPartyClientControl *,
     const SudekiMpControlUpdateDispatchWitness *, SudekiMpLanPartyClientControlReport *);
 void SudekiMpLanPartyClientControlRequestStop(SudekiMpLanPartyClientControl *);
+/* Explicit retry on the verified game thread. The runtime must first restore
+ * presentation/combat state; every native AI lease must have drained. */
+BOOL SudekiMpLanPartyClientControlRejoin(SudekiMpLanPartyClientControl *,
+    const SudekiMpControlUpdateDispatchWitness *);
 /* Disable/unregister/drain the owner callback before destruction. Failed
  * native release retains this object/session and the control-hook dependency. */
 BOOL SudekiMpLanPartyClientControlDestroy(SudekiMpLanPartyClientControl *);

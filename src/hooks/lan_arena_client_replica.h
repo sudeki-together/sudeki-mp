@@ -7,28 +7,44 @@
 #include "hooks/lan_party_control.h"
 
 BOOL SudekiMpInitializeLanPartyClientReplica(HMODULE,SudekiMpLanPartySession *);
+/* Start/advance a fresh host-announced native mode transition before body
+ * snapshots can be captured. No controls or animation state are fabricated.
+ * A newest complete frame, when available, prevents a reordered older notice
+ * from starting an already superseded transition. False includes pending. */
+BOOL SudekiMpLanPartyClientServiceCombatMode(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *confirmed);
 /* Initial four-player movement slice, at the borrowed post-controller seam.
  * No combat, casts, first-person arms, weapon changes or local simulation.
  * All four native identities are preflighted before the first mutation. */
 BOOL SudekiMpLanPartyClientApplyMovement(const SudekiMpControlUpdateDispatchWitness *,
-    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *);
+    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *sampled,
+    const SudekiMpLanPartyFrame *confirmed);
+/* Body transforms use sampled; host events, targeting and resources use the
+ * newest complete confirmed frame from this same lease. */
 BOOL SudekiMpLanPartyClientApplyBasicCombat(const SudekiMpControlUpdateDispatchWitness *,
-    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *);
+    const SudekiMpLanPartyLease *,const SudekiMpLanPartyFrame *sampled,
+    const SudekiMpLanPartyFrame *confirmed);
 /* Retire renderer-only party presentation after the old peer's native actor
  * leases have drained, before a disconnected seat is admitted again. */
 BOOL SudekiMpLanPartyClientEndPresentation(
     const SudekiMpControlUpdateDispatchWitness *);
+/* Plain lifetime fences; callable after the game-thread observer gate drains.
+ * An unobserved projectile terminal retains containment across disconnects. */
+BOOL SudekiMpLanPartyClientCallbacksRetained(void);
 /* Read-only Elco aim sample for the Elco-specific authored pose adapter.
  * This is observer presentation only; clients never receive projectile
  * authority from it. */
 BOOL SudekiMpLanPartyClientRangedAim(void *actor,float direction[3],
     float target[3],BOOL *target_valid,BOOL *firing);
+BOOL SudekiMpLanPartyClientSkillLight(float rgb[3]);
+BOOL SudekiMpLanPartyClientProjectileAim(void *actor,float direction[3],float target[3]);
 /* Drain the last locally applied actor action before releasing a replica-only
  * native lease. It may return a terminal presentation to combat idle only
  * after the exact actor's action selector and completion state are observed. */
 BOOL SudekiMpLanPartyClientActionDrain(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanPartyLease *,void *actor);
-BOOL SudekiMpLanPartyClientRestoreCombatMode(void);
+BOOL SudekiMpLanPartyClientRestoreCombatMode(
+    const SudekiMpControlUpdateDispatchWitness *w);
 
 struct SudekiMpLanArenaActorSnapshot;
 

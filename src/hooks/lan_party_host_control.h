@@ -34,6 +34,13 @@ SudekiMpLanPartyHostControl *SudekiMpLanPartyHostControlCreate(
 BOOL SudekiMpLanPartyHostControlService(SudekiMpLanPartyHostControl *host,
     const SudekiMpControlUpdateDispatchWitness *witness, uint32_t now_ms,
     SudekiMpLanPartyHostControlReport *report);
+/* Runtime entry, once per witnessed native update. Supply that update's
+ * simulation delta (not wall time) for remote Elco's native rapid recharge.
+ * Zero/invalid deltas skip recharge; the ordinary Service wrapper supplies
+ * zero for callers that do not own a native update-data observation. */
+BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *host,
+    const SudekiMpControlUpdateDispatchWitness *witness, uint32_t now_ms,
+    float frame_delta_seconds, SudekiMpLanPartyHostControlReport *report);
 /* Copy the newest host-timestamped input after the game-thread adapter
  * validated its exact actor lease. Used to snapshot aim and by native aim
  * callbacks; a NULL witness is allowed only on the verified game thread and

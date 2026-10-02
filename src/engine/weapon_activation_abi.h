@@ -7,6 +7,18 @@
 /* Native weapon categories each have twelve actor-local slots. */
 enum { SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS = 12u };
 
+/* Exact retail first-person C1: selector 8, fourteen frames at 24 fps.
+ * Presentation additionally verifies the loaded resource before playing it.
+ * Round upward when the host reserves this interval against another shot. */
+enum {
+    SUDEKIMP_RANGED_WEAPON_SWAP_FRAMES = 14u,
+    SUDEKIMP_RANGED_WEAPON_SWAP_RATE = 24u,
+    SUDEKIMP_RANGED_WEAPON_SWAP_MS =
+        (1000u * SUDEKIMP_RANGED_WEAPON_SWAP_FRAMES +
+            SUDEKIMP_RANGED_WEAPON_SWAP_RATE - 1u) /
+        SUDEKIMP_RANGED_WEAPON_SWAP_RATE
+};
+
 typedef enum SudekiMpWeaponActivationStatus {
     SUDEKIMP_WEAPON_ACTIVATION_STARTED = 0,
     SUDEKIMP_WEAPON_ACTIVATION_INVALID_CONTEXT,
@@ -69,6 +81,18 @@ typedef struct SudekiMpElcoWeaponObservation {
 } SudekiMpElcoWeaponObservation;
 /* Game-thread observations; callers retain the session/actor lease. */
 BOOL SudekiMpObserveElcoWeapon(void *character, SudekiMpElcoWeaponObservation *out);
+/* Direction-hook observation of an already admitted native emission, before
+ * charge is spent. Requires the selected record to own the active shot.
+ * This does not authorize starting a shot; keep ElcoWeaponReady for that. */
+BOOL SudekiMpObserveElcoWeaponEmission(void *character,
+    SudekiMpElcoWeaponObservation *out);
+/* Explicit actor type (Elco 0x0e / Ailish 0x01), exact family and native
+ * record ownership. Legacy Elco entry points retain their narrower contract. */
+BOOL SudekiMpObserveRangedWeapon(void *character,uint8_t actor_type,
+    SudekiMpElcoWeaponObservation *out);
+BOOL SudekiMpSetRangedPresentationResources(void *character,uint8_t actor_type,
+    void *local_actor,uint8_t item,uint16_t charge_q8,uint16_t reload_ms,
+    BOOL preserve_reload_edge);
 BOOL SudekiMpElcoWeaponReady(const SudekiMpElcoWeaponObservation *state);
 /* Replica-only resource reconciliation, never called for authoritative actors.
  * Also requires that this actor owns the native local controller. */
@@ -79,6 +103,11 @@ BOOL SudekiMpSetElcoPresentationResources(void *character, uint8_t item,
  * pre-shot seed, used only after the caller proves no native clip is active. */
 BOOL SudekiMpSyncElcoPresentationResources(void *character, uint8_t item,
     uint16_t charge_q8, uint16_t reload_ms);
+/* Replica observer variant. Caller retains both exact actor leases and the
+ * client damage guard. The explicit local actor must own the native
+ * controller; this never changes that controller or either actor identity. */
+BOOL SudekiMpSetObservedElcoPresentationResources(void *character,void *local_actor,
+    uint8_t item,uint16_t charge_q8,uint16_t reload_ms,BOOL preserve_reload_edge);
 float SudekiMpRapidWeaponRechargeAmount(uint16_t rate, uint16_t charge,
     uint8_t flags, float cooldown, float delta);
 uint32_t SudekiMpRapidWeaponCycleMs(unsigned int item_id, float frames,

@@ -688,6 +688,28 @@ int main(int argc,char **argv) {
     registry_tests();
     status_registry_tests();
     shield_registry_tests();
+    {
+        SudekiMpSpiritVisualHostRegistry r={0}; SudekiMpLanArenaSnapshot output;
+        TestContext context={0}; SudekiMpSpiritVisualHostApi api={&context,bind_fake,sample_fake};
+        for(unsigned kind=SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR;
+            kind<=SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP;++kind) {
+            unsigned token=SudekiMpSpiritVisualHostRegistryBeginOwned(&r,44,0,100,
+                kind,SUDEKIMP_LAN_ARENA_TAL_TYPE,(void *)100u,&api);
+            CHECK(token!=0);
+            SudekiMpSpiritVisualHostRegistryComplete(&r,token,TRUE,&api);
+            CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r,44,&output,&api));
+            CHECK(output.spirit_vfx_count==1 && output.spirit_vfx[0].kind==kind);
+            retire_fake(&r,token);
+            CHECK(SudekiMpSpiritVisualHostRegistryCapture(&r,44,&output,&api));
+            CHECK(output.spirit_vfx_count==0);
+            CHECK(SudekiMpSpiritVisualHostRegistryReset(&r,&api));
+            CHECK(!SudekiMpSpiritVisualHostRegistryBeginOwned(&r,44,0,100,
+                kind,SUDEKIMP_LAN_ARENA_BUKI_TYPE,(void *)100u,&api));
+            CHECK(r.unknown && SudekiMpSpiritVisualHostRegistryReset(&r,&api));
+        }
+        CHECK(SudekiMpSpiritVisualKindForResource(0x7eae7163u)==SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR);
+        CHECK(SudekiMpSpiritVisualKindForResource(0x8e21830fu)==SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP);
+    }
     matrix_tests();
     if(argc>1) image_tests(argv[1]);
     if(failures) { fprintf(stderr,"%u failures\n",failures); return 1; }

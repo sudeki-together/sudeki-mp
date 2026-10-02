@@ -137,6 +137,39 @@ static void callback(void *c, void *d,
     }
     if (phase == 0) {
         CHECK(SudekiMpLanPartyControlBeginSession(w));
+        /* Service-only installs return before legacy movement binding. The
+         * noncaster path must bind its native stop helper as well as delta. */
+        CHECK(!SudekiMpLanPartyControlEnableCastInputIsolation(&escaped));
+        CHECK(!SudekiMpControlSeparationForceStopCharacter(actors[0]));
+        {
+            uint8_t saved=image_base[0xc3870u];
+            image_base[0xc3870u]^=1u;
+            CHECK(!SudekiMpLanPartyControlEnableCastInputIsolation(w));
+            image_base[0xc3870u]=saved;
+        }
+        CHECK(SudekiMpLanPartyControlEnableCastInputIsolation(w));
+        *(float *)(movements[0]+0x24u)=1.f;
+        *(float *)(movements[0]+0x28u)=1.f;
+        CHECK(SudekiMpControlSeparationForceStopCharacter(actors[0]));
+        CHECK(*(float *)(movements[0]+0x24u)==0.f &&
+              *(float *)(movements[0]+0x28u)==0.f);
+        CHECK(!SudekiMpLanPartyControlSkillFacing(w,&leases[1],actors[1],0,1));
+        /* Empty network seats are acceptable only with positively observed
+         * default AI. A copied witness, wrong actor or inactive AI is not
+         * equivalent to an unoccupied companion. */
+        for (i=1; i<4; ++i) {
+            CHECK(SudekiMpLanPartyControlHostAiExact(w,i,actors[i]));
+            CHECK(!SudekiMpLanPartyControlHostAiExact(&escaped,i,actors[i]));
+            CHECK(!SudekiMpLanPartyControlHostAiExact(w,i,actors[0]));
+            modes[i][0xb]=0;
+            CHECK(!SudekiMpLanPartyControlHostAiExact(w,i,actors[i]));
+            modes[i][0xb]=1;
+            *(int16_t *)(ai[i]+0x16a)=1;
+            CHECK(!SudekiMpLanPartyControlHostAiExact(w,i,actors[i]));
+            *(int16_t *)(ai[i]+0x16a)=0;
+        }
+        CHECK(!SudekiMpLanPartyControlHostAiExact(w,0,actors[0]));
+        CHECK(!SudekiMpLanPartyControlHostAiExact(w,4,actors[0]));
         CHECK(!SudekiMpLanPartyControlAcquire(w,&leases[1],actors[1],NULL));
         CHECK(!SudekiMpLanPartyControlAcquire(w,&leases[1],actors[2],ready));
         ready_now = FALSE;
@@ -152,8 +185,11 @@ static void callback(void *c, void *d,
         image_base[0xf611c] ^= 1;
         CHECK(acquire_calls[1] == 0);
         /* No P2 prerequisite: independent Tal and Ailish before Elco. */
-        for (i=2; i<4; ++i)
+        for (i=2; i<4; ++i) {
             CHECK(SudekiMpLanPartyControlAcquire(w,&leases[i],actors[i],ready));
+            CHECK(!SudekiMpLanPartyControlHostAiExact(w,i,actors[i]));
+            CHECK(SudekiMpLanPartyControlHostAiExact(w,1,actors[1]));
+        }
         CHECK(SudekiMpLanPartyControlAcquire(w,&leases[1],actors[1],ready));
         for (i=1; i<4; ++i) {
             CHECK(SudekiMpLanPartyControlAcquire(w,&leases[i],actors[i],ready));
@@ -193,6 +229,7 @@ static void callback(void *c, void *d,
     CHECK(!SudekiMpLanPartyControlExact(w,&leases[1],actors[1]));
     CHECK(SudekiMpLanPartyControlQuiesce(w,&leases[1],actors[1]));
     CHECK(SudekiMpLanPartyControlRetains(w,&leases[1],actors[1]));
+    CHECK(!SudekiMpLanPartyControlHostAiExact(w,1,actors[1]));
     CHECK(!move(w,1));
     CHECK(*(float *)(movements[1]+0x24) == 0);
     CHECK(*(float *)(movements[1]+0x28) == 0);
@@ -222,6 +259,7 @@ static void callback(void *c, void *d,
         CHECK(SudekiMpLanPartyControlQuiesce(w,&leases[i],actors[i]));
         CHECK(SudekiMpLanPartyControlRelease(w,&leases[i],actors[i],ready));
         CHECK(*(int16_t *)(ai[i]+0x16a) == 0 && modes[i][0xb] == 1);
+        CHECK(SudekiMpLanPartyControlHostAiExact(w,i,actors[i]));
     }
     CHECK(!SudekiMpLanPartyControlHasLeases());
     /* Positively observed no-op refusal does not invent ownership; retry the
@@ -237,8 +275,13 @@ static void callback(void *c, void *d,
 static void network_pump(void) {
     unsigned int pass,i;
     ++network_now;
-    for (pass=0; pass<3; ++pass)
+    for (pass=0; pass<12; ++pass)
         for (i=0; i<4; ++i) SudekiMpLanPartyPoll(nodes[i],network_now);
+}
+/* HELLO/extension acknowledgements do not prove the client's keepalive
+ * return path. Advance the synthetic clock through its 250ms interval. */
+static void network_join_pump(void) {
+    network_pump(); network_now+=251; network_pump();
 }
 static SudekiMpLanPartyPeerStatus peer(unsigned int node, unsigned int seat) {
     SudekiMpLanPartyPeerStatus p;
@@ -309,7 +352,7 @@ static void network_fixture(void (__attribute__((thiscall)) *update)(void *,void
         config.local_seat=(uint8_t)i;
         nodes[i]=SudekiMpLanPartyCreate(&config); CHECK(nodes[i] != NULL);
     }
-    network_now=GetTickCount(); network_pump();
+    network_now=GetTickCount(); network_join_pump();
     CHECK(SudekiMpLanPartyHostControlCreate(nodes[1],ready) == NULL);
     network_host=SudekiMpLanPartyHostControlCreate(nodes[0],ready);
     CHECK(network_host != NULL);
@@ -400,7 +443,7 @@ static void network_fixture(void (__attribute__((thiscall)) *update)(void *,void
     moves=init_calls[1];
     SudekiMpLanPartyDestroy(nodes[1],FALSE); config.local_seat=1;
     nodes[1]=SudekiMpLanPartyCreate(&config); CHECK(nodes[1] != NULL);
-    network_pump(); update(controller,NULL); network_pump();
+    network_join_pump(); update(controller,NULL); network_pump();
     CHECK(peer(0,1).phase == SUDEKIMP_LAN_PARTY_ACTIVE);
     CHECK(peer(0,1).lease.generation > previous.generation);
     CHECK(peer(0,1).lease.token != previous.token);
@@ -444,7 +487,7 @@ static void client_fixture(void (__attribute__((thiscall)) *update)(void *,void 
         *(void **)(group+0x90+(++order)*0xc)=actors[i];
     *(void **)(controller+0x248)=actors[local];
     memcpy(before,acquire_calls,sizeof(before));
-    network_now=GetTickCount(); network_pump();
+    network_now=GetTickCount(); network_join_pump();
     /* Native local controller is never overridden. The other three are
      * presentation leases, even Buki (network host, locally a replica). */
     for(unsigned i=0;i<8;++i) update(controller,NULL);
@@ -541,7 +584,8 @@ static void ranged_action_fixture(void) {
     CHECK(SudekiMpLanPartyRangedActionObserve(
         SUDEKIMP_LAN_ARENA_AILISH_TYPE,ailish,192u,&action));
     CHECK(action==SUDEKIMP_LAN_ARENA_ACTION_NONE);
-    CHECK(SudekiMpLanPartyRangedActionObserve(
+    /* Straight aim selector54 is not a supported firing channel. */
+    CHECK(!SudekiMpLanPartyRangedActionObserve(
         SUDEKIMP_LAN_ARENA_ELCO_TYPE,elco+1,1u,&action));
     CHECK(action==SUDEKIMP_LAN_ARENA_ACTION_NONE);
     CHECK(!SudekiMpLanPartyRangedActionObserve(
@@ -583,10 +627,16 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     uint8_t original[16];
     void *saved_group = *(void **)(base+0x408d94);
     void *saved_controller = *(void **)(base+0x408da4);
+    uint32_t saved_input_enable_operand;
     void (__attribute__((thiscall)) *update)(void *,void *);
     int32_t displacement;
     static char observer_owner;
     image_base = base; errors = phase = 0; ready_now = TRUE;
+    /* The mapped fixture relocates exercised operands explicitly. Retail's
+     * loader relocates this absolute group load before cast binding. */
+    memcpy(&saved_input_enable_operand,base+0x27121u,4);
+    CHECK(base[0x27120u]==0xa1u && saved_input_enable_operand==0x00808d94u);
+    *(void **)(base+0x27121u)=base+0x408d94u;
     ranged_action_fixture();
     memset(actors,0,sizeof(actors)); memset(ai,0,sizeof(ai));
     memset(modes,0,sizeof(modes)); memset(group,0,sizeof(group));
@@ -598,7 +648,7 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     for (i=0; i<4; ++i) {
         leases[i].seat=(uint8_t)i; leases[i].token=1234u+i; leases[i].generation=1;
         *(void **)(actors[i]+0x94)=ai[i]; *(void **)(ai[i]+0x10)=actors[i];
-        *(void **)ai[i]=base+0x2d48d4;
+        *(void **)ai[i]=base+0x2d4924; /* CCharacterEvent, also owns AI state. */
         *(void **)(ai[i]+0x3c)=modes[i]; modes[i][0xb]=1;
         *(void **)(actors[i]+0x80)=movements[i];
         *(void **)movements[i]=base+0x2c8644;
@@ -656,6 +706,7 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     CHECK(SudekiMpUninstallControlSeparation());
     memcpy(base+0x27cf0,original,sizeof(original));
     *(void **)(base+0x408d94)=saved_group; *(void **)(base+0x408da4)=saved_controller;
+    memcpy(base+0x27121u,&saved_input_enable_operand,4);
     SudekiMpLanPartyControlTestCalls(NULL,NULL,NULL,NULL);
     SudekiMpLanPartyControlTestRosterCalls(NULL,NULL,NULL);
     SudekiMpLanPartyControlTestCombat(NULL);

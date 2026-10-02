@@ -32,6 +32,8 @@ BOOL SudekiMpLanPartyMotionCapture(uint8_t type,const int selectors[4],
 /* Closed basic-combat selector namespace carried by the existing LA42
  * locomotion record. It reuses verified actor-local selector identities; it
  * does not grant input, combo, weapon, or damage authority. */
+BOOL SudekiMpLanPartyTalActionToPresentation(uint8_t variant,int *selector,int *state);
+BOOL SudekiMpLanPartyTalActionObserve(int selector,uint8_t state,uint8_t *variant);
 int SudekiMpLanPartyCombatMotionSelector(uint8_t type,unsigned clip);
 BOOL SudekiMpLanPartyCombatMotionValid(uint8_t type,
     const SudekiMpLanArenaLocomotion *motion);
@@ -39,6 +41,13 @@ BOOL SudekiMpLanPartyCombatMotionCapture(uint8_t type,const int selectors[4],
     const uint8_t states[4],const float rates[4],const float times[4],
     const float blends[3],const SudekiMpLanArenaLocomotion *previous,
     SudekiMpLanArenaLocomotion *out);
+/* SMP4 v4 closed world-fire identities, shared by capture, playback and
+ * native drain. Elco has three authored gun cycles; Ailish retains her
+ * established world fire. Unknown selectors/items never become idle. */
+int SudekiMpLanPartyRangedClipSelector(uint8_t type,unsigned clip);
+int SudekiMpLanPartyRangedClip(uint8_t type,int selector);
+unsigned SudekiMpLanPartyWeaponClip(uint8_t actor_type,unsigned item);
+unsigned SudekiMpLanPartyElcoWeaponClip(unsigned item);
 /* Convert a verified fifth-channel Elco/Ailish firing observation into the
  * bounded ranged action event. Unknown families fail; native selectors never
  * come from client input. */

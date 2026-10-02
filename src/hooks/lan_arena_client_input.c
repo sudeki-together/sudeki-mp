@@ -1,8 +1,10 @@
 #include "hooks/lan_arena_client_input.h"
+#include "hooks/lan_party_cast.h"
 #include "hooks/lan_arena_ranged_aim.h"
 
 #include "cleanroom/engine.h"
 #include "engine/log.h"
+#include "engine/arbiter_combat_input.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
 #include "hooks/call_hook.h"
@@ -18,6 +20,14 @@
 #include <string.h>
 
 static SudekiMpLanPartySession *party_input_session;
+static BOOL (*party_console_input_gate)(void);
+void SudekiMpLanPartyClientInputSetConsoleGate(BOOL (*gate)(void)) {
+    if(party_input_session) party_console_input_gate=gate;
+}
+static BOOL party_console_captures_input(void) {
+    return party_input_session && party_console_input_gate && party_console_input_gate();
+}
+static SudekiMpLanPartyLease party_input_lease;
 static uint8_t seat_client_type(void) {
     uint8_t host_type = 0u, client_type = 0u;
     if (party_input_session)
@@ -78,6 +88,8 @@ enum {
     RVA_CAMERA_INPUT_EVENT = 0x000e85f0u,
     RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT = 0x002cce5cu,
     RVA_ARBITER_MOVEMENT = 0x000dae80u,
+    RVA_ARBITER_DODGE = 0x000dae00u,
+    RVA_PLAYER_DODGE_CALL = 0x00028de8u,
     RVA_PLAYER_MOVE_CALL_ALTERNATE = 0x00028e3fu,
     RVA_PLAYER_MOVE_CALL_NORMAL = 0x00028e5eu,
     RVA_CONTROLLER_COMBAT = 0x000286c0u,
@@ -153,6 +165,8 @@ static const uint8_t expected_camera_input_event_entry[] = {
 static SudekiMpRelativeCallHook alternate_movement_hook;
 static SudekiMpRelativeCallHook normal_movement_hook;
 static SudekiMpInlineHook controller_combat_hook;
+static SudekiMpRelativeCallHook dodge_input_hook;
+static void *original_arbiter_dodge;
 static SudekiMpRelativeCallHook secondary_ranged_fire_hook;
 static SudekiMpRelativeCallHook arbiter_ranged_fire_hook;
 static void *original_secondary_ranged_fire __attribute__((used));
@@ -307,11 +321,21 @@ static BOOL __attribute__((used, noinline)) suppress_secondary_ranged_fire(
 ) {
     uint8_t *actor;
     BOOL owner_exact;
-    if (!authenticated_client() || seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE)
+    if (!authenticated_client() ||
+        (!party_input_session && seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE))
         return FALSE;
-    actor = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
+    /* This hook can only DECLINE a FireStart already requested by Sudeki.
+     * In SMP4 inspect that call's existing back-pointer, without selecting a
+     * different actor or changing the local controller/seat. SMP4 contains both
+     * exact ranged actors; legacy two-seat admission stays Elco-only. */
+    actor = party_input_session ?
+        (readable_memory(combat,0x14u)?*(uint8_t **)(combat+0x10u):NULL) :
+        SudekiMpCleanroomEngineActorEntity(seat_client_actor());
     owner_exact = client_game_base != NULL && readable_memory(actor, 0xc0u) &&
-        *(void **)actor == client_game_base + 0x002d66fcu &&
+        (*(void **)actor == client_game_base + 0x002d66fcu ||
+         (party_input_session &&
+          actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) &&
+          *(void **)actor == client_game_base + 0x002d555cu)) &&
         *(void **)(actor + 0xbcu) == combat &&
         readable_memory(combat, 0xe4u) &&
         *(void **)combat == client_game_base + 0x002d4c8cu &&
@@ -344,7 +368,7 @@ static BOOL queue_client_skill_slot(
     SudekiMpSkillQuickSkillRow row;
     void *ailish = SudekiMpCleanroomEngineActorEntity(
         seat_client_actor());
-    if (!authenticated_client() || character == NULL || character != ailish ||
+    if (party_console_captures_input() || !authenticated_client() || character == NULL || character != ailish ||
         slot < 0 || slot >= 6 || skill_pending || pending_kit_action != 0u ||
         !SudekiMpDescribeCharacterSkillSlot(character, slot, &row)) {
         SetLastError(skill_pending ? ERROR_BUSY : ERROR_INVALID_DATA);
@@ -418,7 +442,8 @@ route_client_quick_menu_skill_validate(void *skill, int slot) {
      * than interpreting a peer's cast as this player's native cooldown.
      * Use still only queues an authenticated request; host owns execution. */
     int result = original_skill_validate == NULL ? 5 :
-        (SudekiMpLanArenaOrdinarySkillOverlapOwned() ?
+        ((SudekiMpLanArenaOrdinarySkillOverlapOwned() ||
+          (party_input_session && SudekiMpLanPartyCastReady())) ?
             SudekiMpInvokeSkillValidate(skill, slot, original_skill_validate) :
             original_skill_validate(skill, slot));
     owner = readable_memory(skill, 0x14u) ?
@@ -487,6 +512,7 @@ static uint8_t SUDEKIMP_THISCALL route_client_quick_menu_input(
     unsigned int command,
     unsigned int value
 ) {
+    if(party_console_captures_input()) return 0u;
     BOOL action_event = event_kind == QUICK_MENU_INPUT_EVENT_DOWN ||
         event_kind == QUICK_MENU_INPUT_EVENT_UP ||
         event_kind == QUICK_MENU_INPUT_EVENT_POINTER;
@@ -553,16 +579,24 @@ static uint8_t SUDEKIMP_THISCALL route_client_quick_menu_input(
             quick_menu, event_kind, command, value);
 }
 
+static BOOL client_scripted_camera_blocks_input(void) {
+    return SudekiMpLanArenaClientReplicaLocalSkillCameraActive() &&
+        !(party_input_session && SudekiMpLanPartyCastLocalTargeting());
+}
+
 static void SUDEKIMP_THISCALL route_client_camera_input_event(
     void *camera,
     const void *event_pointer
 ) {
     const LanArenaNativeCameraInputEvent *event =
         (const LanArenaNativeCameraInputEvent *)event_pointer;
+    if(party_console_captures_input()) {
+        pending_character_camera_event_valid=FALSE; return;
+    }
     DWORD now = GetTickCount();
     if (!SudekiMpLanArenaClientCameraInputAllowed(
             authenticated_client(),
-            SudekiMpLanArenaClientReplicaLocalSkillCameraActive())) {
+            client_scripted_camera_blocks_input())) {
         pending_character_camera_event_valid = FALSE;
         if (client_skill_camera_input_trace_state != 1) {
             client_skill_camera_input_trace_state = 1;
@@ -620,10 +654,16 @@ static void SUDEKIMP_THISCALL route_client_character_input(
         controller = *(uint8_t **)(
             client_game_base + RVA_CHARACTER_CONTROLLER_GLOBAL);
     }
+    /* Preserve release events so previously held controls can retire. New
+     * input belongs to the local console until its closing key is released. */
+    if(listener==controller && party_console_captures_input() &&
+        readable_memory(event,sizeof(*event)) && event->magnitude!=0.0f) {
+        pending_character_camera_event_valid=FALSE; return;
+    }
     if (listener == controller &&
         !SudekiMpLanArenaClientCameraInputAllowed(
             authenticated_client(),
-            SudekiMpLanArenaClientReplicaLocalSkillCameraActive()) &&
+            client_scripted_camera_blocks_input()) &&
         readable_memory(event, sizeof(*event)) &&
         event->action >= CAMERA_INPUT_ACTION_FIRST &&
         event->action <= CAMERA_INPUT_ACTION_LAST) {
@@ -695,7 +735,7 @@ static void service_pending_character_camera_input(void) {
     DWORD now;
     LanArenaNativeCameraInputEvent event;
     if (!pending_character_camera_event_valid) return;
-    if (SudekiMpLanArenaClientReplicaLocalSkillCameraActive()) {
+    if (client_scripted_camera_blocks_input()) {
         pending_character_camera_event_valid = FALSE;
         return;
     }
@@ -903,7 +943,8 @@ static BOOL client_quick_menu_visible(void) {
 }
 
 static BOOL client_local_modal_active(void) {
-    return SudekiMpLanArenaPausePanelActive() || client_quick_menu_visible();
+    return party_console_captures_input() ||
+        SudekiMpLanArenaPausePanelActive() || client_quick_menu_visible();
 }
 
 BOOL SudekiMpLanArenaClientMovementWorldDirection(
@@ -954,6 +995,16 @@ static void refresh_client_camera_aim(void) {
     last_aim_x = 0;
     last_aim_y = 0;
     last_aim_z = 0;
+    if(party_input_session && SudekiMpLanPartyCastLocalTargeting()) {
+        float facing[2];
+        /* A scripted camera may orbit around the caster. The native chosen
+         * facing, not that orbit's forward vector, aims the host's skill. */
+        if(SudekiMpCleanroomEngineActorFacing(seat_client_actor(),facing)) {
+            last_aim_x=normalized_axis(facing[0]);
+            last_aim_z=normalized_axis(facing[1]);
+        }
+        return;
+    }
     stage = 0;
     if (client_game_base == NULL || !readable_memory(
             client_game_base + RVA_GAME_CAMERA_MODE_GLOBAL,
@@ -1012,6 +1063,31 @@ static BOOL send_client_input(
     SudekiMpLanArenaInput input;
     SudekiMpLanPartyCombatInputExtension combat;
     BOOL sent;
+    if(party_input_session) {
+        SudekiMpLanPartyPeerStatus p;
+        unsigned seat=SudekiMpLanPartyLocalSeat(party_input_session);
+        BOOL active=SudekiMpLanPartyPeerStatusGet(party_input_session,seat,&p) &&
+            p.phase==SUDEKIMP_LAN_PARTY_ACTIVE;
+        if(!active || p.lease.token!=party_input_lease.token ||
+            p.lease.generation!=party_input_lease.generation) {
+            /* Containment remains installed while disconnected, but queued
+             * menu/attack edges must never migrate to a fresh generation. */
+            pending_strong_pressed=pending_sweep_pressed=FALSE;
+            skill_pending=FALSE; pending_skill_slot=0;
+            pending_kit_action=pending_kit_slot=0;
+            weapon_cycle_actor=NULL;
+            last_transmitted_block_held=FALSE;
+            last_input_send_at=0;
+            if(active) party_input_lease=p.lease;
+            else ZeroMemory(&party_input_lease,sizeof(party_input_lease));
+            return FALSE;
+        }
+    }
+    if(party_console_captures_input()) {
+        direction_x=direction_z=0; weak_pressed=weak_held=FALSE;
+        pending_strong_pressed=pending_sweep_pressed=native_block_held=FALSE;
+        skill_pending=FALSE; pending_skill_slot=pending_kit_action=pending_kit_slot=0;
+    }
     refresh_client_camera_aim();
     ZeroMemory(&input, sizeof(input));
     input.sequence = 0u;
@@ -1055,6 +1131,20 @@ static BOOL send_client_input(
     combat.strong_pressed=pending_strong_pressed ? 1u : 0u;
     combat.sweep_pressed=pending_sweep_pressed ? 1u : 0u;
     combat.block_held=native_block_held ? 1u : 0u;
+    if(party_input_session && input.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE) {
+        BOOL enabled=FALSE;
+        if(SudekiMpCleanroomEngineCombatMode(&enabled) && !enabled) {
+            /* Retail action/jetpack is controller+A4 (combat block), as used
+             * by RVA28b00/286c0 -> DB0E0 -> DB450. Keep its window-owned held
+             * state distinct from attack and authority/resource claims. */
+            combat.flight_held=combat.block_held;
+            combat.block_held=0;
+            if(combat.flight_held) {
+                combat.strong_pressed=combat.sweep_pressed=0;
+                input.weak_attack_pressed=input.weak_attack_held=0;
+            }
+        }
+    }
     if(input.skill_pressed || input.kit_action) ZeroMemory(&combat,sizeof(combat));
     if(combat.block_held &&
         (combat.strong_pressed || combat.sweep_pressed ||
@@ -1070,7 +1160,7 @@ static BOOL send_client_input(
     if(party_input_session && SudekiMpLanPartyExtensionReady(party_input_session)) {
         if(combat.strong_pressed) pending_strong_pressed=FALSE;
         if(combat.sweep_pressed) pending_sweep_pressed=FALSE;
-        last_transmitted_block_held=combat.block_held!=0u;
+        last_transmitted_block_held=(combat.block_held || combat.flight_held);
     }
     skill_pending = FALSE;
     pending_skill_slot = 0u;
@@ -1128,6 +1218,14 @@ static void __stdcall capture_client_movement(
         SudekiMpLanArenaClientReplicaLocalSkillCameraActive()) {
         now = GetTickCount();
         invalidate_native_movement_sample();
+        /* Retail's targeting movement call also supplies the chosen turn.
+         * Preserve its actor-local arbiter validation with zero translation;
+         * the host still owns movement, skill release and damage. */
+        if(!client_local_modal_active() && party_input_session &&
+            SudekiMpLanPartyCastTargeting(character) &&
+            isfinite(direction[0]) && isfinite(direction[1]) && isfinite(direction[2]) &&
+            isfinite(turn_rate) && turn_rate>=0.f && turn_rate<=1.f)
+            original_arbiter_movement(arbiter,direction,0.f,turn_rate,movement_mode);
         if (last_transmitted_direction_x != 0 ||
             last_transmitted_direction_z != 0 || last_input_send_at == 0u) {
             (void)send_client_input_at(0, 0, FALSE, FALSE, now);
@@ -1223,6 +1321,17 @@ void SudekiMpLanArenaClientInputService(void) {
         }
         return;
     }
+    if(party_console_captures_input()) {
+        pending_character_camera_event_valid=FALSE;
+        invalidate_native_movement_sample();
+        weak_was_down=native_weak_held=native_block_held=FALSE;
+        pending_strong_pressed=pending_sweep_pressed=skill_pending=FALSE;
+        pending_skill_slot=pending_kit_action=pending_kit_slot=0;
+        operator_weak_attack_until_ms=0; weapon_cycle_actor=NULL;
+        if(!last_input_send_at || GetTickCount()-last_input_send_at>=CLIENT_INPUT_SEND_INTERVAL_MS)
+            (void)send_client_input_at(0,0,FALSE,FALSE,GetTickCount());
+        return;
+    }
     {
         unsigned int skill_index;
         for (skill_index = 0u; skill_index < 6u; ++skill_index) {
@@ -1259,6 +1368,9 @@ void SudekiMpLanArenaClientInputService(void) {
             last_transmitted_direction_z != 0 ||
             last_transmitted_weak_held || skill_pending || pending_kit_action != 0u ||
             last_transmitted_block_held ||
+            (!client_local_modal_active() && party_input_session &&
+             SudekiMpLanPartyCastLocalTargeting() &&
+             (DWORD)(now-last_input_send_at)>=CLIENT_INPUT_SEND_INTERVAL_MS) ||
             last_input_send_at == 0u) {
             (void)send_client_input_at(0, 0, FALSE, FALSE, now);
         }
@@ -1449,6 +1561,35 @@ static void queue_client_weapon_cycle(void *ailish, int next, int previous) {
     SudekiMpLogFormat("lan_arena_client_input event=weapon_cycle slot=%u source=native_wheel policy=host_equipment_request\r\n", selected);
 }
 
+/* The retail block branch skips both locomotion callsites. Capture its
+ * already camera-transformed vector here, before it can start a local dodge.
+ * The host consumes this fresh vector with the existing held-block input. */
+static unsigned char __attribute__((cdecl,used,noinline))
+capture_client_dodge(void *arbiter,const float *direction) {
+    void *actor=SudekiMpCleanroomEngineActorEntity(seat_client_actor());
+    if(!party_input_session || !authenticated_client() ||
+        !actor || !readable_memory(arbiter,0x14u) ||
+        *(void **)((uint8_t *)arbiter+0x10u)!=actor)
+        return SudekiMpSubmitArbiterDodgeInput(original_arbiter_dodge,arbiter,direction);
+    if(seat_client_type()!=SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+        !readable_memory(direction,3u*sizeof(float)) ||
+        !isfinite(direction[0]) || !isfinite(direction[1]) ||
+        !isfinite(direction[2]) || fabsf(direction[1])>0.001f)
+        return 0;
+    /* The movement adapter checks the same authenticated local owner, modal
+     * state and skill camera. No local native arbiter entry is made. */
+    capture_client_movement(arbiter,direction,1.0f,1.0f,0u);
+    return 0;
+}
+static void __attribute__((naked,noinline)) client_dodge_bridge(void) {
+    __asm__ volatile(
+        "pushl 4(%esp)\n\t"
+        "pushl %eax\n\t"
+        "call _capture_client_dodge\n\t"
+        "addl $8,%esp\n\t"
+        "ret $4\n\t");
+}
+
 static void __stdcall capture_client_combat(void *controller) {
     uint8_t *state = (uint8_t *)controller;
     void *ailish = SudekiMpCleanroomEngineActorEntity(seat_client_actor());
@@ -1467,6 +1608,10 @@ static void __stdcall capture_client_combat(void *controller) {
     native_block_state = *(int *)(state + CONTROLLER_BLOCK_OFFSET);
     native_next_state = *(int *)(state + CONTROLLER_WEAPON_NEXT_OFFSET);
     native_previous_state = *(int *)(state + CONTROLLER_WEAPON_PREVIOUS_OFFSET);
+    if(party_console_captures_input()) {
+        native_weak_state=native_strong_state=native_sweep_state=native_block_state=0;
+        native_next_state=native_previous_state=0;
+    }
     queue_client_weapon_cycle(ailish, native_next_state, native_previous_state);
     native_weak_held =
         SudekiMpLanArenaClientNativeWeakHeld(native_weak_state);
@@ -1523,6 +1668,7 @@ BOOL SudekiMpInstallLanPartyClientInput(HMODULE game_module,
         original_quick_menu_input || original_camera_input_event ||
         original_character_input_handler) return FALSE;
     party_input_session=session;
+    ZeroMemory(&party_input_lease,sizeof(party_input_lease));
     if (SudekiMpInstallLanArenaClientInput(game_module)) return TRUE;
     /* The common installer rolls back transactionally. On failed rollback,
      * retain the endpoint as long as any reader can still reach it. */
@@ -1602,6 +1748,17 @@ BOOL SudekiMpInstallLanArenaClientInput(HMODULE game_module) {
      * have a valid native continuation. */
     original_controller_combat =
         (ControllerCombatFunction)controller_combat_hook.trampoline;
+    /* SMP4 owns only this additional native callsite. The two-seat path
+     * keeps its existing control and replay contract. */
+    if (party_input_session &&
+        (!SudekiMpArbiterDodgeImageMatches(game_module) ||
+         !(original_arbiter_dodge=base+RVA_ARBITER_DODGE) ||
+         !SudekiMpInstallRelativeCallHook(&dodge_input_hook,
+             base+RVA_PLAYER_DODGE_CALL,original_arbiter_dodge,client_dodge_bridge))) {
+        DWORD error=GetLastError();
+        if(!SudekiMpUninstallLanArenaClientInput()) return FALSE;
+        SetLastError(error ? error:ERROR_INVALID_DATA); return FALSE;
+    }
     if (!SudekiMpInstallRelativeCallHook(&secondary_ranged_fire_hook,
             base + RVA_SECONDARY_RANGED_FIRE_CALL,
             original_secondary_ranged_fire, secondary_ranged_fire_bridge) ||
@@ -1762,6 +1919,7 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
         &arbiter_ranged_fire_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
         &secondary_ranged_fire_hook));
+    RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(&dodge_input_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreInlineHook(&controller_combat_hook));
     RECORD_RESTORE_RESULT(SudekiMpRestoreRelativeCallHook(
         &normal_movement_hook));
@@ -1776,6 +1934,8 @@ BOOL SudekiMpUninstallLanArenaClientInput(void) {
         SetLastError(restore_error);
         return FALSE;
     }
+    party_console_input_gate=NULL;
+    original_arbiter_dodge = NULL;
     original_controller_combat = NULL;
     original_secondary_ranged_fire = NULL;
     original_arbiter_movement = NULL;

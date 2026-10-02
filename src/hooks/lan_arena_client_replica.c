@@ -1,4 +1,5 @@
 #include "hooks/lan_arena_client_replica.h"
+#include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_hit_feedback.h"
 
 #include "cleanroom/engine.h"
@@ -21,6 +22,9 @@
 #include "network/lan_arena_tal_combo_graph.h"
 #include "network/lan_party_motion.h"
 #include "hooks/lan_party_snapshot.h"
+#include "hooks/lan_party_cast.h"
+#include "hooks/lan_party_combo_hud.h"
+#include "hooks/lan_party_dummy_overlay.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -579,17 +583,51 @@ static LanArenaPresentationLease party_presentation_leases[4];
 static SudekiMpLanPartySession *party_replica_session;
 static SudekiMpLanPartyLease party_presentation_generation;
 static SudekiMpLanPartyFrame party_present_frame;
+static SudekiMpLanPartyFrame party_confirmed_frame;
 static SudekiMpLanPartyLease party_present_lease;
 static DWORD party_present_at;
 static BOOL party_present_valid;
 static BOOL party_combat_mode_lease_valid,party_combat_mode_original;
+static uint32_t party_mode_notice_traced;
 static uint64_t party_combat_mode_token;
 static uint32_t party_combat_mode_generation;
+static unsigned party_combat_mode_seat;
+static BOOL party_transition_pending,party_transition_target,party_transition_refreshed;
+static DWORD party_transition_started,party_transition_trace;
+static SudekiMpLanPartyRosterObservation party_transition_roster;
 static PartyAilishFirstPersonLease party_ailish_first_person_lease;
+/* Cosmetic Elco C1 only; native shot/reload ownership is retained separately. */
+static struct {
+    SudekiMpLanPartyLease owner;
+    uint8_t *character, *component, *wrapper;
+    void *renderer;
+    uint8_t slot, from_slot;
+    BOOL valid, active, handed_off;
+} party_elco_swap;
+static SudekiMpLanPartyRangedPresentation party_ranged_presented[2];
+static struct {
+    void *character, *renderer;
+    SudekiMpLanArenaActorSnapshot pose;
+    BOOL valid;
+} party_skill_body[4];
 static BOOL party_retire_ailish_first_person(
     const SudekiMpControlUpdateDispatchWitness *w);
 static LanArenaFirstPersonLease ailish_first_person_lease;
 static LanArenaNativeRangedLease ailish_native_ranged_lease;
+typedef struct PartyNativeWeapon {
+    LanArenaNativeRangedLease native;
+    SudekiMpLanPartyLease owner;
+    uint16_t cursor;
+    DWORD thread;
+    BOOL initialized;
+    float direction[3],target[3];
+} PartyNativeWeapon;
+static PartyNativeWeapon party_ranged_weapon[2];
+/* Plain cross-thread teardown fences. A finished gun animation does not
+ * prove that its emitted native projectile has finished. */
+static volatile LONG party_ranged_native_pending[2],party_projectile_terminal_unknown;
+static BOOL party_drain_ranged_weapon(unsigned index);
+static BOOL party_drain_ranged_weapons(void);
 static void *elco_weapon_cursor_owner;
 static uint64_t elco_weapon_cursor_session;
 static uint16_t elco_weapon_cursor;
@@ -2258,6 +2296,7 @@ static int client_skill_replay_caster_index(void) {
 }
 
 BOOL SudekiMpLanArenaClientReplicaLocalSkillCameraActive(void) {
+    if(party_replica_session) return SudekiMpLanPartyCastLocalCameraActive();
     return (SudekiMpLanArenaClientPrivateCastCamerasOwned() ?
         (native_skill_leases[1].native_started ||
          (InterlockedCompareExchange(&client_skill_activation_depth,0,0)>0 &&
@@ -2308,11 +2347,13 @@ static BOOL client_native_transaction_retained(void) {
         native_skill_leases[0].native_started ||
         native_skill_leases[1].native_started ||
         tal_native_presentation_lease.active ||
-        ailish_native_ranged_lease.active ||
+        ailish_native_ranged_lease.active || party_ranged_weapon[0].native.active ||
+        party_ranged_weapon[1].native.active ||
         SudekiMpCleanroomEngineRangedCombatPrimePending();
 }
 
 static BOOL client_realtime_containment_active(void) {
+    if(party_replica_session) return TRUE;
     return SudekiMpLanArenaClientSkillRealtimeContainmentRequired(
         client_session_authenticated(),
         InterlockedCompareExchange(
@@ -2327,7 +2368,8 @@ static BOOL __attribute__((thiscall)) preserve_client_skill_camera(
 ) {
     CameraManagerSetRenderCameraFunction original =
         (CameraManagerSetRenderCameraFunction)client_skill_camera_hook.trampoline;
-    int routed=SudekiMpLanArenaRouteCastCamera(manager,name);
+    int routed=party_replica_session ? SudekiMpLanPartyCastRouteCamera(manager,name):
+        SudekiMpLanArenaRouteCastCamera(manager,name);
     if(routed==1) return TRUE;
     if(routed<0) return FALSE;
     if(routed==2) return original(manager,name);
@@ -2369,6 +2411,13 @@ static void __attribute__((thiscall)) preserve_client_skill_realtime(
     BOOL success = TRUE;
     int trace_state;
 
+    /* SMP4 installs a lifetime policy before this adapter. It also covers
+     * direct menu writes and variable/normal/master speed requests. Keep one
+     * owner for the alternate constant; the two-seat policy below is intact. */
+    if(party_replica_session) {
+        original(game_speed,requested_mode);
+        return;
+    }
     if (active) {
         success = set_client_skill_realtime_scale(TRUE);
         trace_state = success ? 1 : 0;
@@ -4007,7 +4056,8 @@ BOOL SudekiMpLanArenaClientWeaponSwapComplete(float native_time) {
     /* The supported renderer clamps a 14-frame one-shot to 13.9999f.
      * A sub-frame tolerance admits that terminal without waiting forever
      * for the unreachable exact resource length. */
-    return isfinite(native_time) && native_time >= 14.0f - 0.001f;
+    return isfinite(native_time) &&
+        native_time >= SUDEKIMP_RANGED_WEAPON_SWAP_FRAMES - 0.001f;
 }
 
 static BOOL ailish_swap_resource_matches(void *renderer) {
@@ -4023,7 +4073,7 @@ static BOOL ailish_swap_resource_matches(void *renderer) {
     if (!readable_memory(entries, 9u * 28u)) return FALSE;
     resource = *(uint8_t **)(entries + 8u * 28u);
     return readable_memory(resource, 8u) &&
-        *(float *)(resource + 4u) == 14.0f;
+        *(float *)(resource + 4u) == SUDEKIMP_RANGED_WEAPON_SWAP_FRAMES;
 }
 
 BOOL SudekiMpLanArenaClientNativeRangedIdle(
@@ -4093,6 +4143,18 @@ static void *elco_native_weapon_start_scope;
 static DWORD elco_native_weapon_start_thread;
 
 BOOL SudekiMpLanArenaClientReplicaWeaponStartAuthorized(void *actor) {
+    if(party_replica_session) {
+        for(unsigned i=0;i<2u;++i) {
+            const PartyNativeWeapon *weapon=&party_ranged_weapon[i];
+            const LanArenaNativeRangedLease *n=&weapon->native;
+            if(actor && actor==elco_native_weapon_start_scope &&
+                GetCurrentThreadId()==elco_native_weapon_start_thread &&
+                GetCurrentThreadId()==weapon->thread && n->active && n->weapon_shot &&
+                !n->weapon_fired && n->character==actor && client_apply_damage_hook.installed &&
+                SudekiMpLanPartyLeaseActive(party_replica_session,&weapon->owner)) return TRUE;
+        }
+        return FALSE;
+    }
     const LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
     return actor && actor == elco_native_weapon_start_scope &&
         GetCurrentThreadId() == elco_native_weapon_start_thread &&
@@ -4103,6 +4165,24 @@ BOOL SudekiMpLanArenaClientReplicaWeaponStartAuthorized(void *actor) {
 void SudekiMpLanArenaClientReplicaNativeWeaponFired(void *actor) {
     LanArenaNativeRangedLease *lease = &ailish_native_ranged_lease;
     SudekiMpElcoWeaponObservation observed;
+    if(party_replica_session) {
+        for(unsigned i=0;i<2u;++i) {
+            PartyNativeWeapon *weapon=&party_ranged_weapon[i];
+            lease=&weapon->native;
+            unsigned seat=i==0u?1u:3u;
+            if(client_apply_damage_hook.installed && lease->active && lease->weapon_shot &&
+                !lease->weapon_fired && actor==lease->character &&
+                GetCurrentThreadId()==weapon->thread &&
+                SudekiMpObserveRangedWeapon(actor,SudekiMpLanPartyActorType(seat),&observed) &&
+                observed.item==lease->weapon_item) {
+                InterlockedExchange(&party_projectile_terminal_unknown,1);
+                lease->weapon_fired=TRUE;
+                SudekiMpLogFormat("lan_party event=ranged_replica_emission actor_seat=%u seat=%u sequence=%u item=%u tick=%lu\r\n",
+                    seat,weapon->owner.seat,lease->sequence,observed.item,(unsigned long)GetTickCount());
+            }
+        }
+        return;
+    }
     if (seat_client_type() != SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
         actor != SudekiMpCleanroomEngineActorEntity(seat_client_actor()) ||
         !client_apply_damage_hook.installed ||
@@ -6958,8 +7038,17 @@ BOOL SudekiMpInitializeLanPartyClientReplica(HMODULE game_module,
     memset(&party_presentation_generation,0,sizeof(party_presentation_generation));
     ZeroMemory(&party_ailish_first_person_lease,
         sizeof(party_ailish_first_person_lease));
+    ZeroMemory(&party_elco_swap,sizeof(party_elco_swap));
+    ZeroMemory(party_skill_body,sizeof(party_skill_body));
+    ZeroMemory(party_ranged_presented,sizeof(party_ranged_presented));
+    ZeroMemory(party_ranged_weapon,sizeof(party_ranged_weapon));
     party_combat_mode_lease_valid=FALSE; party_combat_mode_token=0;
-    party_combat_mode_generation=0;
+    party_combat_mode_generation=0; party_combat_mode_seat=0;
+    party_mode_notice_traced=0;
+    party_transition_pending=FALSE; party_transition_target=FALSE;
+    party_transition_refreshed=FALSE;
+    party_transition_started=0; party_transition_trace=0;
+    ZeroMemory(&party_transition_roster,sizeof(party_transition_roster));
     if(SudekiMpInitializeLanArenaClientReplica(game_module)) return TRUE;
     if(!client_apply_damage_hook.installed && !client_skill_camera_hook.installed &&
         !client_skill_speed_hook.installed) party_replica_session=NULL;
@@ -7032,9 +7121,10 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
         memcmp(base + RVA_GAME_SPEED_SET_MODE,
             expected_game_speed_set_mode_entry,
             sizeof(expected_game_speed_set_mode_entry)) != 0 ||
+        (party_replica_session ? !SudekiMpLanPartyCastRealtimeExact(game_module) :
         memcmp(base + RVA_FIXED_ALTERNATE_SPEED,
             expected_fixed_alternate_speed,
-            sizeof(expected_fixed_alternate_speed)) != 0 ||
+            sizeof(expected_fixed_alternate_speed)) != 0) ||
         /* Character-independent ANIMID path. Prologues read from the exact
          * image at these RVAs; each encodes the offset the decompile relies
          * on (0x131 guard / 0xDC animation table / the play entry sequence). */
@@ -7183,7 +7273,18 @@ BOOL SudekiMpInitializeLanArenaClientReplica(HMODULE game_module) {
 BOOL SudekiMpResetLanArenaClientReplica(void) {
     DWORD restore_error = ERROR_SUCCESS;
 
-    if(party_combat_mode_lease_valid && !SudekiMpLanPartyClientRestoreCombatMode()) {
+    if(SudekiMpLanPartyCastCallbacksRetained()) {
+        client_replica_reset_pending=TRUE;
+        retain_client_replica_callbacks("party_cast_projectile_terminal_unobserved",ERROR_BUSY);
+        return FALSE;
+    }
+
+    if(InterlockedCompareExchange(&party_projectile_terminal_unknown,0,0)) {
+        client_replica_reset_pending=TRUE;
+        retain_client_replica_callbacks("party_projectile_terminal_unobserved",ERROR_BUSY);
+        return FALSE;
+    }
+    if(party_combat_mode_lease_valid && !SudekiMpLanPartyClientRestoreCombatMode(NULL)) {
         restore_error=GetLastError();
         if(restore_error==ERROR_SUCCESS) restore_error=ERROR_BUSY;
         client_replica_reset_pending=TRUE;
@@ -7220,7 +7321,7 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
         return FALSE;
     }
     client_skill_activation_actor_index = -1;
-    if (!drain_ailish_native_ranged()) {
+    if (!drain_ailish_native_ranged() || !party_drain_ranged_weapons()) {
         client_replica_reset_pending = TRUE;
         retain_client_replica_callbacks("native_ranged_drain_pending", ERROR_BUSY);
         return FALSE;
@@ -7331,11 +7432,16 @@ BOOL SudekiMpResetLanArenaClientReplica(void) {
     party_replica_session = NULL;
     party_present_valid=FALSE;
     party_combat_mode_lease_valid=FALSE; party_combat_mode_token=0;
-    party_combat_mode_generation=0;
+    party_combat_mode_generation=0; party_combat_mode_seat=0;
+    party_transition_pending=FALSE; party_transition_target=FALSE;
+    party_transition_refreshed=FALSE;
+    party_transition_started=0; party_transition_trace=0;
+    ZeroMemory(&party_transition_roster,sizeof(party_transition_roster));
     memset(party_presentation_leases,0,sizeof(party_presentation_leases));
     memset(&party_presentation_generation,0,sizeof(party_presentation_generation));
     ZeroMemory(&party_ailish_first_person_lease,
         sizeof(party_ailish_first_person_lease));
+    ZeroMemory(&party_elco_swap,sizeof(party_elco_swap));
     position_world_matrix = NULL;
     ailish_ranged_presentation_refresh = NULL;
     weapon_set_visible = NULL;
@@ -8256,6 +8362,8 @@ static BOOL party_combat_action(uint8_t type,uint8_t variant,int *selector,
     int *state,unsigned *channel);
 static BOOL party_loaded_selector(PartyMovementTarget *target,int selector) {
     if(!selector) return TRUE;
+    if(target->actor==SUDEKIMP_CLEANROOM_TAL && selector==38)
+        return resolve_ailish_world_selector(target->model,target->renderer,0x82u,38);
     /* Same exact native lookup as the accepted ranged path, but keyed by the
      * uniform +130 model owner. This is a transition-time lookup only: no
      * unverified cross-frame cache and no 4x full bank walk on settled poses. */
@@ -8319,6 +8427,50 @@ static BOOL party_movement_identity(const SudekiMpControlUpdateDispatchWitness *
     }
     return TRUE;
 }
+static BOOL party_actor_identity(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyRosterObservation *roster,
+    PartyMovementTarget targets[4],unsigned seat,BOOL combat) {
+    SudekiMpLanPartyLease key;
+    PartyMovementTarget *t;
+    uint8_t *component;
+    void *renderer;
+    BOOL current_combat;
+    /* A complete roster/target preflight surrounds each playback transaction.
+     * Inside it, a channel setter owns just this actor. Revalidate that exact
+     * actor's lease and live slots instead of rescanning the other three
+     * actors and their models before every channel. Nothing is cached across
+     * calls, render boundaries, native entries or generation changes. */
+    if(!lease || !roster || seat>=4u || !party_replica_session ||
+        !SudekiMpLanPartyLeaseActive(party_replica_session,lease) ||
+        !(w?SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w):
+            SudekiMpLanPartyPresentationBoundary())) return FALSE;
+    t=&targets[seat]; key=*lease; key.seat=(uint8_t)seat;
+    if(t->character!=roster->actors[seat]) return FALSE;
+    if(seat==lease->seat) {
+        /* The transaction still preflights and rechecks all four actors.
+         * At each local channel write, prove this actor's live roster slot,
+         * controller/front ownership and combat state, just as remote writes
+         * prove their own lease. Avoid rebuilding all four model observations
+         * repeatedly inside one actor's channel loop. */
+        if(!SudekiMpLanPartyControlNativeActorExact(roster,seat) ||
+            !SudekiMpCleanroomEngineCombatMode(&current_combat) ||
+            current_combat!=combat) return FALSE;
+    } else if(!SudekiMpLanPartyControlExact(w,&key,t->character) ||
+        !SudekiMpCleanroomEngineCombatMode(&current_combat) ||
+        current_combat!=combat) return FALSE;
+    return readable_memory(t->character,0x138u) &&
+        *(void **)(t->character+CHARACTER_POSITION_OFFSET)==t->position &&
+        *(void **)(t->character+0x130u)==t->model &&
+        readable_memory(t->position,0x14u) &&
+        *(void **)(t->position+0x10u)==t->character &&
+        readable_memory(t->model,0x14u) &&
+        *(void **)(t->model+0x10u)==t->character &&
+        actor_presentation_renderer(t->character,t->motion.ranged?1u:0u,
+            &renderer,&component) && renderer==t->renderer &&
+        readable_memory(renderer,sizeof(void *)) &&
+        *(void **)renderer==game_base+RVA_ANIMATION_RENDERER_VTABLE &&
+        t->methods.count(renderer)==t->submodels;
+}
 static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame, BOOL final) {
     PartyMovementTarget targets[4]; SudekiMpLanPartyRosterObservation roster;
@@ -8369,7 +8521,7 @@ static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
             for(unsigned sub=0;sub<t->submodels;++sub) {
                 int selector=t->methods.get_selector(t->renderer,4,sub);
                 int state=t->methods.get_state(t->renderer,4,sub);
-                BOOL owned_action=selector==action_selector &&
+                BOOL owned_action=SudekiMpLanPartyRangedClip(s->actor_type,selector)>0 &&
                     (state==action_state || state==192);
                 BOOL already_idle=selector==0 && state==192;
                 if(!owned_action && !already_idle) return FALSE;
@@ -8377,7 +8529,7 @@ static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
         }
     }
     if(!party_movement_identity(w,lease,&roster,targets,FALSE) ||
-        (lease->seat==3u && !party_retire_ailish_first_person(w))) return FALSE;
+        !party_retire_ailish_first_person(w)) return FALSE;
     for(unsigned i=0;i<4;++i) {
         const SudekiMpLanArenaActorSnapshot *s=&frame->chunk[i/2].seat[i%2];
         PartyMovementTarget *t=&targets[i]; LanArenaPresentationLease *prior=&party_presentation_leases[i];
@@ -8387,7 +8539,7 @@ static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
         float coordinates[3]={s->x,s->y,s->z},facing[3]={s->facing_x,0,s->facing_z};
         float x=*(float *)(t->position+0x50),z=*(float *)(t->position+0x58);
         float length=sqrtf(x*x+z*z),dot=length>0.0001f?(x*facing[0]+z*facing[2])/length:-1;
-        if(!party_movement_identity(w,lease,&roster,targets,FALSE)) return FALSE;
+        if(!party_actor_identity(w,lease,&roster,targets,i,FALSE)) return FALSE;
         if(prior->valid && prior->character==t->character &&
             prior->renderer==t->renderer && prior->action_variant!=
                 SUDEKIMP_LAN_ARENA_ACTION_NONE && t->motion.ranged) {
@@ -8439,6 +8591,7 @@ static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
         prior->action_variant=SUDEKIMP_LAN_ARENA_ACTION_NONE;
         prior->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
         prior->action_sequence=0;
+        prior->combat_mode=FALSE;
         if(!final) { prior->locomotion=*m; prior->last_early_apply_at=now; }
         /* Same native publication as the accepted two-seat renderer path.
          * Do not leave local CPosition and the visible/root-motion basis one
@@ -8449,7 +8602,7 @@ static BOOL party_apply_movement(const SudekiMpControlUpdateDispatchWitness *w,
         if((parent && parent!=4) || !position_world_matrix ||
             !readable_memory(object,0xd0) || !writable_memory(t->position+0xb8,1) ||
             !writable_memory(object+0x2c,4) || !writable_memory(object+0x90,64) ||
-            !party_movement_identity(w,lease,&roster,targets,FALSE)) return FALSE;
+            !party_actor_identity(w,lease,&roster,targets,i,FALSE)) return FALSE;
         if(!readable_memory(position_world_matrix(t->position),64)) return FALSE;
         if(!actor_visible_transform_matches_position(t->position,object)) {
             t->position[0xb8]=1;
@@ -8473,29 +8626,206 @@ static BOOL party_combat_mode_identity(const SudekiMpControlUpdateDispatchWitnes
     }
     return TRUE;
 }
+static BOOL party_transition_roster_exact(
+    const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanPartyRosterObservation *roster) {
+    if(!party_combat_mode_lease_valid ||
+        !SudekiMpLanPartyControlObserveRoster(w,roster) || roster->present_mask!=15u ||
+        roster->group!=party_transition_roster.group ||
+        roster->controller!=party_transition_roster.controller) return FALSE;
+    for(unsigned i=0;i<4;++i)
+        if(roster->actors[i]!=party_transition_roster.actors[i]) return FALSE;
+    return TRUE;
+}
+static BOOL party_native_combat_settled(void *expected,BOOL combat) {
+    uint8_t *actor=expected,*arbiter;
+    uint32_t flags,state; uint8_t request;
+    if(!game_base || !readable_memory(actor,0x94u)) return FALSE;
+    arbiter=*(uint8_t **)(actor+0x90u);
+    if(!readable_memory(arbiter,0x64u) ||
+        *(void **)arbiter!=game_base+0x2cc9acu ||
+        *(void **)(arbiter+0x10u)!=actor) return FALSE;
+    flags=*(uint32_t *)(arbiter+0x50u);
+    state=*(uint32_t *)(arbiter+0x58u); request=arbiter[0x60u];
+    return combat ? SudekiMpLanArenaClientNativeArmingComplete(flags,state,request) :
+        !(flags&2u) && !(request&2u) && (state&15u)!=1u && (state&15u)!=3u;
+}
+static BOOL party_armed_presentation_ready(unsigned seat,
+    const SudekiMpLanPartyLease *lease,void *expected,
+    const SudekiMpCleanroomActorPresentation *world_motion) {
+    uint8_t type=SudekiMpLanPartyActorType(seat);
+    uint8_t *actor=expected,*arbiter,*component,*position;
+    if(!readable_memory(actor,0x138u)) return FALSE;
+    arbiter=*(uint8_t **)(actor+0x90u);
+    if(!party_native_combat_settled(actor,TRUE)) return FALSE;
+    if(seat==lease->seat && (seat==1u || seat==3u) &&
+        (*(uint32_t *)(arbiter+0x50u)&AILISH_FIRST_PERSON_ARBITER_FLAG)) {
+        SudekiMpCleanroomActor kind;
+        SudekiMpCleanroomActorPresentation arms;
+        LanArenaAilishModelWitness model;
+        void *world_renderer;
+        uint32_t handle; int selector;
+        int idle=SudekiMpLanArenaRangedCombatSelector(type,0x05u);
+        position=*(uint8_t **)(actor+CHARACTER_POSITION_OFFSET);
+        /* Elco's retained world renderer can remain at selector zero after
+         * the native switch. Readiness belongs to the attached arms bank.
+         * Prove both wrappers, the native FP idle, and its resource mapping
+         * before admitting host playback to the separate world renderer. */
+        return idle>=0 &&
+            actor_presentation_renderer(actor,1u,&world_renderer,&component) &&
+            ailish_desired_model_attached(actor,component,arbiter,position,&model) &&
+            model.first_person && model.saved_world_renderer==world_renderer &&
+            resolve_ailish_first_person_selector(component,
+                model.first_person_renderer,0x05u,idle,&handle,&selector) &&
+            SudekiMpCleanroomActorFromType(type,&kind) &&
+            SudekiMpCleanroomEngineActorPresentation(kind,&arms) &&
+            arms.selector[0]==idle;
+    }
+    return world_motion->selector[0]==SudekiMpLanPartyCombatMotionSelector(type,1u) ||
+        world_motion->selector[0]==SudekiMpLanPartyCombatMotionSelector(type,2u);
+}
+static BOOL party_transition_ready(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease) {
+    SudekiMpLanPartyRosterObservation roster;
+    unsigned ready=0;
+    DWORD now=GetTickCount();
+    if(!party_combat_mode_identity(w,lease) ||
+        !party_transition_roster_exact(w,&roster)) return FALSE;
+    if(!party_transition_pending) return TRUE;
+    if(SudekiMpCleanroomEngineRangedCombatPrimePending()) return FALSE;
+    /* Preserve the established one-shot post-prime group refresh. Never
+     * replace a native draw/sheathe clip just because its renderer exists. */
+    if(SudekiMpLanArenaClientCombatTransitionRefreshDue(party_transition_target,
+            party_transition_refreshed,now-party_transition_started)) {
+        party_transition_refreshed=TRUE;
+        BOOL refreshed=SudekiMpCleanroomEngineRefreshCombatMode();
+        SudekiMpLogFormat("lan_party event=client_combat_refresh result=%s\r\n",
+            refreshed?"confirmed":"rejected");
+        return FALSE;
+    }
+    if(party_transition_target && !party_transition_refreshed) return FALSE;
+    for(unsigned i=0;i<4;++i) {
+        void *actor=roster.actors[i];
+        SudekiMpCleanroomActor kind;
+        SudekiMpCleanroomActorPresentation motion;
+        SudekiMpLanPartyLease key=*lease; key.seat=(uint8_t)i;
+        if(!party_native_combat_settled(actor,party_transition_target) ||
+            !SudekiMpLanPartyMovementDrained(&key,actor,w) ||
+            !SudekiMpCleanroomActorFromType(SudekiMpLanPartyActorType(i),&kind) ||
+            !SudekiMpCleanroomEngineWorldMotion(kind,&motion)) continue;
+        if(party_transition_target) {
+            if(!party_armed_presentation_ready(i,lease,actor,&motion)) continue;
+        } else {
+            uint8_t animation;
+            if(!SudekiMpLanPartyMotionObserve(SudekiMpLanPartyActorType(i),
+                    motion.selector[0],&animation)) continue;
+        }
+        ready|=1u<<i;
+    }
+    if(!party_transition_trace || now-party_transition_trace>=1000u || ready==15u) {
+        SudekiMpLogFormat("lan_party event=client_combat_handoff target=%s ready=%u elapsed=%lu tick=%lu\r\n",
+            party_transition_target?"armed":"sheathed",ready,
+            (unsigned long)(now-party_transition_started),(unsigned long)now);
+        party_transition_trace=now;
+    }
+    if(ready!=15u || !party_combat_mode_identity(w,lease)) return FALSE;
+    party_transition_pending=FALSE;
+    return TRUE;
+}
 static BOOL party_sync_combat_mode(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *lease,BOOL desired) {
-    BOOL current,verified;
+    SudekiMpLanPartyRosterObservation roster;
+    BOOL current,verified,lease_started,changed;
     if(!party_combat_mode_identity(w,lease) ||
         !SudekiMpCleanroomEngineCombatMode(&current)) return FALSE;
     if(party_combat_mode_lease_valid &&
         (party_combat_mode_token!=lease->token ||
          party_combat_mode_generation!=lease->generation ||
-         lease->seat!=party_presentation_generation.seat) &&
-        (!SudekiMpLanPartyClientRestoreCombatMode() ||
+         lease->seat!=party_combat_mode_seat) &&
+        (!SudekiMpLanPartyClientRestoreCombatMode(w) ||
          !SudekiMpCleanroomEngineCombatMode(&current))) return FALSE;
-    if(!party_combat_mode_lease_valid) {
+    lease_started=!party_combat_mode_lease_valid;
+    if(!lease_started && (!party_transition_roster_exact(w,&roster) ||
+        (party_transition_pending && party_transition_target!=desired &&
+         !party_transition_ready(w,lease)))) return FALSE;
+    if(!SudekiMpLanPartyControlObserveRoster(w,&roster)) return FALSE;
+    changed=current!=desired;
+    if(changed) {
+        /* An early mode notice can precede the client's last cast/weapon
+         * cleanup. Preserve those native lifetimes before entering the group
+         * transition; confirmed cast timing continues to be serviced while
+         * this returns pending. Observation failure is not an idle actor. */
+        for(unsigned i=0;i<4u;++i) {
+            SudekiMpLanPartyLease key=*lease; key.seat=(uint8_t)i;
+            if(!SudekiMpLanPartyMovementDrained(&key,roster.actors[i],w)) return FALSE;
+        }
+        if(!party_drain_ranged_weapons()) return FALSE;
+    }
+    if(lease_started) {
         party_combat_mode_original=current;
         party_combat_mode_token=lease->token;
         party_combat_mode_generation=lease->generation;
+        party_combat_mode_seat=lease->seat;
         party_combat_mode_lease_valid=TRUE;
     }
-    if(current!=desired && !SudekiMpCleanroomEngineSetCombatMode(desired)) return FALSE;
+    /* Settled mode already passed the same current controller, lease and
+     * retained roster checks above. Only a real handoff needs the additional
+     * native transition observation below. */
+    if(!lease_started && !changed && !party_transition_pending) return TRUE;
+    if(lease_started || (changed &&
+        (!party_transition_pending || party_transition_target!=desired))) {
+        /* Retain identities before native entry, including a partial failure.
+         * A later retry cannot treat an unpublished draw lease as complete. */
+        party_transition_roster=roster;
+        party_transition_pending=changed || desired;
+        party_transition_target=desired;
+        party_transition_refreshed=!desired;
+        party_transition_started=GetTickCount(); party_transition_trace=0;
+        SudekiMpLogFormat("lan_party event=client_combat_begin target=%s tick=%lu\r\n",
+            desired?"armed":"sheathed",(unsigned long)party_transition_started);
+    }
+    if(changed && !SudekiMpCleanroomEngineSetCombatMode(desired)) return FALSE;
     if(!party_combat_mode_identity(w,lease) ||
         !SudekiMpCleanroomEngineCombatMode(&verified) || verified!=desired) return FALSE;
-    /* Native weapon/UI arming is asynchronous. Preserve the complete host
-     * frame queue and begin selector writes only after Sudeki has drained it. */
-    return !desired || !SudekiMpCleanroomEngineRangedCombatPrimePending();
+    return party_transition_ready(w,lease);
+}
+static BOOL party_mode_frame_ready(const SudekiMpLanPartyLease *lease,
+    const SudekiMpLanPartyFrame *frame) {
+    SudekiMpLanPartyCombatMode mode;
+    return SudekiMpLanPartyGetCombatMode(party_replica_session,lease,GetTickCount(),&mode) &&
+        SudekiMpLanPartyCombatModeFrameReady(&mode,frame);
+}
+BOOL SudekiMpLanPartyClientServiceCombatMode(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *confirmed) {
+    SudekiMpLanPartyCombatMode mode;
+    DWORD now=GetTickCount();
+    if(!w ||
+        !SudekiMpLanPartyGetCombatMode(party_replica_session,lease,now,&mode) ||
+        (confirmed && (!SudekiMpLanPartyFrameValid(confirmed) ||
+         ((int32_t)(confirmed->chunk[0].host_tick-mode.observed_tick)>=0 &&
+          confirmed->chunk[0].combat_enabled!=mode.enabled)))) {
+        party_present_valid=FALSE;
+        return FALSE;
+    }
+    if(party_present_valid &&
+        !SudekiMpLanPartyCombatModeFrameReady(&mode,&party_present_frame))
+        party_present_valid=FALSE;
+    if(party_mode_notice_traced!=mode.sequence) {
+        SudekiMpLogFormat("lan_party event=client_combat_notice sequence=%lu enabled=%u host_tick=%lu observed_tick=%lu tick=%lu\r\n",
+            (unsigned long)mode.sequence,mode.enabled,(unsigned long)mode.host_tick,
+            (unsigned long)mode.observed_tick,(unsigned long)now);
+        party_mode_notice_traced=mode.sequence;
+    }
+    /* A repeated notice requires no native work after this lease's handoff.
+     * Actual body application still validates the full roster/current mode
+     * at its mutation boundary. Do not repeat that expensive native walk
+     * here merely to observe unchanged transport state. */
+    if(party_combat_mode_lease_valid && !party_transition_pending &&
+        party_combat_mode_token==lease->token &&
+        party_combat_mode_generation==lease->generation &&
+        party_combat_mode_seat==lease->seat &&
+        party_transition_target==(mode.enabled!=0u)) return TRUE;
+    return party_sync_combat_mode(w,lease,mode.enabled!=0u);
 }
 static BOOL party_combat_action(uint8_t type,uint8_t variant,int *selector,int *state,
     unsigned *channel) {
@@ -8506,7 +8836,7 @@ static BOOL party_combat_action(uint8_t type,uint8_t variant,int *selector,int *
     }
     if(type==SUDEKIMP_LAN_ARENA_TAL_TYPE) {
         *channel=0;
-        return SudekiMpLanArenaTalActionToNativePresentation(variant,selector,state);
+        return SudekiMpLanPartyTalActionToPresentation(variant,selector,state);
     }
     if((type==SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
         type==SUDEKIMP_LAN_ARENA_AILISH_TYPE) &&
@@ -8522,7 +8852,7 @@ static BOOL party_combat_identity(const SudekiMpControlUpdateDispatchWitness *w,
     PartyMovementTarget targets[4]) {
     return party_movement_identity(w,lease,roster,targets,TRUE);
 }
-typedef struct PartyAilishFirstPersonTarget {
+typedef struct PartyRangedFirstPersonTarget {
     uint8_t *character;
     uint8_t *component;
     uint8_t *wrapper;
@@ -8532,17 +8862,21 @@ typedef struct PartyAilishFirstPersonTarget {
     int fire_selector;
     int reload_selector;
     int reload_complete_selector;
+    uint8_t actor_type;
     LanArenaAnimationMethods methods;
-} PartyAilishFirstPersonTarget;
-static BOOL party_ailish_first_person_target(uint8_t *character,
-    PartyAilishFirstPersonTarget *target) {
+} PartyRangedFirstPersonTarget;
+static BOOL party_ranged_first_person_target(uint8_t *character,uint8_t type,
+    PartyRangedFirstPersonTarget *target) {
     uint8_t *component,*wrapper;
     void *renderer;
     uint32_t handle;
     int selector;
     unsigned int submodels;
-    if(!target || !readable_memory(character,
-            AILISH_RANGED_COMPONENT_OFFSET+sizeof(void *))) return FALSE;
+    if(!target || (type!=SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+            type!=SUDEKIMP_LAN_ARENA_ELCO_TYPE) || !readable_memory(character,
+            AILISH_RANGED_COMPONENT_OFFSET+sizeof(void *)) ||
+        *(void **)character!=game_base+(type==SUDEKIMP_LAN_ARENA_ELCO_TYPE?
+            0x2d66fcu:0x2d555cu)) return FALSE;
     component=*(uint8_t **)(character+AILISH_RANGED_COMPONENT_OFFSET);
     if(!readable_memory(component,0x168u) || *(void **)(component+0x10u)!=character)
         return FALSE;
@@ -8554,10 +8888,10 @@ static BOOL party_ailish_first_person_target(uint8_t *character,
     if(!submodels || submodels>32u ||
         !resolve_ailish_first_person_selector(component,renderer,0x05u,
             SudekiMpLanArenaRangedCombatSelector(
-                SUDEKIMP_LAN_ARENA_AILISH_TYPE,0x05u),&handle,&selector) ||
+                type,0x05u),&handle,&selector) ||
         !resolve_ailish_first_person_selector(component,renderer,0x8cu,
             SudekiMpLanArenaRangedCombatSelector(
-                SUDEKIMP_LAN_ARENA_AILISH_TYPE,0x8cu),&handle,&selector) ||
+                type,0x8cu),&handle,&selector) ||
         !readable_memory(character,
             AILISH_RANGED_COMPONENT_OFFSET+sizeof(void *)) ||
         !readable_memory(component,0x168u) || !readable_memory(wrapper,0x14u) ||
@@ -8571,190 +8905,257 @@ static BOOL party_ailish_first_person_target(uint8_t *character,
     target->wrapper=wrapper;
     target->renderer=renderer;
     target->submodels=submodels;
+    target->actor_type=type;
     target->idle_selector=SudekiMpLanArenaRangedCombatSelector(
-        SUDEKIMP_LAN_ARENA_AILISH_TYPE,0x05u);
+        type,0x05u);
     target->fire_selector=SudekiMpLanArenaRangedCombatSelector(
-        SUDEKIMP_LAN_ARENA_AILISH_TYPE,0x8cu);
+        type,0x8cu);
     /* C2/C3 are first-person-only electric reload phases. Their world-bank
      * counterparts are intentionally not used by this renderer lease. */
     target->reload_selector=9;
     target->reload_complete_selector=10;
     return target->idle_selector>=0 && target->fire_selector>=0;
 }
-static BOOL party_ailish_first_person_same_target(
-    const PartyAilishFirstPersonTarget *expected) {
-    PartyAilishFirstPersonTarget current;
-    return expected && party_ailish_first_person_target(
-        expected->character,&current) && current.component==expected->component &&
+static BOOL party_ailish_first_person_target(uint8_t *character,
+    PartyRangedFirstPersonTarget *target) {
+    return party_ranged_first_person_target(character,
+        SUDEKIMP_LAN_ARENA_AILISH_TYPE,target);
+}
+static BOOL party_ranged_first_person_same_target(
+    const PartyRangedFirstPersonTarget *expected) {
+    PartyRangedFirstPersonTarget current;
+    return expected && party_ranged_first_person_target(
+        expected->character,expected->actor_type,&current) && current.component==expected->component &&
         current.wrapper==expected->wrapper && current.renderer==expected->renderer &&
         current.submodels==expected->submodels;
 }
-static BOOL party_ailish_first_person_reload_selectors(
-    const PartyAilishFirstPersonTarget *target) {
-    uint32_t handle;
-    int selector;
-    return target &&
-        resolve_ailish_first_person_selector(target->component,target->renderer,
-            0xc2u,9,&handle,&selector) &&
-        resolve_ailish_first_person_selector(target->component,target->renderer,
-            0xc3u,10,&handle,&selector);
+static BOOL party_retire_elco_weapon_swap(
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    PartyRangedFirstPersonTarget target;
+    BOOL owns=TRUE;
+    if(!party_elco_swap.valid) return TRUE;
+    if(w && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
+    if(!party_elco_swap.active ||
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO)!=party_elco_swap.character) {
+        ZeroMemory(&party_elco_swap,sizeof(party_elco_swap));
+        return TRUE;
+    }
+    if(!party_ranged_first_person_target(party_elco_swap.character,
+            SUDEKIMP_LAN_ARENA_ELCO_TYPE,&target) ||
+        target.component!=party_elco_swap.component || target.wrapper!=party_elco_swap.wrapper ||
+        target.renderer!=party_elco_swap.renderer) return FALSE;
+    for(unsigned sub=0;sub<target.submodels;++sub)
+        if(target.methods.get_selector(target.renderer,0,sub)!=8 ||
+            target.methods.get_state(target.renderer,0,sub)!=1) owns=FALSE;
+    /* This lease owns only a cosmetic C1 channel. A native skill or weapon
+     * task replacing it keeps its channel; no task is cancelled on release. */
+    if(owns) {
+        if(party_ranged_weapon[0].native.active ||
+            !party_ranged_first_person_same_target(&target)) return FALSE;
+        set_animation_channel(target.renderer,&target.methods,target.submodels,
+            0,target.idle_selector,128,SUDEKIMP_RANGED_WEAPON_SWAP_RATE,TRUE);
+        if(!animation_channel_matches(target.renderer,&target.methods,target.submodels,
+                0,target.idle_selector,SUDEKIMP_RANGED_WEAPON_SWAP_RATE) ||
+            !party_ranged_first_person_same_target(&target)) return FALSE;
+    }
+    ZeroMemory(&party_elco_swap,sizeof(party_elco_swap));
+    return TRUE;
 }
-static BOOL party_apply_ailish_first_person(
+/* Retail C1 raises animation event 1 at frame four. CArbiter::OnEvent
+ * (RVA dbe40) uses that event to exchange the lowered weapon. Validate the
+ * loaded event track as well as C1's duration; do not synthesize an inventory
+ * cycle event or let its direction choose a different host-approved slot. */
+static BOOL party_elco_swap_handoff_frame(void *renderer,float *frame) {
+    uint8_t *bank,*entries,*resource,*tracks,*header,*keys;
+    if(!frame || !ailish_swap_resource_matches(renderer)) return FALSE;
+    bank=*(uint8_t **)((uint8_t *)renderer+8u);
+    entries=*(uint8_t **)(bank+0x20u);
+    resource=*(uint8_t **)(entries+8u*28u);
+    tracks=*(uint8_t **)(entries+8u*28u+8u);
+    if(!readable_memory(resource,16u) || *(uint32_t *)(resource+0xcu)!=2u ||
+        !readable_memory(tracks,24u)) return FALSE;
+    header=*(uint8_t **)tracks; keys=*(uint8_t **)(tracks+8u);
+    if(!readable_memory(header,16u) || !readable_memory(keys,8u) ||
+        *(uint32_t *)header!=0xe21c025du || *(uint32_t *)(header+4u)!=1u ||
+        *(uint32_t *)(header+8u)!=1u || *(uint32_t *)(header+12u)!=1u ||
+        *(float *)keys!=4.0f || keys[4]!=1u) return FALSE;
+    *frame=*(float *)keys;
+    return TRUE;
+}
+static BOOL party_service_elco_weapon_swap(
     const SudekiMpControlUpdateDispatchWitness *w,
-    const SudekiMpLanPartyLease *lease,
-    const SudekiMpLanPartyRosterObservation *roster,
-    PartyMovementTarget targets[4],
-    const SudekiMpLanArenaActorSnapshot *snapshot,
-    const SudekiMpLanPartyAilishWeaponState *weapon,
-    BOOL final) {
-    PartyAilishFirstPersonTarget target;
-    PartyAilishFirstPersonLease *prior=&party_ailish_first_person_lease;
-    BOOL same_owner,weak_attack,swap_transition,swap_finished=FALSE;
-    BOOL reload_active=FALSE,reload_finished=FALSE,reload_started=FALSE;
-    BOOL reload_complete=FALSE;
-    BOOL transition;
-    int selector,state;
-    if(!lease || lease->seat!=3u || !snapshot || snapshot->actor_type!=
-            SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-        (snapshot->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_NONE &&
-         snapshot->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE) ||
-        targets[3].character!=roster->actors[3] ||
-        !party_ailish_first_person_target(targets[3].character,&target) ||
-        !party_combat_identity(w,lease,roster,targets)) return FALSE;
-    same_owner=prior->valid && prior->character==target.character &&
-        prior->component==target.component && prior->wrapper==target.wrapper &&
-        prior->renderer==target.renderer && prior->token==lease->token &&
-        prior->generation==lease->generation && prior->seat==lease->seat;
-    /* Publish the cosmetic renderer lease before a setter can re-enter a
-     * lifecycle callback. No arbiter input or native ranged task is retained. */
-    prior->character=target.character;
-    prior->component=target.component;
-    prior->wrapper=target.wrapper;
-    prior->renderer=target.renderer;
-    prior->token=lease->token;
-    prior->generation=lease->generation;
-    prior->seat=lease->seat;
-    prior->valid=TRUE;
-    weak_attack=snapshot->action_variant==SUDEKIMP_LAN_ARENA_ACTION_WEAK_ONE;
-    if(!same_owner) {
-        prior->reload_sequence=0;
-        prior->reload_active=FALSE;
-        prior->reload_complete=FALSE;
+    const SudekiMpLanPartyLease *owner,const SudekiMpLanPartyRosterObservation *roster,
+    PartyMovementTarget targets[4],const SudekiMpLanArenaActorSnapshot *snapshot,
+    BOOL final,uint8_t *equip_slot) {
+    PartyRangedFirstPersonTarget target;
+    uint32_t handle; int selector;
+    BOOL complete=TRUE,handoff=TRUE;
+    float handoff_frame;
+    *equip_slot=snapshot->weapon_slot_plus_one;
+    if(owner->seat!=1u) return TRUE;
+    if(!party_actor_identity(w,owner,roster,targets,1u,TRUE) ||
+        *equip_slot<1u || *equip_slot>12u) return FALSE;
+    if(!party_elco_swap.valid || party_elco_swap.owner.token!=owner->token ||
+        party_elco_swap.owner.generation!=owner->generation ||
+        party_elco_swap.owner.seat!=owner->seat ||
+        party_elco_swap.character!=targets[1].character) {
+        if(!party_retire_elco_weapon_swap(w)) return FALSE;
+        party_elco_swap.owner=*owner;
+        party_elco_swap.character=targets[1].character;
+        party_elco_swap.slot=*equip_slot;
+        party_elco_swap.valid=TRUE;
+        return TRUE; /* Initial equipment is not a requested swap. */
     }
-    if(weapon && weapon->valid) {
-        reload_active=weapon->reload_ms>0u;
-        reload_started=reload_active && (!prior->reload_active ||
-            prior->reload_sequence!=weapon->reload_sequence);
-        reload_finished=prior->reload_active && !reload_active &&
-            prior->reload_sequence==weapon->reload_sequence;
-        if(prior->reload_sequence!=weapon->reload_sequence) {
-            prior->reload_complete=FALSE;
-            prior->reload_active=FALSE;
-        }
-        if(reload_active) prior->reload_active=TRUE;
-        if(reload_finished) {
-            prior->reload_active=FALSE;
-            prior->reload_complete=TRUE;
-        }
-        prior->reload_sequence=weapon->reload_sequence;
-    } else if(same_owner) {
-        /* A transient missing sidecar must not cut an already observed reload. */
-        reload_active=prior->reload_active;
-        reload_complete=prior->reload_complete;
-    }
-    reload_complete=reload_complete || reload_finished || prior->reload_complete;
-    if((reload_active || reload_finished) &&
-        !party_ailish_first_person_reload_selectors(&target)) return FALSE;
-    swap_transition=SudekiMpLanArenaClientShouldStartWeaponSwap(
-        same_owner,client_ailish_first_person_camera_owns_facing(target.character),
-        weak_attack,prior->weapon_slot,snapshot->weapon_slot_plus_one);
-    if(swap_transition || (same_owner && prior->weapon_swap && !weak_attack)) {
-        uint32_t swap_handle;
-        int swap_selector;
-        BOOL complete=!swap_transition;
-        if(!resolve_ailish_first_person_selector(target.component,target.renderer,
-                0xc1u,8,&swap_handle,&swap_selector) ||
-            !ailish_swap_resource_matches(target.renderer)) return FALSE;
-        if(swap_transition) {
-            if(!party_combat_identity(w,lease,roster,targets) ||
-                !party_ailish_first_person_same_target(&target)) return FALSE;
-            set_animation_channel(target.renderer,&target.methods,target.submodels,
-                0,swap_selector,1,24.0f,TRUE);
-            prior->weapon_slot=snapshot->weapon_slot_plus_one;
-            prior->weapon_swap=TRUE;
-            return party_combat_identity(w,lease,roster,targets) &&
-                party_ailish_first_person_same_target(&target);
-        }
+    if(!party_elco_swap.active && party_elco_swap.slot==*equip_slot) return TRUE;
+    *equip_slot=party_elco_swap.active && !party_elco_swap.handed_off?
+        party_elco_swap.from_slot:party_elco_swap.slot;
+    if(final) return TRUE;
+    /* Existing native shots/reloads must finish before cosmetic C1 owns the
+     * arms. A skill retains its channel and defers the pending equipment. */
+    if(!party_drain_ranged_weapon(0u)) return TRUE;
+    SudekiMpCharacterSkillState skill;
+    if(!SudekiMpObserveCharacterSkill(targets[1].character,&skill)) return FALSE;
+    if(skill.active || SudekiMpLanPartyCastNativeBody(targets[1].character)) return TRUE;
+    if(!party_ranged_first_person_target(targets[1].character,
+            SUDEKIMP_LAN_ARENA_ELCO_TYPE,&target) ||
+        !resolve_ailish_first_person_selector(target.component,target.renderer,
+            0xc1u,8,&handle,&selector) ||
+        !party_elco_swap_handoff_frame(target.renderer,&handoff_frame)) return FALSE;
+    if(!party_elco_swap.active) {
+        LanArenaNativeRangedLease native={0}; BOOL idle=FALSE;
+        native.character=target.character; native.component=target.component;
+        native.combat=*(uint8_t **)(target.character+0xbcu);
+        native.arbiter=*(uint8_t **)(target.character+0x90u);
+        if(!observe_native_ranged(&native,&idle)) return FALSE;
+        if(!idle) return TRUE;
+        if(!client_ailish_first_person_camera_owns_facing(target.character) ||
+            !party_actor_identity(w,owner,roster,targets,1u,TRUE) ||
+            !party_ranged_first_person_same_target(&target)) return FALSE;
+        party_elco_swap.component=target.component;
+        party_elco_swap.wrapper=target.wrapper;
+        party_elco_swap.renderer=target.renderer;
+        party_elco_swap.from_slot=party_elco_swap.slot;
+        party_elco_swap.slot=snapshot->weapon_slot_plus_one;
+        party_elco_swap.handed_off=FALSE;
+        party_elco_swap.active=TRUE;
+        set_animation_channel(target.renderer,&target.methods,target.submodels,
+            0,selector,1,SUDEKIMP_RANGED_WEAPON_SWAP_RATE,TRUE);
+        SudekiMpLogFormat("lan_party event=elco_weapon_swap phase=start from=%u slot=%u handoff_frame=%.1f tick=%lu\r\n",
+            party_elco_swap.from_slot,party_elco_swap.slot,handoff_frame,(unsigned long)GetTickCount());
+    } else {
+        if(party_elco_swap.component!=target.component ||
+            party_elco_swap.wrapper!=target.wrapper || party_elco_swap.renderer!=target.renderer)
+            return FALSE;
         for(unsigned sub=0;sub<target.submodels;++sub) {
             float time=target.methods.get_time(target.renderer,0,sub);
             if(!isfinite(time) || time<0.0f) return FALSE;
-            if(target.methods.get_selector(target.renderer,0,sub)!=swap_selector) {
-                complete=TRUE;
-                break;
+            if(target.methods.get_selector(target.renderer,0,sub)!=selector) {
+                /* Preserve a later native owner; retry pending selection from
+                 * the last slot this cosmetic lease allowed to equip. */
+                party_elco_swap.slot=*equip_slot;
+                party_elco_swap.active=FALSE;
+                return TRUE;
+            }
+            if(time<handoff_frame) handoff=FALSE;
+            if(!SudekiMpLanArenaClientWeaponSwapComplete(time)) complete=FALSE;
+        }
+        if(handoff) {
+            *equip_slot=party_elco_swap.slot;
+            if(!party_elco_swap.handed_off)
+                SudekiMpLogFormat("lan_party event=elco_weapon_swap phase=handoff slot=%u tick=%lu\r\n",
+                    *equip_slot,(unsigned long)GetTickCount());
+            party_elco_swap.handed_off=TRUE;
+        }
+        if(complete) {
+            if(!party_actor_identity(w,owner,roster,targets,1u,TRUE) ||
+                !party_ranged_first_person_same_target(&target)) return FALSE;
+            set_animation_channel(target.renderer,&target.methods,target.submodels,
+                0,target.idle_selector,128,SUDEKIMP_RANGED_WEAPON_SWAP_RATE,TRUE);
+            if(!animation_channel_matches(target.renderer,&target.methods,target.submodels,
+                    0,target.idle_selector,SUDEKIMP_RANGED_WEAPON_SWAP_RATE)) return FALSE;
+            party_elco_swap.active=FALSE;
+            SudekiMpLogFormat("lan_party event=elco_weapon_swap phase=end slot=%u tick=%lu\r\n",
+                party_elco_swap.slot,(unsigned long)GetTickCount());
+        }
+    }
+    return party_actor_identity(w,owner,roster,targets,1u,TRUE) &&
+        party_ranged_first_person_same_target(&target);
+}
+static BOOL party_service_ailish_weapon_swap(
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanPartyLease *lease,
+    const SudekiMpLanPartyRosterObservation *roster,PartyMovementTarget targets[4],
+    const SudekiMpLanArenaActorSnapshot *snapshot,BOOL final) {
+    PartyRangedFirstPersonTarget target;
+    PartyAilishFirstPersonLease *prior=&party_ailish_first_person_lease;
+    if(final || party_ranged_weapon[1].native.active) return TRUE;
+    if(lease->seat!=3u || snapshot->actor_type!=SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+        !party_ailish_first_person_target(targets[3].character,&target) ||
+        !party_actor_identity(w,lease,roster,targets,3u,TRUE)) return FALSE;
+    BOOL same=prior->valid && prior->character==target.character &&
+        prior->component==target.component && prior->wrapper==target.wrapper &&
+        prior->renderer==target.renderer && prior->token==lease->token &&
+        prior->generation==lease->generation && prior->seat==lease->seat;
+    BOOL start=SudekiMpLanArenaClientShouldStartWeaponSwap(same,
+        client_ailish_first_person_camera_owns_facing(target.character),
+        snapshot->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_NONE,
+        prior->weapon_slot,snapshot->weapon_slot_plus_one);
+    /* Preserve Ailish's existing C1 presentation; her native shot journal now
+     * owns fire/reload. This cosmetic lease never seeks either native clip. */
+    if(!same) {
+        ZeroMemory(prior,sizeof(*prior));
+        prior->character=target.character; prior->component=target.component;
+        prior->wrapper=target.wrapper; prior->renderer=target.renderer;
+        prior->token=lease->token; prior->generation=lease->generation;
+        prior->seat=lease->seat; prior->valid=TRUE;
+    }
+    if(!start && !prior->weapon_swap) {
+        prior->weapon_slot=snapshot->weapon_slot_plus_one;
+        return TRUE;
+    }
+    uint32_t handle; int selector;
+    if(!resolve_ailish_first_person_selector(target.component,target.renderer,
+            0xc1u,8,&handle,&selector) || !ailish_swap_resource_matches(target.renderer))
+        return FALSE;
+    if(start) {
+        LanArenaNativeRangedLease native={0}; BOOL idle=FALSE;
+        native.character=target.character; native.component=target.component;
+        native.combat=*(uint8_t **)(target.character+0xbcu);
+        native.arbiter=*(uint8_t **)(target.character+0x90u);
+        if(!observe_native_ranged(&native,&idle)) return FALSE;
+        if(!idle) return TRUE;
+        prior->weapon_slot=snapshot->weapon_slot_plus_one;
+        prior->weapon_swap=TRUE;
+        set_animation_channel(target.renderer,&target.methods,target.submodels,
+            0,selector,1,24.0f,TRUE);
+    } else {
+        BOOL complete=TRUE;
+        for(unsigned sub=0;sub<target.submodels;++sub) {
+            float time=target.methods.get_time(target.renderer,0,sub);
+            if(!isfinite(time) || time<0.0f) return FALSE;
+            if(target.methods.get_selector(target.renderer,0,sub)!=selector) {
+                prior->weapon_swap=FALSE; /* A later native owner keeps its channel. */
+                return TRUE;
             }
             if(!SudekiMpLanArenaClientWeaponSwapComplete(time)) complete=FALSE;
         }
-        if(!complete) {
-            prior->weapon_slot=snapshot->weapon_slot_plus_one;
-            return party_combat_identity(w,lease,roster,targets) &&
-                party_ailish_first_person_same_target(&target);
+        if(complete) {
+            if(!party_actor_identity(w,lease,roster,targets,3u,TRUE) ||
+                !party_ranged_first_person_same_target(&target)) return FALSE;
+            set_animation_channel(target.renderer,&target.methods,target.submodels,
+                0,target.idle_selector,128,24.0f,TRUE);
+            prior->weapon_swap=FALSE;
         }
-        swap_finished=TRUE;
     }
-    transition=!same_owner || prior->action_variant!=snapshot->action_variant ||
-        prior->action_sequence!=snapshot->action_sequence || swap_finished ||
-        prior->weapon_swap;
-    if(!weak_attack && !swap_transition && !prior->weapon_swap &&
-        (reload_active || reload_complete || (weapon && weapon->valid))) {
-        int current=target.methods.get_selector(target.renderer,0,0);
-        BOOL keep_completed=current==target.reload_complete_selector &&
-            prior->reload_complete;
-        int wanted=reload_active?target.reload_selector:
-            ((reload_finished || keep_completed)?target.reload_complete_selector:
-                target.idle_selector);
-        transition=current!=wanted || reload_started;
-    }
-    if(!transition) {
-        prior->weapon_slot=snapshot->weapon_slot_plus_one;
-        if(!weak_attack) return TRUE;
-        return party_combat_identity(w,lease,roster,targets) &&
-            party_ailish_first_person_same_target(&target) &&
-            synchronize_action_phase(
-                target.renderer,&target.methods,target.submodels,0,snapshot) &&
-            party_combat_identity(w,lease,roster,targets) &&
-            party_ailish_first_person_same_target(&target);
-    }
-    selector=weak_attack?target.fire_selector:
-        (reload_active?target.reload_selector:
-        ((reload_finished || (reload_complete &&
-            target.methods.get_selector(target.renderer,0,0)==
-                target.reload_complete_selector)) ?
-            target.reload_complete_selector:target.idle_selector));
-    state=weak_attack || reload_active || reload_finished?1:128;
-    if(!party_combat_identity(w,lease,roster,targets) ||
-        !party_ailish_first_person_same_target(&target)) return FALSE;
-    set_animation_channel(target.renderer,&target.methods,target.submodels,
-        0,selector,state,24.0f,weak_attack || swap_finished ||
-            reload_started || reload_finished);
-    if(weak_attack && !synchronize_action_phase(
-            target.renderer,&target.methods,target.submodels,0,snapshot)) return FALSE;
-    if(!animation_channel_matches(target.renderer,&target.methods,
-            target.submodels,0,selector,24.0f) ||
-        !party_combat_identity(w,lease,roster,targets) ||
-        !party_ailish_first_person_same_target(&target)) return FALSE;
-    prior->action_sequence=snapshot->action_sequence;
-    prior->action_variant=snapshot->action_variant;
-    prior->weapon_slot=snapshot->weapon_slot_plus_one;
-    prior->weapon_swap=FALSE;
-    (void)final;
-    return TRUE;
+    return party_actor_identity(w,lease,roster,targets,3u,TRUE) &&
+        party_ranged_first_person_same_target(&target);
 }
 static BOOL party_retire_ailish_first_person(
     const SudekiMpControlUpdateDispatchWitness *w) {
     PartyAilishFirstPersonLease *prior=&party_ailish_first_person_lease;
     SudekiMpCleanroomActor actor;
-    PartyAilishFirstPersonTarget target;
+    PartyRangedFirstPersonTarget target;
     BOOL owned=TRUE,already_idle=TRUE;
+    if(!party_retire_elco_weapon_swap(w)) return FALSE;
     if(!prior->valid) return TRUE;
     if(w && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w))
         return FALSE;
@@ -8771,8 +9172,7 @@ static BOOL party_retire_ailish_first_person(
         int current=target.methods.get_selector(target.renderer,0,sub);
         int current_state=target.methods.get_state(target.renderer,0,sub);
         BOOL known=(current==target.idle_selector && current_state==128) ||
-            (current==target.fire_selector && current_state==1) ||
-            (current==8 && current_state==1);
+            (prior->weapon_swap && current==8 && current_state==1);
         if(!known) owned=FALSE;
         if(current!=target.idle_selector || current_state!=128) already_idle=FALSE;
     }
@@ -8782,13 +9182,14 @@ static BOOL party_retire_ailish_first_person(
         ZeroMemory(prior,sizeof(*prior));
         return TRUE;
     }
-    if((w && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) ||
-        !party_ailish_first_person_same_target(&target)) return FALSE;
+    if(party_ranged_weapon[1].native.active ||
+        (w && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) ||
+        !party_ranged_first_person_same_target(&target)) return FALSE;
     set_animation_channel(target.renderer,&target.methods,target.submodels,
         0,target.idle_selector,128,24.0f,TRUE);
     if(!animation_channel_matches(target.renderer,&target.methods,
             target.submodels,0,target.idle_selector,24.0f) ||
-        !party_ailish_first_person_same_target(&target)) return FALSE;
+        !party_ranged_first_person_same_target(&target)) return FALSE;
     ZeroMemory(prior,sizeof(*prior));
     return TRUE;
 }
@@ -8805,6 +9206,9 @@ static BOOL party_apply_combat_weapon(PartyMovementTarget *target,
         prior->weapon_attempt_actor=NULL; prior->weapon_attempt_slot=0;
         return TRUE;
     }
+    for(unsigned i=0;i<2u;++i)
+        if(target->character==party_ranged_weapon[i].native.character &&
+            !party_drain_ranged_weapon(i)) return TRUE;
     if(prior->weapon_attempt_actor==target->character &&
         prior->weapon_attempt_slot==snapshot->weapon_slot_plus_one) return TRUE;
     if(SudekiMpCleanroomEngineRangedCombatPrimePending() ||
@@ -8820,8 +9224,326 @@ static BOOL party_apply_combat_weapon(PartyMovementTarget *target,
     }
     return TRUE;
 }
+static BOOL party_combat_rejected(const char *stage,unsigned seat,BOOL final) {
+    static DWORD last_trace;
+    DWORD now=GetTickCount();
+    if(!last_trace || now-last_trace>=2000u) {
+        SudekiMpLogFormat("lan_party event=combat_playback_rejected local=%u stage=%s actor_seat=%u final=%u tick=%lu\r\n",
+            SudekiMpLanPartyLocalSeat(party_replica_session),stage,seat,final,(unsigned long)now);
+        last_trace=now;
+    }
+    return FALSE;
+}
+static BOOL party_apply_combat_facing(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease,unsigned seat,PartyMovementTarget *target,
+    const float direction[3],BOOL final) {
+    uint8_t *arbiter;
+    float x,z,length,dot;
+    if(!readable_memory(target->character,0x94u)) return FALSE;
+    arbiter=*(uint8_t **)(target->character+0x90u);
+    if(!readable_memory(arbiter,0x54u) ||
+        *(void **)arbiter!=game_base+0x2cc9acu ||
+        *(void **)(arbiter+0x10u)!=target->character) return FALSE;
+    /* The local ranged camera owns its current mouse-facing sample. A delayed
+     * host reply must not turn that camera back before aim makes a round trip. */
+    if(seat==lease->seat &&
+        ((target->motion.ranged &&
+          (*(uint32_t *)(arbiter+0x50u)&AILISH_FIRST_PERSON_ARBITER_FLAG)) ||
+         SudekiMpLanPartyCastTargeting(target->character))) return TRUE;
+    if(!final && !SudekiMpLanPartyControlPresentationFacing(
+            w,seat,target->character,direction)) return FALSE;
+    x=*(float *)(target->position+0x50u); z=*(float *)(target->position+0x58u);
+    length=sqrtf(x*x+z*z);
+    dot=length>0.0001f?(x*direction[0]+z*direction[2])/length:-1.0f;
+    if(!isfinite(dot) || dot<=0.99996f)
+        call_position_set_forward(target->position,direction);
+    return TRUE;
+}
+static BOOL party_apply_skill_body(unsigned seat,PartyMovementTarget *t,
+    const SudekiMpLanArenaActorSnapshot *s,BOOL final) {
+    if(seat>=4u || !t || !s || s->actor_type!=SudekiMpLanPartyActorType(seat) ||
+        (s->skill_kind!=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_CHARACTER &&
+         s->skill_kind!=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) ||
+        !s->skill_active || !s->skill_sequence || !s->skill_presentation_valid ||
+        !SudekiMpLanArenaSkillPresentationValid(s,s->actor_type)) return FALSE;
+    /* The caller has proved all four actor/model/control identities and an
+     * idle local CSkill. These are body channels only: no native skill, camera,
+     * screen lighting, resource cost, projectile or damage is executed here. */
+    party_skill_body[seat].character=t->character;
+    party_skill_body[seat].renderer=t->renderer;
+    party_skill_body[seat].pose=*s;
+    party_skill_body[seat].valid=TRUE;
+    for(unsigned c=0;c<s->skill_presentation_channel_count;++c) {
+        set_animation_channel(t->renderer,&t->methods,t->submodels,(int)c,
+            s->skill_presentation_selector[c],s->skill_presentation_state[c],
+            s->skill_presentation_rate[c],FALSE);
+        if(!final && !synchronize_channel_phase(t->renderer,&t->methods,
+            t->submodels,(int)c,s->skill_presentation_time[c])) return FALSE;
+    }
+    for(unsigned c=0;c<(seat==0u || seat==2u?3u:4u);++c)
+        t->methods.set_blend(t->renderer,(int)c,s->skill_presentation_blend[c]);
+    return TRUE;
+}
+static BOOL party_retire_skill_body(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor) {
+    PartyMovementTarget t;
+    BOOL ours=TRUE;
+    if(!key || key->seat>=4u) return FALSE;
+    unsigned seat=key->seat;
+    int idle=SudekiMpLanPartyCombatMotionSelector(SudekiMpLanPartyActorType(seat),1u);
+    if(!party_skill_body[seat].valid) return TRUE;
+    if(actor!=party_skill_body[seat].character ||
+        !SudekiMpLanPartyControlRetains(w,key,actor) ||
+        !SudekiMpLanPartyMovementDrained(key,actor,w) ||
+        !party_combat_target(seat,&party_skill_body[seat].pose,&t) ||
+        t.character!=actor || t.renderer!=party_skill_body[seat].renderer ||
+        idle<0 || !party_loaded_selector(&t,idle)) return FALSE;
+    unsigned count=party_skill_body[seat].pose.skill_presentation_channel_count;
+    for(unsigned c=0;c<count;++c) for(unsigned sub=0;sub<t.submodels;++sub)
+        if(t.methods.get_selector(t.renderer,(int)c,sub)!=
+                party_skill_body[seat].pose.skill_presentation_selector[c] ||
+            t.methods.get_state(t.renderer,(int)c,sub)!=
+                party_skill_body[seat].pose.skill_presentation_state[c]) ours=FALSE;
+    /* A new native owner wins. Otherwise retire only our cosmetic channels;
+     * this lease has never created an asynchronous native task to cancel. */
+    if(ours) {
+        for(unsigned c=0;c<count;++c)
+            set_animation_channel(t.renderer,&t.methods,t.submodels,(int)c,
+                c?0:idle,c?192:128,c?0.0f:12.0f,TRUE);
+        for(unsigned c=0;c<(seat==0u || seat==2u?3u:4u);++c) t.methods.set_blend(t.renderer,(int)c,0.0f);
+    }
+    ZeroMemory(&party_skill_body[seat],sizeof(party_skill_body[seat]));
+    return TRUE;
+}
+static BOOL party_apply_ranged_body(PartyMovementTarget *t,unsigned index,
+    const SudekiMpLanPartyRangedPresentation *p,BOOL transition,BOOL final) {
+    SudekiMpLanPartyRangedPresentation *previous=&party_ranged_presented[index];
+    int selector=SudekiMpLanPartyRangedClipSelector(
+        index==0u?SUDEKIMP_LAN_ARENA_ELCO_TYPE:SUDEKIMP_LAN_ARENA_AILISH_TYPE,p->clip);
+    BOOL restart=transition || !previous->valid || previous->sequence!=p->sequence;
+    if(!p->valid || !SudekiMpLanPartyRangedPresentationValid(p) || selector<0 ||
+        ((transition || !previous->valid || previous->clip!=p->clip) &&
+         !party_loaded_selector(t,selector))) return FALSE;
+    set_animation_channel(t->renderer,&t->methods,t->submodels,4,
+        selector,p->state,p->rate,restart && !final);
+    if(!final && !synchronize_channel_phase(t->renderer,&t->methods,
+        t->submodels,4,p->time)) return FALSE;
+    t->methods.set_blend(t->renderer,3,p->blend);
+    if(!final) *previous=*p;
+    return TRUE;
+}
+static BOOL party_observe_ranged_weapon(const LanArenaNativeRangedLease *n,
+    BOOL world,BOOL *idle) {
+    void *renderer;
+    uint8_t *component;
+    LanArenaAnimationMethods methods;
+    if(!observe_native_ranged(n,idle)) return FALSE;
+    if(!world) return TRUE;
+    if(!actor_presentation_renderer(n->character,1u,&renderer,&component) ||
+        component!=n->component || renderer!=n->renderer ||
+        !animation_methods(renderer,&methods)) return FALSE;
+    float blend=methods.get_blend(renderer,3);
+    if(!isfinite(blend) || blend<0.0f || blend>1.0f) return FALSE;
+    /* The manager can be idle before the third-person arm has blended out.
+     * Native +138 is the queued channel-four request, and Update at 5884c0
+     * retires that channel's blend through 588630. Retain this lease through
+     * the release; never infer native idle from the snapshot's later phase. */
+    if(*(uint32_t *)(component+0x138u)!=0u || blend!=0.0f) *idle=FALSE;
+    return TRUE;
+}
+static BOOL party_drain_ranged_weapon(unsigned index) {
+    PartyNativeWeapon *weapon=&party_ranged_weapon[index];
+    unsigned seat=index==0u?1u:3u;
+    BOOL idle=FALSE;
+    if(!weapon->native.active) return TRUE;
+    if(GetCurrentThreadId()!=weapon->thread || !client_apply_damage_hook.installed ||
+        !party_observe_ranged_weapon(&weapon->native,weapon->owner.seat!=seat,&idle) || !idle) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    SudekiMpLogFormat("lan_party event=ranged_replica_drain actor_seat=%u seat=%u sequence=%u emitted=%u tick=%lu\r\n",
+        seat,weapon->owner.seat,weapon->native.sequence,
+        weapon->native.weapon_fired,(unsigned long)GetTickCount());
+    weapon->native.active=FALSE;
+    InterlockedExchange(&party_ranged_native_pending[index],0);
+    return TRUE;
+}
+static BOOL party_drain_ranged_weapons(void) {
+    BOOL elco=party_drain_ranged_weapon(0u);
+    BOOL ailish=party_drain_ranged_weapon(1u);
+    return elco && ailish;
+}
+BOOL SudekiMpLanPartyClientCallbacksRetained(void) {
+    return SudekiMpLanPartyCastCallbacksRetained() ||
+        InterlockedCompareExchange(&party_ranged_native_pending[0],0,0)!=0 ||
+        InterlockedCompareExchange(&party_ranged_native_pending[1],0,0)!=0 ||
+        InterlockedCompareExchange(&party_projectile_terminal_unknown,0,0)!=0;
+}
+static BOOL party_ranged_resources(void *actor,uint8_t type,void *local,uint8_t item,
+    uint16_t charge,uint16_t reload,BOOL preserve) {
+    return client_apply_damage_hook.installed &&
+        SudekiMpSetRangedPresentationResources(actor,type,local,item,charge,reload,preserve);
+}
+static BOOL party_service_ranged_weapon(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *owner,const SudekiMpLanPartyRosterObservation *roster,
+    PartyMovementTarget targets[4],const SudekiMpLanPartyFrame *frame,unsigned seat,BOOL final) {
+    unsigned index=seat==1u?0u:1u;
+    uint8_t type=SudekiMpLanPartyActorType(seat);
+    PartyNativeWeapon *playback=&party_ranged_weapon[index];
+    const SudekiMpLanArenaActorSnapshot *s=&frame->chunk[seat/2u].seat[seat%2u];
+    SudekiMpLanWeaponState ailish;
+    if(seat==3u && !SudekiMpLanPartyAilishWeaponJournal(&frame->ailish_weapon,&ailish)) return FALSE;
+    const SudekiMpLanWeaponState *weapon=seat==1u?&s->weapon:&ailish;
+    LanArenaNativeRangedLease *n=&playback->native;
+    PartyMovementTarget *t=&targets[seat];
+    SudekiMpElcoWeaponObservation observed;
+    LanArenaNativeRangedLease candidate={0};
+    BOOL idle=FALSE;
+    if(!weapon->valid) return party_drain_ranged_weapon(index);
+    if(!client_apply_damage_hook.installed || !SudekiMpLanRangedWeaponStateValid(weapon,type) ||
+        !party_actor_identity(w,owner,roster,targets,seat,TRUE)) return FALSE;
+    if(!playback->initialized || playback->owner.token!=owner->token ||
+        playback->owner.generation!=owner->generation ||
+        playback->owner.seat!=owner->seat || n->character!=t->character) {
+        if(n->active) return FALSE;
+        ZeroMemory(playback,sizeof(*playback));
+        playback->owner=*owner; n->character=t->character;
+        playback->thread=GetCurrentThreadId();
+        playback->cursor=weapon->shot_count?
+            weapon->shots[weapon->shot_count-1u].sequence:0u;
+        playback->initialized=TRUE;
+    }
+    if(n->active) {
+        if(!party_observe_ranged_weapon(n,owner->seat!=seat,&idle)) return FALSE;
+        if(!final && n->weapon_fired && weapon->item==n->weapon_item) {
+            uint16_t reload;
+            if(!SudekiMpLanRangedWeaponPlaybackReloadMs(type,weapon,n->weapon_item,n->sequence,
+                    frame->chunk[0].host_tick,&reload) ||
+                !party_ranged_resources(t->character,type,roster->actors[owner->seat],
+                    weapon->item,weapon->charge_q8,reload,TRUE)) return FALSE;
+        }
+        if(!idle) return TRUE;
+        if(!party_drain_ranged_weapon(index)) return FALSE;
+    }
+    if(final || !s->ranged_aim_valid || (seat==1u && !s->ranged_target_valid) || s->skill_active ||
+        (seat==1u && owner->seat==1u && party_elco_swap.active) ||
+        (seat==3u && owner->seat==3u && party_ailish_first_person_lease.weapon_swap))
+        return TRUE;
+    if(!SudekiMpObserveRangedWeapon(t->character,type,&observed) || observed.item!=weapon->item)
+        return TRUE; /* Native equipment handoff still owns this actor. */
+    candidate.character=t->character;
+    candidate.component=*(uint8_t **)(t->character+0x134u);
+    candidate.combat=*(uint8_t **)(t->character+0xbcu);
+    candidate.arbiter=*(uint8_t **)(t->character+0x90u);
+    candidate.renderer=t->renderer;
+    if(!readable_memory(candidate.component,0x168u) ||
+        *(void **)candidate.component!=game_base+0x2d5464u ||
+        !readable_memory(candidate.arbiter,0x64u) ||
+        *(void **)candidate.arbiter!=game_base+0x2cc9acu ||
+        !party_observe_ranged_weapon(&candidate,owner->seat!=seat,&idle)) return FALSE;
+    /* Native first-person arms own their own bank and asynchronous firing
+     * sequence. Observers retain that actor's world bank with its actor-local
+     * missile manager; no local controller or global seat is reassigned. */
+    if(owner->seat==seat) {
+        LanArenaAilishModelWitness model;
+        if(!ailish_desired_model_attached(t->character,candidate.component,
+                candidate.arbiter,t->position,&model) || !model.first_person) return TRUE;
+        candidate.renderer=model.first_person_renderer;
+    }
+    const SudekiMpLanWeaponShot *shot=SudekiMpLanRangedWeaponNextShot(type,weapon,observed.item,
+        frame->chunk[0].host_tick,&playback->cursor);
+    if(!shot) return party_ranged_resources(t->character,type,roster->actors[owner->seat],
+        weapon->item,weapon->charge_q8,weapon->reload_ms,TRUE);
+    if(!idle || elco_native_weapon_start_scope) return TRUE;
+    unsigned gun_clip=SudekiMpLanPartyWeaponClip(type,shot->item);
+    if(!gun_clip || shot->pre_charge_q8/256.0f<observed.required_charge ||
+        !party_loaded_selector(t,SudekiMpLanPartyRangedClipSelector(
+            type,gun_clip))) return FALSE;
+    /* Validate this selected item's actual world semantic against its closed
+     * actor-specific mapping before native entry; Ailish 23 deliberately has
+     * heavy world fire with a light first-person clip. */
+    uint8_t *world_record=*(uint8_t **)(candidate.combat+0x60u);
+    uint32_t world_handle; int world_selector;
+    if(!readable_memory(world_record,0xc4u) ||
+        *(uint32_t *)(world_record+0x98u)!=0x84u+gun_clip ||
+        !resolve_ailish_first_person_selector(candidate.component,t->renderer,
+            0x84u+gun_clip,SudekiMpLanPartyRangedClipSelector(type,gun_clip),
+            &world_handle,&world_selector)) return FALSE;
+    if(owner->seat==seat) {
+        uint8_t *record=*(uint8_t **)(candidate.combat+0x60u);
+        uint32_t handle; int selector;
+        if(!readable_memory(record,0xc4u)) return FALSE;
+        unsigned id=*(uint32_t *)(record+0x9cu);
+        if(id<140u || id>142u || !resolve_ailish_first_person_selector(candidate.component,
+            candidate.renderer,id,SudekiMpLanArenaRangedCombatSelector(
+                type,(uint8_t)id),&handle,&selector)) return FALSE;
+    }
+    /* Retain the existing containment module before native entry. Projectile
+     * termination is not established by the ranged animation's idle witness;
+     * explicit runtime teardown must retain its damage guard after emission.
+     * Ordinary disconnect/rejoin keeps that guard installed and may proceed. */
+    if(!client_replica_containment_pinned) {
+        retain_client_replica_callbacks("party_projectile_containment",ERROR_BUSY);
+        if(!client_replica_containment_pinned) return FALSE;
+    }
+    if(!party_actor_identity(w,owner,roster,targets,seat,TRUE) ||
+        !party_ranged_resources(t->character,type,roster->actors[owner->seat],shot->item,
+            shot->pre_charge_q8,0u,FALSE)) return FALSE;
+    candidate.sequence=shot->sequence; candidate.weapon_item=shot->item;
+    candidate.active=TRUE; candidate.weapon_shot=TRUE;
+    *n=candidate; playback->cursor=shot->sequence;
+    InterlockedExchange(&party_ranged_native_pending[index],1);
+    for(unsigned i=0;i<3u;++i) {
+        playback->direction[i]=s->ranged_aim[i]==INT16_MIN?-1.0f:s->ranged_aim[i]/32767.0f;
+        const float position[3]={s->x,s->y,s->z};
+        playback->target[i]=s->ranged_target_valid?s->ranged_target[i]:
+            position[i]+playback->direction[i]*100.0f;
+    }
+    elco_native_weapon_start_scope=t->character;
+    elco_native_weapon_start_thread=GetCurrentThreadId();
+    SudekiMpSubmitArbiterCombatInput(game_base+RVA_ARBITER_COMBAT_INPUT,
+        n->arbiter,1,0,0,0,0,0);
+    elco_native_weapon_start_scope=NULL; elco_native_weapon_start_thread=0;
+    BOOL observed_after=observe_native_ranged(n,&idle);
+    SudekiMpLogFormat("lan_party event=ranged_replica_submit actor_seat=%u seat=%u sequence=%u item=%u tick=%lu host_tick=%lu observed=%u idle=%u arbiter_flags=%lu arbiter_state=%lu stage=%u animation=%u\r\n",
+        seat,owner->seat,shot->sequence,shot->item,(unsigned long)GetTickCount(),
+        (unsigned long)frame->chunk[0].host_tick,observed_after,observed_after && idle,
+        (unsigned long)(observed_after?*(uint32_t *)(n->arbiter+0x50):0),
+        (unsigned long)(observed_after?*(uint32_t *)(n->arbiter+0x58):0),
+        observed_after?n->combat[0xe0]:0,
+        observed_after?(*(uint8_t **)(n->component+0xf8))[2]:0);
+    return party_combat_identity(w,owner,roster,targets);
+}
+static BOOL party_retire_local_tal_dodge_shield(uint8_t *actor) {
+    uint8_t *block,*arbiter;
+    if(!readable_memory(actor,0xb8u) ||
+        *(void **)actor!=game_base+0x2d5010u) return FALSE;
+    block=*(uint8_t **)(actor+0xb4u);
+    arbiter=*(uint8_t **)(actor+0x90u);
+    if(!writable_memory(block,0x20u) || *(void **)block!=game_base+0x2d4b8cu ||
+        *(void **)(block+0x10u)!=actor ||
+        !writable_memory(arbiter,0x64u) || *(void **)arbiter!=game_base+0x2cc9acu ||
+        *(void **)(arbiter+0x10u)!=actor) return FALSE;
+    if(*(uint32_t *)(block+0x18u)==0u) return TRUE;
+    if(*(uint32_t *)(block+0x18u)>8u ||
+        !SudekiMpBlockResetImageMatches((HMODULE)game_base)) return FALSE;
+    /* Retail dodge dae00 calls CBlock::SetState(0) only after native dodge
+     * admission. The local replica has the host's dodge pose but no native
+     * CDodge, so its previous CBlock/effect can survive. Use CBlock's own
+     * reset (the same SetState(0)), including native effect-handle retirement.
+     * Never delete an effect, write block state, or start a client dodge. */
+    SudekiMpResetNativeBlock(game_base+0x18a4d0u,block);
+    BOOL cleared=readable_memory(actor,0xb8u) && *(void **)(actor+0xb4u)==block &&
+        *(void **)(actor+0x90u)==arbiter &&
+        readable_memory(block,0x20u) && *(void **)block==game_base+0x2d4b8cu &&
+        *(void **)(block+0x10u)==actor && *(uint32_t *)(block+0x18u)==0u;
+    SudekiMpLogFormat("lan_party event=tal_dodge_native_block_reset cleared=%u tick=%lu\r\n",
+        cleared,(unsigned long)GetTickCount());
+    return cleared;
+}
+
 static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
-    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame,BOOL final) {
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame,
+    const SudekiMpLanPartyFrame *confirmed,BOOL final) {
     PartyMovementTarget targets[4]; SudekiMpLanPartyRosterObservation roster;
     int action_selector[4]={0},action_state[4]={0}; unsigned action_channel[4]={0};
     BOOL transition[4],action_restart[4]; DWORD now=GetTickCount();
@@ -8829,56 +9551,103 @@ static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
         !lease || lease->seat!=SudekiMpLanPartyLocalSeat(party_replica_session) ||
         !lease->seat || lease->seat>=4 || !SudekiMpLanPartyLeaseActive(party_replica_session,lease) ||
         !SudekiMpLanPartyBasicCombatFrameValid(frame) ||
+        !confirmed || !SudekiMpLanPartyFrameValid(confirmed) ||
+        (int32_t)(confirmed->chunk[0].host_tick-frame->chunk[0].host_tick)<0 ||
         !SudekiMpLanPartyControlObserveRoster(w,&roster) || !roster.combat ||
-        roster.present_mask!=15) return FALSE;
+        roster.present_mask!=15) return party_combat_rejected("roster",4u,final);
     if(lease->token!=party_presentation_generation.token ||
         lease->generation!=party_presentation_generation.generation ||
         lease->seat!=party_presentation_generation.seat) {
         if(!party_retire_ailish_first_person(w)) return FALSE;
         memset(party_presentation_leases,0,sizeof(party_presentation_leases));
+        ZeroMemory(party_ranged_presented,sizeof(party_ranged_presented));
         party_presentation_generation=*lease;
     }
     memset(targets,0,sizeof(targets));
     for(unsigned i=0;i<4;++i) {
         const SudekiMpLanArenaActorSnapshot *s=&frame->chunk[i/2].seat[i%2];
         PartyMovementTarget *t=&targets[i]; LanArenaPresentationLease *prior=&party_presentation_leases[i];
-        if(!party_combat_target(i,s,t) || t->character!=roster.actors[i] ||
-            !SudekiMpLanPartyMovementDrained(&(SudekiMpLanPartyLease){lease->token,
-                lease->generation,(uint8_t)i},t->character,w)) return FALSE;
+        if(!party_combat_target(i,s,t) || t->character!=roster.actors[i])
+            return party_combat_rejected("actor_target",i,final);
+        if(!SudekiMpLanPartyCastNativeBody(t->character) &&
+            !SudekiMpLanPartyCombatPresentationReady(&(SudekiMpLanPartyLease){lease->token,
+                lease->generation,(uint8_t)i},t->character,w))
+            return party_combat_rejected("actor_body_ready",i,final);
         transition[i]=!prior->valid || prior->character!=t->character || prior->renderer!=t->renderer;
         action_restart[i]=transition[i] || prior->action_restart_pending ||
             prior->action_sequence!=s->action_sequence ||
             prior->action_variant!=s->action_variant;
         if(s->action_variant && !party_combat_action(s->actor_type,s->action_variant,
                 &action_selector[i],&action_state[i],&action_channel[i])) return FALSE;
-        for(unsigned c=0;c<4;++c) {
+        if((i==1u || i==3u) && s->action_variant) {
+            unsigned clip=frame->ranged[i==1u?0u:1u].clip;
+            if(!clip && i==1u) clip=SudekiMpLanPartyElcoWeaponClip(s->weapon.item);
+            if(!clip && i==3u) clip=1u;
+            action_selector[i]=SudekiMpLanPartyRangedClipSelector(s->actor_type,clip);
+            if(action_selector[i]<0) return FALSE;
+        }
+        for(unsigned c=0;c<4 && !s->skill_active;++c) {
             int selector=SudekiMpLanPartyCombatMotionSelector(s->actor_type,s->locomotion.clip[c]);
             if(selector<0 || ((transition[i] || !prior->locomotion.valid ||
                 prior->locomotion.clip[c]!=s->locomotion.clip[c]) &&
-                !party_loaded_selector(t,selector))) return FALSE;
+                !party_loaded_selector(t,selector)))
+                return party_combat_rejected("locomotion_resource",i,final);
         }
+        if(s->skill_active) for(unsigned c=0;c<s->skill_presentation_channel_count;++c)
+            if((transition[i] || !party_skill_body[i].valid ||
+                party_skill_body[i].character!=t->character ||
+                party_skill_body[i].renderer!=t->renderer ||
+                party_skill_body[i].pose.skill_presentation_selector[c]!=
+                    s->skill_presentation_selector[c]) &&
+                !party_loaded_selector(t,s->skill_presentation_selector[c]))
+                return party_combat_rejected("skill_body_resource",i,final);
         if(s->action_variant && (transition[i] ||
             prior->action_sequence!=s->action_sequence ||
             prior->action_variant!=s->action_variant) &&
-            !party_loaded_selector(t,action_selector[i])) return FALSE;
+            !party_loaded_selector(t,action_selector[i]))
+            return party_combat_rejected("action_resource",i,final);
     }
     if(!party_combat_identity(w,lease,&roster,targets)) return FALSE;
     for(unsigned i=0;i<4;++i) {
         const SudekiMpLanArenaActorSnapshot *s=&frame->chunk[i/2].seat[i%2];
         PartyMovementTarget *t=&targets[i]; LanArenaPresentationLease *prior=&party_presentation_leases[i];
         const SudekiMpLanArenaLocomotion *m=&s->locomotion;
-        unsigned count=4; DWORD elapsed=prior->last_early_apply_at?now-prior->last_early_apply_at:17;
+        SudekiMpLanArenaLocomotion previous_motion=prior->locomotion;
+        BOOL native_body=SudekiMpLanPartyCastNativeBody(t->character);
+        unsigned count=(s->skill_active || native_body)?0u:4u;
+        DWORD elapsed=prior->last_early_apply_at?now-prior->last_early_apply_at:17;
         float coordinates[3]={s->x,s->y,s->z},facing[3]={s->facing_x,0,s->facing_z};
+        if(i==0u || i==2u) {
+            /* Retain the complete cosmetic body before its first mutation,
+             * including failure recovery with no accepted action variant. */
+            prior->combat_mode=count!=0u;
+            if(count) {
+                prior->character=t->character; prior->renderer=t->renderer;
+                prior->locomotion=*m; prior->valid=TRUE;
+            }
+        }
+        if(i==2u && lease->seat==2u && !final && count==4u) {
+            int primary=SudekiMpLanPartyCombatMotionSelector(s->actor_type,m->clip[0]);
+            if(primary==29 || primary==30 || primary==31) {
+                if(!party_actor_identity(w,lease,&roster,targets,i,TRUE)) return FALSE;
+                BOOL cleaned=party_retire_local_tal_dodge_shield(t->character);
+                static BOOL cleanup_failed;
+                if(cleanup_failed!=!cleaned) {
+                    cleanup_failed=!cleaned;
+                    SudekiMpLogFormat("lan_party event=tal_dodge_shield_cleanup ready=%u policy=native_replica_block_reset_host_damage_unchanged\r\n",
+                        cleaned);
+                }
+                if(!party_actor_identity(w,lease,&roster,targets,i,TRUE)) return FALSE;
+            }
+        }
         for(unsigned c=0;c<count;++c) {
             int selector=SudekiMpLanPartyCombatMotionSelector(s->actor_type,m->clip[c]);
-            BOOL restart=transition[i] || !prior->locomotion.valid ||
-                prior->locomotion.clip[c]!=m->clip[c] || m->time[c]<prior->locomotion.time[c];
-            BOOL fresh=restart || m->time[c]!=prior->locomotion.time[c] ||
-                m->rate[c]!=prior->locomotion.rate[c];
+            BOOL restart=transition[i] || !previous_motion.valid ||
+                previous_motion.clip[c]!=m->clip[c] || m->time[c]<previous_motion.time[c];
+            BOOL fresh=restart || m->time[c]!=previous_motion.time[c] ||
+                m->rate[c]!=previous_motion.rate[c];
             float phase,rate=m->rate[c]; BOOL seek=FALSE;
-            if(!party_combat_identity(w,lease,&roster,targets)) return FALSE;
-            if(c==0 && (s->actor_type==SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
-                s->actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE) && s->action_variant) continue;
+            if(!party_actor_identity(w,lease,&roster,targets,i,TRUE)) return FALSE;
             if(!SudekiMpLanArenaClientLocomotionPhase(m->time[c],m->rate[c],elapsed,final,&phase))
                 return FALSE;
             for(unsigned sub=0;sub<t->submodels;++sub) {
@@ -8896,34 +9665,67 @@ static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
                 }
             }
         }
-        if(!party_combat_identity(w,lease,&roster,targets)) return FALSE;
-        if(!party_apply_combat_weapon(t,s,prior) ||
-            !party_combat_identity(w,lease,&roster,targets)) return FALSE;
-        /* Elco's first-person window owns the native local controller and
-         * reload display. Reconcile only that exact local actor through the
-         * existing controller-checked weapon adapter; other seats remain
-         * renderer-only observers of this host state. */
-        if(!final && i==1u && lease->seat==1u &&
-            (!s->weapon.valid || !SudekiMpSyncElcoPresentationResources(
-                t->character,s->weapon.item,s->weapon.charge_q8,
-                s->weapon.reload_ms))) return FALSE;
+        if(!party_actor_identity(w,lease,&roster,targets,i,TRUE)) return FALSE;
+        SudekiMpLanArenaActorSnapshot equipment=*s;
+        if(i==1u && lease->seat==1u) {
+            const SudekiMpLanArenaActorSnapshot *latest=&confirmed->chunk[0].seat[1];
+            if(!party_service_elco_weapon_swap(w,lease,&roster,targets,latest,final,
+                    &equipment.weapon_slot_plus_one))
+                return party_combat_rejected("elco_swap",i,final);
+        }
+        if(!party_apply_combat_weapon(t,&equipment,prior) ||
+            !party_actor_identity(w,lease,&roster,targets,i,TRUE))
+            return party_combat_rejected("weapon_selection",i,final);
         set_position(t->position,coordinates);
-        if(!final && !SudekiMpLanPartyControlPresentationFacing(w,i,t->character,facing))
+        if(!party_apply_combat_facing(w,lease,i,t,facing,final) ||
+            !party_actor_identity(w,lease,&roster,targets,i,TRUE))
             return FALSE;
-        if(!final && !SudekiMpCleanroomEngineSetActorResources(t->actor,(float)s->hp,(float)s->sp))
-            return FALSE;
+        if(i==3u && lease->seat==3u && !s->skill_active && !native_body &&
+            !party_service_ailish_weapon_swap(w,lease,&roster,targets,&equipment,final))
+            return party_combat_rejected("ailish_swap",i,final);
+        /* The native muzzle uses this frame's position and facing. Each view
+         * retains its own shot lifetime and the client damage guard. */
+        if((i==1u || i==3u) && confirmed->chunk[0].combat_enabled &&
+            !party_service_ranged_weapon(w,lease,&roster,targets,confirmed,i,final))
+            return party_combat_rejected("ranged_resources",i,final);
+        const SudekiMpLanArenaActorSnapshot *resources=&confirmed->chunk[i/2].seat[i%2];
+        if(!final && !SudekiMpCleanroomEngineSetActorResources(t->actor,
+                (float)resources->hp,(float)resources->sp)) return FALSE;
         /* Record the presentation lifetime before entering an action selector.
          * A disconnect/reentrant lifecycle callback must see the lease even
          * if a native renderer setter fails halfway through this frame. */
         if(s->action_variant) {
-            if(!party_combat_identity(w,lease,&roster,targets)) return FALSE;
+            if(!party_actor_identity(w,lease,&roster,targets,i,TRUE)) return FALSE;
             prior->action_restart_pending=action_restart[i];
             prior->character=t->character; prior->renderer=t->renderer;
             prior->action_variant=s->action_variant;
             prior->action_sequence=s->action_sequence;
             prior->combat_state=s->combat_state; prior->valid=TRUE;
         }
-        if(t->motion.ranged) {
+        if(native_body) {
+            /* The host-approved CSkill owns its exact renderer and authored
+             * events through natural task retirement. Do not restart it from
+             * a snapshot or replace its outgoing body with combat idle. */
+        } else if(s->skill_active) {
+            if(!party_apply_skill_body(i,t,s,final)) return FALSE;
+        } else if(i==0u || i==2u) {
+            /* All four validated native melee channels were applied above,
+             * including recovery and the outgoing attack blend. Do not put a
+             * reconstructed action at a fixed rate over the host's result. */
+        } else if((i==1u || i==3u) && lease->seat!=i) {
+            /* The observer's actor-local native missile graph owns channel four
+             * and blend three, including startup and the release to idle.
+             * A host snapshot is already past its emission event by the
+             * time the confirmed shot journal reaches this view. Seeking
+             * that phase over the local graph skips its muzzle event (and
+             * restarting/clearing it aborts the native shot). Keep this
+             * ownership even BETWEEN shots so a cosmetic host clip cannot
+             * run ahead of the next confirmed native entry. Locomotion and
+             * position still follow the host; Elco's own FP bank is separate. */
+        } else if(t->motion.ranged && frame->ranged[i==1u?0u:1u].valid) {
+            if(!party_apply_ranged_body(t,i==1u?0u:1u,
+                &frame->ranged[i==1u?0u:1u],transition[i],final)) return FALSE;
+        } else if(t->motion.ranged) {
             BOOL firing=s->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_NONE;
             set_animation_channel(t->renderer,&t->methods,t->submodels,4,
                 firing?action_selector[i]:0,firing?action_state[i]:192,
@@ -8940,11 +9742,13 @@ static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
             if(!synchronize_action_phase(t->renderer,&t->methods,t->submodels,
                     (int)action_channel[i],s)) return FALSE;
         }
-        if(i==3u && lease->seat==3u &&
-            !party_apply_ailish_first_person(
-                w,lease,&roster,targets,s,&frame->ailish_weapon,final)) return FALSE;
+        /* Ailish's first-person shot/reload now belongs to her confirmed
+         * native projectile lease. Never seek cosmetic firing over it. */
         prior->action_restart_pending=FALSE;
-        for(unsigned c=0;c<3;++c) t->methods.set_blend(t->renderer,(int)c,m->blend[c]);
+        if(!s->skill_active && !native_body) {
+            for(unsigned c=0;c<3;++c) t->methods.set_blend(t->renderer,(int)c,m->blend[c]);
+            ZeroMemory(&party_skill_body[i],sizeof(party_skill_body[i]));
+        }
         prior->character=t->character; prior->renderer=t->renderer;
         prior->animation_state=s->animation_state; prior->combat_state=s->combat_state;
         prior->action_variant=s->action_variant; prior->action_sequence=s->action_sequence;
@@ -8957,7 +9761,7 @@ static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
             if((parent && parent!=4u) || !position_world_matrix ||
                 !readable_memory(object,0xd0u) || !writable_memory(t->position+0xb8u,1) ||
                 !writable_memory(object+0x2cu,4) || !writable_memory(object+0x90u,64) ||
-                !party_combat_identity(w,lease,&roster,targets) ||
+                !party_actor_identity(w,lease,&roster,targets,i,TRUE) ||
                 !readable_memory(position_world_matrix(t->position),64)) return FALSE;
             if(!actor_visible_transform_matches_position(t->position,object)) {
                 t->position[0xb8u]=1;
@@ -8967,9 +9771,66 @@ static BOOL party_apply_combat(const SudekiMpControlUpdateDispatchWitness *w,
         }
     }
     if(!party_combat_identity(w,lease,&roster,targets) ||
-        !apply_training_dummy_feedback(&frame->chunk[0],lease->token) ||
-        !apply_training_dummy(&frame->chunk[0].enemies[0])) return FALSE;
+        !apply_training_dummy_feedback(&confirmed->chunk[0],lease->token) ||
+        !apply_training_dummy(&frame->chunk[0].enemies[0]))
+        return party_combat_rejected("dummy_feedback",4u,final);
+    if(!final && lease->seat==2u &&
+        !SudekiMpLanPartyComboHudApply((HMODULE)game_base,party_replica_session,w,lease,frame))
+        (void)party_combat_rejected("tal_combo_hud",2u,FALSE);
     return party_combat_identity(w,lease,&roster,targets);
+}
+
+static BOOL party_retire_melee_body(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,void *actor,LanArenaPresentationLease *prior) {
+    SudekiMpLanArenaActorSnapshot snapshot;
+    PartyMovementTarget t,current;
+    uint8_t type=SudekiMpLanPartyActorType(key->seat);
+    int idle=SudekiMpLanPartyCombatMotionSelector(type,1u);
+    if((key->seat!=0u && key->seat!=2u) || !prior->combat_mode ||
+        !prior->valid || prior->character!=actor || !prior->renderer ||
+        key->token!=party_presentation_generation.token ||
+        key->generation!=party_presentation_generation.generation ||
+        party_presentation_generation.seat!=SudekiMpLanPartyLocalSeat(party_replica_session) ||
+        !SudekiMpLanPartyControlRetains(w,key,actor) ||
+        !SudekiMpLanPartyMovementDrained(key,actor,w) ||
+        !SudekiMpLanPartyCombatMotionValid(type,&prior->locomotion)) return FALSE;
+    ZeroMemory(&snapshot,sizeof(snapshot));
+    snapshot.actor_type=type; snapshot.animation_state=SUDEKIMP_LAN_ARENA_ANIMATION_IDLE;
+    if(!party_combat_target(key->seat,&snapshot,&t) || t.character!=actor ||
+        t.renderer!=prior->renderer || idle<0 || !party_loaded_selector(&t,idle)) return FALSE;
+    for(unsigned c=0;c<4u;++c) for(unsigned sub=0;sub<t.submodels;++sub) {
+        int selector=t.methods.get_selector(t.renderer,(int)c,sub);
+        int state=t.methods.get_state(t.renderer,(int)c,sub);
+        BOOL ours=selector==SudekiMpLanPartyCombatMotionSelector(type,prior->locomotion.clip[c]) &&
+            (state==prior->locomotion.state[c] || state==128 || state==192);
+        BOOL retired=selector==(c?0:idle) && state==(c?192:128);
+        if(!ours && !retired) return FALSE;
+    }
+    /* These four channels only present the host's body. No native attack was
+     * started here. After the actor's native tasks drain, retire our exact
+     * cosmetic selectors, including outgoing blends and looping block holds.
+     * Unknown ownership retains the lease above; it never authorizes writes. */
+    for(unsigned c=0;c<4u;++c) {
+        if(!SudekiMpLanPartyControlRetains(w,key,actor) ||
+            SudekiMpLanPartyControlObserveActor(w,key->seat)!=actor) return FALSE;
+        set_animation_channel(t.renderer,&t.methods,t.submodels,(int)c,
+            c?0:idle,c?192:128,c?0.0f:12.0f,TRUE);
+    }
+    for(unsigned c=0;c<3u;++c) t.methods.set_blend(t.renderer,(int)c,0.0f);
+    if(!SudekiMpLanPartyControlRetains(w,key,actor) ||
+        !party_combat_target(key->seat,&snapshot,&current) || current.character!=actor ||
+        current.renderer!=t.renderer || current.submodels!=t.submodels) return FALSE;
+    for(unsigned c=0;c<4u;++c) for(unsigned sub=0;sub<t.submodels;++sub)
+        if(t.methods.get_selector(t.renderer,(int)c,sub)!=(c?0:idle) ||
+            t.methods.get_state(t.renderer,(int)c,sub)!=(c?192:128) ||
+            !(fabsf(t.methods.get_rate(t.renderer,(int)c,sub)-(c?0.0f:12.0f))<=0.001f))
+            return FALSE;
+    for(unsigned c=0;c<3u;++c)
+        if(t.methods.get_blend(t.renderer,(int)c)!=0.0f) return FALSE;
+    prior->combat_mode=FALSE; prior->locomotion.valid=0;
+    prior->action_variant=SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    prior->combat_state=SUDEKIMP_LAN_ARENA_COMBAT_IDLE;
+    return TRUE;
 }
 
 BOOL SudekiMpLanPartyClientActionDrain(
@@ -8988,6 +9849,18 @@ BOOL SudekiMpLanPartyClientActionDrain(
         key->seat==SudekiMpLanPartyLocalSeat(party_replica_session) ||
         SudekiMpLanPartyControlObserveActor(w,key->seat)!=actor) return FALSE;
     seat=key->seat; prior=&party_presentation_leases[seat];
+    if(!party_retire_skill_body(w,key,actor)) return FALSE;
+    if((seat==1u || seat==3u) && !party_drain_ranged_weapon(seat==1u?0u:1u)) return FALSE;
+    /* Native draw/sheathe has a lifetime even before the first applied frame.
+     * Retain the exact actor until that transition positively settles. */
+    if(party_combat_mode_lease_valid &&
+        (key->token!=party_combat_mode_token ||
+         key->generation!=party_combat_mode_generation ||
+         !SudekiMpLanPartyControlRetains(w,key,actor) ||
+         !party_transition_roster_exact(w,&roster) ||
+         !party_native_combat_settled(actor,roster.combat))) return FALSE;
+    if((seat==0u || seat==2u) && prior->combat_mode)
+        return party_retire_melee_body(w,key,actor,prior);
     if(prior->action_variant==SUDEKIMP_LAN_ARENA_ACTION_NONE) return TRUE;
     if(!SudekiMpLanPartyControlRetains(w,key,actor) ||
         !prior->valid || prior->character!=actor || !prior->renderer ||
@@ -9039,38 +9912,128 @@ BOOL SudekiMpLanPartyClientActionDrain(
     return TRUE;
 }
 
-BOOL SudekiMpLanPartyClientRestoreCombatMode(void) {
+BOOL SudekiMpLanPartyClientRestoreCombatMode(
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyRosterObservation roster;
     BOOL current,verified;
     if(!party_combat_mode_lease_valid) return TRUE;
-    if(!SudekiMpCleanroomEngineCombatMode(&current) ||
-        (current!=party_combat_mode_original &&
-         !SudekiMpCleanroomEngineSetCombatMode(party_combat_mode_original)) ||
-        !SudekiMpCleanroomEngineCombatMode(&verified) || verified!=party_combat_mode_original) {
-        if(GetLastError()==ERROR_SUCCESS) SetLastError(ERROR_BUSY);
-        return FALSE;
+    if(!party_drain_ranged_weapons()) goto pending;
+    if(!party_transition_roster_exact(w,&roster) ||
+        !SudekiMpCleanroomEngineCombatMode(&current)) goto pending;
+    for(unsigned i=0;i<4;++i) {
+        SudekiMpLanPartyLease key={party_combat_mode_token,
+            party_combat_mode_generation,(uint8_t)i};
+        if(!party_native_combat_settled(roster.actors[i],current) ||
+            !SudekiMpLanPartyMovementDrained(&key,roster.actors[i],w)) goto pending;
     }
+    if(current!=party_combat_mode_original) {
+        party_transition_pending=TRUE;
+        party_transition_target=party_combat_mode_original;
+        party_transition_refreshed=!party_transition_target;
+        party_transition_started=GetTickCount(); party_transition_trace=0;
+        /* Restoration may start another native draw/sheathe. Its observable
+         * mode bit is not completion; retain this lease for the next service. */
+        (void)SudekiMpCleanroomEngineSetCombatMode(party_combat_mode_original);
+        goto pending;
+    }
+    if(!party_transition_roster_exact(w,&roster) ||
+        !SudekiMpCleanroomEngineCombatMode(&verified) ||
+        verified!=party_combat_mode_original) goto pending;
     party_combat_mode_lease_valid=FALSE; party_combat_mode_token=0;
-    party_combat_mode_generation=0;
+    party_combat_mode_generation=0; party_combat_mode_seat=0;
+    party_transition_pending=FALSE;
+    party_mode_notice_traced=0;
+    ZeroMemory(&party_transition_roster,sizeof(party_transition_roster));
     return TRUE;
+pending:
+    SetLastError(ERROR_BUSY);
+    return FALSE;
 }
 
+static void party_service_shields(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame);
+
 BOOL SudekiMpLanPartyClientApplyMovement(const SudekiMpControlUpdateDispatchWitness *w,
-    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame) {
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame,
+    const SudekiMpLanPartyFrame *confirmed) {
     party_present_valid=FALSE;
-    if(!w || !SudekiMpLanPartyMovementFrameValid(frame) ||
+    if(!w || !SudekiMpLanPartyMovementFrameValid(frame) || !confirmed ||
+        !party_mode_frame_ready(lease,frame) || !party_mode_frame_ready(lease,confirmed) ||
+        !(confirmed->chunk[0].combat_enabled ? SudekiMpLanPartyBasicCombatFrameValid(confirmed):
+            SudekiMpLanPartyMovementFrameValid(confirmed)) ||
+        (int32_t)(confirmed->chunk[0].host_tick-frame->chunk[0].host_tick)<0 ||
+        (SudekiMpLanPartyCastReady() && !SudekiMpLanPartyCastReplayTiming(w,lease,confirmed)) ||
         !party_sync_combat_mode(w,lease,FALSE) ||
-        !party_apply_movement(w,lease,frame,FALSE)) return FALSE;
+        !party_apply_movement(w,lease,frame,FALSE) ||
+        (frame->chunk[0].enemy_count &&
+            !apply_training_dummy(&frame->chunk[0].enemies[0]))) return FALSE;
+    party_service_shields(w,lease,frame);
     party_present_frame=*frame; party_present_lease=*lease;
     party_present_at=GetTickCount(); party_present_valid=TRUE;
     return TRUE;
 }
-BOOL SudekiMpLanPartyClientApplyBasicCombat(const SudekiMpControlUpdateDispatchWitness *w,
+/* Consume a complete actor-owned shield set on the same verified boundary
+ * as the body. A loading/unknown cosmetic effect never stalls movement. */
+static void party_service_shields(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame) {
+    SudekiMpLanPartyRosterObservation roster;
+    SudekiMpLanArenaSnapshot visuals={0};
+    static DWORD last_error;
+    if(!w || !lease || !party_replica_session ||
+        !SudekiMpLanPartyLeaseActive(party_replica_session,lease) ||
+        !SudekiMpLanPartyFrameValid(frame) ||
+        !SudekiMpLanPartyControlObserveRoster(w,&roster) || roster.present_mask!=15u)
+        return;
+    visuals.spirit_vfx_observed=frame->chunk[0].spirit_vfx_observed &&
+        frame->chunk[1].spirit_vfx_observed;
+    if(visuals.spirit_vfx_observed) for(unsigned c=0; c<2u; ++c)
+        for(unsigned i=0; i<frame->chunk[c].spirit_vfx_count; ++i) {
+            if(visuals.spirit_vfx_count==SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY) return;
+            visuals.spirit_vfx[visuals.spirit_vfx_count++]=frame->chunk[c].spirit_vfx[i];
+        }
+    if(!SudekiMpLanPartyControlNativeRosterExact(&roster)) return;
+    InterlockedIncrement(&client_spirit_vfx_call_depth);
+    BOOL serviced=SudekiMpLanPartyShieldServiceVisuals((HMODULE)game_base,&visuals,lease->token);
+    DWORD error=serviced?ERROR_SUCCESS:GetLastError();
+    InterlockedDecrement(&client_spirit_vfx_call_depth);
+    if(!SudekiMpLanPartyLeaseActive(party_replica_session,lease) ||
+        !SudekiMpLanPartyControlNativeRosterExact(&roster)) {
+        (void)SudekiMpLanArenaSpiritVfxResetVisuals((HMODULE)game_base);
+        error=ERROR_INVALID_STATE;
+    }
+    if(error!=last_error) {
+        SudekiMpLogFormat("lan_party event=shield_playback error=%lu count=%u observed=%u\r\n",
+            (unsigned long)error,visuals.spirit_vfx_count,visuals.spirit_vfx_observed);
+        last_error=error;
+    }
+}
+
+BOOL SudekiMpLanPartyClientApplyBasicCombat(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanPartyFrame *frame,
+    const SudekiMpLanPartyFrame *confirmed) {
     party_present_valid=FALSE;
-    if(!w || !SudekiMpLanPartyBasicCombatFrameValid(frame) ||
-        !party_sync_combat_mode(w,lease,TRUE) ||
-        !party_apply_combat(w,lease,frame,FALSE)) return FALSE;
+    if(!w || !SudekiMpLanPartyBasicCombatFrameValid(frame) || !confirmed ||
+        !party_mode_frame_ready(lease,frame) || !party_mode_frame_ready(lease,confirmed) ||
+        !(confirmed->chunk[0].combat_enabled ? SudekiMpLanPartyBasicCombatFrameValid(confirmed):
+            SudekiMpLanPartyMovementFrameValid(confirmed)) ||
+        (int32_t)(confirmed->chunk[0].host_tick-frame->chunk[0].host_tick)<0)
+        return party_combat_rejected("frame",4u,FALSE);
+    /* Retained casts must receive host completion even while a native weapon
+     * handoff is waiting for those same tasks. Readiness checks stay intact. */
+    if(SudekiMpLanPartyCastReady() && !SudekiMpLanPartyCastReplayTiming(w,lease,confirmed))
+        return party_combat_rejected("cast_timing",4u,FALSE);
+    if(!party_sync_combat_mode(w,lease,TRUE))
+        return party_combat_rejected("combat_transition",4u,FALSE);
+    /* As in two-seat weapon/targeting playback, confirmed events are not
+     * delayed through the body interpolation clock. They retain their own
+     * actor/session cursors, readiness checks and native task lifetimes. */
+    if(confirmed->chunk[0].combat_enabled && SudekiMpLanPartyCastReady() &&
+        !SudekiMpLanPartyCastReplay(w,lease,confirmed))
+        return party_combat_rejected("cast_replay",4u,FALSE);
+    if(!party_apply_combat(w,lease,frame,confirmed,FALSE)) return FALSE;
+    party_service_shields(w,lease,frame);
     party_present_frame=*frame; party_present_lease=*lease;
+    party_confirmed_frame=*confirmed;
     party_present_at=GetTickCount(); party_present_valid=TRUE;
     return TRUE;
 }
@@ -9079,36 +10042,62 @@ BOOL SudekiMpLanPartyClientEndPresentation(
     if(!w || !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w))
         return FALSE;
     party_present_valid=FALSE;
-    return party_retire_ailish_first_person(w);
+    return party_drain_ranged_weapons() && party_retire_ailish_first_person(w) &&
+        SudekiMpLanArenaSpiritVfxResetVisuals((HMODULE)game_base);
 }
 void SudekiMpLanPartyClientPresent(unsigned phase) {
+    /* Device restoration is independent of the expired gameplay lease. */
+    if(phase==2u && !SudekiMpLanPartyDummyOverlayRestore()) return;
     if(phase>2 || !party_present_valid || !SudekiMpLanPartyPresentationBoundary() ||
         (DWORD)(GetTickCount()-party_present_at)>250) return;
+    if(!party_mode_frame_ready(&party_present_lease,&party_present_frame)) {
+        party_present_valid=FALSE;
+        return;
+    }
     SudekiMpLanAimActors(
-        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO),NULL);
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO),
+        SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH));
     if(party_present_frame.chunk[0].combat_enabled) {
-        if(!party_apply_combat(NULL,&party_present_lease,&party_present_frame,TRUE))
+        if(!party_apply_combat(NULL,&party_present_lease,&party_present_frame,
+                &party_confirmed_frame,TRUE))
             party_present_valid=FALSE;
     } else if(!party_apply_movement(NULL,&party_present_lease,&party_present_frame,TRUE))
         party_present_valid=FALSE;
+    if(phase==2u && party_present_valid)
+        SudekiMpLanPartyDummyOverlayRender((HMODULE)game_base,party_present_lease.seat);
 }
 
 BOOL SudekiMpLanPartyClientRangedAim(void *actor,float direction[3],
     float target[3],BOOL *target_valid,BOOL *firing) {
     const SudekiMpLanArenaActorSnapshot *sample;
+    const SudekiMpLanPartyRosterObservation *roster=&party_transition_roster;
+    BOOL combat=FALSE;
+    unsigned seat;
     if(target_valid) *target_valid=FALSE;
     if(firing) *firing=FALSE;
     if(!actor || !direction || !target || !target_valid || !firing ||
         !party_replica_session || !party_present_valid ||
-        !SudekiMpLanPartyPresentationBoundary() ||
         (DWORD)(GetTickCount()-party_present_at)>250u ||
         party_present_lease.seat!=SudekiMpLanPartyLocalSeat(party_replica_session) ||
         !SudekiMpLanPartyLeaseActive(party_replica_session,&party_present_lease) ||
         !party_present_frame.chunk[0].combat_enabled ||
-        actor!=SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO) ||
-        SudekiMpLanPartyControlObserveActor(NULL,1u)!=actor) return FALSE;
-    sample=&party_present_frame.chunk[0].seat[1];
-    if(sample->actor_type!=SUDEKIMP_LAN_ARENA_ELCO_TYPE || !sample->hp ||
+        !party_combat_mode_lease_valid ||
+        !SudekiMpLanPartyControlNativeRosterExact(roster) ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat) return FALSE;
+    /* The native pose sampler runs outside the before/after-render setter
+     * boundary. This callback only reads the confirmed presentation lease;
+     * require the retained native thread, roster and actor ownership here.
+     * Requiring the setter boundary rejected every observer hold/release and
+     * aim sample, leaving only isolated native recoil on those windows. */
+    if(actor==roster->actors[1]) seat=1u;
+    else if(actor==roster->actors[3]) seat=3u;
+    else return FALSE;
+    if(seat!=party_present_lease.seat) {
+        SudekiMpLanPartyLease key=party_present_lease; key.seat=(uint8_t)seat;
+        if(!SudekiMpLanPartyControlRetainedNativeThreadExact(&key,actor)) return FALSE;
+    }
+    sample=&party_present_frame.chunk[seat/2u].seat[seat%2u];
+    if(sample->actor_type!=SudekiMpLanPartyActorType(seat) || !sample->hp ||
         !sample->ranged_aim_valid || sample->skill_active) return FALSE;
     for(unsigned i=0;i<3;++i) {
         direction[i]=sample->ranged_aim[i]==INT16_MIN ? -1.0f :
@@ -9117,6 +10106,55 @@ BOOL SudekiMpLanPartyClientRangedAim(void *actor,float direction[3],
         if(!isfinite(target[i])) return FALSE;
     }
     *target_valid=sample->ranged_target_valid!=0u;
-    *firing=sample->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    *firing=party_present_frame.ranged[seat==1u?0u:1u].valid ?
+        party_present_frame.ranged[seat==1u?0u:1u].held!=0u :
+        sample->action_variant!=SUDEKIMP_LAN_ARENA_ACTION_NONE;
+    return TRUE;
+}
+
+BOOL SudekiMpLanPartyClientSkillLight(float rgb[3]) {
+    if(SudekiMpLanPartyCastReady()) return SudekiMpLanPartyCastLight(rgb);
+    float current[3],baseline[3];
+    SudekiMpLanPartyLease caster;
+    if(!rgb || !party_replica_session || !party_present_valid ||
+        !party_skill_body[0].valid ||
+        (DWORD)(GetTickCount()-party_present_at)>250u ||
+        !party_present_frame.chunk[0].seat[0].skill_active ||
+        !SudekiMpLanPartyLeaseActive(party_replica_session,&party_present_lease)) return FALSE;
+    caster=party_present_lease; caster.seat=0u;
+    if(!SudekiMpLanPartyControlRetainedNativeThreadExact(&caster,
+            party_skill_body[0].character) ||
+        !SudekiMpLanArenaReadSkillLight(current,baseline)) return FALSE;
+    memcpy(rgb,baseline,sizeof(baseline));
+    return TRUE;
+}
+BOOL SudekiMpLanPartyClientProjectileAim(void *actor,float direction[3],float target[3]) {
+    if(!actor || !direction || !target || !party_replica_session || !game_base)
+        return FALSE;
+    unsigned seat=actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO)?1u:
+        actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH)?3u:0u;
+    if(!seat) return FALSE;
+    const PartyNativeWeapon *weapon=&party_ranged_weapon[seat==1u?0u:1u];
+    const LanArenaNativeRangedLease *n=&weapon->native;
+    SudekiMpLanPartyLease key=weapon->owner;
+    SudekiMpCharacterSkillState skill;
+    BOOL idle;
+    if(!actor || !direction || !target || !party_replica_session ||
+        !client_apply_damage_hook.installed || !n->active || !n->weapon_shot ||
+        n->character!=actor || GetCurrentThreadId()!=weapon->thread ||
+        !SudekiMpLanPartyLeaseActive(party_replica_session,&key) ||
+        !observe_native_ranged(n,&idle) ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active) return FALSE;
+    if(key.seat==seat) {
+        uint8_t *controller=*(uint8_t **)(game_base+0x408da4u);
+        if(controller!=party_transition_roster.controller ||
+            !readable_memory(controller,0x24cu) ||
+            *(void **)(controller+0x248u)!=actor) return FALSE;
+    } else {
+        key.seat=(uint8_t)seat;
+        if(!SudekiMpLanPartyControlRetainedNativeThreadExact(&key,actor)) return FALSE;
+    }
+    memcpy(direction,weapon->direction,sizeof(weapon->direction));
+    memcpy(target,weapon->target,sizeof(weapon->target));
     return TRUE;
 }

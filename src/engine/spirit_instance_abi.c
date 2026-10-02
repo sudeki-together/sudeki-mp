@@ -72,6 +72,9 @@ static unsigned int named_original_slots[2];
 static char named_original_names[2][NAMED_NAME_SIZE];
 static const char named_parked[2][NAMED_NAME_SIZE]={"MP_BaseInit","MP_BaseSkill"};
 static uint32_t named_generation;
+static BOOL named_banking;
+static unsigned int named_bank_slots[2];
+static BOOL named_bank_reserved;
 static uint32_t selection_generation;
 static void *selection_view,*selection_scene_manager,*selection_scene;
 typedef void (__attribute__((thiscall)) *NamedCameraUpdate)(void *,void *);
@@ -111,6 +114,17 @@ static SudekiMpPointerHook update_hooks[3];
 static NativeUpdate original_updates[3];
 static unsigned int update_depth;
 static BOOL update_fault;
+static unsigned int first_fault_site;
+/* Capture the first failed invariant without logging inside a native callback
+ * or changing the retained-fault policy. The owner reports it on its service
+ * seam. Reset only with the same full ABI reset that clears update_fault. */
+#define INSTANCE_FAULT() do { \
+    if(!update_fault) first_fault_site=__LINE__; \
+    update_fault=TRUE; \
+} while(0)
+unsigned int SudekiMpSpiritInstanceFaultSite(void) {
+    return update_fault ? first_fault_site:0u;
+}
 static const uint32_t update_slots[3]={CAMERA_VTABLE+4,SOUL_VTABLE+4,MANAGER_VTABLE+4};
 static const uint32_t update_rvas[3]={0x11bd0,0x12adf0,0xf900};
 typedef void (*RawPeriodSetter)(void);
@@ -174,13 +188,26 @@ static BOOL call(uint8_t *b,uint32_t site,uint32_t target) {
 }
 static BOOL update_image_exact(uint8_t *b) {
     static const uint8_t cam[]={0x89,0x4c,0x24,0x04,0xe9,0x07,0,0,0};
+    /* Complete inactive paths: the camera's state-zero branch and the
+     * soul's inactive branch reach only these stack-restoring epilogues.
+     * Neither path reads a singleton or invokes another native function. */
+    static const uint8_t cam_idle[]={0x55,0x8b,0xec,0x83,0xe4,0xf0,
+        0x81,0xec,0xf4,0,0,0,0x53,0x8b,0x5d,8,0x8b,0x83,0xa0,1,0,0,
+        0x83,0xe8,2,0x56,0x57,0x0f,0x85,0x1e,2,0,0};
     static const uint8_t soul[]={0x55,0x8b,0xec,0x83,0xe4,0xf0,0x81,0xec,0xb4,0,0,0,
         0x53,0x8b,0xd9,0x80,0x7b,0x48,0};
+    static const uint8_t soul_idle[]={0x56,0x57,0x89,0x5c,0x24,0x24,
+        0x0f,0x84,0x39,2,0,0};
+    static const uint8_t idle_return[]={0x5f,0x5e,0x5b,0x8b,0xe5,0x5d,0xc2,4,0};
     static const uint8_t manager_head[]={0x80,0x3d};
     static const uint8_t manager_tail[]={0,0x56,0x57,0x8b,0xf9,0x74,7,0xc6,5};
     static const uint8_t ret4[]={0xc2,4,0};
     return b && bytes(b+update_rvas[0],cam,sizeof(cam)) &&
+        bytes(b+0x11be0,cam_idle,sizeof(cam_idle)) &&
+        bytes(b+0x11e1f,idle_return,sizeof(idle_return)) &&
         bytes(b+update_rvas[1],soul,sizeof(soul)) &&
+        bytes(b+0x12ae03,soul_idle,sizeof(soul_idle)) &&
+        bytes(b+0x12b048,idle_return,sizeof(idle_return)) &&
         bytes(b+0xf900,manager_head,sizeof(manager_head)) &&
         address(b+0xf902,b+0x408d34) &&
         bytes(b+0xf906,manager_tail,sizeof(manager_tail)) &&
@@ -451,14 +478,39 @@ static BOOL named_registry_exact(void) {
     return TRUE;
 }
 static BOOL named_camera_exact(void *camera,unsigned int slot,const char *name) {
-    return slot<NAMED_SLOTS && *named_slot(slot)==camera &&
+    return slot<NAMED_SLOTS &&
         object_exact(camera,NAMED_CAMERA_SIZE,NAMED_CAMERA_VTABLE) &&
-        !memcmp((uint8_t *)camera+NAMED_CAMERA_NAME,name,NAMED_NAME_SIZE);
+        !memcmp((uint8_t *)camera+NAMED_CAMERA_NAME,name,NAMED_NAME_SIZE) &&
+        *named_slot(slot)==camera;
+}
+static BOOL named_owned_camera_exact(const Entry *e,unsigned int k) {
+    void *camera=e->named_cameras[k];
+    const char *name=named_generation==e->identity.generation ?
+        named_original_names[k]:e->named_names[k];
+    if(!named_banking) return named_camera_exact(camera,e->named_slots[k],name);
+    if(!named_bank_reserved || e->named_slots[k]!=named_bank_slots[k] ||
+        !object_exact(camera,NAMED_CAMERA_SIZE,NAMED_CAMERA_VTABLE) ||
+        !memory((uint8_t *)camera+NAMED_CAMERA_NAME,NAMED_NAME_SIZE,TRUE) ||
+        memcmp((uint8_t *)camera+NAMED_CAMERA_NAME,name,NAMED_NAME_SIZE)) return FALSE;
+    /* An inactive camera is still a live native object, but it must not be
+     * registered under any other slot or borrowed by a different owner. */
+    for(unsigned int i=0;i<NAMED_SLOTS;++i)
+        if((*named_slot(i)==camera) !=
+            (named_generation==e->identity.generation && i==named_bank_slots[k])) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) for(unsigned int j=0;j<2;++j)
+        if((&entries[i]!=e || j!=k) && entries[i].named_cameras[j]==camera) return FALSE;
+    return TRUE;
 }
 static BOOL named_namespace_exact(void) {
     unsigned int i,k;
     if(!named_manager) return TRUE;
     if(!named_registry_exact()) return FALSE;
+    if(named_banking && named_bank_reserved) {
+        Entry *active=generation_entry(named_generation);
+        for(k=0;k<2;++k)
+            if(!memory(named_slot(named_bank_slots[k]),sizeof(void *),TRUE) ||
+                *named_slot(named_bank_slots[k])!=(active ? active->named_cameras[k]:NULL)) return FALSE;
+    }
     for(k=0;k<2;++k) if(!named_camera_exact(named_originals[k],named_original_slots[k],
         named_generation ? named_parked[k]:named_original_names[k])) return FALSE;
     for(i=0;i<MAX_INSTANCES;++i) {
@@ -467,8 +519,7 @@ static BOOL named_namespace_exact(void) {
         if(e->named_ready && (!e->named_cameras[0] || !e->named_cameras[1])) return FALSE;
         if(!e->named_cameras[0] && !e->named_cameras[1]) continue;
         if(!e->identity.generation || !caster_exact(e)) return FALSE;
-        for(k=0;k<2;++k) if(e->named_cameras[k] && !named_camera_exact(e->named_cameras[k],e->named_slots[k],
-            named_generation==e->identity.generation ? named_original_names[k]:e->named_names[k])) return FALSE;
+        for(k=0;k<2;++k) if(e->named_cameras[k] && !named_owned_camera_exact(e,k)) return FALSE;
     }
     return !named_generation || (generation_entry(named_generation) && generation_entry(named_generation)->named_ready);
 }
@@ -507,6 +558,12 @@ BOOL SudekiMpSpiritInstanceCameraSelectionAbiReady(void) {
 }
 static BOOL registered_camera(void *camera) {
     for(unsigned int i=0;i<NAMED_SLOTS;++i) if(camera && *named_slot(i)==camera) return TRUE;
+    /* A local private camera can remain the actual renderer's selected view
+     * between owner scopes. Its lifetime is independent of name publication. */
+    if(named_banking) for(unsigned int i=0;i<MAX_INSTANCES;++i)
+        for(unsigned int k=0;k<2;++k)
+            if(camera && entries[i].named_cameras[k]==camera &&
+                named_owned_camera_exact(&entries[i],k)) return TRUE;
     return FALSE;
 }
 static BOOL private_remote_camera(void *camera) {
@@ -514,11 +571,11 @@ static BOOL private_remote_camera(void *camera) {
         (entries[i].named_cameras[0]==camera || entries[i].named_cameras[1]==camera)) return TRUE;
     return FALSE;
 }
-static BOOL selection_exact(void) {
+static BOOL selection_exact_after_namespace(BOOL namespace_checked) {
     Entry *e=generation_entry(selection_generation);
     void *view,*selected;
     if(!selection_scene) return !selection_generation;
-    if(!named_namespace_exact() || !object_exact(selection_scene_manager,0x44,0x2c66b8) ||
+    if((!namespace_checked && !named_namespace_exact()) || !object_exact(selection_scene_manager,0x44,0x2c66b8) ||
         !address(instance_image+0x408d58,selection_scene_manager) ||
         !address((uint8_t *)selection_scene_manager+0x40,selection_scene) ||
         !memory(selection_scene,0x80,FALSE) ||
@@ -530,10 +587,15 @@ static BOOL selection_exact(void) {
         (!e || (selected==e->selected_camera &&
             (selected==e->named_cameras[0] || selected==e->named_cameras[1])));
 }
+static BOOL selection_exact(void) { return selection_exact_after_namespace(FALSE); }
 static BOOL selection_transition_ready(uint32_t generation) {
     Entry *next=generation_entry(generation);
     if(!selection_scene) return TRUE;
-    return selection_exact() && (!next || !next->remote_camera_selection ||
+    /* Both callers have just passed named_transition_ready, with no native
+     * dispatch or mutation between them. Keep all selection checks, but the
+     * four-owner bank need not walk the identical namespace a second time.
+     * No result is cached across a call, task, frame, or native callback. */
+    return selection_exact_after_namespace(named_banking) && (!next || !next->remote_camera_selection ||
         (next->named_ready && caster_exact(next) &&
             (next->selected_camera==next->named_cameras[0] || next->selected_camera==next->named_cameras[1])));
 }
@@ -633,6 +695,8 @@ static void named_transition_commit(uint32_t generation) {
             next ? named_parked[k]:named_original_names[k],NAMED_NAME_SIZE);
         if(next) memcpy((uint8_t *)next->named_cameras[k]+NAMED_CAMERA_NAME,
             named_original_names[k],NAMED_NAME_SIZE);
+        if(named_banking && named_bank_reserved)
+            *named_slot(named_bank_slots[k])=next ? next->named_cameras[k]:NULL;
     }
     named_generation=next ? next->identity.generation:0;
 }
@@ -674,12 +738,25 @@ static BOOL named_retire(Entry *e) {
     e->named_ready=FALSE; /* Partial retirement must never be entered/observed. */
     for(k=2;k>0;--k) if(e->named_cameras[k-1]) {
         if(!named_unselected(e)) return FALSE;
+        /* Retail RemoveCamera owns destruction and scheduler unlinking. Only
+         * lend it this exact unselected object in our still-empty bank slot. */
+        if(named_banking) *named_slot(e->named_slots[k-1])=e->named_cameras[k-1];
         named_remove(named_manager,e->named_names[k-1]);
         /* Never guess that a replaced/non-null slot was our successful delete. */
         if(!named_registry_exact() || *named_slot(e->named_slots[k-1])) return FALSE;
         e->named_cameras[k-1]=NULL;
     }
     e->named_ready=FALSE;
+    return TRUE;
+}
+
+BOOL SudekiMpEnableSpiritInstanceNamedCameraBanking(void) {
+    if(!boundary() || update_fault || named_manager || named_generation ||
+        named_bank_reserved || !SudekiMpSpiritInstanceNamedCameraAbiReady()) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i)
+        if(entries[i].named_ready || entries[i].named_creation_uncertain ||
+            entries[i].named_cameras[0] || entries[i].named_cameras[1]) return FALSE;
+    named_banking=TRUE;
     return TRUE;
 }
 
@@ -710,6 +787,13 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
     if(manager!=named_manager || !named_namespace_exact()) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
     for(i=0;i<NAMED_SLOTS;++i) if(!*named_slot(i)) ++free_slots;
     if(free_slots<2) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
+    if(named_banking && !named_bank_reserved) {
+        for(i=0,k=0;i<NAMED_SLOTS && k<2;++i) if(!*named_slot(i)) {
+            if(!memory(named_slot(i),sizeof(void *),TRUE)) return FALSE;
+            named_bank_slots[k++]=i;
+        }
+        named_bank_reserved=TRUE;
+    }
     for(k=0;k<2;++k) {
         snprintf(e->named_names[k],NAMED_NAME_SIZE,"MP%08lx%c",(unsigned long)e->identity.generation,k ? 'S':'I');
         if(named_lookup(e->named_names[k],NULL)) { SetLastError(ERROR_ALREADY_EXISTS); return FALSE; }
@@ -720,6 +804,9 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
         if(!named_namespace_exact()) break;
         for(i=0;i<NAMED_SLOTS && *named_slot(i);++i) {}
         if(i==NAMED_SLOTS) break;
+        /* AddCamera always chooses the first empty registry slot. The first
+         * bank slot is reused while constructing the detached second object. */
+        if(named_banking && i!=named_bank_slots[0]) break;
         e->named_slots[k]=i;
         e->named_creation_uncertain=TRUE;
         added=named_add(named_manager,e->named_names[k],"default");
@@ -732,6 +819,10 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
             !named_camera_exact(e->named_cameras[k],i,e->named_names[k]))) break;
         e->named_creation_uncertain=FALSE;
         if(!added || !e->named_cameras[k]) break;
+        if(named_banking) {
+            *named_slot(i)=NULL;
+            e->named_slots[k]=named_bank_slots[k];
+        }
     }
     e->named_ready=k==2 && named_namespace_exact();
     if(!e->named_ready) (void)named_retire(e); /* Keep failed cleanup for Destroy. */
@@ -913,10 +1004,10 @@ finished:
     return ok;
 }
 
-static BOOL quiescent(const Entry *e) {
+static BOOL body_quiescent(const Entry *e) {
     const uint8_t *m=e->identity.manager,*c=e->identity.camera;
     unsigned int i;
-    if(e->targeting_open || !SudekiMpCastLightDrained(e->identity.generation) ||
+    if(e->targeting_open ||
         !e->manager_constructed || !e->manager_initialized || !e->camera_constructed || e->caster_lock_owned || e->cast_busy || e->remote_ui_acquired || e->remote_skill_ui_acquired || e->remote_skill_input_acquired || e->remote_state_ui_acquired ||
         !object_exact((void *)m,MANAGER_SIZE,MANAGER_VTABLE) ||
         !object_exact((void *)c,CAMERA_SIZE,CAMERA_VTABLE) ||
@@ -933,6 +1024,10 @@ static BOOL quiescent(const Entry *e) {
             *(void **)(s+0x28) || *(void **)(s+0x40) || s[0x48]) return FALSE;
     }
     return TRUE;
+}
+
+static BOOL quiescent(const Entry *e) {
+    return body_quiescent(e) && SudekiMpCastLightDrained(e->identity.generation);
 }
 
 static BOOL caster_exact(const Entry *e) {
@@ -1119,10 +1214,21 @@ BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instan
     e->timing_draining=TRUE;
     return TRUE;
 }
+BOOL SudekiMpRearmSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *instance) {
+    Entry *e=find(instance);
+    if(!e || !e->timing_configured || update_fault || operation_depth || scope_depth ||
+        GetCurrentThreadId()!=owner_thread || !caster_exact(e) || !skill_ui_exact(e,e->skill) ||
+        !quiescent(e) || e->targeting_open || ((uint8_t *)e->skill)[0x6c] ||
+        !SudekiMpLanCastContextActorDrained(e->caster,e->caster_session)) return FALSE;
+    e->timing_draining=FALSE; e->timing_sequence=0;
+    e->targeting_phase=SUDEKIMP_SKILL_TARGET_NONE; e->targeting_remaining=0;
+    e->targeting_task=e->targeting_thread=NULL;
+    return TRUE;
+}
 static void __attribute__((thiscall)) route_skill_targeting(void *controller,unsigned char enabled) {
     Entry *e=scoped_participant_owner();
     if(e && e->timing_configured) {
-        if(!targeting_owner_exact(e,controller) || !e->timing_sequence) { update_fault=TRUE; return; }
+        if(!targeting_owner_exact(e,controller) || !e->timing_sequence) { INSTANCE_FAULT(); return; }
         if(enabled) {
             void *task=*(void **)((uint8_t *)e->skill+0x74);
             void *starting_thread=NULL;
@@ -1132,18 +1238,18 @@ static void __attribute__((thiscall)) route_skill_targeting(void *controller,uns
              * completed pool cell until the new submission returns. */
             if((!task || (memory(task,4,FALSE) && !*(void **)task)) &&
                 !SudekiMpLanCastContextStartingSkillTask(
-                e->caster,e->caster_session,e->skill,&task,&starting_thread)) { update_fault=TRUE; return; }
+                e->caster,e->caster_session,e->skill,&task,&starting_thread)) { INSTANCE_FAULT(); return; }
             if(e->targeting_open || !memory(task,4,FALSE) || !*(void **)task ||
                 (starting_thread && *(void **)task!=starting_thread) ||
-                !object_exact(gate,0xa04,CAST_GATE_VTABLE)) { update_fault=TRUE; return; }
+                !object_exact(gate,0xa04,CAST_GATE_VTABLE)) { INSTANCE_FAULT(); return; }
             duration=*(float *)((uint8_t *)gate+0xa00);
-            if(!isfinite(duration) || duration<=0.f || duration>60.f) { update_fault=TRUE; return; }
+            if(!isfinite(duration) || duration<=0.f || duration>60.f) { INSTANCE_FAULT(); return; }
             e->targeting_task=task; e->targeting_thread=*(void **)task; e->targeting_open=TRUE;
             if(!e->timing_replica || e->timing_draining) {
                 e->targeting_phase=SUDEKIMP_SKILL_TARGET_AIMING; e->targeting_remaining=duration;
             }
         } else {
-            if(e->targeting_open && !targeting_task_exact(e)) { update_fault=TRUE; return; }
+            if(e->targeting_open && !targeting_task_exact(e)) { INSTANCE_FAULT(); return; }
             e->targeting_open=FALSE;
             if(!e->timing_replica) { e->targeting_phase=SUDEKIMP_SKILL_TARGET_RELEASED; e->targeting_remaining=0.f; }
         }
@@ -1160,23 +1266,23 @@ static void __attribute__((thiscall)) route_skill_targeting(void *controller,uns
      * which would unlock a concurrently casting local player. */
     if(e && e->remote_skill_input) {
         if(update_fault || GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,e->skill) ||
-            !ui_context_exact(e) || !skill_input_exact(e,controller)) update_fault=TRUE;
+            !ui_context_exact(e) || !skill_input_exact(e,controller)) INSTANCE_FAULT();
         return;
     }
-    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return; }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return; }
     if(native_skill_targeting) native_skill_targeting(controller,enabled);
 }
 static unsigned char __attribute__((thiscall)) route_skill_target_predicate(void *controller) {
     Entry *e=scoped_participant_owner();
     if(e && e->timing_configured) {
         if(!targeting_owner_exact(e,controller) || !e->targeting_open ||
-            !targeting_task_exact(e)) { update_fault=TRUE; return 1; }
+            !targeting_task_exact(e)) { INSTANCE_FAULT(); return 1; }
         if(!e->timing_replica && !e->remote_skill_input && !e->timing_draining && !sample_local_targeting(e)) {
-            update_fault=TRUE; return 1;
+            INSTANCE_FAULT(); return 1;
         }
         return e->targeting_phase!=SUDEKIMP_SKILL_TARGET_RELEASED;
     }
-    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return 1; }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return 1; }
     return native_skill_target_predicate(controller);
 }
 static void route_skill_filter(void *controller,unsigned int filter) {
@@ -1189,10 +1295,10 @@ static void route_skill_filter(void *controller,unsigned int filter) {
     if(e && e->remote_skill_input) {
         if(update_fault || GetCurrentThreadId()!=owner_thread ||
             !skill_ui_exact(e,e->skill) || !ui_context_exact(e) ||
-            !skill_input_exact(e,controller)) update_fault=TRUE;
+            !skill_input_exact(e,controller)) INSTANCE_FAULT();
         return;
     }
-    if(update_fault || GetCurrentThreadId()!=owner_thread) { update_fault=TRUE; return; }
+    if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return; }
     native_skill_filters[filter](controller);
 }
 static void __attribute__((thiscall)) route_skill_filter_none(void *controller) {
@@ -1471,8 +1577,10 @@ BOOL SudekiMpResetSpiritInstanceAbi(void) {
     native_skill_targeting=NULL;
     memset(state_ui_trampolines,0,sizeof(state_ui_trampolines));
     state_ui_acquire_resume=state_ui_release_resume=NULL;
-    update_fault=FALSE;
+    update_fault=FALSE; first_fault_site=0;
     named_manager=NULL; named_add=NULL; named_remove=NULL; named_generation=0;
+    named_banking=named_bank_reserved=FALSE;
+    memset(named_bank_slots,0,sizeof(named_bank_slots));
     selection_generation=0; selection_view=selection_scene_manager=selection_scene=NULL;
     memset(named_originals,0,sizeof(named_originals));
     memset(named_original_names,0,sizeof(named_original_names));
@@ -1570,7 +1678,7 @@ static void caster_manager_update(Entry *e,float delta) {
     if(*(uint32_t *)(m+0x5c)!=2) { original_updates[2](m,delta); return; }
     if(!caster_exact(e) || !strike_matches_caster(e->caster_type,strike) ||
         !e->caster_lock_owned) {
-        update_fault=TRUE; return;
+        INSTANCE_FAULT(); return;
     }
     instance_image[0x408d34]=0; /* Same first operation as native f900. */
     if(s[0x131]!=2 && s[0x131]!=3 && !a[0x2b]) return;
@@ -1596,7 +1704,7 @@ static BOOL __attribute__((noinline,used)) remote_ui_transition(BOOL acquire) {
     if(update_fault || GetCurrentThreadId()!=owner_thread || !caster_exact(e) ||
         !globals_exact(e->identity.manager,e->identity.camera) || !remote_ui_exact() ||
         e->remote_ui_acquired==acquire) {
-        update_fault=TRUE;
+        INSTANCE_FAULT();
         /* Fail closed without touching an unknown UI owner or inventing a
          * second acquisition/release. Keep the outstanding lease for drain. */
         return TRUE;
@@ -1627,14 +1735,14 @@ static BOOL __attribute__((noinline,used)) remote_skill_ui_transition(void *skil
     if(!e || !e->remote_skill_ui) {
         for(i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation &&
                 entries[i].remote_skill_ui && entries[i].skill==skill) {
-            update_fault=TRUE; return TRUE; /* Known remote owner escaped its scope. */
+            INSTANCE_FAULT(); return TRUE; /* Known remote owner escaped its scope. */
         }
         return FALSE;
     }
     if(update_fault || GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,skill) ||
         !ui_context_exact(e) || !remote_ui_exact() ||
         ui!=ui_owner || (delta!=1 && delta!=-1) || e->remote_skill_ui_acquired==(delta==1)) {
-        update_fault=TRUE; return TRUE;
+        INSTANCE_FAULT(); return TRUE;
     }
     e->remote_skill_ui_acquired=delta==1;
     return TRUE;
@@ -1672,14 +1780,14 @@ static BOOL __attribute__((noinline,used)) remote_skill_input_transition(void *s
     if(!e || !e->remote_skill_input) {
         for(i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation &&
                 entries[i].remote_skill_input && entries[i].skill==skill) {
-            update_fault=TRUE; return TRUE;
+            INSTANCE_FAULT(); return TRUE;
         }
         return FALSE;
     }
     if(update_fault || GetCurrentThreadId()!=owner_thread || !skill_ui_exact(e,skill) ||
         !ui_context_exact(e) || !skill_input_exact(e,controller) ||
         e->remote_skill_input_acquired==acquire) {
-        update_fault=TRUE; return TRUE;
+        INSTANCE_FAULT(); return TRUE;
     }
     e->remote_skill_input_acquired=acquire;
     return TRUE;
@@ -1710,13 +1818,13 @@ static BOOL __attribute__((noinline,used)) remote_state_ui_transition(void *stat
             persistent_skill_ui.caster,persistent_skill_ui.caster_session);
         if(attributed) e=&persistent_skill_ui;
         else if(persistent_skill_ui.remote_state_ui_acquired) {
-            update_fault=TRUE; return TRUE; /* Retain an escaped cleanup obligation. */
+            INSTANCE_FAULT(); return TRUE; /* Retain an escaped cleanup obligation. */
         }
     }
     if(!e || !e->remote_ui || e->state_component!=state) {
         for(i=0;i<MAX_INSTANCES;++i) if(entries[i].identity.generation &&
             entries[i].state_component==state && entries[i].remote_state_ui_acquired) {
-            update_fault=TRUE; return TRUE; /* A retained remote lock escaped its owner. */
+            INSTANCE_FAULT(); return TRUE; /* A retained remote lock escaped its owner. */
         }
         return FALSE;
     }
@@ -1726,7 +1834,7 @@ static BOOL __attribute__((noinline,used)) remote_state_ui_transition(void *stat
         (acquire && (e->remote_state_ui_acquired ||
             ((uint8_t *)state)[0x131]<1 || ((uint8_t *)state)[0x131]>3)) ||
         (!acquire && ((uint8_t *)state)[0x131]!=0 && ((uint8_t *)state)[0x131]!=4)) {
-        update_fault=TRUE; return TRUE;
+        INSTANCE_FAULT(); return TRUE;
     }
     /* A ui=0 lock (including our Spirit startup) did not acquire this lease.
      * Its native unlock is still valid, but must not create a UI decrement. */
@@ -1755,16 +1863,16 @@ static uint32_t __attribute__((noinline,used)) participant_lock(void *s,uint32_t
     Entry *e=scoped_participant_owner();
     uint32_t result;
     if(!e && scope_depth && scopes[scope_depth-1].generation) {
-        update_fault=TRUE; return 0;
+        INSTANCE_FAULT(); return 0;
     }
     if(!e || !e->caster) return call_participant_lock(s,ui,mode);
     if(update_fault || GetCurrentThreadId()!=owner_thread || !caster_exact(e) ||
         !globals_exact(e->identity.manager,e->identity.camera) || ui!=1 || mode!=2) {
-        update_fault=TRUE; return 0;
+        INSTANCE_FAULT(); return 0;
     }
     if(s!=e->state_component) return 0;
-    if(e->caster_lock_owned) { update_fault=TRUE; return 0; }
-    if(e->remote_ui && !remote_ui_exact()) { update_fault=TRUE; return 0; }
+    if(e->caster_lock_owned) { INSTANCE_FAULT(); return 0; }
+    if(e->remote_ui && !remote_ui_exact()) { INSTANCE_FAULT(); return 0; }
     /* ui=0 also prevents native +133 bit8 from being acquired. The existing
      * native unlock therefore cannot decrement an unrelated local UI lock. */
     result=call_participant_lock(s,e->remote_ui ? 0:ui,mode);
@@ -1779,12 +1887,12 @@ static uint32_t __attribute__((regparm(1),stdcall)) participant_unlock(void *s,u
     Entry *e=scoped_participant_owner();
     uint32_t result;
     if(!e && scope_depth && scopes[scope_depth-1].generation) {
-        update_fault=TRUE; return 0;
+        INSTANCE_FAULT(); return 0;
     }
     if(!e || !e->caster) return native_participant_unlock(s,mode);
     if(update_fault || GetCurrentThreadId()!=owner_thread || !caster_exact(e) ||
         !globals_exact(e->identity.manager,e->identity.camera) || mode!=2) {
-        update_fault=TRUE; return 0;
+        INSTANCE_FAULT(); return 0;
     }
     if(s!=e->state_component || !e->caster_lock_owned) return 0;
     result=native_participant_unlock(s,mode);
@@ -1819,10 +1927,30 @@ static void update_instance(void *object,float delta,unsigned int kind) {
             !owner->camera_constructed ||
             !object_exact(object,kind==2 ? MANAGER_SIZE:(kind ? SOUL_SIZE:CAMERA_SIZE),
                 kind==2 ? MANAGER_VTABLE:(kind ? SOUL_VTABLE:CAMERA_VTABLE))))) {
-        update_fault=TRUE; return;
+        INSTANCE_FAULT(); return;
+    }
+    /* Keep the retained object, generation, thread and vtable checks above.
+     * For these two exact native early returns there is no context to bank:
+     * no globals, caster, camera namespace, resource or task is accessed.
+     * Read the object's current inactive flag every call; never cache it.
+     * A substituted callback, any active state, and every manager update
+     * still take the complete Enter/Leave path. */
+    if(owner && kind<2 &&
+        original_updates[kind]==(NativeUpdate)(instance_image+update_rvas[kind]) &&
+        (kind==0 ? *(uint32_t *)((uint8_t *)object+0x1a0)==0 :
+            ((uint8_t *)object)[0x48]==0)) {
+        uint32_t *ticks=kind ? &owner->soul_ticks:&owner->camera_ticks;
+        ++update_depth;
+        SetLastError(error);
+        original_updates[kind](object,delta);
+        result_error=GetLastError();
+        --update_depth;
+        if(*ticks!=UINT_MAX) ++*ticks;
+        SetLastError(result_error);
+        return;
     }
     cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) { update_fault=TRUE; return; }
+    if(!cookie) { INSTANCE_FAULT(); return; }
     ++update_depth;
     SetLastError(error);
     if(kind==2 && owner && owner->caster) caster_manager_update(owner,delta);
@@ -1833,7 +1961,7 @@ static void update_instance(void *object,float delta,unsigned int kind) {
         uint32_t *ticks=kind==2 ? &owner->manager_ticks:(kind ? &owner->soul_ticks:&owner->camera_ticks);
         if(*ticks!=UINT_MAX) ++*ticks;
     }
-    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) INSTANCE_FAULT();
     SetLastError(result_error);
 }
 static void __attribute__((thiscall)) camera_update(void *object,float delta) {
@@ -1854,38 +1982,41 @@ static void __attribute__((thiscall)) named_camera_update(void *node,void *args)
     for(unsigned int i=0;i<MAX_INSTANCES;++i) for(unsigned int k=0;k<2;++k)
         if(entries[i].named_cameras[k] &&
             (uint8_t *)entries[i].named_cameras[k]+8==node) owner=&entries[i];
-    if(update_fault || owner_thread!=GetCurrentThreadId() || !named_namespace_exact() ||
+    if(update_fault || owner_thread!=GetCurrentThreadId() ||
+        (!named_banking && !named_namespace_exact()) ||
         !object_exact(node,4,0x2cce6c) ||
         (owner && (!owner->named_ready || owner->destroying || !caster_exact(owner)))) {
-        update_fault=TRUE; return;
+        INSTANCE_FAULT(); return;
     }
     /* Other cameras tick in neutral context even when called from a caster's
      * update. Never advance a camera twice or give it the enclosing owner. */
+    /* Enter revalidates the complete namespace before touching globals or
+     * calling native code; Leave repeats that proof after native execution. */
     cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) { update_fault=TRUE; return; }
+    if(!cookie) { INSTANCE_FAULT(); return; }
     ++update_depth;
     SetLastError(error);
     named_update_original(node,args);
     error=GetLastError();
     --update_depth;
-    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) INSTANCE_FAULT();
     SetLastError(error);
 }
 static uint32_t spirit_camera_callback_enter(void *member,unsigned int offset,uint32_t vtable) {
     Entry *owner=NULL;
     uint8_t *camera;
     if(update_fault || owner_thread!=GetCurrentThreadId() || (uintptr_t)member<offset ||
-        !object_exact(member,4,vtable)) { update_fault=TRUE; return 0; }
+        !object_exact(member,4,vtable)) { INSTANCE_FAULT(); return 0; }
     camera=(uint8_t *)member-offset;
     for(unsigned int i=0;i<MAX_INSTANCES;++i)
         if(entries[i].identity.camera==camera) owner=&entries[i];
     if(!object_exact(camera,CAMERA_SIZE,CAMERA_VTABLE) ||
         (!owner && camera!=primary_camera) ||
         (owner && (owner->destroying || !owner->named_ready || !caster_exact(owner)))) {
-        update_fault=TRUE; return 0;
+        INSTANCE_FAULT(); return 0;
     }
     uint32_t cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) update_fault=TRUE;
+    if(!cookie) INSTANCE_FAULT();
     return cookie;
 }
 static unsigned char __attribute__((thiscall)) spirit_camera_ready(void *member) {
@@ -1898,7 +2029,7 @@ static unsigned char __attribute__((thiscall)) spirit_camera_ready(void *member)
     result=spirit_camera_ready_original(member);
     error=GetLastError();
     --update_depth;
-    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) INSTANCE_FAULT();
     SetLastError(error);
     return result; /* Preserve the native result even after a restore fault. */
 }
@@ -1911,7 +2042,7 @@ static void __attribute__((thiscall)) spirit_camera_animation(void *member,void 
     spirit_camera_animation_original(member,source,event);
     error=GetLastError();
     --update_depth;
-    if(!SudekiMpLeaveSpiritInstance(cookie)) update_fault=TRUE;
+    if(!SudekiMpLeaveSpiritInstance(cookie)) INSTANCE_FAULT();
     SetLastError(error);
 }
 static BOOL restore_named_camera_hooks(void) {
@@ -2091,7 +2222,7 @@ BOOL SudekiMpScheduleSpiritInstanceManager(const SudekiMpSpiritInstance *instanc
     --operation_depth;
     if(!globals_exact(manager,camera) ||
         *(int16_t *)((uint8_t *)e->identity.manager+0x20)!=0) {
-        update_fault=TRUE; SetLastError(ERROR_INVALID_DATA); return FALSE;
+        INSTANCE_FAULT(); SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     return TRUE;
 }
@@ -2102,19 +2233,34 @@ BOOL SudekiMpObserveSpiritInstanceManagerTicks(const SudekiMpSpiritInstance *ins
     *ticks=e->manager_ticks;
     return TRUE;
 }
-BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *instance,
-    SudekiMpSpiritInstanceState *state) {
+static Entry *observed_instance(const SudekiMpSpiritInstance *instance) {
     Entry *e=find(instance);
-    uint8_t *m,*c;
-    if(!state || !e || !instance_image || !owner_thread ||
+    if(!e || !instance_image || !owner_thread ||
         owner_thread!=GetCurrentThreadId() || update_fault || e->destroying ||
         !e->manager_initialized || !e->camera_constructed ||
-        (e->caster && !caster_exact(e))) return FALSE;
+        (e->caster && !caster_exact(e)) ||
+        !object_exact(e->identity.manager,MANAGER_SIZE,MANAGER_VTABLE) ||
+        !object_exact(e->identity.camera,CAMERA_SIZE,CAMERA_VTABLE)) return NULL;
+    return e;
+}
+BOOL SudekiMpObserveSpiritInstanceActivity(const SudekiMpSpiritInstance *instance,
+    BOOL *active) {
+    Entry *e;
+    if(!active || !(e=observed_instance(instance))) return FALSE;
+    *active=*(uint32_t *)((uint8_t *)e->identity.manager+0x5c)!=0;
+    return TRUE;
+}
+BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *instance,
+    SudekiMpSpiritInstanceState *state) {
+    Entry *e;
+    uint8_t *m,*c;
+    BOOL body_idle;
+    if(!state || !(e=observed_instance(instance))) return FALSE;
     m=e->identity.manager; c=e->identity.camera;
-    if(!object_exact(m,MANAGER_SIZE,MANAGER_VTABLE) ||
-        !object_exact(c,CAMERA_SIZE,CAMERA_VTABLE)) return FALSE;
+    body_idle=body_quiescent(e);
     *state=(SudekiMpSpiritInstanceState){*(uint32_t *)(m+0x5c),
-        *(uint32_t *)(m+0x98),*(uint32_t *)(c+0x1a0)!=0,quiescent(e)};
+        *(uint32_t *)(m+0x98),*(uint32_t *)(c+0x1a0)!=0,
+        body_idle && SudekiMpCastLightDrained(e->identity.generation),body_idle};
     return TRUE;
 }
 BOOL SudekiMpResolveSpiritInstanceCaster(void *actor,uint64_t session,

@@ -1,4 +1,5 @@
 #include "engine/skill_activation_abi.h"
+#include "engine/arbiter_combat_input.h"
 #include "engine/spirit_activation_abi.h"
 #include "engine/item_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
@@ -21,8 +22,10 @@
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_cast_context.h"
+#include "hooks/lan_party_cast.h"
 #include "engine/spirit_instance_abi.h"
 #include "engine/cast_light_abi.h"
+#include "engine/cast_motion_blur_abi.h"
 #include "hooks/lan_arena_skill_fade.h"
 #include "hooks/lan_arena_spirit_vfx.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
@@ -3731,6 +3734,62 @@ static void exercise_rapid_weapon_context(uint8_t *image, uint8_t *actor,
         CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeapon(actor,&observed) &&
             observed.item==24 && observed.charge==100 && observed.required_charge==5 &&
             observed.reload_seconds==0 && SudekiMpElcoWeaponReady(&observed));
+        /* Host XYZ correction runs at c74e3 after native admission, not at
+         * the idle CanFire boundary. Verify both retail emission routes. */
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc6e0eu,
+            "\x8d\x42\x0c\x89\x56\x5c\x89\x46\x58",9u)==0);
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc6e37u,
+            "\xb8\x01\x00\x00\x00\x8b\xce\xe8",8u)==0);
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc7140u,
+            "\x80\xb9\xc8\x00\x00\x00\x02",7u)==0);
+        CHECK_RAPID_CONTEXT(memcmp(image+0xc89efu,
+            "\x56\xe8\x6b\xe7\xff\xff",6u)==0);
+        store_fixture_pointer(combat,0x5c,record);
+        store_fixture_pointer(combat,0x58,(uint8_t *)record+0x0c);
+        const unsigned emission_items[]={24,26,27,30,31,34,35};
+        for(unsigned gun=0;gun<sizeof(emission_items)/sizeof(*emission_items);++gun) {
+            unsigned item_id=emission_items[gun];
+            void *saved_item=database[3u+item_id];
+            database[3u+item_id]=item;
+            *(uint32_t *)((uint8_t *)item+0x14u)=item_id;record[8/4]=item_id;
+            for(unsigned stage=0;stage<=6;++stage) {
+                ((uint8_t *)combat)[0xe0]=stage;
+                observed.item=255;
+                BOOL emitting=stage==1 || stage==2;
+                CHECK_RAPID_CONTEXT(!!SudekiMpObserveElcoWeaponEmission(actor,&observed)==emitting);
+                CHECK_RAPID_CONTEXT(emitting ? observed.item==item_id &&
+                    !SudekiMpElcoWeaponReady(&observed):observed.item==255);
+            }
+            database[3u+item_id]=saved_item;
+        }
+        *(uint32_t *)((uint8_t *)item+0x14u)=24;record[8/4]=24;
+        ((uint8_t *)combat)[0xe0]=2;
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,NULL));
+        store_fixture_pointer(combat,0x5c,NULL);
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        store_fixture_pointer(combat,0x5c,record);
+        store_fixture_pointer(combat,0x58,record);
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        store_fixture_pointer(combat,0x58,(uint8_t *)record+0x0c);
+        store_fixture_pointer(combat,0x10,local);
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        store_fixture_pointer(combat,0x10,actor);
+        store_fixture_pointer(weapon,0x26c,item);
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        store_fixture_pointer(weapon,0x26c,NULL);
+        rows[0]=NULL;
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        rows[0]=record;
+        *(uint16_t *)((uint8_t *)record+0xba)=0;
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        *(uint16_t *)((uint8_t *)record+0xba)=0x5640;
+        *(float *)((uint8_t *)record+0xc0)=1;
+        CHECK_RAPID_CONTEXT(!SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        *(float *)((uint8_t *)record+0xc0)=0;
+        CHECK_RAPID_CONTEXT(SudekiMpObserveElcoWeaponEmission(actor,&observed));
+        store_fixture_pointer(combat,0x5c,NULL);
+        store_fixture_pointer(combat,0x58,NULL);
+        ((uint8_t *)combat)[0xe0]=0;
         CHECK_RAPID_CONTEXT(!SudekiMpSetElcoPresentationResources(actor,24,12800,2000));
         store_fixture_pointer(controller, 0x248, actor);
         CHECK_RAPID_CONTEXT(SudekiMpSetElcoPresentationResources(actor,24,12800,2000));
@@ -4193,6 +4252,118 @@ static void exercise_weapon_family_inventory(uint8_t *image, int *failures) {
 }
 
 static BOOL no_caster_fade(float rgb[3]) { (void)rgb; return FALSE; }
+
+typedef struct BlurFixtureEffect {
+    void **vtable;
+    uint32_t padding;
+    float amount;
+} BlurFixtureEffect;
+static int blur_fixture_scope,blur_fixture_sets,blur_fixture_deletes;
+static uint32_t blur_fixture_generation,blur_fixture_delete_flags;
+static BOOL blur_fixture_try_uninstall,blur_fixture_busy;
+static DWORD WINAPI blur_fixture_foreign_thread(void *args) {
+    void **request=(void **)args;
+    typedef void (__attribute__((thiscall)) *Setter)(void *,float);
+    ((Setter)request[0])(request[1],1.f);
+    return SudekiMpUninstallCastMotionBlur();
+}
+static int blur_fixture_read_scope(uint32_t *generation) {
+    *generation=blur_fixture_generation;
+    if(blur_fixture_try_uninstall)
+        blur_fixture_busy=!SudekiMpUninstallCastMotionBlur() && GetLastError()==ERROR_BUSY;
+    return blur_fixture_scope;
+}
+static void __attribute__((thiscall)) blur_fixture_set(BlurFixtureEffect *effect,float amount) {
+    ++blur_fixture_sets; effect->amount=amount;
+}
+static void *__attribute__((thiscall)) blur_fixture_delete(BlurFixtureEffect *effect,unsigned flags) {
+    ++blur_fixture_deletes; blur_fixture_delete_flags=flags; return effect;
+}
+static void exercise_cast_motion_blur(uint8_t *image,int *failures) {
+#define BLUR_CHECK(x) do { if(!(x)) { fprintf(stderr,"FAIL: cast blur line %d: %s\n",__LINE__,#x); ++*failures; } } while(0)
+    const uint32_t slots[]={0x1ddfc7,0x2dd91c,0x2dd920};
+    const uint32_t targets[]={0x2dd91c,0x1de050,0x1ddfa0};
+    const uint32_t guards[]={0x1be60,0x1be68,0x1be73,0x1be7f,0x1be83,0x1be8f,0x1be93,
+        0x1be9a,0x1beb0,0x1bece,0x1ddfc7,0x2dd91c,0x2dd920,0x1ddfa0};
+    uint32_t raw[3]; uint8_t entry[8]; void *old_scene;
+    uint32_t scene[0x74/4]={0},foreign_scene[0x74/4]={0};
+    void *vtable[2]={(void *)blur_fixture_delete,(void *)blur_fixture_set};
+    BlurFixtureEffect effect={vtable,0,0.5f};
+    typedef void (__attribute__((thiscall)) *Setter)(void *,float);
+    Setter set=(Setter)(image+0x1be60);
+    memcpy(entry,image+0x1be60,sizeof(entry));
+    memcpy(&old_scene,image+0x408d58,4);
+    /* Relocate only the three guarded operands in this inert PE mapper. */
+    for(unsigned i=0;i<3;++i) {
+        memcpy(&raw[i],image+slots[i],4);
+        BLUR_CHECK(raw[i]==0x400000u+targets[i]);
+        *(void **)(image+slots[i])=image+targets[i];
+    }
+    BLUR_CHECK(SudekiMpCastMotionBlurImageMatches((HMODULE)image));
+    for(unsigned i=0;i<sizeof(guards)/sizeof(guards[0]);++i) {
+        image[guards[i]]^=1;
+        BLUR_CHECK(!SudekiMpCastMotionBlurImageMatches((HMODULE)image));
+        BLUR_CHECK(!SudekiMpInstallCastMotionBlur((HMODULE)image,blur_fixture_read_scope));
+        image[guards[i]]^=1;
+    }
+    *(void **)scene=image+0x2c66b8; *(void **)((uint8_t *)scene+0x70)=&effect;
+    *(void **)(image+0x408d58)=scene;
+    blur_fixture_sets=blur_fixture_deletes=0; blur_fixture_try_uninstall=FALSE;
+    BOOL installed=SudekiMpInstallCastMotionBlur((HMODULE)image,blur_fixture_read_scope);
+    BLUR_CHECK(installed);
+    if(installed) {
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_REMOTE; blur_fixture_generation=2;
+        SetLastError(0x1234); set(scene,0.5f); set(scene,0.f);
+        BLUR_CHECK(GetLastError()==0x1234 && !blur_fixture_sets && !blur_fixture_deletes);
+        BLUR_CHECK(*(void **)((uint8_t *)scene+0x70)==&effect);
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_LOCAL; blur_fixture_generation=1;
+        set(scene,0.75f);
+        BLUR_CHECK(blur_fixture_sets==1 && effect.amount==0.75f);
+        /* A remote cleanup cannot clear a concurrent local caster effect. */
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_REMOTE; blur_fixture_generation=2;
+        set(scene,0.f);
+        BLUR_CHECK(!blur_fixture_deletes && effect.amount==0.75f);
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_NEUTRAL; blur_fixture_generation=0;
+        set(scene,0.25f);
+        BLUR_CHECK(blur_fixture_sets==2 && effect.amount==0.25f);
+        blur_fixture_generation=1; set(scene,1.f); /* inconsistent neutral witness */
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_UNKNOWN; set(scene,1.f);
+        blur_fixture_scope=SUDEKIMP_CAST_BLUR_LOCAL; blur_fixture_generation=0;
+        set(scene,1.f); /* missing generation */
+        blur_fixture_generation=1; set(foreign_scene,1.f);
+        scene[0]=0; set(scene,1.f); *(void **)scene=image+0x2c66b8;
+        set(scene,NAN);
+        void *request[2]={(void *)set,scene};
+        HANDLE thread=CreateThread(NULL,0,blur_fixture_foreign_thread,request,0,NULL);
+        BLUR_CHECK(thread!=NULL);
+        if(thread) {
+            DWORD code=1;
+            WaitForSingleObject(thread,INFINITE);
+            BLUR_CHECK(GetExitCodeThread(thread,&code) && code==FALSE);
+            CloseHandle(thread);
+        }
+        BLUR_CHECK(blur_fixture_sets==2 && !blur_fixture_deletes);
+        blur_fixture_try_uninstall=TRUE; blur_fixture_busy=FALSE;
+        set(scene,0.5f);
+        BLUR_CHECK(blur_fixture_busy && blur_fixture_sets==3 && effect.amount==0.5f);
+        blur_fixture_try_uninstall=FALSE;
+        set(scene,0.f);
+        BLUR_CHECK(blur_fixture_deletes==1 && blur_fixture_delete_flags==1);
+        BLUR_CHECK(!*(void **)((uint8_t *)scene+0x70));
+        /* Foreign replacement must retain callbacks/trampoline for retry. */
+        uint8_t patched=image[0x1be60]; image[0x1be60]=0xcc;
+        BLUR_CHECK(!SudekiMpUninstallCastMotionBlur());
+        BLUR_CHECK(!SudekiMpInstallCastMotionBlur((HMODULE)image,blur_fixture_read_scope));
+        image[0x1be60]=patched;
+        BLUR_CHECK(SudekiMpUninstallCastMotionBlur());
+        BLUR_CHECK(!memcmp(entry,image+0x1be60,sizeof(entry)));
+        BLUR_CHECK(SudekiMpInstallCastMotionBlur((HMODULE)image,blur_fixture_read_scope));
+        BLUR_CHECK(SudekiMpUninstallCastMotionBlur());
+    }
+    memcpy(image+0x408d58,&old_scene,4);
+    for(unsigned i=0;i<3;++i) memcpy(image+slots[i],&raw[i],4);
+#undef BLUR_CHECK
+}
 
 int wmain(int argc, wchar_t **argv) {
     uint8_t *file;
@@ -4671,6 +4842,29 @@ int wmain(int argc, wchar_t **argv) {
     if (image == NULL) {
         fputs("failed to map PE image\n", stderr);
         return 1;
+    }
+    exercise_cast_motion_blur(image,&failures);
+    {
+        const uint32_t guards[]={0x18a4d0u,0x18a5c0u,0x18a5e7u,
+            0x18a601u,0x18a638u,0x2d4b94u,0xdae5fu};
+        uint32_t raw_reset=*(uint32_t *)(image+0x2d4b94u);
+        /* This inert mapper copies sections without loader relocations.
+         * Prove the retail slot before applying its exact relocation. */
+        if(raw_reset!=0x58a4d0u) {
+            fputs("FAIL: unexpected retail CBlock reset vtable slot\n",stderr); ++failures;
+        }
+        *(void **)(image+0x2d4b94u)=image+0x18a4d0u;
+        if(!SudekiMpBlockResetImageMatches((HMODULE)image)) {
+            fputs("FAIL: CBlock reset exact-image ABI rejected\n",stderr); ++failures;
+        }
+        for(unsigned i=0;i<sizeof(guards)/sizeof(guards[0]);++i) {
+            image[guards[i]]^=1u;
+            if(SudekiMpBlockResetImageMatches((HMODULE)image)) {
+                fputs("FAIL: CBlock reset accepted foreign entry/cleanup target\n",stderr); ++failures;
+            }
+            image[guards[i]]^=1u;
+        }
+        *(uint32_t *)(image+0x2d4b94u)=raw_reset;
     }
     {
         uint8_t damage[6], popup[5];
@@ -6386,19 +6580,34 @@ int wmain(int argc, wchar_t **argv) {
     }
     /* Same exact reader/replica seams, explicit local endpoint for every
      * non-host hero. A joining client is contained before any host approval. */
+    const uint32_t party_realtime_operands[]={0x98ee6,0x98eec,0x27046,0x28be96};
+    const uint32_t party_realtime_targets[]={0x408da0,0x408d1c,0x345f70,0x325810};
+    uint32_t party_realtime_originals[4];
+    for(unsigned i=0;i<4;++i) {
+        memcpy(&party_realtime_originals[i],image+party_realtime_operands[i],4);
+        *(void **)(image+party_realtime_operands[i])=image+party_realtime_targets[i];
+    }
     for(unsigned party_seat=1;party_seat<4;++party_seat) {
         SudekiMpLanPartyConfig cfg; memset(&cfg,0,sizeof(cfg));
         cfg.local_seat=(uint8_t)party_seat; cfg.host_ipv4="127.0.0.1"; cfg.port=26889;
         memset(cfg.game_hash,0x13,sizeof(cfg.game_hash));
         SudekiMpLanPartySession *party_session=SudekiMpLanPartyCreate(&cfg);
-        if(!party_session || !SudekiMpInitializeLanPartyClientReplica((HMODULE)image,party_session) ||
-            !SudekiMpInstallLanPartyClientInput((HMODULE)image,party_session)) {
-            fputs("FAIL: fixed-four explicit client input/replica installation\n",stderr); ++failures;
+        /* Match runtime ordering: SMP4 replica preflight requires the exact
+         * shared normal-time patch owner to be installed first. */
+        BOOL cast_installed=party_session && SudekiMpLanPartyCastInstall((HMODULE)image,party_session);
+        BOOL replica_installed=cast_installed && SudekiMpInitializeLanPartyClientReplica((HMODULE)image,party_session);
+        BOOL input_installed=replica_installed && SudekiMpInstallLanPartyClientInput((HMODULE)image,party_session);
+        if(!input_installed) {
+            fprintf(stderr,"FAIL: fixed-four explicit client input/replica installation seat=%u session=%u cast=%u replica=%u error=%lu\n",
+                party_seat,party_session!=NULL,cast_installed,replica_installed,(unsigned long)GetLastError()); ++failures;
         }
-        if(!SudekiMpUninstallLanArenaClientInput() || !SudekiMpResetLanArenaClientReplica()) {
+        if(!SudekiMpLanPartyCastUninstall() || !SudekiMpUninstallLanArenaClientInput() ||
+            !SudekiMpResetLanArenaClientReplica()) {
             fputs("FAIL: fixed-four explicit client adapter teardown\n",stderr); ++failures;
         } else if(party_session) SudekiMpLanPartyDestroy(party_session,FALSE);
     }
+    for(unsigned i=0;i<4;++i)
+        memcpy(image+party_realtime_operands[i],&party_realtime_originals[i],4);
     *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
         raw_lan_client_quick_menu_input;
     *(uint32_t *)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =

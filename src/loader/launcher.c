@@ -1,4 +1,6 @@
 #include "engine/build_identity.h"
+#include "engine/sha256.h"
+#include "loader/lobby_launch.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -436,6 +438,14 @@ static BOOL append_command_line_argument(
     return TRUE;
 }
 
+static BOOL CALLBACK close_owned_game(HWND window,LPARAM process_id) {
+    DWORD pid=0;
+    GetWindowThreadProcessId(window,&pid);
+    if (pid==(DWORD)process_id && GetWindow(window,GW_OWNER)==NULL)
+        PostMessageW(window,WM_CLOSE,0,0);
+    return TRUE;
+}
+
 int wmain(int argc, wchar_t **argv) {
     wchar_t launcher_path[MAX_PATH];
     wchar_t launcher_directory[MAX_PATH];
@@ -458,6 +468,9 @@ int wmain(int argc, wchar_t **argv) {
     DWORD wait_result;
     DWORD game_exit_code;
     int result = 1;
+    HANDLE handoff_mapping=NULL, handoff_owner=NULL;
+    SudekiMpLobbyLaunchShared *handoff=NULL;
+    BOOL lobby_mode=argc==3 && !wcscmp(argv[1],L"--lobby");
 
     if (GetModuleFileNameW(NULL, launcher_path, MAX_PATH) == 0) {
         print_error(L"GetModuleFileNameW");
@@ -471,7 +484,11 @@ int wmain(int argc, wchar_t **argv) {
     default_dll[MAX_PATH - 1] = L'\0';
 
     check_only = argc >= 2 && lstrcmpiW(argv[1], L"--check") == 0;
-    if (check_only) {
+    if (lobby_mode) {
+        if (!SudekiMpLobbyLaunchOpen(argv[2],&handoff_mapping,&handoff) ||
+            !(handoff_owner=OpenProcess(SYNCHRONIZE,FALSE,handoff->owner_pid))) return 1;
+        game_input=handoff->game; dll_input=handoff->dll; first_game_argument=argc;
+    } else if (check_only) {
         game_input = argc >= 3 ? argv[2] : default_game;
         dll_input = argc >= 4 ? argv[3] : default_dll;
         first_game_argument = 4;
@@ -499,6 +516,10 @@ int wmain(int argc, wchar_t **argv) {
     if (GetFileAttributesW(dll_path) == INVALID_FILE_ATTRIBUTES) {
         print_error(L"locate SudekiMP.dll");
         return 1;
+    }
+    if (handoff) {
+        char hash[65];
+        if (!SudekiMpSha256File(dll_path,hash) || strcmp(hash,handoff->dll_hash)) return 2;
     }
     if (check_only) {
         wprintf(L"Build supported; launcher will permit injection.\n");
@@ -528,6 +549,20 @@ int wmain(int argc, wchar_t **argv) {
             return 1;
         }
     }
+    if (handoff) {
+        static const wchar_t *const heroes[]={L"-Buki",L"-Elco",L"-Tal",L"-Ailish"};
+        const wchar_t *args[]={L"-Level",L"testroom",L"-DT",L"1",heroes[handoff->plan.seat],L"1"};
+        for (unsigned i=0;i<sizeof(args)/sizeof(args[0]);++i)
+            if (!append_command_line_argument(command_line,SUDEKIMP_MAX_COMMAND_LINE,args[i])) return 1;
+        if (!SetEnvironmentVariableW(SUDEKIMP_LOBBY_LAUNCH_ENV,argv[2])) return 1;
+        wchar_t logfile[MAX_PATH];
+        directory_from_path(dll_path,logfile);
+        size_t used=wcslen(logfile);
+        if (used+50>=MAX_PATH) return 1;
+        _snwprintf(logfile+used,MAX_PATH-used,L"\\testroom-%lu.log",(unsigned long)GetCurrentProcessId());
+        if (!SetEnvironmentVariableW(L"SUDEKIMP_LOG_PATH",logfile)) return 1;
+    } else if (!SetEnvironmentVariableW(SUDEKIMP_LOBBY_LAUNCH_ENV,NULL)) return 1;
+    if (!SetEnvironmentVariableW(L"SUDEKIMP_LAUNCHER_PATH",launcher_path)) return 1;
 
     ZeroMemory(&startup, sizeof(startup));
     startup.cb = sizeof(startup);
@@ -548,10 +583,20 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
     launched = TRUE;
+    if (handoff) handoff->child_pid=process.dwProcessId;
 
     if (!inject_and_initialize(&process, dll_path)) {
         fwprintf(stderr, L"SudekiMP launcher: injection failed; game was not resumed.\n");
         goto cleanup;
+    }
+    if (handoff) {
+        InterlockedExchange(&handoff->state,SUDEKIMP_LAUNCH_PREPARED);
+        DWORD started=GetTickCount();
+        while (InterlockedCompareExchange(&handoff->command,0,0)==SUDEKIMP_LAUNCH_WAIT &&
+            WaitForSingleObject(handoff_owner,50)==WAIT_TIMEOUT &&
+            (DWORD)(GetTickCount()-started)<90000u) {}
+        if (InterlockedCompareExchange(&handoff->command,0,0)!=SUDEKIMP_LAUNCH_RUN ||
+            WaitForSingleObject(handoff_owner,0)!=WAIT_TIMEOUT) goto cleanup;
     }
     if (ResumeThread(process.hThread) == (DWORD)-1) {
         print_error(L"ResumeThread");
@@ -561,7 +606,20 @@ int wmain(int argc, wchar_t **argv) {
 
     wprintf(L"SudekiMP loaded successfully.\n");
     fflush(stdout);
-    wait_result = WaitForSingleObject(process.hProcess, INFINITE);
+    if (handoff) {
+        DWORD close_at=0;
+        while ((wait_result=WaitForSingleObject(process.hProcess,100))==WAIT_TIMEOUT) {
+            LONG command=InterlockedCompareExchange(&handoff->command,0,0);
+            if (command!=SUDEKIMP_LAUNCH_DETACH && (command==SUDEKIMP_LAUNCH_CANCEL ||
+                WaitForSingleObject(handoff_owner,0)!=WAIT_TIMEOUT) &&
+                (!close_at || (DWORD)(GetTickCount()-close_at)>=1000u)) {
+                /* Once resumed, request ordinary process shutdown. Never
+                 * force-cancel native actors/tasks or kill another game. */
+                EnumWindows(close_owned_game,(LPARAM)process.dwProcessId);
+                close_at=GetTickCount();
+            }
+        }
+    } else wait_result = WaitForSingleObject(process.hProcess, INFINITE);
     if (wait_result != WAIT_OBJECT_0) {
         print_error(L"wait for Sudeki");
         goto cleanup;
@@ -573,10 +631,17 @@ int wmain(int argc, wchar_t **argv) {
     result = 0;
 
 cleanup:
+    if (handoff && result!=0) {
+        InterlockedExchange(&handoff->error,(LONG)GetLastError());
+        InterlockedExchange(&handoff->state,SUDEKIMP_LAUNCH_FAILED);
+    }
     if (result != 0 && launched && !resumed) {
         TerminateProcess(process.hProcess, (UINT)result);
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+    if (handoff) UnmapViewOfFile(handoff);
+    if (handoff_mapping) CloseHandle(handoff_mapping);
+    if (handoff_owner) CloseHandle(handoff_owner);
     return result;
 }

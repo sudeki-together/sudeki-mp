@@ -67,7 +67,7 @@ typedef struct SpiritVisualResource {
     uint32_t identifier;
 } SpiritVisualResource;
 
-static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST] = {
+static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_PARTY_VFX_LAST] = {
     {"SFXSS250_Initiate.HOM", 0x3cef3b8fu},
     {"SFXSS251_Initiate_Loop_Wait.HOM", 0xb5a0cf01u},
     {"SFXSS112_Small_Floor_Pattern.HOM", 0x03439ed3u},
@@ -106,7 +106,11 @@ static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_ARENA_SPIRIT_VFX
     {"SFXSS600_RAFFI_SPIRIT_STRIKE.HOM", 0xec9a809bu},
     {"SFXSS601_HIT.HOM", 0xb0a51d13u},
     {"SFXSS650_RAFFI_SS_SPELL.HOM", 0xa85bf815u},
-    {"SFXSS651_HASTE_PCS.HOM", 0x4ed84d5bu}
+    {"SFXSS651_HASTE_PCS.HOM", 0x4ed84d5bu},
+    /* SMP4: exact Tal resources; the isolated sound-only listener never
+     * forwards their authored block events into a client actor. */
+    {"SFXT200_Shield_Appear.HOM", 0x7eae7163u},
+    {"SFXT201_Shield_Loop.HOM", 0x8e21830fu}
 };
 
 static const uint8_t expected_sfx_play_body[] = {
@@ -863,7 +867,7 @@ static BOOL release_locked(
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
-    for (resource_index = 0u; resource_index < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST;
+    for (resource_index = 0u; resource_index < SUDEKIMP_LAN_PARTY_VFX_LAST;
             ++resource_index) {
         if (visual_resources[resource_index].identifier ==
                 lease->resource_identifier) {
@@ -1140,7 +1144,7 @@ LONG SudekiMpLanArenaSpiritVfxReplayActiveCalls(void) {
 }
 
 static const SpiritVisualResource *visual_resource(unsigned int kind) {
-    if (kind < 1u || kind > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST ||
+    if (kind < 1u || kind > SUDEKIMP_LAN_PARTY_VFX_LAST ||
         visual_resources[kind - 1u].name == NULL)
         return NULL;
     return &visual_resources[kind - 1u];
@@ -1161,7 +1165,9 @@ BOOL SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
     *apply = (kind != SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE &&
               kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
               kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR &&
-              kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) ||
+              kind != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP &&
+              kind != SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR &&
+              kind != SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP) ||
         host_phase > native_phase;
     return TRUE;
 }
@@ -1172,7 +1178,7 @@ BOOL SudekiMpLanArenaSpiritVfxVisualMatrix(
     float x, y, z, w, length;
     unsigned int index;
     if (visual == NULL || matrix == NULL || visual->instance_sequence == 0u ||
-        !SudekiMpLanArenaVisualOwnerValid(visual) || visual_resource(visual->kind) == NULL ||
+        !SudekiMpLanArenaVisualOwnerValidForParty(visual) || visual_resource(visual->kind) == NULL ||
         visual->phase_valid > 1u || !isfinite(visual->phase) ||
         visual->phase < 0.0f || visual->phase > 1000000.0f) return FALSE;
     for (index = 0u; index < 3u; ++index) {
@@ -1247,7 +1253,7 @@ static BOOL reset_visuals_locked(SudekiMpLanArenaSpiritVfxVisualState *state,
         if (!retire_visual_slot(&state->slots[index], api)) result = FALSE;
     /* Effects and observer nodes must be quiescent before backing caches. */
     if (!result) { SetLastError(ERROR_BUSY); return FALSE; }
-    for (index = 0u; index < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++index)
+    for (index = 0u; index < SUDEKIMP_LAN_PARTY_VFX_LAST; ++index)
         if (!release_locked(&state->caches[index], &api->cache)) result = FALSE;
     if (result) {
         state->session_token = 0u;
@@ -1715,8 +1721,8 @@ static void fill_visual_api(HMODULE module,
     api->retire = native_visual_retire; api->detach = native_visual_detach;
 }
 
-BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(HMODULE module,
-    const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token) {
+static BOOL service_native_visuals(HMODULE module,
+    const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token, BOOL party) {
     SudekiMpLanArenaSpiritVfxVisualApi api;
     BOOL result;
     DWORD service_error;
@@ -1737,12 +1743,17 @@ BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(HMODULE module,
         begin_operation()) {
         unsigned int attempt;
         DWORD now = GetTickCount();
-        for (attempt = 0u; attempt < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++attempt) {
+        for (attempt = 0u; attempt < SUDEKIMP_LAN_PARTY_VFX_LAST; ++attempt) {
             unsigned int index = visual_prewarm_index++ %
-                SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST;
+                SUDEKIMP_LAN_PARTY_VFX_LAST;
             SudekiMpLanArenaSpiritVfxCacheLease *lease = &production_visuals.caches[index];
             SudekiMpLanArenaSpiritVfxCacheState before = lease->state;
-            if (visual_resources[index].name == NULL ||
+            if ((party && index != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR-1u &&
+                 index != SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP-1u &&
+                 index != SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR-1u &&
+                 index != SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP-1u) ||
+                (!party && index >= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST) ||
+                visual_resources[index].name == NULL ||
                 before == SUDEKIMP_SPIRIT_VFX_CACHE_READY ||
                 before == SUDEKIMP_SPIRIT_VFX_CACHE_POISONED ||
                 (before == SUDEKIMP_SPIRIT_VFX_CACHE_LOADING &&
@@ -1759,6 +1770,19 @@ BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(HMODULE module,
         end_operation(service_error);
     }
     return result;
+}
+
+BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(HMODULE module,
+    const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token) {
+    return service_native_visuals(module, snapshot, session_token, FALSE);
+}
+BOOL SudekiMpLanPartyShieldServiceVisuals(HMODULE module,
+    const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token) {
+    if(!snapshot || snapshot->spirit_vfx_count > SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY)
+        return FALSE;
+    for(unsigned i=0; i<snapshot->spirit_vfx_count; ++i)
+        if(!SudekiMpLanPartyShieldOwnerValid(&snapshot->spirit_vfx[i])) return FALSE;
+    return service_native_visuals(module, snapshot, session_token, TRUE);
 }
 
 BOOL SudekiMpLanArenaSpiritVfxResetVisuals(HMODULE module) {

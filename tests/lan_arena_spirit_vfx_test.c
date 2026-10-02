@@ -1171,7 +1171,13 @@ static void set_visual_owner(SudekiMpLanArenaSpiritVfxSnapshot *visual) {
          visual->kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) ?
         SUDEKIMP_LAN_ARENA_BUKI_TYPE : 0u;
     visual->skill_sequence = visual->owner_actor_type != 0u ? 0u : 1u;
-    if (visual->kind >= SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE) {
+    if(visual->kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR ||
+       visual->kind == SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP) {
+        visual->owner_actor_type=SUDEKIMP_LAN_ARENA_TAL_TYPE;
+        visual->skill_sequence=0;
+    }
+    if (visual->kind >= SUDEKIMP_LAN_ARENA_ELCO_VFX_INITIATE &&
+        visual->kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST) {
         visual->owner_actor_type = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
         visual->skill_sequence = 1u;
     }
@@ -1231,12 +1237,14 @@ static void test_visual_fixed_resource_lifecycle(
     CHECK(test.spawn_calls == 1u && test.cache.pre_cache_calls == 1u);
     before = state;
     if (snapshot.spirit_vfx[0].owner_actor_type != 0u) {
-        snapshot.spirit_vfx[0].owner_actor_type = SUDEKIMP_LAN_ARENA_TAL_TYPE;
+        snapshot.spirit_vfx[0].owner_actor_type =
+            snapshot.spirit_vfx[0].owner_actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE ?
+                SUDEKIMP_LAN_ARENA_BUKI_TYPE : SUDEKIMP_LAN_ARENA_TAL_TYPE;
         CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
         CHECK(memcmp(&before, &state, sizeof(state)) == 0);
         set_visual_owner(&snapshot.spirit_vfx[0]);
     }
-    snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u;
+    snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_PARTY_VFX_LAST + 1u;
     CHECK(!SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
     CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(memcmp(&before, &state, sizeof(state)) == 0);
@@ -1399,7 +1407,7 @@ static void test_visual_opening_phase_never_rewinds(void) {
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(12u, 1000001.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(0u, 0.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
-        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST + 1u, 0.0f, 0.0f, &apply));
+        SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, 0.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(12u, 0.0f, 0.0f, NULL));
 }
 
@@ -1407,6 +1415,10 @@ int main(int argc, char **argv) {
     test_visual_opening_phase_never_rewinds();
     test_visual_roster_once_unknown_and_retirement();
     test_concurrent_visual_owners_retire_independently();
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR,
+        0x7eae7163u,"SFXT200_Shield_Appear.HOM");
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP,
+        0x8e21830fu,"SFXT201_Shield_Loop.HOM");
     test_visual_pending_cleanup_and_invalid_roster();
     test_visual_matrix_and_native_null();
     test_visual_identity_preflight_precedes_any_retirement();

@@ -4,13 +4,13 @@
 #include <math.h>
 #include <string.h>
 
-BOOL SudekiMpLanWeaponPlaybackReloadMs(const SudekiMpLanWeaponState *state,
+BOOL SudekiMpLanRangedWeaponPlaybackReloadMs(uint8_t type,const SudekiMpLanWeaponState *state,
     uint8_t item, uint16_t playback_sequence, uint32_t host_tick,
     uint16_t *reload_ms) {
     uint16_t remaining;
     if (!reload_ms || !playback_sequence || !state || !state->valid ||
         state->item != item ||
-        !SudekiMpLanWeaponStateValid(state, SUDEKIMP_LAN_ARENA_ELCO_TYPE))
+        !SudekiMpLanRangedWeaponStateValid(state, type))
         return FALSE;
     remaining = state->reload_ms;
     for (unsigned i = 0; i < state->shot_count; ++i) {
@@ -24,11 +24,11 @@ BOOL SudekiMpLanWeaponPlaybackReloadMs(const SudekiMpLanWeaponState *state,
     return TRUE;
 }
 
-const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
-    const SudekiMpLanWeaponState *state, uint8_t item, uint32_t host_tick,
+const SudekiMpLanWeaponShot *SudekiMpLanRangedWeaponNextShot(
+    uint8_t type,const SudekiMpLanWeaponState *state, uint8_t item, uint32_t host_tick,
     uint16_t *cursor) {
     if (!cursor || !state || !state->valid ||
-        !SudekiMpLanWeaponStateValid(state, SUDEKIMP_LAN_ARENA_ELCO_TYPE)) return NULL;
+        !SudekiMpLanRangedWeaponStateValid(state, type)) return NULL;
     for (unsigned i = 0; i < state->shot_count; ++i) {
         const SudekiMpLanWeaponShot *event = &state->shots[i];
         if (*cursor && (int16_t)(event->sequence - *cursor) <= 0) continue;
@@ -40,6 +40,17 @@ const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
         return event;
     }
     return NULL;
+}
+
+BOOL SudekiMpLanWeaponPlaybackReloadMs(const SudekiMpLanWeaponState *state,
+    uint8_t item,uint16_t sequence,uint32_t tick,uint16_t *reload) {
+    return SudekiMpLanRangedWeaponPlaybackReloadMs(SUDEKIMP_LAN_ARENA_ELCO_TYPE,
+        state,item,sequence,tick,reload);
+}
+const SudekiMpLanWeaponShot *SudekiMpLanWeaponNextShot(
+    const SudekiMpLanWeaponState *state,uint8_t item,uint32_t tick,uint16_t *cursor) {
+    return SudekiMpLanRangedWeaponNextShot(SUDEKIMP_LAN_ARENA_ELCO_TYPE,
+        state,item,tick,cursor);
 }
 
 static float clamp01(float value) {
@@ -104,7 +115,7 @@ static void replay_action_history(
 ) {
     const SudekiMpLanArenaActionEvent *selected = NULL;
     BOOL has_new_event = FALSE;
-    unsigned int index;
+    unsigned int index, selected_count = 0u;
     if (before == NULL || after == NULL || output == NULL) return;
     for (index = 0u; index < after->action_history_count; ++index) {
         const SudekiMpLanArenaActionEvent *event =
@@ -112,7 +123,10 @@ static void replay_action_history(
         if (!action_sequence16_newer(
                 event->sequence, before->action_sequence)) continue;
         has_new_event = TRUE;
-        if (!tick_after(event->host_tick, host_tick)) selected = event;
+        if (!tick_after(event->host_tick, host_tick)) {
+            selected = event;
+            selected_count = index + 1u;
+        }
     }
     if (!has_new_event) return;
     if (selected == NULL) {
@@ -128,6 +142,12 @@ static void replay_action_history(
         output->idle_entry_phase_q8 = before->idle_entry_phase_q8;
         output->action_retirement_valid =
             before->action_retirement_valid;
+        /* A sampled actor's journal must end at its sampled sequence. The
+         * future edge remains in the replica history for the next sample;
+         * carrying it here makes the complete SMP4 frame fail validation. */
+        output->action_history_count = before->action_history_count;
+        memcpy(output->action_history, before->action_history,
+            sizeof(output->action_history));
         /* The packet already knows about a future combo edge, but the render
          * clock has not reached it yet. Never inherit that next selector's
          * freshly-reset phase while retaining the current selector: doing so
@@ -153,6 +173,10 @@ static void replay_action_history(
     output->combat_state = combat_state_for_action_event(selected->variant);
     output->action_variant = selected->variant;
     output->action_sequence = selected->sequence;
+    output->action_history_count = (uint8_t)selected_count;
+    memset(output->action_history + selected_count, 0,
+        (SUDEKIMP_LAN_ARENA_ACTION_HISTORY_CAPACITY - selected_count) *
+            sizeof(output->action_history[0]));
     if (selected->sequence == after->action_sequence &&
         after->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
         after->action_phase_valid &&
@@ -374,7 +398,8 @@ static void interpolate_actor(
     uint32_t host_tick,
     uint32_t before_host_tick,
     uint32_t after_host_tick,
-    SudekiMpLanArenaActorSnapshot *output
+    SudekiMpLanArenaActorSnapshot *output,
+    BOOL all_actor_motion
 ) {
     *output = *after;
     if (before->native_entity_id != after->native_entity_id ||
@@ -443,7 +468,27 @@ static void interpolate_actor(
                 before->ranged_target[i],after->ranged_target[i],alpha);
     interpolate_skill_presentation(before, after, alpha, output);
     interpolate_locomotion(before, after, alpha, output);
-    replay_action_history(
+    if(all_actor_motion &&
+        (output->actor_type==SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+         output->actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE)) {
+        /* SMP4 carries the host's complete melee body timeline. Keep semantic
+         * HUD/action metadata at the same endpoint as its channels; replaying
+         * a later journal edge would turn failed recovery or an outgoing blend
+         * into another attack. The legacy two-seat event replay is unchanged. */
+        const SudekiMpLanArenaActorSnapshot *source=
+            alpha<1.0f?before:after;
+        output->animation_state=source->animation_state;
+        output->combat_state=source->combat_state;
+        output->action_variant=source->action_variant;
+        output->action_sequence=source->action_sequence;
+        output->action_phase_valid=source->action_phase_valid;
+        output->action_phase_q8=source->action_phase_q8;
+        output->action_terminal_phase_q8=source->action_terminal_phase_q8;
+        output->idle_entry_phase_q8=source->idle_entry_phase_q8;
+        output->action_retirement_valid=source->action_retirement_valid;
+        output->action_history_count=source->action_history_count;
+        memcpy(output->action_history,source->action_history,sizeof(output->action_history));
+    } else replay_action_history(
         before, after, host_tick, before_host_tick,
         after_host_tick, output);
     if (output->animation_state == SUDEKIMP_LAN_ARENA_ANIMATION_ACTION &&
@@ -723,10 +768,10 @@ static BOOL replica_sample(
             host_tick, alpha, sample);
         interpolate_actor(&replica->earliest.seat[0], &replica->oldest.seat[0],
             alpha, host_tick, replica->earliest.host_tick,
-            replica->oldest.host_tick, &sample->seat[0]);
+            replica->oldest.host_tick, &sample->seat[0],all_actor_motion);
         interpolate_actor(&replica->earliest.seat[1], &replica->oldest.seat[1],
             alpha, host_tick, replica->earliest.host_tick,
-            replica->oldest.host_tick, &sample->seat[1]);
+            replica->oldest.host_tick, &sample->seat[1],all_actor_motion);
         if (!all_actor_motion && !sample->combat_enabled)
             memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
@@ -759,10 +804,10 @@ static BOOL replica_sample(
             host_tick, alpha, sample);
         interpolate_actor(&replica->oldest.seat[0], &replica->previous.seat[0],
             alpha, host_tick, replica->oldest.host_tick,
-            replica->previous.host_tick, &sample->seat[0]);
+            replica->previous.host_tick, &sample->seat[0],all_actor_motion);
         interpolate_actor(&replica->oldest.seat[1], &replica->previous.seat[1],
             alpha, host_tick, replica->oldest.host_tick,
-            replica->previous.host_tick, &sample->seat[1]);
+            replica->previous.host_tick, &sample->seat[1],all_actor_motion);
         if (!all_actor_motion && !sample->combat_enabled)
             memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
         for (index = 0u; index < sample->enemy_count; ++index) {
@@ -796,10 +841,10 @@ static BOOL replica_sample(
         host_tick, alpha, sample);
     interpolate_actor(&replica->previous.seat[0], &replica->latest.seat[0],
         alpha, host_tick, replica->previous.host_tick,
-        replica->latest.host_tick, &sample->seat[0]);
+        replica->latest.host_tick, &sample->seat[0],all_actor_motion);
     interpolate_actor(&replica->previous.seat[1], &replica->latest.seat[1],
         alpha, host_tick, replica->previous.host_tick,
-        replica->latest.host_tick, &sample->seat[1]);
+        replica->latest.host_tick, &sample->seat[1],all_actor_motion);
     if (!all_actor_motion && !sample->combat_enabled)
         memset(&sample->seat[1].locomotion, 0, sizeof(sample->seat[1].locomotion));
     for (index = 0u; index < sample->enemy_count; ++index) {
@@ -845,15 +890,17 @@ void SudekiMpLanArenaReplicaRenderClockReset(
     if (clock != NULL) memset(clock, 0, sizeof(*clock));
 }
 
-static BOOL snapshot_buki_combo_pose(const SudekiMpLanArenaSnapshot *snapshot) {
+static BOOL snapshot_melee_body_pose(const SudekiMpLanArenaSnapshot *snapshot) {
     const SudekiMpLanArenaActorSnapshot *actor = &snapshot->seat[0];
     unsigned int i;
-    if (actor->actor_type != SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
-        !actor->locomotion.valid) return FALSE;
+    if (!snapshot->combat_enabled || !actor->locomotion.valid) return FALSE;
     /* Failed combos have no accepted action variant, but their authored
      * playback (including an outgoing blend) must still run at normal time. */
     for (i=0; i<4; ++i)
-        if (actor->locomotion.clip[i] >= 17u) return TRUE;
+        if ((actor->actor_type==SUDEKIMP_LAN_ARENA_BUKI_TYPE &&
+                actor->locomotion.clip[i]>=17u) ||
+            (actor->actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE &&
+                actor->locomotion.clip[i]>=4u)) return TRUE;
     return FALSE;
 }
 
@@ -869,7 +916,7 @@ BOOL SudekiMpLanArenaReplicaActionTimelineBuffered(
           SUDEKIMP_LAN_ARENA_ANIMATION_ACTION || \
       (snapshot_).seat[0].skill_active != 0u || \
       (snapshot_).seat[1].skill_active != 0u || \
-      snapshot_buki_combo_pose(&(snapshot_))))
+      snapshot_melee_body_pose(&(snapshot_))))
     if (SNAPSHOT_ACTION_ACTIVE(replica->earliest, replica->earliest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->oldest, replica->oldest_valid) ||
         SNAPSHOT_ACTION_ACTIVE(replica->previous, replica->previous_valid) ||
