@@ -722,7 +722,7 @@ BOOL SudekiMpRestoreElcoInterruptedIdleWeapon(void *character) {
         *(int *)(slot+0xac)==hip && !(weapon[0x3b8]&0x20);
 }
 
-BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
+static BOOL sheathed_weapon_visibility(void *character,BOOL visible,BOOL startup) {
     static const uint8_t entry[]={0x8a,0x44,0x24,0x04,0x8b,0x91,0x04,0x02,
         0,0,0x02,0xc0,0x32,0x81,0xb8,0x03,0,0};
     uint8_t *base=(uint8_t *)native_module,*actor=character,*weapon,*position,*arbiter;
@@ -732,7 +732,8 @@ BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
     if(!base || !character_weapon_context(character,&record,&inventory,&category)) return FALSE;
     /* Retail Ailish has no sheathe locator and intentionally hides her staff
      * outside combat. Do not make a floating unattached staff visible. */
-    if(category==5) return TRUE;
+    if(category==5 && startup) return TRUE;
+    if(category==5 && visible) return FALSE;
     weapon=record; count=category==6?2:1;
     position=*(uint8_t **)(actor+0x44); arbiter=*(uint8_t **)(actor+0x90);
     if(memcmp(base+0xd7e30,entry,sizeof(entry)) ||
@@ -746,7 +747,10 @@ BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
         uint8_t *slot=weapon+(i?0x150:0x40);
         wrappers[i]=*(uint8_t **)(slot+0xb4);
         if(!readable_memory(wrappers[i],0x14) ||
-            *(void **)(slot+0x94)!=position+4 || *(int *)(slot+0xac)<0) return FALSE;
+            /* Ailish has no sheathe locator. Hiding her owned wrapper is
+             * allowed; displaying an unattached staff remains forbidden. */
+            (category!=5 &&
+             (*(void **)(slot+0x94)!=position+4 || *(int *)(slot+0xac)<0))) return FALSE;
         objects[i]=*(uint8_t **)(wrappers[i]+8);
         if(!visibility_writable(objects[i],0x38) ||
             *(void **)objects[i]!=base+0x2dd700 ||
@@ -756,16 +760,186 @@ BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
             (*(uint32_t *)(objects[i]+0x34)&0x4000000)) return FALSE;
     }
     if(count==1 && *(void **)(weapon+0x204)) return FALSE;
-    ((Show)(base+0xd7e30))(weapon,1);
+    ((Show)(base+0xd7e30))(weapon,visible?1:0);
     if(*(void **)(actor+0xc0)!=weapon || *(void **)(weapon+0x10)!=actor ||
-        !(weapon[0x3b8]&2)) return FALSE;
+        !!(weapon[0x3b8]&2)!=!!visible) return FALSE;
     for(unsigned i=0;i<count;++i) {
         uint8_t *slot=weapon+(i?0x150:0x40);
         if(*(void **)(slot+0xb4)!=wrappers[i] ||
             *(void **)(wrappers[i]+8)!=objects[i] ||
-            (*(uint32_t *)(objects[i]+0x34)&4)) return FALSE;
+            !!(*(uint32_t *)(objects[i]+0x34)&4)==!!visible) return FALSE;
     }
     return TRUE;
+}
+
+BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character) {
+    return sheathed_weapon_visibility(character,TRUE,TRUE);
+}
+BOOL SudekiMpReconcileSheathedWeaponVisibility(void *character,BOOL visible) {
+    return sheathed_weapon_visibility(character,visible,FALSE);
+}
+
+/* These bindings use the same native CWeapon attachment path as the retail
+ * draw/sheath events. The wire never supplies an index, pointer or name. */
+typedef struct WeaponAttachment {
+    uint8_t *actor,*weapon,*position,*model,*body_wrapper,*body,*instance;
+    uint8_t *wrapper[2],*object[2],*attachment[2];
+    unsigned category,count;
+    int locator[2][2];
+} WeaponAttachment;
+static BOOL weapon_attachment_name(uint8_t *weapon,unsigned offset,uint32_t *hash) {
+    unsigned encoded=*(uint32_t *)(weapon+offset),length=encoded&0x7fffffffu;
+    const char *name=(encoded&0x80000000u)?(char *)weapon+offset+4:
+        *(const char **)(weapon+offset+4);
+    if(!length) { *hash=0; return TRUE; }
+    if(length>63u || !readable_memory(name,length+1u) || name[length] ||
+        memchr(name,0,length)) return FALSE;
+    *hash=attachment_name_hash(name); return *hash!=0;
+}
+static BOOL weapon_attachment_graph(void *actor,BOOL write,WeaponAttachment *out) {
+    uint8_t *b=(uint8_t *)native_module,*a=actor;
+    void *record,*inventory; unsigned category;
+    WeaponAttachment t={0};
+    if(!b || !out || !readable_memory(a,0x138u) ||
+        !character_weapon_context(actor,&record,&inventory,&category) ||
+        !readable_memory(record,0x3bcu)) return FALSE;
+    t.actor=a; t.weapon=record; t.category=category; t.count=category==6u?2u:1u;
+    if(!item_matches_family(*(void **)(t.weapon+0x268u),category)) return FALSE;
+    t.position=*(uint8_t **)(a+0x44u); t.model=*(uint8_t **)(a+0x130u);
+    if(!readable_memory(t.position,0x104u) || *(void **)t.position!=b+0x2cdefcu ||
+        *(void **)(t.position+0x10u)!=actor || !readable_memory(t.model,0x168u) ||
+        *(void **)(t.model+0x10u)!=actor || *(void **)(t.weapon+0x3acu)!=t.model+4u) return FALSE;
+    t.body_wrapper=*(uint8_t **)(t.position+0xb4u);
+    if(!readable_memory(t.body_wrapper,0x14u)) return FALSE;
+    t.body=*(uint8_t **)(t.body_wrapper+8u); t.instance=*(uint8_t **)(t.body_wrapper+0xcu);
+    if(!readable_memory(t.body,0xd0u) || *(void **)t.body!=b+0x2dd700u ||
+        *(void **)(t.body+0x18u) || !readable_memory(t.instance,0x10u) ||
+        *(void **)t.instance!=b+0x2df8ecu ||
+        *(void **)(t.body_wrapper+0x10u)!=t.instance ||
+        *(void **)(b+0x2df8ecu+0x24u)!=b+0x21bd40u ||
+        *(void **)(b+0x2df8ecu+0x28u)!=b+0x21bce0u) return FALSE;
+    if(write && (/* Clients retain the attached world model, including ranged heroes. */
+        ((category==5u || category==7u) &&
+            (t.body_wrapper==*(void **)(t.model+0x160u) ||
+             (*(void **)(t.model+0x164u) && t.body_wrapper!=*(void **)(t.model+0x164u)))) ||
+        !visibility_writable(t.position,0x104u) || !visibility_writable(t.body,0xd0u) ||
+        !visibility_writable(t.weapon,0x3bcu) || *(void **)(t.weapon+0x26cu) ||
+        *(unsigned *)(t.weapon+0x330u)!=3u || (t.weapon[0x3b8u]&4u))) return FALSE;
+    uint8_t *bank=*(uint8_t **)(t.instance+8u),*header,*names_handle,*names,*records;
+    if(!readable_memory(bank,0x54u)) return FALSE;
+    header=*(uint8_t **)(bank+0x1cu); names_handle=*(uint8_t **)(bank+0x24u);
+    if(!readable_memory(header,0x18u) || !readable_memory(names_handle,4u)) return FALSE;
+    unsigned count=*(unsigned *)(header+0x14u);
+    names=*(uint8_t **)names_handle; records=*(uint8_t **)(bank+0x50u);
+    if(!count || count>256u || !readable_memory(records,count*0x50u)) return FALSE;
+    uint32_t hashes[2][2]={{0}};
+    for(unsigned slot=0;slot<t.count;++slot) {
+        t.locator[slot][0]=t.locator[slot][1]=-1;
+        for(unsigned kind=0;kind<2u;++kind)
+            if(!weapon_attachment_name(t.weapon,0x270u+slot*0x20u+kind*0x40u,
+                &hashes[slot][kind])) return FALSE;
+    }
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *r=records+i*0x50u; unsigned n=*(unsigned *)r;
+        if(n>4095u || !readable_memory(names,(n+1u)*8u)) return FALSE;
+        uint32_t hash=*(uint32_t *)(names+n*8u);
+        for(unsigned slot=0;slot<t.count;++slot) for(unsigned kind=0;kind<2u;++kind)
+            if(hashes[slot][kind] && hash==hashes[slot][kind]) {
+                if(t.locator[slot][kind]>=0) return FALSE;
+                const float *m=(const float *)(r+0x10u);
+                for(unsigned k=0;k<16u;++k) if(!isfinite(m[k])) return FALSE;
+                for(unsigned row=0;row<3u;++row) {
+                    float norm=0;
+                    for(unsigned k=0;k<3u;++k) norm+=m[row*4u+k]*m[row*4u+k];
+                    if(!isfinite(norm) || norm<.000001f) return FALSE;
+                }
+                t.locator[slot][kind]=(int)i;
+            }
+    }
+    for(unsigned i=0;i<t.count;++i) {
+        uint8_t *slot=t.weapon+(i?0x150u:0x40u);
+        t.wrapper[i]=*(uint8_t **)(slot+0xb4u);
+        if(!readable_memory(slot,0x104u) || *(void **)slot!=b+0x2cdefcu ||
+            !readable_memory(t.wrapper[i],0x14u)) return FALSE;
+        t.object[i]=*(uint8_t **)(t.wrapper[i]+8u);
+        t.attachment[i]=*(uint8_t **)(slot+0x8cu);
+        if(!readable_memory(t.object[i],0xd0u) || *(void **)t.object[i]!=b+0x2dd700u ||
+            !readable_memory(t.attachment[i],0x110u)) return FALSE;
+        if(write && (!visibility_writable(t.object[i],0xd0u) ||
+            !visibility_writable(t.attachment[i],0x110u) ||
+            (*(uint32_t *)(t.object[i]+0x34u)&0x4000000u) ||
+            slot[0x101u] || slot[0x102u]!=1u || t.attachment[i][0xf2u]>1u ||
+            (*(void **)(slot+0x94u) && *(void **)(slot+0x94u)!=t.position+4u) ||
+            (*(void **)(t.object[i]+0x18u) && *(void **)(t.object[i]+0x18u)!=t.body))) return FALSE;
+    }
+    if(t.count==1u && *(void **)(t.weapon+0x204u)) return FALSE;
+    *out=t; return TRUE;
+}
+static BOOL weapon_attachment_same(const WeaponAttachment *a,const WeaponAttachment *b) {
+    return a->actor==b->actor && a->weapon==b->weapon && a->position==b->position &&
+        a->model==b->model && a->body_wrapper==b->body_wrapper && a->body==b->body &&
+        a->instance==b->instance && a->category==b->category && a->count==b->count &&
+        !memcmp(a->wrapper,b->wrapper,sizeof(a->wrapper)) &&
+        !memcmp(a->object,b->object,sizeof(a->object)) &&
+        !memcmp(a->attachment,b->attachment,sizeof(a->attachment)) &&
+        !memcmp(a->locator,b->locator,sizeof(a->locator));
+}
+BOOL SudekiMpObserveCharacterWeaponAttachment(void *actor,uint8_t slots[2]) {
+    WeaponAttachment t;
+    if(!slots || !weapon_attachment_graph(actor,FALSE,&t)) return FALSE;
+    slots[0]=slots[1]=0;
+    for(unsigned i=0;i<t.count;++i) {
+        uint8_t *position=t.weapon+(i?0x150u:0x40u);
+        void *parent=*(void **)(position+0x94u);
+        if(!parent) continue;
+        if(parent!=t.position+4u) return FALSE;
+        int locator=*(int *)(position+0xacu);
+        if(locator>=0 && locator==t.locator[i][0]) slots[i]=1;
+        else if(locator>=0 && locator==t.locator[i][1]) slots[i]=2;
+        else return FALSE;
+    }
+    return TRUE;
+}
+__attribute__((naked,noinline)) static void call_weapon_attach(void *weapon,
+    unsigned locator,void *position,unsigned secondary,void *entry) {
+    (void)weapon;(void)locator;(void)position;(void)secondary;(void)entry;
+    __asm__ volatile("movl 4(%esp),%eax\n\tmovl 20(%esp),%edx\n\t"
+        "pushl 16(%esp)\n\tpushl 16(%esp)\n\tpushl 16(%esp)\n\tcall *%edx\n\tret\n\t");
+}
+BOOL SudekiMpReconcileCharacterWeaponAttachment(void *actor,const uint8_t slots[2],BOOL visible) {
+    static const uint8_t entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf0,0x83,0xec,0x44,0x53,0x8a,0x5d,0x10};
+    WeaponAttachment before,after; uint8_t *b=(uint8_t *)native_module;
+    if(!slots || slots[0]>2u || slots[1]>2u || !b ||
+        !weapon_attachment_graph(actor,TRUE,&before) ||
+        (before.count==1u && slots[1]) || memcmp(b+0xd8630u,entry,sizeof(entry))) return FALSE;
+    uint8_t *scene=*(uint8_t **)(b+0x408dd4u);
+    if(!readable_memory(scene,4u) || *(void **)scene!=b+0x2c7ae8u) return FALSE;
+    for(unsigned i=0;i<before.count;++i) {
+        if(!slots[i]) { if(visible) return FALSE; continue; }
+        int locator=before.locator[i][slots[i]-1u];
+        if(locator<0) return FALSE;
+        uint8_t *position=before.weapon+(i?0x150u:0x40u);
+        if(*(void **)(position+0x94u)==before.position+4u &&
+            *(int *)(position+0xacu)==locator) continue;
+        /* Retail511960 can allocate a native child-list entry when adding a
+         * previously detached staff. All objects already belong to this
+         * actor; no script/task or entity is created by this attachment path. */
+        call_weapon_attach(before.weapon,(unsigned)locator,before.position,i,b+0xd8630u);
+        if(!weapon_attachment_graph(actor,TRUE,&after) ||
+            !weapon_attachment_same(&before,&after) ||
+            *(void **)(position+0x94u)!=before.position+4u ||
+            *(int *)(position+0xacu)!=locator) return FALSE;
+    }
+    /* Bit4 is the same closed renderer visibility field used by the story
+     * scenery presenter. Update both Buki objects explicitly; retail's hide
+     * branch addresses the primary object twice on this image. No callback
+     * object is admitted by the graph proof above. */
+    before.weapon[0x3b8u]=(before.weapon[0x3b8u]&~2u)|(visible?2u:0u);
+    for(unsigned i=0;i<before.count;++i) {
+        uint32_t *flags=(uint32_t *)(before.object[i]+0x34u);
+        *flags=(*flags&~4u)|(visible?0u:4u);
+    }
+    return weapon_attachment_graph(actor,TRUE,&after) && weapon_attachment_same(&before,&after);
 }
 
 static BOOL exact_launch_option(const char *command, const char *option) {

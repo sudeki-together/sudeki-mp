@@ -1,5 +1,6 @@
 #include "hooks/lan_party_snapshot.h"
 #include "hooks/lan_party_cast.h"
+#include "hooks/lan_party_runtime.h"
 #include "engine/log.h"
 #include "hooks/lan_arena_hit_feedback.h"
 #include "network/lan_party_motion.h"
@@ -42,28 +43,37 @@ typedef struct PartyShotCapture {
     uint16_t sequence;
 } PartyShotCapture;
 static PartyShotCapture ranged_shots[2];
+static SudekiMpLanPartySession *capture_session;
+static SudekiMpLanPartyRosterObservation capture_roster;
 void SudekiMpLanPartyCaptureReset(void) {
     memset(captured,0,sizeof(captured)); memset(actions,0,sizeof(actions));
     memset(&ailish_reload_capture,0,sizeof(ailish_reload_capture));
     memset(&buki_skill_capture,0,sizeof(buki_skill_capture));
     memset(ranged_capture,0,sizeof(ranged_capture));
     memset(ranged_shots,0,sizeof(ranged_shots));
+    capture_session=NULL; memset(&capture_roster,0,sizeof(capture_roster));
 }
 
 void SudekiMpLanPartyCaptureRangedShot(const SudekiMpLanPartyLease *lease,void *actor) {
     SudekiMpElcoWeaponObservation weapon;
     SudekiMpCharacterSkillState skill;
     SudekiMpLanWeaponShot *shot;
-    if(!lease || (lease->seat!=1u && lease->seat!=3u) || !lease->token || !lease->generation ||
-        !SudekiMpLanPartyControlRetainedNativeThreadExact(lease,actor) ||
+    /* The exact host emission callback supplies a world/actor key, independent
+     * of which connection currently controls this actor. The observer never
+     * turns a client input or ownership transition into a projectile event. */
+    if(!lease || (lease->seat!=1u && lease->seat!=3u) || !capture_session ||
+        lease->token!=(uint64_t)(uintptr_t)capture_session || lease->generation!=1u ||
+        SudekiMpLanPartyLocalSeat(capture_session)!=0u ||
+        actor!=capture_roster.actors[lease->seat] ||
+        !SudekiMpLanPartyControlNativeActorExact(&capture_roster,lease->seat) ||
         !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active ||
         !SudekiMpObserveRangedWeapon(actor,SudekiMpLanPartyActorType(lease->seat),&weapon) ||
         weapon.charge<weapon.required_charge) return;
     PartyShotCapture *capture=&ranged_shots[lease->seat==1u?0u:1u];
     if(capture->actor!=actor || capture->lease.token!=lease->token ||
         capture->lease.generation!=lease->generation) {
-        /* Other clients retain their cursors when that actor rejoins. Keep
-         * this actor's event clock while discarding the old owner's journal. */
+        /* Actor replacement or a new world retires the old journal. A mere
+         * player reassignment keeps this world-owned shot history intact. */
         uint16_t sequence=capture->actor==actor?capture->sequence:0u;
         memset(capture,0,sizeof(*capture));
         capture->actor=actor; capture->lease=*lease;
@@ -137,6 +147,7 @@ BOOL SudekiMpLanPartyCaptureMovement(const SudekiMpControlUpdateDispatchWitness 
     if(!out || SudekiMpLanPartyLocalSeat(session)!=0 ||
         !SudekiMpLanPartyControlObserveRoster(w,&before) ||
         before.present_mask!=15 || before.combat) return FALSE;
+    capture_session=session; capture_roster=before;
     memset(&frame,0,sizeof(frame));
     for(unsigned seat=0;seat<4;++seat) {
         SudekiMpCleanroomActor actor; SudekiMpCleanroomActorPresentation native;
@@ -477,15 +488,14 @@ static BOOL party_capture_combat_actor(unsigned seat,void *native_actor,
     for(unsigned i=0;i<weapons.row_count && i<12u;++i)
         if(weapons.rows[i].equipped) { s->weapon_slot_plus_one=(uint8_t)(i+1u); break; }
     if(type==SUDEKIMP_LAN_ARENA_ELCO_TYPE) {
-        SudekiMpLanPartyPeerStatus peer;
         if(!SudekiMpObserveElcoWeapon(native_actor,&weapon))
             return combat_capture_rejected("elco_weapon",seat,now);
         if(!isfinite(weapon.charge) || weapon.charge<0 || weapon.charge>100 ||
             !isfinite(weapon.reload_seconds) || weapon.reload_seconds<0 ||
             weapon.reload_seconds>60) return FALSE;
-        if(SudekiMpLanPartyPeerStatusGet(session,1u,&peer) &&
-            ranged_shots[0].actor==native_actor && ranged_shots[0].lease.token==peer.lease.token &&
-            ranged_shots[0].lease.generation==peer.lease.generation)
+        if(ranged_shots[0].actor==native_actor &&
+            ranged_shots[0].lease.token==(uint64_t)(uintptr_t)session &&
+            ranged_shots[0].lease.generation==1u && ranged_shots[0].lease.seat==1u)
             s->weapon=ranged_shots[0].journal;
         s->weapon.valid=1; s->weapon.item=weapon.item; s->weapon.stage=weapon.stage;
         s->weapon.charge_q8=(uint16_t)(weapon.charge*256.0f+0.5f);
@@ -515,20 +525,18 @@ static BOOL party_capture_ailish_weapon_state(
     const SudekiMpControlUpdateDispatchWitness *w,
     SudekiMpLanPartySession *session,void *actor,
     SudekiMpLanPartyAilishWeaponState *state) {
-    SudekiMpLanPartyPeerStatus peer;
+    SudekiMpLanPartyLease world={(uint64_t)(uintptr_t)session,1u,3u};
     BOOL active;
     if(state) ZeroMemory(state,sizeof(*state));
-    if(!state || !actor || !SudekiMpLanPartyPeerStatusGet(session,3u,&peer) ||
-        peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE || !peer.lease.token ||
-        !peer.lease.generation || peer.lease.seat!=3u ||
+    if(!state || !actor || !session || SudekiMpLanPartyLocalSeat(session)!=0u ||
         SudekiMpLanPartyControlObserveActor(w,3u)!=actor ||
-        !SudekiMpLanPartyControlObserveAilishWeapon(w,&peer.lease,actor,state))
+        !SudekiMpLanPartyControlObserveAilishWorldWeapon(w,actor,state))
         return FALSE;
     if(ailish_reload_capture.actor!=actor ||
-        ailish_reload_capture.lease.token!=peer.lease.token ||
-        ailish_reload_capture.lease.generation!=peer.lease.generation ||
+        ailish_reload_capture.lease.token!=world.token ||
+        ailish_reload_capture.lease.generation!=world.generation ||
         ailish_reload_capture.sequence==0u) {
-        ailish_reload_capture.lease=peer.lease;
+        ailish_reload_capture.lease=world;
         ailish_reload_capture.actor=actor;
         ailish_reload_capture.sequence=1u;
         ailish_reload_capture.active=FALSE;
@@ -540,8 +548,8 @@ static BOOL party_capture_ailish_weapon_state(
     ailish_reload_capture.active=active;
     state->reload_sequence=ailish_reload_capture.sequence;
     const PartyShotCapture *shots=&ranged_shots[1];
-    if(shots->actor==actor && shots->lease.token==peer.lease.token &&
-        shots->lease.generation==peer.lease.generation) {
+    if(shots->actor==actor && shots->lease.token==world.token &&
+        shots->lease.generation==world.generation && shots->lease.seat==3u) {
         state->shot_count=shots->journal.shot_count;
         memcpy(state->shots,shots->journal.shots,sizeof(state->shots));
     }
@@ -555,12 +563,15 @@ BOOL SudekiMpLanPartyCaptureBasicCombat(const SudekiMpControlUpdateDispatchWitne
     if(!out || SudekiMpLanPartyLocalSeat(session)!=0 ||
         !SudekiMpLanPartyControlObserveRoster(w,&before) ||
         before.present_mask!=15 || !before.combat) return FALSE;
+    capture_session=session; capture_roster=before;
     memset(&frame,0,sizeof(frame));
     for(unsigned seat=0;seat<4;++seat) {
         SudekiMpLanArenaSnapshot *chunk=&frame.chunk[seat/2];
         SudekiMpLanArenaActorSnapshot *s=&chunk->seat[seat%2];
         SudekiMpLanArenaInput input; const SudekiMpLanArenaInput *accepted=NULL;
-        if(seat && host && SudekiMpLanPartyHostControlLatestInput(host,w,seat,now,&input))
+        if(SudekiMpLanPartyCharacterPlayer(session,seat)==0u &&
+            SudekiMpLanPartyRuntimeHostLocalInput(w,seat,now,&input)) accepted=&input;
+        else if(host && SudekiMpLanPartyHostControlLatestInput(host,w,seat,now,&input))
             accepted=&input;
         if(!party_capture_combat_actor(seat,before.actors[seat],w,accepted,now,s,session,
             seat==1u?&frame.ranged[0]:seat==3u?&frame.ranged[1]:NULL)) return FALSE;

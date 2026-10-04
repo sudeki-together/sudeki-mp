@@ -165,6 +165,11 @@ static float text_width(const char *text, unsigned capacity) {
     }
     return -1;
 }
+float SudekiMpTitleViewTextWidth(const char *text,unsigned capacity,float size) {
+    if(!text || !capacity || !isfinite(size) || size<=0) return -1;
+    float width=text_width(text,capacity);
+    return width<0?-1:width*size/42.f;
+}
 static HRESULT draw_text(IDirect3DDevice9 *device, const char *text, unsigned capacity,
     float cx, float cy, float size, float max_width, DWORD upper, DWORD lower) {
     TitleVertex vertices[128*6];
@@ -262,7 +267,10 @@ static HRESULT draw_panel(IDirect3DDevice9 *device,const SudekiMpTitleExtras *p,
     PANEL(BOX(44,52,2,616,gold,gold)); PANEL(BOX(914,52,2,616,gold,gold));
     PANEL(BOX(54,62,852,2,tint(0x366575,opacity),tint(0x366575,opacity)));
     PANEL(BOX(64,160,832,1,gold,gold));
-    PANEL(BOX(245,180,1,425,tint(0x50616c,opacity),tint(0x50616c,opacity)));
+    if (!p->full_width)
+        PANEL(BOX(245,180,1,425,tint(0x50616c,opacity),tint(0x50616c,opacity)));
+    if (p->save_details)
+        PANEL(BOX(482,192,1,343,tint(0x50616c,opacity),tint(0x50616c,opacity)));
     PANEL(draw_text(device,p->heading,sizeof(p->heading),left+480*scale,top+103*scale,34*scale,790*scale,pale,gold));
     PANEL(draw_text(device,p->hint,sizeof(p->hint),left+480*scale,top+138*scale,18*scale,790*scale,muted,muted));
     for (unsigned i=0;i<count;++i) {
@@ -281,6 +289,9 @@ static HRESULT draw_panel(IDirect3DDevice9 *device,const SudekiMpTitleExtras *p,
             PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+12,c->y+c->height*.5f,18,267,ink));
             PANEL(PANEL_TEXT(c->value,sizeof(c->value),c->x+291,c->y+c->height*.5f,16,174,muted));
             PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+490,c->y+c->height*.5f,17,61,ink));
+        } else if (c->kind==SUDEKIMP_PANEL_SAVE) {
+            PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+14,c->y+15,19,c->width-28,ink));
+            PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+14,c->y+34,14,c->width-28,muted));
         } else if (c->kind==SUDEKIMP_PANEL_MEMBER) {
             PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+14,c->y+19,21,c->width-28,ink));
             PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+14,c->y+43,16,c->width-28,muted));
@@ -315,11 +326,11 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
     D3DVIEWPORT9 viewport;
     HRESULT result;
     float scale, left, top;
-    if (!device || !window || (!labels && !(extras && extras->panel)) || !count ||
+    if (!device || !window || (!labels && !(extras && (extras->panel || extras->overlay))) || !count ||
         count > (extras && extras->panel ? SUDEKIMP_PANEL_CONTROLS : SUDEKIMP_TITLE_MAX_ROWS) ||
         selected >= count || !isfinite(seconds) || seconds < 0 || !isfinite(opacity) ||
         opacity < 0 || opacity > 1 || !view_ready(device)) return FALSE;
-    for (unsigned row = 0; !(extras && extras->panel) && row < count; ++row)
+    for (unsigned row = 0; !(extras && (extras->panel || extras->overlay)) && row < count; ++row)
         if ((unsigned)labels[row] >= SUDEKIMP_TITLE_LABEL_COUNT) return FALSE;
     if (FAILED(IDirect3DDevice9_GetCreationParameters(device, &creation)) || !creation.hFocusWindow ||
         FAILED(IDirect3DDevice9_GetRenderTarget(device, 0, &surface))) return FALSE;
@@ -379,6 +390,39 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
         DRAW_CALL(IDirect3DDevice9_SetSamplerState(device, stage, D3DSAMP_SRGBTEXTURE, FALSE));
         DRAW_CALL(IDirect3DDevice9_SetSamplerState(device, stage, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
         DRAW_CALL(IDirect3DDevice9_SetSamplerState(device, stage, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
+    }
+    if (extras && extras->overlay) {
+        if(extras->text_count>SUDEKIMP_PANEL_TEXTS ||
+            !isfinite(extras->overlay_letterbox) || extras->overlay_letterbox<0 ||
+            extras->overlay_letterbox>.4f || !isfinite(extras->overlay_letterbox_bottom) ||
+            extras->overlay_letterbox_bottom<0 || extras->overlay_letterbox_bottom>.4f)
+            { result=E_INVALIDARG; goto restore; }
+        if(extras->overlay_letterbox>0 || extras->overlay_letterbox_bottom>0) {
+            float height=extras->overlay_letterbox*desc.Height;
+            float bottom=extras->overlay_letterbox_bottom*desc.Height;
+            DRAW_CALL(IDirect3DDevice9_SetTexture(device,0,NULL));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLOROP,D3DTOP_SELECTARG2));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG2));
+            if(height>0) DRAW_CALL(quad(device,desc.Width*.5f,height*.5f,desc.Width,height,
+                tint(0,opacity),tint(0,opacity),0,1));
+            if(bottom>0) DRAW_CALL(quad(device,desc.Width*.5f,desc.Height-bottom*.5f,desc.Width,bottom,
+                tint(0,opacity),tint(0,opacity),0,1));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLOROP,D3DTOP_MODULATE));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAOP,D3DTOP_MODULATE));
+        }
+        /* Gameplay HUD placement follows the full viewport, not the title
+         * panel's centered 4:3 canvas. Keep lettering uniformly scaled. */
+        float hud_x=(float)desc.Width/SUDEKIMP_TITLE_CANVAS_WIDTH;
+        float hud_y=(float)desc.Height/SUDEKIMP_TITLE_CANVAS_HEIGHT;
+        for(unsigned i=0;i<extras->text_count;++i) {
+            const SudekiMpPanelText *t=&extras->texts[i];
+            float x=t->x*hud_x,y=t->y*hud_y,width=t->width*hud_x;
+            DRAW_CALL(text_left(device,t->text,sizeof(t->text),x+scale,y+scale,
+                t->size*scale,width,tint(0x07121d,opacity*.8f)));
+            DRAW_CALL(text_left(device,t->text,sizeof(t->text),x,y,
+                t->size*scale,width,tint(0xd7d0b8,opacity*.9f)));
+        }
+        goto restore;
     }
     if (extras && extras->panel) {
         DRAW_CALL(draw_panel(device,extras,count,selected,enabled_mask,scale,left,top,

@@ -41,6 +41,34 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     SudekiMpLanArenaSnapshot *output);
 BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE game_module);
 
+/* Native-only namespace ownership, separate from the closed network VFX
+ * resource roster. A generation identifies a retained actor namespace, not a
+ * transport seat or the last skill that happened to run. */
+typedef struct SudekiMpLanPartyEffectOwner {
+    uint64_t session;
+    uint32_t generation;
+    void *actor;
+    uint8_t actor_type;
+} SudekiMpLanPartyEffectOwner;
+typedef BOOL (*SudekiMpLanPartyEffectWitness)(void *source_component,
+    SudekiMpLanPartyEffectOwner *owner);
+BOOL SudekiMpLanPartyEffectLifetimeInitialize(HMODULE module,
+    SudekiMpLanPartyEffectWitness witness,BOOL (*shutdown_drained)(void));
+/* First Poll binds the already verified native service thread. The observer
+ * stays active through disconnect drain. Only native destructor-cleared weak
+ * nodes prove retirement; no reset/unlink substitutes for completion. */
+BOOL SudekiMpLanPartyEffectLifetimePoll(void);
+BOOL SudekiMpLanPartyEffectLifetimeRetains(void);
+BOOL SudekiMpLanPartyEffectLifetimeReset(void);
+BOOL SudekiMpLanPartyEffectLifetimeCurrent(SudekiMpLanPartyEffectOwner *owner);
+/* Shutdown owner must positively prove closed admission and drained native
+ * bodies/tasks. Queues exact owned effects through native retirement; actual
+ * observer destruction remains the sole completion witness. */
+BOOL SudekiMpLanPartyEffectLifetimeRequestRetire(void);
+#ifdef SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING
+void SudekiMpLanPartyEffectLifetimeTestRetire(void (*callback)(void *effect));
+#endif
+
 /* Deterministic registry seams. Native adapters establish identity before
  * Begin; nodes must never move while attached to an engine observer list. */
 enum { SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY = 32 };

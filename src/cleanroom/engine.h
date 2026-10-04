@@ -229,6 +229,12 @@ BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled);
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled);
+/* Story resource flags only. Unlike the cleanroom setters these never run
+ * inventory/skill/actor preparation or refill against a retiring world.
+ * The story owner services MaintainStoryResources on its exact dispatch. */
+BOOL SudekiMpCleanroomEngineSetStoryInfiniteSpirit(BOOL enabled);
+BOOL SudekiMpCleanroomEngineSetStoryInfiniteJetpackFuel(BOOL enabled);
+void SudekiMpCleanroomEngineMaintainStoryResources(void);
 BOOL SudekiMpCleanroomEnginePartyInvulnerable(BOOL *enabled);
 BOOL SudekiMpCleanroomEngineSetPartyInvulnerable(BOOL enabled);
 /* Reconcile the native refcount lease after party or level changes. */

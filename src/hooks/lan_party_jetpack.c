@@ -60,14 +60,29 @@ static uint8_t *ability_exact(void *actor) {
         fabsf(*(float *)(a+0x7cu))>1000.0f) return NULL;
     return a;
 }
+static BOOL elco_admission(SudekiMpLanPartyLease *native,SudekiMpLanPartyLease *connection) {
+    SudekiMpLanPartyPeerStatus peer;
+    unsigned player=seat?seat:SudekiMpLanPartyCharacterPlayer(session,1u);
+    /* The native local host already owns Elco's full flight state machine.
+     * Remote orchestration must not replace its input/camera with a peer. */
+    if(!native || !connection || !player || player>=4u ||
+        !SudekiMpLanPartyPeerStatusGet(session,player,&peer) ||
+        peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE || !peer.lease.token || !peer.lease.generation) return FALSE;
+    if(seat && SudekiMpLanPartyControlLocalCharacter()==1u) {
+        *native=peer.lease; native->seat=1u;
+    } else if(!SudekiMpLanPartyControlActorLeaseOnNativeThread(1u,native) ||
+        native->token!=peer.lease.token) return FALSE;
+    *connection=peer.lease;
+    return TRUE;
+}
 static BOOL elco_owned(void *actor) {
-    SudekiMpLanPartyPeerStatus p;
+    SudekiMpLanPartyLease native,connection;
     if(!thread_exact() || !actor || actor!=roster.actors[1] ||
         !SudekiMpLanPartyControlNativeActorExact(&roster,1u) ||
-        !SudekiMpLanPartyPeerStatusGet(session,seat?seat:1u,&p) ||
-        p.phase!=SUDEKIMP_LAN_PARTY_ACTIVE || !ability_exact(actor)) return FALSE;
-    p.lease.seat=1u;
-    return seat==1u || SudekiMpLanPartyControlRetainedNativeThreadExact(&p.lease,actor);
+        !ability_exact(actor)) return FALSE;
+    /* Charging is native host world state, including an unclaimed AI Elco.
+     * Replica writes still require this client's admitted presentation lease. */
+    return !seat || elco_admission(&native,&connection);
 }
 static uint8_t *crystal_exact(void *iface) {
     if(!base || (uintptr_t)iface<0x18u) return NULL;
@@ -130,9 +145,9 @@ __attribute__((naked,used,noinline)) static void fuel_route_entry(void) {
  * camera, input and music globals remain with each existing local view. */
 typedef struct FlightWeak { void *object,*previous,*next; } FlightWeak;
 typedef struct FlightOwner {
-    SudekiMpLanPartyLease lease;
+    SudekiMpLanPartyLease lease,connection;
     uint8_t *actor,*ability;
-    BOOL live,held,release;
+    BOOL live,held,release,local_actor;
     DWORD input_at;
     unsigned visual_kind,retired_mask;
     FlightWeak effects[8];
@@ -166,19 +181,30 @@ static BOOL world_allows_flight(void) {
         readable(script,0x2au) && readable(mode,0x35u) &&
         !world[0x74u] && !script[0x29u] && !mode[0x34u];
 }
-static BOOL flight_exact(void) {
+static BOOL flight_owner_exact(BOOL cleanup) {
     return thread_exact() && flight.actor && flight.actor==roster.actors[1] &&
         SudekiMpLanPartyControlNativeActorExact(&roster,1u) &&
         ability_exact(flight.actor)==flight.ability && flight_parts(flight.ability) &&
-        (seat==1u || SudekiMpLanPartyControlRetainedNativeThreadExact(&flight.lease,flight.actor));
+        ((flight.local_actor && seat && SudekiMpLanPartyControlLocalCharacter()==1u) ||
+            (cleanup ? SudekiMpLanPartyControlRetainedCleanupNativeThreadExact(&flight.lease,flight.actor):
+                SudekiMpLanPartyControlRetainedNativeThreadExact(&flight.lease,flight.actor)));
+}
+static BOOL flight_exact(void) {
+    return flight_owner_exact(FALSE);
+}
+static BOOL flight_lifetime_exact(void) {
+    /* A latched release may finish its existing native phase/effects after
+     * Quiesce closes active control. New binding and input still require
+     * flight_exact; this proof alone cannot start a flight. */
+    return flight_owner_exact(flight.release);
 }
 static BOOL bind_flight(void) {
-    SudekiMpLanPartyPeerStatus p;
+    SudekiMpLanPartyLease native,connection;
     if(flight.actor) return flight_exact();
     if(!elco_owned(roster.actors[1]) || !flight_parts(ability_exact(roster.actors[1])) ||
-        !SudekiMpLanPartyPeerStatusGet(session,seat?seat:1u,&p) ||
-        p.phase!=SUDEKIMP_LAN_PARTY_ACTIVE) return FALSE;
-    flight.lease=p.lease; flight.lease.seat=1u;
+        !elco_admission(&native,&connection)) return FALSE;
+    flight.lease=native; flight.connection=connection;
+    flight.local_actor=seat && SudekiMpLanPartyControlLocalCharacter()==1u;
     flight.actor=roster.actors[1]; flight.ability=ability_exact(flight.actor);
     return flight_exact();
 }
@@ -242,7 +268,7 @@ __attribute__((naked,noinline)) static int locator(void *lookup __attribute__((u
     __asm__ volatile("movl 4(%esp),%eax\n\tpushl 8(%esp)\n\tcall *_native_locator\n\tret\n\t");
 }
 static BOOL flight_visual(unsigned kind) {
-    if(!flight_exact() || kind>2u) return FALSE;
+    if(!flight_lifetime_exact() || kind>2u) return FALSE;
     if(kind==flight.visual_kind) return TRUE;
     if(!retire_flight_visuals()) return FALSE;
     uint8_t *a=flight.ability;
@@ -320,7 +346,7 @@ static void flight_landing(uint8_t *a) {
     phase_set(a,8u,0x23u);
 }
 static BOOL flight_update(void *iface,void *update) {
-    if(seat || !flight_exact() || iface!=flight.ability+0x18u ||
+    if(seat || !flight_lifetime_exact() || iface!=flight.ability+0x18u ||
         !readable(update,0x10u)) return FALSE;
     uint8_t *a=flight.ability;
     unsigned phase=a[0x88u]&15u;
@@ -334,7 +360,7 @@ static BOOL flight_update(void *iface,void *update) {
     uint8_t *collision=*(uint8_t **)(flight.actor+0x60u);
     BOOL held=flight.held && !flight.release && !InterlockedCompareExchange(&stopping,0,0) &&
         GetTickCount()-flight.input_at<=SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS &&
-        SudekiMpLanPartyLeaseActive(session,&flight.lease) && !actor_combat(arbiter);
+        SudekiMpLanPartyLeaseActive(session,&flight.connection) && !actor_combat(arbiter);
     /* A pending takeoff drains through its native enter/end callbacks even
      * if input was released before the authored clip began. */
     if(phase>=2u && phase<=4u && (!held || *(float *)(a+0x6cu)<=0.0f)) a[0x88u]|=0x10u;
@@ -370,7 +396,7 @@ __attribute__((used,noinline)) static void flight_enter(unsigned id,void *abilit
     InterlockedIncrement(&depth);
     uint8_t *a=ability;
     if(a!=flight.ability) { call_enter(a,id); goto done; }
-    if(!flight_exact()) goto done; /* Unknown retained owner cannot use globals. */
+    if(!flight_lifetime_exact()) goto done; /* Unknown retained owner cannot use globals. */
     if(seat) goto done; /* host semantic callbacks are never client gameplay */
     unsigned phase=a[0x88u]&15u;
     uint8_t *movement=*(uint8_t **)(flight.actor+0x80u);
@@ -397,7 +423,7 @@ __attribute__((used,noinline)) static void flight_exit(unsigned id,void *ability
     InterlockedIncrement(&depth);
     uint8_t *a=ability;
     if(a!=flight.ability) { call_exit(a,id); goto done; }
-    if(!flight_exact()) goto done;
+    if(!flight_lifetime_exact()) goto done;
     if(seat) goto done;
     unsigned phase=a[0x88u]&15u;
     uint8_t *movement=*(uint8_t **)(flight.actor+0x80u);
@@ -422,6 +448,9 @@ __attribute__((naked,noinline)) static unsigned call_edge(void *a __attribute__(
     __asm__ volatile("movl 4(%esp),%eax\n\tjmp *_native_edge\n\t");
 }
 __attribute__((used,noinline)) static unsigned flight_edge(void *ability) {
+    if(!seat && SudekiMpLanPartyControlLocalCharacter()==1u &&
+        !flight.actor && elco_owned(roster.actors[1]) && ability_exact(roster.actors[1])==ability)
+        return call_edge(ability);
     if(!bind_flight() || ability!=flight.ability) {
         if(ability==flight.ability || (roster.actors[1] &&
             SudekiMpLanPartyControlNativeActorExact(&roster,1u) &&
@@ -435,7 +464,7 @@ __attribute__((used,noinline)) static unsigned flight_edge(void *ability) {
     uint8_t *collision=*(uint8_t **)(actor+0x60u);
     unsigned phase=a[0x88u]&15u;
     if(!world_allows_flight() || actor_combat(arbiter) || flight.release || InterlockedCompareExchange(&stopping,0,0) ||
-        !SudekiMpLanPartyLeaseActive(session,&flight.lease)) return 1u;
+        !SudekiMpLanPartyLeaseActive(session,&flight.connection)) return 1u;
     if((phase==0u || phase==6u) &&
         (*(uint32_t *)(collision+0x2cu)&3u)==3u && (movement[0xbfu]&2u)) {
         *(float *)(a+0x64u)=*(float *)(base+0x2d8a34u);
@@ -496,7 +525,7 @@ BOOL SudekiMpLanPartyJetpackDrained(void *actor) {
     uint8_t *a=ability_exact(actor);
     if(!a || !thread_exact()) return FALSE;
     if(!flight.actor) return (a[0x88u]&15u)==0u && !*(uint32_t *)(a+0x5cu);
-    if(!flight_exact()) return FALSE;
+    if(!flight_owner_exact(TRUE)) return FALSE;
     flight.release=TRUE; flight.held=FALSE;
     if(seat && !retire_flight_visuals()) return FALSE;
     if((a[0x88u]&15u) || *(uint32_t *)(a+0x5cu) || !visuals_drained()) return FALSE;
@@ -579,14 +608,18 @@ BOOL SudekiMpLanPartyJetpackLedgeReady(BOOL *enabled) {
 }
 BOOL SudekiMpLanPartyJetpackToLedge(const SudekiMpControlUpdateDispatchWitness *w) {
     BOOL ready=FALSE,combat=TRUE;
+    BOOL local_elco=!seat && SudekiMpLanPartyControlLocalCharacter()==1u;
+    void *actor=roster.actors[1];
     if(!SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
-        !SudekiMpLanPartyJetpackLedgeReady(&ready) || !ready || !bind_flight() ||
-        !SudekiMpLanPartyControlExact(w,&flight.lease,flight.actor) ||
+        !SudekiMpLanPartyJetpackLedgeReady(&ready) || !ready ||
+        SudekiMpLanPartyControlObserveActor(w,1u)!=actor ||
+        !SudekiMpLanPartyControlNativeActorExact(&roster,1u) ||
+        (!local_elco && (!bind_flight() || !SudekiMpLanPartyControlExact(w,&flight.lease,actor))) ||
         !SudekiMpCleanroomEngineCombatMode(&combat) || combat || !world_allows_flight() ||
         InterlockedCompareExchange(&stopping,0,0)) return FALSE;
-    uint8_t *m=component(flight.actor,0x80u,0x2c8644u,0xc0u);
-    uint8_t *p=component(flight.actor,0x44u,0x2cdefcu,0xbcu);
-    uint8_t *arbiter=component(flight.actor,0x90u,0x2cc9acu,0x64u);
+    uint8_t *m=component(actor,0x80u,0x2c8644u,0xc0u);
+    uint8_t *p=component(actor,0x44u,0x2cdefcu,0xbcu);
+    uint8_t *arbiter=component(actor,0x90u,0x2cc9acu,0x64u);
     if(!m || !p || !arbiter || !(m[0xbfu]&2u) ||
         (*(uint32_t *)(arbiter+0x50u)&0x02dbf7ecu)) return FALSE;
     /* Place above the authored column, then let native gravity/collision
@@ -603,13 +636,16 @@ static void flight_service(void) {
         SudekiMpLanPartyPeerStatus p;
         BOOL active=SudekiMpLanPartyPeerStatusGet(session,seat,&p) &&
             p.phase==SUDEKIMP_LAN_PARTY_ACTIVE &&
-            p.lease.token==flight.lease.token && p.lease.generation==flight.lease.generation;
+            p.lease.token==flight.connection.token && p.lease.generation==flight.connection.generation;
         if(!active || InterlockedCompareExchange(&stopping,0,0)) {
-            flight.release=TRUE;
-            if(flight_exact() && retire_flight_visuals() && visuals_drained())
-                ZeroMemory(&flight,sizeof(flight));
-            return;
+            flight.release=TRUE; flight.held=FALSE;
         }
+    }
+    if(flight.actor && flight.release) {
+        if(!flight_lifetime_exact() || (seat && !retire_flight_visuals())) return;
+        if(!(flight.ability[0x88u]&15u) && !*(uint32_t *)(flight.ability+0x5cu) &&
+            visuals_drained()) ZeroMemory(&flight,sizeof(flight));
+        return;
     }
     if(!bind_flight()) return;
     if(seat) {

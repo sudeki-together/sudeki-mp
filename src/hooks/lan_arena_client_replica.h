@@ -29,8 +29,12 @@ BOOL SudekiMpLanPartyClientApplyBasicCombat(const SudekiMpControlUpdateDispatchW
 BOOL SudekiMpLanPartyClientEndPresentation(
     const SudekiMpControlUpdateDispatchWitness *);
 /* Plain lifetime fences; callable after the game-thread observer gate drains.
- * An unobserved projectile terminal retains containment across disconnects. */
+ * Native mode/arms/presentation leases and unobserved projectile terminals
+ * retain their cleanup callbacks across disconnects. */
 BOOL SudekiMpLanPartyClientCallbacksRetained(void);
+/* Native-thread positive terminal observation for emitted ordinary missiles.
+ * Safe during cleanup; it does not admit another shot or infer task idle. */
+BOOL SudekiMpLanPartyClientProjectilePoll(void);
 /* Read-only Elco aim sample for the Elco-specific authored pose adapter.
  * This is observer presentation only; clients never receive projectile
  * authority from it. */

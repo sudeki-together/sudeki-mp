@@ -1,6 +1,7 @@
 #include "hooks/lan_party_control.h"
 #include "hooks/lan_party_host_control.h"
 #include "hooks/lan_party_client_control.h"
+#include "hooks/lan_party_follow.h"
 #include "network/lan_party_motion.h"
 #include "network/lan_arena_tal_combo_graph.h"
 #include <math.h>
@@ -15,7 +16,7 @@ static uint8_t accepted[4][0x60], group[0xe0], controller[0x260];
 static uint8_t *image_base;
 static unsigned int acquire_calls[4], release_calls[4], move_calls[4];
 static unsigned int combat_calls[4];
-static SudekiMpLanPartyLease leases[4];
+static SudekiMpLanPartyLease leases[4], observed_native_leases[4];
 static SudekiMpControlUpdateDispatchWitness escaped;
 static unsigned int phase, errors;
 static BOOL refuse_acquire, wrong_release_mode, no_release, ready_now;
@@ -31,6 +32,12 @@ static SudekiMpLanPartyRoster roster;
 static SudekiMpLanPartyRosterStatus roster_status;
 static SudekiMpLanPartyClientControl *network_client;
 static SudekiMpLanPartyClientControlReport client_report;
+/* This inert adapter fixture has no gameplay runtime or host-local input. */
+BOOL SudekiMpLanPartyRuntimeHostLocalInput(
+    const SudekiMpControlUpdateDispatchWitness *w, unsigned character,
+    uint32_t now, SudekiMpLanArenaInput *input) {
+    (void)w; (void)character; (void)now; (void)input; return FALSE;
+}
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL: party control image fixture line %u: %s\n", \
         (unsigned int)__LINE__, #x); ++errors; } } while (0)
@@ -98,6 +105,213 @@ static void combat_stub(void *actor,void *arbiter) {
     CHECK(*(void **)((uint8_t *)arbiter+0x10)==actor);
     ++combat_calls[i];
 }
+static void menu_filter_stub(void *c,BOOL blocked) {
+    CHECK(c==controller);
+    *(int *)((uint8_t *)c+0x84u)=blocked?0:1;
+}
+static unsigned menu_release_calls;
+static void menu_release_stub(void *actor,void *arbiter,const int states[6]) {
+    CHECK(actor==actors[0] && arbiter==arbiters[0]);
+    for(unsigned i=0;i<6;++i) CHECK(states[i]==3);
+    ++menu_release_calls;
+}
+/* Exercise unchanged retail goal/distance math against inert canonical actors.
+ * This verifies hook installation, pointer/phase fences and math/ABI, not live AI. */
+static void follow_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
+    static const struct {uint32_t site,target;} reloc[]={
+{0x1add4d,0x1adf44},{0x1addb0,0x2e3c50},{0x1adddc,0x2c3b84},{0x1ade9c,0x2c02e0},{0x1aded1,0x2e35cc},{0x1adf44,0x1ade52},{0x1adf48,0x1adda7},{0x1adf4c,0x1add51},{0x1adf50,0x1adeca},{0x1a90d6,0x1a92cc},{0x1a9139,0x2e3c50},{0x1a9165,0x2c3b84},{0x1a9225,0x2c02e0},{0x1a925a,0x2e35cc},{0x1a92cc,0x1a91db},{0x1a92d0,0x1a9130},{0x1a92d4,0x1a90da},{0x1a92d8,0x1a9253},{0xb2b9e,0x2e3640},{0xb2c07,0x33e044},{0xb341b,0x33e044},{0xb3460,0x2e3ae0},{0xb34bb,0x2e3ad8},{0xb34e9,0x2e3958},{0xb350f,0x2e39f8},{0xb355e,0x33e044},{0xb359d,0x2e3ad0},{0xb361c,0x33e044},{0xb3659,0x2e3788},{0xf5288,0x2e3780},{0xf52a6,0x338bb8},{0xf52b8,0x2e36cc},{0xf52c7,0x2e36c8},{0xf52dc,0x2e36c0},{0xf52eb,0x2e36b8},{0xf52f3,0x2e36b0},{0xf5300,0x2e36a8}
+,{0xc91b3,0x2c0ee0},{0x18e319,0x409de4},{0x18e33d,0x409de4},{0x18e363,0x409de4},{0x18e3b2,0x409de4},{0x18e6e3,0x409de4}
+    };
+    uint32_t originals[sizeof(reloc)/sizeof(reloc[0])];
+    uint8_t saved_code[6],positions[4][0x60],directory[0x148];
+    uint8_t saved_modes[4];
+    void *saved_positions[4],*saved_formations[4],*saved_manager;
+    float native_goal[3],goal[3],facing[3]={0.6f,0,0.8f};
+    float original_distance;
+    uint8_t *f=directory+0xf4;
+    memset(positions,0,sizeof(positions)); memset(directory,0,sizeof(directory));
+    saved_manager=*(void **)(image_base+0x409de4);
+    *(void **)(image_base+0x409de4)=directory;
+    for(unsigned i=0;i<4;++i) {
+        saved_positions[i]=*(void **)(actors[i]+0x44);
+        saved_formations[i]=*(void **)(ai[i]+0x40); saved_modes[i]=modes[i][0xb];
+        *(void **)(actors[i]+0x44)=positions[i]; *(void **)positions[i]=image_base+0x2cdefc;
+        *(void **)(positions[i]+0x10)=actors[i]; *(float *)(positions[i]+0x58)=1;
+        *(void **)(ai[i]+0x40)=f; *(void **)(f+i*12)=actors[i];
+        modes[i][0xb]=i<2?0:1;
+    }
+    *(float *)(positions[1]+0x18)=100;
+    *(float *)(positions[2]+0x18)=90;
+    *(float *)(positions[3]+0x18)=10;
+    *(unsigned *)(f+0x30)=4; *(float *)(f+0x38)=20;
+    *(float *)(f+0x3c)=0.6f; *(float *)(f+0x40)=0.8f;
+    for(unsigned i=0;i<sizeof(reloc)/sizeof(reloc[0]);++i) {
+        memcpy(&originals[i],image_base+reloc[i].site,4);
+        CHECK(originals[i]==0x400000u+reloc[i].target);
+        *(void **)(image_base+reloc[i].site)=image_base+reloc[i].target;
+    }
+    /* A changed body and changed ASLR operand are independently rejected. */
+    image_base[0x1ada90]^=1;
+    CHECK(!SudekiMpLanPartyFollowInstall((HMODULE)image_base)); image_base[0x1ada90]^=1;
+    image_base[0xb2b9e]^=1;
+    CHECK(!SudekiMpLanPartyFollowInstall((HMODULE)image_base)); image_base[0xb2b9e]^=1;
+    CHECK(SudekiMpLanPartyFollowInstall((HMODULE)image_base));
+    CHECK(!SudekiMpLanPartyFollowPublish(&escaped,3,0));
+    /* Clear uses the real native helpers. Active native leader must remain
+     * bit-for-bit identical even when native formation heading lags his body. */
+    SudekiMpLanPartyFollowClear();
+    SudekiMpLanPartyFollowTestGoal(f,native_goal,actors[2]);
+    original_distance=SudekiMpLanPartyFollowTestDistance(f,actors[2]);
+    CHECK(SudekiMpLanPartyFollowPublish(w,3,0));
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]);
+    SudekiMpLanPartyFollowTestGoal(f,goal,actors[2]);
+    CHECK(!memcmp(goal,native_goal,sizeof(goal)));
+    CHECK(SudekiMpLanPartyFollowTestDistance(f,actors[2])==original_distance);
+    SudekiMpLanPartyFollowTestFacing(ai[2],facing);
+    /* MinGW/x87 evaluates 0.6f/0.8f comparison constants at excess
+     * precision. Assert actual IEEE32 bytes, a stronger unchanged-data proof. */
+    const uint32_t expected_heading[3]={0x3f19999au,0,0x3f4ccccdu};
+    CHECK(!memcmp(facing,expected_heading,sizeof(expected_heading)));
+    CHECK(SudekiMpLanPartyFollowPublish(w,3,4));
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[1]);
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[3],actors[0])==actors[0]);
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[1],actors[0])==actors[0]); /* never human */
+    SudekiMpLanPartyFollowTestGoal(f,goal,actors[2]);
+    float x=native_goal[0],z=native_goal[2],norm=sqrtf(.6f*.6f+.8f*.8f);
+    CHECK(fabsf(goal[0]-(100+(x*.8f-z*.6f)/norm))<0.001f);
+    CHECK(fabsf(goal[2]-(x*.6f+z*.8f)/norm)<0.001f);
+    float radius=20+*(float *)(image_base+0x33e044);
+    float dx=goal[0]-90,dz=goal[2];
+    CHECK(fabsf(SudekiMpLanPartyFollowTestDistance(f,actors[2])-
+        (dx*dx+dz*dz)/(radius*radius))<0.001f);
+    SudekiMpLanPartyFollowTestFacing(ai[2],facing);
+    CHECK(facing[0]==0 && facing[1]==0 && facing[2]==1);
+    /* Current native leader is now AI: he follows the human using that
+     * human's vacated nonzero slot, without changing formation refs. */
+    modes[0][0xb]=1;
+    CHECK(SudekiMpLanPartyFollowPublish(w,2,4));
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[0],actors[0])==actors[1]);
+    SudekiMpLanPartyFollowTestGoal(f,goal,actors[0]);
+    CHECK(fabsf(goal[0]-100)+fabsf(goal[2])>0.1f);
+    CHECK(*(void **)f==actors[0] && *(void **)(controller+0x248)==actors[0]);
+    /* Ownership, component replacement and native event anchors close the
+     * override immediately; cached pointer readability alone is insufficient. */
+    modes[2][0xb]=0;
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]); modes[2][0xb]=1;
+    *(int16_t *)(ai[2]+0x16a)=1;
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]); *(int16_t *)(ai[2]+0x16a)=0;
+    *(void **)(ai[1]+0x10)=actors[0];
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]); *(void **)(ai[1]+0x10)=actors[1];
+    f[0x50]=1;
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]);
+    CHECK(!SudekiMpLanPartyFollowPublish(w,2,4)); f[0x50]=0;
+    modes[1][0xb]=1;
+    CHECK(SudekiMpLanPartyFollowPublish(w,0,4));
+    for(unsigned i=0;i<4;++i) CHECK(!SudekiMpLanPartyFollowTestLeader(ai[i],actors[0]));
+    SudekiMpLanPartyFollowTestGoal(f,goal,actors[2]);
+    CHECK(goal[0]==90 && goal[1]==0 && goal[2]==0);
+    CHECK(SudekiMpLanPartyFollowTestDistance(f,actors[2])==0);
+    /* Execute both patched retail score entries. Missing selected leader
+     * returns native x87 zero without entering native priority arbitration. */
+    typedef float (__attribute__((thiscall)) *Score)(void *,void *,void *);
+    CHECK(((Score)(uintptr_t)(image_base+0x1ada90))(NULL,ai[2],NULL)==0);
+    CHECK(((Score)(uintptr_t)(image_base+0x1a8e00))(NULL,ai[2],NULL)==0);
+    /* The real native group selector sees both follow states as ineligible;
+     * its no-state branch emits a neutral request without a target or movement
+     * request. Enemy/combat scores are not patched by this adapter. */
+    void *state_vtable[2][5]={{0}},*mode_vtable[7]={0},*states[2];
+    uint8_t state_data[2][0x1c]={{0}},native_mode[0x10]={0},request[0x34]={0};
+    for(unsigned i=0;i<2;++i) {
+        state_vtable[i][1]=image_base+(i?0x1a8e00:0x1ada90);
+        *(void **)state_data[i]=state_vtable[i]; states[i]=state_data[i];
+    }
+    mode_vtable[6]=image_base+0x18e6c0;
+    *(void **)native_mode=mode_vtable; *(void **)(native_mode+4)=states;
+    native_mode[8]=0xff; native_mode[9]=2; native_mode[0xb]=1;
+    void *saved_mode=*(void **)(ai[2]+0x3c); *(void **)(ai[2]+0x3c)=native_mode;
+    typedef void *(__attribute__((thiscall)) *GroupUpdate)(void *,void *,void *,float);
+    CHECK(((GroupUpdate)(uintptr_t)(image_base+0x18e210))(native_mode,request,ai[2],0.016f)==request);
+    CHECK(native_mode[8]==0xff && !*(void **)request);
+    for(unsigned offset=0x10;offset<=0x24;offset+=4) CHECK(*(float *)(request+offset)==0);
+    CHECK(*(uint32_t *)(request+0x30)==0x40000u);
+    *(void **)(ai[2]+0x3c)=saved_mode;
+    SudekiMpLanPartyFollowClear();
+    CHECK(SudekiMpLanPartyFollowTestLeader(ai[2],actors[0])==actors[0]);
+    memcpy(saved_code,image_base+0x1ada9c,sizeof(saved_code)); image_base[0x1ada9e]^=1;
+    CHECK(!SudekiMpLanPartyFollowUninstall()); /* retain live dependency on conflict */
+    memcpy(image_base+0x1ada9c,saved_code,sizeof(saved_code));
+    CHECK(SudekiMpLanPartyFollowUninstall());
+    for(unsigned i=0;i<sizeof(reloc)/sizeof(reloc[0]);++i)
+        memcpy(image_base+reloc[i].site,&originals[i],4);
+    for(unsigned i=0;i<4;++i) {
+        *(void **)(actors[i]+0x44)=saved_positions[i];
+        *(void **)(ai[i]+0x40)=saved_formations[i]; modes[i][0xb]=saved_modes[i];
+    }
+    *(void **)(image_base+0x409de4)=saved_manager;
+}
+
+static void rebind_fixture(const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyRosterObservation old,foreign;
+    SudekiMpLanPartyLease key=leases[1]; ++key.generation; ++key.token;
+    CHECK(SudekiMpLanPartyControlObserveRoster(w,&old));
+    CHECK(SudekiMpLanPartyControlLocalCharacter()==0);
+    CHECK(!SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&old,0));
+    CHECK(!SudekiMpLanPartyControlLocalReleaseInput(w));
+    *(int *)(controller+0x80u)=*(int *)(controller+0x84u)=1;
+    CHECK(!SudekiMpLanPartyControlMenuInputBlocked(w,TRUE));
+    CHECK(*(int *)(controller+0x80u)==1 && *(int *)(controller+0x84u)==0);
+    CHECK(!SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+    *(int *)(controller+0x80u)=0; /* simulate native Update committing None */
+    CHECK(SudekiMpLanPartyControlMenuInputBlocked(w,TRUE));
+    CHECK(SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+    CHECK(SudekiMpLanPartyControlHasLeases() && SudekiMpLanPartyControlActorLeasesEmpty());
+    in_combat=TRUE; menu_release_calls=0;
+    CHECK(!SudekiMpLanPartyControlLocalReleaseInput(w)); /* AI mode1 */
+    modes[0][0xb]=0; *(int16_t *)(ai[0]+0x16a)=1;
+    CHECK(!SudekiMpLanPartyControlLocalReleaseInput(w));
+    *(int16_t *)(ai[0]+0x16a)=0;
+    CHECK(!SudekiMpLanPartyControlLocalReleaseInput(&escaped));
+    uint8_t saved_actors[sizeof(actors)], saved_arbiters[sizeof(arbiters)];
+    memcpy(saved_actors,actors,sizeof(actors)); memcpy(saved_arbiters,arbiters,sizeof(arbiters));
+    CHECK(SudekiMpLanPartyControlLocalReleaseInput(w));
+    CHECK(menu_release_calls==1 && !memcmp(saved_actors,actors,sizeof(actors)) &&
+        !memcmp(saved_arbiters,arbiters,sizeof(arbiters)));
+    in_combat=FALSE; modes[0][0xb]=1;
+    CHECK(!SudekiMpLanPartyControlLocalSwitchReady(&escaped,&old));
+    CHECK(SudekiMpLanPartyControlAcquire(w,&key,actors[1],ready));
+    CHECK(!SudekiMpLanPartyControlActorLeasesEmpty());
+    CHECK(!SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&old,0));
+    CHECK(SudekiMpLanPartyControlQuiesce(w,&key,actors[1]));
+    CHECK(SudekiMpLanPartyControlRelease(w,&key,actors[1],ready));
+    CHECK(SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+    /* Emulate the completed native controller + party-front permutation. */
+    *(void **)(controller+0x248u)=actors[2];
+    *(void **)(group+0x90u)=actors[2]; *(void **)(group+0x90u+2u*0xcu)=actors[0];
+    foreign=old; foreign.controller=actors[0];
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&foreign,2));
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&old,1));
+    *(void **)(group+0x90u+2u*0xcu)=actors[2];
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&old,2));
+    *(void **)(group+0x90u+2u*0xcu)=actors[0];
+    *(int *)(controller+0x84u)=1;
+    CHECK(!SudekiMpLanPartyControlRebindLocal(w,&old,2));
+    *(int *)(controller+0x84u)=0;
+    CHECK(SudekiMpLanPartyControlRebindLocal(w,&old,2));
+    CHECK(SudekiMpLanPartyControlLocalCharacter()==2);
+    CHECK(SudekiMpLanPartyControlMenuInputExact(actors[2]));
+    CHECK(!SudekiMpLanPartyControlAcquire(w,&key,actors[1],ready)); /* tombstone retained */
+    *(void **)(controller+0x248u)=actors[0];
+    *(void **)(group+0x90u)=actors[0]; *(void **)(group+0x90u+2u*0xcu)=actors[2];
+    CHECK(SudekiMpLanPartyControlRebindLocal(w,&old,0));
+    CHECK(!SudekiMpLanPartyControlMenuInputBlocked(w,FALSE));
+    CHECK(*(int *)(controller+0x80u)==0 && *(int *)(controller+0x84u)==1);
+    *(int *)(controller+0x80u)=1;
+    CHECK(SudekiMpLanPartyControlMenuInputBlocked(w,FALSE));
+    CHECK(!SudekiMpLanPartyControlMenuInputExact(actors[0]));
+    CHECK(!SudekiMpLanPartyControlLocalSwitchReady(w,&old));
+}
 static void __attribute__((thiscall)) original_stub(void *c, void *d) {
     (void)c; (void)d;
 }
@@ -111,6 +325,8 @@ static void callback(void *c, void *d,
     (void)c; (void)d;
     CHECK(SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w));
     escaped = *w;
+    if (phase == 7) { follow_fixture(w); return; }
+    if (phase == 6) { rebind_fixture(w); return; }
     if (phase == 5) {
         CHECK(SudekiMpLanPartyClientControlService(network_client,w,&client_report));
         return;
@@ -133,6 +349,8 @@ static void callback(void *c, void *d,
     }
     if (phase == 2) {
         CHECK(SudekiMpLanPartyHostControlService(network_host,w,network_now,&network_report));
+        for(i=0;i<4;++i) if(network_report.owned_mask&(1u<<i))
+            CHECK(SudekiMpLanPartyControlActorLease(w,i,&observed_native_leases[i]));
         return;
     }
     if (phase == 0) {
@@ -383,6 +601,35 @@ static void network_fixture(void (__attribute__((thiscall)) *update)(void *,void
     CHECK(network_report.owned_mask == 0); /* Native ready probe still false. */
     ready_now=TRUE; update(controller,NULL); network_pump();
     CHECK(network_report.owned_mask == 14 && network_report.failed_mask == 0);
+    {
+        SudekiMpLanPartyLease connection[4], native[4];
+        for(i=1;i<4;++i) { connection[i]=peer(0,i).lease; native[i]=observed_native_leases[i]; }
+        CHECK(!SudekiMpLanPartyHostControlBindingsDrained(network_host));
+        SudekiMpLanPartyHostControlSuspendBindings(network_host,TRUE);
+        ready_now=FALSE; update(controller,NULL);
+        CHECK(!SudekiMpLanPartyHostControlBindingsDrained(network_host));
+        CHECK(network_report.draining_mask==14 && SudekiMpLanPartyControlHasLeases());
+        for(i=1;i<4;++i) CHECK(peer(0,i).phase==SUDEKIMP_LAN_PARTY_ACTIVE);
+        ready_now=TRUE; update(controller,NULL);
+        CHECK(SudekiMpLanPartyHostControlBindingsDrained(network_host));
+        CHECK(!SudekiMpLanPartyControlHasLeases());
+        update(controller,NULL); /* Suspension must not reacquire between frames. */
+        CHECK(network_report.owned_mask==0);
+        for(i=1;i<4;++i) {
+            CHECK(peer(0,i).phase==SUDEKIMP_LAN_PARTY_ACTIVE);
+            CHECK(peer(0,i).lease.token==connection[i].token &&
+                peer(0,i).lease.generation==connection[i].generation);
+            CHECK(*(int16_t *)(ai[i]+0x16a)==0 && modes[i][0xb]==1);
+        }
+        SudekiMpLanPartyHostControlSuspendBindings(network_host,FALSE);
+        update(controller,NULL);
+        CHECK(network_report.owned_mask==14 && !network_report.failed_mask);
+        for(i=1;i<4;++i) {
+            CHECK(observed_native_leases[i].generation>native[i].generation);
+            CHECK(peer(0,i).lease.token==connection[i].token &&
+                peer(0,i).lease.generation==connection[i].generation);
+        }
+    }
     for (i=1;i<4;++i) {
         CHECK(peer(i,i).phase == SUDEKIMP_LAN_PARTY_ACTIVE);
         input.actor_type=SudekiMpLanPartyActorType(i);
@@ -669,6 +916,8 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     CHECK(SudekiMpInstallControlSeparation((HMODULE)base,0,FALSE,FALSE,FALSE,0,
         FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0));
     SudekiMpLanPartyControlTestCalls(acquire_stub,release_stub,movement_stub,lookup);
+    SudekiMpLanPartyControlTestMenuFilter(menu_filter_stub);
+    SudekiMpLanPartyControlTestMenuRelease(menu_release_stub);
     SudekiMpLanPartyControlTestRosterCalls(world_stub,spawn_stub,initialize_stub);
     SudekiMpLanPartyControlTestCombat(combat_stub);
     SudekiMpLanPartyControlTestCombatMode(combat_mode_stub);
@@ -687,6 +936,8 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     CHECK(GetLastError() == ERROR_BUSY && SudekiMpLanPartyControlHasLeases());
     phase=1; update(controller,NULL);
     CHECK(!SudekiMpLanPartyControlHasLeases());
+    phase=6; update(controller,NULL);
+    phase=7; update(controller,NULL);
     CHECK(SudekiMpControlSeparationUnregisterUpdateObserver(&observer_owner));
     CHECK(SudekiMpUninstallControlSeparation());
     memcpy(base+0x27cf0,original,sizeof(original));
@@ -708,6 +959,8 @@ int SudekiMpLanPartyControlImageFixture(uint8_t *base) {
     *(void **)(base+0x408d94)=saved_group; *(void **)(base+0x408da4)=saved_controller;
     memcpy(base+0x27121u,&saved_input_enable_operand,4);
     SudekiMpLanPartyControlTestCalls(NULL,NULL,NULL,NULL);
+    SudekiMpLanPartyControlTestMenuFilter(NULL);
+    SudekiMpLanPartyControlTestMenuRelease(NULL);
     SudekiMpLanPartyControlTestRosterCalls(NULL,NULL,NULL);
     SudekiMpLanPartyControlTestCombat(NULL);
     SudekiMpLanPartyControlTestCombatMode(NULL);

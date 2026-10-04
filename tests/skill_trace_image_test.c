@@ -23,6 +23,8 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_cast_context.h"
 #include "hooks/lan_party_cast.h"
+#include "hooks/lan_party_menu_native.h"
+#include "hooks/lan_party_local_control.h"
 #include "engine/spirit_instance_abi.h"
 #include "engine/cast_light_abi.h"
 #include "engine/cast_motion_blur_abi.h"
@@ -61,6 +63,12 @@ static BOOL no_aim_target(void *actor,float target[3]) { (void)actor;(void)targe
 static BOOL no_aim_fire(void *actor,BOOL *held) { (void)actor;(void)held;return FALSE; }
 static BOOL no_aim_actor(void *actor,BOOL projectile,float direction[3]) {
     (void)actor;(void)projectile;(void)direction;return FALSE;
+}
+static BOOL no_party_menu_admission(void) { return FALSE; }
+static void no_party_menu_callback(void) { }
+static BOOL no_local_control_probe(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    (void)key; (void)actor; (void)w; return FALSE;
 }
 
 /* The exact-image harness links the LAN input adapters without the large
@@ -6587,6 +6595,18 @@ int wmain(int argc, wchar_t **argv) {
         memcpy(&party_realtime_originals[i],image+party_realtime_operands[i],4);
         *(void **)(image+party_realtime_operands[i])=image+party_realtime_targets[i];
     }
+    /* This fixture's mapper omits PE relocations. Prove the retail absolute
+     * operands before emulating precisely the loader's TPtr lifetime slots. */
+    const uint32_t projectile_operands[]={0x4d38,0x186323,0x18644f,0x186459,0x2d919c,0x1861c3};
+    const uint32_t projectile_targets[]={0x2c4c34,0x2d915c,0x2c55ec,0x2c55ac,0x187960,0x2c4c34};
+    uint32_t projectile_originals[6];
+    for(unsigned i=0;i<6;++i) {
+        memcpy(&projectile_originals[i],image+projectile_operands[i],4);
+        if(projectile_originals[i]!=0x400000u+projectile_targets[i]) {
+            fputs("FAIL: unexpected raw projectile lifetime relocation\n",stderr); ++failures;
+        }
+        *(void **)(image+projectile_operands[i])=image+projectile_targets[i];
+    }
     for(unsigned party_seat=1;party_seat<4;++party_seat) {
         SudekiMpLanPartyConfig cfg; memset(&cfg,0,sizeof(cfg));
         cfg.local_seat=(uint8_t)party_seat; cfg.host_ipv4="127.0.0.1"; cfg.port=26889;
@@ -6608,6 +6628,8 @@ int wmain(int argc, wchar_t **argv) {
     }
     for(unsigned i=0;i<4;++i)
         memcpy(image+party_realtime_operands[i],&party_realtime_originals[i],4);
+    for(unsigned i=0;i<6;++i)
+        memcpy(image+projectile_operands[i],&projectile_originals[i],4);
     *(uint32_t *)(image + RVA_QUICK_MENU_INPUT_VTABLE_SLOT) =
         raw_lan_client_quick_menu_input;
     *(uint32_t *)(image + RVA_CAMERA_INPUT_EVENT_VTABLE_SLOT) =
@@ -6813,6 +6835,81 @@ int wmain(int argc, wchar_t **argv) {
                 fputs("FAIL: LAN campaign guard hooks were not installed\n",
                     stderr);
                 ++failures;
+            }
+            /* Execute the exact consumers' count<=1 rejection path through
+             * the guard owner's displaced PUSH EBP bridge. No native actor,
+             * UI or scene call is reachable on this fixture path. */
+            {
+                uint8_t group_fixture[0xe0]={0},before[0xe0];
+                *(unsigned *)(group_fixture+0xcc)=1u;
+                memcpy(before,group_fixture,sizeof(before));
+                if(!SudekiMpLanArenaCampaignGuardSwitchCharacter(group_fixture,FALSE) ||
+                    !SudekiMpLanArenaCampaignGuardSwitchCharacter(group_fixture,TRUE) ||
+                    memcmp(before,group_fixture,sizeof(before)) ||
+                    image[RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER]!=0xc3u ||
+                    image[RVA_GROUP_PLAYERS_NEXT_CHARACTER]!=0xc3u) {
+                    fputs("FAIL: campaign guard owned native switch ABI/rejection path\n",stderr);
+                    ++failures;
+                }
+                image[RVA_GROUP_PLAYERS_NEXT_CHARACTER+1u]^=1u;
+                if(SudekiMpLanArenaCampaignGuardSwitchCharacter(group_fixture,FALSE)) {
+                    fputs("FAIL: campaign guard switch accepted foreign body\n",stderr);
+                    ++failures;
+                }
+                image[RVA_GROUP_PLAYERS_NEXT_CHARACTER+1u]^=1u;
+            }
+            /* Coexist with the installed campaign guard just as in SMP4.
+             * Relocate only the exact absolute operands inspected by these
+             * new adapters; no controller, pause or game object is invoked. */
+            {
+                const uint32_t sites[]={0xfd61eu,0xfd75eu,0x1d708u,
+                    0xec2efu,0x23fbeu,0x240beu};
+                const uint32_t targets[]={0x409d8cu,0x408da0u,0x408d1cu,
+                    0x409de4u,0x408d1cu,0x408d1cu};
+                uint32_t saved[6];
+                for(unsigned i=0;i<6;++i) {
+                    memcpy(&saved[i],image+sites[i],4u);
+                    *(void **)(image+sites[i])=image+targets[i];
+                }
+                image[0xfd610u]^=1u;
+                if(SudekiMpLanPartyMenuNativeInstall((HMODULE)image,no_party_menu_admission,
+                    no_party_menu_callback,no_party_menu_callback)) {
+                    fputs("FAIL: party menu accepted foreign native pause bytes\n",stderr); ++failures;
+                    (void)SudekiMpLanPartyMenuNativeUninstall();
+                }
+                image[0xfd610u]^=1u;
+                if(!SudekiMpLanPartyMenuNativeInstall((HMODULE)image,no_party_menu_admission,
+                    no_party_menu_callback,no_party_menu_callback)) {
+                    fprintf(stderr,"FAIL: party menu exact install error=%lu\n",(unsigned long)GetLastError()); ++failures;
+                } else {
+                    BOOL paused=FALSE;
+                    if(relative_call_target(image+0x1db5du)==image+0x1d700u ||
+                        relative_call_target(image+0x28d572u)==image+0x1d690u ||
+                        SudekiMpLanPartyMenuNativeOwnsPause() ||
+                        SudekiMpLanPartyMenuNativePauseExact(&paused) ||
+                        SudekiMpLanPartyMenuNativeSetPaused(TRUE)) {
+                        fputs("FAIL: party menu hook ownership/render-only pause gate\n",stderr); ++failures;
+                    }
+                    if(!SudekiMpLanPartyLocalControlInstall((HMODULE)image,
+                        no_local_control_probe,no_local_control_probe) ||
+                        SudekiMpLanPartyLocalControlRetains() ||
+                        !SudekiMpLanPartyLocalControlUninstall()) {
+                        fprintf(stderr,"FAIL: local control exact install/uninstall error=%lu\n",(unsigned long)GetLastError()); ++failures;
+                    }
+                    image[0xec2d1u]^=1u;
+                    if(SudekiMpLanPartyLocalControlInstall((HMODULE)image,
+                        no_local_control_probe,no_local_control_probe)) {
+                        fputs("FAIL: local control accepted altered full native mode signature\n",stderr); ++failures;
+                        (void)SudekiMpLanPartyLocalControlUninstall();
+                    }
+                    image[0xec2d1u]^=1u;
+                    if(!SudekiMpLanPartyMenuNativeUninstall() ||
+                        relative_call_target(image+0x1db5du)!=image+0x1d700u ||
+                        relative_call_target(image+0x28d572u)!=image+0x1d690u) {
+                        fputs("FAIL: party menu transactional teardown\n",stderr); ++failures;
+                    }
+                }
+                for(unsigned i=0;i<6;++i) memcpy(image+sites[i],&saved[i],4u);
             }
             if (!SudekiMpUninstallLanArenaCampaignGuard()) {
                 fputs("FAIL: LAN campaign guard exact teardown failed\n",

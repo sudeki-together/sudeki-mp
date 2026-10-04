@@ -551,7 +551,7 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (handoff) {
         static const wchar_t *const heroes[]={L"-Buki",L"-Elco",L"-Tal",L"-Ailish"};
-        const wchar_t *args[]={L"-Level",L"testroom",L"-DT",L"1",heroes[handoff->plan.seat],L"1"};
+        const wchar_t *args[]={L"-Level",L"testroom",L"-DT",L"1",heroes[handoff->plan.character[handoff->plan.seat]],L"1"};
         for (unsigned i=0;i<sizeof(args)/sizeof(args[0]);++i)
             if (!append_command_line_argument(command_line,SUDEKIMP_MAX_COMMAND_LINE,args[i])) return 1;
         if (!SetEnvironmentVariableW(SUDEKIMP_LOBBY_LAUNCH_ENV,argv[2])) return 1;

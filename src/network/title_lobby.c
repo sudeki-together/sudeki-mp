@@ -7,14 +7,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { WIRE = 320, BODY = 48, HELLO = 1, STATE, READY, LOAD_ACK,
-    QUERY = 10, OFFER, VERSION = 2, POLL_LIMIT = 16, TIMEOUT = 8000 };
+enum { WIRE = 512, BODY = 48, HELLO = 1, STATE, READY, LOAD_ACK,
+    SELECT_CHARACTER, SET_NAME, ADMISSION_ACK,
+    QUERY = 10, OFFER, VERSION = SUDEKIMP_LOBBY_VERSION, POLL_LIMIT = 16, TIMEOUT = 8000 };
 typedef struct Connection {
     SOCKET socket;
     unsigned rx_size, tx_size, tx_offset;
     uint8_t rx[WIRE], tx[WIRE];
     DWORD seen, sent;
     BOOL admitted;
+    uint8_t player;
 } Connection;
 struct SudekiMpLobby {
     SRWLOCK lock;
@@ -31,6 +33,16 @@ struct SudekiMpLobby {
     uint32_t ready_revision;
     unsigned load_ack;
     char player[SUDEKIMP_LOBBY_NAME];
+    uint8_t credentials[4][16], reconnect_credential[16];
+    char reconnect_ipv4[16];
+    uint16_t reconnect_port;
+    uint32_t command_seen[4], next_command, admission_sequence;
+    uint8_t command_rejected[4], command[WIRE];
+    uint8_t native_members; /* Initial loading can own actors before running. */
+    BOOL command_pending;
+    DWORD admission_at[4];
+    unsigned admission_ack;
+    BOOL saved_start_enabled;
 };
 
 static void close_socket(SOCKET *socket) {
@@ -48,8 +60,18 @@ static uint32_t get32(const uint8_t *p) { return p[0]|(uint32_t)p[1]<<8|(uint32_
 static void put64(uint8_t *p,uint64_t value) { put32(p,(uint32_t)value); put32(p+4,(uint32_t)(value>>32)); }
 static uint64_t get64(const uint8_t *p) { return get32(p)|(uint64_t)get32(p+4)<<32; }
 static BOOL starting(SudekiMpLobby *s) {
-    return s->status.start.phase>=SUDEKIMP_LOBBY_START_PREPARE &&
+    return !s->status.running && s->status.start.phase>=SUDEKIMP_LOBBY_START_PREPARE &&
         s->status.start.phase<=SUDEKIMP_LOBBY_START_COMPLETE;
+}
+static void member_clear(SudekiMpLobbyMember *m) {
+    memset(m,0,sizeof(*m)); m->character=SUDEKIMP_LOBBY_NO_CHARACTER;
+}
+static BOOL random_bytes(void *out,unsigned size) {
+    return BCryptGenRandom(NULL,(PUCHAR)out,size,BCRYPT_USE_SYSTEM_PREFERRED_RNG)==0;
+}
+static void roster_changed(SudekiMpLobby *s) {
+    ++s->status.roster_revision;
+    if (!s->status.roster_revision) ++s->status.roster_revision;
 }
 static void unready(SudekiMpLobby *s) {
     for (unsigned i=0;i<4;++i) s->status.members[i].ready=0;
@@ -60,6 +82,27 @@ static void abort_start(SudekiMpLobby *s) {
     if (!starting(s)) return;
     s->status.start.phase=SUDEKIMP_LOBBY_START_ABORTED;
     s->load_ack=0; unready(s);
+}
+static void release_member_locked(SudekiMpLobby *s,unsigned player) {
+    member_clear(&s->status.members[player]);
+    SecureZeroMemory(s->credentials[player],16);
+    memset(&s->status.admission[player],0,sizeof(s->status.admission[player]));
+    s->command_seen[player]=s->command_rejected[player]=0;
+    s->admission_at[player]=0;
+    s->native_members&=(uint8_t)~(1u<<player);
+}
+static void depart_member_locked(SudekiMpLobby *s,unsigned player) {
+    if(!s->status.members[player].reserved) return;
+    if(!s->status.running) { abort_start(s); unready(s); }
+    s->status.members[player].present=s->status.members[player].ready=0;
+    /* Never let the former credential reclaim a character during its drain.
+     * Running joins may already have a native reservation before HostAdmit. */
+    SecureZeroMemory(s->credentials[player],16);
+    if(!s->status.running && !(s->native_members&(1u<<player)))
+        release_member_locked(s,player);
+    else if(s->status.admission[player].phase)
+        s->status.admission[player].phase=SUDEKIMP_LOBBY_ADMISSION_FAILED;
+    roster_changed(s);
 }
 static void advance_start(SudekiMpLobby *s) {
     SudekiMpLobbyStart *p=&s->status.start;
@@ -101,9 +144,38 @@ static BOOL valid_name(const char *name) {
         if ((unsigned char)name[i]<32 || (unsigned char)name[i]>126) return FALSE;
     return i<SUDEKIMP_LOBBY_NAME;
 }
+static BOOL valid_player_name(const char *name) { return name && (!name[0] || valid_name(name)); }
 static BOOL wire_name(const uint8_t *p) {
     return valid_name((const char *)p) &&
         zero(p+strlen((const char *)p),SUDEKIMP_LOBBY_NAME-(unsigned)strlen((const char *)p));
+}
+static BOOL wire_player_name(const uint8_t *p) {
+    return !p[0]?zero(p,SUDEKIMP_LOBBY_NAME):wire_name(p);
+}
+static BOOL saved_game_valid(const SudekiMpLobbySavedGame *save) {
+    if (!save || save->folder_slot>9999 || zero(save->fish_sha256,32) ||
+        zero(save->bunny_sha256,32) || !save->label[0] ||
+        !save->party_count || save->party_count>4u || save->leader>=4u ||
+        save->leader!=save->party_order[0]) return FALSE;
+    unsigned mask=0;
+    for(unsigned j=0;j<4u;++j) {
+        unsigned c=save->party_order[j];
+        if(j>=save->party_count) { if(c!=4u) return FALSE; }
+        else { if(c>=4u || (mask&(1u<<c))) return FALSE; mask|=1u<<c; }
+    }
+    if(mask!=save->party_mask) return FALSE;
+    unsigned i;
+    for (i=0;i<SUDEKIMP_LOBBY_SAVE_LABEL && save->label[i];++i)
+        if ((unsigned char)save->label[i]<32 || (unsigned char)save->label[i]>126) return FALSE;
+    return i<SUDEKIMP_LOBBY_SAVE_LABEL &&
+        zero(save->label+i,SUDEKIMP_LOBBY_SAVE_LABEL-i);
+}
+static BOOL saved_game_equal(const SudekiMpLobbySavedGame *a,const SudekiMpLobbySavedGame *b) {
+    return a->folder_slot==b->folder_slot && !memcmp(a->fish_sha256,b->fish_sha256,32) &&
+        !memcmp(a->bunny_sha256,b->bunny_sha256,32) &&
+        !memcmp(a->label,b->label,SUDEKIMP_LOBBY_SAVE_LABEL) &&
+        a->party_count==b->party_count && a->leader==b->leader && a->party_mask==b->party_mask &&
+        !memcmp(a->party_order,b->party_order,sizeof(a->party_order));
 }
 static void name_copy(char *out, const char *name) {
     memset(out,0,SUDEKIMP_LOBBY_NAME);
@@ -112,11 +184,11 @@ static void name_copy(char *out, const char *name) {
 static void packet(SudekiMpLobby *s, uint8_t *out, unsigned type) {
     memset(out,0,WIRE); memcpy(out,"SLB1",4);
     out[4]=VERSION; out[5]=(uint8_t)type; put16(out+6,WIRE);
-    memcpy(out+8,"LB02",4); memcpy(out+12,s->hash,32);
+    memcpy(out+8,"LB05",4); memcpy(out+12,s->hash,32);
 }
 static BOOL header(SudekiMpLobby *s, const uint8_t *p) {
     return !memcmp(p,"SLB1",4) && p[4]==VERSION && get16(p+6)==WIRE &&
-        !memcmp(p+8,"LB02",4) && !memcmp(p+12,s->hash,32) && zero(p+44,4);
+        !memcmp(p+8,"LB05",4) && !memcmp(p+12,s->hash,32) && zero(p+44,4);
 }
 static void error(SudekiMpLobby *s, const char *text) {
     s->status.phase=SUDEKIMP_LOBBY_ERROR;
@@ -129,12 +201,21 @@ static void connection_close(Connection *c) {
 static void leave_locked(SudekiMpLobby *s) {
     close_socket(&s->listener); close_socket(&s->discovery);
     for (unsigned i=0;i<4;++i) connection_close(&s->connections[i]);
-    memset(s->status.members,0,sizeof(s->status.members));
+    for (unsigned i=0;i<4;++i) member_clear(&s->status.members[i]);
     s->status.phase=SUDEKIMP_LOBBY_IDLE;
     s->status.local_slot=0; s->status.advertised=0; s->status.room[0]=0;
     s->status.error[0]=0; s->status.port=0; s->connecting=s->desired_ready=FALSE;
     memset(&s->status.start,0,sizeof(s->status.start));
+    memset(&s->status.saved_game,0,sizeof(s->status.saved_game));
     s->status.host_ipv4[0]=0; s->status.departure_safe=FALSE; s->load_ack=0; s->ready_revision=0;
+    s->status.running=s->status.paused=s->status.absence_policy=0;
+    s->status.roster_revision=s->status.command_sequence=s->status.command_rejected=0;
+    memset(s->status.admission,0,sizeof(s->status.admission));
+    memset(s->credentials,0,sizeof(s->credentials)); memset(s->reconnect_credential,0,16);
+    memset(s->command_seen,0,sizeof(s->command_seen)); memset(s->command_rejected,0,sizeof(s->command_rejected));
+    s->reconnect_ipv4[0]=0; s->reconnect_port=0;
+    s->command_pending=FALSE; s->next_command=s->admission_sequence=s->admission_ack=0;
+    s->native_members=0;
 }
 static SOCKET bound_socket(int type, uint16_t port, BOOL shared) {
     SOCKET sock=socket(AF_INET,type,type==SOCK_STREAM?IPPROTO_TCP:IPPROTO_UDP);
@@ -169,53 +250,208 @@ static void state_packet(SudekiMpLobby *s, unsigned slot, uint8_t *out) {
     put32(body+176,p->revision); put64(body+180,p->generation); put16(body+188,p->port);
     /* Each peer receives only its own admission ticket. */
     put64(body+190+slot*8,p->nonce[slot]);
+    body[222]=s->status.running; body[223]=s->status.absence_policy; body[224]=s->status.paused;
+    put32(body+228,s->status.roster_revision);
+    for (unsigned i=0;i<4;++i) {
+        const SudekiMpLobbyMember *m=&s->status.members[i];
+        body[232+i*4]=m->reserved; body[233+i*4]=m->locked; body[234+i*4]=m->character;
+        const SudekiMpLobbyAdmission *a=&s->status.admission[i];
+        put32(body+272+i*16,a->sequence); body[276+i*16]=a->phase;
+        if (i==slot) put64(body+280+i*16,a->ticket);
+    }
+    memcpy(body+248,s->credentials[slot],16);
+    put32(body+264,s->command_seen[slot]); body[268]=s->command_rejected[slot];
+    if (p->destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME) {
+        const SudekiMpLobbySavedGame *save=&s->status.saved_game;
+        put32(body+336,save->folder_slot);
+        memcpy(body+340,save->fish_sha256,32); memcpy(body+372,save->bunny_sha256,32);
+        memcpy(body+404,save->label,SUDEKIMP_LOBBY_SAVE_LABEL);
+        body[452]=save->party_count; body[453]=save->leader; body[454]=save->party_mask;
+        memcpy(body+455,save->party_order,4);
+    }
 }
-static BOOL received(SudekiMpLobby *s, unsigned slot, const uint8_t *p) {
-    Connection *c=&s->connections[slot]; const uint8_t *body=p+BODY;
+static BOOL selectable(SudekiMpLobby *s,unsigned player) {
+    const SudekiMpLobbyMember *m=&s->status.members[player];
+    return m->present && s->status.start.destination!=SUDEKIMP_LOBBY_DEST_NONE &&
+        !starting(s) && (!s->status.running ||
+        s->status.admission[player].phase==SUDEKIMP_LOBBY_ADMISSION_NONE ||
+        s->status.admission[player].phase==SUDEKIMP_LOBBY_ADMISSION_FAILED);
+}
+static BOOL select_character(SudekiMpLobby *s,unsigned player,unsigned character,BOOL locked) {
+    if (player>=4 || character>SUDEKIMP_LOBBY_NO_CHARACTER ||
+        (locked && character==SUDEKIMP_LOBBY_NO_CHARACTER) || !selectable(s,player)) return FALSE;
+    if(!player && !s->status.running && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        (character!=s->status.saved_game.leader || !locked)) return FALSE;
+    for (unsigned i=0;locked && i<4;++i)
+        if (i!=player && s->status.members[i].reserved && s->status.members[i].locked &&
+            s->status.members[i].character==character) return FALSE;
+    SudekiMpLobbyMember *m=&s->status.members[player];
+    if (m->character==character && m->locked==(locked?1:0)) return TRUE;
+    m->character=(uint8_t)character; m->locked=locked?1:0; m->ready=0;
+    roster_changed(s); if (!s->status.running) unready(s);
+    return TRUE;
+}
+static BOOL rename_member(SudekiMpLobby *s,unsigned player,const char *name) {
+    if (player>=4 || !s->status.members[player].present || !valid_player_name(name)) return FALSE;
+    if (!strcmp(s->status.members[player].name,name)) return TRUE;
+    name_copy(s->status.members[player].name,name); roster_changed(s);
+    if (!s->status.running && !starting(s)) unready(s);
+    return TRUE;
+}
+static BOOL admission_ack(SudekiMpLobby *s,unsigned player,uint32_t sequence,uint64_t ticket,unsigned ack) {
+    SudekiMpLobbyAdmission *a=&s->status.admission[player];
+    if (!s->status.running || !s->status.members[player].present || !sequence ||
+        sequence!=a->sequence || !ticket || ticket!=a->ticket ||
+        a->phase==SUDEKIMP_LOBBY_ADMISSION_NONE) return FALSE;
+    /* An ACK already in flight cannot revoke a completed native handoff or
+     * disconnect an otherwise healthy client after the host timed it out. */
+    if (a->phase>=SUDEKIMP_LOBBY_ADMISSION_COMPLETE) return TRUE;
+    if (ack==SUDEKIMP_LOBBY_ACK_FAILED) { a->phase=SUDEKIMP_LOBBY_ADMISSION_FAILED; return TRUE; }
+    if (ack==SUDEKIMP_LOBBY_ACK_PREPARED && a->phase>=SUDEKIMP_LOBBY_ADMISSION_OFFERED) {
+        if (a->phase==SUDEKIMP_LOBBY_ADMISSION_OFFERED) a->phase=SUDEKIMP_LOBBY_ADMISSION_PREPARED;
+        return TRUE;
+    }
+    if (ack==SUDEKIMP_LOBBY_ACK_LOADED && a->phase>=SUDEKIMP_LOBBY_ADMISSION_PREPARED) {
+        if (a->phase==SUDEKIMP_LOBBY_ADMISSION_PREPARED) a->phase=SUDEKIMP_LOBBY_ADMISSION_LOADED;
+        return TRUE;
+    }
+    return FALSE;
+}
+static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
+    Connection *c=&s->connections[connection]; const uint8_t *body=p+BODY;
     if (!header(s,p)) return FALSE;
     if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) {
-        if (p[5]==HELLO && !c->admitted && !starting(s) && wire_name(body) && zero(body+32,WIRE-BODY-32)) {
-            name_copy(s->status.members[slot].name,(const char *)body);
-            s->status.members[slot].present=1; c->admitted=TRUE;
-            unready(s);
-        } else if (p[5]==READY && c->admitted && body[0]<=1 && zero(body+1,3) && zero(body+8,WIRE-BODY-8)) {
-            if (!starting(s) && get32(body+4)==s->status.start.revision) s->status.members[slot].ready=body[0];
-        } else if (p[5]==LOAD_ACK && c->admitted && body[12]>=1 && body[12]<=4 && !body[13] &&
+        if (p[5]==HELLO && !c->admitted && !starting(s) && wire_player_name(body) &&
+            zero(body+48,WIRE-BODY-48)) {
+            unsigned player;
+            if (zero(body+32,16)) {
+                for (player=1;player<4 && s->status.members[player].reserved;++player) {}
+                if (player==4 || !random_bytes(s->credentials[player],16) ||
+                    zero(s->credentials[player],16)) return FALSE;
+                member_clear(&s->status.members[player]);
+                s->status.members[player].reserved=1;
+                s->command_seen[player]=s->command_rejected[player]=0;
+                memset(&s->status.admission[player],0,sizeof(s->status.admission[player]));
+            } else {
+                /* Departure invalidates this credential immediately. Kept
+                 * for the existing wire contract, never an offline claim. */
+                for (player=1;player<4;++player)
+                    if (s->status.members[player].reserved && !s->status.members[player].present &&
+                        !memcmp(body+32,s->credentials[player],16)) break;
+                if (player==4) return FALSE;
+            }
+            name_copy(s->status.members[player].name,(const char *)body);
+            s->status.members[player].present=1; s->status.members[player].ready=0;
+            c->admitted=TRUE; c->player=(uint8_t)player;
+            roster_changed(s); if (!s->status.running) unready(s);
+            return TRUE;
+        }
+        if (!c->admitted || c->player<1 || c->player>3) return FALSE;
+        unsigned player=c->player;
+        if (p[5]==READY && body[0]<=1 && zero(body+1,3) && zero(body+8,WIRE-BODY-8)) {
+            if (!starting(s) && !s->status.running && get32(body+4)==s->status.start.revision)
+                s->status.members[player].ready=(uint8_t)(body[0] && s->status.members[player].locked);
+        } else if (p[5]==LOAD_ACK && body[12]>=1 && body[12]<=4 && !body[13] &&
             zero(body+16,WIRE-BODY-16)) {
-            if (get32(body+8)==s->status.start.revision && get64(body)==s->status.start.generation &&
-                !apply_ack(s,slot,body[12],get16(body+14))) return FALSE;
+            if (!s->status.running && get32(body+8)==s->status.start.revision &&
+                get64(body)==s->status.start.generation && !apply_ack(s,player,body[12],get16(body+14))) return FALSE;
+        } else if (p[5]==SELECT_CHARACTER || p[5]==SET_NAME) {
+            if (!get32(body) || (p[5]==SELECT_CHARACTER &&
+                    (body[8]>4 || body[9]>1 || !zero(body+10,WIRE-BODY-10))) ||
+                (p[5]==SET_NAME && (!wire_player_name(body+8) || !zero(body+40,WIRE-BODY-40)))) return FALSE;
+            uint32_t sequence=get32(body);
+            if (sequence<=s->command_seen[player]) return TRUE;
+            s->command_seen[player]=sequence;
+            BOOL okay=get32(body+4)==s->status.roster_revision;
+            if (okay) okay=p[5]==SELECT_CHARACTER?select_character(s,player,body[8],body[9]):
+                rename_member(s,player,(const char *)body+8);
+            s->command_rejected[player]=okay?0:1;
+        } else if (p[5]==ADMISSION_ACK && body[12]>=1 && body[12]<=4 &&
+            zero(body+13,WIRE-BODY-13)) {
+            /* A stale completion must not affect a newer admission. */
+            if (get32(body)==s->status.admission[player].sequence &&
+                !admission_ack(s,player,get32(body),get64(body+4),body[12])) return FALSE;
         } else return FALSE;
     } else {
         if (p[5]!=STATE || body[0]<1 || body[0]>3 || body[1]>1 || !wire_name(body+2) ||
-            !zero(body+222,WIRE-BODY-222)) return FALSE;
+            body[222]>1 || body[223]>SUDEKIMP_LOBBY_SHARED_PAUSE || body[224]>1 ||
+            !zero(body+225,3) || !get32(body+228) || zero(body+248,16) || body[268]>1 ||
+            !zero(body+269,3) || !zero(body+459,WIRE-BODY-459)) return FALSE;
         if (c->admitted && s->status.local_slot!=body[0]) return FALSE;
         SudekiMpLobbyMember members[4]; memset(members,0,sizeof(members));
+        unsigned present=0,locked=0;
         for (unsigned i=0;i<4;++i) {
-            const uint8_t *m=body+34+i*34;
-            if (m[0]>1 || m[1]>1 || (m[0]?!wire_name(m+2):!zero(m,34))) return FALSE;
-            members[i].present=m[0]; members[i].ready=m[1]; memcpy(members[i].name,m+2,32);
+            const uint8_t *m=body+34+i*34,*extra=body+232+i*4;
+            if (m[0]>1 || m[1]>1 || extra[0]>1 || extra[1]>1 || extra[2]>4 || extra[3] ||
+                (m[0] && !extra[0]) || (m[1] && (!m[0] || !extra[1])) ||
+                (extra[1] && (!extra[0] || extra[2]>=4)) ||
+                (extra[0]?!wire_player_name(m+2):(!zero(m,34) || extra[1] || extra[2]!=4))) return FALSE;
+            if (extra[1]) { if (locked&(1u<<extra[2])) return FALSE; locked|=1u<<extra[2]; }
+            members[i].present=m[0]; members[i].ready=m[1]; members[i].reserved=extra[0];
+            members[i].locked=extra[1]; members[i].character=extra[2]; memcpy(members[i].name,m+2,32);
+            present|=(unsigned)m[0]<<i;
         }
         if (!members[0].present || !members[body[0]].present ||
-            strcmp(members[body[0]].name,s->player)) return FALSE;
+            (!c->admitted && strcmp(members[body[0]].name,s->player))) return FALSE;
         SudekiMpLobbyStart start={0};
         start.destination=body[170]; start.phase=body[171]; start.members=body[172];
         start.prepared=body[173]; start.loaded=body[174]; start.completed=body[175];
         start.revision=get32(body+176); start.generation=get64(body+180); start.port=(uint16_t)get16(body+188);
-        unsigned present=0;
-        for (unsigned i=0;i<4;++i) { start.nonce[i]=get64(body+190+i*8); present|=(unsigned)members[i].present<<i; }
-        if (start.destination>SUDEKIMP_LOBBY_DEST_TESTROOM || start.phase>SUDEKIMP_LOBBY_START_ABORTED ||
+        for (unsigned i=0;i<4;++i) {
+            start.nonce[i]=get64(body+190+i*8);
+            if (i!=body[0] && start.nonce[i]) return FALSE;
+        }
+        if (start.destination>SUDEKIMP_LOBBY_DEST_SAVEDGAME || start.phase>SUDEKIMP_LOBBY_START_ABORTED ||
             !start.revision || (start.prepared&~start.members) || (start.loaded&~start.prepared) ||
-            (start.completed&~start.loaded) || start.members>15) return FALSE;
+            (start.completed&~start.loaded) || start.members>15 ||
+            (body[222] && (start.phase!=SUDEKIMP_LOBBY_START_COMPLETE || start.completed!=start.members))) return FALSE;
         if (start.phase>=SUDEKIMP_LOBBY_START_PREPARE && start.phase<=SUDEKIMP_LOBBY_START_COMPLETE) {
-            if (start.destination!=SUDEKIMP_LOBBY_DEST_TESTROOM || !start.generation || start.members!=present ||
-                (start.phase>=SUDEKIMP_LOBBY_START_LOADING && (!start.port || start.prepared!=present)) ||
-                (start.phase==SUDEKIMP_LOBBY_START_COMPLETE && start.loaded!=present)) return FALSE;
-            for (unsigned i=0;i<4;++i) if ((i==body[0])!=(start.nonce[i]!=0)) return FALSE;
+            if ((start.destination!=SUDEKIMP_LOBBY_DEST_TESTROOM &&
+                    (start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME || !s->saved_start_enabled)) || !start.generation ||
+                (!body[222] && start.members!=present) ||
+                (start.phase>=SUDEKIMP_LOBBY_START_LOADING && (!start.port || start.prepared!=start.members)) ||
+                (start.phase==SUDEKIMP_LOBBY_START_COMPLETE && start.loaded!=start.members) ||
+                (((start.members>>body[0])&1u)!=(start.nonce[body[0]]!=0))) return FALSE;
+        }
+        SudekiMpLobbySavedGame saved_game={0};
+        if (start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME) {
+            saved_game.folder_slot=get32(body+336);
+            memcpy(saved_game.fish_sha256,body+340,32); memcpy(saved_game.bunny_sha256,body+372,32);
+            memcpy(saved_game.label,body+404,SUDEKIMP_LOBBY_SAVE_LABEL);
+            saved_game.party_count=body[452]; saved_game.leader=body[453]; saved_game.party_mask=body[454];
+            memcpy(saved_game.party_order,body+455,4);
+            if (!saved_game_valid(&saved_game)) return FALSE;
+            if(!body[222] && (!members[0].locked || members[0].character!=saved_game.leader)) return FALSE;
+            if (start.phase==SUDEKIMP_LOBBY_START_IDLE &&
+                (start.generation || start.port || start.members || start.prepared || start.loaded ||
+                    start.completed || !zero(start.nonce,sizeof(start.nonce)) || body[222])) return FALSE;
+        } else if (!zero(body+336,123)) return FALSE;
+        if (c->admitted && s->status.start.revision==start.revision &&
+            (s->status.start.destination!=start.destination ||
+                !saved_game_equal(&s->status.saved_game,&saved_game))) return FALSE;
+        SudekiMpLobbyAdmission admissions[4]; memset(admissions,0,sizeof(admissions));
+        for (unsigned i=0;i<4;++i) {
+            const uint8_t *a=body+272+i*16;
+            admissions[i].sequence=get32(a); admissions[i].phase=a[4]; admissions[i].ticket=get64(a+8);
+            if (a[4]>SUDEKIMP_LOBBY_ADMISSION_FAILED || !zero(a+5,3) ||
+                (a[4] && (!body[222] || !members[i].reserved || !get32(a) || (i==body[0] && !get64(a+8)))) ||
+                (!a[4] && !zero(a,16)) || (i!=body[0] && get64(a+8))) return FALSE;
         }
         if (s->status.start.revision!=start.revision) { s->desired_ready=FALSE; s->load_ack=0; }
+        if (s->status.admission[body[0]].sequence!=admissions[body[0]].sequence) s->admission_ack=0;
+        if (admissions[body[0]].phase>=SUDEKIMP_LOBBY_ADMISSION_COMPLETE) s->admission_ack=0;
         s->status.start=start;
+        s->status.saved_game=saved_game;
         s->status.local_slot=body[0]; s->status.advertised=body[1];
+        s->status.running=body[222]; s->status.absence_policy=body[223]; s->status.paused=body[224];
+        s->status.roster_revision=get32(body+228); s->status.command_sequence=get32(body+264);
+        s->status.command_rejected=body[268];
+        if (s->command_pending && s->status.command_sequence>=get32(s->command+BODY)) s->command_pending=FALSE;
+        if (s->next_command<s->status.command_sequence) s->next_command=s->status.command_sequence;
+        memcpy(s->reconnect_credential,body+248,16);
+        memcpy(s->status.admission,admissions,sizeof(admissions));
         memcpy(s->status.room,body+2,32); memcpy(s->status.members,members,sizeof(members));
+        name_copy(s->player,members[body[0]].name);
         s->status.phase=SUDEKIMP_LOBBY_CONNECTED; c->admitted=TRUE;
     }
     return TRUE;
@@ -266,6 +502,7 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         memcpy(out+BODY+43,&s->instance,8);
         put16(out+BODY+8,s->status.port); memcpy(out+BODY+11,s->status.room,32);
         for (unsigned j=0;j<4;++j) out[BODY+10]+=s->status.members[j].present;
+        out[BODY+51]=s->status.running;
         sendto(s->discovery,(const char *)out,WIRE,0,(struct sockaddr *)&source,sizeof(source));
         ++s->discovery_replies;
     }
@@ -291,7 +528,7 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         if (n!=WIRE || !usable_source(&source) || !header(s,bytes) || bytes[5]!=OFFER ||
             memcmp(bytes+BODY,&s->query_nonce,8) || get16(bytes+BODY+8)<1024 ||
             bytes[BODY+10]<1 || bytes[BODY+10]>4 || !wire_name(bytes+BODY+11) ||
-            zero(bytes+BODY+43,8) || !zero(bytes+BODY+51,WIRE-BODY-51)) continue;
+            zero(bytes+BODY+43,8) || bytes[BODY+51]>1 || !zero(bytes+BODY+52,WIRE-BODY-52)) continue;
         char address[16]; if (!InetNtopA(AF_INET,&source.sin_addr,address,sizeof(address))) continue;
         unsigned index;
         for (index=0;index<s->status.server_count;++index)
@@ -307,7 +544,7 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         memset(server,0,sizeof(*server)); strcpy(server->ipv4,retain_loopback?"127.0.0.1":address);
         memcpy(&server->instance,bytes+BODY+43,8);
         memcpy(server->name,bytes+BODY+11,32); server->port=(uint16_t)get16(bytes+BODY+8);
-        server->players=bytes[BODY+10]; server->seen_at=now;
+        server->players=bytes[BODY+10]; server->running=bytes[BODY+51]; server->seen_at=now;
     }
     for (unsigned i=0;i<s->status.server_count;) {
         if ((DWORD)(now-s->status.servers[i].seen_at)>5000u) {
@@ -337,6 +574,7 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
                 connection_close(c); s->connecting=FALSE; error(s,"Unable to reach the host.");
             } else {
                 s->connecting=FALSE; packet(s,bytes,HELLO); name_copy((char *)bytes+BODY,s->player);
+                memcpy(bytes+BODY+32,s->reconnect_credential,16);
                 enqueue(c,bytes); c->seen=now;
             }
         } else if (result<0 || (DWORD)(now-s->connect_at)>=TIMEOUT) {
@@ -347,17 +585,25 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
         Connection *c=&s->connections[slot];
         if (c->socket==INVALID_SOCKET || (!slot && s->connecting)) continue;
         if (!pump(s,slot,now)) {
+            unsigned player=c->player; BOOL admitted=c->admitted;
             connection_close(c);
             if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) {
-                if (s->status.start.phase!=SUDEKIMP_LOBBY_START_COMPLETE) {
-                    abort_start(s); memset(&s->status.members[slot],0,sizeof(s->status.members[slot])); unready(s);
-                } else { s->status.start.completed|=(uint8_t)(1u<<slot); advance_start(s); }
+                if (admitted && player>0 && player<4) depart_member_locked(s,player);
             }
-            else { memset(s->status.members,0,sizeof(s->status.members)); error(s,"Host closed, lobby full, or incompatible build."); }
+            else {
+                s->command_pending=FALSE; SecureZeroMemory(s->reconnect_credential,16);
+                error(s,"Host closed, lobby full, or incompatible build.");
+            }
             continue;
         }
-        if (c->admitted && !c->tx_size && (DWORD)(now-c->sent)>=(starting(s)?100u:500u)) {
-            if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) state_packet(s,slot,bytes);
+        if (c->admitted && !c->tx_size && (DWORD)(now-c->sent)>=100u) {
+            if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) state_packet(s,c->player,bytes);
+            else if (s->command_pending) memcpy(bytes,s->command,WIRE);
+            else if (s->admission_ack && s->status.running) {
+                const SudekiMpLobbyAdmission *a=&s->status.admission[s->status.local_slot];
+                packet(s,bytes,ADMISSION_ACK); put32(bytes+BODY,a->sequence);
+                put64(bytes+BODY+4,a->ticket); bytes[BODY+12]=(uint8_t)s->admission_ack;
+            }
             else if (s->load_ack && starting(s)) {
                 packet(s,bytes,LOAD_ACK); put64(bytes+BODY,s->status.start.generation);
                 put32(bytes+BODY+8,s->status.start.revision); bytes[BODY+12]=(uint8_t)s->load_ack;
@@ -369,6 +615,12 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
      * Read time after that transition; subtracting the older now wraps. */
     if (s->status.phase==SUDEKIMP_LOBBY_HOSTING && starting(s) &&
         !s->status.departure_safe && (DWORD)(GetTickCount()-s->start_at)>90000u) abort_start(s);
+    if (s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running)
+        for (unsigned i=1;i<4;++i)
+            if (s->status.admission[i].phase>=SUDEKIMP_LOBBY_ADMISSION_OFFERED &&
+                s->status.admission[i].phase<=SUDEKIMP_LOBBY_ADMISSION_LOADED &&
+                (DWORD)(GetTickCount()-s->admission_at[i])>90000u)
+                s->status.admission[i].phase=SUDEKIMP_LOBBY_ADMISSION_FAILED;
     discovery_poll(s,now);
 }
 static DWORD WINAPI worker(void *raw) {
@@ -405,7 +657,7 @@ BOOL SudekiMpLobbyDestroy(SudekiMpLobby *s) {
     CloseHandle(s->worker); CloseHandle(s->stop); free(s); WSACleanup(); return TRUE;
 }
 BOOL SudekiMpLobbyHost(SudekiMpLobby *s,const char *room,const char *name,uint16_t port,BOOL advertised) {
-    if (!s || !valid_name(room) || !valid_name(name) || port<1024) return FALSE;
+    if (!s || !valid_name(room) || !valid_player_name(name) || port<1024) return FALSE;
     AcquireSRWLockExclusive(&s->lock); leave_locked(s);
     if (BCryptGenRandom(NULL,(PUCHAR)&s->instance,sizeof(s->instance),BCRYPT_USE_SYSTEM_PREFERRED_RNG) || !s->instance) goto fail;
     s->listener=bound_socket(SOCK_STREAM,port,FALSE);
@@ -416,19 +668,22 @@ BOOL SudekiMpLobbyHost(SudekiMpLobby *s,const char *room,const char *name,uint16
     }
     s->status.phase=SUDEKIMP_LOBBY_HOSTING; s->status.advertised=advertised?1:0;
     s->status.port=port; name_copy(s->status.room,room);
-    s->status.members[0].present=1; name_copy(s->status.members[0].name,name);
-    s->status.start.revision=1;
+    s->status.members[0].present=s->status.members[0].reserved=1;
+    name_copy(s->status.members[0].name,name);
+    s->status.start.revision=s->status.roster_revision=1;
     ReleaseSRWLockExclusive(&s->lock); return TRUE;
 fail:
     leave_locked(s); error(s,"Could not host. Check the port is available.");
     ReleaseSRWLockExclusive(&s->lock); return FALSE;
 }
-BOOL SudekiMpLobbyJoin(SudekiMpLobby *s,const char *ipv4,uint16_t port,const char *name) {
+static BOOL join_locked(SudekiMpLobby *s,const char *ipv4,uint16_t port,const char *name,const uint8_t credential[16]) {
     struct sockaddr_in address; memset(&address,0,sizeof(address)); address.sin_family=AF_INET;
     address.sin_port=htons(port);
-    if (!s || !ipv4 || !valid_name(name) || port<1024 ||
+    if (!s || !ipv4 || !valid_player_name(name) || port<1024 ||
         InetPtonA(AF_INET,ipv4,&address.sin_addr)!=1 || !usable_source(&address)) return FALSE;
-    AcquireSRWLockExclusive(&s->lock); leave_locked(s); name_copy(s->player,name);
+    leave_locked(s); name_copy(s->player,name);
+    if (credential) memcpy(s->reconnect_credential,credential,16);
+    strcpy(s->reconnect_ipv4,ipv4); s->reconnect_port=port;
     Connection *c=&s->connections[0]; c->socket=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
     if (c->socket==INVALID_SOCKET || !nonblocking(c->socket)) goto fail;
     int result=connect(c->socket,(struct sockaddr *)&address,sizeof(address));
@@ -436,21 +691,68 @@ BOOL SudekiMpLobbyJoin(SudekiMpLobby *s,const char *ipv4,uint16_t port,const cha
     s->status.phase=SUDEKIMP_LOBBY_CONNECTING; s->status.port=port;
     strcpy(s->status.host_ipv4,ipv4);
     s->connecting=TRUE; s->connect_at=c->seen=GetTickCount();
-    ReleaseSRWLockExclusive(&s->lock); return TRUE;
+    return TRUE;
 fail:
-    leave_locked(s); error(s,"Unable to connect to that address.");
-    ReleaseSRWLockExclusive(&s->lock); return FALSE;
+    connection_close(c); s->connecting=FALSE; error(s,"Unable to connect to that address.");
+    return FALSE;
+}
+BOOL SudekiMpLobbyJoin(SudekiMpLobby *s,const char *ipv4,uint16_t port,const char *name) {
+    if (!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=join_locked(s,ipv4,port,name,NULL);
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyReconnect(SudekiMpLobby *s) {
+    if (!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_ERROR && s->reconnect_port &&
+        s->reconnect_ipv4[0];
+    if (okay) {
+        char address[16],name[32]; uint16_t port=s->reconnect_port;
+        strcpy(address,s->reconnect_ipv4); name_copy(name,s->player);
+        okay=join_locked(s,address,port,name,NULL);
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
 }
 void SudekiMpLobbyLeave(SudekiMpLobby *s) {
     if (!s) return;
     AcquireSRWLockExclusive(&s->lock); leave_locked(s); ReleaseSRWLockExclusive(&s->lock);
 }
+static BOOL begin_command(SudekiMpLobby *s,unsigned type) {
+    if (s->status.phase!=SUDEKIMP_LOBBY_CONNECTED || s->command_pending ||
+        s->next_command==UINT32_MAX) return FALSE;
+    packet(s,s->command,type); put32(s->command+BODY,++s->next_command);
+    put32(s->command+BODY+4,s->status.roster_revision); s->command_pending=TRUE;
+    return TRUE;
+}
+BOOL SudekiMpLobbySelectCharacter(SudekiMpLobby *s,unsigned character,BOOL locked) {
+    if (!s || character>SUDEKIMP_LOBBY_NO_CHARACTER || (locked && character==SUDEKIMP_LOBBY_NO_CHARACTER)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay;
+    if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) okay=select_character(s,0,character,locked);
+    else {
+        okay=selectable(s,s->status.local_slot) && begin_command(s,SELECT_CHARACTER);
+        if (okay) { s->command[BODY+8]=(uint8_t)character; s->command[BODY+9]=locked?1:0; }
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbySetName(SudekiMpLobby *s,const char *name) {
+    if (!s || !valid_player_name(name)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay;
+    if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) okay=rename_member(s,0,name);
+    else { okay=begin_command(s,SET_NAME); if (okay) name_copy((char *)s->command+BODY+8,name); }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
 void SudekiMpLobbyReady(SudekiMpLobby *s,BOOL ready) {
     if (!s) return;
     AcquireSRWLockExclusive(&s->lock);
-    if (!starting(s)) { s->desired_ready=ready; s->ready_revision=s->status.start.revision; }
-    if (!starting(s) && s->status.phase==SUDEKIMP_LOBBY_HOSTING)
-        s->status.members[s->status.local_slot].ready=ready?1:0;
+    if (!starting(s) && !s->status.running) {
+        s->desired_ready=ready && s->status.members[s->status.local_slot].locked;
+        s->ready_revision=s->status.start.revision;
+        if (s->status.phase==SUDEKIMP_LOBBY_HOSTING)
+            s->status.members[0].ready=s->desired_ready?1:0;
+    }
     ReleaseSRWLockExclusive(&s->lock);
 }
 void SudekiMpLobbyBrowse(SudekiMpLobby *s,BOOL enabled) {
@@ -489,23 +791,64 @@ BOOL SudekiMpLobbyAdvertise(SudekiMpLobby *s,BOOL enabled) {
 BOOL SudekiMpLobbyDestination(SudekiMpLobby *s,unsigned destination) {
     if (!s || destination>SUDEKIMP_LOBBY_DEST_TESTROOM) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s) && !s->status.running;
     if (okay && s->status.start.destination!=destination) {
         unready(s);
+        for(unsigned i=0;i<4u;++i) {
+            s->status.members[i].locked=0; s->status.members[i].character=4u;
+        }
+        roster_changed(s);
         uint32_t revision=s->status.start.revision;
         memset(&s->status.start,0,sizeof(s->status.start));
+        memset(&s->status.saved_game,0,sizeof(s->status.saved_game));
         s->status.start.revision=revision; s->status.start.destination=(uint8_t)destination;
     }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbySelectSavedGame(SudekiMpLobby *s,const SudekiMpLobbySavedGame *save) {
+    if (!s || !save) return FALSE;
+    SudekiMpLobbySavedGame candidate=*save;
+    if (!saved_game_valid(&candidate)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s) && !s->status.running;
+    if (okay && (s->status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME ||
+            !saved_game_equal(&s->status.saved_game,&candidate))) {
+        unready(s);
+        /* Destination changes retire only lobby choices. No native game is
+         * running here. Keep connections/names and require fresh Ready. */
+        for(unsigned i=0;i<4u;++i) {
+            s->status.members[i].locked=0; s->status.members[i].character=4u;
+        }
+        s->status.members[0].character=candidate.leader;
+        s->status.members[0].locked=1;
+        roster_changed(s);
+        uint32_t revision=s->status.start.revision;
+        memset(&s->status.start,0,sizeof(s->status.start));
+        s->status.start.revision=revision; s->status.start.destination=SUDEKIMP_LOBBY_DEST_SAVEDGAME;
+        s->status.saved_game=candidate;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyEnableSavedStart(SudekiMpLobby *s,BOOL enabled) {
+    if (!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=!starting(s) && !s->status.running && !s->native_members;
+    if (okay) s->saved_start_enabled=enabled;
     ReleaseSRWLockExclusive(&s->lock); return okay;
 }
 BOOL SudekiMpLobbyStartGame(SudekiMpLobby *s) {
     if (!s) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s) &&
-        s->status.start.destination==SUDEKIMP_LOBBY_DEST_TESTROOM;
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s) && !s->status.running &&
+        !s->native_members &&
+        (s->status.start.destination==SUDEKIMP_LOBBY_DEST_TESTROOM ||
+            (s->saved_start_enabled && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+                saved_game_valid(&s->status.saved_game)));
+    if(okay && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        s->status.members[0].character!=s->status.saved_game.leader) okay=FALSE;
     unsigned mask=0;
     for (unsigned i=0;i<4;++i) if (s->status.members[i].present) {
-        mask|=1u<<i; if (!s->status.members[i].ready) okay=FALSE;
+        mask|=1u<<i; if (!s->status.members[i].ready || !s->status.members[i].locked) okay=FALSE;
     }
     SudekiMpLobbyStart plan={0};
     plan.destination=s->status.start.destination; plan.revision=s->status.start.revision;
@@ -517,6 +860,7 @@ BOOL SudekiMpLobbyStartGame(SudekiMpLobby *s) {
             !plan.nonce[i]) okay=FALSE;
     if (okay) {
         s->status.start=plan; s->status.departure_safe=FALSE; s->load_ack=0; s->start_at=GetTickCount();
+        s->native_members=(uint8_t)mask;
     }
     ReleaseSRWLockExclusive(&s->lock); return okay;
 }
@@ -535,6 +879,144 @@ void SudekiMpLobbyAbortStart(SudekiMpLobby *s) {
     if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) abort_start(s);
     else if (s->status.phase==SUDEKIMP_LOBBY_CONNECTED && starting(s)) s->load_ack=SUDEKIMP_LOBBY_ACK_FAILED;
     ReleaseSRWLockExclusive(&s->lock);
+}
+BOOL SudekiMpLobbyHostRunning(SudekiMpLobby *s) {
+    if (!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.departure_safe &&
+        s->status.start.phase==SUDEKIMP_LOBBY_START_COMPLETE &&
+        s->status.start.completed==s->status.start.members;
+    if (okay && !s->status.running) {
+        for (unsigned i=0;i<4;++i) if (s->status.start.members&(1u<<i)) {
+            SudekiMpLobbyAdmission *a=&s->status.admission[i];
+            a->sequence=++s->admission_sequence; a->ticket=s->status.start.nonce[i];
+            a->phase=SUDEKIMP_LOBBY_ADMISSION_COMPLETE;
+        }
+        s->status.running=1; s->load_ack=0;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyHostRuntimeState(SudekiMpLobby *s,unsigned policy,BOOL paused) {
+    if (!s || policy>SUDEKIMP_LOBBY_SHARED_PAUSE) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING;
+    if (okay) { s->status.absence_policy=(uint8_t)policy; s->status.paused=paused?1:0; }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyReflectAssignments(SudekiMpLobby *s,const uint8_t character[4],
+    unsigned authoritative_members) {
+    if (!s || !character || authoritative_members>15u || !(authoritative_members&1u)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running;
+    unsigned used=0;
+    for (unsigned i=0;okay && i<4;++i) if(authoritative_members&(1u<<i)) {
+        if (character[i]>SUDEKIMP_LOBBY_NO_CHARACTER ||
+            (!s->status.members[i].reserved && character[i]!=SUDEKIMP_LOBBY_NO_CHARACTER)) okay=FALSE;
+        else if (character[i]<4) {
+            if (used&(1u<<character[i])) okay=FALSE;
+            used|=1u<<character[i];
+        }
+    }
+    if (okay) {
+        BOOL changed=FALSE;
+        for (unsigned i=0;i<4;++i) {
+            SudekiMpLobbyMember *m=&s->status.members[i];
+            if(authoritative_members&(1u<<i)) {
+                if (m->character!=character[i] || m->locked!=(character[i]<4)) {
+                    m->character=character[i]; m->locked=character[i]<4; m->ready=0; changed=TRUE;
+                }
+            } else if(m->character<4u && (used&(1u<<m->character))) {
+                m->character=SUDEKIMP_LOBBY_NO_CHARACTER; m->locked=m->ready=0;
+                s->command_rejected[i]=1; changed=TRUE;
+                SudekiMpLobbyAdmission *a=&s->status.admission[i];
+                if(a->phase && a->phase<SUDEKIMP_LOBBY_ADMISSION_COMPLETE)
+                    a->phase=SUDEKIMP_LOBBY_ADMISSION_FAILED;
+            }
+        }
+        if (changed) roster_changed(s);
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyDisconnectMember(SudekiMpLobby *s,unsigned player) {
+    if(!s || player<1 || player>=4) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING &&
+        s->status.members[player].reserved;
+    if(okay && s->status.members[player].present) {
+        for(unsigned i=1;i<4;++i)
+            if(s->connections[i].admitted && s->connections[i].player==player)
+                connection_close(&s->connections[i]);
+        depart_member_locked(s,player);
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyHostNativeDrained(SudekiMpLobby *s) {
+    if(!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING &&
+        !s->status.running && !starting(s);
+    if(okay) {
+        BOOL changed=FALSE;
+        for(unsigned player=1;player<4;++player)
+            if(s->status.members[player].reserved && !s->status.members[player].present) {
+                release_member_locked(s,player); changed=TRUE;
+            }
+        s->native_members=0;
+        if(changed) { roster_changed(s); unready(s); }
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyReleaseReservation(SudekiMpLobby *s,unsigned player) {
+    if (!s || player<1 || player>=4) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && !starting(s) &&
+        s->status.members[player].reserved && !s->status.members[player].present;
+    if (okay) {
+        release_member_locked(s,player);
+        roster_changed(s); if (!s->status.running) unready(s);
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyHostAdmit(SudekiMpLobby *s,unsigned player) {
+    if (!s || player<1 || player>=4) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    const SudekiMpLobbyMember *m=&s->status.members[player];
+    SudekiMpLobbyAdmission *a=&s->status.admission[player];
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running &&
+        m->present && m->reserved && m->locked && m->character<4 &&
+        (a->phase==SUDEKIMP_LOBBY_ADMISSION_NONE || a->phase==SUDEKIMP_LOBBY_ADMISSION_FAILED) &&
+        s->admission_sequence<UINT32_MAX;
+    uint64_t ticket=0;
+    if (okay) okay=random_bytes(&ticket,sizeof(ticket)) && ticket && ticket!=a->ticket &&
+        ticket!=s->status.start.nonce[player];
+    if (okay) {
+        a->sequence=++s->admission_sequence; a->ticket=ticket;
+        a->phase=SUDEKIMP_LOBBY_ADMISSION_OFFERED; s->admission_at[player]=GetTickCount();
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+void SudekiMpLobbyAdmissionAck(SudekiMpLobby *s,uint32_t sequence,uint64_t ticket,unsigned ack) {
+    if (!s || (ack!=SUDEKIMP_LOBBY_ACK_PREPARED && ack!=SUDEKIMP_LOBBY_ACK_LOADED &&
+            ack!=SUDEKIMP_LOBBY_ACK_FAILED)) return;
+    AcquireSRWLockExclusive(&s->lock);
+    const SudekiMpLobbyAdmission *a=&s->status.admission[s->status.local_slot];
+    if (s->status.phase==SUDEKIMP_LOBBY_CONNECTED && s->status.running && sequence &&
+        a->sequence==sequence && ticket && a->ticket==ticket && a->phase &&
+        a->phase<SUDEKIMP_LOBBY_ADMISSION_COMPLETE &&
+        (ack!=SUDEKIMP_LOBBY_ACK_LOADED || a->phase>=SUDEKIMP_LOBBY_ADMISSION_PREPARED)) s->admission_ack=ack;
+    ReleaseSRWLockExclusive(&s->lock);
+}
+BOOL SudekiMpLobbyHostAdmissionComplete(SudekiMpLobby *s,unsigned player,uint32_t sequence,uint64_t ticket,BOOL success) {
+    if (!s || player<1 || player>=4) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    SudekiMpLobbyAdmission *a=&s->status.admission[player];
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running && sequence &&
+        a->sequence==sequence && ticket && a->ticket==ticket &&
+        (success?(s->status.members[player].present &&
+            (a->phase==SUDEKIMP_LOBBY_ADMISSION_LOADED || a->phase==SUDEKIMP_LOBBY_ADMISSION_COMPLETE)):
+            a->phase!=SUDEKIMP_LOBBY_ADMISSION_NONE);
+    if (okay) a->phase=success?SUDEKIMP_LOBBY_ADMISSION_COMPLETE:SUDEKIMP_LOBBY_ADMISSION_FAILED;
+    ReleaseSRWLockExclusive(&s->lock); return okay;
 }
 void SudekiMpLobbyStatusGet(SudekiMpLobby *s,SudekiMpLobbyStatus *out) {
     if (!out) return;

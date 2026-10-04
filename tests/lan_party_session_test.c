@@ -1,6 +1,7 @@
 #include "network/lan_party_session.h"
 #include "network/lan_party_replica.h"
 #include "network/lan_party_motion.h"
+#include "hooks/lan_party_presence.h"
 #include <math.h>
 #include <winsock2.h>
 #include <stdio.h>
@@ -333,7 +334,7 @@ static void test_motion_catalog(void) {
         CHECK(!SudekiMpLanPartyMotionCapture(type,selectors,native_states,rates,times,
             blends,&phase,&next));
         CHECK(!memcmp(&next,&saved,sizeof(next))); /* no partial publication */
-        phase.clip[0]=6; CHECK(!SudekiMpLanPartyMotionValid(type,&phase));
+        phase.clip[0]=255; CHECK(!SudekiMpLanPartyMotionValid(type,&phase));
         phase=f.chunk[i/2].seat[i%2].locomotion;
         phase.state[0]=3; CHECK(!SudekiMpLanPartyMotionValid(type,&phase));
         phase=f.chunk[i/2].seat[i%2].locomotion;
@@ -501,8 +502,18 @@ static void test_combat_mode_publication(void) {
     }
     CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[0],0,transition-1u));
     CHECK(!SudekiMpLanPartyPublishCombatMode(nodes[0],0,transition));
-    Sleep(110); pump();
-    CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],1,now)); pump();
+    uint32_t refresh_started=GetTickCount(); BOOL refreshed=FALSE;
+    do {
+        Sleep(5); pump();
+        CHECK(SudekiMpLanPartyPublishCombatMode(nodes[0],1,now)); pump();
+        refreshed=TRUE;
+        for(unsigned i=1;i<4;++i) {
+            p=status(i,i);
+            if(!SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now,&mode) ||
+                mode.observed_tick==transition) refreshed=FALSE;
+        }
+    } while(!refreshed && GetTickCount()-refresh_started<1500u);
+    CHECK(refreshed);
     for(unsigned i=1;i<4;++i) {
         p=status(i,i);
         CHECK(SudekiMpLanPartyGetCombatMode(nodes[i],&p.lease,now,&mode));
@@ -656,8 +667,10 @@ static void raw_input(SOCKET sock, const struct sockaddr_in *to,
     p.body.input.sequence = sequence; p.body.input.actor_type = (uint8_t)actor;
     p.body.input.weak_attack_pressed = 1;
     CHECK(SudekiMpLanArenaEncodeForRoster(bytes, &size, &p, &roster));
+    uint8_t body[1468]={0}; /* v13 assignment fence; zero for unmapped profile. */
+    memcpy(body+12,bytes+20,size-20);
     raw_send(sock, to, RAW_INPUT, l->seat, l->generation, l->token, sequence,
-        0, bytes + 20, size - 20, SUDEKIMP_LAN_PARTY_VERSION);
+        0, body, size-20+12, SUDEKIMP_LAN_PARTY_VERSION);
 }
 static void test_raw_authority_and_retry(void) {
     SudekiMpLanPartyConfig c = config; c.local_seat = 0; c.port = 0;
@@ -735,6 +748,12 @@ static void raw_frame(SOCKET sock, const struct sockaddr_in *to,
     CHECK(size - 20 + RAW_HEADER <= 1468);
     raw_send(sock, to, RAW_FRAME, lease->seat, lease->generation, lease->token,
         sequence, part, bytes + 20, size - 20, SUDEKIMP_LAN_PARTY_VERSION);
+    if(!part) {
+        /* Empty fixture still needs v10's mandatory fuel/fixture sidecar. */
+        uint8_t jetpack[42]={0};
+        raw_send(sock,to,18,lease->seat,lease->generation,lease->token,
+            sequence,0,jetpack,sizeof(jetpack),SUDEKIMP_LAN_PARTY_VERSION);
+    }
 }
 static void raw_mode(SOCKET sock,const struct sockaddr_in *to,
     const SudekiMpLanPartyLease *lease,uint32_t packet,uint32_t sequence,
@@ -822,6 +841,74 @@ static void test_raw_combat_mode(void) {
     CHECK(!SudekiMpLanPartyGetCombatMode(client,&lease,local+504u,&mode));
     closesocket(foreign); closesocket(server); SudekiMpLanPartyDestroy(client,FALSE);
 }
+static void raw_encode_presence(uint8_t *b,const SudekiMpLanPartyPresence *p) {
+    const SudekiMpPartyOwnership *o=&p->ownership;
+    const SudekiMpPartyAssignment *a=&o->assignment;
+    put32(b,p->sequence); put32(b+4,p->observed_tick);
+    put32(b+8,a->world); put32(b+12,a->revision);
+    for(unsigned i=0;i<4;++i) put32(b+16+4*i,a->generation[i]);
+    b[32]=a->humans; b[33]=a->available; memcpy(b+34,a->character,4);
+    for(unsigned i=0;i<4;++i) put32(b+38+4*i,o->last_request[i]);
+    put32(b+54,o->request); b[58]=o->player; b[59]=o->previous;
+    b[60]=o->target; b[61]=o->requester; b[62]=o->displaced;
+    b[63]=o->handoff_control; b[64]=(uint8_t)o->phase;
+    b[65]=o->connected; b[66]=o->controlling; b[67]=o->menu;
+    b[68]=o->away; b[69]=o->paused;
+    for(unsigned i=0;i<4;++i) b[70+i]=(uint8_t)o->control[i];
+    b[74]=(uint8_t)o->absence_policy;
+    for(unsigned i=0;i<4;++i) put32(b+75+4*i,p->ack_request[i]);
+    memcpy(b+91,p->ack_result,4);
+}
+static void test_presence_frame_floor(void) {
+    for(unsigned wrapped=0;wrapped<2;++wrapped) {
+        struct sockaddr_in address,source; uint8_t bytes[1468],body[95];
+        SOCKET server=raw_socket(&address);
+        SudekiMpLanPartyConfig c=config; c.local_seat=1; c.port=ntohs(address.sin_port);
+        SudekiMpLanPartySession *client=SudekiMpLanPartyCreate(&c); CHECK(client!=NULL);
+        now=GetTickCount(); SudekiMpLanPartyPoll(client,now);
+        CHECK(raw_read(server,bytes,&source)==RAW_HEADER+47);
+        uint8_t ack[9]; put64(ack,get64(bytes+RAW_HEADER)); ack[8]=SUDEKIMP_LAN_PARTY_ACTIVE;
+        SudekiMpLanPartyLease lease={UINT64_C(0x1020304050607080),21,1};
+        raw_send(server,&source,RAW_ACK,1,lease.generation,lease.token,1,0,ack,9,SUDEKIMP_LAN_PARTY_VERSION);
+        SudekiMpLanPartyPoll(client,now); CHECK(SudekiMpLanPartyLeaseActive(client,&lease));
+        SudekiMpPartyAssignment assignment={0};
+        assignment.world=9; assignment.revision=1; assignment.available=assignment.humans=15;
+        for(unsigned i=0;i<4;++i) { assignment.character[i]=(uint8_t)i; assignment.generation[i]=1; }
+        SudekiMpLanPartyPresence presence={0};
+        CHECK(SudekiMpPartyOwnershipInitializePresence(&presence.ownership,&assignment,15,15));
+        CHECK(SudekiMpPartySetPaused(&presence.ownership,0,1,9,1,1)==SUDEKIMP_PARTY_SWAP_OK);
+        presence.sequence=1; presence.observed_tick=wrapped?UINT32_MAX-4u:100u;
+        raw_encode_presence(body,&presence);
+        raw_send(server,&source,21,1,lease.generation,lease.token,2,0,body,95,SUDEKIMP_LAN_PARTY_VERSION);
+        SudekiMpLanPartyPoll(client,now);
+        CHECK(SudekiMpPartySetPaused(&presence.ownership,0,2,9,2,0)==SUDEKIMP_PARTY_SWAP_OK);
+        ++presence.sequence; presence.observed_tick+=10;
+        raw_encode_presence(body,&presence);
+        raw_send(server,&source,21,1,lease.generation,lease.token,3,0,body,95,SUDEKIMP_LAN_PARTY_VERSION);
+        SudekiMpLanPartyPoll(client,now);
+        SudekiMpLanPartyFrame frame,result; fill_frame(&frame);
+        frame.chunk[0].host_tick=frame.chunk[1].host_tick=presence.observed_tick-5;
+        raw_frame(server,&source,&lease,&frame,40,0); raw_frame(server,&source,&lease,&frame,40,1);
+        SudekiMpLanPartyPoll(client,now); CHECK(!SudekiMpLanPartyTakeFrame(client,&result));
+        frame.chunk[0].host_tick=frame.chunk[1].host_tick=presence.observed_tick;
+        raw_frame(server,&source,&lease,&frame,41,1); raw_frame(server,&source,&lease,&frame,41,0);
+        SudekiMpLanPartyPoll(client,now); CHECK(SudekiMpLanPartyTakeFrame(client,&result));
+        CHECK(result.chunk[0].host_tick==presence.observed_tick);
+        raw_send(server,&source,RAW_END,1,lease.generation,lease.token,50,0,NULL,0,SUDEKIMP_LAN_PARTY_VERSION);
+        SudekiMpLanPartyPoll(client,now); CHECK(SudekiMpLanPartyClientRejoin(client));
+        /* Rejoining clears the prior observation floor and requires new lease. */
+        SudekiMpLanPartyPoll(client,now+1);
+        int length;
+        do { length=raw_read(server,bytes,&source); } while(length>0 && bytes[6]!=RAW_HELLO);
+        CHECK(length==RAW_HEADER+47); put64(ack,get64(bytes+RAW_HEADER)); ++lease.generation;
+        raw_send(server,&source,RAW_ACK,1,lease.generation,lease.token,1,0,ack,9,SUDEKIMP_LAN_PARTY_VERSION);
+        SudekiMpLanPartyPoll(client,now+1);
+        frame.chunk[0].host_tick=frame.chunk[1].host_tick=1;
+        raw_frame(server,&source,&lease,&frame,2,0); raw_frame(server,&source,&lease,&frame,2,1);
+        SudekiMpLanPartyPoll(client,now+1); CHECK(SudekiMpLanPartyTakeFrame(client,&result));
+        closesocket(server); SudekiMpLanPartyDestroy(client,FALSE);
+    }
+}
 static void test_fragment_admission(void) {
     struct sockaddr_in address, source; uint8_t bytes[1468];
     SOCKET server = raw_socket(&address);
@@ -891,6 +978,501 @@ static void test_fragment_admission(void) {
     closesocket(server); SudekiMpLanPartyDestroy(client, FALSE);
 }
 
+static void publish_presence(SudekiMpLanPartyPresence *presence) {
+    ++presence->sequence; presence->observed_tick=GetTickCount();
+    CHECK(SudekiMpLanPartyPublishPresence(nodes[0],presence)); pump();
+    for(unsigned i=1;i<4;++i) {
+        SudekiMpLanPartyPresence copy;
+        CHECK(SudekiMpLanPartyGetPresence(nodes[i],&copy));
+        CHECK(copy.sequence==presence->sequence);
+        CHECK(copy.ownership.assignment.revision==presence->ownership.assignment.revision);
+        CHECK(copy.ownership.controlling==presence->ownership.controlling);
+        CHECK(copy.ownership.paused==presence->ownership.paused);
+    }
+}
+static void test_dynamic_presence(void) {
+    static const uint8_t map[4]={1,0,3,2};
+    SudekiMpPartyAssignment assignment={0};
+    SudekiMpLanPartyPresence presence={0},copy;
+    SudekiMpLanPartyCommand command={0},taken;
+    SudekiMpLanArenaInput input={0}; SudekiMpLanPartyInput admitted;
+    memset(&config,0,sizeof(config)); memset(config.game_hash,0x19,sizeof(config.game_hash));
+    config.assignment_enabled=1; memcpy(config.character,map,4);
+    nodes[0]=SudekiMpLanPartyCreate(&config); CHECK(nodes[0]!=NULL);
+    config.port=SudekiMpLanPartyPort(nodes[0]); config.host_ipv4="127.0.0.1";
+    for(unsigned i=1;i<4;++i) {
+        config.local_seat=(uint8_t)i; nodes[i]=SudekiMpLanPartyCreate(&config);
+        CHECK(nodes[i]!=NULL);
+    }
+    pump();
+    for(unsigned i=1;i<4;++i) {
+        wait_transport(i);
+        SudekiMpLanPartyPeerStatus peer=status(0,i);
+        CHECK(SudekiMpLanPartyApprove(nodes[0],&peer.lease));
+    }
+    pump();
+    for(unsigned i=0;i<4;++i) {
+        CHECK(SudekiMpLanPartyLocalSeat(nodes[i])==i);
+        CHECK(SudekiMpLanPartyLocalCharacter(nodes[i])==map[i]);
+        CHECK(SudekiMpLanPartyCharacterPlayer(nodes[0],map[i])==i);
+    }
+    input.actor_type=SudekiMpLanPartyActorType(0); input.world_direction_x=1000;
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input)); /* no confirmed ownership yet */
+    assignment.world=7; assignment.revision=1; assignment.available=15; assignment.humans=15;
+    memcpy(assignment.character,map,4);
+    for(unsigned i=0;i<4;++i) assignment.generation[i]=5;
+    CHECK(SudekiMpPartyOwnershipInitializePresence(&presence.ownership,&assignment,15,15));
+    publish_presence(&presence);
+    CHECK(!SudekiMpLanPartyPublishPresence(nodes[1],&presence));
+    CHECK(SudekiMpLanPartySendInput(nodes[1],&input)); pump();
+    CHECK(SudekiMpLanPartyTakeInput(nodes[0],1,&admitted));
+    CHECK(admitted.lease.seat==1 && admitted.input.actor_type==SudekiMpLanPartyActorType(0));
+    CHECK(admitted.world==7 && admitted.revision==1 && admitted.actor_generation==5);
+    CHECK(SudekiMpLanPartyAdmitInput(nodes[0],&admitted));
+    input.actor_type=SudekiMpLanPartyActorType(1);
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input)); input.actor_type=SudekiMpLanPartyActorType(0);
+    CHECK(SudekiMpLanPartySendInput(nodes[1],&input)); pump();
+    CHECK(SudekiMpLanPartyTakeInput(nodes[0],1,&admitted));
+    SudekiMpLanPartyLease lease=admitted.lease;
+    CHECK(SudekiMpPartySetPaused(&presence.ownership,0,1,7,1,1)==SUDEKIMP_PARTY_SWAP_OK);
+    publish_presence(&presence);
+    CHECK(!SudekiMpLanPartyAdmitInput(nodes[0],&admitted));
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input));
+    CHECK(SudekiMpLanPartyLeaseActive(nodes[0],&lease)); /* role and token unchanged */
+    CHECK(SudekiMpPartySetPaused(&presence.ownership,0,2,7,2,0)==SUDEKIMP_PARTY_SWAP_OK);
+    publish_presence(&presence);
+    CHECK(SudekiMpLanPartySendInput(nodes[1],&input)); pump();
+    CHECK(SudekiMpLanPartyTakeInput(nodes[0],1,&admitted));
+    CHECK(admitted.revision==3 && SudekiMpLanPartyAdmitInput(nodes[0],&admitted));
+    command.kind=SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE; command.player=1; command.target=4;
+    command.value=1; command.request=1; command.world=7; command.revision=3; command.generation=5;
+    CHECK(SudekiMpLanPartyQueueCommand(nodes[1],&command));
+    CHECK(SudekiMpLanPartyQueueCommand(nodes[1],&command)); /* identical retry */
+    pump(); CHECK(SudekiMpLanPartyTakeCommand(nodes[0],&taken));
+    CHECK(taken.lease.token==lease.token && taken.lease.generation==lease.generation &&
+        taken.lease.seat==1 && taken.player==1 && taken.request==1);
+    CHECK(!SudekiMpLanPartyTakeCommand(nodes[0],&taken));
+    CHECK(SudekiMpPartyPresenceRequest(&presence.ownership,1,1,7,3,1,0)==SUDEKIMP_PARTY_SWAP_OK);
+    presence.ack_request[1]=1; publish_presence(&presence);
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input));
+    CHECK(SudekiMpPartyControlDrainComplete(&presence.ownership,1,7,5));
+    publish_presence(&presence);
+    command.request=2; command.revision=presence.ownership.assignment.revision;
+    command.generation=6; command.value=0;
+    CHECK(SudekiMpLanPartyQueueCommand(nodes[1],&command)); pump();
+    CHECK(SudekiMpLanPartyTakeCommand(nodes[0],&taken));
+    CHECK(SudekiMpPartyPresenceRequest(&presence.ownership,1,2,7,command.revision,0,0)==SUDEKIMP_PARTY_SWAP_OK);
+    presence.ack_request[1]=2; publish_presence(&presence);
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input));
+    CHECK(SudekiMpPartyControlAcquireBegin(&presence.ownership,1,7,presence.ownership.assignment.revision,6));
+    publish_presence(&presence);
+    CHECK(SudekiMpPartyControlAcquireCommit(&presence.ownership,1,7,6)); publish_presence(&presence);
+    CHECK(!SudekiMpLanPartySendInput(nodes[1],&input));
+    command.kind=SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK; command.request=3;
+    command.revision=presence.ownership.assignment.revision; command.generation=7;
+    CHECK(SudekiMpLanPartyQueueCommand(nodes[1],&command)); pump();
+    CHECK(SudekiMpLanPartyTakeCommand(nodes[0],&taken));
+    CHECK(!SudekiMpPartyControlAcknowledge(&presence.ownership,1,7,command.revision,6));
+    CHECK(SudekiMpPartyControlAcknowledge(&presence.ownership,1,7,command.revision,7));
+    presence.ack_request[1]=3; publish_presence(&presence);
+    CHECK(SudekiMpLanPartySendInput(nodes[1],&input)); pump();
+    CHECK(SudekiMpLanPartyTakeInput(nodes[0],1,&admitted));
+    CHECK(admitted.actor_generation==7 && SudekiMpLanPartyAdmitInput(nodes[0],&admitted));
+    command.kind=SUDEKIMP_LAN_PARTY_COMMAND_PAUSE; command.request=4; command.value=1;
+    CHECK(!SudekiMpLanPartyQueueCommand(nodes[1],&command)); /* peer cannot manufacture host op */
+    command.player=0; CHECK(!SudekiMpLanPartyQueueCommand(nodes[1],&command));
+    CHECK(SudekiMpLanPartyQueueCommand(nodes[0],&command));
+    CHECK(SudekiMpLanPartyTakeCommand(nodes[0],&taken));
+    CHECK(taken.player==0 && !taken.lease.token);
+    copy=presence; ++copy.sequence; --copy.ownership.assignment.generation[0];
+    CHECK(!SudekiMpLanPartyPublishPresence(nodes[0],&copy));
+    CHECK(!SudekiMpLanPartySetAssignment(nodes[1],&assignment));
+    assignment=presence.ownership.assignment; ++assignment.revision;
+    CHECK(SudekiMpLanPartySetAssignment(nodes[0],&assignment));
+    CHECK(!SudekiMpLanPartyAdmitInput(nodes[0],&admitted));
+    CHECK(!SudekiMpLanPartyGetPresence(nodes[0],&copy)); /* explicit fence until full publication */
+    for(unsigned i=0;i<4;++i) { SudekiMpLanPartyDestroy(nodes[i],FALSE); nodes[i]=NULL; }
+}
+static void test_runtime_admission(void) {
+    SudekiMpLanPartyConfig c={0};
+    SudekiMpLanPartyPeerStatus peer;
+    c.lobby_members=1; c.lobby_nonce[0]=11; c.assignment_enabled=1;
+    c.character[0]=2; c.character[1]=c.character[2]=c.character[3]=4;
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&c); CHECK(host!=NULL);
+    CHECK(SudekiMpLanPartyRegisterAdmission(host,1,22));
+    CHECK(!SudekiMpLanPartyRegisterAdmission(host,2,22));
+    CHECK(!SudekiMpLanPartyRegisterAdmission(host,1,33));
+    CHECK(!SudekiMpLanPartyRevokeAdmission(host,1,33));
+    CHECK(SudekiMpLanPartyRevokeAdmission(host,1,22));
+    CHECK(SudekiMpLanPartyRegisterAdmission(host,1,33));
+    c.port=SudekiMpLanPartyPort(host); c.host_ipv4="127.0.0.1"; c.local_seat=1;
+    c.lobby_members=3; c.lobby_nonce[0]=0; c.lobby_nonce[1]=33;
+    SudekiMpLanPartySession *client=SudekiMpLanPartyCreate(&c); CHECK(client!=NULL);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPeerStatusGet(host,1,&peer));
+    CHECK(peer.phase==SUDEKIMP_LAN_PARTY_PENDING);
+    CHECK(!SudekiMpLanPartyRegisterAdmission(host,1,44));
+    CHECK(!SudekiMpLanPartyRevokeAdmission(host,1,33));
+    CHECK(!SudekiMpLanPartyRegisterAdmission(client,2,44));
+    CHECK(SudekiMpLanPartyDisconnect(host,&peer.lease));
+    CHECK(!SudekiMpLanPartyRevokeAdmission(host,1,33));
+    CHECK(SudekiMpLanPartyReleaseDrained(host,&peer.lease));
+    CHECK(SudekiMpLanPartyRevokeAdmission(host,1,33));
+    CHECK(SudekiMpLanPartyRegisterAdmission(host,1,44));
+    SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
+}
+
+/* Uses exactly the command-construction entrypoint called by the runtime.
+ * The raw transport still rejects noncanonical target values. */
+static void test_local_command_builder(void) {
+    SudekiMpLanPartyConfig config={0};
+    SudekiMpLanPartyPresenceCoordinator coordinator={0};
+    SudekiMpLanPartyCommand command;
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,
+        SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,1,0));
+    CHECK(GetLastError()==ERROR_INVALID_STATE);
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&config);
+    CHECK(host && SudekiMpLanPartyPresenceInitialize(&coordinator,host,&config));
+    static const struct { SudekiMpLanPartyCommandKind kind; unsigned value; uint32_t transaction; } cases[]={
+        {SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,1,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_POLICY,1,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_PAUSE,1,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_PAUSE,0,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_REQUEST_PAUSE,0,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,0,0},
+        {SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK,0,91}
+    };
+    for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i) {
+        uint32_t request=coordinator.next_request;
+        SudekiMpLanPartyPresence observed=coordinator.current;
+        BOOL acknowledgment=cases[i].kind==SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK ||
+            cases[i].kind==SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK;
+        CHECK(acknowledgment ? SudekiMpLanPartyPresenceQueueAcknowledgment(&coordinator,
+            &observed,cases[i].kind,cases[i].transaction) :
+            SudekiMpLanPartyPresenceQueueLocal(&coordinator,cases[i].kind,
+                cases[i].value,cases[i].transaction));
+        CHECK(GetLastError()==ERROR_SUCCESS);
+        CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,
+            SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,1,0));
+        CHECK(GetLastError()==ERROR_BUSY && coordinator.next_request==request+1);
+        CHECK(SudekiMpLanPartyTakeCommand(host,&command));
+        CHECK(command.kind==cases[i].kind && command.target==SUDEKIMP_PARTY_NO_CHARACTER &&
+            command.value==cases[i].value && command.transaction==cases[i].transaction &&
+            command.request==request && SudekiMpLanPartyCommandValid(&command));
+        CHECK(command.world==observed.ownership.assignment.world &&
+            command.revision==observed.ownership.assignment.revision &&
+            command.generation==observed.ownership.assignment.generation[0]);
+        CHECK(!SudekiMpLanPartyQueueCommand(host,&command));
+        CHECK(GetLastError()==ERROR_RETRY);
+        command.target=0;
+        CHECK(!SudekiMpLanPartyQueueCommand(host,&command));
+        CHECK(GetLastError()==ERROR_INVALID_PARAMETER);
+    }
+    uint32_t request=coordinator.next_request;
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_SWAP,0,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER);
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_RELEASE,0,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER);
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN,0,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER && coordinator.next_request==request);
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,0,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER);
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK,0,91));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER);
+    CHECK(!SudekiMpLanPartyPresenceQueueAcknowledgment(&coordinator,&coordinator.current,
+        SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER && coordinator.next_request==request);
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,4,0));
+    CHECK(GetLastError()==ERROR_INVALID_PARAMETER && coordinator.next_request==request);
+    coordinator.next_request=UINT32_MAX;
+    CHECK(!SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0,0));
+    CHECK(GetLastError()==ERROR_ARITHMETIC_OVERFLOW);
+    SudekiMpLanPartyDestroy(host,FALSE);
+}
+
+static void test_presence_coordinator(void) {
+    SudekiMpLanPartyConfig c={0}; c.assignment_enabled=1;
+    c.character[0]=2; c.character[1]=c.character[2]=c.character[3]=4;
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&c);
+    SudekiMpLanPartyPresenceCoordinator coordinator;
+    SudekiMpLanPartyPresence state;
+    SudekiMpLanPartyPresenceNativeState native={0};
+    CHECK(host!=NULL);
+    CHECK(SudekiMpLanPartyPresenceInitialize(&coordinator,host,&c));
+    CHECK(SudekiMpLanPartyPresenceRead(&coordinator,&state));
+    CHECK(state.ownership.connected==1 && state.ownership.controlling==1 &&
+        state.ownership.assignment.character[0]==2);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,1,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(SudekiMpLanPartyPresenceRead(&coordinator,&state));
+    CHECK(!state.ownership.paused && state.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_DRAINING);
+    native.assignment=state.ownership.assignment; native.connected_mask=1;
+    native.native_owned_mask=1; native.local_bound_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_DRAINING);
+    native.native_owned_mask=0; native.native_ai_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    /* An observation for the retired native generation cannot prove ready. */
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI);
+    native.assignment=coordinator.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_ACQUIRING);
+    native.native_ai_mask=0; native.native_owned_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK);
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK);
+    native.assignment=coordinator.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_HUMAN);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_POLICY,1,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,2,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(coordinator.current.ownership.paused);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PAUSE,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(!coordinator.current.ownership.paused && coordinator.current.ownership.away==1);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,2,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(!coordinator.current.ownership.paused);
+    CHECK(SudekiMpLanPartyPresenceReserve(&coordinator,1,3,GetTickCount()));
+    CHECK(coordinator.current.ownership.assignment.character[1]==3 &&
+        coordinator.current.ownership.connected==1 && coordinator.current.ownership.controlling==1);
+    CHECK(!SudekiMpLanPartyPresenceReserve(&coordinator,2,3,GetTickCount()));
+    CHECK(!SudekiMpLanPartyPresenceReserve(&coordinator,1,0,GetTickCount()));
+    native.assignment=coordinator.current.ownership.assignment;
+    native.native_owned_mask=0; native.native_ai_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI);
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,1,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(SudekiMpLanPartyPresenceQueue(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_SWAP,0,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_RESERVED);
+    native.assignment=coordinator.current.ownership.assignment;
+    native.swap_request=coordinator.current.ownership.request; native.swap_ready=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF);
+    native.swap_ready=0; native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_COMMITTED;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK &&
+        coordinator.current.ownership.assignment.character[0]==0 &&
+        coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI);
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK); /* old identity */
+    native.assignment=coordinator.current.ownership.assignment;
+    native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_NONE;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_IDLE &&
+        !coordinator.current.ownership.controlling); /* menu keeps target under AI */
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    native.assignment=coordinator.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_ACQUIRING);
+    native.native_ai_mask=0; native.native_owned_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    native.assignment=coordinator.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_HUMAN);
+    CHECK(SudekiMpLanPartyPresenceQueue(&coordinator,SUDEKIMP_LAN_PARTY_COMMAND_SWAP,1,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&coordinator,GetTickCount()));
+    native.assignment=coordinator.current.ownership.assignment;
+    native.swap_request=coordinator.current.ownership.request; native.swap_ready=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    native.swap_ready=0; native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_COMMITTED;
+    native.native_ai_mask=1; native.native_owned_mask=0;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK &&
+        coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI &&
+        !coordinator.current.ownership.controlling);
+    native.assignment=coordinator.current.ownership.assignment;
+    native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_NONE;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_ACQUIRING);
+    native.native_ai_mask=0; native.native_owned_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK);
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK);
+    native.assignment=coordinator.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&coordinator,&native,GetTickCount()));
+    CHECK(coordinator.current.ownership.phase==SUDEKIMP_PARTY_SWAP_IDLE &&
+        coordinator.current.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_HUMAN);
+    SudekiMpLanPartyPresenceReset(&coordinator);
+    CHECK(!SudekiMpLanPartyPresenceRead(&coordinator,&state));
+    SudekiMpLanPartyDestroy(host,FALSE);
+}
+
+static void test_loading_assignment_gate(void) {
+    SudekiMpLanPartyConfig config={0};
+    SudekiMpLanPartyPresenceCoordinator host_state, client_state;
+    SudekiMpLanPartyPresenceNativeState native={0};
+    SudekiMpLanPartyPeerStatus peer;
+    config.assignment_enabled=1; config.lobby_members=3;
+    config.character[0]=0; config.character[1]=1;
+    config.character[2]=config.character[3]=4;
+    config.lobby_nonce[0]=11; config.lobby_nonce[1]=22;
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&config);
+    CHECK(host && SudekiMpLanPartyPresenceInitialize(&host_state,host,&config));
+    config.local_seat=1; config.host_ipv4="127.0.0.1";
+    config.lobby_nonce[0]=0;
+    config.port=SudekiMpLanPartyPort(host);
+    SudekiMpLanPartySession *client=SudekiMpLanPartyCreate(&config);
+    CHECK(client && SudekiMpLanPartyPresenceInitialize(&client_state,client,&config));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPeerStatusGet(host,1,&peer));
+    CHECK(peer.phase==SUDEKIMP_LAN_PARTY_PENDING); /* still loading its first binding */
+    native.assignment=host_state.current.ownership.assignment;
+    native.connected_mask=3; native.native_owned_mask=1;
+    native.native_ai_mask=2; native.local_bound_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.bound_players==1);
+    CHECK(SudekiMpLanPartyPresenceQueue(&host_state,SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN,1,2,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.current.ack_result[0]==SUDEKIMP_PARTY_SWAP_BUSY &&
+        host_state.current.ownership.assignment.character[1]==1);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&client_state,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,2,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    native.assignment=host_state.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_AI);
+    CHECK(SudekiMpLanPartyPresenceQueue(&host_state,SUDEKIMP_LAN_PARTY_COMMAND_RELEASE,1,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.current.ack_result[0]==SUDEKIMP_PARTY_SWAP_BUSY &&
+        host_state.current.ownership.assignment.character[1]==1);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&client_state,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,0,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    native.assignment=host_state.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_ACQUIRING);
+    native.native_ai_mask=0; native.native_owned_mask=3;
+    native.assignment=host_state.current.ownership.assignment;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    /* A host policy update can arrive after native binding was proved. The
+     * acknowledgment must keep that proof's revision instead of restamping
+     * itself with a newer policy that has never been observed natively. */
+    SudekiMpLanPartyPresence observed;
+    CHECK(SudekiMpLanPartyPresenceRead(&client_state,&observed));
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&host_state,SUDEKIMP_LAN_PARTY_COMMAND_POLICY,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceQueueAcknowledgment(&client_state,&observed,
+        SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.bound_players==1 &&
+        host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK &&
+        host_state.current.ack_result[1]==SUDEKIMP_PARTY_SWAP_STALE);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceRead(&client_state,&observed));
+    CHECK(SudekiMpLanPartyPresenceQueueAcknowledgment(&client_state,&observed,
+        SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.bound_players==3 &&
+        host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_HUMAN);
+    CHECK(SudekiMpPartyPlayerInputReady(&host_state.current.ownership,1,1,
+        host_state.current.ownership.assignment.world,
+        host_state.current.ownership.assignment.revision,
+        host_state.current.ownership.assignment.generation[1]));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&client_state,
+        SUDEKIMP_LAN_PARTY_COMMAND_REQUEST_PAUSE,0,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.pause_requests==2 && !host_state.current.ownership.paused);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceQueueLocal(&client_state,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,2,0));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    native.assignment=host_state.current.ownership.assignment;
+    native.native_owned_mask=1; native.native_ai_mask=2;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_AI);
+    CHECK(SudekiMpLanPartyPresenceQueue(&host_state,SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN,1,2,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.current.ack_result[0]==SUDEKIMP_PARTY_SWAP_OK &&
+        host_state.current.ownership.phase==SUDEKIMP_PARTY_SWAP_RESERVED);
+    native.assignment=host_state.current.ownership.assignment;
+    native.swap_request=host_state.current.ownership.request; native.swap_ready=1;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF);
+    native.swap_ready=0; native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_COMMITTED;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.current.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK &&
+        host_state.current.ownership.assignment.character[1]==2);
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(host,GetTickCount()); SudekiMpLanPartyPoll(client,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceRead(&client_state,&observed));
+    CHECK(SudekiMpLanPartyPresenceQueueAcknowledgment(&client_state,&observed,
+        SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK,observed.ownership.request));
+    for(unsigned i=0;i<3;++i) {
+        SudekiMpLanPartyPoll(client,GetTickCount()); SudekiMpLanPartyPoll(host,GetTickCount());
+    }
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.current.ownership.phase==SUDEKIMP_PARTY_SWAP_IDLE &&
+        host_state.current.ownership.control[1]==SUDEKIMP_PARTY_CONTROL_AI &&
+        host_state.current.ack_result[1]==SUDEKIMP_PARTY_SWAP_OK);
+    native.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_NONE;
+    native.assignment=host_state.current.ownership.assignment; native.connected_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.bound_players==1);
+    native.assignment=host_state.current.ownership.assignment; native.connected_mask=3;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(host_state.bound_players==1);
+    native.assignment=host_state.current.ownership.assignment; native.connected_mask=1;
+    CHECK(SudekiMpLanPartyPresenceService(&host_state,&native,GetTickCount()));
+    CHECK(SudekiMpLanPartyPresenceQueue(&host_state,SUDEKIMP_LAN_PARTY_COMMAND_RELEASE,1,0,0));
+    CHECK(SudekiMpLanPartyPresenceUiFrame(&host_state,GetTickCount()));
+    CHECK(host_state.current.ack_result[0]==SUDEKIMP_PARTY_SWAP_OK &&
+        host_state.current.ownership.assignment.character[1]==4);
+    SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
+}
+
 int main(void) {
     test_context_isolation(); test_block_dodge_extension(); test_running_attack_extension();
     test_motion_catalog(); test_combat_mode_frame_fence(); test_replica_clock_and_atomicity();
@@ -898,8 +1480,10 @@ int main(void) {
     test_replica_fourth_actor_action_clock(); setup();
     if (!nodes[0] || !nodes[1] || !nodes[2] || !nodes[3]) return 1;
     test_three_clients(); test_transport_replica_consumption(); test_combat_mode_publication(); test_independent_disconnect_rejoin();
-    test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_busy_hash_and_timeouts();
+    test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_presence_frame_floor(); test_busy_hash_and_timeouts();
     for (unsigned i = 0; i < 4; ++i) SudekiMpLanPartyDestroy(nodes[i], FALSE);
+    test_dynamic_presence(); test_runtime_admission(); test_local_command_builder(); test_presence_coordinator();
+    test_loading_assignment_gate();
     if (failures) return 1;
     puts("party session: three real UDP clients, routing, four-actor frames and independent rejoin passed");
     return 0;

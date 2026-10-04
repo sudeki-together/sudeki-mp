@@ -6,11 +6,32 @@
 
 /* Observation-only owner of the seven exact zone entry hooks. Mutually
  * exclusive with zone_transition_trace: both verify unmodified entry bytes.
- * No spawn, native task, actor lease, input or camera mutation. */
+ * No spawn, native task, actor lease, input or camera mutation. Temporary
+ * entry/exit also emit a bounded local diagnostic journal of copied authored
+ * resource text and exterior return context. This is not a replay/transport
+ * API and does not establish asynchronous transition completion. */
 BOOL SudekiMpLanStoryObserverInstall(HMODULE module);
 BOOL SudekiMpLanStoryObserverSample(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,
     SudekiMpLanStoryScene *scene);
+/* Borrowed read-only roster proof for one exact observer callback. This is
+ * neither an actor/input lease nor dialogue/script completion evidence. */
+typedef struct SudekiMpLanStoryNativeRoster {
+    uint64_t dispatch_serial;
+    uint32_t epoch, revision;
+    uint8_t available_mask, leader_character;
+    void *world, *descriptor, *group, *controller;
+    void *actors[4], *ai[4];
+} SudekiMpLanStoryNativeRoster;
+/* Sample(scene) must already have published this READY scene on this thread.
+ * Every call freshly verifies the live sparse native group; no cached pointer
+ * grants access. Actor/scene replacement fails instead of spawning a member. */
+BOOL SudekiMpLanStoryObserverRoster(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *roster);
+BOOL SudekiMpLanStoryObserverRosterStillExact(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanStoryNativeRoster *roster);
 /* After a native callback has occurred, remove on that same native thread,
  * outside the synchronous zone calls. Failed restoration retains all state. */
 BOOL SudekiMpLanStoryObserverUninstall(void);

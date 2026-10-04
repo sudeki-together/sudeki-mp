@@ -79,10 +79,23 @@ BOOL SudekiMpEnableSpiritInstanceRemoteSkillUi(const SudekiMpSpiritInstance *ins
  * unrelated locks keep their native behavior. Does not admit overlapping casts. */
 BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *instance,
     void *local_actor,SudekiMpSpiritCasterWitness local_witness);
+/* Reconfigure only the local-view policy of four retained canonical caster
+ * contexts after an authorized native controller switch. The coordinator
+ * must close admission and drain every actor first. Requires an idle neutral
+ * namespace, a shared native view, and an exact controller already targeting
+ * local_actor. Changes mod-owned UI/input/camera metadata atomically; never
+ * changes caster identities, native objects, task lifetimes or game globals. */
+BOOL SudekiMpRebindSpiritInstanceLocalOwner(const SudekiMpSpiritInstance *local_instance,
+    void *local_actor,SudekiMpSpiritCasterWitness local_witness);
 /* Optional idle-boundary routing of EnableSkillTargettingMode. A remote
  * ordinary script must not change the local controller's action bit/timer.
  * Local and neutral calls retain the complete native function. */
 BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void);
+/* Exact existing owner of native FilterAll/None at a neutral game-thread boundary.
+ * Lets another adapter invoke the installed native entry without mistaking
+ * this module's validated detour for a foreign patch. No filter is changed. */
+BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image);
+BOOL SudekiMpSpiritInstanceFilterNoneEntryExact(HMODULE image);
 /* Ordinary-skill countdown routing. All calls are on the retained game thread.
  * Host timers advance once per controller update; replicas only consume the
  * admitted host phase. NONE is absent, PENDING precedes the script's setter,

@@ -740,6 +740,7 @@ static BOOL party_tools_valid[SUDEKIMP_PARTY_TOOL_COUNT];
 static BOOL (*party_tools_query)(unsigned action,BOOL *enabled);
 static void (*party_tools_status)(char *text,unsigned capacity);
 static unsigned party_tools_seat;
+static BOOL party_tools_story;
 static BOOL party_tools_release_guard;
 static void *party_tools_pending_state;
 static BOOL console_keys[256];
@@ -759,6 +760,18 @@ static const unsigned party_tool_actions[15]={
     SUDEKIMP_PARTY_TOOL_INFINITE_SPIRIT,SUDEKIMP_PARTY_TOOL_FUEL_CRYSTAL,
     SUDEKIMP_PARTY_TOOL_INFINITE_JETPACK,SUDEKIMP_PARTY_TOOL_FLIGHT_LEDGE,
     SUDEKIMP_PARTY_TOOL_HITBOXES,SUDEKIMP_PARTY_TOOL_CLOSE};
+static const char *const story_tool_labels[]={
+    "COMBAT MODE","INFINITE SP","INFINITE SPIRIT","INFINITE JETPACK","CLOSE"};
+static const unsigned story_tool_actions[]={
+    SUDEKIMP_PARTY_TOOL_COMBAT,SUDEKIMP_PARTY_TOOL_INFINITE_SP,SUDEKIMP_PARTY_TOOL_INFINITE_SPIRIT,
+    SUDEKIMP_PARTY_TOOL_INFINITE_JETPACK,SUDEKIMP_PARTY_TOOL_CLOSE};
+static unsigned tool_row_count(void) {
+    return party_tools_story?sizeof(story_tool_actions)/sizeof(story_tool_actions[0]):
+        sizeof(party_tool_actions)/sizeof(party_tool_actions[0]);
+}
+static unsigned tool_row_action(unsigned row) {
+    return party_tools_story?story_tool_actions[row]:party_tool_actions[row];
+}
 static BOOL zone_traversal_mode;
 static unsigned int zone_traversal_page;
 static unsigned int zone_traversal_selection;
@@ -4799,6 +4812,9 @@ static void party_tools_close(void) {
     party_tools_release_guard=TRUE;
     menu_texture_dirty=TRUE;
 }
+void SudekiMpLanPartyToolsClose(void) {
+    if(party_tools_command) party_tools_close();
+}
 BOOL SudekiMpLanPartyToolsCaptureInput(void) {
     return party_tools_command && (menu_open || party_tools_release_guard ||
         ((GetKeyState((int)menu_toggle_key)&0x8000)!=0 && owns_foreground()));
@@ -4825,7 +4841,7 @@ static void console_submit(void) {
     if(!n) return;
     if(!strcmp(command,"help")) {
         console_line("HELP  STATUS  CLEAR  CLOSE");
-        console_line("HITBOXES ON / OFF / TOGGLE");
+        if(!party_tools_story) console_line("HITBOXES ON / OFF / TOGGLE");
         console_line("DISPLAY IS LOCAL. GAME RULES BELONG TO HOST.");
     } else if(!strcmp(command,"status")) {
         char status[48]={0}; party_tools_status(status,sizeof(status));
@@ -4936,17 +4952,19 @@ static void poll_menu_input(void) {
     }
     if(party_tools_command) {
         if(party_tools_seat) return; /* Clients never dispatch host menu rows. */
-        const unsigned count=sizeof(party_tool_actions)/sizeof(party_tool_actions[0]);
+        const unsigned count=tool_row_count();
         if(up) selected_item=(selected_item+count-1u)%count;
         if(down) selected_item=(selected_item+1u)%count;
         if(up || down) { menu_texture_dirty=TRUE; party_tools_message[0]=0; }
         if(activate) {
-            unsigned action=party_tool_actions[selected_item];
+            unsigned action=tool_row_action(selected_item);
             if(action==SUDEKIMP_PARTY_TOOL_CLOSE) party_tools_close();
             else if(action==SUDEKIMP_PARTY_TOOL_COUNT)
                 snprintf(party_tools_message,sizeof(party_tools_message),"SESSION OWNS ACTORS AND DUMMY");
             else if(!party_tools_command(action))
-                snprintf(party_tools_message,sizeof(party_tools_message),"UNAVAILABLE: WAIT FOR ALL PLAYERS TO BE READY AND IDLE");
+                snprintf(party_tools_message,sizeof(party_tools_message),"%s",party_tools_story?
+                    "UNAVAILABLE: WAIT FOR HOST CONTROL TO BE READY":
+                    "UNAVAILABLE: WAIT FOR ALL PLAYERS TO BE READY AND IDLE");
             else snprintf(party_tools_message,sizeof(party_tools_message),"SETTING UPDATED");
             menu_texture_dirty=TRUE;
         }
@@ -6123,7 +6141,7 @@ static BOOL update_menu_texture(void *texture) {
             "F8 OR ESC CLOSE - ARROWS SELECT - ENTER TOGGLES",UINT32_C(0xffaab8c8),2);
         if(party_tools_seat) {
             draw_text(pixels,locked.pitch,32,94,
-                party_tools_enabled[SUDEKIMP_PARTY_TOOL_HITBOXES]?
+                party_tools_story?"STORY SESSION - LOCAL STATUS ONLY":party_tools_enabled[SUDEKIMP_PARTY_TOOL_HITBOXES]?
                 "LOCAL HITBOX DISPLAY: ON":"LOCAL HITBOX DISPLAY: OFF",UINT32_C(0xff7cf29a),2);
             for(unsigned i=0;i<7u;++i)
                 draw_text(pixels,locked.pitch,32,145+(int)i*32,console_history[i],UINT32_C(0xffd6dce5),2);
@@ -6131,8 +6149,8 @@ static BOOL update_menu_texture(void *texture) {
             draw_text(pixels,locked.pitch,30,418,">",UINT32_C(0xff5ef7f0),2);
             draw_text(pixels,locked.pitch,54,418,console_input,UINT32_C(0xffffffff),2);
         } else {
-            for(unsigned i=0;i<sizeof(party_tool_actions)/sizeof(party_tool_actions[0]);++i) {
-                unsigned action=party_tool_actions[i]; int y=108+(int)i*21;
+            for(unsigned i=0;i<tool_row_count();++i) {
+                unsigned action=tool_row_action(i); int y=108+(int)i*21;
                 const char *status=action==SUDEKIMP_PARTY_TOOL_COUNT?"SESSION OWNED":
                     action==SUDEKIMP_PARTY_TOOL_CLOSE?"":!party_tools_valid[action]?"UNAVAILABLE":
                     action==SUDEKIMP_PARTY_TOOL_FLIGHT_LEDGE?(party_tools_enabled[action]?"READY":"WAIT"):
@@ -6140,13 +6158,15 @@ static BOOL update_menu_texture(void *texture) {
                     party_tools_enabled[action]?"ENABLED":"DISABLED";
                 if(selected_item==i) fill_rectangle(pixels,locked.pitch,20,y-4,620,y+20,UINT32_C(0x90324962));
                 draw_text(pixels,locked.pitch,30,y,selected_item==i?">":" ",UINT32_C(0xffffffff),2);
-                draw_text(pixels,locked.pitch,54,y,party_tool_labels[i],UINT32_C(0xffffffff),2);
+                draw_text(pixels,locked.pitch,54,y,party_tools_story?story_tool_labels[i]:party_tool_labels[i],UINT32_C(0xffffffff),2);
                 draw_text(pixels,locked.pitch,440,y,status,action==SUDEKIMP_PARTY_TOOL_COUNT?
                     UINT32_C(0xffaab8c8):UINT32_C(0xff7cf29a),2);
             }
             draw_text(pixels,locked.pitch,32,435,party_tools_message,UINT32_C(0xffffd166),1);
         }
-        draw_text(pixels,locked.pitch,32,461,"HITBOXES: CYAN BODY / MAGENTA DAMAGE TEST / GOLD DEFAULT SHOT FILTER",UINT32_C(0xffaab8c8),1);
+        draw_text(pixels,locked.pitch,32,461,party_tools_story?
+            "HOST RESOURCE SETTINGS LAST UNTIL THE SESSION ENDS":
+            "HITBOXES: CYAN BODY / MAGENTA DAMAGE TEST / GOLD DEFAULT SHOT FILTER",UINT32_C(0xffaab8c8),1);
         result=unlock_rectangle(texture,0u);
         if(FAILED(result)) return FALSE;
         menu_texture_dirty=FALSE;
@@ -8642,6 +8662,7 @@ BOOL SudekiMpInstallLanPartyToolsMenu(HMODULE module,UINT key,unsigned seat,
     game_base=(uint8_t *)module;
     d3d_device_global=(void **)(game_base+RVA_D3D_DEVICE_GLOBAL);
     menu_toggle_key=key; party_tools_command=command; party_tools_query=query;
+    party_tools_story=FALSE;
     party_tools_status=status; party_tools_seat=seat; party_tools_release_guard=FALSE;
     menu_open=FALSE; menu_texture_dirty=TRUE; overlay_failure_logged=FALSE;
     selected_item=5u; menu_texture_device=NULL; console_input[0]=party_tools_message[0]=0;
@@ -8654,6 +8675,14 @@ BOOL SudekiMpInstallLanPartyToolsMenu(HMODULE module,UINT key,unsigned seat,
     if(seat) { console_line("TYPE HELP FOR AVAILABLE COMMANDS."); console_line("HOST GAME SETTINGS ARE NOT CLIENT COMMANDS."); }
     SudekiMpLogFormat("lan_party_tools event=installed seat=%u ui=%s policy=presenter_only_existing_engine_and_dispatch\r\n",
         seat,seat?"client_console":"host_tools");
+    return TRUE;
+}
+
+BOOL SudekiMpInstallLanStoryToolsMenu(HMODULE module,UINT key,unsigned seat,
+    BOOL (*command)(unsigned action),BOOL (*query)(unsigned action,BOOL *enabled),
+    void (*status)(char *text,unsigned capacity)) {
+    if(!SudekiMpInstallLanPartyToolsMenu(module,key,seat,command,query,status)) return FALSE;
+    party_tools_story=TRUE; selected_item=0u;
     return TRUE;
 }
 
@@ -8681,6 +8710,7 @@ void SudekiMpUninstallCleanroomMenu(void) {
         release_com_object(&menu_texture); menu_texture_device=NULL;
         party_tools_command=NULL; party_tools_query=NULL; party_tools_status=NULL;
         party_tools_release_guard=FALSE; party_tools_seat=0;
+        party_tools_story=FALSE;
         game_base=NULL; d3d_device_global=NULL;
         menu_open=FALSE; menu_texture_dirty=FALSE; menu_toggle_key=0;
         return;

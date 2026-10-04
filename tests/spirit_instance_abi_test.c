@@ -910,6 +910,87 @@ static void inactive_native_update_tests(void) {
     CHECK(SudekiMpResetSpiritInstanceAbi());
 }
 
+static uint8_t rebind_actors[4][0x134],rebind_states[4][0x134],rebind_skills[4][0x78];
+static BOOL rebind_witness(void *actor,uint64_t session) {
+    for(unsigned i=0;i<4;++i) if(session==17 && actor==rebind_actors[i]) return TRUE;
+    return FALSE;
+}
+static void rebind_local_tests(void) {
+    SudekiMpSpiritInstance instances[4]={{0}};
+    const uint8_t types[4]={0x23,1,5,14};
+    Entry before[4];
+    setup(); named_fixture();
+    CHECK(SudekiMpEnableSpiritInstanceNamedCameraBanking());
+    named_manager=named_test_manager;
+    named_originals[0]=named_base[5]; named_original_slots[0]=5;
+    named_originals[1]=named_base[4]; named_original_slots[1]=4;
+    for(unsigned k=0;k<2;++k)
+        memcpy(named_original_names[k],(uint8_t *)named_originals[k]+NAMED_CAMERA_NAME,NAMED_NAME_SIZE);
+    named_add=fake_named_add; named_remove=fake_named_remove;
+    *(void **)(fake_controller+0x248)=rebind_actors[0];
+    for(unsigned i=0;i<4;++i) {
+        *(void **)rebind_actors[i]=image+0x1200+i*4;
+        *(void **)rebind_states[i]=image+0x1300+i*4;
+        *(void **)(rebind_actors[i]+0x130)=rebind_states[i];
+        *(void **)(rebind_states[i]+0x10)=rebind_actors[i];
+        *(void **)(rebind_actors[i]+0xd8)=rebind_skills[i];
+        *(void **)rebind_skills[i]=image+0x2cbad0;
+        *(void **)(rebind_skills[i]+0x10)=rebind_actors[i];
+        *(void **)(rebind_skills[i]+0x18)=image+0x2cbadc;
+        CHECK(SudekiMpCreateSpiritInstance(&instances[i]));
+        CHECK(SudekiMpBindSpiritInstanceCaster(&instances[i],rebind_actors[i],types[i],17,rebind_witness));
+        CHECK(SudekiMpEnableSpiritInstanceNamedCameras(&instances[i]));
+        if(i) {
+            CHECK(SudekiMpEnableSpiritInstanceRemoteUi(&instances[i]));
+            CHECK(SudekiMpEnableSpiritInstanceRemoteSkillUi(&instances[i]));
+            CHECK(SudekiMpEnableSpiritInstanceRemoteSkillInput(&instances[i],rebind_actors[0],rebind_witness));
+        }
+    }
+    CHECK(SudekiMpInstallSpiritInstanceNamedCameraUpdates());
+    for(unsigned i=1;i<4;++i) CHECK(SudekiMpEnableSpiritInstanceRemoteCameraSelection(&instances[i]));
+    CHECK(SudekiMpEnableSpiritInstanceSkillTargeting());
+    for(unsigned i=0;i<4;++i) CHECK(SudekiMpConfigureSpiritInstanceSkillTiming(&instances[i],FALSE));
+    memcpy(before,entries,sizeof(before));
+    /* Metadata cannot authorize a controller switch. */
+    CHECK(!SudekiMpRebindSpiritInstanceLocalOwner(&instances[2],rebind_actors[2],rebind_witness));
+    CHECK(!memcmp(before,entries,sizeof(before)));
+    *(void **)(fake_controller+0x248)=rebind_actors[2]; /* Simulated native handoff. */
+    entries[1].remote_skill_input_acquired=TRUE;
+    CHECK(!SudekiMpRebindSpiritInstanceLocalOwner(&instances[2],rebind_actors[2],rebind_witness));
+    entries[1].remote_skill_input_acquired=FALSE;
+    CHECK(!memcmp(before,entries,sizeof(before)));
+    *(void **)(image+UI_GLOBAL)=foreign_ui;
+    CHECK(!SudekiMpRebindSpiritInstanceLocalOwner(&instances[2],rebind_actors[2],rebind_witness));
+    *(void **)(image+UI_GLOBAL)=fake_ui;
+    CHECK(!memcmp(before,entries,sizeof(before)));
+    *(void **)(named_test_manager+0x20)=entries[0].named_cameras[0];
+    *(void **)(named_scene+0x7c)=*(void **)((uint8_t *)entries[0].named_cameras[0]+0x34);
+    CHECK(!SudekiMpRebindSpiritInstanceLocalOwner(&instances[2],rebind_actors[2],rebind_witness));
+    *(void **)(named_test_manager+0x20)=named_base[0];
+    *(void **)(named_scene+0x7c)=named_base[0]+0x70;
+    CHECK(!memcmp(before,entries,sizeof(before)));
+    for(unsigned selected=0;selected<4;++selected) {
+        *(void **)(fake_controller+0x248)=rebind_actors[selected];
+        CHECK(SudekiMpRebindSpiritInstanceLocalOwner(&instances[selected],rebind_actors[selected],rebind_witness));
+        for(unsigned i=0;i<4;++i) {
+            CHECK(entries[i].identity.generation==instances[i].generation);
+            CHECK(entries[i].caster==rebind_actors[i]);
+            CHECK(entries[i].remote_ui==(i!=selected));
+            CHECK(entries[i].remote_skill_ui==(i!=selected));
+            CHECK(entries[i].remote_skill_input==(i!=selected));
+            CHECK(entries[i].remote_camera_selection==(i!=selected));
+            CHECK(entries[i].local_actor==(i!=selected?rebind_actors[selected]:NULL));
+        }
+        CHECK(globals_exact(original_manager,original_camera));
+        CHECK(*(void **)(named_test_manager+0x20)==named_base[0]);
+        CHECK(*(void **)(named_scene+0x7c)==named_base[0]+0x70);
+        CHECK(!update_fault && !scope_depth && !selection_generation);
+    }
+    for(unsigned i=4;i>0;--i) CHECK(SudekiMpDestroySpiritInstance(&instances[i-1]));
+    CHECK(SudekiMpResetSpiritInstanceAbi());
+    *(void **)(fake_controller+0x248)=caster_actors[0];
+}
+
 int main(void) {
     SudekiMpSpiritInstance instances[4]={{0}}, extra={0}, stale;
     unsigned int i,j;
@@ -1803,6 +1884,7 @@ int main(void) {
     named_tests();
     selection_tests();
     inactive_native_update_tests();
+    rebind_local_tests();
     {
         const uint32_t sites[]={MANAGER_CTOR,CAMERA_CTOR,MANAGER_INIT,CAMERA_INIT,
             MANAGER_DELETE,CAMERA_DELETE,SOUL_DELETE,0x78d0d,0x78d18,0x79c53,0x79c5e,

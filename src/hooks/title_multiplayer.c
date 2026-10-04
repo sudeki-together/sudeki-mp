@@ -7,6 +7,7 @@
 #include "ui/title_menu_view.h"
 #include "ui/title_lobby.h"
 #include "hooks/lobby_gameplay.h"
+#include "hooks/lan_story_load.h"
 #include <stdint.h>
 #include <string.h>
 #include <wchar.h>
@@ -65,6 +66,8 @@ static DWORD draw_failed_at;
 static void *preparation_owner;
 static DWORD preparation_seen;
 static BOOL preparation_logged;
+static BOOL saved_load_probe,saved_load_probe_pending;
+static SudekiMpSaveFingerprint saved_load_fingerprint;
 static SudekiMpTitleButtonState view_state = SUDEKIMP_TITLE_BUTTON_FOCUS;
 /* The panel's Windows messages are independent of the native one-column
  * menu's confirm events. The hook and consumer run on the verified UI thread. */
@@ -246,7 +249,11 @@ static void clear_page(void) {
 
 static unsigned row_count(void) { return multiplayer_page ? SudekiMpLobbyUiView()->count : current.count; }
 static unsigned enabled_rows(void) {
-    return multiplayer_page ? SudekiMpLobbyUiView()->enabled : (1u << current.count) - 1u;
+    if(multiplayer_page) return saved_load_probe?0u:SudekiMpLobbyUiView()->enabled;
+    unsigned enabled=(1u<<current.count)-1u;
+    if(saved_load_probe) for(unsigned i=0;i<current.count;++i)
+        if(current.label_ids[i]==SUDEKIMP_TITLE_MULTIPLAYER) enabled&=~(1u<<i);
+    return enabled;
 }
 static BOOL view_hit(unsigned *row, POINT *point) {
     return multiplayer_page ? SudekiMpTitlePanelHit(game_window,row_count(),
@@ -592,6 +599,7 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
         InterlockedCompareExchange(&stopping, 0, 0)) goto done;
     if (!native_thread) native_thread = GetCurrentThreadId();
     if (!exact_thread()) goto done;
+    SudekiMpLanStoryLoadServiceTitle(owner);
     preparation_owner = title_identity(owner) ? owner : NULL;
     preparation_seen = GetTickCount();
     if (!capture_title(owner, &observed, TRUE)) {
@@ -618,6 +626,33 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
     }
     last_update = GetTickCount();
     if (fade_in_active && (DWORD)(last_update-fade_in_started)>=300u) fade_in_active=FALSE;
+    if(saved_load_probe_pending && current_exact(owner) && modal_clear() && !hidden_count) {
+        saved_load_probe_pending=FALSE;
+        SudekiMpSaveCatalog catalog;
+        BOOL prepared=FALSE;
+        DWORD error=ERROR_FILE_NOT_FOUND;
+        if(SudekiMpSaveCatalogRefresh(&catalog)) {
+            for(unsigned i=0;i<catalog.count;++i)
+                if(catalog.entries[i].folder_slot==saved_load_fingerprint.folder_slot) {
+                    prepared=SudekiMpLanStoryLoadPrepare(&catalog,i,&saved_load_fingerprint);
+                    error=prepared?ERROR_SUCCESS:GetLastError();
+                    break;
+                }
+        } else error=GetLastError();
+        if(prepared) for(unsigned row=0;row<current.count;++row)
+            if(current.label_ids[row]==SUDEKIMP_TITLE_CONTINUE && SudekiMpLanStoryLoadArmTitle(owner)) {
+                page_confirm=panel_leaving=fade_in_active=FALSE;
+                native_transition=TRUE; transition_started=GetTickCount();
+                *(unsigned *)((uint8_t *)owner+0x17d4)=current.native_index[row];
+                (void)original_action(owner,5,0,0);
+                SudekiMpLogWrite("lan_story_load probe=native_continue window=same gameplay_enabled=0\r\n");
+                goto done;
+            }
+        if(prepared) error=GetLastError()?GetLastError():ERROR_NOT_FOUND;
+        (void)SudekiMpLanStoryLoadCancel();
+        SudekiMpLogFormat("lan_story_load probe=refused prepared=%u error=%lu\r\n",
+            prepared,(unsigned long)error);
+    }
     if (page_confirm && page_confirm_generation == generation && current_exact(owner)) {
         if (!modal_clear()) { page_confirm = panel_leaving = FALSE; goto done; }
         DWORD delay=panel_leaving?300u:multiplayer_page?80u:720u;
@@ -644,13 +679,15 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
     if (multiplayer_page) {
         SudekiMpLobbyUiPoll(game_window, displayed && !page_confirm && !fade_in_active && current_exact(owner) && modal_clear());
         if (SudekiMpLobbyGameplayNeedsTitle() && current_exact(owner) && modal_clear() && !hidden_count) {
-            for (unsigned row=0;row<current.count;++row) if (current.label_ids[row]==SUDEKIMP_TITLE_NEW_GAME) {
+            unsigned action=SudekiMpLobbyGameplaySavedGame()?SUDEKIMP_TITLE_CONTINUE:SUDEKIMP_TITLE_NEW_GAME;
+            for (unsigned row=0;row<current.count;++row) if (current.label_ids[row]==action) {
                 if (SudekiMpLobbyGameplayArmTitle(owner)) {
                     page_confirm=panel_leaving=fade_in_active=FALSE;
                     native_transition=TRUE; transition_started=GetTickCount();
                     *(unsigned *)((uint8_t *)owner+0x17d4)=current.native_index[row];
                     (void)original_action(owner,5,0,0);
-                    SudekiMpLogWrite("title_multiplayer event=testroom_fade window=same\r\n");
+                    SudekiMpLogFormat("title_multiplayer event=gameplay_fade window=same destination=%s\r\n",
+                        SudekiMpLobbyGameplaySavedGame()?"saved_game":"testroom");
                     goto done;
                 }
             }
@@ -773,6 +810,18 @@ BOOL SudekiMpUninstallTitleMultiplayer(void) {
     return TRUE;
 }
 
+BOOL SudekiMpTitleMultiplayerQueueSavedLoadProbe(const SudekiMpSaveFingerprint *f) {
+    if(!f || f->folder_slot>9999u || saved_load_probe || native_thread ||
+        !InterlockedCompareExchange(&admission,0,0) || SudekiMpLobbyGameplayActive()) {
+        SetLastError(ERROR_INVALID_STATE); return FALSE;
+    }
+    unsigned fish=0,bunny=0;
+    for(unsigned i=0;i<32u;++i) { fish|=f->fish_sha256[i]; bunny|=f->bunny_sha256[i]; }
+    if(!fish || !bunny) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    saved_load_fingerprint=*f;
+    saved_load_probe=saved_load_probe_pending=TRUE;
+    return TRUE;
+}
 BOOL SudekiMpInstallTitleMultiplayer(HMODULE module) {
     static const uint8_t action_entry[] = {0x8b,0x44,0x24,0x04};
     static const uint8_t update_entry[] = {0x56,0x8b,0xf1,0x80,0xbe,0x40,0x18,0x00,0x00,0x00};

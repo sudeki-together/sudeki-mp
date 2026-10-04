@@ -19,6 +19,8 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_party_runtime.h"
 #include "hooks/lan_story_runtime.h"
+#include "hooks/lan_story_load.h"
+#include "hooks/lan_story_task_trace.h"
 #include "hooks/title_multiplayer.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_startup_movie_skip.h"
@@ -254,8 +256,13 @@ static void cleanroom_control_update_observer(
 }
 
 static BOOL uninstall_runtime_hooks(void) {
-    if (!SudekiMpUninstallTitleMultiplayer()) return FALSE;
+    /* Story containment retains the input fence, load result, task observer
+     * and sparse world identities until its own pause and camera are drained. */
     if (!SudekiMpUninstallLanStoryRuntime()) return FALSE;
+    if (!SudekiMpLanStoryLoadCancel()) return FALSE;
+    if (!SudekiMpUninstallTitleMultiplayer()) return FALSE;
+    if (!SudekiMpUninstallLanStoryLoad()) return FALSE;
+    if (!SudekiMpLanStoryTaskTraceUninstall()) return FALSE;
     if (!SudekiMpUninstallLanPartyRuntime()) return FALSE;
     if (!SudekiMpUninstallLobbyInstance()) return FALSE;
     if (!SudekiMpUninstallLobbyGameplay()) return FALSE;
@@ -846,11 +853,33 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if (!lobby_launch && read_config_boolean(config_path, L"TitleMenu", L"Enabled")) {
         wchar_t scope[32];
+        SudekiMpSaveFingerprint saved_probe={0};
+        SudekiMpLanPartyConfig observed_party={0};
         GetPrivateProfileStringW(L"TitleMenu", L"Scope", L"", scope, 32, config_path);
-        if (wcscmp(scope, L"entry") ||
+        BOOL saved_load_probe=!wcscmp(scope,L"saved-load-observe");
+        BOOL saved_story=!wcscmp(scope,L"saved-story");
+        if ((wcscmp(scope, L"entry") && !saved_load_probe && !saved_story) ||
             read_config_boolean(config_path, L"FourPlayerTest", L"Enabled")) {
             SudekiMpLogWrite("title_multiplayer config=invalid\r\n");
             return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if(saved_load_probe) {
+            wchar_t hash_w[66]; char hash[66];
+            static const wchar_t *keys[]={L"FishSha256",L"BunnySha256"};
+            saved_probe.folder_slot=GetPrivateProfileIntW(L"TitleMenu",L"SaveSlot",10000,config_path);
+            if(saved_probe.folder_slot>9999u ||
+                !decode_sha256_text(build.actual_sha256,observed_party.game_hash))
+                return SUDEKIMP_INIT_BAD_CONFIG;
+            for(unsigned i=0;i<2u;++i) {
+                DWORD n=GetPrivateProfileStringW(L"TitleMenu",keys[i],L"",hash_w,66,config_path);
+                if(n!=64u || !WideCharToMultiByte(CP_ACP,WC_NO_BEST_FIT_CHARS,hash_w,-1,
+                    hash,sizeof(hash),NULL,NULL) ||
+                    !decode_sha256_text(hash,i?saved_probe.bunny_sha256:saved_probe.fish_sha256))
+                    return SUDEKIMP_INIT_BAD_CONFIG;
+            }
+            observed_party.story_observation=1u; observed_party.timeout_ms=10000u;
+            observed_party.assignment_enabled=1u;
+            memset(observed_party.character,4,sizeof(observed_party.character));
         }
         /* Lobby rosters must keep updating while another local game has
          * focus. Reuse the existing exact-build LAN policy; physical input
@@ -863,7 +892,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
             !SudekiMpInstallLobbyGameplay(game_module) ||
-            !SudekiMpInstallTitleMultiplayer(game_module)) {
+            ((saved_load_probe || saved_story) && !SudekiMpLanStoryTaskTraceInstall(game_module)) ||
+            ((saved_load_probe || saved_story) && !SudekiMpInstallLanStoryLoad(game_module)) ||
+            (saved_story && (!SudekiMpLobbyGameplayEnableTestroom(FALSE) ||
+                !SudekiMpLobbyGameplayEnableSaved(TRUE))) ||
+            !SudekiMpInstallTitleMultiplayer(game_module) ||
+            (saved_load_probe && (!SudekiMpInstallLanStoryRuntime(game_module,&observed_party) ||
+                !SudekiMpTitleMultiplayerQueueSavedLoadProbe(&saved_probe)))) {
             DWORD error = GetLastError();
             (void)uninstall_runtime_hooks();
             SudekiMpLogFormat("title_multiplayer startup=failed error=%lu\r\n",
@@ -871,7 +906,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             SetLastError(error);
             return SUDEKIMP_INIT_CLEANROOM_MENU_FAILED;
         }
-        SudekiMpLogWrite("status=ok profile=title_multiplayer lobby_enabled=true gameplay_enabled=false\r\n");
+        if(saved_story)
+            SudekiMpLogWrite("status=ok profile=saved_story spectator_candidate=1 recruitment_control=candidate live_acceptance=pending\r\n");
+        else if(saved_load_probe)
+            SudekiMpLogWrite("status=ok profile=saved_load_observe lobby_enabled=false gameplay_enabled=false save_writes_by_mod=0\r\n");
+        else SudekiMpLogWrite("status=ok profile=title_multiplayer lobby_enabled=true gameplay_enabled=false\r\n");
         return SUDEKIMP_INIT_OK;
     }
     /* Closed private integration probe. This branch returns before ALL legacy
@@ -889,6 +928,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             wcscpy(scope,L"basic-combat"); seat=lobby_plan.seat; port=lobby_plan.port;
             for (unsigned i=0;i<16;++i) address[i]=(wchar_t)(unsigned char)lobby_plan.host_ipv4[i];
             party.lobby_members=lobby_plan.members;
+            party.reserved_mask=lobby_plan.reserved_mask;
+            party.assignment_enabled=1;
+            memcpy(party.character,lobby_plan.character,sizeof(party.character));
             memcpy(party.lobby_nonce,lobby_plan.nonce,sizeof(party.lobby_nonce));
         }
         BOOL story_observation=wcscmp(scope,L"story-observe")==0;
@@ -907,7 +949,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Research opening: native story remains unmodified. Only the
              * exact observer and metadata transport are installed. No arena
              * actor spawner, training resources, replica, or input adapter. */
-            if(!SudekiMpCleanroomEngineInitialize(game_module) ||
+            if(!SudekiMpInitializeSkillActivationAbi(game_module) ||
+                !SudekiMpInitializeWeaponActivationAbi(game_module) ||
+                !SudekiMpCleanroomEngineInitialize(game_module) ||
                 !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
                     FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
                 !SudekiMpInstallLanArenaWindowPolicy(game_module) ||

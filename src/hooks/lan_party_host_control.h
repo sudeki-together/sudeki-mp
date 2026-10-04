@@ -48,6 +48,12 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *host,
 BOOL SudekiMpLanPartyHostControlLatestInput(SudekiMpLanPartyHostControl *host,
     const SudekiMpControlUpdateDispatchWitness *witness,unsigned seat,
     uint32_t now_ms,SudekiMpLanArenaInput *input);
+/* Temporary native binding barrier for a local character switch. ACTIVE
+ * transports remain connected while their native tasks drain. Resume acquires
+ * fresh actor-domain generations. The game-thread owner must observe Drained
+ * before changing its native local controller; suspension alone is not proof. */
+void SudekiMpLanPartyHostControlSuspendBindings(SudekiMpLanPartyHostControl *host, BOOL suspended);
+BOOL SudekiMpLanPartyHostControlBindingsDrained(SudekiMpLanPartyHostControl *host);
 /* Plain-data admission closure; safe on the runtime's shutdown thread.
  * Continue game-thread Service calls until native ownership positively drains. */
 void SudekiMpLanPartyHostControlRequestStop(SudekiMpLanPartyHostControl *host);

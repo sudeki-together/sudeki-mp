@@ -31,13 +31,18 @@ static SudekiMpLanPartyLease party_input_lease;
 static uint8_t seat_client_type(void) {
     uint8_t host_type = 0u, client_type = 0u;
     if (party_input_session)
-        return SudekiMpLanPartyActorType(SudekiMpLanPartyLocalSeat(party_input_session));
+        return SudekiMpLanPartyActorType(SudekiMpLanPartyLocalCharacter(party_input_session));
     return SudekiMpLanArenaSeatActorTypes(&host_type, &client_type)
         ? client_type : SUDEKIMP_LAN_ARENA_AILISH_TYPE;
 }
 static SudekiMpCleanroomActor seat_client_actor(void) {
     SudekiMpCleanroomActor actor;
-    return SudekiMpCleanroomActorFromType(seat_client_type(), &actor)
+    /* Containment follows the actual native controller even while a logical
+     * reservation is being swapped or this client is spectating. Wire input
+     * still uses the independently validated logical character above. */
+    uint8_t type=party_input_session?
+        SudekiMpLanPartyActorType(SudekiMpLanPartyControlLocalCharacter()):seat_client_type();
+    return SudekiMpCleanroomActorFromType(type, &actor)
         ? actor : SUDEKIMP_CLEANROOM_AILISH;
 }
 
@@ -304,6 +309,23 @@ static void invalidate_native_movement_sample(void) {
     native_movement_sample_owner = NULL;
     last_direction_x = 0;
     last_direction_z = 0;
+}
+
+void SudekiMpLanPartyClientInputQuiesce(void) {
+    if(!party_input_session) return;
+    /* Plain adapter state only. This is also called on the verified UI thread
+     * while native world callbacks are suspended by a shared party pause. */
+    pending_character_camera_event_valid=FALSE;
+    invalidate_native_movement_sample();
+    weak_was_down=native_weak_held=native_block_held=FALSE;
+    pending_strong_pressed=pending_sweep_pressed=skill_pending=FALSE;
+    pending_skill_slot=pending_kit_action=pending_kit_slot=0;
+    operator_weak_attack_until_ms=operator_camera_until_ms=0;
+    operator_camera_release_pending=FALSE;
+    weapon_cycle_actor=NULL;
+    last_transmitted_direction_x=last_transmitted_direction_z=0;
+    last_transmitted_weak_held=last_transmitted_block_held=FALSE;
+    last_input_send_at=0;
 }
 
 static BOOL authenticated_client(void);
@@ -1072,12 +1094,7 @@ static BOOL send_client_input(
             p.lease.generation!=party_input_lease.generation) {
             /* Containment remains installed while disconnected, but queued
              * menu/attack edges must never migrate to a fresh generation. */
-            pending_strong_pressed=pending_sweep_pressed=FALSE;
-            skill_pending=FALSE; pending_skill_slot=0;
-            pending_kit_action=pending_kit_slot=0;
-            weapon_cycle_actor=NULL;
-            last_transmitted_block_held=FALSE;
-            last_input_send_at=0;
+            SudekiMpLanPartyClientInputQuiesce();
             if(active) party_input_lease=p.lease;
             else ZeroMemory(&party_input_lease,sizeof(party_input_lease));
             return FALSE;
@@ -1270,7 +1287,9 @@ static void __stdcall capture_client_movement(
          (DWORD)(now - last_input_send_at) >= CLIENT_INPUT_SEND_INTERVAL_MS) &&
         send_client_input_at(
             last_direction_x, last_direction_z,
-            FALSE, weak_was_down, now) &&
+            /* Held fire is ranged-only, matching InputService. Melee uses
+             * attack edges; a held-fire flag rejects the whole movement packet. */
+            FALSE, client_ailish_first_person_active() && weak_was_down, now) &&
         !movement_send_logged &&
         (last_direction_x != 0 || last_direction_z != 0)) {
         movement_send_logged = TRUE;

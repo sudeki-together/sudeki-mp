@@ -15,6 +15,18 @@ typedef BOOL (*SudekiMpLanAimFireWitness)(void *actor, BOOL *held);
  * before its charge is spent. Observer must validate role, actor and weapon. */
 typedef void (*SudekiMpLanWeaponShotObserver)(void *actor);
 void SudekiMpLanAimSetShotObserver(SudekiMpLanWeaponShotObserver observer);
+/* Same established direction seam after allocation. The native manager's
+ * constructor-proven missile references are still available here. Runs
+ * before the ordinary emission observer; does not authorize another shot. */
+typedef void (*SudekiMpLanProjectileObserver)(void *actor,void *manager);
+void SudekiMpLanAimSetProjectileObserver(SudekiMpLanProjectileObserver observer);
+/* Passive host-only mode, mutually exclusive with AimInstall. Owns only the
+ * existing direction seam; no pose/sampler hook, direction override or fire
+ * input is installed. Geometry is the native pre-spread emission result.
+ * Caller freshly validates its world/actor namespace inside the callback. */
+typedef void (*SudekiMpLanEmissionObserver)(void *actor,void *manager,
+    const float origin[3],const float direction[3]);
+BOOL SudekiMpLanAimObserveEmissionsInstall(HMODULE image,SudekiMpLanEmissionObserver observer);
 /* Local cosmetic idle ownership, independent of observer snapshot/aim
  * admission. Must freshly validate session, local actor lease and no cast.
  * Does not authorize a projectile, remote pose or gameplay mutation. */

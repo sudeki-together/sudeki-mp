@@ -12,7 +12,7 @@
 #include <string.h>
 
 typedef struct HostActor {
-    SudekiMpLanPartyLease lease;
+    SudekiMpLanPartyLease lease, connection; /* native actor / transport player */
     void *actor;
     SudekiMpLanPartyInput input;
     BOOL have_input, draining, stopped, action_serviced, block_held, movement_busy;
@@ -24,7 +24,7 @@ struct SudekiMpLanPartyHostControl {
     SudekiMpLanPartySession *session;
     SudekiMpLanPartyControlDrainProbe drained;
     HostActor actors[3];
-    volatile LONG stopping;
+    volatile LONG stopping, suspended;
     BOOL initialized;
     SudekiMpLanPartyRoster roster;
 };
@@ -142,6 +142,17 @@ SudekiMpLanPartyHostControl *SudekiMpLanPartyHostControlCreate(
     }
     return h;
 }
+void SudekiMpLanPartyHostControlSuspendBindings(SudekiMpLanPartyHostControl *h,BOOL suspended) {
+    if(h) InterlockedExchange(&h->suspended,suspended?1:0);
+}
+BOOL SudekiMpLanPartyHostControlBindingsDrained(SudekiMpLanPartyHostControl *h) {
+    if(!h) return TRUE;
+    if(!InterlockedCompareExchange(&h->suspended,0,0)) return FALSE;
+    /* Same game thread as Service: pointers remain retained until Release
+     * positively proves task/camera/AI restoration. */
+    for(unsigned i=0;i<3;++i) if(h->actors[i].actor) return FALSE;
+    return TRUE;
+}
 void SudekiMpLanPartyHostControlRequestStop(SudekiMpLanPartyHostControl *h) {
     unsigned int seat;
     if (!h) return;
@@ -164,8 +175,8 @@ BOOL SudekiMpLanPartyHostControlDestroy(SudekiMpLanPartyHostControl *h) {
 }
 static BOOL retire(SudekiMpLanPartyHostControl *h, HostActor *a,
     const SudekiMpControlUpdateDispatchWitness *w) {
-    if(!release_block(w,a) || !SudekiMpLanPartyJetpackDrained(a->actor)) return FALSE;
     a->have_input = FALSE; a->draining = TRUE;
+    if(!release_block(w,a) || !SudekiMpLanPartyJetpackDrained(a->actor)) return FALSE;
     /* Quiesce may fail because Default consumed the reference on an earlier
      * pass. Release retains its own retry/verification state in that case. */
     (void)SudekiMpLanPartyControlQuiesce(w,&a->lease,a->actor);
@@ -173,7 +184,10 @@ static BOOL retire(SudekiMpLanPartyHostControl *h, HostActor *a,
         return FALSE;
     /* Clear native publication only after positive native release. Socket
      * release is separate and retried from DRAINING if it races shutdown. */
-    (void)SudekiMpLanPartyReleaseDrained(h->session,&a->lease);
+    SudekiMpLanPartyPeerStatus peer;
+    if(SudekiMpLanPartyPeerStatusGet(h->session,a->connection.seat,&peer) &&
+        same_lease(&peer.lease,&a->connection) && peer.phase==SUDEKIMP_LAN_PARTY_DRAINING)
+        (void)SudekiMpLanPartyReleaseDrained(h->session,&a->connection);
     memset(a,0,sizeof(*a)); return TRUE;
 }
 BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
@@ -184,7 +198,8 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
     memset(report,0,sizeof(*report));
     if (!h->initialized) {
-        if (!SudekiMpLanPartyControlBeginSession(w)) return FALSE;
+        if (!SudekiMpLanPartyControlBeginHostSession(w,
+                SudekiMpLanPartyLocalCharacter(h->session))) return FALSE;
         h->initialized = TRUE;
     }
     if (!InterlockedCompareExchange(&h->stopping,0,0)) {
@@ -195,27 +210,40 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
         if (report->roster_status == SUDEKIMP_LAN_PARTY_ROSTER_REPLACED)
             SudekiMpLanPartyHostControlRequestStop(h);
     }
-    for (seat=1; seat<4; ++seat) {
-        HostActor *a = &h->actors[seat-1];
+    SudekiMpLanPartyPresence presence;
+    BOOL have_presence=SudekiMpLanPartyGetPresence(h->session,&presence);
+    for (unsigned player=1; player<4; ++player) {
+        seat=SudekiMpLanPartyPlayerCharacter(h->session,player);
+        HostActor *a = &h->actors[player-1];
+        BOOL suspended=InterlockedCompareExchange(&h->suspended,0,0)!=0;
+        BOOL want_control=!suspended && (!have_presence ||
+            ((presence.ownership.connected&(1u<<player)) &&
+             !((presence.ownership.menu|presence.ownership.away)&(1u<<player)) &&
+             presence.ownership.control[player]!=SUDEKIMP_PARTY_CONTROL_AI &&
+             presence.ownership.control[player]!=SUDEKIMP_PARTY_CONTROL_DRAINING &&
+             !(presence.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF &&
+               (presence.ownership.player==player || presence.ownership.displaced==player))));
         SudekiMpLanPartyPeerStatus p;
         SudekiMpLanPartyInput next;
-        uint8_t bit = (uint8_t)(1u << seat);
+        uint8_t bit = seat<4u?(uint8_t)(1u<<seat):0;
         uint32_t repeat_ms=seat==1u?0u:250u;
         BOOL fresh, admitted = FALSE, new_input=FALSE;
-        if (!SudekiMpLanPartyPeerStatusGet(h->session,seat,&p)) {
+        if (!SudekiMpLanPartyPeerStatusGet(h->session,player,&p)) {
             report->failed_mask |= bit; continue;
         }
         if (InterlockedCompareExchange(&h->stopping,0,0) &&
             (p.phase == SUDEKIMP_LAN_PARTY_ACTIVE || p.phase == SUDEKIMP_LAN_PARTY_PENDING)) {
             (void)SudekiMpLanPartyDisconnect(h->session,&p.lease);
-            if (!SudekiMpLanPartyPeerStatusGet(h->session,seat,&p)) {
+            if (!SudekiMpLanPartyPeerStatusGet(h->session,player,&p)) {
                 report->failed_mask |= bit; continue;
             }
         }
         if (a->actor && (a->draining || p.phase != SUDEKIMP_LAN_PARTY_ACTIVE ||
-                !same_lease(&a->lease,&p.lease))) {
-            report->draining_mask |= bit;
-            if (!retire(h,a,w)) report->failed_mask |= bit;
+                !same_lease(&a->connection,&p.lease) || !want_control ||
+                a->lease.seat!=seat)) {
+            uint8_t old_bit=(uint8_t)(1u<<a->lease.seat);
+            report->draining_mask |= old_bit;
+            if (!retire(h,a,w)) report->failed_mask |= old_bit;
             continue;
         }
         if (!a->actor && p.phase == SUDEKIMP_LAN_PARTY_DRAINING) {
@@ -225,16 +253,32 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
                 report->failed_mask |= bit;
             continue;
         }
-        if (!a->actor && p.phase == SUDEKIMP_LAN_PARTY_PENDING && p.transport_confirmed &&
+        if(!a->actor && !want_control && !suspended &&
+            p.phase==SUDEKIMP_LAN_PARTY_PENDING && p.transport_confirmed &&
+            !InterlockedCompareExchange(&h->stopping,0,0) &&
+            report->roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY) {
+            /* A spectator or reserved AI may receive world presentation before
+             * acquiring a character. The ownership policy still denies input. */
+            void *actor=seat<4u?SudekiMpLanPartyControlObserveActor(w,seat):NULL;
+            if(seat>=4u || (actor && SudekiMpLanPartyControlHostAiExact(w,seat,actor))) {
+                if(SudekiMpLanPartyApprove(h->session,&p.lease)) p.phase=SUDEKIMP_LAN_PARTY_ACTIVE;
+                else report->failed_mask|=bit;
+            } else report->waiting_mask|=bit;
+        }
+        if (!a->actor && want_control && seat<4u &&
+            (p.phase == SUDEKIMP_LAN_PARTY_PENDING || p.phase == SUDEKIMP_LAN_PARTY_ACTIVE) && p.transport_confirmed &&
             !InterlockedCompareExchange(&h->stopping,0,0)) {
             if (report->roster_status != SUDEKIMP_LAN_PARTY_ROSTER_READY) {
                 report->waiting_mask |= bit; continue;
             }
             void *actor = SudekiMpLanPartyControlObserveActor(w,seat);
-            BOOL acquired = actor && SudekiMpLanPartyControlAcquire(w,&p.lease,actor,h->drained);
-            if (acquired || (actor && SudekiMpLanPartyControlRetains(w,&p.lease,actor))) {
-                a->lease = p.lease; a->actor = actor;
-                if (!acquired || !SudekiMpLanPartyApprove(h->session,&p.lease)) {
+            SudekiMpLanPartyLease native_key={0};
+            BOOL keyed=actor && SudekiMpLanPartyControlNextLease(w,&p.lease,seat,&native_key);
+            BOOL acquired = keyed && SudekiMpLanPartyControlAcquire(w,&native_key,actor,h->drained);
+            if (acquired || (keyed && SudekiMpLanPartyControlRetains(w,&native_key,actor))) {
+                a->lease = native_key; a->connection=p.lease; a->actor = actor;
+                if (!acquired || (p.phase==SUDEKIMP_LAN_PARTY_PENDING &&
+                    !SudekiMpLanPartyApprove(h->session,&p.lease))) {
                     a->draining = TRUE;
                     (void)SudekiMpLanPartyDisconnect(h->session,&p.lease);
                     report->failed_mask |= bit; continue;
@@ -243,7 +287,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             } else { report->waiting_mask |= bit; continue; }
         }
         if (!a->actor) {
-            if (p.phase == SUDEKIMP_LAN_PARTY_ACTIVE) {
+            if (p.phase == SUDEKIMP_LAN_PARTY_ACTIVE && want_control && seat<4u) {
                 /* A foreign approval is not this coordinator's native lease. */
                 (void)SudekiMpLanPartyDisconnect(h->session,&p.lease);
                 report->failed_mask |= bit;
@@ -254,7 +298,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             SudekiMpLogFormat("lan_party event=host_disconnect seat=%u reason=native_lease_not_exact tick=%lu\r\n",
                 seat,(unsigned long)now);
             a->draining = TRUE;
-            (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
+            (void)SudekiMpLanPartyDisconnect(h->session,&a->connection);
             report->failed_mask |= bit; continue;
         }
         report->owned_mask |= bit;
@@ -267,7 +311,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             a->have_input = FALSE;
             if(!release_block(w,a)) {
                 a->draining=TRUE;
-                (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
+                (void)SudekiMpLanPartyDisconnect(h->session,&a->connection);
                 report->failed_mask|=bit;
                 continue;
             }
@@ -278,8 +322,8 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             }
             continue;
         }
-        if (SudekiMpLanPartyTakeInput(h->session,seat,&next)) {
-            if (!same_lease(&a->lease,&next.lease) ||
+        if (SudekiMpLanPartyTakeInput(h->session,player,&next)) {
+            if (!same_lease(&a->connection,&next.lease) ||
                 next.input.actor_type != SudekiMpLanPartyActorType(seat)) {
                 a->have_input = FALSE;
                 report->failed_mask |= bit;
@@ -291,10 +335,13 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
                 a->action_serviced = FALSE; admitted = TRUE;
             }
         }
+        if(a->have_input && !SudekiMpLanPartyInputCurrent(h->session,&a->input)) {
+            a->have_input=FALSE; a->next_held_fire_at=0;
+        }
         fresh = a->have_input && input_fresh(now,a->input.received_at_ms);
         if(a->weapon_swap && now-a->weapon_swap_started>=SUDEKIMP_RANGED_WEAPON_SWAP_MS)
             a->weapon_swap=FALSE;
-        if (!SudekiMpLanPartyLeaseActive(h->session,&a->lease)) {
+        if (!SudekiMpLanPartyLeaseActive(h->session,&a->connection)) {
             a->draining = TRUE;
             (void)retire(h,a,w);
             continue;
@@ -309,9 +356,10 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             !SudekiMpLanPartyCastActive(a->actor) &&
             isfinite(frame_delta) && frame_delta>0.0f && frame_delta<=0.25f) {
             BOOL combat=FALSE;
-            if(host_combat_mode(&combat) && combat)
+            unsigned local_character=SudekiMpLanPartyControlLocalCharacter();
+            if(local_character<4u && host_combat_mode(&combat) && combat)
                 (void)SudekiMpServiceRemoteRapidWeapon(a->actor,
-                    h->roster.bound.actors[0],frame_delta,&repeat_ms);
+                    h->roster.bound.actors[local_character],frame_delta,&repeat_ms);
         }
         if(seat==1u) {
             BOOL held=fresh && a->input.combat.flight_held;
@@ -341,7 +389,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
             if(!release_block(w,a)) {
                 report->failed_mask|=bit;
                 a->draining=TRUE;
-                (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
+                (void)SudekiMpLanPartyDisconnect(h->session,&a->connection);
                 continue;
             }
         }
@@ -356,7 +404,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
         }
         if ((fresh || !a->stopped) && !SudekiMpLanPartyCastActive(a->actor)) {
             const SudekiMpLanArenaInput *i = &a->input.input;
-            BOOL ok = fresh && seat==2u && a->block_held ?
+            BOOL ok = fresh && (seat==2u || seat==0u) && a->block_held ?
                 SudekiMpLanPartyControlSubmitDodge(w,&a->lease,a->actor,
                     axis(i->world_direction_x),axis(i->world_direction_z)) :
                 SudekiMpLanPartyControlMove(w,&a->lease,a->actor,
@@ -384,7 +432,7 @@ BOOL SudekiMpLanPartyHostControlServiceFrame(SudekiMpLanPartyHostControl *h,
                 SudekiMpLogFormat("lan_party event=host_disconnect seat=%u reason=movement_validation_failed error=%lu tick=%lu\r\n",
                     seat,(unsigned long)error,(unsigned long)now);
                 a->draining = TRUE;
-                (void)SudekiMpLanPartyDisconnect(h->session,&a->lease);
+                (void)SudekiMpLanPartyDisconnect(h->session,&a->connection);
                 report->failed_mask |= bit; continue;
             }
             if(a->movement_busy)
@@ -499,14 +547,18 @@ BOOL SudekiMpLanPartyHostControlLatestInput(SudekiMpLanPartyHostControl *h,
     const SudekiMpControlUpdateDispatchWitness *w,unsigned seat,uint32_t now,
     SudekiMpLanArenaInput *input) {
     HostActor *a;
-    if(!h || !input || seat==0u || seat>=4u ||
+    if(!h || !input || seat>=4u ||
         (w && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w))) return FALSE;
-    a=&h->actors[seat-1u];
-    if(!a->actor || a->draining || !a->have_input ||
+    unsigned player=SudekiMpLanPartyCharacterPlayer(h->session,seat);
+    if(player==0u || player>=4u) return FALSE;
+    a=&h->actors[player-1u];
+    if(!SudekiMpLanPartyInputCurrent(h->session,&a->input)) return FALSE;
+    if(InterlockedCompareExchange(&h->suspended,0,0) ||
+        !a->actor || a->draining || !a->have_input ||
         !input_fresh(now,a->input.received_at_ms) ||
-        !SudekiMpLanPartyLeaseActive(h->session,&a->lease) ||
+        !SudekiMpLanPartyLeaseActive(h->session,&a->connection) ||
         a->input.input.actor_type!=SudekiMpLanPartyActorType(seat) ||
-        !same_lease(&a->lease,&a->input.lease) ||
+        !same_lease(&a->connection,&a->input.lease) ||
         !(w ? SudekiMpLanPartyControlExact(w,&a->lease,a->actor) :
             SudekiMpLanPartyControlRetainedNativeThreadExact(&a->lease,a->actor)))
         return FALSE;

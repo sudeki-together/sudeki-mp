@@ -1,4 +1,10 @@
 #include "hooks/lan_party_runtime.h"
+#include "hooks/lan_party_presence.h"
+#include "hooks/lan_party_menu_native.h"
+#include "hooks/lan_party_local_control.h"
+#include "hooks/lan_party_follow.h"
+#include "ui/party_menu.h"
+#include "ui/title_lobby.h"
 #include "hooks/lan_party_jetpack.h"
 #include "hooks/lan_party_host_control.h"
 #include "hooks/lan_party_client_control.h"
@@ -87,6 +93,464 @@ static struct {
     BOOL frame_valid;
     SudekiMpLanPartyFrame frame;
 } diagnostic;
+static SudekiMpLanPartyPresenceCoordinator presence;
+static SudekiMpPartyMenuState menu_state;
+static SudekiMpLanPartyPresenceNativeState native_presence;
+static unsigned physical_character;
+static BOOL menu_native_installed,local_control_installed,runtime_ready;
+static BOOL follow_install_attempted;
+static BOOL intent_known,intent_menu,intent_away,leaving,runtime_stopping;
+static BOOL cleanup_release_input,cleanup_input_released;
+/* Invalidated before native client presentation is serviced. Only the
+ * verified control callback may confirm restoration before teardown. */
+static BOOL client_native_cleanup_ready;
+static BOOL local_switch_active;
+static uint32_t intent_request,ack_revision;
+static uint64_t lobby_tickets[4];
+static uint8_t admitted_players;
+static char presence_notice[128];
+static DWORD presence_notice_until;
+static BOOL party_readable(const void *,size_t);
+static void party_notice(const char *message) {
+    snprintf(presence_notice,sizeof(presence_notice),"%s",message);
+    presence_notice_until=GetTickCount()+6000u;
+}
+static BOOL party_input_captured(void) {
+    SudekiMpLanPartyPresence p;
+    if(!session) return FALSE;
+    if(leaving || runtime_stopping || !runtime_ready ||
+        (intent_known && (intent_menu || intent_away)) ||
+        !SudekiMpLanPartyPresenceRead(&presence,&p)) return TRUE;
+    unsigned c=p.ownership.assignment.character[local_seat];
+    return c>=4 || c!=physical_character ||
+        !SudekiMpPartyPlayerInputReady(&p.ownership,local_seat,c,
+            p.ownership.assignment.world,p.ownership.assignment.revision,
+            p.ownership.assignment.generation[c]) ||
+        SudekiMpPartyMenuCapturesInput() || SudekiMpLanPartyToolsCaptureInput();
+}
+static BOOL party_menu_command(SudekiMpPartyMenuAction action,unsigned argument) {
+    SudekiMpLanPartyPresence p;
+    if(!session || !runtime_ready || leaving || runtime_stopping) return FALSE;
+    if(action==SUDEKIMP_PARTY_MENU_LEAVE) {
+        leaving=TRUE; party_notice(local_seat?"Leaving the session...":"Ending the session..."); return TRUE;
+    }
+    if(!SudekiMpLanPartyPresenceRead(&presence,&p)) {
+        /* Connection loss cannot prevent opening/closing the local exit UI.
+         * No stale presence command, ownership claim or input is sent. */
+        if(local_seat && (action==SUDEKIMP_PARTY_MENU_OPEN || action==SUDEKIMP_PARTY_MENU_CLOSE)) {
+            intent_known=TRUE; intent_menu=action==SUDEKIMP_PARTY_MENU_OPEN;
+            intent_request=0; return TRUE;
+        }
+        return FALSE;
+    }
+    unsigned value=0,target=SUDEKIMP_PARTY_NO_CHARACTER; SudekiMpLanPartyCommandKind kind;
+    if(!intent_known) {
+        intent_menu=(p.ownership.menu&(1u<<local_seat))!=0;
+        intent_away=(p.ownership.away&(1u<<local_seat))!=0;
+        intent_known=TRUE;
+    }
+    BOOL menu=intent_menu,away=intent_away;
+    switch(action) {
+    case SUDEKIMP_PARTY_MENU_OPEN: menu=TRUE; goto intent;
+    case SUDEKIMP_PARTY_MENU_CLOSE: menu=FALSE; goto intent;
+    case SUDEKIMP_PARTY_MENU_AWAY: menu=FALSE; away=TRUE; goto intent;
+    case SUDEKIMP_PARTY_MENU_RETURN: menu=away=FALSE; goto intent;
+    intent: kind=SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE;
+        value=(menu?1u:0u)|(away?2u:0u); break;
+    case SUDEKIMP_PARTY_MENU_SWITCH: kind=SUDEKIMP_LAN_PARTY_COMMAND_SWAP; target=argument; break;
+    case SUDEKIMP_PARTY_MENU_RELEASE: kind=SUDEKIMP_LAN_PARTY_COMMAND_RELEASE; target=argument; break;
+    case SUDEKIMP_PARTY_MENU_REASSIGN: kind=SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN;
+        target=argument>>8; value=argument&255u; break;
+    case SUDEKIMP_PARTY_MENU_REQUEST_PAUSE: kind=SUDEKIMP_LAN_PARTY_COMMAND_REQUEST_PAUSE; break;
+    case SUDEKIMP_PARTY_MENU_PAUSE: kind=SUDEKIMP_LAN_PARTY_COMMAND_PAUSE; value=1; break;
+    case SUDEKIMP_PARTY_MENU_RESUME: kind=SUDEKIMP_LAN_PARTY_COMMAND_PAUSE; break;
+    case SUDEKIMP_PARTY_MENU_POLICY: kind=SUDEKIMP_LAN_PARTY_COMMAND_POLICY; value=argument; break;
+    default: return FALSE;
+    }
+    BOOL targeted=kind==SUDEKIMP_LAN_PARTY_COMMAND_SWAP ||
+        kind==SUDEKIMP_LAN_PARTY_COMMAND_RELEASE || kind==SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN;
+    BOOL queued=targeted?SudekiMpLanPartyPresenceQueue(&presence,kind,target,value,0):
+        SudekiMpLanPartyPresenceQueueLocal(&presence,kind,value,0);
+    if(!queued) {
+        DWORD error=GetLastError();
+        if(kind==SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE && error==ERROR_BUSY) {
+            /* The local exit UI does not wait behind a control ACK. Preserve
+             * the latest intent and retry without replacing the mailbox. */
+            intent_menu=menu; intent_away=away; intent_request=0;
+            return TRUE;
+        }
+        party_notice(error==ERROR_BUSY?"Waiting for the previous request. Please try again.":
+            "Unable to send the session request. Please try again.");
+        SudekiMpLogFormat("lan_party event=menu_command_rejected kind=%u target=%u error=%lu\r\n",
+            (unsigned)kind,target,(unsigned long)error);
+        return FALSE;
+    }
+    if(kind==SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE) {
+        intent_menu=menu; intent_away=away; intent_request=presence.next_request-1u;
+    }
+    return TRUE;
+}
+static void party_menu_refresh(void) {
+    SudekiMpLanPartyPresence p; SudekiMpLobbyStatus lobby={0};
+    if(session && local_seat && !SudekiMpLanPartyPresenceRead(&presence,&p)) {
+        /* Retain names only for display, never as authoritative ownership. */
+        menu_state.local_player=local_seat; menu_state.active=runtime_ready;
+        menu_state.host=FALSE; menu_state.controlling=menu_state.input_ready=0; menu_state.paused=FALSE;
+        menu_state.transition=TRUE; menu_state.busy_characters=15;
+        snprintf(menu_state.status,sizeof(menu_state.status),"%s",SudekiMpLobbyUiSession()?
+            "Disconnected - returning to the menu; join again to choose a character":
+            "Disconnected - F7 to reconnect, or Leave Session");
+        SudekiMpPartyMenuStateSet(&menu_state); return;
+    }
+    memset(&menu_state,0,sizeof(menu_state));
+    if(!session || !SudekiMpLanPartyPresenceRead(&presence,&p)) return;
+    menu_state.local_player=local_seat; menu_state.active=runtime_ready;
+    menu_state.host=!local_seat; menu_state.connected=p.ownership.connected;
+    menu_state.reserved=p.ownership.assignment.humans;
+    menu_state.controlling=p.ownership.controlling;
+    for(unsigned player=0;player<4;++player) {
+        unsigned character=p.ownership.assignment.character[player];
+        if(character<4 && SudekiMpPartyPlayerInputReady(&p.ownership,player,character,
+            p.ownership.assignment.world,p.ownership.assignment.revision,
+            p.ownership.assignment.generation[character]))
+            menu_state.input_ready|=(uint8_t)(1u<<player);
+    }
+    menu_state.menu=p.ownership.menu; menu_state.away=p.ownership.away;
+    menu_state.policy=(uint8_t)p.ownership.absence_policy; menu_state.paused=p.ownership.paused;
+    menu_state.busy_characters=native_presence.busy_characters;
+    menu_state.combat=native_presence.world_busy;
+    menu_state.transition=p.ownership.phase!=SUDEKIMP_PARTY_SWAP_IDLE || local_switch_active || leaving;
+    memcpy(menu_state.character,p.ownership.assignment.character,4);
+    SudekiMpLobby *l=SudekiMpLobbyUiSession();
+    if(l) {
+        SudekiMpLobbyStatusGet(l,&lobby);
+        for(unsigned i=0;i<4;++i) snprintf(menu_state.name[i],32,"%s",lobby.members[i].name);
+    }
+    if(presence_notice_until && (int32_t)(presence_notice_until-GetTickCount())>0)
+        snprintf(menu_state.status,sizeof(menu_state.status),"%s",presence_notice);
+    else if(p.ownership.paused) snprintf(menu_state.status,sizeof(menu_state.status),"Party paused by the host");
+    else if(p.ownership.away&(1u<<local_seat)) snprintf(menu_state.status,sizeof(menu_state.status),"Away: AI is covering your character");
+    else if(!(p.ownership.controlling&(1u<<local_seat))) snprintf(menu_state.status,sizeof(menu_state.status),"Spectating / waiting for control");
+    SudekiMpPartyMenuStateSet(&menu_state);
+}
+/* Once this runtime owns Escape, never fall back to the vanilla global pause
+ * during loading or retained cleanup. That would stop the very native tasks
+ * needed to finish the handoff. The custom menu rejects actions until ready. */
+static BOOL party_menu_admission(void) { return session!=NULL; }
+static void party_menu_toggle(void) { party_menu_refresh(); SudekiMpPartyMenuToggle(); }
+static void party_menu_frame(void) {
+    if(!session) return;
+    BOOL was_paused=SudekiMpLanPartyMenuNativeOwnsPause();
+    (void)SudekiMpLanPartyPresenceUiFrame(&presence,GetTickCount());
+    SudekiMpLanPartyPresence p;
+    if(!SudekiMpLanPartyPresenceRead(&presence,&p)) {
+        if(client) SudekiMpLanPartyClientInputQuiesce();
+        /* Only release our own pause reference. Presentation/control remain
+         * fenced until a fresh connection and authoritative baseline exist. */
+        (void)SudekiMpLanPartyMenuNativeSetPaused(FALSE);
+        if(was_paused && !SudekiMpLanPartyMenuNativeOwnsPause())
+            SudekiMpLanPartyReplicaReset(&replica);
+        diagnostic.frame_valid=FALSE;
+        goto render_menu;
+    }
+    if(intent_known && (!intent_request || p.ack_request[local_seat]>=intent_request) &&
+        (((p.ownership.menu&(1u<<local_seat))!=0)!=intent_menu ||
+         ((p.ownership.away&(1u<<local_seat))!=0)!=intent_away)) {
+        if(SudekiMpLanPartyPresenceQueueLocal(&presence,SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE,
+            (intent_menu?1u:0u)|(intent_away?2u:0u),0)) intent_request=presence.next_request-1u;
+    }
+    BOOL pause=runtime_ready && !leaving && !runtime_stopping && p.ownership.paused;
+    if(client && party_input_captured()) SudekiMpLanPartyClientInputQuiesce();
+    (void)SudekiMpLanPartyMenuNativeSetPaused(pause);
+    if(was_paused && !SudekiMpLanPartyMenuNativeOwnsPause()) {
+        /* Await a fresh authoritative sample after a shared pause. Never
+         * advance old interpolation clocks through the pause interval. */
+        if(local_seat) SudekiMpLanPartyReplicaReset(&replica);
+        next_publish=0; diagnostic.last_call=0;
+    }
+    if(presence.pause_requests) {
+        unsigned who=0; while(who<4 && !(presence.pause_requests&(1u<<who))) ++who;
+        if(who<4) {
+            char message[128];
+            snprintf(message,sizeof(message),"%s requested a party pause",
+                *menu_state.name[who]?menu_state.name[who]:"A player"); party_notice(message);
+        }
+        presence.pause_requests=0;
+    }
+    static uint32_t noticed_ack,noticed_world;
+    static uint8_t noticed_connected,noticed_away;
+    if(noticed_world!=p.ownership.assignment.world) {
+        noticed_world=p.ownership.assignment.world; noticed_ack=0;
+        noticed_connected=p.ownership.connected; noticed_away=p.ownership.away;
+    }
+    if(p.ack_request[local_seat]!=noticed_ack) {
+        noticed_ack=p.ack_request[local_seat];
+        unsigned result=p.ack_result[local_seat];
+        if(result!=SUDEKIMP_PARTY_SWAP_OK) {
+            const char *message=result==SUDEKIMP_PARTY_SWAP_BUSY?"That change is waiting for a safe handoff. Try again shortly.":
+                result==SUDEKIMP_PARTY_SWAP_OCCUPIED?"That character is assigned to another player.":
+                result==SUDEKIMP_PARTY_SWAP_STALE?"The party changed before that request. Please try again.":
+                result==SUDEKIMP_PARTY_SWAP_UNAUTHORIZED?"That action is controlled by the host.":
+                "That request could not be applied.";
+            party_notice(message);
+        }
+    }
+    unsigned changed=(noticed_connected^p.ownership.connected)|(noticed_away^p.ownership.away);
+    for(unsigned player=0;player<4;++player) if(changed&(1u<<player)) {
+        char message[128]; const char *name=*menu_state.name[player]?menu_state.name[player]:"A player";
+        snprintf(message,sizeof(message),"%s %s",name,
+            !(p.ownership.connected&(1u<<player))?"left; releasing their character":
+            !(noticed_connected&(1u<<player))?"joined the party":
+            (p.ownership.away&(1u<<player))?"is now away":"returned");
+        party_notice(message);
+    }
+    noticed_connected=p.ownership.connected; noticed_away=p.ownership.away;
+    static uint32_t traced_revision;
+    if(traced_revision!=p.ownership.assignment.revision) {
+        traced_revision=p.ownership.assignment.revision;
+        SudekiMpLogFormat("lan_party_presence player=%u revision=%lu connected=%u reserved=%u human=%u menu=%u away=%u paused=%u policy=%u swap=%u mapping=%u,%u,%u,%u control=%u,%u,%u,%u physical=%u\r\n",
+            local_seat,(unsigned long)traced_revision,p.ownership.connected,p.ownership.assignment.humans,
+            p.ownership.controlling,p.ownership.menu,p.ownership.away,p.ownership.paused,
+            p.ownership.absence_policy,p.ownership.phase,p.ownership.assignment.character[0],
+            p.ownership.assignment.character[1],p.ownership.assignment.character[2],p.ownership.assignment.character[3],
+            p.ownership.control[0],p.ownership.control[1],p.ownership.control[2],p.ownership.control[3],physical_character);
+    }
+render_menu:
+    party_menu_refresh();
+    void **slot=(void **)((uint8_t *)party_game_module+0x3c31dcu);
+    if(party_game_module && party_readable(slot,sizeof(*slot)))
+        (void)SudekiMpPartyMenuRender(*slot);
+}
+static BOOL party_local_fenced(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    return key && key->seat==physical_character &&
+        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) &&
+        SudekiMpLanPartyControlMenuInputExact(actor);
+}
+static BOOL party_local_drained(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    return SudekiMpLanPartyJetpackDrained(actor) && SudekiMpLanPartyCastDrained(actor) &&
+        SudekiMpLanPartyMovementDrained(key,actor,w) &&
+        SudekiMpLanPartyCombatActionsDrained(key,actor,w);
+}
+static unsigned local_switch_target=4;
+static uint32_t local_switch_request;
+static unsigned party_park_character(const SudekiMpPartyOwnership *o) {
+    /* Park the real native controller on an AI actor. This is a normal native
+     * switch with input fenced; it creates no player reservation. */
+    if(o->phase==SUDEKIMP_PARTY_SWAP_HANDOFF && o->displaced==local_seat && o->previous<4)
+        return o->previous;
+    if(physical_character<4 && SudekiMpPartyCharacterOwner(&o->assignment,physical_character)==4)
+        return physical_character;
+    for(unsigned c=0;c<4;++c)
+        if(SudekiMpPartyCharacterOwner(&o->assignment,c)==4) return c;
+    return 4;
+}
+static void party_switch_service(const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyPresence p; SudekiMpLanPartyRosterObservation r;
+    if(runtime_stopping || (leaving && !local_switch_active) || !runtime_ready) return;
+    BOOL have_presence=SudekiMpLanPartyPresenceRead(&presence,&p);
+    if(!local_switch_active) {
+        if(!have_presence) return;
+        if(client) {
+            SudekiMpLanPartyPeerStatus peer={0};
+            if(!SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer) ||
+                peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE) return;
+        }
+        unsigned desired=p.ownership.assignment.character[local_seat];
+        if(p.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF && p.ownership.player==local_seat)
+            desired=p.ownership.target;
+        else if((p.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF && p.ownership.displaced==local_seat) || desired>=4)
+            desired=party_park_character(&p.ownership);
+        if(desired>=4 || desired==physical_character) return;
+        if(!SudekiMpLanPartyControlMenuInputBlocked(w,TRUE) ||
+            !SudekiMpLanPartyCastCanRebindLocal(w)) return;
+        local_switch_active=TRUE; local_switch_target=desired;
+        local_switch_request=p.ownership.request;
+    }
+    if(host) SudekiMpLanPartyFollowClear();
+    if(host) SudekiMpLanPartyHostControlSuspendBindings(host,TRUE);
+    if(client) SudekiMpLanPartyClientControlSuspendBindings(client,TRUE);
+    SudekiMpLanPartyLease key={(uint64_t)(uintptr_t)session,1u,(uint8_t)physical_character};
+    if(!SudekiMpLanPartyLocalControlSwitchPending()) {
+        if(!SudekiMpLanPartyControlMenuInputBlocked(w,TRUE) ||
+            !SudekiMpLanPartyControlObserveRoster(w,&r)) return;
+        if(SudekiMpLanPartyLocalControlRetains() &&
+            !SudekiMpLanPartyLocalControlSetAi(w,&key,r.actors[physical_character],FALSE)) return;
+        if(!SudekiMpLanPartyControlLocalReleaseInput(w)) return;
+    }
+    if((host && !SudekiMpLanPartyHostControlBindingsDrained(host)) ||
+        (client && !SudekiMpLanPartyClientControlBindingsDrained(client))) return;
+    if(physical_character!=local_switch_target) {
+        unsigned observed=physical_character;
+        if(!SudekiMpLanPartyLocalControlSwitchStep(w,&key,local_switch_target,&observed)) return;
+        physical_character=observed;
+        if(physical_character!=local_switch_target) return;
+    }
+    if(leaving) {
+        /* Finish an already-entered native switch even if its network peer
+         * disappeared. Only align retained cleanup dependencies; bindings
+         * remain suspended and no input/control acknowledgement is issued. */
+        if(!SudekiMpLanPartyCastRebindLocalForCleanup(w,physical_character)) return;
+        local_switch_active=FALSE; local_switch_target=4;
+        return;
+    }
+    if(client) {
+        SudekiMpLanPartyPeerStatus peer={0};
+        if(SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer) &&
+            (peer.phase==SUDEKIMP_LAN_PARTY_FREE || peer.phase==SUDEKIMP_LAN_PARTY_DRAINING)) {
+            /* Complete only physical bookkeeping after transport loss. The
+             * coordinator stays retired until an explicit fresh F7 rejoin. */
+            if(!SudekiMpLanPartyClientControlFinishDisconnectedSwitch(client,w,physical_character)) return;
+            SudekiMpLanPartyClientControlSuspendBindings(client,FALSE);
+            local_switch_active=FALSE; local_switch_target=4;
+            ack_revision=0; diagnostic.frame_valid=FALSE;
+            SudekiMpLanPartyReplicaReset(&replica);
+            return;
+        }
+    }
+    if(!have_presence) return;
+    unsigned assigned=p.ownership.assignment.character[local_seat];
+    if(assigned<4 && assigned!=physical_character) return; /* await host commit */
+    BOOL rebound=client?SudekiMpLanPartyClientControlSetLocalCharacter(client,w,physical_character):
+        SudekiMpLanPartyCastRebindLocal(w,physical_character);
+    if(!rebound) return;
+    if(host) SudekiMpLanPartyHostControlSuspendBindings(host,FALSE);
+    if(client) SudekiMpLanPartyClientControlSuspendBindings(client,FALSE);
+    local_switch_active=FALSE; local_switch_target=4;
+    ack_revision=0; diagnostic.frame_valid=FALSE;
+    if(client) SudekiMpLanPartyReplicaReset(&replica);
+}
+
+/* Runs only on the native control-update witness. Commands remain plain data
+ * in the UI/transport paths; positive masks below are the only native proofs. */
+static void party_presence_native(const SudekiMpControlUpdateDispatchWitness *w,BOOL bound) {
+    SudekiMpLanPartyPresence p; SudekiMpLanPartyRosterObservation r;
+    if(!SudekiMpLanPartyPresenceRead(&presence,&p)) {
+        if(local_seat) (void)SudekiMpLanPartyControlMenuInputBlocked(w,TRUE);
+        return;
+    }
+    if(!SudekiMpLanPartyControlObserveRoster(w,&r) || r.present_mask!=15 ||
+        !SudekiMpLanPartyControlNativeRosterExact(&r)) return;
+    if(bound && SudekiMpLanPartyCastReady()) runtime_ready=TRUE;
+    SudekiMpLanPartyPresenceNativeState n={0}; n.assignment=p.ownership.assignment;
+    n.connected_mask=1; n.world_busy=r.combat || !runtime_ready;
+    for(unsigned c=0;c<4;++c) {
+        SudekiMpLanPartyLease read={0,0,(uint8_t)c};
+        /* Busy observation cannot request flight/effect retirement. The
+         * release probe is reserved for actual ownership handoffs. */
+        if((c==1u && !SudekiMpLanPartyJetpackIdle()) ||
+            !SudekiMpLanPartyCastDrained(r.actors[c]) ||
+            !SudekiMpLanPartyMovementDrained(&read,r.actors[c],w) ||
+            !SudekiMpLanPartyCombatActionsDrained(&read,r.actors[c],w))
+            n.busy_characters|=(uint8_t)(1u<<c);
+    }
+    n.world_busy|=n.busy_characters!=0 || !SudekiMpLanPartyCastTransferReady();
+    unsigned own_bit=1u<<local_seat;
+    BOOL yielding=((p.ownership.menu|p.ownership.away)&own_bit)!=0 ||
+        (intent_known&&(intent_menu||intent_away));
+    BOOL switching=p.ownership.phase!=SUDEKIMP_PARTY_SWAP_IDLE &&
+        (p.ownership.player==local_seat || p.ownership.displaced==local_seat);
+    BOOL fence=runtime_stopping || yielding || switching || local_switch_active ||
+        p.ownership.paused || leaving || p.ownership.assignment.character[local_seat]>=4 || !bound;
+    SudekiMpLanPartyLease local_key={(uint64_t)(uintptr_t)session,1u,(uint8_t)physical_character};
+    void *local_actor=r.actors[physical_character];
+    if(!local_seat) {
+        BOOL want_ai=!runtime_stopping && !leaving && !local_switch_active && (yielding ||
+            p.ownership.assignment.character[0]>=4 ||
+            p.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_DRAINING ||
+            p.ownership.control[0]==SUDEKIMP_PARTY_CONTROL_AI);
+        if(want_ai || SudekiMpLanPartyLocalControlRetains()) {
+            if(SudekiMpLanPartyControlMenuInputBlocked(w,TRUE)) {
+                if(!want_ai || SudekiMpLanPartyLocalControlRetains() ||
+                    SudekiMpLanPartyControlLocalReleaseInput(w))
+                    (void)SudekiMpLanPartyLocalControlSetAi(w,&local_key,local_actor,want_ai);
+                if(want_ai && physical_character==p.ownership.assignment.character[0] &&
+                    SudekiMpLanPartyLocalControlAiExact(w,&local_key,local_actor)) n.native_ai_mask|=1;
+            }
+        }
+        if(!want_ai && !SudekiMpLanPartyLocalControlRetains()) {
+            if(SudekiMpLanPartyControlMenuInputBlocked(w,fence)) {
+                if(physical_character==p.ownership.assignment.character[0]) n.native_owned_mask|=1;
+                if(!fence && runtime_ready && physical_character==p.ownership.assignment.character[0]) n.local_bound_mask|=1;
+            }
+        }
+        if(bound && !local_switch_active && SudekiMpLanPartyCastReady() &&
+            physical_character==p.ownership.assignment.character[0]) n.local_bound_mask|=1;
+        for(unsigned player=1;player<4;++player) {
+            SudekiMpLanPartyPeerStatus peer={0}; unsigned c=p.ownership.assignment.character[player];
+            if(SudekiMpLanPartyPeerStatusGet(session,player,&peer) &&
+                (peer.phase==SUDEKIMP_LAN_PARTY_PENDING || peer.phase==SUDEKIMP_LAN_PARTY_ACTIVE))
+                n.connected_mask|=(uint8_t)(1u<<player);
+            if(c>=4) continue;
+            SudekiMpLanPartyLease key;
+            if(SudekiMpLanPartyControlActorLease(w,c,&key) &&
+                key.token==peer.lease.token && SudekiMpLanPartyControlExact(w,&key,r.actors[c]))
+                n.native_owned_mask|=(uint8_t)(1u<<player);
+            else if(SudekiMpLanPartyControlHostAiExact(w,c,r.actors[c]))
+                n.native_ai_mask|=(uint8_t)(1u<<player);
+        }
+        if(p.ownership.phase==SUDEKIMP_PARTY_SWAP_RESERVED ||
+            p.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF) {
+            unsigned previous=p.ownership.previous,target=p.ownership.target;
+            n.swap_request=p.ownership.request;
+            BOOL target_ai=SudekiMpLanPartyControlHostAiExact(w,target,r.actors[target]);
+            BOOL previous_ai=previous>=4 || SudekiMpLanPartyControlHostAiExact(w,previous,r.actors[previous]);
+            if(previous==physical_character)
+                previous_ai=SudekiMpLanPartyControlMenuInputExact(r.actors[previous]) &&
+                    !(n.busy_characters&(1u<<previous));
+            n.swap_ready=(!r.combat && runtime_ready &&
+                !(n.busy_characters&((1u<<target)|(previous<4?(1u<<previous):0))) &&
+                (target_ai || (p.ownership.displaced==0 && target==physical_character &&
+                    SudekiMpLanPartyLocalControlAiExact(w,&local_key,r.actors[target]))));
+            BOOL switched=p.ownership.player!=0 || (local_switch_active &&
+                local_switch_request==p.ownership.request && physical_character==target);
+            if(p.ownership.phase==SUDEKIMP_PARTY_SWAP_HANDOFF && previous_ai && switched &&
+                (target_ai || (p.ownership.player==0 && physical_character==target &&
+                    SudekiMpLanPartyControlMenuInputExact(r.actors[target]))))
+                n.swap_result=SUDEKIMP_LAN_PARTY_PRESENCE_SWAP_COMMITTED;
+        }
+        native_presence=n;
+        (void)SudekiMpLanPartyPresenceService(&presence,&n,GetTickCount());
+    } else {
+        (void)SudekiMpLanPartyControlMenuInputBlocked(w,fence);
+        native_presence=n;
+        if(bound && !local_switch_active && SudekiMpLanPartyCastReady() &&
+            physical_character==p.ownership.assignment.character[local_seat] &&
+            ack_revision!=p.ownership.assignment.revision) {
+            BOOL swap=p.ownership.phase==SUDEKIMP_PARTY_SWAP_WAIT_ACK &&
+                p.ownership.player==local_seat;
+            BOOL ready=swap ? (yielding?p.ownership.control[local_seat]==SUDEKIMP_PARTY_CONTROL_AI:
+                p.ownership.control[local_seat]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK) :
+                (!switching && !yielding && !p.ownership.paused &&
+                 p.ownership.control[local_seat]==SUDEKIMP_PARTY_CONTROL_WAIT_ACK);
+            if(ready && SudekiMpLanPartyPresenceQueueAcknowledgment(&presence,&p,
+                swap?SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK:SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,
+                swap?p.ownership.request:0)) ack_revision=p.ownership.assignment.revision;
+        }
+    }
+}
+
+static void party_follow_service(const SudekiMpControlUpdateDispatchWitness *w) {
+    SudekiMpLanPartyPresence p;
+    if(!host || !follow_install_attempted) return;
+    if(runtime_stopping || leaving || local_switch_active || !runtime_ready ||
+        !SudekiMpLanPartyPresenceRead(&presence,&p) ||
+        p.ownership.phase!=SUDEKIMP_PARTY_SWAP_IDLE) {
+        SudekiMpLanPartyFollowClear(); return;
+    }
+    uint8_t active=0;
+    for(unsigned player=0;player<4;++player) {
+        unsigned character=p.ownership.assignment.character[player];
+        if(character<4 && SudekiMpPartyPlayerInputReady(&p.ownership,player,character,
+            p.ownership.assignment.world,p.ownership.assignment.revision,
+            p.ownership.assignment.generation[character])) active|=(uint8_t)(1u<<character);
+    }
+    unsigned host_character=p.ownership.assignment.character[0];
+    if(host_character>=4 || !(active&(1u<<host_character))) host_character=4;
+    (void)SudekiMpLanPartyFollowPublish(w,active,host_character);
+}
+
 static void party_diagnostic(const SudekiMpControlUpdateDispatchWitness *w,DWORD start) {
     DWORD now=GetTickCount(),cost=now-start;
     diagnostic.service_sum+=cost;
@@ -115,7 +579,7 @@ static void party_diagnostic(const SudekiMpControlUpdateDispatchWitness *w,DWORD
             BOOL pos_ok=actor_ok && SudekiMpCleanroomEngineActorPosition(kind,position);
             BOOL pose_ok=actor_ok && SudekiMpCleanroomEngineWorldMotion(kind,&pose);
             BOOL skill_ok=SudekiMpObserveCharacterSkill(roster.actors[i],&skill);
-            BOOL input_ok=host && i && SudekiMpLanPartyHostControlLatestInput(host,w,i,now,&input);
+            BOOL input_ok=host && SudekiMpLanPartyHostControlLatestInput(host,w,i,now,&input);
             const SudekiMpLanArenaActorSnapshot *s=&diagnostic.frame.chunk[i/2].seat[i%2];
             SudekiMpLogFormat("lan_party_actor_diag seat=%u actor=%u tick=%lu observed=%u%u%u pos=%.3f,%.3f,%.3f frame_valid=%u frame_tick=%lu host_pos=%.3f,%.3f,%.3f clip=%ld,%ld,%ld,%ld phase=%.3f,%.3f,%.3f,%.3f native_skill=%u slot=%d wire_skill=%u sequence=%u target_phase=%u target_ms=%u action=%u action_sequence=%u input_valid=%u input_move=%d,%d\r\n",
                 local_seat,i,(unsigned long)now,pos_ok,pose_ok,skill_ok,position[0],position[1],position[2],
@@ -171,26 +635,28 @@ static void party_host_present(unsigned phase) {
     if(tools_installed) SudekiMpCleanroomMenuRender();
     if(!roster_ready) return;
     BOOL casting=roster.combat &&
-        SudekiMpObserveCharacterSkill(roster.actors[0],&caster) && caster.active &&
+        SudekiMpObserveCharacterSkill(roster.actors[physical_character],&caster) && caster.active &&
         SudekiMpCleanroomEngineSpiritPresentationState(&spirit) && spirit==0;
     for(unsigned i=0u;i<4u;++i) {
-        SudekiMpLanPartyPeerStatus peer;
         SudekiMpLanArenaInput input;
         SudekiMpCharacterSkillState own;
+        SudekiMpLanPartyLease observation={0,0,(uint8_t)i};
+        unsigned player=SudekiMpLanPartyCharacterPlayer(session,i);
+        BOOL controlled=i==physical_character;
+        if(player>0 && player<4)
+            controlled=SudekiMpLanPartyControlActorLease(NULL,i,&observation) &&
+                SudekiMpLanPartyControlExact(NULL,&observation,roster.actors[i]);
         BOOL owned=(SudekiMpLanPartyCastReady() ? SudekiMpLanPartyCastNoncaster(roster.actors[i]):
-            (i!=0u && casting)) && SudekiMpLanPartyPeerStatusGet(session,i,&peer) &&
-            peer.phase==SUDEKIMP_LAN_PARTY_ACTIVE &&
-            (!i || SudekiMpLanPartyControlExact(NULL,&peer.lease,roster.actors[i])) &&
+            (i!=physical_character && casting)) && controlled &&
             SudekiMpObserveCharacterSkill(roster.actors[i],&own) && !own.active &&
-            SudekiMpLanPartyCombatActionsDrained(&peer.lease,roster.actors[i],NULL);
+            SudekiMpLanPartyCombatActionsDrained(&observation,roster.actors[i],NULL);
         BOOL moving=owned && SudekiMpLanPartyHostControlLatestInput(host,NULL,i,
             GetTickCount(),&input) && (input.world_direction_x || input.world_direction_z);
-        if(owned && !i) {
+        if(owned && i==physical_character) {
             const uint8_t *controller=roster.controller;
-            /* Observe only the exact Buki controller already proved by the
-             * roster; native input/controller execution still owns its axes. */
-            moving=fabsf(*(const float *)(controller+0x1a0u))>0.0001f ||
-                fabsf(*(const float *)(controller+0x1a4u))>0.0001f;
+            moving=!party_input_captured() &&
+                (fabsf(*(const float *)(controller+0x1a0u))>0.0001f ||
+                 fabsf(*(const float *)(controller+0x1a4u))>0.0001f);
         }
         (void)SudekiMpNoncasterSkillLocomotionService(party_game_module,roster.actors[i],
             kinds[i],owned,moving,&party_noncaster_pose[i],NULL);
@@ -216,9 +682,10 @@ static BOOL service_dummy(const SudekiMpControlUpdateDispatchWitness *w,
             frame->chunk[0].enemies[0].native_entity_id!=
                 SUDEKIMP_LAN_ARENA_TRAINING_DUMMY_ID) return FALSE;
         for(unsigned seat=0;seat<4;++seat) {
-            SudekiMpLanPartyLease key=*lease; key.seat=(uint8_t)seat;
-            if(seat!=local_seat &&
-                !SudekiMpLanPartyControlExact(w,&key,roster.actors[seat])) return FALSE;
+            SudekiMpLanPartyLease key;
+            if(seat!=physical_character &&
+                (!SudekiMpLanPartyControlActorLease(w,seat,&key) || key.token!=lease->token ||
+                 !SudekiMpLanPartyControlExact(w,&key,roster.actors[seat]))) return FALSE;
         }
         position[0]=frame->chunk[0].enemies[0].x;
         position[1]=frame->chunk[0].enemies[0].y;
@@ -287,7 +754,7 @@ static BOOL tool_query(unsigned action,BOOL *enabled) {
     }
 }
 static void tool_connection_status(char *text,unsigned capacity) {
-    static const char *const names[4]={"BUKI","ELCO","TAL","AILISH"};
+    static const char *const names[5]={"BUKI","ELCO","TAL","AILISH","SPECTATOR"};
     SudekiMpLanPartyPeerStatus peer;
     if(!text || !capacity) return;
     if(!session || local_seat>=4u || !SudekiMpLanPartyPeerStatusGet(session,local_seat,&peer)) {
@@ -295,7 +762,9 @@ static void tool_connection_status(char *text,unsigned capacity) {
     }
     const char *state=peer.phase==SUDEKIMP_LAN_PARTY_ACTIVE?"CONNECTED":
         peer.phase==SUDEKIMP_LAN_PARTY_DRAINING?"DISCONNECTING":"WAITING FOR HOST";
-    snprintf(text,capacity,"%s - %s",names[local_seat],state);
+    unsigned character=SudekiMpLanPartyLocalCharacter(session);
+    const char *name=*menu_state.name[local_seat]?menu_state.name[local_seat]:names[character<4?character:4];
+    snprintf(text,capacity,"%s - %s",name,state);
 }
 static void party_client_present(unsigned phase) {
     if(!SudekiMpLanPartyPresentationBoundary() ||
@@ -329,27 +798,23 @@ static BOOL host_tool_command(unsigned action) {
         !SudekiMpCleanroomEngineCombatMode(&combat) ||
         !SudekiMpLanPartyControlObserveRoster(w,&roster) ||
         !SudekiMpLanPartyControlNativeRosterExact(&roster)) goto rejected;
+    for(unsigned player=0;player<4;++player)
+        if(!SudekiMpLanPartyPeerStatusGet(session,player,&peers[player])) goto rejected;
     for(unsigned seat=0;seat<4;++seat) {
-        SudekiMpLanPartyPeerStatus *p=&peers[seat];
+        unsigned player=SudekiMpLanPartyCharacterPlayer(session,seat);
         void *actor=roster.actors[seat];
-        /* The drain readers use only seat identity; an AI companion gets no
-         * fabricated network token and is never acquired for this command. */
         SudekiMpLanPartyLease observation={0,0,(uint8_t)seat};
-        checked_seat=seat; reason="peer_state";
-        if(!actor || !SudekiMpLanPartyPeerStatusGet(session,seat,p)) goto rejected;
-        if(!seat) {
-            if(p->phase!=SUDEKIMP_LAN_PARTY_ACTIVE) goto rejected;
-        } else if(p->phase==SUDEKIMP_LAN_PARTY_ACTIVE) {
-            active_mask|=1u<<seat; reason="remote_ownership";
-            if(!(report->owned_mask&(1u<<seat)) ||
-                !SudekiMpLanPartyControlExact(w,&p->lease,actor)) goto rejected;
-            observation=p->lease;
-        } else if(p->phase==SUDEKIMP_LAN_PARTY_FREE ||
-                  p->phase==SUDEKIMP_LAN_PARTY_REJECTED) {
-            reason="native_ai_ownership";
-            if((report->owned_mask&(1u<<seat)) ||
-                !SudekiMpLanPartyControlHostAiExact(w,seat,actor)) goto rejected;
-        } else goto rejected; /* Joining/pending/draining is not a free AI. */
+        checked_seat=seat; reason="actor_ownership";
+        if(!actor) goto rejected;
+        if(seat==physical_character) {
+            if(!SudekiMpLanPartyControlNativeActorExact(&roster,seat)) goto rejected;
+        } else if(report->owned_mask&(1u<<seat)) {
+            if(player>=4 || peers[player].phase!=SUDEKIMP_LAN_PARTY_ACTIVE ||
+                !SudekiMpLanPartyControlActorLease(w,seat,&observation) ||
+                observation.token!=peers[player].lease.token ||
+                !SudekiMpLanPartyControlExact(w,&observation,actor)) goto rejected;
+            active_mask|=1u<<seat;
+        } else if(!SudekiMpLanPartyControlHostAiExact(w,seat,actor)) goto rejected;
         reason="actor_busy";
         if(!SudekiMpLanPartyMovementDrained(&observation,actor,w) ||
             !SudekiMpLanPartyCombatActionsDrained(&observation,actor,w)) goto rejected;
@@ -391,6 +856,44 @@ rejected:
     return ok;
 }
 
+static BOOL party_readable(const void *p,size_t n) {
+    MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
+    return p && n && a<=UINTPTR_MAX-n && VirtualQuery(p,&m,sizeof(m))==sizeof(m) &&
+        m.State==MEM_COMMIT && !(m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) &&
+        a+n<=(uintptr_t)m.BaseAddress+m.RegionSize;
+}
+BOOL SudekiMpLanPartyRuntimeHostLocalInput(
+    const SudekiMpControlUpdateDispatchWitness *w,unsigned character,
+    uint32_t now,SudekiMpLanArenaInput *out) {
+    SudekiMpLanPartyRosterObservation r;
+    SudekiMpLanArenaInput input={0}; float direction[3],target[3];
+    if(!out || !host || !session || local_seat || character>=4 ||
+        party_input_captured() || character!=physical_character ||
+        character!=SudekiMpLanPartyLocalCharacter(session) ||
+        !SudekiMpLanPartyControlObserveRoster(w,&r) || r.present_mask!=15 ||
+        !SudekiMpLanPartyControlNativeRosterExact(&r) ||
+        !party_readable(r.controller,0x24cu)) return FALSE;
+    uint8_t *controller=r.controller,*actor=r.actors[character];
+    if(*(void **)(controller+0x248u)!=actor || !party_readable(actor,0x94u)) return FALSE;
+    uint8_t *arbiter=*(uint8_t **)(actor+0x90u);
+    if(!party_readable(arbiter,0x54u) ||
+        *(void **)arbiter!=(uint8_t *)party_game_module+0x2cc9acu ||
+        *(void **)(arbiter+0x10u)!=actor) return FALSE;
+    input.actor_type=SudekiMpLanPartyActorType(character); input.client_tick=now;
+    input.ranged_first_person_active=(*(uint32_t *)(arbiter+0x50u)&0x00400000u)!=0;
+    input.weak_attack_held=SudekiMpLanArenaClientCurrentWeakHeld(TRUE,
+        *(int *)(controller+0x80u),*(int *)(controller+0x8cu));
+    if(input.ranged_first_person_active && SudekiMpLanAimCameraTarget(direction,target)) {
+        input.aim_direction_x=(int16_t)lroundf(direction[0]*32767.0f);
+        input.aim_direction_y=(int16_t)lroundf(direction[1]*32767.0f);
+        input.aim_direction_z=(int16_t)lroundf(direction[2]*32767.0f);
+        if(character==1u) { input.aim_target_valid=1; memcpy(input.aim_target,target,sizeof(target)); }
+    }
+    if(!SudekiMpLanPartyControlNativeRosterExact(&r) ||
+        *(void **)(controller+0x248u)!=actor || *(void **)(actor+0x90u)!=arbiter ||
+        *(void **)(arbiter+0x10u)!=actor) return FALSE;
+    *out=input; return TRUE;
+}
 static BOOL party_host_elco_aim_sample(void *actor,BOOL projectile,
     float direction[3],float target[3],BOOL *target_valid,BOOL *held) {
     SudekiMpLanPartyPeerStatus peer;
@@ -406,7 +909,7 @@ static BOOL party_host_elco_aim_sample(void *actor,BOOL projectile,
     if(!session || !host || local_seat!=0u || !actor || !direction || !target ||
         !target_valid || !held ||
         actor!=SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO) ||
-        !SudekiMpLanPartyPeerStatusGet(session,1u,&peer) ||
+        !SudekiMpLanPartyPeerStatusGet(session,SudekiMpLanPartyCharacterPlayer(session,1u),&peer) ||
         peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE || !peer.lease.token ||
         !peer.lease.generation ||
         !SudekiMpLanPartyHostControlLatestInput(host,NULL,1u,GetTickCount(),&input) ||
@@ -460,7 +963,7 @@ static BOOL party_host_ailish_aim_sample(void *actor,BOOL projectile,
     if(!session || !host || local_seat!=0u || !actor || !direction || !target ||
         !target_valid || !held ||
         actor!=SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH) ||
-        !SudekiMpLanPartyPeerStatusGet(session,3u,&peer) ||
+        !SudekiMpLanPartyPeerStatusGet(session,SudekiMpLanPartyCharacterPlayer(session,3u),&peer) ||
         peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE || !peer.lease.token ||
         !peer.lease.generation ||
         !SudekiMpLanPartyHostControlLatestInput(host,NULL,3u,GetTickCount(),&input) ||
@@ -550,18 +1053,16 @@ static BOOL party_ranged_fire(void *actor,BOOL *held) {
     return TRUE;
 }
 static void party_weapon_shot(void *actor) {
-    SudekiMpLanPartyPeerStatus peer;
-    float direction[3],target[3]; BOOL target_valid,held;
     if(local_seat) {
-        SudekiMpLanArenaClientReplicaNativeWeaponFired(actor);
-        return;
+        SudekiMpLanArenaClientReplicaNativeWeaponFired(actor); return;
     }
-    unsigned seat=actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO)?1u:
-        actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH)?3u:0u;
-    if(!seat || !party_host_ranged_aim_sample(actor,FALSE,direction,target,&target_valid,&held) ||
-        !SudekiMpLanPartyPeerStatusGet(session,seat,&peer) ||
-        peer.phase!=SUDEKIMP_LAN_PARTY_ACTIVE) return;
-    SudekiMpLanPartyCaptureRangedShot(&peer.lease,actor);
+    unsigned character=actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_ELCO)?1u:
+        actor==SudekiMpCleanroomEngineActorEntity(SUDEKIMP_CLEANROOM_AILISH)?3u:4u;
+    if(!session || !host || character>=4) return;
+    /* Capture validates the exact host roster and native emission. Identity
+     * belongs to this world/actor, surviving player reassignment. */
+    SudekiMpLanPartyLease world={(uint64_t)(uintptr_t)session,1u,(uint8_t)character};
+    SudekiMpLanPartyCaptureRangedShot(&world,actor);
 }
 
 static BOOL party_host_hit_target_witness(SudekiMpLanHitTarget *target) {
@@ -569,7 +1070,7 @@ static BOOL party_host_hit_target_witness(SudekiMpLanHitTarget *target) {
     uintptr_t identity=(uintptr_t)session;
     if(!target || !session || !host || !identity ||
         SudekiMpLanPartyLocalSeat(session)!=0u ||
-        !SudekiMpLanPartyControlHasLeases()) return FALSE;
+        !runtime_ready) return FALSE;
     for(unsigned seat=1;seat<4;++seat) {
         SudekiMpLanPartyPeerStatus peer;
         if(SudekiMpLanPartyPeerStatusGet(session,seat,&peer) &&
@@ -605,7 +1106,16 @@ static void service(void *controller,void *data,
     (void)controller;
     if(!SudekiMpControlUpdateObserverGateTryEnter(&gate)) return;
     if(!SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) || !SudekiMpLobbyGameplayRunning()) goto done;
+    if(cleanup_release_input) {
+        /* All gameplay callbacks have retired. Keep the final native filter
+         * restoration on its exact control thread, and run no retired owner. */
+        cleanup_input_released=SudekiMpLanPartyControlMenuInputBlocked(w,FALSE);
+        SudekiMpControlUpdateObserverGateLeave(&gate);
+        return;
+    }
     SudekiMpLanPartyJetpackServiceStop(w);
+    if(client) (void)SudekiMpLanPartyClientProjectilePoll();
+    party_switch_service(w);
     if(diagnostic.last_call) {
         DWORD gap=now-diagnostic.last_call;
         diagnostic.gap_sum+=gap;
@@ -642,6 +1152,8 @@ static void service(void *controller,void *data,
             if(!SudekiMpLanPartyCastTryBind(w)) { ++failed; ++diagnostic.cast_fail; }
             diagnostic.cast_ms+=GetTickCount()-part;
         }
+        party_presence_native(w,report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY);
+        party_follow_service(w);
         if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY)
             (void)service_dummy(w,NULL,NULL);
         if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY && SudekiMpLanPartyCastReady())
@@ -680,12 +1192,11 @@ static void service(void *controller,void *data,
                 }
             }
         }
-        if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY &&
-            report.owned_mask)
+        if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY)
             SudekiMpLanAimActors(
                 SudekiMpLanPartyControlObserveActor(w,1u),
                 SudekiMpLanPartyControlObserveActor(w,3u));
-        if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY && report.owned_mask &&
+        if(report.roster_status==SUDEKIMP_LAN_PARTY_ROSTER_READY &&
             (!next_publish || (int32_t)(now-next_publish)>=0)) {
             SudekiMpLanPartyFrame frame;
             BOOL captured_frame;
@@ -720,6 +1231,7 @@ static void service(void *controller,void *data,
         }
     } else if(client) {
         SudekiMpLanPartyClientControlReport report; SudekiMpLanPartyFrame frame; uint32_t tick;
+        BOOL presented=FALSE;
         BOOL rejoin=operator_key_pressed(VK_F7,&rejoin_key_down);
         if(tools_installed) SudekiMpCleanroomMenuUpdate();
         if(rejoin) SudekiMpLogFormat("lan_party event=client_rejoin_request key=F7 seat=%u\r\n",local_seat);
@@ -734,13 +1246,22 @@ static void service(void *controller,void *data,
         }
         if(!report.ready && !report.draining_mask && !report.failed_mask) {
             BOOL restored=SudekiMpLanPartyClientEndPresentation(w) &&
-                SudekiMpLanPartyClientRestoreCombatMode(w);
+                SudekiMpLanPartyClientRestoreCombatMode(w) &&
+                !SudekiMpCleanroomEngineRangedCombatPrimePending();
+            if(restored) client_native_cleanup_ready=TRUE;
             if(!restored) ++failed;
             if(rejoin) {
-                BOOL started=restored && !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
+                BOOL started=restored && !local_switch_active &&
+                    !SudekiMpLanPartyLocalControlSwitchPending() &&
+                    !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
                     SudekiMpLanPartyControlGameplayReady(w) &&
                     SudekiMpLanPartyClientControlRejoin(client,w);
-                if(started) SudekiMpLanPartyReplicaReset(&replica);
+                if(started) {
+                    /* Request acknowledgments belong to the old connection;
+                     * explicit Menu/Away intent remains a local preference. */
+                    intent_request=ack_revision=0;
+                    SudekiMpLanPartyReplicaReset(&replica);
+                }
                 SudekiMpLogFormat("lan_party event=client_rejoin key=F7 seat=%u result=%s policy=after_native_and_presentation_drain\r\n",
                     local_seat,started?"joining":"rejected");
             }
@@ -762,6 +1283,9 @@ static void service(void *controller,void *data,
             confirmed_ready=FALSE; ++diagnostic.cast_fail;
         }
         SudekiMpLanPartyJetpackService(w,confirmed_ready?&confirmed.jetpack:NULL);
+        /* Even a rejected presentation may have started a native mode
+         * transition. Record its cleanup obligation before the first call. */
+        if(report.ready) client_native_cleanup_ready=FALSE;
         BOOL mode_ready=report.ready && SudekiMpLanPartyClientServiceCombatMode(
             w,&report.lease,confirmed_ready?&confirmed:NULL);
         if(mode_ready && confirmed_ready && SudekiMpLanPartyReplicaSample(&replica,&report.lease,
@@ -772,12 +1296,13 @@ static void service(void *controller,void *data,
             BOOL ok=dummy_ready && (frame.chunk[0].combat_enabled ?
                 SudekiMpLanPartyClientApplyBasicCombat(w,&report.lease,&frame,&confirmed) :
                 SudekiMpLanPartyClientApplyMovement(w,&report.lease,&frame,&confirmed));
-            if(ok) { ++applied; SudekiMpLobbyLaunchChildLoaded(); SudekiMpLobbyGameplayLoaded(); }
+            if(ok) { presented=TRUE; ++applied; SudekiMpLobbyLaunchChildLoaded(); SudekiMpLobbyGameplayLoaded(); }
             else { ++failed; ++diagnostic.apply_fail; }
         } else if(report.ready) ++diagnostic.sample_fail;
         diagnostic.playback_ms+=GetTickCount()-part;
         /* The installed native reader is window-local; no global key polling.
          * It consumes local execution even before admission/after disconnect. */
+        party_presence_native(w,report.ready && presented);
         part=GetTickCount();
         SudekiMpLanArenaClientInputService();
         diagnostic.input_ms+=GetTickCount()-part;
@@ -796,6 +1321,12 @@ done:
 }
 BOOL SudekiMpUninstallLanPartyRuntime(void) {
     if(!session) return TRUE;
+    if(local_switch_active || SudekiMpLanPartyLocalControlSwitchPending()) {
+        leaving=TRUE; SetLastError(ERROR_BUSY); return FALSE;
+    }
+    runtime_stopping=TRUE;
+    if(follow_install_attempted) SudekiMpLanPartyFollowClear();
+    if(SudekiMpLanPartyMenuNativeOwnsPause()) { SetLastError(ERROR_BUSY); return FALSE; }
     SudekiMpLanPartyJetpackRequestStop();
     SudekiMpLanPartyDummyOverlayRequestStop();
     InterlockedExchange(&shield_stopping,1);
@@ -804,11 +1335,25 @@ BOOL SudekiMpUninstallLanPartyRuntime(void) {
     if(client) SudekiMpLanPartyClientControlRequestStop(client);
     SudekiMpControlUpdateObserverGateDisable(&gate);
     SudekiMpControlUpdateObserverGateDrain(&gate);
-    if(SudekiMpLanPartyControlHasLeases() ||
-        (local_seat && SudekiMpLanPartyClientCallbacksRetained())) {
+    if(client) (void)SudekiMpLanPartyClientProjectilePoll();
+    if(SudekiMpLanPartyCastCallbacksRetained() || SudekiMpLanPartyLocalControlRetains() || !SudekiMpLanPartyControlActorLeasesEmpty() ||
+        (local_seat && (!client_native_cleanup_ready ||
+            SudekiMpLanPartyClientCallbacksRetained()))) {
         /* Re-enable the sole game-thread cleanup service, not new admission. */
         (void)SudekiMpControlUpdateObserverGateEnable(&gate);
         SetLastError(ERROR_BUSY); return FALSE;
+    }
+    if(local_control_installed) {
+        if(!SudekiMpLanPartyLocalControlUninstall()) {
+            (void)SudekiMpControlUpdateObserverGateEnable(&gate); return FALSE;
+        }
+        local_control_installed=FALSE;
+    }
+    if(follow_install_attempted) {
+        if(!SudekiMpLanPartyFollowUninstall()) {
+            (void)SudekiMpControlUpdateObserverGateEnable(&gate); return FALSE;
+        }
+        follow_install_attempted=FALSE;
     }
     if(!SudekiMpLanPartyJetpackUninstall()) {
         (void)SudekiMpControlUpdateObserverGateEnable(&gate); return FALSE;
@@ -839,8 +1384,6 @@ BOOL SudekiMpUninstallLanPartyRuntime(void) {
         if(!SudekiMpUninstallLanArenaSkillFade()) return FALSE;
         party_fade_install_attempted=FALSE;
     }
-    if(observer_registered && !SudekiMpControlSeparationUnregisterUpdateObserver(&owner)) return FALSE;
-    observer_registered=FALSE;
     if(party_aim_install_attempted) {
         if(!SudekiMpLanAimUninstall()) return FALSE;
         party_aim_install_attempted=FALSE;
@@ -856,6 +1399,26 @@ BOOL SudekiMpUninstallLanPartyRuntime(void) {
     host=NULL;
     if(client && !SudekiMpLanPartyClientControlDestroy(client)) return FALSE;
     client=NULL;
+    if(SudekiMpLanPartyControlHasLeases()) {
+        /* The owned menu filter outlives every actor/task/effect callback.
+         * Only its verified control-update seam may restore native input. */
+        cleanup_release_input=TRUE;
+        (void)SudekiMpControlUpdateObserverGateEnable(&gate);
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    if(cleanup_release_input && !cleanup_input_released) {
+        (void)SudekiMpControlUpdateObserverGateEnable(&gate);
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    if(observer_registered && !SudekiMpControlSeparationUnregisterUpdateObserver(&owner)) return FALSE;
+    observer_registered=FALSE;
+    /* Keep Escape interception until the native owners have all retired.
+     * A partial teardown must not reopen the single-player pause screen. */
+    if(menu_native_installed) {
+        if(!SudekiMpLanPartyMenuNativeUninstall()) return FALSE;
+        menu_native_installed=FALSE;
+    }
+    SudekiMpPartyMenuReset();
     if(worker) {
         if(!SetEvent(stop_worker) || WaitForSingleObject(worker,1000)!=WAIT_OBJECT_0) return FALSE;
         CloseHandle(worker); worker=NULL;
@@ -864,7 +1427,8 @@ BOOL SudekiMpUninstallLanPartyRuntime(void) {
     SudekiMpLanPartyDestroy(session,TRUE); session=NULL;
     SudekiMpLanPartyReplicaReset(&replica);
     ZeroMemory(party_noncaster_pose,sizeof(party_noncaster_pose));
-    party_game_module=NULL;
+    SudekiMpLanPartyPresenceReset(&presence);
+    runtime_ready=FALSE; party_game_module=NULL;
     return TRUE;
 }
 BOOL SudekiMpInstallLanPartyRuntime(HMODULE module,const SudekiMpLanPartyConfig *config) {
@@ -874,6 +1438,23 @@ BOOL SudekiMpInstallLanPartyRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     if(!session) return FALSE;
     SudekiMpLobbyLaunchChildPort(SudekiMpLanPartyPort(session));
     local_seat=config->local_seat; next_publish=last_trace=0; published=applied=failed=0;
+    physical_character=SudekiMpLanPartyLocalCharacter(session);
+    memset(&native_presence,0,sizeof(native_presence)); native_presence.world_busy=1;
+    memset(&menu_state,0,sizeof(menu_state));
+    memcpy(lobby_tickets,config->lobby_nonce,sizeof(lobby_tickets));
+    admitted_players=config->lobby_members?
+        (uint8_t)(config->lobby_members|config->reserved_mask):15u;
+    menu_native_installed=local_control_installed=runtime_ready=FALSE;
+    follow_install_attempted=FALSE;
+    intent_known=intent_menu=intent_away=leaving=runtime_stopping=FALSE;
+    cleanup_release_input=cleanup_input_released=FALSE;
+    /* Partial installation has not touched native presentation. A successful
+     * client service invalidates this before creating a restoration lease. */
+    client_native_cleanup_ready=TRUE;
+    intent_request=ack_revision=presence_notice_until=0; presence_notice[0]=0;
+    local_switch_active=FALSE; local_switch_target=4; local_switch_request=0;
+    if(!SudekiMpLanPartyPresenceInitialize(&presence,session,config)) goto failed_install;
+    SudekiMpPartyMenuInitialize(party_menu_command);
     party_game_module=module; party_fade_install_attempted=FALSE;
     ZeroMemory(party_noncaster_pose,sizeof(party_noncaster_pose));
     tools_installed=tools_resources_ready=FALSE; last_skill_resources=0;
@@ -900,7 +1481,15 @@ BOOL SudekiMpInstallLanPartyRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     if(!SudekiMpInstallLanPartyToolsMenu(module,VK_F8,local_seat,
         local_seat?local_tool_command:host_tool_command,tool_query,tool_connection_status)) goto failed_install;
     tools_installed=TRUE;
-    if(local_seat) SudekiMpLanPartyClientInputSetConsoleGate(SudekiMpLanPartyToolsCaptureInput);
+    if(local_seat) SudekiMpLanPartyClientInputSetConsoleGate(party_input_captured);
+    if(!SudekiMpLanPartyLocalControlInstall(module,party_local_fenced,party_local_drained)) goto failed_install;
+    local_control_installed=TRUE;
+    if(!local_seat) {
+        follow_install_attempted=TRUE;
+        if(!SudekiMpLanPartyFollowInstall(module)) goto failed_install;
+    }
+    if(!SudekiMpLanPartyMenuNativeInstall(module,party_menu_admission,party_menu_toggle,party_menu_frame)) goto failed_install;
+    menu_native_installed=TRUE;
     party_fade_install_attempted=TRUE;
     if(!SudekiMpInstallLanArenaSkillFade(module,party_view_light)) goto failed_install;
     party_aim_install_attempted=TRUE;
@@ -933,3 +1522,93 @@ failed_install:
 }
 
 unsigned SudekiMpLanPartyRuntimePort(void) { return session?SudekiMpLanPartyPort(session):0; }
+
+void SudekiMpLanPartyRuntimeLobbyService(SudekiMpLobby *lobby) {
+    SudekiMpLobbyStatus status; SudekiMpLanPartyPresence p;
+    if(!session || !lobby) return;
+    SudekiMpLobbyStatusGet(lobby,&status);
+    if(leaving) {
+        if(local_switch_active || SudekiMpLanPartyLocalControlSwitchPending()) return;
+        if(!SudekiMpLanPartyMenuNativeOwnsPause() && SudekiMpLobbyGameplayCancel())
+            SudekiMpLobbyLeave(lobby);
+        return;
+    }
+    if(local_seat) {
+        if(status.phase==SUDEKIMP_LOBBY_ERROR || status.phase==SUDEKIMP_LOBBY_IDLE) {
+            party_notice("Disconnected from the session. Returning to the menu..."); leaving=TRUE;
+        }
+        return;
+    }
+    if(!SudekiMpLanPartyPresenceRead(&presence,&p)) return;
+    if(status.phase!=SUDEKIMP_LOBBY_HOSTING || !status.running) return;
+    (void)SudekiMpLobbyHostRuntimeState(lobby,p.ownership.absence_policy,p.ownership.paused);
+    (void)SudekiMpLobbyReflectAssignments(lobby,p.ownership.assignment.character,admitted_players);
+    for(unsigned player=1;player<4;++player) {
+        SudekiMpLanPartyPeerStatus peer; unsigned bit=1u<<player;
+        if(!SudekiMpLanPartyPeerStatusGet(session,player,&peer)) continue;
+        const SudekiMpLobbyMember *member=&status.members[player];
+        const SudekiMpLobbyAdmission *admission=&status.admission[player];
+        /* A UDP departure retires its ticket inside the transport lock even
+         * if the TCP lobby is still alive. Retire both channels; returning
+         * players choose again through a fresh lobby admission. */
+        if(member->present && lobby_tickets[player] &&
+            !SudekiMpLanPartyAdmissionMatches(session,player,lobby_tickets[player])) {
+            (void)SudekiMpLobbyDisconnectMember(lobby,player);
+            continue;
+        }
+        if(!member->present) {
+            /* TCP departure must also close gameplay input. Never infer
+             * native release from a closed socket or from a timeout alone. */
+            if(peer.phase==SUDEKIMP_LAN_PARTY_PENDING || peer.phase==SUDEKIMP_LAN_PARTY_ACTIVE) {
+                (void)SudekiMpLanPartyDisconnect(session,&peer.lease);
+                continue;
+            }
+            if(peer.phase!=SUDEKIMP_LAN_PARTY_FREE) continue;
+            if(lobby_tickets[player]) {
+                if(!SudekiMpLanPartyRevokeAdmission(session,player,lobby_tickets[player])) continue;
+                lobby_tickets[player]=0;
+            }
+            if(!runtime_ready || (p.ownership.connected&bit)) continue;
+            if(p.ownership.assignment.humans&bit) {
+                if(!SudekiMpLanPartyPresenceReleaseDeparted(&presence,player,GetTickCount())) continue;
+                if(!SudekiMpLanPartyPresenceRead(&presence,&p)) return;
+            }
+            if(member->reserved && SudekiMpLobbyReleaseReservation(lobby,player)) {
+                admitted_players&=(uint8_t)~bit;
+                SudekiMpLogFormat("lan_party event=departure_released player=%u revision=%lu native_cleanup=complete policy=available_ai\r\n",
+                    player,(unsigned long)p.ownership.assignment.revision);
+            }
+            continue;
+        }
+        if(!runtime_ready || !member->locked || member->character>=4 ||
+            p.ownership.phase!=SUDEKIMP_PARTY_SWAP_IDLE || p.ownership.paused) continue;
+        if(admission->phase==SUDEKIMP_LOBBY_ADMISSION_LOADED) {
+            if(peer.phase==SUDEKIMP_LAN_PARTY_ACTIVE &&
+                p.ownership.control[player]==SUDEKIMP_PARTY_CONTROL_HUMAN &&
+                p.ownership.assignment.character[player]==member->character)
+                (void)SudekiMpLobbyHostAdmissionComplete(lobby,player,
+                    admission->sequence,admission->ticket,TRUE);
+            continue;
+        }
+        if(peer.phase!=SUDEKIMP_LAN_PARTY_FREE ||
+            (native_presence.busy_characters&(1u<<member->character))) continue;
+        if(!(p.ownership.assignment.humans&bit)) {
+            if(!SudekiMpLanPartyPresenceReserve(&presence,player,member->character,GetTickCount())) continue;
+            admitted_players|=(uint8_t)bit;
+            if(!SudekiMpLanPartyPresenceRead(&presence,&p)) return;
+        }
+        if(p.ownership.assignment.character[player]!=member->character ||
+            p.ownership.control[player]!=SUDEKIMP_PARTY_CONTROL_AI) continue;
+        if(admission->phase==SUDEKIMP_LOBBY_ADMISSION_NONE ||
+            admission->phase==SUDEKIMP_LOBBY_ADMISSION_FAILED) {
+            if(lobby_tickets[player]) {
+                if(!SudekiMpLanPartyRevokeAdmission(session,player,lobby_tickets[player])) continue;
+                lobby_tickets[player]=0;
+            }
+            (void)SudekiMpLobbyHostAdmit(lobby,player);
+        } else if(admission->phase==SUDEKIMP_LOBBY_ADMISSION_OFFERED && admission->ticket &&
+            !lobby_tickets[player] && SudekiMpLanPartyRegisterAdmission(session,player,admission->ticket)) {
+            lobby_tickets[player]=admission->ticket;
+        }
+    }
+}

@@ -3,6 +3,12 @@
 
 #include "network/lan_arena_protocol.h"
 #include "network/lan_party_story.h"
+#include "network/lan_story_frame.h"
+#include "network/lan_story_world_frame.h"
+#include "network/lan_story_handoff.h"
+#include "network/lan_story_presentation.h"
+#include "network/lan_story_catchup.h"
+#include "engine/party_ownership.h"
 #include <windows.h>
 
 /* Opt-in fixed roster; neither seat numbers nor character identities confer
@@ -10,8 +16,8 @@
  * two-player session and LA42 packet format remain available unchanged. */
 #define SUDEKIMP_LAN_PARTY_PLAYERS 4u
 #define SUDEKIMP_LAN_PARTY_CHUNKS 2u
-#define SUDEKIMP_LAN_PARTY_VERSION 12u
-#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x3450000cu
+#define SUDEKIMP_LAN_PARTY_VERSION 13u
+#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x3450000du
 #define SUDEKIMP_LAN_PARTY_MODE_MAX_AGE_MS 500u
 #define SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS 250u
 #define SUDEKIMP_LAN_PARTY_EXTENSION_VERSION 3u
@@ -47,20 +53,56 @@ typedef struct SudekiMpLanPartyPeerStatus {
 } SudekiMpLanPartyPeerStatus;
 
 typedef struct SudekiMpLanPartyConfig {
-    uint8_t local_seat; /* 0 Buki host, 1 Elco, 2 Tal, 3 Ailish */
+    uint8_t local_seat; /* immutable connection slot; zero is authority */
     uint8_t game_hash[SUDEKIMP_LAN_ARENA_GAME_HASH_SIZE];
     const char *host_ipv4; /* clients only */
     unsigned int port; /* host may request an ephemeral port with zero */
     uint32_t timeout_ms;
     /* Explicit private profile, negotiated before a session is allocated.
-     * Zero preserves testroom behavior; one admits scene observation only. */
+     * Zero preserves testroom behavior; one admits scene observation only;
+     * two is the distinct saved-story runtime profile. Story transport stays
+     * OBSERVING; saved-story movement requires its separate native ownership,
+     * presentation ACK and fresh frame fence. Connectivity grants no input. */
     uint8_t story_observation;
     /* Optional title-lobby admission. Fixed launch tickets use the existing
      * HELLO nonce field; ordinary SMP4 profiles keep random nonces. A new
      * native lease still requires the host's fresh token/generation/ACK. */
     uint8_t lobby_members;
     uint64_t lobby_nonce[4];
+    /* Explicit canonical character map; 4 is unassigned/spectating. Zero
+     * assignment_enabled retains canonical profile defaults until the host
+     * publishes authoritative presence. Never reinterpret a transport lease. */
+    uint8_t assignment_enabled;
+    uint8_t reserved_mask; /* optional explicit reservations, including offline players */
+    uint8_t character[4];
 } SudekiMpLanPartyConfig;
+
+typedef enum SudekiMpLanPartyCommandKind {
+    SUDEKIMP_LAN_PARTY_COMMAND_PRESENCE = 1, /* value bit0 menu, bit1 Away */
+    SUDEKIMP_LAN_PARTY_COMMAND_SWAP,        /* target = character */
+    SUDEKIMP_LAN_PARTY_COMMAND_POLICY,      /* host; value = absence policy */
+    SUDEKIMP_LAN_PARTY_COMMAND_PAUSE,       /* host; value = paused */
+    SUDEKIMP_LAN_PARTY_COMMAND_RELEASE,     /* host; target = player */
+    SUDEKIMP_LAN_PARTY_COMMAND_REASSIGN,    /* host; target = player, value = character */
+    SUDEKIMP_LAN_PARTY_COMMAND_CONTROL_ACK,
+    SUDEKIMP_LAN_PARTY_COMMAND_SWAP_ACK,    /* transaction = original swap request */
+    SUDEKIMP_LAN_PARTY_COMMAND_REQUEST_PAUSE
+} SudekiMpLanPartyCommandKind;
+typedef struct SudekiMpLanPartyCommand {
+    /* Transport fills the verified sender lease when dequeuing. Host-local
+     * commands have a zero lease. No native pointers cross this boundary. */
+    SudekiMpLanPartyLease lease;
+    uint32_t request, world, revision, generation, transaction;
+    uint8_t kind, player, target, value;
+} SudekiMpLanPartyCommand;
+typedef struct SudekiMpLanPartyPresence {
+    uint32_t sequence, observed_tick;
+    SudekiMpPartyOwnership ownership;
+    uint32_t ack_request[4];
+    uint8_t ack_result[4]; /* SudekiMpPartySwapResult */
+} SudekiMpLanPartyPresence;
+BOOL SudekiMpLanPartyCommandValid(const SudekiMpLanPartyCommand *command);
+BOOL SudekiMpLanPartyPresenceValid(const SudekiMpLanPartyPresence *presence);
 
 /* Optional negotiated SMP4 sidecar. The nested LA42 input is unchanged;
  * SMP4 v5 requires matching builds for independent ranged shot journals.
@@ -137,6 +179,7 @@ typedef struct SudekiMpLanPartyInput {
     SudekiMpLanArenaInput input;
     SudekiMpLanPartyCombatInputExtension combat;
     uint32_t received_at_ms; /* host clock, never a client-supplied timestamp */
+    uint32_t world, revision, actor_generation; /* v13 assignment fence */
 } SudekiMpLanPartyInput;
 
 typedef struct SudekiMpLanPartySession SudekiMpLanPartySession;
@@ -152,7 +195,54 @@ void SudekiMpLanPartyDestroy(SudekiMpLanPartySession *session, BOOL notify);
 unsigned int SudekiMpLanPartyPort(SudekiMpLanPartySession *session);
 /* Immutable endpoint role, not inferred from a remote peer's status. */
 unsigned int SudekiMpLanPartyLocalSeat(SudekiMpLanPartySession *session);
+unsigned int SudekiMpLanPartyLocalCharacter(SudekiMpLanPartySession *session);
+unsigned int SudekiMpLanPartyPlayerCharacter(SudekiMpLanPartySession *session,
+    unsigned int player);
+unsigned int SudekiMpLanPartyCharacterPlayer(SudekiMpLanPartySession *session,
+    unsigned int character);
 BOOL SudekiMpLanPartyStoryObservation(SudekiMpLanPartySession *session);
+/* Plain-data mailboxes only. The verified game-thread coordinator validates
+ * policy and native readiness, then publishes the confirmed result. Commands
+ * retry until the host's matching ack; at most one is outstanding per player. */
+BOOL SudekiMpLanPartyQueueCommand(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyCommand *command);
+BOOL SudekiMpLanPartyTakeCommand(SudekiMpLanPartySession *session,
+    SudekiMpLanPartyCommand *command);
+BOOL SudekiMpLanPartyPublishPresence(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyPresence *presence);
+BOOL SudekiMpLanPartyGetPresence(SudekiMpLanPartySession *session,
+    SudekiMpLanPartyPresence *presence);
+/* Host-only assignment publication closes queued input. Presence publication
+ * validates/replaces this same map and additionally grants input eligibility. */
+BOOL SudekiMpLanPartySetAssignment(SudekiMpLanPartySession *session,
+    const SudekiMpPartyAssignment *assignment);
+/* Game-thread registration of a freshly host-issued lobby admission ticket.
+ * Existing active/draining peers cannot be replaced. Rejoin still needs a new
+ * native approval and transport token. No story load or ownership is implied. */
+BOOL SudekiMpLanPartyRegisterAdmission(SudekiMpLanPartySession *session,
+    unsigned int player, uint64_t nonce);
+/* Saved-story late admission sets only this FREE player's character map and
+ * ticket. Native ownership remains AI until catch-up and control ACKs. */
+BOOL SudekiMpLanPartyRegisterStoryAdmission(SudekiMpLanPartySession *session,
+    unsigned player,unsigned character,uint64_t nonce);
+BOOL SudekiMpLanPartyPublishStoryCatchup(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryCatchup *snapshot);
+BOOL SudekiMpLanPartyGetStoryCatchup(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryCatchup *snapshot);
+BOOL SudekiMpLanPartyAcknowledgeStoryCatchup(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t transaction,uint32_t presented_sequence);
+/* Initial peers require no catch-up; late peers require the exact current
+ * connection's ACK. A scene change cannot undo a completed admission. */
+BOOL SudekiMpLanPartyStoryCatchupComplete(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease);
+/* Also available to saved-story departure cleanup. Requires a FREE transport
+ * slot and the exact retired ticket; does not admit a new story participant. */
+BOOL SudekiMpLanPartyRevokeAdmission(SudekiMpLanPartySession *session,
+    unsigned int player, uint64_t nonce);
+/* Host-only plain-data observation. Lobby tickets are invalidated atomically
+ * when gameplay starts draining, before the old transport becomes FREE. */
+BOOL SudekiMpLanPartyAdmissionMatches(SudekiMpLanPartySession *session,
+    unsigned int player, uint64_t nonce);
 /* Game-thread observation only; the worker cannot refresh host evidence.
  * No actor, scene load, camera or input permission is conferred by these APIs. */
 BOOL SudekiMpLanPartyPublishStoryScene(SudekiMpLanPartySession *session,
@@ -160,6 +250,72 @@ BOOL SudekiMpLanPartyPublishStoryScene(SudekiMpLanPartySession *session,
 BOOL SudekiMpLanPartyGetStoryScene(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease, uint32_t now,
     SudekiMpLanStoryScene *scene);
+/* Sparse, noncombat story observations. These require the separate story
+ * profile and a fresh host scene. Receipt grants no native/input authority. */
+BOOL SudekiMpLanPartySendStoryFrame(SudekiMpLanPartySession *session,
+    const SudekiMpLanStoryFrame *frame);
+BOOL SudekiMpLanPartyPopStoryFrame(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,
+    SudekiMpLanStoryFrame *frame);
+/* Preserve authenticated local receipt time across render/minimize stalls.
+ * Dequeuing a packet never refreshes its age. */
+BOOL SudekiMpLanPartyPopStoryFrameReceived(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,
+    SudekiMpLanStoryFrame *frame,uint32_t *received_at);
+/* Saved-story only. Complete, bounded world batches share the corresponding
+ * party frame's epoch/revision/sequence/tick. Partial batches never escape
+ * transport; no native objects are touched by the network worker. */
+BOOL SudekiMpLanPartySendStoryWorld(SudekiMpLanPartySession *session,
+    const SudekiMpLanStoryWorldFrame *frame);
+BOOL SudekiMpLanPartyPopStoryWorld(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,
+    SudekiMpLanStoryWorldFrame *frame,uint32_t *received_at);
+/* Separate saved-story native ownership exchange. OBSERVING remains transport
+ * connectivity only. Host publishes PREPARE after acquiring a native lease;
+ * client ACK follows actual local actor/view/input preparation. READY requires
+ * that exact ACK. Input admission still requires a fresh game-thread native
+ * lease check; the network worker never changes a character or native world. */
+BOOL SudekiMpLanPartyPublishStoryControl(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryControlState *state);
+BOOL SudekiMpLanPartyGetStoryControl(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryControlState *state);
+BOOL SudekiMpLanPartyAcknowledgeStoryControl(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryControlFence *fence);
+/* Host renewal query: acknowledgment remains tied to the current connection,
+ * scene and unrevoked fence across a publication gap. This does not admit
+ * movement: publish a fresh READY after validating the native lease first. */
+BOOL SudekiMpLanPartyStoryControlAcknowledged(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryControlFence *fence);
+BOOL SudekiMpLanPartySendStoryMovement(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryMovement *input);
+BOOL SudekiMpLanPartyTakeStoryMovement(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryMovement *input,
+    uint32_t *received_at);
+/* Authenticated saved-story requests, bounded to one outstanding action per
+ * player. Identical retries recover the immutable host result. Take consumes
+ * admission once; only the game thread may execute, then publish its observed
+ * outcome. A transport ACK cannot authorize a native cast. */
+BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryActionRequest *request);
+BOOL SudekiMpLanPartyTakeStoryAction(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryActionRequest *request);
+BOOL SudekiMpLanPartyPublishStoryActionResult(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryActionResult *result);
+BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,SudekiMpLanStoryActionResult *result);
+/* Closes this exact offer and input queue before native drain. It grants no
+ * native retirement; ReleaseDrained is still the coordinator's final step. */
+BOOL SudekiMpLanPartyRevokeStoryControl(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease);
+BOOL SudekiMpLanPartyPublishStoryRecruitment(SudekiMpLanPartySession *session,
+    const SudekiMpLanStoryRecruitment *recruitment);
+BOOL SudekiMpLanPartyGetStoryRecruitment(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryRecruitment *recruitment);
+BOOL SudekiMpLanPartySendStoryPresentation(SudekiMpLanPartySession *session,
+    const SudekiMpLanStoryPresentation *presentation);
+BOOL SudekiMpLanPartyPopStoryPresentation(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryPresentation *presentation,
+    uint32_t *received_at);
 void SudekiMpLanPartyPoll(SudekiMpLanPartySession *session, uint32_t now_ms);
 BOOL SudekiMpLanPartyPeerStatusGet(SudekiMpLanPartySession *session,
     unsigned int seat, SudekiMpLanPartyPeerStatus *status);
@@ -182,6 +338,10 @@ BOOL SudekiMpLanPartyLeaseActive(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease);
 BOOL SudekiMpLanPartyTakeInput(SudekiMpLanPartySession *session,
     unsigned int seat, SudekiMpLanPartyInput *input);
+/* Read-only validation of a previously dequeued input against current policy;
+ * unlike AdmitInput this does not acknowledge it or consume its sequence. */
+BOOL SudekiMpLanPartyInputCurrent(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyInput *input);
 BOOL SudekiMpLanPartyAdmitInput(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyInput *input);
 BOOL SudekiMpLanPartySendInput(SudekiMpLanPartySession *session,

@@ -1318,6 +1318,26 @@ static BOOL skill_filter_image_exact(unsigned int filter) {
         call(instance_image,skill_filter_sites[filter]+13,0x290d0) &&
         bytes(site+18,(const uint8_t *)"\x5e\xc3",2);
 }
+BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image) {
+    SudekiMpInlineHook *hook=&skill_filter_hooks[1];
+    return image && instance_image==(uint8_t *)image && !update_fault &&
+        GetCurrentThreadId()==owner_thread && !scope_depth && !operation_depth && !update_depth &&
+        hook->installed && hook->target==instance_image+skill_filter_sites[1] &&
+        hook->length==13u && native_skill_filters[1]==(ControllerFilterFunction)hook->trampoline &&
+        bytes(hook->target,hook->replacement,hook->length) &&
+        call(instance_image,skill_filter_sites[1]+13u,0x290d0u) &&
+        bytes(instance_image+skill_filter_sites[1]+18u,(const uint8_t *)"\x5e\xc3",2u);
+}
+BOOL SudekiMpSpiritInstanceFilterNoneEntryExact(HMODULE image) {
+    SudekiMpInlineHook *hook=&skill_filter_hooks[0];
+    return image && instance_image==(uint8_t *)image && !update_fault &&
+        GetCurrentThreadId()==owner_thread && !scope_depth && !operation_depth && !update_depth &&
+        hook->installed && hook->target==instance_image+skill_filter_sites[0] &&
+        hook->length==13u && native_skill_filters[0]==(ControllerFilterFunction)hook->trampoline &&
+        bytes(hook->target,hook->replacement,hook->length) &&
+        call(instance_image,skill_filter_sites[0]+13u,0x290d0u) &&
+        bytes(instance_image+skill_filter_sites[0]+18u,(const uint8_t *)"\x5e\xc3",2u);
+}
 BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void) {
     static const uint8_t entry[]={0x80,0x7c,0x24,4,0};
     if(!boundary() || update_fault || scope_depth || skill_targeting_hook.installed ||
@@ -1368,6 +1388,79 @@ BOOL SudekiMpEnableSpiritInstanceRemoteSkillInput(const SudekiMpSpiritInstance *
     e->local_controller=controller; e->local_actor=local_actor;
     e->local_actor_vtable=*(void **)local_actor; e->local_actor_witness=local_witness;
     e->remote_skill_input=TRUE;
+    return TRUE;
+}
+
+BOOL SudekiMpRebindSpiritInstanceLocalOwner(const SudekiMpSpiritInstance *instance,
+    void *local_actor,SudekiMpSpiritCasterWitness local_witness) {
+    Entry *local=find(instance),*old_local=NULL;
+    void *controller,*view;
+    if(!local || !local_actor || local->caster!=local_actor || !local_witness ||
+        !boundary() || update_fault || persistent_skill_ui.caster ||
+        named_generation || selection_generation || !named_banking ||
+        !named_namespace_exact() || !selection_scene || !selection_exact() ||
+        !remote_ui_exact() || !globals_exact(primary_manager,primary_camera) ||
+        !ui_hooks[0].installed || !ui_hooks[1].installed ||
+        !state_ui_hooks[0].installed || !state_ui_hooks[1].installed ||
+        !skill_ui_hooks[0].installed || !skill_ui_hooks[1].installed ||
+        !skill_input_hooks[0].installed || !skill_input_hooks[1].installed ||
+        !named_update_hook.installed || !SudekiMpSpiritInstanceCameraSelectionAbiReady() ||
+        !memory(instance_image+CONTROLLER_GLOBAL,4,FALSE)) return FALSE;
+    controller=*(void **)(instance_image+CONTROLLER_GLOBAL);
+    view=*(void **)((uint8_t *)named_manager+0x20);
+    if(!object_exact(controller,0x24c,CONTROLLER_VTABLE) ||
+        *(void **)((uint8_t *)controller+0x248)!=local_actor ||
+        !local_witness(local_actor,local->caster_session) ||
+        !memory(local_actor,0x134,FALSE) || !registered_camera(view)) return FALSE;
+    /* Validate the entire old policy before changing any owner. A private
+     * camera can remain selected after a local skill, so require the native
+     * controller switch to have restored an ordinary shared view first. */
+    for(unsigned i=0;i<MAX_INSTANCES;++i) {
+        Entry *e=&entries[i];
+        if(!e->identity.generation || !quiescent(e) || !caster_exact(e) ||
+            !e->timing_configured || !skill_ui_exact(e,e->skill) ||
+            ((uint8_t *)e->skill)[0x6c] || !e->named_ready ||
+            e->caster_session!=local->caster_session ||
+            (e->remote_ui!=e->remote_skill_ui) ||
+            (e->remote_ui!=e->remote_skill_input) ||
+            (e->remote_ui!=e->remote_camera_selection) ||
+            (view==e->named_cameras[0] || view==e->named_cameras[1]) ||
+            (((uint8_t *)e->state_component)[0x131]!=0 &&
+             ((uint8_t *)e->state_component)[0x131]!=4)) return FALSE;
+        for(unsigned j=0;j<i;++j) if(entries[j].caster==e->caster) return FALSE;
+        if(!e->remote_ui) {
+            if(old_local) return FALSE;
+            old_local=e;
+        }
+    }
+    if(!old_local) return FALSE;
+    for(unsigned i=0;i<MAX_INSTANCES;++i) {
+        Entry *e=&entries[i],proposed=*e;
+        if(e->remote_ui && (e->local_controller!=controller ||
+            e->local_actor!=old_local->caster || !e->local_actor_witness ||
+            !e->local_actor_witness(e->local_actor,e->caster_session) ||
+            !memory(e->local_actor,0x134,FALSE) ||
+            *(void **)e->local_actor!=e->local_actor_vtable)) return FALSE;
+        if(e==local) continue;
+        proposed.local_controller=controller; proposed.local_actor=local_actor;
+        proposed.local_actor_vtable=*(void **)local_actor;
+        proposed.local_actor_witness=local_witness;
+        if(!skill_input_exact(&proposed,controller)) return FALSE;
+    }
+    /* No native calls or callbacks occur during this metadata commit. The
+     * four actor namespaces and their generations remain live and unchanged. */
+    for(unsigned i=0;i<MAX_INSTANCES;++i) {
+        Entry *e=&entries[i]; BOOL remote=e!=local;
+        e->remote_ui=e->remote_skill_ui=e->remote_skill_input=remote;
+        e->remote_camera_selection=remote;
+        e->local_controller=remote?controller:NULL;
+        e->local_actor=remote?local_actor:NULL;
+        e->local_actor_vtable=remote?*(void **)local_actor:NULL;
+        e->local_actor_witness=remote?local_witness:NULL;
+        e->selected_camera=e->named_cameras[0]; e->selected_kind=0;
+    }
+    selection_view=view;
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
 

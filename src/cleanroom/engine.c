@@ -5125,7 +5125,7 @@ BOOL SudekiMpCleanroomEngineInfiniteSpirit(BOOL *enabled) {
     return TRUE;
 }
 
-BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled) {
+static BOOL set_infinite_spirit(BOOL enabled,BOOL prepare_cleanroom) {
     BOOL current;
 
     enabled = enabled != FALSE;
@@ -5142,12 +5142,19 @@ BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled) {
         current != enabled) {
         return FALSE;
     }
-    SudekiMpCleanroomEngineMaintainResources();
+    if(prepare_cleanroom) SudekiMpCleanroomEngineMaintainResources();
     SudekiMpLogFormat(
         "cleanroom_engine event=infinite_spirit status=confirmed state=%s\r\n",
         enabled ? "enabled" : "disabled"
     );
     return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetInfiniteSpirit(BOOL enabled) {
+    return set_infinite_spirit(enabled,TRUE);
+}
+BOOL SudekiMpCleanroomEngineSetStoryInfiniteSpirit(BOOL enabled) {
+    return set_infinite_spirit(enabled,FALSE);
 }
 
 BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled) {
@@ -5159,7 +5166,7 @@ BOOL SudekiMpCleanroomEngineInfiniteJetpackFuel(BOOL *enabled) {
     return TRUE;
 }
 
-BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
+static BOOL set_infinite_jetpack_fuel(BOOL enabled,BOOL prepare_cleanroom) {
     BOOL current;
 
     enabled = enabled != FALSE;
@@ -5173,7 +5180,7 @@ BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
         current != enabled) {
         return FALSE;
     }
-    if (enabled) {
+    if (enabled && prepare_cleanroom) {
         SudekiMpCleanroomEngineMaintainResources();
     }
     SudekiMpLogFormat(
@@ -5182,6 +5189,13 @@ BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
         enabled ? "enabled" : "disabled"
     );
     return TRUE;
+}
+
+BOOL SudekiMpCleanroomEngineSetInfiniteJetpackFuel(BOOL enabled) {
+    return set_infinite_jetpack_fuel(enabled,TRUE);
+}
+BOOL SudekiMpCleanroomEngineSetStoryInfiniteJetpackFuel(BOOL enabled) {
+    return set_infinite_jetpack_fuel(enabled,FALSE);
 }
 
 static BOOL story_test_speed_bits(uint32_t *bits) {
@@ -5507,6 +5521,13 @@ static void maintain_spirit_resource(void) {
 void SudekiMpCleanroomEngineMaintainTrainingResources(void) {
     if(!SudekiMpCleanroomEngineWorldReady()) return;
     SudekiMpCleanroomEngineMaintainSkillResources();
+    maintain_jetpack_resource();
+    maintain_spirit_resource();
+}
+
+void SudekiMpCleanroomEngineMaintainStoryResources(void) {
+    if(!SudekiMpCleanroomEngineWorldReady()) return;
+    maintain_party_skill_points();
     maintain_jetpack_resource();
     maintain_spirit_resource();
 }

@@ -24,9 +24,14 @@ static DWORD aim_thread;
 static void *aim_actors[2];
 static uint32_t corrected_shots;
 static SudekiMpLanWeaponShotObserver weapon_shot_observer;
+static SudekiMpLanProjectileObserver projectile_observer;
+static SudekiMpLanEmissionObserver emission_observer;
 
 void SudekiMpLanAimSetShotObserver(SudekiMpLanWeaponShotObserver observer) {
     weapon_shot_observer = observer;
+}
+void SudekiMpLanAimSetProjectileObserver(SudekiMpLanProjectileObserver observer) {
+    projectile_observer=observer;
 }
 void SudekiMpLanAimSetIdleWitness(SudekiMpLanIdleWitness witness) {
     idle_witness = witness;
@@ -879,12 +884,21 @@ static void __attribute__((used,noinline)) apply_direction(void *manager, const 
     uint8_t *m=manager;
     void *actor;
     float direction[3], normalized[3],target[3];
-    if (GetCurrentThreadId()!=aim_thread || !aim_witness ||
+    if (GetCurrentThreadId()!=aim_thread || (!aim_witness && !emission_observer) ||
         !memory(m,0x14,FALSE) || *(void **)m!=aim_image+MISSILE_VT ||
         !memory(out,12,TRUE) || !memory(muzzle,12,FALSE)) return;
     actor=*(void **)(m+0x10);
     if (!actor || (actor!=aim_actors[0] && actor!=aim_actors[1]) ||
         !memory(actor,0xc0,FALSE) || *(void **)((uint8_t *)actor+0xbc)!=m) return;
+    if(emission_observer) {
+        /* Copy before callback; a passive consumer cannot mutate the native
+         * vectors through this API. No extra shot or native update occurs. */
+        float origin_copy[3],direction_copy[3];
+        memcpy(origin_copy,muzzle,sizeof(origin_copy)); memcpy(direction_copy,out,sizeof(direction_copy));
+        emission_observer(actor,m,origin_copy,direction_copy);
+        return;
+    }
+    if (projectile_observer) projectile_observer(actor,m);
     if (weapon_shot_observer) weapon_shot_observer(actor);
     if (!aim_witness(actor,TRUE,direction) ||
         !aim_target_witness || !aim_target_witness(actor,target) ||
@@ -933,6 +947,18 @@ BOOL SudekiMpLanAimInstall(HMODULE image, SudekiMpLanAimWitness witness,
     }
     return TRUE;
 }
+BOOL SudekiMpLanAimObserveEmissionsInstall(HMODULE image,SudekiMpLanEmissionObserver observer) {
+    if(!observer || aim_image || !SudekiMpLanAimImageMatches(image)) {
+        SetLastError(ERROR_INVALID_DATA); return FALSE;
+    }
+    aim_image=(uint8_t *)image; direction_original=aim_image+AIM_DIRECTION;
+    emission_observer=observer;
+    if(!SudekiMpInstallRelativeCallHook(&direction_hook,aim_image+AIM_CALL,
+        direction_original,direction_bridge)) {
+        aim_image=NULL; direction_original=NULL; emission_observer=NULL; return FALSE;
+    }
+    return TRUE;
+}
 BOOL SudekiMpLanAimUninstall(void) {
     if (!SudekiMpRestoreRelativeCallHook(&sample_hook)) return FALSE;
     if (!SudekiMpRestoreRelativeCallHook(&pose_hook)) return FALSE;
@@ -941,6 +967,8 @@ BOOL SudekiMpLanAimUninstall(void) {
     idle_witness=NULL;
     aim_fire_witness=NULL;sample_original=NULL;aim_thread=0;
     weapon_shot_observer=NULL;
+    projectile_observer=NULL;
+    emission_observer=NULL;
     memset(aim_actors,0,sizeof(aim_actors)); corrected_shots=0;
     memset(world_renderers,0,sizeof(world_renderers)); pose_original=NULL;
     memset(first_person_renderers,0,sizeof(first_person_renderers));smoothed_fp_idle_poses=0;
@@ -953,6 +981,10 @@ void SudekiMpLanAimActors(void *first, void *second) {
     if (!aim_image) return;
     aim_thread=GetCurrentThreadId();
     void *actors[2]={first,second};
+    if(emission_observer) {
+        memcpy(aim_actors,actors,sizeof(aim_actors));
+        return; /* passive mode needs no renderer lookup or native method */
+    }
     for(unsigned i=0;i<2;++i) {
         void *renderer=world_renderer(actors[i]);
         if(actors[i]!=aim_actors[i] || renderer!=world_renderers[i])

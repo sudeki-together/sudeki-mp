@@ -60,6 +60,20 @@ BOOL SudekiMpEnsureCharacterStarterWeapon(void *character);
  * changing equipment, locators, animation, or Ailish's hidden staff policy.
  * Unknown/pending/first-person attachment topology fails closed. */
 BOOL SudekiMpInitializeSheathedWeaponVisibility(void *character);
+/* Replica-only host visibility for already equipped, attached, noncombat
+ * weapons. Same exact topology/callback checks as startup, with native
+ * setter/readback. Does not expose Ailish's intentionally hidden staff.
+ * Caller owns the current authenticated actor/scene and game-thread lease. */
+BOOL SudekiMpReconcileSheathedWeaponVisibility(void *character,BOOL visible);
+/* Read-only portable attachment semantics for an owned equipped weapon:
+ * 0 detached/hidden, 1 authored hand locator, 2 authored sheath locator.
+ * Indices are resolved independently in each process's loaded model bank. */
+BOOL SudekiMpObserveCharacterWeaponAttachment(void *character,uint8_t slots[2]);
+/* Contained story replica only. Caller proves the paused actor/scene before
+ * and after this synchronous operation. Reattaches existing owned wrappers;
+ * does not arm the native controller, run gameplay, or change equipment. */
+BOOL SudekiMpReconcileCharacterWeaponAttachment(void *character,
+    const uint8_t slots[2],BOOL visible);
 /* Replica-only, exact game/render-thread actor lease required at the caller.
  * After the replicated Elco gun-play idle leaves both animation pairs,
  * perform its native hand-to-holster interruption cleanup if still pending.

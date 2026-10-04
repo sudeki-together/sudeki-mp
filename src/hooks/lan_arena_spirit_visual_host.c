@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
+#include <wincrypt.h>
 
 #include "network/lan_arena_protocol.h"
 
@@ -92,6 +93,27 @@ static const uint8_t weak_null_tail[] = {
 static SudekiMpInlineHook finalize_hook;
 static SudekiMpInlineHook animation_emit_hook;
 static SudekiMpRelativeCallHook script_parent_hook;
+static SudekiMpInlineHook lifetime_factory_hook,lifetime_forward_hook,lifetime_pump_hook;
+enum { LIFETIME_CAPACITY=512 };
+typedef struct EffectLifetime {
+    SudekiMpSpiritVisualWeakNode weak;
+    SudekiMpLanPartyEffectOwner owner;
+    BOOL registered;
+} EffectLifetime;
+static EffectLifetime lifetimes[LIFETIME_CAPACITY];
+static SudekiMpLanPartyEffectWitness lifetime_witness;
+static BOOL (*lifetime_shutdown_drained)(void);
+static uint8_t lifetime_retire_code[0x107];
+#ifdef SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING
+static void (*lifetime_test_retire)(void *);
+void SudekiMpLanPartyEffectLifetimeTestRetire(void (*callback)(void *)) {
+    lifetime_test_retire=callback;
+}
+#endif
+static const SudekiMpLanPartyEffectOwner *lifetime_scope;
+static volatile LONG lifetime_count,lifetime_unknown,lifetime_depth;
+static BOOL lifetime_only;
+static BOOL lifetime_source(void *component,SudekiMpLanPartyEffectOwner *owner);
 typedef struct EmissionSource {
     uint64_t session;
     uint16_t sequence;
@@ -493,6 +515,126 @@ static BOOL native_bind(void *context, SudekiMpSpiritVisualWeakNode *node, void 
     return node->entity == entity && weak_links_valid(node);
 }
 
+static BOOL lifetime_owner_valid(const SudekiMpLanPartyEffectOwner *o) {
+    return o && o->session && o->generation && o->actor &&
+        (o->actor_type==SUDEKIMP_LAN_ARENA_BUKI_TYPE ||
+         o->actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE ||
+         o->actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE ||
+         o->actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE);
+}
+static BOOL lifetime_owner_equal(const SudekiMpLanPartyEffectOwner *a,
+    const SudekiMpLanPartyEffectOwner *b) {
+    return a->session==b->session && a->generation==b->generation &&
+        a->actor==b->actor && a->actor_type==b->actor_type;
+}
+static void lifetime_fault(void) {
+    if(!InterlockedExchange(&lifetime_unknown,1))
+        SudekiMpLogFormat("lan_party_effect event=lifetime_unknown count=%ld policy=retain_native_dependencies\r\n",
+            (long)InterlockedCompareExchange(&lifetime_count,0,0));
+}
+static EffectLifetime *lifetime_find(void *entity) {
+    for(unsigned i=0;i<LIFETIME_CAPACITY;++i) {
+        EffectLifetime *e=&lifetimes[i];
+        if(e->registered && e->weak.entity==entity && entity) {
+            if(weak_links_valid(&e->weak)) return e;
+            lifetime_fault(); return NULL;
+        }
+    }
+    return NULL;
+}
+static void lifetime_capture(void *entity,const SudekiMpLanPartyEffectOwner *owner) {
+    EffectLifetime *entry;
+    if(!entity) return; /* Native allocation failure creates no callback owner. */
+    if(!lifetime_owner_valid(owner) || !exact_effect(entity)) { lifetime_fault(); return; }
+    entry=lifetime_find(entity);
+    if(entry) {
+        if(!lifetime_owner_equal(owner,&entry->owner)) lifetime_fault();
+        return;
+    }
+    for(unsigned i=0;i<LIFETIME_CAPACITY;++i) {
+        entry=&lifetimes[i];
+        if(entry->registered || entry->weak.entity || entry->weak.previous || entry->weak.next) continue;
+        entry->owner=*owner;
+        /* Set registration intent before the native write. A failed bind may
+         * have attached this stable address; never reclaim it on failure. */
+        entry->registered=TRUE; InterlockedIncrement(&lifetime_count);
+        if(!native_bind(image,&entry->weak,entity)) lifetime_fault();
+        return;
+    }
+    lifetime_fault();
+}
+static BOOL lifetime_source(void *component,SudekiMpLanPartyEffectOwner *owner) {
+    void *entity=NULL,*backlink=NULL;
+    if(!owner || !lifetime_witness || !game_thread) return FALSE;
+    memset(owner,0,sizeof(*owner));
+    if(GetCurrentThreadId()!=game_thread) { lifetime_fault(); return FALSE; }
+    if(component && pointer_at(component,0x10u,&entity) && exact_effect(entity) &&
+        pointer_at(entity,0x58u,&backlink) && backlink==component) {
+        EffectLifetime *entry=lifetime_find(entity);
+        if(entry) *owner=entry->owner;
+        return entry!=NULL;
+    }
+    /* An explicit unowned nested emission masks its enclosing cast. A
+     * forwarded effect event retains its original owner through the actor's
+     * event dispatcher, even when that actor is merely a buff recipient. */
+    if(lifetime_scope) {
+        *owner=*lifetime_scope; return lifetime_owner_valid(owner);
+    }
+    return lifetime_witness(component,owner) && lifetime_owner_valid(owner);
+}
+BOOL SudekiMpLanPartyEffectLifetimeCurrent(SudekiMpLanPartyEffectOwner *owner) {
+    return lifetime_source(NULL,owner);
+}
+static void * __cdecl lifetime_factory(void) {
+    SudekiMpLanPartyEffectOwner owner={0};
+    BOOL owned=lifetime_source(NULL,&owner);
+    InterlockedIncrement(&lifetime_depth);
+    void *entity=((void *(__cdecl *)(void))lifetime_factory_hook.trampoline)();
+    if(owned) lifetime_capture(entity,&owner);
+    InterlockedDecrement(&lifetime_depth);
+    return entity;
+}
+typedef void (__attribute__((thiscall)) *EffectForward)(void *,void *,void *);
+static void __attribute__((thiscall)) lifetime_forward(void *listener,void *source,void *event) {
+    SudekiMpLanPartyEffectOwner owner={0};
+    const SudekiMpLanPartyEffectOwner *previous=lifetime_scope;
+    BOOL observing=lifetime_witness && game_thread && GetCurrentThreadId()==game_thread;
+    InterlockedIncrement(&lifetime_depth);
+    if(observing) {
+        void *effect=(uintptr_t)listener>=0x148u?(uint8_t *)listener-0x148u:NULL;
+        EffectLifetime *entry=exact_effect(effect)?lifetime_find(effect):NULL;
+        if(entry) owner=entry->owner;
+        lifetime_scope=&owner;
+    } else if(lifetime_witness && game_thread) lifetime_fault();
+    ((EffectForward)lifetime_forward_hook.trampoline)(listener,source,event);
+    if(observing) lifetime_scope=previous;
+    InterlockedDecrement(&lifetime_depth);
+}
+static uintptr_t __attribute__((cdecl,used)) lifetime_pump_body(void *source,void *model) {
+    SudekiMpLanPartyEffectOwner owner={0};
+    const SudekiMpLanPartyEffectOwner *previous=lifetime_scope;
+    BOOL observing=lifetime_witness && game_thread && GetCurrentThreadId()==game_thread;
+    uintptr_t result=(uintptr_t)source;
+    void *entry=lifetime_pump_hook.trampoline;
+    InterlockedIncrement(&lifetime_depth);
+    if(observing) {
+        lifetime_scope=NULL;
+        if((uintptr_t)source>=0x18u) (void)lifetime_source((uint8_t *)source-0x18u,&owner);
+        lifetime_scope=&owner;
+    } else if(lifetime_witness && game_thread) lifetime_fault();
+    /* Both retail graphics-update callers pass EAX=component+18, then one
+     * model pointer. The pump returns EAX and pops that one stack argument. */
+    __asm__ volatile("pushl %1\n\tcall *%2" : "+a"(result)
+        : "r"(model),"r"(entry) : "ecx","edx","memory","cc");
+    if(observing) lifetime_scope=previous;
+    InterlockedDecrement(&lifetime_depth);
+    return result;
+}
+static void __attribute__((naked,used)) lifetime_pump(void) {
+    __asm__ volatile("pushl 4(%esp)\n\tpushl %eax\n\tcall _lifetime_pump_body\n\t"
+        "addl $8,%esp\n\tret $4");
+}
+
 static BOOL native_phase(void *renderer, SudekiMpLanArenaSpiritVfxSnapshot *value) {
     void *model, *parts, *bank, *channels;
     uint32_t count, i;
@@ -716,9 +858,17 @@ static void __attribute__((stdcall)) observe_animation_emit(
     void *component, void **out_effect, uint32_t event_index
 ) {
     EmissionSource source = {0};
+    SudekiMpLanPartyEffectOwner life={0};
+    const SudekiMpLanPartyEffectOwner *previous_life=lifetime_scope;
+    BOOL observe_life=lifetime_witness && game_thread && GetCurrentThreadId()==game_thread;
     const EmissionSource *previous = NULL;
     BOOL observing = FALSE;
     InterlockedIncrement(&in_flight);
+    if(observe_life) {
+        (void)lifetime_source(component,&life);
+        lifetime_scope=&life;
+        InterlockedIncrement(&lifetime_depth);
+    } else if(lifetime_witness && game_thread) lifetime_fault();
     if (game_thread && session_armed && InterlockedCompareExchange(&admitted, 0, 0)) {
         if (GetCurrentThreadId() != game_thread) InterlockedExchange(&unexpected_thread, 1);
         else {
@@ -739,6 +889,16 @@ static void __attribute__((stdcall)) observe_animation_emit(
         }
     }
     ((AnimationEmit)animation_emit_hook.trampoline)(component, out_effect, event_index);
+    if(observe_life) {
+        /* The common factory already captured this object before async
+         * resource setup. The result is an independent completeness check. */
+        if(lifetime_owner_valid(&life)) {
+            if(memory_access(out_effect,sizeof(*out_effect),FALSE)) lifetime_capture(*out_effect,&life);
+            else lifetime_fault();
+        }
+        lifetime_scope=previous_life;
+        InterlockedDecrement(&lifetime_depth);
+    }
     if (observing) {
         if (source.valid) {
             if (memory_access(out_effect, sizeof(*out_effect), FALSE)) retain_emission(*out_effect, &source);
@@ -826,7 +986,21 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
     uint8_t owner_type = 0u;
     PendingEmission *pending = NULL;
     const char *skip_reason = NULL;
+    SudekiMpLanPartyEffectOwner life={0};
+    const SudekiMpLanPartyEffectOwner *previous_life=lifetime_scope;
+    BOOL observe_life=lifetime_witness && game_thread && GetCurrentThreadId()==game_thread;
     InterlockedIncrement(&in_flight);
+    if(observe_life) {
+        if(memory_access(setup,0x48u,FALSE) && mode<=2u) {
+            void *effect=*(void **)((uint8_t *)setup+0x1cu);
+            EffectLifetime *entry=lifetime_find(effect);
+            if(entry) life=entry->owner;
+            else (void)lifetime_source(NULL,&life);
+            if(effect && lifetime_owner_valid(&life)) lifetime_capture(effect,&life);
+        } else if(lifetime_source(NULL,&life)) lifetime_fault();
+        lifetime_scope=&life;
+        InterlockedIncrement(&lifetime_depth);
+    } else if(lifetime_witness && game_thread) lifetime_fault();
     if (game_thread != 0u && session_armed &&
         InterlockedCompareExchange(&admitted, 0, 0) != 0) {
         if (GetCurrentThreadId() != game_thread) {
@@ -920,6 +1094,10 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
         }
     }
     result = invoke_finalize(setup, mode);
+    if(observe_life) {
+        lifetime_scope=previous_life;
+        InterlockedDecrement(&lifetime_depth);
+    }
     if (token != 0u) {
         instance = registry.entries[token - 1u].value.instance_sequence;
         SudekiMpSpiritVisualHostRegistryComplete(
@@ -1061,6 +1239,158 @@ static BOOL no_spirit_scope(void *context, void *source, uint64_t *session,
     uint16_t *skill, uint32_t *tick, uint8_t *owner) {
     (void)context; (void)source; (void)session; (void)skill; (void)tick; (void)owner;
     return FALSE;
+}
+static BOOL lifetime_image_exact(HMODULE module) {
+    static const uint32_t operands[][2]={
+        {23,0x3c2fef},{38,0x3cb968},{53,0x3cb968},{70,0x3cb968},
+        {86,0x3cb96c},{94,0x3cb970},{102,0x3cb970},{114,0x409d8c}};
+    static const uint32_t pump_operands[][2]={
+        {0x9f,0x18af08},{0xa6,0x18aecc},{0x2dc,0x18ac9a},{0x2e0,0x18ace3},
+        {0x2e4,0x18acf3},{0x2e8,0x18ae9c},{0x2ec,0x18ad36},{0x2f0,0x18ad6a},
+        {0x2f4,0x18ada2},{0x2f8,0x18ade5},{0x2fc,0x18adf3},{0x300,0x18ae01},
+        {0x304,0x18ae40},{0x308,0x18ae7b},{0x30c,0x18ae86},{0x310,0x18ae93},
+        {0x314,0x18aea3}};
+    static const uint32_t retire_operands[][2]={{0x93,0x409d8c},{0xd4,0x29a068},{0xf0,0x29a064}};
+    static const uint32_t rva[]={0x18760,0x131d20,0x18abf0,0x131df0};
+    static const unsigned size[]={0xc8,0x3a,0x332,0x107};
+    static const uint8_t hashes[4][32]={
+        {0xea,0x81,0xdf,0x2d,0xb8,0xcd,0x83,0xed,0x51,0x97,0x7b,0x0d,0x19,0x8b,0xa9,0x17,
+         0x00,0xae,0x1b,0x9f,0x55,0xd9,0xc3,0x0d,0xac,0x42,0xc7,0xc1,0xa9,0xf9,0x68,0x75},
+        {0xe7,0x40,0xdd,0x6a,0x1b,0xdd,0xa5,0x6d,0xe1,0x30,0x2c,0x37,0x2f,0x7e,0x42,0x92,
+         0x7b,0xcb,0xb1,0xc5,0x86,0x1c,0x82,0xeb,0xc8,0x58,0x04,0x5f,0x7d,0xc8,0x4d,0xec},
+        {0xcc,0xed,0xdc,0x78,0x52,0x79,0x20,0xb8,0x09,0x74,0x77,0x95,0x6c,0x09,0xe0,0xb4,
+         0xd9,0xc1,0xd6,0x31,0xe3,0x49,0xe3,0x5c,0xa9,0xea,0xab,0xf9,0x16,0x6c,0xf3,0xc8},
+        {0x16,0xcb,0x9f,0xff,0x8d,0x93,0xd3,0xdc,0xc3,0xbd,0xd8,0xc7,0x30,0x9f,0xbd,0x3a,
+         0x00,0x73,0xcf,0x3f,0x75,0xed,0xe3,0x39,0xdd,0x81,0x96,0x9d,0xd2,0xcb,0x35,0x44}};
+    uint8_t *base=(uint8_t *)module;
+    if(!call_matches(base,0x18a88,0x18760) || !call_matches(base,0x18cd1,0x18760) ||
+        !call_matches(base,0x18b94,0x18760) || !call_matches(base,0xdfa8d,0x18abf0) ||
+        !call_matches(base,0xdfaa3,0x18abf0) ||
+        !memory_access(base+0x2d3d00,4,FALSE) ||
+        *(void **)(base+0x2d3d00)!=base+0x131d20) return FALSE;
+    for(unsigned k=0;k<4;++k) {
+        uint8_t code[0x332],digest[32]; DWORD n=sizeof(digest);
+        HCRYPTPROV provider=0; HCRYPTHASH hash=0; BOOL exact=FALSE;
+        if(!memory_access(base+rva[k],size[k],FALSE)) return FALSE;
+        memcpy(code,base+rva[k],size[k]);
+        if(!k) for(unsigned j=0;j<sizeof(operands)/sizeof(operands[0]);++j) {
+            if(*(void **)(code+operands[j][0])!=base+operands[j][1]) return FALSE;
+            memcpy(code+operands[j][0],&operands[j][1],4);
+        }
+        if(k==2u) for(unsigned j=0;j<sizeof(pump_operands)/sizeof(pump_operands[0]);++j) {
+            if(*(void **)(code+pump_operands[j][0])!=base+pump_operands[j][1]) return FALSE;
+            memcpy(code+pump_operands[j][0],&pump_operands[j][1],4);
+        }
+        if(k==3u) for(unsigned j=0;j<sizeof(retire_operands)/sizeof(retire_operands[0]);++j) {
+            if(*(void **)(code+retire_operands[j][0])!=base+retire_operands[j][1]) return FALSE;
+            memcpy(code+retire_operands[j][0],&retire_operands[j][1],4);
+        }
+        if(CryptAcquireContextW(&provider,NULL,NULL,PROV_RSA_AES,CRYPT_VERIFYCONTEXT|CRYPT_SILENT) &&
+            CryptCreateHash(provider,CALG_SHA_256,0,0,&hash) &&
+            CryptHashData(hash,code,size[k],0) &&
+            CryptGetHashParam(hash,HP_HASHVAL,digest,&n,0) && n==sizeof(digest))
+            exact=!memcmp(digest,hashes[k],sizeof(digest));
+        if(hash) CryptDestroyHash(hash);
+        if(provider) CryptReleaseContext(provider,0);
+        if(!exact) return FALSE;
+    }
+    memcpy(lifetime_retire_code,base+0x131df0,sizeof(lifetime_retire_code));
+    return TRUE;
+}
+BOOL SudekiMpLanPartyEffectLifetimeInitialize(HMODULE module,
+    SudekiMpLanPartyEffectWitness witness,BOOL (*shutdown_drained)(void)) {
+    static const uint8_t factory_prefix[]={0x83,0xec,0x14,0x53,0x55,0x56};
+    static const uint8_t forward_prefix[]={0x83,0xb9,0x8c,0x02,0,0,0};
+    static const uint8_t pump_prefix[]={0x55,0x8b,0xec,0x83,0xe4,0xf8};
+    if(!module || !witness || !shutdown_drained || lifetime_witness ||
+        InterlockedCompareExchange(&lifetime_count,0,0) ||
+        InterlockedCompareExchange(&lifetime_unknown,0,0) ||
+        InterlockedCompareExchange(&lifetime_depth,0,0)) return FALSE;
+    if(!finalize_hook.installed) {
+        if(!SudekiMpLanArenaSpiritVisualHostInitialize(module,no_spirit_scope,NULL)) return FALSE;
+        lifetime_only=TRUE;
+    }
+    if(image!=module || !animation_emit_hook.installed || !script_parent_hook.installed) return FALSE;
+    if(!lifetime_factory_hook.installed && !lifetime_forward_hook.installed && !lifetime_pump_hook.installed) {
+        if(!lifetime_image_exact(module) ||
+            !SudekiMpInstallInlineHook(&lifetime_factory_hook,(uint8_t *)module+0x18760,
+                factory_prefix,sizeof(factory_prefix),lifetime_factory)) return FALSE;
+        if(!SudekiMpInstallInlineHook(&lifetime_forward_hook,(uint8_t *)module+0x131d20,
+                forward_prefix,sizeof(forward_prefix),lifetime_forward)) {
+            SudekiMpRestoreInlineHook(&lifetime_factory_hook); return FALSE;
+        }
+        if(!SudekiMpInstallInlineHook(&lifetime_pump_hook,(uint8_t *)module+0x18abf0,
+                pump_prefix,sizeof(pump_prefix),lifetime_pump)) {
+            SudekiMpRestoreInlineHook(&lifetime_forward_hook);
+            SudekiMpRestoreInlineHook(&lifetime_factory_hook); return FALSE;
+        }
+    }
+    if(!lifetime_factory_hook.installed || !lifetime_forward_hook.installed ||
+        !lifetime_pump_hook.installed) return FALSE;
+    lifetime_witness=witness;
+    lifetime_shutdown_drained=shutdown_drained;
+    return TRUE;
+}
+BOOL SudekiMpLanPartyEffectLifetimePoll(void) {
+    if(!lifetime_witness) return !SudekiMpLanPartyEffectLifetimeRetains();
+    if(!game_thread) game_thread=GetCurrentThreadId();
+    if(game_thread!=GetCurrentThreadId() || lifetime_scope ||
+        InterlockedCompareExchange(&lifetime_depth,0,0)) return FALSE;
+    if(InterlockedCompareExchange(&lifetime_unknown,0,0)) return FALSE;
+    for(unsigned i=0;i<LIFETIME_CAPACITY;++i) {
+        EffectLifetime *entry=&lifetimes[i];
+        if(!entry->registered) continue;
+        if(!entry->weak.entity && !entry->weak.previous && !entry->weak.next) {
+            /* Native base destructor 4d30 cleared all three fields. The
+             * observer is never unlinked to manufacture a drained result. */
+            memset(entry,0,sizeof(*entry)); InterlockedDecrement(&lifetime_count);
+        } else if(!weak_links_valid(&entry->weak)) { lifetime_fault(); return FALSE; }
+    }
+    return TRUE;
+}
+BOOL SudekiMpLanPartyEffectLifetimeRetains(void) {
+    return InterlockedCompareExchange(&lifetime_count,0,0) ||
+        InterlockedCompareExchange(&lifetime_unknown,0,0) ||
+        InterlockedCompareExchange(&lifetime_depth,0,0);
+}
+BOOL SudekiMpLanPartyEffectLifetimeRequestRetire(void) {
+    if(!lifetime_witness || !lifetime_shutdown_drained ||
+        !SudekiMpLanPartyEffectLifetimePoll() || !lifetime_shutdown_drained() ||
+        !memory_access((uint8_t *)image+0x131df0,sizeof(lifetime_retire_code),FALSE) ||
+        memcmp((uint8_t *)image+0x131df0,lifetime_retire_code,sizeof(lifetime_retire_code))) return FALSE;
+    for(unsigned i=0;i<LIFETIME_CAPACITY;++i) {
+        EffectLifetime *entry=&lifetimes[i];
+        if(!entry->registered || !entry->weak.entity) continue;
+        if(!weak_links_valid(&entry->weak) || !lifetime_shutdown_drained()) { lifetime_fault(); return FALSE; }
+        uint8_t *effect=entry->weak.entity;
+        if(!memory_access(effect,0x3e4u,TRUE)) { lifetime_fault(); return FALSE; }
+        if(effect[0x3e0u]&8u) continue; /* Already queued by this API or native completion. */
+        const SudekiMpLanPartyEffectOwner *previous=lifetime_scope;
+        lifetime_scope=&entry->owner;
+        InterlockedIncrement(&lifetime_depth);
+#ifdef SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING
+        if(lifetime_test_retire) lifetime_test_retire(effect);
+        else
+#endif
+            ((void (__attribute__((stdcall)) *)(void *))((uint8_t *)image+0x131df0))(effect);
+        InterlockedDecrement(&lifetime_depth);
+        lifetime_scope=previous;
+        if(!weak_links_valid(&entry->weak) ||
+            (entry->weak.entity && !(effect[0x3e0u]&8u))) { lifetime_fault(); return FALSE; }
+    }
+    return TRUE;
+}
+BOOL SudekiMpLanPartyEffectLifetimeReset(void) {
+    if(!SudekiMpLanPartyEffectLifetimePoll() || SudekiMpLanPartyEffectLifetimeRetains()) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    lifetime_witness=NULL;
+    lifetime_shutdown_drained=NULL;
+    if(lifetime_only) {
+        if(!SudekiMpLanArenaSpiritVisualHostReset()) return FALSE;
+        lifetime_only=FALSE;
+    }
+    return TRUE;
 }
 BOOL SudekiMpLanPartyShieldHostInitialize(HMODULE module,
     SudekiMpLanPartyShieldHostWitness witness, void *context) {

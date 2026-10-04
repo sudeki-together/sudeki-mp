@@ -43,10 +43,15 @@ add_library(SudekiMP SHARED
     src/ui/title_button.c
     src/ui/title_menu_view.c
     src/ui/title_lobby.c
+    src/ui/save_catalog.c
+    src/ui/party_menu.c
     src/network/title_lobby.c
     src/loader/lobby_launch.c
     src/hooks/lobby_instance.c
     src/hooks/lobby_gameplay.c
+    src/hooks/lan_party_presence.c
+    src/hooks/lan_party_menu_native.c
+    src/hooks/lan_party_local_control.c
     src/hooks/title_multiplayer.c
     src/engine/arbiter_combat_input.c
     src/engine/buki_replica_native.c
@@ -95,14 +100,46 @@ add_library(SudekiMP SHARED
     src/network/lan_arena_endpoint.c
     src/network/lan_party_session.c
     src/network/lan_party_story.c
+    src/network/lan_story_frame.c
+    src/network/lan_story_handoff.c
+    src/network/lan_story_catchup.c
+    src/network/lan_story_presentation.c
+    src/network/lan_story_world_frame.c
     src/network/lan_party_replica.c
     src/hooks/lan_party_host_control.c
     src/hooks/lan_party_client_control.c
+    src/hooks/lan_party_projectile_lifetime.c
     src/hooks/lan_party_snapshot.c
     src/hooks/lan_party_jetpack.c
     src/hooks/lan_party_runtime.c
+    src/hooks/lan_party_follow.c
+    src/engine/party_follow.c
     src/hooks/lan_story_runtime.c
+    src/hooks/lan_story_load.c
+    src/hooks/lan_story_task_trace.c
     src/hooks/lan_story_observer.c
+    src/hooks/lan_story_snapshot.c
+    src/hooks/lan_story_shots.c
+    src/hooks/lan_story_cinematic.c
+    src/hooks/lan_story_client.c
+    src/hooks/lan_story_recruit.c
+    src/hooks/lan_story_local_control.c
+    src/hooks/lan_story_activity.c
+    src/hooks/lan_story_cinematic_audio.c
+    src/hooks/lan_story_recruit_setup.c
+    src/ui/story_cinematic_view.c
+    src/hooks/lan_story_input.c
+    src/hooks/lan_story_replica.c
+    src/hooks/lan_story_world.c
+    src/hooks/lan_story_curve.c
+    src/hooks/lan_story_material.c
+    src/hooks/lan_story_residency.c
+    src/hooks/lan_story_render.c
+    src/hooks/lan_story_resource_file.c
+    src/hooks/lan_story_effects.c
+    src/hooks/lan_story_host_control.c
+    src/hooks/lan_story_control.c
+    src/hooks/lan_story_menu.c
     src/hooks/lan_party_cast.c
     src/engine/cast_motion_blur_abi.c
     src/hooks/lan_party_combo_hud.c
@@ -411,6 +448,7 @@ add_executable(SudekiMP.LanArenaSpiritVisualHostTest
 target_include_directories(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE
     WIN32_LEAN_AND_MEAN
+    SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING=1
 )
 target_compile_options(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE
     -Wall -Wextra -Werror
@@ -618,13 +656,26 @@ set_target_properties(SudekiMP.KeyBindingTest PROPERTIES
 )
 
 add_executable(SudekiMP.SkillTraceImageTest
+    src/engine/build_identity.c
+    src/engine/sha256.c
+    src/hooks/lan_party_menu_native.c
+    src/hooks/lan_party_local_control.c
+    src/hooks/lan_party_follow.c
+    src/engine/party_follow.c
+    src/engine/party_ownership.c
     tests/skill_trace_image_test.c
     tests/lan_party_control_image_fixture.c
     src/network/lan_party_session.c
     src/network/lan_party_story.c
+    src/network/lan_story_frame.c
+    src/network/lan_story_handoff.c
+    src/network/lan_story_catchup.c
+    src/network/lan_story_presentation.c
+    src/network/lan_story_world_frame.c
     src/hooks/lan_party_host_control.c
     src/hooks/lan_party_client_control.c
     src/hooks/lan_party_jetpack.c
+    src/hooks/lan_party_projectile_lifetime.c
     src/hooks/lan_party_snapshot.c
     src/hooks/lan_party_cast.c
     src/engine/cast_motion_blur_abi.c
@@ -706,6 +757,7 @@ target_compile_definitions(SudekiMP.SkillTraceImageTest PRIVATE
     SUDEKIMP_LAN_ARENA_PAUSE_PANEL_TESTING=1
     SUDEKIMP_SAVE_BOOK_INTERCEPT_TESTING=1
     SUDEKIMP_LAN_PARTY_CONTROL_TESTING=1
+    SUDEKIMP_LAN_PARTY_FOLLOW_TESTING=1
 )
 target_compile_options(SudekiMP.SkillTraceImageTest PRIVATE
     -Wall -Wextra -Wpedantic
@@ -971,7 +1023,14 @@ set_target_properties(SudekiMP.LanArenaLoopbackPeerTest PROPERTIES
 )
 
 add_executable(SudekiMP.LanPartySessionTest
+    src/hooks/lan_party_presence.c
+    src/engine/party_ownership.c
     src/network/lan_party_story.c
+    src/network/lan_story_frame.c
+    src/network/lan_story_handoff.c
+    src/network/lan_story_catchup.c
+    src/network/lan_story_presentation.c
+    src/network/lan_story_world_frame.c
     tests/lan_party_session_test.c
     src/network/lan_party_motion.c
     src/network/lan_party_replica.c
@@ -989,6 +1048,50 @@ target_link_libraries(SudekiMP.LanPartySessionTest PRIVATE ws2_32 bcrypt)
 set_target_properties(SudekiMP.LanPartySessionTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+add_executable(SudekiMP.LanPartyClientControlTest tests/lan_party_client_control_test.c)
+target_include_directories(SudekiMP.LanPartyClientControlTest PRIVATE src)
+target_compile_options(SudekiMP.LanPartyClientControlTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.LanPartyClientControlTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.TitleLobbyProtocolTest tests/title_lobby_protocol_test.c)
+target_include_directories(SudekiMP.TitleLobbyProtocolTest PRIVATE src)
+target_compile_options(SudekiMP.TitleLobbyProtocolTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.TitleLobbyProtocolTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.TitleLobbyProtocolTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.LanPartyProjectileLifetimeTest
+    tests/lan_party_projectile_lifetime_test.c
+    src/hooks/call_hook.c
+    src/engine/build_identity.c
+    src/engine/sha256.c)
+target_include_directories(SudekiMP.LanPartyProjectileLifetimeTest PRIVATE src)
+target_compile_options(SudekiMP.LanPartyProjectileLifetimeTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_options(SudekiMP.LanPartyProjectileLifetimeTest PRIVATE -municode)
+target_link_libraries(SudekiMP.LanPartyProjectileLifetimeTest PRIVATE advapi32)
+set_target_properties(SudekiMP.LanPartyProjectileLifetimeTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.LobbyLaunchPlanTest
+    tests/lobby_launch_plan_test.c
+    src/loader/lobby_launch.c
+    src/engine/sha256.c)
+target_include_directories(SudekiMP.LobbyLaunchPlanTest PRIVATE src)
+target_compile_options(SudekiMP.LobbyLaunchPlanTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.LobbyLaunchPlanTest PRIVATE advapi32 bcrypt)
+set_target_properties(SudekiMP.LobbyLaunchPlanTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.PartyFollowTest
+    tests/party_follow_test.c
+    src/engine/party_follow.c)
+target_include_directories(SudekiMP.PartyFollowTest PRIVATE src)
+target_compile_options(SudekiMP.PartyFollowTest PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(SudekiMP.PartyFollowTest PRIVATE m)
+set_target_properties(SudekiMP.PartyFollowTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.InputBridgeReceiverTest
     tests/input_bridge_receiver_test.c
@@ -1563,5 +1666,44 @@ target_compile_options(SudekiMP.NoncasterSkillLocomotionTest PRIVATE
 set_target_properties(SudekiMP.NoncasterSkillLocomotionTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+add_executable(SudekiMP.RangedWorldPoseTest tests/ranged_world_pose_test.c)
+add_executable(SudekiMP.StoryShotsTest tests/story_shots_test.c
+    src/network/lan_story_frame.c src/network/lan_party_story.c
+    src/network/lan_party_motion.c src/network/lan_arena_protocol.c
+    src/network/lan_arena_tal_combo_graph.c src/network/lan_party_session.c
+    src/network/lan_story_world_frame.c src/network/lan_story_presentation.c
+    src/network/lan_story_handoff.c src/network/lan_story_catchup.c
+    src/engine/party_ownership.c)
+target_include_directories(SudekiMP.StoryShotsTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryShotsTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryShotsTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryShotsTest PRIVATE -Wl,--gc-sections)
+target_link_libraries(SudekiMP.StoryShotsTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryShotsTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryEmissionImageTest tests/story_emission_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c src/engine/log.c)
+target_include_directories(SudekiMP.StoryEmissionImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryEmissionImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryEmissionImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryEmissionImageTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_include_directories(SudekiMP.RangedWorldPoseTest PRIVATE src)
+target_compile_options(SudekiMP.RangedWorldPoseTest PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+set_target_properties(SudekiMP.RangedWorldPoseTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryRangedProjectionTest tests/story_ranged_projection_test.c)
+target_include_directories(SudekiMP.StoryRangedProjectionTest PRIVATE src)
+target_compile_options(SudekiMP.StoryRangedProjectionTest PRIVATE
+    -Wall -Wextra -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryRangedProjectionTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryRangedProjectionTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryControlStatusTest tests/story_control_status_test.c)
+target_include_directories(SudekiMP.StoryControlStatusTest PRIVATE src)
+target_compile_options(SudekiMP.StoryControlStatusTest PRIVATE -Wall -Wextra -UNDEBUG -fwhole-program)
+set_target_properties(SudekiMP.StoryControlStatusTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 configure_file(config/SudekiMP.ini "${CMAKE_BINARY_DIR}/bin/SudekiMP.ini" COPYONLY)

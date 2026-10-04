@@ -40,6 +40,7 @@ static BOOL slot_block_logged;
 static BOOL restore_quarantined;
 static BOOL restore_failure_logged;
 static BOOL guard_module_pinned;
+static volatile LONG switch_calls;
 
 static BOOL signatures_match(uint8_t *base) {
     uint32_t operand;
@@ -188,12 +189,44 @@ BOOL SudekiMpInstallLanArenaCampaignGuard(HMODULE game_module) {
 }
 
 BOOL SudekiMpUninstallLanArenaCampaignGuard(void) {
+    if(InterlockedCompareExchange(&switch_calls,0,0)) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
     if (!restore_campaign_guard_hooks()) return FALSE;
     game_base = NULL;
     save_block_logged = FALSE;
     slot_block_logged = FALSE;
     restore_quarantined = FALSE;
     restore_failure_logged = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
+}
+
+/* Reproduce exactly the one displaced PUSH EBP through its sole patch
+ * owner. The inner CALL supplies the native return address; its ordinary
+ * epilogue then returns to our ESI restore. Neither public entry is opened. */
+__attribute__((naked,noinline,used))
+static void call_owned_character_switch(void *group __attribute__((unused)),
+    void *body __attribute__((unused))) {
+    __asm__ volatile("pushl %esi\n\tmovl 8(%esp),%esi\n\tmovl 12(%esp),%eax\n\t"
+        "call 1f\n\tpopl %esi\n\tret\n\t1: pushl %ebp\n\tjmp *%eax\n\t");
+}
+BOOL SudekiMpLanArenaCampaignGuardSwitchCharacter(void *group,BOOL previous) {
+    SudekiMpBytePatch *patch=previous?&previous_character_patch:&next_character_patch;
+    uint32_t rva=previous?RVA_GROUP_PLAYERS_PREVIOUS_CHARACTER:RVA_GROUP_PLAYERS_NEXT_CHARACTER;
+    if(!game_base || !group || restore_quarantined || !patch->installed ||
+        patch->target!=game_base+rva || *patch->target!=0xc3u ||
+        memcmp(game_base+rva+1u,group_players_character_switch_entry+1u,
+            sizeof(group_players_character_switch_entry)-1u) ||
+        InterlockedCompareExchange(&switch_calls,1,0)) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    call_owned_character_switch(group,game_base+rva+1u);
+    InterlockedExchange(&switch_calls,0);
+    if(!patch->installed || patch->target!=game_base+rva || *patch->target!=0xc3u) {
+        retain_campaign_guard_after_restore_failure(ERROR_INVALID_DATA);
+        return FALSE;
+    }
     SetLastError(ERROR_SUCCESS);
     return TRUE;
 }

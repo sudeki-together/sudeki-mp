@@ -23,7 +23,7 @@ typedef enum SudekiMpTitleLabel {
 enum { SUDEKIMP_PANEL_CONTROLS = 24, SUDEKIMP_PANEL_TEXTS = 24 };
 typedef enum SudekiMpPanelKind {
     SUDEKIMP_PANEL_NAV, SUDEKIMP_PANEL_FIELD, SUDEKIMP_PANEL_BUTTON,
-    SUDEKIMP_PANEL_SERVER, SUDEKIMP_PANEL_MEMBER
+    SUDEKIMP_PANEL_SERVER, SUDEKIMP_PANEL_MEMBER, SUDEKIMP_PANEL_SAVE
 } SudekiMpPanelKind;
 typedef struct SudekiMpPanelControl {
     float x, y, width, height;
@@ -40,6 +40,12 @@ typedef struct SudekiMpTitleExtras {
     char rows[SUDEKIMP_TITLE_MAX_ROWS][80];
     char heading[80], hint[128], status[128];
     BOOL panel;
+    /* Text-only gameplay HUD: x/y/width use full-viewport 960x720 coordinates;
+     * font size scales uniformly. Shadow only; no panels, buttons or pointer. */
+    BOOL overlay;
+    float overlay_letterbox,overlay_letterbox_bottom; /* Independent normalized bar heights. */
+    BOOL full_width; /* Panel content uses the sidebar space as well. */
+    BOOL save_details; /* Save list/details layout with a central divider. */
     unsigned text_count;
     SudekiMpPanelControl controls[SUDEKIMP_PANEL_CONTROLS];
     SudekiMpPanelText texts[SUDEKIMP_PANEL_TEXTS];
@@ -64,4 +70,6 @@ BOOL SudekiMpTitlePanelHitPoint(HWND window, unsigned count,
     const SudekiMpTitleExtras *panel, POINT client_point, unsigned *row);
 /* Drawn only at the verified title flush; retains/restores the same D3D lease. */
 BOOL SudekiMpTitleViewFade(void *device, float opacity);
+/* Existing atlas only; returns -1 for unsupported glyphs or missing NUL. */
+float SudekiMpTitleViewTextWidth(const char *text,unsigned capacity,float size);
 #endif

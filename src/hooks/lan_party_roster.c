@@ -33,8 +33,10 @@ SudekiMpLanPartyRosterStatus SudekiMpLanPartyRosterService(
     for (seat=0; seat<4; ++seat) {
         uint8_t bit = (uint8_t)(1u << seat);
         if (!(current.present_mask & bit)) {
-            float position[3] = {r->bound.anchor[0]+offsets[seat][0],
-                r->bound.anchor[1],r->bound.anchor[2]+offsets[seat][1]};
+            unsigned local=SudekiMpLanPartyControlLocalCharacter();
+            if(local>=4u) return SUDEKIMP_LAN_PARTY_ROSTER_WAITING;
+            float position[3] = {r->bound.anchor[0]+offsets[seat][0]-offsets[local][0],
+                r->bound.anchor[1],r->bound.anchor[2]+offsets[seat][1]-offsets[local][1]};
             if (!isfinite(position[0]) || !isfinite(position[1]) || !isfinite(position[2]))
                 return SUDEKIMP_LAN_PARTY_ROSTER_WAITING;
             /* Keep the pending bit across arbitrarily many callbacks. A

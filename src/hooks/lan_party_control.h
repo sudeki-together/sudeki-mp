@@ -34,6 +34,24 @@ typedef BOOL (*SudekiMpLanPartyControlDrainProbe)(
  * has a new token domain and may restart its per-seat generation counter. */
 BOOL SudekiMpLanPartyControlBeginSession(
     const SudekiMpControlUpdateDispatchWitness *witness);
+/* Exact startup binding for a host who selected any canonical character.
+ * This does not switch a live native controller or change network authority. */
+BOOL SudekiMpLanPartyControlBeginHostSession(
+    const SudekiMpControlUpdateDispatchWitness *witness, unsigned local_character);
+/* Native actor leases have a separate generation domain from connection
+ * leases. Allocate only after the previous exact actor lease has drained.
+ * The returned key is for native adapters, never transport authorization. */
+BOOL SudekiMpLanPartyControlNextLease(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyLease *connection, unsigned character,
+    SudekiMpLanPartyLease *native_key);
+/* Read-only actor-domain key lookup. The caller separately proves connection
+ * ownership; this verifies the retained native actor and generation. */
+BOOL SudekiMpLanPartyControlActorLease(
+    const SudekiMpControlUpdateDispatchWitness *witness, unsigned character,
+    SudekiMpLanPartyLease *native_key);
+BOOL SudekiMpLanPartyControlActorLeaseOnNativeThread(
+    unsigned character, SudekiMpLanPartyLease *native_key);
 /* Client startup chooses its one local controller ONCE, before any native
  * lease. It does not swap the global legacy pair or retarget a live camera.
  * The process must have been launched as this fixed local character. Remote
@@ -45,6 +63,21 @@ BOOL SudekiMpLanPartyControlBeginClientSession(
  * native UsingUI clear and an unpaused normal-speed world. */
 BOOL SudekiMpLanPartyControlGameplayReady(
     const SudekiMpControlUpdateDispatchWitness *witness);
+/* Persistent owned native None filter: service until Update commits 0/0.
+ * Acquire only from neutral 1/1; an existing skill-owned 0/0 is not ours.
+ * Enable AI only after TRUE; restore only after local AI has been reclaimed.
+ * Native UI/puzzle movement and switching locks remain with their owner. */
+BOOL SudekiMpLanPartyControlMenuInputBlocked(
+    const SudekiMpControlUpdateDispatchWitness *witness, BOOL blocked);
+BOOL SudekiMpLanPartyControlMenuInputExact(void *actor);
+/* Deliver released button states to the current human actor while our exact
+ * None input fence is held. Never cancels native tasks or an AI action;
+ * callers still wait for ordinary animation/action completion afterwards. */
+BOOL SudekiMpLanPartyControlLocalReleaseInput(
+    const SudekiMpControlUpdateDispatchWitness *witness);
+/* Physical native controller owner on its verified game thread; independent
+ * of a network player reservation (including an observing player). */
+unsigned SudekiMpLanPartyControlLocalCharacter(void);
 
 BOOL SudekiMpLanPartyControlAcquire(
     const SudekiMpControlUpdateDispatchWitness *witness,
@@ -69,6 +102,11 @@ BOOL SudekiMpLanPartyControlRetains(
  * the same verified game thread, including callbacks outside the observer
  * stack. This never admits input or mutates the lease. */
 BOOL SudekiMpLanPartyControlRetainedNativeThreadExact(
+    const SudekiMpLanPartyLease *lease, void *actor);
+/* Cleanup-only lifetime proof for HELD or DRAINING on the verified native
+ * thread. Requires the same exact actor/key/roster and owned AI override
+ * (ref1/mode0); excludes RELEASE_VERIFY and never admits fresh input/tasks. */
+BOOL SudekiMpLanPartyControlRetainedCleanupNativeThreadExact(
     const SudekiMpLanPartyLease *lease, void *actor);
 /* Ordinary native locomotion only. This does not route attacks, skills,
  * Spirit Strikes, vertical aim, cameras or animation presentation. */
@@ -107,6 +145,10 @@ BOOL SudekiMpLanPartyControlAilishRangedReady(
     const SudekiMpLanPartyLease *lease, void *actor, BOOL *ready);
 /* Host-only read of Ailish's selected native weapon record under her exact
  * party actor lease. Does not mutate ammunition or reload state. */
+/* Exact host-world read for local or AI Ailish; grants no control lease. */
+BOOL SudekiMpLanPartyControlObserveAilishWorldWeapon(
+    const SudekiMpControlUpdateDispatchWitness *,void *,
+    SudekiMpLanPartyAilishWeaponState *);
 BOOL SudekiMpLanPartyControlObserveAilishWeapon(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanPartyLease *lease, void *actor,
@@ -128,6 +170,34 @@ BOOL SudekiMpLanPartyControlRelease(
 /* Pointer-free teardown barrier, safe to query outside the game callback.
  * The owning control hook refuses uninstall while ANY lease is retained. */
 BOOL SudekiMpLanPartyControlHasLeases(void);
+/* Explicit saved-story native lease entrypoints. They use separate retained
+ * records and a fresh sparse StoryObserver witness; they do not change any
+ * four-member/TestRoom predicate above. The story coordinator additionally
+ * owns Q/E containment, action readiness and network admission. */
+struct SudekiMpLanStoryNativeRoster;
+BOOL SudekiMpLanPartyControlStoryBegin(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *);
+BOOL SudekiMpLanPartyControlStoryNextLease(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,unsigned character,SudekiMpLanPartyLease *);
+BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
+    SudekiMpLanPartyControlDrainProbe);
+BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *);
+BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,float,float);
+BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
+    SudekiMpLanPartyControlDrainProbe);
+BOOL SudekiMpLanPartyControlStoryActorOwned(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,unsigned);
+BOOL SudekiMpLanPartyControlStoryRetainsKey(const SudekiMpLanPartyLease *key);
+BOOL SudekiMpLanPartyControlStoryRetains(void);
+BOOL SudekiMpLanPartyControlStoryEnd(void);
+/* Native-thread coordinator query: all actor leases and their retained mask
+ * are empty. This deliberately excludes the separately owned menu input fence;
+ * it is not permission to uninstall control callbacks or release that fence. */
+BOOL SudekiMpLanPartyControlActorLeasesEmpty(void);
 /* A same-process lobby may supply independently validated native Test Room
  * evidence. Installed only with no actor leases; never replaces roster checks. */
 BOOL SudekiMpLanPartyControlSetTestroomProbe(BOOL (*probe)(unsigned seat));
@@ -152,6 +222,16 @@ BOOL SudekiMpLanPartyControlNativeRosterExact(
     const SudekiMpLanPartyRosterObservation *expected);
 BOOL SudekiMpLanPartyControlNativeActorExact(
     const SudekiMpLanPartyRosterObservation *expected,unsigned seat);
+/* Native local selection transaction. All actor leases must drain; the
+ * existing owned None input fence remains 0/0 throughout. Rebind validates
+ * the native rotation's same-roster result, then changes mod-owned physical
+ * identity only. It preserves launch identity and generation tombstones. */
+BOOL SudekiMpLanPartyControlLocalSwitchReady(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyRosterObservation *expected);
+BOOL SudekiMpLanPartyControlRebindLocal(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyRosterObservation *expected,unsigned character);
 BOOL SudekiMpLanPartyControlEnableCastInputIsolation(
     const SudekiMpControlUpdateDispatchWitness *witness);
 /* Revalidate the complete observation immediately before each existing native
@@ -179,6 +259,11 @@ void SudekiMpLanPartyControlTestCalls(SudekiMpLanPartyTestAiCall acquire,
 void SudekiMpLanPartyControlTestCombat(SudekiMpLanPartyTestCombatCall combat);
 void SudekiMpLanPartyControlTestCombatMode(SudekiMpLanPartyTestCombatMode mode);
 typedef BOOL (*SudekiMpLanPartyTestWorld)(float anchor[3], BOOL *combat);
+typedef void (*SudekiMpLanPartyTestMenuFilter)(void *controller,BOOL blocked);
+void SudekiMpLanPartyControlTestMenuFilter(SudekiMpLanPartyTestMenuFilter call);
+typedef void (*SudekiMpLanPartyTestMenuRelease)(void *actor,void *arbiter,
+    const int states[6]);
+void SudekiMpLanPartyControlTestMenuRelease(SudekiMpLanPartyTestMenuRelease call);
 typedef BOOL (*SudekiMpLanPartyTestSpawn)(unsigned int seat, const float position[3]);
 typedef BOOL (*SudekiMpLanPartyTestInitialize)(unsigned int seat);
 void SudekiMpLanPartyControlTestRosterCalls(SudekiMpLanPartyTestWorld world,

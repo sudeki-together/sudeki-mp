@@ -27,12 +27,20 @@ BOOL SudekiMpLobbyLaunchAvailable(void) {
     wchar_t game[MAX_PATH],dll[MAX_PATH],launcher[MAX_PATH];
     return module_paths(game,dll,launcher);
 }
-static BOOL valid_plan(const SudekiMpLobbyLaunchPlan *p) {
-    if (!p->revision || !p->generation || p->seat>=4 || !(p->members&1u) ||
+BOOL SudekiMpLobbyLaunchPlanValid(const SudekiMpLobbyLaunchPlan *p) {
+    if (!p || !p->revision || !p->generation || p->seat>=4 || !(p->members&1u) ||
         p->members>15 || !(p->members&(1u<<p->seat)) ||
+        !p->reserved_mask || p->reserved_mask>15 || !(p->reserved_mask&(1u<<p->seat)) ||
         (p->seat && (!p->port || !p->host_ipv4[0])) || p->host_ipv4[15]) return FALSE;
-    for (unsigned i=0;i<4;++i)
+    unsigned assigned=0;
+    for (unsigned i=0;i<4;++i) {
+        if (p->reserved_mask&(1u<<i)) {
+            unsigned c=p->character[i];
+            if (c>=4 || (assigned&(1u<<c))) return FALSE;
+            assigned|=1u<<c;
+        } else if (p->character[i]!=4) return FALSE;
         if ((p->seat ? i==p->seat : (p->members>>i)&1u)!=(p->nonce[i]!=0)) return FALSE;
+    }
     for (unsigned i=0;p->host_ipv4[i];++i)
         if ((p->host_ipv4[i]<'0' || p->host_ipv4[i]>'9') && p->host_ipv4[i]!='.') return FALSE;
     return TRUE;
@@ -44,8 +52,8 @@ BOOL SudekiMpLobbyLaunchOpen(const wchar_t *name,HANDLE *handle,SudekiMpLobbyLau
     HANDLE h=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,name);
     if (!h) return FALSE;
     SudekiMpLobbyLaunchShared *s=MapViewOfFile(h,FILE_MAP_ALL_ACCESS,0,0,sizeof(*s));
-    if (!s || s->magic!=LAUNCH_MAGIC || s->version!=1 || s->size!=sizeof(*s) || !s->owner_pid ||
-        !valid_plan(&s->plan) || !wmemchr(s->game,0,MAX_PATH) || !wmemchr(s->dll,0,MAX_PATH) ||
+    if (!s || s->magic!=LAUNCH_MAGIC || s->version!=3 || s->size!=sizeof(*s) || !s->owner_pid ||
+        !SudekiMpLobbyLaunchPlanValid(&s->plan) || !wmemchr(s->game,0,MAX_PATH) || !wmemchr(s->dll,0,MAX_PATH) ||
         wcschr(s->game,L'"') || wcschr(s->dll,L'"') || s->dll_hash[64]) {
         if (s) UnmapViewOfFile(s);
         CloseHandle(h); return FALSE;
@@ -55,7 +63,7 @@ BOOL SudekiMpLobbyLaunchOpen(const wchar_t *name,HANDLE *handle,SudekiMpLobbyLau
 BOOL SudekiMpLobbyLaunchPrepare(SudekiMpLobbyLaunch *launch,const SudekiMpLobbyLaunchPlan *plan) {
     wchar_t game[MAX_PATH],dll[MAX_PATH],launcher[MAX_PATH],name[96],command[512];
     uint64_t random;
-    if (!launch || launch->mapping || !valid_plan(plan) || !module_paths(game,dll,launcher) ||
+    if (!launch || launch->mapping || !SudekiMpLobbyLaunchPlanValid(plan) || !module_paths(game,dll,launcher) ||
         BCryptGenRandom(NULL,(PUCHAR)&random,sizeof(random),BCRYPT_USE_SYSTEM_PREFERRED_RNG)) return FALSE;
     _snwprintf(name,96,L"Local\\SudekiMP-Lobby-%lx-%016llx",(unsigned long)GetCurrentProcessId(),
         (unsigned long long)random);
@@ -64,7 +72,7 @@ BOOL SudekiMpLobbyLaunchPrepare(SudekiMpLobbyLaunch *launch,const SudekiMpLobbyL
     if (GetLastError()==ERROR_ALREADY_EXISTS) { CloseHandle(h); return FALSE; }
     SudekiMpLobbyLaunchShared *s=MapViewOfFile(h,FILE_MAP_ALL_ACCESS,0,0,sizeof(*s));
     if (!s) { CloseHandle(h); return FALSE; }
-    memset(s,0,sizeof(*s)); s->magic=LAUNCH_MAGIC; s->version=1; s->size=sizeof(*s);
+    memset(s,0,sizeof(*s)); s->magic=LAUNCH_MAGIC; s->version=3; s->size=sizeof(*s);
     s->owner_pid=GetCurrentProcessId(); s->plan=*plan;
     wcscpy(s->game,game); wcscpy(s->dll,dll);
     if (!SudekiMpSha256File(dll,s->dll_hash)) goto fail;

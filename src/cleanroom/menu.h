@@ -17,6 +17,12 @@ BOOL SudekiMpInstallLanPartyToolsMenu(HMODULE game_module,UINT toggle_key,
     unsigned local_seat, BOOL (*command)(unsigned action),
     BOOL (*query)(unsigned action,BOOL *enabled),
     void (*connection_status)(char *text,unsigned capacity));
+/* Same presenter and resource ownership; story rows omit Test Room setup. */
+BOOL SudekiMpInstallLanStoryToolsMenu(HMODULE game_module,UINT toggle_key,
+    unsigned local_seat, BOOL (*command)(unsigned action),
+    BOOL (*query)(unsigned action,BOOL *enabled),
+    void (*connection_status)(char *text,unsigned capacity));
+void SudekiMpLanPartyToolsClose(void);
 /* Local input only: never pauses the world or another network seat. */
 BOOL SudekiMpLanPartyToolsCaptureInput(void);
 BOOL SudekiMpLanPartyToolsRestoreRenderState(void);

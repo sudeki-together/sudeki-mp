@@ -13,7 +13,9 @@ enum { SUDEKIMP_LAUNCH_NEW, SUDEKIMP_LAUNCH_PREPARED, SUDEKIMP_LAUNCH_LOADED,
 typedef struct SudekiMpLobbyLaunchPlan {
     uint32_t revision;
     uint64_t generation;
-    uint8_t seat, members;
+    uint8_t seat, members; /* Connected load barrier, includes host. */
+    uint8_t reserved_mask; /* Concrete character claims, including offline players. */
+    uint8_t character[4]; /* Canonical identity; nonlocal members may spectate (4). */
     uint16_t port;
     char host_ipv4[16];
     uint64_t nonce[4];
@@ -31,6 +33,7 @@ typedef struct SudekiMpLobbyLaunch {
 } SudekiMpLobbyLaunch;
 
 BOOL SudekiMpLobbyLaunchAvailable(void);
+BOOL SudekiMpLobbyLaunchPlanValid(const SudekiMpLobbyLaunchPlan *);
 BOOL SudekiMpLobbyLaunchPrepare(SudekiMpLobbyLaunch *, const SudekiMpLobbyLaunchPlan *);
 unsigned SudekiMpLobbyLaunchPoll(SudekiMpLobbyLaunch *, unsigned *port);
 void SudekiMpLobbyLaunchCommand(SudekiMpLobbyLaunch *, unsigned command);

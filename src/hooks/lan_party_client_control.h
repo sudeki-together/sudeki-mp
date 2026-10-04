@@ -10,7 +10,7 @@ typedef struct SudekiMpLanPartyClientControlReport {
     BOOL ready;
 } SudekiMpLanPartyClientControlReport;
 
-/* One local native controller (Elco, Tal OR Ailish); three presentation-only
+/* One selected local native controller; three presentation-only
  * AI leases. The client never calls ControlMove or admits authoritative input.
  * The owning runtime must install input/damage containment before servicing
  * this coordinator. No callbacks or game pointers are touched by Create. */
@@ -20,6 +20,23 @@ SudekiMpLanPartyClientControl *SudekiMpLanPartyClientControlCreate(
 BOOL SudekiMpLanPartyClientControlService(SudekiMpLanPartyClientControl *,
     const SudekiMpControlUpdateDispatchWitness *, SudekiMpLanPartyClientControlReport *);
 void SudekiMpLanPartyClientControlRequestStop(SudekiMpLanPartyClientControl *);
+/* A character handoff drains native presentation bindings without disconnecting
+ * the ACTIVE transport. Service while suspended until BindingsDrained is TRUE.
+ * Resume only after the native controller transaction and this coordinator's
+ * exact rebind have committed. Away alone does not suspend replica playback. */
+void SudekiMpLanPartyClientControlSuspendBindings(SudekiMpLanPartyClientControl *,BOOL);
+BOOL SudekiMpLanPartyClientControlBindingsDrained(const SudekiMpLanPartyClientControl *);
+BOOL SudekiMpLanPartyClientControlSetLocalCharacter(SudekiMpLanPartyClientControl *,
+    const SudekiMpControlUpdateDispatchWitness *,unsigned character);
+/* A transport loss during a native switch must not strand the physical view
+ * on an actor this coordinator still excludes incorrectly. Requires suspended
+ * and positively drained bindings, a disconnected transport, exact unchanged
+ * roster, new physical controller, owned input fence and idle Cast namespaces.
+ * Updates presentation identity only; retains retiring and the old lease. The
+ * runtime may then clear suspension and allow its ordinary explicit F7 retry.
+ * This neither acknowledges an assignment nor grants input/transport control. */
+BOOL SudekiMpLanPartyClientControlFinishDisconnectedSwitch(SudekiMpLanPartyClientControl *,
+    const SudekiMpControlUpdateDispatchWitness *,unsigned character);
 /* Explicit retry on the verified game thread. The runtime must first restore
  * presentation/combat state; every native AI lease must have drained. */
 BOOL SudekiMpLanPartyClientControlRejoin(SudekiMpLanPartyClientControl *,

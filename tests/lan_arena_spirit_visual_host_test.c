@@ -579,6 +579,102 @@ static void native_weak_tests(uint8_t *mapped) {
     CHECK(entity.head==NULL);
 }
 
+static BOOL lifetime_root;
+static BOOL lifetime_shutdown;
+static void *lifetime_factory_result;
+static BOOL fixture_lifetime_shutdown(void) { return lifetime_shutdown; }
+#ifdef SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING
+static unsigned lifetime_retire_calls;
+static void fixture_lifetime_retire(void *effect) {
+    ++lifetime_retire_calls;
+    ((uint8_t *)effect)[0x3e0u]|=8u;
+}
+#endif
+static BOOL fixture_lifetime_witness(void *component,SudekiMpLanPartyEffectOwner *owner) {
+    if(!lifetime_root || (component && component!=fixture_sources[0])) return FALSE;
+    *owner=(SudekiMpLanPartyEffectOwner){77u,19u,fixture_sources[0],SUDEKIMP_LAN_ARENA_BUKI_TYPE};
+    return TRUE;
+}
+static void __attribute__((naked,used)) fixture_lifetime_factory_tail(void) {
+    __asm__ volatile("movl _lifetime_factory_result,%eax\n\tpopl %esi\n\tpopl %ebp\n\t"
+        "popl %ebx\n\taddl $20,%esp\n\tret");
+}
+static void __attribute__((cdecl,used)) fixture_lifetime_forward_body(void) {
+    SudekiMpLanPartyEffectOwner owner={0};
+    CHECK(SudekiMpLanPartyEffectLifetimeCurrent(&owner));
+    CHECK(owner.session==77u && owner.generation==19u && owner.actor==fixture_sources[0]);
+    CHECK(((void *(__cdecl *)(void))(emission_image+0x18760u))()==lifetime_factory_result);
+}
+static void __attribute__((naked,used)) fixture_lifetime_forward_tail(void) {
+    __asm__ volatile("call _fixture_lifetime_forward_body\n\tret $8");
+}
+static void __attribute__((naked,used)) fixture_lifetime_pump_tail(void) {
+    __asm__ volatile("call _fixture_lifetime_forward_body\n\tmovl %ebp,%esp\n\t"
+        "popl %ebp\n\tmovl $19,%eax\n\tret $4");
+}
+static void effect_lifetime_tests(uint8_t *mapped) {
+    typedef void (__attribute__((stdcall)) *Emit)(void *,void **,uint32_t);
+    typedef void (__attribute__((thiscall)) *Forward)(void *,void *,void *);
+    void *out=NULL,*destroy=mapped+0x4d30u;
+    uint8_t saved=mapped[0x1877du];
+    mapped[0x1877du]^=1u;
+    CHECK(!SudekiMpLanPartyEffectLifetimeInitialize((HMODULE)mapped,fixture_lifetime_witness,fixture_lifetime_shutdown));
+    mapped[0x1877du]=saved;
+    CHECK(SudekiMpLanPartyEffectLifetimeInitialize((HMODULE)mapped,fixture_lifetime_witness,fixture_lifetime_shutdown));
+    CHECK(SudekiMpLanPartyEffectLifetimePoll());
+    CHECK(!SudekiMpLanPartyEffectLifetimeRetains());
+    /* Native admission precedes these inert continuation substitutions. Keep
+     * actual hook prologues, native intrusive bind and destructor execution. */
+    fixture_jump(mapped+0x18766u,fixture_lifetime_factory_tail);
+    fixture_jump(mapped+0x131d27u,fixture_lifetime_forward_tail);
+    fixture_jump(mapped+0x18abf6u,fixture_lifetime_pump_tail);
+    lifetime_root=TRUE; lifetime_factory_result=fixture_effects[0];
+    CHECK(((void *(__cdecl *)(void))(mapped+0x18760u))()==fixture_effects[0]);
+    CHECK(SudekiMpLanPartyEffectLifetimeRetains());
+    lifetime_root=FALSE;
+    CHECK(SudekiMpLanPartyEffectLifetimePoll());
+    CHECK(!SudekiMpLanPartyEffectLifetimeReset());
+    /* A child emitted after root/GEL completion inherits the exact observed
+     * native parent, including asynchronous setup and actor-event forwarding. */
+    fixture_nested=0;
+    ((Emit)(mapped+0xe2810u))(fixture_effects[0]+0x270u,&out,3u);
+    CHECK(out==fixture_effects[3]);
+    CHECK(*(void **)(fixture_effects[3]+4u)!=NULL);
+    lifetime_factory_result=fixture_effects[4];
+    ((Forward)(mapped+0x131d20u))(fixture_effects[0]+0x148u,NULL,NULL);
+    CHECK(*(void **)(fixture_effects[4]+4u)!=NULL);
+    lifetime_factory_result=fixture_effects[5];
+    uintptr_t result=(uintptr_t)(fixture_effects[0]+0x288u);
+    void *pump=mapped+0x18abf0u;
+    __asm__ volatile("pushl $0\n\tcall *%1" : "+a"(result) : "r"(pump)
+        : "ecx","edx","memory","cc");
+    CHECK(result==19u && *(void **)(fixture_effects[5]+4u)!=NULL);
+#ifdef SUDEKIMP_SPIRIT_VISUAL_HOST_TESTING
+    SudekiMpLanPartyEffectLifetimeTestRetire(fixture_lifetime_retire);
+    CHECK(!SudekiMpLanPartyEffectLifetimeRequestRetire());
+    CHECK(lifetime_retire_calls==0u);
+    lifetime_shutdown=TRUE;
+    CHECK(SudekiMpLanPartyEffectLifetimeRequestRetire());
+    CHECK(lifetime_retire_calls==4u);
+    CHECK(SudekiMpLanPartyEffectLifetimeRequestRetire());
+    CHECK(lifetime_retire_calls==4u);
+    CHECK(SudekiMpLanPartyEffectLifetimeRetains());
+    CHECK(!SudekiMpLanPartyEffectLifetimeReset());
+#endif
+    uintptr_t ecx=(uintptr_t)fixture_effects[0];
+    __asm__ volatile("call *%1" : "+c"(ecx) : "r"(destroy) : "eax","edx","memory","cc");
+    CHECK(SudekiMpLanPartyEffectLifetimePoll());
+    CHECK(SudekiMpLanPartyEffectLifetimeRetains());
+    CHECK(!SudekiMpLanPartyEffectLifetimeReset());
+    for(unsigned i=3;i<=5;++i) {
+        ecx=(uintptr_t)fixture_effects[i];
+        __asm__ volatile("call *%1" : "+c"(ecx) : "r"(destroy) : "eax","edx","memory","cc");
+    }
+    CHECK(SudekiMpLanPartyEffectLifetimePoll());
+    CHECK(!SudekiMpLanPartyEffectLifetimeRetains());
+    CHECK(SudekiMpLanPartyEffectLifetimeReset());
+}
+
 static void image_tests(const char *path) {
     uint8_t *mapped=map_image(path);
     uint8_t setup[0x90]={0};
@@ -680,6 +776,7 @@ static void image_tests(const char *path) {
     CHECK((unsigned char)eax==1u);
     CHECK(SudekiMpLanArenaSpiritVisualHostInitialize((HMODULE)mapped,inactive_witness,NULL));
     CHECK(SudekiMpLanArenaSpiritVisualHostReset());
+    effect_lifetime_tests(mapped);
     /* Fixture allocation intentionally survives every process-lifetime hook. */
 }
 
