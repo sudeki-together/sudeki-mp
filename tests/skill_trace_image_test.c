@@ -11164,3 +11164,9 @@ int wmain(int argc, wchar_t **argv) {
     puts("skill_trace_image_test: PASS");
     return 0;
 }
+/* This executable exercises Test Room owners only. The story runtime is not
+ * linked; its native roster/noncaster grants must stay explicitly closed. */
+#include "hooks/lan_story_cast.h"
+BOOL SudekiMpLanStoryCastLocalNoncaster(void *actor) { (void)actor; return FALSE; }
+BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r) { (void)w; (void)r; return FALSE; }

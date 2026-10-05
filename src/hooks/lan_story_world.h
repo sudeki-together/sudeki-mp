@@ -63,6 +63,11 @@ BOOL SudekiMpLanStoryWorldFinishRecruitment(const SudekiMpLanStoryNativeRoster *
     const SudekiMpLanStoryWorldFrame *frame,uint32_t remote_after_epoch,
     SudekiMpLanStoryReplicaExact exact,void *context);
 BOOL SudekiMpLanStoryWorldRecruiting(void);
+/* Render-only aim witness; called inside a fresh contained client pose scope.
+ * Reads the last complete body observation and revalidates its native bank,
+ * actor and resource residency. Does not load resources or mutate any object. */
+BOOL SudekiMpLanStoryWorldAimDirection(const SudekiMpLanStoryNativeRoster *roster,
+    void *actor,SudekiMpLanStoryReplicaExact exact,void *context,float direction[3]);
 /* No mod-owned native reference is held; native renderer destruction releases
  * normal animation dependencies. Retires plain observations only, outside the
  * capture/apply stack and on the native thread after the runtime stops use. */

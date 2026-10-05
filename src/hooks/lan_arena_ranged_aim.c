@@ -47,6 +47,9 @@ static float aimed_pose[BONES*12] __attribute__((aligned(16)));
 static float center_pose[BONES*12] __attribute__((aligned(16)));
 static float result_pose[BONES*12] __attribute__((aligned(16)));
 static unsigned pose_depth;
+static BOOL pose_only;
+static LONG pose_callbacks;
+static DWORD pose_callback_thread;
 static uint32_t corrected_poses;
 static uint32_t calibrated_poses;
 static float reference_pose[BONES*12] __attribute__((aligned(16)));
@@ -575,7 +578,8 @@ static void *world_renderer(void *actor) {
     uint8_t *a=actor,*model,*position,*table,*details,*wrapper,*renderer,*bank,*header;
     void *wrappers[3];
     typedef int (__attribute__((thiscall)) *Lookup)(void *,uint32_t);
-    if(!memory(a,0x138,FALSE) || *(void **)a!=aim_image+ELCO_VT) return NULL;
+    if(!memory(a,0x138,FALSE) ||
+        *(void **)a!=aim_image+(pose_only?0x2d555cu:ELCO_VT)) return NULL;
     model=*(uint8_t **)(a+0x134); position=*(uint8_t **)(a+0x44);
     if(!memory(model,0x168,FALSE) || *(void **)model!=aim_image+MODEL_VT ||
         *(void **)(model+0x10)!=actor || !memory(position,0xb8,FALSE) ||
@@ -592,14 +596,15 @@ static void *world_renderer(void *actor) {
         bank=*(uint8_t **)(renderer+8);
         if(!memory(bank,0x28,FALSE)) continue;
         header=*(uint8_t **)(bank+0x1c);
-        if(!memory(header,16,FALSE) || *(uint32_t *)header!=141 ||
-            *(uint32_t *)(header+4)!=BONES) continue;
+        if(!memory(header,16,FALSE) || *(uint32_t *)header!=(pose_only?126u:141u) ||
+            *(uint32_t *)(header+4)!=(pose_only?101u:BONES) ||
+            (pose_only && *(uint32_t *)(header+12)!=3u)) continue;
         if(*(void **)(aim_image+RENDERER_VT+0x40)!=aim_image+0x21bac0) return NULL;
         BOOL matches=TRUE;
         for(unsigned id=0x97;id<=0x98;++id) {
             details=*(uint8_t **)(table+0x14+id*4);
             if(!memory(details,0x28,FALSE)) { matches=FALSE; break; }
-            int expected=id==0x97 ? 50:54;
+            int expected=pose_only?(id==0x97?54:60):(id==0x97?50:54);
             Lookup lookup=(Lookup)(aim_image+0x21bac0);
             if(lookup(renderer,*(uint32_t *)(details+0x14))!=expected &&
                 lookup(renderer,*(uint32_t *)(details+0x20))!=expected) { matches=FALSE; break; }
@@ -870,12 +875,120 @@ static float *__attribute__((used,noinline)) select_pose(void **args,void *rende
         SudekiMpLogFormat("lan_ranged_aim event=pose actor=Elco phase=%.3f amount=%.3f precise=%u calibrated=%lu policy=authored_upper_body_no_channel_restart\r\n",phase,amount,precise,(unsigned long)calibrated_poses);
     return result_pose;
 }
+/* ALICE.HOM has101 nodes, not Elco's109. Its upper branch starts at the
+ * authored waist, with Hips/legs on a separate branch. Validate the runtime
+ * palette and the actual root clip's hierarchy before sampling either aim
+ * clip. Neither exporter indices nor Elco bone hashes are transferable. */
+static BOOL ailish_pose_layout(uint8_t *bank,unsigned root,uint8_t mask[BONES]) {
+    uint8_t *header,*entries,*groups,*circle,*straight,*root_clip,*hierarchy;
+    uint32_t *palette;
+    if(!memory(bank,0x28,FALSE) || !memory(header=*(uint8_t **)(bank+0x1c),16,FALSE) ||
+        *(uint32_t *)header!=126 || *(uint32_t *)(header+4)!=101 ||
+        *(uint32_t *)(header+12)!=3 || root>=126 ||
+        !memory(entries=*(uint8_t **)(bank+0x20),126*28,FALSE)) return FALSE;
+    circle=*(uint8_t **)(entries+54*28);straight=*(uint8_t **)(entries+60*28);
+    root_clip=*(uint8_t **)(entries+root*28);
+    if(!memory(circle,24,FALSE) || !memory(straight,24,FALSE) || !memory(root_clip,24,FALSE) ||
+        *(float *)(circle+4)!=48 || *(float *)(straight+4)!=1 ||
+        *(uint32_t *)(circle+8)!=*(uint32_t *)(straight+8) ||
+        *(uint32_t *)(circle+8)!=*(uint32_t *)(root_clip+8) ||
+        *(uint32_t *)(circle+8)>8 || entries[root*28+24]==1 ||
+        !memory(groups=*(uint8_t **)(bank+0x24),(*(uint32_t *)(circle+8)+1)*8,FALSE)) return FALSE;
+    groups+=*(uint32_t *)(circle+8)*8;
+    hierarchy=*(uint8_t **)groups;palette=*(uint32_t **)(groups+4);
+    if(!memory(hierarchy,101*8,FALSE) || !memory(palette,101*4,FALSE)) return FALSE;
+    void **circle_tracks=*(void ***)(entries+54*28+4),**straight_tracks=*(void ***)(entries+60*28+4);
+    if(!memory(circle_tracks,101*4,FALSE) || !memory(straight_tracks,101*4,FALSE)) return FALSE;
+    uint8_t seen[BONES]={0};int upper=-1,hips=-1;unsigned masked=0;
+    memset(mask,0,BONES);
+    for(unsigned i=0;i<101;++i) {
+        int parent=*(int16_t *)(hierarchy+i*8+4),channel=*(int16_t *)(hierarchy+i*8+6);
+        uint32_t hash=*(uint32_t *)(hierarchy+i*8);
+        if(palette[i]>=101 || seen[palette[i]] || parent < -1 || parent>=(int)i ||
+            channel<0 || channel>=3 ||
+            !memory(circle_tracks[i],4,FALSE) || !memory(straight_tracks[i],4,FALSE)) return FALSE;
+        seen[palette[i]]=1;
+        if(hash==139840248u) { if(upper>=0 || parent<0) return FALSE; upper=(int)i; }
+        if(hash==3626754u) { if(hips>=0) return FALSE; hips=(int)palette[i]; }
+        mask[palette[i]]=(int)i==upper || (parent>=0 && mask[palette[parent]]);
+        /* Ailish also has facial channel2 and channel0 accessories inside
+         * the upper branch. Supply THREE native sampler states; Elco's two
+         * states would be an out-of-bounds native read on this skeleton. */
+        if((hash==139840248u && channel!=1) || (hash==3626754u && channel!=0)) return FALSE;
+        masked+=mask[palette[i]];
+    }
+    return upper>=0 && hips>=0 && !mask[hips] && masked>1 && masked<101;
+}
+static float *ailish_story_pose(void **args,void *renderer,unsigned root) {
+    float *original=args[2],direction[3],unit[3];void *actor=NULL;
+    for(unsigned i=0;i<2;++i) if(renderer && renderer==world_renderers[i]) actor=aim_actors[i];
+    if(!actor || GetCurrentThreadId()!=aim_thread || pose_depth || !aim_witness ||
+        !aim_witness(actor,FALSE,direction) || !SudekiMpLanAimNormalize(direction,unit) ||
+        world_renderer(actor)!=renderer || *(void **)((uint8_t *)renderer+8)!=args[0] ||
+        !memory(original,101*12*sizeof(float),FALSE)) return original;
+    uint8_t mask[BONES];
+    if(!ailish_pose_layout(args[0],root,mask)) return original;
+    uint8_t *position=*(uint8_t **)((uint8_t *)actor+0x44);
+    if(!memory(position,0x5c,FALSE)) return original;
+    float x=*(float *)(position+0x50),z=*(float *)(position+0x58);
+    if(!isfinite(x) || !isfinite(z) || x*x+z*z<.5f ||
+        fabsf(*(float *)(position+0x54))>.0001f) return original;
+    float yaw=atan2f(unit[0]*z-unit[2]*x,unit[0]*x+unit[2]*z);
+    float pitch=atan2f(unit[1],sqrtf(unit[0]*unit[0]+unit[2]*unit[2]));
+    float amount=fminf(sqrtf(yaw*yaw+pitch*pitch)/(3.14159265358979323846f/4),2.f);
+    if(amount<.00001f) return original;
+    float phase=atan2f(yaw,pitch)*(48.f/(2*3.14159265358979323846f));
+    if(phase<0) phase+=48.f;
+    uint8_t states[3][SAMPLE_STATE_BYTES]={{0}};
+    typedef void (__stdcall *Sample)(void *,void *,void *);
+    ++pose_depth;
+    for(unsigned i=0;i<3;++i) { *(uint16_t *)states[i]=54;memcpy(states[i]+12,&phase,4); }
+    ((Sample)(aim_image+POSE_SAMPLE))(args[0],states,aimed_pose);
+    for(unsigned i=0;i<3;++i) { *(uint16_t *)states[i]=60;memset(states[i]+12,0,4); }
+    ((Sample)(aim_image+POSE_SAMPLE))(args[0],states,center_pose);
+    memcpy(result_pose,original,101*12*sizeof(float));
+    BOOL okay=SudekiMpLanAimOverlay(result_pose,aimed_pose,center_pose,mask,101,amount);
+    --pose_depth;
+    float after[3];
+    if(!okay || world_renderer(actor)!=renderer ||
+        *(void **)((uint8_t *)renderer+8)!=args[0] ||
+        !aim_witness(actor,FALSE,after) || memcmp(after,direction,sizeof(after))) return original;
+    if(++corrected_poses<=3)
+        SudekiMpLogFormat("lan_ranged_aim event=pose actor=Ailish phase=%.3f amount=%.3f policy=story_authored_upper_body_root_legs_unchanged\r\n",phase,amount);
+    return result_pose;
+}
+BOOL SudekiMpLanAimPoseWitness(void *unused) {
+    (void)unused;
+    return pose_only && aim_image && pose_callbacks==1 &&
+        pose_callback_thread==GetCurrentThreadId() && pose_hook.installed &&
+        pose_hook.instruction==aim_image+POSE_CALL && aim_image[POSE_CALL]==0xe8 &&
+        !memcmp(aim_image+POSE_CALL+1,&pose_hook.replacement_displacement,4);
+}
+typedef struct PoseCallState { uint8_t fp[512] __attribute__((aligned(16)));DWORD error; } PoseCallState;
+static void leave_pose(PoseCallState *s) {
+    SetLastError(s->error);
+    __asm__ volatile("fxrstor %0" : : "m"(s->fp) : "memory");
+}
+static float *__attribute__((used,noinline,force_align_arg_pointer)) dispatch_pose(void **args,void *renderer,unsigned root) {
+    PoseCallState saved __attribute__((cleanup(leave_pose)));
+    const uint32_t mxcsr=0x1f80u;
+    __asm__ volatile("fxsave %0" : "=m"(saved.fp) : : "memory");
+    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(mxcsr) : "memory");
+    saved.error=GetLastError();
+    float *out=args[2];
+    if(InterlockedIncrement(&pose_callbacks)==1) {
+        pose_callback_thread=GetCurrentThreadId();
+        out=pose_only?ailish_story_pose(args,renderer,root):select_pose(args,renderer);
+        pose_callback_thread=0;
+    }
+    InterlockedDecrement(&pose_callbacks);return out;
+}
 static void __attribute__((naked,noinline)) pose_bridge(void) {
     /* Final local-pose -> model-matrix call: EDI=renderer, EAX=root clip,
      * five stack args, ret20. Replace only the transient input pose pointer.
      * Native matrix construction/weapon attachment still run unmodified. */
     __asm__ volatile("pushfl\n\tpushal\n\tlea 40(%esp),%eax\n\t"
-        "pushl %edi\n\tpushl %eax\n\tcall _select_pose\n\taddl $8,%esp\n\t"
+        "pushl 28(%esp)\n\tpushl %edi\n\tpushl %eax\n\tcall _dispatch_pose\n\taddl $12,%esp\n\t"
         "movl %eax,48(%esp)\n\tpopal\n\tpopfl\n\tjmp *_pose_original\n\t");
 }
 /* Original direction runs first. This override is before native pellet
@@ -959,7 +1072,20 @@ BOOL SudekiMpLanAimObserveEmissionsInstall(HMODULE image,SudekiMpLanEmissionObse
     }
     return TRUE;
 }
+BOOL SudekiMpLanAimPoseOnlyInstall(HMODULE image,SudekiMpLanAimWitness witness) {
+    if(!witness || aim_image || !SudekiMpLanAimImageMatches(image)) {
+        SetLastError(ERROR_INVALID_DATA);return FALSE;
+    }
+    aim_image=(uint8_t *)image;aim_witness=witness;pose_only=TRUE;
+    pose_original=aim_image+POSE_BUILD;
+    if(!SudekiMpInstallRelativeCallHook(&pose_hook,aim_image+POSE_CALL,pose_original,pose_bridge)) {
+        if(!pose_hook.installed) { aim_image=NULL;aim_witness=NULL;pose_only=FALSE;pose_original=NULL; }
+        return FALSE;
+    }
+    return TRUE;
+}
 BOOL SudekiMpLanAimUninstall(void) {
+    if(InterlockedCompareExchange(&pose_callbacks,0,0)) { SetLastError(ERROR_BUSY);return FALSE; }
     if (!SudekiMpRestoreRelativeCallHook(&sample_hook)) return FALSE;
     if (!SudekiMpRestoreRelativeCallHook(&pose_hook)) return FALSE;
     if (!SudekiMpRestoreRelativeCallHook(&direction_hook)) return FALSE;
@@ -975,6 +1101,7 @@ BOOL SudekiMpLanAimUninstall(void) {
     corrected_poses=calibrated_poses=0;
     held_base_samples=idle_pose_passthrough=0;memset(hold_states,0,sizeof(hold_states));
     pose_attempts=0;memset((void *)pose_rejected,0,sizeof(pose_rejected));
+    pose_only=FALSE;pose_callback_thread=0;
     return TRUE;
 }
 void SudekiMpLanAimActors(void *first, void *second) {
@@ -990,6 +1117,6 @@ void SudekiMpLanAimActors(void *first, void *second) {
         if(actors[i]!=aim_actors[i] || renderer!=world_renderers[i])
             memset(&hold_states[i],0,sizeof(hold_states[i]));
         aim_actors[i]=actors[i];world_renderers[i]=renderer;
-        first_person_renderers[i]=first_person_renderer(actors[i]);
+        first_person_renderers[i]=pose_only?NULL:first_person_renderer(actors[i]);
     }
 }

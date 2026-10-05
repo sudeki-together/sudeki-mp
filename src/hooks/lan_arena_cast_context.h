@@ -22,6 +22,20 @@ typedef BOOL (*SudekiMpLanCastOwnerWitness)(void *actor, uint8_t kind,
  * cancel scripts, change speed, or grant client gameplay authority. */
 BOOL SudekiMpInstallLanCastContext(HMODULE image,
     SudekiMpLanCastOwnerWitness witness);
+/* An existing native task-hook owner may provide the constructor/step seams.
+ * It must invoke created AFTER retail construction and BEFORE first step,
+ * and route each step exactly once through the supplied fastcall adapter.
+ * All callbacks and the host remain retained until drained detach succeeds.
+ * The default Test Room installer still owns its original four callsites. */
+typedef void (*SudekiMpLanCastCreatedObserver)(uint32_t hash,void **out_cell);
+typedef int (__attribute__((fastcall)) *SudekiMpLanCastStepAdapter)(void *,void *);
+typedef struct SudekiMpLanCastTaskHost {
+    BOOL (*exact)(HMODULE image);
+    BOOL (*attach)(HMODULE image,SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step);
+    BOOL (*detach)(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step);
+} SudekiMpLanCastTaskHost;
+BOOL SudekiMpInstallLanCastContextWithTaskHost(HMODULE image,
+    SudekiMpLanCastOwnerWitness witness,const SudekiMpLanCastTaskHost *host);
 BOOL SudekiMpUninstallLanCastContext(void);
 /* Called at the verified native controller boundary. Retained task references
  * are released only after the native scheduler has cleared their thread. */

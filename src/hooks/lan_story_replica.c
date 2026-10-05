@@ -1,5 +1,6 @@
 #include "hooks/lan_story_replica.h"
 #include "hooks/lan_arena_owner_view.h"
+#include "hooks/lan_story_residency.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
 #include "engine/skill_activation_abi.h"
@@ -299,6 +300,95 @@ static BOOL equipment_idle(void *actor,void **weapon_out) {
         (weapon[0x3b8u]&4u)) return FALSE;
     *weapon_out=weapon; return TRUE;
 }
+typedef struct TalWeaponPose {
+    uint8_t *actor,*weapon,*item,*wrapper,*object,*renderer,*bank,*description,*entries,*channels,*rows;
+    unsigned submodels,animations;
+    Methods methods;
+} TalWeaponPose;
+static BOOL tal_weapon_pose_target(void *actor,TalWeaponPose *out) {
+    TalWeaponPose t={.actor=actor};
+    if(!readable(actor,0xc4u) || *(void **)actor!=base+0x2d5010u) return FALSE;
+    if(*(void **)(base+0xd9218u)!=base+0xd91f6u ||
+        *(void **)(base+0xd9224u)!=base+0xd91deu ||
+        base[0xd91deu]!=0xb8u || *(uint32_t *)(base+0xd91dfu)!=3u ||
+        base[0xd91e3u]!=0xc3u) return FALSE;
+    t.weapon=*(uint8_t **)(t.actor+0xc0u);
+    if(!readable(t.weapon,0x3b9u) || *(void **)(t.weapon+0x10u)!=actor ||
+        *(void **)(t.weapon+0x26cu) || *(unsigned *)(t.weapon+0x330u)!=3u ||
+        (t.weapon[0x3b8u]&4u)) return FALSE;
+    t.item=*(uint8_t **)(t.weapon+0x268u);
+    if(!readable(t.item,0x18u) || *(unsigned *)(t.item+0x14u)>=12u) return FALSE;
+    t.wrapper=*(uint8_t **)(t.weapon+0xf4u);
+    if(!readable(t.wrapper,0x14u)) return FALSE;
+    t.object=*(uint8_t **)(t.wrapper+8u); t.renderer=*(uint8_t **)(t.wrapper+0xcu);
+    if(!readable(t.object,0x38u) || *(void **)t.object!=base+0x2dd700u ||
+        *(void **)(t.wrapper+0x10u)!=t.renderer || *(void **)(t.object+0x14u)!=t.renderer ||
+        !writable(t.renderer,0xb0u) || !renderer_methods(t.renderer,&t.methods) ||
+        *(unsigned *)(t.renderer+0xa0u)!=1u || *(unsigned *)(t.renderer+0xa4u)) return FALSE;
+    t.bank=*(uint8_t **)(t.renderer+8u);
+    if(!readable(t.bank,0x5cu)) return FALSE;
+    t.description=*(uint8_t **)(t.bank+0x1cu); t.entries=*(uint8_t **)(t.bank+0x20u);
+    if(!readable(t.description,0x10u)) return FALSE;
+    t.animations=*(unsigned *)t.description; t.submodels=*(unsigned *)(t.description+0xcu);
+    if(t.animations<4u || t.animations>4096u || !t.submodels || t.submodels>32u ||
+        !readable(t.entries,t.animations*28u)) return FALSE;
+    t.channels=*(uint8_t **)(t.renderer+0x98u);
+    if(!writable(t.channels,36u)) return FALSE;
+    t.rows=*(uint8_t **)t.channels;
+    if(!writable(t.rows,t.submodels*24u)) return FALSE;
+    for(unsigned c=0;c<=3u;c+=3u) {
+        uint8_t *resource=*(uint8_t **)(t.entries+c*28u);
+        if(!readable(resource,0x20u) || !*(uint32_t *)resource ||
+            *(uint32_t *)resource==0x7ffffu || !isfinite(*(float *)(resource+4u)) ||
+            *(float *)(resource+4u)<=0) return FALSE;
+    }
+    for(unsigned s=0;s<t.submodels;++s) {
+        uint8_t *row=t.rows+s*24u;
+        unsigned selector=*(uint16_t *)row,state=*(uint16_t *)(row+2u);
+        if((selector!=0u && selector!=3u) || (state!=0u && state!=128u) ||
+            *(float *)(row+4u)!=24.0f || !isfinite(*(float *)(row+8u)) ||
+            !isfinite(*(float *)(row+0xcu))) return FALSE;
+    }
+    *out=t; return TRUE;
+}
+static BOOL tal_weapon_pose_same(const TalWeaponPose *a,const TalWeaponPose *b) {
+    return a->actor==b->actor && a->weapon==b->weapon && a->item==b->item &&
+        a->wrapper==b->wrapper && a->object==b->object && a->renderer==b->renderer &&
+        a->bank==b->bank && a->description==b->description && a->entries==b->entries &&
+        a->channels==b->channels && a->rows==b->rows &&
+        a->submodels==b->submodels && a->animations==b->animations;
+}
+static BOOL tal_weapon_pose(const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpLanStoryActor *state,SudekiMpLanStoryReplicaExact exact,void *context) {
+    /* The attachment stream already distinguishes authored hand/sheath.
+     * Tal's weapon has its OWN animation: retail D9170/D92D0 resolve settled
+     * drawn=0, sheathed=3. Moving the wrapper alone leaves the sheath mesh on
+     * the blade. Do not arm CArbiter, alter CWeapon's native state, start a
+     * draw task, or replay transition events inside the paused replica. */
+    if(!state || state->character!=2u || state->weapon_attachment[0]>2u ||
+        state->weapon_attachment[1]) return FALSE;
+    if(!state->weapon_visible || !state->weapon_attachment[0]) return TRUE;
+    unsigned desired=state->weapon_attachment[0]==1u?0u:3u;
+    TalWeaponPose before,after;
+    if(!exact(roster,context) || !tal_weapon_pose_target(roster->actors[2],&before) ||
+        *(unsigned *)(before.item+0x14u)+1u!=state->weapon_item_plus_one) return FALSE;
+    for(unsigned s=0;s<before.submodels;++s) {
+        if(*(uint16_t *)(before.rows+s*24u)==desired) continue;
+        SudekiMpLanStoryResidencyReport report;
+        if(SudekiMpLanStoryResidencyInspect(before.renderer,before.bank,desired,&report)!=
+            SUDEKIMP_STORY_RESIDENCY_READY) return FALSE;
+        if(!exact(roster,context) || !tal_weapon_pose_target(before.actor,&after) ||
+            !tal_weapon_pose_same(&before,&after)) return FALSE;
+        before.methods.set_selector(before.renderer,0,s,(int)desired);
+        if(!exact(roster,context) || !tal_weapon_pose_target(before.actor,&after) ||
+            !tal_weapon_pose_same(&before,&after)) return FALSE;
+        before.methods.set_time(before.renderer,0,s,0.0f,0);
+        if(!exact(roster,context) || !tal_weapon_pose_target(before.actor,&after) ||
+            !tal_weapon_pose_same(&before,&after) ||
+            *(uint16_t *)(before.rows+s*24u)!=desired) return FALSE;
+    }
+    return TRUE;
+}
 BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryFrame *frame,SudekiMpLanStoryReplicaExact exact,void *context) {
     BOOL combat=TRUE;
@@ -368,6 +458,12 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
                     state->weapon_attachment,state->weapon_visible!=0u);
                 applying=FALSE;
                 if(!shown || !exact(roster,context)) { SetLastError(ERROR_IO_PENDING); return FALSE; }
+            }
+            if(c==2u) {
+                applying=TRUE;
+                BOOL posed=tal_weapon_pose(roster,state,exact,context);
+                applying=FALSE;
+                if(!posed) { SetLastError(ERROR_IO_PENDING); return FALSE; }
             }
         }
         if(*(void **)((uint8_t *)actor+0xc0u)!=weapon ||

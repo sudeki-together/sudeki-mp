@@ -49,6 +49,13 @@ SudekiMpStoryLoadState SudekiMpLanStoryLoadPoll(DWORD *result);
 /* Same native thread, outside callbacks. Identifies this prepared attempt and
  * the route actually guarded; it adds no broader readiness/authority claim. */
 BOOL SudekiMpLanStoryLoadGetResult(SudekiMpStoryLoadResult *result);
+/* Local trust root for future story-account binding. Copies the fingerprint
+ * reverified by this exact load's file lease, only AFTER native success and
+ * file retirement. The caller must separately prove world/task readiness.
+ * A network-provided fingerprint, preview, or matching area name is not a
+ * substitute. Failure leaves output unchanged; folder_slot is local metadata
+ * and must not participate in a cross-machine content identity. */
+BOOL SudekiMpLanStoryLoadGetFingerprint(uint32_t attempt,SudekiMpSaveFingerprint *out);
 /* Never force-cancels a native page fade or synchronous load. Busy retains
  * the exact file lease and hook dependencies for a later safe retry. */
 BOOL SudekiMpLanStoryLoadCancel(void);

@@ -8,6 +8,7 @@
 #include "network/lan_story_handoff.h"
 #include "network/lan_story_presentation.h"
 #include "network/lan_story_catchup.h"
+#include "network/lan_story_loot.h"
 #include "engine/party_ownership.h"
 #include <windows.h>
 
@@ -184,6 +185,16 @@ typedef struct SudekiMpLanPartyInput {
 
 typedef struct SudekiMpLanPartySession SudekiMpLanPartySession;
 
+/* Loot remains inert until the native coordinator binds a LOCAL verified
+ * save identity. Packets cannot choose/rebind it. Snapshots carry absolute
+ * character accounts and consumed world sources; Get never awards a delta.
+ * These functions do not enable client interaction or touch native inventory. */
+BOOL SudekiMpLanPartyBindStoryLootSave(SudekiMpLanPartySession *,const uint8_t save_identity[32]);
+BOOL SudekiMpLanPartySendStoryLoot(SudekiMpLanPartySession *,const SudekiMpStoryLootState *,
+    const SudekiMpLanStoryScene *fresh_native_scene);
+BOOL SudekiMpLanPartyGetStoryLoot(SudekiMpLanPartySession *,const SudekiMpLanPartyLease *,
+    uint32_t now,SudekiMpStoryLootState *);
+
 uint8_t SudekiMpLanPartyActorType(unsigned int seat);
 BOOL SudekiMpLanPartyFrameValid(const SudekiMpLanPartyFrame *frame);
 
@@ -294,7 +305,9 @@ BOOL SudekiMpLanPartyTakeStoryMovement(SudekiMpLanPartySession *session,
 /* Authenticated saved-story requests, bounded to one outstanding action per
  * player. Identical retries recover the immutable host result. Take consumes
  * admission once; only the game thread may execute, then publish its observed
- * outcome. A transport ACK cannot authorize a native cast. */
+ * outcome. A never-sent request whose displayed frame already expired may
+ * receive a local EXPIRED result; a possibly sent request always recovers the
+ * host result. A transport ACK cannot authorize a native cast. */
 BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryActionRequest *request);
 BOOL SudekiMpLanPartyTakeStoryAction(SudekiMpLanPartySession *session,

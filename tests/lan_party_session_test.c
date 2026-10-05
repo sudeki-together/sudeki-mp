@@ -1474,6 +1474,12 @@ static void test_loading_assignment_gate(void) {
 }
 
 int main(void) {
+    SudekiMpLanStoryView missing_host_view={0};
+    CHECK(!SudekiMpLanStoryViewUsable(&missing_host_view,FALSE));
+    CHECK(SudekiMpLanStoryViewUsable(&missing_host_view,TRUE));
+    missing_host_view.matrix[0]=1; /* malformed absent view is not a camera gap */
+    CHECK(!SudekiMpLanStoryViewUsable(&missing_host_view,TRUE));
+    CHECK(!SudekiMpLanStoryViewUsable(NULL,TRUE));
     test_context_isolation(); test_block_dodge_extension(); test_running_attack_extension();
     test_motion_catalog(); test_combat_mode_frame_fence(); test_replica_clock_and_atomicity();
     test_world_phase_replica();

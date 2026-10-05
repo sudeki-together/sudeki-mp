@@ -936,6 +936,12 @@ BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,v
     BOOL still_exact=SudekiMpLanStoryClientService(NULL);
     return result && still_exact;
 }
+BOOL SudekiMpLanStoryClientUiPresent(SudekiMpLanStoryClientPresentation callback,
+    void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context) {
+    /* Reuse the existing exact native-callback bracket; never waive registry,
+     * scheduler, roster, input or full-pause checks for UI. */
+    return SudekiMpLanStoryClientEffectsPresent(callback,context,witness,witness_context);
+}
 BOOL SudekiMpLanStoryClientEffectsPresent(SudekiMpLanStoryClientPresentation callback,
     void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context) {
     if(!callback || !witness || effects_witness || presentation_active || exit_prepared ||

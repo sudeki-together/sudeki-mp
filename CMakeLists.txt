@@ -137,6 +137,9 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_render.c
     src/hooks/lan_story_resource_file.c
     src/hooks/lan_story_effects.c
+    src/hooks/lan_story_realtime.c
+    src/hooks/lan_story_quick_menu.c
+    src/hooks/lan_story_cast.c
     src/hooks/lan_story_host_control.c
     src/hooks/lan_story_control.c
     src/hooks/lan_story_menu.c
@@ -1694,6 +1697,13 @@ target_compile_options(SudekiMP.RangedWorldPoseTest PRIVATE -Wall -Wextra -Wpeda
 set_target_properties(SudekiMP.RangedWorldPoseTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryRangedProjectionTest tests/story_ranged_projection_test.c)
+add_executable(SudekiMP.StoryWeaponPoseTest tests/story_weapon_pose_test.c)
+target_include_directories(SudekiMP.StoryWeaponPoseTest PRIVATE src)
+target_compile_options(SudekiMP.StoryWeaponPoseTest PRIVATE
+    -Wall -Wextra -Werror -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryWeaponPoseTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryWeaponPoseTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 target_include_directories(SudekiMP.StoryRangedProjectionTest PRIVATE src)
 target_compile_options(SudekiMP.StoryRangedProjectionTest PRIVATE
     -Wall -Wextra -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
@@ -1705,12 +1715,117 @@ target_include_directories(SudekiMP.StoryControlStatusTest PRIVATE src)
 target_compile_options(SudekiMP.StoryControlStatusTest PRIVATE -Wall -Wextra -UNDEBUG -fwhole-program)
 set_target_properties(SudekiMP.StoryControlStatusTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryHostFilterTest tests/story_host_filter_test.c)
+target_include_directories(SudekiMP.StoryHostFilterTest PRIVATE src)
+target_compile_options(SudekiMP.StoryHostFilterTest PRIVATE
+    -Wall -Wextra -Werror -UNDEBUG -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryHostFilterTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryHostFilterTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+set(SUDEKIMP_STORY_LOOT_CORE
+    src/engine/story_loot.c src/engine/story_loot_codec.c
+    src/network/lan_story_loot.c)
+target_sources(SudekiMP PRIVATE ${SUDEKIMP_STORY_LOOT_CORE} src/engine/story_loot_sidecar.c
+    src/engine/story_breakable.c src/engine/story_placement.c src/hooks/lan_story_objects.c
+    src/hooks/lan_story_loot_trace.c)
+foreach(target SudekiMP.SkillTraceImageTest SudekiMP.LanPartySessionTest SudekiMP.StoryShotsTest)
+    target_sources(${target} PRIVATE ${SUDEKIMP_STORY_LOOT_CORE} src/engine/personal_wallet.c)
+endforeach()
+add_executable(SudekiMP.StoryLootTest tests/story_loot_test.c ${SUDEKIMP_STORY_LOOT_CORE}
+    src/engine/personal_wallet.c src/network/lan_party_story.c)
+add_executable(SudekiMP.StoryLootSidecarTest tests/story_loot_sidecar_test.c
+    src/engine/story_loot.c src/engine/story_loot_codec.c src/engine/story_loot_sidecar.c
+    src/engine/personal_wallet.c)
+add_executable(SudekiMP.StoryBreakableTest tests/story_breakable_test.c
+    src/engine/story_breakable.c src/engine/story_loot.c src/engine/personal_wallet.c)
+add_executable(SudekiMP.StoryPlacementTest tests/story_placement_test.c src/engine/story_placement.c)
+add_executable(SudekiMP.StoryObjectsImageTest tests/story_objects_image_test.c
+    src/engine/story_placement.c src/engine/build_identity.c src/engine/sha256.c)
+target_link_libraries(SudekiMP.StoryObjectsImageTest PRIVATE bcrypt)
+add_executable(SudekiMP.StoryLootTraceImageTest tests/story_loot_trace_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_link_libraries(SudekiMP.StoryLootTraceImageTest PRIVATE bcrypt)
+add_executable(SudekiMP.StoryEffectClockImageTest tests/story_effect_clock_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryEffectClockImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryEffectClockImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryEffectClockImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryEffectClockImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryRealtimeImageTest tests/story_realtime_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryRealtimeImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryRealtimeImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryRealtimeImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryRealtimeImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryQuickMenuImageTest tests/story_quick_menu_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryQuickMenuImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryQuickMenuImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryQuickMenuImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryQuickMenuImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryMaterialImageTest tests/story_material_image_test.c
+    src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryMaterialImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMaterialImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryMaterialImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryMaterialImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryTaskHostImageTest tests/story_task_host_image_test.c
+    src/hooks/lan_arena_cast_context.c src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryTaskHostImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryTaskHostImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryTaskHostImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryTaskHostImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryLoadIdentityTest tests/story_load_identity_test.c)
+add_executable(SudekiMP.StoryCastAdmissionTest tests/story_cast_admission_test.c)
+add_executable(SudekiMP.StoryQuickInputTest tests/story_quick_input_test.c)
+add_executable(SudekiMP.StoryMeleeAdmissionTest tests/story_melee_admission_test.c)
 add_executable(SudekiMP.StoryInteractionGuardImageTest tests/story_interaction_guard_image_test.c
     src/engine/arbiter_combat_input.c src/engine/build_identity.c src/engine/sha256.c)
 target_include_directories(SudekiMP.StoryInteractionGuardImageTest PRIVATE src)
 target_compile_options(SudekiMP.StoryInteractionGuardImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StoryInteractionGuardImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StoryInteractionGuardImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_include_directories(SudekiMP.StoryMeleeAdmissionTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMeleeAdmissionTest PRIVATE -Wall -Wextra -Werror -UNDEBUG
+    -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryMeleeAdmissionTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryMeleeAdmissionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_include_directories(SudekiMP.StoryQuickInputTest PRIVATE src)
+target_compile_options(SudekiMP.StoryQuickInputTest PRIVATE -Wall -Wextra -Werror -UNDEBUG
+    -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryQuickInputTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryQuickInputTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+get_target_property(SUDEKIMP_STORY_ACTION_TEST_SOURCES SudekiMP.StoryShotsTest SOURCES)
+list(REMOVE_ITEM SUDEKIMP_STORY_ACTION_TEST_SOURCES tests/story_shots_test.c)
+add_executable(SudekiMP.StoryActionTransportTest tests/story_action_transport_test.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
+target_include_directories(SudekiMP.StoryActionTransportTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryActionTransportTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryActionTransportTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryActionTransportTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryActionTransportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_include_directories(SudekiMP.StoryCastAdmissionTest PRIVATE src)
+target_compile_options(SudekiMP.StoryCastAdmissionTest PRIVATE -Wall -Wextra -Werror -UNDEBUG
+    -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryCastAdmissionTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryCastAdmissionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_include_directories(SudekiMP.StoryLoadIdentityTest PRIVATE src)
+target_compile_options(SudekiMP.StoryLoadIdentityTest PRIVATE -Wall -Wextra -Werror -UNDEBUG
+    -fwhole-program -ffunction-sections -fdata-sections)
+target_link_options(SudekiMP.StoryLoadIdentityTest PRIVATE -Wl,--gc-sections)
+set_target_properties(SudekiMP.StoryLoadIdentityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryLootTransportTest tests/story_loot_transport_test.c ${SUDEKIMP_STORY_LOOT_CORE}
+    src/engine/personal_wallet.c src/network/lan_story_frame.c src/network/lan_party_story.c
+    src/network/lan_party_motion.c src/network/lan_arena_protocol.c
+    src/network/lan_arena_tal_combo_graph.c src/network/lan_party_session.c
+    src/network/lan_story_world_frame.c src/network/lan_story_presentation.c
+    src/network/lan_story_handoff.c src/network/lan_story_catchup.c src/engine/party_ownership.c)
+target_link_libraries(SudekiMP.StoryLootTransportTest PRIVATE ws2_32 bcrypt)
+target_compile_definitions(SudekiMP.StoryLootTransportTest PRIVATE WIN32_LEAN_AND_MEAN)
+foreach(target SudekiMP.StoryLootTest SudekiMP.StoryLootSidecarTest SudekiMP.StoryLootTransportTest SudekiMP.StoryBreakableTest SudekiMP.StoryPlacementTest SudekiMP.StoryObjectsImageTest SudekiMP.StoryLootTraceImageTest)
+    target_include_directories(${target} PRIVATE src)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endforeach()
 
 configure_file(config/SudekiMP.ini "${CMAKE_BINARY_DIR}/bin/SudekiMP.ini" COPYONLY)

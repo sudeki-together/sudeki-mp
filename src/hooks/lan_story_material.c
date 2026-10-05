@@ -9,7 +9,7 @@
 #error "Saved-story material observations require the supported x86 layout"
 #endif
 
-enum { MAX_MATERIALS=128u, MAX_TEXTURES=8u, MAX_BACKINGS=1024u };
+enum { MAX_MATERIALS=128u, MAX_TEXTURES=8u, MAX_BACKINGS=1024u, MAX_JOB_NODES=256u };
 typedef struct CodeIdentity { unsigned rva,size; uint32_t hash; } CodeIdentity;
 typedef struct Relocation { unsigned rva,target; } Relocation;
 static const CodeIdentity codes[]={
@@ -26,6 +26,14 @@ static const CodeIdentity codes[]={
     {0x1d9630u,464u,0xfc75536eu},
     {0x1d9800u,311u,0xc06f1f9fu},
     {0x1d9af0u,140u,0xe9d0000bu},
+    {0x1d6b80u,48u,0xfd11326bu},
+    {0x1d6bb0u,42u,0x6cb1539au},
+    {0x1d6c80u,112u,0xc3d4e618u},
+    {0x1d6d10u,191u,0x456ab716u},
+    {0x1d6dd0u,151u,0x06fc6e17u},
+    {0x1d6e70u,93u,0xafd376c4u},
+    {0x1d6ed0u,296u,0xd353e1a4u},
+    {0x1d9c20u,95u,0xf236be23u},
     {0x206ce0u,52u,0x1172e151u},
     {0x215e70u,24u,0xa68bb247u},
     {0x215ec0u,31u,0x37ddc37au},
@@ -93,6 +101,62 @@ static const Relocation relocations[]={
     {0x1d9b2fu,0x364148u},
     {0x1d9b39u,0x364148u},
     {0x1d9b40u,0x364148u},
+    {0x1d6b82u,0x364148u},
+    {0x1d6b8au,0x29a068u},
+    {0x1d6b92u,0x364148u},
+    {0x1d6b98u,0x29a064u},
+    {0x1d6c8au,0x2dd7acu},
+    {0x1d6cc3u,0x364148u},
+    {0x1d6cccu,0x29a068u},
+    {0x1d6cd3u,0x363ee8u},
+    {0x1d6cdbu,0x364148u},
+    {0x1d6ce2u,0x363ee8u},
+    {0x1d6ce8u,0x29a064u},
+    {0x1d6d1au,0x2dd7acu},
+    {0x1d6d32u,0x3c3168u},
+    {0x1d6d4bu,0x3c316cu},
+    {0x1d6dbcu,0x2de234u},
+    {0x1d6de2u,0x364148u},
+    {0x1d6de8u,0x29a068u},
+    {0x1d6e1au,0x29a064u},
+    {0x1d6e28u,0x364148u},
+    {0x1d6e2eu,0x29a064u},
+    {0x1d6e38u,0x3c31afu},
+    {0x1d6e46u,0x29a09cu},
+    {0x1d6e78u,0x364148u},
+    {0x1d6e81u,0x29a068u},
+    {0x1d6e88u,0x363ee8u},
+    {0x1d6ea7u,0x364148u},
+    {0x1d6eb0u,0x29a064u},
+    {0x1d6ebau,0x364148u},
+    {0x1d6ec1u,0x363ee8u},
+    {0x1d6ec7u,0x29a064u},
+    {0x1d6ed7u,0x29a068u},
+    {0x1d6eedu,0x364148u},
+    {0x1d6efeu,0x363ee8u},
+    {0x1d6f15u,0x364148u},
+    {0x1d6f1fu,0x364148u},
+    {0x1d6f25u,0x29a064u},
+    {0x1d6f60u,0x364148u},
+    {0x1d6f6au,0x364148u},
+    {0x1d6f70u,0x29a064u},
+    {0x1d6f8bu,0x404140u},
+    {0x1d6fa0u,0x3c3168u},
+    {0x1d6fa7u,0x404180u},
+    {0x1d6fbcu,0x3c316cu},
+    {0x1d6fc7u,0x29a064u},
+    {0x1d6fccu,0x364148u},
+    {0x1d9c22u,0x3c3137u},
+    {0x1d9c2au,0x29a060u},
+    {0x1d9c31u,0x364148u},
+    {0x1d9c39u,0x3c3137u},
+    {0x1d9c3fu,0x363fe8u},
+    {0x1d9c46u,0x364018u},
+    {0x1d9c4du,0x364000u},
+    {0x1d9c59u,0x364160u},
+    {0x1d9c68u,0x3c31d8u},
+    {0x1d9c71u,0x1d9e90u},
+    {0x1d9c79u,0x3c31d8u},
     {0x206cffu,0x2dee3cu},
     {0x215e80u,0x2df67cu},
     {0x215ecau,0x2dee1cu},
@@ -171,18 +235,6 @@ static BOOL slot(unsigned table,unsigned offset,unsigned method) {
     return readable(verified_image+table+offset,4u) &&
         *(void **)(verified_image+table+offset)==verified_image+method;
 }
-static BOOL jobs_empty(void) {
-    /* The native hash is (resource>>6)&31. Never traverse worker-owned
-     * pending job/callback nodes without their lock. This same-area scope
-     * requires the complete job table empty before admitting clone/delete. */
-    observe("resource_jobs",0);
-    void *const *heads=(void *const *)(verified_image+0x363ee8u);
-    if(!readable(heads,32u*4u)) return FALSE;
-    for(unsigned i=0;i<32u;++i) if(heads[i]) {
-        observe("resource_jobs",i); SetLastError(ERROR_BUSY); return FALSE;
-    }
-    return TRUE;
-}
 typedef struct Backing {
     uint8_t *pointer;
     unsigned additions,retirements;
@@ -198,6 +250,68 @@ typedef struct Proof {
     void *original_uv[MAX_BACKINGS],*retired_uv[MAX_BACKINGS];
     unsigned original_texture_count,retired_texture_count,original_uv_count,retired_uv_count;
 } Proof;
+static unsigned resource_bucket(const void *resource) {
+    return ((uintptr_t)resource>>6u)&31u;
+}
+static DWORD backings_ready_locked(const Proof *proof) {
+    uint32_t buckets=0;
+    for(unsigned i=0;i<proof->backing_count;++i)
+        buckets|=1u<<resource_bucket(proof->backing[i].pointer);
+    uint8_t *const *heads=(uint8_t *const *)(verified_image+0x363ee8u);
+    observe("resource_job_table",0);
+    if(!readable(heads,32u*4u)) return ERROR_INVALID_DATA;
+    unsigned visited=0;
+    for(unsigned bucket=0;bucket<32u;++bucket) {
+        if(!(buckets&(1u<<bucket))) continue;
+        for(uint8_t *node=heads[bucket];node;node=*(uint8_t **)(node+0x18u)) {
+            observe("resource_job_node",bucket);
+            /* Exact5D6C80/5D6ED0 publish resource+10/hash-next+18 under
+             * 764148. Unlink5D6E70 uses that same lock before destruction.
+             * Never follow callbacks, load-queue owners or foreign backings.
+             * A bound also rejects cycles without retaining borrowed nodes. */
+            if(++visited>MAX_JOB_NODES || !readable(node,0x1cu) ||
+                *(void **)node!=verified_image+0x2dd7acu ||
+                !*(void **)(node+0x10u) || !*(uint32_t *)(node+0xcu) ||
+                resource_bucket(*(void **)(node+0x10u))!=bucket) return ERROR_INVALID_DATA;
+            for(unsigned i=0;i<proof->backing_count;++i)
+                if(*(void **)(node+0x10u)==proof->backing[i].pointer) {
+                    observe("resource_job_owned",i); return ERROR_IO_PENDING;
+                }
+        }
+    }
+    for(unsigned i=0;i<proof->backing_count;++i) {
+        observe("texture_backing",i);
+        const Backing *b=&proof->backing[i];
+        if(!writable(b->pointer,0x3cu) || *(void **)(b->pointer+0xcu)) return ERROR_INVALID_DATA;
+        uint32_t flags=*(uint32_t *)(b->pointer+0x20u);
+        /* Queue membership is authoritative even for resident textures:
+         * 5D9800 may queue a resident resource's callback. Also exclude the
+         * worker/queued bits, including the unlink-to-destructor interval. */
+        if(flags&0x5000u) { observe("resource_backing_waiting",i); return ERROR_IO_PENDING; }
+        if(!*(void **)(b->pointer+4u) || (flags&0x2000u)) return ERROR_INVALID_DATA;
+        observe("backing_counts",i);
+        unsigned references=word(b->pointer+0x24u),requests=(flags>>16u)&0x7fffu;
+        if(references<=b->retirements || requests<=b->retirements ||
+            references>0xffffu-b->additions || requests>0x7fffu-b->additions) return ERROR_INVALID_DATA;
+    }
+    return ERROR_SUCCESS;
+}
+static BOOL backings_ready(const Proof *proof) {
+    /* No texture graph means no texture-job dependency (including Q icons).
+     * Borrow only the already initialized native lock, never initialize it.
+     * Try once: no wait, load pumping, native calls, logging or allocation
+     * while locked. The caller's game-thread owner lease remains required;
+     * this is an observation, not a lease across later renderer mutation. */
+    if(!proof->backing_count) return TRUE;
+    observe("resource_job_lock",0);
+    CRITICAL_SECTION *lock=(CRITICAL_SECTION *)(verified_image+0x364148u);
+    if(!readable(verified_image+0x3c3137u,1u) || verified_image[0x3c3137u]!=1u ||
+        !writable(lock,sizeof(*lock))) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
+    if(!TryEnterCriticalSection(lock)) { SetLastError(ERROR_IO_PENDING); return FALSE; }
+    DWORD error=backings_ready_locked(proof);
+    LeaveCriticalSection(lock);
+    SetLastError(error); return error==ERROR_SUCCESS;
+}
 static BOOL distinct_owned(void *value,void **originals,unsigned *original_count,
     void **retired,unsigned *retired_count,BOOL add,BOOL retire) {
     observe("owned_alias",*retired_count);
@@ -215,10 +329,9 @@ static BOOL distinct_owned(void *value,void **originals,unsigned *original_count
 }
 static BOOL backing(Proof *proof,uint8_t *pointer,BOOL add,BOOL retire) {
     observe("texture_backing",proof->backing_count);
-    if(!writable(pointer,0x3cu) || !*(void **)(pointer+4u) ||
-        *(void **)(pointer+0xcu)) return FALSE;
-    uint32_t flags=*(uint32_t *)(pointer+0x20u);
-    if((flags&0x2000u) || !(flags&0x7fff0000u) || !word(pointer+0x24u)) return FALSE;
+    if(!writable(pointer,0x3cu) || *(void **)(pointer+0xcu)) return FALSE;
+    /* Readiness and aggregate reference arithmetic are checked after the
+     * complete graph is collected, alongside resource-specific queue state. */
     unsigned i;
     for(i=0;i<proof->backing_count;++i) if(proof->backing[i].pointer==pointer) break;
     if(i==proof->backing_count) {
@@ -365,7 +478,6 @@ static BOOL owner_exact(HMODULE image,const void *pointer,const void *resource_p
         manager_offset=0x28u; override_pair=*(uint8_t **)(wrapper+0xcu);
         if(override_pair && !writable(override_pair,8u)) return FALSE;
     } else return FALSE;
-    if(!jobs_empty()) return FALSE;
     observe("material_manager",0);
     uint8_t *manager=*(uint8_t **)(resource+manager_offset);
     if(!readable(manager,8u)) return FALSE;
@@ -395,14 +507,6 @@ static BOOL owner_exact(HMODULE image,const void *pointer,const void *resource_p
     /* All old overrides are released before replacement clones are made.
      * Sum every possibly retired wrapper sharing a backing; per-wrapper >1
      * alone does not prove the final release preserves the original holder. */
-    for(unsigned i=0;i<proof.backing_count;++i) {
-        observe("backing_counts",i);
-        const Backing *b=&proof.backing[i];
-        unsigned references=word(b->pointer+0x24u);
-        unsigned requests=(*(unsigned *)(b->pointer+0x20u)>>16u)&0x7fffu;
-        if(references<=b->retirements || requests<=b->retirements ||
-            references>0xffffu-b->additions || requests>0x7fffu-b->additions) return FALSE;
-    }
     for(unsigned i=0;i<proof.definition_count;++i) {
         observe("definition_counts",i);
         const Definition *d=&proof.definitions[i];
@@ -412,7 +516,7 @@ static BOOL owner_exact(HMODULE image,const void *pointer,const void *resource_p
     observe("owner_recheck",count);
     return *(void **)(resource+manager_offset)==manager && *(unsigned *)manager==count &&
         *(void **)(manager+4u)==originals && (!override_pair ||
-            (*(void **)override_pair==overrides && *(void **)(override_pair+4u)==flags)) && jobs_empty();
+            (*(void **)override_pair==overrides && *(void **)(override_pair+4u)==flags)) && backings_ready(&proof);
 }
 BOOL SudekiMpLanStoryMaterialOwnerExact(HMODULE image,const void *child,const void *resource) {
     SetLastError(ERROR_INVALID_DATA);

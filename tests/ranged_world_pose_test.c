@@ -2,6 +2,19 @@
 #include <assert.h>
 #include <stdio.h>
 int main(void) {
+    float prior[3]={1,0,0},root[3]={9,9,9};
+    for(int i=-89;i<=89;++i) {
+        float pitch=i*.01745329252f,aim[3]={0,sinf(pitch),cosf(pitch)};
+        assert(SudekiMpRangedWorldRoot(aim,prior,root));
+        assert(root[0]==0 && root[1]==0 && fabsf(root[2]-1)<.00001f);
+        assert(fabsf(aim[1]-sinf(pitch))<.00001f); /* full aim not discarded */
+    }
+    assert(SudekiMpRangedWorldRoot((float[]){0,1,0},prior,root) && root[0]==1 && root[1]==0);
+    assert(SudekiMpRangedWorldRoot((float[]){0,-1,0},prior,root) && root[0]==1 && root[1]==0);
+    assert(!SudekiMpRangedWorldRoot((float[]){0,1,0},(float[]){0,1,0},root) && root[0]==1);
+    assert(!SudekiMpRangedWorldRoot((float[]){NAN,0,1},prior,root) && root[0]==1);
+    assert(!SudekiMpRangedWorldRoot((float[]){0,0,0},prior,root) && root[0]==1);
+    assert(!SudekiMpRangedWorldRoot(NULL,prior,root));
     assert(SudekiMpRangedWorldSemantic(5)==2);
     assert(SudekiMpRangedWorldSemantic(0x8c)==0x85);
     assert(SudekiMpRangedWorldSemantic(0x8d)==0x86);

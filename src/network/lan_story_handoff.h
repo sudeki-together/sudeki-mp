@@ -38,7 +38,10 @@ typedef struct SudekiMpLanStoryMovement {
  * Spirit variants retain the native actor-specific one-based pair (1..2). */
 typedef enum SudekiMpLanStoryActionKind {
     SUDEKIMP_STORY_ACTION_SKILL=1,
-    SUDEKIMP_STORY_ACTION_SPIRIT
+    SUDEKIMP_STORY_ACTION_SPIRIT,
+    /* Tal only in this closed story slice. slot is 1 weak, 2 strong, 3 sweep.
+     * A press requests native admission, never an animation or hit result. */
+    SUDEKIMP_STORY_ACTION_MELEE
 } SudekiMpLanStoryActionKind;
 typedef struct SudekiMpLanStoryActionRequest {
     SudekiMpLanStoryControlFence fence;
@@ -51,7 +54,11 @@ typedef enum SudekiMpLanStoryActionOutcome {
     SUDEKIMP_STORY_ACTION_BUSY,
     SUDEKIMP_STORY_ACTION_EXPIRED,
     /* Native submission may have started: retain its owner, never retry Use. */
-    SUDEKIMP_STORY_ACTION_RETAINED
+    SUDEKIMP_STORY_ACTION_RETAINED,
+    /* The native melee entry was called once. Its void ABI cannot prove an
+     * accepted combo: only subsequent host-observed poses/consequences can. */
+    SUDEKIMP_STORY_ACTION_SUBMITTED,
+    SUDEKIMP_STORY_ACTION_NO_SP
 } SudekiMpLanStoryActionOutcome;
 typedef struct SudekiMpLanStoryActionResult {
     SudekiMpLanStoryControlFence fence;

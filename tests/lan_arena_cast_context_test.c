@@ -15,6 +15,19 @@ static unsigned int expected_actor;
 static BOOL spawn_child, nested;
 static BOOL refuse_enter, refuse_leave, nested_step, step_dispatch, retained_binding;
 static BOOL check_starting_task;
+static BOOL shared_exact=TRUE,shared_detach=TRUE;
+static SudekiMpLanCastCreatedObserver shared_created;
+static SudekiMpLanCastStepAdapter shared_step;
+static BOOL shared_host_exact(HMODULE module) { return shared_exact && module==(HMODULE)image; }
+static BOOL shared_host_attach(HMODULE module,SudekiMpLanCastCreatedObserver c,SudekiMpLanCastStepAdapter s) {
+    CHECK(shared_host_exact(module) && !shared_created && !shared_step);
+    shared_created=c; shared_step=s; return TRUE;
+}
+static BOOL shared_host_detach(SudekiMpLanCastCreatedObserver c,SudekiMpLanCastStepAdapter s) {
+    CHECK(c==shared_created && s==shared_step);
+    if(!shared_detach) return FALSE;
+    shared_created=NULL; shared_step=NULL; return TRUE;
+}
 static void *routed_actor, *saved_route[16];
 static unsigned int route_depth, step_calls;
 static uint32_t route_enter(const SudekiMpLanCastOwner *owner) {
@@ -201,12 +214,28 @@ static void setup(void) {
     CHECK(SudekiMpLanCastContextPoll());
     original_opcodes[0]=original_opcodes[1]=original_opcodes[2]=binding;
 }
+static unsigned idle_steps;
+static int __attribute__((fastcall)) idle_step(void *thread,void *edx) {
+    CHECK(thread==threads[3] && edx==(void *)0x13579);
+    CHECK(!task_enter && !task_scope_count && !depth && !current_cast && !route_depth);
+    ++idle_steps; SetLastError(1234); return 93;
+}
 int main(void) {
     unsigned int a,b,i;
     SudekiMpLanCastOwner owner;
     image=VirtualAlloc(NULL,0x45f000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
     if(!image) return 1;
     fixture(); setup();
+    {
+        OpcodeFunction saved=original_step;
+        original_step=idle_step;
+        /* Production story routing stays off before a private cast. A busy
+         * story VM must reach retail once per step without namespace entry. */
+        for(unsigned n=0;n<100000;++n)
+            CHECK(task_step(threads[3],(void *)0x13579)==93 && GetLastError()==1234);
+        CHECK(idle_steps==100000 && !next_cast_id && !task_scope_count && !depth);
+        original_step=saved;
+    }
     {
         typedef uint32_t * (__attribute__((regparm(1),stdcall)) *CreateBridge)(
             uint32_t,void *,void **,void *,uint32_t,uint32_t);
@@ -518,6 +547,28 @@ int main(void) {
     CHECK(!SudekiMpUninstallLanCastContext() && original_step && cast_image);
     image[STEP_IMMEDIATE]=0xe8;
     CHECK(SudekiMpUninstallLanCastContext());
+
+    /* An explicit task host owns these four sites. Cast context must neither
+     * overwrite them nor restore them while removing its own entry hooks. */
+    {
+        const SudekiMpLanCastTaskHost host={shared_host_exact,shared_host_attach,shared_host_detach};
+        const unsigned sites[]={CREATE_DIRECT,CREATE_CHILD,STEP_IMMEDIATE,STEP_SCHEDULED};
+        uint8_t owned[4][5];
+        for(unsigned j=0;j<4;++j) { memset(image+sites[j],0xcc,5); memcpy(owned[j],image+sites[j],5); }
+        CHECK(SudekiMpInstallLanCastContextWithTaskHost((HMODULE)image,witness,&host));
+        CHECK(shared_created==created_task && shared_step==task_step && task_host_attached);
+        CHECK(!create_hooks[0].installed && !create_hooks[1].installed &&
+            !step_hooks[0].installed && !step_hooks[1].installed);
+        CHECK(SudekiMpLanCastContextPoll());
+        shared_detach=FALSE;
+        CHECK(!SudekiMpUninstallLanCastContext() && cast_image && task_host_attached && original_step);
+        shared_detach=TRUE; CHECK(SudekiMpUninstallLanCastContext());
+        for(unsigned j=0;j<4;++j) CHECK(!memcmp(image+sites[j],owned[j],5));
+        CHECK(!shared_created && !shared_step && !task_host_attached);
+        shared_exact=FALSE;
+        CHECK(!SudekiMpInstallLanCastContextWithTaskHost((HMODULE)image,witness,&host) && !cast_image);
+        shared_exact=TRUE; fixture();
+    }
 
     /* A failed native context restoration cannot free callbacks or rewrite an
      * already executed opcode as a retry. End this test with quarantined state;

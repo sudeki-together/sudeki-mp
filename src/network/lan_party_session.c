@@ -20,12 +20,12 @@ enum {
     MSG_COMMAND, MSG_PRESENCE, MSG_STORY_FRAME, MSG_STORY_WORLD,
     MSG_STORY_CONTROL, MSG_STORY_CONTROL_ACK, MSG_STORY_MOVEMENT, MSG_STORY_RECRUITMENT,
     MSG_STORY_PRESENTATION, MSG_STORY_CATCHUP, MSG_STORY_CATCHUP_ACK,
-    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT,
+    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT,
     COMMAND_SIZE = 24, PRESENCE_SIZE = 95, INPUT_FENCE_SIZE = 12, PRESENCE_INTERVAL = 100,
-    /* Saved profile 14 carries combat mode, authored weapon attachments and
-     * five-channel world poses. Action/result messages retain their fences.
-     * HELLO rejects prior saved builds; Test Room keeps its existing profile. */
-    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 15, STORY_SCENE_INTERVAL = 100,
+    /* Saved profile 18 adds Tal melee requests and explicit submission/SP
+     * outcomes. Native routing is gated separately. Test Room and observation
+     * profiles, loot sidecars and native saves remain unchanged. */
+    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 18, STORY_SCENE_INTERVAL = 100,
     JETPACK_STATE_SIZE = 42, COMBAT_MODE_SIZE = 13, COMBAT_MODE_INTERVAL = 100,
     INPUT_EXTENSION_SIZE = 5, AILISH_STATE_SIZE = 11 + 9 * SUDEKIMP_LAN_WEAPON_SHOT_HISTORY,
     PRESENTATION_STATE_SIZE = 37,
@@ -141,6 +141,10 @@ struct SudekiMpLanPartySession {
     SudekiMpLanStoryPresentation story_presentations[FRAME_QUEUE];
     uint32_t story_presentation_receipts[FRAME_QUEUE],story_presentation_sequence;
     unsigned story_presentation_head,story_presentation_count;
+    uint8_t story_loot_save[32],story_loot_bound;
+    SudekiMpStoryLootState story_loot;
+    SudekiMpLanStoryLootAssembly story_loot_assembly;
+    uint32_t story_loot_epoch,story_loot_scene_revision,story_loot_tick,story_loot_received_at;
     SudekiMpPartyAssignment assignment;
     uint8_t assignment_valid, presence_valid;
     SudekiMpLanPartyPresence presence;
@@ -175,6 +179,10 @@ static void clear_story_frames(SudekiMpLanPartySession *s) {
     memset(s->story_presentations,0,sizeof(s->story_presentations));
     memset(s->story_presentation_receipts,0,sizeof(s->story_presentation_receipts));
     s->story_presentation_head=s->story_presentation_count=s->story_presentation_sequence=0;
+    memset(&s->story_loot_assembly,0,sizeof(s->story_loot_assembly));
+    s->story_loot_epoch=s->story_loot_scene_revision=0;
+    /* Keep the account revision floor and trusted save identity. A roster
+     * change/reconnect must not reset reward ownership or permit rollback. */
     for(unsigned i=1u;i<4u;++i) {
         Peer *p=&s->peer[i];
         clear_story_action(p);
@@ -918,6 +926,28 @@ static BOOL accept_story_presentation(SudekiMpLanPartySession *s,const uint8_t *
     return TRUE;
 }
 
+static BOOL story_loot_advances(const SudekiMpStoryLootState *old,const SudekiMpStoryLootState *next) {
+    if(!old->revision) return TRUE;
+    return SudekiMpStoryLootAdvances(old,next);
+}
+static BOOL accept_story_loot(SudekiMpLanPartySession *s,const uint8_t *bytes,size_t size) {
+    SudekiMpLanStoryLootChunk c; SudekiMpStoryLootState completed;
+    if(s->config.story_observation!=2u || !s->config.local_seat || !s->story_loot_bound ||
+        !story_control_fresh(s->now,s->story_scene_received_at) ||
+        !SudekiMpLanStoryLootDecode(bytes,size,&c) ||
+        !presentation_scene(s,c.epoch,c.scene_revision,c.host_tick) ||
+        c.revision<s->story_loot.revision ||
+        (s->story_loot_epoch==c.epoch && s->story_loot_scene_revision==c.scene_revision &&
+            (int32_t)(c.host_tick-s->story_loot_tick)<=0)) return FALSE;
+    int result=SudekiMpLanStoryLootAccept(&s->story_loot_assembly,&c,s->now,s->story_loot_save,&completed);
+    if(result!=2) return result==1;
+    if(!story_loot_advances(&s->story_loot,&completed)) return FALSE;
+    s->story_loot=completed; s->story_loot_epoch=c.epoch;
+    s->story_loot_scene_revision=c.scene_revision; s->story_loot_tick=c.host_tick;
+    s->story_loot_received_at=s->story_loot_assembly.started_at;
+    return TRUE;
+}
+
 static uint32_t catchup_digest(const uint8_t *bytes,size_t size) {
     /* Fragment consistency only; authentication is the existing peer lease. */
     uint32_t hash=2166136261u;
@@ -982,7 +1012,7 @@ static void receive_message(SudekiMpLanPartySession *s,
     size_t body_size = size - HEADER;
     if (seat == 0 || seat >= SUDEKIMP_LAN_PARTY_PLAYERS || bytes[27] ||
         get16(bytes + 24) != body_size || kind < MSG_HELLO ||
-        kind > MSG_STORY_ACTION_RESULT ||
+        kind > MSG_STORY_LOOT ||
         part >= SUDEKIMP_LAN_PARTY_CHUNKS || (kind != MSG_FRAME && part)) return;
     if (get16(bytes + 4) != SUDEKIMP_LAN_PARTY_VERSION) {
         if (!s->config.local_seat && kind == MSG_HELLO && body_size == HELLO_SIZE)
@@ -1028,6 +1058,13 @@ static void receive_message(SudekiMpLanPartySession *s,
     if (!connected_phase(p->status.phase) || !sequence ||
         !same_address(source, &p->address) || !token || !generation ||
         token != p->status.lease.token || generation != p->status.lease.generation) return;
+    if(kind==MSG_STORY_LOOT) {
+        if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !accept_story_loot(s,body,body_size)) return;
+        p->last_received_at=s->now;
+        if(!p->received_sequence || SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence))
+            p->received_sequence=sequence;
+        return;
+    }
     if(kind==MSG_STORY_CATCHUP || kind==MSG_STORY_CATCHUP_ACK) {
         if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
             !(kind==MSG_STORY_CATCHUP ? accept_story_catchup(s,p,body,body_size) :
@@ -1170,13 +1207,21 @@ static void receive_message(SudekiMpLanPartySession *s,
             if(SudekiMpLanStoryActionResultMatches(&p->story_action_result,&request))
                 (void)send_story_action_result(s,p);
         } else {
-            if(!story_action_current(s,p,&request,s->now) ||
-                (p->story_action.request &&
+            if(p->story_action.request &&
                  (!SudekiMpLanArenaSequenceNewer(request.request,p->story_action.request) ||
-                  !SudekiMpLanStoryActionResultMatches(&p->story_action_result,&p->story_action)))) return;
+                  !SudekiMpLanStoryActionResultMatches(&p->story_action_result,&p->story_action))) return;
             p->story_action=request; p->story_action_received_at=s->now;
-            p->story_action_pending=1; p->story_action_taken=0;
+            BOOL fresh=story_action_current(s,p,&request,s->now);
+            p->story_action_pending=fresh?1:0; p->story_action_taken=fresh?0:1;
             memset(&p->story_action_result,0,sizeof(p->story_action_result));
+            if(!fresh) {
+                /* A delayed first datagram still needs a terminal reply.
+                 * Authenticated/current-fence but stale requests are NEVER
+                 * native admission, nor can retries rejuvenate their frame. */
+                p->story_action_result=(SudekiMpLanStoryActionResult){request.fence,
+                    request.request,s->now,request.kind,request.slot,SUDEKIMP_STORY_ACTION_EXPIRED};
+                (void)send_story_action_result(s,p);
+            }
         }
         p->received_sequence=sequence; p->last_received_at=s->now; return;
     }
@@ -1903,6 +1948,57 @@ BOOL SudekiMpLanPartySendStoryPresentation(SudekiMpLanPartySession *s,
     }
     ReleaseSRWLockExclusive(&s->lock); return ok;
 }
+BOOL SudekiMpLanPartyBindStoryLootSave(SudekiMpLanPartySession *s,const uint8_t identity[32]) {
+    if(!s || !identity || s->config.story_observation!=2u) return FALSE;
+    unsigned any=0; for(unsigned i=0;i<32;++i) any|=identity[i];
+    if(!any) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL ok=!s->story_loot_bound || !memcmp(s->story_loot_save,identity,32);
+    if(ok) { memcpy(s->story_loot_save,identity,32); s->story_loot_bound=1; }
+    ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartySendStoryLoot(SudekiMpLanPartySession *s,const SudekiMpStoryLootState *state,
+    const SudekiMpLanStoryScene *scene) {
+    if(!s || s->config.local_seat || s->config.story_observation!=2u || !SudekiMpStoryLootValid(state) ||
+        !state->visit || !SudekiMpLanStorySceneValid(scene) || scene->phase!=SUDEKIMP_LAN_STORY_READY) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    uint32_t now=GetTickCount();
+    BOOL ok=s->story_loot_bound && !memcmp(s->story_loot_save,state->save_identity,32) &&
+        SudekiMpLanStorySceneSame(scene,&s->story_scene) && scene->observed_tick==s->story_scene.observed_tick &&
+        story_control_fresh(now,scene->observed_tick) && story_loot_advances(&s->story_loot,state) &&
+        (!s->story_loot_epoch || scene->epoch!=s->story_loot_epoch ||
+         scene->revision!=s->story_loot_scene_revision || (int32_t)(scene->observed_tick-s->story_loot_tick)>0);
+    if(ok) {
+        /* Reserve the immutable revision before sending. A partial send is
+         * retried from a fresh observation, never as another reward grant. */
+        s->story_loot=*state; s->story_loot_epoch=scene->epoch;
+        s->story_loot_scene_revision=scene->revision; s->story_loot_tick=scene->observed_tick;
+        unsigned count=SudekiMpLanStoryLootChunkCount(state);
+        for(unsigned i=0;i<count;++i) {
+            uint8_t bytes[SUDEKIMP_STORY_LOOT_CHUNK_MAX_SIZE]; size_t size;
+            if(!SudekiMpLanStoryLootEncode(state,scene,i,bytes,sizeof(bytes),&size)) { ok=FALSE; break; }
+            for(unsigned player=1;player<4;++player) {
+                Peer *p=&s->peer[player];
+                if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !p->status.transport_confirmed ||
+                    p->last_story_revision!=scene->revision) continue;
+                if(!send_peer(s,p,MSG_STORY_LOOT,next_sequence(p),0,bytes,size)) ok=FALSE;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyGetStoryLoot(SudekiMpLanPartySession *s,const SudekiMpLanPartyLease *lease,
+    uint32_t now,SudekiMpStoryLootState *out) {
+    if(!s || !out || !lease || !s->config.local_seat || s->config.story_observation!=2u ||
+        lease->seat!=s->config.local_seat) return FALSE;
+    AcquireSRWLockShared(&s->lock); Peer *p=leased(s,lease);
+    BOOL ok=p && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && s->story_loot_bound &&
+        s->story_loot.revision && s->story_loot_epoch==s->story_scene.epoch &&
+        s->story_loot_scene_revision==s->story_scene.revision && s->story_scene.phase==SUDEKIMP_LAN_STORY_READY &&
+        story_receipt_fresh(now,s->story_scene_received_at) && story_receipt_fresh(now,s->story_loot_received_at);
+    if(ok) *out=s->story_loot;
+    ReleaseSRWLockShared(&s->lock); return ok;
+}
 BOOL SudekiMpLanPartyPopStoryPresentation(SudekiMpLanPartySession *s,
     const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryPresentation *frame,
     uint32_t *received_at) {
@@ -2071,9 +2167,12 @@ BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *s,
     AcquireSRWLockExclusive(&s->lock); Peer *p=leased(s,lease);
     uint32_t now=GetTickCount();
     BOOL same=p && SudekiMpLanStoryActionRequestSame(request,&p->story_action);
+    BOOL frame_expired=p && s->story_frame_sequence &&
+        !sequence_ahead(request->acknowledged_frame,s->story_frame_sequence) &&
+        (uint32_t)(s->story_frame_sequence-request->acknowledged_frame)>8u;
     BOOL ok=p && story_control_peer(s,p,&request->fence) &&
         SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&request->fence) &&
-        (same || (story_action_current(s,p,request,now) &&
+        (same || ((story_action_current(s,p,request,now) || frame_expired) &&
             (!p->story_action.request ||
              (SudekiMpLanArenaSequenceNewer(request->request,p->story_action.request) &&
               SudekiMpLanStoryActionResultMatches(&p->story_action_result,&p->story_action)))));
@@ -2083,8 +2182,17 @@ BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *s,
         p->story_action=*request; p->story_action_pending=1;
         p->story_action_received_at=now;
         memset(&p->story_action_result,0,sizeof(p->story_action_result));
+        if(frame_expired) {
+            /* No send was attempted for this first submission. Record local
+             * preflight expiry so the UI can release its plain-data outbox.
+             * A previously sent ID (same) ALWAYS recovers the host result. */
+            p->story_action_pending=0;
+            p->story_action_result=(SudekiMpLanStoryActionResult){request->fence,
+                request->request,now,request->kind,request->slot,SUDEKIMP_STORY_ACTION_EXPIRED};
+        }
     }
-    if(ok) ok=send_peer(s,p,MSG_STORY_ACTION,next_sequence(p),0,bytes,sizeof(bytes));
+    if(ok && !p->story_action_result.request)
+        ok=send_peer(s,p,MSG_STORY_ACTION,next_sequence(p),0,bytes,sizeof(bytes));
     ReleaseSRWLockExclusive(&s->lock); return ok;
 }
 BOOL SudekiMpLanPartyTakeStoryAction(SudekiMpLanPartySession *s,

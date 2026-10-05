@@ -86,6 +86,12 @@ BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *actor,
 BOOL SudekiMpLanStoryFrameValid(const SudekiMpLanStoryFrame *frame);
 BOOL SudekiMpLanStoryFrameMatchesScene(const SudekiMpLanStoryFrame *frame,
     const SudekiMpLanStoryScene *scene);
+/* Missing host geometry may not stall an already selected independent view.
+ * This is not native camera admission: the presenter still proves its local
+ * view lease every frame. Malformed geometry is never accepted. */
+static inline BOOL SudekiMpLanStoryViewUsable(const SudekiMpLanStoryView *view,BOOL independent_selected) {
+    return SudekiMpLanStoryViewValid(view) && (view->valid || independent_selected);
+}
 /* Standalone payload only: authentication/lease/freshness belong to transport.
  * Decoder requires exact length, sorted unique characters and reserved zeros. */
 BOOL SudekiMpLanStoryFrameEncode(const SudekiMpLanStoryFrame *frame,

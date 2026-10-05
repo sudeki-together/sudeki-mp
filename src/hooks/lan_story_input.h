@@ -26,6 +26,16 @@ BOOL SudekiMpLanStoryInputExact(void *controller, void *actor);
 BOOL SudekiMpLanStoryInputArm(void *controller,void *actor,uint32_t transaction);
 BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transaction,
     float *local_x,float *local_z);
+/* Consume this window's native action19 press edge. No native controller
+ * cache is seeded. Releases/repeats cannot open the menu a second time. */
+BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t transaction);
+/* Fresh window-owned 2C/2D/2E press, 1 weak/2 strong/3 sweep, else zero.
+ * Four bounded edges, each expires after 250ms. Focus/menu/rebind discards the
+ * queue without making a held key a new press. No native action execution. */
+unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t transaction);
+/* Keep the exact binding while a local menu owns navigation. Discard held
+ * movement/look/attack edges so closing it cannot replay old gameplay input. */
+void SudekiMpLanStoryInputMuteMovement(void);
 /* Consume elapsed time once per local presentation. Uses window-owned 69/6A
  * events and retail Exploration sensitivity/inversion. Outputs bounded axis
  * seconds; the view applies native authored rotation and distance settings.

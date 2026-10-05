@@ -1,4 +1,5 @@
 #include "hooks/lan_story_control.h"
+#include "hooks/lan_story_cast.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/story_interaction_guard.h"
 #include "hooks/call_hook.h"
@@ -21,6 +22,11 @@ static uint8_t *base;
 static SudekiMpRelativeCallHook switches[2];
 static DWORD native_thread;
 static BOOL installed;
+/* Retail IsAttacking (RVA88D0) reads bit1000. Include it in movement/drain
+ * readiness now that story clients can submit melee; do not restore AI or
+ * overwrite native swing movement before that actor positively retires it.
+ * Submission itself intentionally does not use this idle mask (combo input). */
+enum { STORY_BODY_BUSY_FLAGS=0x081812c8u };
 
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -74,7 +80,7 @@ static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
         !readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
         !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
         *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor ||
-        (*(uint32_t *)(arbiter+0x50u)&0x081802c8u) || (arbiter[0x60u]&5u) ||
+        (*(uint32_t *)(arbiter+0x50u)&STORY_BODY_BUSY_FLAGS) || (arbiter[0x60u]&5u) ||
         SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
         !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
@@ -87,7 +93,8 @@ static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
     interaction=*(uint8_t **)(a+0xa8u);
     if(interaction && (!readable(interaction,0x64u) ||
         !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) return FALSE;
-    return SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+    return SudekiMpLanStoryCastDrained(actor) &&
+        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
 }
 static BOOL ordinary_world(BOOL allow_combat) {
     BOOL combat=TRUE; uint8_t *speed;
@@ -171,6 +178,27 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
         return TRUE;
     }
     return FALSE;
+}
+unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned kind) {
+    if(!key || key->seat!=2u || kind<1u || kind>3u || !boundary(w,roster) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    BOOL pending=TRUE; int spirit=-1;
+    void *actor=roster->actors[key->seat];
+    /* Do not require body_idle: a native combo accepts another press while
+     * its previous swing owns animation/movement. Native arbiter validation
+     * remains responsible for combat state and combo gates. Its early
+     * interaction branches are NOT actor-isolated: deny those before entry. */
+    if(!ordinary_world(TRUE) || SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
+        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
+        !SudekiMpLanStoryCastDrained(actor) ||
+        !SudekiMpStoryMeleeInteractionClear(base,actor,kind,readable))
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    BOOL submitted=FALSE;
+    if(SudekiMpLanPartyControlStoryMelee(w,roster,key,kind,&submitted))
+        return SUDEKIMP_STORY_ACTION_SUBMITTED;
+    return submitted?SUDEKIMP_STORY_ACTION_RETAINED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
 }
 BOOL SudekiMpLanStoryControlDrain(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key) {

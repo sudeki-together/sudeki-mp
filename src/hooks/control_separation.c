@@ -1,6 +1,7 @@
 #include "hooks/control_separation.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/lan_party_cast.h"
+#include "hooks/lan_story_cast.h"
 #include "hooks/lan_story_observer.h"
 
 #include "cleanroom/engine.h"
@@ -1290,7 +1291,8 @@ static void call_original_controller_update_with_skill_input_isolation(
         *(void **)((uint8_t *)controller+CONTROLLER_TARGET_OFFSET):NULL;
     BOOL input_isolation=!party_menu_input_requested &&
         (player_one_skill_input_isolation_enabled ||
-         (service_only_mode && SudekiMpLanPartyCastLocalNoncaster(party_local)));
+         (service_only_mode && (SudekiMpLanPartyCastLocalNoncaster(party_local) ||
+            SudekiMpLanStoryCastLocalNoncaster(party_local))));
     if(service_only_mode && !input_isolation) player_one_skill_native_input_restored=FALSE;
 
     player_one_skill_direct_movement_scope_active = FALSE;
@@ -5840,7 +5842,8 @@ static BOOL local_noncaster_action_exact(
 static BOOL local_noncaster_filter_exact(uint8_t *character) {
     uint8_t *controller;
     void *other;
-    if(service_only_mode) return SudekiMpLanPartyCastLocalNoncaster(character);
+    if(service_only_mode) return SudekiMpLanPartyCastLocalNoncaster(character) ||
+        SudekiMpLanStoryCastLocalNoncaster(character);
     if (!player_one_skill_input_isolation_enabled || game_base == NULL ||
         character == NULL || character != SudekiMpCleanroomEngineActorEntity(
             lan_movement_local_actor) || !character_is_in_active_group(character) ||

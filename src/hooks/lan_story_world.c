@@ -40,6 +40,8 @@ typedef struct Bound {
     SudekiMpLanStoryWorldActor previous;
     BOOL ranged_base;
     uint32_t tick;
+    uint32_t translated_tick;
+    float translation_anchor[2];
 } Bound;
 typedef struct Prepared {
     BOOL valid;
@@ -576,18 +578,62 @@ static BOOL read_pose_detail(const Target *t,SudekiMpLanStoryWorldActor *a,BOOL 
 static BOOL read_pose(const Target *t,SudekiMpLanStoryWorldActor *a) {
     return read_pose_detail(t,a,NULL);
 }
+static BOOL project_ranged_translation(const Target *t,const Bound *old,uint32_t now,
+    SudekiMpLanStoryWorldActor *a,Bound *next) {
+    next->translated_tick=0;
+    next->translation_anchor[0]=a->position[0]; next->translation_anchor[1]=a->position[2];
+    if(!old || !old->ranged_base || !same_target(&old->target,t) ||
+        !now || !old->tick || now-old->tick>250u || now==old->tick) return TRUE;
+    float dx=a->position[0]-old->previous.position[0],dz=a->position[2]-old->previous.position[2];
+    /* A loading/teleport discontinuity is not walking. The bound is wider
+     * than ordinary native movement; this never changes host coordinates. */
+    float maximum=.05f+20.0f*(now-old->tick)/1000.0f;
+    if(!isfinite(dx) || !isfinite(dz) || dx*dx+dz*dz>maximum*maximum) return TRUE;
+    memcpy(next->translation_anchor,old->translation_anchor,sizeof(next->translation_anchor));
+    next->translated_tick=old->translated_tick;
+    dx=a->position[0]-next->translation_anchor[0]; dz=a->position[2]-next->translation_anchor[1];
+    if(dx*dx+dz*dz>.000025f) {
+        next->translated_tick=now;
+        next->translation_anchor[0]=a->position[0]; next->translation_anchor[1]=a->position[2];
+    }
+    /* Same short stop grace as the established ranged world presenter.
+     * Accumulating from an anchor also admits slow sub-threshold movement. */
+    if(!next->translated_tick || now-next->translated_tick>150u) return TRUE;
+    uint8_t *table=*(uint8_t **)(t->model+0xdcu);
+    if((t->character!=1u && t->character!=3u) || !readable(table,0x414u)) return FALSE;
+    for(unsigned c=0;c<2u;++c) {
+        uint8_t *definition=*(uint8_t **)(table+0x14u+(6u+c)*4u);
+        if(!readable(definition,0x28u)) return FALSE;
+        /* Authored combat handles, never the alternate exploration bank or
+         * first-person selector numbers. Output still uses the body bank. */
+        int selector=authored_selector(t,*(uint32_t *)(definition+0x14u));
+        if(selector<1) return FALSE;
+        uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
+        float length=*(float *)(resource+4u);
+        if(!isfinite(length) || length<=0) return FALSE;
+        a->clip[c]=*(uint32_t *)resource; a->clip_occurrence[c]=0;
+        a->state[c]=0; a->time[c]=0;
+        a->rate[c]=t->character==3u ? (c?30.92161f:41.22882f) : (c?28.608f:34.33f);
+    }
+    a->blend[0]=.99f; /* channel4's independently observed fire layer survives */
+    return *(void **)(t->model+0xdcu)==table;
+}
 static BOOL retain_ranged_base(const Target *t,const Bound *old,uint32_t now,
     SudekiMpLanStoryWorldActor *a) {
     if(!old || !old->ranged_base || !same_target(&old->target,t) ||
-        old->previous.clip[0]!=a->clip[0] || old->previous.state[0]!=a->state[0] ||
         now-old->tick>250u) return TRUE; /* new owner/gap starts a fresh base */
-    int selector=authored_selector(t,a->clip[0]);
-    if(selector<1) return FALSE;
-    uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
-    float length=*(float *)(resource+4u);
-    if(!isfinite(length) || length<=0 || !isfinite(old->previous.time[0])) return FALSE;
-    a->time[0]=fmodf(old->previous.time[0]+a->rate[0]*(now-old->tick)/1000.0f,length);
-    return isfinite(a->time[0]) && a->time[0]>=0;
+    for(unsigned c=0;c<2u;++c) {
+        if(!a->clip[c] || old->previous.clip[c]!=a->clip[c] ||
+            old->previous.state[c]!=a->state[c]) continue;
+        int selector=authored_selector(t,a->clip[c]);
+        if(selector<1) return FALSE;
+        uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
+        float length=*(float *)(resource+4u);
+        if(!isfinite(length) || length<=0 || !isfinite(old->previous.time[c])) return FALSE;
+        a->time[c]=fmodf(old->previous.time[c]+a->rate[c]*(now-old->tick)/1000.0f,length);
+        if(!isfinite(a->time[c]) || a->time[c]<0) return FALSE;
+    }
+    return TRUE;
 }
 static BOOL animation_edge(const SudekiMpLanStoryWorldActor *old,const SudekiMpLanStoryWorldActor *next) {
     if(memcmp(old->clip,next->clip,sizeof(old->clip)) ||
@@ -624,7 +670,9 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
         if(host_seen && host_epoch==party->epoch) for(unsigned j=0;j<host_count;++j)
             if(host_bound[j].previous.kind==targets[i].kind &&
                 host_bound[j].previous.identifier==targets[i].identifier) { old=&host_bound[j]; break; }
-        if(next[i].ranged_base && !retain_ranged_base(&targets[i],old,party->host_tick,&frame.actors[i])) {
+        if(next[i].ranged_base &&
+            (!project_ranged_translation(&targets[i],old,party->host_tick,&frame.actors[i],&next[i]) ||
+             !retain_ranged_base(&targets[i],old,party->host_tick,&frame.actors[i]))) {
             error=ERROR_NOT_SUPPORTED; goto fail;
         }
         if(old && same_target(&old->target,&targets[i])) {
@@ -1090,7 +1138,7 @@ static BOOL material_children_closed(const Target *t) {
         if(!child_resource_exact(t,i,child,resource)) return FALSE;
         observe_stage("material_owner",t->identifier,i);
         if(!SudekiMpLanStoryMaterialOwnerExact((HMODULE)base,child,resource)) {
-            if(GetLastError()==ERROR_BUSY) observe_stage("material_resource_jobs",t->identifier,i);
+            if(GetLastError()==ERROR_IO_PENDING) observe_stage("material_resource_waiting",t->identifier,i);
             return FALSE;
         }
     }
@@ -1130,14 +1178,62 @@ __attribute__((naked,noinline,used)) static void set_forward(
 static BOOL close_float(float actual,float wanted,float tolerance) {
     return isfinite(actual) && isfinite(wanted) && fabsf(actual-wanted)<=tolerance;
 }
-static BOOL visible(const Target *t,const SudekiMpLanStoryWorldActor *a) {
+/* Recognize only the host's established FP-idle/fire -> world-base projection.
+ * Other authored actions (skills, falls, story poses) keep their native basis. */
+static BOOL ranged_body_pose(const Target *t,const SudekiMpLanStoryWorldActor *a) {
+    if(t->kind!=SUDEKIMP_LAN_STORY_WORLD_PC_KIND || t->character!=3u ||
+        a->kind!=t->kind || a->identifier!=t->identifier || t->channel_count!=5u ||
+        a->clip[2] || a->clip[3] || a->state[2]!=192 || a->state[3]!=192 ||
+        a->blend[1]!=0 || a->blend[2]!=0 || a->state[0]!=0 ||
+        a->clip_occurrence[0] || a->clip_occurrence[1] || a->clip_occurrence[4]) return FALSE;
+    uint8_t *table=*(uint8_t **)(t->model+0xdc);
+    if(!readable(table,0x414)) return FALSE;
+    unsigned semantic[6]={2,6,7,0x85,0x86,0x87};uint32_t handles[6];
+    for(unsigned i=0;i<6;++i) {
+        uint8_t *definition=*(uint8_t **)(table+0x14+semantic[i]*4);
+        if(!readable(definition,0x28)) return FALSE;
+        handles[i]=*(uint32_t *)(definition+0x14);
+        /* The complete pose preflight already resolved each used wire clip
+         * in this fingerprinted bank. Do not rescan all126 headers six times
+         * on every body/aim publication merely to compare semantic handles. */
+        if(!handles[i] || handles[i]==0x7ffffu) return FALSE;
+    }
+    BOOL idle=a->clip[0]==handles[0] && !a->clip[1] && a->state[1]==192 && a->blend[0]==0;
+    BOOL walk=a->clip[0]==handles[1] && a->clip[1]==handles[2] && a->state[1]==0;
+    if(!idle && !walk) return FALSE;
+    if(!a->clip[4]) return a->state[4]==192 && a->blend[3]==0;
+    return (a->clip[4]==handles[3] || a->clip[4]==handles[4] || a->clip[4]==handles[5]) &&
+        (a->state[4]&1u)!=0;
+}
+static BOOL body_forward(const Target *t,const SudekiMpLanStoryWorldActor *a,float out[3]) {
+    if(ranged_body_pose(t,a))
+        return SudekiMpRangedWorldRoot(a->forward,(const float *)(t->position+0x50),out);
+    memcpy(out,a->forward,12);return TRUE;
+}
+static BOOL visible(const Target *t,const SudekiMpLanStoryWorldActor *a,const float forward[3]) {
     const float *matrix=(const float *)(t->object+0x90u);
     float norm=0,dot=0;
     for(unsigned i=0;i<3u;++i) {
         if(!close_float(matrix[12u+i],a->position[i],.01f) || !isfinite(matrix[8u+i])) return FALSE;
-        norm+=matrix[8u+i]*matrix[8u+i]; dot+=matrix[8u+i]*a->forward[i];
+        norm+=matrix[8u+i]*matrix[8u+i]; dot+=matrix[8u+i]*forward[i];
     }
     return isfinite(norm) && norm>.25f && dot/sqrtf(norm)>.9995f;
+}
+BOOL SudekiMpLanStoryWorldAimDirection(const SudekiMpLanStoryNativeRoster *roster,void *actor,
+    SudekiMpLanStoryReplicaExact exact,void *context,float direction[3]) {
+    if(!base || !client_seen || host_seen || active || !roster || !exact || !direction ||
+        native_thread!=GetCurrentThreadId() || recruitment.retained || resource_fault ||
+        actor!=roster->actors[3] || !exact(roster,context)) return FALSE;
+    unsigned i=0;for(;i<client_count && client_bound[i].target.entity!=actor;++i) {}
+    if(i==client_count) return FALSE;
+    Target current;
+    if(!target(actor,roster,&current,FALSE) || !same_target(&current,&client_bound[i].target) ||
+        current.wrapper!=current.attached_wrapper ||
+        !ranged_body_pose(&current,&client_bound[i].previous) ||
+        /* No resource acquisition or native gameplay call on the pose seam. */
+        !selector_available(&current,54) || !selector_available(&current,60) ||
+        !exact(roster,context)) return FALSE;
+    memcpy(direction,client_bound[i].previous.forward,12);return TRUE;
 }
 typedef struct ResidencyWitness {
     const Target *target;
@@ -1152,8 +1248,13 @@ static BOOL residency_owner_exact(void *context) {
         registry_still(w->registry) &&
         target_still(w->target,w->registry,w->roster,w->exact,w->context);
 }
-static DWORD prepare_missing_clip(const Target *target,const Registry *registry,
+static DWORD prepare_missing_resource(const Target *target,const Registry *registry,
     const SudekiMpLanStoryNativeRoster *roster,SudekiMpLanStoryReplicaExact exact,void *context) {
+    /* Material loading has no authority to acquire animation clips. Preserve
+     * only the exact material adapter's temporary result; stale Win32 errors
+     * or unrelated validation failures must not become loading admission. */
+    if(!strcmp(stage,"material_resource_waiting") && stage_identifier==target->identifier &&
+        GetLastError()==ERROR_IO_PENDING) return ERROR_IO_PENDING;
     if(strcmp(stage,"clip_residency") || stage_identifier!=target->identifier ||
         stage_detail>=target->animations) return ERROR_NOT_SUPPORTED;
     unsigned selector=stage_detail;
@@ -1221,8 +1322,9 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
             observe_stage("retained_owner_changed",targets[i].identifier,i);
             error=ERROR_NOT_SUPPORTED; goto fail;
         }
+        SetLastError(ERROR_NOT_SUPPORTED);
         if(!pose_supported(&targets[i],&frame->actors[i],selectors[i])) {
-            error=prepare_missing_clip(&targets[i],&registry,roster,exact,context);
+            error=prepare_missing_resource(&targets[i],&registry,roster,exact,context);
             goto fail;
         }
         /* Never let the host's compact record erase a different client-side
@@ -1372,8 +1474,10 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
          * changes its basis through scalar/D3DX math, with no owner, resource,
          * scheduler or task callbacks. Keep one full ownership bracket around
          * these synchronous writes; the visibility bit above is local too. */
+        float forward[3];
+        if(!body_forward(t,a,forward)) goto fail;
         set_position(t->position,a->position);
-        set_forward(t->position,a->forward);
+        set_forward(t->position,forward);
         if(!target_still(t,registry,roster,exact,context)) goto fail;
         /* State/time/blend setters are closed native memory/math operations:
          * no allocation, object callbacks or message pumping. One synchronous
@@ -1413,14 +1517,14 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         }
         if(!target_still(t,registry,roster,exact,context) || !readable(position_matrix(t->position),64u) ||
             !target_still(t,registry,roster,exact,context)) goto fail;
-        if(!visible(t,a)) {
+        if(!visible(t,a,forward)) {
             /* Same exact dirty-publication field used by the existing party
              * replica after native SetPosition/SetForward. No spatial/AI tick. */
             t->position[0xb8u]=1;
             if(!target_still(t,registry,roster,exact,context) || !readable(position_matrix(t->position),64u) ||
                 !target_still(t,registry,roster,exact,context)) goto fail;
         }
-        if(!visible(t,a)) { observe_stage("visible_matrix",t->identifier,0); goto fail; }
+        if(!visible(t,a,forward)) { observe_stage("visible_matrix",t->identifier,0); goto fail; }
         Target after;
         if(!target(t->entity,roster,&after,TRUE) || !same_target(t,&after)) goto fail;
         SudekiMpLanStoryWorldActor readback;

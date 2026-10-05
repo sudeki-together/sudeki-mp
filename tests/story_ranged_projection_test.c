@@ -6,12 +6,12 @@
 
 typedef struct TestRenderer {
     uint8_t wrapper[0x14],object[0xd0],renderer[0xb0],bank[0x5c],description[0x24];
-    uint8_t entries[3*28],resources[3][0x20],channels[5*36],blends[4*20],rows[5][24];
+    uint8_t entries[5*28],resources[5][0x20],channels[5*36],blends[4*20],rows[5][24];
 } TestRenderer;
 typedef struct Fixture {
     uint8_t actor[0x200],model[0x168],position[0x108],arbiter[0x64];
     uint8_t manager[0x64],missile_record[0xc4];
-    uint8_t table[0x414],states[20],definitions[4][0x28];
+    uint8_t table[0x414],states[20],definitions[6][0x28];
     TestRenderer body,arms;
 } Fixture;
 static void pointer(uint8_t *p,unsigned offset,void *v) { memcpy(p+offset,&v,4); }
@@ -21,12 +21,14 @@ static void renderer(TestRenderer *r,uint32_t first,uint32_t second) {
     pointer(r->wrapper,8,r->object); pointer(r->wrapper,0x10,r->renderer);
     pointer(r->object,0x14,r->renderer); pointer(r->renderer,0,base+0x2df8ec);
     pointer(r->renderer,8,r->bank); pointer(r->bank,0x1c,r->description);
-    pointer(r->bank,0x20,r->entries); word(r->description,0,3); word(r->description,0xc,1);
+    pointer(r->bank,0x20,r->entries); word(r->description,0,5); word(r->description,0xc,1);
     pointer(r->renderer,0x98,r->channels); pointer(r->renderer,0x9c,r->blends);
     word(r->renderer,0xa0,5); word(r->renderer,0xa4,4);
-    for(unsigned i=0;i<3;++i) pointer(r->entries,i*28,r->resources[i]);
+    for(unsigned i=0;i<5;++i) pointer(r->entries,i*28,r->resources[i]);
     word(r->resources[1],0,first); word(r->resources[2],0,second);
     number(r->resources[1],4,60); number(r->resources[2],4,60);
+    word(r->resources[3],0,0x55555555); number(r->resources[3],4,40);
+    word(r->resources[4],0,0x66666666); number(r->resources[4],4,30);
     for(unsigned c=0;c<5;++c) pointer(r->channels,c*36,r->rows[c]);
     static const uint32_t topology[]={0x00010000,0x00030002,0x80018000,0x00048002};
     for(unsigned i=0;i<4;++i) word(r->blends,i*20,topology[i]);
@@ -34,6 +36,17 @@ static void renderer(TestRenderer *r,uint32_t first,uint32_t second) {
 int main(void) {
     base=VirtualAlloc(NULL,0x410000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     assert(base);
+    /* A material dependency waits without entering animation acquisition.
+     * Neither a stale error nor another actor/stage can claim that route. */
+    Target pending={.identifier=123};
+    observe_stage("material_resource_waiting",123,0); SetLastError(ERROR_IO_PENDING);
+    assert(prepare_missing_resource(&pending,NULL,NULL,NULL,NULL)==ERROR_IO_PENDING);
+    SetLastError(ERROR_INVALID_DATA);
+    assert(prepare_missing_resource(&pending,NULL,NULL,NULL,NULL)==ERROR_NOT_SUPPORTED);
+    observe_stage("material_resource_waiting",124,0); SetLastError(ERROR_IO_PENDING);
+    assert(prepare_missing_resource(&pending,NULL,NULL,NULL,NULL)==ERROR_NOT_SUPPORTED);
+    observe_stage("material_owner",123,0); SetLastError(ERROR_IO_PENDING);
+    assert(prepare_missing_resource(&pending,NULL,NULL,NULL,NULL)==ERROR_NOT_SUPPORTED);
     for(unsigned i=0;i<sizeof(identities)/sizeof(identities[0]);++i)
         pointer(base,0x2df8ec+identities[i].slot,base+identities[i].rva);
     pointer(base,0x2df8ec+0x184,base+0x21bf50);
@@ -103,6 +116,62 @@ int main(void) {
     out.time[0]=0; assert(retain_ranged_base(&t,&prior,1300,&out) && out.time[0]==0);
     prior.target.entity=NULL;
     assert(retain_ranged_base(&t,&prior,1100,&out) && out.time[0]==0);
+    /* Translation supplies the missing body locomotion while FP idle/fire
+     * supplies only the upper-body layer. No host rows are ever changed. */
+    pointer(f->table,0x14+6*4,f->definitions[4]); word(f->definitions[4],0x14,0x55555555);
+    pointer(f->table,0x14+7*4,f->definitions[5]); word(f->definitions[5],0x14,0x66666666);
+    assert(read_pose_detail(&t,&out,&stable) && stable);
+    prior=(Bound){.target=t,.previous=out,.ranged_base=TRUE,.tick=1000};
+    Bound next={.target=t,.ranged_base=TRUE,.tick=1100};
+    out.position[0]=.2f;
+    Fixture moving_before=*f;
+    assert(project_ranged_translation(&t,&prior,1100,&out,&next));
+    assert(out.clip[0]==0x55555555 && out.clip[1]==0x66666666 && fabsf(out.blend[0]-.99f)<.0001f);
+    assert(fabsf(out.rate[0]-41.22882f)<.0001f && fabsf(out.rate[1]-30.92161f)<.0001f);
+    assert(out.clip[4]==0x22222222 && out.blend[3]==1 && out.time[4]==2);
+    assert(next.translated_tick==1100 && !memcmp(&moving_before,f,sizeof(*f)));
+    assert(retain_ranged_base(&t,&prior,1100,&out) && out.time[0]==0 && out.time[1]==0);
+    next.previous=out; prior=next;
+    assert(read_pose_detail(&t,&out,&stable)); out.position[0]=.4f;
+    assert(project_ranged_translation(&t,&prior,1200,&out,&next));
+    assert(retain_ranged_base(&t,&prior,1200,&out));
+    assert(fabsf(out.time[0]-4.122882f)<.0001f && fabsf(out.time[1]-3.092161f)<.0001f);
+    next.tick=1200; next.previous=out; prior=next;
+    assert(read_pose_detail(&t,&out,&stable)); out.position[0]=.4f;
+    assert(project_ranged_translation(&t,&prior,1300,&out,&next) && out.clip[1]==0x66666666);
+    assert(read_pose_detail(&t,&out,&stable)); out.position[0]=.4f;
+    assert(project_ranged_translation(&t,&prior,1400,&out,&next) && !out.clip[1]);
+    /* Unknown owners, gaps and teleports do not inherit a walking lease. */
+    assert(project_ranged_translation(&t,NULL,1300,&out,&next) && !next.translated_tick);
+    assert(project_ranged_translation(&t,&prior,1600,&out,&next) && !next.translated_tick);
+    out.position[0]=100; assert(project_ranged_translation(&t,&prior,1300,&out,&next) && !next.translated_tick);
+    prior.target.entity=NULL; out.position[0]=.5f;
+    assert(project_ranged_translation(&t,&prior,1300,&out,&next) && !next.translated_tick);
+    prior=(Bound){.target=t,.previous=out,.ranged_base=TRUE,.tick=2000};
+    prior.previous.position[0]=0; assert(read_pose_detail(&t,&out,&stable)); out.position[0]=.003f;
+    assert(project_ranged_translation(&t,&prior,2100,&out,&next) && !out.clip[1]);
+    next.tick=2100; next.previous=out; prior=next; out.position[0]=.006f;
+    assert(project_ranged_translation(&t,&prior,2200,&out,&next) && out.clip[1]==0x66666666);
+    word(f->definitions[5],0x14,0x77777777);
+    assert(!project_ranged_translation(&t,&prior,2200,&out,&next)); /* no exploration fallback */
+    word(f->definitions[5],0x14,0x66666666);
+    pointer(f->table,0x14+0x86*4,f->definitions[3]);
+    pointer(f->table,0x14+0x87*4,f->definitions[3]);
+    assert(read_pose_detail(&t,&out,&stable) && stable);
+    assert(ranged_body_pose(&t,&out));
+    memcpy(out.forward,(float[]){0,.6f,.8f},12);
+    float forward[3];Fixture no_root_write=*f;
+    assert(body_forward(&t,&out,forward) && forward[0]==0 && forward[1]==0 && forward[2]==1);
+    assert(out.forward[1]>.59f && !memcmp(&no_root_write,f,sizeof(*f)));
+    prior=(Bound){.target=t,.previous=out,.ranged_base=TRUE,.tick=2000};
+    out.position[0]+=.2f;
+    assert(project_ranged_translation(&t,&prior,2100,&out,&next) && ranged_body_pose(&t,&out));
+    assert(body_forward(&t,&out,forward) && forward[1]==0);
+    out.clip[2]=0x22222222;out.state[2]=1; /* skill/nonprojected pose: no invented flat transform */
+    assert(!ranged_body_pose(&t,&out));
+    assert(body_forward(&t,&out,forward) && !memcmp(forward,out.forward,12));
+    out.clip[2]=0;out.state[2]=192;t.character=2;
+    assert(!ranged_body_pose(&t,&out));t.character=3;
     memcpy(f,before,sizeof(*f));
     word(f->definitions[0],0x14,0x77777777); assert(!read_pose(&t,&out));
     memcpy(f,before,sizeof(*f));

@@ -90,6 +90,12 @@ BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,
 typedef BOOL (*SudekiMpLanStoryClientEffectsWitness)(void *context);
 BOOL SudekiMpLanStoryClientEffectsPresent(SudekiMpLanStoryClientPresentation callback,
     void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context);
+/* Exact native UI-listener boundary, with the same full pre/post containment
+ * checks as cosmetic rendering. A local menu may update its own widgets and
+ * balanced UI locks, but must intercept script submission and gameplay
+ * confirmations. This grants no world tick, skill execution or pause change. */
+BOOL SudekiMpLanStoryClientUiPresent(SudekiMpLanStoryClientPresentation callback,
+    void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context);
 /* Primary scene preparation only: a fresh native render witness permits the
  * dispatcher to select an authenticated frame and call ClientPresent. Full
  * registry/pause/input/task proofs bracket dispatch. It grants no pause

@@ -58,5 +58,19 @@ int main(int argc,char **argv) {
     assert(!SudekiMpLanAimObserveEmissionsInstall((HMODULE)image,observe));
     assert(SudekiMpLanAimUninstall());
     assert(!memcmp(launch,image+AIM_CALL,5) && !memcmp(pose,image+POSE_CALL,5) && !memcmp(sample,image+BASE_SAMPLE_CALL,5));
+    assert(SudekiMpLanAimPoseOnlyInstall((HMODULE)image,no_actor));
+    assert(!memcmp(launch,image+AIM_CALL,5) && memcmp(pose,image+POSE_CALL,5) &&
+        !memcmp(sample,image+BASE_SAMPLE_CALL,5));
+    assert(!SudekiMpLanAimObserveEmissionsInstall((HMODULE)image,observe));
+    assert(!SudekiMpLanAimInstall((HMODULE)image,no_actor,no_target,no_fire));
+    assert(!SudekiMpLanAimPoseOnlyInstall((HMODULE)image,no_actor));
+    assert(!SudekiMpLanAimPoseWitness(NULL));
+    pose_callbacks=1;pose_callback_thread=GetCurrentThreadId();
+    assert(SudekiMpLanAimPoseWitness(NULL) && !SudekiMpLanAimUninstall());
+    pose_callbacks=0;pose_callback_thread=0;
+    memcpy(ours,image+POSE_CALL,5);image[POSE_CALL]=0x90;
+    assert(!SudekiMpLanAimUninstall() && pose_only && aim_witness==no_actor);
+    memcpy(image+POSE_CALL,ours,5);assert(SudekiMpLanAimUninstall() && !pose_only);
+    assert(!memcmp(launch,image+AIM_CALL,5) && !memcmp(pose,image+POSE_CALL,5) && !memcmp(sample,image+BASE_SAMPLE_CALL,5));
     VirtualFree(image,0,MEM_RELEASE); puts("story passive emission exact-image tests passed"); return 0;
 }

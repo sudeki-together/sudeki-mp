@@ -3,6 +3,15 @@
 
 #include <windows.h>
 #include <stdint.h>
+#include "hooks/lan_arena_cast_context.h"
+
+/* Native callback sharing, never an extra patch at an already-owned seam.
+ * Host-side caster only; attach/detach on the verified native thread outside
+ * all task callbacks. Uninstall refuses while this consumer is registered. */
+BOOL SudekiMpLanStoryTaskHostExact(HMODULE image);
+BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver created,
+    SudekiMpLanCastStepAdapter step);
+BOOL SudekiMpLanStoryTaskHostDetach(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step);
 
 typedef struct SudekiMpLanStoryTaskTraceStatus {
     uint32_t load_generation;

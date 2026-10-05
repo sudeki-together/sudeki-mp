@@ -32,6 +32,10 @@ BOOL SudekiMpLanStoryObserverRoster(void *controller,
 BOOL SudekiMpLanStoryObserverRosterStillExact(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanStoryNativeRoster *roster);
+/* Retained native callback identity only. Re-observes the sparse roster on
+ * the established native thread, outside zone entry/exit. No controller
+ * dispatch, input, movement, acquisition or new network authority is granted. */
+BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *roster);
 /* After a native callback has occurred, remove on that same native thread,
  * outside the synchronous zone calls. Failed restoration retains all state. */
 BOOL SudekiMpLanStoryObserverUninstall(void);

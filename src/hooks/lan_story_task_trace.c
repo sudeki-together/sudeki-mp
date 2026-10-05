@@ -92,6 +92,8 @@ static uint32_t spawn_setup_transaction,spawn_setup_construction,spawn_setup_cou
 static volatile LONG spawn_fault;
 static void *current_thread, *load_manager;
 static DWORD native_thread;
+static SudekiMpLanCastCreatedObserver cast_created;
+static SudekiMpLanCastStepAdapter cast_step;
 static uint32_t next_task_id, events, critical_events;
 static unsigned truncated_quotas;
 static unsigned submit_kind, submit_depth, add_depth, argument_depth;
@@ -666,6 +668,12 @@ story_created(uint32_t hash,void *manager,void **out_cell) {
         (unsigned long)t->parent,thread,
         t->id==status.start_task?1u:t->id==status.on_load_task?2u:0u);
 done:
+    /* The independent cast journal pins its own task handle here, after the
+     * story observation and before immediate native execution. Neither
+     * journal may infer the other's ownership or terminal state. */
+    if(cast_created && native_thread==GetCurrentThreadId()) {
+        SetLastError(error); cast_created(hash,out_cell);
+    }
     InterlockedDecrement(&callbacks);
     SetLastError(error);
 }
@@ -678,7 +686,7 @@ static int __attribute__((fastcall,force_align_arg_pointer)) story_step(void *th
     if(exact) current_thread=thread;
     else fault("step_thread");
     SetLastError(error);
-    int result=original_step(thread,edx);
+    int result=cast_step?cast_step(thread,edx):original_step(thread,edx);
     error=GetLastError();
     if(exact) {
         Task *t=find_task(thread,FALSE);
@@ -1163,7 +1171,7 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
      * return is required BEFORE discarding any borrowed address; never inspect
      * old task bodies or a possibly replaced manager here. A busy observer
      * retains everything for a later UI retry after its original returns. */
-    if(!installed || !image_base || !native_thread ||
+    if(cast_created || cast_step || !installed || !image_base || !native_thread ||
         native_thread!=GetCurrentThreadId() ||
         SudekiMpLobbyGameplayStoryExitStatus()!=1u ||
         InterlockedCompareExchange(&callbacks,0,0) || current_thread ||
@@ -1199,7 +1207,7 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
 }
 BOOL SudekiMpLanStoryTaskTraceUninstall(void) {
     if(!image_base) return TRUE;
-    if((native_thread && native_thread!=GetCurrentThreadId()) ||
+    if(cast_created || cast_step || (native_thread && native_thread!=GetCurrentThreadId()) ||
         InterlockedCompareExchange(&callbacks,0,0) || spawn_replay.transaction ||
         spawn_setup_transaction) return retain(ERROR_BUSY);
     BOOL ok=SudekiMpRestoreInlineHook(&spawn_rr_hook);
@@ -1230,6 +1238,26 @@ BOOL SudekiMpLanStoryTaskTraceUninstall(void) {
     submit_kind=0; submit_depth=0; add_depth=0; argument_depth=0;
     InterlockedExchange(&trace_fault,0);
     return TRUE;
+}
+BOOL SudekiMpLanStoryTaskHostExact(HMODULE image) {
+    return image_base==(uint8_t *)image && installed && native_thread &&
+        native_thread==GetCurrentThreadId() &&
+        create_hooks[0].installed && create_hooks[1].installed && step_hooks[0].installed && step_hooks[1].installed &&
+        call_target(image_base+CREATE_DIRECT,story_create) && call_target(image_base+CREATE_CHILD,story_create) &&
+        call_target(image_base+STEP_IMMEDIATE,story_step) && call_target(image_base+STEP_SCHEDULED,story_step);
+}
+BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver created,
+    SudekiMpLanCastStepAdapter step) {
+    if(!created || !step || cast_created || cast_step || InterlockedCompareExchange(&callbacks,0,0) ||
+        !SudekiMpLanStoryTaskHostExact(image)) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
+    cast_created=created; cast_step=step; return TRUE;
+}
+BOOL SudekiMpLanStoryTaskHostDetach(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step) {
+    if(!created || !step || cast_created!=created || cast_step!=step ||
+        InterlockedCompareExchange(&callbacks,0,0) || !native_thread || native_thread!=GetCurrentThreadId()) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    cast_created=NULL; cast_step=NULL; return TRUE;
 }
 BOOL SudekiMpLanStoryTaskTraceInstall(HMODULE game) {
     uint8_t spawn_destroy_prefix[]={0x56,0x8b,0xf1,0xc7,0x06,0,0,0,0};

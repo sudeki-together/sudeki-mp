@@ -41,6 +41,7 @@ static volatile LONG phase, result_code, callbacks, installed;
 static SudekiMpSaveLease *file_lease;
 static uint8_t reviewed_record[RECORD_BYTES];
 static unsigned reviewed_slot;
+static SudekiMpSaveFingerprint reviewed_fingerprint;
 static uint8_t *title_owner, *page_owner, *selected_record;
 static int selected_index=-1;
 static BOOL confirmation, final_seen;
@@ -366,12 +367,16 @@ BOOL SudekiMpLanStoryLoadPrepare(SudekiMpSaveCatalog *catalog,unsigned index,
     if(!InterlockedCompareExchange(&installed,0,0) || !thread_exact() || state()!=SUDEKIMP_STORY_LOAD_IDLE ||
         file_lease || InterlockedCompareExchange(&callbacks,0,0)) { SetLastError(ERROR_BUSY); return FALSE; }
     if(load_attempt==UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return FALSE; }
+    if(!fingerprint) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    /* Retain the exact candidate passed to Acquire, not the caller's mutable
+     * review buffer after acquisition. Acquire independently rehashes files. */
+    SudekiMpSaveFingerprint candidate=*fingerprint;
     SudekiMpSaveLease *acquired=NULL;
     if(!lease_lock_ready) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
     /* Serialize the first pin and its publication with native open attempts;
      * a catalog worker must not choose exclusive sharing in that interval. */
     EnterCriticalSection(&lease_lock);
-    BOOL acquired_ok=SudekiMpSaveCatalogAcquire(catalog,index,fingerprint,&acquired);
+    BOOL acquired_ok=SudekiMpSaveCatalogAcquire(catalog,index,&candidate,&acquired);
     DWORD acquired_error=GetLastError();
     if(acquired_ok) file_lease=acquired;
     LeaveCriticalSection(&lease_lock);
@@ -379,6 +384,10 @@ BOOL SudekiMpLanStoryLoadPrepare(SudekiMpSaveCatalog *catalog,unsigned index,
     if(!SudekiMpSaveLeaseRecord(file_lease,reviewed_record,&reviewed_slot)) {
         release_files(); return FALSE;
     }
+    if(reviewed_slot!=candidate.folder_slot) {
+        release_files(); SetLastError(ERROR_INVALID_DATA); return FALSE;
+    }
+    reviewed_fingerprint=candidate;
     title_owner=page_owner=selected_record=NULL; selected_index=-1;
     confirmation=final_seen=native_called=FALSE; accepted_route=SUDEKIMP_STORY_LOAD_ROUTE_NONE;
     ++load_attempt; InterlockedExchange(&result_code,0);
@@ -461,6 +470,18 @@ BOOL SudekiMpLanStoryLoadGetResult(SudekiMpStoryLoadResult *out) {
     EnterCriticalSection(&lease_lock); next.files_retired=file_lease==NULL; LeaveCriticalSection(&lease_lock);
     *out=next; return TRUE;
 }
+BOOL SudekiMpLanStoryLoadGetFingerprint(uint32_t attempt,SudekiMpSaveFingerprint *out) {
+    SudekiMpStoryLoadResult result;
+    if(!out || !attempt || !SudekiMpLanStoryLoadGetResult(&result) ||
+        result.attempt!=attempt || result.state!=SUDEKIMP_STORY_LOAD_RETURNED ||
+        !result.native_called || !result.files_retired || result.result ||
+        (result.route!=SUDEKIMP_STORY_LOAD_ROUTE_TITLE_INDEX &&
+         result.route!=SUDEKIMP_STORY_LOAD_ROUTE_PAGE_RECORD) ||
+        result.folder_slot!=reviewed_fingerprint.folder_slot) {
+        SetLastError(ERROR_INVALID_STATE); return FALSE;
+    }
+    *out=reviewed_fingerprint; return TRUE;
+}
 BOOL SudekiMpLanStoryLoadCancel(void) {
     unsigned current=state();
     if(current==SUDEKIMP_STORY_LOAD_IDLE) return TRUE;
@@ -474,6 +495,7 @@ BOOL SudekiMpLanStoryLoadCancel(void) {
             page_owner[0x29] || page_owner[0x4a]) { SetLastError(ERROR_BUSY); return FALSE; }
     }
     release_files();
+    memset(&reviewed_fingerprint,0,sizeof(reviewed_fingerprint));
     title_owner=page_owner=selected_record=NULL; selected_index=-1;
     confirmation=final_seen=native_called=FALSE; accepted_route=SUDEKIMP_STORY_LOAD_ROUTE_NONE;
     InterlockedExchange(&phase,SUDEKIMP_STORY_LOAD_IDLE); return TRUE;

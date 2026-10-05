@@ -404,7 +404,116 @@ static void test_coordinated_arm_reference(void) {
         CHECK(!memcmp(pose,rest,12*sizeof(float)));
     }
 }
+static unsigned story_samples,story_witness_calls;
+static unsigned observed_root __attribute__((used));
+static void *observed_pose __attribute__((used));
+static void __attribute__((naked,noinline)) story_build(void) {
+    __asm__ volatile("movl %eax,_observed_root\n\tmovl 12(%esp),%eax\n\t"
+        "movl %eax,_observed_pose\n\tret $20\n\t");
+}
+static void __attribute__((naked,noinline)) invoke_story_bridge(
+    void *bank __attribute__((unused)),void *renderer __attribute__((unused)),
+    float *pose __attribute__((unused)),unsigned root __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushl %edi\n\t"
+        "movl 12(%ebp),%edi\n\tpushl $0\n\tpushl $0\n\tpushl 16(%ebp)\n\t"
+        "pushl $0\n\tpushl 8(%ebp)\n\tmovl 20(%ebp),%eax\n\tcall _pose_bridge\n\t"
+        "popl %edi\n\tleave\n\tret\n\t");
+}
+static BOOL story_lost_after_sample;
+static BOOL story_witness(void *actor,BOOL projectile,float direction[3]) {
+    ++story_witness_calls;
+    if(actor!=expected_actor || projectile || !admitted ||
+        (story_lost_after_sample && story_samples)) return FALSE;
+    CHECK(pose_callbacks==1 && pose_callback_thread==GetCurrentThreadId());
+    memcpy(direction,(float[]){0,.6f,.8f},12);return TRUE;
+}
+static int __attribute__((thiscall)) story_lookup(void *renderer,uint32_t handle) {
+    (void)renderer;return handle==12345?54:handle==23456?60:-1;
+}
+static void __stdcall story_sample(void *bank,void *input,void *output) {
+    (void)bank;uint8_t *states=input;float *pose=output;
+    unsigned selector=*(uint16_t *)states;
+    CHECK(selector==54 || selector==60);
+    for(unsigned i=1;i<3;++i) CHECK(!memcmp(states,states+i*24,24));
+    for(unsigned i=0;i<101;++i) {
+        memcpy(pose+i*12+8,(float[]){0,0,0,1},16);
+        if(selector==54) { pose[i*12+8]=sinf(.2f);pose[i*12+11]=cosf(.2f); }
+    }
+    ++story_samples;
+}
+static void test_story_ailish(void) {
+    uint8_t *image=VirtualAlloc(NULL,0x410000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    CHECK(image!=NULL);if(!image) return;
+    uint8_t actor[0x138]={0},model[0x168]={0},position[0xb8]={0},wrapper[0x14]={0},renderer[0xa8]={0};
+    uint8_t bank[0x28]={0},table[0x414]={0},definitions[2][0x28]={{0}},entries[126*28]={0};
+    uint32_t header[4]={126,101,1,3},palette[101],tracks[101]={0};
+    uint8_t resources[126][24]={{0}},hier[101*8]={0};void *track_ptrs[101];
+    void *groups[2]={hier,palette};
+    *(void **)actor=image+0x2d555c;*(void **)(actor+0x134)=model;*(void **)(actor+0x44)=position;
+    *(void **)model=image+MODEL_VT;*(void **)(model+0x10)=actor;*(void **)(model+0xdc)=table;
+    *(void **)(position+0x10)=actor;*(void **)(position+0xb4)=wrapper;*(float *)(position+0x58)=1;
+    *(void **)(wrapper+0x10)=renderer;*(void **)renderer=image+RENDERER_VT;*(void **)(renderer+8)=bank;
+    *(void **)(bank+0x1c)=header;*(void **)(bank+0x20)=entries;*(void **)(bank+0x24)=groups;
+    *(void **)(table+0x14+0x97*4)=definitions[0];*(uint32_t *)(definitions[0]+0x14)=12345;
+    *(void **)(table+0x14+0x98*4)=definitions[1];*(uint32_t *)(definitions[1]+0x14)=23456;
+    for(unsigned i=0;i<126;++i) { *(void **)(entries+i*28)=resources[i];*(void **)(entries+i*28+4)=track_ptrs; }
+    *(float *)(resources[54]+4)=48;*(float *)(resources[60]+4)=1;
+    for(unsigned i=0;i<101;++i) {
+        palette[i]=100-i;track_ptrs[i]=tracks+i;
+        *(int16_t *)(hier+i*8+4)=i==0?-1:i<3?0:2;
+        *(int16_t *)(hier+i*8+6)=i<2?0:1;
+    }
+    *(uint32_t *)(hier+8)=3626754;*(uint32_t *)(hier+16)=139840248;
+    *(int16_t *)(hier+55*8+6)=2; /* facial branch requires third sampler state */
+    *(int16_t *)(hier+37*8+6)=0; /* upper accessory is not a leg */
+    *(void **)(image+RENDERER_VT+0x40)=image+0x21bac0;
+    image[0x21bac0]=image[POSE_SAMPLE]=0xe9;
+    int32_t d=(int32_t)((uint8_t *)story_lookup-(image+0x21bac0+5));memcpy(image+0x21bac1,&d,4);
+    d=(int32_t)((uint8_t *)story_sample-(image+POSE_SAMPLE+5));memcpy(image+POSE_SAMPLE+1,&d,4);
+    FlushInstructionCache(GetCurrentProcess(),image,0x410000);
+    aim_image=image;pose_only=TRUE;aim_thread=GetCurrentThreadId();aim_witness=story_witness;
+    expected_actor=actor;admitted=TRUE;SudekiMpLanAimActors(actor,NULL);
+    CHECK(world_renderer(actor)==renderer);
+    uint8_t mask[BONES];CHECK(ailish_pose_layout(bank,20,mask));
+    CHECK(!mask[100] && !mask[99] && mask[98] && mask[45]);
+    float pose[101*12],saved[101*12];
+    for(unsigned i=0;i<101;++i) {
+        for(unsigned k=0;k<8;++k) pose[i*12+k]=.01f*(float)(i+k);
+        memcpy(pose+i*12+8,(float[]){0,0,0,1},16);
+    }
+    memcpy(saved,pose,sizeof(saved));void *args[5]={bank,NULL,pose,NULL,NULL};
+    story_samples=story_witness_calls=0;story_lost_after_sample=FALSE;
+    SetLastError(1234);float *out=dispatch_pose(args,renderer,20);
+    CHECK(out==result_pose && story_samples==2 && story_witness_calls==2 && GetLastError()==1234);
+    CHECK(!memcmp(pose,saved,sizeof(pose)));
+    for(unsigned i=0;i<101;++i) {
+        CHECK(!memcmp(out+i*12,saved+i*12,8*sizeof(float)));
+        if(!mask[i]) CHECK(!memcmp(out+i*12,saved+i*12,12*sizeof(float)));
+        else CHECK(out[i*12+8]>.1f && quaternion(out+i*12+8));
+    }
+    pose_original=story_build;
+    invoke_story_bridge(bank,renderer,pose,20);
+    CHECK(observed_root==20 && observed_pose==result_pose);
+    admitted=FALSE;invoke_story_bridge(bank,renderer,pose,20);
+    CHECK(observed_root==20 && observed_pose==pose);admitted=TRUE;
+    story_samples=0;story_lost_after_sample=TRUE;
+    CHECK(dispatch_pose(args,renderer,20)==pose && story_samples==2); /* no stale publication */
+    story_lost_after_sample=FALSE;admitted=FALSE;story_samples=0;
+    CHECK(dispatch_pose(args,renderer,20)==pose && !story_samples);admitted=TRUE;
+    *(uint32_t *)(resources[20]+8)=1;CHECK(!ailish_pose_layout(bank,20,mask));
+    CHECK(dispatch_pose(args,renderer,20)==pose && !story_samples);*(uint32_t *)(resources[20]+8)=0;
+    *(int16_t *)(hier+55*8+6)=3;CHECK(!ailish_pose_layout(bank,20,mask));*(int16_t *)(hier+55*8+6)=2;
+    palette[100]=palette[0];CHECK(!ailish_pose_layout(bank,20,mask));palette[100]=0;
+    *(uint32_t *)(hier+16)=0;CHECK(!ailish_pose_layout(bank,20,mask));*(uint32_t *)(hier+16)=139840248;
+    track_ptrs[100]=NULL;CHECK(!ailish_pose_layout(bank,20,mask));track_ptrs[100]=tracks+100;
+    header[1]=109;CHECK(!ailish_pose_layout(bank,20,mask) && !world_renderer(actor));header[1]=101;
+    *(void **)actor=image+ELCO_VT;CHECK(dispatch_pose(args,renderer,20)==pose);
+    CHECK(!memcmp(pose,saved,sizeof(pose)) && !pose_callbacks && !pose_callback_thread);
+    CHECK(SudekiMpLanAimUninstall());VirtualFree(image,0,MEM_RELEASE);
+    expected_actor=NULL;
+}
 int main(void) {
+    test_story_ailish();
     test_fp_idle_loop();
     test_held_base();
     test_reference_keeps_native_animation();

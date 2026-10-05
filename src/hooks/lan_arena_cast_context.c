@@ -50,6 +50,8 @@ typedef struct Task {
 } Task;
 static uint8_t *cast_image;
 static SudekiMpLanCastOwnerWitness owner_witness;
+static SudekiMpLanCastTaskHost task_host;
+static BOOL task_host_attached;
 static RawFunction original_submit __attribute__((used));
 static RawFunction original_create __attribute__((used));
 static OpcodeFunction original_opcodes[3];
@@ -143,6 +145,9 @@ BOOL SudekiMpLanCastContextPoll(void) {
     if(!game_thread) game_thread=GetCurrentThreadId();
     if(game_thread!=GetCurrentThreadId() || depth) {
         SetLastError(ERROR_BUSY); return FALSE;
+    }
+    if(task_host_attached && !task_host.exact((HMODULE)cast_image)) {
+        fault("shared_task_host_changed"); return FALSE;
     }
     for(i=0;i<MAX_TASKS;++i) {
         Task *t=&tasks[i];
@@ -631,6 +636,8 @@ BOOL SudekiMpUninstallLanCastContext(void) {
     for(i=3;i>0;--i) if(!SudekiMpRestorePointerHook(&opcode_hooks[i-1])) restored=FALSE;
     for(i=2;i>0;--i) if(!SudekiMpRestoreRelativeCallHook(&create_hooks[i-1])) restored=FALSE;
     if(!restored) return FALSE;
+    if(task_host_attached && !task_host.detach(created_task,task_step)) return FALSE;
+    task_host_attached=FALSE; memset(&task_host,0,sizeof(task_host));
     ui_trace_trampoline=NULL; ui_trace_events=0;
     cast_image=NULL; owner_witness=NULL; original_submit=NULL; original_create=NULL;
     memset(original_opcodes,0,sizeof(original_opcodes));
@@ -642,13 +649,15 @@ BOOL SudekiMpUninstallLanCastContext(void) {
     return TRUE;
 }
 
-BOOL SudekiMpInstallLanCastContext(HMODULE image,SudekiMpLanCastOwnerWitness witness) {
+static BOOL install_context(HMODULE image,SudekiMpLanCastOwnerWitness witness,
+    const SudekiMpLanCastTaskHost *host) {
     uint8_t *candidate=(uint8_t *)image;
     unsigned int i;
     OpcodeFunction hooks[3]={opcode27,opcode28,opcode29};
     uint32_t camera_rvas[2]={SKILL_CAMERA_START,SKILL_CAMERA_END};
     static const uint8_t camera_tail[]={0x81,0xec,0xac,0,0,0,0x53,0x56,0x57};
     if(cast_image || !candidate || !witness ||
+        (host && (!host->exact || !host->attach || !host->detach || !host->exact(image))) ||
         !memory_access(candidate+SUBMIT,sizeof(submit_prefix),FALSE) ||
         memcmp(candidate+SUBMIT,submit_prefix,sizeof(submit_prefix)) ||
         !memory_access(candidate+CREATE,sizeof(create_prefix),FALSE) ||
@@ -688,10 +697,16 @@ BOOL SudekiMpInstallLanCastContext(HMODULE image,SudekiMpLanCastOwnerWitness wit
     for(i=0;i<3;++i) original_opcodes[i]=(OpcodeFunction)(candidate+opcode_rvas[i]);
     original_skill_camera[0]=(SkillCameraFunction)(candidate+SKILL_CAMERA_START);
     original_skill_camera[1]=(SkillCameraFunction)(candidate+SKILL_CAMERA_END);
-    if(!SudekiMpInstallRelativeCallHook(&create_hooks[0],candidate+CREATE_DIRECT,original_create,create_task) ||
-        !SudekiMpInstallRelativeCallHook(&create_hooks[1],candidate+CREATE_CHILD,original_create,create_task)) goto failed;
-    if(!SudekiMpInstallRelativeCallHook(&step_hooks[0],candidate+STEP_IMMEDIATE,original_step,task_step) ||
-        !SudekiMpInstallRelativeCallHook(&step_hooks[1],candidate+STEP_SCHEDULED,original_step,task_step)) goto failed;
+    if(host) {
+        task_host=*host;
+        if(!task_host.attach(image,created_task,task_step)) goto failed;
+        task_host_attached=TRUE;
+    } else {
+        if(!SudekiMpInstallRelativeCallHook(&create_hooks[0],candidate+CREATE_DIRECT,original_create,create_task) ||
+            !SudekiMpInstallRelativeCallHook(&create_hooks[1],candidate+CREATE_CHILD,original_create,create_task)) goto failed;
+        if(!SudekiMpInstallRelativeCallHook(&step_hooks[0],candidate+STEP_IMMEDIATE,original_step,task_step) ||
+            !SudekiMpInstallRelativeCallHook(&step_hooks[1],candidate+STEP_SCHEDULED,original_step,task_step)) goto failed;
+    }
     for(i=0;i<3;++i) if(!SudekiMpInstallPointerHook(&opcode_hooks[i],
         (void **)(candidate+OPCODE_SLOT+i*4),original_opcodes[i],hooks[i])) goto failed;
     if(!SudekiMpInstallRelativeCallHook(&skill_camera_hooks[0],candidate+SKILL_CAMERA_START_CALL,
@@ -710,4 +725,12 @@ failed: {
         if(!SudekiMpUninstallLanCastContext()) return FALSE;
         SetLastError(error); return FALSE;
     }
+}
+BOOL SudekiMpInstallLanCastContext(HMODULE image,SudekiMpLanCastOwnerWitness witness) {
+    return install_context(image,witness,NULL);
+}
+BOOL SudekiMpInstallLanCastContextWithTaskHost(HMODULE image,SudekiMpLanCastOwnerWitness witness,
+    const SudekiMpLanCastTaskHost *host) {
+    if(!host) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
+    return install_context(image,witness,host);
 }

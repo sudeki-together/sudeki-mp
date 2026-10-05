@@ -26,6 +26,10 @@ static HWND input_window;
 static BOOL focused;
 static void *sample_controller,*sample_actor;
 static uint32_t sample_transaction;
+static BOOL quick_down,quick_pending;
+enum { MELEE_QUEUE=4, MELEE_MAX_AGE=250 };
+static unsigned melee_down,melee_first,melee_count;
+static struct { unsigned kind; uint32_t at; } melee_queue[MELEE_QUEUE];
 static float sample_x,sample_z,sample_scale=1.0f;
 static float look_x,look_y;
 static uint32_t look_x_at,look_y_at,look_sample_at;
@@ -39,8 +43,37 @@ typedef struct NativeEvent {
 
 static void clear_sample(void) {
     sample_controller=sample_actor=NULL; sample_transaction=0;
+    quick_pending=FALSE;
+    melee_first=melee_count=0; /* Preserve down bits until physical releases. */
     sample_x=sample_z=0; sample_scale=1.0f;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
+}
+static void sample_quick(const NativeEvent *e,BOOL admitted) {
+    /* Native4279E4 chooses listener+90 for action19. The digital enable bit
+     * belongs to controller+1d0, NOT event+10. Value is press/release. Track even
+     * while disarmed so a held press cannot migrate to another binding. */
+    if(e->action!=0x19u) return;
+    BOOL down=e->value!=0;
+    if(down && !quick_down && admitted) quick_pending=TRUE;
+    quick_down=down;
+}
+static void sample_melee(const NativeEvent *e,BOOL admitted,uint32_t now) {
+    if(e->action<0x2cu || e->action>0x2eu) return;
+    unsigned kind=e->action-0x2bu,bit=1u<<(kind-1u);
+    BOOL down=e->value!=0;
+    if(down && !(melee_down&bit) && admitted && melee_count<MELEE_QUEUE) {
+        unsigned next=(melee_first+melee_count)%MELEE_QUEUE;
+        melee_queue[next].kind=kind; melee_queue[next].at=now; ++melee_count;
+    }
+    if(down) melee_down|=bit; else melee_down&=~bit;
+}
+static unsigned take_melee(uint32_t now) {
+    while(melee_count) {
+        unsigned next=melee_first;
+        melee_first=(melee_first+1u)%MELEE_QUEUE; --melee_count;
+        if((uint32_t)(now-melee_queue[next].at)<=MELEE_MAX_AGE) return melee_queue[next].kind;
+    }
+    return 0;
 }
 
 static BOOL window_exact(void) {
@@ -59,9 +92,13 @@ static LRESULT CALLBACK focus_messages(int code,WPARAM sent,LPARAM raw) {
                 (m->message==WM_ACTIVATE && LOWORD(m->wParam)==WA_INACTIVE) ||
                 (m->message==WM_ACTIVATEAPP && !m->wParam)) {
                 focused=FALSE; sample_x=sample_z=0;
+                quick_pending=FALSE;
+                melee_first=melee_count=0;
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             } else if(m->message==WM_SETFOCUS) {
                 focused=TRUE; sample_x=sample_z=0;
+                quick_pending=FALSE;
+                melee_first=melee_count=0;
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             }
         }
@@ -138,12 +175,17 @@ static void __attribute__((thiscall,force_align_arg_pointer)) story_input(
      * never reopens native input for the same global controller listener. */
     if(controller && listener==controller+INPUT_SUBOBJECT) {
         if(!controller_exact(controller)) InterlockedExchange(&fault,1);
-        else if(sample_transaction && focused && window_exact() &&
-            controller==sample_controller &&
-            *(void **)(controller+ACTOR_TARGET)==sample_actor &&
-            readable(event,sizeof(NativeEvent))) {
+        else if(readable(event,sizeof(NativeEvent))) {
             NativeEvent e; memcpy(&e,event,sizeof(e));
             int owner=*(int *)(controller+INPUT_SUBOBJECT+0x5cu);
+            BOOL admitted=sample_transaction && focused && window_exact() &&
+            controller==sample_controller &&
+                *(void **)(controller+ACTOR_TARGET)==sample_actor;
+            if(owner==-1 || owner==e.owner) {
+                sample_quick(&e,admitted && (controller[0x1d0u]&2u));
+                sample_melee(&e,admitted && (controller[0x1d0u]&2u),GetTickCount());
+            }
+            if(!admitted) goto done;
             /* Exact42781C checks this signed device owner. 4278F9..427980
              * maps29 to lateral and28 to forward magnitude. The ordinary
              * input backend dispatches releases through the same listener;
@@ -245,6 +287,22 @@ BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transacti
 void SudekiMpLanStoryInputClear(void) {
     if(native_thread_exact() && !InterlockedCompareExchange(&callbacks,0,0)) clear_sample();
 }
+BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t transaction) {
+    float x,z;
+    if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return FALSE;
+    BOOL pressed=quick_pending; quick_pending=FALSE; return pressed;
+}
+unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t transaction) {
+    float x,z;
+    if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return 0;
+    return take_melee(GetTickCount());
+}
+void SudekiMpLanStoryInputMuteMovement(void) {
+    if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return;
+    sample_x=sample_z=0;
+    melee_first=melee_count=0;
+    look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
+}
 
 BOOL SudekiMpLanStoryInputOrbit(void *controller,void *actor,uint32_t transaction,
     float *yaw,float *pitch) {
@@ -302,6 +360,7 @@ BOOL SudekiMpLanStoryInputInstall(HMODULE image,unsigned client_player) {
      * installs no trampoline and never changes native controller/actor fields. */
     if(!base) { base=b; original_input=(NativeInput)(b+INPUT_HANDLER); }
     player=client_player;
+    quick_down=quick_pending=FALSE;
     InterlockedExchange(&retained,1);
     if(!SudekiMpInstallPointerHook(&input_hook,(void **)(b+INPUT_VT),
             b+INPUT_HANDLER,story_input)) {

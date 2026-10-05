@@ -388,15 +388,13 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     ReleaseSRWLockExclusive(&state_lock); return TRUE;
 }
 
-static BOOL roster_locked(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+static BOOL roster_identity_locked(void *controller,
     const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *out) {
     static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,
         SUDEKIMP_CLEANROOM_ELCO,SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
     SudekiMpLanStoryNativeRoster r={0};
-    if(!base || !installed || !w || !w->service_post_original_exact || !w->dispatch_serial ||
-        last_dispatch_serial!=w->dispatch_serial || !last_exact || call_depth ||
+    if(!base || !installed || !last_exact || call_depth ||
         exhausted || foreign_thread || native_thread!=GetCurrentThreadId() ||
-        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
         !SudekiMpLanStorySceneValid(scene) || scene->phase!=SUDEKIMP_LAN_STORY_READY ||
         scene->revision!=published.revision || !SudekiMpLanStorySceneSame(scene,&published))
         return FALSE;
@@ -429,14 +427,30 @@ static BOOL roster_locked(void *controller,const SudekiMpControlUpdateDispatchWi
         *(void **)((uint8_t *)controller+0x248u)!=r.actors[r.leader_character] ||
         count!=*(unsigned *)(group+0xccu) || world!=*(void **)(base+0x408d10u) ||
         group!=*(void **)(base+0x408d94u) || descriptor!=*(void **)(world+0x0cu) ||
-        controller!=*(void **)(base+0x408da4u) ||
-        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
+        controller!=*(void **)(base+0x408da4u)) return FALSE;
     for(unsigned c=0;c<4u;++c) if(r.actors[c] &&
         (SudekiMpCleanroomEngineActorEntity(types[c])!=r.actors[c] ||
          *(void **)((uint8_t *)r.actors[c]+0x94u)!=r.ai[c])) return FALSE;
-    r.dispatch_serial=w->dispatch_serial; r.epoch=scene->epoch; r.revision=scene->revision;
+    r.epoch=scene->epoch; r.revision=scene->revision;
     r.world=world; r.descriptor=descriptor; r.group=group; r.controller=controller;
     *out=r; return TRUE;
+}
+static BOOL roster_locked(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *out) {
+    if(!w || !w->service_post_original_exact || !w->dispatch_serial ||
+        last_dispatch_serial!=w->dispatch_serial ||
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
+        !roster_identity_locked(controller,scene,out) ||
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
+    out->dispatch_serial=w->dispatch_serial; return TRUE;
+}
+static BOOL same_native_roster(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryNativeRoster *fresh) {
+    return r->epoch==fresh->epoch && r->revision==fresh->revision &&
+        r->available_mask==fresh->available_mask && r->leader_character==fresh->leader_character &&
+        r->world==fresh->world && r->descriptor==fresh->descriptor &&
+        r->group==fresh->group && r->controller==fresh->controller &&
+        !memcmp(r->actors,fresh->actors,sizeof(r->actors)) && !memcmp(r->ai,fresh->ai,sizeof(r->ai));
 }
 BOOL SudekiMpLanStoryObserverRoster(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,
@@ -451,12 +465,14 @@ BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatc
     SudekiMpLanStoryNativeRoster fresh;
     if(!w || !r || r->dispatch_serial!=w->dispatch_serial) return FALSE;
     AcquireSRWLockShared(&state_lock);
-    BOOL ok=roster_locked(r->controller,w,&published,&fresh) &&
-        r->epoch==fresh.epoch && r->revision==fresh.revision &&
-        r->available_mask==fresh.available_mask && r->leader_character==fresh.leader_character &&
-        r->world==fresh.world && r->descriptor==fresh.descriptor &&
-        r->group==fresh.group && r->controller==fresh.controller &&
-        !memcmp(r->actors,fresh.actors,sizeof(r->actors)) && !memcmp(r->ai,fresh.ai,sizeof(r->ai));
+    BOOL ok=roster_locked(r->controller,w,&published,&fresh) && same_native_roster(r,&fresh);
+    ReleaseSRWLockShared(&state_lock); return ok;
+}
+BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
+    SudekiMpLanStoryNativeRoster fresh;
+    if(!r || !r->dispatch_serial) return FALSE;
+    AcquireSRWLockShared(&state_lock);
+    BOOL ok=roster_identity_locked(r->controller,&published,&fresh) && same_native_roster(r,&fresh);
     ReleaseSRWLockShared(&state_lock); return ok;
 }
 

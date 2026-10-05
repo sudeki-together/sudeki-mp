@@ -6,7 +6,7 @@
 
 /* HOST saved-story scope, deliberately separate from the four-member Test
  * Room adapter. This adapter admits only validated loaded party members, ordinary
- * noncombat movement, and exact independent native AI leases.
+ * movement, Tal's native melee input, and exact independent native AI leases.
  * The caller owns authenticated offer/ACK/freshness. None of these functions
  * authorizes a network player or creates a missing native character.
  *
@@ -28,6 +28,8 @@ BOOL SudekiMpLanStoryControlExact(const SudekiMpControlUpdateDispatchWitness *,
 BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *native_key,
     float world_x,float world_z,BOOL *temporarily_held);
+unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned kind);
 /* Closes input first, then retries native speed/action drain and precisely
  * one DefaultControl. TRUE proves ref0/mode1; a failure retains ownership.
  * Never release a transport ticket, replace the scene, or destroy the actor

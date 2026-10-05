@@ -11,13 +11,14 @@ static uint32_t get32(const uint8_t *p) {
 static void putfloat(uint8_t *p,float f) { uint32_t n; memcpy(&n,&f,4); put32(p,n); }
 static float getfloat(const uint8_t *p) { uint32_t n=get32(p); float f; memcpy(&f,&n,4); return f; }
 
-static BOOL action_slot_valid(unsigned kind,unsigned slot) {
+static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned character) {
     return (kind==SUDEKIMP_STORY_ACTION_SKILL && slot<6u) ||
-        (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1u && slot<=2u);
+        (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1u && slot<=2u) ||
+        (kind==SUDEKIMP_STORY_ACTION_MELEE && character==2u && slot>=1u && slot<=3u);
 }
 BOOL SudekiMpLanStoryActionRequestValid(const SudekiMpLanStoryActionRequest *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&
-        r->acknowledged_frame && action_slot_valid(r->kind,r->slot);
+        r->acknowledged_frame && action_slot_valid(r->kind,r->slot,r->fence.character);
 }
 BOOL SudekiMpLanStoryActionRequestSame(const SudekiMpLanStoryActionRequest *a,
     const SudekiMpLanStoryActionRequest *b) {
@@ -27,8 +28,11 @@ BOOL SudekiMpLanStoryActionRequestSame(const SudekiMpLanStoryActionRequest *a,
 }
 BOOL SudekiMpLanStoryActionResultValid(const SudekiMpLanStoryActionResult *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&
-        action_slot_valid(r->kind,r->slot) && r->outcome>=SUDEKIMP_STORY_ACTION_STARTED &&
-        r->outcome<=SUDEKIMP_STORY_ACTION_RETAINED;
+        action_slot_valid(r->kind,r->slot,r->fence.character) && r->outcome>=SUDEKIMP_STORY_ACTION_STARTED &&
+        r->outcome<=SUDEKIMP_STORY_ACTION_NO_SP &&
+        (r->outcome!=SUDEKIMP_STORY_ACTION_SUBMITTED || r->kind==SUDEKIMP_STORY_ACTION_MELEE) &&
+        (r->outcome!=SUDEKIMP_STORY_ACTION_STARTED || r->kind!=SUDEKIMP_STORY_ACTION_MELEE) &&
+        (r->outcome!=SUDEKIMP_STORY_ACTION_NO_SP || r->kind==SUDEKIMP_STORY_ACTION_SKILL);
 }
 BOOL SudekiMpLanStoryActionResultMatches(const SudekiMpLanStoryActionResult *r,
     const SudekiMpLanStoryActionRequest *q) {

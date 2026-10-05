@@ -45,6 +45,13 @@ BOOL SudekiMpLanAimOverlay(float *pose, const float *aim, const float *center,
 BOOL SudekiMpLanAimImageMatches(HMODULE image);
 BOOL SudekiMpLanAimInstall(HMODULE image, SudekiMpLanAimWitness witness,
     SudekiMpLanAimTargetWitness target_witness, SudekiMpLanAimFireWitness fire_witness);
+/* Contained story client: Ailish's authored upper-body pose only. The same
+ * adapter owns the matrix-build seam; no direction, shot or base-sampler
+ * hook is installed. The witness must establish a fresh paused-world scope
+ * using PoseWitness and validate the current authenticated body observation.
+ * Mutually exclusive with the two existing modes. */
+BOOL SudekiMpLanAimPoseOnlyInstall(HMODULE image,SudekiMpLanAimWitness witness);
+BOOL SudekiMpLanAimPoseWitness(void *unused);
 BOOL SudekiMpLanAimUninstall(void);
 /* Refresh candidate identities at a verified game-thread boundary. They are
  * only a fast filter; the witness and native ownership are checked at use. */

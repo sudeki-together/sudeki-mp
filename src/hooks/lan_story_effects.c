@@ -12,6 +12,7 @@
 
 enum {
     PARTICLE_CALL=0x1d4915u, PARTICLE_UPDATE=0x22faa0u,
+    MODEL_CLOCK_CALL=0x1f9faeu, MODEL_CLOCK_SET=0x231860u,
     SCENE_MANAGER=0x408d58u, WORLD_GLOBAL=0x408d10u,
     PARTICLE_ANIMATION_VT=0x2e22c8u, EMITTER_VT=0x2e26ccu,
     MAX_INSTANCES=128u, MAX_EMITTERS=64u, MAX_EFFECTS=128u,
@@ -20,6 +21,16 @@ enum {
 typedef void (__stdcall *ParticleUpdate)(void *manager,float delta);
 static uint8_t *base;
 static SudekiMpRelativeCallHook update_hook;
+static SudekiMpRelativeCallHook model_clock_hook;
+static void *original_model_clock __attribute__((used));
+static volatile LONG clock_callbacks;
+static unsigned clock_trace_logs;
+typedef struct ModelClockObservation {
+    void *renderer,*instance,*resource;
+    uint32_t source,last_tick;
+    unsigned observations,logs;
+} ModelClockObservation;
+static ModelClockObservation model_observations[MAX_INSTANCES];
 static ParticleUpdate original_update;
 static SudekiMpLanStoryEffectsDispatch dispatcher;
 static void *dispatch_context;
@@ -78,6 +89,100 @@ static BOOL call_targets(const uint8_t *call,const void *target) {
     int32_t displacement;
     if(!readable(call,5u) || call[0]!=0xe8u) return FALSE;
     memcpy(&displacement,call+1u,4u); return call+5u+displacement==target;
+}
+/* Diagnostic only. The previous cosmetic updater can advance a custom node,
+ * then native model playback can set it back to the contained world time.
+ * Observe the actual setter arguments before changing clock ownership. This
+ * seam never suppresses the original, edits its arguments, or retains a node.
+ * The native call takes ESI=instance, one stack float, and owns RET4. */
+static void model_clock_entry(void);
+typedef struct ClockObserveState {
+    uint8_t fp[512] __attribute__((aligned(16)));
+    DWORD error;
+} ClockObserveState;
+static void clock_observe_leave(ClockObserveState *s) {
+    SetLastError(s->error);
+    __asm__ volatile("fxrstor %0" : : "m"(s->fp) : "memory");
+}
+__attribute__((noinline,used,force_align_arg_pointer))
+static void observe_model_clock(uint8_t *sub,uint8_t *instance,uint32_t source) {
+    ClockObserveState saved __attribute__((cleanup(clock_observe_leave)));
+    const uint32_t mxcsr=0x1f80u;
+    __asm__ volatile("fxsave %0" : "=m"(saved.fp) : : "memory");
+    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(mxcsr) : "memory");
+    saved.error=GetLastError();
+    LONG depth=InterlockedIncrement(&clock_callbacks);
+    if(depth!=1 || !installed || !base || native_thread!=GetCurrentThreadId() ||
+        InterlockedCompareExchange(&stopping,0,0) || clock_trace_logs>=256u ||
+        !model_clock_hook.installed || !call_targets(base+MODEL_CLOCK_CALL,model_clock_entry) ||
+        (uintptr_t)sub<4u) goto done;
+    uint8_t *renderer=sub-4u;
+    if(!readable(renderer,0x28u) || *(void **)renderer!=base+0x2de564u ||
+        *(void **)sub!=base+0x2de658u || *(void **)(sub+0x10u)!=instance ||
+        !readable(instance,0x8cu) || *(void **)instance!=base+PARTICLE_ANIMATION_VT ||
+        !readable(base+SCENE_MANAGER,4u)) goto done;
+    uint8_t *owner=*(uint8_t **)(base+SCENE_MANAGER);
+    if(!readable(owner,0x44u)) goto done;
+    uint8_t *scene=*(uint8_t **)(owner+0x40u);
+    if(!readable(scene,0x8cu) || !scene[0x88u]) goto done;
+    uint8_t *manager=*(uint8_t **)(scene+0x54u);
+    if(!readable(manager,0x10u) || *(void **)(instance+0x1cu)!=manager) goto done;
+    unsigned count=*(unsigned *)(manager+4u),capacity=*(unsigned *)(manager+8u),matches=0;
+    void **items=*(void ***)(manager+0xcu);
+    if(!count || count>MAX_INSTANCES || count>capacity || capacity>4096u ||
+        !readable(items,count*4u)) goto done;
+    for(unsigned i=0;i<count;++i) if(items[i]==instance) ++matches;
+    if(matches!=1u) goto done;
+    uint8_t *node=NULL;
+    for(unsigned kind=0;kind<2u && !node;++kind) {
+        unsigned n=*(unsigned *)(instance+(kind?0x14u:8u));
+        uint8_t **nodes=*(uint8_t ***)(instance+(kind?0x10u:4u));
+        if(n>(kind?MAX_EFFECTS:MAX_EMITTERS) || (n && !readable(nodes,n*4u))) goto done;
+        for(unsigned i=0;i<n;++i) {
+            uint8_t *p=nodes[i]; unsigned offset=kind?0x120u:0x190u;
+            if(!readable(p,offset+4u)) goto done;
+            uint8_t *vt=*(uint8_t **)p,*data=*(uint8_t **)(p+offset);
+            /* The exact native getter and sampler, not arbitrary readable
+             * objects. No callback is invoked by this observer. */
+            if(!readable(vt,0x38u) || *(void **)(vt+4u)!=base+0x235590u ||
+                *(void **)(vt+0x34u)!=base+(kind?0x237990u:0x233bd0u) ||
+                !readable(data,kind?9u:10u)) goto done;
+            if(data[kind?8u:9u]==1u) { node=p; break; }
+        }
+    }
+    if(!node) goto done;
+    void *resource=*(void **)(renderer+0x10u);
+    ModelClockObservation *observation=NULL,*empty=NULL;
+    for(unsigned i=0;i<MAX_INSTANCES;++i) {
+        ModelClockObservation *o=&model_observations[i];
+        if(!o->renderer && !empty) empty=o;
+        if(o->renderer==renderer && o->instance==instance && o->resource==resource) {
+            observation=o; break;
+        }
+    }
+    if(!observation) {
+        if(!empty) goto done;
+        observation=empty;
+        *observation=(ModelClockObservation){.renderer=renderer,.instance=instance,.resource=resource};
+    }
+    uint32_t now=GetTickCount(),previous=observation->source;
+    ++observation->observations; observation->source=source;
+    if(observation->logs<4u || (observation->logs<12u && now-observation->last_tick>=1000u)) {
+        ++clock_trace_logs; ++observation->logs; observation->last_tick=now;
+        uint32_t times[5]; memcpy(times,node+0xd8u,sizeof(times));
+        SudekiMpLogFormat("story_effect_clock event=model_set renderer=%p resource=%p instance=%p node=%p source_bits=%08lx previous_source_bits=%08lx phase_bits=%08lx delta_bits=%08lx previous_phase_bits=%08lx duration_bits=%08lx observations=%u policy=observe_only_original_unchanged\r\n",
+            renderer,resource,instance,node,(unsigned long)source,(unsigned long)previous,
+            (unsigned long)times[0],(unsigned long)times[1],(unsigned long)times[2],
+            (unsigned long)times[4],observation->observations);
+    }
+done:
+    InterlockedDecrement(&clock_callbacks);
+}
+__attribute__((naked,noinline,used))
+static void model_clock_entry(void) {
+    __asm__ volatile("pushfl\n\tpushal\n\tpushl 40(%esp)\n\tpushl %esi\n\tpushl %edi\n\t"
+        "call _observe_model_clock\n\taddl $12,%esp\n\tpopal\n\tpopfl\n\t"
+        "jmp *_original_model_clock\n\t");
 }
 static void update_entry(void);
 static BOOL hook_exact(void) {
@@ -431,12 +536,22 @@ BOOL SudekiMpLanStoryEffectsInstall(HMODULE image,
     SudekiMpLanStoryEffectsDispatch dispatch,void *context) {
     static const uint8_t update_bytes[]={0x83,0xec,0x24,0x53,0x55,0x8b,0x6c,0x24,0x30,0x56,0x57};
     static const uint8_t call_prefix[]={0xd9,0x44,0x24,0x0c,0x51,0x8b,0x4e,0x54,0xd9,0x1c,0x24,0x51};
+    static const uint8_t model_prefix[]={0x8b,0x77,0x10,0x85,0xf6,0x74,0x0d,
+        0xd9,0x44,0x24,0x10,0x51,0xd9,0x1c,0x24};
+    static const uint8_t model_entry[]={0x53,0x55,0x8b,0x6e,0x08,0x57,0x33,0xff};
+    static const uint8_t model_return[]={0x5f,0x5d,0x5b,0xc2,0x04,0x00};
     uint8_t *b=(uint8_t *)image;
-    if(installed || !image || !dispatch || InterlockedCompareExchange(&callbacks,0,0) ||
+    if(installed || update_hook.installed || model_clock_hook.installed || !image || !dispatch ||
+        InterlockedCompareExchange(&callbacks,0,0) || InterlockedCompareExchange(&clock_callbacks,0,0) ||
         !SudekiMpCheckLoadedExecutable(image) ||
         memcmp(b+PARTICLE_UPDATE,update_bytes,sizeof(update_bytes)) ||
         memcmp(b+PARTICLE_CALL-sizeof(call_prefix),call_prefix,sizeof(call_prefix)) ||
-        !call_targets(b+PARTICLE_CALL,b+PARTICLE_UPDATE)) {
+        !call_targets(b+PARTICLE_CALL,b+PARTICLE_UPDATE) ||
+        memcmp(b+MODEL_CLOCK_CALL-sizeof(model_prefix),model_prefix,sizeof(model_prefix)) ||
+        memcmp(b+MODEL_CLOCK_SET,model_entry,sizeof(model_entry)) ||
+        memcmp(b+0x23190du,model_return,sizeof(model_return)) ||
+        *(void **)(b+0x2de660u)!=b+0x1f9f70u ||
+        !call_targets(b+MODEL_CLOCK_CALL,b+MODEL_CLOCK_SET)) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
     /* All four bodies have no image relocations. Their callback closure is
@@ -454,6 +569,8 @@ BOOL SudekiMpLanStoryEffectsInstall(HMODULE image,
     }
     base=b; dispatcher=dispatch; dispatch_context=context;
     original_update=(ParticleUpdate)(b+PARTICLE_UPDATE);
+    original_model_clock=b+MODEL_CLOCK_SET;
+    clock_trace_logs=0u; memset(model_observations,0,sizeof(model_observations));
     native_thread=0; successful=refused=0; active=original_entered=advanced=FALSE;
     topology_stage=topology_index=topology_table=refusal_logs=0u;
     last_refusal_stage=last_refusal_table=last_refusal_tick=0u;
@@ -464,15 +581,22 @@ BOOL SudekiMpLanStoryEffectsInstall(HMODULE image,
     InterlockedExchange(&stopping,0);
     if(!SudekiMpInstallRelativeCallHook(&update_hook,b+PARTICLE_CALL,
         b+PARTICLE_UPDATE,update_entry)) return FALSE;
+    if(!SudekiMpInstallRelativeCallHook(&model_clock_hook,b+MODEL_CLOCK_CALL,
+        b+MODEL_CLOCK_SET,model_clock_entry)) {
+        DWORD error=GetLastError();
+        if(!SudekiMpLanStoryEffectsUninstall()) return FALSE;
+        SetLastError(error); return FALSE;
+    }
     installed=TRUE; SetLastError(ERROR_SUCCESS); return TRUE;
 }
 BOOL SudekiMpLanStoryEffectsUninstall(void) {
-    if(!installed && !update_hook.installed) return TRUE;
+    if(!installed && !update_hook.installed && !model_clock_hook.installed) return TRUE;
     InterlockedExchange(&stopping,1);
-    if(active || InterlockedCompareExchange(&callbacks,0,0) ||
+    if(active || InterlockedCompareExchange(&callbacks,0,0) || InterlockedCompareExchange(&clock_callbacks,0,0) ||
         (native_thread && native_thread!=GetCurrentThreadId())) return pin(ERROR_BUSY);
-    if(!SudekiMpRestoreRelativeCallHook(&update_hook) ||
-        InterlockedCompareExchange(&callbacks,0,0)) return pin(ERROR_BUSY);
+    if(!SudekiMpRestoreRelativeCallHook(&model_clock_hook) ||
+        !SudekiMpRestoreRelativeCallHook(&update_hook) ||
+        InterlockedCompareExchange(&callbacks,0,0) || InterlockedCompareExchange(&clock_callbacks,0,0)) return pin(ERROR_BUSY);
     installed=FALSE; dispatcher=NULL; dispatch_context=NULL;
     current_scene=current_manager=NULL; SudekiMpLanStoryEffectsResetClock();
     base=NULL; native_thread=0;

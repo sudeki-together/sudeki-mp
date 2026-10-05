@@ -2,6 +2,24 @@
 #define SUDEKIMP_RANGED_WORLD_POSE_H
 #include <math.h>
 
+/* Keep an observer's body upright while retaining the full aim separately.
+ * At an exactly vertical aim use the already owned body's horizontal heading,
+ * not a fabricated direction. Output is transactional on invalid input. */
+static inline int SudekiMpRangedWorldRoot(const float aim[3],const float prior[3],float root[3]) {
+    if(!aim || !prior || !root) return 0;
+    float norm=0;
+    for(unsigned i=0;i<3;++i) { if(!isfinite(aim[i])) return 0;norm+=aim[i]*aim[i]; }
+    if(!isfinite(norm) || norm<.5f || norm>1.5f) return 0;
+    float x=aim[0],z=aim[2],flat=x*x+z*z;
+    if(flat<.00000001f) {
+        x=prior[0];z=prior[2];flat=x*x+z*z;
+        if(!isfinite(x) || !isfinite(z) || !isfinite(flat) || flat<.00000001f) return 0;
+    }
+    float length=sqrtf(flat),out[3]={x/length,0,z/length};
+    for(unsigned i=0;i<3;++i) root[i]=out[i];
+    return 1;
+}
+
 /* Authored first-person semantic -> world semantic, not renderer selectors.
  * Resource presence and source identity must still be proved by the caller.
  * The established ranged adapter uses these missile combo families. */

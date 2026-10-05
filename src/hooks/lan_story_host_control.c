@@ -5,6 +5,7 @@
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
+#include "engine/spirit_instance_abi.h"
 #include "engine/weapon_activation_abi.h"
 #include <stdint.h>
 #include <string.h>
@@ -76,8 +77,13 @@ static BOOL next_supported(uint8_t *image) {
     return exact;
 }
 static BOOL entries_exact(void) {
-    return base && !memcmp(base+FILTER_NONE,none_code,sizeof(none_code)) &&
-        !memcmp(base+FILTER_ALL,all_code,sizeof(all_code)) &&
+    /* Private caster namespaces own these two native filter entries. Accept
+     * only that adapter's complete live-hook/trampoline/neutral-scope proof;
+     * arbitrary changed bytes still invalidate the host binding. */
+    return base && (!memcmp(base+FILTER_NONE,none_code,sizeof(none_code)) ||
+            SudekiMpSpiritInstanceFilterNoneEntryExact((HMODULE)base)) &&
+        (!memcmp(base+FILTER_ALL,all_code,sizeof(all_code)) ||
+            SudekiMpSpiritInstanceFilterAllEntryExact((HMODULE)base)) &&
         !memcmp(base+NEXT,verified_next,sizeof(verified_next));
 }
 static BOOL observe(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
@@ -120,15 +126,24 @@ static BOOL same_native_party(const SudekiMpLanStoryNativeRoster *a,
         a->available_mask==b->available_mask && !memcmp(a->actors,b->actors,sizeof(a->actors)) &&
         !memcmp(a->ai,b->ai,sizeof(a->ai));
 }
+static BOOL menus_clear(void);
 static BOOL input_filter(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,BOOL blocked) {
     uint8_t *c=r->controller;
     if(!owner_matches(r) || !entries_exact() ||
         !SudekiMpLanStoryObserverRosterStillExact(w,r)) return FALSE;
     int current=*(int *)(c+0x80u),pending=*(int *)(c+0x84u);
+    /* Native UI retirement (including the ranged combat prime) can restore
+     * All while our custom menu is still open. The exact original pair on
+     * the SAME owner ends this lease; there is nothing left to restore.
+     * Never write a mode to repair drift, and never treat a pending-only All
+     * or a foreign filter as completion. Reopening below still needs a fresh
+     * native-menu boundary before acquiring a new None lease. */
+    if(input_owner.owned && current==1 && pending==1)
+        memset(&input_owner,0,sizeof(input_owner));
     if(blocked) {
         if(!input_owner.owned) {
-            if(current!=1 || pending!=1) return FALSE;
+            if(current!=1 || pending!=1 || !menus_clear()) return FALSE;
             input_owner.world=r->world; input_owner.descriptor=r->descriptor;
             input_owner.group=r->group; input_owner.controller=c;
             input_owner.owned=TRUE; input_owner.releasing=FALSE;
