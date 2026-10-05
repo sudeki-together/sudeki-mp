@@ -1706,4 +1706,11 @@ target_compile_options(SudekiMP.StoryControlStatusTest PRIVATE -Wall -Wextra -UN
 set_target_properties(SudekiMP.StoryControlStatusTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(SudekiMP.StoryInteractionGuardImageTest tests/story_interaction_guard_image_test.c
+    src/engine/arbiter_combat_input.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryInteractionGuardImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryInteractionGuardImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryInteractionGuardImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryInteractionGuardImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 configure_file(config/SudekiMP.ini "${CMAKE_BINARY_DIR}/bin/SudekiMP.ini" COPYONLY)

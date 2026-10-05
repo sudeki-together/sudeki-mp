@@ -186,6 +186,11 @@ BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitnes
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *);
 BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,float,float);
+/* Exact sparse Tal lease; call the same per-arbiter entry as Test Room. The
+ * submitted output distinguishes a pre-call refusal from an uncertain return.
+ * TRUE proves return ownership, NOT native attack acceptance or damage. */
+BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned,BOOL *submitted);
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
     SudekiMpLanPartyControlDrainProbe);

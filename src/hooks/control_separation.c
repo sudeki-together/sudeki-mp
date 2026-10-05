@@ -18,6 +18,7 @@
 #include "hooks/blacksmith_ui_adapter.h"
 #include "hooks/call_hook.h"
 #include "hooks/interaction_provenance.h"
+#include "hooks/story_interaction_guard.h"
 #include "hooks/split_screen_render.h"
 #include "input/bridge_protocol.h"
 #include "input/bridge_receiver.h"
@@ -8158,6 +8159,31 @@ BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness
     ((ArbiterMovementFunction)(game_base+RVA_ARBITER_MOVEMENT))(
         arbiter,heading,magnitude,1.0f,0u);
     return SudekiMpLanPartyControlStoryExact(w,roster,key);
+}
+BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    unsigned kind,BOOL *submitted) {
+    if(submitted) *submitted=FALSE;
+    BOOL combat=FALSE;
+    if(!submitted || !key || key->seat!=2u || kind<1u || kind>3u ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key) || !party_native_entries_exact() ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat) return FALSE;
+    void *actor=story_native_control.actor[key->seat].actor;
+    uint8_t *arbiter=party_component(actor,0x90u,0x2cc9acu,0x64u);
+    if(!arbiter || *(void **)(arbiter+0x10u)!=actor ||
+        !party_component(actor,0x94u,0x2d4924u,0x16cu) ||
+        !party_component(actor,0xacu,0x2d4b24u,0x54u) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key) ||
+        party_component(actor,0x90u,0x2cc9acu,0x64u)!=arbiter ||
+        !SudekiMpStoryInteractionInputImageExact(game_base,readable_memory) ||
+        !SudekiMpStoryMeleeInteractionClear(game_base,actor,kind,readable_memory)) return FALSE;
+    *submitted=TRUE;
+    SudekiMpSubmitArbiterCombatInput(game_base+RVA_ARBITER_COMBAT_INPUT,arbiter,
+        kind==1u,kind==2u,kind==3u,0,0,0);
+    /* Native validation/combo timing may legitimately reject the request.
+     * Never manufacture an animation, target, damage or second invocation. */
+    return SudekiMpLanPartyControlStoryExact(w,roster,key) &&
+        party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter;
 }
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,

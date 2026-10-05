@@ -1,5 +1,6 @@
 #include "hooks/lan_story_control.h"
 #include "hooks/lan_party_control.h"
+#include "hooks/story_interaction_guard.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
@@ -103,6 +104,7 @@ BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) 
     static const uint8_t switch_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x18};
     if(!image || locked_character_id>=4u) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
     if(base || !SudekiMpCheckLoadedExecutable(image) ||
+        !SudekiMpStoryInteractionInputImageExact(b,readable) ||
         !readable(b+PREVIOUS_CALL-11u,16u) || !readable(b+NEXT_CALL-11u,16u) ||
         memcmp(b+PREVIOUS_CALL-11u,previous_context,sizeof(previous_context)) ||
         memcmp(b+NEXT_CALL-11u,next_context,sizeof(next_context)) ||
