@@ -24,6 +24,7 @@
 #include "hooks/lan_story_temp_exterior.h"
 #include "hooks/lan_story_pause_trace.h"
 #include "hooks/lan_story_anim_trace.h"
+#include "hooks/lan_story_name_tags.h"
 #include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
 #include "hooks/lan_arena_pause_panel.h"
@@ -286,6 +287,11 @@ static const SudekiMpLanStoryTempExteriorConsumer temp_exterior_probe={
 
 static BOOL read_config_boolean(const wchar_t *path,const wchar_t *section,const wchar_t *key);
 static BOOL read_config_integer(const wchar_t *path,const wchar_t *section,const wchar_t *key,int default_value,int minimum,int maximum,int *result);
+static BOOL config_key_false(const wchar_t *path,const wchar_t *section,const wchar_t *key) {
+    wchar_t value[16];
+    GetPrivateProfileStringW(section,key,L"",value,16,path);
+    return !_wcsicmp(value,L"false") || !wcscmp(value,L"0") || !_wcsicmp(value,L"no") || !_wcsicmp(value,L"off");
+}
 static void configure_lobby_auto(const wchar_t *config_path) {
     SudekiMpLobbyAuto a; wchar_t text[64]; int number;
     memset(&a,0,sizeof(a)); a.save_slot=~0u; a.character=4u; a.min_players=2u;
@@ -297,6 +303,8 @@ static void configure_lobby_auto(const wchar_t *config_path) {
     for (unsigned i=0;i<sizeof(a.room)-1u && text[i];++i) a.room[i]=(char)text[i];
     a.port=(uint16_t)(read_config_integer(config_path,L"Lobby",L"Port",26770,1024,65535,&number)?number:26770);
     if (read_config_integer(config_path,L"Lobby",L"SaveSlot",-1,0,9999,&number) && number>=0) a.save_slot=(unsigned)number;
+    GetPrivateProfileStringW(L"Lobby",L"Name",L"",text,64,config_path);
+    for (unsigned i=0;i<sizeof(a.name)-1u && text[i];++i) a.name[i]=(char)text[i];
     GetPrivateProfileStringW(L"Lobby",L"Character",L"",text,64,config_path);
     static const wchar_t *const names[4]={L"Buki",L"Elco",L"Tal",L"Ailish"};
     for (unsigned i=0;i<4u;++i) if (!_wcsicmp(text,names[i])) a.character=i;
@@ -323,6 +331,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaWindowPolicy()) return FALSE;
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
+    if (!SudekiMpLanStoryNameTagsUninstall()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
     SudekiMpControlUpdateObserverGateDisable(
@@ -967,6 +976,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (read_config_boolean(config_path,L"SudekiMP",L"SkipStartupMovies") &&
                 (SudekiMpLanArenaStartupMovieSkipIntroPoem(TRUE),
                  !SudekiMpInstallLanArenaStartupMovieSkip(game_module))) ||
+            /* Research diagnostics (bounded, log-only) default on; off when
+             * [StoryAreas] ResearchDiagnostics=false. */
+            (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
+            /* Player names on the HUD card and above party heads (saved story). */
+            (saved_story && !config_key_false(config_path,L"SudekiMP",L"PlayerNameTags") &&
+                !SudekiMpLanStoryNameTagsInstall(game_module)) ||
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||

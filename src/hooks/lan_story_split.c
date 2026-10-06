@@ -152,7 +152,7 @@ static void __attribute__((used,noinline)) scene_updated(uint32_t dt_bits) {
         ++animate_driven;
     }
     DWORD now=GetTickCount();
-    if(now-animate_logged>=2000u && animate_logs<300u) {
+    if(SudekiMpLogResearchEnabled() && now-animate_logged>=2000u && animate_logs<300u) {
         animate_logged=now; ++animate_logs;
         SudekiMpLogFormat("lan_story_split event=animate targets=%u driven=%lu already=%lu hidden=%lu invalid=%lu\r\n",
             n,(unsigned long)animate_driven,(unsigned long)animate_already,(unsigned long)animate_hidden,(unsigned long)animate_invalid);

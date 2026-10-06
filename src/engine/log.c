@@ -5,6 +5,9 @@
 #include <string.h>
 
 static HANDLE log_file = INVALID_HANDLE_VALUE;
+static BOOL research_enabled = TRUE;
+void SudekiMpLogSetResearch(BOOL enabled) { research_enabled = enabled; }
+BOOL SudekiMpLogResearchEnabled(void) { return research_enabled; }
 
 BOOL SudekiMpLogOpenBesideGame(const wchar_t *game_path) {
     wchar_t path[MAX_PATH];

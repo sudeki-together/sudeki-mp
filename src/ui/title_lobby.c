@@ -42,7 +42,7 @@ static SudekiMpSaveFingerprint reviewed_save;
 static unsigned save_page, selected_save=~0u, armed_save=~0u;
 static unsigned row_saves[SUDEKIMP_PANEL_CONTROLS];
 static BOOL save_reviewed;
-static SudekiMpLobbyAuto auto_config; static BOOL auto_enabled,auto_opened,auto_done,auto_started;
+static SudekiMpLobbyAuto auto_config; static BOOL auto_enabled,auto_opened,auto_done,auto_started,auto_named;
 static DWORD auto_last,auto_retry_at; static unsigned auto_logs;
 void SudekiMpLobbyUiConfigureAuto(const SudekiMpLobbyAuto *config) {
     if (!config) { auto_enabled=FALSE; return; }
@@ -655,6 +655,11 @@ static void auto_step(void) {
         (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME || status.saved_game.folder_slot!=auto_config.save_slot)) {
         if (!destination_editable()) return;
         if (auto_act(DESTINATION,0)) auto_log("destinations"); return;
+    }
+    if (auto_config.name[0] && strcmp(me->name,auto_config.name) && !auto_named) {
+        auto_named=TRUE; snprintf(player,sizeof(player),"%s",auto_config.name);
+        if (SudekiMpLobbySetName(session,player)) auto_log("name"); else auto_log("name_failed");
+        auto_last=now; return;
     }
     BOOL leader_assigned=hosting && status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME;
     if (!leader_assigned && auto_config.character<4u && me->character!=auto_config.character) {

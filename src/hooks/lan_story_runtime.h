@@ -18,4 +18,8 @@ unsigned SudekiMpLanStoryRuntimePort(void);
  * Reserved but unavailable characters do not become input-enabled here. */
 BOOL SudekiMpLanStoryRuntimeReady(void);
 void SudekiMpLanStoryRuntimeLobbyService(SudekiMpLobby *lobby);
+/* Lobby player name holding character 0..3 (Buki, Elco, Tal, Ailish) from the
+ * last lobby status copy; FALSE when the character is not held by a present
+ * member with a non-empty name. Runtime thread only; copy-only. */
+BOOL SudekiMpLanStoryRuntimePlayerName(unsigned character,char out[32]);
 #endif

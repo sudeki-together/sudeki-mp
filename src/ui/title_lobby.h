@@ -30,7 +30,7 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection);
  * session, save verification or start admission paths. */
 typedef struct SudekiMpLobbyAuto {
     BOOL host,join,ready,start;
-    char room[32],address[32];
+    char room[32],address[32],name[32]; /* name: player name to set once in the room */
     uint16_t port;
     unsigned save_slot;    /* host: SAVESLOTdddd suffix, ~0u = none */
     unsigned character;    /* 0 Buki,1 Elco,2 Tal,3 Ailish, 4 = keep */

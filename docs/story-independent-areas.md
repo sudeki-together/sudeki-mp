@@ -743,6 +743,11 @@ start and in the post-write readback. A world snapshot is about 6.7 KB for 27
 actors, so every-tick capture is roughly 300 KB/s per client; acceptable on a
 LAN, unmeasured over VPN.
 
+Research diagnostics (bounded, log-only: clip/pose/input transition logs, the
+client phase profile, the split animate summary and the hitch detector) are on
+by default and switched off with `[StoryAreas] ResearchDiagnostics=false`;
+the animation renderer trace stays opt-in through `[StoryAreas] AnimTrace`.
+
 Known limits: only the host lead can use a door; remote players cannot enter.
 The client still tolerates empty channels per channel for actors the host did
 not advance. Other-area characters remain visible at their last pose. The host

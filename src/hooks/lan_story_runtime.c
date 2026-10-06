@@ -1,4 +1,5 @@
 #include "hooks/lan_story_runtime.h"
+#include "hooks/lan_story_name_tags.h"
 #include "hooks/lan_story_observer.h"
 #include "hooks/lan_story_objects.h"
 #include "hooks/lan_story_area_membership.h"
@@ -788,7 +789,7 @@ static void present(void) {
         if(previous_present.QuadPart && timing_frequency.QuadPart>0 && end_stamp.QuadPart>previous_present.QuadPart)
             gap_us=(uint64_t)(end_stamp.QuadPart-previous_present.QuadPart)*UINT64_C(1000000)/(uint64_t)timing_frequency.QuadPart;
         previous_present=end_stamp;
-        if((present_timing.last_us>50000u || gap_us>90000u) && hitch_logs<200u) {
+        if(SudekiMpLogResearchEnabled() && (present_timing.last_us>50000u || gap_us>90000u) && hitch_logs<200u) {
             ++hitch_logs;
             SudekiMpLogFormat("lan_story event=hitch gap_us=%lu present_us=%lu preflight_us=%lu party_us=%lu world_us=%lu effects_last_us=%lu result=%u received=%lu\r\n",
                 (unsigned long)gap_us,(unsigned long)present_timing.last_us,(unsigned long)world_preflight_timing.last_us,
@@ -1239,7 +1240,7 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             /* Bounded research diagnostic: applied-movement transitions and why. */
             static BOOL was_moving[4]; static unsigned move_logs;
             BOOL moving=(x!=0.0f || z!=0.0f);
-            if(moving!=was_moving[p] && move_logs<400u) {
+            if(SudekiMpLogResearchEnabled() && moving!=was_moving[p] && move_logs<400u) {
                 ++move_logs; was_moving[p]=moving;
                 SudekiMpLogFormat("lan_story_control event=host_input ms=%lu player=%u moving=%u binding=%u ready=%u fresh=%u age_ms=%ld fence=%u packet=%.2f,%.2f\r\n",
                     (unsigned long)GetTickCount(),p,moving,host_binding_ready,host_control[p].ready,fresh,
@@ -1529,14 +1530,14 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     else if(!SudekiMpLanStoryInputSample(controller,roster.actors[chosen],state.fence.transaction,&local_x,&local_z) ||
         !SudekiMpLanStoryLocalControlDirection(controller,w,&roster,native,local_x,local_z,&x,&z)) {
         static unsigned sample_fail_logs;
-        if(sample_fail_logs<200u) { ++sample_fail_logs; SudekiMpLogFormat("lan_story_control event=client_input_sample_failed ms=%lu\r\n",(unsigned long)GetTickCount()); }
+        if(SudekiMpLogResearchEnabled() && sample_fail_logs<200u) { ++sample_fail_logs; SudekiMpLogFormat("lan_story_control event=client_input_sample_failed ms=%lu\r\n",(unsigned long)GetTickCount()); }
         SudekiMpLanStoryInputClear(); return;
     }
     {
         /* Bounded research diagnostic: moving/stopped transitions of the sent input. */
         static BOOL was_moving; static unsigned move_logs;
         BOOL moving=(x!=0.0f || z!=0.0f);
-        if(moving!=was_moving && move_logs<400u) {
+        if(SudekiMpLogResearchEnabled() && moving!=was_moving && move_logs<400u) {
             ++move_logs; was_moving=moving;
             SudekiMpLogFormat("lan_story_control event=client_input ms=%lu moving=%u local=%.2f,%.2f world=%.2f,%.2f\r\n",
                 (unsigned long)GetTickCount(),moving,(double)local_x,(double)local_z,(double)x,(double)z);
@@ -1596,6 +1597,7 @@ static void menu_frame(void) {
             DWORD error=ok?ERROR_SUCCESS:GetLastError();
             trace_cinematic(&overlay_trace,"overlay",&visible_dialogue,ok,error);
         }
+        SudekiMpLanStoryNameTagsRender(*slot);
         (void)SudekiMpLanStoryMenuRender(*slot);
     }
 }
@@ -1679,6 +1681,16 @@ static void service_story_admission(SudekiMpLobby *lobby,const SudekiMpLobbyStat
         SudekiMpLobbyHostAdmissionComplete(lobby,player,a->sequence,a->ticket,TRUE))
         SudekiMpLogFormat("lan_story event=catchup_complete player=%u character=%u transaction=%lu input_ready=%u\r\n",
             player,member->character,(unsigned long)a->sequence,host_control[player].ready?1u:0u);
+}
+BOOL SudekiMpLanStoryRuntimePlayerName(unsigned character,char out[32]) {
+    if(!out) return FALSE; out[0]=0;
+    if(character>=4u || !menu_lobby_known || runtime_thread!=GetCurrentThreadId()) return FALSE;
+    for(unsigned i=0;i<4u;++i) {
+        const SudekiMpLobbyMember *m=&menu_lobby.members[i];
+        if(!m->present || !m->reserved || m->character!=character || !m->name[0]) continue;
+        memcpy(out,m->name,31); out[31]=0; return TRUE;
+    }
+    return FALSE;
 }
 void SudekiMpLanStoryRuntimeLobbyService(SudekiMpLobby *lobby) {
     SudekiMpLobbyStatus status;

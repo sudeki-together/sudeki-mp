@@ -145,7 +145,7 @@ static BOOL begin(void) {
     native_thread=GetCurrentThreadId(); active=TRUE; curve_proof_count=0;
     region_count=0; region_next=0;
     DWORD now=GetTickCount();
-    if(now-region_logged>=2000u && (region_queries||region_hits)) {
+    if(SudekiMpLogResearchEnabled() && now-region_logged>=2000u && (region_queries||region_hits)) {
         region_logged=now;
         SudekiMpLogFormat("lan_story_world event=region_cache queries=%lu hits=%lu frames=%lu prep_catalog_us=%lu prep_pose_us=%lu prep_read_us=%lu apply_still_us=%lu apply_set_us=%lu apply_readback_us=%lu pose_material_us=%lu pose_selector_us=%lu\r\n",
             (unsigned long)region_queries,(unsigned long)region_hits,(unsigned long)profile_frames,
@@ -800,7 +800,7 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
         next[i].previous=frame.actors[i];
         /* Bounded diagnostic (split research): party rows while a split is
          * active, once per second per character. Read-only. */
-        if(targets[i].character<4u) {
+        if(targets[i].character<4u && SudekiMpLogResearchEnabled()) {
             static DWORD last_split_log[4];
             if(targets[i].character==2u) SudekiMpLanStoryAnimTraceWatch(targets[i].renderer);
             /* Bounded research diagnostic: base-channel clip changes of the
@@ -1313,7 +1313,7 @@ static BOOL pose_supported(const Target *t,const SudekiMpLanStoryWorldActor *a,u
                 empty_clip_hit=TRUE; empty_channels|=1u<<c;
                 /* Bounded diagnostic (split research): what the host sent. */
                 static DWORD last_empty_log;
-                if(GetTickCount()-last_empty_log>1000u) {
+                if(SudekiMpLogResearchEnabled() && GetTickCount()-last_empty_log>1000u) {
                     last_empty_log=GetTickCount();
                     SudekiMpLogFormat("lan_story_world event=empty_channel identifier=%08lx character=%u channel=%u host_clip=%08lx occurrence=%u state=%u time=%.3f rate=%.3f local_selector=%u\r\n",
                         (unsigned long)t->identifier,t->character,c,(unsigned long)a->clip[c],a->clip_occurrence[c],
