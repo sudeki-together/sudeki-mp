@@ -884,6 +884,41 @@ static BOOL retain_ranged_base(const Target *t,const Bound *old,uint32_t now,
     }
     return TRUE;
 }
+/* Ailish/Elco first-person actions without a proven world translation
+ * (reload, recharge, weapon swap: semantics the bridge above does not map)
+ * must not drop the whole world frame: every other actor and Tal's own world
+ * would freeze on the client (#23). Keep the actor's last published pose,
+ * refreshed with the native position/heading, while the projection is
+ * refused. Only a ranged-attached party character with a recent bound record
+ * of the same target qualifies; nothing is invented for a first frame. */
+static unsigned ranged_fallback_streak; static DWORD ranged_fallback_logged;
+static BOOL ranged_pose_fallback(const Target *t,const Bound *old,uint32_t now,
+    SudekiMpLanStoryWorldActor *a) {
+    const char *refused_stage=stage; uint32_t refused_detail=stage_detail;
+    if(t->character>=4u || t->wrapper==t->attached_wrapper || !old || !old->tick ||
+        !same_target(&old->target,t) || now-old->tick>2000u || !old->previous.identifier) return FALSE;
+    SudekiMpLanStoryWorldActor kept=old->previous;
+    float position[3],forward[3],length=0;
+    memcpy(position,t->position+0x18u,sizeof(position));
+    memcpy(forward,t->position+0x50u,sizeof(forward));
+    for(unsigned i=0;i<3u;++i) {
+        if(!isfinite(position[i]) || fabsf(position[i])>=1000000.0f || !isfinite(forward[i])) return FALSE;
+        length+=forward[i]*forward[i];
+    }
+    length=sqrtf(length); if(!isfinite(length) || length<.0001f || length>1000.0f) return FALSE;
+    for(unsigned i=0;i<3u;++i) forward[i]/=length;
+    memcpy(kept.position,position,sizeof(kept.position));
+    memcpy(kept.forward,forward,sizeof(kept.forward));
+    *a=kept; ++ranged_fallback_streak;
+    DWORD tick=GetTickCount();
+    if(SudekiMpLogResearchEnabled() && (ranged_fallback_streak==1u || tick-ranged_fallback_logged>=1000u)) {
+        ranged_fallback_logged=tick;
+        SudekiMpLogFormat("lan_story_world event=ranged_fallback identifier=%08lx character=%u stage=%s channel=%lu semantic=%lu streak=%u clip0=%08lx\r\n",
+            (unsigned long)t->identifier,t->character,refused_stage,(unsigned long)(refused_detail>>16),
+            (unsigned long)(refused_detail&0xffffu),ranged_fallback_streak,(unsigned long)kept.clip[0]);
+    }
+    return TRUE;
+}
 static BOOL animation_edge(const SudekiMpLanStoryWorldActor *old,const SudekiMpLanStoryWorldActor *next) {
     if(memcmp(old->clip,next->clip,sizeof(old->clip)) ||
         memcmp(old->clip_occurrence,next->clip_occurrence,sizeof(old->clip_occurrence)) ||
@@ -912,15 +947,35 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
     uint32_t generation=next_generation; BOOL scenery_due=scenery_log_due();
     for(unsigned i=0;i<count;++i) {
         next[i].target=targets[i];
-        if(!read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base)) {
-            error=ERROR_NOT_SUPPORTED; goto fail;
-        }
-        if(scenery_due && scenery(&targets[i])) log_scenery_pose("host",&targets[i],&frame.actors[i]);
-        next[i].tick=party->host_tick;
         const Bound *old=NULL;
         if(host_seen && host_epoch==party->epoch) for(unsigned j=0;j<host_count;++j)
             if(host_bound[j].previous.kind==targets[i].kind &&
                 host_bound[j].previous.identifier==targets[i].identifier) { old=&host_bound[j]; break; }
+        if(!read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base)) {
+            if(!ranged_pose_fallback(&targets[i],old,party->host_tick,&frame.actors[i])) {
+                error=ERROR_NOT_SUPPORTED; goto fail;
+            }
+            next[i].ranged_base=FALSE;
+        } else if(targets[i].character<4u && targets[i].wrapper!=targets[i].attached_wrapper &&
+            ranged_fallback_streak) {
+            if(SudekiMpLogResearchEnabled())
+                SudekiMpLogFormat("lan_story_world event=ranged_fallback_end identifier=%08lx streak=%u\r\n",
+                    (unsigned long)targets[i].identifier,ranged_fallback_streak);
+            ranged_fallback_streak=0;
+        }
+        if(scenery_due && scenery(&targets[i])) log_scenery_pose("host",&targets[i],&frame.actors[i]);
+        if(targets[i].character==3u) {
+            static BOOL last_base=FALSE,last_attached=FALSE; static unsigned base_logs;
+            BOOL attached=targets[i].wrapper!=targets[i].attached_wrapper;
+            if((next[i].ranged_base!=last_base || attached!=last_attached) && SudekiMpLogResearchEnabled() && base_logs<400u) {
+                ++base_logs;
+                SudekiMpLogFormat("lan_story_world event=ailish_capture ranged_base=%u arms_attached=%u clip0=%08lx clip4=%08lx state0=%u state4=%u blend3=%.2f\r\n",
+                    (unsigned)next[i].ranged_base,(unsigned)attached,(unsigned long)frame.actors[i].clip[0],(unsigned long)frame.actors[i].clip[4],
+                    frame.actors[i].state[0],frame.actors[i].state[4],(double)frame.actors[i].blend[3]);
+            }
+            last_base=next[i].ranged_base; last_attached=attached;
+        }
+        next[i].tick=party->host_tick;
         if(next[i].ranged_base &&
             (!project_ranged_translation(&targets[i],old,party->host_tick,&frame.actors[i],&next[i]) ||
              !retain_ranged_base(&targets[i],old,party->host_tick,&frame.actors[i]))) {
@@ -1531,18 +1586,34 @@ static BOOL visible(const Target *t,const SudekiMpLanStoryWorldActor *a,const fl
 }
 BOOL SudekiMpLanStoryWorldAimDirection(const SudekiMpLanStoryNativeRoster *roster,void *actor,
     SudekiMpLanStoryReplicaExact exact,void *context,float direction[3]) {
+    static DWORD aim_logged; static unsigned aim_logs; const char *reason=NULL;
     if(!base || !client_seen || host_seen || active || !roster || !exact || !direction ||
         native_thread!=GetCurrentThreadId() || recruitment.retained || resource_fault ||
-        actor!=roster->actors[3] || !exact(roster,context)) return FALSE;
-    unsigned i=0;for(;i<client_count && client_bound[i].target.entity!=actor;++i) {}
-    if(i==client_count) return FALSE;
+        actor!=roster->actors[3] || !exact(roster,context)) reason="precondition";
+    unsigned i=0;for(;!reason && i<client_count && client_bound[i].target.entity!=actor;++i) {}
+    if(!reason && i==client_count) reason="unbound_actor";
     Target current;
-    if(!target(actor,roster,&current,FALSE) || !same_target(&current,&client_bound[i].target) ||
-        current.wrapper!=current.attached_wrapper ||
-        !ranged_body_pose(&current,&client_bound[i].previous) ||
+    if(!reason) {
+        if(!target(actor,roster,&current,FALSE)) reason="target";
+        else if(!same_target(&current,&client_bound[i].target)) reason="target_changed";
+        else if(current.wrapper!=current.attached_wrapper) reason="arms_attached";
+        else if(!ranged_body_pose(&current,&client_bound[i].previous)) reason="body_pose_topology";
         /* No resource acquisition or native gameplay call on the pose seam. */
-        !selector_available(&current,54) || !selector_available(&current,60) ||
-        !exact(roster,context)) return FALSE;
+        else if(!selector_available(&current,54) || !selector_available(&current,60)) reason="aim_clips_unavailable";
+        else if(!exact(roster,context)) reason="exact";
+    }
+    if(reason) {
+        DWORD now=GetTickCount();
+        if(SudekiMpLogResearchEnabled() && now-aim_logged>=1000u && aim_logs<300u) {
+            aim_logged=now; ++aim_logs;
+            const SudekiMpLanStoryWorldActor *a=i<client_count?&client_bound[i].previous:NULL;
+            SudekiMpLogFormat("lan_story_world event=aim_witness_refused reason=%s clip0=%08lx clip1=%08lx clip4=%08lx state=%u,%u,%u,%u,%u blend=%.2f,%.2f,%.2f,%.2f\r\n",
+                reason,(unsigned long)(a?a->clip[0]:0),(unsigned long)(a?a->clip[1]:0),(unsigned long)(a?a->clip[4]:0),
+                a?a->state[0]:0,a?a->state[1]:0,a?a->state[2]:0,a?a->state[3]:0,a?a->state[4]:0,
+                (double)(a?a->blend[0]:0),(double)(a?a->blend[1]:0),(double)(a?a->blend[2]:0),(double)(a?a->blend[3]:0));
+        }
+        return FALSE;
+    }
     memcpy(direction,client_bound[i].previous.forward,12);return TRUE;
 }
 typedef struct ResidencyWitness {

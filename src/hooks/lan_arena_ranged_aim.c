@@ -922,10 +922,21 @@ static BOOL ailish_pose_layout(uint8_t *bank,unsigned root,uint8_t mask[BONES]) 
 static float *ailish_story_pose(void **args,void *renderer,unsigned root) {
     float *original=args[2],direction[3],unit[3];void *actor=NULL;
     for(unsigned i=0;i<2;++i) if(renderer && renderer==world_renderers[i]) actor=aim_actors[i];
-    if(!actor || GetCurrentThreadId()!=aim_thread || pose_depth || !aim_witness ||
-        !aim_witness(actor,FALSE,direction) || !SudekiMpLanAimNormalize(direction,unit) ||
-        world_renderer(actor)!=renderer || *(void **)((uint8_t *)renderer+8)!=args[0] ||
-        !memory(original,101*12*sizeof(float),FALSE)) return original;
+    static DWORD skip_logged; static unsigned skip_logs; const char *skip=NULL;
+    if(!actor) return original; /* other renderers: silent */
+    if(GetCurrentThreadId()!=aim_thread || pose_depth || !aim_witness) skip="thread_or_depth";
+    else if(!aim_witness(actor,FALSE,direction)) skip="witness";
+    else if(!SudekiMpLanAimNormalize(direction,unit)) skip="direction";
+    else if(world_renderer(actor)!=renderer || *(void **)((uint8_t *)renderer+8)!=args[0]) skip="renderer";
+    else if(!memory(original,101*12*sizeof(float),FALSE)) skip="pose_memory";
+    if(skip) {
+        DWORD now=GetTickCount();
+        if(SudekiMpLogResearchEnabled() && now-skip_logged>=1000u && skip_logs<300u) {
+            skip_logged=now; ++skip_logs;
+            SudekiMpLogFormat("lan_ranged_aim event=ailish_pose_skipped reason=%s\r\n",skip);
+        }
+        return original;
+    }
     uint8_t mask[BONES];
     if(!ailish_pose_layout(args[0],root,mask)) return original;
     uint8_t *position=*(uint8_t **)((uint8_t *)actor+0x44);

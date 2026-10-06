@@ -768,6 +768,17 @@ with `[StoryAreas] AmbientAnimation=false`; mutually exclusive with the
 AnimTrace probe, which uses the same entry bytes. Other zones' water classes
 are unverified, and the UI scene also receives the cosmetic delta.
 
+Reload/recharge/weapon-swap freeze (CONFIRMED_LIVE, 2026-10-06, Ailish host /
+Tal client): Ailish's first-person channels carry semantics the first-person
+to world bridge does not map (193–195) during those actions, and one refused
+actor used to fail the whole world capture, so no world frame left the host
+for the duration and the client's entire world stopped. Capture now keeps a
+ranged-attached party character's last published pose, refreshed with the
+native position and heading, while its projection is refused
+(`ranged_pose_fallback`), and sends the frame; the client no longer freezes.
+Ailish's own reload/recharge/swap animation is not yet translated for the
+client, so she holds her last pose for the action.
+
 Known limits: only the host lead can use a door; remote players cannot enter.
 The client still tolerates empty channels per channel for actors the host did
 not advance. Other-area characters remain visible at their last pose. The host
