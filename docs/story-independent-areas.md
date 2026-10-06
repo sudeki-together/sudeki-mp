@@ -781,7 +781,12 @@ client, so she holds her last pose for the action.
 
 Known limits: only the host lead can use a door; remote players cannot enter.
 The client still tolerates empty channels per channel for actors the host did
-not advance. Other-area characters remain visible at their last pose. The host
+not advance. A party character in another host area fades out on the client
+over 0.6 s through the scene object's native colour alpha (object+0x10 top
+byte, the field the zone distance fade writes) and is then flagged hidden with
+the renderer visibility callback; it fades back in on return
+(`src/hooks/lan_story_area_fade.c`, `[StoryAreas] AreaFade`; CONFIRMED_LIVE
+2026-10-06, church entry and exit observed from the client). The host
 frame time rises while both areas simulate. The exterior collision terrain
 stays enabled while the interior is current, so overlapping interior/exterior
 coordinates are a known risk until collision queries are scoped per area.

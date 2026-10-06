@@ -16,6 +16,7 @@
 #include "hooks/lan_story_effects.h"
 #include "hooks/lan_story_realtime.h"
 #include "hooks/lan_story_ambient.h"
+#include "hooks/lan_story_area_fade.h"
 #include "hooks/lan_story_quick_menu.h"
 #include "hooks/lan_story_render.h"
 #include "hooks/lan_story_host_control.h"
@@ -392,6 +393,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
         if(!SudekiMpLanStoryLocalControlPresent(roster,replica_exact,NULL,yaw,pitch)) return FALSE;
     }
     if(world_applied) {
+        SudekiMpLanStoryAreaFadeApply(roster);
         if(aim_pose_attempted) SudekiMpLanAimActors(roster->actors[3],NULL);
         if(frame->dialogue) {
             BOOL ok=SudekiMpLanStoryCinematicAudioPresent(frame->dialogue,audio_present_exact,(void *)roster);
@@ -773,6 +775,7 @@ static void present(void) {
         uint8_t foreign=client_foreign_characters(&remote);
         SudekiMpLanStoryReplicaSetForeignCharacters(foreign);
         SudekiMpLanStoryWorldSetForeignCharacters(foreign);
+        SudekiMpLanStoryAreaFadeSetForeign(foreign);
         if(foreign!=traced_foreign) {
             traced_foreign=foreign;
             SudekiMpLogFormat("lan_story event=client_area foreign=%u inside=%u temporary=%s epoch=%lu revision=%lu\r\n",
@@ -2240,6 +2243,7 @@ static BOOL retire_runtime(BOOL exit_to_title) {
      * cancelled or declared normally retired by this plain-data reset. */
     if(exited && !SudekiMpLanStoryTaskTraceForgetExitedWorld()) return retain_module();
     SudekiMpLanStoryAmbientSetActive(FALSE);
+    SudekiMpLanStoryAreaFadeReset();
     if(client_attempted && !SudekiMpLanStoryClientUninstall()) return retain_module();
     client_attempted=FALSE;
     if(menu_attempted && !SudekiMpLanPartyMenuNativeUninstall()) return retain_module();

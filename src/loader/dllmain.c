@@ -25,6 +25,7 @@
 #include "hooks/lan_story_pause_trace.h"
 #include "hooks/lan_story_anim_trace.h"
 #include "hooks/lan_story_ambient.h"
+#include "hooks/lan_story_area_fade.h"
 #include "hooks/lan_story_name_tags.h"
 #include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
@@ -987,6 +988,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||
+            /* Client fade for party characters inside another host area. */
+            (saved_story && (SudekiMpLanStoryAreaFadeEnable(!config_key_false(config_path,L"StoryAreas",L"AreaFade")),FALSE)) ||
             /* Client ambient animation for zone-placed props (water, chimes,
              * leaves): zero-delta renderers no entity owns get a local delta.
              * Shares the AnimTrace entry bytes, so the probe excludes it. */

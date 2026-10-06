@@ -1,4 +1,5 @@
 #include "hooks/lan_story_name_tags.h"
+#include "hooks/lan_story_area_fade.h"
 #include "hooks/lan_story_runtime.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
@@ -137,7 +138,7 @@ void SudekiMpLanStoryNameTagsRender(void *device) {
         if(!have_camera) { if(!camera(&cam)) return; have_camera=TRUE; }
         float sx,sy,depth;
         if(!project(&cam,head,&sx,&sy,&depth)) continue;
-        float opacity=tag_opacity(depth);
+        float opacity=tag_opacity(depth)*SudekiMpLanStoryAreaFadeAlpha(c);
         if(opacity<0.03f) continue;
         /* Overlay text is placed on a 960x720 grid stretched over the whole
          * viewport (x scales by W/960, y by H/720) and drawn left-aligned with
