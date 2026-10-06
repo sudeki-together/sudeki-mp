@@ -32,6 +32,8 @@ static BOOL foreign_thread,exhausted,installed;
 static SudekiMpLanStoryScene observed,published;
 static void *last_world,*last_descriptor,*last_group,*last_controller,*last_actors[4];
 static BOOL last_exact;
+static const SudekiMpLanStoryObserverSplit *split_owner;
+static BOOL split_active,split_transition,split_exiting;
 static unsigned last_logged_revision;
 static uint64_t last_dispatch_serial;
 /* Diagnostics only. A bounded synchronous copy is not a retained native
@@ -48,7 +50,7 @@ typedef struct TemporaryWorldCopy {
     BOOL exact,context_valid;
     void *descriptor,*pending,*returning,*departed;
     uint32_t state,pending_state,return_bits[6];
-    uint16_t camera;
+    uint16_t sector;
     uint8_t ready,placed;
     char current[64],destination[64];
 } TemporaryWorldCopy;
@@ -142,7 +144,10 @@ static TemporaryWorldCopy temporary_world_copy(void *recipient) {
     if(!temporary_descriptor(table,count,out.descriptor,&out.state,out.current) ||
         !temporary_descriptor(table,count,out.pending,&out.pending_state,out.destination)) return out;
     memcpy(out.return_bits,w+0x28u,sizeof(out.return_bits));
-    memcpy(&out.camera,w+0x40u,sizeof(out.camera));
+    /* Native temporary entry copies the lead's CAiTracking packed sector;
+     * exit consumes it in the return-placement packet. This is not a camera
+     * selector, and a copied sector is not proof of valid ground collision. */
+    memcpy(&out.sector,w+0x40u,sizeof(out.sector));
     out.ready=w[0x399u]; out.placed=w[0x39au]; out.context_valid=TRUE;
     for(unsigned i=0;i<6u;++i)
         if((out.return_bits[i]&0x7f800000u)==0x7f800000u) out.context_valid=FALSE;
@@ -214,11 +219,11 @@ static void temporary_journal_end(const TemporaryJournal *j,void *world) {
     /* Entry writes the exterior return context; exit consumes the stored
      * pre-call context. These are exact float bits, not the interior arrival. */
     const TemporaryWorldCopy *context=j->kind==TEMP?&after:&j->before;
-    SudekiMpLogFormat("lan_story event=temporary_return_context serial=%u captured=%u finite=%u phase=%s position_bits=%08lx,%08lx,%08lx direction_bits=%08lx,%08lx,%08lx camera=%u completion=unobserved policy=observation_only\r\n",
+    SudekiMpLogFormat("lan_story event=temporary_return_context serial=%u captured=%u finite=%u phase=%s position_bits=%08lx,%08lx,%08lx direction_bits=%08lx,%08lx,%08lx sector=%u completion=unobserved policy=observation_only\r\n",
         j->serial,context->exact,context->context_valid,j->kind==TEMP?"after_entry":"before_exit",
         (unsigned long)context->return_bits[0],(unsigned long)context->return_bits[1],
         (unsigned long)context->return_bits[2],(unsigned long)context->return_bits[3],
-        (unsigned long)context->return_bits[4],(unsigned long)context->return_bits[5],context->camera);
+        (unsigned long)context->return_bits[4],(unsigned long)context->return_bits[5],context->sector);
     ReleaseSRWLockExclusive(&state_lock);
 }
 static void increment(uint32_t *value) {
@@ -227,7 +232,7 @@ static void increment(uint32_t *value) {
 }
 static void unknown_scene(unsigned phase) {
     observed.phase=(uint8_t)phase;
-    observed.available_mask=0;
+    observed.available_mask=0; observed.inside_mask=0;
     observed.leader_seat=SUDEKIMP_LAN_STORY_NO_SEAT;
 }
 static uint32_t begin_zone(unsigned kind,const char *name) {
@@ -237,6 +242,39 @@ static uint32_t begin_zone(unsigned kind,const char *name) {
     else native_thread=thread;
     ++call_depth;
     uint32_t source_epoch=observed.epoch;
+    /* Split-area travel keeps the exterior epoch: only the lead's area moves.
+     * Anything else (or a declined/unknown request) is vanilla whole-party. */
+    if(kind==TEMP && split_owner && !split_active && call_depth==1u &&
+        published.phase==SUDEKIMP_LAN_STORY_READY && published.revision &&
+        observed.phase==SUDEKIMP_LAN_STORY_READY && !observed.temporary[0] &&
+        observed.leader_seat<4u && (observed.available_mask&~(1u<<observed.leader_seat)) &&
+        name && split_owner->begin_temp(name,observed.leader_seat)) {
+        char copy[64];
+        if(name_copy(copy,name)) {
+            memcpy(observed.temporary,copy,sizeof(copy));
+            observed.inside_mask=(uint8_t)(1u<<observed.leader_seat);
+            split_active=split_transition=TRUE; split_exiting=FALSE;
+            SudekiMpLogFormat("lan_story event=split_begin epoch=%lu temporary=%s inside=%u available=%u policy=exterior_epoch_retained\r\n",
+                (unsigned long)observed.epoch,observed.temporary,observed.inside_mask,observed.available_mask);
+            ReleaseSRWLockExclusive(&state_lock);
+            return source_epoch;
+        }
+        if(split_owner->ended) split_owner->ended(TRUE);
+    }
+    if(kind==EXIT && split_active && !split_exiting && call_depth==1u &&
+        split_owner && split_owner->begin_exit()) {
+        memset(observed.temporary,0,sizeof(observed.temporary));
+        observed.inside_mask=0; split_transition=split_exiting=TRUE;
+        SudekiMpLogFormat("lan_story event=split_exit_begin epoch=%lu policy=exterior_epoch_retained\r\n",
+            (unsigned long)observed.epoch);
+        ReleaseSRWLockExclusive(&state_lock);
+        return source_epoch;
+    }
+    if(split_active) {
+        split_active=split_transition=split_exiting=FALSE;
+        if(split_owner && split_owner->ended) split_owner->ended(TRUE);
+        SudekiMpLogFormat("lan_story event=split_abandoned kind=%u policy=vanilla_epoch\r\n",kind);
+    }
     increment(&observed.epoch);
     unknown_scene(SUDEKIMP_LAN_STORY_LOADING);
     if(kind==SET || kind==ENTER || kind==SWITCH || kind==MAIN) {
@@ -356,12 +394,51 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
                 SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
         }
     }
-    BOOL replaced=last_exact && (!exact || world!=last_world || descriptor!=last_descriptor ||
+    if(split_transition && !exact) {
+        /* Native lead travel is settling. The exterior and its other
+         * occupants are unchanged, so keep publishing the READY split scene;
+         * roster consumers still fail closed until native exactness returns. */
+        if(!published.revision || !SudekiMpLanStorySceneSame(&published,&observed))
+            increment(&observed.revision);
+        observed.observed_tick=GetTickCount();
+        if(exhausted || !SudekiMpLanStorySceneValid(&observed)) {
+            ReleaseSRWLockExclusive(&state_lock); return FALSE;
+        }
+        published=observed; *out=observed; last_dispatch_serial=w->dispatch_serial;
+        ReleaseSRWLockExclusive(&state_lock); return TRUE;
+    }
+    /* Inside a split the current descriptor legitimately alternates between
+     * exterior and TEMP; it is not a world replacement. */
+    BOOL replaced=last_exact && (!exact || world!=last_world ||
+        (!split_active && descriptor!=last_descriptor) ||
         group!=last_group || controller!=last_controller || memcmp(found,last_actors,sizeof(found)));
-    if(replaced) increment(&observed.epoch);
+    if(replaced) {
+        increment(&observed.epoch);
+        if(split_active) {
+            split_active=split_transition=split_exiting=FALSE;
+            if(split_owner && split_owner->ended) split_owner->ended(TRUE);
+            memset(observed.temporary,0,sizeof(observed.temporary));
+            SudekiMpLogFormat("lan_story event=split_abandoned kind=replaced policy=vanilla_epoch\r\n");
+        }
+    }
     if(exact) {
         observed.phase=SUDEKIMP_LAN_STORY_READY;
         observed.available_mask=mask; observed.leader_seat=lead;
+        /* Whole native party shares the host's current area unless a split
+         * owner moved only the lead. */
+        observed.inside_mask=(uint8_t)(!observed.temporary[0]?0u:
+            split_active?(1u<<lead):mask);
+        if(split_transition) {
+            BOOL leaving=split_exiting;
+            split_transition=FALSE;
+            if(split_owner && split_owner->settled) split_owner->settled(!leaving);
+            if(leaving) {
+                split_active=split_exiting=FALSE;
+                if(split_owner && split_owner->ended) split_owner->ended(FALSE);
+            }
+            SudekiMpLogFormat("lan_story event=split_settled epoch=%lu inside=%u temporary=%s\r\n",
+                (unsigned long)observed.epoch,observed.inside_mask,observed.temporary);
+        }
     } else unknown_scene(observed.world[0]?SUDEKIMP_LAN_STORY_LOADING:SUDEKIMP_LAN_STORY_UNKNOWN);
     if(!published.revision || !SudekiMpLanStorySceneSame(&published,&observed))
         increment(&observed.revision);
@@ -388,6 +465,14 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     ReleaseSRWLockExclusive(&state_lock); return TRUE;
 }
 
+BOOL SudekiMpLanStoryObserverSetSplit(const SudekiMpLanStoryObserverSplit *split) {
+    AcquireSRWLockExclusive(&state_lock);
+    BOOL ok=!split_active && !call_depth &&
+        (!split || (split->begin_temp && split->begin_exit));
+    if(ok) split_owner=split;
+    ReleaseSRWLockExclusive(&state_lock);
+    return ok;
+}
 static BOOL roster_identity_locked(void *controller,
     const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *out) {
     static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,
@@ -468,11 +553,47 @@ BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatc
     BOOL ok=roster_locked(r->controller,w,&published,&fresh) && same_native_roster(r,&fresh);
     ReleaseSRWLockShared(&state_lock); return ok;
 }
+/* Same exterior lifetime (epoch) and the same native world/group/
+ * controller/actor/AI objects. Revision and current descriptor change with
+ * split-area occupancy, during and after a split; membership, leader and
+ * actor changes still fail. */
+static BOOL same_native_identity(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryNativeRoster *fresh) {
+    return r->epoch==fresh->epoch && r->available_mask==fresh->available_mask &&
+        r->leader_character==fresh->leader_character && r->world==fresh->world &&
+        r->group==fresh->group && r->controller==fresh->controller &&
+        !memcmp(r->actors,fresh->actors,sizeof(r->actors)) && !memcmp(r->ai,fresh->ai,sizeof(r->ai));
+}
+/* During the split transition hold the area is not native-ready, but the
+ * party objects are unchanged: prove them directly from native globals. */
+static BOOL split_hold_identity_locked(const SudekiMpLanStoryNativeRoster *r) {
+    static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,
+        SUDEKIMP_CLEANROOM_ELCO,SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
+    if(!split_active || !split_transition || !base || exhausted || foreign_thread ||
+        native_thread!=GetCurrentThreadId() || r->epoch!=observed.epoch ||
+        *(void **)(base+0x408d10u)!=r->world || *(void **)(base+0x408d94u)!=r->group ||
+        *(void **)(base+0x408da4u)!=r->controller || !readable(r->group,0xd0u) ||
+        !readable(r->controller,0x24cu) ||
+        *(void **)((uint8_t *)r->controller+0x248u)!=r->actors[r->leader_character<4u?r->leader_character:0]) return FALSE;
+    unsigned count=*(unsigned *)((uint8_t *)r->group+0xccu),mask=0;
+    if(!count || count>4u) return FALSE;
+    for(unsigned i=0;i<count;++i) {
+        void *actor=*(void **)((uint8_t *)r->group+0x90u+i*0x0cu);
+        unsigned c=0;
+        for(;c<4u && (!actor || actor!=r->actors[c]);++c) {}
+        if(c>=4u || (mask&(1u<<c)) || SudekiMpCleanroomEngineActorEntity(types[c])!=actor ||
+            !readable(actor,0x98u) || *(void **)((uint8_t *)actor+0x94u)!=r->ai[c]) return FALSE;
+        mask|=1u<<c;
+    }
+    return mask==r->available_mask;
+}
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
     SudekiMpLanStoryNativeRoster fresh;
     if(!r || !r->dispatch_serial) return FALSE;
     AcquireSRWLockShared(&state_lock);
-    BOOL ok=roster_identity_locked(r->controller,&published,&fresh) && same_native_roster(r,&fresh);
+    BOOL ok=roster_identity_locked(r->controller,&published,&fresh) &&
+        (same_native_roster(r,&fresh) || same_native_identity(r,&fresh));
+    if(!ok) ok=split_hold_identity_locked(r);
     ReleaseSRWLockShared(&state_lock); return ok;
 }
 
@@ -488,6 +609,7 @@ BOOL SudekiMpLanStoryObserverUninstall(void) {
         ok=FALSE;
     }
     if(ok) {
+        split_owner=NULL; split_active=split_transition=split_exiting=FALSE;
         base=NULL; installed=FALSE; native_thread=0; exhausted=FALSE;
         memset(&observed,0,sizeof(observed));
         memset(&published,0,sizeof(published));

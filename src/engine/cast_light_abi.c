@@ -151,12 +151,36 @@ static BOOL lm_world(void) {
         *(void **)(light_image+CL_SCHEDULER)==scheduler && lm_memory(scheduler,8,FALSE) &&
         *(void **)scheduler==scheduler_vtable;
 }
+static unsigned world_light_adoptions,foreign_light_skips,light_fault_site;
+static unsigned light_fault_line;
+unsigned SudekiMpCastLightFaultLine(void){return light_fault_line;}
+unsigned SudekiMpCastLightFaultSite(void){return light_fault_site;}
+unsigned SudekiMpCastLightForeignSkips(void) {return foreign_light_skips;}
+unsigned SudekiMpCastLightWorldAdoptions(void) {return world_light_adoptions;}
+/* An area switch (e.g. a split-area TEMP interior) legitimately installs its
+ * own native world light. With no instance light selected and no operation
+ * in progress, adopt the validated native object as the new baseline rather
+ * than faulting; an instance light selected across a switch still fails. */
+static void lm_adopt_world(void) {
+    void *current;
+    if(!light_image || light_fault || light_operation || selected_key ||
+        light_thread!=GetCurrentThreadId() || !lm_memory(light_image+CL_GLOBAL,4,FALSE)) return;
+    current=*(void **)(light_image+CL_GLOBAL);
+    if(current && current!=world_light && lm_object(current)) {
+        world_light=current; ++world_light_adoptions;
+    }
+}
+static unsigned light_ready_failure;
+unsigned SudekiMpCastLightReadyFailure(void) {return light_ready_failure;}
 BOOL SudekiMpCastLightTransitionReady(uint32_t key) {
     LightEntry *previous=lm_find(selected_key),*next=lm_find(key);
     if(!light_image) return TRUE;
-    if(light_fault || light_operation || !lm_world() || !lm_hooks() ||
-        (selected_key && !lm_owner(previous)) || (key && !lm_owner(next)) ||
-        *(void **)(light_image+CL_GLOBAL)!=(previous ? previous->object:world_light)) {
+    lm_adopt_world();
+    unsigned code=light_fault?1:light_operation?2:!lm_world()?3:!lm_hooks()?4:
+        (selected_key && !lm_owner(previous))?5:(key && !lm_owner(next))?6:
+        *(void **)(light_image+CL_GLOBAL)!=(previous ? previous->object:world_light)?7:0;
+    if(code) {
+        if(!light_ready_failure) light_ready_failure=code*10u+(selected_key?1u:0u);
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     return TRUE;
@@ -176,16 +200,32 @@ static void __attribute__((thiscall)) light_update(void *object,void *args) {
     LightEntry *e=NULL;
     DWORD error=GetLastError();
     for(unsigned int i=0;i<CL_MAX;++i) if(light_entries[i].key && light_entries[i].object==object) e=&light_entries[i];
+    /* A second native area's light (split-area TEMP interior or the retained
+     * exterior). The light that is the current native global becomes the
+     * world baseline; any other valid native light is left un-updated, as
+     * vanilla suspension of an inactive area would. Instance lights and
+     * malformed objects keep the fail-closed path below. */
+    if(!e && object!=world_light && !light_update_depth && !light_operation && !light_fault &&
+        !selected_key && light_thread==GetCurrentThreadId() && lm_object(object)) {
+        if(lm_memory(light_image+CL_GLOBAL,4,FALSE) && *(void **)(light_image+CL_GLOBAL)==object) {
+            world_light=object; ++world_light_adoptions;
+        } else {
+            ++foreign_light_skips; SetLastError(error); return;
+        }
+    }
     if(light_update_depth || light_operation || light_fault || !lm_world() ||
         !SudekiMpCastLightTransitionReady(selected_key) ||
         (e ? !lm_owner(e):object!=world_light) || !lm_memory(args,16,FALSE) ||
         !isfinite(*(float *)((uint8_t *)args+12)) || *(float *)((uint8_t *)args+12)<0) {
-        light_fault=TRUE; return;
+        if(!light_fault_site) light_fault_site=(light_update_depth?1u:0u)|(light_operation?2u:0u)|
+            (!lm_world()?4u:0u)|(e?8u:0u)|(object==world_light?16u:0u)|(lm_object(object)?32u:0u)|
+            (selected_key?64u:0u)|(*(void **)(light_image+CL_GLOBAL)==object?128u:0u)|256u;
+        (light_fault_line?0:(light_fault_line=221)),light_fault=TRUE; return;
     }
     ++light_update_depth; publishing=e;
     SetLastError(error); light_update_original(object,args); error=GetLastError();
     publishing=NULL; --light_update_depth;
-    if(e && !lm_owner(e)) light_fault=TRUE;
+    if(e && !lm_owner(e)) (light_fault_line?0:(light_fault_line=226)),light_fault=TRUE;
     SetLastError(error);
 }
 __attribute__((naked,noinline)) static void __attribute__((regparm(2)))
@@ -240,7 +280,7 @@ BOOL SudekiMpCreateCastLight(uint32_t key,void *actor,uint64_t session,SudekiMpC
     --light_operation;
     return lm_owner(e);
 retained:
-    --light_operation; light_fault=TRUE; SetLastError(ERROR_INVALID_DATA); return FALSE;
+    --light_operation; (light_fault_line?0:(light_fault_line=281)),light_fault=TRUE; SetLastError(ERROR_INVALID_DATA); return FALSE;
 }
 BOOL SudekiMpReadCastLight(uint32_t key,float current[3],float baseline[3]) {
     LightEntry *e=lm_find(key);
@@ -268,7 +308,7 @@ BOOL SudekiMpDestroyCastLight(uint32_t key) {
          * the sole verified baseline using its real native handle first. */
         light_remove(e->object,e->baseline_id);
         if(*(uint32_t *)(e->object+0x60)!=0) {
-            --light_operation; light_fault=TRUE; return FALSE;
+            --light_operation; (light_fault_line?0:(light_fault_line=309)),light_fault=TRUE; return FALSE;
         }
         light_delete(e->object,0); e->destroyed=TRUE; e->restore_pending=TRUE;
         --light_operation;

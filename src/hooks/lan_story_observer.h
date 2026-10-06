@@ -39,5 +39,19 @@ BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoste
 /* After a native callback has occurred, remove on that same native thread,
  * outside the synchronous zone calls. Failed restoration retains all state. */
 BOOL SudekiMpLanStoryObserverUninstall(void);
+/* Optional split-area owner. begin_temp is asked on the native thread at a
+ * TEMP entry from a READY exterior scene; TRUE keeps the scene epoch, marks
+ * only the lead character inside and holds the last READY scene while the
+ * native transition settles. begin_exit likewise for the matching exit.
+ * settled reports the transition reached native exactness; ended reports the
+ * split is over (normal exit or vanilla zone change). Callbacks must not call
+ * back into the observer. NULL removes the owner (refused while split). */
+typedef struct SudekiMpLanStoryObserverSplit {
+    BOOL (*begin_temp)(const char *temporary,unsigned leader_character);
+    BOOL (*begin_exit)(void);
+    void (*settled)(BOOL inside);
+    void (*ended)(BOOL vanilla_change);
+} SudekiMpLanStoryObserverSplit;
+BOOL SudekiMpLanStoryObserverSetSplit(const SudekiMpLanStoryObserverSplit *split);
 
 #endif

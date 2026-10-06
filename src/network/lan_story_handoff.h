@@ -103,6 +103,10 @@ BOOL SudekiMpLanStoryRecruitmentDecode(const uint8_t *bytes,size_t size,
 BOOL SudekiMpLanStoryControlFenceValid(const SudekiMpLanStoryControlFence *fence);
 BOOL SudekiMpLanStoryControlFenceSame(const SudekiMpLanStoryControlFence *a,
     const SudekiMpLanStoryControlFence *b);
+/* Same epoch, fence revision not newer than the scene, character available
+ * and not the leader. Later same-epoch revisions (e.g. another player's
+ * split-area travel) keep the fence; actor identity is fenced separately by
+ * actor_generation and native roster checks. */
 BOOL SudekiMpLanStoryControlMatchesScene(const SudekiMpLanStoryControlFence *fence,
     const SudekiMpLanStoryScene *scene);
 BOOL SudekiMpLanStoryControlStateValid(const SudekiMpLanStoryControlState *state);

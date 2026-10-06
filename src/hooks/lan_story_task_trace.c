@@ -31,7 +31,7 @@ typedef int (__attribute__((fastcall)) *StepFunction)(void *,void *);
 typedef struct Task {
     void *thread, *manager;
     uint32_t id, hash, parent, generation, spawn_construction;
-    BOOL occupied, used, terminal, retirement_entered, recruitment,spawn_setup;
+    BOOL occupied, used, terminal, retirement_entered, recruitment,spawn_setup,admission_waiting;
 } Task;
 typedef struct AddObservation {
     void *group, *actor;
@@ -94,6 +94,12 @@ static void *current_thread, *load_manager;
 static DWORD native_thread;
 static SudekiMpLanCastCreatedObserver cast_created;
 static SudekiMpLanCastStepAdapter cast_step;
+static const void *admission_consumer;
+static SudekiMpStoryTaskDecide admission_decide;
+static SudekiMpStoryTaskRetired admission_retired;
+static unsigned admission_waiters,admission_depth;
+static volatile LONG admission_fault;
+static const SudekiMpStoryTaskAdmissionView *admission_current_view;
 static uint32_t next_task_id, events, critical_events;
 static unsigned truncated_quotas;
 static unsigned submit_kind, submit_depth, add_depth, argument_depth;
@@ -678,6 +684,152 @@ done:
     SetLastError(error);
 }
 
+static SudekiMpStoryTaskAdmissionView admission_view(const Task *t,void *thread) {
+    SudekiMpStoryTaskAdmissionView v={.thread=thread};
+    if(t) {
+        v.load_generation=t->generation;v.task_id=t->id;v.function_hash=t->hash;
+        v.parent_id=t->parent;v.tracked=TRUE;v.waiting=t->admission_waiting;
+    }
+    return v;
+}
+static void admission_unknown(const char *reason) {
+    InterlockedExchange(&admission_fault,1);fault(reason);
+}
+/* Table entries must belong to the corresponding native contiguous pool;
+ * readable arbitrary addresses are not table membership. All probes are bounded. */
+static BOOL instruction_pool_entry(uintptr_t item,uintptr_t pool,unsigned count,unsigned stride) {
+    return count && count<=65536u && pool && pool<=UINTPTR_MAX-(size_t)count*stride &&
+        item>=pool && item<pool+(size_t)count*stride && (item-pool)%stride==0;
+}
+static BOOL inspect_instruction(const Task *t,SudekiMpStoryTaskInstruction *out) {
+    uint8_t *manager=t->manager,*thread=t->thread;
+    if(!manager_exact(manager) || !readable(thread,0x50) ||
+        *(void **)(image_base+0x3c3108)!=manager ||
+        *(void **)(image_base+RUNTIME_GLOBAL)!=manager+0x20) return FALSE;
+    uintptr_t code=*(uintptr_t *)(manager+0x34),end=*(uintptr_t *)(manager+0x38),
+        limit=*(uintptr_t *)(manager+0x3c);
+    uint32_t pc=*(uint32_t *)(thread+0xc);
+    if(!code || end<=code || limit<end || pc>=end-code || !readable((void *)(code+pc),1))
+        return FALSE;
+    SudekiMpStoryTaskInstruction v={.offset=pc,.opcode=*(uint8_t *)(code+pc),
+        .kind=SUDEKIMP_STORY_INSTRUCTION_OTHER};
+    if(v.opcode!=0x27 && v.opcode!=0x28 && v.opcode!=0x29) { *out=v;return TRUE; }
+    unsigned width=v.opcode==0x29?9u:5u;
+    if(width>end-code-pc || !readable((void *)(code+pc),width)) return FALSE;
+    memcpy(&v.call_hash,(void *)(code+pc+1),4);
+    if(v.opcode==0x28 || v.opcode==0x29) {
+        v.kind=v.opcode==0x28?SUDEKIMP_STORY_INSTRUCTION_METHOD:SUDEKIMP_STORY_INSTRUCTION_CHILD;
+        if(v.opcode==0x29) memcpy(&v.argument_count,(void *)(code+pc+5),4);
+        *out=v;return TRUE;
+    }
+    unsigned slots=*(unsigned *)(manager+0x20),count=*(unsigned *)(manager+0x2c),
+        capacity=*(unsigned *)(manager+0x30);
+    uintptr_t *table=*(uintptr_t **)(manager+0x24),pool=*(uintptr_t *)(manager+0x28);
+    if(!slots || slots>65536u || (slots&(slots-1u)) || count>capacity || capacity>65536u ||
+        !readable(table,(size_t)slots*4)) return FALSE;
+    unsigned slot=v.call_hash&(slots-1u),probes;
+    for(probes=0;probes<slots;++probes,slot=(slot+1)&(slots-1u)) {
+        uintptr_t item=table[slot];
+        if(!item) break;
+        if(!instruction_pool_entry(item,pool,count,16) || !readable((void *)item,16)) return FALSE;
+        if(*(uint32_t *)(item+4)==v.call_hash) {
+            v.script_offset=*(uint32_t *)(item+8);
+            if(v.script_offset>=end-code) return FALSE;
+            v.kind=SUDEKIMP_STORY_INSTRUCTION_COMPILED;*out=v;return TRUE;
+        }
+    }
+    if(probes==slots) return FALSE; /* Native lookup would loop forever. */
+    count=*(unsigned *)(manager+0x70);capacity=*(unsigned *)(manager+0x74);
+    uintptr_t bindings=*(uintptr_t *)(manager+0x78);
+    pool=*(uintptr_t *)(manager+0x7c);table=(uintptr_t *)(manager+0x80);
+    if(!count || count>capacity || capacity>16384u || !pool ||
+        pool>UINTPTR_MAX-(size_t)count*12 || !bindings ||
+        bindings>UINTPTR_MAX-(size_t)count*28 || !readable(table,16384u*4u)) return FALSE;
+    slot=v.call_hash&0x3fffu;
+    for(probes=0;probes<16384u;++probes,slot=(slot+1)&0x3fffu) {
+        uintptr_t item=table[slot];
+        if(!item) return FALSE;
+        if(!instruction_pool_entry(item,pool,count,12) || !readable((void *)item,12)) return FALSE;
+        if(*(uint32_t *)item!=v.call_hash || *(uint32_t *)(item+4)!=0) continue;
+        unsigned index=*(uint16_t *)(item+8);
+        if(index>=count) return FALSE;
+        uint8_t *binding=(uint8_t *)(bindings+(size_t)index*28);
+        if(!readable(binding,28)) return FALSE;
+        unsigned abi=*(uint32_t *)(binding+12)&0x7fu;
+        if(abi>1u) return FALSE; /* Not a supported global cdecl/stdcall record. */
+        uintptr_t target=(uint32_t)(*(uint32_t *)binding+*(uint32_t *)(manager+0x6c));
+        if(target<(uintptr_t)image_base+0x1000u ||
+            target>=(uintptr_t)image_base+0x299000u || !readable((void *)target,1)) return FALSE;
+        v.native_rva=(uint32_t)(target-(uintptr_t)image_base);
+        v.argument_count=*(uint32_t *)(binding+24)>>16;
+        if(v.argument_count>16u) return FALSE;
+        v.kind=SUDEKIMP_STORY_INSTRUCTION_NATIVE;*out=v;return TRUE;
+    }
+    return FALSE;
+}
+BOOL SudekiMpLanStoryTaskInspectInstruction(HMODULE image,const void *consumer,
+    const SudekiMpStoryTaskAdmissionView *view,SudekiMpStoryTaskInstruction *out) {
+    if(!out || !view || view!=admission_current_view || !consumer || consumer!=admission_consumer ||
+        admission_depth!=1 || !InterlockedCompareExchange(&callbacks,0,0) ||
+        !SudekiMpLanStoryTaskHostExact(image) || InterlockedCompareExchange(&admission_fault,0,0) ||
+        InterlockedCompareExchange(&trace_fault,0,0) || !view->tracked || !view->thread ||
+        current_thread!=view->thread) { SetLastError(ERROR_INVALID_STATE);return FALSE; }
+    Task *t=find_task(view->thread,FALSE);
+    if(!t || t->id!=view->task_id || t->generation!=view->load_generation ||
+        t->generation!=status.load_generation || t->manager!=load_manager ||
+        t->terminal || t->retirement_entered || !inspect_instruction(t,out)) {
+        SetLastError(ERROR_INVALID_DATA);return FALSE;
+    }
+    SetLastError(ERROR_SUCCESS);return TRUE;
+}
+static BOOL admission_run(void *thread,BOOL exact,uint32_t *waiting_id) {
+    *waiting_id=0;
+    if(!admission_decide) return TRUE;
+    if(!exact || admission_depth || InterlockedCompareExchange(&admission_fault,0,0) ||
+        InterlockedCompareExchange(&trace_fault,0,0)) {
+        admission_unknown("admission_context");return FALSE;
+    }
+    Task *t=find_task(thread,FALSE);
+    if(t && (t->generation!=status.load_generation || t->manager!=load_manager ||
+        t->terminal || t->retirement_entered || !manager_exact(t->manager))) {
+        admission_unknown("admission_task_identity");return FALSE;
+    }
+    SudekiMpStoryTaskAdmissionView v=admission_view(t,thread);
+    ++admission_depth;
+    admission_current_view=&v;
+    SudekiMpStoryTaskAdmissionDecision decision=admission_decide(admission_consumer,&v);
+    admission_current_view=NULL;
+    --admission_depth;
+    if(InterlockedCompareExchange(&admission_fault,0,0) ||
+        InterlockedCompareExchange(&trace_fault,0,0)) return FALSE;
+    if(decision==SUDEKIMP_STORY_TASK_RUN) {
+        if(t && t->admission_waiting) *waiting_id=t->id;
+        return TRUE;
+    }
+    if(decision!=SUDEKIMP_STORY_TASK_WAIT || !t) {
+        admission_unknown("admission_unknown_decision");return FALSE;
+    }
+    if(!t->admission_waiting) {
+        if(admission_waiters>=TASK_CAPACITY) {
+            admission_unknown("admission_wait_capacity");return FALSE;
+        }
+        t->admission_waiting=TRUE;++admission_waiters;
+    }
+    return FALSE;
+}
+static void admission_returned(void *thread,uint32_t id,int result) {
+    if(!id || result==2) return; /* Cast routing can yield without fetching. */
+    if(InterlockedCompareExchange(&admission_fault,0,0) ||
+        InterlockedCompareExchange(&trace_fault,0,0)) return;
+    Task *t=find_task(thread,FALSE);
+    /* Original execution may retire this task. That separate callback owns
+     * the pending-intent notice; never dereference a returned native thread. */
+    if(!t || t->id!=id) return;
+    if((result!=0 && result!=1) || !t->admission_waiting || !admission_waiters) {
+        admission_unknown("admission_return_identity");return;
+    }
+    t->admission_waiting=FALSE;--admission_waiters;
+}
 static int __attribute__((fastcall,force_align_arg_pointer)) story_step(void *thread,void *edx) {
     DWORD error=GetLastError();
     InterlockedIncrement(&callbacks);
@@ -685,9 +837,12 @@ static int __attribute__((fastcall,force_align_arg_pointer)) story_step(void *th
     void *previous=exact?current_thread:NULL;
     if(exact) current_thread=thread;
     else fault("step_thread");
+    uint32_t waiting_id=0;
+    BOOL run=admission_run(thread,exact,&waiting_id);
     SetLastError(error);
-    int result=cast_step?cast_step(thread,edx):original_step(thread,edx);
+    int result=run?(cast_step?cast_step(thread,edx):original_step(thread,edx)):2;
     error=GetLastError();
+    if(run && exact) admission_returned(thread,waiting_id,result);
     if(exact) {
         Task *t=find_task(thread,FALSE);
         if(t && result==1) {
@@ -771,7 +926,24 @@ story_retire_end(uint32_t id,void *thread) {
                 SudekiMpLogFormat(
                     "lan_story_task event=retired generation=%lu id=%lu hash=%08lx normal_terminal=%u native_retire_returned=1 scene_ready=unproven\r\n",
                     (unsigned long)t->generation,(unsigned long)t->id,(unsigned long)t->hash,t->terminal);
-            memset(t,0,sizeof(*t)); t->used=TRUE;
+            BOOL retire_admission=TRUE;
+            if(t->admission_waiting) {
+                SudekiMpStoryTaskAdmissionView v=admission_view(t,NULL);
+                if(!admission_retired || !admission_waiters || admission_depth ||
+                    InterlockedCompareExchange(&admission_fault,0,0) ||
+                    InterlockedCompareExchange(&trace_fault,0,0)) {
+                    admission_unknown("admission_retirement_context");retire_admission=FALSE;
+                } else {
+                    ++admission_depth;
+                    retire_admission=admission_retired(admission_consumer,&v);
+                    --admission_depth;
+                    if(InterlockedCompareExchange(&admission_fault,0,0) ||
+                        InterlockedCompareExchange(&trace_fault,0,0) || !retire_admission) {
+                        admission_unknown("admission_retirement_unacknowledged");retire_admission=FALSE;
+                    } else --admission_waiters;
+                }
+            }
+            if(retire_admission) {memset(t,0,sizeof(*t)); t->used=TRUE;}
         }
     }
     InterlockedDecrement(&callbacks);
@@ -1171,7 +1343,7 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
      * return is required BEFORE discarding any borrowed address; never inspect
      * old task bodies or a possibly replaced manager here. A busy observer
      * retains everything for a later UI retry after its original returns. */
-    if(cast_created || cast_step || !installed || !image_base || !native_thread ||
+    if(cast_created || cast_step || admission_decide || !installed || !image_base || !native_thread ||
         native_thread!=GetCurrentThreadId() ||
         SudekiMpLobbyGameplayStoryExitStatus()!=1u ||
         InterlockedCompareExchange(&callbacks,0,0) || current_thread ||
@@ -1207,7 +1379,9 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
 }
 BOOL SudekiMpLanStoryTaskTraceUninstall(void) {
     if(!image_base) return TRUE;
-    if(cast_created || cast_step || (native_thread && native_thread!=GetCurrentThreadId()) ||
+    if(cast_created || cast_step || admission_decide || admission_waiters ||
+        InterlockedCompareExchange(&admission_fault,0,0) ||
+        (native_thread && native_thread!=GetCurrentThreadId()) ||
         InterlockedCompareExchange(&callbacks,0,0) || spawn_replay.transaction ||
         spawn_setup_transaction) return retain(ERROR_BUSY);
     BOOL ok=SudekiMpRestoreInlineHook(&spawn_rr_hook);
@@ -1251,6 +1425,26 @@ BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver
     if(!created || !step || cast_created || cast_step || InterlockedCompareExchange(&callbacks,0,0) ||
         !SudekiMpLanStoryTaskHostExact(image)) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
     cast_created=created; cast_step=step; return TRUE;
+}
+BOOL SudekiMpLanStoryTaskAdmissionAttach(HMODULE image,const void *consumer,
+    SudekiMpStoryTaskDecide decide,SudekiMpStoryTaskRetired retired) {
+    if(!consumer || !decide || !retired || admission_decide || admission_waiters || admission_depth ||
+        InterlockedCompareExchange(&admission_fault,0,0) || InterlockedCompareExchange(&trace_fault,0,0) ||
+        InterlockedCompareExchange(&callbacks,0,0) || !SudekiMpLanStoryTaskHostExact(image) ||
+        !status.load_generation || !load_manager || !manager_exact(load_manager)) {
+        SetLastError(ERROR_INVALID_STATE);return FALSE;
+    }
+    admission_consumer=consumer;admission_retired=retired;admission_decide=decide;return TRUE;
+}
+BOOL SudekiMpLanStoryTaskAdmissionDetach(HMODULE image,const void *consumer,
+    SudekiMpStoryTaskDecide decide,SudekiMpStoryTaskRetired retired) {
+    if(!consumer || !decide || !retired || consumer!=admission_consumer || decide!=admission_decide ||
+        retired!=admission_retired || admission_waiters || admission_depth ||
+        InterlockedCompareExchange(&admission_fault,0,0) || InterlockedCompareExchange(&trace_fault,0,0) ||
+        InterlockedCompareExchange(&callbacks,0,0) || !SudekiMpLanStoryTaskHostExact(image)) {
+        SetLastError(ERROR_BUSY);return FALSE;
+    }
+    admission_decide=NULL;admission_retired=NULL;admission_consumer=NULL;return TRUE;
 }
 BOOL SudekiMpLanStoryTaskHostDetach(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step) {
     if(!created || !step || cast_created!=created || cast_step!=step ||

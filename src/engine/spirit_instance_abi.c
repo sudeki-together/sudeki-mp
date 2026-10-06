@@ -501,26 +501,30 @@ static BOOL named_owned_camera_exact(const Entry *e,unsigned int k) {
         if((&entries[i]!=e || j!=k) && entries[i].named_cameras[j]==camera) return FALSE;
     return TRUE;
 }
+static unsigned named_fail;
+static unsigned named_fail_at_enter;
+unsigned SudekiMpSpiritInstanceNamedFail(void){return named_fail_at_enter;}
 static BOOL named_namespace_exact(void) {
     unsigned int i,k;
     if(!named_manager) return TRUE;
-    if(!named_registry_exact()) return FALSE;
+    if(!named_registry_exact()) { named_fail=1; return FALSE; }
     if(named_banking && named_bank_reserved) {
         Entry *active=generation_entry(named_generation);
         for(k=0;k<2;++k)
             if(!memory(named_slot(named_bank_slots[k]),sizeof(void *),TRUE) ||
-                *named_slot(named_bank_slots[k])!=(active ? active->named_cameras[k]:NULL)) return FALSE;
+                *named_slot(named_bank_slots[k])!=(active ? active->named_cameras[k]:NULL)) { named_fail=2; return FALSE; }
     }
     for(k=0;k<2;++k) if(!named_camera_exact(named_originals[k],named_original_slots[k],
-        named_generation ? named_parked[k]:named_original_names[k])) return FALSE;
+        named_generation ? named_parked[k]:named_original_names[k])) { named_fail=3; return FALSE; }
     for(i=0;i<MAX_INSTANCES;++i) {
         Entry *e=&entries[i];
-        if(e->named_creation_uncertain) return FALSE;
-        if(e->named_ready && (!e->named_cameras[0] || !e->named_cameras[1])) return FALSE;
+        if(e->named_creation_uncertain) { named_fail=4; return FALSE; }
+        if(e->named_ready && (!e->named_cameras[0] || !e->named_cameras[1])) { named_fail=5; return FALSE; }
         if(!e->named_cameras[0] && !e->named_cameras[1]) continue;
-        if(!e->identity.generation || !caster_exact(e)) return FALSE;
-        for(k=0;k<2;++k) if(e->named_cameras[k] && !named_owned_camera_exact(e,k)) return FALSE;
+        if(!e->identity.generation || !caster_exact(e)) { named_fail=6; return FALSE; }
+        for(k=0;k<2;++k) if(e->named_cameras[k] && !named_owned_camera_exact(e,k)) { named_fail=7; return FALSE; }
     }
+    named_fail=9; /* only meaningful when the final clause is false */
     return !named_generation || (generation_entry(named_generation) && generation_entry(named_generation)->named_ready);
 }
 BOOL SudekiMpSpiritInstanceCameraSelectionAbiReady(void) {
@@ -1318,6 +1322,19 @@ static BOOL skill_filter_image_exact(unsigned int filter) {
         call(instance_image,skill_filter_sites[filter]+13,0x290d0) &&
         bytes(site+18,(const uint8_t *)"\x5e\xc3",2);
 }
+unsigned SudekiMpSpiritInstanceFilterEntryDiag(HMODULE image,unsigned which) {
+    /* Bit mask of failing conditions for diagnostics only. */
+    SudekiMpInlineHook *hook=&skill_filter_hooks[which&1u]; unsigned m=0;
+    if(!image || instance_image!=(uint8_t *)image) m|=1u;
+    if(update_fault) m|=2u;
+    if(GetCurrentThreadId()!=owner_thread) m|=4u;
+    if(scope_depth) m|=8u;
+    if(operation_depth) m|=16u;
+    if(update_depth) m|=32u;
+    if(!hook->installed) m|=64u;
+    else if(!bytes(hook->target,hook->replacement,hook->length)) m|=128u;
+    return m;
+}
 BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image) {
     SudekiMpInlineHook *hook=&skill_filter_hooks[1];
     return image && instance_image==(uint8_t *)image && !update_fault &&
@@ -1681,6 +1698,9 @@ BOOL SudekiMpResetSpiritInstanceAbi(void) {
     return TRUE;
 }
 
+static unsigned enter_failure,enter_failure_first;
+unsigned SudekiMpSpiritInstanceEnterFailure(void) {return enter_failure_first*100u+enter_failure;}
+#define ENTER_FAIL(code) do { enter_failure=(code); if(!enter_failure_first) enter_failure_first=(code); } while(0)
 uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
     Entry *e=instance ? find(instance):NULL;
     void *manager,*camera,*expected_manager,*expected_camera;
@@ -1688,24 +1708,25 @@ uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
     if(!instance_image || !owner_thread || GetCurrentThreadId()!=owner_thread ||
         operation_depth || n==16 || next_scope_cookie==UINT_MAX ||
         (instance && (update_fault || !e || e->destroying || !e->manager_initialized || !e->camera_constructed))) {
-        SetLastError(ERROR_BUSY); return 0;
+        ENTER_FAIL(1); SetLastError(ERROR_BUSY); return 0;
     }
     expected_manager=n ? scopes[n-1].manager:primary_manager;
     expected_camera=n ? scopes[n-1].camera:primary_camera;
     manager=e ? e->identity.manager:primary_manager;
     camera=e ? e->identity.camera:primary_camera;
-    if(!globals_exact(expected_manager,expected_camera) ||
-        !object_exact(expected_manager,MANAGER_SIZE,MANAGER_VTABLE) ||
+    if(!globals_exact(expected_manager,expected_camera)) { ENTER_FAIL(!address(instance_image+MANAGER_GLOBAL,expected_manager)?2:3); SetLastError(ERROR_INVALID_DATA); return 0; }
+    if(!object_exact(expected_manager,MANAGER_SIZE,MANAGER_VTABLE) ||
         !object_exact(expected_camera,CAMERA_SIZE,CAMERA_VTABLE) ||
         !object_exact(manager,MANAGER_SIZE,MANAGER_VTABLE) ||
         !object_exact(camera,CAMERA_SIZE,CAMERA_VTABLE)) {
-        SetLastError(ERROR_INVALID_DATA); return 0;
+        ENTER_FAIL(4); SetLastError(ERROR_INVALID_DATA); return 0;
     }
-    if(!SudekiMpCastLightTransitionReady(e ? e->identity.generation:0) ||
-        !shared_ssp_transition_ready(e ? e->identity.generation:0) ||
-        !named_transition_ready(e ? e->identity.generation:0) ||
-        !selection_transition_ready(e ? e->identity.generation:0) ||
-        !cast_gate_transition(e ? e->identity.generation:0,FALSE)) return 0;
+    {
+        uint32_t g=e ? e->identity.generation:0;
+        unsigned code=!SudekiMpCastLightTransitionReady(g)?5:!shared_ssp_transition_ready(g)?6:
+            !named_transition_ready(g)?7:!selection_transition_ready(g)?8:!cast_gate_transition(g,FALSE)?9:0;
+        if(code) { if(code==7 && !named_fail_at_enter) named_fail_at_enter=named_fail; ENTER_FAIL(code); return 0; }
+    }
     shared_ssp_transition_commit(e ? e->identity.generation:0);
     named_transition_commit(e ? e->identity.generation:0);
     selection_transition_commit(e ? e->identity.generation:0);

@@ -25,6 +25,25 @@ BOOL SudekiMpInstallSaveBookIntercept(
 );
 void SudekiMpUninstallSaveBookIntercept(void);
 
+/* Experimental story-only use of this SAME LoadGameSave patch owner, mutually
+ * exclusive with the local vote/other profile installers. Startup-only install;
+ * no SaveMenuShow hook, vote, UI/global mutation or native load is initiated.
+ * begin/end are paired around each intercepted call, including a deferred one.
+ * begin receives only the copied native sorted index, NOT a save identity.
+ * Caller owns thread/admission/deferred-plan/file/native-lifetime verification.
+ * TRUE admits this native export now; FALSE returns from its void entry without
+ * executing it. This does not suspend the C/script caller or replay anything.
+ * Callbacks must not reenter native code or retain an index as a file lease. */
+typedef BOOL (*SudekiMpSaveBookStoryLoadBegin)(const void *,int);
+typedef void (*SudekiMpSaveBookStoryLoadEnd)(const void *);
+BOOL SudekiMpSaveBookStoryLoadInstall(HMODULE,const void *owner,
+    SudekiMpSaveBookStoryLoadBegin,SudekiMpSaveBookStoryLoadEnd);
+BOOL SudekiMpSaveBookStoryLoadExact(HMODULE,const void *owner);
+/* Only pre-native startup restoration; observed native entry retains callbacks
+ * for process lifetime. Not an explicit DLL-unload policy. Wrong owner refuses.
+ * Failed restoration preserves dependencies and permits startup retry. */
+BOOL SudekiMpSaveBookStoryLoadUninstall(const void *owner);
+
 /* Pointer-free overlay/input contract. The first successful visible report
  * starts the full ten-second timer. player_index zero is the host; index one
  * is the currently supported Player 2 input seat. */

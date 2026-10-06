@@ -259,6 +259,13 @@ BOOL SudekiMpLanStoryActivityService(const SudekiMpControlUpdateDispatchWitness 
     reason="retained_lease";
     for(unsigned i=0;i<lease_count;++i) if(!activity_exact(&leases[i],!leases[i].releasing) ||
         (leases[i].releasing && leases[i].entity[0x2bu]!=leases[i].release_refs)) return fail();
+    {
+        static unsigned traced_wanted=999u,traces;
+        if(count!=traced_wanted && traces<48u) {
+            ++traces; traced_wanted=count;
+            SudekiMpLogFormat("lan_story_activity event=wanted count=%u mask=%u leases=%u\r\n",count,mask,lease_count);
+        }
+    }
     busy=TRUE;
     for(unsigned i=0;i<lease_count;) {
         Activity *a=&leases[i]; BOOL keep=FALSE;

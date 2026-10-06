@@ -9,6 +9,8 @@
 BOOL SudekiMpInstallLanArenaStartupMovieSkip(HMODULE game_module);
 BOOL SudekiMpUninstallLanArenaStartupMovieSkip(void);
 BOOL SudekiMpLanArenaStartupMovieSkipInstalled(void);
+/* Opt-in: also skip the opening poem cinematic (FMA01_poem.bik). */
+void SudekiMpLanArenaStartupMovieSkipIntroPoem(BOOL enabled);
 
 /* Exact supported-image preflight for the MoviePlay entry used by the hook
  * transaction. The LAN launcher initializes the DLL before resuming Sudeki's

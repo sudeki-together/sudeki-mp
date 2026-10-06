@@ -1,6 +1,7 @@
 #include "hooks/save_book_intercept.h"
 
 #include "engine/log.h"
+#include "engine/build_identity.h"
 #include "engine/player_statehood.h"
 #include "engine/save_book_vote.h"
 #include "hooks/call_hook.h"
@@ -72,7 +73,7 @@ static BOOL repeated_request_logged;
 static SudekiMpInlineHook save_menu_show_hook;
 static SaveMenuShowFunction original_save_menu_show;
 static SudekiMpInlineHook load_game_save_hook;
-void *load_game_save_trampoline;
+void *load_game_save_trampoline __attribute__((used));
 static LoadGameSaveFunction original_load_game_save;
 static SudekiMpSaveBookVote save_book_vote;
 static SudekiMpPendingSaveBook pending_save_book;
@@ -86,6 +87,13 @@ static uint32_t native_save_serial;
 static BOOL native_save_source_snapshot_valid;
 static uint32_t native_save_source_generation;
 static uintptr_t native_save_world_identity;
+static SRWLOCK story_load_lock=SRWLOCK_INIT;
+static const void *story_load_owner;
+static SudekiMpSaveBookStoryLoadBegin story_load_admit;
+static SudekiMpSaveBookStoryLoadEnd story_load_complete;
+static DWORD story_load_startup_thread;
+static unsigned story_load_calls;
+static BOOL story_load_installed,story_load_ever_native,story_load_unknown;
 
 static BOOL readable_memory(const void *pointer, size_t size) {
     MEMORY_BASIC_INFORMATION information;
@@ -905,6 +913,123 @@ const void *SudekiMpSaveBookInterceptLoadGameSaveOriginalForTesting(void) {
 }
 #endif
 
+static BOOL story_load_retain(DWORD error) {
+    HMODULE self;
+    (void)GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+        (LPCSTR)(uintptr_t)&SudekiMpSaveBookStoryLoadUninstall,&self);
+    SetLastError(error?error:ERROR_BUSY);return FALSE;
+}
+static BOOL story_load_patch_exact(void) {
+    return load_game_save_hook.installed &&
+        readable_memory(game_base+RVA_LOAD_GAME_SAVE,LOAD_GAME_SAVE_HOOK_LENGTH) &&
+        !memcmp(game_base+RVA_LOAD_GAME_SAVE,load_game_save_hook.replacement,LOAD_GAME_SAVE_HOOK_LENGTH);
+}
+BOOL __attribute__((externally_visible)) SudekiMpSaveBookStoryLoadExact(HMODULE image,const void *owner) {
+    AcquireSRWLockExclusive(&story_load_lock);
+    BOOL ok=owner && story_load_owner==owner && game_base==(uint8_t *)image &&
+        story_load_installed && !story_load_unknown;
+    if(ok && !story_load_patch_exact()) {story_load_unknown=TRUE;ok=FALSE;}
+    ReleaseSRWLockExclusive(&story_load_lock);return ok;
+}
+static BOOL __attribute__((used,noinline)) story_load_begin(int index) {
+    DWORD error=GetLastError();
+    AcquireSRWLockExclusive(&story_load_lock);story_load_ever_native=TRUE;
+    if(story_load_calls==UINT32_MAX) story_load_unknown=TRUE;else ++story_load_calls;
+    if(!story_load_patch_exact()) story_load_unknown=TRUE;
+    const void *owner=story_load_owner;
+    SudekiMpSaveBookStoryLoadBegin begin=story_load_admit;
+    /* Callbacks remain published while this hook may execute, including partial
+     * installation/rollback. Never hold this lock while entering the consumer:
+     * its own guard health checks may query this owner. */
+    ReleaseSRWLockExclusive(&story_load_lock);
+    BOOL run=begin(owner,index);
+    AcquireSRWLockExclusive(&story_load_lock);
+    if((run!=FALSE && run!=TRUE) || !story_load_patch_exact()) story_load_unknown=TRUE;
+    if(story_load_unknown) run=FALSE;
+    ReleaseSRWLockExclusive(&story_load_lock);SetLastError(error);return run;
+}
+static void __attribute__((used,noinline)) story_load_end(void) {
+    DWORD error=GetLastError();
+    /* Uninstall refuses any native entry, so this paired provider cannot be
+     * detached between begin, the original call and end. No native object read. */
+    story_load_complete(story_load_owner);
+    AcquireSRWLockExclusive(&story_load_lock);
+    if(story_load_calls) --story_load_calls;else story_load_unknown=TRUE;
+    ReleaseSRWLockExclusive(&story_load_lock);SetLastError(error);
+}
+#define STORY_SAVE "pushfl; pushal; mov %esp,%ebp; sub $528,%esp; and $-16,%esp;" \
+    "fxsave (%esp); fninit; movl $0x1f80,512(%esp); ldmxcsr 512(%esp); cld; sub $16,%esp;"
+#define STORY_RESTORE "add $16,%esp; fxrstor (%esp); mov %ebp,%esp; popal; popfl;"
+static void __attribute__((naked,noinline)) story_load_entry(void) {
+    __asm__ volatile(STORY_SAVE "mov 40(%ebp),%eax; mov %eax,(%esp);"
+        "call _story_load_begin; test %eax,%eax; jz 1f;" STORY_RESTORE
+        /* Cdecl export takes one stack argument. Duplicate it for the inner
+         * original call; LEA removes that copy without changing native flags. */
+        "pushl 4(%esp); call *_load_game_save_trampoline; lea 4(%esp),%esp;"
+        STORY_SAVE "call _story_load_end;" STORY_RESTORE "ret;"
+        "1: call _story_load_end;" STORY_RESTORE "ret;");
+}
+#undef STORY_SAVE
+#undef STORY_RESTORE
+BOOL __attribute__((externally_visible)) SudekiMpSaveBookStoryLoadUninstall(const void *owner) {
+    AcquireSRWLockExclusive(&story_load_lock);
+    if(!story_load_owner) {ReleaseSRWLockExclusive(&story_load_lock);return TRUE;}
+    DWORD error=0;
+    if(!owner || story_load_owner!=owner || story_load_calls || story_load_ever_native ||
+        story_load_unknown || GetCurrentThreadId()!=story_load_startup_thread ||
+        *(void **)(game_base+0x408d10) || *(void **)(game_base+RVA_UI_SCENE_GLOBAL)) error=ERROR_BUSY;
+    if(!error && !SudekiMpRestoreInlineHook(&load_game_save_hook)) {
+        error=GetLastError();if(!error) error=ERROR_WRITE_FAULT;
+    }
+    if(!error) {
+        story_load_installed=FALSE;story_load_owner=NULL;story_load_admit=NULL;story_load_complete=NULL;
+        story_load_startup_thread=0;load_game_save_trampoline=NULL;original_load_game_save=NULL;game_base=NULL;
+    }
+    ReleaseSRWLockExclusive(&story_load_lock);return error?story_load_retain(error):TRUE;
+}
+BOOL __attribute__((externally_visible)) SudekiMpSaveBookStoryLoadInstall(HMODULE image,const void *owner,
+    SudekiMpSaveBookStoryLoadBegin begin,SudekiMpSaveBookStoryLoadEnd end) {
+    uint8_t *b=(uint8_t *)image;
+    AcquireSRWLockExclusive(&story_load_lock);
+    if(!owner || !begin || !end || game_base || story_load_owner || story_load_ever_native ||
+        story_load_unknown || !readable_memory(b,sizeof(IMAGE_DOS_HEADER)) ||
+        (uintptr_t)b>UINTPTR_MAX-SUDEKIMP_EXPECTED_IMAGE_SIZE) goto invalid;
+    IMAGE_DOS_HEADER *dos=(void *)b;
+    uint8_t count_entry[]={0x56,0x0f,0xb7,0x35,0,0,0,0,0x75,0x2c};
+    void *count_slot=b+0x34b32c;memcpy(count_entry+4,&count_slot,4);
+    static const uint8_t argument_tail[]={0x8b,0x44,0x24,8,0x8b,0xd6,0x3b,0xc2,0x7d,0x17,
+        0x69,0xc0,0xc8,2,0,0,0x03,0xc1,0x80,0xb8,0xc4,2,0,0,0,0x75,6,0x5e,
+        0xe9,0x4a,0xeb,0xff,0xff,0x5e,0xc3};
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE || dos->e_lfanew<=0 ||
+        (uint32_t)dos->e_lfanew>SUDEKIMP_EXPECTED_IMAGE_SIZE-sizeof(IMAGE_NT_HEADERS32) ||
+        !readable_memory(b+dos->e_lfanew,sizeof(IMAGE_NT_HEADERS32)) ||
+        !SudekiMpCheckLoadedExecutable(image) ||
+        !readable_memory(b+RVA_LOAD_GAME_SAVE,LOAD_GAME_SAVE_HOOK_LENGTH) ||
+        !load_game_save_signature_matches(b) ||
+        !readable_memory(b+RVA_LOAD_GAME_SAVE+7,sizeof(count_entry)) ||
+        memcmp(b+RVA_LOAD_GAME_SAVE+7,count_entry,sizeof(count_entry)) ||
+        !readable_memory(b+0x101715,sizeof(argument_tail)) ||
+        memcmp(b+0x101715,argument_tail,sizeof(argument_tail)) ||
+        !readable_memory(b+0x408d10,4) || *(void **)(b+0x408d10) ||
+        !readable_memory(b+RVA_UI_SCENE_GLOBAL,4) || *(void **)(b+RVA_UI_SCENE_GLOBAL)) goto invalid;
+    uint8_t expected[LOAD_GAME_SAVE_HOOK_LENGTH];memcpy(expected,b+RVA_LOAD_GAME_SAVE,sizeof(expected));
+    game_base=b;story_load_owner=owner;story_load_admit=begin;story_load_complete=end;
+    story_load_startup_thread=GetCurrentThreadId();
+    BOOL ok=SudekiMpInstallInlineHook(&load_game_save_hook,b+RVA_LOAD_GAME_SAVE,expected,sizeof(expected),
+        (void *)(uintptr_t)story_load_entry);
+    load_game_save_trampoline=load_game_save_hook.trampoline;
+    _Static_assert(sizeof(original_load_game_save)==sizeof(load_game_save_trampoline),"x86 function pointer size");
+    memcpy(&original_load_game_save,&load_game_save_trampoline,sizeof(original_load_game_save));
+    DWORD error=GetLastError();if(ok) story_load_installed=TRUE;
+    ReleaseSRWLockExclusive(&story_load_lock);
+    /* The acquiring coordinator owns rollback across its other native hooks.
+     * Leave even a failed-install obligation here for that single reverse pass. */
+    if(!ok) SetLastError(error);
+    return ok;
+invalid:
+    ReleaseSRWLockExclusive(&story_load_lock);SetLastError(ERROR_INVALID_STATE);return FALSE;
+}
+
 BOOL SudekiMpInstallSaveBookIntercept(
     HMODULE game_module,
     BOOL enabled
@@ -969,6 +1094,9 @@ BOOL SudekiMpInstallSaveBookIntercept(
 }
 
 void SudekiMpUninstallSaveBookIntercept(void) {
+    /* The legacy vote teardown is not authority to detach the story provider.
+     * Its own coordinator must use the owner-checked startup API above. */
+    if(story_load_owner) {(void)story_load_retain(ERROR_BUSY);return;}
     save_book_intercept_enabled = FALSE;
     if (pending_save_book.valid && !native_save_lifecycle_active) {
         cancel_pending_save_book("uninstall");

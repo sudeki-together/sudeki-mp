@@ -994,6 +994,11 @@ static const uint8_t *relative_jump_target(const uint8_t *instruction) {
     return instruction + 5 + displacement;
 }
 
+static int story_save_owner_fixture,story_save_foreign_owner;
+static BOOL story_save_begin_fixture(const void *owner,int index) {
+    (void)owner;(void)index;return FALSE;
+}
+static void story_save_end_fixture(const void *owner) {(void)owner;}
 static void check_save_book_intercept_exact_image(
     uint8_t *image,
     int *failures
@@ -1122,6 +1127,11 @@ static void check_save_book_intercept_exact_image(
             stderr);
         ++*failures;
     }
+    if(SudekiMpSaveBookStoryLoadInstall((HMODULE)image,&story_save_owner_fixture,
+            story_save_begin_fixture,story_save_end_fixture)) {
+        fputs("FAIL: story load owner overlapped active save-book voting owner\n",stderr);
+        ++*failures;
+    }
     SudekiMpUninstallSaveBookIntercept();
     if (memcmp(image + RVA_SAVE_MENU_SHOW,
             original_entry, sizeof(original_entry)) != 0 ||
@@ -1133,6 +1143,33 @@ static void check_save_book_intercept_exact_image(
             stderr);
         ++*failures;
     }
+    /* This test maps raw sections rather than relocating the full executable.
+     * Enroll only the extra relocated count operand used by the story ABI gate. */
+    uint32_t prior_count,relocated_count=(uint32_t)(uintptr_t)(image+0x34b32c);
+    memcpy(&prior_count,image+RVA_LOAD_GAME_SAVE+11,4);
+    memcpy(image+RVA_LOAD_GAME_SAVE+11,&relocated_count,4);
+    if(!SudekiMpSaveBookStoryLoadInstall((HMODULE)image,&story_save_owner_fixture,
+            story_save_begin_fixture,story_save_end_fixture)) {
+        fprintf(stderr,"FAIL: shared story load owner install error=%lu\n",(unsigned long)GetLastError());
+        ++*failures;
+    } else {
+        if(SudekiMpInstallSaveBookIntercept((HMODULE)image,TRUE) ||
+            SudekiMpInstallLanArenaCampaignGuard((HMODULE)image)) {
+            fputs("FAIL: another profile replaced the story load owner\n",stderr);++*failures;
+        }
+        SudekiMpUninstallSaveBookIntercept(); /* Must not clear story callbacks. */
+        if(!SudekiMpSaveBookStoryLoadExact((HMODULE)image,&story_save_owner_fixture) ||
+            memcmp(image+RVA_SAVE_MENU_SHOW,original_entry,sizeof(original_entry)) ||
+            image[RVA_LOAD_GAME_SAVE]!=0xe9 ||
+            SudekiMpSaveBookStoryLoadUninstall(&story_save_foreign_owner)) {
+            fputs("FAIL: legacy teardown or foreign owner stole story load hook\n",stderr);++*failures;
+        }
+        if(!SudekiMpSaveBookStoryLoadUninstall(&story_save_owner_fixture) ||
+            memcmp(image+RVA_LOAD_GAME_SAVE,original_load_entry,sizeof(original_load_entry))) {
+            fputs("FAIL: story load owner did not restore native entry\n",stderr);++*failures;
+        }
+    }
+    memcpy(image+RVA_LOAD_GAME_SAVE+11,&prior_count,4);
 }
 
 typedef struct ZonePatchProbe {

@@ -21,6 +21,10 @@
 #include "hooks/lan_story_runtime.h"
 #include "hooks/lan_story_load.h"
 #include "hooks/lan_story_task_trace.h"
+#include "hooks/lan_story_temp_exterior.h"
+#include "hooks/lan_story_pause_trace.h"
+#include "hooks/lan_story_anim_trace.h"
+#include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_startup_movie_skip.h"
@@ -255,6 +259,54 @@ static void cleanroom_control_update_observer(
         &cleanroom_update_observer_gate);
 }
 
+/* Closed single-player research probe for independent story areas. Every
+ * TEMP entry from a state-3 exterior keeps that exterior's entities, terrain
+ * collision and audio live; exit skips only the matching resume. Logs copied
+ * entry/receipt diagnostics. No network, party, camera or save behavior. */
+static BOOL temp_exterior_probe_keep(void *context,const SudekiMpLanStoryTempExteriorEntry *e) {
+    (void)context;
+    SudekiMpLogFormat("temp_exterior event=entry ticket=%llu exterior=%s destination=%s neighbors=%lu characters=%lu tracked=%lu decision=keep_live\r\n",
+        (unsigned long long)e->ticket,e->exterior,e->destination,(unsigned long)e->neighbors,
+        (unsigned long)e->characters,(unsigned long)e->tracked);
+    return TRUE;
+}
+static void temp_exterior_probe_exit(void *context,const SudekiMpLanStoryTempExteriorReceipt *r) {
+    (void)context;
+    SudekiMpLogFormat("temp_exterior event=exit ticket=%llu result=%s exterior=%s elapsed_ms=%lu tracked=%lu present=%lu moved=%lu unchanged=%lu disable_changed=%lu raised=%lu lowered=%lu nonzero=%lu,%lu max_displacement_milli=%ld terrain=%u enabled=%u,%u mask=%08lx,%08lx resume=skipped\r\n",
+        (unsigned long long)r->ticket,r->result==SUDEKIMP_STORY_TEMP_EXTERIOR_EXIT_BALANCED?"balanced":"mismatch",
+        r->exterior,(unsigned long)r->elapsed_ms,(unsigned long)r->tracked,(unsigned long)r->still_present,
+        (unsigned long)r->moved,(unsigned long)r->unchanged,(unsigned long)r->disable_changed,
+        (unsigned long)r->disable_raised,(unsigned long)r->disable_lowered,
+        (unsigned long)r->disable_entry_nonzero,(unsigned long)r->disable_exit_nonzero,
+        (long)(r->max_displacement*1000.0f),(unsigned)r->terrain_present,(unsigned)r->terrain_enabled_entry,
+        (unsigned)r->terrain_enabled_exit,(unsigned long)r->terrain_mask_entry,(unsigned long)r->terrain_mask_exit);
+}
+static const SudekiMpLanStoryTempExteriorConsumer temp_exterior_probe={
+    temp_exterior_probe_keep,temp_exterior_probe_exit,NULL};
+
+static BOOL read_config_boolean(const wchar_t *path,const wchar_t *section,const wchar_t *key);
+static BOOL read_config_integer(const wchar_t *path,const wchar_t *section,const wchar_t *key,int default_value,int minimum,int maximum,int *result);
+static void configure_lobby_auto(const wchar_t *config_path) {
+    SudekiMpLobbyAuto a; wchar_t text[64]; int number;
+    memset(&a,0,sizeof(a)); a.save_slot=~0u; a.character=4u; a.min_players=2u;
+    a.host=read_config_boolean(config_path,L"Lobby",L"AutoHost");
+    GetPrivateProfileStringW(L"Lobby",L"AutoJoin",L"",text,64,config_path);
+    if (text[0]) { a.join=TRUE; for (unsigned i=0;i<sizeof(a.address)-1u && text[i];++i) a.address[i]=(char)text[i]; }
+    if (!a.host && !a.join) { SudekiMpLobbyUiConfigureAuto(NULL); return; }
+    GetPrivateProfileStringW(L"Lobby",L"Room",L"Sudeki Together",text,64,config_path);
+    for (unsigned i=0;i<sizeof(a.room)-1u && text[i];++i) a.room[i]=(char)text[i];
+    a.port=(uint16_t)(read_config_integer(config_path,L"Lobby",L"Port",26770,1024,65535,&number)?number:26770);
+    if (read_config_integer(config_path,L"Lobby",L"SaveSlot",-1,0,9999,&number) && number>=0) a.save_slot=(unsigned)number;
+    GetPrivateProfileStringW(L"Lobby",L"Character",L"",text,64,config_path);
+    static const wchar_t *const names[4]={L"Buki",L"Elco",L"Tal",L"Ailish"};
+    for (unsigned i=0;i<4u;++i) if (!_wcsicmp(text,names[i])) a.character=i;
+    a.ready=read_config_boolean(config_path,L"Lobby",L"AutoReady");
+    a.start=read_config_boolean(config_path,L"Lobby",L"AutoStart");
+    if (read_config_integer(config_path,L"Lobby",L"MinPlayers",2,1,4,&number)) a.min_players=(unsigned)number;
+    SudekiMpLobbyUiConfigureAuto(&a);
+    SudekiMpLogFormat("lobby_auto config host=%u join=%u port=%u save_slot=%d character=%u ready=%u start=%u min_players=%u\r\n",
+        a.host,a.join,(unsigned)a.port,a.save_slot==~0u?-1:(int)a.save_slot,a.character,a.ready,a.start,a.min_players);
+}
 static BOOL uninstall_runtime_hooks(void) {
     /* Story containment retains the input fence, load result, task observer
      * and sparse world identities until its own pause and camera are drained. */
@@ -270,6 +322,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
     if (!SudekiMpUninstallLanArenaWindowPolicy()) return FALSE;
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
+    if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
     SudekiMpControlUpdateObserverGateDisable(
@@ -851,6 +904,25 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("lobby_launch config=invalid\r\n");
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (!lobby_launch && read_config_boolean(config_path, L"StoryAreas", L"TempExteriorProbe")) {
+        if (read_config_boolean(config_path, L"TitleMenu", L"Enabled") ||
+            read_config_boolean(config_path, L"FourPlayerTest", L"Enabled")) {
+            SudekiMpLogWrite("temp_exterior_probe config=invalid reason=exclusive_profile\r\n");
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if (!SudekiMpLanStoryTempExteriorInstall(game_module) ||
+            !SudekiMpLanStoryTempExteriorAttach(&temp_exterior_probe) ||
+            !SudekiMpLanStoryPauseTraceInstall(game_module)) {
+            DWORD error = GetLastError();
+            (void)SudekiMpLanStoryPauseTraceUninstall();
+            (void)SudekiMpLanStoryTempExteriorDetach();
+            (void)SudekiMpLanStoryTempExteriorUninstall();
+            SudekiMpLogFormat("temp_exterior_probe startup=failed error=%lu\r\n",(unsigned long)error);
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        SudekiMpLogWrite("status=ok profile=temp_exterior_probe network=false party=native gameplay_acceptance=false\r\n");
+        return SUDEKIMP_INIT_OK;
+    }
     if (!lobby_launch && read_config_boolean(config_path, L"TitleMenu", L"Enabled")) {
         wchar_t scope[32];
         SudekiMpSaveFingerprint saved_probe={0};
@@ -891,12 +963,19 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
                 FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
             !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+            /* Optional: skip only the three publisher/logo startup movies. */
+            (read_config_boolean(config_path,L"SudekiMP",L"SkipStartupMovies") &&
+                (SudekiMpLanArenaStartupMovieSkipIntroPoem(TRUE),
+                 !SudekiMpInstallLanArenaStartupMovieSkip(game_module))) ||
+            /* Probe only: aggregate animation renderer update callers. */
+            (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
+                !SudekiMpLanStoryAnimTraceInstall(game_module)) ||
             !SudekiMpInstallLobbyGameplay(game_module) ||
             ((saved_load_probe || saved_story) && !SudekiMpLanStoryTaskTraceInstall(game_module)) ||
             ((saved_load_probe || saved_story) && !SudekiMpInstallLanStoryLoad(game_module)) ||
             (saved_story && (!SudekiMpLobbyGameplayEnableTestroom(FALSE) ||
                 !SudekiMpLobbyGameplayEnableSaved(TRUE))) ||
-            !SudekiMpInstallTitleMultiplayer(game_module) ||
+            (configure_lobby_auto(config_path),!SudekiMpInstallTitleMultiplayer(game_module)) ||
             (saved_load_probe && (!SudekiMpInstallLanStoryRuntime(game_module,&observed_party) ||
                 !SudekiMpTitleMultiplayerQueueSavedLoadProbe(&saved_probe)))) {
             DWORD error = GetLastError();

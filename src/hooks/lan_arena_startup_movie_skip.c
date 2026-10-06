@@ -73,6 +73,29 @@ static const char *matched_startup_movie(const char *movie_name) {
     return NULL;
 }
 
+/* Optional extra (saved-story SkipStartupMovies): the opening poem
+ * cinematic. Case-insensitive suffix match so a path prefix also matches. */
+static BOOL skip_intro_poem;
+static unsigned passthrough_logs;
+void SudekiMpLanArenaStartupMovieSkipIntroPoem(BOOL enabled) { skip_intro_poem=enabled; }
+static const char *matched_intro_poem(const char *movie_name) {
+    static const char poem[]="fma01_poem";
+    size_t n=0,k=sizeof(poem)-1u;
+    if (!skip_intro_poem || movie_name==NULL) return NULL;
+    while (n<260u && readable_region(movie_name+n,1u) && movie_name[n]) ++n;
+    if (n<k || n>=260u) return NULL;
+    for (size_t at=0; at+k<=n; ++at) {
+        size_t i=0;
+        for (; i<k; ++i) {
+            char c=movie_name[at+i];
+            if (c>='A' && c<='Z') c=(char)(c-'A'+'a');
+            if (c!=poem[i]) break;
+        }
+        if (i==k) return "FMA01_poem";
+    }
+    return NULL;
+}
+
 BOOL SudekiMpLanArenaStartupMovieShouldSkip(const char *movie_name) {
     return matched_startup_movie(movie_name) != NULL;
 }
@@ -83,6 +106,7 @@ static BOOL __attribute__((cdecl)) lan_arena_movie_play(
 ) {
     MoviePlayFunction original_movie_play;
     const char *matched_movie = matched_startup_movie(movie_name);
+    if (matched_movie == NULL) matched_movie = matched_intro_poem(movie_name);
 
     if (matched_movie != NULL) {
         SudekiMpLogFormat(
@@ -92,6 +116,14 @@ static BOOL __attribute__((cdecl)) lan_arena_movie_play(
         return TRUE;
     }
 
+    if (skip_intro_poem && passthrough_logs < 16u) {
+        char copy[64]; size_t n=0;
+        while (n+1u<sizeof(copy) && movie_name && readable_region(movie_name+n,1u) && movie_name[n]) {
+            copy[n]=(movie_name[n]>=0x20 && movie_name[n]<0x7f)?movie_name[n]:'?'; ++n;
+        }
+        copy[n]=0; ++passthrough_logs;
+        SudekiMpLogFormat("lan_arena_startup_movie event=passthrough movie=%s skippable=%d\r\n",copy,(int)skippable);
+    }
     original_movie_play =
         (MoviePlayFunction)movie_play_hook.trampoline;
     if (original_movie_play == NULL) return FALSE;

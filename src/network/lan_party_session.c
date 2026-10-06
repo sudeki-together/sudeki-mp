@@ -165,7 +165,7 @@ static void clear_story_action(Peer *p) {
     p->story_action_received_at=0;
     p->story_action_pending=p->story_action_taken=0;
 }
-static void clear_story_frames(SudekiMpLanPartySession *s) {
+static void clear_story_media(SudekiMpLanPartySession *s) {
     s->story_frame_head=s->story_frame_count=0;
     s->story_frame_sequence=s->story_frame_tick=s->story_frame_received_at=0;
     memset(s->story_frames,0,sizeof(s->story_frames));
@@ -181,6 +181,9 @@ static void clear_story_frames(SudekiMpLanPartySession *s) {
     s->story_presentation_head=s->story_presentation_count=s->story_presentation_sequence=0;
     memset(&s->story_loot_assembly,0,sizeof(s->story_loot_assembly));
     s->story_loot_epoch=s->story_loot_scene_revision=0;
+}
+static void clear_story_frames(SudekiMpLanPartySession *s) {
+    clear_story_media(s);
     /* Keep the account revision floor and trusted save identity. A roster
      * change/reconnect must not reset reward ownership or permit rollback. */
     for(unsigned i=1u;i<4u;++i) {
@@ -195,6 +198,17 @@ static void clear_story_frames(SudekiMpLanPartySession *s) {
         /* Keep the transaction floor: a roster change cannot revive an offer
          * issued for the same connection before its topology was replaced. */
     }
+}
+
+/* Same epoch and exterior world: only another player's split-area
+ * occupancy changed. Queued frames are stale, but control offers and
+ * acknowledgements remain valid (fences span same-epoch revisions). */
+static void clear_story_scene_change(SudekiMpLanPartySession *s,const SudekiMpLanStoryScene *next) {
+    if(s->story_scene.revision && s->story_scene.epoch==next->epoch &&
+        !memcmp(s->story_scene.world,next->world,sizeof(next->world)) &&
+        s->story_scene.available_mask==next->available_mask &&
+        s->story_scene.leader_seat==next->leader_seat) clear_story_media(s);
+    else clear_story_frames(s);
 }
 
 static const uint8_t actors[SUDEKIMP_LAN_PARTY_PLAYERS] = {
@@ -1082,7 +1096,7 @@ static void receive_message(SudekiMpLanPartySession *s,
             (s->story_scene_sequence && !SudekiMpLanArenaSequenceNewer(sequence,s->story_scene_sequence)) ||
             !SudekiMpLanStorySceneDecode(body,body_size,&next) ||
             !SudekiMpLanStorySceneAdvances(&s->story_scene,&next)) return;
-        if(!SudekiMpLanStorySceneSame(&s->story_scene,&next)) clear_story_frames(s);
+        if(!SudekiMpLanStorySceneSame(&s->story_scene,&next)) clear_story_scene_change(s,&next);
         s->story_scene=next; s->story_scene_received_at=s->now;
         s->story_scene_sequence=sequence; p->last_received_at=s->now;
         if(!p->received_sequence || SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence))
@@ -1890,7 +1904,7 @@ BOOL SudekiMpLanPartyPublishStoryScene(SudekiMpLanPartySession *s,
     if(!SudekiMpLanStorySceneAdvances(&s->story_scene,scene)) {
         ReleaseSRWLockExclusive(&s->lock); return FALSE;
     }
-    if(!SudekiMpLanStorySceneSame(&s->story_scene,scene)) clear_story_frames(s);
+    if(!SudekiMpLanStorySceneSame(&s->story_scene,scene)) clear_story_scene_change(s,scene);
     s->story_scene=*scene;
     for(unsigned seat=1;seat<4u;++seat) {
         Peer *p=&s->peer[seat];

@@ -471,6 +471,8 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
     }
     SetLastError(ERROR_SUCCESS); return TRUE;
 }
+static uint8_t foreign_characters;
+void SudekiMpLanStoryReplicaSetForeignCharacters(uint8_t mask) {foreign_characters=(uint8_t)(mask&15u);}
 BOOL SudekiMpLanStoryReplicaApply(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryFrame *frame,BOOL apply_host_view,SudekiMpLanStoryReplicaExact exact,void *context) {
     Target targets[4]={{0}}; BOOL okay=FALSE,combat=TRUE;
@@ -482,6 +484,7 @@ BOOL SudekiMpLanStoryReplicaApply(const SudekiMpLanStoryNativeRoster *roster,
     applying=TRUE;
     for(unsigned c=0;c<4u;++c) if(frame->available_mask&(1u<<c)) {
         if(frame->actors[c].native_pose) continue; /* Complete WorldPrepare owns this pose. */
+        if(foreign_characters&(1u<<c)) continue; /* Different host area. */
         if(!target(roster->actors[c],c,&targets[c]) || !current_motion_known(&targets[c])) goto done;
         for(unsigned channel=0;channel<4u;++channel)
             if(!selector_loaded(&targets[c],SudekiMpLanPartyMotionSelector(types[c],
@@ -490,7 +493,7 @@ BOOL SudekiMpLanStoryReplicaApply(const SudekiMpLanStoryNativeRoster *roster,
     /* Nothing changes until every present actor has passed the bounded bank
      * preflight. Each later native setter rechecks the exact paused owner. */
     for(unsigned c=0;c<4u;++c) if(frame->available_mask&(1u<<c)) {
-        if(frame->actors[c].native_pose) continue;
+        if(frame->actors[c].native_pose || (foreign_characters&(1u<<c))) continue;
         Target *t=&targets[c]; const SudekiMpLanStoryActor *a=&frame->actors[c];
         const SudekiMpLanArenaLocomotion *m=&a->locomotion;
         float xyz[3]={a->x,a->y,a->z},direction[3]={a->facing_x,0,a->facing_z};

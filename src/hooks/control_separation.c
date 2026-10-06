@@ -8001,7 +8001,8 @@ static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
         story_native_control.thread==GetCurrentThreadId() &&
         story_control_boundary(w,roster) &&
         roster->world==story_native_control.world &&
-        roster->descriptor==story_native_control.descriptor &&
+        /* Same observer epoch = same exterior lifetime; a split-area TEMP may
+         * change the current descriptor without replacing the party. */
         roster->epoch==story_native_control.epoch;
 }
 static BOOL story_key_valid(const SudekiMpLanPartyLease *key) {
@@ -8098,13 +8099,28 @@ BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitnes
         story_native_control.actor[key->seat].phase==PARTY_NATIVE_HELD &&
         party_ai_owned(&story_native_control.actor[key->seat]);
 }
+static const char *story_owned_trace;
+static unsigned story_owned_traces;
 BOOL SudekiMpLanPartyControlStoryActorOwned(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,unsigned character) {
     if(!roster || character>=4u) return FALSE;
-    PartyNativeLease *owned=&story_native_control.actor[character];
-    return (roster->available_mask&(1u<<character)) && (owned->phase==PARTY_NATIVE_HELD ||
-        owned->phase==PARTY_NATIVE_DRAINING) &&
-        story_control_identity(w,roster,&owned->key,NULL) && party_ai_owned(owned);
+    PartyNativeLease *owned=&story_native_control.actor[character],fresh;
+    const char *why=!(roster->available_mask&(1u<<character))?"unavailable":
+        !(owned->phase==PARTY_NATIVE_HELD || owned->phase==PARTY_NATIVE_DRAINING)?"phase":
+        !story_key_valid(&owned->key)?"key":
+        !story_control_scope(w,roster)?(roster->epoch!=story_native_control.epoch?"scope_epoch":
+            roster->world!=story_native_control.world?"scope_world":"scope_boundary"):
+        !story_control_observe(w,roster,&owned->key,&fresh,NULL)?"observe":
+        owned->actor!=fresh.actor?"actor":owned->group!=fresh.group?"group":
+        owned->controller!=fresh.controller?"controller":owned->host!=fresh.host?"host":
+        owned->ai!=fresh.ai?"ai":owned->mode!=fresh.mode?"mode":
+        !party_ai_owned(owned)?"ai_not_owned":NULL;
+    if(why!=story_owned_trace && story_owned_traces<48u) {
+        ++story_owned_traces; story_owned_trace=why;
+        SudekiMpLogFormat("story_native_control event=actor_owned character=%u result=%s phase=%u\r\n",
+            character,why?why:"owned",(unsigned)owned->phase);
+    }
+    return why==NULL;
 }
 BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,

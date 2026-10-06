@@ -22,6 +22,9 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
  * it submits no input, native task, combat, inventory or resource operation.
  * The optional host view changes only the already-owned render camera state.
  * TRUE is native setter/readback proof, NOT visible paused bone-update proof. */
+/* Characters (bit=character) whose host area differs from the local player's.
+ * Their poses are not applied; they keep their last same-area presentation. */
+void SudekiMpLanStoryReplicaSetForeignCharacters(uint8_t mask);
 BOOL SudekiMpLanStoryReplicaApply(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryFrame *frame, BOOL apply_host_view,SudekiMpLanStoryReplicaExact exact,
     void *context);

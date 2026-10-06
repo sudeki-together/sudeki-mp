@@ -39,6 +39,9 @@ BOOL SudekiMpLobbyGameplayCancel(void);
  * read-only outcome for this prepared session; it does not initiate cleanup. */
 unsigned SudekiMpLobbyGameplayStoryExit(void);
 unsigned SudekiMpLobbyGameplayStoryExitStatus(void);
+/* Positive exit return plus completion of the existing runtime teardown. This
+ * read-only witness does not initiate exit or prove frontend readiness. */
+BOOL SudekiMpLobbyGameplayStoryExitDrained(void);
 BOOL SudekiMpLobbyGameplayRunning(void); /* plain atomic worker gate */
 void SudekiMpLobbyGameplayLoaded(void); /* positively observed native roster */
 /* Runtime invokes only after native load tasks and local host/replica

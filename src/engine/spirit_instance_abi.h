@@ -6,6 +6,8 @@
 /* First retained invariant failure in this exact build, or zero. Observation
  * only; never clears the fault or releases a native owner. */
 unsigned int SudekiMpSpiritInstanceFaultSite(void);
+unsigned SudekiMpSpiritInstanceEnterFailure(void);
+unsigned SudekiMpSpiritInstanceNamedFail(void);
 
 /* Native objects, NOT a copy of the active singleton and never wire data.
  * Construction/destruction is allowed only at the caller's verified idle
@@ -95,6 +97,7 @@ BOOL SudekiMpEnableSpiritInstanceSkillTargeting(void);
  * Lets another adapter invoke the installed native entry without mistaking
  * this module's validated detour for a foreign patch. No filter is changed. */
 BOOL SudekiMpSpiritInstanceFilterAllEntryExact(HMODULE image);
+unsigned SudekiMpSpiritInstanceFilterEntryDiag(HMODULE image,unsigned which);
 BOOL SudekiMpSpiritInstanceFilterNoneEntryExact(HMODULE image);
 /* Ordinary-skill countdown routing. All calls are on the retained game thread.
  * Host timers advance once per controller update; replicas only consume the

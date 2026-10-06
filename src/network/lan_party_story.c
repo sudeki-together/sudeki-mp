@@ -16,9 +16,11 @@ int SudekiMpLanStorySceneValid(const SudekiMpLanStoryScene *s) {
     if(!s || !s->epoch || !s->revision || s->phase>SUDEKIMP_LAN_STORY_READY ||
         (s->available_mask&~15u) || s->leader_seat>SUDEKIMP_LAN_STORY_NO_SEAT ||
         !name_valid(s->world,s->phase==SUDEKIMP_LAN_STORY_READY) ||
-        !name_valid(s->temporary,0) || (s->temporary[0] && !s->world[0])) return 0;
+        !name_valid(s->temporary,0) || (s->temporary[0] && !s->world[0]) ||
+        (s->inside_mask&~15u)) return 0;
     if(s->phase!=SUDEKIMP_LAN_STORY_READY)
-        return !s->available_mask && s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT;
+        return !s->available_mask && !s->inside_mask && s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT;
+    if((s->inside_mask&~s->available_mask) || (!s->temporary[0])!=(!s->inside_mask)) return 0;
     return s->leader_seat<4u && (s->available_mask&(1u<<s->leader_seat))!=0;
 }
 int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
@@ -26,7 +28,11 @@ int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
     return a && b && a->epoch==b->epoch && a->phase==b->phase &&
         a->available_mask==b->available_mask && a->leader_seat==b->leader_seat &&
         !memcmp(a->world,b->world,sizeof(a->world)) &&
-        !memcmp(a->temporary,b->temporary,sizeof(a->temporary));
+        !memcmp(a->temporary,b->temporary,sizeof(a->temporary)) &&
+        a->inside_mask==b->inside_mask;
+}
+static int exterior_occupied(const SudekiMpLanStoryScene *s) {
+    return s->phase==SUDEKIMP_LAN_STORY_READY && (s->available_mask&~s->inside_mask)!=0;
 }
 int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
     const SudekiMpLanStoryScene *n) {
@@ -41,8 +47,12 @@ int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
         return SudekiMpLanStorySceneSame(p,n) &&
             (int32_t)(n->observed_tick-p->observed_tick)>0;
     if(SudekiMpLanStorySceneSame(p,n)) return 0;
-    if(n->epoch==p->epoch && (memcmp(p->world,n->world,sizeof(p->world)) ||
-        memcmp(p->temporary,n->temporary,sizeof(p->temporary)))) return 0;
+    if(n->epoch==p->epoch) {
+        if(memcmp(p->world,n->world,sizeof(p->world))) return 0;
+        /* Split occupancy: the exterior stays live, so its epoch continues. */
+        if(memcmp(p->temporary,n->temporary,sizeof(p->temporary)) &&
+            (!exterior_occupied(p) || !exterior_occupied(n))) return 0;
+    }
     return 1;
 }
 static void put32(uint8_t *p,uint32_t v) {
@@ -57,6 +67,7 @@ int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *s,uint8_t *p,size_t
     p[12]=s->phase; p[13]=s->available_mask; p[14]=s->leader_seat;
     memcpy(p+15,s->world,sizeof(s->world));
     memcpy(p+79,s->temporary,sizeof(s->temporary));
+    p[143]=s->inside_mask;
     return 1;
 }
 int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene *s) {
@@ -66,8 +77,29 @@ int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene 
     v.phase=p[12]; v.available_mask=p[13]; v.leader_seat=p[14];
     memcpy(v.world,p+15,sizeof(v.world));
     memcpy(v.temporary,p+79,sizeof(v.temporary));
+    v.inside_mask=p[143];
     if(!SudekiMpLanStorySceneValid(&v)) return 0;
     *s=v; return 1;
+}
+int SudekiMpLanStorySceneCharacterArea(const SudekiMpLanStoryScene *s,unsigned int c,
+    char world[SUDEKIMP_LAN_STORY_NAME_SIZE],char temporary[SUDEKIMP_LAN_STORY_NAME_SIZE]) {
+    if(c>=4u || !world || !temporary || !SudekiMpLanStorySceneValid(s) ||
+        s->phase!=SUDEKIMP_LAN_STORY_READY || !(s->available_mask&(1u<<c))) return 0;
+    memcpy(world,s->world,SUDEKIMP_LAN_STORY_NAME_SIZE);
+    if(s->inside_mask&(1u<<c)) memcpy(temporary,s->temporary,SUDEKIMP_LAN_STORY_NAME_SIZE);
+    else memset(temporary,0,SUDEKIMP_LAN_STORY_NAME_SIZE);
+    return 1;
+}
+int SudekiMpLanStorySceneCharacterAreaMatches(const SudekiMpLanStoryScene *s,unsigned int c,
+    const char *world,const char *temporary) {
+    char w[SUDEKIMP_LAN_STORY_NAME_SIZE],t[SUDEKIMP_LAN_STORY_NAME_SIZE];
+    return world && temporary && SudekiMpLanStorySceneCharacterArea(s,c,w,t) &&
+        !strcmp(w,world) && !strcmp(t,temporary);
+}
+int SudekiMpLanStorySceneSameArea(const SudekiMpLanStoryScene *s,unsigned int a,unsigned int b) {
+    char wa[SUDEKIMP_LAN_STORY_NAME_SIZE],ta[SUDEKIMP_LAN_STORY_NAME_SIZE];
+    return SudekiMpLanStorySceneCharacterArea(s,a,wa,ta) &&
+        SudekiMpLanStorySceneCharacterAreaMatches(s,b,wa,ta);
 }
 unsigned int SudekiMpLanStoryViewSeat(const SudekiMpLanStoryScene *s,
     unsigned int player,unsigned int preferred) {

@@ -13,6 +13,62 @@ BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver
     SudekiMpLanCastStepAdapter step);
 BOOL SudekiMpLanStoryTaskHostDetach(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step);
 
+/* Optional area-coordinator admission, NOT registered by runtime yet. This
+ * shares the same pre-fetch step owner alongside cast routing. WAIT returns
+ * native yield=2 before opcode fetch/argument consumption; it neither skips a
+ * binding nor rewinds an instruction. RUN still passes through cast routing.
+ * No world/area lifetime lease is supplied here. Explicit read-only instruction
+ * inspection is available below; admission alone does not classify bindings. */
+typedef enum SudekiMpStoryTaskAdmissionDecision {
+    SUDEKIMP_STORY_TASK_UNKNOWN=0, SUDEKIMP_STORY_TASK_RUN=1,
+    SUDEKIMP_STORY_TASK_WAIT=2
+} SudekiMpStoryTaskAdmissionDecision;
+typedef struct SudekiMpStoryTaskAdmissionView {
+    uint32_t load_generation,task_id,function_hash,parent_id;
+    void *thread; /* Borrowed only during decide; NULL for retirement notice. */
+    BOOL tracked,waiting;
+} SudekiMpStoryTaskAdmissionView;
+/* Callbacks must only inspect/copy state and make an admission decision; they
+ * must not enter native code, change the VM, attach/detach, or retain thread.
+ * An untracked task is explicitly unknown provenance. RUN for such a task
+ * needs independent consumer proof; WAIT/UNKNOWN cannot manufacture an id and
+ * therefore quarantine the registration. Unknown also yields without fetch.
+ * Native retirement of a waiting task delivers its copied identity AFTER the
+ * original retirement returns; ack must discard that pending intent, not replay
+ * it. FALSE retains a quarantined record and all callback dependencies. */
+typedef SudekiMpStoryTaskAdmissionDecision (*SudekiMpStoryTaskDecide)(
+    const void *consumer,const SudekiMpStoryTaskAdmissionView *view);
+typedef BOOL (*SudekiMpStoryTaskRetired)(const void *consumer,
+    const SudekiMpStoryTaskAdmissionView *view);
+BOOL SudekiMpLanStoryTaskAdmissionAttach(HMODULE,const void *consumer,
+    SudekiMpStoryTaskDecide,SudekiMpStoryTaskRetired);
+/* Native thread outside callbacks, exact shared hooks, and no pending wait or
+ * unknown state. A later RUN clears a wait only after step returns 0/1; a cast
+ * router's yield=2 keeps it pending. No timeout/disconnect force-release. */
+BOOL SudekiMpLanStoryTaskAdmissionDetach(HMODULE,const void *consumer,
+    SudekiMpStoryTaskDecide,SudekiMpStoryTaskRetired);
+
+enum { SUDEKIMP_STORY_INSTRUCTION_OTHER=1,SUDEKIMP_STORY_INSTRUCTION_COMPILED,
+    SUDEKIMP_STORY_INSTRUCTION_NATIVE,SUDEKIMP_STORY_INSTRUCTION_METHOD,
+    SUDEKIMP_STORY_INSTRUCTION_CHILD };
+typedef struct SudekiMpStoryTaskInstruction {
+    uint32_t offset,opcode,kind,call_hash;
+    uint32_t script_offset,native_rva,argument_count;
+} SudekiMpStoryTaskInstruction;
+/* Optional read-only pre-fetch lookup, ONLY inside this consumer's decide
+ * callback using the exact borrowed view. No new patch or native invocation.
+ * Checks the current manager/program bounds and bounded native lookup tables;
+ * compiled functions take precedence over global native bindings. OTHER copies
+ * the opcode only, METHOD/CHILD copy their operand but do NOT resolve effects.
+ * NATIVE identifies the current direct target, not its transitive consequences
+ * or permission to run. No stack argument is consumed/copied, no area/file/VM
+ * lifetime lease is acquired. The coordinator must retain those separately and
+ * repeat lookup on resume; never replay a saved native_rva. Failed/unsupported
+ * lookup leaves output untouched and must not be treated as harmless work.
+ * This API does not suspend the native C caller of an immediate script. */
+BOOL SudekiMpLanStoryTaskInspectInstruction(HMODULE,const void *consumer,
+    const SudekiMpStoryTaskAdmissionView *,SudekiMpStoryTaskInstruction *);
+
 typedef struct SudekiMpLanStoryTaskTraceStatus {
     uint32_t load_generation;
     uint32_t start_task, on_load_task;
@@ -58,9 +114,12 @@ typedef struct SudekiMpLanStorySpawnObservation {
     BOOL job_destructor_returned,job_storage_released;
 } SudekiMpLanStorySpawnObservation;
 
-/* Private saved-load observation and saved-story profiles only. These passive GEL call observers
- * are mutually exclusive with lan_arena_cast_context/Talos task hooks. Every
- * native call still runs once with its original arguments and return value.
+/* Private saved-load observation and saved-story profiles only. These GEL call
+ * observers own the seams otherwise used by standalone cast/Talos task hooks.
+ * Cast routing shares this owner through TaskHostAttach instead of repatching.
+ * Without optional routing/admission consumers, every native call still runs
+ * once with its original arguments and return value. Admission can yield ONLY
+ * at the verified pre-fetch step boundary described above.
  * Recruitment diagnostics report raw copied VM arguments and the next VM PC;
  * neither grants replay/control authority or proves argument object identity.
  * The authored SpawnPC journal copies bounded resource identities and observes

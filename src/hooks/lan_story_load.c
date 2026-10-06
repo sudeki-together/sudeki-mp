@@ -1,4 +1,5 @@
 #include "hooks/lan_story_load.h"
+#include "hooks/lobby_gameplay.h"
 #include "hooks/call_hook.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
@@ -49,6 +50,20 @@ static unsigned manual_observations;
 static uint32_t load_attempt;
 static SudekiMpStoryLoadRoute accepted_route;
 static BOOL native_called;
+static struct {
+    const void *consumer;
+    SudekiMpSaveLease *files;
+    uint64_t ticket;
+    uint32_t source_attempt;
+    BOOL source_retired;
+    unsigned slot;
+    SudekiMpSaveFingerprint fingerprint;
+    uint8_t record[RECORD_BYTES];
+} reload;
+static uint64_t reload_serial;
+static BOOL promoted_reload;
+static BOOL reload_context(void);
+static BOOL reload_source(uint32_t attempt);
 
 static void release_files(void) {
     EnterCriticalSection(&lease_lock);
@@ -93,10 +108,10 @@ static void failed(DWORD code,const char *reason) {
 
 /* Read the canonical native StringTable with its proven inline/external string
  * representation. No native methods or native globals are changed here. */
-static BOOL root_matches(void) {
+static BOOL root_matches_lease(const SudekiMpSaveLease *lease) {
     uint8_t *manager=*(uint8_t **)(base+ROOT_MANAGER);
     uint8_t *table=*(uint8_t **)(base+STRING_TABLE);
-    if(!file_lease || !readable(manager,0x1c) || !readable(table,0x14) ||
+    if(!lease || !readable(manager,0x1c) || !readable(table,0x14) ||
         *(void **)table!=base+STRING_VT || *(void **)(table+4)!=base+STRING_ARRAY_VT)
         return FALSE;
     int index=*(int *)(manager+0x18);
@@ -113,17 +128,18 @@ static BOOL root_matches(void) {
         text[length] || memchr(text,0,length) || (text[length-1]!='\\' && text[length-1]!='/')) return FALSE;
     wchar_t path[MAX_PATH];
     if(!MultiByteToWideChar(CP_ACP,MB_ERR_INVALID_CHARS,text,-1,path,MAX_PATH)) return FALSE;
-    return SudekiMpSaveLeaseMatchesRoot(file_lease,path);
+    return SudekiMpSaveLeaseMatchesRoot(lease,path);
 }
 
-static BOOL catalog_match(int *index,uint8_t **record) {
-    if(!root_matches() || *(unsigned *)(base+CATALOG_STATE)!=5 ||
+static BOOL catalog_match_lease(const SudekiMpSaveLease *lease,const uint8_t reviewed[RECORD_BYTES],
+    unsigned slot,int *index,uint8_t **record) {
+    if(!root_matches_lease(lease) || *(unsigned *)(base+CATALOG_STATE)!=5 ||
         (*(uint8_t *)(base+CATALOG_REQUEST)&3u)) return FALSE;
     unsigned count=*(uint16_t *)(base+CATALOG_COUNT);
     uint8_t *records=*(uint8_t **)(base+CATALOG_RECORDS);
     if(!count || count>MAX_NATIVE_RECORDS || !readable(records,(size_t)count*RECORD_BYTES)) return FALSE;
     char folder[32];
-    int n=snprintf(folder,sizeof(folder),"SAVESLOT%04u\\",reviewed_slot);
+    int n=snprintf(folder,sizeof(folder),"SAVESLOT%04u\\",slot);
     if(n<=0 || (size_t)n>=sizeof(folder)) return FALSE;
     int found=-1;
     for(unsigned i=0;i<count;++i) {
@@ -134,10 +150,13 @@ static BOOL catalog_match(int *index,uint8_t **record) {
          * catalog records resolving to the reviewed pair are ambiguous. */
         if(found>=0) return FALSE;
         found=(int)i;
-        if(r[0x2c4] || memcmp(r+0x20,reviewed_record+0x20,0x29c)) return FALSE;
+        if(r[0x2c4] || memcmp(r+0x20,reviewed+0x20,0x29c)) return FALSE;
     }
     if(found<0) return FALSE;
     *index=found; *record=records+(unsigned)found*RECORD_BYTES; return TRUE;
+}
+static BOOL catalog_match(int *index,uint8_t **record) {
+    return catalog_match_lease(file_lease,reviewed_record,reviewed_slot,index,record);
 }
 
 static BOOL selected_row(uint8_t *page,int catalog_index,uint8_t **list_out,int *row_out) {
@@ -181,6 +200,7 @@ static HANDLE __cdecl reader_open(LPCSTR name,DWORD access,DWORD share,
         if(length && terminated &&
             MultiByteToWideChar(CP_ACP,MB_ERR_INVALID_CHARS,local,-1,wide,MAX_PATH)) {
             handled=SudekiMpSaveLeaseOpenNativeRead(file_lease,wide,&opened);
+            if(!handled) handled=SudekiMpSaveLeaseOpenNativeRead(reload.files,wide,&opened);
             error=GetLastError();
         }
     }
@@ -344,7 +364,8 @@ rollback: {
 
 BOOL SudekiMpUninstallLanStoryLoad(void) {
     if(!base) return TRUE;
-    if(state()!=SUDEKIMP_STORY_LOAD_IDLE || file_lease || InterlockedCompareExchange(&callbacks,0,0)) {
+    if(state()!=SUDEKIMP_STORY_LOAD_IDLE || file_lease || reload.files || reload.ticket ||
+        InterlockedCompareExchange(&callbacks,0,0)) {
         SetLastError(ERROR_BUSY); return FALSE;
     }
     BOOL okay=SudekiMpRestoreRelativeCallHook(&page_load_hook);
@@ -364,8 +385,25 @@ BOOL SudekiMpUninstallLanStoryLoad(void) {
 
 BOOL SudekiMpLanStoryLoadPrepare(SudekiMpSaveCatalog *catalog,unsigned index,
     const SudekiMpSaveFingerprint *fingerprint) {
+    /* A coordinator-promoted reservation survives old lobby cancellation.
+     * The new ordinary lobby preparation may adopt it only for this exact
+     * locally reviewed pair. Do not reopen its lease or create another attempt. */
+    if(promoted_reload) {
+        if(!catalog || !fingerprint || !reload_context() ||
+            state()!=SUDEKIMP_STORY_LOAD_PREPARED || !file_lease || reload.ticket) {
+            SetLastError(ERROR_BUSY);return FALSE;
+        }
+        SudekiMpSaveFingerprint candidate=*fingerprint;
+        if(memcmp(&candidate,&reviewed_fingerprint,sizeof(candidate))) {
+            SetLastError(ERROR_FILE_INVALID);return FALSE;
+        }
+        if(!SudekiMpSaveCatalogVerify(catalog,index,&candidate)) return FALSE;
+        promoted_reload=FALSE;return TRUE;
+    }
     if(!InterlockedCompareExchange(&installed,0,0) || !thread_exact() || state()!=SUDEKIMP_STORY_LOAD_IDLE ||
-        file_lease || InterlockedCompareExchange(&callbacks,0,0)) { SetLastError(ERROR_BUSY); return FALSE; }
+        file_lease || reload.files || reload.ticket || InterlockedCompareExchange(&callbacks,0,0)) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
     if(load_attempt==UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return FALSE; }
     if(!fingerprint) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     /* Retain the exact candidate passed to Acquire, not the caller's mutable
@@ -484,6 +522,17 @@ BOOL SudekiMpLanStoryLoadGetFingerprint(uint32_t attempt,SudekiMpSaveFingerprint
 }
 BOOL SudekiMpLanStoryLoadCancel(void) {
     unsigned current=state();
+    if(reload.files || reload.ticket) {
+        /* Called by the existing lobby cancellation AFTER positive runtime
+         * drain. Retire only the old load proof, never the reserved next pair. */
+        if(!reload_context() || !reload.files || !reload.ticket ||
+            reload.source_attempt!=load_attempt || !SudekiMpLobbyGameplayStoryExitDrained() ||
+            ((!reload_source(reload.source_attempt)) &&
+             !(current==SUDEKIMP_STORY_LOAD_IDLE && reload.source_retired))) {
+            SetLastError(ERROR_BUSY);return FALSE;
+        }
+        reload.source_retired=TRUE;
+    }
     if(current==SUDEKIMP_STORY_LOAD_IDLE) return TRUE;
     if(!thread_exact() || InterlockedCompareExchange(&callbacks,0,0) || current==SUDEKIMP_STORY_LOAD_LOADING ||
         current==SUDEKIMP_STORY_LOAD_FADING) { SetLastError(ERROR_BUSY); return FALSE; }
@@ -495,8 +544,80 @@ BOOL SudekiMpLanStoryLoadCancel(void) {
             page_owner[0x29] || page_owner[0x4a]) { SetLastError(ERROR_BUSY); return FALSE; }
     }
     release_files();
+    promoted_reload=FALSE;
     memset(&reviewed_fingerprint,0,sizeof(reviewed_fingerprint));
     title_owner=page_owner=selected_record=NULL; selected_index=-1;
     confirmation=final_seen=native_called=FALSE; accepted_route=SUDEKIMP_STORY_LOAD_ROUTE_NONE;
     InterlockedExchange(&phase,SUDEKIMP_STORY_LOAD_IDLE); return TRUE;
+}
+
+static BOOL reload_context(void) {
+    return InterlockedCompareExchange(&installed,0,0) && lease_lock_ready && thread_exact() &&
+        !InterlockedCompareExchange(&callbacks,0,0);
+}
+static BOOL reload_source(uint32_t attempt) {
+    return attempt && load_attempt==attempt && state()==SUDEKIMP_STORY_LOAD_RETURNED &&
+        native_called && final_seen && !file_lease && !result_code &&
+        (accepted_route==SUDEKIMP_STORY_LOAD_ROUTE_TITLE_INDEX ||
+         accepted_route==SUDEKIMP_STORY_LOAD_ROUTE_PAGE_RECORD);
+}
+BOOL SudekiMpLanStoryLoadReserveReload(const void *consumer,uint32_t active_attempt,
+    SudekiMpSaveCatalog *catalog,unsigned index,const SudekiMpSaveFingerprint *fingerprint,uint64_t *ticket) {
+    if(!consumer || !catalog || !fingerprint || !ticket || !base || !reload_context() ||
+        !reload_source(active_attempt) || reload.ticket || reload.files ||
+        SudekiMpLobbyGameplayStoryExitStatus()!=0u) {
+        SetLastError(ERROR_INVALID_STATE);return FALSE;
+    }
+    if(reload_serial==UINT64_MAX || load_attempt==UINT32_MAX) {
+        SetLastError(ERROR_ARITHMETIC_OVERFLOW);return FALSE;
+    }
+    SudekiMpSaveFingerprint candidate=*fingerprint;
+    SudekiMpSaveLease *acquired=NULL;unsigned slot=0;
+    uint8_t record[RECORD_BYTES];int native_index=-1;uint8_t *native_record=NULL;
+    EnterCriticalSection(&lease_lock);
+    BOOL ok=SudekiMpSaveCatalogAcquire(catalog,index,&candidate,&acquired);
+    DWORD error=GetLastError();
+    if(ok) {
+        ok=SudekiMpSaveLeaseRecord(acquired,record,&slot) && slot==candidate.folder_slot &&
+            catalog_match_lease(acquired,record,slot,&native_index,&native_record) &&
+            *(int *)(base+CATALOG_SELECTED)==native_index;
+        if(!ok) error=ERROR_FILE_INVALID;
+    }
+    if(ok) {
+        reload.consumer=consumer;reload.files=acquired;reload.source_attempt=active_attempt;
+        reload.fingerprint=candidate;reload.slot=slot;memcpy(reload.record,record,sizeof(record));
+        reload.ticket=++reload_serial;*ticket=reload.ticket;
+    } else SudekiMpSaveLeaseRelease(&acquired);
+    LeaveCriticalSection(&lease_lock);
+    SetLastError(ok?ERROR_SUCCESS:error);return ok;
+}
+static BOOL reload_owned(const void *consumer,uint64_t ticket) {
+    return reload_context() && consumer && consumer==reload.consumer &&
+        ticket && ticket==reload.ticket && reload.files;
+}
+BOOL SudekiMpLanStoryLoadCancelReload(const void *consumer,uint64_t ticket) {
+    if(!reload_owned(consumer,ticket)) { SetLastError(ERROR_BUSY);return FALSE; }
+    EnterCriticalSection(&lease_lock);
+    SudekiMpSaveLeaseRelease(&reload.files);memset(&reload,0,sizeof(reload));
+    LeaveCriticalSection(&lease_lock);SetLastError(ERROR_SUCCESS);return TRUE;
+}
+BOOL SudekiMpLanStoryLoadPromoteReload(const void *consumer,uint64_t ticket,uint32_t *attempt) {
+    if(!attempt || !reload_owned(consumer,ticket) || !reload.source_retired ||
+        state()!=SUDEKIMP_STORY_LOAD_IDLE || file_lease || load_attempt!=reload.source_attempt ||
+        load_attempt==UINT32_MAX || !SudekiMpLobbyGameplayStoryExitDrained() ||
+        SudekiMpLobbyGameplayActive()) {
+        SetLastError(ERROR_BUSY);return FALSE;
+    }
+    /* No native owner is read here: the old world/catalog may be gone. Transfer
+     * the exact file handles; do not release/reopen or hash a newer file pair. */
+    EnterCriticalSection(&lease_lock);
+    file_lease=reload.files;reviewed_slot=reload.slot;reviewed_fingerprint=reload.fingerprint;
+    memcpy(reviewed_record,reload.record,sizeof(reviewed_record));
+    memset(&reload,0,sizeof(reload));
+    title_owner=page_owner=selected_record=NULL;selected_index=-1;
+    confirmation=final_seen=native_called=FALSE;accepted_route=SUDEKIMP_STORY_LOAD_ROUTE_NONE;
+    promoted_reload=TRUE;
+    ++load_attempt;InterlockedExchange(&result_code,0);
+    InterlockedExchange(&phase,SUDEKIMP_STORY_LOAD_PREPARED);*attempt=load_attempt;
+    LeaveCriticalSection(&lease_lock);SetLastError(ERROR_SUCCESS);return TRUE;
 }

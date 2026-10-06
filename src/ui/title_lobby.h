@@ -24,5 +24,20 @@ void SudekiMpLobbyUiEndEdit(void);
 unsigned SudekiMpLobbyUiPageRevision(void);
 /* TRUE returns to the native root; selection receives a valid new-page row. */
 BOOL SudekiMpLobbyUiCommit(unsigned *selection);
+/* Optional ini-driven automation of the same lobby actions a player would
+ * take (create/join, character, saved game, ready, start). Copy-only config;
+ * the driver runs on the title thread from Poll and never bypasses the
+ * session, save verification or start admission paths. */
+typedef struct SudekiMpLobbyAuto {
+    BOOL host,join,ready,start;
+    char room[32],address[32];
+    uint16_t port;
+    unsigned save_slot;    /* host: SAVESLOTdddd suffix, ~0u = none */
+    unsigned character;    /* 0 Buki,1 Elco,2 Tal,3 Ailish, 4 = keep */
+    unsigned min_players;  /* host auto start waits for this many members */
+} SudekiMpLobbyAuto;
+void SudekiMpLobbyUiConfigureAuto(const SudekiMpLobbyAuto *config);
+/* TRUE until the automated page has been opened once. */
+BOOL SudekiMpLobbyUiAutoWantsOpen(void);
 BOOL SudekiMpLobbyUiBack(unsigned *selection);
 #endif

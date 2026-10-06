@@ -653,6 +653,19 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
         SudekiMpLogFormat("lan_story_load probe=refused prepared=%u error=%lu\r\n",
             prepared,(unsigned long)error);
     }
+    /* Ini-driven lobby automation: take the Multiplayer row once, exactly as
+     * a confirmed selection would, when the root page is idle. */
+    if (SudekiMpLobbyUiAutoWantsOpen() && !multiplayer_page && !page_confirm && !native_transition &&
+        root_owned && displayed && !fade_in_active && current_exact(owner) && modal_clear() &&
+        (DWORD)(last_update-focus_started)>=1000u) {
+        for (unsigned row=0;row<current.count;++row)
+            if (current.label_ids[row]==SUDEKIMP_TITLE_MULTIPLAYER && (enabled_rows()&(1u<<row))) {
+                select_row(row);
+                page_confirm=TRUE; page_started=last_update; page_confirm_generation=generation;
+                SudekiMpLogWrite("title_multiplayer event=auto_open row=multiplayer\r\n");
+                break;
+            }
+    }
     if (page_confirm && page_confirm_generation == generation && current_exact(owner)) {
         if (!modal_clear()) { page_confirm = panel_leaving = FALSE; goto done; }
         DWORD delay=panel_leaving?300u:multiplayer_page?80u:720u;

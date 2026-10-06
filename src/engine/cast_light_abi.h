@@ -19,5 +19,10 @@ BOOL SudekiMpReadCastLight(uint32_t key,float current[3],float baseline[3]);
  * Commit cannot fail and is called immediately after all preflights. Key 0
  * means world lighting. Disabled adapter is a no-op, not partial admission. */
 BOOL SudekiMpCastLightTransitionReady(uint32_t key);
+unsigned SudekiMpCastLightWorldAdoptions(void);
+unsigned SudekiMpCastLightForeignSkips(void);
+unsigned SudekiMpCastLightReadyFailure(void);
+unsigned SudekiMpCastLightFaultSite(void);
+unsigned SudekiMpCastLightFaultLine(void);
 void SudekiMpCastLightTransitionCommit(uint32_t key);
 #endif

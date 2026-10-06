@@ -291,6 +291,10 @@ BOOL SudekiMpLobbyGameplayArmTitle(void *owner) {
 unsigned SudekiMpLobbyGameplayStoryExitStatus(void) {
     return thread_exact()?story_exit_status:0u;
 }
+BOOL SudekiMpLobbyGameplayStoryExitDrained(void) {
+    return thread_exact() && story_exit_status==1u && !runtime_attempted &&
+        (!active || (saved_game && dispatched));
+}
 unsigned SudekiMpLobbyGameplayStoryExit(void) {
     uint8_t *scene,*resident,*world;
     if(!thread_exact()) { SetLastError(ERROR_INVALID_THREAD_ID); return 0; }

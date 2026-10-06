@@ -1,4 +1,5 @@
 #include "hooks/lan_story_world.h"
+#include "hooks/lan_story_anim_trace.h"
 #include "hooks/lan_story_curve.h"
 #include "hooks/lan_story_material.h"
 #include "hooks/lan_story_residency.h"
@@ -46,6 +47,7 @@ typedef struct Bound {
 typedef struct Prepared {
     BOOL valid;
     BOOL independent_view;
+    uint8_t skip[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     Registry registry;
     Target targets[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     unsigned count,selectors[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS][5];
@@ -58,13 +60,16 @@ typedef struct Prepared {
 } Prepared;
 static uint8_t *base;
 static DWORD native_thread;
-static BOOL active,host_seen,client_seen,resource_fault;
+static BOOL host_seen,client_seen,resource_fault;
 static uint32_t next_generation,host_epoch,host_sequence,client_epoch;
 static unsigned host_count,client_count;
 static Bound host_bound[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
 static Bound client_bound[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
 static struct { BOOL retained; void *world,*descriptor,*removed_npc; uint32_t before_epoch; } recruitment;
 static Prepared prepared;
+static BOOL empty_clip_hit;
+static unsigned empty_channels;
+static unsigned empty_clip_skips;
 static PositionSet set_position;
 static PositionMatrix position_matrix;
 static SelectorSet set_selector;
@@ -89,15 +94,45 @@ static void observe_stage(const char *value,uint32_t identifier,uint32_t detail)
     stage=value; stage_identifier=identifier; stage_detail=detail;
 }
 
+/* Region answers are reused only inside one begin()/finish() traversal on
+ * the verified native thread: the native setters admitted in a traversal are
+ * closed memory operations that never release or reprotect these regions.
+ * Every range is still checked against a committed, accessible region; the
+ * cache only removes repeated VirtualQuery calls into the same region. */
+enum { REGION_CACHE=48 };
+typedef struct Region { uintptr_t lower,upper; DWORD access; } Region;
+static Region regions[REGION_CACHE]; static unsigned region_count,region_next;
+static uint32_t region_queries,region_hits; static DWORD region_logged;
+/* Bounded research profile of the client prepare/apply phases. */
+static LARGE_INTEGER profile_frequency; static uint64_t profile_us[8]; static uint32_t profile_frames;
+static LARGE_INTEGER profile_now(void) { LARGE_INTEGER t={0}; if(!profile_frequency.QuadPart) QueryPerformanceFrequency(&profile_frequency); QueryPerformanceCounter(&t); return t; }
+static void profile_add(unsigned slot,LARGE_INTEGER start) {
+    LARGE_INTEGER end=profile_now();
+    if(profile_frequency.QuadPart>0 && end.QuadPart>=start.QuadPart && slot<8u)
+        profile_us[slot]+=(uint64_t)(end.QuadPart-start.QuadPart)*UINT64_C(1000000)/(uint64_t)profile_frequency.QuadPart;
+}
+static BOOL active;
 static BOOL memory(const void *p,size_t n,BOOL write) {
-    MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
-    if(!p || !n || a+n<a || VirtualQuery(p,&m,sizeof(m))!=sizeof(m) ||
-        m.State!=MEM_COMMIT || (m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
-        a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
-    DWORD access=m.Protect&0xffu;
-    if(access!=PAGE_READONLY && access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
-        access!=PAGE_EXECUTE_READ && access!=PAGE_EXECUTE_READWRITE &&
-        access!=PAGE_EXECUTE_WRITECOPY) return FALSE;
+    uintptr_t a=(uintptr_t)p; DWORD access=0; BOOL known=FALSE;
+    if(!p || !n || a+n<a) return FALSE;
+    if(active) for(unsigned i=0;i<region_count;++i)
+        if(a>=regions[i].lower && a+n<=regions[i].upper) { access=regions[i].access; known=TRUE; ++region_hits; break; }
+    if(!known) {
+        MEMORY_BASIC_INFORMATION m; ++region_queries;
+        if(VirtualQuery(p,&m,sizeof(m))!=sizeof(m) ||
+            m.State!=MEM_COMMIT || (m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
+            a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+        access=m.Protect&0xffu;
+        if(access!=PAGE_READONLY && access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
+            access!=PAGE_EXECUTE_READ && access!=PAGE_EXECUTE_READWRITE &&
+            access!=PAGE_EXECUTE_WRITECOPY) return FALSE;
+        if(active) {
+            unsigned slot=region_count<REGION_CACHE?region_count++:region_next;
+            region_next=(region_next+1u)%REGION_CACHE;
+            regions[slot].lower=(uintptr_t)m.BaseAddress; regions[slot].upper=(uintptr_t)m.BaseAddress+m.RegionSize;
+            regions[slot].access=access;
+        }
+    }
     return !write || access==PAGE_READWRITE || access==PAGE_WRITECOPY ||
         access==PAGE_EXECUTE_READWRITE || access==PAGE_EXECUTE_WRITECOPY;
 }
@@ -107,7 +142,20 @@ static BOOL begin(void) {
     if(!base || active || (native_thread && native_thread!=GetCurrentThreadId())) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
-    native_thread=GetCurrentThreadId(); active=TRUE; curve_proof_count=0; return TRUE;
+    native_thread=GetCurrentThreadId(); active=TRUE; curve_proof_count=0;
+    region_count=0; region_next=0;
+    DWORD now=GetTickCount();
+    if(now-region_logged>=2000u && (region_queries||region_hits)) {
+        region_logged=now;
+        SudekiMpLogFormat("lan_story_world event=region_cache queries=%lu hits=%lu frames=%lu prep_catalog_us=%lu prep_pose_us=%lu prep_read_us=%lu apply_still_us=%lu apply_set_us=%lu apply_readback_us=%lu pose_material_us=%lu pose_selector_us=%lu\r\n",
+            (unsigned long)region_queries,(unsigned long)region_hits,(unsigned long)profile_frames,
+            (unsigned long)(profile_frames?profile_us[0]/profile_frames:0),(unsigned long)(profile_frames?profile_us[1]/profile_frames:0),
+            (unsigned long)(profile_frames?profile_us[2]/profile_frames:0),(unsigned long)(profile_frames?profile_us[3]/profile_frames:0),
+            (unsigned long)(profile_frames?profile_us[4]/profile_frames:0),(unsigned long)(profile_frames?profile_us[5]/profile_frames:0),
+            (unsigned long)(profile_frames?profile_us[6]/profile_frames:0),(unsigned long)(profile_frames?profile_us[7]/profile_frames:0));
+        region_queries=region_hits=0; memset(profile_us,0,sizeof(profile_us)); profile_frames=0;
+    }
+    return TRUE;
 }
 static BOOL finish(BOOL result,DWORD error) {
     if(!result && diagnostic_count<64u &&
@@ -369,6 +417,51 @@ static int target_order(const void *left,const void *right) {
     if(a->kind!=b->kind) return a->kind<b->kind?-1:1;
     return a->identifier<b->identifier?-1:a->identifier>b->identifier;
 }
+static const void *excluded_zone;
+static const uint8_t *excluded[512];
+static unsigned excluded_count;
+void SudekiMpLanStoryWorldSetExcludedZone(const void *zone_data) {excluded_zone=zone_data;}
+static uint8_t foreign_characters;
+static BOOL allow_frozen;
+static unsigned allow_count;
+static uint16_t allow_kind[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
+static uint32_t allow_identifier[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
+void SudekiMpLanStoryWorldSetForeignCharacters(uint8_t mask) {foreign_characters=(uint8_t)(mask&15u);}
+unsigned SudekiMpLanStoryWorldSplitAnimateTargets(SudekiMpLanStoryWorldAnimateTarget *out,unsigned max) {
+    if(!out || !allow_frozen || !host_seen) return 0;
+    unsigned n=0;
+    for(unsigned i=0;i<host_count && n<max;++i) {
+        const Target *t=&host_bound[i].target;
+        if(!t->object || !t->renderer) continue;
+        out[n].object=t->object; out[n].renderer=t->renderer; out[n].identifier=t->identifier;
+        out[n].kind=t->kind; out[n].character=t->character<4u?(uint8_t)t->character:255u; ++n;
+    }
+    return n;
+}
+void SudekiMpLanStoryWorldSetSplitAllowlist(BOOL frozen) {
+    if(frozen && !allow_frozen) {
+        allow_count=host_seen?host_count:0u;
+        for(unsigned i=0;i<allow_count;++i) {
+            allow_kind[i]=host_bound[i].previous.kind; allow_identifier[i]=host_bound[i].previous.identifier;
+        }
+        SudekiMpLogFormat("lan_story_world event=split_allowlist frozen=1 count=%u\r\n",allow_count);
+    } else if(!frozen && allow_frozen) SudekiMpLogFormat("lan_story_world event=split_allowlist frozen=0\r\n");
+    allow_frozen=frozen;
+}
+static BOOL excluded_capture(void) {
+    excluded_count=0;
+    const uint8_t *data=excluded_zone,*c,*spawns;
+    if(!data) return TRUE;
+    if(!readable(data,0x12au) || *(void *const *)data!=base+0x2cdcdcu ||
+        !readable(c=*(const uint8_t *const *)(data+0x118u),0x1cu)) return FALSE;
+    unsigned n=*(const unsigned *)(c+0x10u); spawns=*(const uint8_t *const *)(c+0x18u);
+    if(n>512u || (n && !readable(spawns,n*0x90u))) return FALSE;
+    for(unsigned i=0;i<n;++i) {
+        uintptr_t r=*(const uintptr_t *)(spawns+i*0x90u+0x78u);
+        if(r>0x2cu) excluded[excluded_count++]=(const uint8_t *)(r-0x2cu);
+    }
+    return TRUE;
+}
 static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster *roster,
     Target *targets,unsigned *count,BOOL write) {
     unsigned n=0;
@@ -376,6 +469,9 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
         observe_stage("registry_entry",0,i);
         uint8_t *entity=registry->entities[i];
         if(!readable(entity,0x3cu)) return FALSE;
+        BOOL foreign=FALSE;
+        for(unsigned x=0;x<excluded_count;++x) if(excluded[x]==entity) foreign=TRUE;
+        if(foreign) continue;
         BOOL include=*(void **)entity==base+0x2d65a0u;
         for(unsigned c=0;c<4u;++c) if(roster->actors[c]==entity) include=TRUE;
         if(*(void **)entity==base+0x2d5b00u) {
@@ -390,6 +486,12 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
         }
         if(!include) continue;
         if(n==SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS || !target(entity,roster,&targets[n],write)) return FALSE;
+        if(!write && allow_frozen && targets[n].character>=4u) {
+            BOOL allowed=FALSE;
+            for(unsigned x=0;x<allow_count;++x)
+                if(allow_kind[x]==targets[n].kind && allow_identifier[x]==targets[n].identifier) allowed=TRUE;
+            if(!allowed) continue;
+        }
         for(unsigned j=0;j<n;++j)
             if(targets[j].entity==entity || (targets[j].kind==targets[n].kind &&
                 targets[j].identifier==targets[n].identifier)) {
@@ -656,7 +758,8 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
     operation="capture"; observe_stage("host_witness_registry",0,0);
     if(client_seen || (host_seen && ((int32_t)(party->sequence-host_sequence)<=0 || party->epoch<host_epoch)) ||
         !SudekiMpLanStoryObserverRoster(controller,w,scene,&roster) || !registry_capture(&registry) ||
-        !catalog(&registry,&roster,targets,&count,FALSE)) goto fail;
+        !excluded_capture() || !catalog(&registry,&roster,targets,&count,FALSE)) goto fail;
+    excluded_count=0;
     frame.epoch=party->epoch; frame.revision=party->revision; frame.sequence=party->sequence;
     frame.host_tick=party->host_tick; frame.count=(uint8_t)count;
     uint32_t generation=next_generation;
@@ -695,6 +798,42 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
             observe_stage("wire_pose_bounds",targets[i].identifier,i); error=ERROR_NOT_SUPPORTED; goto fail;
         }
         next[i].previous=frame.actors[i];
+        /* Bounded diagnostic (split research): party rows while a split is
+         * active, once per second per character. Read-only. */
+        if(targets[i].character<4u) {
+            static DWORD last_split_log[4];
+            if(targets[i].character==2u) SudekiMpLanStoryAnimTraceWatch(targets[i].renderer);
+            /* Bounded research diagnostic: base-channel clip changes of the
+             * remote-controlled party characters with a millisecond stamp. */
+            {
+                static uint16_t last_selector[4]; static uint8_t last_state[4]; static unsigned change_logs;
+                const uint8_t *row=targets[i].rows[0]; uint16_t sel=*(const uint16_t *)row; uint8_t st=(uint8_t)*(const uint16_t *)(row+2u);
+                unsigned c=targets[i].character;
+                if((sel!=last_selector[c] || st!=last_state[c]) && change_logs<400u) {
+                    ++change_logs;
+                    SudekiMpLogFormat("lan_story_world event=base_clip_change ms=%lu character=%u selector=%u->%u state=%u->%u time=%.3f rate=%.3f\r\n",
+                        (unsigned long)GetTickCount(),c,last_selector[c],sel,last_state[c],st,(double)*(const float *)(row+8u),(double)*(const float *)(row+4u));
+                }
+                last_selector[c]=sel; last_state[c]=st;
+            }
+            if(GetTickCount()-last_split_log[targets[i].character]>(allow_frozen?1000u:5000u)) {
+                last_split_log[targets[i].character]=GetTickCount();
+                const Target *t=&targets[i];
+                const uint8_t *link=*(const uint8_t *const *)(t->object+0x1cu);
+                SudekiMpLogFormat("lan_story_world event=split_pose split=%u character=%u identifier=%08lx wrapper=%p attached=%p object=%p object_flags=%08lx link=%p link_flags=%08lx renderer=%p bank=%p flags=%02x pos=%.1f,%.1f,%.1f\r\n",
+                    allow_frozen?1u:0u,t->character,(unsigned long)t->identifier,(void *)t->wrapper,(void *)t->attached_wrapper,
+                    (void *)t->object,(unsigned long)*(const uint32_t *)(t->object+0x34u),(const void *)link,
+                    (unsigned long)(readable(link,0x18u)?*(const uint32_t *)(link+0x14u):0xfffffffful),
+                    (void *)t->renderer,(void *)t->bank,t->renderer[0x6eu],
+                    (double)frame.actors[i].position[0],(double)frame.actors[i].position[1],(double)frame.actors[i].position[2]);
+                for(unsigned c=0;allow_frozen && c<pose_channels(t);++c) {
+                    const uint8_t *row=t->rows[c];
+                    SudekiMpLogFormat("lan_story_world event=split_channel character=%u channel=%u selector=%u state=%u rate=%.3f time=%.3f phase=%.3f clip=%08lx\r\n",
+                        t->character,c,*(const uint16_t *)row,*(const uint16_t *)(row+2u),(double)*(const float *)(row+4u),
+                        (double)*(const float *)(row+8u),(double)*(const float *)(row+0xcu),(unsigned long)frame.actors[i].clip[c]);
+                }
+            }
+        }
     }
     if(!registry_still(&registry) || !SudekiMpLanStoryObserverRosterStillExact(w,&roster)) goto fail;
     for(unsigned i=0;i<count;++i) {
@@ -707,15 +846,24 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
     host_sequence=party->sequence; next_generation=generation; host_seen=TRUE; *out=frame;
     return finish(TRUE,0);
 fail:
+    excluded_count=0;
     return finish(FALSE,error);
 }
 
+static BOOL target_chain_still(const Target *t,const Registry *registry);
 static BOOL target_still(const Target *t,const Registry *registry,
     const SudekiMpLanStoryNativeRoster *roster,SudekiMpLanStoryReplicaExact exact,void *context) {
     observe_stage("write_owner",t->identifier,0);
     unsigned character; uint16_t kind; uint8_t *model;
     if(!exact(roster,context) || !entity_identity(t->entity,roster,&character,&kind,&model) ||
         character!=t->character || kind!=t->kind || model!=t->model) return FALSE;
+    return target_chain_still(t,registry);
+}
+/* The native pointer chain and storage of one target, re-read in place. Used
+ * between the admitted closed setters of one target inside a traversal whose
+ * entry already proved the roster, scheduler and registry; the full proof is
+ * repeated at the target's start and by the post-write target() readback. */
+static BOOL target_chain_still(const Target *t,const Registry *registry) {
     if(*(void **)(base+0x409d8cu)!=registry->owner ||
         !readable(registry->owner,0x40u) || *(uint32_t *)(registry->owner+0x34u)!=registry->count ||
         *(void **)(registry->owner+0x3cu)!=registry->entries ||
@@ -1146,18 +1294,32 @@ static BOOL material_children_closed(const Target *t) {
 }
 static BOOL pose_supported(const Target *t,const SudekiMpLanStoryWorldActor *a,unsigned selectors[5]) {
     observe_stage("bank_compatibility",t->identifier,a->submodels);
+    LARGE_INTEGER sub=profile_now();
     if(a->kind!=t->kind || a->identifier!=t->identifier ||
         a->submodels!=t->submodels || a->bank_fingerprint!=t->fingerprint ||
         !material_children_closed(t)) return FALSE;
+    profile_add(6,sub);
     for(unsigned c=0;c<pose_channels(t);++c) {
         observe_stage("clip_mapping",t->identifier,c);
         if(!resolve_clip(t,a->clip[c],a->clip_occurrence[c],&selectors[c])) return FALSE;
+        sub=profile_now();
         if(!selector_change_closed(t,c,selectors[c])) return FALSE;
+        profile_add(7,sub);
         if(!rate_change_closed(t,c,0,a->rate[c])) return FALSE;
         if(!selectors[c] && !scenery(t)) {
             if(a->state[c]!=192u || a->time[c]!=0.0f) {
-                observe_stage("empty_clip_state",t->identifier,(c<<16)|a->state[c]);
-                return FALSE;
+                /* A channel the host did not advance (e.g. an actor outside
+                 * the host camera during a split) keeps its local state. */
+                empty_clip_hit=TRUE; empty_channels|=1u<<c;
+                /* Bounded diagnostic (split research): what the host sent. */
+                static DWORD last_empty_log;
+                if(GetTickCount()-last_empty_log>1000u) {
+                    last_empty_log=GetTickCount();
+                    SudekiMpLogFormat("lan_story_world event=empty_channel identifier=%08lx character=%u channel=%u host_clip=%08lx occurrence=%u state=%u time=%.3f rate=%.3f local_selector=%u\r\n",
+                        (unsigned long)t->identifier,t->character,c,(unsigned long)a->clip[c],a->clip_occurrence[c],
+                        a->state[c],(double)a->time[c],(double)a->rate[c],*(uint16_t *)t->rows[c]);
+                }
+                continue;
             }
         } else {
             uint8_t *resource=*(uint8_t **)(t->entries+selectors[c]*28u);
@@ -1304,13 +1466,16 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     BOOL independent_view) {
     Registry registry; Target targets[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     unsigned count=0,selectors[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS][5]={{0}};
+    uint8_t skip_pose[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS]={0};
     if(!roster || !frame || !exact || !SudekiMpLanStoryWorldFrameValid(frame) || !begin()) return FALSE;
     DWORD error=ERROR_RETRY;
     operation="apply"; observe_stage("client_witness_registry",0,0);
     if(resource_fault) { observe_stage("clip_resource_unknown",0,0); error=ERROR_INVALID_STATE; goto fail; }
     if(recruitment.retained) { error=ERROR_IO_PENDING; goto fail; }
+    LARGE_INTEGER profile_start=profile_now(); ++profile_frames;
     if(host_seen || !exact(roster,context) || !registry_capture(&registry) ||
         !catalog(&registry,roster,targets,&count,TRUE)) goto fail;
+    profile_add(0,profile_start);
     if(count!=frame->count || (client_seen && (frame->epoch!=client_epoch || count!=client_count))) {
         observe_stage("catalog_identity",0,(count<<16)|frame->count); goto fail;
     }
@@ -1323,7 +1488,16 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
             error=ERROR_NOT_SUPPORTED; goto fail;
         }
         SetLastError(ERROR_NOT_SUPPORTED);
-        if(!pose_supported(&targets[i],&frame->actors[i],selectors[i])) {
+        /* A party character in another host area keeps its last local pose;
+         * its remote pose (e.g. inside a split TEMP) is never applied. */
+        if(targets[i].character<4u && (foreign_characters&(1u<<targets[i].character))) continue;
+        empty_clip_hit=FALSE; empty_channels=0;
+        profile_start=profile_now();
+        BOOL supported=pose_supported(&targets[i],&frame->actors[i],selectors[i]);
+        profile_add(1,profile_start);
+        skip_pose[i]=(uint8_t)empty_channels;
+        if(empty_clip_hit) ++empty_clip_skips;
+        if(!supported) {
             error=prepare_missing_resource(&targets[i],&registry,roster,exact,context);
             goto fail;
         }
@@ -1331,7 +1505,9 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
          * per-submodel pose graph. All native channels, including the fifth
          * ranged action channel, must have uniform validated submodel rows. */
         SudekiMpLanStoryWorldActor current;
+        profile_start=profile_now();
         if(!read_pose(&targets[i],&current)) { error=ERROR_NOT_SUPPORTED; goto fail; }
+        profile_add(2,profile_start);
     }
     if(!registry_still(&registry) || !exact(roster,context)) goto fail;
     prepared.registry=registry; memcpy(prepared.targets,targets,count*sizeof(targets[0]));
@@ -1340,6 +1516,7 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     memcpy(&prepared.roster,roster,sizeof(*roster)); memcpy(&prepared.frame,frame,sizeof(*frame));
     prepared.exact=exact; prepared.context=context;
     prepared.independent_view=independent_view;
+    memcpy(prepared.skip,skip_pose,sizeof(prepared.skip));
     /* No curve authorization survives into the mutation phase. The admitted
      * native setters do not replace curve resources; selector's immediate
      * cleanup is checked separately against its current attached owner. */
@@ -1444,8 +1621,10 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
     unsigned count=prepared.count; unsigned (*selectors)[5]=prepared.selectors;
     /* Recheck all exact targets after the composed player publication and
      * before the first native pose write. The expensive bank preflight is not repeated. */
+    LARGE_INTEGER profile_start=profile_now();
     for(unsigned i=0;i<count;++i)
         if(!target_still(&targets[i],registry,roster,exact,context)) goto fail;
+    profile_add(3,profile_start);
     if(!client_seen) {
         for(unsigned i=0;i<count;++i) {
             client_bound[i].target=targets[i]; client_bound[i].previous=frame->actors[i];
@@ -1457,7 +1636,9 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
      * witness below cannot be reused after this synchronous Present callback. */
     for(unsigned i=0;i<count;++i) {
         Target *t=&targets[i]; const SudekiMpLanStoryWorldActor *a=&frame->actors[i];
+        profile_start=profile_now();
         if(!target_still(t,registry,roster,exact,context)) goto fail;
+        if(t->character<4u && (foreign_characters&(1u<<t->character))) continue; /* other host area */
         if(scenery(t)) {
             /* Native5D5300/612050 use bit4 as hidden. Preserve every other
              * local renderer flag. The telescope's authored lens is a view
@@ -1478,18 +1659,19 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         if(!body_forward(t,a,forward)) goto fail;
         set_position(t->position,a->position);
         set_forward(t->position,forward);
-        if(!target_still(t,registry,roster,exact,context)) goto fail;
+        if(!target_chain_still(t,registry)) goto fail;
         /* State/time/blend setters are closed native memory/math operations:
          * no allocation, object callbacks or message pumping. One synchronous
          * proof bracket covers them. Selector and rate retain their separate
          * pre/post owner proof because they may touch verified child targets. */
         for(unsigned c=0;c<pose_channels(t);++c) for(unsigned sub=0;sub<t->submodels;++sub) {
+            if(prepared.skip[i]&(1u<<c)) break; /* host did not advance this channel */
             uint8_t *row=t->rows[c]+sub*24u;
             if(*(uint16_t *)row!=selectors[i][c]) {
-                if(!target_still(t,registry,roster,exact,context) ||
+                if(!target_chain_still(t,registry) ||
                     !selector_cleanup_closed(t,c,selectors[i][c])) goto fail;
                 set_selector(t->renderer,(int)c,sub,(int)selectors[i][c]);
-                if(!target_still(t,registry,roster,exact,context)) goto fail;
+                if(!target_chain_still(t,registry)) goto fail;
             }
             if(*(uint16_t *)(row+2u)!=a->state[c]) {
                 set_state(t->renderer,(int)c,sub,a->state[c]);
@@ -1498,10 +1680,10 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
                 set_time(t->renderer,(int)c,sub,a->time[c],0);
             }
             if(!close_float(*(float *)(row+4u),a->rate[c],.0001f)) {
-                if(!target_still(t,registry,roster,exact,context) ||
+                if(!target_chain_still(t,registry) ||
                     !rate_change_closed(t,c,sub,a->rate[c])) goto fail;
                 set_rate(t->renderer,(int)c,sub,a->rate[c]);
-                if(!target_still(t,registry,roster,exact,context)) goto fail;
+                if(!target_chain_still(t,registry)) goto fail;
             }
             if(*(uint16_t *)row!=selectors[i][c] || *(uint16_t *)(row+2u)!=a->state[c] ||
                 !close_float(*(float *)(row+8u),a->time[c],.01f) ||
@@ -1515,23 +1697,32 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
             }
             if(!close_float(*(float *)(t->blends+blend*20u+0xcu),a->blend[blend],.0001f)) goto fail;
         }
-        if(!target_still(t,registry,roster,exact,context) || !readable(position_matrix(t->position),64u) ||
-            !target_still(t,registry,roster,exact,context)) goto fail;
+        if(!target_chain_still(t,registry) || !readable(position_matrix(t->position),64u) ||
+            !target_chain_still(t,registry)) goto fail;
         if(!visible(t,a,forward)) {
             /* Same exact dirty-publication field used by the existing party
              * replica after native SetPosition/SetForward. No spatial/AI tick. */
             t->position[0xb8u]=1;
-            if(!target_still(t,registry,roster,exact,context) || !readable(position_matrix(t->position),64u) ||
-                !target_still(t,registry,roster,exact,context)) goto fail;
+            if(!target_chain_still(t,registry) || !readable(position_matrix(t->position),64u) ||
+                !target_chain_still(t,registry)) goto fail;
         }
         if(!visible(t,a,forward)) { observe_stage("visible_matrix",t->identifier,0); goto fail; }
+        profile_add(4,profile_start); profile_start=profile_now();
         Target after;
         if(!target(t->entity,roster,&after,TRUE) || !same_target(t,&after)) goto fail;
         SudekiMpLanStoryWorldActor readback;
-        if(!read_pose(&after,&readback) || memcmp(readback.clip,a->clip,sizeof(a->clip)) ||
-            memcmp(readback.clip_occurrence,a->clip_occurrence,sizeof(a->clip_occurrence))) {
+        BOOL clip_mismatch=FALSE;
+        if(read_pose(&after,&readback)) {
+            for(unsigned c=0;c<sizeof(a->clip)/sizeof(a->clip[0]);++c) {
+                if(prepared.skip[i]&(1u<<c)) continue; /* channel left untouched */
+                if(readback.clip[c]!=a->clip[c] || readback.clip_occurrence[c]!=a->clip_occurrence[c])
+                    clip_mismatch=TRUE;
+            }
+        } else clip_mismatch=TRUE;
+        if(clip_mismatch) {
             observe_stage("clip_identity_readback",t->identifier,i); goto fail;
         }
+        profile_add(5,profile_start);
     }
     if(!registry_still(registry) || !exact(roster,context)) goto fail;
     for(unsigned i=0;i<count;++i) client_bound[i].previous=frame->actors[i];

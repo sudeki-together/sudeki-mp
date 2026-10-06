@@ -60,4 +60,28 @@ BOOL SudekiMpLanStoryLoadGetFingerprint(uint32_t attempt,SudekiMpSaveFingerprint
  * the exact file lease and hook dependencies for a later safe retry. */
 BOOL SudekiMpLanStoryLoadCancel(void);
 
+/* Optional occupied-area coordinator support; NOT called by runtime yet.
+ * Reserve the exact currently selected native save before deferring an entire
+ * menu reload request. The reviewed local catalog/fingerprint must match that
+ * native selection/root. This pins only read-only files, NOT any native owner.
+ * Caller must separately close whole-action admission (including script/export
+ * routes); this is not a late-reader replacement for that boundary.
+ * The active attempt/fingerprint remain unchanged until a verified world exit.
+ * All calls require the existing loader's native thread outside its callbacks.
+ * Outputs are unchanged on failure; tickets never repeat. */
+BOOL SudekiMpLanStoryLoadReserveReload(const void *consumer,uint32_t active_attempt,
+    SudekiMpSaveCatalog *,unsigned,const SudekiMpSaveFingerprint *,uint64_t *ticket);
+/* Transfer the reserved files into the existing PREPARED load flow only after
+ * lobby_gameplay's positive native exit return AND completed runtime/lobby
+ * cancellation. That cancellation clears the old load proof but preserves the
+ * reserved pair; before drain, ordinary Cancel still refuses. No old menu/catalog
+ * pointer is replayed, no new load is invoked here, and this does not prove the
+ * frontend is ready. The next ordinary Prepare must verify the same local pair
+ * to adopt the reservation; ArmTitle/ServiceTitle own the normal loading route.
+ * The returned attempt identifies the new load; an old ticket cannot promote
+ * twice. Explicit cancellation releases only this still-unpromoted reservation.
+ * Uninstall refuses while a reservation exists. */
+BOOL SudekiMpLanStoryLoadPromoteReload(const void *consumer,uint64_t ticket,uint32_t *attempt);
+BOOL SudekiMpLanStoryLoadCancelReload(const void *consumer,uint64_t ticket);
+
 #endif

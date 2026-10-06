@@ -84,15 +84,34 @@ static struct {
 } trigger_owner;
 static volatile LONG trigger_held;
 
+/* Region answers are reused only inside one exact presentation bracket
+ * (SudekiMpLanStoryClientPresent) on the native thread: the native setters
+ * admitted there are closed memory operations that never release or reprotect
+ * these regions. Every range is still checked against a committed, accessible
+ * region; the cache only removes repeated VirtualQuery calls into one region. */
+enum { REGION_CACHE=32 };
+typedef struct Region { uintptr_t lower,upper; } Region;
+static Region regions[REGION_CACHE]; static unsigned region_count,region_next;
+static BOOL region_cache_active;
 static BOOL readable(const void *p,size_t n) {
-    MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
-    if(!p || !n || a>UINTPTR_MAX-n || VirtualQuery(p,&m,sizeof(m))!=sizeof(m) ||
+    uintptr_t a=(uintptr_t)p;
+    if(!p || !n || a>UINTPTR_MAX-n) return FALSE;
+    if(region_cache_active) for(unsigned i=0;i<region_count;++i)
+        if(a>=regions[i].lower && a+n<=regions[i].upper) return TRUE;
+    MEMORY_BASIC_INFORMATION m;
+    if(VirtualQuery(p,&m,sizeof(m))!=sizeof(m) ||
         m.State!=MEM_COMMIT || (m.Protect&(PAGE_GUARD|PAGE_NOACCESS))) return FALSE;
     DWORD access=m.Protect&0xffu;
     if(access!=PAGE_READONLY && access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
         access!=PAGE_EXECUTE_READ && access!=PAGE_EXECUTE_READWRITE &&
         access!=PAGE_EXECUTE_WRITECOPY) return FALSE;
-    return a+n<=(uintptr_t)m.BaseAddress+m.RegionSize;
+    if(a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+    if(region_cache_active) {
+        unsigned slot=region_count<REGION_CACHE?region_count++:region_next;
+        region_next=(region_next+1u)%REGION_CACHE;
+        regions[slot].lower=(uintptr_t)m.BaseAddress; regions[slot].upper=(uintptr_t)m.BaseAddress+m.RegionSize;
+    }
+    return TRUE;
 }
 static BOOL native_thread_exact(void) {
     return installed && native_thread && native_thread==GetCurrentThreadId();
@@ -930,9 +949,9 @@ BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,v
      * complete post-operation registry observation, even on callback failure. */
     SudekiMpLanStoryNativeRoster roster=retained_roster;
     SudekiMpLanStoryScene scene=retained_scene;
-    presentation_active=TRUE;
+    presentation_active=TRUE; region_count=0; region_next=0; region_cache_active=TRUE;
     BOOL result=callback(&roster,&scene,context);
-    presentation_active=FALSE;
+    region_cache_active=FALSE; presentation_active=FALSE;
     BOOL still_exact=SudekiMpLanStoryClientService(NULL);
     return result && still_exact;
 }

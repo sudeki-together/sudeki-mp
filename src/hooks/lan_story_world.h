@@ -16,6 +16,23 @@ BOOL SudekiMpInitializeLanStoryWorld(HMODULE image);
  * and its fourth blend must be positively inactive on both peers. Generic
  * scenery has one channel whose selector zero is a real authored clip.
  * The complete batch shares the already captured party frame's identity. */
+/* Host only, before capture: native zone data of an occupied split-area TEMP
+ * (or NULL). Entities spawned by that zone's authored catalog are left out
+ * of the exterior world frame. Copy-only identities; recomputed per call. */
+void SudekiMpLanStoryWorldSetExcludedZone(const void *zone_data);
+/* Host only. TRUE freezes the exterior catalog as the (kind,identifier) set of
+ * the last successful capture; while frozen, other registry entities (an
+ * occupied split-area TEMP's objects) are left out. FALSE releases it. */
+void SudekiMpLanStoryWorldSetSplitAllowlist(BOOL frozen);
+/* Host split animation pass (copy-only): the last captured exterior catalog
+ * plus party characters while the split allowlist is frozen. Pointers are
+ * re-validated by the caller before any native use. */
+typedef struct SudekiMpLanStoryWorldAnimateTarget {
+    void *object,*renderer; uint32_t identifier; uint16_t kind; uint8_t character;
+} SudekiMpLanStoryWorldAnimateTarget;
+unsigned SudekiMpLanStoryWorldSplitAnimateTargets(SudekiMpLanStoryWorldAnimateTarget *out,unsigned max);
+/* Client: party characters in a different host area keep their last pose. */
+void SudekiMpLanStoryWorldSetForeignCharacters(uint8_t mask);
 BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,
     void *controller, const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanStoryScene *scene, const SudekiMpLanStoryFrame *party,

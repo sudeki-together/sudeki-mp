@@ -115,8 +115,8 @@ BOOL SudekiMpLanStoryControlFenceSame(const SudekiMpLanStoryControlFence *a,
 BOOL SudekiMpLanStoryControlMatchesScene(const SudekiMpLanStoryControlFence *f,
     const SudekiMpLanStoryScene *s) {
     return SudekiMpLanStoryControlFenceValid(f) && SudekiMpLanStorySceneValid(s) &&
-        s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch && f->revision==s->revision &&
-        (s->available_mask&(1u<<f->character));
+        s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch && f->revision<=s->revision &&
+        (s->available_mask&(1u<<f->character)) && s->leader_seat!=f->character;
 }
 BOOL SudekiMpLanStoryControlStateValid(const SudekiMpLanStoryControlState *s) {
     return s && SudekiMpLanStoryControlFenceValid(&s->fence) &&

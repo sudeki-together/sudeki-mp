@@ -42,6 +42,13 @@ static SudekiMpSaveFingerprint reviewed_save;
 static unsigned save_page, selected_save=~0u, armed_save=~0u;
 static unsigned row_saves[SUDEKIMP_PANEL_CONTROLS];
 static BOOL save_reviewed;
+static SudekiMpLobbyAuto auto_config; static BOOL auto_enabled,auto_opened,auto_done,auto_started;
+static DWORD auto_last,auto_retry_at; static unsigned auto_logs;
+void SudekiMpLobbyUiConfigureAuto(const SudekiMpLobbyAuto *config) {
+    if (!config) { auto_enabled=FALSE; return; }
+    auto_config=*config; auto_enabled=config->host||config->join; auto_opened=auto_done=FALSE;
+}
+BOOL SudekiMpLobbyUiAutoWantsOpen(void) { return auto_enabled && !auto_opened; }
 
 static BOOL start_busy(void) {
     return !status.running && status.start.phase>=SUDEKIMP_LOBBY_START_PREPARE && status.start.phase<=SUDEKIMP_LOBBY_START_COMPLETE;
@@ -531,7 +538,7 @@ static void build_view(void) {
     if (editing) strcpy(view.text.status,"Type to edit. Ctrl+A clears; Enter or Escape finishes editing.");
 }
 void SudekiMpLobbyUiOpen(void) {
-    opened=TRUE; focused=FALSE; wanted_ready=FALSE;
+    opened=TRUE; focused=FALSE; wanted_ready=FALSE; auto_opened=TRUE; auto_last=GetTickCount();
     launch_available=TRUE; seen_revision=0; seen_command=0;
     if (!session) {
         session=SudekiMpLobbyCreate();
@@ -573,6 +580,98 @@ static BOOL pressed(unsigned key) {
     BOOL down=(GetAsyncKeyState((int)key)&0x8000)!=0;
     BOOL edge=down && !keys[key]; keys[key]=down; return edge;
 }
+
+/* ---- ini-driven automation ------------------------------------------- */
+static void auto_log(const char *step) {
+    if (auto_logs<64u) { ++auto_logs; SudekiMpLogFormat("title_lobby event=auto step=%s page=%u phase=%u\r\n",step,(unsigned)page,(unsigned)status.phase); }
+}
+static BOOL auto_act(enum Action action,unsigned save_index) {
+    build_view();
+    for (unsigned row=0;row<view.count;++row) {
+        if (actions[row]!=action || !(view.enabled&(1u<<row))) continue;
+        if (action==SAVE_ROW && row_saves[row]!=save_index) continue;
+        unsigned selection=0;
+        SudekiMpLobbyUiArm(row);
+        (void)SudekiMpLobbyUiCommit(&selection);
+        auto_last=GetTickCount();
+        if (*message && auto_logs<64u) { ++auto_logs; SudekiMpLogFormat("title_lobby event=auto_message action=%u text=%s\r\n",(unsigned)action,message); }
+        return TRUE;
+    }
+    static DWORD unavailable_logged;
+    if (GetTickCount()-unavailable_logged>5000u && auto_logs<64u) {
+        unavailable_logged=GetTickCount(); ++auto_logs;
+        SudekiMpLogFormat("title_lobby event=auto_unavailable action=%u page=%u phase=%u\r\n",(unsigned)action,(unsigned)page,(unsigned)status.phase);
+    }
+    auto_last=GetTickCount();
+    return FALSE;
+}
+static void auto_step(void) {
+    if (!auto_enabled || !opened || auto_done || !session || editing) return;
+    DWORD now=GetTickCount();
+    if (now-auto_last<350u) return;
+    if (SudekiMpLobbyGameplayActive() || status.running) { auto_done=TRUE; auto_log("handoff"); return; }
+    const SudekiMpLobbyMember *me=&status.members[status.local_slot];
+    if (page==BROWSE) {
+        if (status.phase!=SUDEKIMP_LOBBY_IDLE && status.phase!=SUDEKIMP_LOBBY_ERROR) return;
+        if (auto_config.host) { if (auto_act(HOST,0)) auto_log("create_page"); }
+        else if (now>=auto_retry_at && auto_act(DIRECT,0)) auto_log("join_page");
+        return;
+    }
+    if (page==CREATE) {
+        snprintf(room,sizeof(room),"%s",auto_config.room);
+        snprintf(port,sizeof(port),"%u",(unsigned)auto_config.port);
+        if (auto_act(CREATE_ROOM,0)) auto_log(page==ROOM?"hosting":"create_failed");
+        if (page!=ROOM) auto_retry_at=now+2000u;
+        return;
+    }
+    if (page==JOIN) {
+        if (now<auto_retry_at) return;
+        snprintf(address,sizeof(address),"%s",auto_config.address);
+        if (auto_act(CONNECT,0)) auto_log(page==ROOM?"connecting":"connect_failed");
+        if (page!=ROOM) auto_retry_at=now+2000u;
+        return;
+    }
+    if (page==DESTINATIONS) { if (auto_act(PICK_SAVE,0)) auto_log("saves_page"); return; }
+    if (page==SAVES) {
+        unsigned index=~0u;
+        for (unsigned i=0;i<saves.count;++i) if (saves.entries[i].folder_slot==auto_config.save_slot) { index=i; break; }
+        if (index==~0u) { auto_log("save_missing"); auto_done=TRUE; return; }
+        if (save_page!=index/PAGE_SIZE) { save_page=index/PAGE_SIZE; ++page_revision; }
+        if (selected_save!=index) { if (auto_act(SAVE_ROW,index)) auto_log("save_row"); return; }
+        if (auto_act(REVIEW_SAVE,0)) auto_log(page==CONFIRM_SAVE?"save_review":"save_review_failed");
+        return;
+    }
+    if (page==CONFIRM_SAVE) { if (auto_act(CONFIRM_YES,0)) auto_log(page==ROOM?"save_selected":"save_confirm_failed"); if (page!=ROOM) auto_done=TRUE; return; }
+    if (page!=ROOM) return;
+    if (status.phase==SUDEKIMP_LOBBY_CONNECTING) return;
+    if (status.phase==SUDEKIMP_LOBBY_IDLE || status.phase==SUDEKIMP_LOBBY_ERROR) {
+        /* Dropped or refused: return to the browser and retry later. */
+        if (auto_act(LEAVE,0)) auto_log("left"); auto_retry_at=now+2000u; return;
+    }
+    BOOL hosting=status.phase==SUDEKIMP_LOBBY_HOSTING;
+    /* Host: a saved-game destination assigns the save's leader to the host,
+     * so choose the destination first and never fight the character rows. */
+    if (hosting && auto_config.save_slot!=~0u &&
+        (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME || status.saved_game.folder_slot!=auto_config.save_slot)) {
+        if (!destination_editable()) return;
+        if (auto_act(DESTINATION,0)) auto_log("destinations"); return;
+    }
+    BOOL leader_assigned=hosting && status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME;
+    if (!leader_assigned && auto_config.character<4u && me->character!=auto_config.character) {
+        if (auto_act(CHARACTER_BUKI+auto_config.character,0)) auto_log("character"); return;
+    }
+    if (!leader_assigned && me->character<4u && !me->locked) {
+        if (auto_act(LOCK_CHARACTER,0)) auto_log("lock"); return;
+    }
+    if (auto_config.ready && !me->ready && !wanted_ready) { if (auto_act(READY,0)) auto_log("ready"); return; }
+    if (status.phase==SUDEKIMP_LOBBY_HOSTING && auto_config.start && !auto_started) {
+        unsigned present=0; BOOL all_ready=TRUE;
+        for (unsigned i=0;i<4;++i) if (status.members[i].present) { ++present; if (!status.members[i].ready) all_ready=FALSE; }
+        if (present<auto_config.min_players || !all_ready || !launch_available || start_busy()) return;
+        if (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME) return;
+        if (auto_act(START_GAME,0)) { auto_started=TRUE; auto_log("start"); }
+    }
+}
 void SudekiMpLobbyUiPoll(HWND window,BOOL input) {
     if (!opened) return;
     if (SudekiMpLobbyGameplayActive()) SudekiMpLobbyGameplayService(session);
@@ -590,6 +689,7 @@ void SudekiMpLobbyUiPoll(HWND window,BOOL input) {
         snprintf(player,sizeof(player),"%s",status.members[status.local_slot].name);
     if (status.start.revision!=seen_revision) { seen_revision=status.start.revision; wanted_ready=FALSE; }
     service_start(window);
+    auto_step();
     if (logged_start!=status.start.phase) {
         SudekiMpLogFormat("title_lobby event=start phase=%u revision=%lu prepared=%u loaded=%u members=%u\r\n",
             status.start.phase,(unsigned long)status.start.revision,status.start.prepared,status.start.loaded,status.start.members);

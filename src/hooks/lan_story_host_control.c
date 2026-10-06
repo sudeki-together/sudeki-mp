@@ -25,6 +25,7 @@ static DWORD native_thread,next_attempt;
 static BOOL active,stopping;
 static struct {
     void *world,*descriptor,*group,*controller;
+    uint32_t epoch;
     BOOL owned,releasing;
 } input_owner;
 static struct {
@@ -88,17 +89,33 @@ static BOOL entries_exact(void) {
 }
 static BOOL observe(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *r) {
-    if(!base || active || !w || !w->service_only || !w->service_post_original_exact ||
-        !w->dispatch_serial || !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
-        (native_thread && native_thread!=GetCurrentThreadId()) || !entries_exact() ||
-        !SudekiMpLanStoryObserverRoster(controller,w,scene,r) ||
+    static const char *trace; static unsigned traces;
+    const char *why=!base?"base":active?"active":!w?"witness":!w->service_only?"service_only":
+        !w->service_post_original_exact?"post_original":!w->dispatch_serial?"serial":
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)?"witness_stale":
+        (native_thread && native_thread!=GetCurrentThreadId())?"thread":
+        !entries_exact()?(memcmp(base+NEXT,verified_next,sizeof(verified_next))?"filter_next":
+            (memcmp(base+FILTER_NONE,none_code,sizeof(none_code)) &&
+             !SudekiMpSpiritInstanceFilterNoneEntryExact((HMODULE)base))?"filter_none":"filter_all"):
+        !SudekiMpLanStoryObserverRoster(controller,w,scene,r)?"roster":
         !readable(controller,0x24cu) || *(void **)controller!=base+CONTROLLER_VT ||
-        *(void **)((uint8_t *)controller+0x2cu)!=base+INPUT_VT) return FALSE;
+        *(void **)((uint8_t *)controller+0x2cu)!=base+INPUT_VT?"controller":NULL;
+    if(why!=trace && traces<48u) {
+        ++traces; trace=why;
+        SudekiMpLogFormat("lan_story_host_control event=observe result=%s phase=%u temporary=%s spirit_none=%u spirit_all=%u fault_site=%u enter_failure=%u named_fail=%u\r\n",
+            why?why:"ok",scene?scene->phase:9u,scene?scene->temporary:"-",
+            base?SudekiMpSpiritInstanceFilterEntryDiag((HMODULE)base,0u):0u,
+            base?SudekiMpSpiritInstanceFilterEntryDiag((HMODULE)base,1u):0u,
+            SudekiMpSpiritInstanceFaultSite(),SudekiMpSpiritInstanceEnterFailure(),SudekiMpSpiritInstanceNamedFail());
+    }
+    if(why) return FALSE;
     native_thread=GetCurrentThreadId(); return TRUE;
 }
 static BOOL owner_matches(const SudekiMpLanStoryNativeRoster *r) {
+    /* The observer epoch is the exterior lifetime: a split-area TEMP changes
+     * the current descriptor without replacing the world or party. */
     return !input_owner.owned || (input_owner.world==r->world &&
-        input_owner.descriptor==r->descriptor && input_owner.group==r->group &&
+        (input_owner.descriptor==r->descriptor || input_owner.epoch==r->epoch) && input_owner.group==r->group &&
         input_owner.controller==r->controller);
 }
 static BOOL binding_exact(const SudekiMpControlUpdateDispatchWitness *w,
@@ -121,7 +138,7 @@ static BOOL binding_exact(const SudekiMpControlUpdateDispatchWitness *w,
 }
 static BOOL same_native_party(const SudekiMpLanStoryNativeRoster *a,
     const SudekiMpLanStoryNativeRoster *b) {
-    return a->world==b->world && a->descriptor==b->descriptor && a->group==b->group &&
+    return a->world==b->world && (a->descriptor==b->descriptor || a->epoch==b->epoch) && a->group==b->group &&
         a->controller==b->controller && a->epoch==b->epoch &&
         a->available_mask==b->available_mask && !memcmp(a->actors,b->actors,sizeof(a->actors)) &&
         !memcmp(a->ai,b->ai,sizeof(a->ai));
@@ -144,7 +161,7 @@ static BOOL input_filter(const SudekiMpControlUpdateDispatchWitness *w,
     if(blocked) {
         if(!input_owner.owned) {
             if(current!=1 || pending!=1 || !menus_clear()) return FALSE;
-            input_owner.world=r->world; input_owner.descriptor=r->descriptor;
+            input_owner.world=r->world; input_owner.descriptor=r->descriptor; input_owner.epoch=r->epoch;
             input_owner.group=r->group; input_owner.controller=c;
             input_owner.owned=TRUE; input_owner.releasing=FALSE;
         } else if(input_owner.releasing) {
@@ -325,9 +342,16 @@ BOOL SudekiMpLanStoryHostControlDrain(void *controller,
 BOOL SudekiMpLanStoryHostControlBound(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene) {
     SudekiMpLanStoryNativeRoster r;
-    if(stopping || requested<4u || rotation.entered || !observe(controller,w,scene,&r) ||
-        !owner_matches(&r) || r.leader_character!=locked || !binding_exact(w,&r,TRUE)) return FALSE;
-    return SudekiMpLanStoryObserverRosterStillExact(w,&r);
+    static const char *trace; static unsigned traces;
+    const char *why=stopping?"stopping":requested<4u?"requested":rotation.entered?"rotation":
+        !observe(controller,w,scene,&r)?"observe":!owner_matches(&r)?"owner":
+        r.leader_character!=locked?"leader":!binding_exact(w,&r,TRUE)?"binding":
+        !SudekiMpLanStoryObserverRosterStillExact(w,&r)?"roster":NULL;
+    if(why!=trace && traces<48u) {
+        ++traces; trace=why;
+        SudekiMpLogFormat("lan_story_host_control event=bound result=%s\r\n",why?why:"bound");
+    }
+    return why==NULL;
 }
 BOOL SudekiMpLanStoryHostControlReady(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene) {
