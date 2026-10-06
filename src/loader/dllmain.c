@@ -24,6 +24,7 @@
 #include "hooks/lan_story_temp_exterior.h"
 #include "hooks/lan_story_pause_trace.h"
 #include "hooks/lan_story_anim_trace.h"
+#include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_name_tags.h"
 #include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
@@ -331,6 +332,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaWindowPolicy()) return FALSE;
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
+    if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpLanStoryNameTagsUninstall()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
@@ -985,6 +987,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||
+            /* Client ambient animation for zone-placed props (water, chimes,
+             * leaves): zero-delta renderers no entity owns get a local delta.
+             * Shares the AnimTrace entry bytes, so the probe excludes it. */
+            (saved_story && !read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
+                !config_key_false(config_path,L"StoryAreas",L"AmbientAnimation") &&
+                !SudekiMpLanStoryAmbientInstall(game_module)) ||
             !SudekiMpInstallLobbyGameplay(game_module) ||
             ((saved_load_probe || saved_story) && !SudekiMpLanStoryTaskTraceInstall(game_module)) ||
             ((saved_load_probe || saved_story) && !SudekiMpInstallLanStoryLoad(game_module)) ||

@@ -31,6 +31,10 @@ typedef struct SudekiMpLanStoryWorldAnimateTarget {
     void *object,*renderer; uint32_t identifier; uint16_t kind; uint8_t character;
 } SudekiMpLanStoryWorldAnimateTarget;
 unsigned SudekiMpLanStoryWorldSplitAnimateTargets(SudekiMpLanStoryWorldAnimateTarget *out,unsigned max);
+/* Renderers owned by native registry entities (entity CPosition render
+ * wrapper, plus party-character model banks). Copy-only pointers for the
+ * ambient adapter's exclusion list; re-validated by nobody, compared only. */
+unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max);
 /* Client: party characters in a different host area keep their last pose. */
 void SudekiMpLanStoryWorldSetForeignCharacters(uint8_t mask);
 BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,

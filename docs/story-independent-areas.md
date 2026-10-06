@@ -748,6 +748,26 @@ client phase profile, the split animate summary and the hitch detector) are on
 by default and switched off with `[StoryAreas] ResearchDiagnostics=false`;
 the animation renderer trace stays opt-in through `[StoryAreas] AnimTrace`.
 
+Client ambient animation (CONFIRMED_LIVE, 2026-10-06, Ailish host / Tal
+client, New Brightwater): the contained client holds the native full pause, so
+the frame dispatcher (RVA 0xA5B0) hands every scene update a zero delta.
+Zone-placed props (river, waterfall, fountain, chimes, leaves) are scene
+objects without a registry entity, so no replicated pose reaches them and the
+animation renderer update (RVA 0x222B50) never advances them; the harbour sea
+is the zone renderer's one sub-object (class vtable RVA 0x2DF7A4) whose update
+(RVA 0x2171B0) only accumulates two phase values from the delta. The
+client-only adapter `src/hooks/lan_story_ambient.c` owns both entries and,
+while the runtime renews its lease after each successful presentation,
+replaces a zero incoming delta with a bounded local frame delta (cap 50 ms,
+zero after a 250 ms gap). Renderers owned by registry entities (the entity
+CPosition render wrapper and the party-character model banks, enumerated by
+`SudekiMpLanStoryWorldOwnedRenderers`) keep the native zero delta, so
+presentation stays authoritative; the host never substitutes. Owner confirmed
+harbour, river and fountain motion on the client with NPCs unchanged. Disabled
+with `[StoryAreas] AmbientAnimation=false`; mutually exclusive with the
+AnimTrace probe, which uses the same entry bytes. Other zones' water classes
+are unverified, and the UI scene also receives the cosmetic delta.
+
 Known limits: only the host lead can use a door; remote players cannot enter.
 The client still tolerates empty channels per channel for actors the host did
 not advance. Other-area characters remain visible at their last pose. The host

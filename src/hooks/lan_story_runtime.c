@@ -15,6 +15,7 @@
 #include "hooks/lan_story_world.h"
 #include "hooks/lan_story_effects.h"
 #include "hooks/lan_story_realtime.h"
+#include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_quick_menu.h"
 #include "hooks/lan_story_render.h"
 #include "hooks/lan_story_host_control.h"
@@ -779,6 +780,7 @@ static void present(void) {
         }
     }
     result=SudekiMpLanStoryClientPresent(apply_presented_frame,&presented)?4u:3u;
+    if(result==4u) SudekiMpLanStoryAmbientSetActive(TRUE);
     if(result==3u && presented.resources_waiting && SudekiMpLanStoryClientService(&report)) result=7u;
     timing_end(&present_timing,present_start);
     {
@@ -2237,6 +2239,7 @@ static BOOL retire_runtime(BOOL exit_to_title) {
      * them before frontend tasks can reuse their addresses; no task is being
      * cancelled or declared normally retired by this plain-data reset. */
     if(exited && !SudekiMpLanStoryTaskTraceForgetExitedWorld()) return retain_module();
+    SudekiMpLanStoryAmbientSetActive(FALSE);
     if(client_attempted && !SudekiMpLanStoryClientUninstall()) return retain_module();
     client_attempted=FALSE;
     if(menu_attempted && !SudekiMpLanPartyMenuNativeUninstall()) return retain_module();

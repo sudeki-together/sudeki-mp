@@ -185,6 +185,36 @@ static BOOL registry_capture(Registry *r) {
     if(!r->count || r->count>MAX_REGISTRY || !readable(r->entries,r->count*sizeof(void *))) return FALSE;
     memcpy(r->entities,r->entries,r->count*sizeof(void *)); return registry_still(r);
 }
+unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) {
+    static const uint32_t pc_vtables[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
+    unsigned n=0;
+    if(!base || !out || !max || !readable(base+0x409d8cu,4u)) return 0;
+    const uint8_t *owner=*(const uint8_t *const *)(base+0x409d8cu);
+    if(!readable(owner,0x40u)) return 0;
+    unsigned count=*(const uint32_t *)(owner+0x34u);
+    void *const *entries=*(void *const *const *)(owner+0x3cu);
+    if(!count || count>MAX_REGISTRY || !readable(entries,count*sizeof(void *))) return 0;
+    for(unsigned i=0;i<count && n<max;++i) {
+        const uint8_t *e=entries[i];
+        if(!readable(e,0x48u)) continue;
+        const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
+        if(readable(position,0xb8u) && *(void *const *)position==base+0x2cdefcu &&
+            *(const void *const *)(position+0x10u)==e) {
+            const uint8_t *wrapper=*(const uint8_t *const *)(position+0xb4u);
+            if(readable(wrapper,0x14u) && *(void *const *)(wrapper+0x10u)) out[n++]=*(void **)(wrapper+0x10u);
+        }
+        for(unsigned c=0;c<4u && n<max;++c) if(*(void *const *)e==base+pc_vtables[c]) {
+            const uint8_t *m=*(const uint8_t *const *)(e+0x130u);
+            if(!readable(m,0x168u)) break;
+            for(unsigned k=0;k<2u && n<max;++k) {
+                const uint8_t *wrapper=*(const uint8_t *const *)(m+0x160u+k*4u);
+                if(readable(wrapper,0x14u) && *(void *const *)(wrapper+0x10u)) out[n++]=*(void **)(wrapper+0x10u);
+            }
+            break;
+        }
+    }
+    return n;
+}
 
 /* Method slots and entry bytes are shared with the established player world
  * renderer adapter. No native getter is called while capturing host state. */
@@ -462,9 +492,125 @@ static BOOL excluded_capture(void) {
     }
     return TRUE;
 }
+
+/* Research diagnostics (gated): one bounded catalog dump per distinct
+ * identity set per side, and a once-per-second scenery pose line. Reads only
+ * structures the surrounding traversal already proved; no native call. */
+static uint32_t catalog_digest[2]; static unsigned catalog_dumps,scenery_lines; static DWORD scenery_logged;
+static void entity_name(const Target *t,char out[48]) {
+    out[0]='?'; out[1]=0;
+    const uint32_t *r=*(const uint32_t *const *)(t->entity+0x38u);
+    if(!readable(r,8u)) return;
+    const char *s=(const char *)(uintptr_t)r[1]; unsigned k=0;
+    while(k<47u && readable(s+k,1u) && s[k]>=0x20 && s[k]<0x7f) { out[k]=s[k]; ++k; }
+    out[k]=0;
+}
+static void log_catalog(const Target *t,unsigned n,BOOL write) {
+    if(!SudekiMpLogResearchEnabled() || catalog_dumps>=8u) return;
+    uint32_t digest=2166136261u;
+    for(unsigned i=0;i<n;++i) { digest=(digest^t[i].identifier)*16777619u; digest=(digest^t[i].kind)*16777619u; }
+    digest=(digest^n)*16777619u;
+    if(digest==catalog_digest[write?1u:0u]) return;
+    catalog_digest[write?1u:0u]=digest; ++catalog_dumps;
+    SudekiMpLogFormat("lan_story_world event=catalog side=%s count=%u\r\n",write?"client":"host",n);
+    for(unsigned i=0;i<n;++i) {
+        char name[48]; entity_name(&t[i],name);
+        const uint8_t *row=t[i].rows[0];
+        SudekiMpLogFormat("lan_story_world event=catalog_entry side=%s index=%u kind=%04x identifier=%08lx character=%u name=%s animations=%u submodels=%u selector=%u state=%u rate=%.3f time=%.3f phase=%.3f hidden=%u\r\n",
+            write?"client":"host",i,(unsigned)t[i].kind,(unsigned long)t[i].identifier,t[i].character,name,
+            t[i].animations,t[i].submodels,(unsigned)*(const uint16_t *)row,(unsigned)*(const uint16_t *)(row+2u),
+            (double)*(const float *)(row+4u),(double)*(const float *)(row+8u),(double)*(const float *)(row+0xcu),
+            (unsigned)((*(const uint32_t *)(t[i].object+0x34u)&4u)!=0u));
+    }
+}
+static BOOL scenery_log_due(void) {
+    DWORD now=GetTickCount();
+    if(!SudekiMpLogResearchEnabled() || scenery_lines>=600u || now-scenery_logged<1000u) return FALSE;
+    scenery_logged=now; return TRUE;
+}
+static void log_scenery_pose(const char *side,const Target *t,const SudekiMpLanStoryWorldActor *a) {
+    char name[48]; entity_name(t,name); ++scenery_lines;
+    const uint8_t *row=t->rows[0];
+    SudekiMpLogFormat("lan_story_world event=scenery_pose side=%s identifier=%08lx name=%s wire_clip=%08lx wire_state=%u wire_time=%.3f wire_rate=%.3f local_selector=%u local_state=%u local_time=%.3f local_phase=%.3f hidden=%u\r\n",
+        side,(unsigned long)t->identifier,name,(unsigned long)a->clip[0],a->state[0],(double)a->time[0],(double)a->rate[0],
+        (unsigned)*(const uint16_t *)row,(unsigned)*(const uint16_t *)(row+2u),(double)*(const float *)(row+8u),(double)*(const float *)(row+0xcu),
+        (unsigned)((*(const uint32_t *)(t->object+0x34u)&4u)!=0u));
+}
+static unsigned registry_dumps;
+/* Research (gated): one bounded dump of the native entity registry per side,
+ * naming every generic entity the catalog leaves out and why. Read-only. */
+static void log_registry(const Registry *registry,BOOL write) {
+    if(!SudekiMpLogResearchEnabled() || (registry_dumps&(write?2u:1u))) return;
+    registry_dumps|=write?2u:1u;
+    SudekiMpLogFormat("lan_story_world event=registry side=%s count=%u\r\n",write?"client":"host",registry->count);
+    /* Main scene special members (scene+8 zone renderer, scene+0xc) and the
+     * zone renderer's two sub-renderer arrays updated by 612B50 (research). */
+    if(readable(base+0x408d58u,4u)) {
+        const uint8_t *owner=*(const uint8_t *const *)(base+0x408d58u);
+        const uint8_t *scene=readable(owner,0x44u)?*(const uint8_t *const *)(owner+0x40u):NULL;
+        if(readable(scene,0x8cu)) {
+            for(unsigned m=0;m<2u;++m) {
+                const uint8_t *o=*(const uint8_t *const *)(scene+8u+m*4u);
+                const void *const *vt=readable(o,4u)?*(const void *const *const *)o:NULL;
+                unsigned vt_rva=vt?(unsigned)((uintptr_t)vt-(uintptr_t)base):0u;
+                unsigned update=vt && readable(vt,12u)?(unsigned)((uintptr_t)vt[2]-(uintptr_t)base):0u;
+                SudekiMpLogFormat("lan_story_world event=scene_member side=%s member=%u object=%p vtable=%06x update=%06x\r\n",
+                    write?"client":"host",m,(const void *)o,vt_rva,update);
+                if(m==0u && update==0x212b50u && readable(o,0x128u)) {
+                    const uint8_t *desc=*(const uint8_t *const *)(o+0x3cu);
+                    if(!readable(desc,0xacu)) continue;
+                    unsigned n1=*(const uint32_t *)(desc+0xa4u),n2=*(const uint32_t *)(desc+0xa8u);
+                    SudekiMpLogFormat("lan_story_world event=zone_renderer side=%s descriptor=%p array1=%u array2=%u\r\n",write?"client":"host",(const void *)desc,n1,n2);
+                    for(unsigned i=0;i<n1 && i<32u;++i) {
+                        const uint8_t *entry=o+0xd8u+i*0x18u;
+                        const uint8_t *sub=readable(entry,4u)?*(const uint8_t *const *)entry:NULL;
+                        const void *const *svt=readable(sub,4u)?*(const void *const *const *)sub:NULL;
+                        SudekiMpLogFormat("lan_story_world event=zone_sub side=%s array=1 index=%u object=%p vtable=%06x update=%06x\r\n",
+                            write?"client":"host",i,(const void *)sub,svt?(unsigned)((uintptr_t)svt-(uintptr_t)base):0u,
+                            svt && readable(svt,12u)?(unsigned)((uintptr_t)svt[2]-(uintptr_t)base):0u);
+                    }
+                    const uint8_t *const *list=*(const uint8_t *const *const *)(o+0x124u);
+                    for(unsigned i=0;i<n2 && i<32u && readable(list,(i+1u)*4u);++i) {
+                        const uint8_t *sub=list[i];
+                        const void *const *svt=readable(sub,4u)?*(const void *const *const *)sub:NULL;
+                        SudekiMpLogFormat("lan_story_world event=zone_sub side=%s array=2 index=%u object=%p vtable=%06x update=%06x\r\n",
+                            write?"client":"host",i,(const void *)sub,svt?(unsigned)((uintptr_t)svt-(uintptr_t)base):0u,
+                            svt && readable(svt,12u)?(unsigned)((uintptr_t)svt[2]-(uintptr_t)base):0u);
+                    }
+                }
+            }
+        }
+    }
+    unsigned lines=0;
+    for(unsigned i=0;i<registry->count && lines<400u;++i) {
+        const uint8_t *e=registry->entities[i];
+        if(!readable(e,0x48u)) { SudekiMpLogFormat("lan_story_world event=registry_entry side=%s index=%u unreadable=1\r\n",write?"client":"host",i); ++lines; continue; }
+        uintptr_t vt=(uintptr_t)*(void *const *)e; unsigned rva=vt>=(uintptr_t)base?(unsigned)(vt-(uintptr_t)base):0u;
+        BOOL generic=*(void *const *)e==base+0x2d5b00u,npc=*(void *const *)e==base+0x2d65a0u;
+        char name[48]="-"; (void)generic; (void)npc;
+        /* Shared base layout (slot-1 registrar 53E1C0): +30 kind bits, +34
+         * identifier, +38 ResourceName. The +44 pointer is only read when it
+         * is a real CPosition (vtable 2CDEFC owned by this entity). */
+        { Target t={.entity=(uint8_t *)e}; entity_name(&t,name); }
+        const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
+        unsigned pos_vt=position && readable(position,0x14u)?(unsigned)((uintptr_t)*(void *const *)position-(uintptr_t)base):0u;
+        if(pos_vt!=0x2cdefcu || *(const void *const *)(position+0x10u)!=e) position=NULL;
+        const void *wrapper=position && readable(position,0xb8u)?*(const void *const *)(position+0xb4u):NULL;
+        unsigned wrapper_object_vt=0u,wrapper_renderer_vt=0u;
+        if(readable(wrapper,0x14u)) {
+            const uint8_t *o=*(const uint8_t *const *)((const uint8_t *)wrapper+8u),*r=*(const uint8_t *const *)((const uint8_t *)wrapper+0x10u);
+            if(readable(o,4u)) wrapper_object_vt=(unsigned)((uintptr_t)*(void *const *)o-(uintptr_t)base);
+            if(readable(r,4u)) wrapper_renderer_vt=(unsigned)((uintptr_t)*(void *const *)r-(uintptr_t)base);
+        }
+        SudekiMpLogFormat("lan_story_world event=registry_entry side=%s index=%u vtable=%06x kind=%04x identifier=%08lx name=%s position=%p position_vtable=%06x wrapper=%p object_vtable=%06x renderer_vtable=%06x\r\n",
+            write?"client":"host",i,rva,(unsigned)(*(const uint32_t *)(e+0x30u)&0x1fffu),(unsigned long)*(const uint32_t *)(e+0x34u),name,(const void *)position,pos_vt,wrapper,wrapper_object_vt,wrapper_renderer_vt);
+        ++lines;
+    }
+}
 static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster *roster,
     Target *targets,unsigned *count,BOOL write) {
     unsigned n=0;
+    log_registry(registry,write);
     for(unsigned i=0;i<registry->count;++i) {
         observe_stage("registry_entry",0,i);
         uint8_t *entity=registry->entities[i];
@@ -505,6 +651,7 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
         if(matches!=1u) return FALSE;
     }
     qsort(targets,n,sizeof(*targets),target_order); *count=n;
+    log_catalog(targets,n,write);
     return registry_still(registry);
 }
 static BOOL read_native_pose(const Target *t,SudekiMpLanStoryWorldActor *a) {
@@ -762,12 +909,13 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
     excluded_count=0;
     frame.epoch=party->epoch; frame.revision=party->revision; frame.sequence=party->sequence;
     frame.host_tick=party->host_tick; frame.count=(uint8_t)count;
-    uint32_t generation=next_generation;
+    uint32_t generation=next_generation; BOOL scenery_due=scenery_log_due();
     for(unsigned i=0;i<count;++i) {
         next[i].target=targets[i];
         if(!read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base)) {
             error=ERROR_NOT_SUPPORTED; goto fail;
         }
+        if(scenery_due && scenery(&targets[i])) log_scenery_pose("host",&targets[i],&frame.actors[i]);
         next[i].tick=party->host_tick;
         const Bound *old=NULL;
         if(host_seen && host_epoch==party->epoch) for(unsigned j=0;j<host_count;++j)
@@ -1479,6 +1627,7 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     if(count!=frame->count || (client_seen && (frame->epoch!=client_epoch || count!=client_count))) {
         observe_stage("catalog_identity",0,(count<<16)|frame->count); goto fail;
     }
+    BOOL scenery_due=scenery_log_due();
     for(unsigned i=0;i<count;++i) {
         if(client_seen && (!same_target(&client_bound[i].target,&targets[i]) ||
             client_bound[i].previous.kind!=frame->actors[i].kind ||
@@ -1495,6 +1644,7 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
         profile_start=profile_now();
         BOOL supported=pose_supported(&targets[i],&frame->actors[i],selectors[i]);
         profile_add(1,profile_start);
+        if(scenery_due && scenery(&targets[i])) log_scenery_pose(supported?"client":"client_unsupported",&targets[i],&frame->actors[i]);
         skip_pose[i]=(uint8_t)empty_channels;
         if(empty_clip_hit) ++empty_clip_skips;
         if(!supported) {
