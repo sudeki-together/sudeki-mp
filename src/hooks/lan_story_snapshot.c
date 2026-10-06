@@ -1,4 +1,5 @@
 #include "hooks/lan_story_snapshot.h"
+#include "engine/log.h"
 #include "cleanroom/engine.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
@@ -131,19 +132,20 @@ BOOL SudekiMpLanStoryCapturePresentation(SudekiMpLanStoryCapture *capture,
     return SudekiMpLanStoryCinematicCaptureSpeech(&capture->speech,party,out,
         view_capture_exact,&scope);
 }
-BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
+static const char *capture_stage="start"; static unsigned capture_character;
+static BOOL capture_movement_inner(SudekiMpLanStoryCapture *capture,
     SudekiMpLanPartySession *session,void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,
     BOOL native_poses,uint32_t now,SudekiMpLanStoryFrame *out) {
     SudekiMpLanStoryNativeRoster roster;
     SudekiMpLanStoryFrame frame={0};
     ActorObservation actor_before[4]={{0}}; BOOL combat_before,combat_after;
-    if(!capture || !session || !out || SudekiMpLanPartyLocalSeat(session)!=0u ||
+capture_stage="roster_or_world";     if(!capture || !session || !out || SudekiMpLanPartyLocalSeat(session)!=0u ||
         !SudekiMpLanStoryObserverRoster(controller,w,scene,&roster) || !capturable_world(native_poses,&combat_before)) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
-    if(capture->sequence==UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return FALSE; }
-    if(capture->sequence && ((int32_t)(now-capture->last_tick)<=0 ||
+capture_stage="sequence";     if(capture->sequence==UINT32_MAX) { SetLastError(ERROR_ARITHMETIC_OVERFLOW); return FALSE; }
+capture_stage="retry_order";     if(capture->sequence && ((int32_t)(now-capture->last_tick)<=0 ||
         scene->epoch<capture->epoch || scene->revision<capture->revision)) {
         SetLastError(ERROR_RETRY); return FALSE;
     }
@@ -158,6 +160,7 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
         if(!(scene->available_mask&(1u<<c))) {
             next.actors[c]=NULL; memset(&next.motion[c],0,sizeof(next.motion[c])); continue;
         }
+        capture_character=c; capture_stage="fresh";
         BOOL fresh=next.epoch!=scene->epoch || next.actors[c]!=roster.actors[c];
         if(fresh) {
             if(next.generation[c]==UINT32_MAX) {
@@ -165,7 +168,7 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
             }
             ++next.generation[c]; memset(&next.motion[c],0,sizeof(next.motion[c]));
         }
-        if(!SudekiMpLanStoryObserverRosterStillExact(w,&roster) ||
+capture_stage="observe_actor";         if(!SudekiMpLanStoryObserverRosterStillExact(w,&roster) ||
             !observe_actor(roster.actors[c],native_poses,&actor_before[c])) {
             SetLastError(ERROR_BUSY); return FALSE;
         }
@@ -176,7 +179,17 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
         actor->weapon_item_plus_one=actor_before[c].item;
         actor->weapon_visible=actor_before[c].weapon_visible;
         memcpy(actor->weapon_attachment,actor_before[c].attachment,sizeof(actor->weapon_attachment));
-        if(!SudekiMpCleanroomEngineActorPosition(types[c],position) ||
+        /* A model without the authored hand locator (e.g. a [ResourceSwap]
+         * body) cannot show its equipped weapon; publish it as hidden rather
+         * than refusing the whole frame. Native equipment is untouched. */
+        if(actor->weapon_visible && !actor->weapon_attachment[0]) {
+            static unsigned unattachable_logs;
+            if(unattachable_logs<8u && SudekiMpLogResearchEnabled()) { ++unattachable_logs;
+                SudekiMpLogFormat("lan_story_snapshot event=weapon_unattachable character=%u item_plus_one=%u attachment=%u,%u policy=published_hidden\r\n",
+                    c,actor->weapon_item_plus_one,actor->weapon_attachment[0],actor->weapon_attachment[1]); }
+            actor->weapon_visible=0;
+        }
+capture_stage="position_resources";         if(!SudekiMpCleanroomEngineActorPosition(types[c],position) ||
             !SudekiMpCleanroomEngineActorFacing(types[c],facing) ||
             !SudekiMpCleanroomEngineActorResources(types[c],&hp,&sp) ||
             !isfinite(hp) || !isfinite(sp) || hp<0 || sp<0 ||
@@ -184,7 +197,7 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
             SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
         }
         actor->native_pose=native_poses?1u:0u;
-        if(!native_poses && (!SudekiMpCleanroomEngineWorldMotion(types[c],&native) ||
+capture_stage="motion";         if(!native_poses && (!SudekiMpCleanroomEngineWorldMotion(types[c],&native) ||
             !SudekiMpLanPartyMotionObserve(actor_types[c],native.selector[0],&actor->animation_state) ||
             !SudekiMpLanPartyMotionCapture(actor_types[c],native.selector,native.state,
                 native.rate,native.time,native.blend,fresh?NULL:&next.motion[c],&actor->locomotion))) {
@@ -193,10 +206,17 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
         actor->x=position[0]; actor->y=position[1]; actor->z=position[2];
         actor->facing_x=facing[0]; actor->facing_z=facing[1];
         actor->hp=(uint32_t)hp; actor->sp=(uint32_t)sp;
-        if(!SudekiMpLanStoryActorValid(actor,c)) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
+capture_stage="actor_valid";         if(!SudekiMpLanStoryActorValid(actor,c)) {
+            static DWORD invalid_logged;
+            if(SudekiMpLogResearchEnabled() && now-invalid_logged>=1000u) { invalid_logged=now;
+                SudekiMpLogFormat("lan_story_snapshot event=actor_invalid character=%u item_plus_one=%u visible=%u attachment=%u,%u hp=%lu sp=%lu native_pose=%u pos=%.1f,%.1f,%.1f\r\n",
+                    c,actor->weapon_item_plus_one,actor->weapon_visible,actor->weapon_attachment[0],actor->weapon_attachment[1],
+                    (unsigned long)actor->hp,(unsigned long)actor->sp,actor->native_pose,(double)actor->x,(double)actor->y,(double)actor->z); }
+            SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
+        }
         next.actors[c]=roster.actors[c]; next.motion[c]=actor->locomotion;
     }
-    if(!capturable_world(native_poses,&combat_after) || combat_before!=combat_after || !SudekiMpLanStoryFrameMatchesScene(&frame,scene) ||
+capture_stage="post_world";     if(!capturable_world(native_poses,&combat_after) || combat_before!=combat_after || !SudekiMpLanStoryFrameMatchesScene(&frame,scene) ||
         !SudekiMpLanStoryObserverRosterStillExact(w,&roster)) {
         SetLastError(ERROR_RETRY); return FALSE;
     }
@@ -212,4 +232,21 @@ BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
     next.epoch=scene->epoch; next.revision=scene->revision;
     next.sequence=frame.sequence; next.last_tick=now;
     *capture=next; *out=frame; SetLastError(ERROR_SUCCESS); return TRUE;
+}
+
+BOOL SudekiMpLanStoryCaptureMovement(SudekiMpLanStoryCapture *capture,
+    SudekiMpLanPartySession *session,void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,
+    BOOL native_poses,uint32_t now,SudekiMpLanStoryFrame *out) {
+    capture_stage="start"; capture_character=255u;
+    BOOL ok=capture_movement_inner(capture,session,controller,w,scene,native_poses,now,out);
+    if(!ok) {
+        DWORD error=GetLastError(); static DWORD logged; static unsigned logs;
+        if(SudekiMpLogResearchEnabled() && error!=ERROR_RETRY && now-logged>=1000u && logs<300u) {
+            logged=now; ++logs;
+            SudekiMpLogFormat("lan_story_snapshot event=capture_refused stage=%s character=%u win32_error=%lu\r\n",capture_stage,capture_character,(unsigned long)error);
+        }
+        SetLastError(error);
+    }
+    return ok;
 }
