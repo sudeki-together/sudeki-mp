@@ -22,8 +22,12 @@ that loader.
 Before first launch, this beta checks that SUDEKI.exe is the supported GOG
 build. It never changes SUDEKI.exe, the game archives, or your save files.
 
-Choose a profile in the launcher: **Local co-op (2 players)**, **LAN arena
-host**, **LAN arena client**, **Cleanroom**, or **Safe launch**. Local co-op
+Choose a profile in the launcher: **Local co-op (2 players)**, **Cleanroom**,
+or **Safe launch**. The **LAN arena host** and **LAN arena client** test
+profiles (and the LAN IP/Port fields) appear only after ticking **Developer
+mode** on the Tools tab. Cleanroom shows a **Start as** list (Ailish, Tal,
+Elco, Buki): the test room starts as that hero, handy for checking a mod's
+look straight away. Local co-op
 reserves XInput slot 0 for Player 2 while Player 1 remains keyboard/mouse.
 LAN arena is a save-free, direct-IP, host-authoritative Tal/Ailish experiment;
 host and client each run a separate full-screen Sudeki process. Cleanroom is

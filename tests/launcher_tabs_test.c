@@ -35,8 +35,21 @@ static DWORD WINAPI exercise_tabs(void *unused) {
     assert(launch && profile && directory && skip_movies && identity);
     /* Play first: the workshop is hidden, the art column is shown. */
     assert(IsWindowVisible(directory) && !IsWindowVisible(pane) && IsWindowVisible(identity));
+    /* Developer mode off: no LAN arena profiles and no LAN address row. */
+    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 3);
+    assert(!IsWindowVisible(GetDlgItem(window, IDC_LAN_HOST)));
+    SendMessageW(GetDlgItem(window, IDC_DEVELOPER_MODE), BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_DEVELOPER_MODE, BN_CLICKED),
+                 (LPARAM)GetDlgItem(window, IDC_DEVELOPER_MODE));
     assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 5);
-    SendMessageW(profile, CB_SETCURSEL, SUDEKIMP_PROFILE_SAFE, 0);
+    assert(IsWindowVisible(GetDlgItem(window, IDC_LAN_HOST)));
+    set_profile(SUDEKIMP_PROFILE_LAN_HOST);
+    SendMessageW(GetDlgItem(window, IDC_DEVELOPER_MODE), BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_DEVELOPER_MODE, BN_CLICKED),
+                 (LPARAM)GetDlgItem(window, IDC_DEVELOPER_MODE));
+    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 3 &&
+           current_profile() == SUDEKIMP_PROFILE_LOCAL_COOP);
+    set_profile(SUDEKIMP_PROFILE_SAFE);
     SetWindowTextW(directory, L"synthetic-invalid-install");
     for (i = 0; i < 12; ++i) {
         click_tab(window, SUDEKIMP_TAB_MODS);
@@ -52,7 +65,7 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         assert(IsWindowVisible(skip_movies) && !IsWindowVisible(pane) && IsWindowVisible(identity));
         click_tab(window, SUDEKIMP_TAB_PLAY);
         assert(!IsWindowVisible(pane) && IsWindowVisible(directory));
-        assert(SendMessageW(profile, CB_GETCURSEL, 0, 0) == SUDEKIMP_PROFILE_SAFE);
+        assert(current_profile() == SUDEKIMP_PROFILE_SAFE);
         GetWindowTextW(directory, text, 128);
         assert(!wcscmp(text, L"synthetic-invalid-install"));
     }
@@ -61,10 +74,10 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         HWND lead = GetDlgItem(window, IDC_CLEANROOM_LEAD);
         WCHAR command[2048];
         assert(lead);
-        SendMessageW(profile, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+        set_profile(SUDEKIMP_PROFILE_LOCAL_COOP);
         SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
         assert(!IsWindowVisible(lead));
-        SendMessageW(profile, CB_SETCURSEL, SUDEKIMP_PROFILE_CLEANROOM, 0);
+        set_profile(SUDEKIMP_PROFILE_CLEANROOM);
         SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
         assert(IsWindowVisible(lead));
         click_tab(window, SUDEKIMP_TAB_MODS);
@@ -102,6 +115,6 @@ int wmain(void) {
     RemoveDirectoryW(file);
     RemoveDirectoryW(settings);
     assert(result == 0);
-    puts("LauncherTabsTest: passed (Mods workshop full width, options on Tools, Play state kept, Cleanroom start-as)");
+    puts("LauncherTabsTest: passed (Mods workshop full width, options on Tools, Play state kept, Cleanroom start-as, developer mode)");
     return 0;
 }

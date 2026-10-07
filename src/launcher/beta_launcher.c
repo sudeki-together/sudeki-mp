@@ -43,6 +43,10 @@ static HWND auto_update_checkbox;
 static HWND cleanroom_tools_checkbox;
 /* Cleanroom only: the hero the test room starts as (combo order below). */
 static HWND cleanroom_lead_label;
+/* Developer mode (Tools): shows the LAN arena test profiles and their address row. */
+static BOOL developer_mode;
+static HWND developer_mode_checkbox;
+static HWND lan_row[4];
 static HWND cleanroom_lead_combo;
 static const WCHAR *const cleanroom_lead_names[] = {L"Ailish", L"Tal", L"Elco", L"Buki"};
 static const WCHAR *const cleanroom_lead_arguments[] = {
@@ -303,6 +307,53 @@ static void persist_game_directory(const WCHAR *game_directory) {
     }
 }
 
+static const struct { int profile; const WCHAR *label; BOOL developer; } profile_entries[] = {
+    {SUDEKIMP_PROFILE_LOCAL_COOP, L"Local co-op (2 players)", FALSE},
+    {SUDEKIMP_PROFILE_LAN_HOST, L"LAN arena host — Tal (developer)", TRUE},
+    {SUDEKIMP_PROFILE_LAN_CLIENT, L"LAN arena client — Ailish (developer)", TRUE},
+    {SUDEKIMP_PROFILE_CLEANROOM, L"Cleanroom (test room)", FALSE},
+    {SUDEKIMP_PROFILE_SAFE, L"Safe launch", FALSE}
+};
+
+/* The list holds only the profiles available in the current mode; each
+   entry carries its profile number, so list positions never matter. */
+static int current_profile(void) {
+    LRESULT index = profile_combo == NULL ? CB_ERR :
+        SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    LRESULT data = index == CB_ERR ? CB_ERR :
+        SendMessageW(profile_combo, CB_GETITEMDATA, (WPARAM)index, 0);
+    return data >= SUDEKIMP_PROFILE_LOCAL_COOP && data <= SUDEKIMP_PROFILE_SAFE ?
+        (int)data : SUDEKIMP_PROFILE_LOCAL_COOP;
+}
+
+static void set_profile(int profile) {
+    LRESULT count, index;
+    if (profile_combo == NULL) return;
+    count = SendMessageW(profile_combo, CB_GETCOUNT, 0, 0);
+    for (index = 0; index < count; ++index) {
+        if (SendMessageW(profile_combo, CB_GETITEMDATA, (WPARAM)index, 0) == profile) {
+            SendMessageW(profile_combo, CB_SETCURSEL, (WPARAM)index, 0);
+            return;
+        }
+    }
+    SendMessageW(profile_combo, CB_SETCURSEL, 0, 0); /* hidden profile: Local co-op */
+}
+
+static void rebuild_profile_list(void) {
+    const int keep = current_profile();
+    size_t index;
+    if (profile_combo == NULL) return;
+    SendMessageW(profile_combo, CB_RESETCONTENT, 0, 0);
+    for (index = 0u; index < sizeof(profile_entries) / sizeof(profile_entries[0]); ++index) {
+        LRESULT item;
+        if (profile_entries[index].developer && !developer_mode) continue;
+        item = SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)profile_entries[index].label);
+        SendMessageW(profile_combo, CB_SETITEMDATA, (WPARAM)item,
+                     (LPARAM)profile_entries[index].profile);
+    }
+    set_profile(keep);
+}
+
 static int selected_cleanroom_lead(void) {
     int lead = cleanroom_lead_combo == NULL ? 0 :
         (int)SendMessageW(cleanroom_lead_combo, CB_GETCURSEL, 0, 0);
@@ -316,8 +367,7 @@ static void persist_launcher_options(void) {
     int profile;
     if (!get_settings_path(settings_path,
             sizeof(settings_path) / sizeof(settings_path[0]))) return;
-    profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
-        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    profile = current_profile();
     StringCchPrintfW(value, sizeof(value) / sizeof(value[0]), L"%d", profile);
     WritePrivateProfileStringW(L"launcher", L"profile", value, settings_path);
     if (lan_host_edit != NULL) {
@@ -338,6 +388,8 @@ static void persist_launcher_options(void) {
         cleanroom_tools_checkbox != NULL &&
             SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
             L"true" : L"false", settings_path);
+    WritePrivateProfileStringW(L"launcher", L"developer_mode",
+        developer_mode ? L"true" : L"false", settings_path);
     WritePrivateProfileStringW(L"launcher", L"cleanroom_lead",
         cleanroom_lead_names[selected_cleanroom_lead()], settings_path);
 }
@@ -357,13 +409,24 @@ static void load_saved_game_directory(void) {
     if (saved_directory[0] != L'\0') {
         SetWindowTextW(directory_edit, saved_directory);
     }
+    {
+        WCHAR flag[16];
+        GetPrivateProfileStringW(L"launcher", L"developer_mode", L"false", flag, 16,
+                                 settings_path);
+        developer_mode = lstrcmpiW(flag, L"true") == 0;
+        if (developer_mode_checkbox != NULL) {
+            SendMessageW(developer_mode_checkbox, BM_SETCHECK,
+                         developer_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        rebuild_profile_list();
+    }
     if (profile_combo != NULL) {
         int profile = GetPrivateProfileIntW(L"launcher", L"profile",
             SUDEKIMP_PROFILE_LOCAL_COOP, settings_path);
         if (profile < SUDEKIMP_PROFILE_LOCAL_COOP || profile > SUDEKIMP_PROFILE_SAFE) {
             profile = SUDEKIMP_PROFILE_LOCAL_COOP;
         }
-        SendMessageW(profile_combo, CB_SETCURSEL, (WPARAM)profile, 0);
+        set_profile(profile);
     }
     if (lan_host_edit != NULL) {
         GetPrivateProfileStringW(L"launcher", L"lan_host", L"127.0.0.1",
@@ -663,8 +726,7 @@ static void launch_game(HWND owner) {
     WCHAR command[MAX_PATH * 3u + 80u];
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
-    int selected_profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
-        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    int selected_profile = current_profile();
     SudekiMpLauncherProfile profile;
 
     if (selected_profile < SUDEKIMP_PROFILE_LOCAL_COOP ||
@@ -1516,8 +1578,14 @@ static void show_tab(int tab) {
 
 /* "Start as" belongs to the Cleanroom profile only. */
 static void update_cleanroom_lead_visibility(void) {
-    const int profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
-        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    const int profile = current_profile();
+    size_t index;
+    for (index = 0u; index < sizeof(lan_row) / sizeof(lan_row[0]); ++index) {
+        if (lan_row[index] != NULL) {
+            ShowWindow(lan_row[index],
+                       active_tab == SUDEKIMP_TAB_PLAY && developer_mode ? SW_SHOW : SW_HIDE);
+        }
+    }
     const int show = active_tab == SUDEKIMP_TAB_PLAY && profile == SUDEKIMP_PROFILE_CLEANROOM ?
         SW_SHOW : SW_HIDE;
     if (cleanroom_lead_label != NULL) ShowWindow(cleanroom_lead_label, show);
@@ -1615,12 +1683,7 @@ static void mark_settings_dirty(void) {
 }
 
 static int selected_profile(void) {
-    int profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
-        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
-    if (profile < SUDEKIMP_PROFILE_LOCAL_COOP || profile > SUDEKIMP_PROFILE_SAFE) {
-        profile = SUDEKIMP_PROFILE_LOCAL_COOP;
-    }
-    return profile;
+    return current_profile();
 }
 
 static BOOL is_checked(HWND checkbox) {
@@ -1818,7 +1881,7 @@ static void restore_tab_defaults(HWND owner) {
         return;
     }
     if (active_tab == SUDEKIMP_TAB_PLAY) {
-        SendMessageW(profile_combo, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+        set_profile(SUDEKIMP_PROFILE_LOCAL_COOP);
         SetWindowTextW(lan_host_edit, L"127.0.0.1");
         SetWindowTextW(lan_port_edit, L"26770");
         SendMessageW(cleanroom_tools_checkbox, BM_SETCHECK, BST_CHECKED, 0);
@@ -2186,6 +2249,16 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     update_mod_availability();
                     update_cleanroom_lead_visibility();
                     return 0;
+                case IDC_DEVELOPER_MODE:
+                    developer_mode = is_checked(developer_mode_checkbox);
+                    rebuild_profile_list();
+                    persist_launcher_options();
+                    update_mod_availability();
+                    update_cleanroom_lead_visibility();
+                    set_status(developer_mode ?
+                        L"Developer mode on: LAN arena test profiles are on the Play tab." :
+                        L"Developer mode off: LAN arena test profiles are hidden.");
+                    return 0;
                 case IDC_CLEANROOM_LEAD:
                     if (notification == CBN_SELCHANGE) {
                         persist_launcher_options();
@@ -2458,12 +2531,7 @@ int WINAPI wWinMain(HINSTANCE instance,
         create_label(tab, L"Launch", x, y + 104, 300, 22, IDC_HEADING, 0u);
         create_label(tab, L"Profile:", x, y + 138, 70, 22, 0, 0u);
         profile_combo = create_combo(tab, x + 76, y + 134, 320, IDC_PROFILE);
-        SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Local co-op (2 players)");
-        SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"LAN arena host — Tal");
-        SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"LAN arena client — Ailish");
-        SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Cleanroom");
-        SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Safe launch");
-        SendMessageW(profile_combo, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+        rebuild_profile_list();
         cleanroom_lead_label = create_label(tab, L"Start as:", x + 410, y + 138, 70, 22, 0, 0u);
         cleanroom_lead_combo = create_combo(tab, x + 484, y + 134, 112, IDC_CLEANROOM_LEAD);
         {
@@ -2474,14 +2542,16 @@ int WINAPI wWinMain(HINSTANCE instance,
             }
             SendMessageW(cleanroom_lead_combo, CB_SETCURSEL, 0, 0);
         }
-        create_label(tab, L"LAN IP:", x, y + 178, 70, 22, 0, 0u);
+        lan_row[0] = create_label(tab, L"LAN IP:", x, y + 178, 70, 22, 0, 0u);
         lan_host_edit = create_child(tab, WS_EX_CLIENTEDGE, L"EDIT", L"127.0.0.1",
                                      WS_TABSTOP | ES_AUTOHSCROLL,
                                      x + 76, y + 174, 170, 28, IDC_LAN_HOST);
-        create_label(tab, L"Port:", x + 262, y + 178, 44, 22, 0, 0u);
+        lan_row[1] = create_label(tab, L"Port:", x + 262, y + 178, 44, 22, 0, 0u);
         lan_port_edit = create_child(tab, WS_EX_CLIENTEDGE, L"EDIT", L"26770",
                                      WS_TABSTOP | ES_NUMBER,
                                      x + 310, y + 174, 86, 28, IDC_LAN_PORT);
+        lan_row[2] = lan_host_edit;
+        lan_row[3] = lan_port_edit;
         cleanroom_tools_checkbox = create_checkbox(
             tab,
             L"Enable cleanroom sandbox tools (F8): actors, dummy, combat/camera, inventory, "
@@ -2606,10 +2676,9 @@ int WINAPI wWinMain(HINSTANCE instance,
                           290, 34, tools[index].identifier);
         }
         create_label(tab,
-                     L"LAN arena and cleanroom do not read campaign saves. Talos research "
-                     L"flags are not exposed. Support logs are exported locally for manual "
-                     L"sharing; nothing is uploaded automatically.",
-                     x, y + 408, SUDEKIMP_CONTENT_W, 48, IDC_SAVE_WARNING, 0u);
+                     L"LAN arena and cleanroom do not read campaign saves. Support logs stay "
+                     L"on this PC until you share them; nothing is uploaded.",
+                     x, y + 432, SUDEKIMP_CONTENT_W, 40, IDC_SAVE_WARNING, 0u);
     }
 
     {
@@ -2641,6 +2710,9 @@ int WINAPI wWinMain(HINSTANCE instance,
                      L"uses the first two; LAN arena and cleanroom keep their fixed "
                      L"profiles. The story boost always starts off until you press F6.",
                      x, y + 136, SUDEKIMP_CONTENT_W, 48, IDC_NOTE, 0u);
+        developer_mode_checkbox = create_checkbox(
+            tab, L"Developer mode: show the LAN arena test profiles on Play",
+            x, y + 190, SUDEKIMP_CONTENT_W, 22, IDC_DEVELOPER_MODE);
     }
 
     status_label = create_label(SUDEKIMP_TAB_ALWAYS,
