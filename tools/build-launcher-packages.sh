@@ -49,6 +49,7 @@ mkdir -p "${windows_root}"
 cp -- "${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe" \
     "${project_dir}/build/mingw32/bin/SudekiMP.LauncherGUI.exe" \
     "${project_dir}/build/mingw32/bin/SudekiMP.XInputProbe.exe" \
+    "${project_dir}/build/mingw32/bin/mod-groups.ini" \
     "${project_dir}/build/mingw32/bin/SudekiMP.dll" \
     "${project_dir}/build/mingw32/bin/SudekiMP.ini" \
     "${windows_root}/"

@@ -90,3 +90,18 @@ Download and extract the ZIP yourself, then replace only this `SudekiMP`
 folder. This beta deliberately does not use an unsigned PowerShell self-updater:
 manual replacement is clearer, preserves your `SudekiMP.ini`, and never changes
 SUDEKI.exe, game data, or save files. Close Sudeki before replacing the folder.
+
+MODS TAB (EXPERIMENTAL)
+
+Choose your game folder on Play, then open Mods. Select a mod, character,
+category and texture; use Browse or drop an image, then Apply. Apply only saves
+into the mod folder. Start the game again to see the replacement. Revert removes
+this resource's entries from the selected mod. Other enabled mods may still
+replace it. Export PNG saves the base original for editing.
+
+The selector shows alphabetical folder load order; later enabled packages win.
+My Mods is the initial package inside the configured mods folder. Grouping uses
+editable name patterns in mod-groups.ini and may leave items under World/Other
+or Other textures. No game images are included, and Python is not required.
+Model Apply is disabled pending the owner-run live test; there is no OBJ/FBX
+converter. Native Windows/live game acceptance for this new editor is pending.

@@ -363,6 +363,8 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
 - [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
 - [docs/mod-packages.md](docs/mod-packages.md) — mod packages (textures,
   whole archive files, sound banks and movies), TexMod `.tpf` conversion, and the Clean 4x Font example
+- [docs/launcher-mods.md](docs/launcher-mods.md) — GUI Mods tab: character thumbnails,
+  texture Browse/drop, Apply/Revert/PNG export, package enable controls and verification limits
 - [docs/armour-choice.md](docs/armour-choice.md) — choose any owned armour from
   the Main Menu Armor page
 - [docs/windows-build.md](docs/windows-build.md) — native Windows build,

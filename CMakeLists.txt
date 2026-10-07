@@ -293,11 +293,23 @@ set_target_properties(SudekiMP.Launcher PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+add_library(SudekiMP.ModdingCore STATIC
+    src/modding/mod_archive.c src/modding/mod_image.c
+    src/modding/mod_manifest.c src/modding/mod_groups.c
+    src/engine/texture_mod_index.c)
+target_include_directories(SudekiMP.ModdingCore PUBLIC src)
+target_compile_options(SudekiMP.ModdingCore PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 add_executable(SudekiMP.BetaLauncher WIN32
     src/launcher/beta_launcher.c
+    src/launcher/mp3_wave.c
+    src/launcher/options_store.c
+    src/launcher/player_options.c
+    src/launcher/settings_page.c
     src/launcher/beta_launcher.rc
+    src/launcher/mods_panel.c
 )
-target_include_directories(SudekiMP.BetaLauncher PRIVATE src/launcher)
+target_include_directories(SudekiMP.BetaLauncher PRIVATE src/launcher src)
 target_compile_definitions(SudekiMP.BetaLauncher PRIVATE
     WIN32_LEAN_AND_MEAN
     UNICODE
@@ -305,7 +317,7 @@ target_compile_definitions(SudekiMP.BetaLauncher PRIVATE
 )
 target_compile_options(SudekiMP.BetaLauncher PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP.BetaLauncher PRIVATE -municode -static-libgcc)
-target_link_libraries(SudekiMP.BetaLauncher PRIVATE ole32 shell32 urlmon winmm)
+target_link_libraries(SudekiMP.BetaLauncher PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon winmm windowscodecs uuid comdlg32 comctl32 gdi32)
 set_target_properties(SudekiMP.BetaLauncher PROPERTIES
     OUTPUT_NAME "SudekiMP.LauncherGUI"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -526,6 +538,26 @@ target_compile_options(SudekiMP.AcceleratorCacheTest PRIVATE
     -Wall -Wextra -Wpedantic
 )
 set_target_properties(SudekiMP.AcceleratorCacheTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.Mp3WaveTest
+    tests/mp3_wave_test.c
+    src/launcher/mp3_wave.c
+)
+target_include_directories(SudekiMP.Mp3WaveTest PRIVATE src)
+target_compile_options(SudekiMP.Mp3WaveTest PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.Mp3WaveTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+add_executable(SudekiMP.PlayerOptionsTest
+    tests/player_options_test.c
+    src/launcher/player_options.c
+)
+target_include_directories(SudekiMP.PlayerOptionsTest PRIVATE src)
+target_compile_options(SudekiMP.PlayerOptionsTest PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(SudekiMP.PlayerOptionsTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -1974,3 +2006,36 @@ foreach(target SudekiMP.StoryLootTest SudekiMP.StoryLootSidecarTest SudekiMP.Sto
 endforeach()
 
 configure_file(config/SudekiMP.ini "${CMAKE_BINARY_DIR}/bin/SudekiMP.ini" COPYONLY)
+
+# Host-testable modding core, using synthetic archives/images only.
+add_executable(SudekiMP.ModdingCoreTest
+    tests/modding_core_test.c
+    tests/modding_archive_image_test.c
+    tests/modding_manifest_test.c
+    tests/modding_groups_test.c)
+target_link_libraries(SudekiMP.ModdingCoreTest PRIVATE SudekiMP.ModdingCore)
+target_include_directories(SudekiMP.ModdingCoreTest PRIVATE src)
+target_compile_options(SudekiMP.ModdingCoreTest PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+set_target_properties(SudekiMP.ModdingCoreTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+configure_file(data/mod-groups.ini "${CMAKE_BINARY_DIR}/bin/mod-groups.ini" COPYONLY)
+
+add_executable(SudekiMP.LauncherTabsTest
+    tests/launcher_tabs_test.c src/launcher/beta_launcher.rc
+    src/launcher/mods_panel.c src/launcher/mp3_wave.c src/launcher/options_store.c
+    src/launcher/player_options.c src/launcher/settings_page.c)
+target_include_directories(SudekiMP.LauncherTabsTest PRIVATE src src/launcher)
+target_compile_definitions(SudekiMP.LauncherTabsTest PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(SudekiMP.LauncherTabsTest PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+target_link_options(SudekiMP.LauncherTabsTest PRIVATE -municode -static-libgcc)
+target_link_libraries(SudekiMP.LauncherTabsTest PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon winmm windowscodecs uuid comdlg32 comctl32 gdi32)
+set_target_properties(SudekiMP.LauncherTabsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.LauncherModsUiTest
+    tests/launcher_mods_ui_test.c)
+target_include_directories(SudekiMP.LauncherModsUiTest PRIVATE src src/launcher)
+target_compile_definitions(SudekiMP.LauncherModsUiTest PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(SudekiMP.LauncherModsUiTest PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+target_link_options(SudekiMP.LauncherModsUiTest PRIVATE -municode -static-libgcc)
+target_link_libraries(SudekiMP.LauncherModsUiTest PRIVATE SudekiMP.ModdingCore ole32 shell32 windowscodecs uuid comdlg32 comctl32 gdi32)
+set_target_properties(SudekiMP.LauncherModsUiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

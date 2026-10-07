@@ -21,6 +21,20 @@ files: XACT wave banks (`.xwb`), sound banks (`.xsb`), speech
 (`sound/Speech/...`) and Bink movies (`.bik`). These sit beside the archives
 rather than inside them.
 
+## Launcher editor
+
+The graphical launcher now has **Play** and **Mods** tabs. Mods scans the
+player's own archives on a worker, displays configurable character/category
+thumbnails, and supports Browse/drop, texture Apply/Revert, and original PNG
+export. Apply saves into the selected package; restart the game to see it.
+The selector shows alphabetical load order and global/per-package enable
+controls. Players do not need Python.
+
+This new UI is `CONFIRMED_TEST` with synthetic fixtures under Wine; it is not
+new live-game proof. Model tiles remain experimental and model Apply is gated
+on the pending owner-run Talos test. See [Launcher Mods tab](launcher-mods.md)
+for usage, name-grouping limitations and the exact verification record.
+
 ## Package format
 
 A mod is a folder under the game's `mods` folder:
