@@ -361,6 +361,8 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
 - [docs/player-statehood-design.md](docs/player-statehood-design.md) — player
   leases, interaction authority, shared inventory, and shop/blacksmith roadmap
 - [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
+- [docs/texture-mods.md](docs/texture-mods.md) — texture mod packages,
+  TexMod `.tpf` conversion, and the Clean 4x Font example
 - [docs/windows-build.md](docs/windows-build.md) — native Windows build,
   validation, installation, and launch
 - [docs/windows-agent-handoff.md](docs/windows-agent-handoff.md) — bounded

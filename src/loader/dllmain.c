@@ -27,6 +27,7 @@
 #include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_area_fade.h"
 #include "hooks/resource_swap.h"
+#include "hooks/texture_mods.h"
 #include "hooks/lan_story_name_tags.h"
 #include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
@@ -336,6 +337,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
     if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpResourceSwapUninstall()) return FALSE;
+    if (!SudekiMpTextureModsUninstall()) return FALSE;
     if (!SudekiMpLanStoryNameTagsUninstall()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
@@ -371,6 +373,7 @@ static BOOL uninstall_runtime_hooks(void) {
     SudekiMpResetWeaponActivationAbi();
     SudekiMpResetSpiritActivationAbi();
     SudekiMpResetSkillActivationAbi();
+    (void)SudekiMpTextureModsUninstall();
     (void)SudekiMpUninstallAcceleratorCache();
     return TRUE;
 }
@@ -909,6 +912,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     }
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
+    }
+    /* Texture mod packages ([TextureMods], mods\<Mod>\mod.ini) for every
+     * launch profile. Installs nothing without an enabled texture or
+     * Dump=true; a refusal leaves the game unhooked and is not fatal. */
+    if (!SudekiMpTextureModsInstall(game_module, config_path)) {
+        SudekiMpLogFormat("texture_mods_error=%lu\r\n", (unsigned long)GetLastError());
     }
     /* Title entry candidate has no actor/session assignment. Keep its input
      * and UI seams exclusive with the old local roster and arena profiles. */
@@ -1545,6 +1554,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "environment_hook_or_startup_movie_bypass\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpTextureModsUninstall();
         (void)SudekiMpUninstallAcceleratorCache();
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -1597,6 +1607,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "character_switch_or_other_hook_owner\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpTextureModsUninstall();
         (void)SudekiMpUninstallAcceleratorCache();
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -2396,6 +2407,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=SOLWORLDM_full_file_sha256\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_post_movie_restore_error\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
@@ -2408,6 +2420,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "talos_post_movie_party_restore_error=exact_SOLWORLDM_"
                 "hash_mismatch\r\n");
             SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
@@ -2430,6 +2443,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=SOLWORLDM_full_file_sha256\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2442,6 +2456,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "talos_companion_staging_observation_error=exact_SOLWORLDM_"
                 "hash_mismatch\r\n");
             SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2469,6 +2484,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 (unsigned long)membership_validation.observed_value,
                 (unsigned long)membership_validation.checks_completed);
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2481,6 +2497,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=per_run_identity_generation\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
