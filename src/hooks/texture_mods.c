@@ -1,6 +1,7 @@
 #define COBJMACROS
 #include "hooks/texture_mods.h"
 #include "hooks/call_hook.h"
+#include "hooks/archive_mods.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "engine/texture_mod_index.h"
@@ -239,7 +240,7 @@ static wchar_t *read_section(const wchar_t *path, const wchar_t *section) {
 static void load_mod(const wchar_t *root, const wchar_t *folder_name) {
     wchar_t manifest[MAX_PATH], format[64], name[64];
     wchar_t *section, *line;
-    unsigned added = 0, rejected = 0, mod;
+    unsigned added = 0, files_added = 0, rejected = 0, mod;
     if (mod_count >= MAX_MODS || _snwprintf(manifest, MAX_PATH, L"%ls\\mod.ini", root) <= 0) return;
     manifest[MAX_PATH - 1] = 0;
     if (GetFileAttributesW(manifest) == INVALID_FILE_ATTRIBUTES) return;
@@ -255,23 +256,44 @@ static void load_mod(const wchar_t *root, const wchar_t *folder_name) {
         SudekiMpLogFormat("texture_mods event=mod_disabled mod=%s\r\n", mods[mod].name);
         return;
     }
-    if (!(section = read_section(manifest, L"Textures"))) {
-        SudekiMpLogFormat("texture_mods event=mod_refused mod=%s reason=textures_section\r\n", mods[mod].name);
-        return;
+    if (!(mods[mod].root = _wcsdup(root))) return;
+    /* [Textures]: 0xKEY = image (TexMod-compatible content key). */
+    if ((section = read_section(manifest, L"Textures")) != NULL) {
+        for (line = section; *line; line += wcslen(line) + 1u) {
+            char utf8[SUDEKIMP_TEXTURE_MOD_PATH_MAX + 32], path[SUDEKIMP_TEXTURE_MOD_PATH_MAX];
+            uint32_t key;
+            int parsed;
+            if (!WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8), NULL, NULL)) { ++rejected; continue; }
+            parsed = SudekiMpTextureModParseLine(utf8, &key, path, sizeof(path));
+            if (parsed > 0 && SudekiMpTextureModIndexAdd(&index_table, key, mod, path)) ++added;
+            else if (parsed) ++rejected;
+        }
+        free(section);
     }
-    if (!(mods[mod].root = _wcsdup(root))) { free(section); return; }
-    for (line = section; *line; line += wcslen(line) + 1u) {
-        char utf8[SUDEKIMP_TEXTURE_MOD_PATH_MAX + 32], path[SUDEKIMP_TEXTURE_MOD_PATH_MAX];
-        uint32_t key;
-        int parsed;
-        if (!WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8), NULL, NULL)) { ++rejected; continue; }
-        parsed = SudekiMpTextureModParseLine(utf8, &key, path, sizeof(path));
-        if (parsed > 0 && SudekiMpTextureModIndexAdd(&index_table, key, mod, path)) ++added;
-        else if (parsed) ++rejected;
+    /* [Files]: NAME.EXT (or 0xARCHIVEKEY) = file, a whole archive resource. */
+    if ((section = read_section(manifest, L"Files")) != NULL) {
+        wchar_t add_to[64];
+        GetPrivateProfileStringW(L"Mod", L"AddToArchive", L"SOLData.baf", add_to, 64, manifest);
+        for (line = section; *line; line += wcslen(line) + 1u) {
+            char utf8[SUDEKIMP_TEXTURE_MOD_PATH_MAX + SUDEKIMP_MOD_NAME_MAX + 32], name[SUDEKIMP_MOD_NAME_MAX + 1],
+                path[SUDEKIMP_TEXTURE_MOD_PATH_MAX];
+            wchar_t relative[SUDEKIMP_TEXTURE_MOD_PATH_MAX], full[MAX_PATH];
+            uint32_t key;
+            int parsed;
+            if (!WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, sizeof(utf8), NULL, NULL)) { ++rejected; continue; }
+            parsed = SudekiMpModFileParseLine(utf8, &key, name, sizeof(name), path, sizeof(path));
+            if (!parsed) continue;
+            if (parsed < 0 || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, relative, SUDEKIMP_TEXTURE_MOD_PATH_MAX) ||
+                _snwprintf(full, MAX_PATH, L"%ls\\%ls", root, relative) <= 0) { ++rejected; continue; }
+            full[MAX_PATH - 1] = 0;
+            for (wchar_t *p = full; *p; ++p) if (*p == L'/') *p = L'\\';
+            if (SudekiMpArchiveModsAdd(key, name, full, mods[mod].name, add_to)) ++files_added;
+            else ++rejected;
+        }
+        free(section);
     }
-    free(section);
     ++mod_count;
-    SudekiMpLogFormat("texture_mods event=mod_loaded mod=%s textures=%u rejected_lines=%u\r\n", mods[mod].name, added, rejected);
+    SudekiMpLogFormat("texture_mods event=mod_loaded mod=%s textures=%u files=%u rejected_lines=%u\r\n", mods[mod].name, added, files_added, rejected);
 }
 
 static int compare_names(const void *a, const void *b) { return _wcsicmp(*(wchar_t *const *)a, *(wchar_t *const *)b); }
@@ -301,7 +323,7 @@ static void load_mods(const wchar_t *folder) {
 
 static BOOL resolve_folder(HMODULE image, const wchar_t *config_path, wchar_t *folder) {
     wchar_t setting[MAX_PATH], game[MAX_PATH], *slash;
-    GetPrivateProfileStringW(L"TextureMods", L"Folder", L"mods", setting, MAX_PATH, config_path);
+    GetPrivateProfileStringW(L"Mods", L"Folder", L"mods", setting, MAX_PATH, config_path);
     if (setting[0] && (setting[1] == L':' || setting[0] == L'\\' || setting[0] == L'/')) {
         wcsncpy(folder, setting, MAX_PATH - 1);
         folder[MAX_PATH - 1] = 0;
@@ -315,6 +337,7 @@ static BOOL resolve_folder(HMODULE image, const wchar_t *config_path, wchar_t *f
 }
 
 BOOL SudekiMpTextureModsUninstall(void) {
+    if (!SudekiMpArchiveModsUninstall()) return FALSE;
     if (!base) return TRUE;
     if (decode_hook.installed && !SudekiMpRestoreInlineHook(&decode_hook)) return FALSE;
     SudekiMpLogFormat("texture_mods event=uninstalled decoded=%ld replaced=%ld failed=%ld skipped=%ld\r\n",
@@ -330,13 +353,17 @@ BOOL SudekiMpTextureModsInstall(HMODULE image, const wchar_t *config_path) {
     wchar_t folder[MAX_PATH];
     HMODULE d3dx;
     if (base || !b || !config_path || !SudekiMpCheckLoadedExecutable(image)) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
-    if (!config_bool(config_path, L"TextureMods", L"Enable", TRUE) || !resolve_folder(image, config_path, folder)) {
+    if (!config_bool(config_path, L"Mods", L"Enable", TRUE) || !resolve_folder(image, config_path, folder)) {
         SetLastError(ERROR_SUCCESS);
         return TRUE;
     }
-    dump_enabled = config_bool(config_path, L"TextureMods", L"Dump", FALSE);
+    dump_enabled = config_bool(config_path, L"Mods", L"DumpTextures", FALSE);
     load_mods(folder);
     SudekiMpTextureModIndexFinish(&index_table);
+    /* Archive files are independent of the texture seam; a refusal leaves
+     * the archives untouched and is reported, not fatal. */
+    if (!SudekiMpArchiveModsInstall(image))
+        SudekiMpLogFormat("archive_mods event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
     if (!index_table.count && !dump_enabled) { SetLastError(ERROR_SUCCESS); return TRUE; } /* nothing to own */
     /* The game imports d3dx9_30, so it is already mapped; use its loader so
      * DDS, PNG, TGA, BMP and JPG replacements decode exactly as D3DX does. */

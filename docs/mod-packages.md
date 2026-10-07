@@ -1,12 +1,24 @@
-# Texture mods (`[TextureMods]`, `SudekiMP.Mod/1`)
+# Mod packages (`[Mods]`, `SudekiMP.Mod/1`)
 
-Status: `IMPLEMENTED` / `EXPERIMENTAL`. Replacement is `CONFIRMED_LIVE` for the
-Clean 4x Font example (2026-10-07, see Evidence). Other textures, TPF packs in
-game, and teardown are not yet exercised live.
+Status: `IMPLEMENTED` / `EXPERIMENTAL`.
 
-SudekiMP loads texture replacements from mod folders. It replaces the game's
-textures as they are loaded, so no game file changes. Existing TexMod packages
-(`.tpf`) convert without changes because the key is TexMod's.
+- `[Textures]` replacement is `CONFIRMED_LIVE` for the Clean 4x Font example
+  and for a converted TexMod package (2026-10-07).
+- `[Files]` replace and add are `CONFIRMED_LIVE` at the index level (log,
+  2026-10-07). Visual confirmation of reads served from the mod file is
+  pending; see Evidence.
+- Not yet exercised live: teardown, and a model or animation `[Files]` entry.
+
+SudekiMP loads mods from folders, and no game file changes:
+
+- `[Textures]` replaces textures as they are decoded, keyed by TexMod's hash,
+  so existing TexMod packages (`.tpf`) convert without changes.
+- `[Files]` replaces or adds whole archive resources: models (`.HOM`),
+  animation banks (`.ANI`), SOL definitions, textures (`.SQX`/`.TGA`), font
+  descriptors, zones and collision, that is anything inside a mounted `.baf`.
+
+Loose sound banks (`sound\*.xwb`, `*.XSB`) and movies (`movies\*.bik`) are not
+archive resources and are not covered yet.
 
 ## Package format
 
@@ -30,10 +42,17 @@ Enabled=true
 [Textures]
 ; 0xKEY = file, relative to this folder
 0xAC57BC5D=textures/Verdana_16-0.tga.dds
+
+[Files]
+; NAME.EXT (as stored in the archive) or 0xARCHIVEKEY = file
+TAL.HOM=files/TAL.HOM
+MY_NEW_PROP.SQX=files/MY_NEW_PROP.SQX
 ```
 
 - `Format` is required. A loader refuses any major version other than `1`.
   Later minor versions (`SudekiMP.Mod/1.x`) must stay readable by a `/1` loader.
+- `AddToArchive=` (in `[Mod]`, default `SOLData.baf`) names the archive that
+  receives `[Files]` names no mounted archive holds.
 - `Enabled=false` keeps the mod installed but inactive. Folders whose names
   start with `.` or `_` are skipped. `mods\_dump` is the dump output.
 - **Key**: TexMod's texture hash. It is the CRC-32 of the original texture's
@@ -49,26 +68,31 @@ Enabled=true
 - The manifest is ASCII, or UTF-16LE with a BOM when it holds other characters
   (`GetPrivateProfile*W` reads both).
 - Mods load in case-insensitive folder-name order. A later mod overrides an
-  earlier one for the same key, and the override is counted in the install
-  log line.
+  earlier one for the same key or name, and texture overrides are counted in
+  the install log line.
+- `[Files]` names are `NAME.EXT` in ASCII letters, digits, `_` and `-`, with
+  one dot and at most 120 characters. Matching is case-insensitive, because
+  the archive key is the native checksum of the upper-cased name. A `0xKEY`
+  form addresses a resource whose name is unknown.
 
 Keys identify content, not names. Textures with identical pixels share a key
 and one replacement. The catalog finds 117 such shared keys among the 5240
 TGA/SQX textures of the supported build, for example `Verdana_18-0.tga` and
 an unnamed copy in `Fonts.baf`.
 
-## Runtime (`src/hooks/texture_mods.c`)
+## Runtime: loader and textures (`src/hooks/texture_mods.c`)
 
 ```ini
-[TextureMods]
-Enable=true        ; default true; nothing installs without an enabled texture
-Folder=mods        ; relative to the game folder, or absolute
-Dump=false         ; write every decoded texture once to <Folder>\_dump\0xKEY.dds
+[Mods]
+Enable=true          ; default true; nothing installs without an entry
+Folder=mods          ; relative to the game folder, or absolute
+DumpTextures=false   ; write every decoded texture once to <Folder>\_dump\0xKEY.dds
 ```
 
-The adapter installs for every launch profile, right after `SudekiMP.ini` is
-resolved. It installs nothing unless an enabled mod lists a texture or
-`Dump=true`, and a refusal there is logged but is not fatal. It rolls back on
+The loader runs for every launch profile, right after `SudekiMP.ini` is
+resolved and before any archive mounts. Each seam installs only when it has
+an entry (or `DumpTextures=true` for the texture seam). A refusal is logged but
+is not fatal. It rolls back on
 every init failure path that rolls back the accelerator cache.
 
 Seam (`CONFIRMED_STATIC`, Ghidra on the supported image):
@@ -115,6 +139,50 @@ Multiplayer: purely local and visual. Peers do not need the same mods.
 Address space: the game is 32-bit. A 2048² A8R8G8B8 sheet with mips is about
 22 MB in the managed pool, so very large packs can exhaust memory.
 
+## Runtime: archive files (`src/hooks/archive_mods.c`)
+
+All addresses below are `CONFIRMED_STATIC` (Ghidra on the supported image).
+
+- **Mount:** `0x1BD400` parses an archive index with the C runtime (`0x1BDE70`:
+  256 buckets of 12-byte `{offset, size, key}` rows, allocated with `new[]`
+  `0x24884E`), then opens the read handle with `CALL [CreateFileA]` at
+  `0x1BD45C`. At that call `EBP` is the `XBafFileSystem` object, whose index
+  is complete and not yet registered with the manager. The destructor
+  `0x1BD390` frees the rows with `delete[]` `0x248916`.
+- **Reads:** opening a resource (`0x1BD560` by key, `0x1BD4E0` by name) copies
+  the row into an `XBafFileLoader`: `+8` size, `+0xC` base, `+0x14` the archive
+  handle, `+0x20` position. Every read is `0x1BD290`, which calls
+  `SetFilePointer(handle, position, &0, FILE_BEGIN)` and then `ReadFile` on
+  the archive handle while holding the archive lock. No other code reads
+  archive handles.
+
+The adapter owns the 6-byte mount call and the `SetFilePointer`/`ReadFile`
+import slots (`0x29A0B0`, `0x29A0DC`):
+
+1. After the native open, each listed name present in that archive gets its
+   row pointed at a virtual offset (≥ `0x80000000`, 2 KiB aligned) with the mod
+   file's size. A name no archive holds is inserted, in key order, into the
+   `AddToArchive` archive. The game's own `new[]` grows the bucket and
+   `delete[]` frees the old one, so the destructor stays valid.
+2. `SetFilePointer` on a patched archive's handle into the virtual range
+   records the position instead of seeking. The next `ReadFile` on that handle
+   and thread is served from the mod file with a positional read, zero-filled
+   past its end. Every other handle and read passes straight through.
+
+Nothing inside the code ranges that `lan_story_resource_file.c` hashes is
+changed. The `CreateFileA` slot that `lan_story_load.c` checks is untouched,
+because the mount call is patched rather than the slot. Rows keep their
+sorted, per-bucket invariants, so its row validation still holds.
+
+- **Lifetime:** once any archive is patched the read hooks are pinned, because
+  index rows and open loaders hold virtual offsets. Uninstall then restores
+  only the mount call and reports `uninstall_refused`.
+- **Multiplayer:** `[Files]` changes game data and can change simulation.
+  Host and clients must install the same `[Files]` mods; nothing checks this
+  yet (`UNKNOWN` policy, owner decision). `[ResourceSwap]` runs on top: it
+  maps a name to another key before the lookup, so a swap can target an
+  added resource.
+
 ## Tools
 
 `tools/sudekimod.py` needs only the Python standard library; `--dds` needs
@@ -125,10 +193,12 @@ Pillow.
 | `convert-tpf MOD.tpf OUT [--game DIR \| --catalog keys.tsv] [--dds]` | TexMod package → mod folder. Removes the TPF XOR layer (`0x3FA43FA4`), decrypts the ZipCrypto archive with TexMod's fixed password, reads `texmod.def` (`0xKEY\|file`), and falls back to walking local headers when the central directory is damaged. The zip comment becomes Author/Description. With a catalog, files are named after their archive resource. |
 | `catalog --game DIR [--out keys.tsv]` | Lists every TGA (32-bit, uncompressed) and SQX (DXT1/3/5) texture in the game's `.baf` archives with its key and, where harvested, its resource name. Read-only, about one minute. |
 | `build SRC OUT --game DIR [--dds]` | Builds a mod from images named after the texture they replace: `NAME.EXT.<img>` (for example `Verdana_16-0.tga.png`) or `0xKEY.<img>`. |
-| `validate MOD` | Checks the manifest, keys, paths and image headers. |
+| `extract NAME.EXT OUT --game DIR` | Copies one archive resource out (read-only), as a starting point for a `[Files]` edit. |
+| `add-file MOD NAME.EXT FILE` | Copies a file into `MOD/files/` and adds or replaces its `[Files]` line, creating `mod.ini` if needed. |
+| `validate MOD` | Checks the manifest, texture keys, `[Files]` names, paths and image headers. |
 
 Catalog keys for SQX assume the game uploads level 0 unchanged (DXT is
-uploaded compressed): `INFERENCE` until `Dump=true` confirms a known SQX key.
+uploaded compressed): `INFERENCE` until `DumpTextures=true` confirms a known SQX key.
 On the supported build 4699 of 5240 textures get a unique name. The rest are
 unreferenced by any harvested string.
 
@@ -175,16 +245,26 @@ glyph layout and from the supplied font.
 - `CONFIRMED_LIVE` (2026-10-07, single player, `[TitleMenu] Enabled=true Scope=entry`,
   dirty tree on `codex/shared-simulation`, DLL `5e20a595…`): two instances were
   run side by side with the same save area, one with the Clean 4x Font mod and
-  one with `[TextureMods] Enable=false`. The log recorded
+  one with mods disabled (`Enable=false`). The log recorded
   `event=replace key=0xAC57BC5D` (Verdana_16-0) and `key=0x78534B58`
   (Verdana_18-0), both 512² → 2048² with 12 levels. Owner screenshots of the
   same Martin Finchey subtitle show identical layout, wrapping and highlight
   colours with smoother glyph edges and no garbling. So the font path takes UVs
   from the record dimensions and a larger replacement is safe there.
-  `Dump=true` wrote 607 textures, and 400 of their keys match the offline
+  `Dump=true` (now `DumpTextures`) wrote 607 textures, and 400 of their keys match the offline
   catalog, SQX DXT included. That confirms the catalog's SQX key rule.
 - Log caveat: with `[TitleMenu] Enabled=false` the loader closes the log after
   startup, so replace/dump lines from the decode thread are lost even though
   replacement and dump still happen.
-- Not yet exercised: a converted TPF in game, non-font replacements, teardown
-  or uninstall, and very large packs.
+- `CONFIRMED_LIVE` (2026-10-07, same profile): the converted
+  `SymphonyUI_1.tpf` (PNG, not re-encoded) logged `event=replace
+  key=0xAC57BC5D … to=2048x2048/0x33`. D3DX chose A8L8 for the greyscale
+  sheet.
+- `CONFIRMED_LIVE` (2026-10-07, `[Files]` test, branch `codex/texture-mods`):
+  the log shows `archive_mods event=replace name=Verdana_16-0.tga
+  archive=Fonts.baf` and `event=add name=MODTEST_18.TGA archive=Fonts.baf`
+  (red- and green-tinted copies; `[ResourceSwap] Verdana_18-0.tga=MODTEST_18.TGA`)
+  at mount, and no fault. Visual confirmation of the tinted subtitles is
+  pending.
+- Not yet exercised: non-font replacements, model or animation files,
+  teardown or uninstall, very large packs, and LAN with identical mods.

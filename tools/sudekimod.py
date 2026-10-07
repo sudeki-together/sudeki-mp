@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""SudekiMP texture mod packages: convert TexMod TPFs, catalog keys, build, validate.
+"""SudekiMP mod packages: textures and archive files; convert TexMod TPFs, catalog, build, validate.
 
-Format: docs/texture-mods.md. A package is a folder with mod.ini and image
-files; the runtime ([TextureMods] in SudekiMP.ini) loads every package under
+Format: docs/mod-packages.md. A package is a folder with mod.ini and image
+files; the runtime ([Mods] in SudekiMP.ini) loads every package under
 the game's mods folder. Textures are keyed by the TexMod-compatible CRC-32 of
 the level-0 pixels the game uploads, so TexMod keys carry over unchanged.
 
@@ -10,6 +10,8 @@ Commands:
   convert-tpf MOD.tpf OUT_DIR [--game DIR] [--dds]   TexMod package -> SudekiMP mod
   catalog --game DIR [--out keys.tsv]                 key <-> archive resource name
   build SRC_DIR OUT_DIR --game DIR [--dds]            images named NAME.EXT.<img> -> mod
+  extract NAME.EXT OUT --game DIR                     copy one archive resource out (read-only)
+  add-file MOD_DIR NAME.EXT FILE                      add/replace a whole archive resource ([Files])
   validate MOD_DIR                                    check a package
 
 Only Python's standard library is required; --dds needs Pillow. Nothing here
@@ -368,7 +370,7 @@ def ini_escape(value):
 
 def write_manifest(out_dir, meta, entries):
     """entries: [(key, relative path, comment)]."""
-    lines = ['; SudekiMP texture mod package (docs/texture-mods.md)', '[Mod]', f'Format={FORMAT}']
+    lines = ['; SudekiMP mod package (docs/mod-packages.md)', '[Mod]', f'Format={FORMAT}']
     for field in ('Name', 'Version', 'Author', 'Description', 'Source'):
         if meta.get(field):
             lines.append(f'{field}={ini_escape(meta[field])}')
@@ -558,12 +560,88 @@ def command_validate(args):
             problems.append(f'line {number}: {relative} is not a DDS/PNG/TGA/BMP/JPG image')
         elif width and height and not (is_pow2(width) and is_pow2(height)):
             warnings.append(f'line {number}: {relative} is {width}x{height}; it will be resampled to a power of two')
+    names = {}
+    for number, line in sections.get('files', []):
+        name, sep, relative = line.partition('=')
+        name, relative = name.strip(), relative.strip()
+        if not sep or not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or
+                           re.fullmatch(r'[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', name) and len(name) <= 120):
+            problems.append(f'line {number}: expected NAME.EXT=file or 0xKEY=file, got {line!r}')
+            continue
+        if not safe_relative(relative):
+            problems.append(f'line {number}: unsafe path {relative!r}')
+            continue
+        key = int(name, 16) if name.lower().startswith('0x') else resource_checksum(name)
+        if key in names:
+            warnings.append(f'line {number}: {name} repeats line {names[key]} (the later line wins)')
+        names[key] = number
+        path = mod / relative.replace('\\', '/')
+        if not path.is_file() or not path.stat().st_size:
+            problems.append(f'line {number}: {relative} does not exist or is empty')
     for w in warnings:
         print('warning:', w)
     for p in problems:
         print('error:', p)
-    print(f"{mod}: {len(keys)} textures, {len(problems)} errors, {len(warnings)} warnings")
+    print(f"{mod}: {len(keys)} textures, {len(names)} files, {len(problems)} errors, {len(warnings)} warnings")
     return 1 if problems else 0
+
+
+def find_resource(game, name):
+    key = int(name, 16) if name.lower().startswith('0x') else resource_checksum(name)
+    for path in game_archives(game):
+        with path.open('rb') as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            for offset, size, archive_key in index_archive(data):
+                if archive_key == key:
+                    return path.name, bytes(data[offset:offset + size])
+    return None, None
+
+
+def command_extract(args):
+    archive, blob = find_resource(args.game, args.name)
+    if blob is None:
+        raise SystemExit(f'{args.name} is in no archive of {args.game}')
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        raise SystemExit(f'{out} exists (use --force)')
+    out.write_bytes(blob)
+    print(f'{out}: {len(blob)} bytes from {archive}')
+    return 0
+
+
+def command_add_file(args):
+    mod = Path(args.mod)
+    name = args.name
+    if not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or re.fullmatch(r'[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', name)):
+        raise SystemExit('name must be NAME.EXT (as stored in the archive) or 0xKEY')
+    source = Path(args.file)
+    if not source.is_file() or not source.stat().st_size:
+        raise SystemExit(f'{source} is missing or empty')
+    manifest = mod / 'mod.ini'
+    if not manifest.is_file():
+        mod.mkdir(parents=True, exist_ok=True)
+        write_manifest(mod, {'Name': mod.name, 'Version': '1'}, [])
+    relative = f'files/{safe_filename(name)}'
+    (mod / 'files').mkdir(exist_ok=True)
+    (mod / relative).write_bytes(source.read_bytes())
+    raw = manifest.read_bytes()
+    utf16 = raw[:2] == b'\xff\xfe'
+    text = raw[2:].decode('utf-16-le') if utf16 else raw.decode('utf-8-sig')
+    lines = [l for l in text.splitlines()
+             if not re.match(rf'\s*{re.escape(name)}\s*=', l, re.IGNORECASE)]
+    if not any(l.strip().lower() == '[files]' for l in lines):
+        lines += ['', '[Files]', '; NAME.EXT (or 0xARCHIVEKEY) = file: replaces that archive resource,',
+                  '; or adds it to AddToArchive (default SOLData.baf) when no archive has it']
+    at = next(i for i, l in enumerate(lines) if l.strip().lower() == '[files]') + 1
+    while at < len(lines) and not lines[at].strip().startswith('['):
+        at += 1
+    while at > 0 and not lines[at - 1].strip():
+        at -= 1
+    lines.insert(at, f'{name}={relative}')
+    out = '\r\n'.join(lines) + '\r\n'
+    manifest.write_bytes(b'\xff\xfe' + out.encode('utf-16-le') if utf16 or any(ord(c) > 127 for c in out)
+                         else out.encode('ascii'))
+    print(f'{mod}: {name} -> {relative}')
+    return 0
 
 
 def main(argv=None):
@@ -594,6 +672,17 @@ def main(argv=None):
     p.add_argument('--dds', action='store_true')
     p.add_argument('--force', action='store_true')
     p.set_defaults(run=command_build)
+    p = sub.add_parser('extract', help='copy one archive resource out of the game (read-only)')
+    p.add_argument('name')
+    p.add_argument('out')
+    p.add_argument('--game', required=True)
+    p.add_argument('--force', action='store_true')
+    p.set_defaults(run=command_extract)
+    p = sub.add_parser('add-file', help='add or replace a whole archive resource in a mod ([Files])')
+    p.add_argument('mod')
+    p.add_argument('name')
+    p.add_argument('file')
+    p.set_defaults(run=command_add_file)
     p = sub.add_parser('validate', help='check a mod folder')
     p.add_argument('mod')
     p.set_defaults(run=command_validate)

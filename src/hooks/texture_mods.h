@@ -2,8 +2,8 @@
 #define SUDEKIMP_TEXTURE_MODS_H
 #include <windows.h>
 
-/* Runtime texture replacement from mod packages ([TextureMods] in the ini;
- * format in docs/texture-mods.md).
+/* Mod package loader and runtime texture replacement ([Mods] in the ini;
+ * format in docs/mod-packages.md). [Files] entries go to archive_mods.c.
  *
  * Every decoded game texture passes through the decode dispatcher at RVA
  * 0x1D8300 (ESI = 0x3C-byte texture record, one stack argument, RET 4,
@@ -16,7 +16,7 @@
  * cube textures (record+4 is not a plain texture) are left alone.
  *
  * Installs nothing unless at least one enabled mod lists a texture, or
- * Dump=true (writes every decoded texture once as <key>.dds for finding keys).
+ * DumpTextures=true (writes every decoded texture once as <key>.dds for finding keys).
  * Purely visual and local: peers need not run the same mods. */
 BOOL SudekiMpTextureModsInstall(HMODULE image, const wchar_t *config_path);
 BOOL SudekiMpTextureModsUninstall(void);

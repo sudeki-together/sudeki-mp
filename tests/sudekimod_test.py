@@ -157,5 +157,22 @@ class DescriptorTests(unittest.TestCase):
         self.assertIsNone(font.parse_descriptor(blob + b'\0'))
 
 
+class FilesTests(unittest.TestCase):
+    def test_add_file_and_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod, source = Path(tmp) / 'mod', Path(tmp) / 'src.bin'
+            source.write_bytes(b'model bytes')
+            self.assertEqual(sudekimod.main(['add-file', str(mod), 'TAL.HOM', str(source)]), 0)
+            self.assertEqual(sudekimod.main(['add-file', str(mod), 'TAL.HOM', str(source)]), 0)  # replaces its line
+            self.assertEqual(sudekimod.main(['add-file', str(mod), 'NEW_THING.SQX', str(source)]), 0)
+            files = [line for _, line in sudekimod.read_manifest(mod)['files']]
+            self.assertEqual(files, ['TAL.HOM=files/TAL.HOM', 'NEW_THING.SQX=files/NEW_THING.SQX'])
+            self.assertEqual((mod / 'files/TAL.HOM').read_bytes(), b'model bytes')
+            self.assertEqual(sudekimod.main(['validate', str(mod)]), 0)
+            with open(mod / 'mod.ini', 'a') as out:
+                out.write('BAD NAME=files/x\r\nX.Y=../up\r\n')
+            self.assertEqual(sudekimod.main(['validate', str(mod)]), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

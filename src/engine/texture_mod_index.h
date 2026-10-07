@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Pure core of the texture mod format (docs/texture-mods.md). No Windows or
+/* Pure core of the texture mod format (docs/mod-packages.md). No Windows or
  * native dependency, so it is host-testable.
  *
  * A texture is identified by the TexMod-compatible key: CRC-32 (reflected
@@ -51,4 +51,19 @@ void SudekiMpTextureModIndexFinish(SudekiMpTextureModIndex *index);
 const SudekiMpTextureModEntry *SudekiMpTextureModIndexFind(const SudekiMpTextureModIndex *index, uint32_t key);
 const char *SudekiMpTextureModIndexPath(const SudekiMpTextureModIndex *index, const SudekiMpTextureModEntry *entry);
 void SudekiMpTextureModIndexFree(SudekiMpTextureModIndex *index);
+
+/* ---- Whole-file archive resources ([Files], docs/mod-packages.md) ---- */
+/* Archive key of NAME.EXT: upper-cased ASCII, add on even and multiply on odd
+ * positions, modulo 2^32 (the native checksum at RVA 0x3A4A0). */
+uint32_t SudekiMpModResourceKey(const char *name);
+enum { SUDEKIMP_MOD_NAME_MAX = 120 };
+/* One [Files] line: "NAME.EXT = relative/file" or "0xKEY = relative/file".
+ * name receives NAME.EXT (or the key text). 1 entry, 0 blank/comment, -1 bad. */
+int SudekiMpModFileParseLine(const char *line, uint32_t *key, char *name, size_t name_capacity,
+    char *path, size_t path_capacity);
+/* Archive index bucket rows are 12 bytes {offset, size, key}, sorted by key. */
+long SudekiMpArchiveBucketFind(const uint8_t *rows, uint32_t count, uint32_t key);
+/* dst (count+1 rows) = src with {offset,size,key} inserted in key order. */
+void SudekiMpArchiveBucketInsert(uint8_t *dst, const uint8_t *src, uint32_t count,
+    uint32_t offset, uint32_t size, uint32_t key);
 #endif

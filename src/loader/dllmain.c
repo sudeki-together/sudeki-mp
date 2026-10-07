@@ -913,9 +913,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
     }
-    /* Texture mod packages ([TextureMods], mods\<Mod>\mod.ini) for every
-     * launch profile. Installs nothing without an enabled texture or
-     * Dump=true; a refusal leaves the game unhooked and is not fatal. */
+    /* Mod packages ([Mods], mods\<Mod>\mod.ini: textures and archive files)
+     * for every launch profile, before any archive mounts. Installs nothing
+     * without an entry or DumpTextures=true; a refusal is not fatal. */
     if (!SudekiMpTextureModsInstall(game_module, config_path)) {
         SudekiMpLogFormat("texture_mods_error=%lu\r\n", (unsigned long)GetLastError());
     }

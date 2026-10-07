@@ -186,3 +186,82 @@ void SudekiMpTextureModIndexFree(SudekiMpTextureModIndex *index) {
     free(index->pool);
     memset(index, 0, sizeof(*index));
 }
+
+uint32_t SudekiMpModResourceKey(const char *name) {
+    uint32_t value = 0;
+    for (unsigned i = 0; name[i]; ++i) {
+        unsigned char c = (unsigned char)name[i];
+        if (c >= 'a' && c <= 'z') c = (unsigned char)(c - 'a' + 'A');
+        value = (i & 1u) ? value * c : value + c;
+    }
+    return value;
+}
+
+static int resource_name_valid(const char *name) {
+    size_t n = strlen(name), dots = 0;
+    if (!n || n > SUDEKIMP_MOD_NAME_MAX || name[0] == '.' || name[n - 1] == '.') return 0;
+    for (size_t i = 0; i < n; ++i) {
+        char c = name[i];
+        if (c == '.') ++dots;
+        else if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+    }
+    return dots == 1;
+}
+
+int SudekiMpModFileParseLine(const char *line, uint32_t *key, char *name, size_t name_capacity,
+    char *path, size_t path_capacity) {
+    const char *a, *eq, *b, *end;
+    size_t n;
+    if (!line || !key || !name || !path || !name_capacity || !path_capacity) return -1;
+    a = line;
+    while (is_space(*a)) ++a;
+    if (!*a || *a == ';' || *a == '#') return 0;
+    eq = strchr(a, '=');
+    if (!eq) return -1;
+    n = (size_t)(eq - a);
+    while (n && is_space(a[n - 1])) --n;
+    if (!n || n >= name_capacity || n > SUDEKIMP_MOD_NAME_MAX) return -1;
+    memcpy(name, a, n);
+    name[n] = 0;
+    if (!SudekiMpTextureModParseKey(name, key)) {
+        if (!resource_name_valid(name)) return -1;
+        *key = SudekiMpModResourceKey(name);
+    }
+    b = eq + 1;
+    while (is_space(*b)) ++b;
+    end = b + strlen(b);
+    while (end > b && is_space(end[-1])) --end;
+    n = (size_t)(end - b);
+    if (!n || n >= path_capacity || n >= SUDEKIMP_TEXTURE_MOD_PATH_MAX) return -1;
+    memcpy(path, b, n);
+    path[n] = 0;
+    return SudekiMpTextureModSafePath(path) ? 1 : -1;
+}
+
+static uint32_t row_key(const uint8_t *row) {
+    return (uint32_t)row[8] | (uint32_t)row[9] << 8 | (uint32_t)row[10] << 16 | (uint32_t)row[11] << 24;
+}
+
+static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+
+long SudekiMpArchiveBucketFind(const uint8_t *rows, uint32_t count, uint32_t key) {
+    uint32_t lo = 0, hi = count;
+    if (!rows) return -1;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u, k = row_key(rows + mid * 12u);
+        if (k == key) return (long)mid;
+        if (k < key) lo = mid + 1u; else hi = mid;
+    }
+    return -1;
+}
+
+void SudekiMpArchiveBucketInsert(uint8_t *dst, const uint8_t *src, uint32_t count,
+    uint32_t offset, uint32_t size, uint32_t key) {
+    uint32_t at = 0;
+    while (at < count && row_key(src + at * 12u) < key) ++at;
+    if (at) memcpy(dst, src, at * 12u);
+    put32(dst + at * 12u, offset);
+    put32(dst + at * 12u + 4u, size);
+    put32(dst + at * 12u + 8u, key);
+    if (count > at) memcpy(dst + (at + 1u) * 12u, src + at * 12u, (count - at) * 12u);
+}

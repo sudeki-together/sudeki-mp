@@ -8,7 +8,7 @@ game's own style: flat 0xEA fill, a one-pixel bottom-right 0xC2 extrusion and a
 0x20 outline two pixels wide and one pixel tall (all scaled). The game keeps
 using its original glyph table, so only the pixels get sharper.
 
-Output is a SudekiMP texture mod folder (docs/texture-mods.md):
+Output is a SudekiMP texture mod folder (docs/mod-packages.md):
     OUT/mod.ini, OUT/textures/<sheet>.dds   (A8R8G8B8 with mipmaps)
 Copy OUT into the game's mods folder. The generated sheets are derived from
 the game's glyph layout and from the font you supply, so they are produced on
