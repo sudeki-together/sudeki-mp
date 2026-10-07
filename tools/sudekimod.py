@@ -272,6 +272,14 @@ def scan_local_entries(data, password):
         cursor = start + max(csize, 1)
 
 
+def decode_text(raw):
+    """TexMod comments and defs come from Windows tools: UTF-8 if valid, else cp1252."""
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return raw.decode('cp1252', 'replace')
+
+
 def read_tpf(path):
     """-> (entries {member: bytes}, def text, comment)."""
     data = tpf_unxor(Path(path).read_bytes())
@@ -280,7 +288,7 @@ def read_tpf(path):
     comment = ''
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            comment = archive.comment.decode('utf-8', 'replace')
+            comment = decode_text(archive.comment)
             members = {info.filename: archive.read(info, pwd=TPF_PASSWORD) for info in archive.infolist()
                        if not info.is_dir()}
     except (zipfile.BadZipFile, RuntimeError, zlib.error, ValueError):
@@ -291,7 +299,7 @@ def read_tpf(path):
     if definition[:2] in (b'\xff\xfe', b'\xfe\xff'):
         text = definition.decode('utf-16')
     else:
-        text = definition.decode('utf-8', 'replace')
+        text = decode_text(definition)
     return members, text.replace('\x00', ''), comment.strip()
 
 
