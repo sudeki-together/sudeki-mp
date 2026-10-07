@@ -244,6 +244,11 @@ with the byte offset of its first chroma plane, as the original movies do.
 - The game's own `binkw32.dll`, driven by a small harness under Wine, opens it
   (120 frames, 1920×1080, 30/1) and decodes it within 2 levels of FFmpeg's RGB
   (`CONFIRMED_TEST`).
+- It plays in game as the startup movies (`CONFIRMED_LIVE`, 2026-10-07).
+- The free RAD Video Tools converter (MP4/AVI to Bink, with audio) is
+  Windows-only and runs under Wine. This writer is portable Python but only
+  makes pattern-block video; real footage would need its DCT and inter blocks
+  and Bink audio (not implemented).
 
 One file can stand in for every startup movie:
 
@@ -328,8 +333,9 @@ glyph layout and from the supplied font.
 - `CONFIRMED_LIVE` (log, 2026-10-07, branch `codex/texture-mods`): with
   `SkipStartupMovies=false`, `movies\Publisher.bik` was redirected at both
   `movie_check` and `bink_open`. Every sound and speech bank the game loaded
-  went through the owned sites. The audible check (silenced
-  `BS_brightwater.xwb`) and the visible check (Climax logo first) are pending
-  the owner.
+  went through the owned sites.
+- `CONFIRMED_LIVE` (2026-10-07, owner): the Rainbow Static Intro mod played the
+  generated `rainbow_static.bik` in place of the startup movies after the
+  window was activated. The silenced-music check is still pending.
 - Not yet exercised: non-font replacements, model or animation files,
   teardown or uninstall, very large packs, and LAN with identical mods.
