@@ -2,6 +2,7 @@
 #include "hooks/texture_mods.h"
 #include "hooks/call_hook.h"
 #include "hooks/archive_mods.h"
+#include "hooks/loose_mods.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "engine/texture_mod_index.h"
@@ -270,7 +271,8 @@ static void load_mod(const wchar_t *root, const wchar_t *folder_name) {
         }
         free(section);
     }
-    /* [Files]: NAME.EXT (or 0xARCHIVEKEY) = file, a whole archive resource. */
+    /* [Files]: NAME.EXT (or 0xARCHIVEKEY) = file, a whole archive resource;
+     * sound/<file> or movies/<file> = file, a loose game-folder file. */
     if ((section = read_section(manifest, L"Files")) != NULL) {
         wchar_t add_to[64];
         GetPrivateProfileStringW(L"Mod", L"AddToArchive", L"SOLData.baf", add_to, 64, manifest);
@@ -287,7 +289,8 @@ static void load_mod(const wchar_t *root, const wchar_t *folder_name) {
                 _snwprintf(full, MAX_PATH, L"%ls\\%ls", root, relative) <= 0) { ++rejected; continue; }
             full[MAX_PATH - 1] = 0;
             for (wchar_t *p = full; *p; ++p) if (*p == L'/') *p = L'\\';
-            if (SudekiMpArchiveModsAdd(key, name, full, mods[mod].name, add_to)) ++files_added;
+            if (strchr(name, '\\') ? SudekiMpLooseModsAdd(name, full, mods[mod].name)
+                : SudekiMpArchiveModsAdd(key, name, full, mods[mod].name, add_to)) ++files_added;
             else ++rejected;
         }
         free(section);
@@ -337,6 +340,7 @@ static BOOL resolve_folder(HMODULE image, const wchar_t *config_path, wchar_t *f
 }
 
 BOOL SudekiMpTextureModsUninstall(void) {
+    if (!SudekiMpLooseModsUninstall()) return FALSE;
     if (!SudekiMpArchiveModsUninstall()) return FALSE;
     if (!base) return TRUE;
     if (decode_hook.installed && !SudekiMpRestoreInlineHook(&decode_hook)) return FALSE;
@@ -364,6 +368,8 @@ BOOL SudekiMpTextureModsInstall(HMODULE image, const wchar_t *config_path) {
      * the archives untouched and is reported, not fatal. */
     if (!SudekiMpArchiveModsInstall(image))
         SudekiMpLogFormat("archive_mods event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
+    if (!SudekiMpLooseModsInstall(image))
+        SudekiMpLogFormat("loose_mods event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
     if (!index_table.count && !dump_enabled) { SetLastError(ERROR_SUCCESS); return TRUE; } /* nothing to own */
     /* The game imports d3dx9_30, so it is already mapped; use its loader so
      * DDS, PNG, TGA, BMP and JPG replacements decode exactly as D3DX does. */

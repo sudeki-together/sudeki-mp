@@ -99,6 +99,23 @@ int main(void) {
         CHECK(SudekiMpArchiveBucketFind(dst, 1, 0x9u) == 0);
     }
 
+    /* Loose sound/movie names and game paths. */
+    {
+        char name[SUDEKIMP_MOD_NAME_MAX + 1], rel[64];
+        CHECK(SudekiMpModFileParseLine("sound/ailish.xwb = files/ailish.xwb", &key, name, sizeof(name), path, sizeof(path)) == 1);
+        CHECK(key == 0 && !strcmp(name, "sound\\ailish.xwb"));
+        CHECK(SudekiMpModFileParseLine("Movies\\Publisher.bik=files/p.bik", &key, name, sizeof(name), path, sizeof(path)) == 1);
+        CHECK(SudekiMpModFileParseLine("data/x.gex=files/x", &key, name, sizeof(name), path, sizeof(path)) == -1);
+        CHECK(SudekiMpModFileParseLine("sound/../SUDEKI.exe=files/x", &key, name, sizeof(name), path, sizeof(path)) == -1);
+        CHECK(SudekiMpModFileParseLine("sound/=files/x", &key, name, sizeof(name), path, sizeof(path)) == -1);
+        CHECK(SudekiMpModLooseRelative("C:\\Games\\Sudeki\\sound\\ailish.xwb", rel, sizeof(rel)) && !strcmp(rel, "sound\\ailish.xwb"));
+        CHECK(SudekiMpModLooseRelative("Z:\\sound\\Sudeki\\sound\\Speech\\x.xwb", rel, sizeof(rel)) && !strcmp(rel, "sound\\Speech\\x.xwb"));
+        CHECK(SudekiMpModLooseRelative("movies/Publisher.bik", rel, sizeof(rel)) && !strcmp(rel, "movies\\Publisher.bik"));
+        CHECK(!SudekiMpModLooseRelative("C:\\Games\\Sudeki\\SOLData.baf", rel, sizeof(rel)));
+        CHECK(!SudekiMpModLooseRelative("C:\\x\\mysound\\a.xwb", rel, sizeof(rel)));
+        CHECK(!SudekiMpModLooseRelative("C:\\x\\sound\\", rel, sizeof(rel)));
+    }
+
     if (failures) return 1;
     puts("texture_mod_index_test: ok");
     return 0;

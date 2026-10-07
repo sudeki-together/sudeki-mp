@@ -165,8 +165,13 @@ class FilesTests(unittest.TestCase):
             self.assertEqual(sudekimod.main(['add-file', str(mod), 'TAL.HOM', str(source)]), 0)
             self.assertEqual(sudekimod.main(['add-file', str(mod), 'TAL.HOM', str(source)]), 0)  # replaces its line
             self.assertEqual(sudekimod.main(['add-file', str(mod), 'NEW_THING.SQX', str(source)]), 0)
+            self.assertEqual(sudekimod.main(['add-file', str(mod), 'sound/Speech/speech_ailish.xwb', str(source)]), 0)
             files = [line for _, line in sudekimod.read_manifest(mod)['files']]
-            self.assertEqual(files, ['TAL.HOM=files/TAL.HOM', 'NEW_THING.SQX=files/NEW_THING.SQX'])
+            self.assertEqual(files, ['TAL.HOM=files/TAL.HOM', 'NEW_THING.SQX=files/NEW_THING.SQX',
+                                     'sound/Speech/speech_ailish.xwb=files/sound/Speech/speech_ailish.xwb'])
+            self.assertTrue((mod / 'files/sound/Speech/speech_ailish.xwb').is_file())
+            with self.assertRaises(SystemExit):
+                sudekimod.main(['add-file', str(mod), 'data/x.gex', str(source)])
             self.assertEqual((mod / 'files/TAL.HOM').read_bytes(), b'model bytes')
             self.assertEqual(sudekimod.main(['validate', str(mod)]), 0)
             with open(mod / 'mod.ini', 'a') as out:

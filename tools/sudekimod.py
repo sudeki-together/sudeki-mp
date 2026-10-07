@@ -11,7 +11,7 @@ Commands:
   catalog --game DIR [--out keys.tsv]                 key <-> archive resource name
   build SRC_DIR OUT_DIR --game DIR [--dds]            images named NAME.EXT.<img> -> mod
   extract NAME.EXT OUT --game DIR                     copy one archive resource out (read-only)
-  add-file MOD_DIR NAME.EXT FILE                      add/replace a whole archive resource ([Files])
+  add-file MOD_DIR NAME FILE                          [Files]: NAME.EXT archive resource, or sound/... movies/...
   validate MOD_DIR                                    check a package
 
 Only Python's standard library is required; --dds needs Pillow. Nothing here
@@ -564,14 +564,15 @@ def command_validate(args):
     for number, line in sections.get('files', []):
         name, sep, relative = line.partition('=')
         name, relative = name.strip(), relative.strip()
-        if not sep or not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or
+        if not sep or not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or loose_name(name) or
                            re.fullmatch(r'[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', name) and len(name) <= 120):
-            problems.append(f'line {number}: expected NAME.EXT=file or 0xKEY=file, got {line!r}')
+            problems.append(f'line {number}: expected NAME.EXT=file, 0xKEY=file or sound/<file>=file, got {line!r}')
             continue
         if not safe_relative(relative):
             problems.append(f'line {number}: unsafe path {relative!r}')
             continue
-        key = int(name, 16) if name.lower().startswith('0x') else resource_checksum(name)
+        key = (name.lower().replace('/', '\\') if loose_name(name) else
+               int(name, 16) if name.lower().startswith('0x') else resource_checksum(name))
         if key in names:
             warnings.append(f'line {number}: {name} repeats line {names[key]} (the later line wins)')
         names[key] = number
@@ -584,6 +585,14 @@ def command_validate(args):
         print('error:', p)
     print(f"{mod}: {len(keys)} textures, {len(names)} files, {len(problems)} errors, {len(warnings)} warnings")
     return 1 if problems else 0
+
+
+LOOSE_NAME = re.compile(r'(?i)(sound|movies)[\\/][^:*?"<>|\x00-\x1f]+')
+
+
+def loose_name(name):
+    """sound/<file> or movies/<file>: a loose game-folder file, not an archive resource."""
+    return bool(LOOSE_NAME.fullmatch(name)) and safe_relative(name) and len(name) <= 120
 
 
 def find_resource(game, name):
@@ -611,8 +620,9 @@ def command_extract(args):
 def command_add_file(args):
     mod = Path(args.mod)
     name = args.name
-    if not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or re.fullmatch(r'[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', name)):
-        raise SystemExit('name must be NAME.EXT (as stored in the archive) or 0xKEY')
+    if not (re.fullmatch(r'0[xX][0-9A-Fa-f]{1,8}', name) or loose_name(name) or
+            re.fullmatch(r'[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', name)):
+        raise SystemExit('name must be NAME.EXT (as stored in an archive), 0xKEY, or sound/<file> / movies/<file>')
     source = Path(args.file)
     if not source.is_file() or not source.stat().st_size:
         raise SystemExit(f'{source} is missing or empty')
@@ -620,8 +630,9 @@ def command_add_file(args):
     if not manifest.is_file():
         mod.mkdir(parents=True, exist_ok=True)
         write_manifest(mod, {'Name': mod.name, 'Version': '1'}, [])
-    relative = f'files/{safe_filename(name)}'
-    (mod / 'files').mkdir(exist_ok=True)
+    relative = ('files/' + '/'.join(safe_filename(p) for p in re.split(r'[\\/]', name)) if loose_name(name)
+                else f'files/{safe_filename(name)}')
+    (mod / relative).parent.mkdir(parents=True, exist_ok=True)
     (mod / relative).write_bytes(source.read_bytes())
     raw = manifest.read_bytes()
     utf16 = raw[:2] == b'\xff\xfe'
@@ -630,7 +641,8 @@ def command_add_file(args):
              if not re.match(rf'\s*{re.escape(name)}\s*=', l, re.IGNORECASE)]
     if not any(l.strip().lower() == '[files]' for l in lines):
         lines += ['', '[Files]', '; NAME.EXT (or 0xARCHIVEKEY) = file: replaces that archive resource,',
-                  '; or adds it to AddToArchive (default SOLData.baf) when no archive has it']
+                  '; or adds it to AddToArchive (default SOLData.baf) when no archive has it;',
+                  '; sound/<file> or movies/<file> = file: overrides that loose game-folder file']
     at = next(i for i, l in enumerate(lines) if l.strip().lower() == '[files]') + 1
     while at < len(lines) and not lines[at].strip().startswith('['):
         at += 1

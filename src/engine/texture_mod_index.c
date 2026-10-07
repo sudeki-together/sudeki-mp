@@ -223,7 +223,11 @@ int SudekiMpModFileParseLine(const char *line, uint32_t *key, char *name, size_t
     if (!n || n >= name_capacity || n > SUDEKIMP_MOD_NAME_MAX) return -1;
     memcpy(name, a, n);
     name[n] = 0;
-    if (!SudekiMpTextureModParseKey(name, key)) {
+    if (strchr(name, '/') || strchr(name, '\\')) {
+        if (!SudekiMpModLooseNameValid(name)) return -1;
+        for (char *c = name; *c; ++c) if (*c == '/') *c = '\\';
+        *key = 0; /* loose file: matched by path, not archive key */
+    } else if (!SudekiMpTextureModParseKey(name, key)) {
         if (!resource_name_valid(name)) return -1;
         *key = SudekiMpModResourceKey(name);
     }
@@ -264,4 +268,35 @@ void SudekiMpArchiveBucketInsert(uint8_t *dst, const uint8_t *src, uint32_t coun
     put32(dst + at * 12u + 4u, size);
     put32(dst + at * 12u + 8u, key);
     if (count > at) memcpy(dst + (at + 1u) * 12u, src + at * 12u, (count - at) * 12u);
+}
+
+static int loose_prefix(const char *p) {
+    static const char *const folders[] = {"sound", "movies"};
+    for (unsigned f = 0; f < 2u; ++f) {
+        size_t n = strlen(folders[f]), i;
+        for (i = 0; i < n; ++i) {
+            char c = p[i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != folders[f][i]) break;
+        }
+        if (i == n && (p[n] == '\\' || p[n] == '/')) return (int)n + 1;
+    }
+    return 0;
+}
+
+int SudekiMpModLooseNameValid(const char *name) {
+    int prefix;
+    if (!name || !(prefix = loose_prefix(name)) || !name[prefix]) return 0;
+    return SudekiMpTextureModSafePath(name) && strlen(name) <= SUDEKIMP_MOD_NAME_MAX;
+}
+
+int SudekiMpModLooseRelative(const char *path, char *rel, size_t capacity) {
+    const char *found = NULL;
+    size_t n;
+    if (!path || !rel || !capacity) return 0;
+    for (const char *p = path; *p; ++p)
+        if ((p == path || p[-1] == '\\' || p[-1] == '/') && loose_prefix(p) && p[loose_prefix(p)]) found = p;
+    if (!found || (n = strlen(found)) >= capacity) return 0;
+    for (size_t i = 0; i <= n; ++i) rel[i] = found[i] == '/' ? '\\' : found[i];
+    return 1;
 }

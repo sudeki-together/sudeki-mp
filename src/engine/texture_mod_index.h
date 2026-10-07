@@ -66,4 +66,13 @@ long SudekiMpArchiveBucketFind(const uint8_t *rows, uint32_t count, uint32_t key
 /* dst (count+1 rows) = src with {offset,size,key} inserted in key order. */
 void SudekiMpArchiveBucketInsert(uint8_t *dst, const uint8_t *src, uint32_t count,
     uint32_t offset, uint32_t size, uint32_t key);
+
+/* Loose game-folder files a mod may override ([Files] names with a folder):
+ * "sound/<file>" (wave/sound banks, speech) and "movies/<file>". The name is
+ * normalised to backslashes; 1 when valid. */
+int SudekiMpModLooseNameValid(const char *name);
+/* The "sound\..." or "movies\..." tail of a path the game opens (after the
+ * last separator-bounded sound\ or movies\ component), copied into rel with
+ * backslashes; 0 when the path is not under either folder. */
+int SudekiMpModLooseRelative(const char *path, char *rel, size_t capacity);
 #endif

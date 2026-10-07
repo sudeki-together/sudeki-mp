@@ -16,8 +16,10 @@ SudekiMP loads mods from folders, and no game file changes:
   animation banks (`.ANI`), SOL definitions, textures (`.SQX`/`.TGA`), font
   descriptors, zones and collision, that is anything inside a mounted `.baf`.
 
-Loose sound banks (`sound\*.xwb`, `*.XSB`) and movies (`movies\*.bik`) are not
-archive resources and are not covered yet.
+`[Files]` names `sound/<file>` and `movies/<file>` override loose game-folder
+files: XACT wave banks (`.xwb`), sound banks (`.xsb`), speech
+(`sound/Speech/...`) and Bink movies (`.bik`). These sit beside the archives
+rather than inside them.
 
 ## Package format
 
@@ -46,6 +48,8 @@ Enabled=true
 ; NAME.EXT (as stored in the archive) or 0xARCHIVEKEY = file
 TAL.HOM=files/TAL.HOM
 MY_NEW_PROP.SQX=files/MY_NEW_PROP.SQX
+sound/BS_brightwater.xwb=files/sound/BS_brightwater.xwb
+movies/Publisher.bik=files/movies/Publisher.bik
 ```
 
 - `Format` is required. A loader refuses any major version other than `1`.
@@ -182,6 +186,33 @@ sorted, per-bucket invariants, so its row validation still holds.
   maps a name to another key before the lookup, so a swap can target an
   added resource.
 
+## Runtime: loose sound and movie files (`src/hooks/loose_mods.c`)
+
+All addresses are `CONFIRMED_STATIC`; the roles are `CONFIRMED_LIVE` from the
+open log of 2026-10-07. The game builds each path with `sprintf` and opens it
+directly. The adapter owns six `CALL [import]` sites (6 bytes each), where the
+first stack argument is the path:
+
+| RVA | Opens |
+| --- | --- |
+| `0x28870B` | Streamed speech banks, `sound\Speech\*.xwb` (`CreateFileA`, overlapped) |
+| `0x28878C` | Streamed wave banks, `sound\*.xwb` |
+| `0x2890DE` | In-memory wave banks and `.xsb` sound banks |
+| `0x256C49` | C runtime open (under `fopen`) |
+| `0x1BF383`, `0x1BF3C9` | Movie header check (`CreateFileA`), then `BinkOpen` on the same `%smovies\%s.bik` buffer |
+
+At each site the stub takes the `sound\...` or `movies\...` tail of the
+path. If a mod overrides it, the stub swaps the argument for the mod file's
+ANSI path, then calls through the same import slot. Every other path passes
+through unchanged, and the first 64 non-overridden opens are logged, which is
+a handy list of what the game loads.
+
+The `CreateFileA` import slot itself is untouched (`lan_story_load.c` checks
+it). The startup probe at `0x28D205`, which checks whether `ClimaxLogo.bik`
+exists, is left alone. Mod paths must survive the ANSI code page, or the
+entry is refused. Sound and movie mods are local presentation, but a bank
+whose cues differ from the original can make the game miss sounds.
+
 ## Tools
 
 `tools/sudekimod.py` needs only the Python standard library; `--dds` needs
@@ -265,5 +296,11 @@ glyph layout and from the supplied font.
   (red- and green-tinted copies; `[ResourceSwap] Verdana_18-0.tga=MODTEST_18.TGA`)
   at mount, and no fault. The owner confirmed the tinted subtitles in game, so
   reads are served from the mod file for both a replaced and an added resource.
+- `CONFIRMED_LIVE` (log, 2026-10-07, branch `codex/texture-mods`): with
+  `SkipStartupMovies=false`, `movies\Publisher.bik` was redirected at both
+  `movie_check` and `bink_open`. Every sound and speech bank the game loaded
+  went through the owned sites. The audible check (silenced
+  `BS_brightwater.xwb`) and the visible check (Climax logo first) are pending
+  the owner.
 - Not yet exercised: non-font replacements, model or animation files,
   teardown or uninstall, very large packs, and LAN with identical mods.
