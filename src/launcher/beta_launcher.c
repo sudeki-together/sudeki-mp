@@ -2209,6 +2209,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                 DestroyWindow(window);
             }
             return 0;
+        case WM_ACTIVATE:
+            /* Back from Explorer: pick up mod folders copied in meanwhile. */
+            if (LOWORD(wparam) != WA_INACTIVE && active_tab == SUDEKIMP_TAB_MODS) {
+                show_tab(SUDEKIMP_TAB_MODS);
+            }
+            break;
         case WM_DESTROY:
             if (mods_panel != NULL) {
                 SudekiMpModsPanelDestroy(mods_panel);

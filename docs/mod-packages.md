@@ -4,6 +4,15 @@ Status: `IMPLEMENTED` / `EXPERIMENTAL`.
 
 - `[Textures]` replacement is `CONFIRMED_LIVE` for the Clean 4x Font example
   and for a converted TexMod package (2026-10-07).
+- A converted weapon pack is `CONFIRMED_LIVE` (2026-10-07, owner-observed):
+  the COOLER Runic Blade TexMod package, installed as a mod folder through the
+  launcher on a throwaway game copy, recoloured Tal's Runic Blade in the Talos
+  fight. The log recorded 4 of its 5 keys replaced (`0x4383377F`,
+  `0x4FADDA1E`, `0x8A57026F`, `0xE4E3CC34` = `W005_MrChoppy_env.SQX`); the
+  fifth (`0x2C287194`, a large side-view icon) was not loaded in that session.
+  Three of the replaced originals decode as 32-bit `A8R8G8B8` textures that
+  the offline catalogue (`sudekimod.py catalog`, the launcher scan) does not
+  list, so keys can match in game without appearing in the catalogue.
 - `[Files]` replace and add are `CONFIRMED_LIVE` (2026-10-07): tinted font
   sheets were served from the mod file, see Evidence.
 - Not yet exercised live: teardown, and a model or animation `[Files]` entry.

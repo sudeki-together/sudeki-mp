@@ -537,10 +537,15 @@ int wmain(int argc, wchar_t **argv) {
     for (argument_index = first_game_argument;
          argument_index < argc;
          ++argument_index) {
+        /* The GUI launcher passes each game token as --game-arg=<token>. */
+        const wchar_t *argument = argv[argument_index];
+        if (wcsncmp(argument, L"--game-arg=", 11u) == 0) {
+            argument += 11;
+        }
         if (!append_command_line_argument(
                 command_line,
                 SUDEKIMP_MAX_COMMAND_LINE,
-                argv[argument_index])) {
+                argument)) {
             fwprintf(
                 stderr,
                 L"SudekiMP launcher: game arguments must be non-empty "

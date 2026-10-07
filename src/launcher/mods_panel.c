@@ -1315,8 +1315,17 @@ static void refresh_grid(Panel *p) {
       if (!name[0])
         StringCchPrintfW(name, 128, L"Unnamed 0x%08lX",
                          (unsigned long)r->entry.archive_key);
-      if (!contains_case_insensitive(name, search))
-        continue;
+      if (search[0]) {
+        /* Names, or the TexMod texture key / archive key in hex ("4FADDA1E"),
+         * so converted .tpf entries that only carry a key can be found. */
+        WCHAR keys[64];
+        StringCchPrintfW(keys, 64, L"0x%08lX 0x%08lX",
+                         (unsigned long)r->entry.texture_key,
+                         (unsigned long)r->entry.archive_key);
+        if (!contains_case_insensitive(name, search) &&
+            !contains_case_insensitive(keys, search))
+          continue;
+      }
       tile_caption(dc, name, label, 256);
       memset(&item, 0, sizeof(item));
       item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
@@ -1426,6 +1435,30 @@ static void refresh_mods(Panel *p, const WCHAR *preferred) {
     return;
   }
   qsort(p->mod_list, p->mod_count, sizeof(p->mod_list[0]), mod_compare);
+  /* A mod copied into another mod's folder is never loaded: say where it is. */
+  for (i = 0; i < p->mod_count; ++i) {
+    WCHAR inner[PATH_CAP], nested[PATH_CAP], text[512];
+    WIN32_FIND_DATAW sub;
+    HANDLE look;
+    if (!join(root, PATH_CAP, p->mods, p->mod_list[i].folder) ||
+        !join(inner, PATH_CAP, root, L"*"))
+      continue;
+    look = FindFirstFileW(inner, &sub);
+    if (look == INVALID_HANDLE_VALUE)
+      continue;
+    do {
+      if (!(sub.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || sub.cFileName[0] == L'.' ||
+          !join(nested, PATH_CAP, root, sub.cFileName) ||
+          !join(manifest_path, PATH_CAP, nested, L"mod.ini") ||
+          GetFileAttributesW(manifest_path) == INVALID_FILE_ATTRIBUTES)
+        continue;
+      StringCchPrintfW(text, 512,
+                       L"\"%ls\" is inside \"%ls\" and will not load: move it directly into the mods folder.",
+                       sub.cFileName, p->mod_list[i].folder);
+      status(p, text);
+    } while (FindNextFileW(look, &sub));
+    FindClose(look);
+  }
   for (i = 0; i < p->mod_count; ++i) {
     StringCchPrintfW(name, 256, L"%u. %ls%ls", (unsigned)i + 1,
                      p->mod_list[i].name,
@@ -2184,7 +2217,7 @@ static void create_controls(Panel *p) {
   SendMessageW(p->category, LB_SETCURSEL, p->category_filter, 0);
   p->search = control(p, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, ID_SEARCH);
   SendMessageW(p->search, EM_SETCUEBANNER, TRUE,
-               (LPARAM)L"Search resource names…");
+               (LPARAM)L"Search names or texture keys…");
   p->grid = control(p, WC_LISTVIEWW, L"",
                     WS_TABSTOP | WS_VSCROLL | LVS_ICON | LVS_SINGLESEL |
                         LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
@@ -2519,8 +2552,12 @@ void SudekiMpModsPanelSetPaths(HWND panel, const WCHAR *game_directory,
     return;
   changed = _wcsicmp(p->game, game_directory ? game_directory : L"") ||
             _wcsicmp(p->ini, ini_path ? ini_path : L"");
-  if (!changed && (p->catalog || p->scan_thread))
+  if (!changed && (p->catalog || p->scan_thread)) {
+    /* Same game: re-read only the mod folders (cheap), never the archives,
+     * so mods copied in from Explorer appear without a rescan. */
+    refresh_mods(p, NULL);
     return;
+  }
   if (changed) {
     select_resource(p, -1);
     free_catalog(p->catalog);

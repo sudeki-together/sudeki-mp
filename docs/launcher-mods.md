@@ -23,6 +23,14 @@ There is no global switch in the tab: `[Mods] Enable` keeps its default
 **Open folder** opens the selected package, or the mods folder (created if
 missing) when none is selected.
 
+The mod list is re-read whenever the Mods tab is shown and whenever the
+launcher window is reactivated (for example after copying a mod in from
+Explorer); **Rescan game** is only needed for the game archives. A mod copied
+into another mod's folder (one level too deep) is never loaded by the game;
+the workshop says which folder it is in. The search box matches resource
+names and also texture or archive keys in hex (`4FADDA1E`), as used by
+converted TexMod packages.
+
 Select a character and category, then a thumbnail. Search filters resource
 names within that selection. Original metadata identifies the archive,
 resource name (or an unnamed archive key), texture CRC, size and pixel format.
@@ -54,6 +62,19 @@ Changes take effect on the next game launch. Game archives are only read.
 Package comments, unrelated entries, metadata and other sections are preserved;
 manifest output is ASCII or UTF-16LE with a BOM. Unsupported/malformed
 manifests cannot be edited through the tab.
+
+## Owner live test (2026-10-07)
+
+On a throwaway game copy launched from the merged launcher, the owner
+installed the converted COOLER Runic Blade package, loaded a save where Tal
+holds the Runic Blade and saw it recoloured in the Talos fight
+(`CONFIRMED_LIVE`; log: 4 of 5 keys replaced, see
+[mod-packages.md](mod-packages.md)). The same test found that the GUI passed
+Cleanroom/LAN arena game options as `--game-arg=<token>` while the loader
+forwarded them literally, so the game never saw `-Level testroom` and the
+cleanroom menu refused to install (`cleanroom_menu_error=87`); the loader now
+strips the prefix. Drag-and-drop Apply of a single texture from the tab is
+still not owner-confirmed in game.
 
 ## Implementation and grouping
 

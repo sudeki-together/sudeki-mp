@@ -70,10 +70,14 @@ the option simply stops refilling.
 ## Training loadout initialization
 
 Once Sudeki's inventory and item database are live, cleanroom mode invokes the
-game's shipped `FillInventory()` developer function once. This populates the
-native inventory tables with all authored items, including every weapon for
-Tal, Ailish, Elco, and Buki. It intentionally also supplies consumables and
-other inventory items; it does not create parallel mod-owned item records.
+game's shipped `FillInventory()` developer function once. It was intended to
+populate the native inventory tables with all authored items, including every
+weapon for Tal, Ailish, Elco, and Buki; it does not create parallel mod-owned
+item records. **Correction (2026-10-07, `CONFIRMED_LIVE`):** on the supported
+build the log reports `inventory_fill status=complete`, but the Weapons page
+lists only the starter weapon and a memory read of the inventory showed one or
+two item IDs per weapon category. Do not rely on the cleanroom to provide
+other weapons; load a save that owns them instead.
 
 All eight main-party Spirit Strikes are enabled through the native
 `SpiritStrikeEnable(-1)` path. The original unlock mask is captured and
