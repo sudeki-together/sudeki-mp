@@ -245,10 +245,8 @@ with the byte offset of its first chroma plane, as the original movies do.
   (120 frames, 1920×1080, 30/1) and decodes it within 2 levels of FFmpeg's RGB
   (`CONFIRMED_TEST`).
 - It plays in game as the startup movies (`CONFIRMED_LIVE`, 2026-10-07).
-- The free RAD Video Tools converter (MP4/AVI to Bink, with audio) is
-  Windows-only and runs under Wine. This writer is portable Python but only
-  makes pattern-block video; real footage would need its DCT and inter blocks
-  and Bink audio (not implemented).
+- This writer only makes pattern-block video. For real footage, see "Your own
+  movies" below.
 
 One file can stand in for every startup movie:
 
@@ -265,6 +263,34 @@ movie ends or is skipped. The supported install ships only `ClimaxLogo.bik`;
 the other two slots are skipped unless a mod supplies them. A window that has
 not been activated waits inside `PlayMovie` (a `Sleep(500)` loop) and shows
 white until it is clicked.
+
+## Your own movies (MP4 and other video)
+
+SudekiMP does not convert real video to Bink. Use RAD Game Tools' free **RAD
+Video Tools**, which you download yourself from RAD's website; the project
+does not redistribute it. It is a Windows program, and on Linux it runs under
+Wine.
+
+1. Convert your video to **Bink 1** (`.bik`), not Bink 2: the game's
+   `binkw32.dll` only plays Bink 1. Match the original movies where you can:
+   1920×1080 at 30 fps. Include audio if you want sound.
+2. Add it to a mod under the movie name it replaces, for example the first
+   startup logo:
+
+   ```sh
+   python3 tools/sudekimod.py add-file mods/MyIntro movies/Publisher.bik my_intro.bik
+   ```
+
+   Startup slots are `Publisher.bik`, `ClimaxLogo.bik` and `TWIMTBP.bik`. Story
+   cutscenes are the `FMA*.bik` files in `movies/`, and the opening poem is
+   `FMA01_poem.bik`.
+3. Check the result with `ffprobe my_intro.bik`; it should report
+   `binkvideo (BIKi)` or another Bink 1 revision. Then launch, and click the
+   game window so the movie advances.
+
+`UNKNOWN`: SudekiMP has only tested its own generated video in game, not a
+RAD-converted one, a resolution other than 1920×1080, or a movie with an audio
+track.
 
 ## Example mod: Clean 4x Font
 
