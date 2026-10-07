@@ -232,6 +232,35 @@ uploaded compressed): `INFERENCE` until `DumpTextures=true` confirms a known SQX
 On the supported build 4699 of 5240 textures get a unique name. The rest are
 unreferenced by any harvested string.
 
+## Example mod: rainbow static intro
+
+`tools/make_static_bink.py out.bik` writes an original Bink 1 (`BIKi`) video
+of rainbow static (default 1920×1080, 30 fps, 4 s, about 59 MB). It is a minimal
+intra-only writer: identity Huffman trees, two-colour pattern blocks, no audio.
+It follows the public FFmpeg Bink demuxer and decoder, and each frame starts
+with the byte offset of its first chroma plane, as the original movies do.
+
+- FFmpeg decodes known content pixel-exactly on all three planes (`CONFIRMED_TEST`).
+- The game's own `binkw32.dll`, driven by a small harness under Wine, opens it
+  (120 frames, 1920×1080, 30/1) and decodes it within 2 levels of FFmpeg's RGB
+  (`CONFIRMED_TEST`).
+
+One file can stand in for every startup movie:
+
+```ini
+[Files]
+movies/Publisher.bik=files/movies/rainbow_static.bik
+movies/ClimaxLogo.bik=files/movies/rainbow_static.bik
+movies/TWIMTBP.bik=files/movies/rainbow_static.bik
+```
+
+The startup sequence (`0x68DEE0`) calls `PlayMovie` (`0x504D90`) for
+`Publisher`, `ClimaxLogo` and `TWIMTBP` in turn. Each call blocks until its
+movie ends or is skipped. The supported install ships only `ClimaxLogo.bik`;
+the other two slots are skipped unless a mod supplies them. A window that has
+not been activated waits inside `PlayMovie` (a `Sleep(500)` loop) and shows
+white until it is clicked.
+
 ## Example mod: Clean 4x Font
 
 `tools/make_clean_font_mod.py --game DIR --font Verdana.ttf --out mods/CleanFont4x`
