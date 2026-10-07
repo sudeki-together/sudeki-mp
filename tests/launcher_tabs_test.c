@@ -56,6 +56,28 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         GetWindowTextW(directory, text, 128);
         assert(!wcscmp(text, L"synthetic-invalid-install"));
     }
+    /* "Start as" appears only for the Cleanroom profile and reaches the game. */
+    {
+        HWND lead = GetDlgItem(window, IDC_CLEANROOM_LEAD);
+        WCHAR command[2048];
+        assert(lead);
+        SendMessageW(profile, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+        SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
+        assert(!IsWindowVisible(lead));
+        SendMessageW(profile, CB_SETCURSEL, SUDEKIMP_PROFILE_CLEANROOM, 0);
+        SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
+        assert(IsWindowVisible(lead));
+        click_tab(window, SUDEKIMP_TAB_MODS);
+        assert(!IsWindowVisible(lead));
+        click_tab(window, SUDEKIMP_TAB_PLAY);
+        assert(IsWindowVisible(lead));
+        SendMessageW(lead, CB_SETCURSEL, 1, 0); /* Tal */
+        assert(build_loader_command(command, 2048, L"L.exe", L"C:\\Game", L"M.dll", FALSE,
+                                    SUDEKIMP_PROFILE_CLEANROOM));
+        assert(wcsstr(command, L"--game-arg=-Level --game-arg=testroom") &&
+               wcsstr(command, L"--game-arg=-Tal --game-arg=1") && !wcsstr(command, L"-Ailish"));
+        SendMessageW(lead, CB_SETCURSEL, 0, 0);
+    }
     PostMessageW(window, WM_CLOSE, 0, 0);
     return 0;
 }
@@ -80,6 +102,6 @@ int wmain(void) {
     RemoveDirectoryW(file);
     RemoveDirectoryW(settings);
     assert(result == 0);
-    puts("LauncherTabsTest: passed (Mods workshop full width, options on Tools, Play state kept)");
+    puts("LauncherTabsTest: passed (Mods workshop full width, options on Tools, Play state kept, Cleanroom start-as)");
     return 0;
 }

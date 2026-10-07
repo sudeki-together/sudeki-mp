@@ -26,9 +26,19 @@ save-free testroom but does not install the overlay.
 - Enter: spawn/despawn the selected entry
 - Escape: close the menu
 
+**Starting hero (2026-10-07).** The test room starts as the hero named on the
+command line (`-Ailish 1`, `-Tal 1`, `-Elco 1` or `-Buki 1`); the launcher's
+**Start as** choice, shown only for the Cleanroom profile, supplies it. That
+hero is the menu's locked lead (spawn anchor, never removed) and the others
+are spawnable. `CONFIRMED_LIVE` for all four on the supported build: each
+started as the playable lead with its own HUD and the menu installed
+(`lead=PC_<hero>`). Title-roster and zone-traversal modes keep Ailish. Elco
+and Buki log `actor_weapon ... status=pending` for the old starter path but
+still hold their native weapon.
+
 The entries are Tal, Buki, Elco, Ailish, Training Dummy, Combat Mode, Camera
 Mode, Split Screen P2, Infinite SP, Infinite Spirit, Infinite Jetpack, and
-Close. Ailish is shown as `LEAD LOCKED` and cannot be removed.
+Close. The starting hero (Ailish by default) is shown as `LEAD LOCKED` and cannot be removed.
 Playable characters use Sudeki's native `InternalSpawnPC`/`RemovePC` path so
 its party and formation systems keep ownership. Character names are
 constructed through Sudeki's own 12-byte, reference-backed `ResourceName`

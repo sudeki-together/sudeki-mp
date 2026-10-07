@@ -76,6 +76,14 @@ cleanroom menu refused to install (`cleanroom_menu_error=87`); the loader now
 strips the prefix. Drag-and-drop Apply of a single texture from the tab is
 still not owner-confirmed in game.
 
+## Checking a mod in the test room
+
+Choose the **Cleanroom** profile on Play; a **Start as** list (Ailish, Tal,
+Elco, Buki) appears beside it and the test room starts as that hero, so a
+skin or texture change can be checked straight away (F8 for the sandbox
+tools, Combat Mode to draw weapons). The test room only provides starter
+weapons; to see another weapon, load a save that owns it.
+
 ## Implementation and grouping
 
 The scan runs on one background worker, one archive mapped at a time.

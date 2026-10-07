@@ -41,6 +41,13 @@ static HWND lan_host_edit;
 static HWND lan_port_edit;
 static HWND auto_update_checkbox;
 static HWND cleanroom_tools_checkbox;
+/* Cleanroom only: the hero the test room starts as (combo order below). */
+static HWND cleanroom_lead_label;
+static HWND cleanroom_lead_combo;
+static const WCHAR *const cleanroom_lead_names[] = {L"Ailish", L"Tal", L"Elco", L"Buki"};
+static const WCHAR *const cleanroom_lead_arguments[] = {
+    L" --game-arg=-Ailish --game-arg=1", L" --game-arg=-Tal --game-arg=1",
+    L" --game-arg=-Elco --game-arg=1", L" --game-arg=-Buki --game-arg=1"};
 static WCHAR package_directory[MAX_PATH];
 static WCHAR music_cache_path[MAX_PATH];
 static LONG music_download_running;
@@ -296,6 +303,13 @@ static void persist_game_directory(const WCHAR *game_directory) {
     }
 }
 
+static int selected_cleanroom_lead(void) {
+    int lead = cleanroom_lead_combo == NULL ? 0 :
+        (int)SendMessageW(cleanroom_lead_combo, CB_GETCURSEL, 0, 0);
+    return lead >= 0 && lead < (int)(sizeof(cleanroom_lead_names) / sizeof(cleanroom_lead_names[0])) ?
+        lead : 0;
+}
+
 static void persist_launcher_options(void) {
     WCHAR settings_path[MAX_PATH];
     WCHAR value[64];
@@ -324,6 +338,8 @@ static void persist_launcher_options(void) {
         cleanroom_tools_checkbox != NULL &&
             SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
             L"true" : L"false", settings_path);
+    WritePrivateProfileStringW(L"launcher", L"cleanroom_lead",
+        cleanroom_lead_names[selected_cleanroom_lead()], settings_path);
 }
 
 static void load_saved_game_directory(void) {
@@ -375,6 +391,19 @@ static void load_saved_game_directory(void) {
         SendMessageW(cleanroom_tools_checkbox, BM_SETCHECK,
             lstrcmpiW(saved_directory, L"false") == 0 ? BST_UNCHECKED : BST_CHECKED, 0);
     }
+    if (cleanroom_lead_combo != NULL) {
+        size_t index;
+        GetPrivateProfileStringW(L"launcher", L"cleanroom_lead", L"Ailish",
+            saved_directory, (DWORD)(sizeof(saved_directory) /
+                sizeof(saved_directory[0])), settings_path);
+        SendMessageW(cleanroom_lead_combo, CB_SETCURSEL, 0, 0);
+        for (index = 0u; index < sizeof(cleanroom_lead_names) / sizeof(cleanroom_lead_names[0]);
+             ++index) {
+            if (lstrcmpiW(saved_directory, cleanroom_lead_names[index]) == 0) {
+                SendMessageW(cleanroom_lead_combo, CB_SETCURSEL, index, 0);
+            }
+        }
+    }
 }
 
 static BOOL validate_install(HWND owner,
@@ -411,6 +440,7 @@ static BOOL build_loader_command(WCHAR *command,
                                  SudekiMpLauncherProfile profile) {
     WCHAR game_executable[MAX_PATH];
     const WCHAR *game_arguments = L"";
+    const WCHAR *lead_argument = L"";
     if (!join_path(game_executable, MAX_PATH, game_directory, L"SUDEKI.exe")) {
         return FALSE;
     }
@@ -418,21 +448,25 @@ static BOOL build_loader_command(WCHAR *command,
         if (profile == SUDEKIMP_PROFILE_LAN_HOST) {
             game_arguments = L" --game-arg=-Level --game-arg=testroom "
                 L"--game-arg=-DT --game-arg=1 --game-arg=-Tal --game-arg=1";
-        } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT ||
-                   profile == SUDEKIMP_PROFILE_CLEANROOM) {
+        } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT) {
             game_arguments = L" --game-arg=-Level --game-arg=testroom "
                 L"--game-arg=-DT --game-arg=1 --game-arg=-Ailish --game-arg=1";
+        } else if (profile == SUDEKIMP_PROFILE_CLEANROOM) {
+            /* The test room starts as the hero chosen in "Start as". */
+            game_arguments = L" --game-arg=-Level --game-arg=testroom --game-arg=-DT --game-arg=1";
+            lead_argument = cleanroom_lead_arguments[selected_cleanroom_lead()];
         }
     }
     return SUCCEEDED(StringCchPrintfW(command,
                                       command_count,
                                       check_only
                                           ? L"\"%s\" --check \"%s\" \"%s\""
-                                          : L"\"%s\" \"%s\" \"%s\"%s",
+                                          : L"\"%s\" \"%s\" \"%s\"%s%s",
                                       loader_path,
                                       game_executable,
                                       dll_path,
-                                      game_arguments));
+                                      game_arguments,
+                                      lead_argument));
 }
 
 static BOOL verify_game(HWND owner,
@@ -688,10 +722,14 @@ static void launch_game(HWND owner) {
     } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT) {
         set_status(L"LAN arena client started as Ailish. Keep the loader console for errors.");
     } else if (profile == SUDEKIMP_PROFILE_CLEANROOM) {
-        set_status(cleanroom_tools_checkbox != NULL &&
+        WCHAR text[160];
+        StringCchPrintfW(text, sizeof(text) / sizeof(text[0]),
+            cleanroom_tools_checkbox != NULL &&
                 SendMessageW(cleanroom_tools_checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED ?
-            L"Cleanroom started. Press F8 for sandbox tools; campaign saves are not used." :
-            L"Cleanroom started with F8 sandbox tools disabled; campaign saves are not used.");
+            L"Test room started as %ls. Press F8 for sandbox tools; campaign saves are not used." :
+            L"Test room started as %ls with F8 tools disabled; campaign saves are not used.",
+            cleanroom_lead_names[selected_cleanroom_lead()]);
+        set_status(text);
     } else if (profile == SUDEKIMP_PROFILE_LOCAL_COOP) {
         set_status(L"Windows local co-op started. Player 2 uses XInput slot 0.");
     } else {
@@ -1446,6 +1484,8 @@ static HWND create_combo(int tab, int x, int y, int width, int identifier) {
                         x, y, width, 320, identifier);
 }
 
+static void update_cleanroom_lead_visibility(void);
+
 static void show_tab(int tab) {
     size_t index;
     if (tab < 0 || tab >= SUDEKIMP_TAB_COUNT) {
@@ -1469,8 +1509,19 @@ static void show_tab(int tab) {
                            (owner == SUDEKIMP_TAB_SIDEBAR && tab != SUDEKIMP_TAB_MODS) ?
                        SW_SHOW : SW_HIDE);
     }
+    update_cleanroom_lead_visibility();
     /* Children too: the parent repaints its page surface under them. */
     RedrawWindow(launcher_window, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+/* "Start as" belongs to the Cleanroom profile only. */
+static void update_cleanroom_lead_visibility(void) {
+    const int profile = profile_combo == NULL ? SUDEKIMP_PROFILE_LOCAL_COOP :
+        (int)SendMessageW(profile_combo, CB_GETCURSEL, 0, 0);
+    const int show = active_tab == SUDEKIMP_TAB_PLAY && profile == SUDEKIMP_PROFILE_CLEANROOM ?
+        SW_SHOW : SW_HIDE;
+    if (cleanroom_lead_label != NULL) ShowWindow(cleanroom_lead_label, show);
+    if (cleanroom_lead_combo != NULL) ShowWindow(cleanroom_lead_combo, show);
 }
 
 static void release_launcher_art(void) {
@@ -2133,6 +2184,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                 case IDC_PROFILE:
                     persist_launcher_options();
                     update_mod_availability();
+                    update_cleanroom_lead_visibility();
+                    return 0;
+                case IDC_CLEANROOM_LEAD:
+                    if (notification == CBN_SELCHANGE) {
+                        persist_launcher_options();
+                    }
                     return 0;
                 case IDC_LAN_HOST:
                 case IDC_LAN_PORT:
@@ -2407,6 +2464,16 @@ int WINAPI wWinMain(HINSTANCE instance,
         SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Cleanroom");
         SendMessageW(profile_combo, CB_ADDSTRING, 0, (LPARAM)L"Safe launch");
         SendMessageW(profile_combo, CB_SETCURSEL, SUDEKIMP_PROFILE_LOCAL_COOP, 0);
+        cleanroom_lead_label = create_label(tab, L"Start as:", x + 410, y + 138, 70, 22, 0, 0u);
+        cleanroom_lead_combo = create_combo(tab, x + 484, y + 134, 112, IDC_CLEANROOM_LEAD);
+        {
+            size_t index;
+            for (index = 0u; index < sizeof(cleanroom_lead_names) / sizeof(cleanroom_lead_names[0]);
+                 ++index) {
+                SendMessageW(cleanroom_lead_combo, CB_ADDSTRING, 0, (LPARAM)cleanroom_lead_names[index]);
+            }
+            SendMessageW(cleanroom_lead_combo, CB_SETCURSEL, 0, 0);
+        }
         create_label(tab, L"LAN IP:", x, y + 178, 70, 22, 0, 0u);
         lan_host_edit = create_child(tab, WS_EX_CLIENTEDGE, L"EDIT", L"127.0.0.1",
                                      WS_TABSTOP | ES_AUTOHSCROLL,
