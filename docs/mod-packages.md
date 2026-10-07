@@ -4,9 +4,8 @@ Status: `IMPLEMENTED` / `EXPERIMENTAL`.
 
 - `[Textures]` replacement is `CONFIRMED_LIVE` for the Clean 4x Font example
   and for a converted TexMod package (2026-10-07).
-- `[Files]` replace and add are `CONFIRMED_LIVE` at the index level (log,
-  2026-10-07). Visual confirmation of reads served from the mod file is
-  pending; see Evidence.
+- `[Files]` replace and add are `CONFIRMED_LIVE` (2026-10-07): tinted font
+  sheets were served from the mod file, see Evidence.
 - Not yet exercised live: teardown, and a model or animation `[Files]` entry.
 
 SudekiMP loads mods from folders, and no game file changes:
@@ -264,7 +263,7 @@ glyph layout and from the supplied font.
   the log shows `archive_mods event=replace name=Verdana_16-0.tga
   archive=Fonts.baf` and `event=add name=MODTEST_18.TGA archive=Fonts.baf`
   (red- and green-tinted copies; `[ResourceSwap] Verdana_18-0.tga=MODTEST_18.TGA`)
-  at mount, and no fault. Visual confirmation of the tinted subtitles is
-  pending.
+  at mount, and no fault. The owner confirmed the tinted subtitles in game, so
+  reads are served from the mod file for both a replaced and an added resource.
 - Not yet exercised: non-font replacements, model or animation files,
   teardown or uninstall, very large packs, and LAN with identical mods.
