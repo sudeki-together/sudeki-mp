@@ -5616,3 +5616,213 @@ cleanup or rejection. The owner explicitly confirmed that the eight rotating
 orbs' flicker was resolved. This adds bounded visual `CONFIRMED_LIVE` for the
 client opening correction in this DXVK LAN profile; it does not establish
 generic effect coverage, adverse-network timing or disconnect behavior.
+
+
+## 2026-10-07 — Dev Play lobby and native-avatar contract checkpoint
+
+Revision/profile: `2854c47fb544` on `codex/shared-simulation` plus uncommitted
+Dev Play changes and the pre-existing dirty research tree. Profile is opt-in
+title/saved-story Dev Play. No commits, release or full-avatar support claim.
+The candidate DLL SHA256 is
+`8c7fd66e5fb34952d240778ac4a1c5ca72640a7fc0508635c9b156c560447335`.
+
+**CONFIRMED_TEST:** Flatpak MinGW build passed. Under Wine, all six suites
+passed: TitleLobbyProtocolTest, LobbyLaunchPlanTest, TitleLobbyUiTest,
+StoryActionTransportTest, LanPartySessionTest and LanPartyClientControlTest.
+Expected and observed: normal mode retains unique heroes/save-leader rules;
+Dev Play admits Talos (5), duplicate choices and independent host selection;
+mode mismatches reject before admission; malformed mode/reserved fields fail;
+setting off preserves the direct browser path; picker selection locks and
+returns to the room. The UI fixture uses synthetic native-boundary stubs,
+not actual game rendering or controller dispatch.
+
+Protocol v12 uses STATE225, HELLO48 and discovery OFFER52 for mode. Local
+launcher IPC v4 carries the launch-plan mode. Pure first-hero projection
+preserves the original lobby plan and grants no native authority. Both UI
+Start and native preparation refuse presently unsupported Talos/duplicate/
+nonleader-host avatar plans. [Dev Play](dev-play.md) records the complete
+owner-selected design, current partial boundary and retained alternatives.
+
+**CONFIRMED_STATIC:** the existing title portrait path has no demonstrated
+five-portrait title residency; the picker therefore uses the authorized name
+fallback. Native spawning/camera research identified why the proposed direct
+hero spawn and anchor-only camera changes do not establish independent
+avatars. See [native contract checkpoint](dev-play-native-research.md).
+
+**CONFIRMED_EXACT_IMAGE:** StoryTalosDamageProbeImageTest passed against the
+supported game image. The six direct-call seams matched; opcode/target/entry
+mismatches refused; install, independent restoration, foreign-owner refusal,
+retained retry and reinstall passed with both damage entry sequences intact.
+This is an inert-image test, not native-hit execution or live damage proof.
+The default-off `[DevPlay] MeleeTrace` observer performs no item/stat writes.
+The proposed D92D0 equip writer was corrected to presentation-state handling;
+D7C10 is the equip path and D95C0 has a no-item component-damage fallback.
+
+**UNKNOWN:** native portrait rendering, independent Talos controls/camera,
+multiple avatars, host-Talos AI transfer, duplicate spectator integration,
+all-peer HP/SP card and live damage. No avatar gameplay, HP decrease,
+Ailish run-in-place repair, scene transition or gameplay teardown acceptance
+was performed for this checkpoint. Owner visual acceptance remains required.
+
+## 2026-10-07 — Dev Play native HUD and camera follow-up
+
+Revision/profile: `2854c47fb544` plus uncommitted Dev Play and pre-existing
+research changes, saved-story Dev Play, two Talos selections in New Brightwater
+under Wine. No commit or release. The inspected pair used DLL SHA256
+`730523aee47131ec7c6439144502f0a06d0a9920b05c40ee4d3053079fbacff4`.
+The supported executable remains SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+This supersedes the earlier checkpoint's lobby-only limitations without
+claiming complete gameplay. Independent native spawn tracking now identifies
+two Talos actors in each process, and separate name/HP/SP cards appeared on both
+screens. All five native title portrait textures were loaded and visually
+inspected after correcting extensionless loader names. On the earlier DLL
+`102bcfdeebc3b6c6f47e6276fe840ac2ac71f34683cc239d5d14cdae83b339d8`, a bounded
+host movement sample changed its own Talos position while the other stayed near
+its initial position; that does not prove client control or camera quality.
+The owner accepted the lobby layout but reported that the vanilla HUD still
+showed Tal and Ailish, that camera handoff was delayed, and that camera behavior
+was unreliable. These are unresolved acceptance failures.
+
+The follow-up was read-only native/source research and targeted process
+observation. It did not stage another gameplay build, inject input, change
+native memory or run a new gameplay acceptance sequence. Existing fixture
+results remain bounded to their earlier candidates; tests are not evidence
+that the reported visual/control problems are solved.
+
+**CONFIRMED_STATIC:** native HUD construction creates all four gizmos, but
+their current sources and visibility depend on the saved party. Existing
+split-screen source hooks establish a hero-to-hero reuse precedent. The generic
+intrusive pointer copier does not require party membership, but its observer
+does not own the actor lifetime. Talos needs separate portrait selection,
+auxiliary-label and visible-count handling. Native actor rebinding alone also
+cannot supply authoritative client HP/SP: avatar status currently feeds plain
+overlay rows, while world records carry pose/animation only.
+
+**CONFIRMED_STATIC:** host input captures mouse orbit but does not consume it
+in the avatar camera path. Client camera geometry is computed separately and
+has no native collision step. Host loading can be announced before asynchronous
+avatar readiness; the logs place several capture-unavailable summaries before
+ready Talos world records. Gating changes must preserve host frames and control
+offers needed for the client's acknowledgement.
+
+**CONFIRMED_LIVE, read-only:** the client's input window and focus hook were
+unset despite a real game window owned by the native runtime thread, and
+avatar input remained pending. Active-window-only discovery is a plausible
+cause; hook-install failure is not yet excluded. Both cameras were in
+Exploration with their own MatrixTarget in both target slots. Talos native
+camera offsets were zero; Tal's vertical offset was 1.8. No precise cause is
+claimed for every reported camera defect.
+
+**CONFIRMED_STATIC / INFERENCE:** native GameObjectTarget and OffsetTarget
+provide a candidate actor-follow route with explicit reference/observer
+lifetimes and facing, but Talos requires deliberate framing. Ordinary native
+camera update exits under the client's pause; isolated camera stepping remains
+**UNKNOWN**. Newer source for selected host state transitions was not staged
+in the inspected pair. The recommended proof sequence and exact contracts are
+in [the HUD/camera investigation](dev-play-hud-camera-research.md).
+
+The parallel [equip investigation](dev-play-talos-equip-contract.md) records
+read-only live zero Talos fallback/attack inputs, a real-item/model dependency,
+and the missing model-visibility/restoration contract. It still has no accepted
+Tal/Talos same-target hit comparison, equip experiment or target-HP decrease.
+
+Native HUD reuse, client movement/melee, host/client camera acceptance,
+combat/exit/retry behavior, duplicate/free-host cases and damage remain open.
+The user's requested research supports a native reuse candidate; it is not
+approval of a completed replacement or a claim of supported gameplay.
+
+
+## 2026-10-07 — Native HUD/party replacement integration checkpoint
+
+Scope: owner-authorized replacement of the added player cards with the native
+HUD and removal of unselected saved heroes. Dirty `2854c47fb544`; ordinary
+multiplayer remains on its strict hero-only policy. Damage work remains open.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE:** the native HUD adapter uses eight
+actor-source callsites and two native widget virtual slots; it retains native
+bar, text, portrait-resource and rendering ownership. The old separate-card
+runtime draw path is removed. Tests cover all four rows, independent values,
+local-first mapping, stale omission, portrait lifetime and retained restoration.
+The all-Talos party adapter has fixture coverage for native group membership,
+queued leadership, zero-hero typed observation, actual-leader AI mode 0/ref 0,
+world-exit receipts and unknown-state quarantine. Required lobby/session/action
+regressions pass. These fixtures do not establish live hero deletion.
+
+**CONFIRMED_LIVE / CONFIRMED_EXACT_IMAGE:** the first combined runtime refused
+installation because the AddPlayer signature included TaskTrace's existing
+callsite at RVA `23260`. An owner attestation now normalizes only that exact
+call displacement; all remaining signature bytes remain checked. An actual
+TaskTrace-install fixture verifies startup composition before native thread/load
+enrollment and rejects foreign opcode, displacement, hook metadata and body
+tampering. Candidate `09da5d383c84` subsequently installed and loaded New
+Brightwater on the first Start in both labelled Dev Play processes, with two
+independent Talos entities in each registry.
+
+**CONFIRMED_STATIC / CONFIRMED_LIVE:** the next handoff stopped before changing
+group membership. Native FilterNone (`8AC0`) requests pending filter zero at
+controller `+84`; native update `27CF0` commits it to current `+80` later, at
+RVA `285D7`. Requiring both fields to be zero immediately after the request was
+incorrect. The retained candidate quarantined that state; subsequent read-only
+observations found both filters zero and neutral caches, with both saved heroes
+still present. Both processes later completed verified native exit and runtime
+cleanup from this failed-start state. This does not prove teardown after hero
+replacement or camera binding.
+
+The explicit pending-filter handshake is the next correction. Native HUD
+appearance, actual unselected-hero removal, both players' movement/camera
+behavior and completed-party exit/retry remain live acceptance work.
+
+
+## 2026-10-07 — Native HUD and zero-hero party live checkpoint
+
+This supersedes the incomplete filter-handoff checkpoint above. Scope remains
+owner-authorized native HUD reuse and removal of unselected saved heroes on the
+initial two-player all-Talos/None New Brightwater route. Code is dirty
+`2854c47fb544`; final staged DLL SHA256 is
+`85a275efe466ec270d92acf24463e0335205ce98675a3cc587ef9e4e594269a3`.
+
+**CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST:** the party adapter now retains an
+explicit pending phase between FilterNone's request and the later native commit.
+The fixture executes the real supported-image filter functions and rejects
+premature or foreign transitions. Typed zero-hero observation and transport are
+limited to the admitted Dev Play policy; regular multiplayer retains its hero
+rules. Native HUD fixtures also reproduce the live widget's dormant optional
+child and anchored material-free geometric overlay without weakening texture,
+owner or live-state checks. Required action/session/client-control/lobby/launch
+regressions and focused native HUD, party, spawn, observer, roster, runtime, menu,
+status and control fixtures passed.
+
+**CONFIRMED_LIVE:** candidate `834a` reached sole local Talos native leadership
+in each process. Guarded read-only entity registries contained exactly two Talos
+actors and no canonical hero actors; controller targets matched each process's
+local Talos, with native leader AI mode 0/ref 0. Focused, bounded movement on each
+peer moved its own actor independently and the other process reflected it.
+This proves a bounded movement sample, not full gameplay or damage.
+
+**CONFIRMED_LIVE:** final candidate `85a275e` loaded both peers on first Start
+and again reached party READY with zero heroes, one native member and revision 5.
+Both screenshots show the game's original bottom-right HUD with two resident
+Talos portraits, local-first player names and 8000 HP / 999 SP on the primary
+row. Guarded reads confirm the native widget hooks/owner tuples, two visible
+rows and two hidden unused rows. There are no separate player-stat cards or
+visible Tal/Ailish HUD rows. Changing HP/SP, four-player presentation and owner
+visual acceptance remain unproved.
+
+**CONFIRMED_TEST / CONFIRMED_LIVE:** terminal client roster proof no longer
+requires the already-retired observer; it instead requires the retained terminal
+scope and repeated fresh native party/owner proof. The fixture exercises observer
+retirement, pause release, reacquisition and another release, rejecting stale
+ownership and unbalanced prerequisites. On the final live candidate, normal host
+End Session released the client's owned pause, verified native Quit in both
+processes, retired each world journal and completed runtime cleanup. Both
+processes visibly returned to the native title. Same-process re-entry is pending.
+
+**UNKNOWN / remaining acceptance:** both inputs became ready, but client
+readiness is intermittent and its inspected frame rate was low. Camera framing
+remains poor; these HUD/party results do not resolve the reported camera defects.
+The save loader still constructs its saved heroes before the adapter removes
+them; no loader-constructor suppression or save editing is claimed. Mixed
+hero/Talos selections, recruitment, campaign transitions, combat and damage
+remain outside this live proof. Damage research remains on hold.

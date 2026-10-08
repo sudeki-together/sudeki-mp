@@ -54,7 +54,29 @@ and sound script as well; a mismatched skeleton renders garbage.
 | --- | --- | --- |
 | `TAL.HOM` | `TALOS.HOM` | skeleton/effect container (the HOM named in the SOL) |
 | `TAL_TAL_LORES_ARMOUR{A,2,3}.HOM` | `TALOS_TALOS.HOM` | body meshes, one per equipped armour |
-| `PC_TAL.ANI` | `BOSS_TALOS.ANI` | animation bank; the player bank `PC_TALOS.ANI` has no walk/run clips |
+| `PC_TAL.ANI` | `PC_TALOS_PLAYER.ANI` | animation bank built by the forge from `BOSS_TALOS.ANI` (see below); the player bank `PC_TALOS.ANI` has no walk/run clips |
+
+## Animation banks and player control
+
+An AnimScript bank (`.ANI`) is the same node container as a SOL definition.
+Each state's `Connections ` list holds records `{Target state, No interrupt,
+Blend time, Connection Type}`. Player locomotion requests (arbiter movement
+RVA 0xDAE80 → the `MOVE` meta-state) are honoured only through a
+`Connection Type 3` record: Tal's and the NPC Talos bank author idle→MOVE as
+type 3 with a blend time; the boss bank authors it as type 1 with no blend and
+a player-controlled body then idles and turns but never moves (CONFIRMED_LIVE,
+mp56–mp63). The forge builds `PC_TALOS_PLAYER.ANI` from the boss bank with
+IDLE_NORMAL as state 0, unified locomotion clips, and Tal's connection
+type/blend for every connection Tal's bank also has; with it the Tal slot
+walks and runs as Talos. Melee submission requires native combat mode, so
+attacks cannot be exercised in New Brightwater town.
+
+Tools (sudeki-forge): `ani_tool.py` (lossless node serializer with a
+byte-exact round-trip, state reordering) and `baf_patch.py` (patched archive
+copy with appended/replaced entries; bucket-sorted index, 2048-aligned data,
+footer as the engine's parser at 0x5BDE70 reads it). The patched
+`SOLData.talos.baf` is linked per stage in place of `SOLData.baf`; the original
+archive is never modified.
 
 ## Evidence
 
