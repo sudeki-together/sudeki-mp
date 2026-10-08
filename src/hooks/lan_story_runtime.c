@@ -24,6 +24,7 @@
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_story_recruit.h"
 #include "hooks/lan_story_local_control.h"
+#include "hooks/lan_story_context_prompt.h"
 #include "hooks/lan_story_activity.h"
 #include "hooks/lan_story_cinematic.h"
 #include "ui/story_cinematic_view.h"
@@ -1582,6 +1583,11 @@ static void menu_frame(void) {
             BOOL contained=SudekiMpLanStoryClientRetains()?
                 SudekiMpLanStoryClientService(&report):SudekiMpLanStoryClientAcquire(&report);
             if(!contained || !presentation_attempted) invalidate_presentation();
+            /* A stale native interaction prompt (e.g. the save point's hand
+             * icon and "Save") survives the pause; clear it through the HUD's
+             * own update every half second while contained. */
+            if(contained) { static DWORD prompt_checked; DWORD t=GetTickCount();
+                if(t-prompt_checked>=500u) { prompt_checked=t; (void)SudekiMpLanStoryContextPromptClear((HMODULE)game_base); } }
             if(contained && quick_menu_attempted)
                 (void)SudekiMpLanStoryClientPresent(service_quick_menu,NULL);
             if(contained && SudekiMpLanStoryCinematicAudioRetains() &&
