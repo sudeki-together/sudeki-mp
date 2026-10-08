@@ -111,6 +111,8 @@ int wmain(void) {
     DeleteFileW(file);
     StringCchPrintfW(file, MAX_PATH, L"%ls\\SudekiMP\\thumbs", settings);
     RemoveDirectoryW(file);
+    StringCchPrintfW(file, MAX_PATH, L"%ls\\SudekiMP\\music", settings);
+    RemoveDirectoryW(file);
     StringCchPrintfW(file, MAX_PATH, L"%ls\\SudekiMP", settings);
     RemoveDirectoryW(file);
     RemoveDirectoryW(settings);

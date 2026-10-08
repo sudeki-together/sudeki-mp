@@ -54,6 +54,17 @@ static const WCHAR *const cleanroom_lead_arguments[] = {
     L" --game-arg=-Elco --game-arg=1", L" --game-arg=-Buki --game-arg=1"};
 static WCHAR package_directory[MAX_PATH];
 static WCHAR music_cache_path[MAX_PATH];
+/* Mini player (bottom of the left column, every tab). */
+typedef enum SudekiMpMusicState {
+    SUDEKIMP_MUSIC_STOPPED = 0, SUDEKIMP_MUSIC_LOADING, SUDEKIMP_MUSIC_PLAYING,
+    SUDEKIMP_MUSIC_PAUSED
+} SudekiMpMusicState;
+static SudekiMpMusicState music_state;
+static HWND music_title_label, music_state_label, music_play_button, music_stop_button;
+#define SUDEKIMP_MUSIC_X (SUDEKIMP_ART_X)
+#define SUDEKIMP_MUSIC_Y 552
+#define SUDEKIMP_MUSIC_TIMER 7u
+static void close_music(void);
 static LONG music_download_running;
 static HANDLE launched_game_job;
 static HBRUSH app_background_brush;
@@ -779,6 +790,10 @@ static void launch_game(HWND owner) {
     ResumeThread(process.hThread);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
+    /* The game is starting: the launcher's music stops (Play resumes it later). */
+    if (music_state != SUDEKIMP_MUSIC_STOPPED) {
+        close_music();
+    }
     if (profile == SUDEKIMP_PROFILE_LAN_HOST) {
         set_status(L"LAN arena host started as Tal. Keep the loader console for errors.");
     } else if (profile == SUDEKIMP_PROFILE_LAN_CLIENT) {
@@ -1049,8 +1064,13 @@ static void test_xinput_controller(HWND owner) {
     }
 }
 
+static void update_music_player(void);
+static void start_music_download(HWND owner);
+
 static void close_music(void) {
     mciSendStringW(L"close SudekiMPMusic", NULL, 0u, NULL);
+    music_state = SUDEKIMP_MUSIC_STOPPED;
+    update_music_player();
 }
 
 /* Writes "<track>.wav" beside the cached MP3: the same MP3 frames in a RIFF
@@ -1130,7 +1150,9 @@ static BOOL play_cached_music(HWND owner) {
         result = mciSendStringW(command, NULL, 0u, NULL);
     }
     if (result == 0u) {
-        result = mciSendStringW(L"play SudekiMPMusic from 0", NULL, 0u, NULL);
+        (void)mciSendStringW(L"set SudekiMPMusic time format milliseconds", NULL, 0u, NULL);
+        /* notify: MM_MCINOTIFY tells the mini player when the track ends. */
+        result = mciSendStringW(L"play SudekiMPMusic from 0 notify", NULL, 0u, launcher_window);
     }
     if (result != 0u) {
         close_music();
@@ -1138,8 +1160,88 @@ static BOOL play_cached_music(HWND owner) {
                    L"Windows could not play the cached MP3. The launcher itself is unaffected.");
         return FALSE;
     }
+    music_state = SUDEKIMP_MUSIC_PLAYING;
+    update_music_player();
     set_status(L"Playing Map Inversion from the project music cache.");
     return TRUE;
+}
+
+/* Track name for the mini player: the cached file's name without ".mp3". */
+static void music_title(WCHAR *out, size_t count) {
+    const WCHAR *name = wcsrchr(music_cache_path, L'\\');
+    WCHAR *dot;
+    StringCchCopyW(out, count, name != NULL ? name + 1 : L"Map Inversion.mp3");
+    if (out[0] == L'\0') StringCchCopyW(out, count, L"Map Inversion.mp3");
+    dot = wcsrchr(out, L'.');
+    if (dot != NULL) *dot = L'\0';
+}
+
+static void update_music_player(void) {
+    static const WCHAR *const states[] = {L"Stopped", L"Loading…", L"Playing", L"Paused"};
+    WCHAR title[MAX_PATH];
+    if (music_title_label == NULL) return;
+    music_title(title, MAX_PATH);
+    SetWindowTextW(music_title_label, title);
+    SetWindowTextW(music_state_label, states[music_state]);
+    EnableWindow(music_stop_button, music_state != SUDEKIMP_MUSIC_STOPPED);
+    InvalidateRect(music_play_button, NULL, FALSE);
+    if (music_state == SUDEKIMP_MUSIC_PLAYING) {
+        SetTimer(launcher_window, SUDEKIMP_MUSIC_TIMER, 500u, NULL);
+    } else {
+        KillTimer(launcher_window, SUDEKIMP_MUSIC_TIMER);
+    }
+    {
+        RECT bar = {SUDEKIMP_MUSIC_X + 104, SUDEKIMP_MUSIC_Y + 56,
+                    SUDEKIMP_MUSIC_X + SUDEKIMP_ART_W - 8, SUDEKIMP_MUSIC_Y + 64};
+        InvalidateRect(launcher_window, &bar, FALSE);
+    }
+}
+
+/* Thin progress bar beside the buttons (position/length from MCI). */
+static void paint_music_progress(HDC dc) {
+    WCHAR position[32] = L"", length[32] = L"";
+    RECT bar = {SUDEKIMP_MUSIC_X + 104, SUDEKIMP_MUSIC_Y + 58,
+                SUDEKIMP_MUSIC_X + SUDEKIMP_ART_W - 8, SUDEKIMP_MUSIC_Y + 62};
+    RECT done = bar;
+    HBRUSH track = CreateSolidBrush(SUDEKIMP_COLOR_INPUT);
+    HBRUSH fill = CreateSolidBrush(SUDEKIMP_COLOR_CYAN);
+    long at = 0, total = 0;
+    FillRect(dc, &bar, track);
+    if (music_state == SUDEKIMP_MUSIC_PLAYING || music_state == SUDEKIMP_MUSIC_PAUSED) {
+        if (mciSendStringW(L"status SudekiMPMusic position", position, 32u, NULL) == 0u &&
+            mciSendStringW(L"status SudekiMPMusic length", length, 32u, NULL) == 0u) {
+            at = wcstol(position, NULL, 10);
+            total = wcstol(length, NULL, 10);
+        }
+        if (total > 0 && at >= 0) {
+            done.right = done.left + MulDiv(bar.right - bar.left, at < total ? at : total, total);
+            FillRect(dc, &done, fill);
+        }
+    }
+    DeleteObject(track);
+    DeleteObject(fill);
+}
+
+/* Play/Pause: start (download if needed), pause, or resume. */
+static void toggle_music(HWND owner) {
+    if (music_state == SUDEKIMP_MUSIC_PLAYING) {
+        if (mciSendStringW(L"pause SudekiMPMusic", NULL, 0u, NULL) == 0u) {
+            music_state = SUDEKIMP_MUSIC_PAUSED;
+            set_status(L"Project music paused.");
+        }
+    } else if (music_state == SUDEKIMP_MUSIC_PAUSED) {
+        if (mciSendStringW(L"resume SudekiMPMusic", NULL, 0u, NULL) == 0u ||
+            mciSendStringW(L"play SudekiMPMusic notify", NULL, 0u, launcher_window) == 0u) {
+            music_state = SUDEKIMP_MUSIC_PLAYING;
+            set_status(L"Project music resumed.");
+        }
+    } else if (music_state == SUDEKIMP_MUSIC_STOPPED) {
+        music_state = SUDEKIMP_MUSIC_LOADING;
+        update_music_player();
+        start_music_download(owner);
+        return;
+    }
+    update_music_player();
 }
 
 static BOOL manifest_names_expected_track(const WCHAR *manifest_path) {
@@ -1964,7 +2066,7 @@ static COLORREF button_fill_color(unsigned int identifier, BOOL selected) {
     if (identifier == IDC_LAUNCH) {
         return selected ? RGB(20, 132, 160) : SUDEKIMP_COLOR_CYAN;
     }
-    if (identifier == IDC_PLAY_MUSIC || identifier == IDC_SAVE) {
+    if (identifier == IDC_SAVE) {
         return selected ? RGB(42, 105, 144) : SUDEKIMP_COLOR_BLUE;
     }
     return selected ? RGB(53, 76, 101) : SUDEKIMP_COLOR_BUTTON;
@@ -1989,7 +2091,8 @@ static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
     /* RoundRect does not paint its corners. Clear the full owner-draw area
        with whatever surface the button sits on so nothing peeks through. */
     FillRect(draw->hDC, &content,
-             control_tab(draw->hwndItem) == SUDEKIMP_TAB_ALWAYS ?
+             control_tab(draw->hwndItem) == SUDEKIMP_TAB_ALWAYS &&
+                     draw->CtlID != IDC_PLAY_MUSIC && draw->CtlID != IDC_STOP_MUSIC ?
                  app_background_brush : panel_background_brush);
     fill = CreateSolidBrush(fill_color);
     outline = CreatePen(PS_SOLID,
@@ -2010,6 +2113,26 @@ static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
     DeleteObject(fill);
     DeleteObject(outline);
 
+    if (draw->CtlID == IDC_PLAY_MUSIC || draw->CtlID == IDC_STOP_MUSIC) {
+        /* Mini player icons: play triangle, pause bars, stop square. */
+        const int cx = (content.left + content.right) / 2, cy = (content.top + content.bottom) / 2;
+        HBRUSH icon = CreateSolidBrush(disabled ? RGB(125, 140, 155) : SUDEKIMP_COLOR_TEXT);
+        HGDIOBJ previous_brush = SelectObject(draw->hDC, icon);
+        HGDIOBJ previous_pen = SelectObject(draw->hDC, GetStockObject(NULL_PEN));
+        if (draw->CtlID == IDC_STOP_MUSIC) {
+            Rectangle(draw->hDC, cx - 5, cy - 5, cx + 6, cy + 6);
+        } else if (music_state == SUDEKIMP_MUSIC_PLAYING) {
+            Rectangle(draw->hDC, cx - 6, cy - 6, cx - 1, cy + 7);
+            Rectangle(draw->hDC, cx + 2, cy - 6, cx + 7, cy + 7);
+        } else {
+            POINT triangle[3] = {{cx - 4, cy - 7}, {cx - 4, cy + 7}, {cx + 7, cy}};
+            Polygon(draw->hDC, triangle, 3);
+        }
+        SelectObject(draw->hDC, previous_brush);
+        SelectObject(draw->hDC, previous_pen);
+        DeleteObject(icon);
+        return;
+    }
     GetWindowTextW(draw->hwndItem, text, (int)(sizeof(text) / sizeof(text[0])));
     SetBkMode(draw->hDC, TRANSPARENT);
     SetTextColor(draw->hDC,
@@ -2042,30 +2165,6 @@ static void paint_bitmap(HDC target, HBITMAP bitmap, int x, int y, int width, in
                info.bmWidth < width ? info.bmWidth : width,
                info.bmHeight < height ? info.bmHeight : height,
                source, 0, 0, SRCCOPY);
-    }
-    SelectObject(source, previous);
-    DeleteDC(source);
-}
-
-/* Scaled copy that keeps the bitmap's aspect ratio inside width x height. */
-static void paint_bitmap_fit(HDC target, HBITMAP bitmap, int x, int y, int width, int height) {
-    HDC source = CreateCompatibleDC(target);
-    HGDIOBJ previous;
-    BITMAP info;
-    if (source == NULL) {
-        return;
-    }
-    previous = SelectObject(source, bitmap);
-    if (GetObjectW(bitmap, sizeof(info), &info) != 0 && info.bmWidth > 0 && info.bmHeight > 0) {
-        int fit_w = width, fit_h = MulDiv(width, info.bmHeight, info.bmWidth);
-        if (fit_h > height) {
-            fit_h = height;
-            fit_w = MulDiv(height, info.bmWidth, info.bmHeight);
-        }
-        SetStretchBltMode(target, HALFTONE);
-        SetBrushOrgEx(target, 0, 0, NULL);
-        StretchBlt(target, x + (width - fit_w) / 2, y + (height - fit_h) / 2, fit_w, fit_h,
-                   source, 0, 0, info.bmWidth, info.bmHeight, SRCCOPY);
     }
     SelectObject(source, previous);
     DeleteDC(source);
@@ -2110,11 +2209,13 @@ static void paint_launcher(HWND window) {
         DrawTextW(paint_dc, L"Mod workshop", -1, &title,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(paint_dc, old_font);
-        if (launcher_art[SUDEKIMP_ART_LOGO] != NULL) {
-            paint_bitmap_fit(paint_dc, launcher_art[SUDEKIMP_ART_LOGO], SUDEKIMP_ART_X,
-                             SUDEKIMP_STATUS_Y, SUDEKIMP_ART_W, SUDEKIMP_CLIENT_H - 16 -
-                                 SUDEKIMP_STATUS_Y);
+        {
+            /* The mini player keeps its panel below the workshop. */
+            RECT player = {SUDEKIMP_ART_X, SUDEKIMP_MUSIC_Y,
+                           SUDEKIMP_ART_X + SUDEKIMP_ART_W, SUDEKIMP_CLIENT_H - 16};
+            FillRect(paint_dc, &player, panel_background_brush);
         }
+        paint_music_progress(paint_dc);
         EndPaint(window, &paint);
         return;
     }
@@ -2137,6 +2238,7 @@ static void paint_launcher(HWND window) {
                           L"Choose the Sudeki folder on the Play tab to show the game's "
                           L"launcher art.", NULL);
     }
+    paint_music_progress(paint_dc);
     if (active_tab == SUDEKIMP_TAB_CONTROLLER) {
         RECT map = {SUDEKIMP_CONTENT_X, SUDEKIMP_CONTENT_Y,
                     SUDEKIMP_CONTENT_X + 289, SUDEKIMP_CONTENT_Y + 360};
@@ -2171,10 +2273,12 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
             const int control_id = GetDlgCtrlID((HWND)lparam);
             SetTextColor(control_dc,
                          control_id == IDC_STATUS || control_id == IDC_NOTE ||
+                                 control_id == IDC_MUSIC_STATE ||
                                  control_id == IDC_OPTIONS_SOURCE ?
                              SUDEKIMP_COLOR_MUTED :
                          control_id == IDC_SAVE_WARNING ? RGB(244, 105, 105) :
-                         control_id == IDC_HEADING ? SUDEKIMP_COLOR_CYAN :
+                         control_id == IDC_HEADING || control_id == IDC_MUSIC_TITLE ?
+                             SUDEKIMP_COLOR_CYAN :
                                                      SUDEKIMP_COLOR_TEXT);
             /* Every label, checkbox and slider sits on a painted panel, so an
                opaque panel brush also clears old text when a label changes. */
@@ -2305,7 +2409,7 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     test_xinput_controller(window);
                     return 0;
                 case IDC_PLAY_MUSIC:
-                    start_music_download(window);
+                    toggle_music(window);
                     return 0;
                 case IDC_STOP_MUSIC:
                     close_music();
@@ -2324,10 +2428,28 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
             }
             break;
         }
+        case WM_TIMER:
+            if (wparam == SUDEKIMP_MUSIC_TIMER) {
+                update_music_player();
+                return 0;
+            }
+            break;
+        case MM_MCINOTIFY:
+            /* The track reached its end (superseded/aborted come from pause/stop). */
+            if (wparam == MCI_NOTIFY_SUCCESSFUL && music_state == SUDEKIMP_MUSIC_PLAYING) {
+                close_music();
+                set_status(L"Project music finished.");
+            }
+            return 0;
         case WM_SUDEKIMP_MUSIC_COMPLETE:
-            if (wparam != 0u) {
+            if (wparam != 0u && music_state != SUDEKIMP_MUSIC_LOADING) {
+                /* Stopped (or the game started) while the track was fetched. */
+                update_music_player();
+            } else if (wparam != 0u) {
                 (void)play_cached_music(window);
             } else {
+                music_state = SUDEKIMP_MUSIC_STOPPED;
+                update_music_player();
                 show_error(window,
                            L"The project music catalog or track could not be downloaded. "
                            L"The launcher never changed the game installation.");
@@ -2661,9 +2783,7 @@ int WINAPI wWinMain(HINSTANCE instance,
             {L"Export support logs…", IDC_EXPORT_LOGS},
             {L"Check for updates…", IDC_UPDATE},
             {L"Install co-op save fixtures…", IDC_INSTALL_COOP_SAVES},
-            {L"Developer: wander", IDC_DEVELOPER},
-            {L"Play project music", IDC_PLAY_MUSIC},
-            {L"Stop music", IDC_STOP_MUSIC}
+            {L"Developer: wander", IDC_DEVELOPER}
         };
         const int x = SUDEKIMP_CONTENT_X;
         const int y = SUDEKIMP_CONTENT_Y;
@@ -2735,6 +2855,23 @@ int WINAPI wWinMain(HINSTANCE instance,
         }
     }
 
+    /* Mini player: title, state, Play/Pause, Stop, progress (painted). */
+    music_title_label = create_label(SUDEKIMP_TAB_ALWAYS, L"Map Inversion",
+                                     SUDEKIMP_MUSIC_X + 10, SUDEKIMP_MUSIC_Y + 6,
+                                     SUDEKIMP_ART_W - 20, 20, IDC_MUSIC_TITLE,
+                                     SS_ENDELLIPSIS | SS_NOPREFIX);
+    music_state_label = create_label(SUDEKIMP_TAB_ALWAYS, L"Stopped",
+                                     SUDEKIMP_MUSIC_X + 10, SUDEKIMP_MUSIC_Y + 26,
+                                     SUDEKIMP_ART_W - 20, 18, IDC_MUSIC_STATE, 0u);
+    apply_font(music_state_label, subtitle_font);
+    music_play_button = create_button(SUDEKIMP_TAB_ALWAYS, L"", SUDEKIMP_MUSIC_X + 10,
+                                      SUDEKIMP_MUSIC_Y + 46, 40, 28, IDC_PLAY_MUSIC);
+    music_stop_button = create_button(SUDEKIMP_TAB_ALWAYS, L"", SUDEKIMP_MUSIC_X + 56,
+                                      SUDEKIMP_MUSIC_Y + 46, 40, 28, IDC_STOP_MUSIC);
+    /* Track name only; nothing is downloaded until Play. */
+    (void)get_music_cache_path(music_cache_path,
+                               sizeof(music_cache_path) / sizeof(music_cache_path[0]));
+    update_music_player();
     mods_panel = SudekiMpModsPanelCreate(launcher_window, launcher_instance);
     if (mods_panel != NULL) {
         MoveWindow(mods_panel, SUDEKIMP_MODS_X, SUDEKIMP_PAGE_Y, SUDEKIMP_MODS_W,
