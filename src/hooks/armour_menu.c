@@ -28,8 +28,9 @@ enum {
     W_HINT_SOURCE = 0x268, W_HINT_HANDLE = 0x6b8, W_TITLE_BASE = 0x330,
     W_STAT_A = 0x478, W_STAT_B = 0x4b8, W_RATE_LABEL = 0x410, W_RATE_VALUE = 0x4d0,
     W_ICON = 0x000, W_SECTION_LABELS = 0x3d0, ITEM_ICON = 0x78, TEXT_ID = 0x4, TEXT_STRING = 0x38,
+    W_MORE_INFO = 0x778, /* F3 More Info text: description, separator, flavour text */
     /* Item / character fields. */
-    ITEM_ID = 0x14, ITEM_NAME = 0x50, ITEM_USED_ON = 0x84, CHAR_EQUIPPED = 0xe0, EQUIPPED_ARMOUR = 0x18, CHAR_TYPE_COMPONENT = 0x2c,
+    ITEM_ID = 0x14, ITEM_NAME = 0x50, ITEM_DESCRIPTION = 0x58, ITEM_FLAVOUR = 0x60, ITEM_USED_ON = 0x84, CHAR_EQUIPPED = 0xe0, EQUIPPED_ARMOUR = 0x18, CHAR_TYPE_COMPONENT = 0x2c,
     MAX_ITEMS = 999, MAX_ROWS = 64
 };
 
@@ -321,6 +322,19 @@ static void armour_details(uint8_t *layer) {
     if (readable(widgets + W_LIST_SELECTED, 4) && (index = *(int *)(widgets + W_LIST_SELECTED)) >= 0 && index < MAX_ROWS &&
         (rows = ptr_at(widgets + W_LIST_ROWS)) && (row = ptr_at(rows + index * 4)) && readable(row + ROW_ITEM, 4))
         item = item_by_id(*(int *)(row + ROW_ITEM));
+    /* More Info is the description plus the flavour text (native 0x56F5B0;
+     * the item loader 0x52D3F0 stores Item Desc. at +0x58 and Item Flavour
+     * Text. at +0x60). Armour has no flavour text: its ID is 0, which the
+     * localiser renders as "StringNotSet". Show the description alone. */
+    if (item && readable(item + ITEM_FLAVOUR, 4) && (*(int *)(item + ITEM_FLAVOUR) == 0 ||
+            *(int *)(item + ITEM_FLAVOUR) == -1)) {
+        void *localizer = ptr_at(base + LOCALIZER);
+        Localize localize = (Localize)method(localizer, 4);
+        int description = *(int *)(item + ITEM_DESCRIPTION);
+        const wchar_t *text = localize && description != 0 && description != -1 ?
+            localize(localizer, description) : NULL;
+        set_text(widgets, W_MORE_INFO, text ? text : L"");
+    }
     if (item && readable(item + ITEM_ICON, 12)) {
         uint32_t descriptor[3];
         descriptor[0] = *(uint32_t *)(item + ITEM_ICON) & 0x1fffu;
