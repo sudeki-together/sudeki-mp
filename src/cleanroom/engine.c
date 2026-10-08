@@ -2469,6 +2469,8 @@ static BOOL prepare_training_inventory(void) {
     void **inventory_global;
     uint8_t *inventory;
     unsigned identifier, weapons = 0u, armour = 0u, owned = 0u, full = 0u;
+    unsigned items = 0u, equipment = 0u, uncategorized = 0u;
+    static unsigned waiting_logs;
     if (game_base == NULL || training_grant_attempts >= 5u) {
         return inventory_filled;
     }
@@ -2498,6 +2500,24 @@ static BOOL prepare_training_inventory(void) {
         SudekiMpLogWrite("cleanroom_engine event=training_loadout status=refused reason=add_item_bytes\r\n");
         return FALSE;
     }
+    /* The item database fills after the inventory categories: wait until it
+     * shows equipment, without spending an attempt. */
+    for (identifier = 0u; identifier < 999u; ++identifier) {
+        uint8_t *item = global_item(identifier);
+        int type;
+        if (!readable_memory(item, 0x20u)) continue;
+        ++items;
+        type = training_item_type(item);
+        if (type >= 3 && type <= 32) ++equipment;
+    }
+    if (equipment == 0u) {
+        if (waiting_logs < 3u) {
+            ++waiting_logs;
+            SudekiMpLogFormat("cleanroom_engine event=training_loadout status=waiting items=%u "
+                "categories=%d reason=no_equipment_items_yet\r\n", items, *(int *)(inventory + 300));
+        }
+        return FALSE;
+    }
     ++training_grant_attempts;
     for (identifier = 0u; identifier < 999u; ++identifier) {
         uint8_t *item = global_item(identifier), *category;
@@ -2506,7 +2526,7 @@ static BOOL prepare_training_inventory(void) {
         type = training_item_type(item);
         if (type < 3 || type > 32) continue;
         category = inventory_category(inventory, type);
-        if (category == NULL) continue;
+        if (category == NULL) { ++uncategorized; continue; }
         if (category_has(category, identifier)) { ++owned; continue; }
         if (native_add_item(category, identifier) == 1u) { ++full; continue; }
         if (type <= 17) ++weapons; else ++armour;
@@ -2522,9 +2542,22 @@ static BOOL prepare_training_inventory(void) {
     inventory_filled = TRUE;
     SudekiMpLogFormat(
         "cleanroom_engine event=training_loadout status=complete attempt=%u "
-        "weapons_added=%u armour_added=%u already_owned=%u no_slot=%u "
-        "equipment_in_inventory=%u method=native_category_add\r\n",
-        training_grant_attempts, weapons, armour, owned, full, training_grant_total);
+        "items=%u equipment_items=%u weapons_added=%u armour_added=%u already_owned=%u "
+        "no_slot=%u no_category=%u equipment_in_inventory=%u method=native_category_add\r\n",
+        training_grant_attempts, items, equipment, weapons, armour, owned, full, uncategorized,
+        training_grant_total);
+    if (weapons + armour + owned == 0u) {
+        /* Nothing landed: log the category layout once for diagnosis. */
+        int count = *(int *)(inventory + 300), index;
+        uint8_t **categories = *(uint8_t ***)(inventory + 0xc);
+        for (index = 0; index < count && index < 64; ++index) {
+            uint8_t *category = categories[index];
+            if (!readable_memory(category, 0x14u)) continue;
+            SudekiMpLogFormat("cleanroom_engine event=training_loadout_category index=%d type=%d "
+                "count=%d slots=%d\r\n", index, *(int *)(category + 8),
+                *(short *)(category + 0xc), *(short *)(category + 0x10));
+        }
+    }
     return TRUE;
 }
 

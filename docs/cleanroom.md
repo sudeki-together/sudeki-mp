@@ -89,7 +89,7 @@ lists only the starter weapon and a memory read of the inventory showed one or
 two item IDs per weapon category. Do not rely on the cleanroom to provide
 other weapons; load a save that owns them instead.
 
-**Replacement (2026-10-07, built, not yet live-confirmed):** `FillInventory()`
+**Replacement (2026-10-07):** `FillInventory()`
 adds through the native category-add routine (RVA `0x00133C80`, item ID in
 EAX, category in EDX), which silently skips an item when no category of its
 type exists yet. The cleanroom now waits until the weapon (type 4) and armour
@@ -98,8 +98,14 @@ every item of type 3-17 (weapons) or 18-32 (armour) not already owned. The
 routine's prologue bytes are checked first; a mismatch refuses the grant. The
 log line is `cleanroom_engine event=training_loadout status=complete`, with
 added/owned/no-slot counts. If the game later resets the categories, the grant
-repeats, at most five times. Evidence: `CONFIRMED_TEST` (build and cleanroom
-engine test) until a test-room run shows the weapons in the Weapons menu.
+repeats, at most five times. The item database fills after the categories, so
+the grant also waits (without spending an attempt) until it lists equipment.
+
+Evidence: `CONFIRMED_LIVE` for Tal. In a test-room run started as Tal, the log
+reported 206 items, 60 equipment items, 37 weapons and 23 armour pieces added.
+The owner saw Tal's full weapon list in game. The inventory is party-wide, so
+the other heroes' lists are filled by the same grant (`INFERENCE` until each is
+checked in game).
 
 All eight main-party Spirit Strikes are enabled through the native
 `SpiritStrikeEnable(-1)` path. The original unlock mask is captured and
