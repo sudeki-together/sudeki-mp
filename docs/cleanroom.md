@@ -101,11 +101,10 @@ added/owned/no-slot counts. If the game later resets the categories, the grant
 repeats, at most five times. The item database fills after the categories, so
 the grant also waits (without spending an attempt) until it lists equipment.
 
-Evidence: `CONFIRMED_LIVE` for Tal. In a test-room run started as Tal, the log
-reported 206 items, 60 equipment items, 37 weapons and 23 armour pieces added.
-The owner saw Tal's full weapon list in game. The inventory is party-wide, so
-the other heroes' lists are filled by the same grant (`INFERENCE` until each is
-checked in game).
+Evidence: `CONFIRMED_LIVE` for all four heroes. In a test-room run started as
+Tal, the log reported 206 items, 60 equipment items, 37 weapons and 23 armour
+pieces added, and the owner saw Tal's full weapon list in game. On 2026-10-08
+the owner confirmed the full weapon menus starting as Ailish, Elco and Buki.
 
 All eight main-party Spirit Strikes are enabled through the native
 `SpiritStrikeEnable(-1)` path. The original unlock mask is captured and

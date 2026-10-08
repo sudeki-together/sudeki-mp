@@ -195,7 +195,8 @@ tile's second line names the part (Texture, Shine, Reflection, Icon, Menu
 picture), and search also matches item names. In the launcher run on the local
 install, searching "runic" under Tal → Weapons shows exactly the five
 textures the COOLER Runic Blade TexMod package replaces (`CONFIRMED_TEST`).
-Items without a model or icon (the merged armours) are not grouped. This work neither
+Items without a model or icon (the merged armours) are not grouped. The owner confirmed item grouping and the
+model tiles in the launcher on 2026-10-08 (`CONFIRMED_LIVE`). This work neither
 changes native item behavior nor uses a speculative link to choose replacements.
 The initial name rules may leave many weapons/armour in Other textures.
 
