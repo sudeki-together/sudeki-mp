@@ -16,9 +16,10 @@ a Weapons-style page instead:
 - Enter equips the selected armour, using the game's own equip routine;
 - the details panel shows the name, description, the armour's own icon and
   its rune Enchantments; F3 More Info shows the armour's description (the
-  Weapons page adds the flavour text, which armour does not have: its text ID
-  is 0, rendered natively as "StringNotSet", so the armour page writes the
-  description alone; issue #46, built, not yet live-confirmed);
+  Weapons page adds the flavour text, which armour does not have: its
+  localiser handle resolves to the game's "StringNotSet" placeholder, so the
+  armour page writes the description alone; issue #46, `CONFIRMED_LIVE`
+  2026-10-08 on Ailish's Silk Dress);
 - the 3D character in the menu updates at once.
 
 Each armour keeps its own runes. Gameplay reads the rune effects of the armour

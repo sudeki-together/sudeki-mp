@@ -322,18 +322,28 @@ static void armour_details(uint8_t *layer) {
     if (readable(widgets + W_LIST_SELECTED, 4) && (index = *(int *)(widgets + W_LIST_SELECTED)) >= 0 && index < MAX_ROWS &&
         (rows = ptr_at(widgets + W_LIST_ROWS)) && (row = ptr_at(rows + index * 4)) && readable(row + ROW_ITEM, 4))
         item = item_by_id(*(int *)(row + ROW_ITEM));
-    /* More Info is the description plus the flavour text (native 0x56F5B0;
-     * the item loader 0x52D3F0 stores Item Desc. at +0x58 and Item Flavour
-     * Text. at +0x60). Armour has no flavour text: its ID is 0, which the
-     * localiser renders as "StringNotSet". Show the description alone. */
-    if (item && readable(item + ITEM_FLAVOUR, 4) && (*(int *)(item + ITEM_FLAVOUR) == 0 ||
-            *(int *)(item + ITEM_FLAVOUR) == -1)) {
+    /* More Info is the description, a separator and the flavour text (native
+     * 0x56F5B0 reads item +0x58 and +0x60; both hold localiser handles, not
+     * text IDs: CONFIRMED_LIVE Silk Dress description=185 flavour=5). Armour
+     * has no flavour text; its handle resolves to the game's "StringNotSet"
+     * placeholder (a fixed string in SUDEKI.exe). Then show the description
+     * alone. */
+    if (item && readable(item + ITEM_FLAVOUR, 4) && readable(item + ITEM_DESCRIPTION, 4)) {
+        static int logged_item = -2;
         void *localizer = ptr_at(base + LOCALIZER);
         Localize localize = (Localize)method(localizer, 4);
-        int description = *(int *)(item + ITEM_DESCRIPTION);
-        const wchar_t *text = localize && description != 0 && description != -1 ?
-            localize(localizer, description) : NULL;
-        set_text(widgets, W_MORE_INFO, text ? text : L"");
+        int flavour = *(int *)(item + ITEM_FLAVOUR), description = *(int *)(item + ITEM_DESCRIPTION);
+        const wchar_t *flavour_text = localize && flavour != -1 ? localize(localizer, flavour) : NULL;
+        BOOL missing = !flavour_text || !flavour_text[0] || !wcscmp(flavour_text, L"StringNotSet");
+        if (missing && localize) {
+            const wchar_t *text = description != -1 ? localize(localizer, description) : NULL;
+            set_text(widgets, W_MORE_INFO, text && wcscmp(text, L"StringNotSet") ? text : L"");
+        }
+        if (*(int *)(item + ITEM_ID) != logged_item) {
+            logged_item = *(int *)(item + ITEM_ID);
+            SudekiMpLogFormat("armour_menu event=details item=%d flavour_handle=%d more_info=%s\r\n",
+                logged_item, flavour, missing ? "description_only" : "native");
+        }
     }
     if (item && readable(item + ITEM_ICON, 12)) {
         uint32_t descriptor[3];
