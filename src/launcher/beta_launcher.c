@@ -21,7 +21,7 @@
 #include "mods_panel.h"
 
 #define SUDEKIMP_TITLE L"SudekiMP Launcher"
-#define SUDEKIMP_LAUNCHER_VERSION L"0.5.0"
+#define SUDEKIMP_LAUNCHER_VERSION L"0.6.0"
 #define SUDEKIMP_PROJECT_URL L"https://git.unfilteredrealm.com/wander"
 #define SUDEKIMP_WINDOWS_BETA_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta"
