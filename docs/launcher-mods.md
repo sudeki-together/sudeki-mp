@@ -147,13 +147,27 @@ resource-name patterns were approved by the owner on 2026-10-07. They are
 and `?`, case-insensitively. The first matching rule wins. Broad hero fallback
 rules follow specific category rules. Models always use the Models category.
 
-Phase B's item → model → texture relationship remains `UNKNOWN`. No native
-item or `.HOM` relationship is assumed by the grouping code. This work neither
+Model → texture is now read from the model itself. A `.HOM` v5 file's chunk of
+kind 24 is a texture-name table: a count, a string-table size, one offset per
+name, then NUL-terminated names. Names carry no extension (the game resolves
+`NAME.SQX`, else `NAME.TGA`) and may end in a `!N` variant suffix that resolves
+to the base name. The scanner links each model to the first listed name that is
+a catalog texture in the same archive, preferring names without a `_spec`,
+`_env`, `_bump`, `_nrm` or `_norm` suffix. The model's tile and Original preview
+show that texture, and its detail lists every texture name in the table.
+On the supported build, 2219 of 2432 models carry a table. In the launcher run,
+Tal's 15 and Ailish's 8 models all got a texture preview, as did 1184 of 1230
+World / Other models (`CONFIRMED_TEST`, launcher under Wine on the local
+install; for example `W007_MOJO.HOM` lists `W007_Mojo_handle` and `W007_Mojo`).
+
+Phase B's item → model relationship remains `UNKNOWN`. No native item
+relationship is assumed by the grouping code. This work neither
 changes native item behavior nor uses a speculative link to choose replacements.
 The initial name rules may leave many weapons/armour in Other textures.
 
 Model Apply/Browse remain disabled pending the owner's Talos-on-Tal live
-`[Files]` confirmation. There is no OBJ/FBX conversion or rendered model preview.
+`[Files]` confirmation. There is no OBJ/FBX conversion or rendered 3D model
+preview; the preview is the model's main texture.
 Existing model entries can be inspected and reverted. Whole-resource editing
 remains available through the established developer tool; its loader evidence
 and limitations are documented separately in mod-packages.md.

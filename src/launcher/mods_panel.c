@@ -86,6 +86,9 @@ typedef struct Resource {
   SudekiMpModCatalogEntry entry;
   SudekiMpModArchiveRecord record;
   int character, category, icon;
+  /* Models: index of the linked main texture (-1 none). Textures: character
+   * of the first model showing it, so Models tiles decode first (-1 none). */
+  int preview, preview_character;
   HBITMAP thumbnail;
 } Resource;
 typedef struct ScanResult {
@@ -117,9 +120,10 @@ typedef struct ScanJob {
 typedef struct DetailJob {
   HANDLE cancel;
   WCHAR archive[PATH_CAP], replacement[PATH_CAP];
-  SudekiMpModArchiveRecord record;
-  int model;
+  SudekiMpModArchiveRecord record, preview_record;
+  int model, has_preview;
   int saved_replacement;
+  WCHAR textures[1024]; /* Models: the texture names their table lists. */
   SudekiMpModImage original, imported;
   int import_valid, import_preview_unavailable;
   WIN32_FILE_ATTRIBUTE_DATA replacement_identity;
@@ -575,6 +579,51 @@ static void decode_batch(DecodeBatch *b) {
   for (i = 0; i < started; ++i)
     CloseHandle(threads[i]);
 }
+typedef struct TextureSlot {
+  uint64_t key; /* archive index << 32 | archive key */
+  size_t index;
+} TextureSlot;
+static int compare_texture_slot(const void *a, const void *b) {
+  uint64_t x = ((const TextureSlot *)a)->key, y = ((const TextureSlot *)b)->key;
+  return x < y ? -1 : x > y;
+}
+/* Models show their main texture's thumbnail: resolve each model's
+ * preview_key to the texture resource in the same archive. */
+static void link_model_previews(ScanResult *r) {
+  TextureSlot *slots;
+  size_t count = 0, i;
+  if (!r->count)
+    return;
+  slots = (TextureSlot *)malloc(r->count * sizeof(*slots));
+  if (!slots)
+    return;
+  for (i = 0; i < r->count; ++i)
+    if (r->resources[i].entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE) {
+      slots[count].key = ((uint64_t)r->resources[i].entry.archive_index << 32) |
+                         r->resources[i].entry.archive_key;
+      slots[count++].index = i;
+    }
+  qsort(slots, count, sizeof(*slots), compare_texture_slot);
+  for (i = 0; i < r->count; ++i) {
+    Resource *model = &r->resources[i];
+    TextureSlot probe, *found;
+    if (model->entry.kind != SUDEKIMP_MOD_RESOURCE_MODEL || !model->entry.preview_key)
+      continue;
+    probe.key = ((uint64_t)model->entry.archive_index << 32) | model->entry.preview_key;
+    found = (TextureSlot *)bsearch(&probe, slots, count, sizeof(*slots), compare_texture_slot);
+    if (!found)
+      continue;
+    model->preview = (int)found->index;
+    if (r->resources[found->index].preview_character < 0)
+      r->resources[found->index].preview_character = model->character;
+  }
+  free(slots);
+}
+static int resource_icon(const ScanResult *catalog, const Resource *r) {
+  if (r->icon >= 0 || r->preview < 0 || (size_t)r->preview >= catalog->count)
+    return r->icon;
+  return catalog->resources[r->preview].icon;
+}
 static DWORD WINAPI scan_worker(void *context) {
   ScanJob *job = (ScanJob *)context;
   ScanResult *r = (ScanResult *)calloc(1, sizeof(*r));
@@ -702,6 +751,7 @@ static DWORD WINAPI scan_worker(void *context) {
       resource->entry.archive_index = i;
       resource->record = archives[i].records[resource->entry.resource_index];
       resource->icon = -1;
+      resource->preview = resource->preview_character = -1;
       SudekiMpModGroupsClassify(job->grouping, resource->entry.name,
                                 resource->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL,
                                 &hero, &category);
@@ -714,6 +764,7 @@ static DWORD WINAPI scan_worker(void *context) {
     archives[i].data = NULL;
     unmap_file(&mapped);
   }
+  link_model_previews(r);
   /* Hand the catalogue to the panel now; from here on this thread only reads
    * entries/records and reports thumbnails through the queue. */
   InterlockedExchange(&job->phase, 3);
@@ -751,7 +802,8 @@ static DWORD WINAPI scan_worker(void *context) {
         for (int pass = 0; pass < 2 && taken < DECODE_BATCH; ++pass)
           for (k = 0; k < pending_count && taken < DECODE_BATCH; ++k) {
             const Resource *c = &r->resources[pending[k]];
-            int match = c->character == want_character && c->category == want_category;
+            int match = (c->character == want_character && c->category == want_category) ||
+                        (want_category == CAT_MODELS && c->preview_character == want_character);
             if (pending[k] != (size_t)-1 && (pass ? !match : match)) {
               indices[taken++] = pending[k];
               pending[k] = (size_t)-1;
@@ -1004,6 +1056,27 @@ done:
   IWICImagingFactory_Release(factory);
   return hr;
 }
+static void collect_texture_name(void *context, const char *name) {
+  DetailJob *job = (DetailJob *)context;
+  WCHAR wide[SUDEKIMP_MOD_RESOURCE_NAME_MAX];
+  size_t used = wcslen(job->textures);
+  if (used + 8 >= ARRAYSIZE(job->textures))
+    return;
+  utf8_to_wide(name, wide, SUDEKIMP_MOD_RESOURCE_NAME_MAX);
+  if (used) {
+    /* Variants (Name!1, Name!2) resolve to one texture: list it once. */
+    WCHAR probe[SUDEKIMP_MOD_RESOURCE_NAME_MAX + 4];
+    StringCchPrintfW(probe, ARRAYSIZE(probe), L", %ls,", wide);
+    {
+      WCHAR padded[ARRAYSIZE(job->textures) + 4];
+      StringCchPrintfW(padded, ARRAYSIZE(padded), L", %ls,", job->textures);
+      if (wcsstr(padded, probe))
+        return;
+    }
+    StringCchCatW(job->textures, ARRAYSIZE(job->textures), L", ");
+  }
+  StringCchCatW(job->textures, ARRAYSIZE(job->textures), wide);
+}
 static DWORD WINAPI detail_worker(void *context) {
   DetailJob *job = (DetailJob *)context;
   uint8_t *bytes = NULL;
@@ -1012,9 +1085,19 @@ static DWORD WINAPI detail_worker(void *context) {
   const WCHAR *extension;
   HRESULT initialized, hr;
   initialized = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  if (!job->model && WaitForSingleObject(job->cancel, 0) != WAIT_OBJECT_0 &&
+  if (job->model && WaitForSingleObject(job->cancel, 0) != WAIT_OBJECT_0 &&
       read_range(job->archive, job->record.offset, job->record.size, &bytes,
                  &size)) {
+    SudekiMpModHomTextureNames(bytes, size, collect_texture_name, job);
+    free(bytes);
+    bytes = NULL;
+  }
+  if ((!job->model || job->has_preview) &&
+      WaitForSingleObject(job->cancel, 0) != WAIT_OBJECT_0 &&
+      read_range(job->archive,
+                 job->model ? job->preview_record.offset : job->record.offset,
+                 job->model ? job->preview_record.size : job->record.size,
+                 &bytes, &size)) {
     SudekiMpModImageDecode(bytes, size, &job->original, error, sizeof(error));
     free(bytes);
     bytes = NULL;
@@ -1269,6 +1352,10 @@ static void detail_start(Panel *p) {
   StringCchCopyW(p->detail->replacement, PATH_CAP, p->candidate);
   p->detail->record = r->record;
   p->detail->model = r->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL;
+  if (p->detail->model && r->preview >= 0 && (size_t)r->preview < p->catalog->count) {
+    p->detail->preview_record = p->catalog->resources[r->preview].record;
+    p->detail->has_preview = 1;
+  }
   p->detail->saved_replacement = !p->candidate_pending;
   p->detail_thread = CreateThread(NULL, 0, detail_worker, p->detail, 0, NULL);
   if (!p->detail_thread) {
@@ -1345,12 +1432,13 @@ static void select_resource(Panel *p, int index) {
   } else {
     StringCchPrintfW(
         text, 768,
-        L"%ls\r\n%ls\r\nArchive key 0x%08lX\r\nExperimental game model (.HOM)",
+        L"%ls\r\n%ls\r\nArchive key 0x%08lX\r\nGame model (.HOM)",
         name, archive, (unsigned long)r->entry.archive_key);
     SetWindowTextW(p->drop, L"Game .HOM models only; no OBJ / FBX converter. "
                             L"Apply awaits the live model test.");
     preview_set(p->original_preview, &p->original, NULL,
-                L"Model preview unavailable");
+                r->preview >= 0 ? L"Reading model texture…"
+                                : L"No texture preview for this model");
   }
   SetWindowTextW(p->information, text);
   if (resource_replaced(p, r, relative, sizeof(relative)) &&
@@ -1483,7 +1571,7 @@ static void refresh_grid(Panel *p) {
       memset(&item, 0, sizeof(item));
       item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
       item.pszText = label;
-      item.iImage = r->icon;
+      item.iImage = resource_icon(p->catalog, r);
       item.lParam = (LPARAM)i;
       item.iItem = ListView_GetItemCount(p->grid);
       if ((int)i == selected)
@@ -1710,6 +1798,27 @@ static void drain_thumbnails(Panel *p, ScanJob *job) {
     DeleteObject(items[i].bitmap);
   }
   free(items);
+  /* Model tiles borrow their texture's thumbnail once it has arrived. */
+  if (taken && count && p->category_filter == CAT_MODELS) {
+    int item, total = ListView_GetItemCount(p->grid);
+    for (item = 0; item < total; ++item) {
+      LVITEMW get;
+      const Resource *r;
+      int icon;
+      memset(&get, 0, sizeof(get));
+      get.mask = LVIF_PARAM | LVIF_IMAGE;
+      get.iItem = item;
+      if (!ListView_GetItem(p->grid, &get) || (size_t)get.lParam >= p->catalog->count)
+        continue;
+      r = &p->catalog->resources[get.lParam];
+      icon = resource_icon(p->catalog, r);
+      if (icon >= 0 && icon != get.iImage) {
+        get.mask = LVIF_IMAGE;
+        get.iImage = icon;
+        ListView_SetItem(p->grid, &get);
+      }
+    }
+  }
 }
 /* Releases a finished (joined) scan job; a catalogue the panel took stays. */
 static void release_scan_job(Panel *p, ScanJob *job) {
@@ -1806,8 +1915,15 @@ static void poll_jobs(Panel *p) {
       preview_set(p->original_preview, &p->original,
                   image_bitmap(&p->original_image, 0),
                   r && r->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL
-                      ? L"Model preview unavailable"
+                      ? L"No texture preview for this model"
                       : L"Original preview unavailable");
+      if (job->model && job->textures[0]) {
+        WCHAR hint[1200];
+        StringCchPrintfW(hint, ARRAYSIZE(hint),
+                         L"Uses textures: %ls. Apply awaits the live model test.",
+                         job->textures);
+        SetWindowTextW(p->drop, hint);
+      }
       preview_set(
           p->replacement_preview, &p->replacement,
           image_bitmap(&job->imported, 0),

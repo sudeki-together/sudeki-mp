@@ -245,6 +245,85 @@ static int catalog_texture(const uint8_t *data, size_t size) {
         (size >= 2048 && !(size % 2048) && (u32(data + size - 4) & 255u) == 0x23u));
 }
 
+int SudekiMpModHomTextureNames(const void *input, size_t size,
+    SudekiMpModHomNameVisit visit, void *context) {
+    const uint8_t *data = (const uint8_t *)input;
+    uint32_t count;
+    size_t cursor = 2048;
+    int visited = 0;
+    if (!data || size < 2048 || memcmp(data, "HOM\x05", 4)) return -1;
+    count = u32(data + 4);
+    if (!count || count > (2048u - 16u) / 4u) return -1;
+    for (uint32_t index = 0; index < count; ++index) {
+        uint32_t descriptor = u32(data + 16 + index * 4u), chunk_size = descriptor & 0xffffffu;
+        const uint8_t *chunk = data + cursor;
+        if (chunk_size > size - cursor) return -1;
+        if ((descriptor >> 24) == 24u && chunk_size >= 8) {
+            uint32_t names = u32(chunk), string_bytes = u32(chunk + 4);
+            size_t base = 8u + (size_t)names * 4u;
+            if (names > chunk_size / 4u || base > chunk_size || string_bytes != chunk_size - base) return -1;
+            for (uint32_t n = 0; n < names; ++n) {
+                uint32_t offset = u32(chunk + 8 + n * 4u);
+                char name[SUDEKIMP_MOD_RESOURCE_NAME_MAX];
+                size_t length = 0;
+                if (offset >= string_bytes) return -1;
+                while (offset + length < string_bytes && chunk[base + offset + length] &&
+                       chunk[base + offset + length] != '!' && length + 1 < sizeof(name)) {
+                    name[length] = (char)chunk[base + offset + length];
+                    ++length;
+                }
+                name[length] = 0;
+                if (!length) continue;
+                if (visit) visit(context, name);
+                ++visited;
+            }
+        }
+        cursor += chunk_size;
+        cursor = (cursor + 2047u) & ~(size_t)2047u;
+        if (cursor > size) return index + 1 == count ? visited : -1;
+    }
+    return visited;
+}
+
+typedef struct PreviewSearch {
+    const SudekiMpModArchive *archive;
+    uint32_t main_key, any_key;
+} PreviewSearch;
+static int auxiliary_texture(const char *name) {
+    static const char *const suffixes[] = {"_SPEC", "_ENV", "_BUMP", "_NRM", "_NORM"};
+    size_t length = strlen(name);
+    for (size_t s = 0; s < sizeof(suffixes) / sizeof(*suffixes); ++s) {
+        size_t n = strlen(suffixes[s]), i;
+        if (length < n) continue;
+        for (i = 0; i < n && upper((unsigned char)name[length - n + i]) == (unsigned char)suffixes[s][i]; ++i) {}
+        if (i == n) return 1;
+    }
+    return 0;
+}
+static void preview_visit(void *context, const char *name) {
+    PreviewSearch *search = (PreviewSearch *)context;
+    static const char *const extensions[] = {".SQX", ".TGA"};
+    char full[SUDEKIMP_MOD_RESOURCE_NAME_MAX + 8];
+    if (search->main_key) return;
+    for (size_t e = 0; e < 2; ++e) {
+        size_t bytes;
+        const uint8_t *payload;
+        uint32_t key;
+        snprintf(full, sizeof(full), "%s%s", name, extensions[e]);
+        key = SudekiMpModResourceKey(full);
+        payload = SudekiMpModArchiveResourceByKey(search->archive, key, &bytes);
+        if (!payload || !catalog_texture(payload, bytes)) continue;
+        if (!search->any_key) search->any_key = key;
+        if (!auxiliary_texture(name)) search->main_key = key;
+        return;
+    }
+}
+static uint32_t model_preview_key(const SudekiMpModArchive *archive, const uint8_t *data, size_t size) {
+    PreviewSearch search = {archive, 0, 0};
+    if (SudekiMpModHomTextureNames(data, size, preview_visit, &search) <= 0) return 0;
+    return search.main_key ? search.main_key : search.any_key;
+}
+
 int SudekiMpModNamesBegin(const SudekiMpModArchive *archives, size_t archive_count,
     SudekiMpModNames *names, char *error, size_t capacity) {
     Harvest *h;
@@ -323,8 +402,10 @@ int SudekiMpModCatalogBuildNamed(const SudekiMpModArchive *archive,
              (info.kind == SUDEKIMP_MOD_IMAGE_TGA && bytes >= 18 && payload[2] == 2 && payload[16] == 32))) {
             entry.kind = SUDEKIMP_MOD_RESOURCE_TEXTURE; entry.texture_key = info.texture_key;
             entry.width = info.width; entry.height = info.height; entry.d3d_format = info.d3d_format;
-        } else if (candidates == 1 && hom_name(h.names[first].name)) entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
-        else continue;
+        } else if (candidates == 1 && hom_name(h.names[first].name)) {
+            entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
+            entry.preview_key = model_preview_key(archive, payload, bytes);
+        } else continue;
         if (candidates == 1) memcpy(entry.name, h.names[first].name, sizeof(entry.name));
         entries[used++] = entry;
     }
@@ -386,7 +467,10 @@ int SudekiMpModCatalogBuildEx(const SudekiMpModArchive *archives, size_t archive
                  (info.kind == SUDEKIMP_MOD_IMAGE_TGA && bytes >= 18 && payload[2] == 2 && payload[16] == 32))) {
                 entry.kind = SUDEKIMP_MOD_RESOURCE_TEXTURE; entry.texture_key = info.texture_key;
                 entry.width = info.width; entry.height = info.height; entry.d3d_format = info.d3d_format;
-            } else if (candidates == 1 && hom_name(h.names[first].name)) entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
+            } else if (candidates == 1 && hom_name(h.names[first].name)) {
+                entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
+                entry.preview_key = model_preview_key(archives + a, payload, bytes);
+            }
             else continue;
             if (candidates == 1) memcpy(entry.name, h.names[first].name, sizeof(entry.name));
             entries[used++] = entry;

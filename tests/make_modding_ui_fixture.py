@@ -13,7 +13,24 @@ root = Path(sys.argv[1])
 root.mkdir(parents=True, exist_ok=True)
 face = 'CL002_Tal_Test_FaceLR.TGA'
 model = 'Tal_Test.HOM'
-payload = archive([(face, tga(True)), ('Nameless.TGA', tga(False)), (model, b'synthetic HOM data')])
+
+
+def hom(texture_names):
+    """HOM v5 with one texture-name chunk (kind 24), as the game stores it."""
+    strings = b''.join(n.encode('ascii') + b'\0' for n in texture_names)
+    offsets, cursor = [], 0
+    for n in texture_names:
+        offsets.append(cursor)
+        cursor += len(n) + 1
+    chunk = struct.pack('<2I', len(texture_names), len(strings)) + struct.pack(f'<{len(offsets)}I', *offsets) + strings
+    header = b'HOM\x05' + struct.pack('<3I', 1, 0, 0) + struct.pack('<I', (24 << 24) | len(chunk))
+    return header.ljust(2048, b'\0') + chunk.ljust(2048, b'\0')
+
+
+# The model names a spec map that does not exist, then the face (variant !1):
+# the launcher previews the model with the face texture.
+payload = archive([(face, tga(True)), ('Nameless.TGA', tga(False)),
+                   (model, hom(['Tal_Test_spec', face[:-4] + '!1']))])
 (root / 'Synthetic.baf').write_bytes(payload)
 (root / 'original-archive.bin').write_bytes(payload)
 (root / 'SUDEKI.exe').write_bytes(f'{face}\0{model}\0'.encode())

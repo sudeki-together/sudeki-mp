@@ -159,9 +159,28 @@ static int image_tests(void) {
     return 0;
 }
 
+/* HOM v5 with one texture-name chunk (kind 24): "Hero_spec!1", "Hero!2". */
+static void make_hom(uint8_t *data) {
+    static const char strings[] = "Hero_spec!1\0Hero!2\0";
+    uint8_t *chunk = data + 2048;
+    uint32_t chunk_size = 8 + 2 * 4 + (uint32_t)sizeof(strings) - 1;
+    memset(data, 0, 4096); memcpy(data, "HOM\x05", 4); put32(data + 4, 1);
+    put32(data + 16, (24u << 24) | chunk_size);
+    put32(chunk, 2); put32(chunk + 4, (uint32_t)sizeof(strings) - 1);
+    put32(chunk + 8, 0); put32(chunk + 12, 12);
+    memcpy(chunk + 16, strings, sizeof(strings) - 1);
+}
+static void count_name(void *context, const char *name) {
+    unsigned *seen = (unsigned *)context;
+    /* Counts names in the expected order; a wrong name stops the count. */
+    if (*seen == 0 ? !strcmp(name, "Hero_spec") : *seen == 1 && !strcmp(name, "Hero")) ++*seen;
+    else *seen = 100;
+}
 static int cancel_now(void *context) { ++*(unsigned *)context; return 1; }
 static int archive_tests(void) {
-    uint8_t tga[34], sqx[2048], model[] = {1,2,3,4}, *data, *bad;
+    static uint8_t model[4096];
+    uint8_t tga[34], sqx[2048], junk[] = {1,2,3,4}, *data, *bad;
+    unsigned seen = 0;
     const char names[] = "Hero!1\0Top.tga\0-Verdana_16\0Actor.HOM\0Hero1001.SQX\0Hero1110.SQX\0";
     SudekiMpModBlob blob = {names, sizeof(names)};
     SudekiMpModArchive archive = {0}, invalid = {0};
@@ -172,7 +191,11 @@ static int archive_tests(void) {
     size_t size, table, row, resource_size;
     unsigned cancel_calls = 0, textures = 0, models = 0, unnamed = 0;
     FixtureResource resources[6];
-    make_tga(tga, 1); make_sqx(sqx, 12);
+    make_tga(tga, 1); make_sqx(sqx, 12); make_hom(model);
+    CHECK(SudekiMpModHomTextureNames(model, sizeof(model), count_name, &seen) == 2 && seen == 2);
+    CHECK(SudekiMpModHomTextureNames(junk, sizeof(junk), NULL, NULL) == -1);
+    model[16 + 2] = 0xff; CHECK(SudekiMpModHomTextureNames(model, sizeof(model), NULL, NULL) == -1); /* chunk past the end */
+    make_hom(model);
     resources[0] = (FixtureResource){tga, sizeof(tga), SudekiMpModResourceKey("Top.tga")};
     resources[1] = (FixtureResource){tga, sizeof(tga), SudekiMpModResourceKey("Verdana_16-0.tga")};
     resources[2] = (FixtureResource){sqx, sizeof(sqx), SudekiMpModResourceKey("Hero.SQX")};
@@ -193,7 +216,11 @@ static int archive_tests(void) {
     for (size_t i = 0; i < catalog.count; ++i) {
         const SudekiMpModCatalogEntry *e = catalog.entries + i;
         if (e->kind == SUDEKIMP_MOD_RESOURCE_TEXTURE) { ++textures; CHECK(e->width == (e->d3d_format == 21 ? 2u : 4u)); }
-        else { ++models; CHECK(!strcmp(e->name, "Actor.HOM")); }
+        else {
+            ++models; CHECK(!strcmp(e->name, "Actor.HOM"));
+            /* Hero_spec has no texture; Hero!2 resolves to Hero.SQX. */
+            CHECK(e->preview_key == SudekiMpModResourceKey("Hero.SQX"));
+        }
         if (!e->name[0]) ++unnamed;
         if (e->archive_key == resources[5].key) CHECK(e->name_candidates == 2 && !*e->name);
         if (e->archive_key == resources[1].key) CHECK(!strcmp(e->name, "Verdana_16-0.tga") && e->texture_key == 0x52d377ccu);

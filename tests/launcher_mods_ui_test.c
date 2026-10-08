@@ -132,6 +132,9 @@ int wmain(int argc, WCHAR **argv) {
         if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL) model = (int)i;
     }
     assert(texture >= 0 && model >= 0);
+    /* The model's texture table links it to the face; its tile borrows that thumbnail. */
+    assert(p->catalog->resources[model].preview == texture);
+    assert(resource_icon(p->catalog, &p->catalog->resources[model]) == p->catalog->resources[texture].icon);
     key = p->catalog->resources[texture].entry.texture_key;
     assert(create_mod(p, L"My Mods")); refresh_mods(p, L"My Mods");
     assert(p->mod_count == 3 && p->selected_mod == 1);
@@ -197,6 +200,8 @@ int wmain(int argc, WCHAR **argv) {
     SendMessageW(p->enabled, BM_CLICK, 0, 0);
     assert(SudekiMpModManifestGetValue(&p->manifest, "Mod", "Enabled", value, sizeof(value)) && !strcmp(value, "false"));
     select_resource(p, model); pump(p); assert(!IsWindowEnabled(p->apply));
+    { WCHAR hint[512]; GetWindowTextW(p->drop, hint, 512); assert(wcsstr(hint, L"CL002_Tal_Test_FaceLR") && wcsstr(hint, L"Tal_Test_spec")); }
+    assert(p->original.bitmap); /* the face texture previews the model */
     /* Archive data remains byte-identical; cancel/close also drains workers. */
     join(root, PATH_CAP, argv[1], L"Synthetic.baf"); join(copied, PATH_CAP, argv[1], L"original-archive.bin"); identical(root, copied);
     assert(create_mod(p, L"Größe")); refresh_mods(p, L"Größe");

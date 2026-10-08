@@ -36,6 +36,9 @@ typedef struct SudekiMpModCatalogEntry {
     uint32_t archive_key, texture_key, width, height, d3d_format;
     SudekiMpModResourceKind kind;
     unsigned name_candidates; /* Distinct case-insensitive names; 1 is resolved. */
+    uint32_t preview_key; /* Models: archive key of the model's main texture in
+                           * the same archive (first non-spec/env name in its
+                           * texture table that is a catalog texture); 0 = none. */
     char name[SUDEKIMP_MOD_RESOURCE_NAME_MAX]; /* Empty for unknown/ambiguous. */
 } SudekiMpModCatalogEntry;
 typedef struct SudekiMpModCatalog {
@@ -71,4 +74,12 @@ int SudekiMpModCatalogBuildEx(const SudekiMpModArchive *archives, size_t archive
     SudekiMpModCatalog *catalog, SudekiMpModCancelCheck cancel, void *cancel_context,
     char *error, size_t error_capacity);
 void SudekiMpModCatalogFree(SudekiMpModCatalog *catalog);
+
+/* HOM v5 texture-name table (chunk kind 24). Calls visit for each name in
+ * table order, with any "!N" variant suffix removed and no extension (the game
+ * resolves NAME.SQX, else NAME.TGA). Returns the number of names visited, 0
+ * for a HOM without a table, or -1 when the data is not a valid HOM v5. */
+typedef void (*SudekiMpModHomNameVisit)(void *context, const char *name);
+int SudekiMpModHomTextureNames(const void *data, size_t size,
+    SudekiMpModHomNameVisit visit, void *context);
 #endif
