@@ -138,7 +138,7 @@ jobs:
           )
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'public\launcher-manifest.txt') -Destination $stage
-          $artifact = Join-Path $env:GITHUB_WORKSPACE 'sudekimp-windows-launcher-0.4.0.zip'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'sudekimp-windows-launcher-0.5.0.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
 
       - name: Upload unified Windows launcher
@@ -147,6 +147,6 @@ jobs:
         # that client-side GHES refusal.
         uses: christopherhx/gitea-upload-artifact@v4
         with:
-          name: sudekimp-windows-launcher-0.4.0
-          path: sudekimp-windows-launcher-0.4.0.zip
+          name: sudekimp-windows-launcher-0.5.0
+          path: sudekimp-windows-launcher-0.5.0.zip
           if-no-files-found: error

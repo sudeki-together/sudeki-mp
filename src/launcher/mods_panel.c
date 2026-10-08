@@ -31,7 +31,7 @@
  * collected in batches so at most DECODE_BATCH bitmaps exist at a time. */
 #define DECODE_WORKERS 8
 #define DECODE_BATCH 512
-/* The 0.4.0 launcher palette: the panel sits on its page surface. */
+/* The launcher palette: the panel sits on its page surface. */
 #define BG RGB(23, 34, 49)
 #define INPUT_BG RGB(17, 27, 40)
 #define FG RGB(232, 240, 248)

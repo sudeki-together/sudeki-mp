@@ -5,8 +5,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
 release_dir="${project_dir}/build/releases"
 stage_root="$(mktemp -d)"
-linux_archive="${release_dir}/sudekimp-linux-launcher-0.4.0.tar.gz"
-windows_archive="${release_dir}/sudekimp-windows-launcher-0.4.0.zip"
+linux_archive="${release_dir}/sudekimp-linux-launcher-0.5.0.tar.gz"
+windows_archive="${release_dir}/sudekimp-windows-launcher-0.5.0.zip"
 
 cleanup() { rm -rf -- "${stage_root:?}"; }
 trap cleanup EXIT
@@ -73,6 +73,6 @@ else
 fi
 
 (cd "${release_dir}" && sha256sum \
-    sudekimp-linux-launcher-0.4.0.tar.gz \
-    sudekimp-windows-launcher-0.4.0.zip >SHA256SUMS)
+    sudekimp-linux-launcher-0.5.0.tar.gz \
+    sudekimp-windows-launcher-0.5.0.zip >SHA256SUMS)
 printf 'Launcher packages written to %s\n' "${release_dir}"
