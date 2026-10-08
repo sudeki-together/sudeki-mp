@@ -7,7 +7,8 @@
 /* Player flight (research prototype). While enabled for the controlled
  * character, the native movement controller's gravity bit is held clear and
  * its vertical velocity follows the ascend/descend keys. Toggle, ascend and
- * descend are virtual keys; speed is vertical units per second. When
+ * descend are virtual keys; speed is vertical units per second; while flying
+ * the frame's horizontal displacement is scaled by forward_multiplier. When
  * ailish_only is TRUE the toggle is accepted only while Ailish is controlled. */
 typedef struct SudekiMpStoryFlightConfig {
     UINT toggle_key;
@@ -15,6 +16,8 @@ typedef struct SudekiMpStoryFlightConfig {
     UINT descend_key;
     float speed;
     BOOL ailish_only;
+    /* Horizontal displacement multiplier while flying (1 = walking pace). */
+    float forward_multiplier;
 } SudekiMpStoryFlightConfig;
 
 /* Called once per frame on the game thread for the controlled character, from

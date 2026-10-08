@@ -157,6 +157,8 @@ static const int tab_art[SUDEKIMP_TAB_COUNT] = {
 static const WCHAR *const story_boost_multipliers[] = {L"1.5", L"2.0", L"3.0", L"4.0"};
 /* [Flight] Speed (vertical units per second; the DLL accepts 0.5-60). */
 static const WCHAR *const flight_speeds[] = {L"3", L"6", L"12", L"24"};
+/* [Flight] ForwardSpeed: horizontal multiplier while flying (DLL accepts 1-8). */
+static const WCHAR *const flight_forward[] = {L"1", L"1.5", L"2.5", L"4"};
 
 static SudekiMpLauncherControl launcher_controls[SUDEKIMP_MAX_CONTROLS];
 static size_t launcher_control_count;
@@ -1835,7 +1837,7 @@ static void update_mod_availability(void) {
     EnableWindow(flight_speed_combo, profile == SUDEKIMP_PROFILE_SAFE && is_checked(flight_checkbox));
     if (flight_note != NULL) {
         SetWindowTextW(flight_note, profile == SUDEKIMP_PROFILE_SAFE ?
-            L"In game: F5 flies; Page Up / Page Down rise and sink at this speed." :
+            L"In game: F5 flies; Page Up / Page Down rise and sink. Speed sets both." :
             L"Available only with Safe launch: pick Safe launch on the Play tab.");
     }
 }
@@ -1849,6 +1851,12 @@ static void select_flight_speed(const WCHAR *value) {
         }
     }
     SendMessageW(flight_speed_combo, CB_SETCURSEL, 1u, 0);
+}
+
+static const WCHAR *selected_flight_forward(void) {
+    const int index = (int)SendMessageW(flight_speed_combo, CB_GETCURSEL, 0, 0);
+    const int count = (int)(sizeof(flight_forward) / sizeof(flight_forward[0]));
+    return index >= 0 && index < count ? flight_forward[index] : L"1.5";
 }
 
 static const WCHAR *selected_flight_speed(void) {
@@ -1946,6 +1954,7 @@ static BOOL apply_mod_options(const WCHAR *config_path, SudekiMpLauncherProfile 
     if (profile == SUDEKIMP_PROFILE_SAFE && is_checked(flight_checkbox) &&
         (!WritePrivateProfileStringW(L"Flight", L"Enabled", L"true", config_path) ||
          !WritePrivateProfileStringW(L"Flight", L"Speed", selected_flight_speed(), config_path) ||
+         !WritePrivateProfileStringW(L"Flight", L"ForwardSpeed", selected_flight_forward(), config_path) ||
          !WritePrivateProfileStringW(L"Flight", L"AilishOnly", L"false", config_path))) {
         return FALSE;
     }

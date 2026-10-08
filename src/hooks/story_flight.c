@@ -32,7 +32,9 @@ enum {
     RVA_CHARACTER_CONTROLLER_GLOBAL = 0x408da4u,
     CONTROLLER_TARGET_OFFSET = 0x248u,
     MOVEMENT_OWNER = 0x10u,
+    MOVEMENT_VELOCITY_X = 0x34u,
     MOVEMENT_VELOCITY_Y = 0x38u,
+    MOVEMENT_VELOCITY_Z = 0x3cu,
     MOVEMENT_FLAGS_HI = 0xbfu,
     MOVEMENT_SIZE = 0xc0u,
     ENTITY_MOVEMENT = 0x80u,
@@ -170,8 +172,25 @@ __attribute__((used, noinline)) static void story_flight_observe(uint8_t *m, con
     }
 }
 
-/* Entry: EAX = controller, [ESP+4] = update block. Preserve every register and
- * the stack, observe, then continue into the native update. */
+/* After the native update: while this controller's owner flies, scale the
+ * frame's horizontal displacement (+0x34/+0x3c, applied after the update by
+ * the owner; 0x4C41B0 adds to the same vector) so forward flight is faster. */
+__attribute__((used, noinline)) static void story_flight_after(uint8_t *m) {
+    if (!base || !flying || GetCurrentThreadId() != game_thread || cfg.forward_multiplier <= 1.0f) return;
+    uint8_t *owner = movement_exact(m);
+    if (!owner || owner != flying_actor) return;
+    float *vx = (float *)(m + MOVEMENT_VELOCITY_X), *vz = (float *)(m + MOVEMENT_VELOCITY_Z);
+    if (!isfinite(*vx) || !isfinite(*vz)) return;
+    *vx *= cfg.forward_multiplier;
+    *vz *= cfg.forward_multiplier;
+    if (frames % 120u == 1u)
+        SudekiMpLogFormat("story_flight event=forward actor=%p vx=%.3f vz=%.3f multiplier=%.2f\r\n",
+            (void *)owner, (double)*vx, (double)*vz, (double)cfg.forward_multiplier);
+}
+
+/* Entry: EAX = controller, [ESP+4] = update block. Preserve every register,
+ * observe, run the native update (it pops its argument: RET 4), then the
+ * after-update step, and return as the native update would. */
 __attribute__((naked, used, noinline)) static void story_flight_entry(void) {
     __asm__ volatile(
         "pushl %eax\n\tpushl %ecx\n\tpushl %edx\n\t"
@@ -180,7 +199,16 @@ __attribute__((naked, used, noinline)) static void story_flight_entry(void) {
         "call _story_flight_observe\n\t"
         "addl $8,%esp\n\t"
         "popl %edx\n\tpopl %ecx\n\tpopl %eax\n\t"
-        "jmp *_native_movement_update\n\t");
+        "pushl %eax\n\t"                /* controller, kept for the after step */
+        "pushl 8(%esp)\n\t"             /* update block (return address at 4) */
+        "call *_native_movement_update\n\t"
+        "popl %ecx\n\t"
+        "pushl %eax\n\tpushl %edx\n\t"
+        "pushl %ecx\n\t"
+        "call _story_flight_after\n\t"
+        "addl $4,%esp\n\t"
+        "popl %edx\n\tpopl %eax\n\t"
+        "ret $4\n\t");
 }
 
 BOOL SudekiMpStoryFlightAddControlledObserver(SudekiMpStoryFlightControlledObserver observer) {
@@ -199,7 +227,9 @@ void SudekiMpStoryFlightSetControlledObserver(SudekiMpStoryFlightControlledObser
 
 BOOL SudekiMpInstallStoryFlight(HMODULE game_module, const SudekiMpStoryFlightConfig *config) {
     if (!game_module || !config || !config->toggle_key || !config->ascend_key || !config->descend_key ||
-        !isfinite(config->speed) || config->speed <= 0.0f || config->speed > 100.0f) {
+        !isfinite(config->speed) || config->speed <= 0.0f || config->speed > 100.0f ||
+        !isfinite(config->forward_multiplier) || config->forward_multiplier < 1.0f ||
+        config->forward_multiplier > 8.0f) {
         SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
     }
     base = (uint8_t *)game_module; cfg = *config;
@@ -229,8 +259,9 @@ BOOL SudekiMpInstallStoryFlight(HMODULE game_module, const SudekiMpStoryFlightCo
             base = NULL; SetLastError(error); return FALSE;
         }
     }
-    SudekiMpLogFormat("story_flight event=install status=success sites=%u toggle=0x%02x ascend=0x%02x descend=0x%02x speed=%.2f ailish_only=%u policy=observer_before_native_update_gravity_bit_and_vy_only\r\n",
-        (unsigned)SITE_COUNT, cfg.toggle_key, cfg.ascend_key, cfg.descend_key, (double)cfg.speed, cfg.ailish_only);
+    SudekiMpLogFormat("story_flight event=install status=success sites=%u toggle=0x%02x ascend=0x%02x descend=0x%02x speed=%.2f forward=%.2f ailish_only=%u policy=observer_before_native_update_gravity_bit_and_vy_horizontal_scale_after\r\n",
+        (unsigned)SITE_COUNT, cfg.toggle_key, cfg.ascend_key, cfg.descend_key, (double)cfg.speed,
+        (double)cfg.forward_multiplier, cfg.ailish_only);
     return TRUE;
 }
 

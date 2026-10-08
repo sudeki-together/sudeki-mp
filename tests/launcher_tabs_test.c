@@ -131,6 +131,7 @@ static DWORD WINAPI exercise_tabs(void *unused) {
             assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_SAFE));
             GetPrivateProfileStringW(L"Flight", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"true"));
             GetPrivateProfileStringW(L"Flight", L"Speed", L"", value, 32, ini); assert(!wcscmp(value, L"24"));
+            GetPrivateProfileStringW(L"Flight", L"ForwardSpeed", L"", value, 32, ini); assert(!wcscmp(value, L"4"));
             GetPrivateProfileStringW(L"Flight", L"AilishOnly", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
             assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_CLEANROOM));
             GetPrivateProfileStringW(L"Flight", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"false"));

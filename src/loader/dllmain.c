@@ -759,7 +759,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL fixed_three_seat_renderer_enabled;
     BOOL freeroam_camera_input_enabled;
     BOOL story_flight_enabled;
-    SudekiMpStoryFlightConfig story_flight = {VK_F5, VK_PRIOR, VK_NEXT, 6.0f, FALSE};
+    SudekiMpStoryFlightConfig story_flight = {VK_F5, VK_PRIOR, VK_NEXT, 6.0f, FALSE, 1.0f};
     wchar_t story_flight_key_text[3][32];
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL realtime_multiplayer_skill_combat_enabled;
@@ -1269,6 +1269,13 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         }
         if (!read_config_float(config_path, L"Flight", L"Speed", 6.0f, 0.5f, 60.0f, &story_flight.speed)) {
             SudekiMpLogWrite("story_flight_config=invalid_speed\r\n");
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if (!read_config_float(config_path, L"Flight", L"ForwardSpeed", 1.0f, 1.0f, 8.0f,
+                &story_flight.forward_multiplier)) {
+            SudekiMpLogWrite("story_flight_config=invalid_forward_speed\r\n");
             SudekiMpLogWrite("status=config_error\r\n");
             SudekiMpLogClose();
             return SUDEKIMP_INIT_BAD_CONFIG;
