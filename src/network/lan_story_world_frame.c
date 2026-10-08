@@ -32,9 +32,17 @@ unsigned SudekiMpLanStoryWorldCharacter(uint32_t identifier) {
         if(identifier==SudekiMpLanStoryWorldCharacterIdentifier(c)) return c;
     return 4u;
 }
+uint32_t SudekiMpLanStoryWorldAvatarIdentifier(unsigned player) {
+    return player<4u?0xffffff00u+player:0u;
+}
+unsigned SudekiMpLanStoryWorldAvatarPlayer(uint32_t identifier) {
+    return identifier>=0xffffff00u && identifier<=0xffffff03u?identifier-0xffffff00u:4u;
+}
 BOOL SudekiMpLanStoryWorldActorValid(const SudekiMpLanStoryWorldActor *a) {
     if(!a || (a->kind!=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_PC_KIND &&
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND &&
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_ENEMY_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND) ||
         (a->visual_flags&~SUDEKIMP_LAN_STORY_WORLD_HIDDEN) ||
         (a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND && a->visual_flags) ||
@@ -82,11 +90,11 @@ BOOL SudekiMpLanStoryWorldFrameValid(const SudekiMpLanStoryWorldFrame *f) {
     /* Unused in-memory records are deliberately not serialized or consulted. */
     return TRUE;
 }
-BOOL SudekiMpLanStoryWorldFrameMatches(const SudekiMpLanStoryWorldFrame *w,
-    const SudekiMpLanStoryFrame *p) {
+BOOL SudekiMpLanStoryWorldFrameMatchesForPolicy(const SudekiMpLanStoryWorldFrame *w,
+    const SudekiMpLanStoryFrame *p,SudekiMpLanStoryPolicy policy) {
     if(!w || !p || w->epoch!=p->epoch || w->revision!=p->revision ||
         w->sequence!=p->sequence || w->host_tick!=p->host_tick ||
-        !SudekiMpLanStoryWorldFrameValid(w) || !SudekiMpLanStoryFrameValid(p)) return FALSE;
+        !SudekiMpLanStoryWorldFrameValid(w) || !SudekiMpLanStoryFrameValidForPolicy(p,policy)) return FALSE;
     unsigned found=0,expected=0;
     for(unsigned c=0;c<4u;++c) if((p->available_mask&(1u<<c)) && p->actors[c].native_pose)
         expected|=1u<<c;
@@ -102,10 +110,18 @@ BOOL SudekiMpLanStoryWorldFrameMatches(const SudekiMpLanStoryWorldFrame *w,
     }
     return found==expected;
 }
+BOOL SudekiMpLanStoryWorldFrameMatches(const SudekiMpLanStoryWorldFrame *w,
+    const SudekiMpLanStoryFrame *p) {
+    return SudekiMpLanStoryWorldFrameMatchesForPolicy(w,p,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
+}
+BOOL SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(const SudekiMpLanStoryWorldFrame *f,
+    const SudekiMpLanStoryScene *s,SudekiMpLanStoryPolicy policy) {
+    return SudekiMpLanStoryWorldFrameValid(f) && SudekiMpLanStorySceneValidForPolicy(s,policy) &&
+        s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch && f->revision==s->revision;
+}
 BOOL SudekiMpLanStoryWorldFrameMatchesScene(const SudekiMpLanStoryWorldFrame *f,
     const SudekiMpLanStoryScene *s) {
-    return SudekiMpLanStoryWorldFrameValid(f) && SudekiMpLanStorySceneValid(s) &&
-        s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch && f->revision==s->revision;
+    return SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(f,s,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }
 unsigned SudekiMpLanStoryWorldChunkCount(unsigned n) {
     if(n>SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS) return 0;

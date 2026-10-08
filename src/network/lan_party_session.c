@@ -20,12 +20,15 @@ enum {
     MSG_COMMAND, MSG_PRESENCE, MSG_STORY_FRAME, MSG_STORY_WORLD,
     MSG_STORY_CONTROL, MSG_STORY_CONTROL_ACK, MSG_STORY_MOVEMENT, MSG_STORY_RECRUITMENT,
     MSG_STORY_PRESENTATION, MSG_STORY_CATCHUP, MSG_STORY_CATCHUP_ACK,
-    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT,
+    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT, MSG_STORY_ALLY_HUD,
+    MSG_STORY_AVATAR_STATUS,
+    MSG_LAST = MSG_STORY_AVATAR_STATUS, STORY_ALLY_HUD_MAX_AGE_MS = 1500,
     COMMAND_SIZE = 24, PRESENCE_SIZE = 95, INPUT_FENCE_SIZE = 12, PRESENCE_INTERVAL = 100,
     /* Saved profile 18 adds Tal melee requests and explicit submission/SP
      * outcomes. Native routing is gated separately. Test Room and observation
      * profiles, loot sidecars and native saves remain unchanged. */
-    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 18, STORY_SCENE_INTERVAL = 100,
+    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 18,
+    STORY_DEV_PLAY_PROFILE = 19, STORY_SCENE_INTERVAL = 100,
     JETPACK_STATE_SIZE = 42, COMBAT_MODE_SIZE = 13, COMBAT_MODE_INTERVAL = 100,
     INPUT_EXTENSION_SIZE = 5, AILISH_STATE_SIZE = 11 + 9 * SUDEKIMP_LAN_WEAPON_SHOT_HISTORY,
     PRESENTATION_STATE_SIZE = 37,
@@ -78,6 +81,8 @@ typedef struct Peer {
     SudekiMpLanStoryActionResult story_action_result;
     uint32_t story_action_received_at;
     uint8_t story_action_pending,story_action_taken;
+    SudekiMpLanStoryAllyHud story_ally_hud;
+    uint32_t story_ally_hud_received_at;
 } Peer;
 
 typedef struct Assembly {
@@ -136,6 +141,7 @@ struct SudekiMpLanPartySession {
     uint32_t story_world_sequence,story_world_tick;
     SudekiMpLanStoryRecruitment story_recruitment;
     uint32_t story_recruitment_received_at;
+    SudekiMpLanStoryAvatarStatus avatar_status[4];
     StoryCatchupSlot catchup[4];
     StoryPresentationAssembly story_presentation_assembly[ASSEMBLIES];
     SudekiMpLanStoryPresentation story_presentations[FRAME_QUEUE];
@@ -162,6 +168,7 @@ static BOOL story_tick_near_scene(uint32_t tick,uint32_t scene_tick) {
 static void clear_story_action(Peer *p) {
     memset(&p->story_action,0,sizeof(p->story_action));
     memset(&p->story_action_result,0,sizeof(p->story_action_result));
+    memset(&p->story_ally_hud,0,sizeof(p->story_ally_hud)); p->story_ally_hud_received_at=0;
     p->story_action_received_at=0;
     p->story_action_pending=p->story_action_taken=0;
 }
@@ -239,6 +246,32 @@ static uint32_t get32(const uint8_t *p) {
 static uint64_t get64(const uint8_t *p) {
     return get32(p) | (uint64_t)get32(p + 4) << 32;
 }
+static BOOL avatar_status_scene(const SudekiMpLanPartySession *s,const SudekiMpLanStoryAvatarStatus *v) {
+    return s->config.dev_play && s->config.story_observation==2u &&
+        SudekiMpLanStoryAvatarStatusValid(v) &&
+        ((s->config.lobby_members&(1u<<v->player)) || (!v->present && s->avatar_status[v->player].sequence)) &&
+        (s->config.avatar[v->player]==5u ||
+         (s->config.avatar[v->player]<4u &&
+          s->config.character[v->player]==s->config.avatar[v->player])) &&
+        s->story_scene.phase==SUDEKIMP_LAN_STORY_READY &&
+        s->story_scene.epoch==v->epoch && s->story_scene.revision==v->revision;
+}
+static BOOL accept_avatar_status(SudekiMpLanPartySession *s,const SudekiMpLanStoryAvatarStatus *v,uint32_t receipt) {
+    if(!avatar_status_scene(s,v)) return FALSE;
+    SudekiMpLanStoryAvatarStatus *old=&s->avatar_status[v->player];
+    if(old->sequence && old->epoch==v->epoch) {
+        if(v->spawn_generation<old->spawn_generation ||
+            (v->spawn_generation==old->spawn_generation &&
+             !SudekiMpLanArenaSequenceNewer(v->sequence,old->sequence))) {
+            uint8_t a[SUDEKIMP_STORY_AVATAR_STATUS_WIRE_SIZE],b[SUDEKIMP_STORY_AVATAR_STATUS_WIRE_SIZE];
+            /* An identical resend is admissible, but cannot refresh the
+             * age of an old observation or alter a same-sequence value. */
+            return SudekiMpLanStoryAvatarStatusEncode(old,a,sizeof(a)) &&
+                SudekiMpLanStoryAvatarStatusEncode(v,b,sizeof(b)) && !memcmp(a,b,sizeof(a));
+        }
+    }
+    *old=*v; old->received_tick=receipt; return TRUE;
+}
 static uint32_t next_sequence(Peer *p) {
     if (++p->next_sequence == 0u) ++p->next_sequence;
     return p->next_sequence;
@@ -256,6 +289,7 @@ static BOOL connected_phase(SudekiMpLanPartyPhase phase) {
         phase==SUDEKIMP_LAN_PARTY_OBSERVING;
 }
 static unsigned profile_id(const SudekiMpLanPartySession *s) {
+    if(s->config.dev_play) return STORY_DEV_PLAY_PROFILE;
     return s->config.story_observation==2u ? STORY_GAMEPLAY_PROFILE :
         s->config.story_observation ? STORY_OBSERVATION_PROFILE :
         SUDEKIMP_LAN_ARENA_MAP_CLEANROOM;
@@ -576,6 +610,7 @@ static void drain(SudekiMpLanPartySession *s, Peer *p, SudekiMpLanArenaRejectRea
         memset(&s->combat_mode,0,sizeof(s->combat_mode));
         s->combat_mode_received_at=0;
         memset(&s->story_scene,0,sizeof(s->story_scene));
+        memset(s->avatar_status,0,sizeof(s->avatar_status));
         s->story_scene_received_at=s->story_scene_sequence=0;
         memset(&s->story_recruitment,0,sizeof(s->story_recruitment));
         s->story_recruitment_received_at=0;
@@ -799,7 +834,7 @@ static BOOL accept_story_world(SudekiMpLanPartySession *s,const uint8_t *bytes,s
         c.actors,c.count*sizeof(c.actors[0]));
     a->mask|=(uint8_t)(1u<<c.index);
     if(a->mask!=(1u<<a->chunks)-1u) return TRUE;
-    if(!SudekiMpLanStoryWorldFrameMatchesScene(&a->frame,&s->story_scene)) {
+    if(!SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(&a->frame,&s->story_scene,SudekiMpLanPartyStoryPolicy(s))) {
         memset(a,0,sizeof(*a)); return FALSE;
     }
     if(s->story_world_count==FRAME_QUEUE) {
@@ -825,10 +860,12 @@ static BOOL story_control_fresh(uint32_t now,uint32_t tick) {
 static BOOL story_control_peer(const SudekiMpLanPartySession *s,const Peer *p,
     const SudekiMpLanStoryControlFence *f) {
     return s->config.story_observation==2u && p &&
+        (!s->config.dev_play || f->character<4u ||
+            (f->player<4u && s->config.avatar[f->player]==5u)) &&
         p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && p->status.transport_confirmed &&
         f->player==p->status.lease.seat && f->character==player_character_locked(s,f->player) &&
         (s->config.local_seat || !s->catchup[f->player].required || s->catchup[f->player].acknowledged) &&
-        SudekiMpLanStoryControlMatchesScene(f,&s->story_scene);
+        SudekiMpLanStoryControlMatchesSceneForPolicy(f,&s->story_scene,SudekiMpLanPartyStoryPolicy(s));
 }
 static BOOL story_control_advances(const Peer *p,const SudekiMpLanStoryControlState *v) {
     if(!SudekiMpLanStoryControlStateValid(v)) return FALSE;
@@ -1026,7 +1063,7 @@ static void receive_message(SudekiMpLanPartySession *s,
     size_t body_size = size - HEADER;
     if (seat == 0 || seat >= SUDEKIMP_LAN_PARTY_PLAYERS || bytes[27] ||
         get16(bytes + 24) != body_size || kind < MSG_HELLO ||
-        kind > MSG_STORY_LOOT ||
+        kind > MSG_LAST ||
         part >= SUDEKIMP_LAN_PARTY_CHUNKS || (kind != MSG_FRAME && part)) return;
     if (get16(bytes + 4) != SUDEKIMP_LAN_PARTY_VERSION) {
         if (!s->config.local_seat && kind == MSG_HELLO && body_size == HELLO_SIZE)
@@ -1094,8 +1131,8 @@ static void receive_message(SudekiMpLanPartySession *s,
         if(!s->config.story_observation || !s->config.local_seat ||
             p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
             (s->story_scene_sequence && !SudekiMpLanArenaSequenceNewer(sequence,s->story_scene_sequence)) ||
-            !SudekiMpLanStorySceneDecode(body,body_size,&next) ||
-            !SudekiMpLanStorySceneAdvances(&s->story_scene,&next)) return;
+            !SudekiMpLanStorySceneDecodeForPolicy(body,body_size,&next,SudekiMpLanPartyStoryPolicy(s)) ||
+            !SudekiMpLanStorySceneAdvancesForPolicy(&s->story_scene,&next,SudekiMpLanPartyStoryPolicy(s))) return;
         if(!SudekiMpLanStorySceneSame(&s->story_scene,&next)) clear_story_scene_change(s,&next);
         s->story_scene=next; s->story_scene_received_at=s->now;
         s->story_scene_sequence=sequence; p->last_received_at=s->now;
@@ -1108,8 +1145,8 @@ static void receive_message(SudekiMpLanPartySession *s,
         if(!s->config.story_observation || !s->config.local_seat ||
             p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
             (uint32_t)(s->now-s->story_scene_received_at)>SUDEKIMP_LAN_STORY_MAX_AGE_MS ||
-            !SudekiMpLanStoryFrameDecode(body,body_size,&frame) ||
-            !SudekiMpLanStoryFrameMatchesScene(&frame,&s->story_scene) ||
+            !SudekiMpLanStoryFrameDecodeForPolicy(body,body_size,&frame,SudekiMpLanPartyStoryPolicy(s)) ||
+            !SudekiMpLanStoryFrameMatchesSceneForPolicy(&frame,&s->story_scene,SudekiMpLanPartyStoryPolicy(s)) ||
             !story_tick_near_scene(frame.host_tick,s->story_scene.observed_tick) ||
             (s->story_frame_sequence &&
                 (!SudekiMpLanArenaSequenceNewer(frame.sequence,s->story_frame_sequence) ||
@@ -1236,6 +1273,29 @@ static void receive_message(SudekiMpLanPartySession *s,
                     request.request,s->now,request.kind,request.slot,SUDEKIMP_STORY_ACTION_EXPIRED};
                 (void)send_story_action_result(s,p);
             }
+        }
+        p->received_sequence=sequence; p->last_received_at=s->now; return;
+    }
+    if(kind==MSG_STORY_AVATAR_STATUS) {
+        SudekiMpLanStoryAvatarStatus status;
+        if(!s->config.local_seat || !s->config.dev_play ||
+            p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
+            (p->received_sequence && !SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence)) ||
+            !SudekiMpLanStoryAvatarStatusDecode(body,body_size,&status) ||
+            !accept_avatar_status(s,&status,s->now)) return;
+        p->received_sequence=sequence; p->last_received_at=s->now; return;
+    }
+    if(kind==MSG_STORY_ALLY_HUD) {
+        SudekiMpLanStoryAllyHud hud;
+        if(!s->config.local_seat || s->config.story_observation!=2u ||
+            (p->received_sequence && !SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence)) ||
+            !SudekiMpLanStoryAllyHudDecode(body,body_size,&hud) ||
+            !story_control_peer(s,p,&hud.fence) ||
+            !SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&hud.fence)) return;
+        if(!SudekiMpLanStoryControlFenceSame(&p->story_ally_hud.fence,&hud.fence) ||
+            !p->story_ally_hud.sequence || SudekiMpLanArenaSequenceNewer(hud.sequence,p->story_ally_hud.sequence) ||
+            hud.sequence==p->story_ally_hud.sequence) {
+            p->story_ally_hud=hud; p->story_ally_hud_received_at=s->now;
         }
         p->received_sequence=sequence; p->last_received_at=s->now; return;
     }
@@ -1515,6 +1575,21 @@ SudekiMpLanPartySession *SudekiMpLanPartyCreate(const SudekiMpLanPartyConfig *co
     }
     if(config->assignment_enabled>1u || config->reserved_mask>15u ||
         (config->reserved_mask && !config->assignment_enabled)) return NULL;
+    if(config->dev_play>1u) return NULL;
+    if(config->dev_play) {
+        if(config->story_observation!=2u || !config->assignment_enabled || config->dev_play_leader>=4u ||
+            !config->lobby_members) return NULL;
+        unsigned used=0,mask=0;
+        for(unsigned p=0;p<4u;++p) {
+            unsigned avatar=config->avatar[p],native=4u;
+            if(avatar>5u) return NULL;
+            if(avatar<4u && !(used&(1u<<avatar))) {
+                used|=1u<<avatar; native=avatar; mask|=1u<<p;
+            }
+            if(config->character[p]!=native) return NULL;
+        }
+        if(config->reserved_mask!=mask) return NULL;
+    }
     if(config->assignment_enabled) {
         unsigned used=0;
         for(unsigned i=0;i<4;++i) {
@@ -1579,6 +1654,10 @@ void SudekiMpLanPartyDestroy(SudekiMpLanPartySession *s, BOOL notify) {
 unsigned int SudekiMpLanPartyPort(SudekiMpLanPartySession *s) {
     return s ? s->config.port : 0;
 }
+SudekiMpLanStoryPolicy SudekiMpLanPartyStoryPolicy(const SudekiMpLanPartySession *s) {
+    return s && s->config.story_observation==2u && s->config.dev_play ?
+        SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS : SUDEKIMP_LAN_STORY_POLICY_REGULAR;
+}
 unsigned int SudekiMpLanPartyLocalSeat(SudekiMpLanPartySession *s) {
     return s ? s->config.local_seat : SUDEKIMP_LAN_PARTY_PLAYERS;
 }
@@ -1590,6 +1669,13 @@ unsigned int SudekiMpLanPartyPlayerCharacter(SudekiMpLanPartySession *s,unsigned
 }
 unsigned int SudekiMpLanPartyLocalCharacter(SudekiMpLanPartySession *s) {
     return s?SudekiMpLanPartyPlayerCharacter(s,s->config.local_seat):4;
+}
+BOOL SudekiMpLanPartyDevPlay(SudekiMpLanPartySession *s) {
+    return s && s->config.dev_play;
+}
+unsigned int SudekiMpLanPartyPlayerAvatar(SudekiMpLanPartySession *s,unsigned player) {
+    if(!s || player>=4u) return 4u;
+    return s->config.dev_play?s->config.avatar[player]:SudekiMpLanPartyPlayerCharacter(s,player);
 }
 unsigned int SudekiMpLanPartyCharacterPlayer(SudekiMpLanPartySession *s,unsigned c) {
     unsigned player=4;
@@ -1725,6 +1811,7 @@ BOOL SudekiMpLanPartyClientRejoin(SudekiMpLanPartySession *s) {
         memset(&s->combat_mode,0,sizeof(s->combat_mode));
         s->combat_mode_received_at=0;
         memset(&s->story_scene,0,sizeof(s->story_scene));
+        memset(s->avatar_status,0,sizeof(s->avatar_status));
         s->story_scene_received_at=s->story_scene_sequence=0;
         memset(&s->story_recruitment,0,sizeof(s->story_recruitment));
         s->story_recruitment_received_at=0;
@@ -1899,9 +1986,9 @@ BOOL SudekiMpLanPartyPublishStoryScene(SudekiMpLanPartySession *s,
     const SudekiMpLanStoryScene *scene) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_WIRE_SIZE];
     if(!s || s->config.local_seat || !s->config.story_observation ||
-        !SudekiMpLanStorySceneEncode(scene,bytes,sizeof(bytes))) return FALSE;
+        !SudekiMpLanStorySceneEncodeForPolicy(scene,bytes,sizeof(bytes),SudekiMpLanPartyStoryPolicy(s))) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    if(!SudekiMpLanStorySceneAdvances(&s->story_scene,scene)) {
+    if(!SudekiMpLanStorySceneAdvancesForPolicy(&s->story_scene,scene,SudekiMpLanPartyStoryPolicy(s))) {
         ReleaseSRWLockExclusive(&s->lock); return FALSE;
     }
     if(!SudekiMpLanStorySceneSame(&s->story_scene,scene)) clear_story_scene_change(s,scene);
@@ -1932,7 +2019,7 @@ BOOL SudekiMpLanPartyGetStoryScene(SudekiMpLanPartySession *s,
     AcquireSRWLockShared(&s->lock);
     Peer *p=leased(s,lease);
     BOOL ok=p && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
-        SudekiMpLanStorySceneValid(&s->story_scene) &&
+        SudekiMpLanStorySceneValidForPolicy(&s->story_scene,SudekiMpLanPartyStoryPolicy(s)) &&
         story_receipt_fresh(now,s->story_scene_received_at);
     if(ok) *scene=s->story_scene;
     ReleaseSRWLockShared(&s->lock); return ok;
@@ -1974,7 +2061,7 @@ BOOL SudekiMpLanPartyBindStoryLootSave(SudekiMpLanPartySession *s,const uint8_t 
 BOOL SudekiMpLanPartySendStoryLoot(SudekiMpLanPartySession *s,const SudekiMpStoryLootState *state,
     const SudekiMpLanStoryScene *scene) {
     if(!s || s->config.local_seat || s->config.story_observation!=2u || !SudekiMpStoryLootValid(state) ||
-        !state->visit || !SudekiMpLanStorySceneValid(scene) || scene->phase!=SUDEKIMP_LAN_STORY_READY) return FALSE;
+        !state->visit || !SudekiMpLanStorySceneValidForPolicy(scene,SudekiMpLanPartyStoryPolicy(s)) || scene->phase!=SUDEKIMP_LAN_STORY_READY) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
     uint32_t now=GetTickCount();
     BOOL ok=s->story_loot_bound && !memcmp(s->story_loot_save,state->save_identity,32) &&
@@ -2257,6 +2344,67 @@ BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *s,
     if(ok) *result=p->story_action_result;
     ReleaseSRWLockShared(&s->lock); return ok;
 }
+BOOL SudekiMpLanPartyPublishStoryAllyHud(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryAllyHud *hud) {
+    if(!s || s->config.local_seat || s->config.story_observation!=2u ||
+        !SudekiMpLanStoryAllyHudValid(hud)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock); Peer *p=leased(s,lease);
+    BOOL ok=p && story_control_peer(s,p,&hud->fence) &&
+        SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&hud->fence) &&
+        p->story_control.phase==SUDEKIMP_STORY_CONTROL_READY;
+    if(ok) {
+        uint8_t bytes[SUDEKIMP_STORY_ALLY_HUD_WIRE_SIZE];
+        p->story_ally_hud=*hud; p->story_ally_hud_received_at=s->now;
+        ok=SudekiMpLanStoryAllyHudEncode(hud,bytes,sizeof(bytes)) &&
+            send_peer(s,p,MSG_STORY_ALLY_HUD,next_sequence(p),0,bytes,sizeof(bytes));
+    }
+    ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyPublishAvatarStatus(SudekiMpLanPartySession *s,
+    const SudekiMpLanStoryAvatarStatus *status) {
+    uint8_t bytes[SUDEKIMP_STORY_AVATAR_STATUS_WIRE_SIZE];
+    if(!s || s->config.local_seat || !s->config.dev_play ||
+        !SudekiMpLanStoryAvatarStatusEncode(status,bytes,sizeof(bytes))) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL ok=accept_avatar_status(s,status,GetTickCount());
+    if(ok) for(unsigned player=1;player<4u;++player) {
+        Peer *p=&s->peer[player];
+        if(p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && p->status.transport_confirmed &&
+            !send_peer(s,p,MSG_STORY_AVATAR_STATUS,next_sequence(p),0,bytes,sizeof(bytes))) ok=FALSE;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyGetAvatarStatus(SudekiMpLanPartySession *s,
+    unsigned player,uint32_t now,SudekiMpLanStoryAvatarStatus *status) {
+    if(!s || player>=4u || !status || !s->config.dev_play) return FALSE;
+    AcquireSRWLockShared(&s->lock);
+    const SudekiMpLanStoryAvatarStatus *v=&s->avatar_status[player];
+    int32_t age=(int32_t)(now-v->received_tick);
+    BOOL ok=v->present && avatar_status_scene(s,v) && age>=0 &&
+        age<=(int32_t)SUDEKIMP_STORY_AVATAR_STATUS_MAX_AGE_MS;
+    if(s->config.local_seat) {
+        const Peer *p=&s->peer[s->config.local_seat];
+        ok=ok && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && p->status.transport_confirmed;
+    } else if(player) {
+        const Peer *p=&s->peer[player];
+        ok=ok && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && p->status.transport_confirmed;
+    }
+    if(ok) *status=*v;
+    ReleaseSRWLockShared(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyGetStoryAllyHud(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryAllyHud *hud) {
+    if(!s || !s->config.local_seat || s->config.story_observation!=2u || !lease ||
+        lease->seat!=s->config.local_seat || !hud) return FALSE;
+    AcquireSRWLockShared(&s->lock); Peer *p=leased(s,lease);
+    BOOL ok=p && p->story_ally_hud.sequence && story_control_peer(s,p,&p->story_ally_hud.fence) &&
+        SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&p->story_ally_hud.fence) &&
+        p->story_control.phase==SUDEKIMP_STORY_CONTROL_READY &&
+        (int32_t)(now-p->story_ally_hud_received_at)>=0 &&
+        now-p->story_ally_hud_received_at<=STORY_ALLY_HUD_MAX_AGE_MS;
+    if(ok) *hud=p->story_ally_hud;
+    ReleaseSRWLockShared(&s->lock); return ok;
+}
 BOOL SudekiMpLanPartyRevokeStoryControl(SudekiMpLanPartySession *s,
     const SudekiMpLanPartyLease *lease) {
     if(!s || s->config.local_seat || s->config.story_observation!=2u) return FALSE;
@@ -2282,9 +2430,9 @@ BOOL SudekiMpLanPartySendStoryFrame(SudekiMpLanPartySession *s,
     const SudekiMpLanStoryFrame *frame) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_FRAME_MAX_SIZE]; size_t size=0;
     if(!s || s->config.local_seat || !s->config.story_observation ||
-        !SudekiMpLanStoryFrameEncode(frame,bytes,sizeof(bytes),&size)) return FALSE;
+        !SudekiMpLanStoryFrameEncodeForPolicy(frame,bytes,sizeof(bytes),&size,SudekiMpLanPartyStoryPolicy(s))) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    if(!SudekiMpLanStoryFrameMatchesScene(frame,&s->story_scene) ||
+    if(!SudekiMpLanStoryFrameMatchesSceneForPolicy(frame,&s->story_scene,SudekiMpLanPartyStoryPolicy(s)) ||
         !story_tick_near_scene(frame->host_tick,s->story_scene.observed_tick) ||
         (s->story_frame_sequence &&
             (!SudekiMpLanArenaSequenceNewer(frame->sequence,s->story_frame_sequence) ||
@@ -2323,7 +2471,7 @@ BOOL SudekiMpLanPartyPopStoryFrameReceived(SudekiMpLanPartySession *s,
         story_receipt_fresh(now,s->story_frame_received_at) &&
         s->story_frame_count &&
         story_receipt_fresh(now,s->story_frame_receipts[s->story_frame_head]) &&
-        SudekiMpLanStoryFrameMatchesScene(&s->story_frames[s->story_frame_head],&s->story_scene);
+        SudekiMpLanStoryFrameMatchesSceneForPolicy(&s->story_frames[s->story_frame_head],&s->story_scene,SudekiMpLanPartyStoryPolicy(s));
     if(okay) {
         *frame=s->story_frames[s->story_frame_head];
         if(received_at) *received_at=s->story_frame_receipts[s->story_frame_head];
@@ -2337,7 +2485,7 @@ BOOL SudekiMpLanPartySendStoryWorld(SudekiMpLanPartySession *s,
     if(!s || s->config.local_seat || s->config.story_observation!=2u ||
         !SudekiMpLanStoryWorldFrameValid(frame)) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    if(!SudekiMpLanStoryWorldFrameMatchesScene(frame,&s->story_scene) ||
+    if(!SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(frame,&s->story_scene,SudekiMpLanPartyStoryPolicy(s)) ||
         frame->sequence!=s->story_frame_sequence || frame->host_tick!=s->story_frame_tick ||
         !story_tick_near_scene(frame->host_tick,s->story_scene.observed_tick) ||
         (s->story_world_sequence && !SudekiMpLanArenaSequenceNewer(frame->sequence,s->story_world_sequence))) {
@@ -2371,7 +2519,7 @@ BOOL SudekiMpLanPartyPopStoryWorld(SudekiMpLanPartySession *s,
     BOOL okay=p && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
         story_receipt_fresh(now,s->story_scene_received_at) && s->story_world_count &&
         story_receipt_fresh(now,s->story_world_receipts[s->story_world_head]) &&
-        SudekiMpLanStoryWorldFrameMatchesScene(&s->story_world_frames[s->story_world_head],&s->story_scene);
+        SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(&s->story_world_frames[s->story_world_head],&s->story_scene,SudekiMpLanPartyStoryPolicy(s));
     if(okay) {
         *frame=s->story_world_frames[s->story_world_head];
         if(received_at) *received_at=s->story_world_receipts[s->story_world_head];

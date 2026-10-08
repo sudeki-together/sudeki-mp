@@ -11,6 +11,14 @@
 #define SUDEKIMP_LAN_STORY_NO_SEAT 4u
 #define SUDEKIMP_LAN_STORY_MAX_AGE_MS 1000u
 
+/* Selected by the authenticated local session configuration, never inferred
+ * from a packet or the shared saved-story profile number. This only validates
+ * plain metadata; it cannot prove native avatar or world ownership. */
+typedef enum SudekiMpLanStoryPolicy {
+    SUDEKIMP_LAN_STORY_POLICY_REGULAR = 0,
+    SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS = 1
+} SudekiMpLanStoryPolicy;
+
 typedef enum SudekiMpLanStoryPhase {
     SUDEKIMP_LAN_STORY_UNKNOWN = 0,
     SUDEKIMP_LAN_STORY_LOADING,
@@ -44,6 +52,19 @@ int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *scene,
     uint8_t *bytes, size_t size);
 int SudekiMpLanStorySceneDecode(const uint8_t *bytes, size_t size,
     SudekiMpLanStoryScene *scene);
+/* Additive Dev Play policy: READY may contain no canonical heroes, with
+ * NO_SEAT, no inside members and an exterior world only. The native group
+ * may have a separately proved avatar leader; no hero index aliases it.
+ * Existing entry points above always apply REGULAR policy. Wire layout is
+ * unchanged; regular sessions must never opt into this policy. */
+int SudekiMpLanStorySceneValidForPolicy(const SudekiMpLanStoryScene *scene,
+    SudekiMpLanStoryPolicy policy);
+int SudekiMpLanStorySceneAdvancesForPolicy(const SudekiMpLanStoryScene *prior,
+    const SudekiMpLanStoryScene *next,SudekiMpLanStoryPolicy policy);
+int SudekiMpLanStorySceneEncodeForPolicy(const SudekiMpLanStoryScene *scene,
+    uint8_t *bytes,size_t size,SudekiMpLanStoryPolicy policy);
+int SudekiMpLanStorySceneDecodeForPolicy(const uint8_t *bytes,size_t size,
+    SudekiMpLanStoryScene *scene,SudekiMpLanStoryPolicy policy);
 /* Intended view policy, not input authorization. Unknown/loading returns
  * NO_SEAT. Unavailable players may follow a present companion. */
 /* Area of one character in a READY scene: copies world and, when that

@@ -76,6 +76,12 @@ typedef struct SudekiMpLanPartyConfig {
     uint8_t assignment_enabled;
     uint8_t reserved_mask; /* optional explicit reservations, including offline players */
     uint8_t character[4];
+    /* Dev Play lobby choices are separate from the unique native-party map.
+     * 0..3 heroes, 4 none, 5 Talos. Duplicate heroes and Talos project to
+     * character=4; this configuration alone grants no avatar input lease. */
+    uint8_t dev_play;
+    uint8_t dev_play_leader; /* Fingerprint-verified native save leader; no control authority. */
+    uint8_t avatar[4];
 } SudekiMpLanPartyConfig;
 
 typedef enum SudekiMpLanPartyCommandKind {
@@ -206,8 +212,13 @@ void SudekiMpLanPartyDestroy(SudekiMpLanPartySession *session, BOOL notify);
 unsigned int SudekiMpLanPartyPort(SudekiMpLanPartySession *session);
 /* Immutable endpoint role, not inferred from a remote peer's status. */
 unsigned int SudekiMpLanPartyLocalSeat(SudekiMpLanPartySession *session);
+/* Immutable local configuration, never inferred from received metadata. */
+SudekiMpLanStoryPolicy SudekiMpLanPartyStoryPolicy(const SudekiMpLanPartySession *session);
 unsigned int SudekiMpLanPartyLocalCharacter(SudekiMpLanPartySession *session);
 unsigned int SudekiMpLanPartyPlayerCharacter(SudekiMpLanPartySession *session,
+    unsigned int player);
+BOOL SudekiMpLanPartyDevPlay(SudekiMpLanPartySession *session);
+unsigned int SudekiMpLanPartyPlayerAvatar(SudekiMpLanPartySession *session,
     unsigned int player);
 unsigned int SudekiMpLanPartyCharacterPlayer(SudekiMpLanPartySession *session,
     unsigned int character);
@@ -316,6 +327,22 @@ BOOL SudekiMpLanPartyPublishStoryActionResult(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryActionResult *result);
 BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,SudekiMpLanStoryActionResult *result);
+/* Dev Play ally seat combo reader (host -> client, latest wins, resent by the
+ * host while bound). Accepted only under the peer's current ally control fence. */
+BOOL SudekiMpLanPartyPublishStoryAllyHud(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryAllyHud *hud);
+BOOL SudekiMpLanPartyGetStoryAllyHud(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryAllyHud *hud);
+/* Dev Play only: host game-thread snapshots broadcast to every observing
+ * peer, including spectators; host-local Get uses the same fresh plain cache.
+ * A present=0 tombstone closes display immediately. Publish must increase
+ * sequence on each fresh observation; identical retries cannot renew age.
+ * Get returns only configured Talos players in the current exact scene.
+ * received_tick comes from the local clock, never the remote host clock. */
+BOOL SudekiMpLanPartyPublishAvatarStatus(SudekiMpLanPartySession *session,
+    const SudekiMpLanStoryAvatarStatus *status);
+BOOL SudekiMpLanPartyGetAvatarStatus(SudekiMpLanPartySession *session,
+    unsigned player,uint32_t now,SudekiMpLanStoryAvatarStatus *status);
 /* Closes this exact offer and input queue before native drain. It grants no
  * native retirement; ReleaseDrained is still the coordinator's final step. */
 BOOL SudekiMpLanPartyRevokeStoryControl(SudekiMpLanPartySession *session,

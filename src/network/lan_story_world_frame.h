@@ -7,7 +7,7 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 5u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 7u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
@@ -22,8 +22,19 @@
 /* Portable record category, NOT ResourceName encoded_kind: the native low
  * seven bits may change during lazy resolution. Canonical ID is independent. */
 #define SUDEKIMP_LAN_STORY_WORLD_PC_KIND 0x0f81u
+/* Dev Play ally (ALLY_TALOS class): NPC-like record, never a party character. */
+#define SUDEKIMP_LAN_STORY_WORLD_ALLY_KIND 0x0f82u
+/* Dev Play mirrored monster (the [DevPlay] SpawnResource class, e.g.
+ * BOSS_Behemoth): NPC-like record. The host owns its AI, health and damage;
+ * the client only presents its own paused copy and may drop the record. */
+#define SUDEKIMP_LAN_STORY_WORLD_ENEMY_KIND 0x0f83u
 uint32_t SudekiMpLanStoryWorldCharacterIdentifier(unsigned character);
 unsigned SudekiMpLanStoryWorldCharacter(uint32_t identifier);
+/* Dev Play profile only: stable seat identity, never a native ResourceName.
+ * The world adapter requires a fresh spawn lease before assigning these IDs.
+ * Existing version-7 records and the unconfigured legacy path are unchanged. */
+uint32_t SudekiMpLanStoryWorldAvatarIdentifier(unsigned player);
+unsigned SudekiMpLanStoryWorldAvatarPlayer(uint32_t identifier);
 
 typedef struct SudekiMpLanStoryWorldActor {
     uint16_t kind;
@@ -62,6 +73,10 @@ BOOL SudekiMpLanStoryWorldFrameMatches(const SudekiMpLanStoryWorldFrame *world,
     const SudekiMpLanStoryFrame *party);
 BOOL SudekiMpLanStoryWorldFrameMatchesScene(const SudekiMpLanStoryWorldFrame *frame,
     const SudekiMpLanStoryScene *scene);
+BOOL SudekiMpLanStoryWorldFrameMatchesForPolicy(const SudekiMpLanStoryWorldFrame *world,
+    const SudekiMpLanStoryFrame *party,SudekiMpLanStoryPolicy policy);
+BOOL SudekiMpLanStoryWorldFrameMatchesSceneForPolicy(const SudekiMpLanStoryWorldFrame *frame,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryPolicy policy);
 unsigned SudekiMpLanStoryWorldChunkCount(unsigned actors);
 BOOL SudekiMpLanStoryWorldChunkEncode(const SudekiMpLanStoryWorldFrame *frame,
     unsigned index,uint8_t *bytes,size_t capacity,size_t *written);

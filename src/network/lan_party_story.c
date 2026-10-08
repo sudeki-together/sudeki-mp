@@ -12,16 +12,24 @@ static int name_valid(const char name[SUDEKIMP_LAN_STORY_NAME_SIZE], int require
     for(;end<SUDEKIMP_LAN_STORY_NAME_SIZE;++end) if(name[end]) return 0;
     return 1;
 }
-int SudekiMpLanStorySceneValid(const SudekiMpLanStoryScene *s) {
-    if(!s || !s->epoch || !s->revision || s->phase>SUDEKIMP_LAN_STORY_READY ||
+int SudekiMpLanStorySceneValidForPolicy(const SudekiMpLanStoryScene *s,
+    SudekiMpLanStoryPolicy policy) {
+    if((policy!=SUDEKIMP_LAN_STORY_POLICY_REGULAR &&
+        policy!=SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS) ||
+        !s || !s->epoch || !s->revision || s->phase>SUDEKIMP_LAN_STORY_READY ||
         (s->available_mask&~15u) || s->leader_seat>SUDEKIMP_LAN_STORY_NO_SEAT ||
         !name_valid(s->world,s->phase==SUDEKIMP_LAN_STORY_READY) ||
         !name_valid(s->temporary,0) || (s->temporary[0] && !s->world[0]) ||
         (s->inside_mask&~15u)) return 0;
     if(s->phase!=SUDEKIMP_LAN_STORY_READY)
         return !s->available_mask && !s->inside_mask && s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT;
+    if(policy==SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS && !s->available_mask)
+        return s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT && !s->inside_mask && !s->temporary[0];
     if((s->inside_mask&~s->available_mask) || (!s->temporary[0])!=(!s->inside_mask)) return 0;
     return s->leader_seat<4u && (s->available_mask&(1u<<s->leader_seat))!=0;
+}
+int SudekiMpLanStorySceneValid(const SudekiMpLanStoryScene *s) {
+    return SudekiMpLanStorySceneValidForPolicy(s,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }
 int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
     const SudekiMpLanStoryScene *b) {
@@ -34,13 +42,13 @@ int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
 static int exterior_occupied(const SudekiMpLanStoryScene *s) {
     return s->phase==SUDEKIMP_LAN_STORY_READY && (s->available_mask&~s->inside_mask)!=0;
 }
-int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
-    const SudekiMpLanStoryScene *n) {
-    if(!SudekiMpLanStorySceneValid(n)) return 0;
+int SudekiMpLanStorySceneAdvancesForPolicy(const SudekiMpLanStoryScene *p,
+    const SudekiMpLanStoryScene *n,SudekiMpLanStoryPolicy policy) {
+    if(!SudekiMpLanStorySceneValidForPolicy(n,policy)) return 0;
     if(!p || !p->revision) return 1;
     /* Epoch/revision exhaustion closes the session; these counters never wrap.
      * Tick arithmetic alone wraps, like GetTickCount's bounded freshness. */
-    if(!SudekiMpLanStorySceneValid(p) || n->epoch<p->epoch ||
+    if(!SudekiMpLanStorySceneValidForPolicy(p,policy) || n->epoch<p->epoch ||
         n->revision<p->revision || (int32_t)(n->observed_tick-p->observed_tick)<0)
         return 0;
     if(n->revision==p->revision)
@@ -55,14 +63,19 @@ int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
     }
     return 1;
 }
+int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
+    const SudekiMpLanStoryScene *n) {
+    return SudekiMpLanStorySceneAdvancesForPolicy(p,n,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
+}
 static void put32(uint8_t *p,uint32_t v) {
     for(unsigned i=0;i<4u;++i) p[i]=(uint8_t)(v>>(8u*i));
 }
 static uint32_t get32(const uint8_t *p) {
     return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
 }
-int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *s,uint8_t *p,size_t n) {
-    if(!p || n!=SUDEKIMP_LAN_STORY_WIRE_SIZE || !SudekiMpLanStorySceneValid(s)) return 0;
+int SudekiMpLanStorySceneEncodeForPolicy(const SudekiMpLanStoryScene *s,uint8_t *p,size_t n,
+    SudekiMpLanStoryPolicy policy) {
+    if(!p || n!=SUDEKIMP_LAN_STORY_WIRE_SIZE || !SudekiMpLanStorySceneValidForPolicy(s,policy)) return 0;
     put32(p,s->epoch); put32(p+4,s->revision); put32(p+8,s->observed_tick);
     p[12]=s->phase; p[13]=s->available_mask; p[14]=s->leader_seat;
     memcpy(p+15,s->world,sizeof(s->world));
@@ -70,7 +83,11 @@ int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *s,uint8_t *p,size_t
     p[143]=s->inside_mask;
     return 1;
 }
-int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene *s) {
+int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *s,uint8_t *p,size_t n) {
+    return SudekiMpLanStorySceneEncodeForPolicy(s,p,n,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
+}
+int SudekiMpLanStorySceneDecodeForPolicy(const uint8_t *p,size_t n,SudekiMpLanStoryScene *s,
+    SudekiMpLanStoryPolicy policy) {
     SudekiMpLanStoryScene v={0};
     if(!p || !s || n!=SUDEKIMP_LAN_STORY_WIRE_SIZE) return 0;
     v.epoch=get32(p); v.revision=get32(p+4); v.observed_tick=get32(p+8);
@@ -78,8 +95,11 @@ int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene 
     memcpy(v.world,p+15,sizeof(v.world));
     memcpy(v.temporary,p+79,sizeof(v.temporary));
     v.inside_mask=p[143];
-    if(!SudekiMpLanStorySceneValid(&v)) return 0;
+    if(!SudekiMpLanStorySceneValidForPolicy(&v,policy)) return 0;
     *s=v; return 1;
+}
+int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene *s) {
+    return SudekiMpLanStorySceneDecodeForPolicy(p,n,s,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }
 int SudekiMpLanStorySceneCharacterArea(const SudekiMpLanStoryScene *s,unsigned int c,
     char world[SUDEKIMP_LAN_STORY_NAME_SIZE],char temporary[SUDEKIMP_LAN_STORY_NAME_SIZE]) {

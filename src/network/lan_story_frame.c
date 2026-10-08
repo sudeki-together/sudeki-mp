@@ -144,10 +144,16 @@ BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *a,unsigned characte
     float norm=sqrtf(a->facing_x*a->facing_x+a->facing_z*a->facing_z);
     return isfinite(norm) && norm>=0.5f && norm<=1.5f;
 }
-BOOL SudekiMpLanStoryFrameValid(const SudekiMpLanStoryFrame *f) {
-    if(!f || !f->epoch || !f->revision || !f->sequence || !SudekiMpLanStoryViewValid(&f->view) ||
-        !f->available_mask || (f->available_mask&~15u) || f->leader_character>=4u ||
-        !(f->available_mask&(1u<<f->leader_character)) || f->combat_mode>1u) return FALSE;
+BOOL SudekiMpLanStoryFrameValidForPolicy(const SudekiMpLanStoryFrame *f,
+    SudekiMpLanStoryPolicy policy) {
+    if((policy!=SUDEKIMP_LAN_STORY_POLICY_REGULAR &&
+        policy!=SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS) ||
+        !f || !f->epoch || !f->revision || !f->sequence || !SudekiMpLanStoryViewValid(&f->view) ||
+        (f->available_mask&~15u) || f->combat_mode>1u) return FALSE;
+    if(!f->available_mask) {
+        if(policy!=SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS ||
+            f->leader_character!=SUDEKIMP_LAN_STORY_NO_SEAT) return FALSE;
+    } else if(f->leader_character>=4u || !(f->available_mask&(1u<<f->leader_character))) return FALSE;
     for(unsigned c=0;c<4u;++c) {
         if(f->available_mask&(1u<<c)) {
             if(!SudekiMpLanStoryActorValid(&f->actors[c],c) ||
@@ -158,12 +164,19 @@ BOOL SudekiMpLanStoryFrameValid(const SudekiMpLanStoryFrame *f) {
     }
     return TRUE;
 }
-BOOL SudekiMpLanStoryFrameMatchesScene(const SudekiMpLanStoryFrame *f,
-    const SudekiMpLanStoryScene *s) {
-    return SudekiMpLanStoryFrameValid(f) && SudekiMpLanStorySceneValid(s) &&
+BOOL SudekiMpLanStoryFrameValid(const SudekiMpLanStoryFrame *f) {
+    return SudekiMpLanStoryFrameValidForPolicy(f,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
+}
+BOOL SudekiMpLanStoryFrameMatchesSceneForPolicy(const SudekiMpLanStoryFrame *f,
+    const SudekiMpLanStoryScene *s,SudekiMpLanStoryPolicy policy) {
+    return SudekiMpLanStoryFrameValidForPolicy(f,policy) && SudekiMpLanStorySceneValidForPolicy(s,policy) &&
         s->phase==SUDEKIMP_LAN_STORY_READY && f->epoch==s->epoch &&
         f->revision==s->revision && f->available_mask==s->available_mask &&
         f->leader_character==s->leader_seat;
+}
+BOOL SudekiMpLanStoryFrameMatchesScene(const SudekiMpLanStoryFrame *f,
+    const SudekiMpLanStoryScene *s) {
+    return SudekiMpLanStoryFrameMatchesSceneForPolicy(f,s,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }
 
 static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
@@ -226,10 +239,10 @@ static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryActor *a,unsigned charac
     }
     return SudekiMpLanStoryActorValid(a,character);
 }
-BOOL SudekiMpLanStoryFrameEncode(const SudekiMpLanStoryFrame *f,
-    uint8_t *bytes,size_t capacity,size_t *written) {
+BOOL SudekiMpLanStoryFrameEncodeForPolicy(const SudekiMpLanStoryFrame *f,
+    uint8_t *bytes,size_t capacity,size_t *written,SudekiMpLanStoryPolicy policy) {
     if(written) *written=0;
-    if(!bytes || !written || !SudekiMpLanStoryFrameValid(f)) return FALSE;
+    if(!bytes || !written || !SudekiMpLanStoryFrameValidForPolicy(f,policy)) return FALSE;
     unsigned count=count_actors(f->available_mask);
     size_t size=SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE+count*SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE;
     if(capacity<size) return FALSE;
@@ -249,14 +262,18 @@ BOOL SudekiMpLanStoryFrameEncode(const SudekiMpLanStoryFrame *f,
             n++*SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE,&f->actors[c]);
     *written=size; return TRUE;
 }
-BOOL SudekiMpLanStoryFrameDecode(const uint8_t *bytes,size_t size,
-    SudekiMpLanStoryFrame *f) {
+BOOL SudekiMpLanStoryFrameEncode(const SudekiMpLanStoryFrame *f,
+    uint8_t *bytes,size_t capacity,size_t *written) {
+    return SudekiMpLanStoryFrameEncodeForPolicy(f,bytes,capacity,written,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
+}
+BOOL SudekiMpLanStoryFrameDecodeForPolicy(const uint8_t *bytes,size_t size,
+    SudekiMpLanStoryFrame *f,SudekiMpLanStoryPolicy policy) {
     SudekiMpLanStoryFrame next={0};
     if(!bytes || !f || size<SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE ||
         size>SUDEKIMP_LAN_STORY_FRAME_MAX_SIZE || bytes[0]!='S' || bytes[1]!='T' ||
         bytes[2]!='F' || bytes[3]!=SUDEKIMP_LAN_STORY_FRAME_VERSION || bytes[23]>1u ||
         bytes[25] || bytes[26] || bytes[27] ||
-        !bytes[20] || (bytes[20]&~15u) || bytes[22]!=count_actors(bytes[20]) ||
+        (bytes[20]&~15u) || bytes[22]!=count_actors(bytes[20]) ||
         size!=SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE+
             bytes[22]*SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE) return FALSE;
     next.epoch=get32(bytes+4); next.revision=get32(bytes+8); next.host_tick=get32(bytes+12);
@@ -271,8 +288,12 @@ BOOL SudekiMpLanStoryFrameDecode(const uint8_t *bytes,size_t size,
         if(!read_actor(bytes+SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE+
             n++*SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE,&next.actors[c],c)) return FALSE;
     }
-    if(!SudekiMpLanStoryFrameValid(&next)) return FALSE;
+    if(!SudekiMpLanStoryFrameValidForPolicy(&next,policy)) return FALSE;
     *f=next; return TRUE;
+}
+BOOL SudekiMpLanStoryFrameDecode(const uint8_t *bytes,size_t size,
+    SudekiMpLanStoryFrame *f) {
+    return SudekiMpLanStoryFrameDecodeForPolicy(bytes,size,f,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }
 
 static float lerp(float a,float b,float alpha) { return a+(b-a)*alpha; }
@@ -363,9 +384,9 @@ static void actor_interpolate(const SudekiMpLanStoryActor *a,
     for(unsigned i=0;i<3u;++i)
         out->locomotion.blend[i]=lerp(a->locomotion.blend[i],b->locomotion.blend[i],alpha);
 }
-BOOL SudekiMpLanStoryFrameInterpolate(const SudekiMpLanStoryFrame *a,
-    const SudekiMpLanStoryFrame *b,uint32_t tick,SudekiMpLanStoryFrame *out) {
-    if(!out || !SudekiMpLanStoryFrameValid(a) || !SudekiMpLanStoryFrameValid(b) ||
+BOOL SudekiMpLanStoryFrameInterpolateForPolicy(const SudekiMpLanStoryFrame *a,
+    const SudekiMpLanStoryFrame *b,uint32_t tick,SudekiMpLanStoryFrame *out,SudekiMpLanStoryPolicy policy) {
+    if(!out || !SudekiMpLanStoryFrameValidForPolicy(a,policy) || !SudekiMpLanStoryFrameValidForPolicy(b,policy) ||
         a->epoch!=b->epoch || a->revision!=b->revision ||
         a->available_mask!=b->available_mask || a->leader_character!=b->leader_character ||
         (int32_t)(b->sequence-a->sequence)<=0 || (int32_t)(b->host_tick-a->host_tick)<=0 ||
@@ -381,6 +402,10 @@ BOOL SudekiMpLanStoryFrameInterpolate(const SudekiMpLanStoryFrame *a,
     for(unsigned c=0;c<4u;++c) if(a->available_mask&(1u<<c))
         actor_interpolate(&a->actors[c],&b->actors[c],alpha,
             tick-a->host_tick,b->host_tick-a->host_tick,&next.actors[c]);
-    if(!SudekiMpLanStoryFrameValid(&next)) return FALSE;
+    if(!SudekiMpLanStoryFrameValidForPolicy(&next,policy)) return FALSE;
     *out=next; return TRUE;
+}
+BOOL SudekiMpLanStoryFrameInterpolate(const SudekiMpLanStoryFrame *a,
+    const SudekiMpLanStoryFrame *b,uint32_t tick,SudekiMpLanStoryFrame *out) {
+    return SudekiMpLanStoryFrameInterpolateForPolicy(a,b,tick,out,SUDEKIMP_LAN_STORY_POLICY_REGULAR);
 }

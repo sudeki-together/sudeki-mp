@@ -10,6 +10,11 @@ typedef struct SudekiMpLanStoryControlFence {
     uint32_t epoch,revision,transaction,actor_generation;
     uint8_t player,character;
 } SudekiMpLanStoryControlFence;
+/* Ally seat (Dev Play): the fence drives a host-spawned ALLY_TALOS entity that
+ * is not one of the four heroes and never joins the native party group. It
+ * is outside the scene's available_mask/leader rules; the host proves the
+ * entity itself. Hero-only kinds (SKILL) stay unavailable for it. */
+#define SUDEKIMP_STORY_CHARACTER_ALLY 4u
 typedef enum SudekiMpLanStoryControlPhase {
     SUDEKIMP_STORY_CONTROL_PREPARE=1,
     SUDEKIMP_STORY_CONTROL_READY,
@@ -82,6 +87,43 @@ BOOL SudekiMpLanStoryActionResultEncode(const SudekiMpLanStoryActionResult *resu
 BOOL SudekiMpLanStoryActionResultDecode(const uint8_t *bytes,size_t size,
     SudekiMpLanStoryActionResult *result);
 
+/* Dev Play ally seat: the host's shadow of the native combo reader
+ * (COMBO_GIZMO slots) for the ally entity, host -> client, latest wins. The
+ * client writes these values into its own HUD controller; the record carries
+ * no input, no actor identity and no permission to change gameplay. */
+typedef struct SudekiMpLanStoryAllyHud {
+    SudekiMpLanStoryControlFence fence; /* character == SUDEKIMP_STORY_CHARACTER_ALLY */
+    uint32_t sequence,observed_tick;
+    uint8_t slots[3];   /* native slot kinds 0..6; 7 = empty */
+    uint8_t flags;      /* SUDEKIMP_STORY_ALLY_HUD_* bits */
+} SudekiMpLanStoryAllyHud;
+#define SUDEKIMP_STORY_ALLY_HUD_WIRE_SIZE 32u
+#define SUDEKIMP_STORY_ALLY_HUD_SLOT_EMPTY 7u
+#define SUDEKIMP_STORY_ALLY_HUD_FULL 0x01u      /* HUD +0x200: three slots filled */
+#define SUDEKIMP_STORY_ALLY_HUD_ALT_ICONS 0x02u /* HUD +0x201: alternate icon set */
+#define SUDEKIMP_STORY_ALLY_HUD_FLASH 0x04u     /* HUD +0x202: combo-complete flash */
+#define SUDEKIMP_STORY_ALLY_HUD_ARMED 0x08u     /* HUD +0x203: slots accept pushes */
+#define SUDEKIMP_STORY_ALLY_HUD_COMBAT 0x10u    /* ally arbiter in melee combat: HUD mode 3 */
+#define SUDEKIMP_STORY_ALLY_HUD_FLAG_MASK 0x1fu
+BOOL SudekiMpLanStoryAllyHudValid(const SudekiMpLanStoryAllyHud *hud);
+BOOL SudekiMpLanStoryAllyHudEncode(const SudekiMpLanStoryAllyHud *hud,uint8_t *bytes,size_t size);
+BOOL SudekiMpLanStoryAllyHudDecode(const uint8_t *bytes,size_t size,SudekiMpLanStoryAllyHud *hud);
+
+/* Host-authoritative Dev Play avatar display record. This grants no native
+ * control or stat-write authority. received_tick is a local receipt stamp;
+ * it is never serialized or compared with the host's observed_tick. */
+typedef struct SudekiMpLanStoryAvatarStatus {
+    uint32_t epoch,revision,spawn_generation,sequence,observed_tick,received_tick;
+    float hp,max_hp,sp,max_sp;
+    uint8_t player,present;
+    char name[32];
+} SudekiMpLanStoryAvatarStatus;
+#define SUDEKIMP_STORY_AVATAR_STATUS_WIRE_SIZE 72u
+#define SUDEKIMP_STORY_AVATAR_STATUS_MAX_AGE_MS 250u
+BOOL SudekiMpLanStoryAvatarStatusValid(const SudekiMpLanStoryAvatarStatus *status);
+BOOL SudekiMpLanStoryAvatarStatusEncode(const SudekiMpLanStoryAvatarStatus *status,uint8_t *bytes,size_t size);
+BOOL SudekiMpLanStoryAvatarStatusDecode(const uint8_t *bytes,size_t size,SudekiMpLanStoryAvatarStatus *status);
+
 /* A host-observed authored recruitment result, limited to one closed route.
  * Load generation is intentionally absent: local native load journals have
  * independent counters. The client maps this to its retained matching save. */
@@ -109,6 +151,8 @@ BOOL SudekiMpLanStoryControlFenceSame(const SudekiMpLanStoryControlFence *a,
  * actor_generation and native roster checks. */
 BOOL SudekiMpLanStoryControlMatchesScene(const SudekiMpLanStoryControlFence *fence,
     const SudekiMpLanStoryScene *scene);
+BOOL SudekiMpLanStoryControlMatchesSceneForPolicy(const SudekiMpLanStoryControlFence *fence,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryPolicy policy);
 BOOL SudekiMpLanStoryControlStateValid(const SudekiMpLanStoryControlState *state);
 BOOL SudekiMpLanStoryMovementValid(const SudekiMpLanStoryMovement *input);
 BOOL SudekiMpLanStoryControlEncode(const SudekiMpLanStoryControlState *state,

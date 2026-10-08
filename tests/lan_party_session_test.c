@@ -1473,6 +1473,73 @@ static void test_loading_assignment_gate(void) {
     SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
 }
 
+static void test_dev_play_configuration(void) {
+    SudekiMpLanPartyConfig c={.dev_play=1,.story_observation=2,.assignment_enabled=1,
+        .lobby_members=3,.reserved_mask=4,.character={4,4,2,4},.avatar={5,5,2,4},
+        .lobby_nonce={101,102,0,0},.timeout_ms=2000};
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&c);
+    CHECK(host!=NULL);
+    if(!host) return;
+    CHECK(SudekiMpLanPartyDevPlay(host));
+    CHECK(SudekiMpLanPartyPlayerAvatar(host,0)==5 && SudekiMpLanPartyPlayerCharacter(host,0)==4);
+    CHECK(SudekiMpLanPartyPlayerAvatar(host,1)==5 && SudekiMpLanPartyPlayerCharacter(host,1)==4);
+    CHECK(SudekiMpLanPartyPlayerAvatar(host,2)==2 && SudekiMpLanPartyPlayerCharacter(host,2)==2);
+    CHECK(SudekiMpLanPartyPlayerAvatar(host,4)==4);
+    SudekiMpLanPartyConfig bad=c;
+    bad.dev_play=2; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.story_observation=1; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.assignment_enabled=0; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.lobby_members=0; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.avatar[1]=6; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.character[1]=0; CHECK(!SudekiMpLanPartyCreate(&bad));
+    bad=c; bad.reserved_mask=0; CHECK(!SudekiMpLanPartyCreate(&bad));
+    /* Duplicate hero gets no second native party lease. */
+    bad=c; bad.avatar[0]=bad.avatar[1]=2; bad.avatar[2]=4;
+    bad.character[0]=2; bad.character[2]=4; bad.reserved_mask=1;
+    SudekiMpLanPartySession *duplicates=SudekiMpLanPartyCreate(&bad);
+    CHECK(duplicates!=NULL);
+    if(duplicates) {
+        CHECK(SudekiMpLanPartyPlayerAvatar(duplicates,1)==2);
+        CHECK(SudekiMpLanPartyPlayerCharacter(duplicates,1)==4);
+        SudekiMpLanPartyDestroy(duplicates,FALSE);
+    }
+    c.port=SudekiMpLanPartyPort(host); c.host_ipv4="127.0.0.1";
+    c.local_seat=1; c.lobby_nonce[0]=0;
+    /* Same ticket/party map cannot cross the ordinary-story profile. */
+    bad=c; bad.dev_play=0;
+    SudekiMpLanPartySession *client=SudekiMpLanPartyCreate(&bad);
+    CHECK(client!=NULL);
+    if(client) {
+        SudekiMpLanPartyPeerStatus state={0};
+        for(unsigned i=0;i<500u;++i) {
+            uint32_t tick=GetTickCount();
+            SudekiMpLanPartyPoll(client,tick); SudekiMpLanPartyPoll(host,tick);
+            SudekiMpLanPartyPoll(client,tick);
+            CHECK(SudekiMpLanPartyPeerStatusGet(client,1,&state));
+            if(state.phase==SUDEKIMP_LAN_PARTY_REJECTED) break;
+            Sleep(1);
+        }
+        CHECK(state.phase==SUDEKIMP_LAN_PARTY_REJECTED);
+        SudekiMpLanPartyDestroy(client,FALSE);
+    }
+    client=SudekiMpLanPartyCreate(&c); CHECK(client!=NULL);
+    if(client) {
+        SudekiMpLanPartyPeerStatus state={0};
+        for(unsigned i=0;i<500u;++i) {
+            uint32_t tick=GetTickCount();
+            SudekiMpLanPartyPoll(client,tick); SudekiMpLanPartyPoll(host,tick);
+            SudekiMpLanPartyPoll(client,tick);
+            CHECK(SudekiMpLanPartyPeerStatusGet(host,1,&state));
+            if(state.transport_confirmed) break;
+            Sleep(1);
+        }
+        CHECK(state.transport_confirmed && state.phase==SUDEKIMP_LAN_PARTY_OBSERVING);
+        CHECK(SudekiMpLanPartyPlayerAvatar(client,1)==5);
+        SudekiMpLanPartyDestroy(client,FALSE);
+    }
+    SudekiMpLanPartyDestroy(host,FALSE);
+}
+
 int main(void) {
     SudekiMpLanStoryView missing_host_view={0};
     CHECK(!SudekiMpLanStoryViewUsable(&missing_host_view,FALSE));
@@ -1489,7 +1556,7 @@ int main(void) {
     test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_presence_frame_floor(); test_busy_hash_and_timeouts();
     for (unsigned i = 0; i < 4; ++i) SudekiMpLanPartyDestroy(nodes[i], FALSE);
     test_dynamic_presence(); test_runtime_admission(); test_local_command_builder(); test_presence_coordinator();
-    test_loading_assignment_gate();
+    test_loading_assignment_gate(); test_dev_play_configuration();
     if (failures) return 1;
     puts("party session: three real UDP clients, routing, four-actor frames and independent rejoin passed");
     return 0;

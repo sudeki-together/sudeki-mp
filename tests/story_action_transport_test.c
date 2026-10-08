@@ -57,6 +57,108 @@ static void receive_result(const SudekiMpLanStoryActionRequest *r,unsigned outco
     }
     assert(received && SudekiMpLanStoryActionResultMatches(&got,r) && got.outcome==outcome);
 }
+/* Dev Play ally seat combo reader: codec rules, then a host -> client round
+ * trip under an ally (character 4) control fence. Pure records: no HUD, no
+ * actor and no executable are touched. */
+static void ally_hud_tests(void) {
+    SudekiMpLanStoryAllyHud h={.fence={1,1,1,1,1,SUDEKIMP_STORY_CHARACTER_ALLY},.sequence=1,
+        .observed_tick=GetTickCount(),.slots={7,7,7},.flags=0};
+    uint8_t bytes[SUDEKIMP_STORY_ALLY_HUD_WIRE_SIZE]; SudekiMpLanStoryAllyHud d;
+    assert(SudekiMpLanStoryAllyHudValid(&h));
+    assert(SudekiMpLanStoryAllyHudEncode(&h,bytes,sizeof(bytes)) && SudekiMpLanStoryAllyHudDecode(bytes,sizeof(bytes),&d));
+    assert(!memcmp(&d.fence,&h.fence,sizeof(h.fence)) && d.sequence==1 && d.slots[2]==7 && d.flags==0);
+    h.slots[0]=2; h.slots[1]=0; h.flags=SUDEKIMP_STORY_ALLY_HUD_COMBAT|SUDEKIMP_STORY_ALLY_HUD_FLASH|SUDEKIMP_STORY_ALLY_HUD_ARMED;
+    assert(SudekiMpLanStoryAllyHudEncode(&h,bytes,sizeof(bytes)) && SudekiMpLanStoryAllyHudDecode(bytes,sizeof(bytes),&d));
+    assert(d.slots[0]==2 && d.slots[1]==0 && d.slots[2]==7 && d.flags==h.flags);
+    SudekiMpLanStoryAllyHud bad=h; bad.fence.character=2; assert(!SudekiMpLanStoryAllyHudValid(&bad)); /* heroes keep the native reader */
+    bad=h; bad.slots[1]=8; assert(!SudekiMpLanStoryAllyHudValid(&bad));
+    bad=h; bad.flags=0x20; assert(!SudekiMpLanStoryAllyHudValid(&bad));
+    bad=h; bad.sequence=0; assert(!SudekiMpLanStoryAllyHudValid(&bad));
+    bytes[29]=9; assert(!SudekiMpLanStoryAllyHudDecode(bytes,sizeof(bytes),&d));
+    assert(!SudekiMpLanStoryAllyHudDecode(bytes,sizeof(bytes)-1u,&d));
+
+    /* Player 1 locked to the spectator value 4 = the ally seat. */
+    SudekiMpLanPartyConfig config={.story_observation=2,.timeout_ms=5000,
+        .assignment_enabled=1,.character={3,SUDEKIMP_STORY_CHARACTER_ALLY,0,1}};
+    memset(config.game_hash,0x26,sizeof(config.game_hash));
+    host=SudekiMpLanPartyCreate(&config); assert(host);
+    config.local_seat=1; config.host_ipv4="127.0.0.1"; config.port=SudekiMpLanPartyPort(host);
+    client=SudekiMpLanPartyCreate(&config); assert(client);
+    scene.epoch=2; scene.revision=1; scene.observed_tick=0;
+    BOOL connected=FALSE;
+    for(unsigned i=0;i<300 && !connected;++i) {
+        SudekiMpLanPartyPeerStatus server; SudekiMpLanStoryScene remote;
+        poll(); assert(SudekiMpLanPartyPeerStatusGet(client,1,&peer));
+        assert(SudekiMpLanPartyPeerStatusGet(host,1,&server));
+        connected=peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && server.transport_confirmed &&
+            SudekiMpLanPartyGetStoryScene(client,&peer.lease,GetTickCount(),&remote);
+        if(!connected) Sleep(5);
+    }
+    assert(connected);
+    SudekiMpLanStoryFrame frame={.epoch=2,.revision=1,.sequence=1,.host_tick=GetTickCount(),
+        .available_mask=15,.leader_character=3};
+    for(unsigned c=0;c<4;++c) frame.actors[c]=(SudekiMpLanStoryActor){.generation=1,
+        .character=(uint8_t)c,.native_pose=1,.facing_z=1,.hp=100,.sp=100};
+    assert(SudekiMpLanPartySendStoryFrame(host,&frame));
+    SudekiMpLanStoryFrame received; BOOL got=FALSE;
+    for(unsigned i=0;i<80 && !got;++i) {
+        poll(); got=SudekiMpLanPartyPopStoryFrame(client,&peer.lease,GetTickCount(),&received);
+        if(!got) Sleep(1);
+    }
+    assert(got);
+    /* Ally control exchange: fence character 4, actor generation = ally generation. */
+    h.fence=(SudekiMpLanStoryControlFence){2,1,1,1,1,SUDEKIMP_STORY_CHARACTER_ALLY};
+    h.sequence=1; h.slots[0]=h.slots[1]=h.slots[2]=7; h.flags=0;
+    /* Before any control: refused on both ends. */
+    assert(!SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&h));
+    assert(!SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount(),&d));
+    state=(SudekiMpLanStoryControlState){.fence=h.fence,.phase=SUDEKIMP_STORY_CONTROL_PREPARE,.observed_tick=GetTickCount()};
+    assert(SudekiMpLanPartyPublishStoryControl(host,&peer.lease,&state));
+    BOOL ack=FALSE; SudekiMpLanStoryControlState remote;
+    for(unsigned i=0;i<80 && !ack;++i) {
+        poll();
+        if(SudekiMpLanPartyGetStoryControl(client,&peer.lease,GetTickCount(),&remote) && remote.fence.transaction==1)
+            assert(SudekiMpLanPartyAcknowledgeStoryControl(client,&peer.lease,&state.fence));
+        ack=SudekiMpLanPartyStoryControlAcknowledged(host,&peer.lease,&state.fence);
+        if(!ack) Sleep(1);
+    }
+    assert(ack);
+    assert(!SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&h)); /* not READY yet */
+    state.phase=SUDEKIMP_STORY_CONTROL_READY; state.observed_tick=GetTickCount();
+    assert(SudekiMpLanPartyPublishStoryControl(host,&peer.lease,&state));
+    BOOL ready=FALSE;
+    for(unsigned i=0;i<80 && !ready;++i) {
+        poll(); ready=SudekiMpLanPartyGetStoryControl(client,&peer.lease,GetTickCount(),&remote) &&
+            remote.fence.transaction==1 && remote.phase==SUDEKIMP_STORY_CONTROL_READY;
+        if(!ready) Sleep(1);
+    }
+    assert(ready);
+    assert(!SudekiMpLanPartyPublishStoryAllyHud(client,&peer.lease,&h)); /* client never publishes */
+    h.slots[0]=2; h.flags=SUDEKIMP_STORY_ALLY_HUD_COMBAT|SUDEKIMP_STORY_ALLY_HUD_ARMED; h.sequence=5;
+    assert(SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&h));
+    got=FALSE;
+    for(unsigned i=0;i<80 && !got;++i) {
+        poll(); got=SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount(),&d);
+        if(!got) Sleep(1);
+    }
+    assert(got && d.sequence==5 && d.slots[0]==2 && d.slots[1]==7 && d.flags==h.flags);
+    /* Newer state replaces; an older sequence never regresses the client. */
+    h.sequence=6; h.slots[1]=3; assert(SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&h));
+    for(unsigned i=0;i<80;++i) { poll(); if(SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount(),&d) && d.sequence==6) break; Sleep(1); }
+    assert(d.sequence==6 && d.slots[1]==3);
+    h.sequence=4; assert(SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&h));
+    for(unsigned i=0;i<8;++i) { poll(); Sleep(1); }
+    assert(SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount(),&d) && d.sequence==6);
+    /* Stale without a host resend; a wrong fence is refused by the host. */
+    assert(!SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount()+1501u,&d));
+    bad=h; bad.fence.transaction=2; assert(!SudekiMpLanPartyPublishStoryAllyHud(host,&peer.lease,&bad));
+    /* Revoking control drops the record on the client's next check. */
+    assert(SudekiMpLanPartyRevokeStoryControl(host,&peer.lease));
+    for(unsigned i=0;i<8;++i) { poll(); Sleep(1); }
+    assert(!SudekiMpLanPartyGetStoryAllyHud(client,&peer.lease,GetTickCount(),&d));
+    SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
+    puts("ally hud codec/transport tests passed (pure records)");
+}
 int main(void) {
     SudekiMpLanPartyConfig config={.story_observation=2,.timeout_ms=5000,
         .assignment_enabled=1,.character={3,2,0,1}};
@@ -108,6 +210,14 @@ int main(void) {
         uint8_t bytes[SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE];
         assert(SudekiMpLanStoryActionRequestEncode(&r,bytes,sizeof(bytes)));
         invalid=r; invalid.fence.character=3; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        /* Dev Play ally seat: character 4 is a valid, melee-capable fence that
+         * matches the scene outside the hero mask/leader rules; 5 is not. */
+        invalid=r; invalid.fence.character=SUDEKIMP_STORY_CHARACTER_ALLY;
+        assert(SudekiMpLanStoryControlFenceValid(&invalid.fence) && SudekiMpLanStoryActionRequestValid(&invalid));
+        { SudekiMpLanStoryScene scene_now;
+          assert(SudekiMpLanPartyGetStoryScene(client,&peer.lease,GetTickCount(),&scene_now));
+          assert(SudekiMpLanStoryControlMatchesScene(&invalid.fence,&scene_now)); }
+        invalid.fence.character=5; assert(!SudekiMpLanStoryControlFenceValid(&invalid.fence));
         invalid=r; invalid.slot=0; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
         invalid.slot=4; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
         bytes[30]=1; assert(!SudekiMpLanStoryActionRequestDecode(bytes,sizeof(bytes),&invalid));
@@ -154,6 +264,7 @@ int main(void) {
     assert(SudekiMpLanPartyDisconnect(host,&peer.lease));
     assert(!SudekiMpLanPartyTakeStoryAction(host,&previous,GetTickCount(),&taken));
     SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
+    ally_hud_tests();
     puts("story skill/melee UDP request/duplicate/result/expiry/fence tests passed (no native actions)");
     return 0;
 }

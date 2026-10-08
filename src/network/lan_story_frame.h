@@ -98,6 +98,17 @@ BOOL SudekiMpLanStoryFrameEncode(const SudekiMpLanStoryFrame *frame,
     uint8_t *bytes,size_t capacity,size_t *written);
 BOOL SudekiMpLanStoryFrameDecode(const uint8_t *bytes,size_t size,
     SudekiMpLanStoryFrame *frame);
+/* DEV_AVATARS also permits a zero-hero frame with leader NO_SEAT and four
+ * zero actor records. Avatar poses remain separate world records. No wire
+ * field enables this policy, and existing entry points remain REGULAR. */
+BOOL SudekiMpLanStoryFrameValidForPolicy(const SudekiMpLanStoryFrame *frame,
+    SudekiMpLanStoryPolicy policy);
+BOOL SudekiMpLanStoryFrameMatchesSceneForPolicy(const SudekiMpLanStoryFrame *frame,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryPolicy policy);
+BOOL SudekiMpLanStoryFrameEncodeForPolicy(const SudekiMpLanStoryFrame *frame,
+    uint8_t *bytes,size_t capacity,size_t *written,SudekiMpLanStoryPolicy policy);
+BOOL SudekiMpLanStoryFrameDecodeForPolicy(const uint8_t *bytes,size_t size,
+    SudekiMpLanStoryFrame *frame,SudekiMpLanStoryPolicy policy);
 
 /* Plain-data interpolation between authenticated frames from one unchanged
  * scene/roster/generation. Caller owns clock/history and session freshness.
@@ -114,5 +125,8 @@ void SudekiMpLanStoryInterpolatePosition(const float before[3],const float after
 BOOL SudekiMpLanStoryFrameInterpolate(const SudekiMpLanStoryFrame *before,
     const SudekiMpLanStoryFrame *after,uint32_t host_tick,
     SudekiMpLanStoryFrame *sample);
+BOOL SudekiMpLanStoryFrameInterpolateForPolicy(const SudekiMpLanStoryFrame *before,
+    const SudekiMpLanStoryFrame *after,uint32_t host_tick,
+    SudekiMpLanStoryFrame *sample,SudekiMpLanStoryPolicy policy);
 
 #endif
