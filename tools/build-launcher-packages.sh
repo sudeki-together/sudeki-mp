@@ -56,7 +56,13 @@ cp -- "${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe" \
 cp -- "${project_dir}/packaging/windows-beta/README-Windows.txt" \
     "${windows_root}/README-Windows.txt"
 cp -- "${project_dir}/LICENSE" "${project_dir}/NOTICE" "${windows_root}/"
-printf '%s\r\n%s\r\n' '@echo off' '"%~dp0SudekiMP.LauncherGUI.exe"' \
+# Same contents as .gitea/workflows/windows-build.yml: co-op save fixtures for
+# the launcher's "Install co-op save fixtures" tool and the update manifest.
+mkdir -p "${windows_root}/CoopSaveFixtures"
+cp -R -- "${project_dir}"/testdata/sudeki-saves/SAVESLOT* "${windows_root}/CoopSaveFixtures/"
+cp -- "${project_dir}/public/launcher-manifest.txt" "${windows_root}/"
+printf '%s\r\n' '@echo off' '"%~dp0SudekiMP.LauncherGUI.exe"' \
+    'if errorlevel 1 (' '  echo SudekiMP Launcher could not start.' '  pause' ')' \
     >"${windows_root}/Launch SudekiMP.cmd"
 if command -v zip >/dev/null 2>&1; then
     (cd "${stage_root}" && zip -qr \
