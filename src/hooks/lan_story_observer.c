@@ -1,4 +1,5 @@
 #include "hooks/lan_story_observer.h"
+#include "hooks/lan_story_avatar_party.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
@@ -32,6 +33,21 @@ static BOOL foreign_thread,exhausted,installed;
 static SudekiMpLanStoryScene observed,published;
 static void *last_world,*last_descriptor,*last_group,*last_controller,*last_actors[4];
 static BOOL last_exact;
+static void *last_native_leader;
+static uint32_t last_native_avatar_generation;
+static uint8_t last_native_avatar_player;
+static SudekiMpLanStoryPolicy observer_policy(void) {
+    return SudekiMpLanStoryAvatarPartyRetains() ? SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS :
+        SUDEKIMP_LAN_STORY_POLICY_REGULAR;
+}
+static BOOL avatar_party_ready(const SudekiMpLanStoryAvatarPartyObservation *p) {
+    if(!p || p->phase!=SUDEKIMP_AVATAR_PARTY_READY || p->hero_mask ||
+        p->leader_character!=SUDEKIMP_LAN_STORY_NO_SEAT || p->local_player>=4u ||
+        !p->spawn_generation || !p->native_leader || p->member_count!=1u ||
+        p->members[0]!=p->native_leader) return FALSE;
+    for(unsigned c=0;c<4u;++c) if(p->heroes[c] || (c && p->members[c])) return FALSE;
+    return TRUE;
+}
 static const SudekiMpLanStoryObserverSplit *split_owner;
 static BOOL split_active,split_transition,split_exiting;
 static unsigned last_logged_revision;
@@ -334,6 +350,8 @@ BOOL SudekiMpLanStoryObserverInstall(HMODULE module) {
             SetLastError(ERROR_INVALID_DATA); return FALSE;
         }
     base=(uint8_t *)module; observed.epoch=1; observed.revision=0;
+    last_native_leader=NULL; last_native_avatar_generation=0;
+    last_native_avatar_player=SUDEKIMP_LAN_STORY_NO_SEAT;
     unknown_scene(SUDEKIMP_LAN_STORY_UNKNOWN);
     for(unsigned i=0;i<HOOK_COUNT;++i)
         if(!SudekiMpInstallInlineHook(&hooks[i],base+rvas[i],expected[i],lengths[i],replacements[i])) {
@@ -365,6 +383,11 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     uint8_t mask=0,lead=SUDEKIMP_LAN_STORY_NO_SEAT;
     BOOL exact=FALSE;
     unsigned count=0;
+    SudekiMpLanStoryAvatarPartyObservation party={0};
+    BOOL party_owned=SudekiMpLanStoryAvatarPartyObserve(&party) &&
+        party.epoch==observed.epoch && party.world==world && party.group==group &&
+        party.controller==controller;
+    BOOL native_avatar=party_owned && avatar_party_ready(&party);
     if(readable(world,0x39bu)) descriptor=*(uint8_t **)(world+0x0cu);
     if(readable(world,0x39bu) && readable(descriptor,0x38u) &&
         !*(void **)(world+0x14u) && world[0x399u] && world[0x39au] &&
@@ -373,7 +396,15 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
         controller==*(void **)(base+0x408da4u) &&
         SudekiMpCleanroomEngineWorldReady()) {
         count=*(unsigned *)(group+0xccu);
-        if(count && count<=4u) {
+        if(party_owned) {
+            /* A native membership transaction holds the same world epoch.
+             * Pending/unknown leadership grants no READY roster or input. */
+            exact=native_avatar && count==party.member_count &&
+                *(void **)((uint8_t *)controller+0x248u)==party.native_leader &&
+                world==*(void **)(base+0x408d10u) && group==*(void **)(base+0x408d94u) &&
+                descriptor==*(void **)(world+0x0cu) &&
+                SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+        } else if(count && count<=4u) {
             void *heroes[4];
             for(unsigned i=0;i<4u;++i) heroes[i]=SudekiMpCleanroomEngineActorEntity(actors[i]);
             exact=TRUE;
@@ -401,7 +432,7 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
         if(!published.revision || !SudekiMpLanStorySceneSame(&published,&observed))
             increment(&observed.revision);
         observed.observed_tick=GetTickCount();
-        if(exhausted || !SudekiMpLanStorySceneValid(&observed)) {
+        if(exhausted || !SudekiMpLanStorySceneValidForPolicy(&observed,observer_policy())) {
             ReleaseSRWLockExclusive(&state_lock); return FALSE;
         }
         published=observed; *out=observed; last_dispatch_serial=w->dispatch_serial;
@@ -409,10 +440,20 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     }
     /* Inside a split the current descriptor legitimately alternates between
      * exterior and TEMP; it is not a world replacement. */
-    BOOL replaced=last_exact && (!exact || world!=last_world ||
+    BOOL expected_party_change=party_owned && !split_active && world==last_world &&
+        descriptor==last_descriptor && group==last_group && controller==last_controller;
+    BOOL replaced=last_exact && !expected_party_change && (!exact || world!=last_world ||
         (!split_active && descriptor!=last_descriptor) ||
-        group!=last_group || controller!=last_controller || memcmp(found,last_actors,sizeof(found)));
+        group!=last_group || controller!=last_controller || memcmp(found,last_actors,sizeof(found)) ||
+        (native_avatar ? party.native_leader : (lead<4u?found[lead]:NULL))!=last_native_leader);
     if(replaced) {
+        /* Research (gated, bounded): which identity predicate replaced the world. */
+        static unsigned replaced_logs;
+        if(SudekiMpLogResearchEnabled() && replaced_logs<64u) { ++replaced_logs;
+            unsigned differing=0; for(unsigned i=0;i<4u;++i) if(found[i]!=last_actors[i]) differing|=1u<<i;
+            SudekiMpLogFormat("lan_story_observer event=world_replaced exact=%u world_changed=%u descriptor_changed=%u group_changed=%u controller_changed=%u actors_changed=%u split=%u epoch=%lu\r\n",
+                exact,world!=last_world,descriptor!=last_descriptor,group!=last_group,controller!=last_controller,
+                differing,split_active,(unsigned long)observed.epoch); }
         increment(&observed.epoch);
         if(split_active) {
             split_active=split_transition=split_exiting=FALSE;
@@ -443,11 +484,14 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     if(!published.revision || !SudekiMpLanStorySceneSame(&published,&observed))
         increment(&observed.revision);
     observed.observed_tick=GetTickCount();
-    if(exhausted || !SudekiMpLanStorySceneValid(&observed)) {
+    if(exhausted || !SudekiMpLanStorySceneValidForPolicy(&observed,observer_policy())) {
         ReleaseSRWLockExclusive(&state_lock); return FALSE;
     }
     last_exact=exact; last_world=world; last_descriptor=descriptor;
     last_group=group; last_controller=controller; memcpy(last_actors,found,sizeof(found));
+    last_native_leader=exact?(native_avatar?party.native_leader:(lead<4u?found[lead]:NULL)):NULL;
+    last_native_avatar_generation=exact && native_avatar?party.spawn_generation:0u;
+    last_native_avatar_player=exact && native_avatar?party.local_player:SUDEKIMP_LAN_STORY_NO_SEAT;
     published=observed; *out=observed; last_dispatch_serial=w->dispatch_serial;
     if(last_logged_revision!=observed.revision) {
         last_logged_revision=observed.revision;
@@ -480,7 +524,7 @@ static BOOL roster_identity_locked(void *controller,
     SudekiMpLanStoryNativeRoster r={0};
     if(!base || !installed || !last_exact || call_depth ||
         exhausted || foreign_thread || native_thread!=GetCurrentThreadId() ||
-        !SudekiMpLanStorySceneValid(scene) || scene->phase!=SUDEKIMP_LAN_STORY_READY ||
+        !SudekiMpLanStorySceneValidForPolicy(scene,observer_policy()) || scene->phase!=SUDEKIMP_LAN_STORY_READY ||
         scene->revision!=published.revision || !SudekiMpLanStorySceneSame(scene,&published))
         return FALSE;
     uint8_t *world=*(uint8_t **)(base+0x408d10u);
@@ -495,6 +539,24 @@ static BOOL roster_identity_locked(void *controller,
         *(uint32_t *)(descriptor+0x34u)!=(scene->temporary[0]?4u:3u)) return FALSE;
     unsigned count=*(unsigned *)(group+0xccu);
     if(!count || count>4u) return FALSE;
+    if(last_native_avatar_generation) {
+        SudekiMpLanStoryAvatarPartyObservation party;
+        if(!SudekiMpLanStoryAvatarPartyObserve(&party) || !avatar_party_ready(&party) ||
+            party.epoch!=scene->epoch || party.world!=world || party.group!=group ||
+            party.controller!=controller || party.native_leader!=last_native_leader ||
+            party.spawn_generation!=last_native_avatar_generation ||
+            party.local_player!=last_native_avatar_player || count!=1u ||
+            scene->available_mask || scene->leader_seat!=SUDEKIMP_LAN_STORY_NO_SEAT ||
+            *(void **)(group+0x90u)!=party.native_leader ||
+            *(void **)((uint8_t *)controller+0x248u)!=party.native_leader) return FALSE;
+        for(unsigned c=0;c<4u;++c) if(last_actors[c]) return FALSE;
+        r.epoch=scene->epoch; r.revision=scene->revision;
+        r.leader_character=SUDEKIMP_LAN_STORY_NO_SEAT;
+        r.world=world; r.descriptor=descriptor; r.group=group; r.controller=controller;
+        r.native_leader=party.native_leader; r.native_avatar_generation=party.spawn_generation;
+        r.native_avatar_player=party.local_player;
+        *out=r; return TRUE;
+    }
     void *heroes[4];
     for(unsigned c=0;c<4u;++c) heroes[c]=SudekiMpCleanroomEngineActorEntity(types[c]);
     for(unsigned i=0;i<count;++i) {
@@ -518,6 +580,8 @@ static BOOL roster_identity_locked(void *controller,
          *(void **)((uint8_t *)r.actors[c]+0x94u)!=r.ai[c])) return FALSE;
     r.epoch=scene->epoch; r.revision=scene->revision;
     r.world=world; r.descriptor=descriptor; r.group=group; r.controller=controller;
+    r.native_leader=r.actors[r.leader_character];
+    r.native_avatar_player=SUDEKIMP_LAN_STORY_NO_SEAT;
     *out=r; return TRUE;
 }
 static BOOL roster_locked(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
@@ -535,6 +599,9 @@ static BOOL same_native_roster(const SudekiMpLanStoryNativeRoster *r,
         r->available_mask==fresh->available_mask && r->leader_character==fresh->leader_character &&
         r->world==fresh->world && r->descriptor==fresh->descriptor &&
         r->group==fresh->group && r->controller==fresh->controller &&
+        r->native_leader==fresh->native_leader &&
+        r->native_avatar_generation==fresh->native_avatar_generation &&
+        r->native_avatar_player==fresh->native_avatar_player &&
         !memcmp(r->actors,fresh->actors,sizeof(r->actors)) && !memcmp(r->ai,fresh->ai,sizeof(r->ai));
 }
 BOOL SudekiMpLanStoryObserverRoster(void *controller,
@@ -562,6 +629,9 @@ static BOOL same_native_identity(const SudekiMpLanStoryNativeRoster *r,
     return r->epoch==fresh->epoch && r->available_mask==fresh->available_mask &&
         r->leader_character==fresh->leader_character && r->world==fresh->world &&
         r->group==fresh->group && r->controller==fresh->controller &&
+        r->native_leader==fresh->native_leader &&
+        r->native_avatar_generation==fresh->native_avatar_generation &&
+        r->native_avatar_player==fresh->native_avatar_player &&
         !memcmp(r->actors,fresh->actors,sizeof(r->actors)) && !memcmp(r->ai,fresh->ai,sizeof(r->ai));
 }
 /* During the split transition hold the area is not native-ready, but the

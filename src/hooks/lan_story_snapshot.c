@@ -216,7 +216,7 @@ capture_stage="actor_valid";         if(!SudekiMpLanStoryActorValid(actor,c)) {
         }
         next.actors[c]=roster.actors[c]; next.motion[c]=actor->locomotion;
     }
-capture_stage="post_world";     if(!capturable_world(native_poses,&combat_after) || combat_before!=combat_after || !SudekiMpLanStoryFrameMatchesScene(&frame,scene) ||
+capture_stage="post_world";     if(!capturable_world(native_poses,&combat_after) || combat_before!=combat_after || !SudekiMpLanStoryFrameMatchesSceneForPolicy(&frame,scene,SudekiMpLanPartyStoryPolicy(session)) ||
         !SudekiMpLanStoryObserverRosterStillExact(w,&roster)) {
         SetLastError(ERROR_RETRY); return FALSE;
     }

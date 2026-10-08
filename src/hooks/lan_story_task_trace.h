@@ -9,6 +9,11 @@
  * Host-side caster only; attach/detach on the verified native thread outside
  * all task callbacks. Uninstall refuses while this consumer is registered. */
 BOOL SudekiMpLanStoryTaskHostExact(HMODULE image);
+/* Immutable AddPlayer callsite ownership, including pre-load installation.
+ * Accepts the pristine native call only while this owner is fully uninstalled;
+ * otherwise requires this exact installed observer and its retained original
+ * target. No native thread, actor, world or task admission is granted. */
+BOOL SudekiMpLanStoryTaskTraceAddCallImageExact(HMODULE image);
 BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver created,
     SudekiMpLanCastStepAdapter step);
 BOOL SudekiMpLanStoryTaskHostDetach(SudekiMpLanCastCreatedObserver created,SudekiMpLanCastStepAdapter step);
@@ -151,6 +156,39 @@ BOOL SudekiMpLanStoryTaskTraceGetRecruitmentStatus(SudekiMpLanStoryRecruitmentSt
  * proves that all initialization work, NPC removal or recruitment is ready.
  * Resource observations are bounded copies, never retained native references. */
 BOOL SudekiMpLanStoryTaskTraceGetSpawnObservation(SudekiMpLanStorySpawnObservation *out);
+
+/* Shared EntitySetup owner. Observers may only copy/validate state; they must
+ * never call native code, detach, or start a spawn from these callbacks.
+ * BEGIN/END pairs run on the verified game thread around the original call.
+ * END's result is the native return value (only ctor/destructor use it).
+ * WORLD_EXIT is emitted only after the existing verified native Quit witness.
+ * UNKNOWN means the bounded nesting journal could not retain exact pairing.
+ * The consumer must detach before this adapter can uninstall. */
+typedef enum SudekiMpLanStoryEntitySetupPhase {
+    SUDEKIMP_ENTITY_SETUP_CTOR_BEGIN,
+    SUDEKIMP_ENTITY_SETUP_CTOR_END,
+    SUDEKIMP_ENTITY_SETUP_COMPLETE_BEGIN,
+    SUDEKIMP_ENTITY_SETUP_COMPLETE_END,
+    SUDEKIMP_ENTITY_SETUP_DESTROY_BEGIN,
+    SUDEKIMP_ENTITY_SETUP_DESTROY_END,
+    SUDEKIMP_ENTITY_SETUP_WORLD_EXIT,
+    SUDEKIMP_ENTITY_SETUP_UNKNOWN
+} SudekiMpLanStoryEntitySetupPhase;
+typedef struct SudekiMpLanStoryEntitySetupEvent {
+    SudekiMpLanStoryEntitySetupPhase phase;
+    uint32_t load_generation, flags;
+    void *job;
+    const void *subject; /* ctor placement or completed actor; NULL for destroy */
+    void *result;
+} SudekiMpLanStoryEntitySetupEvent;
+typedef void (*SudekiMpLanStoryEntitySetupObserver)(const void *consumer,
+    const SudekiMpLanStoryEntitySetupEvent *event);
+BOOL SudekiMpLanStoryTaskTraceEntitySetupAttach(HMODULE image,const void *consumer,
+    SudekiMpLanStoryEntitySetupObserver observer);
+BOOL SudekiMpLanStoryTaskTraceEntitySetupDetach(HMODULE image,const void *consumer,
+    SudekiMpLanStoryEntitySetupObserver observer);
+/* Outside callbacks; includes shared hook ownership and both fault latches. */
+BOOL SudekiMpLanStoryTaskTraceEntitySetupExact(HMODULE image);
 /* Diagnostic scope for the separate, positively fenced native recruitment
  * adapter. Does not call native spawning or grant authority. The following
  * exact RR call must receive these same local ResourceName addresses; it is

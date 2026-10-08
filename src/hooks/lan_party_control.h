@@ -175,8 +175,17 @@ BOOL SudekiMpLanPartyControlHasLeases(void);
  * four-member/TestRoom predicate above. The story coordinator additionally
  * owns Q/E containment, action readiness and network admission. */
 struct SudekiMpLanStoryNativeRoster;
+enum { SUDEKIMP_STORY_NATIVE_AVATAR_FIRST=4u, SUDEKIMP_STORY_NATIVE_SEATS=8u };
 BOOL SudekiMpLanPartyControlStoryBegin(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *);
+/* Explicit Dev Play path: native key=4+connection player (0..3), while wire
+ * character remains ALLY=4. Bind only a ready SpawnObserve identity in this
+ * exact story world/epoch. Spawn generation is independent of lease generation.
+ * NULL/zero clears only an unowned binding. Existing refs prevent replacement
+ * or clearing; failed observations retain ownership. The first binding excludes
+ * the legacy singleton route until StoryEnd. No actor/group/AI mutation. */
+BOOL SudekiMpLanPartyControlStoryAvatarEntity(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,unsigned player,void *entity,uint32_t spawn_generation);
 BOOL SudekiMpLanPartyControlStoryNextLease(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanPartyLease *,unsigned character,SudekiMpLanPartyLease *);
 BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitness *,
@@ -199,6 +208,13 @@ BOOL SudekiMpLanPartyControlStoryActorOwned(const SudekiMpControlUpdateDispatchW
 BOOL SudekiMpLanPartyControlStoryRetainsKey(const SudekiMpLanPartyLease *key);
 BOOL SudekiMpLanPartyControlStoryRetains(void);
 BOOL SudekiMpLanPartyControlStoryEnd(void);
+/* Ally seat (Dev Play): the host-spawned non-hero entity that story seat 4
+ * drives. NULL withdraws it; the lease then drains like a lost actor. The
+ * resource name (<=47 chars) is re-resolved on every observation. */
+void SudekiMpLanPartyControlStoryAllyEntity(void *entity,const char *resource);
+/* Legacy singleton actor, or in explicit avatar mode the freshly spawn-exact
+ * actor of a retained key4..7 lease. Never resolves an avatar by name. */
+void *SudekiMpLanPartyControlStoryAllyActor(const SudekiMpLanPartyLease *key);
 /* Native-thread coordinator query: all actor leases and their retained mask
  * are empty. This deliberately excludes the separately owned menu input fence;
  * it is not permission to uninstall control callbacks or release that fence. */

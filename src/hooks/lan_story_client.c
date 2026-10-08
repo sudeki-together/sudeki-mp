@@ -5,6 +5,7 @@
 #include "hooks/lan_story_world.h"
 #include "hooks/lan_story_input.h"
 #include "hooks/lan_story_replica.h"
+#include "hooks/lan_story_avatar_party_roster.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
@@ -312,17 +313,25 @@ static BOOL same_roster(const SudekiMpLanStoryNativeRoster *a,
         a->revision==b->revision && a->available_mask==b->available_mask &&
         a->leader_character==b->leader_character && a->world==b->world &&
         a->descriptor==b->descriptor && a->group==b->group && a->controller==b->controller &&
+        a->native_leader==b->native_leader &&
+        a->native_avatar_generation==b->native_avatar_generation &&
+        a->native_avatar_player==b->native_avatar_player &&
         !memcmp(a->actors,b->actors,sizeof(a->actors)) && !memcmp(a->ai,b->ai,sizeof(a->ai));
 }
 /* A fresh render-thread identity check, rooted in the controller observation
  * that enrolled these exact objects. No stale dispatch witness is passed to
  * ControlSeparation or treated as permission to submit a native action. */
-static BOOL roster_matches(const SudekiMpLanStoryNativeRoster *r,
-    const SudekiMpLanStoryScene *scene) {
+static BOOL roster_matches_scope(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *scene,BOOL terminal) {
     static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,
         SUDEKIMP_CLEANROOM_ELCO,SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
-    if(!native_thread_exact() || !r->dispatch_serial || r->leader_character>=4u ||
-        !SudekiMpLanStorySceneValid(scene) ||
+    if(!native_thread_exact() || !r || !r->dispatch_serial ||
+        (terminal && (!exit_prepared || presentation_active ||
+            r!=&retained_roster || scene!=&retained_scene))) return FALSE;
+    BOOL avatar=r->native_avatar_generation!=0;
+    if((avatar?!SudekiMpLanStoryAvatarPartyRosterExact(r):r->leader_character>=4u) ||
+        !SudekiMpLanStorySceneValidForPolicy(scene,avatar?
+            SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS:SUDEKIMP_LAN_STORY_POLICY_REGULAR) ||
         scene->phase!=SUDEKIMP_LAN_STORY_READY ||
         *(void **)(base+WORLD_GLOBAL)!=r->world ||
         *(void **)(base+GROUP_GLOBAL)!=r->group ||
@@ -334,8 +343,19 @@ static BOOL roster_matches(const SudekiMpLanStoryNativeRoster *r,
         !world[0x399] || !world[0x39a] ||
         *(uint32_t *)((uint8_t *)r->descriptor+0x34)!=(scene->temporary[0]?4u:3u) ||
         !SudekiMpCleanroomEngineWorldReady() ||
-        *(void **)(controller+0x248)!=r->actors[r->leader_character]) return FALSE;
+        *(void **)(controller+0x248)!=(avatar?r->native_leader:r->actors[r->leader_character])) return FALSE;
     unsigned count=*(unsigned *)(group+0xcc),mask=0;
+    if(avatar) {
+        return !scene->available_mask && scene->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT &&
+            r->epoch==scene->epoch && r->revision==scene->revision &&
+            count==1u && *(void **)(group+0x90)==r->native_leader &&
+            (terminal || SudekiMpLanStoryObserverNativeRosterExact(r)) &&
+            SudekiMpLanStoryAvatarPartyRosterExact(r) &&
+            *(unsigned *)(group+0xcc)==1u && *(void **)(group+0x90)==r->native_leader &&
+            *(void **)(controller+0x248)==r->native_leader &&
+            *(void **)(base+WORLD_GLOBAL)==world && *(void **)(base+GROUP_GLOBAL)==group &&
+            *(void **)(base+CONTROLLER_GLOBAL)==controller;
+    }
     if(!count || count>4u) return FALSE;
     for(unsigned i=0;i<count;++i) {
         void *actor=*(void **)(group+0x90+i*12u);
@@ -353,8 +373,23 @@ static BOOL roster_matches(const SudekiMpLanStoryNativeRoster *r,
         *(void **)(base+WORLD_GLOBAL)==world && *(void **)(base+GROUP_GLOBAL)==group &&
         *(void **)(base+CONTROLLER_GLOBAL)==controller;
 }
+static BOOL roster_matches(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *scene) {
+    return roster_matches_scope(r,scene,FALSE);
+}
 static BOOL roster_exact(void) {
     return roster_matches(&retained_roster,&retained_scene);
+}
+static BOOL exit_roster_exact(void) {
+    /* PrepareExit enrolled this retained tuple while the Observer, complete
+     * registry and owned pause were exact. The runtime retires the Observer
+     * before balancing that pause and immediately entering native Quit.
+     * Only terminal Drain/Reacquire may replace the retired Observer proof
+     * with the still-live Party owner's generation/component checks, both
+     * before and after these direct native identity reads. Their callers
+     * still require the input fence, registry and prepared pause lease.
+     * This grants no presentation or gameplay admission. */
+    return roster_matches_scope(&retained_roster,&retained_scene,TRUE);
 }
 static BOOL load_ready(SudekiMpLanStoryTaskTraceStatus *tasks,SudekiMpStoryLoadResult *load) {
     return SudekiMpLanStoryTaskTraceGetStatus(tasks) && !tasks->unknown &&
@@ -1033,7 +1068,7 @@ BOOL SudekiMpLanStoryClientDrain(SudekiMpLanStoryClientReport *out) {
     /* A changed GEL task clock need not make a positively balanced reference
      * impossible to retire. Still require the exact native registry and all
      * counts; never invoke Unpause on a replacement/new entity. */
-    if(!roster_exact() || (!exit_released && !input_closed(retained_roster.controller)) ||
+    if(!exit_roster_exact() || (!exit_released && !input_closed(retained_roster.controller)) ||
         !trigger_hooks_exact() || !trigger_queue_empty() ||
         InterlockedCompareExchange(&trigger_callbacks,0,0)) return pin(ERROR_BUSY);
     if(!SudekiMpLanPartyMenuNativeOwnsPause()) {
@@ -1070,7 +1105,7 @@ BOOL SudekiMpLanStoryClientReacquireExit(SudekiMpLanStoryClientReport *out) {
         InterlockedCompareExchange(&busy,0,0) ||
         InterlockedCompareExchange(&trigger_callbacks,0,0) ||
         !SudekiMpLanPartyMenuNativeExitPauseExact(&paused) ||
-        !roster_exact() || !input_closed(retained_roster.controller) ||
+        !exit_roster_exact() || !input_closed(retained_roster.controller) ||
         !trigger_hooks_exact() || !trigger_queue_empty()) return pin(ERROR_BUSY);
     BOOL already=SudekiMpLanPartyMenuNativeOwnsPause() && registry_exact(1);
     if(!already && (paused || !registry_exact(0))) return pin(ERROR_BUSY);

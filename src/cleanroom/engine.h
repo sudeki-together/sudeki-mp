@@ -174,6 +174,11 @@ BOOL SudekiMpCleanroomEngineInitializePartyActor(
     SudekiMpCleanroomActor actor
 );
 BOOL SudekiMpCleanroomEngineRemoveActor(SudekiMpCleanroomActor actor);
+/* Research spawn: the native generic entity spawn (same path as the training
+ * dummy and fuel crystal) for an arbitrary definition stem such as
+ * "BOSS_Mystril". Validates only the name characters and the position; the
+ * engine owns the result, including a missing model. Logs begin/returned. */
+BOOL SudekiMpCleanroomEngineSpawnEntityNamed(const char *resource, const float position[3]);
 BOOL SudekiMpCleanroomEngineDummyPresent(void);
 BOOL SudekiMpCleanroomEngineDummySnapshot(
     float position[3],

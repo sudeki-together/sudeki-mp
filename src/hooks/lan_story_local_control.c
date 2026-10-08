@@ -25,7 +25,9 @@ static BOOL active,entered,uncertain;
 static const char *switch_reason="native_selection_busy";
 static uint64_t last_attempt;
 static unsigned selected=4u;
+static void *anchor_entity; /* Dev Play ally seat: camera follows this entity instead of the selected hero */
 static SudekiMpLanStoryNativeRoster retained;
+void SudekiMpLanStoryLocalControlSetAnchorEntity(void *entity) { anchor_entity=entity; }
 static struct {
     SudekiMpLanArenaOwnerViewLease owner;
     SudekiMpLanStoryView geometry;
@@ -513,7 +515,7 @@ BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *r,
         r->leader_character!=selected || !exact(r,context) || !binding(r) ||
         !SudekiMpLanStoryInputExact(r->controller,r->actors[selected]) || !camera_ready(r,NULL)) return FALSE;
     float position[3]; SudekiMpLanStoryView next=view.geometry;
-    if(!actor_position(r->actors[selected],position)) return FALSE;
+    if(!actor_position(anchor_entity?anchor_entity:r->actors[selected],position)) return FALSE;
     float distance;
     if(!frame_camera(&next,position,yaw,pitch,&distance) ||
         !SudekiMpLanStoryViewGeometryValid(&next) || !exact(r,context) || !camera_ready(r,NULL)) return FALSE;

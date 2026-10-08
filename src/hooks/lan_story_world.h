@@ -9,6 +9,16 @@
  * AI updates or native task calls are installed here. Missing animation
  * resources may be acquired through the exact synchronous native loader. */
 BOOL SudekiMpInitializeLanStoryWorld(HMODULE image);
+/* Optional Dev Play profile-19 identity route, set before first catalog and
+ * immutable until WorldUninstall. For each exact Ally native target, resolver
+ * must freshly prove the current world/epoch/player/spawn generation/actor
+ * through AvatarSpawnObserve. FALSE is unknown and refuses the whole batch.
+ * No fallback to name or registry order. No native calls/writes in resolver.
+ * Callback/context lifetime must outlive world adapter use. NULL selects the
+ * existing native-resource identity route before that lifetime starts. */
+typedef BOOL (*SudekiMpLanStoryWorldAvatarResolver)(void *context,
+    const SudekiMpLanStoryNativeRoster *roster,void *actor,unsigned *player,uint32_t *spawn_generation);
+BOOL SudekiMpLanStoryWorldSetAvatarResolver(SudekiMpLanStoryWorldAvatarResolver resolver,void *context);
 /* Read only, on the exact post-controller observer dispatch. Every record is
  * an already present NPCEntity, generic scenery entity or exact canonical party member. Canonical PCs
  * use a portable PC category rather than native lazy-resolution kind bits.
@@ -35,6 +45,13 @@ unsigned SudekiMpLanStoryWorldSplitAnimateTargets(SudekiMpLanStoryWorldAnimateTa
  * wrapper, plus party-character model banks). Copy-only pointers for the
  * ambient adapter's exclusion list; re-validated by nobody, compared only. */
 unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max);
+/* Dev Play mirrored monster (configuration thread, before the runtime runs).
+ * The one monster-class entity whose ResourceName equals resource (first per
+ * identifier) joins the catalog as SUDEKIMP_LAN_STORY_WORLD_ENEMY_KIND: the
+ * host captures it, the client presents its own copy. Client enemy targets
+ * without a host record, and host records without a client copy, are left out
+ * of the matched set; unmatched client copies are hidden. NULL/empty = off. */
+void SudekiMpLanStoryWorldSetMirrorEnemy(const char *resource);
 /* Client: party characters in a different host area keep their last pose. */
 void SudekiMpLanStoryWorldSetForeignCharacters(uint8_t mask);
 BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,

@@ -6,9 +6,13 @@ static BOOL roster_ok=TRUE,lease_ok=TRUE,combat=TRUE,combat_known=TRUE;
 static BOOL prime,pending_weapon,weapon_known=TRUE,cast_idle=TRUE;
 static BOOL spirit_known=TRUE,lower_submits=TRUE,lower_returns=TRUE;
 static int spirit_state;
-static unsigned calls,last_kind;
-static uint8_t speed[0x30],actor[0xdc],arbiter[0x64],skill[0x78];
+static unsigned calls,last_kind,expected_seat=2;
+static BOOL avatar_known=TRUE;
+static uint8_t speed[0x30],actor[0x138],arbiter[0x64],skill[0x78];
 static uint8_t trigger[0x1da],interaction[0x64],interaction_mode[0x84];
+BOOL SudekiMpLanStoryAvatarPartyObserve(SudekiMpLanStoryAvatarPartyObservation *out) {
+    (void)out; return FALSE;
+}
 BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(const SudekiMpControlUpdateDispatchWitness *w) {
     return w && w->dispatch_serial==7;
 }
@@ -19,8 +23,13 @@ BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatc
     const SudekiMpLanStoryNativeRoster *r) { return roster_ok && w && r && w->dispatch_serial==7; }
 BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k) {
-    return lease_ok && w && r && k && k->token==5 && k->generation==2 && k->seat==2;
+    return lease_ok && w && r && k && k->token==5 && k->generation==2 && k->seat==expected_seat;
 }
+void *SudekiMpLanPartyControlStoryAllyActor(const SudekiMpLanPartyLease *k) {
+    return avatar_known && k && k->seat==expected_seat && expected_seat>=4u && expected_seat<8u?actor:NULL;
+}
+BOOL SudekiMpLogResearchEnabled(void) { return FALSE; }
+void SudekiMpLogFormat(const char *format,...) { (void)format; }
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *out) { *out=combat; return combat_known; }
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) { return prime; }
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *out) { *out=spirit_state; return spirit_known; }
@@ -100,7 +109,27 @@ int main(void) {
     for(unsigned kind=2;kind<=3;++kind)
         assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_SUBMITTED);
     assert(trigger[0x1d9]==2 && trigger[0x1d8]==1); /* no global input ownership */
+    /* Each independent native avatar key shares the ally component contract.
+     * It must never touch hero-only skill/weapon/cast gates or index actors[4+]. */
+    *(void **)actor=base+0x2d55d4u;
+    pending_weapon=TRUE; weapon_known=FALSE; cast_idle=FALSE;
+    for(unsigned p=0;p<4u;++p) {
+        expected_seat=k.seat=(uint8_t)(4u+p);
+        assert(body_idle(&k,actor,&w));
+        for(unsigned kind=1;kind<=4u;++kind)
+            assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_SUBMITTED);
+        unsigned before=calls;
+        avatar_known=FALSE;
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==before);
+        avatar_known=TRUE; prime=TRUE;
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_BUSY && calls==before);
+        prime=FALSE;
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,5)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==before);
+    }
+    k.seat=8;
+    assert(!body_idle(&k,actor,&w));
+    assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE);
     VirtualFree(base,0,MEM_RELEASE);
-    puts("story Tal melee synthetic admission/ownership/busy/uncertain-return tests passed");
+    puts("story Tal and four-avatar synthetic melee admission/ownership/busy/uncertain-return tests passed");
     return 0;
 }

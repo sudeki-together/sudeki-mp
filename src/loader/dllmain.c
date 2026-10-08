@@ -15,6 +15,9 @@
 #include "hooks/character_switch_trace.h"
 #include "hooks/control_separation.h"
 #include "hooks/freeroam_camera_input.h"
+#include "hooks/story_flight.h"
+#include "hooks/story_door_link.h"
+#include "hooks/story_spawn.h"
 #include "hooks/interaction_provenance.h"
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_party_runtime.h"
@@ -24,6 +27,13 @@
 #include "hooks/lan_story_temp_exterior.h"
 #include "hooks/lan_story_pause_trace.h"
 #include "hooks/lan_story_anim_trace.h"
+#include "hooks/lan_story_arbiter_trace.h"
+#include "hooks/talos_seat_probe.h"
+#include "hooks/lan_story_ally_seat.h"
+#include "hooks/lan_story_ally_hud.h"
+#include "hooks/lan_story_talos_damage_probe.h"
+#include "hooks/lan_story_dev_protect.h"
+#include "hooks/lan_story_dev_spawn.h"
 #include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_area_fade.h"
 #include "hooks/resource_swap.h"
@@ -90,6 +100,9 @@
 #define SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED 20u
 #define SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED 21u
 #define SUDEKIMP_INIT_LAN_ARENA_FAILED 22u
+#define SUDEKIMP_INIT_STORY_FLIGHT_FAILED 23u
+#define SUDEKIMP_INIT_STORY_DOOR_LINK_FAILED 24u
+#define SUDEKIMP_INIT_STORY_SPAWN_FAILED 25u
 #define SUDEKIMP_TALOS_EXACT_SOL_SHA256 \
     "e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9"
 
@@ -298,6 +311,8 @@ static BOOL config_key_false(const wchar_t *path,const wchar_t *section,const wc
 static void configure_lobby_auto(const wchar_t *config_path) {
     SudekiMpLobbyAuto a; wchar_t text[64]; int number;
     memset(&a,0,sizeof(a)); a.save_slot=~0u; a.character=4u; a.min_players=2u;
+    GetPrivateProfileStringW(L"Lobby",L"Mode",L"Multiplayer",text,64,config_path);
+    a.dev_play=!_wcsicmp(text,L"DevPlay");
     a.host=read_config_boolean(config_path,L"Lobby",L"AutoHost");
     GetPrivateProfileStringW(L"Lobby",L"AutoJoin",L"",text,64,config_path);
     if (text[0]) { a.join=TRUE; for (unsigned i=0;i<sizeof(a.address)-1u && text[i];++i) a.address[i]=(char)text[i]; }
@@ -311,12 +326,13 @@ static void configure_lobby_auto(const wchar_t *config_path) {
     GetPrivateProfileStringW(L"Lobby",L"Character",L"",text,64,config_path);
     static const wchar_t *const names[4]={L"Buki",L"Elco",L"Tal",L"Ailish"};
     for (unsigned i=0;i<4u;++i) if (!_wcsicmp(text,names[i])) a.character=i;
+    if(a.dev_play && !_wcsicmp(text,L"Talos")) a.character=SUDEKIMP_LOBBY_TALOS;
     a.ready=read_config_boolean(config_path,L"Lobby",L"AutoReady");
     a.start=read_config_boolean(config_path,L"Lobby",L"AutoStart");
     if (read_config_integer(config_path,L"Lobby",L"MinPlayers",2,1,4,&number)) a.min_players=(unsigned)number;
     SudekiMpLobbyUiConfigureAuto(&a);
-    SudekiMpLogFormat("lobby_auto config host=%u join=%u port=%u save_slot=%d character=%u ready=%u start=%u min_players=%u\r\n",
-        a.host,a.join,(unsigned)a.port,a.save_slot==~0u?-1:(int)a.save_slot,a.character,a.ready,a.start,a.min_players);
+    SudekiMpLogFormat("lobby_auto config host=%u join=%u mode=%s port=%u save_slot=%d character=%u ready=%u start=%u min_players=%u\r\n",
+        a.host,a.join,a.dev_play?"dev_play":"multiplayer",(unsigned)a.port,a.save_slot==~0u?-1:(int)a.save_slot,a.character,a.ready,a.start,a.min_players);
 }
 static BOOL uninstall_runtime_hooks(void) {
     /* Story containment retains the input fence, load result, task observer
@@ -333,6 +349,11 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
     if (!SudekiMpUninstallLanArenaWindowPolicy()) return FALSE;
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
+    SudekiMpLanStoryDevProtectRelease("teardown");
+    if (!SudekiMpLanStoryAllyHudUninstall()) return FALSE;
+    if (!SudekiMpLanStoryTalosDamageProbeUninstall()) return FALSE;
+    if (!SudekiMpTalosSeatProbeUninstall()) return FALSE;
+    if (!SudekiMpLanStoryArbiterTraceUninstall()) return FALSE;
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
     if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpResourceSwapUninstall()) return FALSE;
@@ -363,6 +384,9 @@ static BOOL uninstall_runtime_hooks(void) {
     SudekiMpUninstallInteractionProvenance();
     SudekiMpUninstallZoneTransitionTrace();
     SudekiMpUninstallFreeRoamCameraInput();
+    (void)SudekiMpUninstallStorySpawn();
+    (void)SudekiMpUninstallStoryDoorLink();
+    (void)SudekiMpUninstallStoryFlight();
     SudekiMpUninstallTalosDefenseTrace();
     SudekiMpUninstallCharacterSwitchTrace();
     SudekiMpUninstallQuickSkillInputTrace();
@@ -736,6 +760,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL lan_arena_enabled;
     BOOL talos_companion_staging_observation_enabled;
     BOOL talos_defense_trace_enabled;
+    BOOL arbiter_trace_enabled = FALSE;
+    BOOL talos_seat_probe_enabled = FALSE;
     BOOL control_separation_enabled;
     BOOL player_movement_trace_enabled;
     BOOL second_player_movement_enabled;
@@ -749,6 +775,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL dual_camera_frame_cache_enabled;
     BOOL fixed_three_seat_renderer_enabled;
     BOOL freeroam_camera_input_enabled;
+    BOOL story_flight_enabled;
+    BOOL story_door_link_enabled;
+    BOOL story_spawn_enabled;
+    SudekiMpStoryFlightConfig story_flight = {VK_F5, VK_PRIOR, VK_NEXT, 6.0f, TRUE};
+    wchar_t story_flight_key_text[3][32];
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL realtime_multiplayer_skill_combat_enabled;
     BOOL skill_camera_routing_enabled;
@@ -910,6 +941,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
     }
+    /* Settings is also present outside the title-lobby profile. Bind its
+     * persistent toggle before any profile-specific early return. */
+    SudekiMpLobbyUiConfigureDevPlay(read_config_boolean(config_path,L"DevPlay",L"Enabled"),config_path);
     /* Title entry candidate has no actor/session assignment. Keep its input
      * and UI seams exclusive with the old local roster and arena profiles. */
     SudekiMpLobbyLaunchPlan lobby_plan;
@@ -984,17 +1018,35 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Research diagnostics (bounded, log-only) default on; off when
              * [StoryAreas] ResearchDiagnostics=false. */
             (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
+            /* Opt-in observe-only receiver calls. These forward through the
+             * existing damage-entry owners and never equip or change stats. */
+            (saved_story && SudekiMpLobbyUiDevPlayEnabled() &&
+                read_config_boolean(config_path,L"DevPlay",L"MeleeTrace") &&
+                !SudekiMpLanStoryTalosDamageProbeInstall(game_module)) ||
             /* Player names on the HUD card and above party heads (saved story). */
             (saved_story && !config_key_false(config_path,L"SudekiMP",L"PlayerNameTags") &&
                 !SudekiMpLanStoryNameTagsInstall(game_module)) ||
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||
+            /* Probe only (non-fatal): the lobby init path returns before the
+             * mode-independent trace section, so install the arbiter trace here too. */
+            (read_config_boolean(config_path,L"StoryAreas",L"ArbiterTrace") && !SudekiMpLanStoryArbiterTraceInstalled() &&
+                (SudekiMpLanStoryArbiterTraceInstall(game_module,config_path),FALSE)) ||
             /* Archive resource redirection table ([ResourceSwap]); installs
              * nothing when the section is empty. Before any archive mounts. */
             !SudekiMpResourceSwapInstall(game_module,config_path) ||
             /* Client fade for party characters inside another host area. */
             (saved_story && (SudekiMpLanStoryAreaFadeEnable(!config_key_false(config_path,L"StoryAreas",L"AreaFade")),FALSE)) ||
+            /* Dev Play ally seat ([DevPlay] AllySeatPlayer): host-spawned ALLY_TALOS driven by one remote seat. */
+            (saved_story && (SudekiMpLanStoryAllySeatConfigure(game_module,config_path),FALSE)) ||
+            /* Native combo reader for the ally seat (host observe-only seams,
+             * client HUD mode hold). Installs nothing without an ally seat. */
+            (saved_story && !SudekiMpLanStoryAllyHudInstall(game_module) &&
+                (SudekiMpLogFormat("ally_hud event=install_failed error=%lu\r\n",(unsigned long)GetLastError()),FALSE)) ||
+            /* Dev Play ([DevPlay] PartyInvulnerable): native invulnerability leases for heroes + ally. */
+            (saved_story && (SudekiMpLanStoryDevProtectInstall(game_module,config_path),FALSE)) ||
+            (saved_story && (SudekiMpLanStoryDevSpawnConfigure(config_path),FALSE)) ||
             /* Client ambient animation for zone-placed props (water, chimes,
              * leaves): zero-delta renderers no entity owns get a local delta.
              * Shares the AnimTrace entry bytes, so the probe excludes it. */
@@ -1228,6 +1280,38 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableFreeRoamCameraModifierPrototype"
     );
+    /* [Flight] player flight prototype: toggle/ascend/descend keys, vertical speed. */
+    story_flight_enabled = read_config_boolean(config_path, L"Flight", L"Enabled");
+    story_door_link_enabled = read_config_boolean(config_path, L"DoorLink", L"Enabled");
+    story_spawn_enabled = read_config_boolean(config_path, L"Spawn", L"Enabled");
+    if ((story_door_link_enabled || story_spawn_enabled) && !story_flight_enabled) {
+        SudekiMpLogWrite("story_door_link_config=requires_flight\r\n");
+        SudekiMpLogWrite("status=config_error\r\n");
+        SudekiMpLogClose();
+        return SUDEKIMP_INIT_BAD_CONFIG;
+    }
+    if (story_flight_enabled) {
+        static const wchar_t *const flight_keys[3] = {L"ToggleKey", L"AscendKey", L"DescendKey"};
+        static const wchar_t *const flight_defaults[3] = {L"F5", L"PageUp", L"PageDown"};
+        UINT *flight_slots[3] = {&story_flight.toggle_key, &story_flight.ascend_key, &story_flight.descend_key};
+        for (unsigned i = 0; i < 3u; ++i) {
+            GetPrivateProfileStringW(L"Flight", flight_keys[i], flight_defaults[i],
+                story_flight_key_text[i], 32, config_path);
+            if (!SudekiMpParseInputKey(story_flight_key_text[i], flight_slots[i])) {
+                SudekiMpLogWrite("story_flight_config=invalid_key\r\n");
+                SudekiMpLogWrite("status=config_error\r\n");
+                SudekiMpLogClose();
+                return SUDEKIMP_INIT_BAD_CONFIG;
+            }
+        }
+        if (!read_config_float(config_path, L"Flight", L"Speed", 6.0f, 0.5f, 60.0f, &story_flight.speed)) {
+            SudekiMpLogWrite("story_flight_config=invalid_speed\r\n");
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        story_flight.ailish_only = !read_config_boolean(config_path, L"Flight", L"AnyCharacter");
+    }
     ranged_quick_skill_prototype_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -2613,6 +2697,16 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     } else {
         SudekiMpLogWrite("talos_defense_trace_applied=false\r\n");
     }
+    /* Probe only ([StoryAreas] ArbiterTrace): arbiter animation events, combo
+     * dispatch, CComboManager::PlayCombo and movement requests, any mode. */
+    arbiter_trace_enabled = read_config_boolean(config_path, L"StoryAreas", L"ArbiterTrace");
+    talos_seat_probe_enabled = read_config_boolean(config_path, L"TalosSeatProbe", L"Enabled");
+    if (arbiter_trace_enabled) {
+        if (!SudekiMpLanStoryArbiterTraceInstall(game_module, config_path)) {
+            SudekiMpLogFormat("arbiter_trace event=install_failed error=%lu\r\n",
+                (unsigned long)GetLastError());
+        }
+    }
     SudekiMpLogFormat(
         "freeroam_camera_requested=%s modifier_virtual_key=0x%02lx\r\n",
         freeroam_camera_input_enabled ? "true" : "false",
@@ -3565,8 +3659,64 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "talos_companion_staging_observation_applied=false "
             "default=false\r\n");
     }
+    if (story_flight_enabled) {
+        /* The actor identity check reads the exact-build engine adapter; it is
+         * export resolution only and may already have run for another feature. */
+        if (!SudekiMpCleanroomEngineInitialize(game_module) ||
+            !SudekiMpInstallStoryFlight(game_module, &story_flight)) {
+            DWORD error = GetLastError();
+            SudekiMpLogFormat("story_flight_error=%lu\r\n", (unsigned long)error);
+            SudekiMpLogWrite("story_flight_applied=false\r\n");
+            SudekiMpLogWrite("status=story_flight_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(error);
+            return SUDEKIMP_INIT_STORY_FLIGHT_FAILED;
+        }
+        SudekiMpLogWrite("story_flight_applied=true\r\n");
+        /* Research probe: drive a spawned ALLY_TALOS through hero native entries. */
+        if (talos_seat_probe_enabled) {
+            if (!SudekiMpTalosSeatProbeInstall(game_module))
+                SudekiMpLogFormat("talos_seat_probe event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
+        }
+        if (story_door_link_enabled) {
+            if (!SudekiMpInstallStoryDoorLink(game_module, config_path)) {
+                DWORD error = GetLastError();
+                SudekiMpLogFormat("story_door_link_error=%lu\r\n", (unsigned long)error);
+                SudekiMpLogWrite("story_door_link_applied=false\r\n");
+                SudekiMpLogWrite("status=story_door_link_error\r\n");
+                uninstall_runtime_hooks();
+                SudekiMpLogClose();
+                SetLastError(error);
+                return SUDEKIMP_INIT_STORY_DOOR_LINK_FAILED;
+            }
+            SudekiMpLogWrite("story_door_link_applied=true\r\n");
+        } else {
+            SudekiMpLogWrite("story_door_link_applied=false\r\n");
+        }
+        if (story_spawn_enabled) {
+            if (!SudekiMpInstallStorySpawn(game_module, config_path)) {
+                DWORD error = GetLastError();
+                SudekiMpLogFormat("story_spawn_error=%lu\r\n", (unsigned long)error);
+                SudekiMpLogWrite("story_spawn_applied=false\r\n");
+                SudekiMpLogWrite("status=story_spawn_error\r\n");
+                uninstall_runtime_hooks();
+                SudekiMpLogClose();
+                SetLastError(error);
+                return SUDEKIMP_INIT_STORY_SPAWN_FAILED;
+            }
+            SudekiMpLogWrite("story_spawn_applied=true\r\n");
+        } else {
+            SudekiMpLogWrite("story_spawn_applied=false\r\n");
+        }
+    } else {
+        SudekiMpLogWrite("story_flight_applied=false\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
-    if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
+    if (!story_flight_enabled &&
+        !arbiter_trace_enabled && /* the probe logs for the whole session */
+        !talos_seat_probe_enabled &&
+        !trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
         !realtime_multiplayer_skill_combat_enabled &&
         !direct_spirit_strike_prototype_enabled &&

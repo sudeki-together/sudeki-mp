@@ -4581,6 +4581,30 @@ BOOL SudekiMpCleanroomEngineSpawnDummy(const float position[3]) {
     return TRUE;
 }
 
+BOOL SudekiMpCleanroomEngineSpawnEntityNamed(const char *resource, const float position[3]) {
+    size_t n;
+    if (spawn_entity == NULL || resource == NULL || position == NULL ||
+        !SudekiMpCleanroomEngineWorldReady()) {
+        return FALSE;
+    }
+    for (n = 0; resource[n]; ++n) {
+        char ch = resource[n];
+        if (n >= 48u || !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                (ch >= '0' && ch <= '9') || ch == '_')) {
+            return FALSE;
+        }
+    }
+    if (n == 0u) return FALSE;
+    for (n = 0; n < 3u; ++n) {
+        if (!isfinite(position[n]) || fabsf(position[n]) > 5000.0f) return FALSE;
+    }
+    SudekiMpLogFormat(
+        "cleanroom_engine event=named_spawn phase=begin resource=%s position=%.2f,%.2f,%.2f\r\n",
+        resource, (double)position[0], (double)position[1], (double)position[2]);
+    spawn_entity(resource, position[0], position[1], position[2]);
+    SudekiMpLogFormat("cleanroom_engine event=named_spawn phase=returned resource=%s\r\n", resource);
+    return TRUE;
+}
 BOOL SudekiMpCleanroomEngineRemoveDummy(void) {
     void *entity;
 

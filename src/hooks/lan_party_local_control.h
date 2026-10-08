@@ -2,6 +2,7 @@
 #define SUDEKIMP_LAN_PARTY_LOCAL_CONTROL_H
 
 #include "hooks/lan_party_control.h"
+#include "hooks/lan_story_observer.h"
 
 /* Owns temporary AI execution for this process's controller-target actor.
  * The AI lease never changes native actor/controller/camera identities.
@@ -11,6 +12,26 @@
 BOOL SudekiMpLanPartyLocalControlInstall(HMODULE image,
     SudekiMpLanPartyControlDrainProbe input_fenced,
     SudekiMpLanPartyControlDrainProbe actions_drained);
+/* Explicit sparse saved-story route. Mutually exclusive with the SMP4
+ * installation above; verifies the same native AI-mode function, but does
+ * not acquire or use a party-switch adapter. The caller must independently
+ * own a persistent host input fence and positive native action/task drain.
+ * No runtime caller may replace those proofs with avatar selection alone. */
+BOOL SudekiMpLanPartyLocalControlInstallStory(HMODULE image,
+    SudekiMpLanPartyControlDrainProbe input_fenced,
+    SudekiMpLanPartyControlDrainProbe actions_drained);
+/* Fresh roster from this exact story-observer dispatch. key->seat is the
+ * native saved leader's canonical hero index, not the avatar/player index.
+ * Binds epoch/world/descriptor/group/controller/actor/AI/mode/directory.
+ * Native mode changes neither override references nor party/controller/
+ * camera identity; the caller keeps its input fence until restore succeeds. */
+BOOL SudekiMpLanPartyLocalControlStorySetAi(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyLease *assignment,const SudekiMpLanStoryNativeRoster *roster,
+    BOOL enabled);
+BOOL SudekiMpLanPartyLocalControlStoryAiExact(
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanPartyLease *assignment,const SudekiMpLanStoryNativeRoster *roster);
 BOOL SudekiMpLanPartyLocalControlSetAi(
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanPartyLease *assignment,void *actor,BOOL enabled);

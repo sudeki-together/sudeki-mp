@@ -22,6 +22,11 @@ typedef struct SudekiMpLanStoryNativeRoster {
     uint8_t available_mask, leader_character;
     void *world, *descriptor, *group, *controller;
     void *actors[4], *ai[4];
+    /* Canonical hero arrays never alias an avatar. A nonzero generation is
+     * admitted only by the explicit Dev Play native-party owner. */
+    void *native_leader;
+    uint32_t native_avatar_generation;
+    uint8_t native_avatar_player;
 } SudekiMpLanStoryNativeRoster;
 /* Sample(scene) must already have published this READY scene on this thread.
  * Every call freshly verifies the live sparse native group; no cached pointer

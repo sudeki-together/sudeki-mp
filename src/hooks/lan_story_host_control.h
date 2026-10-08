@@ -9,6 +9,14 @@
  * host-approved swaps. The closed Lighthouse journal separately authorizes
  * restoring Tal after recruitment. It never writes actor/controller/group identity fields. */
 BOOL SudekiMpLanStoryHostControlInstall(HMODULE image,unsigned locked_character);
+/* Separate Dev Play owner may positively prove the saved leader's temporary
+ * AI lease and persistent native input fence. This does not grant rotation
+ * or a second input owner. Configure before the first service dispatch. */
+typedef BOOL (*SudekiMpLanStoryHostLeaderAiExact)(
+    const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryNativeRoster *);
+BOOL SudekiMpLanStoryHostControlSetLeaderAiWitness(SudekiMpLanStoryHostLeaderAiExact);
+BOOL SudekiMpLanStoryHostControlLeaderActionsDrained(
+    const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryNativeRoster *);
 /* Sample the scene with StoryObserver first on this exact post-controller
  * dispatch. FALSE means pending/unknown or a native rotation occurred: do not
  * publish using that pre-call scene. A fresh Sample after the call is allowed

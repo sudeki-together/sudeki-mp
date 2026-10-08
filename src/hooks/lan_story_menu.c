@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *const characters[5]={"Buki","Elco","Tal","Ailish","No character"};
+static const char *const characters[6]={"Buki","Elco","Tal","Ailish","No character","Talos"};
 static DWORD native_thread;
 static unsigned local_player;
 static BOOL initialized,menu_open,leave_requested;
@@ -149,6 +149,7 @@ static void tools_status(char *text,unsigned capacity) {
     if(!text || !capacity) return;
     const char *status=!thread_exact()?"SESSION UNAVAILABLE":leave_requested?
         "LEAVING SESSION":(state.input_ready&(1u<<local_player))?"PLAYING":
+        state.character[local_player]==SUDEKIMP_LOBBY_TALOS?"WAITING FOR AVATAR":
         (state.connected&(1u<<local_player))?"SPECTATING / SYNCHRONIZING":"WAITING FOR SESSION";
     snprintf(text,capacity,"%s",status);
 }
@@ -262,25 +263,44 @@ void SudekiMpLanStoryMenuRefresh(const SudekiMpLobbyStatus *lobby,
     next.local_player=local_player; next.active=TRUE; next.host=local_player==0u;
     next.saved_story=TRUE; next.transition=TRUE;
     memset(next.character,4,sizeof(next.character));
-    BOOL known=scene_ready && leader<4u && available<=15u && (available&(1u<<leader));
+    BOOL dev_play=lobby && lobby->mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    /* The caller has already validated the native scene. An all-avatar Dev
+     * party has no canonical hero leader or availability bit; local control
+     * below still requires its independently confirmed input lease. */
+    BOOL known=scene_ready && ((leader<4u && available<=15u && (available&(1u<<leader))) ||
+        (dev_play && leader==SUDEKIMP_LAN_STORY_NO_SEAT && !available));
     if(lobby && lobby->local_slot==local_player) {
         for(unsigned p=0;p<4u;++p) {
             const SudekiMpLobbyMember *member=&lobby->members[p];
             unsigned bit=1u<<p;
             if(member->present) next.connected|=(uint8_t)bit;
-            if(member->reserved && member->locked && member->character<4u) {
+            if(member->reserved && member->locked && (member->character<4u ||
+                (dev_play && member->character==SUDEKIMP_LOBBY_TALOS))) {
                 next.reserved|=(uint8_t)bit;
                 next.character[p]=member->character;
             }
             snprintf(next.name[p],sizeof(next.name[p]),"%.31s",member->name);
             unsigned chosen=next.character[p];
             const char *choice=characters[chosen];
+            if(dev_play && chosen==SUDEKIMP_LOBBY_TALOS && !next.name[p][0])
+                snprintf(next.name[p],sizeof(next.name[p]),"Talos");
             if(!member->present) {
                 snprintf(next.story_detail[p],sizeof(next.story_detail[p]),"%s",
                     member->reserved?"Disconnected; releasing selection":"Open slot");
             } else if(!known) {
                 snprintf(next.story_detail[p],sizeof(next.story_detail[p]),
                     "%s - Waiting for the story",choice);
+            } else if(dev_play && chosen==SUDEKIMP_LOBBY_TALOS) {
+                /* Avatar IDs have no native party-slot bit. Only the local
+                 * input lease can prove control; remote rows state selection. */
+                if(p==local_player && (local_player?client_control_ready:host_control_ready)) {
+                    next.controlling|=(uint8_t)bit; next.input_ready|=(uint8_t)bit;
+                    snprintf(next.story_detail[p],sizeof(next.story_detail[p]),
+                        "Talos - %s",menu_open?"Menu open":"Playing");
+                } else if(p==local_player)
+                    snprintf(next.story_detail[p],sizeof(next.story_detail[p]),"Talos - Waiting for avatar control");
+                else snprintf(next.story_detail[p],sizeof(next.story_detail[p]),
+                    "Talos - %s",p?"Avatar selected":"Host avatar");
             } else if(!p && !local_player && host_control_ready && chosen==leader) {
                 next.controlling|=1u; next.input_ready|=1u;
                 snprintf(next.story_detail[p],sizeof(next.story_detail[p]),
@@ -323,6 +343,9 @@ void SudekiMpLanStoryMenuRefresh(const SudekiMpLobbyStatus *lobby,
         snprintf(next.status,sizeof(next.status),"Session ended; returning to the intro...");
     else if(!known)
         snprintf(next.status,sizeof(next.status),"Waiting for the story...");
+    else if(dev_play && next.character[local_player]==SUDEKIMP_LOBBY_TALOS)
+        snprintf(next.status,sizeof(next.status),"%s",(next.input_ready&(1u<<local_player))?
+            "Playing Talos":"Waiting for Talos avatar control...");
     else if(local_player && client_control_ready)
         snprintf(next.status,sizeof(next.status),"Playing %s",characters[next.character[local_player]<=4u?next.character[local_player]:4u]);
     else if(local_player && !spectator_playback_ready)

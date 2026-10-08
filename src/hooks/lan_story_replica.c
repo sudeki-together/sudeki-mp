@@ -1,6 +1,7 @@
 #include "hooks/lan_story_replica.h"
 #include "hooks/lan_arena_owner_view.h"
 #include "hooks/lan_story_residency.h"
+#include "hooks/lan_story_avatar_party_roster.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
 #include "engine/skill_activation_abi.h"
@@ -43,6 +44,13 @@ static PositionSet set_position;
 static PositionMatrix position_matrix;
 static void *story_set_forward __attribute__((used));
 static DWORD native_thread;
+static BOOL frame_valid_for_roster(const SudekiMpLanStoryFrame *frame,
+    const SudekiMpLanStoryNativeRoster *roster) {
+    if(!roster) return FALSE;
+    if(!roster->native_avatar_generation) return SudekiMpLanStoryFrameValid(frame);
+    return SudekiMpLanStoryAvatarPartyRosterExact(roster) &&
+        SudekiMpLanStoryFrameValidForPolicy(frame,SUDEKIMP_LAN_STORY_POLICY_DEV_AVATARS);
+}
 static BOOL applying;
 static struct EquipmentAttempt {
     void *actor,*weapon,*item;
@@ -237,8 +245,14 @@ static BOOL apply_view(const SudekiMpLanStoryNativeRoster *roster,
         /* This is a local restoration copy, with no host camera serial or
          * network authority. Only its native geometry is being validated. */
         if(!SudekiMpLanStoryViewGeometryValid(&prior)) return FALSE;
-        if(roster->leader_character>=4u) return FALSE;
-        uint8_t *actor=roster->actors[roster->leader_character];
+        uint8_t *actor=NULL;
+        if(roster->native_avatar_generation) {
+            if(!SudekiMpLanStoryAvatarPartyRosterExact(roster) || !exact(roster,context)) return FALSE;
+            actor=roster->native_leader;
+        } else {
+            if(roster->leader_character>=4u) return FALSE;
+            actor=roster->actors[roster->leader_character];
+        }
         if(!readable(actor,0x48u)) return FALSE;
         uint8_t *position=*(uint8_t **)(actor+0x44u);
         if(!readable(position,0x24u) || *(void **)position!=base+0x2cdefcu ||
@@ -247,6 +261,8 @@ static BOOL apply_view(const SudekiMpLanStoryNativeRoster *roster,
             saved_anchor[i]=*(float *)(position+0x18u+4u*i);
             if(!isfinite(saved_anchor[i]) || fabsf(saved_anchor[i])>=1000000.0f) return FALSE;
         }
+        if(roster->native_avatar_generation &&
+            (!SudekiMpLanStoryAvatarPartyRosterExact(roster) || !exact(roster,context))) return FALSE;
         saved_anchor_valid=TRUE;
         view_owner=owner; saved_view=prior; last_view=prior;
     }
@@ -392,7 +408,7 @@ static BOOL tal_weapon_pose(const SudekiMpLanStoryNativeRoster *roster,
 BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryFrame *frame,SudekiMpLanStoryReplicaExact exact,void *context) {
     BOOL combat=TRUE;
-    if(!base || applying || !roster || !exact || !SudekiMpLanStoryFrameValid(frame) ||
+    if(!base || applying || !roster || !exact || !frame_valid_for_roster(frame,roster) ||
         frame->available_mask!=roster->available_mask ||
         (native_thread && native_thread!=GetCurrentThreadId()) || !exact(roster,context) ||
         !SudekiMpCleanroomEngineCombatMode(&combat) || combat) return FALSE;
@@ -477,7 +493,7 @@ BOOL SudekiMpLanStoryReplicaApply(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryFrame *frame,BOOL apply_host_view,SudekiMpLanStoryReplicaExact exact,void *context) {
     Target targets[4]={{0}}; BOOL okay=FALSE,combat=TRUE;
     if(!base || applying || !roster || !frame || !exact ||
-        !SudekiMpLanStoryFrameValid(frame) || frame->available_mask!=roster->available_mask ||
+        !frame_valid_for_roster(frame,roster) || frame->available_mask!=roster->available_mask ||
         (native_thread && native_thread!=GetCurrentThreadId()) || !exact(roster,context) ||
         !SudekiMpCleanroomEngineCombatMode(&combat) || combat) return FALSE;
     if(!native_thread) native_thread=GetCurrentThreadId();

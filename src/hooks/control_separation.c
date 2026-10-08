@@ -3,6 +3,9 @@
 #include "hooks/lan_party_cast.h"
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_story_observer.h"
+#include "hooks/lan_story_avatar_spawn.h"
+#include "hooks/lan_story_avatar_party_roster.h"
+#include "hooks/lan_story_input.h"
 
 #include "cleanroom/engine.h"
 #include "engine/arbiter_combat_input.h"
@@ -349,6 +352,8 @@ typedef struct PartyNativeLease {
     SudekiMpLanPartyLease key;
     PartyNativePhase phase;
     void *actor, *group, *controller, *host, *ai, *mode;
+    uint32_t avatar_generation; /* Story avatar only; never a transport key. */
+    BOOL story_native_leader; /* Native mode0/ref0; owns no AI override ref. */
 } PartyNativeLease;
 typedef struct PartyMissileManagerCache {
     SudekiMpLanPartyLease key;
@@ -358,13 +363,25 @@ static PartyNativeLease party_native_leases[4];
 /* Saved-story leases deliberately do not enter the TestRoom lease table or
  * its global local-seat identity. Only the explicit Story* APIs below can
  * observe or mutate this scope. The common teardown barrier retains it. */
+/* Native keys 0..3 are heroes. Explicit avatar mode uses 4+player; otherwise
+ * only key4 is available to the older singleton ally route. Wire character
+ * identifiers are not native keys. */
+enum { STORY_ALLY_SEAT=4u, STORY_SEATS=8u };
+typedef struct StoryAvatarBinding {
+    void *actor,*slot;
+    uint32_t spawn_generation,issued_spawn_generation,connection_generation;
+    SudekiMpLanPartyLease issued;
+} StoryAvatarBinding;
 static struct {
     volatile LONG bound,retained;
     DWORD thread;
     void *world,*descriptor;
-    uint32_t epoch,last_generation[4];
-    PartyNativeLease actor[4];
-    SudekiMpLanPartyLease released[4];
+    uint32_t epoch,last_generation[STORY_SEATS];
+    PartyNativeLease actor[STORY_SEATS];
+    SudekiMpLanPartyLease released[STORY_SEATS];
+    void *ally_entity,*ally_slot; char ally_resource[48];
+    BOOL avatar_route;
+    StoryAvatarBinding avatar[4];
 } story_native_control;
 static PartyMissileManagerCache party_missile_manager_cache[4];
 static uint32_t party_native_last_generation[4];
@@ -7991,9 +8008,10 @@ BOOL SudekiMpLanPartyControlRelease(const SudekiMpControlUpdateDispatchWitness *
  * Canonical character keys remain independent of connection slots; no spawn. */
 static BOOL story_control_boundary(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
-    return party_boundary(w) && roster && roster->available_mask && !(roster->available_mask&~15u) &&
-        roster->leader_character<4u && (roster->available_mask&(1u<<roster->leader_character)) &&
-        SudekiMpLanStoryObserverRosterStillExact(w,roster);
+    if(!party_boundary(w) || !roster || !SudekiMpLanStoryObserverRosterStillExact(w,roster)) return FALSE;
+    if(roster->native_avatar_generation) return SudekiMpLanStoryAvatarPartyRosterExact(roster);
+    return roster->available_mask && !(roster->available_mask&~15u) &&
+        roster->leader_character<4u && (roster->available_mask&(1u<<roster->leader_character));
 }
 static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
@@ -8006,7 +8024,145 @@ static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
         roster->epoch==story_native_control.epoch;
 }
 static BOOL story_key_valid(const SudekiMpLanPartyLease *key) {
-    return key && key->seat<4u && key->generation && key->token;
+    return key && key->seat<STORY_SEATS && key->generation && key->token &&
+        (key->seat<=STORY_ALLY_SEAT || story_native_control.avatar_route);
+}
+static BOOL story_avatar_exact(unsigned player,void *actor,uint32_t generation) {
+    SudekiMpLanStoryAvatarSpawnObservation observation;
+    return player<4u && actor && generation &&
+        SudekiMpLanStoryAvatarSpawnObserve(player,story_native_control.epoch,generation,&observation) &&
+        observation.ready && !observation.unknown && observation.seat==player &&
+        observation.epoch==story_native_control.epoch && observation.generation==generation &&
+        observation.world==story_native_control.world && observation.actor==actor;
+}
+static BOOL story_avatar_key_exact(const SudekiMpLanPartyLease *key) {
+    if(!story_key_valid(key) || !story_native_control.avatar_route || key->seat<STORY_ALLY_SEAT) return FALSE;
+    const StoryAvatarBinding *binding=&story_native_control.avatar[key->seat-STORY_ALLY_SEAT];
+    return party_key_equal(&binding->issued,key) && binding->spawn_generation &&
+        binding->spawn_generation==binding->issued_spawn_generation;
+}
+static void story_avatar_invalidate(unsigned player) {
+    StoryAvatarBinding *binding=&story_native_control.avatar[player];
+    unsigned character=STORY_ALLY_SEAT+player;
+    if(binding->issued.generation>story_native_control.last_generation[character])
+        story_native_control.last_generation[character]=binding->issued.generation;
+    ZeroMemory(binding,sizeof(*binding));
+}
+static BOOL story_bind_avatar(unsigned player,void *entity,uint32_t spawn_generation) {
+    if(player>=4u) return FALSE;
+    unsigned character=STORY_ALLY_SEAT+player;
+    StoryAvatarBinding *binding=&story_native_control.avatar[player];
+    /* A binding cannot be replaced or withdrawn beneath an owned AI ref. */
+    if(story_native_control.actor[character].phase!=PARTY_NATIVE_EMPTY)
+        return story_native_control.avatar_route && entity && binding->actor==entity &&
+            binding->spawn_generation==spawn_generation &&
+            story_native_control.actor[character].avatar_generation==spawn_generation &&
+            story_avatar_exact(player,entity,spawn_generation);
+    if(!entity) {
+        if(spawn_generation || !story_native_control.avatar_route) return FALSE;
+        story_avatar_invalidate(player); return TRUE;
+    }
+    if((!story_native_control.avatar_route && (story_native_control.ally_entity ||
+        story_native_control.last_generation[STORY_ALLY_SEAT])) ||
+        !story_avatar_exact(player,entity,spawn_generation)) return FALSE;
+    for(unsigned i=0;i<4u;++i)
+        if(i!=player && story_native_control.avatar[i].actor==entity) return FALSE;
+    if(binding->actor!=entity || binding->spawn_generation!=spawn_generation) story_avatar_invalidate(player);
+    binding->actor=entity; binding->slot=entity; binding->spawn_generation=spawn_generation;
+    story_native_control.avatar_route=TRUE;
+    return TRUE;
+}
+BOOL SudekiMpLanPartyControlStoryAvatarEntity(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,unsigned player,void *entity,uint32_t spawn_generation) {
+    return story_control_scope(w,roster) && story_bind_avatar(player,entity,spawn_generation);
+}
+void SudekiMpLanPartyControlStoryAllyEntity(void *entity,const char *resource) {
+    if(story_native_control.avatar_route) return;
+    story_native_control.ally_entity=entity;
+    story_native_control.ally_resource[0]=0;
+    if(entity && resource) { strncpy(story_native_control.ally_resource,resource,47); story_native_control.ally_resource[47]=0; }
+}
+void *SudekiMpLanPartyControlStoryAllyActor(const SudekiMpLanPartyLease *key) {
+    if(!story_key_valid(key) || key->seat<STORY_ALLY_SEAT) return NULL;
+    if(story_native_control.avatar_route) {
+        unsigned player=key->seat-STORY_ALLY_SEAT;
+        const StoryAvatarBinding *binding=&story_native_control.avatar[player];
+        const PartyNativeLease *owned=&story_native_control.actor[key->seat];
+        return story_native_control.thread==GetCurrentThreadId() &&
+            owned->phase!=PARTY_NATIVE_EMPTY && party_key_equal(&owned->key,key) && story_avatar_key_exact(key) &&
+            owned->actor==binding->actor && owned->avatar_generation==binding->spawn_generation &&
+            story_avatar_exact(player,binding->actor,binding->spawn_generation)?binding->actor:NULL;
+    }
+    const PartyNativeLease *owned=&story_native_control.actor[STORY_ALLY_SEAT];
+    if(owned->phase==PARTY_NATIVE_EMPTY || !party_key_equal(&owned->key,key)) return story_native_control.ally_entity;
+    return owned->actor;
+}
+/* Ally observation: the entity is proved by resource lookup and class, with the
+ * hero component classes it shares (AI unit, arbiter, movement controller).
+ * No native group slot exists; the AI wrapper takes our own entity pointer. */
+static BOOL story_control_observe_ally(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    PartyNativeLease *out,void ***slot_out) {
+    uint8_t *actor=story_native_control.ally_entity,*ai,*mode;
+    if(roster->native_avatar_generation || roster->leader_character>=4u ||
+        !actor || !story_native_control.ally_resource[0] || !readable_memory(actor,0x138u) ||
+        *(void **)actor!=game_base+0x2d55d4u ||
+        SudekiMpCleanroomEngineGenericEntity(story_native_control.ally_resource)!=actor) return FALSE;
+    ai=*(uint8_t **)(actor+0x94u);
+    if(!readable_memory(ai,0x16cu) || *(void **)ai!=game_base+0x2d4924u || *(void **)(ai+0x10u)!=actor ||
+        !readable_memory(mode=*(uint8_t **)(ai+0x3cu),0xcu) ||
+        !party_component(actor,0x90u,0x2cc9acu,0x64u) ||
+        !party_component(actor,0x80u,0x2c8644u,0xc0u) ||
+        !readable_memory(roster->controller,0x24cu) ||
+        *(void **)roster->controller!=game_base+0x2c9f5cu) return FALSE;
+    for(unsigned i=0;i<*(unsigned *)((uint8_t *)roster->group+0xccu);++i)
+        if(*(void **)((uint8_t *)roster->group+0x90u+i*0xcu)==actor) return FALSE; /* must stay outside the group */
+    if(!story_control_scope(w,roster)) return FALSE;
+    ZeroMemory(out,sizeof(*out)); out->key=*key; out->actor=actor;
+    out->group=roster->group; out->controller=roster->controller;
+    out->host=roster->actors[roster->leader_character]; out->ai=ai; out->mode=mode;
+    story_native_control.ally_slot=actor;
+    if(slot_out) *slot_out=&story_native_control.ally_slot;
+    return TRUE;
+}
+static BOOL story_control_observe_avatar(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    PartyNativeLease *out,void ***slot_out) {
+    unsigned player=key->seat-STORY_ALLY_SEAT;
+    StoryAvatarBinding *binding=&story_native_control.avatar[player];
+    uint8_t *actor=binding->actor,*ai,*mode;
+    BOOL typed=roster->native_avatar_generation!=0;
+    void *host=typed?roster->native_leader:
+        (roster->leader_character<4u?roster->actors[roster->leader_character]:NULL);
+    BOOL native_leader=typed && player==roster->native_avatar_player && actor==host;
+    if(!host || (typed && !SudekiMpLanStoryAvatarPartyRosterExact(roster)) ||
+        (native_leader && (player!=0u || binding->spawn_generation!=roster->native_avatar_generation ||
+            !SudekiMpLanStoryInputHostFenceExact(roster->controller,host)))) return FALSE;
+    if(!story_avatar_key_exact(key) || !story_avatar_exact(player,actor,binding->spawn_generation) ||
+        !readable_memory(actor,0x138u) || *(void **)actor!=game_base+0x2d55d4u ||
+        !readable_memory(ai=*(uint8_t **)(actor+0x94u),0x16cu) ||
+        *(void **)ai!=game_base+0x2d4924u || *(void **)(ai+0x10u)!=actor ||
+        !readable_memory(mode=*(uint8_t **)(ai+0x3cu),0xcu) ||
+        !party_component(actor,0x90u,0x2cc9acu,0x64u) ||
+        !party_component(actor,0x80u,0x2c8644u,0xc0u) ||
+        !readable_memory(roster->controller,0x24cu) ||
+        *(void **)roster->controller!=game_base+0x2c9f5cu ||
+        *(void **)((uint8_t *)roster->controller+0x248u)!=host) return FALSE;
+    unsigned count=*(unsigned *)((uint8_t *)roster->group+0xccu),memberships=0;
+    for(unsigned i=0;i<count;++i) if(*(void **)((uint8_t *)roster->group+0x90u+i*0xcu)==actor) {
+        if(!native_leader || i || count!=1u) return FALSE;
+        ++memberships;
+    }
+    if((native_leader && memberships!=1u) || !story_control_scope(w,roster) ||
+        !story_avatar_exact(player,actor,binding->spawn_generation) ||
+        (native_leader && !SudekiMpLanStoryInputHostFenceExact(roster->controller,host))) return FALSE;
+    ZeroMemory(out,sizeof(*out)); out->key=*key; out->actor=actor;
+    out->group=roster->group; out->controller=roster->controller;
+    out->host=host; out->ai=ai; out->mode=mode; out->story_native_leader=native_leader;
+    out->avatar_generation=binding->spawn_generation;
+    binding->slot=actor;
+    if(slot_out) *slot_out=&binding->slot;
+    return TRUE;
 }
 static BOOL story_control_observe(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
@@ -8016,6 +8172,9 @@ static BOOL story_control_observe(const SudekiMpControlUpdateDispatchWitness *w,
     unsigned matches=0;
     if(!story_key_valid(key) || !out || !story_control_scope(w,roster) ||
         !party_native_entries_exact()) return FALSE;
+    if(key->seat>=STORY_ALLY_SEAT) return story_native_control.avatar_route?
+        story_control_observe_avatar(w,roster,key,out,slot_out):
+        story_control_observe_ally(w,roster,key,out,slot_out);
     if(key->seat==roster->leader_character || !(roster->available_mask&(1u<<key->seat))) return FALSE;
     actor=roster->actors[key->seat]; ai=roster->ai[key->seat]; controller=roster->controller;
     if(party_actor(key->seat)!=actor) return FALSE;
@@ -8047,18 +8206,28 @@ static BOOL story_control_identity(const SudekiMpControlUpdateDispatchWitness *w
         story_control_observe(w,roster,key,&fresh,slot_out) &&
         owned->actor==fresh.actor && owned->group==fresh.group &&
         owned->controller==fresh.controller && owned->host==fresh.host &&
-        owned->ai==fresh.ai && owned->mode==fresh.mode;
+        owned->ai==fresh.ai && owned->mode==fresh.mode &&
+        owned->avatar_generation==fresh.avatar_generation && owned->story_native_leader==fresh.story_native_leader;
+}
+/* The actual native party leader already has native control mode0. Its
+ * closed input adapter permits our explicit arbiter requests without an AI
+ * override increment. Only the typed Story route may retain this state. */
+static BOOL story_control_mode_exact(const PartyNativeLease *owned) {
+    return owned->story_native_leader?
+        (*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 && ((uint8_t *)owned->mode)[0xbu]==0u):
+        party_ai_owned(owned);
 }
 static BOOL story_control_stop(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key) {
     if(!story_key_valid(key)) return FALSE;
     uint8_t *movement; PartyNativeLease *owned=&story_native_control.actor[key->seat];
-    if(!story_control_identity(w,roster,key,NULL) || !party_ai_owned(owned) ||
+    if(!story_control_identity(w,roster,key,NULL) || !story_control_mode_exact(owned) ||
         !(movement=party_component(owned->actor,0x80u,0x2c8644u,0xc0u)) ||
         !(movement[0xbeu]&8u)) return FALSE;
     ((MovementControllerSetSpeedImmediateFunction)(game_base+
         RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE))(movement,0.0f,1.0f);
     return story_control_identity(w,roster,key,NULL) &&
+        story_control_mode_exact(owned) &&
         party_component(owned->actor,0x80u,0x2c8644u,0xc0u)==movement &&
         *(float *)(movement+0x24u)==0.0f && *(float *)(movement+0x28u)==0.0f;
 }
@@ -8080,24 +8249,47 @@ BOOL SudekiMpLanPartyControlStoryBegin(const SudekiMpControlUpdateDispatchWitnes
     ZeroMemory(story_native_control.last_generation,sizeof(story_native_control.last_generation));
     ZeroMemory(&story_native_control.actor,sizeof(story_native_control.actor));
     ZeroMemory(&story_native_control.released,sizeof(story_native_control.released));
+    ZeroMemory(story_native_control.avatar,sizeof(story_native_control.avatar));
+    story_native_control.avatar_route=FALSE;
     InterlockedExchange(&story_native_control.bound,1);
+    return TRUE;
+}
+static BOOL story_next_lease(const SudekiMpLanPartyLease *connection,unsigned character,
+    SudekiMpLanPartyLease *out) {
+    if(!connection || !out || character>=STORY_SEATS ||
+        !connection->token || !connection->generation ||
+        connection->seat>3u || story_native_control.actor[character].phase!=PARTY_NATIVE_EMPTY ||
+        story_native_control.last_generation[character]==UINT32_MAX) return FALSE;
+    if(character>=STORY_ALLY_SEAT && story_native_control.avatar_route) {
+        unsigned player=character-STORY_ALLY_SEAT;
+        StoryAvatarBinding *binding=&story_native_control.avatar[player];
+        if(connection->seat!=player || !story_avatar_exact(player,binding->actor,binding->spawn_generation)) return FALSE;
+        if(binding->issued.generation>story_native_control.last_generation[character]) {
+            if(binding->issued.token==connection->token && binding->connection_generation==connection->generation &&
+                binding->issued_spawn_generation==binding->spawn_generation) { *out=binding->issued; return TRUE; }
+            story_native_control.last_generation[character]=binding->issued.generation;
+            if(story_native_control.last_generation[character]==UINT32_MAX) return FALSE;
+        }
+        *out=*connection; out->seat=(uint8_t)character;
+        out->generation=story_native_control.last_generation[character]+1u;
+        binding->issued=*out; binding->issued_spawn_generation=binding->spawn_generation;
+        binding->connection_generation=connection->generation;
+        return TRUE;
+    } else if(!connection->seat || character>STORY_ALLY_SEAT ||
+        (character==STORY_ALLY_SEAT && !story_native_control.ally_entity)) return FALSE;
+    *out=*connection; out->seat=(uint8_t)character; out->generation=story_native_control.last_generation[character]+1u;
     return TRUE;
 }
 BOOL SudekiMpLanPartyControlStoryNextLease(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *connection,unsigned character,SudekiMpLanPartyLease *out) {
-    if(!party_boundary(w) || !InterlockedCompareExchange(&story_native_control.bound,0,0) ||
-        story_native_control.thread!=GetCurrentThreadId() || !connection || !out || character>=4u ||
-        !connection->token || !connection->generation || connection->seat<1u ||
-        connection->seat>3u || story_native_control.actor[character].phase!=PARTY_NATIVE_EMPTY ||
-        story_native_control.last_generation[character]==UINT32_MAX) return FALSE;
-    *out=*connection; out->seat=(uint8_t)character; out->generation=story_native_control.last_generation[character]+1u;
-    return TRUE;
+    return party_boundary(w) && InterlockedCompareExchange(&story_native_control.bound,0,0) &&
+        story_native_control.thread==GetCurrentThreadId() && story_next_lease(connection,character,out);
 }
 BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key) {
     return story_control_identity(w,roster,key,NULL) &&
         story_native_control.actor[key->seat].phase==PARTY_NATIVE_HELD &&
-        party_ai_owned(&story_native_control.actor[key->seat]);
+        story_control_mode_exact(&story_native_control.actor[key->seat]);
 }
 static const char *story_owned_trace;
 static unsigned story_owned_traces;
@@ -8135,14 +8327,19 @@ BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitn
         !story_control_observe(w,roster,key,&fresh,&slot) ||
         before.actor!=fresh.actor || before.group!=fresh.group ||
         before.controller!=fresh.controller || before.host!=fresh.host ||
-        before.ai!=fresh.ai || before.mode!=fresh.mode ||
+        before.ai!=fresh.ai || before.mode!=fresh.mode || before.avatar_generation!=fresh.avatar_generation ||
+        before.story_native_leader!=fresh.story_native_leader ||
         owned->phase!=PARTY_NATIVE_EMPTY ||
         *(int16_t *)((uint8_t *)fresh.ai+0x16au)!=0 ||
-        ((uint8_t *)fresh.mode)[0xbu]!=1u) return FALSE;
+        ((uint8_t *)fresh.mode)[0xbu]!=(fresh.story_native_leader?0u:1u)) return FALSE;
     uint32_t previous=story_native_control.last_generation[key->seat];
     *owned=fresh; owned->phase=PARTY_NATIVE_QUARANTINED;
     story_native_control.last_generation[key->seat]=key->generation;
     InterlockedOr(&story_native_control.retained,(LONG)(1u<<key->seat));
+    if(owned->story_native_leader) {
+        owned->phase=PARTY_NATIVE_HELD;
+        return story_control_stop(w,roster,key);
+    }
     party_call_ai(TRUE,slot);
     if(!story_control_identity(w,roster,key,NULL)) return FALSE;
     if(party_ai_owned(owned)) {
@@ -8167,6 +8364,25 @@ BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness
         !(movement=party_component(actor,0x80u,0x2c8644u,0xc0u)) ||
         !party_component(actor,0x8cu,0x2d48d4u,0x14u) ||
         !party_component(actor,0xacu,0x2d4b24u,0x54u)) return FALSE;
+    {   /* Research (gated): which native movement gate applies to this
+         * story-controlled actor, once per second while input moves. */
+        static DWORD gate_logged; DWORD gate_now=GetTickCount();
+        if(SudekiMpLogResearchEnabled() && (x!=0.0f || z!=0.0f) && gate_now-gate_logged>=1000u) {
+            gate_logged=gate_now;
+            uint32_t flags=0; int mode=-1; unsigned state60=0; int control=-1; unsigned mflags=0;
+            unsigned gate=classify_native_movement_gate(arbiter,0u,&flags,&mode,&state60,&control,&mflags);
+            uint8_t *a=actor; BOOL a_ok=readable_memory(a,0x108u);
+            uint8_t *attachment_state=a_ok?*(uint8_t **)(a+0xa4u):NULL,*attachment_owner=a_ok?*(uint8_t **)(a+0xb8u):NULL;
+            unsigned att72=readable_memory(attachment_state,0x73u)?attachment_state[0x72u]:0xffu;
+            unsigned ownb1=readable_memory(attachment_owner,0xb2u)?attachment_owner[0xb1u]:0xffu;
+            /* Native 4DBB20 admits a MOVE request only when the model-animation
+             * component (entity+0x104) state nibble (+0x88 & 0xF) is 0,3,4 or 6. */
+            uint8_t *model_anim=a_ok?*(uint8_t **)(a+0x104u):NULL;
+            unsigned anim_state=readable_memory(model_anim,0x89u)?(model_anim[0x88u]&0x0fu):0xffu;
+            SudekiMpLogFormat("story_native_control event=move_gate character=%u gate=%s flags=%08lx busy=%08lx mode=%d state60=%u control=%d movement_flags=%02x attachment72=%02x owner_b1=%02x anim_state=%u has_8c=%u input=%.2f,%.2f\r\n",
+                key->seat,native_movement_gate_name(gate),(unsigned long)flags,(unsigned long)(flags&0x0289e568u),mode,state60,control,mflags,att72,ownb1,anim_state,(unsigned)(a_ok && *(void **)(a+0x8cu)!=NULL),(double)x,(double)z);
+        }
+    }
     if(!(movement[0xbeu]&8u)) { SetLastError(ERROR_BUSY); return FALSE; }
     float magnitude=sqrtf(x*x+z*z),heading[3]={0.0f,0.0f,0.0f};
     if(magnitude<0.0001f) return story_control_stop(w,roster,key);
@@ -8183,22 +8399,113 @@ BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitnes
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
     unsigned kind,BOOL *submitted) {
     if(submitted) *submitted=FALSE;
-    BOOL combat=FALSE;
-    if(!submitted || !key || key->seat!=2u || kind<1u || kind>3u ||
-        !SudekiMpLanPartyControlStoryExact(w,roster,key) || !party_native_entries_exact() ||
-        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat) return FALSE;
-    void *actor=story_native_control.actor[key->seat].actor;
-    uint8_t *arbiter=party_component(actor,0x90u,0x2cc9acu,0x64u);
-    if(!arbiter || *(void **)(arbiter+0x10u)!=actor ||
-        !party_component(actor,0x94u,0x2d4924u,0x16cu) ||
-        !party_component(actor,0xacu,0x2d4b24u,0x54u) ||
-        !SudekiMpLanPartyControlStoryExact(w,roster,key) ||
-        party_component(actor,0x90u,0x2cc9acu,0x64u)!=arbiter ||
-        !SudekiMpStoryInteractionInputImageExact(game_base,readable_memory) ||
-        !SudekiMpStoryMeleeInteractionClear(game_base,actor,kind,readable_memory)) return FALSE;
+    BOOL combat=FALSE; const char *refuse=NULL;
+    static DWORD melee_logged; static unsigned melee_logs;
+    BOOL ally_seat=key && key->seat>=STORY_ALLY_SEAT && key->seat<STORY_SEATS;
+    BOOL ally_special=ally_seat && kind>=3u && kind<=4u;
+    if(!submitted || !key || (key->seat!=2u && !ally_seat) || kind<1u || kind>(ally_special?4u:3u)) refuse="arguments";
+    else if(!SudekiMpLanPartyControlStoryExact(w,roster,key)) refuse="lease";
+    else if(!party_native_entries_exact()) refuse="native_entries";
+    else if(!SudekiMpCleanroomEngineCombatMode(&combat) || !combat) refuse="combat_mode_off";
+    void *actor=refuse?NULL:story_native_control.actor[key->seat].actor;
+    uint8_t *arbiter=actor?party_component(actor,0x90u,0x2cc9acu,0x64u):NULL;
+    if(!refuse) {
+        if(!arbiter || *(void **)(arbiter+0x10u)!=actor) refuse="arbiter";
+        else if(!party_component(actor,0x94u,0x2d4924u,0x16cu)) refuse="ai_component";
+        else if(!party_component(actor,0xacu,0x2d4b24u,0x54u)) refuse="component_ac";
+        else if(!SudekiMpLanPartyControlStoryExact(w,roster,key) || party_component(actor,0x90u,0x2cc9acu,0x64u)!=arbiter) refuse="lease_recheck";
+        else if(!SudekiMpStoryInteractionInputImageExact(game_base,readable_memory)) refuse="interaction_image";
+        else if(!ally_seat && !SudekiMpStoryMeleeInteractionClear(game_base,actor,kind,readable_memory)) refuse="interaction_busy";
+    }
+    if(refuse) {
+        DWORD now=GetTickCount();
+        if(SudekiMpLogResearchEnabled() && now-melee_logged>=1000u && melee_logs<300u) { melee_logged=now; ++melee_logs;
+            SudekiMpLogFormat("story_native_control event=melee_refused kind=%u reason=%s arbiter_flags=%08lx\r\n",kind,refuse,(unsigned long)(arbiter?*(uint32_t *)(arbiter+0x50u):0u)); }
+        return FALSE;
+    }
+    uint32_t flags_before=*(uint32_t *)(arbiter+0x50u);
+    if(ally_special) {
+        /* Talos's authored "special1"/"special2" combos (HHL=COMBO7, HHH=COMBO8)
+         * are single moves his AI plays by entry, never by press prefix. Mirror
+         * the AI wrapper (RVA DAC40): native attack admission (RVA DB740, EAX=
+         * arbiter) then CComboManager::PlayCombo(manager, index, true, true). */
+        static const uint8_t admission_entry[16]={0x8b,0x48,0x50,0xf6,0xc1,0x02,0x76,0x4e,0x8b,0x50,0x58,0x83,0xe2,0x0f,0x80,0xfa};
+        static const uint8_t play_tail[10]={0x3b,0x50,0x58,0x7d,0x0d,0x8b,0x48,0x60,0x83,0x3c};
+        uint8_t *manager=party_component(actor,0xb8u,0x2d4bd4u,0xb4u);
+        unsigned want=kind==3u?127u:126u,index=0xffffffffu;
+        if(memcmp(game_base+0xdb740u,admission_entry,sizeof(admission_entry)) ||
+            memcmp(game_base+0xd0f30u+6u,play_tail,sizeof(play_tail)) ||
+            (game_base[0xd0f30u]!=0x8bu && game_base[0xd0f30u]!=0xe9u) || !manager) refuse="special_entries";
+        else {
+            unsigned count=*(uint32_t *)(manager+0x58u); uint32_t *table=*(uint32_t **)(manager+0x60u);
+            if(count>32u || !readable_memory(table,count*4u)) refuse="special_table";
+            else for(unsigned i=0;i<count;++i) {
+                const uint8_t *record=(const uint8_t *)(uintptr_t)table[i];
+                if(readable_memory(record,0x58u) && *(const uint16_t *)(record+0x54u)==want &&
+                    *(const uint16_t *)(record+0x48u)>=4u) { index=i; break; }
+            }
+            if(!refuse && index==0xffffffffu) refuse="special_missing";
+        }
+        if(refuse) {
+            if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+                SudekiMpLogFormat("story_native_control event=melee_refused kind=%u reason=%s\r\n",kind,refuse); }
+            return FALSE;
+        }
+        unsigned char admitted=0;
+        __asm__ volatile("call *%[fn]" : "=a"(admitted) : "a"(arbiter), [fn]"r"(game_base+0xdb740u) : "ecx","edx","memory","cc");
+        if(!(admitted&0xffu)) {
+            if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+                SudekiMpLogFormat("story_native_control event=melee_refused kind=%u reason=special_admission flags50=%08lx state58=%08lx\r\n",
+                    kind,(unsigned long)flags_before,(unsigned long)*(uint32_t *)(arbiter+0x58u)); }
+            return FALSE;
+        }
+        *submitted=TRUE;
+        unsigned char played=0;
+        __asm__ volatile("push $1; push $1; push %[idx]; call *%[fn]" : "=a"(played) : "c"(manager), [idx]"r"(index), [fn]"r"(game_base+0xd0f30u) : "edx","memory","cc");
+        if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+            SudekiMpLogFormat("story_native_control event=ally_special kind=%u index=%u animid=%u played=%u flags50=%08lx\r\n",
+                kind,index,want,(unsigned)(played&0xffu),(unsigned long)*(uint32_t *)(arbiter+0x50u)); }
+        return (played&0xffu) && SudekiMpLanPartyControlStoryExact(w,roster,key) &&
+            party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter;
+    }
+    if(ally_seat) {
+        /* Weak/strong for the ally: the hero input function (DB0E0) also writes
+         * the host controller's global interaction latch for Weak, which is why
+         * a remote weak press near an interactable is refused. Feed the press
+         * where DB0E0 itself ends up: attack admission (DB740, EAX=arbiter) and
+         * combo dispatch (D0730, EAX=manager, args kind,1; callee cleans). */
+        static const uint8_t admission_entry[16]={0x8b,0x48,0x50,0xf6,0xc1,0x02,0x76,0x4e,0x8b,0x50,0x58,0x83,0xe2,0x0f,0x80,0xfa};
+        static const uint8_t dispatch_tail[10]={0x8b,0x56,0x10,0x8b,0x82,0xa8,0x00,0x00,0x00,0x57};
+        uint8_t *manager=party_component(actor,0xb8u,0x2d4bd4u,0xb4u);
+        if(memcmp(game_base+0xdb740u,admission_entry,sizeof(admission_entry)) ||
+            memcmp(game_base+0xd0730u+6u,dispatch_tail,sizeof(dispatch_tail)) ||
+            (game_base[0xd0730u]!=0x83u && game_base[0xd0730u]!=0xe9u) || !manager) {
+            if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+                SudekiMpLogFormat("story_native_control event=melee_refused kind=%u reason=dispatch_entries\r\n",kind); }
+            return FALSE;
+        }
+        unsigned char admitted=0,dispatched=0;
+        __asm__ volatile("call *%[fn]" : "=a"(admitted) : "a"(arbiter), [fn]"r"(game_base+0xdb740u) : "ecx","edx","memory","cc");
+        if(!(admitted&0xffu)) {
+            if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+                SudekiMpLogFormat("story_native_control event=melee_refused kind=%u reason=admission flags50=%08lx state58=%08lx\r\n",
+                    kind,(unsigned long)flags_before,(unsigned long)*(uint32_t *)(arbiter+0x58u)); }
+            return FALSE;
+        }
+        *submitted=TRUE;
+        __asm__ volatile("push $1; push %[kind]; call *%[fn]" : "=a"(dispatched) : "a"(manager), [kind]"r"(kind), [fn]"r"(game_base+0xd0730u) : "ecx","edx","memory","cc");
+        if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+            SudekiMpLogFormat("story_native_control event=ally_dispatch kind=%u accepted=%u flags50=%08lx\r\n",kind,(unsigned)(dispatched&0xffu),(unsigned long)*(uint32_t *)(arbiter+0x50u)); }
+        /* The native combo tracker's own verdict: FALSE with *submitted set maps
+         * to RETAINED, which the client shows as "no chain" for that press. */
+        return (dispatched&0xffu) && SudekiMpLanPartyControlStoryExact(w,roster,key) &&
+            party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter;
+    }
     *submitted=TRUE;
     SudekiMpSubmitArbiterCombatInput(game_base+RVA_ARBITER_COMBAT_INPUT,arbiter,
         kind==1u,kind==2u,kind==3u,0,0,0);
+    if(SudekiMpLogResearchEnabled() && melee_logs<300u) { ++melee_logs;
+        SudekiMpLogFormat("story_native_control event=melee_submitted kind=%u arbiter_flags=%08lx->%08lx arbiter60=%02x\r\n",kind,(unsigned long)flags_before,(unsigned long)*(uint32_t *)(arbiter+0x50u),(unsigned)*(uint8_t *)(arbiter+0x60u)); }
     /* Native validation/combo timing may legitimately reject the request.
      * Never manufacture an animation, target, damage or second invocation. */
     return SudekiMpLanPartyControlStoryExact(w,roster,key) &&
@@ -8217,6 +8524,12 @@ BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitnes
     /* Close admission before inspecting a potentially changed native scene. */
     if(owned->phase==PARTY_NATIVE_HELD) owned->phase=PARTY_NATIVE_DRAINING;
     if(!story_control_identity(w,roster,key,&slot)) return FALSE;
+    if(owned->story_native_leader) {
+        if(owned->phase!=PARTY_NATIVE_DRAINING || !story_control_mode_exact(owned) ||
+            !story_control_stop(w,roster,key) || !drained(key,owned->actor,w) ||
+            !story_control_identity(w,roster,key,NULL) || !story_control_mode_exact(owned)) return FALSE;
+        story_control_forget(key->seat); return TRUE;
+    }
     if(owned->phase==PARTY_NATIVE_QUARANTINED) {
         /* Acquire records the exact ref0/mode1 owner before its sole native
          * OverrideControl call. A later fresh witness may resolve an
@@ -8256,19 +8569,18 @@ BOOL SudekiMpLanPartyControlStoryRetains(void) {
 }
 BOOL SudekiMpLanPartyControlStoryEnd(void) {
     if(!InterlockedCompareExchange(&story_native_control.bound,0,0)) return TRUE;
-    if(story_native_control.thread!=GetCurrentThreadId() ||
-        SudekiMpLanPartyControlStoryRetains() ||
-        (story_native_control.actor[0].phase!=PARTY_NATIVE_EMPTY ||
-         story_native_control.actor[1].phase!=PARTY_NATIVE_EMPTY ||
-         story_native_control.actor[2].phase!=PARTY_NATIVE_EMPTY ||
-         story_native_control.actor[3].phase!=PARTY_NATIVE_EMPTY)) {
+    if(story_native_control.thread!=GetCurrentThreadId() || SudekiMpLanPartyControlStoryRetains()) {
         SetLastError(ERROR_BUSY); return FALSE;
     }
+    for(unsigned i=0;i<STORY_SEATS;++i)
+        if(story_native_control.actor[i].phase!=PARTY_NATIVE_EMPTY) { SetLastError(ERROR_BUSY); return FALSE; }
     InterlockedExchange(&story_native_control.bound,0);
     story_native_control.thread=0; story_native_control.world=NULL;
     story_native_control.descriptor=NULL; story_native_control.epoch=0;
     ZeroMemory(story_native_control.last_generation,sizeof(story_native_control.last_generation));
     ZeroMemory(&story_native_control.released,sizeof(story_native_control.released));
+    ZeroMemory(story_native_control.avatar,sizeof(story_native_control.avatar));
+    story_native_control.avatar_route=FALSE;
     return TRUE;
 }
 

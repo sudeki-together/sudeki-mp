@@ -2,6 +2,8 @@
 #include "hooks/lan_party_host_control.h"
 #include "hooks/lan_party_client_control.h"
 #include "hooks/lan_party_follow.h"
+#include "hooks/lan_story_avatar_spawn.h"
+#include "hooks/lan_story_avatar_party.h"
 #include "network/lan_party_motion.h"
 #include "network/lan_arena_tal_combo_graph.h"
 #include <math.h>
@@ -32,6 +34,19 @@ static SudekiMpLanPartyRoster roster;
 static SudekiMpLanPartyRosterStatus roster_status;
 static SudekiMpLanPartyClientControl *network_client;
 static SudekiMpLanPartyClientControlReport client_report;
+/* This SMP4 image fixture owns no asynchronous story-avatar spawn records. */
+BOOL SudekiMpLanStoryAvatarSpawnObserve(unsigned player,uint32_t epoch,uint32_t generation,
+    SudekiMpLanStoryAvatarSpawnObservation *out) {
+    (void)player; (void)epoch; (void)generation;
+    if(out) ZeroMemory(out,sizeof(*out));
+    return FALSE;
+}
+BOOL SudekiMpLanStoryAvatarPartyObserve(SudekiMpLanStoryAvatarPartyObservation *out) {
+    (void)out; return FALSE;
+}
+BOOL SudekiMpLanStoryInputHostFenceExact(void *controller,void *actor) {
+    (void)controller; (void)actor; return FALSE;
+}
 /* This inert adapter fixture has no gameplay runtime or host-local input. */
 BOOL SudekiMpLanPartyRuntimeHostLocalInput(
     const SudekiMpControlUpdateDispatchWitness *w, unsigned character,

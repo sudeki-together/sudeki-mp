@@ -1,6 +1,8 @@
 #include "hooks/lan_story_control.h"
+#include "network/lan_story_handoff.h"
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_party_control.h"
+#include "hooks/lan_story_avatar_party_roster.h"
 #include "hooks/story_interaction_guard.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
@@ -64,17 +66,39 @@ static BOOL boundary(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
     if(!base || !installed || !hooks_exact() || !w || !roster ||
         !w->service_post_original_exact || !w->dispatch_serial ||
-        !roster->available_mask || roster->leader_character>=4u ||
-        !(roster->available_mask&(1u<<roster->leader_character)) ||
         !SudekiMpLanStoryObserverRosterStillExact(w,roster) ||
         (native_thread && native_thread!=GetCurrentThreadId())) return FALSE;
+    if(roster->native_avatar_generation) {
+        if(!SudekiMpLanStoryAvatarPartyRosterExact(roster)) return FALSE;
+    } else if(!roster->available_mask || roster->leader_character>=4u ||
+        !(roster->available_mask&(1u<<roster->leader_character))) return FALSE;
     native_thread=GetCurrentThreadId(); return TRUE;
+}
+/* Ally seat (ALLY_TALOS, class 0x2d55d4): it has the arbiter and interaction
+ * components but no CSkill/hero weapon record, so idleness is the arbiter's
+ * busy flags plus the shared world/spirit gates. */
+static BOOL ally_body_idle(void *actor,const SudekiMpControlUpdateDispatchWitness *w) {
+    uint8_t *a=actor,*arbiter,*interaction,*mode; int spirit=-1;
+    if(!base || !w || !w->service_post_original_exact ||
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
+        !readable(a,0x138u) || *(void **)a!=base+0x2d55d4u ||
+        !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
+        *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor ||
+        (*(uint32_t *)(arbiter+0x50u)&STORY_BODY_BUSY_FLAGS) || (arbiter[0x60u]&5u) ||
+        SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0) return FALSE;
+    interaction=*(uint8_t **)(a+0xa8u);
+    if(interaction && (!readable(interaction,0x64u) ||
+        !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) return FALSE;
+    return SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
 }
 static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
     const SudekiMpControlUpdateDispatchWitness *w) {
     uint8_t *a=actor,*arbiter,*interaction,*mode; SudekiMpCharacterSkillState skill;
     static const uint32_t actor_vt[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
     BOOL pending=TRUE; int spirit=-1;
+    if(key && key->seat>=SUDEKIMP_STORY_NATIVE_AVATAR_FIRST && key->seat<SUDEKIMP_STORY_NATIVE_SEATS)
+        return ally_body_idle(actor,w);
     if(!base || !key || key->seat>=4u || !w || !w->service_post_original_exact ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
         !readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
@@ -136,7 +160,7 @@ BOOL SudekiMpLanStoryControlBegin(const SudekiMpControlUpdateDispatchWitness *w,
 }
 BOOL SudekiMpLanStoryControlNextLease(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *connection,unsigned character,SudekiMpLanPartyLease *key) {
-    return base && installed && hooks_exact() && character<4u && native_thread &&
+    return base && installed && hooks_exact() && character<SUDEKIMP_STORY_NATIVE_SEATS && native_thread &&
         native_thread==GetCurrentThreadId() &&
         SudekiMpLanPartyControlStoryNextLease(w,connection,character,key);
 }
@@ -158,10 +182,12 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,float x,float z,
     BOOL *temporarily_held) {
     if(temporarily_held) *temporarily_held=FALSE;
-    if(!boundary(w,roster) || !key || key->seat>=4u || !isfinite(x) || !isfinite(z)) return FALSE;
+    if(!boundary(w,roster) || !key || key->seat>=SUDEKIMP_STORY_NATIVE_SEATS || !isfinite(x) || !isfinite(z)) return FALSE;
+    void *body=key->seat>=SUDEKIMP_STORY_NATIVE_AVATAR_FIRST?
+        SudekiMpLanPartyControlStoryAllyActor(key):roster->actors[key->seat];
     /* A neutral packet may quiesce our speed while native UI or a menu is
      * active. New locomotion still requires the ordinary unpaused world. */
-    if(!ordinary_world(TRUE) || !body_idle(key,roster->actors[key->seat],w)) {
+    if(!ordinary_world(TRUE) || !body || !body_idle(key,body,w)) {
         /* A temporary native interaction is not a disconnect. The lower
          * adapter still proves this exact retained AI/movement lease before
          * stopping it; failure there remains an ownership/drain fault. */
@@ -181,20 +207,28 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
 }
 unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned kind) {
-    if(!key || key->seat!=2u || kind<1u || kind>3u || !boundary(w,roster) ||
+    BOOL ally=key && key->seat>=SUDEKIMP_STORY_NATIVE_AVATAR_FIRST && key->seat<SUDEKIMP_STORY_NATIVE_SEATS;
+    if(!key || (key->seat!=2u && !ally) || kind<1u || kind>(ally?4u:3u) || !boundary(w,roster) ||
         !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     BOOL pending=TRUE; int spirit=-1;
-    void *actor=roster->actors[key->seat];
+    void *actor=ally?SudekiMpLanPartyControlStoryAllyActor(key):roster->actors[key->seat];
+    if(!actor) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     /* Do not require body_idle: a native combo accepts another press while
      * its previous swing owns animation/movement. Native arbiter validation
      * remains responsible for combat state and combo gates. Its early
      * interaction branches are NOT actor-isolated: deny those before entry. */
-    if(!ordinary_world(TRUE) || SudekiMpCleanroomEngineRangedCombatPrimePending() ||
-        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
-        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
-        !SudekiMpLanStoryCastDrained(actor) ||
-        !SudekiMpStoryMeleeInteractionClear(base,actor,kind,readable))
+    const char *busy=!ordinary_world(TRUE)?"world":SudekiMpCleanroomEngineRangedCombatPrimePending()?"ranged_prime":
+        (!SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0)?"spirit":
+        /* Hero weapon/cast records do not exist on the ally entity. */
+        (!ally && (!SudekiMpWeaponActivationPending(actor,&pending) || pending))?"weapon_pending":
+        (!ally && !SudekiMpLanStoryCastDrained(actor))?"cast":
+        (!ally && !SudekiMpStoryMeleeInteractionClear(base,actor,kind,readable))?"interaction":NULL;
+    if(busy) {
+        static DWORD busy_logged; static unsigned busy_logs; DWORD now=GetTickCount();
+        if(SudekiMpLogResearchEnabled() && busy_logs<200u && now-busy_logged>=500u) { busy_logged=now; ++busy_logs;
+            SudekiMpLogFormat("story_control event=melee_busy seat=%u kind=%u reason=%s\r\n",key->seat,kind,busy); }
         return SUDEKIMP_STORY_ACTION_BUSY;
+    }
     BOOL submitted=FALSE;
     if(SudekiMpLanPartyControlStoryMelee(w,roster,key,kind,&submitted))
         return SUDEKIMP_STORY_ACTION_SUBMITTED;

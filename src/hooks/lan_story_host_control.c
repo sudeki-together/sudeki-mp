@@ -23,6 +23,7 @@ static uint8_t verified_next[SWITCH_SIZE];
 static unsigned locked,requested=4u;
 static DWORD native_thread,next_attempt;
 static BOOL active,stopping;
+static SudekiMpLanStoryHostLeaderAiExact leader_ai_exact;
 static struct {
     void *world,*descriptor,*group,*controller;
     uint32_t epoch;
@@ -131,6 +132,8 @@ static BOOL binding_exact(const SudekiMpControlUpdateDispatchWitness *w,
             !readable(mode=*(uint8_t **)(ai+0x3cu),0xcu)) return FALSE;
         if(allow_remote && c!=r->leader_character &&
             SudekiMpLanStoryControlActorOwned(w,r,c)) continue;
+        if(allow_remote && c==r->leader_character && leader_ai_exact &&
+            *(int16_t *)(ai+0x16au)==0 && mode[0xbu]==1u && leader_ai_exact(w,r)) continue;
         if(*(int16_t *)(ai+0x16au)!=0 ||
             mode[0xbu]!=(c==r->leader_character?0u:1u)) return FALSE;
     }
@@ -221,6 +224,19 @@ static BOOL switch_ready(const SudekiMpControlUpdateDispatchWitness *w,
     for(unsigned i=0;i<4u;++i) if(r->actors[i] && !actor_idle(r->actors[i])) return FALSE;
     return SudekiMpLanStoryObserverRosterStillExact(w,r);
 }
+BOOL SudekiMpLanStoryHostControlSetLeaderAiWitness(SudekiMpLanStoryHostLeaderAiExact exact) {
+    if(!base || native_thread || active || input_owner.owned || rotation.entered) return FALSE;
+    leader_ai_exact=exact; return TRUE;
+}
+BOOL SudekiMpLanStoryHostControlLeaderActionsDrained(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r) {
+    if(!base || !r || r->leader_character>=4u || !SudekiMpLanStoryObserverRosterStillExact(w,r) ||
+        !actor_idle(r->actors[r->leader_character])) return FALSE;
+    const uint8_t *actor=r->actors[r->leader_character];
+    const uint8_t *arbiter=*(const uint8_t *const *)(actor+0x90u);
+    return readable(arbiter,0x64u) && *(const void *const *)(arbiter+0x10u)==actor &&
+        !(*(const uint32_t *)(arbiter+0x50u)&0x1000u) && SudekiMpLanStoryObserverRosterStillExact(w,r);
+}
 /* Retail entry ABI: ESI=group, no stack arguments, ordinary RET. This calls
  * the entire pristine function including native veto, intrusive rotation,
  * AI transition and camera/HUD/listener notification. */
@@ -238,7 +254,7 @@ BOOL SudekiMpLanStoryHostControlInstall(HMODULE image,unsigned locked_character)
         memcmp(b+FILTER_ALL,all_code,sizeof(all_code)) || !next_supported(b)) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
-    base=b; locked=locked_character; requested=4u; native_thread=next_attempt=0;
+    base=b; locked=locked_character; requested=4u; native_thread=next_attempt=0; leader_ai_exact=NULL;
     active=stopping=FALSE; completed_load=completed_task=0;
     memset(&input_owner,0,sizeof(input_owner)); memset(&rotation,0,sizeof(rotation));
     return TRUE;
@@ -367,6 +383,6 @@ BOOL SudekiMpLanStoryHostControlUninstall(void) {
     if(!base) return TRUE;
     if(SudekiMpLanStoryHostControlRetains() || SudekiMpLanStoryControlRetains() ||
         (native_thread && native_thread!=GetCurrentThreadId())) return retain(ERROR_BUSY);
-    base=NULL; native_thread=next_attempt=0; active=stopping=FALSE; locked=4u;
+    base=NULL; native_thread=next_attempt=0; active=stopping=FALSE; locked=4u; leader_ai_exact=NULL;
     memset(verified_next,0,sizeof(verified_next)); return TRUE;
 }

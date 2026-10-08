@@ -51,6 +51,8 @@ typedef BOOL (*SudekiMpLanStoryLocalViewExact)(
  * No native camera tick, world simulation or actor identity writes. Ready
  * stays FALSE until at least one successful local view publication. The
  * borrowed view is retired only after the caller's native Quit witness. */
+/* Dev Play ally seat: the published view frames this entity (NULL = the selected hero). */
+void SudekiMpLanStoryLocalControlSetAnchorEntity(void *entity);
 BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *roster,
     SudekiMpLanStoryLocalViewExact exact,void *context,float horizontal_seconds,float vertical_seconds);
 /* Read-only local movement basis. Caller still owns transport offer/ACK,

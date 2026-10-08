@@ -83,6 +83,10 @@ static SpawnJob spawn_jobs[SPAWN_JOBS];
 static unsigned completion_scopes[MAX_DEPTH]; /* zero masks an unrelated completion */
 static unsigned spawn_depth,completion_depth,spawn_events;
 static uint32_t next_spawn_request,next_construction;
+static const void *entity_setup_consumer;
+static SudekiMpLanStoryEntitySetupObserver entity_setup_observer;
+static unsigned entity_setup_depth[3];
+static SudekiMpLanStoryEntitySetupEvent entity_setup_scopes[3][MAX_DEPTH];
 static struct {
     uint32_t transaction,request,created_before;
     const void *actor,*placement;
@@ -213,6 +217,28 @@ static BOOL descriptor_exact(void *value,unsigned kind) {
  * them. An observed constructor at a reused address invalidates its old tag. */
 static BOOL spawn_owner_thread(void) {
     return native_thread && native_thread==GetCurrentThreadId();
+}
+static void entity_setup_begin(unsigned kind,void *job,const void *subject,uint32_t flags) {
+    if(!entity_setup_observer || !spawn_owner_thread()) return;
+    unsigned depth=entity_setup_depth[kind]++;
+    SudekiMpLanStoryEntitySetupEvent event={
+        .phase=depth<MAX_DEPTH?(SudekiMpLanStoryEntitySetupPhase)(kind*2u):SUDEKIMP_ENTITY_SETUP_UNKNOWN,
+        .load_generation=status.load_generation,.flags=flags,.job=job,.subject=subject};
+    if(depth<MAX_DEPTH) entity_setup_scopes[kind][depth]=event;
+    entity_setup_observer(entity_setup_consumer,&event);
+}
+static void entity_setup_end(unsigned kind,void *result) {
+    if(!entity_setup_observer || !spawn_owner_thread()) return;
+    SudekiMpLanStoryEntitySetupEvent event={.phase=SUDEKIMP_ENTITY_SETUP_UNKNOWN,
+        .load_generation=status.load_generation,.result=result};
+    if(entity_setup_depth[kind]) {
+        unsigned depth=--entity_setup_depth[kind];
+        if(depth>=MAX_DEPTH) return;
+        event=entity_setup_scopes[kind][depth];
+        memset(&entity_setup_scopes[kind][depth],0,sizeof(event));
+        event.phase=(SudekiMpLanStoryEntitySetupPhase)(kind*2u+1u); event.result=result;
+    }
+    entity_setup_observer(entity_setup_consumer,&event);
 }
 static BOOL spawn_log_allowed(void) {
     if(spawn_events>=SPAWN_EVENTS) return FALSE;
@@ -357,6 +383,7 @@ static void TRACE_HELPER spawn_rr_end(unsigned cookie) {
 static unsigned TRACE_HELPER spawn_ctor_begin(void *job,const void *placement) {
     DWORD error=GetLastError(); unsigned cookie=0,slot=SPAWN_JOBS;
     InterlockedIncrement(&callbacks);
+    entity_setup_begin(0u,job,placement,0u);
     if(!spawn_owner_thread()) {
         if(native_thread) spawn_unknown("spawn_foreign_thread");
         goto done;
@@ -415,11 +442,13 @@ static void TRACE_HELPER spawn_ctor_end(unsigned cookie,void *result) {
                 actor_text,j->job_name.exact);
         }
     }
+    entity_setup_end(0u,result);
     InterlockedDecrement(&callbacks); SetLastError(error);
 }
 static unsigned TRACE_HELPER spawn_complete_begin(void *job,void *actor) {
     DWORD error=GetLastError(); unsigned cookie=0;
     InterlockedIncrement(&callbacks);
+    entity_setup_begin(1u,job,actor,0u);
     if(!spawn_owner_thread()) {
         if(native_thread) spawn_unknown("spawn_foreign_thread");
         goto done;
@@ -495,6 +524,7 @@ static void TRACE_HELPER spawn_complete_end(unsigned cookie) {
         }
     }
  done:
+    entity_setup_end(1u,NULL);
     InterlockedDecrement(&callbacks); SetLastError(error);
 }
 
@@ -507,6 +537,7 @@ static SpawnJob *spawn_construction(uint32_t construction) {
 static unsigned TRACE_HELPER spawn_destroy_begin(void *job,unsigned flags) {
     DWORD error=GetLastError(); unsigned cookie=0;
     InterlockedIncrement(&callbacks);
+    entity_setup_begin(2u,job,NULL,flags);
     if(!spawn_owner_thread()) {
         if(native_thread) spawn_unknown("spawn_destroy_foreign_thread");
         goto done;
@@ -554,6 +585,7 @@ static void TRACE_HELPER spawn_destroy_end(unsigned cookie,void *result) {
             }
         }
     }
+    entity_setup_end(2u,result);
     InterlockedDecrement(&callbacks); SetLastError(error);
 }
 
@@ -1348,11 +1380,19 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
         SudekiMpLobbyGameplayStoryExitStatus()!=1u ||
         InterlockedCompareExchange(&callbacks,0,0) || current_thread ||
         submit_kind || submit_depth || add_depth || argument_depth || spawn_depth || completion_depth ||
-        spawn_replay.transaction || spawn_setup_transaction) {
+        spawn_replay.transaction || spawn_setup_transaction || entity_setup_depth[0] ||
+        entity_setup_depth[1] || entity_setup_depth[2]) {
         SetLastError(ERROR_BUSY); return FALSE;
     }
     if(!load_manager) { SetLastError(ERROR_SUCCESS); return TRUE; }
     uint32_t generation=status.load_generation;
+    if(entity_setup_observer) {
+        SudekiMpLanStoryEntitySetupEvent event={.phase=SUDEKIMP_ENTITY_SETUP_WORLD_EXIT,
+            .load_generation=generation};
+        InterlockedIncrement(&callbacks);
+        entity_setup_observer(entity_setup_consumer,&event);
+        InterlockedDecrement(&callbacks);
+    }
     BOOL truncated=status.log_truncated;
     unsigned discarded=0;
     for(unsigned i=0;i<TASK_CAPACITY;++i) discarded+=tasks[i].occupied!=FALSE;
@@ -1379,7 +1419,7 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
 }
 BOOL SudekiMpLanStoryTaskTraceUninstall(void) {
     if(!image_base) return TRUE;
-    if(cast_created || cast_step || admission_decide || admission_waiters ||
+    if(cast_created || cast_step || admission_decide || admission_waiters || entity_setup_observer ||
         InterlockedCompareExchange(&admission_fault,0,0) ||
         (native_thread && native_thread!=GetCurrentThreadId()) ||
         InterlockedCompareExchange(&callbacks,0,0) || spawn_replay.transaction ||
@@ -1419,6 +1459,47 @@ BOOL SudekiMpLanStoryTaskHostExact(HMODULE image) {
         create_hooks[0].installed && create_hooks[1].installed && step_hooks[0].installed && step_hooks[1].installed &&
         call_target(image_base+CREATE_DIRECT,story_create) && call_target(image_base+CREATE_CHILD,story_create) &&
         call_target(image_base+STEP_IMMEDIATE,story_step) && call_target(image_base+STEP_SCHEDULED,story_step);
+}
+BOOL SudekiMpLanStoryTaskTraceAddCallImageExact(HMODULE image) {
+    uint8_t *b=(uint8_t *)image;
+    if(!b || !readable(b+ADD_CALL,5)) return FALSE;
+    if(!installed && !image_base && !add_hook.installed && !original_add)
+        return call_target(b+ADD_CALL,b+ADD);
+    return installed && image_base==b && add_hook.installed &&
+        add_hook.instruction==b+ADD_CALL &&
+        add_hook.original_displacement==(int32_t)(ADD-ADD_CALL-5) &&
+        original_add==(RawFunction)(b+ADD) &&
+        add_hook.replacement_displacement==(int32_t)((uintptr_t)story_add-(uintptr_t)(b+ADD_CALL+5)) &&
+        call_target(b+ADD_CALL,story_add);
+}
+BOOL SudekiMpLanStoryTaskTraceEntitySetupAttach(HMODULE image,const void *consumer,
+    SudekiMpLanStoryEntitySetupObserver observer) {
+    if(!consumer || !observer || entity_setup_observer ||
+        InterlockedCompareExchange(&callbacks,0,0) ||
+        InterlockedCompareExchange(&trace_fault,0,0) ||
+        !status.load_generation || !SudekiMpLanStoryTaskTraceEntitySetupExact(image)) {
+        SetLastError(ERROR_INVALID_STATE);return FALSE;
+    }
+    memset(entity_setup_depth,0,sizeof(entity_setup_depth));
+    memset(entity_setup_scopes,0,sizeof(entity_setup_scopes));
+    entity_setup_consumer=consumer; entity_setup_observer=observer;
+    return TRUE;
+}
+BOOL SudekiMpLanStoryTaskTraceEntitySetupExact(HMODULE image) {
+    return !InterlockedCompareExchange(&callbacks,0,0) &&
+        !InterlockedCompareExchange(&trace_fault,0,0) &&
+        !InterlockedCompareExchange(&spawn_fault,0,0) &&
+        SudekiMpLanStoryTaskHostExact(image) && SudekiMpLanStoryTaskTraceSpawnEntryExact(image);
+}
+BOOL SudekiMpLanStoryTaskTraceEntitySetupDetach(HMODULE image,const void *consumer,
+    SudekiMpLanStoryEntitySetupObserver observer) {
+    if(!consumer || !observer || entity_setup_consumer!=consumer || entity_setup_observer!=observer ||
+        InterlockedCompareExchange(&callbacks,0,0) || !SudekiMpLanStoryTaskHostExact(image) ||
+        entity_setup_depth[0] || entity_setup_depth[1] || entity_setup_depth[2]) {
+        SetLastError(ERROR_BUSY);return FALSE;
+    }
+    entity_setup_observer=NULL; entity_setup_consumer=NULL;
+    return TRUE;
 }
 BOOL SudekiMpLanStoryTaskHostAttach(HMODULE image,SudekiMpLanCastCreatedObserver created,
     SudekiMpLanCastStepAdapter step) {
