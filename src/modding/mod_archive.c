@@ -288,6 +288,7 @@ int SudekiMpModHomTextureNames(const void *input, size_t size,
 typedef struct PreviewSearch {
     const SudekiMpModArchive *archive;
     uint32_t main_key, any_key;
+    SudekiMpModCatalogEntry *entry;
 } PreviewSearch;
 static int auxiliary_texture(const char *name) {
     static const char *const suffixes[] = {"_SPEC", "_ENV", "_BUMP", "_NRM", "_NORM"};
@@ -304,7 +305,6 @@ static void preview_visit(void *context, const char *name) {
     PreviewSearch *search = (PreviewSearch *)context;
     static const char *const extensions[] = {".SQX", ".TGA"};
     char full[SUDEKIMP_MOD_RESOURCE_NAME_MAX + 8];
-    if (search->main_key) return;
     for (size_t e = 0; e < 2; ++e) {
         size_t bytes;
         const uint8_t *payload;
@@ -314,14 +314,22 @@ static void preview_visit(void *context, const char *name) {
         payload = SudekiMpModArchiveResourceByKey(search->archive, key, &bytes);
         if (!payload || !catalog_texture(payload, bytes)) continue;
         if (!search->any_key) search->any_key = key;
-        if (!auxiliary_texture(name)) search->main_key = key;
+        if (!search->main_key && !auxiliary_texture(name)) search->main_key = key;
+        {
+            SudekiMpModCatalogEntry *entry = search->entry;
+            unsigned n;
+            for (n = 0; n < entry->texture_count && entry->texture_keys[n] != key; ++n) {}
+            if (n == entry->texture_count && n < SUDEKIMP_MOD_MODEL_TEXTURES_MAX)
+                entry->texture_keys[entry->texture_count++] = key;
+        }
         return;
     }
 }
-static uint32_t model_preview_key(const SudekiMpModArchive *archive, const uint8_t *data, size_t size) {
-    PreviewSearch search = {archive, 0, 0};
-    if (SudekiMpModHomTextureNames(data, size, preview_visit, &search) <= 0) return 0;
-    return search.main_key ? search.main_key : search.any_key;
+static void model_textures(const SudekiMpModArchive *archive, const uint8_t *data, size_t size,
+    SudekiMpModCatalogEntry *entry) {
+    PreviewSearch search = {archive, 0, 0, entry};
+    if (SudekiMpModHomTextureNames(data, size, preview_visit, &search) <= 0) return;
+    entry->preview_key = search.main_key ? search.main_key : search.any_key;
 }
 
 int SudekiMpModNamesBegin(const SudekiMpModArchive *archives, size_t archive_count,
@@ -404,7 +412,7 @@ int SudekiMpModCatalogBuildNamed(const SudekiMpModArchive *archive,
             entry.width = info.width; entry.height = info.height; entry.d3d_format = info.d3d_format;
         } else if (candidates == 1 && hom_name(h.names[first].name)) {
             entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
-            entry.preview_key = model_preview_key(archive, payload, bytes);
+            model_textures(archive, payload, bytes, &entry);
         } else continue;
         if (candidates == 1) memcpy(entry.name, h.names[first].name, sizeof(entry.name));
         entries[used++] = entry;
@@ -469,7 +477,7 @@ int SudekiMpModCatalogBuildEx(const SudekiMpModArchive *archives, size_t archive
                 entry.width = info.width; entry.height = info.height; entry.d3d_format = info.d3d_format;
             } else if (candidates == 1 && hom_name(h.names[first].name)) {
                 entry.kind = SUDEKIMP_MOD_RESOURCE_MODEL;
-                entry.preview_key = model_preview_key(archives + a, payload, bytes);
+                model_textures(archives + a, payload, bytes, &entry);
             }
             else continue;
             if (candidates == 1) memcpy(entry.name, h.names[first].name, sizeof(entry.name));

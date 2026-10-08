@@ -160,8 +160,35 @@ Tal's 15 and Ailish's 8 models all got a texture preview, as did 1184 of 1230
 World / Other models (`CONFIRMED_TEST`, launcher under Wine on the local
 install; for example `W007_MOJO.HOM` lists `W007_Mojo_handle` and `W007_Mojo`).
 
-Phase B's item → model relationship remains `UNKNOWN`. No native item
-relationship is assumed by the grouping code. This work neither
+Item → model is read from the game's own item list (Phase B). The item
+definitions are one `SOLData.baf` resource that starts with a `CItemManager`
+field tree. Each record is a u32 header (bit 31 marks a leaf; the low bits are
+the record size including the header), a NUL-terminated field name, then the
+leaf value or child records. String values are a container of `length` and
+`string` leaves. Each `Item NNN` has an `Item type` (`WeaponTal`,
+`ArmourAlice`, `WeaponDarkBuki`, …). Under `Item Common Data` it has an
+`Item Model`, a 16-bit `Item Name` text ID and a `UI Icon Filename`. Armour
+carries its look in `Equippable Properties` → `Appearance Change Model` (the
+character model wearing it). Names come from the English UTF-16 text table
+(archive key `0xFD092E42`): a u16 version and group count; per group a u16 id,
+u16 count, u32 offset and u32 size; then entries of u16 text ID, u16 character
+count and u32 offset, followed by the strings.
+
+`CONFIRMED_STATIC`: item 004 is "Runic Blade" with model `W005_MRCHOPPY.HOM`
+and icon `SUI_W005_MRCHOPPY.SQX`; item 007 is "Mojo" with `W007_MOJO.HOM`.
+54 hero weapons and armour pieces resolve, including the shadow forms.
+
+The launcher groups each item's parts under its hero's Weapons or Armour,
+titled with the item's name and kept together in the game's item order. The
+parts are its model, the model's textures, its menu icon and, for weapons, its
+large menu picture (`SUI_Wnnn_FULL`). Textures that more than one item's
+model uses (Tal's face, eyes and lashes appear in all three armour models)
+keep their name-pattern category; a shared icon goes to the first item. The
+tile's second line names the part (Texture, Shine, Reflection, Icon, Menu
+picture), and search also matches item names. In the launcher run on the local
+install, searching "runic" under Tal → Weapons shows exactly the five
+textures the COOLER Runic Blade TexMod package replaces (`CONFIRMED_TEST`).
+Items without a model or icon (the merged armours) are not grouped. This work neither
 changes native item behavior nor uses a speculative link to choose replacements.
 The initial name rules may leave many weapons/armour in Other textures.
 

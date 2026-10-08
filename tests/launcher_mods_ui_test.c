@@ -120,7 +120,7 @@ int wmain(int argc, WCHAR **argv) {
         SudekiMpModsPanelDestroy(panel); DestroyWindow(parent); CoUninitialize();
         return 0;
     }
-    assert(p->catalog && p->catalog->count == 3);
+    assert(p->catalog && p->catalog->count == 6); /* face, nameless, model; Test Sword model, blade, icon */
     /* Thumbnails reach the catalogue (and the image list) for every texture. */
     for (i = 0; i < p->catalog->count; ++i)
         if (p->catalog->resources[i].entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
@@ -129,9 +129,30 @@ int wmain(int argc, WCHAR **argv) {
     for (i = 0; i < p->catalog->count; ++i) {
         Resource *r = &p->catalog->resources[i];
         if (strstr(r->entry.name, "Face")) texture = (int)i;
-        if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL) model = (int)i;
+        if (!strcmp(r->entry.name, "Tal_Test.HOM")) model = (int)i;
     }
     assert(texture >= 0 && model >= 0);
+    /* The game's item list groups "Test Sword" (Tal weapon): model, texture, icon. */
+    {
+        int parts = 0;
+        WCHAR label[128];
+        assert(p->catalog->items.count == 1 && !strcmp(p->catalog->items.items[0].name, "Test Sword"));
+        for (i = 0; i < p->catalog->count; ++i) {
+            Resource *r = &p->catalog->resources[i];
+            if (!strcmp(r->entry.name, "Test_Sword_Blade.TGA")) {
+                assert(r->item == 0 && r->role == ROLE_TEXTURE && r->character == 0 && r->category == CAT_WEAPONS); ++parts;
+            } else if (!strcmp(r->entry.name, "SUI_TEST_SWORD.TGA")) {
+                assert(r->item == 0 && r->role == ROLE_ICON && r->category == CAT_WEAPONS); ++parts;
+            } else if (!strcmp(r->entry.name, "TEST_SWORD.HOM")) {
+                assert(r->item == 0 && r->role == ROLE_MODEL && r->character == 0 && r->category == CAT_MODELS); ++parts;
+            } else if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE) {
+                assert(r->item < 0); /* the face stays a body texture */
+            }
+            item_label(p->catalog, r, label, 128);
+            assert(!label[0] == (r->item < 0));
+        }
+        assert(parts == 3);
+    }
     /* The model's texture table links it to the face; its tile borrows that thumbnail. */
     assert(p->catalog->resources[model].preview == texture);
     assert(resource_icon(p->catalog, &p->catalog->resources[model]) == p->catalog->resources[texture].icon);

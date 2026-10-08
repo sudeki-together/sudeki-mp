@@ -30,7 +30,7 @@ typedef enum SudekiMpModResourceKind {
     SUDEKIMP_MOD_RESOURCE_MODEL = 2
 } SudekiMpModResourceKind;
 
-enum { SUDEKIMP_MOD_RESOURCE_NAME_MAX = 128 };
+enum { SUDEKIMP_MOD_RESOURCE_NAME_MAX = 128, SUDEKIMP_MOD_MODEL_TEXTURES_MAX = 16 };
 typedef struct SudekiMpModCatalogEntry {
     size_t archive_index, resource_index;
     uint32_t archive_key, texture_key, width, height, d3d_format;
@@ -39,6 +39,10 @@ typedef struct SudekiMpModCatalogEntry {
     uint32_t preview_key; /* Models: archive key of the model's main texture in
                            * the same archive (first non-spec/env name in its
                            * texture table that is a catalog texture); 0 = none. */
+    /* Models: archive keys of every catalog texture its table names (same
+     * archive, table order, no duplicates; at most the first 16). */
+    uint32_t texture_keys[SUDEKIMP_MOD_MODEL_TEXTURES_MAX];
+    unsigned texture_count;
     char name[SUDEKIMP_MOD_RESOURCE_NAME_MAX]; /* Empty for unknown/ambiguous. */
 } SudekiMpModCatalogEntry;
 typedef struct SudekiMpModCatalog {

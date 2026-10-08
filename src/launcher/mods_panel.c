@@ -5,6 +5,7 @@
 #include "modding/mod_archive.h"
 #include "modding/mod_groups.h"
 #include "modding/mod_image.h"
+#include "modding/mod_items.h"
 #include "modding/mod_manifest.h"
 #include "modding/mod_zip.h"
 #include <commctrl.h>
@@ -89,14 +90,19 @@ typedef struct Resource {
   /* Models: index of the linked main texture (-1 none). Textures: character
    * of the first model showing it, so Models tiles decode first (-1 none). */
   int preview, preview_character;
+  /* The weapon/armour item this resource belongs to (-1 none) and its part. */
+  int item;
+  int role;
   HBITMAP thumbnail;
 } Resource;
+enum { ROLE_NONE, ROLE_TEXTURE, ROLE_ICON, ROLE_PICTURE, ROLE_MODEL };
 typedef struct ScanResult {
   HIMAGELIST images; /* Owned until transferred to the panel at completion. */
   ArchiveLocation *archives;
   size_t archive_count;
   Resource *resources;
   size_t count;
+  SudekiMpModItems items; /* hero weapons and armour, from the game's item list */
   WCHAR error[256];
 } ScanResult;
 typedef struct ThumbResult {
@@ -528,6 +534,7 @@ static void free_catalog(ScanResult *r) {
     ImageList_Destroy(r->images);
   free(r->resources);
   free(r->archives);
+  SudekiMpModItemsFree(&r->items);
   free(r);
 }
 static int archive_compare(const void *a, const void *b) {
@@ -619,6 +626,154 @@ static void link_model_previews(ScanResult *r) {
   }
   free(slots);
 }
+/* The item list and its English names are copied out while their archive is
+ * mapped (each is a few hundred KiB); the first archive holding them wins. */
+typedef struct ItemData {
+  uint8_t *manager, *text;
+  size_t manager_size, text_size;
+} ItemData;
+static void capture_item_data(const SudekiMpModArchive *archive, ItemData *out) {
+  size_t i, size;
+  const uint8_t *bytes;
+  if (!out->text &&
+      (bytes = SudekiMpModArchiveResourceByKey(archive, SUDEKIMP_MOD_ITEM_TEXT_KEY, &size)) &&
+      (out->text = (uint8_t *)malloc(size)) != NULL) {
+    memcpy(out->text, bytes, size);
+    out->text_size = size;
+  }
+  for (i = 0; !out->manager && i < archive->count; ++i) {
+    bytes = SudekiMpModArchiveResource(archive, i, &size);
+    if (bytes && SudekiMpModItemsIsManager(bytes, size) &&
+        (out->manager = (uint8_t *)malloc(size)) != NULL) {
+      memcpy(out->manager, bytes, size);
+      out->manager_size = size;
+    }
+  }
+}
+typedef struct KeySlot {
+  uint32_t key;
+  size_t index;
+} KeySlot;
+static int compare_key_slot(const void *a, const void *b) {
+  const KeySlot *x = (const KeySlot *)a, *y = (const KeySlot *)b;
+  if (x->key != y->key)
+    return x->key < y->key ? -1 : 1;
+  return x->index < y->index ? -1 : x->index > y->index;
+}
+static int find_resource(const KeySlot *slots, size_t count, const Resource *resources,
+                         uint32_t key, SudekiMpModResourceKind kind) {
+  size_t low = 0, high = count;
+  while (low < high) { /* first slot with this key */
+    size_t middle = low + (high - low) / 2;
+    if (slots[middle].key < key) low = middle + 1; else high = middle;
+  }
+  for (; low < count && slots[low].key == key; ++low)
+    if (resources[slots[low].index].entry.kind == kind)
+      return (int)slots[low].index;
+  return -1;
+}
+/* Groups each hero weapon/armour item's resources under that hero: its model,
+ * the model's textures (only those no other item's model uses, so shared
+ * faces and bodies stay in Body / Face), its menu icon and, for weapons, its
+ * large menu picture. */
+static void link_items(ScanResult *r) {
+  KeySlot *slots = (KeySlot *)malloc((r->count + 1) * sizeof(*slots));
+  int *claim = (int *)malloc((r->count + 1) * sizeof(int));
+  size_t i, n;
+  if (!slots || !claim) {
+    free(slots); free(claim);
+    return;
+  }
+  for (i = 0; i < r->count; ++i) {
+    slots[i].key = r->resources[i].entry.archive_key;
+    slots[i].index = i;
+    claim[i] = -1; /* -1 unclaimed, -2 shared, else the item */
+  }
+  qsort(slots, r->count, sizeof(*slots), compare_key_slot);
+  for (n = 0; n < r->items.count; ++n) {
+    const SudekiMpModItem *item = &r->items.items[n];
+    int category = item->kind == SUDEKIMP_MOD_ITEM_WEAPON ? CAT_WEAPONS : CAT_ARMOUR;
+    const char *parts[2] = {item->icon, item->picture};
+    int model = item->model[0] ? find_resource(slots, r->count, r->resources,
+        SudekiMpModResourceKey(item->model), SUDEKIMP_MOD_RESOURCE_MODEL) : -1;
+    if (model >= 0) {
+      Resource *m = &r->resources[model];
+      if (m->item < 0) {
+        m->item = (int)n; m->role = ROLE_MODEL; m->character = item->hero;
+      }
+      for (unsigned k = 0; k < m->entry.texture_count; ++k) {
+        int t = find_resource(slots, r->count, r->resources, m->entry.texture_keys[k],
+                              SUDEKIMP_MOD_RESOURCE_TEXTURE);
+        if (t >= 0)
+          claim[t] = claim[t] == -1 || claim[t] == (int)n ? (int)n : -2;
+      }
+    }
+    for (int p = 0; p < 2; ++p) {
+      int t = parts[p][0] ? find_resource(slots, r->count, r->resources,
+          SudekiMpModResourceKey(parts[p]), SUDEKIMP_MOD_RESOURCE_TEXTURE) : -1;
+      if (t >= 0 && r->resources[t].item < 0) { /* shared icons: the first item */
+        r->resources[t].item = (int)n;
+        r->resources[t].role = p ? ROLE_PICTURE : ROLE_ICON;
+        r->resources[t].character = item->hero;
+        r->resources[t].category = category;
+      }
+    }
+  }
+  for (i = 0; i < r->count; ++i) {
+    Resource *t = &r->resources[i];
+    if (claim[i] < 0 || t->item >= 0)
+      continue;
+    t->item = claim[i];
+    t->role = ROLE_TEXTURE;
+    t->character = r->items.items[claim[i]].hero;
+    t->category = r->items.items[claim[i]].kind == SUDEKIMP_MOD_ITEM_WEAPON ? CAT_WEAPONS : CAT_ARMOUR;
+  }
+  free(slots);
+  free(claim);
+}
+/* "Runic Blade", or "Mournblade (shadow)"; empty when not an item's part. */
+static void item_label(const ScanResult *catalog, const Resource *r, WCHAR *out,
+                       size_t capacity) {
+  const SudekiMpModItem *item;
+  *out = 0;
+  if (!catalog || r->item < 0 || (size_t)r->item >= catalog->items.count)
+    return;
+  item = &catalog->items.items[r->item];
+  if (item->name[0])
+    utf8_to_wide(item->name, out, capacity);
+  else
+    StringCchPrintfW(out, capacity, L"Item %u", item->id);
+  if (item->shadow)
+    StringCchCatW(out, capacity, L" (shadow)");
+}
+/* Tile part label: what this resource is for its item. */
+static const WCHAR *role_label(const Resource *r) {
+  size_t length = strlen(r->entry.name);
+  const char *stem_end = length > 4 ? r->entry.name + length - 4 : r->entry.name;
+  switch (r->role) {
+  case ROLE_ICON: return L"Icon";
+  case ROLE_PICTURE: return L"Menu picture";
+  case ROLE_MODEL: return L"Model";
+  case ROLE_TEXTURE:
+    if (stem_end - r->entry.name >= 5 && !_strnicmp(stem_end - 5, "_spec", 5)) return L"Shine";
+    if (stem_end - r->entry.name >= 4 && !_strnicmp(stem_end - 4, "_env", 4)) return L"Reflection";
+    return L"Texture";
+  default: return L"";
+  }
+}
+static const Panel *sort_panel; /* UI thread only: qsort context */
+static int compare_tiles(const void *a, const void *b) {
+  const Resource *x = &sort_panel->catalog->resources[*(const size_t *)a],
+                 *y = &sort_panel->catalog->resources[*(const size_t *)b];
+  /* Item parts first, item by item in the game's order; then the rest as scanned. */
+  if ((x->item < 0) != (y->item < 0))
+    return x->item < 0 ? 1 : -1;
+  if (x->item != y->item)
+    return x->item < y->item ? -1 : 1;
+  if (x->role != y->role)
+    return x->role < y->role ? -1 : 1;
+  return *(const size_t *)a < *(const size_t *)b ? -1 : *(const size_t *)a > *(const size_t *)b;
+}
 static int resource_icon(const ScanResult *catalog, const Resource *r) {
   if (r->icon >= 0 || r->preview < 0 || (size_t)r->preview >= catalog->count)
     return r->icon;
@@ -631,6 +786,7 @@ static DWORD WINAPI scan_worker(void *context) {
   SudekiMpModArchive *archives = NULL;
   SudekiMpModCatalog catalog = {0};
   SudekiMpModNames names = {0};
+  ItemData item_data = {0};
   WIN32_FIND_DATAW found;
   HANDLE find = INVALID_HANDLE_VALUE;
   WCHAR pattern[PATH_CAP], path[PATH_CAP];
@@ -730,6 +886,7 @@ static DWORD WINAPI scan_worker(void *context) {
         !unchanged_file(r->archives[i].path, &r->archives[i].attributes))
       goto changed;
     archives[i].data = mapped.bytes;
+    capture_item_data(&archives[i], &item_data);
     if (!SudekiMpModCatalogBuildNamed(&archives[i], &names, &catalog, cancelled,
                                       job, error, sizeof(error)))
       goto core_fail;
@@ -752,6 +909,7 @@ static DWORD WINAPI scan_worker(void *context) {
       resource->record = archives[i].records[resource->entry.resource_index];
       resource->icon = -1;
       resource->preview = resource->preview_character = -1;
+      resource->item = -1;
       SudekiMpModGroupsClassify(job->grouping, resource->entry.name,
                                 resource->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL,
                                 &hero, &category);
@@ -765,6 +923,10 @@ static DWORD WINAPI scan_worker(void *context) {
     unmap_file(&mapped);
   }
   link_model_previews(r);
+  if (item_data.manager &&
+      SudekiMpModItemsParse(item_data.manager, item_data.manager_size, item_data.text,
+                            item_data.text_size, &r->items, NULL, 0))
+    link_items(r);
   /* Hand the catalogue to the panel now; from here on this thread only reads
    * entries/records and reports thumbnails through the queue. */
   InterlockedExchange(&job->phase, 3);
@@ -873,6 +1035,8 @@ done:
   SudekiMpModNamesFree(&names);
   unmap_file(&mapped);
   free(archives);
+  free(item_data.manager);
+  free(item_data.text);
   job->result = r;
   return 0;
 }
@@ -1420,6 +1584,17 @@ static void select_resource(Panel *p, int index) {
   StringCchCopyW(archive, MAX_PATH,
                  leaf ? leaf + 1
                       : p->catalog->archives[r->entry.archive_index].path);
+  {
+    /* An item's part: "Runic Blade · Tal weapon" instead of the archive. */
+    WCHAR item_name[128];
+    item_label(p->catalog, r, item_name, 128);
+    if (item_name[0]) {
+      const SudekiMpModItem *item = &p->catalog->items.items[r->item];
+      StringCchPrintfW(archive, MAX_PATH, L"%ls · %ls %ls", item_name,
+                       characters[item->hero],
+                       item->kind == SUDEKIMP_MOD_ITEM_WEAPON ? L"weapon" : L"armour");
+    }
+  }
   if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE) {
     utf8_to_wide(SudekiMpModImageFormatName(r->entry.d3d_format), format, 64);
     StringCchPrintfW(
@@ -1514,11 +1689,13 @@ static LRESULT grid_custom_draw(Panel *p, NMLVCUSTOMDRAW *draw) {
     FillRect(draw->nmcd.hdc, &metadata, p->input_background);
     SetBkMode(draw->nmcd.hdc, TRANSPARENT);
     SetTextColor(draw->nmcd.hdc, MUTED);
-    if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
+    if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE && r->item >= 0)
+      StringCchCopyW(size, 96, role_label(r)); /* the size is in the details */
+    else if (r->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
       StringCchPrintfW(size, 96, L"%lu × %lu", (unsigned long)r->entry.width,
                        (unsigned long)r->entry.height);
     else
-      StringCchCopyW(size, 96, L"HOM · Experimental");
+      StringCchCopyW(size, 96, r->item >= 0 ? L"Item model (.HOM)" : L"HOM · Experimental");
     line = metadata;
     line.bottom = line.top + metrics.tmHeight;
     DrawTextW(draw->nmcd.hdc, size, -1, &line,
@@ -1544,14 +1721,23 @@ static void refresh_grid(Panel *p) {
   p->refreshing = 1;
   SendMessageW(p->grid, WM_SETREDRAW, FALSE, 0);
   ListView_DeleteAllItems(p->grid);
-  if (p->catalog)
-    for (i = 0; i < p->catalog->count; ++i) {
-      Resource *r = &p->catalog->resources[i];
-      WCHAR name[128], label[256];
+  if (p->catalog) {
+    size_t *order = (size_t *)malloc((p->catalog->count + 1) * sizeof(size_t)), shown = 0, n;
+    for (i = 0; order && i < p->catalog->count; ++i)
+      if (p->catalog->resources[i].character == p->character_filter &&
+          p->catalog->resources[i].category == p->category_filter)
+        order[shown++] = i;
+    if (order) {
+      sort_panel = p;
+      qsort(order, shown, sizeof(*order), compare_tiles);
+    }
+    for (n = 0; order && n < shown; ++n) {
+      Resource *r;
+      WCHAR name[128], label[256], item_name[128];
       LVITEMW item;
-      if (r->character != p->character_filter ||
-          r->category != p->category_filter)
-        continue;
+      i = order[n];
+      r = &p->catalog->resources[i];
+      item_label(p->catalog, r, item_name, 128);
       utf8_to_wide(r->entry.name, name, 128);
       if (!name[0])
         StringCchPrintfW(name, 128, L"Unnamed 0x%08lX",
@@ -1564,10 +1750,11 @@ static void refresh_grid(Panel *p) {
                          (unsigned long)r->entry.texture_key,
                          (unsigned long)r->entry.archive_key);
         if (!contains_case_insensitive(name, search) &&
+            !contains_case_insensitive(item_name, search) &&
             !contains_case_insensitive(keys, search))
           continue;
       }
-      tile_caption(dc, name, label, 256);
+      tile_caption(dc, item_name[0] ? item_name : name, label, 256);
       memset(&item, 0, sizeof(item));
       item.mask = LVIF_TEXT | LVIF_IMAGE | LVIF_PARAM;
       item.pszText = label;
@@ -1578,6 +1765,8 @@ static void refresh_grid(Panel *p) {
         new_selection = item.iItem;
       ListView_InsertItem(p->grid, &item);
     }
+    free(order);
+  }
   SelectObject(dc, previous);
   ReleaseDC(p->grid, dc);
   if (new_selection >= 0)

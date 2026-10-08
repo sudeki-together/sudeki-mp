@@ -16,7 +16,7 @@ def archive(resources):
     payload = bytearray()
     buckets = [[] for _ in range(256)]
     for name, data in resources:
-        key = sudekimod.resource_checksum(name)
+        key = name if isinstance(name, int) else sudekimod.resource_checksum(name)
         buckets[key & 255].append((len(payload), len(data), key))
         payload += data
     table = bytearray()

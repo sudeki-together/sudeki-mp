@@ -220,6 +220,7 @@ static int archive_tests(void) {
             ++models; CHECK(!strcmp(e->name, "Actor.HOM"));
             /* Hero_spec has no texture; Hero!2 resolves to Hero.SQX. */
             CHECK(e->preview_key == SudekiMpModResourceKey("Hero.SQX"));
+            CHECK(e->texture_count == 1 && e->texture_keys[0] == e->preview_key);
         }
         if (!e->name[0]) ++unnamed;
         if (e->archive_key == resources[5].key) CHECK(e->name_candidates == 2 && !*e->name);
