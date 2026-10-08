@@ -1,5 +1,5 @@
-version=0.6.0
-release_url=https://git.unfilteredrealm.com/sudeki-together/-/packages
+version=0.6.1
+release_url=https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/releases
 linux_package=sudekimp-linux-launcher.tar.gz
 windows_package=sudekimp-windows-launcher.zip
 policy=prompt_only_never_silent

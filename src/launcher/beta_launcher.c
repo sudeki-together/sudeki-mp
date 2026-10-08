@@ -23,7 +23,7 @@
 #include <wininet.h>
 
 #define SUDEKIMP_TITLE L"SudekiMP Launcher"
-#define SUDEKIMP_LAUNCHER_VERSION L"0.6.0"
+#define SUDEKIMP_LAUNCHER_VERSION L"0.6.1"
 #define SUDEKIMP_PROJECT_URL L"https://git.unfilteredrealm.com/wander"
 #define SUDEKIMP_MUSIC_MANIFEST_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt"
