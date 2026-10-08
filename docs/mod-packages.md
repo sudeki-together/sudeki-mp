@@ -101,7 +101,7 @@ movies/Publisher.bik=files/movies/Publisher.bik
   form addresses a resource whose name is unknown.
 
 Keys identify content, not names. Textures with identical pixels share a key
-and one replacement. The catalog finds 117 such shared keys among the 5240
+and one replacement. The catalog finds shared keys among the 7171
 TGA/SQX textures of the supported build, for example `Verdana_18-0.tga` and
 an unnamed copy in `Fonts.baf`.
 
@@ -257,7 +257,7 @@ Pillow.
 | Command | Purpose |
 | --- | --- |
 | `convert-tpf MOD.tpf OUT [--game DIR \| --catalog keys.tsv] [--dds]` | TexMod package → mod folder. Removes the TPF XOR layer (`0x3FA43FA4`), decrypts the ZipCrypto archive with TexMod's fixed password, reads `texmod.def` (`0xKEY\|file`), and falls back to walking local headers when the central directory is damaged. The zip comment becomes Author/Description. With a catalog, files are named after their archive resource. |
-| `catalog --game DIR [--out keys.tsv]` | Lists every TGA (32-bit, uncompressed) and SQX (DXT1/3/5) texture in the game's `.baf` archives with its key and, where harvested, its resource name. Read-only, about one minute. |
+| `catalog --game DIR [--out keys.tsv]` | Lists every TGA (32-bit, uncompressed) and SQX (DXT1/3/5, 8-bit palettized) texture in the game's `.baf` archives with its key and, where harvested, its resource name. Read-only, about one minute. |
 | `build SRC OUT --game DIR [--dds]` | Builds a mod from images named after the texture they replace: `NAME.EXT.<img>` (for example `Verdana_16-0.tga.png`) or `0xKEY.<img>`. |
 | `extract NAME.EXT OUT --game DIR` | Copies one archive resource out (read-only), as a starting point for a `[Files]` edit. |
 | `add-file MOD NAME.EXT FILE` | Copies a file into `MOD/files/` and adds or replaces its `[Files]` line, creating `mod.ini` if needed. |
@@ -265,7 +265,15 @@ Pillow.
 
 Catalog keys for SQX assume the game uploads level 0 unchanged (DXT is
 uploaded compressed): `INFERENCE` until `DumpTextures=true` confirms a known SQX key.
-On the supported build 4699 of 5240 textures get a unique name. The rest are
+SQX format 11 is 8-bit palettized: one index byte per pixel for every mip,
+then 256 BGRA palette entries. The game uploads it expanded to A8R8G8B8, and the
+key is the CRC of that expansion. `CONFIRMED_STATIC`: expanding
+`W005_MrChoppy.SQX` and `W005_MrChoppy_spec.SQX` this way reproduces the keys
+that a TexMod package captured in game (`0x4FADDA1E`, `0x4383377F`). Before this
+format was read, 1931 such textures (most weapon and menu-icon art) were
+missing from the catalog.
+
+On the supported build 6582 of 7171 textures get a unique name. The rest are
 unreferenced by any harvested string.
 
 ## Example mod: rainbow static intro

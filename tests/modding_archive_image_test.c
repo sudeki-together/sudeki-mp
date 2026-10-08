@@ -144,6 +144,17 @@ static int image_tests(void) {
     CHECK(image.info.kind == SUDEKIMP_MOD_IMAGE_SQX && image.rgba[0] == 255 && image.info.texture_key == SudekiMpTexModCrc32(data, 8)); SudekiMpModImageFree(&image);
     CHECK(!SudekiMpModImageInspect(data, 2047, &info, NULL, 0));
     make_sqx(data, 13); CHECK(!SudekiMpModImageInspect(data, 2048, &info, NULL, 0));
+    /* 8-bit palettized SQX: 4x4 + 2x2 indices, then BGRA entries; the key is
+     * the A8R8G8B8 expansion of level zero. */
+    make_sqx(data, 11); put32(data + 2044, 0x23u | (11u << 8) | (2u << 16) | (2u << 20) | (2u << 24));
+    for (unsigned n = 0; n < 20; ++n) data[n] = (uint8_t)(n < 16 ? n : 0);
+    for (unsigned n = 0; n < 256; ++n) { data[20 + n * 4] = (uint8_t)n; data[21 + n * 4] = (uint8_t)(2 * n); data[22 + n * 4] = (uint8_t)(3 * n); data[23 + n * 4] = 255; }
+    CHECK(SudekiMpModImageDecode(data, 2048, &image, NULL, 0));
+    CHECK(image.info.d3d_format == 21 && image.info.width == 4 && image.info.key_known);
+    CHECK(image.info.texture_key == SudekiMpTexModCrc32(data + 20, 64));
+    CHECK(image.rgba[4] == 3 && image.rgba[5] == 2 && image.rgba[6] == 1 && image.rgba[7] == 255); SudekiMpModImageFree(&image);
+    put32(data + 2044, 0x23u | (11u << 8) | (2u << 16) | (10u << 20) | (10u << 24));
+    CHECK(!SudekiMpModImageInspect(data, 2048, &info, NULL, 0)); /* palette past the end */
     CHECK(!SudekiMpModImageInspect(NULL, 0, &info, NULL, 0));
     return 0;
 }

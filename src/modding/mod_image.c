@@ -12,6 +12,7 @@ enum { FMT_ARGB = 21, FMT_XRGB = 22, FMT_RGB = 20 };
 typedef struct ImageSource {
     SudekiMpModImageInfo info;
     const uint8_t *pixels;
+    const uint8_t *palette; /* SQX P8: 256 BGRA entries after the index mip chain */
     size_t available, level_size, pitch;
     unsigned bytes, descriptor, rle;
 } ImageSource;
@@ -78,14 +79,32 @@ static int source(const void *input, size_t size, ImageSource *out, char *error,
     } else if (!raw_tga32(data, size) && size >= 2048 && !(size % 2048) &&
                (u32(data + size - 4) & 255u) == 0x23u && !(u32(data + size - 4) >> 28)) {
         uint32_t word = u32(data + size - 4), sqx_format = (word >> 8) & 255u;
-        format = sqx_format == 12 ? FMT_DXT1 : sqx_format == 14 ? FMT_DXT3 : sqx_format == 15 ? FMT_DXT5 : 0;
+        format = sqx_format == 12 ? FMT_DXT1 : sqx_format == 14 ? FMT_DXT3 : sqx_format == 15 ? FMT_DXT5 :
+            sqx_format == 11 ? FMT_ARGB : 0;
         width = 1u << ((word >> 20) & 15u); height = 1u << ((word >> 24) & 15u);
         if (!format || !dimensions(width, height)) return fail(error, capacity, "Unsupported SQX format or dimensions");
-        start = 0; out->level_size = block_size(format, width, height);
-        if (out->level_size > size - 4) return fail(error, capacity, "Truncated SQX level zero");
         out->info.kind = SUDEKIMP_MOD_IMAGE_SQX;
         out->info.mip_levels = (word >> 16) & 15u;
         if (!out->info.mip_levels) out->info.mip_levels = 1;
+        start = 0;
+        if (sqx_format == 11) {
+            /* 8-bit palettized: one index byte per pixel for every mip, then
+             * 256 BGRA entries. The game uploads it expanded to A8R8G8B8, so
+             * that expansion is the TexMod identity. */
+            size_t chain = 0;
+            uint32_t mip_width = width, mip_height = height;
+            for (uint32_t mip = 0; mip < out->info.mip_levels; ++mip) {
+                chain += (size_t)mip_width * mip_height;
+                mip_width = mip_width > 1 ? mip_width / 2 : 1;
+                mip_height = mip_height > 1 ? mip_height / 2 : 1;
+            }
+            if (chain > size - 4 || 1024u > size - 4 - chain) return fail(error, capacity, "Truncated SQX palette");
+            out->palette = data + chain; out->bytes = 1;
+            out->level_size = (size_t)width * height; out->pitch = width;
+        } else {
+            out->level_size = block_size(format, width, height);
+            if (out->level_size > size - 4) return fail(error, capacity, "Truncated SQX level zero");
+        }
     } else {
         if (size < 18 || data[1] || (data[2] != 2 && data[2] != 10) ||
             (data[16] != 24 && data[16] != 32) || (data[17] & 0xc0u))
@@ -214,6 +233,11 @@ static void image_key(ImageSource *src) {
             const uint8_t *p = src->pixels + file_y * src->pitch;
             for (size_t n = 0; n < src->pitch; ++n) crc = table[(crc ^ p[n]) & 255u] ^ (crc >> 8);
         }
+    } else if (src->palette) {
+        for (size_t n = 0; n < src->level_size; ++n) {
+            const uint8_t *entry = src->palette + src->pixels[n] * 4u;
+            for (unsigned c = 0; c < 4; ++c) crc = table[(crc ^ entry[c]) & 255u] ^ (crc >> 8);
+        }
     } else if (compressed(src->info.d3d_format)) {
         /* Use this call's table: previews and scans can hash concurrently,
          * while the old engine helper initializes a shared mutable table. */
@@ -237,7 +261,13 @@ int SudekiMpModImageDecode(const void *data, size_t size, SudekiMpModImage *imag
     if (src.info.kind == SUDEKIMP_MOD_IMAGE_TGA) {
         if (!tga_rgba(&src, rgba, error, capacity)) { free(rgba); return 0; }
     } else if (compressed(src.info.d3d_format)) dxt_rgba(&src, rgba);
-    else {
+    else if (src.palette) {
+        for (size_t n = 0; n < src.level_size; ++n) {
+            const uint8_t *p = src.palette + src.pixels[n] * 4u;
+            uint8_t *d = rgba + n * 4;
+            d[0] = p[2]; d[1] = p[1]; d[2] = p[0]; d[3] = p[3];
+        }
+    } else {
         for (uint32_t y = 0; y < src.info.height; ++y) {
             const uint8_t *row = src.pixels + y * src.pitch;
             for (uint32_t x = 0; x < src.info.width; ++x) {

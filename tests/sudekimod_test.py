@@ -77,6 +77,14 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(sudekimod.sqx_level0(blob), (32, 32, 'DXT1', payload))
         self.assertIsNone(sudekimod.sqx_level0(blob[:-4] + struct.pack('<I', word & ~0xff)))
 
+    def test_sqx_palettized_expands_to_argb(self):
+        indices = bytes(range(16)) + bytes(4)  # 4x4 and 2x2 mips
+        palette = b''.join(bytes((n, 2 * n & 255, 3 * n & 255, 255)) for n in range(256))
+        word = 0x23 | (11 << 8) | (2 << 16) | (2 << 20) | (2 << 24)
+        blob = indices + palette
+        blob += bytes(2048 - len(blob) - 4) + struct.pack('<I', word)
+        self.assertEqual(sudekimod.sqx_level0(blob), (4, 4, 'A8R8G8B8', palette[:64]))
+
 
 class TpfTests(unittest.TestCase):
     def test_round_trip_convert_and_validate(self):

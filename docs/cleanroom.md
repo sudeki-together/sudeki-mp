@@ -89,6 +89,18 @@ lists only the starter weapon and a memory read of the inventory showed one or
 two item IDs per weapon category. Do not rely on the cleanroom to provide
 other weapons; load a save that owns them instead.
 
+**Replacement (2026-10-07, built, not yet live-confirmed):** `FillInventory()`
+adds through the native category-add routine (RVA `0x00133C80`, item ID in
+EAX, category in EDX), which silently skips an item when no category of its
+type exists yet. The cleanroom now waits until the weapon (type 4) and armour
+(type 18) categories exist and calls that routine itself, once per item, for
+every item of type 3-17 (weapons) or 18-32 (armour) not already owned. The
+routine's prologue bytes are checked first; a mismatch refuses the grant. The
+log line is `cleanroom_engine event=training_loadout status=complete`, with
+added/owned/no-slot counts. If the game later resets the categories, the grant
+repeats, at most five times. Evidence: `CONFIRMED_TEST` (build and cleanroom
+engine test) until a test-room run shows the weapons in the Weapons menu.
+
 All eight main-party Spirit Strikes are enabled through the native
 `SpiritStrikeEnable(-1)` path. The original unlock mask is captured and
 restored when the cleanroom hook unloads. The party-shared Spirit meter remains

@@ -104,14 +104,25 @@ SQX_FORMATS = {12: ('DXT1', 8), 14: ('DXT3', 16), 15: ('DXT5', 16)}
 
 
 def sqx_level0(data):
-    """SQX (Xbox pixel container) DXT1/3/5 -> (width, height, format, level-0 blocks)."""
+    """SQX (Xbox pixel container) DXT1/3/5 or P8 -> (width, height, format, level-0 blocks)."""
     if len(data) < 2048 or len(data) % 2048:
         return None
     word = struct.unpack_from('<I', data, len(data) - 4)[0]
     fmt = (word >> 8) & 255
-    if word & 255 != 0x23 or word >> 28 or fmt not in SQX_FORMATS:
+    if word & 255 != 0x23 or word >> 28 or (fmt not in SQX_FORMATS and fmt != 11):
         return None
     width, height = 1 << ((word >> 20) & 15), 1 << ((word >> 24) & 15)
+    if fmt == 11:
+        # 8-bit palettized: index bytes for every mip, then 256 BGRA entries.
+        # The game uploads it expanded to A8R8G8B8; that is the TexMod key.
+        chain, w, h = 0, width, height
+        for _ in range(max(1, (word >> 16) & 15)):
+            chain += w * h
+            w, h = max(1, w // 2), max(1, h // 2)
+        if chain + 1024 > len(data) - 4:
+            return None
+        palette = [bytes(data[chain + 4 * i:chain + 4 * i + 4]) for i in range(256)]
+        return width, height, 'A8R8G8B8', b''.join(palette[i] for i in data[:width * height])
     name, block = SQX_FORMATS[fmt]
     size = max(1, width // 4) * max(1, height // 4) * block
     return (width, height, name, data[:size]) if size <= len(data) - 4 else None

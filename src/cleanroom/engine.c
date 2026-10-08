@@ -198,6 +198,9 @@ enum {
     RVA_SPIRIT_STRIKE_MANAGER_GLOBAL = 0x00408d30u,
     RVA_ITEM_DATABASE_GLOBAL = 0x00408d80u,
     RVA_INVENTORY_GLOBAL = 0x00408d84u,
+    /* CInventory category add (EAX item id, EDX category; FillInventory's
+     * inner call). Prologue checked before use. */
+    RVA_INVENTORY_ADD_ITEM = 0x00133c80u,
     CHARACTER_WEAPON_OFFSET = 0x00c0u,
     CHARACTER_WEAPON_CURRENT_ITEM_OFFSET = 0x0268u,
     ELCO_STARTER_WEAPON_SLOT = 12,
@@ -392,6 +395,7 @@ static SudekiMpTrainingSkillLease training_skill_leases[4];
 static BOOL training_skills_enabled;
 static void *sp_refill_logged_entities[4];
 static BOOL inventory_filled;
+static unsigned training_grant_attempts, training_grant_total;
 static BOOL spirit_strikes_unlocked;
 static BOOL infinite_jetpack_fuel;
 static void maintain_jetpack_resource(void);
@@ -2413,30 +2417,114 @@ BOOL SudekiMpCleanroomEngineSetActorTargetsAllies(
         actual == enabled;
 }
 
-static BOOL prepare_training_inventory(void) {
-    void **inventory_global;
-    void **item_database_global;
+static uint8_t *global_item(unsigned int item_identifier);
 
-    if (inventory_filled) {
-        return TRUE;
+/* Item type (virtual slot 2, thiscall), as the native inventory keys it. */
+typedef int (__attribute__((thiscall)) *ItemTypeMethod)(void *item);
+static int training_item_type(uint8_t *item) {
+    void **vtable;
+    if (!readable_memory(item, 4u)) return -1;
+    vtable = *(void ***)item;
+    if (!readable_memory(vtable, 12u) || vtable[2] == NULL) return -1;
+    return ((ItemTypeMethod)vtable[2])(item);
+}
+static uint32_t native_add_item(void *category, uint32_t identifier) {
+    void *function = game_base + RVA_INVENTORY_ADD_ITEM;
+    uint32_t eax = identifier, ecx = 0u;
+    void *edx = category;
+    __asm__ volatile("call *%3"
+        : "+a"(eax), "+d"(edx), "+c"(ecx)
+        : "S"(function)
+        : "memory", "cc");
+    return eax;
+}
+static uint8_t *inventory_category(uint8_t *inventory, int type) {
+    int count = *(int *)(inventory + 300);
+    uint8_t **categories = *(uint8_t ***)(inventory + 0xc);
+    int index;
+    if (count <= 0 || count > 256 || !readable_memory(categories, (size_t)count * sizeof(void *)))
+        return NULL;
+    for (index = 0; index < count; ++index) {
+        uint8_t *category = categories[index];
+        if (readable_memory(category, 0x14u) && *(int *)(category + 8) == type) return category;
     }
-    if (game_base == NULL || fill_inventory == NULL) {
-        return FALSE;
+    return NULL;
+}
+static BOOL category_has(uint8_t *category, uint32_t identifier) {
+    short slots = *(short *)(category + 0x10);
+    short *pairs = *(short **)(category + 4);
+    short index;
+    if (slots <= 0 || !readable_memory(pairs, (size_t)slots * 4u)) return TRUE; /* refuse */
+    for (index = 0; index < slots; ++index)
+        if ((uint16_t)pairs[index * 2] == identifier) return TRUE;
+    return FALSE;
+}
+/* Training loadout: one of every weapon (types 3-17) and armour (18-32) in
+ * the owning category, through the native add. FillInventory (99 of every
+ * item) ran before the categories existed and added nothing usable. Retried
+ * until the categories exist; re-granted (bounded) if the game resets them. */
+static BOOL prepare_training_inventory(void) {
+    static const uint8_t add_prologue[] = {0x53, 0x55, 0x56, 0x57, 0x33, 0xff, 0x83, 0xce,
+        0xff, 0x33, 0xc9, 0x66, 0x3b, 0x7a, 0x10};
+    void **inventory_global;
+    uint8_t *inventory;
+    unsigned identifier, weapons = 0u, armour = 0u, owned = 0u, full = 0u;
+    if (game_base == NULL || training_grant_attempts >= 5u) {
+        return inventory_filled;
     }
     inventory_global = (void **)(game_base + RVA_INVENTORY_GLOBAL);
-    item_database_global = (void **)(game_base + RVA_ITEM_DATABASE_GLOBAL);
     if (!readable_memory(inventory_global, sizeof(*inventory_global)) ||
-        !readable_memory(item_database_global, sizeof(*item_database_global)) ||
-        !readable_memory(*inventory_global, 0x131u) ||
-        !readable_memory(*item_database_global, 0x1000u)) {
+        !readable_memory(*inventory_global, 0x131u)) {
         return FALSE;
     }
-    fill_inventory();
+    inventory = (uint8_t *)*inventory_global;
+    /* Weapon categories exist only after the game builds its inventory. */
+    if (inventory_category(inventory, 4) == NULL || inventory_category(inventory, 18) == NULL) {
+        return FALSE;
+    }
+    if (inventory_filled) {
+        /* Already granted: only act again if the game reset the categories. */
+        unsigned present = 0u;
+        int type;
+        for (type = 3; type <= 32; ++type) {
+            uint8_t *category = inventory_category(inventory, type);
+            if (category) present += (unsigned)*(short *)(category + 0xc);
+        }
+        if (present >= training_grant_total) return TRUE;
+    }
+    if (!readable_memory(game_base + RVA_INVENTORY_ADD_ITEM, sizeof(add_prologue)) ||
+        memcmp(game_base + RVA_INVENTORY_ADD_ITEM, add_prologue, sizeof(add_prologue)) != 0) {
+        training_grant_attempts = 5u;
+        SudekiMpLogWrite("cleanroom_engine event=training_loadout status=refused reason=add_item_bytes\r\n");
+        return FALSE;
+    }
+    ++training_grant_attempts;
+    for (identifier = 0u; identifier < 999u; ++identifier) {
+        uint8_t *item = global_item(identifier), *category;
+        int type;
+        if (!readable_memory(item, 0x20u)) continue;
+        type = training_item_type(item);
+        if (type < 3 || type > 32) continue;
+        category = inventory_category(inventory, type);
+        if (category == NULL) continue;
+        if (category_has(category, identifier)) { ++owned; continue; }
+        if (native_add_item(category, identifier) == 1u) { ++full; continue; }
+        if (type <= 17) ++weapons; else ++armour;
+    }
+    training_grant_total = 0u;
+    {
+        int type;
+        for (type = 3; type <= 32; ++type) {
+            uint8_t *category = inventory_category(inventory, type);
+            if (category) training_grant_total += (unsigned)*(short *)(category + 0xc);
+        }
+    }
     inventory_filled = TRUE;
-    SudekiMpLogWrite(
-        "cleanroom_engine event=inventory_fill status=complete "
-        "method=native_developer_function scope=all_items\r\n"
-    );
+    SudekiMpLogFormat(
+        "cleanroom_engine event=training_loadout status=complete attempt=%u "
+        "weapons_added=%u armour_added=%u already_owned=%u no_slot=%u "
+        "equipment_in_inventory=%u method=native_category_add\r\n",
+        training_grant_attempts, weapons, armour, owned, full, training_grant_total);
     return TRUE;
 }
 
@@ -5776,6 +5864,8 @@ void SudekiMpCleanroomEngineReset(void) {
     ZeroMemory(training_skill_leases, sizeof(training_skill_leases));
     ZeroMemory(sp_refill_logged_entities, sizeof(sp_refill_logged_entities));
     inventory_filled = FALSE;
+    training_grant_attempts = 0u;
+    training_grant_total = 0u;
     spirit_strikes_unlocked = FALSE;
     native_ai_probe_enabled = FALSE;
     native_ai_probe_stage = 0u;

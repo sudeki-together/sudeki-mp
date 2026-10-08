@@ -24,7 +24,8 @@ typedef struct SudekiMpModImage {
 
 /* Output must be zero-initialized. Unsupported or malformed images return 0;
  * error is optional. All input memory is borrowed and remains unchanged.
- * TGA: true-color 24/32-bit, raw/RLE; SQX: DXT1/3/5; DDS: DXT1/3/5,
+ * TGA: true-color 24/32-bit, raw/RLE; SQX: DXT1/3/5 and 8-bit palettized
+ * (reported as A8R8G8B8, its upload format); DDS: DXT1/3/5,
  * uncompressed A8R8G8B8/X8R8G8B8. PNG/JPEG/BMP need a platform decoder. */
 int SudekiMpModImageInspect(const void *data, size_t size, SudekiMpModImageInfo *info,
     char *error, size_t error_capacity);
