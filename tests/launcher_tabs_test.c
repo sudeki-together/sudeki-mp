@@ -91,19 +91,17 @@ static DWORD WINAPI exercise_tabs(void *unused) {
                wcsstr(command, L"--game-arg=-Tal --game-arg=1") && !wcsstr(command, L"-Ailish"));
         SendMessageW(lead, CB_SETCURSEL, 0, 0);
     }
-    /* Title-menu multiplayer: "Mode" replaces "Start as"; the profile turns on
-       [TitleMenu] with the chosen scope, and every other profile turns it off. */
+    /* Title-menu multiplayer turns on the saved-story [TitleMenu] lobby (no
+       extra choice beside the profile); every other profile turns it off. */
     {
-        HWND mode = GetDlgItem(window, IDC_TITLE_MODE), lead = GetDlgItem(window, IDC_CLEANROOM_LEAD);
+        HWND lead = GetDlgItem(window, IDC_CLEANROOM_LEAD);
         WCHAR saved_package[MAX_PATH], ini[MAX_PATH], value[32];
         HANDLE file;
         DWORD written;
         static const char seed[] = "[SudekiMP]\r\nEnableCleanroomMenu=true\r\n";
-        assert(mode && !IsWindowVisible(mode));
         set_profile(SUDEKIMP_PROFILE_TITLE_MULTIPLAYER);
         SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
-        assert(IsWindowVisible(mode) && !IsWindowVisible(lead));
-        SendMessageW(mode, CB_SETCURSEL, 1, 0); /* Saved story */
+        assert(!IsWindowVisible(lead));
         StringCchCopyW(saved_package, MAX_PATH, package_directory);
         GetEnvironmentVariableW(L"LOCALAPPDATA", package_directory, MAX_PATH);
         StringCchPrintfW(ini, MAX_PATH, L"%ls\\SudekiMP.ini", package_directory);
@@ -118,7 +116,6 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         GetPrivateProfileStringW(L"TitleMenu", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
         DeleteFileW(ini);
         StringCchCopyW(package_directory, MAX_PATH, saved_package);
-        SendMessageW(mode, CB_SETCURSEL, 0, 0);
     }
     PostMessageW(window, WM_CLOSE, 0, 0);
     return 0;

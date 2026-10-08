@@ -110,12 +110,11 @@ tools, Combat Mode to draw weapons). The test room only provides starter
 weapons; to see another weapon, load a save that owns it.
 
 The **Multiplayer (title menu lobby)** profile writes `[TitleMenu] Enabled=true`
-and a `Scope` from its **Mode** list (`entry` = Test room, `saved-story` = Saved
-story) and starts the game normally; the title screen's Multiplayer menu and its
-lobby take over from there. Every other profile writes `[TitleMenu]
-Enabled=false`. Evidence: `CONFIRMED_TEST` (launcher test: the ini keys and the
-Mode list's visibility); a live lobby started from this profile is not yet
-recorded.
+with `Scope=saved-story` and starts the game normally; the title screen's
+Multiplayer menu and its saved-story lobby take over from there (the test room
+is the Cleanroom profile). Every other profile writes `[TitleMenu]
+Enabled=false`. Evidence: `CONFIRMED_TEST` (launcher test: the ini keys); a live
+lobby started from this profile is not yet recorded.
 
 ## Implementation and grouping
 

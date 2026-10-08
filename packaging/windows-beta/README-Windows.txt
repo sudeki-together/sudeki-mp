@@ -25,9 +25,8 @@ build. It never changes SUDEKI.exe, the game archives, or your save files.
 Choose a profile in the launcher: **Local co-op (2 players)**,
 **Multiplayer (title menu lobby)**, **Cleanroom**, or **Safe launch**.
 Multiplayer adds a Multiplayer entry to the game's title screen: one player
-hosts a lobby, the others join by IP, and the lobby starts every player's game
-itself. Its **Mode** list picks the lobby kind: **Test room** (save-free) or
-**Saved story** (the campaign from the host's save). This is experimental. The **LAN arena host** and **LAN arena client** test
+hosts a lobby from a saved game, the others join by IP, and the lobby starts
+every player's game itself. This is experimental. The **LAN arena host** and **LAN arena client** test
 profiles (and the LAN IP/Port fields) appear only after ticking **Developer
 mode** on the Tools tab. Cleanroom shows a **Start as** list (Ailish, Tal,
 Elco, Buki): the test room starts as that hero, handy for checking a mod's

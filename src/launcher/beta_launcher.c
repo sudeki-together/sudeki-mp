@@ -48,11 +48,7 @@ static BOOL developer_mode;
 static HWND developer_mode_checkbox;
 static HWND lan_row[4];
 static HWND cleanroom_lead_combo;
-/* Title-menu multiplayer only: the lobby's [TitleMenu] Scope (combo order). */
-static HWND title_mode_label;
-static HWND title_mode_combo;
-static const WCHAR *const title_mode_names[] = {L"Test room", L"Saved story"};
-static const WCHAR *const title_mode_scopes[] = {L"entry", L"saved-story"};
+
 static const WCHAR *const cleanroom_lead_names[] = {L"Ailish", L"Tal", L"Elco", L"Buki"};
 static const WCHAR *const cleanroom_lead_arguments[] = {
     L" --game-arg=-Ailish --game-arg=1", L" --game-arg=-Tal --game-arg=1",
@@ -380,13 +376,6 @@ static int selected_cleanroom_lead(void) {
         lead : 0;
 }
 
-static int selected_title_mode(void) {
-    int mode = title_mode_combo == NULL ? 0 :
-        (int)SendMessageW(title_mode_combo, CB_GETCURSEL, 0, 0);
-    return mode >= 0 && mode < (int)(sizeof(title_mode_names) / sizeof(title_mode_names[0])) ?
-        mode : 0;
-}
-
 static void persist_launcher_options(void) {
     WCHAR settings_path[MAX_PATH];
     WCHAR value[64];
@@ -418,8 +407,6 @@ static void persist_launcher_options(void) {
         developer_mode ? L"true" : L"false", settings_path);
     WritePrivateProfileStringW(L"launcher", L"cleanroom_lead",
         cleanroom_lead_names[selected_cleanroom_lead()], settings_path);
-    WritePrivateProfileStringW(L"launcher", L"title_mode",
-        title_mode_scopes[selected_title_mode()], settings_path);
 }
 
 static void load_saved_game_directory(void) {
@@ -495,19 +482,7 @@ static void load_saved_game_directory(void) {
             }
         }
     }
-    if (title_mode_combo != NULL) {
-        size_t index;
-        GetPrivateProfileStringW(L"launcher", L"title_mode", L"entry",
-            saved_directory, (DWORD)(sizeof(saved_directory) /
-                sizeof(saved_directory[0])), settings_path);
-        SendMessageW(title_mode_combo, CB_SETCURSEL, 0, 0);
-        for (index = 0u; index < sizeof(title_mode_scopes) / sizeof(title_mode_scopes[0]);
-             ++index) {
-            if (lstrcmpiW(saved_directory, title_mode_scopes[index]) == 0) {
-                SendMessageW(title_mode_combo, CB_SETCURSEL, index, 0);
-            }
-        }
-    }
+
 }
 
 static BOOL validate_install(HWND owner,
@@ -742,13 +717,13 @@ static BOOL configure_launcher_profile(
             return FALSE;
         }
     } else if (profile == SUDEKIMP_PROFILE_TITLE_MULTIPLAYER) {
-        /* The title screen gains a Multiplayer menu; its lobby starts each
-           player's game itself (through the loader), in the chosen mode. */
+        /* The title screen gains a Multiplayer menu; its saved-story lobby
+           starts each player's game itself (through the loader). The test
+           room has its own Cleanroom profile. */
         if (!WritePrivateProfileStringW(L"SudekiMP", L"SkipStartupMovies", L"true",
                                          config_path) ||
             !WritePrivateProfileStringW(L"TitleMenu", L"Enabled", L"true", config_path) ||
-            !WritePrivateProfileStringW(L"TitleMenu", L"Scope",
-                title_mode_scopes[selected_title_mode()], config_path)) {
+            !WritePrivateProfileStringW(L"TitleMenu", L"Scope", L"saved-story", config_path)) {
             show_error(owner, L"SudekiMP could not write the title-menu multiplayer profile.");
             return FALSE;
         }
@@ -851,9 +826,7 @@ static void launch_game(HWND owner) {
             cleanroom_lead_names[selected_cleanroom_lead()]);
         set_status(text);
     } else if (profile == SUDEKIMP_PROFILE_TITLE_MULTIPLAYER) {
-        set_status(selected_title_mode() == 0 ?
-            L"Started with the title-screen Multiplayer menu (test room lobby)." :
-            L"Started with the title-screen Multiplayer menu (saved story lobby).");
+        set_status(L"Started with the title-screen Multiplayer menu.");
     } else if (profile == SUDEKIMP_PROFILE_LOCAL_COOP) {
         set_status(L"Windows local co-op started. Player 2 uses XInput slot 0.");
     } else {
@@ -1737,12 +1710,8 @@ static void update_cleanroom_lead_visibility(void) {
     }
     const int show = active_tab == SUDEKIMP_TAB_PLAY && profile == SUDEKIMP_PROFILE_CLEANROOM ?
         SW_SHOW : SW_HIDE;
-    const int show_mode = active_tab == SUDEKIMP_TAB_PLAY &&
-        profile == SUDEKIMP_PROFILE_TITLE_MULTIPLAYER ? SW_SHOW : SW_HIDE;
     if (cleanroom_lead_label != NULL) ShowWindow(cleanroom_lead_label, show);
     if (cleanroom_lead_combo != NULL) ShowWindow(cleanroom_lead_combo, show);
-    if (title_mode_label != NULL) ShowWindow(title_mode_label, show_mode);
-    if (title_mode_combo != NULL) ShowWindow(title_mode_combo, show_mode);
 }
 
 static void release_launcher_art(void) {
@@ -2415,7 +2384,6 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                         L"Developer mode off: LAN arena test profiles are hidden.");
                     return 0;
                 case IDC_CLEANROOM_LEAD:
-                case IDC_TITLE_MODE:
                     if (notification == CBN_SELCHANGE) {
                         persist_launcher_options();
                     }
@@ -2715,17 +2683,6 @@ int WINAPI wWinMain(HINSTANCE instance,
                 SendMessageW(cleanroom_lead_combo, CB_ADDSTRING, 0, (LPARAM)cleanroom_lead_names[index]);
             }
             SendMessageW(cleanroom_lead_combo, CB_SETCURSEL, 0, 0);
-        }
-        /* Same spot as "Start as"; only one of the two is ever shown. */
-        title_mode_label = create_label(tab, L"Mode:", x + 410, y + 138, 70, 22, 0, 0u);
-        title_mode_combo = create_combo(tab, x + 484, y + 134, 112, IDC_TITLE_MODE);
-        {
-            size_t index;
-            for (index = 0u; index < sizeof(title_mode_names) / sizeof(title_mode_names[0]);
-                 ++index) {
-                SendMessageW(title_mode_combo, CB_ADDSTRING, 0, (LPARAM)title_mode_names[index]);
-            }
-            SendMessageW(title_mode_combo, CB_SETCURSEL, 0, 0);
         }
         lan_row[0] = create_label(tab, L"LAN IP:", x, y + 178, 70, 22, 0, 0u);
         lan_host_edit = create_child(tab, WS_EX_CLIENTEDGE, L"EDIT", L"127.0.0.1",
