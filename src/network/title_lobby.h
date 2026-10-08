@@ -10,11 +10,11 @@
 #define SUDEKIMP_LOBBY_NAME 32
 #define SUDEKIMP_LOBBY_PORT 26770
 #define SUDEKIMP_LOBBY_DISCOVERY_PORT 26771
-/* Matching saved-story builds now require the NPC world presentation stream.
- * Reject older lobbies before either side starts loading a saved game. */
-#define SUDEKIMP_LOBBY_VERSION 11
+/* Version 12 separates Dev Play choices from regular multiplayer rules. */
+#define SUDEKIMP_LOBBY_VERSION 12
 #define SUDEKIMP_LOBBY_SAVE_LABEL 48
-enum { SUDEKIMP_LOBBY_NO_CHARACTER = 4 };
+enum { SUDEKIMP_LOBBY_NO_CHARACTER = 4, SUDEKIMP_LOBBY_TALOS = 5 };
+enum { SUDEKIMP_LOBBY_MODE_MULTIPLAYER, SUDEKIMP_LOBBY_MODE_DEV_PLAY };
 enum { SUDEKIMP_LOBBY_AI_COVER, SUDEKIMP_LOBBY_SHARED_PAUSE };
 typedef enum SudekiMpLobbyPhase {
     SUDEKIMP_LOBBY_IDLE, SUDEKIMP_LOBBY_HOSTING, SUDEKIMP_LOBBY_CONNECTING,
@@ -27,7 +27,7 @@ typedef struct SudekiMpLobbyMember {
 typedef struct SudekiMpLobbyServer {
     char name[SUDEKIMP_LOBBY_NAME], ipv4[16];
     uint16_t port;
-    uint8_t players, running;
+    uint8_t players, running, mode;
     uint32_t seen_at;
     uint64_t instance;
 } SudekiMpLobbyServer;
@@ -71,7 +71,7 @@ typedef struct SudekiMpLobbyStatus {
     SudekiMpLobbyStart start;
     SudekiMpLobbySavedGame saved_game;
     BOOL departure_safe;
-    uint8_t running, absence_policy, paused;
+    uint8_t running, absence_policy, paused, mode;
     uint32_t roster_revision;
     uint32_t command_sequence;
     uint8_t command_rejected;
@@ -84,6 +84,10 @@ typedef struct SudekiMpLobby SudekiMpLobby;
 SudekiMpLobby *SudekiMpLobbyCreate(void);
 /* FALSE retains the object/worker: caller must retry before unloading. */
 BOOL SudekiMpLobbyDestroy(SudekiMpLobby *lobby);
+/* Select the mode before browsing/hosting/joining. Only idle/error services
+ * may change mode. Retained across Leave/Reconnect; regular is the default.
+ * Discovery and incoming STATE must match this selection. */
+BOOL SudekiMpLobbySetMode(SudekiMpLobby *, unsigned mode);
 BOOL SudekiMpLobbyHost(SudekiMpLobby *, const char *room, const char *name,
     uint16_t port, BOOL advertised);
 BOOL SudekiMpLobbyJoin(SudekiMpLobby *, const char *ipv4, uint16_t port, const char *name);
@@ -121,7 +125,7 @@ BOOL SudekiMpLobbyHostRunning(SudekiMpLobby *);
 /* Host game-thread adapter reflects its confirmed policy/pause state here. */
 BOOL SudekiMpLobbyHostRuntimeState(SudekiMpLobby *, unsigned policy, BOOL paused);
 /* Mirror a game-thread-confirmed assignment after its native handoff. Four
- * canonical indices or NO_CHARACTER for spectators; never changes identity.
+ * canonical indices, Dev Play Talos, or NO_CHARACTER for spectators.
  * Only authoritative_members are mirrored. Pending lobby selections survive
  * unless they conflict with a confirmed character, which unlocks the choice. */
 BOOL SudekiMpLobbyReflectAssignments(SudekiMpLobby *, const uint8_t character[4],

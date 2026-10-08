@@ -7,14 +7,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <wchar.h>
 
-enum Page { BROWSE, CREATE, JOIN, ROOM, DESTINATIONS, SAVES, CONFIRM_SAVE };
+enum Page { MODES, BROWSE, CREATE, JOIN, ROOM, PICKER, DESTINATIONS, SAVES, CONFIRM_SAVE };
 enum Action { FIND, HOST, DIRECT, BACK, NAME, ROOM_NAME, PORT, VISIBILITY,
     CREATE_ROOM, ADDRESS, LOCAL_ADDRESS, CONNECT, SEARCH, REFRESH, PREVIOUS,
     NEXT, SERVER, JOIN_SELECTED, READY, LEAVE, DESTINATION, START_GAME,
     CHARACTER_BUKI, CHARACTER_ELCO, CHARACTER_TAL, CHARACTER_AILISH, LOCK_CHARACTER,
     RECONNECT, PICK_TESTROOM, PICK_SAVE, SAVE_ROW, SAVE_PREVIOUS, SAVE_NEXT,
-    SAVE_REFRESH, REVIEW_SAVE, CONFIRM_YES, CONFIRM_NO, RETURN_ROOM, RETURN_DESTINATIONS, NONE };
+    SAVE_REFRESH, REVIEW_SAVE, CONFIRM_YES, CONFIRM_NO, RETURN_ROOM, RETURN_DESTINATIONS,
+    MODE_MULTIPLAYER, MODE_DEV_PLAY, CHOOSE_CHARACTER, PICK_CHARACTER, NONE };
 enum { PAGE_SIZE=6 };
 static SudekiMpLobby *session;
 static SudekiMpLobbyStatus status;
@@ -24,6 +26,30 @@ static enum Action actions[SUDEKIMP_PANEL_CONTROLS], armed_action;
 static SudekiMpLobbyServer row_servers[SUDEKIMP_PANEL_CONTROLS], armed_server, chosen;
 static unsigned browser_page;
 static unsigned page_revision;
+static BOOL dev_play_enabled, dev_play;
+static wchar_t dev_play_config_path[MAX_PATH];
+static unsigned picker_index, pending_selection=~0u, armed_character=SUDEKIMP_LOBBY_NO_CHARACTER;
+static const unsigned picker_characters[5]={2,3,1,0,SUDEKIMP_LOBBY_TALOS};
+static const char *const actor_names[]={"Buki","Elco","Tal","Ailish","No character","Talos"};
+static const char *actor_name(unsigned character) {
+    return character<sizeof(actor_names)/sizeof(*actor_names)?actor_names[character]:"No character";
+}
+static BOOL selected_character(unsigned character) {
+    return character<4u || (dev_play && character==SUDEKIMP_LOBBY_TALOS);
+}
+void SudekiMpLobbyUiConfigureDevPlay(BOOL enabled,const wchar_t *config_path) {
+    dev_play_enabled=enabled;
+    dev_play_config_path[0]=0;
+    if (config_path && wcslen(config_path)<MAX_PATH)
+        wcscpy(dev_play_config_path,config_path);
+}
+BOOL SudekiMpLobbyUiDevPlayEnabled(void) { return dev_play_enabled; }
+BOOL SudekiMpLobbyUiSetDevPlayEnabled(BOOL enabled) {
+    if (!*dev_play_config_path || !WritePrivateProfileStringW(L"DevPlay",L"Enabled",
+            enabled?L"1":L"0",dev_play_config_path)) return FALSE;
+    dev_play_enabled=enabled;
+    return TRUE;
+}
 static char room[32]="Sudeki Together", player[32], port[6]="26770";
 static char address[32], search[32], message[128];
 static char *editing;
@@ -52,6 +78,22 @@ BOOL SudekiMpLobbyUiAutoWantsOpen(void) { return auto_enabled && !auto_opened; }
 
 static BOOL start_busy(void) {
     return !status.running && status.start.phase>=SUDEKIMP_LOBBY_START_PREPARE && status.start.phase<=SUDEKIMP_LOBBY_START_COMPLETE;
+}
+/* Lobby choices remain available for research. Do not translate an unproven
+ * avatar choice into native hero ownership merely to get past Start. */
+static const char *dev_gameplay_blocker(void) {
+    if (!dev_play) return NULL;
+    if (status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        status.members[0].locked) {
+        if(status.members[0].character==SUDEKIMP_LOBBY_TALOS) {
+            for(unsigned p=1;p<4u;++p) if(status.members[p].reserved && status.members[p].locked &&
+                status.members[p].character==status.saved_game.leader)
+                return "The saved leader stays with AI while the host is Talos. Choose another character.";
+        } else if(status.members[0].character>=4u ||
+            !(status.saved_game.party_mask&(1u<<status.members[0].character)))
+            return "That host hero is not in this save yet. Choose a present hero or Talos.";
+    }
+    return NULL;
 }
 static BOOL destination_editable(void) {
     return status.phase==SUDEKIMP_LOBBY_HOSTING && !status.running &&
@@ -93,13 +135,13 @@ static void service_running_join(void) {
     if (!SudekiMpLobbyGameplayActive()) {
         if (a->phase!=SUDEKIMP_LOBBY_ADMISSION_OFFERED || !a->ticket || !status.start.port) return;
         SudekiMpLobbyLaunchPlan p={.revision=a->sequence,.generation=status.start.generation,
-            .seat=(uint8_t)player_slot,.port=status.start.port};
+            .seat=(uint8_t)player_slot,.port=status.start.port,.mode=status.mode};
         for (unsigned i=0;i<4;++i) {
             const SudekiMpLobbyMember *m=&status.members[i];
             /* Membership identifies a connection, even when its player is
              * spectating. This client's concrete selection remains required. */
             if (m->present) p.members|=(uint8_t)(1u<<i);
-            if (m->reserved && m->locked && m->character<4)
+            if (m->reserved && m->locked && selected_character(m->character))
                 p.reserved_mask|=(uint8_t)(1u<<i);
             p.character[i]=(p.reserved_mask&(1u<<i))?
                 m->character:SUDEKIMP_LOBBY_NO_CHARACTER;
@@ -167,10 +209,10 @@ static void service_start(HWND window) {
     }
     if (!SudekiMpLobbyGameplayActive() && p->phase==SUDEKIMP_LOBBY_START_PREPARE && (!status.local_slot || p->port)) {
         SudekiMpLobbyLaunchPlan plan={.revision=p->revision,.generation=p->generation,
-            .seat=status.local_slot,.members=p->members,.port=status.local_slot?p->port:0};
+            .seat=status.local_slot,.members=p->members,.port=status.local_slot?p->port:0,.mode=status.mode};
         for (unsigned i=0;i<4;++i) {
             const SudekiMpLobbyMember *m=&status.members[i];
-            if (m->reserved && m->locked && m->character<4)
+            if (m->reserved && m->locked && selected_character(m->character))
                 plan.reserved_mask|=(uint8_t)(1u<<i);
             plan.character[i]=(plan.reserved_mask&(1u<<i))?
                 m->character:SUDEKIMP_LOBBY_NO_CHARACTER;
@@ -211,7 +253,7 @@ static void snapshot_keys(void) {
 }
 static void change_page(enum Page next) {
     if (session) SudekiMpLobbyBrowse(session,next==BROWSE);
-    page=next; editing=NULL; edit_release=FALSE; browser_page=0; message[0]=0;
+    page=next; editing=NULL; edit_release=FALSE; browser_page=0; message[0]=0; pending_selection=~0u;
     ++page_revision;
     memset(&chosen,0,sizeof(chosen)); snapshot_keys();
     SudekiMpLogFormat("title_lobby event=page page=%u actors=unassigned\r\n",(unsigned)page);
@@ -297,8 +339,8 @@ static void build_destination_view(void) {
         strcpy(view.text.heading,"Choose Destination");
         strcpy(view.text.hint,"Choose where your party will begin");
         unsigned id=control(PICK_TESTROOM,SUDEKIMP_PANEL_MEMBER,106,222,748,78,"Test Room",
-            destination_editable(),status.start.destination==SUDEKIMP_LOBBY_DEST_TESTROOM);
-        strcpy(view.text.controls[id].detail,"Practice together with the full party.");
+            destination_editable() && !dev_play,status.start.destination==SUDEKIMP_LOBBY_DEST_TESTROOM);
+        strcpy(view.text.controls[id].detail,dev_play?"Choose a saved game for Dev Play.":"Practice together with the full party.");
         id=control(PICK_SAVE,SUDEKIMP_PANEL_MEMBER,106,324,748,78,"Saved Game",
             destination_editable(),status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME);
         strcpy(view.text.controls[id].detail,"Browse your saves and choose one for this lobby.");
@@ -354,20 +396,55 @@ static void build_view(void) {
     memset(&view,0,sizeof(view)); memset(row_servers,0,sizeof(row_servers));
     for (unsigned i=0;i<SUDEKIMP_PANEL_CONTROLS;++i) row_saves[i]=~0u;
     view.text.panel=TRUE;
-    strcpy(view.text.heading,"Multiplayer");
+    strcpy(view.text.heading,dev_play?"Dev Play":"Multiplayer");
     strcpy(view.text.hint,"Gather your party");
-    if (page<ROOM) {
+    if (page>=BROWSE && page<ROOM) {
         control(FIND,SUDEKIMP_PANEL_NAV,66,188,158,45,"Find a Game",TRUE,page==BROWSE);
         control(HOST,SUDEKIMP_PANEL_NAV,66,244,158,45,"Host a Game",TRUE,page==CREATE);
         control(DIRECT,SUDEKIMP_PANEL_NAV,66,300,158,45,"Direct Connect",TRUE,page==JOIN);
-        control(BACK,SUDEKIMP_PANEL_NAV,66,560,158,40,"Main Menu",TRUE,FALSE);
+        control(BACK,SUDEKIMP_PANEL_NAV,66,560,158,40,dev_play_enabled?"Choose Mode":"Main Menu",TRUE,FALSE);
         note(78,414,20,136,"Your party");
         note(78,445,16,136,"1 to 4 players");
         note(78,474,16,136,"Unclaimed heroes");
         note(78,498,16,136,"remain with AI.");
     }
     strcpy(view.text.status,"Left click to select. Enter confirms. Escape goes back.");
-    if (page==BROWSE) {
+    if (page==MODES) {
+        view.text.full_width=TRUE;
+        strcpy(view.text.heading,"Multiplayer");
+        strcpy(view.text.hint,"Choose how to play");
+        control(MODE_MULTIPLAYER,SUDEKIMP_PANEL_NAV,106,236,358,70,"Multiplayer",TRUE,FALSE);
+        if (dev_play_enabled)
+            control(MODE_DEV_PLAY,SUDEKIMP_PANEL_NAV,496,236,358,70,"Dev Play",TRUE,FALSE);
+        note(106,345,21,358,"The four heroes, together");
+        note(106,382,17,358,"Unique characters and the saved leader rules.");
+        if (dev_play_enabled) {
+            note(496,345,21,358,"Choose an experimental avatar");
+            note(496,382,17,358,"Tal, Ailish, Elco, Buki or Talos.");
+            note(496,415,17,358,"Duplicate choices are allowed.");
+        }
+        control(BACK,SUDEKIMP_PANEL_BUTTON,106,560,224,40,"Main Menu",TRUE,FALSE);
+    } else if (page==PICKER) {
+        view.text.full_width=TRUE;
+        strcpy(view.text.heading,"Dev Play - Choose Character");
+        strcpy(view.text.hint,"Pick your character. The host can choose any character too.");
+        BOOL can_pick=(status.phase==SUDEKIMP_LOBBY_HOSTING || status.phase==SUDEKIMP_LOBBY_CONNECTED) &&
+            !start_busy() && !SudekiMpLobbyGameplayActive() &&
+            (!status.running || status.admission[status.local_slot].phase==SUDEKIMP_LOBBY_ADMISSION_NONE);
+        for (unsigned i=0;i<5u;++i) {
+            unsigned character=picker_characters[i];
+            unsigned id=control(PICK_CHARACTER,SUDEKIMP_PANEL_PORTRAIT,78+i*163,250,151,212,
+                actor_name(character),can_pick,status.members[status.local_slot].character==character);
+            view.text.controls[id].portrait_character=character;
+            /* The native title adapter resolves each portrait across the
+             * matching draw only; unavailable residency keeps a name tile. */
+            snprintf(view.text.controls[id].detail,sizeof(view.text.controls[id].detail),"%s",
+                character==SUDEKIMP_LOBBY_TALOS?"Talos avatar":"Hero");
+        }
+        note(106,506,17,748,"Duplicate heroes are not supported yet; extra copies join as spectators.");
+        control(RETURN_ROOM,SUDEKIMP_PANEL_BUTTON,106,560,224,40,"Back to Lobby",TRUE,FALSE);
+        strcpy(view.text.status,"Left / Right or Up / Down to cycle. Enter or click chooses and returns to the lobby.");
+    } else if (page==BROWSE) {
         unsigned filtered[SUDEKIMP_LOBBY_SERVERS],count=0;
         field(NAME,"Your name",player,278,202,265);
         field(SEARCH,"Filter rooms",search,561,202,283);
@@ -443,7 +520,7 @@ static void build_view(void) {
         const SudekiMpLobbyMember *local=&status.members[status.local_slot];
         BOOL can_select=connected && (testroom || saved) && !busy && (!status.running ||
             status.admission[status.local_slot].phase==SUDEKIMP_LOBBY_ADMISSION_NONE);
-        static const char *const actors[]={"Buki","Elco","Tal","Ailish","No character"};
+        const char *const *actors=actor_names;
         /* The room uses both columns: party on the left, local setup on the
          * right. MEMBER rows need room for their two native-font text lines. */
         view.text.full_width=TRUE;
@@ -459,22 +536,29 @@ static void build_view(void) {
             members+=m->present; ready+=m->present && m->ready;
             char label[80],fallback[32];
             snprintf(fallback,sizeof(fallback),"Player %u",i+1);
-            if (m->reserved) snprintf(label,sizeof(label),"%s%s%s",*m->name?m->name:m->character<4?actors[m->character]:fallback,
+            if (m->reserved) snprintf(label,sizeof(label),"%s%s%s",*m->name?m->name:selected_character(m->character)?actors[m->character]:fallback,
                 i==0?" - Host":"",i==status.local_slot?" - You":"");
             else strcpy(label,"Open slot");
             unsigned id=control(NONE,
-                SUDEKIMP_PANEL_MEMBER,76,262+i*70,388,64,label,FALSE,m->present);
+                dev_play?SUDEKIMP_PANEL_CHARACTER:SUDEKIMP_PANEL_MEMBER,76,262+i*70,388,64,label,FALSE,m->present);
             if (m->reserved) {
                 const char *state=!m->present?"Leaving...":
                     status.running?"Connected":m->ready?"Ready":m->locked?"Locked":"Choosing";
                 snprintf(view.text.controls[id].detail,sizeof(view.text.controls[id].detail),"%s%s%s",
-                    *m->name || m->character>=4?actors[m->character]:"",
-                    *m->name || m->character>=4?" - ":"",state);
+                    dev_play || *m->name || m->character>=4?actors[m->character]:"",
+                    dev_play || *m->name || m->character>=4?" - ":"",state);
             } else strcpy(view.text.controls[id].detail,"Available for another player");
         }
         char roster[128];
         snprintf(roster,sizeof(roster),"Party - %u / 4 connected - %u ready",members,ready);
         note(76,193,17,388,roster);
+        if (dev_play) {
+            note(504,302,20,364,"Your chosen character");
+            note(504,338,27,364,actor_name(local->character));
+            control(CHOOSE_CHARACTER,SUDEKIMP_PANEL_BUTTON,504,376,364,44,
+                "Choose character",can_select,FALSE);
+            note(504,445,16,364,"Duplicate choices allowed. Host may choose Talos.");
+        } else {
         note(504,302,20,364,host && saved?"Host plays the saved leader":"Choose your character");
         for (unsigned character=0;character<4;++character) {
             BOOL available=TRUE;
@@ -492,14 +576,16 @@ static void build_view(void) {
         control(LOCK_CHARACTER,SUDEKIMP_PANEL_BUTTON,504,430,364,40,
             host && saved && !status.running?"Saved Leader Assigned":local->locked?"Unlock Character":"Lock Character",
             can_select && local->character<4 && !(host && saved && !status.running),local->locked);
+        }
         unsigned name_id=control(NAME,SUDEKIMP_PANEL_FIELD,504,208,364,38,"Your name (optional)",connected && !busy,editing==player);
         snprintf(view.text.controls[name_id].value,sizeof(view.text.controls[name_id].value),"%s%s",player,editing==player?"_":"");
         note(504,264,16,364,"Leave blank to use your character's name.");
-        snprintf(view.text.heading,sizeof(view.text.heading),"%s",*status.room?status.room:"Connecting...");
+        snprintf(view.text.heading,sizeof(view.text.heading),"%s%s",dev_play?"Dev Play - ":"",*status.room?status.room:"Connecting...");
         if (host) snprintf(view.text.hint,sizeof(view.text.hint),"Hosting on port %u - %s",status.port,
             status.advertised?"Discoverable on LAN":"Unlisted - direct address only");
         else strcpy(view.text.hint,!connected?"Waiting for the host...":status.running?
-            "Join the party already in progress":"Choose a character, lock it, then select Ready");
+            "Join the party already in progress":dev_play?
+            "Choose a character, then select Ready":"Choose a character, lock it, then select Ready");
         if (host) control(VISIBILITY,SUDEKIMP_PANEL_BUTTON,504,492,364,40,
             status.advertised?"Discoverable on LAN":"Unlisted - Join by Address",!busy,status.advertised);
         else note(504,512,17,364,"Unclaimed characters stay with AI.");
@@ -508,7 +594,7 @@ static void build_view(void) {
         control(START_GAME,SUDEKIMP_PANEL_BUTTON,340,560,280,40,busy?"Loading...":status.running?"Game Running":host?"Start Game":"Waiting for Host",
             host && ((testroom && SudekiMpLobbyGameplayTestroomAvailable()) ||
                 (saved && SudekiMpLobbyGameplaySavedAvailable())) &&
-                !busy && !status.running && launch_available && members && ready==members,FALSE);
+                !busy && !status.running && launch_available && members && ready==members && !dev_gameplay_blocker(),FALSE);
         control(status.phase==SUDEKIMP_LOBBY_ERROR?RECONNECT:LEAVE,SUDEKIMP_PANEL_BUTTON,644,560,224,40,
             status.phase==SUDEKIMP_LOBBY_ERROR?"Join Again":"Leave Lobby",TRUE,FALSE);
         strcpy(view.text.status,testroom?"Select and lock a character, then Ready. The host starts when everyone is ready.":
@@ -516,6 +602,8 @@ static void build_view(void) {
                 "Select and lock a character, then Ready. Unavailable characters spectate until they join the party.":
                 "Save selected. Starting a shared story is not available yet."):
             "Choose a destination first; character choices follow its party.");
+        if (dev_play && !status.running && (testroom || saved))
+            strcpy(view.text.status,"Choose a character, then Ready. Experimental avatar choices may prevent starting.");
         if (status.running) strcpy(view.text.status,host?(saved?"The party is playing the selected save.":"The party is in the Test Room."):can_select?"Choose and lock an available character to join.":
             "Waiting for the host to finish synchronizing your game...");
         else if (status.start.phase==SUDEKIMP_LOBBY_START_PREPARE)
@@ -529,6 +617,8 @@ static void build_view(void) {
         if (!launch_available) strcpy(view.text.status,"Game start is unavailable in this build.");
         else if(testroom && !SudekiMpLobbyGameplayTestroomAvailable())
             strcpy(view.text.status,"Choose a saved game to start with this profile.");
+        if (dev_gameplay_blocker() && !busy && !status.running)
+            snprintf(view.text.status,sizeof(view.text.status),"%s",dev_gameplay_blocker());
         if (status.phase==SUDEKIMP_LOBBY_ERROR) {
             strcpy(view.text.heading,"Connection ended");
             snprintf(view.text.hint,sizeof(view.text.hint),"%s",status.error);
@@ -547,7 +637,12 @@ void SudekiMpLobbyUiOpen(void) {
     SudekiMpLobbyStatusGet(session,&status);
     if (SudekiMpLobbyGameplayActive()) SudekiMpLobbyGameplayService(session);
     if (!status.running) handoff_complete=FALSE;
-    change_page(status.running?ROOM:BROWSE);
+    if (status.running) dev_play=status.mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    else {
+        dev_play=FALSE;
+        (void)SudekiMpLobbySetMode(session,SUDEKIMP_LOBBY_MODE_MULTIPLAYER);
+    }
+    change_page(status.running?ROOM:dev_play_enabled?MODES:BROWSE);
     if (!session) strcpy(message,"Network initialization failed. Main Menu remains available.");
     SudekiMpLobbyStatusGet(session,&status); build_view();
 }
@@ -567,6 +662,13 @@ const SudekiMpLobbyView *SudekiMpLobbyUiView(void) { return &view; }
 SudekiMpLobby *SudekiMpLobbyUiSession(void) { return session; }
 BOOL SudekiMpLobbyUiEditing(void) { return editing!=NULL || edit_release; }
 unsigned SudekiMpLobbyUiPageRevision(void) { return page_revision; }
+void SudekiMpLobbyUiFocus(unsigned row) {
+    if (page==PICKER && row<5u) picker_index=row;
+}
+BOOL SudekiMpLobbyUiTakeSelection(unsigned *row) {
+    if (!row || pending_selection==~0u) return FALSE;
+    *row=pending_selection; pending_selection=~0u; return TRUE;
+}
 void SudekiMpLobbyUiEndEdit(void) {
     if (editing==player && page==ROOM && !SudekiMpLobbySetName(session,player))
         strcpy(message,"Name update could not be queued. Wait for the previous choice and try again.");
@@ -611,6 +713,23 @@ static void auto_step(void) {
     if (now-auto_last<350u) return;
     if (SudekiMpLobbyGameplayActive() || status.running) { auto_done=TRUE; auto_log("handoff"); return; }
     const SudekiMpLobbyMember *me=&status.members[status.local_slot];
+    if (auto_config.dev_play && !dev_play_enabled) {
+        strcpy(message,"Enable Dev Play in SudekiMP Settings before using Lobby Mode=DevPlay.");
+        auto_done=TRUE; auto_log("dev_play_disabled"); return;
+    }
+    if (page==MODES) {
+        if (auto_act(auto_config.dev_play?MODE_DEV_PLAY:MODE_MULTIPLAYER,0)) auto_log("mode");
+        return;
+    }
+    if (page==PICKER) {
+        unsigned character=selected_character(auto_config.character)?auto_config.character:me->character;
+        for (unsigned row=0;row<5u;++row) if (picker_characters[row]==character) {
+            unsigned selection=0;
+            build_view(); SudekiMpLobbyUiArm(row); (void)SudekiMpLobbyUiCommit(&selection);
+            auto_last=now; auto_log("character"); return;
+        }
+        return;
+    }
     if (page==BROWSE) {
         if (status.phase!=SUDEKIMP_LOBBY_IDLE && status.phase!=SUDEKIMP_LOBBY_ERROR) return;
         if (auto_config.host) { if (auto_act(HOST,0)) auto_log("create_page"); }
@@ -646,7 +765,8 @@ static void auto_step(void) {
     if (status.phase==SUDEKIMP_LOBBY_CONNECTING) return;
     if (status.phase==SUDEKIMP_LOBBY_IDLE || status.phase==SUDEKIMP_LOBBY_ERROR) {
         /* Dropped or refused: return to the browser and retry later. */
-        if (auto_act(LEAVE,0)) auto_log("left"); auto_retry_at=now+2000u; return;
+        if (auto_act(LEAVE,0)) auto_log("left");
+        auto_retry_at=now+2000u; return;
     }
     BOOL hosting=status.phase==SUDEKIMP_LOBBY_HOSTING;
     /* Host: a saved-game destination assigns the save's leader to the host,
@@ -654,21 +774,39 @@ static void auto_step(void) {
     if (hosting && auto_config.save_slot!=~0u &&
         (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME || status.saved_game.folder_slot!=auto_config.save_slot)) {
         if (!destination_editable()) return;
-        if (auto_act(DESTINATION,0)) auto_log("destinations"); return;
+        if (auto_act(DESTINATION,0)) auto_log("destinations");
+        return;
     }
     if (auto_config.name[0] && strcmp(me->name,auto_config.name) && !auto_named) {
         auto_named=TRUE; snprintf(player,sizeof(player),"%s",auto_config.name);
         if (SudekiMpLobbySetName(session,player)) auto_log("name"); else auto_log("name_failed");
         auto_last=now; return;
     }
-    BOOL leader_assigned=hosting && status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME;
+    BOOL leader_assigned=!dev_play && hosting && status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME;
+    if (dev_play && ((selected_character(auto_config.character) && me->character!=auto_config.character) ||
+            (selected_character(me->character) && !me->locked))) {
+        if (auto_act(CHOOSE_CHARACTER,0)) auto_log("picker");
+        return;
+    }
     if (!leader_assigned && auto_config.character<4u && me->character!=auto_config.character) {
-        if (auto_act(CHARACTER_BUKI+auto_config.character,0)) auto_log("character"); return;
+        if (auto_act(CHARACTER_BUKI+auto_config.character,0)) auto_log("character");
+        return;
     }
     if (!leader_assigned && me->character<4u && !me->locked) {
-        if (auto_act(LOCK_CHARACTER,0)) auto_log("lock"); return;
+        if (auto_act(LOCK_CHARACTER,0)) auto_log("lock");
+        return;
     }
     if (auto_config.ready && !me->ready && !wanted_ready) { if (auto_act(READY,0)) auto_log("ready"); return; }
+    /* A configured Dev Play room is handed back to the player. Wait for
+     * confirmed host state, not merely queued name/character/ready commands,
+     * then stop driving pages so a later manual picker stays open. */
+    if (dev_play && !auto_config.start &&
+        (!auto_config.name[0] || !strcmp(me->name,auto_config.name)) &&
+        (!selected_character(auto_config.character) ||
+            (me->character==auto_config.character && me->locked)) &&
+        (!auto_config.ready || me->ready)) {
+        auto_done=TRUE; auto_log("configured"); return;
+    }
     if (status.phase==SUDEKIMP_LOBBY_HOSTING && auto_config.start && !auto_started) {
         unsigned present=0; BOOL all_ready=TRUE;
         for (unsigned i=0;i<4;++i) if (status.members[i].present) { ++present; if (!status.members[i].ready) all_ready=FALSE; }
@@ -742,6 +880,9 @@ void SudekiMpLobbyUiPoll(HWND window,BOOL input) {
             if (editing==address && !((c>='0' && c<='9') || c=='.' || c==':')) c=0;
             if (c && length+1<edit_capacity) { editing[length]=c; editing[length+1]=0; browser_page=0; }
         }
+    } else if (page==PICKER) {
+        if (pressed(VK_LEFT)) { picker_index=(picker_index+4u)%5u; pending_selection=picker_index; }
+        if (pressed(VK_RIGHT)) { picker_index=(picker_index+1u)%5u; pending_selection=picker_index; }
     } else if (page==BROWSE) {
         if (pressed(VK_PRIOR)) { if (browser_page) --browser_page; }
         if (pressed(VK_NEXT)) ++browser_page;
@@ -758,6 +899,7 @@ void SudekiMpLobbyUiArm(unsigned row) {
     if (armed_action==SERVER) armed_server=row_servers[row];
     if (armed_action==JOIN_SELECTED) armed_server=chosen;
     armed_save=armed_action==SAVE_ROW?row_saves[row]:selected_save;
+    armed_character=armed_action==PICK_CHARACTER && row<5u?picker_characters[row]:SUDEKIMP_LOBBY_NO_CHARACTER;
 }
 BOOL SudekiMpLobbyUiBack(unsigned *selection) {
     if (editing) { SudekiMpLobbyUiEndEdit(); return FALSE; }
@@ -765,6 +907,10 @@ BOOL SudekiMpLobbyUiBack(unsigned *selection) {
         save_reviewed=FALSE;
         change_page(page==CONFIRM_SAVE?SAVES:page==SAVES?DESTINATIONS:ROOM);
         *selection=0; build_view(); return FALSE;
+    }
+    if (page==PICKER) { change_page(ROOM); *selection=0; build_view(); return FALSE; }
+    if (page>=BROWSE && page<ROOM && dev_play_enabled) {
+        change_page(MODES); *selection=dev_play?1u:0u; build_view(); return FALSE;
     }
     if (page!=ROOM) return TRUE;
     if (!SudekiMpLobbyGameplayCancel()) {
@@ -777,7 +923,8 @@ BOOL SudekiMpLobbyUiBack(unsigned *selection) {
 static void join_room(const SudekiMpLobbyServer *server) {
     wanted_ready=FALSE;
     handoff_complete=FALSE;
-    if (SudekiMpLobbyJoin(session,server->ipv4,server->port,player)) change_page(ROOM);
+    if (SudekiMpLobbySetMode(session,dev_play?SUDEKIMP_LOBBY_MODE_DEV_PLAY:SUDEKIMP_LOBBY_MODE_MULTIPLAYER) &&
+        SudekiMpLobbyJoin(session,server->ipv4,server->port,player)) change_page(ROOM);
     else { SudekiMpLobbyStatusGet(session,&status); snprintf(message,sizeof(message),"%s",
         *status.error?status.error:"Unable to start a connection."); }
 }
@@ -789,11 +936,31 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection) {
     }
     message[0]=0;
     switch (armed_action) {
+    case MODE_MULTIPLAYER: case MODE_DEV_PLAY: {
+        BOOL selected_dev_play=armed_action==MODE_DEV_PLAY;
+        if (selected_dev_play && !dev_play_enabled) break;
+        if (!SudekiMpLobbySetMode(session,selected_dev_play?SUDEKIMP_LOBBY_MODE_DEV_PLAY:SUDEKIMP_LOBBY_MODE_MULTIPLAYER)) {
+            strcpy(message,"Leave the current lobby before changing modes."); break;
+        }
+        dev_play=selected_dev_play;
+        change_page(BROWSE); *selection=0; break;
+    }
+    case CHOOSE_CHARACTER:
+        if (!dev_play || start_busy() || SudekiMpLobbyGameplayActive()) break;
+        change_page(PICKER); picker_index=0;
+        for (unsigned i=0;i<5u;++i) if (picker_characters[i]==status.members[status.local_slot].character) picker_index=i;
+        *selection=picker_index; break;
+    case PICK_CHARACTER:
+        if (!dev_play || !selected_character(armed_character)) break;
+        if (!SudekiMpLobbySelectCharacter(session,armed_character,TRUE))
+            strcpy(message,"Character selection is waiting for the host or the previous request.");
+        else { wanted_ready=FALSE; change_page(ROOM); *selection=0; }
+        break;
     case FIND: case HOST: case DIRECT:
         if (page==ROOM) break;
         change_page(armed_action==FIND?BROWSE:armed_action==HOST?CREATE:JOIN);
         *selection=(unsigned)armed_action; break;
-    case BACK: return page<ROOM;
+    case BACK: return SudekiMpLobbyUiBack(selection);
     case NAME: begin_edit(player,sizeof(player)); break;
     case ROOM_NAME: begin_edit(room,sizeof(room)); break;
     case PORT: begin_edit(port,sizeof(port)); break;
@@ -812,7 +979,8 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection) {
         if (!valid_text(room)) strcpy(message,"Enter a room name. Your player name is optional.");
         else if (!SudekiMpLanArenaParseEndpoint(endpoint,SUDEKIMP_LOBBY_PORT,ip,sizeof(ip),&number))
             strcpy(message,"Choose a port between 1024 and 65535.");
-        else if (SudekiMpLobbyHost(session,room,player,number,advertised)) {
+        else if (SudekiMpLobbySetMode(session,dev_play?SUDEKIMP_LOBBY_MODE_DEV_PLAY:SUDEKIMP_LOBBY_MODE_MULTIPLAYER) &&
+            SudekiMpLobbyHost(session,room,player,number,advertised)) {
             wanted_ready=FALSE; handoff_complete=FALSE; change_page(ROOM); *selection=0;
         } else { SudekiMpLobbyStatusGet(session,&status); snprintf(message,sizeof(message),"%s",
             *status.error?status.error:"Unable to create a lobby."); }
@@ -920,6 +1088,9 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection) {
         save_reviewed=FALSE; change_page(DESTINATIONS); *selection=0;
         break;
     case START_GAME:
+        if (dev_gameplay_blocker()) {
+            snprintf(message,sizeof(message),"%s",dev_gameplay_blocker()); break;
+        }
         if (!launch_available || !SudekiMpLobbyStartGame(session))
             strcpy(message,status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME && !SudekiMpLobbyGameplaySavedAvailable()?
                 "Save selected. Starting a shared story is not available yet.":

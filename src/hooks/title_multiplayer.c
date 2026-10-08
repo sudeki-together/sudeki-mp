@@ -8,6 +8,7 @@
 #include "ui/title_lobby.h"
 #include "hooks/lobby_gameplay.h"
 #include "hooks/lan_story_load.h"
+#include "hooks/title_portraits.h"
 #include <stdint.h>
 #include <string.h>
 #include <wchar.h>
@@ -227,6 +228,7 @@ static BOOL presentation_exact(void) {
 }
 
 static void select_row(unsigned row) {
+    if(multiplayer_page) SudekiMpLobbyUiFocus(row);
     if (selected != row) {
         selected = row;
         focus_started = GetTickCount();
@@ -507,6 +509,7 @@ static void title_render_entry(void) {
 }
 
 static void return_to_root(void) {
+    (void)SudekiMpTitlePortraitsRelease();
     SudekiMpLobbyUiClose();
     multiplayer_page = FALSE;
     panel_leaving = FALSE;
@@ -528,6 +531,7 @@ static unsigned activate_selection(void *owner,unsigned phase,unsigned event,uns
     *(unsigned *)((uint8_t *)owner+0x17d4)=current.native_index[selected];
     SudekiMpLogFormat("title_multiplayer event=native_action index=%u generation=%u\r\n",
         current.native_index[selected],generation);
+    (void)SudekiMpTitlePortraitsRelease();
     native_transition=TRUE; transition_started=GetTickCount(); displayed=FALSE;
     return original_action(owner,phase,event,argument);
 }
@@ -606,11 +610,13 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
         if (current.owner && title_identity(owner))
             SudekiMpLogFormat("title_multiplayer event=leave_root generation=%u state=%u\r\n",
                 generation, *(unsigned *)((uint8_t *)owner + 0x44));
+        (void)SudekiMpTitlePortraitsRelease();
         clear_page(); goto done;
     }
     if (native_transition && *(unsigned *)((uint8_t *)owner + 0x44) == 5)
         native_transition = FALSE;
     if (!current.owner || memcmp(&observed, &current, sizeof(current))) {
+        (void)SudekiMpTitlePortraitsRelease();
         clear_page();
         current = observed;
         selected = 0;
@@ -644,6 +650,7 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
                 page_confirm=panel_leaving=fade_in_active=FALSE;
                 native_transition=TRUE; transition_started=GetTickCount();
                 *(unsigned *)((uint8_t *)owner+0x17d4)=current.native_index[row];
+                (void)SudekiMpTitlePortraitsRelease();
                 (void)original_action(owner,5,0,0);
                 SudekiMpLogWrite("lan_story_load probe=native_continue window=same gameplay_enabled=0\r\n");
                 goto done;
@@ -691,6 +698,19 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
     service_panel_mouse();
     if (multiplayer_page) {
         SudekiMpLobbyUiPoll(game_window, displayed && !page_confirm && !fade_in_active && current_exact(owner) && modal_clear());
+        /* Native requests run on the verified title update, never while the
+         * D3D view is drawing. Their wrappers outlive only our retained lease. */
+        if(current_exact(owner) && modal_clear()) {
+            const SudekiMpLobbyView *lobby=SudekiMpLobbyUiView();
+            for(unsigned i=0;i<lobby->count && i<SUDEKIMP_PANEL_CONTROLS;++i)
+                if(lobby->text.controls[i].kind==SUDEKIMP_PANEL_PORTRAIT) {
+                    (void)SudekiMpTitlePortraitsService((HMODULE)game_base,owner,current.scene,
+                        *(void **)(game_base+D3D_DEVICE));
+                    break;
+                }
+        }
+        unsigned picker_row;
+        if(SudekiMpLobbyUiTakeSelection(&picker_row)) select_row(picker_row);
         if (SudekiMpLobbyGameplayNeedsTitle() && current_exact(owner) && modal_clear() && !hidden_count) {
             unsigned action=SudekiMpLobbyGameplaySavedGame()?SUDEKIMP_TITLE_CONTINUE:SUDEKIMP_TITLE_NEW_GAME;
             for (unsigned row=0;row<current.count;++row) if (current.label_ids[row]==action) {
@@ -698,6 +718,7 @@ static void __attribute__((thiscall)) title_update(void *owner, uint32_t update_
                     page_confirm=panel_leaving=fade_in_active=FALSE;
                     native_transition=TRUE; transition_started=GetTickCount();
                     *(unsigned *)((uint8_t *)owner+0x17d4)=current.native_index[row];
+                    (void)SudekiMpTitlePortraitsRelease();
                     (void)original_action(owner,5,0,0);
                     SudekiMpLogFormat("title_multiplayer event=gameplay_fade window=same destination=%s\r\n",
                         SudekiMpLobbyGameplaySavedGame()?"saved_game":"testroom");
@@ -738,12 +759,14 @@ static void __attribute__((stdcall)) title_flush(void *scene) {
     original_flush(scene);
     if (exact_thread() && !InterlockedCompareExchange(&stopping,0,0)) SudekiMpLobbyUiBackground();
     if (InterlockedCompareExchange(&stopping, 0, 0)) {
-        if ((!native_thread || exact_thread()) && !hidden_count && SudekiMpTitleViewRelease())
+        if ((!native_thread || exact_thread()) && !hidden_count &&
+            SudekiMpTitlePortraitsRelease() && SudekiMpTitleViewRelease())
             InterlockedExchange(&resources_released, 1);
         goto done;
     }
     if (!frame_composed || !render_state_ready || !InterlockedCompareExchange(&admission, 0, 0) ||
         !presentation_exact() || scene != current.scene || !modal_clear()) {
+        if(exact_thread() && !presentation_exact()) (void)SudekiMpTitlePortraitsRelease();
         displayed = FALSE;
         goto done;
     }
@@ -758,9 +781,25 @@ static void __attribute__((stdcall)) title_flush(void *scene) {
         if (native_transition && seconds > .417)
             opacity = fmaxf(0, 1.f - (float)(seconds - .417) / .3f);
     }
-    displayed = SudekiMpTitleViewDraw(*(void **)(game_base + D3D_DEVICE), row_count(),
+    void *device=*(void **)(game_base+D3D_DEVICE);
+    SudekiMpTitleExtras draw_extras;
+    const SudekiMpTitleExtras *extras=NULL;
+    if(multiplayer_page) {
+        const SudekiMpLobbyView *lobby=SudekiMpLobbyUiView();
+        draw_extras=lobby->text;
+        /* These COM pointers are borrowed across this exact paint only. The
+         * persistent UI model never stores or releases a native texture. */
+        for(unsigned i=0;i<lobby->count && i<SUDEKIMP_PANEL_CONTROLS;++i) {
+            SudekiMpPanelControl *control=&draw_extras.controls[i];
+            if(control->kind==SUDEKIMP_PANEL_PORTRAIT)
+                control->texture=SudekiMpTitlePortraitsResolve((HMODULE)game_base,current.owner,
+                    current.scene,device,control->portrait_character);
+        }
+        extras=&draw_extras;
+    }
+    displayed = SudekiMpTitleViewDraw(device, row_count(),
         selected, enabled_rows(), multiplayer_page ? choices : current.label_ids,
-        state, seconds, opacity, &game_window, multiplayer_page ? &SudekiMpLobbyUiView()->text : NULL);
+        state, seconds, opacity, &game_window, extras);
     /* Match the title's confirmation beat, then fade the whole view into a
      * separate panel. Panel fields/actions have no title-button bounce. */
     float fade=0;
@@ -801,6 +840,11 @@ BOOL SudekiMpUninstallTitleMultiplayer(void) {
     InterlockedExchange(&admission, 0);
     InterlockedExchange(&stopping, 1);
     if (InterlockedCompareExchange(&callbacks, 0, 0)) return retained();
+    if(SudekiMpTitlePortraitsRetains() && (!exact_thread() || !SudekiMpTitlePortraitsRelease())) {
+        /* Keep the existing loader/hook ownership until a native-thread
+         * retry releases the requests; routine pending work does not pin. */
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
     if (!remove_mouse_hook()) return retained();
     if (hidden_count && (!exact_thread() || !restore_rows())) return retained();
     if (!InterlockedCompareExchange(&resources_released, 0, 0)) {

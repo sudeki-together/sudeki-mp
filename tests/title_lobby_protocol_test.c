@@ -16,12 +16,14 @@ static void initialize(SudekiMpLobby *s,BOOL host) {
     if (host) {
         s->status.members[0].reserved=s->status.members[0].present=1;
         name_copy(s->status.members[0].name,"Host");
+        assert(SudekiMpLobbyDestination(s,SUDEKIMP_LOBBY_DEST_TESTROOM));
     }
 }
 static BOOL hello(SudekiMpLobby *host,SudekiMpLobby *client,unsigned connection,const uint8_t *credential) {
     uint8_t bytes[WIRE]; packet(client,bytes,HELLO);
     name_copy((char *)bytes+BODY,client->player);
     if (credential) memcpy(bytes+BODY+32,credential,16);
+    bytes[BODY+48]=client->status.mode;
     return received(host,connection,bytes);
 }
 static void state(SudekiMpLobby *host,SudekiMpLobby *client,unsigned player) {
@@ -35,7 +37,6 @@ static void select_request(SudekiMpLobby *host,SudekiMpLobby *client,unsigned co
     assert(!client->command_pending);
 }
 static void complete_initial(SudekiMpLobby *host) {
-    assert(SudekiMpLobbyDestination(host,SUDEKIMP_LOBBY_DEST_TESTROOM));
     AcquireSRWLockExclusive(&host->lock);
     for (unsigned i=0;i<4;++i) if (host->status.members[i].present) host->status.members[i].ready=1;
     ReleaseSRWLockExclusive(&host->lock);
@@ -91,6 +92,7 @@ static void loopback(void) {
     assert(probe!=INVALID_SOCKET && !getsockname(probe,(struct sockaddr *)&endpoint,&size));
     uint16_t port=ntohs(endpoint.sin_port); close_socket(&probe);
     assert(SudekiMpLobbyHost(host,"Loopback fixture","",port,FALSE));
+    assert(SudekiMpLobbyDestination(host,SUDEKIMP_LOBBY_DEST_TESTROOM));
     assert(SudekiMpLobbyJoin(client,"127.0.0.1",port,""));
     assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_NONE));
     assert(SudekiMpLobbySelectCharacter(host,2,TRUE));
@@ -116,7 +118,8 @@ static void loopback(void) {
     assert(wait_phase(late,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_LOADED));
     assert(SudekiMpLobbyHostAdmissionComplete(host,2,a.sequence,a.ticket,TRUE));
     assert(wait_phase(late,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_COMPLETE));
-    /* A broken TCP stream retains the client's private credential. */
+    /* Departure retires the credential. A fresh join may reuse the slot only
+     * after the native adapter confirms its reservation has drained. */
     AcquireSRWLockExclusive(&client->lock);
     connection_close(&client->connections[0]); error(client,"Simulated transport loss");
     ReleaseSRWLockExclusive(&client->lock);
@@ -125,14 +128,124 @@ static void loopback(void) {
         SudekiMpLobbyStatusGet(host,&h); if (!h.members[1].present) break; Sleep(10);
     } while ((LONG)(deadline-GetTickCount())>0);
     assert(!h.members[1].present && h.members[1].reserved && h.members[1].character==1);
+    assert(SudekiMpLobbyReleaseReservation(host,1));
     assert(SudekiMpLobbyReconnect(client));
-    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_FAILED));
-    SudekiMpLobbyStatusGet(client,&c); assert(c.local_slot==1 && c.members[1].character==1);
+    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_NONE));
+    SudekiMpLobbyStatusGet(client,&c); assert(c.local_slot==1 && c.members[1].character==4);
+    assert(SudekiMpLobbySelectCharacter(client,1,TRUE)); Sleep(250);
     assert(SudekiMpLobbyHostAdmit(host,1));
     assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_OFFERED));
     assert(SudekiMpLobbyDestroy(late)); assert(SudekiMpLobbyDestroy(client)); assert(SudekiMpLobbyDestroy(host));
 }
+static SudekiMpLobbySavedGame saved_fixture(void) {
+    SudekiMpLobbySavedGame save={.folder_slot=1,.fish_sha256={1},.bunny_sha256={2},
+        .label="Fixture",.party_count=4,.leader=2,.party_mask=15,.party_order={2,3,1,0}};
+    return save;
+}
+static void dev_play(void) {
+    SudekiMpLobby host,client,late; uint8_t bytes[WIRE];
+    initialize(&host,TRUE); initialize(&client,FALSE); initialize(&late,FALSE);
+    assert(!SudekiMpLobbySetMode(&host,SUDEKIMP_LOBBY_MODE_DEV_PLAY));
+    host.status.phase=SUDEKIMP_LOBBY_IDLE; client.status.phase=SUDEKIMP_LOBBY_IDLE;
+    late.status.phase=SUDEKIMP_LOBBY_IDLE;
+    assert(!SudekiMpLobbySetMode(&host,2)); assert(!SudekiMpLobbySetMode(NULL,0));
+    assert(SudekiMpLobbySetMode(&host,SUDEKIMP_LOBBY_MODE_DEV_PLAY));
+    assert(SudekiMpLobbySetMode(&client,SUDEKIMP_LOBBY_MODE_DEV_PLAY));
+    assert(SudekiMpLobbySetMode(&late,SUDEKIMP_LOBBY_MODE_DEV_PLAY));
+    host.status.phase=SUDEKIMP_LOBBY_HOSTING; client.status.phase=late.status.phase=SUDEKIMP_LOBBY_CONNECTING;
+    SudekiMpLobbySavedGame save=saved_fixture();
+    assert(SudekiMpLobbyEnableSavedStart(&host,TRUE));
+    assert(SudekiMpLobbyEnableSavedStart(&client,TRUE));
+    assert(SudekiMpLobbyEnableSavedStart(&late,TRUE));
+    assert(SudekiMpLobbySelectSavedGame(&host,&save));
+    assert(!host.status.members[0].locked && host.status.members[0].character==SUDEKIMP_LOBBY_NO_CHARACTER);
+    assert(hello(&host,&client,1,NULL)); state(&host,&client,1);
+    assert(SudekiMpLobbySelectCharacter(&host,SUDEKIMP_LOBBY_TALOS,TRUE)); state(&host,&client,1);
+    select_request(&host,&client,1,SUDEKIMP_LOBBY_TALOS,TRUE);
+    assert(!client.status.command_rejected && client.status.members[1].character==SUDEKIMP_LOBBY_TALOS);
+    state_packet(&host,1,bytes);
+    assert(bytes[4]==12 && bytes[BODY+225]==1 && !bytes[BODY+226] && !bytes[BODY+227]);
+    bytes[4]=11; assert(!received(&client,0,bytes));
+    for (unsigned i=225;i<=227;++i) {
+        state_packet(&host,1,bytes); bytes[BODY+i]=2; assert(!received(&client,0,bytes));
+    }
+    state_packet(&host,1,bytes); bytes[BODY+225]=255; assert(!received(&client,0,bytes));
+    state_packet(&host,1,bytes); bytes[BODY+234+4]=6; assert(!received(&client,0,bytes));
+    state_packet(&host,1,bytes); bytes[BODY+234+4]=4; assert(!received(&client,0,bytes));
+    state_packet(&host,1,bytes); bytes[BODY+234+8]=5; assert(!received(&client,0,bytes));
+    state_packet(&host,1,bytes); bytes[BODY+225]=0; assert(!received(&client,0,bytes));
+    assert(strstr(client.status.error,"Lobby mode differs")); state(&host,&client,1);
+    assert(!SudekiMpLobbySelectCharacter(&host,6,TRUE));
+    assert(SudekiMpLobbySelectCharacter(&host,2,TRUE)); state(&host,&client,1);
+    select_request(&host,&client,1,2,TRUE); assert(!client.status.command_rejected);
+    assert(SudekiMpLobbySelectCharacter(&host,SUDEKIMP_LOBBY_TALOS,TRUE)); state(&host,&client,1);
+    select_request(&host,&client,1,SUDEKIMP_LOBBY_TALOS,TRUE);
+    complete_initial(&host); state(&host,&client,1);
+    assert(host.status.running && host.status.members[0].character!=save.leader);
+    assert(hello(&host,&late,2,NULL)); state(&host,&late,2);
+    select_request(&host,&late,2,SUDEKIMP_LOBBY_TALOS,TRUE);
+    const uint8_t talos[4]={5,5,4,4}, duplicate[4]={2,2,4,4}, invalid[4]={6,2,4,4};
+    assert(SudekiMpLobbyReflectAssignments(&host,talos,3));
+    assert(host.status.members[2].character==5 && host.status.members[2].locked);
+    assert(SudekiMpLobbyReflectAssignments(&host,duplicate,3));
+    assert(!SudekiMpLobbyReflectAssignments(&host,invalid,3));
+    assert(SudekiMpLobbyHostAdmit(&host,2)); state(&host,&late,2);
+    assert(late.status.admission[2].phase==SUDEKIMP_LOBBY_ADMISSION_OFFERED);
+    SudekiMpLobbyLeave(&client); assert(client.status.mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY);
+    assert(SudekiMpLobbySetMode(&client,SUDEKIMP_LOBBY_MODE_MULTIPLAYER));
+    assert(client.status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER);
+}
+static void regular_saved_rules(void) {
+    SudekiMpLobby host,client; uint8_t bytes[WIRE];
+    initialize(&host,TRUE); initialize(&client,FALSE);
+    SudekiMpLobbySavedGame save=saved_fixture();
+    assert(SudekiMpLobbySelectSavedGame(&host,&save));
+    assert(host.status.members[0].character==save.leader && host.status.members[0].locked);
+    assert(!SudekiMpLobbySelectCharacter(&host,1,TRUE));
+    assert(!SudekiMpLobbySelectCharacter(&host,save.leader,FALSE));
+    assert(!SudekiMpLobbySelectCharacter(&host,SUDEKIMP_LOBBY_TALOS,TRUE));
+    client.status.mode=SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    assert(!hello(&host,&client,1,NULL)); assert(!host.status.members[1].reserved);
+    client.status.mode=SUDEKIMP_LOBBY_MODE_MULTIPLAYER;
+    assert(hello(&host,&client,1,NULL)); state(&host,&client,1);
+    assert(!SudekiMpLobbySelectCharacter(&client,SUDEKIMP_LOBBY_TALOS,TRUE));
+    state_packet(&host,1,bytes); bytes[BODY+234]=5; assert(!received(&client,0,bytes));
+    state_packet(&host,1,bytes); bytes[BODY+234]=1; assert(!received(&client,0,bytes));
+    packet(&client,bytes,SELECT_CHARACTER); put32(bytes+BODY,1);
+    put32(bytes+BODY+4,host.status.roster_revision); bytes[BODY+8]=5; bytes[BODY+9]=1;
+    assert(!received(&host,1,bytes));
+    for (unsigned i=225;i<=227;++i) {
+        state_packet(&host,1,bytes); bytes[BODY+i]=2; assert(!received(&client,0,bytes));
+    }
+}
+static void discovery_modes(void) {
+    WSADATA data; assert(!WSAStartup(MAKEWORD(2,2),&data));
+    SudekiMpLobby browser; initialize(&browser,FALSE);
+    browser.status.mode=SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    browser.browser=bound_socket(SOCK_DGRAM,0,FALSE); assert(browser.browser!=INVALID_SOCKET);
+    browser.query_nonce=123;
+    struct sockaddr_in address; int size=sizeof(address);
+    assert(!getsockname(browser.browser,(struct sockaddr *)&address,&size));
+    address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    SOCKET sender=bound_socket(SOCK_DGRAM,0,FALSE); assert(sender!=INVALID_SOCKET);
+    uint8_t bytes[WIRE]; packet(&browser,bytes,OFFER);
+    put64(bytes+BODY,browser.query_nonce); put16(bytes+BODY+8,26770);
+    bytes[BODY+10]=1; name_copy((char *)bytes+BODY+11,"Mode fixture");
+    put64(bytes+BODY+43,99);
+    /* A regular advertisement is ignored from the Dev Play tab. */
+    assert(sendto(sender,(const char *)bytes,WIRE,0,(struct sockaddr *)&address,sizeof(address))==WIRE);
+    Sleep(10); discovery_poll(&browser,GetTickCount()); assert(!browser.status.server_count);
+    bytes[BODY+52]=SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    assert(sendto(sender,(const char *)bytes,WIRE,0,(struct sockaddr *)&address,sizeof(address))==WIRE);
+    Sleep(10); discovery_poll(&browser,GetTickCount()); assert(browser.status.server_count==1);
+    assert(browser.status.servers[0].mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY);
+    browser.status.server_count=0; bytes[BODY+53]=1;
+    assert(sendto(sender,(const char *)bytes,WIRE,0,(struct sockaddr *)&address,sizeof(address))==WIRE);
+    Sleep(10); discovery_poll(&browser,GetTickCount()); assert(!browser.status.server_count);
+    close_socket(&sender); close_socket(&browser.browser); WSACleanup();
+}
 int main(void) {
+    dev_play(); regular_saved_rules(); discovery_modes();
     offline_start_reservation();
     SudekiMpLobby host,client,late,rejoined; uint8_t bytes[WIRE],credential[16];
     initialize(&host,TRUE); initialize(&client,FALSE); initialize(&late,FALSE);

@@ -66,6 +66,12 @@ static BOOL starting(SudekiMpLobby *s) {
 static void member_clear(SudekiMpLobbyMember *m) {
     memset(m,0,sizeof(*m)); m->character=SUDEKIMP_LOBBY_NO_CHARACTER;
 }
+static BOOL playable_character(unsigned mode,unsigned character) {
+    return character<4u || (mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY && character==SUDEKIMP_LOBBY_TALOS);
+}
+static BOOL valid_character(unsigned mode,unsigned character) {
+    return character==SUDEKIMP_LOBBY_NO_CHARACTER || playable_character(mode,character);
+}
 static BOOL random_bytes(void *out,unsigned size) {
     return BCryptGenRandom(NULL,(PUCHAR)out,size,BCRYPT_USE_SYSTEM_PREFERRED_RNG)==0;
 }
@@ -251,6 +257,7 @@ static void state_packet(SudekiMpLobby *s, unsigned slot, uint8_t *out) {
     /* Each peer receives only its own admission ticket. */
     put64(body+190+slot*8,p->nonce[slot]);
     body[222]=s->status.running; body[223]=s->status.absence_policy; body[224]=s->status.paused;
+    body[225]=s->status.mode;
     put32(body+228,s->status.roster_revision);
     for (unsigned i=0;i<4;++i) {
         const SudekiMpLobbyMember *m=&s->status.members[i];
@@ -278,11 +285,12 @@ static BOOL selectable(SudekiMpLobby *s,unsigned player) {
         s->status.admission[player].phase==SUDEKIMP_LOBBY_ADMISSION_FAILED);
 }
 static BOOL select_character(SudekiMpLobby *s,unsigned player,unsigned character,BOOL locked) {
-    if (player>=4 || character>SUDEKIMP_LOBBY_NO_CHARACTER ||
+    if (player>=4 || !valid_character(s->status.mode,character) ||
         (locked && character==SUDEKIMP_LOBBY_NO_CHARACTER) || !selectable(s,player)) return FALSE;
-    if(!player && !s->status.running && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+    if(s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER && !player && !s->status.running &&
+        s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
         (character!=s->status.saved_game.leader || !locked)) return FALSE;
-    for (unsigned i=0;locked && i<4;++i)
+    for (unsigned i=0;s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER && locked && i<4;++i)
         if (i!=player && s->status.members[i].reserved && s->status.members[i].locked &&
             s->status.members[i].character==character) return FALSE;
     SudekiMpLobbyMember *m=&s->status.members[player];
@@ -322,7 +330,7 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
     if (!header(s,p)) return FALSE;
     if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) {
         if (p[5]==HELLO && !c->admitted && !starting(s) && wire_player_name(body) &&
-            zero(body+48,WIRE-BODY-48)) {
+            body[48]==s->status.mode && zero(body+49,WIRE-BODY-49)) {
             unsigned player;
             if (zero(body+32,16)) {
                 for (player=1;player<4 && s->status.members[player].reserved;++player) {}
@@ -357,7 +365,7 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
                 get64(body)==s->status.start.generation && !apply_ack(s,player,body[12],get16(body+14))) return FALSE;
         } else if (p[5]==SELECT_CHARACTER || p[5]==SET_NAME) {
             if (!get32(body) || (p[5]==SELECT_CHARACTER &&
-                    (body[8]>4 || body[9]>1 || !zero(body+10,WIRE-BODY-10))) ||
+                    (!valid_character(s->status.mode,body[8]) || body[9]>1 || !zero(body+10,WIRE-BODY-10))) ||
                 (p[5]==SET_NAME && (!wire_player_name(body+8) || !zero(body+40,WIRE-BODY-40)))) return FALSE;
             uint32_t sequence=get32(body);
             if (sequence<=s->command_seen[player]) return TRUE;
@@ -375,18 +383,27 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
     } else {
         if (p[5]!=STATE || body[0]<1 || body[0]>3 || body[1]>1 || !wire_name(body+2) ||
             body[222]>1 || body[223]>SUDEKIMP_LOBBY_SHARED_PAUSE || body[224]>1 ||
-            !zero(body+225,3) || !get32(body+228) || zero(body+248,16) || body[268]>1 ||
+            body[225]>SUDEKIMP_LOBBY_MODE_DEV_PLAY || !zero(body+226,2) ||
+            !get32(body+228) || zero(body+248,16) || body[268]>1 ||
             !zero(body+269,3) || !zero(body+459,WIRE-BODY-459)) return FALSE;
+        if (body[225]!=s->status.mode) {
+            error(s,"Lobby mode differs. Choose the matching Multiplayer or Dev Play tab.");
+            return FALSE;
+        }
         if (c->admitted && s->status.local_slot!=body[0]) return FALSE;
         SudekiMpLobbyMember members[4]; memset(members,0,sizeof(members));
         unsigned present=0,locked=0;
         for (unsigned i=0;i<4;++i) {
             const uint8_t *m=body+34+i*34,*extra=body+232+i*4;
-            if (m[0]>1 || m[1]>1 || extra[0]>1 || extra[1]>1 || extra[2]>4 || extra[3] ||
+            if (m[0]>1 || m[1]>1 || extra[0]>1 || extra[1]>1 ||
+                !valid_character(body[225],extra[2]) || extra[3] ||
                 (m[0] && !extra[0]) || (m[1] && (!m[0] || !extra[1])) ||
-                (extra[1] && (!extra[0] || extra[2]>=4)) ||
+                (extra[1] && (!extra[0] || !playable_character(body[225],extra[2]))) ||
                 (extra[0]?!wire_player_name(m+2):(!zero(m,34) || extra[1] || extra[2]!=4))) return FALSE;
-            if (extra[1]) { if (locked&(1u<<extra[2])) return FALSE; locked|=1u<<extra[2]; }
+            if (extra[1] && body[225]==SUDEKIMP_LOBBY_MODE_MULTIPLAYER) {
+                if (locked&(1u<<extra[2])) return FALSE;
+                locked|=1u<<extra[2];
+            }
             members[i].present=m[0]; members[i].ready=m[1]; members[i].reserved=extra[0];
             members[i].locked=extra[1]; members[i].character=extra[2]; memcpy(members[i].name,m+2,32);
             present|=(unsigned)m[0]<<i;
@@ -421,7 +438,8 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
             saved_game.party_count=body[452]; saved_game.leader=body[453]; saved_game.party_mask=body[454];
             memcpy(saved_game.party_order,body+455,4);
             if (!saved_game_valid(&saved_game)) return FALSE;
-            if(!body[222] && (!members[0].locked || members[0].character!=saved_game.leader)) return FALSE;
+            if(body[225]==SUDEKIMP_LOBBY_MODE_MULTIPLAYER && !body[222] &&
+                (!members[0].locked || members[0].character!=saved_game.leader)) return FALSE;
             if (start.phase==SUDEKIMP_LOBBY_START_IDLE &&
                 (start.generation || start.port || start.members || start.prepared || start.loaded ||
                     start.completed || !zero(start.nonce,sizeof(start.nonce)) || body[222])) return FALSE;
@@ -503,6 +521,7 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         put16(out+BODY+8,s->status.port); memcpy(out+BODY+11,s->status.room,32);
         for (unsigned j=0;j<4;++j) out[BODY+10]+=s->status.members[j].present;
         out[BODY+51]=s->status.running;
+        out[BODY+52]=s->status.mode;
         sendto(s->discovery,(const char *)out,WIRE,0,(struct sockaddr *)&source,sizeof(source));
         ++s->discovery_replies;
     }
@@ -528,7 +547,8 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         if (n!=WIRE || !usable_source(&source) || !header(s,bytes) || bytes[5]!=OFFER ||
             memcmp(bytes+BODY,&s->query_nonce,8) || get16(bytes+BODY+8)<1024 ||
             bytes[BODY+10]<1 || bytes[BODY+10]>4 || !wire_name(bytes+BODY+11) ||
-            zero(bytes+BODY+43,8) || bytes[BODY+51]>1 || !zero(bytes+BODY+52,WIRE-BODY-52)) continue;
+            zero(bytes+BODY+43,8) || bytes[BODY+51]>1 || bytes[BODY+52]!=s->status.mode ||
+            !zero(bytes+BODY+53,WIRE-BODY-53)) continue;
         char address[16]; if (!InetNtopA(AF_INET,&source.sin_addr,address,sizeof(address))) continue;
         unsigned index;
         for (index=0;index<s->status.server_count;++index)
@@ -545,6 +565,7 @@ static void discovery_poll(SudekiMpLobby *s, DWORD now) {
         memcpy(&server->instance,bytes+BODY+43,8);
         memcpy(server->name,bytes+BODY+11,32); server->port=(uint16_t)get16(bytes+BODY+8);
         server->players=bytes[BODY+10]; server->running=bytes[BODY+51]; server->seen_at=now;
+        server->mode=bytes[BODY+52];
     }
     for (unsigned i=0;i<s->status.server_count;) {
         if ((DWORD)(now-s->status.servers[i].seen_at)>5000u) {
@@ -575,6 +596,7 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
             } else {
                 s->connecting=FALSE; packet(s,bytes,HELLO); name_copy((char *)bytes+BODY,s->player);
                 memcpy(bytes+BODY+32,s->reconnect_credential,16);
+                bytes[BODY+48]=s->status.mode;
                 enqueue(c,bytes); c->seen=now;
             }
         } else if (result<0 || (DWORD)(now-s->connect_at)>=TIMEOUT) {
@@ -592,7 +614,7 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
             }
             else {
                 s->command_pending=FALSE; SecureZeroMemory(s->reconnect_credential,16);
-                error(s,"Host closed, lobby full, or incompatible build.");
+                if (!s->status.error[0]) error(s,"Host closed, lobby full, or incompatible build/mode.");
             }
             continue;
         }
@@ -655,6 +677,17 @@ BOOL SudekiMpLobbyDestroy(SudekiMpLobby *s) {
     if (WaitForSingleObject(s->worker,1000)!=WAIT_OBJECT_0) return FALSE;
     leave_locked(s); close_socket(&s->browser);
     CloseHandle(s->worker); CloseHandle(s->stop); free(s); WSACleanup(); return TRUE;
+}
+BOOL SudekiMpLobbySetMode(SudekiMpLobby *s,unsigned mode) {
+    if (!s || mode>SUDEKIMP_LOBBY_MODE_DEV_PLAY) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=(s->status.phase==SUDEKIMP_LOBBY_IDLE || s->status.phase==SUDEKIMP_LOBBY_ERROR) &&
+        !s->status.running && !s->native_members;
+    if (okay && s->status.mode!=mode) {
+        s->status.mode=(uint8_t)mode;
+        s->status.server_count=0; s->query_at=0;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
 }
 BOOL SudekiMpLobbyHost(SudekiMpLobby *s,const char *room,const char *name,uint16_t port,BOOL advertised) {
     if (!s || !valid_name(room) || !valid_player_name(name) || port<1024) return FALSE;
@@ -726,9 +759,10 @@ static BOOL begin_command(SudekiMpLobby *s,unsigned type) {
     return TRUE;
 }
 BOOL SudekiMpLobbySelectCharacter(SudekiMpLobby *s,unsigned character,BOOL locked) {
-    if (!s || character>SUDEKIMP_LOBBY_NO_CHARACTER || (locked && character==SUDEKIMP_LOBBY_NO_CHARACTER)) return FALSE;
+    if (!s || character>SUDEKIMP_LOBBY_TALOS || (locked && character==SUDEKIMP_LOBBY_NO_CHARACTER)) return FALSE;
     AcquireSRWLockExclusive(&s->lock);
-    BOOL okay;
+    BOOL okay=valid_character(s->status.mode,character);
+    if (!okay) { ReleaseSRWLockExclusive(&s->lock); return FALSE; }
     if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) okay=select_character(s,0,character,locked);
     else {
         okay=selectable(s,s->status.local_slot) && begin_command(s,SELECT_CHARACTER);
@@ -819,8 +853,10 @@ BOOL SudekiMpLobbySelectSavedGame(SudekiMpLobby *s,const SudekiMpLobbySavedGame 
         for(unsigned i=0;i<4u;++i) {
             s->status.members[i].locked=0; s->status.members[i].character=4u;
         }
-        s->status.members[0].character=candidate.leader;
-        s->status.members[0].locked=1;
+        if (s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER) {
+            s->status.members[0].character=candidate.leader;
+            s->status.members[0].locked=1;
+        }
         roster_changed(s);
         uint32_t revision=s->status.start.revision;
         memset(&s->status.start,0,sizeof(s->status.start));
@@ -844,7 +880,8 @@ BOOL SudekiMpLobbyStartGame(SudekiMpLobby *s) {
         (s->status.start.destination==SUDEKIMP_LOBBY_DEST_TESTROOM ||
             (s->saved_start_enabled && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
                 saved_game_valid(&s->status.saved_game)));
-    if(okay && s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+    if(okay && s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER &&
+        s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
         s->status.members[0].character!=s->status.saved_game.leader) okay=FALSE;
     unsigned mask=0;
     for (unsigned i=0;i<4;++i) if (s->status.members[i].present) {
@@ -910,10 +947,10 @@ BOOL SudekiMpLobbyReflectAssignments(SudekiMpLobby *s,const uint8_t character[4]
     BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running;
     unsigned used=0;
     for (unsigned i=0;okay && i<4;++i) if(authoritative_members&(1u<<i)) {
-        if (character[i]>SUDEKIMP_LOBBY_NO_CHARACTER ||
+        if (!valid_character(s->status.mode,character[i]) ||
             (!s->status.members[i].reserved && character[i]!=SUDEKIMP_LOBBY_NO_CHARACTER)) okay=FALSE;
-        else if (character[i]<4) {
-            if (used&(1u<<character[i])) okay=FALSE;
+        else if (playable_character(s->status.mode,character[i])) {
+            if (s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER && (used&(1u<<character[i]))) okay=FALSE;
             used|=1u<<character[i];
         }
     }
@@ -922,10 +959,12 @@ BOOL SudekiMpLobbyReflectAssignments(SudekiMpLobby *s,const uint8_t character[4]
         for (unsigned i=0;i<4;++i) {
             SudekiMpLobbyMember *m=&s->status.members[i];
             if(authoritative_members&(1u<<i)) {
-                if (m->character!=character[i] || m->locked!=(character[i]<4)) {
-                    m->character=character[i]; m->locked=character[i]<4; m->ready=0; changed=TRUE;
+                BOOL locked=playable_character(s->status.mode,character[i]);
+                if (m->character!=character[i] || m->locked!=locked) {
+                    m->character=character[i]; m->locked=(uint8_t)locked; m->ready=0; changed=TRUE;
                 }
-            } else if(m->character<4u && (used&(1u<<m->character))) {
+            } else if(s->status.mode==SUDEKIMP_LOBBY_MODE_MULTIPLAYER &&
+                m->character<4u && (used&(1u<<m->character))) {
                 m->character=SUDEKIMP_LOBBY_NO_CHARACTER; m->locked=m->ready=0;
                 s->command_rejected[i]=1; changed=TRUE;
                 SudekiMpLobbyAdmission *a=&s->status.admission[i];
@@ -983,7 +1022,7 @@ BOOL SudekiMpLobbyHostAdmit(SudekiMpLobby *s,unsigned player) {
     const SudekiMpLobbyMember *m=&s->status.members[player];
     SudekiMpLobbyAdmission *a=&s->status.admission[player];
     BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING && s->status.running &&
-        m->present && m->reserved && m->locked && m->character<4 &&
+        m->present && m->reserved && m->locked && playable_character(s->status.mode,m->character) &&
         (a->phase==SUDEKIMP_LOBBY_ADMISSION_NONE || a->phase==SUDEKIMP_LOBBY_ADMISSION_FAILED) &&
         s->admission_sequence<UINT32_MAX;
     uint64_t ticket=0;

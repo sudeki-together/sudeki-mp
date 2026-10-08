@@ -13,9 +13,9 @@ enum { SUDEKIMP_LAUNCH_NEW, SUDEKIMP_LAUNCH_PREPARED, SUDEKIMP_LAUNCH_LOADED,
 typedef struct SudekiMpLobbyLaunchPlan {
     uint32_t revision;
     uint64_t generation;
-    uint8_t seat, members; /* Connected load barrier, includes host. */
+    uint8_t seat, members, mode; /* Connected load barrier, includes host. */
     uint8_t reserved_mask; /* Concrete character claims, including offline players. */
-    uint8_t character[4]; /* Canonical identity; nonlocal members may spectate (4). */
+    uint8_t character[4]; /* Hero 0..3, none 4, or Dev Play Talos 5. */
     uint16_t port;
     char host_ipv4[16];
     uint64_t nonce[4];
@@ -34,6 +34,20 @@ typedef struct SudekiMpLobbyLaunch {
 
 BOOL SudekiMpLobbyLaunchAvailable(void);
 BOOL SudekiMpLobbyLaunchPlanValid(const SudekiMpLobbyLaunchPlan *);
+/* Pure projection only: the first player choosing a hero receives its native
+ * slot. Talos and later duplicates project to NO_CHARACTER. The original
+ * lobby choices remain in plan; outputs must not alias it. No native spawn,
+ * control or camera capability follows from this projection. */
+BOOL SudekiMpLobbyLaunchProjectNative(const SudekiMpLobbyLaunchPlan *,
+    uint8_t character[4], uint8_t *reserved_mask);
+/* Interim saved-game gate until independent avatar control/camera exist:
+ * every choice must project to a native hero and host must be save leader. */
+BOOL SudekiMpLobbyLaunchPlanNativeReady(const SudekiMpLobbyLaunchPlan *, unsigned save_leader);
+/* Implemented Dev Play runtime routes; duplicate hero picks spectate. A
+ * native host must exist in the fingerprinted save party so startup can
+ * select it through the exact native rotation adapter. */
+BOOL SudekiMpLobbyLaunchPlanDevPlayReady(const SudekiMpLobbyLaunchPlan *,
+    unsigned save_leader,unsigned save_party_mask);
 BOOL SudekiMpLobbyLaunchPrepare(SudekiMpLobbyLaunch *, const SudekiMpLobbyLaunchPlan *);
 unsigned SudekiMpLobbyLaunchPoll(SudekiMpLobbyLaunch *, unsigned *port);
 void SudekiMpLobbyLaunchCommand(SudekiMpLobbyLaunch *, unsigned command);

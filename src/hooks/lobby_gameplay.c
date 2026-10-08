@@ -204,6 +204,14 @@ static BOOL prepare_save(const SudekiMpLobbySavedGame *wanted) {
 static BOOL prepare(const SudekiMpLobbyLaunchPlan *p,const SudekiMpLobbySavedGame *save) {
     if (!base || active || !SudekiMpLobbyLaunchPlanValid(p) ||
         (save?!saved_enabled:!testroom_enabled)) return FALSE;
+    /* Choices project to independently fenced avatars or native heroes.
+     * Native preflight below must still acquire the exact input owners. */
+    if(p->mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY &&
+        (!save || !SudekiMpLobbyLaunchPlanDevPlayReady(p,save->leader,save->party_mask))) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        SudekiMpLogWrite("lobby_gameplay event=prepare_refused reason=avatar_runtime_pending\r\n");
+        return FALSE;
+    }
     native_thread=GetCurrentThreadId(); plan=*p; title_owner=room_world=room_descriptor=NULL;
     saved_game=save!=NULL; runtime_attempted=FALSE;
     story_exit_status=0;
@@ -213,6 +221,14 @@ static BOOL prepare(const SudekiMpLobbyLaunchPlan *p,const SudekiMpLobbySavedGam
         .port=p->port,.timeout_ms=10000,.lobby_members=p->members,
         .reserved_mask=p->reserved_mask,.assignment_enabled=1,.story_observation=save?2u:0u};
     memcpy(c.character,p->character,sizeof(c.character));
+    c.dev_play=p->mode==SUDEKIMP_LOBBY_MODE_DEV_PLAY;
+    if(c.dev_play) {
+        c.dev_play_leader=save->leader;
+        memcpy(c.avatar,p->character,sizeof(c.avatar));
+        if(!SudekiMpLobbyLaunchProjectNative(p,c.character,&c.reserved_mask)) {
+            failed=TRUE; SetLastError(ERROR_INVALID_DATA); return FALSE;
+        }
+    }
     memcpy(c.lobby_nonce,p->nonce,sizeof(c.lobby_nonce));
     for (unsigned i=0;i<32;++i) {
         const char *hex=SUDEKIMP_EXPECTED_SHA256; unsigned value=0;

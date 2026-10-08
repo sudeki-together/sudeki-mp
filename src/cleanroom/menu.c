@@ -1,5 +1,6 @@
 #include "cleanroom/menu.h"
 #include "ui/menu_button.h"
+#include "ui/title_lobby.h"
 
 #include "cleanroom/audio.h"
 #include "cleanroom/engine.h"
@@ -925,7 +926,8 @@ enum {
     NATIVE_ROSTER_PLAYER_TWO = 3u,
     NATIVE_ROSTER_PLAYER_THREE = 4u,
     NATIVE_ROSTER_CONFIRM = 5u,
-    NATIVE_ROSTER_SETTINGS = 6u
+    NATIVE_ROSTER_SETTINGS = 6u,
+    NATIVE_ROSTER_TALOS_SETTINGS = 7u
 };
 
 static uint32_t float_bits(float value) {
@@ -2293,9 +2295,8 @@ static unsigned int native_roster_item_count(void) {
         roster_native_screen_kind == NATIVE_ROSTER_PLAYER_THREE) {
         return 5u;
     }
-    if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
-        return 5u;
-    }
+    if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) return 3u;
+    if (roster_native_screen_kind == NATIVE_ROSTER_TALOS_SETTINGS) return 5u;
     return 0u;
 }
 
@@ -2499,6 +2500,7 @@ static void native_roster_submit_page(void) {
     char confirm_player_one[28];
     char confirm_player_two[28];
     char confirm_player_three[28];
+    char dev_play_setting[28];
     char talos_tuning[28];
     char talos_health[28];
     char talos_stagger[28];
@@ -2562,6 +2564,15 @@ static void native_roster_submit_page(void) {
         count = roster_player_count == 3u ? 5u : 4u;
     }
     else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
+        wsprintfA(dev_play_setting,"Dev Play: %s",SudekiMpLobbyUiDevPlayEnabled()?"ON":"OFF");
+        settings_labels[0] = dev_play_setting;
+        settings_labels[1] = "Talos Co-op Settings";
+        settings_labels[2] = "Back";
+        heading = "SUDEKIMP SETTINGS";
+        labels = settings_labels;
+        count = 3u;
+    }
+    else if (roster_native_screen_kind == NATIVE_ROSTER_TALOS_SETTINGS) {
         wsprintfA(talos_tuning, "Talos Tuning: %s",
             roster_talos_tuning_enabled ? "ON" : "OFF");
         wsprintfA(talos_health, "Health Scale: %ux",
@@ -2697,6 +2708,9 @@ static const char *native_roster_selected_action(void) {
         "SudekiMPRosterLock", "SudekiMPRosterBack"
     };
     static const char *const settings_actions[] = {
+        "SudekiMPDevPlayToggle", "SudekiMPTalosSettings", "SudekiMPRosterBack"
+    };
+    static const char *const talos_settings_actions[] = {
         "SudekiMPTalosToggle", "SudekiMPTalosHealth",
         "SudekiMPTalosStagger", "SudekiMPTalosWindow",
         "SudekiMPRosterBack"
@@ -2731,9 +2745,9 @@ static const char *native_roster_selected_action(void) {
         }
     }
     if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS &&
-        roster_native_selection < 5u) {
-        return settings_actions[roster_native_selection];
-    }
+        roster_native_selection < 3u) return settings_actions[roster_native_selection];
+    if (roster_native_screen_kind == NATIVE_ROSTER_TALOS_SETTINGS &&
+        roster_native_selection < 5u) return talos_settings_actions[roster_native_selection];
     return NULL;
 }
 
@@ -3623,6 +3637,12 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
             native_roster_start_page_transition(FALSE);
             native_roster_rebuild_from_native_menu(controller);
         }
+        else if (roster_native_screen_kind == NATIVE_ROSTER_TALOS_SETTINGS) {
+            roster_native_screen_kind = NATIVE_ROSTER_SETTINGS;
+            roster_native_selection = 1u;
+            native_roster_start_page_transition(FALSE);
+            native_roster_rebuild_from_native_menu(controller);
+        }
         else if (roster_native_screen_kind == NATIVE_ROSTER_SETTINGS) {
             roster_native_screen_kind = NATIVE_ROSTER_MODE;
             roster_native_selection =
@@ -3691,6 +3711,19 @@ static unsigned int __attribute__((thiscall)) cleanroom_front_end_action(
     }
     if (_stricmp(action, "SudekiMPSettings") == 0) {
         roster_native_screen_kind = NATIVE_ROSTER_SETTINGS;
+        roster_native_selection = 0u;
+        native_roster_start_page_transition(FALSE);
+        native_roster_rebuild_from_native_menu(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPDevPlayToggle") == 0) {
+        if (!SudekiMpLobbyUiSetDevPlayEnabled(!SudekiMpLobbyUiDevPlayEnabled()))
+            SudekiMpLogWrite("cleanroom_menu event=dev_play_setting status=write_failed\r\n");
+        native_roster_refresh_screen(controller);
+        return 1u;
+    }
+    if (_stricmp(action, "SudekiMPTalosSettings") == 0) {
+        roster_native_screen_kind = NATIVE_ROSTER_TALOS_SETTINGS;
         roster_native_selection = 0u;
         native_roster_start_page_transition(FALSE);
         native_roster_rebuild_from_native_menu(controller);

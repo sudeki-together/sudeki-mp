@@ -213,6 +213,56 @@ static HRESULT panel_rect(IDirect3DDevice9 *device,float x,float y,float w,float
     return quad(device,x+w*.5f,y+h*.5f,w,h,upper,lower,0,1);
 }
 
+static HRESULT draw_avatar_cards(IDirect3DDevice9 *device,const SudekiMpTitleExtras *extras,
+    float scale,float hud_x,float hud_y,float opacity) {
+    if(extras->avatar_card_count>SUDEKIMP_OVERLAY_AVATAR_CARDS) return E_INVALIDARG;
+    for(unsigned i=0;i<extras->avatar_card_count;++i) {
+        const SudekiMpOverlayAvatarCard *c=&extras->avatar_cards[i];
+        if(!isfinite(c->right) || !isfinite(c->y) || !isfinite(c->width) || !isfinite(c->height) ||
+            c->right<0 || c->right>960 || c->y<0 || c->y>720 ||
+            c->width<160 || c->width>400 || c->height<76 || c->height>120 ||
+            !isfinite(c->hp_fraction) || c->hp_fraction<0 || c->hp_fraction>1 ||
+            !isfinite(c->sp_fraction) || c->sp_fraction<0 || c->sp_fraction>1) return E_INVALIDARG;
+        float x=c->right*hud_x-c->width*scale,y=c->y*hud_y;
+        DWORD edge=tint(c->local?0xc7ad73:0x425764,opacity*.9f);
+        DWORD text=tint(0xf3e3bc,opacity),muted=tint(0xaabac2,opacity);
+        HRESULT result;
+#define CARD(call) do { result=(call); if(FAILED(result)) return result; } while(0)
+#define CARD_BOX(a,b,w,h,upper,lower) panel_rect(device,x+(a)*scale,y+(b)*scale,(w)*scale,(h)*scale,upper,lower)
+#define CARD_TEXT(value,px,py,size,width,color) text_left(device,value,sizeof(value),x+(px)*scale,y+(py)*scale,(size)*scale,(width)*scale,color)
+        CARD(CARD_BOX(0,0,c->width,c->height,edge,edge));
+        CARD(CARD_BOX(1,1,c->width-2,c->height-2,tint(0x152a38,opacity*.92f),tint(0x09131d,opacity*.94f)));
+        CARD(CARD_BOX(8,11,56,56,tint(0x294657,opacity*.95f),tint(0x102536,opacity*.95f)));
+        if(c->portrait) {
+            CARD(IDirect3DDevice9_SetTexture(device,0,(IDirect3DBaseTexture9 *)c->portrait));
+            CARD(quad(device,x+36*scale,y+39*scale,56*scale,56*scale,
+                tint(0xffffff,opacity),tint(0xffffff,opacity),0,1));
+        } else CARD(draw_text(device,c->avatar,sizeof(c->avatar),x+36*scale,y+39*scale,
+            14*scale,50*scale,text,edge));
+        CARD(CARD_TEXT(c->name,76,15,17,c->width-(c->local?118:84),text));
+        if(c->local) {
+            static const char you[]="YOU";
+            CARD(CARD_TEXT(you,c->width-35,15,11,27,edge));
+        }
+        CARD(CARD_TEXT(c->hp,76,34,13,c->width-84,text));
+        CARD(CARD_TEXT(c->sp,76,57,13,c->width-84,muted));
+        CARD(CARD_BOX(76,43,c->width-84,4,tint(0x243a41,opacity),tint(0x243a41,opacity)));
+        CARD(CARD_BOX(76,66,c->width-84,4,tint(0x233342,opacity),tint(0x233342,opacity)));
+        if(c->hp_fraction>0) {
+            DWORD health=tint(c->hp_fraction<=.25f?0xd1796e:0x71b899,opacity);
+            CARD(CARD_BOX(76,43,(c->width-84)*c->hp_fraction,4,health,health));
+        }
+        if(c->sp_fraction>0) {
+            DWORD spirit=tint(0x79a9d1,opacity);
+            CARD(CARD_BOX(76,66,(c->width-84)*c->sp_fraction,4,spirit,spirit));
+        }
+#undef CARD_TEXT
+#undef CARD_BOX
+#undef CARD
+    }
+    return S_OK;
+}
+
 static HRESULT draw_pointer(IDirect3DDevice9 *device,HWND window,
     UINT width,UINT height,float scale,float opacity) {
     /* Retail's WM_SETFOCUS path calls ShowCursor(FALSE). Draw our pointer in
@@ -292,6 +342,25 @@ static HRESULT draw_panel(IDirect3DDevice9 *device,const SudekiMpTitleExtras *p,
         } else if (c->kind==SUDEKIMP_PANEL_SAVE) {
             PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+14,c->y+15,19,c->width-28,ink));
             PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+14,c->y+34,14,c->width-28,muted));
+        } else if (c->kind==SUDEKIMP_PANEL_PORTRAIT) {
+            if (c->texture) {
+                PANEL(IDirect3DDevice9_SetTexture(device,0,(IDirect3DBaseTexture9 *)c->texture));
+                PANEL(quad(device,left+(c->x+c->width*.5f)*scale,
+                    top+(c->y+81)*scale,(c->width-22)*scale,140*scale,
+                    tint(0xffffff,opacity),tint(0xffffff,opacity),0,1));
+            } else {
+                PANEL(BOX(c->x+11,c->y+13,c->width-22,135,
+                    tint(c->active?0x385467:0x203a4f,opacity),tint(0x102334,opacity)));
+                PANEL(draw_text(device,c->label,sizeof(c->label),left+(c->x+c->width*.5f)*scale,
+                    top+(c->y+80)*scale,28*scale,(c->width-30)*scale,ink,gold));
+            }
+            PANEL(draw_text(device,c->label,sizeof(c->label),left+(c->x+c->width*.5f)*scale,
+                top+(c->y+169)*scale,22*scale,(c->width-22)*scale,ink,ink));
+            PANEL(draw_text(device,c->detail,sizeof(c->detail),left+(c->x+c->width*.5f)*scale,
+                top+(c->y+193)*scale,15*scale,(c->width-22)*scale,muted,muted));
+        } else if (c->kind==SUDEKIMP_PANEL_CHARACTER) {
+            PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+14,c->y+18,18,c->width-28,ink));
+            PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+14,c->y+44,21,c->width-28,pale));
         } else if (c->kind==SUDEKIMP_PANEL_MEMBER) {
             PANEL(PANEL_TEXT(c->label,sizeof(c->label),c->x+14,c->y+19,21,c->width-28,ink));
             PANEL(PANEL_TEXT(c->detail,sizeof(c->detail),c->x+14,c->y+43,16,c->width-28,muted));
@@ -414,6 +483,7 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
          * panel's centered 4:3 canvas. Keep lettering uniformly scaled. */
         float hud_x=(float)desc.Width/SUDEKIMP_TITLE_CANVAS_WIDTH;
         float hud_y=(float)desc.Height/SUDEKIMP_TITLE_CANVAS_HEIGHT;
+        DRAW_CALL(draw_avatar_cards(device,extras,scale,hud_x,hud_y,opacity));
         for(unsigned i=0;i<extras->text_count;++i) {
             const SudekiMpPanelText *t=&extras->texts[i];
             float x=t->x*hud_x,y=t->y*hud_y,width=t->width*hud_x;
