@@ -75,4 +75,10 @@ int SudekiMpModLooseNameValid(const char *name);
  * last separator-bounded sound\ or movies\ component), copied into rel with
  * backslashes; 0 when the path is not under either folder. */
 int SudekiMpModLooseRelative(const char *path, char *rel, size_t capacity);
+
+/* mods\load-order.txt: one mod folder name per line (UTF-8, optional BOM,
+ * '#' or ';' comments, blank lines ignored), earliest-loaded first. Returns the
+ * folder's position among the listed names (case-insensitive ASCII match),
+ * or -1 when it is not listed; unlisted mods load after listed ones, by name. */
+long SudekiMpModOrderRank(const char *order, size_t length, const char *folder);
 #endif

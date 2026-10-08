@@ -68,6 +68,17 @@ static DWORD WINAPI choose_browse_file(void *context) {
     assert(!"Browse dialog did not expose its filename input");
     return 1;
 }
+typedef struct ZipBuffer { uint8_t *bytes; size_t size, capacity; } ZipBuffer;
+static int zip_buffer_sink(void *context, const void *bytes, size_t size) {
+    ZipBuffer *b = (ZipBuffer *)context;
+    if (b->size + size > b->capacity) {
+        size_t capacity = (b->size + size) * 2u + 64u;
+        uint8_t *grown = (uint8_t *)realloc(b->bytes, capacity);
+        if (!grown) return 0;
+        b->bytes = grown; b->capacity = capacity;
+    }
+    memcpy(b->bytes + b->size, bytes, size); b->size += size; return 1;
+}
 int wmain(int argc, WCHAR **argv) {
     INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_LISTVIEW_CLASSES };
     HINSTANCE instance = GetModuleHandleW(NULL);
@@ -110,6 +121,11 @@ int wmain(int argc, WCHAR **argv) {
         return 0;
     }
     assert(p->catalog && p->catalog->count == 3);
+    /* Thumbnails reach the catalogue (and the image list) for every texture. */
+    for (i = 0; i < p->catalog->count; ++i)
+        if (p->catalog->resources[i].entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
+            assert(p->catalog->resources[i].icon >= 0);
+    assert(ImageList_GetImageCount(p->images) >= 2);
     for (i = 0; i < p->catalog->count; ++i) {
         Resource *r = &p->catalog->resources[i];
         if (strstr(r->entry.name, "Face")) texture = (int)i;
@@ -194,11 +210,65 @@ int wmain(int argc, WCHAR **argv) {
     assert(WritePrivateProfileStringW(L"Mod", L"Format", L"SudekiMP.Mod/1", manifest));
     assert(WritePrivateProfileStringW(L"Mod", L"Enabled", L"off", manifest));
     refresh_mods(p, L"Größe"); assert(p->manifest.text && SendMessageW(p->enabled, BM_GETCHECK, 0, 0) == BST_UNCHECKED);
+    /* Import: TexMod .tpf, zipped mod folder, unsafe zip; load order; export. */
+    {
+        WCHAR package[PATH_CAP], mods[PATH_CAP], probe[PATH_CAP];
+        SudekiMpModManifest imported = {0};
+        size_t k; int at = -1;
+        join(mods, PATH_CAP, argv[1], L"mods");
+        join(package, PATH_CAP, argv[1], L"package.tpf"); import_path(p, package);
+        join(probe, PATH_CAP, mods, L"package\\textures\\0x12345678.png");
+        assert(GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES);
+        join(probe, PATH_CAP, mods, L"package\\mod.ini");
+        assert(load_manifest_at(probe, &imported));
+        assert(SudekiMpModManifestGetTexture(&imported, 0x12345678u, relative, sizeof(relative)) &&
+               !strcmp(relative, "textures/0x12345678.png"));
+        assert(SudekiMpModManifestGetValue(&imported, "Mod", "Author", value, sizeof(value)) && !strcmp(value, "Tester"));
+        SudekiMpModManifestFree(&imported);
+        join(package, PATH_CAP, argv[1], L"pack.zip"); import_path(p, package);
+        join(probe, PATH_CAP, mods, L"Packed\\textures\\x.png");
+        assert(GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES);
+        quiet_errors = 1;
+        join(package, PATH_CAP, argv[1], L"evil.zip"); import_path(p, package);
+        quiet_errors = 0;
+        join(probe, PATH_CAP, mods, L"Evil");
+        assert(GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES); /* nothing written */
+        join(probe, PATH_CAP, mods, L"escape.txt");
+        assert(GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES);
+        join(probe, PATH_CAP, argv[1], L"escape.txt");
+        assert(GetFileAttributesW(probe) == INVALID_FILE_ATTRIBUTES);
+        /* Load order: move "package" one earlier; load-order.txt drives the list. */
+        refresh_mods(p, L"package");
+        for (k = 0; k < p->mod_count; ++k) if (!_wcsicmp(p->mod_list[k].folder, L"package")) at = (int)k;
+        assert(at > 0 && p->selected_mod == at);
+        move_selected_mod(p, -1);
+        assert(!_wcsicmp(p->mod_list[at - 1].folder, L"package") && p->selected_mod == at - 1);
+        join(probe, PATH_CAP, mods, L"load-order.txt");
+        assert(GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES);
+        refresh_mods(p, NULL);
+        assert(!_wcsicmp(p->mod_list[at - 1].folder, L"package"));
+        /* Export tree -> zip -> read back. */
+        {
+            ZipBuffer out = {0};
+            SudekiMpModZipWriter w;
+            SudekiMpModZip zip;
+            char error[128];
+            join(probe, PATH_CAP, mods, L"package");
+            SudekiMpModZipWriterBegin(&w, zip_buffer_sink, &out);
+            assert(export_tree(&w, probe, "package", 0));
+            assert(SudekiMpModZipWriterFinish(&w, "test"));
+            assert(SudekiMpModZipRead(out.bytes, out.size, NULL, 0, 0, &zip, error, sizeof(error)));
+            assert(SudekiMpModZipFind(&zip, "package/mod.ini") >= 0 &&
+                   SudekiMpModZipFind(&zip, "package/textures/0x12345678.png") >= 0);
+            SudekiMpModZipFree(&zip);
+            free(out.bytes);
+        }
+    }
     /* No global toggle in the workshop: [Mods] Enable is only reported. */
     assert(WritePrivateProfileStringW(L"Mods", L"Enable", L"false", ini));
     SudekiMpModsPanelSetPaths(panel, L"", ini); SudekiMpModsPanelSetPaths(panel, argv[1], ini); pump(p);
     GetWindowTextW(p->order_label, root, PATH_CAP); assert(wcsstr(root, L"switched off"));
     scan_start(p); SudekiMpModsPanelDestroy(panel); DestroyWindow(parent); CoUninitialize();
-    puts("LauncherModsUiTest: passed (scan/filter/WIC/Browse/drop/apply rollback/revert/Unicode/enable/model gate/teardown)");
+    puts("LauncherModsUiTest: passed (scan/filter/WIC/Browse/drop/apply rollback/revert/Unicode/enable/model gate/import tpf+zip/unsafe zip/load order/export/teardown)");
     return 0;
 }

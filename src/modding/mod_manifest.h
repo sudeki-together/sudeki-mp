@@ -22,6 +22,9 @@ int SudekiMpModManifestEncode(const SudekiMpModManifest *manifest, uint8_t **byt
 void SudekiMpModManifestFree(SudekiMpModManifest *manifest);
 
 int SudekiMpModManifestSetEnabled(SudekiMpModManifest *manifest, int enabled);
+/* [Mod] metadata (Author, Description, Source, Version...): one UTF-8 line;
+ * NULL removes it. Format and Enabled have their own rules and are refused. */
+int SudekiMpModManifestSetMetadata(SudekiMpModManifest *manifest, const char *name, const char *value);
 /* NULL relative removes every alias of the identity in that section. Texture
  * aliases include differently padded/cased hex keys; archive file aliases also
  * include NAME.EXT and its checksum key. Loose names match case-insensitively

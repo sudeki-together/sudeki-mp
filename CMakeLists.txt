@@ -295,7 +295,7 @@ set_target_properties(SudekiMP.Launcher PROPERTIES
 
 add_library(SudekiMP.ModdingCore STATIC
     src/modding/mod_archive.c src/modding/mod_image.c
-    src/modding/mod_manifest.c src/modding/mod_groups.c
+    src/modding/mod_manifest.c src/modding/mod_groups.c src/modding/mod_zip.c
     src/engine/texture_mod_index.c)
 target_include_directories(SudekiMP.ModdingCore PUBLIC src)
 target_compile_options(SudekiMP.ModdingCore PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -2012,7 +2012,8 @@ add_executable(SudekiMP.ModdingCoreTest
     tests/modding_core_test.c
     tests/modding_archive_image_test.c
     tests/modding_manifest_test.c
-    tests/modding_groups_test.c)
+    tests/modding_groups_test.c
+    tests/modding_zip_test.c)
 target_link_libraries(SudekiMP.ModdingCoreTest PRIVATE SudekiMP.ModdingCore)
 target_include_directories(SudekiMP.ModdingCoreTest PRIVATE src)
 target_compile_options(SudekiMP.ModdingCoreTest PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)

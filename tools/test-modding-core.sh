@@ -9,6 +9,7 @@ mod_core_sources=(
     "${project_dir}/src/modding/mod_image.c"
     "${project_dir}/src/modding/mod_manifest.c"
     "${project_dir}/src/modding/mod_groups.c"
+    "${project_dir}/src/modding/mod_zip.c"
     "${project_dir}/src/engine/texture_mod_index.c"
 )
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -UNDEBUG \
@@ -17,6 +18,7 @@ mod_core_sources=(
     "${project_dir}/tests/modding_archive_image_test.c" \
     "${project_dir}/tests/modding_manifest_test.c" \
     "${project_dir}/tests/modding_groups_test.c" \
+    "${project_dir}/tests/modding_zip_test.c" \
     "${mod_core_sources[@]}" -o "${mod_test_dir}/SudekiMP.ModdingCoreTest"
 "${mod_test_dir}/SudekiMP.ModdingCoreTest"
 "${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -UNDEBUG \

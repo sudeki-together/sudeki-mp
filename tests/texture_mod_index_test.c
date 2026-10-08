@@ -117,6 +117,17 @@ int main(void) {
     }
 
     if (failures) return 1;
+    {
+        /* mods\load-order.txt ranking: BOM, comments, blanks, case, spaces, CRLF. */
+        static const char order[] = "\xef\xbb\xbf# load order\r\n\r\n  CoolerRunicBlade \r\n; note\nmy mods\nZeta";
+        size_t n = sizeof(order) - 1;
+        CHECK(SudekiMpModOrderRank(order, n, "coolerrunicblade") == 0);
+        CHECK(SudekiMpModOrderRank(order, n, "My Mods") == 1);
+        CHECK(SudekiMpModOrderRank(order, n, "Zeta") == 2);
+        CHECK(SudekiMpModOrderRank(order, n, "Zet") == -1);
+        CHECK(SudekiMpModOrderRank(order, n, "Alpha") == -1);
+        CHECK(SudekiMpModOrderRank(NULL, 0, "Alpha") == -1);
+    }
     puts("texture_mod_index_test: ok");
     return 0;
 }

@@ -7,6 +7,7 @@
 #include "engine/log.h"
 #include "engine/texture_mod_index.h"
 #include <d3d9.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -304,6 +305,46 @@ static int compare_names(const void *a, const void *b) { return _wcsicmp(*(wchar
 
 /* Every subfolder of the mods folder with a mod.ini, in case-insensitive name
  * order; a later mod overrides an earlier one for the same key. */
+/* Optional mods\load-order.txt: listed folders first, in its order; the rest
+ * keep their name order after them (stable). */
+static void apply_load_order(const wchar_t *folder, wchar_t **names, unsigned count) {
+    wchar_t path[MAX_PATH];
+    HANDLE file;
+    char *text = NULL;
+    DWORD size, read = 0;
+    long ranks[MAX_MODS];
+    if (!count || _snwprintf(path, MAX_PATH, L"%ls\\load-order.txt", folder) <= 0) return;
+    path[MAX_PATH - 1] = 0;
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (file == INVALID_HANDLE_VALUE) return;
+    size = GetFileSize(file, NULL);
+    if (size != INVALID_FILE_SIZE && size > 0 && size < 65536 && (text = (char *)malloc(size)) != NULL &&
+        !ReadFile(file, text, size, &read, NULL)) read = 0;
+    CloseHandle(file);
+    if (!text || !read) { free(text); return; }
+    for (unsigned i = 0; i < count; ++i) {
+        char utf8[MAX_PATH * 3];
+        ranks[i] = WideCharToMultiByte(CP_UTF8, 0, names[i], -1, utf8, (int)sizeof(utf8), NULL, NULL) ?
+            SudekiMpModOrderRank(text, read, utf8) : -1;
+    }
+    free(text);
+    /* Insertion sort keeps the existing name order among equal ranks. */
+    for (unsigned i = 1; i < count; ++i) {
+        wchar_t *name = names[i];
+        long rank = ranks[i], key = rank < 0 ? LONG_MAX : rank;
+        unsigned j = i;
+        while (j > 0 && (ranks[j - 1] < 0 ? LONG_MAX : ranks[j - 1]) > key) {
+            names[j] = names[j - 1]; ranks[j] = ranks[j - 1]; --j;
+        }
+        names[j] = name; ranks[j] = rank;
+    }
+    {
+        unsigned listed = 0;
+        for (unsigned i = 0; i < count; ++i) if (ranks[i] >= 0) ++listed;
+        SudekiMpLogFormat("texture_mods event=load_order listed=%u total=%u\r\n", listed, count);
+    }
+}
+
 static void load_mods(const wchar_t *folder) {
     wchar_t pattern[MAX_PATH], *names[MAX_MODS];
     unsigned count = 0;
@@ -318,6 +359,7 @@ static void load_mods(const wchar_t *folder) {
     } while (FindNextFileW(search, &found));
     FindClose(search);
     qsort(names, count, sizeof(names[0]), compare_names);
+    apply_load_order(folder, names, count);
     for (unsigned i = 0; i < count; ++i) {
         wchar_t root[MAX_PATH];
         if (_snwprintf(root, MAX_PATH, L"%ls\\%ls", folder, names[i]) > 0) { root[MAX_PATH - 1] = 0; load_mod(root, names[i]); }

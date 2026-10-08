@@ -6,10 +6,12 @@
 #include "modding/mod_groups.h"
 #include "modding/mod_image.h"
 #include "modding/mod_manifest.h"
+#include "modding/mod_zip.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,7 +61,11 @@ enum {
   ID_NAME_OK,
   ID_NAME_CANCEL,
   ID_HEADING,
-  ID_NOTE
+  ID_NOTE,
+  ID_UP,
+  ID_DOWN,
+  ID_IMPORT,
+  ID_EXPORT_MOD
 };
 enum { CAT_WEAPONS, CAT_ARMOUR, CAT_BODY, CAT_OTHER, CAT_MODELS };
 static const WCHAR *characters[] = {L"Tal", L"Ailish", L"Buki", L"Elco",
@@ -125,6 +131,7 @@ typedef struct ModFolder {
 } ModFolder;
 typedef struct Panel {
   HWND window, selector, enabled, folder, rescan, new_mod, status_sink,
+      move_up, move_down, import_mod, export_mod,
       character, category, search, grid, information, check, drop, browse,
       apply, revert, export_original, status, original_label, replacement_label,
       order_label, character_label, category_label;
@@ -172,7 +179,13 @@ static void status(Panel *p, const WCHAR *s) {
   SetWindowTextW(p->status_sink ? p->status_sink : p->status, s);
 }
 static HFONT body(Panel *p) { return p->body_font ? p->body_font : p->font; }
+/* Automated tests set this so an error reaches the status line, not a modal box. */
+static int quiet_errors;
 static void error_box(Panel *p, const WCHAR *s) {
+  if (quiet_errors) {
+    status(p, s);
+    return;
+  }
   MessageBoxW(p->window, s, L"SudekiMP Mods", MB_OK | MB_ICONERROR);
 }
 static int is_directory(const WCHAR *path) {
@@ -704,6 +717,8 @@ static DWORD WINAPI scan_worker(void *context) {
   /* Hand the catalogue to the panel now; from here on this thread only reads
    * entries/records and reports thumbnails through the queue. */
   InterlockedExchange(&job->phase, 3);
+  job->result = r; /* visible to the panel only after the published flag */
+  MemoryBarrier();
   InterlockedExchange(&job->published, 1);
   {
     size_t *pending = (size_t *)malloc(r->count * sizeof(size_t) + 1);
@@ -1124,6 +1139,70 @@ static int mod_compare(const void *a, const void *b) {
   return _wcsicmp(((const ModFolder *)a)->folder,
                   ((const ModFolder *)b)->folder);
 }
+static void refresh_mods(Panel *p, const WCHAR *preferred);
+/* Same rule as the game loader: folders listed in mods\load-order.txt
+ * first, in that order; the rest after them by name (stable). */
+static void apply_mod_order(Panel *p) {
+  WCHAR path[PATH_CAP];
+  uint8_t *text = NULL;
+  size_t size = 0, i, j;
+  long ranks[MAX_MODS];
+  if (!p->mod_count || !join(path, PATH_CAP, p->mods, L"load-order.txt") ||
+      !read_range(path, 0, (size_t)-1, &text, &size))
+    return;
+  for (i = 0; i < p->mod_count; ++i) {
+    char utf8[MAX_PATH * 3];
+    ranks[i] = wide_to_utf8(p->mod_list[i].folder, utf8, sizeof(utf8))
+                   ? SudekiMpModOrderRank((const char *)text, size, utf8)
+                   : -1;
+  }
+  free(text);
+  for (i = 1; i < p->mod_count; ++i) {
+    ModFolder folder = p->mod_list[i];
+    long rank = ranks[i], key = rank < 0 ? LONG_MAX : rank;
+    for (j = i; j > 0 && (ranks[j - 1] < 0 ? LONG_MAX : ranks[j - 1]) > key; --j) {
+      p->mod_list[j] = p->mod_list[j - 1];
+      ranks[j] = ranks[j - 1];
+    }
+    p->mod_list[j] = folder;
+    ranks[j] = rank;
+  }
+}
+/* Moves the selected mod one place earlier (-1) or later (+1) and records
+ * the whole order in mods\load-order.txt for the game and the launcher. */
+static void move_selected_mod(Panel *p, int direction) {
+  WCHAR path[PATH_CAP], preferred[MAX_PATH];
+  size_t i, used = 0, capacity = 0;
+  char *text = NULL;
+  int target = p->selected_mod + direction;
+  ModFolder swap;
+  if (p->selected_mod < 0 || target < 0 || (size_t)target >= p->mod_count ||
+      !join(path, PATH_CAP, p->mods, L"load-order.txt"))
+    return;
+  swap = p->mod_list[p->selected_mod];
+  p->mod_list[p->selected_mod] = p->mod_list[target];
+  p->mod_list[target] = swap;
+  capacity = 128 + p->mod_count * (MAX_PATH * 3 + 2);
+  text = (char *)malloc(capacity);
+  if (!text)
+    return;
+  used = (size_t)snprintf(text, capacity,
+                          "# SudekiMP mod load order, earliest first; a later mod wins.\r\n"
+                          "# Folders not listed load after these, by name.\r\n");
+  for (i = 0; i < p->mod_count; ++i) {
+    char utf8[MAX_PATH * 3];
+    if (!wide_to_utf8(p->mod_list[i].folder, utf8, sizeof(utf8)))
+      continue;
+    used += (size_t)snprintf(text + used, capacity - used, "%s\r\n", utf8);
+  }
+  StringCchCopyW(preferred, MAX_PATH, p->mod_list[target].folder);
+  if (!atomic_write(path, (const uint8_t *)text, used))
+    error_box(p, L"Unable to save the mod load order.");
+  else
+    status(p, L"Load order saved. It takes effect on the next game launch.");
+  free(text);
+  refresh_mods(p, preferred);
+}
 static int resource_replaced(Panel *p, const Resource *r, char *relative,
                              size_t cap) {
   char key[16];
@@ -1439,8 +1518,8 @@ static void load_selected_mod(Panel *p) {
                  0);
     StringCchPrintfW(
         order, 256,
-        L"Load order %d of %u: mods load by folder name, and a later mod wins "
-        L"when two change the same thing.",
+        L"Load order %d of %u (\x25B2\x25BC to change): a later mod wins when "
+        L"two change the same thing.",
         p->selected_mod + 1, (unsigned)p->mod_count);
   } else {
     StringCchCopyW(order, 256, L"Choose a mod to save replacements.");
@@ -1452,6 +1531,10 @@ static void load_selected_mod(Panel *p) {
                    L"Mod loading is switched off in SudekiMP.ini ([Mods] Enable=false): "
                    L"edits are saved, but the game ignores every mod.");
   SetWindowTextW(p->order_label, order);
+  EnableWindow(p->move_up, p->selected_mod > 0);
+  EnableWindow(p->move_down, p->selected_mod >= 0 && (size_t)p->selected_mod + 1 < p->mod_count);
+  EnableWindow(p->export_mod, p->selected_mod >= 0);
+  EnableWindow(p->import_mod, p->mods[0] != 0);
   refresh_grid(p);
   if (p->selected_resource >= 0)
     select_resource(p, p->selected_resource);
@@ -1509,6 +1592,7 @@ static void refresh_mods(Panel *p, const WCHAR *preferred) {
     return;
   }
   qsort(p->mod_list, p->mod_count, sizeof(p->mod_list[0]), mod_compare);
+  apply_mod_order(p);
   /* A mod copied into another mod's folder is never loaded: say where it is. */
   for (i = 0; i < p->mod_count; ++i) {
     WCHAR inner[PATH_CAP], nested[PATH_CAP], text[512];
@@ -2138,6 +2222,374 @@ static void browse_replacement(Panel *p) {
   if (GetOpenFileNameW(&dialog))
     queue_candidate(p, path);
 }
+/* ------------------------------------------------------------ import/export */
+
+static int ends_with(const WCHAR *path, const WCHAR *suffix) {
+  size_t a = wcslen(path), b = wcslen(suffix);
+  return a >= b && !_wcsicmp(path + a - b, suffix);
+}
+/* A free, valid folder name under mods\ derived from base. */
+static int unique_mod_folder(Panel *p, const WCHAR *base, WCHAR *out, size_t cap) {
+  WCHAR clean[96], candidate[128], root[PATH_CAP];
+  size_t i, n = 0;
+  int attempt;
+  for (i = 0; base[i] && n < 60; ++i) {
+    WCHAR c = base[i];
+    clean[n++] = (c < 32 || wcschr(L"\\/:*?\"<>|", c)) ? L'_' : c;
+  }
+  while (n && (clean[n - 1] == L' ' || clean[n - 1] == L'.')) --n;
+  clean[n] = 0;
+  if (!n || clean[0] == L'.' || clean[0] == L'_')
+    StringCchCopyW(clean, 96, L"Imported mod");
+  for (attempt = 1; attempt < 100; ++attempt) {
+    if (attempt == 1)
+      StringCchCopyW(candidate, 128, clean);
+    else
+      StringCchPrintfW(candidate, 128, L"%ls (%d)", clean, attempt);
+    if (!valid_mod_name(candidate) || !join(root, PATH_CAP, p->mods, candidate))
+      return 0;
+    if (GetFileAttributesW(root) == INVALID_FILE_ATTRIBUTES)
+      return SUCCEEDED(StringCchCopyW(out, cap, candidate));
+  }
+  return 0;
+}
+static void file_stem(const WCHAR *path, WCHAR *out, size_t cap) {
+  const WCHAR *name = wcsrchr(path, L'\\'), *slash = wcsrchr(path, L'/');
+  WCHAR *dot;
+  if (slash && (!name || slash > name))
+    name = slash;
+  StringCchCopyW(out, cap, name ? name + 1 : path);
+  dot = wcsrchr(out, L'.');
+  if (dot && dot != out)
+    *dot = 0;
+}
+/* One relative path from a package: '/' components, no empty/./.. parts,
+ * no drive or stream separators. */
+static int safe_package_path(const char *rel) {
+  const char *part = rel;
+  if (!rel[0] || rel[0] == '/' || rel[0] == '\\')
+    return 0;
+  for (;;) {
+    const char *end = part;
+    size_t length;
+    while (*end && *end != '/' && *end != '\\')
+      ++end;
+    length = (size_t)(end - part);
+    if (!length || (length == 1 && part[0] == '.') ||
+        (length == 2 && part[0] == '.' && part[1] == '.'))
+      return 0;
+    for (const char *c = part; c < end; ++c)
+      if ((unsigned char)*c < 32 || *c == ':' || *c == '*' || *c == '?' ||
+          *c == '"' || *c == '<' || *c == '>' || *c == '|')
+        return 0;
+    if (!*end)
+      return 1;
+    part = end + 1;
+  }
+}
+/* Writes data at root\rel (rel uses '/'), creating its folders. */
+static int write_package_file(const WCHAR *root, const char *rel,
+                              const uint8_t *data, size_t size) {
+  WCHAR wide[PATH_CAP], path[PATH_CAP], *slash;
+  size_t i;
+  utf8_to_wide(rel, wide, PATH_CAP);
+  for (i = 0; wide[i]; ++i)
+    if (wide[i] == L'/')
+      wide[i] = L'\\';
+  if (!join(path, PATH_CAP, root, wide))
+    return 0;
+  slash = wcsrchr(path, L'\\');
+  if (slash) {
+    *slash = 0;
+    if (!make_directory(path))
+      return 0;
+    *slash = L'\\';
+  }
+  return atomic_write(path, size ? data : (const uint8_t *)"", size);
+}
+/* TexMod .tpf -> mods\<name>: textures named after their game resource when
+ * the catalogue knows the key (as sudekimod.py convert-tpf), else 0xKEY. */
+static int import_tpf(Panel *p, const WCHAR *source, const uint8_t *bytes, size_t size) {
+  SudekiMpModTpf tpf;
+  SudekiMpModManifest manifest = {0};
+  WCHAR stem[MAX_PATH], folder[128], root[PATH_CAP], manifest_path[PATH_CAP], text[256];
+  char error[128], utf8[512], note[600];
+  size_t i, written = 0;
+  int ok = 1;
+  if (!SudekiMpModTpfRead(bytes, size, &tpf, error, sizeof(error))) {
+    WCHAR wide[128];
+    utf8_to_wide(error, wide, 128);
+    StringCchPrintfW(text, 256, L"This TexMod package could not be read: %ls.", wide);
+    error_box(p, text);
+    return 0;
+  }
+  file_stem(source, stem, MAX_PATH);
+  if (!unique_mod_folder(p, stem, folder, 128) || !join(root, PATH_CAP, p->mods, folder) ||
+      !join(manifest_path, PATH_CAP, root, L"mod.ini") || !make_directory(root) ||
+      !wide_to_utf8(folder, utf8, sizeof(utf8)) || !SudekiMpModManifestCreate(utf8, &manifest)) {
+    SudekiMpModTpfFree(&tpf);
+    error_box(p, L"Unable to create the mod folder for this package.");
+    return 0;
+  }
+  if (tpf.author[0])
+    SudekiMpModManifestSetMetadata(&manifest, "Author", tpf.author);
+  if (tpf.description[0])
+    SudekiMpModManifestSetMetadata(&manifest, "Description", tpf.description);
+  {
+    WCHAR name[MAX_PATH];
+    const WCHAR *slash = wcsrchr(source, L'\\');
+    StringCchCopyW(name, MAX_PATH, slash ? slash + 1 : source);
+    if (wide_to_utf8(name, utf8, sizeof(utf8))) {
+      snprintf(note, sizeof(note), "Converted from TexMod package %s by the SudekiMP launcher", utf8);
+      SudekiMpModManifestSetMetadata(&manifest, "Source", note);
+    }
+  }
+  for (i = 0; ok && i < tpf.count; ++i) {
+    const SudekiMpModTpfTexture *t = &tpf.textures[i];
+    const SudekiMpModZipEntry *e;
+    const char *ext;
+    char base[200], rel[260];
+    size_t k;
+    if (t->member < 0)
+      continue;
+    e = &tpf.zip.entries[t->member];
+    ext = SudekiMpModImageExtension(e->data, e->size);
+    snprintf(base, sizeof(base), "0x%08lX", (unsigned long)t->key);
+    for (k = 0; p->catalog && k < p->catalog->count; ++k) {
+      const SudekiMpModCatalogEntry *c = &p->catalog->resources[k].entry;
+      if (c->kind == SUDEKIMP_MOD_RESOURCE_TEXTURE && c->texture_key == t->key && c->name[0]) {
+        snprintf(base, sizeof(base), "%s", c->name);
+        break;
+      }
+    }
+    for (k = 0; base[k]; ++k)
+      if (!((base[k] >= 'A' && base[k] <= 'Z') || (base[k] >= 'a' && base[k] <= 'z') ||
+            (base[k] >= '0' && base[k] <= '9') || base[k] == '_' || base[k] == '-' || base[k] == '.'))
+        base[k] = '_';
+    snprintf(rel, sizeof(rel), "textures/%s.%s", base, ext);
+    ok = write_package_file(root, rel, e->data, e->size) &&
+         SudekiMpModManifestSetTexture(&manifest, t->key, rel);
+    written += ok;
+  }
+  ok = ok && save_manifest_at(manifest_path, &manifest);
+  SudekiMpModManifestFree(&manifest);
+  if (!ok) {
+    SudekiMpModTpfFree(&tpf);
+    error_box(p, L"The package was read, but its files could not be written to the mods folder.");
+    refresh_mods(p, NULL);
+    return 0;
+  }
+  StringCchPrintfW(text, 256, L"Imported %u textures from %ls into \"%ls\"%ls.",
+                   (unsigned)written, stem, folder,
+                   tpf.missing ? L" (some listed files were missing from the package)" : L"");
+  SudekiMpModTpfFree(&tpf);
+  refresh_mods(p, folder);
+  status(p, text);
+  return 1;
+}
+/* A zip holding mod.ini at its top or inside one top folder; or one .tpf. */
+static int import_zip(Panel *p, const WCHAR *source, const uint8_t *bytes, size_t size) {
+  SudekiMpModZip zip;
+  WCHAR folder[128], root[PATH_CAP], base[MAX_PATH], text[256];
+  char error[128], prefix[SUDEKIMP_MOD_ZIP_NAME_MAX + 1] = "";
+  size_t i, written = 0, tpf_count = 0, tpf_index = 0, depth = (size_t)-1;
+  int ok = 1;
+  if (!SudekiMpModZipRead(bytes, size, NULL, 0, 0, &zip, error, sizeof(error))) {
+    WCHAR wide[128];
+    utf8_to_wide(error, wide, 128);
+    StringCchPrintfW(text, 256, L"This zip could not be read: %ls.", wide);
+    error_box(p, text);
+    return 0;
+  }
+  for (i = 0; i < zip.count; ++i) {
+    const char *name = zip.entries[i].name, *slash = strrchr(name, '/');
+    const char *leaf = slash ? slash + 1 : name;
+    size_t d = 0;
+    if (zip.entries[i].directory)
+      continue;
+    for (const char *c = name; *c; ++c)
+      d += *c == '/';
+    if (!_stricmp(leaf, "mod.ini") && d < depth && d <= 1) {
+      depth = d;
+      snprintf(prefix, sizeof(prefix), "%.*s", (int)(leaf - name), name);
+    }
+    if (strlen(leaf) > 4 && !_stricmp(leaf + strlen(leaf) - 4, ".tpf")) {
+      ++tpf_count;
+      tpf_index = i;
+    }
+  }
+  if (depth == (size_t)-1) {
+    if (tpf_count == 1) {
+      WCHAR inner[MAX_PATH];
+      utf8_to_wide(zip.entries[tpf_index].name, inner, MAX_PATH);
+      ok = import_tpf(p, inner, zip.entries[tpf_index].data, zip.entries[tpf_index].size);
+      SudekiMpModZipFree(&zip);
+      return ok;
+    }
+    SudekiMpModZipFree(&zip);
+    error_box(p, L"This zip has no mod.ini (and not exactly one .tpf), so it is not a mod package.");
+    return 0;
+  }
+  /* Every name is checked before anything is written. */
+  for (i = 0; i < zip.count; ++i) {
+    const char *name = zip.entries[i].name;
+    size_t plen = strlen(prefix);
+    if (!zip.entries[i].directory && !_strnicmp(name, prefix, plen) &&
+        !safe_package_path(name + plen)) {
+      SudekiMpModZipFree(&zip);
+      error_box(p, L"This zip contains unsafe file names (for example \"..\"); nothing was imported.");
+      return 0;
+    }
+  }
+  if (prefix[0]) {
+    char top[SUDEKIMP_MOD_ZIP_NAME_MAX + 1];
+    snprintf(top, sizeof(top), "%.*s", (int)strlen(prefix) - 1, prefix);
+    utf8_to_wide(top, base, MAX_PATH);
+  } else
+    file_stem(source, base, MAX_PATH);
+  if (!unique_mod_folder(p, base, folder, 128) || !join(root, PATH_CAP, p->mods, folder) ||
+      !make_directory(root)) {
+    SudekiMpModZipFree(&zip);
+    error_box(p, L"Unable to create the mod folder for this package.");
+    return 0;
+  }
+  for (i = 0; ok && i < zip.count; ++i) {
+    const char *name = zip.entries[i].name;
+    size_t plen = strlen(prefix);
+    if (zip.entries[i].directory || _strnicmp(name, prefix, plen))
+      continue;
+    if (!safe_package_path(name + plen)) {
+      ok = 0;
+      break;
+    }
+    ok = write_package_file(root, name + plen, zip.entries[i].data, zip.entries[i].size);
+    written += ok;
+  }
+  SudekiMpModZipFree(&zip);
+  refresh_mods(p, folder);
+  if (!ok) {
+    error_box(p, L"Some files in this zip have unsafe names or could not be written; the import stopped.");
+    return 0;
+  }
+  StringCchPrintfW(text, 256, L"Imported %u files into \"%ls\".", (unsigned)written, folder);
+  status(p, text);
+  return 1;
+}
+static void import_path(Panel *p, const WCHAR *path) {
+  uint8_t *bytes = NULL;
+  size_t size = 0;
+  if (!p->mods[0] || !make_directory(p->mods)) {
+    status(p, L"Choose the Sudeki folder on the Play tab first.");
+    return;
+  }
+  if (!read_range(path, 0, (size_t)-1, &bytes, &size)) {
+    error_box(p, L"The package could not be read (missing, empty or larger than 128 MB).");
+    return;
+  }
+  if (ends_with(path, L".tpf"))
+    import_tpf(p, path, bytes, size);
+  else
+    import_zip(p, path, bytes, size);
+  free(bytes);
+}
+static void import_mod_dialog(Panel *p) {
+  OPENFILENAMEW dialog;
+  WCHAR path[PATH_CAP] = {0};
+  memset(&dialog, 0, sizeof(dialog));
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner = p->window;
+  dialog.lpstrFilter = L"Mod packages (*.zip, *.tpf)\0*.zip;*.tpf\0All files\0*.*\0";
+  dialog.lpstrFile = path;
+  dialog.nMaxFile = PATH_CAP;
+  dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  dialog.lpstrTitle = L"Import a mod (.zip) or a TexMod package (.tpf)";
+  if (GetOpenFileNameW(&dialog))
+    import_path(p, path);
+}
+typedef struct ExportFile { HANDLE file; } ExportFile;
+static int export_sink(void *context, const void *bytes, size_t size) {
+  DWORD done = 0;
+  return WriteFile(((ExportFile *)context)->file, bytes, (DWORD)size, &done, NULL) &&
+         done == size;
+}
+static int export_tree(SudekiMpModZipWriter *w, const WCHAR *dir, const char *prefix,
+                       unsigned depth) {
+  WCHAR pattern[PATH_CAP], child[PATH_CAP];
+  WIN32_FIND_DATAW found;
+  HANDLE find;
+  int ok = 1;
+  if (depth > 8 || !join(pattern, PATH_CAP, dir, L"*"))
+    return 0;
+  find = FindFirstFileW(pattern, &found);
+  if (find == INVALID_HANDLE_VALUE)
+    return 1;
+  do {
+    char leaf[MAX_PATH * 3], name[SUDEKIMP_MOD_ZIP_NAME_MAX + 1];
+    if (!wcscmp(found.cFileName, L".") || !wcscmp(found.cFileName, L".."))
+      continue;
+    if (!join(child, PATH_CAP, dir, found.cFileName) ||
+        !wide_to_utf8(found.cFileName, leaf, sizeof(leaf)) ||
+        snprintf(name, sizeof(name), "%s/%s", prefix, leaf) >= (int)sizeof(name)) {
+      ok = 0;
+      break;
+    }
+    if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      ok = export_tree(w, child, name, depth + 1);
+    } else {
+      uint8_t *bytes = NULL;
+      size_t size = 0;
+      int empty = found.nFileSizeHigh == 0 && found.nFileSizeLow == 0;
+      ok = (empty || read_range(child, 0, (size_t)-1, &bytes, &size)) &&
+           SudekiMpModZipWriterAdd(w, name, bytes ? bytes : (uint8_t *)"", size);
+      free(bytes);
+    }
+  } while (ok && FindNextFileW(find, &found));
+  FindClose(find);
+  return ok;
+}
+static void export_selected_mod(Panel *p) {
+  OPENFILENAMEW dialog;
+  WCHAR root[PATH_CAP], path[PATH_CAP], temporary[PATH_CAP], text[256];
+  char folder[MAX_PATH * 3];
+  SudekiMpModZipWriter writer;
+  ExportFile out;
+  int ok;
+  if (p->selected_mod < 0 || !selected_mod_path(p, root, NULL) ||
+      !wide_to_utf8(p->mod_list[p->selected_mod].folder, folder, sizeof(folder)))
+    return;
+  StringCchPrintfW(path, PATH_CAP, L"%ls.zip", p->mod_list[p->selected_mod].folder);
+  memset(&dialog, 0, sizeof(dialog));
+  dialog.lStructSize = sizeof(dialog);
+  dialog.hwndOwner = p->window;
+  dialog.lpstrFilter = L"Zip archive (*.zip)\0*.zip\0";
+  dialog.lpstrDefExt = L"zip";
+  dialog.lpstrFile = path;
+  dialog.nMaxFile = PATH_CAP;
+  dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  dialog.lpstrTitle = L"Export this mod as a zip";
+  if (!GetSaveFileNameW(&dialog))
+    return;
+  if (FAILED(StringCchPrintfW(temporary, PATH_CAP, L"%ls.partial", path)))
+    return;
+  out.file = CreateFileW(temporary, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+  if (out.file == INVALID_HANDLE_VALUE) {
+    error_box(p, L"The zip could not be created there.");
+    return;
+  }
+  SudekiMpModZipWriterBegin(&writer, export_sink, &out);
+  ok = export_tree(&writer, root, folder, 0);
+  ok = SudekiMpModZipWriterFinish(&writer, "SudekiMP mod package") && ok;
+  CloseHandle(out.file);
+  if (!ok || !MoveFileExW(temporary, path, MOVEFILE_REPLACE_EXISTING)) {
+    DeleteFileW(temporary);
+    error_box(p, L"The mod could not be exported (a file was unreadable or too large).");
+    return;
+  }
+  StringCchPrintfW(text, 256, L"Exported \"%ls\" (%u files). Import it with Import… on another PC.",
+                   p->mod_list[p->selected_mod].folder, (unsigned)writer.count);
+  status(p, text);
+}
 static void export_original(Panel *p) {
   OPENFILENAMEW dialog;
   WCHAR path[PATH_CAP] = {0};
@@ -2283,10 +2735,14 @@ static void layout(Panel *p, int width, int height) {
   list_h = (bottom - top - 2 * 26 - 10) / 2;
   MoveWindow(p->selector, margin, 10, 236, 300, TRUE);
   MoveWindow(p->new_mod, margin + 244, 8, 96, 30, TRUE);
-  MoveWindow(p->enabled, margin + 352, 12, 130, 24, TRUE);
+  MoveWindow(p->enabled, margin + 352, 12, 124, 24, TRUE);
+  MoveWindow(p->move_up, margin + 480, 8, 30, 30, TRUE);
+  MoveWindow(p->move_down, margin + 514, 8, 30, 30, TRUE);
+  MoveWindow(p->import_mod, width - margin - 182, 40, 88, 26, TRUE);
+  MoveWindow(p->export_mod, width - margin - 88, 40, 88, 26, TRUE);
   MoveWindow(p->folder, width - margin - 238, 8, 112, 30, TRUE);
   MoveWindow(p->rescan, width - margin - 118, 8, 118, 30, TRUE);
-  MoveWindow(p->order_label, margin, 44, width - 2 * margin, 20, TRUE);
+  MoveWindow(p->order_label, margin, 44, width - 2 * margin - 192, 20, TRUE);
   MoveWindow(p->character_label, margin, top, left, 22, TRUE);
   MoveWindow(p->character, margin, top + 24, left, list_h, TRUE);
   MoveWindow(p->category_label, margin, top + 34 + list_h, left, 22, TRUE);
@@ -2320,6 +2776,10 @@ static void create_controls(Panel *p) {
   p->new_mod = button(p, L"New mod…", ID_NEW);
   p->enabled = control(p, L"BUTTON", L"Load this mod",
                        WS_TABSTOP | BS_AUTOCHECKBOX, ID_ENABLED);
+  p->move_up = button(p, L"\x25B2", ID_UP);
+  p->move_down = button(p, L"\x25BC", ID_DOWN);
+  p->import_mod = button(p, L"Import…", ID_IMPORT);
+  p->export_mod = button(p, L"Export…", ID_EXPORT_MOD);
   p->folder = button(p, L"Open folder", ID_FOLDER);
   p->rescan = button(p, L"Rescan game", ID_RESCAN);
   p->order_label = control(
@@ -2508,8 +2968,13 @@ static LRESULT CALLBACK panel_proc(HWND window, UINT message, WPARAM wparam,
     HDROP drop = (HDROP)wparam;
     UINT count = DragQueryFileW(drop, 0xffffffffu, NULL, 0);
     if (count == 1 && DragQueryFileW(drop, 0, NULL, 0) < PATH_CAP &&
-        DragQueryFileW(drop, 0, path, PATH_CAP))
-      queue_candidate(p, path);
+        DragQueryFileW(drop, 0, path, PATH_CAP)) {
+      /* A whole mod (.zip) or TexMod package (.tpf) imports; images replace. */
+      if (ends_with(path, L".zip") || ends_with(path, L".tpf"))
+        import_path(p, path);
+      else
+        queue_candidate(p, path);
+    }
     else
       status(p, L"Drop one replacement image onto the selected resource.");
     DragFinish(drop);
@@ -2533,6 +2998,18 @@ static LRESULT CALLBACK panel_proc(HWND window, UINT message, WPARAM wparam,
       break;
     case ID_ENABLED:
       save_mod_enabled(p);
+      break;
+    case ID_UP:
+      move_selected_mod(p, -1);
+      break;
+    case ID_DOWN:
+      move_selected_mod(p, +1);
+      break;
+    case ID_IMPORT:
+      import_mod_dialog(p);
+      break;
+    case ID_EXPORT_MOD:
+      export_selected_mod(p);
       break;
     case ID_FOLDER: {
       /* The selected mod's folder, else the mods folder itself (created). */

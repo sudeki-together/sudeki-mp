@@ -295,6 +295,21 @@ int SudekiMpModManifestSetEnabled(SudekiMpModManifest *m, int enabled) {
     Identity id = {ID_METADATA, 0, "Enabled"};
     return edit(m, "Mod", &id, "Enabled", enabled ? "true" : "false");
 }
+int SudekiMpModManifestSetMetadata(SudekiMpModManifest *m, const char *name, const char *value) {
+    Identity id = {ID_METADATA, 0, ""};
+    size_t i, n = name ? strlen(name) : 0;
+    if (!n || n >= sizeof(id.name)) return 0;
+    for (i = 0; i < n; ++i)
+        if (!((name[i] >= 'A' && name[i] <= 'Z') || (name[i] >= 'a' && name[i] <= 'z') ||
+              (name[i] >= '0' && name[i] <= '9'))) return 0;
+    {
+        Span probe = {name, n};
+        if (equal(probe, "Format") || equal(probe, "Enabled")) return 0;
+    }
+    if (value && !valid_utf8(value, strlen(value), 1)) return 0;
+    memcpy(id.name, name, n + 1);
+    return edit(m, "Mod", &id, name, value);
+}
 int SudekiMpModManifestSetTexture(SudekiMpModManifest *m, uint32_t key, const char *relative) {
     Identity id = {ID_TEXTURE, 0, ""};
     char name[16];

@@ -32,17 +32,16 @@ rather than inside them.
 
 ## Launcher editor
 
-The graphical launcher now has **Play** and **Mods** tabs. Mods scans the
-player's own archives on a worker, displays configurable character/category
-thumbnails, and supports Browse/drop, texture Apply/Revert, and original PNG
-export. Apply saves into the selected package; restart the game to see it.
-The selector shows alphabetical load order and global/per-package enable
-controls. Players do not need Python.
-
-This new UI is `CONFIRMED_TEST` with synthetic fixtures under Wine; it is not
-new live-game proof. Model tiles remain experimental and model Apply is gated
-on the pending owner-run Talos test. See [Launcher Mods tab](launcher-mods.md)
-for usage, name-grouping limitations and the exact verification record.
+The graphical launcher's **Mods** tab (the Mod workshop) shows the player's
+own archive textures by character and category, replaces a texture by drag
+and drop or Browse (Apply/Revert), exports originals as PNG, and manages
+packages: one **Load this mod** switch per package, ▲/▼ load order (written
+to `mods\load-order.txt`), **Import…** for a zipped mod or a TexMod `.tpf`
+(also by dropping the file on the tab) and **Export…** to a zip. Changes take
+effect on the next game launch. Players do not need Python. See
+[Launcher Mods tab](launcher-mods.md) for usage, grouping limits and the
+verification record. Model Apply stays disabled until a model `[Files]`
+replacement is confirmed in game.
 
 ## Package format
 
@@ -114,6 +113,20 @@ Enable=true          ; default true; nothing installs without an entry
 Folder=mods          ; relative to the game folder, or absolute
 DumpTextures=false   ; write every decoded texture once to <Folder>\_dump\0xKEY.dds
 ```
+
+**Load order.** Every folder under `Folder` with a `mod.ini` loads; a later
+mod wins when two replace the same key or file. By default the order is the
+folder names (case-insensitive). An optional `mods\load-order.txt` overrides
+it: one folder name per line, earliest first (UTF-8, `#`/`;` comments);
+listed folders load first in that order, the rest after them by name. The log
+records `texture_mods event=load_order listed=<n> total=<n>`
+(`CONFIRMED_LIVE` 2026-10-07: a two-line file reversed the name order).
+
+**Log.** While any mod is loaded (or `DumpTextures=true`), or the Main Menu
+armour choice is installed, `SudekiMP.log` stays open after initialization in
+every profile, so replacements and redirects during play are recorded (before
+2026-10-07 it closed in profiles without a research feature, such as Safe
+launch).
 
 The loader runs for every launch profile, right after `SudekiMP.ini` is
 resolved and before any archive mounts. Each seam installs only when it has

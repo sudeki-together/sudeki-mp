@@ -300,3 +300,32 @@ int SudekiMpModLooseRelative(const char *path, char *rel, size_t capacity) {
     for (size_t i = 0; i <= n; ++i) rel[i] = found[i] == '/' ? '\\' : found[i];
     return 1;
 }
+
+long SudekiMpModOrderRank(const char *order, size_t length, const char *folder) {
+    size_t at = 0, folder_length;
+    long rank = 0;
+    if (!order || !folder || !folder[0]) return -1;
+    folder_length = strlen(folder);
+    if (length >= 3 && (unsigned char)order[0] == 0xef && (unsigned char)order[1] == 0xbb &&
+        (unsigned char)order[2] == 0xbf) at = 3;
+    while (at < length) {
+        size_t start = at, end, i;
+        while (at < length && order[at] != '\n' && order[at] != '\r') ++at;
+        end = at;
+        while (at < length && (order[at] == '\n' || order[at] == '\r')) ++at;
+        while (start < end && (order[start] == ' ' || order[start] == '\t')) ++start;
+        while (end > start && (order[end - 1] == ' ' || order[end - 1] == '\t')) --end;
+        if (start == end || order[start] == '#' || order[start] == ';') continue;
+        if (end - start == folder_length) {
+            for (i = 0; i < folder_length; ++i) {
+                unsigned char a = (unsigned char)order[start + i], b = (unsigned char)folder[i];
+                if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + 32);
+                if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + 32);
+                if (a != b) break;
+            }
+            if (i == folder_length) return rank;
+        }
+        ++rank;
+    }
+    return -1;
+}

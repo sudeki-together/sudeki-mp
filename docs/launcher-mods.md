@@ -63,6 +63,31 @@ Package comments, unrelated entries, metadata and other sections are preserved;
 manifest output is ASCII or UTF-16LE with a BOM. Unsupported/malformed
 manifests cannot be edited through the tab.
 
+## Packages: import, export and load order
+
+- **Import…** (or drop the file on the tab) takes a zipped mod or a TexMod
+  `.tpf`. A zip must hold `mod.ini` at its top or inside one top folder (or
+  contain exactly one `.tpf`); every name is checked first and a zip with an
+  unsafe name (`..`, a drive, an absolute path) imports nothing. A `.tpf` is
+  converted in the launcher (XOR layer, TexMod's ZipCrypto password, deflate,
+  `texmod.def`): textures are named after their game resource when the scan
+  knows the key, else `0xKEY`; Author/Description come from the package
+  comment. The C core matched `tools/sudekimod.py` on the COOLER Runic Blade
+  package (5 textures, identical sizes).
+- **Export…** writes the selected package folder to a zip (stored, UTF-8
+  names) that Import reads back on another PC.
+- **▲/▼** move the selected package in the load order and rewrite
+  `mods\load-order.txt` (see [mod-packages.md](mod-packages.md)); the list
+  shows that order.
+
+## Scan
+
+The catalogue appears as soon as the archives are indexed and named (about
+4.2 s on the supported install under Wine); thumbnails then stream in on 8
+decode threads, the selected character/category first, and follow the
+selection if it changes mid-scan. A full cold scan finished in 12.3–13.6 s, 5.3 s
+from the thumbnail cache (`CONFIRMED_TEST`, 2026-10-07).
+
 ## Owner live test (2026-10-07)
 
 On a throwaway game copy launched from the merged launcher, the owner
