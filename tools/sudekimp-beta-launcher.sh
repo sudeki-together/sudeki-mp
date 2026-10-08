@@ -13,7 +13,7 @@ settings_file="${settings_dir}/settings"
 launch_log="${project_dir}/build/linux/sudekimp-launcher.log"
 project_icon="${project_dir}/src/launcher/assets/SudekiMP.png"
 update_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/launcher-manifest.txt'
-launcher_version='0.4.0'
+launcher_version='0.5.0'
 
 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
 wine_prefix="${SUDEKIMP_WINEPREFIX:-${HOME}/Games/sudeki-research-prefix}"

@@ -22,12 +22,25 @@ that loader.
 Before first launch, this beta checks that SUDEKI.exe is the supported GOG
 build. It never changes SUDEKI.exe, the game archives, or your save files.
 
-Choose a profile in the launcher: **Local co-op (2 players)**, **LAN arena
-host**, **LAN arena client**, **Cleanroom**, or **Safe launch**. Local co-op
+Choose a profile in the launcher: **Local co-op (2 players)**,
+**Multiplayer (title menu lobby)**, **Cleanroom**, or **Safe launch**.
+Multiplayer adds a Multiplayer entry to the game's title screen: one player
+hosts a lobby from a saved game, the others join by IP, and the lobby starts
+every player's game itself. This is experimental. The **LAN arena host** and **LAN arena client** test
+profiles (and the LAN IP/Port fields) appear only after ticking **Developer
+mode** on the Tools tab. Cleanroom shows a **Start as** list (Ailish, Tal,
+Elco, Buki): the test room starts as that hero, handy for checking a mod's
+look straight away. Local co-op
 reserves XInput slot 0 for Player 2 while Player 1 remains keyboard/mouse.
 LAN arena is a save-free, direct-IP, host-authoritative Tal/Ailish experiment;
 host and client each run a separate full-screen Sudeki process. Cleanroom is
 also save-free. Talos research profiles are intentionally not exposed.
+
+**Flight mode** (Tools tab) is for exploring: finding hidden places or getting
+somewhere faster. It can only be switched on with the **Safe launch** profile;
+otherwise it stays greyed out. In game, F5 starts or stops flying as whichever
+character you control, and Page Up / Page Down rise and sink at the chosen
+speed (Slow, Normal, Fast, Very fast). Walking speed is unchanged.
 
 The **Enable cleanroom sandbox tools (F8)** checkbox applies only to the
 Cleanroom profile and defaults on. Press F8 there to spawn/remove party actors
@@ -90,3 +103,18 @@ Download and extract the ZIP yourself, then replace only this `SudekiMP`
 folder. This beta deliberately does not use an unsigned PowerShell self-updater:
 manual replacement is clearer, preserves your `SudekiMP.ini`, and never changes
 SUDEKI.exe, game data, or save files. Close Sudeki before replacing the folder.
+
+MODS TAB (EXPERIMENTAL)
+
+Choose your game folder on Play, then open Mods. Select a mod, character,
+category and texture; use Browse or drop an image, then Apply. Apply only saves
+into the mod folder. Start the game again to see the replacement. Revert removes
+this resource's entries from the selected mod. Other enabled mods may still
+replace it. Export PNG saves the base original for editing.
+
+The selector shows alphabetical folder load order; later enabled packages win.
+My Mods is the initial package inside the configured mods folder. Grouping uses
+editable name patterns in mod-groups.ini and may leave items under World/Other
+or Other textures. No game images are included, and Python is not required.
+Model Apply is disabled pending the owner-run live test; there is no OBJ/FBX
+converter. Native Windows/live game acceptance for this new editor is pending.

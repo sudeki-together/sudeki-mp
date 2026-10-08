@@ -5,8 +5,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd -- "${script_dir}/.." && pwd)"
 release_dir="${project_dir}/build/releases"
 stage_root="$(mktemp -d)"
-linux_archive="${release_dir}/sudekimp-linux-launcher-0.4.0.tar.gz"
-windows_archive="${release_dir}/sudekimp-windows-launcher-0.4.0.zip"
+linux_archive="${release_dir}/sudekimp-linux-launcher-0.5.0.tar.gz"
+windows_archive="${release_dir}/sudekimp-windows-launcher-0.5.0.zip"
 
 cleanup() { rm -rf -- "${stage_root:?}"; }
 trap cleanup EXIT
@@ -49,13 +49,20 @@ mkdir -p "${windows_root}"
 cp -- "${project_dir}/build/mingw32/bin/SudekiMP.Launcher.exe" \
     "${project_dir}/build/mingw32/bin/SudekiMP.LauncherGUI.exe" \
     "${project_dir}/build/mingw32/bin/SudekiMP.XInputProbe.exe" \
+    "${project_dir}/build/mingw32/bin/mod-groups.ini" \
     "${project_dir}/build/mingw32/bin/SudekiMP.dll" \
     "${project_dir}/build/mingw32/bin/SudekiMP.ini" \
     "${windows_root}/"
 cp -- "${project_dir}/packaging/windows-beta/README-Windows.txt" \
     "${windows_root}/README-Windows.txt"
 cp -- "${project_dir}/LICENSE" "${project_dir}/NOTICE" "${windows_root}/"
-printf '%s\r\n%s\r\n' '@echo off' '"%~dp0SudekiMP.LauncherGUI.exe"' \
+# Same contents as .gitea/workflows/windows-build.yml: co-op save fixtures for
+# the launcher's "Install co-op save fixtures" tool and the update manifest.
+mkdir -p "${windows_root}/CoopSaveFixtures"
+cp -R -- "${project_dir}"/testdata/sudeki-saves/SAVESLOT* "${windows_root}/CoopSaveFixtures/"
+cp -- "${project_dir}/public/launcher-manifest.txt" "${windows_root}/"
+printf '%s\r\n' '@echo off' '"%~dp0SudekiMP.LauncherGUI.exe"' \
+    'if errorlevel 1 (' '  echo SudekiMP Launcher could not start.' '  pause' ')' \
     >"${windows_root}/Launch SudekiMP.cmd"
 if command -v zip >/dev/null 2>&1; then
     (cd "${stage_root}" && zip -qr \
@@ -66,6 +73,6 @@ else
 fi
 
 (cd "${release_dir}" && sha256sum \
-    sudekimp-linux-launcher-0.4.0.tar.gz \
-    sudekimp-windows-launcher-0.4.0.zip >SHA256SUMS)
+    sudekimp-linux-launcher-0.5.0.tar.gz \
+    sudekimp-windows-launcher-0.5.0.zip >SHA256SUMS)
 printf 'Launcher packages written to %s\n' "${release_dir}"

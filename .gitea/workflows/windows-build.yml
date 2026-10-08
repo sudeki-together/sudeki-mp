@@ -72,7 +72,9 @@ jobs:
             'SudekiMP.TalosCompanionCarryAdapterTest.exe',
             'SudekiMP.TalosEncounterInterceptTest.exe',
             'SudekiMP.TalosNativeLifecycleTraceTest.exe',
-            'SudekiMP.TalosPostMoviePartyRestoreTest.exe'
+            'SudekiMP.TalosPostMoviePartyRestoreTest.exe',
+            'SudekiMP.ModdingCoreTest.exe',
+            'SudekiMP.TextureModIndexTest.exe'
           )
           foreach ($test in $tests) {
             $path = Join-Path $bin $test
@@ -109,6 +111,7 @@ jobs:
             (Join-Path $bin 'SudekiMP.XInputProbe.exe'),
             (Join-Path $bin 'SudekiMP.dll'),
             (Join-Path $bin 'SudekiMP.ini'),
+            (Join-Path $bin 'mod-groups.ini'),
             (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt'),
             (Join-Path $env:GITHUB_WORKSPACE 'LICENSE'),
             (Join-Path $env:GITHUB_WORKSPACE 'NOTICE')
@@ -119,7 +122,7 @@ jobs:
           }
           Remove-Item -LiteralPath (Split-Path -Parent $stage) -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.LauncherGUI.exe'), (Join-Path $bin 'SudekiMP.XInputProbe.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini') -Destination $stage
+          Copy-Item -LiteralPath (Join-Path $bin 'SudekiMP.Launcher.exe'), (Join-Path $bin 'SudekiMP.LauncherGUI.exe'), (Join-Path $bin 'SudekiMP.XInputProbe.exe'), (Join-Path $bin 'SudekiMP.dll'), (Join-Path $bin 'SudekiMP.ini'), (Join-Path $bin 'mod-groups.ini') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'packaging\windows-beta\README-Windows.txt') -Destination $stage
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'LICENSE'), (Join-Path $env:GITHUB_WORKSPACE 'NOTICE') -Destination $stage
           $fixtures = Join-Path $env:GITHUB_WORKSPACE 'testdata\sudeki-saves'
@@ -135,7 +138,7 @@ jobs:
           )
           '@ | Set-Content -LiteralPath (Join-Path $stage 'Launch SudekiMP.cmd') -Encoding Ascii
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'public\launcher-manifest.txt') -Destination $stage
-          $artifact = Join-Path $env:GITHUB_WORKSPACE 'sudekimp-windows-launcher-0.4.0.zip'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'sudekimp-windows-launcher-0.5.0.zip'
           Compress-Archive -Path $stage -DestinationPath $artifact -Force
 
       - name: Upload unified Windows launcher
@@ -144,6 +147,6 @@ jobs:
         # that client-side GHES refusal.
         uses: christopherhx/gitea-upload-artifact@v4
         with:
-          name: sudekimp-windows-launcher-0.4.0
-          path: sudekimp-windows-launcher-0.4.0.zip
+          name: sudekimp-windows-launcher-0.5.0
+          path: sudekimp-windows-launcher-0.5.0.zip
           if-no-files-found: error

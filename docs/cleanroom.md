@@ -26,9 +26,19 @@ save-free testroom but does not install the overlay.
 - Enter: spawn/despawn the selected entry
 - Escape: close the menu
 
+**Starting hero (2026-10-07).** The test room starts as the hero named on the
+command line (`-Ailish 1`, `-Tal 1`, `-Elco 1` or `-Buki 1`); the launcher's
+**Start as** choice, shown only for the Cleanroom profile, supplies it. That
+hero is the menu's locked lead (spawn anchor, never removed) and the others
+are spawnable. `CONFIRMED_LIVE` for all four on the supported build: each
+started as the playable lead with its own HUD and the menu installed
+(`lead=PC_<hero>`). Title-roster and zone-traversal modes keep Ailish. Elco
+and Buki log `actor_weapon ... status=pending` for the old starter path but
+still hold their native weapon.
+
 The entries are Tal, Buki, Elco, Ailish, Training Dummy, Combat Mode, Camera
 Mode, Split Screen P2, Infinite SP, Infinite Spirit, Infinite Jetpack, and
-Close. Ailish is shown as `LEAD LOCKED` and cannot be removed.
+Close. The starting hero (Ailish by default) is shown as `LEAD LOCKED` and cannot be removed.
 Playable characters use Sudeki's native `InternalSpawnPC`/`RemovePC` path so
 its party and formation systems keep ownership. Character names are
 constructed through Sudeki's own 12-byte, reference-backed `ResourceName`
@@ -70,10 +80,31 @@ the option simply stops refilling.
 ## Training loadout initialization
 
 Once Sudeki's inventory and item database are live, cleanroom mode invokes the
-game's shipped `FillInventory()` developer function once. This populates the
-native inventory tables with all authored items, including every weapon for
-Tal, Ailish, Elco, and Buki. It intentionally also supplies consumables and
-other inventory items; it does not create parallel mod-owned item records.
+game's shipped `FillInventory()` developer function once. It was intended to
+populate the native inventory tables with all authored items, including every
+weapon for Tal, Ailish, Elco, and Buki; it does not create parallel mod-owned
+item records. **Correction (2026-10-07, `CONFIRMED_LIVE`):** on the supported
+build the log reports `inventory_fill status=complete`, but the Weapons page
+lists only the starter weapon and a memory read of the inventory showed one or
+two item IDs per weapon category. Do not rely on the cleanroom to provide
+other weapons; load a save that owns them instead.
+
+**Replacement (2026-10-07):** `FillInventory()`
+adds through the native category-add routine (RVA `0x00133C80`, item ID in
+EAX, category in EDX), which silently skips an item when no category of its
+type exists yet. The cleanroom now waits until the weapon (type 4) and armour
+(type 18) categories exist and calls that routine itself, once per item, for
+every item of type 3-17 (weapons) or 18-32 (armour) not already owned. The
+routine's prologue bytes are checked first; a mismatch refuses the grant. The
+log line is `cleanroom_engine event=training_loadout status=complete`, with
+added/owned/no-slot counts. If the game later resets the categories, the grant
+repeats, at most five times. The item database fills after the categories, so
+the grant also waits (without spending an attempt) until it lists equipment.
+
+Evidence: `CONFIRMED_LIVE` for all four heroes. In a test-room run started as
+Tal, the log reported 206 items, 60 equipment items, 37 weapons and 23 armour
+pieces added, and the owner saw Tal's full weapon list in game. On 2026-10-08
+the owner confirmed the full weapon menus starting as Ailish, Elco and Buki.
 
 All eight main-party Spirit Strikes are enabled through the native
 `SpiritStrikeEnable(-1)` path. The original unlock mask is captured and
