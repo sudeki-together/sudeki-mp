@@ -3636,6 +3636,17 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "talos_companion_staging_observation_applied=false "
             "default=false\r\n");
     }
+    /* Safe launch: the publisher/logo movie skip has no profile-specific
+     * installer (co-op, cleanroom, LAN and the title menu install their own),
+     * so install it here when requested and nothing else has. Story movies,
+     * including the intro poem, still play. */
+    if (skip_startup_movies && !SudekiMpLanArenaStartupMovieSkipInstalled()) {
+        if (!SudekiMpInstallLanArenaStartupMovieSkip(game_module)) {
+            SudekiMpLogFormat("startup_movie_skip_applied=false error=%lu\r\n", (unsigned long)GetLastError());
+        } else {
+            SudekiMpLogWrite("startup_movie_skip_applied=true scope=ordinary_profile\r\n");
+        }
+    }
     if (story_flight_enabled) {
         /* The actor identity check reads the exact-build engine adapter; it is
          * export resolution only and may already have run for another feature. */
