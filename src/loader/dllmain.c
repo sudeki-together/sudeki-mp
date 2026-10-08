@@ -60,6 +60,10 @@
 #include "loader/lan_arena_profile.h"
 #include "loader/lobby_launch.h"
 #include "hooks/lobby_instance.h"
+#include "hooks/window_title.h"
+#include "hooks/shared_read_files.h"
+#include "hooks/profile_folder.h"
+#include "ui/save_catalog.h"
 #include "hooks/lobby_gameplay.h"
 
 #include <windows.h>
@@ -322,6 +326,20 @@ static void configure_lobby_auto(const wchar_t *config_path) {
     SudekiMpLogFormat("lobby_auto config host=%u join=%u port=%u save_slot=%d character=%u ready=%u start=%u min_players=%u\r\n",
         a.host,a.join,(unsigned)a.port,a.save_slot==~0u?-1:(int)a.save_slot,a.character,a.ready,a.start,a.min_players);
 }
+/* [TitleMenu] ProfileFolder (with AllowSecondInstance): this game uses its
+ * own roaming AppData folder for saves, cache and options. Empty = the
+ * Windows profile's own folder (the host of a local pair). */
+static BOOL configure_profile_folder(HMODULE game_module,const wchar_t *config_path) {
+    wchar_t folder[MAX_PATH]={0};
+    GetPrivateProfileStringW(L"TitleMenu",L"ProfileFolder",L"",folder,MAX_PATH,config_path);
+    if(!folder[0]) return TRUE;
+    if(!SudekiMpProfileFolderInstall(game_module,folder)) {
+        SudekiMpLogFormat("profile_folder event=install_failed error=%lu\r\n",(unsigned long)GetLastError());
+        return FALSE;
+    }
+    SudekiMpSaveCatalogSetAppDataOverride(folder);
+    return TRUE;
+}
 static BOOL uninstall_runtime_hooks(void) {
     /* Story containment retains the input fence, load result, task observer
      * and sparse world identities until its own pause and camera are drained. */
@@ -332,6 +350,9 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpLanStoryTaskTraceUninstall()) return FALSE;
     if (!SudekiMpUninstallLanPartyRuntime()) return FALSE;
     if (!SudekiMpUninstallLobbyInstance()) return FALSE;
+    if (!SudekiMpWindowTitleUninstall()) return FALSE;
+    if (!SudekiMpSharedReadFilesUninstall()) return FALSE;
+    if (!SudekiMpProfileFolderUninstall()) return FALSE;
     if (!SudekiMpUninstallLobbyGameplay()) return FALSE;
     if (!SudekiMpUninstallLanArenaPausePanel()) return FALSE;
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
@@ -922,6 +943,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
     }
+    /* [SudekiMP] WindowTitle: name the main render window (launcher local
+     * host + client profile). Exact call site only; a refusal is not fatal. */
+    if (!SudekiMpWindowTitleInstall(game_module, config_path)) {
+        SudekiMpLogFormat("window_title event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
+    }
     /* Mod packages ([Mods], mods\<Mod>\mod.ini: textures and archive files)
      * for every launch profile, before any archive mounts. Installs nothing
      * without an entry or DumpTextures=true; a refusal is not fatal. */
@@ -1024,10 +1050,20 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 !config_key_false(config_path,L"StoryAreas",L"AmbientAnimation") &&
                 !SudekiMpLanStoryAmbientInstall(game_module)) ||
             !SudekiMpInstallLobbyGameplay(game_module) ||
+            /* Launcher "Local host + client": a second game in the same Wine
+             * prefix/Windows session needs a process-scoped startup mutex. */
+            (read_config_boolean(config_path,L"TitleMenu",L"AllowSecondInstance") &&
+                (!SudekiMpInstallLobbyInstance(game_module) ||
+                 !configure_profile_folder(game_module,config_path))) ||
             ((saved_load_probe || saved_story) && !SudekiMpLanStoryTaskTraceInstall(game_module)) ||
             ((saved_load_probe || saved_story) && !SudekiMpInstallLanStoryLoad(game_module)) ||
             (saved_story && (!SudekiMpLobbyGameplayEnableTestroom(FALSE) ||
                 !SudekiMpLobbyGameplayEnableSaved(TRUE))) ||
+            /* Both games read the same data files; the native read-only opens
+             * use share mode 0 and would lock the other game out. Installed
+             * after the story loader, whose exact-image check reads this import. */
+            (read_config_boolean(config_path,L"TitleMenu",L"AllowSecondInstance") &&
+                !SudekiMpSharedReadFilesInstall(game_module)) ||
             (configure_lobby_auto(config_path),!SudekiMpInstallTitleMultiplayer(game_module)) ||
             (saved_load_probe && (!SudekiMpInstallLanStoryRuntime(game_module,&observed_party) ||
                 !SudekiMpTitleMultiplayerQueueSavedLoadProbe(&saved_probe)))) {

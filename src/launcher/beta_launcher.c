@@ -86,7 +86,9 @@ typedef enum SudekiMpLauncherProfile {
     SUDEKIMP_PROFILE_CLEANROOM = 3,
     SUDEKIMP_PROFILE_SAFE = 4,
     SUDEKIMP_PROFILE_TITLE_MULTIPLAYER = 5,
-    SUDEKIMP_PROFILE_LAST = SUDEKIMP_PROFILE_TITLE_MULTIPLAYER
+    /* Two games on this PC: a host room and a client that joins it. */
+    SUDEKIMP_PROFILE_LOCAL_PAIR = 6,
+    SUDEKIMP_PROFILE_LAST = SUDEKIMP_PROFILE_LOCAL_PAIR
 } SudekiMpLauncherProfile;
 
 #define SUDEKIMP_COLOR_BACKGROUND RGB(12, 20, 31)
@@ -336,6 +338,7 @@ static void persist_game_directory(const WCHAR *game_directory) {
 static const struct { int profile; const WCHAR *label; BOOL developer; } profile_entries[] = {
     {SUDEKIMP_PROFILE_LOCAL_COOP, L"Local co-op (2 players)", FALSE},
     {SUDEKIMP_PROFILE_TITLE_MULTIPLAYER, L"Multiplayer (title menu lobby)", FALSE},
+    {SUDEKIMP_PROFILE_LOCAL_PAIR, L"Local host + client (two windows)", FALSE},
     {SUDEKIMP_PROFILE_LAN_HOST, L"LAN arena host — Tal (developer)", TRUE},
     {SUDEKIMP_PROFILE_LAN_CLIENT, L"LAN arena client — Ailish (developer)", TRUE},
     {SUDEKIMP_PROFILE_CLEANROOM, L"Cleanroom (test room)", FALSE},
@@ -736,7 +739,8 @@ static BOOL configure_launcher_profile(
             show_error(owner, L"SudekiMP could not write its closed LAN arena profile.");
             return FALSE;
         }
-    } else if (profile == SUDEKIMP_PROFILE_TITLE_MULTIPLAYER) {
+    } else if (profile == SUDEKIMP_PROFILE_TITLE_MULTIPLAYER ||
+               profile == SUDEKIMP_PROFILE_LOCAL_PAIR) {
         /* The title screen gains a Multiplayer menu; its saved-story lobby
            starts each player's game itself (through the loader). The test
            room has its own Cleanroom profile. */
@@ -768,6 +772,227 @@ static BOOL configure_launcher_profile(
     return TRUE;
 }
 
+/* Local host + client: each game reads the SudekiMP.ini beside its DLL, so
+   each role gets its own folder under %LOCALAPPDATA%\SudekiMP\instances
+   with a copy of the configured package DLL and ini plus its role keys. The
+   shared package ini never receives [Lobby] keys, so ordinary launches are
+   unaffected. The client starts after a delay: two WineD3D start-ups at once
+   have failed before. */
+#define SUDEKIMP_PAIR_TIMER 8u
+#define SUDEKIMP_PAIR_CLIENT_DELAY_MS 12000u
+static WCHAR pair_game_directory[MAX_PATH];
+static WCHAR pair_loader_path[MAX_PATH];
+static WCHAR pair_client_directory[MAX_PATH];
+static BOOL pair_client_pending;
+
+/* Recursive copy of a profile folder (saves are plain files and folders). */
+static BOOL copy_tree(const WCHAR *source, const WCHAR *target) {
+    WCHAR pattern[MAX_PATH], from[MAX_PATH], to[MAX_PATH];
+    WIN32_FIND_DATAW item;
+    HANDLE find;
+    BOOL ok = TRUE;
+    if (!directory_exists(target) && !CreateDirectoryW(target, NULL)) return FALSE;
+    if (!join_path(pattern, MAX_PATH, source, L"*")) return FALSE;
+    find = FindFirstFileW(pattern, &item);
+    if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
+    do {
+        if (!lstrcmpW(item.cFileName, L".") || !lstrcmpW(item.cFileName, L"..")) continue;
+        if (!join_path(from, MAX_PATH, source, item.cFileName) ||
+            !join_path(to, MAX_PATH, target, item.cFileName)) { ok = FALSE; break; }
+        if (item.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        ok = (item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? copy_tree(from, to) :
+            CopyFileW(from, to, FALSE);
+    } while (ok && FindNextFileW(find, &item));
+    FindClose(find);
+    return ok;
+}
+
+/* The client gets its own roaming profile (saves, options, cache) so the two
+   games never write the same save working files: <instance>\Profile\Sudeki
+   is refreshed from the real %APPDATA%\Sudeki on every launch. */
+static BOOL seed_local_pair_profile(const WCHAR *instance_directory, WCHAR profile[MAX_PATH]) {
+    WCHAR appdata[MAX_PATH], real[MAX_PATH], copy[MAX_PATH], from[MAX_PATH], to[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, appdata)) ||
+        !join_path(real, MAX_PATH, appdata, L"Sudeki") ||
+        !join_path(profile, MAX_PATH, instance_directory, L"Profile") ||
+        (!directory_exists(profile) && !CreateDirectoryW(profile, NULL)) ||
+        !join_path(copy, MAX_PATH, profile, L"Sudeki") ||
+        (!directory_exists(copy) && !CreateDirectoryW(copy, NULL))) {
+        return FALSE;
+    }
+    if (join_path(from, MAX_PATH, real, L"PlayerOptions.xml") && file_exists(from) &&
+        (!join_path(to, MAX_PATH, copy, L"PlayerOptions.xml") || !CopyFileW(from, to, FALSE))) {
+        return FALSE;
+    }
+    if (!join_path(from, MAX_PATH, real, L"Save") || !join_path(to, MAX_PATH, copy, L"Save")) {
+        return FALSE;
+    }
+    return !directory_exists(from) || copy_tree(from, to);
+}
+
+static BOOL stage_local_pair_role(const WCHAR *role,
+                                  const WCHAR *window_title,
+                                  BOOL host,
+                                  const WCHAR *port,
+                                  WCHAR instance_directory[MAX_PATH]) {
+    WCHAR root[MAX_PATH], instances[MAX_PATH], source[MAX_PATH], target[MAX_PATH];
+    if (!get_settings_directory(root, MAX_PATH) ||
+        (!directory_exists(root) && !CreateDirectoryW(root, NULL)) ||
+        !join_path(instances, MAX_PATH, root, L"instances") ||
+        (!directory_exists(instances) && !CreateDirectoryW(instances, NULL)) ||
+        !join_path(instance_directory, MAX_PATH, instances, role) ||
+        (!directory_exists(instance_directory) && !CreateDirectoryW(instance_directory, NULL))) {
+        return FALSE;
+    }
+    if (!join_path(source, MAX_PATH, package_directory, L"SudekiMP.dll") ||
+        !join_path(target, MAX_PATH, instance_directory, L"SudekiMP.dll") ||
+        !CopyFileW(source, target, FALSE) ||
+        !join_path(source, MAX_PATH, package_directory, L"SudekiMP.ini") ||
+        !join_path(target, MAX_PATH, instance_directory, L"SudekiMP.ini") ||
+        !CopyFileW(source, target, FALSE)) {
+        return FALSE;
+    }
+    /* Role keys; [Lobby] is rebuilt from scratch so stale keys never leak. */
+    WritePrivateProfileStringW(L"Lobby", NULL, NULL, target);
+    if (!WritePrivateProfileStringW(L"TitleMenu", L"Enabled", L"true", target) ||
+        !WritePrivateProfileStringW(L"TitleMenu", L"Scope", L"saved-story", target) ||
+        !WritePrivateProfileStringW(L"TitleMenu", L"AllowSecondInstance", L"true", target) ||
+        !WritePrivateProfileStringW(L"SudekiMP", L"SkipStartupMovies", L"true", target) ||
+        !WritePrivateProfileStringW(L"SudekiMP", L"WindowTitle", window_title, target) ||
+        !WritePrivateProfileStringW(L"Lobby", host ? L"AutoHost" : L"AutoJoin",
+                                    host ? L"true" : L"127.0.0.1", target) ||
+        !WritePrivateProfileStringW(L"Lobby", L"Port", port, target) ||
+        !WritePrivateProfileStringW(L"Lobby", L"Name", host ? L"Host" : L"Client", target)) {
+        return FALSE;
+    }
+    {
+        /* The host keeps the Windows profile; the client gets its own copy. */
+        WCHAR profile[MAX_PATH];
+        if (host) {
+            WritePrivateProfileStringW(L"TitleMenu", L"ProfileFolder", NULL, target);
+        } else if (!seed_local_pair_profile(instance_directory, profile) ||
+                   !WritePrivateProfileStringW(L"TitleMenu", L"ProfileFolder", profile, target)) {
+            return FALSE;
+        }
+    }
+    WritePrivateProfileStringW(NULL, NULL, NULL, target);
+    return TRUE;
+}
+
+/* Starts one loader for a staged role: its own DLL, log file and console
+   title, tracked by the launch job like a single launch. */
+static BOOL start_local_pair_role(HWND owner,
+                                  const WCHAR *instance_directory,
+                                  const WCHAR *console_title) {
+    WCHAR dll_path[MAX_PATH], log_path[MAX_PATH], command[MAX_PATH * 3u + 80u];
+    WCHAR title[64];
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+    BOOL started;
+    if (!join_path(dll_path, MAX_PATH, instance_directory, L"SudekiMP.dll") ||
+        !join_path(log_path, MAX_PATH, instance_directory, L"runtime.log") ||
+        !build_loader_command(command, sizeof(command) / sizeof(command[0]),
+                              pair_loader_path, pair_game_directory, dll_path, FALSE,
+                              SUDEKIMP_PROFILE_LOCAL_PAIR) ||
+        FAILED(StringCchCopyW(title, sizeof(title) / sizeof(title[0]), console_title))) {
+        return FALSE;
+    }
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    startup.lpTitle = title;
+    /* The loader and the game inherit this; each role logs to its folder. */
+    SetEnvironmentVariableW(L"SUDEKIMP_LOG_PATH", log_path);
+    started = CreateProcessW(NULL, command, NULL, NULL, FALSE,
+                             CREATE_NEW_CONSOLE | CREATE_SUSPENDED, NULL,
+                             pair_game_directory, &startup, &process);
+    SetEnvironmentVariableW(L"SUDEKIMP_LOG_PATH", NULL);
+    if (!started) {
+        show_error(owner, L"SudekiMP could not start the loader.");
+        return FALSE;
+    }
+    if (launched_game_job == NULL ||
+        !AssignProcessToJobObject(launched_game_job, process.hProcess)) {
+        TerminateProcess(process.hProcess, 1u);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        show_error(owner, L"SudekiMP could not create a safely tracked launch session.");
+        return FALSE;
+    }
+    ResumeThread(process.hThread);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return TRUE;
+}
+
+static void start_pending_local_pair_client(HWND owner) {
+    KillTimer(launcher_window, SUDEKIMP_PAIR_TIMER);
+    if (!pair_client_pending) return;
+    pair_client_pending = FALSE;
+    if (start_local_pair_role(owner, pair_client_directory, L"SudekiMP CLIENT loader")) {
+        set_status(L"Host and client started: \"SudekiMP HOST\" opens a room, "
+                   L"\"SudekiMP CLIENT\" joins it. Pick a save and characters in the lobby.");
+    } else {
+        set_status(L"The host started, but the client could not start.");
+    }
+}
+
+static BOOL tracked_session_running(void) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info;
+    return launched_game_job != NULL &&
+        QueryInformationJobObject(launched_game_job, JobObjectBasicAccountingInformation,
+                                  &info, sizeof(info), NULL) &&
+        info.ActiveProcesses > 0u;
+}
+
+static void launch_local_pair(HWND owner) {
+    WCHAR dll_path[MAX_PATH], port[16], host_directory[MAX_PATH];
+    /* A second Play while the pair runs would try to replace DLLs the games
+       still have loaded. */
+    if (pair_client_pending || tracked_session_running()) {
+        set_status(L"The host and client from this launcher are still running. "
+                   L"Close them or use Tools > Stop tracked game first.");
+        return;
+    }
+    /* Two windows on one screen: both games read the shared PlayerOptions,
+       so this launch switches it to windowed (Settings can switch it back). */
+    if (settings_controls.fullscreen != NULL && IsWindowEnabled(settings_controls.fullscreen) &&
+        SendMessageW(settings_controls.fullscreen, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        SendMessageW(settings_controls.fullscreen, BM_SETCHECK, BST_UNCHECKED, 0);
+    }
+    port[0] = L'\0';
+    if (lan_port_edit != NULL) {
+        GetWindowTextW(lan_port_edit, port, (int)(sizeof(port) / sizeof(port[0])));
+    }
+    if (port[0] == L'\0' || _wtoi(port) < 1024 || _wtoi(port) > 65535) {
+        StringCchCopyW(port, sizeof(port) / sizeof(port[0]), L"26770");
+    }
+    pair_client_pending = FALSE;
+    KillTimer(launcher_window, SUDEKIMP_PAIR_TIMER);
+    if (!save_all_settings(owner) ||
+        !configure_launcher_profile(owner, SUDEKIMP_PROFILE_LOCAL_PAIR) ||
+        !verify_game(owner, pair_game_directory, pair_loader_path, dll_path)) {
+        return;
+    }
+    if (!stage_local_pair_role(L"host", L"SudekiMP HOST", TRUE, port, host_directory) ||
+        !stage_local_pair_role(L"client", L"SudekiMP CLIENT", FALSE, port, pair_client_directory)) {
+        show_error(owner, L"SudekiMP could not prepare the host and client folders "
+                          L"under %LOCALAPPDATA%\\SudekiMP\\instances.");
+        set_status(L"Launch blocked before the games started.");
+        return;
+    }
+    if (!start_local_pair_role(owner, host_directory, L"SudekiMP HOST loader")) {
+        set_status(L"Launch failed before injection.");
+        return;
+    }
+    if (music_state != SUDEKIMP_MUSIC_STOPPED) {
+        close_music();
+    }
+    pair_client_pending = TRUE;
+    SetTimer(launcher_window, SUDEKIMP_PAIR_TIMER, SUDEKIMP_PAIR_CLIENT_DELAY_MS, NULL);
+    set_status(L"Host started (\"SudekiMP HOST\"). The client starts in 12 seconds…");
+}
+
 static void launch_game(HWND owner) {
     WCHAR game_directory[MAX_PATH];
     WCHAR loader_path[MAX_PATH];
@@ -783,6 +1008,10 @@ static void launch_game(HWND owner) {
         selected_profile = SUDEKIMP_PROFILE_LOCAL_COOP;
     }
     profile = (SudekiMpLauncherProfile)selected_profile;
+    if (profile == SUDEKIMP_PROFILE_LOCAL_PAIR) {
+        launch_local_pair(owner);
+        return;
+    }
 
     if (!save_all_settings(owner) ||
         !configure_launcher_profile(owner, profile) ||
@@ -1470,6 +1699,9 @@ static void stop_tracked_sudeki(HWND owner) {
     }
     CloseHandle(launched_game_job);
     launched_game_job = NULL;
+    /* A local host + client launch may still be waiting to start its client. */
+    pair_client_pending = FALSE;
+    KillTimer(launcher_window, SUDEKIMP_PAIR_TIMER);
     set_status(L"The tracked Sudeki session was stopped.");
 }
 
@@ -2549,6 +2781,10 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
         case WM_TIMER:
             if (wparam == SUDEKIMP_MUSIC_TIMER) {
                 update_music_player();
+                return 0;
+            }
+            if (wparam == SUDEKIMP_PAIR_TIMER) {
+                start_pending_local_pair_client(window);
                 return 0;
             }
             break;

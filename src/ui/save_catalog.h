@@ -78,4 +78,7 @@ BOOL SudekiMpSaveLeaseOpenNativeRead(const SudekiMpSaveLease *lease,
     const wchar_t *path, HANDLE *opened);
 void SudekiMpSaveLeaseRelease(SudekiMpSaveLease **lease);
 
+/* Roaming AppData folder to use instead of the Windows profile's (NULL or
+ * empty = the profile's own). Set once at DLL start-up, before any catalogue. */
+void SudekiMpSaveCatalogSetAppDataOverride(const wchar_t *path);
 #endif

@@ -48,6 +48,9 @@ add_library(SudekiMP SHARED
     src/network/title_lobby.c
     src/loader/lobby_launch.c
     src/hooks/lobby_instance.c
+    src/hooks/window_title.c
+    src/hooks/shared_read_files.c
+    src/hooks/profile_folder.c
     src/hooks/lobby_gameplay.c
     src/hooks/lan_party_presence.c
     src/hooks/lan_party_menu_native.c
@@ -1786,6 +1789,13 @@ add_executable(SudekiMP.TextureModIndexTest tests/texture_mod_index_test.c src/e
 target_include_directories(SudekiMP.TextureModIndexTest PRIVATE src)
 target_compile_options(SudekiMP.TextureModIndexTest PRIVATE -Wall -Wextra -Wpedantic -Werror)
 set_target_properties(SudekiMP.TextureModIndexTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.WindowTitleImageTest tests/window_title_image_test.c
+    src/hooks/window_title.c src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c src/engine/log.c)
+target_include_directories(SudekiMP.WindowTitleImageTest PRIVATE src)
+target_compile_options(SudekiMP.WindowTitleImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.WindowTitleImageTest PRIVATE bcrypt)
+target_link_options(SudekiMP.WindowTitleImageTest PRIVATE -municode)
+set_target_properties(SudekiMP.WindowTitleImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryAreaFinaliseImageTest tests/story_area_finalise_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
 target_include_directories(SudekiMP.StoryAreaFinaliseImageTest PRIVATE src)

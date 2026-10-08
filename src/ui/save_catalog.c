@@ -34,8 +34,17 @@ static BOOL join(wchar_t out[MAX_PATH], const wchar_t *parent, const wchar_t *na
     memcpy(out+a,name,(b+1u)*sizeof(wchar_t)); return TRUE;
 }
 
+/* Launcher "Local host + client": a second game on the same Windows profile
+ * gets its own roaming AppData folder (the game's own lookup is redirected by
+ * hooks/profile_folder.c); the save catalogue must read the same folder. */
+static wchar_t appdata_override[MAX_PATH];
+void SudekiMpSaveCatalogSetAppDataOverride(const wchar_t *path) {
+    if(!path || !path[0] || wcslen(path)>=MAX_PATH) appdata_override[0]=0;
+    else wcscpy(appdata_override,path);
+}
 static BOOL save_directory(wchar_t out[MAX_PATH]) {
     wchar_t appdata[MAX_PATH],sudeki[MAX_PATH];
+    if(appdata_override[0]) return join(sudeki,appdata_override,L"Sudeki") && join(out,sudeki,L"Save");
     HMODULE shell=LoadLibraryW(L"shell32.dll");
     if(!shell) return FALSE;
     FARPROC address=GetProcAddress(shell,"SHGetFolderPathW");

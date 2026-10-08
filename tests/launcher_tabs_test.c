@@ -36,18 +36,18 @@ static DWORD WINAPI exercise_tabs(void *unused) {
     /* Play first: the workshop is hidden, the art column is shown. */
     assert(IsWindowVisible(directory) && !IsWindowVisible(pane) && IsWindowVisible(identity));
     /* Developer mode off: no LAN arena profiles and no LAN address row. */
-    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 4);
+    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 5);
     assert(!IsWindowVisible(GetDlgItem(window, IDC_LAN_HOST)));
     SendMessageW(GetDlgItem(window, IDC_DEVELOPER_MODE), BM_SETCHECK, BST_CHECKED, 0);
     SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_DEVELOPER_MODE, BN_CLICKED),
                  (LPARAM)GetDlgItem(window, IDC_DEVELOPER_MODE));
-    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 6);
+    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 7);
     assert(IsWindowVisible(GetDlgItem(window, IDC_LAN_HOST)));
     set_profile(SUDEKIMP_PROFILE_LAN_HOST);
     SendMessageW(GetDlgItem(window, IDC_DEVELOPER_MODE), BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_DEVELOPER_MODE, BN_CLICKED),
                  (LPARAM)GetDlgItem(window, IDC_DEVELOPER_MODE));
-    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 4 &&
+    assert(SendMessageW(profile, CB_GETCOUNT, 0, 0) == 5 &&
            current_profile() == SUDEKIMP_PROFILE_LOCAL_COOP);
     set_profile(SUDEKIMP_PROFILE_SAFE);
     SetWindowTextW(directory, L"synthetic-invalid-install");
@@ -112,6 +112,47 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         GetPrivateProfileStringW(L"TitleMenu", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"true"));
         GetPrivateProfileStringW(L"TitleMenu", L"Scope", L"", value, 32, ini); assert(!wcscmp(value, L"saved-story"));
         GetPrivateProfileStringW(L"SudekiMP", L"EnableCleanroomMenu", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
+        /* Local host + client: the package ini gets the title-menu profile but
+           never [Lobby] keys; each role folder gets a DLL+ini copy with its keys. */
+        {
+            WCHAR dll[MAX_PATH], host_dir[MAX_PATH], client_dir[MAX_PATH], role_ini[MAX_PATH];
+            WCHAR command[MAX_PATH * 3u + 80u], section[64];
+            StringCchPrintfW(dll, MAX_PATH, L"%ls\\SudekiMP.dll", package_directory);
+            file = CreateFileW(dll, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+            assert(file != INVALID_HANDLE_VALUE && WriteFile(file, "MZ", 2, &written, NULL));
+            CloseHandle(file);
+            assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_LOCAL_PAIR));
+            GetPrivateProfileStringW(L"TitleMenu", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"true"));
+            assert(GetPrivateProfileSectionW(L"Lobby", section, 64, ini) == 0);
+            assert(stage_local_pair_role(L"host", L"SudekiMP HOST", TRUE, L"26770", host_dir));
+            assert(stage_local_pair_role(L"client", L"SudekiMP CLIENT", FALSE, L"26770", client_dir));
+            assert(wcsstr(host_dir, L"\\SudekiMP\\instances\\host") && wcsstr(client_dir, L"\\instances\\client"));
+            StringCchPrintfW(role_ini, MAX_PATH, L"%ls\\SudekiMP.ini", host_dir);
+            GetPrivateProfileStringW(L"SudekiMP", L"WindowTitle", L"", value, 32, role_ini); assert(!wcscmp(value, L"SudekiMP HOST"));
+            GetPrivateProfileStringW(L"TitleMenu", L"AllowSecondInstance", L"", value, 32, role_ini); assert(!wcscmp(value, L"true"));
+            GetPrivateProfileStringW(L"TitleMenu", L"Scope", L"", value, 32, role_ini); assert(!wcscmp(value, L"saved-story"));
+            GetPrivateProfileStringW(L"Lobby", L"AutoHost", L"", value, 32, role_ini); assert(!wcscmp(value, L"true"));
+            GetPrivateProfileStringW(L"Lobby", L"AutoJoin", L"", value, 32, role_ini); assert(!value[0]);
+            StringCchPrintfW(role_ini, MAX_PATH, L"%ls\\SudekiMP.ini", client_dir);
+            GetPrivateProfileStringW(L"SudekiMP", L"WindowTitle", L"", value, 32, role_ini); assert(!wcscmp(value, L"SudekiMP CLIENT"));
+            GetPrivateProfileStringW(L"Lobby", L"AutoJoin", L"", value, 32, role_ini); assert(!wcscmp(value, L"127.0.0.1"));
+            GetPrivateProfileStringW(L"Lobby", L"AutoHost", L"", value, 32, role_ini); assert(!value[0]);
+            GetPrivateProfileStringW(L"Lobby", L"Port", L"", value, 32, role_ini); assert(!wcscmp(value, L"26770"));
+            {   /* Only the client gets its own profile folder (saves/options copy). */
+                WCHAR folder[MAX_PATH];
+                GetPrivateProfileStringW(L"TitleMenu", L"ProfileFolder", L"", folder, MAX_PATH, role_ini);
+                assert(wcsstr(folder, L"\\instances\\client\\Profile") && GetFileAttributesW(folder) != INVALID_FILE_ATTRIBUTES);
+                StringCchPrintfW(folder, MAX_PATH, L"%ls\\SudekiMP.ini", host_dir);
+                GetPrivateProfileStringW(L"TitleMenu", L"ProfileFolder", L"", value, 32, folder); assert(!value[0]);
+            }
+            StringCchPrintfW(role_ini, MAX_PATH, L"%ls\\SudekiMP.dll", client_dir);
+            assert(GetFileAttributesW(role_ini) != INVALID_FILE_ATTRIBUTES);
+            /* The client's loader command points at the client's staged DLL. */
+            assert(build_loader_command(command, sizeof(command) / sizeof(command[0]), L"Loader.exe",
+                                        L"C:\\Game", role_ini, FALSE, SUDEKIMP_PROFILE_LOCAL_PAIR));
+            assert(wcsstr(command, L"\\instances\\client\\SudekiMP.dll") && !wcsstr(command, L"--game-arg"));
+            DeleteFileW(dll);
+        }
         assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_SAFE));
         GetPrivateProfileStringW(L"TitleMenu", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
         /* Flight: greyed out with its instruction until Safe launch is chosen;

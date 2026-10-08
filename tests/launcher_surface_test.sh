@@ -26,6 +26,7 @@ for required in \
     'Local co-op (2 players)' \
     'LAN arena host — Tal' \
     'LAN arena client — Ailish' \
+    'Local host + client (two windows)' \
     'Cleanroom' \
     'Enable cleanroom sandbox tools (F8)' \
     'stop_tracked_sudeki' \
