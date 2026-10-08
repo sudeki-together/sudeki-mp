@@ -36,6 +36,12 @@ LAN arena is a save-free, direct-IP, host-authoritative Tal/Ailish experiment;
 host and client each run a separate full-screen Sudeki process. Cleanroom is
 also save-free. Talos research profiles are intentionally not exposed.
 
+**Flight mode** (Tools tab) is for exploring: finding hidden places or getting
+somewhere faster. It can only be switched on with the **Safe launch** profile;
+otherwise it stays greyed out. In game, F5 starts or stops flying as whichever
+character you control, and Page Up / Page Down rise and sink at the chosen
+speed (Slow, Normal, Fast, Very fast). Walking speed is unchanged.
+
 The **Enable cleanroom sandbox tools (F8)** checkbox applies only to the
 Cleanroom profile and defaults on. Press F8 there to spawn/remove party actors
 and the Training Dummy, toggle combat/camera modes, and use the cleanroom

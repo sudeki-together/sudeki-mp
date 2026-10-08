@@ -1780,7 +1780,7 @@ target_sources(SudekiMP PRIVATE src/engine/story_area.c src/hooks/lan_story_area
     src/hooks/lan_story_temp_exterior.c src/hooks/lan_story_pause_trace.c src/hooks/lan_story_split.c
     src/hooks/lan_story_anim_trace.c src/hooks/lan_story_name_tags.c
     src/hooks/lan_story_ambient.c src/hooks/lan_story_area_fade.c src/hooks/resource_swap.c
-    src/hooks/texture_mods.c src/hooks/archive_mods.c src/hooks/loose_mods.c src/hooks/armour_menu.c
+    src/hooks/texture_mods.c src/hooks/archive_mods.c src/hooks/loose_mods.c src/hooks/armour_menu.c src/hooks/story_flight.c
     src/engine/texture_mod_index.c)
 add_executable(SudekiMP.TextureModIndexTest tests/texture_mod_index_test.c src/engine/texture_mod_index.c)
 target_include_directories(SudekiMP.TextureModIndexTest PRIVATE src)

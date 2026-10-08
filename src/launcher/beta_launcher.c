@@ -155,6 +155,8 @@ static const int tab_art[SUDEKIMP_TAB_COUNT] = {
 };
 /* Values accepted by the DLL's StoryTestBoostMultiplier range (1.0-4.0). */
 static const WCHAR *const story_boost_multipliers[] = {L"1.5", L"2.0", L"3.0", L"4.0"};
+/* [Flight] Speed (vertical units per second; the DLL accepts 0.5-60). */
+static const WCHAR *const flight_speeds[] = {L"3", L"6", L"12", L"24"};
 
 static SudekiMpLauncherControl launcher_controls[SUDEKIMP_MAX_CONTROLS];
 static size_t launcher_control_count;
@@ -169,6 +171,10 @@ static HWND skip_movies_checkbox;
 static HWND quick_menu_speed_checkbox;
 static HWND story_boost_checkbox;
 static HWND story_boost_combo;
+/* Flight mode: Safe launch only (exploration), with a rise/sink speed. */
+static HWND flight_checkbox;
+static HWND flight_speed_combo;
+static HWND flight_note;
 static BOOL settings_dirty;
 static BOOL populating_settings;
 
@@ -666,9 +672,11 @@ static BOOL configure_launcher_profile(
                    L"This beta package is missing SudekiMP.ini. Reinstall it before launching.");
         return FALSE;
     }
-    /* [TitleMenu] lives outside [SudekiMP]: every other profile turns it off. */
+    /* [TitleMenu] and [Flight] live outside [SudekiMP]: start with them off;
+       the title-menu profile and Safe launch's flight option turn them on. */
     if (!disable_all_optional_profiles(config_path) ||
-        !WritePrivateProfileStringW(L"TitleMenu", L"Enabled", L"false", config_path)) {
+        !WritePrivateProfileStringW(L"TitleMenu", L"Enabled", L"false", config_path) ||
+        !WritePrivateProfileStringW(L"Flight", L"Enabled", L"false", config_path)) {
         show_error(owner,
                    L"SudekiMP could not reset the package to a closed launch profile.");
         return FALSE;
@@ -1822,6 +1830,31 @@ static void update_mod_availability(void) {
     /* The DLL accepts the story boost only alongside the co-op roster menu. */
     EnableWindow(story_boost_checkbox, coop);
     EnableWindow(story_boost_combo, coop && is_checked(story_boost_checkbox));
+    /* Flight is for single-player exploration: usable only with Safe launch. */
+    EnableWindow(flight_checkbox, profile == SUDEKIMP_PROFILE_SAFE);
+    EnableWindow(flight_speed_combo, profile == SUDEKIMP_PROFILE_SAFE && is_checked(flight_checkbox));
+    if (flight_note != NULL) {
+        SetWindowTextW(flight_note, profile == SUDEKIMP_PROFILE_SAFE ?
+            L"In game: F5 flies; Page Up / Page Down rise and sink at this speed." :
+            L"Available only with Safe launch: pick Safe launch on the Play tab.");
+    }
+}
+
+static void select_flight_speed(const WCHAR *value) {
+    int index = (int)SendMessageW(flight_speed_combo, CB_GETCOUNT, 0, 0);
+    while (--index >= 0) {
+        if (lstrcmpW(flight_speeds[index], value) == 0) {
+            SendMessageW(flight_speed_combo, CB_SETCURSEL, (WPARAM)index, 0);
+            return;
+        }
+    }
+    SendMessageW(flight_speed_combo, CB_SETCURSEL, 1u, 0);
+}
+
+static const WCHAR *selected_flight_speed(void) {
+    const int index = (int)SendMessageW(flight_speed_combo, CB_GETCURSEL, 0, 0);
+    const int count = (int)(sizeof(flight_speeds) / sizeof(flight_speeds[0]));
+    return index >= 0 && index < count ? flight_speeds[index] : L"6";
 }
 
 static void select_story_boost_multiplier(const WCHAR *value) {
@@ -1840,6 +1873,8 @@ static void set_mod_defaults(void) {
     SendMessageW(quick_menu_speed_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(story_boost_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
     select_story_boost_multiplier(L"2.0");
+    SendMessageW(flight_checkbox, BM_SETCHECK, BST_UNCHECKED, 0);
+    select_flight_speed(L"6");
     update_mod_availability();
 }
 
@@ -1865,6 +1900,11 @@ static void load_mod_options(void) {
     GetPrivateProfileStringW(L"mods", L"story_test_boost_multiplier", L"2.0", value, 16u,
                              settings_path);
     select_story_boost_multiplier(value);
+    GetPrivateProfileStringW(L"mods", L"flight", L"false", value, 16u, settings_path);
+    SendMessageW(flight_checkbox, BM_SETCHECK,
+                 lstrcmpiW(value, L"true") == 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+    GetPrivateProfileStringW(L"mods", L"flight_speed", L"6", value, 16u, settings_path);
+    select_flight_speed(value);
     update_mod_availability();
 }
 
@@ -1885,7 +1925,10 @@ static BOOL persist_mod_options(void) {
         WritePrivateProfileStringW(L"mods", L"story_test_boost",
             is_checked(story_boost_checkbox) ? L"true" : L"false", settings_path) &&
         WritePrivateProfileStringW(L"mods", L"story_test_boost_multiplier",
-            selected_story_boost_multiplier(), settings_path);
+            selected_story_boost_multiplier(), settings_path) &&
+        WritePrivateProfileStringW(L"mods", L"flight",
+            is_checked(flight_checkbox) ? L"true" : L"false", settings_path) &&
+        WritePrivateProfileStringW(L"mods", L"flight_speed", selected_flight_speed(), settings_path);
 }
 
 /* Applies the mod checkboxes after the closed launch profile has been written.
@@ -1898,6 +1941,12 @@ static BOOL apply_mod_options(const WCHAR *config_path, SudekiMpLauncherProfile 
             is_checked(skip_movies_checkbox) ? L"true" : L"false", config_path) ||
         !WritePrivateProfileStringW(L"SudekiMP", L"EnableQuickMenuNormalSpeed",
             is_checked(quick_menu_speed_checkbox) ? L"true" : L"false", config_path)) {
+        return FALSE;
+    }
+    if (profile == SUDEKIMP_PROFILE_SAFE && is_checked(flight_checkbox) &&
+        (!WritePrivateProfileStringW(L"Flight", L"Enabled", L"true", config_path) ||
+         !WritePrivateProfileStringW(L"Flight", L"Speed", selected_flight_speed(), config_path) ||
+         !WritePrivateProfileStringW(L"Flight", L"AilishOnly", L"false", config_path))) {
         return FALSE;
     }
     if (profile == SUDEKIMP_PROFILE_LOCAL_COOP && is_checked(story_boost_checkbox)) {
@@ -2404,11 +2453,13 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                 case IDC_ANTIALIASING:
                 case IDC_AUDIO_QUALITY:
                 case IDC_STORY_BOOST_MULTIPLIER:
+                case IDC_FLIGHT_SPEED:
                     if (notification == CBN_SELCHANGE) {
                         mark_settings_dirty();
                     }
                     return 0;
                 case IDC_STORY_BOOST:
+                case IDC_FLIGHT:
                     update_mod_availability();
                     mark_settings_dirty();
                     return 0;
@@ -2825,8 +2876,11 @@ int WINAPI wWinMain(HINSTANCE instance,
         static const WCHAR *const multiplier_labels[] = {
             L"1.5x", L"2x", L"3x (experimental)", L"4x (experimental)"
         };
+        static const WCHAR *const flight_labels[] = {
+            L"Slow", L"Normal", L"Fast", L"Very fast"
+        };
         const int x = SUDEKIMP_CONTENT_X;
-        const int y = SUDEKIMP_CONTENT_Y + 214;
+        const int y = SUDEKIMP_CONTENT_Y + 178;
         const int tab = SUDEKIMP_TAB_TOOLS;
         size_t index;
         create_label(tab, L"SudekiMP options", x, y, 300, 22, IDC_HEADING, 0u);
@@ -2846,13 +2900,21 @@ int WINAPI wWinMain(HINSTANCE instance,
             SendMessageW(story_boost_combo, CB_ADDSTRING, 0, (LPARAM)multiplier_labels[index]);
         }
         create_label(tab,
-                     L"Applied when you press Play. Local co-op uses all three; Safe launch "
-                     L"uses the first two; LAN arena and cleanroom keep their fixed "
-                     L"profiles. The story boost always starts off until you press F6.",
-                     x, y + 136, SUDEKIMP_CONTENT_W, 48, IDC_NOTE, 0u);
+                     L"Applied when you press Play. The story boost (Local co-op) starts off "
+                     L"until you press F6.",
+                     x, y + 136, SUDEKIMP_CONTENT_W, 32, IDC_NOTE, 0u);
+        flight_checkbox = create_checkbox(
+            tab, L"Flight mode: fly about to explore (Safe launch only)",
+            x, y + 170, 420, 22, IDC_FLIGHT);
+        flight_speed_combo = create_combo(tab, x + 430, y + 166, 166, IDC_FLIGHT_SPEED);
+        for (index = 0u; index < sizeof(flight_labels) / sizeof(flight_labels[0]); ++index) {
+            SendMessageW(flight_speed_combo, CB_ADDSTRING, 0, (LPARAM)flight_labels[index]);
+        }
+        flight_note = create_label(tab, L"", x + 22, y + 194, SUDEKIMP_CONTENT_W - 22, 20,
+                                   IDC_NOTE, 0u);
         developer_mode_checkbox = create_checkbox(
             tab, L"Developer mode: show the LAN arena test profiles on Play",
-            x, y + 190, SUDEKIMP_CONTENT_W, 22, IDC_DEVELOPER_MODE);
+            x, y + 222, SUDEKIMP_CONTENT_W, 22, IDC_DEVELOPER_MODE);
     }
 
     status_label = create_label(SUDEKIMP_TAB_ALWAYS,

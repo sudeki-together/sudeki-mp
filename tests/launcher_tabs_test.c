@@ -114,6 +114,29 @@ static DWORD WINAPI exercise_tabs(void *unused) {
         GetPrivateProfileStringW(L"SudekiMP", L"EnableCleanroomMenu", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
         assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_SAFE));
         GetPrivateProfileStringW(L"TitleMenu", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
+        /* Flight: greyed out with its instruction until Safe launch is chosen;
+           then written to [Flight] with the chosen speed; off for other profiles. */
+        {
+            HWND flight = GetDlgItem(window, IDC_FLIGHT), speed = GetDlgItem(window, IDC_FLIGHT_SPEED);
+            assert(flight && speed && !IsWindowEnabled(flight) && !IsWindowEnabled(speed));
+            GetWindowTextW(flight_note, value, 32);
+            assert(!wcsncmp(value, L"Available only with Safe launch", 31));
+            set_profile(SUDEKIMP_PROFILE_SAFE);
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_PROFILE, CBN_SELCHANGE), (LPARAM)profile);
+            assert(IsWindowEnabled(flight) && !IsWindowEnabled(speed));
+            SendMessageW(flight, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_FLIGHT, BN_CLICKED), (LPARAM)flight);
+            assert(IsWindowEnabled(speed));
+            SendMessageW(speed, CB_SETCURSEL, 3, 0); /* Very fast */
+            assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_SAFE));
+            GetPrivateProfileStringW(L"Flight", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"true"));
+            GetPrivateProfileStringW(L"Flight", L"Speed", L"", value, 32, ini); assert(!wcscmp(value, L"24"));
+            GetPrivateProfileStringW(L"Flight", L"AilishOnly", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
+            assert(configure_launcher_profile(window, SUDEKIMP_PROFILE_CLEANROOM));
+            GetPrivateProfileStringW(L"Flight", L"Enabled", L"", value, 32, ini); assert(!wcscmp(value, L"false"));
+            SendMessageW(flight, BM_SETCHECK, BST_UNCHECKED, 0);
+            SendMessageW(window, WM_COMMAND, MAKEWPARAM(IDC_FLIGHT, BN_CLICKED), (LPARAM)flight);
+        }
         DeleteFileW(ini);
         StringCchCopyW(package_directory, MAX_PATH, saved_package);
     }
