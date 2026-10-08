@@ -77,12 +77,35 @@ static void test_tagged_stream(void) {
     check(get16(wave + 20) == 0x55u, "mpeg layer 3 tag");
     check(get16(wave + 22) == 1u, "mono channel count");
     check(get32(wave + 24) == 44100u, "sample rate");
-    check(get32(wave + 28) == 16000u, "average bytes per second");
+    /* 3 frames x 417 bytes for 3 x 1152 samples at 44.1 kHz (no padding). */
+    check(get32(wave + 28) == (FRAME_BYTES * FRAME_COUNT * 44100ul + 1728ul) / 3456ul,
+          "average bytes per second from counted frames");
     check(get16(wave + 44) == FRAME_BYTES, "block size");
     check(memcmp(wave + 50, "data", 4u) == 0 && get32(wave + 54) == frames_count,
           "data chunk covers frames only");
     check(memcmp(wave + 58, input + 34u, frames_count) == 0,
           "frames copied unchanged after tag and false sync");
+    free(wave);
+}
+
+/* VBR: a 128 kbps first frame (as an Xing/Info header usually is), then
+ * 64 kbps frames. The reported length must follow the real duration. */
+static void test_vbr_length(void) {
+    enum { SMALL = 208u };  /* 64 kbps at 44.1 kHz, no padding */
+    unsigned char input[FRAME_BYTES + SMALL * 4u];
+    unsigned char *wave = NULL;
+    size_t wave_count = 0u, at = FRAME_BYTES;
+    unsigned long expected;
+    memset(input, 0x22, sizeof(input));
+    input[0] = 0xFFu; input[1] = 0xFBu; input[2] = 0x90u; input[3] = 0xC4u;
+    for (unsigned int i = 0u; i < 4u; ++i, at += SMALL) {
+        input[at] = 0xFFu; input[at + 1u] = 0xFBu; input[at + 2u] = 0x50u; input[at + 3u] = 0xC4u;
+    }
+    check(SudekiMpWrapMp3InWave(input, sizeof(input), &wave, &wave_count), "vbr stream wraps");
+    if (wave == NULL) return;
+    expected = (unsigned long)(((unsigned long long)sizeof(input) * 44100u + 5u * 1152u / 2u) / (5u * 1152u));
+    check(get32(wave + 28) == expected, "vbr average follows the counted duration");
+    check(get32(wave + 28) < 16000u, "vbr average is not the first frame's 128 kbps");
     free(wave);
 }
 
@@ -107,6 +130,7 @@ static void test_rejections(void) {
 
 int main(void) {
     test_tagged_stream();
+    test_vbr_length();
     test_rejections();
     if (failures != 0) {
         fprintf(stderr, "%d mp3 wave checks failed\n", failures);

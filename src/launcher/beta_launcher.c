@@ -62,6 +62,10 @@ typedef enum SudekiMpMusicState {
 } SudekiMpMusicState;
 static SudekiMpMusicState music_state;
 static HWND music_title_label, music_state_label, music_play_button, music_stop_button;
+/* Loop: replays the track when it ends. On until the user turns it off
+   (remembered); it never starts the music by itself. */
+static HWND music_loop_button;
+static BOOL music_loop = TRUE;
 #define SUDEKIMP_MUSIC_X (SUDEKIMP_ART_X)
 #define SUDEKIMP_MUSIC_Y 552
 #define SUDEKIMP_MUSIC_TIMER 7u
@@ -415,6 +419,8 @@ static void persist_launcher_options(void) {
         developer_mode ? L"true" : L"false", settings_path);
     WritePrivateProfileStringW(L"launcher", L"cleanroom_lead",
         cleanroom_lead_names[selected_cleanroom_lead()], settings_path);
+    WritePrivateProfileStringW(L"launcher", L"music_loop",
+        music_loop ? L"true" : L"false", settings_path);
 }
 
 static void load_saved_game_directory(void) {
@@ -477,6 +483,10 @@ static void load_saved_game_directory(void) {
         SendMessageW(cleanroom_tools_checkbox, BM_SETCHECK,
             lstrcmpiW(saved_directory, L"false") == 0 ? BST_UNCHECKED : BST_CHECKED, 0);
     }
+    GetPrivateProfileStringW(L"launcher", L"music_loop", L"true", saved_directory,
+        (DWORD)(sizeof(saved_directory) / sizeof(saved_directory[0])), settings_path);
+    music_loop = lstrcmpiW(saved_directory, L"false") != 0;
+    if (music_loop_button != NULL) InvalidateRect(music_loop_button, NULL, FALSE);
     if (cleanroom_lead_combo != NULL) {
         size_t index;
         GetPrivateProfileStringW(L"launcher", L"cleanroom_lead", L"Ailish",
@@ -1215,13 +1225,14 @@ static void update_music_player(void) {
     SetWindowTextW(music_state_label, states[music_state]);
     EnableWindow(music_stop_button, music_state != SUDEKIMP_MUSIC_STOPPED);
     InvalidateRect(music_play_button, NULL, FALSE);
+    if (music_loop_button != NULL) InvalidateRect(music_loop_button, NULL, FALSE);
     if (music_state == SUDEKIMP_MUSIC_PLAYING) {
         SetTimer(launcher_window, SUDEKIMP_MUSIC_TIMER, 500u, NULL);
     } else {
         KillTimer(launcher_window, SUDEKIMP_MUSIC_TIMER);
     }
     {
-        RECT bar = {SUDEKIMP_MUSIC_X + 104, SUDEKIMP_MUSIC_Y + 56,
+        RECT bar = {SUDEKIMP_MUSIC_X + 150, SUDEKIMP_MUSIC_Y + 56,
                     SUDEKIMP_MUSIC_X + SUDEKIMP_ART_W - 8, SUDEKIMP_MUSIC_Y + 64};
         InvalidateRect(launcher_window, &bar, FALSE);
     }
@@ -1230,7 +1241,7 @@ static void update_music_player(void) {
 /* Thin progress bar beside the buttons (position/length from MCI). */
 static void paint_music_progress(HDC dc) {
     WCHAR position[32] = L"", length[32] = L"";
-    RECT bar = {SUDEKIMP_MUSIC_X + 104, SUDEKIMP_MUSIC_Y + 58,
+    RECT bar = {SUDEKIMP_MUSIC_X + 150, SUDEKIMP_MUSIC_Y + 58,
                 SUDEKIMP_MUSIC_X + SUDEKIMP_ART_W - 8, SUDEKIMP_MUSIC_Y + 62};
     RECT done = bar;
     HBRUSH track = CreateSolidBrush(SUDEKIMP_COLOR_INPUT);
@@ -2170,7 +2181,8 @@ static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
        with whatever surface the button sits on so nothing peeks through. */
     FillRect(draw->hDC, &content,
              control_tab(draw->hwndItem) == SUDEKIMP_TAB_ALWAYS &&
-                     draw->CtlID != IDC_PLAY_MUSIC && draw->CtlID != IDC_STOP_MUSIC ?
+                     draw->CtlID != IDC_PLAY_MUSIC && draw->CtlID != IDC_STOP_MUSIC &&
+                     draw->CtlID != IDC_LOOP_MUSIC ?
                  app_background_brush : panel_background_brush);
     fill = CreateSolidBrush(fill_color);
     outline = CreatePen(PS_SOLID,
@@ -2191,6 +2203,25 @@ static void draw_owner_button(const DRAWITEMSTRUCT *draw) {
     DeleteObject(fill);
     DeleteObject(outline);
 
+    if (draw->CtlID == IDC_LOOP_MUSIC) {
+        /* Loop: a ring with an arrowhead; cyan while on, muted while off. */
+        const int cx = (content.left + content.right) / 2, cy = (content.top + content.bottom) / 2;
+        const COLORREF colour = music_loop ? SUDEKIMP_COLOR_CYAN : RGB(125, 140, 155);
+        HPEN ring = CreatePen(PS_SOLID, 2, colour);
+        HBRUSH head = CreateSolidBrush(colour);
+        HGDIOBJ previous_pen = SelectObject(draw->hDC, ring);
+        HGDIOBJ previous_brush = SelectObject(draw->hDC, GetStockObject(NULL_BRUSH));
+        POINT arrow[3] = {{cx + 3, cy - 10}, {cx + 9, cy - 6}, {cx + 3, cy - 2}};
+        Arc(draw->hDC, cx - 7, cy - 6, cx + 8, cy + 7, cx + 2, cy - 6, cx + 8, cy);
+        SelectObject(draw->hDC, head);
+        SelectObject(draw->hDC, GetStockObject(NULL_PEN));
+        Polygon(draw->hDC, arrow, 3);
+        SelectObject(draw->hDC, previous_pen);
+        SelectObject(draw->hDC, previous_brush);
+        DeleteObject(ring);
+        DeleteObject(head);
+        return;
+    }
     if (draw->CtlID == IDC_PLAY_MUSIC || draw->CtlID == IDC_STOP_MUSIC) {
         /* Mini player icons: play triangle, pause bars, stop square. */
         const int cx = (content.left + content.right) / 2, cy = (content.top + content.bottom) / 2;
@@ -2495,6 +2526,13 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
                     close_music();
                     set_status(L"Project music stopped.");
                     return 0;
+                case IDC_LOOP_MUSIC:
+                    music_loop = !music_loop;
+                    InvalidateRect(music_loop_button, NULL, FALSE);
+                    persist_launcher_options();
+                    set_status(music_loop ? L"Loop on: the track repeats until you stop it." :
+                                            L"Loop off: the track stops at its end.");
+                    return 0;
                 case IDC_DEVELOPER:
                     ShellExecuteW(window,
                                   L"open",
@@ -2517,8 +2555,13 @@ static LRESULT CALLBACK launcher_window_proc(HWND window,
         case MM_MCINOTIFY:
             /* The track reached its end (superseded/aborted come from pause/stop). */
             if (wparam == MCI_NOTIFY_SUCCESSFUL && music_state == SUDEKIMP_MUSIC_PLAYING) {
-                close_music();
-                set_status(L"Project music finished.");
+                if (music_loop &&
+                    mciSendStringW(L"play SudekiMPMusic from 0 notify", NULL, 0u, launcher_window) == 0u) {
+                    update_music_player();
+                } else {
+                    close_music();
+                    set_status(L"Project music finished.");
+                }
             }
             return 0;
         case WM_SUDEKIMP_MUSIC_COMPLETE:
@@ -2959,6 +3002,8 @@ int WINAPI wWinMain(HINSTANCE instance,
                                       SUDEKIMP_MUSIC_Y + 46, 40, 28, IDC_PLAY_MUSIC);
     music_stop_button = create_button(SUDEKIMP_TAB_ALWAYS, L"", SUDEKIMP_MUSIC_X + 56,
                                       SUDEKIMP_MUSIC_Y + 46, 40, 28, IDC_STOP_MUSIC);
+    music_loop_button = create_button(SUDEKIMP_TAB_ALWAYS, L"", SUDEKIMP_MUSIC_X + 102,
+                                      SUDEKIMP_MUSIC_Y + 46, 40, 28, IDC_LOOP_MUSIC);
     /* Track name only; nothing is downloaded until Play. */
     (void)get_music_cache_path(music_cache_path,
                                sizeof(music_cache_path) / sizeof(music_cache_path[0]));

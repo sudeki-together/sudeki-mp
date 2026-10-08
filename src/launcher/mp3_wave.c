@@ -13,6 +13,7 @@ typedef struct FrameInfo {
     unsigned long bitrate_kbps;
     unsigned int channels;
     unsigned int block_size;
+    unsigned int samples;        /* per frame: 1152 (MPEG1) or 576 */
 } FrameInfo;
 
 static void put16(unsigned char *out, unsigned long value) {
@@ -54,6 +55,7 @@ static int parse_frame(const unsigned char *header, FrameInfo *info) {
     info->channels = ((header[3] >> 6) & 0x03u) == 3u ? 1u : 2u;
     info->block_size = (unsigned int)((version == 3u ? 144000ul : 72000ul) *
                                       info->bitrate_kbps / info->sample_rate);
+    info->samples = version == 3u ? 1152u : 576u;
     return 1;
 }
 
@@ -66,6 +68,7 @@ int SudekiMpWrapMp3InWave(const unsigned char *mp3,
     size_t data_count;
     size_t padded;
     FrameInfo info;
+    unsigned long average_bytes;
     unsigned char *out;
     if (mp3 == NULL || wave == NULL || wave_count == NULL) {
         return 0;
@@ -100,6 +103,23 @@ int SudekiMpWrapMp3InWave(const unsigned char *mp3,
     if (data_count > 0x7FFFFFFFu - WAVE_HEADER_BYTES) {
         return 0;
     }
+    /* nAvgBytesPerSec sets the length the wave device reports. The first
+       frame's bitrate is wrong for VBR files (often a 128 kbps Xing/Info
+       frame), so count every frame and use the true duration. */
+    {
+        unsigned long long samples = 0u;
+        size_t at = start;
+        FrameInfo frame;
+        while (at + 4u <= end && parse_frame(mp3 + at, &frame) &&
+               frame.sample_rate == info.sample_rate) {
+            samples += frame.samples;
+            at += frame.block_size + ((mp3[at + 2u] >> 1) & 0x01u);
+        }
+        average_bytes = samples != 0u ?
+            (unsigned long)(((unsigned long long)data_count * info.sample_rate + samples / 2u) / samples) :
+            info.bitrate_kbps * 1000ul / 8ul;
+        if (average_bytes == 0u) average_bytes = 1u;
+    }
     padded = data_count + (data_count & 1u);
     out = (unsigned char *)malloc(WAVE_HEADER_BYTES + padded);
     if (out == NULL) {
@@ -112,7 +132,7 @@ int SudekiMpWrapMp3InWave(const unsigned char *mp3,
     put16(out + 20, 0x0055u);                      /* WAVE_FORMAT_MPEGLAYER3 */
     put16(out + 22, info.channels);
     put32(out + 24, info.sample_rate);
-    put32(out + 28, info.bitrate_kbps * 1000ul / 8ul);
+    put32(out + 28, average_bytes);
     put16(out + 32, 1u);                           /* nBlockAlign */
     put16(out + 34, 0u);                           /* wBitsPerSample */
     put16(out + 36, 12u);                          /* cbSize */
