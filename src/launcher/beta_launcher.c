@@ -19,18 +19,21 @@
 #include "player_options.h"
 #include "settings_page.h"
 #include "mods_panel.h"
+#include "release_check.h"
+#include <wininet.h>
 
 #define SUDEKIMP_TITLE L"SudekiMP Launcher"
 #define SUDEKIMP_LAUNCHER_VERSION L"0.6.0"
 #define SUDEKIMP_PROJECT_URL L"https://git.unfilteredrealm.com/wander"
-#define SUDEKIMP_WINDOWS_BETA_URL \
-    L"https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta"
 #define SUDEKIMP_MUSIC_MANIFEST_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/manifest.txt"
 #define SUDEKIMP_MUSIC_TRACK_URL \
     L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/music/Map%20Inversion.mp3"
-#define SUDEKIMP_UPDATE_MANIFEST_URL \
-    L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/launcher-manifest.txt"
+/* Newest published release (drafts and pre-releases are never returned). */
+#define SUDEKIMP_LATEST_RELEASE_API_URL \
+    L"https://git.unfilteredrealm.com/api/v1/repos/sudeki-together/sudeki-mp/releases/latest"
+#define SUDEKIMP_RELEASES_PAGE_URL \
+    L"https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/releases"
 
 static HINSTANCE launcher_instance;
 static HWND launcher_window;
@@ -1608,80 +1611,94 @@ static void start_music_download(HWND owner) {
     CloseHandle(thread);
 }
 
-static void open_windows_beta_download(HWND owner) {
-    const INT_PTR result = MessageBoxW(
-        owner,
-        L"This opens the public SudekiMP Windows beta package page in your browser. "
-        L"Download and extract the ZIP yourself, then replace only the SudekiMP "
-        L"folder. It never changes SUDEKI.exe, game data, or saves.\n\nOpen the page?",
-        L"Get latest SudekiMP beta",
-        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
-
-    if (result != IDYES) {
-        set_status(L"Download cancelled. No files changed.");
+static void open_release_page(HWND owner, const WCHAR *url) {
+    if ((INT_PTR)ShellExecuteW(owner, L"open", url, NULL, NULL, SW_SHOWNORMAL) <= 32) {
+        show_error(owner, L"Windows could not open the release page in your browser.");
         return;
     }
-    if ((INT_PTR)ShellExecuteW(owner,
-                               L"open",
-                               SUDEKIMP_WINDOWS_BETA_URL,
-                               NULL,
-                               NULL,
-                               SW_SHOWNORMAL) <= 32) {
-        show_error(owner, L"Windows could not open the public beta package page.");
-        return;
-    }
-    set_status(L"Opened the public beta package page. This launcher remains unchanged.");
+    set_status(L"Opened the release page. Download the zip there; this launcher is unchanged.");
 }
 
+/* Asks the official repository for its newest published release. A newer
+   version is announced with its title and the player may open its release
+   page; nothing is downloaded or installed by the launcher itself. */
 static void check_for_launcher_update(HWND owner, BOOL quiet_when_current) {
-    WCHAR settings_directory[MAX_PATH];
-    WCHAR manifest_path[MAX_PATH];
+    WCHAR settings_directory[MAX_PATH], release_path[MAX_PATH];
+    WCHAR current[32], latest[32], title[128], page[256], text[640];
+    char current_ascii[32];
+    char *json;
     HANDLE file;
-    DWORD size;
-    DWORD read_count = 0u;
-    char buffer[2048];
-    char *version;
-    char *end;
-    WCHAR remote_version[64];
+    DWORD size, read_count = 0u;
+    SudekiMpRelease release;
+    int order;
     if (!get_settings_directory(settings_directory,
             sizeof(settings_directory) / sizeof(settings_directory[0])) ||
-        !join_path(manifest_path,
-            sizeof(manifest_path) / sizeof(manifest_path[0]),
-            settings_directory, L"launcher-manifest.txt") ||
-        FAILED(URLDownloadToFileW(NULL, SUDEKIMP_UPDATE_MANIFEST_URL,
-            manifest_path, 0u, NULL))) {
+        (!directory_exists(settings_directory) && !CreateDirectoryW(settings_directory, NULL)) ||
+        !join_path(release_path, sizeof(release_path) / sizeof(release_path[0]),
+            settings_directory, L"latest-release.json")) {
+        return;
+    }
+    /* Always ask the server: a cached answer would hide a new release. */
+    DeleteUrlCacheEntryW(SUDEKIMP_LATEST_RELEASE_API_URL);
+    DeleteFileW(release_path);
+    if (FAILED(URLDownloadToFileW(NULL, SUDEKIMP_LATEST_RELEASE_API_URL, release_path, 0u, NULL))) {
         if (!quiet_when_current) {
-            show_error(owner, L"The official update manifest could not be read. Nothing was changed.");
+            show_error(owner, L"The SudekiMP release list could not be reached. Check your connection; nothing was changed.");
         }
         return;
     }
-    file = CreateFileW(manifest_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    file = CreateFileW(release_path, GENERIC_READ, FILE_SHARE_READ, NULL,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return;
     size = GetFileSize(file, NULL);
-    if (size == INVALID_FILE_SIZE || size >= sizeof(buffer) ||
-        !ReadFile(file, buffer, size, &read_count, NULL)) {
+    json = size != INVALID_FILE_SIZE && size > 0u && size <= 512u * 1024u ?
+        (char *)HeapAlloc(GetProcessHeap(), 0, size + 1u) : NULL;
+    if (json == NULL || !ReadFile(file, json, size, &read_count, NULL) || read_count != size) {
         CloseHandle(file);
+        if (json != NULL) HeapFree(GetProcessHeap(), 0, json);
+        if (!quiet_when_current) show_error(owner, L"The SudekiMP release list could not be read.");
         return;
     }
     CloseHandle(file);
-    buffer[read_count] = '\0';
-    version = strstr(buffer, "version=");
-    if (version == NULL) return;
-    version += 8;
-    end = strpbrk(version, "\r\n");
-    if (end != NULL) *end = '\0';
-    if (MultiByteToWideChar(CP_UTF8, 0, version, -1, remote_version,
-            (int)(sizeof(remote_version) / sizeof(remote_version[0]))) == 0) return;
-    if (lstrcmpW(remote_version, SUDEKIMP_LAUNCHER_VERSION) == 0) {
-        if (!quiet_when_current) set_status(L"SudekiMP Launcher is current.");
+    json[read_count] = '\0';
+    if (!SudekiMpReleaseParse(json, read_count, &release)) {
+        HeapFree(GetProcessHeap(), 0, json);
+        if (!quiet_when_current) show_error(owner, L"The SudekiMP release list was not understood. Nothing was changed.");
         return;
     }
-    if (MessageBoxW(owner,
-            L"A different SudekiMP launcher release is available. Updates are "
-            L"never installed silently. Open the official package page now?",
-            L"SudekiMP update available", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
-        open_windows_beta_download(owner);
+    HeapFree(GetProcessHeap(), 0, json);
+    if (WideCharToMultiByte(CP_UTF8, 0, SUDEKIMP_LAUNCHER_VERSION, -1, current_ascii,
+            (int)sizeof(current_ascii), NULL, NULL) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, release.version, -1, latest, 32) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, release.title, -1, title, 128) == 0 ||
+        MultiByteToWideChar(CP_UTF8, 0, release.page_url, -1, page, 256) == 0) {
+        return;
+    }
+    StringCchCopyW(current, sizeof(current) / sizeof(current[0]), SUDEKIMP_LAUNCHER_VERSION);
+    order = SudekiMpVersionCompare(current_ascii, release.version);
+    if (order >= 0) {
+        if (!quiet_when_current) {
+            StringCchPrintfW(text, sizeof(text) / sizeof(text[0]), order == 0 ?
+                L"SudekiMP Launcher %ls is the newest release." :
+                L"This launcher (%ls) is newer than the newest published release (%ls).",
+                current, latest);
+            set_status(text);
+        }
+        return;
+    }
+    StringCchPrintfW(text, sizeof(text) / sizeof(text[0]),
+        L"A new SudekiMP launcher is available: %ls (you have %ls).\n\n%ls\n\n"
+        L"Open the release page to download it? The launcher never installs "
+        L"updates by itself; extract the new zip over this SudekiMP folder. "
+        L"Your game files and saves are not touched.",
+        latest, current, title);
+    StringCchPrintfW(title, sizeof(title) / sizeof(title[0]), L"SudekiMP %ls available", latest);
+    if (MessageBoxW(owner, text, title, MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+        open_release_page(owner, page);
+    } else {
+        StringCchPrintfW(text, sizeof(text) / sizeof(text[0]),
+            L"SudekiMP %ls is available on the releases page. Nothing was changed.", latest);
+        set_status(text);
     }
 }
 

@@ -12,7 +12,7 @@ settings_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/sudekimp-launcher"
 settings_file="${settings_dir}/settings"
 launch_log="${project_dir}/build/linux/sudekimp-launcher.log"
 project_icon="${project_dir}/src/launcher/assets/SudekiMP.png"
-update_manifest_url='https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/raw/branch/main/public/launcher-manifest.txt'
+latest_release_api_url='https://git.unfilteredrealm.com/api/v1/repos/sudeki-together/sudeki-mp/releases/latest'
 launcher_version='0.6.0'
 
 game_path="${SUDEKIMP_GAME:-${HOME}/Games/SudekiMP/working/SUDEKI.exe}"
@@ -235,18 +235,21 @@ export_logs_gui() {
 }
 
 check_updates_gui() {
-    local quiet="${1:-false}" manifest remote_version release_url
+    # Newest published release from the official repository (the API never
+    # returns drafts or pre-releases); only its own release page is opened.
+    local quiet="${1:-false}" release remote_tag remote_version release_url
     command -v curl >/dev/null 2>&1 || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='curl is required to check for updates.'; return; }
-    manifest="$(curl --fail --silent --show-error --location "${update_manifest_url}" 2>/dev/null)" || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The official release channel could not be reached. Nothing was changed.'; return; }
-    remote_version="$(sed -n 's/^version=//p' <<<"${manifest}" | head -1)"
-    release_url="$(sed -n 's/^release_url=//p' <<<"${manifest}" | head -1)"
-    [[ -n "${remote_version}" && -n "${release_url}" ]] || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The update manifest is malformed.'; return; }
+    release="$(curl --fail --silent --show-error --location "${latest_release_api_url}" 2>/dev/null)" || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The SudekiMP release list could not be reached. Nothing was changed.'; return; }
+    remote_tag="$(grep -o '"tag_name":"[^"]*"' <<<"${release}" | head -1 | sed 's/^"tag_name":"//; s/"$//')"
+    release_url="$(grep -o '"html_url":"https://git\.unfilteredrealm\.com/sudeki-together/sudeki-mp/releases/[^"]*"' <<<"${release}" | head -1 | sed 's/^"html_url":"//; s/"$//')"
+    remote_version="${remote_tag#v}"
+    [[ "${remote_version}" =~ ^[0-9]+(\.[0-9]+)+$ && -n "${release_url}" ]] || { [[ "${quiet}" == true ]] || zenity_app --error --title="${app_title}" --text='The SudekiMP release list was not understood. Nothing was changed.'; return; }
     if [[ "$(printf '%s\n%s\n' "${launcher_version}" "${remote_version}" | sort -V | tail -1)" == "${launcher_version}" ]]; then
-        [[ "${quiet}" == true ]] || zenity_app --info --title="${app_title}" --text="SudekiMP Launcher ${launcher_version} is current."
+        [[ "${quiet}" == true ]] || zenity_app --info --title="${app_title}" --text="SudekiMP Launcher ${launcher_version} is the newest release."
         return
     fi
-    zenity_app --question --title="${app_title}" --ok-label='Open download page' --cancel-label='Later' \
-        --text="SudekiMP ${remote_version} is available.\n\nUpdates are never installed silently. Open the official download page?" || return
+    zenity_app --question --title="${app_title}" --ok-label='Open release page' --cancel-label='Later' \
+        --text="A new SudekiMP launcher is available: ${remote_version} (you have ${launcher_version}).\n\nUpdates are never installed silently. Open the release page to download it?" || return
     xdg-open "${release_url}" >/dev/null 2>&1 &
 }
 

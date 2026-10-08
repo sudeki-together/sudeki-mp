@@ -305,6 +305,7 @@ target_compile_options(SudekiMP.ModdingCore PRIVATE -Wall -Wextra -Wpedantic -We
 
 add_executable(SudekiMP.BetaLauncher WIN32
     src/launcher/beta_launcher.c
+    src/launcher/release_check.c
     src/launcher/mp3_wave.c
     src/launcher/options_store.c
     src/launcher/player_options.c
@@ -320,7 +321,7 @@ target_compile_definitions(SudekiMP.BetaLauncher PRIVATE
 )
 target_compile_options(SudekiMP.BetaLauncher PRIVATE -Wall -Wextra -Wpedantic)
 target_link_options(SudekiMP.BetaLauncher PRIVATE -municode -static-libgcc)
-target_link_libraries(SudekiMP.BetaLauncher PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon winmm windowscodecs uuid comdlg32 comctl32 gdi32)
+target_link_libraries(SudekiMP.BetaLauncher PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon wininet winmm windowscodecs uuid comdlg32 comctl32 gdi32)
 set_target_properties(SudekiMP.BetaLauncher PROPERTIES
     OUTPUT_NAME "SudekiMP.LauncherGUI"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
@@ -2033,15 +2034,20 @@ set_target_properties(SudekiMP.ModdingCoreTest PROPERTIES
 configure_file(data/mod-groups.ini "${CMAKE_BINARY_DIR}/bin/mod-groups.ini" COPYONLY)
 
 add_executable(SudekiMP.LauncherTabsTest
-    tests/launcher_tabs_test.c src/launcher/beta_launcher.rc
+    tests/launcher_tabs_test.c src/launcher/beta_launcher.rc src/launcher/release_check.c
     src/launcher/mods_panel.c src/launcher/mp3_wave.c src/launcher/options_store.c
     src/launcher/player_options.c src/launcher/settings_page.c)
 target_include_directories(SudekiMP.LauncherTabsTest PRIVATE src src/launcher)
 target_compile_definitions(SudekiMP.LauncherTabsTest PRIVATE WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(SudekiMP.LauncherTabsTest PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
 target_link_options(SudekiMP.LauncherTabsTest PRIVATE -municode -static-libgcc)
-target_link_libraries(SudekiMP.LauncherTabsTest PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon winmm windowscodecs uuid comdlg32 comctl32 gdi32)
+target_link_libraries(SudekiMP.LauncherTabsTest PRIVATE SudekiMP.ModdingCore ole32 shell32 urlmon wininet winmm windowscodecs uuid comdlg32 comctl32 gdi32)
 set_target_properties(SudekiMP.LauncherTabsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.LauncherReleaseCheckTest tests/launcher_release_check_test.c src/launcher/release_check.c)
+target_include_directories(SudekiMP.LauncherReleaseCheckTest PRIVATE src/launcher)
+target_compile_options(SudekiMP.LauncherReleaseCheckTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.LauncherReleaseCheckTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.LauncherModsUiTest
     tests/launcher_mods_ui_test.c)
