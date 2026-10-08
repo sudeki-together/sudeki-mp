@@ -114,7 +114,9 @@ int main(void) {
     assigned=3u;
     assert(SudekiMpLanPartyClientControlService(c,&w,&report) && report.ready && report.owned_mask==11u);
     assigned=2u;
-    SudekiMpLanPartyLease old[4]; memcpy(old,c->native,sizeof(old));
+    SudekiMpLanPartyLease old[4];
+    /* Element copy: MinGW GCC 16 misreads memcpy of this array as out of bounds. */
+    for (unsigned k=0;k<4u;++k) old[k]=c->native[k];
     menu_owned=TRUE; /* The persistent input fence must not block actor drain. */
     SudekiMpLanPartyClientControlSuspendBindings(c,TRUE); release_ready=FALSE;
     assert(SudekiMpLanPartyClientControlService(c,&w,&report) && report.failed_mask==11u);
