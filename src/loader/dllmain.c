@@ -3616,7 +3616,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !lan_arena_enabled &&
         !talos_companion_staging_observation_enabled &&
         !zone_transition_trace_enabled &&
-        !zone_traversal_enabled) {
+        !zone_traversal_enabled &&
+        /* Mods and the armour menu log during play (replacements, file
+         * redirects, equips): keep the log open whenever they are active. */
+        !SudekiMpTextureModsActive() &&
+        !SudekiMpArmourMenuActive()) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;

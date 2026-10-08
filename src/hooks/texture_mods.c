@@ -50,6 +50,7 @@ static uint32_t *dump_seen; /* open addressing, key+1 so zero means empty */
 static volatile LONG decoded, replaced, failed, skipped, log_lines;
 
 unsigned SudekiMpTextureModsCount(void) { return (unsigned)index_table.count; }
+BOOL SudekiMpTextureModsActive(void) { return mod_count != 0u || dump_enabled; }
 
 static BOOL readable(const void *p, size_t n) {
     MEMORY_BASIC_INFORMATION m;

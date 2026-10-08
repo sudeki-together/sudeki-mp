@@ -90,11 +90,23 @@ typedef struct ScanResult {
   size_t count;
   WCHAR error[256];
 } ScanResult;
+typedef struct ThumbResult {
+  size_t index;
+  HBITMAP bitmap;
+} ThumbResult;
 typedef struct ScanJob {
   HANDLE cancel;
   WCHAR directory[PATH_CAP], cache[PATH_CAP];
   volatile LONG phase, progress, total, thumbs_done, thumbs_total;
   ScanResult *result;
+  /* Progressive scan: the catalogue is handed to the panel (published) as
+   * soon as it is built and classified; thumbnails follow through the queue,
+   * the selected character/category first (priority_*, set by the panel). */
+  const SudekiMpModGroups *grouping;
+  volatile LONG published, priority_character, priority_category;
+  CRITICAL_SECTION queue_lock;
+  ThumbResult *queue;
+  size_t queue_count, queue_capacity;
 } ScanJob;
 typedef struct DetailJob {
   HANDLE cancel;
@@ -509,7 +521,9 @@ typedef struct DecodeBatch {
   ScanJob *job;
   const ArchiveLocation *archive;
   const SudekiMpModArchive *source;
-  Resource *resources; /* batch slice; textures only are decoded */
+  const Resource *resources; /* the whole catalogue (read-only here) */
+  const size_t *indices;     /* the textures of this batch */
+  HBITMAP *bitmaps;          /* one result per index */
   size_t count;
   volatile LONG next;
 } DecodeBatch;
@@ -518,18 +532,16 @@ static DWORD WINAPI decode_worker(void *context) {
   DecodeBatch *b = (DecodeBatch *)context;
   for (;;) {
     LONG index = InterlockedIncrement(&b->next) - 1;
-    Resource *resource;
+    const Resource *resource;
     const uint8_t *bytes;
     size_t size;
     if (index < 0 || (size_t)index >= b->count || cancelled(b->job))
       return 0;
-    resource = &b->resources[index];
-    if (resource->entry.kind != SUDEKIMP_MOD_RESOURCE_TEXTURE)
-      continue;
+    resource = &b->resources[b->indices[index]];
     bytes = SudekiMpModArchiveResource(b->source, resource->entry.resource_index, &size);
     if (bytes)
-      resource->thumbnail = thumbnail_cache(b->job, b->archive,
-                                            resource->entry.archive_key, bytes, size);
+      b->bitmaps[index] = thumbnail_cache(b->job, b->archive,
+                                          resource->entry.archive_key, bytes, size);
     InterlockedIncrement(&b->job->thumbs_done);
   }
 }
@@ -645,9 +657,7 @@ static DWORD WINAPI scan_worker(void *context) {
   }
   SudekiMpModNamesFinish(&names);
   InterlockedExchange(&job->phase, 2);
-  r->images = ImageList_Create(THUMB_SIDE, THUMB_SIDE, ILC_COLOR32, 256, 256);
-  if (!r->images)
-    goto fail;
+  /* Catalogue first (no decoding): every archive's entries, classified. */
   for (i = 0; i < r->archive_count; ++i) {
     size_t j, old_count = r->count;
     Resource *grown;
@@ -674,40 +684,104 @@ static DWORD WINAPI scan_worker(void *context) {
     r->count += catalog.count;
     for (j = 0; j < catalog.count; ++j) {
       Resource *resource = &r->resources[old_count + j];
+      unsigned hero = 0, category = 0;
       resource->entry = catalog.entries[j];
       resource->entry.archive_index = i;
       resource->record = archives[i].records[resource->entry.resource_index];
       resource->icon = -1;
+      SudekiMpModGroupsClassify(job->grouping, resource->entry.name,
+                                resource->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL,
+                                &hero, &category);
+      resource->character = (int)hero;
+      resource->category = (int)category;
       if (resource->entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
         InterlockedIncrement(&job->thumbs_total);
-    }
-    /* Decode in parallel, then add to the image list here, in catalog order. */
-    for (j = 0; j < catalog.count; j += DECODE_BATCH) {
-      DecodeBatch batch;
-      size_t k;
-      memset(&batch, 0, sizeof(batch));
-      batch.job = job;
-      batch.archive = &r->archives[i];
-      batch.source = &archives[i];
-      batch.resources = &r->resources[old_count + j];
-      batch.count = catalog.count - j < DECODE_BATCH ? catalog.count - j : DECODE_BATCH;
-      decode_batch(&batch);
-      for (k = 0; k < batch.count; ++k) {
-        Resource *resource = &batch.resources[k];
-        if (!resource->thumbnail)
-          continue;
-        resource->icon = ImageList_Add(r->images, resource->thumbnail, NULL);
-        DeleteObject(resource->thumbnail);
-        resource->thumbnail = NULL;
-        if (resource->icon < 0)
-          goto fail;
-      }
-      if (cancelled(job))
-        goto done;
     }
     SudekiMpModCatalogFree(&catalog);
     archives[i].data = NULL;
     unmap_file(&mapped);
+  }
+  /* Hand the catalogue to the panel now; from here on this thread only reads
+   * entries/records and reports thumbnails through the queue. */
+  InterlockedExchange(&job->phase, 3);
+  InterlockedExchange(&job->published, 1);
+  {
+    size_t *pending = (size_t *)malloc(r->count * sizeof(size_t) + 1);
+    size_t *indices = (size_t *)malloc(DECODE_BATCH * sizeof(size_t));
+    HBITMAP *bitmaps = (HBITMAP *)calloc(DECODE_BATCH, sizeof(HBITMAP));
+    if (!pending || !indices || !bitmaps) {
+      free(pending); free(indices); free(bitmaps);
+      goto fail;
+    }
+    for (i = 0; i < r->archive_count; ++i) {
+      size_t j, pending_count = 0;
+      for (j = 0; j < r->count; ++j)
+        if (r->resources[j].entry.archive_index == i &&
+            r->resources[j].entry.kind == SUDEKIMP_MOD_RESOURCE_TEXTURE)
+          pending[pending_count++] = j;
+      if (!pending_count)
+        continue;
+      if (!map_file(r->archives[i].path, &mapped) ||
+          !unchanged_file(r->archives[i].path, &r->archives[i].attributes)) {
+        free(pending); free(indices); free(bitmaps);
+        goto changed;
+      }
+      archives[i].data = mapped.bytes;
+      while (pending_count && !cancelled(job)) {
+        /* Next batch: the panel's current selection first, then the rest. */
+        LONG want_character = InterlockedCompareExchange(&job->priority_character, 0, 0);
+        LONG want_category = InterlockedCompareExchange(&job->priority_category, 0, 0);
+        size_t taken = 0, k, kept = 0;
+        DecodeBatch batch;
+        for (int pass = 0; pass < 2 && taken < DECODE_BATCH; ++pass)
+          for (k = 0; k < pending_count && taken < DECODE_BATCH; ++k) {
+            const Resource *c = &r->resources[pending[k]];
+            int match = c->character == want_character && c->category == want_category;
+            if (pending[k] != (size_t)-1 && (pass ? !match : match)) {
+              indices[taken++] = pending[k];
+              pending[k] = (size_t)-1;
+            }
+          }
+        for (k = 0; k < pending_count; ++k)
+          if (pending[k] != (size_t)-1)
+            pending[kept++] = pending[k];
+        pending_count = kept;
+        memset(&batch, 0, sizeof(batch));
+        memset(bitmaps, 0, DECODE_BATCH * sizeof(HBITMAP));
+        batch.job = job;
+        batch.archive = &r->archives[i];
+        batch.source = &archives[i];
+        batch.resources = r->resources;
+        batch.indices = indices;
+        batch.bitmaps = bitmaps;
+        batch.count = taken;
+        decode_batch(&batch);
+        EnterCriticalSection(&job->queue_lock);
+        for (k = 0; k < taken; ++k) {
+          if (!bitmaps[k])
+            continue;
+          if (job->queue_count == job->queue_capacity) {
+            size_t capacity = job->queue_capacity ? job->queue_capacity * 2 : 256;
+            ThumbResult *grown = (ThumbResult *)realloc(job->queue, capacity * sizeof(*grown));
+            if (!grown) {
+              DeleteObject(bitmaps[k]);
+              continue;
+            }
+            job->queue = grown;
+            job->queue_capacity = capacity;
+          }
+          job->queue[job->queue_count].index = indices[k];
+          job->queue[job->queue_count].bitmap = bitmaps[k];
+          ++job->queue_count;
+        }
+        LeaveCriticalSection(&job->queue_lock);
+      }
+      archives[i].data = NULL;
+      unmap_file(&mapped);
+      if (cancelled(job))
+        break;
+    }
+    free(pending); free(indices); free(bitmaps);
   }
   goto done;
 core_fail:
@@ -1502,8 +1576,13 @@ static void scan_start(Panel *p) {
   }
   StringCchCopyW(p->scan->directory, PATH_CAP, p->game);
   StringCchCopyW(p->scan->cache, PATH_CAP, p->cache);
+  p->scan->grouping = &p->grouping;
+  p->scan->priority_character = p->character_filter;
+  p->scan->priority_category = p->category_filter;
+  InitializeCriticalSection(&p->scan->queue_lock);
   p->scan_thread = CreateThread(NULL, 0, scan_worker, p->scan, 0, NULL);
   if (!p->scan_thread) {
+    DeleteCriticalSection(&p->scan->queue_lock);
     CloseHandle(p->scan->cancel);
     free(p->scan);
     p->scan = NULL;
@@ -1513,64 +1592,112 @@ static void scan_start(Panel *p) {
   SetWindowTextW(p->rescan, L"Cancel scan");
   status(p, L"Reading game archives…");
 }
+/* Moves finished thumbnails into the panel's image list and onto any grid
+ * tile already showing that resource. Panel (UI) thread only. */
+static void drain_thumbnails(Panel *p, ScanJob *job) {
+  ThumbResult *items;
+  size_t count, i;
+  int taken = p->catalog != NULL && p->catalog == job->result;
+  EnterCriticalSection(&job->queue_lock);
+  items = job->queue;
+  count = job->queue_count;
+  job->queue = NULL;
+  job->queue_count = job->queue_capacity = 0;
+  LeaveCriticalSection(&job->queue_lock);
+  for (i = 0; i < count; ++i) {
+    if (taken && items[i].index < p->catalog->count) {
+      Resource *r = &p->catalog->resources[items[i].index];
+      LVFINDINFOW find;
+      int item;
+      r->icon = ImageList_Add(p->images, items[i].bitmap, NULL);
+      memset(&find, 0, sizeof(find));
+      find.flags = LVFI_PARAM;
+      find.lParam = (LPARAM)items[i].index;
+      item = ListView_FindItem(p->grid, -1, &find);
+      if (item >= 0 && r->icon >= 0) {
+        LVITEMW update;
+        memset(&update, 0, sizeof(update));
+        update.mask = LVIF_IMAGE;
+        update.iItem = item;
+        update.iImage = r->icon;
+        ListView_SetItem(p->grid, &update);
+      }
+    }
+    DeleteObject(items[i].bitmap);
+  }
+  free(items);
+}
+/* Releases a finished (joined) scan job; a catalogue the panel took stays. */
+static void release_scan_job(Panel *p, ScanJob *job) {
+  drain_thumbnails(p, job);
+  DeleteCriticalSection(&job->queue_lock);
+  CloseHandle(job->cancel);
+  if (job->result != p->catalog)
+    free_catalog(job->result);
+  free(job);
+}
+static void join_worker(HANDLE worker);
+/* Stops a running scan and waits for it (used before freeing the catalogue
+ * it may still be reading). */
+static void stop_scan(Panel *p) {
+  if (!p->scan_thread)
+    return;
+  SetEvent(p->scan->cancel);
+  join_worker(p->scan_thread);
+  p->scan_thread = NULL;
+  release_scan_job(p, p->scan);
+  p->scan = NULL;
+}
+
 static void poll_jobs(Panel *p) {
   WCHAR text[256];
+  /* The catalogue is shown as soon as the worker publishes it. */
+  if (p->scan_thread && p->scan->result && p->catalog != p->scan->result &&
+      InterlockedCompareExchange(&p->scan->published, 0, 0)) {
+    cancel_detail(p);
+    select_resource(p, -1);
+    free_catalog(p->catalog); /* the previous scan has finished */
+    p->catalog = p->scan->result;
+    ImageList_RemoveAll(p->images);
+    refresh_grid(p);
+  }
+  if (p->scan_thread)
+    drain_thumbnails(p, p->scan);
   if (p->scan_thread) {
     if (WaitForSingleObject(p->scan_thread, 0) == WAIT_OBJECT_0) {
       ScanJob *job = p->scan;
       int was_cancelled = WaitForSingleObject(job->cancel, 0) == WAIT_OBJECT_0;
+      int taken = job->result != NULL && job->result == p->catalog;
       CloseHandle(p->scan_thread);
       p->scan_thread = NULL;
       p->scan = NULL;
-      CloseHandle(job->cancel);
-      if (!was_cancelled && job->result && !job->result->error[0]) {
-        size_t i;
-        HIMAGELIST previous;
-        cancel_detail(p);
-        select_resource(p, -1);
-        free_catalog(p->catalog);
-        p->catalog = job->result;
-        job->result = NULL;
-        previous =
-            ListView_SetImageList(p->grid, p->catalog->images, LVSIL_NORMAL);
-        p->images = p->catalog->images;
-        p->catalog->images = NULL;
-        if (previous)
-          ImageList_Destroy(previous);
-        for (i = 0; i < p->catalog->count; ++i) {
-          Resource *r = &p->catalog->resources[i];
-          unsigned hero, category;
-          SudekiMpModGroupsClassify(
-              &p->grouping, r->entry.name,
-              r->entry.kind == SUDEKIMP_MOD_RESOURCE_MODEL, &hero, &category);
-          r->character = (int)hero;
-          r->category = (int)category;
-        }
-        refresh_grid(p);
+      if (taken && !job->result->error[0]) {
         StringCchPrintfW(text, 256,
                          L"%u resources scanned. Grouping follows name "
                          L"patterns; changes appear next game launch.",
                          (unsigned)p->catalog->count);
         status(p, text);
       } else if (!was_cancelled)
-        status(p, job->result ? job->result->error
+        status(p, job->result && job->result->error[0] ? job->result->error
                               : L"Unable to allocate the game catalog.");
       else if (!p->rescanning)
         status(p, L"Scan cancelled.");
-      free_catalog(job->result);
-      free(job);
+      release_scan_job(p, job);
       SetWindowTextW(p->rescan, L"Rescan game");
       if (p->rescanning)
         scan_start(p);
     } else {
       const WCHAR *phase = p->scan->phase == 0   ? L"Reading archives"
                            : p->scan->phase == 1 ? L"Finding resource names"
-                                                 : L"Decoding thumbnails";
+                           : p->scan->phase == 2 ? L"Building the catalogue"
+                                                 : L"Thumbnails";
       if (p->scan->phase == 1)
         StringCchPrintfW(text, 256, L"%ls…", phase);
-      else if (p->scan->phase == 2)
-        StringCchPrintfW(text, 256, L"%ls (%d threads): %ld / %ld", phase,
-                         DECODE_WORKERS, p->scan->thumbs_done, p->scan->thumbs_total);
+      else if (p->scan->phase == 3)
+        StringCchPrintfW(text, 256,
+                         L"%ls: %ld / %ld (selected category first; browse "
+                         L"and apply now)",
+                         phase, p->scan->thumbs_done, p->scan->thumbs_total);
       else
         StringCchPrintfW(text, 256, L"%ls: %ld / %ld", phase,
                          (long)p->scan->progress, (long)p->scan->total);
@@ -2283,9 +2410,8 @@ static void destroy_panel(Panel *p) {
   join_worker(p->scan_thread);
   join_worker(p->detail_thread);
   if (p->scan) {
-    CloseHandle(p->scan->cancel);
-    free_catalog(p->scan->result);
-    free(p->scan);
+    release_scan_job(p, p->scan);
+    p->scan = NULL;
   }
   if (p->detail) {
     CloseHandle(p->detail->cancel);
@@ -2441,12 +2567,16 @@ static LRESULT CALLBACK panel_proc(HWND window, UINT message, WPARAM wparam,
       if (HIWORD(wparam) == LBN_SELCHANGE) {
         p->character_filter =
             (int)SendMessageW(p->character, LB_GETCURSEL, 0, 0);
+        if (p->scan)
+          InterlockedExchange(&p->scan->priority_character, p->character_filter);
         refresh_grid(p);
       }
       break;
     case ID_CATEGORY:
       if (HIWORD(wparam) == LBN_SELCHANGE) {
         p->category_filter = (int)SendMessageW(p->category, LB_GETCURSEL, 0, 0);
+        if (p->scan)
+          InterlockedExchange(&p->scan->priority_category, p->category_filter);
         refresh_grid(p);
       }
       break;
@@ -2560,6 +2690,7 @@ void SudekiMpModsPanelSetPaths(HWND panel, const WCHAR *game_directory,
   }
   if (changed) {
     select_resource(p, -1);
+    stop_scan(p); /* it may still be reading the published catalogue */
     free_catalog(p->catalog);
     p->catalog = NULL;
     p->refreshing = 1;

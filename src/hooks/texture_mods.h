@@ -21,4 +21,7 @@
 BOOL SudekiMpTextureModsInstall(HMODULE image, const wchar_t *config_path);
 BOOL SudekiMpTextureModsUninstall(void);
 unsigned SudekiMpTextureModsCount(void);
+/* TRUE when at least one mod loaded or texture dumping is on: the game then
+ * keeps logging mod events (replacements, redirects) after initialization. */
+BOOL SudekiMpTextureModsActive(void);
 #endif

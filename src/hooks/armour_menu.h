@@ -20,4 +20,6 @@
  * (single player first; see docs/armour-choice.md). */
 BOOL SudekiMpArmourMenuInstall(HMODULE image, const wchar_t *config_path);
 BOOL SudekiMpArmourMenuUninstall(void);
+/* TRUE while the armour choice seams are installed (its events are logged). */
+BOOL SudekiMpArmourMenuActive(void);
 #endif

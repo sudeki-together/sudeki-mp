@@ -457,3 +457,5 @@ fail:
         return FALSE;
     }
 }
+
+BOOL SudekiMpArmourMenuActive(void) { return base != NULL; }
