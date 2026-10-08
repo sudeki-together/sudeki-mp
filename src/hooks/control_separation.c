@@ -8204,19 +8204,37 @@ BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitnes
     return SudekiMpLanPartyControlStoryExact(w,roster,key) &&
         party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter;
 }
+/* #42 diagnostic: which drain step refused, with the bound scope beside the
+ * live roster (a same-world descriptor change is the suspect). Logged on a
+ * step change or every 2 s per seat; observe-only. */
+static BOOL story_drain_refused(const char *step,const SudekiMpLanPartyLease *key,
+    const SudekiMpLanStoryNativeRoster *roster,const PartyNativeLease *owned) {
+    static const char *last_step[4]; static DWORD last_at[4]; static unsigned logs;
+    unsigned seat=key && key->seat<4u?key->seat:0u;
+    DWORD now=GetTickCount();
+    if(logs<400u && (last_step[seat]!=step || now-last_at[seat]>=2000u)) {
+        ++logs; last_step[seat]=step; last_at[seat]=now;
+        SudekiMpLogFormat("story_native_control event=drain_refused seat=%u step=%s phase=%d "
+            "bound_world=%p bound_descriptor=%p bound_epoch=%lu roster_world=%p roster_descriptor=%p roster_epoch=%lu\r\n",
+            seat,step,owned?(int)owned->phase:-1,story_native_control.world,story_native_control.descriptor,
+            (unsigned long)story_native_control.epoch,roster?roster->world:NULL,roster?roster->descriptor:NULL,
+            (unsigned long)(roster?roster->epoch:0u));
+    }
+    return FALSE;
+}
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
     SudekiMpLanPartyControlDrainProbe drained) {
     if(!story_key_valid(key)) return FALSE;
     PartyNativeLease *owned=&story_native_control.actor[key->seat]; void **slot;
     if(!party_boundary(w) || story_native_control.thread!=GetCurrentThreadId() ||
-        !story_key_valid(key) || !drained) return FALSE;
+        !story_key_valid(key) || !drained) return story_drain_refused("boundary",key,roster,owned);
     if(owned->phase==PARTY_NATIVE_EMPTY)
         return party_key_equal(&story_native_control.released[key->seat],key);
-    if(!party_key_equal(&owned->key,key)) return FALSE;
+    if(!party_key_equal(&owned->key,key)) return story_drain_refused("key",key,roster,owned);
     /* Close admission before inspecting a potentially changed native scene. */
     if(owned->phase==PARTY_NATIVE_HELD) owned->phase=PARTY_NATIVE_DRAINING;
-    if(!story_control_identity(w,roster,key,&slot)) return FALSE;
+    if(!story_control_identity(w,roster,key,&slot)) return story_drain_refused("identity",key,roster,owned);
     if(owned->phase==PARTY_NATIVE_QUARANTINED) {
         /* Acquire records the exact ref0/mode1 owner before its sole native
          * OverrideControl call. A later fresh witness may resolve an
@@ -8225,7 +8243,7 @@ BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitnes
         else if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
             ((uint8_t *)owned->mode)[0xbu]==1u) {
             story_control_forget(key->seat); return TRUE;
-        } else return FALSE;
+        } else return story_drain_refused("quarantine_owner",key,roster,owned);
     }
     if(owned->phase==PARTY_NATIVE_RELEASE_VERIFY) {
         if(*(int16_t *)((uint8_t *)owned->ai+0x16au)==0 &&
@@ -8233,11 +8251,14 @@ BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitnes
             story_control_identity(w,roster,key,NULL)) {
             story_control_forget(key->seat); return TRUE;
         }
-        return FALSE;
+        return story_drain_refused("release_verify",key,roster,owned);
     }
-    if(owned->phase!=PARTY_NATIVE_DRAINING || !party_ai_owned(owned) ||
-        !story_control_stop(w,roster,key) || !drained(key,owned->actor,w) ||
-        !story_control_identity(w,roster,key,&slot) || !party_ai_owned(owned)) return FALSE;
+    if(owned->phase!=PARTY_NATIVE_DRAINING) return story_drain_refused("phase",key,roster,owned);
+    if(!party_ai_owned(owned)) return story_drain_refused("ai_owner",key,roster,owned);
+    if(!story_control_stop(w,roster,key)) return story_drain_refused("stop",key,roster,owned);
+    if(!drained(key,owned->actor,w)) return story_drain_refused("body_busy",key,roster,owned);
+    if(!story_control_identity(w,roster,key,&slot) || !party_ai_owned(owned))
+        return story_drain_refused("identity_after_stop",key,roster,owned);
     owned->phase=PARTY_NATIVE_RELEASE_VERIFY;
     party_call_ai(FALSE,slot);
     if(!story_control_identity(w,roster,key,NULL)) return FALSE;
