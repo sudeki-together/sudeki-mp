@@ -12,6 +12,9 @@
  * TestStartFollower = x,y,z. Not a gameplay feature. */
 BOOL SudekiMpLanStoryTestStartConfigure(HMODULE image, const float leader[3],
     const float follower[3]);
+/* Optional [StoryAreas] TestStartZone: native zone (descriptor name) made
+ * current before placing, via the area follower's native calls. */
+void SudekiMpLanStoryTestStartSetZone(const char *zone);
 /* Native game thread, from the host runtime service with a proved roster. */
 void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster);
 

@@ -302,6 +302,12 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
     float leader[3],follower[3];
     if(!read_config_xyz(path,L"TestStartLeader",leader)) return;
     if(!read_config_xyz(path,L"TestStartFollower",follower)) memcpy(follower,leader,sizeof(follower));
+    {
+        wchar_t zone[40]; char narrow[40]={0};
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartZone",L"",zone,40,path);
+        for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
+        SudekiMpLanStoryTestStartSetZone(narrow);
+    }
     if(!SudekiMpLanStoryTestStartConfigure(game_module,leader,follower))
         SudekiMpLogFormat("story_test_start event=refused error=%lu\r\n",(unsigned long)GetLastError());
 }

@@ -129,6 +129,17 @@ void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now)
     if(_stricmp(host->current,mine_current) && !*(void **)(world+WORLD_PENDING)) {
         uint8_t *d=find(host->current,table,count);
         uint32_t state=d?*(uint32_t *)(d+DESC_STATE):0u;
+        /* The host's current zone is not resident here (e.g. the host jumped
+         * or the report started after its background target moved on):
+         * background-load it first with the same native request. */
+        if(d && !state && d!=current && *(uint8_t **)(world+WORLD_TARGET)!=d &&
+            (_stricmp(last_switch,host->current) || now-last_switch_at>=RETRY_MS)) {
+            memcpy(last_switch,host->current,sizeof(last_switch)); last_switch_at=now;
+            if(logs<64u) { ++logs; SudekiMpLogFormat("story_area_follow event=switch target=%s reason=host_current_not_resident current=%s\r\n",
+                host->current,mine_current); }
+            call_zone(RVA_SWITCH_ZONE_NOW,host->current);
+            return;
+        }
         if(d && (state==2u || state==3u) && *(uint8_t **)(world+WORLD_LOADED)!=d &&
             (_stricmp(last_enter,host->current) || now-last_enter_at>=RETRY_MS)) {
             memcpy(last_enter,host->current,sizeof(last_enter)); last_enter_at=now;
@@ -137,4 +148,33 @@ void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now)
             call_zone(RVA_ENTER_ZONE,host->current);
         }
     }
+}
+
+int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now) {
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    static uint32_t last_at; static unsigned step_logs;
+    if(!zone || !zone[0] || !world || !*(world+WORLD_ARMED)) return 0;
+    uint8_t *d=find(zone,table,count);
+    if(!d) return 0;
+    if(*(uint8_t **)(world+WORLD_CURRENT)==d) return 2;
+    if(last_at && now-last_at<RETRY_MS) return 1;
+    uint32_t state=*(uint32_t *)(d+DESC_STATE);
+    if(!state && *(uint8_t **)(world+WORLD_TARGET)!=d) {
+        last_at=now?now:1u;
+        if(step_logs<16u) { ++step_logs; SudekiMpLogFormat("story_area_goto event=switch zone=%s\r\n",zone); }
+        call_zone(RVA_SWITCH_ZONE_NOW,zone); return 1;
+    }
+    if((state==2u || state==3u) && !*(void **)(world+WORLD_PENDING) && *(uint8_t **)(world+WORLD_LOADED)!=d) {
+        last_at=now?now:1u;
+        if(step_logs<16u) { ++step_logs; SudekiMpLogFormat("story_area_goto event=enter zone=%s\r\n",zone); }
+        call_zone(RVA_ENTER_ZONE,zone); return 1;
+    }
+    return 1;
+}
+
+int SudekiMpLanStoryAreaZoneState(const char *zone) {
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    uint8_t *d=world && zone && zone[0]?find(zone,table,count):NULL;
+    if(!d) return -1;
+    return *(uint8_t **)(world+WORLD_CURRENT)==d?3:(int)*(uint32_t *)(d+DESC_STATE);
 }

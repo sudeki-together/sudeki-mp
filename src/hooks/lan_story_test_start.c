@@ -2,6 +2,7 @@
 
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "hooks/lan_story_area_follow.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -14,7 +15,12 @@ typedef void (__attribute__((fastcall)) *PositionSet)(void *,const float *);
 static uint8_t *base;
 static float leader_xyz[3],follower_xyz[3];
 static BOOL pending;
-static DWORD ready_since;
+static DWORD ready_since,zone_since;
+static char start_zone[40];
+void SudekiMpLanStoryTestStartSetZone(const char *zone) {
+    memset(start_zone,0,sizeof(start_zone));
+    if(zone) strncpy(start_zone,zone,sizeof(start_zone)-1u);
+}
 
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -29,7 +35,7 @@ BOOL SudekiMpLanStoryTestStartConfigure(HMODULE image,const float leader[3],cons
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     base=b; memcpy(leader_xyz,leader,sizeof(leader_xyz)); memcpy(follower_xyz,follower,sizeof(follower_xyz));
-    pending=TRUE; ready_since=0;
+    pending=TRUE; ready_since=0; zone_since=0;
     SudekiMpLogFormat("story_test_start event=armed leader=%.1f,%.1f,%.1f follower=%.1f,%.1f,%.1f\r\n",
         (double)leader[0],(double)leader[1],(double)leader[2],
         (double)follower[0],(double)follower[1],(double)follower[2]);
@@ -51,6 +57,24 @@ void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster
     /* Let the load fade and first party placement settle before moving. */
     if(!ready_since) { ready_since=now?now:1u; return; }
     if(now-ready_since<SETTLE_MS) return;
+    if(start_zone[0]) {
+        /* Background-load the zone with the native SwitchZoneNOW, then place
+         * the party inside it once resident: the native position-based swap
+         * makes it current, as walking in does. */
+        int state=SudekiMpLanStoryAreaZoneState(start_zone);
+        if(!zone_since) zone_since=now?now:1u;
+        if(state<0 || now-zone_since>60000u) {
+            pending=FALSE;
+            SudekiMpLogFormat("story_test_start event=zone_refused zone=%s state=%d\r\n",start_zone,state);
+            return;
+        }
+        if(state<2) {
+            if(!state) (void)SudekiMpLanStoryAreaGoTo(start_zone,now);
+            ready_since=now?now:1u; return;
+        }
+        if(now-ready_since<500u) return;
+        SudekiMpLogFormat("story_test_start event=zone_resident zone=%s state=%d\r\n",start_zone,state);
+    }
     pending=FALSE;
     unsigned placed=0,refused=0;
     for(unsigned c=0;c<4u;++c) if(roster->available_mask&(1u<<c)) {

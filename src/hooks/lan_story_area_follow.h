@@ -26,5 +26,10 @@ void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now)
 BOOL SudekiMpLanStoryAreaFollowCalling(void);
 /* GetTickCount of the last native zone call this follower issued (0 = none). */
 uint32_t SudekiMpLanStoryAreaFollowLastCall(void);
+/* Host developer path (test start): drive the native world to make `zone`
+ * current with the same exports. 2 = current, 1 = in progress, 0 = refused. */
+int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now);
+/* Native descriptor state of `zone` (3 when current), -1 when unknown. */
+int SudekiMpLanStoryAreaZoneState(const char *zone);
 
 #endif
