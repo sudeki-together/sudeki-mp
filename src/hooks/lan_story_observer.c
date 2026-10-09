@@ -1,4 +1,5 @@
 #include "hooks/lan_story_observer.h"
+#include "hooks/lan_story_area_follow.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
@@ -275,6 +276,18 @@ static uint32_t begin_zone(unsigned kind,const char *name) {
         if(split_owner && split_owner->ended) split_owner->ended(TRUE);
         SudekiMpLogFormat("lan_story event=split_abandoned kind=%u policy=vanilla_epoch\r\n",kind);
     }
+    if(kind==SWITCH || (kind==ENTER && SudekiMpLanStoryAreaFollowCalling())) {
+        /* SwitchZoneNOW only requests a background load of the target
+         * (FUN_00405a70: target state 0->1, world+0x399 cleared); the current
+         * zone stays active and playable, and the native world swaps current
+         * later as the party walks in, which the sampler sees as a zone walk.
+         * Not a scene replacement (#42). */
+        SudekiMpLogFormat("lan_story event=%s epoch=%lu target=%s current_world=%s policy=%s\r\n",
+            kind==SWITCH?"zone_switch_requested":"zone_enter_followed",(unsigned long)observed.epoch,
+            name?name:"",observed.world,kind==SWITCH?"background_load":"host_area_follow");
+        ReleaseSRWLockExclusive(&state_lock);
+        return source_epoch;
+    }
     increment(&observed.epoch);
     unknown_scene(SUDEKIMP_LAN_STORY_LOADING);
     if(kind==SET || kind==ENTER || kind==SWITCH || kind==MAIN) {
@@ -300,11 +313,22 @@ static void end_zone(void) {
     if(call_depth) --call_depth;
     ReleaseSRWLockExclusive(&state_lock);
 }
-static void __cdecl zone_set(const char *s) { begin_zone(SET,s); ((ZoneCall)hooks[SET].trampoline)(s); end_zone(); }
-static void __cdecl zone_enter(const char *s) { begin_zone(ENTER,s); ((ZoneCall)hooks[ENTER].trampoline)(s); end_zone(); }
+/* Called on the native thread before a whole-world zone call runs its
+ * original (#42): the native load decides at its start whether every party
+ * member can travel, so held controls must be returned before it begins. */
+static void (*world_change_hook)(void);
+static void before_world_change(void) {
+    void (*hook)(void)=world_change_hook;
+    if(hook && call_depth==0u && (!native_thread || native_thread==GetCurrentThreadId())) hook();
+}
+BOOL SudekiMpLanStoryObserverSetWorldChangeHook(void (*hook)(void)) {
+    world_change_hook=hook; return TRUE;
+}
+static void __cdecl zone_set(const char *s) { before_world_change(); begin_zone(SET,s); ((ZoneCall)hooks[SET].trampoline)(s); end_zone(); }
+static void __cdecl zone_enter(const char *s) { before_world_change(); begin_zone(ENTER,s); ((ZoneCall)hooks[ENTER].trampoline)(s); end_zone(); }
 static void __cdecl zone_switch(const char *s) { begin_zone(SWITCH,s); ((ZoneCall)hooks[SWITCH].trampoline)(s); end_zone(); }
 static void __cdecl zone_load(const char *s) { begin_zone(LOAD,s); ((ZoneCall)hooks[LOAD].trampoline)(s); end_zone(); }
-static void __attribute__((thiscall)) zone_main(void *w,const char *s) { begin_zone(MAIN,s); ((MainCall)hooks[MAIN].trampoline)(w,s); end_zone(); }
+static void __attribute__((thiscall)) zone_main(void *w,const char *s) { before_world_change(); begin_zone(MAIN,s); ((MainCall)hooks[MAIN].trampoline)(w,s); end_zone(); }
 static void __attribute__((thiscall)) zone_temp(void *w,const char *s,const void *r) {
     TemporaryJournal journal;
     uint32_t source_epoch=begin_zone(TEMP,s);
@@ -370,14 +394,17 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     if(!readable(world,0x39bu)) miss=1;
     else if(!readable(descriptor,0x38u)) miss=2;
     else if(*(void **)(world+0x14u)) miss=3;
-    else if(!world[0x399u] || !world[0x39au]) miss=4;
+    else if(!world[0x39au] || (!world[0x399u] && *(uint32_t *)(descriptor+0x34u)!=3u)) miss=4;
     else if(*(uint32_t *)(descriptor+0x34u)!=(observed.temporary[0]?4u:3u)) miss=5;
     else if(!observed.world[0]) miss=6;
     else if(!readable(group,0xd0u)) miss=7;
     else if(!readable(controller,0x24cu) || controller!=*(void **)(base+0x408da4u)) miss=8;
     else if(!SudekiMpCleanroomEngineWorldReady()) miss=9;
     if(readable(world,0x39bu) && readable(descriptor,0x38u) &&
-        !*(void **)(world+0x14u) && world[0x399u] && world[0x39au] &&
+        /* world+0x399 is cleared for the whole background load that
+         * SwitchZoneNOW starts; the active current zone stays playable (#42). */
+        !*(void **)(world+0x14u) && world[0x39au] &&
+        (world[0x399u] || *(uint32_t *)(descriptor+0x34u)==3u) &&
         *(uint32_t *)(descriptor+0x34u)==(observed.temporary[0]?4u:3u) &&
         observed.world[0] && readable(group,0xd0u) && readable(controller,0x24cu) &&
         controller==*(void **)(base+0x408da4u) &&
@@ -530,9 +557,10 @@ static BOOL roster_identity_locked(void *controller,
     if(world!=last_world || group!=last_group || controller!=last_controller ||
         controller!=*(void **)(base+0x408da4u) || !readable(world,0x39bu) ||
         !readable(group,0xd0u) || !readable(controller,0x24cu) ||
-        *(void **)(world+0x14u) || !world[0x399u] || !world[0x39au] ||
+        *(void **)(world+0x14u) || !world[0x39au] ||
         !SudekiMpCleanroomEngineWorldReady()) return FALSE;
     uint8_t *descriptor=*(uint8_t **)(world+0x0cu);
+    if(!world[0x399u] && (!readable(descriptor,0x38u) || *(uint32_t *)(descriptor+0x34u)!=3u)) return FALSE;
     /* Walking into the next zone of the same world swaps the descriptor
      * during the native frame, before the next observer sample publishes it
      * as a revision (#42). Identity consumers (cast instances, lights, host
@@ -636,6 +664,17 @@ static BOOL split_hold_identity_locked(const SudekiMpLanStoryNativeRoster *r) {
     }
     return mask==r->available_mask;
 }
+/* TRUE only while a whole-world zone change is pending (scene LOADING with a
+ * named world, no split). Consumers use it to tell "unknown during a load"
+ * from a real identity mismatch (#42). */
+BOOL SudekiMpLanStoryObserverWorldLoading(void) {
+    if(!installed) return FALSE;
+    AcquireSRWLockShared(&state_lock);
+    BOOL loading=observed.phase==SUDEKIMP_LAN_STORY_LOADING && observed.world[0] &&
+        !observed.temporary[0] && !split_active && !split_transition;
+    ReleaseSRWLockShared(&state_lock);
+    return loading;
+}
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
     SudekiMpLanStoryNativeRoster fresh;
     if(!r || !r->dispatch_serial) return FALSE;
@@ -652,6 +691,7 @@ BOOL SudekiMpLanStoryObserverUninstall(void) {
     if(call_depth || foreign_thread || (native_thread && native_thread!=GetCurrentThreadId())) {
         ReleaseSRWLockExclusive(&state_lock); SetLastError(ERROR_BUSY); return FALSE;
     }
+    world_change_hook=NULL;
     BOOL ok=TRUE; DWORD error=ERROR_SUCCESS;
     for(unsigned n=HOOK_COUNT;n>0;--n) if(!SudekiMpRestoreInlineHook(&hooks[n-1])) {
         if(ok) error=GetLastError();

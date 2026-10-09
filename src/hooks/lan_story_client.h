@@ -59,6 +59,10 @@ BOOL SudekiMpLanStoryClientRecruitService(SudekiMpLanStoryRecruitReport *report)
 BOOL SudekiMpLanStoryClientRecruitCommit(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,const SudekiMpLanStoryScene *scene);
 BOOL SudekiMpLanStoryClientRecruiting(void);
+/* Host area following (#42): re-contain after a followed native zone change.
+ * TRUE when nothing changed or the new residency was adopted exactly. */
+BOOL SudekiMpLanStoryClientAdoptResidency(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *witness,const SudekiMpLanStoryScene *scene,BOOL follow_recent);
 /* Exact local physical selection after recruited-world presentation and old
  * spectator view retirement. Native pause/registry/task ownership is retained;
  * only the Tal/Ailish front permutation may change. A returned bound roster

@@ -36,6 +36,8 @@ BOOL SudekiMpLanStoryObserverRosterStillExact(
  * the established native thread, outside zone entry/exit. No controller
  * dispatch, input, movement, acquisition or new network authority is granted. */
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *roster);
+/* A whole-world zone change is pending (identity is unknown, not changed). */
+BOOL SudekiMpLanStoryObserverWorldLoading(void);
 /* After a native callback has occurred, remove on that same native thread,
  * outside the synchronous zone calls. Failed restoration retains all state. */
 BOOL SudekiMpLanStoryObserverUninstall(void);
@@ -53,5 +55,8 @@ typedef struct SudekiMpLanStoryObserverSplit {
     void (*ended)(BOOL vanilla_change);
 } SudekiMpLanStoryObserverSplit;
 BOOL SudekiMpLanStoryObserverSetSplit(const SudekiMpLanStoryObserverSplit *split);
+/* Native thread, before a whole-world zone call (SET/ENTER/SWITCH/MAIN) runs
+ * its original; NULL clears. */
+BOOL SudekiMpLanStoryObserverSetWorldChangeHook(void (*hook)(void));
 
 #endif

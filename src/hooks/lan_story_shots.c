@@ -28,7 +28,8 @@ static BOOL emission_owner_exact(void *actor,void *manager,unsigned c) {
     uint8_t *world=owner.world,*group=owner.group,*controller=owner.controller,*a=actor,*m=manager;
     if(!readable(world,0x39bu) || !readable(group,0xd0u) || !readable(controller,0x24cu) ||
         *(void **)(world+0xcu)!=owner.descriptor || *(void **)(world+0x14u) ||
-        !world[0x399u] || !world[0x39au] ||
+        !world[0x39au] || (!world[0x399u] &&
+            (!readable(owner.descriptor,0x38u) || *(uint32_t *)((uint8_t *)owner.descriptor+0x34u)!=3u)) ||
         *(void **)(controller+0x248u)!=owner.actors[owner.leader_character] ||
         !readable(a,0xc4u) || *(void **)a!=base+(c==1u?0x2d66fcu:0x2d555cu) ||
         *(void **)(a+0x94u)!=owner.ai[c] || !readable(owner.ai[c],0x14u) ||

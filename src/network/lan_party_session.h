@@ -1,6 +1,7 @@
 #ifndef SUDEKIMP_LAN_PARTY_SESSION_H
 #define SUDEKIMP_LAN_PARTY_SESSION_H
 
+#include "network/lan_story_area_state.h"
 #include "network/lan_arena_protocol.h"
 #include "network/lan_party_story.h"
 #include "network/lan_story_frame.h"
@@ -17,8 +18,8 @@
  * two-player session and LA42 packet format remain available unchanged. */
 #define SUDEKIMP_LAN_PARTY_PLAYERS 4u
 #define SUDEKIMP_LAN_PARTY_CHUNKS 2u
-#define SUDEKIMP_LAN_PARTY_VERSION 14u
-#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x3450000eu
+#define SUDEKIMP_LAN_PARTY_VERSION 15u
+#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x3450000fu
 #define SUDEKIMP_LAN_PARTY_MODE_MAX_AGE_MS 500u
 #define SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS 250u
 #define SUDEKIMP_LAN_PARTY_EXTENSION_VERSION 3u
@@ -320,6 +321,11 @@ BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *session,
  * native retirement; ReleaseDrained is still the coordinator's final step. */
 BOOL SudekiMpLanPartyRevokeStoryControl(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease);
+/* Host: native area residency report (#42), sent on change and every 250 ms. */
+BOOL SudekiMpLanPartyPublishStoryArea(SudekiMpLanPartySession *session,const SudekiMpStoryAreaState *area);
+/* Client: newest host area residency, if received within the control freshness window. */
+BOOL SudekiMpLanPartyGetStoryArea(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
+    uint32_t now,SudekiMpStoryAreaState *area);
 BOOL SudekiMpLanPartyPublishStoryRecruitment(SudekiMpLanPartySession *session,
     const SudekiMpLanStoryRecruitment *recruitment);
 BOOL SudekiMpLanPartyGetStoryRecruitment(SudekiMpLanPartySession *session,

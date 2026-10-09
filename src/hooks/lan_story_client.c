@@ -3,6 +3,7 @@
 #include "hooks/lan_story_load.h"
 #include "hooks/lobby_gameplay.h"
 #include "hooks/lan_story_world.h"
+#include "hooks/lan_story_area_follow.h"
 #include "hooks/lan_story_input.h"
 #include "hooks/lan_story_replica.h"
 #include "hooks/call_hook.h"
@@ -331,7 +332,7 @@ static BOOL roster_matches(const SudekiMpLanStoryNativeRoster *r,
         !readable(r->group,0xd0u) || !readable(r->controller,0x24cu)) return FALSE;
     uint8_t *world=r->world,*group=r->group,*controller=r->controller;
     if(*(void **)(world+0x0c)!=r->descriptor || *(void **)(world+0x14) ||
-        !world[0x399] || !world[0x39a] ||
+        !world[0x39a] || (!world[0x399] && *(uint32_t *)((uint8_t *)r->descriptor+0x34)!=3u) ||
         *(uint32_t *)((uint8_t *)r->descriptor+0x34)!=(scene->temporary[0]?4u:3u) ||
         !SudekiMpCleanroomEngineWorldReady() ||
         *(void **)(controller+0x248)!=r->actors[r->leader_character]) return FALSE;
@@ -674,6 +675,8 @@ BOOL SudekiMpLanStoryClientAcquire(SudekiMpLanStoryClientReport *out) {
         (unsigned long)retained_scene.revision,world_pause.count);
     return SudekiMpLanStoryClientService(out);
 }
+static BOOL adopt_native(void);
+static BOOL follow_recent_now(void);
 BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     BOOL paused=FALSE;
     if(!native_thread_exact() || presentation_active || InterlockedCompareExchange(&busy,0,0) ||
@@ -689,6 +692,13 @@ BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     if((phase!=SUDEKIMP_STORY_CLIENT_PAUSED && phase!=SUDEKIMP_STORY_CLIENT_UNKNOWN) || !attempted) {
         report_state(out,FALSE,FALSE,FALSE,FALSE,FALSE);
         SetLastError(ERROR_NOT_READY); return FALSE;
+    }
+    /* Host area following (#42): re-contain a followed zone change before
+     * judging the invariants; while the native swap settles, wait. */
+    if(phase==SUDEKIMP_STORY_CLIENT_PAUSED && follow_recent_now() && !adopt_native()) {
+        report_state(out,paused && SudekiMpLanPartyMenuNativeOwnsPause(),FALSE,
+            input_closed(retained_roster.controller),FALSE,FALSE);
+        SetLastError(ERROR_IO_PENDING); return FALSE;
     }
     BOOL exact=paused && SudekiMpLanPartyMenuNativeOwnsPause();
     BOOL roster=roster_exact(),input=input_closed(retained_roster.controller);
@@ -861,6 +871,105 @@ static BOOL recruit_commit(void *controller,
     return TRUE;
 }
 
+/* Host area following (#42): after a followed native zone call changed this
+ * paused client's residency, re-contain instead of failing forever. Same
+ * world, group, controller and party; only the current zone descriptor may
+ * change. Surviving entities keep their exact pause observation; a newly
+ * loaded entity must carry exactly the inherited world pause (refs 1, base 0);
+ * unloaded zones' entities may leave. Created tasks are accounted only while
+ * a follow call is recent. Anything else refuses and stays blocked. */
+static unsigned adopt_logs;
+static const char *adopt_refused(const char *why) {
+    static const char *last;
+    if(why!=last && adopt_logs<48u) { ++adopt_logs; last=why;
+        SudekiMpLogFormat("lan_story_client event=residency_refused reason=%s\r\n",why); }
+    return why;
+}
+static BOOL follow_recent_now(void) {
+    uint32_t last=SudekiMpLanStoryAreaFollowLastCall();
+    if(!last) return FALSE;
+    if(GetTickCount()-last<30000u) return TRUE;
+    /* A followed background load can stay pending (world+0x399 clear, current
+     * zone active) until the party walks into the target; residency keeps
+     * changing meanwhile, so keep re-containing for that whole stretch. */
+    uint8_t *w=retained_roster.world;
+    return readable(w,0x3a0u) && !w[0x399u] && *(void **)(w+0x394u);
+}
+/* Returns TRUE when nothing changed or the new residency was adopted. */
+static BOOL adopt_native(void) {
+    static EntityPauseObservation adopted[MAX_ENTITIES];
+    WorldPauseObservation *p=&world_pause;
+    SudekiMpLanStoryNativeRoster next=retained_roster;
+    if(!native_thread_exact() || phase!=SUDEKIMP_STORY_CLIENT_PAUSED || recruiting || presentation_active ||
+        !attempted || !readable(p->registry,0x40u) || !readable(retained_roster.world,0x10u)) return FALSE;
+    uint8_t **entries=*(uint8_t ***)(p->registry+0x3cu); unsigned count=*(unsigned *)(p->registry+0x34u);
+    next.descriptor=*(void **)((uint8_t *)retained_roster.world+0x0cu);
+    BOOL same=entries==p->entities && count==p->count && next.descriptor==retained_roster.descriptor &&
+        *(uint32_t *)(base+TASK_CREATED)==p->created_tasks;
+    for(unsigned i=0;same && i<count;++i)
+        if(entries[i]!=entity_pause[i].entity || !entity_pause_exact(&entity_pause[i],1u)) same=FALSE;
+    if(same) return TRUE;
+    /* Pause counters only: pause_counts_exact() also re-proves the old
+     * registry snapshot, which is exactly what changed here. */
+    if(*(void **)(base+SPEED_GLOBAL)!=p->speed || *(void **)(base+GEL_GLOBAL)!=p->gel ||
+        !readable(p->speed,0x30) || !readable(p->gel,0x4c) ||
+        *(uint16_t *)(p->speed+0x2a)!=(unsigned)p->speed_references+1u || p->speed[0x28]!=1u ||
+        p->gel[0x23]!=(unsigned)p->gel_references+1u) {
+        static uint32_t counts_logged;
+        if(GetTickCount()-counts_logged>=2000u && adopt_logs<200u) { counts_logged=GetTickCount(); ++adopt_logs;
+            SudekiMpLogFormat("lan_story_client event=residency_waiting reason=world_pause_counts speed_refs=%u expected=%u speed_flag=%u gel_refs=%u expected_gel=%u\r\n",
+                (unsigned)*(uint16_t *)(p->speed+0x2a),(unsigned)p->speed_references+1u,(unsigned)p->speed[0x28],
+                (unsigned)p->gel[0x23],(unsigned)p->gel_references+1u); }
+        return FALSE;
+    }
+    if(!trigger_hooks_exact() || !trigger_queue_empty() || InterlockedCompareExchange(&trigger_fault,0,0) ||
+        *(void **)(p->manager+0x10080)) { adopt_refused("trigger_or_script_busy"); return FALSE; }
+    /* Same world, group, controller, party actors/AI; only the zone moved. */
+    if(!roster_matches(&next,&retained_scene)) { adopt_refused("roster_or_swap_pending"); return FALSE; }
+    if(!count || count>MAX_ENTITIES || !readable(entries,count*sizeof(*entries))) { adopt_refused("registry_unreadable"); return FALSE; }
+    unsigned added=0,kept=0,suspended=0,rebased=0;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *e=entries[i];
+        for(unsigned j=0;j<i;++j) if(entries[j]==e) { adopt_refused("duplicate_entity"); return FALSE; }
+        unsigned j=0; for(;j<p->count && entity_pause[j].entity!=e;++j) {}
+        if(j<p->count) {
+            adopted[i]=entity_pause[j]; ++kept;
+            if(!entity_pause_exact(&entity_pause[j],1u)) {
+                /* The native area-cluster suspension changes as the party moves
+                 * through a streaming area; the entity must still hold this
+                 * client's world pause. Same object, vtables and schedule bit. */
+                const EntityPauseObservation *o=&entity_pause[j];
+                if(!readable(e,0x145u) || *(void **)e!=o->vtable || *(void **)(e+8u)!=o->update_vtable ||
+                    !e[0x2bu] || e[0x2bu]==UINT8_MAX) { adopt_refused("survivor_pause_changed"); return FALSE; }
+                adopted[i].references=(uint8_t)(e[0x2bu]-1u); adopted[i].activity_delta=0;
+                adopted[i].scheduled=(uint8_t)(e[0x144u]&4u); ++rebased;
+            }
+        } else {
+            /* A newly loaded entity must hold the inherited world pause; it may
+             * also carry the native suspension of an inactive area cluster.
+             * Baseline excludes only the world pause this client owns. */
+            if(!readable(e,0x145u) || !e[0x2bu] || e[0x2bu]==UINT8_MAX) {
+                adopt_refused("new_entity_not_paused"); return FALSE; }
+            adopted[i]=(EntityPauseObservation){e,*(void **)e,*(void **)(e+8u),(uint8_t)(e[0x2bu]-1u),(uint8_t)(e[0x144u]&4u),0};
+            if(e[0x2bu]>1u) ++suspended;
+            ++added;
+        }
+    }
+    unsigned removed=p->count-kept;
+    memcpy(entity_pause,adopted,count*sizeof(*adopted));
+    if(count<MAX_ENTITIES) memset(entity_pause+count,0,(MAX_ENTITIES-count)*sizeof(*entity_pause));
+    p->entities=entries; p->count=count; p->created_tasks=*(uint32_t *)(base+TASK_CREATED);
+    retained_roster=next;
+    if(adopt_logs<200u) { ++adopt_logs;
+        SudekiMpLogFormat("lan_story_client event=residency_adopted entities=%u kept=%u added=%u suspended=%u rebased=%u removed=%u descriptor=%p\r\n",
+            count,kept,added,suspended,rebased,removed,next.descriptor); }
+    return TRUE;
+}
+BOOL SudekiMpLanStoryClientAdoptResidency(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryScene *scene,BOOL follow_recent) {
+    (void)controller; (void)w; (void)scene;
+    return follow_recent && adopt_native();
+}
 BOOL SudekiMpLanStoryClientRecruitCommit(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene) {
     if(!w || recruit_commit_witness || effects_witness || presentation_active ||

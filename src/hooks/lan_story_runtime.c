@@ -1,6 +1,10 @@
 #include "hooks/lan_story_runtime.h"
 #include "hooks/lan_story_name_tags.h"
 #include "hooks/lan_story_observer.h"
+#include "hooks/lan_story_test_start.h"
+#include "hooks/lan_story_area_follow.h"
+#include "engine/spirit_instance_abi.h"
+#include "engine/cast_light_abi.h"
 #include "hooks/lan_story_objects.h"
 #include "hooks/lan_story_area_membership.h"
 #include "hooks/lan_story_loot_trace.h"
@@ -351,6 +355,15 @@ static BOOL service_catchup_seed(const SudekiMpLanPartyPeerStatus *peer,
     trace_catchup(3u,"native_seed_bound_waiting_recruitment");
     return TRUE;
 }
+/* #42 diagnostic: which presentation step refused (rate limited). */
+static void present_refusal(const char *step,DWORD error) {
+    static const char *last; static DWORD last_error; static uint32_t at; static unsigned logs;
+    uint32_t now=GetTickCount();
+    if(logs<200u && (step!=last || error!=last_error || now-at>=3000u)) {
+        ++logs; last=step; last_error=error; at=now;
+        SudekiMpLogFormat("lan_story event=present_refused step=%s error=%lu\r\n",step,(unsigned long)error);
+    }
+}
 static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
     const SudekiMpLanStoryScene *scene,void *context) {
     StoryPresentation *frame=context;
@@ -370,6 +383,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
     timing_end(&world_preflight_timing,started);
     if(!prepared) {
         frame->resources_waiting=prepare_error==ERROR_IO_PENDING;
+        present_refusal("prepare",prepare_error);
         return FALSE;
     }
     started=timing_begin();
@@ -377,6 +391,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
         !client_switch_prepared && !client_local_selected,replica_exact,NULL);
     timing_end(&party_apply_timing,started);
     if(!party_applied) {
+        present_refusal("party_apply",GetLastError());
         (void)SudekiMpLanStoryWorldCancelPrepared(); return FALSE;
     }
     started=timing_begin();
@@ -391,7 +406,8 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
             client_input_ready=FALSE; SudekiMpLanStoryInputClear();
             yaw=pitch=0;
         }
-        if(!SudekiMpLanStoryLocalControlPresent(roster,replica_exact,NULL,yaw,pitch)) return FALSE;
+        if(!SudekiMpLanStoryLocalControlPresent(roster,replica_exact,NULL,yaw,pitch)) {
+            present_refusal("local_control",GetLastError()); return FALSE; }
     }
     if(world_applied) {
         SudekiMpLanStoryAreaFadeApply(roster);
@@ -1136,6 +1152,27 @@ static void trace_control_block(unsigned p,const char *reason) {
     ++control_block_traces;
     SudekiMpLogFormat("lan_story_control event=host_control_blocked player=%u reason=%s\r\n",p,reason?reason:"none");
 }
+/* Observer callback, native thread, before a whole-world zone call runs
+ * (#42): return NPC activity and every held character to native control so
+ * the native load starts with the whole party under default control. The
+ * client is told on the next dispatch (draining -> revoke -> drained). */
+static BOOL area_follow_ready;
+static void before_world_change(void) {
+    if(local_seat || !control_attempted) return;
+    if(activity_attempted && SudekiMpLanStoryActivityRetains() &&
+        !SudekiMpLanStoryActivityReleaseBeforeWorldChange())
+        SudekiMpLogWrite("lan_story_control event=preload_activity_retained\r\n");
+    for(unsigned p=1;p<4u;++p) if(host_control[p].native_key.token) {
+        host_control[p].ready=FALSE;
+        if(!host_control[p].draining) {
+            host_control[p].draining=TRUE;
+            SudekiMpLogFormat("lan_story_control event=host_control_drain player=%u character=%u transaction=%lu reason=world_change\r\n",
+                p,host_control[p].native_key.seat,(unsigned long)host_control[p].fence.transaction);
+        }
+        if(!SudekiMpLanStoryControlReleaseBeforeWorldChange(&host_control[p].native_key))
+            SudekiMpLogFormat("lan_story_control event=preload_release_refused player=%u\r\n",p);
+    }
+}
 static void service_story_controls(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryScene *scene) {
     if(!control_attempted) return;
@@ -1171,15 +1208,23 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             if(host_control[p].draining) {
                 host_control[p].ready=FALSE;
                 (void)SudekiMpLanPartyRevokeStoryControl(session,&host_control[p].connection);
+                /* A native world load (scene LOADING) has no roster; release
+                 * NPC activity and the held AI from their exact leases so the
+                 * load can complete (#42). */
+                BOOL world_load=!known && scene && scene->phase==SUDEKIMP_LAN_STORY_LOADING;
                 if(activity_attempted && SudekiMpLanStoryActivityRetains() &&
-                    (!known || !SudekiMpLanStoryActivityService(w,&roster,0u))) {
-                    trace_control_block(p,!known?"drain_roster_unknown":"drain_activity_retained"); continue;
+                    (world_load ? !SudekiMpLanStoryActivityReleaseForLoad(w) :
+                     (!known || !SudekiMpLanStoryActivityService(w,&roster,0u)))) {
+                    trace_control_block(p,world_load?"drain_load_activity":
+                        !known?"drain_roster_unknown":"drain_activity_retained"); continue;
                 }
-                if(known && SudekiMpLanStoryControlDrain(w,&roster,&host_control[p].native_key)) {
+                if(world_load ? SudekiMpLanStoryControlLoadDrain(w,&host_control[p].native_key) :
+                    (known && SudekiMpLanStoryControlDrain(w,&roster,&host_control[p].native_key))) {
                     uint32_t transaction=host_control[p].transaction;
                     memset(&host_control[p],0,sizeof(host_control[p])); host_control[p].transaction=transaction;
                     trace_control_block(p,"drained");
-                } else trace_control_block(p,!known?"drain_roster_unknown":"drain_native_refused");
+                } else trace_control_block(p,world_load?"drain_load_native":
+                    !known?"drain_roster_unknown":"drain_native_refused");
                 continue;
             }
         } else {
@@ -1826,6 +1871,18 @@ static void service(void *controller,void *data,
             SudekiMpLanStoryObserverUninstall()) InterlockedExchange(&observer_removed,1);
         goto done;
     }
+    {
+        /* #42 diagnostic: report the first spirit-instance / cast-light fault
+         * from this service seam (never from inside a native callback). */
+        static unsigned reported_spirit,reported_light;
+        unsigned spirit_site=SudekiMpSpiritInstanceFaultSite(),light_line=SudekiMpCastLightFaultLine();
+        if((spirit_site && spirit_site!=reported_spirit) || (light_line && light_line!=reported_light)) {
+            reported_spirit=spirit_site; reported_light=light_line;
+            SudekiMpLogFormat("story_fault event=first spirit_site=%u enter_failure=%u named_fail=%u light_line=%u light_site=%u light_ready_failure=%u\r\n",
+                spirit_site,SudekiMpSpiritInstanceEnterFailure(),SudekiMpSpiritInstanceNamedFail(),
+                light_line,SudekiMpCastLightFaultSite(),SudekiMpCastLightReadyFailure());
+        }
+    }
     DWORD now=GetTickCount();
     SudekiMpLanStoryScene native;
     BOOL known=SudekiMpLanStoryObserverSample(controller,w,&native);
@@ -1870,6 +1927,12 @@ static void service(void *controller,void *data,
         LARGE_INTEGER cast_start=timing_begin();
         if(cast_attempted && SudekiMpLanStoryObserverRoster(controller,w,&native,&cast_roster))
             (void)SudekiMpLanStoryCastService(w,&cast_roster);
+        {
+            SudekiMpLanStoryNativeRoster start_roster;
+            if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished() &&
+                SudekiMpLanStoryObserverRoster(controller,w,&native,&start_roster))
+                SudekiMpLanStoryTestStartService(&start_roster);
+        }
         timing_end(&cast_service_timing,cast_start);
         LARGE_INTEGER control_start=timing_begin();
         service_story_ownership(controller,w,&native);
@@ -1882,6 +1945,34 @@ static void service(void *controller,void *data,
         SudekiMpLanStoryShotsCloseAdmission();
     if(!local_seat && known && (!last_publish || now-last_publish>=50u)) {
         if(SudekiMpLanPartyPublishStoryScene(session,&native)) last_publish=now;
+    }
+    /* Native area residency (#42): host publishes, client steers toward it. */
+    if(saved_profile && area_follow_ready) {
+        static uint32_t last_area_at;
+        if(!local_seat && known && (!last_area_at || now-last_area_at>=100u)) {
+            SudekiMpStoryAreaState area;
+            last_area_at=now?now:1u;
+            if(SudekiMpLanStoryAreaCapture(&area)) (void)SudekiMpLanPartyPublishStoryArea(session,&area);
+        } else if(local_seat) {
+            SudekiMpLanPartyPeerStatus area_peer; SudekiMpStoryAreaState area;
+            if(SudekiMpLanPartyPeerStatusGet(session,local_seat,&area_peer) &&
+                area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+                SudekiMpLanPartyGetStoryArea(session,&area_peer.lease,now,&area))
+                SudekiMpLanStoryAreaFollow(&area,now);
+            /* Re-contain after a followed zone change (entities/tasks/descriptor). */
+            uint32_t followed=SudekiMpLanStoryAreaFollowLastCall();
+            if(known && native.phase==SUDEKIMP_LAN_STORY_READY)
+                (void)SudekiMpLanStoryClientAdoptResidency(controller,w,&native,
+                    followed && now-followed<30000u);
+            else {
+                static uint32_t not_ready_logged;
+                if(followed && now-followed<30000u && now-not_ready_logged>=2000u) {
+                    not_ready_logged=now;
+                    SudekiMpLogFormat("lan_story_client event=residency_waiting known=%u phase=%u\r\n",
+                        (unsigned)known,known?(unsigned)native.phase:9u);
+                }
+            }
+        }
     }
     /* Capture on every controller tick (~21 ms). A 33 ms gate on a ~21 ms
      * tick captured every second tick (42-50 ms steps), which sat at the edge
@@ -2071,7 +2162,13 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
         if(!story_policy_initialized || !publish_story_ownership()) goto fail;
     }
     observer_attempted=TRUE;
+    /* Before the observer hooks the zone exports it verifies. */
+    area_follow_ready=saved_profile && SudekiMpLanStoryAreaFollowInitialize(module);
+    if(saved_profile && !area_follow_ready) SudekiMpLogWrite("story_area_follow event=unavailable\r\n");
     if(!SudekiMpLanStoryObserverInstall(module)) goto fail;
+    /* Identity is unknown (not mismatched) while a world load is pending. */
+    SudekiMpCastLightSetUnknownWitness(SudekiMpLanStoryObserverWorldLoading);
+    SudekiMpSpiritInstanceSetUnknownWitness(SudekiMpLanStoryObserverWorldLoading);
     if(saved_profile) {
         realtime_attempted=TRUE;
         if(!SudekiMpLanStoryRealtimeInstall(module)) goto fail;
@@ -2088,6 +2185,7 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
             if(!SudekiMpLanStoryActivityInitialize(module)) goto fail;
             split_attempted=TRUE;
             if(!SudekiMpLanStorySplitInstall(module)) goto fail;
+            (void)SudekiMpLanStoryObserverSetWorldChangeHook(before_world_change);
             shots_attempted=TRUE;
             if(!SudekiMpLanStoryShotsInstall(module)) goto fail;
         }

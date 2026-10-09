@@ -20,12 +20,13 @@ enum {
     MSG_COMMAND, MSG_PRESENCE, MSG_STORY_FRAME, MSG_STORY_WORLD,
     MSG_STORY_CONTROL, MSG_STORY_CONTROL_ACK, MSG_STORY_MOVEMENT, MSG_STORY_RECRUITMENT,
     MSG_STORY_PRESENTATION, MSG_STORY_CATCHUP, MSG_STORY_CATCHUP_ACK,
-    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT,
+    MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT, MSG_STORY_AREA,
     COMMAND_SIZE = 24, PRESENCE_SIZE = 95, INPUT_FENCE_SIZE = 12, PRESENCE_INTERVAL = 100,
     /* Saved profile 18 adds Tal melee requests and explicit submission/SP
      * outcomes. Native routing is gated separately. Test Room and observation
      * profiles, loot sidecars and native saves remain unchanged. */
     STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 18, STORY_SCENE_INTERVAL = 100,
+    STORY_AREA_INTERVAL = 250,
     JETPACK_STATE_SIZE = 42, COMBAT_MODE_SIZE = 13, COMBAT_MODE_INTERVAL = 100,
     INPUT_EXTENSION_SIZE = 5, AILISH_STATE_SIZE = 11 + 9 * SUDEKIMP_LAN_WEAPON_SHOT_HISTORY,
     PRESENTATION_STATE_SIZE = 37,
@@ -61,7 +62,7 @@ typedef struct Peer {
     uint8_t extension_flags;
     uint8_t presentation_offered, presentation_ready;
     uint32_t last_mode_sequence, last_mode_sent_at;
-    uint32_t last_story_revision, last_story_sent_at;
+    uint32_t last_story_revision, last_story_sent_at, last_area_sent_at;
     SudekiMpLanArenaInput input;
     SudekiMpLanPartyCombatInputExtension combat;
     uint32_t input_world, input_revision, input_actor_generation;
@@ -136,6 +137,8 @@ struct SudekiMpLanPartySession {
     uint32_t story_world_sequence,story_world_tick;
     SudekiMpLanStoryRecruitment story_recruitment;
     uint32_t story_recruitment_received_at;
+    SudekiMpStoryAreaState story_area;
+    uint32_t story_area_received_at;
     StoryCatchupSlot catchup[4];
     StoryPresentationAssembly story_presentation_assembly[ASSEMBLIES];
     SudekiMpLanStoryPresentation story_presentations[FRAME_QUEUE];
@@ -579,6 +582,8 @@ static void drain(SudekiMpLanPartySession *s, Peer *p, SudekiMpLanArenaRejectRea
         s->story_scene_received_at=s->story_scene_sequence=0;
         memset(&s->story_recruitment,0,sizeof(s->story_recruitment));
         s->story_recruitment_received_at=0;
+        memset(&s->story_area,0,sizeof(s->story_area));
+        s->story_area_received_at=0;
         clear_story_frames(s);
         s->presence_valid=0; s->presence_received_at=0;
         memset(&s->presence,0,sizeof(s->presence));
@@ -1026,7 +1031,7 @@ static void receive_message(SudekiMpLanPartySession *s,
     size_t body_size = size - HEADER;
     if (seat == 0 || seat >= SUDEKIMP_LAN_PARTY_PLAYERS || bytes[27] ||
         get16(bytes + 24) != body_size || kind < MSG_HELLO ||
-        kind > MSG_STORY_LOOT ||
+        kind > MSG_STORY_AREA ||
         part >= SUDEKIMP_LAN_PARTY_CHUNKS || (kind != MSG_FRAME && part)) return;
     if (get16(bytes + 4) != SUDEKIMP_LAN_PARTY_VERSION) {
         if (!s->config.local_seat && kind == MSG_HELLO && body_size == HELLO_SIZE)
@@ -1143,6 +1148,16 @@ static void receive_message(SudekiMpLanPartySession *s,
         if(!p->received_sequence || SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence))
             p->received_sequence=sequence;
         return;
+    }
+    if(kind==MSG_STORY_AREA) {
+        /* Host area residency (#42): newest valid report replaces the last. */
+        SudekiMpStoryAreaState area;
+        if(s->config.story_observation!=2u || !s->config.local_seat ||
+            p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
+            (p->received_sequence && !SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence)) ||
+            !SudekiMpStoryAreaStateDecode(body,body_size,&area)) return;
+        s->story_area=area; s->story_area_received_at=s->now;
+        p->received_sequence=sequence; p->last_received_at=s->now; return;
     }
     if(kind==MSG_STORY_RECRUITMENT) {
         SudekiMpLanStoryRecruitment r;
@@ -1728,6 +1743,8 @@ BOOL SudekiMpLanPartyClientRejoin(SudekiMpLanPartySession *s) {
         s->story_scene_received_at=s->story_scene_sequence=0;
         memset(&s->story_recruitment,0,sizeof(s->story_recruitment));
         s->story_recruitment_received_at=0;
+        memset(&s->story_area,0,sizeof(s->story_area));
+        s->story_area_received_at=0;
         clear_story_frames(s);
     }
     ReleaseSRWLockExclusive(&s->lock);
@@ -2059,6 +2076,33 @@ BOOL SudekiMpLanPartyPublishStoryRecruitment(SudekiMpLanPartySession *s,
         }
     }
     ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyPublishStoryArea(SudekiMpLanPartySession *s,const SudekiMpStoryAreaState *area) {
+    uint8_t bytes[SUDEKIMP_STORY_AREA_WIRE_SIZE];
+    if(!s || s->config.local_seat || s->config.story_observation!=2u ||
+        !SudekiMpStoryAreaStateEncode(area,bytes,sizeof(bytes))) return FALSE;
+    AcquireSRWLockExclusive(&s->lock); uint32_t now=GetTickCount();
+    BOOL changed=!SudekiMpStoryAreaStateSame(area,&s->story_area),ok=TRUE;
+    s->story_area=*area;
+    for(unsigned player=1;player<4u;++player) {
+        Peer *p=&s->peer[player];
+        if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !p->status.transport_confirmed) continue;
+        /* State report: on change, else a 250 ms refresh for late joiners and loss. */
+        if(!changed && p->last_area_sent_at && now-p->last_area_sent_at<STORY_AREA_INTERVAL) continue;
+        if(send_peer(s,p,MSG_STORY_AREA,next_sequence(p),0,bytes,sizeof(bytes))) p->last_area_sent_at=now?now:1u;
+        else ok=FALSE;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return ok;
+}
+BOOL SudekiMpLanPartyGetStoryArea(SudekiMpLanPartySession *s,const SudekiMpLanPartyLease *lease,
+    uint32_t now,SudekiMpStoryAreaState *area) {
+    if(!s || !area || !s->config.local_seat || s->config.story_observation!=2u ||
+        !lease || lease->seat!=s->config.local_seat) return FALSE;
+    AcquireSRWLockShared(&s->lock); Peer *p=leased(s,lease);
+    BOOL ok=p && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && s->story_area_received_at &&
+        story_control_fresh(now,s->story_area_received_at) && SudekiMpStoryAreaStateValid(&s->story_area);
+    if(ok) *area=s->story_area;
+    ReleaseSRWLockShared(&s->lock); return ok;
 }
 BOOL SudekiMpLanPartyGetStoryRecruitment(SudekiMpLanPartySession *s,
     const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryRecruitment *r) {

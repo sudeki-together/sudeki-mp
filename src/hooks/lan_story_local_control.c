@@ -91,7 +91,10 @@ static BOOL retain(DWORD error) {
 }
 static BOOL same_party(const SudekiMpLanStoryNativeRoster *a,
     const SudekiMpLanStoryNativeRoster *b) {
-    return a->world==b->world && a->descriptor==b->descriptor && a->group==b->group &&
+    /* The current zone descriptor is not party identity: walking into the
+     * next zone of the same world (including a followed host zone, #42)
+     * keeps world, group, controller, epoch, actors and AI. */
+    return a->world==b->world && a->group==b->group &&
         a->controller==b->controller && a->epoch==b->epoch &&
         a->available_mask && a->available_mask==b->available_mask &&
         !memcmp(a->actors,b->actors,sizeof(a->actors)) && !memcmp(a->ai,b->ai,sizeof(a->ai));

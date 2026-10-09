@@ -40,6 +40,7 @@
 #include "hooks/quick_skill_input.h"
 #include "hooks/save_book_intercept.h"
 #include "hooks/save_search_speed.h"
+#include "hooks/lan_story_test_start.h"
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
@@ -291,6 +292,19 @@ static const SudekiMpLanStoryTempExteriorConsumer temp_exterior_probe={
 
 static BOOL read_config_boolean(const wchar_t *path,const wchar_t *section,const wchar_t *key);
 static BOOL read_config_integer(const wchar_t *path,const wchar_t *section,const wchar_t *key,int default_value,int minimum,int maximum,int *result);
+static BOOL read_config_xyz(const wchar_t *path,const wchar_t *key,float out[3]) {
+    wchar_t text[96];
+    GetPrivateProfileStringW(L"StoryAreas",key,L"",text,96,path);
+    return text[0] && swscanf(text,L"%f , %f , %f",&out[0],&out[1],&out[2])==3 &&
+        isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]);
+}
+static void configure_test_start(HMODULE game_module,const wchar_t *path) {
+    float leader[3],follower[3];
+    if(!read_config_xyz(path,L"TestStartLeader",leader)) return;
+    if(!read_config_xyz(path,L"TestStartFollower",follower)) memcpy(follower,leader,sizeof(follower));
+    if(!SudekiMpLanStoryTestStartConfigure(game_module,leader,follower))
+        SudekiMpLogFormat("story_test_start event=refused error=%lu\r\n",(unsigned long)GetLastError());
+}
 static BOOL config_key_false(const wchar_t *path,const wchar_t *section,const wchar_t *key) {
     wchar_t value[16];
     GetPrivateProfileStringW(section,key,L"",value,16,path);
@@ -993,6 +1007,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Research diagnostics (bounded, log-only) default on; off when
              * [StoryAreas] ResearchDiagnostics=false. */
             (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
+            /* Developer test start: place the party at fixed coordinates once
+             * the saved game is loaded ([StoryAreas] TestStartLeader/Follower). */
+            ((saved_story ? configure_test_start(game_module,config_path) : (void)0),FALSE) ||
             /* Player names on the HUD card and above party heads (saved story). */
             (saved_story && !config_key_false(config_path,L"SudekiMP",L"PlayerNameTags") &&
                 !SudekiMpLanStoryNameTagsInstall(game_module)) ||

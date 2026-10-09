@@ -46,7 +46,7 @@ typedef struct Bound {
 } Bound;
 typedef struct Prepared {
     BOOL valid;
-    BOOL independent_view;
+    BOOL independent_view,rebind;
     uint8_t skip[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     Registry registry;
     Target targets[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
@@ -54,7 +54,7 @@ typedef struct Prepared {
     const SudekiMpLanStoryNativeRoster *roster_address;
     const SudekiMpLanStoryWorldFrame *frame_address;
     SudekiMpLanStoryNativeRoster roster;
-    SudekiMpLanStoryWorldFrame frame;
+    SudekiMpLanStoryWorldFrame frame,filtered;
     SudekiMpLanStoryReplicaExact exact;
     void *context;
 } Prepared;
@@ -607,9 +607,13 @@ static void log_registry(const Registry *registry,BOOL write) {
         ++lines;
     }
 }
+static unsigned ambiguous_logs,rebind_logs,subset_logs,last_subset_client,last_subset_host,unsupported_logs;
+static uint32_t last_unsupported;
 static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster *roster,
     Target *targets,unsigned *count,BOOL write) {
-    unsigned n=0;
+    unsigned n=0,ambiguous_count=0;
+    uint16_t ambiguous_kind[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
+    uint32_t ambiguous_identifier[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     log_registry(registry,write);
     for(unsigned i=0;i<registry->count;++i) {
         observe_stage("registry_entry",0,i);
@@ -638,11 +642,32 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
                 if(allow_kind[x]==targets[n].kind && allow_identifier[x]==targets[n].identifier) allowed=TRUE;
             if(!allowed) continue;
         }
+        BOOL ambiguous=FALSE;
+        for(unsigned x=0;x<ambiguous_count;++x)
+            if(ambiguous_kind[x]==targets[n].kind && ambiguous_identifier[x]==targets[n].identifier) ambiguous=TRUE;
+        if(ambiguous && targets[n].character>=4u) continue;
+        BOOL dropped=FALSE;
         for(unsigned j=0;j<n;++j)
             if(targets[j].entity==entity || (targets[j].kind==targets[n].kind &&
                 targets[j].identifier==targets[n].identifier)) {
+                /* Two loaded zones (e.g. a background-loaded neighbor, #42) can
+                 * carry the same authored scenery identity. It cannot be
+                 * matched across machines, so leave that scenery out of this
+                 * frame on both sides; party characters still refuse. */
+                if(targets[j].entity!=entity && targets[j].character>=4u && targets[n].character>=4u &&
+                    ambiguous_count<SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS) {
+                    ambiguous_kind[ambiguous_count]=targets[n].kind;
+                    ambiguous_identifier[ambiguous_count++]=targets[n].identifier;
+                    memmove(&targets[j],&targets[j+1u],(n-j-1u)*sizeof(*targets));
+                    --n; dropped=TRUE;
+                    if(ambiguous_logs<16u) { ++ambiguous_logs;
+                        SudekiMpLogFormat("lan_story_world event=ambiguous_scenery side=%s kind=%04x identifier=%08lx policy=omitted\r\n",
+                            write?"client":"host",(unsigned)targets[n+1u].kind,(unsigned long)targets[n+1u].identifier); }
+                    break;
+                }
                 observe_stage("duplicate_entity",targets[n].identifier,n); return FALSE;
             }
+        if(dropped) continue;
         ++n;
     }
     for(unsigned c=0;c<4u;++c) if(roster->available_mask&(1u<<c)) {
@@ -1695,12 +1720,88 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     if(host_seen || !exact(roster,context) || !registry_capture(&registry) ||
         !catalog(&registry,roster,targets,&count,TRUE)) goto fail;
     profile_add(0,profile_start);
-    if(count!=frame->count || (client_seen && (frame->epoch!=client_epoch || count!=client_count))) {
+    /* Identity matching (#42): with zones streaming independently on each
+     * machine the two catalogs need not be equal. Pose the (kind,identifier)
+     * intersection; client-only objects keep their local state, host-only
+     * objects are skipped. Every available party character must match. Both
+     * lists are sorted by target_order. */
+    const SudekiMpLanStoryWorldFrame *original_frame=frame;
+    {
+        static SudekiMpLanStoryWorldFrame filtered_frame;
+        static Target matched[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
+        unsigned m=0,j=0;
+        memset(&filtered_frame,0,sizeof(filtered_frame));
+        filtered_frame.epoch=frame->epoch; filtered_frame.revision=frame->revision;
+        filtered_frame.host_tick=frame->host_tick; filtered_frame.sequence=frame->sequence;
+        for(unsigned i=0;i<count;++i) {
+            while(j<frame->count && (frame->actors[j].kind<targets[i].kind ||
+                (frame->actors[j].kind==targets[i].kind && frame->actors[j].identifier<targets[i].identifier))) ++j;
+            if(j<frame->count && frame->actors[j].kind==targets[i].kind &&
+                frame->actors[j].identifier==targets[i].identifier) {
+                /* Scenery whose host clip is not in this client's loaded bank
+                 * (e.g. a streaming area's creature) keeps its local state
+                 * instead of refusing the whole frame. Characters keep the
+                 * resource preparation path below. */
+                if(targets[i].character>=4u) {
+                    unsigned probe[5]={0};
+                    empty_clip_hit=FALSE; empty_channels=0;
+                    if(!pose_supported(&targets[i],&frame->actors[j],probe)) {
+                        /* Still request a missing clip (native residency path, its
+                         * own fault policy); the object rejoins once loaded. */
+                        (void)prepare_missing_resource(&targets[i],&registry,roster,exact,context);
+                        if(unsupported_logs<32u && targets[i].identifier!=last_unsupported) {
+                            ++unsupported_logs; last_unsupported=targets[i].identifier;
+                            SudekiMpLogFormat("lan_story_world event=scenery_unsupported identifier=%08lx policy=local_state\r\n",
+                                (unsigned long)targets[i].identifier); }
+                        ++j; continue;
+                    }
+                }
+                matched[m]=targets[i]; filtered_frame.actors[m++]=frame->actors[j++];
+            } else if(targets[i].character<4u) {
+                observe_stage("character_unmatched",targets[i].identifier,i); goto fail;
+            }
+        }
+        for(unsigned c=0;c<4u;++c) if(roster->available_mask&(1u<<c)) {
+            unsigned found=0;
+            for(unsigned i=0;i<m;++i) if(matched[i].character==c) ++found;
+            if(found!=1u) { observe_stage("character_unmatched",c,m); goto fail; }
+        }
+        if((m!=count || m!=frame->count) && subset_logs<32u &&
+            (count!=last_subset_client || frame->count!=last_subset_host)) {
+            ++subset_logs; last_subset_client=count; last_subset_host=frame->count;
+            SudekiMpLogFormat("lan_story_world event=identity_subset client=%u host=%u matched=%u policy=pose_intersection\r\n",
+                count,(unsigned)frame->count,m);
+        }
+        memcpy(targets,matched,m*sizeof(*targets)); count=m;
+        filtered_frame.count=(uint8_t)m; frame=&filtered_frame;
+    }
+    BOOL rebind=FALSE;
+    if(count==frame->count && client_seen && frame->epoch==client_epoch) {
+        BOOL bound_same=count==client_count;
+        for(unsigned i=0;bound_same && i<count;++i)
+            if(!same_target(&client_bound[i].target,&targets[i]) ||
+                client_bound[i].previous.kind!=frame->actors[i].kind ||
+                client_bound[i].previous.identifier!=frame->actors[i].identifier ||
+                (client_bound[i].previous.generation!=frame->actors[i].generation &&
+                 targets[i].character>=4u)) bound_same=FALSE;
+        if(!bound_same) {
+            /* Native residency changed within the scene (an area loaded or
+             * unloaded on both machines, #42). Rebind only when this client's
+             * fresh catalog and the host frame agree element by element. */
+            rebind=TRUE;
+            for(unsigned i=0;rebind && i<count;++i)
+                if(targets[i].kind!=frame->actors[i].kind || targets[i].identifier!=frame->actors[i].identifier) rebind=FALSE;
+            if(rebind && rebind_logs<32u) { ++rebind_logs;
+                SudekiMpLogFormat("lan_story_world event=client_rebind epoch=%lu count=%u previous=%u policy=matching_residency\r\n",
+                    (unsigned long)frame->epoch,count,client_count); }
+        }
+    }
+    if(count!=frame->count || (client_seen && (frame->epoch!=client_epoch || (count!=client_count && !rebind)))) {
         observe_stage("catalog_identity",0,(count<<16)|frame->count); goto fail;
     }
     BOOL scenery_due=scenery_log_due();
     for(unsigned i=0;i<count;++i) {
-        if(client_seen && (!same_target(&client_bound[i].target,&targets[i]) ||
+        if(client_seen && !rebind && (!same_target(&client_bound[i].target,&targets[i]) ||
             client_bound[i].previous.kind!=frame->actors[i].kind ||
             client_bound[i].previous.identifier!=frame->actors[i].identifier ||
             client_bound[i].previous.generation!=frame->actors[i].generation)) {
@@ -1733,8 +1834,10 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
     if(!registry_still(&registry) || !exact(roster,context)) goto fail;
     prepared.registry=registry; memcpy(prepared.targets,targets,count*sizeof(targets[0]));
     memcpy(prepared.selectors,selectors,count*sizeof(selectors[0]));
-    prepared.count=count; prepared.roster_address=roster; prepared.frame_address=frame;
-    memcpy(&prepared.roster,roster,sizeof(*roster)); memcpy(&prepared.frame,frame,sizeof(*frame));
+    prepared.count=count; prepared.roster_address=roster; prepared.frame_address=original_frame;
+    prepared.rebind=rebind;
+    memcpy(&prepared.roster,roster,sizeof(*roster)); memcpy(&prepared.frame,original_frame,sizeof(*original_frame));
+    memcpy(&prepared.filtered,frame,sizeof(*frame));
     prepared.exact=exact; prepared.context=context;
     prepared.independent_view=independent_view;
     memcpy(prepared.skip,skip_pose,sizeof(prepared.skip));
@@ -1838,6 +1941,7 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         context!=prepared.context || memcmp(roster,&prepared.roster,sizeof(*roster)) ||
         memcmp(frame,&prepared.frame,sizeof(*frame)) || !exact(roster,context) ||
         !registry_still(&prepared.registry)) goto fail;
+    frame=&prepared.filtered; /* the identity-matched subset prepared above */
     Registry *registry=&prepared.registry; Target *targets=prepared.targets;
     unsigned count=prepared.count; unsigned (*selectors)[5]=prepared.selectors;
     /* Recheck all exact targets after the composed player publication and
@@ -1846,7 +1950,8 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
     for(unsigned i=0;i<count;++i)
         if(!target_still(&targets[i],registry,roster,exact,context)) goto fail;
     profile_add(3,profile_start);
-    if(!client_seen) {
+    if(!client_seen || prepared.rebind) {
+        if(prepared.rebind) memset(client_bound,0,sizeof(client_bound));
         for(unsigned i=0;i<count;++i) {
             client_bound[i].target=targets[i]; client_bound[i].previous=frame->actors[i];
         }
