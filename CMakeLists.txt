@@ -1746,7 +1746,7 @@ target_sources(SudekiMP PRIVATE src/engine/story_area.c src/hooks/lan_story_area
     src/hooks/lan_story_area_eviction.c src/hooks/lan_story_area_finalise.c
     src/hooks/lan_story_area_close.c src/hooks/lan_story_area_intent.c
     src/hooks/lan_story_temp_exterior.c src/hooks/lan_story_pause_trace.c src/hooks/lan_story_split.c
-    src/hooks/lan_story_anim_trace.c src/hooks/lan_story_name_tags.c src/hooks/lan_story_context_prompt.c
+    src/hooks/lan_story_anim_trace.c src/hooks/lan_story_name_tags.c src/hooks/lan_story_context_prompt.c src/hooks/save_search_speed.c
     src/hooks/lan_story_ambient.c src/hooks/lan_story_area_fade.c src/hooks/resource_swap.c)
 add_executable(SudekiMP.StoryAreaFinaliseImageTest tests/story_area_finalise_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
@@ -1968,3 +1968,10 @@ foreach(target SudekiMP.StoryLootTest SudekiMP.StoryLootSidecarTest SudekiMP.Sto
 endforeach()
 
 configure_file(config/SudekiMP.ini "${CMAKE_BINARY_DIR}/bin/SudekiMP.ini" COPYONLY)
+add_executable(SudekiMP.SaveSearchSpeedImageTest tests/save_search_speed_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c src/engine/log.c)
+target_include_directories(SudekiMP.SaveSearchSpeedImageTest PRIVATE src)
+target_compile_options(SudekiMP.SaveSearchSpeedImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_options(SudekiMP.SaveSearchSpeedImageTest PRIVATE -municode)
+target_link_libraries(SudekiMP.SaveSearchSpeedImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.SaveSearchSpeedImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

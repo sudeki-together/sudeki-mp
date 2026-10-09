@@ -39,6 +39,7 @@
 #include "hooks/quick_menu.h"
 #include "hooks/quick_skill_input.h"
 #include "hooks/save_book_intercept.h"
+#include "hooks/save_search_speed.h"
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
@@ -333,6 +334,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
     if (!SudekiMpUninstallLanArenaWindowPolicy()) return FALSE;
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
+    if (!SudekiMpSaveSearchSpeedUninstall()) return FALSE;
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
     if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpResourceSwapUninstall()) return FALSE;
@@ -938,6 +940,7 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         return SUDEKIMP_INIT_OK;
     }
     if (!lobby_launch && read_config_boolean(config_path, L"TitleMenu", L"Enabled")) {
+        float save_search_wait=0.0f;
         wchar_t scope[32];
         SudekiMpSaveFingerprint saved_probe={0};
         SudekiMpLanPartyConfig observed_party={0};
@@ -981,6 +984,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             (read_config_boolean(config_path,L"SudekiMP",L"SkipStartupMovies") &&
                 (SudekiMpLanArenaStartupMovieSkipIntroPoem(TRUE),
                  !SudekiMpInstallLanArenaStartupMovieSkip(game_module))) ||
+            /* In-game save book: no fixed wait before the save scan and the
+             * whole native scan in one tick ([SudekiMP] FastSaveSearch,
+             * SaveSearchWait seconds). */
+            (!config_key_false(config_path,L"SudekiMP",L"FastSaveSearch") &&
+                (read_config_float(config_path,L"SudekiMP",L"SaveSearchWait",0.0f,0.0f,10.0f,&save_search_wait),
+                 !SudekiMpSaveSearchSpeedInstall(game_module,save_search_wait))) ||
             /* Research diagnostics (bounded, log-only) default on; off when
              * [StoryAreas] ResearchDiagnostics=false. */
             (SudekiMpLogSetResearch(!config_key_false(config_path,L"StoryAreas",L"ResearchDiagnostics")),FALSE) ||
