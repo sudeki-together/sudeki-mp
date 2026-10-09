@@ -25,4 +25,9 @@ unsigned SudekiMpCastLightReadyFailure(void);
 unsigned SudekiMpCastLightFaultSite(void);
 unsigned SudekiMpCastLightFaultLine(void);
 void SudekiMpCastLightTransitionCommit(uint32_t key);
+/* Optional predicate: TRUE while retained-actor identity is temporarily
+ * unknowable (native world load). Unknown is skipped, never faulted. */
+void SudekiMpCastLightSetUnknownWitness(BOOL (*unknown)(void));
+BOOL SudekiMpCastLightTransient(void);
+unsigned SudekiMpCastLightTransientSkips(void);
 #endif

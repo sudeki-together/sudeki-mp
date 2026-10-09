@@ -127,6 +127,31 @@ static BOOL lm_stack(uint8_t *p) {
     }
     return TRUE;
 }
+/* Everything lm_owner proves except the caller's retained-actor witness. */
+static BOOL lm_owner_struct(LightEntry *e) {
+    return e && e->initialized && !e->destroyed && !e->restore_pending &&
+        e->retained && lm_stack(e->object) &&
+        *(int16_t *)(e->object+0x20)>=0 && !e->object[0x22] &&
+        !memcmp(e->object+0x50,e->baseline,12) &&
+        ***(int ***)(e->object+0x68)==e->baseline_id &&
+        !memcmp(**(uint8_t ***)(e->object+0x68)+4,e->baseline,12);
+}
+static BOOL (*light_unknown)(void);
+static unsigned transient_skips;
+void SudekiMpCastLightSetUnknownWitness(BOOL (*unknown)(void)) { light_unknown=unknown; }
+/* The retained witness cannot answer (e.g. native world load pending) while
+ * every structural proof still holds: identity is unknown, not mismatched. */
+static BOOL lm_owner_unknown(LightEntry *e) {
+    return light_unknown && !light_fault && lm_owner_struct(e) &&
+        !e->retained(e->actor,e->session) && light_unknown();
+}
+BOOL SudekiMpCastLightTransient(void) {
+    if(!light_image || light_fault || !light_unknown || !light_unknown()) return FALSE;
+    for(unsigned int i=0;i<CL_MAX;++i) if(light_entries[i].key && lm_owner_struct(&light_entries[i]))
+        return TRUE;
+    return FALSE;
+}
+unsigned SudekiMpCastLightTransientSkips(void) { return transient_skips; }
 static BOOL lm_owner(LightEntry *e) {
     return e && e->initialized && !e->destroyed && !e->restore_pending &&
         e->retained && e->retained(e->actor,e->session) && lm_stack(e->object) &&
@@ -213,6 +238,10 @@ static void __attribute__((thiscall)) light_update(void *object,void *args) {
             ++foreign_light_skips; SetLastError(error); return;
         }
     }
+    /* World load pending: leave an instance light un-updated (as vanilla
+     * suspension would) instead of a sticky fault; resumes once proved (#42). */
+    if(e && !light_update_depth && !light_operation && !selected_key && lm_world() &&
+        lm_owner_unknown(e)) { ++transient_skips; SetLastError(error); return; }
     if(light_update_depth || light_operation || light_fault || !lm_world() ||
         !SudekiMpCastLightTransitionReady(selected_key) ||
         (e ? !lm_owner(e):object!=world_light) || !lm_memory(args,16,FALSE) ||

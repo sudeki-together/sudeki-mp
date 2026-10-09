@@ -236,4 +236,7 @@ BOOL SudekiMpScheduleIdleSpiritInstanceProbe(const SudekiMpSpiritInstance *insta
 /* Refuses reset while any native instance remains; does not force cancel. */
 BOOL SudekiMpResetSpiritInstanceAbi(void);
 
+/* Optional predicate: TRUE while caster identity is temporarily unknowable
+ * (native world load). Caster-witness failures then skip, never fault. */
+void SudekiMpSpiritInstanceSetUnknownWitness(BOOL (*unknown)(void));
 #endif

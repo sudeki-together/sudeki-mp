@@ -114,6 +114,7 @@ static SudekiMpPointerHook update_hooks[3];
 static NativeUpdate original_updates[3];
 static unsigned int update_depth;
 static BOOL update_fault;
+static unsigned enter_failure,transient_update_skips;
 static unsigned int first_fault_site;
 /* Capture the first failed invariant without logging inside a native callback
  * or changing the retained-fault policy. The owner reports it on its service
@@ -1041,6 +1042,30 @@ static BOOL caster_exact(const Entry *e) {
         *(void **)(a+0x130)==s && memory(s,0x134,FALSE) &&
         *(void **)s==e->state_vtable && *(void **)(s+0x10)==a;
 }
+/* caster_exact without the retained-actor witness. */
+static BOOL caster_struct(const Entry *e) {
+    uint8_t *a=e->caster,*s=e->state_component;
+    return a && e->caster_witness &&
+        memory(a,0x134,FALSE) && *(void **)a==e->caster_vtable &&
+        *(void **)(a+0x130)==s && memory(s,0x134,FALSE) &&
+        *(void **)s==e->state_vtable && *(void **)(s+0x10)==a;
+}
+static BOOL (*identity_unknown)(void);
+void SudekiMpSpiritInstanceSetUnknownWitness(BOOL (*unknown)(void)) { identity_unknown=unknown; }
+/* #42: a native world load is pending, every live caster is structurally
+ * intact and at least one retained witness cannot answer. Identity is
+ * unknown, not changed: callers skip the tick instead of a sticky fault. */
+static BOOL identity_transient(void) {
+    BOOL unanswered=FALSE;
+    if(!identity_unknown || update_fault || !identity_unknown()) return FALSE;
+    for(unsigned int i=0;i<MAX_INSTANCES;++i) {
+        const Entry *e=&entries[i];
+        if(!e->identity.generation) continue;
+        if(!caster_struct(e)) return FALSE;
+        if(!e->caster_witness(e->caster,e->caster_session)) unanswered=TRUE;
+    }
+    return unanswered;
+}
 static BOOL remote_ui_exact(void) {
     return object_exact(ui_owner,0xe4,UI_VTABLE) &&
         address(instance_image+UI_GLOBAL,ui_owner) &&
@@ -1698,9 +1723,17 @@ BOOL SudekiMpResetSpiritInstanceAbi(void) {
     return TRUE;
 }
 
-static unsigned enter_failure,enter_failure_first;
+static unsigned enter_failure_first;
 unsigned SudekiMpSpiritInstanceEnterFailure(void) {return enter_failure_first*100u+enter_failure;}
 #define ENTER_FAIL(code) do { enter_failure=(code); if(!enter_failure_first) enter_failure_first=(code); } while(0)
+static BOOL identity_transient(void);
+static BOOL enter_transient(void) {
+    /* 5/6: cast light not ready; 7: named namespace (caster witness, fail 6). */
+    if(enter_failure==5u || enter_failure==6u)
+        return SudekiMpCastLightTransient() || identity_transient();
+    return enter_failure==7u && named_fail==6u && identity_transient();
+}
+unsigned SudekiMpSpiritInstanceTransientSkips(void) { return transient_update_skips; }
 uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
     Entry *e=instance ? find(instance):NULL;
     void *manager,*camera,*expected_manager,*expected_camera;
@@ -2064,7 +2097,12 @@ static void update_instance(void *object,float delta,unsigned int kind) {
         return;
     }
     cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) { INSTANCE_FAULT(); return; }
+    if(!cookie) {
+        /* Cast light not ready only because identity is unknown during a
+         * native world load: skip this tick, never a sticky fault (#42). */
+        if(enter_transient()) { ++transient_update_skips; SetLastError(error); return; }
+        INSTANCE_FAULT(); return;
+    }
     ++update_depth;
     SetLastError(error);
     if(kind==2 && owner && owner->caster) caster_manager_update(owner,delta);
@@ -2096,10 +2134,15 @@ static void __attribute__((thiscall)) named_camera_update(void *node,void *args)
     for(unsigned int i=0;i<MAX_INSTANCES;++i) for(unsigned int k=0;k<2;++k)
         if(entries[i].named_cameras[k] &&
             (uint8_t *)entries[i].named_cameras[k]+8==node) owner=&entries[i];
-    if(update_fault || owner_thread!=GetCurrentThreadId() ||
-        (!named_banking && !named_namespace_exact()) ||
-        !object_exact(node,4,0x2cce6c) ||
-        (owner && (!owner->named_ready || owner->destroying || !caster_exact(owner)))) {
+    if(update_fault || owner_thread!=GetCurrentThreadId() || !object_exact(node,4,0x2cce6c) ||
+        (owner && (!owner->named_ready || owner->destroying))) {
+        INSTANCE_FAULT(); return;
+    }
+    if((!named_banking && !named_namespace_exact()) || (owner && !caster_exact(owner))) {
+        /* Only a caster-witness failure during a world load is transient. */
+        if((owner || named_fail==6u) && (!owner || caster_struct(owner)) && identity_transient()) {
+            ++transient_update_skips; SetLastError(error); return;
+        }
         INSTANCE_FAULT(); return;
     }
     /* Other cameras tick in neutral context even when called from a caster's
@@ -2107,7 +2150,12 @@ static void __attribute__((thiscall)) named_camera_update(void *node,void *args)
     /* Enter revalidates the complete namespace before touching globals or
      * calling native code; Leave repeats that proof after native execution. */
     cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) { INSTANCE_FAULT(); return; }
+    if(!cookie) {
+        /* Cast light not ready only because identity is unknown during a
+         * native world load: skip this tick, never a sticky fault (#42). */
+        if(enter_transient()) { ++transient_update_skips; SetLastError(error); return; }
+        INSTANCE_FAULT(); return;
+    }
     ++update_depth;
     SetLastError(error);
     named_update_original(node,args);
@@ -2126,11 +2174,15 @@ static uint32_t spirit_camera_callback_enter(void *member,unsigned int offset,ui
         if(entries[i].identity.camera==camera) owner=&entries[i];
     if(!object_exact(camera,CAMERA_SIZE,CAMERA_VTABLE) ||
         (!owner && camera!=primary_camera) ||
-        (owner && (owner->destroying || !owner->named_ready || !caster_exact(owner)))) {
+        (owner && (owner->destroying || !owner->named_ready))) {
         INSTANCE_FAULT(); return 0;
     }
+    if(owner && !caster_exact(owner)) {
+        if(!caster_struct(owner) || !identity_transient()) INSTANCE_FAULT();
+        return 0;
+    }
     uint32_t cookie=SudekiMpEnterSpiritInstance(owner ? &owner->identity:NULL);
-    if(!cookie) INSTANCE_FAULT();
+    if(!cookie && !enter_transient()) INSTANCE_FAULT();
     return cookie;
 }
 static unsigned char __attribute__((thiscall)) spirit_camera_ready(void *member) {

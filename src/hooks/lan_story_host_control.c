@@ -3,6 +3,7 @@
 #include "hooks/lan_story_control.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
+#include "engine/cast_light_abi.h"
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/spirit_instance_abi.h"
@@ -102,11 +103,12 @@ static BOOL observe(void *controller,const SudekiMpControlUpdateDispatchWitness 
         *(void **)((uint8_t *)controller+0x2cu)!=base+INPUT_VT?"controller":NULL;
     if(why!=trace && traces<48u) {
         ++traces; trace=why;
-        SudekiMpLogFormat("lan_story_host_control event=observe result=%s phase=%u temporary=%s spirit_none=%u spirit_all=%u fault_site=%u enter_failure=%u named_fail=%u\r\n",
+        SudekiMpLogFormat("lan_story_host_control event=observe result=%s phase=%u temporary=%s spirit_none=%u spirit_all=%u fault_site=%u enter_failure=%u named_fail=%u light_ready_failure=%u light_fault_site=%u light_fault_line=%u\r\n",
             why?why:"ok",scene?scene->phase:9u,scene?scene->temporary:"-",
             base?SudekiMpSpiritInstanceFilterEntryDiag((HMODULE)base,0u):0u,
             base?SudekiMpSpiritInstanceFilterEntryDiag((HMODULE)base,1u):0u,
-            SudekiMpSpiritInstanceFaultSite(),SudekiMpSpiritInstanceEnterFailure(),SudekiMpSpiritInstanceNamedFail());
+            SudekiMpSpiritInstanceFaultSite(),SudekiMpSpiritInstanceEnterFailure(),SudekiMpSpiritInstanceNamedFail(),
+            SudekiMpCastLightReadyFailure(),SudekiMpCastLightFaultSite(),SudekiMpCastLightFaultLine());
     }
     if(why) return FALSE;
     native_thread=GetCurrentThreadId(); return TRUE;
