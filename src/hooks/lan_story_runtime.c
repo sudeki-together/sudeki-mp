@@ -3,6 +3,8 @@
 #include "hooks/lan_story_observer.h"
 #include "hooks/lan_story_test_start.h"
 #include "hooks/lan_story_area_follow.h"
+#include "hooks/lan_story_spawn_trace.h"
+#include "cleanroom/engine.h"
 #include "engine/spirit_instance_abi.h"
 #include "engine/cast_light_abi.h"
 #include "hooks/lan_story_objects.h"
@@ -410,6 +412,24 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
             present_refusal("local_control",GetLastError()); return FALSE; }
     }
     if(world_applied) {
+        /* Host-authoritative party HP/SP for the client's HUD (#54): the
+         * host's native stats travel in every frame; mirror them into the
+         * client's presentation replica only when they differ. */
+        static const SudekiMpCleanroomActor resource_types[4]={SUDEKIMP_CLEANROOM_BUKI,
+            SUDEKIMP_CLEANROOM_ELCO,SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
+        for(unsigned c=0;c<4u;++c) if(frame->party->available_mask&(1u<<c)) {
+            float hp=0.0f,sp=0.0f;
+            const SudekiMpLanStoryActor *a=&frame->party->actors[c];
+            if(SudekiMpCleanroomEngineActorResources(resource_types[c],&hp,&sp) &&
+                ((uint32_t)hp!=a->hp || (uint32_t)sp!=a->sp))
+            {
+                BOOL set=SudekiMpCleanroomEngineSetActorResources(resource_types[c],(float)a->hp,(float)a->sp);
+                static unsigned resource_logs;
+                if(resource_logs<200u) { ++resource_logs;
+                    SudekiMpLogFormat("lan_story_client event=party_resources character=%u hp=%lu->%lu sp=%lu->%lu ok=%u\r\n",
+                        c,(unsigned long)hp,(unsigned long)a->hp,(unsigned long)sp,(unsigned long)a->sp,(unsigned)set); }
+            }
+        }
         SudekiMpLanStoryAreaFadeApply(roster);
         if(aim_pose_attempted) SudekiMpLanAimActors(roster->actors[3],NULL);
         if(frame->dialogue) {
@@ -2164,6 +2184,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     observer_attempted=TRUE;
     /* Before the observer hooks the zone exports it verifies. */
     area_follow_ready=saved_profile && SudekiMpLanStoryAreaFollowInitialize(module);
+    if(saved_profile && SudekiMpLogResearchEnabled() && !SudekiMpLanStorySpawnTraceInstall(module))
+        SudekiMpLogFormat("story_spawn_trace event=install_failed error=%lu\r\n",(unsigned long)GetLastError());
     if(saved_profile && !area_follow_ready) SudekiMpLogWrite("story_area_follow event=unavailable\r\n");
     if(!SudekiMpLanStoryObserverInstall(module)) goto fail;
     /* Identity is unknown (not mismatched) while a world load is pending. */
@@ -2296,7 +2318,8 @@ static BOOL retire_runtime(BOOL exit_to_title) {
         split_attempted=FALSE;
     }
     if(observer_attempted && !InterlockedCompareExchange(&observer_removed,0,0)) {
-        if(SudekiMpLanStoryObserverUninstall()) InterlockedExchange(&observer_removed,1);
+(void)SudekiMpLanStorySpawnTraceUninstall();
+                if(SudekiMpLanStoryObserverUninstall()) InterlockedExchange(&observer_removed,1);
         else {
             /* Retry from the verified game-thread service, never free a
              * trampoline while a zone continuation could still return to it. */

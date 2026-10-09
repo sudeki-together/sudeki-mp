@@ -607,6 +607,45 @@ static void log_registry(const Registry *registry,BOOL write) {
         ++lines;
     }
 }
+/* #54 research: entities appearing/leaving the native registry (enemy spawns
+ * in a battle encounter). Host and client separately; on change only. */
+static void log_registry_diff(const Registry *registry,BOOL write) {
+    static void *previous[2][MAX_REGISTRY]; static unsigned previous_count[2],lines;
+    unsigned side=write?1u:0u;
+    if(!SudekiMpLogResearchEnabled() || lines>=1500u) return;
+    if(previous_count[side]) {
+        unsigned removed=0,added=0;
+        for(unsigned i=0;i<previous_count[side];++i) {
+            BOOL found=FALSE;
+            for(unsigned j=0;j<registry->count && !found;++j) if(registry->entities[j]==previous[side][i]) found=TRUE;
+            if(!found) ++removed;
+        }
+        for(unsigned j=0;j<registry->count && lines<1500u;++j) {
+            BOOL found=FALSE;
+            for(unsigned i=0;i<previous_count[side] && !found;++i) if(previous[side][i]==registry->entities[j]) found=TRUE;
+            if(found) continue;
+            ++added;
+            const uint8_t *e=registry->entities[j];
+            if(!readable(e,0x48u)) continue;
+            char name[48]="-"; { Target t={.entity=(uint8_t *)e}; entity_name(&t,name); }
+            unsigned rva=(unsigned)((uintptr_t)*(void *const *)e-(uintptr_t)base);
+            const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
+            float xyz[3]={0,0,0};
+            if(position && readable(position,0x24u) && *(const void *const *)position==base+0x2cdefcu)
+                memcpy(xyz,position+0x18u,sizeof(xyz));
+            ++lines;
+            SudekiMpLogFormat("lan_story_world event=registry_added side=%s entity=%p vtable=%06x kind=%04x identifier=%08lx name=%s pos=%.1f,%.1f,%.1f refs=%u\r\n",
+                write?"client":"host",(const void *)e,rva,(unsigned)(*(const uint32_t *)(e+0x30u)&0x1fffu),
+                (unsigned long)*(const uint32_t *)(e+0x34u),name,(double)xyz[0],(double)xyz[1],(double)xyz[2],
+                readable(e,0x2cu)?e[0x2bu]:0u);
+        }
+        if((added || removed) && lines<1500u) { ++lines;
+            SudekiMpLogFormat("lan_story_world event=registry_changed side=%s count=%u added=%u removed=%u\r\n",
+                write?"client":"host",registry->count,added,removed); }
+    }
+    memcpy(previous[side],registry->entities,registry->count*sizeof(void *));
+    previous_count[side]=registry->count;
+}
 static unsigned ambiguous_logs,rebind_logs,subset_logs,last_subset_client,last_subset_host,unsupported_logs;
 static uint32_t last_unsupported;
 static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster *roster,
@@ -615,6 +654,7 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
     uint16_t ambiguous_kind[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     uint32_t ambiguous_identifier[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     log_registry(registry,write);
+    log_registry_diff(registry,write);
     for(unsigned i=0;i<registry->count;++i) {
         observe_stage("registry_entry",0,i);
         uint8_t *entity=registry->entities[i];

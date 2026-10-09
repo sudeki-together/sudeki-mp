@@ -1746,7 +1746,7 @@ target_sources(SudekiMP PRIVATE src/engine/story_area.c src/hooks/lan_story_area
     src/hooks/lan_story_area_eviction.c src/hooks/lan_story_area_finalise.c
     src/hooks/lan_story_area_close.c src/hooks/lan_story_area_intent.c
     src/hooks/lan_story_temp_exterior.c src/hooks/lan_story_pause_trace.c src/hooks/lan_story_split.c
-    src/hooks/lan_story_anim_trace.c src/hooks/lan_story_name_tags.c src/hooks/lan_story_context_prompt.c src/hooks/save_search_speed.c src/hooks/lan_story_test_start.c src/hooks/lan_story_area_follow.c
+    src/hooks/lan_story_anim_trace.c src/hooks/lan_story_name_tags.c src/hooks/lan_story_context_prompt.c src/hooks/save_search_speed.c src/hooks/lan_story_test_start.c src/hooks/lan_story_area_follow.c src/hooks/lan_story_spawn_trace.c
     src/hooks/lan_story_ambient.c src/hooks/lan_story_area_fade.c src/hooks/resource_swap.c)
 add_executable(SudekiMP.StoryAreaFinaliseImageTest tests/story_area_finalise_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
