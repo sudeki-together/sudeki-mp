@@ -207,6 +207,34 @@ BOOL SudekiMpLanStoryControlDrain(const SudekiMpControlUpdateDispatchWitness *w,
     return base && installed &&
         SudekiMpLanPartyControlStoryDrain(w,roster,key,body_idle);
 }
+/* World-load variant (#42): the mod's spirit/cast/weapon observers cannot
+ * answer while the native world load is pending, so prove only the native
+ * body itself is idle (arbiter action flags, interaction mode, skill byte). */
+static BOOL body_idle_load(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    uint8_t *a=actor,*arbiter,*interaction,*mode,*skill;
+    static const uint32_t actor_vt[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
+    /* w==NULL: called inside a native zone call (no dispatch witness). */
+    if(!base || !key || key->seat>=4u ||
+        (w && (!w->service_post_original_exact || !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w))) ||
+        !readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
+        !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
+        *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor ||
+        (*(uint32_t *)(arbiter+0x50u)&STORY_BODY_BUSY_FLAGS) || (arbiter[0x60u]&5u)) return FALSE;
+    skill=*(uint8_t **)(a+0xd8u);
+    if(skill && (!readable(skill,0x78u) || *(void **)(skill+0x10u)!=actor || skill[0x6cu])) return FALSE;
+    interaction=*(uint8_t **)(a+0xa8u);
+    if(interaction && (!readable(interaction,0x64u) ||
+        !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) return FALSE;
+    return !w || SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+}
+BOOL SudekiMpLanStoryControlLoadDrain(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key) {
+    return base && installed && SudekiMpLanPartyControlStoryLoadDrain(w,key,body_idle_load);
+}
+BOOL SudekiMpLanStoryControlReleaseBeforeWorldChange(const SudekiMpLanPartyLease *key) {
+    return base && installed && SudekiMpLanPartyControlStoryReleaseBeforeWorldChange(key,body_idle_load);
+}
 BOOL SudekiMpLanStoryControlActorOwned(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,unsigned character) {
     return boundary(w,roster) &&

@@ -36,6 +36,11 @@ unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness
  * merely because the socket disconnected. */
 BOOL SudekiMpLanStoryControlDrain(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *native_key);
+/* Native world load pending (scene LOADING, no roster): release-only drain. */
+BOOL SudekiMpLanStoryControlLoadDrain(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *);
+/* Native thread, before a whole-world zone call runs: release only. */
+BOOL SudekiMpLanStoryControlReleaseBeforeWorldChange(const SudekiMpLanPartyLease *);
 /* Positive native binding observation for HostControlReady. A draining
  * ref1/mode0 actor is still owned, but is never eligible for new Move calls. */
 BOOL SudekiMpLanStoryControlActorOwned(const SudekiMpControlUpdateDispatchWitness *,

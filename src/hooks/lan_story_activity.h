@@ -9,6 +9,10 @@
 BOOL SudekiMpLanStoryActivityInitialize(HMODULE image);
 BOOL SudekiMpLanStoryActivityService(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,unsigned remote_character_mask);
+/* Native world load pending: release every lease without a roster (#42). */
+BOOL SudekiMpLanStoryActivityReleaseForLoad(const SudekiMpControlUpdateDispatchWitness *);
+/* Native thread inside a whole-world zone call, before its original runs. */
+BOOL SudekiMpLanStoryActivityReleaseBeforeWorldChange(void);
 BOOL SudekiMpLanStoryActivityRetains(void);
 BOOL SudekiMpLanStoryActivityNativeExitReturned(void);
 BOOL SudekiMpLanStoryActivityUninstall(void);

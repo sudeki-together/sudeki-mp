@@ -194,6 +194,15 @@ BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitnes
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
     SudekiMpLanPartyControlDrainProbe);
+/* Release-only during a native world load (#42): no roster; the lease's exact
+ * recorded objects must still be bound to the current world, group and
+ * player controller. Never acquires. */
+BOOL SudekiMpLanPartyControlStoryLoadDrain(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanPartyLease *,SudekiMpLanPartyControlDrainProbe);
+/* Native thread, before a whole-world zone call runs (no witness; the probe
+ * receives NULL). Release only. */
+BOOL SudekiMpLanPartyControlStoryReleaseBeforeWorldChange(const SudekiMpLanPartyLease *,
+    SudekiMpLanPartyControlDrainProbe);
 BOOL SudekiMpLanPartyControlStoryActorOwned(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,unsigned);
 BOOL SudekiMpLanPartyControlStoryRetainsKey(const SudekiMpLanPartyLease *key);

@@ -28,6 +28,7 @@ static uint32_t serviced_at;
 static unsigned serviced_mask;
 static BOOL serviced;
 static const char *reason="not_initialized";
+static BOOL before_world_change;
 static void *activity_pause_native __attribute__((used));
 static void *activity_resume_native __attribute__((used));
 static const struct {unsigned rva,size;uint32_t hash;unsigned reloc_count,reloc[8];} code[]={
@@ -203,22 +204,24 @@ static BOOL boundary(const SudekiMpControlUpdateDispatchWitness *w,
     for(unsigned i=0;i<sizeof(code)/sizeof(code[0]);++i)
         if(!memory(base+code[i].rva,code[i].size,FALSE) ||
             memcmp(base+code[i].rva,verified_code[i],code[i].size)) return FALSE;
-    return w && r && w->service_post_original_exact && w->dispatch_serial &&
+    /* r==NULL: release-only during a native world load (#42). Every lease is
+     * still proved against its own zone/spawn/cluster/entity data below. */
+    return (w ? w->service_post_original_exact && w->dispatch_serial &&
+            SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) : !r && before_world_change) &&
         (!native_thread || native_thread==GetCurrentThreadId()) &&
-        (!lease_count || r->world==world) &&
-        *(void **)(base+0x408d10u)==r->world &&
-        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) &&
-        SudekiMpLanStoryObserverRosterStillExact(w,r);
+        (r ? (!lease_count || r->world==world) && *(void **)(base+0x408d10u)==r->world &&
+              SudekiMpLanStoryObserverRosterStillExact(w,r) :
+            world && *(void **)(base+0x408d10u)==world);
 }
 BOOL SudekiMpLanStoryActivityService(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,unsigned mask) {
     reason="boundary";
-    if(busy || !boundary(w,r) || (mask&~r->available_mask)) return fail();
+    if(busy || !boundary(w,r) || (r ? (mask&~r->available_mask)!=0u : mask!=0u)) return fail();
     /* NPC activity changes at region boundaries, not the render rate. Drains
      * and ownership changes bypass this cap. Never catch up stale activity. */
     uint32_t now=GetTickCount();
     if(mask && serviced && serviced_mask==mask && world==r->world && now-serviced_at<100u) return TRUE;
-    native_thread=GetCurrentThreadId(); world=r->world;
+    native_thread=GetCurrentThreadId(); if(r) world=r->world;
     Activity wanted[MAX_LEASES]; unsigned count=0;
     /* Build a union of occupied native clusters without executing their story
      * entry/exit callbacks. Only the authoritative host owns these NPCs. */
@@ -339,6 +342,16 @@ BOOL SudekiMpLanStoryActivityInitialize(HMODULE image) {
     activity_pause_native=b+0x13d540u;activity_resume_native=b+0x13d5b0u;
     base=b;world=NULL;native_thread=0;busy=serviced=FALSE;trace_count=0;
     return TRUE;
+}
+BOOL SudekiMpLanStoryActivityReleaseForLoad(const SudekiMpControlUpdateDispatchWitness *w) {
+    return !lease_count || SudekiMpLanStoryActivityService(w,NULL,0u);
+}
+BOOL SudekiMpLanStoryActivityReleaseBeforeWorldChange(void) {
+    if(!lease_count) return TRUE;
+    before_world_change=TRUE;
+    BOOL ok=SudekiMpLanStoryActivityService(NULL,NULL,0u);
+    before_world_change=FALSE;
+    return ok;
 }
 BOOL SudekiMpLanStoryActivityRetains(void) {return busy || lease_count!=0u;}
 BOOL SudekiMpLanStoryActivityNativeExitReturned(void) {

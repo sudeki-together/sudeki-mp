@@ -8288,6 +8288,107 @@ static BOOL story_control_drain(const SudekiMpControlUpdateDispatchWitness *w,
     if(party_ai_owned(owned)) owned->phase=PARTY_NATIVE_DRAINING;
     return FALSE;
 }
+/* Release-only path for a native world load (#42). While the native world
+ * load is pending (world+0x399 clear) no observer roster can be proved, and
+ * the held AI override keeps the load from completing, so the old drain
+ * waited forever. The lease recorded the exact objects at acquire; require
+ * every one of them unchanged and still bound to the current world, party
+ * group and player controller, then return the native AI slot. Never
+ * acquires, moves or writes anything but the native default-control call. */
+static BOOL story_load_identity(const PartyNativeLease *owned,unsigned seat,void ***slot_out) {
+    static const uint32_t actor_vt[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
+    uint8_t *actor=owned->actor,*ai=owned->ai,*group=owned->group,*controller=owned->controller;
+    void **slot=NULL; unsigned matches=0,count;
+    if(seat>=4u || !actor || !party_native_entries_exact() || party_actor(seat)!=actor ||
+        *(void **)(game_base+0x408d10u)!=story_native_control.world ||
+        *(void **)(game_base+0x408d94u)!=(void *)group ||
+        *(void **)(game_base+0x408da4u)!=(void *)controller ||
+        !readable_memory(actor,0xdcu) || *(void **)actor!=game_base+actor_vt[seat] ||
+        *(void **)(actor+0x94u)!=(void *)ai || !readable_memory(ai,0x16cu) ||
+        *(void **)ai!=game_base+0x2d4924u || *(void **)(ai+0x10u)!=(void *)actor ||
+        *(void **)(ai+0x3cu)!=owned->mode || !readable_memory(owned->mode,0xcu) ||
+        !readable_memory(controller,0x24cu) || *(void **)controller!=game_base+0x2c9f5cu ||
+        *(void **)(controller+0x248u)!=owned->host ||
+        !readable_memory(group,0xd0u) || !(count=*(unsigned *)(group+0xccu)) || count>4u) return FALSE;
+    for(unsigned i=0;i<count;++i) {
+        void **candidate=(void **)(group+0x90u+i*0xcu);
+        if(*candidate==actor) { ++matches; slot=candidate; }
+    }
+    if(matches!=1u) return FALSE;
+    if(slot_out) *slot_out=slot;
+    return TRUE;
+}
+static BOOL story_load_released(const PartyNativeLease *owned) {
+    return *(int16_t *)((uint8_t *)owned->ai+0x16au)==0 && ((uint8_t *)owned->mode)[0xbu]==1u;
+}
+BOOL SudekiMpLanPartyControlStoryLoadDrain(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanPartyLease *key,SudekiMpLanPartyControlDrainProbe drained) {
+    if(!story_key_valid(key)) return FALSE;
+    PartyNativeLease *owned=&story_native_control.actor[key->seat]; void **slot=NULL; uint8_t *movement;
+    if(!party_boundary(w) || !InterlockedCompareExchange(&story_native_control.bound,0,0) ||
+        story_native_control.thread!=GetCurrentThreadId() || !drained)
+        return story_drain_refused("load_boundary",key,NULL,owned);
+    if(owned->phase==PARTY_NATIVE_EMPTY)
+        return party_key_equal(&story_native_control.released[key->seat],key);
+    if(!party_key_equal(&owned->key,key)) return story_drain_refused("load_key",key,NULL,owned);
+    if(owned->phase==PARTY_NATIVE_HELD) owned->phase=PARTY_NATIVE_DRAINING;
+    if(!story_load_identity(owned,key->seat,&slot)) return story_drain_refused("load_identity",key,NULL,owned);
+    if(owned->phase==PARTY_NATIVE_RELEASE_VERIFY) {
+        if(!story_load_released(owned)) return story_drain_refused("load_release_verify",key,NULL,owned);
+        story_control_forget(key->seat);
+        SudekiMpLogFormat("story_native_control event=load_drained seat=%u policy=release_only_exact_lease\r\n",key->seat);
+        return TRUE;
+    }
+    if(owned->phase!=PARTY_NATIVE_DRAINING) return story_drain_refused("load_phase",key,NULL,owned);
+    if(!party_ai_owned(owned)) return story_drain_refused("load_ai_owner",key,NULL,owned);
+    if((movement=party_component(owned->actor,0x80u,0x2c8644u,0xc0u)) && (movement[0xbeu]&8u))
+        ((MovementControllerSetSpeedImmediateFunction)(game_base+
+            RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE))(movement,0.0f,1.0f);
+    if(!drained(key,owned->actor,w)) return story_drain_refused("load_body_busy",key,NULL,owned);
+    if(!story_load_identity(owned,key->seat,&slot) || !party_ai_owned(owned))
+        return story_drain_refused("load_identity_after_stop",key,NULL,owned);
+    owned->phase=PARTY_NATIVE_RELEASE_VERIFY;
+    party_call_ai(FALSE,slot);
+    if(story_load_identity(owned,key->seat,NULL) && story_load_released(owned)) {
+        story_control_forget(key->seat);
+        SudekiMpLogFormat("story_native_control event=load_drained seat=%u policy=release_only_exact_lease\r\n",key->seat);
+        return TRUE;
+    }
+    if(party_ai_owned(owned)) owned->phase=PARTY_NATIVE_DRAINING;
+    return FALSE;
+}
+/* Native thread, inside a whole-world zone call before its original runs
+ * (#42). No dispatch witness exists here; the lease's exact recorded objects
+ * and the native body-idle probe (witness-free) are the proof. Release only. */
+BOOL SudekiMpLanPartyControlStoryReleaseBeforeWorldChange(const SudekiMpLanPartyLease *key,
+    SudekiMpLanPartyControlDrainProbe idle) {
+    if(!story_key_valid(key) || !idle) return FALSE;
+    PartyNativeLease *owned=&story_native_control.actor[key->seat]; void **slot=NULL; uint8_t *movement;
+    if(!InterlockedCompareExchange(&story_native_control.bound,0,0) ||
+        story_native_control.thread!=GetCurrentThreadId())
+        return story_drain_refused("preload_boundary",key,NULL,owned);
+    if(owned->phase==PARTY_NATIVE_EMPTY)
+        return party_key_equal(&story_native_control.released[key->seat],key);
+    if(!party_key_equal(&owned->key,key)) return story_drain_refused("preload_key",key,NULL,owned);
+    if(owned->phase==PARTY_NATIVE_HELD) owned->phase=PARTY_NATIVE_DRAINING;
+    if(owned->phase!=PARTY_NATIVE_DRAINING || !story_load_identity(owned,key->seat,&slot) ||
+        !party_ai_owned(owned)) return story_drain_refused("preload_identity",key,NULL,owned);
+    if((movement=party_component(owned->actor,0x80u,0x2c8644u,0xc0u)) && (movement[0xbeu]&8u))
+        ((MovementControllerSetSpeedImmediateFunction)(game_base+
+            RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE))(movement,0.0f,1.0f);
+    if(!idle(key,owned->actor,NULL)) return story_drain_refused("preload_body_busy",key,NULL,owned);
+    if(!story_load_identity(owned,key->seat,&slot) || !party_ai_owned(owned))
+        return story_drain_refused("preload_identity_after_stop",key,NULL,owned);
+    owned->phase=PARTY_NATIVE_RELEASE_VERIFY;
+    party_call_ai(FALSE,slot);
+    if(story_load_identity(owned,key->seat,NULL) && story_load_released(owned)) {
+        story_control_forget(key->seat);
+        SudekiMpLogFormat("story_native_control event=preload_drained seat=%u policy=release_before_world_change\r\n",key->seat);
+        return TRUE;
+    }
+    if(party_ai_owned(owned)) owned->phase=PARTY_NATIVE_DRAINING;
+    return FALSE;
+}
 BOOL SudekiMpLanPartyControlStoryRetainsKey(const SudekiMpLanPartyLease *key) {
     if(!story_key_valid(key) || story_native_control.thread!=GetCurrentThreadId()) return FALSE;
     const PartyNativeLease *owned=&story_native_control.actor[key->seat];
