@@ -7995,6 +7995,8 @@ static BOOL story_control_boundary(const SudekiMpControlUpdateDispatchWitness *w
         roster->leader_character<4u && (roster->available_mask&(1u<<roster->leader_character)) &&
         SudekiMpLanStoryObserverRosterStillExact(w,roster);
 }
+/* Set only while SudekiMpLanPartyControlStoryDrain runs (game thread). */
+static BOOL story_drain_scope_relaxed;
 static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
     return InterlockedCompareExchange(&story_native_control.bound,0,0) &&
@@ -8002,8 +8004,11 @@ static BOOL story_control_scope(const SudekiMpControlUpdateDispatchWitness *w,
         story_control_boundary(w,roster) &&
         roster->world==story_native_control.world &&
         /* Same observer epoch = same exterior lifetime; a split-area TEMP may
-         * change the current descriptor without replacing the party. */
-        roster->epoch==story_native_control.epoch;
+         * change the current descriptor without replacing the party. A drain
+         * (releasing control, never taking it) may also prove a later epoch
+         * of the same world: the identity check still requires the exact
+         * same actor, group, controller, AI and mode objects (#42). */
+        (roster->epoch==story_native_control.epoch || story_drain_scope_relaxed);
 }
 static BOOL story_key_valid(const SudekiMpLanPartyLease *key) {
     return key && key->seat<4u && key->generation && key->token;
@@ -8222,7 +8227,23 @@ static BOOL story_drain_refused(const char *step,const SudekiMpLanPartyLease *ke
     }
     return FALSE;
 }
+static BOOL story_control_drain(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    SudekiMpLanPartyControlDrainProbe drained);
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    SudekiMpLanPartyControlDrainProbe drained) {
+    BOOL later_epoch=roster && roster->epoch!=story_native_control.epoch;
+    story_drain_scope_relaxed=TRUE;
+    BOOL ok=story_control_drain(w,roster,key,drained);
+    story_drain_scope_relaxed=FALSE;
+    if(ok && later_epoch) {
+        SudekiMpLogFormat("story_native_control event=drain_later_epoch seat=%u bound_epoch=%lu roster_epoch=%lu policy=same_world_same_objects\r\n",
+            key?key->seat:4u,(unsigned long)story_native_control.epoch,(unsigned long)roster->epoch);
+    }
+    return ok;
+}
+static BOOL story_control_drain(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
     SudekiMpLanPartyControlDrainProbe drained) {
     if(!story_key_valid(key)) return FALSE;

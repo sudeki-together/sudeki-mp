@@ -364,8 +364,18 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
     void *found[4]={0};
     uint8_t mask=0,lead=SUDEKIMP_LAN_STORY_NO_SEAT;
     BOOL exact=FALSE;
-    unsigned count=0;
+    unsigned count=0,miss=0,miss_slot=0;
     if(readable(world,0x39bu)) descriptor=*(uint8_t **)(world+0x0cu);
+    /* Diagnostic only (#42): first party check that fails while a world is named. */
+    if(!readable(world,0x39bu)) miss=1;
+    else if(!readable(descriptor,0x38u)) miss=2;
+    else if(*(void **)(world+0x14u)) miss=3;
+    else if(!world[0x399u] || !world[0x39au]) miss=4;
+    else if(*(uint32_t *)(descriptor+0x34u)!=(observed.temporary[0]?4u:3u)) miss=5;
+    else if(!observed.world[0]) miss=6;
+    else if(!readable(group,0xd0u)) miss=7;
+    else if(!readable(controller,0x24cu) || controller!=*(void **)(base+0x408da4u)) miss=8;
+    else if(!SudekiMpCleanroomEngineWorldReady()) miss=9;
     if(readable(world,0x39bu) && readable(descriptor,0x38u) &&
         !*(void **)(world+0x14u) && world[0x399u] && world[0x39au] &&
         *(uint32_t *)(descriptor+0x34u)==(observed.temporary[0]?4u:3u) &&
@@ -373,6 +383,7 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
         controller==*(void **)(base+0x408da4u) &&
         SudekiMpCleanroomEngineWorldReady()) {
         count=*(unsigned *)(group+0xccu);
+        if(!count || count>4u) miss=10;
         if(count && count<=4u) {
             void *heroes[4];
             for(unsigned i=0;i<4u;++i) heroes[i]=SudekiMpCleanroomEngineActorEntity(actors[i]);
@@ -381,9 +392,11 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
                 uint8_t *actor=*(uint8_t **)(group+0x90u+slot*0x0cu);
                 unsigned seat=0;
                 for(;seat<4u && (!actor || actor!=heroes[seat]);++seat) {}
-                if(seat==4u || (mask&(1u<<seat)) || !readable(actor,0x98u)) { exact=FALSE; break; }
+                if(seat==4u || (mask&(1u<<seat)) || !readable(actor,0x98u)) {
+                    miss=seat==4u?11u:12u; miss_slot=slot; exact=FALSE; break; }
                 uint8_t *ai=*(uint8_t **)(actor+0x94u);
-                if(!readable(ai,0x16cu) || *(void **)(ai+0x10u)!=actor) { exact=FALSE; break; }
+                if(!readable(ai,0x16cu) || *(void **)(ai+0x10u)!=actor) {
+                    miss=13; miss_slot=slot; exact=FALSE; break; }
                 found[seat]=actor; mask|=(uint8_t)(1u<<seat);
                 if(!slot) lead=(uint8_t)seat;
             }
@@ -392,6 +405,22 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
                 descriptor==*(void **)(world+0x0cu) && group==*(void **)(base+0x408d94u) &&
                 controller==*(void **)(base+0x408da4u) &&
                 SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+            if(!exact && !miss) miss=lead<4u &&
+                *(void **)((uint8_t *)controller+0x248u)!=found[lead]?14u:15u;
+        }
+    }
+    {
+        static unsigned last_miss; static DWORD last_miss_tick;
+        DWORD now=GetTickCount();
+        if(exact) last_miss=0;
+        else if(observed.world[0] && (miss!=last_miss || now-last_miss_tick>=3000u)) {
+            last_miss=miss; last_miss_tick=now;
+            SudekiMpLogFormat("lan_story event=party_miss check=%u slot=%u count=%u world=%s descriptor=%p kind=%lu ready=%u,%u target=%p lead_actor=%p split=%u,%u\r\n",
+                miss,miss_slot,readable(group,0xd0u)?*(unsigned *)(group+0xccu):0u,observed.world,descriptor,
+                readable(descriptor,0x38u)?(unsigned long)*(uint32_t *)(descriptor+0x34u):0ul,
+                readable(world,0x39bu)?world[0x399u]:0u,readable(world,0x39bu)?world[0x39au]:0u,
+                readable(controller,0x24cu)?*(void **)((uint8_t *)controller+0x248u):NULL,
+                lead<4u?found[lead]:NULL,split_active,split_transition);
         }
     }
     if(split_transition && !exact) {
@@ -408,10 +437,23 @@ BOOL SudekiMpLanStoryObserverSample(void *controller,
         ReleaseSRWLockExclusive(&state_lock); return TRUE;
     }
     /* Inside a split the current descriptor legitimately alternates between
-     * exterior and TEMP; it is not a world replacement. */
-    BOOL replaced=last_exact && (!exact || world!=last_world ||
-        (!split_active && descriptor!=last_descriptor) ||
-        group!=last_group || controller!=last_controller || memcmp(found,last_actors,sizeof(found)));
+     * exterior and TEMP; it is not a world replacement. Outside a split, a
+     * descriptor change in the same world with the same party (walking from
+     * one zone into the next, e.g. New Brightwater -> ws_country_se_to_bright_ne)
+     * is not one either: the actors, group and controller are unchanged, so
+     * it is the same scene (#42). A new epoch here made every
+     * control fence and the client presentation stale with no way back. */
+    BOOL same_party=last_exact && exact && world==last_world && group==last_group &&
+        controller==last_controller && !memcmp(found,last_actors,sizeof(found));
+    BOOL zone_walk=same_party && !split_active && descriptor!=last_descriptor;
+    BOOL replaced=last_exact && !same_party;
+    if(zone_walk) {
+        /* No forced revision: nothing a peer sees changed (the session only
+         * accepts a new revision with a visible scene change), so the scene,
+         * its control fences and its frames simply continue. */
+        SudekiMpLogFormat("lan_story event=zone_walk epoch=%lu revision=%lu descriptor=%p->%p policy=same_scene\r\n",
+            (unsigned long)observed.epoch,(unsigned long)observed.revision,last_descriptor,descriptor);
+    }
     if(replaced) {
         increment(&observed.epoch);
         if(split_active) {
@@ -491,7 +533,14 @@ static BOOL roster_identity_locked(void *controller,
         *(void **)(world+0x14u) || !world[0x399u] || !world[0x39au] ||
         !SudekiMpCleanroomEngineWorldReady()) return FALSE;
     uint8_t *descriptor=*(uint8_t **)(world+0x0cu);
-    if(descriptor!=last_descriptor || !readable(descriptor,0x38u) ||
+    /* Walking into the next zone of the same world swaps the descriptor
+     * during the native frame, before the next observer sample publishes it
+     * as a revision (#42). Identity consumers (cast instances, lights, host
+     * control) must not fail in that gap: the world, group, controller and
+     * every party actor below are still proved exactly. Inside a split the
+     * descriptor must still match (split_hold_identity_locked owns that). */
+    if((descriptor!=last_descriptor && (split_active || split_transition)) ||
+        !readable(descriptor,0x38u) ||
         *(uint32_t *)(descriptor+0x34u)!=(scene->temporary[0]?4u:3u)) return FALSE;
     unsigned count=*(unsigned *)(group+0xccu);
     if(!count || count>4u) return FALSE;
