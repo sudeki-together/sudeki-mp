@@ -539,3 +539,22 @@ A separate host crash and one stalled client handoff occurred during reloads
 before the accepted run; their logs were preserved privately. This acceptance
 does not establish startup/crash reliability. No further gameplay code changed
 for this acceptance record. **Next: A6**, when the owner moves on.
+
+
+### #55 researched before A6 — 2026-10-10
+
+At the owner's request, the A5 visual follow-up was investigated before resuming
+Phase A. [Research record](story-combat-presentation-55.md) separates supported
+native/source findings from live observations and unconfirmed causes.
+
+The accepted-run particle log reaches 129–318 instances and refuses the entire
+cosmetic update at the 128-instance guard. This is a demonstrated interruption
+of particle advancement; which blood resource lingered and the reason for the
+accumulation remain unknown. Damage-number activation has additional native
+state/UI gates absent from the current logs. Death replay lacks host fatal-hit
+metadata and directly follows despawns, without a proved chunk presentation
+path. No visual issue is claimed fixed and #55 remains open. These findings
+inform A7 and Phase D without changing their acceptance requirements.
+
+No new live test, reload or gameplay change was performed for this research.
+**Next: A6**, authorized by the owner's request to resume the plan.
