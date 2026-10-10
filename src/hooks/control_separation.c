@@ -8182,6 +8182,30 @@ BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness
         party_component(actor,0x80u,0x2c8644u,0xc0u)!=movement) return FALSE;
     ((ArbiterMovementFunction)(game_base+RVA_ARBITER_MOVEMENT))(
         arbiter,heading,magnitude,1.0f,0u);
+    /* #54 research: Tal turns away from the steered heading. 4 Hz while the
+     * render facing and the requested heading differ by more than ~120 deg:
+     * arbiter +50 (0x400000 = lock-on), AI override count (ai+0x16A),
+     * targeter (+0xAC) current target node (+0x54). Read-only. */
+    if(SudekiMpLogResearchEnabled()) {
+        static DWORD last; static unsigned logs;
+        const uint8_t *a=actor,*pos=readable_memory(a+0x44u,4u)?*(const uint8_t *const *)(a+0x44u):NULL;
+        const uint8_t *wrap=readable_memory(pos,0xb8u)?*(const uint8_t *const *)(pos+0xb4u):NULL;
+        const uint8_t *obj=readable_memory(wrap,0xcu)?*(const uint8_t *const *)(wrap+8u):NULL;
+        if(logs<2000u && GetTickCount()-last>=250u && readable_memory(obj,0xd0u)) {
+            const float *m=(const float *)(obj+0x90u);
+            float fx=m[8],fz=m[10],fl=sqrtf(fx*fx+fz*fz),dot=fl>0.0001f?(fx*heading[0]+fz*heading[2])/fl:1.0f;
+            if(dot<-0.5f) {
+                const uint8_t *ai=*(const uint8_t *const *)(a+0x94u);
+                const uint8_t *tg=party_component(actor,0xacu,0x2d4b24u,0x58u);
+                last=GetTickCount(); ++logs;
+                SudekiMpLogFormat("story_native_control event=tal_facing_away heading=%.2f,%.2f facing=%.2f,%.2f dot=%.2f arb50=%08lx arb58=%08lx ai_override=%d target=%p target_valid=%u ms=%lu\r\n",
+                    (double)heading[0],(double)heading[2],(double)(fl>0?fx/fl:0),(double)(fl>0?fz/fl:0),(double)dot,
+                    (unsigned long)*(const uint32_t *)(arbiter+0x50u),(unsigned long)*(const uint32_t *)(arbiter+0x58u),
+                    readable_memory(ai,0x16cu)?(int)*(const int16_t *)(ai+0x16au):-1,
+                    tg?*(void *const *)(tg+0x54u):NULL,tg?1u:0u,(unsigned long)GetTickCount());
+            }
+        }
+    }
     return SudekiMpLanPartyControlStoryExact(w,roster,key);
 }
 BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *w,

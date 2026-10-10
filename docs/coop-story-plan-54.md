@@ -194,6 +194,7 @@ Append one row per completed step. A step is "done" only with its acceptance met
 |---|---|---|---|---|---|
 | 2026-10-10 | Plan adopted | (uncommitted) | — | — | Step 0 answered: no baseline commit; start Phase A |
 | 2026-10-09 (owner local) | A1 — effect timing and cutscene clock issue resolved | Commit containing this acceptance entry (clock ownership and regression); surrounding prototype remains uncommitted | SpawnTimingImage, EffectClockImage, RangedProjection, InteractionGuardImage: PASS; old-code ownership regression: expected FAIL | CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST + CONFIRMED_LIVE (owner) | Owner: “yep that works”; A2 next when work resumes; A4/A7 remaining requirements unchanged |
+| 2026-10-09 (owner local) | A2 — correct target diagnostic | Commit containing this A2 acceptance entry | DLL build: PASS; InteractionGuardImage: PASS; live diagnostic/target-trace correlation: PASS | CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_LIVE | Actual target node matches the independent trace; A3 next |
 
 ### A1 owner gate not passed — 2026-10-09 (owner local date)
 
@@ -356,3 +357,30 @@ A1 is resolved for the tested report. The owner's acceptance is not evidence of
 unimplemented protocol fields or every other cutscene. A4's precise effect
 classification, A7/B1's host-driven termination, and hit-contact replication
 retain their separate scope. No later phase was started in this save-only turn.
+
+
+### A2 completed — 2026-10-09 (owner local date)
+
+Corrected `tal_facing_away` to read the native targeter at `actor+0xAC`, not
+`actor+0x8C` (the turn component). Before reading the current target node at
+`targeter+0x54`, `party_component` re-proves the `CTargeter` vtable, owner backlink
+and readable extent through `+0x58`. `target_valid=1` distinguishes a valid null
+or non-null target from an unknown component (`target_valid=0`). The reported
+pointer is the native target node, not a resolved monster/entity identity.
+
+**Acceptance met:** DLL build and `StoryInteractionGuardImageTest` passed.
+In the existing two-instance saved-story ambush setup (host Ailish, client Tal,
+ResearchDiagnostics/Research54 enabled), bounded client direction reversals
+produced a corrected `tal_facing_away` message with a non-null target and
+`target_valid=1`. The independent Research54 Tal samples immediately before and
+after it reported the same node. A valid empty-target message was also observed
+before combat. **CONFIRMED_LIVE**, log correlation on `8497eac` plus the preserved
+dirty prototype and A2 correction; this is a diagnostic acceptance, not a new
+visual acceptance or a facing-behavior fix. See `docs/structures.md`, CTargeter,
+for the established component layout. No new native hook or byte patch; teardown
+behavior unchanged. Raw logs and the correlation record remain private.
+
+The focused commit includes the corrected diagnostic block and this progress
+entry. Research54 wiring and unrelated #54 prototype changes remain uncommitted;
+no baseline commit, reset, stash or push. The graph records the correction and
+live verification. **Next: A3 light-manager ownership cleanup and its owner gate.**
