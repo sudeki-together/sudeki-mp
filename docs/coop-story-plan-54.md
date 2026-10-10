@@ -467,3 +467,49 @@ remain at the A7 owner gate. The commit saves the independent predicate and pure
 regression target; call-site integration and the extended image fixture remain
 with the pre-existing dirty spawn prototype, without a baseline commit. The
 running A3 pair was read only and was not restarted with A4. **Next: A5**.
+
+
+### A5 completed — damage arbiter reproof (2026-10-09 owner local date)
+
+On `fd7ef88` plus the preserved dirty prototype/A5 edits, the temporary `0x400`
+lift now captures and re-proves the registered MonsterEntity, its native
+identifier, replica epoch/generation, CCharacterArbiter vtable and owner, and
+CCombat vtable and owner. The exact-image guard uses the native combat slot at
+entity `+0xA4`, which is also what DoDirectDamage uses to dispatch the hit.
+Registry storage is freshly read after the native call and before each queued
+hit. No traversal memory cache crosses damage, and re-entrant calls are refused.
+
+Only the lifted bit is restored, and only if the same arbiter action state
+remains. Other native flag changes survive. A retired/replaced target receives
+no restoration, feedback lease or diagnostic pointer walk. If observation or
+write access becomes unavailable, the restoration lease remains pending; further
+damage and world teardown wait for successful restoration or proved retirement.
+Stale generations cannot spend an old queued HP delta. HP diagnostics also
+revalidate the current stats component rather than retaining its old pointer.
+This hardens the existing replay mechanism; Phase D1 still replaces HP-delta
+replay with host combat events.
+
+Validation: DLL build **PASS**; `StoryMonsterDamageGuardImageTest` **PASS**;
+`StoryMonsterDamageFlushImageTest` **PASS**; existing `StoryRangedProjectionTest`
+**PASS**. The image fixtures hash-check the supported executable and execute its
+retail DoDirectDamage gate and DamageStructure setup. Hit effects, reference-list
+binding and allocating cleanup use inert test endpoints. Cases cover every byte
+in the named entry/hit-call/return validators; the native blocked and lifted
+paths; unchanged versus changed state; entity/component/vtable/owner/native-ID
+and generation changes; registry removal, replacement and storage relocation;
+read-only/inaccessible memory and restore retry; wrong thread; re-entry; and
+teardown refusal/retry. Production feedback from a retired target is discarded.
+Named-symbol and literal-address searches include the existing skill-trace
+export adapter; no production native patch or second hook was added.
+
+Evidence: **CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST**.
+The A5 image-test acceptance is met. These fixtures do not prove live hit
+feedback, lethal-hit behavior, full combat parity or arbitrary native allocator
+reuse with an indistinguishable identity. The running A3 pair was not restarted
+or modified for A5; there is no new live-play claim.
+
+The focused commit saves the independent guard, image fixture, standalone CMake
+target and this entry. Flush integration and its extra CMake test target remain
+with the pre-existing uncommitted world-damage prototype. No baseline commit,
+reset, stash or push. The reusable finding is saved in the local graph.
+**Next: A6**, restrict the residency re-baseline window to mod-caused spawn calls.

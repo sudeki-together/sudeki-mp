@@ -1984,3 +1984,10 @@ add_executable(SudekiMP.StoryAreaStateTest tests/story_area_state_test.c src/net
 target_include_directories(SudekiMP.StoryAreaStateTest PRIVATE src)
 target_compile_options(SudekiMP.StoryAreaStateTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 set_target_properties(SudekiMP.StoryAreaStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryMonsterDamageGuardImageTest tests/story_monster_damage_guard_image_test.c
+    src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryMonsterDamageGuardImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
