@@ -15,7 +15,9 @@ enum {
     MODEL_CLOCK_CALL=0x1f9faeu, MODEL_CLOCK_SET=0x231860u,
     SCENE_MANAGER=0x408d58u, WORLD_GLOBAL=0x408d10u,
     PARTICLE_ANIMATION_VT=0x2e22c8u, EMITTER_VT=0x2e26ccu,
-    MAX_INSTANCES=128u, MAX_EMITTERS=64u, MAX_EFFECTS=128u,
+    /* Bound the native manager by its validated capacity, not the size of
+     * the diagnostic sample cache. Full resource/node validation still applies. */
+    MAX_INSTANCES=4096u, MAX_CLOCK_OBSERVATIONS=128u, MAX_EMITTERS=64u, MAX_EFFECTS=128u,
     MAX_MODIFIERS=64u, MAX_NODES=2048u
 };
 typedef void (__stdcall *ParticleUpdate)(void *manager,float delta);
@@ -30,7 +32,7 @@ typedef struct ModelClockObservation {
     uint32_t source,last_tick;
     unsigned observations,logs;
 } ModelClockObservation;
-static ModelClockObservation model_observations[MAX_INSTANCES];
+static ModelClockObservation model_observations[MAX_CLOCK_OBSERVATIONS];
 static ParticleUpdate original_update;
 static SudekiMpLanStoryEffectsDispatch dispatcher;
 static void *dispatch_context;
@@ -129,7 +131,7 @@ static void observe_model_clock(uint8_t *sub,uint8_t *instance,uint32_t source) 
     if(!readable(manager,0x10u) || *(void **)(instance+0x1cu)!=manager) goto done;
     unsigned count=*(unsigned *)(manager+4u),capacity=*(unsigned *)(manager+8u),matches=0;
     void **items=*(void ***)(manager+0xcu);
-    if(!count || count>MAX_INSTANCES || count>capacity || capacity>4096u ||
+    if(!count || count>MAX_INSTANCES || count>capacity || capacity>MAX_INSTANCES ||
         !readable(items,count*4u)) goto done;
     for(unsigned i=0;i<count;++i) if(items[i]==instance) ++matches;
     if(matches!=1u) goto done;
@@ -153,7 +155,7 @@ static void observe_model_clock(uint8_t *sub,uint8_t *instance,uint32_t source) 
     if(!node) goto done;
     void *resource=*(void **)(renderer+0x10u);
     ModelClockObservation *observation=NULL,*empty=NULL;
-    for(unsigned i=0;i<MAX_INSTANCES;++i) {
+    for(unsigned i=0;i<MAX_CLOCK_OBSERVATIONS;++i) {
         ModelClockObservation *o=&model_observations[i];
         if(!o->renderer && !empty) empty=o;
         if(o->renderer==renderer && o->instance==instance && o->resource==resource) {

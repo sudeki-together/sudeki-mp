@@ -74,6 +74,18 @@ BOOL SudekiMpLanStoryClientAdoptResidency(void *controller,
 typedef BOOL (*SudekiMpLanStoryClientResidencyOperation)(void *context);
 BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitness *witness,
     SudekiMpLanStoryClientResidencyOperation operation,void *context);
+/* A journaled SoloSpawnSetup continuation: witness proves the exact currently
+ * executing job born inside our group call, including its live native owners.
+ * Only that actor's native schedule transition 0 -> 4 may change; unrelated
+ * survivors retain their complete pause/schedule proof. No permission survives
+ * the callback. Refusal does not cancel or fabricate completion of native work. */
+BOOL SudekiMpLanStoryClientSpawnResidencyCall(BOOL (*witness)(void *),void *context,
+    uint8_t *actor,SudekiMpLanStoryClientResidencyOperation operation);
+/* Exact animation-owner cleanup callback. Only this already-owned effect may
+ * disappear; no tasks/additions/other removals or survivor changes are allowed.
+ * The callback witness must remain valid without reading retired storage. */
+BOOL SudekiMpLanStoryClientEffectRetireCall(BOOL (*witness)(void *),void *context,
+    uint8_t *effect,SudekiMpLanStoryClientResidencyOperation operation);
 /* Exact local physical selection after recruited-world presentation and old
  * spectator view retirement. Native pause/registry/task ownership is retained;
  * only the Tal/Ailish front permutation may change. A returned bound roster

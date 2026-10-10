@@ -154,11 +154,31 @@ static void lifecycle_tests(void) {
     memcpy(mapped+MODEL_CLOCK_CALL,owned,5); assert(SudekiMpLanStoryEffectsUninstall());
     assert(!base && call_targets(mapped+MODEL_CLOCK_CALL,mapped+MODEL_CLOCK_SET));
 }
+static void combat_sized_manager(void) {
+    enum { COUNT=318 };
+    static uint8_t instances[COUNT][0x8c];
+    static void *list[COUNT];
+    uint8_t manager[0x24]={0};
+    *(unsigned *)(manager+4)=COUNT; *(unsigned *)(manager+8)=474;
+    *(void **)(manager+0xc)=list; *(float *)(manager+0x1c)=1.0f;
+    for(unsigned i=0;i<COUNT;++i) {
+        list[i]=instances[i]; *(void **)instances[i]=mapped+PARTICLE_ANIMATION_VT;
+        *(void **)(instances[i]+0x1c)=manager; *(float *)(instances[i]+0x84)=1.0f;
+    }
+    assert(topology(manager));
+    *(void **)(instances[COUNT-1]+0x1c)=fixture.manager;
+    assert(!topology(manager)); /* Every entry above the old 128 bound is proved. */
+    *(void **)(instances[COUNT-1]+0x1c)=manager;
+    *(void **)instances[COUNT-1]=mapped;
+    assert(!topology(manager));
+    *(void **)instances[COUNT-1]=mapped+PARTICLE_ANIMATION_VT;
+    assert(topology(manager));
+}
 int main(int argc,char **argv) {
     assert(argc==2); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024)); mapped=map_image(path);
     lifecycle_tests();
-    setup(); invoke(); assert(notices==1);
+    setup(); combat_sized_manager(); invoke(); assert(notices==1);
     fixture.data[9]=0; invoke(); assert(notices==1); fixture.data[9]=1;
     fixture.instances[1]=fixture.instance; *(unsigned *)(fixture.manager+4)=2;
     invoke(); assert(notices==1); *(unsigned *)(fixture.manager+4)=1;

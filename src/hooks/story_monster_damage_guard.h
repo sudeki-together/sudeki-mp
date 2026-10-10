@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 /* Temporary client damage replay, until host combat events replace HP deltas.
  * The caller owns the game-thread and replica-generation proofs. Memory checks
@@ -20,6 +21,24 @@ typedef struct SudekiMpStoryDamageGuard {
     BOOL lifted;
 } SudekiMpStoryDamageGuard;
 enum { SUDEKIMP_DAMAGE_UNKNOWN=-1, SUDEKIMP_DAMAGE_RETIRED=0, SUDEKIMP_DAMAGE_EXACT=1 };
+/* The native DamageStructure stores the amount as binary16. Leave more
+ * than its rounding error below current HP, including near a killing hit. */
+static inline float SudekiMpStoryNonlethalDamage(float hp,float amount) {
+    if(!isfinite(hp) || !isfinite(amount) || hp<=0.0f || amount<=0.0f) return 0.0f;
+    float reserve=fmaxf(1.0f,hp/512.0f);
+    float limit=hp>reserve?hp-reserve:hp*0.5f;
+    return fminf(fminf(amount,limit),65504.0f);
+}
+static inline BOOL SudekiMpStoryDamageArmDisplay(uint8_t *image,uint8_t *entity,
+    BOOL host_visible,SudekiMpStoryDamageMemory memory) {
+    if(!host_visible || !image || !memory(entity,0xb4u,FALSE) ||
+        *(void **)entity!=image+0x2d5fa0u) return FALSE;
+    uint8_t *stat=*(uint8_t **)(entity+0xb0u);
+    if(!memory(stat,0x1b4u,TRUE) || *(void **)stat!=image+0x2d21e4u ||
+        *(void **)(stat+0x10u)!=entity || !stat[0x24u] || !stat[0x30u]) return FALSE;
+    *(float *)(stat+0x18u)=1.0f;
+    return TRUE;
+}
 enum { SUDEKIMP_RVA_DIRECT_DAMAGE=0xd3ae0u };
 typedef void (__attribute__((thiscall)) *SudekiMpStoryDirectDamage)(void *,float);
 static const uint8_t story_direct_damage_head[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x68};

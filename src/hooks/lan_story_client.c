@@ -5,6 +5,7 @@
 #include "hooks/lan_story_world.h"
 #include "hooks/lan_story_area_follow.h"
 #include "hooks/story_residency_call.h"
+#include "hooks/story_spawn_schedule_guard.h"
 #include "hooks/lan_story_input.h"
 #include "hooks/lan_story_replica.h"
 #include "hooks/call_hook.h"
@@ -67,6 +68,13 @@ static uint32_t recruit_remote_before_epoch;
 static const SudekiMpControlUpdateDispatchWitness *recruit_commit_witness;
 static const SudekiMpControlUpdateDispatchWitness *residency_witness;
 static SudekiMpStoryResidencyCallState residency_call;
+static BOOL (*spawn_witness)(void *);
+static void *spawn_witness_context;
+static uint8_t *spawn_actor;
+static uint32_t spawn_actor_identifier;
+static BOOL (*retire_witness)(void *);
+static void *retire_context;
+static uint8_t *retire_entity;
 static SudekiMpRelativeCallHook trigger_hooks[2];
 static SudekiMpRelativeCallHook cluster_hooks[2];
 static SudekiMpRelativeCallHook activity_hooks[2];
@@ -121,6 +129,12 @@ static BOOL native_thread_exact(void) {
     return installed && native_thread && native_thread==GetCurrentThreadId();
 }
 static BOOL presentation_pause_exact(BOOL *paused) {
+    if(retire_witness)
+        return retire_witness(retire_context) &&
+            SudekiMpLanPartyMenuNativeObserveOwnedPause(paused);
+    if(spawn_witness)
+        return spawn_witness(spawn_witness_context) &&
+            SudekiMpLanPartyMenuNativeObserveOwnedPause(paused);
     if(residency_witness)
         return residency_witness->service_post_original_exact &&
             SudekiMpControlSeparationUpdateDispatchWitnessStillExact(residency_witness) &&
@@ -526,9 +540,39 @@ static void report_state(SudekiMpLanStoryClientReport *out,BOOL pause,BOOL roste
         retained_scene.epoch,retained_scene.revision,world_pause.count,observation,
         phase,attempted && SudekiMpLanPartyMenuNativeOwnsPause(),pause,roster,input,scheduler,entities};
 }
+static void diagnose_registry(void) {
+    if(!base || !native_thread_exact() || !SudekiMpLogResearchEnabled()) return;
+    uint8_t *r=*(uint8_t **)(base+REGISTRY_GLOBAL);
+    if(!readable(r,0x40u)) return;
+    unsigned count=*(unsigned *)(r+0x34u),changes=0;
+    uint8_t **entries=*(uint8_t ***)(r+0x3cu);
+    if(count>MAX_ENTITIES || !readable(entries,count*sizeof(*entries))) return;
+    SudekiMpLogFormat("lan_story_client event=registry_difference expected=%u actual=%u same_registry=%u same_array=%u tasks=%lu->%lu\r\n",
+        world_pause.count,count,r==world_pause.registry,entries==world_pause.entities,
+        (unsigned long)world_pause.created_tasks,(unsigned long)*(uint32_t *)(base+TASK_CREATED));
+    for(unsigned i=0;i<world_pause.count && changes<16u;++i) {
+        const EntityPauseObservation *o=&entity_pause[i]; BOOL found=FALSE;
+        for(unsigned j=0;j<count;++j) if(entries[j]==o->entity) {found=TRUE;break;}
+        if(!found || !entity_pause_exact(o,1u)) {
+            ++changes; BOOL rd=found && readable(o->entity,0x145u);
+            SudekiMpLogFormat("lan_story_client event=registry_member_difference entity=%p vtable=%p found=%u refs=%d->%u scheduled=%u->%u\r\n",
+                o->entity,o->vtable,found,entity_references(o,1u),rd?o->entity[0x2bu]:255u,
+                o->scheduled,rd?(o->entity[0x144u]&4u):255u);
+        }
+    }
+    for(unsigned j=0;j<count && changes<16u;++j) {
+        BOOL found=FALSE;
+        for(unsigned i=0;i<world_pause.count;++i) if(entity_pause[i].entity==entries[j]) {found=TRUE;break;}
+        if(!found && readable(entries[j],0x145u)) {
+            ++changes;SudekiMpLogFormat("lan_story_client event=registry_member_added entity=%p vtable=%p refs=%u scheduled=%u\r\n",
+                entries[j],*(void **)entries[j],entries[j][0x2bu],entries[j][0x144u]&4u);
+        }
+    }
+}
 static BOOL unknown(const char *reason) {
     phase=SUDEKIMP_STORY_CLIENT_UNKNOWN;
     if(!logged_unknown) {
+        diagnose_registry();
         SudekiMpLogFormat("lan_story_client event=unknown reason=%s pause_retained=%u gameplay_ready=0\r\n",
             reason,attempted && SudekiMpLanPartyMenuNativeOwnsPause());
         if(native_thread_exact() && world_identity()) {
@@ -949,6 +993,21 @@ static BOOL adopt_native(BOOL call_scoped) {
     /* Same world, group, controller, party actors/AI; only the zone moved. */
     if(!roster_matches(&next,&retained_scene)) { adopt_refused("roster_or_swap_pending"); return FALSE; }
     if(!count || count>MAX_ENTITIES || !readable(entries,count*sizeof(*entries))) { adopt_refused("registry_unreadable"); return FALSE; }
+    /* This delayed animation-owner cleanup may retire only its proved effect.
+     * No task creation, additions or unrelated removals are admitted. Never
+     * dereference the retiring entity after its native release. */
+    if(retire_entity) {
+        if(*(uint32_t *)(base+TASK_CREATED)!=p->created_tasks ||
+            (count!=p->count && count+1u!=p->count)) return FALSE;
+        for(unsigned j=0;j<p->count;++j) {
+            unsigned i=0; for(;i<count && entries[i]!=entity_pause[j].entity;++i) {}
+            if(i==count && entity_pause[j].entity!=retire_entity) return FALSE;
+        }
+        for(unsigned i=0;i<count;++i) {
+            unsigned j=0; for(;j<p->count && entity_pause[j].entity!=entries[i];++j) {}
+            if(j==p->count) return FALSE;
+        }
+    }
     unsigned added=0,kept=0,suspended=0,rebased=0;
     for(unsigned i=0;i<count;++i) {
         uint8_t *e=entries[i];
@@ -957,7 +1016,19 @@ static BOOL adopt_native(BOOL call_scoped) {
         if(j<p->count) {
             adopted[i]=entity_pause[j]; ++kept;
             if(!entity_pause_exact(&entity_pause[j],1u)) {
-                if(call_scoped) { adopt_refused("call_survivor_changed"); return FALSE; }
+                if(call_scoped) {
+                    /* 4B28B0 finishes precisely this journaled setup by setting
+                     * its schedule bit. It cannot rebase another actor, consume
+                     * our pause, or excuse a changed component identity. */
+                    const EntityPauseObservation *o=&entity_pause[j];
+                    if(!spawn_witness || !spawn_witness(spawn_witness_context) ||
+                        !SudekiMpStorySpawnScheduleFinished(e,spawn_actor,o->vtable,o->update_vtable,
+                            spawn_actor_identifier,entity_references(o,1u),o->scheduled,readable)) {
+                        adopt_refused("call_survivor_changed"); return FALSE;
+                    }
+                    adopted[i].scheduled=4u;
+                    continue;
+                }
                 /* The native area-cluster suspension changes as the party moves
                  * through a streaming area; the entity must still hold this
                  * client's world pause. Same object, vtables and schedule bit. */
@@ -1038,6 +1109,29 @@ BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitn
         residency_before,residency_operation,residency_adopt,residency_after);
     residency_witness=NULL;
     if(residency_call.failed) return unknown("residency_call_postcondition");
+    return result;
+}
+BOOL SudekiMpLanStoryClientSpawnResidencyCall(BOOL (*witness)(void *),void *context,
+    uint8_t *actor,SudekiMpLanStoryClientResidencyOperation operation) {
+    if(!witness || !operation || spawn_witness || residency_call.active ||
+        !native_thread_exact() || !readable(actor,0x145u) || !witness(context)) return FALSE;
+    spawn_witness=witness; spawn_witness_context=context;
+    spawn_actor=actor; spawn_actor_identifier=*(uint32_t *)(actor+0x34u);
+    BOOL result=SudekiMpLanStoryClientResidencyCall(NULL,operation,context);
+    spawn_witness=NULL; spawn_witness_context=NULL; spawn_actor=NULL; spawn_actor_identifier=0;
+    return result;
+}
+BOOL SudekiMpLanStoryClientEffectRetireCall(BOOL (*witness)(void *),void *context,
+    uint8_t *effect,SudekiMpLanStoryClientResidencyOperation operation) {
+    if(!witness || !operation || retire_witness || spawn_witness || residency_call.active ||
+        !native_thread_exact() || !witness(context)) return FALSE;
+    unsigned i=0; for(;i<world_pause.count && entity_pause[i].entity!=effect;++i) {}
+    if(i==world_pause.count || !entity_pause_exact(&entity_pause[i],1u) ||
+        entity_pause[i].vtable!=base+0x2d3c7cu ||
+        entity_pause[i].update_vtable!=base+0x2d3ca4u) return FALSE;
+    retire_witness=witness; retire_context=context; retire_entity=effect;
+    BOOL result=SudekiMpLanStoryClientResidencyCall(NULL,operation,context);
+    retire_witness=NULL; retire_context=NULL; retire_entity=NULL;
     return result;
 }
 BOOL SudekiMpLanStoryClientRecruitCommit(void *controller,

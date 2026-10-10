@@ -3,13 +3,136 @@
 Research recorded 2026-10-10 for [issue #55](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/55).
 The owner accepted A5's repeated-hit, lethal-hit and next-wave regression check,
 while reporting absent damage numbers, absent death chunks and possibly lingering
-blood-like trails. These presentation issues remain open.
+blood-like trails. The owner accepted the three fixes on 2026-10-10; the
+remaining combat/control observations are tracked separately in the plan.
+
+## Owner acceptance — issue #55 resolved (2026-10-10)
+
+**CONFIRMED_LIVE (owner visual acceptance):** on the paired saved-story
+Ailish-host/Tal-client candidate, the owner confirmed that client damage numbers
+appear, lingering hit effects finish and disappear, and death chunks appear.
+The owner explicitly reported that everything in #55 appears resolved.
+Both staged DLLs still match the candidate hash below. This closes the three
+reported #55 symptoms for the tested encounter; it is not general campaign,
+new-game, full teardown, or A7 ring/sigil acceptance.
+
+The same play-test reported four separate follow-ups: the client shows the enemy
+blocking pose but lacks the accompanying effect; Ailish's sweep lacks its blue
+wave (expected visibility outside first person remains unknown); Tal cannot
+activate skills/strikes; and Tal becomes very slow after the last enemy dies,
+with an item and pickup flare observed. The owner corrected the initial apparent
+freeze to slowdown. Causes, exact input/resource gates, and whether the slowdown
+is local or shared remain **UNKNOWN**. These observations do not reopen the
+accepted #55 symptoms; see the plan's acceptance/follow-up entry.
+
+The acceptance commit saves the independent guards, native helper headers,
+particle-capacity change and its focused test, plus the client residency adapter
+hunks and this evidence. The spawn/world/protocol integration and expanded image
+fixtures still depend on the owner's existing uncommitted #54 prototype and
+remain in that same worktree under the no-baseline-commit instruction. The
+committed subset alone is not the complete tested multiplayer build.
+The exact scoped commit was also built separately from the dirty prototype;
+its DLL build, `StoryEffectClockImageTest`, `StoryMonsterDamageGuardImageTest`
+and `StoryResidencyCallTest` pass. This checks the commit subset independently,
+without broadening the owner-accepted live scope.
+
+## Implementation and pre-acceptance smoke test
+
+The owner subsequently requested implementation. Candidate: `12e5767` plus the
+preserved dirty #54 prototype and the #55 changes, saved-story host Ailish/client
+Tal, supported executable below. Candidate DLL SHA-256:
+`9d05e92778091aa4fb4e194a4c0d9f27516075726d5cc936df4c36cc89a98b26`.
+This section records the pre-acceptance implementation and smoke test. The
+owner acceptance below supersedes its pending visual checks.
+
+- **Numbers:** host display eligibility is carried on monster snapshots. Before
+  replay, the exact owned CStatDisplay is armed only when the host is eligible;
+  local display settings still apply natively. The displayed value uses the
+  host HP delta, while replay damage reserves positive client HP even after
+  binary16 storage. **CONFIRMED_LIVE:** the host timer was positive while the
+  client's was negative before this change; the candidate visibly shows damage
+  numbers, including repeated `-19` values, on the client.
+- **Hit lifetime:** particle topology now accepts up to the verified 4,096-entry
+  capacity, retaining resource/node/owner checks. Ordinary SpecialEffects are
+  discovered from the current registry each tick and receive native animation
+  and completion updates without the old 24-slot, 15-second or active-group
+  cutoff. Native completion owns retirement. **CONFIRMED_LIVE:** all six sampled
+  `b51df833` hit-effect identities were later removed from the registry; the
+  sampled run reached 4,200 admitted cosmetic updates with zero refusals.
+  This does not identify every blood-like resource or prove visual parity.
+- **Death presentation:** the host retains its selected death style until
+  despawn. The client resolves the corresponding action's authored independent
+  SFX from its matched resident monster and calls visual creation `0x417DA0`.
+  It does not call gameplay death `0x4D31C0`, award loot or XP, or let replayed
+  damage kill the copy. **CONFIRMED_EXACT_IMAGE:** AL=1, CL=0, six stack words,
+  RET 24 and copied ResourceName lease consumption. Attached/weapon resources
+  remain refused. **UNKNOWN:** chunk-finisher visual parity. The smoke test's
+  four deaths selected style 3, whose resident action has no independent effect;
+  it did not exercise the new chunk creation branch.
+
+The paired candidate uses session protocol 18 and world frame version 8. Six
+remaining area-message bytes pack sixteen bounded death styles; the area body
+is exactly 1,440 bytes and the datagram 1,468 bytes. Old protocol peers are
+rejected. This temporary encoding does not complete the planned B1 split.
+
+### A6 integration corrections discovered by the live test
+
+The stricter pause proof exposed two actual asynchronous native continuations.
+The native group-start replay also now acknowledges the observed group so the
+same request does not restart it every frame.
+
+`SoloSpawnSetup` jobs constructed at `0x4762EA` during our native group update
+are journaled through their real destructor return. Their exact callback at
+`0x472D50` registers the actor and later enables scheduling/initialization.
+Each callback gets its own synchronous witness and immediate accounting; only
+its proved actor may make the native schedule transition. Pending jobs retain
+the hooks. There is no combat-time permission window or fabricated cancellation.
+
+After host-driven despawn, the animation owner's deferred destructor stops its
+sigil through the call at `0x4E1870` to `0x531DF0`. The adapter brackets that exact
+call and allows only that owned effect to leave the registry, with no task
+creation, additions, other removals or changed surviving pause identities.
+Its post-witness does not read released storage. Native work runs exactly once
+on refusal or nested entry. `0x531DF0` stays byte-for-byte unchanged for
+`SudekiMpLanArenaSpiritVfxVisualImageMatches`, `lifetime_image_exact` and the
+jetpack validator; symbolic names and literal addresses were checked.
+
+**CONFIRMED_LIVE:** the final candidate replayed 43 hits and followed four
+host despawns, including four deferred sigil releases, without an unknown
+containment state. Later-wave monsters spawned, but later-wave combat and
+complete end-to-end teardown were not accepted. This supersedes any inference
+that A6's earlier pure tests alone covered asynchronous native residency.
+
+### Validation and remaining gate
+
+DLL build and focused tests passed: `StorySpawnTimingImageTest`,
+`StoryEffectClockImageTest`, `StoryMonsterDamageGuardImageTest`,
+`StoryMonsterDamageFlushImageTest`, `StoryAreaStateTest`, `LanPartySessionTest`
+and `StoryResidencyCallTest`. Tests cover native effect completion, the visual
+creation ABI, 48-effect bursts, 318 particle instances, repeated nonlethal HP
+packing, display ownership/gates, death-style wire bounds, journaled constructor
+arguments and retirement, pending-job teardown refusal, and unchanged retirement
+function bytes. Native-image fixtures use inert renderer/allocation endpoints;
+they do not prove chunk rendering or an actual game DLL unload.
+
+Owner procedure: compare both peers during repeated hits, a chunk-producing
+finisher, ordinary kills and at least two later waves. Numbers should appear
+when enabled; chunk-producing host deaths should produce the corresponding
+client effect; hit/blood effects should finish without accumulating at feet.
+Check that movement, repeated hits and subsequent spawns continue after kills.
+This was the requested procedure; the owner subsequently accepted the three
+#55 symptoms as recorded above. Do not infer unreported route or wave coverage.
+
+A7 remains separate: its provisional six-second sigil hide and host-driven
+termination dependency are not completed by these fixes. The initial research
+below is retained as historical evidence; its unresolved mechanisms are updated
+by the candidate findings above.
 
 ## Evidence boundary
 
 The observed candidate was `04a31d5` plus the preserved dirty #54 prototype,
 saved-story host Ailish/client Tal, castle-road ambush and subsequent combat.
-Acceptance was recorded by `69383ec`; this investigation changes no gameplay.
+Acceptance was recorded by `69383ec`; that initial investigation changed no gameplay.
 Native research used the supported executable SHA-256
 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
 Addresses below are virtual addresses at preferred base `0x400000`.

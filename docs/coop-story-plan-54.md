@@ -614,3 +614,99 @@ still requires host/client strength, position and duration to match in the
 ambush intro and later waves, including host-driven termination (B1 dependency).
 The observed #55 particle-instance rejection must be considered alongside short
 not-ready gaps; raising its bound alone is not a proved expiry fix.
+
+
+### Owner-requested #55 fixes — candidate at owner gate (2026-10-10)
+
+The owner interrupted the next planned step with “now fix them”: missing client
+numbers, missing death chunks, and suspected non-expiring hit/blood effects.
+Implementation and evidence are in
+[the #55 report](story-combat-presentation-55.md#implementation-and-pre-acceptance-smoke-test).
+This is not A7 completion. Base `12e5767`, dirty #54 work preserved; DLL SHA-256
+`9d05e92778091aa4fb4e194a4c0d9f27516075726d5cc936df4c36cc89a98b26`.
+No baseline commit, staging, reset, stash or push was performed.
+
+Candidate changes: host-eligible native number display, nonlethal client damage
+with host-derived displayed amount, authored visual-only death effects selected
+by host death style, full native hit-effect completion, and validated particle
+capacity. Both peers use session protocol 18/world frame 8. Death styles use the
+last six area-body bytes without exceeding the accepted datagram cap; B1 still
+must split the messages before adding the planned fields.
+
+The live run found two A6 integration gaps beyond the earlier pure test:
+journaled SoloSpawnSetup callbacks and deferred animation-owner sigil cleanup.
+Both now account only the native operation executing on their own proved stack.
+The latter admits only its effect's removal. No combat timestamp was restored.
+Native byte validators were checked by name and address; the cleanup hook uses
+`0x4E1870`, preserving the `0x531DF0` body checked by other adapters.
+
+**Tests:** DLL build and all seven focused suites PASS: SpawnTimingImage,
+EffectClockImage, MonsterDamageGuardImage, MonsterDamageFlushImage,
+StoryAreaState, LanPartySession and StoryResidencyCall. Exact-image coverage
+includes the real visual-call ABI, native completion path, journal constructor,
+callback identity, native destructor retirement, delayed cleanup wrapper,
+unchanged native-retirement bytes and refusal to uninstall pending jobs.
+These are not live visual or full game-unload acceptance.
+
+**Live smoke evidence:** saved-story Ailish host/Tal client, castle-road ambush.
+Numbers visibly appear. The final candidate replayed 43 hits, followed four
+host despawns and accounted their four deferred sigil releases without a
+containment failure. All six sampled hit-effect identities were subsequently
+removed; 4,200 cosmetic updates were admitted without refusal. Later-wave
+monsters appeared. All four sampled deaths were ordinary style-3 deaths with
+no authored independent effect; chunk-producing finishers and two complete
+later waves remain **UNKNOWN**. No owner acceptance has been given.
+
+**Exact owner procedure:**
+
+1. With the paired candidate, trigger the castle-road ambush and hit enemies
+   repeatedly. Compare host/client floating numbers, bar and flash; leave the
+   game's number-display setting enabled.
+2. Perform a finisher that visibly breaks a host enemy into chunks. Confirm
+   the client shows the same kind of effect instead of only disappearing.
+   An ordinary collapsing death does not test this branch.
+3. Kill several enemies, stop attacking and watch the hit/blood trails finish.
+   Repeat through at least two later waves. Look for effects accumulating at
+   feet, frozen effects, disappearing numbers or a client that stops following.
+4. Report the three observations. Keep #55 open and this candidate uncommitted
+   until that gate is settled. Then resume A7, including its B1 host-termination
+   dependency and ambush-intro/later-wave visual comparison.
+
+
+### #55 accepted by the owner; separate follow-ups recorded (2026-10-10)
+
+**CONFIRMED_LIVE (owner):** the owner reports that client damage numbers appear,
+lingering hit effects finish and disappear, and death chunks appear. The owner
+explicitly accepts all three #55 symptoms as resolved. Tested candidate remains
+`12e5767` plus the dirty prototype, DLL
+`9d05e92778091aa4fb4e194a4c0d9f27516075726d5cc936df4c36cc89a98b26`, on the saved-story
+Ailish-host/Tal-client pair; both staged DLLs were checked against that hash.
+Earlier seven-suite results remain applicable: no implementation changed during
+acceptance recording. No additional route/wave count or teardown result is
+inferred from this feedback. #55 may close; this is not A7 acceptance.
+
+The focused acceptance commit saves only owned, separable changes: native
+helper headers, number/nonlethal guards, particle capacity with its regression,
+and client residency API/adapter hunks, together with this evidence. Existing
+#54 spawn/world/network integration and its dependent image fixtures stay
+uncommitted. This follows the earlier scoped-commit approach; the commit alone
+is not the complete played candidate. No baseline commit, reset, stash or push.
+The exact scoped commit was also built separately from the dirty prototype;
+its DLL build, `StoryEffectClockImageTest`, `StoryMonsterDamageGuardImageTest`
+and `StoryResidencyCallTest` pass. This checks the commit subset independently,
+without broadening the owner-accepted live scope.
+
+The following observations are retained for follow-up, with no cause asserted
+and no change to the agreed phase order:
+
+| Owner observation | Next discriminating check |
+|---|---|
+| Enemy block pose appears on client; accompanying animated effect does not | Compare the same blocked hit on host/client; identify the native block effect and its creation/completion path. Preserve the existing block pose. |
+| Ailish sweep has no visible blue wave | Establish vanilla first-person and external-view behavior, then compare host/client action and effect creation. Do not assume the wave should be visible from every camera. |
+| Tal cannot activate skills or strikes | Capture the exact attempted action, input admission, availability/resource gates and host result. Inspect alongside Phase C's remote control work without assuming rotation is the cause. |
+| Tal becomes very slow after the last enemy dies; an item and pickup flare appear | The owner retracts the initial freeze diagnosis. Correlate combat exit, movement/control state, native time/speed and pickup processing; distinguish actor-only slowdown from whole-game slowdown. Pickup causation is unproved. |
+
+**Next on the agreed plan: A7**, with B1 still required for host-driven sigil
+termination. These new observations have not been researched or fixed in this
+acceptance pass. The issue report and graph retain #55 acceptance separately
+from these open follow-ups.
