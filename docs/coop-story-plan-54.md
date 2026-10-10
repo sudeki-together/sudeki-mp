@@ -486,8 +486,8 @@ write access becomes unavailable, the restoration lease remains pending; further
 damage and world teardown wait for successful restoration or proved retirement.
 Stale generations cannot spend an old queued HP delta. HP diagnostics also
 revalidate the current stats component rather than retaining its old pointer.
-This hardens the existing replay mechanism; Phase D1 still replaces HP-delta
-replay with host combat events.
+This hardens the existing replay mechanism; Phase D1 will clamp replayed
+damage above zero, prevent client-native death and follow host despawns.
 
 Validation: DLL build **PASS**; `StoryMonsterDamageGuardImageTest` **PASS**;
 `StoryMonsterDamageFlushImageTest` **PASS**; existing `StoryRangedProjectionTest`
@@ -513,3 +513,29 @@ target and this entry. Flush integration and its extra CMake test target remain
 with the pre-existing uncommitted world-damage prototype. No baseline commit,
 reset, stash or push. The reusable finding is saved in the local graph.
 **Next: A6**, restrict the residency re-baseline window to mod-caused spawn calls.
+
+
+### A5 owner play-test accepted — 2026-10-09 owner local date
+
+The owner tested the A5 candidate (`04a31d5` plus the preserved dirty #54
+prototype) in the saved-story host-Ailish/client-Tal setup. They report that
+repeated hits, killing blows and the next wave seem to work normally and accept
+this step. **CONFIRMED_LIVE**, owner report for that bounded regression check.
+The client log snapshot contains 233 replayed-hit entries, all with
+`identity_proof=1` and `restore_pending=0`; no pending restoration is recorded in
+those entries. This does not prove every possible lifetime edge or full combat
+presentation parity.
+
+The owner also reports visible damage without floating damage numbers, and
+applicable enemies disappearing instead of exploding into chunks on the client.
+Some blood-like trails may fail to expire, but the owner is uncertain about that
+symptom. These remain open in [follow-up #55](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/55),
+with host/client comparison and expiry checks. Numbers relate to Phase D5;
+death presentation must respect Phase D1's host-owned deaths/despawns. A5
+acceptance does not resolve these visual issues. Root causes are **UNKNOWN**;
+trail non-expiry still needs confirmation.
+
+A separate host crash and one stalled client handoff occurred during reloads
+before the accepted run; their logs were preserved privately. This acceptance
+does not establish startup/crash reliability. No further gameplay code changed
+for this acceptance record. **Next: A6**, when the owner moves on.
