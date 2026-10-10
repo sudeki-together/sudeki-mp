@@ -1867,6 +1867,11 @@ target_include_directories(SudekiMP.StoryEffectClockImageTest PRIVATE src)
 target_compile_options(SudekiMP.StoryEffectClockImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StoryEffectClockImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StoryEffectClockImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StorySpawnSigilTest tests/story_spawn_sigil_test.c)
+target_include_directories(SudekiMP.StorySpawnSigilTest PRIVATE src)
+target_compile_options(SudekiMP.StorySpawnSigilTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StorySpawnSigilTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryRealtimeImageTest tests/story_realtime_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
 target_include_directories(SudekiMP.StoryRealtimeImageTest PRIVATE src)

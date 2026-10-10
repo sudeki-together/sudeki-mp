@@ -196,6 +196,7 @@ Append one row per completed step. A step is "done" only with its acceptance met
 | 2026-10-09 (owner local) | A1 — effect timing and cutscene clock issue resolved | Commit containing this acceptance entry (clock ownership and regression); surrounding prototype remains uncommitted | SpawnTimingImage, EffectClockImage, RangedProjection, InteractionGuardImage: PASS; old-code ownership regression: expected FAIL | CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST + CONFIRMED_LIVE (owner) | Owner: “yep that works”; A2 next when work resumes; A4/A7 remaining requirements unchanged |
 | 2026-10-09 (owner local) | A2 — correct target diagnostic | Commit containing this A2 acceptance entry | DLL build: PASS; InteractionGuardImage: PASS; live diagnostic/target-trace correlation: PASS | CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_LIVE | Actual target node matches the independent trace; A3 next |
 | 2026-10-09 (owner local) | A3 — native lighting tick and target ownership | Commit containing this acceptance record; implementation remains in the dirty prototype | DLL build, StorySkyLightImageTest, CastLightAbiTest: PASS; native light advancement and convergence observed | CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST + CONFIRMED_LIVE (owner) | Owner accepts zone darkening and authorizes moving on; A4 next |
+| 2026-10-09 (owner local) | A4 — proven-sigil-only hide | Commit containing this predicate/test and acceptance entry; spawn integration remains in the dirty prototype | DLL build, StorySpawnSigilTest, StorySpawnTimingImageTest: PASS | CONFIRMED_STATIC + CONFIRMED_TEST + CONFIRMED_EXACT_IMAGE | Stated pure-predicate acceptance met; A5 next; A7 retains the visual/lifetime gate |
 
 ### A1 owner gate not passed — 2026-10-09 (owner local date)
 
@@ -427,3 +428,42 @@ remain in the existing dirty prototype: the sky module was already untracked
 and depends on uncommitted area-state types and integration. Do not sweep that
 prototype into a baseline commit. No reset, stash or push. **Next: A4**, restrict
 sigil hiding to proven sigils; its stated acceptance is a pure predicate test.
+
+
+### A4 completed — proven-sigil-only hide (2026-10-09 owner local date)
+
+The original six-second branch admitted every newly discovered SpecialEffect.
+It now requires the current entity's verified SpecialEffect/update identities,
+registry membership, animation component and back-pointer, plus the explicit
+resource predicate in `src/hooks/story_spawn_sigil.h`. `fx_hide` repeats that
+proof immediately before changing visibility. Unrelated effects retain their
+existing animation/update path and cannot enter the sigil timeout branch.
+
+**CONFIRMED_STATIC:** the supported archive name/index checksum identifies
+`SFXKK001_SPAWN_EFFECT.HOM` as `0x7e8a6f3f`; the retained ResourceName is at
+entity `+0x29C` (low seven kind bits `0x29`, identifier at `+0x2A0`). Existing
+SpecialEffect component ownership checks are also used by the Spirit visual
+adapter and Research54. **CONFIRMED_LIVE**, observation only on the A3 dirty
+candidate: both host and client ambush sigils carried that identifier. The same
+class also contained normal hit (`0xb51df833`), item collection (`0x4e2c1433`)
+and level-up (`0xe3293133`) resources. Neither class identity alone nor a
+resource name containing "spawn" establishes an admitted sigil.
+
+On `7e63fb9` plus the preserved prototype/A4 edits, DLL build **PASS**;
+`StorySpawnSigilTest` **PASS** (known sigil, ResourceName flags, every wrong kind,
+other observed effects, unknown and neighboring identifiers);
+`StorySpawnTimingImageTest` **PASS** on the supported executable. Its additional
+fixture exercises the production timed-hide path: a normal hit remains visible
+and tracked after six seconds; the verified sigil hides; changed component
+ownership, absent registry membership and wrong kind refuse the write. Existing
+native call-shape, frame-stamp and byte-identity checks still pass. No native
+bytes were patched by A4; literal addresses and named validators were checked.
+Evidence: **CONFIRMED_TEST + CONFIRMED_EXACT_IMAGE**, not a new live visual test.
+
+The stated pure-predicate acceptance is met. Only the proved ambush resource is
+admitted; further assets require evidence. The six-second timeout remains until
+A7/B1 supplies host-driven termination. Full spawn visuals and later-wave parity
+remain at the A7 owner gate. The commit saves the independent predicate and pure
+regression target; call-site integration and the extended image fixture remain
+with the pre-existing dirty spawn prototype, without a baseline commit. The
+running A3 pair was read only and was not restarted with A4. **Next: A5**.
