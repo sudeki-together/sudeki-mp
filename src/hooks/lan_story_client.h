@@ -32,7 +32,8 @@ typedef struct SudekiMpLanStoryClientReport {
 /* This is a native containment adapter, not a campaign replica. PAUSED means
  * this exact pause transaction, roster, task-clock/counter and entity registry
  * were re-observed; it does not prove all native story mutation sources closed.
- * It never submits input, advances tasks, spawns actors or writes pose/camera.
+ * It never chooses gameplay actions. ResidencyCall brackets explicitly invoked
+ * native operations; ordinary presentation grants no simulation or spawning.
  * Install owns two exact TriggerManager calls. Their void native phases are
  * suspended only for this retained pause/manager; queued events must be empty
  * before acquire and before drain. Two cluster-script query calls retain host
@@ -63,6 +64,16 @@ BOOL SudekiMpLanStoryClientRecruiting(void);
  * TRUE when nothing changed or the new residency was adopted exactly. */
 BOOL SudekiMpLanStoryClientAdoptResidency(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,const SudekiMpLanStoryScene *scene,BOOL follow_recent);
+/* A6: re-contain only the synchronous native operations the mod invokes.
+ * A callback returns TRUE iff it entered code which may create/remove entities
+ * or tasks, even if that native call failed. FALSE is observation-only and
+ * cannot authorize adoption. It must not pump messages or dispatch a world
+ * tick. Nested operations are refused. No permission remains after return.
+ * Supply the current post-controller witness, or NULL on the active exact
+ * render/effects stack. All lifetime proofs are freshly checked on each side. */
+typedef BOOL (*SudekiMpLanStoryClientResidencyOperation)(void *context);
+BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitness *witness,
+    SudekiMpLanStoryClientResidencyOperation operation,void *context);
 /* Exact local physical selection after recruited-world presentation and old
  * spectator view retirement. Native pause/registry/task ownership is retained;
  * only the Tal/Ailish front permutation may change. A returned bound roster

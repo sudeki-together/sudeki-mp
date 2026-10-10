@@ -1991,3 +1991,9 @@ target_include_directories(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE src
 target_compile_options(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StoryMonsterDamageGuardImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StoryMonsterDamageGuardImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# A6: synchronous residency permission; no retail executable required.
+add_executable(SudekiMP.StoryResidencyCallTest tests/story_residency_call_test.c)
+target_include_directories(SudekiMP.StoryResidencyCallTest PRIVATE src)
+target_compile_options(SudekiMP.StoryResidencyCallTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryResidencyCallTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

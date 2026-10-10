@@ -4,6 +4,7 @@
 #include "hooks/lobby_gameplay.h"
 #include "hooks/lan_story_world.h"
 #include "hooks/lan_story_area_follow.h"
+#include "hooks/story_residency_call.h"
 #include "hooks/lan_story_input.h"
 #include "hooks/lan_story_replica.h"
 #include "hooks/call_hook.h"
@@ -64,6 +65,8 @@ static BOOL recruiting;
 static SudekiMpLanStoryRecruitReport recruit_observation;
 static uint32_t recruit_remote_before_epoch;
 static const SudekiMpControlUpdateDispatchWitness *recruit_commit_witness;
+static const SudekiMpControlUpdateDispatchWitness *residency_witness;
+static SudekiMpStoryResidencyCallState residency_call;
 static SudekiMpRelativeCallHook trigger_hooks[2];
 static SudekiMpRelativeCallHook cluster_hooks[2];
 static SudekiMpRelativeCallHook activity_hooks[2];
@@ -118,6 +121,10 @@ static BOOL native_thread_exact(void) {
     return installed && native_thread && native_thread==GetCurrentThreadId();
 }
 static BOOL presentation_pause_exact(BOOL *paused) {
+    if(residency_witness)
+        return residency_witness->service_post_original_exact &&
+            SudekiMpControlSeparationUpdateDispatchWitnessStillExact(residency_witness) &&
+            SudekiMpLanPartyMenuNativeObserveOwnedPause(paused);
     if(recruit_commit_witness)
         return recruit_commit_witness->service_post_original_exact &&
             SudekiMpControlSeparationUpdateDispatchWitnessStillExact(recruit_commit_witness) &&
@@ -543,6 +550,7 @@ static BOOL unknown(const char *reason) {
     SetLastError(ERROR_INVALID_STATE); return FALSE;
 }
 static void clear_observation(void) {
+    memset(&residency_call,0,sizeof(residency_call)); residency_witness=NULL;
     memset(&retained_roster,0,sizeof(retained_roster));
     memset(&retained_scene,0,sizeof(retained_scene));
     memset(&retained_tasks,0,sizeof(retained_tasks));
@@ -675,7 +683,7 @@ BOOL SudekiMpLanStoryClientAcquire(SudekiMpLanStoryClientReport *out) {
         (unsigned long)retained_scene.revision,world_pause.count);
     return SudekiMpLanStoryClientService(out);
 }
-static BOOL adopt_native(void);
+static BOOL adopt_native(BOOL call_scoped);
 static BOOL follow_recent_now(void);
 BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     BOOL paused=FALSE;
@@ -695,7 +703,7 @@ BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     }
     /* Host area following (#42): re-contain a followed zone change before
      * judging the invariants; while the native swap settles, wait. */
-    if(phase==SUDEKIMP_STORY_CLIENT_PAUSED && follow_recent_now() && !adopt_native()) {
+    if(phase==SUDEKIMP_STORY_CLIENT_PAUSED && follow_recent_now() && !adopt_native(FALSE)) {
         report_state(out,paused && SudekiMpLanPartyMenuNativeOwnsPause(),FALSE,
             input_closed(retained_roster.controller),FALSE,FALSE);
         SetLastError(ERROR_IO_PENDING); return FALSE;
@@ -896,14 +904,28 @@ static BOOL follow_recent_now(void) {
     return readable(w,0x3a0u) && !w[0x399u] && *(void **)(w+0x394u);
 }
 /* Returns TRUE when nothing changed or the new residency was adopted. */
-static BOOL adopt_native(void) {
+static BOOL adopt_native(BOOL call_scoped) {
     static EntityPauseObservation adopted[MAX_ENTITIES];
     WorldPauseObservation *p=&world_pause;
     SudekiMpLanStoryNativeRoster next=retained_roster;
     if(!native_thread_exact() || phase!=SUDEKIMP_STORY_CLIENT_PAUSED || recruiting || presentation_active ||
-        !attempted || !readable(p->registry,0x40u) || !readable(retained_roster.world,0x10u)) return FALSE;
+        !attempted || !readable(p->registry,0x40u) || !readable(retained_roster.world,0x10u) ||
+        *(void **)(base+REGISTRY_GLOBAL)!=p->registry ||
+        *(void **)(base+SCHEDULER_GLOBAL)!=p->scheduler ||
+        *(void **)(base+SPEED_GLOBAL)!=p->speed || *(void **)(base+GEL_GLOBAL)!=p->gel ||
+        !readable(p->speed,0x30u) || !readable(p->scheduler,0x20u) ||
+        !readable(p->gel,0x4cu) || *(void **)(p->gel+0x30u)!=p->manager ||
+        !readable(p->manager,0x1008cu) || !trigger_identity(p->trigger) ||
+        !cluster_identity(p->cluster)) return FALSE;
+    BOOL paused=FALSE;
+    if(call_scoped && (!residency_call.active || !presentation_pause_exact(&paused) || !paused ||
+        !SudekiMpLanPartyMenuNativeOwnsPause() || !same_load() ||
+        !input_closed(retained_roster.controller) || !roster_exact() ||
+        memcmp(p->gel+0x38u,p->gel_time,sizeof(p->gel_time)) ||
+        *(uint32_t *)(base+TASK_CREATED)<p->created_tasks)) return FALSE;
     uint8_t **entries=*(uint8_t ***)(p->registry+0x3cu); unsigned count=*(unsigned *)(p->registry+0x34u);
     next.descriptor=*(void **)((uint8_t *)retained_roster.world+0x0cu);
+    if(!count || count>MAX_ENTITIES || !readable(entries,count*sizeof(*entries))) return FALSE;
     BOOL same=entries==p->entities && count==p->count && next.descriptor==retained_roster.descriptor &&
         *(uint32_t *)(base+TASK_CREATED)==p->created_tasks;
     for(unsigned i=0;same && i<count;++i)
@@ -935,6 +957,7 @@ static BOOL adopt_native(void) {
         if(j<p->count) {
             adopted[i]=entity_pause[j]; ++kept;
             if(!entity_pause_exact(&entity_pause[j],1u)) {
+                if(call_scoped) { adopt_refused("call_survivor_changed"); return FALSE; }
                 /* The native area-cluster suspension changes as the party moves
                  * through a streaming area; the entity must still hold this
                  * client's world pause. Same object, vtables and schedule bit. */
@@ -968,7 +991,54 @@ static BOOL adopt_native(void) {
 BOOL SudekiMpLanStoryClientAdoptResidency(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryScene *scene,BOOL follow_recent) {
     (void)controller; (void)w; (void)scene;
-    return follow_recent && adopt_native();
+    return !residency_call.active && !InterlockedCompareExchange(&busy,0,0) &&
+        follow_recent && follow_recent_now() && adopt_native(FALSE);
+}
+/* Every callback is synchronous on a fresh native render/controller witness.
+ * Combat never renews the asynchronous zone-follow permission. The immediate
+ * post-call adoption cannot rebase a survivor, change worlds or advance GEL. */
+typedef struct ResidencyCallContext {
+    SudekiMpLanStoryClientResidencyOperation operation;
+    void *context;
+} ResidencyCallContext;
+static int residency_before(void *context) {
+    (void)context;
+    return SudekiMpLanStoryClientService(NULL);
+}
+static int residency_operation(void *context) {
+    ResidencyCallContext *c=context;
+    InterlockedIncrement(&busy);
+    BOOL entered=c->operation(c->context);
+    InterlockedDecrement(&busy);
+    return entered;
+}
+static int residency_adopt(void *context) {
+    (void)context;
+    return adopt_native(TRUE);
+}
+static int residency_after(void *context) {
+    (void)context; BOOL paused=FALSE;
+    /* Deliberately no zone adoption here: a no-op must leave the proof exact. */
+    return native_thread_exact() && phase==SUDEKIMP_STORY_CLIENT_PAUSED && attempted &&
+        !recruiting && !presentation_active && !InterlockedCompareExchange(&busy,0,0) &&
+        presentation_pause_exact(&paused) && paused && SudekiMpLanPartyMenuNativeOwnsPause() &&
+        roster_exact() && input_closed(retained_roster.controller) && registry_exact(1u) &&
+        scheduler_exact() && same_load();
+}
+BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanStoryClientResidencyOperation operation,void *context) {
+    if(!operation || !native_thread_exact() || residency_call.active || residency_call.failed ||
+        presentation_active || recruiting || exit_prepared || exit_released ||
+        recruit_commit_witness || residency_witness || InterlockedCompareExchange(&busy,0,0) ||
+        (w && (effects_witness || !w->service_post_original_exact ||
+            !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)))) return FALSE;
+    residency_witness=w;
+    ResidencyCallContext c={operation,context};
+    BOOL result=SudekiMpStoryResidencyCallRun(&residency_call,&c,
+        residency_before,residency_operation,residency_adopt,residency_after);
+    residency_witness=NULL;
+    if(residency_call.failed) return unknown("residency_call_postcondition");
+    return result;
 }
 BOOL SudekiMpLanStoryClientRecruitCommit(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene) {

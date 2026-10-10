@@ -558,3 +558,59 @@ inform A7 and Phase D without changing their acceptance requirements.
 
 No new live test, reload or gameplay change was performed for this research.
 **Next: A6**, authorized by the owner's request to resume the plan.
+
+
+### A6 completed — synchronous residency accounting (2026-10-10)
+
+On `7fffda7` plus the preserved dirty #54 prototype, combat no longer refreshes
+`AreaFollowLastCall`: `AreaFollowNoteSpawn` and its damage/tick call sites are
+removed. Only a real native zone export sets that timestamp. The pre-existing
+asynchronous area-load permission remains separate; A6 does not claim to
+replace that area lifecycle with an entity creation journal.
+
+The new `SudekiMpLanStoryClientResidencyCall` brackets replayed group starts,
+group/effect update batches, queued damage and host despawn follow. It proves
+containment before entry and accounts the registry/task result immediately on
+the same native stack. The adapter requires a current post-controller witness
+or the existing exact render/effects witness. It refuses nesting, recruitment,
+exit and wrong-thread entry. No timestamp or unused adoption permission survives
+return. Failed postconditions close admission and preserve the pause debt.
+
+A callback must report actual entry to a native operation, even when the native
+operation fails. Tracked but watched/idle/invalid groups now return false;
+no-op despawn and refused damage paths do likewise. Observation-only calls
+cannot re-baseline. Refused group starts remain retryable. Post-call adoption
+re-proves the current registry and native owners; surviving entities must retain
+their exact pause/schedule identity. It cannot rebase a changed survivor, change
+the world/party/descriptor or advance the GEL clock. No traversal memory cache
+crosses the native operation. New entities must carry an inherited pause.
+
+Validation: DLL build **PASS**; `StoryResidencyCallTest` **PASS** both natively
+and under Wine. Its cases cover 15,000 idle observations, unrelated registry/task
+changes between calls, actual creation/removal, native failure with residual
+allocation, no-op mutation, wrong owner/thread, nesting at every callback stage,
+postcondition failure and closed-admission retry. `StorySpawnTimingImageTest`
+**PASS** on the supported image, including the production regression that
+watched, zero-delta, natively scheduled and invalid groups grant no adoption;
+its native sigil call shape, frame-stamp and hide predicates still pass.
+`StoryMonsterDamageFlushImageTest` **PASS**, including actual-entry versus
+refusal/re-entry/restore-only results. Named validators and literal native
+addresses were checked; A6 changes no native byte patches or calling conventions.
+
+Evidence: **CONFIRMED_STATIC + CONFIRMED_TEST + CONFIRMED_EXACT_IMAGE**. The
+stated pure-test acceptance is met. No live reload, combat, area transition or
+teardown acceptance was performed on this candidate; stricter containment may
+expose a previously hidden native mutation and must be checked during the next
+owner test. The #55 presentation defects are not claimed fixed.
+
+The focused commit saves the policy, client adapter hunks, public adapter API,
+pure test/target and this entry. Runtime/spawn/damage integration and the extended
+image fixtures remain with their pre-existing dirty dependencies. Existing
+uncommitted work was preserved; no baseline commit, reset, stash or push. The
+research findings and A6 contract are saved in the local graph.
+
+**Next: A7**, the combined ground-ring and airborne-sigil work. Its owner gate
+still requires host/client strength, position and duration to match in the
+ambush intro and later waves, including host-driven termination (B1 dependency).
+The observed #55 particle-instance rejection must be considered alongside short
+not-ready gaps; raising its bound alone is not a proved expiry fix.
