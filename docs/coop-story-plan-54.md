@@ -195,6 +195,7 @@ Append one row per completed step. A step is "done" only with its acceptance met
 | 2026-10-10 | Plan adopted | (uncommitted) | — | — | Step 0 answered: no baseline commit; start Phase A |
 | 2026-10-09 (owner local) | A1 — effect timing and cutscene clock issue resolved | Commit containing this acceptance entry (clock ownership and regression); surrounding prototype remains uncommitted | SpawnTimingImage, EffectClockImage, RangedProjection, InteractionGuardImage: PASS; old-code ownership regression: expected FAIL | CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST + CONFIRMED_LIVE (owner) | Owner: “yep that works”; A2 next when work resumes; A4/A7 remaining requirements unchanged |
 | 2026-10-09 (owner local) | A2 — correct target diagnostic | Commit containing this A2 acceptance entry | DLL build: PASS; InteractionGuardImage: PASS; live diagnostic/target-trace correlation: PASS | CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_LIVE | Actual target node matches the independent trace; A3 next |
+| 2026-10-09 (owner local) | A3 — native lighting tick and target ownership | Commit containing this acceptance record; implementation remains in the dirty prototype | DLL build, StorySkyLightImageTest, CastLightAbiTest: PASS; native light advancement and convergence observed | CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST + CONFIRMED_LIVE (owner) | Owner accepts zone darkening and authorizes moving on; A4 next |
 
 ### A1 owner gate not passed — 2026-10-09 (owner local date)
 
@@ -384,3 +385,45 @@ The focused commit includes the corrected diagnostic block and this progress
 entry. Research54 wiring and unrelated #54 prototype changes remain uncommitted;
 no baseline commit, reset, stash or push. The graph records the correction and
 live verification. **Next: A3 light-manager ownership cleanup and its owner gate.**
+
+### A3 accepted — 2026-10-09 owner local date
+
+On `fd70bbe` plus the preserved dirty prototype, the sky follower no longer
+calls native light Update (`0x41F350`) or supplies a second clock. The native
+scheduler owns interpolation and publication. Host target/rate following remains
+because the contained client does not execute the host's AddLightEffect script.
+
+The target override validates the current singleton, primary vtable, original
+update slot, named `light_update_head` bytes, scene identity, writable memory and
+game thread. A hooked update slot, including the cast-light adapter's slot,
+closes admission; this client-only path cannot write a selected private manager.
+Rate-only changes are handled alongside the target. Current RGB and the native
+effect stack are untouched. The lease saves local values and conditionally
+restores them before a followed area switch, observed departure or shutdown.
+Newer native writes are preserved; unknown ownership retains the lease for retry.
+Runtime teardown now respects a failed sky uninstall.
+
+Validation: DLL build **PASS**; `StorySkyLightImageTest` **PASS** on the supported
+image (native hook install/restore, target/rate ownership, invalid observations,
+unchanged current RGB, foreign writers, wrong thread, read-only memory and
+restore retry); existing `CastLightAbiTest` **PASS**. Both literal-address and
+named-symbol source checks confirm no remaining sky call to native light Update.
+Evidence: **CONFIRMED_STATIC + CONFIRMED_EXACT_IMAGE + CONFIRMED_TEST**. These
+checks do not establish visible lighting parity, live area/exit restoration or
+reconnect behavior. The reusable finding is recorded in the local graph.
+
+Bounded live observation on the same dirty candidate: the client current RGB
+advanced after the host target changed and converged to the host's ambush target
+`(0.60, 0.75, 1.10)` with no manual lighting tick present. **CONFIRMED_LIVE** for
+native advancement and target convergence. The owner subsequently accepted the
+zone darkening and authorized moving on. This does not claim a separate live
+return-to-normal, disconnect or restoration test.
+
+**Owner gate accepted:** the owner reports that the lighting when the zone
+darkens is acceptable and explicitly says to move on. "Fades" referred to the
+gradual brightness transition; no additional visual requirement is imposed.
+The acceptance commit records this result. The implementation and regression
+remain in the existing dirty prototype: the sky module was already untracked
+and depends on uncommitted area-state types and integration. Do not sweep that
+prototype into a baseline commit. No reset, stash or push. **Next: A4**, restrict
+sigil hiding to proven sigils; its stated acceptance is a pure predicate test.
