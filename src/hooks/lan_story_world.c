@@ -197,6 +197,13 @@ unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) {
     for(unsigned i=0;i<count && n<max;++i) {
         const uint8_t *e=entries[i];
         if(!readable(e,0x48u)) continue;
+        /* SpecialEffectEntity clocks are native, not world-pose replicated.
+         * Excluding them from the ambient adapter lets the render walk stamp
+         * them with dt=0; a later 5D64D0 call then skips the same frame. Keep
+         * their first native renderer visit eligible for the local delta.
+         * They must not consume the bounded actor exclusion list either. */
+        if(*(void *const *)e==base+0x2d3c7cu &&
+            *(void *const *)(e+8u)==base+0x2d3ca4u) continue;
         const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
         if(readable(position,0xb8u) && *(void *const *)position==base+0x2cdefcu &&
             *(const void *const *)(position+0x10u)==e) {

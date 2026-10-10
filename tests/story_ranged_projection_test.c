@@ -33,9 +33,37 @@ static void renderer(TestRenderer *r,uint32_t first,uint32_t second) {
     static const uint32_t topology[]={0x00010000,0x00030002,0x80018000,0x00048002};
     for(unsigned i=0;i<4;++i) word(r->blends,i*20,topology[i]);
 }
+static void effect_renderer_ownership(void) {
+    uint8_t owner[0x40]={0},effects[129][0x48]={{0}},actor[0x48]={0};
+    uint8_t position[130][0xb8]={{0}},wrapper[130][0x14]={{0}};
+    uint8_t renderers[130][4]={{0}};
+    void *entries[130],*out[128];
+    for(unsigned i=0;i<130u;++i) {
+        uint8_t *e=i<129u?effects[i]:actor;
+        entries[i]=e;
+        pointer(e,0,base+(i<129u?0x2d3c7cu:0x2d5fa0u));
+        pointer(e,8,base+(i<129u?0x2d3ca4u:0x2d5fc4u));
+        pointer(e,0x44,position[i]);
+        pointer(position[i],0,base+0x2cdefc);
+        pointer(position[i],0x10,e); pointer(position[i],0xb4,wrapper[i]);
+        pointer(wrapper[i],0x10,renderers[i]);
+    }
+    word(owner,0x34,130); pointer(owner,0x3c,entries);
+    pointer(base,0x409d8c,owner);
+    /* Effects created before an actor must neither freeze their own native
+     * animation nor crowd the replicated actor out of the 128-entry list. */
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1);
+    assert(out[0]==renderers[129]);
+    /* Unknown/mismatched classes retain the conservative exclusion. */
+    pointer(effects[0],8,base);
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);
+    assert(out[0]==renderers[0] && out[1]==renderers[129]);
+    pointer(base,0x409d8c,NULL);
+}
 int main(void) {
     base=VirtualAlloc(NULL,0x410000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     assert(base);
+    effect_renderer_ownership();
     /* A material dependency waits without entering animation acquisition.
      * Neither a stale error nor another actor/stage can claim that route. */
     Target pending={.identifier=123};
