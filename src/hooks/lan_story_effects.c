@@ -1,4 +1,5 @@
 #include "hooks/lan_story_effects.h"
+#include "hooks/lan_arena_spirit_vfx.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "hooks/call_hook.h"
@@ -47,7 +48,12 @@ static struct {
     void *world,*descriptor,*controller;
 } clock_state;
 static uint32_t successful,refused;
-static unsigned topology_stage,topology_index,topology_table;
+static unsigned topology_stage,topology_index,topology_table,topology_detail,topology_speed;
+/* Capture the failed manager invariant at the existing particle seam.
+ * Stage 10 used to print stale node detail from an earlier rejection. */
+static const char *manager_reason="unchecked";
+static unsigned manager_count,manager_capacity;
+static uint32_t manager_remainder,manager_accumulator,manager_step;
 static unsigned refusal_logs,last_refusal_stage,last_refusal_table;
 static uint32_t last_refusal_tick;
 static LARGE_INTEGER timing_frequency;
@@ -75,17 +81,38 @@ static BOOL pin(DWORD error) {
         (LPCWSTR)(uintptr_t)&SudekiMpLanStoryEffectsUninstall,&self);
     SetLastError(error); return FALSE;
 }
+/* Page access only, local to one topology walk on the native thread. The
+ * walk reads every owner, vtable, descriptor and value again. It invokes no
+ * native code; discard all answers before witnesses or clock/update calls. */
+enum { TOPOLOGY_REGIONS=32u };
+static struct { uintptr_t lower,upper; } topology_regions[TOPOLOGY_REGIONS];
+static unsigned topology_region_count,topology_region_next;
+static BOOL topology_read_active;
+static void topology_read_end(BOOL *owned) {
+    if(!*owned) return;
+    topology_read_active=FALSE; topology_region_count=topology_region_next=0;
+}
 static BOOL readable(const void *pointer,size_t size) {
     MEMORY_BASIC_INFORMATION m;
     uintptr_t p=(uintptr_t)pointer;
-    if(!pointer || !size || p>UINTPTR_MAX-size ||
-        VirtualQuery(pointer,&m,sizeof(m))!=sizeof(m) || m.State!=MEM_COMMIT ||
+    if(!pointer || !size || p>UINTPTR_MAX-size) return FALSE;
+    if(topology_read_active && native_thread==GetCurrentThreadId())
+        for(unsigned i=0;i<topology_region_count;++i)
+            if(p>=topology_regions[i].lower && p+size<=topology_regions[i].upper) return TRUE;
+    if(VirtualQuery(pointer,&m,sizeof(m))!=sizeof(m) || m.State!=MEM_COMMIT ||
         (m.Protect&(PAGE_GUARD|PAGE_NOACCESS))) return FALSE;
     DWORD protection=m.Protect&0xffu;
     if(protection!=PAGE_READONLY && protection!=PAGE_READWRITE &&
         protection!=PAGE_WRITECOPY && protection!=PAGE_EXECUTE_READ &&
         protection!=PAGE_EXECUTE_READWRITE && protection!=PAGE_EXECUTE_WRITECOPY) return FALSE;
-    return p+size<=(uintptr_t)m.BaseAddress+m.RegionSize;
+    if(p+size>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+    if(topology_read_active && native_thread==GetCurrentThreadId()) {
+        unsigned slot=topology_region_count<TOPOLOGY_REGIONS?topology_region_count++:topology_region_next;
+        topology_region_next=(topology_region_next+1u)%TOPOLOGY_REGIONS;
+        topology_regions[slot].lower=(uintptr_t)m.BaseAddress;
+        topology_regions[slot].upper=(uintptr_t)m.BaseAddress+m.RegionSize;
+    }
+    return TRUE;
 }
 static BOOL call_targets(const uint8_t *call,const void *target) {
     int32_t displacement;
@@ -223,8 +250,12 @@ static BOOL reject(unsigned stage) {
     if(stage) topology_stage=stage;
     if(refusal_logs<64u && (!refusal_logs || topology_stage!=last_refusal_stage ||
         topology_table!=last_refusal_table || now-last_refusal_tick>=5000u)) {
-        SudekiMpLogFormat("lan_story event=effects_rejected stage=%u instance=%u table_rva=%08x count=%lu\r\n",
-            topology_stage,topology_index,topology_table,(unsigned long)refused);
+        SudekiMpLogFormat("lan_story event=effects_rejected stage=%u instance=%u table_rva=%08x detail=%08x speed=%08x count=%lu\r\n",
+            topology_stage,topology_index,topology_table,topology_detail,topology_speed,(unsigned long)refused);
+        if(topology_stage==10u)
+            SudekiMpLogFormat("lan_story event=effects_manager_rejected reason=%s instances=%u capacity=%u remainder_bits=%08lx accumulator_bits=%08lx step_bits=%08lx\r\n",
+                manager_reason,manager_count,manager_capacity,(unsigned long)manager_remainder,
+                (unsigned long)manager_accumulator,(unsigned long)manager_step);
         ++refusal_logs; last_refusal_stage=topology_stage;
         last_refusal_table=topology_table; last_refusal_tick=now;
     }
@@ -253,6 +284,9 @@ static BOOL effect(uint8_t *node) {
     else if(table==base+0x2e2d7cu) {update=0x240450u;modifier=0x248010u;apply=0x240550u;}
     else if(table==base+0x2e2eacu) {modifier=0x248010u;apply=0x2432d0u;}
     else if(table==base+0x2e2f3cu) {modifier=0x248010u;apply=0x244000u;}
+    /* TorusEmitter: emit 642670 grows particle arrays (636620), allocates and
+     * uses the visual PRNG; no entity/GEL/AI dispatch. */
+    else if(table==base+0x2e2e64u) modifier=0x242670u;
     else return FALSE;
     if(!method(table,4u,0x235590u) || !method(table,8u,update) ||
         !method(table,0x34u,0x237990u) || !method(table,0x38u,modifier) ||
@@ -286,8 +320,11 @@ static BOOL emitter(uint8_t *node,void **effects,unsigned count) {
             target=*(uint8_t **)(modifier+0x70u);
             if(!member(target,effects,count)) return FALSE;
             uint8_t *target_table=*(uint8_t **)target;
+            /* #54: TorusEmitter (2E2E64) is a sibling emitter node with the
+             * same particle-array emit contract (live: stage 60 rejections). */
             if(target_table!=base+0x2e2b14u && target_table!=base+0x2e2b5cu &&
-                target_table!=base+0x2e2c94u && target_table!=base+0x2e2fecu) return FALSE;
+                target_table!=base+0x2e2c94u && target_table!=base+0x2e2fecu &&
+                target_table!=base+0x2e2e64u) return FALSE;
         } else if(mt==base+0x2e2d60u) {
             if(!method(mt,8u,0x2402e0u) || !method(mt,0x14u,0x2402c0u)) return FALSE;
             target=*(uint8_t **)(modifier+4u);
@@ -321,6 +358,7 @@ static BOOL resources(void **descriptors,unsigned count,BOOL emitters,
             *(unsigned *)(descriptor+4u)==UINT32_MAX) return FALSE;
         uint8_t *table=*(uint8_t **)descriptor;
         unsigned node=0,factory=0;
+        topology_table=(unsigned)((uintptr_t)table-(uintptr_t)base); topology_detail=emitters?1u:2u;
         if(emitters) {
             if(table!=base+0x2e233cu) return FALSE;
             node=EMITTER_VT; factory=0x232000u;
@@ -331,6 +369,9 @@ static BOOL resources(void **descriptors,unsigned count,BOOL emitters,
         else if(table==base+0x2e23c4u) {node=0x2e2d7cu;factory=0x2324c0u;}
         else if(table==base+0x2e262cu) {node=0x2e2eacu;factory=0x233640u;}
         else if(table==base+0x2e25bcu) {node=0x2e2f3cu;factory=0x2333b0u;}
+        /* #54: TorusEmitter (factory 633040 -> 642620; Aklorian spawn sigil
+         * rings), resource at node+0x120 like the other effect nodes. */
+        else if(table==base+0x2e254cu) {node=0x2e2e64u;factory=0x233040u;}
         else return FALSE;
         if(!method(table,0x14u,factory)) return FALSE;
         out[i].data=*(void **)(descriptor+(emitters?0x18u:0x14u));
@@ -348,16 +389,32 @@ static BOOL resource_matches(uint8_t *node,unsigned offset,
     return matches==1u;
 }
 static BOOL topology(uint8_t *manager) {
-    topology_stage=10u; topology_index=topology_table=0u;
+    /* This function's complete call closure is read-only and has no callbacks. */
+    if(topology_read_active) return FALSE;
+    BOOL read_scope __attribute__((cleanup(topology_read_end)))=
+        installed && native_thread && native_thread==GetCurrentThreadId();
+    if(read_scope) { topology_region_count=topology_region_next=0; topology_read_active=TRUE; }
+    topology_stage=10u; topology_index=topology_table=topology_detail=topology_speed=0u;
+    manager_reason="manager_memory"; manager_count=manager_capacity=0u;
+    manager_remainder=manager_accumulator=manager_step=0u;
     if(!readable(manager,0x24u)) return FALSE;
     unsigned count=*(unsigned *)(manager+4u),capacity=*(unsigned *)(manager+8u);
     void **instances=*(void ***)(manager+0xcu);
     float remainder=*(float *)(manager+0x10u),accumulator=*(float *)(manager+0x14u);
     float step=*(float *)(manager+0x1cu);
-    if(!count || count>MAX_INSTANCES || capacity<count || capacity>4096u ||
-        !readable(instances,count*4u) || !isfinite(remainder) || !isfinite(accumulator) ||
-        !isfinite(step) || step<=0.0f || step>24.0f ||
-        remainder<0.0f || remainder>step || accumulator<0.0f || accumulator>0.1f) return FALSE;
+    manager_count=count; manager_capacity=capacity;
+    memcpy(&manager_remainder,&remainder,4u); memcpy(&manager_accumulator,&accumulator,4u);
+    memcpy(&manager_step,&step,4u);
+    if(!count) manager_reason="empty";
+    else if(count>MAX_INSTANCES) manager_reason="instance_limit";
+    else if(capacity<count || capacity>MAX_INSTANCES) manager_reason="capacity";
+    else if(!readable(instances,count*4u)) manager_reason="instance_array";
+    else if(!isfinite(remainder) || !isfinite(accumulator) || !isfinite(step)) manager_reason="nonfinite_clock";
+    else if(step<=0.0f || step>24.0f) manager_reason="step_range";
+    else if(remainder<0.0f || remainder>step) manager_reason="remainder_range";
+    else if(accumulator<0.0f || accumulator>0.1f) manager_reason="accumulator_range";
+    else manager_reason="accepted";
+    if(strcmp(manager_reason,"accepted")) return FALSE;
     unsigned total=0;
     for(unsigned i=0;i<count;++i) {
         uint8_t *instance=instances[i];
@@ -365,8 +422,16 @@ static BOOL topology(uint8_t *manager) {
         if(!instance) continue;
         if(!readable(instance,0x8cu) || *(void **)instance!=base+PARTICLE_ANIMATION_VT ||
             *(void **)(instance+0x1cu)!=manager || instance[0x58u] ||
-            instance[0x88u] || !isfinite(*(float *)(instance+0x84u)) ||
-            *(float *)(instance+0x84u)!=1.0f) return FALSE;
+            instance[0x88u]>1u || !isfinite(*(float *)(instance+0x84u)) ||
+            *(float *)(instance+0x84u)!=1.0f) {
+            if(readable(instance,0x8cu)) {
+                uint32_t speed; memcpy(&speed,instance+0x84u,4u);
+                topology_table=(unsigned)((uintptr_t)*(void **)instance-(uintptr_t)base);
+                topology_detail=(unsigned)(*(void **)(instance+0x1cu)==manager)|((unsigned)instance[0x58u]<<8)|
+                    ((unsigned)instance[0x88u]<<16)|((speed==0x3f800000u)?0u:0x1000000u);
+                topology_speed=speed; }
+            return FALSE;
+        }
         unsigned emitters=*(unsigned *)(instance+8u),effects=*(unsigned *)(instance+0x14u);
         void **emitters_list=*(void ***)(instance+4u),**effects_list=*(void ***)(instance+0x10u);
         if(emitters>MAX_EMITTERS || effects>MAX_EFFECTS ||
@@ -402,7 +467,8 @@ static BOOL clock_code_exact(void) {
  * A node advanced by native model playback since our previous observation is
  * left alone. Newly seen/reordered nodes seed once; gaps reset all observations.
  * Caller just proved the ENTIRE topology, with no intervening native callback. */
-static BOOL advance_custom_clocks(uint8_t *manager,uint32_t elapsed_ms) {
+static BOOL advance_custom_clocks(uint8_t *manager,uint32_t elapsed_ms,
+    void *const *model_clocks,unsigned model_clock_count) {
     CustomClock next[MAX_NODES]; unsigned n=0u;
     unsigned count=*(unsigned *)(manager+4u);
     uint8_t **instances=*(uint8_t ***)(manager+0xcu);
@@ -413,10 +479,32 @@ static BOOL advance_custom_clocks(uint8_t *manager,uint32_t elapsed_ms) {
     if(!clock_code_exact()) return FALSE;
     topology_stage=71u;
     if(!elapsed_ms || elapsed_ms>50u) return FALSE;
+    /* Caller just collected these through retained native model owners.
+     * Require unique membership in this freshly proved main manager too.
+     * Unknown is not permission to fall back to an independent clock. */
+    topology_stage=75u;
+    if(model_clock_count>SUDEKIMP_SPIRIT_MODEL_CLOCK_CAPACITY || (model_clock_count && !model_clocks)) return FALSE;
+    for(unsigned i=0;i<model_clock_count;++i) {
+        unsigned matches=0;
+        if(!model_clocks[i]) return FALSE;
+        for(unsigned j=0;j<i;++j) if(model_clocks[j]==model_clocks[i]) return FALSE;
+        for(unsigned j=0;j<count;++j) if(instances[j]==model_clocks[i]) ++matches;
+        if(matches!=1u) return FALSE;
+    }
     float frames=(float)elapsed_ms*0.024f;
     /* Preflight every custom flag/phase before the first clock mutation. */
     for(unsigned i=0;i<count;++i) {
         uint8_t *instance=instances[i]; if(!instance) continue;
+        /* +88 set (live: SFX-owned combat/spawn instances): the native update
+         * itself runs their custom-time nodes; never advance them twice. */
+        if(instance[0x88u]) continue;
+        /* A native model may intentionally hold its final sample. Equality
+         * with the last phase does not mean its custom clock is abandoned:
+         * advancing here wraps the tail, then its model seeks back every frame. */
+        BOOL model_driven=FALSE;
+        for(unsigned c=0;c<model_clock_count;++c)
+            if(model_clocks[c]==instance) model_driven=TRUE;
+        if(model_driven) continue;
         topology_index=i;
         for(unsigned kind=0;kind<2u;++kind) {
             unsigned nodes=*(unsigned *)(instance+(kind?0x14u:8u));
@@ -454,7 +542,8 @@ static BOOL advance_custom_clocks(uint8_t *manager,uint32_t elapsed_ms) {
 }
 BOOL SudekiMpLanStoryEffectsAdvance(const SudekiMpLanStoryNativeRoster *roster,
     uint32_t epoch,uint32_t revision,uint32_t sequence,uint32_t host_tick,
-    uint32_t receipt_tick,SudekiMpLanStoryReplicaExact exact,void *context) {
+    uint32_t receipt_tick,SudekiMpLanStoryReplicaExact exact,void *context,
+    void *const *model_clocks,unsigned model_clock_count) {
     uint32_t now=GetTickCount();
     int32_t age=(int32_t)(now-receipt_tick);
     topology_stage=1u; topology_index=topology_table=0u;
@@ -485,7 +574,7 @@ BOOL SudekiMpLanStoryEffectsAdvance(const SudekiMpLanStoryNativeRoster *roster,
         return reject(2u);
     }
     /* Native manager 62FAA0 converts seconds to authored frames at 24 Hz. */
-    if(!advance_custom_clocks(current_manager,elapsed)) return reject(0u);
+    if(!advance_custom_clocks(current_manager,elapsed,model_clocks,model_clock_count)) return reject(0u);
     original_entered=TRUE;
     original_update(current_manager,(float)elapsed*0.001f);
     advanced=TRUE; ++successful;

@@ -94,4 +94,12 @@ BOOL SudekiMpLanStoryWorldAimDirection(const SudekiMpLanStoryNativeRoster *roste
  * capture/apply stack and on the native thread after the runtime stops use. */
 BOOL SudekiMpUninstallLanStoryWorld(void);
 
+/* Client: show queued host monster hits natively (game thread, after apply). */
+/* TRUE iff a native direct-damage call was entered (also on failed restore). */
+BOOL SudekiMpLanStoryWorldFlushMonsterDamage(void);
+BOOL SudekiMpLanStoryWorldMonsterDamagePending(void);
+/* Client: animate replayed-hit flash and damage numbers (game thread). */
+void SudekiMpLanStoryWorldTickMonsterFeedback(void);
+/* Same-frame, exact replicated character -> native trail child witness. */
+BOOL SudekiMpLanStoryWorldTrailOwner(void *renderer,void *child,unsigned slot);
 #endif

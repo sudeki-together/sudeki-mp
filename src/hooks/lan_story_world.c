@@ -1,8 +1,11 @@
 #include "hooks/lan_story_world.h"
+#include "hooks/story_monster_damage_guard.h"
+#include "hooks/lan_story_spawn_trace.h"
 #include "hooks/lan_story_anim_trace.h"
 #include "hooks/lan_story_curve.h"
 #include "hooks/lan_story_material.h"
 #include "hooks/lan_story_residency.h"
+#include "hooks/lan_story_research54.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
@@ -26,6 +29,7 @@ typedef struct Target {
     uint8_t *bank,*description,*entries,*channels,*blends;
     uint8_t *rows[5];
     uint32_t identifier,animations,submodels,channel_count;
+    uint32_t native_identifier; /* entity+0x34; differs only for monsters */
     uint16_t kind;
     unsigned character;
     uint64_t fingerprint;
@@ -42,7 +46,9 @@ typedef struct Bound {
     BOOL ranged_base;
     uint32_t tick;
     uint32_t translated_tick;
+    uint32_t translation_anchor_tick;
     float translation_anchor[2];
+    unsigned ranged_move_semantic;
 } Bound;
 typedef struct Prepared {
     BOOL valid;
@@ -63,6 +69,13 @@ static DWORD native_thread;
 static BOOL host_seen,client_seen,resource_fault;
 static uint32_t next_generation,host_epoch,host_sequence,client_epoch;
 static unsigned host_count,client_count;
+/* Native child updates follow this same frame's successful pose publication.
+ * Only observations are retained; each use re-proves current registry,
+ * character/model/renderer, child slot and retained resource identity. */
+static struct {
+    BOOL valid; uint16_t frame; DWORD tick;
+    SudekiMpLanStoryNativeRoster roster;
+} trail_publication;
 static Bound host_bound[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
 static Bound client_bound[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
 static struct { BOOL retained; void *world,*descriptor,*removed_npc; uint32_t before_epoch; } recruitment;
@@ -111,7 +124,8 @@ static void profile_add(unsigned slot,LARGE_INTEGER start) {
     if(profile_frequency.QuadPart>0 && end.QuadPart>=start.QuadPart && slot<8u)
         profile_us[slot]+=(uint64_t)(end.QuadPart-start.QuadPart)*UINT64_C(1000000)/(uint64_t)profile_frequency.QuadPart;
 }
-static BOOL active;
+static BOOL active,damage_call_active;
+static SudekiMpStoryDamageGuard damage_restore;
 static BOOL memory(const void *p,size_t n,BOOL write) {
     uintptr_t a=(uintptr_t)p; DWORD access=0; BOOL known=FALSE;
     if(!p || !n || a+n<a) return FALSE;
@@ -139,7 +153,7 @@ static BOOL memory(const void *p,size_t n,BOOL write) {
 static BOOL readable(const void *p,size_t n) { return memory(p,n,FALSE); }
 static BOOL writable(const void *p,size_t n) { return memory(p,n,TRUE); }
 static BOOL begin(void) {
-    if(!base || active || (native_thread && native_thread!=GetCurrentThreadId())) {
+    if(!base || active || damage_call_active || (native_thread && native_thread!=GetCurrentThreadId())) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
     native_thread=GetCurrentThreadId(); active=TRUE; curve_proof_count=0;
@@ -158,6 +172,7 @@ static BOOL begin(void) {
     return TRUE;
 }
 static BOOL finish(BOOL result,DWORD error) {
+    if(!result) trail_publication.valid=FALSE;
     if(!result && diagnostic_count<64u &&
         (stage!=last_stage || stage_identifier!=last_identifier ||
             stage_detail!=last_detail || error!=last_error)) {
@@ -354,6 +369,12 @@ static BOOL entity_identity(void *entity,const SudekiMpLanStoryNativeRoster *ros
         }
         *kind=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND; return TRUE;
     }
+    if(*(void **)e==base+0x2d5fa0u) {
+        /* Group-spawned monster (#54): exact primary and update-node bases. */
+        if(*(void **)(e+8u)!=base+0x2d5fc4u ||
+            (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) return FALSE;
+        *kind=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND; return TRUE;
+    }
     if(*(void **)e==base+0x2d65a0u) {
         if(*(void **)(e+8u)!=base+0x2d65c4u || *(void **)(e+0x2cu)!=base+0x2d65e4u ||
             (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND) return FALSE;
@@ -381,7 +402,7 @@ static BOOL target(void *entity,const SudekiMpLanStoryNativeRoster *roster,Targe
     Target t={.entity=entity};
     observe_stage("entity_identity",0,0);
     if(!entity_identity(entity,roster,&t.character,&t.kind,&t.model)) return FALSE;
-    t.identifier=*(uint32_t *)(t.entity+0x34u);
+    t.identifier=t.native_identifier=*(uint32_t *)(t.entity+0x34u);
     observe_stage("entity_resource",t.identifier,0);
     uint32_t *name=*(uint32_t **)(t.entity+0x38u);
     if(!name || !readable(name,8u) || !name[0] || !name[1]) return FALSE;
@@ -391,6 +412,7 @@ static BOOL target(void *entity,const SudekiMpLanStoryNativeRoster *roster,Targe
      * unrelated playable-character model-component layout. */
     if((t.kind==SUDEKIMP_LAN_STORY_WORLD_NPC_KIND && t.position!=t.entity+0x150u) ||
         (scenery(&t) && t.position!=t.entity+0x210u) ||
+        (t.kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && (t.position<=t.entity || t.position>=t.entity+0x2000u)) ||
         !memory(t.position,0x104u,write) ||
         *(void **)t.position!=base+0x2cdefcu || *(void **)(t.position+0x10u)!=entity) return FALSE;
     uintptr_t parent=*(uintptr_t *)(t.position+0x94u);
@@ -446,7 +468,9 @@ static BOOL same_target(const Target *a,const Target *b) {
         a->description==b->description && a->entries==b->entries && a->channels==b->channels &&
         a->blends==b->blends && !memcmp(a->rows,b->rows,sizeof(a->rows)) &&
         a->kind==b->kind && a->character==b->character && a->channel_count==b->channel_count &&
-        a->identifier==b->identifier && a->animations==b->animations &&
+        /* The native identity: a monster's wire identifier is its portable
+         * spawn identity, which a fresh target() re-read does not carry. */
+        a->native_identifier==b->native_identifier && a->animations==b->animations &&
         a->submodels==b->submodels && a->fingerprint==b->fingerprint;
 }
 static int target_order(const void *left,const void *right) {
@@ -614,20 +638,56 @@ static void log_registry(const Registry *registry,BOOL write) {
         ++lines;
     }
 }
+/* #54 research: render state of spawned monsters (vtable 2D5FA0), host and
+ * client, at fixed ages, to find why client spawns cast a shadow but draw no
+ * model. Read-only; position+0xB4 wrapper, wrapper+8 object (+0x34 flags,
+ * +0x1C link +0x14 flags), wrapper+0x10 renderer. */
+static struct { const uint8_t *entity; DWORD born; unsigned dumped; } watched_monsters[2][64];
+static void hex_of(const uint8_t *p,unsigned n,char *out) {
+    unsigned k=0; out[0]=0;
+    if(!readable(p,n)) { strcpy(out,"-"); return; }
+    for(unsigned i=0;i<n;i+=4u) k+=(unsigned)wsprintfA(out+k,"%08lx ",(unsigned long)*(const uint32_t *)(p+i));
+}
+static void dump_monsters(const Registry *registry,BOOL write) {
+    unsigned side=write?1u:0u; DWORD now=GetTickCount();
+    static const DWORD ages[3]={0u,2000u,8000u};
+    for(unsigned m=0;m<64u;++m) {
+        const uint8_t *e=watched_monsters[side][m].entity;
+        if(!e || watched_monsters[side][m].dumped>=3u) continue;
+        if(now-watched_monsters[side][m].born<ages[watched_monsters[side][m].dumped]) continue;
+        BOOL present=FALSE;
+        for(unsigned i=0;i<registry->count;++i) if(registry->entities[i]==e) present=TRUE;
+        if(!present || !readable(e,0x48u)) { watched_monsters[side][m].entity=NULL; continue; }
+        const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
+        const uint8_t *wrapper=readable(position,0xb8u)?*(const uint8_t *const *)(position+0xb4u):NULL;
+        const uint8_t *object=readable(wrapper,0x14u)?*(const uint8_t *const *)(wrapper+8u):NULL;
+        const uint8_t *renderer=readable(wrapper,0x14u)?*(const uint8_t *const *)(wrapper+0x10u):NULL;
+        const uint8_t *link=readable(object,0x20u)?*(const uint8_t *const *)(object+0x1cu):NULL;
+        static char ow[0x60u/4u*9u+2u],rw[0x80u/4u*9u+2u],ww[0x40u/4u*9u+2u];
+        hex_of(object,0x60u,ow); hex_of(renderer,0x80u,rw); hex_of(wrapper,0x40u,ww);
+        SudekiMpLogFormat("lan_story_world event=monster_render side=%s entity=%p age=%lu refs=%u wrapper=%p object=%p link=%p link14=%08lx renderer=%p wrapper40=%s object60=%s renderer80=%s\r\n",
+            write?"client":"host",(const void *)e,(unsigned long)(now-watched_monsters[side][m].born),(unsigned)e[0x2bu],
+            (const void *)wrapper,(const void *)object,(const void *)link,
+            (unsigned long)(readable(link,0x18u)?*(const uint32_t *)(link+0x14u):0xfffffffful),(const void *)renderer,ww,ow,rw);
+        ++watched_monsters[side][m].dumped;
+    }
+}
 /* #54 research: entities appearing/leaving the native registry (enemy spawns
  * in a battle encounter). Host and client separately; on change only. */
 static void log_registry_diff(const Registry *registry,BOOL write) {
     static void *previous[2][MAX_REGISTRY]; static unsigned previous_count[2],lines;
     unsigned side=write?1u:0u;
-    if(!SudekiMpLogResearchEnabled() || lines>=1500u) return;
+    if(!SudekiMpLogResearchEnabled() || lines>=40000u) return;
     if(previous_count[side]) {
         unsigned removed=0,added=0;
         for(unsigned i=0;i<previous_count[side];++i) {
             BOOL found=FALSE;
             for(unsigned j=0;j<registry->count && !found;++j) if(registry->entities[j]==previous[side][i]) found=TRUE;
-            if(!found) ++removed;
+            if(!found) { ++removed;
+                if(lines<40000u) { ++lines; SudekiMpLogFormat("lan_story_world event=registry_removed side=%s entity=%p tick=%lu\r\n",
+                    write?"client":"host",previous[side][i],(unsigned long)GetTickCount()); } }
         }
-        for(unsigned j=0;j<registry->count && lines<1500u;++j) {
+        for(unsigned j=0;j<registry->count && lines<40000u;++j) {
             BOOL found=FALSE;
             for(unsigned i=0;i<previous_count[side] && !found;++i) if(previous[side][i]==registry->entities[j]) found=TRUE;
             if(found) continue;
@@ -640,18 +700,56 @@ static void log_registry_diff(const Registry *registry,BOOL write) {
             float xyz[3]={0,0,0};
             if(position && readable(position,0x24u) && *(const void *const *)position==base+0x2cdefcu)
                 memcpy(xyz,position+0x18u,sizeof(xyz));
+            if(*(void *const *)e==base+0x2d5fa0u) {
+                for(unsigned m=0;m<64u;++m) if(!watched_monsters[side][m].entity) {
+                    watched_monsters[side][m].entity=e; watched_monsters[side][m].born=GetTickCount();
+                    watched_monsters[side][m].dumped=0; break; }
+            }
             ++lines;
             SudekiMpLogFormat("lan_story_world event=registry_added side=%s entity=%p vtable=%06x kind=%04x identifier=%08lx name=%s pos=%.1f,%.1f,%.1f refs=%u\r\n",
                 write?"client":"host",(const void *)e,rva,(unsigned)(*(const uint32_t *)(e+0x30u)&0x1fffu),
                 (unsigned long)*(const uint32_t *)(e+0x34u),name,(double)xyz[0],(double)xyz[1],(double)xyz[2],
                 readable(e,0x2cu)?e[0x2bu]:0u);
         }
-        if((added || removed) && lines<1500u) { ++lines;
+        if((added || removed) && lines<40000u) { ++lines;
             SudekiMpLogFormat("lan_story_world event=registry_changed side=%s count=%u added=%u removed=%u\r\n",
                 write?"client":"host",registry->count,added,removed); }
     }
     memcpy(previous[side],registry->entities,registry->count*sizeof(void *));
     previous_count[side]=registry->count;
+}
+/* #54 research: once per second per monster identity and side. */
+static BOOL monster_pos_due(uint32_t identity,unsigned side) {
+    static struct { uint32_t identity; DWORD at; } seen[2][32]; static unsigned logs;
+    BOOL dense=SudekiMpLanStoryResearch54Enabled(); /* #54 Phase 1: 4 Hz */
+    if(!SudekiMpLogResearchEnabled() || logs>=(dense?30000u:6000u)) return FALSE;
+    DWORD now=GetTickCount(); unsigned slot=32u,oldest=0u;
+    for(unsigned k=0;k<32u;++k) {
+        if(seen[side][k].identity==identity) { slot=k; break; }
+        if(seen[side][k].at<seen[side][oldest].at) oldest=k;
+    }
+    if(slot==32u) { slot=oldest; seen[side][slot].identity=identity; seen[side][slot].at=0u; }
+    if(seen[side][slot].at && now-seen[side][slot].at<(dense?250u:1000u)) return FALSE;
+    seen[side][slot].at=now?now:1u; ++logs; return TRUE;
+}
+/* Client: last host HitPoints per replicated monster and the not yet shown
+ * drop. Plain observations; the entity is re-proved before any native call. */
+enum { MAX_MONSTER_HP=64 };
+static struct { SudekiMpStoryDamageIdentity identity; float hp,pending; BOOL stat_visible; } monster_hp[MAX_MONSTER_HP];
+static BOOL monster_damage_bound(const SudekiMpStoryDamageIdentity *id) {
+    if(!client_seen || client_epoch!=id->epoch) return FALSE;
+    for(unsigned i=0;i<client_count;++i) {
+        const Bound *b=&client_bound[i];
+        if(b->previous.kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND &&
+            b->previous.identifier==id->identifier && b->previous.generation==id->generation &&
+            b->target.entity==id->entity && b->target.native_identifier==id->native_identifier) return TRUE;
+    }
+    return FALSE;
+}
+static BOOL monster_damage_restore(void) {
+    if(damage_restore.lifted)
+        SudekiMpStoryDamageRestore(base,&damage_restore,monster_damage_bound(&damage_restore.identity),memory);
+    return !damage_restore.lifted;
 }
 static unsigned ambiguous_logs,rebind_logs,subset_logs,last_subset_client,last_subset_host,unsupported_logs;
 static uint32_t last_unsupported;
@@ -662,6 +760,32 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
     uint32_t ambiguous_identifier[SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS];
     log_registry(registry,write);
     log_registry_diff(registry,write);
+    if(SudekiMpLogResearchEnabled()) dump_monsters(registry,write);
+    /* #54 research (host): a monster AI's combat target (ai = entity+0x94;
+     * +0x1C4 engaged, +0x330 current, words after +0x330 for link shape).
+     * Logged per monster only when it changes, with the party lead. */
+    if(SudekiMpLogResearchEnabled() && !write) {
+        static struct { const uint8_t *e; uint32_t sig; } last[64]; static unsigned scan_logs;
+        for(unsigned i=0;i<registry->count && scan_logs<5000u;++i) {
+            const uint8_t *e=registry->entities[i];
+            if(!readable(e,0x98u) || *(void *const *)e!=base+0x2d5fa0u) continue;
+            const uint8_t *ai=*(const uint8_t *const *)(e+0x94u);
+            if(!readable(ai,0x340u)) continue;
+            const void *engaged=*(const void *const *)(ai+0x1c4u),*current=*(const void *const *)(ai+0x330u);
+            unsigned ce=4u,cc=4u;
+            for(unsigned c=0;c<4u;++c) { if(engaged && engaged==roster->actors[c]) ce=c; if(current && current==roster->actors[c]) cc=c; }
+            uint32_t sig=(uint32_t)(uintptr_t)current^((uint32_t)(uintptr_t)engaged<<1)^roster->leader_character;
+            unsigned slot=64u,free_slot=64u;
+            for(unsigned k=0;k<64u;++k) { if(last[k].e==e) slot=k; if(!last[k].e && free_slot==64u) free_slot=k; }
+            if(slot==64u) { if(free_slot==64u) continue; slot=free_slot; last[slot].e=e; last[slot].sig=~sig; }
+            if(last[slot].sig==sig) continue;
+            last[slot].sig=sig; ++scan_logs;
+            SudekiMpLogFormat("lan_story_world event=monster_target entity=%p lead=%u engaged=%p/c%u current=%p/c%u w330=%08lx,%08lx,%08lx tick=%lu\r\n",
+                (const void *)e,roster->leader_character,engaged,ce,current,cc,
+                (unsigned long)*(const uint32_t *)(ai+0x330u),(unsigned long)*(const uint32_t *)(ai+0x334u),
+                (unsigned long)*(const uint32_t *)(ai+0x338u),(unsigned long)GetTickCount());
+        }
+    }
     for(unsigned i=0;i<registry->count;++i) {
         observe_stage("registry_entry",0,i);
         uint8_t *entity=registry->entities[i];
@@ -670,6 +794,26 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
         for(unsigned x=0;x<excluded_count;++x) if(excluded[x]==entity) foreign=TRUE;
         if(foreign) continue;
         BOOL include=*(void **)entity==base+0x2d65a0u;
+        /* #54: a group-spawned monster joins only with a portable identity
+         * and never at the cost of the frame (any refusal leaves it out). */
+        uint32_t monster_identity=0;
+        if(*(void **)entity==base+0x2d5fa0u) {
+            if(n+4u>=SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS ||
+                !SudekiMpLanStorySpawnIdentity(entity,&monster_identity)) continue;
+            if(!target(entity,roster,&targets[n],write)) {
+                static unsigned monster_refusals;
+                if(monster_refusals<16u) { ++monster_refusals;
+                    SudekiMpLogFormat("lan_story_world event=monster_omitted side=%s entity=%p stage=%s identity=%08lx\r\n",
+                        write?"client":"host",(void *)entity,stage?stage:"-",(unsigned long)monster_identity); }
+                continue;
+            }
+            targets[n].identifier=monster_identity;
+            include=FALSE;
+            BOOL duplicate=FALSE;
+            for(unsigned j=0;j<n;++j) if(targets[j].kind==targets[n].kind && targets[j].identifier==monster_identity) duplicate=TRUE;
+            if(!duplicate) ++n;
+            continue;
+        }
         for(unsigned c=0;c<4u;++c) if(roster->actors[c]==entity) include=TRUE;
         if(*(void **)entity==base+0x2d5b00u) {
             unsigned character; uint16_t kind; uint8_t *model;
@@ -888,6 +1032,21 @@ static BOOL read_pose_detail(const Target *t,SudekiMpLanStoryWorldActor *a,BOOL 
             a->time[4]=projected.time[fire]; a->rate[4]=projected.rate[fire];
             a->blend[3]=fire==0?1.0f-source.blend[2]:source.blend[2];
         }
+        /* FP idle still holds the weapon aimed. Combat body idle lowers it;
+         * using that as the inter-shot pose made every recoil end in a snap.
+         * Keep the authored upper-body FirePose on the existing ranged layer.
+         * The client base sampler uses the same stance beneath native recoil.
+         * Scope to Ailish; attached world bodies and other actions are native. */
+        if(fire<0 && t->character==3u) {
+            uint8_t *definition=*(uint8_t **)(table+0x14u+0x98u*4u);
+            if(!readable(definition,0x28u)) return FALSE;
+            int stance=authored_selector(t,*(uint32_t *)(definition+0x14u));
+            if(stance<1) return FALSE;
+            uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)stance*28u);
+            if(*(float *)(resource+4u)!=1.f) return FALSE;
+            a->clip[4]=*(uint32_t *)resource; a->state[4]=0;
+            a->blend[3]=1.f;
+        }
         if(ranged_base) *ranged_base=TRUE;
     }
     /* A fully empty result is never an acceptable substitute for a body. */
@@ -902,6 +1061,8 @@ static BOOL read_pose(const Target *t,SudekiMpLanStoryWorldActor *a) {
 static BOOL project_ranged_translation(const Target *t,const Bound *old,uint32_t now,
     SudekiMpLanStoryWorldActor *a,Bound *next) {
     next->translated_tick=0;
+    next->translation_anchor_tick=now;
+    next->ranged_move_semantic=0;
     next->translation_anchor[0]=a->position[0]; next->translation_anchor[1]=a->position[2];
     if(!old || !old->ranged_base || !same_target(&old->target,t) ||
         !now || !old->tick || now-old->tick>250u || now==old->tick) return TRUE;
@@ -910,32 +1071,48 @@ static BOOL project_ranged_translation(const Target *t,const Bound *old,uint32_t
      * than ordinary native movement; this never changes host coordinates. */
     float maximum=.05f+20.0f*(now-old->tick)/1000.0f;
     if(!isfinite(dx) || !isfinite(dz) || dx*dx+dz*dz>maximum*maximum) return TRUE;
-    memcpy(next->translation_anchor,old->translation_anchor,sizeof(next->translation_anchor));
     next->translated_tick=old->translated_tick;
+    next->ranged_move_semantic=old->ranged_move_semantic;
+    /* Ground settling drifts even with no input. Accumulate sub-threshold
+     * motion only within a short window, never across seconds of idle. */
+    uint32_t anchor_tick=old->translation_anchor_tick?old->translation_anchor_tick:old->tick;
+    if(now-anchor_tick<=250u) {
+        memcpy(next->translation_anchor,old->translation_anchor,sizeof(next->translation_anchor));
+        next->translation_anchor_tick=anchor_tick;
+    }
     dx=a->position[0]-next->translation_anchor[0]; dz=a->position[2]-next->translation_anchor[1];
     if(dx*dx+dz*dz>.000025f) {
+        if(!SudekiMpRangedWorldMoveSemantic(a->forward,dx,dz,&next->ranged_move_semantic)) return FALSE;
         next->translated_tick=now;
+        next->translation_anchor_tick=now;
         next->translation_anchor[0]=a->position[0]; next->translation_anchor[1]=a->position[2];
     }
     /* Same short stop grace as the established ranged world presenter.
-     * Accumulating from an anchor also admits slow sub-threshold movement. */
+     * The bounded anchor also admits slow sub-threshold movement. */
     if(!next->translated_tick || now-next->translated_tick>150u) return TRUE;
+    unsigned motion=next->ranged_move_semantic;
+    if(motion!=6u && motion!=8u && motion!=0xau && motion!=0xcu) return FALSE;
     uint8_t *table=*(uint8_t **)(t->model+0xdcu);
     if((t->character!=1u && t->character!=3u) || !readable(table,0x414u)) return FALSE;
+    float lengths[2]; uint16_t multipliers[2];
     for(unsigned c=0;c<2u;++c) {
-        uint8_t *definition=*(uint8_t **)(table+0x14u+(6u+c)*4u);
-        if(!readable(definition,0x28u)) return FALSE;
+        uint8_t *definition=*(uint8_t **)(table+0x14u+(motion+c)*4u);
+        if(!readable(definition,0x57u) || definition[0x56u]!=motion+c) return FALSE;
         /* Authored combat handles, never the alternate exploration bank or
-         * first-person selector numbers. Output still uses the body bank. */
+         * first-person selector numbers. E1560 reads this definition's +54
+         * speed multiplier; E4F50 retains it in the model's channel metadata. */
         int selector=authored_selector(t,*(uint32_t *)(definition+0x14u));
         if(selector<1) return FALSE;
         uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
-        float length=*(float *)(resource+4u);
-        if(!isfinite(length) || length<=0) return FALSE;
+        lengths[c]=*(float *)(resource+4u);
+        memcpy(&multipliers[c],definition+0x54u,sizeof(multipliers[c]));
         a->clip[c]=*(uint32_t *)resource; a->clip_occurrence[c]=0;
         a->state[c]=0; a->time[c]=0;
-        a->rate[c]=t->character==3u ? (c?30.92161f:41.22882f) : (c?28.608f:34.33f);
     }
+    /* Match native E3D10's authored paired-cycle timing, as the Test Room
+     * host-locomotion stream does. Scaling a forward-run rate by clip length
+     * incorrectly gave sideways/backward clips the forward speed boost. */
+    if(!SudekiMpRangedWorldGaitRates(lengths,multipliers,.99f,a->rate)) return FALSE;
     a->blend[0]=.99f; /* channel4's independently observed fire layer survives */
     return *(void **)(t->model+0xdcu)==table;
 }
@@ -944,16 +1121,71 @@ static BOOL retain_ranged_base(const Target *t,const Bound *old,uint32_t now,
     if(!old || !old->ranged_base || !same_target(&old->target,t) ||
         now-old->tick>250u) return TRUE; /* new owner/gap starts a fresh base */
     for(unsigned c=0;c<2u;++c) {
-        if(!a->clip[c] || old->previous.clip[c]!=a->clip[c] ||
-            old->previous.state[c]!=a->state[c]) continue;
+        if(!a->clip[c] || old->previous.state[c]!=a->state[c]) continue;
+        BOOL same_clip=old->previous.clip[c]==a->clip[c];
+        if(!same_clip && (!a->clip[1] || !old->previous.clip[1] ||
+            !old->ranged_move_semantic || a->state[c]!=0)) continue;
         int selector=authored_selector(t,a->clip[c]);
         if(selector<1) return FALSE;
         uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
         float length=*(float *)(resource+4u);
         if(!isfinite(length) || length<=0 || !isfinite(old->previous.time[c])) return FALSE;
-        a->time[c]=fmodf(old->previous.time[c]+a->rate[c]*(now-old->tick)/1000.0f,length);
+        float phase=old->previous.time[c];
+        if(!same_clip) {
+            int previous=authored_selector(t,old->previous.clip[c]);
+            if(previous<1) return FALSE;
+            uint8_t *resource_before=*(uint8_t **)(t->entries+(unsigned)previous*28u);
+            float before_length=*(float *)(resource_before+4u);
+            if(!isfinite(before_length) || before_length<=0 || phase<0 || phase>before_length) return FALSE;
+            phase*=length/before_length;
+        }
+        a->time[c]=fmodf(phase+a->rate[c]*(now-old->tick)/1000.0f,length);
         if(!isfinite(a->time[c]) || a->time[c]<0) return FALSE;
     }
+    /* The FP arms have no body locomotion transition to copy. Preserve the
+     * outgoing gait in 0/1 and blend its pair against authored idle in 2.
+     * Native E3D10 uses this same two-pair tree; its ordinary transition
+     * duration (image RVA339BE0) is 0.1 s. Only cosmetic output changes.
+     * Channel4's aim/recoil is independent and must survive the fade. */
+    BOOL moving=a->clip[1]!=0,was_moving=old->previous.clip[1]!=0;
+    if(!moving && !was_moving) return TRUE;
+    float elapsed=(now-old->tick)/1000.0f;
+    float weight=was_moving ? (old->previous.clip[2]?old->previous.blend[2]:0.f) : 1.f;
+    weight=fminf(1.f,fmaxf(0.f,weight+(moving?-1.f:1.f)*elapsed/.1f));
+    if(!weight) return TRUE; /* settled gait: no hidden idle clock to reset */
+    uint8_t *table=*(uint8_t **)(t->model+0xdcu),*definition;
+    if(!readable(table,0x414u) ||
+        !readable(definition=*(uint8_t **)(table+0x14u+2u*4u),0x28u)) return FALSE;
+    int selector=authored_selector(t,*(uint32_t *)(definition+0x14u));
+    if(selector<1) return FALSE;
+    uint8_t *resource=*(uint8_t **)(t->entries+(unsigned)selector*28u);
+    uint32_t idle=*(uint32_t *)resource;float length=*(float *)(resource+4u);
+    if(!isfinite(length) || length<=0) return FALSE;
+    int previous=old->previous.clip[2]==idle?2:
+        (!was_moving && old->previous.clip[0]==idle?0:-1);
+    float phase=previous<0?0:old->previous.time[previous];
+    if(!isfinite(phase) || phase<0 || phase>length) return FALSE;
+    phase=fmodf(phase+12.f*elapsed,length);
+    if(weight==1.f && !moving) {
+        /* Promotion must retain the fading idle's clock, not restart it. */
+        a->clip[0]=idle;a->clip_occurrence[0]=0;a->state[0]=0;
+        a->time[0]=phase;a->rate[0]=12.f;
+        return TRUE;
+    }
+    if(!moving) for(unsigned c=0;c<2u;++c) {
+        int selected=authored_selector(t,old->previous.clip[c]);
+        if(selected<1 || old->previous.state[c]!=0 || old->previous.clip_occurrence[c]) return FALSE;
+        uint8_t *clip=*(uint8_t **)(t->entries+(unsigned)selected*28u);
+        float duration=*(float *)(clip+4u);
+        if(!isfinite(duration) || duration<=0 || !isfinite(old->previous.time[c]) ||
+            old->previous.time[c]<0 || old->previous.time[c]>duration) return FALSE;
+        a->clip[c]=old->previous.clip[c];a->clip_occurrence[c]=0;a->state[c]=0;
+        a->rate[c]=old->previous.rate[c];
+        a->time[c]=fmodf(old->previous.time[c]+a->rate[c]*elapsed,duration);
+        a->blend[0]=old->previous.blend[0];
+    }
+    a->clip[2]=idle;a->clip_occurrence[2]=0;a->state[2]=0;
+    a->time[2]=phase;a->rate[2]=12.f;a->blend[1]=0;a->blend[2]=weight;
     return TRUE;
 }
 /* Ailish/Elco first-person actions without a proven world translation
@@ -1014,6 +1246,20 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
         !SudekiMpLanStoryObserverRoster(controller,w,scene,&roster) || !registry_capture(&registry) ||
         !excluded_capture() || !catalog(&registry,&roster,targets,&count,FALSE)) goto fail;
     excluded_count=0;
+    /* #54: a monster whose pose cannot be read yet (e.g. a clip still
+     * streaming in) leaves this frame instead of failing it. */
+    for(unsigned i=0;i<count;) {
+        SudekiMpLanStoryWorldActor probe; BOOL probe_base=FALSE;
+        if(targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND &&
+            !read_pose_detail(&targets[i],&probe,&probe_base)) {
+            static unsigned monster_pose_logs;
+            if(monster_pose_logs<16u) { ++monster_pose_logs;
+                SudekiMpLogFormat("lan_story_world event=monster_omitted side=host identity=%08lx stage=%s detail=%lu\r\n",
+                    (unsigned long)targets[i].identifier,stage?stage:"-",(unsigned long)stage_detail); }
+            memmove(&targets[i],&targets[i+1u],(count-i-1u)*sizeof(*targets)); --count; continue;
+        }
+        ++i;
+    }
     frame.epoch=party->epoch; frame.revision=party->revision; frame.sequence=party->sequence;
     frame.host_tick=party->host_tick; frame.count=(uint8_t)count;
     uint32_t generation=next_generation; BOOL scenery_due=scenery_log_due();
@@ -1023,7 +1269,40 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
         if(host_seen && host_epoch==party->epoch) for(unsigned j=0;j<host_count;++j)
             if(host_bound[j].previous.kind==targets[i].kind &&
                 host_bound[j].previous.identifier==targets[i].identifier) { old=&host_bound[j]; break; }
-        if(!read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base)) {
+        BOOL pose_read=read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base);
+        if(pose_read && targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) {
+            float hp=0.0f;
+            const uint8_t *stats=readable(targets[i].entity+0x4cu,4u)?*(const uint8_t *const *)(targets[i].entity+0x4cu):NULL;
+            if(readable(stats,0x30u) && *(void *const *)stats==base+0x2cc064u &&
+                *(const void *const *)(stats+0x10u)==targets[i].entity) hp=*(const float *)(stats+0x2cu);
+            frame.actors[i].hit_points=isfinite(hp) && hp>=0.0f && hp<=100000000.0f?hp:0.0f;
+            const uint8_t *stat=*(const uint8_t *const *)(targets[i].entity+0xb0u);
+            if(readable(stat,0x1b4u) && *(void *const *)stat==base+0x2d21e4u &&
+                *(const void *const *)(stat+0x10u)==targets[i].entity && stat[0x24u] && stat[0x30u] &&
+                isfinite(*(const float *)(stat+0x18u)) && *(const float *)(stat+0x18u)>0.0f)
+                frame.actors[i].visual_flags=SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE;
+            /* #54 research: host monster CPosition and render matrix, 1/s each
+             * (4/s with Research54, plus arbiter state, HP and AI target). */
+            SudekiMpLanStoryResearch54Monster(0u,targets[i].identifier,frame.actors[i].position);
+            if(monster_pos_due(targets[i].identifier,0u)) {
+                const float *m=readable(targets[i].object+0x90u,64u)?(const float *)(targets[i].object+0x90u):NULL;
+                const uint8_t *arb=readable(targets[i].entity+0x90u,4u)?*(const uint8_t *const *)(targets[i].entity+0x90u):NULL;
+                /* CTargeter = entity+0xAC component, +0x54 current target; CAiUnit
+                 * (entity+0x94) +0xC0 is the AI's own choice (S3 research). */
+                const uint8_t *ai=readable(targets[i].entity+0x94u,4u)?*(const uint8_t *const *)(targets[i].entity+0x94u):NULL;
+                const uint8_t *tg=readable(targets[i].entity+0xacu,4u)?*(const uint8_t *const *)(targets[i].entity+0xacu):NULL;
+                char ai_target[16],tg_target[16];
+                SudekiMpLanStoryResearch54Name(readable(ai,0xc4u)?*(void *const *)(ai+0xc0u):NULL,ai_target);
+                SudekiMpLanStoryResearch54Name(readable(tg,0x58u)?*(void *const *)(tg+0x54u):NULL,tg_target);
+                SudekiMpLogFormat("lan_story_world event=monster_pos side=host identity=%08lx pos=%.2f,%.2f,%.2f matrix=%.2f,%.2f,%.2f clip0=%08lx entity=%p hp=%.1f arb50=%08lx arb58=%08lx ai_target=%s targeter_target=%s ms=%lu\r\n",
+                    (unsigned long)targets[i].identifier,(double)frame.actors[i].position[0],(double)frame.actors[i].position[1],
+                    (double)frame.actors[i].position[2],m?(double)m[12]:0.0,m?(double)m[13]:0.0,m?(double)m[14]:0.0,
+                    (unsigned long)frame.actors[i].clip[0],(void *)targets[i].entity,(double)frame.actors[i].hit_points,
+                    readable(arb,0x5cu)?(unsigned long)*(const uint32_t *)(arb+0x50u):0ul,
+                    readable(arb,0x5cu)?(unsigned long)*(const uint32_t *)(arb+0x58u):0ul,ai_target,tg_target,(unsigned long)GetTickCount());
+            }
+        }
+        if(!pose_read) {
             if(!ranged_pose_fallback(&targets[i],old,party->host_tick,&frame.actors[i])) {
                 error=ERROR_NOT_SUPPORTED; goto fail;
             }
@@ -1122,6 +1401,9 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
     return finish(TRUE,0);
 fail:
     excluded_count=0;
+    /* Refuse this observation and retry on the next capture. A party pose
+     * failure must not remove every healthy monster for three seconds.
+     * Per-monster identity/pose refusals remain local to that actor above. */
     return finish(FALSE,error);
 }
 
@@ -1142,9 +1424,10 @@ static BOOL target_chain_still(const Target *t,const Registry *registry) {
     if(*(void **)(base+0x409d8cu)!=registry->owner ||
         !readable(registry->owner,0x40u) || *(uint32_t *)(registry->owner+0x34u)!=registry->count ||
         *(void **)(registry->owner+0x3cu)!=registry->entries ||
-        *(uint32_t *)(t->entity+0x34u)!=t->identifier ||
+        *(uint32_t *)(t->entity+0x34u)!=t->native_identifier ||
         *(void **)(t->entity+0x44u)!=t->position ||
         (t->kind==SUDEKIMP_LAN_STORY_WORLD_NPC_KIND && t->position!=t->entity+0x150u) ||
+        (t->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && (t->position<=t->entity || t->position>=t->entity+0x2000u)) ||
         (scenery(t) && t->position!=t->entity+0x210u) ||
         !writable(t->position,0x104u) || *(void **)t->position!=base+0x2cdefcu ||
         *(void **)(t->position+0x10u)!=t->entity || *(void **)(t->position+0xb4u)!=t->wrapper ||
@@ -1212,6 +1495,7 @@ typedef struct VisualOutput {
     SudekiMpLanStoryCurveKind kind;
     unsigned floats;
 } VisualOutput;
+static unsigned binding_fail_line;
 static BOOL selector_binding_closed(const Target *t,unsigned index,const uint32_t *binding,
     VisualOutput *output);
 static BOOL curve_preflight(const Target *t,const void *chunk,const void *curve,
@@ -1343,9 +1627,55 @@ static BOOL child_resource_exact(const Target *t,unsigned slot,uint8_t *child,ui
     }
     return TRUE;
 }
+BOOL SudekiMpLanStoryWorldTrailOwner(void *renderer,void *child,unsigned slot) {
+    if(!base || active || !client_seen || host_seen || resource_fault || !trail_publication.valid ||
+        native_thread!=GetCurrentThreadId() || GetTickCount()-trail_publication.tick>100u ||
+        *(uint16_t *)(base+0x3c3150u)!=trail_publication.frame ||
+        *(void **)(base+0x408d10u)!=trail_publication.roster.world ||
+        !SudekiMpLanStoryObserverNativeRosterExact(&trail_publication.roster) ||
+        !readable(child,0x74u) || *(void **)child!=base+0x2dfb14u) return FALSE;
+    const Target *t=NULL;
+    for(unsigned i=0;i<client_count;++i) if(client_bound[i].target.renderer==renderer) {
+        if(t) return FALSE;
+        t=&client_bound[i].target;
+    }
+    if(!t || t->character>=4u || trail_publication.roster.actors[t->character]!=t->entity) return FALSE;
+    Registry registry; unsigned found=0,character; uint16_t kind; uint8_t *model;
+    if(!registry_capture(&registry)) return FALSE;
+    for(unsigned i=0;i<registry.count;++i) if(registry.entities[i]==t->entity) ++found;
+    if(found!=1u || !entity_identity(t->entity,&trail_publication.roster,&character,&kind,&model) ||
+        character!=t->character || kind!=t->kind || model!=t->model ||
+        !target_chain_still(t,&registry) ||
+        !child_resource_exact(t,slot,child,*(uint8_t **)((uint8_t *)child+0x14u))) return FALSE;
+    return registry_still(&registry);
+}
+static struct {unsigned valid,index,count,flags,slot;} mcon_shader_probe;
+static void mcon_material_inventory(const Target *t,uint8_t *manager,unsigned count) {
+    static struct {uint32_t flags; unsigned token;} seen[64]; static unsigned logged;
+    static DWORD last_at;
+    if(t->character!=2u || logged==64u || !SudekiMpLogResearchEnabled()) return;
+    DWORD now=GetTickCount(); if(last_at && now-last_at<1000u) return; last_at=now;
+    uint8_t **originals=*(uint8_t ***)(manager+4u);
+    if(!readable(originals,count*sizeof(*originals))) return;
+    /* The caller proved the skin/resource owner. Read the entire original
+     * table before an individual output can refuse, so one layout does not
+     * conceal the next. This diagnostic never admits a native operation. */
+    for(unsigned token=0;token<count && logged<64u;++token) {
+        uint8_t *material=originals[token],*d;
+        if(!readable(material,0x40u) || *(void **)material!=base+0x2deb7cu ||
+            !readable(d=*(uint8_t **)(material+4u),0x30u) || *(void **)d!=base+0x2deb70u) continue;
+        uint32_t flags=*(uint32_t *)(d+8u); BOOL known=FALSE;
+        for(unsigned i=0;i<logged;++i) if(seen[i].flags==flags && seen[i].token==token) known=TRUE;
+        if(known) continue;
+        seen[logged].flags=flags; seen[logged++].token=token;
+        SudekiMpLogFormat("lan_story_world event=tal_material_inventory token=%u flags=%08lx textures=%lu constants=%lu\r\n",
+            token,(unsigned long)flags,(unsigned long)*(uint32_t *)(d+0xcu),(unsigned long)*(uint32_t *)(d+0x10u));
+    }
+}
 static BOOL mcon_output(const Target *t,uint8_t *owner,uint8_t *resource,unsigned token,
     unsigned argument,unsigned member,VisualOutput *output) {
     observe_stage("material_graph",t->identifier,token);
+    memset(&mcon_shader_probe,0,sizeof(mcon_shader_probe));
     /* The complete original/override graph is preflighted for every child by
      * material_children_closed, including children with an empty token list.
      * Immediate selector cleanup never prepares or replaces those materials. */
@@ -1355,6 +1685,7 @@ static BOOL mcon_output(const Target *t,uint8_t *owner,uint8_t *resource,unsigne
     if(!readable(manager,8u)) return FALSE;
     unsigned count=*(uint32_t *)manager;
     if(!count || count>MAX_CHILDREN) return FALSE;
+    mcon_material_inventory(t,manager,count);
     uint8_t **materials=*(uint8_t ***)(owner+0x20u);
     if(!materials) materials=*(uint8_t ***)(manager+4u);
     if(token>=count || !readable(materials,count*sizeof(*materials))) return FALSE;
@@ -1362,17 +1693,26 @@ static BOOL mcon_output(const Target *t,uint8_t *owner,uint8_t *resource,unsigne
     if(!writable(material,0x40u) || *(void **)material!=base+0x2deb7cu ||
         *(void **)(base+0x2deb7cu+4u)!=base+0x202e40u ||
         *(void **)(base+0x2deb7cu+8u)!=base+0x3b870u) return FALSE;
-    if(argument==3u && member==0u) {
-        /*5E6ED0 returns this scalar. Its flag update and consequent BONA
-         * material-flag aggregation are covered by MaterialOwnerExact. */
+    if(argument==0u && member<2u) {
+        /* D3D GetProperty (RVA202E40) delegates these two float4 colors to
+         * the base getter (RVA1E6ED0). They are inline material storage;
+         * neither case prepares a shader definition or invokes a callback. */
+        output->kind=SUDEKIMP_STORY_CURVE_COLOR; output->floats=4u;
+        return writable(material+(member ? 0x28u:0x18u),16u);
+    }
+    if(argument==3u && member<2u) {
+        /* RVA1E6ED0 returns the corresponding color's alpha scalar. Member
+         * zero's flag update and consequent BONA material-flag aggregation
+         * are covered by MaterialOwnerExact. */
         output->kind=SUDEKIMP_STORY_CURVE_SCALAR; output->floats=1u;
-        return writable(material+0x24u,4u);
+        return writable(material+(member ? 0x34u:0x24u),4u);
     }
     if(argument==0u && member>=2u && member<6u) {
         /* D3D602E40 returns a float4 shader constant. Require its authored
          * slot in BOTH the selected material and retained original; native
-         * preparation may replace the override with a clone. Missing slots
-         * enter6032C0 (definition replacement), which is not admitted. */
+         * preparation may replace the override with a clone. A missing slot
+         * is admitted through the read-only NULL branch or the separately
+         * proved SOL members3..5 expansion, including its derived cleanup graph. */
         uint8_t **originals=*(uint8_t ***)(manager+4u);
         if(!readable(originals,count*sizeof(*originals))) return FALSE;
         uint8_t *values[2]={material,originals[token]};
@@ -1382,7 +1722,17 @@ static BOOL mcon_output(const Target *t,uint8_t *owner,uint8_t *resource,unsigne
             if(!readable(d,0x30u)) return FALSE;
             unsigned n=*(unsigned *)(d+0x10u);
             uint32_t *mapping=*(uint32_t **)(d+0x2cu);
-            if(!n || n>4096u || !readable(mapping,16u) || mapping[member-2u]>=n ||
+            if(!readable(mapping,16u)) return FALSE;
+            mcon_shader_probe.valid=1u; mcon_shader_probe.index=i; mcon_shader_probe.count=n;
+            mcon_shader_probe.flags=*(uint32_t *)(d+8u); mcon_shader_probe.slot=mapping[member-2u];
+            if(mapping[member-2u]==UINT32_MAX) {
+                static const unsigned shifts[4]={0u,2u,6u,8u};
+                if(!((*(uint32_t *)(d+8u)>>shifts[member-2u])&3u) &&
+                    !SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)base,material,originals[token],member))
+                    return FALSE;
+                continue;
+            }
+            if(!n || n>4096u || mapping[member-2u]>=n ||
                 !memory(*(void **)(values[i]+0x38u),n*16u,i==0u)) return FALSE;
         }
         output->kind=SUDEKIMP_STORY_CURVE_COLOR; output->floats=4u; return TRUE;
@@ -1423,30 +1773,30 @@ static BOOL mcon_output(const Target *t,uint8_t *owner,uint8_t *resource,unsigne
 static BOOL selector_binding_closed(const Target *t,unsigned index,const uint32_t *binding,
     VisualOutput *output) {
     observe_stage("clip_target",t->identifier,index);
-    if(!readable(t->bank,0x74u)) return FALSE;
+    if(!readable(t->bank,0x74u)) { binding_fail_line=__LINE__; return FALSE; }
     unsigned event_count=*(uint32_t *)(t->description+0x1cu);
     unsigned control_count=*(uint32_t *)(t->description+0x18u);
     uint8_t *events=*(uint8_t **)(t->bank+0x70u),*definitions=*(uint8_t **)(t->bank+0x6cu);
     uint8_t *owners=*(uint8_t **)(t->renderer+0xa8u);
     if(!event_count || event_count>MAX_CHILD_ROWS || index>=event_count ||
         !control_count || control_count>MAX_CHILD_ROWS || !readable(events,event_count*12u) ||
-        !readable(definitions,control_count*8u) || !readable(owners,control_count*8u)) return FALSE;
+        !readable(definitions,control_count*8u) || !readable(owners,control_count*8u)) { binding_fail_line=__LINE__; return FALSE; }
     uint32_t *event=(uint32_t *)(events+index*12u);
     unsigned control=event[0];
-    if(control>=control_count) return FALSE;
+    if(control>=control_count) { binding_fail_line=__LINE__; return FALSE; }
     uint8_t *owner=*(uint8_t **)(owners+control*8u);
     unsigned token=*(uint32_t *)(owners+control*8u+4u);
     if(token==UINT32_MAX) return TRUE; /* native61F410 skips this binding */
     unsigned kind=*(uint32_t *)(definitions+control*8u)&0xffffu;
-    if(kind>1u || !readable(owner,0x28u)) return FALSE;
+    if(kind>1u || !readable(owner,0x28u)) { binding_fail_line=__LINE__; return FALSE; }
     unsigned children=*(uint32_t *)(t->bank+0x58u),slot=MAX_CHILDREN;
     uint8_t **child_array=*(uint8_t ***)(t->renderer+0x64u);
-    if(!children || children>MAX_CHILDREN || !readable(child_array,children*sizeof(*child_array))) return FALSE;
+    if(!children || children>MAX_CHILDREN || !readable(child_array,children*sizeof(*child_array))) { binding_fail_line=__LINE__; return FALSE; }
     for(unsigned i=0;i<children;++i) if(child_array[i]==owner) {
-        if(slot!=MAX_CHILDREN) return FALSE;
+        if(slot!=MAX_CHILDREN) { binding_fail_line=__LINE__; return FALSE; }
         slot=i;
     }
-    if(slot==MAX_CHILDREN) return FALSE;
+    if(slot==MAX_CHILDREN) { binding_fail_line=__LINE__; return FALSE; }
     if(kind==0u && *(void **)owner==base+0x2dfb14u) {
         uint8_t *morph=*(uint8_t **)(owner+0x14u);
         if(event[1]!=0u || !child_resource_exact(t,slot,owner,morph) ||
@@ -1455,42 +1805,70 @@ static BOOL selector_binding_closed(const Target *t,unsigned index,const uint32_
             *(void **)(base+0x2dfc30u+4u)!=base+0x224980u ||
             *(void **)(base+0x2dfc30u+8u)!=base+0x2249b0u ||
             !code_hash(0x224980u,48u,0x9d29beacu) ||
-            !code_hash(0x2249b0u,38u,0x5fe9ba5cu)) return FALSE;
+            !code_hash(0x2249b0u,38u,0x5fe9ba5cu)) { binding_fail_line=__LINE__; return FALSE; }
         uint32_t *description=*(uint32_t **)(morph+0x18u);
         uint8_t *rows=*(uint8_t **)(owner+0x18u);
         if(!readable(description,4u) || !*description || *description>MAX_CHILD_ROWS ||
             token>=*description || !writable(rows,*description*0xb0u) ||
-            !readable(rows-4u,4u) || *(uint32_t *)(rows-4u)!=*description) return FALSE;
+            !readable(rows-4u,4u) || *(uint32_t *)(rows-4u)!=*description) { binding_fail_line=__LINE__; return FALSE; }
         output->kind=SUDEKIMP_STORY_CURVE_SCALAR; output->floats=1u;
         return !binding || binding[0]==(uint32_t)(uintptr_t)(rows+token*0xb0u);
     }
-    if(*(void **)owner!=base+0x2dec74u) return FALSE;
+    if(*(void **)owner!=base+0x2dec74u) {
+        /* #54: a monster attack clip binds a visual event to a child of a
+         * class this validator does not model (live: every Kurian attack
+         * freeze). The host runs that child natively; for monsters only,
+         * admit it with no curve output (no preflight) and record its class. */
+        if(t->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) {
+            static uintptr_t logged[8]; static unsigned logged_count;
+            uintptr_t vt=(uintptr_t)*(void **)owner-(uintptr_t)base; BOOL seen=FALSE;
+            for(unsigned i=0;i<logged_count;++i) if(logged[i]==vt) seen=TRUE;
+            if(!seen && logged_count<8u) { logged[logged_count++]=vt;
+                SudekiMpLogFormat("lan_story_world event=monster_binding_admitted owner_vtable=%06lx kind=%u token=%u\r\n",
+                    (unsigned long)vt,kind,token); }
+            output->floats=0u; return TRUE;
+        }
+        binding_fail_line=__LINE__; return FALSE;
+    }
     uint8_t *resource=*(uint8_t **)(owner+0x10u);
-    if(!child_resource_exact(t,slot,owner,resource)) return FALSE;
-    if(kind==1u) return mcon_output(t,owner,resource,token,event[1],event[2],output);
+    if(!child_resource_exact(t,slot,owner,resource)) { binding_fail_line=__LINE__; return FALSE; }
+    if(kind==1u) {
+        BOOL accepted=mcon_output(t,owner,resource,token,event[1],event[2],output);
+        if(!accepted) {
+            static DWORD last_at; static unsigned reports;
+            DWORD now=GetTickCount();
+            if(reports<16u && (!reports || now-last_at>=1000u)) {
+                ++reports; last_at=now;
+                SudekiMpLogFormat("lan_story_world event=material_output_refused identifier=%08lx token=%u argument=%u member=%u shader_known=%u original=%u constants=%u flags=%08x slot=%08x\r\n",
+                    (unsigned long)t->identifier,token,event[1],event[2],mcon_shader_probe.valid,
+                    mcon_shader_probe.index,mcon_shader_probe.count,mcon_shader_probe.flags,mcon_shader_probe.slot);
+            }
+        }
+        return accepted;
+    }
     if(event[1]!=0u || *(void **)(owner+4u)!=base+0x2dedacu ||
         *(void **)(base+0x2dec74u+0xccu)!=base+0x2036b0u ||
         *(void **)(base+0x2dec74u+0xf8u)!=base+0x203750u ||
         *(void **)(base+0x2dedacu+4u)!=base+0x2058a0u ||
         *(void **)(base+0x2dedacu+8u)!=base+0x2058e0u ||
         !code_hash(0x2036b0u,83u,0x5e6df1b0u) || !code_hash(0x203750u,13u,0xa3ba83abu) ||
-        !code_hash(0x2058a0u,61u,0xd811648eu) || !code_hash(0x2058e0u,43u,0x8e6ace1eu)) return FALSE;
+        !code_hash(0x2058a0u,61u,0xd811648eu) || !code_hash(0x2058e0u,43u,0x8e6ace1eu)) { binding_fail_line=__LINE__; return FALSE; }
     /* This ATGT interface starts by returning a counted float buffer and
      * stops by zeroing it. It does not create objects or dispatch tasks. */
-    if(!readable(resource,0x88u)) return FALSE;
+    if(!readable(resource,0x88u)) { binding_fail_line=__LINE__; return FALSE; }
     uint8_t *header=*(uint8_t **)(resource+0x78u),*descriptors=*(uint8_t **)(resource+0x84u);
     uint8_t **nodes=*(uint8_t ***)(owner+0x1cu);
-    if(!readable(header,8u)) return FALSE;
+    if(!readable(header,8u)) { binding_fail_line=__LINE__; return FALSE; }
     unsigned count=*(uint32_t *)(header+4u);
     if(!count || count>MAX_CHILD_ROWS || token>=count || !readable(descriptors,count*8u) ||
-        !readable(nodes,count*sizeof(*nodes))) return FALSE;
+        !readable(nodes,count*sizeof(*nodes))) { binding_fail_line=__LINE__; return FALSE; }
     uint8_t *definition=*(uint8_t **)(descriptors+token*8u),*node=nodes[token];
-    if(!readable(definition,0xcu) || !readable(node,0x24u)) return FALSE;
+    if(!readable(definition,0xcu) || !readable(node,0x24u)) { binding_fail_line=__LINE__; return FALSE; }
     unsigned n=*(uint32_t *)(node+0x14u),extra=*(uint32_t *)(node+0x18u);
     uint8_t *allocation=*(uint8_t **)(node+8u),*values=*(uint8_t **)(node+0xcu);
-    if(!n || n!=*(uint32_t *)(definition+4u) || n>MAX_CHILD_ROWS || extra>MAX_CHILD_ROWS) return FALSE;
+    if(!n || n!=*(uint32_t *)(definition+4u) || n>MAX_CHILD_ROWS || extra>MAX_CHILD_ROWS) { binding_fail_line=__LINE__; return FALSE; }
     if(!writable(allocation,(2u*n+extra)*4u) || values!=allocation+(n+extra)*4u ||
-        !writable(values,n*4u)) return FALSE;
+        !writable(values,n*4u)) { binding_fail_line=__LINE__; return FALSE; }
     output->kind=SUDEKIMP_STORY_CURVE_WEIGHTS; output->floats=n;
     return !binding || binding[0]==(uint32_t)(uintptr_t)values;
 }
@@ -1620,26 +1998,39 @@ static BOOL close_float(float actual,float wanted,float tolerance) {
 static BOOL ranged_body_pose(const Target *t,const SudekiMpLanStoryWorldActor *a) {
     if(t->kind!=SUDEKIMP_LAN_STORY_WORLD_PC_KIND || t->character!=3u ||
         a->kind!=t->kind || a->identifier!=t->identifier || t->channel_count!=5u ||
-        a->clip[2] || a->clip[3] || a->state[2]!=192 || a->state[3]!=192 ||
-        a->blend[1]!=0 || a->blend[2]!=0 || a->state[0]!=0 ||
-        a->clip_occurrence[0] || a->clip_occurrence[1] || a->clip_occurrence[4]) return FALSE;
+        a->clip[3] || a->state[3]!=192 ||
+        a->blend[1]!=0 || a->state[0]!=0 ||
+        a->clip_occurrence[0] || a->clip_occurrence[1] ||
+        a->clip_occurrence[2] || a->clip_occurrence[4]) return FALSE;
     uint8_t *table=*(uint8_t **)(t->model+0xdc);
     if(!readable(table,0x414)) return FALSE;
-    unsigned semantic[6]={2,6,7,0x85,0x86,0x87};uint32_t handles[6];
-    for(unsigned i=0;i<6;++i) {
+    unsigned semantic[5]={2,0x85,0x86,0x87,0x98};uint32_t handles[5];
+    for(unsigned i=0;i<5;++i) {
         uint8_t *definition=*(uint8_t **)(table+0x14+semantic[i]*4);
         if(!readable(definition,0x28)) return FALSE;
         handles[i]=*(uint32_t *)(definition+0x14);
         /* The complete pose preflight already resolved each used wire clip
-         * in this fingerprinted bank. Do not rescan all126 headers six times
+         * in this fingerprinted bank. Do not rescan all126 headers seven times
          * on every body/aim publication merely to compare semantic handles. */
         if(!handles[i] || handles[i]==0x7ffffu) return FALSE;
     }
     BOOL idle=a->clip[0]==handles[0] && !a->clip[1] && a->state[1]==192 && a->blend[0]==0;
-    BOOL walk=a->clip[0]==handles[1] && a->clip[1]==handles[2] && a->state[1]==0;
+    BOOL fade=a->clip[2]==handles[0] && a->state[2]==0 &&
+        a->blend[2]>0 && a->blend[2]<1;
+    if(!fade && (a->clip[2] || a->state[2]!=192 || a->blend[2]!=0)) return FALSE;
+    if(fade && idle) return FALSE;
+    BOOL walk=FALSE;
+    if(a->state[1]==0 && a->clip[1]) for(unsigned motion=6;motion<=0xc;motion+=2) {
+        uint8_t *definition=*(uint8_t **)(table+0x14+motion*4);
+        if(!readable(definition,0x28) || a->clip[0]!=*(uint32_t *)(definition+0x14)) continue;
+        definition=*(uint8_t **)(table+0x14+(motion+1)*4);
+        if(readable(definition,0x28) && a->clip[1]==*(uint32_t *)(definition+0x14)) walk=TRUE;
+    }
     if(!idle && !walk) return FALSE;
     if(!a->clip[4]) return a->state[4]==192 && a->blend[3]==0;
-    return (a->clip[4]==handles[3] || a->clip[4]==handles[4] || a->clip[4]==handles[5]) &&
+    if(a->clip[4]==handles[4]) return a->state[4]==0 && a->time[4]==0 &&
+        a->rate[4]==0 && a->blend[3]==1;
+    return (a->clip[4]==handles[1] || a->clip[4]==handles[2] || a->clip[4]==handles[3]) &&
         (a->state[4]&1u)!=0;
 }
 static BOOL body_forward(const Target *t,const SudekiMpLanStoryWorldActor *a,float out[3]) {
@@ -1792,14 +2183,27 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
                 if(targets[i].character>=4u) {
                     unsigned probe[5]={0};
                     empty_clip_hit=FALSE; empty_channels=0;
+                    SudekiMpLanStoryWorldActor monster_pose;
+                    if(targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND &&
+                        !read_pose(&targets[i],&monster_pose)) {
+                        static unsigned monster_client_logs;
+                        if(monster_client_logs<16u) { ++monster_client_logs;
+                            SudekiMpLogFormat("lan_story_world event=monster_omitted side=client identity=%08lx stage=%s detail=%lu\r\n",
+                                (unsigned long)targets[i].identifier,stage?stage:"-",(unsigned long)stage_detail); }
+                        ++j; continue;
+                    }
                     if(!pose_supported(&targets[i],&frame->actors[j],probe)) {
                         /* Still request a missing clip (native residency path, its
                          * own fault policy); the object rejoins once loaded. */
                         (void)prepare_missing_resource(&targets[i],&registry,roster,exact,context);
-                        if(unsupported_logs<32u && targets[i].identifier!=last_unsupported) {
+                        if(unsupported_logs<400u && targets[i].identifier!=last_unsupported) {
                             ++unsupported_logs; last_unsupported=targets[i].identifier;
-                            SudekiMpLogFormat("lan_story_world event=scenery_unsupported identifier=%08lx policy=local_state\r\n",
-                                (unsigned long)targets[i].identifier); }
+                            SudekiMpLogFormat("lan_story_world event=scenery_unsupported identifier=%08lx kind=%04x stage=%s detail=%lu line=%u clips=%08lx,%08lx,%08lx,%08lx occ=%u,%u,%u,%u policy=local_state\r\n",
+                                (unsigned long)targets[i].identifier,(unsigned)targets[i].kind,stage?stage:"-",(unsigned long)stage_detail,binding_fail_line,
+                                (unsigned long)frame->actors[j].clip[0],(unsigned long)frame->actors[j].clip[1],
+                                (unsigned long)frame->actors[j].clip[2],(unsigned long)frame->actors[j].clip[3],
+                                frame->actors[j].clip_occurrence[0],frame->actors[j].clip_occurrence[1],
+                                frame->actors[j].clip_occurrence[2],frame->actors[j].clip_occurrence[3]); }
                         ++j; continue;
                     }
                 }
@@ -2080,6 +2484,16 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
                 !target_chain_still(t,registry)) goto fail;
         }
         if(!visible(t,a,forward)) { observe_stage("visible_matrix",t->identifier,0); goto fail; }
+        if(t->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && SudekiMpLogResearchEnabled()) {
+            SudekiMpLanStoryResearch54Monster(1u,t->identifier,a->position);
+            if(monster_pos_due(t->identifier,1u)) {
+                const float *m=(const float *)(t->object+0x90u);
+                SudekiMpLogFormat("lan_story_world event=monster_pos side=client identity=%08lx pos=%.2f,%.2f,%.2f matrix=%.2f,%.2f,%.2f clip0=%08lx refs=%u hp=%.1f ms=%lu\r\n",
+                    (unsigned long)t->identifier,(double)a->position[0],(double)a->position[1],(double)a->position[2],
+                    (double)m[12],(double)m[13],(double)m[14],(unsigned long)a->clip[0],(unsigned)t->entity[0x2bu],
+                    (double)a->hit_points,(unsigned long)GetTickCount());
+            }
+        }
         profile_add(4,profile_start); profile_start=profile_now();
         Target after;
         if(!target(t->entity,roster,&after,TRUE) || !same_target(t,&after)) goto fail;
@@ -2098,7 +2512,34 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         profile_add(5,profile_start);
     }
     if(!registry_still(registry) || !exact(roster,context)) goto fail;
+    trail_publication.roster=*roster;
+    trail_publication.frame=*(uint16_t *)(base+0x3c3150u);
+    trail_publication.tick=GetTickCount(); trail_publication.valid=TRUE;
     for(unsigned i=0;i<count;++i) client_bound[i].previous=frame->actors[i];
+    /* #54: host monster hits. Queue the HP drop per portable identity; the
+     * native damage call runs after this traversal (FlushMonsterDamage). */
+    for(unsigned i=0;i<count;++i) {
+        const Target *t=&prepared.targets[i];
+        if(t->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) continue;
+        float hp=frame->actors[i].hit_points;
+        unsigned slot=MAX_MONSTER_HP,free_slot=MAX_MONSTER_HP;
+        for(unsigned k=0;k<MAX_MONSTER_HP;++k) {
+            if(monster_hp[k].identity.identifier==t->identifier && monster_hp[k].identity.entity==t->entity) slot=k;
+            if(!monster_hp[k].identity.identifier && free_slot==MAX_MONSTER_HP) free_slot=k;
+        }
+        if(slot==MAX_MONSTER_HP) {
+            if(free_slot==MAX_MONSTER_HP) continue;
+            slot=free_slot;
+        }
+        SudekiMpStoryDamageIdentity id={t->entity,t->identifier,t->native_identifier,frame->epoch,frame->actors[i].generation};
+        if(!monster_hp[slot].identity.identifier || !monster_damage_bound(&monster_hp[slot].identity)) {
+            monster_hp[slot].stat_visible=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE)!=0;
+            monster_hp[slot].identity=id; monster_hp[slot].hp=hp; monster_hp[slot].pending=0.0f; continue;
+        }
+        monster_hp[slot].stat_visible=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE)!=0;
+        if(hp<monster_hp[slot].hp-0.01f) monster_hp[slot].pending+=monster_hp[slot].hp-hp;
+        monster_hp[slot].hp=hp;
+    }
     return finish(TRUE,0);
 fail:
     return finish(FALSE,error);
@@ -2140,16 +2581,156 @@ BOOL SudekiMpInitializeLanStoryWorld(HMODULE image) {
     base=b; SetLastError(ERROR_SUCCESS); return TRUE;
 }
 BOOL SudekiMpUninstallLanStoryWorld(void) {
-    if(active || (native_thread && native_thread!=GetCurrentThreadId())) {
+    if(active || damage_call_active || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        !monster_damage_restore()) {
         SetLastError(ERROR_BUSY); return FALSE;
     }
+    memset(monster_hp,0,sizeof(monster_hp)); memset(&damage_restore,0,sizeof(damage_restore));
     memset(host_bound,0,sizeof(host_bound)); memset(client_bound,0,sizeof(client_bound));
     memset(&recruitment,0,sizeof(recruitment));
     memset(&prepared,0,sizeof(prepared));
+    memset(&trail_publication,0,sizeof(trail_publication));
     native_thread=0; host_seen=client_seen=resource_fault=FALSE; next_generation=host_epoch=host_sequence=client_epoch=0;
     host_count=client_count=0; base=NULL; set_position=NULL; position_matrix=NULL;
     set_selector=NULL; set_rate=NULL; set_time=NULL; set_state=NULL; set_blend=NULL;
     world_set_forward=NULL; operation=stage="none"; last_stage=NULL;
     stage_identifier=stage_detail=last_identifier=last_detail=0; last_error=0; diagnostic_count=0;
     SetLastError(ERROR_SUCCESS); return TRUE;
+}
+
+/* #54: show host hits on the client's monster copies through the native
+ * CCombat::DoDirectDamage(float) (D3AE0, thiscall, RET 4: builds the native
+ * DamageStructure and runs the hit path: flash, numbers, stagger, HP). The
+ * component is the monster's own CCombat (vtable 2C8754, +0x10 owner). */
+/* Hit feedback lease (research report #54): 4D21D0 queues the floating
+ * number/health bar on CStatDisplay (*(entity+0xB0), vtable 2D21E4) and the
+ * red flash on CNewGameModelAnimation (*(entity+0x58), vtable 2C8504), but
+ * only the paused entity update 553240 animates them. Tick just those two
+ * natives for a few seconds after a replayed hit:
+ *   4DFAB0  EDI=anim, stack float dt, RET 4     (flash ramp/detach)
+ *   528FF0  stdcall(stat, timing{.., dt @ +0xC}), RET 8  (bar + numbers) */
+static struct { uint8_t *entity; DWORD started; SudekiMpStoryDamageIdentity identity; } feedback[MAX_MONSTER_HP];
+void *world_flash_fn __attribute__((used));
+static void __attribute__((naked,noinline)) flash_tick(void *anim __attribute__((unused)),uint32_t dt_bits __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\tpushal\n\tmovl 8(%ebp),%edi\n\tpushl 12(%ebp)\n\t"
+        "call *_world_flash_fn\n\tpopal\n\tpopl %ebp\n\tret\n\t");
+}
+typedef void (__stdcall *StatTick)(void *,const float *);
+void SudekiMpLanStoryWorldTickMonsterFeedback(void) {
+    static const uint8_t flash_entry[10]={0x8b,0x47,0x68,0x83,0xec,0x28,0xf6,0x40,0x0c,0x01};
+    static const uint8_t stat_entry[17]={0x55,0x8b,0xec,0x83,0xe4,0xf0,0x83,0xec,0x64,0x53,0x8b,0x5d,0x08,0x80,0x7b,0x30,0x00};
+    static DWORD last; DWORD now=GetTickCount();
+    float dt=last && now-last<200u?(float)(now-last)/1000.0f:0.016f; last=now;
+    if(dt>0.05f) dt=0.05f;
+    if(dt<=0.0f) dt=0.001f;
+    if(!base || GetCurrentThreadId()!=native_thread) return;
+    BOOL flash_ok=readable(base+0xdfab0u,10u) && !memcmp(base+0xdfab0u,flash_entry,10u);
+    BOOL stat_ok=readable(base+0x128ff0u,17u) && !memcmp(base+0x128ff0u,stat_entry,17u);
+    const uint8_t *owner=readable(base+0x409d8cu,4u)?*(const uint8_t *const *)(base+0x409d8cu):NULL;
+    unsigned count=readable(owner,0x40u)?*(const uint32_t *)(owner+0x34u):0u;
+    uint8_t *const *entries=readable(owner,0x40u)?*(uint8_t *const *const *)(owner+0x3cu):NULL;
+    if(!count || count>MAX_REGISTRY || !readable(entries,count*sizeof(*entries))) return;
+    world_flash_fn=base+0xdfab0u;
+    for(unsigned f=0;f<MAX_MONSTER_HP;++f) {
+        uint8_t *e=feedback[f].entity; if(!e) continue;
+        BOOL present=FALSE;
+        for(unsigned i=0;i<count && !present;++i) if(entries[i]==e) present=TRUE;
+        if(!present || !monster_damage_bound(&feedback[f].identity) ||
+            now-feedback[f].started>5000u || !readable(e,0x100u) || *(void **)e!=base+0x2d5fa0u) {
+            feedback[f].entity=NULL; continue; }
+        uint8_t *anim=*(uint8_t **)(e+0x58u),*stat=*(uint8_t **)(e+0xb0u);
+        BOOL flash_active=FALSE,stat_active=FALSE;
+        if(flash_ok && readable(anim,0x6cu) && *(void **)anim==base+0x2c8504u && *(uint8_t **)(anim+0x10u)==e) {
+            uint8_t *state=*(uint8_t **)(anim+0x68u);
+            if(readable(state,0x10u) && (state[0xcu]&1u)) {
+                uint32_t bits; memcpy(&bits,&dt,4); flash_tick(anim,bits); flash_active=TRUE; }
+        }
+        if(stat_ok && readable(stat,0x1b4u) && *(void **)stat==base+0x2d21e4u && *(uint8_t **)(stat+0x10u)==e) {
+            float timing[4]={0.0f,0.0f,0.0f,dt};
+            ((StatTick)(base+0x128ff0u))(stat,timing);
+            stat_active=readable(stat,0x4cu) && (*(uint32_t *)(stat+0x1cu) || *(uint32_t *)(stat+0x48u));
+        }
+        if(!flash_active && !stat_active && now-feedback[f].started>500u) feedback[f].entity=NULL;
+    }
+}
+BOOL SudekiMpLanStoryWorldMonsterDamagePending(void) {
+    if(damage_restore.lifted) return TRUE;
+    for(unsigned k=0;k<MAX_MONSTER_HP;++k) if(monster_hp[k].identity.identifier && monster_hp[k].pending>=0.5f) return TRUE;
+    return FALSE;
+}
+static float monster_damage_hp(uint8_t *e) {
+    uint8_t *stats=*(uint8_t **)(e+0x4cu);
+    return readable(stats,0x30u) && *(void **)stats==base+0x2cc064u &&
+        *(void **)(stats+0x10u)==e?*(float *)(stats+0x2cu):-1.0f;
+}
+BOOL SudekiMpLanStoryWorldFlushMonsterDamage(void) {
+    BOOL entered=FALSE;
+    /* Damage can retire components and grow the registry. Never carry the
+     * traversal's memory cache or a registry entries pointer across this call. */
+    if(!base || active || damage_call_active || GetCurrentThreadId()!=native_thread ||
+        !monster_damage_restore()) return FALSE;
+    for(unsigned k=0;k<MAX_MONSTER_HP;++k) {
+        if(!monster_hp[k].identity.identifier) continue;
+        if(!monster_damage_bound(&monster_hp[k].identity)) {
+            memset(&monster_hp[k],0,sizeof(monster_hp[k])); continue;
+        }
+        if(monster_hp[k].pending<0.5f) continue;
+        if(!SudekiMpStoryDamageCapture(base,&monster_hp[k].identity,&damage_restore,memory)) continue;
+        uint8_t *e=damage_restore.identity.entity,*arb=damage_restore.arbiter;
+        float amount=monster_hp[k].pending,host_hp=monster_hp[k].hp;
+        uint32_t identifier=monster_hp[k].identity.identifier;
+        float before=monster_damage_hp(e);
+        /* Native proximity refresh (4AFDD0) is paused on this client. Carry
+         * only the host's positive eligibility into its owned display before
+         * 529800 decides whether this hit may arm a floating number. Local
+         * display enable and the show-numbers option remain native gates. */
+        uint8_t *stat=readable(e,0xb4u)?*(uint8_t **)(e+0xb0u):NULL;
+        BOOL display_armed=SudekiMpStoryDamageArmDisplay(base,e,monster_hp[k].stat_visible,memory);
+        monster_hp[k].pending=0.0f;
+        float replay_amount=SudekiMpStoryNonlethalDamage(before,amount);
+        if(replay_amount<=0.0f) continue;
+        damage_call_active=TRUE;
+        SudekiMpStoryDamageLift(&damage_restore);
+        BOOL lifted=damage_restore.lifted;
+        entered=TRUE;
+        ((SudekiMpStoryDirectDamage)(base+SUDEKIMP_RVA_DIRECT_DAMAGE))(damage_restore.combat,replay_amount);
+        int proof=SudekiMpStoryDamageRestore(base,&damage_restore,
+            monster_damage_bound(&damage_restore.identity),memory);
+        damage_call_active=FALSE;
+        /* No feedback lease or diagnostic pointer walk survives lost identity. */
+        if(proof==SUDEKIMP_DAMAGE_EXACT) {
+            /* The local nonlethal budget must not replace the host's damage
+             * value in the number that native 529500 has just queued. */
+            stat=readable(e,0xb4u)?*(uint8_t **)(e+0xb0u):NULL;
+            if(memory(stat,0x1b4u,TRUE) && *(void **)stat==base+0x2d21e4u &&
+                *(void **)(stat+0x10u)==e && *(uint32_t *)(stat+0x48u)==1u)
+                *(int32_t *)(stat+0x74u)=-(int32_t)floorf(fminf(amount,100000000.0f)+0.5f);
+            unsigned slot=MAX_MONSTER_HP;
+            for(unsigned f=0;f<MAX_MONSTER_HP;++f) if(feedback[f].entity==e) slot=f;
+            for(unsigned f=0;f<MAX_MONSTER_HP && slot==MAX_MONSTER_HP;++f) if(!feedback[f].entity) slot=f;
+            if(slot<MAX_MONSTER_HP) { feedback[slot].entity=e; feedback[slot].started=GetTickCount();
+                feedback[slot].identity=damage_restore.identity; }
+        } else {
+            for(unsigned f=0;f<MAX_MONSTER_HP;++f) if(feedback[f].entity==e) feedback[f].entity=NULL;
+        }
+        static unsigned damage_logs;
+        if(damage_logs<400u) { ++damage_logs;
+            BOOL exact=proof==SUDEKIMP_DAMAGE_EXACT;
+            BOOL display_exact=exact && readable(stat,0x1b4u) &&
+                *(void **)stat==base+0x2d21e4u && *(void **)(stat+0x10u)==e;
+            SudekiMpLogFormat("lan_story_world event=monster_damage identity=%08lx amount=%.1f replay_amount=%.1f host_hp=%.1f combat=%p hp=%.1f->%.1f arb50=%08lx arb58=%08lx arb60=%02x lifted=%u identity_proof=%d restore_pending=%u host_display=%u display_armed=%u display_exact=%u display_enabled=%u display_active=%u display_timer=%.3f number_state=%lu numbers_option=%u\r\n",
+                (unsigned long)identifier,(double)amount,(double)replay_amount,(double)host_hp,(void *)damage_restore.combat,
+                (double)before,(double)(exact?monster_damage_hp(e):-1.0f),
+                (unsigned long)(exact?*(uint32_t *)(arb+0x50u):0u),
+                (unsigned long)(exact?*(uint32_t *)(arb+0x58u):0u),
+                (unsigned)(exact?arb[0x60u]:0u),(unsigned)lifted,proof,(unsigned)damage_restore.lifted,
+                (unsigned)monster_hp[k].stat_visible,(unsigned)display_armed,(unsigned)display_exact,
+                display_exact?(unsigned)stat[0x24u]:0u,display_exact?(unsigned)stat[0x30u]:0u,
+                display_exact?(double)*(float *)(stat+0x18u):0.0,
+                (unsigned long)(display_exact?*(uint32_t *)(stat+0x48u):0u),
+                readable(base+0x31f0f3u,1u)?(unsigned)base[0x31f0f3u]:0u);
+        }
+        if(damage_restore.lifted) return entered; /* Unknown ownership retains the lease for retry. */
+    }
+    return entered;
 }

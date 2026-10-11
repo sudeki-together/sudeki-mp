@@ -867,6 +867,25 @@ int SudekiMpLanArenaVisualOwnerValidForParty(
         SudekiMpLanPartyShieldOwnerValid(visual);
 }
 
+int SudekiMpLanStoryCastVisualOwnerValid(const SudekiMpLanArenaSpiritVfxSnapshot *v) {
+    if(SudekiMpLanPartyShieldOwnerValid(v)) return 1;
+    if(v && !v->skill_sequence && v->kind==SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT &&
+        (v->owner_actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+         v->owner_actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE)) return 1;
+    if(v && !v->skill_sequence &&
+        ((v->owner_actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE &&
+          v->kind>=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST && v->kind<=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_LAST) ||
+         (v->owner_actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE &&
+          v->kind>=SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_FIRST && v->kind<=SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_LAST))) return 1;
+    return v && !v->owner_actor_type && v->skill_sequence &&
+        ((v->kind>=SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE &&
+          v->kind<=SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_HIT) ||
+         v->kind==SUDEKIMP_LAN_STORY_VFX_SHIN_SPLITTER || v->kind==SUDEKIMP_LAN_STORY_VFX_AIM_ARC);
+}
+int SudekiMpLanVisualOwnerValidForPresentation(const SudekiMpLanArenaSpiritVfxSnapshot *v) {
+    return SudekiMpLanArenaVisualOwnerValidForParty(v) || SudekiMpLanStoryCastVisualOwnerValid(v);
+}
+
 static int spirit_vfx_entry_empty(
     const SudekiMpLanArenaSpiritVfxSnapshot *entry
 ) {
@@ -910,11 +929,12 @@ static int spirit_vfx_roster_valid(
             if (owner_seat == 2u) return 0;
         }
         if (entry->instance_sequence == 0u ||
-            !(party ? SudekiMpLanArenaVisualOwnerValidForParty(entry) :
-                SudekiMpLanArenaVisualOwnerValid(entry)) ||
+            !(party==2 ? SudekiMpLanStoryCastVisualOwnerValid(entry) :
+              (party ? SudekiMpLanArenaVisualOwnerValidForParty(entry) :
+                SudekiMpLanArenaVisualOwnerValid(entry))) ||
             entry->kind < SUDEKIMP_LAN_ARENA_SPIRIT_VFX_INITIATE ||
-            entry->kind > (party ? SUDEKIMP_LAN_PARTY_VFX_LAST :
-                SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST) ||
+            entry->kind > (party==2 ? SUDEKIMP_LAN_STORY_VFX_LAST :
+              (party ? SUDEKIMP_LAN_PARTY_VFX_LAST : SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST)) ||
             entry->phase_valid > 1u || !isfinite(entry->phase) ||
             entry->phase < 0.0f || entry->phase > 1000000.0f ||
             (!entry->phase_valid && entry->phase != 0.0f) ||
@@ -952,6 +972,32 @@ static int spirit_vfx_roster_valid(
 int SudekiMpLanArenaSpiritVfxRosterValid(
     const SudekiMpLanArenaSnapshot *snapshot
 ) { return spirit_vfx_roster_valid(snapshot, 0); }
+
+int SudekiMpLanStoryCastVfxRosterValid(const SudekiMpLanArenaSnapshot *snapshot) {
+    return spirit_vfx_roster_valid(snapshot,2);
+}
+
+int SudekiMpLanStoryCastVfxEntriesValid(uint32_t tick,uint16_t cast_sequence,
+    unsigned observed,unsigned count,const SudekiMpLanArenaSpiritVfxSnapshot *entries,unsigned capacity) {
+    if(!entries || observed>1u || count>capacity || (!observed && count)) return 0;
+    SudekiMpLanArenaSnapshot check={0};
+    check.host_tick=tick; check.seat[0].actor_type=SUDEKIMP_LAN_ARENA_TAL_TYPE;
+    check.seat[0].skill_sequence=cast_sequence;
+    check.seat[0].skill_kind=SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT;
+    check.spirit_vfx_observed=(uint8_t)observed;
+    for(unsigned start=0;start<capacity;start+=SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY) {
+        unsigned n=capacity-start;
+        if(n>SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY) n=SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY;
+        memset(check.spirit_vfx,0,sizeof(check.spirit_vfx));
+        memcpy(check.spirit_vfx,entries+start,n*sizeof(*entries));
+        unsigned active=count>start?count-start:0u;
+        check.spirit_vfx_count=(uint8_t)(active<n?active:n);
+        if(!SudekiMpLanStoryCastVfxRosterValid(&check)) return 0;
+    }
+    for(unsigned i=0;i<count;++i) for(unsigned j=0;j<i;++j)
+        if(entries[i].instance_sequence==entries[j].instance_sequence) return 0;
+    return 1;
+}
 
 static void write_spirit_vfx(
     uint8_t *output,

@@ -13,6 +13,28 @@ enum { MAX_MATERIALS=128u, MAX_TEXTURES=8u, MAX_BACKINGS=1024u, MAX_JOB_NODES=25
 typedef struct CodeIdentity { unsigned rva,size; uint32_t hash; } CodeIdentity;
 typedef struct Relocation { unsigned rva,target; } Relocation;
 static const CodeIdentity codes[]={
+    /* ShaderConstantEnsure */
+    {0x2032c0u,457u,0x551d4f50u},
+    /* ShaderDefinitionLookup */
+    {0x1e76d0u,86u,0x83d40160u},
+    /* SolDefinitionFactory */
+    {0x202a30u,501u,0xa3c8b529u},
+    /* SolDefinitionDelete */
+    {0x2014b0u,90u,0xf6ae8a78u},
+    /* DefinitionUnlink */
+    {0x1e4080u,75u,0xc92f74eau},
+    /* BaseDefinitionFactory */
+    {0x1fb7c0u,147u,0x0f6e1acbu},
+    /* WaterDefinitionFactory */
+    {0x216630u,42u,0x7b180985u},
+    /* TextureCount */
+    {0x201670u,83u,0xe717bf1eu},
+    /* ConstantCount */
+    {0x2016d0u,86u,0x401493b2u},
+    /* TextureMapping */
+    {0x201730u,148u,0xfb53df6fu},
+    /* ConstantMapping */
+    {0x2017d0u,83u,0x27627461u},
     {0x203910u,54u,0xadcad836u},
     {0x1e79d0u,253u,0x071e809eu},
     {0x202cb0u,81u,0xebb3098fu},
@@ -39,6 +61,11 @@ static const CodeIdentity codes[]={
     {0x215ec0u,31u,0x37ddc37au},
     {0x2038c0u,36u,0x4ee71e45u},
     {0x202e40u,240u,0x72ae6836u},
+    /* ShaderConstantAbsent: member dispatch, pure early return, jump table.
+     * Replacement also requires the closed SOL proof below. */
+    {0x2032c0u,69u,0x38ff63ddu},
+    {0x20347fu,10u,0x3d201f33u},
+    {0x20348cu,16u,0xe40a00f2u},
     {0x1e7380u,448u,0xd8a0258bu},
     {0x1e6ed0u,220u,0xd5cf2b24u},
     {0x206ad0u,74u,0x5b126e41u},
@@ -54,6 +81,28 @@ static const CodeIdentity codes[]={
     {0x1fa100u,75u,0x3528ae39u},
 };
 static const Relocation relocations[]={
+    {0x1e409eu,0x36b8b0u},
+    {0x1e40c6u,0x36b8b0u},
+    {0x1e76eeu,0x36b8b0u},
+    {0x1e7705u,0x3c3654u},
+    {0x1fb7eau,0x34fbd8u},
+    {0x1fb805u,0x34fbb0u},
+    {0x1fb820u,0x34fbc4u},
+    {0x1fb842u,0x34fbecu},
+    {0x2014b9u,0x2deb70u},
+    {0x2014d0u,0x2ddb64u},
+    {0x202b62u,0x323b40u},
+    {0x202b72u,0x323ad0u},
+    {0x202bcdu,0x2ddb64u},
+    {0x202be4u,0x36b8b0u},
+    {0x202beeu,0x36b8b0u},
+    {0x202bf4u,0x2deb70u},
+    {0x216649u,0x350058u},
+    {0x2032d3u,0x20348cu},
+    {0x20348cu,0x2032d7u},
+    {0x203490u,0x2032dbu},
+    {0x203494u,0x2032e2u},
+    {0x203498u,0x2032e9u},
     {0x202ce1u,0x2deb7cu},
     {0x202c85u,0x2deb7cu},
     {0x1fb770u,0x2de864u},
@@ -186,22 +235,46 @@ static DWORD verified_thread;
 static const char *failure_stage="none",*last_failure_stage;
 static unsigned failure_detail,last_failure_detail,failure_logs;
 static const void *last_failure_child;
+/* Reuse only OS range/protection answers inside one read-only owner walk.
+ * Never cache graph validity, identities, values or a successful inspection.
+ * The game-owned graph cannot allocate/free/reprotect on this thread during
+ * this walk. Resource-worker observations start a fresh scope under its lock. */
+enum { MATERIAL_REGIONS=32u };
+typedef struct MaterialRegion { uintptr_t lower,upper; DWORD access; } MaterialRegion;
+static MaterialRegion memory_regions[MATERIAL_REGIONS];
+static unsigned memory_region_count,memory_region_next;
+static BOOL memory_scope;
+static void memory_reset(void) { memory_region_count=memory_region_next=0u; }
 static void observe(const char *stage,unsigned detail) {
     failure_stage=stage; failure_detail=detail;
 }
 static BOOL memory(const void *pointer,size_t size,BOOL write) {
-    MEMORY_BASIC_INFORMATION m; uintptr_t p=(uintptr_t)pointer;
-    if(!pointer || !size || p>UINTPTR_MAX-size ||
-        VirtualQuery(pointer,&m,sizeof(m))!=sizeof(m) || m.State!=MEM_COMMIT ||
-        (m.Protect&(PAGE_GUARD|PAGE_NOACCESS))) return FALSE;
-    DWORD access=m.Protect&0xffu;
+    uintptr_t p=(uintptr_t)pointer; DWORD access=0; BOOL known=FALSE;
+    if(!pointer || !size || p>UINTPTR_MAX-size) return FALSE;
+    if(memory_scope) for(unsigned i=0;i<memory_region_count;++i)
+        if(p>=memory_regions[i].lower && p+size<=memory_regions[i].upper) {
+            access=memory_regions[i].access; known=TRUE; break;
+        }
+    if(!known) {
+        MEMORY_BASIC_INFORMATION m;
+        if(VirtualQuery(pointer,&m,sizeof(m))!=sizeof(m) || m.State!=MEM_COMMIT ||
+            (m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
+            p+size>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+        access=m.Protect&0xffu;
+        if(memory_scope) {
+            unsigned i=memory_region_count<MATERIAL_REGIONS?memory_region_count++:memory_region_next;
+            memory_region_next=(memory_region_next+1u)%MATERIAL_REGIONS;
+            memory_regions[i]=(MaterialRegion){(uintptr_t)m.BaseAddress,
+                (uintptr_t)m.BaseAddress+m.RegionSize,access};
+        }
+    }
     if(write) {
         if(access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
             access!=PAGE_EXECUTE_READWRITE && access!=PAGE_EXECUTE_WRITECOPY) return FALSE;
     } else if(access!=PAGE_READONLY && access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
         access!=PAGE_EXECUTE_READ && access!=PAGE_EXECUTE_READWRITE &&
         access!=PAGE_EXECUTE_WRITECOPY) return FALSE;
-    return p+size<=(uintptr_t)m.BaseAddress+m.RegionSize;
+    return TRUE;
 }
 static BOOL readable(const void *p,size_t n) { return memory(p,n,FALSE); }
 static BOOL writable(const void *p,size_t n) { return memory(p,n,TRUE); }
@@ -235,6 +308,163 @@ static BOOL slot(unsigned table,unsigned offset,unsigned method) {
     return readable(verified_image+table+offset,4u) &&
         *(void **)(verified_image+table+offset)==verified_image+method;
 }
+/* Closed SOL color/texture family used by Tal's material animation. Texture0
+ * and authored texture fields stay native; zero fields for members3..5 may
+ * each add one float4, in any order. Prove the whole
+ * reachable definition family before native evaluation, including a later
+ * output in the same pose. Other flag families still need their own proof. */
+static uint32_t sol_color_flags(uint32_t original,unsigned mask) {
+    static const unsigned shifts[3]={2u,6u,8u};
+    for(unsigned i=0;i<3u;++i)
+        if((mask&(1u<<i)) && !((original>>shifts[i])&3u)) original|=3u<<shifts[i];
+    return original;
+}
+static BOOL sol_colors(uint32_t flags,unsigned *count) {
+    /* The non-color fields at bits4/10 are retained authored textures.
+     * Bit23 selects the factory's second static layout, never an owned array.
+     * Authored bit13 is opaque here: the native factory preserves the key
+     * without changing its arrays. Derivation must retain it exactly. */
+    if((flags&~0x802ffcu)!=0x80000001u ||
+        ((flags>>4u)&3u)>1u || ((flags>>10u)&3u)>1u) return FALSE;
+    *count=0;
+    static const unsigned shifts[3]={2u,6u,8u};
+    for(unsigned i=0;i<3u;++i) {
+        unsigned field=(flags>>shifts[i])&3u;
+        if(field==2u) return FALSE;
+        *count+=field==3u;
+    }
+    return TRUE;
+}
+static BOOL sol_cache(uint32_t flags,uint8_t **found) {
+    unsigned bucket=(flags+(flags>>8)+(flags>>16)+(flags>>24))&255u;
+    uint8_t **head=(uint8_t **)(verified_image+0x36b8b0u+bucket*4u);
+    uint8_t *seen[256]; unsigned count=0;
+    if(!writable(head,4u)) return FALSE;
+    *found=NULL;
+    for(uint8_t *p=*head;p;p=*(uint8_t **)(p+0x24u)) {
+        if(count==256u || !writable(p,0x28u) ||
+            (*(void **)p!=verified_image+0x2ddb64u && *(void **)p!=verified_image+0x2deb70u)) return FALSE;
+        for(unsigned i=0;i<count;++i) if(seen[i]==p) return FALSE;
+        seen[count++]=p;
+        uint32_t key=*(uint32_t *)(p+8u);
+        if(((key+(key>>8)+(key>>16)+(key>>24))&255u)!=bucket) return FALSE;
+        if(key==flags) { if(*found) return FALSE; *found=p; }
+    }
+    return TRUE;
+}
+static BOOL sol_definition(uint8_t *d,BOOL unreferenced) {
+    uint8_t *cached=NULL;
+    if(!writable(d,0x30u) || *(void **)d!=verified_image+0x2deb70u ||
+        !slot(0x2deb70u,0u,0x2014b0u)) return FALSE;
+    uint32_t flags=*(uint32_t *)(d+8u),refs=*(uint32_t *)(d+4u); unsigned colors;
+    if(!sol_colors(flags,&colors) || (!unreferenced && !refs) ||
+        refs>UINT32_MAX-MAX_MATERIALS ||
+        *(uint32_t *)(d+0x10u)!=colors ||
+        *(uint32_t *)(d+0x14u)!=9u ||
+        *(void **)(d+0x18u)!=verified_image+((flags&0x800000u)?0x323b40u:0x323ad0u) ||
+        !sol_cache(flags,&cached) || cached!=d) return FALSE;
+    uint32_t texture[6]; unsigned textures=0;
+    for(unsigned i=0;i<6u;++i) texture[i]=((flags>>(i*2u))&3u)==1u?textures++:UINT32_MAX;
+    if(*(uint32_t *)(d+0xcu)!=textures) return FALSE;
+    uint32_t constant[4]={UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX};
+    unsigned slot_index=0; static const unsigned shifts[3]={2u,6u,8u};
+    for(unsigned i=0;i<3u;++i) if(((flags>>shifts[i])&3u)==3u) constant[i+1u]=slot_index++;
+    unsigned second=(flags>>6u)&3u,third=(flags>>8u)&3u;
+    const uint32_t descriptor[7]={0x103u+((flags&0xcu)==4u?0x100u:0u),
+        second==1u?0x103u:second==3u?2u:0u,third==1u?0x103u:third==3u?2u:0u,
+        (flags&0x400u)?0x103u:1u,(flags&0x10u)?0x103u:0u,
+        (flags&0x10u)?0x103u:0u,(flags&0x10u)?0x103u:0u};
+    void *t=*(void **)(d+0x28u),*c=*(void **)(d+0x2cu),*v=*(void **)(d+0x1cu);
+    void *optional=*(void **)(d+0x20u);
+    if(flags&0x10u) {
+        uint32_t second_descriptor[7]; memcpy(second_descriptor,descriptor,sizeof(descriptor));
+        second_descriptor[2]=second_descriptor[3]=1u;
+        second_descriptor[4]=second_descriptor[5]=second_descriptor[6]=0u;
+        if(!writable(optional,sizeof(second_descriptor)) || optional==t || optional==c || optional==v ||
+            memcmp(optional,second_descriptor,sizeof(second_descriptor))) return FALSE;
+    } else if(optional) return FALSE;
+    return writable(t,sizeof(texture)) && writable(c,sizeof(constant)) && writable(v,sizeof(descriptor)) &&
+        t!=c && t!=v && c!=v && !memcmp(t,texture,sizeof(texture)) &&
+        !memcmp(c,constant,sizeof(constant)) && !memcmp(v,descriptor,sizeof(descriptor));
+}
+static BOOL sol_factories(void) {
+    uint8_t *p=*(uint8_t **)(verified_image+0x3c3654u);
+    unsigned seen=0;
+    /* Lookup stops at SOL's successful factory. Each earlier native factory
+     * rejects this flag family without allocation or callback. */
+    for(unsigned i=0;p && i<3u;++i) {
+        unsigned bit,table,method;
+        if(p==verified_image+0x34fc00u) {bit=1;table=0x2de8ccu;method=0x1fb7c0u;}
+        else if(p==verified_image+0x34fcb0u) {bit=2;table=0x2debe4u;method=0x202a30u;}
+        else if(p==verified_image+0x350040u) {bit=4;table=0x2df76cu;method=0x216630u;}
+        else return FALSE;
+        if((seen&bit) || !readable(p,8u) || *(void **)p!=verified_image+table || !slot(table,0u,method)) return FALSE;
+        seen|=bit;
+        if(bit==2) return TRUE;
+        p=*(uint8_t **)(p+4u);
+    }
+    return FALSE;
+}
+static BOOL sol_arrays_distinct(uint8_t *value,uint8_t *original) {
+    /* Counted native definitions separately own these heap arrays. */
+    for(unsigned i=0;i<4u;++i) for(unsigned j=0;j<4u;++j) {
+        static const unsigned offsets[4]={0x1cu,0x20u,0x28u,0x2cu};
+        void *a=*(void **)(value+offsets[i]),*b=*(void **)(original+offsets[j]);
+        if(a && a==b) return FALSE;
+    }
+    return TRUE;
+}
+static BOOL sol_derived(uint8_t *value,uint8_t *original) {
+    if(!sol_definition(original,FALSE) || !sol_definition(value,FALSE) ||
+        *(uint32_t *)(original+0x10u)!=0u || !sol_arrays_distinct(value,original)) return FALSE;
+    uint32_t old=*(uint32_t *)(original+8u),next=*(uint32_t *)(value+8u);
+    if((old&~0x3ccu)!=(next&~0x3ccu)) return FALSE;
+    /* Native can add a constant only to an absent field. Authored textures
+     * must remain textures in the same slots, not merely keep their count. */
+    static const unsigned shifts[3]={2u,6u,8u};
+    for(unsigned i=0;i<3u;++i) {
+        unsigned a=(old>>shifts[i])&3u,b=(next>>shifts[i])&3u;
+        if(a==1u?b!=1u:(b!=0u && b!=3u)) return FALSE;
+    }
+    return old!=next;
+}
+static BOOL sol_expansion_closure(uint32_t original) {
+    uint8_t *definitions[8]={0}; BOOL needs_factory=FALSE;
+    uint32_t flags[8]; unsigned count=0;
+    for(unsigned i=0;i<8u;++i) {
+        uint32_t next=sol_color_flags(original,i); BOOL seen=FALSE;
+        for(unsigned j=0;j<count;++j) if(flags[j]==next) seen=TRUE;
+        if(seen) continue;
+        unsigned at=count++; flags[at]=next;
+        if(!sol_cache(next,&definitions[at])) return FALSE;
+        if(!definitions[at]) { needs_factory=TRUE; continue; }
+        if(!sol_definition(definitions[at],TRUE)) return FALSE;
+        for(unsigned j=0;j<at;++j) if(definitions[j] &&
+            !sol_arrays_distinct(definitions[at],definitions[j])) return FALSE;
+    }
+    return !needs_factory || sol_factories();
+}
+BOOL SudekiMpLanStoryMaterialShaderOutputExact(HMODULE image,const void *pointer,
+    const void *original_pointer,unsigned member) {
+    if(!verified_image || image!=(HMODULE)verified_image ||
+        verified_thread!=GetCurrentThreadId() || memory_scope || member<3u || member>5u) return FALSE;
+    memory_reset(); memory_scope=TRUE;
+    uint8_t *value=(uint8_t *)pointer,*original=(uint8_t *)original_pointer;
+    BOOL result=FALSE;
+    if(!writable(value,0x40u) || !readable(original,0x40u) ||
+        *(void **)value!=verified_image+0x2deb7cu || *(void **)original!=verified_image+0x2deb7cu) goto done;
+    uint8_t *d=*(uint8_t **)(value+4u),*o=*(uint8_t **)(original+4u);
+    if(!sol_definition(o,FALSE) || !sol_definition(d,FALSE) ||
+        *(uint32_t *)(o+0x10u)!=0u || (d!=o && !sol_derived(d,o))) goto done;
+    if(!*(uint32_t *)(d+0x10u)) {
+        if(*(void **)(value+0x38u)) goto done;
+    } else if((*(uint32_t *)(value+0xcu)&0x200u) || !writable(*(void **)(value+0x38u),*(uint32_t *)(d+0x10u)*16u)) goto done;
+    if(!sol_expansion_closure(*(uint32_t *)(o+8u))) goto done;
+    result=TRUE;
+done:
+    memory_scope=FALSE; memory_reset(); return result;
+}
+
 typedef struct Backing {
     uint8_t *pointer;
     unsigned additions,retirements;
@@ -308,8 +538,10 @@ static BOOL backings_ready(const Proof *proof) {
     if(!readable(verified_image+0x3c3137u,1u) || verified_image[0x3c3137u]!=1u ||
         !writable(lock,sizeof(*lock))) { SetLastError(ERROR_INVALID_STATE); return FALSE; }
     if(!TryEnterCriticalSection(lock)) { SetLastError(ERROR_IO_PENDING); return FALSE; }
+    memory_reset();
     DWORD error=backings_ready_locked(proof);
     LeaveCriticalSection(lock);
+    memory_reset();
     SetLastError(error); return error==ERROR_SUCCESS;
 }
 static BOOL distinct_owned(void *value,void **originals,unsigned *original_count,
@@ -392,7 +624,10 @@ static BOOL material(Proof *proof,uint8_t *value,uint8_t *original,
         !slot(table,8u,0x3b870u) || !slot(table,0x50u,clone)) return FALSE;
     uint8_t *description=*(uint8_t **)(value+4u);
     if(!definition(proof,description,add,retire) ||
-        (original && *(void **)(original+4u)!=description)) return FALSE;
+        (original && *(void **)(original+4u)!=description &&
+            !sol_derived(description,*(uint8_t **)(original+4u)))) return FALSE;
+    if(original && *(void **)(original+4u)!=description &&
+        ((*(uint32_t *)(value+0xcu)&0x200u) || !writable(*(void **)(value+0x38u),*(uint32_t *)(description+0x10u)*16u))) return FALSE;
     unsigned count=*(unsigned *)(description+0xcu),constants=*(unsigned *)(description+0x10u);
     uint8_t **textures=*(uint8_t ***)(value+8u);
     observe("material_arrays",count);
@@ -511,7 +746,8 @@ static BOOL owner_exact(HMODULE image,const void *pointer,const void *resource_p
         observe("definition_counts",i);
         const Definition *d=&proof.definitions[i];
         uint32_t references=*(uint32_t *)(d->pointer+4u);
-        if(references<=d->retirements || references>UINT32_MAX-d->additions) return FALSE;
+        if(references<d->retirements || references>UINT32_MAX-d->additions ||
+            (references==d->retirements && (d->additions || !sol_definition(d->pointer,FALSE)))) return FALSE;
     }
     observe("owner_recheck",count);
     return *(void **)(resource+manager_offset)==manager && *(unsigned *)manager==count &&
@@ -519,9 +755,16 @@ static BOOL owner_exact(HMODULE image,const void *pointer,const void *resource_p
             (*(void **)override_pair==overrides && *(void **)(override_pair+4u)==flags)) && backings_ready(&proof);
 }
 BOOL SudekiMpLanStoryMaterialOwnerExact(HMODULE image,const void *child,const void *resource) {
+    /* Reject a foreign/reentrant caller before touching the scoped cache. */
+    if(!verified_image || image!=(HMODULE)verified_image ||
+        verified_thread!=GetCurrentThreadId() || memory_scope) {
+        SetLastError(ERROR_INVALID_DATA); return FALSE;
+    }
     SetLastError(ERROR_INVALID_DATA);
+    memory_reset(); memory_scope=TRUE;
     BOOL result=owner_exact(image,child,resource);
     DWORD error=result?ERROR_SUCCESS:GetLastError();
+    memory_scope=FALSE; memory_reset();
     if(!result && failure_logs<64u &&
         (failure_stage!=last_failure_stage || failure_detail!=last_failure_detail ||
             child!=last_failure_child)) {

@@ -2,6 +2,7 @@
 #define SUDEKIMP_LAN_ARENA_SPIRIT_VISUAL_HOST_H
 
 #include "network/lan_arena_protocol.h"
+#include "network/lan_story_vfx.h"
 #include <windows.h>
 #include <stdint.h>
 
@@ -21,6 +22,10 @@ typedef BOOL (*SudekiMpLanArenaSpiritVisualHostWitness)(
  * roster witness. No legacy seat globals or cast ownership are borrowed. */
 typedef BOOL (*SudekiMpLanPartyShieldHostWitness)(
     void *context, uint8_t actor_type, void **actor);
+/* Share the existing effect-finalization owner with saved-story casts.
+ * Install only before its first capture; no second hook or registry. */
+BOOL SudekiMpLanPartySpiritVisualHostSetShieldWitness(HMODULE module,
+    SudekiMpLanPartyShieldHostWitness witness);
 BOOL SudekiMpLanPartyShieldHostInitialize(HMODULE game_module,
     SudekiMpLanPartyShieldHostWitness witness, void *context);
 BOOL SudekiMpLanPartyShieldHostCapture(uint64_t session, uint32_t host_tick,
@@ -40,6 +45,17 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     void *tal, void *ailish,
     SudekiMpLanArenaSnapshot *output);
 BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE game_module);
+/* Saved-story owner supplies its own positively observed idle baseline and
+ * emission witness. No legacy seat globals or status discovery are consulted. */
+BOOL SudekiMpLanPartySpiritVisualHostCapture(uint64_t session,BOOL idle_baseline,
+    SudekiMpStoryVfx *output);
+
+/* Saved-story only: append current native ordinary Ailish/Elco missiles as
+ * parent-free visual models. Uses the existing weak lifetime journal, its
+ * incarnation and the same monotonic visual instance allocator. No native
+ * projectile is created or ticked on a client. Complete roster or failure. */
+BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *elco,void *ailish,
+    SudekiMpStoryVfx *output);
 
 /* Native-only namespace ownership, separate from the closed network VFX
  * resource roster. A generation identifies a retained actor namespace, not a
@@ -125,5 +141,9 @@ void SudekiMpSpiritVisualHostRegistryComplete(
 BOOL SudekiMpSpiritVisualHostRegistryCapture(
     SudekiMpSpiritVisualHostRegistry *registry, uint64_t session,
     SudekiMpLanArenaSnapshot *output, const SudekiMpSpiritVisualHostApi *api);
+
+BOOL SudekiMpSpiritVisualHostRegistryCaptureStory(
+    SudekiMpSpiritVisualHostRegistry *registry,uint64_t session,
+    SudekiMpStoryVfx *output,const SudekiMpSpiritVisualHostApi *api);
 
 #endif

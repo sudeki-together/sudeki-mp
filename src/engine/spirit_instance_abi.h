@@ -8,6 +8,8 @@
 unsigned int SudekiMpSpiritInstanceFaultSite(void);
 unsigned SudekiMpSpiritInstanceEnterFailure(void);
 unsigned SudekiMpSpiritInstanceNamedFail(void);
+/* Idle named-camera bank moved off a slot a native camera took (count). */
+unsigned SudekiMpSpiritInstanceNamedBankMoves(void);
 
 /* Native objects, NOT a copy of the active singleton and never wire data.
  * Construction/destruction is allowed only at the caller's verified idle
@@ -161,6 +163,17 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
  * to fall back to a different caster's global camera. */
 BOOL SudekiMpObserveSpiritInstanceNamedCamera(const SudekiMpSpiritInstance *instance,
     unsigned int kind,void **camera);
+/* Read-only snapshot of the retained REMOTE instance's actual selection.
+ * kind zero positively means native default; failure leaves output unchanged.
+ * Geometry comes from its constructor-owned render state, never the host view.
+ * No scope switch, native tick, task, or renderer selection is performed. */
+typedef struct SudekiMpSpiritCameraView {
+    unsigned kind;
+    float matrix[16],projection[3];
+} SudekiMpSpiritCameraView;
+BOOL SudekiMpSpiritInstanceViewAbiReady(void);
+BOOL SudekiMpObserveSpiritInstanceView(const SudekiMpSpiritInstance *instance,
+    SudekiMpSpiritCameraView *view);
 /* Route a remote caster's logical current-camera pointer without selecting
  * its camera for the local renderer or notifying local-view listeners.
  * Requires its private named pair and remote UI lease. Empty-name native

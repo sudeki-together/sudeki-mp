@@ -458,6 +458,21 @@ enum {
     SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP = 32,
     SUDEKIMP_LAN_PARTY_VFX_LAST = SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP
 };
+/* Saved-story additive cosmetic message only. LA42/SMP4 retain their old
+ * closed kind ranges and byte layouts. These IDs never authorize gameplay. */
+enum {
+    SUDEKIMP_LAN_STORY_VFX_SHIN_SPLITTER = 33,
+    SUDEKIMP_LAN_STORY_VFX_AIM_ARC = 34,
+    SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST = 35,
+    SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_LAST = 51,
+    SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_FIRST = 52,
+    SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_LAST = 66,
+    SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT = 67,
+    SUDEKIMP_LAN_STORY_VFX_LAST = SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT
+};
+int SudekiMpLanStoryCastVisualOwnerValid(const SudekiMpLanArenaSpiritVfxSnapshot *visual);
+/* Shared native presentation backend, after the profile-specific decoder. */
+int SudekiMpLanVisualOwnerValidForPresentation(const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 int SudekiMpLanPartyShieldOwnerValid(
     const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 int SudekiMpLanArenaVisualOwnerValidForParty(
@@ -533,6 +548,7 @@ typedef struct SudekiMpLanArenaSnapshot {
     uint8_t enemy_count;
     SudekiMpLanArenaEnemySnapshot enemies[SUDEKIMP_LAN_ARENA_MAX_ENEMIES];
 } SudekiMpLanArenaSnapshot;
+int SudekiMpLanStoryCastVfxRosterValid(const SudekiMpLanArenaSnapshot *snapshot);
 
 typedef struct SudekiMpLanArenaPacket {
     SudekiMpLanArenaPacketType type;
@@ -658,6 +674,8 @@ int SudekiMpLanArenaHandshakeValid(
     const SudekiMpLanArenaHandshakeExpectation *expectation,
     SudekiMpLanArenaRejectReason *reason
 );
+int SudekiMpLanStoryCastVfxEntriesValid(uint32_t tick,uint16_t cast_sequence,
+    unsigned observed,unsigned count,const SudekiMpLanArenaSpiritVfxSnapshot *entries,unsigned capacity);
 int SudekiMpLanArenaSequenceNewer(uint32_t candidate, uint32_t previous);
 int SudekiMpLanArenaConnectionAcceptPacket(
     SudekiMpLanArenaConnectionState *state,

@@ -5616,3 +5616,1177 @@ cleanup or rejection. The owner explicitly confirmed that the eight rotating
 orbs' flicker was resolved. This adds bounded visual `CONFIRMED_LIVE` for the
 client opening correction in this DXVK LAN profile; it does not establish
 generic effect coverage, adverse-network timing or disconnect behavior.
+
+## 2026-10-10 — #54 C1 native auto-target candidate
+
+B2's zone/loading/lighting gate is accepted by the owner based on the testing
+to date; no newly instrumented round trip is claimed. Work proceeds to C1.
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE:** the supported executable's
+CTargeter dispatcher retains a bit-1 target under the remote actor's AI
+override. Its ordinary melee leaf `0x4BA1C0` instead scores native candidates
+against the targeter's accepted heading and commits through `0x4B9D20`.
+The controller call at `0x428031` is a turn call, correcting that research lead
+in the plan. The native contract and fixture limitations are recorded in
+`docs/engine-functions.md` and `tests/story_target_refresh_image_test.c`.
+
+C1 runs the native melee leaf once per leased remote actor's ordinary-world
+control update, before body-idle movement filtering. Full current actor/key,
+generation, thread and roster ownership remain mandatory; disabled targeting,
+ranged, UI, skill and invalid-body states are skipped. Neutral frames preserve
+the accepted heading. No new native patch, AI/lead/controller swap, lock-on
+flag change or targeting algorithm is introduced. C2–C4 remain separate.
+
+DLL build, `StoryTargetRefreshImageTest` and `StoryInteractionGuardImageTest`
+passed on dirty `decbbc5`. The target regression reproduces the old retained
+opposite target and exercises real native selection, replacement and release;
+its world enumeration/position preparation/vector normalization are fixtures.
+The new acquisition/commit/exclusion byte contracts were checked by name, and
+every byte was independently corrupted to verify rejection. No visual parity
+or teardown/reconnect result is claimed; the owner combat gate remains open.
+
+The first C1 startup refused control because its added guard compared the
+observer world (`0x808D10`) to the distinct collision system (`0x808DD4`).
+The corrected guard proves both identities separately and bounds the collision
+registration vectors; the fixture now models distinct objects and tests refusal
+of missing/malformed collision storage. That regression passed. The corrected
+pair reached client input readiness and logged successful native target refresh
+for Tal (**CONFIRMED_LIVE**, startup/call completion only). C1 combat acceptance
+and quantitative swing-direction results remain pending.
+
+## 2026-10-10 — #54 C2 leased player turn candidate
+
+Profile: private saved-story LAN, host authoritative remote Tal. Base `decbbc5`
+with existing uncommitted prototype and C1/C2 changes; DLL SHA256 `d6fa911cce14057a51148d70f3828ad7e2555c00c84f10d544ed3fa7124c288b`.
+Supported executable SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+**CONFIRMED_STATIC:** the remote AI hold affects both `0x4B73D0`'s choice of
+turn step and its `0x4DBB20` CanTurn gate. Ghidra caller/branch inspection and
+exact-image disassembly establish the register/stack contract; see
+[the native contract](engine-functions.md#saved-story-leased-player-turning-54-c2-2026-10-10).
+Use two scoped branch decisions rather than transient writes to the native
+reference count. Movement inherits player CanTurn only inside the mod's own
+call. C3 AI movement and C4 input-during-attack behavior remain separate.
+
+**CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST:** DLL build,
+`StoryPlayerTurnImageTest`, `SkillTraceImageTest`, `StoryTargetRefreshImageTest`
+and `StoryInteractionGuardImageTest` passed. C2 fixture executes native player
+interpolation, restores register/FP/SSE state, tests game override and native
+attack gates, transactional install rollback, failed restore/retry, and
+coexistence with the Research54 turn callsites. Named validators were checked
+alongside `party_native_entries_exact` / `RVA_ARBITER_MOVEMENT`,
+`RVA_ARBITER_COMBAT_INPUT` and existing turn-facing observers; no validator
+was weakened to admit a patch overlap.
+
+An additional `StoryMeleeAdmissionTest` run fails its available-interaction
+BUSY expectation at line 68. The exact same failure was reproduced by building
+and executing the preserved pre-C2 wrapper source with the unchanged fixture.
+It predates this change and conflicts with the existing restorable interaction
+behavior. Do not report this suite as passing or change gameplay to satisfy it.
+
+**UNKNOWN:** live encounter turning parity and C2's zero unexpected AI-turn
+criterion await owner play-test and Research54 review. C1 quantitative facing
+checks are deferred by owner request to issue #56; qualitative acceptance
+does not prove those numbers.
+
+**C2 live follow-up:** candidate reached client input readiness after the
+owner-requested reload. A bounded settled Research54 slice recorded
+820 remote Tal player turns and zero AI turns across
+7 complete windows (14005 ms), with count1/mode0
+retained. Earlier/mixed windows are excluded. This is live native routing
+evidence, not an encounter-wide measurement or owner visual acceptance.
+The earlier blank-start host was observed waiting in Wine X11 pointer/focus
+capture; it later progressed without a C2 code/config change.
+
+
+### 2026-10-10 — #54 C3 AI movement candidate
+
+Dirty revision `decbbc5` plus preserved prototype and C3 changes. Supported
+EXE SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`;
+DLL SHA256 `f7b333d1ae16c00aed5316f7bf5c6dfb98fcbcc30ee87441264680e7cf5b7615`.
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE:** the AI movement update mixes
+command submission with fade/state bookkeeping. C3 redirects only its movement
+decision to the existing native player-cache path, and gates navigation-adjusted
+placement separately while retaining native cleanup. Script-style placements
+stay native. Native addresses, ABI, request-flag caller evidence, image guards
+and lease scope are documented in `docs/engine-functions.md`, C3 section.
+The alternative of skipping the whole node was rejected statically because it
+would suppress fade progression. No such candidate was launched.
+
+**CONFIRMED_TEST:** DLL build and StoryAiMovementImageTest passed. The new
+mapped-retail fixture covers movement/stop/snap suppression, native fallback,
+fade completion, intrusive cleanup, observer coexistence, machine state and
+install/restore failure paths. StoryPlayerTurnImageTest, SkillTraceImageTest,
+StoryTargetRefreshImageTest and StoryInteractionGuardImageTest also passed.
+These are selected tests, not a complete suite; the pre-existing melee-admission
+fixture debt noted under C2 remains unchanged.
+
+Research54 adds `ai_move_bypassed` and `ai_snap_bypassed` counters through an
+observation callback. It remains read-only and owns its existing callsites.
+Only the saved-story host control adapter enables C3; binding still requires
+the witnessed native update boundary. C4 attack movement is unchanged.
+
+**UNKNOWN (live acceptance pending):** reduced AI SetSpeed traffic and visible
+control improvement on the saved-story Ailish-host/Tal-client pair. Owner must
+check moving/stopping and opposite-side attacks through the ambush and later
+waves. Numerical swing parity remains in issue #56. No baseline commit or
+unrelated staging; stop at C3 owner gate.
+
+
+**CONFIRMED_LIVE (C3 startup/instrumentation only):** both roles loaded the
+candidate DLL and the client reached acknowledged `input_ready=1`. Across
+20 complete settled Research54 windows (40038 ms), after excluding the first
+mixed admission window, Tal recorded 6101 AI movement bypasses, zero AI
+SetSpeed calls and zero AI move calls. C2 also recorded 6101 player turns and
+zero AI turns in this slice. No AI snap bypass was recorded in this slice, so live snap suppression
+remains unproven. This is bounded startup
+instrumentation, not an encounter-wide measurement or visible smoothness proof.
+The client initially waited before its lobby; it progressed after the verified
+host window was temporarily minimized and client focus restored, without a
+code/config change. Both test windows were restored. **C3 owner gate is ready;
+visual acceptance is pending. Stop before C4.**
+
+### 2026-10-10 — Story combat feedback: monster blackout and casting bind
+
+**CONFIRMED_STATIC / CONFIRMED_LIVE (diagnosis):** an Ailish ranged-pose
+capture failure armed a global three-second monster exclusion even though the
+failure was not an enemy. Matching host/client gap bursts coincide with both
+Grotesque terminal sequences. Removed this timed exclusion; capture retries
+retain all existing native validation. D4's transform-only fallback remains
+open. The explosion's exact emitter/terminal transform is not yet established.
+
+**CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST:** story sky's rate-setter detour
+invalidated cast-light's `light_image_exact` check at `SetLightingChangeRate`,
+RVA `0x1F740`. The new coexistence regression fails before removal and passes
+afterward, without relaxing the guard. Target/rate state replication and the
+client restoration lease remain. See the named contract in
+`docs/engine-functions.md` and detailed evidence/limitations in
+`docs/coop-story-plan-54.md` (C3 play-test combat reports).
+
+The DLL and four focused tests pass. **CONFIRMED_LIVE (startup only):** the
+candidate now binds the host's sparse cast namespaces and reaches client input
+readiness. Ordinary skill selection, both-screen effects, beast alignment and
+enemy timing still require owner checks. Remote Spirit submission is absent in
+the story adapter and was not enabled. C3 visual acceptance remains pending;
+C4 has not started. Exact candidate identity is in the plan's progress record.
+
+**Additional CONFIRMED_LIVE:** one client Q skill selection reaches the host
+activation adapter and is rejected by native validation 2 (actor not ready),
+with no `Use` call; retained task routing subsequently drains. The exact failing
+readiness predicate is unknown. This is stronger than startup binding but still
+does not establish successful Skill Strike gameplay or both-screen effects.
+
+
+### 2026-10-10 — Saved-story remote Spirit submission and asynchronous root
+
+Implemented contained Q Spirit selection, actor-specific variant mapping,
+authenticated host dispatch, native SSP feedback and retained body/task/effect
+lifetime. Focused menu, transport, activation, ownership and exact-image tests
+pass. The first owner run starts Tal's Spirit but freezes him and drops native
+frame rate; it is explicitly not accepted. The ordinary skill attempt passes
+readiness but fails native SP validation.
+
+The delayed Spirit power-up root at 0x10DE5 must use the accepted cast's retained
+manager scope after request authority expires. Its regression fails before and
+passes after the correction. Native readiness helper 0xD0250 reads actor+0xA4
+combat state, not arbiter state; exact-image inert tests exercise that contract.
+See docs/engine-functions.md for native contracts and the co-op plan's Tal skill
+readiness / Spirit retention entry for candidate identity and the pending owner
+gate. No completed ordinary cast, Spirit completion or lag recovery is claimed.
+
+### 2026-10-10 — Spirit control recovery and remaining visual slowdown
+
+The next owner run confirms post-Spirit movement returns; native retained
+root/task/body drain is also observed. This supersedes the preceding
+completion-unknown status only for that tested action. Full client presentation
+and performance still fail owner acceptance. A client material-control refusal
+coincides with summon onset; its exact property was not present in the old
+trace. Controller service and pose capture do not account for the slower native
+frame interval.
+
+Verified inline native material color/alpha outputs were missing from preflight.
+The new exact-image regression fails before their addition and passes after,
+without permitting shader definition replacement. A second narrow change
+avoids namespace swapping for the exact native script timer-yield prefix,
+retaining full routing for executable tasks and ownership failures. Tests
+exercise the literal prefix and boundary cases. New bounded observations expose
+refused property arguments and scoped task cost for the next play-test.
+
+See the material/script contracts in docs/engine-functions.md and the plan's
+Spirit movement/visual entry for evidence levels, five passing focused checks,
+candidate identity and the outstanding owner gate. This is not yet a claim of
+full Spirit visualization, smooth frame rate or ordinary Skill success.
+
+
+## 2026-10-10 — Saved-story Tal Spirit presentation and scoped roster proof
+
+Supported executable SHA256:
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Dirty decbbc5 candidate; see the C3 progress entry in
+[the co-op plan](coop-story-plan-54.md) for owner evidence and acceptance limits.
+
+CONFIRMED_STATIC: saved-story previously retained native Spirit descendant
+lifetimes but did not publish their cosmetic roster. The existing observer
+seams Finalize18830, animation emissionE2810 and script parent call18F2B are
+shared with lifetime tracking. Saved-story now arms its own retained Tal
+witness after a positive inactive baseline, without legacy arena seat discovery.
+Client parent-free SFX clones reuse the established renderer and exact image
+resource closure. Cosmetic rows contain no native pointers or script requests.
+Authenticated optional message36 carries area/scene/stream/sequence fences;
+unknown, positive empty and populated rosters remain distinct. Failed cleanup
+retains dependencies. Client lifecycle/zone behavior still needs live exercise.
+
+CONFIRMED_EXACT_IMAGE: D3DMaterialGetProperty202E40 calls2032C0 for an absent
+shader constant. For members2,3,4,5, description+8 shifts are0,2,6,8. A nonzero
+two-bit field branches to20347F and returns -1 without heap/native callbacks;
+the getter returns NULL without flags/storage changes. Zero still reaches
+shader definition replacement and remains refused. Selected and retained
+original graphs must both prove admissible outputs. New exact guards cover
+entry2032C0, return20347F and dispatch20348C with relocation checks. Inert retail
+getter tests cover all members/field values plus mismatched original refusal.
+The owner's arg0/member3 rejection alone does not prove which branch it used.
+
+CONFIRMED_STATIC / CONFIRMED_TEST: EnterSpiritInstance/LeaveSpiritInstance
+transitions use bounded graph checks, retained witnesses and banking writes;
+no intervening native script executes. The approved story adapter now shares
+one fresh full roster proof within each transition only. Tests reject stale
+actor/generation/thread, recursive reuse and lost identity after script work,
+and clear the proof on failed enter/leave. Existing full native component and
+namespace validation stays active. Runtime timing separately records entry,
+native script and exit costs. No measured performance improvement is claimed.
+
+Ten focused checks passed as listed in the plan. Synthetic/fixture evidence
+does not establish visual completeness, native area cleanup or owner smoothness.
+
+
+C3 integration follow-up (same date): CONFIRMED_LIVE startup established host
+cosmetic publication; the first client integration was refused at paused_roster.
+CONFIRMED_STATIC: ClientPausedRoster calls ClientService, whose ordinary pause
+check is valid at the presentation seam. The post-controller path instead
+requires ClientResidencyCall to install its exact dispatch witness before that
+same roster/pause preflight. Runtime now uses its fresh controller scene for
+area correlation and acquires full native proof inside the residency call.
+StoryVfxDispatchTest covers actual helper sequencing with fake native APIs,
+including refusal/retry and preservation of unknown observations. This does
+not establish rendered Spirit visibility or smoothness.
+
+## 2026-10-10 — C3 Spirit startup pose, transition cost and missing client camera
+
+Same supported executable and dirty candidate as the preceding entry; no
+runtime change in this investigation. Owner reports Tal's model holds still at
+cast start, client playback appears slower, and the authored Spirit camera
+angles do not appear on the client. Testing used the existing host resource
+and combat toggles before the encounter.
+
+CONFIRMED_LIVE / CONFIRMED_STATIC: at startup the host changes Tal's base clip
+to selector75. Client preflight refuses Tal's token2 material binding at
+argument0/member3 and rejects the whole prepared world frame. The client
+therefore loses presented-frame admission while host snapshots continue to
+arrive. Cosmetic Spirit clones still arrive on their separate stream. Playback
+admission returns after the host moves to the later strike clip. This accounts
+for the missing startup pose; it is not evidence of a missing startup request
+or of camera obstruction. The logged shader field requires the replacement
+branch described in engine-functions.md, not the previously admitted NULL
+branch. Existing checks remain intact.
+
+CONFIRMED_LIVE diagnostic, bounded to this run: across42 logged one-second
+windows, median combined task namespace entry/exit time is about54% of the
+window; native step execution is about0.22% of the measured scoped time.
+This establishes a substantial transition cost, not an exact rendered speed
+ratio or proof that all client lag has one cause. Repeated neutral tasks also
+use the transition path while cast routing is active. No check has been
+removed or carried across script execution.
+
+CONFIRMED_STATIC: saved-story camera_select retains a remote caster's native
+InitCam/SkillCam selection through RouteSpiritInstanceRenderCamera, avoiding
+selection into the host's own view. StoryVfx carries only cosmetic instances,
+and StoryLocalControlPresent continues to construct the client's ordinary
+orbit view. There is no caster-camera publication/application path in this
+candidate. The host reports an active private Spirit camera during the cast;
+client camera completeness is unresolved. Native obstruction decisions must
+remain authoritative in any future view transport.
+
+Next bounded implementation work: prove and support the exact reachable
+shader-definition replacement and subsequent override lifetime, then test
+startup pose acceptance; measure and reduce namespace transition work with
+fresh ownership checks preserved; add owner-fenced native Spirit view playback
+and restoration. C3 visual acceptance remains open; C4 has not started.
+
+
+## 2026-10-10 — C3 startup material and transition-cost candidate
+
+Dirty codex/shared-simulation at decbbc5, saved-story profile; DLL SHA256
+`1c485e64a67fbafdc920a716d01127f9b5abcd81df0c81c8dcdeffff72154120`.
+Supported executable identity unchanged. This implements the two bounded
+corrections identified in the preceding investigation. Client Spirit camera
+publication remains absent and is not included in this candidate.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: admitted Tal's exact SOL member3
+replacement and derived-definition cleanup, using the closed factory/cache /
+reference/mapping proof described in engine-functions.md. All11 newly named
+native identities reject a byte mutation and accept the original supported
+image. Native inert-object execution covers creation, zeroed output, later
+color storage, original preservation, deletion/cache unlink and retry. Wrong
+ownership, mappings and borrowed expanded storage refuse. This removes the
+known preflight refusal in the modeled contract; live startup pose remains an
+owner check.
+
+CONFIRMED_TEST: transition-local OS range caching reduces the same namespace
+fixture's entry/exit VirtualQuery count from100 to12. Fresh identity checks,
+thread checks, failed-leave retention/retry and changed memory permissions
+remain active. No proof is reused across native work. Actual cast speed and
+live namespace timings have not yet been measured for this DLL.
+
+Build and11 focused suites passed: SpiritInstanceAbiTest,
+StoryMaterialImageTest, StoryMaterialOutputImageTest, StoryCastAdmissionTest,
+LanCastContextTest, LanArenaSpiritVisualHostTest, LanArenaSpiritVfxTest,
+StoryEffectTransportTest, StoryResidencyCallTest, StoryVfxDispatchTest and
+SkillTraceImageTest. Exact-image suites used the supported retail executable.
+These checks do not prove rendering, camera parity or full material teardown
+inside the game. C3 owner gate remains open; C4 has not started.
+
+
+## 2026-10-10 — C3 full color closure, summon cadence and recovery candidate
+
+Dirty codex/shared-simulation at decbbc5, saved-story profile; DLL SHA256
+`cdc3ad8cbcfcc706812234728d54096ad097d022f1bc25947e0ef4a5667e2e62`. Same supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+The owner rejected the prior candidate's startup: arms remain frozen, summon
+playback clips/steps, movement returns several seconds after Tal reappears,
+and ending effects are missing. The previous member3-only correction was
+insufficient; C3 has not passed and C4 has not started.
+
+CONFIRMED_LIVE (diagnostic only): the next refused startup material output is
+member4 with flags80000001, after the previous candidate admitted member3.
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: the complete closed member3..5 SOL
+family is now proved, including all eight reachable definitions and six
+output orders; see engine-functions.md and structures.md. Native getter,
+factory, remapping and intermediate/final definition release execute on inert
+owned fixture objects. Every tracked allocation is released. The eleven
+named native routine guards accept the supported image and reject mutation.
+No rendered startup acceptance is inferred.
+
+CONFIRMED_STATIC: saved-story VFX publication was inside the100ms area snapshot
+branch and client servicing had a50ms throttle. The new path publishes and
+services at the controller cadence, bounded by15ms, independently of the sky
+snapshot. Each packet still needs fresh native area/scene/lease evidence.
+Successfully adopted duplicate packets no longer seek the same phase again;
+resource/adoption failures retry, and unknown state retains native instances.
+CONFIRMED_TEST: actual runtime helper fixture covers21ms publication and client
+updates, duplicate suppression, pending retry and failed scene cleanup.
+Host-roster lifetime authority and the wire format are unchanged.
+
+CONFIRMED_STATIC / CONFIRMED_TEST: movement and basic melee use positive native
+body/task drain without waiting for retained lighting to finish. New casts,
+transfer and teardown still require full drain. This is a candidate correction
+for recovery delay, not proof of its full cause. The melee fixture also had a
+stale expectation from the earlier interaction-available fix: available+1D9
+bit2 is admitted through the restoring native wrapper; pending+1D8 remains
+busy. That fixture expectation was corrected without changing the production
+interaction contract.
+
+The retail Tal variant1 emits generic initiation and the Tal summon; absence
+of a separate sample-script ending kind does not itself establish a lost
+emission. A bounded read-only summon trace now records host/native phase,
+clip duration and submodel count through the existing ownership proof. Ending
+visuals, summon smoothness, actual input-recovery delay and missing native
+client Spirit camera playback remain unresolved owner checks.
+
+Build and12 focused suites passed: SpiritInstanceAbiTest, StoryMaterialImageTest,
+StoryMaterialOutputImageTest, StoryCastAdmissionTest, StoryMeleeAdmissionTest,
+LanCastContextTest, LanArenaSpiritVisualHostTest, LanArenaSpiritVfxTest,
+StoryEffectTransportTest, StoryResidencyCallTest, StoryVfxDispatchTest and
+SkillTraceImageTest. Evidence levels are CONFIRMED_TEST and
+CONFIRMED_EXACT_IMAGE; native gameplay/rendering parity is not established.
+
+
+## 2026-10-10 — C3 client-only opening freeze: authored texture field
+
+Dirty codex/shared-simulation at decbbc5, saved-story profile; DLL SHA256
+`86f1df631bd268533d099d4c7268dc9f745dbcc9dcacc5ae26e37dae841bc850`. Supported executable identity unchanged.
+The owner still sees Tal pause at the beginning while the host animates.
+CONFIRMED_LIVE (diagnostic): incoming world/party frames continue during the
+client freeze, but material token5 argument0/member3 is refused with original
+flags80000101 and zero constants. Presentation stays refused across the
+opening and resumes around the change from native selector75 to114. This is
+a remaining client material proof gap, not evidence of a missing host cast.
+The prior three-color closure covered only originals without these additional
+texture fields and did not fix the complete opening pose.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: native expansion preserves authored
+texture fields1 while changing only absent fields0 to constant3. The proof
+now covers all eight original texture layouts and their27 reachable
+definitions, maintaining exact texture identity/order and native allocation,
+remapping, reference and deletion contracts. See engine-functions.md and
+structures.md. Field2, unrelated flag families, texture relocation, array
+aliases and borrowed derived constant storage remain refused. No guard was
+relaxed and no gameplay/camera/script behavior was changed.
+
+Build and three focused suites passed: StoryMaterialImageTest,
+StoryMaterialOutputImageTest and SkillTraceImageTest. The eleven named native
+shader checks pass exact-image and mutation refusal. The retail material
+fixture exercises all six output orders for every original layout, checks
+NULL texture outputs, preserves existing colors/textures and releases all
+tracked allocations. This is not rendered animation acceptance.
+
+C3 remains at the owner gate: repeat Tal's Spirit Strike and compare the full
+arm-opening motion from its first frame on both screens, then repeat once.
+Ending-effect and client Spirit camera parity remain unresolved. C4 has not
+started; unrelated dirty work is preserved.
+
+
+### Same-session correction: alternate SOL layout still held the whole world
+
+The immediately reloaded 27-definition candidate was rejected by the live
+check: Tal token4 argument0/member3 has flags80800501. Incoming frames still
+advance while atomic presentation refuses the material graph. The owner also
+observes the whole client world stop and resume with Tal at the next animation
+phase. This corroborates presentation refusal, not delayed host publication.
+The rejected candidate and its passing inert tests remain separate evidence.
+
+Current dirty decbbc5 candidate DLL SHA256
+`fd3971b332e40d1a7f43a5af38152e77cb1ce5af8f146b54e08840b08c1adc99` proves the same native SOL factory's two remaining
+texture fields (bits4/10) and alternate static layout (bit23), preserved across
+every expansion. CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: all64 original layouts,
+216 reachable definitions and six output orders per layout execute through
+retail factory/getter/destructor fixtures with complete allocation release.
+Optional descriptor contents and non-aliasing are checked; changed retained
+layout/texture fields, unknown modes and borrowed storage refuse. No native
+byte guard was relaxed. A bounded read-only inventory observes every Tal
+original material before the first individual-output refusal can hide others.
+Build and the same three focused suites pass, including all eleven named
+shader native byte checks. These tests do not establish rendered parity.
+C3 startup, repeat-cast and full-effect acceptance remain owner gates.
+
+
+Final inventory follow-up: all seven Tal originals use four flag keys:
+`80000001`, `80000101`, `80800501`, `80802505`. The last also retains bit13;
+its member4 expansion was the remaining live refusal. Native factory202A30
+preserves that bit in the cache key without changing descriptor arrays.
+The proof now retains it exactly, including a negative test for substituting
+it. The exact-image fixture covers128 original layouts,432 reachable
+definitions and all six output orders, including every observed Tal key.
+All tracked allocations are released; the same eleven named byte guards
+remain unchanged. This supersedes the insufficient216-definition candidate.
+
+Final dirty decbbc5 candidate DLL SHA256 `6de2a94f8ed64d817f30fed2196038af2d7748c922b757f6b014ce0eb180bf21`.
+Build and the three focused suites pass. Inventory and refusal evidence are
+CONFIRMED_LIVE diagnostics; the complete family tests are
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST. Owner startup/world-motion acceptance
+is still pending. Prior candidates were not accepted as resolved.
+
+CONFIRMED_LIVE diagnostic follow-up on the final candidate: two owner-triggered
+Spirit casts each traversed the roughly 5.25-second selector75 opening. All ten
+sampled client spectator records in those intervals reported `reason=presented`
+and `replica_applied=1`, with received frames advancing and 37–41 applications
+per sampling interval. Interval placement uses adjacent timestamped records.
+Neither material-output nor material-graph refusal occurred in the captured
+run. Both roles loaded the tested DLL; the requested combat/SP/SSP options
+were enabled. This proves continued application in the sampled opening
+intervals, not rendered smoothness, camera/end-effect parity or owner
+acceptance. C3 remains open.
+
+Owner follow-up confirms the opening freeze is resolved, the Spirit animation
+appears on both client and host, and playback is substantially smoother.
+This establishes owner visual acceptance for the opening fix. Lingering ending
+effects remain reported; their cause and lifetime parity are not yet established.
+Do not infer full C3 or client Spirit camera acceptance from this result.
+
+### 2026-10-10 — C3 return flash: one-shot ending candidate
+
+The owner narrows the remaining symptom to particles/light around returning
+Tal: the ending light stays bright across the scene, then disappears abruptly.
+Sampled world-light-manager current/target values remain equal on both peers.
+The summon renderer differs: the host finishes its one-shot clip near native
+time220, while the client's loop mode advances beyond it and wraps the sampled
+time to the beginning. Repeated host end samples therefore replay the opening
+portion until host roster removal. This supersedes the earlier, incomplete
+hypothesis that backward corrections alone explain the tail.
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: see the named native
+timing methods and fixture in `docs/engine-functions.md`. The candidate selects
+one-shot playback for Tal's observed summon using the native state setter,
+preserves native completion, catches up only forward and avoids seeking at
+the modulo boundary. The clone's entity lifetime remains host-owned; no new
+retirement timeout, private completion write or forced task cancellation.
+
+Dirty `decbbc5`, DLL SHA256
+`91d02523267ca3912efed41f6d70415576862d0ec8983545aec4d08a45845d1d`.
+Build, SpiritVisualTimingImageTest, LanArenaSpiritVfxTest,
+LanArenaSpiritVisualHostTest and SkillTraceImageTest pass. All three new named
+routine guards reject every-byte mutation. The broader raw-section fixture
+needed its original end-epsilon operand relocated; the production guard was
+kept strict. Existing visual tests cover host omission, unknown retention and
+cleanup retry. No live ending-fade acceptance yet; compare two casts and
+movement after Tal returns. Client Spirit camera remains a separate open item.
+
+CONFIRMED_LIVE diagnostic follow-up: two owner-triggered casts on the candidate
+reach native state `0x41` with absolute/sample time `219.999893`, hold that
+sample without repeated end seeks, then enter host-driven retirement once
+each. Both peers loaded the tested DLL; no material-graph refusal was logged.
+This establishes the intended timing change in gameplay but does not replace
+owner acceptance of the visible fade.
+
+
+### 2026-10-10 — C3 ending light accepted; client Spirit camera next
+
+CONFIRMED_LIVE owner acceptance: the ending light is now good after the
+owner replayed the sequence through its end. This closes the visible
+return-flash fade gate on the tested dirty `decbbc5` candidate, DLL SHA256
+`91d02523267ca3912efed41f6d70415576862d0ec8983545aec4d08a45845d1d`.
+Opening animation and both-peer effect visibility remain accepted. The
+owner also asked whether the ending switched scenes or reloaded; the agent
+did not observe that event, so its nature is UNKNOWN.
+
+The owner authorizes client Spirit Strike camera work next. C3 remains
+open for native camera selection/obstruction parity and restoration to the
+client's ordinary view, plus the sufficient-SP ordinary Skill check. C4
+has not started.
+
+
+### 2026-10-10 — C3 client Spirit camera candidate
+
+Owner selected camera parity after accepting the ending light fade.
+CONFIRMED_STATIC: the host's private Tal camera already follows native
+selection, while the saved-story client always presented its orbit view.
+The candidate observes that retained private camera and sends its geometry
+only to Tal's acknowledged owner. Selection/end changes follow the same
+presented world timeline; native obstruction choices remain authoritative.
+The client preserves its orbit, holds unknown camera observations, and
+restores on an observed ending or confirmed presentation-owner change.
+Host cutscenes take priority through an explicit restoration before borrowing
+the view. See the native identities and transport/lifecycle limits in
+`docs/engine-functions.md`, Remote Tal Spirit camera observation.
+
+Dirty `decbbc5`, DLL SHA256 `a2d4b18918737674372b00c08d0fbd715745a2565298eddce9dccc7e602cc1f1`.
+Build and seven focused checks pass: SpiritInstanceAbiTest,
+StoryCastViewTest, StoryCastViewNativeTest, StoryVfxDispatchTest,
+StoryActionTransportTest, StoryEffectTransportTest and SkillTraceImageTest.
+Five new native instruction checks were verified by name/RVA and every-byte
+mutation refusal. Tests cover interpolation/cuts, no early start/end, packet
+loss/reordering, stale/wrong control/actor leases, scene revision changes,
+foreign or read-only camera restoration with retry, repeated casts and Quit
+destruction. Initial fixture gaps (registry membership, scene heartbeat rules
+and C structure padding comparison) were corrected without relaxing native
+or transport guards. These establish CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST,
+not rendered camera acceptance.
+
+**Owner gate:** cast Tal's Spirit Strike in open space and compare the authored
+camera movement with native behavior; repeat near an obstruction where native
+play suppresses the cinematic. Check both start and ending transitions, return
+to the previous orbit heading/distance, movement afterward, a second cast and
+the following host cutscene. The host player's camera should keep its own
+view. C3 remains open, including the sufficient-SP ordinary Skill check; C4
+is not started.
+
+
+Camera candidate startup verified: both peers loaded the tested DLL, host
+cast ownership bound, and the client reached input-ready state. A native
+default-camera observation was captured on the host and received/applied on
+the client. Combat Mode, Infinite SP and Infinite Spirit are enabled. Host
+overlays were visually confirmed closed and client focus restored. This is
+startup/baseline evidence only; no cinematic camera visual acceptance is
+claimed. Stop at the camera owner gate above. The new findings and prior
+ending-light acceptance are saved in the graph and recalled successfully.
+
+
+### 2026-10-10 — C3 client Spirit camera accepted; ending spiral follow-up
+
+CONFIRMED_LIVE owner acceptance on the dirty `decbbc5` camera candidate
+(DLL SHA256 `a2d4b18918737674372b00c08d0fbd715745a2565298eddce9dccc7e602cc1f1`):
+client Spirit Strike camera angles are correct, including the native edge
+guard. This closes the owner camera-angle/obstruction gate for the tested
+Tal saved-story route. It does not establish untested disconnect behavior.
+
+The owner separately reports flicker in the ending pair of lights spiraling
+down to the ground. That effect remains unresolved; the previously accepted
+return-flash fade remains accepted. Preserve the live run before investigating
+playback and particle clocks. The apparent host map change at combat end has
+not been visually observed by the agent; examine scene/area/cinematic evidence
+before attributing it to a reload. C3 remains open, including the sufficient-SP
+ordinary Skill completion/control check. C4 has not started.
+
+
+### 2026-10-10 — C3 ending spiral particle-clock correction
+
+CONFIRMED_LIVE diagnostic evidence on the accepted camera candidate: the
+owner confirms flicker only on the client. A read-only paired capture of one
+owner cast sampled 262 summon observations per peer. Both main renderers
+reached one-shot completion at `219.999893`. The host's custom particle
+clocks held that sample; 21 client observations contained a near-full-duration
+particle delta after wrapping to approximately `0.6` and returning to the
+held end. The client fallback custom clock mistook an intentional model hold
+for a stopped clock. Native model playback then supplied the ending sample
+again. This is distinct from the earlier corrected main-renderer loop.
+
+The correction collects only native-driven particle instances under retained
+Tal summon weak leases, with exact root, child, resource slot and BONA timing
+ownership. The main manager independently confirms unique membership before
+excluding those instances from the supplemental custom clock. Native particle
+aging, host-owned lifetime and unrelated custom clocks remain in place. The
+list is freshly observed and consumed on the same verified game-thread seam;
+it is never retained. Failed ownership is unknown and rejects that cosmetic
+advance. No new hooks or protocol changes are introduced.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: five focused checks pass:
+SpiritVisualTimingImageTest, StoryEffectClockImageTest, LanArenaSpiritVfxTest,
+SkillTraceImageTest and StoryVfxDispatchTest. The native fixture reproduces
+the particle wrap/jump and verifies stable held samples after exclusion;
+independent clocks, invalid/duplicate ownership, resource mismatch, weak
+destruction, retained retirement and unchanged outputs on failure are covered.
+Four added byte checks are tested by name/RVA and every-byte mutation:
+VisualChildClockDispatch `2228D0`, ParticleBoneTimeBinding `1F9F70`,
+ParticleBoneQuery `1FA070`, ParticleModelTimeSet `231860`. Existing timing
+guards remain tested. Dirty `decbbc5`, DLL SHA256
+`ff13b600dd2da7fa4b3792fe3fe2394e230418511348df4ad8e0880688af381c`.
+
+The reported combat-ending map event is now narrowed by saved diagnostics:
+the host briefly enabled letterbox/cinematic mode and returned to normal
+within roughly half a second; the client followed that transition. Recorded
+area and scene epoch did not change and no additional load was recorded.
+This supports a brief scripted camera transition, not a recorded map reload;
+the agent still did not visually observe the original event.
+
+**Owner gate:** replay the ending on both screens; the descending pair of
+lights should stop flickering, retain the accepted fade and camera, and clear
+with the host. Repeat once and check ordinary hit particles still expire.
+Visual acceptance of this correction is pending. C3 remains open, including
+the sufficient-SP ordinary Skill completion/control check. C4 has not started.
+
+
+### 2026-10-10 — C3 spiral accepted; ordinary skills and melee presentation
+
+CONFIRMED_LIVE owner acceptance: ending spiral flicker is gone on the tested
+dirty `decbbc5` correction, DLL SHA256
+`ff13b600dd2da7fa4b3792fe3fe2394e230418511348df4ad8e0880688af381c`.
+The owner also confirms ordinary skills now fire. This does not close their
+full parity gate: Shin Splitter lacks dust and sword trails on the client;
+ordinary primary/secondary swings and combos also lack client sword trails.
+The initial report placed the missing directional/range cone on the host;
+the owner subsequently clarified it is missing on the client. Tal cannot
+move during the short skill aiming window. Investigate shared native presentation and
+phase-specific input ownership so other skills inherit the proper behavior.
+C3 remains open; C4 has not started. Owner handles game commands and controls.
+
+
+CONFIRMED_LIVE observation, same pre-candidate build: the owner clarified
+that the missing orange cone is on the **client**, superseding the earlier
+host-side report. The owner selected Shin Splitter from Q and confirmed it
+fires. Passive paired observation recorded host trail accumulation and bounds
+changing while the client's remained unchanged during replicated swing clips.
+The host created the Shin Splitter dust and aiming arc; neither was observed
+on the client. This proves the missing native presentations in that capture,
+not a visual acceptance of the correction below.
+
+CONFIRMED_STATIC correction: the contained client gives body children zero
+delta, freezing native trail history independently of replicated body pose.
+The existing ambient adapter now changes only the native trail child's zero
+delta after a fresh same-frame actor/model/registry/child/resource proof.
+It leaves the body animation and gameplay step contained. Separately, exact
+ordinary-cast lineage and two verified resources now enter the story cosmetic
+stream: Shin Splitter dust and its attack-zone arc. Client clones use the
+existing isolated listener, host transforms, one-shot playback and host
+retirement. Completed model-driven particle clocks retain the accepted
+spiral hold behavior. LA42/SMP4 packet layouts and kind admission are unchanged.
+
+Remote movement now follows the shared native ordinary-skill AIMING phase
+with positive remaining time. Other skills using that phase inherit this
+movement rule. Native execution flags and strict cast/drain ownership remain
+in force; other skill-specific visuals still require closed resource admission.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: the candidate builds with MinGW.
+Eleven focused executable targets pass under Wine: StoryTrailClockImageTest,
+StoryTrailOwnerImageTest, StorySkillVfxCodecTest, StoryCastAdmissionTest,
+StoryMeleeAdmissionTest, StoryVfxDispatchTest, LanArenaSpiritVfxTest,
+SpiritVisualTimingImageTest, LanArenaSpiritVisualHostTest, LanArenaProtocolTest
+and LanPartySessionTest (each prefixed `SudekiMP.` in the build).
+The image tests use the supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+The two new checks are verified by name/RVA plus every-byte mutation:
+TrailUpdateEntry `225760` and TrailChildDispatch `222A50`. The actual x86 shim
+passes inert stack/register argument tests. Rejected ownership, phase-bound
+movement, ordinary synchronous emissions, codec isolation, effect lifecycle
+and model-driven particle holds are covered. Existing protocol regressions
+pass. In-game hook teardown/retry and visual parity of this candidate are
+not yet tested.
+
+Candidate: dirty `decbbc5`, DLL SHA256
+`e8259d3dfa392749b083a3390f14b2eb17ae44fa724e1a8099655cb71d62ec45`.
+The candidate is saved separately; the running pair was not reloaded or
+changed. No game input was injected. The owner retains commands and controls.
+
+**Owner gate:** after loading this candidate on both peers, compare M1, M2
+and a combo for sword trails. Select Shin Splitter while armed and idle:
+compare its dust, sword trail and orange aiming arc, and walk/turn during its
+short aiming window. Check that the arc follows Tal, clears with the host,
+and execution/control recovery still match. Repeat the skill once; then
+confirm the accepted Spirit Strike camera, ending fade and spiral remain
+unchanged. C3 stays open until the owner accepts this pass. C4 has not started.
+
+
+### 2026-10-10 — C3 Shin Splitter accepted; ordinary skill camera candidate
+
+CONFIRMED_LIVE owner report: Shin Splitter fires and the previously reported
+effect/aiming issues are fixed. Both staged peers carry the skill-presentation
+candidate, dirty `decbbc5`, DLL SHA256
+`e8259d3dfa392749b083a3390f14b2eb17ae44fa724e1a8099655cb71d62ec45`.
+The owner now requests ordinary skill cinematic angles with the same native
+obstruction/edge behavior accepted for Spirit Strikes. This acceptance is
+specific to the reported Shin Splitter test; it is not a new blanket claim
+for all weapons, skills or maps.
+
+CONFIRMED_STATIC root cause: the host already routes ordinary skills through
+the retained native named-camera namespace, but story camera capture was
+explicitly limited to `spirit_started`. It published normal-camera kind 0
+for an ordinary skill even when the native observer selected InitCam or
+SkillCam. A new regression fails on that exact case before the correction.
+
+The correction permits either retained ordinary-skill or Spirit activity to
+publish the observed native selection. It preserves native obstruction/default
+choices, host-owned start/end timing, camera geometry and the existing client
+orbit restoration. It does not choose angles from a cast timer. This is the
+shared Tal skill path, not a Shin Splitter exception. Existing message 37,
+actor/scene/control fences, UNKNOWN handling, cutscene priority and host
+camera ownership remain unchanged. No new native hooks or byte guards.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: five focused targets pass under Wine
+following a successful MinGW build: `SudekiMP.StoryCastAdmissionTest`,
+`SudekiMP.StoryCastViewTest`, `SudekiMP.StoryCastViewNativeTest`,
+`SudekiMP.SpiritInstanceAbiTest` and `SudekiMP.SkillTraceImageTest`.
+The new fixture checks ordinary and Spirit default/InitCam/SkillCam selection,
+geometry, completion, recast, changed/unknown ownership, invalid geometry and
+unchanged outputs on refusal. Existing checks cover timeline cuts, transport,
+orbit restoration with retry and native camera ownership. The supported
+retail image SHA256 remains
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Existing native checks passed by name/RVA and every-byte mutation:
+`CCameraCtor.RenderStateSize` E72BF, `CCameraCtor.RenderStateAllocate` E72D1,
+`CCameraCtor.RenderStateConstruct` E72DD, `CCameraCtor.RenderStateResult` E72E2,
+and `CCameraCtor.RenderStateStore` E72FD.
+
+New candidate: dirty `decbbc5`, DLL SHA256
+`32239b59ddd0acdda4a20fa36412d2a61b5614f8ef73f71a76c4ecee625dfe4b`.
+Saved separately with an owner-run reload helper. The agent did not reload,
+stage into the running pair or inject game controls. In-game appearance and
+live teardown/retry of this candidate remain untested.
+
+**Owner gate:** load the candidate on both peers, then cast Shin Splitter in
+open space and near an obstruction/edge where native play suppresses the
+cinematic. Check the authored skill angles, native fallback, return to the
+previous camera heading/distance, aiming movement and effect cleanup. Repeat
+once; verify the accepted Spirit camera/edge behavior and the host player's
+independent view remain intact. C3 remains open; C4 has not started.
+
+
+### 2026-10-10 — C3 Shin Splitter camera accepted; roster coverage clarified
+
+CONFIRMED_LIVE owner report: the ordinary-skill camera correction worked for
+Shin Splitter. This accepts the reported test of the dirty `decbbc5` candidate,
+DLL SHA256 `32239b59ddd0acdda4a20fa36412d2a61b5614f8ef73f71a76c4ecee625dfe4b`.
+It does not establish every other skill, obstruction case, character or map.
+
+CONFIRMED_STATIC coverage: the camera gate applies to ordinary skills and
+Spirit Strikes, with no Shin Splitter slot check. Other Tal skills using the
+same native InitCam/SkillCam selection path inherit it, but their live results
+remain UNKNOWN. Story capture selects `caster[2]`; camera packet validation
+and host publication also require character 2. Ailish, Buki and Elco are
+therefore not covered by this client camera replication feature. Extending
+capture, validation and per-owner routing and testing each character remains
+necessary before claiming full-roster camera parity. No implementation scope
+was changed during this clarification; C3 remains open and C4 has not started.
+
+
+### 2026-10-10 — C3 full-roster Skill and Spirit camera candidate
+
+Owner priority: extend the accepted native cinematic camera behavior to Tal,
+Ailish, Buki and Elco, for both ordinary Skill Strikes and Spirit Strikes.
+This pass extends camera coverage in the saved-story direct-IP profile. It
+preserves each skill's authored choice of cinematic or normal camera; it does
+not add a cinematic to a move that has none. Other characters' effect assets
+and all individual skills' live behavior are not established by this pass.
+
+CONFIRMED_STATIC: the prior Tal-only restriction existed in three places:
+retained cast capture, camera-message validation and host peer publication.
+Capture now takes a character and observes that character's retained native
+camera bank, cast activity and sequence. It refuses an absent/stale actor and
+the host-local character. Runtime publication visits each roster slot
+independently, so an unknown or missing observation cannot suppress another
+character's camera. Both cast families use the same path.
+
+Camera packets accept the existing valid character range. The host sends each
+observation only to the ready peer whose acknowledged control fence owns that
+character. It cannot relabel one character's camera for another player. Scene,
+lease, actor-generation and control-transaction fences remain in force.
+Native obstruction/default selection, unknown-observation holds, host-cutscene
+priority and prior-orbit restoration remain unchanged. No native hook, byte
+signature, global ownership rule or wire layout was added or changed.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: MinGW builds the candidate and seven
+focused executable targets pass under Wine: `SudekiMP.StoryCastAdmissionTest`,
+`SudekiMP.StoryCastViewTest`, `SudekiMP.StoryCastViewNativeTest`,
+`SudekiMP.StoryVfxDispatchTest`, `SudekiMP.SpiritInstanceAbiTest`,
+`SudekiMP.SkillTraceImageTest` and `SudekiMP.LanPartySessionTest`.
+Coverage includes every roster character with both cast families; per-owner
+native default/InitCam/SkillCam observation; sparse/unknown captures; three
+simultaneous client camera streams with every character as host; independent
+end/restore; stale fences; release and reacquisition of ownership; restoration
+refusal/retry; and private native camera namespaces with no host-camera writes.
+The ownership test reacquires the same character; live character reassignment
+is not claimed. The loopback fixture was corrected to respect the existing
+scene heartbeat tick/revision contract; no production validation was relaxed.
+
+The supported retail executable SHA256 is
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Existing native checks pass by name/RVA against that image and every-byte
+mutation: `CCameraCtor.RenderStateSize` E72BF,
+`CCameraCtor.RenderStateAllocate` E72D1,
+`CCameraCtor.RenderStateConstruct` E72DD,
+`CCameraCtor.RenderStateResult` E72E2 and
+`CCameraCtor.RenderStateStore` E72FD.
+
+Candidate: dirty `decbbc5`, DLL SHA256
+`6c392e1e0a91f48816d428949e92c69178bd644fafd4dff1659968f5f55b78c0`.
+It is saved separately with an owner-run reload helper. The agent did not
+reload or stage into the running pair, inject game controls, or change the
+modmenu. Automated evidence is not full-roster visual acceptance. Live
+teardown/retry, transitions and character reassignment remain untested for
+this candidate.
+
+**Owner gate:** load the candidate on both peers. For each available roster
+character, use an ordinary skill and a Spirit Strike in open space and near
+an obstruction/edge where native play suppresses its cinematic. Compare the
+native camera choice, timing and return to the previous orbit; repeat a cast
+and check that the host player's view stays independent. Skills without an
+authored cinematic should keep the normal view. Check camera restoration
+across a later area/owner change when that route is available. Record each
+character and move tested; untested moves remain UNKNOWN. C3 remains open;
+C4 has not started.
+
+
+### 2026-10-10 — C3 roster camera and attack-effect verification tracked in #57
+
+At the owner's request, opened [issue #57](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/57)
+to check Tal, Ailish, Buki and Elco across ordinary Skill Strikes, Spirit
+Strikes, regular M1/M2 attacks and combos. It records camera/fallback checks
+separately from effect visibility, timing, targeting markers, trails,
+projectiles, impacts and cleanup on the casting client, host and other
+observers. Individual moves and weapons must be recorded; untested or locked
+moves remain pending.
+
+CONFIRMED_STATIC: the latest extension changes camera coverage. Effect
+replication has a separate closed resource set, including shared and named
+Tal/Buki/Elco Spirit assets plus Shin Splitter and its targeting arc. Existing
+asset support and trail-clock handling do not prove complete roster effect
+parity. Prior owner acceptance of the specific Tal tests is retained; this
+issue is not full-roster visual acceptance. No implementation, running game,
+DLL or modmenu was changed in this issue-recording pass. C3 remains open;
+C4 has not started.
+
+
+### 2026-10-10 — C3 native single-player comparison prepared
+
+The owner requests a logged base-game comparison: load New Brightwater,
+place the party at the same pre-ambush spot, and let the owner start combat.
+Added default-off `[StoryAreas] NativeResearch54=true` in the loader. This
+exclusive launch profile installs the existing service-only controller observer,
+read-only scene/roster and Research54 observers, and the existing one-time test
+placement. It starts no lobby or network session and installs no remote-control
+leases, C1/C2/C3 gameplay adapters, cast-routing or client presentation. Combat,
+party leadership and movement remain native. Save files are copied into a
+separate runtime prefix; the original saves and multiplayer pair are unchanged.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: MinGW build and
+`SudekiMP.SkillTraceImageTest` pass, including the existing service-only
+observer/lifetime tests and named native checks. No new patch seam or byte
+signature is introduced. The first startup was refused before gameplay because
+area-follow initialization checked `RVA_SWITCH_ZONE_NOW` (7990) and
+`RVA_ENTER_ZONE` (7970) after the scene observer had hooked them. Initialization
+now checks those native entries before installing their observer, matching the
+established runtime order; guards remain intact and the failed run is retained.
+
+CONFIRMED_LIVE startup only: the corrected candidate reports
+`profile=native_research54 network=false party=native movement=native`, and
+Research54 plus scene observations are arriving at the native title screen.
+Dirty `decbbc5`, DLL SHA256
+`60c60d5cc109ccd0d627de455a8aa6493717aa5a4203202ac26cf109522a61d4`;
+supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+The owner loads the save and triggers combat. Post-load placement, combat
+comparison and live teardown/retry are not yet accepted. C3's movement gate
+remains pending; C4 has not started. Full-roster camera/effect checks remain
+tracked separately in issue #57.
+
+
+Native comparison follow-up: the owner loaded New Brightwater. Native logging
+paused while the game lost focus to the chat; after focus returned, the target
+area became resident and the existing test placement reported two actors
+placed with zero refusals. This confirms post-load placement and continuing
+instrumentation, not combat parity. The owner now controls combat. Native
+leadership initially remains Ailish as stored in the save; Tal should be
+selected through the game's normal controls for the remote-Tal comparison.
+
+### 2026-10-10 — Native combat comparison identifies C4 movement differences
+
+See the same-date comparison entry in `docs/coop-story-plan-54.md` for
+candidate identity and evidence boundaries. CONFIRMED_LIVE instrumentation:
+native Tal continues controller movement submission during active melee,
+with speed parameters 1.0/1.5/1.8 and no movement-AI speed resets after the
+scripted intro in complete sampled windows. CONFIRMED_STATIC: current
+`SudekiMpLanStoryControlMove` still filters through `body_idle_common`;
+`SudekiMpLanPartyControlStoryMove` caps magnitude/speed at 1.0 and
+`story_control_stop` immediately stops. This is movement submission evidence,
+not proof that every native attack permits translation or that the client is
+a particular percentage slower. Historical co-op melee summaries show the
+C3 AI bypass active, but do not replace a current-build owner gate. No new
+code, native patch, gameplay action, or test was performed in this analysis.
+
+### 2026-10-10 — C4 movement candidate from the native comparison
+
+At the owner's request, implemented the movement differences identified by
+the C3 native comparison. C3 visual acceptance remains open; this is explicit
+authorization to prepare C4, not retrospective acceptance. Dirty `decbbc5`
+with the preserved prototype and this pass; DLL SHA256
+`711bdab26c99a2eb58c87f25327f5bb3a8e2019a71c94fe47487654ce9564cf3`.
+The supported executable remains SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: see **Saved-story C4 native movement
+contract** in `docs/engine-functions.md`. Ordinary movement no longer treats
+melee attack bit `0x1000` as a blanket hold. Each admitted remote movement
+request reaches native Move/CanMove with its existing native combo/cast gates.
+Neutral input calls native blended SetSpeed instead of the lifecycle stop.
+Menu, pause, cutscene, interaction, cast execution, actor/lease and drain
+checks remain. Native targeting receives unit direction while movement
+retains speed, avoiding rejection of valid scaled requests by the targeter.
+
+The input sample, client camera transform, movement codec and host now retain
+the native shaped magnitude. Finite scaled-axis bounds and a derived maximum
+world-vector length of `4.13` remain enforced. Saved-story gameplay profile
+advances from 19 to 20 so an older peer refuses at handshake rather than
+silently discarding movement above one. The 36-byte movement layout, party
+envelope, arena protocol and save files are unchanged. Both peers require the
+candidate. Research54 input summaries now record frames, fresh moving frames,
+held moving frames and timestamp so C4's held-share gate has a denominator;
+this does not measure translation refused internally by native CanMove.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: DLL build and eight focused tests pass:
+`StoryPlayerMovementImageTest`, `StoryMeleeAdmissionTest`,
+`StoryActionTransportTest`, `LanPartySessionTest`, `SkillTraceImageTest`,
+`StoryPlayerTurnImageTest`, `StoryAiMovementImageTest`, `StoryQuickInputTest`.
+The movement image test checks **C4_INPUT_SCALE**, **C4_LOCAL_SHAPE**,
+**C4_CONTROLLER_DEADZONE**, **C4_CONTROLLER_VECTOR**,
+**C4_CONTROLLER_MAGNITUDE**, **C4_MOVE_ARBITRATION**, **C4_BLEND_STOP**,
+**C4_CAN_MOVE**, and the shape constants by name with mutation refusal.
+It executes 22 native input cases and verifies native arbitration and blended
+release. The admission test preserves repeated movement submissions during
+melee, aiming movement, cast/menu/interaction holds and strict attack drain.
+Transport tests round-trip scaled movement through actual local peers, reject
+invalid magnitude/nonfinite data and reject the older gameplay profile.
+Existing hook restoration/refusal tests pass; no live teardown is claimed.
+
+The new boundary regression initially exposed a mistaken deadzone comparison,
+then x87 excess decimal precision; the final helper matches the native stored
+float boundary without changing executable guards. No running game, input,
+save, staged DLL or modmenu was changed. Candidate visual feel, numeric
+held-share comparison, current-build C3 movement acceptance and live retry
+remain pending. Full-roster effects/cameras remain tracked in issue #57;
+the beast explosion-position mismatch and delayed enemy attacks remain open.
+
+C4 owner-run follow-up (**CONFIRMED_LIVE instrumentation**): see the plan's
+entry **C4 owner run: movement admission matches; smoothness unresolved**.
+The ordinary-combat sample records zero mod-held movement among 9,525 fresh
+moving-input frames, native-range requested speeds, and no Tal movement-AI
+speed resets/turns/snaps in complete call windows. The client still advances
+the native frame counter at approximately 35/s median versus the host's 56/s.
+This supports the movement-admission changes while leaving visual smoothness,
+physical motion alignment and the cause of the rate difference unresolved.
+The scripted intro and ending Spirit are excluded from the ordinary-combat
+counts. No code or gameplay actions were changed during this inspection.
+
+### 2026-10-10 — C4 client performance: page-query hotspots and candidate
+
+The owner requests investigation and further improvement of the client/host
+update-rate gap. CONFIRMED_LIVE instrumentation on the C4 candidate: ordinary
+combat presentation windows have median mean costs of approximately 8.03 ms
+for applying the replicated world and 7.83 ms for the separate cosmetic-effect
+dispatch. The sampled party/world buffers remain populated. These phase costs
+do not establish zero network lock contention, RTT, rendered FPS or GPU cost.
+
+A separate bounded 12-second user-space CPU sample of the still-running pair
+after combat records 8,488 client-main-thread on-CPU samples. Its call chains
+include 2,121 samples in the containment module's readable-memory helper and
+1,872 in the particle module's helper (approximately 47% combined). The
+sample contains no dropped records. The helpers repeatedly call VirtualQuery
+for objects sharing mapped regions. This identifies substantial local
+validation overhead; it does not assign every remaining millisecond or prove
+networking/rendering irrelevant. The native comparison game remains open and
+was not closed or modified for this sample.
+
+Implemented fresh read-only page-access scopes in `registry_exact` and particle
+`topology`. Both retain the full object/value proof and discard the cache on
+every exit before native execution. The registry scope preserves an outer
+presentation scope's enabled state but empties its cache. No guards, gameplay
+pause references, clocks, native ownership, update rate or network layout were
+relaxed. See `docs/engine-functions.md`, **Saved-story validation cost: scoped
+page queries**, for the contract.
+
+Dirty `decbbc5` plus the preserved prototype, C4 and this pass. Candidate DLL
+SHA256 `cf66be37913a5bda489226093328ffdbff9a2b2b8a6be314c6bf485352994c53`;
+supported executable SHA256 remains
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: DLL build, `StoryClientRegistryTest`,
+`StoryEffectClockImageTest`, `StorySpawnTimingImageTest` and
+`SkillTraceImageTest` pass. Synthetic walks reduce page queries 528 to 3 for
+512 retained entities, and 320 to 3 for 318 particle instances. Tests preserve
+ownership/value mutation rejection, no-access/guard/free rejection, fresh
+permission observation, nested-scope cleanup and retry. Existing named
+`PARTICLE_CALL`/`PARTICLE_UPDATE` and `MODEL_CLOCK_CALL`/`MODEL_CLOCK_SET`
+contracts, model-call mutation refusal, hook rollback/restoration and the
+native-driven ending-clock hold regression pass unchanged. No live teardown
+is inferred from those tests.
+
+The candidate is saved but has not replaced the running pair. Performance
+improvement in live play, C3/C4 visual acceptance, effects/trail/sigil behavior
+and client containment across a later area change remain owner-gated. No input,
+reload, commit, reset, stash or unrelated staging occurred in this pass.
+
+### 2026-10-10 — Validation optimization: live checkpoint comparison
+
+Owner-authorized pair reload on dirty `decbbc5`, using the validation candidate
+SHA256 `cf66be37913a5bda489226093328ffdbff9a2b2b8a6be314c6bf485352994c53`.
+Both staged DLL identities match, configuration bytes are unchanged, both
+saved-story startups succeed, and the client acquires Tal with input ready.
+Previous DLLs and logs were retained. The separate native comparison game
+remains open. No game input was injected and no commit or Git cleanup occurred.
+
+CONFIRMED_LIVE instrumentation at the pre-ambush checkpoint: 11 seconds from
+the prior build and 22 settled seconds from the optimized build yield median
+native update-counter rates of 34.41 to 74.33/s on the client, versus 61.57 to
+60.58/s on the host. These contain 9/21 usable client one-second intervals
+and 9/20 host intervals; a wrapped 16-bit counter difference is divided by
+elapsed time, with intervals outside 0.5–2 seconds excluded. They are not
+rendered-FPS measurements or a matched combat replay.
+
+For client presentation windows wholly inside the selected bounds, median
+per-window mean cosmetic-dispatch cost drops from 6.777 to 0.390 ms, and
+replicated-world application from 7.773 to 6.897 ms (10 old / 20 new windows).
+Preflight and world-body costs remain approximately 3.6–3.7 and 2.6 ms;
+party/world buffers remain at 8 and all selected spectator samples present.
+The three complete new host input windows have no stale or held-moving frames,
+but also no moving input, so they cannot re-establish combat motion parity.
+
+Loading and a transient host-publication interruption during startup are
+outside the selected interval. The connection/control state recovered; the
+interruption's cause is UNKNOWN. Raw snapshots, interval bounds, hashes and
+analysis remain private. No new combat is present in this capture. The live
+checkpoint result supports the page-query cost diagnosis, while sustained
+combat pacing, visual effects and area-change containment remain owner-gated.
+
+### 2026-10-10 — Validation optimization: subsequent owner combat capture
+
+Same dirty `decbbc5` validation candidate and unchanged pair configuration as
+the checkpoint comparison above. The owner's subsequent encounter spans
+approximately 206 seconds in the sampled host combat flag. For ordinary
+combat, exclude the scripted intro through the first resumed input summary
+and stop at the final Spirit activation. The selected new interval covers
+179.792 seconds; the old comparison covers 182.425 seconds. CONFIRMED_LIVE
+instrumentation: median native update-counter rates are 35.05 to 66.73/s on
+the client and 56.21 to 55.83/s on the host. There are 179/178 usable client
+intervals before/after and 180/177 host intervals. Counter rates are not
+rendered FPS or position/animation alignment, and owner inputs differ between
+the two runs.
+
+Client presented windows have median per-window mean cosmetic-dispatch cost
+7.828 to 0.405 ms and world-application cost 8.059 to 7.326 ms (195/196 rows).
+This supports a substantial validation-cost reduction during combat, with
+the earlier client update-rate deficit absent in this sample. It does not
+remove the existing 50–66 ms target presentation buffer or prove zero latency.
+Party/world buffer counts remain 8. There are 41 transient `not_ready`
+presentation reports in the new interval, versus 29 previously, despite
+admitted input and populated buffers; duration, cause and visible impact are
+not established by these event counts.
+
+Thirty-five complete new host input windows total 175.292 seconds, 9,862
+frames, 7,303 moving-input frames, zero held-moving frames and one stale-input
+frame. The one stale window records a maximum input gap of 108 ms. Final
+Spirit activation and body-drained are observed outside the ordinary-combat
+comparison. Effects, physical motion, camera behavior and transition safety
+are not visually re-accepted from these logs. Raw snapshots, explicit bounds,
+analysis and hashes remain private. No source change or game input occurred
+during this read-only inspection; C3/C4 owner gates remain open.
+
+
+## 2026-10-10 — saved-story encounter music ownership
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE.** `CBattleScores` global RVA
+`0x409D80`; score Update-node subobject +8, ClusterListener subobject +0x30.
+`BattleScoreLoad` RVA `0x39560` takes ECX=this and one string argument
+(RET4, bool in AL), retires its previous emitter/cue through native Reset
+`0x39A00`, loads a registered native sound bank, and clears the battle flag.
+Its cluster battle listener `0x39AD0` takes ECX=this+0x30 and three arguments
+(RET12); the first two are unused, the third boolean sets score+0xAC and
+selects score+0x78 from peaceful +0x7C or danger +0x80. The listener itself
+only changes scalars. Update `0x391C0` advances the score's native audio.
+
+Cluster-enter parameters at score+0xA0/+0xA4/+0xA8 control native variation
+reset/ramp/hold; +0x84 and +0xAD hold its remaining time/phase. Replicating
+only the battle flag would leave a contained client's zero ramp duration and
+risk division by zero. The adapter transports validated curve and phase
+alongside the requested intensity and score. `BattleScoreIntensity` at
+`0x397E0` is unsuitable for this projection because it also replaces the
+peaceful default. No track assets or cursor synchronization are involved.
+
+**CONFIRMED_LIVE observation:** after the accepted castle-road encounter,
+host/client native score names differed (`BS_IllumCountry`/`BS_Brightwater`)
+and client cluster variation parameters were zero. **INFERENCE:** missing
+area-score and encounter listener delivery explains exploration music
+persisting on the client; hearing the candidate remains an owner gate.
+
+**CONFIRMED_TEST:** `StoryMusicImageTest` verifies named native guards,
+relocations and method slots, typed score/emitter/bank/pool/cue owners,
+actual native scalar danger entry/exit and refusal paths. It does not run
+native bank loading or audible playback. `StoryEffectTransportTest` covers
+new music fields, validation, atomic assembly and old-version refusal.
+See the encounter-music owner-gate entry in `docs/coop-story-plan-54.md`.
+
+
+## 2026-10-10 — Saved-story Tal combo UI and non-neutral cast-light construction
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE:** native accepted input reaches
+RVA D14D0 through call D06B0, with EAX = actor's typed melee component
+(actor+B8, component owner+10, vtable 2D4BD4). Stage+64 selects one of six
+input kinds at +68 and timing bytes at +A0. Native display maps weak/strong
+to 0/1 or mistimed 2/3, clears at stage zero, and appends up to three icons.
+It updates the global HUD only for the native party leader. Remote Tal needs
+his own copied display state rather than the host Ailish widget's contents.
+
+Reset D0440 takes EAX=component. Combo-window D0A10 takes ECX=component+3C
+and one callee-cleaned marker argument. The observation seam D0A3B is after
+any queued input dispatch; ESI still owns the subobject and [ESP+8] contains
+the marker. By the later D0A75 HUD call, ESI has already been restored to its
+caller, so that call cannot identify the component. D0A3B's seven displaced
+bytes are complete non-relative instructions. BukiReplicaNativeImageMatches
+still accepts its guarded entry prefixes and interrupt calls with all three
+new observers installed. No observation changes native admission or timing.
+
+Native HUD global 3C2FC4 / vtable 2CB784 has mode+48, flags+58, icon row
++1F4/+1F8/+1FC, blink clock+1EC/+1F0 and flags+200/+201, marker+202.
+Hide AED20 takes EAX=mode, ECX=HUD; Show AE9D0 takes EAX=mode, ESI=HUD;
+label AE7C0 and icon refresh AF110 take EAX=HUD. Existing native gizmos and
+blink update draw the replicated state. The story codec carries only plain
+validated UI state; full rows recover from missed packets without replaying
+pressed buttons. See StoryComboHudImageTest and StoryShotsTest for fixture
+scope and the plan's owner gate for the pending visible result.
+
+**CONFIRMED_STATIC / CONFIRMED_LIVE observation:** the captured cast-binding
+failure at `cast_lighting` preceded Ailish's KO. Authored ambush lighting has
+three active effects and RGB (0.6, 0.75, 1.1). The former cast-light validator
+incorrectly restricted these native gain values to [0,1] and demanded one
+neutral effect. Init 1F210 seeds a new manager from light-group publication
+404CAC, while 1F280 resets only that new manager. **CONFIRMED_TEST:** creation
+with this non-neutral, active world now preserves the complete world object,
+all effect records and publication; mismatched publication, negative or
+nonfinite values still refuse, and drained teardown succeeds. Whether a
+separate downed-leader restriction exists remains UNKNOWN pending the owner
+cast comparison. This corrects the earlier KO-causation suspicion.

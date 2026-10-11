@@ -189,7 +189,34 @@ int main(void) {
     memcpy(call_bytes,image+CL_PUBLISH_CALL,5); image[CL_PUBLISH_CALL+1]^=1;
     CHECK(!SudekiMpResetCastLightAbi() && light_image && light_publish_original);
     memcpy(image+CL_PUBLISH_CALL,call_bytes,5); CHECK(SudekiMpResetCastLightAbi());
-    delete_foreign=FALSE; remove_light(world,1); destroy(world,0);
+    /* Binding during the native ambush must preserve its active stack and
+     * current publication, including a blue gain greater than one. */
+    delete_foreign=FALSE;
+    add_effect(world,2,.2f); add_effect(world,3,1.1f);
+    const float ambush[3]={.6f,.75f,1.1f};
+    memcpy(world+0x34,ambush,12); memcpy(world+0x40,ambush,12);
+    memcpy(image+CL_GROUP,ambush,12);
+    uint8_t saved_world[CL_SIZE],saved_entries[3][16];
+    memcpy(saved_world,world,sizeof(world));
+    for(unsigned i=0;i<3u;++i) memcpy(saved_entries[i],(*(uint8_t ***)(world+0x68))[i],16);
+    CHECK(SudekiMpInitializeCastLightAbi((HMODULE)image)); callbacks();
+    *(float *)(image+CL_GROUP)=.7f;
+    CHECK(!SudekiMpCreateCastLight(33,&actors[0],7,witness));
+    memcpy(image+CL_GROUP,ambush,12);
+    CHECK(SudekiMpCreateCastLight(33,&actors[0],7,witness));
+    CHECK(SudekiMpReadCastLight(33,current,baseline));
+    CHECK(!memcmp(current,ambush,12) && !memcmp(baseline,ambush,12));
+    CHECK(!memcmp(world,saved_world,sizeof(world)) && !memcmp(image+CL_GROUP,ambush,12));
+    for(unsigned i=0;i<3u;++i) CHECK(!memcmp(saved_entries[i],(*(uint8_t ***)(world+0x68))[i],16));
+    a=lm_find(33)->object;
+    CHECK(*(uint32_t *)(a+0x60)==1 && *(uint32_t *)(world+0x60)==3);
+    *(float *)(a+0x34)=INFINITY; CHECK(!SudekiMpReadCastLight(33,current,baseline));
+    *(float *)(a+0x34)=-.1f; CHECK(!SudekiMpReadCastLight(33,current,baseline));
+    memcpy(a+0x34,ambush,12);
+    CHECK(SudekiMpCastLightDrained(33) && SudekiMpDestroyCastLight(33));
+    CHECK(SudekiMpResetCastLightAbi());
+    CHECK(!memcmp(world,saved_world,sizeof(world)));
+    remove_light(world,3); remove_light(world,2); remove_light(world,1); destroy(world,0);
     VirtualFree(image,0,MEM_RELEASE);
     printf("Caster lighting lifetime tests: %s\n",failures ? "FAIL":"PASS");
     return failures ? 1:0;

@@ -7,18 +7,21 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 5u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_HEADER_SIZE 28u
-#define SUDEKIMP_LAN_STORY_WORLD_ACTOR_SIZE 140u
-#define SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE (28u + 8u * 140u)
+#define SUDEKIMP_LAN_STORY_WORLD_ACTOR_SIZE 144u
+#define SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE (28u + 8u * 144u)
 /* The native bank has at most 4096 entries including the empty selector. */
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CLIP_OCCURRENCES 4095u
 #define SUDEKIMP_LAN_STORY_WORLD_NPC_KIND 0x0f9bu
+/* Group-spawned monster (#54); identifier is the portable spawn identity. */
+#define SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND 0x0f99u
 #define SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND 0x0f8fu
 #define SUDEKIMP_LAN_STORY_WORLD_HIDDEN 1u
+#define SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE 2u
 /* Portable record category, NOT ResourceName encoded_kind: the native low
  * seven bits may change during lazy resolution. Canonical ID is independent. */
 #define SUDEKIMP_LAN_STORY_WORLD_PC_KIND 0x0f81u
@@ -28,7 +31,7 @@ unsigned SudekiMpLanStoryWorldCharacter(uint32_t identifier);
 typedef struct SudekiMpLanStoryWorldActor {
     uint16_t kind;
     uint8_t submodels;
-    /* Generic scenery only; never carries native renderer flag words. */
+    /* Category-specific presentation bits; never native flag words. */
     uint8_t visual_flags;
     uint32_t identifier, generation, animation_sequence;
     /* Deterministic compatibility fingerprint of the loaded bank topology.
@@ -42,6 +45,8 @@ typedef struct SudekiMpLanStoryWorldActor {
     uint16_t clip_occurrence[5];
     uint8_t state[5];
     float rate[5], time[5], blend[4];
+    /* Monsters only (#54): host native HitPoints (CStats+0x2C); 0 otherwise. */
+    float hit_points;
 } SudekiMpLanStoryWorldActor;
 
 typedef struct SudekiMpLanStoryWorldFrame {
@@ -67,8 +72,9 @@ BOOL SudekiMpLanStoryWorldChunkEncode(const SudekiMpLanStoryWorldFrame *frame,
     unsigned index,uint8_t *bytes,size_t capacity,size_t *written);
 BOOL SudekiMpLanStoryWorldChunkDecode(const uint8_t *bytes,size_t size,
     SudekiMpLanStoryWorldChunk *chunk);
-/* Same complete identity set/generations only; no extrapolation or smoothing
- * through an animation edge. A discrete state change arrives at its endpoint. */
+/* Same complete identity set/generations only; no extrapolation. Discrete
+ * channels arrive at their endpoints; unchanged PC channels/blend subtrees
+ * may interpolate while a different channel changes or wraps. */
 BOOL SudekiMpLanStoryWorldFrameInterpolate(const SudekiMpLanStoryWorldFrame *before,
     const SudekiMpLanStoryWorldFrame *after,uint32_t host_tick,
     SudekiMpLanStoryWorldFrame *sample);

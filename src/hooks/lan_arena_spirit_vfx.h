@@ -3,6 +3,7 @@
 
 #include "cleanroom/engine.h"
 #include "network/lan_arena_protocol.h"
+#include "network/lan_story_vfx.h"
 
 #include <stdint.h>
 #include <windows.h>
@@ -182,8 +183,8 @@ typedef struct SudekiMpLanArenaSpiritVfxVisualState {
     uint64_t session_token;
     uint32_t newest_instance_sequence;
     SudekiMpLanArenaSpiritVfxVisualSlot slots[
-        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
-    SudekiMpLanArenaSpiritVfxCacheLease caches[SUDEKIMP_LAN_PARTY_VFX_LAST];
+        SUDEKIMP_STORY_VFX_CAPACITY];
+    SudekiMpLanArenaSpiritVfxCacheLease caches[SUDEKIMP_LAN_STORY_VFX_LAST];
 } SudekiMpLanArenaSpiritVfxVisualState;
 
 typedef struct SudekiMpLanArenaSpiritVfxVisualApi {
@@ -210,6 +211,13 @@ BOOL SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(
     uint64_t session_token,
     const SudekiMpLanArenaSpiritVfxVisualApi *api
 );
+/* Local geometry admission, one bit per snapshot entry. Unprepared entries
+ * reserve their identity but neither spawn nor synchronize. They remain in
+ * the complete host roster for ordinary retirement/unknown handling. */
+BOOL SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(
+    SudekiMpLanArenaSpiritVfxVisualState *state,
+    const SudekiMpLanArenaSnapshot *snapshot,uint64_t session_token,uint8_t prepared,
+    const SudekiMpLanArenaSpiritVfxVisualApi *api);
 BOOL SudekiMpLanArenaSpiritVfxResetVisualsWithApi(
     SudekiMpLanArenaSpiritVfxVisualState *state,
     const SudekiMpLanArenaSpiritVfxVisualApi *api
@@ -222,4 +230,18 @@ BOOL SudekiMpLanArenaSpiritVfxVisualMatrix(
 BOOL SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
     unsigned int kind, float native_phase, float host_phase, BOOL *apply);
 
+/* Read-only, on the caller's verified game-thread presentation seam. Collect
+ * native-driven particle instances under retained Tal summon weak leases.
+ * Consume immediately, without native callbacks; never retain this list.
+ * Unknown ownership fails without changing outputs. No lifetime is changed. */
+enum { SUDEKIMP_SPIRIT_MODEL_CLOCK_CAPACITY = 512 };
+BOOL SudekiMpLanArenaSpiritVfxCollectModelClocks(HMODULE module,
+    void **instances, unsigned capacity, unsigned *count);
+
+BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE module,
+    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared);
+BOOL SudekiMpLanStoryVfxServicePreparedVisualsWithApi(
+    SudekiMpLanArenaSpiritVfxVisualState *state,
+    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared,
+    const SudekiMpLanArenaSpiritVfxVisualApi *api);
 #endif

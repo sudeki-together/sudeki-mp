@@ -5,7 +5,7 @@
 #include "network/lan_party_story.h"
 #include <windows.h>
 
-#define SUDEKIMP_LAN_STORY_FRAME_VERSION 7u
+#define SUDEKIMP_LAN_STORY_FRAME_VERSION 8u
 #define SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE 108u
 #define SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE 248u
 #define SUDEKIMP_LAN_STORY_FRAME_MAX_SIZE (108u + 4u * 248u)
@@ -47,6 +47,11 @@ typedef struct SudekiMpLanStoryView {
 /* Geometry-only check for a locally retained camera; it has no host serial. */
 BOOL SudekiMpLanStoryViewGeometryValid(const SudekiMpLanStoryView *view);
 BOOL SudekiMpLanStoryViewValid(const SudekiMpLanStoryView *view);
+/* Same bounded view interpolation as party frames; discrete changes wait for
+ * their endpoint. Also used by an independently fenced cast-camera stream. */
+BOOL SudekiMpLanStoryViewInterpolate(const SudekiMpLanStoryView *before,
+    const SudekiMpLanStoryView *after,uint32_t before_tick,uint32_t after_tick,
+    uint32_t tick,SudekiMpLanStoryView *out);
 
 /* Canonical character identity, never a connection/player index. Only actors
  * actually in the host's exact native party are present. This closed first
@@ -65,6 +70,9 @@ typedef struct SudekiMpLanStoryActor {
     /* Native pose is supplied by the matching world record. Semantic fields
      * must be zero; this flag never authorizes a native object or action. */
     uint8_t native_pose;
+    /* Native Tal/Buki combo UI: known bit 15, three 3-bit icons (0..3/7),
+     * bit 9 timing marker. Zero is unknown, not an empty row. */
+    uint16_t combo_hud;
     uint32_t hp, sp;
     float x, y, z, facing_x, facing_z;
     SudekiMpLanArenaLocomotion locomotion;
@@ -81,6 +89,7 @@ typedef struct SudekiMpLanStoryFrame {
     SudekiMpLanStoryActor actors[4]; /* Canonical indices; absent entries zero. */
 } SudekiMpLanStoryFrame;
 
+BOOL SudekiMpLanStoryComboHudValid(uint16_t state,unsigned character);
 BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *actor,
     unsigned character);
 BOOL SudekiMpLanStoryFrameValid(const SudekiMpLanStoryFrame *frame);

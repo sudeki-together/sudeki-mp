@@ -184,11 +184,28 @@ BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitn
     SudekiMpLanPartyControlDrainProbe);
 BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *);
+/* Retained native turn callback: freshly proves actor/scene/component identity
+ * and HELD generation. Caller must separately prove current input/session authority. */
+BOOL SudekiMpLanPartyControlStoryTurnOwner(void *actor,SudekiMpLanPartyLease *key);
+/* Per-frame melee auto-target selection, before movement can be held.
+ * Requires the exact live remote actor lease; does not route turn/movement. */
+BOOL SudekiMpLanPartyControlStoryRefreshTarget(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,float,float);
 BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,float,float);
-/* Exact sparse Tal lease; call the same per-arbiter entry as Test Room. The
+/* Exact sparse Tal/Buki lease; call the same per-arbiter entry as Test Room. The
  * submitted output distinguishes a pre-call refusal from an uncertain return.
  * TRUE proves return ownership, NOT native attack acceptance or damage. */
+BOOL SudekiMpLanPartyControlStoryRanged(const SudekiMpControlUpdateDispatchWitness *w,
+    const struct SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    unsigned state,BOOL *submitted);
+BOOL SudekiMpLanPartyControlStoryBlock(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,BOOL held);
+/* handled means retained block intent owns locomotion, even at neutral or
+ * when native dodge admission rejects. Never fall through to walking then. */
+BOOL SudekiMpLanPartyControlStoryDodge(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
+    float x,float z,BOOL *handled);
 BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned,BOOL *submitted);
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *,

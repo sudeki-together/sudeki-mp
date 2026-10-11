@@ -84,7 +84,7 @@ int main(void) {
     SudekiMpLanStoryFrame decoded={0};
     assert(SudekiMpLanStoryFrameDecode(bytes,n,&decoded));
     assert(decoded.actors[3].shots.latest==6 && decoded.actors[3].shots.events[3].origin[2]==400);
-    bytes[3]=6; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[3]=7;
+    bytes[3]=7; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[3]=SUDEKIMP_LAN_STORY_FRAME_VERSION;
     bytes[108+97]=1; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+97]=0;
     bytes[108+104+9]=1; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+104+9]=0;
     assert(!SudekiMpLanStoryFrameDecode(bytes,n-1,&decoded));
@@ -98,5 +98,27 @@ int main(void) {
     transport(f);
     memset(&s,0,sizeof(s)); s.events[3]=shot(1,1000);
     assert(!SudekiMpLanStoryShotsValid(&s,3)); /* hidden trailing payload */
-    puts("story shot journal/codec tests passed"); return 0;
+    /* Combo state shares the authenticated actor record. Unknown and a
+     * positively empty row are different; malformed rows never reach UI. */
+    SudekiMpLanStoryFrame melee={.epoch=1,.revision=1,.sequence=1,.host_tick=1000,
+        .available_mask=4,.leader_character=2,.combat_mode=1};
+    melee.actors[2]=(SudekiMpLanStoryActor){.generation=1,.character=2,.native_pose=1,
+        .hp=100,.facing_z=1,.combo_hud=0x83f8};
+    assert(SudekiMpLanStoryFrameEncode(&melee,bytes,sizeof(bytes),&n));
+    assert(SudekiMpLanStoryFrameDecode(bytes,n,&decoded) && decoded.actors[2].combo_hud==0x83f8);
+    const uint16_t bad[]={1,0xffff,0x8004,0x803f,0x83ff,0x8400};
+    for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+        bytes[108+94]=(uint8_t)bad[i];bytes[108+95]=(uint8_t)(bad[i]>>8);
+        assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded));
+    }
+    assert(!SudekiMpLanStoryComboHudValid(0x81ff,3));
+    assert(SudekiMpLanStoryComboHudValid(0x81ff,2));
+    assert(SudekiMpLanStoryComboHudValid(0x81ff,0));
+    assert(!SudekiMpLanStoryComboHudValid(0x81ff,1));
+    assert(SudekiMpLanStoryComboHudValid(0,2));
+    SudekiMpLanStoryFrame melee_next=melee; ++melee_next.sequence;melee_next.host_tick+=50;
+    melee_next.actors[2].combo_hud=0x8008;
+    assert(SudekiMpLanStoryFrameInterpolate(&melee,&melee_next,1025,&decoded) && decoded.actors[2].combo_hud==0x83f8);
+    assert(SudekiMpLanStoryFrameInterpolate(&melee,&melee_next,1050,&decoded) && decoded.actors[2].combo_hud==0x8008);
+    puts("story shot journal/codec and combo UI state tests passed"); return 0;
 }

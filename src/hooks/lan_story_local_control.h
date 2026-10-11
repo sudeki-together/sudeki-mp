@@ -53,8 +53,20 @@ typedef BOOL (*SudekiMpLanStoryLocalViewExact)(
  * borrowed view is retired only after the caller's native Quit witness. */
 BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *roster,
     SudekiMpLanStoryLocalViewExact exact,void *context,float horizontal_seconds,float vertical_seconds);
+/* Camera stream is fenced by the runtime before this same native lease.
+ * NULL is unknown (retain an active view); valid=0 is observed normal.
+ * Preserves orbit heading/distance while displaying the native host camera. */
+BOOL SudekiMpLanStoryLocalControlPresentCast(const SudekiMpLanStoryNativeRoster *roster,
+    SudekiMpLanStoryLocalViewExact exact,void *context,float horizontal_seconds,float vertical_seconds,
+    const SudekiMpLanStoryView *cast);
+/* Explicit priority handoff before the host-cutscene presenter borrows view. */
+BOOL SudekiMpLanStoryLocalControlRestoreCastView(const SudekiMpLanStoryNativeRoster *roster,
+    SudekiMpLanStoryLocalViewExact exact,void *context);
 /* Read-only local movement basis. Caller still owns transport offer/ACK,
  * scene freshness and the independent paused-world containment proof. */
+BOOL SudekiMpLanStoryLocalControlAim(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *roster,
+    const SudekiMpLanStoryScene *scene,float direction[3],float target[3]);
 BOOL SudekiMpLanStoryLocalControlDirection(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanStoryScene *scene,

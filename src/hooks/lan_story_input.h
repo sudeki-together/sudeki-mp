@@ -35,6 +35,10 @@ BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t tr
 unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t transaction);
 /* Keep the exact binding while a local menu owns navigation. Discard held
  * movement/look/attack edges so closing it cannot replay old gameplay input. */
+BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transaction,
+    BOOL *held,uint32_t *press);
+/* Native action31, held only in the exact focused binding. */
+BOOL SudekiMpLanStoryInputBlock(void *controller,void *actor,uint32_t transaction);
 void SudekiMpLanStoryInputMuteMovement(void);
 /* Consume elapsed time once per local presentation. Uses window-owned 69/6A
  * events and retail Exploration sensitivity/inversion. Outputs bounded axis

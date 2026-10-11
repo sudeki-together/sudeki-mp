@@ -2,6 +2,10 @@
 #define SUDEKIMP_LAN_PARTY_SESSION_H
 
 #include "network/lan_story_area_state.h"
+#include "network/lan_story_effect_state.h"
+#include "network/lan_story_vfx.h"
+#include "network/lan_story_audio.h"
+#include "network/lan_story_cast_view.h"
 #include "network/lan_arena_protocol.h"
 #include "network/lan_party_story.h"
 #include "network/lan_story_frame.h"
@@ -18,8 +22,8 @@
  * two-player session and LA42 packet format remain available unchanged. */
 #define SUDEKIMP_LAN_PARTY_PLAYERS 4u
 #define SUDEKIMP_LAN_PARTY_CHUNKS 2u
-#define SUDEKIMP_LAN_PARTY_VERSION 15u
-#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x3450000fu
+#define SUDEKIMP_LAN_PARTY_VERSION 21u
+#define SUDEKIMP_LAN_PARTY_BUILD_ID 0x34500011u
 #define SUDEKIMP_LAN_PARTY_MODE_MAX_AGE_MS 500u
 #define SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS 250u
 #define SUDEKIMP_LAN_PARTY_EXTENSION_VERSION 3u
@@ -298,6 +302,14 @@ BOOL SudekiMpLanPartyAcknowledgeStoryControl(SudekiMpLanPartySession *session,
  * movement: publish a fresh READY after validating the native lease first. */
 BOOL SudekiMpLanPartyStoryControlAcknowledged(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryControlFence *fence);
+BOOL SudekiMpLanPartySendStoryBlock(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryBlock *input);
+BOOL SudekiMpLanPartyTakeStoryBlock(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryBlock *input,uint32_t *received_at);
+BOOL SudekiMpLanPartySendStoryRanged(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryRanged *input);
+BOOL SudekiMpLanPartyTakeStoryRanged(SudekiMpLanPartySession *session,
+    const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryRanged *input,uint32_t *received_at);
 BOOL SudekiMpLanPartySendStoryMovement(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryMovement *input);
 BOOL SudekiMpLanPartyTakeStoryMovement(SudekiMpLanPartySession *session,
@@ -322,6 +334,17 @@ BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *session,
 BOOL SudekiMpLanPartyRevokeStoryControl(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease);
 /* Host: native area residency report (#42), sent on change and every 250 ms. */
+/* Independent, atomic host presentation snapshots; worker handles plain data only. */
+BOOL SudekiMpLanPartyPublishStoryEffects(SudekiMpLanPartySession *session,const SudekiMpStoryEffectState *state);
+/* Host fills the current acknowledged control fence for the one owning peer. */
+BOOL SudekiMpLanPartyPublishStoryCastView(SudekiMpLanPartySession *session,const SudekiMpStoryCastView *state);
+BOOL SudekiMpLanPartyGetStoryCastView(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
+    const SudekiMpLanStoryControlFence *fence,uint32_t now,uint32_t presented_tick,SudekiMpStoryCastView *state);
+BOOL SudekiMpLanPartyPublishStoryVfx(SudekiMpLanPartySession *session,const SudekiMpStoryVfx *state);
+BOOL SudekiMpLanPartyGetStoryVfx(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
+    uint32_t now,SudekiMpStoryVfx *state);
+BOOL SudekiMpLanPartyGetStoryEffects(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
+    uint32_t now,SudekiMpStoryEffectState *state);
 BOOL SudekiMpLanPartyPublishStoryArea(SudekiMpLanPartySession *session,const SudekiMpStoryAreaState *area);
 /* Client: newest host area residency, if received within the control freshness window. */
 BOOL SudekiMpLanPartyGetStoryArea(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
@@ -383,4 +406,7 @@ BOOL SudekiMpLanPartySendFrame(SudekiMpLanPartySession *session,
 BOOL SudekiMpLanPartyTakeFrame(SudekiMpLanPartySession *session,
     SudekiMpLanPartyFrame *frame);
 
+BOOL SudekiMpLanPartyPublishStoryAudio(SudekiMpLanPartySession *session,const SudekiMpStoryAudio *state);
+BOOL SudekiMpLanPartyGetStoryAudio(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
+    uint32_t now,unsigned character,SudekiMpStoryAudio *state);
 #endif

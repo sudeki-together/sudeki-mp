@@ -7,6 +7,17 @@ static BOOL prime,pending_weapon,weapon_known=TRUE,cast_idle=TRUE;
 static BOOL spirit_known=TRUE,lower_submits=TRUE,lower_returns=TRUE;
 static int spirit_state;
 static unsigned calls,last_kind;
+static unsigned movement_calls;
+static float movement_x,movement_z;
+BOOL SudekiMpLanPartyControlStoryRefreshTarget(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z) {
+    (void)x; (void)z; return SudekiMpLanPartyControlStoryExact(w,r,k);
+}
+BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z) {
+    ++movement_calls; movement_x=x; movement_z=z;
+    return SudekiMpLanPartyControlStoryExact(w,r,k);
+}
 static uint8_t speed[0x30],actor[0xdc],arbiter[0x64],skill[0x78];
 static uint8_t trigger[0x1da],interaction[0x64],interaction_mode[0x84];
 BOOL SudekiMpControlSeparationUpdateDispatchWitnessStillExact(const SudekiMpControlUpdateDispatchWitness *w) {
@@ -19,17 +30,37 @@ BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatc
     const SudekiMpLanStoryNativeRoster *r) { return roster_ok && w && r && w->dispatch_serial==7; }
 BOOL SudekiMpLanPartyControlStoryExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k) {
-    return lease_ok && w && r && k && k->token==5 && k->generation==2 && k->seat==2;
+    return lease_ok && w && r && k && k->token==5 && k->generation==2 && k->seat<4u;
 }
 BOOL SudekiMpCleanroomEngineCombatMode(BOOL *out) { *out=combat; return combat_known; }
 BOOL SudekiMpCleanroomEngineRangedCombatPrimePending(void) { return prime; }
 BOOL SudekiMpCleanroomEngineSpiritPresentationState(int *out) { *out=spirit_state; return spirit_known; }
 BOOL SudekiMpWeaponActivationPending(void *a,BOOL *out) { assert(a==actor); *out=pending_weapon; return weapon_known; }
-BOOL SudekiMpLanStoryCastDrained(void *a) { assert(a==actor); return cast_idle; }
+BOOL SudekiMpLanStoryCastBodyDrained(void *a) { assert(a==actor); return cast_idle; }
+static BOOL lighting_tail,aiming;
+BOOL SudekiMpLanStoryCastAiming(void *a) { assert(a==actor); return aiming; }
+BOOL SudekiMpLanStoryCastDrained(void *a) { assert(a==actor); return cast_idle && !lighting_tail; }
 BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,unsigned kind,BOOL *submitted) {
     assert(SudekiMpLanPartyControlStoryExact(w,r,k));
     ++calls; last_kind=kind; *submitted=lower_submits; return lower_returns;
+}
+BOOL SudekiMpLanPartyControlStoryRanged(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,unsigned state,BOOL *submitted) {
+    assert(SudekiMpLanPartyControlStoryExact(w,r,k));
+    ++calls; last_kind=state; *submitted=lower_submits; return lower_returns;
+}
+static unsigned block_calls;static BOOL last_block;
+static BOOL dodge_held,dodge_ok=TRUE;static unsigned dodge_calls;
+static float dodge_x,dodge_z;
+BOOL SudekiMpLanPartyControlStoryDodge(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z,BOOL *handled) {
+    if(!SudekiMpLanPartyControlStoryExact(w,r,k)) return FALSE;
+    ++dodge_calls;dodge_x=x;dodge_z=z;*handled=dodge_held;return dodge_ok;
+}
+BOOL SudekiMpLanPartyControlStoryBlock(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,BOOL held) {
+    assert(SudekiMpLanPartyControlStoryExact(w,r,k));++block_calls;last_block=held;return TRUE;
 }
 int main(void) {
     assert((STORY_BODY_BUSY_FLAGS&0x1000u)!=0 && !(STORY_BODY_BUSY_FLAGS&3u));
@@ -55,21 +86,99 @@ int main(void) {
     *(void **)arbiter=base+0x2cc9ac; *(void **)(arbiter+0x10)=actor;
     *(void **)(skill+0x10)=actor;
     *(uint32_t *)(arbiter+0x50)=3; assert(body_idle(&k,actor,&w));
+    lighting_tail=TRUE;
+    assert(!body_idle(&k,actor,&w) && body_idle_common(&k,actor,&w,FALSE,FALSE));
+    lighting_tail=FALSE;
+    /* Native skill aim flags (0x813) allow walking, but keep the skill live
+     * for transfer/drain and block melee/recast. Execution's 0x80000 remains
+     * busy even if a stale phase observation says aiming. */
+    aiming=TRUE; cast_idle=FALSE; skill[0x6c]=1;
+    *(uint32_t *)(arbiter+0x50)=0x813;
+    assert(body_idle_common(&k,actor,&w,FALSE,TRUE) && !body_idle(&k,actor,&w));
+    *(uint32_t *)(arbiter+0x50)=0x80812;
+    assert(!body_idle_common(&k,actor,&w,FALSE,TRUE));
+    *(uint32_t *)(arbiter+0x50)=0x813; aiming=FALSE;
+    assert(!body_idle_common(&k,actor,&w,FALSE,TRUE));
+    cast_idle=TRUE; skill[0x6c]=0;
     *(uint32_t *)(arbiter+0x50)=0x1002; assert(!body_idle(&k,actor,&w));
-    /* An in-progress swing blocks movement/AI drain but not a new combo
-     * press. The real native arbiter, not this wrapper, decides its timing. */
+    /* Preserve each frame's movement during a combo; native CanMove decides
+     * translation. Retiring the AI lease must still wait for the swing. */
+    BOOL held=TRUE;
+    assert(body_idle_common(&k,actor,&w,FALSE,TRUE));
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0.3f,1.8f,&held) && !held);
+    assert(movement_calls==1 && fabsf(movement_x-0.3f)<0.00001f && fabsf(movement_z-1.8f)<0.00001f);
+    for(unsigned frame=0;frame<8;++frame) {
+        assert(SudekiMpLanStoryControlMove(&w,&r,&k,-0.4f,1.5f,&held) && !held);
+        assert(fabsf(movement_x+0.4f)<0.00001f && movement_z==1.5f);
+    }
+    assert(!body_idle(&k,actor,&w));
+    *(uint32_t *)(arbiter+0x50)=0x80812; aiming=TRUE; cast_idle=FALSE; skill[0x6c]=1;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_x && !movement_z);
+    *(uint32_t *)(arbiter+0x50)=0x813;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && !held && fabsf(movement_z-1.8f)<0.00001f);
+    aiming=FALSE; cast_idle=TRUE; skill[0x6c]=0; *(uint32_t *)(arbiter+0x50)=0x1002;
+    speed[0x28]=1;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_x && !movement_z);
+    speed[0x28]=0; interaction_mode[0x4c]=1;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_x && !movement_z);
+    interaction_mode[0x4c]=0;
+    /* Held block must bypass the generic body-busy gate and ordinary Move,
+     * for Tal and Buki, including native cooldown and neutral input. */
+    unsigned before_move=movement_calls;
+    dodge_held=TRUE;*(uint32_t *)(arbiter+0x50)=0x10au;
+    for(unsigned c=0;c<=2;c+=2) {
+        k.seat=c;r.actors[c]=actor;
+        assert(SudekiMpLanStoryControlMove(&w,&r,&k,-0.4f,1.5f,&held) && !held);
+        assert(fabsf(dodge_x+0.4f)<0.00001f && dodge_z==1.5f && movement_calls==before_move);
+        assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,0,&held) && !held && movement_calls==before_move);
+    }
+    unsigned before_dodge=dodge_calls;
+    speed[0x28]=1;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_z);
+    assert(dodge_calls==before_dodge);speed[0x28]=0;
+    interaction_mode[0x4c]=1;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_z);
+    assert(dodge_calls==before_dodge);interaction_mode[0x4c]=0;
+    cast_idle=FALSE;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_z);
+    assert(dodge_calls==before_dodge);cast_idle=TRUE;
+    dodge_ok=FALSE;before_move=movement_calls;
+    assert(!SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && movement_calls==before_move);
+    dodge_ok=TRUE;lease_ok=FALSE;
+    assert(!SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held));lease_ok=TRUE;
+    dodge_held=FALSE;*(uint32_t *)(arbiter+0x50)=2;
+    assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && !held && fabsf(movement_z-1.8f)<0.00001f);
     for(unsigned kind=1;kind<=3;++kind) {
         assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_SUBMITTED);
         assert(last_kind==kind && calls==kind);
     }
     *(uint32_t *)(arbiter+0x50)=3; assert(body_idle(&k,actor,&w));
     skill[0x6c]=1; assert(!body_idle(&k,actor,&w)); skill[0x6c]=0;
-    #define BUSY() assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_BUSY && calls==3)
-    trigger[0x1d9]=2; BUSY(); assert(trigger[0x1d9]==2 && !trigger[0x1d8]); trigger[0x1d9]=0;
+    /* An available interaction is safe: the native press wrapper owns and
+     * restores its temporary latch. A preexisting latch is still busy. */
+    trigger[0x1d9]=2;
+    assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_SUBMITTED);
+    assert(calls==4 && trigger[0x1d9]==2 && !trigger[0x1d8]); trigger[0x1d9]=0;
+    assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && last_block);
+    speed[0x28]=1;assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && !last_block);
+    assert(SudekiMpLanStoryControlBlock(&w,&r,&k,FALSE) && !last_block);speed[0x28]=0;
+    interaction_mode[0x4c]=1;
+    assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && !last_block);
+    assert(SudekiMpLanStoryControlBlock(&w,&r,&k,FALSE) && !last_block);interaction_mode[0x4c]=0;
+    cast_idle=FALSE;assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && !last_block);cast_idle=TRUE;
+    combat=FALSE;assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && !last_block);combat=TRUE;
+    trigger[0x1d8]=1;assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && last_block);
+    assert(trigger[0x1d8]==1);trigger[0x1d8]=0; /* block does not borrow the host latch */
+    k.seat=0;r.actors[0]=actor;assert(SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE) && last_block);
+    k.seat=1;assert(!SudekiMpLanStoryControlBlock(&w,&r,&k,TRUE));k.seat=2;
+    lease_ok=FALSE;unsigned before_block=block_calls;
+    assert(!SudekiMpLanStoryControlBlock(&w,&r,&k,FALSE) && block_calls==before_block);lease_ok=TRUE;
+    const unsigned accepted_calls=calls;
+    #define BUSY() assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_BUSY && calls==accepted_calls)
     trigger[0x1d8]=1; BUSY(); assert(trigger[0x1d8]==1); trigger[0x1d8]=0;
     interaction_mode[0x4c]=1;
     for(unsigned kind=1;kind<=3;++kind)
-        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_BUSY && calls==3);
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_BUSY && calls==accepted_calls);
     interaction_mode[0x4c]=0;
     *(void **)(interaction+0x10)=NULL; BUSY(); *(void **)(interaction+0x10)=actor;
     *(void **)(interaction+0x60)=NULL; BUSY(); *(void **)(interaction+0x60)=interaction_mode;
@@ -85,7 +194,7 @@ int main(void) {
     spirit_known=FALSE; BUSY(); spirit_known=TRUE;
     cast_idle=FALSE; BUSY(); cast_idle=TRUE;
     combat_known=FALSE; BUSY(); combat_known=TRUE;
-    #define REFUSE() assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==3)
+    #define REFUSE() assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==accepted_calls)
     roster_ok=FALSE; REFUSE(); roster_ok=TRUE;
     lease_ok=FALSE; REFUSE(); lease_ok=TRUE;
     k.seat=3; REFUSE(); k.seat=2;
@@ -100,7 +209,33 @@ int main(void) {
     for(unsigned kind=2;kind<=3;++kind)
         assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_SUBMITTED);
     assert(trigger[0x1d9]==2 && trigger[0x1d8]==1); /* no global input ownership */
+    /* Buki uses the same native melee entry and admission guards. */
+    r.available_mask=13;r.actors[0]=actor;k.seat=0;
+    *(void **)actor=base+0x2d5a88;trigger[0x1d8]=trigger[0x1d9]=0;
+    assert(body_idle(&k,actor,&w));
+    for(unsigned kind=1;kind<=3;++kind) {
+        unsigned before=calls;
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_SUBMITTED);
+        assert(calls==before+1 && last_kind==kind);
+        interaction_mode[0x4c]=1;
+        assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_BUSY);
+        assert(calls==before+1);interaction_mode[0x4c]=0;
+    }
+    k.seat=1;
+    assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE);
+    for(unsigned character=1;character<=3;character+=2) {
+        r.actors[character]=actor;r.available_mask=15;k.seat=character;
+        for(unsigned state=1;state<=2;++state) {
+            unsigned before=calls;
+            assert(SudekiMpLanStoryControlRanged(&w,&r,&k,state)==SUDEKIMP_STORY_ACTION_SUBMITTED);
+            assert(calls==before+1 && last_kind==state);
+        }
+        interaction_mode[0x4c]=1;
+        assert(SudekiMpLanStoryControlRanged(&w,&r,&k,2)==SUDEKIMP_STORY_ACTION_BUSY);
+        interaction_mode[0x4c]=0;
+        assert(SudekiMpLanStoryControlRanged(&w,&r,&k,3)==SUDEKIMP_STORY_ACTION_UNAVAILABLE);
+    }
     VirtualFree(base,0,MEM_RELEASE);
-    puts("story Tal melee synthetic admission/ownership/busy/uncertain-return tests passed");
+    puts("story Tal/Buki melee synthetic admission/ownership/busy/uncertain-return tests passed");
     return 0;
 }

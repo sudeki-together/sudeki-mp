@@ -78,6 +78,12 @@ static SudekiMpLanCastTaskLeave task_leave;
 static struct { Cast *previous; unsigned int prior_depth; uint32_t cookie; void *thread; } task_scopes[16];
 static unsigned int task_scope_count;
 static BOOL task_route_fault;
+static struct {
+    LARGE_INTEGER frequency;
+    LONGLONG scoped_ticks,enter_ticks,native_ticks,leave_ticks;
+    DWORD at;
+    unsigned int waiting,scoped,reports;
+} step_cost;
 static SudekiMpInlineHook ui_trace_hook;
 static void *ui_trace_trampoline __attribute__((used));
 static unsigned int ui_trace_events;
@@ -274,6 +280,9 @@ BOOL SudekiMpLanCastContextSetTaskRouting(SudekiMpLanCastTaskEnter enter,
         SetLastError(ERROR_BUSY); return FALSE;
     }
     task_enter=enter; task_leave=leave;
+    memset(&step_cost,0,sizeof(step_cost));
+    step_cost.at=GetTickCount();
+    QueryPerformanceFrequency(&step_cost.frequency);
     return TRUE;
 }
 
@@ -441,12 +450,45 @@ BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
     }
     return FALSE;
 }
+static BOOL task_waiting_exact(void *thread) {
+    uint32_t bits[2]; float clocks[2];
+    /* STEP (RVA1C41D0), through its first RET, only compares +44/+48.
+     * Ordered current < deadline returns native yield=2 before opcode fetch.
+     * No namespace is touched, even for a retained cast task. Never extend
+     * this shortcut to equal/expired clocks or a replacement step callback. */
+    if(lineage_fault || !cast_image || original_step!=(OpcodeFunction)(cast_image+STEP) ||
+        memcmp(cast_image+STEP,step_prefix,sizeof(step_prefix)) ||
+        !memory_access(thread,0x4cu,FALSE)) return FALSE;
+    memcpy(bits,(uint8_t *)thread+0x44u,sizeof(bits));
+    if((bits[0]&0x7f800000u)==0x7f800000u || (bits[1]&0x7f800000u)==0x7f800000u) return FALSE;
+    memcpy(clocks,bits,sizeof(clocks));
+    return clocks[0]<clocks[1];
+}
+static void record_step_cost(BOOL waiting,LONGLONG enter,LONGLONG native,LONGLONG leave) {
+    DWORD now=GetTickCount();
+    if(waiting) ++step_cost.waiting;
+    else { ++step_cost.scoped; step_cost.scoped_ticks+=enter+native+leave;
+        step_cost.enter_ticks+=enter; step_cost.native_ticks+=native; step_cost.leave_ticks+=leave; }
+    if(now-step_cost.at<1000u || step_cost.reports>=40u) return;
+    ++step_cost.reports;
+    SudekiMpLogFormat("lan_cast_context event=step_cost waiting=%u scoped=%u scoped_total_us=%lu window_ms=%lu enter_us=%lu native_us=%lu leave_us=%lu\r\n",
+        step_cost.waiting,step_cost.scoped,
+        step_cost.frequency.QuadPart>0 ?
+            (unsigned long)(step_cost.scoped_ticks*1000000/step_cost.frequency.QuadPart):0ul,
+        (unsigned long)(now-step_cost.at),
+        step_cost.frequency.QuadPart>0?(unsigned long)(step_cost.enter_ticks*1000000/step_cost.frequency.QuadPart):0ul,
+        step_cost.frequency.QuadPart>0?(unsigned long)(step_cost.native_ticks*1000000/step_cost.frequency.QuadPart):0ul,
+        step_cost.frequency.QuadPart>0?(unsigned long)(step_cost.leave_ticks*1000000/step_cost.frequency.QuadPart):0ul);
+    step_cost.waiting=step_cost.scoped=0;
+    step_cost.scoped_ticks=step_cost.enter_ticks=step_cost.native_ticks=step_cost.leave_ticks=0; step_cost.at=now;
+}
 static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
     Cast *previous=current_cast, *owner;
     unsigned int n=task_scope_count;
     uint32_t cookie;
     BOOL known;
     int result;
+    LARGE_INTEGER started,entered,executed,finished;
     DWORD error=GetLastError(), result_error;
     /* Disabled in ordinary builds until a runtime owner installs the pair.
      * No native context is silently inferred from the last active character. */
@@ -463,6 +505,14 @@ static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
          * the primary manager or advance it under a replacement session. */
         SetLastError(ERROR_INVALID_DATA); return 2;
     }
+    if(task_waiting_exact(thread)) {
+        SetLastError(error);
+        result=original_step(thread,edx); /* Preserve the real x87/ABI result. */
+        result_error=GetLastError();
+        record_step_cost(TRUE,0,0,0);
+        SetLastError(result_error); return result;
+    }
+    QueryPerformanceCounter(&started);
     current_cast=owner;
     cookie=task_enter(owner ? &owner->owner:NULL);
     if(!cookie) { current_cast=previous; return 2; }
@@ -471,9 +521,11 @@ static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
     task_scopes[n].cookie=cookie;
     task_scopes[n].thread=thread;
     ++task_scope_count; ++depth;
+    QueryPerformanceCounter(&entered);
     SetLastError(error);
     result=original_step(thread,edx);
     result_error=GetLastError();
+    QueryPerformanceCounter(&executed);
     if(task_scope_count!=n+1 || depth!=task_scopes[n].prior_depth+1 ||
         !task_leave(cookie)) {
         task_route_fault=TRUE;
@@ -486,6 +538,9 @@ static int __attribute__((fastcall)) task_step(void *thread,void *edx) {
     --task_scope_count; --depth;
     current_cast=previous;
     memset(&task_scopes[n],0,sizeof(task_scopes[n]));
+    QueryPerformanceCounter(&finished);
+    record_step_cost(FALSE,entered.QuadPart-started.QuadPart,executed.QuadPart-entered.QuadPart,
+        finished.QuadPart-executed.QuadPart);
     SetLastError(result_error);
     return result;
 }

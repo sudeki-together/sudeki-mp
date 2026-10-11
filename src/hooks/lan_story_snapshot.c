@@ -1,4 +1,5 @@
 #include "hooks/lan_story_snapshot.h"
+#include "hooks/lan_story_combo_hud.h"
 #include "engine/log.h"
 #include "cleanroom/engine.h"
 #include "engine/skill_activation_abi.h"
@@ -206,6 +207,7 @@ capture_stage="motion";         if(!native_poses && (!SudekiMpCleanroomEngineWor
         actor->x=position[0]; actor->y=position[1]; actor->z=position[2];
         actor->facing_x=facing[0]; actor->facing_z=facing[1];
         actor->hp=(uint32_t)hp; actor->sp=(uint32_t)sp;
+        if(c==0u || c==2u) actor->combo_hud=SudekiMpLanStoryComboHudCapture(w,&roster,c);
 capture_stage="actor_valid";         if(!SudekiMpLanStoryActorValid(actor,c)) {
             static DWORD invalid_logged;
             if(SudekiMpLogResearchEnabled() && now-invalid_logged>=1000u) { invalid_logged=now;

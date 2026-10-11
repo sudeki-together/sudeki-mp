@@ -446,6 +446,9 @@ static void named_fixture(void) {
         {0x36eff,"\x46\x83\xc7\x04\x83\xfe\x0a\x72\xe0",9}
     };
     for(i=0;i<sizeof(code)/sizeof(code[0]);++i) memcpy(image+code[i].rva,code[i].bytes,code[i].count);
+    memcpy(image+0xe72bf,"\x68\x60\x02\x00\x00",5);
+    put_call(0xe72d1,0x2484fa); put_call(0xe72dd,0x1d1370);
+    memcpy(image+0xe72e2,"\x8b\xd8",2); memcpy(image+0xe72fd,"\x89\x5d\x34",3);
     put_call(0x36cd9,0x2484fa); put_call(0x36ce6,0xe7110); put_call(0x36d54,0x1061d0);
     put_call(0x36d72,0x249580); put_call(0x36d8b,0xe8360);
     put_call(0x36dfb,0x24ae0e); put_call(0x36ef3,0x24ae0e);
@@ -520,6 +523,18 @@ static void selection_tests(void) {
         0x11823,0x11826,0x1182a,0x1182d,0x121a0,0x121ad,0x121b0,0x121bd,
         0x11ff0,0x12000,0x1204c,0x12052,0x2c5678,0x2c566c};
     setup(); named_fixture();
+    const struct {const char *name; unsigned rva,size;} camera_checks[]={
+        {"CCameraCtor.RenderStateSize",0xe72bf,5}, {"CCameraCtor.RenderStateAllocate",0xe72d1,5},
+        {"CCameraCtor.RenderStateConstruct",0xe72dd,5}, {"CCameraCtor.RenderStateResult",0xe72e2,2},
+        {"CCameraCtor.RenderStateStore",0xe72fd,3}};
+    CHECK(SudekiMpSpiritInstanceViewAbiReady());
+    for(unsigned i=0;i<sizeof(camera_checks)/sizeof(*camera_checks);++i) {
+        for(unsigned n=0;n<camera_checks[i].size;++n) {
+            image[camera_checks[i].rva+n]^=1; CHECK(!SudekiMpSpiritInstanceViewAbiReady());
+            image[camera_checks[i].rva+n]^=1; CHECK(SudekiMpSpiritInstanceViewAbiReady());
+        }
+        printf("PASS %s RVA %08x mutation refusal\n",camera_checks[i].name,camera_checks[i].rva);
+    }
     for(unsigned int i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
         image[sites[i]]^=1; CHECK(!SudekiMpSpiritInstanceCameraSelectionAbiReady());
         image[sites[i]]^=1; CHECK(SudekiMpSpiritInstanceCameraSelectionAbiReady());
@@ -574,6 +589,33 @@ static void selection_tests(void) {
     CHECK(SudekiMpLeaveSpiritInstance(b));
     CHECK(*(void **)(named_test_manager+0x20)==named_base[0]);
     CHECK(SudekiMpLeaveSpiritInstance(a));
+    /* Observe the private selection outside all scopes, never the host view.
+     * Synthetic native objects: this is ownership/read-only proof, not pixels. */
+    uint8_t camera_render[0x260]={0};
+    *(void **)camera_render=image+0x2dd638;
+    float geometry[16]={1,0,0,0,0,1,0,0,0,0,1,0,4,5,6,1};
+    memcpy(camera_render+0x90,geometry,sizeof(geometry));
+    const float projection[3]={1,.1f,1000}; memcpy(camera_render+0xd0,projection,sizeof(projection));
+    void *prior_render=*(void **)((uint8_t *)entries[1].named_cameras[1]+0x34);
+    *(void **)((uint8_t *)entries[1].named_cameras[1]+0x34)=camera_render;
+    SudekiMpSpiritCameraView observed_view,unchanged_view;
+    CHECK(SudekiMpObserveSpiritInstanceView(&pair[1],&observed_view) && observed_view.kind==2);
+    CHECK(!memcmp(observed_view.matrix,geometry,sizeof(geometry)) &&
+        !memcmp(observed_view.projection,projection,sizeof(projection)));
+    unchanged_view=observed_view;
+    CHECK(!SudekiMpObserveSpiritInstanceView(&pair[0],&observed_view));
+    CHECK(!memcmp(&observed_view,&unchanged_view,sizeof(observed_view)));
+    *(void **)camera_render=image+0x2dd639;
+    CHECK(!SudekiMpObserveSpiritInstanceView(&pair[1],&observed_view));
+    *(void **)camera_render=image+0x2dd638;
+    void *other_render=*(void **)((uint8_t *)entries[1].named_cameras[0]+0x34);
+    *(void **)((uint8_t *)entries[1].named_cameras[0]+0x34)=camera_render;
+    CHECK(!SudekiMpObserveSpiritInstanceView(&pair[1],&observed_view));
+    *(void **)((uint8_t *)entries[1].named_cameras[0]+0x34)=other_render;
+    n=SudekiMpEnterSpiritInstance(&pair[1]); CHECK(n);
+    CHECK(!SudekiMpObserveSpiritInstanceView(&pair[1],&observed_view));
+    CHECK(SudekiMpLeaveSpiritInstance(n));
+    *(void **)((uint8_t *)entries[1].named_cameras[1]+0x34)=prior_render;
     named_update_original=fake_named_update; selection_update_count=0;
     a=SudekiMpEnterSpiritInstance(&pair[0]); CHECK(a);
     selection_expected_scope=pair[1];
@@ -614,6 +656,8 @@ static void selection_tests(void) {
     CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"default",&kind)==1 && kind==0);
     CHECK(*(void **)(named_test_manager+0x20)==entries[1].named_cameras[0]);
     CHECK(SudekiMpLeaveSpiritInstance(b));
+    CHECK(SudekiMpObserveSpiritInstanceView(&pair[1],&observed_view) && !observed_view.kind);
+    for(unsigned i=0;i<16;++i) CHECK(observed_view.matrix[i]==0);
     for(unsigned int i=2;i>0;--i) CHECK(SudekiMpDestroySpiritInstance(&pair[i-1]));
     /* Foreign callback must retain the adapter on teardown and allow retry. */
     *(void **)(image+0x2cce70)=(void *)1;
@@ -915,9 +959,44 @@ static BOOL rebind_witness(void *actor,uint64_t session) {
     for(unsigned i=0;i<4;++i) if(session==17 && actor==rebind_actors[i]) return TRUE;
     return FALSE;
 }
+static void transition_range_tests(const SudekiMpSpiritInstance *instance) {
+    /* Same real validator twice: query sharing must reduce OS calls without
+     * caching any identity or lending page permissions to the next boundary. */
+    observed_memory_queries=0;
+    uint32_t cookie=enter_instance(instance); CHECK(cookie);
+    CHECK(leave_instance(cookie));
+    unsigned uncached=observed_memory_queries;
+    observed_memory_queries=0;
+    cookie=SudekiMpEnterSpiritInstance(instance); CHECK(cookie);
+    CHECK(!transition_memory_scope && !transition_region_count);
+    CHECK(SudekiMpLeaveSpiritInstance(cookie));
+    unsigned cached=observed_memory_queries;
+    CHECK(cached*2u<uncached);
+    printf("Namespace transition range queries: %u -> %u; full identity checks retained\n",uncached,cached);
+    void *saved=*(void **)instance->manager;
+    *(void **)instance->manager=NULL;
+    CHECK(!SudekiMpEnterSpiritInstance(instance));
+    CHECK(!transition_memory_scope && !transition_region_count);
+    *(void **)instance->manager=saved;
+    cookie=SudekiMpEnterSpiritInstance(instance); CHECK(cookie);
+    *(void **)instance->manager=NULL;
+    CHECK(!SudekiMpLeaveSpiritInstance(cookie));
+    CHECK(scope_depth && !transition_memory_scope && !transition_region_count);
+    *(void **)instance->manager=saved;
+    CHECK(SudekiMpLeaveSpiritInstance(cookie));
+    DWORD protection;
+    CHECK(VirtualProtect(instance->manager,MANAGER_SIZE,PAGE_READONLY,&protection));
+    CHECK(!SudekiMpEnterSpiritInstance(instance));
+    CHECK(!transition_memory_scope && !transition_region_count);
+    CHECK(VirtualProtect(instance->manager,MANAGER_SIZE,protection,&protection));
+    cookie=SudekiMpEnterSpiritInstance(instance); CHECK(cookie);
+    CHECK(SudekiMpLeaveSpiritInstance(cookie));
+}
 static void rebind_local_tests(void) {
     SudekiMpSpiritInstance instances[4]={{0}};
     const uint8_t types[4]={0x23,1,5,14};
+    uint8_t camera_render[4][2][0x260]={{{0}}};
+    void *prior_render[4][2];
     Entry before[4];
     setup(); named_fixture();
     CHECK(SudekiMpEnableSpiritInstanceNamedCameraBanking());
@@ -940,6 +1019,15 @@ static void rebind_local_tests(void) {
         CHECK(SudekiMpCreateSpiritInstance(&instances[i]));
         CHECK(SudekiMpBindSpiritInstanceCaster(&instances[i],rebind_actors[i],types[i],17,rebind_witness));
         CHECK(SudekiMpEnableSpiritInstanceNamedCameras(&instances[i]));
+        for(unsigned k=0;k<2;++k) {
+            prior_render[i][k]=*(void **)((uint8_t *)entries[i].named_cameras[k]+0x34);
+            *(void **)camera_render[i][k]=image+0x2dd638;
+            const float matrix[16]={1,0,0,0,0,1,0,0,0,0,1,0,(float)(10*i+k),2,3,1};
+            const float projection[3]={1,.1f,1000};
+            memcpy(camera_render[i][k]+0x90,matrix,sizeof(matrix));
+            memcpy(camera_render[i][k]+0xd0,projection,sizeof(projection));
+            *(void **)((uint8_t *)entries[i].named_cameras[k]+0x34)=camera_render[i][k];
+        }
         if(i) {
             CHECK(SudekiMpEnableSpiritInstanceRemoteUi(&instances[i]));
             CHECK(SudekiMpEnableSpiritInstanceRemoteSkillUi(&instances[i]));
@@ -948,6 +1036,7 @@ static void rebind_local_tests(void) {
     }
     CHECK(SudekiMpInstallSpiritInstanceNamedCameraUpdates());
     for(unsigned i=1;i<4;++i) CHECK(SudekiMpEnableSpiritInstanceRemoteCameraSelection(&instances[i]));
+    transition_range_tests(&instances[1]);
     CHECK(SudekiMpEnableSpiritInstanceSkillTargeting());
     for(unsigned i=0;i<4;++i) CHECK(SudekiMpConfigureSpiritInstanceSkillTiming(&instances[i],FALSE));
     memcpy(before,entries,sizeof(before));
@@ -980,12 +1069,33 @@ static void rebind_local_tests(void) {
             CHECK(entries[i].remote_skill_input==(i!=selected));
             CHECK(entries[i].remote_camera_selection==(i!=selected));
             CHECK(entries[i].local_actor==(i!=selected?rebind_actors[selected]:NULL));
+            SudekiMpSpiritCameraView observed;
+            if(i==selected) CHECK(!SudekiMpObserveSpiritInstanceView(&instances[i],&observed));
+            else for(unsigned kind=0;kind<3;++kind) {
+                const char *names[]={"default","InitCam","SkillCam"}; unsigned routed=99;
+                uint32_t cookie=SudekiMpEnterSpiritInstance(&instances[i]); CHECK(cookie);
+                CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,names[kind],&routed)==1 && routed==kind);
+                CHECK(SudekiMpLeaveSpiritInstance(cookie));
+                CHECK(SudekiMpObserveSpiritInstanceView(&instances[i],&observed) && observed.kind==kind);
+                if(kind) CHECK(observed.matrix[12]==(float)(10*i+kind-1));
+                else CHECK(observed.matrix[12]==0);
+                CHECK(*(void **)(named_test_manager+0x20)==named_base[0]);
+                CHECK(*(void **)(named_scene+0x7c)==named_base[0]+0x70);
+            }
+        }
+        /* Finish every remote selection before the next simulated handoff. */
+        for(unsigned i=0;i<4;++i) if(i!=selected) {
+            unsigned kind; uint32_t cookie=SudekiMpEnterSpiritInstance(&instances[i]); CHECK(cookie);
+            CHECK(SudekiMpRouteSpiritInstanceRenderCamera(named_manager,"default",&kind)==1 && !kind);
+            CHECK(SudekiMpLeaveSpiritInstance(cookie));
         }
         CHECK(globals_exact(original_manager,original_camera));
         CHECK(*(void **)(named_test_manager+0x20)==named_base[0]);
         CHECK(*(void **)(named_scene+0x7c)==named_base[0]+0x70);
         CHECK(!update_fault && !scope_depth && !selection_generation);
     }
+    for(unsigned i=0;i<4;++i) for(unsigned k=0;k<2;++k)
+        *(void **)((uint8_t *)entries[i].named_cameras[k]+0x34)=prior_render[i][k];
     for(unsigned i=4;i>0;--i) CHECK(SudekiMpDestroySpiritInstance(&instances[i-1]));
     CHECK(SudekiMpResetSpiritInstanceAbi());
     *(void **)(fake_controller+0x248)=caster_actors[0];

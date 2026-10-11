@@ -99,7 +99,7 @@ static BOOL absent_actor(const SudekiMpLanStoryActor *a) {
     if(a->shots.count || a->shots.latest || !SudekiMpLanStoryShotsValid(&a->shots,0u)) return FALSE;
     if(a->generation || a->character || a->animation_state ||
         a->weapon_item_plus_one || a->weapon_visible || a->weapon_attachment[0] ||
-        a->weapon_attachment[1] || a->native_pose || a->hp || a->sp ||
+        a->weapon_attachment[1] || a->native_pose || a->combo_hud || a->hp || a->sp ||
         a->x!=0 || a->y!=0 || a->z!=0 || a->facing_x!=0 || a->facing_z!=0 ||
         a->locomotion.valid || a->locomotion.sequence) return FALSE;
     for(unsigned i=0;i<4u;++i)
@@ -108,10 +108,22 @@ static BOOL absent_actor(const SudekiMpLanStoryActor *a) {
     for(unsigned i=0;i<3u;++i) if(a->locomotion.blend[i]!=0) return FALSE;
     return TRUE;
 }
+BOOL SudekiMpLanStoryComboHudValid(uint16_t state,unsigned character) {
+    if(!state) return TRUE;
+    if((character!=0u && character!=2u) || !(state&0x8000u) || (state&0x7c00u)) return FALSE;
+    BOOL empty=FALSE;
+    for(unsigned i=0;i<3u;++i) {
+        unsigned cue=(state>>(3u*i))&7u;
+        if(cue==7u) empty=TRUE;
+        else if(cue>3u || empty) return FALSE;
+    }
+    return !(state&0x200u) || (state&7u)!=7u;
+}
 BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *a,unsigned character) {
     SudekiMpLanPartyMotion description;
     if(!a || character>=4u || a->character!=character || !a->generation ||
         !SudekiMpLanStoryShotsValid(&a->shots,character) ||
+        !SudekiMpLanStoryComboHudValid(a->combo_hud,character) ||
         a->hp>SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         a->sp>SUDEKIMP_LAN_ARENA_MAX_RESOURCE_VALUE ||
         !coordinate(a->x) || !coordinate(a->y) || !coordinate(a->z) ||
@@ -193,7 +205,7 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryActor *a) {
     }
     for(unsigned i=0;i<3u;++i) put_float(p+79+i*4,m->blend[i]);
     p[91]=a->weapon_visible;
-    p[92]=a->weapon_attachment[0]; p[93]=a->weapon_attachment[1]; p[94]=p[95]=0;
+    p[92]=a->weapon_attachment[0]; p[93]=a->weapon_attachment[1]; put16(p+94,a->combo_hud);
     p[96]=a->shots.count; p[97]=p[98]=p[99]=0; put32(p+100,a->shots.latest);
     for(unsigned i=0;i<SUDEKIMP_LAN_STORY_SHOT_HISTORY;++i) {
         const SudekiMpLanStoryShot *e=&a->shots.events[i]; uint8_t *q=p+104+i*36u;
@@ -204,9 +216,9 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryActor *a) {
 }
 static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryActor *a,unsigned character) {
     SudekiMpLanArenaLocomotion *m=&a->locomotion;
-    if(p[0]!=character || p[3]>1u || p[91]>1u || p[94] || p[95] || p[97] || p[98] || p[99]) return FALSE;
+    if(p[0]!=character || p[3]>1u || p[91]>1u || p[97] || p[98] || p[99]) return FALSE;
     a->character=p[0]; a->animation_state=p[1]; a->weapon_item_plus_one=p[2]; a->native_pose=p[3];
-    a->weapon_visible=p[91];
+    a->weapon_visible=p[91]; a->combo_hud=get16(p+94);
     a->weapon_attachment[0]=p[92]; a->weapon_attachment[1]=p[93];
     a->generation=get32(p+4); a->hp=get32(p+8); a->sp=get32(p+12);
     a->x=get_float(p+16); a->y=get_float(p+20); a->z=get_float(p+24);
@@ -327,6 +339,15 @@ static void view_interpolate(const SudekiMpLanStoryView *a,
     basis_cross(value.matrix+8u,value.matrix+4u,value.matrix);
     if(hand_a<0) for(unsigned i=0;i<3u;++i) value.matrix[i]=-value.matrix[i];
     if(SudekiMpLanStoryViewValid(&value)) *out=value;
+}
+BOOL SudekiMpLanStoryViewInterpolate(const SudekiMpLanStoryView *a,
+    const SudekiMpLanStoryView *b,uint32_t before,uint32_t after,uint32_t tick,
+    SudekiMpLanStoryView *out) {
+    if(!out || !SudekiMpLanStoryViewValid(a) || !SudekiMpLanStoryViewValid(b) ||
+        (int32_t)(after-before)<=0 || (int32_t)(tick-before)<0 || (int32_t)(after-tick)<0) return FALSE;
+    if(tick==after) {*out=*b; return TRUE;}
+    view_interpolate(a,b,after-before,(float)(tick-before)/(float)(after-before),out);
+    return TRUE;
 }
 __attribute__((noinline))
 void SudekiMpLanStoryInterpolatePosition(const float before[3],const float after[3],

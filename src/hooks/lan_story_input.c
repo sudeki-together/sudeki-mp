@@ -31,6 +31,9 @@ enum { MELEE_QUEUE=4, MELEE_MAX_AGE=250 };
 static unsigned melee_down,melee_first,melee_count;
 static struct { unsigned kind; uint32_t at; } melee_queue[MELEE_QUEUE];
 static float sample_x,sample_z,sample_scale=1.0f;
+static BOOL ranged_held,block_down,block_held;
+static uint32_t ranged_press,ranged_transaction;
+static void *ranged_actor;
 static float look_x,look_y;
 static uint32_t look_x_at,look_y_at,look_sample_at;
 typedef struct NativeEvent {
@@ -43,7 +46,7 @@ typedef struct NativeEvent {
 
 static void clear_sample(void) {
     sample_controller=sample_actor=NULL; sample_transaction=0;
-    quick_pending=FALSE;
+    quick_pending=FALSE; ranged_held=block_held=FALSE;
     melee_first=melee_count=0; /* Preserve down bits until physical releases. */
     sample_x=sample_z=0; sample_scale=1.0f;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
@@ -57,10 +60,26 @@ static void sample_quick(const NativeEvent *e,BOOL admitted) {
     if(down && !quick_down && admitted) quick_pending=TRUE;
     quick_down=down;
 }
+/* Retail action31 maps listener+78 = controller+A4 (block).
+ * Keep physical down across focus/menu/rebind; only a fresh admitted press
+ * can acquire held intent, and release is always observed. */
+static void sample_block(const NativeEvent *e,BOOL admitted) {
+    if(e->action!=0x31u) return;
+    BOOL down=e->value!=0;
+    if(!down) block_held=FALSE;
+    else if(!block_down && admitted) block_held=TRUE;
+    block_down=down;
+}
 static void sample_melee(const NativeEvent *e,BOOL admitted,uint32_t now) {
     if(e->action<0x2cu || e->action>0x2eu) return;
     unsigned kind=e->action-0x2bu,bit=1u<<(kind-1u);
     BOOL down=e->value!=0;
+    if(kind==1u) {
+        if(!down) ranged_held=FALSE;
+        else if(!(melee_down&bit) && admitted && ranged_press!=UINT32_MAX) {
+            ranged_held=TRUE; ++ranged_press;
+        }
+    }
     if(down && !(melee_down&bit) && admitted && melee_count<MELEE_QUEUE) {
         unsigned next=(melee_first+melee_count)%MELEE_QUEUE;
         melee_queue[next].kind=kind; melee_queue[next].at=now; ++melee_count;
@@ -92,12 +111,12 @@ static LRESULT CALLBACK focus_messages(int code,WPARAM sent,LPARAM raw) {
                 (m->message==WM_ACTIVATE && LOWORD(m->wParam)==WA_INACTIVE) ||
                 (m->message==WM_ACTIVATEAPP && !m->wParam)) {
                 focused=FALSE; sample_x=sample_z=0;
-                quick_pending=FALSE;
+                quick_pending=FALSE; ranged_held=block_held=FALSE;
                 melee_first=melee_count=0;
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             } else if(m->message==WM_SETFOCUS) {
                 focused=TRUE; sample_x=sample_z=0;
-                quick_pending=FALSE;
+                quick_pending=FALSE; ranged_held=block_held=FALSE;
                 melee_first=melee_count=0;
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             }
@@ -184,6 +203,7 @@ static void __attribute__((thiscall,force_align_arg_pointer)) story_input(
             if(owner==-1 || owner==e.owner) {
                 sample_quick(&e,admitted && (controller[0x1d0u]&2u));
                 sample_melee(&e,admitted && (controller[0x1d0u]&2u),GetTickCount());
+                sample_block(&e,admitted && (controller[0x1d0u]&2u));
             }
             if(!admitted) goto done;
             /* Exact42781C checks this signed device owner. 4278F9..427980
@@ -259,6 +279,9 @@ BOOL SudekiMpLanStoryInputExact(void *controller,void *actor) {
 BOOL SudekiMpLanStoryInputArm(void *controller,void *actor,uint32_t transaction) {
     if(!transaction || !SudekiMpLanStoryInputExact(controller,actor) ||
         !ensure_focus_hook()) return FALSE;
+    if(ranged_transaction!=transaction || ranged_actor!=actor) {
+        ranged_transaction=transaction;ranged_actor=actor;ranged_press=0;ranged_held=FALSE;
+    }
     if(sample_controller!=controller || sample_actor!=actor || sample_transaction!=transaction) {
         clear_sample(); sample_controller=controller; sample_actor=actor;
         sample_transaction=transaction;
@@ -278,10 +301,14 @@ BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transacti
         !focus_hook || !window_exact() || sample_controller!=controller ||
         sample_actor!=actor || sample_transaction!=transaction) return FALSE;
     if(!focused) { sample_x=sample_z=0; return TRUE; }
-    float n=sqrtf(sample_x*sample_x+sample_z*sample_z);
-    if(!isfinite(n)) { sample_x=sample_z=0; return FALSE; }
-    *x=n>1.0f?sample_x/n:sample_x;
-    *z=n>1.0f?sample_z/n:sample_z;
+    if(!isfinite(sample_x) || !isfinite(sample_z) ||
+        fabsf(sample_x)>0x1.00418ap+2f || fabsf(sample_z)>0x1.00418ap+2f) {
+        /* 4.004 rounded to the stored float, including the boundary on x87. */
+        sample_x=sample_z=0; return FALSE;
+    }
+    /* Preserve native action2B scaling until the controller's local shaping
+     * and camera transform; normalization here erased walk/run magnitude. */
+    *x=sample_x; *z=sample_z;
     return TRUE;
 }
 void SudekiMpLanStoryInputClear(void) {
@@ -297,10 +324,21 @@ unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t tr
     if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return 0;
     return take_melee(GetTickCount());
 }
+BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transaction,
+    BOOL *held,uint32_t *press) {
+    float x,z;
+    if(!held || !press || !SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z)) return FALSE;
+    *held=focused && ranged_held;*press=ranged_press;
+    return TRUE;
+}
+BOOL SudekiMpLanStoryInputBlock(void *controller,void *actor,uint32_t transaction) {
+    float x,z;
+    return SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) && focused && block_held;
+}
 void SudekiMpLanStoryInputMuteMovement(void) {
     if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return;
     sample_x=sample_z=0;
-    melee_first=melee_count=0;
+    melee_first=melee_count=0; ranged_held=block_held=FALSE;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
 }
 

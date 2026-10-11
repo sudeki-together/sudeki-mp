@@ -6,15 +6,18 @@
 
 /* HOST saved-story scope, deliberately separate from the four-member Test
  * Room adapter. This adapter admits only validated loaded party members, ordinary
- * movement, Tal's native melee input, and exact independent native AI leases.
+ * movement, Tal/Buki native melee input, and exact independent native AI leases.
  * The caller owns authenticated offer/ACK/freshness. None of these functions
  * authorizes a network player or creates a missing native character.
  *
- * Install closes only the controller's two Q/E rotation callsites. The native
+ * Install closes the controller's two Q/E rotation callsites and owns the
+ * C2 leased-player turn/CanTurn branch adapter. The native
  * Prev/Next entries remain pristine for the witnessed host-restoration path.
- * Every actor operation requires a fresh roster from the current exact
+ * Direct actor operations require a fresh roster from the current exact
  * StoryObserver post-controller dispatch. A lease key's seat is CHARACTER;
- * its generation is native ownership, independent of a connection key. */
+ * its generation is native ownership, independent of a connection key.
+ * The native turn callback re-proves the retained roster/lease, current peer
+ * and acknowledged control fence on the game thread. */
 BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character);
 BOOL SudekiMpLanStoryControlBegin(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *);
@@ -28,6 +31,11 @@ BOOL SudekiMpLanStoryControlExact(const SudekiMpControlUpdateDispatchWitness *,
 BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *native_key,
     float world_x,float world_z,BOOL *temporarily_held);
+unsigned SudekiMpLanStoryControlRanged(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned state);
+/* Held native block for Tal/Buki; release remains admitted while UI is open. */
+BOOL SudekiMpLanStoryControlBlock(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,BOOL held);
 unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned kind);
 /* Closes input first, then retries native speed/action drain and precisely

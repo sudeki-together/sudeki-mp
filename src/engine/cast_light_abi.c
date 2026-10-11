@@ -99,8 +99,11 @@ static BOOL light_image_exact(uint8_t *b) {
         lm_call(b,0x77c66,CL_PERIOD) && lm_address(b,0x77c43,0x2c3bfc) &&
         lm_bytes(b,0x2c3bfc,"\x00\x00\x00\x40",4);
 }
+/* Native light channels are nonnegative finite gains, not normalized RGB:
+ * the authored castle-road ambush uses (0.6,0.75,1.1). AddLightEffect stores
+ * these values verbatim and Update publishes them without a [0,1] clamp. */
 static BOOL lm_rgb(const float rgb[3]) {
-    for(unsigned int i=0;i<3;++i) if(!isfinite(rgb[i]) || rgb[i]<0 || rgb[i]>1) return FALSE;
+    for(unsigned int i=0;i<3;++i) if(!isfinite(rgb[i]) || rgb[i]<0) return FALSE;
     return TRUE;
 }
 static LightEntry *lm_find(uint32_t key) {
@@ -285,8 +288,14 @@ BOOL SudekiMpCreateCastLight(uint32_t key,void *actor,uint64_t session,SudekiMpC
     uint8_t *device;
     if(!key || !actor || !session || !retained || !retained(actor,session) || lm_find(key) ||
         !light_image || selected_key || !SudekiMpCastLightTransitionReady(0) || !lm_stack(world_light) ||
-        *(uint32_t *)(world_light+0x60)!=1 || memcmp(world_light+0x34,world_light+0x50,12) ||
-        memcmp(light_image+CL_GROUP,world_light+0x50,12)) return FALSE;
+        !lm_memory(light_image+CL_GROUP,12,FALSE) ||
+        memcmp(light_image+CL_GROUP,world_light+0x34,12)) {
+        SetLastError(ERROR_INVALID_DATA); return FALSE;
+    }
+    /* Init seeds a NEW baseline from the currently published light group.
+     * It neither copies nor clears the world's effect stack. Requiring that
+     * published group to equal the world current colour means Init's native
+     * GPU publication preserves the scene even mid-fade or in an ambush. */
     device=*(void **)(light_image+CL_DEVICE);
     if(!lm_memory(device,4,FALSE) || !lm_memory(*(void **)device,0x17c,FALSE)) return FALSE;
     for(unsigned int i=0;i<CL_MAX;++i) if(!light_entries[i].key) { e=&light_entries[i]; break; }

@@ -6,9 +6,15 @@
 #include <stdlib.h>
 #include <stdarg.h>
 static unsigned install_step,fail_step;
+static unsigned memory_queries;
+static SIZE_T WINAPI counted_query(LPCVOID p,PMEMORY_BASIC_INFORMATION m,SIZE_T n) {
+    ++memory_queries; return VirtualQuery(p,m,n);
+}
 static BOOL test_install(SudekiMpRelativeCallHook *,uint8_t *,const void *,const void *);
 #define SudekiMpInstallRelativeCallHook test_install
+#define VirtualQuery counted_query
 #include "../src/hooks/lan_story_effects.c"
+#undef VirtualQuery
 #undef SudekiMpInstallRelativeCallHook
 static BOOL test_install(SudekiMpRelativeCallHook *h,uint8_t *p,const void *a,const void *b) {
     if(++install_step==fail_step) { SetLastError(ERROR_WRITE_FAULT); return FALSE; }
@@ -154,6 +160,31 @@ static void lifecycle_tests(void) {
     memcpy(mapped+MODEL_CLOCK_CALL,owned,5); assert(SudekiMpLanStoryEffectsUninstall());
     assert(!base && call_targets(mapped+MODEL_CLOCK_CALL,mapped+MODEL_CLOCK_SET));
 }
+static void manager_diagnostics(void) {
+    uint8_t manager[0x24]={0}; void *instances[1]={NULL};
+    *(unsigned *)(manager+4)=1; *(unsigned *)(manager+8)=1;
+    *(void **)(manager+0xc)=instances; *(float *)(manager+0x1c)=1.0f;
+    topology_detail=0xdeadbeef; topology_speed=0xdeadbeef;
+    assert(topology(manager) && !topology_detail && !topology_speed);
+    *(unsigned *)(manager+4)=MAX_INSTANCES+1u;
+    assert(!topology(manager) && !strcmp(manager_reason,"instance_limit") && manager_count==MAX_INSTANCES+1u);
+    *(unsigned *)(manager+4)=0;
+    assert(!topology(manager) && !strcmp(manager_reason,"empty"));
+    *(unsigned *)(manager+4)=1; *(unsigned *)(manager+8)=0;
+    assert(!topology(manager) && !strcmp(manager_reason,"capacity"));
+    *(unsigned *)(manager+8)=1; *(void **)(manager+0xc)=NULL;
+    assert(!topology(manager) && !strcmp(manager_reason,"instance_array"));
+    *(void **)(manager+0xc)=instances; *(float *)(manager+0x14)=NAN;
+    assert(!topology(manager) && !strcmp(manager_reason,"nonfinite_clock"));
+    *(float *)(manager+0x14)=0; *(float *)(manager+0x1c)=0;
+    assert(!topology(manager) && !strcmp(manager_reason,"step_range"));
+    *(float *)(manager+0x1c)=1; *(float *)(manager+0x10)=1.1f;
+    assert(!topology(manager) && !strcmp(manager_reason,"remainder_range"));
+    *(float *)(manager+0x10)=0; *(float *)(manager+0x14)=0.11f;
+    assert(!topology(manager) && !strcmp(manager_reason,"accumulator_range"));
+    *(float *)(manager+0x14)=0.03125f; assert(topology(manager));
+    assert(!topology(NULL) && !strcmp(manager_reason,"manager_memory") && !manager_count);
+}
 static void combat_sized_manager(void) {
     enum { COUNT=318 };
     static uint8_t instances[COUNT][0x8c];
@@ -165,7 +196,12 @@ static void combat_sized_manager(void) {
         list[i]=instances[i]; *(void **)instances[i]=mapped+PARTICLE_ANIMATION_VT;
         *(void **)(instances[i]+0x1c)=manager; *(float *)(instances[i]+0x84)=1.0f;
     }
+    installed=FALSE; memory_queries=0; assert(topology(manager));
+    unsigned uncached=memory_queries; installed=TRUE; memory_queries=0;
     assert(topology(manager));
+    unsigned cached=memory_queries;
+    assert(uncached>=COUNT && cached<8 && !topology_read_active && !topology_region_count);
+    printf("particle topology: %u instances, page queries %u -> %u; full owner walk retained\n",COUNT,uncached,cached);
     *(void **)(instances[COUNT-1]+0x1c)=fixture.manager;
     assert(!topology(manager)); /* Every entry above the old 128 bound is proved. */
     *(void **)(instances[COUNT-1]+0x1c)=manager;
@@ -174,11 +210,79 @@ static void combat_sized_manager(void) {
     *(void **)instances[COUNT-1]=mapped+PARTICLE_ANIMATION_VT;
     assert(topology(manager));
 }
+static void page_access_refresh(void) {
+    uint8_t *instance=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    assert(instance); void *items[1]={instance}; uint8_t manager[0x24]={0};
+    *(unsigned *)(manager+4)=*(unsigned *)(manager+8)=1;
+    *(void **)(manager+0xc)=items; *(float *)(manager+0x1c)=1;
+    *(void **)instance=mapped+PARTICLE_ANIMATION_VT;
+    *(void **)(instance+0x1c)=manager; *(float *)(instance+0x84)=1;
+    assert(topology(manager) && !topology_read_active);
+    DWORD old;
+    assert(VirtualProtect(instance,4096,PAGE_NOACCESS,&old));
+    assert(!topology(manager) && !topology_read_active && !topology_region_count);
+    assert(VirtualProtect(instance,4096,PAGE_READWRITE|PAGE_GUARD,&old));
+    assert(!topology(manager) && !topology_read_active);
+    assert(VirtualProtect(instance,4096,PAGE_READWRITE,&old));
+    memory_queries=0; assert(topology(manager) && memory_queries);
+    assert(!readable(NULL,1) && !readable(instance,0) &&
+        !readable((void *)(uintptr_t)(UINTPTR_MAX-1u),8));
+    assert(VirtualFree(instance,0,MEM_RELEASE));
+    assert(!topology(manager) && !topology_read_active);
+    puts("particle scope refresh: changed permissions, guard, free, overflow and retry refused/preserved");
+}
+static void held_model_clock_regression(void) {
+    DWORD old;
+    assert(VirtualProtect(mapped,0x45f000,PAGE_EXECUTE_READWRITE,&old));
+    typedef void (__attribute__((thiscall)) *SetClock)(void *,float);
+    SetClock set=(SetClock)(mapped+0x235590);
+    float end=219.9998931884765625f;
+    *(float *)(fixture.node+0xe8)=220.0f;
+    set(fixture.node,end);custom_clock_count=0;
+    assert(advance_custom_clocks(fixture.manager,25,NULL,0)); /* initial seed */
+    assert(advance_custom_clocks(fixture.manager,25,NULL,0));
+    assert(*(float *)(fixture.node+0xd8)<1.0f); /* reproduced fallback wrap */
+    set(fixture.node,end);assert(*(float *)(fixture.node+0xdc)>219.0f);
+    puts("PASS reproduced native particle wrap/near-full-duration jump after model final hold");
+    void *owned[2]={fixture.instance,fixture.instance};
+    unsigned before=custom_advanced;
+    for(unsigned i=0;i<40;++i) {
+        assert(advance_custom_clocks(fixture.manager,25,owned,1));
+        set(fixture.node,end);
+        assert(*(float *)(fixture.node+0xd8)==end && *(float *)(fixture.node+0xdc)==0);
+    }
+    assert(custom_advanced==before && !custom_clock_count);
+    snapshot=fixture;
+    assert(!advance_custom_clocks(fixture.manager,25,owned,2)); /* duplicate */
+    owned[0]=fixture.renderer;assert(!advance_custom_clocks(fixture.manager,25,owned,1));
+    owned[0]=NULL;assert(!advance_custom_clocks(fixture.manager,25,owned,1));
+    assert(!advance_custom_clocks(fixture.manager,25,NULL,1));
+    assert(!advance_custom_clocks(fixture.manager,25,owned,SUDEKIMP_SPIRIT_MODEL_CLOCK_CAPACITY+1u));
+    assert(!memcmp(&snapshot,&fixture,sizeof(fixture)));
+    /* Exclusion lists can grow with the complete visual roster. All entries
+     * must still have unique freshly observed manager membership. */
+    uint8_t many_instances[65][0x8c]={{0}},many_manager[16]={0};void *many[65];
+    for(unsigned i=0;i<65;++i) {many[i]=many_instances[i];many_instances[i][0x88]=1;}
+    *(unsigned *)(many_manager+4)=65;*(void **)(many_manager+0xc)=many;
+    assert(advance_custom_clocks(many_manager,25,many,65));
+    /* Loss/reset never retains the old exclusion. Unrelated static-world
+     * custom particles still use their existing supplemental clock. */
+    custom_clock_count=0;set(fixture.node,10.0f);
+    assert(advance_custom_clocks(fixture.manager,25,NULL,0));
+    assert(advance_custom_clocks(fixture.manager,25,NULL,0));
+    assert(*(float *)(fixture.node+0xd8)>10.5f && *(float *)(fixture.node+0xd8)<10.7f);
+    fixture.instance[0x88]=1;before=custom_advanced;
+    assert(advance_custom_clocks(fixture.manager,25,NULL,0) && custom_advanced==before);
+    fixture.instance[0x88]=0;custom_clock_count=0;
+    assert(VirtualProtect(mapped,0x45f000,old,&old));
+    puts("PASS native-driven hold preserved; independent/native-manager clocks and rejection isolation retained");
+}
+
 int main(int argc,char **argv) {
     assert(argc==2); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024)); mapped=map_image(path);
     lifecycle_tests();
-    setup(); combat_sized_manager(); invoke(); assert(notices==1);
+    setup(); manager_diagnostics(); combat_sized_manager(); page_access_refresh(); invoke(); assert(notices==1);
     fixture.data[9]=0; invoke(); assert(notices==1); fixture.data[9]=1;
     fixture.instances[1]=fixture.instance; *(unsigned *)(fixture.manager+4)=2;
     invoke(); assert(notices==1); *(unsigned *)(fixture.manager+4)=1;
@@ -188,6 +292,7 @@ int main(int argc,char **argv) {
     assert(WaitForSingleObject(worker,5000)==WAIT_OBJECT_0); CloseHandle(worker);
     stopping=0; invoke(); assert(notices==2);
     clock_trace_logs=256; invoke(); assert(notices==2);
+    held_model_clock_regression();
     assert(SudekiMpLanStoryEffectsUninstall()); invoke(); assert(notices==2);
     VirtualFree(mapped,0,MEM_RELEASE);
     puts("story effect clock exact-image/synthetic observer ABI, isolation and rollback tests passed (no native gameplay)");

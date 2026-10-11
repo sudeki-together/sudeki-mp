@@ -28,7 +28,7 @@ static SudekiMpLanStoryNativeRoster roster;
 static uint8_t menu[0x224],controller[0x24c],actor[0x100],other_actor[0x100],group[0xd8],front[0x178],hud[0xd0];
 static uint8_t list[0x480],row[0x88];
 static void *rows[1];
-static unsigned opened,closed,ui_calls,requests,mutes,brackets,script_native_calls,selected;
+static unsigned opened,closed,ui_calls,requests,mutes,brackets,script_native_calls,selected,selected_kind;
 void SudekiMpLogFormat(const char *format,...) { (void)format; }
 BOOL SudekiMpLanStoryRealtimeExact(HMODULE image) { return realtime && image==(HMODULE)mapped; }
 BOOL SudekiMpLanStoryInputExact(void *c,void *a) { return input_exact && c==controller && a==actor; }
@@ -41,9 +41,14 @@ BOOL SudekiMpLanStoryClientUiPresent(SudekiMpLanStoryClientPresentation callback
     assert(witness(witness_context) || !menu_owner);
     return result && contained;
 }
-static BOOL queue(void *a,unsigned slot) {
-    assert(a==actor && slot<6); if(!queue_ok) return FALSE;
-    ++requests; selected=slot; return TRUE;
+uint8_t SudekiMpLanPartyActorType(unsigned c) {
+    static const uint8_t types[]={5,14,0x23,1}; assert(c<4); return types[c];
+}
+static BOOL queue(void *a,unsigned kind,unsigned slot) {
+    assert(a==actor && ((kind==SUDEKIMP_STORY_ACTION_SKILL && slot<6) ||
+        (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1 && slot<=2)));
+    if(!queue_ok) return FALSE;
+    ++requests; selected=slot; selected_kind=kind; return TRUE;
 }
 typedef void *(__attribute__((stdcall)) *ScriptCall)(void *,void **,unsigned,unsigned,unsigned,unsigned,unsigned);
 static void * __attribute__((stdcall)) script_fallback(void *descriptor,void **out,
@@ -211,6 +216,28 @@ int main(int argc,char **argv) {
     assert(SudekiMpLanStoryQuickMenuService(&roster,9,TRUE,FALSE,TRUE) && !visible());
     assert(closed==5); /* explicit toggle/cancel still works during a stall */
     assert(!script_native_calls && brackets>0 && !fault);
+    assert(SudekiMpLanStoryQuickMenuUninstall());
+    /* Both Tal Spirit rows carry native IDs 0/1, while the transport accepts
+     * variants 1/2. A different actor's row and malformed list never queue. */
+    setup(); open_fixture();
+    *(unsigned *)(row+0x84)=2; input(1,5,0,1); assert(!requests && visible());
+    *(unsigned *)(row+0x84)=0;
+    *(unsigned *)(list+0x474)=3; input(1,5,0,1); assert(!requests && visible());
+    *(unsigned *)(list+0x474)=1;
+    assert(SudekiMpLanStoryQuickMenuService(&roster,7,TRUE,FALSE,FALSE));
+    input(1,5,0,1); assert(!requests && visible());
+    assert(SudekiMpLanStoryQuickMenuService(&roster,7,TRUE,TRUE,FALSE));
+    queue_ok=FALSE; input(1,5,0,1); assert(!requests && visible()); queue_ok=TRUE;
+    input(1,5,0,1); assert(requests==1 && selected_kind==SUDEKIMP_STORY_ACTION_SPIRIT && selected==1 && !visible());
+    input(1,5,0,1); assert(requests==1);
+    open_fixture(); *(unsigned *)(row+0x84)=1;
+    input(1,5,2,1); assert(requests==2 && selected==2 && !visible());
+    /* Rebinding keeps the native character's pair, never Tal's row numbering. */
+    roster.actors[2]=other_actor; roster.actors[3]=actor; roster.leader_character=3;
+    assert(SudekiMpLanStoryQuickMenuService(&roster,8,TRUE,TRUE,TRUE));
+    input(1,5,0,1); assert(requests==2 && visible());
+    *(unsigned *)(row+0x84)=3;
+    input(1,5,0,1); assert(requests==3 && selected==2 && !visible());
     assert(SudekiMpLanStoryQuickMenuUninstall());
     VirtualFree(mapped,0,MEM_RELEASE);
     puts("story Q menu exact-image/synthetic UI, request-only selection, RET28 and rollback tests passed (no gameplay)");

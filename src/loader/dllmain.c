@@ -19,11 +19,14 @@
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_party_runtime.h"
 #include "hooks/lan_story_runtime.h"
+#include "hooks/lan_story_menu.h"
+#include "hooks/lan_party_menu_native.h"
 #include "hooks/lan_story_load.h"
 #include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_story_temp_exterior.h"
 #include "hooks/lan_story_pause_trace.h"
 #include "hooks/lan_story_anim_trace.h"
+#include "hooks/lan_story_research54.h"
 #include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_area_fade.h"
 #include "hooks/resource_swap.h"
@@ -41,6 +44,8 @@
 #include "hooks/save_book_intercept.h"
 #include "hooks/save_search_speed.h"
 #include "hooks/lan_story_test_start.h"
+#include "hooks/lan_story_observer.h"
+#include "hooks/lan_story_area_follow.h"
 #include "hooks/skill_trace.h"
 #include "hooks/split_screen_render.h"
 #include "hooks/spirit_strike_input.h"
@@ -339,7 +344,71 @@ static void configure_lobby_auto(const wchar_t *config_path) {
     SudekiMpLogFormat("lobby_auto config host=%u join=%u port=%u save_slot=%d character=%u ready=%u start=%u min_players=%u\r\n",
         a.host,a.join,(unsigned)a.port,a.save_slot==~0u?-1:(int)a.save_slot,a.character,a.ready,a.start,a.min_players);
 }
+/* Opt-in native single-player comparison. No session or remote actor leases. */
+static BOOL native_research54_profile;
+static HMODULE native_research54_image;
+static BOOL native_research54_tools_requested,native_research54_tools_ready;
+static volatile LONG native_research54_stopping,native_research54_tools_drained;
+static char native_research54_owner;
+static SudekiMpControlUpdateObserverGate native_research54_gate;
+static BOOL native_research54_menu_admission(void) {
+    return native_research54_tools_ready && SudekiMpLanStoryMenuCapturesInput();
+}
+static void native_research54_menu_frame(void) {
+    if(native_research54_tools_ready) (void)SudekiMpLanStoryMenuRender(NULL);
+}
+static void native_research54_update(void *controller,void *update_data,
+    const SudekiMpControlUpdateDispatchWitness *witness) {
+    (void)update_data;
+    if(!SudekiMpControlUpdateObserverGateTryEnter(&native_research54_gate)) return;
+    if(SudekiMpControlSeparationUpdateDispatchWitnessStillExact(witness)) {
+        SudekiMpLanStoryResearch54Sample(FALSE);
+        SudekiMpLanStoryScene scene;
+        SudekiMpLanStoryNativeRoster roster;
+        if(SudekiMpLanStoryObserverSample(controller,witness,&scene) &&
+            scene.phase==SUDEKIMP_LAN_STORY_READY &&
+            !SudekiMpLanStoryObserverWorldLoading() &&
+            SudekiMpLanStoryObserverRoster(controller,witness,&scene,&roster)) {
+            if(!InterlockedCompareExchange(&native_research54_stopping,0,0)) {
+                SudekiMpLanStoryTestStartService(&roster);
+                if(native_research54_tools_requested && !native_research54_tools_ready) {
+                    native_research54_tools_ready=
+                        SudekiMpLanStoryMenuInitializeNativeTools(native_research54_image);
+                    if(native_research54_tools_ready)
+                        SudekiMpLogWrite("native_research54 tools=ready key=F8 defaults=unchanged\r\n");
+                }
+                if(native_research54_tools_ready)
+                    SudekiMpLanStoryMenuServiceTools(controller,witness,&scene,TRUE);
+            } else if(native_research54_tools_ready &&
+                SudekiMpLanStoryMenuDrainToolsOnDispatch(controller,witness,&scene)) {
+                InterlockedExchange(&native_research54_tools_drained,1);
+            }
+        }
+    }
+    SudekiMpControlUpdateObserverGateLeave(&native_research54_gate);
+}
+static BOOL native_research54_uninstall(void) {
+    if(!native_research54_profile) return TRUE;
+    InterlockedExchange(&native_research54_stopping,1);
+    /* Keep dispatch/render alive until owned resource flags and render state
+     * drain on their native thread. A refusal is retryable, never an unload. */
+    if(native_research54_tools_ready &&
+        !InterlockedCompareExchange(&native_research54_tools_drained,0,0)) return FALSE;
+    if(native_research54_tools_requested && !SudekiMpLanPartyMenuNativeUninstall()) return FALSE;
+    if(native_research54_tools_ready && !SudekiMpLanStoryMenuReset()) return FALSE;
+    native_research54_tools_ready=FALSE;
+    SudekiMpControlUpdateObserverGateDisable(&native_research54_gate);
+    if(!SudekiMpControlSeparationUnregisterUpdateObserver(&native_research54_owner)) return FALSE;
+    SudekiMpControlUpdateObserverGateDrain(&native_research54_gate);
+    /* A native-thread or restoration refusal retains the profile/dependencies. */
+    if(!SudekiMpLanStoryResearch54Uninstall() || !SudekiMpLanStoryObserverUninstall()) return FALSE;
+    native_research54_profile=FALSE;
+    native_research54_image=NULL;
+    native_research54_tools_requested=FALSE;
+    return TRUE;
+}
 static BOOL uninstall_runtime_hooks(void) {
+    if(!native_research54_uninstall()) return FALSE;
     /* Story containment retains the input fence, load result, task observer
      * and sparse world identities until its own pause and camera are drained. */
     if (!SudekiMpUninstallLanStoryRuntime()) return FALSE;
@@ -356,6 +425,7 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpUninstallLanArenaStartupMovieSkip()) return FALSE;
     if (!SudekiMpSaveSearchSpeedUninstall()) return FALSE;
     if (!SudekiMpLanStoryAnimTraceUninstall()) return FALSE;
+    if (!SudekiMpLanStoryResearch54Uninstall()) return FALSE;
     if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpResourceSwapUninstall()) return FALSE;
     if (!SudekiMpLanStoryNameTagsUninstall()) return FALSE;
@@ -940,6 +1010,51 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         SudekiMpLogWrite("lobby_launch config=invalid\r\n");
         return SUDEKIMP_INIT_BAD_CONFIG;
     }
+    if (!lobby_launch && read_config_boolean(config_path,L"StoryAreas",L"NativeResearch54")) {
+        if(read_config_boolean(config_path,L"TitleMenu",L"Enabled") ||
+            read_config_boolean(config_path,L"FourPlayerTest",L"Enabled") ||
+            read_config_boolean(config_path,L"StoryAreas",L"TempExteriorProbe")) {
+            SudekiMpLogWrite("native_research54 config=invalid reason=exclusive_profile\r\n");
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        SudekiMpLogSetResearch(TRUE);
+        native_research54_profile=TRUE;
+        native_research54_image=game_module;
+        native_research54_tools_requested=
+            read_config_boolean(config_path,L"StoryAreas",L"NativeResearchTools");
+        InterlockedExchange(&native_research54_stopping,0);
+        InterlockedExchange(&native_research54_tools_drained,0);
+        if(!SudekiMpInitializeSkillActivationAbi(game_module) ||
+            !SudekiMpInitializeSpiritActivationAbi(game_module) ||
+            !SudekiMpInitializeWeaponActivationAbi(game_module) ||
+            !SudekiMpCleanroomEngineInitialize(game_module) ||
+            !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
+                FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
+            !SudekiMpLanStoryAreaFollowInitialize(game_module) ||
+            !SudekiMpLanStoryObserverInstall(game_module) ||
+            !SudekiMpLanStoryResearch54Install(game_module) ||
+            (native_research54_tools_requested &&
+                !SudekiMpLanPartyMenuNativeInstall(game_module,native_research54_menu_admission,
+                    SudekiMpLanStoryMenuToggle,native_research54_menu_frame)) ||
+            (read_config_boolean(config_path,L"SudekiMP",L"SkipStartupMovies") &&
+                (SudekiMpLanArenaStartupMovieSkipIntroPoem(TRUE),
+                 !SudekiMpInstallLanArenaStartupMovieSkip(game_module)))) {
+            DWORD error=GetLastError();
+            (void)uninstall_runtime_hooks();
+            SudekiMpLogFormat("native_research54 startup=failed error=%lu\r\n",(unsigned long)error);
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        configure_test_start(game_module,config_path);
+        if(!SudekiMpControlUpdateObserverGateEnable(&native_research54_gate) ||
+            !SudekiMpControlSeparationRegisterUpdateObserver(&native_research54_owner,native_research54_update)) {
+            DWORD error=GetLastError();
+            (void)uninstall_runtime_hooks();
+            SudekiMpLogFormat("native_research54 startup=failed error=%lu\r\n",(unsigned long)error);
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        SudekiMpLogWrite("status=ok profile=native_research54 network=false party=native movement=native logging=observe_only placement=configured_once\r\n");
+        return SUDEKIMP_INIT_OK;
+    }
     if (!lobby_launch && read_config_boolean(config_path, L"StoryAreas", L"TempExteriorProbe")) {
         if (read_config_boolean(config_path, L"TitleMenu", L"Enabled") ||
             read_config_boolean(config_path, L"FourPlayerTest", L"Enabled")) {
@@ -1022,6 +1137,12 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||
+            /* #54 research (Phase 1, log-only): control/facing/combat-input
+             * call observers and a per-frame party/cluster sampler
+             * ([StoryAreas] Research54, needs ResearchDiagnostics). */
+            (saved_story && SudekiMpLogResearchEnabled() &&
+                read_config_boolean(config_path,L"StoryAreas",L"Research54") &&
+                !SudekiMpLanStoryResearch54Install(game_module)) ||
             /* Archive resource redirection table ([ResourceSwap]); installs
              * nothing when the section is empty. Before any archive mounts. */
             !SudekiMpResourceSwapInstall(game_module,config_path) ||

@@ -1,5 +1,6 @@
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/call_hook.h"
+#include "hooks/lan_party_projectile_lifetime.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
 #include <math.h>
@@ -43,7 +44,8 @@ static const uint32_t resource_ids[] = {
     0x423bad0du, 0xc198e72du, 0x26de2bb3u, 0xc6cf803bu, 0x07f9bc13u,
     0x920d7163u, 0x0fdb430fu,
     0x18a0da0fu, 0x34b6a981u, 0xafbcfa53u, 0x55f90a03u, 0xf3c381cfu,
-    0xe2711ed3u, 0xec9a809bu, 0xb0a51d13u, 0xa85bf815u, 0x4ed84d5bu, 0x7eae7163u, 0x8e21830fu
+    0xe2711ed3u, 0xec9a809bu, 0xb0a51d13u, 0xa85bf815u, 0x4ed84d5bu, 0x7eae7163u, 0x8e21830fu, 0x79853f03u, 0x55fe7cfbu,
+    0x6e6ab603u, 0x0700bb4fu, 0x92924c93u, 0x9aba9c13u, 0xe04de4f7u, 0x113e7163u, 0x8fd33af3u, 0x6962ac13u, 0x7a0f7be5u, 0x44339603u, 0xec6ec03bu, 0x6cfc3173u, 0x26c23af3u, 0xb3f54b2du, 0xbe038af3u, 0xaf5881cbu, 0x4dc21929u, 0xba1fbc33u, 0xd4d5734bu, 0xdef2f193u, 0xf1758a93u, 0x147c1a93u, 0xb253d293u, 0x92215eefu, 0x1164f28fu, 0xd7a3ae33u, 0xd6aea28bu, 0xfe2b79f3u, 0x3ba29d83u, 0x661fb62du, 0xda7a5273u, 0xbe566943u, 0x06d8e387u
 };
 static const char *const resource_names[] = {
     NULL, "SFXSS250_INITIATE", "SFXSS251_INITIATE_LOOP_WAIT",
@@ -59,7 +61,41 @@ static const char *const resource_names[] = {
     "SFXSS550_INITIATE", "SFXSS551_INITIATE_LOOP_WAIT", "SFXSS552_MORPH_INTO_SPIRIT",
     "SFXSS560_LOOP_INVULNERABLE", "SFXSS561_END_INVULNERABLE", "SFXSS562_SMALL_FLOOR_PATTERN",
     "SFXSS600_RAFFI_SPIRIT_STRIKE", "SFXSS601_HIT", "SFXSS650_RAFFI_SS_SPELL", "SFXSS651_HASTE_PCS",
-    "SFXT200_SHIELD_APPEAR", "SFXT201_SHIELD_LOOP"
+    "SFXT200_SHIELD_APPEAR", "SFXT201_SHIELD_LOOP",
+    "SFXTS001_SHIN_SPLITTER", "SFXSA002_ATTACK_ZONE_ARC",
+    "SFXAF001_ROYAL_SCEPTRE",
+    "SFXAF004_XURICS_FIRE_EFFECT",
+    "SFXAF005_HISTANICA_FIRE_EFFECT",
+    "SFXAF006_WIZARDWOOD_STAVE_FIRE_EFFECT",
+    "SFXAF007_NIGHT_SHADOW_FIRE_EFFECT",
+    "SFXAH001_HEAVY_HIT_016",
+    "SFXAH003_BATHOLITH",
+    "SFXAH006_WIZARDWOOD_STAVE_HIT_EFFECT",
+    "SFXAP001_LIGHT_ATTACK_012",
+    "SFXAP001_ROYAL_SCEPTRE",
+    "SFXAP002_CHILLTIP_CANE",
+    "SFXAP002_MEDIUM_ATTACK_050",
+    "SFXAP003_BATHOLITH",
+    "SFXAP004_XURICS_SHOCK_STAFF",
+    "SFXAP005_HISTANICA",
+    "SFXAP006_WIZARDWOOD_STAVE",
+    "SFXAP007_NIGHT_SHADOW",
+    "SFXEF001_LIGHT_ATTACK_FIRE_024",
+    "SFXEF001_MK1_PISTOL_FIRE_EFFECT",
+    "SFXEF002_MOURNING_TIDE_FIRE_EFFECT",
+    "SFXEF004_SULFURYL_LAUNCHER_FIRE_EFFECT",
+    "SFXEF005_ELUVIAM_FIRE_EFFECT",
+    "SFXEF007_SHOOTING_IRON_FIRE_EFFECT",
+    "SFXEH004_SULFURYL_LAUNCHER_HIT_EFFECT",
+    "SFXEP001_MK1_PISTOL",
+    "SFXEP002_MEDIUM_ATTACK_024",
+    "SFXEP002_MOURNING_TIDE",
+    "SFXEP003_BEWILDERMENT_RAYGUN",
+    "SFXEP004_SULFURYL_LAUNCHER",
+    "SFXEP005_ELUVIAM_JACKHAMMER",
+    "SFXEP006_PHOENIX_REBIRTH",
+    "SFXEP007_SHOOTING_IRON",
+    "SFXHT104_MISS_BLADE2MAGIC"
 };
 enum { RESOURCE_TEXT_CAPACITY = 64, DIAGNOSTIC_CAPACITY = 16 };
 static const uint8_t finalize_prefix[] = {
@@ -129,6 +165,7 @@ typedef struct PendingEmission {
  * Never cache a naked effect or infer its caster from whoever is active later. */
 static PendingEmission pending_emissions[SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY];
 static const EmissionSource *emission_source;
+static void retain_emission(void *entity,const EmissionSource *source);
 static SudekiMpSpiritVisualHostRegistry registry;
 static HMODULE image;
 static DWORD game_thread;
@@ -147,13 +184,13 @@ static uint32_t diagnostic_ids[DIAGNOSTIC_CAPACITY];
 static uint32_t diagnostic_types[DIAGNOSTIC_CAPACITY];
 static unsigned int diagnostic_count;
 static uint16_t diagnostic_skill;
-static uint64_t inactive_kind_mask;
-_Static_assert(SUDEKIMP_LAN_PARTY_VFX_LAST < 64u,
-    "inactive diagnostics need one bit per closed visual kind");
+static uint8_t inactive_kind_seen[SUDEKIMP_LAN_STORY_VFX_LAST+1u];
+_Static_assert(SUDEKIMP_LAN_STORY_VFX_LAST < 256u,
+    "visual kind fits the closed wire byte");
 _Static_assert(sizeof(resource_ids) / sizeof(resource_ids[0]) ==
-    SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, "closed visual ID table mismatch");
+    SUDEKIMP_LAN_STORY_VFX_LAST + 1u, "closed visual ID table mismatch");
 _Static_assert(sizeof(resource_names) / sizeof(resource_names[0]) ==
-    SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, "closed visual name table mismatch");
+    SUDEKIMP_LAN_STORY_VFX_LAST + 1u, "closed visual name table mismatch");
 
 uint8_t SudekiMpSpiritVisualKindForResource(uint32_t identifier) {
     unsigned int i;
@@ -305,7 +342,7 @@ unsigned int SudekiMpSpiritVisualHostRegistryBeginOwned(
     identity.skill_sequence = skill;
     identity.owner_actor_type = owner_actor_type;
     if (r == NULL || !api_valid(api)) return 0u;
-    if (session == 0u || !SudekiMpLanArenaVisualOwnerValidForParty(&identity) || entity == NULL || kind == 0u ||
+    if (session == 0u || !SudekiMpLanVisualOwnerValidForPresentation(&identity) || entity == NULL || kind == 0u ||
         kind >= sizeof(resource_ids)/sizeof(resource_ids[0]) ||
         (r->session != 0u && r->session != session)) {
         r->unknown = TRUE;
@@ -367,16 +404,16 @@ void SudekiMpSpiritVisualHostRegistryComplete(
     entry->state = ENTRY_READY;
 }
 
-BOOL SudekiMpSpiritVisualHostRegistryCapture(
+static BOOL registry_capture(
     SudekiMpSpiritVisualHostRegistry *r, uint64_t session,
-    SudekiMpLanArenaSnapshot *output, const SudekiMpSpiritVisualHostApi *api
+    SudekiMpLanArenaSpiritVfxSnapshot *output,unsigned capacity,uint8_t *out_count,
+    const SudekiMpSpiritVisualHostApi *api
 ) {
     SudekiMpLanArenaSpiritVfxSnapshot values[
-        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY];
+        SUDEKIMP_STORY_VFX_CAPACITY];
     unsigned int i, count = 0u;
-    unknown_output(output);
     if (r == NULL || output == NULL || !api_valid(api) || session == 0u ||
-        r->unknown || (r->session != 0u && r->session != session)) return FALSE;
+        !out_count || capacity>SUDEKIMP_STORY_VFX_CAPACITY || r->unknown || (r->session != 0u && r->session != session)) return FALSE;
     r->session = session;
     memset(values, 0, sizeof(values));
     for (i = 0; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
@@ -387,8 +424,7 @@ BOOL SudekiMpSpiritVisualHostRegistryCapture(
             memset(entry, 0, sizeof(*entry));
             continue;
         }
-        if (entry->state != ENTRY_READY || count >=
-                SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY) return FALSE;
+        if (entry->state != ENTRY_READY || count >= capacity) return FALSE;
         values[count] = entry->value;
         if (!api->sample(api->context, &entry->weak, entry->value.kind,
                 &values[count])) return FALSE;
@@ -403,10 +439,26 @@ BOOL SudekiMpSpiritVisualHostRegistryCapture(
         }
         values[at] = value;
     }
-    memcpy(output->spirit_vfx, values, sizeof(values));
-    output->spirit_vfx_count = (uint8_t)count;
-    output->spirit_vfx_observed = 1u;
+    memcpy(output,values,capacity*sizeof(*values));
+    *out_count=(uint8_t)count;
     return TRUE;
+}
+
+BOOL SudekiMpSpiritVisualHostRegistryCapture(
+    SudekiMpSpiritVisualHostRegistry *r,uint64_t session,
+    SudekiMpLanArenaSnapshot *output,const SudekiMpSpiritVisualHostApi *api) {
+    unknown_output(output);
+    if(!output || !registry_capture(r,session,output->spirit_vfx,
+        SUDEKIMP_LAN_ARENA_SPIRIT_VFX_CAPACITY,&output->spirit_vfx_count,api)) return FALSE;
+    output->spirit_vfx_observed=1;return TRUE;
+}
+BOOL SudekiMpSpiritVisualHostRegistryCaptureStory(
+    SudekiMpSpiritVisualHostRegistry *r,uint64_t session,
+    SudekiMpStoryVfx *output,const SudekiMpSpiritVisualHostApi *api) {
+    if(!output) return FALSE;
+    output->observed=output->count=0;memset(output->entries,0,sizeof(output->entries));
+    if(!registry_capture(r,session,output->entries,SUDEKIMP_STORY_VFX_CAPACITY,&output->count,api)) return FALSE;
+    output->observed=1;return TRUE;
 }
 
 static BOOL memory_access(const void *pointer, size_t size, BOOL write) {
@@ -588,9 +640,24 @@ BOOL SudekiMpLanPartyEffectLifetimeCurrent(SudekiMpLanPartyEffectOwner *owner) {
 static void * __cdecl lifetime_factory(void) {
     SudekiMpLanPartyEffectOwner owner={0};
     BOOL owned=lifetime_source(NULL,&owner);
+    EmissionSource source={0};
+    /* Positional missile impacts allocate here, outside the animation and
+     * script-parent observers. Their setup can finish after the missile's
+     * update scope has returned. Retain the witnessed ordinary-shot source
+     * on the native weak identity before that scope ends. */
+    if(owned && session_armed && InterlockedCompareExchange(&admitted,0,0) &&
+        active_witness && (owner.actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
+                          owner.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE)) {
+        if(emission_source) source=*emission_source;
+        else source.valid=active_witness(witness_context,NULL,&source.session,
+            &source.sequence,&source.tick,&source.owner);
+        source.valid=source.valid && !source.sequence && source.session==owner.session &&
+            source.owner==owner.actor_type;
+    }
     InterlockedIncrement(&lifetime_depth);
     void *entity=((void *(__cdecl *)(void))lifetime_factory_hook.trampoline)();
     if(owned) lifetime_capture(entity,&owner);
+    if(source.valid) retain_emission(entity,&source);
     InterlockedDecrement(&lifetime_depth);
     return entity;
 }
@@ -770,6 +837,94 @@ static BOOL native_sample(void *context, const SudekiMpSpiritVisualWeakNode *nod
     return TRUE;
 }
 
+typedef struct StoryMissileVisual {
+    uint32_t incarnation,instance,tick;
+} StoryMissileVisual;
+static StoryMissileVisual story_missile_visuals[SUDEKIMP_STORY_VFX_CAPACITY];
+static uint64_t story_missile_session;
+
+static BOOL missile_visual_sample(const SudekiMpLanPartyProjectileObservation *o,
+    SudekiMpLanArenaSpiritVfxSnapshot *value) {
+    uint8_t *e=o->entity,*m=o->missile,*position,*record;
+    void *wrapper,*renderer,*render_object,*model_interface,*render_interface;
+    typedef const float *(__attribute__((thiscall)) *WorldMatrix)(void *);
+    if(!memory_access(m,0x60u,FALSE) || *(void **)m!=(uint8_t *)image+0x2d915cu ||
+        *(void **)(m+0x10u)!=e || !memory_access(e,0x100u,FALSE) ||
+        *(void **)e!=(uint8_t *)image+0x2d5a10u || *(void **)(e+0xfcu)!=m ||
+        !memory_access(record=*(uint8_t **)(m+0x3cu),0x30u,FALSE)) return FALSE;
+    value->kind=native_resource_kind(record+0x24u);
+    value->owner_actor_type=o->owner.actor_type;value->skill_sequence=0;
+    if(!SudekiMpLanStoryCastVisualOwnerValid(value) ||
+        !memory_access(position=*(uint8_t **)(e+0x44u),0x104u,TRUE) ||
+        *(void **)position!=(uint8_t *)image+RVA_POSITION_VTABLE || *(void **)(position+0x10u)!=e ||
+        !pointer_at(position,0xb4u,&wrapper) || !pointer_at(wrapper,8u,&render_object) ||
+        !pointer_at(wrapper,0xcu,&model_interface) || !pointer_at(wrapper,0x10u,&renderer) ||
+        !memory_access(render_object,0xd0u,TRUE) || !pointer_at(render_object,0x14u,&render_interface) ||
+        !memory_access(renderer,0x9cu,FALSE) || *(void **)renderer!=(uint8_t *)image+RVA_RENDERER_VTABLE ||
+        model_interface!=renderer || render_interface!=renderer) return FALSE;
+    /* Ordinary native missiles have a root world position. No speculative
+     * actor parent traversal and no borrowing pointers beyond this sample. */
+    if(*(void **)(position+0x94u) || !memory_access(*(void **)(position+0x8cu),0x110u,TRUE)) return FALSE;
+    const float *matrix=((WorldMatrix)((uint8_t *)image+RVA_WORLD_MATRIX))(position);
+    return memory_access(matrix,64u,FALSE) && SudekiMpSpiritVisualDecomposeMatrix(matrix,value) &&
+        native_phase(renderer,value) && *(void **)(m+0x10u)==e && *(void **)(e+0xfcu)==m;
+}
+BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *elco,void *ailish,
+    SudekiMpStoryVfx *output) {
+    SudekiMpLanPartyProjectileObservation missiles[512];unsigned count=0;
+    if(!output || !image || !session || session!=registry.session || registry.unknown ||
+        GetCurrentThreadId()!=game_thread || !output->observed ||
+        output->count>SUDEKIMP_STORY_VFX_CAPACITY ||
+        !SudekiMpLanPartyProjectileLifetimeObserve(missiles,512,&count)) return FALSE;
+    if(story_missile_session!=session) {
+        memset(story_missile_visuals,0,sizeof(story_missile_visuals));story_missile_session=session;
+    }
+    /* Drop only identities positively absent/terminated in this complete
+     * native observation; unknown never becomes an empty deletion roster. */
+    for(unsigned i=0;i<SUDEKIMP_STORY_VFX_CAPACITY;++i) {
+        BOOL present=FALSE;
+        for(unsigned j=0;j<count;++j) if(missiles[j].incarnation==story_missile_visuals[i].incarnation &&
+            missiles[j].owner.session==session && !missiles[j].termination_entered) present=TRUE;
+        if(!present) memset(&story_missile_visuals[i],0,sizeof(story_missile_visuals[i]));
+    }
+    SudekiMpStoryVfx next=*output;
+    for(unsigned i=0;i<count;++i) {
+        const SudekiMpLanPartyProjectileObservation *o=&missiles[i];
+        if(o->owner.session!=session || o->termination_entered ||
+            !((o->owner.actor_type==0x0eu && o->owner.actor==elco) ||
+              (o->owner.actor_type==0x01u && o->owner.actor==ailish))) continue;
+        /* Only the closed ordinary weapon model set is admitted. Skill
+         * missiles keep their separate owner and existing visual contract. */
+        if(!memory_access(o->missile,0x40u,FALSE)) return FALSE;
+        uint8_t *record=*(uint8_t **)((uint8_t *)o->missile+0x3cu);
+        if(!memory_access(record,0x30u,FALSE)) return FALSE;
+        uint8_t kind=native_resource_kind(record+0x24u);
+        if(kind<SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST) continue;
+        if(next.count>=SUDEKIMP_STORY_VFX_CAPACITY) return FALSE;
+        StoryMissileVisual *entry=NULL,*empty=NULL;
+        for(unsigned j=0;j<SUDEKIMP_STORY_VFX_CAPACITY;++j) {
+            if(story_missile_visuals[j].incarnation==o->incarnation) entry=&story_missile_visuals[j];
+            if(!story_missile_visuals[j].incarnation && !empty) empty=&story_missile_visuals[j];
+        }
+        SudekiMpLanArenaSpiritVfxSnapshot value={0};
+        if(!missile_visual_sample(o,&value)) return FALSE;
+        if(!entry) {
+            if(!empty || registry.next_instance==UINT32_MAX) return FALSE;
+            entry=empty;*entry=(StoryMissileVisual){o->incarnation,++registry.next_instance,output->tick};
+        }
+        value.instance_sequence=entry->instance;value.emitted_host_tick=entry->tick;
+        next.entries[next.count++]=value;
+    }
+    for(unsigned i=1;i<next.count;++i) {
+        unsigned at=i;SudekiMpLanArenaSpiritVfxSnapshot value=next.entries[i];
+        while(at && next.entries[at-1].instance_sequence>value.instance_sequence) {
+            next.entries[at]=next.entries[at-1];--at;
+        }
+        next.entries[at]=value;
+    }
+    *output=next;return TRUE;
+}
+
 static const SudekiMpSpiritVisualHostApi *native_api(void) {
     static SudekiMpSpiritVisualHostApi api;
     api.context = image; api.bind = native_bind; api.sample = native_sample;
@@ -817,7 +972,10 @@ static BOOL registered_source_for(void *entity, EmissionSource *source) {
     for (i = 0u; i < SUDEKIMP_SPIRIT_VISUAL_HOST_REGISTRY_CAPACITY; ++i) {
         SudekiMpSpiritVisualHostEntry *e = &registry.entries[i];
         if (e->weak.entity != entity) continue;
-        if (!weak_links_valid(&e->weak) || !e->value.skill_sequence) return FALSE;
+        if (!weak_links_valid(&e->weak) ||
+            (!e->value.skill_sequence &&
+             !(e->value.kind>=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST &&
+               SudekiMpLanStoryCastVisualOwnerValid(&e->value)))) return FALSE;
         *source = (EmissionSource){registry.session, e->value.skill_sequence,
             e->value.emitted_host_tick, e->value.owner_actor_type, TRUE};
         return TRUE;
@@ -1060,8 +1218,8 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                      * status component after finalization, never attributed
                      * to whichever Spirit happened to be running. */
                 } else if (!shield_witness && !active && kind != 0u &&
-                    (inactive_kind_mask & (UINT64_C(1) << kind)) == 0u) {
-                    inactive_kind_mask |= (UINT64_C(1) << kind);
+                    (kind<=SUDEKIMP_LAN_STORY_VFX_LAST && !inactive_kind_seen[kind])) {
+                    inactive_kind_seen[kind]=1;
                     observed_kind = kind;
                     skip_reason = "native_spirit_witness_inactive";
                 } else if (active && kind == 0u &&
@@ -1070,7 +1228,7 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                     if (diagnostic_skill != skill) {
                         diagnostic_skill = skill;
                         diagnostic_count = 0u;
-                        inactive_kind_mask = 0u;
+                        memset(inactive_kind_seen,0,sizeof(inactive_kind_seen));
                     }
                     for (i = 0u; i < diagnostic_count; ++i)
                         if (diagnostic_ids[i] == requested_identifier &&
@@ -1087,8 +1245,13 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                      * pointer is NULL; it cannot create an effect on that
                      * branch. A retired/pending setup is not a missed spawn. */
                     if (entity != NULL && !exact_effect(entity)) registry.unknown = TRUE;
-                    else if (entity != NULL) token = SudekiMpSpiritVisualHostRegistryBeginOwned(
-                        &registry, session, skill, tick, kind, owner_type, entity, native_api());
+                    else if (entity != NULL) {
+                        SudekiMpLanArenaSpiritVfxSnapshot candidate={.kind=kind,
+                            .skill_sequence=skill,.owner_actor_type=owner_type};
+                        if(SudekiMpLanVisualOwnerValidForPresentation(&candidate))
+                            token = SudekiMpSpiritVisualHostRegistryBeginOwned(
+                                &registry, session, skill, tick, kind, owner_type, entity, native_api());
+                    }
                 }
             }
         }
@@ -1230,7 +1393,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostInitialize(
     last_capture_count = -1;
     diagnostic_count = 0u;
     diagnostic_skill = 0u;
-    inactive_kind_mask = 0u;
+    memset(inactive_kind_seen,0,sizeof(inactive_kind_seen));
     InterlockedExchange(&admitted, 1);
     return TRUE;
 }
@@ -1392,6 +1555,12 @@ BOOL SudekiMpLanPartyEffectLifetimeReset(void) {
     }
     return TRUE;
 }
+BOOL SudekiMpLanPartySpiritVisualHostSetShieldWitness(HMODULE module,
+    SudekiMpLanPartyShieldHostWitness witness) {
+    if(!witness || image!=module || !InterlockedCompareExchange(&admitted,0,0) ||
+        session_armed || shield_witness || InterlockedCompareExchange(&in_flight,0,0)) return FALSE;
+    shield_witness=witness;return TRUE;
+}
 BOOL SudekiMpLanPartyShieldHostInitialize(HMODULE module,
     SudekiMpLanPartyShieldHostWitness witness, void *context) {
     if(!witness || !SudekiMpLanArenaSpiritVisualHostInitialize(
@@ -1512,6 +1681,20 @@ static BOOL discover_actor_status_visuals(
     return registry.entries[token - 1u].state == ENTRY_READY;
 }
 
+BOOL SudekiMpLanPartySpiritVisualHostCapture(uint64_t session,BOOL idle_baseline,
+    SudekiMpStoryVfx *output) {
+    if(output) {output->count=output->observed=0;memset(output->entries,0,sizeof(output->entries));}
+    if(!session || !output || !active_witness || !InterlockedCompareExchange(&admitted,0,0) ||
+        !game_thread || game_thread!=GetCurrentThreadId() || InterlockedCompareExchange(&in_flight,0,0)) return FALSE;
+    if(InterlockedCompareExchange(&unexpected_thread,0,0)) registry.unknown=TRUE;
+    if(registry.session && registry.session!=session) return FALSE; /* Explicit reset owns the old registry. */
+    if(!session_armed) {
+        if(!idle_baseline) return FALSE;
+        registry.session=session; session_armed=TRUE;
+    }
+    return SudekiMpSpiritVisualHostRegistryCaptureStory(&registry,session,output,native_api());
+}
+
 BOOL SudekiMpLanArenaSpiritVisualHostCapture(
     uint64_t session, uint16_t current_skill, uint32_t host_tick,
     void *tal, void *ailish,
@@ -1533,7 +1716,7 @@ BOOL SudekiMpLanArenaSpiritVisualHostCapture(
         if (!SudekiMpSpiritVisualHostRegistryReset(&registry, native_api())) goto unknown;
         diagnostic_count = 0u;
         diagnostic_skill = 0u;
-        inactive_kind_mask = 0u;
+        memset(inactive_kind_seen,0,sizeof(inactive_kind_seen));
     }
     registry.session = session;
     if (!session_armed) {

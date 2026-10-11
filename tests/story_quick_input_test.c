@@ -25,6 +25,31 @@ int main(void) {
     assert(take_melee(4)==1); /* unsigned clock wrap */
     attack.value=0; sample_melee(&attack,TRUE,50);
     attack.value=1; sample_melee(&attack,TRUE,50); clear_sample(); assert(!take_melee(50));
+    melee_down=0; ranged_press=0;ranged_held=FALSE;
+    attack.action=0x2c;attack.value=1;sample_melee(&attack,TRUE,70);
+    assert(ranged_held && ranged_press==1);
+    sample_melee(&attack,TRUE,71);assert(ranged_press==1 && ranged_held);
+    clear_sample();assert(!ranged_held && ranged_press==1);
+    sample_melee(&attack,TRUE,72);assert(!ranged_held && ranged_press==1);
+    attack.value=0;sample_melee(&attack,FALSE,73);
+    attack.value=1;sample_melee(&attack,FALSE,74);
+    sample_melee(&attack,TRUE,75);assert(!ranged_held && ranged_press==1);
+    attack.value=0;sample_melee(&attack,TRUE,76);
+    attack.value=1;sample_melee(&attack,TRUE,77);assert(ranged_held && ranged_press==2);
+    attack.value=0;sample_melee(&attack,TRUE,78);assert(!ranged_held && ranged_press==2);
+    NativeEvent guard={.action=0x31,.value=1};
+    sample_block(&guard,TRUE);assert(block_down && block_held);
+    sample_block(&guard,TRUE);assert(block_held); /* held state persists */
+    clear_sample();assert(block_down && !block_held);
+    sample_block(&guard,TRUE);assert(!block_held); /* rebind cannot replay hold */
+    guard.value=0;sample_block(&guard,FALSE);assert(!block_down && !block_held);
+    guard.value=1;sample_block(&guard,FALSE);sample_block(&guard,TRUE);assert(!block_held);
+    guard.value=0;sample_block(&guard,TRUE);guard.value=1;sample_block(&guard,TRUE);assert(block_held);
+    native_thread=GetCurrentThreadId();SudekiMpLanStoryInputMuteMovement();assert(block_down && !block_held);
+    sample_block(&guard,TRUE);assert(!block_held);
+    guard.value=0;sample_block(&guard,TRUE);guard.value=1;sample_block(&guard,TRUE);assert(block_held);
+    guard.action=0x2f;guard.value=0;sample_block(&guard,TRUE);assert(block_held); /* weapon-next is not block */
+    guard.action=0x31;sample_block(&guard,FALSE);assert(!block_held && !block_down);
     NativeEvent e={.action=0x19,.value=1};
     sample_quick(&e,TRUE); assert(quick_pending && quick_down);
     quick_pending=FALSE; sample_quick(&e,TRUE); assert(!quick_pending);

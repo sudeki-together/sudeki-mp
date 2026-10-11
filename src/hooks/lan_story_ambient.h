@@ -12,7 +12,10 @@
  * zero incoming delta with a bounded local render delta for renderers no
  * registry entity owns. Entity-owned renderers (replicated NPCs, scenery,
  * party characters, monsters) keep the native zero delta: their poses are
- * written by presentation. Host processes never activate it. Mutually
+ * written by presentation. A separately guarded trail-child Update visit
+ * receives the bounded delta only after a fresh current-frame replicated
+ * character/renderer/resource proof; this advances trail history without
+ * stepping the body pose or its events. Host processes never activate it. Mutually
  * exclusive with the AnimTrace probe, which uses the same entry bytes. */
 BOOL SudekiMpLanStoryAmbientInstall(HMODULE image);
 BOOL SudekiMpLanStoryAmbientUninstall(void);

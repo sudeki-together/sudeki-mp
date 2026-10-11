@@ -9,6 +9,23 @@ static SudekiMpLanPartyPeerStatus peer;
 static SudekiMpLanStoryScene scene={.epoch=1,.revision=1,.phase=SUDEKIMP_LAN_STORY_READY,
     .available_mask=15,.leader_seat=3,.world="skill_request_fixture"};
 static SudekiMpLanStoryControlState state;
+static unsigned client_character;
+static SudekiMpLanPartyPresence presence;
+static void change_presence(void) {
+    assert(SudekiMpPartyPresenceRequest(&presence.ownership,1,presence.sequence+1u,
+        presence.ownership.assignment.world,presence.ownership.assignment.revision,
+        FALSE,!(presence.ownership.away&2u))==SUDEKIMP_PARTY_SWAP_OK);
+    ++presence.sequence;presence.observed_tick=GetTickCount();
+    assert(SudekiMpLanPartyPublishPresence(host,&presence));
+    BOOL received=FALSE;
+    for(unsigned i=0;i<80 && !received;++i) {
+        SudekiMpLanPartyPresence got;
+        SudekiMpLanPartyPoll(host,GetTickCount());SudekiMpLanPartyPoll(client,GetTickCount());
+        received=SudekiMpLanPartyGetPresence(client,&got) && got.sequence==presence.sequence;
+        if(!received) Sleep(1);
+    }
+    assert(received);
+}
 static void poll(void) {
     uint32_t now=GetTickCount();
     if(now!=scene.observed_tick) {
@@ -17,7 +34,7 @@ static void poll(void) {
     SudekiMpLanPartyPoll(host,now); SudekiMpLanPartyPoll(client,now);
 }
 static void control(unsigned transaction) {
-    state=(SudekiMpLanStoryControlState){.fence={1,1,transaction,1,1,2},
+    state=(SudekiMpLanStoryControlState){.fence={1,1,transaction,1,1,(uint8_t)client_character},
         .phase=SUDEKIMP_STORY_CONTROL_PREPARE,.observed_tick=GetTickCount()};
     assert(SudekiMpLanPartyPublishStoryControl(host,&peer.lease,&state));
     BOOL ack=FALSE; SudekiMpLanStoryControlState remote;
@@ -57,9 +74,11 @@ static void receive_result(const SudekiMpLanStoryActionRequest *r,unsigned outco
     }
     assert(received && SudekiMpLanStoryActionResultMatches(&got,r) && got.outcome==outcome);
 }
-int main(void) {
+static void exercise(unsigned character) {
+    client_character=character;
     SudekiMpLanPartyConfig config={.story_observation=2,.timeout_ms=5000,
         .assignment_enabled=1,.character={3,2,0,1}};
+    config.character[1]=(uint8_t)character; config.character[2]=(uint8_t)(character==0?2:0);
     memset(config.game_hash,0x25,sizeof(config.game_hash));
     host=SudekiMpLanPartyCreate(&config); assert(host);
     config.local_seat=1; config.host_ipv4="127.0.0.1"; config.port=SudekiMpLanPartyPort(host);
@@ -85,6 +104,19 @@ int main(void) {
         if(!got) Sleep(1);
     }
     assert(got); control(1);
+    /* C4 preserves native scaled/diagonal speed through the actual peers. */
+    SudekiMpLanStoryMovement movement={state.fence,1,1,1.0f,1.8f},remote_movement;
+    uint32_t movement_received=0;
+    assert(SudekiMpLanPartySendStoryMovement(client,&peer.lease,&movement));
+    got=FALSE;
+    for(unsigned i=0;i<80 && !got;++i) {
+        poll(); got=SudekiMpLanPartyTakeStoryMovement(host,&peer.lease,GetTickCount(),
+            &remote_movement,&movement_received);
+        if(!got) Sleep(1);
+    }
+    assert(got && remote_movement.world_x==movement.world_x && remote_movement.world_z==movement.world_z);
+    movement.world_x=movement.world_z=4;
+    assert(!SudekiMpLanPartySendStoryMovement(client,&peer.lease,&movement));
     SudekiMpLanStoryActionRequest r={state.fence,1,1,SUDEKIMP_STORY_ACTION_SKILL,3},taken;
     SudekiMpLanStoryActionRequest invalid=r; invalid.fence.character=3;
     assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid));
@@ -122,7 +154,53 @@ int main(void) {
         receive_request(&r,FALSE); receive_result(&r,SUDEKIMP_STORY_ACTION_SUBMITTED);
         assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
     }
+    for(unsigned variant=1;variant<=2;++variant) {
+        ++r.request; r.kind=SUDEKIMP_STORY_ACTION_SPIRIT; r.slot=(uint8_t)variant;
+        invalid=r; invalid.slot=0; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        invalid.slot=3; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        receive_request(&r,TRUE);
+        result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
+            variant==1?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_NO_SP};
+        assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+        receive_result(&r,result.outcome);
+        receive_request(&r,FALSE); receive_result(&r,result.outcome);
+        assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
+        invalid=r; invalid.kind=SUDEKIMP_STORY_ACTION_SKILL;
+        assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid)); /* ID cannot change kind */
+    }
     r.kind=SUDEKIMP_STORY_ACTION_SKILL; r.slot=3;
+    /* Presence/focus fencing must terminalize untaken host work, retain a
+     * possibly executed client request, and permit the NEXT attack afterward. */
+    SudekiMpPartyAssignment assignment={.world=1,.revision=1,.available=15,.humans=3};
+    memcpy(assignment.character,config.character,4);
+    assignment.character[2]=assignment.character[3]=4;
+    for(unsigned c=0;c<4;++c) assignment.generation[c]=1;
+    memset(&presence,0,sizeof(presence));
+    assert(SudekiMpPartyOwnershipInitializePresence(&presence.ownership,&assignment,3,3));
+    ++r.request;receive_request(&r,FALSE);
+    change_presence();
+    receive_request(&r,FALSE);receive_result(&r,SUDEKIMP_STORY_ACTION_EXPIRED);
+    assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
+    /* A request already taken may have run: never replace its eventual native
+     * outcome with expiry or allow another submission after a presence gap. */
+    ++r.request;receive_request(&r,TRUE);
+    change_presence();
+    assert(!SudekiMpLanPartyGetStoryActionResult(client,&peer.lease,&result));
+    invalid=r;++invalid.request;
+    assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid));
+    result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
+        SUDEKIMP_STORY_ACTION_STARTED};
+    assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+    receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
+    change_presence();receive_request(&r,FALSE);receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
+    assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
+    ++r.request;r.kind=SUDEKIMP_STORY_ACTION_MELEE;r.slot=2;
+    receive_request(&r,TRUE);
+    result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
+        SUDEKIMP_STORY_ACTION_SUBMITTED};
+    assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+    receive_result(&r,SUDEKIMP_STORY_ACTION_SUBMITTED);
+    r.kind=SUDEKIMP_STORY_ACTION_SKILL;r.slot=3;
     ++r.request; receive_request(&r,FALSE);
     assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,
         GetTickCount()+SUDEKIMP_STORY_CONTROL_MAX_AGE_MS+1,&taken));
@@ -150,10 +228,11 @@ int main(void) {
     r.acknowledged_frame=11; ++r.request; receive_request(&r,FALSE);
     assert(SudekiMpLanPartyRevokeStoryControl(host,&peer.lease));
     assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
+    receive_request(&r,FALSE);receive_result(&r,SUDEKIMP_STORY_ACTION_EXPIRED);
     SudekiMpLanPartyLease previous=peer.lease;
     assert(SudekiMpLanPartyDisconnect(host,&peer.lease));
     assert(!SudekiMpLanPartyTakeStoryAction(host,&previous,GetTickCount(),&taken));
     SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
     puts("story skill/melee UDP request/duplicate/result/expiry/fence tests passed (no native actions)");
-    return 0;
 }
+int main(void) { exercise(2); exercise(0); return 0; }

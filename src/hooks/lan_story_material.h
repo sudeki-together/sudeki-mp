@@ -12,4 +12,10 @@
 BOOL SudekiMpLanStoryMaterialInitialize(HMODULE image);
 BOOL SudekiMpLanStoryMaterialOwnerExact(HMODULE image,const void *child,
     const void *resource);
+/* Read-only closure of the exact SOL members3..5 constant expansion with
+ * authored texture fields retained, including
+ * cache/factory dispatch and derived-definition cleanup. Parent/slot ownership
+ * and native prepare/clone admission remain the caller's separate proof. */
+BOOL SudekiMpLanStoryMaterialShaderOutputExact(HMODULE image,const void *material,
+    const void *original,unsigned member);
 #endif

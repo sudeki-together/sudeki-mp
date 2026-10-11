@@ -3,9 +3,9 @@
 #include "hooks/lan_story_client.h"
 
 /* Client-only retail Q UI. The callback only reserves plain request data;
- * TRUE means queued, never that a native skill has started. */
-typedef BOOL (*SudekiMpStoryQuickSkillRequest)(void *actor,unsigned slot);
-BOOL SudekiMpLanStoryQuickMenuInstall(HMODULE image,SudekiMpStoryQuickSkillRequest request);
+ * TRUE means queued, never that a native skill/Spirit has started. */
+typedef BOOL (*SudekiMpStoryQuickActionRequest)(void *actor,unsigned kind,unsigned slot);
+BOOL SudekiMpLanStoryQuickMenuInstall(HMODULE image,SudekiMpStoryQuickActionRequest request);
 /* Inside ClientPresent, using that transaction's exact roster. Losing owned
  * closes through the balanced native path. A transient !admitted blocks new
  * opens/skill submissions, not the existing UI or its cancel/navigation. */

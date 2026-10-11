@@ -2,6 +2,9 @@
 
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "hooks/lan_story_spawn_trace.h"
+#include "hooks/lan_story_sky.h"
+#include "hooks/lan_story_client.h"
 
 #include <string.h>
 
@@ -98,6 +101,8 @@ BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out) {
 static uint32_t last_call_at;
 uint32_t SudekiMpLanStoryAreaFollowLastCall(void) { return last_call_at; }
 static void call_zone(unsigned rva,const char *name) {
+    /* Return the old area's lighting before native residency can replace it. */
+    if(!SudekiMpLanStorySkyReleaseLighting()) return;
     last_call_at=GetTickCount(); if(!last_call_at) last_call_at=1u;
     InterlockedExchange(&calling,1);
     ((ZoneCall)(base+rva))(name);
@@ -105,7 +110,16 @@ static void call_zone(unsigned rva,const char *name) {
 }
 BOOL SudekiMpLanStoryAreaFollowCalling(void) { return InterlockedCompareExchange(&calling,0,0)!=0; }
 
-void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now) {
+static BOOL replay_spawn(void *context) {
+    const SudekiMpStorySpawnGroup *group=context;
+    InterlockedExchange(&calling,1);
+    BOOL entered=SudekiMpLanStorySpawnReplay(group->name,group->sequence);
+    InterlockedExchange(&calling,0);
+    return entered;
+}
+void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    (void)w;
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
     if(!world || !SudekiMpStoryAreaStateValid(host) || !*(world+WORLD_ARMED)) return;
     uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT),*target=*(uint8_t **)(world+WORLD_TARGET);
@@ -177,4 +191,59 @@ int SudekiMpLanStoryAreaZoneState(const char *zone) {
     uint8_t *d=world && zone && zone[0]?find(zone,table,count):NULL;
     if(!d) return -1;
     return *(uint8_t **)(world+WORLD_CURRENT)==d?3:(int)*(uint32_t *)(d+DESC_STATE);
+}
+
+BOOL SudekiMpLanStoryEffectsCapture(SudekiMpStoryEffectState *out) {
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!out || !world) return FALSE;
+    uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT);
+    memset(out,0,sizeof(*out)); out->observed_tick=GetTickCount();
+    if(!in_table(current,table,count) || !name_of(current,out->current) || !out->current[0]) return FALSE;
+    out->group_count=(uint8_t)SudekiMpLanStorySpawnTraceGroups(out->groups,SUDEKIMP_STORY_SPAWN_GROUP_MAX);
+    SudekiMpLanStorySkyCapture(out);
+    SudekiMpLanStorySpawnDespawnCapture(out->despawned);
+    SudekiMpLanStorySpawnEffectsCapture(out);
+    return SudekiMpStoryEffectStateValid(out);
+}
+BOOL SudekiMpLanStoryEffectsInCurrentArea(const SudekiMpStoryEffectState *host) {
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!world || !SudekiMpStoryEffectStateValid(host) || !*(world+WORLD_ARMED)) return FALSE;
+    uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT); char name[SUDEKIMP_STORY_AREA_NAME];
+    return in_table(current,table,count) && name_of(current,name) && name[0] && !_stricmp(name,host->current);
+}
+void SudekiMpLanStoryEffectsFollowGroups(const SudekiMpStoryEffectState *host,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    if(!SudekiMpLanStoryEffectsInCurrentArea(host)) return;
+    /* 0. Spawn groups (#54): once standing in the host's current zone, start
+     * each host-started group sequence this client has not started yet. */
+    {
+        static SudekiMpStorySpawnGroup replayed[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
+        static unsigned replayed_count;
+        for(unsigned g=0;g<host->group_count;++g) {
+            unsigned r=0;
+            for(;r<replayed_count && (_stricmp(replayed[r].name,host->groups[g].name) ||
+                replayed[r].sequence!=host->groups[g].sequence);++r) {}
+            if(r<replayed_count) continue;
+            {   /* Already started natively here (e.g. during this client's own load). */
+                SudekiMpStorySpawnGroup local[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
+                unsigned n=SudekiMpLanStorySpawnTraceGroups(local,SUDEKIMP_STORY_SPAWN_GROUP_MAX),k=0;
+                for(;k<n && (_stricmp(local[k].name,host->groups[g].name) || local[k].sequence!=host->groups[g].sequence);++k) {}
+                if(k<n) continue;
+            }
+            SudekiMpStorySpawnGroup group=host->groups[g];
+            if(SudekiMpLanStoryClientResidencyCall(w,replay_spawn,&group)) {
+                /* Retry refused calls; merely seeing a group grants no lease. */
+                SudekiMpStorySpawnGroup local[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
+                unsigned n=SudekiMpLanStorySpawnTraceGroups(local,SUDEKIMP_STORY_SPAWN_GROUP_MAX),k=0;
+                for(;k<n && (_stricmp(local[k].name,group.name) || local[k].sequence!=group.sequence);++k) {}
+                if(k<n) {
+                    if(replayed_count==SUDEKIMP_STORY_SPAWN_GROUP_MAX) {
+                        memmove(replayed,replayed+1,(SUDEKIMP_STORY_SPAWN_GROUP_MAX-1u)*sizeof(*replayed)); --replayed_count;
+                    }
+                    replayed[replayed_count++]=group;
+                }
+            }
+            return;
+        }
+    }
 }

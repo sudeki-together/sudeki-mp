@@ -107,6 +107,165 @@ static DWORD WINAPI foreign_thread(void *unused) {
     (void)unused; assert(!check());
     assert(!SudekiMpLanStoryMaterialInitialize((HMODULE)mapped)); return 0;
 }
+static void *shader_allocations[128];
+static unsigned shader_allocated,shader_freed;
+static void * __attribute__((cdecl)) shader_allocate(size_t size) {
+    void *p=calloc(1,size); assert(p && shader_allocated<128);
+    shader_allocations[shader_allocated++]=p; return p;
+}
+static void __attribute__((cdecl)) shader_free(void *p) {
+    if(!p) return;
+    unsigned i=0; for(;i<shader_allocated && shader_allocations[i]!=p;++i) {}
+    assert(i<shader_allocated); shader_allocations[i]=NULL; ++shader_freed; free(p);
+}
+static void allocator_jump(unsigned rva,void *target) {
+    int32_t relative=(int32_t)((uintptr_t)target-(uintptr_t)(mapped+rva+5u));
+    mapped[rva]=0xe9; memcpy(mapped+rva+1,&relative,4);
+}
+static void shader_outputs(void) {
+    /* Execute the exact factory/getter/destructor on inert owned objects.
+     * Only the process allocator is replaced by tracked test storage; no
+     * renderer, gameplay, resource worker or network callback executes. */
+    DWORD protect; assert(VirtualProtect(mapped,0x45f000,PAGE_EXECUTE_READWRITE,&protect));
+    allocator_jump(0x2484fau,shader_allocate); allocator_jump(0x24844fu,shader_free);
+    assert(FlushInstructionCache(GetCurrentProcess(),mapped,0x45f000));
+    memset(mapped+0x36b8b0,0,256*4);
+    put(mapped,0x3c3654,mapped+0x350040); put(mapped,0x350044,mapped+0x34fc00);
+    put(mapped,0x34fc04,mapped+0x34fcb0); put(mapped,0x34fcb4,NULL);
+    typedef uint8_t *(__attribute__((thiscall)) *Factory)(void *,uint32_t);
+    typedef void *(__attribute__((thiscall)) *Property)(void *,unsigned,unsigned,uint32_t *);
+    typedef void *(__attribute__((thiscall)) *Delete)(void *,unsigned);
+    Factory factory=(Factory)(mapped+0x202a30); Property getter=(Property)(mapped+0x202e40);
+    Delete destroy=(Delete)(mapped+0x2014b0);
+    static const unsigned shifts[3]={2,6,8};
+    static const unsigned orders[6][3]={{3,4,5},{3,5,4},{4,3,5},{4,5,3},{5,3,4},{5,4,3}};
+    uint32_t seen[432]; unsigned seen_count=0;
+    for(unsigned layout=0;layout<16;++layout) for(unsigned textured=0;textured<8;++textured) {
+        setup(TRUE,TRUE); shader_allocated=shader_freed=0;
+        uint32_t initial=0x80000001u | ((layout&1u)?0x10u:0u) |
+            ((layout&2u)?0x400u:0u) | ((layout&4u)?0x800000u:0u) | ((layout&8u)?0x2000u:0u);
+        for(unsigned i=0;i<3;++i) if(textured&(1u<<i)) initial|=1u<<shifts[i];
+        uint8_t *original=factory(mapped+0x34fcb0,initial); assert(original);
+        BOOL initial_seen=FALSE;
+        for(unsigned i=0;i<seen_count;++i) if(seen[i]==initial) initial_seen=TRUE;
+        if(!initial_seen) { assert(seen_count<432); seen[seen_count++]=initial; }
+        u32(original,4,2); put(materials[0],4,original); put(materials[1],4,original);
+        unsigned texture_count=*(uint32_t *)(original+0xc);
+        uint8_t extra_wrappers[2][5][8]={0}; void *tex[2][6]={0},*aux[2][6]={0};
+        u32(backing_data,0x20,(texture_count*2u)<<16); u32(backing_data,0x24,texture_count*2u);
+        for(unsigned i=0;i<2;++i) {
+            tex[i][0]=wrappers[i]; put(materials[i],8,tex[i]); put(materials[i],0x10,aux[i]);
+            for(unsigned j=1;j<texture_count;++j) {
+                tex[i][j]=extra_wrappers[i][j-1];
+                put(tex[i][j],0,mapped+0x2dd80c); put(tex[i][j],4,backing_data);
+            }
+        }
+        assert(sol_definition(original,FALSE) && check());
+        assert(SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],3));
+        assert(!SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],2));
+        /* Invalid factory, cyclic cache or map is never a safe expansion. */
+        void *old=*(void **)(mapped+0x350040); put(mapped,0x350040,mapped);
+        if(textured!=7) assert(!SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],3));
+        put(mapped,0x350040,old);
+        put(original,0x24,original);
+        assert(!SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],3));
+        put(original,0x24,NULL);
+        uint32_t *map=*(uint32_t **)(original+0x2c); map[1]=0;
+        assert(!SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],3)); map[1]=UINT32_MAX;
+        uint32_t final_flags=sol_color_flags(initial,7);
+        if(final_flags!=initial) {
+            uint8_t *precreated=factory(mapped+0x34fcb0,final_flags); assert(precreated);
+            assert(sol_expansion_closure(initial)); /* Exact cached native reuse. */
+            void *pre_map=*(void **)(precreated+0x28);
+            put(precreated,0x28,*(void **)(original+0x28));
+            assert(!SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],4));
+            put(precreated,0x28,pre_map);
+        }
+        for(unsigned attempt=0;attempt<6;++attempt) {
+            unsigned mask=0,colors=0; uint8_t *expanded=original;
+            for(unsigned step=0;step<3;++step) {
+                unsigned member=orders[attempt][step];
+                assert(SudekiMpLanStoryMaterialShaderOutputExact((HMODULE)mapped,materials[1],materials[0],member));
+                uint32_t flags=0; uint8_t before[0x40]; memcpy(before,materials[0],sizeof(before));
+                void *constant=getter(materials[1],0,member,&flags);
+                assert(!memcmp(before,materials[0],sizeof(before)));
+                if(textured&(1u<<(member-3u))) {
+                    assert(!constant && !flags); /* Native texture field is not converted. */
+                } else {
+                    assert(constant && flags==0x1010001u);
+                    ++colors; mask|=1u<<(member-3u);
+                    assert(!memcmp(constant,(float[4]){0,0,0,0},16));
+                    float color[4]={(float)member,.5f,.75f,1}; memcpy(constant,color,16);
+                }
+                expanded=*(uint8_t **)(materials[1]+4u);
+                assert(*(uint32_t *)(expanded+8)==sol_color_flags(initial,mask));
+                assert(*(uint32_t *)(expanded+0x10)==colors && *(uint32_t *)(expanded+0xc)==texture_count);
+                BOOL known=FALSE;
+                for(unsigned i=0;i<seen_count;++i) if(seen[i]==*(uint32_t *)(expanded+8)) known=TRUE;
+                if(!known) { assert(seen_count<432); seen[seen_count++]=*(uint32_t *)(expanded+8); }
+                assert(check());
+                if(colors) {
+                    assert(expanded!=original && sol_derived(expanded,original));
+                    assert(*(uint32_t *)(expanded+4)==1 && *(uint32_t *)(original+4)==1);
+                    uint32_t material_flags=*(uint32_t *)(materials[1]+0xc);
+                    u32(materials[1],0xc,material_flags|0x200u); assert(!check());
+                    u32(materials[1],0xc,material_flags);
+                    void *mapping=*(void **)(expanded+0x28); put(expanded,0x28,*(void **)(original+0x28));
+                    assert(!check()); put(expanded,0x28,mapping); assert(check());
+                    if(layout&1u) {
+                        void *optional=*(void **)(expanded+0x20);
+                        put(expanded,0x20,*(void **)(original+0x20)); assert(!check());
+                        put(expanded,0x20,optional); assert(check());
+                        uint32_t *words=optional; words[2]=2u; assert(!check());
+                        words[2]=1u; assert(check());
+                    }
+                }
+                for(unsigned prior=0;prior<=step;++prior) {
+                    unsigned previous=orders[attempt][prior];
+                    if(textured&(1u<<(previous-3u))) continue;
+                    float expected[4]={(float)previous,.5f,.75f,1}; flags=0;
+                    void *kept=getter(materials[1],0,previous,&flags);
+                    assert(kept && flags==0x1000000u && !memcmp(kept,expected,16));
+                }
+                /* Expansion cannot replace or reorder any texture wrapper. */
+                assert(*(void **)(materials[1]+8)==tex[1] && tex[1][0]==wrappers[1]);
+                for(unsigned j=1;j<texture_count;++j) assert(tex[1][j]==extra_wrappers[1][j-1]);
+            }
+            if(expanded!=original) {
+                shader_free(*(void **)(materials[1]+0x38)); put(materials[1],0x38,NULL);
+                u32(expanded,4,0); destroy(expanded,1);
+            }
+            for(unsigned mask=1;mask<8;++mask) {
+                uint32_t flags=sol_color_flags(initial,mask); if(flags==initial) continue;
+                uint8_t *cached=(void *)1; assert(sol_cache(flags,&cached) && !cached);
+            }
+            put(materials[1],4,original); u32(original,4,2);
+            assert(check() && sol_definition(original,FALSE));
+        }
+        /* Reject a different valid texture layout even if the count matches.
+         * Both descriptors alone are native, but the pair is not a derivation. */
+        if(textured==4) {
+            uint8_t *wrong=factory(mapped+0x34fcb0,(initial&~0x3ccu)|0x4cu); u32(wrong,4,1);
+            assert(sol_definition(wrong,FALSE) && !sol_derived(wrong,original));
+            u32(wrong,4,0); destroy(wrong,1);
+        }
+        uint8_t *wrong_layout=factory(mapped+0x34fcb0,initial^0x800000u); u32(wrong_layout,4,1);
+        assert(sol_definition(wrong_layout,FALSE) && !sol_derived(wrong_layout,original));
+        u32(wrong_layout,4,0); destroy(wrong_layout,1);
+        uint8_t *wrong_key=factory(mapped+0x34fcb0,initial^0x2000u); u32(wrong_key,4,1);
+        assert(sol_definition(wrong_key,FALSE) && !sol_derived(wrong_key,original));
+        u32(wrong_key,4,0); destroy(wrong_key,1);
+        u32(original,4,0); destroy(original,1);
+        assert(shader_allocated==shader_freed);
+    }
+    unsigned colors;
+    assert(!sol_colors(0x80001001u,&colors)); /* Different descriptor family. */
+    for(unsigned i=0;i<3;++i) assert(!sol_colors(0x80000001u|(2u<<shifts[i]),&colors));
+    assert(!sol_colors(0x80000021u,&colors) && !sol_colors(0x80000c01u,&colors));
+    assert(seen_count==432);
+    puts("SOL members3..5: 128 authored layouts, all6 output orders,432 definitions, textures/colors/optional descriptors preserved, release/retry PASS");
+}
+
 int main(int argc,char **argv) {
     assert(argc==2); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024)); mapped=map_image(path);
@@ -117,9 +276,50 @@ int main(int argc,char **argv) {
         assert(GetLastError()==ERROR_BAD_EXE_FORMAT && !verified_image);
         mapped[codes[i].rva]^=1;
     }
+    static const struct {const char *name; unsigned rva,size;} shader_checks[]={
+        {"ShaderConstantEnsure",0x2032c0u,457u},
+        {"ShaderDefinitionLookup",0x1e76d0u,86u},
+        {"SolDefinitionFactory",0x202a30u,501u},
+        {"SolDefinitionDelete",0x2014b0u,90u},
+        {"DefinitionUnlink",0x1e4080u,75u},
+        {"BaseDefinitionFactory",0x1fb7c0u,147u},
+        {"WaterDefinitionFactory",0x216630u,42u},
+        {"TextureCount",0x201670u,83u},
+        {"ConstantCount",0x2016d0u,86u},
+        {"TextureMapping",0x201730u,148u},
+        {"ConstantMapping",0x2017d0u,83u}
+    };
+    for(unsigned j=0;j<sizeof(shader_checks)/sizeof(shader_checks[0]);++j) {
+        BOOL found=FALSE;
+        for(unsigned i=0;i<sizeof(codes)/sizeof(codes[0]);++i)
+            if(codes[i].rva==shader_checks[j].rva && codes[i].size==shader_checks[j].size)
+                found=code_exact(mapped,&codes[i]);
+        assert(found);
+        printf("Native byte check %s RVA %06x length %u: exact and mutation-rejected PASS\n",
+            shader_checks[j].name,shader_checks[j].rva,shader_checks[j].size);
+    }
     assert(SudekiMpLanStoryMaterialInitialize((HMODULE)mapped));
     queue_lock=(CRITICAL_SECTION *)(mapped+0x364148); InitializeCriticalSection(queue_lock);
     setup(FALSE,FALSE); assert(check());
+    /* A successful walk never lends its memory permissions or graph result
+     * to the next call, including failure/recovery and same-address reuse. */
+    uint8_t *page=VirtualAlloc(NULL,8192,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    assert(page); memcpy(page,child,sizeof(child)); DWORD old_protect;
+    assert(SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page,resource));
+    put(page,0,NULL);
+    assert(!SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page,resource));
+    memcpy(page,child,sizeof(child));
+    assert(VirtualProtect(page,4096,PAGE_READONLY,&old_protect));
+    assert(!SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page,resource));
+    assert(VirtualProtect(page,4096,PAGE_NOACCESS,&old_protect));
+    assert(!SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page,resource));
+    assert(VirtualProtect(page,4096,PAGE_READWRITE,&old_protect));
+    assert(SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page,resource));
+    memcpy(page+4096-16,child,sizeof(child));
+    assert(VirtualProtect(page+4096,4096,PAGE_NOACCESS,&old_protect));
+    assert(!SudekiMpLanStoryMaterialOwnerExact((HMODULE)mapped,page+4096-16,resource));
+    assert(!memory_scope && !memory_region_count);
+    assert(VirtualFree(page,0,MEM_RELEASE));
     /* Empty graphs depend on no queue; textured graphs ignore unrelated jobs,
      * including a valid node in exactly the same hash bucket. */
     for(unsigned i=0;i<32;++i) {
@@ -177,6 +377,7 @@ int main(int argc,char **argv) {
     worker=CreateThread(NULL,0,foreign_thread,NULL,0,NULL); assert(worker);
     assert(WaitForSingleObject(worker,5000)==WAIT_OBJECT_0); CloseHandle(worker);
     assert(check() && queue_lock->RecursionCount==0);
+    shader_outputs();
     DeleteCriticalSection(queue_lock); VirtualFree(mapped,0,MEM_RELEASE);
     puts("story material exact-image/resource-specific readiness tests passed (no native gameplay)");
     return 0;

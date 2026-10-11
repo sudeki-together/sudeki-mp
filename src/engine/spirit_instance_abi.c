@@ -166,15 +166,40 @@ static const uint8_t readiness_body[]={
     0x74,0x0b,0x80,0xf9,3,0x74,6,0x80,0x78,0x2b,0,0x76,0x23,0x42,
     0x83,0xc6,0x0c,0x83,0xfa,4,0x7c,0xd5};
 
+/* Namespace entry/exit are synchronous ownership walks and bounded copies.
+ * Cache only VirtualQuery range/protection results within that one transition;
+ * every object/header/global value is still checked. Clear before returning
+ * to any native script, callback, scheduler or allocation. */
+enum { TRANSITION_REGIONS=64u };
+static struct {uintptr_t begin,end; DWORD access;} transition_regions[TRANSITION_REGIONS];
+static unsigned transition_region_count;
+static BOOL transition_memory_scope;
 static BOOL memory(const void *p,size_t n,BOOL write) {
-    MEMORY_BASIC_INFORMATION m;
-    uintptr_t a=(uintptr_t)p;
-    return p && n && VirtualQuery(p,&m,sizeof(m)) && m.State==MEM_COMMIT &&
-        !(m.Protect&(PAGE_NOACCESS|PAGE_GUARD)) && a+n>=a &&
-        a+n<=(uintptr_t)m.BaseAddress+m.RegionSize &&
-        (!write || (m.Protect&(PAGE_READWRITE|PAGE_WRITECOPY|
-                              PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)));
+    uintptr_t a=(uintptr_t)p; DWORD access=0; BOOL known=FALSE;
+    if(!p || !n || a>UINTPTR_MAX-n) return FALSE;
+    if(transition_memory_scope) for(unsigned i=0;i<transition_region_count;++i)
+        if(a>=transition_regions[i].begin && a+n<=transition_regions[i].end) {
+            access=transition_regions[i].access; known=TRUE; break;
+        }
+    if(!known) {
+        MEMORY_BASIC_INFORMATION m;
+        if(VirtualQuery(p,&m,sizeof(m))!=sizeof(m) || m.State!=MEM_COMMIT ||
+            (m.Protect&(PAGE_NOACCESS|PAGE_GUARD)) ||
+            a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+        access=m.Protect&0xffu;
+        if(transition_memory_scope && transition_region_count<TRANSITION_REGIONS) {
+            unsigned i=transition_region_count++;
+            transition_regions[i].begin=(uintptr_t)m.BaseAddress;
+            transition_regions[i].end=(uintptr_t)m.BaseAddress+m.RegionSize;
+            transition_regions[i].access=access;
+        }
+    }
+    if(write) return access==PAGE_READWRITE || access==PAGE_WRITECOPY ||
+        access==PAGE_EXECUTE_READWRITE || access==PAGE_EXECUTE_WRITECOPY;
+    return access==PAGE_READONLY || access==PAGE_READWRITE || access==PAGE_WRITECOPY ||
+        access==PAGE_EXECUTE_READ || access==PAGE_EXECUTE_READWRITE || access==PAGE_EXECUTE_WRITECOPY;
 }
+
 static BOOL bytes(uint8_t *p,const uint8_t *expected,size_t n) {
     return memory(p,n,FALSE) && !memcmp(p,expected,n);
 }
@@ -677,11 +702,37 @@ BOOL SudekiMpObserveSpiritInstanceScope(SudekiMpSpiritInstance *instance) {
     *instance=observed;
     return TRUE;
 }
+/* Native AddCamera fills the FIRST empty registry slot, so an idle bank kept
+ * in the first empty slots is taken by the next scripted camera (live, #54:
+ * the castle-road ambush cutscene camera landed in bank slot 0, named_fail 2,
+ * fault site in named_camera_update, every later named camera update skipped:
+ * no cutscene camera motion on the host). Keep the idle bank in the LAST
+ * empty slots and move it when a native camera already holds a bank slot.
+ * Only while no instance is entered (idle bank slots hold NULL by contract);
+ * only this module's slot bookkeeping changes, no native memory is written. */
+static BOOL named_bank_relocate(void) {
+    unsigned int i,k,n=0,picked[2];
+    if(!named_banking || !named_bank_reserved || named_generation || !named_registry_exact()) return FALSE;
+    for(i=0;i<MAX_INSTANCES;++i) for(k=0;k<2;++k) if(entries[i].named_cameras[k])
+        for(unsigned int j=0;j<NAMED_SLOTS;++j) if(*named_slot(j)==entries[i].named_cameras[k]) return FALSE;
+    for(i=NAMED_SLOTS;i-- && n<2;)
+        if(!*named_slot(i) && memory(named_slot(i),sizeof(void *),TRUE)) picked[n++]=i;
+    if(n<2) return FALSE;
+    named_bank_slots[0]=picked[1]; named_bank_slots[1]=picked[0];
+    for(i=0;i<MAX_INSTANCES;++i) for(k=0;k<2;++k)
+        if(entries[i].named_cameras[k]) entries[i].named_slots[k]=named_bank_slots[k];
+    return TRUE;
+}
+static unsigned named_bank_moves;
+unsigned SudekiMpSpiritInstanceNamedBankMoves(void) { return named_bank_moves; }
 /* Preflight and commit are deliberately separate: busy-bit banking may reject
  * a scope too. Once all checks pass, these bounded copies make no callbacks. */
 static BOOL named_transition_ready(uint32_t generation) {
     Entry *next=generation_entry(generation);
     if(!named_manager) return TRUE;
+    if(named_banking && named_bank_reserved && !named_generation &&
+        (*named_slot(named_bank_slots[0]) || *named_slot(named_bank_slots[1])) &&
+        named_bank_relocate()) ++named_bank_moves;
     if(!named_namespace_exact() || (next &&
         (next->named_cameras[0] || next->named_cameras[1]) && !next->named_ready)) {
         SetLastError(ERROR_INVALID_DATA); return FALSE;
@@ -793,10 +844,14 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
     for(i=0;i<NAMED_SLOTS;++i) if(!*named_slot(i)) ++free_slots;
     if(free_slots<2) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
     if(named_banking && !named_bank_reserved) {
-        for(i=0,k=0;i<NAMED_SLOTS && k<2;++i) if(!*named_slot(i)) {
+        /* Reserve from the end: native AddCamera fills from the front. */
+        unsigned int picked[2];
+        for(i=NAMED_SLOTS,k=0;i-- && k<2;) if(!*named_slot(i)) {
             if(!memory(named_slot(i),sizeof(void *),TRUE)) return FALSE;
-            named_bank_slots[k++]=i;
+            picked[k++]=i;
         }
+        if(k<2) return FALSE;
+        named_bank_slots[0]=picked[1]; named_bank_slots[1]=picked[0];
         named_bank_reserved=TRUE;
     }
     for(k=0;k<2;++k) {
@@ -809,9 +864,9 @@ BOOL SudekiMpEnableSpiritInstanceNamedCameras(const SudekiMpSpiritInstance *inst
         if(!named_namespace_exact()) break;
         for(i=0;i<NAMED_SLOTS && *named_slot(i);++i) {}
         if(i==NAMED_SLOTS) break;
-        /* AddCamera always chooses the first empty registry slot. The first
-         * bank slot is reused while constructing the detached second object. */
-        if(named_banking && i!=named_bank_slots[0]) break;
+        /* AddCamera always chooses the first empty registry slot; with
+         * banking that slot only hosts construction and is emptied again
+         * below (the same slot is reused for the second object). */
         e->named_slots[k]=i;
         e->named_creation_uncertain=TRUE;
         added=named_add(named_manager,e->named_names[k],"default");
@@ -844,6 +899,48 @@ BOOL SudekiMpObserveSpiritInstanceNamedCamera(const SudekiMpSpiritInstance *inst
         kind<1 || kind>2 || owner_thread!=GetCurrentThreadId() || !named_namespace_exact()) return FALSE;
     *camera=e->named_cameras[kind-1];
     return TRUE;
+}
+BOOL SudekiMpSpiritInstanceViewAbiReady(void) {
+    uint8_t *b=instance_image;
+    /* CCameraCtor RVA E7110 allocates and owns a distinct RenderState via
+     * RenderStateCtor RVA1D1370, then stores that result at camera+34.
+     * NamedCamera/selection proofs remain required separately. */
+    return b && bytes(b+0xe72bf,(const uint8_t *)"\x68\x60\x02\x00\x00",5) &&
+        call(b,0xe72d1,0x2484fa) && call(b,0xe72dd,0x1d1370) &&
+        bytes(b+0xe72e2,(const uint8_t *)"\x8b\xd8",2) &&
+        bytes(b+0xe72fd,(const uint8_t *)"\x89\x5d\x34",3);
+}
+BOOL SudekiMpObserveSpiritInstanceView(const SudekiMpSpiritInstance *instance,
+    SudekiMpSpiritCameraView *out) {
+    Entry *e=find(instance); SudekiMpSpiritCameraView next={0};
+    if(!out || !e || e->destroying || !e->named_ready || !e->remote_camera_selection ||
+        update_fault || operation_depth || scope_depth || owner_thread!=GetCurrentThreadId() ||
+        !SudekiMpSpiritInstanceViewAbiReady() || !named_namespace_exact() || !selection_exact_after_namespace(TRUE) ||
+        !caster_exact(e) || e->selected_kind>2 ||
+        e->selected_camera!=e->named_cameras[e->selected_kind==2?1:0]) return FALSE;
+    next.kind=e->selected_kind;
+    if(next.kind) {
+        uint8_t *camera=e->selected_camera,*render=*(uint8_t **)(camera+0x34);
+        if(!object_exact(render,0x260,0x2dd638)) return FALSE;
+        /* All native named objects own distinct renderer allocations. */
+        for(unsigned i=0;i<NAMED_SLOTS;++i) {
+            uint8_t *other=*named_slot(i);
+            if(other && other!=camera && *(void **)(other+0x34)==render) return FALSE;
+        }
+        for(unsigned i=0;i<MAX_INSTANCES;++i) for(unsigned k=0;k<2;++k) {
+            uint8_t *other=entries[i].named_cameras[k];
+            if(other && other!=camera && *(void **)(other+0x34)==render) return FALSE;
+        }
+        uint16_t serial=*(uint16_t *)(render+0x2c);
+        memcpy(next.matrix,render+0x90,sizeof(next.matrix));
+        memcpy(next.projection,render+0xd0,sizeof(next.projection));
+        if(!named_namespace_exact() || !selection_exact_after_namespace(TRUE) || !caster_exact(e) ||
+            e->selected_camera!=camera || e->selected_kind!=next.kind ||
+            *(void **)(camera+0x34)!=render || *(uint16_t *)(render+0x2c)!=serial ||
+            memcmp(next.matrix,render+0x90,sizeof(next.matrix)) ||
+            memcmp(next.projection,render+0xd0,sizeof(next.projection))) return FALSE;
+    }
+    *out=next; return TRUE;
 }
 /* Validate all participants before changing either a bank or native memory.
  * Never restore a saved byte: an inner A -> B -> A call may have changed A's
@@ -1734,7 +1831,7 @@ static BOOL enter_transient(void) {
     return enter_failure==7u && named_fail==6u && identity_transient();
 }
 unsigned SudekiMpSpiritInstanceTransientSkips(void) { return transient_update_skips; }
-uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
+static uint32_t enter_instance(const SudekiMpSpiritInstance *instance) {
     Entry *e=instance ? find(instance):NULL;
     void *manager,*camera,*expected_manager,*expected_camera;
     unsigned int n=scope_depth;
@@ -1774,7 +1871,7 @@ uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
     return scopes[n].cookie;
 }
 
-BOOL SudekiMpLeaveSpiritInstance(uint32_t cookie) {
+static BOOL leave_instance(uint32_t cookie) {
     unsigned int n=scope_depth ? scope_depth-1:0;
     SudekiMpSpiritInstance identity;
     if(!instance_image || !cookie || !scope_depth || scopes[n].cookie!=cookie ||
@@ -1803,6 +1900,25 @@ BOOL SudekiMpLeaveSpiritInstance(uint32_t cookie) {
     *(void **)(instance_image+CAMERA_GLOBAL)=scopes[n].saved_camera;
     memset(&scopes[n],0,sizeof(scopes[n])); --scope_depth;
     return TRUE;
+}
+
+uint32_t SudekiMpEnterSpiritInstance(const SudekiMpSpiritInstance *instance) {
+    if(transition_memory_scope || !owner_thread || GetCurrentThreadId()!=owner_thread) {
+        SetLastError(ERROR_BUSY); return 0;
+    }
+    transition_region_count=0; transition_memory_scope=TRUE;
+    uint32_t cookie=enter_instance(instance);
+    transition_memory_scope=FALSE; transition_region_count=0;
+    return cookie;
+}
+BOOL SudekiMpLeaveSpiritInstance(uint32_t cookie) {
+    if(transition_memory_scope || !owner_thread || GetCurrentThreadId()!=owner_thread) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    transition_region_count=0; transition_memory_scope=TRUE;
+    BOOL result=leave_instance(cookie);
+    transition_memory_scope=FALSE; transition_region_count=0;
+    return result;
 }
 
 /* Retail f900's verified continuation expects its two saved registers and

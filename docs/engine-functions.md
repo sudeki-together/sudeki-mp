@@ -105,6 +105,22 @@ Named exports are evidence supplied by the PE, but the behavior descriptions abo
 
 The validation helper at RVA `0x000B4BC0` returns `0` when the skill may start. Confirmed nonzero meanings are `1` = insufficient SP, `2` = actor not ready to use a skill, `3` = actor not in combat, `4` = global skill lock or unusable skill, and `5` = skills globally unavailable. The first three map in order to the localized strings `Not enough SP to use this skill.`, `Not ready to use skill.`, and `Cannot use skill if not in combat.`
 
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE (2026-10-10):** the readiness
+predicate at RVA `0xDB9B0` receives the arbiter in EAX. It requires arming bit 2
+at `+0x50`, combat-request bit 2 at `+0x60`, a signed low-nibble mode other
+than 1 or 3 at `+0x58`, and no flags in mask `0x02D9C6F0`. Its helper
+`0xD0250` receives **the combat component at actor `+0xA4`**, after following
+arbiter `+0x10`; it does not receive the arbiter. The helper rejects combat
+`+0x72` bit 8 or action IDs 42 through 54 in the first nonzero signed 9-bit
+lane of combat `+0x5C` (high, middle, then low). Decompilation alone obscures
+that register change; the caller's instructions establish the component.
+Neither predicate reads the leased AI count. `StoryCastReadinessImageTest`
+executes both retail predicates and the native skill validator on inert
+components from the hash-verified supported image, including these refusal
+cases. It isolates readiness from resource availability/SP checks and does
+not call `Use` or prove gameplay activation. Production validation remains
+unchanged.
+
 ### Native QuickSkill activation
 
 | Field | Value |
@@ -138,6 +154,22 @@ The menu passes `(manager, selected_id)` to both native functions using a callee
 The main loop calls its normal frame update at RVA `0x0028DDBA`. The direct-input prototype wraps that call solely to poll a rising configured-key edge on the game thread while Sudeki owns the foreground window. `[Bindings] SpiritStrike` defaults to `G` and is converted to a Win32 virtual-key value during initialization. A live override to `H` logged virtual key `0x48` and activated successfully. On success it cycles native UI/control state for 75 ms, validates again, and calls the native activation implementation. The live test returned validator results `0` before and after the transition, activation result `1`, and completed normally. Repeated presses during the move were rejected by the native validator with result `4`.
 
 For automatic definition selection, `SpiritStrikeId=-1` follows the same front-character path as native QuickSkills: active group VA `0x00808D94`, first entry at group `+0x90`, then embedded character-type component at character `+0x2C`. The component's virtual slot `+0x10` returns a resource type, which maps to the primary character pair starts `0`, `2`, `4`, or `6`; `SpiritStrikeVariant=1|2` selects within the pair. The function pointer is accepted only when it lies within the exact supported executable image, and the unchanged Spirit Strike validator still rejects unavailable definitions. A live Ailish test resolved resource type `0x01` to ID `2`, passed both validations, returned activation result `1`, and completed normally.
+
+**CONFIRMED_STATIC / CONFIRMED_TEST (2026-10-10):** Spirit activation at
+`0xFBA0` and the power-up script launch are different lifetime boundaries.
+The manager's `Update(float)` at `0xF900` waits for participant readiness,
+then calls `0x10C20`; its `ROOT_SPIRIT` call at `0x10DE5` submits the script
+through `SUBMIT` at `0xFCFD0`. The saved-story remote owner therefore must
+survive the request callback. The first remote candidate admitted activation
+but rejected this later root because its short submission authority had ended.
+The corrected owner permits one root only for the accepted, retained caster
+inside that same live manager/camera generation, even while disconnect cleanup
+is pending. Fresh requests still require current host admission.
+`StoryCastAdmissionTest` reproduces the old rejection and passes the corrected
+delayed-root, wrong-scope/unknown-identity, duplicate-root and retained-drain
+checks. Native root and task hook guards are unchanged; this test is synthetic,
+not proof of completed Spirit gameplay. Current live acceptance belongs in the
+co-op plan progress log.
 
 ## Native character-control switching
 
@@ -639,3 +671,743 @@ Successful casts execute one cinematic selection and one normal-camera restore. 
 This chain was live-confirmed for the Load Game page's Ailish, Tal, Buki, and
 Elco portraits. It is a borrowing boundary only: the game continues to own the
 material, resident wrapper, backend, and COM texture.
+
+## Saved-story remote melee auto-target refresh (#54 C1)
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE:** on the supported executable,
+`0x4B8200` is the targeter scheduler callback (`ECX = CTargeter+0x18`). When
+`CTargeter+0x84 bit 2` is enabled it calls `0x4B9AB0` with the targeter in
+ESI. A current target with bit 1 set is retained while `AI+0x16A > 0`; simply
+calling that dispatcher again does not replace the retained target.
+
+The ordinary melee branch tail-calls `0x4BA1C0`: targeter in EAX, no stack
+arguments, callee-saved registers preserved, plain RET. It queries up to 15
+native world candidates, scores them against `targeter+0x48..0x50`, and calls
+`0x4B9D20` (EDI = targeter, one callee-popped stack argument) to retain/release
+the target through native intrusive-pointer operations. This leaf preserves
+native dead/spawning-target filtering and the targeter's exclusion list.
+It does not require a controller/lead swap or global lock-on UI changes.
+Ranged acquisition is a different branch and is not rerouted by C1.
+
+`0x4DAE80` writes its requested direction to `targeter+0x48..0x50` outside
+ranged mode. With neutral input, C1 retains this accepted direction; a body
+turn still catching up must not become the next target-search direction.
+The candidate call `0x428031` actually invokes turn routine `0x4B6E50` with
+the component at actor+0x8C; it is not the target-search call.
+
+`StoryTargetRefreshImageTest` executes the native search and commit with inert
+world candidates: opposite headings select opposite enemies, neutral input
+retains the accepted heading, dead/no candidates clear the target, exclusions
+remain native, and intrusive references retire correctly. It checks every byte
+of the named acquisition/commit/exclusion contracts, including relocated
+operands, and rejects foreign owners/worlds and unwritable target state.
+The fixture substitutes only world enumeration, position preparation and vector
+normalization; it is not live gameplay, world-enumeration or rendering proof.
+See the C1 progress entry in `docs/coop-story-plan-54.md` for live status.
+
+Ownership distinction: the saved-story observer's world is the singleton at
+`0x808D10`; target enumeration uses the separate collision system at `0x808DD4`
+and its registration vectors (`+0x70/+0x78` and `+0x80/+0x88`). C1 validates
+these distinct identities; equating the two causes a fail-closed lease refusal.
+
+## Saved-story leased player turning (#54 C2, 2026-10-10)
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE.** On the supported executable,
+`0x4B73D0` (EDI = actor's `+0x8C` turn component; one float argument, `ret 4`)
+selects player interpolation `0x4B7B90` only when AI is absent or
+`ai+0x16A <= 0` and `*(ai+0x3C)+0x0B == 0`. The held remote-control reference
+(count 1, mode 0) otherwise selects `0x4B7C50` or `0x4B7CC0`.
+
+The turn function first calls `CanTurn` (`0x4DBB20`, ESI = arbiter). That
+function has a separate AI-count decision: player rules reject an active
+combo (`actor+0xB8 -> +0xA8`) or attacking (`arbiter+0x50 & 0x1000`). A change
+to the interpolation branch alone misses this gate. The same `CanTurn` is
+called by arbiter movement `0x4DAE80` and the separate turn mode `0x4B77F0`.
+
+`story_player_turn.c` owns two whole-instruction branch seams: the compare
+at RVA `0xB742E` and the compare at RVA `0xDBB3C`. For an exact HELD remote
+lease with count 1/mode 0, their arithmetic flags emulate comparing zero;
+the AI counter, mode, native registers, controller, leader and lock-on globals
+are not changed. The second seam admits only return `0x4B73E8`, or return
+`0x4DAEC0` inside the mod's witnessed movement call. Other callers, actors,
+unknown ownership, unbound/wrong threads and game-raised counts retain native
+comparisons. The game's `0x20000` forced-turn latch still follows native rules.
+
+Authority is freshly checked against retained native roster/epoch/components,
+HELD key/generation, live peer connection, acknowledged control fence, and
+ordinary unpaused world. Research54's three turn observation callsites and
+`RVA_ARBITER_MOVEMENT`'s existing entry-byte guard remain separate owners.
+Install validates named turn-choice, CanTurn-choice, turn-gate, movement-gate,
+player-argument and player-entry contracts. Failed reverse restoration retains
+continuations and callbacks for retry.
+
+`StoryPlayerTurnImageTest` executes the retail branches, CanTurn, player/AI
+steps and native interpolation on inert components. It replaces only renderer
+forward application, an actor-kind query and the D3DX normalization import.
+It covers count/mode/lease/thread rejection, attack/combo gates, scoped versus
+unscoped movement, FP/SSE/register/flag preservation, every-byte rejection,
+second-hook failure rollback, restoration failure/retry and reinstall.
+Observer callsite coexistence uses the same three callsites as Research54.
+This is not network-authority, campaign-rendering or owner visual proof.
+
+
+## Saved-story leased AI movement gating (#54 C3, 2026-10-10)
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE.** Supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+The `CAiDynamics` component is `actor+0x98`, vtable RVA `0x2D4994`, owner
+`+0x10`. Constructor `0x53A300`, its actor-constructor callers, and the
+movement/teleport request callers establish this identity. Its update
+`0x4F4BB0` takes ECX = component and one timing-block pointer (`dt` at +0x0C),
+returning with `ret 4`.
+
+Before choosing movement, this update advances its fade (`0x4F4E00`), refreshes
+AI state, measures displacement, and updates cached position. Its existing
+local-player path `0x4F4CCD` copies current facing/speed into the node and
+returns. The other path runs `0x4F4250`, then either submits an AI move at
+`0x4F4D7F -> 0x4DAE80` or resets speed at `0x4F4DE3 -> 0x4DB070`.
+A held remote actor fails the local-leader/count test even with the mod's
+single AI hold. Skipping the whole update would also skip fade completion.
+
+`story_ai_movement.c` owns the whole five-byte CMP at RVA `0xF4CB3`. For a
+freshly admitted remote lease, it continues at the existing player-cache path
+`0xF4CCD`. Otherwise it replays the original CMP and resumes at `0xF4CB8`.
+Research54 retains sole ownership of the movement and SetSpeed callsites.
+
+The shared placement helper `0x4F50C0` (one component argument, `ret 4`) also
+serves scripted teleports. Request `0x4F30A0` records navigation adjustment at
+node `+0xA9`; reviewed AI follow/catch-up callers pass 1. Explicit
+`PopToNamedLocation`, `TeleportGroup`, temporary-zone restoration and authored
+AI queue placement pass 0. A separate seven-byte CMP at RVA `0xF50FF` gates
+only adjustment flag **exactly 1** for the admitted lease. It bypasses the
+placement block to `0xF51CA`: position call `0x4F5176`, facing call `0x4F5185`,
+turn-target call `0x4F51C5`, and associated native speed/dynamics writes are
+skipped. Native intrusive-reference retirement, node cleanup and fade timers
+still run. Flag 0/unknown requests retain native placement; this is not a
+universal teleport blocker.
+
+Both gates require the bound native thread, exact hook/image contracts,
+reciprocal node/actor/AI ownership, AI count 1/mode 0, and the same fresh
+HELD actor/roster/epoch/input/session/control-fence proof as C2. Game-raised
+holds, other actors, revoked ownership, unknown contexts and menu/load states
+retain native decisions. Main-update ESI/EBX/EDI ownership is checked as well.
+No AI counter, mode, controller or leader is swapped. Registers, EFLAGS,
+x87/SSE and LastError are preserved before the native continuation.
+
+Named guards are `AI_MOVE_FRAME`, `AI_MOVE_CHOICE`, `AI_MOVE_PLAYER_CACHE`,
+`AI_SNAP_FRAME`, `AI_SNAP_CHOICE`, and `AI_SNAP_CLEANUP`. Their spans contain no
+image-base relocations. Reference scans found no interior branch targets in
+either overwritten instruction; the existing branch to `0x4F50FF` lands at
+its start. `party_native_entries_exact`, `RVA_ARBITER_MOVEMENT`, and
+`RVA_MOVEMENT_CONTROLLER_SET_SPEED_IMMEDIATE` were checked by name and remain
+unchanged. Installation is transactional; reverse restoration closes admission
+and retains continuations/dependencies on failure for retry.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE:** `StoryAiMovementImageTest` executes
+the retail update branches, player-cache path, placement block, cleanup and
+fade timer on inert components. World/AI planning, rendering, movement payloads
+and alpha application are fixture substitutes. Tests reproduce the original
+held-actor AI stop/snap calls, check both command branches and observer
+coexistence, preserve script-style placements, exercise intrusive retirement
+and fade completion, and reject count/mode/owner/thread/lease changes. They
+also cover registers/flags/x87/SSE/LastError, every-byte guard rejection,
+failure at either install stage, restoration failure/retry and reinstall.
+This does not establish visible movement, cutscene or whole-encounter parity.
+
+### Story sky / cast-light coexistence (#54 combat follow-up)
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST**, supported EXE
+SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+`CLightManager::SetLightingChangeRate` at RVA `0x1F740` is a thiscall float
+setter of manager `+0x30`, returning with `ret 4`. `light_image_exact` in
+`cast_light_abi.c` requires its complete ten-byte native body. The story sky
+adapter had replaced its first seven bytes, so private cast-light initialization
+could not coexist with installed sky hooks. Search both the named guard and RVA
+when changing either adapter; this was an ownership conflict, not a bad retail
+executable.
+
+The redundant sky rate hook is removed. `SudekiMpLanStorySkyCapture` already
+captures the current rate and target every presentation report, and the client
+applies them together under the existing restorable lease. No guard exception,
+new seam owner or manual lighting tick is introduced. The legacy rate-call
+message remains understood as a no-op; there is no protocol change.
+
+`StorySkyLightImageTest` reproduces the old failure with sky installed, then
+passes cast-light install/reset/reinstall alongside sky with the correction.
+It rejects a damaged `SetLightingChangeRate` entry and checks rate-only state
+capture and the existing client target/rate restoration cases. The fixture maps
+the hash-verified image and uses inert manager/scheduler objects: it runs no
+native constructor, effect, task, graphics-device call or gameplay cast.
+Live story binding and remaining owner checks are recorded in the plan.
+
+### Material color outputs and script timer yield (#54 Spirit follow-up)
+
+**CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE**, supported executable identity
+unchanged. D3D material property getter RVA 0x202E40 delegates argument 0,
+members 0/1 to base getter RVA 0x1E6ED0: float4 storage at material +0x18/+0x28.
+Argument 3, members 0/1 returns alpha storage at +0x24/+0x34; member 0 also
+updates the established material flag/output flag contract. These properties
+neither allocate nor invoke callbacks. Story material preflight admits these
+outputs only inside the existing exact owner/material/curve closure. Missing
+shader constant slots requiring definition replacement at 0x2032C0 were
+refused in that candidate; the later SOL proof below narrows that refusal. StoryMaterialOutputImageTest invokes the retail getters on inert owned
+storage, checks read-only preflight and negative bindings; it does not render.
+
+**CONFIRMED_STATIC / CONFIRMED_TEST:** script STEP at RVA 0x1C41D0 compares
+thread +0x44 against +0x48 before reading its opcode pointer at +0x0C.
+An ordered strict-less comparison returns native yield 2 without a write,
+callback or global access. The named step_prefix guard covers that entire
+early-return path, and is checked at installation and for the waiting shortcut.
+The cast-context adapter may call this native prefix without swapping global
+namespaces only after checking thread/routing state and retained task identity.
+Equal/expired/nonfinite clocks and substituted callbacks take full routing.
+LanCastContextTest exercises the real prefix with an inert due-task body,
+including stale handles, LastError, unowned tasks and refusal boundaries.
+SkillTraceImageTest checks installation against the supported image. Frame
+improvement and client Spirit visual parity still require live evidence.
+
+
+### Material shader output: proven absent-slot branch (2026-10-10)
+
+On the supported executable, D3DMaterialGetProperty (RVA202E40) maps
+argument0/member2..5 through description+2C. An absent slot calls2032C0;
+member shifts0,2,6,8 select a two-bit field in description+8. Nonzero fields
+return -1 through20347F, with no allocation, replacement or object write;
+the caller returns NULL. Zero fields reach the definition replacement path,
+which that candidate refused. The later closed SOL proof below admits one
+verified replacement family. Guarded entry2032C0,
+return20347F and jump table20348C are checked with relocated pointers.
+StoryMaterialOutputImageTest executes the real getter on inert materials and
+proves unchanged material/description/flags on the absent-output branch.
+
+The later C3 owner run takes the other branch: Tal's material token2,
+argument0/member3 has an absent slot and descriptor flags `0x80000001`, so
+bits2..3 are zero. It requires native shader-definition replacement; the
+read-only absent-output allowance cannot fix this case. CONFIRMED_EXACT_IMAGE
+read-only decompilation of the same supported executable shows
+ShaderConstantEnsure `0x2032C0` calling ShaderDefinitionLookup `0x1E76D0`,
+allocating a new float4 array, remapping existing constants, releasing the old
+array/definition reference and retaining the replacement. Lookup searches a
+flag-keyed cache and, on a miss, invokes registered factories. Those factory
+and derived-definition lifetime paths were not admitted by that candidate.
+The NULL-return test alone does not cover replacement; see the later proof below. See the C3 startup investigation in research-log.md.
+CONFIRMED_EXACT_IMAGE; see the dated research-log entry for live limitations.
+
+
+### Tal startup SOL definition expansion and scoped memory queries (2026-10-10)
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST on supported SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`:
+argument0/member3 of D3DMaterialGetProperty `0x202E40` can expand SOL flags
+`0x80000001` to `0x8000000D`. ShaderConstantEnsure `0x2032C0` sets both
+bits2..3, obtains the replacement via ShaderDefinitionLookup `0x1E76D0`,
+allocates one zeroed float4, and transfers the material's counted definition
+reference. The retained original remains unchanged. The read-only proof in
+lan_story_material.c initially admitted only this pair (extended below), its exact registered factories,
+cache membership, mapping arrays and native-owned constant storage.
+
+Named exact code checks (RVA) cover ShaderConstantEnsure `0x2032C0`,
+ShaderDefinitionLookup `0x1E76D0`, SolDefinitionFactory `0x202A30`,
+SolDefinitionDelete `0x2014B0`, DefinitionUnlink `0x1E4080`,
+BaseDefinitionFactory `0x1FB7C0`, WaterDefinitionFactory `0x216630`,
+TextureCount `0x201670`, ConstantCount `0x2016D0`, TextureMapping `0x201730`
+and ConstantMapping `0x2017D0`. Full routine hashes normalize only verified PE
+relocations. Unknown factories, cyclic caches, cross-definition array aliases,
+wrong maps and borrowed expanded constant storage still fail closed. Final
+release of a derived definition is admitted only through the proved SOL
+native destructor; originals required by replacement clones must survive.
+
+StoryMaterialImageTest runs the retail factory, getter and derived-definition
+release on inert owned objects with tracked allocator fixtures. Two creation /
+release cycles preserve the original and release all tracked allocations.
+StoryMaterialOutputImageTest separately verifies world preflight delegates with
+the correct selected/original pair and refuses a rejected proof. Neither test
+renders a cast or executes the entire native material destructor.
+
+Spirit namespace Enter/Leave cache only OS memory-region/protection answers for
+one synchronous transition. Every object, component, global and retained owner
+value is still checked; no cache crosses native script execution or entry/exit.
+SpiritInstanceAbiTest measures100 uncached versus12 cached VirtualQuery calls
+for the same fixture's entry/exit pair and rejects changed identity/protection
+at the next boundary. Failed leave retains its scope for retry. This proves
+reduced query work, not live frame rate or visual acceptance.
+
+
+### Tal SOL color closure and body-ready recovery (2026-10-10 follow-up)
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST on the same supported SHA256 above:
+Tal's animation can request argument0/members3,4,5 together. Their flag fields
+start at bits2,6,8. The admitted closed family starts at `0x80000001` and each
+field is either0 or3, giving eight definitions. Each enabled field adds one
+float4; texture0 and the static layout remain unchanged. Before pose evaluation,
+preflight checks every reachable cached definition, its private arrays, or the
+exact registered factory chain for a missing entry. This also covers combined
+states reached by several outputs during one native pose call. Intermediate
+native definition deletion, constant remapping, original retention and final
+release remain required. Unknown flag families and borrowed expanded buffers
+are refused; no byte guard is relaxed.
+
+StoryMaterialImageTest now executes all six output orders through the exact
+retail factory/getter/destructor and checks preservation of prior colors,
+cached-definition reuse, reference counts, cache unlink, ownership refusals
+and complete tracked allocation release. The same eleven named native routine
+checks above pass exact-image and deliberate byte-mutation checks.
+
+CONFIRMED_STATIC / CONFIRMED_TEST: StoryCastBodyDrained distinguishes positively
+quiescent native body/input/camera/tasks from a still-retained lighting tail.
+Only movement and basic melee use this body gate. New casts, ownership transfer
+and teardown retain the complete CastDrained gate. No completion flag is
+forced and no native task is cancelled. Admission fixtures reject unknown or
+stale identity, active body and retained task lineage in both paths. Visual
+recovery timing and ending-effect parity remain owner checks.
+
+
+### Tal startup with authored SOL texture fields (2026-10-10 correction)
+
+The preceding closure was insufficient for Tal's full opening pose: material
+token5 uses flag key `0x80000101`, with an authored texture in the member5
+field. CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST on the same supported executable:
+ShaderConstantEnsure `0x2032C0` expands only a zero field to3. An existing
+texture field1 remains1 and its constant getter returns NULL without mutation.
+SolDefinitionFactory `0x202A30`, TextureCount `0x201670`, ConstantCount
+`0x2016D0`, TextureMapping `0x201730` and ConstantMapping `0x2017D0` determine
+the exact counts, descriptors and mapping order. Their named full-code checks
+are unchanged and still reject byte mutation.
+
+The current closure admits eight original layouts: fixed texture0 plus an
+optional texture at each field starting at bits2/6/8. Original constant count
+must be zero. The corresponding 27 reachable definitions allow those fields
+to be absent0, texture1 or constant3; value2 and other flag families remain
+refused. Each actual derivation preserves all original texture fields and
+only changes zero fields to3. Equal texture counts alone are insufficient:
+moving a texture to a different field is rejected. Native factory/cache proof,
+distinct owned arrays, writable constant storage and native deletion still
+apply. Each original has at most eight reachable definitions, checked before
+pose evaluation.
+
+StoryMaterialImageTest executes all six output orders for all eight original
+layouts. It checks all27 definitions, texture-wrapper identity/order, prior
+color retention, NULL outputs for texture fields, exact cached reuse,
+intermediate and final native release, and no outstanding tracked allocation.
+This addresses the captured refusal contract; owner visual acceptance remains
+required for startup, repeat casts and later effects.
+
+
+The immediate live check of that 27-definition candidate exposed token4 with
+flags `0x80800501`; it still held the opening frame. The current proof also
+covers the factory's authored texture fields at bits4/10 and static-layout
+selection at bit23. These fields are preserved exactly during expansion.
+Bits4/10 remain0 or1; constant/unknown modes there are not admitted. Bit23
+selects native static layout RVA0x323B40 instead of0x323AD0. Field4 texture1
+creates the optional descriptor at definition+20; its exact contents, distinct
+ownership and native destructor path are proved alongside the other arrays.
+
+This gives64 original layouts and216 reachable definitions, with at most eight
+reachable from any one original. The same full native routine byte guards
+cover these factory branches. Exact-image tests execute all six output orders
+for all64 layouts, preserve all textures and colors, and release every tracked
+allocation through the verified native paths. Borrowed/malformed optional
+arrays, changed layout selection and relocated textures are negative cases.
+A bounded read-only Tal material inventory records the whole original table
+before an individual output can refuse. This is diagnostic evidence only and
+never grants permission to evaluate a pose. The owner reports the whole client
+world freezing with Tal, consistent with atomic presentation refusal while
+incoming host frames continue; visual acceptance remains pending.
+
+
+Final inventory follow-up: all seven Tal originals use four flag keys:
+`80000001`, `80000101`, `80800501`, `80802505`. The last also retains bit13;
+its member4 expansion was the remaining live refusal. Native factory202A30
+preserves that bit in the cache key without changing descriptor arrays.
+The proof now retains it exactly, including a negative test for substituting
+it. The exact-image fixture covers128 original layouts,432 reachable
+definitions and all six output orders, including every observed Tal key.
+All tracked allocations are released; the same eleven named byte guards
+remain unchanged. This supersedes the insufficient216-definition candidate.
+
+### Tal Spirit ending: renderer one-shot state versus entity lifetime
+
+On supported image SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`,
+`VisualChannelAdvance` RVA `0x221D70` takes EDI=renderer and one stack float
+delta (RET4). For clip state bit0 clear it advances absolute time but samples
+modulo clip duration. With bit0 set it clamps absolute and sampled time to
+duration minus the native epsilon at RVA `0x2E3670`, then sets completion
+bit `0x40`. `VisualStateSet` RVA `0x223240` is thiscall with channel, submodel
+and state (RET12); `VisualTimeSet` RVA `0x223180` is thiscall with channel,
+submodel, time and invalidation mode (RET16). TimeSet computes a modulo sample
+even for one-shot clips, so seeking at/past duration is not a completion API.
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: the native factory finalizer
+RVA `0x18830` separately records the entity's loop/lifetime flag. Native effect
+update RVA `0x1319B0` requires entity loop clear before auto-retirement.
+Thus the client can retain its existing host-owned entity lifetime while
+selecting one-shot renderer playback through the native setter. No private
+task completion or entity lifetime flag is overwritten.
+
+The bounded correction applies to Tal's observed `SFXSS300` only: preserve
+native completed state, catch up forward, cap a late seek just below duration,
+and let the ordinary native update complete the clip. Unknown channel states
+refuse. Host roster omission still retires the clone through the existing
+identity and weak-reference path. Other looping resources retain their policy.
+
+New full routine checks are named `VisualStateSet` (67 bytes), `VisualTimeSet`
+(157 bytes) and `VisualChannelAdvance` (397 bytes). The only absolute operand
+is checked and normalized; the native epsilon is checked too.
+`SpiritVisualTimingImageTest` executes these retail methods on inert renderer
+storage: old looping playback repeatedly samples the beginning during the
+host's final hold, while the corrected playback keeps the terminal sample and
+completion state. It covers late/exact-duration packets, repeat holds,
+unsupported states, unchanged loop policy, every-byte mutation refusal and
+the epsilon. This proves native timing, not rendered fade acceptance.
+
+
+### Remote Tal Spirit camera observation and story playback
+
+Supported retail SHA256: `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: `CCameraCtor` RVA `0xE7110`
+allocates a distinct 0x260-byte `RenderState` through allocator RVA `0x2484FA`
+and `RenderStateCtor` RVA `0x1D1370`, then retains it at camera+0x34.
+The read-only observer retains the existing exact Spirit generation, caster,
+named-bank, selected-camera and scene-owner checks. A typed render state
+(vtable RVA `0x2DD638`) must not alias another named camera. Its revision at
++0x2C, matrix at +0x90 and projection at +0xD0 are copied and rechecked.
+No native camera update, registry mutation or render selection occurs.
+
+The new native byte checks are tested by name against the supported image
+and reject mutation of every byte in their checked instruction spans:
+
+| Check | RVA | Meaning |
+| --- | --- | --- |
+| CCameraCtor.RenderStateSize | 0xE72BF | Allocate 0x260 bytes |
+| CCameraCtor.RenderStateAllocate | 0xE72D1 | Call allocator RVA 0x2484FA |
+| CCameraCtor.RenderStateConstruct | 0xE72DD | Call RenderStateCtor RVA 0x1D1370 |
+| CCameraCtor.RenderStateResult | 0xE72E2 | Preserve constructor result |
+| CCameraCtor.RenderStateStore | 0xE72FD | Store owned result at camera+0x34 |
+
+`SudekiMpObserveSpiritInstanceView` reports the remote namespace's actual
+selection: 0 native default, 1 InitCam, 2 SkillCam. FALSE means UNKNOWN.
+The existing SetRenderCamera adapter remains the only selection-hook owner.
+Native CSpiritCam state transition RVA `0x124E0` selects the configured
+named camera at start and requests default at completion when its native
+flags permit; resource/animation callbacks retain their existing namespace.
+The host game's camera remains independently selected.
+
+CONFIRMED_TEST: additive story message 37 carries only the observed Tal
+Spirit camera, with control transaction, actor generation, scene epoch and
+revision, stream/cast sequence, area and host time. It is 168 bytes plus the
+28-byte envelope. An eight-sample history uses the world presentation time;
+selection/end changes wait for their timestamp. Existing bounded matrix
+interpolation preserves handedness and avoids blending large cuts. Older
+messages and native saves are unchanged. No client gameplay Spirit task is
+started. Native obstruction decisions are preserved by observing selection,
+not by inventing a cinematic based on the cast timer.
+
+The client's existing retained local camera receives the geometry. Its orbit
+heading/distance stay saved; missing observations hold the last active view.
+An observed default, confirmed ownership/area change, or host-cutscene
+priority restores the normal view. Foreign camera/state writes or inaccessible
+storage refuse restoration and retain the obligation for retry. Existing
+native Quit completion is the final destruction witness. Visual camera
+parity, obstruction behavior and live disconnect remain owner gates.
+
+
+### Tal summon held particle clocks
+
+Supported retail SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: renderer child dispatch RVA
+`2228D0` reads model child count `+58`, renderer children `+64` and child flags
+`+68`; bits 0/1 select BONA `+8` with channel-zero sampled time. Particle BONA
+query `1FA070` returns child `+4`; `1F9F70` retains selector at child `+20` and
+forwards the sample to particle instance `+14` through `231860`. The existing
+story observer owns the call at `1F9FAE`; the new binding check stops before it.
+`231860` forwards to custom nodes even when the supplied model sample is held.
+Sampler `235590` treats a lower phase as a loop and derives a positive delta.
+
+The story client's supplemental clock must not advance these native-driven
+nodes during an intentional hold. Paired capture confirmed client-only wrap
+and near-220-frame jumps at the completed Tal summon while host nodes held.
+`SudekiMpLanArenaSpiritVfxCollectModelClocks` observes retained kind-8 weak
+leases, exact root/wrapper/renderer, typed particle children, retained resource
+slot, timing flags and selector. `SudekiMpLanStoryEffectsAdvance` confirms
+unique main-manager membership and omits only the supplemental clock. Native
+aging and host retirement are untouched; lists are local to one synchronous
+verified presentation seam, and unknown ownership rejects the advance.
+
+Additional named identities: VisualChildClockDispatch `2228D0`, 131 bytes,
+FNV `9FAFB82F`; ParticleBoneTimeBinding `1F9F70`, 62 bytes, `7D6C4435`;
+ParticleBoneQuery `1FA070`, 60 bytes, `47323B67`; ParticleModelTimeSet
+`231860`, 179 bytes, `231AA289`. Each is exact-image and every-byte-mutation
+tested. Existing `235520`/`235590` clock identities remain unchanged. Native
+timing tests reproduce the old failure and corrected hold. The owner subsequently
+accepted the ending spiral correction; see the 2026-10-10 C3 ordinary-skills
+entry in the research log for the accepted build and remaining owner gate.
+
+### Story sword-trail clock and ordinary skill presentation (2026-10-10)
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE on supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`:
+`cD3DTrailRenderer::Update` is RVA `225760`, primary vtable `2DFB14` slot 2.
+The animated renderer's child dispatch calls it at `222A66`, return `222A68`;
+ESI retains the parent renderer, EDI the child index, ECX the child, with
+context and delta on the stack. Trail accumulation is independent of the
+parent's animation channel time. Retail disassembly and passive paired
+observations identify Tal's sword trail under his body renderer, not his
+weapon mesh renderer. In the failing client, matching swing clips advance
+while trail accumulation and bounds stay unchanged; the host advances both.
+
+`lan_story_ambient.c` now owns this additional child-update seam. It replaces
+only a zero delta during the current client presentation lease. A successful
+same-frame world-pose publication, fresh roster/registry/actor/model identity,
+unique child slot and retained typed resource must all still match. The
+existing bounded render delta advances native trail history without replaying
+body animation, events or gameplay. Unknown/stale ownership leaves the native
+delta alone. Named guards: `TrailUpdateEntry`, RVA `225760`, length 6, FNV-1a
+`235A3448`; `TrailChildDispatch`, RVA `222A50`, length 24, FNV-1a `A86BD27B`.
+Both are checked by name/RVA against the retail image and every-byte mutation.
+The inert continuation test exercises the actual x86 shim's register and
+stack contract. Ownership fixtures cover stale frames, changed worlds,
+duplicate actors/children, wrong resources and wrong threads. Live visual
+acceptance and in-game teardown of the new seam remain pending.
+
+The ordinary skill uses authored effects `SFXTS001_Shin_Splitter.HOM`
+(`79853F03`) and `SFXSA002_Attack_Zone_Arc.HOM` (`55FE7CFB`). Both appeared on
+the host during the owner's successful cast and were absent on the client.
+The host observer previously admitted only Spirit lineage and its closed
+resource set omitted both. Story-only kinds 33/34 now admit exact ordinary
+cast lineage, including synchronous emissions before native Use returns.
+The existing parent-free cosmetic backend uses the host transform, one-shot
+phase and lifetime; it never connects authored events to a client actor.
+LA42/SMP4 layouts and accepted kind ranges remain unchanged. Other ordinary
+skill assets still require explicit resource research and admission.
+
+Movement now uses the shared retained skill targeting phase observed through
+the existing native `EnableSkillTargettingMode` (`29570`) contract. Only a
+positive AIMING phase with remaining native time bypasses the ordinary skill
+hold for movement. Execution flags, interactions, Spirit activity, cast
+admission and strict drain remain guarded. This introduces no fixed aiming
+timer and does not grant movement throughout a full skill execution.
+
+### Ordinary Skill camera publication (2026-10-10)
+
+CONFIRMED_STATIC: story cast camera capture previously published the retained
+native selection only while `spirit_started` was set. Ordinary skills already
+used the same private named-camera bank, render-selection routing and shared
+cast sequence, but their observation was replaced with kind 0. The corrected
+capture admits either an ordinary started skill or a started Spirit Strike.
+It copies the native InitCam/SkillCam choice and geometry without choosing
+an angle itself. Native obstruction/default choices, positively observed
+cast completion and UNKNOWN observation behavior are preserved. This applies
+to remote Tal's ordinary skills generally, not a Shin Splitter timer or
+special case. At this checkpoint, other characters remained outside this
+presentation contract; the subsequent full-roster extension is described below.
+
+No native hook, instruction guard, camera-global owner or packet layout is
+added or changed. Existing story message 37 carries the view on the presented
+world timeline; the accepted client orbit restoration and host camera
+independence remain the same. `StoryCastAdmissionTest` reproduces the former
+ordinary-camera suppression before the correction and checks both cast
+families afterward, including default, InitCam, SkillCam, drain, recast,
+invalid geometry, changed owner and unknown observation without output writes.
+The existing camera transport, native presenter and named byte-check tests
+also pass. See the research log for the candidate identity and owner gate;
+the owner subsequently confirmed the Shin Splitter camera worked on this
+candidate. Other Tal skills and broader obstruction cases remain untested.
+At that checkpoint, capture, camera message validation and per-peer
+publication explicitly required character 2 (Tal).
+
+
+### Full-roster Skill and Spirit camera publication (2026-10-10)
+
+CONFIRMED_STATIC / CONFIRMED_TEST: `SudekiMpLanStoryCastCaptureView` now takes
+an explicit roster character and observes only that character's retained
+`SudekiMpSpiritInstance` camera bank. It refuses missing or stale actors and
+the current host-local character. Both ordinary skills and Spirit Strikes
+publish the owner's native default/InitCam/SkillCam selection, geometry and
+cast sequence. Completion is positive native evidence; an unknown observation
+still cannot manufacture an end. There is no skill-slot or Tal-only branch.
+
+`lan_story_runtime.c` captures each character independently.
+`SudekiMpLanPartyPublishStoryCastView` routes only to a ready peer with an
+acknowledged control fence for the same character. `lan_story_cast_view.c`
+accepts all four valid roster characters using the existing fence validator.
+Wire message 37 and its layout are unchanged. Clients continue to require the
+full current scene/control/actor fence and apply the camera on the presented
+world timeline. Native fallback, host-cutscene priority and retryable prior-
+orbit restoration use the existing implementation. Host-local native camera
+ownership is unchanged.
+
+Focused tests exercise all four typed native camera namespaces and both cast
+families; a host plus three clients with every character as leader; independent
+camera start/end; stale ownership refusal; same-character ownership release
+and reacquisition; sparse roster capture; and per-character presenter
+restoration, foreign-write refusal and retry. Existing named camera-constructor
+byte checks still pass against the supported executable and every-byte
+mutation. No native hook or byte signature changed. See the full-roster C3
+entry in the research log for the candidate identity, exact checks and owner
+gate. Camera visuals for all characters, live reassignment and individual
+skills remain UNKNOWN pending owner tests. Other roster skill-effect assets
+are outside this camera extension.
+
+
+### Native single-player Research54 launch (2026-10-10)
+
+`[StoryAreas] NativeResearch54=true` is a default-off exclusive loader profile
+for native combat comparisons. It uses the existing service-only controller
+vtable dispatch: native update runs once, then the owned observer samples
+Research54 and the native scene/roster. It does not install a network session,
+remote actor leases, movement corrections, cast routing or replica presentation.
+Optional existing TestStart coordinates use the retained native position setter
+after READY/load settling; without coordinates the profile only observes.
+
+Area-follow identity checks for `RVA_SWITCH_ZONE_NOW` 7990 and `RVA_ENTER_ZONE`
+7970 must run before `SudekiMpLanStoryObserverInstall` patches those entries.
+Reversing this order caused a correctly refused startup; correcting the order
+allowed native title startup and live diagnostics without relaxing the checks.
+The owned callback has an entry gate; shutdown disables/unregisters/drains it
+before removing its dependencies. Native-thread or restoration refusal retains
+those dependencies for retry. Existing service-only lifecycle/image tests pass;
+this profile's live gameplay comparison and teardown remain pending. See the
+2026-10-10 C3 native comparison entry in the research log for build identity.
+
+### Saved-story C4 native movement contract (2026-10-10)
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: the native controller at RVA
+`0x28B00` submits movement during melee and delegates translation permission
+to `CArbiter::Move` (`0xDAE80`, stdcall: arbiter, direction, speed, blend,
+mode). Move calls `CanMove` (`0xDB800`); attack bit `0x1000` alone does not
+prohibit movement. Combat `+0x72` bit `0x10` blocks it unless combo `+0xB1`
+bit `4` permits it. Movement `+0xBE` bit `8` owns speed writes, but a disabled
+speed write does not suppress Move's target-heading update. Do not replace
+these decisions with an attack-wide idle check.
+
+Ordinary neutral input uses `CArbiter::SetSpeed` (`0xDB070`, thiscall:
+arbiter, zero speed, blend `1.0`). This changes target speed at movement
+`+0x24` and blend at `+0x30`, preserving current speed at `+0x28`; the
+movement write-enable remains authoritative. Lifecycle drain/acquisition is
+a separate immediate-stop contract and has not changed.
+
+Input action `0x2B` supplies scale `2.0 - magnitude`. The native controller
+shapes the lateral/vertical pair at `0x289D0`, with vertical zero, so lateral
+input clamps to one while forward input retains its scale. Speed is the
+length of this shaped vector, before camera-relative direction normalization.
+It is not a universal multiplier: scaled `(1.8,0)` requests speed `1.0`,
+`(0,1.8)` requests `1.8`, and `(1.8,1.8)` requests approximately `2.059`.
+Both horizontal axes at or below the stored float deadzone `0.001` are neutral.
+The helper uses exact binary float constants to avoid x87 excess decimal
+precision changing the inclusive boundary.
+
+`story_player_movement.h` preserves these rules while retaining the client's
+independent camera transform and the host's existing actor/lease and C2 turn
+scope. Its eight named exact-image contracts cover input scaling, local
+shaping, deadzone, vector assembly, magnitude, Move, blended stop and CanMove.
+Host and client admission verify them before enabling this path; no new patch
+seam is installed. `StoryPlayerMovementImageTest` executes the supported native
+controller with inert camera/Move sinks, then executes native Move/SetSpeed
+with synthetic actor components. It checks 22 input cases, native combo/cast
+arbitration, write ownership, release blending and every-byte refusal for each
+named code contract. This establishes request/arbiter parity, not visible
+locomotion or complete engine-update parity. See the C4 research entry for
+candidate identity, transport compatibility and the pending owner gate.
+
+### Saved-story validation cost: scoped page queries (2026-10-10)
+
+CONFIRMED_STATIC / CONFIRMED_TEST: `lan_story_client.c::registry_exact`
+performs a complete retained-entity ownership/pause walk without native calls
+or external callbacks. Each invocation now opens a fresh page-access scope and
+clears it on every exit. If called from an existing presentation scope, that
+outer scope resumes with an empty cache. Entity pointers, both vtables,
+membership, scheduled bits and pause references are still read and compared
+for every entry. This does not cache a successful registry observation.
+
+`lan_story_effects.c::topology` likewise validates the entire manager,
+instances, descriptors, nodes, methods, clocks and resource backlinks on every
+call. A bounded page-access cache lives only inside that callback-free walk
+on the native thread. It is discarded before any subsequent witness, custom
+clock advancement or native particle update. No cached node validity or page
+answer survives into another call or frame. Unsupported/guard/no-access pages,
+overflowing ranges and changed object values retain their refusal behavior.
+
+The production-walker regressions compare caching disabled/enabled on the same
+synthetic objects: 512 entity entries require 528 versus 3 VirtualQuery calls;
+318 particle instances require 320 versus 3. Changed fields are still refused,
+including the last entry; changed page permissions, freed memory and retries
+are re-observed. These query counts establish reduced validation work, not an
+FPS prediction. Existing effect clock, spawn timing and hook tests pass. No
+native patch seam, byte contract, network format or update frequency changes.
+See the corresponding performance follow-up in the research log for the live
+CPU evidence and pending owner check.
+
+
+## CBattleScores encounter presentation (supported image)
+
+| RVA | Function / contract | Evidence |
+| --- | --- | --- |
+| `0x39560` | BattleScoreLoad: ECX=score, native score name, RET4, bool AL; owns previous emitter/cue retirement | CONFIRMED_STATIC; named exact-image guard |
+| `0x39A00` | BattleScoreReset: clears current emitter/cue and score name | CONFIRMED_STATIC; named exact-image guard |
+| `0x39AD0` | Cluster battle listener: ECX=score+0x30, RET12; third argument battle boolean, first two unused; scalar-only flag/intensity change | CONFIRMED_EXACT_IMAGE; native entry/exit fixture |
+| `0x391C0` | Update: ECX=score+8; native score playback, variation and fades | CONFIRMED_STATIC; named exact-image guard |
+| `0x397E0` | BattleScoreIntensity: sets current intensity and peaceful default; unsuitable for a battle-only projection | CONFIRMED_STATIC |
+
+Global score pointer: RVA `0x409D80`. See research-log's encounter music entry,
+`src/hooks/lan_story_music.c`, and `tests/story_music_image_test.c`. No new
+hook owns these entries; the saved-story adapter calls only on a verified
+native thread. Image fixtures do not establish audible parity.
+
+
+### Saved-story native melee timing display
+
+`lan_story_combo_hud.c` observes accepted-input display call RVA `0xD06B0`
+(to `0xD14D0`, EAX=melee component), reset `0xD0440` (EAX=component), and
+window marker seam `0xD0A3B` (ESI=component+0x3C, marker at [ESP+8]).
+This last seam precedes ESI restoration; the later `0xD0A75` call cannot
+identify the component from ESI. `StoryComboHudImageTest` verifies that
+`BukiReplicaNativeImageMatches` remains valid with these observers installed.
+
+HUD mode hide `0xAED20` uses EAX=mode/ECX=HUD; show `0xAE9D0` uses
+EAX=mode/ESI=HUD. Label `0xAE7C0` and icon refresh `0xAF110` use EAX=HUD.
+All four return with plain RET. The native three-icon row uses 0/1 for
+weak/strong, 2/3 for mistimed inputs and 7 for empty. The saved-story client
+projects these native UI fields without enabling native gameplay combat.
+See the 2026-10-10 combo/light entry in `docs/research-log.md` for evidence
+and the remaining owner acceptance gate.
+
+### Saved-story native character audio
+
+`lan_story_character_audio.c` owns the saved-story observation detour at
+actor PlayCue RVA `0xFC200`: ECX is the actor sound component, ESI points to
+the output handle, and four stack arguments are cue name, attachment mode,
+gain and distance-bypass flag; native returns with RET16. It observes only
+successful exact roster-owned calls. Client playback uses this same ABI;
+thread/roster/component/bank/cue and listener identities are independently
+checked. The detour and trampoline remain pinned, with admission logically
+closed when the scene/runtime is unavailable.
+
+Actor+`0x5C` owns the sound component (vtable RVA `0x2CD0AC`); its embedded
+emitter at +`0x4C` owns bank +`0x50` and the attachment tuple +`0x30` referenced
+at +`0x54`. The cue tracker at global RVA `0x409E8C` uses 24-byte entries and
+handles containing an 8-bit slot plus generation. Positive retirement or a
+changed generation never grants further access to the old cue. Synchronous
+bank Stop RVA `0x280C30` can immediately free the cue; handle retirement
+`0x284AE0` is checked without any subsequent cue dereference. See
+StoryCharacterAudioImageTest for named exact-image checks and synthetic ABI,
+source-owner, deduplication and lifetime coverage. Audible acceptance remains
+separate from these checks.
+
+
+Client character audio additionally needs the presentation equivalent of
+`ActorSoundTransform` RVA `0xFC560`. Native ActorPlayCue compares camera position
+to sound-component `+0x84/+0x88/+0x8C`, not directly to actor CPosition. A paused
+replica can therefore be correctly displayed yet silently rejected at its old
+sound origin. Refresh both that origin and the attachment tuple at `+0x34`
+from the exact actor pose. Nonzero sound locator `+0xD4` selects the current
+model locator/bone composed with the body matrix; no actor/model task is run.
+For a live owned attachment, native `AttachmentPosition` RVA `0x284520`
+(ESI points to component `+0x30`) propagates position and existing velocity.
+The attachment's native position/velocity setters are RVAs `0x281860` and
+`0x2817F0`; its sound-list buffer getter is `0x22E940`. Exact registered
+attachment, linked-list and sound identities are required. This path serves
+all four roster actors and does not bypass range culling or alter gain.
+The distance regression and active-emitter movement run against the supported
+image in StoryCharacterAudioImageTest; audible acceptance is tracked in the
+plan's client-emitter correction entry.

@@ -17,6 +17,8 @@ unsigned SudekiMpLanStoryRuntimePort(void);
 /* Positive native saved-load and presentation readiness, not connectivity.
  * Reserved but unavailable characters do not become input-enabled here. */
 BOOL SudekiMpLanStoryRuntimeReady(void);
+/* Game-thread read-only authority check for the retained C2 turn callback. */
+BOOL SudekiMpLanStoryRuntimeTurnLeaseExact(const SudekiMpLanPartyLease *native_key);
 void SudekiMpLanStoryRuntimeLobbyService(SudekiMpLobby *lobby);
 /* Lobby player name holding character 0..3 (Buki, Elco, Tal, Ailish) from the
  * last lobby status copy; FALSE when the character is not held by a present

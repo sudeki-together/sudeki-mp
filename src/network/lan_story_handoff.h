@@ -26,10 +26,42 @@ typedef struct SudekiMpLanStoryMovement {
     float world_x,world_z;
 } SudekiMpLanStoryMovement;
 
+/* World direction times native controller magnitude, not a unit stick.
+ * Lateral clamps to one; forward preserves the bounded input scale <=4.004.
+ * sqrt(1 + 4.004^2) < 4.13. Wire layout and units remain unchanged. */
+#define SUDEKIMP_STORY_MOVEMENT_MAX 4.13f
+BOOL SudekiMpLanStoryMovementVectorValid(float x,float z);
+
 #define SUDEKIMP_STORY_CONTROL_WIRE_SIZE 24u
 #define SUDEKIMP_STORY_CONTROL_FENCE_SIZE 20u
 #define SUDEKIMP_STORY_MOVEMENT_WIRE_SIZE 36u
 #define SUDEKIMP_STORY_CONTROL_MAX_AGE_MS 250u
+
+/* Additive ranged input message; existing movement/action layouts stay intact.
+ * press is an owner-local monotonic edge journal; held enables retail repeat.
+ * The host validates aim against its actor and owns all native emissions. */
+typedef struct SudekiMpLanStoryRanged {
+    SudekiMpLanStoryControlFence fence;
+    uint32_t sequence,acknowledged_frame,press;
+    uint8_t held;
+    float direction[3],target[3];
+} SudekiMpLanStoryRanged;
+#define SUDEKIMP_STORY_RANGED_WIRE_SIZE 60u
+BOOL SudekiMpLanStoryRangedValid(const SudekiMpLanStoryRanged *input);
+BOOL SudekiMpLanStoryRangedEncode(const SudekiMpLanStoryRanged *input,uint8_t *bytes,size_t size);
+BOOL SudekiMpLanStoryRangedDecode(const uint8_t *bytes,size_t size,SudekiMpLanStoryRanged *input);
+
+/* Additive held-block channel for Tal/Buki. No attack journal or legacy
+ * movement bytes are repurposed. Expiry closes held intent on the host. */
+typedef struct SudekiMpLanStoryBlock {
+    SudekiMpLanStoryControlFence fence;
+    uint32_t sequence,acknowledged_frame;
+    uint8_t held;
+} SudekiMpLanStoryBlock;
+#define SUDEKIMP_STORY_BLOCK_WIRE_SIZE 32u
+BOOL SudekiMpLanStoryBlockValid(const SudekiMpLanStoryBlock *input);
+BOOL SudekiMpLanStoryBlockEncode(const SudekiMpLanStoryBlock *input,uint8_t *bytes,size_t size);
+BOOL SudekiMpLanStoryBlockDecode(const uint8_t *bytes,size_t size,SudekiMpLanStoryBlock *input);
 
 /* Discrete saved-story actions have their own request/result journal.
  * Transport acceptance is never native execution. A request is consumed once
@@ -39,7 +71,7 @@ typedef struct SudekiMpLanStoryMovement {
 typedef enum SudekiMpLanStoryActionKind {
     SUDEKIMP_STORY_ACTION_SKILL=1,
     SUDEKIMP_STORY_ACTION_SPIRIT,
-    /* Tal only in this closed story slice. slot is 1 weak, 2 strong, 3 sweep.
+    /* Tal and Buki. slot is 1 weak, 2 strong, 3 sweep.
      * A press requests native admission, never an animation or hit result. */
     SUDEKIMP_STORY_ACTION_MELEE
 } SudekiMpLanStoryActionKind;
@@ -58,7 +90,7 @@ typedef enum SudekiMpLanStoryActionOutcome {
     /* The native melee entry was called once. Its void ABI cannot prove an
      * accepted combo: only subsequent host-observed poses/consequences can. */
     SUDEKIMP_STORY_ACTION_SUBMITTED,
-    SUDEKIMP_STORY_ACTION_NO_SP
+    SUDEKIMP_STORY_ACTION_NO_SP /* Ordinary SP or shared Spirit SSP, according to kind. */
 } SudekiMpLanStoryActionOutcome;
 typedef struct SudekiMpLanStoryActionResult {
     SudekiMpLanStoryControlFence fence;

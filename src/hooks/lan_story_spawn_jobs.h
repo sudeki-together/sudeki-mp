@@ -68,7 +68,7 @@ static void solo_record(void *raw) {
     solo_fault=TRUE;
 }
 static void __attribute__((noinline,used,force_align_arg_pointer)) solo_constructed(void *raw) {
-    DWORD error=GetLastError(); solo_record(raw); SetLastError(error);
+    DWORD error=GetLastError(); sigil_constructed(raw); solo_record(raw); SetLastError(error);
 }
 /* Constructor: EAX=allocation, EDX=group, two stack arguments, RET8.
  * The observer runs after construction and preserves all native return state. */
@@ -124,11 +124,13 @@ static unsigned __attribute__((thiscall)) solo_step(void *raw) {
         SudekiMpLogFormat("story_spawn_trace event=solo_step serial=%lu stage=%u->%u exact=%u accounted=%u terminal=%u\r\n",
             (unsigned long)s->serial,previous,s->stage,exact,accounted,result&255u);
     }
+    sigil_job_step(raw);
     --solo_callbacks; SetLastError(error); return result;
 }
 static void * __attribute__((thiscall)) solo_destroy(void *raw,unsigned flags) {
     ++solo_callbacks; SoloJob *s=solo_find(raw);
     void *result=original_solo_destroy(raw,flags); DWORD error=GetLastError();
+    sigil_job_destroyed(raw);
     if(s) { /* Positive destructor return; do not read released storage. */
         SudekiMpLogFormat("story_spawn_trace event=solo_retired serial=%lu\r\n",(unsigned long)s->serial);
         memset(s,0,sizeof(*s));

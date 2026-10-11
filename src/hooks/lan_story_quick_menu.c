@@ -4,6 +4,8 @@
 #include "hooks/call_hook.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "engine/spirit_activation_abi.h"
+#include "hooks/lan_party_control.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -19,7 +21,7 @@ static MenuTransition native_open,native_close;
 static void *native_submit;
 static SudekiMpPointerHook input_hook,open_hook,close_hook;
 static SudekiMpRelativeCallHook script_hooks[2];
-static SudekiMpStoryQuickSkillRequest request_skill;
+static SudekiMpStoryQuickActionRequest request_action;
 static DWORD native_thread;
 static BOOL installed,retained,fault,admission;
 static unsigned callbacks,scope,transition;
@@ -146,21 +148,35 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
     ++scope;
     /* Never enter the retail action dispatcher: it can consume items, alter
      * party AI/equipment or execute CSkill::Use on this contained replica.
-     * Reading a displayed row only reserves an ordinary host skill request. */
+     * Reading a displayed row only reserves a host skill/Spirit request. */
     if((e->kind==5u || e->kind==6u) && (e->command==0u || e->command==2u)) {
         e->result=1;
         uint8_t *m=e->menu,*list=*(uint8_t **)(m+0x214u),*category=*(uint8_t **)(m+0x208u);
-        if(e->kind==5u && e->value && admission && *(unsigned *)(m+0x204u)==0u &&
+        unsigned category_id=*(unsigned *)(m+0x204u);
+        unsigned limit=category_id==0u?6u:category_id==1u?2u:0u;
+        if(e->kind==5u && e->value && admission && limit &&
             !m[0x188u] && !m[0x189u] && !m[0xfdu] && !m[0xfeu] &&
             !*(unsigned *)(m+0x108u) && readable(category,0xbcu) &&
             *(unsigned *)(category+0xb4u)==*(unsigned *)(category+0xb8u) &&
             readable(list,0x480u)) {
             int row=*(int *)(list+0x448u); unsigned count=*(unsigned *)(list+0x474u);
             uint8_t **rows=*(uint8_t ***)(list+0x47cu);
-            if(row>=0 && row<6 && count<=6u && (unsigned)row<count &&
+            if(row>=0 && (unsigned)row<limit && count<=limit && (unsigned)row<count &&
                 readable(rows,count*4u) && readable(rows[row],0x88u)) {
                 int slot=*(int *)(rows[row]+0x84u);
-                if(slot>=0 && slot<6 && request_skill(actor_owner,(unsigned)slot)) close_owned("skill_queued");
+                if(category_id==0u && slot>=0 && slot<6 &&
+                    request_action(actor_owner,SUDEKIMP_STORY_ACTION_SKILL,(unsigned)slot))
+                    close_owned("skill_queued");
+                if(category_id==1u) {
+                    int first;
+                    /* Retail rows contain the actor's strike ID, not their
+                     * displayed ordinal. Send a one-based variant only after
+                     * proving membership in this exact character's pair. */
+                    if(SudekiMpResolveSpiritStrikeId(SudekiMpLanPartyActorType(r->leader_character),1,&first) &&
+                        slot>=first && slot<=first+1 &&
+                        request_action(actor_owner,SUDEKIMP_STORY_ACTION_SPIRIT,(unsigned)(slot-first+1)))
+                        close_owned("spirit_queued");
+                }
             }
         }
     } else if(e->kind!=0x19u) {
@@ -236,10 +252,10 @@ BOOL SudekiMpLanStoryQuickMenuUninstall(void) {
     for(unsigned i=2u;i>0;--i)
         if(!SudekiMpRestoreRelativeCallHook(&script_hooks[i-1u])) return pin(GetLastError());
     installed=retained=fault=FALSE; native_thread=0;
-    controller_owner=actor_owner=group_owner=NULL; owner_transaction=0; request_skill=NULL;
+    controller_owner=actor_owner=group_owner=NULL; owner_transaction=0; request_action=NULL;
     return TRUE;
 }
-BOOL SudekiMpLanStoryQuickMenuInstall(HMODULE image,SudekiMpStoryQuickSkillRequest request) {
+BOOL SudekiMpLanStoryQuickMenuInstall(HMODULE image,SudekiMpStoryQuickActionRequest request) {
     uint8_t *b=(uint8_t *)image;
     if(!image || !request || retained || installed || (base && base!=b) ||
         !SudekiMpCheckLoadedExecutable(image) || !SudekiMpLanStoryRealtimeExact(image)) return FALSE;
@@ -248,7 +264,7 @@ BOOL SudekiMpLanStoryQuickMenuInstall(HMODULE image,SudekiMpStoryQuickSkillReque
         *(void **)(b+MENU_VT+0x44u)!=b+0x99180u) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
     base=b; native_input=(MenuInput)(b+0x98b40u);
     native_open=(MenuTransition)(b+0x98ec0u); native_close=(MenuTransition)(b+0x99180u);
-    native_submit=b+0x1c37b0u; request_skill=request; retained=TRUE;
+    native_submit=b+0x1c37b0u; request_action=request; retained=TRUE;
     static const unsigned sites[]={0x990fau,0x992e1u};
     for(unsigned i=0;i<2u;++i)
         if(!SudekiMpInstallRelativeCallHook(&script_hooks[i],b+sites[i],native_submit,submit_script)) goto fail;

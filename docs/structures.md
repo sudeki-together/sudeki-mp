@@ -230,3 +230,95 @@ limit 10 trips bit 0 on reaction 11 within the same active session.
 Live Blade Dance testing confirmed the layout: count reached 11, bit 0 set,
 four later damage packets produced no reaction while still reducing HP, and
 both count and bit reset after the 10-second session expired.
+
+### CTargeter ordinary melee selection (#54 C1)
+
+Exact-image/static follow-up to the earlier target trace: `CTargeter+0x48`,
+`+0x4C`, `+0x50` hold the accepted targeting direction. Native arbiter movement
+updates it outside ranged mode; ordinary search `0x4BA1C0` scores against it.
+`+0x84 bit 1` retains the current target in dispatcher `0x4B9AB0` when the
+actor's AI override count is positive. C1's native melee-leaf call preserves
+that flag and uses the normal commit helper for the intrusive slot at `+0x54`.
+The exclusion count is at `+0x88`, with a pointer to 12-byte entries at `+0x90`.
+These facts do not establish remote combat parity; see the exact-image test
+and owner gate recorded in the co-op story plan.
+
+
+### SOL startup material definition (C3, 2026-10-10)
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST; supported executable and named routines
+are recorded in engine-functions.md. The initial SOL pair uses definition
+vtable RVA `0x2DEB70`, references +04, flag key +08, texture count +0C,
+constant count +10, descriptor count +14, static layout +18, owned descriptor
+array +1C, optional array +20, cache-next +24, six texture mappings +28 and
+four constant mappings +2C. The closed flags `0x80000001` / `0x8000000D`
+retain one texture; the latter adds the member3 float4 at constant slot0.
+Material +38 owns that constant buffer after expansion; borrowed-storage flag
+`0x200` is refused for the derived material. This is a narrow validated family,
+not permission to accept other readable descriptions or mapping arrays.
+
+
+The C3 follow-up extends that initial pair to the eight closed combinations of
+member3/4/5 fields at flag bits2/6/8, each either0 or3. Texture mappings remain
+`[0,-1,-1,-1,-1,-1]`; constant mapping0 remains -1, and mappings1..3 assign
+successive slots only to enabled fields. Constant count is0..3. The seven-word
+owned descriptor is `[0x103, member4?2:0, member5?2:0, 1,0,0,0]`; optional
+array+20 remains NULL and static layout+18 remains image RVA0x323AD0. Expanded
+material+38 must own `16 * constant_count` writable bytes. Exact-image tests
+cover all output orders, intermediate releases and mapping-preserved colors.
+This does not admit other SOL texture/color modes or arbitrary definitions.
+
+
+The later C3 textured-material correction supersedes the zero/constant-only
+restriction above. For fixed base `0x80000001`, fields at bits2/6/8 may be
+0 (absent),1 (authored texture) or3 (derived constant);2 remains unsupported.
+Texture count is1 plus the number of fields equal1. Six texture mappings assign
+successive slots to field1 in native shift order0/2/4/6/8/10; constant mappings
+use only fields equal3 at shifts0/2/6/8. The descriptor's first word is0x203
+when bits2..3 equal1, otherwise0x103. Words1/2 are0x103 for texture1,2 for
+constant3, or0 for absent0. The remaining words stay `[1,0,0,0]`. A derived
+material retains the original texture fields and mapping order exactly.
+All27 reachable descriptors and all eight original texture layouts have
+exact-image test coverage; arbitrary SOL families are still not admitted.
+
+
+The subsequent alternate-layout extension also retains authored fields at
+bits4/10 (each0 or1) and bit23. Bit23 selects static layout RVA0x323B40; when
+clear the pointer remains RVA0x323AD0. Descriptor word3 is0x103 for field10
+texture1, otherwise1; words4..6 are0x103 for field4 texture1, otherwise0.
+With field4 texture1, optional array+20 is a separately owned seven-word copy
+of the first descriptor with words2/3 set to1 and words4..6 zero. Without it,
++20 must be NULL. The optional array participates in same-definition and
+cross-definition alias checks and native release. These retained fields raise
+the tested family to64 original layouts and216 reachable definitions; they
+are never changed by color expansion.
+
+
+Final inventory follow-up: all seven Tal originals use four flag keys:
+`80000001`, `80000101`, `80800501`, `80802505`. The last also retains bit13;
+its member4 expansion was the remaining live refusal. Native factory202A30
+preserves that bit in the cache key without changing descriptor arrays.
+The proof now retains it exactly, including a negative test for substituting
+it. The exact-image fixture covers128 original layouts,432 reachable
+definitions and all six output orders, including every observed Tal key.
+All tracked allocations are released; the same eleven named byte guards
+remain unchanged. This supersedes the insufficient216-definition candidate.
+
+### Native trail renderer timing (2026-10-10, story C3)
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE on executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`:
+the trail renderer primary vtable is RVA `2DFB14`, with Update at `225760`.
+Its retained resource at `+14` has primary vtable `2DFAF0`; resource `+14`
+points to the authored definition, whose `+4` identifies the child slot.
+The renderer's `+68` is its step interval, `+6C` its accumulated delta and
+`+70` the prior accumulator. Its native update consumes accumulated time
+and then adds the incoming delta; copied body animation times do not advance
+this history. Tal's observed body renderer owns this trail as child 1.
+
+These offsets alone grant no access. The story adapter requires the current
+world/roster, unique entity registry membership, exact actor-model-renderer
+chain, native frame and thread, unique renderer child slot, and positive
+typed resource retention before replacing an incoming zero delta. See
+`StoryTrailOwnerImageTest`, `StoryTrailClockImageTest` and the corresponding
+engine-functions entry. Fixture acceptance is not live trail appearance proof.

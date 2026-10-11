@@ -74,7 +74,16 @@ static void protect(void *p,DWORD access) {
     DWORD old; assert(VirtualProtect(p,4096,access,&old));
 }
 static void __attribute__((thiscall)) hit(void *self,void *damage) {
-    assert(self==combat && *(uint16_t *)((uint8_t *)damage+0x14)==0x4a40); /* native half: 12.5 */
+    assert(self==combat);
+    if(mode==20) {
+        uint16_t h=*(uint16_t *)((uint8_t *)damage+0x14);
+        unsigned exponent=(h>>10u)&31u;
+        uint32_t bits=((h&0x8000u)<<16u)|((h&1023u)<<13u)|((exponent?exponent+112u:0u)<<23u);
+        float packed; memcpy(&packed,&bits,4u);
+        float *hp=(float *)(entity+0x200u+0x2cu);
+        assert(isfinite(packed) && packed>=0.0f && packed<*hp);
+        *hp-=packed; assert(*hp>0.0f);
+    } else assert(*(uint16_t *)((uint8_t *)damage+0x14)==0x4a40); /* native half: 12.5 */
     assert(!(*(uint32_t *)(arbiter+0x50)&0x400));
     ++calls;
     *(uint32_t *)(arbiter+0x50)|=0x10000000; /* A native flag write must survive. */
@@ -100,7 +109,7 @@ static void __attribute__((thiscall)) hit(void *self,void *damage) {
     case 17:
         assert(!SudekiMpUninstallLanStoryWorld() && GetLastError()==ERROR_BUSY);
         assert(!begin());
-        SudekiMpLanStoryWorldFlushMonsterDamage();
+        assert(!SudekiMpLanStoryWorldFlushMonsterDamage());
         assert(calls==1); break;
     case 18: ++client_bound[0].previous.generation; break;
 #endif
@@ -117,6 +126,9 @@ static void fixture(void) {
     *(void **)(entity+0x90)=arbiter; *(void **)(entity+0xa4)=combat;
     *(void **)old_entries=entity; *(void **)(registry+0x3c)=old_entries; *(unsigned *)(registry+0x34)=1;
     *(void **)(image+0x409d8c)=registry;
+    uint8_t *stats=entity+0x200u;
+    *(void **)(entity+0x4cu)=stats; *(void **)stats=image+0x2cc064u;
+    *(void **)(stats+0x10u)=entity; *(float *)(stats+0x2cu)=100.0f;
     identity=(SudekiMpStoryDamageIdentity){entity,456,123,7,8};
 #ifdef SUDEKIMP_DAMAGE_FLUSH_TEST
     base=image; native_thread=GetCurrentThreadId(); client_seen=TRUE; active=damage_call_active=FALSE;
@@ -150,26 +162,60 @@ static void byte_checks(void) {
     assert(FlushInstructionCache(GetCurrentProcess(),image,0x45f000));
 }
 #ifdef SUDEKIMP_DAMAGE_FLUSH_TEST
-static DWORD WINAPI wrong_thread(void *unused) { (void)unused; SudekiMpLanStoryWorldFlushMonsterDamage(); return 0; }
+static DWORD WINAPI wrong_thread(void *unused) { (void)unused; assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); return 0; }
+static void number_gate(void) {
+    fixture(); uint8_t *stat=entity+0x400u,*settings=entity+0x800u;
+    *(void **)(entity+0xb0u)=stat; *(void **)stat=image+0x2d21e4u;
+    *(void **)(stat+0x10u)=entity; stat[0x24u]=stat[0x30u]=1;
+    *(float *)(stat+0x18u)=-10.0f;
+    *(void **)(image+0x409dc0u)=settings; *(float *)(settings+0x29cu)=3.0f;
+    typedef void (__stdcall *NumberQueue)(void *,float,float,uint32_t);
+    NumberQueue queue=(NumberQueue)(image+0x129800u);
+    assert(!memcmp(image+0x129800u,"\x55\x8b\x6c\x24\x08\x80\x7d\x24\x00",9u));
+    assert(!memcmp(image+0x12989au,"\xc2\x10\x00",3u));
+    queue(stat,1.0f,1.0f,0xffffffffu); assert(!*(uint32_t *)(stat+0x48u));
+    assert(!SudekiMpStoryDamageArmDisplay(image,entity,FALSE,checked_memory));
+    *(void **)(stat+0x10u)=registry;
+    assert(!SudekiMpStoryDamageArmDisplay(image,entity,TRUE,checked_memory));
+    *(void **)(stat+0x10u)=entity; stat[0x24u]=0;
+    assert(!SudekiMpStoryDamageArmDisplay(image,entity,TRUE,checked_memory));
+    stat[0x24u]=1; stat[0x30u]=0;
+    assert(!SudekiMpStoryDamageArmDisplay(image,entity,TRUE,checked_memory));
+    stat[0x30u]=1; image[0x31f0f3u]=0;
+    assert(SudekiMpStoryDamageArmDisplay(image,entity,TRUE,checked_memory));
+    assert(!image[0x31f0f3u]); /* Do not change the user's number option. */
+    queue(stat,1.0f,1.0f,0xffffffffu);
+    assert(*(uint32_t *)(stat+0x48u)==1u && *(uint32_t *)(stat+0x70u)==0xffffffffu);
+}
 static void flush_cases(void) {
-    fixture(); active=TRUE; SudekiMpLanStoryWorldFlushMonsterDamage(); assert(!calls); active=FALSE;
+    number_gate();
+    fixture(); mode=20;
+    for(unsigned i=0;i<30u;++i) {
+        monster_hp[0].pending=100000000.0f;
+        assert(SudekiMpLanStoryWorldFlushMonsterDamage());
+        assert(*(float *)(entity+0x200u+0x2cu)>0.0f);
+    }
+    assert(SudekiMpStoryNonlethalDamage(NAN,10.0f)==0 &&
+        SudekiMpStoryNonlethalDamage(100.0f,INFINITY)==0 && SudekiMpStoryNonlethalDamage(0,10.0f)==0);
+
+    fixture(); active=TRUE; assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); assert(!calls); active=FALSE;
     HANDLE thread=CreateThread(NULL,0,wrong_thread,NULL,0,NULL); assert(thread);
     assert(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0); CloseHandle(thread); assert(!calls);
-    mode=17; SudekiMpLanStoryWorldFlushMonsterDamage();
+    mode=17; assert(SudekiMpLanStoryWorldFlushMonsterDamage());
     assert(calls==1 && !damage_restore.lifted && feedback[0].entity==entity);
     assert(*(uint32_t *)(arbiter+0x50)==0x10000402);
-    fixture(); mode=18; feedback[0].entity=entity; SudekiMpLanStoryWorldFlushMonsterDamage();
+    fixture(); mode=18; feedback[0].entity=entity; assert(SudekiMpLanStoryWorldFlushMonsterDamage());
     assert(calls==1 && !damage_restore.lifted && !feedback[0].entity);
     assert(*(uint32_t *)(arbiter+0x50)==0x10000002);
-    fixture(); mode=9; SudekiMpLanStoryWorldFlushMonsterDamage();
+    fixture(); mode=9; assert(SudekiMpLanStoryWorldFlushMonsterDamage());
     assert(calls==1 && damage_restore.lifted && !feedback[0].entity);
     assert(!SudekiMpUninstallLanStoryWorld() && base==image);
     protect(arbiter,PAGE_READWRITE); assert(SudekiMpUninstallLanStoryWorld() && !base);
     assert(*(uint32_t *)(arbiter+0x50)==0x10000402);
-    fixture(); mode=15; SudekiMpLanStoryWorldFlushMonsterDamage();
+    fixture(); mode=15; assert(SudekiMpLanStoryWorldFlushMonsterDamage());
     assert(calls==1 && damage_restore.lifted && !feedback[0].entity);
-    protect(entity,PAGE_READWRITE); SudekiMpLanStoryWorldFlushMonsterDamage(); assert(!damage_restore.lifted && calls==1);
-    fixture(); ++client_bound[0].previous.generation; SudekiMpLanStoryWorldFlushMonsterDamage(); assert(!calls);
+    protect(entity,PAGE_READWRITE); assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); assert(!damage_restore.lifted && calls==1);
+    fixture(); ++client_bound[0].previous.generation; assert(!SudekiMpLanStoryWorldFlushMonsterDamage()); assert(!calls);
 }
 #endif
 int main(int argc,char **argv) {

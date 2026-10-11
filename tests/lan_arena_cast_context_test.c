@@ -417,6 +417,55 @@ int main(void) {
     CHECK(SudekiMpLanCastContextSetTaskRouting(NULL,NULL));
     CHECK(SudekiMpUninstallLanCastContext());
 
+    /* The verified native waiting prefix cannot touch the cast namespace.
+     * Run it literally, with an inert fixture body for due/NaN clocks. */
+    setup();
+    CHECK(SudekiMpLanCastContextSetTaskRouting(route_enter,route_leave));
+    a=begin_root(scripts[0],2); create(0,91); end_root(a);
+    {
+        uint8_t *tail=image+STEP+sizeof(step_prefix);
+        uint8_t saved[5]; memcpy(saved,tail,5);
+        int32_t delta=(int32_t)((uintptr_t)fake_step-(uintptr_t)(tail+5));
+        tail[0]=0xe9; memcpy(tail+1,&delta,4);
+        FlushInstructionCache(GetCurrentProcess(),image+STEP,sizeof(step_prefix)+5);
+        expected_actor=0;
+        *(float *)(threads[0]+0x44)=1.0f;
+        *(float *)(threads[0]+0x48)=2.0f;
+        uint32_t ip=*(uint32_t *)(threads[0]+0xc);
+        refuse_enter=TRUE; SetLastError(789);
+        CHECK(task_waiting_exact(threads[0]));
+        CHECK(task_step(threads[0],(void *)0x13579)==2 && GetLastError()==789);
+        CHECK(*(uint32_t *)(threads[0]+0xc)==ip && !route_depth && !task_scope_count && !depth);
+        /* Ownership refusal still precedes the native waiting shortcut. */
+        handles[0][0]=(uint32_t)(uintptr_t)threads[3];
+        SetLastError(789);
+        CHECK(task_step(threads[0],(void *)0x13579)==2 && GetLastError()==ERROR_INVALID_DATA);
+        handles[0][0]=(uint32_t)(uintptr_t)threads[0];
+        /* Unrelated waiting tasks also need no temporary global swap. */
+        *(float *)(threads[3]+0x44)=1.0f; *(float *)(threads[3]+0x48)=2.0f;
+        SetLastError(789);
+        CHECK(task_step(threads[3],(void *)0x13579)==2 && GetLastError()==789);
+        refuse_enter=FALSE;
+        *(float *)(threads[0]+0x44)=2.0f;
+        CHECK(!task_waiting_exact(threads[0]) && task_step(threads[0],(void *)0x13579)==93);
+        *(float *)(threads[0]+0x44)=3.0f;
+        CHECK(!task_waiting_exact(threads[0]) && task_step(threads[0],(void *)0x13579)==93);
+        *(uint32_t *)(threads[0]+0x44)=0x7fc00000u;
+        CHECK(!task_waiting_exact(threads[0]) && task_step(threads[0],(void *)0x13579)==93);
+        *(float *)(threads[0]+0x44)=1.0f;
+        original_step=fake_step;
+        CHECK(!task_waiting_exact(threads[0]) && task_step(threads[0],(void *)0x13579)==93);
+        original_step=(OpcodeFunction)(image+STEP);
+        image[STEP+20]^=1;
+        CHECK(!task_waiting_exact(threads[0]));
+        image[STEP+20]^=1;
+        memcpy(tail,saved,5);
+        memset(threads[0]+0x44,0,8); memset(threads[3]+0x44,0,8);
+    }
+    handles[0][0]=0; CHECK(SudekiMpLanCastContextDrained());
+    CHECK(SudekiMpLanCastContextSetTaskRouting(NULL,NULL));
+    CHECK(SudekiMpUninstallLanCastContext());
+
     /* Native UpdateMgr cleanup uses the same actor scope and owns any child
      * it creates after the root task completed. Exercise the installed ABI. */
     setup(); original_skill_update=fake_skill_update;

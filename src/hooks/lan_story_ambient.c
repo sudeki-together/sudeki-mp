@@ -19,7 +19,10 @@
  * straight-line code, no relative branch. Same zero-delta substitution. */
 enum { WATER_RVA=0x2171b0, WATER_LENGTH=6, WATER_VTABLE_RVA=0x2df7a4 };
 static const uint8_t water_bytes[WATER_LENGTH]={0xd9,0x44,0x24,0x08,0xb0,0x01};
-static SudekiMpInlineHook water_hook;
+static SudekiMpInlineHook water_hook,trail_hook;
+static void *trail_trampoline __attribute__((used));
+static DWORD active_thread;
+static volatile LONG trail_callbacks;
 void *SudekiMpLanStoryAmbientWaterTrampoline __attribute__((used));
 enum { UPDATE_RVA=0x222b50, UPDATE_LENGTH=5, VTABLE_RVA=0x2df8ec, FRAME_STAMP=0x3c3150,
        MAX_OWNED=128, LEASE_MS=500, MAX_DT_MS=50, GAP_MS=250, REFRESH_MS=250 };
@@ -43,7 +46,7 @@ static BOOL readable_code(const void *p,size_t n) {
     return access==PAGE_EXECUTE_READ || access==PAGE_EXECUTE_READWRITE || access==PAGE_EXECUTE_WRITECOPY;
 }
 void SudekiMpLanStoryAmbientSetActive(BOOL on) {
-    if(on) { active_tick=GetTickCount(); InterlockedExchange(&active,1); }
+    if(on) { active_thread=GetCurrentThreadId(); active_tick=GetTickCount(); InterlockedExchange(&active,1); }
     else InterlockedExchange(&active,0);
 }
 /* One local delta per native frame (frame stamp 0x7C3150 changes once per
@@ -104,9 +107,49 @@ static void __attribute__((naked,noinline)) water_stub(void) {
         "add $16,%esp; fxrstor (%esp); mov %ebp,%esp; popal; popfl;"
         "jmp *_SudekiMpLanStoryAmbientWaterTrampoline");
 }
+/* This is the native trail's existing visit, after the parent has sampled
+ * the replicated pose. Only its zero dt changes: no animation/event/AI step
+ * is replayed. ESI=parent and EDI=child slot at exact caller 222A66. */
+static const struct { const char *name; unsigned rva,size; uint32_t hash; } trail_checks[]={
+    {"TrailUpdateEntry",0x225760u,6u,0x235a3448u},
+    {"TrailChildDispatch",0x222a50u,24u,0xa86bd27bu}
+};
+static BOOL trail_image_exact(uint8_t *b) {
+    for(unsigned i=0;i<sizeof(trail_checks)/sizeof(trail_checks[0]);++i) {
+        unsigned rva=trail_checks[i].rva,n=trail_checks[i].size; uint32_t h=2166136261u;
+        if(!readable_code(b+rva,n)) return FALSE;
+        for(unsigned j=0;j<n;++j) h=(h^b[rva+j])*16777619u;
+        if(h!=trail_checks[i].hash) return FALSE;
+    }
+    return *(void **)(b+0x2dfb14u+8u)==b+0x225760u;
+}
+static void __attribute__((used,noinline)) trail_delta(void *parent,void *child,unsigned slot,
+    void *caller,uint32_t *dt_slot) {
+    DWORD saved=GetLastError(); InterlockedIncrement(&trail_callbacks);
+    if(!base || !trail_hook.installed || !InterlockedCompareExchange(&active,0,0) ||
+        active_thread!=GetCurrentThreadId() || GetTickCount()-active_tick>LEASE_MS ||
+        caller!=base+0x222a68u || *dt_slot!=0u ||
+        !SudekiMpLanStoryWorldTrailOwner(parent,child,slot)) goto done;
+    refresh_frame(GetTickCount());
+    /* The native scene walker already visits each renderer once per frame.
+     * Re-entrancy cannot share this argument replacement. */
+    if(InterlockedCompareExchange(&trail_callbacks,0,0)==1) *dt_slot=frame_dt_bits;
+done:
+    InterlockedDecrement(&trail_callbacks); SetLastError(saved);
+}
+static void __attribute__((naked,noinline)) trail_stub(void) {
+    __asm__ volatile("pushfl; pushal; mov %esp,%ebp; sub $528,%esp; and $-16,%esp;"
+        "fxsave (%esp); fninit; movl $0x1f80,512(%esp); ldmxcsr 512(%esp); cld; sub $32,%esp;"
+        "mov 4(%ebp),%eax; mov %eax,(%esp); mov 24(%ebp),%eax; mov %eax,4(%esp);"
+        "mov (%ebp),%eax; mov %eax,8(%esp); mov 36(%ebp),%eax; mov %eax,12(%esp);"
+        "lea 44(%ebp),%eax; mov %eax,16(%esp); call _trail_delta;"
+        "add $32,%esp; fxrstor (%esp); mov %ebp,%esp; popal; popfl; jmp *_trail_trampoline");
+}
 BOOL SudekiMpLanStoryAmbientUninstall(void) {
     if(!base) return TRUE;
     InterlockedExchange(&active,0);
+    if(InterlockedCompareExchange(&trail_callbacks,0,0)) return FALSE;
+    if(trail_hook.installed && !SudekiMpRestoreInlineHook(&trail_hook)) return FALSE;
     if(water_hook.installed && !SudekiMpRestoreInlineHook(&water_hook)) return FALSE;
     if(!SudekiMpRestoreInlineHook(&hook)) return FALSE;
     /* The trampoline stays referenced: a thread may still be inside it. */
@@ -114,7 +157,7 @@ BOOL SudekiMpLanStoryAmbientUninstall(void) {
 }
 BOOL SudekiMpLanStoryAmbientInstall(HMODULE image) {
     uint8_t *b=(uint8_t *)image;
-    if(base || !b || !SudekiMpCheckLoadedExecutable(image)) {SetLastError(ERROR_INVALID_STATE); return FALSE;}
+    if(base || !b || !SudekiMpCheckLoadedExecutable(image) || !trail_image_exact(b)) {SetLastError(ERROR_INVALID_STATE); return FALSE;}
     QueryPerformanceFrequency(&frequency);
     if(!readable_code(b+UPDATE_RVA,UPDATE_LENGTH) || memcmp(b+UPDATE_RVA,update_bytes,UPDATE_LENGTH) ||
         *(void **)(b+VTABLE_RVA+8u)!=b+UPDATE_RVA ||
@@ -129,6 +172,12 @@ BOOL SudekiMpLanStoryAmbientInstall(HMODULE image) {
         SetLastError(error?error:ERROR_INVALID_DATA); return FALSE;
     }
     SudekiMpLanStoryAmbientWaterTrampoline=water_hook.trampoline;
-    SudekiMpLogWrite("lan_story_ambient event=installed seams=anim_renderer_update:0x222b50,zone_water_clock:0x2171b0 policy=client_zero_delta_only\r\n");
+    static const uint8_t trail_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf0};
+    if(!SudekiMpInstallInlineHook(&trail_hook,b+0x225760u,trail_entry,sizeof(trail_entry),(const void *)(uintptr_t)trail_stub)) {
+        DWORD error=GetLastError(); (void)SudekiMpLanStoryAmbientUninstall();
+        SetLastError(error); return FALSE;
+    }
+    trail_trampoline=trail_hook.trampoline;
+    SudekiMpLogWrite("lan_story_ambient event=installed seams=anim_renderer_update:0x222b50,zone_water_clock:0x2171b0,owned_trail_clock:0x225760 policy=client_zero_delta_only\r\n");
     return TRUE;
 }

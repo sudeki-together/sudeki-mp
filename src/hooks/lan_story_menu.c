@@ -13,6 +13,7 @@ static const char *const characters[5]={"Buki","Elco","Tal","Ailish","No charact
 static DWORD native_thread;
 static unsigned local_player;
 static BOOL initialized,menu_open,leave_requested;
+static BOOL native_tools_only;
 static SudekiMpPartyMenuState state;
 static char notice[128];
 static DWORD notice_until;
@@ -67,7 +68,8 @@ static BOOL tools_host_exact(void) {
         tools_commands_ready && tools_controller && tools_witness && tools_scene &&
         tools_scene->phase==SUDEKIMP_LAN_STORY_READY &&
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(tools_witness) &&
-        SudekiMpLanStoryHostControlReady(tools_controller,tools_witness,tools_scene) &&
+        (native_tools_only ||
+            SudekiMpLanStoryHostControlReady(tools_controller,tools_witness,tools_scene)) &&
         SudekiMpLanStoryObserverRoster(tools_controller,tools_witness,tools_scene,&roster) &&
         SudekiMpLanStoryObserverRosterStillExact(tools_witness,&roster);
 }
@@ -147,6 +149,10 @@ static BOOL tools_command(unsigned action) {
 }
 static void tools_status(char *text,unsigned capacity) {
     if(!text || !capacity) return;
+    if(native_tools_only) {
+        snprintf(text,capacity,"NATIVE RESEARCH - SINGLE PLAYER");
+        return;
+    }
     const char *status=!thread_exact()?"SESSION UNAVAILABLE":leave_requested?
         "LEAVING SESSION":(state.input_ready&(1u<<local_player))?"PLAYING":
         (state.connected&(1u<<local_player))?"SPECTATING / SYNCHRONIZING":"WAITING FOR SESSION";
@@ -235,9 +241,10 @@ static BOOL command(SudekiMpPartyMenuAction action,unsigned argument) {
         return FALSE;
     }
 }
-BOOL SudekiMpLanStoryMenuInitialize(HMODULE image,unsigned player) {
+static BOOL initialize_menu(HMODULE image,unsigned player,BOOL native_only) {
     if(initialized || player>=4u) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
     native_thread=GetCurrentThreadId(); local_player=player;
+    native_tools_only=native_only;
     initialized=TRUE; menu_open=leave_requested=FALSE;
     tools_stopping=tools_commands_ready=FALSE; resource_owned=0; resources_at=0;
     combat_owned=FALSE; combat_group=combat_world=NULL;
@@ -247,12 +254,19 @@ BOOL SudekiMpLanStoryMenuInitialize(HMODULE image,unsigned player) {
     }
     tools_installed=TRUE;
     notice[0]=0; notice_until=0;
+    if(native_tools_only) return TRUE;
     memset(&state,0,sizeof(state)); memset(state.character,4,sizeof(state.character));
     state.local_player=player; state.active=TRUE; state.host=player==0u;
     state.saved_story=TRUE;
     snprintf(state.status,sizeof(state.status),"Waiting for the saved game...");
     SudekiMpPartyMenuInitialize(command); SudekiMpPartyMenuStateSet(&state);
     return TRUE;
+}
+BOOL SudekiMpLanStoryMenuInitialize(HMODULE image,unsigned player) {
+    return initialize_menu(image,player,FALSE);
+}
+BOOL SudekiMpLanStoryMenuInitializeNativeTools(HMODULE image) {
+    return initialize_menu(image,0,TRUE);
 }
 void SudekiMpLanStoryMenuRefresh(const SudekiMpLobbyStatus *lobby,
     unsigned leader,unsigned available,BOOL scene_ready,BOOL host_control_ready,
@@ -342,13 +356,14 @@ void SudekiMpLanStoryMenuRefresh(const SudekiMpLobbyStatus *lobby,
 void SudekiMpLanStoryMenuNotice(const char *text) {
     if(!thread_exact() || !text || leave_requested) return;
     snprintf(notice,sizeof(notice),"%s",text); notice_until=GetTickCount()+4000u;
+    if(native_tools_only) return;
     snprintf(state.status,sizeof(state.status),"%s",notice); SudekiMpPartyMenuStateSet(&state);
 }
 void SudekiMpLanStoryMenuToggle(void) {
     if(!thread_exact()) return;
     /* Escape closes the F8 overlay before it can open a second menu. */
     if(SudekiMpLanPartyToolsCaptureInput()) SudekiMpLanPartyToolsClose();
-    else SudekiMpPartyMenuToggle();
+    else if(!native_tools_only) SudekiMpPartyMenuToggle();
 }
 BOOL SudekiMpLanStoryMenuRender(void *device) {
     if(!thread_exact() || !SudekiMpLanPartyToolsRestoreRenderState()) return FALSE;
@@ -356,12 +371,12 @@ BOOL SudekiMpLanStoryMenuRender(void *device) {
      * console stays available on the existing render callback; no host
      * mutation is admitted here because no dispatch context is supplied. */
     if(local_player) SudekiMpLanStoryMenuServiceTools(NULL,NULL,NULL,FALSE);
-    BOOL ok=SudekiMpPartyMenuRender(device);
+    BOOL ok=native_tools_only || SudekiMpPartyMenuRender(device);
     if(tools_installed) SudekiMpCleanroomMenuRender();
     return ok && SudekiMpLanPartyToolsRenderDrained();
 }
 BOOL SudekiMpLanStoryMenuCapturesInput(void) {
-    return thread_exact() && (leave_requested || SudekiMpPartyMenuCapturesInput() ||
+    return thread_exact() && (leave_requested || (!native_tools_only && SudekiMpPartyMenuCapturesInput()) ||
         (tools_installed && SudekiMpLanPartyToolsCaptureInput()));
 }
 BOOL SudekiMpLanStoryMenuLeaveRequested(void) {
@@ -374,7 +389,8 @@ BOOL SudekiMpLanStoryMenuReset(void) {
     if(tools_installed) {
         SudekiMpUninstallCleanroomMenu(); tools_installed=FALSE;
     }
-    SudekiMpPartyMenuReset(); memset(&state,0,sizeof(state));
+    if(!native_tools_only) SudekiMpPartyMenuReset();
+    memset(&state,0,sizeof(state)); native_tools_only=FALSE;
     initialized=menu_open=leave_requested=FALSE; native_thread=0; local_player=0;
     return TRUE;
 }

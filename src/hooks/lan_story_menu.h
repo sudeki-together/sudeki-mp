@@ -7,6 +7,9 @@
  * fence and positive session drain. This adapter owns UI and scoped host
  * resource preferences. Every call stays on the initializing native thread. */
 BOOL SudekiMpLanStoryMenuInitialize(HMODULE image,unsigned local_player);
+/* Exclusive native research profile: F8 tools only, no party/session UI or
+ * host-control lease. Commands still require an exact native roster witness. */
+BOOL SudekiMpLanStoryMenuInitializeNativeTools(HMODULE image);
 /* Borrowed only during this exact native dispatch. No queued native work. */
 void SudekiMpLanStoryMenuServiceTools(void *controller,
     const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryScene *,

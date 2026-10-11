@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <stdint.h>
+#include "hooks/control_separation.h"
 
 /* Host-authoritative native area residency (#42). The host publishes which
  * world zone descriptors it has resident (state 1..4), which one is current
@@ -13,6 +14,7 @@
  * next current one; the native world update performs the swap).
  * Zones are identified by their authored descriptor names (desc+0x24). */
 #include "network/lan_story_area_state.h"
+#include "network/lan_story_effect_state.h"
 
 BOOL SudekiMpLanStoryAreaFollowInitialize(HMODULE image);
 /* Native game thread. Reads the current native residency; FALSE when the
@@ -20,7 +22,8 @@ BOOL SudekiMpLanStoryAreaFollowInitialize(HMODULE image);
 BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out);
 /* Client, native game thread, once per dispatch with the newest host state.
  * Issues at most one native zone call per call, rate limited. */
-void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now);
+void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now,
+    const SudekiMpControlUpdateDispatchWitness *witness);
 /* TRUE while a follow call is inside a native zone export (the observer lets
  * these through when client zone decisions are held). */
 BOOL SudekiMpLanStoryAreaFollowCalling(void);
@@ -32,4 +35,9 @@ int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now);
 /* Native descriptor state of `zone` (3 when current), -1 when unknown. */
 int SudekiMpLanStoryAreaZoneState(const char *zone);
 
+BOOL SudekiMpLanStoryEffectsCapture(SudekiMpStoryEffectState *out);
+/* Presentation never drives zone residency; only applies in its current zone. */
+BOOL SudekiMpLanStoryEffectsInCurrentArea(const SudekiMpStoryEffectState *host);
+void SudekiMpLanStoryEffectsFollowGroups(const SudekiMpStoryEffectState *host,
+    const SudekiMpControlUpdateDispatchWitness *witness);
 #endif

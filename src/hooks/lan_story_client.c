@@ -96,11 +96,13 @@ static struct {
 } trigger_owner;
 static volatile LONG trigger_held;
 
-/* Region answers are reused only inside one exact presentation bracket
+/* Region answers are reused inside one exact presentation bracket
  * (SudekiMpLanStoryClientPresent) on the native thread: the native setters
  * admitted there are closed memory operations that never release or reprotect
  * these regions. Every range is still checked against a committed, accessible
- * region; the cache only removes repeated VirtualQuery calls into one region. */
+ * region; the cache only removes repeated VirtualQuery calls into one region.
+ * Registry observations additionally use their own fresh read-only scope,
+ * ending before control returns to a caller that may invoke native code. */
 enum { REGION_CACHE=32 };
 typedef struct Region { uintptr_t lower,upper; } Region;
 static Region regions[REGION_CACHE]; static unsigned region_count,region_next;
@@ -127,6 +129,17 @@ static BOOL readable(const void *p,size_t n) {
 }
 static BOOL native_thread_exact(void) {
     return installed && native_thread && native_thread==GetCurrentThreadId();
+}
+typedef struct RegistryReadScope { BOOL owned,previous; } RegistryReadScope;
+static RegistryReadScope registry_read_begin(void) {
+    RegistryReadScope scope={native_thread_exact(),region_cache_active};
+    if(scope.owned) { region_count=region_next=0; region_cache_active=TRUE; }
+    return scope;
+}
+static void registry_read_end(RegistryReadScope *scope) {
+    if(!scope->owned) return;
+    /* An enclosing presentation may continue, but must query pages afresh. */
+    region_count=region_next=0; region_cache_active=scope->previous;
 }
 static BOOL presentation_pause_exact(BOOL *paused) {
     if(retire_witness)
@@ -420,6 +433,9 @@ static BOOL entity_pause_exact(const EntityPauseObservation *e,unsigned extra) {
         (e->entity[0x144u]&4u)==e->scheduled && e->entity[0x2bu]==expected;
 }
 static BOOL registry_exact(unsigned extra) {
+    /* No callbacks/native execution in this walk: refresh all field proofs
+     * while querying each page range only once. Every exit clears the scope. */
+    RegistryReadScope read_scope __attribute__((cleanup(registry_read_end)))=registry_read_begin();
     WorldPauseObservation *p=&world_pause;
     if(extra>1u || !world_identity() ||
         *(uint16_t *)(p->speed+0x2a)!=(unsigned)p->speed_references+extra ||
@@ -1207,12 +1223,19 @@ BOOL SudekiMpLanStoryClientRosterExact(const SudekiMpLanStoryNativeRoster *roste
     if(!same_roster(roster,&retained_roster)) return FALSE;
     if(!presentation_active) return SudekiMpLanStoryClientService(NULL);
     BOOL paused=FALSE;
-    if(!native_thread_exact() || phase!=SUDEKIMP_STORY_CLIENT_PAUSED || !attempted ||
-        InterlockedCompareExchange(&busy,0,0) ||
-        !presentation_pause_exact(&paused) || !paused ||
-        !SudekiMpLanPartyMenuNativeOwnsPause() || !pause_counts_exact() ||
-        !roster_exact() || !input_closed(retained_roster.controller) ||
-        !scheduler_exact() || !same_load()) return unknown("presentation_owner_changed");
+    /* Name the failing proof (#54: a replayed monster hit tripped this). */
+    const char *why=!native_thread_exact()?"presentation_owner_changed_thread":
+        phase!=SUDEKIMP_STORY_CLIENT_PAUSED?"presentation_owner_changed_phase":
+        !attempted?"presentation_owner_changed_attempt":
+        InterlockedCompareExchange(&busy,0,0)?"presentation_owner_changed_busy":
+        (!presentation_pause_exact(&paused) || !paused)?"presentation_owner_changed_pause":
+        !SudekiMpLanPartyMenuNativeOwnsPause()?"presentation_owner_changed_menu":
+        !pause_counts_exact()?"presentation_owner_changed_counts":
+        !roster_exact()?"presentation_owner_changed_roster":
+        !input_closed(retained_roster.controller)?"presentation_owner_changed_input":
+        !scheduler_exact()?"presentation_owner_changed_scheduler":
+        !same_load()?"presentation_owner_changed_load":NULL;
+    if(why) return unknown(why);
     return TRUE;
 }
 BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,void *context) {
@@ -1233,6 +1256,18 @@ BOOL SudekiMpLanStoryClientUiPresent(SudekiMpLanStoryClientPresentation callback
     /* Reuse the existing exact native-callback bracket; never waive registry,
      * scheduler, roster, input or full-pause checks for UI. */
     return SudekiMpLanStoryClientEffectsPresent(callback,context,witness,witness_context);
+}
+BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanStoryClientPresentation callback,void *context) {
+    if(!w || !callback || residency_witness || residency_call.active || residency_call.failed ||
+        effects_witness || recruit_commit_witness || presentation_active || recruiting ||
+        exit_prepared || exit_released || InterlockedCompareExchange(&busy,0,0) ||
+        !native_thread_exact() || !w->service_post_original_exact ||
+        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
+    residency_witness=w;
+    BOOL result=SudekiMpLanStoryClientPresent(callback,context);
+    residency_witness=NULL;
+    return result;
 }
 BOOL SudekiMpLanStoryClientEffectsPresent(SudekiMpLanStoryClientPresentation callback,
     void *context,SudekiMpLanStoryClientEffectsWitness witness,void *witness_context) {

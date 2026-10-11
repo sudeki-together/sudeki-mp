@@ -120,6 +120,7 @@ static int failures;
 static void *native_stub_tal;
 
 void SudekiMpLogFormat(const char *format, ...) { (void)format; }
+BOOL SudekiMpLogResearchEnabled(void) { return FALSE; }
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -979,6 +980,8 @@ static void test_exact_supported_image(const char *path) {
         *(void **)(image + 0x2df8ecu + 0xf8u) = image + 0x21bb10u;
         *(void **)(image + 0x2df8ecu + 0x10cu) = image + 0x223180u;
         *(void **)(image + 0x2df8ecu + 0x110u) = image + 0x223220u;
+        *(void **)(image + 0x2df8ecu + 0x114u) = image + 0x223240u;
+        *(void **)(image + 0x221d70u + 0xc1u) = image + 0x2e3670u;
         for (listener_offset = 4u; listener_offset < 0x3cu; listener_offset += 4u) {
             uint32_t target = *(uint32_t *)(image + 0x2cd0f4u + listener_offset);
             *(void **)(image + 0x2cd0f4u + listener_offset) =
@@ -1006,6 +1009,9 @@ typedef struct VisualTestContext {
     SudekiMpLanArenaSpiritVfxVisualState *state;
     const SudekiMpLanArenaSpiritVfxVisualApi *api;
     const SudekiMpLanArenaSnapshot *snapshot;
+    uint32_t born_instance[64];
+    float synchronized_x[64];
+    float born_position[64][3];
 } VisualTestContext;
 
 static BOOL test_visual_spawn(void *context, void *manager,
@@ -1015,6 +1021,10 @@ static BOOL test_visual_spawn(void *context, void *manager,
     CHECK(manager == test->cache.manager);
     CHECK(SudekiMpLanArenaSpiritVfxReplayActiveCalls() == 1);
     if (!test->spawn_allowed) return FALSE;
+    if(test->spawn_calls<64u) {
+        test->born_instance[test->spawn_calls]=visual->instance_sequence;
+        memcpy(test->born_position[test->spawn_calls],visual->position,sizeof(visual->position));
+    }
     ++test->spawn_calls;
     if (!test->spawn_null)
         observer->object = (void *)(uintptr_t)(0x400000u + visual->instance_sequence);
@@ -1035,6 +1045,7 @@ static BOOL test_visual_sync(void *context,
     SudekiMpLanArenaSpiritVfxTransientTPtr *observer) {
     VisualTestContext *test = (VisualTestContext *)context;
     CHECK(observer->object != NULL); CHECK(visual->instance_sequence != 0u);
+    if(visual->instance_sequence<=64u) test->synchronized_x[visual->instance_sequence-1u]=visual->position[0];
     ++test->sync_calls; return TRUE;
 }
 
@@ -1134,6 +1145,49 @@ static void test_concurrent_visual_owners_retire_independently(void) {
     }
 }
 
+static void test_visual_waits_for_prepared_origin(void) {
+    VisualTestContext test;SudekiMpLanArenaSpiritVfxVisualState state;
+    SudekiMpLanArenaSpiritVfxVisualApi api;SudekiMpLanArenaSnapshot snapshot;
+    setup_visual_test(&test,&state,&api,&snapshot);
+    test.cache.resource_identifier=test.cache.constructed_resource_identifier=0x44339603u;
+    snapshot.spirit_vfx[0].kind=44;snapshot.spirit_vfx[0].skill_sequence=0;
+    snapshot.spirit_vfx[0].owner_actor_type=1;snapshot.spirit_vfx[0].position[1]=2;
+    snapshot.spirit_vfx_count=2;snapshot.spirit_vfx[1]=snapshot.spirit_vfx[0];
+    snapshot.spirit_vfx[1].instance_sequence=2;snapshot.spirit_vfx[1].position[1]=1;
+    /* The first shot packet outruns its journal. An independent ready shot
+     * may appear, but must neither create the first at its raw FP origin nor
+     * prevent its later admission by advancing the monotonic watermark. */
+    CHECK(!SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,2,&api));
+    CHECK(GetLastError()==ERROR_NOT_READY && test.spawn_calls==1 && test.sync_calls==1);
+    CHECK(test.born_instance[0]==2 && test.born_position[0][1]==1);
+    CHECK(state.slots[0].occupied && !state.slots[0].spawn_entered && !state.slots[0].observer.object);
+    CHECK(state.newest_instance_sequence==2);
+    snapshot.spirit_vfx[0].position[1]=1;
+    CHECK(SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,3,&api));
+    CHECK(test.spawn_calls==2 && test.born_instance[1]==1 && test.born_position[1][1]==1);
+    CHECK(test.sync_calls==3 && test.retire_calls==0 && test.detach_calls==0);
+    snapshot.spirit_vfx[0].position[1]=snapshot.spirit_vfx[1].position[1]=2;
+    CHECK(!SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,0,&api));
+    CHECK(test.spawn_calls==2 && test.sync_calls==3 && test.retire_calls==0);
+    snapshot.spirit_vfx_observed=0;snapshot.spirit_vfx_count=0;
+    CHECK(SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,0,&api));
+    CHECK(test.retire_calls==0); /* Unknown is not native cleanup. */
+    snapshot.spirit_vfx_observed=1;
+    CHECK(SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,0,&api));
+    CHECK(test.retire_calls==2 && test.detach_calls==2);
+    /* A short-lived shot can retire before its journal arrives. No later
+     * packet may materialize it after the host's positive absence. */
+    snapshot.spirit_vfx_count=1;snapshot.spirit_vfx[0].instance_sequence=3;
+    CHECK(!SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,0,&api));
+    CHECK(test.spawn_calls==2);
+    snapshot.spirit_vfx_count=0;
+    CHECK(SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,0,&api));
+    snapshot.spirit_vfx_count=1;
+    CHECK(SudekiMpLanArenaSpiritVfxServicePreparedVisualsWithApi(&state,&snapshot,10,1,&api));
+    CHECK(test.spawn_calls==2 && test.sync_calls==3);
+    CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state,&api));
+}
+
 static void test_visual_pending_cleanup_and_invalid_roster(void) {
     VisualTestContext test; SudekiMpLanArenaSpiritVfxVisualState state, before;
     SudekiMpLanArenaSpiritVfxVisualApi api; SudekiMpLanArenaSnapshot snapshot;
@@ -1180,6 +1234,12 @@ static void set_visual_owner(SudekiMpLanArenaSpiritVfxSnapshot *visual) {
         visual->kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST) {
         visual->owner_actor_type = SUDEKIMP_LAN_ARENA_ELCO_TYPE;
         visual->skill_sequence = 1u;
+    }
+    if(visual->kind>=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST &&
+        visual->kind<=SUDEKIMP_LAN_STORY_VFX_LAST) {
+        visual->owner_actor_type=visual->kind<=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_LAST ?
+            SUDEKIMP_LAN_ARENA_AILISH_TYPE:SUDEKIMP_LAN_ARENA_ELCO_TYPE;
+        visual->skill_sequence=0;
     }
 }
 
@@ -1244,7 +1304,7 @@ static void test_visual_fixed_resource_lifecycle(
         CHECK(memcmp(&before, &state, sizeof(state)) == 0);
         set_visual_owner(&snapshot.spirit_vfx[0]);
     }
-    snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_PARTY_VFX_LAST + 1u;
+    snapshot.spirit_vfx[0].kind = SUDEKIMP_LAN_STORY_VFX_LAST + 1u;
     CHECK(!SudekiMpLanArenaSpiritVfxVisualMatrix(&snapshot.spirit_vfx[0], matrix));
     CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(memcmp(&before, &state, sizeof(state)) == 0);
@@ -1385,7 +1445,8 @@ static void test_visual_opening_phase_never_rewinds(void) {
         SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST, 125.0f, 126.0f, &apply));
     CHECK(apply);
     for (kind = 1u; kind <= SUDEKIMP_LAN_ARENA_SPIRIT_VFX_LAST; ++kind) {
-        if (kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
+        if (kind == SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_ONE ||
+            kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_APPEAR ||
             kind == SUDEKIMP_LAN_ARENA_BUKI_VFX_SHIELD_LOOP) {
             CHECK(SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(kind, 125.0f, 124.0f, &apply));
             CHECK(!apply);
@@ -1407,18 +1468,54 @@ static void test_visual_opening_phase_never_rewinds(void) {
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(12u, 1000001.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(0u, 0.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(
-        SUDEKIMP_LAN_PARTY_VFX_LAST + 1u, 0.0f, 0.0f, &apply));
+        SUDEKIMP_LAN_STORY_VFX_LAST + 1u, 0.0f, 0.0f, &apply));
     CHECK(!SudekiMpLanArenaSpiritVfxVisualPhaseCorrection(12u, 0.0f, 0.0f, NULL));
 }
 
+static void test_story_capacity_and_high_ready_bits(void) {
+    VisualTestContext test;SudekiMpLanArenaSpiritVfxVisualState state;
+    SudekiMpLanArenaSpiritVfxVisualApi api;SudekiMpLanArenaSnapshot legacy;
+    setup_visual_test(&test,&state,&api,&legacy);
+    SudekiMpStoryVfx story={.observed=1,.count=64};
+    for(unsigned i=0;i<64;++i) {story.entries[i]=legacy.spirit_vfx[0];story.entries[i].instance_sequence=i+1;}
+    CHECK(!SudekiMpLanStoryVfxServicePreparedVisualsWithApi(&state,&story,10,UINT64_MAX^(UINT64_C(1)<<40),&api));
+    CHECK(test.spawn_calls==63 && state.slots[40].occupied && !state.slots[40].spawn_entered);
+    CHECK(SudekiMpLanStoryVfxServicePreparedVisualsWithApi(&state,&story,10,UINT64_MAX,&api));
+    CHECK(test.spawn_calls==64 && state.slots[40].spawn_entered && state.slots[63].occupied);
+    for(unsigned step=1;step<=30;++step) {
+        for(unsigned i=0;i<64;++i) story.entries[i].position[0]=(float)step+i;
+        CHECK(SudekiMpLanStoryVfxServicePreparedVisualsWithApi(&state,&story,10,UINT64_MAX,&api));
+        for(unsigned i=0;i<64;++i) CHECK(test.synchronized_x[i]==(float)step+i);
+    }
+    CHECK(test.spawn_calls==64 && !test.retire_calls);
+    SudekiMpStoryVfx unknown={0};
+    CHECK(SudekiMpLanStoryVfxServicePreparedVisualsWithApi(&state,&unknown,10,0,&api) && !test.retire_calls);
+    story.count=11;memset(story.entries+11,0,sizeof(story.entries)-11*sizeof(story.entries[0]));
+    CHECK(SudekiMpLanStoryVfxServicePreparedVisualsWithApi(&state,&story,10,UINT64_MAX,&api));
+    CHECK(test.retire_calls==53 && !state.slots[63].occupied);
+    CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state,&api));CHECK(test.retire_calls==64);
+}
+
 int main(int argc, char **argv) {
+    test_story_capacity_and_high_ready_bits();
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT,
+        0x06d8e387u,"SFXHT104_MISS_BLADE2MAGIC.HOM");
     test_visual_opening_phase_never_rewinds();
     test_visual_roster_once_unknown_and_retirement();
+    test_visual_waits_for_prepared_origin();
     test_concurrent_visual_owners_retire_independently();
     test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_APPEAR,
         0x7eae7163u,"SFXT200_Shield_Appear.HOM");
     test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_PARTY_TAL_VFX_SHIELD_LOOP,
         0x8e21830fu,"SFXT201_Shield_Loop.HOM");
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_SHIN_SPLITTER,
+        0x79853f03u,"SFXTS001_Shin_Splitter.HOM");
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_AIM_ARC,
+        0x55fe7cfbu,"SFXSA002_Attack_Zone_Arc.HOM");
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST+9u,
+        0x44339603u,"SFXAP001_ROYAL_SCEPTRE.HOM");
+    test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_FIRST+7u,
+        0x1164f28fu,"SFXEP001_MK1_PISTOL.HOM");
     test_visual_pending_cleanup_and_invalid_roster();
     test_visual_matrix_and_native_null();
     test_visual_identity_preflight_precedes_any_retirement();

@@ -34,10 +34,14 @@ unsigned SudekiMpLanStoryWorldCharacter(uint32_t identifier) {
 }
 BOOL SudekiMpLanStoryWorldActorValid(const SudekiMpLanStoryWorldActor *a) {
     if(!a || (a->kind!=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND &&
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_PC_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND) ||
-        (a->visual_flags&~SUDEKIMP_LAN_STORY_WORLD_HIDDEN) ||
-        (a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND && a->visual_flags) ||
+        !bounded(a->hit_points,0,100000000.0f) ||
+        (a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && a->hit_points!=0.0f) ||
+        (a->visual_flags & ~(a->kind==SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND ?
+            SUDEKIMP_LAN_STORY_WORLD_HIDDEN : a->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND ?
+            SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE : 0u)) ||
         (a->kind==SUDEKIMP_LAN_STORY_WORLD_PC_KIND && SudekiMpLanStoryWorldCharacter(a->identifier)>=4u) ||
         !a->identifier ||
         !a->generation || !a->animation_sequence || !a->bank_fingerprint ||
@@ -134,6 +138,7 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryWorldActor *a) {
     p[126]=a->state[4]; p[127]=0;
     put_float(p+128,a->rate[4]); put_float(p+132,a->time[4]);
     put_float(p+136,a->blend[3]);
+    put_float(p+140,a->hit_points);
 }
 static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryWorldActor *a) {
     a->kind=get16(p); a->submodels=p[2]; a->visual_flags=p[3];
@@ -152,6 +157,7 @@ static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryWorldActor *a) {
     a->clip[4]=get32(p+120); a->clip_occurrence[4]=get16(p+124);
     a->state[4]=p[126]; a->rate[4]=get_float(p+128); a->time[4]=get_float(p+132);
     a->blend[3]=get_float(p+136);
+    a->hit_points=get_float(p+140);
     return SudekiMpLanStoryWorldActorValid(a);
 }
 BOOL SudekiMpLanStoryWorldChunkEncode(const SudekiMpLanStoryWorldFrame *f,
@@ -222,6 +228,25 @@ BOOL SudekiMpLanStoryWorldFrameInterpolate(const SudekiMpLanStoryWorldFrame *a,
             !memcmp(x->clip_occurrence,y->clip_occurrence,sizeof(x->clip_occurrence)) &&
             !memcmp(x->state,y->state,sizeof(x->state));
         for(unsigned k=0;k<5u;++k) if(y->time[k]<x->time[k]) same=FALSE;
+        if(!same && x->kind==SUDEKIMP_LAN_STORY_WORLD_PC_KIND) {
+            /* A recoil edge or one channel wrapping must not freeze the
+             * unrelated native locomotion/idle fade. Each channel and blend
+             * subtree has its own resource/state fence for every roster PC.
+             * Changed clips still arrive only at the discrete endpoint. */
+            BOOL stable[5];
+            for(unsigned k=0;k<5u;++k) {
+                stable[k]=x->clip[k]==y->clip[k] &&
+                    x->clip_occurrence[k]==y->clip_occurrence[k] && x->state[k]==y->state[k];
+                if(stable[k] && y->time[k]>=x->time[k]) {
+                    z->rate[k]=lerp(x->rate[k],y->rate[k],t);
+                    z->time[k]=lerp(x->time[k],y->time[k],t);
+                }
+            }
+            BOOL branches[4]={stable[0]&&stable[1],stable[2]&&stable[3],FALSE,FALSE};
+            branches[2]=branches[0]&&branches[1];branches[3]=branches[2]&&stable[4];
+            for(unsigned k=0;k<4u;++k) if(branches[k]) z->blend[k]=lerp(x->blend[k],y->blend[k],t);
+            continue;
+        }
         if(!same) continue;
         for(unsigned k=0;k<5u;++k) {
             z->rate[k]=lerp(x->rate[k],y->rate[k],t); z->time[k]=lerp(x->time[k],y->time[k],t);

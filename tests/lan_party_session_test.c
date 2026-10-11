@@ -1,4 +1,5 @@
 #include "network/lan_party_session.h"
+#include "network/lan_story_world_frame.h"
 #include "network/lan_party_replica.h"
 #include "network/lan_party_motion.h"
 #include "hooks/lan_party_presence.h"
@@ -672,6 +673,26 @@ static void raw_input(SOCKET sock, const struct sockaddr_in *to,
     raw_send(sock, to, RAW_INPUT, l->seat, l->generation, l->token, sequence,
         0, body, size-20+12, SUDEKIMP_LAN_PARTY_VERSION);
 }
+static void test_old_story_movement_profile(void) {
+    SudekiMpLanPartyConfig c=config; c.local_seat=0; c.port=0; c.story_observation=2;
+    SudekiMpLanPartySession *host=SudekiMpLanPartyCreate(&c); CHECK(host!=NULL);
+    struct sockaddr_in address,to,source; uint8_t bytes[1468],hello[47]={0};
+    SOCKET sock=raw_socket(&address);
+    memset(&to,0,sizeof(to)); to.sin_family=AF_INET; to.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    to.sin_port=htons((u_short)SudekiMpLanPartyPort(host));
+    put64(hello,123457); put32(hello+8,SUDEKIMP_LAN_PARTY_BUILD_ID);
+    memcpy(hello+12,c.game_hash,32); hello[45]=SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION;
+    hello[44]=19; /* Old unit-magnitude saved-story profile. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=20;
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount()); (void)raw_read(sock,bytes,&source);
+    CHECK(bytes[6]==RAW_ACK);
+    closesocket(sock); SudekiMpLanPartyDestroy(host,FALSE);
+}
 static void test_raw_authority_and_retry(void) {
     SudekiMpLanPartyConfig c = config; c.local_seat = 0; c.port = 0;
     SudekiMpLanPartySession *host = SudekiMpLanPartyCreate(&c); CHECK(host != NULL);
@@ -683,10 +704,13 @@ static void test_raw_authority_and_retry(void) {
     uint8_t hello[47]; memset(hello, 0, sizeof(hello)); put64(hello, 123456);
     put32(hello + 8, SUDEKIMP_LAN_PARTY_BUILD_ID); memcpy(hello + 12, c.game_hash, 32);
     hello[44] = SUDEKIMP_LAN_ARENA_MAP_CLEANROOM; hello[45] = SUDEKIMP_LAN_ARENA_PROTOCOL_VERSION;
-    raw_send(sock, &host_address, RAW_HELLO, 2, 0, 0, 0, 0, hello, sizeof(hello), 99);
-    now = GetTickCount(); SudekiMpLanPartyPoll(host, now);
-    CHECK(raw_read(sock, bytes, &source) == RAW_HEADER + 9);
-    CHECK(bytes[6] == RAW_REJECT && bytes[RAW_HEADER + 8] == SUDEKIMP_LAN_ARENA_REJECT_VERSION);
+    const unsigned incompatible_versions[]={17u,99u};
+    for(unsigned v=0;v<2u;++v) {
+        raw_send(sock, &host_address, RAW_HELLO, 2, 0, 0, 0, 0, hello, sizeof(hello), incompatible_versions[v]);
+        now = GetTickCount(); SudekiMpLanPartyPoll(host, now);
+        CHECK(raw_read(sock, bytes, &source) == RAW_HEADER + 9);
+        CHECK(bytes[6] == RAW_REJECT && bytes[RAW_HEADER + 8] == SUDEKIMP_LAN_ARENA_REJECT_VERSION);
+    }
     raw_send(sock, &host_address, RAW_HELLO, 2, 0, 0, 0, 0, hello, sizeof(hello), SUDEKIMP_LAN_PARTY_VERSION);
     SudekiMpLanPartyPoll(host, now); (void)raw_read(sock, bytes, &source);
     CHECK(bytes[6] == RAW_ACK);
@@ -1473,7 +1497,34 @@ static void test_loading_assignment_gate(void) {
     SudekiMpLanPartyDestroy(client,FALSE); SudekiMpLanPartyDestroy(host,FALSE);
 }
 
+static void test_monster_display_wire(void) {
+    SudekiMpLanStoryWorldFrame frame={.epoch=1,.revision=1,.sequence=1,.count=1};
+    SudekiMpLanStoryWorldActor *a=&frame.actors[0];
+    *a=(SudekiMpLanStoryWorldActor){.kind=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND,
+        .submodels=1,.visual_flags=SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE,
+        .identifier=1,.generation=1,.animation_sequence=1,.bank_fingerprint=1,
+        .forward={0,0,1},.hit_points=100};
+    uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE]; size_t size=0;
+    SudekiMpLanStoryWorldChunk out;
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    CHECK(size==172u && bytes[3]==8u);
+    CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    CHECK(out.actors[0].visual_flags==SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE);
+    CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size-1u,&out));
+    bytes[3]=7u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=8u;
+    bytes[31]=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
+    CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND; a->hit_points=0;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND; a->clip[0]=1;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+}
+
 int main(void) {
+    test_monster_display_wire();
     SudekiMpLanStoryView missing_host_view={0};
     CHECK(!SudekiMpLanStoryViewUsable(&missing_host_view,FALSE));
     CHECK(SudekiMpLanStoryViewUsable(&missing_host_view,TRUE));
@@ -1486,6 +1537,7 @@ int main(void) {
     test_replica_fourth_actor_action_clock(); setup();
     if (!nodes[0] || !nodes[1] || !nodes[2] || !nodes[3]) return 1;
     test_three_clients(); test_transport_replica_consumption(); test_combat_mode_publication(); test_independent_disconnect_rejoin();
+    test_old_story_movement_profile();
     test_raw_authority_and_retry(); test_raw_combat_mode(); test_fragment_admission(); test_presence_frame_floor(); test_busy_hash_and_timeouts();
     for (unsigned i = 0; i < 4; ++i) SudekiMpLanPartyDestroy(nodes[i], FALSE);
     test_dynamic_presence(); test_runtime_admission(); test_local_command_builder(); test_presence_coordinator();

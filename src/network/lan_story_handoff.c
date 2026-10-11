@@ -14,7 +14,7 @@ static float getfloat(const uint8_t *p) { uint32_t n=get32(p); float f; memcpy(&
 static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned character) {
     return (kind==SUDEKIMP_STORY_ACTION_SKILL && slot<6u) ||
         (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1u && slot<=2u) ||
-        (kind==SUDEKIMP_STORY_ACTION_MELEE && character==2u && slot>=1u && slot<=3u);
+        (kind==SUDEKIMP_STORY_ACTION_MELEE && (character==0u || character==2u) && slot>=1u && slot<=3u);
 }
 BOOL SudekiMpLanStoryActionRequestValid(const SudekiMpLanStoryActionRequest *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&
@@ -32,7 +32,7 @@ BOOL SudekiMpLanStoryActionResultValid(const SudekiMpLanStoryActionResult *r) {
         r->outcome<=SUDEKIMP_STORY_ACTION_NO_SP &&
         (r->outcome!=SUDEKIMP_STORY_ACTION_SUBMITTED || r->kind==SUDEKIMP_STORY_ACTION_MELEE) &&
         (r->outcome!=SUDEKIMP_STORY_ACTION_STARTED || r->kind!=SUDEKIMP_STORY_ACTION_MELEE) &&
-        (r->outcome!=SUDEKIMP_STORY_ACTION_NO_SP || r->kind==SUDEKIMP_STORY_ACTION_SKILL);
+        (r->outcome!=SUDEKIMP_STORY_ACTION_NO_SP || r->kind!=SUDEKIMP_STORY_ACTION_MELEE);
 }
 BOOL SudekiMpLanStoryActionResultMatches(const SudekiMpLanStoryActionResult *r,
     const SudekiMpLanStoryActionRequest *q) {
@@ -122,11 +122,14 @@ BOOL SudekiMpLanStoryControlStateValid(const SudekiMpLanStoryControlState *s) {
     return s && SudekiMpLanStoryControlFenceValid(&s->fence) &&
         s->phase>=SUDEKIMP_STORY_CONTROL_PREPARE && s->phase<=SUDEKIMP_STORY_CONTROL_REVOKED;
 }
+BOOL SudekiMpLanStoryMovementVectorValid(float x,float z) {
+    return isfinite(x) && isfinite(z) &&
+        fabsf(x)<=SUDEKIMP_STORY_MOVEMENT_MAX && fabsf(z)<=SUDEKIMP_STORY_MOVEMENT_MAX &&
+        x*x+z*z<=SUDEKIMP_STORY_MOVEMENT_MAX*SUDEKIMP_STORY_MOVEMENT_MAX;
+}
 BOOL SudekiMpLanStoryMovementValid(const SudekiMpLanStoryMovement *i) {
     return i && SudekiMpLanStoryControlFenceValid(&i->fence) && i->sequence &&
-        i->acknowledged_frame && isfinite(i->world_x) && isfinite(i->world_z) &&
-        fabsf(i->world_x)<=1.0f && fabsf(i->world_z)<=1.0f &&
-        i->world_x*i->world_x+i->world_z*i->world_z<=1.001f;
+        i->acknowledged_frame && SudekiMpLanStoryMovementVectorValid(i->world_x,i->world_z);
 }
 BOOL SudekiMpLanStoryControlFenceEncode(const SudekiMpLanStoryControlFence *f,uint8_t *p,size_t n) {
     if(!p || n!=SUDEKIMP_STORY_CONTROL_FENCE_SIZE || !SudekiMpLanStoryControlFenceValid(f)) return FALSE;
@@ -168,4 +171,54 @@ BOOL SudekiMpLanStoryMovementDecode(const uint8_t *p,size_t n,SudekiMpLanStoryMo
     v.world_x=getfloat(p+28); v.world_z=getfloat(p+32);
     if(!SudekiMpLanStoryMovementValid(&v)) return FALSE;
     *i=v; return TRUE;
+}
+
+BOOL SudekiMpLanStoryRangedValid(const SudekiMpLanStoryRanged *v) {
+    if(!v || !SudekiMpLanStoryControlFenceValid(&v->fence) ||
+        (v->fence.character!=1u && v->fence.character!=3u) || !v->sequence ||
+        !v->acknowledged_frame || v->held>1u || (v->held && !v->press)) return FALSE;
+    float norm=0;
+    for(unsigned i=0;i<3;++i) {
+        if(!isfinite(v->direction[i]) || !isfinite(v->target[i]) || fabsf(v->target[i])>100000.0f)
+            return FALSE;
+        norm+=v->direction[i]*v->direction[i];
+    }
+    return norm>=0.98f && norm<=1.02f;
+}
+BOOL SudekiMpLanStoryRangedEncode(const SudekiMpLanStoryRanged *v,uint8_t *p,size_t n) {
+    if(!p || n!=SUDEKIMP_STORY_RANGED_WIRE_SIZE || !SudekiMpLanStoryRangedValid(v) ||
+        !SudekiMpLanStoryControlFenceEncode(&v->fence,p,20)) return FALSE;
+    put32(p+20,v->sequence); put32(p+24,v->acknowledged_frame); put32(p+28,v->press);
+    p[32]=v->held; p[33]=p[34]=p[35]=0;
+    for(unsigned i=0;i<3;++i) {putfloat(p+36+4*i,v->direction[i]);putfloat(p+48+4*i,v->target[i]);}
+    return TRUE;
+}
+BOOL SudekiMpLanStoryRangedDecode(const uint8_t *p,size_t n,SudekiMpLanStoryRanged *out) {
+    SudekiMpLanStoryRanged v={0};
+    if(!p || !out || n!=SUDEKIMP_STORY_RANGED_WIRE_SIZE || p[33] || p[34] || p[35] ||
+        !SudekiMpLanStoryControlFenceDecode(p,20,&v.fence)) return FALSE;
+    v.sequence=get32(p+20);v.acknowledged_frame=get32(p+24);v.press=get32(p+28);v.held=p[32];
+    for(unsigned i=0;i<3;++i) {v.direction[i]=getfloat(p+36+4*i);v.target[i]=getfloat(p+48+4*i);}
+    if(!SudekiMpLanStoryRangedValid(&v)) return FALSE;
+    *out=v;return TRUE;
+}
+
+BOOL SudekiMpLanStoryBlockValid(const SudekiMpLanStoryBlock *v) {
+    return v && SudekiMpLanStoryControlFenceValid(&v->fence) &&
+        (v->fence.character==0u || v->fence.character==2u) && v->sequence &&
+        v->acknowledged_frame && v->held<=1u;
+}
+BOOL SudekiMpLanStoryBlockEncode(const SudekiMpLanStoryBlock *v,uint8_t *p,size_t n) {
+    if(!p || n!=SUDEKIMP_STORY_BLOCK_WIRE_SIZE || !SudekiMpLanStoryBlockValid(v) ||
+        !SudekiMpLanStoryControlFenceEncode(&v->fence,p,20)) return FALSE;
+    put32(p+20,v->sequence);put32(p+24,v->acknowledged_frame);
+    p[28]=v->held;p[29]=p[30]=p[31]=0;return TRUE;
+}
+BOOL SudekiMpLanStoryBlockDecode(const uint8_t *p,size_t n,SudekiMpLanStoryBlock *out) {
+    SudekiMpLanStoryBlock v={0};
+    if(!p || !out || n!=SUDEKIMP_STORY_BLOCK_WIRE_SIZE || p[29] || p[30] || p[31] ||
+        !SudekiMpLanStoryControlFenceDecode(p,20,&v.fence)) return FALSE;
+    v.sequence=get32(p+20);v.acknowledged_frame=get32(p+24);v.held=p[28];
+    if(!SudekiMpLanStoryBlockValid(&v)) return FALSE;
+    *out=v;return TRUE;
 }

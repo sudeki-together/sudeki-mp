@@ -1,5 +1,6 @@
 #include "engine/skill_activation_abi.h"
 #include "engine/arbiter_combat_input.h"
+#include "engine/ranged_world_pose.h"
 #include "engine/spirit_activation_abi.h"
 #include "engine/item_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
@@ -971,6 +972,15 @@ static uint8_t *map_pe_image(const uint8_t *file, DWORD file_size) {
         if (size != 0) {
             memcpy(image + destination, file + source, size);
         }
+    }
+    /* Raw-section fixture: enroll the original ChannelAdvance end-epsilon
+     * operand now checked by the Spirit timing gate. Relocate the retail
+     * value rather than substituting the target expected by production. */
+    if (nt->OptionalHeader.SizeOfImage >= 0x221e35u) {
+        uint32_t target;
+        memcpy(&target,image+0x221e31u,4u);
+        target += (uint32_t)(uintptr_t)image - nt->OptionalHeader.ImageBase;
+        memcpy(image+0x221e31u,&target,4u);
     }
     return image;
 }
@@ -4410,6 +4420,24 @@ static void exercise_cast_motion_blur(uint8_t *image,int *failures) {
 #undef BLUR_CHECK
 }
 
+static BOOL spirit_view_named_image_checks(uint8_t *image) {
+    const struct {const char *name;unsigned rva,size;} checks[]={
+        {"CCameraCtor.RenderStateSize",0xe72bf,5}, {"CCameraCtor.RenderStateAllocate",0xe72d1,5},
+        {"CCameraCtor.RenderStateConstruct",0xe72dd,5}, {"CCameraCtor.RenderStateResult",0xe72e2,2},
+        {"CCameraCtor.RenderStateStore",0xe72fd,3}};
+    if(!SudekiMpSpiritInstanceViewAbiReady()) return FALSE;
+    for(unsigned i=0;i<sizeof(checks)/sizeof(*checks);++i) {
+        for(unsigned j=0;j<checks[i].size;++j) {
+            image[checks[i].rva+j]^=1;
+            BOOL refused=!SudekiMpSpiritInstanceViewAbiReady();
+            image[checks[i].rva+j]^=1;
+            if(!refused || !SudekiMpSpiritInstanceViewAbiReady()) return FALSE;
+        }
+        printf("PASS %s RVA %08x exact-image mutation refusal\n",checks[i].name,checks[i].rva);
+    }
+    return TRUE;
+}
+
 int wmain(int argc, wchar_t **argv) {
     uint8_t *file;
     uint8_t *image;
@@ -5530,6 +5558,27 @@ int wmain(int argc, wchar_t **argv) {
                     mode != i || fabsf(x) > 0.0001f || fabsf(z-1) > 0.0001f) {
                     fputs("FAIL: LAN directional native gait selection\n", stderr);
                     ++failures;
+                }
+            }
+            /* Cross-check the saved-story presentation against the Test
+             * Room gait introduced in bc56ed8. Native C3B70 maps mode0..3
+             * to movement state1..4; E3D10 selects semantic6+2*mode. A
+             * mirrored world-right convention passed isolated story tests
+             * while choosing the opposite lateral animation on both heroes. */
+            for (unsigned heading=0;heading<8;++heading) {
+                float angle=(float)heading*.78539816339f;
+                float ax=sinf(angle),az=cosf(angle);
+                for (unsigned travel=0;travel<8;++travel) {
+                    float direction=angle+(float)travel*.78539816339f+.03f;
+                    float dx=sinf(direction),dz=cosf(direction);
+                    unsigned mode,semantic=0;float bx,bz;
+                    float aim[3]={ax,0,az};
+                    if (!SudekiMpControlSeparationDirectionalGait(dx,dz,ax,az,&mode,&bx,&bz) ||
+                        !SudekiMpRangedWorldMoveSemantic(aim,dx,dz,&semantic) ||
+                        semantic!=6u+2u*mode) {
+                        fputs("FAIL: story directional gait disagrees with Test Room/native mapping\n",stderr);
+                        ++failures;
+                    }
                 }
             }
             {
@@ -8750,6 +8799,7 @@ int wmain(int argc, wchar_t **argv) {
         if(!SudekiMpInitializeSpiritInstanceAbi((HMODULE)image,inert_spirit_hook_boundary) ||
             !SudekiMpSpiritInstanceNamedCameraAbiReady() ||
             !SudekiMpSpiritInstanceCameraSelectionAbiReady() ||
+            !spirit_view_named_image_checks(image) ||
             !SudekiMpSpiritInstanceSharedSspAbiReady() ||
             !SudekiMpInstallSpiritInstanceUpdates() ||
             !SudekiMpEnableSpiritInstanceSkillTargeting() ||
@@ -11207,3 +11257,7 @@ int wmain(int argc, wchar_t **argv) {
 BOOL SudekiMpLanStoryCastLocalNoncaster(void *actor) { (void)actor; return FALSE; }
 BOOL SudekiMpLanStoryObserverRosterStillExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r) { (void)w; (void)r; return FALSE; }
+
+BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
+    (void)r; return FALSE;
+}

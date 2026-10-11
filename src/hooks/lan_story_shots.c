@@ -3,6 +3,8 @@
 #include "engine/weapon_activation_abi.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/log.h"
+#include "hooks/lan_story_cast.h"
+#include "hooks/lan_party_projectile_lifetime.h"
 #include <math.h>
 #include <string.h>
 
@@ -10,6 +12,8 @@ static uint8_t *base;
 static DWORD thread;
 static volatile LONG admission;
 static BOOL installed;
+static struct { void *actor;uint32_t epoch,generation,receipt;float target[3]; } remote_aim[4];
+static float actor_position[4][3];
 static SudekiMpLanStoryNativeRoster owner;
 static uint32_t generations[4];
 static SudekiMpLanStoryShots journal[4];
@@ -46,6 +50,37 @@ static BOOL emission_owner_exact(void *actor,void *manager,unsigned c) {
     }
     return mask==owner.available_mask;
 }
+static BOOL directed(void *actor,float target[3]) {
+    unsigned c=actor==owner.actors[1]?1u:actor==owner.actors[3]?3u:4u;
+    if(c>=4u || !target || !remote_aim[c].receipt || remote_aim[c].actor!=actor ||
+        remote_aim[c].epoch!=owner.epoch || remote_aim[c].generation!=generations[c] ||
+        (int32_t)(GetTickCount()-remote_aim[c].receipt)>100 || c==owner.leader_character ||
+        !readable(actor,0xc0u) ||
+        !emission_owner_exact(actor,*(void **)((uint8_t *)actor+0xbcu),c)) return FALSE;
+    memcpy(target,remote_aim[c].target,12);return TRUE;
+}
+BOOL SudekiMpLanStoryShotsAim(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,unsigned c,const SudekiMpLanStoryRanged *input,uint32_t receipt) {
+    if(!installed || thread!=GetCurrentThreadId() || c>=4u) return FALSE;
+    memset(&remote_aim[c],0,sizeof(remote_aim[c]));
+    if(!input) return TRUE;
+    if(!r || (c!=1u && c!=3u) || c==r->leader_character || !receipt ||
+        (int32_t)(GetTickCount()-receipt)>100 || !SudekiMpLanStoryRangedValid(input) ||
+        input->fence.character!=c || input->fence.epoch!=r->epoch ||
+        input->fence.actor_generation!=generations[c] || owner.epoch!=r->epoch ||
+        owner.actors[c]!=r->actors[c] || !SudekiMpLanStoryObserverRosterStillExact(w,r)) return FALSE;
+    float distance=0;
+    for(unsigned i=0;i<3;++i) {
+        float offset=input->target[i]-100.0f*input->direction[i]-actor_position[c][i];
+        distance+=offset*offset;
+    }
+    /* Story orbit uses the native exploration distance, up to 30 units.
+     * Bound the supplied camera origin to that actor; no remote positions. */
+    if(!isfinite(distance) || distance>32.0f*32.0f) return FALSE;
+    remote_aim[c].actor=r->actors[c];remote_aim[c].epoch=r->epoch;
+    remote_aim[c].generation=generations[c];remote_aim[c].receipt=receipt;
+    memcpy(remote_aim[c].target,input->target,12);return TRUE;
+}
 static void emitted(void *actor,void *manager,const float origin[3],const float direction[3]) {
     unsigned c=actor==owner.actors[1]?1u:actor==owner.actors[3]?3u:4u;
     SudekiMpElcoWeaponObservation weapon; SudekiMpCharacterSkillState skill;
@@ -59,17 +94,24 @@ static void emitted(void *actor,void *manager,const float origin[3],const float 
     memcpy(event.origin,origin,sizeof(event.origin));
     if(!SudekiMpLanAimNormalize(direction,event.direction) ||
         !emission_owner_exact(actor,manager,c) || !SudekiMpLanStoryShotsAppend(&journal[c],c,&event)) return;
+    SudekiMpLanPartyEffectOwner namespace;
+    if(SudekiMpLanStoryCastShotOwner(actor,&namespace)) {
+        SudekiMpLanPartyProjectileTag tag={namespace.session,event.sequence,1u,(uint8_t)c,event.item,actor};
+        if(!SudekiMpLanPartyProjectileLifetimeCaptureOwned(&tag,&namespace,manager))
+            SudekiMpLogWrite("story_shots event=projectile_capture_failed\r\n");
+    }
     SudekiMpLogFormat("story_shots event=host_emission character=%u generation=%lu sequence=%lu item=%u tick=%lu\r\n",
         c,(unsigned long)generations[c],(unsigned long)event.sequence,event.item,(unsigned long)event.host_tick);
 }
 BOOL SudekiMpLanStoryShotsInstall(HMODULE image) {
     if(base || installed || !image) return FALSE;
     base=(uint8_t *)image;
-    if(!SudekiMpLanAimObserveEmissionsInstall(image,emitted)) { base=NULL; return FALSE; }
+    if(!SudekiMpLanAimObserveDirectedEmissionsInstall(image,emitted,directed)) { base=NULL; return FALSE; }
     installed=TRUE; return TRUE;
 }
 void SudekiMpLanStoryShotsCloseAdmission(void) {
     InterlockedExchange(&admission,0); /* retained hook becomes a no-op */
+    memset(remote_aim,0,sizeof(remote_aim));
 }
 BOOL SudekiMpLanStoryShotsCapture(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,
@@ -86,6 +128,7 @@ BOOL SudekiMpLanStoryShotsCapture(void *controller,
     for(unsigned c=0;c<4;++c) {
         if(!same_world || owner.actors[c]!=fresh.actors[c] ||
             generations[c]!=frame->actors[c].generation) memset(&journal[c],0,sizeof(journal[c]));
+        actor_position[c][0]=frame->actors[c].x;actor_position[c][1]=frame->actors[c].y;actor_position[c][2]=frame->actors[c].z;
         generations[c]=frame->actors[c].generation;
         frame->actors[c].shots=journal[c];
     }
@@ -104,4 +147,10 @@ BOOL SudekiMpLanStoryShotsUninstall(void) {
     installed=FALSE; base=NULL; thread=0;
     memset(&owner,0,sizeof(owner)); memset(journal,0,sizeof(journal)); memset(generations,0,sizeof(generations));
     return TRUE;
+}
+
+BOOL SudekiMpLanStoryShotsAppendVisuals(const SudekiMpLanStoryNativeRoster *r,SudekiMpStoryVfx *state) {
+    if(!r || !state || !installed || thread!=GetCurrentThreadId()) return FALSE;
+    if(!state->observed) return TRUE;
+    return SudekiMpLanStoryProjectileVisuals(state->stream,r->actors[1],r->actors[3],state);
 }

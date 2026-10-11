@@ -6,7 +6,7 @@
 
 static SudekiMpStoryAreaState sample(void) {
     SudekiMpStoryAreaState s; memset(&s,0,sizeof(s));
-    s.observed_tick=0x12345678u;
+    s.sequence=1u; s.observed_tick=0x12345678u;
     strcpy(s.current,"WS_Country_SE_to_Bright_NE");
     strcpy(s.target,"Illumina_Countryside_SE");
     s.count=3;
@@ -18,7 +18,7 @@ static SudekiMpStoryAreaState sample(void) {
 int main(void) {
     uint8_t wire[SUDEKIMP_STORY_AREA_WIRE_SIZE];
     SudekiMpStoryAreaState s=sample(),d;
-    assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==413u && SUDEKIMP_STORY_AREA_WIRE_SIZE<1440u);
+    assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==421u && SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u);
     assert(SudekiMpStoryAreaStateValid(&s));
     assert(SudekiMpStoryAreaStateEncode(&s,wire,sizeof(wire)));
     assert(SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d) && !memcmp(&s,&d,sizeof(s)));
@@ -37,7 +37,8 @@ int main(void) {
     memset(d.target,'a',sizeof(d.target)); d=s; memset(d.target,'a',sizeof(d.target)); assert(!SudekiMpStoryAreaStateValid(&d));
     /* Empty target is allowed (no background load pending). */
     d=s; memset(d.target,0,sizeof(d.target)); assert(SudekiMpStoryAreaStateValid(&d));
-    wire[4+2*SUDEKIMP_STORY_AREA_NAME]=9; assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d));
+    wire[12+2*SUDEKIMP_STORY_AREA_NAME]=9; assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d));
+    wire[0]=0; assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d));
     puts("story area state tests passed");
     return 0;
 }

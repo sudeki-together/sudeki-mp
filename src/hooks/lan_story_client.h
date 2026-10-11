@@ -110,6 +110,11 @@ typedef BOOL (*SudekiMpLanStoryClientPresentation)(
  * this adapter's Acquire/Observe/Service/Drain methods. */
 BOOL SudekiMpLanStoryClientPresent(SudekiMpLanStoryClientPresentation callback,
     void *context);
+/* Read-only presentation observation at the current post-controller dispatch.
+ * Same full containment proof as ClientPresent; no residency adoption, native
+ * update or retained permission. The callback may copy plain geometry only. */
+BOOL SudekiMpLanStoryClientObserveDispatch(const SudekiMpControlUpdateDispatchWitness *witness,
+    SudekiMpLanStoryClientPresentation callback,void *context);
 /* Separate cosmetic render boundary. The witness must positively identify
  * the currently active, exact native effects hook on every check. A full
  * registry/pause/input/task proof brackets the callback, without granting

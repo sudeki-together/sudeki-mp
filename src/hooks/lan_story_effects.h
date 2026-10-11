@@ -22,10 +22,14 @@ BOOL SudekiMpLanStoryEffectsWitness(void *unused);
  * the original manager once in-place with bounded local render delta; it
  * never changes engine time, runs AI/GEL or duplicates a native update.
  * A FALSE result after original entry does not authorize a second call.
- * Neither host tick nor local time is accumulated across a stale/gap/reset. */
+ * Neither host tick nor local time is accumulated across a stale/gap/reset.
+ * model_clocks is a freshly collected native-model ownership list from this
+ * same seam, consumed synchronously after manager membership validation. It
+ * excludes only the supplemental custom clock, never native particle aging. */
 BOOL SudekiMpLanStoryEffectsAdvance(const SudekiMpLanStoryNativeRoster *roster,
     uint32_t epoch,uint32_t revision,uint32_t sequence,uint32_t host_tick,
-    uint32_t receipt_tick,SudekiMpLanStoryReplicaExact exact,void *context);
+    uint32_t receipt_tick,SudekiMpLanStoryReplicaExact exact,void *context,
+    void *const *model_clocks,unsigned model_clock_count);
 /* Same native thread. Retires plain clock observations only; no native object
  * is released. Use whenever current authenticated presentation is rejected. */
 void SudekiMpLanStoryEffectsResetClock(void);

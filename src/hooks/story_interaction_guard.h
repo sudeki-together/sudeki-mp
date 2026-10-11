@@ -53,4 +53,34 @@ static inline BOOL SudekiMpStoryMeleeInteractionClear(uint8_t *image,void *actor
     return trigger[0x1d8u]==0u && !(trigger[0x1d9u]&2u);
 }
 
+/* #54: a weak press with an interaction merely AVAILABLE (+1D9 bit2, e.g.
+ * dropped loot near the host's front actor during a fight; live: 48 of 58
+ * remote weak strikes refused) is admitted when the caller restores the
+ * +1D8 latch right after the native press, before D6F0/D7A0 can consume it.
+ * A latch already pending (a host press) or an active actor interaction is
+ * still refused. Returns the trigger to restore, NULL when none is needed. */
+static inline BOOL SudekiMpStoryMeleeInteractionRestorable(uint8_t *image,void *actor,
+    unsigned kind,SudekiMpStoryInteractionReadable readable,uint8_t **restore_trigger) {
+    uint8_t *trigger;
+    *restore_trigger=NULL;
+    if(SudekiMpStoryMeleeInteractionClear(image,actor,1u==kind?2u:kind,readable) == FALSE) return FALSE;
+    if(kind!=1u) return TRUE;
+    if(!readable(image+0x408d24u,4u) ||
+        !readable(trigger=*(uint8_t **)(image+0x408d24u),0x1dau) ||
+        *(void **)trigger!=image+0x2c5458u || *(void **)(trigger+8u)!=image+0x2c5460u ||
+        *(void **)(trigger+0x10u)!=image+0x2c5470u || trigger[0x1d8u]!=0u) return FALSE;
+    if(trigger[0x1d9u]&2u) *restore_trigger=trigger;
+    return TRUE;
+}
+
+/* Ranged weak=2 is the exact DB0E0 held-fire branch: with all other states
+ * zero it skips both global latch writes. Active actor interactions still
+ * run before combat validation and must remain denied. No release=3 here. */
+static inline BOOL SudekiMpStoryRangedInteractionRestorable(uint8_t *image,void *actor,
+    unsigned state,SudekiMpStoryInteractionReadable readable,uint8_t **restore_trigger) {
+    if(!restore_trigger) return FALSE;
+    *restore_trigger=NULL;
+    if(state==1u) return SudekiMpStoryMeleeInteractionRestorable(image,actor,1u,readable,restore_trigger);
+    return state==2u && SudekiMpStoryMeleeInteractionClear(image,actor,2u,readable);
+}
 #endif

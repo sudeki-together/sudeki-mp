@@ -2,6 +2,12 @@
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/story_interaction_guard.h"
+#include "hooks/story_block_input.h"
+#include "hooks/story_player_turn.h"
+#include "hooks/story_ai_movement.h"
+#include "hooks/story_player_movement.h"
+#include "hooks/lan_story_research54.h"
+#include "hooks/lan_story_runtime.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
@@ -22,10 +28,9 @@ static uint8_t *base;
 static SudekiMpRelativeCallHook switches[2];
 static DWORD native_thread;
 static BOOL installed;
-/* Retail IsAttacking (RVA88D0) reads bit1000. Include it in movement/drain
- * readiness now that story clients can submit melee; do not restore AI or
- * overwrite native swing movement before that actor positively retires it.
- * Submission itself intentionally does not use this idle mask (combo input). */
+/* Retail IsAttacking (RVA88D0) reads bit1000. Transfers/drains must wait for
+ * it. Ordinary movement instead reaches native Move/CanMove every frame;
+ * the arbiter owns which phases of the combo permit locomotion. */
 enum { STORY_BODY_BUSY_FLAGS=0x081812c8u };
 
 static BOOL readable(const void *p,size_t n) {
@@ -70,31 +75,37 @@ static BOOL boundary(const SudekiMpControlUpdateDispatchWitness *w,
         (native_thread && native_thread!=GetCurrentThreadId())) return FALSE;
     native_thread=GetCurrentThreadId(); return TRUE;
 }
-static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
-    const SudekiMpControlUpdateDispatchWitness *w) {
+static BOOL body_idle_common(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w,BOOL include_lighting,BOOL movement_request) {
     uint8_t *a=actor,*arbiter,*interaction,*mode; SudekiMpCharacterSkillState skill;
     static const uint32_t actor_vt[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
     BOOL pending=TRUE; int spirit=-1;
+    BOOL aiming=movement_request && SudekiMpLanStoryCastAiming(actor);
+    uint32_t busy=movement_request ? STORY_BODY_BUSY_FLAGS&~0x1000u : STORY_BODY_BUSY_FLAGS;
     if(!base || !key || key->seat>=4u || !w || !w->service_post_original_exact ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
         !readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
         !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
         *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor ||
-        (*(uint32_t *)(arbiter+0x50u)&STORY_BODY_BUSY_FLAGS) || (arbiter[0x60u]&5u) ||
+        (*(uint32_t *)(arbiter+0x50u)&busy) || (arbiter[0x60u]&5u) ||
         SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
         !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
-        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || (!aiming && skill.active) ||
         !readable(skill.skill,0x78u) || *(void **)(a+0xd8u)!=skill.skill ||
         *(void **)((uint8_t *)skill.skill+0x10u)!=actor ||
-        ((uint8_t *)skill.skill)[0x6cu]) return FALSE;
+        (!aiming && ((uint8_t *)skill.skill)[0x6cu])) return FALSE;
     void *task=*(void **)((uint8_t *)skill.skill+0x74u);
-    if(task && (!readable(task,8u) || *(void **)task || !*((uint32_t *)task+1))) return FALSE;
+    if(!aiming && task && (!readable(task,8u) || *(void **)task || !*((uint32_t *)task+1))) return FALSE;
     interaction=*(uint8_t **)(a+0xa8u);
     if(interaction && (!readable(interaction,0x64u) ||
         !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) return FALSE;
-    return SudekiMpLanStoryCastDrained(actor) &&
+    return (aiming || (include_lighting?SudekiMpLanStoryCastDrained(actor):SudekiMpLanStoryCastBodyDrained(actor))) &&
         SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+}
+static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
+    const SudekiMpControlUpdateDispatchWitness *w) {
+    return body_idle_common(key,actor,w,TRUE,FALSE);
 }
 static BOOL ordinary_world(BOOL allow_combat) {
     BOOL combat=TRUE; uint8_t *speed;
@@ -104,6 +115,18 @@ static BOOL ordinary_world(BOOL allow_combat) {
         !*(int *)(speed+0x20u) && !*(int *)(speed+0x24u) &&
         SudekiMpCleanroomEngineCombatMode(&combat) && (allow_combat || !combat);
 }
+static BOOL player_turn_lease(void *actor) {
+    SudekiMpLanPartyLease key;
+    return base && installed && native_thread && native_thread==GetCurrentThreadId() &&
+        hooks_exact() && ordinary_world(TRUE) &&
+        SudekiMpLanPartyControlStoryTurnOwner(actor,&key) &&
+        SudekiMpLanStoryRuntimeTurnLeaseExact(&key);
+}
+static BOOL ai_movement_lease(void *actor,unsigned gate) {
+    if(!player_turn_lease(actor)) return FALSE;
+    SudekiMpLanStoryResearch54AiGate(actor,gate);
+    return TRUE;
+}
 BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) {
     uint8_t *b=(uint8_t *)image;
     static const uint8_t previous_context[]={0x83,0xbb,0xfc,0,0,0,1,0x75,0x0f,0x8b,0xf7};
@@ -111,7 +134,9 @@ BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) 
     static const uint8_t switch_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x18};
     if(!image || locked_character_id>=4u) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
     if(base || !SudekiMpCheckLoadedExecutable(image) ||
+        !SudekiMpStoryMovementImageExact(b,readable) ||
         !SudekiMpStoryInteractionInputImageExact(b,readable) ||
+        !SudekiMpStoryBlockImageExact(b,readable) ||
         !readable(b+PREVIOUS_CALL-11u,16u) || !readable(b+NEXT_CALL-11u,16u) ||
         memcmp(b+PREVIOUS_CALL-11u,previous_context,sizeof(previous_context)) ||
         memcmp(b+NEXT_CALL-11u,next_context,sizeof(next_context)) ||
@@ -122,17 +147,20 @@ BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) 
     }
     base=b; native_thread=0;
     if(!SudekiMpInstallRelativeCallHook(&switches[0],b+PREVIOUS_CALL,b+PREVIOUS,locked_character) ||
-        !SudekiMpInstallRelativeCallHook(&switches[1],b+NEXT_CALL,b+NEXT,locked_character)) {
+        !SudekiMpInstallRelativeCallHook(&switches[1],b+NEXT_CALL,b+NEXT,locked_character) ||
+        !SudekiMpStoryPlayerTurnInstall(image,player_turn_lease) ||
+        !SudekiMpStoryAiMovementInstall(image,ai_movement_lease)) {
         DWORD error=GetLastError();
         (void)SudekiMpLanStoryControlUninstall(); SetLastError(error); return FALSE;
     }
     installed=TRUE;
-    SudekiMpLogWrite("story_control event=install scope=validated_saved_party locomotion=noncombat native_input_rotation=locked\r\n");
+    SudekiMpLogWrite("story_control event=install scope=validated_saved_party native_input_rotation=locked turn_path=leased_player ai_movement=leased_gate\r\n");
     return TRUE;
 }
 BOOL SudekiMpLanStoryControlBegin(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster) {
-    return boundary(w,roster) && SudekiMpLanPartyControlStoryBegin(w,roster);
+    return boundary(w,roster) && SudekiMpLanPartyControlStoryBegin(w,roster) &&
+        SudekiMpStoryPlayerTurnBindThread() && SudekiMpStoryAiMovementBindThread();
 }
 BOOL SudekiMpLanStoryControlNextLease(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyLease *connection,unsigned character,SudekiMpLanPartyLease *key) {
@@ -154,6 +182,15 @@ BOOL SudekiMpLanStoryControlExact(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key) {
     return boundary(w,roster) && SudekiMpLanPartyControlStoryExact(w,roster,key);
 }
+static BOOL block_world_ready(void *actor) {
+    BOOL combat=FALSE,pending=TRUE; int spirit=-1;
+    return ordinary_world(TRUE) && SudekiMpCleanroomEngineCombatMode(&combat) && combat &&
+        !SudekiMpCleanroomEngineRangedCombatPrimePending() &&
+        SudekiMpCleanroomEngineSpiritPresentationState(&spirit) && spirit==0 &&
+        SudekiMpWeaponActivationPending(actor,&pending) && !pending &&
+        SudekiMpLanStoryCastBodyDrained(actor) &&
+        SudekiMpStoryMeleeInteractionClear(base,actor,2u,readable);
+}
 BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,float x,float z,
     BOOL *temporarily_held) {
@@ -161,7 +198,14 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     if(!boundary(w,roster) || !key || key->seat>=4u || !isfinite(x) || !isfinite(z)) return FALSE;
     /* A neutral packet may quiesce our speed while native UI or a menu is
      * active. New locomotion still requires the ordinary unpaused world. */
-    if(!ordinary_world(TRUE) || !body_idle(key,roster->actors[key->seat],w)) {
+    BOOL ordinary=ordinary_world(TRUE);
+    if(ordinary && !SudekiMpLanPartyControlStoryRefreshTarget(w,roster,key,x,z)) return FALSE;
+    if((key->seat==0u || key->seat==2u) && block_world_ready(roster->actors[key->seat])) {
+        BOOL handled=FALSE;
+        if(!SudekiMpLanPartyControlStoryDodge(w,roster,key,x,z,&handled)) return FALSE;
+        if(handled) return TRUE;
+    }
+    if(!ordinary || !body_idle_common(key,roster->actors[key->seat],w,FALSE,TRUE)) {
         /* A temporary native interaction is not a disconnect. The lower
          * adapter still proves this exact retained AI/movement lease before
          * stopping it; failure there remains an ownership/drain fault. */
@@ -179,9 +223,16 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     }
     return FALSE;
 }
+BOOL SudekiMpLanStoryControlBlock(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,BOOL held) {
+    if(!key || (key->seat!=0u && key->seat!=2u) || !boundary(w,roster) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return FALSE;
+    if(held && !block_world_ready(roster->actors[key->seat])) held=FALSE;
+    return SudekiMpLanPartyControlStoryBlock(w,roster,key,held);
+}
 unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned kind) {
-    if(!key || key->seat!=2u || kind<1u || kind>3u || !boundary(w,roster) ||
+    if(!key || (key->seat!=0u && key->seat!=2u) || kind<1u || kind>3u || !boundary(w,roster) ||
         !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     BOOL pending=TRUE; int spirit=-1;
     void *actor=roster->actors[key->seat];
@@ -192,11 +243,31 @@ unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness
     if(!ordinary_world(TRUE) || SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
         !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
-        !SudekiMpLanStoryCastDrained(actor) ||
-        !SudekiMpStoryMeleeInteractionClear(base,actor,kind,readable))
+        !SudekiMpLanStoryCastBodyDrained(actor) ||
+        !SudekiMpStoryMeleeInteractionRestorable(base,actor,kind,readable,&(uint8_t *){NULL}))
         return SUDEKIMP_STORY_ACTION_BUSY;
     BOOL submitted=FALSE;
     if(SudekiMpLanPartyControlStoryMelee(w,roster,key,kind,&submitted))
+        return SUDEKIMP_STORY_ACTION_SUBMITTED;
+    return submitted?SUDEKIMP_STORY_ACTION_RETAINED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+}
+unsigned SudekiMpLanStoryControlRanged(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned state) {
+    if(!key || (key->seat!=1u && key->seat!=3u) || state<1u || state>2u || !boundary(w,roster) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    BOOL pending=TRUE; int spirit=-1;
+    void *actor=roster->actors[key->seat];
+    /* Native CanFire owns reload and hold cadence. Do not require body_idle
+     * during a weapon's firing cycle. Deny the arbiter's nonisolated early
+     * interaction branches before submitting either press or held input. */
+    if(!ordinary_world(TRUE) || SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
+        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
+        !SudekiMpLanStoryCastBodyDrained(actor) ||
+        !SudekiMpStoryRangedInteractionRestorable(base,actor,state,readable,&(uint8_t *){NULL}))
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    BOOL submitted=FALSE;
+    if(SudekiMpLanPartyControlStoryRanged(w,roster,key,state,&submitted))
         return SUDEKIMP_STORY_ACTION_SUBMITTED;
     return submitted?SUDEKIMP_STORY_ACTION_RETAINED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
 }
@@ -251,6 +322,8 @@ BOOL SudekiMpLanStoryControlUninstall(void) {
     if((native_thread && native_thread!=GetCurrentThreadId()) ||
         SudekiMpLanStoryControlRetains() || !SudekiMpLanPartyControlStoryEnd())
         return retain(ERROR_BUSY);
+    if(!SudekiMpStoryAiMovementUninstall()) return retain(GetLastError());
+    if(!SudekiMpStoryPlayerTurnUninstall()) return retain(GetLastError());
     BOOL restored=TRUE; DWORD error=ERROR_SUCCESS;
     for(unsigned i=2u;i-->0u;) if(!SudekiMpRestoreRelativeCallHook(&switches[i])) {
         if(restored) error=GetLastError();

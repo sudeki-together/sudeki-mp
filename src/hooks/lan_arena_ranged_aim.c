@@ -25,6 +25,7 @@ static void *aim_actors[2];
 static uint32_t corrected_shots;
 static SudekiMpLanWeaponShotObserver weapon_shot_observer;
 static SudekiMpLanProjectileObserver projectile_observer;
+static SudekiMpLanAimTargetWitness emission_target;
 static SudekiMpLanEmissionObserver emission_observer;
 
 void SudekiMpLanAimSetShotObserver(SudekiMpLanWeaponShotObserver observer) {
@@ -752,8 +753,15 @@ static BOOL hold_storage(void *renderer,void *bank,void *states,unsigned layer,B
     }
     *recoil=w>0;return TRUE;
 }
+typedef struct PoseCallState { uint8_t fp[512] __attribute__((aligned(16)));DWORD error; } PoseCallState;
+static void leave_pose(PoseCallState *s) {
+    SetLastError(s->error);
+    __asm__ volatile("fxrstor %0" : : "m"(s->fp) : "memory");
+}
+static void ailish_story_base(void *renderer,unsigned layer,void *bank,void *states,float *pose);
 static void __attribute__((used,noinline)) hold_base_pose(void *renderer,unsigned layer,
     void *bank,void *states,float *pose) {
+    if(pose_only) { ailish_story_base(renderer,layer,bank,states,pose);return; }
     if(layer>=4 || GetCurrentThreadId()!=aim_thread || pose_depth || !aim_fire_witness) return;
     unsigned seat;
     for(seat=0;seat<2;++seat) if(renderer && renderer==world_renderers[seat]) break;
@@ -919,6 +927,71 @@ static BOOL ailish_pose_layout(uint8_t *bank,unsigned root,uint8_t mask[BONES]) 
     }
     return upper>=0 && hips>=0 && !mask[hips] && masked>1 && masked<101;
 }
+/* Rebase only an admitted Ailish locomotion sample, before the retail blend
+ * tree adds its actual shot. Recoil clocks, legs and all positions stay native.
+ * FP idle is published as FirePose; an empty/skill/reload layer is ineligible. */
+static BOOL ailish_base_storage(void *renderer,void *bank,void *states,unsigned layer) {
+    uint8_t *r=renderer,*channels,*blends,*fire;
+    if(layer>1 || !memory(r,0xa8,FALSE) || *(void **)(r+8)!=bank ||
+        *(uint32_t *)(r+0xa0)!=5 || *(uint32_t *)(r+0xa4)!=4 ||
+        !memory(channels=*(uint8_t **)(r+0x98),5*36,FALSE) ||
+        !memory(blends=*(uint8_t **)(r+0x9c),4*20,FALSE) ||
+        states!=*(void **)(channels+layer*36) || !memory(states,3*24,FALSE) ||
+        !memory(fire=*(uint8_t **)(channels+4*36),3*24,FALSE)) return FALSE;
+    const uint16_t links[8]={0,1,2,3,0x8000,0x8001,0x8002,4};
+    for(unsigned i=0;i<4;++i) {
+        float weight=*(float *)(blends+i*20+12);
+        if(memcmp(blends+i*20,links+i*2,4) || !isfinite(weight) || weight<0 || weight>1)
+            return FALSE;
+    }
+    if(*(float *)(blends+20+12)!=0 || *(float *)(blends+40+12)!=0) return FALSE;
+    for(unsigned i=0;i<3;++i) {
+        unsigned clip=*(uint16_t *)((uint8_t *)states+i*24);
+        unsigned shot=*(uint16_t *)(fire+i*24);
+        /* Authored Ailish combat idle, forward, backward, left and right
+         * bases. Keep the same closed bank/hierarchy/witness requirements;
+         * a directional base must not lower the staff between recoil poses. */
+        if((clip!=20 && clip!=22 && clip!=23 && clip!=66 && clip!=67 &&
+            clip!=69 && clip!=70 && clip!=71 && clip!=72) ||
+            (shot!=55 && shot!=58 && shot!=59) ||
+            !(*(uint16_t *)(fire+i*24+2)&1u)) return FALSE;
+    }
+    return TRUE;
+}
+static void __attribute__((noinline,force_align_arg_pointer)) ailish_story_base(
+    void *renderer,unsigned layer,void *bank,void *states,float *pose) {
+    PoseCallState saved __attribute__((cleanup(leave_pose)));
+    const uint32_t mxcsr=0x1f80u;
+    __asm__ volatile("fxsave %0" : "=m"(saved.fp) : : "memory");
+    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(mxcsr) : "memory");
+    saved.error=GetLastError();
+    if(layer>1 || GetCurrentThreadId()!=aim_thread || pose_depth || !aim_witness) return;
+    void *actor=NULL;
+    for(unsigned i=0;i<2;++i) if(renderer && renderer==world_renderers[i]) actor=aim_actors[i];
+    if(!actor || !ailish_base_storage(renderer,bank,states,layer) ||
+        !memory(pose,101*12*sizeof(float),TRUE)) return;
+    if(InterlockedIncrement(&pose_callbacks)!=1) { InterlockedDecrement(&pose_callbacks);return; }
+    pose_callback_thread=GetCurrentThreadId();
+    uint8_t mask[BONES];float direction[3],after[3];
+    if(aim_witness(actor,FALSE,direction) && world_renderer(actor)==renderer &&
+        ailish_pose_layout(bank,*(uint16_t *)states,mask)) {
+        uint8_t sample[3][SAMPLE_STATE_BYTES]={{0}};
+        for(unsigned i=0;i<3;++i) *(uint16_t *)sample[i]=60;
+        typedef void (__stdcall *Sample)(void *,void *,void *);
+        ++pose_depth;
+        ((Sample)(aim_image+POSE_SAMPLE))(bank,sample,hold_straight);
+        memcpy(reference_pose,pose,101*12*sizeof(float));
+        BOOL okay=blend_hold_base(reference_pose,hold_straight,mask,101,1.f);
+        --pose_depth;
+        if(okay && world_renderer(actor)==renderer &&
+            ailish_base_storage(renderer,bank,states,layer) &&
+            aim_witness(actor,FALSE,after) && !memcmp(after,direction,12)) {
+            memcpy(pose,reference_pose,101*12*sizeof(float));
+            ++held_base_samples;
+        }
+    }
+    pose_callback_thread=0;InterlockedDecrement(&pose_callbacks);
+}
 static float *ailish_story_pose(void **args,void *renderer,unsigned root) {
     float *original=args[2],direction[3],unit[3];void *actor=NULL;
     for(unsigned i=0;i<2;++i) if(renderer && renderer==world_renderers[i]) actor=aim_actors[i];
@@ -973,12 +1046,10 @@ BOOL SudekiMpLanAimPoseWitness(void *unused) {
     return pose_only && aim_image && pose_callbacks==1 &&
         pose_callback_thread==GetCurrentThreadId() && pose_hook.installed &&
         pose_hook.instruction==aim_image+POSE_CALL && aim_image[POSE_CALL]==0xe8 &&
-        !memcmp(aim_image+POSE_CALL+1,&pose_hook.replacement_displacement,4);
-}
-typedef struct PoseCallState { uint8_t fp[512] __attribute__((aligned(16)));DWORD error; } PoseCallState;
-static void leave_pose(PoseCallState *s) {
-    SetLastError(s->error);
-    __asm__ volatile("fxrstor %0" : : "m"(s->fp) : "memory");
+        !memcmp(aim_image+POSE_CALL+1,&pose_hook.replacement_displacement,4) &&
+        sample_hook.installed && sample_hook.instruction==aim_image+BASE_SAMPLE_CALL &&
+        aim_image[BASE_SAMPLE_CALL]==0xe8 &&
+        !memcmp(aim_image+BASE_SAMPLE_CALL+1,&sample_hook.replacement_displacement,4);
 }
 static float *__attribute__((used,noinline,force_align_arg_pointer)) dispatch_pose(void **args,void *renderer,unsigned root) {
     PoseCallState saved __attribute__((cleanup(leave_pose)));
@@ -1017,6 +1088,8 @@ static void __attribute__((used,noinline)) apply_direction(void *manager, const 
     if(emission_observer) {
         /* Copy before callback; a passive consumer cannot mutate the native
          * vectors through this API. No extra shot or native update occurs. */
+        if(emission_target && emission_target(actor,target) &&
+            SudekiMpLanAimConverge(muzzle,target,normalized)) memcpy(out,normalized,sizeof(normalized));
         float origin_copy[3],direction_copy[3];
         memcpy(origin_copy,muzzle,sizeof(origin_copy)); memcpy(direction_copy,out,sizeof(direction_copy));
         emission_observer(actor,m,origin_copy,direction_copy);
@@ -1072,14 +1145,18 @@ BOOL SudekiMpLanAimInstall(HMODULE image, SudekiMpLanAimWitness witness,
     return TRUE;
 }
 BOOL SudekiMpLanAimObserveEmissionsInstall(HMODULE image,SudekiMpLanEmissionObserver observer) {
+    return SudekiMpLanAimObserveDirectedEmissionsInstall(image,observer,NULL);
+}
+BOOL SudekiMpLanAimObserveDirectedEmissionsInstall(HMODULE image,SudekiMpLanEmissionObserver observer,
+    SudekiMpLanAimTargetWitness target) {
     if(!observer || aim_image || !SudekiMpLanAimImageMatches(image)) {
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     aim_image=(uint8_t *)image; direction_original=aim_image+AIM_DIRECTION;
-    emission_observer=observer;
+    emission_observer=observer; emission_target=target;
     if(!SudekiMpInstallRelativeCallHook(&direction_hook,aim_image+AIM_CALL,
         direction_original,direction_bridge)) {
-        aim_image=NULL; direction_original=NULL; emission_observer=NULL; return FALSE;
+        aim_image=NULL; direction_original=NULL; emission_observer=NULL; emission_target=NULL; return FALSE;
     }
     return TRUE;
 }
@@ -1093,6 +1170,12 @@ BOOL SudekiMpLanAimPoseOnlyInstall(HMODULE image,SudekiMpLanAimWitness witness) 
         if(!pose_hook.installed) { aim_image=NULL;aim_witness=NULL;pose_only=FALSE;pose_original=NULL; }
         return FALSE;
     }
+    sample_original=aim_image+POSE_SAMPLE;
+    if(!SudekiMpInstallRelativeCallHook(&sample_hook,aim_image+BASE_SAMPLE_CALL,
+        sample_original,sample_bridge)) {
+        DWORD error=GetLastError();(void)SudekiMpLanAimUninstall();
+        SetLastError(error);return FALSE;
+    }
     return TRUE;
 }
 BOOL SudekiMpLanAimUninstall(void) {
@@ -1105,7 +1188,7 @@ BOOL SudekiMpLanAimUninstall(void) {
     aim_fire_witness=NULL;sample_original=NULL;aim_thread=0;
     weapon_shot_observer=NULL;
     projectile_observer=NULL;
-    emission_observer=NULL;
+    emission_observer=NULL; emission_target=NULL;
     memset(aim_actors,0,sizeof(aim_actors)); corrected_shots=0;
     memset(world_renderers,0,sizeof(world_renderers)); pose_original=NULL;
     memset(first_person_renderers,0,sizeof(first_person_renderers));smoothed_fp_idle_poses=0;

@@ -507,6 +507,64 @@ static void test_story_ailish(void) {
     *(uint32_t *)(hier+16)=0;CHECK(!ailish_pose_layout(bank,20,mask));*(uint32_t *)(hier+16)=139840248;
     track_ptrs[100]=NULL;CHECK(!ailish_pose_layout(bank,20,mask));track_ptrs[100]=tracks+100;
     header[1]=109;CHECK(!ailish_pose_layout(bank,20,mask) && !world_renderer(actor));header[1]=101;
+    /* Saved-story base sampling must hold the staff through partial recoil,
+     * preserving native legs/translation, all three submodels and shot time. */
+    uint8_t channels[5*36]={0},blends[4*20]={0},rows[5][3*24]={0};
+    *(void **)(renderer+0x98)=channels;*(void **)(renderer+0x9c)=blends;
+    *(uint32_t *)(renderer+0xa0)=5;*(uint32_t *)(renderer+0xa4)=4;
+    const uint16_t links[8]={0,1,2,3,0x8000,0x8001,0x8002,4};
+    for(unsigned i=0;i<4;++i) memcpy(blends+i*20,links+i*2,4);
+    for(unsigned i=0;i<5;++i) {
+        *(void **)(channels+i*36)=rows[i];
+        for(unsigned j=0;j<3;++j) {
+            *(uint16_t *)(rows[i]+j*24)=i==4?59:20;
+            *(uint16_t *)(rows[i]+j*24+2)=i==4?1:0;
+        }
+    }
+    CHECK(ailish_pose_layout(bank,20,mask));
+    float lowered[101*12],candidate[101*12];memcpy(lowered,saved,sizeof(lowered));
+    for(unsigned i=0;i<101;++i) {
+        lowered[i*12+8]=sinf(.4f);lowered[i*12+11]=cosf(.4f);
+    }
+    for(unsigned step=0;step<=10;++step) {
+        *(float *)(blends+72)=step*.1f;
+        for(unsigned j=0;j<3;++j) *(float *)(rows[4]+j*24+12)=step*.3f;
+        memcpy(candidate,lowered,sizeof(candidate));story_samples=0;
+        uint8_t before_rows[sizeof(rows)];memcpy(before_rows,rows,sizeof(rows));
+        SetLastError(1234);ailish_story_base(renderer,0,bank,rows[0],candidate);
+        CHECK(story_samples==1 && GetLastError()==1234 && !memcmp(rows,before_rows,sizeof(rows)));
+        for(unsigned i=0;i<101;++i) {
+            CHECK(!memcmp(candidate+i*12,lowered+i*12,8*sizeof(float)));
+            if(mask[i]) CHECK(fabsf(candidate[i*12+8])<.00001f && fabsf(candidate[i*12+11]-1)<.00001f);
+            else CHECK(!memcmp(candidate+i*12,lowered+i*12,48));
+        }
+    }
+    const unsigned strafes[]={66,67,69,70,71,72};
+    for(unsigned k=0;k<sizeof(strafes)/sizeof(strafes[0]);++k) for(unsigned layer=0;layer<2;++layer) {
+        for(unsigned j=0;j<3;++j) *(uint16_t *)(rows[layer]+j*24)=(uint16_t)strafes[k];
+        memcpy(candidate,lowered,sizeof(candidate));story_samples=0;
+        uint8_t before_rows[sizeof(rows)];memcpy(before_rows,rows,sizeof(rows));
+        ailish_story_base(renderer,layer,bank,rows[layer],candidate);
+        CHECK(story_samples==1 && !memcmp(rows,before_rows,sizeof(rows)));
+        for(unsigned i=0;i<101;++i) if(!mask[i]) CHECK(!memcmp(candidate+i*12,lowered+i*12,48));
+        for(unsigned j=0;j<3;++j) *(uint16_t *)(rows[layer]+j*24)=20;
+    }
+    *(uint16_t *)rows[0]=68;CHECK(!ailish_base_storage(renderer,bank,rows[0],0));
+    *(uint16_t *)rows[0]=20;
+    memcpy(candidate,lowered,sizeof(candidate));story_samples=0;story_lost_after_sample=TRUE;
+    ailish_story_base(renderer,0,bank,rows[0],candidate);
+    CHECK(story_samples==1 && !memcmp(candidate,lowered,sizeof(candidate)));story_lost_after_sample=FALSE;
+    story_samples=0;admitted=FALSE;ailish_story_base(renderer,0,bank,rows[0],candidate);
+    CHECK(!story_samples && !memcmp(candidate,lowered,sizeof(candidate)));admitted=TRUE;
+    CHECK(!ailish_base_storage(renderer,bank,rows[0],4)); /* recoil itself is never rebased */
+    CHECK(!ailish_base_storage(renderer,bank,rows[1],0));
+    *(uint16_t *)(rows[0]+48)=73;CHECK(!ailish_base_storage(renderer,bank,rows[0],0));
+    *(uint16_t *)(rows[0]+48)=20;
+    for(unsigned i=0;i<3;++i) *(uint16_t *)(rows[4]+i*24)=60;
+    CHECK(!ailish_base_storage(renderer,bank,rows[0],0)); /* idle already has the full authored layer */
+    for(unsigned i=0;i<3;++i) *(uint16_t *)(rows[4]+i*24)=59;
+    *(float *)(blends+52)=.01f;CHECK(!ailish_base_storage(renderer,bank,rows[0],0));
+    *(float *)(blends+52)=0;blends[60]^=1;CHECK(!ailish_base_storage(renderer,bank,rows[0],0));blends[60]^=1;
     *(void **)actor=image+ELCO_VT;CHECK(dispatch_pose(args,renderer,20)==pose);
     CHECK(!memcmp(pose,saved,sizeof(pose)) && !pose_callbacks && !pose_callback_thread);
     CHECK(SudekiMpLanAimUninstall());VirtualFree(image,0,MEM_RELEASE);

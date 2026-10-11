@@ -27,6 +27,12 @@ void SudekiMpLanAimSetProjectileObserver(SudekiMpLanProjectileObserver observer)
 typedef void (*SudekiMpLanEmissionObserver)(void *actor,void *manager,
     const float origin[3],const float direction[3]);
 BOOL SudekiMpLanAimObserveEmissionsInstall(HMODULE image,SudekiMpLanEmissionObserver observer);
+/* Same sole direction-hook owner, with an optional authoritative remote aim
+ * witness. It may redirect an already admitted host missile only; spread,
+ * collisions, charge and damage remain native. NULL preserves passive mode. */
+BOOL SudekiMpLanAimObserveDirectedEmissionsInstall(HMODULE image,
+    SudekiMpLanEmissionObserver observer,SudekiMpLanAimTargetWitness target);
+
 /* Local cosmetic idle ownership, independent of observer snapshot/aim
  * admission. Must freshly validate session, local actor lease and no cast.
  * Does not authorize a projectile, remote pose or gameplay mutation. */
@@ -46,8 +52,8 @@ BOOL SudekiMpLanAimImageMatches(HMODULE image);
 BOOL SudekiMpLanAimInstall(HMODULE image, SudekiMpLanAimWitness witness,
     SudekiMpLanAimTargetWitness target_witness, SudekiMpLanAimFireWitness fire_witness);
 /* Contained story client: Ailish's authored upper-body pose only. The same
- * adapter owns the matrix-build seam; no direction, shot or base-sampler
- * hook is installed. The witness must establish a fresh paused-world scope
+ * adapter owns the matrix-build and base-sampler seams. The authored
+ * firing stance underlies recoil; no direction or shot hook is installed. The witness must establish a fresh paused-world scope
  * using PoseWitness and validate the current authenticated body observation.
  * Mutually exclusive with the two existing modes. */
 BOOL SudekiMpLanAimPoseOnlyInstall(HMODULE image,SudekiMpLanAimWitness witness);

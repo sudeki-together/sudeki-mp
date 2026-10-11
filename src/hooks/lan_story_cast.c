@@ -5,6 +5,7 @@
 #include "hooks/lan_arena_cast_context.h"
 #include "hooks/lan_arena_spirit_visual_host.h"
 #include "hooks/lan_party_projectile_lifetime.h"
+#include "hooks/lan_story_shots.h"
 #include "hooks/quick_skill_input.h"
 #include "hooks/call_hook.h"
 #include "engine/build_identity.h"
@@ -22,6 +23,9 @@ typedef struct StoryCaster {
     void *actor,*skill;
     uint16_t sequence;
     BOOL started,active_seen;
+    BOOL spirit_started,spirit_active_seen,spirit_root_started;
+    DWORD spirit_trace_at;
+    unsigned spirit_traces;
 } StoryCaster;
 static HMODULE image;
 static SudekiMpLanStoryNativeRoster owners;
@@ -30,7 +34,14 @@ static uint64_t lifetime,lifetime_serial;
 static DWORD native_thread,last_service;
 static BOOL bound,initializing,initialized,context_owned,menu_owned,skill_routed,spirit_routed,task_routed;
 static BOOL effects_owned,missiles_owned,stopping,fault;
+static BOOL visuals_owned;
 static int submitting=-1;
+static BOOL submitting_spirit;
+/* One synchronous namespace transition has no native calls except its
+ * retained witnesses. Prove the whole roster once, then share that proof
+ * among light/SSP/camera validators. Clear it BEFORE any script executes;
+ * Leave must acquire a new proof after native execution. */
+static BOOL transition_roster_proved;
 static SudekiMpRelativeCallHook use_hooks[2];
 static SudekiMpInlineHook camera_hook;
 static SudekiMpSkillUseFunction original_use;
@@ -51,7 +62,8 @@ static BOOL exact(void) {
 }
 static BOOL retained_actor(void *actor,uint64_t generation) {
     int i=index_of(actor);
-    return lifetime && generation==lifetime && i>=0 && exact() && owners.actors[i]==actor;
+    return lifetime && generation==lifetime && i>=0 &&
+        (transition_roster_proved ? native_thread==GetCurrentThreadId():exact()) && owners.actors[i]==actor;
 }
 static BOOL native_idle(void *actor) {
     SudekiMpCharacterSkillState s;
@@ -60,25 +72,42 @@ static BOOL native_idle(void *actor) {
     void *task=*(void **)((uint8_t *)s.skill+0x74u);
     return !task || (memory(task,8u) && !*(void **)task && *((uint32_t *)task+1));
 }
-static BOOL all_idle(void) {
+static BOOL namespaces_idle(void) {
     int spirit=-1;
-    if(!exact() || submitting>=0 || !SudekiMpLanCastContextDrained() ||
+    if(!exact() || !SudekiMpLanCastContextDrained() ||
         SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit) return FALSE;
     for(unsigned i=0;i<4;++i) if(caster[i].actor) {
         SudekiMpSpiritInstanceState s;
-        if(caster[i].started || !native_idle(caster[i].actor) ||
+        if(caster[i].started || caster[i].spirit_started || !native_idle(caster[i].actor) ||
             (caster[i].instance.generation &&
              (!SudekiMpObserveSpiritInstance(&caster[i].instance,&s) || !s.idle))) return FALSE;
     }
     return TRUE;
 }
-BOOL SudekiMpLanStoryCastDrained(void *actor) {
+static BOOL all_idle(void) { return submitting<0 && namespaces_idle(); }
+static BOOL cast_drained(void *actor,BOOL include_lighting) {
     int i=index_of(actor); SudekiMpSpiritInstanceState s;
     if(!initialized) return !SudekiMpLanStoryCastRetains();
-    return i>=0 && retained_actor(actor,lifetime) && !caster[i].started && native_idle(actor) &&
+    return i>=0 && retained_actor(actor,lifetime) && !caster[i].started &&
+        !caster[i].spirit_started && native_idle(actor) &&
         SudekiMpLanCastContextActorDrained(actor,lifetime) &&
-        SudekiMpObserveSpiritInstance(&caster[i].instance,&s) && s.idle;
+        SudekiMpObserveSpiritInstance(&caster[i].instance,&s) && (include_lighting?s.idle:s.body_idle);
+}
+BOOL SudekiMpLanStoryCastDrained(void *actor) { return cast_drained(actor,TRUE); }
+BOOL SudekiMpLanStoryCastBodyDrained(void *actor) { return cast_drained(actor,FALSE); }
+/* Movement permission is narrower than cast completion: retain the exact
+ * admitted ordinary skill and its native targeting task/sequence. The shared
+ * phase observer closes this window at the authored deadline or disable call;
+ * it never extends a cast or permits movement through its execution phase. */
+BOOL SudekiMpLanStoryCastAiming(void *actor) {
+    int i=index_of(actor); SudekiMpCharacterSkillState skill;
+    uint8_t phase; uint16_t remaining;
+    return initialized && bound && !stopping && !fault && i>=0 &&
+        retained_actor(actor,lifetime) && caster[i].started && !caster[i].spirit_started &&
+        SudekiMpObserveCharacterSkill(actor,&skill) && skill.active && skill.skill==caster[i].skill &&
+        SudekiMpObserveSpiritInstanceSkillTiming(&caster[i].instance,caster[i].sequence,&phase,&remaining) &&
+        phase==SUDEKIMP_SKILL_TARGET_AIMING && remaining>0u;
 }
 static BOOL authority(unsigned i) {
     /* Remote admission exists only around a freshly fenced Submit invocation.
@@ -91,23 +120,38 @@ static BOOL ready(unsigned i) {
         SudekiMpCleanroomEngineRangedCombatPrimePending()) return FALSE;
     for(unsigned j=0;j<4;++j) if(caster[j].actor) {
         BOOL active;
-        if(!SudekiMpObserveSpiritInstanceActivity(&caster[j].instance,&active) || active) return FALSE;
+        if(caster[j].spirit_started ||
+            !SudekiMpObserveSpiritInstanceActivity(&caster[j].instance,&active) || active) return FALSE;
     }
     return TRUE;
 }
 static BOOL root_owner(void *actor,uint8_t kind,uint64_t *session,uint8_t *type) {
     int i=index_of(actor);
-    if(i<0 || !session || !type || (kind!=1u && kind!=2u) || !authority((unsigned)i) ||
-        (kind==2u && (unsigned)i!=owners.leader_character)) return FALSE;
+    if(i<0 || !session || !type || (kind!=1u && kind!=2u)) return FALSE;
+    if(kind==2u && (unsigned)i!=owners.leader_character) {
+        /* Retail F900 launches the power-up script through 10C20/10DE5 on
+         * a later manager tick, not in Activate(FBA0). The admitted cast must
+         * retain this ONE root across request expiry/disconnect. This grants
+         * no fresh player action and never routes a foreign manager's root. */
+        SudekiMpSpiritInstance current; BOOL active;
+        if(!caster[i].spirit_started || caster[i].spirit_root_started ||
+            !retained_actor(actor,lifetime) ||
+            !SudekiMpObserveSpiritInstanceScope(&current) ||
+            current.generation!=caster[i].instance.generation ||
+            current.manager!=caster[i].instance.manager || current.camera!=caster[i].instance.camera ||
+            !SudekiMpObserveSpiritInstanceActivity(&caster[i].instance,&active) || !active) return FALSE;
+        caster[i].spirit_root_started=TRUE;
+    } else if(!authority((unsigned)i)) return FALSE;
     *session=lifetime; *type=SudekiMpLanPartyActorType((unsigned)i); return TRUE;
 }
 static uint32_t enter_task(const SudekiMpLanCastOwner *owner);
+static BOOL leave_task(uint32_t cookie);
 static BOOL start_task_routing(void) {
     if(task_routed) return TRUE;
     /* Enable BEFORE entering any private namespace, including synchronous
      * availability callbacks. The lineage owner proves its registry drained;
      * a failed enable must never fall through to native activation. */
-    if(!SudekiMpLanCastContextSetTaskRouting(enter_task,SudekiMpLeaveSpiritInstance)) return FALSE;
+    if(!SudekiMpLanCastContextSetTaskRouting(enter_task,leave_task)) return FALSE;
     task_routed=TRUE;
     SudekiMpLogWrite("story_cast event=task_routing active=1 reason=private_entry\r\n");
     return TRUE;
@@ -130,20 +174,31 @@ static uint32_t enter_skill(void *skill,int slot,BOOL using) {
 static uint32_t enter_spirit(void *actor,int strike,BOOL activating,void **manager) {
     if(!actor && owners.leader_character<4u) actor=caster[owners.leader_character].actor;
     int i=index_of(actor),first;
-    if(i<0 || !manager || (unsigned)i!=owners.leader_character || !authority((unsigned)i) ||
+    if(i<0 || !manager || !authority((unsigned)i) ||
+        ((unsigned)i!=owners.leader_character && !submitting_spirit) ||
         !SudekiMpResolveSpiritStrikeId(SudekiMpLanPartyActorType((unsigned)i),1,&first) ||
-        (strike!=first && strike!=first+1) || (activating && !all_idle())) return 0;
+        (strike!=first && strike!=first+1) ||
+        (activating && ((submitting>=0 && submitting!=i) || !namespaces_idle()))) return 0;
     if(!start_task_routing()) return 0;
     uint32_t cookie=SudekiMpEnterSpiritInstance(&caster[i].instance);
     if(cookie) *manager=caster[i].instance.manager;
     return cookie;
 }
 static uint32_t enter_task(const SudekiMpLanCastOwner *owner) {
-    if(!owner) return SudekiMpEnterSpiritInstance(NULL);
-    int i=index_of(owner->actor);
-    if(i<0 || !owner->cast_id || (owner->kind!=1u && owner->kind!=2u) ||
-        !retained_actor(owner->actor,owner->session)) return 0;
-    return SudekiMpEnterSpiritInstance(&caster[i].instance);
+    int i=owner?index_of(owner->actor):-1;
+    if(transition_roster_proved || !lifetime || (owner && (i<0 || !owner->cast_id ||
+        (owner->kind!=1u && owner->kind!=2u) || owner->session!=lifetime)) || !exact()) return 0;
+    transition_roster_proved=TRUE;
+    uint32_t cookie=SudekiMpEnterSpiritInstance(owner?&caster[i].instance:NULL);
+    transition_roster_proved=FALSE;
+    return cookie;
+}
+static BOOL leave_task(uint32_t cookie) {
+    if(transition_roster_proved || !exact()) return FALSE;
+    transition_roster_proved=TRUE;
+    BOOL result=SudekiMpLeaveSpiritInstance(cookie);
+    transition_roster_proved=FALSE;
+    return result;
 }
 static void started(unsigned i,void *skill) {
     SudekiMpCharacterSkillState after;
@@ -180,11 +235,89 @@ static BOOL effect_owner(void *component,SudekiMpLanPartyEffectOwner *out) {
     }
     int i=index_of(actor);
     if(i<0 || !retained_actor(actor,lifetime) || !caster[i].instance.generation) return FALSE;
-    if(component && !caster[i].started &&
+    if(component && i!=1 && i!=3 && !caster[i].started && !caster[i].spirit_started &&
         (!SudekiMpLanCastContextCurrentRetained(&cast) || cast.actor!=actor || cast.session!=lifetime || !cast.cast_id))
         return FALSE;
     *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,SudekiMpLanPartyActorType((unsigned)i)};
     return TRUE;
+}
+BOOL SudekiMpLanStoryCastShotOwner(void *actor,SudekiMpLanPartyEffectOwner *out) {
+    int i=index_of(actor); SudekiMpCharacterSkillState skill;
+    if(!out || !bound || stopping || fault || (i!=1 && i!=3) || !exact() ||
+        !retained_actor(actor,lifetime) || !caster[i].instance.generation ||
+        caster[i].started || caster[i].spirit_started ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active) return FALSE;
+    *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,SudekiMpLanPartyActorType((unsigned)i)};
+    return TRUE;
+}
+static BOOL visual_owner(void *unused,void *component,uint64_t *session,uint16_t *sequence,
+    uint32_t *tick,uint8_t *type) {
+    SudekiMpLanPartyEffectOwner owner; SudekiMpLanCastOwner cast;
+    (void)unused;
+    if(!session || !sequence || !tick || !type || !effect_owner(component,&owner)) return FALSE;
+    int i=index_of(owner.actor);
+    if((i==1 || i==3) && !caster[i].started && !caster[i].spirit_started) {
+        *session=owner.session;*sequence=0;*tick=GetTickCount();*type=owner.actor_type;return TRUE;
+    }
+    if(owner.actor!=caster[2].actor || !caster[2].sequence) return FALSE;
+    if(!component && (!SudekiMpLanCastContextCurrentRetained(&cast) || (cast.kind!=1u && cast.kind!=2u) ||
+        cast.actor!=owner.actor || cast.session!=owner.session)) return FALSE;
+    *session=owner.session; *sequence=caster[2].sequence; *tick=GetTickCount();
+    *type=0; /* Existing renderer's Tal cast tag, independent of transport seat. */
+    return TRUE;
+}
+static BOOL shield_owner(void *unused,uint8_t type,void **actor) {
+    (void)unused;
+    if(!actor || !bound || !exact()) return FALSE;
+    for(unsigned c=0;c<4;c+=2) if(type==SudekiMpLanPartyActorType(c) && caster[c].actor &&
+        retained_actor(caster[c].actor,lifetime)) {
+        *actor=caster[c].actor;return TRUE;
+    }
+    return FALSE; /* A sparse story party need not contain Buki yet. */
+}
+BOOL SudekiMpLanStoryCastCaptureVisuals(SudekiMpStoryVfx *out) {
+    if(!out || !bound || !visuals_owned || !exact()) return FALSE;
+    SudekiMpStoryVfx result={0};
+    BOOL idle=TRUE;
+    for(unsigned i=0;i<4;++i) if(caster[i].actor) {
+        BOOL active;
+        if(caster[i].started || caster[i].spirit_started ||
+            !SudekiMpObserveSpiritInstanceActivity(&caster[i].instance,&active) || active) idle=FALSE;
+    }
+    if(!SudekiMpLanPartySpiritVisualHostCapture(lifetime,idle,&result)) return FALSE;
+    result.stream=lifetime; result.tick=GetTickCount(); result.cast_sequence=caster[2].sequence;
+    if(!SudekiMpLanStoryShotsAppendVisuals(&owners,&result) || !SudekiMpStoryVfxValid(&result)) return FALSE;
+    *out=result; return TRUE;
+}
+BOOL SudekiMpLanStoryCastCaptureView(unsigned character,SudekiMpStoryCastView *out) {
+    SudekiMpSpiritCameraView native;
+    if(!out || character>=4u || !bound || stopping || fault || !exact() ||
+        !(owners.available_mask&(1u<<character)) || owners.leader_character==character ||
+        !retained_actor(caster[character].actor,lifetime) ||
+        !SudekiMpObserveSpiritInstanceView(&caster[character].instance,&native)) return FALSE;
+    const StoryCaster *c=&caster[character];
+    SudekiMpStoryCastView next={0};
+    next.stream=lifetime; next.tick=GetTickCount(); next.fence.character=(uint8_t)character;
+    next.cast_sequence=c->sequence;
+    /* Both cast families select these retained native cameras. Publish only
+     * the observed choice: native obstruction checks may keep it at default.
+     * A native default selection or positively drained cast ends the view;
+     * an unknown observation above must never manufacture that transition. */
+    next.kind=(c->started || c->spirit_started) ? (uint8_t)native.kind:0;
+    if(next.kind) {
+        next.view.valid=1; next.view.camera_serial=(uint32_t)next.cast_sequence*4u+next.kind;
+        memcpy(next.view.matrix,native.matrix,sizeof(next.view.matrix));
+        memcpy(next.view.projection,native.projection,sizeof(next.view.projection));
+        if(!next.cast_sequence || !SudekiMpLanStoryViewValid(&next.view)) return FALSE;
+    }
+    if(!exact()) return FALSE;
+    static unsigned last_kind[4]={3,3,3,3},reports;
+    if(next.kind!=last_kind[character] && reports<64) {
+        ++reports; last_kind[character]=next.kind;
+        SudekiMpLogFormat("story_cast_view event=host character=%u kind=%u cast=%u tick=%lu\r\n",
+            character,next.kind,next.cast_sequence,(unsigned long)next.tick);
+    }
+    *out=next; return TRUE;
 }
 static BOOL __attribute__((thiscall)) camera_select(void *manager,const char *name) {
     SudekiMpSpiritInstance scope_owner; unsigned kind;
@@ -216,7 +349,7 @@ static BOOL shutdown_drained(void) {
         SudekiMpCleanroomEngineRangedCombatPrimePending()) return FALSE;
     for(unsigned i=0;i<4u;++i) if(caster[i].actor) {
         SudekiMpSpiritInstanceState state;
-        if(caster[i].started || !native_idle(caster[i].actor) ||
+        if(caster[i].started || caster[i].spirit_started || !native_idle(caster[i].actor) ||
             !SudekiMpObserveSpiritInstance(&caster[i].instance,&state) || !state.body_idle) return FALSE;
     }
     return TRUE;
@@ -288,13 +421,21 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
     if(!SudekiMpInstallSpiritInstanceNamedCameraUpdates()) goto failed;
     for(unsigned i=0;i<4;++i) if(caster[i].actor && i!=owners.leader_character &&
         !SudekiMpEnableSpiritInstanceRemoteCameraSelection(&caster[i].instance)) goto failed;
-    stage="gates_timing";
-    if(!SudekiMpEnableSpiritInstanceCastGates() || !SudekiMpEnableSpiritInstanceLighting() ||
-        !SudekiMpEnableSpiritInstanceSkillTargeting() || !SudekiMpEnableSpiritInstanceSharedSsp()) goto failed;
+    stage="cast_gates";
+    if(!SudekiMpEnableSpiritInstanceCastGates()) goto failed;
+    stage="cast_lighting";
+    if(!SudekiMpEnableSpiritInstanceLighting()) goto failed;
+    stage="skill_targeting";
+    if(!SudekiMpEnableSpiritInstanceSkillTargeting()) goto failed;
+    stage="shared_ssp";
+    if(!SudekiMpEnableSpiritInstanceSharedSsp()) goto failed;
+    stage="skill_timing";
     for(unsigned i=0;i<4;++i) if(caster[i].actor &&
         (!SudekiMpConfigureSpiritInstanceSkillTiming(&caster[i].instance,FALSE) ||
          !SudekiMpScheduleSpiritInstanceManager(&caster[i].instance))) goto failed;
+    stage="motion_blur";
     if(!SudekiMpInstallCastMotionBlur(image,blur_scope)) goto failed;
+    stage="camera_selection";
     static const uint8_t camera_bytes[]={0x55,0x8b,0xec,0x83,0xe4,0xf8};
     if(!SudekiMpInstallInlineHook(&camera_hook,(uint8_t *)image+0x36fb0u,camera_bytes,sizeof(camera_bytes),camera_select))
         goto failed;
@@ -313,6 +454,9 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
     stage="descendant_lifetimes";
     missiles_owned=TRUE;
     if(!SudekiMpLanPartyProjectileLifetimeInstall(image)) goto failed;
+    visuals_owned=TRUE;
+    if(!SudekiMpLanArenaSpiritVisualHostInitialize(image,visual_owner,NULL) ||
+        !SudekiMpLanPartySpiritVisualHostSetShieldWitness(image,shield_owner)) goto failed;
     effects_owned=TRUE;
     if(!SudekiMpLanPartyEffectLifetimeInitialize(image,effect_owner,shutdown_drained)) goto failed;
     if(!SudekiMpLanPartyEffectLifetimePoll()) goto failed;
@@ -320,6 +464,10 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
      * Native entry routing above activates task isolation before the first
      * private callback; no camera/name/light banking per unrelated idle task. */
     bound=TRUE; initializing=FALSE;
+    {
+        SudekiMpStoryVfx baseline;
+        if(!SudekiMpLanStoryCastCaptureVisuals(&baseline)) goto failed;
+    }
     SudekiMpLogFormat("story_cast event=bound mask=%u local=%u authority=host sparse_party=1\r\n",
         owners.available_mask,owners.leader_character);
     return TRUE;
@@ -364,6 +512,32 @@ BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,
                 c->started=c->active_seen=FALSE; c->skill=NULL;
             }
         }
+        if(c->spirit_started) {
+            BOOL active; SudekiMpSpiritInstanceState state;
+            if(!SudekiMpObserveSpiritInstanceActivity(&c->instance,&active) ||
+                !SudekiMpObserveSpiritInstance(&c->instance,&state)) { fault=TRUE; return FALSE; }
+            if(active) c->spirit_active_seen=TRUE;
+            if(SudekiMpLogResearchEnabled() && c->spirit_traces<40u &&
+                (!c->spirit_trace_at || now-c->spirit_trace_at>=1000u)) {
+                uint32_t ticks=0,cam=0,soul=0;
+                BOOL observed=SudekiMpObserveSpiritInstanceManagerTicks(&c->instance,&ticks) &&
+                    SudekiMpObserveSpiritInstanceUpdates(&c->instance,&cam,&soul);
+                /* The successful instance observation above re-proves this
+                 * caster, state component, vtable and reciprocal owner. */
+                uint8_t *participant=*(uint8_t **)((uint8_t *)c->actor+0x130u);
+                ++c->spirit_traces; c->spirit_trace_at=now;
+                SudekiMpLogFormat("story_cast event=spirit_progress character=%u state=%lu strike=%lu camera=%u body_idle=%u tasks_idle=%u participant=%u ticks_known=%u ticks=%lu,%lu,%lu ms=%lu\r\n",
+                    i,(unsigned long)state.state,(unsigned long)state.strike_id,state.camera_active,
+                    state.body_idle,SudekiMpLanCastContextActorDrained(c->actor,lifetime),
+                    participant[0x131u],observed,(unsigned long)ticks,(unsigned long)cam,
+                    (unsigned long)soul,(unsigned long)now);
+            }
+            if(c->spirit_active_seen && !active && state.body_idle &&
+                SudekiMpLanCastContextActorDrained(c->actor,lifetime)) {
+                c->spirit_started=c->spirit_active_seen=FALSE;
+                SudekiMpLogFormat("story_cast event=spirit_body_drained character=%u\r\n",i);
+            }
+        }
     }
     if(shutdown_drained() && (!SudekiMpLanPartyProjectileLifetimeRequestRetire() ||
         !SudekiMpLanPartyEffectLifetimeRequestRetire())) return FALSE;
@@ -378,6 +552,19 @@ BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,
         SudekiMpLogWrite("story_cast event=task_routing active=0 reason=fully_drained\r\n");
     }
     return !fault;
+}
+static void trace_readiness(unsigned i,unsigned kind,unsigned slot) {
+    DWORD error=GetLastError();
+    uint8_t *a=caster[i].actor,*arb=memory(a,0xa8u)?*(uint8_t **)(a+0x90u):NULL;
+    uint8_t *combat=arb?*(uint8_t **)(a+0xa4u):NULL;
+    if(memory(arb,0x64u) && *(void **)arb==(uint8_t *)image+0x2cc9acu &&
+        *(void **)(arb+0x10u)==a && memory(combat,0x74u) &&
+        *(void **)combat==(uint8_t *)image+0x2c8754u && *(void **)(combat+0x10u)==a)
+        SudekiMpLogFormat("story_cast event=readiness character=%u kind=%u slot=%u arb50=%08lx arb58=%08lx arb60=%02x combat5c=%08lx combat72=%02x ms=%lu\r\n",
+            i,kind,slot,(unsigned long)*(uint32_t *)(arb+0x50u),
+            (unsigned long)*(uint32_t *)(arb+0x58u),arb[0x60u],
+            (unsigned long)*(uint32_t *)(combat+0x5cu),combat[0x72u],(unsigned long)GetTickCount());
+    SetLastError(error);
 }
 unsigned SudekiMpLanStoryCastSubmit(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *key,unsigned slot) {
@@ -404,6 +591,7 @@ unsigned SudekiMpLanStoryCastSubmit(const SudekiMpControlUpdateDispatchWitness *
         if(!owned_skill) { submitting=-1; return SUDEKIMP_STORY_ACTION_BUSY; }
     }
     if(!ready(i)) { submitting=-1; return SUDEKIMP_STORY_ACTION_BUSY; }
+    trace_readiness(i,SUDEKIMP_STORY_ACTION_SKILL,slot);
     SudekiMpSkillActivationResult result=SudekiMpActivateCharacterSkillSlot(caster[i].actor,slot);
     /* Keep the native rejection, rather than losing SP/readiness failures
      * behind the wire's deliberately coarse UNAVAILABLE result. This is one
@@ -420,11 +608,52 @@ unsigned SudekiMpLanStoryCastSubmit(const SudekiMpControlUpdateDispatchWitness *
     if(!SudekiMpLanStoryCastDrained(caster[i].actor)) return SUDEKIMP_STORY_ACTION_RETAINED;
     if(result.status==SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED && result.validation_result==1)
         return SUDEKIMP_STORY_ACTION_NO_SP;
+    if(result.status==SUDEKIMP_SKILL_ACTIVATION_VALIDATION_REJECTED && result.validation_result==2)
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+}
+unsigned SudekiMpLanStoryCastSubmitSpirit(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *key,unsigned variant) {
+    if(!key || key->seat>=4u || variant<1u || variant>2u || !bound || stopping || fault ||
+        submitting>=0 || !exact() || !SudekiMpLanStoryControlExact(w,r,key) ||
+        r->actors[key->seat]!=caster[key->seat].actor) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    /* Spirit requires a neutral world and drained namespaces. It never
+     * overlaps a skill, another Spirit, a cinematic or a native modal action. */
+    uint8_t *speed=*(uint8_t **)((uint8_t *)image+0x408da0u);
+    if(!memory(speed,0x2cu) || speed[0x28u] || *(uint16_t *)(speed+0x2au) ||
+        *(int *)(speed+0x20u) || *(int *)(speed+0x24u) || !all_idle())
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    unsigned i=key->seat;
+    if(caster[i].sequence==UINT16_MAX) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    submitting=(int)i; submitting_spirit=TRUE;
+    trace_readiness(i,SUDEKIMP_STORY_ACTION_SPIRIT,variant);
+    SudekiMpSpiritActivationResult result=SudekiMpActivateCharacterSpirit(caster[i].actor,variant);
+    if(result.status==SUDEKIMP_SPIRIT_ACTIVATION_STARTED) {
+        /* Successful activation is an asynchronous obligation even when the
+         * first observation fails. Never retry it or declare unknown idle. */
+        BOOL active=FALSE;
+        ++caster[i].sequence;
+        caster[i].spirit_started=TRUE;
+        caster[i].spirit_root_started=FALSE;
+        caster[i].spirit_trace_at=0; caster[i].spirit_traces=0;
+        caster[i].spirit_active_seen=SudekiMpObserveSpiritInstanceActivity(&caster[i].instance,&active) && active;
+    }
+    submitting_spirit=FALSE; submitting=-1;
+    SudekiMpLogFormat("story_cast event=spirit_result character=%u variant=%u strike=%d status=%u validation=%d activate=%d\r\n",
+        i,variant,result.strike_id,(unsigned)result.status,result.validation_result,result.activation_result);
+    if(!SudekiMpSpiritActivationRoutingHealthy()) { fault=TRUE; return SUDEKIMP_STORY_ACTION_RETAINED; }
+    if(result.status==SUDEKIMP_SPIRIT_ACTIVATION_STARTED) return SUDEKIMP_STORY_ACTION_STARTED;
+    if(!SudekiMpLanStoryCastDrained(caster[i].actor)) return SUDEKIMP_STORY_ACTION_RETAINED;
+    if(result.status==SUDEKIMP_SPIRIT_ACTIVATION_BUSY ||
+        (result.status==SUDEKIMP_SPIRIT_ACTIVATION_VALIDATION_REJECTED && result.validation_result==2))
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    if(result.status==SUDEKIMP_SPIRIT_ACTIVATION_VALIDATION_REJECTED && result.validation_result==1)
+        return SUDEKIMP_STORY_ACTION_NO_SP; /* Shared native SSP; kind distinguishes the notice. */
     return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
 }
 void SudekiMpLanStoryCastRequestStop(void) { stopping=TRUE; }
 BOOL SudekiMpLanStoryCastRetains(void) {
-    return initialized || context_owned || bound || initializing || menu_owned || effects_owned || missiles_owned;
+    return initialized || context_owned || bound || initializing || menu_owned || effects_owned || missiles_owned || visuals_owned;
 }
 BOOL SudekiMpLanStoryCastUninstall(void) {
     stopping=TRUE;
@@ -443,6 +672,8 @@ BOOL SudekiMpLanStoryCastUninstall(void) {
     menu_owned=FALSE;
     if(!SudekiMpRestoreInlineHook(&camera_hook) || !SudekiMpUninstallCastMotionBlur()) return FALSE;
     if(effects_owned && !SudekiMpLanPartyEffectLifetimeReset()) return FALSE;
+    if(visuals_owned && !SudekiMpLanArenaSpiritVisualHostReset()) return FALSE;
+    visuals_owned=FALSE;
     effects_owned=FALSE;
     if(missiles_owned && !SudekiMpLanPartyProjectileLifetimeUninstall()) return FALSE;
     missiles_owned=FALSE;

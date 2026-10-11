@@ -1,7 +1,8 @@
 #include "network/lan_story_area_state.h"
-
 #include <string.h>
-
+_Static_assert(SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u,"story area datagram bound");
+static void put(uint8_t *p,uint32_t v) {for(unsigned i=0;i<4u;++i) p[i]=(uint8_t)(v>>(8u*i));}
+static uint32_t get(const uint8_t *p) {return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
 static BOOL name_valid(const char *n,BOOL allow_empty) {
     unsigned i=0;
     for(;i<SUDEKIMP_STORY_AREA_NAME && n[i];++i) if(n[i]<0x20 || n[i]>0x7e) return FALSE;
@@ -24,30 +25,21 @@ BOOL SudekiMpStoryAreaStateSame(const SudekiMpStoryAreaState *a,const SudekiMpSt
         a->count==b->count && !memcmp(a->entries,b->entries,sizeof(a->entries));
 }
 BOOL SudekiMpStoryAreaStateEncode(const SudekiMpStoryAreaState *s,uint8_t *p,size_t n) {
-    if(!p || n!=SUDEKIMP_STORY_AREA_WIRE_SIZE || !SudekiMpStoryAreaStateValid(s)) return FALSE;
-    p[0]=(uint8_t)s->observed_tick; p[1]=(uint8_t)(s->observed_tick>>8);
-    p[2]=(uint8_t)(s->observed_tick>>16); p[3]=(uint8_t)(s->observed_tick>>24);
-    memcpy(p+4,s->current,SUDEKIMP_STORY_AREA_NAME);
-    memcpy(p+4+SUDEKIMP_STORY_AREA_NAME,s->target,SUDEKIMP_STORY_AREA_NAME);
-    p[4+2*SUDEKIMP_STORY_AREA_NAME]=s->count;
-    uint8_t *e=p+5+2*SUDEKIMP_STORY_AREA_NAME;
-    for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i,e+=SUDEKIMP_STORY_AREA_NAME+1u) {
-        memcpy(e,s->entries[i].name,SUDEKIMP_STORY_AREA_NAME); e[SUDEKIMP_STORY_AREA_NAME]=s->entries[i].state;
+    if(!p || n!=SUDEKIMP_STORY_AREA_WIRE_SIZE || !SudekiMpStoryAreaStateValid(s) || !s->sequence) return FALSE;
+    put(p,SUDEKIMP_STORY_AREA_CODEC_VERSION); put(p+4,s->sequence); put(p+8,s->observed_tick);
+    memcpy(p+12,s->current,40u); memcpy(p+52,s->target,40u); p[92]=s->count;
+    for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i) {
+        memcpy(p+93+i*41u,s->entries[i].name,40u); p[133+i*41u]=s->entries[i].state;
     }
     return TRUE;
 }
-BOOL SudekiMpStoryAreaStateDecode(const uint8_t *p,size_t n,SudekiMpStoryAreaState *s) {
-    SudekiMpStoryAreaState v;
-    if(!p || !s || n!=SUDEKIMP_STORY_AREA_WIRE_SIZE) return FALSE;
-    memset(&v,0,sizeof(v));
-    v.observed_tick=(uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
-    memcpy(v.current,p+4,SUDEKIMP_STORY_AREA_NAME);
-    memcpy(v.target,p+4+SUDEKIMP_STORY_AREA_NAME,SUDEKIMP_STORY_AREA_NAME);
-    v.count=p[4+2*SUDEKIMP_STORY_AREA_NAME];
-    const uint8_t *e=p+5+2*SUDEKIMP_STORY_AREA_NAME;
-    for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i,e+=SUDEKIMP_STORY_AREA_NAME+1u) {
-        memcpy(v.entries[i].name,e,SUDEKIMP_STORY_AREA_NAME); v.entries[i].state=e[SUDEKIMP_STORY_AREA_NAME];
+BOOL SudekiMpStoryAreaStateDecode(const uint8_t *p,size_t n,SudekiMpStoryAreaState *out) {
+    if(!p || !out || n!=SUDEKIMP_STORY_AREA_WIRE_SIZE || get(p)!=SUDEKIMP_STORY_AREA_CODEC_VERSION) return FALSE;
+    SudekiMpStoryAreaState s={0}; s.sequence=get(p+4); s.observed_tick=get(p+8);
+    memcpy(s.current,p+12,40u); memcpy(s.target,p+52,40u); s.count=p[92];
+    for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i) {
+        memcpy(s.entries[i].name,p+93+i*41u,40u); s.entries[i].state=p[133+i*41u];
     }
-    if(!SudekiMpStoryAreaStateValid(&v)) return FALSE;
-    *s=v; return TRUE;
+    if(!s.sequence || !SudekiMpStoryAreaStateValid(&s)) return FALSE;
+    *out=s; return TRUE;
 }

@@ -1,4 +1,5 @@
 #include "hooks/lan_story_local_control.h"
+#include "hooks/story_player_movement.h"
 #include "hooks/lan_story_input.h"
 #include "hooks/lan_story_menu.h"
 #include "hooks/lan_party_menu_native.h"
@@ -31,6 +32,8 @@ static struct {
     SudekiMpLanStoryView geometry;
     float anchor[3],distance;
     BOOL seeded,framed,published;
+    BOOL cast_active;
+    SudekiMpLanStoryView cast_geometry;
 } view;
 
 
@@ -236,7 +239,8 @@ __attribute__((naked,noinline,used)) static void call_next(void *group __attribu
 static BOOL camera_ready(const SudekiMpLanStoryNativeRoster *r,float matrix[16]);
 
 BOOL SudekiMpLanStoryLocalControlInstall(HMODULE image) {
-    if(base || !image || !SudekiMpCheckLoadedExecutable(image) || !next_supported((uint8_t *)image)) {
+    if(base || !image || !SudekiMpCheckLoadedExecutable(image) || !next_supported((uint8_t *)image) ||
+        !SudekiMpStoryMovementImageExact((uint8_t *)image,readable)) {
         SetLastError(ERROR_INVALID_STATE); return FALSE;
     }
     base=(uint8_t *)image; native_thread=0; active=entered=uncertain=FALSE;
@@ -318,20 +322,34 @@ BOOL SudekiMpLanStoryLocalControlReady(void *controller,
         same_party(&retained,r) && r->leader_character==selected && binding(r) &&
         view.published && camera_ready(r,NULL);
 }
+BOOL SudekiMpLanStoryLocalControlAim(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *scene,float direction[3],float target[3]) {
+    float matrix[16],unit[3],point[3],length=0;
+    if(!direction || !target || !SudekiMpLanStoryLocalControlReady(controller,w,r,scene) ||
+        !camera_ready(r,matrix)) return FALSE;
+    for(unsigned i=0;i<3;++i) length+=matrix[8+i]*matrix[8+i];
+    if(!isfinite(length) || length<0.98f || length>1.02f) return FALSE;
+    length=sqrtf(length);
+    for(unsigned i=0;i<3;++i) {
+        unit[i]=matrix[8+i]/length;point[i]=matrix[12+i]+100.0f*unit[i];
+        if(!isfinite(point[i])) return FALSE;
+    }
+    if(!boundary(controller,w,r,scene)) return FALSE;
+    memcpy(direction,unit,sizeof(unit));memcpy(target,point,sizeof(point));return TRUE;
+}
 BOOL SudekiMpLanStoryLocalControlDirection(void *controller,
     const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r,
     const SudekiMpLanStoryScene *scene,float local_x,float local_z,float *world_x,float *world_z) {
-    float matrix[16],local[3]={local_x,0.0f,local_z},world[3];
+    float matrix[16],local[3],world[3];
     if(world_x) *world_x=0.0f;
     if(world_z) *world_z=0.0f;
-    if(!world_x || !world_z || !isfinite(local_x) || !isfinite(local_z) ||
-        fabsf(local_x)>1.001f || fabsf(local_z)>1.001f ||
+    if(!world_x || !world_z || !SudekiMpStoryMovementLocal(local_x,local_z,local) ||
         !SudekiMpLanStoryLocalControlReady(controller,w,r,scene) || !camera_ready(r,matrix)) return FALSE;
-    float magnitude=sqrtf(local_x*local_x+local_z*local_z);
+    float magnitude=sqrtf(local[0]*local[0]+local[2]*local[2]);
     if(magnitude<0.0001f) return boundary(controller,w,r,scene);
     if(!SudekiMpCameraTransformHorizontalDirection(matrix,local,world) ||
         !boundary(controller,w,r,scene)) return FALSE;
-    if(magnitude>1.0f) magnitude=1.0f;
     *world_x=world[0]*magnitude; *world_z=world[2]*magnitude; return TRUE;
 }
 BOOL SudekiMpLanStoryLocalControlRetains(void) { return active || entered; }
@@ -508,19 +526,30 @@ static BOOL frame_camera(SudekiMpLanStoryView *next,const float position[3],
     *distance_out=distance;
     return SudekiMpLanStoryViewGeometryValid(next);
 }
-BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *r,
-    SudekiMpLanStoryLocalViewExact exact,void *context,float yaw,float pitch) {
+BOOL SudekiMpLanStoryLocalControlPresentCast(const SudekiMpLanStoryNativeRoster *r,
+    SudekiMpLanStoryLocalViewExact exact,void *context,float yaw,float pitch,
+    const SudekiMpLanStoryView *cast) {
     if(!base || !entered || uncertain || active || native_thread!=GetCurrentThreadId() ||
         !r || !exact || !isfinite(yaw) || !isfinite(pitch) ||
         fabsf(yaw)>0.5f || fabsf(pitch)>0.5f || !same_party(&retained,r) ||
         r->leader_character!=selected || !exact(r,context) || !binding(r) ||
         !SudekiMpLanStoryInputExact(r->controller,r->actors[selected]) || !camera_ready(r,NULL)) return FALSE;
+    if(cast && !SudekiMpLanStoryViewValid(cast)) return FALSE;
+    uint8_t *state=view.owner.render_state;
+    /* Retain the overlay obligation on foreign writes, including during
+     * restoration. Host-cutscene priority explicitly restores it first. */
+    if(view.cast_active &&
+        (memcmp(state+0x90u,view.cast_geometry.matrix,sizeof(view.cast_geometry.matrix)) ||
+         memcmp(state+0xd0u,view.cast_geometry.projection,sizeof(view.cast_geometry.projection))))
+        return retain(ERROR_RETRY);
+    BOOL casting=cast?cast->valid:view.cast_active;
     float position[3]; SudekiMpLanStoryView next=view.geometry;
     if(!actor_position(r->actors[selected],position)) return FALSE;
-    float distance;
-    if(!frame_camera(&next,position,yaw,pitch,&distance) ||
+    float distance=view.distance;
+    if(casting) next=cast?*cast:view.cast_geometry;
+    if((!casting && !frame_camera(&next,position,yaw,pitch,&distance)) ||
         !SudekiMpLanStoryViewGeometryValid(&next) || !exact(r,context) || !camera_ready(r,NULL)) return FALSE;
-    uint8_t *state=view.owner.render_state; MEMORY_BASIC_INFORMATION memory;
+    MEMORY_BASIC_INFORMATION memory;
     if(VirtualQuery(state,&memory,sizeof(memory))!=sizeof(memory)) return FALSE;
     DWORD access=memory.Protect&0xffu;
     if(access!=PAGE_READWRITE && access!=PAGE_WRITECOPY &&
@@ -533,12 +562,27 @@ BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *r,
     memcpy(state+0xd0u,next.projection,sizeof(next.projection));
     ++*(uint16_t *)(state+0x2cu);
     active=FALSE;
-    view.geometry=next; view.distance=distance; view.framed=TRUE;
-    memcpy(view.anchor,position,sizeof(position));
+    if(casting) { view.cast_geometry=next; view.cast_active=TRUE; }
+    else {
+        view.geometry=next; view.distance=distance; view.framed=TRUE;
+        memcpy(view.anchor,position,sizeof(position));
+        /* Keep the old obligation until postconditions below succeed. */
+    }
     if(!exact(r,context) || !camera_ready(r,NULL) ||
         memcmp(state+0x90u,next.matrix,sizeof(next.matrix)) ||
         memcmp(state+0xd0u,next.projection,sizeof(next.projection))) {
         uncertain=TRUE; return retain(ERROR_RETRY);
     }
+    if(!casting) {view.cast_active=FALSE; memset(&view.cast_geometry,0,sizeof(view.cast_geometry));}
     view.published=TRUE; SetLastError(ERROR_SUCCESS); return TRUE;
+}
+BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *r,
+    SudekiMpLanStoryLocalViewExact exact,void *context,float yaw,float pitch) {
+    return SudekiMpLanStoryLocalControlPresentCast(r,exact,context,yaw,pitch,NULL);
+}
+BOOL SudekiMpLanStoryLocalControlRestoreCastView(const SudekiMpLanStoryNativeRoster *r,
+    SudekiMpLanStoryLocalViewExact exact,void *context) {
+    if(!view.cast_active) return TRUE;
+    const SudekiMpLanStoryView normal={0};
+    return SudekiMpLanStoryLocalControlPresentCast(r,exact,context,0,0,&normal);
 }
