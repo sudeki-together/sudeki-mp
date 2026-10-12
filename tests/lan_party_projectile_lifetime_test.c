@@ -216,7 +216,7 @@ static void capacity(void) {
 }
 static void descendant_lifetime(void) {
     setup(1);
-    fixture_owner=(SudekiMpLanPartyEffectOwner){77,9,actor,0x0e};
+    fixture_owner=(SudekiMpLanPartyEffectOwner){77,9,actor,0x0e,0u};
     void *manager=launch(0,1);
     /* A namespace observer and an ordinary emission observer are independent.
      * Their generations belong to different domains and must not be deduped. */
@@ -243,7 +243,7 @@ static void descendant_lifetime(void) {
     assert(SudekiMpLanPartyProjectileLifetimeUninstall());
 
     setup(3); t=tag(3,1); manager=launch(0,1);
-    fixture_owner=(SudekiMpLanPartyEffectOwner){78,10,actor,0x01};
+    fixture_owner=(SudekiMpLanPartyEffectOwner){78,10,actor,0x01,0u};
     assert(SudekiMpLanPartyProjectileLifetimeCaptureOwned(&t,&fixture_owner,manager));
     ++fixture_owner.generation;
     assert(!SudekiMpLanPartyProjectileLifetimeCaptureOwned(&t,&fixture_owner,manager));
@@ -277,7 +277,7 @@ static void bridge_abi(void) {
     uint8_t *missile=constructed_entity+0x414;
     *(void **)missile=mapped+MISSILE_VT;
     *(void **)(missile+4)=mapped+MISSILE_SECONDARY_VT;
-    fixture_owner=(SudekiMpLanPartyEffectOwner){88,15,actor,0x0e}; namespace_on=TRUE;
+    fixture_owner=(SudekiMpLanPartyEffectOwner){88,15,actor,0x0e,0u}; namespace_on=TRUE;
     void *saved=construct_original; construct_original=construct_stub;
     uintptr_t entity_arg=(uintptr_t)constructed_entity, missile_arg=(uintptr_t)missile,result;
     void *entry=construct_entry;
@@ -350,7 +350,7 @@ static void owned_observation(void) {
     SudekiMpLanPartyProjectileObservation out[2],saved[2];
     memset(out,0x5a,sizeof(out)); memcpy(saved,out,sizeof(out));
     assert(SudekiMpLanPartyProjectileLifetimeObserve(NULL,0,&count) && !count && !native_thread);
-    fixture_owner=(SudekiMpLanPartyEffectOwner){89,18,actor,0x01};
+    fixture_owner=(SudekiMpLanPartyEffectOwner){89,18,actor,0x01,0u};
     SudekiMpLanPartyProjectileTag t=tag(3,700);
     void *manager=launch(0,2);
     assert(SudekiMpLanPartyProjectileLifetimeCapture(&t,manager));
@@ -392,7 +392,7 @@ static void owned_observation(void) {
 }
 static void shutdown_retire(void) {
     setup(1);
-    fixture_owner=(SudekiMpLanPartyEffectOwner){79,17,actor,0x0e};
+    fixture_owner=(SudekiMpLanPartyEffectOwner){79,17,actor,0x0e,0u};
     SudekiMpLanPartyProjectileTag t=tag(1,600);
     assert(SudekiMpLanPartyProjectileLifetimeCaptureOwned(&t,&fixture_owner,launch(0,2)));
     run_foreign_thread(wrong_retire);

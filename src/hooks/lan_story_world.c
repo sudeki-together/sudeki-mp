@@ -29,7 +29,7 @@ typedef struct Target {
     uint8_t *bank,*description,*entries,*channels,*blends;
     uint8_t *rows[5];
     uint32_t identifier,animations,submodels,channel_count;
-    uint32_t native_identifier; /* entity+0x34; differs only for monsters */
+    uint32_t native_identifier; /* entity+0x34; portable IDs also distinguish gate instances */
     uint16_t kind;
     unsigned character;
     uint64_t fingerprint;
@@ -468,7 +468,7 @@ static BOOL same_target(const Target *a,const Target *b) {
         a->description==b->description && a->entries==b->entries && a->channels==b->channels &&
         a->blends==b->blends && !memcmp(a->rows,b->rows,sizeof(a->rows)) &&
         a->kind==b->kind && a->character==b->character && a->channel_count==b->channel_count &&
-        /* The native identity: a monster's wire identifier is its portable
+        /* Native identity: monster/gate wire identifiers include the portable
          * spawn identity, which a fresh target() re-read does not carry. */
         a->native_identifier==b->native_identifier && a->animations==b->animations &&
         a->submodels==b->submodels && a->fingerprint==b->fingerprint;
@@ -735,7 +735,7 @@ static BOOL monster_pos_due(uint32_t identity,unsigned side) {
 /* Client: last host HitPoints per replicated monster and the not yet shown
  * drop. Plain observations; the entity is re-proved before any native call. */
 enum { MAX_MONSTER_HP=64 };
-static struct { SudekiMpStoryDamageIdentity identity; float hp,pending; BOOL stat_visible; } monster_hp[MAX_MONSTER_HP];
+static struct { SudekiMpStoryDamageIdentity identity; float hp,pending; BOOL stat_visible,dead; unsigned death_effect,death_seen; } monster_hp[MAX_MONSTER_HP];
 static BOOL monster_damage_bound(const SudekiMpStoryDamageIdentity *id) {
     if(!client_seen || client_epoch!=id->epoch) return FALSE;
     for(unsigned i=0;i<client_count;++i) {
@@ -827,6 +827,10 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
         }
         if(!include) continue;
         if(n==SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS || !target(entity,roster,&targets[n],write)) return FALSE;
+        if(targets[n].kind==SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND) {
+            uint32_t gate_identity;
+            if(SudekiMpLanStoryGateIdentity(entity,&gate_identity)) targets[n].identifier=gate_identity;
+        }
         if(!write && allow_frozen && targets[n].character>=4u) {
             BOOL allowed=FALSE;
             for(unsigned x=0;x<allow_count;++x)
@@ -1281,6 +1285,12 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
                 *(const void *const *)(stat+0x10u)==targets[i].entity && stat[0x24u] && stat[0x30u] &&
                 isfinite(*(const float *)(stat+0x18u)) && *(const float *)(stat+0x18u)>0.0f)
                 frame.actors[i].visual_flags=SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE;
+            BOOL dead=FALSE;unsigned emitted=0;
+            if(!SudekiMpLanStorySpawnDeathState(targets[i].entity,&dead,&emitted)) goto fail;
+            if(dead) frame.actors[i].visual_flags|=SUDEKIMP_LAN_STORY_WORLD_DEAD;
+            frame.actors[i].visual_flags|=(uint8_t)(emitted<<SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT);
+            if(*(uint32_t *)(targets[i].object+0x34u)&4u)
+                frame.actors[i].visual_flags|=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
             /* #54 research: host monster CPosition and render matrix, 1/s each
              * (4/s with Research54, plus arbiter state, HP and AI target). */
             SudekiMpLanStoryResearch54Monster(0u,targets[i].identifier,frame.actors[i].position);
@@ -2416,14 +2426,14 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         profile_start=profile_now();
         if(!target_still(t,registry,roster,exact,context)) goto fail;
         if(t->character<4u && (foreign_characters&(1u<<t->character))) continue; /* other host area */
-        if(scenery(t)) {
+        if(scenery(t) || t->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) {
             /* Native5D5300/612050 use bit4 as hidden. Preserve every other
              * local renderer flag. The telescope's authored lens is a view
              * overlay: an independent companion camera must not render the
              * host's lens as scenery. Spectators sharing his camera use the
              * host's visibility exactly. Its canonical name was checked. */
             BOOL hidden=(a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_HIDDEN)!=0u ||
-                (prepared.independent_view && t->identifier==0x36f00a6cu);
+                (scenery(t) && prepared.independent_view && t->identifier==0x36f00a6cu);
             uint32_t *flags=(uint32_t *)(t->object+0x34u);
             *flags=(*flags&~4u)|(hidden?4u:0u);
             if(((*flags&4u)!=0u)!=hidden) goto fail;
@@ -2532,8 +2542,13 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
             slot=free_slot;
         }
         SudekiMpStoryDamageIdentity id={t->entity,t->identifier,t->native_identifier,frame->epoch,frame->actors[i].generation};
+        monster_hp[slot].dead=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEAD)!=0;
+        unsigned emitted=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK)>>
+            SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT;
+        monster_hp[slot].death_effect=monster_hp[slot].death_seen==emitted?0:emitted;
         if(!monster_hp[slot].identity.identifier || !monster_damage_bound(&monster_hp[slot].identity)) {
             monster_hp[slot].stat_visible=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE)!=0;
+            monster_hp[slot].death_seen=0;monster_hp[slot].death_effect=emitted;
             monster_hp[slot].identity=id; monster_hp[slot].hp=hp; monster_hp[slot].pending=0.0f; continue;
         }
         monster_hp[slot].stat_visible=(frame->actors[i].visual_flags&SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE)!=0;
@@ -2631,6 +2646,8 @@ void SudekiMpLanStoryWorldTickMonsterFeedback(void) {
     uint8_t *const *entries=readable(owner,0x40u)?*(uint8_t *const *const *)(owner+0x3cu):NULL;
     if(!count || count>MAX_REGISTRY || !readable(entries,count*sizeof(*entries))) return;
     world_flash_fn=base+0xdfab0u;
+    /* Native death owns no client simulation. Hide the two health/name UI
+     * branches after native feedback updates, leaving floating numbers alone. */
     for(unsigned f=0;f<MAX_MONSTER_HP;++f) {
         uint8_t *e=feedback[f].entity; if(!e) continue;
         BOOL present=FALSE;
@@ -2652,10 +2669,16 @@ void SudekiMpLanStoryWorldTickMonsterFeedback(void) {
         }
         if(!flash_active && !stat_active && now-feedback[f].started>500u) feedback[f].entity=NULL;
     }
+    for(unsigned k=0;k<MAX_MONSTER_HP;++k) if(monster_hp[k].dead &&
+        monster_damage_bound(&monster_hp[k].identity)) {
+        SudekiMpStoryDamageGuard proof;
+        if(SudekiMpStoryDamageCapture(base,&monster_hp[k].identity,&proof,memory))
+            (void)SudekiMpStoryDamageHideHealth(base,monster_hp[k].identity.entity,memory);
+    }
 }
 BOOL SudekiMpLanStoryWorldMonsterDamagePending(void) {
     if(damage_restore.lifted) return TRUE;
-    for(unsigned k=0;k<MAX_MONSTER_HP;++k) if(monster_hp[k].identity.identifier && monster_hp[k].pending>=0.5f) return TRUE;
+    for(unsigned k=0;k<MAX_MONSTER_HP;++k) if(monster_hp[k].identity.identifier && (monster_hp[k].pending>=0.5f || monster_hp[k].death_effect)) return TRUE;
     return FALSE;
 }
 static float monster_damage_hp(uint8_t *e) {
@@ -2673,6 +2696,15 @@ BOOL SudekiMpLanStoryWorldFlushMonsterDamage(void) {
         if(!monster_hp[k].identity.identifier) continue;
         if(!monster_damage_bound(&monster_hp[k].identity)) {
             memset(&monster_hp[k],0,sizeof(monster_hp[k])); continue;
+        }
+        if(monster_hp[k].death_effect) {
+            if(SudekiMpLanStorySpawnDeathPresent(monster_hp[k].identity.entity,
+                monster_hp[k].identity.identifier,monster_hp[k].death_effect)) {
+                entered=TRUE;monster_hp[k].death_seen=monster_hp[k].death_effect;
+            }
+            /* Presentation is deduplicated by the intrusive spawn lease.
+             * Future authoritative snapshots may retry a not-ready resource. */
+            monster_hp[k].death_effect=0;
         }
         if(monster_hp[k].pending<0.5f) continue;
         if(!SudekiMpStoryDamageCapture(base,&monster_hp[k].identity,&damage_restore,memory)) continue;

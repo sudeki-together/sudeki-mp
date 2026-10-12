@@ -11,4 +11,8 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
     SudekiMpStoryCharacterAudioExact exact,void *context);
 BOOL SudekiMpStoryCharacterAudioStop(unsigned character,SudekiMpStoryCharacterAudioExact exact,void *context);
 BOOL SudekiMpStoryCharacterAudioRetains(void);
+/* Caller proves a retained parent-free FX sound component inside the exact
+ * client residency operation. Uses the native bank setter/refcount lifetime. */
+BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *roster,
+    unsigned character,void *sound);
 #endif

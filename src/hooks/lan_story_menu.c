@@ -26,9 +26,39 @@ static BOOL resource_before[3],resource_expected[3];
 static DWORD resources_at;
 static BOOL combat_owned,combat_before,combat_expected;
 static void *combat_group,*combat_world;
+static BOOL test_invulnerable,test_invulnerability_owned,test_invulnerability_before;
+static BOOL test_invulnerability_confirmed;
 
 static BOOL thread_exact(void) {
     return initialized && native_thread==GetCurrentThreadId();
+}
+void SudekiMpLanStoryMenuTestInvulnerable(BOOL enabled) {
+    if(!initialized) test_invulnerable=enabled!=FALSE;
+}
+static void service_test_invulnerability(BOOL host_ready) {
+    BOOL before=FALSE;
+    if(!test_invulnerable || !thread_exact() || local_player || native_tools_only ||
+        tools_stopping || leave_requested || !host_ready) return;
+    if(!test_invulnerability_owned) {
+        if(!SudekiMpCleanroomEnginePartyInvulnerable(&before)) return;
+        test_invulnerability_before=before;
+        /* The native reconciler may partially acquire before returning false.
+         * Retain restoration responsibility before entering it. */
+        test_invulnerability_owned=TRUE;
+    }
+    BOOL confirmed=SudekiMpCleanroomEngineMaintainPartyInvulnerability(TRUE);
+    if(confirmed!=test_invulnerability_confirmed) {
+        SudekiMpLogFormat("lan_story_tools event=test_party_invulnerability status=%s speed=unchanged policy=host_native_party_leases\r\n",
+            confirmed?"confirmed":"pending");
+        test_invulnerability_confirmed=confirmed;
+    }
+}
+static BOOL drain_test_invulnerability(void) {
+    if(!test_invulnerability_owned) return TRUE;
+    if(!thread_exact() || local_player ||
+        !SudekiMpCleanroomEngineMaintainPartyInvulnerability(test_invulnerability_before)) return FALSE;
+    test_invulnerability_owned=test_invulnerability_confirmed=FALSE;
+    return TRUE;
 }
 static int resource_index(unsigned action) {
     switch(action) {
@@ -166,6 +196,7 @@ void SudekiMpLanStoryMenuServiceTools(void *controller,
         (void)SudekiMpCleanroomEngineServiceRangedPrime();
     tools_controller=controller; tools_witness=w; tools_scene=scene;
     tools_commands_ready=host_commands_ready;
+    service_test_invulnerability(tools_host_exact());
     if(!menu_open && !leave_requested) SudekiMpCleanroomMenuUpdate();
     DWORD now=GetTickCount();
     BOOL resources_enabled=FALSE;
@@ -181,6 +212,7 @@ BOOL SudekiMpLanStoryMenuDrainTools(void) {
     if(!thread_exact()) { SetLastError(ERROR_BUSY); return FALSE; }
     if(!tools_stopping && tools_installed) SudekiMpLanPartyToolsClose();
     tools_stopping=TRUE;
+    if(!drain_test_invulnerability()) return FALSE;
     if(!local_player && SudekiMpCleanroomEngineRangedCombatPrimePending()) return FALSE;
     if(combat_owned) {
         SudekiMpLanStoryNativeRoster roster; BOOL current;
@@ -247,6 +279,7 @@ static BOOL initialize_menu(HMODULE image,unsigned player,BOOL native_only) {
     native_tools_only=native_only;
     initialized=TRUE; menu_open=leave_requested=FALSE;
     tools_stopping=tools_commands_ready=FALSE; resource_owned=0; resources_at=0;
+    test_invulnerability_owned=test_invulnerability_confirmed=FALSE;
     combat_owned=FALSE; combat_group=combat_world=NULL;
     tools_controller=NULL; tools_witness=NULL; tools_scene=NULL;
     if(!SudekiMpInstallLanStoryToolsMenu(image,VK_F8,player,tools_command,tools_query,tools_status)) {

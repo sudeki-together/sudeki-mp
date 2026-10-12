@@ -687,7 +687,32 @@ static void test_old_story_movement_profile(void) {
     SudekiMpLanPartyPoll(host,GetTickCount());
     CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
     CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
-    hello[44]=20;
+    hello[44]=20; /* Old separate-edge melee profile. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=21; /* Old incomplete spawn-start profile. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=22; /* Old profile without world/drop cosmetic kinds. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=23; /* Previous profile lacks individual host spawn events. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=24; /* No live death-presentation flags. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=25;
     raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
     SudekiMpLanPartyPoll(host,GetTickCount()); (void)raw_read(sock,bytes,&source);
     CHECK(bytes[6]==RAW_ACK);
@@ -1507,13 +1532,27 @@ static void test_monster_display_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE]; size_t size=0;
     SudekiMpLanStoryWorldChunk out;
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
-    CHECK(size==172u && bytes[3]==8u);
+    CHECK(size==172u && bytes[3]==9u);
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     CHECK(out.actors[0].visual_flags==SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE);
     CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size-1u,&out));
-    bytes[3]=7u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=8u;
+    bytes[3]=8u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=9u;
     bytes[31]=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
+    CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    for(unsigned style=0;style<=7;++style) {
+        bytes[31]=SUDEKIMP_LAN_STORY_WORLD_DEAD|SUDEKIMP_LAN_STORY_WORLD_HIDDEN|
+            (style<<SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT);
+        CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)==(style<=4));
+    }
+    bytes[31]=1u<<SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT;
     CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    SudekiMpLanStoryWorldFrame next=frame,mid;
+    next.sequence=2;next.host_tick=100;
+    next.actors[0].visual_flags=SUDEKIMP_LAN_STORY_WORLD_DEAD|(4u<<SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT);
+    CHECK(SudekiMpLanStoryWorldFrameInterpolate(&frame,&next,99,&mid));
+    CHECK(mid.actors[0].visual_flags==frame.actors[0].visual_flags);
+    CHECK(SudekiMpLanStoryWorldFrameInterpolate(&frame,&next,100,&mid));
+    CHECK(mid.actors[0].visual_flags==next.actors[0].visual_flags);
     a->kind=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND; a->hit_points=0;
     CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     a->kind=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND; a->clip[0]=1;

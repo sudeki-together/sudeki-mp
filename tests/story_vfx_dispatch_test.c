@@ -4,11 +4,13 @@
 #include "../src/hooks/lan_story_runtime.c"
 #undef SudekiMpStoryMuzzleObserve
 #include "../src/hooks/lan_story_muzzle.c"
+#include "../src/network/lan_arena_protocol.c"
 #include <assert.h>
 #include <stdio.h>
 static SudekiMpStoryVfx packet={.epoch=1,.revision=2,.sequence=1,.stream=9,.current="road",.observed=1};
 static SudekiMpLanStoryScene remote_scene={.epoch=1,.revision=2,.phase=SUDEKIMP_LAN_STORY_READY,
     .available_mask=12,.leader_seat=3,.world="world"};
+static BOOL world_ready=TRUE;
 static BOOL packet_ready=TRUE,area_ready=TRUE,reset_ready=TRUE,inside;
 static unsigned creates,resets,operations,publishes,captures;
 static unsigned camera_captures[4],camera_publishes[4],camera_mask=5;
@@ -57,8 +59,8 @@ BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitn
     assert(w==expected_w && !inside);inside=TRUE;++operations;
     BOOL result=operation(context);inside=FALSE;return result;
 }
-BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE m,const SudekiMpStoryVfx *s,uint64_t serial,uint64_t prepared) {
-    (void)m;assert(inside && !observing && serial && s->observed==packet.observed);
+BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE m,const SudekiMpStoryVfx *s,uint64_t serial,uint64_t prepared, SudekiMpStoryVisualSoundSetup sound_setup,void *sound_context) {
+    (void)m;assert(sound_setup==vfx_sound_setup && sound_context);assert(inside && !observing && serial && s->observed==packet.observed);
     ++creates;last_prepared=prepared;last_visuals=*s;
     uint64_t required=s->count==64u?UINT64_MAX:((UINT64_C(1)<<s->count)-1u);
     return service_ready && (prepared&required)==required;
@@ -66,6 +68,9 @@ BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE m,const SudekiMpStoryVfx *s,uint6
 BOOL SudekiMpLanArenaSpiritVfxResetVisuals(HMODULE m) {(void)m;assert(inside);++resets;return reset_ready;}
 BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out) {
     memset(out,0,sizeof(*out));strcpy(out->current,"road");return area_ready;
+}
+BOOL SudekiMpLanStoryWorldVisuals(uint64_t stream,SudekiMpStoryVfx *out) {
+    assert(stream==packet.stream && out->stream==stream);return world_ready;
 }
 BOOL SudekiMpLanStoryCastCaptureVisuals(SudekiMpStoryVfx *out) {++captures;*out=packet;return packet_ready;}
 BOOL SudekiMpLanPartyPublishStoryVfx(SudekiMpLanPartySession *s,const SudekiMpStoryVfx *out) {
@@ -83,31 +88,49 @@ BOOL SudekiMpLanPartyPublishStoryCastView(SudekiMpLanPartySession *s,const Sudek
     assert(c<4 && (camera_mask&(1u<<c)) && out->cast_sequence==10+c);
     ++camera_publishes[c]; return TRUE;
 }
+BOOL SudekiMpLanStoryObserverRoster(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryScene *scene,SudekiMpLanStoryNativeRoster *out) {
+    (void)controller;assert(w==expected_w && scene && out);memset(out,0,sizeof(*out));return TRUE;
+}
+BOOL SudekiMpLanStoryCastReady(void) {return TRUE;}
+static unsigned sound_character;
+BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *r,unsigned character,void *sound) {
+    assert(r && sound);sound_character=character;return TRUE;
+}
 int main(void) {
+    const unsigned kinds[]={SUDEKIMP_LAN_STORY_VFX_SFXBS001_SPIRIT_WIND,
+        SUDEKIMP_LAN_STORY_VFX_SFXES008_NANO_REPAIRS,
+        SUDEKIMP_LAN_STORY_VFX_SFXTS008_INVINCIBLE_CITADEL,
+        SUDEKIMP_LAN_STORY_VFX_SFXAS011_WITCHES_KISS};
+    const unsigned types[]={5,14,0,1};SudekiMpLanStoryNativeRoster sound_roster={0};
+    for(unsigned c=0;c<4;++c) {
+        SudekiMpLanArenaSpiritVfxSnapshot v={.kind=kinds[c],.skill_sequence=1,.owner_actor_type=types[c]};
+        sound_character=4;assert(vfx_sound_setup(&sound_roster,&v,(void *)1) && sound_character==c);
+    }
     session=(void *)1;
     SudekiMpControlUpdateDispatchWitness w={.dispatch_serial=5,.service_post_original_exact=TRUE};expected_w=&w;
     SudekiMpLanPartyPeerStatus peer={.lease={.token=7,.generation=3,.seat=1}};
     SudekiMpLanStoryScene native=remote_scene; uint32_t now=1000;
-    follow_story_vfx(&w,&peer,now,&native);
+    follow_story_vfx(NULL,&w,&peer,now,&native);
     assert(creates==1 && operations==1 && story_vfx.active && story_vfx.serial==1);
-    packet_ready=FALSE;follow_story_vfx(&w,&peer,now+=100,&native);assert(operations==1 && story_vfx.active);
-    packet_ready=TRUE;area_ready=FALSE;follow_story_vfx(&w,&peer,now+=100,&native);assert(operations==1);
-    area_ready=TRUE;packet.epoch=2;follow_story_vfx(&w,&peer,now+=100,&native);assert(operations==1);
-    packet.epoch=1;strcpy(native.world,"other");follow_story_vfx(&w,&peer,now+=100,&native);assert(operations==1);
-    native=remote_scene;packet.observed=0;++packet.sequence;follow_story_vfx(&w,&peer,now+=100,&native);
+    packet_ready=FALSE;follow_story_vfx(NULL,&w,&peer,now+=100,&native);assert(operations==1 && story_vfx.active);
+    packet_ready=TRUE;area_ready=FALSE;follow_story_vfx(NULL,&w,&peer,now+=100,&native);assert(operations==1);
+    area_ready=TRUE;packet.epoch=2;follow_story_vfx(NULL,&w,&peer,now+=100,&native);assert(operations==1);
+    packet.epoch=1;strcpy(native.world,"other");follow_story_vfx(NULL,&w,&peer,now+=100,&native);assert(operations==1);
+    native=remote_scene;packet.observed=0;++packet.sequence;follow_story_vfx(NULL,&w,&peer,now+=100,&native);
     assert(creates==2 && !resets); /* Unknown roster reaches renderer without forced removal. */
-    packet.stream=10;reset_ready=FALSE;follow_story_vfx(&w,&peer,now+=100,&native);
+    packet.stream=10;reset_ready=FALSE;follow_story_vfx(NULL,&w,&peer,now+=100,&native);
     assert(resets==1 && creates==2 && story_vfx.stream==9 && story_vfx.active);
-    reset_ready=TRUE;follow_story_vfx(&w,&peer,now+=100,&native);
+    reset_ready=TRUE;follow_story_vfx(NULL,&w,&peer,now+=100,&native);
     assert(resets==2 && creates==3 && story_vfx.stream==10 && story_vfx.serial==2);
     assert(reset_story_vfx(&w) && !story_vfx.active && resets==3);
     packet.observed=1; ++packet.sequence;
-    follow_story_vfx(&w,&peer,now+=21,&native); assert(creates==4);
-    follow_story_vfx(&w,&peer,now+=21,&native); assert(creates==4); /* same packet: no repeated seek */
-    ++packet.sequence; follow_story_vfx(&w,&peer,now+=21,&native); assert(creates==5);
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==4);
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==4); /* same packet: no repeated seek */
+    ++packet.sequence; follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==5);
     ++packet.sequence; service_ready=FALSE;
-    follow_story_vfx(&w,&peer,now+=21,&native); assert(creates==6 && !story_vfx.ready);
-    service_ready=TRUE; follow_story_vfx(&w,&peer,now+=21,&native); assert(creates==7 && story_vfx.ready);
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==6 && !story_vfx.ready);
+    service_ready=TRUE; follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==7 && story_vfx.ready);
     cast_attempted=TRUE; captures=publishes=0;
     for(unsigned i=0;i<12;++i) publish_story_vfx(10000+i*21);
     assert(captures==12 && publishes==12); /* no hidden100ms area throttle */
@@ -119,6 +142,9 @@ int main(void) {
     }
     camera_mask=15; publish_story_vfx(11200);
     for(unsigned c=0;c<4;++c) assert(camera_publishes[c]==((5u&(1u<<c))?14u:1u));
+    packet_ready=TRUE;world_ready=FALSE;unsigned sent=publishes;
+    publish_story_vfx(11300);assert(publishes==sent && SudekiMpLanStoryCastReady());
+    world_ready=TRUE;publish_story_vfx(11400);assert(publishes==sent+1);
     /* Real projection through the real runtime dispatch. Only transport and
      * native geometry/containment are synthetic. The VFX packet wins the
      * race; its matching party journal arrives on the following dispatch. */
@@ -134,13 +160,17 @@ int main(void) {
     history[0]=(SudekiMpLanStoryFrame){.epoch=1,.revision=2,.available_mask=12};
     history[0].actors[3]=(SudekiMpLanStoryActor){.generation=2,.character=3,.weapon_item_plus_one=13};
     presented_generations[3]=2;now=GetTickCount();unsigned before=creates;
-    follow_story_vfx(&w,&peer,now,&native);
+    follow_story_vfx(NULL,&w,&peer,now,&native);
     assert(creates==before+1 && !story_vfx.ready && last_prepared==0);
     history[0].actors[3].shots=(SudekiMpLanStoryShots){.latest=1,.count=1,
         .events={{.sequence=1,.host_tick=1000,.item=12,.origin={10,2,30},.direction={0,0,1}}}};
-    follow_story_vfx(&w,&peer,now+=21,&native);
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native);
     assert(creates==before+2 && story_vfx.ready && last_prepared==1);
     assert(last_visuals.entries[0].position[1]==1 && last_visuals.entries[0].instance_sequence==1);
-    follow_story_vfx(&w,&peer,now+=21,&native);assert(creates==before+2); /* Ready packet is not replayed. */
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native);assert(creates==before+2); /* Ready packet is not replayed. */
+    ++packet.sequence;packet.entries[0].kind=SUDEKIMP_LAN_STORY_VFX_WORLD_SFXKK105_PROJECTILE02;
+    packet.entries[0].owner_actor_type=255;
+    follow_story_vfx(NULL,&w,&peer,now+=21,&native);
+    assert(story_vfx.ready && last_prepared==1 && last_visuals.entries[0].position[1]==2);
     puts("Story VFX and roster-camera controller dispatch: PASS (synthetic residency/transport; no rendering)");return 0;
 }

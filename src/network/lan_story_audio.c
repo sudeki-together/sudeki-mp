@@ -5,6 +5,8 @@ static void put(uint8_t *b,uint32_t v) {for(unsigned i=0;i<4;++i)b[i]=(uint8_t)(
 static uint32_t get(const uint8_t *b) {return b[0]|((uint32_t)b[1]<<8)|((uint32_t)b[2]<<16)|((uint32_t)b[3]<<24);}
 BOOL SudekiMpStoryAudioValid(const SudekiMpStoryAudio *s) {
     if(!s || !s->stream || !s->bank || s->character>=4 || s->count>SUDEKIMP_STORY_AUDIO_CAPACITY) return FALSE;
+    if((!s->start_sequence && s->start_tick) ||
+        (s->start_sequence && (int32_t)(s->tick-s->start_tick)<0))return FALSE;
     for(unsigned i=0;i<s->count;++i) {
         const SudekiMpStoryAudioCue *c=s->cues+i; float gain;memcpy(&gain,&c->gain,4);
         if(!c->id || !c->hash || c->index>=8192 || c->mode>1 || c->spatial>1 ||
@@ -18,6 +20,7 @@ BOOL SudekiMpStoryAudioEncode(const SudekiMpStoryAudio *s,uint8_t *b,size_t capa
     size_t size=32u+20u*s->count;if(capacity<size)return FALSE;memset(b,0,size);
     put(b,s->epoch);put(b+4,s->revision);put(b+8,s->tick);put(b+12,s->sequence);
     put(b+16,s->stream);put(b+20,s->bank);b[24]=s->character;b[25]=s->count;
+    b[26]=(uint8_t)s->start_sequence;b[27]=(uint8_t)(s->start_sequence>>8);put(b+28,s->start_tick);
     for(unsigned i=0;i<s->count;++i) {
         const SudekiMpStoryAudioCue *c=s->cues+i;uint8_t *p=b+32+20*i;
         put(p,c->id);put(p+4,c->started);put(p+8,c->hash);put(p+12,c->gain);
@@ -27,9 +30,8 @@ BOOL SudekiMpStoryAudioEncode(const SudekiMpStoryAudio *s,uint8_t *b,size_t capa
 }
 BOOL SudekiMpStoryAudioDecode(const uint8_t *b,size_t size,SudekiMpStoryAudio *s) {
     if(!b || !s || size<32 || b[25]>SUDEKIMP_STORY_AUDIO_CAPACITY || size!=32u+20u*b[25])return FALSE;
-    for(unsigned i=26;i<32;++i)if(b[i])return FALSE;
     SudekiMpStoryAudio v={.epoch=get(b),.revision=get(b+4),.tick=get(b+8),.sequence=get(b+12),
-        .stream=get(b+16),.bank=get(b+20),.character=b[24],.count=b[25]};
+        .stream=get(b+16),.bank=get(b+20),.character=b[24],.count=b[25],.start_sequence=(uint16_t)(b[26]|((uint16_t)b[27]<<8)),.start_tick=get(b+28)};
     for(unsigned i=0;i<v.count;++i) {
         const uint8_t *p=b+32+20*i;v.cues[i]=(SudekiMpStoryAudioCue){get(p),get(p+4),get(p+8),get(p+12),
             (uint16_t)(p[16]|((uint16_t)p[17]<<8)),p[18],p[19]};

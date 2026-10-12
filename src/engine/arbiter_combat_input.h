@@ -20,6 +20,12 @@ void SudekiMpSubmitArbiterCombatInput(
     int weapon_previous
 );
 
+/* Saved-story Tal/Buki: enter the verified combat-only join at DB189 with
+ * the exact DB0E0 prologue stack/register shape. No interaction-latch path,
+ * weapon switching, global-controller mutation or installed patch. */
+void SudekiMpSubmitArbiterMeleeSnapshot(void *combat_entry,void *arbiter,
+    int weak,int strong,int sweep,int block);
+
 /* Retail dodge: EAX is the arbiter, one callee-popped vector pointer.
  * Unlike locomotion, this enters the actor's own dodge component. */
 BOOL SudekiMpArbiterDodgeImageMatches(HMODULE module);

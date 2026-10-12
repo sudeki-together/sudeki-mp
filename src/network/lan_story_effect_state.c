@@ -12,12 +12,36 @@ static BOOL name_valid(const char *n,BOOL allow_empty) {
     for(unsigned j=i;j<SUDEKIMP_STORY_AREA_NAME;++j) if(n[j]) return FALSE;
     return allow_empty || i>0u;
 }
+BOOL SudekiMpStorySpawnGroupValid(const SudekiMpStorySpawnGroup *g) {
+    return g && name_valid(g->name,FALSE) && g->serial &&
+        g->method>=1u && g->method<=3u && g->sequence>=-1 &&
+        g->selection>=0 && g->selection<=255 &&
+        (g->method!=1u || !g->selection) && name_valid(g->scope,g->method!=3u) &&
+        (g->method==3u || !g->scope[0]);
+}
+BOOL SudekiMpStorySpawnGroupSame(const SudekiMpStorySpawnGroup *a,const SudekiMpStorySpawnGroup *b) {
+    return a && b && a->serial==b->serial && a->method==b->method &&
+        a->sequence==b->sequence && a->selection==b->selection &&
+        !_stricmp(a->name,b->name) && !_stricmp(a->scope,b->scope);
+}
+BOOL SudekiMpStorySpawnEventValid(const SudekiMpStorySpawnEvent *e) {
+    if(!e || !name_valid(e->group,FALSE) || !e->serial || !e->group_id || !e->resource ||
+        e->point>=256u || e->entry>=2048u || e->passes < -1 || !e->passes || e->flags>65535u) return FALSE;
+    for(unsigned i=0;i<3u;++i)
+        if((e->position[i]&0x7f800000u)==0x7f800000u || (e->forward[i]&0x7f800000u)==0x7f800000u) return FALSE;
+    return TRUE;
+}
 BOOL SudekiMpStoryEffectStateValid(const SudekiMpStoryEffectState *s) {
     if(!s || !name_valid(s->current,FALSE)) return FALSE;
     static const SudekiMpStorySpawnGroup zero_group;
     if(s->group_count>SUDEKIMP_STORY_SPAWN_GROUP_MAX) return FALSE;
-    for(unsigned i=0;i<s->group_count;++i)
-        if(!name_valid(s->groups[i].name,FALSE) || s->groups[i].sequence<0) return FALSE;
+    for(unsigned i=0;i<s->group_count;++i) {
+        if(!SudekiMpStorySpawnGroupValid(&s->groups[i])) return FALSE;
+        for(unsigned j=0;j<i;++j)
+            if(s->groups[i].serial==s->groups[j].serial ||
+                (!_stricmp(s->groups[i].name,s->groups[j].name) &&
+                 !_stricmp(s->groups[i].scope,s->groups[j].scope))) return FALSE;
+    }
     for(unsigned i=s->group_count;i<SUDEKIMP_STORY_SPAWN_GROUP_MAX;++i)
         if(memcmp(&s->groups[i],&zero_group,sizeof(zero_group))) return FALSE;
     if(!name_valid(s->vertical_fog,TRUE)) return FALSE;
@@ -55,6 +79,27 @@ BOOL SudekiMpStoryEffectStateValid(const SudekiMpStoryEffectState *s) {
         for(unsigned a=0;a<3u;++a) if((r->position[a]&0x7f800000u)==0x7f800000u) return FALSE;
         for(unsigned j=0;j<i;++j) if(s->drops[j].serial==r->serial) return FALSE;
     }
+    if(s->gates_valid>1u || s->gate_count>SUDEKIMP_STORY_GATE_GROUP_MAX ||
+        (!s->gates_valid && s->gate_count)) return FALSE;
+    static const SudekiMpStoryGateGroup zero_gate;
+    for(unsigned i=0;i<SUDEKIMP_STORY_GATE_GROUP_MAX;++i) {
+        const SudekiMpStoryGateGroup *g=&s->gates[i];
+        if(i>=s->gate_count) {if(memcmp(g,&zero_gate,sizeof(*g))) return FALSE; continue;}
+        if(!name_valid(g->name,FALSE) || !g->serial || !g->resource ||
+            !g->point_count || g->point_count>SUDEKIMP_STORY_GATE_POINTS ||
+            (g->point_count<32u && (g->live_mask>>g->point_count))) return FALSE;
+        for(unsigned j=0;j<i;++j)
+            if(!_stricmp(g->name,s->gates[j].name) || g->serial==s->gates[j].serial) return FALSE;
+    }
+    if(s->spawns_valid>1u || s->spawn_count>SUDEKIMP_STORY_SPAWN_MAX ||
+        (!s->spawns_valid && s->spawn_count)) return FALSE;
+    static const SudekiMpStorySpawnEvent zero_spawn;
+    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_MAX;++i) {
+        const SudekiMpStorySpawnEvent *e=&s->spawns[i];
+        if(i>=s->spawn_count) {if(memcmp(e,&zero_spawn,sizeof(*e))) return FALSE;continue;}
+        if(!SudekiMpStorySpawnEventValid(e)) return FALSE;
+        for(unsigned j=0;j<i;++j) if(e->serial==s->spawns[j].serial) return FALSE;
+    }
     if(s->music_flags!=0u && s->music_flags!=1u && s->music_flags!=3u) return FALSE;
     if(!name_valid(s->music_score,!(s->music_flags&1u))) return FALSE;
     if(!s->music_flags) {
@@ -85,7 +130,10 @@ BOOL SudekiMpStoryEffectStateEncode(const SudekiMpStoryEffectState *s,uint8_t *p
 #define NAME(f) do {memcpy(e,s->f,SUDEKIMP_STORY_AREA_NAME); e+=SUDEKIMP_STORY_AREA_NAME;} while(0)
 #define BYTE(f) do {*e++=s->f;} while(0)
     WORD(epoch); WORD(revision); WORD(observed_tick); WORD(sequence); NAME(current); BYTE(group_count);
-    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_GROUP_MAX;++i) {NAME(groups[i].name); WORD(groups[i].sequence);}
+    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_GROUP_MAX;++i) {
+        NAME(groups[i].name); WORD(groups[i].sequence); WORD(groups[i].serial);
+        WORD(groups[i].method); WORD(groups[i].selection); NAME(groups[i].scope);
+    }
     for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i) {
         WORD(sky[i].serial); for(unsigned j=0;j<SUDEKIMP_STORY_SKY_ARGS;++j) {WORD(sky[i].args[j]);}
     }
@@ -106,6 +154,18 @@ BOOL SudekiMpStoryEffectStateEncode(const SudekiMpStoryEffectState *s,uint8_t *p
     }
     WORD(music_flags); WORD(music_intensity); NAME(music_score);
     WORD(music_variation); for(unsigned i=0;i<6u;++i) {WORD(music_curve[i]);}
+    BYTE(gates_valid); BYTE(gate_count);
+    for(unsigned i=0;i<SUDEKIMP_STORY_GATE_GROUP_MAX;++i) {
+        NAME(gates[i].name); WORD(gates[i].serial); WORD(gates[i].resource);
+        WORD(gates[i].point_count); WORD(gates[i].live_mask);
+    }
+    BYTE(spawns_valid); BYTE(spawn_count);
+    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_MAX;++i) {
+        NAME(spawns[i].group); WORD(spawns[i].serial); WORD(spawns[i].group_id);
+        WORD(spawns[i].resource); WORD(spawns[i].point); WORD(spawns[i].entry); WORD(spawns[i].passes);
+        for(unsigned j=0;j<3u;++j) {WORD(spawns[i].position[j]); WORD(spawns[i].forward[j]);}
+        WORD(spawns[i].flags);
+    }
 #undef WORD
 #undef NAME
 #undef BYTE
@@ -118,7 +178,10 @@ BOOL SudekiMpStoryEffectStateDecode(const uint8_t *p,size_t n,SudekiMpStoryEffec
 #define NAME(f) do {memcpy(s->f,e,SUDEKIMP_STORY_AREA_NAME); e+=SUDEKIMP_STORY_AREA_NAME;} while(0)
 #define BYTE(f) do {s->f=*e++;} while(0)
     WORD(epoch); WORD(revision); WORD(observed_tick); WORD(sequence); NAME(current); BYTE(group_count);
-    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_GROUP_MAX;++i) {NAME(groups[i].name); WORD(groups[i].sequence);}
+    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_GROUP_MAX;++i) {
+        NAME(groups[i].name); WORD(groups[i].sequence); WORD(groups[i].serial);
+        WORD(groups[i].method); WORD(groups[i].selection); NAME(groups[i].scope);
+    }
     for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i) {
         WORD(sky[i].serial); for(unsigned j=0;j<SUDEKIMP_STORY_SKY_ARGS;++j) {WORD(sky[i].args[j]);}
     }
@@ -139,6 +202,18 @@ BOOL SudekiMpStoryEffectStateDecode(const uint8_t *p,size_t n,SudekiMpStoryEffec
     }
     WORD(music_flags); WORD(music_intensity); NAME(music_score);
     WORD(music_variation); for(unsigned i=0;i<6u;++i) {WORD(music_curve[i]);}
+    BYTE(gates_valid); BYTE(gate_count);
+    for(unsigned i=0;i<SUDEKIMP_STORY_GATE_GROUP_MAX;++i) {
+        NAME(gates[i].name); WORD(gates[i].serial); WORD(gates[i].resource);
+        WORD(gates[i].point_count); WORD(gates[i].live_mask);
+    }
+    BYTE(spawns_valid); BYTE(spawn_count);
+    for(unsigned i=0;i<SUDEKIMP_STORY_SPAWN_MAX;++i) {
+        NAME(spawns[i].group); WORD(spawns[i].serial); WORD(spawns[i].group_id);
+        WORD(spawns[i].resource); WORD(spawns[i].point); WORD(spawns[i].entry); WORD(spawns[i].passes);
+        for(unsigned j=0;j<3u;++j) {WORD(spawns[i].position[j]); WORD(spawns[i].forward[j]);}
+        WORD(spawns[i].flags);
+    }
 #undef WORD
 #undef NAME
 #undef BYTE

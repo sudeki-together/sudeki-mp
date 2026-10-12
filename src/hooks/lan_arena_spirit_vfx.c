@@ -149,7 +149,13 @@ static const SpiritVisualResource visual_resources[SUDEKIMP_LAN_STORY_VFX_LAST] 
     {"SFXEP005_ELUVIAM_JACKHAMMER.HOM", 0x661fb62du},
     {"SFXEP006_PHOENIX_REBIRTH.HOM", 0xda7a5273u},
     {"SFXEP007_SHOOTING_IRON.HOM", 0xbe566943u},
-    {"SFXHT104_MISS_BLADE2MAGIC.HOM", 0x06d8e387u}
+    {"SFXHT104_MISS_BLADE2MAGIC.HOM", 0x06d8e387u},
+#define SKILL_RESOURCE(symbol,name,id,mask) {name ".HOM",id},
+    SUDEKIMP_STORY_SKILL_RESOURCES(SKILL_RESOURCE)
+#undef SKILL_RESOURCE
+#define WORLD_RESOURCE(symbol,name,id,mask) {name ".HOM",id},
+    SUDEKIMP_STORY_WORLD_RESOURCES(WORLD_RESOURCE)
+#undef WORLD_RESOURCE
 };
 
 static const uint8_t expected_sfx_play_body[] = {
@@ -1220,6 +1226,10 @@ typedef struct VisualPlaybackPlan {
 
 static BOOL visual_one_shot(unsigned kind) {
     const SpiritVisualResource *resource=visual_resource(kind);
+    if(SudekiMpLanStoryWorldVfxSourceMask(kind) && resource) {
+        if(SudekiMpLanStoryWorldVfxSourceMask(kind)&4u) return FALSE;
+        return !strstr(resource->name,"PROJECTILE") && !strstr(resource->name,"LOOP") && !strstr(resource->name,"IDLE");
+    }
     if(kind>=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST && resource)
         return resource->name[4]!='P'; /* Authored fire/hit burst, not moving projectile. */
     return kind==SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_ONE ||
@@ -1355,6 +1365,7 @@ static BOOL same_visual_identity(const SudekiMpLanArenaSpiritVfxSnapshot *a,
         a->emitted_host_tick == b->emitted_host_tick;
 }
 
+static BOOL visual_weak_links_valid(const SudekiMpLanArenaSpiritVfxTransientTPtr *observer);
 static BOOL service_visuals_locked(SudekiMpLanArenaSpiritVfxVisualState *state,
     const SudekiMpStoryVfx *snapshot, uint64_t session_token,uint64_t prepared,
     const SudekiMpLanArenaSpiritVfxVisualApi *api) {
@@ -1413,6 +1424,19 @@ static BOOL service_visuals_locked(SudekiMpLanArenaSpiritVfxVisualState *state,
         }
         if (!present && !retire_visual_slot(slot, api)) result = FALSE;
     }
+    /* The native cache has 64 cells. New roster skills are demand-loaded;
+     * release their leases only after complete host withdrawal AND local
+     * retirement. Unknown observations and failed retirements retain leases. */
+    for (index = SUDEKIMP_LAN_STORY_VFX_SKILL_FIRST - 1u;
+            index < SUDEKIMP_LAN_STORY_VFX_LAST; ++index) {
+        BOOL needed = FALSE;
+        for (other = 0; other < snapshot->count; ++other)
+            if (snapshot->entries[other].kind == index + 1u) needed = TRUE;
+        for (other = 0; other < SUDEKIMP_STORY_VFX_CAPACITY; ++other)
+            if (state->slots[other].occupied &&
+                state->slots[other].identity.kind == index + 1u) needed = TRUE;
+        if (!needed && !release_locked(&state->caches[index], &api->cache)) result = FALSE;
+    }
     previous_newest = state->newest_instance_sequence;
     for (index = 0u; index < snapshot->count; ++index) {
         const SudekiMpLanArenaSpiritVfxSnapshot *visual =
@@ -1454,6 +1478,14 @@ static BOOL service_visuals_locked(SudekiMpLanArenaSpiritVfxVisualState *state,
             if (!api->spawn(api->cache.context, cache->manager, visual,
                     &slot->observer)) { result = FALSE; continue; }
             slot->spawn_entered = TRUE;
+        }
+        if (slot->observer.object && api->sound_setup) {
+            uint8_t *entity=slot->observer.object;
+            if (!visual_weak_links_valid(&slot->observer) ||
+                !SudekiMpLanArenaSpiritVfxVisualIdentityMatches((HMODULE)api->cache.context,entity) ||
+                *(uint32_t *)(entity+0x2a0u)!=resource->identifier) result=FALSE;
+            else if (!(entity[0x3e0u]&8u) &&
+                !api->sound_setup(api->sound_context,visual,entity+0x2e8u)) result=FALSE;
         }
         /* Native destruction nulls the weak node. It is still consumed. */
         if (slot->observer.object != NULL &&
@@ -1977,7 +2009,8 @@ static void fill_visual_api(HMODULE module,
 }
 
 static BOOL service_native_visuals(HMODULE module,
-    const SudekiMpStoryVfx *snapshot, uint64_t session_token, BOOL party,uint64_t prepared) {
+    const SudekiMpStoryVfx *snapshot, uint64_t session_token, BOOL party,uint64_t prepared,
+    SudekiMpStoryVisualSoundSetup sound_setup,void *sound_context) {
     SudekiMpLanArenaSpiritVfxVisualApi api;
     BOOL result;
     DWORD service_error;
@@ -1986,6 +2019,7 @@ static BOOL service_native_visuals(HMODULE module,
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     fill_visual_api(module, &api);
+    api.sound_setup=sound_setup; api.sound_context=sound_context;
     result = SudekiMpLanStoryVfxServicePreparedVisualsWithApi(
         &production_visuals, snapshot, session_token, prepared, &api);
     if (visual_quarantined) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
@@ -2041,7 +2075,7 @@ static BOOL service_native_visuals(HMODULE module,
 BOOL SudekiMpLanArenaSpiritVfxServiceVisuals(HMODULE module,
     const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token) {
     SudekiMpStoryVfx v;
-    return legacy_visuals(snapshot,&v) && service_native_visuals(module,&v,session_token,FALSE,UINT8_MAX);
+    return legacy_visuals(snapshot,&v) && service_native_visuals(module,&v,session_token,FALSE,UINT8_MAX,NULL,NULL);
 }
 BOOL SudekiMpLanPartyShieldServiceVisuals(HMODULE module,
     const SudekiMpLanArenaSnapshot *snapshot, uint64_t session_token) {
@@ -2050,14 +2084,15 @@ BOOL SudekiMpLanPartyShieldServiceVisuals(HMODULE module,
     for(unsigned i=0; i<snapshot->spirit_vfx_count; ++i)
         if(!SudekiMpLanPartyShieldOwnerValid(&snapshot->spirit_vfx[i])) return FALSE;
     SudekiMpStoryVfx v;
-    return legacy_visuals(snapshot,&v) && service_native_visuals(module,&v,session_token,TRUE,UINT8_MAX);
+    return legacy_visuals(snapshot,&v) && service_native_visuals(module,&v,session_token,TRUE,UINT8_MAX,NULL,NULL);
 }
 
 BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE module,
-    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared) {
+    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared,
+    SudekiMpStoryVisualSoundSetup sound_setup,void *sound_context) {
     if(!snapshot || !SudekiMpLanStoryCastVfxEntriesValid(snapshot->tick,snapshot->cast_sequence,
         snapshot->observed,snapshot->count,snapshot->entries,SUDEKIMP_STORY_VFX_CAPACITY)) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
-    return service_native_visuals(module,snapshot,session_token,2,prepared);
+    return service_native_visuals(module,snapshot,session_token,2,prepared,sound_setup,sound_context);
 }
 
 BOOL SudekiMpLanArenaSpiritVfxResetVisuals(HMODULE module) {

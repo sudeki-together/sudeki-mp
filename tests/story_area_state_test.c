@@ -20,6 +20,7 @@ int main(void) {
     SudekiMpStoryAreaState s=sample(),d;
     assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==421u && SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u);
     assert(SudekiMpStoryAreaStateValid(&s));
+    assert(SudekiMpStoryAreaStateExterior(&s));
     assert(SudekiMpStoryAreaStateEncode(&s,wire,sizeof(wire)));
     assert(SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d) && !memcmp(&s,&d,sizeof(s)));
     assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire)-1u,&d));
@@ -33,6 +34,17 @@ int main(void) {
     d=s; d.target[30]='x'; assert(!SudekiMpStoryAreaStateValid(&d));
     d=s; d.entries[5].state=1; assert(!SudekiMpStoryAreaStateValid(&d));
     d=s; d.count=9; assert(!SudekiMpStoryAreaStateValid(&d));
+    /* An interior report remains valid on the wire, but never authorizes
+     * the outdoor follower. This remains true if scene/area packets reorder. */
+    d=s; d.entries[2].state=4;
+    assert(SudekiMpStoryAreaStateValid(&d) && !SudekiMpStoryAreaStateExterior(&d));
+    d=s; d.entries[1].state=4; assert(!SudekiMpStoryAreaStateExterior(&d));
+    d=s; d.count=0; memset(d.entries,0,sizeof(d.entries));
+    assert(SudekiMpStoryAreaStateValid(&d) && !SudekiMpStoryAreaStateExterior(&d));
+    d=s; d.entries[2].state=2; assert(!SudekiMpStoryAreaStateExterior(&d));
+    d=s; d.entries[1]=d.entries[2]; assert(!SudekiMpStoryAreaStateExterior(&d));
+    d=s; strcpy(d.current,"ws_country_se_to_bright_ne");
+    assert(SudekiMpStoryAreaStateExterior(&d));
     d=s; d.current[2]='\x07'; assert(!SudekiMpStoryAreaStateValid(&d));
     memset(d.target,'a',sizeof(d.target)); d=s; memset(d.target,'a',sizeof(d.target)); assert(!SudekiMpStoryAreaStateValid(&d));
     /* Empty target is allowed (no background load pending). */

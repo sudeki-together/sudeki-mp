@@ -82,7 +82,7 @@ BOOL SudekiMpLanPartyCastRetainedEffectOwner(void *actor,SudekiMpLanPartyEffectO
     if(!out || !bound || GetCurrentThreadId()!=game_thread || i<0 ||
         !retained(actor,native_session) || !casts[i].instance.generation) return FALSE;
     *out=(SudekiMpLanPartyEffectOwner){native_session,casts[i].instance.generation,
-        actor,SudekiMpLanPartyActorType((unsigned)i)};
+        actor,SudekiMpLanPartyActorType((unsigned)i),0u};
     return TRUE;
 }
 static void host_projectile(void *actor,void *manager) {

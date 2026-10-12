@@ -18,6 +18,8 @@ typedef struct SudekiMpStoryAudioCue {
 typedef struct SudekiMpStoryAudio {
     uint32_t epoch,revision,tick,sequence,stream,bank;
     uint8_t character,count;
+    uint16_t start_sequence;
+    uint32_t start_tick; /* Last positively observed native global Spirit cue. */
     SudekiMpStoryAudioCue cues[SUDEKIMP_STORY_AUDIO_CAPACITY];
 } SudekiMpStoryAudio;
 BOOL SudekiMpStoryAudioValid(const SudekiMpStoryAudio *state);

@@ -82,7 +82,7 @@ BOOL SudekiMpLanCastContextActorDrained(void *a,uint64_t life) { return ix(a)>=0
 BOOL SudekiMpLanCastContextDrained(void) { return lineage_idle; }
 BOOL SudekiMpObserveSpiritInstance(const SudekiMpSpiritInstance *s,SudekiMpSpiritInstanceState *o) {
     if(!known || s->generation<1 || s->generation>4) return FALSE;
-    memset(o,0,sizeof(*o)); o->body_idle=instance_idle[s->generation-1]; o->idle=o->body_idle && !lighting_tail; return TRUE;
+    memset(o,0,sizeof(*o)); o->state=spirit_active?7:0; o->body_idle=instance_idle[s->generation-1]; o->idle=o->body_idle && !lighting_tail; return TRUE;
 }
 BOOL SudekiMpObserveSpiritInstanceActivity(const SudekiMpSpiritInstance *s,BOOL *a) {
     (void)s; *a=spirit_active; return known;
@@ -137,7 +137,13 @@ BOOL SudekiMpLanCastContextCurrentRetained(SudekiMpLanCastOwner *out) {
     if(!visual_lineage_known) return FALSE;
     *out=visual_lineage; return TRUE;
 }
-BOOL SudekiMpLanPartyProjectileLifetimeCurrent(SudekiMpLanPartyEffectOwner *out) { (void)out; return FALSE; }
+static SudekiMpLanPartyEffectOwner visual_projectile_owner;
+static BOOL visual_projectile_scope;
+BOOL SudekiMpLanPartyProjectileLifetimeCurrent(SudekiMpLanPartyEffectOwner *out) {
+    if(!visual_projectile_scope) return FALSE;
+    *out=visual_projectile_owner;return TRUE;
+}
+BOOL SudekiMpLanPartyEffectLifetimeCurrent(SudekiMpLanPartyEffectOwner *out) { return effect_owner(NULL,out); }
 BOOL SudekiMpLanCastContextPoll(void) { return known; }
 BOOL SudekiMpLanPartyEffectLifetimePoll(void) { return known; }
 BOOL SudekiMpLanPartyProjectileLifetimePoll(void) { return known; }
@@ -148,7 +154,7 @@ BOOL SudekiMpDrainSpiritInstanceSkillTiming(const SudekiMpSpiritInstance *s) { (
 BOOL SudekiMpLanPartyProjectileLifetimeRequestRetire(void) { assert(shutdown_drained()); return TRUE; }
 BOOL SudekiMpLanPartyEffectLifetimeRequestRetire(void) { assert(shutdown_drained()); return TRUE; }
 void SudekiMpLogFormat(const char *format,...) { (void)format; }
-uint8_t SudekiMpLanPartyActorType(unsigned c) { return c==2?0x23:1; }
+uint8_t SudekiMpLanPartyActorType(unsigned c) { const uint8_t types[]={5,14,35,1};return c<4?types[c]:0; }
 static void reset(void) {
     memset(caster,0,sizeof(caster)); memset(&owners,0,sizeof(owners));
     memset(skills,0,sizeof(skills)); memset(speed,0,sizeof(speed));
@@ -175,6 +181,34 @@ static void reset(void) {
     camera_known=TRUE; camera_changes_owner=FALSE;
     camera_observation=(SudekiMpSpiritCameraView){.kind=1,
         .matrix={1,0,0,0,0,1,0,0,0,0,1,0,10,20,30,1},.projection={1,.1f,1000}};
+}
+static SudekiMpLanArenaSpiritAudioEvent audio_events[4];
+size_t SudekiMpLanArenaSpiritAudioTraceSnapshot(SudekiMpLanArenaSpiritAudioEvent *out,size_t capacity,uint32_t *dropped) {
+    assert(capacity>=4 && !dropped);memcpy(out,audio_events,sizeof(audio_events));return 4;
+}
+static void cast_audio_publication(void) {
+    reset();audio_owned=TRUE;caster[2].sequence=5;spirit_active=TRUE;
+    int state;uint64_t session;uint16_t sequence;uint8_t character;uint32_t tick;
+    assert(!audio_witness(NULL,&state,&session,&sequence,&character));
+    neutral_scope=FALSE;
+    assert(audio_witness(NULL,&state,&session,&sequence,&character));
+    assert(state==7 && session==9 && sequence==5 && character==2);
+    identity=FALSE;assert(!audio_witness(NULL,&state,&session,&sequence,&character));identity=TRUE;
+    known=FALSE;assert(!audio_witness(NULL,&state,&session,&sequence,&character));known=TRUE;
+    spirit_active=FALSE;assert(!audio_witness(NULL,&state,&session,&sequence,&character));spirit_active=TRUE;
+    for(unsigned i=0;i<4;++i) audio_events[i]=(SudekiMpLanArenaSpiritAudioEvent){
+        .session_token=9,.owner_seat=2,.skill_sequence=5,.observed_tick=100,.cue="spiritstrike_start"};
+    audio_events[0].session_token=8;audio_events[1].owner_seat=3;audio_events[2].skill_sequence=4;
+    SudekiMpLanStoryCastCaptureAudioStart(2,&sequence,&tick);assert(sequence==5 && tick==100);
+    audio_events[3].observed_tick=200; /* Same cast cannot restart the one-shot. */
+    SudekiMpLanStoryCastCaptureAudioStart(2,&sequence,&tick);assert(sequence==5 && tick==100);
+    ++caster[2].sequence;
+    SudekiMpLanStoryCastCaptureAudioStart(2,&sequence,&tick);assert(sequence==5 && tick==100);
+    ++audio_events[3].skill_sequence;
+    SudekiMpLanStoryCastCaptureAudioStart(2,&sequence,&tick);assert(sequence==6 && tick==200);
+    identity=FALSE;SudekiMpLanStoryCastCaptureAudioStart(2,&sequence,&tick);assert(!sequence && !tick);
+    identity=TRUE;audio_owned=FALSE;
+    puts("PASS Spirit startup exact scoped native witness, character/session/cast fences, emission timestamp and duplicate suppression");
 }
 static void cast_camera_publication(void) {
     SudekiMpStoryCastView view,before;
@@ -230,9 +264,12 @@ static void cast_camera_publication(void) {
     }
     puts("PASS all four characters ordinary/Spirit native camera choices, obstruction fallback, completion, recast and unknown ownership");
 }
+#include "story_cast_binding_fixture.h"
 int main(void) {
     image=VirtualAlloc(NULL,0x409000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE); assert(image);
+    cast_binding_lifecycle();
     cast_camera_publication();
+    cast_audio_publication();
     SudekiMpControlUpdateDispatchWitness w={.dispatch_serial=5,.service_post_original_exact=TRUE};
     SudekiMpLanStoryNativeRoster r={0}; r.actors[2]=actors[2];
     SudekiMpLanPartyLease key={.token=21,.generation=8,.seat=2};
@@ -261,6 +298,24 @@ int main(void) {
     visual_lineage.session=9;visual_lineage.kind=3;
     assert(!visual_owner(NULL,NULL,&visual_session,&visual_sequence,&visual_tick,&visual_type));
     visual_lineage_known=FALSE;
+    for(unsigned c=0;c<4;++c) {
+        reset(); owners.available_mask=15;
+        for(unsigned i=0;i<4;++i) { owners.actors[i]=caster[i].actor=actors[i];caster[i].instance.generation=i+1; }
+        caster[c].sequence=10+c;
+        visual_lineage=(SudekiMpLanCastOwner){.actor=actors[c],.session=9,.cast_id=2,.kind=1};
+        visual_lineage_known=TRUE;
+        assert(visual_owner(NULL,NULL,&visual_session,&visual_sequence,&visual_tick,&visual_type));
+        assert(visual_sequence==10+c && visual_type==(c==2?0:SudekiMpLanPartyActorType(c)));
+        assert(effect_owner(NULL,&visual_projectile_owner));
+        visual_lineage_known=FALSE;visual_projectile_scope=TRUE;
+        caster[c].sequence+=10; /* New cast must not relabel a delayed impact. */
+        assert(visual_owner(NULL,NULL,&visual_session,&visual_sequence,&visual_tick,&visual_type) && visual_sequence==10+c);
+        ++visual_projectile_owner.generation;
+        assert(!visual_owner(NULL,NULL,&visual_session,&visual_sequence,&visual_tick,&visual_type));
+        --visual_projectile_owner.generation;visual_projectile_owner.session=10;
+        assert(!visual_owner(NULL,NULL,&visual_session,&visual_sequence,&visual_tick,&visual_type));
+        visual_projectile_scope=FALSE;
+    }
     reset(); caster[2].started=TRUE; caster[2].skill=skills[2]; caster[2].sequence=1;
     native_active[2]=TRUE; aim_phase=SUDEKIMP_SKILL_TARGET_AIMING; aim_remaining=100;
     assert(SudekiMpLanStoryCastAiming(actors[2]) && !SudekiMpLanStoryCastBodyDrained(actors[2]));

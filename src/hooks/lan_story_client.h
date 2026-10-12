@@ -76,11 +76,12 @@ BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitn
     SudekiMpLanStoryClientResidencyOperation operation,void *context);
 /* A journaled SoloSpawnSetup continuation: witness proves the exact currently
  * executing job born inside our group call, including its live native owners.
- * Only that actor's native schedule transition 0 -> 4 may change; unrelated
+ * Only that actor's native schedule transition 0 -> 4 and the journal's
+ * optional terminal initialization-reference release may change; unrelated
  * survivors retain their complete pause/schedule proof. No permission survives
  * the callback. Refusal does not cancel or fabricate completion of native work. */
 BOOL SudekiMpLanStoryClientSpawnResidencyCall(BOOL (*witness)(void *),void *context,
-    uint8_t *actor,SudekiMpLanStoryClientResidencyOperation operation);
+    uint8_t *actor,const int *native_pause_delta,SudekiMpLanStoryClientResidencyOperation operation);
 /* Exact animation-owner cleanup callback. Only this already-owned effect may
  * disappear; no tasks/additions/other removals or survivor changes are allowed.
  * The callback witness must remain valid without reading retired storage. */

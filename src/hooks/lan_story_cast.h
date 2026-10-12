@@ -5,6 +5,8 @@
 #include "network/lan_story_vfx.h"
 #include "network/lan_story_cast_view.h"
 BOOL SudekiMpLanStoryCastShotOwner(void *actor,SudekiMpLanPartyEffectOwner *owner);
+/* Only a witnessed native spiritstrike_start emission, never camera/phase inference. */
+void SudekiMpLanStoryCastCaptureAudioStart(unsigned character,uint16_t *sequence,uint32_t *tick);
 BOOL SudekiMpLanStoryCastCaptureVisuals(SudekiMpStoryVfx *out);
 /* One remote character's retained native camera; host-local selection stays native. */
 BOOL SudekiMpLanStoryCastCaptureView(unsigned character,SudekiMpStoryCastView *out);

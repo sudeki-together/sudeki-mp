@@ -43,13 +43,14 @@ static int failures;
     } \
 } while (0)
 
+static uint8_t witness_character;
 static BOOL active_witness(void *context, int *native_state,
     uint64_t *session, uint16_t *sequence, uint8_t *owner) {
     WitnessState *state = (WitnessState *)context;
     if (state == NULL || native_state == NULL) return FALSE;
     ++state->calls;
     *native_state = state->native_state;
-    *session = 123u; *sequence = 7u; *owner = 0u;
+    *session = 123u; *sequence = 7u; *owner = witness_character;
     return state->active;
 }
 
@@ -320,6 +321,19 @@ static void test_exact_preflight_and_bounded_capture(void) {
           events[0].sequence == 1u && events[0].native_state == 9 &&
           strcmp(events[0].cue, "TAL_SS_spell") == 0);
     CHECK(rebound_witness.calls == 1u && witness.calls == 0u);
+    for(unsigned c=0;c<5;++c) {
+        witness_character=(uint8_t)c;DWORD before=GetTickCount();
+        invoke_play_cue(image,"spiritstrike_start");
+        count=SudekiMpLanArenaSpiritAudioTraceSnapshot(events,SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY,&dropped);
+        CHECK(count==(c<4?c+2u:5u));
+        if(c<4) {
+            CHECK(events[count-1].owner_seat==c && events[count-1].skill_sequence==7);
+            CHECK((int32_t)(events[count-1].observed_tick-before)>=0 &&
+                (int32_t)(GetTickCount()-events[count-1].observed_tick)>=0);
+        }
+    }
+    witness_character=0;
+
     CHECK(!SudekiMpInstallLanArenaSpiritAudioTrace(
         (HMODULE)image, active_witness, &rebound_witness));
     CHECK(GetLastError() == ERROR_ALREADY_EXISTS);

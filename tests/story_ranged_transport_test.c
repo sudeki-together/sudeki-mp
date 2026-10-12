@@ -109,7 +109,27 @@ int main(void) {
             }}Sleep(1);
     }
     assert(mask==14); /* Includes both shooters and a third observing client. */
+    /* Host-owned skill effects for every caster reach every client, including
+     * the caster's own view. Their counters are independent of Tal's header. */
+    const unsigned kinds[]={SUDEKIMP_LAN_STORY_VFX_SFXBS001_SPIRIT_WIND,
+        SUDEKIMP_LAN_STORY_VFX_SFXES008_NANO_REPAIRS,
+        SUDEKIMP_LAN_STORY_VFX_SFXTS008_INVINCIBLE_CITADEL,
+        SUDEKIMP_LAN_STORY_VFX_SFXAS011_WITCHES_KISS};
+    const unsigned types[]={5,14,0,1};
+    fx.count=4;fx.cast_sequence=2;fx.tick=GetTickCount();
+    for(unsigned c=0;c<4;++c) fx.entries[c]=(SudekiMpLanArenaSpiritVfxSnapshot){
+        .instance_sequence=10+c,.skill_sequence=c==2?2:50+c,.owner_actor_type=types[c],.kind=kinds[c],
+        .emitted_host_tick=fx.tick,.position={5,2,7},.rotation_xyzw={0,0,0,1},.scale={1,1,1}};
+    assert(!SudekiMpLanPartyPublishStoryVfx(nodes[1],&fx));
+    assert(SudekiMpLanPartyPublishStoryVfx(nodes[0],&fx));mask=0;
+    for(unsigned i=0;i<120 && mask!=14;++i) {
+        poll();for(unsigned p=1;p<4;++p) {SudekiMpStoryVfx got;
+            if(SudekiMpLanPartyGetStoryVfx(nodes[p],&peers[p].lease,GetTickCount(),&got) && got.count==4) {
+                assert(got.cast_sequence==2 && !memcmp(got.entries,fx.entries,sizeof(fx.entries)));mask|=1u<<p;
+            }}Sleep(1);
+    }
+    assert(mask==14);
     for(unsigned p=1;p<4;++p)SudekiMpLanPartyDestroy(nodes[p],FALSE);
     SudekiMpLanPartyDestroy(nodes[0],FALSE);
-    puts("PASS Ailish/Elco intent, release, duplicate/expiry/fence rejection, host visuals to all 3 clients");return 0;
+    puts("PASS Ailish/Elco intent, release, duplicate/expiry/fence rejection, host shots and independent four-roster skill visuals to all 3 clients");return 0;
 }

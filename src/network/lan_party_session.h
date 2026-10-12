@@ -5,12 +5,14 @@
 #include "network/lan_story_effect_state.h"
 #include "network/lan_story_vfx.h"
 #include "network/lan_story_audio.h"
+#include "network/lan_story_xp.h"
 #include "network/lan_story_cast_view.h"
 #include "network/lan_arena_protocol.h"
 #include "network/lan_party_story.h"
 #include "network/lan_story_frame.h"
 #include "network/lan_story_world_frame.h"
 #include "network/lan_story_handoff.h"
+#include "network/lan_story_melee.h"
 #include "network/lan_story_presentation.h"
 #include "network/lan_story_catchup.h"
 #include "network/lan_story_loot.h"
@@ -22,7 +24,7 @@
  * two-player session and LA42 packet format remain available unchanged. */
 #define SUDEKIMP_LAN_PARTY_PLAYERS 4u
 #define SUDEKIMP_LAN_PARTY_CHUNKS 2u
-#define SUDEKIMP_LAN_PARTY_VERSION 21u
+#define SUDEKIMP_LAN_PARTY_VERSION 23u
 #define SUDEKIMP_LAN_PARTY_BUILD_ID 0x34500011u
 #define SUDEKIMP_LAN_PARTY_MODE_MAX_AGE_MS 500u
 #define SUDEKIMP_LAN_PARTY_INPUT_MAX_AGE_MS 250u
@@ -302,6 +304,12 @@ BOOL SudekiMpLanPartyAcknowledgeStoryControl(SudekiMpLanPartySession *session,
  * movement: publish a fresh READY after validating the native lease first. */
 BOOL SudekiMpLanPartyStoryControlAcknowledged(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryControlFence *fence);
+BOOL SudekiMpLanPartySendStoryMelee(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease *,const SudekiMpLanStoryMelee *);
+/* One ordered native snapshot per host dispatch; steady states in between.
+ * take consumes before native entry, so rejection cannot become a replay. */
+BOOL SudekiMpLanPartyTakeStoryMelee(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease *,uint32_t now,BOOL admitted,uint8_t *buttons,uint32_t *serial);
 BOOL SudekiMpLanPartySendStoryBlock(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryBlock *input);
 BOOL SudekiMpLanPartyTakeStoryBlock(SudekiMpLanPartySession *session,
@@ -409,4 +417,9 @@ BOOL SudekiMpLanPartyTakeFrame(SudekiMpLanPartySession *session,
 BOOL SudekiMpLanPartyPublishStoryAudio(SudekiMpLanPartySession *session,const SudekiMpStoryAudio *state);
 BOOL SudekiMpLanPartyGetStoryAudio(SudekiMpLanPartySession *session,const SudekiMpLanPartyLease *lease,
     uint32_t now,unsigned character,SudekiMpStoryAudio *state);
+/* Optional native XP popup snapshots; display only, no reward mutation. */
+BOOL SudekiMpLanPartyPublishStoryXp(SudekiMpLanPartySession *,const SudekiMpStoryXp *);
+BOOL SudekiMpLanPartyGetStoryXp(SudekiMpLanPartySession *,const SudekiMpLanPartyLease *,
+    uint32_t now,SudekiMpStoryXp *,uint32_t *received_age);
+
 #endif

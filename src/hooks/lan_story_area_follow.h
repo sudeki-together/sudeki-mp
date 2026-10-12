@@ -21,6 +21,9 @@ BOOL SudekiMpLanStoryAreaFollowInitialize(HMODULE image);
  * world/descriptor table is not exactly readable. */
 BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out);
 /* Client, native game thread, once per dispatch with the newest host state.
+ * Ordinary state-3 zones only; state-4 temporary travel has a separate owner.
+ * A background target also requires a positive host residency entry; native
+ * house exit can retain an unloaded target name, which grants no load.
  * Issues at most one native zone call per call, rate limited. */
 void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now,
     const SudekiMpControlUpdateDispatchWitness *witness);

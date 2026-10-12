@@ -24,6 +24,23 @@ BOOL SudekiMpStoryAreaStateSame(const SudekiMpStoryAreaState *a,const SudekiMpSt
         !memcmp(a->current,b->current,sizeof(a->current)) && !memcmp(a->target,b->target,sizeof(a->target)) &&
         a->count==b->count && !memcmp(a->entries,b->entries,sizeof(a->entries));
 }
+BOOL SudekiMpStoryAreaStateExterior(const SudekiMpStoryAreaState *s) {
+    if(!SudekiMpStoryAreaStateValid(s)) return FALSE;
+    BOOL current=FALSE;
+    for(unsigned i=0;i<s->count;++i) {
+        /* Reject mixed transition reports, including an exterior current
+         * accompanied by an active temporary descriptor. Names use the
+         * native case-insensitive lookup convention. */
+        if(s->entries[i].state==4u) return FALSE;
+        for(unsigned j=0;j<i;++j)
+            if(!_stricmp(s->entries[i].name,s->entries[j].name)) return FALSE;
+        if(!_stricmp(s->entries[i].name,s->current)) {
+            if(s->entries[i].state!=3u) return FALSE;
+            current=TRUE;
+        }
+    }
+    return current;
+}
 BOOL SudekiMpStoryAreaStateEncode(const SudekiMpStoryAreaState *s,uint8_t *p,size_t n) {
     if(!p || n!=SUDEKIMP_STORY_AREA_WIRE_SIZE || !SudekiMpStoryAreaStateValid(s) || !s->sequence) return FALSE;
     put(p,SUDEKIMP_STORY_AREA_CODEC_VERSION); put(p+4,s->sequence); put(p+8,s->observed_tick);

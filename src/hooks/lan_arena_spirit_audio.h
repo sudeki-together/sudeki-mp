@@ -24,6 +24,7 @@ typedef BOOL (*SudekiMpLanArenaSpiritActiveWitness)(
 typedef struct SudekiMpLanArenaSpiritAudioEvent {
     uint32_t sequence;
     uint32_t elapsed_ms;
+    uint32_t observed_tick; /* Native clock at emission, never a later polling time. */
     int32_t native_state;
     /* Captured at the native emission, not inferred later from whichever
      * caster is active when a snapshot is published. Process-local only. */

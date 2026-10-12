@@ -15,6 +15,8 @@ static uint32_t sigil_serial;
 static DWORD sigil_thread;
 static BOOL sigil_fault;
 static uint32_t sigil_identity(const SoloJob *s) {
+    uint32_t event_id=spawn_event_job_identity(s->job);
+    if(event_id) return event_id;
     unsigned point=(unsigned)(s->point-*(uint8_t **)(s->group+0x170u))/0x80u;
     uint32_t h=2166136261u,words[3]={s->group_id,point,s->resource_id};
     for(unsigned i=0;i<3u;++i) for(unsigned b=0;b<4u;++b) h=(h^((words[i]>>(8u*b))&255u))*16777619u;
@@ -29,9 +31,9 @@ static void sigil_constructed(void *raw) {
     if(!solo_group_fields(&s)) return;
     if(!sigil_thread) sigil_thread=GetCurrentThreadId();
     if(sigil_thread!=GetCurrentThreadId()) {sigil_fault=TRUE;return;}
-    uint32_t id=sigil_identity(&s); unsigned key=0;
-    for(;key<SIGIL_IDENTITIES && sigil_occurrences[key].identity && sigil_occurrences[key].identity!=id;++key) {}
-    if(key==SIGIL_IDENTITIES || sigil_occurrences[key].occurrence==UINT32_MAX || sigil_serial==UINT32_MAX) {
+    uint32_t id=sigil_identity(&s); BOOL event=spawn_event_job_identity(raw)!=0; unsigned key=0;
+    for(;!event && key<SIGIL_IDENTITIES && sigil_occurrences[key].identity && sigil_occurrences[key].identity!=id;++key) {}
+    if(key==SIGIL_IDENTITIES || (!event && sigil_occurrences[key].occurrence==UINT32_MAX) || sigil_serial==UINT32_MAX) {
         sigil_fault=TRUE;return; /* Never evict a generation floor or wrap it. */
     }
     unsigned slot=SIGIL_RECEIPTS;
@@ -42,7 +44,8 @@ static void sigil_constructed(void *raw) {
             (slot==SIGIL_RECEIPTS || sigils[i].state.spawn_serial<sigils[slot].state.spawn_serial)) slot=i;
     }
     /* Count even refused tracking so later occurrences cannot alias. */
-    sigil_occurrences[key].identity=id; uint32_t occurrence=++sigil_occurrences[key].occurrence;
+    uint32_t occurrence=1u;
+    if(!event) {sigil_occurrences[key].identity=id;occurrence=++sigil_occurrences[key].occurrence;}
     if(slot==SIGIL_RECEIPTS) {sigil_fault=TRUE;return;}
     /* The constructor is positive evidence of a new occurrence. Invalidate
      * older local ownership even if its end was never observed. Retain its

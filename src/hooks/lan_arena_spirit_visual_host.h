@@ -18,6 +18,11 @@ typedef BOOL (*SudekiMpLanArenaSpiritVisualHostWitness)(
     uint64_t *session, uint16_t *skill, uint32_t *host_tick,
     uint8_t *owner_actor_type);
 
+/* Shares the pinned animation-effect seam. The observer must reprove its
+ * own game-thread/actor lifetime and may only observe the completed emission.
+ * NULL unregisters only outside the hook; failed unregister retains it. */
+BOOL SudekiMpLanStoryDeathObserverSet(void (*observer)(void *,void *));
+
 /* SMP4 uses the same pinned native observer, with an actor-specific retained
  * roster witness. No legacy seat globals or cast ownership are borrowed. */
 typedef BOOL (*SudekiMpLanPartyShieldHostWitness)(
@@ -50,12 +55,19 @@ BOOL SudekiMpLanArenaSpiritVisualHostImageMatches(HMODULE game_module);
 BOOL SudekiMpLanPartySpiritVisualHostCapture(uint64_t session,BOOL idle_baseline,
     SudekiMpStoryVfx *output);
 
-/* Saved-story only: append current native ordinary Ailish/Elco missiles as
+/* Saved-story only: append current native ordinary and roster skill missiles as
  * parent-free visual models. Uses the existing weak lifetime journal, its
  * incarnation and the same monotonic visual instance allocator. No native
  * projectile is created or ticked on a client. Complete roster or failure. */
-BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *elco,void *ailish,
+BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *const actors[4],
     SudekiMpStoryVfx *output);
+
+/* Host registry cosmetics with native weak lifetimes. No gameplay objects
+ * are made on a client. Complete output or failure; unknown retains visuals. */
+BOOL SudekiMpLanStoryWorldVisuals(uint64_t session,SudekiMpStoryVfx *output);
+/* Host control adapter supplies an exact living player in the same native
+ * area. Collects a nearby observed native drop once, honoring native caps. */
+BOOL SudekiMpLanStoryWorldCollectNearby(void *actor,uint8_t actor_type);
 
 /* Native-only namespace ownership, separate from the closed network VFX
  * resource roster. A generation identifies a retained actor namespace, not a
@@ -65,6 +77,8 @@ typedef struct SudekiMpLanPartyEffectOwner {
     uint32_t generation;
     void *actor;
     uint8_t actor_type;
+    /* Immutable emission-time cast, zero for ordinary shots. Not wire data. */
+    uint16_t cast_sequence;
 } SudekiMpLanPartyEffectOwner;
 typedef BOOL (*SudekiMpLanPartyEffectWitness)(void *source_component,
     SudekiMpLanPartyEffectOwner *owner);

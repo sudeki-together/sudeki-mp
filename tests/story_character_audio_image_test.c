@@ -4,6 +4,11 @@
 #include "hooks/lan_story_character_audio.c"
 void SudekiMpLogFormat(const char *format,...) {(void)format;}
 static BOOL admitted=TRUE;
+static unsigned startup_calls;
+BOOL SudekiMpLanArenaSpiritAudioReplayLocalCue(HMODULE image,SudekiMpLanArenaSpiritAudioCue cue) {
+    assert(image==(HMODULE)base && cue==SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START);
+    ++startup_calls;return TRUE;
+}
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *roster) {(void)roster;return admitted;}
 static uint8_t *map_image(const wchar_t *path) {
     SudekiMpBuildCheck check;
@@ -68,7 +73,10 @@ int main(int argc,char **argv) {
     wchar_t path[32768];assert(argc==2 && MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,32768));
     base=map_image(path);assert(methods(base));
     for(unsigned i=0;i<sizeof(codes)/sizeof(codes[0]);++i) {
-        base[codes[i].rva]^=1;assert(!methods(base));base[codes[i].rva]^=1;assert(methods(base));
+        unsigned mutations=i<4?codes[i].size:1u;
+        for(unsigned j=0;j<mutations;++j) {
+            base[codes[i].rva+j]^=1;assert(!methods(base));base[codes[i].rva+j]^=1;assert(methods(base));
+        }
         printf("Named native guard: %s PASS\n",codes[i].name);
     }
     for(unsigned i=0;i<sizeof(relocations)/sizeof(relocations[0]);++i) {
@@ -114,6 +122,31 @@ int main(int argc,char **argv) {
     assert(SudekiMpStoryCharacterAudioCapture(2,&frame) && !frame.count);
     entries[0]=0;assert(SudekiMpStoryCharacterAudioCapture(2,&frame) && !frame.count);
     puts("PASS native source actor/bank/handle ownership, unknown refusal and positive generation retirement");
+    /* Execute all three retail bank-binding leaves, with no device/loading
+     * stub: the actor already retains the bank, as it does in the live pair. */
+    host_mode=FALSE;uint8_t fx[0xe0]={0};
+    ptr(fx,base+0x2cd0ac);ptr(fx+0x4c,base+0x2e1db4);ptr(fx+0x54,fx+0x30);
+    uint32_t bank_id=0;for(unsigned i=0;bank_name[i];++i) {
+        uint8_t ch=bank_name[i];if(ch>='a' && ch<='z')ch-=32;
+        bank_id=(i&1)?bank_id*ch:bank_id+ch;
+    }
+    num(bank+0x14,bank_id);unsigned refs=u32(bank+0x18);
+    admitted=FALSE;assert(!SudekiMpStoryCharacterAudioBindEffect(&roster,2,fx));admitted=TRUE;
+    assert(!*(void **)(fx+0x50) && u32(bank+0x18)==refs);
+    assert(SudekiMpStoryCharacterAudioBindEffect(&roster,2,fx));
+    assert(*(void **)(fx+0x50)==bank && fx[0x5c]==1 && u32(bank+0x18)==refs+1 && *(float *)(fx+0x80)==50);
+    for(unsigned i=0;i<5;++i)assert(SudekiMpStoryCharacterAudioBindEffect(&roster,2,fx));
+    assert(u32(bank+0x18)==refs+1); /* No duplicate references on retransmission. */
+    uint8_t generic[0x34];memcpy(generic,bank,sizeof(generic));char generic_name[96]="sfx_generic.xsb";
+    ptr(generic+0x10,generic_name);num(generic+0x14,bank_id+1);num(generic+0x18,2);
+    void *both[]={bank,generic};ptr(manager+0x2c,both);num(manager+0x30,2);
+    ptr(fx+0x50,generic);num(bank+0x18,refs); /* Isolated second fixture. */
+    assert(SudekiMpStoryCharacterAudioBindEffect(&roster,2,fx));
+    assert(u32(generic+0x18)==1 && u32(bank+0x18)==refs+1 && *(void **)(fx+0x50)==bank);
+    ptr(fx+0x50,generic);num(bank+0x18,refs);
+    assert(!SudekiMpStoryCharacterAudioBindEffect(&roster,2,fx) && u32(generic+0x18)==1);
+    ptr(manager+0x2c,banks);num(manager+0x30,1);
+    puts("PASS retail effect-bank ABI, initial and fallback binding, native references, radius, repeat and last-reference refusal");
     uint8_t camera_manager[0x60]={0},camera[0xbc]={0},camera_state[0xdc]={0};
     uint8_t categories[28]={0},parameters[24]={0},head[12]={0};char parameter_name[64]="Volume";
     ptr(camera_manager,base+0x2c7b80);ptr(camera_manager+0x20,camera);ptr(camera_manager+0x24,camera);
@@ -193,6 +226,18 @@ int main(int argc,char **argv) {
     assert(!SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && stub_calls==calls_before+1);
     admitted=TRUE;
     puts("PASS replay deduplication, completed-local/active-host suppression, expired bank cleanup and closed admission");
+    frame.count=0;frame.start_sequence=1;frame.start_tick=frame.tick;
+    assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);
+    assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);
+    frame.start_sequence=2;frame.start_tick=frame.tick-251;
+    assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);
+    frame.start_tick=frame.tick;
+    assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);
+    frame.start_sequence=3;admitted=FALSE;
+    assert(!SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);admitted=TRUE;
+    assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==2);
+    puts("PASS witnessed Spirit startup once per cast, retransmit, late-drop and closed admission");
+
     const char *banks_by_character[]={"BUKISoundScript.xsb","ELCOSoundScript.xsb","TalSoundScript.xsb","ALICESoundScript.xsb"};
     const char *shared_cues[]={"hit_sml","hit_med","hit_lrg","death"};
     const char *melee_cues[]={"attack_sml","attack_lrg","whooshmedium","BlockStart","BlockEnd"};

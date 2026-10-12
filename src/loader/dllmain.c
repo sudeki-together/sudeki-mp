@@ -1131,6 +1131,10 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Developer test start: place the party at fixed coordinates once
              * the saved game is loaded ([StoryAreas] TestStartLeader/Follower). */
             ((saved_story ? configure_test_start(game_module,config_path) : (void)0),FALSE) ||
+            /* Explicit test-only protection; ordinary saved-story sessions
+             * remain unchanged. Acquisition and cleanup belong to the host. */
+            (saved_story && (SudekiMpLanStoryMenuTestInvulnerable(
+                read_config_boolean(config_path,L"StoryAreas",L"TestPartyInvulnerable")),FALSE)) ||
             /* Player names on the HUD card and above party heads (saved story). */
             (saved_story && !config_key_false(config_path,L"SudekiMP",L"PlayerNameTags") &&
                 !SudekiMpLanStoryNameTagsInstall(game_module)) ||

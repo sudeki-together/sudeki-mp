@@ -4,27 +4,23 @@
 #include <stdio.h>
 int main(void) {
     NativeEvent attack={.action=0x2c,.value=1};
-    sample_melee(&attack,TRUE,10); assert(take_melee(10)==1 && !take_melee(10));
-    sample_melee(&attack,TRUE,11); assert(!take_melee(11)); /* repeat, not another press */
-    clear_sample(); sample_melee(&attack,TRUE,12); assert(!take_melee(12));
-    attack.value=0; sample_melee(&attack,FALSE,13);
-    attack.value=1; sample_melee(&attack,FALSE,14);
-    sample_melee(&attack,TRUE,15); assert(!take_melee(15)); /* focus/lease regain */
-    attack.value=0; sample_melee(&attack,TRUE,16);
-    for(unsigned i=0;i<6;++i) {
-        attack.action=0x2c+i%3; attack.value=0; sample_melee(&attack,TRUE,20+i);
-        attack.value=1; sample_melee(&attack,TRUE,20+i);
-    }
-    assert(melee_count==4); /* bounded, ordered, overflow doesn't invent input */
-    assert(take_melee(30)==1 && take_melee(30)==2 && take_melee(30)==3 && take_melee(30)==1);
-    assert(!take_melee(30));
-    attack.action=0x2c; attack.value=0; sample_melee(&attack,TRUE,40);
-    attack.value=1; sample_melee(&attack,TRUE,40); assert(!take_melee(291));
-    attack.value=0; sample_melee(&attack,TRUE,UINT32_MAX-10u);
-    attack.value=1; sample_melee(&attack,TRUE,UINT32_MAX-10u);
-    assert(take_melee(4)==1); /* unsigned clock wrap */
-    attack.value=0; sample_melee(&attack,TRUE,50);
-    attack.value=1; sample_melee(&attack,TRUE,50); clear_sample(); assert(!take_melee(50));
+    sample_melee(&attack,TRUE,10); assert(take_melee()==1 && take_melee()==2 && take_melee()==2);
+    sample_melee(&attack,TRUE,11); assert(take_melee()==2); /* repeat remains held */
+    attack.value=0;sample_melee(&attack,TRUE,12);assert(take_melee()==3 && !take_melee());
+    attack.value=1;sample_melee(&attack,TRUE,13);
+    attack.action=0x2d;sample_melee(&attack,TRUE,13);
+    assert(take_melee()==5 && take_melee()==10); /* grouped weak+strong */
+    attack.action=0x2c;attack.value=0;sample_melee(&attack,TRUE,14);
+    assert(take_melee()==11 && take_melee()==8); /* one release while other held */
+    attack.action=0x2d;attack.value=0;sample_melee(&attack,TRUE,14);assert(take_melee()==12);
+    attack.action=0x2e;attack.value=1;sample_melee(&attack,TRUE,15);assert(take_melee()==16);
+    uint32_t generation=melee_generation;clear_sample();assert(melee_generation!=generation && !take_melee());
+    sample_melee(&attack,TRUE,16);assert(!take_melee()); /* held across rebind */
+    attack.value=0;sample_melee(&attack,FALSE,17);
+    attack.value=1;sample_melee(&attack,FALSE,18);sample_melee(&attack,TRUE,19);assert(!take_melee());
+    attack.value=0;sample_melee(&attack,TRUE,20);attack.value=1;sample_melee(&attack,TRUE,21);
+    assert(take_melee()==16 && take_melee()==32);
+    clear_sample();
     melee_down=0; ranged_press=0;ranged_held=FALSE;
     attack.action=0x2c;attack.value=1;sample_melee(&attack,TRUE,70);
     assert(ranged_held && ranged_press==1);
@@ -66,6 +62,6 @@ int main(void) {
     assert(sample_controller==(void *)1 && sample_actor==(void *)2 && sample_transaction==3);
     attack.value=0; sample_melee(&attack,TRUE,60);
     attack.value=1; sample_melee(&attack,TRUE,60); SudekiMpLanStoryInputMuteMovement();
-    assert(!take_melee(60)); sample_melee(&attack,TRUE,61); assert(!take_melee(61));
-    puts("story Q/melee edge, queue, expiry, rebind and menu-mute tests passed (synthetic)"); return 0;
+    assert(!take_melee()); sample_melee(&attack,TRUE,61); assert(!take_melee());
+    puts("story Q/melee grouped states, native cadence, rebind and menu-mute tests passed (synthetic)"); return 0;
 }

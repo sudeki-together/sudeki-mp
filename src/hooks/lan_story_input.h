@@ -29,10 +29,11 @@ BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transacti
 /* Consume this window's native action19 press edge. No native controller
  * cache is seeded. Releases/repeats cannot open the menu a second time. */
 BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t transaction);
-/* Fresh window-owned 2C/2D/2E press, 1 weak/2 strong/3 sweep, else zero.
- * Four bounded edges, each expires after 250ms. Focus/menu/rebind discards the
- * queue without making a held key a new press. No native action execution. */
-unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t transaction);
+/* One native frame of 2C/2D/2E states, packed as weak|strong<<2|sweep<<4.
+ * Press=1, held=2, release=3, neutral=0; simultaneous events stay together.
+ * generation changes on focus/menu/rebind so unsent history can be retired. */
+BOOL SudekiMpLanStoryInputMelee(void *controller,void *actor,uint32_t transaction,
+    uint8_t *buttons,uint32_t *generation);
 /* Keep the exact binding while a local menu owns navigation. Discard held
  * movement/look/attack edges so closing it cannot replay old gameplay input. */
 BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transaction,

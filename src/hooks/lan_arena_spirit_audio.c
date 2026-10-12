@@ -170,6 +170,7 @@ static BOOL record_cue_locked(
     }
     event.sequence = next_event_sequence();
     event.elapsed_ms = (uint32_t)(now_ms - trace_started_at_ms);
+    event.observed_tick = now_ms;
     event.native_state = native_state;
     event.session_token = session_token;
     event.skill_sequence = skill_sequence;
@@ -349,7 +350,7 @@ static void __attribute__((fastcall)) observe_sound_play_cue(
             active = spirit_active_witness(
                 spirit_active_witness_context, &native_state,
                 &session_token, &skill_sequence, &owner_seat);
-            if (active && native_state != 0 && session_token && skill_sequence && owner_seat < 2u) {
+            if (active && native_state != 0 && session_token && skill_sequence && owner_seat < 4u) {
                 recorded = record_cue_locked(
                     cue, native_state, session_token, skill_sequence, owner_seat, &logged_event);
             }

@@ -2,6 +2,7 @@
 #include "hooks/call_hook.h"
 #include "hooks/story_spawn_sigil.h"
 #include "hooks/story_death_visual.h"
+#include "hooks/lan_arena_spirit_visual_host.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "network/lan_story_area_state.h"
@@ -21,36 +22,64 @@ static const size_t lengths[COUNT]={8,7,7,6,6};
 static SudekiMpInlineHook hooks[COUNT];
 static BOOL spawn_jobs_install(uint8_t *b),spawn_jobs_uninstall(void),spawn_jobs_can_uninstall(void);
 static BOOL effect_retire_install(uint8_t *b),effect_retire_uninstall(void);
+static BOOL gates_install(uint8_t *b),gates_uninstall(void);
 static unsigned retire_callbacks;
+static BOOL spawn_events_install(uint8_t *b),spawn_events_uninstall(void);
+static BOOL death_interrupt_install(uint8_t *b),death_interrupt_uninstall(void);
+static void spawn_event_constructed(void *job),spawn_event_step(void *job),spawn_event_destroyed(void *job);
+static uint32_t spawn_event_job_identity(void *job);
+static BOOL spawn_event_identity(const void *actor,uint32_t *id);
+static void spawn_events_host_tick(void);
+static SudekiMpPointerHook spawn_group_update_hook;
 static void spawn_jobs_begin(uint8_t *group),spawn_jobs_end(void);
 static unsigned logs;
 static uint8_t *image_base;
 static SudekiMpStorySpawnGroup started[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
 static unsigned started_count;
+static uint32_t start_serial;
 static volatile LONG replaying;
 static BOOL client_role;
 typedef struct Ticked Ticked;
 static void track_group(const char *name,BOOL watch_only);
 
-static void record_start(const void *resource,int sequence) {
-    char name[64]; uint32_t hash; unsigned i;
-    extern void spawn_trace_name_of(const void *,char *,uint32_t *);
-    spawn_trace_name_of(resource,name,&hash);
-    if(!name[0] || name[0]=='?' || strlen(name)>=SUDEKIMP_STORY_AREA_NAME || sequence<0) return;
-    for(i=0;i<started_count;++i) if(!_stricmp(started[i].name,name)) break;
+static BOOL copy_start_text(char out[SUDEKIMP_STORY_AREA_NAME],const char *text);
+static void remember_start(const SudekiMpStorySpawnGroup *command) {
+    unsigned i;
+    for(i=0;i<started_count;++i) if(!_stricmp(started[i].name,command->name) &&
+        !_stricmp(started[i].scope,command->scope)) break;
     if(i==started_count) {
         if(started_count==SUDEKIMP_STORY_SPAWN_GROUP_MAX) {
             memmove(started,started+1,(SUDEKIMP_STORY_SPAWN_GROUP_MAX-1u)*sizeof(*started)); i=--started_count;
         }
         ++started_count;
     }
-    memset(&started[i],0,sizeof(started[i])); strcpy(started[i].name,name); started[i].sequence=sequence;
+    started[i]=*command;
+}
+static void record_start(const void *resource,unsigned method,int selection,int sequence,const char *scope) {
+    char name[64]; uint32_t hash;
+    extern void spawn_trace_name_of(const void *,char *,uint32_t *);
+    spawn_trace_name_of(resource,name,&hash);
+    if(!name[0] || name[0]=='?' || strlen(name)>=SUDEKIMP_STORY_AREA_NAME || start_serial==UINT32_MAX) return;
+    SudekiMpStorySpawnGroup command={.method=method,.selection=selection,.sequence=sequence,.serial=start_serial+1u};
+    strcpy(command.name,name);
+    if(scope && !copy_start_text(command.scope,scope)) return;
+    if(!SudekiMpStorySpawnGroupValid(&command)) return;
+    ++start_serial; remember_start(&command);
 }
 
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
     return p && n && VirtualQuery(p,&m,sizeof(m))==sizeof(m) && m.State==MEM_COMMIT &&
         !(m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) && a+n<=(uintptr_t)m.BaseAddress+m.RegionSize;
+}
+static BOOL copy_start_text(char out[SUDEKIMP_STORY_AREA_NAME],const char *text) {
+    for(unsigned i=0;i<SUDEKIMP_STORY_AREA_NAME;++i) {
+        if(!text || !readable(text+i,1u)) return FALSE;
+        if(!text[i]) return i>0u;
+        if(text[i]<0x20 || text[i]>0x7e) return FALSE;
+        out[i]=text[i];
+    }
+    return FALSE; /* Never replay a truncated scope/name. */
 }
 /* ResourceName: +0 kind bits, +4 hash, +8 shared name record; the record's
  * second word is the C string in the observed layout (entity+0x38 uses it). */
@@ -85,12 +114,12 @@ static void watch_started(const void *resource) {
     spawn_trace_name_of(resource,name,&hash);
     if(name[0] && name[0]!='?' && strlen(name)<SUDEKIMP_STORY_AREA_NAME) track_group(name,TRUE);
 }
-static void __cdecl start1_hook(const void *n,int a) { trace("start_sequence1",n,a,0,NULL); if(!replaying) record_start(n,a); ((Start1)hooks[START1].trampoline)(n,a); watch_started(n); }
-static void __cdecl start2_hook(const void *n,int a,int b) { trace("start_sequence2",n,a,b,NULL); if(!replaying) record_start(n,b); ((Start2)hooks[START2].trampoline)(n,a,b); watch_started(n); }
+static void __cdecl start1_hook(const void *n,int a) { trace("start_sequence1",n,a,0,NULL); if(!replaying) record_start(n,1u,0,a,NULL); ((Start1)hooks[START1].trampoline)(n,a); watch_started(n); }
+static void __cdecl start2_hook(const void *n,int a,int b) { trace("start_sequence2",n,a,b,NULL); if(!replaying) record_start(n,2u,a,b,NULL); ((Start2)hooks[START2].trampoline)(n,a,b); watch_started(n); }
 static void __cdecl start3_hook(const char *t,const void *n,int a,int b) {
     char copy[48]={0};
     for(unsigned k=0;k<47u && t && readable(t+k,1u) && t[k]>=0x20 && t[k]<0x7f;++k) copy[k]=t[k];
-    trace("start_sequence3",n,a,b,copy); if(!replaying) record_start(n,b); ((Start3)hooks[START3].trampoline)(t,n,a,b); watch_started(n);
+    trace("start_sequence3",n,a,b,copy); if(!replaying) record_start(n,3u,a,b,t); ((Start3)hooks[START3].trampoline)(t,n,a,b); watch_started(n);
 }
 static SudekiMpStoryDespawn despawned[SUDEKIMP_STORY_DESPAWN_MAX];
 static uint32_t despawn_serial;
@@ -110,9 +139,10 @@ static void __cdecl despawn_hook(void *ptr) {
 static const void *replacements[COUNT]={(const void *)create_hook,(const void *)start1_hook,
     (const void *)start2_hook,(const void *)start3_hook,(const void *)despawn_hook};
 
-BOOL SudekiMpLanStorySpawnTraceInstall(HMODULE image) {
+BOOL SudekiMpLanStorySpawnTraceInstall(HMODULE image,BOOL client) {
     uint8_t *b=(uint8_t *)image;
     if(!b || !SudekiMpCheckLoadedExecutable(image)) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    client_role=client;
     if(!effect_retire_install(b)) return FALSE;
     if(!spawn_jobs_install(b)) { (void)effect_retire_uninstall(); return FALSE; }
     for(unsigned i=0;i<COUNT;++i) {
@@ -125,11 +155,15 @@ BOOL SudekiMpLanStorySpawnTraceInstall(HMODULE image) {
         }
     }
     image_base=b;
-    SudekiMpLogWrite("story_spawn_trace event=installed policy=observe_only\r\n");
+    if(!gates_install(b)) { (void)SudekiMpLanStorySpawnTraceUninstall(); return FALSE; }
+    if(!spawn_events_install(b)) { (void)SudekiMpLanStorySpawnTraceUninstall(); return FALSE; }
+    if(!death_interrupt_install(b)) { (void)SudekiMpLanStorySpawnTraceUninstall(); return FALSE; }
+    SudekiMpLogWrite("story_spawn_trace event=installed policy=host_events\r\n");
     return TRUE;
 }
 BOOL SudekiMpLanStorySpawnTraceUninstall(void) {
-    if(retire_callbacks || !spawn_jobs_can_uninstall()) return FALSE;
+    if(retire_callbacks || !spawn_jobs_can_uninstall() || !death_interrupt_uninstall() ||
+        !spawn_events_uninstall() || !gates_uninstall()) return FALSE;
     BOOL ok=TRUE;
     for(unsigned i=COUNT;i--;) if(hooks[i].installed && !SudekiMpRestoreInlineHook(&hooks[i])) ok=FALSE;
     return ok && spawn_jobs_uninstall() && effect_retire_uninstall();
@@ -183,11 +217,38 @@ static void track_group(const char *name,BOOL watch_only) {
 }
 void *spawn_trace_construct_fn __attribute__((used));
 void *spawn_trace_release_fn __attribute__((used));
-BOOL SudekiMpLanStorySpawnReplay(const char *group,int sequence) {
+/* Unhooked native argument routing, checked by name in the image fixture. */
+static const struct { const char *name; uint32_t rva,size,hash; } spawn_start_contracts[]={
+    {"SpawnStartDefaultArguments",0x75ddcu,22u,0x0a9e906cu},
+    {"SpawnStartSelectedArguments",0x75e7cu,24u,0x937f664du},
+    {"SpawnStartScopedArguments",0x75f6fu,24u,0x3e36646fu}
+};
+static BOOL spawn_start_code(void) {
+    for(unsigned i=0;i<3u;++i) {
+        const uint8_t *p=image_base+spawn_start_contracts[i].rva;
+        uint32_t hash=2166136261u;
+        if(!readable(p,spawn_start_contracts[i].size)) return FALSE;
+        for(unsigned j=0;j<spawn_start_contracts[i].size;++j) hash=(hash^p[j])*16777619u;
+        if(hash!=spawn_start_contracts[i].hash) return FALSE;
+    }
+    return TRUE;
+}
+static void replay_start_native(const SudekiMpStorySpawnGroup *command,const void *resource) {
+    if(command->method==1u) ((Start1)(image_base+rvas[START1]))(resource,command->sequence);
+    else if(command->method==2u) ((Start2)(image_base+rvas[START2]))(resource,command->selection,command->sequence);
+    else ((Start3)(image_base+rvas[START3]))(command->scope,resource,command->selection,command->sequence);
+}
+BOOL SudekiMpLanStorySpawnReplay(const SudekiMpStorySpawnGroup *command) {
     uint32_t resource[3]={0,0,0};
-    if(!image_base || !hooks[START1].installed || !group || !group[0] || sequence<0 ||
+    if(!image_base || !SudekiMpStorySpawnGroupValid(command) ||
+        !hooks[command->method].installed || !spawn_start_code() ||
         memcmp(image_base+RVA_NAME_CONSTRUCT,construct_entry,sizeof(construct_entry)) ||
         memcmp(image_base+RVA_NAME_RELEASE,release_entry,sizeof(release_entry))) return FALSE;
+    const char *group=command->name;
+    /* A missing group is retried after residency; it is not an acknowledged
+     * start. Also exclude ambiguous names before calling native lookup. */
+    uint8_t *entity=find_group(group);
+    if(!entity) return FALSE;
     spawn_trace_construct_fn=image_base+RVA_NAME_CONSTRUCT; spawn_trace_release_fn=image_base+RVA_NAME_RELEASE;
     /* Register inputs only: no stack-relative operands across pushes. */
     {
@@ -197,22 +258,28 @@ BOOL SudekiMpLanStorySpawnReplay(const char *group,int sequence) {
     }
     client_role=TRUE;
     InterlockedExchange(&replaying,1);
-    ((Start1)(image_base+rvas[START1]))(resource,sequence);
+    spawn_jobs_begin(entity);
+    replay_start_native(command,resource);
+    spawn_jobs_end();
     InterlockedExchange(&replaying,0);
-    uint8_t *entity=find_group(group);
+    entity=find_group(group);
     /* The native hook deliberately skips replay calls. Publish the observed
      * local start only after entering native code and finding the exact group,
      * so AreaFollow can acknowledge it instead of restarting it every frame. */
-    if(entity) record_start(resource,sequence);
+    BOOL observed=entity && *(const int32_t *)(entity+0x178u)==command->sequence &&
+        *(const int32_t *)(entity+0x180u)==command->selection;
+    if(observed) remember_start(command);
     uint32_t *record=(uint32_t *)(uintptr_t)resource[2];
     if(record && readable(record,4u) && --*record==0u) {
         uint32_t *r=record;
         __asm__ volatile("call *_spawn_trace_release_fn"
             : "+a"(r) : : "ecx","edx","ebx","esi","edi","memory","cc");
     }
-    SudekiMpLogFormat("story_spawn_trace event=replayed group=%s sequence=%d entity=%p\r\n",group,sequence,(void *)entity);
-    if(entity) track_group(group,FALSE);
-    return TRUE;
+    SudekiMpLogFormat("story_spawn_trace event=replayed group=%s sequence=%d selection=%d method=%lu serial=%lu scope=%s entity=%p observed=%d\r\n",
+        group,command->sequence,command->selection,(unsigned long)command->method,
+        (unsigned long)command->serial,command->scope,(void *)entity,observed);
+    if(observed) track_group(group,FALSE);
+    return observed;
 }
 
 /* Spawn group entity (vtable 2C9E20): the update node is the second base at
@@ -240,7 +307,8 @@ static BOOL group_exact(const uint8_t *e) {
     return readable(e,0x1b4u) && *(void *const *)e==image_base+RVA_GROUP_VTABLE &&
         *(void *const *)(e+8u)==image_base+RVA_GROUP_NODE_VTABLE &&
         readable(image_base+RVA_GROUP_NODE_VTABLE,8u) &&
-        ((void *const *)(image_base+RVA_GROUP_NODE_VTABLE))[1]==image_base+RVA_GROUP_UPDATE &&
+        (((void *const *)(image_base+RVA_GROUP_NODE_VTABLE))[1]==image_base+RVA_GROUP_UPDATE ||
+         (spawn_group_update_hook.installed && ((void *const *)(image_base+RVA_GROUP_NODE_VTABLE))[1]==spawn_group_update_hook.replacement_value)) &&
         !memcmp(image_base+RVA_GROUP_UPDATE,update_entry,sizeof(update_entry));
 }
 static BOOL in_registry(const uint8_t *entity) {
@@ -301,7 +369,7 @@ static uint32_t cluster_now(char name[48]) {
  * zone's +0x118 table holds {+4 count, +0xC array of 0x48-byte Cluster}
  * (Cluster vtable 2D4780, second base +4 vtable 2D4788, hash +0xC). */
 enum { RVA_WORLD=0x408d10u, RVA_CLUSTER_OBJECT_VTABLE=0x2d4780u, RVA_CLUSTER_NAME_VTABLE=0x2d4788u };
-static uint8_t *find_cluster(uint32_t hash) {
+static __attribute__((unused)) uint8_t *find_cluster(uint32_t hash) {
     uint8_t *world=readable(image_base+RVA_WORLD,4u)?*(uint8_t **)(image_base+RVA_WORLD):NULL, *found=NULL;
     if(!hash || !readable(world,0x58u+0xceu*4u)) return NULL;
     for(unsigned r=0;r<0xceu;++r) {
@@ -332,7 +400,7 @@ static void __attribute__((unused)) cluster_update(float dt) {
     __asm__ volatile("push %1; call *_spawn_trace_cluster_fn"
         : "+c"(ecx) : "r"(arg) : "eax","edx","memory","cc");
 }
-static void group_update(uint8_t *node,const float *timing) {
+static void __attribute__((unused)) group_update(uint8_t *node,const float *timing) {
     void *ecx=node; const void *arg=timing;
     __asm__ volatile("push %1; call *_spawn_trace_update_fn"
         : "+c"(ecx) : "r"(arg) : "eax","edx","memory","cc");
@@ -366,25 +434,11 @@ static unsigned death_style(const uint8_t *e) {
     return action>=0x17u && action<=0x1au ? action-0x16u : 0u;
 }
 static BOOL cached_identity(const void *monster,uint32_t *identity) {
-    for(unsigned i=0;i<64u;++i) if(identity_cache[i].entity==monster && identity_cache[i].identity) {
-        *identity=identity_cache[i].identity; return TRUE; }
-    return FALSE;
+    return spawn_event_identity(monster,identity);
 }
 BOOL SudekiMpLanStorySpawnIdentity(const void *monster,uint32_t *identity) {
-    if(!image_base || !monster || !identity) return FALSE;
-    for(unsigned g=0;g<16u;++g) {
-        uint8_t *e=known_groups[g];
-        if(!e || !group_exact(e) || !in_registry(e)) continue;
-        unsigned count=*(uint32_t *)(e+0x168u); uint8_t *points=*(uint8_t **)(e+0x170u);
-        if(!count || count>256u || !readable(points,count*0x80u)) continue;
-        for(unsigned i=0;i<count;++i) {
-            if(*(const void *const *)(points+i*0x80u+0x6cu)!=monster) continue;
-            uint32_t h=2166136261u,parts[3]={*(uint32_t *)(e+0x34u),i,*(const uint32_t *)((const uint8_t *)monster+0x34u)};
-            for(unsigned k=0;k<3u;++k) for(unsigned b=0;b<4u;++b) h=(h^((parts[k]>>(b*8u))&0xffu))*16777619u;
-            *identity=h?h:1u; cache_identity(monster,*identity); return TRUE;
-        }
-    }
-    return FALSE;
+    if(!image_base || !monster || !identity || !spawn_event_identity(monster,identity)) return FALSE;
+    cache_identity(monster,*identity);return TRUE;
 }
 /* Spawn sigils (#54): a group spawn also creates SpecialEffect entities
  * (vtable 2D3C7C; update node +8, vtable 2D3CA4, slot 1 = 5319B0, thiscall,
@@ -504,7 +558,7 @@ static BOOL fx_tick(float dt) {
  * that left the registry is recorded as despawned for clients. */
 static unsigned death_style(const uint8_t *entity);
 static void record_despawn(uint32_t identity,unsigned style);
-static void host_removals(void) {
+static void __attribute__((unused)) host_removals(void) {
     for(unsigned i=0;i<64u;++i) {
         if(!identity_cache[i].entity || !identity_cache[i].identity) continue;
         if(in_registry(identity_cache[i].entity)) continue;
@@ -517,7 +571,7 @@ BOOL SudekiMpLanStorySpawnTick(uint32_t now,BOOL client) {
     static uint32_t last;
     float dt=last && now-last<1000u?(float)(now-last)/1000.0f:0.0f;
     last=now?now:1u;
-    if(image_base && !client_role) host_removals();
+    if(image_base && !client_role) spawn_events_host_tick();
     if(!image_base) return FALSE;
     if(dt>0.1f) dt=0.1f;
     spawn_trace_update_fn=image_base+RVA_GROUP_UPDATE;
@@ -554,35 +608,8 @@ BOOL SudekiMpLanStorySpawnTick(uint32_t now,BOOL client) {
             }
             ++t->dumped;
         }
-        if(t->watch_only) { ++i; continue; }
-        /* Natively scheduled (pause lifted): the native scheduler runs it. */
-        if(t->entity[0x2bu] && dt>0.0f) {
-            float timing[4]={0.0f,0.0f,0.0f,dt};
-            /* The contained client's cluster manager does not follow the
-             * party (live: client Town_Cluster, host Castle_Road), so the
-             * group's cluster-gated delays never advance. For this call only,
-             * present the group's own resident Cluster as the current one,
-             * then restore the native pointer. */
-            uint8_t *cm=cluster_manager(),*want=NULL,*saved=NULL; BOOL swapped=FALSE;
-            if(cm) {
-                want=find_cluster(*(uint32_t *)(t->entity+0x160u));
-                saved=*(uint8_t **)(cm+0x24u);
-                if(want && saved!=want) { *(uint8_t **)(cm+0x24u)=want; swapped=TRUE; }
-            }
-            if(!t->ticks) SudekiMpLogFormat("story_spawn_trace event=group_cluster group=%s want=%p current=%p swapped=%u\r\n",
-                t->name,(void *)want,(void *)saved,(unsigned)swapped);
-            entered=TRUE;
-            spawn_jobs_begin(t->entity);
-            group_update(t->entity+8u,timing);
-            spawn_jobs_end();
-            if(swapped) {
-                if(*(uint8_t **)(cm+0x24u)==want) *(uint8_t **)(cm+0x24u)=saved;
-                else SudekiMpLogFormat("story_spawn_trace event=cluster_restore_skipped group=%s now=%p\r\n",
-                    t->name,*(void **)(cm+0x24u));
-            }
-            if(!t->ticks++) SudekiMpLogFormat("story_spawn_trace event=tick_started group=%s entity=%p refs=%u\r\n",
-                t->name,(void *)t->entity,(unsigned)t->entity[0x2bu]);
-        }
+        /* D2: the client never runs random selection or spawn timers. Native
+         * setup jobs and effects continue; authenticated events create actors. */
         ++i;
     }
     return entered;
@@ -607,9 +634,7 @@ static void record_despawn(uint32_t identity,unsigned style) {
 void SudekiMpLanStorySpawnDespawnCapture(SudekiMpStoryDespawn *out) {
     if(out) memcpy(out,despawned,sizeof(despawned));
 }
-/* Client: remove this machine's copy of each monster the host despawned
- * (once per host serial), through the same native DespawnEntity. It reads
- * only the handle's entity word, so a stack handle is passed. */
+/* Shared native death cosmetics; D2 retires only completed spawn jobs. */
 static BOOL visual_memory(const void *p,size_t n,BOOL write) {
     MEMORY_BASIC_INFORMATION m;
     if(!readable(p,n) || !write) return readable(p,n);
@@ -628,45 +653,6 @@ static BOOL death_visual(uint8_t *entity,unsigned style) {
         style,(unsigned long)v.resource[1],effect && in_registry(effect) && fx_exact(effect));
     return TRUE; /* Native creation entered, including a failed allocation. */
 }
-BOOL SudekiMpLanStorySpawnDespawnFollow(const SudekiMpStoryDespawn *host) {
-    static uint32_t processed;
-    BOOL entered=FALSE;
-    if(!host || !image_base || !hooks[DESPAWN].installed) return FALSE;
-    for(unsigned i=0;i<SUDEKIMP_STORY_DESPAWN_MAX;++i) {
-        const SudekiMpStoryDespawn *d=&host[i];
-        if(!d->serial || (int32_t)(d->serial-processed)<=0) continue;
-        processed=d->serial;
-        void *found=NULL;
-        for(unsigned g=0;g<16u && !found;++g) {
-            uint8_t *e=known_groups[g];
-            if(!e || !group_exact(e) || !in_registry(e)) continue;
-            unsigned count=*(uint32_t *)(e+0x168u); uint8_t *points=*(uint8_t **)(e+0x170u);
-            if(!count || count>256u || !readable(points,count*0x80u)) continue;
-            for(unsigned p=0;p<count && !found;++p) {
-                void *m=*(void **)(points+p*0x80u+0x6cu); uint32_t id=0;
-                if(m && in_registry(m) && SudekiMpLanStorySpawnIdentity(m,&id) && id==d->identity) found=m;
-            }
-        }
-        if(found) {
-            uint32_t native_identifier=*(uint32_t *)((uint8_t *)found+0x34u);
-            entered=death_visual(found,d->death_style) || entered;
-            /* Effect creation can replace registry storage. Reprove the copy
-             * immediately before native removal; no old registry view survives. */
-            if(!in_registry(found) || !readable(found,0x38u) ||
-                *(void **)found!=image_base+0x2d5fa0u ||
-                *(uint32_t *)((uint8_t *)found+0x34u)!=native_identifier) continue;
-            void *handle[3]={found,NULL,NULL};
-            InterlockedExchange(&despawning,1);
-            entered=TRUE;
-            ((Despawn)(image_base+rvas[DESPAWN]))(handle);
-            InterlockedExchange(&despawning,0);
-        }
-        if(logs<20000u) { ++logs; SudekiMpLogFormat("story_spawn_trace event=despawn_followed identity=%08lx serial=%lu style=%lu found=%u\r\n",
-            (unsigned long)d->identity,(unsigned long)d->serial,(unsigned long)d->death_style,(unsigned)(found!=NULL)); }
-    }
-    return entered;
-}
-
 /* Build a native ResourceName (FUN_005B9440: ECX=kind, EAX=C string,
  * ESI=destination), hand it to use(), release the name record. Game thread. */
 BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
@@ -696,3 +682,9 @@ BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
 #include "hooks/lan_story_sigils.h"
 
 #include "hooks/lan_story_effect_retire.h"
+
+#include "hooks/lan_story_gates.h"
+
+static BOOL visual_memory(const void *,size_t,BOOL);
+#include "hooks/lan_story_spawn_events.h"
+#include "hooks/lan_story_death_interrupt.h"

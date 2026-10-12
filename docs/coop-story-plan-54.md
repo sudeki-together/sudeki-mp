@@ -154,7 +154,7 @@ for a non-lead actor with that actor's facing, without touching `controller+0x24
 | C2 | **Player turn path** for leased actors: route the 0x4B73D0 decision to the player step 0x4B7B90, call-scoped (hold `ai+0x16A` at 0 only around the turn step and the mod's 0x4DAE80 call, or patch the branch test for leased actors only; choose with static proof) | Research54: remote Tal takes `turn_player`, 0 AI turn steps outside game-raised override windows |
 | C3 | **Gate the AI movement node** for leased actors: no `SetSpeed(0)` at 0x4F4DE3, no AI moves at 0x4F4D7F, no AI snaps at 0x4F5185/0x4F51C5 | Research54: `ai_set_speed` ≈ 0 for the remote actor |
 | C4 | **Movement during attacks** like the native controller: keep calling 0x4DAE80 every frame with the stick and let the arbiter's CanMove decide. Stop with blend `SetSpeed(0,1.0)`, not set-speed-immediate. | Research54: held-frame share during fights near local levels; owner gate: Tal controllable mid-combo |
-| C5 | Optional, low priority: native press cadence (1→2→3→0) through the same snapshot shape as 0x42891F | Combo windows match local play |
+| C5 | Native press cadence (1→2→3→0) through the same snapshot shape as 0x42891F. Originally optional; owner requested the remaining rewrite on 2026-10-11. | Combo windows match local play; revised Tal play-test pending |
 | C6 | Owner gate: the owner plays remote Tal through the castle-road ambush, solo vs co-op comparison | Owner confirms no "el reverso" |
 
 ## 6. Phase D: enemies and loot (D5, plus freeze fixes)
@@ -3316,3 +3316,952 @@ No build or test execution is requested or performed for this checkpoint.
 Earlier test and play-test results remain bounded to their recorded candidates.
 Private captures, game files and generated build output remain excluded. This
 is work in progress, not a release or a merge-ready completion claim.
+
+
+### 2026-10-11 — automatic combat-barrier replication candidate
+
+The owner resumed the six-family barrier plan after checkpoint `fc43d78`.
+The earlier capture now establishes the host vine's complete lifetime:
+opening clip, holding clip, closing clip, then native removal. The client
+never created a placed vine during that capture. This is instrumented
+`CONFIRMED_LIVE` evidence of the missing instance, not visual acceptance of
+the new candidate.
+
+`CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE`: native `InternalSpawnGates`
+resolves the authored spawn group and clones the current zone's gate resource.
+The six listed families share this path. Their setup heartbeats select opening
+and looping animations. Spawn-point weak references identify placed actors
+separately from the resource template. See the combat-gate entry in
+`docs/research-log.md` for the native lifecycle and field evidence.
+
+The candidate adds complete host gate-group liveness to the presentation
+message. Native client creation uses the matching zone resource and authored
+placement; host world snapshots drive animation and transforms. Per-occurrence
+identities distinguish repeated same-resource gates. Native weak observers
+track destruction, and host retirement ends each replica after the closing
+animation. Only owned client gate heartbeats are suppressed; creation and
+removal stay inside the existing scoped residency checks. Unknown observations
+do not mean that a gate ended. The six allowlisted zone families share this
+implementation; special ship, bridge and scripted variants remain unaudited.
+
+Session protocol is **22**, presentation codec **3**; both peers must update
+together. The presentation occupies three bounded datagrams and retains atomic
+assembly, scene fencing and mixed-version refusal. This follows the adopted
+D1 versioning decision; no save-format migration is introduced.
+
+Dirty candidate based on `fc43d782b95fb52a786b35439c6bffd29cda44c8`, DLL SHA256
+`c3d7e257b73578acf633bb59605eb3fd88ae90f8767861e14479f5d0913d3b2b`:
+
+- `SudekiMP.StorySpawnTimingImageTest` passes, including named
+  **`gate_native_code`**, 21 byte-check mutation refusals, native weak-reference
+  destruction, address reuse, per-instance identity, heartbeat ownership,
+  pending-setup retirement refusal, spawn-point reset and hook restoration.
+- `SudekiMP.StoryEffectTransportTest` passes, including gate roster validation,
+  unknown versus empty observations and the three-chunk transport.
+- `SudekiMP.SkillTraceImageTest` passes, including the named
+  `SudekiMpLanHitImageMatches` and `SudekiMpLanAimImageMatches` checks.
+- `SudekiMP.StoryResidencyCallTest` and `SudekiMP.LanPartySessionTest` pass.
+
+These are `CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE` results. The matching pair
+was reloaded with its existing configuration; both native gate hooks installed
+and client presentation/input admission resumed without a residency refusal.
+That establishes live installation/readiness, not combat-barrier acceptance.
+
+The first candidate encounter subsequently produced a placed vine on both
+peers at identical authored coordinates. Both entered the opening and holding
+clips; the client instance had one pause reference and completed native scene
+setup. Its native creation reported no fault and containment remained admitted.
+This is `CONFIRMED_LIVE` instrumented creation/animation evidence only; ending,
+removal and the owner's visual judgment are still pending.
+
+**Owner gate OPEN:** start the New Brightwater ambush and compare the doorway
+on both screens. The vines must appear at the same doorway, animate through
+opening/hold/closing and clear when combat ends. Check passage afterward.
+A read-only capture is prepared for this comparison; gameplay inputs remain
+with the owner. Repeated encounters, area changes, disconnect/teardown and the
+other five families still need live lifecycle checks. Special scripted gates
+remain a separate research pass. Phase D1 remains queued behind this detour.
+
+### 2026-10-11 — New Brightwater vine acceptance; Spirit Strike audio follow-up
+
+The owner reports the barrier correction is fixed. This accepts the visible
+New Brightwater vine behavior on the paired candidate above, not the other
+five families or special scripted gates. `CONFIRMED_LIVE` capture observed
+opening, hold and closing selectors on both placed actors, followed by removal
+on both. Client registry removal was about 3.6 seconds later than host removal;
+the owner accepted the visible result, but this does not establish simultaneous
+native retirement or a tested passage/transition/disconnect contract. Preserve
+that timing as a lifecycle follow-up.
+
+The owner separately reports missing Tal Spirit Strike sounds. Audio cause and
+affected screen are not yet established; investigate character cues, global
+Spirit startup cues and summon/effect sounds before changing playback. The
+accepted vine correction remains in the current dirty candidate.
+
+The owner clarifies that only Tal's client is missing the Spirit atmosphere,
+echoing and roar; the host is audible. A 59-second read-only paired sound-pool
+capture (`CONFIRMED_LIVE` observation, same candidate) finds native host cues
+`spiritstrike_start`, `ALICE_SS_initiate_floorc`, `spirit_strike_init_1` through
+`_4`, `roar`, `strike_spirit_travel_split`, `TAL_SS_attackatmos`,
+`TAL_SS_strike` and `TAL_SS_morphtoTAL`, with none of those on the client.
+`TAL_SS_strikevocal` and ordinary Tal attack cues are present on both.
+
+`CONFIRMED_STATIC`: the saved-story character relay filters to party actors'
+sound components. The legacy arena separately observes and relays the global
+Spirit startup cue, but that observer is not bound by saved-story casts.
+Summon replicas retain an isolated native sound listener, while their renderer
+clock and their native entity/audio updates are distinct paths. A second
+read-only capture is prepared to establish the client summon's sound-bank,
+origin and authored event state during another owner cast. Those details are
+still `UNKNOWN`; no audio correction or audible acceptance is claimed yet.
+
+### 2026-10-11 — Tal Spirit audio bank and startup candidate
+
+**Cause (`CONFIRMED_LIVE` + `CONFIRMED_STATIC`):** the second paired capture
+finds both host Spirit resources bound to `TalSoundScript.xsb`; their client
+copies use `sfx_generic.xsb` instead. Both peers have the same authored cue
+names. The client sound origin reaches the correct presented position.
+Native `PlaySFXWithAll` copies the caster's sound-bank name after its effect
+factory; the parent-free client factory omitted that step. The existing
+paused-effect updater already delivers native sound events.
+
+The candidate restores that native bank binding before the first replica
+phase seek for the two confirmed Tal resources, with native reference-count
+ownership and hearing radius. It also binds the existing global Spirit sound
+observer to the retained saved-story caster and sends only the witnessed
+`spiritstrike_start` sequence/timestamp. The client consumes it once; duplicate
+and late packets cannot replay it. SMP4 protocol is **23** (both peers together).
+The accepted visual playback, camera and barrier behavior is retained.
+
+**Validation:** dirty `fc43d78`, candidate SHA256
+`981306ee1c295059a1a9d93435fb6356a24904fbe8fc7d3a072d362a457d4093`.
+DLL builds; seven focused checks pass: `StoryCharacterAudioImageTest`,
+`StoryCharacterAudioTransportTest`, `LanArenaSpiritAudioTest` (supported image),
+`SpiritVisualTimingImageTest`, `LanArenaSpiritVfxTest`,
+`StoryCastReadinessImageTest`, `StoryCastAdmissionTest`. New named byte guards
+`SoundBankNameId`, `SoundBankSet`, `EmitterBankSet`, `ManagerBankFind` pass
+including every-byte mutation refusal; existing named character-audio and
+visual timing guards also pass. Native bank setter execution proves initial
+binding, shared fallback replacement, balanced references, repeat idempotence,
+hearing radius and refusal to release a final fallback reference. Cast tests
+cover native scope, session/character/sequence fences and original emission
+clock; transport/replay tests cover all clients, stale and repeated startup.
+
+**Owner gate pending:** cast Tal's Spirit Strike from his client twice and
+listen for startup, initiation, roar/atmosphere, impact and return cues on both
+screens. Confirm the existing smooth animation, ending fade and normal control
+return. Logs may prove native cues started but cannot establish audible quality.
+Other roster Spirit resources and a disconnect/zone change during these sounds
+remain unaccepted. No commit, push, merge or public build is claimed.
+
+### 2026-10-11 — failed cast setup disables client effects; recovery candidate
+
+**Owner regression report:** Tal cannot start his Spirit Strike and Ailish's
+effects are absent on his client. The preceding audio candidate is **not
+accepted**. Its host never completed shared cast binding: initialization
+returned `ERROR_BUSY` at the formerly combined native-namespace stage, rolled
+back completely, then permanently closed admission. Host effect capture and
+publication depend on that same binding. The new Spirit sound observer was
+never installed, so this run cannot establish its audible behavior.
+
+**Correction:** retry a busy native camera-banking/construction boundary only
+after complete successful rollback, with a one-second backoff and fresh roster,
+menu and idle proofs. Invalid or unknown failures and retained native work
+still stop admission. Each namespace operation now has a separate diagnostic
+stage and caster index. Effect readiness logging reports actual binding and
+continues to report health changes after the startup sample budget. The exact
+busy substep in the earlier run remains `UNKNOWN`; the original native camera
+can outlive skill-body idle, but that specific trigger is not proven by its log.
+
+**Validation:** dirty `fc43d78`, protocol 23, recovery candidate SHA256
+`deff1a5fbb6a0705ade45e5194bb05b24f2ef7baedcb0b69ff8c9c4bcf2eb3dd`.
+Eight focused tests pass: the preceding seven plus `SpiritInstanceAbiTest`.
+`StoryCastAdmissionTest` now runs the actual binding and rollback coordinator
+against inert dependencies: second-caster busy refusal, clean rollback,
+delayed retry, recovered cast/VFX readiness, fresh identity/menu checks,
+invalid/unknown errors and failed restoration. This is `CONFIRMED_TEST`, not
+native constructor or gameplay proof. Named audio, visual timing and cast
+readiness image checks pass unchanged. Accepted barrier edits are preserved.
+
+**Owner gate:** verify live binding and publication before asking for another
+Tal Spirit Strike, then check startup, effects, audio and control return.
+Distinguish Ailish's regular shots from individual skills/Spirit Strikes:
+the latter still have incomplete saved-story effect coverage under #57.
+This candidate alone does not establish those missing effects or full-roster
+acceptance. No commit, push or merge.
+
+After the owner focused the loaded client, this recovery candidate completed
+live shared binding (`mask=12`, local Ailish), installed the Spirit sound
+observer, and published host VFX successfully; the client adopted the stream
+and reported ready. This is bounded `CONFIRMED_LIVE` setup/transport evidence,
+not cast, visible-effect or audible acceptance. No busy setup refusal occurred
+in the fresh run, so live retry remains unexercised. The read-only paired
+capture awaits Tal's cast and identification/repetition of the missing Ailish
+move.
+
+### 2026-10-11 — Witch’s Kiss and ordinary skill effects across the roster
+
+**Owner clarification:** the missing Ailish action is Witch’s Kiss, an ordinary
+skill. The paired recovery capture shows Tal’s Spirit Strike activation and
+body completion, and Ailish’s Witch’s Kiss running on the host. It does not
+establish audible acceptance of the preceding Spirit audio change.
+
+**Cause confirmed:** the saved-story visual witness admitted Tal casts and
+ordinary Ailish/Elco weapon shots, but excluded other casters’ skill effects.
+The closed resource list also omitted Witch’s Kiss and its shared startup.
+The host capture contains both resources while the client contains neither.
+
+**Candidate:** admit ordinary skill effects by exact roster caster and retained
+emission-time cast sequence; preserve that source for asynchronous effects,
+projectiles and late impacts. Add 62 original model descriptors covering the
+four six-slot skill families, multi-part attacks, shared startup/targeting and
+status descendants. Shipped animation-state roots and backing model metadata
+were audited; camera models are excluded. Replicas use the existing isolated
+sound-only cosmetic factory. They cannot forward damage, healing, status or
+missile events into a client actor. Native actor sound-bank inheritance is
+applied to these skill replicas. Demand-loaded skill cache leases are released
+following complete host withdrawal and successful local retirement/detachment;
+unknown observations and failed cleanup retain ownership.
+
+**Validation:** dirty `fc43d78`, protocol 23, candidate SHA256
+`4181a024b84d299c75f28957ed4bcf069e9048f5254ebd116fd13d9c8e364f87`.
+Fourteen focused suites pass: `SpiritInstanceAbiTest`,
+`StoryCharacterAudioImageTest`, `StoryCharacterAudioTransportTest`,
+`LanArenaSpiritAudioTest`, `SpiritVisualTimingImageTest`,
+`LanArenaSpiritVfxTest`, `LanArenaSpiritVisualHostTest`,
+`LanPartyProjectileLifetimeTest`, `StoryProjectileVisualTest`,
+`StorySkillVfxCodecTest`, `StoryVfxDispatchTest`,
+`StoryCastReadinessImageTest`, `StoryCastAdmissionTest`, and
+`StoryRangedTransportTest`.
+The affected host/projectile fixtures passed again after the final scope guard.
+Native checks use the supported image, including named sound-bank and visual
+clock byte checks. Tests cover independent four-caster sequences, delayed
+native finalization for every caster, late skill projectile identity, all 62
+resource lifecycles, unknown/failed-retirement lease retention, wrong owners,
+regular shots/shields and unchanged legacy codec rejection. The real four-peer
+loopback fixture delivers all four independent skill streams to every client
+and refuses client-side publication. No wire layout or
+protocol version changed; the saved-story closed kind set is extended.
+
+**Owner gate pending:** compare Witch’s Kiss on Ailish’s host and Tal’s client:
+startup/sigil, main spell, target effects and natural completion; repeat once.
+Recheck ordinary shots and Tal’s Spirit Strike for regressions. The common
+implementation covers all four ordinary skill families, but each move’s visual
+completeness, sustained status effects and concurrent casts remain unaccepted
+until play-tested under #57. This does not establish missing full-roster Spirit
+Strike resources or audio, effects created before observation, or live
+transition/disconnect cleanup. Keep the full-party Buki/Elco gate open. No
+commit, push, merge or public release.
+
+After reloading this candidate, shared casting bound successfully and the
+client adopted the effect stream. A read-only paired capture records one
+Witch’s Kiss with both startup and main models present in both games. Their
+animation data advance, both use `ALICESoundScript.xsb`, and both retire after
+the host ends them: sampled startup duration 2.91 seconds and main duration
+14.56 seconds on each peer (50 ms sampling; these are observations, not fixed
+lifetimes). Neither resource remains afterward; the capture reported no read
+errors. This is `CONFIRMED_LIVE` native replication/lifetime evidence. Owner
+visual/audio acceptance, repeat-cast and full-roster checks remain pending.
+
+### 2026-10-11 — remote idle lift report, read-only investigation
+
+**Owner report:** Ailish appears to lift and settle in Tal's window, and Tal
+does the same in Ailish's window. Keep this distinct from the previously
+corrected movement-to-idle transition. The owner completed a paired idle and
+brief movement capture; the recorded settled states were combat stances.
+
+**Evidence:** unchanged dirty `fc43d78`, protocol 23, roster candidate
+`4181a024b84d299c75f28957ed4bcf069e9048f5254ebd116fd13d9c8e364f87`.
+The read-only capture contains 3,454 paired samples with no read errors.
+During the initial stationary interval Tal's world-height range is below
+0.000008 units. Ailish's range is about 0.0041 units and originates on the
+host; it is not a client-only correction. Settled idle clocks advance without
+an unexpected restart. A second bounded capture examines final model-space
+bone matrices over several loops (575 samples per game, no read errors).
+Root transforms stay constant; hips move while lower leg-chain endpoints
+remain nearly planted. No substantial vertical discontinuity appears at the
+captured loop boundaries. These are `CONFIRMED_LIVE` measurements, not visual
+acceptance or a claim that the owner's reported difference is resolved.
+
+Tal uses the original lock-on idle, selector 17, 46 frames at 12 frames/second,
+in both the paired games and the existing native reference. At closely matched
+phases, all 79 bone translations closely match that reference. The reference
+clock is stationary, so this establishes only a pose comparison, not a native
+full-cycle or frame-pacing comparison. Projected Ailish uses original armed
+idle selector 20 and the accepted single-frame aiming overlay; the host's
+first-person arms are not a third-person body baseline.
+
+**Still open:** identify whether the visible difference occurs during settled
+combat idle, the transition after movement, or weapons-away idle. A running
+native comparison remains necessary to establish full-cycle visual parity.
+No animation, position or clock correction was justified by this capture;
+no production code, build, reload, commit, push or acceptance gate changed.
+
+The owner then clarified that the visible movement happens in settled combat
+idle and can appear to move the whole world in Ailish's view. A separate
+read-only camera pass found a concrete lead: Ailish's first-person camera
+repeatedly rises and falls by about 0.0041 units with her host world height,
+despite zero movement demand. Tal's camera-height range remains below
+0.000009 units. Camera orientation stays effectively constant. The pass has
+934 validated host camera samples and 996 client/reference samples; 62 host
+samples failed validation and are excluded, not interpreted as an inactive
+camera. This narrows the investigation to host position/camera movement;
+it does not establish the cause or prove that vanilla differs. The existing
+native reference is paused and contains Tal only. A fresh read-only comparison
+is armed for the owner to load Ailish and stand aiming in that native window.
+
+**Follow-up source trace:** a bounded native height watchpoint caught both the
+upward excursion and return through the original collision publication path:
+RVA `32320` -> callsite `329FD` -> `110BD0` -> position setter `3050`.
+The trace detached successfully after eight writes. A separate 696-sample
+read-only movement capture shows zero requested/current speed, zero horizontal
+and secondary movement accumulators, and ordinary animation speed factors.
+Ailish's first-person movement uses the native direct-delta integration branch;
+Tal uses the other branch. These observations narrow the source but do not
+establish that the mod introduced the collision behavior. The native comparison
+still has only paused Tal, so a running Ailish comparison remains the next gate.
+No collision clamp, animation flattening or camera patch has been applied.
+
+**Running native comparison and post-walk check:** the fresh native research
+profile now supplies 816 consecutive neutral Ailish samples over 42.87 seconds
+with an advancing native idle clock. Her height varies by about 0.000010 units
+and camera height by 0.000017 units at the loaded New Brightwater location.
+This is a running reference, but the ground differs from the multiplayer
+pre-ambush location. Both versions use the same native first-person movement
+branch and gravity value; no incorrect movement mode has been established.
+After the owner walks multiplayer Ailish to another nearby point, 126 seconds
+of settled samples retain a 0.00409-unit height range. A temporary bad landing
+is therefore less likely; terrain and native update timing remain uncontrolled.
+A native comparison at the established pre-ambush start is prepared and logging,
+awaiting the owner's save load and aiming sample. No production fix or visual
+acceptance is claimed.
+
+### 2026-10-11 — ranged idle terrain-contact candidate
+
+The owner clarified that the steady view is the **native Ailish same-ground
+comparison**, not the multiplayer correction. Keep the multiplayer owner gate
+open. Walking after test placement did not remove the measured multiplayer
+height cycle; the native reference looks steady on the same road.
+
+**Cause and scope:** exact-image inspection and eight bounded native contact
+observations identify the small-penetration branch at RVA `33288`. For barely
+touching terrain it adds `0.01` normalized collision units, despite penetration
+below `0.00001`. Ailish's vertical radius converts that margin to about `0.00725`
+world units; the remaining downward step explains the observed roughly `0.0041`
+lift. The surrounding solver at `32320` skips small movement deltas. The
+first-person gravity step crosses that threshold at longer frame times; this
+timing explanation is an `INFERENCE` from the native math and passive capture,
+not a controlled native frame-rate experiment.
+
+**Candidate:** dirty `fc43d78`, protocol 23, DLL SHA256
+`54cd58a1dfbb8b2128fc9c0b7c48b0962c18e57cbc0ff4b5b808291cc00e9c3e`.
+A host-only adapter reduces the extra clearance to the existing
+small-penetration tolerance for a current terrain contact, almost-upward normal,
+stationary Ailish/Elco first-person movement and exact roster/control ownership.
+It retains the original query, gravity and swept collision response. It does
+not retain a terrain pointer or treat last frame's ground flag as proof.
+Movement, casts, hits, steep surfaces, parented positions, larger penetrations
+and uncertain ownership use the native path. Native research and client
+profiles do not install this adapter.
+
+**Validation:** five focused suites pass: `StoryIdleContactImageTest`,
+`StoryAiMovementImageTest`, `StoryPlayerMovementImageTest`,
+`StoryMeleeAdmissionTest` and `StoryCastAdmissionTest`. The new exact-image suite
+checks `IDLE_CONTACT_CALL`, `IDLE_CONTACT_FRAME`, `IDLE_CONTACT_NORMAL`,
+`IDLE_CONTACT_END`, `IDLE_CONTACT_THRESHOLD`, `IDLE_CONTACT_MARGIN` and
+`IDLE_CONTACT_HALF` by name, including every-byte rejection. It also checks
+register/flag/x87/SSE/LastError preservation, thread and identity refusal,
+install rollback, restore failure/retry, and the original contact routine
+over synthetic geometry. The synthetic tiny-contact output changes from
+`1.009999037` to `1.000008941`; tested air, larger penetration, movement and
+nonterrain responses match the original. This is `CONFIRMED_EXACT_IMAGE` and
+`CONFIRMED_TEST`, not whole-game collision or visual acceptance.
+
+**Owner gate:** reload the candidate pair; leave Ailish aiming still for
+20 seconds, walk and settle again, then fire and check normal movement and hit
+reactions. Compare her view and Tal's view of her. Record an advancing-game
+height/camera capture and the owner's visible result separately. Elco and
+other terrain/lifecycle cases remain unaccepted. No commit, push or merge.
+
+The candidate pair has now been reloaded with the same test configuration;
+the native comparison remains unchanged. A fresh read-only actor/camera
+capture is armed. Loading and gameplay inputs remain with the owner, and the
+multiplayer visible-result gate is still pending.
+
+### 2026-10-11 — idle-contact first candidate failed acceptance
+
+The owner reports that the lift-and-settle remains. The first candidate is
+**not accepted**: the capture retains roughly `0.0041` world-unit idle height
+and camera excursions, despite short steady intervals.
+
+A bounded hardware-breakpoint trace identifies the missed native case.
+The corrected `33288` path uses its small margin, but terrain penetration of
+`0.000011444` crosses the `1e-5` branch boundary into the adjacent positive
+separation path at `334A8`, which still adds approximately `0.01`.
+Fourteen sampled contacts take the corrected path; two take that neighboring
+path. All have zero movement demand. This is `CONFIRMED_LIVE` evidence of
+the remaining branch, not a failure of roster admission. Software breakpoints
+inside checked code invalidate byte guards; the preliminary software-breakpoint
+admission observations were discarded and replaced by hardware observations.
+
+The revised candidate covers both branches. The additional branch admits only
+shallow depth from `1e-5` through `1e-4`, with both a current near-up terrain
+normal and a near-up normalized separation vector. It clears the full bounded
+overlap before adding the small margin, so the reduced clearance cannot leave
+the actor below that surface. Deeper penetration and the backside response
+remain native. Existing ownership, movement, cast and hit guards are unchanged.
+
+Validation first ran in a separate executable-only harness after automatic
+review rejected an unvalidated runtime expansion. All eight named contracts
+pass, including new `IDLE_CONTACT_SEPARATION`, with ABI checks for both hooks,
+two-hook install rollback and restore retry. The original native routine now
+passes synthetic contacts on both sides of the boundary at both native single
+and extended x87 precision. The observed-depth fixture changes its result
+from `1.009994268` to `1.000010014`; larger penetration, air, movement and
+nonterrain continue matching native. Integration was then approved and all
+five repository suites passed again.
+
+Revised DLL SHA256:
+`7f200dba1ece5c364ea782ef700e0c71731f6e796ed001a5665c9842be045103`.
+Dirty `fc43d78`, protocol 23. The same multiplayer owner gate remains open;
+retest settled aim, walking/stopping and firing in both views. Elco, other
+terrain and live lifecycle checks remain unaccepted. No commit, push or merge.
+
+The revised pair is now reloaded and a fresh read-only capture is armed.
+The client still needs owner focus/startup and the pair needs to enter the
+loaded world before a new idle measurement is valid. No second-candidate
+visual result has been claimed.
+
+
+### 2026-10-11 — C5 grouped native input candidate; owner gate reopened
+
+The owner explicitly requests the remaining C5 rewrite before moving on.
+The earlier Tal acceptance applies to the separate-edge implementation; it
+is not acceptance of this new candidate. C3/C4 and C6 keep their accepted
+scope. D1 remains next after this C5 owner gate. The second ranged idle-contact
+candidate is parked without a new owner result.
+
+CONFIRMED_STATIC / CONFIRMED_TEST, dirty `fc43d78`: client Tal and Buki now
+sample weak/strong/sweep together once per controller dispatch. Each button
+uses native press/held/released/neutral states (`1→2→3→0`). Simultaneous
+buttons remain in one snapshot. Melee no longer waits for the skill-action
+result outbox, and the old edge-request path no longer executes melee in the
+saved-story runtime. Skills and Spirit Strikes retain their existing outbox.
+
+A bounded 16-change history accompanies each melee datagram (228-byte payload).
+The host consumes each change at most once in order, supplies steady held or
+neutral states between changes, and rejects stale input and retired leases.
+Focus/menu cancellation removes pending history; a host input fence requires
+neutral before rearming. Loss beyond the history/250 ms/eight-world-frame
+bounds drops input rather than replaying old attacks. Saved-story gameplay
+profile **21** requires the new channel; profiles 19/20 are rejected by the
+handshake. Outer session protocol remains 23, with no save-format change.
+
+CONFIRMED_EXACT_IMAGE: the new ABI adapter enters the retail combat-only join
+at RVA `DB189`, with the original prologue's register/stack shape. It leaves
+interaction globals untouched, preserves block priority, and lets native
+combat/combos decide admission. It installs no additional patch. Tal/Buki
+actor, arbiter, block, scene and control ownership remain validated; ranged
+and special input modes are excluded. The named byte checks
+`MeleeSnapshotSelection`, `MeleeSnapshotReturn`, `MeleeSnapshotReject`,
+`SudekiMpStoryInteractionInputImageExact` and `SudekiMpStoryBlockImageExact`
+pass, including mutation refusals. The isolated retail router selected the
+expected attack for all 64 button combinations while preserving all tested
+host latch/availability values. Held input did not repeat attacks.
+
+The runtime DLL builds. Ten focused executables pass:
+`StoryQuickInputTest`, `StoryInteractionGuardImageTest`,
+`StoryMeleeTransportTest`, `StoryMeleeAdmissionTest`,
+`StoryActionTransportTest`, `StoryActionOutboxTest`,
+`StoryBlockTransportTest`, `StoryRangedTransportTest`,
+`StoryCastAdmissionTest`, and `LanPartySessionTest`.
+The tests cover bounded loss/reordering, duplicate/expiry/cancellation,
+Tal/Buki transport and admission, simultaneous-button priority, host latch
+preservation, stack balance, block priority and old-profile rejection.
+Candidate DLL SHA256:
+`266217fbdb80eb0e05753096529cab105915ee7aedef4dbf54379576fc833287`.
+
+**Owner gate OPEN:** reload both peers with this candidate, then compare
+client Tal's light/heavy taps, hold/release, HHL plus extra light follow-ups,
+simultaneous M1/M2 and block/roll followed by attacking. Check for missed,
+extra or delayed attacks, and that Q/Spirit still works. The owner retains
+all gameplay commands. The candidate has not been deployed or play-tested;
+no new gameplay acceptance, full-roster result, higher-latency timing parity,
+or live disconnect/transition result is claimed. Buki's full-party check
+remains under #57. No Phase D work, commit, push or merge in this pass.
+
+### 2026-10-12 — owner-requested protected death/loot observation
+
+The owner requests closing all games, reloading the pair at the established
+castle-road approach, and protecting the party while Ailish starts combat.
+This is a baseline observation for D1, not acceptance of D1 or the revised C5.
+The reloaded candidate includes the C5 grouped input implementation.
+
+Added disabled-by-default `[StoryAreas] TestPartyInvulnerable` for this test.
+Only the saved-story host acquires the existing native party protection leases
+on a witnessed game-thread dispatch. It does not change enemy health or game
+speed. Partial acquisition retains cleanup responsibility; teardown retries
+restoration of the previous protection setting. Client and native-reference
+profiles do not acquire these test leases. Original launch configuration was
+restored after startup; the running host retains its explicit test request.
+
+CONFIRMED_TEST: runtime build and `StoryControlStatusTest`,
+`CleanroomEngineTest`, `StoryMonsterDamageGuardImageTest`,
+`StoryMonsterDamageFlushImageTest`, `StoryLootTraceImageTest` pass. Coverage
+includes disabled/client/foreign-thread refusal, unavailable-state refusal,
+partial acquisition, restoration retry and preserving prior protection.
+Dirty `fc43d78` candidate SHA256:
+`ee78eade13e22dc38f36645c17f2c9328f3eb9ef333a83b0d633453ee2b8cd9a`.
+
+CONFIRMED_LIVE (startup only): both peers loaded; test placement reports two
+actors placed without refusal. Host Tal and Ailish each have an acquired native
+invulnerability reference and flag. A bounded read-only capture observes party
+HP/protection, monster copies and DroppedItem objects on both peers alongside
+the runtime's damage/despawn logs. Registry sampling is not an exhaustive
+native death-entry or XP-award trace. Combat, loot comparison, revised C5 input
+acceptance and live protection cleanup remain pending the owner's test.
+
+### 2026-10-12 — first protected encounter: four host drops, none on client
+
+Owner reports at least four visible drops. CONFIRMED_LIVE (bounded capture):
+four distinct DroppedItem instances coexist on the host; none are observed
+on the client. All 32 host despawn records match the client's 32 follow records
+by identity, serial and death style; every client follow finds its copy, and
+all 32 death-effect creations report success. All 37 logged damage replays
+retain positive client HP (minimum 1), exact identity proof and no pending
+flag restoration. No monster copies remain in the latest paired sample.
+
+This supports the existing nonlethal replay and host-removal path for this
+encounter. It also reproduces D3's missing real-drop presentation on the client.
+It is not complete D1 acceptance: native death-entry and XP-award absence were
+not exhaustively traced, and C5's revised input gate remains unaccepted. The
+capture remains running; no gameplay, runtime or configuration change was
+made during this inspection.
+
+### 2026-10-12 — farmhouse missing-enemy correction; owner gate open
+
+Owner confirms the missing-enemy encounter was the farmhouse and requests
+broader enemy visibility. Investigation found a shared spawn-command loss:
+Start2 selected sequence one on the host, but the client always replayed
+Start1, which selects zero. The prior capture contains no client copies for
+the host's farmhouse monsters. This detour addresses that failure without
+claiming D1, D2 or the revised C5 owner gate complete.
+
+The command path now carries all three native start forms, sequence selection,
+pass count, scope and repeated-start serial. It preserves native resource
+loading; there is no farmhouse-specific or enemy-type whitelist. Named byte
+checks and actual default/selected native argument routing pass, along with
+`StorySpawnTimingImageTest`, `StoryEffectTransportTest` and
+`LanPartySessionTest`. See the matching research-log entry for evidence and
+scoped-call test limits. Dirty `fc43d78` candidate SHA256:
+`d881825b122f9b96a77a75291358660199b7c06d295fe2ca0b1a41701743471e`.
+Saved-story gameplay profile 22 / presentation codec 4 require both peers.
+
+**Owner gate OPEN:** replay the farmhouse fight from the usual protected test
+setup. Confirm the enemies appear, animate, take host-authored damage and
+leave both views when defeated. Compare monster identities and removals in
+the paired capture. Then recheck the ambush and repeated encounters. Other
+areas, bosses and scoped/random group lifecycles are not accepted by these
+automated tests. Full D2 event-driven spawning remains separate work; D3's
+missing real client drops remains reproduced. No commit, push or merge.
+
+The candidate pair is now reloaded. CONFIRMED_LIVE (startup only): both peers
+loaded, two actors placed, and host Tal/Ailish native protection references
+and flags are present. Original launch INIs have been restored. A fresh
+bounded read-only capture is armed. The owner has been asked to repeat the
+farmhouse fight; no corrected encounter acceptance is claimed yet.
+
+### 2026-10-12 — farmhouse spawn pause corrected; identity mismatch remains
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: `SpawnAttachPauseRelease` checks the
+native SoloSpawnSetup attachment chain and its release of one initialization
+pause reference. A completed, witnessed native job may change references from
+2 to 1 while becoming scheduled. The client now accounts for that exact delta
+without releasing its own world-pause reference. `StorySpawnTimingImageTest`,
+`StoryClientRegistryTest` and `StoryResidencyCallTest` pass, including named
+byte mutations, deferred completion and reference ownership. No new hook.
+
+CONFIRMED_LIVE (owner control check): Tal remains controllable while farmhouse
+enemies appear. The owner also suspects enemies vanished during combat; that
+specific visual symptom is not established by the capture. The paired capture
+does establish a separate D2 failure: both peers create fifteen monsters, but
+four host removal records find no matching client identity and four client
+copies remain after the host has none. Independent native spawn-point choices
+still feed different portable identities. **D2 remains OPEN**; this is not a
+passed farmhouse encounter or all-game enemy coverage.
+
+### 2026-10-12 — host world cosmetics and nearby loot candidate
+
+Implemented a saved-story host observer for enemy missile models, the audited
+Kurian attack/block effect family, native item-drop models and pickup effects.
+The client uses the existing parent-free cosmetic renderer with host transforms,
+phases and stable shared visual instance IDs. It creates no native missile,
+damage callback, DroppedItem gameplay object or local loot roll. Native weak
+references distinguish destruction/address reuse and retain failed cleanup.
+World observation gates presentation publication, independently of party casting
+initialization. Unknown or overflowing observations do not publish an empty set.
+
+Nearby, living, leased remote characters in the same ordinary area may invoke
+the host's existing pickup routine for an observed drop. The host keeps native
+inventory limits and consumption; presentation disappears after collection.
+This uses a one-unit center-distance check; precise native collision-volume
+boundary parity remains unverified. D6's individual reward ledger is unchanged.
+The catalog includes 79 resolved item models, 22 encounter attack/block/missile
+models and six pickup effects. Two unresolved item model identifiers remain
+unadmitted; other enemy effect families require their own resource evidence.
+
+CONFIRMED_TEST: eight suites pass: `StoryWorldVisualImageTest`,
+`StoryProjectileVisualTest`, `StorySkillVfxCodecTest`, `LanArenaSpiritVfxTest`,
+`LanArenaSpiritVisualHostTest`, `LanPartySessionTest`, `StoryCastAdmissionTest`,
+`StoryVfxDispatchTest`. The new exact-image test executes native weak assignment,
+destruction and the pickup decision/call path with inert inventory/render/consume
+endpoints; it does not prove real rendering or real inventory changes. Named
+checks `WorldVisualWeakDestruction` and `WorldDropCollect` reject every tested
+byte/pointer mutation. Shared IDs, reused addresses, positive removal, unknown
+and capacity failure, cap refusal/cooldown, dead/far collectors and single
+consumption are covered. Existing casting and weapon-shot regressions pass.
+
+Dirty `fc43d78` candidate SHA256:
+`39d640898a5a8da0a01d48071b169343eb2fe2e01f9693f104cc15f6486d2a28`.
+Saved-story gameplay profile 23 requires both peers; wire envelope and saves
+are unchanged. **D3/effects owner gate OPEN:** compare host and Tal views for
+real drops, nearby collection, enemy ranged shots and blocking visuals. Recheck
+normal attacks/skills, cleanup and area changes. D1, D2 and revised C5 remain
+separate open gates. No commit, push or merge.
+
+### 2026-10-12 — farmhouse frozen/invisible-looking enemies: D2 reproduced
+
+Owner reports enemies frozen in mid-air or never becoming visible on the current
+protected candidate. CONFIRMED_LIVE (read-only native state, not a screenshot):
+over twenty paired samples with both game frame counters advancing, all fifteen
+host monsters change pose. Nine client copies receive matching world updates;
+six (three scarecrows and three gnats) retain identical positions and all animation
+channels. All fifteen client models have render objects, and the six frozen
+objects have the renderer hidden bit clear. Native SoloSpawnSetup jobs complete
+with the corrected pause accounting; party/world presentation continues. This
+rules out the earlier whole-client spawn pause failure for this sample.
+
+The frozen copies have no host identity match because current identity hashes
+include locally randomized spawn-point indices. 7 of the nine matching IDs
+also refer to different native entry indices across peers, so matching counts
+alone are insufficient acceptance evidence. A stalled early pose can explain
+an invisible-looking model, but that visual interpretation remains INFERENCE.
+No missing model-resource failure was observed in this sample.
+
+**D2 owner gate FAILED / remains OPEN.** Correct individual host spawn events,
+entry/pass/occurrence identity and client creation before another farmhouse
+acceptance run. Do not unpause client AI, force visibility, pair by proximity,
+or treat group-start replay as sufficient. No production source change or
+reload was made during this diagnosis. The separate D3 loot/effect candidate
+and its pending pickup/block acceptance are unchanged.
+
+### 2026-10-12 — D2 individual host spawn implementation, owner gate pending
+
+Implemented in the dirty `fc43d78` worktree for saved-story LAN. Each observed
+native SoloSpawnSetup construction records the host's group, selected point,
+low-11-bit entry index, remaining pass count, resource, placement and a unique
+monotonic occurrence serial. The monster's wire identity is that serial;
+reusing a point/type/entry in another wave cannot reuse its identity. Native
+intrusive weak observers retain group and actor lifetime, including asynchronous
+loading. Serial conflicts and journal overflow fail closed and are not published
+as an empty or truncated roster.
+
+The authenticated effects stream now carries a complete active/pending spawn
+roster (maximum 64). The client invokes the native single-spawn creation path
+for each previously unseen occurrence. Its spawn-group update is suppressed,
+so it no longer makes independent random choices or advances spawn timers.
+Complete host absence removes only completed native jobs; pending work drains.
+The older point-search despawn shortcut is removed. Spawn sigils share the new
+occurrence identity while retaining host-observed end timing. Automatic combat
+gates keep their existing separate lifecycle adapter.
+
+CONFIRMED_EXACT_IMAGE: supported executable SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Native RVA `0x762B0` accepts the group in EDI with no stack arguments and returns
+without popping arguments. It owns allocation, SoloSpawnSetup construction,
+resource request, point weak assignment, packed entry flags and pass advance.
+The existing constructor/step/destructor adapter remains the single seam owner.
+Named contracts `SpawnEventChooseEntry`, `SpawnEventResourceName`,
+`SpawnEventCreateAndAttach`, `SpawnEventWeakAssign`, `SpawnEventWeakDestroy`,
+`SpawnEventMonsterDestroy`, `SpawnEventMonsterBaseDestroy`,
+`SpawnEventGroupDestroy`, `SpawnEventGroupBaseDestroy`,
+`SpawnEventEntityBaseDestroy` and `SpawnEventGroupUpdateABI` all pass, including
+mutation refusal for every checked byte. The fixture executes native creation,
+constructor and weak cleanup with inert allocation/resource endpoints; it does
+not execute gameplay or demonstrate rendering.
+
+CONFIRMED_TEST: six suites pass: StorySpawnTimingImageTest,
+StoryEffectTransportTest, LanPartySessionTest, StoryWorldVisualImageTest,
+StoryCastAdmissionTest and StoryVfxDispatchTest. Coverage includes duplicate
+replay, entry/pass packing, point reuse across waves, pending-load retirement,
+conflicting serial rejection, positive destruction, unknown preservation,
+64-entry atomic transport, lost/reordered/stale packets, and older peer refusal.
+Existing spawn-pause, sigil, gate, death-effect, cast and world-cosmetic checks
+remain passing. Build and whitespace checks pass.
+
+Saved-story gameplay profile 24 and effects codec 5 require both peers to update;
+the outer envelope and save format are unchanged. Candidate DLL SHA256:
+`ce1d4e49d4c02aede1678a2c4c9122876b4c4609167731820ed95bcd99827e42`.
+The protected pair was reopened and read-only occurrence/pose logging armed.
+**D2 remains OPEN at its owner gate:** verify the ambush and farmhouse through
+at least two waves, equal host/client occurrence sets and entry/type/point
+choices, advancing poses, no missing/frozen/leftover enemies, sigil endings and
+continued Tal control. Other areas, exceptional non-group spawns, reconnect
+while a native load is pending, and runtime teardown failure still need live
+coverage. This does not establish all-game enemy coverage or close D1, D3 loot
+acceptance, or the revised C5 gate. No commit, push or merge.
+
+### 2026-10-12 — Tal loot observation during D2 testing
+
+Owner reports an item appearing in Tal's play-test. CONFIRMED_LIVE (native
+pickup result): the host recorded the remote Tal character collecting item
+204, with successful native return and the drop consumed. This establishes
+one client pickup of host-owned loot on the dirty D2 candidate; it does not
+identify the killing blow or establish a separate client-side loot roll.
+Both host party members retain the test invulnerability reference. The ambush
+has twenty-two matching host/client construction descriptors so far; this is
+structural evidence only. Farmhouse/two-wave visual acceptance and broader
+loot/reward acceptance remain open. Read-only logging was restarted after the
+previous bounded capture expired. No code change or reload for this observation.
+
+### 2026-10-12 — D2 farmhouse delayed health-bar/death presentation candidate
+
+Owner reports delayed client health-bar cleanup and death effects after returning
+to the farmhouse. CONFIRMED_LIVE (observation, previous dirty D2 candidate):
+matched farmhouse spawn/removal observations are within one 0.2-second sampling
+interval; final removal is not the measured multi-second bottleneck there.
+CONFIRMED_STATIC: client damage intentionally reserves positive HP, while death
+cosmetics were only replayed at final host object removal. The recorded fatal-hit
+to-removal intervals span several seconds. Ambush transport delays seen separately
+are not explained by this farmhouse finding and remain a follow-up.
+
+The candidate separates presentation from removal. The existing native animation
+emission adapter observes the matched monster's independent authored death effect;
+its spawn occurrence retains that receipt. World snapshots now carry host death,
+model visibility and the observed death style. The client creates the visual once
+at the presented pose, keeps the native object until complete host absence, and
+suppresses duplicate creation at retirement. No client native death, loot roll,
+XP award or async task cancellation is introduced. Pending native loads still drain.
+
+Health/name widgets use the native hidden state after feedback updates; floating
+killing-hit numbers and local number settings remain separate. Exact-image native
+UI entries are RVA `0x15C2D0` and `0x15C230`, thiscall/no stack arguments/RET,
+through owned CStatDisplay `+0xD0` and `+0x12C`. The full native `0x129360` cleanup
+also clears floating numbers, so replaying that whole routine would regress #55.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: eight suites pass:
+StorySpawnTimingImageTest, StoryMonsterDamageGuardImageTest,
+StoryMonsterDamageFlushImageTest, LanPartySessionTest,
+LanArenaSpiritVisualHostTest, StoryWorldVisualImageTest,
+StoryCastAdmissionTest and StoryVfxDispatchTest. The six named health-widget
+entry/return/vtable checks and eleven existing spawn contracts reject every checked
+byte mutation. Native widget propagation preserves queued damage numbers and HP;
+death tests cover unrelated effects, the still-present host actor, wrong identity,
+repeated receipts, and no second effect at final removal. The resource test endpoint
+was corrected to initialize native `0x411730`'s complete 20-byte ESI output handle,
+including its ResourceName record at `+0xC`; the prior incomplete fixture depended
+on stack contents. These fixture results do not prove rendered timing.
+
+Revision: dirty `fc43d78` on the existing shared-simulation worktree; supported
+executable SHA256 `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Candidate DLL SHA256 `3df9c68d3d42d6034290cb93f85858c4dce3d3d45fe75129aa7d8eb544f86ad4`.
+Saved-story gameplay profile 25 / world frame version 9 reject the prior profile;
+record sizes, effects codec 5, outer envelope and save format are unchanged.
+
+**Owner gate OPEN:** compare ordinary and chunk-producing farmhouse kills on both
+screens: health bar clears promptly, killing-hit numbers remain visible when enabled,
+death effects start with the host and do not repeat at removal, models disappear
+with the host, later waves and Tal control continue. The ambush and other enemy
+families still need coverage. No broader D2/D3 acceptance, commit, push or merge.
+
+The pair was reloaded with this candidate. Both native spawn adapters installed;
+host party invulnerability and pre-ambush placement were confirmed. Original
+configuration files were restored after startup. Fresh read-only health/death
+logging is active for the owner gate; this is readiness, not visual acceptance.
+
+CONFIRMED_LIVE (native observation, same candidate): the first ambush pass
+records 22 host-authored death emissions and 22 matching client creations,
+77–113 ms later by the paired native clocks, with no duplicate occurrence.
+For sampled dying actors, client health/name widgets are hidden within one
+0.2-second sample interval; native floating-number state 2 remains observable
+while those widgets are hidden. No spawn/solo fault was sampled. This is
+ambush structural/timing evidence, not farmhouse or visual owner acceptance.
+
+### 2026-10-12 — client left outside freezes on temporary house entry
+
+Owner reports Tal's world freezing when Ailish enters the farmhouse or another
+house, then world motion returning without client movement after she exits.
+The earlier farmhouse health/death presentation gate is still unconfirmed.
+CONFIRMED_LIVE (observed failure): the outdoor zone follower requested the host's
+state-4 temporary interior through SwitchZoneNOW. The client entered a loading
+scene and advanced its local epoch; presentation resumed on return, while local
+control remained pending. CONFIRMED_STATIC: the retained control selection
+requires the original native party epoch. A zone residency report does not
+transfer a character into a temporary interior.
+
+The candidate restricts the ordinary follower to positively observed state-3
+host and local zones. A state-4 entry, missing current descriptor or ambiguous
+name report grants no outdoor zone call. The runtime uses the same report check
+before releasing exterior effects. Temporary travel remains with its existing
+per-character owner; the control epoch check is preserved. No native pause
+reference, task or retained control lease is forcibly cleared.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: StoryAreaFollowImageTest,
+StoryAreaStateTest, StorySceneAreaTest and StoryAreaTest pass. SwitchZoneNOW
+(RVA 0x7990) and EnterZone (RVA 0x7970) byte guards are checked by name and reject
+mutations. A hash-verified image fixture with recording zone-call stubs covers
+host interior entry while the client stays outside, an already resident interior,
+return to the same exterior, ordinary outdoor background load/entry, lighting
+release refusal and an admitted local interior. It executes no real loading or
+renderer. Protocol/profile and save format are unchanged.
+
+Revision: dirty fc43d78; candidate SHA256 0e4dcfd057c57dc366a4a0d95cd873d5fc6dbd0aed9c0ced9b3e778e0dc15179.
+**Owner gate OPEN:** leave Tal outside and moving while Ailish enters/exits the
+farmhouse, repeat at another house, and verify his world and movement throughout
+and after return. Then recheck farmhouse health-bar/death timing; the owner could
+not confirm that preceding gate. No broader D2/D3 acceptance, commit, push or merge.
+
+### 2026-10-12 — one delayed death after Tal's Spirit Strike
+
+Owner noticed one enemy missing the other enemies' death cue. CONFIRMED_LIVE
+(native observation, current house-transition candidate): the first ambush's
+four actors reach zero host HP in the same 0.2-second sample. Three emit death
+visuals together; the fourth emits 1.902 seconds later on the host, then the
+client presents its matching receipt 86 ms later. That actor continues pose
+channel 31 to its end before switching to death channel 20. All four receipts
+arrive; this observation does not show a lost client death message. Why the host
+continues that animation, and whether vanilla does the same, remain UNKNOWN.
+No death-timing override is applied. House-entry/return and farmhouse death
+visual acceptance remain open.
+
+Follow-up: CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE identifies the actor as a
+Kurian Trooper playing its combo slash. The shipped animation definition marks
+all four death transitions from that slash `No interrupt`; the native transition
+selector honors that flag. Its 42-frame clip at the observed 24 frames/second,
+plus the authored approximately 0.15-second blend, accounts for the observed
+1.902-second delay (INFERENCE from matching native data and live timing).
+This supersedes the unknown animation-rule cause above. A matching untouched
+vanilla play-test remains UNKNOWN. Details: research-log entry
+“Kurian Trooper delayed death follows the authored combo transition.”
+No gameplay timing change or owner-gate closure.
+
+### 2026-10-12 — owner requests immediate Kurian death interruption; broader audit #62
+
+The owner explicitly requested changing the identified wait. The saved-story
+host now has a narrowly scoped candidate: a leased Kurian Trooper at zero HP,
+native dead state and selected death action may leave COMBO3 before completion.
+The native death predicate, transition blend, effect emission, loot and removal
+still execute; the client follows the existing host receipt. Living actors,
+client replicas, other creatures and other animations retain native rules.
+No shared animation asset is edited. Broader creature coverage is tracked in
+[issue #62](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/62).
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: StorySpawnTimingImageTest executes the
+retail transition selector and death predicate and passes all four death types,
+negative ownership/liveness cases and teardown retry. The named
+KurianDeathTransitionSelect contract rejects every checked byte mutation.
+StoryWorldVisualImageTest, StoryMonsterDamageGuardImageTest and
+StoryMonsterDamageFlushImageTest also pass. Dirty fc43d78; candidate SHA256
+4202b15dc1ef56613387efaad2a6dbfc84003f4b926801642cb63340f3ccd79e.
+Protocol/profile and save format are unchanged.
+
+**Owner gate OPEN:** kill a Kurian during its combo slash with an ordinary
+attack or Spirit Strike. Verify the slash stops promptly, host/client death
+effects agree, no attack continues after death, loot is not duplicated and the
+next wave proceeds. This is not all-creature acceptance or closure of the
+separate house-entry and farmhouse death-presentation gates.
+
+The pair was reloaded with this candidate: both DLL hashes and saved-story
+startup markers match; the host's Kurian exception and both spawn adapters
+installed. Pre-ambush test placement reports two actors placed, none refused.
+Original configurations were restored after startup. Read-only death/pose
+logging is armed. This is installation/readiness evidence, not visual acceptance.
+
+### 2026-10-12 — Kurian result accepted; health-bar comparison deferred to #63
+
+CONFIRMED_LIVE (owner observation): the owner reports the Kurian death issue
+resolved on the preceding candidate and authorizes moving on. This closes that
+reported symptom's visual gate. The captured run records hook installation but
+no override-admission event, so the specific interrupted branch remains backed
+by the exact-image fixture rather than a new live admission trace.
+The broader creature audit remains open under #62.
+
+Per owner request, [issue #63](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/63)
+tracks enemies reaching zero HP and health-bar cleanup versus vanilla, including
+ordinary hits, skills, Spirit Strikes, simultaneous deaths and later waves.
+Those comparisons are not silently accepted by the Kurian sign-off.
+
+The active task returns to house travel: Tal stays functional while Ailish is
+inside, but Tal and his world freeze when she exits. The house round-trip gate
+remains open.
+
+### 2026-10-12 — house-return follower rejects a retired target
+
+CONFIRMED_LIVE / CONFIRMED_STATIC: after the host returns outside, its current
+and loaded exterior are state 3, but its target still names the now-unloaded
+farmhouse (state 0). That target is absent from the transmitted residency list.
+The client accepted the name alone, requested the farmhouse, entered state 4
+and lost ordinary exterior presentation/control while the host stayed outside.
+The prior state-4 entry guard therefore did not cover the return path.
+
+The follower now requires a matching host residency entry in states 1–3 before
+loading a background target. A retired target cannot authorize a new load.
+Following a positively resident host current exterior still works when its
+background target is stale. Existing local/host exterior checks, native
+pause/control epochs and asynchronous ownership rules remain in force.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: the retained-house-target regression
+fails against the preceding implementation and passes with this correction.
+StoryAreaFollowImageTest, StoryAreaStateTest, StorySceneAreaTest and StoryAreaTest
+pass. The exact-image fixture checks SwitchZoneNOW and EnterZone by name and
+rejects mutations of every checked byte. Ordinary outdoor load/entry and the
+missing-current-exterior fallback are also covered.
+
+Dirty fc43d78; saved-story profile 25/world 9/effects 5 unchanged. Candidate DLL
+SHA256 ba6989b68a869c32551c74257d64bd8e6b86337771ebf0cc5f6ea5f568b1f05f.
+**Owner gate OPEN:** leave Tal outside while Ailish enters, stays in, and exits
+the farmhouse; verify Tal's movement and world updates throughout. Repeat with
+another house and ordinary outdoor travel. Compilation and fixture results do
+not close this live gate or the separate #63 death-presentation comparison.
+
+Both test windows have reloaded with the matching candidate hash and successful
+saved-story startup. Native spawn adapters installed, pre-ambush placement
+reports two actors placed and none refused, and the host's Ailish/Tal both have
+one test invulnerability reference. Original configurations were restored after
+startup. Read-only area/party capture is running for the owner's round trip.
+
+### 2026-10-12 — client native XP popup candidate
+
+The owner clarified that the requested text above a dead enemy is the XP
+reward. This adds that presentation to the existing host-owned death path;
+client gameplay death and local XP/loot generation remain prohibited by D1.
+The reported 128/64/0 numbers are not established as XP or corrected by this
+change; their damage/health comparison remains under #63.
+
+CONFIRMED_STATIC / CONFIRMED_LIVE: native monster rewards call the separate XP
+popup manager after awarding experience. The observed host pool contains used
+XP popups, while the corresponding client pool remains unused. The candidate
+captures the host's actual active native popups, including displayed value,
+position, height and authored lifetime, and sends an optional cosmetic snapshot.
+Clients invoke only the native popup entry, once per observed pool occurrence.
+Late snapshots retain elapsed lifetime; wrong-area, stale-scene and unknown
+owner observations cannot start a popup. Native display enable is respected.
+Ordinary damage-number and host death-effect paths remain independent.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: StoryXpImageTest and
+StoryXpTransportTest pass, including all three observing clients, native ABI,
+pool reuse, duplicate suppression, authored duration, expiry, full-pool retry,
+wrong-area refusal and named byte checks XpPopup, XpFreeSlot, XpSetupHead and
+XpSetupReturn. LanPartySessionTest, StoryAreaFollowImageTest and
+StoryMonsterDamageFlushImageTest also pass. The rendering leaf is a recording
+endpoint in the exact-image fixture; real rendered XP acceptance is UNKNOWN.
+
+Dirty fc43d78; candidate SHA256
+4ed6a92f9162ebc2003d0d2a505f709ffcc13033da1e81409eb4c71886f108f8.
+The XP packet is additive; saved-story profile 25/world 9/effects 5 and saves
+are unchanged. Older peers can ignore it without granting gameplay authority.
+The running pair still uses the preceding house-return candidate.
+**Owner gate OPEN after reload:** ordinary and simultaneous kills show the
+host's XP values once, at the same death locations, and finish naturally on the
+client; damage numbers, death effects, loot and subsequent waves remain normal.
+The house-entry/return gate is still awaiting explicit owner confirmation.

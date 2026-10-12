@@ -19,6 +19,10 @@
  * The native turn callback re-proves the retained roster/lease, current peer
  * and acknowledged control fence on the game thread. */
 BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character);
+/* Publish a witnessed host roster each controller dispatch; NULL closes idle
+ * contact admission. The collision callback revalidates this identity. */
+void SudekiMpLanStoryControlObserveIdleContact(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanStoryNativeRoster *);
 BOOL SudekiMpLanStoryControlBegin(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *);
 BOOL SudekiMpLanStoryControlNextLease(const SudekiMpControlUpdateDispatchWitness *,
@@ -36,6 +40,8 @@ unsigned SudekiMpLanStoryControlRanged(const SudekiMpControlUpdateDispatchWitnes
 /* Held native block for Tal/Buki; release remains admitted while UI is open. */
 BOOL SudekiMpLanStoryControlBlock(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,BOOL held);
+unsigned SudekiMpLanStoryControlMeleeSnapshot(const SudekiMpControlUpdateDispatchWitness *,
+    const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned buttons);
 unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness *,
     const SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned kind);
 /* Closes input first, then retries native speed/action drain and precisely

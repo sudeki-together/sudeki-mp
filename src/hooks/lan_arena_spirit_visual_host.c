@@ -45,7 +45,13 @@ static const uint32_t resource_ids[] = {
     0x920d7163u, 0x0fdb430fu,
     0x18a0da0fu, 0x34b6a981u, 0xafbcfa53u, 0x55f90a03u, 0xf3c381cfu,
     0xe2711ed3u, 0xec9a809bu, 0xb0a51d13u, 0xa85bf815u, 0x4ed84d5bu, 0x7eae7163u, 0x8e21830fu, 0x79853f03u, 0x55fe7cfbu,
-    0x6e6ab603u, 0x0700bb4fu, 0x92924c93u, 0x9aba9c13u, 0xe04de4f7u, 0x113e7163u, 0x8fd33af3u, 0x6962ac13u, 0x7a0f7be5u, 0x44339603u, 0xec6ec03bu, 0x6cfc3173u, 0x26c23af3u, 0xb3f54b2du, 0xbe038af3u, 0xaf5881cbu, 0x4dc21929u, 0xba1fbc33u, 0xd4d5734bu, 0xdef2f193u, 0xf1758a93u, 0x147c1a93u, 0xb253d293u, 0x92215eefu, 0x1164f28fu, 0xd7a3ae33u, 0xd6aea28bu, 0xfe2b79f3u, 0x3ba29d83u, 0x661fb62du, 0xda7a5273u, 0xbe566943u, 0x06d8e387u
+    0x6e6ab603u, 0x0700bb4fu, 0x92924c93u, 0x9aba9c13u, 0xe04de4f7u, 0x113e7163u, 0x8fd33af3u, 0x6962ac13u, 0x7a0f7be5u, 0x44339603u, 0xec6ec03bu, 0x6cfc3173u, 0x26c23af3u, 0xb3f54b2du, 0xbe038af3u, 0xaf5881cbu, 0x4dc21929u, 0xba1fbc33u, 0xd4d5734bu, 0xdef2f193u, 0xf1758a93u, 0x147c1a93u, 0xb253d293u, 0x92215eefu, 0x1164f28fu, 0xd7a3ae33u, 0xd6aea28bu, 0xfe2b79f3u, 0x3ba29d83u, 0x661fb62du, 0xda7a5273u, 0xbe566943u, 0x06d8e387u,
+#define SKILL_ID(symbol,name,id,mask) id,
+    SUDEKIMP_STORY_SKILL_RESOURCES(SKILL_ID)
+#undef SKILL_ID
+#define WORLD_ID(symbol,name,id,mask) id,
+    SUDEKIMP_STORY_WORLD_RESOURCES(WORLD_ID)
+#undef WORLD_ID
 };
 static const char *const resource_names[] = {
     NULL, "SFXSS250_INITIATE", "SFXSS251_INITIATE_LOOP_WAIT",
@@ -95,7 +101,13 @@ static const char *const resource_names[] = {
     "SFXEP005_ELUVIAM_JACKHAMMER",
     "SFXEP006_PHOENIX_REBIRTH",
     "SFXEP007_SHOOTING_IRON",
-    "SFXHT104_MISS_BLADE2MAGIC"
+    "SFXHT104_MISS_BLADE2MAGIC",
+#define SKILL_NAME(symbol,name,id,mask) name,
+    SUDEKIMP_STORY_SKILL_RESOURCES(SKILL_NAME)
+#undef SKILL_NAME
+#define WORLD_NAME(symbol,name,id,mask) name,
+    SUDEKIMP_STORY_WORLD_RESOURCES(WORLD_NAME)
+#undef WORLD_NAME
 };
 enum { RESOURCE_TEXT_CAPACITY = 64, DIAGNOSTIC_CAPACITY = 16 };
 static const uint8_t finalize_prefix[] = {
@@ -643,16 +655,16 @@ static void * __cdecl lifetime_factory(void) {
     EmissionSource source={0};
     /* Positional missile impacts allocate here, outside the animation and
      * script-parent observers. Their setup can finish after the missile's
-     * update scope has returned. Retain the witnessed ordinary-shot source
+     * update scope has returned. Retain the witnessed cast/ordinary-shot source
      * on the native weak identity before that scope ends. */
     if(owned && session_armed && InterlockedCompareExchange(&admitted,0,0) &&
-        active_witness && (owner.actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
-                          owner.actor_type==SUDEKIMP_LAN_ARENA_ELCO_TYPE)) {
+        active_witness) {
         if(emission_source) source=*emission_source;
         else source.valid=active_witness(witness_context,NULL,&source.session,
             &source.sequence,&source.tick,&source.owner);
-        source.valid=source.valid && !source.sequence && source.session==owner.session &&
-            source.owner==owner.actor_type;
+        source.valid=source.valid && source.sequence==owner.cast_sequence &&
+            source.session==owner.session && (source.owner==owner.actor_type ||
+                (!source.owner && owner.actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE && source.sequence));
     }
     InterlockedIncrement(&lifetime_depth);
     void *entity=((void *(__cdecl *)(void))lifetime_factory_hook.trampoline)();
@@ -853,7 +865,9 @@ static BOOL missile_visual_sample(const SudekiMpLanPartyProjectileObservation *o
         *(void **)e!=(uint8_t *)image+0x2d5a10u || *(void **)(e+0xfcu)!=m ||
         !memory_access(record=*(uint8_t **)(m+0x3cu),0x30u,FALSE)) return FALSE;
     value->kind=native_resource_kind(record+0x24u);
-    value->owner_actor_type=o->owner.actor_type;value->skill_sequence=0;
+    value->skill_sequence=o->owner.cast_sequence;
+    value->owner_actor_type=(value->skill_sequence && o->owner.actor_type==SUDEKIMP_LAN_ARENA_TAL_TYPE)
+        ? 0u : o->owner.actor_type;
     if(!SudekiMpLanStoryCastVisualOwnerValid(value) ||
         !memory_access(position=*(uint8_t **)(e+0x44u),0x104u,TRUE) ||
         *(void **)position!=(uint8_t *)image+RVA_POSITION_VTABLE || *(void **)(position+0x10u)!=e ||
@@ -869,10 +883,10 @@ static BOOL missile_visual_sample(const SudekiMpLanPartyProjectileObservation *o
     return memory_access(matrix,64u,FALSE) && SudekiMpSpiritVisualDecomposeMatrix(matrix,value) &&
         native_phase(renderer,value) && *(void **)(m+0x10u)==e && *(void **)(e+0xfcu)==m;
 }
-BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *elco,void *ailish,
+BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *const actors[4],
     SudekiMpStoryVfx *output) {
     SudekiMpLanPartyProjectileObservation missiles[512];unsigned count=0;
-    if(!output || !image || !session || session!=registry.session || registry.unknown ||
+    if(!output || !actors || !image || !session || session!=registry.session || registry.unknown ||
         GetCurrentThreadId()!=game_thread || !output->observed ||
         output->count>SUDEKIMP_STORY_VFX_CAPACITY ||
         !SudekiMpLanPartyProjectileLifetimeObserve(missiles,512,&count)) return FALSE;
@@ -891,15 +905,21 @@ BOOL SudekiMpLanStoryProjectileVisuals(uint64_t session,void *elco,void *ailish,
     for(unsigned i=0;i<count;++i) {
         const SudekiMpLanPartyProjectileObservation *o=&missiles[i];
         if(o->owner.session!=session || o->termination_entered ||
-            !((o->owner.actor_type==0x0eu && o->owner.actor==elco) ||
-              (o->owner.actor_type==0x01u && o->owner.actor==ailish))) continue;
-        /* Only the closed ordinary weapon model set is admitted. Skill
-         * missiles keep their separate owner and existing visual contract. */
+            !((o->owner.actor_type==0x05u && o->owner.actor==actors[0]) ||
+              (o->owner.actor_type==0x0eu && o->owner.actor==actors[1]) ||
+              (o->owner.actor_type==0x23u && o->owner.actor==actors[2]) ||
+              (o->owner.actor_type==0x01u && o->owner.actor==actors[3]))) continue;
+        /* Closed ordinary weapon and skill resources, retaining the original
+         * cast even when the projectile outlives it or a later cast starts. */
         if(!memory_access(o->missile,0x40u,FALSE)) return FALSE;
         uint8_t *record=*(uint8_t **)((uint8_t *)o->missile+0x3cu);
         if(!memory_access(record,0x30u,FALSE)) return FALSE;
         uint8_t kind=native_resource_kind(record+0x24u);
-        if(kind<SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST) continue;
+        SudekiMpLanArenaSpiritVfxSnapshot candidate={.kind=kind,
+            .skill_sequence=o->owner.cast_sequence,
+            .owner_actor_type=(o->owner.cast_sequence && o->owner.actor_type==0x23u) ? 0u : o->owner.actor_type};
+        if(!kind) continue;
+        if(!SudekiMpLanStoryCastVisualOwnerValid(&candidate)) return FALSE;
         if(next.count>=SUDEKIMP_STORY_VFX_CAPACITY) return FALSE;
         StoryMissileVisual *entry=NULL,*empty=NULL;
         for(unsigned j=0;j<SUDEKIMP_STORY_VFX_CAPACITY;++j) {
@@ -930,6 +950,8 @@ static const SudekiMpSpiritVisualHostApi *native_api(void) {
     api.context = image; api.bind = native_bind; api.sample = native_sample;
     return &api;
 }
+
+#include "hooks/lan_story_world_visuals.h"
 
 static BOOL reset_pending_emissions(void) {
     unsigned int i;
@@ -1011,6 +1033,12 @@ static void retain_emission(void *entity, const EmissionSource *source) {
     registry.unknown = TRUE; /* Never publish a truncated lifetime roster. */
 }
 
+static void (*story_death_observer)(void *,void *);
+BOOL SudekiMpLanStoryDeathObserverSet(void (*observer)(void *,void *)) {
+    if(InterlockedCompareExchange(&in_flight,0,0) ||
+        (observer && story_death_observer && observer!=story_death_observer)) return FALSE;
+    story_death_observer=observer;return TRUE;
+}
 typedef void (__attribute__((stdcall)) *AnimationEmit)(void *, void **, uint32_t);
 static void __attribute__((stdcall)) observe_animation_emit(
     void *component, void **out_effect, uint32_t event_index
@@ -1047,6 +1075,8 @@ static void __attribute__((stdcall)) observe_animation_emit(
         }
     }
     ((AnimationEmit)animation_emit_hook.trampoline)(component, out_effect, event_index);
+    if(story_death_observer && memory_access(out_effect,sizeof(*out_effect),FALSE))
+        story_death_observer(component,*out_effect);
     if(observe_life) {
         /* The common factory already captured this object before async
          * resource setup. The result is an independent completeness check. */
@@ -1097,7 +1127,7 @@ static void * __attribute__((cdecl, used)) observe_script_parent_body(
             uint8_t kind = native_resource_kind(args + 2u);
             /* Status/shield effects have separate target-owned discovery.
              * An unrelated script effect must not consume a pending slot. */
-            observing = kind != 0u && kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST &&
+            observing = kind != 0u && (kind != SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST || shield_witness) &&
                 !shield_owner(kind);
             if (observing) {
                 if (emission_source) source = *emission_source;
@@ -1213,7 +1243,7 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                             if (token != 0u) registry.entries[token - 1u].status_actor = actor;
                         }
                     }
-                } else if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST) {
+                } else if (kind == SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST && !shield_witness) {
                     /* Status effects are discovered from the exact target's
                      * status component after finalization, never attributed
                      * to whichever Spirit happened to be running. */
@@ -1248,7 +1278,8 @@ static unsigned char __attribute__((cdecl, used)) observe_finalize_body(
                     else if (entity != NULL) {
                         SudekiMpLanArenaSpiritVfxSnapshot candidate={.kind=kind,
                             .skill_sequence=skill,.owner_actor_type=owner_type};
-                        if(SudekiMpLanVisualOwnerValidForPresentation(&candidate))
+                        if(shield_witness ? SudekiMpLanStoryCastVisualOwnerValid(&candidate) :
+                            SudekiMpLanVisualOwnerValidForPresentation(&candidate))
                             token = SudekiMpSpiritVisualHostRegistryBeginOwned(
                                 &registry, session, skill, tick, kind, owner_type, entity, native_api());
                     }
@@ -1623,6 +1654,7 @@ unknown:
 }
 
 BOOL SudekiMpLanArenaSpiritVisualHostReset(void) {
+    if(!world_visual_reset()) return FALSE;
     InterlockedExchange(&admitted, 0);
     session_armed = FALSE;
     if (!finalize_hook.installed) return TRUE;

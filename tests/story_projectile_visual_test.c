@@ -37,29 +37,29 @@ int main(void) {
     *(void **)(renderer+8)=model;*(void **)(renderer+0x98)=bank;*(void **)bank=channels;
     *(void **)(model+0x1c)=parts;*(uint32_t *)(parts+0xc)=1;*(float *)(channels+8)=4;
     game_thread=GetCurrentThreadId();registry.session=7;registry.next_instance=20;
-    observation=(SudekiMpLanPartyProjectileObservation){.owner={7,8,actor,1},.incarnation=1,
+    observation=(SudekiMpLanPartyProjectileObservation){.owner={7,8,actor,1,0},.incarnation=1,
         .entity=entity,.missile=missile};observation_count=1;
     SudekiMpStoryVfx s={.tick=100,.observed=1},before;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s));
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s));
     assert(s.count==1 && s.entries[0].kind==kind && s.entries[0].instance_sequence==21 &&
         s.entries[0].position[0]==10 && s.entries[0].phase==4 && s.entries[0].owner_actor_type==1);
     assert(SudekiMpLanStoryCastVfxEntriesValid(s.tick,s.cast_sequence,s.observed,s.count,s.entries,SUDEKIMP_STORY_VFX_CAPACITY));
     s.count=0;memset(s.entries,0,sizeof(s.entries));s.tick=110;matrix[12]=12;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s));
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s));
     assert(s.entries[0].instance_sequence==21 && s.entries[0].emitted_host_tick==100 && s.entries[0].position[0]==12);
     before=s;observation_ok=FALSE;
-    assert(!SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && !memcmp(&s,&before,sizeof(s)));observation_ok=TRUE;
+    assert(!SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && !memcmp(&s,&before,sizeof(s)));observation_ok=TRUE;
     s.count=0;memset(s.entries,0,sizeof(s.entries));observation.termination_entered=TRUE;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && !s.count);
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && !s.count);
     observation.termination_entered=FALSE;observation.incarnation=2;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && s.entries[0].instance_sequence==22);
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && s.entries[0].instance_sequence==22);
     s.count=0;memset(s.entries,0,sizeof(s.entries));before=s;
     *(void **)(position+0x10)=NULL;
-    assert(!SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && !memcmp(&s,&before,sizeof(s)));
+    assert(!SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && !memcmp(&s,&before,sizeof(s)));
     *(void **)(position+0x10)=entity;observation.owner.session=8;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && !s.count);
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && !s.count);
     observation.owner.session=7;observation.owner.actor_type=0x0e;before=s;
-    assert(!SudekiMpLanStoryProjectileVisuals(7,actor,NULL,&s) && !memcmp(&s,&before,sizeof(s)));
+    assert(!SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,actor,NULL,NULL},&s) && !memcmp(&s,&before,sizeof(s)));
     /* Six wall impacts plus five in-flight shots reproduced the live
      * overflow. Synthetic native owners have separate entities/components. */
     observation.owner.actor_type=1;observation.incarnation=10;
@@ -78,14 +78,32 @@ int main(void) {
         .rotation_xyzw={0,0,0,1},.scale={1,1,1}};
     for(unsigned step=0;step<30;++step) {
         s=effects;s.tick+=step*16;matrix[12]=20+(float)step;
-        assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && s.count==11);
+        assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && s.count==11);
         assert(SudekiMpLanStoryCastVfxEntriesValid(s.tick,0,1,s.count,s.entries,64));
         for(unsigned i=6;i<11;++i) assert(s.entries[i].position[0]==matrix[12]);
     }
     observation_count=64;s=effects;before=s;
-    assert(!SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && !memcmp(&s,&before,sizeof(s)));
+    assert(!SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && !memcmp(&s,&before,sizeof(s)));
     observation_count=0;s=effects;
-    assert(SudekiMpLanStoryProjectileVisuals(7,NULL,actor,&s) && s.count==6);
+    assert(SudekiMpLanStoryProjectileVisuals(7,(void *const[4]){NULL,NULL,NULL,actor},&s) && s.count==6);
+    /* Ailish, Elco and Tal skill missiles retain their own cast sequences,
+     * including a late sample after a different caster's newer cast. */
+    const unsigned kinds[]={SUDEKIMP_LAN_STORY_VFX_SFXAS007_FIREBALL_PROJECTILE,
+        SUDEKIMP_LAN_STORY_VFX_SFXES005_PLASMATICA_PROJECTILE,
+        SUDEKIMP_LAN_STORY_VFX_SFXTS010_BLADE_SPARK_PROJECTILE};
+    const unsigned chars[]={3,1,2},types[]={1,14,35};
+    observation_count=1;
+    for(unsigned i=0;i<3;++i) {
+        void *roster[4]={0};roster[chars[i]]=actor;
+        observation.owner.actor_type=types[i];observation.owner.cast_sequence=41+i;
+        observation.incarnation=200+i;
+        *(uint32_t *)(record+0x28)=resource_ids[kinds[i]];
+        s=(SudekiMpStoryVfx){.tick=1000,.cast_sequence=100,.observed=1};
+        assert(SudekiMpLanStoryProjectileVisuals(7,roster,&s) && s.count==1);
+        assert(s.entries[0].kind==kinds[i] && s.entries[0].skill_sequence==41+i &&
+            s.entries[0].owner_actor_type==(i==2?0:types[i]));
+        assert(SudekiMpLanStoryCastVfxEntriesValid(s.tick,s.cast_sequence,1,1,s.entries,64));
+    }
     VirtualFree(image,0,MEM_RELEASE);
     puts("PASS owned projectile transform/phase, monotonic shared IDs, retirement/address reuse, unknown and foreign-owner rejection");return 0;
 }

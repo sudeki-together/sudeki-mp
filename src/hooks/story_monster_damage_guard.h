@@ -39,6 +39,32 @@ static inline BOOL SudekiMpStoryDamageArmDisplay(uint8_t *image,uint8_t *entity,
     *(float *)(stat+0x18u)=1.0f;
     return TRUE;
 }
+/* Retail 529360's health/name branch uses state 2 and each widget's
+ * native visibility propagation. Its later branch also destroys numbers;
+ * keep that branch out of nonlethal client feedback. No arbiter/HP change. */
+static const uint8_t story_health_hide_bar_head[]={0x57,0x8b,0xf9,0x8b,0x47,0x1c};
+static const uint8_t story_health_hide_label_head[]={0x57,0x8b,0xf9,0x8b,0x47,0x1c};
+static inline BOOL SudekiMpStoryHealthHideCode(uint8_t *b,SudekiMpStoryDamageMemory m) {
+    return b && m(b+0x2d9038u,4,FALSE) && m(b+0x2d8538u,4,FALSE) &&
+        *(void **)(b+0x2d9038u)==b+0x15c2d0u && *(void **)(b+0x2d8538u)==b+0x15c230u &&
+        m(b+0x15c2d0u,0x28u,FALSE) &&
+        !memcmp(b+0x15c2d0u,story_health_hide_bar_head,sizeof(story_health_hide_bar_head)) && b[0x15c2f7u]==0xc3 &&
+        m(b+0x15c230u,0x3eu,FALSE) &&
+        !memcmp(b+0x15c230u,story_health_hide_label_head,sizeof(story_health_hide_label_head)) && b[0x15c26du]==0xc3;
+}
+static inline BOOL SudekiMpStoryDamageHideHealth(uint8_t *b,uint8_t *e,SudekiMpStoryDamageMemory m) {
+    if(!SudekiMpStoryHealthHideCode(b,m) || !m(e,0xb4u,FALSE) || *(void **)e!=b+0x2d5fa0u) return FALSE;
+    uint8_t *s=*(uint8_t **)(e+0xb0u);
+    if(!m(s,0x1b4u,TRUE) || *(void **)s!=b+0x2d21e4u || *(void **)(s+0x10u)!=e ||
+        *(void **)(s+0xd0u)!=b+0x2d9024u || *(void **)(s+0x12cu)!=b+0x2d8524u) return FALSE;
+    typedef void (__attribute__((thiscall)) *Visibility)(void *);
+    s[0x1cu]=s[0x25u]=0;
+    *(uint32_t *)(s+0xd0u+0x1cu)=2;
+    ((Visibility)(b+0x15c2d0u))(s+0xd0u);
+    *(uint32_t *)(s+0x12cu+0x1cu)=2;
+    ((Visibility)(b+0x15c230u))(s+0x12cu);
+    return TRUE;
+}
 enum { SUDEKIMP_RVA_DIRECT_DAMAGE=0xd3ae0u };
 typedef void (__attribute__((thiscall)) *SudekiMpStoryDirectDamage)(void *,float);
 static const uint8_t story_direct_damage_head[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x68};

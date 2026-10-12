@@ -25,7 +25,7 @@ static void vfx_codec(void) {
     bytes[0]=2; assert(!SudekiMpStoryVfxDecode(bytes,sizeof(bytes),&out));
     bad=s; bad.entries[0].position[0]=NAN; assert(!SudekiMpStoryVfxValid(&bad));
     bad=s; bad.entries[0].owner_actor_type=0x23; assert(!SudekiMpStoryVfxValid(&bad));
-    bad=s; bad.entries[0].kind=14; assert(!SudekiMpStoryVfxValid(&bad));
+    bad=s; bad.entries[0].kind=255; assert(!SudekiMpStoryVfxValid(&bad));
     bad=s; bad.entries[0].rotation_xyzw[3]=0; assert(!SudekiMpStoryVfxValid(&bad));
     bad=s; bad.entries[0].emitted_host_tick=101; assert(!SudekiMpStoryVfxValid(&bad));
     bad=s; bad.count=2; bad.entries[1]=bad.entries[0]; assert(!SudekiMpStoryVfxValid(&bad));
@@ -127,7 +127,7 @@ static void vfx_reordered_transport(SOCKET server,const struct sockaddr_in *to,
 }
 static SudekiMpStoryEffectState sample(void) {
     SudekiMpStoryEffectState s={.epoch=1,.revision=1,.sequence=1,.observed_tick=1,.current="castle_road",
-        .group_count=1,.groups={{"ambush",1}},.light_valid=1,.light_target={0x3f800000,0x3f000000,0},
+        .group_count=1,.groups={{.name="ambush",.sequence=1,.serial=1,.method=1}},.light_valid=1,.light_target={0x3f800000,0x3f000000,0},
         .sky_dome_serial=1,.sky_dome="sky",.cluster_valid=1,.cluster_hash=91,.sector=12,.in_combat=1,.flag36=2,.suspended=1};
     s.sky[0].serial=7; s.sky[0].args[4]=0x3f800000; strcpy(s.vertical_fog,"fog");
     for(unsigned i=0;i<SUDEKIMP_STORY_DESPAWN_MAX;++i) s.despawned[i]=(SudekiMpStoryDespawn){i+1,100+i,i%5u};
@@ -136,6 +136,14 @@ static SudekiMpStoryEffectState sample(void) {
     s.music_flags=3; s.music_intensity=0x3f19999a; strcpy(s.music_score,"BS_IllumCountry");
     s.music_curve[0]=0x3ecccccd; s.music_curve[1]=s.music_curve[3]=0x3f19999a;
     s.music_curve[4]=0x42f00000; s.music_curve[5]=0x41a00000;
+    s.gates_valid=1;s.gate_count=1;
+    strcpy(s.gates[0].name,"fixture_gates");
+    s.gates[0].serial=7;s.gates[0].resource=0x47b40b4a;
+    s.gates[0].point_count=32;s.gates[0].live_mask=0x80000001u;
+    s.spawns_valid=1;s.spawn_count=64;
+    for(unsigned i=0;i<64u;++i) s.spawns[i]=(SudekiMpStorySpawnEvent){
+        .group="ambush",.serial=i+1,.group_id=41,.resource=93,.point=i%16,.entry=i,
+        .passes=3,.position={0x3f800000,0,0xbf800000},.forward={0,0,0x3f800000},.flags=3};
     s.drops[15]=(SudekiMpStoryDropRecord){1,31,919,2,{0x3f800000,0,0xbf800000},1};
     return s;
 }
@@ -164,7 +172,22 @@ static void codec(void) {
     out=s; out.drops[0].position[2]=1; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.drops[15].position[2]=0x7fc00000; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.cluster_valid=0; assert(!SudekiMpStoryEffectStateValid(&out));
-    out=s; out.groups[0].sequence=-1; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.groups[0].sequence=-1; assert(SudekiMpStoryEffectStateValid(&out));
+    out.groups[0].sequence=-2; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.groups[0].method=2; out.groups[0].selection=1;
+    assert(SudekiMpStoryEffectStateEncode(&out,bytes,sizeof(bytes)));
+    assert(SudekiMpStoryEffectStateDecode(bytes,sizeof(bytes),&unchanged));
+    assert(SudekiMpStorySpawnGroupSame(&out.groups[0],&unchanged.groups[0]));
+    unchanged.groups[0].serial++; assert(!SudekiMpStorySpawnGroupSame(&out.groups[0],&unchanged.groups[0]));
+    out.groups[0].method=3; strcpy(out.groups[0].scope,"dungeon");
+    assert(SudekiMpStoryEffectStateEncode(&out,bytes,sizeof(bytes)));
+    assert(SudekiMpStoryEffectStateDecode(bytes,sizeof(bytes),&unchanged));
+    assert(SudekiMpStorySpawnGroupSame(&out.groups[0],&unchanged.groups[0]));
+    out.groups[0].scope[0]=0; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.groups[0].method=1; out.groups[0].selection=1; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.groups[0].serial=0; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.groups[0].method=4; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.group_count=2;out.groups[1]=out.groups[0];assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.light[0].kind=1; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.despawned[1].death_style=5; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.music_flags=2; assert(!SudekiMpStoryEffectStateValid(&out));
@@ -177,12 +200,43 @@ static void codec(void) {
     out=s; out.music_curve[4]=0; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.music_curve[5]=0x7f800000; assert(!SudekiMpStoryEffectStateValid(&out));
     out=s; out.music_variation=2; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates_valid=0; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gate_count=9; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[0].point_count=33; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[0].point_count=31; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[0].serial=0; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[0].resource=0; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gate_count=2; out.gates[1]=out.gates[0]; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[1].resource=1; assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s; out.gates[0].live_mask=0; assert(SudekiMpStoryEffectStateValid(&out));
+    assert(SudekiMpStoryEffectStateEncode(&out,bytes,sizeof(bytes)));
+    bytes[0]=2; assert(!SudekiMpStoryEffectStateDecode(bytes,sizeof(bytes),&unchanged));
+    out=s;out.spawns_valid=0;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawn_count=65;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawn_count=63;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[63].serial=out.spawns[0].serial;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].entry=2048;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].point=256;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].passes=0;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].passes=-2;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].position[0]=0x7f800000;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].forward[2]=0x7fc00000;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].flags=65536;assert(!SudekiMpStoryEffectStateValid(&out));
+    out=s;out.spawns[0].passes=-1;assert(SudekiMpStoryEffectStateValid(&out));
+    out=s;memset(out.spawns,0,sizeof(out.spawns));out.spawn_count=0;
+    assert(SudekiMpStoryEffectStateValid(&out));out.spawns_valid=0;assert(SudekiMpStoryEffectStateValid(&out));
     out=s; out.sky[1].args[0]=1; assert(!SudekiMpStoryEffectStateValid(&out));
 }
 static void effect_packet(SOCKET server,const struct sockaddr_in *client,const SudekiMpStoryEffectState *s,unsigned part,uint32_t envelope) {
     uint8_t b[SUDEKIMP_STORY_EFFECT_CHUNK_MAX]; size_t n;
     assert(SudekiMpStoryEffectChunkEncode(s,part,b,sizeof(b),&n));
     send_packet(server,client,35,SUDEKIMP_LAN_PARTY_VERSION,envelope,b,n);
+}
+/* Chunk 1 remains the deliberately missing/reordered piece in this fixture;
+ * send all the remaining pieces together, including the gate payload. */
+static void effect_front(SOCKET server,const struct sockaddr_in *client,const SudekiMpStoryEffectState *s,uint32_t envelope) {
+    effect_packet(server,client,s,0,envelope);
+    for(unsigned i=2;i<SUDEKIMP_STORY_EFFECT_CHUNKS;++i) effect_packet(server,client,s,i,envelope+1000u+i);
 }
 int main(void) {
     vfx_large_codec();
@@ -245,14 +299,14 @@ int main(void) {
     SudekiMpStoryEffectState s=sample(),got; s.observed_tick=now;
     effect_packet(server,&source,&s,1,4); SudekiMpLanPartyPoll(client,now+4);
     assert(!SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+4,&got)); /* missing chunk */
-    effect_packet(server,&source,&s,1,5); effect_packet(server,&source,&s,0,3); SudekiMpLanPartyPoll(client,now+5);
+    effect_packet(server,&source,&s,1,5); effect_front(server,&source,&s,3); SudekiMpLanPartyPoll(client,now+5);
     assert(SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+5,&got) && !memcmp(&got,&s,sizeof(s)));
     /* Incomplete newer record cannot publish; older complete record remains usable. */
-    s.sequence=2; s.sigils[0].ended=1; effect_packet(server,&source,&s,0,6);
+    s.sequence=2; s.sigils[0].ended=1; effect_front(server,&source,&s,6);
     SudekiMpLanPartyPoll(client,now+6); assert(SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+6,&got) && got.sequence==1);
-    s.sequence=3; effect_packet(server,&source,&s,1,8); effect_packet(server,&source,&s,0,7);
+    s.sequence=3; effect_packet(server,&source,&s,1,8); effect_front(server,&source,&s,7);
     SudekiMpLanPartyPoll(client,now+7); assert(SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+7,&got) && got.sequence==3);
-    s.sequence=2; effect_packet(server,&source,&s,1,200); effect_packet(server,&source,&s,0,201);
+    s.sequence=2; effect_packet(server,&source,&s,1,200); effect_front(server,&source,&s,201);
     area.sequence=2; strcpy(area.current,"brightwater"); assert(SudekiMpStoryAreaStateEncode(&area,area_bytes,sizeof(area_bytes)));
     send_packet(server,&source,34,SUDEKIMP_LAN_PARTY_VERSION,9,area_bytes,sizeof(area_bytes));
     SudekiMpLanPartyPoll(client,now+8);
@@ -265,16 +319,16 @@ int main(void) {
     /* Scene fence clears assemblies and complete effects without suppressing areas. */
     ++scene.epoch; ++scene.revision; scene.observed_tick+=10u; strcpy(scene.world,"next_fixture"); assert(SudekiMpLanStorySceneEncode(&scene,scene_bytes,sizeof(scene_bytes)));
     send_packet(server,&source,19,SUDEKIMP_LAN_PARTY_VERSION,301,scene_bytes,sizeof(scene_bytes));
-    s.sequence=4; effect_packet(server,&source,&s,0,302); effect_packet(server,&source,&s,1,303);
+    s.sequence=4; effect_front(server,&source,&s,302); effect_packet(server,&source,&s,1,303);
     SudekiMpLanPartyPoll(client,now+10);
     assert(!SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+10,&got));
     assert(!SudekiMpLanPartyGetStoryVfx(client,&peer.lease,now+10,&vfx_got));
     assert(SudekiMpLanPartyGetStoryArea(client,&peer.lease,now+10,&actual));
     s.epoch=scene.epoch; s.revision=scene.revision; s.observed_tick=scene.observed_tick;
-    effect_packet(server,&source,&s,0,304); effect_packet(server,&source,&s,1,305);
+    effect_front(server,&source,&s,304); effect_packet(server,&source,&s,1,305);
     SudekiMpLanPartyPoll(client,now+11);
     assert(SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+11,&got) && got.sequence==4);
-    effect_packet(server,&source,&s,0,306); effect_packet(server,&source,&s,1,307);
+    effect_front(server,&source,&s,306); effect_packet(server,&source,&s,1,307);
     SudekiMpLanPartyPoll(client,now+1012);
     assert(!SudekiMpLanPartyGetStoryEffects(client,&peer.lease,now+1012,&got)); /* duplicate cannot refresh */
     assert(!SudekiMpLanPartyPublishStoryEffects(client,&s));

@@ -2,6 +2,8 @@
  * Never load a campaign, dispatch a script, or execute an attack task. */
 #include "hooks/story_interaction_guard.h"
 #include "hooks/story_block_input.h"
+#include "hooks/story_melee_snapshot.h"
+#include "network/lan_story_melee.h"
 #include "engine/build_identity.h"
 #include "engine/arbiter_combat_input.h"
 #include <assert.h>
@@ -74,6 +76,15 @@ static BOOL guarded(unsigned kind) {
  * downstream attack task in this isolated mapping with an inert observer.
  * This proves request selection, not actual combo acceptance or timing. */
 static void reproduce_cadence(void) {
+    assert(SudekiMpStoryMeleeSnapshotImageExact(image,readable));
+    for(unsigned g=0;g<sizeof(story_melee_contracts)/sizeof(*story_melee_contracts);++g) {
+        for(unsigned i=0;i<story_melee_contracts[g].size;++i) {
+            image[story_melee_contracts[g].rva+i]^=1;
+            assert(!SudekiMpStoryMeleeSnapshotImageExact(image,readable));
+            image[story_melee_contracts[g].rva+i]^=1;
+        }
+        printf("named byte guard %s passed including mutation refusal\n",story_melee_contracts[g].name);
+    }
     uint8_t *call=image+0xdb222u,saved[5]; int32_t displacement;
     memcpy(saved,call,sizeof(saved)); memcpy(&displacement,call+1,4);
     assert(call[0]==0xe8 && call+5+displacement==image+0xdac00u);
@@ -113,6 +124,32 @@ static void reproduce_cadence(void) {
             kind==1?3:0,kind==2?3:0,kind==3?3:0,0,0,0);
         assert(!trigger[0x1d8]);
     }
+    /* Execute the production combat-only ABI on every snapshot and host
+     * latch/availability combination. The real router selects the attack;
+     * only the downstream task is replaced by the inert sink. */
+    for(unsigned buttons=0;buttons<64u;++buttons) {
+        for(unsigned flags=0;flags<256u;++flags) for(unsigned latch=0;latch<3u;++latch) {
+            trigger[0x1d8]=(uint8_t)latch;trigger[0x1d9]=(uint8_t)flags;attack_count=0;
+            uintptr_t before,after;
+            __asm__ volatile("movl %%esp,%0":"=r"(before));
+            SudekiMpSubmitArbiterMeleeSnapshot(image+0xdb189,arbiter,
+                buttons&3u,(buttons>>2u)&3u,(buttons>>4u)&3u,0);
+            __asm__ volatile("movl %%esp,%0":"=r"(after));
+            unsigned selected=SudekiMpStoryMeleePress(buttons);
+            assert(before==after && attack_count==(selected?1u:0u));
+            if(selected) assert(attack_kinds[0]==selected);
+            assert(trigger[0x1d8]==latch && trigger[0x1d9]==flags);
+        }
+    }
+    const unsigned sequence[]={1,2,2,2,3,0};attack_count=0;
+    for(unsigned i=0;i<6u;++i) {
+        SudekiMpSubmitArbiterMeleeSnapshot(image+0xdb189,arbiter,sequence[i],0,0,0);
+        assert(attack_count==1 && attack_kinds[0]==1);
+    }
+    *(uint32_t *)(arbiter+0x50)=0;attack_count=0;
+    SudekiMpSubmitArbiterMeleeSnapshot(image+0xdb189,arbiter,1,1,1,0);
+    assert(!attack_count);*(uint32_t *)(arbiter+0x50)=2;
+    puts("combat-only native snapshots: all 64 states, held/released cadence, host latch preservation and stack balance passed");
     memcpy(call,saved,sizeof(saved));
     assert(FlushInstructionCache(GetCurrentProcess(),call,sizeof(saved)));
     puts("C5 native routing reproduced: holds do not repeat melee; simultaneous buttons select one attack; separate presses attempt two; releases clear shared latch");
@@ -144,6 +181,9 @@ static void reproduce_block(void) {
         assert(trigger[0x1d8]==1 && trigger[0x1d9]==2);
         if(state<=2) assert(block_starts==state);else assert(*(uint32_t *)(block+0x18)==7);
     }
+    unsigned starts=block_starts;
+    SudekiMpSubmitArbiterMeleeSnapshot(image+0xdb189,arbiter,1,1,1,2);
+    assert(block_starts==starts+1 && trigger[0x1d8]==1 && trigger[0x1d9]==2);
     memcpy(call,saved,5);assert(FlushInstructionCache(GetCurrentProcess(),call,5));
     assert(SudekiMpStoryBlockImageExact(image,readable));
     /* Ending input acts only on this native block. It can release during an

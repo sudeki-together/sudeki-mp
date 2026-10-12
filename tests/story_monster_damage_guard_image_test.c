@@ -9,6 +9,10 @@
 #include "../src/engine/build_identity.c"
 #include "../src/engine/sha256.c"
 #include "../src/hooks/lan_story_world.c"
+static unsigned death_present_calls;
+BOOL SudekiMpLanStorySpawnDeathPresent(void *actor,uint32_t id,unsigned style) {
+    (void)actor;assert(id && style>=1 && style<=4);++death_present_calls;return TRUE;
+}
 BOOL SudekiMpLogResearchEnabled(void) { return FALSE; }
 void SudekiMpLogFormat(const char *format,...) { (void)format; }
 #else
@@ -187,7 +191,48 @@ static void number_gate(void) {
     queue(stat,1.0f,1.0f,0xffffffffu);
     assert(*(uint32_t *)(stat+0x48u)==1u && *(uint32_t *)(stat+0x70u)==0xffffffffu);
 }
+static unsigned hidden_widgets;
+static void __attribute__((thiscall)) widget_hidden(void *widget,unsigned state) {
+    assert(state==2 && *(uint32_t *)((uint8_t *)widget+0x24u)==2);++hidden_widgets;
+}
+static void health_cleanup(void) {
+    fixture();uint8_t *stat=entity+0x400u;
+    *(void **)(entity+0xb0u)=stat;*(void **)stat=image+0x2d21e4u;*(void **)(stat+0x10u)=entity;
+    *(void **)(stat+0xd0u)=image+0x2d9024u;*(void **)(stat+0x12cu)=image+0x2d8524u;
+    *(uint32_t *)(stat+0x48u)=1;*(int32_t *)(stat+0x74u)=-100;stat[0x24u]=stat[0x30u]=1;
+    assert(SudekiMpStoryHealthHideCode(image,checked_memory));
+    const unsigned rvas[]={0x15c2d0,0x15c230,0x15c2f7,0x15c26d,0x2d9038,0x2d8538};
+    const unsigned sizes[]={sizeof(story_health_hide_bar_head),sizeof(story_health_hide_label_head),1,1,4,4};
+    const char *names[]={"HealthBarVisibilityHead","HealthLabelVisibilityHead","HealthBarVisibilityReturn",
+        "HealthLabelVisibilityReturn","HealthBarVisibilitySlot","HealthLabelVisibilitySlot"};
+    for(unsigned i=0;i<6;++i) {
+        for(unsigned j=0;j<sizes[i];++j) {
+            image[rvas[i]+j]^=1;assert(!SudekiMpStoryHealthHideCode(image,checked_memory));image[rvas[i]+j]^=1;
+        }
+        printf("%s every-byte refusals PASS\n",names[i]);
+    }
+    /* Execute retail propagation and empty native child lists. Only renderer
+     * visibility endpoints are inert; number state and gameplay stay intact. */
+    void *bar=*(void **)(image+0x2d9034),*label=*(void **)(image+0x2d8534);
+    *(void **)(image+0x2d9034)=widget_hidden;*(void **)(image+0x2d8534)=widget_hidden;
+    assert(FlushInstructionCache(GetCurrentProcess(),image,0x45f000));
+    assert(SudekiMpStoryDamageHideHealth(image,entity,checked_memory));assert(hidden_widgets==2);
+    assert(*(uint32_t *)(stat+0x48)==1 && *(int32_t *)(stat+0x74)==-100 && stat[0x24] && stat[0x30]);
+    assert(*(float *)(entity+0x22c)==100 && *(uint32_t *)(arbiter+0x50)==0x402);
+    assert(SudekiMpStoryDamageHideHealth(image,entity,checked_memory));assert(hidden_widgets==2);
+    *(void **)(stat+0x10)=registry;assert(!SudekiMpStoryDamageHideHealth(image,entity,checked_memory));
+    *(void **)(stat+0x10)=entity;*(void **)(stat+0xd0)=image;
+    assert(!SudekiMpStoryDamageHideHealth(image,entity,checked_memory));
+    *(void **)(image+0x2d9034)=bar;*(void **)(image+0x2d8534)=label;
+    fixture();monster_hp[0].pending=0;monster_hp[0].death_effect=4;
+    assert(SudekiMpLanStoryWorldMonsterDamagePending());
+    assert(SudekiMpLanStoryWorldFlushMonsterDamage() && death_present_calls==1 && !calls);
+    assert(!SudekiMpLanStoryWorldMonsterDamagePending());
+    assert(!SudekiMpLanStoryWorldFlushMonsterDamage() && death_present_calls==1);
+    puts("Death health cleanup preserves lethal numbers, HP, pause and independent emission PASS");
+}
 static void flush_cases(void) {
+    health_cleanup();
     number_gate();
     fixture(); mode=20;
     for(unsigned i=0;i<30u;++i) {

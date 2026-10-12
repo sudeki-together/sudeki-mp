@@ -1,5 +1,6 @@
 #include "hooks/lan_story_character_audio.h"
 #include "hooks/call_hook.h"
+#include "hooks/lan_arena_spirit_audio.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include <math.h>
@@ -17,6 +18,10 @@ static SudekiMpLanStoryNativeRoster host_roster;
 static uint32_t stream;
 static unsigned traces;
 static const struct {const char *name;unsigned rva,size;uint32_t hash;} codes[]={
+    {"SoundBankNameId",0x16550u,53u,0x565d9efcu},
+    {"SoundBankSet",0xfc3b0u,93u,0x03b9dde6u},
+    {"EmitterBankSet",0x28ae50u,95u,0xf2449934u},
+    {"ManagerBankFind",0x289a10u,63u,0xf5f92246u},
     {"AttachmentCreate",0x289df0u,158u,0x6d270c72u},
     {"AttachmentConstruct",0x281a00u,106u,0xeea4d590u},
     {"AttachmentPosition",0x284520u,97u,0x5211f40eu},
@@ -41,6 +46,7 @@ static const struct {const char *name;unsigned rva,size;uint32_t hash;} codes[]=
     {"AttachmentGet",0x2846f0u,30u,0xf5f56708u},
 };
 static const struct {unsigned rva,target;} relocations[]={
+    {0x28ae6au,0x409e58u},
     {0x289e3bu,0x3c37d8u},
     {0x281a0au,0x2e1ed8u},
     {0x281a18u,0x2e1f34u},
@@ -171,6 +177,49 @@ static BOOL actor_owner(const SudekiMpLanStoryNativeRoster *roster,unsigned char
         *(void **)(s+0x54u)!=s+0x30u || !owner(*(uint8_t **)(s+0x50u),&a))return FALSE;
     for(unsigned i=0x80;i<0x90;i+=4) {float v;memcpy(&v,s+i,4);if(!isfinite(v))return FALSE;}
     a.component=s;a.emitter=s+0x4cu;*out=a;return TRUE;
+}
+static void bind_effect_bank(void *entry,void *sound,const char *name) {
+    uintptr_t edx=(uintptr_t)name;
+    __asm__ volatile("pushl %[sound]\n\tcall *%[entry]"
+        : "+d"(edx) : [sound] "r"(sound), [entry] "r"(entry)
+        : "eax","ecx","memory","cc");
+}
+BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *roster,
+    unsigned character,void *component) {
+    uint8_t *s=component;AudioOwner source,old;
+    if(host_mode || busy || !base || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        !SudekiMpLanStoryObserverNativeRosterExact(roster) || !actor_owner(roster,character,&source) ||
+        !typed(base,s,0xe0u,0x2cd0acu) || !memory(s,0xe0u,TRUE) ||
+        !typed(base,s+0x4cu,0x14u,0x2e1db4u) || *(void **)(s+0x54u)!=s+0x30u || s[0x5cu]>1)
+        return FALSE;
+    if(*(void **)(s+0x50u)==source.bank && s[0x5cu]==1) return TRUE;
+    /* Never release a foreign bank or its last reference. The initial clone
+     * has no bank; a delayed setup may replace the still-shared generic bank. */
+    uint8_t *previous=*(uint8_t **)(s+0x50u);
+    if(previous && (!owner(previous,&old) || strcmp(*(char **)(previous+0x10u),"sfx_generic.xsb") ||
+        (s[0x5cu] && u32(previous+0x18u)<=1u))) return FALSE;
+    if(!previous && s[0x5cu])return FALSE;
+    if(!methods(base) || u32(base+0x2c3d80u)!=0x42480000u)return FALSE;
+    const char *name=*(const char **)(source.bank+0x10u);uint32_t id=0;
+    for(unsigned i=0;name[i];++i) {
+        uint8_t ch=(uint8_t)name[i];if(ch>='a' && ch<='z')ch-=32;
+        id=(i&1u)?id*ch:id+ch;
+    }
+    if(id!=u32(source.bank+0x14u))return FALSE;
+    /* The bank already belongs to this local actor. Native lookup must find
+     * its unique resource ID; no arbitrary packet text or bank loading. */
+    void **banks=*(void ***)(source.manager+0x2cu);unsigned count=u32(source.manager+0x30u),matches=0;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *b=banks[i];
+        if(!typed(base,b,0x34u,0x2e1e40u))return FALSE;
+        if(u32(b+0x14u)==u32(source.bank+0x14u))++matches;
+    }
+    if(matches!=1 || !SudekiMpLanStoryObserverNativeRosterExact(roster))return FALSE;
+    bind_effect_bank(base+0xfc3b0u,s,*(const char **)(source.bank+0x10u));
+    BOOL ok=*(void **)(s+0x50u)==source.bank && s[0x5cu]==1;
+    if(ok)memcpy(s+0x80u,base+0x2c3d80u,4u); /* Native PlaySFXWithAll hearing radius. */
+    if(traces++<300)SudekiMpLogFormat("story_character_audio event=effect_bank character=%u ready=%u\r\n",character,ok);
+    return ok;
 }
 static BOOL same_owner(const AudioOwner *a,const AudioOwner *b) {
     return a->bank==b->bank && a->soundbank==b->soundbank && a->pool==b->pool &&
@@ -454,6 +503,7 @@ typedef struct LocalCue {
 } LocalCue;
 static LocalCue local[4][SUDEKIMP_STORY_AUDIO_CAPACITY];
 static uint32_t local_stream[4],local_epoch[4];
+static uint16_t local_start[4];
 static const char *last_refusal[4];
 static BOOL playback_refused(unsigned character,const char *reason,unsigned count) {
     if(character<4 && last_refusal[character]!=reason) {
@@ -532,7 +582,7 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
     native_thread=GetCurrentThreadId();unsigned c=s->character;
     if(local_stream[c]!=s->stream || local_epoch[c]!=s->epoch) {
         if(!SudekiMpStoryCharacterAudioStop(c,exact,context))return FALSE;
-        local_stream[c]=s->stream;local_epoch[c]=s->epoch;
+        local_stream[c]=s->stream;local_epoch[c]=s->epoch;local_start[c]=0;
     }
     BOOL ok=TRUE;busy=TRUE;
     /* Retire missing remote owners first. A retransmit retains consumed IDs
@@ -549,6 +599,16 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
     }
     if(!refresh_position(c,&a,exact,context)) {
         busy=FALSE;return playback_refused(c,"presented_sound_position",s->count);
+    }
+    /* A native global one-shot: accept only the latest witnessed cast and
+     * consume it once, even when the packet repeats after its natural end. */
+    if(s->start_sequence>local_start[c]) {
+        if((uint32_t)(s->tick-s->start_tick)<=250u) {
+            if(!exact(context) || !SudekiMpLanArenaSpiritAudioReplayLocalCue((HMODULE)base,
+                    SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_START)) {busy=FALSE;return FALSE;}
+            SudekiMpLogFormat("story_character_audio event=spirit_start character=%u cast=%u\r\n",c,s->start_sequence);
+        }
+        local_start[c]=s->start_sequence;
     }
     BOOL native_ready=FALSE;
     for(unsigned j=0;j<s->count;++j) {

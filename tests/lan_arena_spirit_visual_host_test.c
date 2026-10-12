@@ -394,6 +394,7 @@ static uint8_t *map_image(const char *path) {
 
 static BOOL fixture_active;
 static uint8_t fixture_ranged_owner;
+static uint16_t fixture_cast_sequence;
 static uint8_t fixture_sources[2][0x14];
 static BOOL fixture_sources_active;
 static BOOL inactive_witness(void *context,void *source_component,uint64_t *session,uint16_t *skill,uint32_t *tick,uint8_t *owner) {
@@ -401,7 +402,8 @@ static BOOL inactive_witness(void *context,void *source_component,uint64_t *sess
     *session=1u; *skill=1u; *tick=1u;
     *owner=0u;
     if(!source_component && fixture_ranged_owner) {
-        *session=77u;*skill=0u;*owner=fixture_ranged_owner;
+        *session=77u;*skill=fixture_cast_sequence;
+        *owner=(fixture_cast_sequence && fixture_ranged_owner==35u)?0u:fixture_ranged_owner;
         return fixture_active;
     }
     if(source_component) {
@@ -606,7 +608,7 @@ static void fixture_lifetime_retire(void *effect) {
 static BOOL fixture_lifetime_witness(void *component,SudekiMpLanPartyEffectOwner *owner) {
     if(!lifetime_root || (component && component!=fixture_sources[0])) return FALSE;
     *owner=(SudekiMpLanPartyEffectOwner){77u,19u,fixture_sources[0],
-        fixture_ranged_owner?fixture_ranged_owner:SUDEKIMP_LAN_ARENA_BUKI_TYPE};
+        fixture_ranged_owner?fixture_ranged_owner:SUDEKIMP_LAN_ARENA_BUKI_TYPE,fixture_cast_sequence};
     return TRUE;
 }
 static void __attribute__((naked,used)) fixture_lifetime_factory_tail(void) {
@@ -700,10 +702,16 @@ static void positional_impact_tests(uint8_t *mapped) {
     CHECK(SudekiMpLanPartyEffectLifetimeInitialize((HMODULE)mapped,fixture_lifetime_witness,fixture_lifetime_shutdown));
     CHECK(SudekiMpLanPartyEffectLifetimePoll());
     CHECK(SudekiMpLanPartySpiritVisualHostCapture(77,TRUE,&output));
-    for(unsigned i=0;i<3;++i) {
+    const unsigned types[]={1,14,1,5,14,35,1};
+    const unsigned kinds[]={67,67,67,SUDEKIMP_LAN_STORY_VFX_SFXBS004_PATH_WARRIOR_TOTEM,
+        SUDEKIMP_LAN_STORY_VFX_SFXES006_PLASMATICA_HIT_EFFECT,
+        SUDEKIMP_LAN_STORY_VFX_SFXTS011_BLADE_SPARK_HIT,
+        SUDEKIMP_LAN_STORY_VFX_SFXAS008_FIREBALL_HIT};
+    const uint32_t hashes[]={0x06d8e387,0x06d8e387,0x06d8e387,0x14e0d395,0xc6b3b3d3,0xe17bcc13,0xaa834a3d};
+    for(unsigned i=0;i<7;++i) {
         /* Model a fresh construction after the real base destructor below. */
         *(void **)fixture_effects[0]=mapped+0x2d3c7cu;
-        fixture_ranged_owner=i==1?SUDEKIMP_LAN_ARENA_ELCO_TYPE:SUDEKIMP_LAN_ARENA_AILISH_TYPE;
+        fixture_ranged_owner=types[i];fixture_cast_sequence=i<3?0:100+i;
         fixture_active=i!=2;lifetime_root=TRUE;lifetime_factory_result=fixture_effects[0];
         CHECK(((void *(__cdecl *)(void))(mapped+0x18760u))()==fixture_effects[0]);
         /* No active shooter when the native positional setup becomes ready. */
@@ -711,16 +719,16 @@ static void positional_impact_tests(uint8_t *mapped) {
         uint8_t setup[0x54]={0};
         *(void **)setup=mapped+0x2c6330u;
         *(void **)(setup+0x1c)=fixture_effects[0];
-        *(uint32_t *)(setup+0x28)=0xfa9u;*(uint32_t *)(setup+0x2c)=0x06d8e387u;
+        *(uint32_t *)(setup+0x28)=0xfa9u;*(uint32_t *)(setup+0x2c)=hashes[i];
         uintptr_t eax=(uintptr_t)setup;void *entry=mapped+0x18830u;
         __asm__ volatile("pushl $2\n\tcall *%1" : "+a"(eax) : "r"(entry) : "ecx","edx","memory","cc");
         CHECK((unsigned char)eax==1u);
         SudekiMpSpiritVisualWeakNode *head=*(void **)(fixture_effects[0]+4);
         CHECK(head!=NULL);
-        if(head && i<2) {
+        if(head && i!=2) {
             SudekiMpSpiritVisualHostEntry *e=(void *)head;
-            CHECK(e->value.kind==SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT &&
-                !e->value.skill_sequence && e->value.owner_actor_type==fixture_ranged_owner);
+            CHECK(e->value.kind==kinds[i] && e->value.skill_sequence==fixture_cast_sequence &&
+                e->value.owner_actor_type==((fixture_cast_sequence && fixture_ranged_owner==35u)?0u:fixture_ranged_owner));
             CHECK(head->next && !head->next->next); /* visual + lifetime, pending drained */
         } else if(head) CHECK(!head->next); /* Lifetime alone is not a visual owner witness. */
         uintptr_t ecx=(uintptr_t)fixture_effects[0];void *destroy=mapped+0x4d30u;
@@ -728,7 +736,7 @@ static void positional_impact_tests(uint8_t *mapped) {
         CHECK(SudekiMpLanPartyEffectLifetimePoll());
         CHECK(SudekiMpLanPartySpiritVisualHostCapture(77,FALSE,&output) && !output.count);
     }
-    fixture_ranged_owner=0;
+    fixture_ranged_owner=0;fixture_cast_sequence=0;
     CHECK(SudekiMpLanPartyEffectLifetimeReset());
     CHECK(SudekiMpLanArenaSpiritVisualHostReset());
 }

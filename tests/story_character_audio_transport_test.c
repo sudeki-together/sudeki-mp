@@ -37,7 +37,12 @@ int main(void) {
     uint8_t bytes[SUDEKIMP_STORY_AUDIO_MAX];size_t size=0;SudekiMpStoryAudio got,bad;
     assert(SudekiMpStoryAudioEncode(&audio,bytes,sizeof(bytes),&size) && size+28<=1468);
     assert(SudekiMpStoryAudioDecode(bytes,size,&got) && got.count==64);
-    bytes[26]=1;assert(!SudekiMpStoryAudioDecode(bytes,size,&got));bytes[26]=0;
+    bytes[28]=1;assert(!SudekiMpStoryAudioDecode(bytes,size,&got));bytes[28]=0;
+    audio.start_sequence=7;audio.start_tick=audio.tick;
+    assert(SudekiMpStoryAudioEncode(&audio,bytes,sizeof(bytes),&size));
+    assert(SudekiMpStoryAudioDecode(bytes,size,&got) && got.start_sequence==7 && got.start_tick==audio.tick);
+    bad=audio;bad.start_tick=bad.tick+1;assert(!SudekiMpStoryAudioValid(&bad));
+    bad=audio;bad.start_sequence=0;assert(!bad.start_tick || !SudekiMpStoryAudioValid(&bad));
     assert(!SudekiMpStoryAudioDecode(bytes,size-1,&got));
     bad=audio;bad.cues[1].id=bad.cues[0].id;assert(!SudekiMpStoryAudioValid(&bad));
     bad=audio;bad.cues[0].gain=0x7fc00000;assert(!SudekiMpStoryAudioValid(&bad));
@@ -47,7 +52,7 @@ int main(void) {
     assert(SudekiMpLanPartyPublishStoryAudio(nodes[0],&audio));mask=0;
     for(unsigned i=0;i<120 && mask!=14;++i) {
         poll();for(unsigned p=1;p<4;++p)if(SudekiMpLanPartyGetStoryAudio(nodes[p],&peers[p].lease,GetTickCount(),2,&got)) {
-            assert(got.count==64 && got.stream==1 && got.bank==123);mask|=1u<<p;
+            assert(got.count==64 && got.stream==1 && got.bank==123 && got.start_sequence==7 && got.start_tick==audio.start_tick);mask|=1u<<p;
         }Sleep(1);
     }
     assert(mask==14);

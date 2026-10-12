@@ -206,6 +206,8 @@ BOOL SudekiMpLanPartyControlStoryBlock(const SudekiMpControlUpdateDispatchWitnes
 BOOL SudekiMpLanPartyControlStoryDodge(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,
     float x,float z,BOOL *handled);
+BOOL SudekiMpLanPartyControlStoryMeleeSnapshot(const SudekiMpControlUpdateDispatchWitness *,
+    const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned buttons,BOOL *submitted);
 BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitness *,
     const struct SudekiMpLanStoryNativeRoster *,const SudekiMpLanPartyLease *,unsigned,BOOL *submitted);
 BOOL SudekiMpLanPartyControlStoryDrain(const SudekiMpControlUpdateDispatchWitness *,

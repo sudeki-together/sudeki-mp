@@ -1,3 +1,4 @@
+#include "hooks/story_melee_snapshot.h"
 #include "hooks/lan_story_control.h"
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_party_control.h"
@@ -5,6 +6,7 @@
 #include "hooks/story_block_input.h"
 #include "hooks/story_player_turn.h"
 #include "hooks/story_ai_movement.h"
+#include "hooks/story_idle_contact.h"
 #include "hooks/story_player_movement.h"
 #include "hooks/lan_story_research54.h"
 #include "hooks/lan_story_runtime.h"
@@ -28,6 +30,8 @@ static uint8_t *base;
 static SudekiMpRelativeCallHook switches[2];
 static DWORD native_thread;
 static BOOL installed;
+static SudekiMpLanStoryNativeRoster idle_roster;
+static BOOL idle_contact_reported;
 /* Retail IsAttacking (RVA88D0) reads bit1000. Transfers/drains must wait for
  * it. Ordinary movement instead reaches native Move/CanMove every frame;
  * the arbiter owns which phases of the combo permit locomotion. */
@@ -127,6 +131,35 @@ static BOOL ai_movement_lease(void *actor,unsigned gate) {
     SudekiMpLanStoryResearch54AiGate(actor,gate);
     return TRUE;
 }
+/* The isolated StoryIdleContactImageTest covers the exact native seam, all
+ * named byte contracts, ABI preservation and native contact responses.
+ * Runtime admission additionally requires current host roster authority. */
+static BOOL idle_contact_lease(void *actor) {
+    BOOL pending=TRUE; int spirit=-1; SudekiMpCharacterSkillState skill;
+    if(!base || !installed || !native_thread || native_thread!=GetCurrentThreadId() ||
+        !ordinary_world(TRUE) || !hooks_exact() || !idle_roster.dispatch_serial ||
+        SudekiMpLanStoryObserverWorldLoading() ||
+        !SudekiMpLanStoryObserverNativeRosterExact(&idle_roster)) return FALSE;
+    unsigned c=0;
+    for(;c<4 && idle_roster.actors[c]!=actor;++c) {}
+    if((c!=1 && c!=3) || !(idle_roster.available_mask&(1u<<c)) ||
+        (c!=idle_roster.leader_character && !player_turn_lease(actor)) ||
+        SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
+        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
+        !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active ||
+        !SudekiMpLanStoryCastBodyDrained(actor)) return FALSE;
+    return TRUE;
+}
+void SudekiMpLanStoryControlObserveIdleContact(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster) {
+    memset(&idle_roster,0,sizeof(idle_roster));
+    if(boundary(w,roster) && SudekiMpStoryIdleContactBindThread()) idle_roster=*roster;
+    if(!idle_contact_reported && SudekiMpStoryIdleContactCount()) {
+        idle_contact_reported=TRUE;
+        SudekiMpLogWrite("story_control event=idle_contact scope=stationary_ranged_terrain status=observed\r\n");
+    }
+}
 BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) {
     uint8_t *b=(uint8_t *)image;
     static const uint8_t previous_context[]={0x83,0xbb,0xfc,0,0,0,1,0x75,0x0f,0x8b,0xf7};
@@ -149,7 +182,8 @@ BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) 
     if(!SudekiMpInstallRelativeCallHook(&switches[0],b+PREVIOUS_CALL,b+PREVIOUS,locked_character) ||
         !SudekiMpInstallRelativeCallHook(&switches[1],b+NEXT_CALL,b+NEXT,locked_character) ||
         !SudekiMpStoryPlayerTurnInstall(image,player_turn_lease) ||
-        !SudekiMpStoryAiMovementInstall(image,ai_movement_lease)) {
+        !SudekiMpStoryAiMovementInstall(image,ai_movement_lease) ||
+        !SudekiMpStoryIdleContactInstall(image,idle_contact_lease)) {
         DWORD error=GetLastError();
         (void)SudekiMpLanStoryControlUninstall(); SetLastError(error); return FALSE;
     }
@@ -251,6 +285,27 @@ unsigned SudekiMpLanStoryControlMelee(const SudekiMpControlUpdateDispatchWitness
         return SUDEKIMP_STORY_ACTION_SUBMITTED;
     return submitted?SUDEKIMP_STORY_ACTION_RETAINED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
 }
+unsigned SudekiMpLanStoryControlMeleeSnapshot(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned buttons) {
+    if(!key || (key->seat!=0u && key->seat!=2u) || buttons>63u || !boundary(w,roster) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    BOOL pending=TRUE; int spirit=-1;
+    void *actor=roster->actors[key->seat];
+    /* Do not require body_idle: a native combo accepts another press while
+     * its previous swing owns animation/movement. Native arbiter validation
+     * remains responsible for combat state and combo gates. Its early
+     * interaction branches are NOT actor-isolated: deny those before entry. */
+    if(!ordinary_world(TRUE) || SudekiMpCleanroomEngineRangedCombatPrimePending() ||
+        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
+        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
+        !SudekiMpLanStoryCastBodyDrained(actor) ||
+        !SudekiMpStoryMeleeSnapshotInteractionClear(base,actor,readable))
+        return SUDEKIMP_STORY_ACTION_BUSY;
+    BOOL submitted=FALSE;
+    if(SudekiMpLanPartyControlStoryMeleeSnapshot(w,roster,key,buttons,&submitted))
+        return SUDEKIMP_STORY_ACTION_SUBMITTED;
+    return submitted?SUDEKIMP_STORY_ACTION_RETAINED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+}
 unsigned SudekiMpLanStoryControlRanged(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned state) {
     if(!key || (key->seat!=1u && key->seat!=3u) || state<1u || state>2u || !boundary(w,roster) ||
@@ -322,6 +377,8 @@ BOOL SudekiMpLanStoryControlUninstall(void) {
     if((native_thread && native_thread!=GetCurrentThreadId()) ||
         SudekiMpLanStoryControlRetains() || !SudekiMpLanPartyControlStoryEnd())
         return retain(ERROR_BUSY);
+    memset(&idle_roster,0,sizeof(idle_roster));
+    if(!SudekiMpStoryIdleContactUninstall()) return retain(GetLastError());
     if(!SudekiMpStoryAiMovementUninstall()) return retain(GetLastError());
     if(!SudekiMpStoryPlayerTurnUninstall()) return retain(GetLastError());
     BOOL restored=TRUE; DWORD error=ERROR_SUCCESS;
@@ -330,6 +387,6 @@ BOOL SudekiMpLanStoryControlUninstall(void) {
         restored=FALSE;
     }
     if(!restored) return retain(error);
-    base=NULL; installed=FALSE; native_thread=0;
+    base=NULL; installed=FALSE; native_thread=0; idle_contact_reported=FALSE;
     return TRUE;
 }

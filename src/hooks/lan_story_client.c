@@ -72,6 +72,7 @@ static BOOL (*spawn_witness)(void *);
 static void *spawn_witness_context;
 static uint8_t *spawn_actor;
 static uint32_t spawn_actor_identifier;
+static const int *spawn_pause_delta;
 static BOOL (*retire_witness)(void *);
 static void *retire_context;
 static uint8_t *retire_entity;
@@ -1033,16 +1034,18 @@ static BOOL adopt_native(BOOL call_scoped) {
             adopted[i]=entity_pause[j]; ++kept;
             if(!entity_pause_exact(&entity_pause[j],1u)) {
                 if(call_scoped) {
-                    /* 4B28B0 finishes precisely this journaled setup by setting
-                     * its schedule bit. It cannot rebase another actor, consume
-                     * our pause, or excuse a changed component identity. */
+                    /* The journal proves 4B28B0's schedule enable and the
+                     * terminal 4B1530 attachment's optional native reference
+                     * release. Neither can consume our owned world pause. */
                     const EntityPauseObservation *o=&entity_pause[j];
                     if(!spawn_witness || !spawn_witness(spawn_witness_context) ||
                         !SudekiMpStorySpawnScheduleFinished(e,spawn_actor,o->vtable,o->update_vtable,
-                            spawn_actor_identifier,entity_references(o,1u),o->scheduled,readable)) {
+                            spawn_actor_identifier,entity_references(o,1u),o->scheduled,
+                            spawn_pause_delta?*spawn_pause_delta:0,readable)) {
                         adopt_refused("call_survivor_changed"); return FALSE;
                     }
                     adopted[i].scheduled=4u;
+                    adopted[i].activity_delta+=(int16_t)(spawn_pause_delta?*spawn_pause_delta:0);
                     continue;
                 }
                 /* The native area-cluster suspension changes as the party moves
@@ -1128,13 +1131,15 @@ BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitn
     return result;
 }
 BOOL SudekiMpLanStoryClientSpawnResidencyCall(BOOL (*witness)(void *),void *context,
-    uint8_t *actor,SudekiMpLanStoryClientResidencyOperation operation) {
+    uint8_t *actor,const int *native_pause_delta,SudekiMpLanStoryClientResidencyOperation operation) {
     if(!witness || !operation || spawn_witness || residency_call.active ||
         !native_thread_exact() || !readable(actor,0x145u) || !witness(context)) return FALSE;
     spawn_witness=witness; spawn_witness_context=context;
     spawn_actor=actor; spawn_actor_identifier=*(uint32_t *)(actor+0x34u);
+    spawn_pause_delta=native_pause_delta;
     BOOL result=SudekiMpLanStoryClientResidencyCall(NULL,operation,context);
     spawn_witness=NULL; spawn_witness_context=NULL; spawn_actor=NULL; spawn_actor_identifier=0;
+    spawn_pause_delta=NULL;
     return result;
 }
 BOOL SudekiMpLanStoryClientEffectRetireCall(BOOL (*witness)(void *),void *context,

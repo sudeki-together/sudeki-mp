@@ -3,6 +3,7 @@
 #include "hooks/lan_story_observer.h"
 #include "hooks/lan_story_test_start.h"
 #include "hooks/lan_story_area_follow.h"
+#include "hooks/lan_story_xp.h"
 #include "hooks/lan_story_spawn_trace.h"
 #include "hooks/lan_story_death_hold.h"
 #include "hooks/lan_story_sky.h"
@@ -112,7 +113,25 @@ typedef struct StoryVfxCall {
     SudekiMpLanPartyLease lease;
     BOOL ready;
     uint64_t prepared;
+    SudekiMpLanStoryNativeRoster roster;
 } StoryVfxCall;
+static BOOL vfx_sound_setup(void *context,const SudekiMpLanArenaSpiritVfxSnapshot *visual,void *sound) {
+    /* Native PlaySFXWithAll inherits the emitting actor's bank. Parent-free
+     * replicas keep only the sound listener; provide the same exact roster
+     * bank without installing any actor-event forwarding listener. */
+    BOOL tal_spirit=visual->kind==SUDEKIMP_LAN_ARENA_SPIRIT_VFX_GENERIC_INITIATE ||
+        visual->kind==SUDEKIMP_LAN_ARENA_SPIRIT_VFX_TAL_STRIKE_ONE;
+    if(!visual->skill_sequence || (!tal_spirit && !SudekiMpLanStorySkillVfxOwnerMask(visual->kind))) return TRUE;
+    unsigned character;
+    switch(visual->owner_actor_type) {
+        case 5u: character=0u;break;
+        case 14u: character=1u;break;
+        case 0u: case 35u: character=2u;break;
+        case 1u: character=3u;break;
+        default: return FALSE;
+    }
+    return SudekiMpStoryCharacterAudioBindEffect(context,character,sound);
+}
 static BOOL vfx_service_residency(void *context) {
     StoryVfxCall *call=context; const SudekiMpStoryVfx *s=call->state;
     if(!story_vfx.active) {
@@ -122,7 +141,7 @@ static BOOL vfx_service_residency(void *context) {
         story_vfx.sequence=0; story_vfx.ready=FALSE;
         memcpy(story_vfx.current,s->current,sizeof(story_vfx.current));
     }
-    call->ready=SudekiMpLanStoryVfxServiceVisuals((HMODULE)game_base,s,story_vfx.serial,call->prepared);
+    call->ready=SudekiMpLanStoryVfxServiceVisuals((HMODULE)game_base,s,story_vfx.serial,call->prepared,vfx_sound_setup,&call->roster);
     return TRUE; /* Adopt cache/spawn/retire changes even when resources wait. */
 }
 static void vfx_wait(const char *reason) {
@@ -132,7 +151,7 @@ static void vfx_wait(const char *reason) {
         SudekiMpLogFormat("story_vfx event=waiting reason=%s\r\n",reason);
     }
 }
-static void follow_story_vfx(const SudekiMpControlUpdateDispatchWitness *w,
+static void follow_story_vfx(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanPartyPeerStatus *peer,uint32_t now,const SudekiMpLanStoryScene *native) {
     static DWORD attempted_at;
     if(attempted_at && now-attempted_at<15u) return;
@@ -162,6 +181,7 @@ static void follow_story_vfx(const SudekiMpControlUpdateDispatchWitness *w,
     if(story_vfx.active && story_vfx.ready && story_vfx.sequence==state.sequence) return;
     uint64_t prepared=project_story_muzzles(w,peer,now,&state);
     StoryVfxCall call={.state=&state,.lease=peer->lease,.prepared=prepared};
+    if(!SudekiMpLanStoryObserverRoster(controller,w,native,&call.roster)) {vfx_wait("sound_roster");return;}
     vfx_wait("servicing");
     BOOL adopted=SudekiMpLanStoryClientResidencyCall(w,vfx_service_residency,&call);
     story_vfx.ready=adopted && call.ready;
@@ -184,6 +204,9 @@ static void publish_story_vfx(uint32_t now) {
     BOOL area_captured=SudekiMpLanStoryAreaCapture(&area);
     SudekiMpStoryVfx vfx;
     BOOL captured=area_captured && cast_attempted && SudekiMpLanStoryCastCaptureVisuals(&vfx),published=FALSE;
+    /* World observation must never turn a transient pending item/model into
+     * a failed party casting initialization. It gates publication only. */
+    if(captured) captured=SudekiMpLanStoryWorldVisuals(vfx.stream,&vfx);
     if(captured) {
         memcpy(vfx.current,area.current,sizeof(vfx.current));
         published=SudekiMpLanPartyPublishStoryVfx(session,&vfx);
@@ -194,11 +217,14 @@ static void publish_story_vfx(uint32_t now) {
             memcpy(camera.current,area.current,sizeof(camera.current));
             (void)SudekiMpLanPartyPublishStoryCastView(session,&camera);
         }
-    static unsigned reports; static DWORD trace_at;
-    if(reports<12u && (!trace_at || now-trace_at>=2000u)) {
+    static unsigned reports,last_health; static DWORD trace_at;
+    BOOL ready=SudekiMpLanStoryCastReady();
+    unsigned health=(ready?1u:0u)|(area_captured?2u:0u)|(captured?4u:0u)|(published?8u:0u);
+    if((reports<12u || health!=last_health) && (!trace_at || now-trace_at>=2000u)) {
         ++reports; trace_at=now;
+        last_health=health;
         SudekiMpLogFormat("story_vfx event=host cast_ready=%u area=%u captured=%u published=%u count=%u\r\n",
-            (unsigned)cast_attempted,(unsigned)area_captured,(unsigned)captured,(unsigned)published,captured?vfx.count:0u);
+            (unsigned)ready,(unsigned)area_captured,(unsigned)captured,(unsigned)published,captured?vfx.count:0u);
     }
 }
 static SudekiMpLobbyStatus menu_lobby;
@@ -298,6 +324,8 @@ static SudekiMpLanPartyLease client_control_connection;
 static uint32_t client_block_sent_at;
 static BOOL client_block_last_held,client_block_sent;
 static uint32_t client_input_sequence,client_input_sent_at,client_ranged_sequence,client_block_sequence;
+static SudekiMpStoryMeleeSender client_melee_sender;
+static uint32_t client_melee_generation;
 static uint32_t client_ranged_physical_press,client_ranged_wire_press;
 static SudekiMpLanStoryActionRequest client_action;
 static SudekiMpLanPartyLease client_action_connection;
@@ -815,8 +843,11 @@ static BOOL flush_damage_residency(void *context) {
 static BOOL tick_spawn_residency(void *context) {
     return SudekiMpLanStorySpawnTick(*(const uint32_t *)context,TRUE);
 }
-static BOOL despawn_residency(void *context) {
-    return SudekiMpLanStorySpawnDespawnFollow(context);
+static BOOL spawns_residency(void *context) {
+    return SudekiMpLanStorySpawnEventsFollow(context);
+}
+static BOOL gates_residency(void *context) {
+    return SudekiMpLanStoryGatesFollow(context);
 }
 static void present(void);
 static void render_present(void *unused) { (void)unused; present(); }
@@ -1500,6 +1531,7 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
     if(!control_attempted) return;
     SudekiMpLanStoryNativeRoster roster; memset(&roster,0,sizeof(roster));
     BOOL known=SudekiMpLanStoryObserverRoster(controller,w,scene,&roster);
+    SudekiMpLanStoryControlObserveIdleContact(w,known?&roster:NULL);
     uint32_t now=GetTickCount();
     {   /* Dead lead keeps its slot while any remote player drives a member. */
         BOOL remote=FALSE; void *remote_actors[3]={0};
@@ -1693,6 +1725,14 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             }
         }
         (void)SudekiMpLanStoryActivityService(w,&roster,mask);
+        if(host_binding_ready && !scene->temporary[0])
+            for(unsigned p=1;p<4u;++p) {
+                unsigned c=host_control[p].native_key.seat;
+                if(c<4u && (mask&(1u<<c)) && !host_control[p].input_held &&
+                    SudekiMpLanStorySceneSameArea(scene,roster.leader_character,c) &&
+                    SudekiMpLanStoryControlExact(w,&roster,&host_control[p].native_key))
+                    (void)SudekiMpLanStoryWorldCollectNearby(roster.actors[c],SudekiMpLanPartyActorType(c));
+            }
         /* Remote players currently holding their characters may stay in the
          * exterior when the host's lead uses a temporary door. */
         if(split_attempted) SudekiMpLanStorySplitSetEligibility(
@@ -1740,6 +1780,23 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
         }
     }
     for(unsigned p=1;p<4u;++p) {
+        if(!host_control[p].native_key.token) continue;
+        unsigned character=host_control[p].native_key.seat;
+        if(character!=0u && character!=2u) continue;
+        BOOL admitted=known && host_binding_ready && host_control[p].ready &&
+            !host_control[p].draining && !story_swap_blocks(p) && !SudekiMpLanStoryMenuCapturesInput() &&
+            SudekiMpLanStoryHostControlBound(controller,w,scene) &&
+            SudekiMpLanStoryControlExact(w,&roster,&host_control[p].native_key);
+        uint8_t buttons=0;uint32_t serial=0;
+        if(!SudekiMpLanPartyTakeStoryMelee(session,&host_control[p].connection,GetTickCount(),
+            admitted,&buttons,&serial)) continue;
+        unsigned outcome=SudekiMpLanStoryControlMeleeSnapshot(w,&roster,&host_control[p].native_key,buttons);
+        static unsigned snapshot_logs;
+        if(serial && SudekiMpLogResearchEnabled() && snapshot_logs++<4096u)
+            SudekiMpLogFormat("story_melee event=native_snapshot player=%u character=%u serial=%lu buttons=%u selected=%u outcome=%u ms=%lu\r\n",
+                p,character,(unsigned long)serial,buttons,SudekiMpStoryMeleePress(buttons),outcome,(unsigned long)GetTickCount());
+    }
+    for(unsigned p=1;p<4u;++p) {
         SudekiMpLanStoryActionRequest request;
         if(!host_control[p].native_key.token ||
             !SudekiMpLanPartyTakeStoryAction(session,&host_control[p].connection,GetTickCount(),&request)) continue;
@@ -1754,8 +1811,8 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
                 outcome=SudekiMpLanStoryCastSubmit(w,&roster,&host_control[p].native_key,request.slot);
             else if(request.kind==SUDEKIMP_STORY_ACTION_SPIRIT)
                 outcome=SudekiMpLanStoryCastSubmitSpirit(w,&roster,&host_control[p].native_key,request.slot);
-            else if(request.kind==SUDEKIMP_STORY_ACTION_MELEE)
-                outcome=SudekiMpLanStoryControlMelee(w,&roster,&host_control[p].native_key,request.slot);
+            /* Profile21 melee belongs exclusively to the snapshot stream.
+             * Retired edge requests receive UNAVAILABLE, never a second path. */
         }
         /* Take consumed this ID before entering native code. Even an unknown
          * native outcome is terminal for this request: retransmission only
@@ -1958,6 +2015,8 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
         !SudekiMpLanStoryControlFenceSame(&client_control_fence,&state.fence)) {
         client_control_connection=peer.lease; client_control_fence=state.fence;
         client_input_sequence=client_input_sent_at=client_ranged_sequence=client_block_sequence=0;
+        memset(&client_melee_sender,0,sizeof(client_melee_sender));
+        client_melee_generation=0;
         client_block_sent_at=0;client_block_sent=client_block_last_held=FALSE;
         client_ranged_physical_press=client_ranged_wire_press=0;
     }
@@ -1987,11 +2046,22 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
         }
     }
     client_input_ready=TRUE;
-    if(!SudekiMpLanStoryMenuCapturesInput() && !SudekiMpLanStoryQuickMenuCapturesInput() &&
-        !client_action_pending && (chosen==0u || chosen==2u)) {
-        unsigned melee=SudekiMpLanStoryInputTakeMelee(controller,roster.actors[chosen],state.fence.transaction);
-        if(melee && queue_client_action(roster.actors[chosen],SUDEKIMP_STORY_ACTION_MELEE,melee))
-            service_client_action(&peer.lease,&state.fence,now);
+    if(chosen==0u || chosen==2u) {
+        uint8_t buttons=0;uint32_t generation=0;
+        BOOL active=SudekiMpLanStoryInputMelee(controller,roster.actors[chosen],state.fence.transaction,
+            &buttons,&generation) && !SudekiMpLanStoryMenuCapturesInput() && !SudekiMpLanStoryQuickMenuCapturesInput();
+        if(generation!=client_melee_generation) {
+            SudekiMpStoryMeleeCancel(&client_melee_sender);client_melee_generation=generation;
+        }
+        SudekiMpLanStoryMelee melee;
+        if(SudekiMpStoryMeleeBuild(&client_melee_sender,&state.fence,presentation_sample.sequence,
+            now,buttons,active,&melee)) {
+            (void)SudekiMpLanPartySendStoryMelee(session,&peer.lease,&melee);
+            static unsigned sample_logs;
+            if(SudekiMpLogResearchEnabled() && SudekiMpStoryMeleePress(buttons) && sample_logs++<4096u)
+                SudekiMpLogFormat("story_melee event=sample ms=%lu serial=%lu buttons=%u selected=%u\r\n",
+                    (unsigned long)now,(unsigned long)client_melee_sender.serial,buttons,SudekiMpStoryMeleePress(buttons));
+        }
     }
     trace_client_control(5u,"host_confirmed_movement",state.fence.transaction);
     if(client_input_sequence==UINT32_MAX) { client_input_ready=FALSE; SudekiMpLanStoryInputClear(); return; }
@@ -2357,6 +2427,8 @@ static void service(void *controller,void *data,
         else SudekiMpStoryCharacterAudioClose();
     }
     if(saved_profile && known) poll_story_swap();
+    if(!local_seat && saved_profile && !known)
+        SudekiMpLanStoryControlObserveIdleContact(w,NULL);
     if(!local_seat && saved_profile && known) {
         SudekiMpLanStoryNativeRoster cast_roster;
         LARGE_INTEGER cast_start=timing_begin();
@@ -2387,8 +2459,10 @@ static void service(void *controller,void *data,
             last_audio_at=now;
             for(unsigned c=0;c<4;++c) {
                 SudekiMpStoryAudio audio;
-                if(SudekiMpStoryCharacterAudioCapture(c,&audio))
+                if(SudekiMpStoryCharacterAudioCapture(c,&audio)) {
+                    SudekiMpLanStoryCastCaptureAudioStart(c,&audio.start_sequence,&audio.start_tick);
                     (void)SudekiMpLanPartyPublishStoryAudio(session,&audio);
+                }
             }
         }
     }
@@ -2406,9 +2480,15 @@ static void service(void *controller,void *data,
             SudekiMpStoryAreaState area;
             last_area_at=now?now:1u;
             BOOL area_captured=SudekiMpLanStoryAreaCapture(&area);
-            if(area_captured) (void)SudekiMpLanPartyPublishStoryArea(session,&area);
+            if(area_captured) {
+                (void)SudekiMpLanPartyPublishStoryArea(session,&area);
+                SudekiMpStoryXp xp;
+                if(SudekiMpLanStoryXpCapture(native.epoch,native.revision,now,area.current,&xp))
+                    (void)SudekiMpLanPartyPublishStoryXp(session,&xp);
+            }
             SudekiMpStoryEffectState effects;
             if(SudekiMpLanStoryEffectsCapture(&effects)) {
+                (void)SudekiMpLanStoryGatesCapture(&effects);
                 SudekiMpLanStoryMusicCapture(&effects,w);
                 (void)SudekiMpLanPartyPublishStoryEffects(session,&effects);
             }
@@ -2418,25 +2498,40 @@ static void service(void *controller,void *data,
             if(area_peer_known &&
                 area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
                 SudekiMpLanPartyGetStoryArea(session,&area_peer.lease,now,&area)) {
-                if(!story_vfx.active || !_stricmp(story_vfx.current,area.current) || reset_story_vfx(w))
+                BOOL exterior=SudekiMpStoryAreaStateExterior(&area);
+                static BOOL follow_held;static unsigned follow_hold_logs;
+                if(follow_held!=!exterior) {
+                    follow_held=!exterior;
+                    if(follow_hold_logs++<32u)
+                        SudekiMpLogFormat("story_area_follow event=policy held=%u current=%s reason=%s\r\n",
+                            follow_held,area.current,exterior?"ordinary_zone":"temporary_or_unknown");
+                }
+                /* A host house entry does not move an exterior client or
+                 * release that client's exterior effect owners. */
+                if(exterior && (!story_vfx.active || !_stricmp(story_vfx.current,area.current) || reset_story_vfx(w)))
                     SudekiMpLanStoryAreaFollow(&area,now,w);
             }
+            SudekiMpStoryXp xp;uint32_t xp_age=0;
+            if(area_peer_known && known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+                SudekiMpLanPartyGetStoryXp(session,&area_peer.lease,now,&xp,&xp_age))
+                (void)SudekiMpLanStoryXpPresent(&xp,now,xp_age);
             SudekiMpStoryEffectState effects;
             if(area_peer_known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
                 SudekiMpLanPartyGetStoryEffects(session,&area_peer.lease,now,&effects) &&
                 SudekiMpLanStoryEffectsInCurrentArea(&effects)) {
+                (void)SudekiMpLanStoryClientResidencyCall(w,gates_residency,&effects);
                 SudekiMpLanStoryEffectsFollowGroups(&effects,w);
+                (void)SudekiMpLanStoryClientResidencyCall(w,spawns_residency,&effects);
                 SudekiMpLanStorySkyFollow(&effects);
                 (void)SudekiMpLanStoryMusicFollow(&effects,w);
                 SudekiMpLanStorySpawnSigilsFollow(effects.sigils);
-                (void)SudekiMpLanStoryClientResidencyCall(w,despawn_residency,effects.despawned);
             }
             /* Missing samples are unknown. A positively ended observation
              * releases the override; failed owner proof retains it for retry. */
             if(area_peer_known && area_peer.phase!=SUDEKIMP_LAN_PARTY_OBSERVING)
                 (void)SudekiMpLanStorySkyReleaseLighting();
             if(area_peer_known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && known)
-                follow_story_vfx(w,&area_peer,now,&native);
+                follow_story_vfx(controller,w,&area_peer,now,&native);
             else if(area_peer_known && area_peer.phase!=SUDEKIMP_LAN_PARTY_OBSERVING)
                 (void)reset_story_vfx(w);
             /* Re-contain after a followed zone change (entities/tasks/descriptor). */
@@ -2611,6 +2706,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     memset(&presented_cast_view,0,sizeof(presented_cast_view));
     memset(&client_control_connection,0,sizeof(client_control_connection));
     client_input_sequence=client_input_sent_at=client_ranged_sequence=client_block_sequence=0;
+    memset(&client_melee_sender,0,sizeof(client_melee_sender));
+    client_melee_generation=0;
         client_block_sent_at=0;client_block_sent=client_block_last_held=FALSE;
         client_ranged_physical_press=client_ranged_wire_press=0;
     memset(&client_action,0,sizeof(client_action));
@@ -2648,12 +2745,13 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     observer_attempted=TRUE;
     /* Before the observer hooks the zone exports it verifies. */
     area_follow_ready=saved_profile && SudekiMpLanStoryAreaFollowInitialize(module);
+    if(saved_profile && !SudekiMpLanStoryXpInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpStoryCharacterAudioInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpLanStoryMusicInitialize(module))
         SudekiMpLogWrite("story_music event=unavailable\r\n");
     /* Spawn tracking is functional (#54: client group replay and monster
      * identity), not only research. */
-    if(saved_profile && !SudekiMpLanStorySpawnTraceInstall(module))
+    if(saved_profile && !SudekiMpLanStorySpawnTraceInstall(module,local_seat!=0))
         SudekiMpLogFormat("story_spawn_trace event=install_failed error=%lu\r\n",(unsigned long)GetLastError());
     if(saved_profile && !area_follow_ready) SudekiMpLogWrite("story_area_follow event=unavailable\r\n");
     if(saved_profile && !SudekiMpLanStorySkyInstall(module))
@@ -2797,7 +2895,7 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     if(!SudekiMpLanStoryComboHudUninstall()) return retain_module();
     if(!SudekiMpLanStorySkyUninstall()) return retain_module();
     if(observer_attempted && !InterlockedCompareExchange(&observer_removed,0,0)) {
-(void)SudekiMpLanStorySpawnTraceUninstall();
+if(!SudekiMpLanStorySpawnTraceUninstall()) return retain_module();
 (void)SudekiMpLanStoryDeathHoldUninstall();
                 if(SudekiMpLanStoryObserverUninstall()) InterlockedExchange(&observer_removed,1);
         else {
@@ -2840,6 +2938,7 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     if(exited && local_control_attempted && !SudekiMpLanStoryLocalControlNativeExitReturned()) return retain_module();
     if(local_control_attempted && !SudekiMpLanStoryLocalControlUninstall()) return retain_module();
     local_control_attempted=FALSE;
+    SudekiMpLanStoryXpReset();
     SudekiMpStoryCharacterAudioClose();
     if(SudekiMpStoryCharacterAudioRetains() || !SudekiMpLanStoryCinematicAudioReset()) return retain_module();
     if(exited && recruit_attempted && !SudekiMpLanStoryRecruitNativeExitReturned()) return retain_module();

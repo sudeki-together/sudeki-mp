@@ -41,7 +41,10 @@ BOOL SudekiMpLanStoryWorldActorValid(const SudekiMpLanStoryWorldActor *a) {
         (a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && a->hit_points!=0.0f) ||
         (a->visual_flags & ~(a->kind==SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND ?
             SUDEKIMP_LAN_STORY_WORLD_HIDDEN : a->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND ?
-            SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE : 0u)) ||
+            (SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE|SUDEKIMP_LAN_STORY_WORLD_HIDDEN|
+             SUDEKIMP_LAN_STORY_WORLD_DEAD|SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK) : 0u)) ||
+        ((a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK)>>SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT)>4u ||
+        ((a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK) && !(a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEAD)) ||
         (a->kind==SUDEKIMP_LAN_STORY_WORLD_PC_KIND && SudekiMpLanStoryWorldCharacter(a->identifier)>=4u) ||
         !a->identifier ||
         !a->generation || !a->animation_sequence || !a->bank_fingerprint ||

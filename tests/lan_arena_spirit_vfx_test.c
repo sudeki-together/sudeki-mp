@@ -1236,11 +1236,17 @@ static void set_visual_owner(SudekiMpLanArenaSpiritVfxSnapshot *visual) {
         visual->skill_sequence = 1u;
     }
     if(visual->kind>=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_FIRST &&
-        visual->kind<=SUDEKIMP_LAN_STORY_VFX_LAST) {
+        visual->kind<=SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT) {
         visual->owner_actor_type=visual->kind<=SUDEKIMP_LAN_STORY_VFX_AILISH_SHOT_LAST ?
             SUDEKIMP_LAN_ARENA_AILISH_TYPE:SUDEKIMP_LAN_ARENA_ELCO_TYPE;
         visual->skill_sequence=0;
     }
+    if(visual->kind>=SUDEKIMP_LAN_STORY_VFX_SKILL_FIRST) {
+        unsigned mask=SudekiMpLanStorySkillVfxOwnerMask(visual->kind);
+        visual->owner_actor_type=(mask&8u)?1u:(mask&4u)?0u:(mask&2u)?14u:5u;
+        visual->skill_sequence=1;
+    }
+
 }
 
 static void test_visual_matrix_and_native_null(void) {
@@ -1313,7 +1319,7 @@ static void test_visual_fixed_resource_lifecycle(
     snapshot.spirit_vfx_count = 0u;
     CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state, &snapshot, 10u, &api));
     CHECK(test.retire_calls == 1u && test.detach_calls == 1u);
-    CHECK(test.cache.un_cache_calls == 0u);
+    CHECK(test.cache.un_cache_calls == (kind>=SUDEKIMP_LAN_STORY_VFX_SKILL_FIRST ? 1u : 0u));
     CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state, &api));
     CHECK(test.cache.un_cache_calls == 1u);
     CHECK(strcmp(test.cache.requested_resource, name) == 0);
@@ -1496,7 +1502,36 @@ static void test_story_capacity_and_high_ready_bits(void) {
     CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state,&api));CHECK(test.retire_calls==64);
 }
 
+static void test_roster_skill_cache_waits_for_retirement(void) {
+    VisualTestContext test; SudekiMpLanArenaSpiritVfxVisualState state;
+    SudekiMpLanArenaSpiritVfxVisualApi api; SudekiMpLanArenaSnapshot snapshot;
+    setup_visual_test(&test,&state,&api,&snapshot);
+    unsigned kind=SUDEKIMP_LAN_STORY_VFX_SFXAS011_WITCHES_KISS;
+    snapshot.spirit_vfx[0].kind=kind;set_visual_owner(&snapshot.spirit_vfx[0]);
+    test.cache.resource_identifier=test.cache.constructed_resource_identifier=0xe76ca04du;
+    CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    snapshot.spirit_vfx_count=0;snapshot.spirit_vfx_observed=0;
+    CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    CHECK(!test.retire_calls && !test.cache.un_cache_calls);
+    snapshot.spirit_vfx_observed=1;test.retire_allowed=FALSE;
+    CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    CHECK(!test.cache.un_cache_calls);
+    test.retire_allowed=TRUE;test.detach_allowed=FALSE;
+    CHECK(!SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    CHECK(!test.cache.un_cache_calls);
+    test.detach_allowed=TRUE;
+    CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    CHECK(test.cache.un_cache_calls==1 && state.caches[kind-1].state==SUDEKIMP_SPIRIT_VFX_CACHE_EMPTY);
+    CHECK(SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(&state,&snapshot,10,&api));
+    CHECK(test.cache.un_cache_calls==1);
+    CHECK(SudekiMpLanArenaSpiritVfxResetVisualsWithApi(&state,&api));
+}
+
 int main(int argc, char **argv) {
+#define SKILL_TEST(symbol,name,id,mask) test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_##symbol,id,name ".HOM");
+    SUDEKIMP_STORY_SKILL_RESOURCES(SKILL_TEST)
+#undef SKILL_TEST
+    test_roster_skill_cache_waits_for_retirement();
     test_story_capacity_and_high_ready_bits();
     test_visual_fixed_resource_lifecycle(SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT,
         0x06d8e387u,"SFXHT104_MISS_BLADE2MAGIC.HOM");

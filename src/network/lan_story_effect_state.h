@@ -6,9 +6,12 @@
 #define SUDEKIMP_STORY_SKY_ARGS 5u
 #define SUDEKIMP_STORY_SIGIL_MAX 32u
 #define SUDEKIMP_STORY_DROP_MAX 16u
-#define SUDEKIMP_STORY_EFFECT_CODEC_VERSION 2u
+#define SUDEKIMP_STORY_GATE_GROUP_MAX 8u
+#define SUDEKIMP_STORY_GATE_POINTS 32u
+#define SUDEKIMP_STORY_SPAWN_MAX 64u
+#define SUDEKIMP_STORY_EFFECT_CODEC_VERSION 5u
 /* 32 retained per-spawn receipts and 16 authored drop records. No pointers. */
-#define SUDEKIMP_STORY_EFFECT_WIRE_SIZE 2269u
+#define SUDEKIMP_STORY_EFFECT_WIRE_SIZE 9025u
 #define SUDEKIMP_STORY_EFFECT_CHUNK_BYTES 1152u
 #define SUDEKIMP_STORY_EFFECT_CHUNK_HEADER 28u
 #define SUDEKIMP_STORY_EFFECT_CHUNKS ((SUDEKIMP_STORY_EFFECT_WIRE_SIZE+SUDEKIMP_STORY_EFFECT_CHUNK_BYTES-1u)/SUDEKIMP_STORY_EFFECT_CHUNK_BYTES)
@@ -41,12 +44,18 @@ typedef struct SudekiMpStorySkyCall {
     uint32_t args[SUDEKIMP_STORY_SKY_ARGS];
 } SudekiMpStorySkyCall;
 
-/* A native spawn group the host has started (InternalStartSpawnGroupSequence),
- * newest sequence per group name (#54). */
+/* Complete native start command, newest occurrence per group/scope. The old
+ * sequence field is the native pass count; selection is a separate argument.
+ * A repeated identical start still has a new serial. */
 typedef struct SudekiMpStorySpawnGroup {
     char name[SUDEKIMP_STORY_AREA_NAME];
     int32_t sequence;
+    uint32_t serial,method;
+    int32_t selection;
+    char scope[SUDEKIMP_STORY_AREA_NAME];
 } SudekiMpStorySpawnGroup;
+BOOL SudekiMpStorySpawnGroupValid(const SudekiMpStorySpawnGroup *group);
+BOOL SudekiMpStorySpawnGroupSame(const SudekiMpStorySpawnGroup *a,const SudekiMpStorySpawnGroup *b);
 
 /* occurrence is the constructor count for this portable spawn identity;
  * spawn_serial is assigned by the host. A previous occurrence cannot end a
@@ -59,6 +68,23 @@ typedef struct SudekiMpStorySigilState {
 typedef struct SudekiMpStoryDropRecord {
     uint32_t serial,spawn_serial,resource,quantity,position[3],collected;
 } SudekiMpStoryDropRecord;
+/* Complete current-area gate roster, including positively retired groups.
+ * serial identifies one native spawn occurrence; bits identify authored spawn
+ * points. Unknown observations never publish an empty/retired roster. */
+typedef struct SudekiMpStoryGateGroup {
+    char name[SUDEKIMP_STORY_AREA_NAME];
+    uint32_t serial,resource,point_count,live_mask;
+} SudekiMpStoryGateGroup;
+/* Complete active/pending host spawn roster. A serial is one occurrence,
+ * never a point/type hash. Entry is the native low-11-bit sequence index;
+ * passes is the remaining native pass count at construction. */
+typedef struct SudekiMpStorySpawnEvent {
+    char group[SUDEKIMP_STORY_AREA_NAME];
+    uint32_t serial,group_id,resource,point,entry;
+    int32_t passes;
+    uint32_t position[3],forward[3],flags;
+} SudekiMpStorySpawnEvent;
+BOOL SudekiMpStorySpawnEventValid(const SudekiMpStorySpawnEvent *event);
 typedef struct SudekiMpStoryEffectState {
     uint32_t epoch,revision,observed_tick,sequence;
     char current[SUDEKIMP_STORY_AREA_NAME];
@@ -85,6 +111,10 @@ typedef struct SudekiMpStoryEffectState {
     uint32_t music_flags,music_intensity;
     uint32_t music_variation,music_curve[6]; /* peaceful, battle, remaining, reset, ramp, hold */
     char music_score[SUDEKIMP_STORY_AREA_NAME];
+    uint8_t spawns_valid,spawn_count;
+    SudekiMpStorySpawnEvent spawns[SUDEKIMP_STORY_SPAWN_MAX];
+    uint8_t gates_valid,gate_count;
+    SudekiMpStoryGateGroup gates[SUDEKIMP_STORY_GATE_GROUP_MAX];
 } SudekiMpStoryEffectState;
 typedef struct SudekiMpStoryEffectChunk {
     uint32_t epoch,revision,sequence,observed_tick,digest,index;

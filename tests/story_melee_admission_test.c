@@ -9,6 +9,20 @@ static int spirit_state;
 static unsigned calls,last_kind;
 static unsigned movement_calls;
 static float movement_x,movement_z;
+static BOOL idle_loading,idle_remote=TRUE,idle_binding=TRUE;
+BOOL SudekiMpLanStoryObserverWorldLoading(void) { return idle_loading; }
+BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
+    return roster_ok && r && r->dispatch_serial==7;
+}
+BOOL SudekiMpLanPartyControlStoryTurnOwner(void *a,SudekiMpLanPartyLease *key) {
+    (void)a; *key=(SudekiMpLanPartyLease){.seat=3,.token=5,.generation=2}; return idle_remote;
+}
+BOOL SudekiMpLanStoryRuntimeTurnLeaseExact(const SudekiMpLanPartyLease *key) {
+    return idle_remote && lease_ok && key->token==5;
+}
+BOOL SudekiMpStoryIdleContactBindThread(void) { return idle_binding; }
+uint32_t SudekiMpStoryIdleContactCount(void) { return 0; }
+void SudekiMpLogWrite(const char *message) { (void)message; }
 BOOL SudekiMpLanPartyControlStoryRefreshTarget(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z) {
     (void)x; (void)z; return SudekiMpLanPartyControlStoryExact(w,r,k);
@@ -44,6 +58,11 @@ BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitnes
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,unsigned kind,BOOL *submitted) {
     assert(SudekiMpLanPartyControlStoryExact(w,r,k));
     ++calls; last_kind=kind; *submitted=lower_submits; return lower_returns;
+}
+BOOL SudekiMpLanPartyControlStoryMeleeSnapshot(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,unsigned buttons,BOOL *submitted) {
+    assert(SudekiMpLanPartyControlStoryExact(w,r,k));
+    ++calls;last_kind=buttons;*submitted=lower_submits;return lower_returns;
 }
 BOOL SudekiMpLanPartyControlStoryRanged(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,unsigned state,BOOL *submitted) {
@@ -221,6 +240,33 @@ int main(void) {
         assert(SudekiMpLanStoryControlMelee(&w,&r,&k,kind)==SUDEKIMP_STORY_ACTION_BUSY);
         assert(calls==before+1);interaction_mode[0x4c]=0;
     }
+    for(unsigned seat=0;seat<=2;seat+=2) {
+        k.seat=seat;r.actors[seat]=actor;
+        trigger[0x1d8]=1;trigger[0x1d9]=2;
+        for(unsigned buttons=0;buttons<64;++buttons) {
+            unsigned before=calls;
+            assert(SudekiMpLanStoryControlMeleeSnapshot(&w,&r,&k,buttons)==SUDEKIMP_STORY_ACTION_SUBMITTED);
+            assert(calls==before+1 && last_kind==buttons && trigger[0x1d8]==1 && trigger[0x1d9]==2);
+        }
+        unsigned before=calls;
+        #define SNAP_BUSY() assert(SudekiMpLanStoryControlMeleeSnapshot(&w,&r,&k,5)==SUDEKIMP_STORY_ACTION_BUSY && calls==before)
+        interaction_mode[0x4c]=1;SNAP_BUSY();interaction_mode[0x4c]=0;
+        speed[0x28]=1;SNAP_BUSY();speed[0x28]=0;
+        pending_weapon=TRUE;SNAP_BUSY();pending_weapon=FALSE;
+        weapon_known=FALSE;SNAP_BUSY();weapon_known=TRUE;
+        prime=TRUE;SNAP_BUSY();prime=FALSE;
+        spirit_state=1;SNAP_BUSY();spirit_state=0;
+        spirit_known=FALSE;SNAP_BUSY();spirit_known=TRUE;
+        cast_idle=FALSE;SNAP_BUSY();cast_idle=TRUE;
+        combat_known=FALSE;SNAP_BUSY();combat_known=TRUE;
+        roster_ok=FALSE;
+        assert(SudekiMpLanStoryControlMeleeSnapshot(&w,&r,&k,5)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==before);
+        roster_ok=TRUE;lease_ok=FALSE;
+        assert(SudekiMpLanStoryControlMeleeSnapshot(&w,&r,&k,5)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==before);
+        lease_ok=TRUE;
+        assert(SudekiMpLanStoryControlMeleeSnapshot(&w,&r,&k,64)==SUDEKIMP_STORY_ACTION_UNAVAILABLE && calls==before);
+    }
+    trigger[0x1d8]=trigger[0x1d9]=0;
     k.seat=1;
     assert(SudekiMpLanStoryControlMelee(&w,&r,&k,1)==SUDEKIMP_STORY_ACTION_UNAVAILABLE);
     for(unsigned character=1;character<=3;character+=2) {
@@ -235,6 +281,27 @@ int main(void) {
         interaction_mode[0x4c]=0;
         assert(SudekiMpLanStoryControlRanged(&w,&r,&k,3)==SUDEKIMP_STORY_ACTION_UNAVAILABLE);
     }
+    /* Host idle contact must not borrow a stale roster, remote input lease,
+     * menu/scene state or an uncertain native cast/weapon observation. */
+    memset(r.actors,0,sizeof(r.actors));r.actors[3]=actor;r.available_mask=8;
+    r.leader_character=3;r.dispatch_serial=7;combat_known=TRUE;cast_idle=TRUE;
+    SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(idle_contact_lease(actor));
+    idle_loading=TRUE;assert(!idle_contact_lease(actor));idle_loading=FALSE;
+    roster_ok=FALSE;assert(!idle_contact_lease(actor));roster_ok=TRUE;
+    speed[0x28]=1;assert(!idle_contact_lease(actor));speed[0x28]=0;
+    pending_weapon=TRUE;assert(!idle_contact_lease(actor));pending_weapon=FALSE;
+    weapon_known=FALSE;assert(!idle_contact_lease(actor));weapon_known=TRUE;
+    spirit_known=FALSE;assert(!idle_contact_lease(actor));spirit_known=TRUE;
+    spirit_state=1;assert(!idle_contact_lease(actor));spirit_state=0;
+    cast_idle=FALSE;assert(!idle_contact_lease(actor));cast_idle=TRUE;
+    prime=TRUE;assert(!idle_contact_lease(actor));prime=FALSE;
+    r.leader_character=2;r.available_mask=12;
+    SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(idle_contact_lease(actor));
+    idle_remote=FALSE;assert(!idle_contact_lease(actor));idle_remote=TRUE;
+    lease_ok=FALSE;assert(!idle_contact_lease(actor));lease_ok=TRUE;
+    SudekiMpLanStoryControlObserveIdleContact(&w,NULL);assert(!idle_contact_lease(actor));
+    idle_binding=FALSE;SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(!idle_contact_lease(actor));
+    puts("story idle contact: host roster, remote authority, load, pause, cast and unknown-state guards passed");
     VirtualFree(base,0,MEM_RELEASE);
     puts("story Tal/Buki melee synthetic admission/ownership/busy/uncertain-return tests passed");
     return 0;

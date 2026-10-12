@@ -1,4 +1,5 @@
 #include "hooks/lan_story_cast.h"
+#include "hooks/lan_arena_spirit_audio.h"
 #include "hooks/lan_story_realtime.h"
 #include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_party_control.h"
@@ -26,15 +27,19 @@ typedef struct StoryCaster {
     BOOL spirit_started,spirit_active_seen,spirit_root_started;
     DWORD spirit_trace_at;
     unsigned spirit_traces;
+    uint16_t audio_sequence;
+    uint32_t audio_tick;
 } StoryCaster;
 static HMODULE image;
 static SudekiMpLanStoryNativeRoster owners;
 static StoryCaster caster[4];
 static uint64_t lifetime,lifetime_serial;
 static DWORD native_thread,last_service;
+static DWORD bind_deferred_at;
+static BOOL bind_deferred;
 static BOOL bound,initializing,initialized,context_owned,menu_owned,skill_routed,spirit_routed,task_routed;
 static BOOL effects_owned,missiles_owned,stopping,fault;
-static BOOL visuals_owned;
+static BOOL visuals_owned,audio_owned;
 static int submitting=-1;
 static BOOL submitting_spirit;
 /* One synchronous namespace transition has no native calls except its
@@ -64,6 +69,36 @@ static BOOL retained_actor(void *actor,uint64_t generation) {
     int i=index_of(actor);
     return lifetime && generation==lifetime && i>=0 &&
         (transition_roster_proved ? native_thread==GetCurrentThreadId():exact()) && owners.actors[i]==actor;
+}
+static BOOL audio_witness(void *unused,int *state,uint64_t *session,uint16_t *sequence,uint8_t *character) {
+    (void)unused;SudekiMpSpiritInstance scope;
+    if(!bound || !exact() || !SudekiMpObserveSpiritInstanceScope(&scope) || !scope.generation) return FALSE;
+    for(unsigned i=0;i<4;++i) {
+        StoryCaster *c=&caster[i];SudekiMpSpiritInstanceState observed;
+        if(!c->actor || !c->sequence || scope.generation!=c->instance.generation ||
+            scope.manager!=c->instance.manager || scope.camera!=c->instance.camera)continue;
+        if(!retained_actor(c->actor,lifetime) || !SudekiMpObserveSpiritInstance(&c->instance,&observed) ||
+            !observed.state)return FALSE;
+        *state=(int)observed.state;*session=lifetime;*sequence=c->sequence;*character=(uint8_t)i;return TRUE;
+    }
+    return FALSE;
+}
+void SudekiMpLanStoryCastCaptureAudioStart(unsigned character,uint16_t *sequence,uint32_t *tick) {
+    if(!sequence || !tick)return;
+    *sequence=0;*tick=0;
+    if(character>=4 || !bound || !audio_owned || !exact())return;
+    SudekiMpLanArenaSpiritAudioEvent events[SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY];
+    size_t count=SudekiMpLanArenaSpiritAudioTraceSnapshot(events,SUDEKIMP_LAN_ARENA_SPIRIT_AUDIO_EVENT_CAPACITY,NULL);
+    StoryCaster *c=&caster[character];
+    for(size_t i=0;i<count;++i) {
+        const SudekiMpLanArenaSpiritAudioEvent *e=&events[i];
+        if(e->session_token!=lifetime || e->owner_seat!=character || !e->skill_sequence ||
+            e->skill_sequence!=c->sequence || strcmp(e->cue,"spiritstrike_start"))continue;
+        if(c->audio_sequence!=e->skill_sequence) {
+            c->audio_sequence=e->skill_sequence;c->audio_tick=e->observed_tick;
+        }
+    }
+    *sequence=c->audio_sequence;*tick=c->audio_tick;
 }
 static BOOL native_idle(void *actor) {
     SudekiMpCharacterSkillState s;
@@ -230,7 +265,8 @@ static BOOL effect_owner(void *component,SudekiMpLanPartyEffectOwner *out) {
         actor=*(void **)((uint8_t *)component+0x10u);
         if(!memory(actor,0x5cu) || *(void **)((uint8_t *)actor+0x58u)!=component) return FALSE;
     } else {
-        if(!SudekiMpLanCastContextCurrentRetained(&cast) || cast.session!=lifetime || !cast.cast_id) return FALSE;
+        if(!SudekiMpLanCastContextCurrentRetained(&cast) || cast.session!=lifetime || !cast.cast_id ||
+            (cast.kind!=1u && cast.kind!=2u)) return FALSE;
         actor=cast.actor;
     }
     int i=index_of(actor);
@@ -238,7 +274,12 @@ static BOOL effect_owner(void *component,SudekiMpLanPartyEffectOwner *out) {
     if(component && i!=1 && i!=3 && !caster[i].started && !caster[i].spirit_started &&
         (!SudekiMpLanCastContextCurrentRetained(&cast) || cast.actor!=actor || cast.session!=lifetime || !cast.cast_id))
         return FALSE;
-    *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,SudekiMpLanPartyActorType((unsigned)i)};
+    BOOL scoped=SudekiMpLanCastContextCurrentRetained(&cast) &&
+        cast.actor==actor && cast.session==lifetime && cast.cast_id && (cast.kind==1u || cast.kind==2u);
+    if(!scoped && !caster[i].started && !caster[i].spirit_started && i!=1 && i!=3) return FALSE;
+    *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,
+        SudekiMpLanPartyActorType((unsigned)i),
+        (scoped || caster[i].started || caster[i].spirit_started) ? caster[i].sequence : 0u};
     return TRUE;
 }
 BOOL SudekiMpLanStoryCastShotOwner(void *actor,SudekiMpLanPartyEffectOwner *out) {
@@ -247,25 +288,34 @@ BOOL SudekiMpLanStoryCastShotOwner(void *actor,SudekiMpLanPartyEffectOwner *out)
         !retained_actor(actor,lifetime) || !caster[i].instance.generation ||
         caster[i].started || caster[i].spirit_started ||
         !SudekiMpObserveCharacterSkill(actor,&skill) || skill.active) return FALSE;
-    *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,SudekiMpLanPartyActorType((unsigned)i)};
+    *out=(SudekiMpLanPartyEffectOwner){lifetime,caster[i].instance.generation,actor,SudekiMpLanPartyActorType((unsigned)i),0u};
     return TRUE;
 }
 static BOOL visual_owner(void *unused,void *component,uint64_t *session,uint16_t *sequence,
     uint32_t *tick,uint8_t *type) {
-    SudekiMpLanPartyEffectOwner owner; SudekiMpLanCastOwner cast;
+    SudekiMpLanPartyEffectOwner owner;
     (void)unused;
-    if(!session || !sequence || !tick || !type || !effect_owner(component,&owner)) return FALSE;
-    int i=index_of(owner.actor);
-    if((i==1 || i==3) && !caster[i].started && !caster[i].spirit_started) {
-        *session=owner.session;*sequence=0;*tick=GetTickCount();*type=owner.actor_type;return TRUE;
+    if(!session || !sequence || !tick || !type || !bound || !exact()) return FALSE;
+    if(component) {
+        /* FX components use their registered emission identity in the visual
+         * observer, never the caster's latest sequence. Only exact roster
+         * actor components may use the current lifetime forwarding scope. */
+        if(!memory(component,0x14u)) return FALSE;
+        void *actor=*(void **)((uint8_t *)component+0x10u);
+        if(index_of(actor)<0 || !memory(actor,0x5cu) ||
+            *(void **)((uint8_t *)actor+0x58u)!=component) return FALSE;
     }
-    if(owner.actor!=caster[2].actor || !caster[2].sequence) return FALSE;
-    if(!component && (!SudekiMpLanCastContextCurrentRetained(&cast) || (cast.kind!=1u && cast.kind!=2u) ||
-        cast.actor!=owner.actor || cast.session!=owner.session)) return FALSE;
-    *session=owner.session; *sequence=caster[2].sequence; *tick=GetTickCount();
-    *type=0; /* Existing renderer's Tal cast tag, independent of transport seat. */
+    if(!SudekiMpLanPartyEffectLifetimeCurrent(&owner)) return FALSE;
+    int i=index_of(owner.actor);
+    if(i<0 || !retained_actor(owner.actor,owner.session) ||
+        owner.generation!=caster[i].instance.generation ||
+        owner.actor_type!=SudekiMpLanPartyActorType((unsigned)i) ||
+        (!owner.cast_sequence && i!=1 && i!=3)) return FALSE;
+    *session=owner.session; *sequence=owner.cast_sequence; *tick=GetTickCount();
+    *type=(i==2 && owner.cast_sequence) ? 0u : owner.actor_type;
     return TRUE;
 }
+
 static BOOL shield_owner(void *unused,uint8_t type,void **actor) {
     (void)unused;
     if(!actor || !bound || !exact()) return FALSE;
@@ -375,7 +425,7 @@ BOOL SudekiMpLanStoryCastLocalNoncaster(void *actor) {
 }
 BOOL SudekiMpLanStoryCastInstall(HMODULE module) {
     if(image || !module || !SudekiMpCheckLoadedExecutable(module) || !SudekiMpLanStoryRealtimeExact(module)) return FALSE;
-    image=module; stopping=fault=FALSE; return TRUE;
+    image=module; stopping=fault=bind_deferred=FALSE; return TRUE;
 }
 static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryNativeRoster *r) {
     if(!r || !SudekiMpLanStoryObserverRosterStillExact(w,r) || !r->available_mask || r->leader_character>=4u)
@@ -394,6 +444,8 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
     if(!all_idle()) return TRUE; /* no native construction until positive idle */
     if(lifetime_serial==UINT64_MAX) return FALSE;
     lifetime=++lifetime_serial; initializing=TRUE;
+    BOOL retry_busy=FALSE;
+    int stage_character=-1;
     const char *stage="input_isolation";
     if(!SudekiMpLanPartyControlEnableCastInputIsolation(w)) goto failed;
     stage="task_context";
@@ -401,15 +453,23 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
         SudekiMpLanStoryTaskHostAttach,SudekiMpLanStoryTaskHostDetach};
     context_owned=TRUE;
     if(!SudekiMpInstallLanCastContextWithTaskHost(image,root_owner,&task_owner)) goto failed;
-    stage="native_namespaces";
+    stage="native_namespace_abi";
     if(!SudekiMpInitializeSpiritInstanceAbi(image,all_idle)) goto failed;
     initialized=TRUE;
-    if(!SudekiMpInstallSpiritInstanceUpdates() || !SudekiMpEnableSpiritInstanceNamedCameraBanking()) goto failed;
+    stage="native_namespace_updates";
+    if(!SudekiMpInstallSpiritInstanceUpdates()) goto failed;
+    stage="native_camera_banking"; retry_busy=TRUE;
+    SetLastError(ERROR_SUCCESS);
+    if(!SudekiMpEnableSpiritInstanceNamedCameraBanking()) goto failed;
     for(unsigned i=0;i<4;++i) if(caster[i].actor) {
-        if(!SudekiMpCreateSpiritInstance(&caster[i].instance) ||
-            !SudekiMpBindSpiritInstanceCaster(&caster[i].instance,caster[i].actor,
+        stage="native_namespace_create"; stage_character=(int)i; retry_busy=TRUE;
+        SetLastError(ERROR_SUCCESS);
+        if(!SudekiMpCreateSpiritInstance(&caster[i].instance)) goto failed;
+        stage="native_namespace_caster"; retry_busy=FALSE;
+        if(!SudekiMpBindSpiritInstanceCaster(&caster[i].instance,caster[i].actor,
                 SudekiMpLanPartyActorType(i),lifetime,retained_actor)) goto failed;
     }
+    retry_busy=FALSE; stage_character=-1;
     stage="private_ui_camera_input";
     for(unsigned i=0;i<4;++i) if(caster[i].actor) {
         if(i!=owners.leader_character && (!SudekiMpEnableSpiritInstanceRemoteUi(&caster[i].instance) ||
@@ -451,6 +511,9 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
     static const unsigned sites[]={0x27cb1u,0x998a1u};
     for(unsigned i=0;i<2;++i)
         if(!SudekiMpInstallRelativeCallHook(&use_hooks[i],(uint8_t *)image+sites[i],original_use,native_use)) goto failed;
+    stage="spirit_audio";
+    if(!SudekiMpInstallLanArenaSpiritAudioTrace(image,audio_witness,NULL))goto failed;
+    audio_owned=TRUE;
     stage="descendant_lifetimes";
     missiles_owned=TRUE;
     if(!SudekiMpLanPartyProjectileLifetimeInstall(image)) goto failed;
@@ -463,7 +526,7 @@ static BOOL bind_casters(const SudekiMpControlUpdateDispatchWitness *w,const Sud
     /* Ordinary story scripts remain on the original step path while idle.
      * Native entry routing above activates task isolation before the first
      * private callback; no camera/name/light banking per unrelated idle task. */
-    bound=TRUE; initializing=FALSE;
+    bound=TRUE; initializing=bind_deferred=FALSE;
     {
         SudekiMpStoryVfx baseline;
         if(!SudekiMpLanStoryCastCaptureVisuals(&baseline)) goto failed;
@@ -475,16 +538,26 @@ failed: {
         DWORD error=GetLastError(); HMODULE retry=image;
         initializing=FALSE; stopping=TRUE;
         BOOL restored=SudekiMpLanStoryCastUninstall();
-        SudekiMpLogFormat("story_cast event=bind_failed stage=%s error=%lu retained=%u\r\n",
-            stage,(unsigned long)error,!restored);
-        if(restored) { image=retry; fault=TRUE; stopping=TRUE; }
-        SetLastError(error); return FALSE;
+        /* A busy native construction boundary can become idle on a later
+         * dispatch (the original camera may outlive the skill body). Retry
+         * only after every retained object/hook has positively rolled back.
+         * Byte/identity failures and incomplete rollback remain quarantined. */
+        BOOL deferred=restored && retry_busy && error==ERROR_BUSY;
+        SudekiMpLogFormat("story_cast event=%s stage=%s character=%d error=%lu retained=%u retry=%u\r\n",
+            deferred?"bind_deferred":"bind_failed",stage,stage_character,
+            (unsigned long)error,!restored,deferred);
+        if(restored) {
+            image=retry; fault=stopping=!deferred;
+            bind_deferred=deferred; bind_deferred_at=GetTickCount();
+        }
+        SetLastError(error); return deferred;
     }
 }
 BOOL SudekiMpLanStoryCastTryBind(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r) {
     if(!image || stopping || fault || initializing || !w || !w->service_post_original_exact ||
         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) return FALSE;
+    if(bind_deferred && GetTickCount()-bind_deferred_at<1000u) return TRUE;
     return bound ? exact() : bind_casters(w,r);
 }
 BOOL SudekiMpLanStoryCastService(const SudekiMpControlUpdateDispatchWitness *w,
@@ -653,7 +726,7 @@ unsigned SudekiMpLanStoryCastSubmitSpirit(const SudekiMpControlUpdateDispatchWit
 }
 void SudekiMpLanStoryCastRequestStop(void) { stopping=TRUE; }
 BOOL SudekiMpLanStoryCastRetains(void) {
-    return initialized || context_owned || bound || initializing || menu_owned || effects_owned || missiles_owned || visuals_owned;
+    return initialized || context_owned || bound || initializing || menu_owned || effects_owned || missiles_owned || visuals_owned || audio_owned;
 }
 BOOL SudekiMpLanStoryCastUninstall(void) {
     stopping=TRUE;
@@ -672,6 +745,8 @@ BOOL SudekiMpLanStoryCastUninstall(void) {
     menu_owned=FALSE;
     if(!SudekiMpRestoreInlineHook(&camera_hook) || !SudekiMpUninstallCastMotionBlur()) return FALSE;
     if(effects_owned && !SudekiMpLanPartyEffectLifetimeReset()) return FALSE;
+    if(audio_owned && !SudekiMpUninstallLanArenaSpiritAudioTrace())return FALSE;
+    audio_owned=FALSE;
     if(visuals_owned && !SudekiMpLanArenaSpiritVisualHostReset()) return FALSE;
     visuals_owned=FALSE;
     effects_owned=FALSE;
@@ -682,7 +757,7 @@ BOOL SudekiMpLanStoryCastUninstall(void) {
     if(initialized && !SudekiMpResetSpiritInstanceAbi()) return FALSE;
     initialized=FALSE;
     if(context_owned && !SudekiMpUninstallLanCastContext()) return FALSE;
-    context_owned=bound=FALSE; native_thread=last_service=0; lifetime=0;
+    context_owned=bound=bind_deferred=FALSE; native_thread=last_service=0; lifetime=0;
     memset(caster,0,sizeof(caster)); memset(&owners,0,sizeof(owners)); image=NULL;
     return TRUE;
 }

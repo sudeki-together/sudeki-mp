@@ -187,6 +187,10 @@ typedef struct SudekiMpLanArenaSpiritVfxVisualState {
     SudekiMpLanArenaSpiritVfxCacheLease caches[SUDEKIMP_LAN_STORY_VFX_LAST];
 } SudekiMpLanArenaSpiritVfxVisualState;
 
+/* Optional story-only setup, after weak ownership and before first phase seek.
+ * Borrowed callback/context never survive this service invocation. */
+typedef BOOL (*SudekiMpStoryVisualSoundSetup)(void *context,
+    const SudekiMpLanArenaSpiritVfxSnapshot *visual,void *sound);
 typedef struct SudekiMpLanArenaSpiritVfxVisualApi {
     SudekiMpLanArenaSpiritVfxReplayApi cache;
     /* FALSE means no native spawn entry. TRUE consumes the instance, even
@@ -203,6 +207,8 @@ typedef struct SudekiMpLanArenaSpiritVfxVisualApi {
         SudekiMpLanArenaSpiritVfxTransientTPtr *observer);
     BOOL (*detach)(void *context,
         SudekiMpLanArenaSpiritVfxTransientTPtr *observer);
+    SudekiMpStoryVisualSoundSetup sound_setup;
+    void *sound_context;
 } SudekiMpLanArenaSpiritVfxVisualApi;
 
 BOOL SudekiMpLanArenaSpiritVfxServiceVisualsWithApi(
@@ -239,7 +245,8 @@ BOOL SudekiMpLanArenaSpiritVfxCollectModelClocks(HMODULE module,
     void **instances, unsigned capacity, unsigned *count);
 
 BOOL SudekiMpLanStoryVfxServiceVisuals(HMODULE module,
-    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared);
+    const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared,
+    SudekiMpStoryVisualSoundSetup sound_setup,void *sound_context);
 BOOL SudekiMpLanStoryVfxServicePreparedVisualsWithApi(
     SudekiMpLanArenaSpiritVfxVisualState *state,
     const SudekiMpStoryVfx *snapshot,uint64_t session_token,uint64_t prepared,

@@ -7,6 +7,7 @@ typedef struct SoloJob {
     uint8_t *job,*group,*point,*sequence,*actor;
     uint32_t group_id,actor_id,resource_id,serial;
     unsigned stage,result;
+    int native_pause_delta;
     DWORD native_error;
     BOOL entered,active;
 } SoloJob;
@@ -26,6 +27,24 @@ static SoloDestroy original_solo_destroy;
 static const uint8_t solo_step_head[]={0x83,0xec,0x2c,0x56,0x8b,0xf1,0x8b,0x4e,0x04};
 static const uint8_t solo_ctor_head[]={0x53,0x33,0xdb,0x8d,0x48,0x10};
 static const uint8_t solo_destroy_head[]={0x56,0x8b,0xf1,0xe8,0x68,0xfe,0xff,0xff};
+/* SpawnAttachPauseRelease: native attachment 4B1530 first keeps at least
+ * speed-manager references + 1, then conditionally releases its initialization
+ * reference. Check both the caller chain and the precise decrement/schedule
+ * branch. This is observation of the retail path, not another hook. */
+static BOOL solo_attach_code(uint8_t *b) {
+    static const uint8_t floor[]={0x0f,0xb7,0x41,0x2a,0x0f,0xb6,0x4e,0x2b,0x40,0x3b,0xc8,
+        0x0f,0x8d,0x8b,0,0,0};
+    static const uint8_t release[]={0xfe,0x4e,0x2b,0x75,0x19,0x8b,0x0d};
+    static const uint8_t resume[]={0x8d,0x46,0x08,0xe8,0x9d,0x2a,0x08,0,
+        0x8b,0x46,0x08,0x8b,0x50,0x0c,0x8d,0x4e,0x08,0xff,0xd2};
+    return readable(b+0xb1683u,0x16bu) &&
+        !memcmp(b+0x72df9u,"\xe8\x62\x08\0\0",5) &&
+        !memcmp(b+0x737b4u,"\xe8\x77\xdd\x03\0",5) &&
+        !memcmp(b+0xb1683u,"\x8b\x0d",2) && *(void **)(b+0xb1685u)==b+0x408da0u &&
+        !memcmp(b+0xb1689u,floor,sizeof(floor)) &&
+        !memcmp(b+0xb17d0u,release,sizeof(release)) && *(void **)(b+0xb17d7u)==b+0x409e14u &&
+        !memcmp(b+0xb17dbu,resume,sizeof(resume));
+}
 static BOOL solo_code(uint8_t *b) {
     return readable(b+SOLO_CTOR,0x4bu) && readable(b+SOLO_STEP,0xb6u) &&
         readable(b+SOLO_DESTROY,0x1eu) &&
@@ -34,7 +53,7 @@ static BOOL solo_code(uint8_t *b) {
         !memcmp(b+SOLO_STEP,solo_step_head,sizeof(solo_step_head)) &&
         b[SOLO_STEP+0x82u]==0xc3 && b[SOLO_STEP+0xb5u]==0xc3 &&
         !memcmp(b+SOLO_DESTROY,solo_destroy_head,sizeof(solo_destroy_head)) &&
-        !memcmp(b+SOLO_DESTROY+0x1bu,"\xc2\x04\x00",3u);
+        !memcmp(b+SOLO_DESTROY+0x1bu,"\xc2\x04\x00",3u) && solo_attach_code(b);
 }
 static BOOL solo_group_fields(const SoloJob *s) {
     uint8_t *g=s->group;
@@ -68,7 +87,7 @@ static void solo_record(void *raw) {
     solo_fault=TRUE;
 }
 static void __attribute__((noinline,used,force_align_arg_pointer)) solo_constructed(void *raw) {
-    DWORD error=GetLastError(); sigil_constructed(raw); solo_record(raw); SetLastError(error);
+    DWORD error=GetLastError(); spawn_event_constructed(raw); sigil_constructed(raw); solo_record(raw); SetLastError(error);
 }
 /* Constructor: EAX=allocation, EDX=group, two stack arguments, RET8.
  * The observer runs after construction and preserves all native return state. */
@@ -100,14 +119,20 @@ static BOOL solo_witness(void *context) {
         *(uint32_t *)(s->actor+0x34u)==s->actor_id;
 }
 static BOOL solo_operation(void *context) {
-    SoloJob *s=context; s->entered=TRUE;
+    SoloJob *s=context; s->entered=TRUE; s->native_pause_delta=0;
+    unsigned previous=s->stage;
+    unsigned references=s->actor?s->actor[0x2bu]:0u;
     s->result=original_solo_step(s->job); s->native_error=GetLastError();
     if(readable(s->job,0x28u)) s->stage=s->job[0x24u];
+    if(previous>=1u && previous<=3u && s->stage==4u && (s->result&255u)==1u &&
+        references>1u && references<UINT8_MAX && solo_actor(s)==s->actor &&
+        s->actor[0x2bu]==references-1u && solo_attach_code(image_base))
+        s->native_pause_delta=-1;
     return TRUE;
 }
 static unsigned __attribute__((thiscall)) solo_step(void *raw) {
     DWORD error=GetLastError();
-    ++solo_callbacks; SoloJob *s=solo_find(raw); unsigned result;
+    ++solo_callbacks; spawn_event_step(raw); SoloJob *s=solo_find(raw); unsigned result;
     if(!s) {SetLastError(error);result=original_solo_step(raw);error=GetLastError();}
     else {
         uint8_t *actor=readable(s->job,0x28u)?solo_actor(s):NULL;
@@ -116,21 +141,22 @@ static unsigned __attribute__((thiscall)) solo_step(void *raw) {
         unsigned previous=s->stage;
         BOOL exact=solo_witness(s),accounted=FALSE;
         if(exact && solo_scope_group==s->group) {solo_operation(s);accounted=TRUE;}
-        else if(exact) accounted=SudekiMpLanStoryClientSpawnResidencyCall(solo_witness,s,actor,solo_operation);
+        else if(exact) accounted=SudekiMpLanStoryClientSpawnResidencyCall(solo_witness,s,actor,
+            &s->native_pause_delta,solo_operation);
         /* Native work must still run exactly once if admission is lost. This
          * retains containment failure; it does not invent cancellation. */
         if(!s->entered) (void)solo_operation(s);
         result=s->result; error=s->native_error; s->active=FALSE;
-        SudekiMpLogFormat("story_spawn_trace event=solo_step serial=%lu stage=%u->%u exact=%u accounted=%u terminal=%u\r\n",
-            (unsigned long)s->serial,previous,s->stage,exact,accounted,result&255u);
+        SudekiMpLogFormat("story_spawn_trace event=solo_step serial=%lu stage=%u->%u exact=%u accounted=%u terminal=%u pause_delta=%d\r\n",
+            (unsigned long)s->serial,previous,s->stage,exact,accounted,result&255u,s->native_pause_delta);
     }
-    sigil_job_step(raw);
+    spawn_event_step(raw); sigil_job_step(raw);
     --solo_callbacks; SetLastError(error); return result;
 }
 static void * __attribute__((thiscall)) solo_destroy(void *raw,unsigned flags) {
     ++solo_callbacks; SoloJob *s=solo_find(raw);
     void *result=original_solo_destroy(raw,flags); DWORD error=GetLastError();
-    sigil_job_destroyed(raw);
+    spawn_event_destroyed(raw); sigil_job_destroyed(raw);
     if(s) { /* Positive destructor return; do not read released storage. */
         SudekiMpLogFormat("story_spawn_trace event=solo_retired serial=%lu\r\n",(unsigned long)s->serial);
         memset(s,0,sizeof(*s));

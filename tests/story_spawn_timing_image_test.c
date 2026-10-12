@@ -4,13 +4,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "hooks/story_spawn_schedule_guard.h"
+static void (*test_death_observer)(void *,void *);
+BOOL SudekiMpLanStoryDeathObserverSet(void (*observer)(void *,void *)) {
+    test_death_observer=observer;return TRUE;
+}
 #include "../src/hooks/lan_story_spawn_trace.c"
 
 static unsigned deferred_calls;
 BOOL SudekiMpLanStoryClientSpawnResidencyCall(BOOL (*witness)(void *),void *context,
-    uint8_t *actor,SudekiMpLanStoryClientResidencyOperation operation) {
+    uint8_t *actor,const int *native_pause_delta,SudekiMpLanStoryClientResidencyOperation operation) {
     assert(actor && witness(context)); ++deferred_calls;
-    assert(operation(context)); return witness(context);
+    assert(operation(context)); assert(native_pause_delta && (*native_pause_delta==0 || *native_pause_delta==-1)); return witness(context);
 }
 static unsigned retire_admissions;
 static BOOL refuse_retirement;
@@ -232,7 +236,7 @@ static void * __stdcall effect_create_endpoint(void *manager,const float *matrix
     assert(*record==4u); --*record; ++death_calls;
     return entity;
 }
-static void death_visual_contract(void) {
+static void death_visual_fixture(void) {
     *(void **)death_monster=image_base+0x2d5fa0u;
     *(void **)(death_monster+0x58u)=death_anim; *(void **)death_anim=image_base+0x2c8504u;
     *(void **)(death_anim+0x10u)=death_monster; *(void **)(death_anim+0xdcu)=death_info;
@@ -248,6 +252,10 @@ static void death_visual_contract(void) {
     for(unsigned i=0;i<16u;++i) ((float *)(death_object+0x90u))[i]=(i%5u==0u)?1.0f:0.0f;
     ((float *)(death_object+0x90u))[12]=12.0f;
     *(void **)death_manager=image_base+0x2c62a0u; *(void **)(image_base+0x408d48u)=death_manager;
+    death_record[0]=2;death_calls=0;
+}
+static void death_visual_contract(void) {
+    death_visual_fixture();
     assert(SudekiMpStoryDeathVisualPrepare(image_base,death_monster,2u,&death_request,visual_memory));
     assert(!SudekiMpStoryDeathVisualPrepare(image_base,death_monster,0u,&death_request,visual_memory));
     assert(!SudekiMpStoryDeathVisualPrepare(image_base,death_monster,5u,&death_request,visual_memory));
@@ -318,28 +326,73 @@ static void spawn_schedule_ownership(void) {
     fixture(); *(uint32_t *)(entity+0x34u)=123u;
     entity[0x2bu]=2u; entity[0x144u]=0x84u;
     assert(SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,123u,2,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,registry,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,123u,2,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base,
-        image_base+RVA_FX_NODE_VTABLE,123u,2,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base,123u,2,0,readable));
+        image_base,123u,2,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,124u,2,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,124u,2,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,123u,1,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,1,0,0,readable));
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,123u,2,4,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,2,4,0,readable));
+    entity[0x2bu]=1u;
+    assert(SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,-1,readable));
+    assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,0,readable));
+    assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
+        image_base+RVA_FX_NODE_VTABLE,123u,3,0,-2,readable));
+    entity[0x2bu]=0u;
+    assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
+        image_base+RVA_FX_NODE_VTABLE,123u,1,0,-1,readable));
+    entity[0x2bu]=2u;
     entity[0x144u]=0x80u;
     assert(!SudekiMpStorySpawnScheduleFinished(entity,entity,image_base+RVA_FX_VTABLE,
-        image_base+RVA_FX_NODE_VTABLE,123u,2,0,readable));
+        image_base+RVA_FX_NODE_VTABLE,123u,2,0,0,readable));
 }
-static uint8_t solo_test_group[0x1b4],solo_test_point[0x80],solo_test_sequence[0x50],solo_test_job[0x28],solo_test_actor[0x200];
+/* Referenced by the naked assembly constructor below. */
+static uint8_t solo_test_group[0x1b4] __attribute__((used)),solo_test_point[0x80] __attribute__((used)),
+    solo_test_sequence[0x50] __attribute__((used)),solo_test_job[0x28] __attribute__((used)),solo_test_actor[0x200];
 static unsigned solo_native_calls,solo_destroy_calls;
+static BOOL solo_test_release;
+static void *solo_test_resume_fn;
+static void solo_release_native(uint8_t *actor) {
+    __asm__ volatile("call *%1" : "+S"(actor) : "m"(solo_test_resume_fn) : "eax","ecx","edx","memory","cc");
+}
+static void spawn_attach_pause_contract(void) {
+    assert(solo_attach_code(image_base));
+    const unsigned ranges[][2]={{0x72df9,5},{0x737b4,5},{0xb1683,23},{0xb17d0,30}};
+    for(unsigned i=0;i<4;++i) for(unsigned j=0;j<ranges[i][1];++j) {
+        image_base[ranges[i][0]+j]^=1; assert(!solo_attach_code(image_base));
+        image_base[ranges[i][0]+j]^=1;
+    }
+    /* Execute the retail reference release with its continuation made inert.
+     * With a separately retained world reference it must never schedule AI. */
+    uint8_t continuation=image_base[0xb17ee];assert(continuation==0x8b);
+    image_base[0xb17ee]=0xc3;solo_test_resume_fn=image_base+0xb17d0;
+    assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    for(unsigned n=2;n<255;++n) {
+        solo_test_actor[0x2b]=(uint8_t)n;solo_release_native(solo_test_actor);
+        assert(solo_test_actor[0x2b]==n-1);
+    }
+    image_base[0xb17ee]=continuation;
+    assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    puts("SpawnAttachPauseRelease mutation refusals and native 2..254 -> 1..253 references PASS");
+}
 static unsigned __attribute__((thiscall)) solo_test_step(void *raw) {
     assert(raw==solo_test_job); ++solo_native_calls;
     ((uint8_t *)raw)[0x24u]=((uint8_t *)raw)[0x24u]?4:1;
+    if(((uint8_t *)raw)[0x24u]==4u && solo_test_release) {
+        uint8_t continuation=image_base[0xb17ee];image_base[0xb17ee]=0xc3;
+        assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+        solo_release_native(solo_test_actor);
+        image_base[0xb17ee]=continuation;
+        assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    }
     SetLastError(0x1234u); return ((uint8_t *)raw)[0x24u]==4u;
 }
 static void * __attribute__((thiscall)) solo_test_destroy(void *raw,unsigned flags) {
@@ -378,7 +431,9 @@ static void deferred_spawn_contract(void) {
     void *replacement=(void *)solo_step;
     solo_step_hook=(SudekiMpPointerHook){.slot=&replacement,.replacement_value=replacement,.installed=TRUE};
     assert(!solo_step(solo_test_job) && deferred_calls==1u && solo_native_calls==1u && GetLastError()==0x1234u);
+    solo_test_actor[0x2b]=2u;solo_test_release=TRUE;
     assert(solo_step(solo_test_job)==1u && deferred_calls==2u && solo_native_calls==2u);
+    assert(s->native_pause_delta==-1 && solo_test_actor[0x2b]==1u);solo_test_release=FALSE;
     s->active=TRUE; ++solo_callbacks;
     assert(solo_witness(s));
     *(void **)(solo_test_job+0x10u)=entity; assert(!solo_witness(s));
@@ -481,13 +536,175 @@ static void host_driven_sigil_end(void) {
     sigil_fault=FALSE; fixture();
 }
 
+
+static uint8_t gate_models[3][0x5a0],gate_group_fixture[0x1b4],gate_points[2][0x80],gate_sequence[0x50];
+static uint8_t *gate_registry_entries[4];
+static uint32_t gate_name_record[2],gate_group_name_record[2];
+static uint8_t gate_zone_fixture[0x11c],gate_zone_entries[0x24],gate_world_fixture[0x58],gate_descriptor_fixture[0x38];
+static void gate_model_fixture(unsigned i) {
+    uint8_t *e=gate_models[i]; memset(e,0,0x5a0);
+    *(void **)e=image_base+0x2d5b00u;*(void **)(e+8u)=image_base+0x2d5b24u;
+    *(void **)(e+0x2cu)=image_base+0x2d5b44u;*(uint32_t *)(e+0x30u)=0xf8fu;
+    *(uint32_t *)(e+0x34u)=0x47b40b4au;*(void **)(e+0x38u)=gate_name_record;
+    *(void **)(e+0x44u)=e+0x210u;*(void **)(e+0x220u)=e;
+}
+static unsigned gate_script_calls;
+static void __attribute__((thiscall)) fake_gate_heartbeat(void *component) {(void)component;++gate_script_calls;}
+static void gate_contract(void) {
+    puts("gate_native_code exact supported-image check");fflush(stdout);
+    assert(gate_native_code(image_base));
+    const unsigned sites[]={GATE_SPAWN,0x76000u,0x7600bu,GATE_CREATE,0x73907u,0x73adeu,
+        0x73a52u,0x73a54u,0x2c9eccu,0x72e30u,0x72e6eu,0x72e8au,GATE_HEARTBEAT_CALL,
+        GATE_WEAK_ASSIGN,0x1791u,0x17a4u,GATE_PAUSE,0x1060f4u,GATE_POINT_CLEAR,0x156145u,0x156159u};
+    for(unsigned i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
+        image_base[sites[i]]^=1;assert(!gate_native_code(image_base));image_base[sites[i]]^=1;
+    }
+    assert(gates_install(image_base));gate_thread=GetCurrentThreadId();
+    gate_name_record[0]=1;gate_name_record[1]=(uint32_t)(uintptr_t)"HC_AklorianBarrier";
+    gate_group_name_record[0]=1;gate_group_name_record[1]=(uint32_t)(uintptr_t)"fixture_gates";
+    for(unsigned i=0;i<3u;++i) {gate_model_fixture(i);gate_registry_entries[i]=gate_models[i];}
+    memset(gate_group_fixture,0,sizeof(gate_group_fixture));memset(gate_points,0,sizeof(gate_points));
+    uint8_t *g=gate_group_fixture;
+    *(void **)g=image_base+RVA_GROUP_VTABLE;*(void **)(g+8u)=image_base+RVA_GROUP_NODE_VTABLE;
+    *(uint32_t *)(g+0x34u)=77;*(void **)(g+0x38u)=gate_group_name_record;
+    *(unsigned *)(g+0x168u)=2;*(unsigned *)(g+0x16cu)=1;
+    *(void **)(g+0x170u)=gate_points;*(void **)(g+0x174u)=gate_sequence;
+    *(void **)(image_base+0x408d10u)=gate_world_fixture;
+    *(void **)(gate_world_fixture+0xcu)=gate_descriptor_fixture;
+    *(void **)gate_descriptor_fixture=image_base+0x2c82a4u;
+    *(void **)(gate_descriptor_fixture+0x14u)=gate_zone_fixture;
+    *(void **)(gate_zone_fixture+0xbcu)=gate_models[0]+0x2cu;
+    *(void **)gate_zone_fixture=image_base+0x2cdcdcu;
+    *(unsigned *)(gate_zone_fixture+0xfcu)=1;*(void **)(gate_zone_fixture+0x104u)=gate_zone_entries;
+    *(void **)(gate_zone_entries+0x1cu)=g+0x2cu;
+    gate_registry_entries[3]=g;*(void **)(image_base+RVA_REGISTRY)=registry;
+    *(unsigned *)(registry+0x34u)=4;*(void **)(registry+0x3cu)=gate_registry_entries;
+    for(unsigned i=0;i<2u;++i) {gate_bind((GateWeak *)(gate_points[i]+0x6cu),gate_models[i+1]);*(uint16_t *)(gate_points[i]+0x7au)=0x800u;}
+    assert(gate_observe_group(g,gate_zone_fixture,gate_models[0],"fixture"));
+    GateLease *lease=&gate_leases[0];assert(lease->used && lease->state.live_mask==3 && lease->state.serial);
+    uint32_t a,b,serial=lease->state.serial;
+    assert(SudekiMpLanStoryGateIdentity(gate_models[1],&a));assert(SudekiMpLanStoryGateIdentity(gate_models[2],&b));
+    assert(a && b && a!=b && !SudekiMpLanStoryGateIdentity(gate_models[0],&a));
+    uint32_t old_id=a;
+    SudekiMpStoryEffectState unknown_gates={.current="fixture"};
+    assert(!SudekiMpLanStoryGatesFollow(&unknown_gates));
+    assert(lease->actors[0].object==gate_models[1] && lease->actors[1].object==gate_models[2]);
+    assert(gate_observe_group(g,gate_zone_fixture,gate_models[0],"fixture") && lease->state.serial==serial);
+    uint8_t component[0x30]={0};*(void **)(component+0x10u)=gate_models[1];
+    *(void **)(gate_models[1]+0x68u)=component;
+    GateHeartbeat original=gate_heartbeat_original;gate_heartbeat_original=fake_gate_heartbeat;
+    gate_heartbeat(component);assert(gate_script_calls==1); /* Host remains native. */
+    lease->owned=TRUE;gate_heartbeat(component);assert(gate_script_calls==1);
+    *(void **)(component+0x10u)=gate_models[0];gate_heartbeat(component);assert(gate_script_calls==2);
+    lease->owned=FALSE;gate_heartbeat_original=original;
+    /* Native TPtr base destruction clears every observer. Reusing the same
+     * addresses cannot resurrect the old gate occurrence or template identity. */
+    typedef void (__attribute__((thiscall)) *DestroyWeakBase)(void *);
+    for(unsigned i=1;i<3u;++i) ((DestroyWeakBase)(image_base+0x4d30u))(gate_models[i]);
+    assert(!lease->actors[0].object && !lease->actors[1].object);
+    BOOL cleared=FALSE;
+    assert(gate_retire(lease,0,&cleared) && cleared && !(*(uint16_t *)(gate_points[0]+0x7au)&0x800u));
+    assert(gate_observe_group(g,gate_zone_fixture,gate_models[0],"fixture") && !lease->state.live_mask);
+    for(unsigned i=0;i<2u;++i) {gate_model_fixture(i+1);gate_bind((GateWeak *)(gate_points[i]+0x6cu),gate_models[i+1]);*(uint16_t *)(gate_points[i]+0x7au)=0x800u;}
+    assert(gate_observe_group(g,gate_zone_fixture,gate_models[0],"fixture"));assert(lease->state.serial>serial);
+    assert(SudekiMpLanStoryGateIdentity(gate_models[1],&a) && a!=old_id);
+    /* A pending native setup is not safe to cancel. */
+    BOOL entered=FALSE;assert(!gate_retire(lease,0,&entered) && !entered && lease->actors[0].object);
+    assert(gates_uninstall() && gate_native_code(image_base));
+    for(unsigned i=0;i<2u;++i) {
+        gate_base=image_base;gate_bind((GateWeak *)(gate_points[i]+0x6cu),NULL);
+        assert(!*(void **)(gate_models[i+1]+4u));
+    }
+    gate_base=NULL;
+    puts("gate_native_code and gate identity/lifetime tests PASS");fflush(stdout);
+}
+
+static uint8_t start_fixture_group[0x1b4];
+static void *start_fixture_resource __attribute__((used));
+static uint32_t start_fixture_selection __attribute__((used));
+static void *start_fixture_receiver __attribute__((used));
+static unsigned start_fixture_calls __attribute__((used));
+static void __attribute__((naked,noinline,used)) start_lookup(void) {
+    __asm__ volatile("movl _start_fixture_resource,%eax\n\tret $16\n\t");
+}
+static void __attribute__((naked,noinline,used)) start_core(void) {
+    __asm__ volatile("movl %eax,_start_fixture_selection\n\tmovl %ecx,_start_fixture_receiver\n\tincl _start_fixture_calls\n\tret\n\t");
+}
+static unsigned __attribute__((thiscall)) start_kind(void *self) {
+    assert(self==start_fixture_resource);return 0x20;
+}
+static void __cdecl start_scoped(const char *scope,const void *resource,int selection,int count) {
+    assert(!strcmp(scope,"dungeon") && resource);
+    start_fixture_selection=(uint32_t)selection;
+    *(int32_t *)(start_fixture_group+0x178)=count;
+    ++start_fixture_calls;
+}
+static void start_test_endpoint(uint32_t rva,void *fn) {
+    image_base[rva]=0xe9;
+    *(int32_t *)(image_base+rva+1)=(intptr_t)fn-(intptr_t)(image_base+rva+5);
+}
+static void spawn_start_variants(void) {
+    assert(spawn_start_code());
+    for(unsigned i=0;i<3;++i) {
+        for(unsigned j=0;j<spawn_start_contracts[i].size;++j) {
+            image_base[spawn_start_contracts[i].rva+j]^=1;
+            assert(!spawn_start_code());
+            image_base[spawn_start_contracts[i].rva+j]^=1;
+        }
+        printf("%s mutation refusals PASS\n",spawn_start_contracts[i].name);
+    }
+    uint8_t old_lookup[5],old_core[5],old_scoped[5];
+    memcpy(old_lookup,image_base+0x3e540,5);memcpy(old_core,image_base+0x73f00,5);
+    memcpy(old_scoped,image_base+rvas[START3],5);
+    start_test_endpoint(0x3e540,(void *)(uintptr_t)start_lookup);
+    start_test_endpoint(0x73f00,(void *)(uintptr_t)start_core);
+    start_test_endpoint(rvas[START3],(void *)(uintptr_t)start_scoped);
+    assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    void *table[5]={NULL,NULL,NULL,NULL,(void *)(uintptr_t)start_kind};
+    start_fixture_resource=start_fixture_group+0x2c;
+    *(void **)start_fixture_resource=table;
+    uint32_t resource[3]={0x20,123,0};
+    for(unsigned method=1;method<=3;++method) for(int pass=-1;pass<=3;++pass) {
+        SudekiMpStorySpawnGroup command={.name="fixture",.sequence=pass,.serial=1,
+            .method=method,.selection=method==1?0:1};
+        if(method==3) strcpy(command.scope,"dungeon");
+        unsigned before=start_fixture_calls;
+        replay_start_native(&command,resource);
+        assert(start_fixture_calls==before+1 && start_fixture_selection==(uint32_t)command.selection);
+        assert(*(int32_t *)(start_fixture_group+0x178)==pass);
+        if(method!=3) assert(start_fixture_receiver==start_fixture_group);
+    }
+    memcpy(image_base+0x3e540,old_lookup,5);memcpy(image_base+0x73f00,old_core,5);
+    memcpy(image_base+rvas[START3],old_scoped,5);
+    assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    assert(spawn_start_code());
+    /* Identical commands are separate occurrences, including scoped groups. */
+    uint32_t record[2]={1,(uint32_t)(uintptr_t)"fixture"};resource[2]=(uint32_t)(uintptr_t)record;
+    started_count=start_serial=0;
+    record_start(resource,2,1,1,NULL);assert(started_count==1 && started[0].selection==1);
+    uint32_t serial=started[0].serial;
+    record_start(resource,2,1,1,NULL);assert(started_count==1 && started[0].serial==serial+1);
+    record_start(resource,3,7,-1,"dungeon");assert(started_count==2 && started[1].selection==7 && started[1].sequence==-1);
+    record_start(resource,3,1,1,"0123456789012345678901234567890123456789");assert(started_count==2);
+    start_serial=UINT32_MAX;record_start(resource,1,0,1,NULL);assert(started_count==2);
+    started_count=start_serial=0;memset(started,0,sizeof(started));
+    puts("native default/selected argument routes, scoped dispatch and repeated starts PASS");
+}
+#include "story_spawn_event_fixture.h"
+#include "story_death_interrupt_fixture.h"
 int main(int argc,char **argv) {
+    setvbuf(stdout,NULL,_IONBF,0);
     assert(argc==2); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024));
     image_base=map_image(path);
+    spawn_event_fixture();
+    death_interrupt_fixture();
+    spawn_start_variants();
     assert(FlushInstructionCache(GetCurrentProcess(),image_base,0x45f000));
+    gate_contract();
     delayed_owner_effect_retirement();
     spawn_schedule_ownership();
+    spawn_attach_pause_contract();
     deferred_spawn_contract();
     host_driven_sigil_end();
     puts("death visual contract"); fflush(stdout); death_visual_contract();

@@ -152,5 +152,5 @@ BOOL SudekiMpLanStoryShotsUninstall(void) {
 BOOL SudekiMpLanStoryShotsAppendVisuals(const SudekiMpLanStoryNativeRoster *r,SudekiMpStoryVfx *state) {
     if(!r || !state || !installed || thread!=GetCurrentThreadId()) return FALSE;
     if(!state->observed) return TRUE;
-    return SudekiMpLanStoryProjectileVisuals(state->stream,r->actors[1],r->actors[3],state);
+    return SudekiMpLanStoryProjectileVisuals(state->stream,r->actors,state);
 }

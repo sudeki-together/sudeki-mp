@@ -460,6 +460,8 @@ enum {
 };
 /* Saved-story additive cosmetic message only. LA42/SMP4 retain their old
  * closed kind ranges and byte layouts. These IDs never authorize gameplay. */
+#include "network/lan_story_skill_resources.h"
+#include "network/lan_story_world_resources.h"
 enum {
     SUDEKIMP_LAN_STORY_VFX_SHIN_SPLITTER = 33,
     SUDEKIMP_LAN_STORY_VFX_AIM_ARC = 34,
@@ -468,8 +470,19 @@ enum {
     SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_FIRST = 52,
     SUDEKIMP_LAN_STORY_VFX_ELCO_SHOT_LAST = 66,
     SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT = 67,
-    SUDEKIMP_LAN_STORY_VFX_LAST = SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT
+#define SUDEKIMP_SKILL_KIND(symbol,name,id,mask) SUDEKIMP_LAN_STORY_VFX_##symbol,
+    SUDEKIMP_STORY_SKILL_RESOURCES(SUDEKIMP_SKILL_KIND)
+#undef SUDEKIMP_SKILL_KIND
+#define SUDEKIMP_WORLD_KIND(symbol,name,id,mask) SUDEKIMP_LAN_STORY_VFX_WORLD_##symbol,
+    SUDEKIMP_STORY_WORLD_RESOURCES(SUDEKIMP_WORLD_KIND)
+#undef SUDEKIMP_WORLD_KIND
+    SUDEKIMP_LAN_STORY_VFX_WORLD_END,
+    SUDEKIMP_LAN_STORY_VFX_SKILL_END = SUDEKIMP_LAN_STORY_VFX_WORLD_I315_MONEY,
+    SUDEKIMP_LAN_STORY_VFX_SKILL_FIRST = 68,
+    SUDEKIMP_LAN_STORY_VFX_LAST = SUDEKIMP_LAN_STORY_VFX_WORLD_END-1
 };
+unsigned SudekiMpLanStorySkillVfxOwnerMask(unsigned kind);
+unsigned SudekiMpLanStoryWorldVfxSourceMask(unsigned kind);
 int SudekiMpLanStoryCastVisualOwnerValid(const SudekiMpLanArenaSpiritVfxSnapshot *visual);
 /* Shared native presentation backend, after the profile-specific decoder. */
 int SudekiMpLanVisualOwnerValidForPresentation(const SudekiMpLanArenaSpiritVfxSnapshot *visual);

@@ -19,6 +19,10 @@ typedef struct SudekiMpStoryAreaState {
     SudekiMpStoryAreaEntry entries[SUDEKIMP_STORY_AREA_MAX];
 } SudekiMpStoryAreaState;
 BOOL SudekiMpStoryAreaStateValid(const SudekiMpStoryAreaState *state);
+/* Positive ordinary-zone evidence for SwitchZoneNOW/EnterZone following.
+ * State 4 is a temporary interior: residency is not permission to move another
+ * character there. Unknown/ambiguous current descriptors also grant no move. */
+BOOL SudekiMpStoryAreaStateExterior(const SudekiMpStoryAreaState *state);
 /* Ignores transport sequence and observation tick. */
 BOOL SudekiMpStoryAreaStateSame(const SudekiMpStoryAreaState *a,const SudekiMpStoryAreaState *b);
 BOOL SudekiMpStoryAreaStateEncode(const SudekiMpStoryAreaState *state,uint8_t *bytes,size_t size);

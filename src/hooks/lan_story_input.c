@@ -1,4 +1,5 @@
 #include "hooks/lan_story_input.h"
+#include "network/lan_story_melee.h"
 #include "hooks/call_hook.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
@@ -27,9 +28,10 @@ static BOOL focused;
 static void *sample_controller,*sample_actor;
 static uint32_t sample_transaction;
 static BOOL quick_down,quick_pending;
-enum { MELEE_QUEUE=4, MELEE_MAX_AGE=250 };
-static unsigned melee_down,melee_first,melee_count;
-static struct { unsigned kind; uint32_t at; } melee_queue[MELEE_QUEUE];
+static unsigned melee_down;
+static uint8_t melee_buttons;
+static uint32_t melee_generation;
+static void clear_melee(void) { melee_buttons=0; ++melee_generation; }
 static float sample_x,sample_z,sample_scale=1.0f;
 static BOOL ranged_held,block_down,block_held;
 static uint32_t ranged_press,ranged_transaction;
@@ -47,7 +49,7 @@ typedef struct NativeEvent {
 static void clear_sample(void) {
     sample_controller=sample_actor=NULL; sample_transaction=0;
     quick_pending=FALSE; ranged_held=block_held=FALSE;
-    melee_first=melee_count=0; /* Preserve down bits until physical releases. */
+    clear_melee(); /* Preserve down bits until physical releases. */
     sample_x=sample_z=0; sample_scale=1.0f;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
 }
@@ -71,6 +73,7 @@ static void sample_block(const NativeEvent *e,BOOL admitted) {
     block_down=down;
 }
 static void sample_melee(const NativeEvent *e,BOOL admitted,uint32_t now) {
+    (void)now;
     if(e->action<0x2cu || e->action>0x2eu) return;
     unsigned kind=e->action-0x2bu,bit=1u<<(kind-1u);
     BOOL down=e->value!=0;
@@ -80,19 +83,17 @@ static void sample_melee(const NativeEvent *e,BOOL admitted,uint32_t now) {
             ranged_held=TRUE; ++ranged_press;
         }
     }
-    if(down && !(melee_down&bit) && admitted && melee_count<MELEE_QUEUE) {
-        unsigned next=(melee_first+melee_count)%MELEE_QUEUE;
-        melee_queue[next].kind=kind; melee_queue[next].at=now; ++melee_count;
-    }
+    unsigned shift=2u*(kind-1u);
+    if(admitted && down && !(melee_down&bit))
+        melee_buttons=(uint8_t)((melee_buttons&~(3u<<shift))|(1u<<shift));
+    else if(!down && ((melee_buttons>>shift)&3u))
+        melee_buttons=(uint8_t)((melee_buttons&~(3u<<shift))|(admitted?3u<<shift:0u));
     if(down) melee_down|=bit; else melee_down&=~bit;
 }
-static unsigned take_melee(uint32_t now) {
-    while(melee_count) {
-        unsigned next=melee_first;
-        melee_first=(melee_first+1u)%MELEE_QUEUE; --melee_count;
-        if((uint32_t)(now-melee_queue[next].at)<=MELEE_MAX_AGE) return melee_queue[next].kind;
-    }
-    return 0;
+static uint8_t take_melee(void) {
+    uint8_t buttons=melee_buttons;
+    melee_buttons=SudekiMpStoryMeleeAdvance(buttons);
+    return buttons;
 }
 
 static BOOL window_exact(void) {
@@ -112,12 +113,12 @@ static LRESULT CALLBACK focus_messages(int code,WPARAM sent,LPARAM raw) {
                 (m->message==WM_ACTIVATEAPP && !m->wParam)) {
                 focused=FALSE; sample_x=sample_z=0;
                 quick_pending=FALSE; ranged_held=block_held=FALSE;
-                melee_first=melee_count=0;
+                clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             } else if(m->message==WM_SETFOCUS) {
                 focused=TRUE; sample_x=sample_z=0;
                 quick_pending=FALSE; ranged_held=block_held=FALSE;
-                melee_first=melee_count=0;
+                clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             }
         }
@@ -319,11 +320,15 @@ BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t tr
     if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return FALSE;
     BOOL pressed=quick_pending; quick_pending=FALSE; return pressed;
 }
-unsigned SudekiMpLanStoryInputTakeMelee(void *controller,void *actor,uint32_t transaction) {
+BOOL SudekiMpLanStoryInputMelee(void *controller,void *actor,uint32_t transaction,
+    uint8_t *buttons,uint32_t *generation) {
     float x,z;
-    if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return 0;
-    return take_melee(GetTickCount());
+    if(!buttons || !generation) return FALSE;
+    *buttons=0;*generation=melee_generation;
+    if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return FALSE;
+    *buttons=take_melee();return TRUE;
 }
+
 BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transaction,
     BOOL *held,uint32_t *press) {
     float x,z;
@@ -338,7 +343,7 @@ BOOL SudekiMpLanStoryInputBlock(void *controller,void *actor,uint32_t transactio
 void SudekiMpLanStoryInputMuteMovement(void) {
     if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return;
     sample_x=sample_z=0;
-    melee_first=melee_count=0; ranged_held=block_held=FALSE;
+    clear_melee(); ranged_held=block_held=FALSE;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
 }
 

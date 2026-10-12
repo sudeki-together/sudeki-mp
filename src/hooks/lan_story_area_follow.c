@@ -113,7 +113,7 @@ BOOL SudekiMpLanStoryAreaFollowCalling(void) { return InterlockedCompareExchange
 static BOOL replay_spawn(void *context) {
     const SudekiMpStorySpawnGroup *group=context;
     InterlockedExchange(&calling,1);
-    BOOL entered=SudekiMpLanStorySpawnReplay(group->name,group->sequence);
+    BOOL entered=SudekiMpLanStorySpawnReplay(group);
     InterlockedExchange(&calling,0);
     return entered;
 }
@@ -121,13 +121,25 @@ void SudekiMpLanStoryAreaFollow(const SudekiMpStoryAreaState *host,uint32_t now,
     const SudekiMpControlUpdateDispatchWitness *w) {
     (void)w;
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
-    if(!world || !SudekiMpStoryAreaStateValid(host) || !*(world+WORLD_ARMED)) return;
+    if(!world || !SudekiMpStoryAreaStateExterior(host) || !*(world+WORLD_ARMED)) return;
     uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT),*target=*(uint8_t **)(world+WORLD_TARGET);
     char mine_current[SUDEKIMP_STORY_AREA_NAME],mine_target[SUDEKIMP_STORY_AREA_NAME];
     if(!in_table(current,table,count) || !in_table(target,table,count) ||
-        !name_of(current,mine_current) || !name_of(target,mine_target) || !mine_current[0]) return;
-    /* 1. Background load: follow the host's target (native also unloads our previous target). */
-    if(host->target[0] && _stricmp(host->target,mine_target)) {
+        !name_of(current,mine_current) || !name_of(target,mine_target) || !mine_current[0] ||
+        *(uint32_t *)(current+DESC_STATE)!=3u) return;
+    /* Temporary travel belongs to the per-character transition owner. Never
+     * background-load a host interior for a character left outside, or pull
+     * a locally admitted interior view back out with an ordinary EnterZone. */
+    /* Exiting a temporary interior leaves WORLD_TARGET naming that house
+     * after its state has returned to zero. Capture omits zero-state entries.
+     * A target name alone must not start a new client load of the old house. */
+    BOOL target_active=FALSE;
+    for(unsigned i=0;i<host->count;++i)
+        if(host->entries[i].state>=1u && host->entries[i].state<=3u &&
+            !_stricmp(host->entries[i].name,host->target)) {target_active=TRUE;break;}
+    /* 1. Follow only a positively loading/resident host background target.
+     * SwitchZoneNOW also unloads our previous target. */
+    if(target_active && _stricmp(host->target,mine_target)) {
         uint8_t *d=find(host->target,table,count);
         if(d && !*(uint32_t *)(d+DESC_STATE) && d!=current &&
             (_stricmp(last_switch,host->target) || now-last_switch_at>=RETRY_MS)) {
@@ -203,7 +215,7 @@ BOOL SudekiMpLanStoryEffectsCapture(SudekiMpStoryEffectState *out) {
     SudekiMpLanStorySkyCapture(out);
     SudekiMpLanStorySpawnDespawnCapture(out->despawned);
     SudekiMpLanStorySpawnEffectsCapture(out);
-    return SudekiMpStoryEffectStateValid(out);
+    return SudekiMpLanStorySpawnEventsCapture(out) && SudekiMpStoryEffectStateValid(out);
 }
 BOOL SudekiMpLanStoryEffectsInCurrentArea(const SudekiMpStoryEffectState *host) {
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
@@ -219,15 +231,16 @@ void SudekiMpLanStoryEffectsFollowGroups(const SudekiMpStoryEffectState *host,
     {
         static SudekiMpStorySpawnGroup replayed[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
         static unsigned replayed_count;
+        static uint32_t replayed_epoch;
+        if(replayed_epoch!=host->epoch) {replayed_count=0;replayed_epoch=host->epoch;}
         for(unsigned g=0;g<host->group_count;++g) {
             unsigned r=0;
-            for(;r<replayed_count && (_stricmp(replayed[r].name,host->groups[g].name) ||
-                replayed[r].sequence!=host->groups[g].sequence);++r) {}
+            for(;r<replayed_count && !SudekiMpStorySpawnGroupSame(&replayed[r],&host->groups[g]);++r) {}
             if(r<replayed_count) continue;
             {   /* Already started natively here (e.g. during this client's own load). */
                 SudekiMpStorySpawnGroup local[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
                 unsigned n=SudekiMpLanStorySpawnTraceGroups(local,SUDEKIMP_STORY_SPAWN_GROUP_MAX),k=0;
-                for(;k<n && (_stricmp(local[k].name,host->groups[g].name) || local[k].sequence!=host->groups[g].sequence);++k) {}
+                for(;k<n && !SudekiMpStorySpawnGroupSame(&local[k],&host->groups[g]);++k) {}
                 if(k<n) continue;
             }
             SudekiMpStorySpawnGroup group=host->groups[g];
@@ -235,7 +248,7 @@ void SudekiMpLanStoryEffectsFollowGroups(const SudekiMpStoryEffectState *host,
                 /* Retry refused calls; merely seeing a group grants no lease. */
                 SudekiMpStorySpawnGroup local[SUDEKIMP_STORY_SPAWN_GROUP_MAX];
                 unsigned n=SudekiMpLanStorySpawnTraceGroups(local,SUDEKIMP_STORY_SPAWN_GROUP_MAX),k=0;
-                for(;k<n && (_stricmp(local[k].name,group.name) || local[k].sequence!=group.sequence);++k) {}
+                for(;k<n && !SudekiMpStorySpawnGroupSame(&local[k],&group);++k) {}
                 if(k<n) {
                     if(replayed_count==SUDEKIMP_STORY_SPAWN_GROUP_MAX) {
                         memmove(replayed,replayed+1,(SUDEKIMP_STORY_SPAWN_GROUP_MAX-1u)*sizeof(*replayed)); --replayed_count;

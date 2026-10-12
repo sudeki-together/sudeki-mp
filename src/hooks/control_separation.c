@@ -1,3 +1,5 @@
+#include "hooks/story_melee_snapshot.h"
+#include "network/lan_story_melee.h"
 #include "hooks/control_separation.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/lan_party_cast.h"
@@ -8382,6 +8384,40 @@ BOOL SudekiMpLanPartyControlStoryMelee(const SudekiMpControlUpdateDispatchWitnes
      * Never manufacture an animation, target, damage or second invocation. */
     return SudekiMpLanPartyControlStoryExact(w,roster,key) &&
         party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter;
+}
+BOOL SudekiMpLanPartyControlStoryMeleeSnapshot(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
+    unsigned buttons,BOOL *submitted) {
+    if(submitted) *submitted=FALSE;
+    BOOL combat=FALSE;
+    if(!submitted || !key || (key->seat!=0u && key->seat!=2u) || buttons>63u ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key) || !party_native_entries_exact() ||
+        !SudekiMpCleanroomEngineCombatMode(&combat) || !combat) return FALSE;
+    void *actor=story_native_control.actor[key->seat].actor;
+    uint8_t *arbiter=party_component(actor,0x90u,0x2cc9acu,0x64u);
+    uint8_t *block=party_component(actor,0xb4u,0x2d4b8cu,0x20u);
+    if(!arbiter || !block || *(void **)(block+0x10u)!=actor || *(void **)(arbiter+0x10u)!=actor ||
+        !party_component(actor,0x94u,0x2d4924u,0x16cu) ||
+        !party_component(actor,0xacu,0x2d4b24u,0x54u) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key) ||
+        party_component(actor,0x90u,0x2cc9acu,0x64u)!=arbiter ||
+        !SudekiMpStoryMeleeSnapshotImageExact(game_base,readable_memory)) return FALSE;
+    /* Only native melee mode; never enter ranged fire or the special-mode
+     * input path. No controller or arbiter flags are manufactured here. */
+    uint32_t mode=*(uint32_t *)(arbiter+0x58u);
+    if(((mode>>4u)&15u)!=1u || (mode&15u)==4u ||
+        !SudekiMpStoryMeleeSnapshotInteractionClear(game_base,actor,readable_memory)) return FALSE;
+    *submitted=TRUE;
+    unsigned kind=SudekiMpStoryMeleePress(buttons);
+    if(kind) SudekiMpLanStoryResearch54Melee(actor,kind);
+    SudekiMpSubmitArbiterMeleeSnapshot(game_base+0xdb189u,arbiter,
+        buttons&3u,(buttons>>2u)&3u,(buttons>>4u)&3u,
+        story_native_control.block_held[key->seat]?2:0);
+    /* Native validation/combo timing may legitimately reject the request.
+     * Never manufacture an animation, target, damage or second invocation. */
+    return SudekiMpLanPartyControlStoryExact(w,roster,key) &&
+        party_component(actor,0x90u,0x2cc9acu,0x64u)==arbiter &&
+        party_component(actor,0xb4u,0x2d4b8cu,0x20u)==block;
 }
 BOOL SudekiMpLanPartyControlStoryRanged(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,

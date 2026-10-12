@@ -50,6 +50,32 @@ BOOL SudekiMpArbiterDodgeImageMatches(HMODULE module) {
         base[0xdae5eu]==0xe8 && *(const int32_t *)(base+0xdae5fu)==0xaf75d;
 }
 
+__attribute__((naked,noinline))
+void SudekiMpSubmitArbiterMeleeSnapshot(void *combat_entry,void *arbiter,
+    int weak,int strong,int sweep,int block) {
+    __asm__ volatile(
+        "pushl %ebp\n\t"
+        "movl %esp, %ebp\n\t"
+        "movl 8(%ebp), %edx\n\t"
+        "pushl $0\n\t" /* weapon previous */
+        "pushl $0\n\t" /* weapon next */
+        "pushl 24(%ebp)\n\t"
+        "pushl 20(%ebp)\n\t"
+        "pushl 16(%ebp)\n\t"
+        "movl 12(%ebp), %ecx\n\t"
+        "movl 28(%ebp), %eax\n\t"
+        "call 1f\n\t"
+        "popl %ebp\n\t"
+        "ret\n\t"
+        "1: pushl %ebp\n\t"
+        "movl 8(%esp), %ebp\n\t"
+        "pushl %esi\n\t"
+        "pushl %edi\n\t"
+        "movl %eax, %edi\n\t"
+        "movl %ecx, %esi\n\t"
+        "jmp *%edx\n\t");
+}
+
 __attribute__((naked, noinline))
 unsigned char SudekiMpSubmitArbiterDodgeInput(
     void *target, void *arbiter, const float direction[3]) {

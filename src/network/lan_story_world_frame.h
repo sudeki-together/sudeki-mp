@@ -7,7 +7,7 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 8u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 9u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
@@ -22,6 +22,9 @@
 #define SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND 0x0f8fu
 #define SUDEKIMP_LAN_STORY_WORLD_HIDDEN 1u
 #define SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE 2u
+#define SUDEKIMP_LAN_STORY_WORLD_DEAD 4u
+#define SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT 3u
+#define SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK (7u << SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT)
 /* Portable record category, NOT ResourceName encoded_kind: the native low
  * seven bits may change during lazy resolution. Canonical ID is independent. */
 #define SUDEKIMP_LAN_STORY_WORLD_PC_KIND 0x0f81u

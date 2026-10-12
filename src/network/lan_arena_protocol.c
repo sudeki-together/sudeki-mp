@@ -867,7 +867,33 @@ int SudekiMpLanArenaVisualOwnerValidForParty(
         SudekiMpLanPartyShieldOwnerValid(visual);
 }
 
+unsigned SudekiMpLanStorySkillVfxOwnerMask(unsigned kind) {
+    switch(kind) {
+    case SUDEKIMP_LAN_STORY_VFX_SHIN_SPLITTER: return 4u;
+    case SUDEKIMP_LAN_STORY_VFX_AIM_ARC:
+    case SUDEKIMP_LAN_ARENA_STATUS_VFX_BOOST: return 15u;
+#define SUDEKIMP_SKILL_MASK(symbol,name,id,mask) case SUDEKIMP_LAN_STORY_VFX_##symbol: return mask;
+    SUDEKIMP_STORY_SKILL_RESOURCES(SUDEKIMP_SKILL_MASK)
+#undef SUDEKIMP_SKILL_MASK
+    default: return 0u;
+    }
+}
+unsigned SudekiMpLanStoryWorldVfxSourceMask(unsigned kind) {
+    switch(kind) {
+#define WORLD_MASK(symbol,name,id,mask) case SUDEKIMP_LAN_STORY_VFX_WORLD_##symbol: return mask;
+    SUDEKIMP_STORY_WORLD_RESOURCES(WORLD_MASK)
+#undef WORLD_MASK
+    default: return 0u;
+    }
+}
 int SudekiMpLanStoryCastVisualOwnerValid(const SudekiMpLanArenaSpiritVfxSnapshot *v) {
+    if(v && v->owner_actor_type==255u && !v->skill_sequence &&
+        SudekiMpLanStoryWorldVfxSourceMask(v->kind)) return 1;
+    if(v && v->skill_sequence) {
+        unsigned bit=v->owner_actor_type==5u?1u:v->owner_actor_type==14u?2u:
+            !v->owner_actor_type?4u:v->owner_actor_type==1u?8u:0u;
+        if(SudekiMpLanStorySkillVfxOwnerMask(v->kind)&bit) return 1;
+    }
     if(SudekiMpLanPartyShieldOwnerValid(v)) return 1;
     if(v && !v->skill_sequence && v->kind==SUDEKIMP_LAN_STORY_VFX_MAGIC_WALL_HIT &&
         (v->owner_actor_type==SUDEKIMP_LAN_ARENA_AILISH_TYPE ||
@@ -923,7 +949,11 @@ static int spirit_vfx_roster_valid(
             if (!spirit_vfx_entry_empty(entry)) return 0;
             continue;
         }
-        if (entry->skill_sequence != 0u && entry->owner_actor_type != 0u) {
+        /* Saved-story typed casters carry independent immutable sequences.
+         * Tal's historical header cannot fence another character's cast.
+         * Stream/epoch/packet ordering and visual instance IDs fence replay;
+         * legacy arena/party packets keep their original seat checks. */
+        if (party!=2 && entry->skill_sequence != 0u && entry->owner_actor_type != 0u) {
             for (owner_seat = 0u; owner_seat < 2u; ++owner_seat)
                 if (snapshot->seat[owner_seat].actor_type == entry->owner_actor_type) break;
             if (owner_seat == 2u) return 0;
@@ -938,7 +968,8 @@ static int spirit_vfx_roster_valid(
             entry->phase_valid > 1u || !isfinite(entry->phase) ||
             entry->phase < 0.0f || entry->phase > 1000000.0f ||
             (!entry->phase_valid && entry->phase != 0.0f) ||
-            (entry->skill_sequence != 0u && (snapshot->seat[owner_seat].skill_sequence == 0u ||
+            (entry->skill_sequence != 0u && (party!=2 || !entry->owner_actor_type) &&
+            (snapshot->seat[owner_seat].skill_sequence == 0u ||
             (entry->skill_sequence == snapshot->seat[owner_seat].skill_sequence &&
              snapshot->seat[owner_seat].skill_kind !=
                  SUDEKIMP_LAN_ARENA_SKILL_PRESENTATION_SPIRIT) ||
