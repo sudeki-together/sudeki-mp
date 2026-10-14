@@ -719,6 +719,9 @@ static DWORD pending_started[MENU_DUMMY_INDEX + 1u];
 static DWORD failed_until[MENU_DUMMY_INDEX + 1u];
 static float cleanroom_anchor[3];
 static BOOL cleanroom_anchor_valid;
+/* The hero the game was started as ("-Tal 1" etc.); Ailish by default. It is
+ * the locked lead: never removed from the menu and the spawn anchor. */
+static SudekiMpCleanroomActor cleanroom_lead = SUDEKIMP_CLEANROOM_AILISH;
 static BOOL overlay_failure_logged;
 static BOOL player_two_badge_failure_logged;
 static BOOL cleanroom_world_ready;
@@ -932,6 +935,16 @@ static uint32_t float_bits(float value) {
     uint32_t bits;
     memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+static SudekiMpCleanroomActor command_line_lead(void) {
+    const char *command_line = GetCommandLineA();
+    if (command_line != NULL) {
+        if (strstr(command_line, "-Tal 1") != NULL) return SUDEKIMP_CLEANROOM_TAL;
+        if (strstr(command_line, "-Buki 1") != NULL) return SUDEKIMP_CLEANROOM_BUKI;
+        if (strstr(command_line, "-Elco 1") != NULL) return SUDEKIMP_CLEANROOM_ELCO;
+    }
+    return SUDEKIMP_CLEANROOM_AILISH;
 }
 
 static BOOL command_line_is_cleanroom(void) {
@@ -4295,12 +4308,12 @@ static void update_action_status(void) {
 
     if (!cleanroom_anchor_valid &&
         SudekiMpCleanroomEngineActorPosition(
-            SUDEKIMP_CLEANROOM_AILISH,
+            cleanroom_lead,
             cleanroom_anchor)) {
         cleanroom_anchor_valid = TRUE;
         SudekiMpLogFormat(
             "cleanroom_menu event=anchor status=captured "
-            "position_bits=%08lx,%08lx,%08lx policy=ailish_initial_position\r\n",
+            "position_bits=%08lx,%08lx,%08lx policy=lead_initial_position\r\n",
             (unsigned long)float_bits(cleanroom_anchor[0]),
             (unsigned long)float_bits(cleanroom_anchor[1]),
             (unsigned long)float_bits(cleanroom_anchor[2])
@@ -4563,7 +4576,7 @@ static void activate_selected_item(void) {
         if (coop_role_lock_active || !integrated_multiplayer_mode) {
             return;
         }
-        if (coop_selected_actor == SUDEKIMP_CLEANROOM_AILISH ||
+        if (coop_selected_actor == cleanroom_lead ||
             !item_present[coop_selected_actor]) {
             coop_ready_failed_until = GetTickCount() + 2500u;
             menu_texture_dirty = TRUE;
@@ -4574,7 +4587,7 @@ static void activate_selected_item(void) {
             return;
         }
         for (index = 0u; index < MENU_ACTOR_COUNT; ++index) {
-            if (index != SUDEKIMP_CLEANROOM_AILISH &&
+            if (index != (unsigned int)cleanroom_lead &&
                 index != (unsigned int)coop_selected_actor &&
                 item_present[index]) {
                 coop_ready_failed_until = GetTickCount() + 2500u;
@@ -4587,7 +4600,7 @@ static void activate_selected_item(void) {
             }
         }
         player_one = SudekiMpCleanroomEngineActorEntity(
-            SUDEKIMP_CLEANROOM_AILISH
+            cleanroom_lead
         );
         player_two = SudekiMpCleanroomEngineActorEntity(coop_selected_actor);
         accepted = player_one != NULL && player_two != NULL &&
@@ -4714,7 +4727,7 @@ static void activate_selected_item(void) {
         }
         return;
     }
-    if (selected_item == SUDEKIMP_CLEANROOM_AILISH ||
+    if (selected_item == (unsigned int)cleanroom_lead ||
         selected_item > MENU_DUMMY_INDEX ||
         pending_actions[selected_item] != SUDEKIMP_PENDING_NONE) {
         return;
@@ -4727,7 +4740,7 @@ static void activate_selected_item(void) {
         return;
     }
     if (!SudekiMpCleanroomEngineActorPosition(
-            SUDEKIMP_CLEANROOM_AILISH,
+            cleanroom_lead,
             position)) {
         failed_until[selected_item] = GetTickCount() + 2500u;
         menu_texture_dirty = TRUE;
@@ -4736,7 +4749,7 @@ static void activate_selected_item(void) {
 
     if (selected_item < MENU_ACTOR_COUNT) {
         if (integrated_multiplayer_mode &&
-            selected_item != SUDEKIMP_CLEANROOM_AILISH &&
+            selected_item != (unsigned int)cleanroom_lead &&
             item_present[selected_item]) {
             coop_selected_actor = (SudekiMpCleanroomActor)selected_item;
             menu_texture_dirty = TRUE;
@@ -6000,7 +6013,7 @@ static void draw_roster_character_cards(uint32_t *pixels, int pitch) {
 static const char *item_status(unsigned int index) {
     DWORD now = GetTickCount();
 
-    if (index == SUDEKIMP_CLEANROOM_AILISH) {
+    if (index == (unsigned int)cleanroom_lead) {
         return item_present[index] ? "LEAD LOCKED" : "WAITING";
     }
     if (pending_actions[index] == SUDEKIMP_PENDING_SPAWN) {
@@ -6353,7 +6366,7 @@ static BOOL update_menu_texture(void *texture) {
             } else if (coop_role_lock_active) {
                 status = "ROLES LOCKED";
                 status_color = UINT32_C(0xff7cf29a);
-            } else if (coop_selected_actor != SUDEKIMP_CLEANROOM_AILISH &&
+            } else if (coop_selected_actor != cleanroom_lead &&
                        item_present[coop_selected_actor]) {
                 status = SudekiMpCleanroomActorLabel(coop_selected_actor);
                 status_color = UINT32_C(0xffffd166);
@@ -8178,6 +8191,8 @@ static BOOL install_cleanroom_menu_internal(
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
+    /* Title-roster and traversal modes keep their fixed Ailish lead. */
+    cleanroom_lead = roster || traversal ? SUDEKIMP_CLEANROOM_AILISH : command_line_lead();
     if (!SudekiMpCleanroomEngineInitialize(game_module) ||
         (!roster && !traversal && !SudekiMpCleanroomAudioInitialize())) {
         SudekiMpCleanroomEngineReset();
@@ -8582,11 +8597,12 @@ static BOOL install_cleanroom_menu_internal(
     }
     SudekiMpLogFormat(
         "cleanroom_menu event=install status=success toggle_key=0x%02lx "
-        "lead=PC_Ailish actor_policy=native_internal_spawn_and_remove "
+        "lead=PC_%s actor_policy=native_internal_spawn_and_remove "
         "dummy_resource=MON_TrainingDummy dummy_placement=cleanroom_center_anchor "
         "controls=combat_camera_infinite_sp_infinite_spirit "
         "resource_defaults=enabled multiplayer_integration=%s traversal=%s\r\n",
         (unsigned long)menu_toggle_key,
+        SudekiMpCleanroomActorLabel(cleanroom_lead),
         external_hooks ? (lan_host_tools ? "lan_host_external_hooks" :
             "external_control_and_render_hooks") :
             (roster ? "title_roster_hooks" :

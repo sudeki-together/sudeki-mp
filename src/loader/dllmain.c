@@ -30,6 +30,9 @@
 #include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_area_fade.h"
 #include "hooks/resource_swap.h"
+#include "hooks/texture_mods.h"
+#include "hooks/armour_menu.h"
+#include "hooks/story_flight.h"
 #include "hooks/lan_story_name_tags.h"
 #include "ui/title_lobby.h"
 #include "hooks/title_multiplayer.h"
@@ -64,6 +67,10 @@
 #include "loader/lan_arena_profile.h"
 #include "loader/lobby_launch.h"
 #include "hooks/lobby_instance.h"
+#include "hooks/window_title.h"
+#include "hooks/shared_read_files.h"
+#include "hooks/profile_folder.h"
+#include "ui/save_catalog.h"
 #include "hooks/lobby_gameplay.h"
 
 #include <windows.h>
@@ -97,6 +104,7 @@
 #define SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED 20u
 #define SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED 21u
 #define SUDEKIMP_INIT_LAN_ARENA_FAILED 22u
+#define SUDEKIMP_INIT_STORY_FLIGHT_FAILED 23u
 #define SUDEKIMP_TALOS_EXACT_SOL_SHA256 \
     "e36a5974f9aedea5b5b428fe2445cf496c52911ff01d4934ea8ab8124abf1ff9"
 
@@ -407,6 +415,20 @@ static BOOL native_research54_uninstall(void) {
     native_research54_tools_requested=FALSE;
     return TRUE;
 }
+/* [TitleMenu] ProfileFolder (with AllowSecondInstance): this game uses its
+ * own roaming AppData folder for saves, cache and options. Empty = the
+ * Windows profile's own folder (the host of a local pair). */
+static BOOL configure_profile_folder(HMODULE game_module,const wchar_t *config_path) {
+    wchar_t folder[MAX_PATH]={0};
+    GetPrivateProfileStringW(L"TitleMenu",L"ProfileFolder",L"",folder,MAX_PATH,config_path);
+    if(!folder[0]) return TRUE;
+    if(!SudekiMpProfileFolderInstall(game_module,folder)) {
+        SudekiMpLogFormat("profile_folder event=install_failed error=%lu\r\n",(unsigned long)GetLastError());
+        return FALSE;
+    }
+    SudekiMpSaveCatalogSetAppDataOverride(folder);
+    return TRUE;
+}
 static BOOL uninstall_runtime_hooks(void) {
     if(!native_research54_uninstall()) return FALSE;
     /* Story containment retains the input fence, load result, task observer
@@ -418,6 +440,9 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpLanStoryTaskTraceUninstall()) return FALSE;
     if (!SudekiMpUninstallLanPartyRuntime()) return FALSE;
     if (!SudekiMpUninstallLobbyInstance()) return FALSE;
+    if (!SudekiMpWindowTitleUninstall()) return FALSE;
+    if (!SudekiMpSharedReadFilesUninstall()) return FALSE;
+    if (!SudekiMpProfileFolderUninstall()) return FALSE;
     if (!SudekiMpUninstallLobbyGameplay()) return FALSE;
     if (!SudekiMpUninstallLanArenaPausePanel()) return FALSE;
     if (!SudekiMpUninstallLanArenaRuntime()) return FALSE;
@@ -428,6 +453,8 @@ static BOOL uninstall_runtime_hooks(void) {
     if (!SudekiMpLanStoryResearch54Uninstall()) return FALSE;
     if (!SudekiMpLanStoryAmbientUninstall()) return FALSE;
     if (!SudekiMpResourceSwapUninstall()) return FALSE;
+    if (!SudekiMpArmourMenuUninstall()) return FALSE;
+    if (!SudekiMpTextureModsUninstall()) return FALSE;
     if (!SudekiMpLanStoryNameTagsUninstall()) return FALSE;
     SudekiMpUninstallTalosPostMoviePartyRestore();
     uninstall_talos_staging_observation();
@@ -455,6 +482,7 @@ static BOOL uninstall_runtime_hooks(void) {
     SudekiMpUninstallInteractionProvenance();
     SudekiMpUninstallZoneTransitionTrace();
     SudekiMpUninstallFreeRoamCameraInput();
+    (void)SudekiMpUninstallStoryFlight();
     SudekiMpUninstallTalosDefenseTrace();
     SudekiMpUninstallCharacterSwitchTrace();
     SudekiMpUninstallQuickSkillInputTrace();
@@ -463,6 +491,8 @@ static BOOL uninstall_runtime_hooks(void) {
     SudekiMpResetWeaponActivationAbi();
     SudekiMpResetSpiritActivationAbi();
     SudekiMpResetSkillActivationAbi();
+    (void)SudekiMpArmourMenuUninstall();
+    (void)SudekiMpTextureModsUninstall();
     (void)SudekiMpUninstallAcceleratorCache();
     return TRUE;
 }
@@ -841,6 +871,9 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     BOOL dual_camera_frame_cache_enabled;
     BOOL fixed_three_seat_renderer_enabled;
     BOOL freeroam_camera_input_enabled;
+    BOOL story_flight_enabled;
+    SudekiMpStoryFlightConfig story_flight = {VK_F5, VK_PRIOR, VK_NEXT, 6.0f, FALSE, 1.0f};
+    wchar_t story_flight_key_text[3][32];
     BOOL ranged_quick_skill_prototype_enabled;
     BOOL realtime_multiplayer_skill_combat_enabled;
     BOOL skill_camera_routing_enabled;
@@ -1002,6 +1035,21 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
     if ((size_t)lstrlenW(config_path) + 13u < MAX_PATH) {
         lstrcatW(config_path, L"SudekiMP.ini");
     }
+    /* [SudekiMP] WindowTitle: name the main render window (launcher local
+     * host + client profile). Exact call site only; a refusal is not fatal. */
+    if (!SudekiMpWindowTitleInstall(game_module, config_path)) {
+        SudekiMpLogFormat("window_title event=install_failed error=%lu\r\n", (unsigned long)GetLastError());
+    }
+    /* Mod packages ([Mods], mods\<Mod>\mod.ini: textures and archive files)
+     * for every launch profile, before any archive mounts. Installs nothing
+     * without an entry or DumpTextures=true; a refusal is not fatal. */
+    if (!SudekiMpTextureModsInstall(game_module, config_path)) {
+        SudekiMpLogFormat("texture_mods_error=%lu\r\n", (unsigned long)GetLastError());
+    }
+    /* Armour choice on the Main Menu ([Menus] ArmourChoice, default on). */
+    if (!SudekiMpArmourMenuInstall(game_module, config_path)) {
+        SudekiMpLogFormat("armour_menu_error=%lu\r\n", (unsigned long)GetLastError());
+    }
     /* Title entry candidate has no actor/session assignment. Keep its input
      * and UI seams exclusive with the old local roster and arena profiles. */
     SudekiMpLobbyLaunchPlan lobby_plan;
@@ -1159,10 +1207,20 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 !config_key_false(config_path,L"StoryAreas",L"AmbientAnimation") &&
                 !SudekiMpLanStoryAmbientInstall(game_module)) ||
             !SudekiMpInstallLobbyGameplay(game_module) ||
+            /* Launcher "Local host + client": a second game in the same Wine
+             * prefix/Windows session needs a process-scoped startup mutex. */
+            (read_config_boolean(config_path,L"TitleMenu",L"AllowSecondInstance") &&
+                (!SudekiMpInstallLobbyInstance(game_module) ||
+                 !configure_profile_folder(game_module,config_path))) ||
             ((saved_load_probe || saved_story) && !SudekiMpLanStoryTaskTraceInstall(game_module)) ||
             ((saved_load_probe || saved_story) && !SudekiMpInstallLanStoryLoad(game_module)) ||
             (saved_story && (!SudekiMpLobbyGameplayEnableTestroom(FALSE) ||
                 !SudekiMpLobbyGameplayEnableSaved(TRUE))) ||
+            /* Both games read the same data files; the native read-only opens
+             * use share mode 0 and would lock the other game out. Installed
+             * after the story loader, whose exact-image check reads this import. */
+            (read_config_boolean(config_path,L"TitleMenu",L"AllowSecondInstance") &&
+                !SudekiMpSharedReadFilesInstall(game_module)) ||
             (configure_lobby_auto(config_path),!SudekiMpInstallTitleMultiplayer(game_module)) ||
             (saved_load_probe && (!SudekiMpInstallLanStoryRuntime(game_module,&observed_party) ||
                 !SudekiMpTitleMultiplayerQueueSavedLoadProbe(&saved_probe)))) {
@@ -1387,6 +1445,39 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         L"SudekiMP",
         L"EnableFreeRoamCameraModifierPrototype"
     );
+    /* [Flight] player flight: a toggle key turns gravity off for whichever
+     * character this player controls; ascend/descend keys move up and down. */
+    story_flight_enabled = read_config_boolean(config_path, L"Flight", L"Enabled");
+    if (story_flight_enabled) {
+        static const wchar_t *const flight_keys[3] = {L"ToggleKey", L"AscendKey", L"DescendKey"};
+        static const wchar_t *const flight_defaults[3] = {L"F5", L"PageUp", L"PageDown"};
+        UINT *flight_slots[3] = {&story_flight.toggle_key, &story_flight.ascend_key, &story_flight.descend_key};
+        for (unsigned i = 0; i < 3u; ++i) {
+            GetPrivateProfileStringW(L"Flight", flight_keys[i], flight_defaults[i],
+                story_flight_key_text[i], 32, config_path);
+            if (!SudekiMpParseInputKey(story_flight_key_text[i], flight_slots[i])) {
+                SudekiMpLogWrite("story_flight_config=invalid_key\r\n");
+                SudekiMpLogWrite("status=config_error\r\n");
+                SudekiMpLogClose();
+                return SUDEKIMP_INIT_BAD_CONFIG;
+            }
+        }
+        if (!read_config_float(config_path, L"Flight", L"Speed", 6.0f, 0.5f, 60.0f, &story_flight.speed)) {
+            SudekiMpLogWrite("story_flight_config=invalid_speed\r\n");
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        if (!read_config_float(config_path, L"Flight", L"ForwardSpeed", 1.0f, 1.0f, 8.0f,
+                &story_flight.forward_multiplier)) {
+            SudekiMpLogWrite("story_flight_config=invalid_forward_speed\r\n");
+            SudekiMpLogWrite("status=config_error\r\n");
+            SudekiMpLogClose();
+            return SUDEKIMP_INIT_BAD_CONFIG;
+        }
+        /* Every character may fly unless AilishOnly=true (the original research limit). */
+        story_flight.ailish_only = read_config_boolean(config_path, L"Flight", L"AilishOnly");
+    }
     ranged_quick_skill_prototype_enabled = read_config_boolean(
         config_path,
         L"SudekiMP",
@@ -1704,6 +1795,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "environment_hook_or_startup_movie_bypass\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpArmourMenuUninstall();
+        (void)SudekiMpTextureModsUninstall();
         (void)SudekiMpUninstallAcceleratorCache();
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -1756,6 +1849,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "character_switch_or_other_hook_owner\r\n"
         );
         SudekiMpLogWrite("status=bad_config\r\n");
+        (void)SudekiMpArmourMenuUninstall();
+        (void)SudekiMpTextureModsUninstall();
         (void)SudekiMpUninstallAcceleratorCache();
         SudekiMpLogClose();
         return SUDEKIMP_INIT_BAD_CONFIG;
@@ -2555,6 +2650,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=SOLWORLDM_full_file_sha256\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_post_movie_restore_error\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
@@ -2567,6 +2664,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "talos_post_movie_party_restore_error=exact_SOLWORLDM_"
                 "hash_mismatch\r\n");
             SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_POST_MOVIE_RESTORE_FAILED;
@@ -2589,6 +2688,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=SOLWORLDM_full_file_sha256\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2601,6 +2702,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "talos_companion_staging_observation_error=exact_SOLWORLDM_"
                 "hash_mismatch\r\n");
             SudekiMpLogWrite("status=unsupported_solworldm\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2628,6 +2731,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 (unsigned long)membership_validation.observed_value,
                 (unsigned long)membership_validation.checks_completed);
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -2640,6 +2745,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 "phase=per_run_identity_generation\r\n",
                 (unsigned long)GetLastError());
             SudekiMpLogWrite("status=talos_staging_observation_error\r\n");
+            (void)SudekiMpArmourMenuUninstall();
+            (void)SudekiMpTextureModsUninstall();
             (void)SudekiMpUninstallAcceleratorCache();
             SudekiMpLogClose();
             return SUDEKIMP_INIT_TALOS_STAGING_OBSERVATION_FAILED;
@@ -3724,8 +3831,38 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             "talos_companion_staging_observation_applied=false "
             "default=false\r\n");
     }
+    /* Safe launch: the publisher/logo movie skip has no profile-specific
+     * installer (co-op, cleanroom, LAN and the title menu install their own),
+     * so install it here when requested and nothing else has. Story movies,
+     * including the intro poem, still play. */
+    if (skip_startup_movies && !SudekiMpLanArenaStartupMovieSkipInstalled()) {
+        if (!SudekiMpInstallLanArenaStartupMovieSkip(game_module)) {
+            SudekiMpLogFormat("startup_movie_skip_applied=false error=%lu\r\n", (unsigned long)GetLastError());
+        } else {
+            SudekiMpLogWrite("startup_movie_skip_applied=true scope=ordinary_profile\r\n");
+        }
+    }
+    if (story_flight_enabled) {
+        /* The actor identity check reads the exact-build engine adapter; it is
+         * export resolution only and may already have run for another feature. */
+        if (!SudekiMpCleanroomEngineInitialize(game_module) ||
+            !SudekiMpInstallStoryFlight(game_module, &story_flight)) {
+            DWORD error = GetLastError();
+            SudekiMpLogFormat("story_flight_error=%lu\r\n", (unsigned long)error);
+            SudekiMpLogWrite("story_flight_applied=false\r\n");
+            SudekiMpLogWrite("status=story_flight_error\r\n");
+            uninstall_runtime_hooks();
+            SudekiMpLogClose();
+            SetLastError(error);
+            return SUDEKIMP_INIT_STORY_FLIGHT_FAILED;
+        }
+        SudekiMpLogWrite("story_flight_applied=true\r\n");
+    } else {
+        SudekiMpLogWrite("story_flight_applied=false\r\n");
+    }
     SudekiMpLogWrite("status=ready\r\n");
-    if (!trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
+    if (!story_flight_enabled && /* flight logs on/off for the whole session */
+        !trace_enabled && !animation_speed_enabled && !camera_speed_enabled &&
         !quick_skill_input_trace_enabled && !ranged_quick_skill_prototype_enabled &&
         !realtime_multiplayer_skill_combat_enabled &&
         !direct_spirit_strike_prototype_enabled &&
@@ -3743,7 +3880,11 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
         !lan_arena_enabled &&
         !talos_companion_staging_observation_enabled &&
         !zone_transition_trace_enabled &&
-        !zone_traversal_enabled) {
+        !zone_traversal_enabled &&
+        /* Mods and the armour menu log during play (replacements, file
+         * redirects, equips): keep the log open whenever they are active. */
+        !SudekiMpTextureModsActive() &&
+        !SudekiMpArmourMenuActive()) {
         SudekiMpLogClose();
     }
     return SUDEKIMP_INIT_OK;

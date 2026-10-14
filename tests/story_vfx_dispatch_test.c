@@ -132,19 +132,19 @@ int main(void) {
     follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==6 && !story_vfx.ready);
     service_ready=TRUE; follow_story_vfx(NULL,&w,&peer,now+=21,&native); assert(creates==7 && story_vfx.ready);
     cast_attempted=TRUE; captures=publishes=0;
-    for(unsigned i=0;i<12;++i) publish_story_vfx(10000+i*21);
+    for(unsigned i=0;i<12;++i) publish_story_vfx(10000+i*21,NULL,&w,&native);
     assert(captures==12 && publishes==12); /* no hidden100ms area throttle */
-    area_ready=FALSE; publish_story_vfx(11000); assert(captures==12 && publishes==12);
-    area_ready=TRUE; packet_ready=FALSE; publish_story_vfx(11100); assert(captures==13 && publishes==12);
+    area_ready=FALSE; publish_story_vfx(11000,NULL,&w,&native); assert(captures==12 && publishes==12);
+    area_ready=TRUE; packet_ready=FALSE; publish_story_vfx(11100,NULL,&w,&native); assert(captures==13 && publishes==12);
     for(unsigned c=0;c<4;++c) {
         assert(camera_captures[c]==13);
         assert(camera_publishes[c]==((camera_mask&(1u<<c))?13u:0u));
     }
-    camera_mask=15; publish_story_vfx(11200);
+    camera_mask=15; publish_story_vfx(11200,NULL,&w,&native);
     for(unsigned c=0;c<4;++c) assert(camera_publishes[c]==((5u&(1u<<c))?14u:1u));
     packet_ready=TRUE;world_ready=FALSE;unsigned sent=publishes;
-    publish_story_vfx(11300);assert(publishes==sent && SudekiMpLanStoryCastReady());
-    world_ready=TRUE;publish_story_vfx(11400);assert(publishes==sent+1);
+    publish_story_vfx(11300,NULL,&w,&native);assert(publishes==sent && SudekiMpLanStoryCastReady());
+    world_ready=TRUE;publish_story_vfx(11400,NULL,&w,&native);assert(publishes==sent+1);
     /* Real projection through the real runtime dispatch. Only transport and
      * native geometry/containment are synthetic. The VFX packet wins the
      * race; its matching party journal arrives on the following dispatch. */

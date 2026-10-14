@@ -14,20 +14,19 @@ legitimate user-supplied copy is required.
 > Individual systems have strong live proofs, but they are not yet integrated
 > into a complete co-op playthrough.
 
-## Latest Windows beta package
+## Download
 
-The latest successful Windows build is available as the
-[`SudekiMP Windows beta package](https://git.unfilteredrealm.com/sudeki-together/-/packages/generic/sudekimp-windows-beta/ci-165-69115f1),
-published from [Windows CI run #165](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/actions/runs/165).
-It contains a ready-to-copy `SudekiMP` folder with a standalone PE32 beta
-launcher, raw loader, DLL, safe default configuration, XInput diagnostic and
-focused Windows local-co-op toggle,
-co-op save fixtures, launch script, and Windows guide—not Sudeki or any game
-assets. The beta launcher supports pasted game paths, optional in-app project
-music, recoverable co-op-save isolation, and a browser link to the public
-manual-download page. See
-[Windows build instructions](docs/windows-build.md) for
-the supported game build and installation steps.
+Download the newest launcher from the
+[SudekiMP releases page](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/releases)
+(`sudekimp-windows-launcher-<version>.zip`). It contains a ready-to-copy
+`SudekiMP` folder with the launcher, raw loader, DLL, safe default
+configuration, XInput diagnostic, co-op save fixtures, launch script and
+Windows guide—not Sudeki or any game assets. The launcher's *Check for updates*
+(Tools tab, or on startup when enabled) asks this releases page for the newest
+published release, tells you when a newer version exists and offers to open
+its release page; it never downloads or installs anything by itself. See
+[Windows build instructions](docs/windows-build.md) for the supported game
+build and installation steps.
 
 ## Supported game build
 
@@ -361,6 +360,12 @@ disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
 - [docs/player-statehood-design.md](docs/player-statehood-design.md) — player
   leases, interaction authority, shared inventory, and shop/blacksmith roadmap
 - [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
+- [docs/mod-packages.md](docs/mod-packages.md) — mod packages (textures,
+  whole archive files, sound banks and movies), TexMod `.tpf` conversion, and the Clean 4x Font example
+- [docs/launcher-mods.md](docs/launcher-mods.md) — GUI Mods tab: character thumbnails,
+  texture Browse/drop, Apply/Revert/PNG export, package enable controls and verification limits
+- [docs/armour-choice.md](docs/armour-choice.md) — choose any owned armour from
+  the Main Menu Armor page
 - [docs/windows-build.md](docs/windows-build.md) — native Windows build,
   validation, installation, and launch
 - [docs/windows-agent-handoff.md](docs/windows-agent-handoff.md) — bounded

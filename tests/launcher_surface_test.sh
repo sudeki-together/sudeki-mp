@@ -26,6 +26,7 @@ for required in \
     'Local co-op (2 players)' \
     'LAN arena host — Tal' \
     'LAN arena client — Ailish' \
+    'Local host + client (two windows)' \
     'Cleanroom' \
     'Enable cleanroom sandbox tools (F8)' \
     'stop_tracked_sudeki' \
@@ -44,7 +45,7 @@ if grep -Fq -- 'EnableTalos' "${windows_launcher}"; then
     exit 1
 fi
 
-grep -Fxq 'version=0.4.0' "${manifest}"
+grep -Fxq 'version=0.6.1' "${manifest}"
 grep -Fxq 'policy=prompt_only_never_silent' "${manifest}"
 grep -Fq 'automatic_upload=false' "${windows_launcher}"
 grep -Fq 'Automatic upload is intentionally not enabled yet' "${linux_launcher}"
