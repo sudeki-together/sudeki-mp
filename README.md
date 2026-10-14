@@ -1,377 +1,146 @@
 # SudekiMP
 
-SudekiMP is a reverse-engineering and modding project that is extending the
-GOG Windows release of *Sudeki* into local co-op and, eventually,
-host-authoritative online co-op.
+SudekiMP adds multiplayer to the GOG Windows release of *Sudeki* (2005): play
+your saved story with a friend over a LAN or VPN, or share one PC in split
+screen. It is an injected mod — the game on disk is never patched — and it
+keeps Sudeki's own systems (combat, cameras, animation, AI) running wherever
+they are understood, instead of re-implementing them.
 
 The repository contains only original source code, documentation, signatures,
-configuration, hooks, and development tooling. It does **not** contain the
-game, installer, saves, extracted resources, or copyrighted game assets. A
-legitimate user-supplied copy is required.
+configuration, hooks and tooling. It does **not** contain the game, installer,
+saves, extracted resources or copyrighted game assets. You need your own copy
+of Sudeki.
 
-> [!IMPORTANT]
-> SudekiMP is an active research prototype, not a general-purpose release.
-> Individual systems have strong live proofs, but they are not yet integrated
-> into a complete co-op playthrough.
+> [!NOTE]
+> SudekiMP is playable with limits and still under active development. The
+> table below says exactly what works today and what does not. Everything in it
+> was accepted in live play by the project owner on one machine; nothing has
+> been through a public beta yet.
 
 ## Download
 
-Download the newest launcher from the
+Get the newest launcher from the
 [SudekiMP releases page](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/releases)
-(`sudekimp-windows-launcher-<version>.zip`). It contains a ready-to-copy
+(`sudekimp-windows-launcher-<version>.zip`). It unpacks to a ready-to-copy
 `SudekiMP` folder with the launcher, raw loader, DLL, safe default
-configuration, XInput diagnostic, co-op save fixtures, launch script and
-Windows guide—not Sudeki or any game assets. The launcher's *Check for updates*
-(Tools tab, or on startup when enabled) asks this releases page for the newest
-published release, tells you when a newer version exists and offers to open
-its release page; it never downloads or installs anything by itself. See
-[Windows build instructions](docs/windows-build.md) for the supported game
-build and installation steps.
+configuration, XInput diagnostic, co-op save fixtures, launch script and the
+Windows guide — not Sudeki or any game assets. The launcher's *Check for
+updates* (Tools tab) asks that page for a newer release and offers to open it;
+it never downloads or installs anything by itself. Install steps are in
+[docs/windows-build.md](docs/windows-build.md); Linux/Wine players start with
+[docs/linux-coop-beta.md](docs/linux-coop-beta.md).
+
+## What you can play today
+
+| Mode | Status | What works | What does not (yet) |
+| --- | --- | --- | --- |
+| **Story co-op over LAN** (launcher profile *Multiplayer (title menu lobby)*) | Playable with limits | One player hosts a saved game, friends join from the game's main menu. Everyone moves, fights (melee, ranged, skills, Spirit Strikes), sees the same enemies, deaths, drops, XP popups, doors and chests. The joining player has the game's own camera, HUD, audio and controls for their character. | Only the host can open doors and chests, talk, shop or save; joiners see the result. One shared party inventory, owned by the host. Both players need an identical copy of the save. No leader change or spectating when a character falls. Bosses, the full campaign and saves transfer are untested or unbuilt. |
+| **Two games on one PC** (profile *Local host + client (two windows)*) | Playable with limits | Starts a host and a client window on the same machine, each with its own saves folder, auto-joined into one room. Same rules as above. | Both games must run windowed; this is how the mode has been tested so far. |
+| **Local co-op split screen** (profile *Local co-op (2 players)*) | Experimental | Keyboard/mouse Player 1 and a controller Player 2 in one Sudeki process, each with their own camera half; drop in/out with Start / F10. | Accepted on Linux/Wine with a Linux controller only; native Windows controller delivery is a follow-up. Many menus are shared and shown full width. Player 2 cannot interact with the world yet. |
+| **Mods** (launcher Mods tab) | Experimental | Texture packages, TexMod `.tpf` conversion, archive/sound/movie files, a clean 4× font example, Main Menu armour choice, flight mode in Safe launch. | See [docs/mod-packages.md](docs/mod-packages.md) for format limits. |
+| **Cleanroom (test room)** and **Safe launch** | Tools | The shipped `testroom` with an F8 research menu; a plain launch with every hook off. | Research use. |
+
+"Playable with limits" means: the owner has played the route from the castle
+road to New Brightwater and back, repeatedly, as Ailish hosting with Tal
+joining, on one Linux PC running two game windows under Wine. It has **not**
+been run across two machines or on native Windows yet, and other character
+combinations are less proven. Every row above is tracked with its evidence in
+[docs/status-matrix.md](docs/status-matrix.md).
 
 ## Supported game build
 
-SudekiMP currently supports one exact executable:
+SudekiMP works with exactly one executable and refuses every other:
 
 | Property | Value |
 | --- | --- |
 | Store/build | GOG offline build `50303954381148403` |
 | Executable | `SUDEKI.exe` (PE32/x86) |
 | SHA256 | `8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94` |
-| Static analysis | Ghidra 12.1.2 |
-| Primary runtime | Wine on Linux |
+| Runtimes | Windows; Wine on Linux (development platform) |
 
-The launcher refuses unknown executable builds. Runtime experiments are
-disabled by default, signature-gated, reversible, and do not patch the game on
-disk. The original vanilla installation remains separate from the writable
-research copy; the complete 394-file baseline is hashed and reproducible.
+Every hook checks the exact bytes it expects before installing and backs out
+cleanly if anything differs. Nothing is written to the game's files.
 
-## Current status
+## Playing story co-op
 
-### LAN arena foundation
+1. Both players install the same SudekiMP version beside their own copy of
+   Sudeki, and both have the **same save** (copy the host's `SAVESLOTnnnn`
+   folder to the joiner — the lobby checks the save fingerprint and refuses a
+   mismatch).
+2. Each player starts the launcher and picks **Multiplayer (title menu lobby)**,
+   then **Play**. The game's main menu gains a **Multiplayer** entry.
+3. The host creates a room (UDP port 26770, shown on the LAN browser). Joiners
+   either pick the room from the browser or enter the host's address directly
+   (works over a VPN).
+4. The host chooses the saved game. The host plays that save's party leader;
+   each joiner picks one of the other party members and locks it. Characters
+   nobody picks stay with the game's AI.
+5. Everyone presses **Ready**; the host presses **Start**. Both games load the
+   save and the joiner takes control of their character.
 
-The first host-authoritative network slice is now available as a closed
-cleanroom experiment. It runs Tal on a host process and Ailish on a separate
-client process, with direct IPv4 UDP, independent full-screen native cameras,
-client movement and weak attacks, and host-authored actor/enemy snapshots.
-Campaign saves, transitions, native client QuickMenu actions, and the local
-split-screen hooks are excluded from both profiles. See
-[LAN arena development guide](docs/lan-arena.md) for launch commands, controls,
-protocol guarantees, and the two-prefix loopback tests.
+In play, the host decides where the party goes: zone changes, houses, doors and
+chests are triggered by the host, and the joiner is brought along. Controls, camera, HUD and sound for the
+joiner are the game's own. If something goes wrong, `SudekiMP.log` is written
+beside `SUDEKI.exe` on each machine; attach both when reporting.
 
-### Confirmed foundations
+To try it alone, choose **Local host + client (two windows)** instead of step 2:
+the launcher starts both games windowed on one PC and joins them automatically.
 
-- The GOG installer, installed files, executable, and vanilla Wine baseline
-  are documented and reproducible.
-- `SudekiMP.dll` and `SudekiMP.Launcher.exe` build as PE32 binaries on Linux
-  and safely reject an unsupported executable.
-- Sudeki's Quick Menu slowdown is understood. A live-only prototype keeps the
-  shared world simulation at `1.0x` while the menu remains logically active.
-- Elco's Plasmatica path is traced from skill activation through targeting,
-  animation, projectile launch, collision damage, invulnerability, and
-  cleanup. Per-skill actor and cinematic-camera rates can be changed without
-  changing global world time.
-- Native real-time Skill Strike activation, consumable slots, and direct
-  Spirit Strike activation have all been demonstrated.
-- Sudeki's native AI override/default-control exports can release and restore
-  an individual party member without removing that character's movement,
-  targeting, or attack systems.
+## Building from source
 
-### Local co-op proofs
-
-- Keyboard/mouse Player 1 and a Linux-controller Player 2 can move and attack
-  independently in one Sudeki process.
-- The Talos post-movie profile now lets retail Sudeki complete the companion
-  deletes, Kazel lifecycle, and TSA settle, then restores Ailish, Buki, and
-  Elco from one exact one-shot ticket. Live testing confirmed four heroes with
-  Ailish owned by Player 2 while Buki and Elco remain native AI.
-- A gated Tal-left/Ailish-right presentation is live-proven for that restored
-  party. Ailish's right stick independently rotates Camera 2 and her movement
-  is transformed through that same right-hand view basis without rotating
-  Tal's native camera. The same seat-local basis is the intended model for
-  future P3/P4 views, which are not implemented yet.
-- Player 2 input is transported from Linux joydev through a small loopback UDP
-  bridge because the test controller is not exposed to Wine as XInput or
-  DirectInput.
-- A maximum-separation guard, shared midpoint camera, distinct render-only
-  cameras, and alternating dual-camera split-screen compositor all have live
-  proofs.
-- A disabled-by-default native Player 2 obstruction prototype now binds the
-  named camera to Player 2 and lets Sudeki's Exploration solver keep it out of
-  outdoor world geometry. This first cut is collision parity, not input parity:
-  while native Exploration is ready, Player 1 camera broadcasts are filtered
-  and Player 2 right-stick orbit is disabled; the right stick still operates in
-  the existing manual fallback/combat/unsupported phases.
-- The compositor preserves native world rendering, culling, shadows, doors,
-  and simulation by caching one complete native frame per engine frame rather
-  than replaying the game renderer.
-- Viewport-owned character names, HP, SP, companion ordering, and native
-  portrait art are confirmed for the two-character prototype.
-- The map pointer and heading now resolve the character assigned to each
-  cached viewport instead of hard-coding party slot zero for both halves.
-- The native Quit interface renders once at full width over the preserved
-  split-screen background.
-- Skills and Spirit Strikes can leave the other player's simulation and
-  movement active at normal world speed. Camera containment and observer
-  animation coverage remain incomplete for several moves.
-
-### Sudeki Together front end
-
-The New Game flow can now open a dedicated Sudeki Together roster page:
-
-1. Choose Single Player or Co-op.
-2. Assign distinct Player 1 and Player 2 characters.
-3. Select Ailish, Tal, Buki, or Elco.
-4. Persist the selected role contract in a sidecar profile.
-
-The Windows beta launcher additionally has an explicit loaded-save co-op
-profile. It requests the same atomic Tal-host/Ailish-Player-2 contract only
-after a save's native world and party have settled; it never edits save data or
-party pointers outside Sudeki's own roster path.
-
-> [!WARNING]
-> Talos's retail Void transition is still host-only in the beta. The old
-> post-collapse four-party restoration experiment is retired because it can
-> trigger an R6025 pure-virtual failure. The replacement expanded-encounter
-> coordinator remains default-off until the four heroes can be carried through
-> the native transition without spawning them afterward and every human seat
-> has proven camera/render/HUD/input ownership.
-5. Wait for a selected character when the story has not added them yet.
-
-The page reuses Sudeki's native title fade, font submission, and four resident
-character-portrait textures. No portrait file is extracted or committed. The
-four-card presentation, Back navigation, duplicate-role rejection, cleanup,
-and return to native New Game flow work.
-
-The same page now includes `SudekiMP Settings`. Its first bounded settings
-panel tunes the real Talos encounter for a locked co-op profile: explicit
-enable/disable, `1x`–`4x` maximum HP, stagger limits, and stagger-session
-duration. Settings persist in the existing sidecar. Vanilla values remain the
-default and Single Player never receives the co-op override.
-
-The Tal-to-Ailish roster handoff now activates the selected split roles without
-duplicating Ailish's HUD portrait. Participation is separate from selection:
-F10 drops Player 2 back to native AI and full-screen play without erasing the
-locked character, and F10 again requests that same character. With the Linux
-controller bridge, Start requests drop-in and holding Back+Start for one second
-drops out. This is the first two-player implementation of a seat model intended
-to scale to additional local or network players later.
-
-An opt-in party-atomic transition prototype addresses Sudeki's single active
-world. On an authored temporary-room entry or exit, it quiesces the second
-viewport/control lease, lets Sudeki place the native lead, then calls the
-engine's own formation-pop operation so every declared party member follows
-with collision/navigation-aware offsets. Co-op is rebuilt only after the new
-zone is stable. Failure leaves the game in usable native single-player mode,
-retains the roster contract, and permits a later manual drop-in.
-
-The travel-vote state machine and overlay remain available for isolated
-research, but the adapter is disabled in the integrated lifecycle profile. A
-live Player 2 veto proved that the current `EnterTemporaryZone` hook runs after
-Sudeki has already started the native door approach/script; returning from that
-void call without loading cannot roll the native task back and can leave the
-world paused. The feature must remain off until a target-specific pre-OnAction
-hook can defer the approach itself and replay that exact action only after
-consent.
-
-### Cleanroom and research tools
-
-- Sudeki's shipped `testroom` can start with Ailish and expose an F8 research
-  menu for party members, Training Dummy, combat mode, camera mode, infinite
-  resources, and split-screen Player 2.
-- The F7 traversal prototype distinguishes persistent worlds from temporary
-  interiors and uses Sudeki's native `SetZoneNOW` and
-  `EnterTemporaryZone` paths. It records actor-specific arrival anchors and
-  fails closed for unknown destinations instead of inventing coordinates.
-- The orange story-intro crash was traced to repeated accelerator-resource
-  loading. An exact-build cache now lets the complete intro play normally.
-- An opt-in F6 Story Test Boost is available while the roster prototype is
-  installed. It starts off, runs engine/world time at the configured multiplier
-  while the game is focused, and gives each current party member one lease from
-  Sudeki's native refcounted invulnerability system. Normal speed is restored
-  whenever title/loading/focus-loss state is observed; party protection is
-  reconciled across rebuilt and newly joined party members.
-- Cafu was confirmed as an unfinished Elco-derived developer variant, not a
-  fifth complete party archetype. His native fire crash is contained, and an
-  Elco pistol visual attaches correctly, but the missing projectile visual and
-  malformed Cafu pistol remain asset-completion/SudekiForge work.
-
-### Latest confirmed encounter: Talos
-
-The retail final-battle transition deliberately removes Ailish, Buki, and Elco
-and carries only Tal into the Void. The former prototype restored companions
-after that collapse with an internal spawn routine. It is retired: skipping the
-Void movie exposed an R6025 pure-virtual failure, so supported launch profiles
-now reject that path before installing its hooks.
-
-The replacement expanded-encounter work is native-inert groundwork. It has
-tested policies for a four-hero roster, one to four human seats, adaptive
-viewport rectangles, stable controller identities, replay-safe transition
-provenance, native-AI admission, and a one-shot `45,000 x 4 = 180,000` Talos HP
-ticket. It does not yet intercept the live transition or create Player 3/4
-cameras.
-
-The first passive Void trace also found that the authored Tal/Kazel merge
-temporarily occupies a second slot in both native four-entry party structures.
-Simply preserving all four heroes in place would therefore overfill those
-structures when `PC_KAZEL` arrives. Exact disassembly closes the dangerous
-part of that question: the group insertion core has no four-member guard and
-would write a fifth slot/count, while the formation core rejects a fifth
-member. The passive observer now follows the exact TalKazelMerge/SpawnPC SOL
-chain, classifies the transient DarkTal actor, and wraps only the native raw
-group-insert call. A corrected retail run proved the unchanged native
-`1 -> 2 -> 1` Kazel lifecycle, including the same actor token entering and
-leaving both party structures. A native-safe way to stage and reattach one
-companion around that temporary slot remains required before any carry
-experiment. The selected research path is to use Sudeki's public
-membership-only remove/add APIs on the exact group-last nonlead hero, leave
-Kazel's native `3 -> 4 -> 3` callbacks untouched, and require byte-exact
-restoration of both independently ordered hero rosters before combat.
-
-Companion AI will not be pinned to the canonical `BOSS_Talos` entity. The
-intended rule is to make verified real and clone Talos entities eligible, then
-leave defensive target selection and retargeting to Sudeki's native AI. Prior
-live research observed companions switching between the real boss and clones;
-native selectors use distance within authored priority buckets, but a hit is
-not yet proven to force retargeting and globally nearest is not guaranteed.
-See [Expanded Talos encounter design](docs/expanded-talos-encounter-design.md).
-
-## Integration frontier
-
-The project has proven the engine rails needed for local co-op, but the next
-work is integration rather than adding more isolated features:
-
-1. Validate roster lock-in through the real Tal-only-to-Ailish party arrival.
-2. Confirm HUD, movement, camera, input, and AI ownership survive every role
-   bind and party/level reconstruction.
-3. Finish visible Player 2 locomotion during Pure Land and complete one
-   uninterrupted two-player combat encounter.
-4. Finish skill-camera startup, cinematic, and restoration containment.
-5. Resolve ranged observer presentation: full-body locomotion, firing, aim,
-   weapon attachment, and vanilla-compatible first-person-only reloads.
-6. Build direct combat loadouts before attempting full per-player Quick Menu
-   UI/state virtualization. Sudeki's Quick Menu is currently a global payload.
-7. Add an optional shared-focus camera alongside split-screen.
-8. Generalize doors, party transitions, cutscenes, quests, and scripted world
-   progression.
-9. Expand to three or four local players only after two-player play is stable.
-10. Begin host-authoritative networking only after the local simulation and
-    ownership model is reliable.
-
-Known global or shared systems include Skill Targeting, Spirit Strike power,
-Quick Menu state, some cinematic cameras and post-processing histories, and
-parts of HUD/input presentation. They must be virtualized deliberately; the
-project will not synchronize arbitrary process memory between machines.
-
-## Build and verify on Linux
-
-For the shortest supported two-player setup, start with the
-[Linux Local Co-op Beta Quick Start](docs/linux-coop-beta.md), including the
-desktop launcher at `./tools/sudekimp-beta-launcher.sh`. Install its Linux
-desktop entry with `./tools/install-linux-launcher.sh`. The commands below
-are the underlying developer and research workflow.
+Linux (MinGW-w64 cross build; tests run under Wine):
 
 ```bash
 ./tools/build-linux.sh
+```
+
+```bash
 ./tools/run-wine.sh --check
 ```
 
-The build uses the configured MinGW-w64 environment and produces ignored
-artifacts under `build/mingw32/bin/`.
+Windows (MSYS2 `MINGW32`, no Wine needed): `tools/build-windows.sh`, then
+`tools/install-windows.ps1`. Details, preflight and the exact-build check are in
+[docs/windows-build.md](docs/windows-build.md); the Linux developer workflow,
+research launch modes and the graphical Linux launcher are in
+[docs/linux-coop-beta.md](docs/linux-coop-beta.md) and
+`./tools/continue-research.sh --help`. `./tools/stop-sudeki.sh` stops a stalled
+live experiment.
 
-For the dedicated working game and research saves:
+## For developers and researchers
 
-```bash
-./tools/continue-research.sh --check
-./tools/continue-research.sh --safe
-```
+SudekiMP is also a reverse-engineering project: the exact-build research behind
+every hook is documented and reproducible.
 
-Useful focused modes include:
-
-```bash
-./tools/continue-research.sh --cleanroom
-./tools/continue-research.sh --controller-bridge-test
-./tools/continue-research.sh --realtime-skill-coop-test
-./tools/continue-research.sh --zone-traversal-test
-./tools/continue-research.sh --talos-defense-trace
-```
-
-Run `./tools/continue-research.sh --help` for the complete research-mode list.
-Focused modes temporarily generate their required configuration and restore
-the checked-in disabled defaults when the run ends.
-
-## Build and run on Windows
-
-Windows does not require Wine. The supported source-build path uses MSYS2's
-32-bit `MINGW32` GCC environment because Sudeki and the injected DLL are PE32
-and the low-level hooks use GNU calling-convention and inline-assembly
-extensions.
-
-The repository now provides a checked build helper and a PowerShell installer:
-
-```text
-tools/build-windows.sh
-tools/install-windows.ps1
-```
-
-For a dedicated native-Windows build machine, see
-[windows-gitea-runner.md](docs/windows-gitea-runner.md). It installs a
-repository-scoped Actions runner and includes a manual smoke workflow; it does
-not publish builds or run game injection from CI.
-
-The installer verifies the exact GOG executable hash and copies only the
-launcher, DLL, and configuration into a removable `SudekiMP` subdirectory. It
-does not modify or redistribute the game. See
-[docs/windows-build.md](docs/windows-build.md) for the complete setup,
-preflight, launch, limitations, and eventual binary-release path.
-
-Use the emergency stop helper if a live experiment stalls:
-
-```bash
-./tools/stop-sudeki.sh
-```
-
-## OBS recording
-
-Research launches use Sudeki's native windowed option and, by default, start
-Wine through the host's `obs-gamecapture`/OBSVkCapture hook. Because Sudeki is
-PE32, both the 32-bit capture hook and the OBSVkCapture source are required.
-
-1. Start OBS before Sudeki.
-2. Add the OBSVkCapture **Game Capture** source.
-3. Launch through `continue-research.sh`.
-4. Confirm the source receives the Sudeki texture before recording.
-
-Set `SUDEKIMP_DISABLE_OBS_GAMECAPTURE=true` only when capture injection must be
-disabled for a diagnostic run. See [docs/recording.md](docs/recording.md).
-
-## Documentation map
-
-- [RECOVER.txt](RECOVER.txt) — operational checkpoint and safe resume notes
-- [docs/project-status.md](docs/project-status.md) — planning status and open
-  acceptance work
-- [docs/milestones.md](docs/milestones.md) — milestone evidence and status
-- [docs/research-log.md](docs/research-log.md) — chronological experiments,
-  failures, and confirmations
-- [docs/combat.md](docs/combat.md) — combat, skills, timing, and protection
-- [docs/cleanroom.md](docs/cleanroom.md) — native testroom harness
-- [docs/engine-functions.md](docs/engine-functions.md) — RVAs, ABIs, signatures,
-  and confidence
-- [docs/structures.md](docs/structures.md) — reverse-engineered structures
-- [docs/player-statehood-design.md](docs/player-statehood-design.md) — player
-  leases, interaction authority, shared inventory, and shop/blacksmith roadmap
-- [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL, and hook lifecycle
-- [docs/mod-packages.md](docs/mod-packages.md) — mod packages (textures,
-  whole archive files, sound banks and movies), TexMod `.tpf` conversion, and the Clean 4x Font example
-- [docs/launcher-mods.md](docs/launcher-mods.md) — GUI Mods tab: character thumbnails,
-  texture Browse/drop, Apply/Revert/PNG export, package enable controls and verification limits
-- [docs/armour-choice.md](docs/armour-choice.md) — choose any owned armour from
-  the Main Menu Armor page
-- [docs/windows-build.md](docs/windows-build.md) — native Windows build,
-  validation, installation, and launch
-- [docs/windows-agent-handoff.md](docs/windows-agent-handoff.md) — bounded
-  native-Windows agent scope and acceptance evidence
+- [docs/status-matrix.md](docs/status-matrix.md) — canonical feature status with
+  evidence levels; start here before believing any other document
+- [docs/architecture-current.md](docs/architecture-current.md) — what exists now
+- [docs/runtime-lifecycle.md](docs/runtime-lifecycle.md) — hook, object-lifetime
+  and teardown rules
+- [docs/testing.md](docs/testing.md) — what each kind of test proves
+- [docs/evidence-index.md](docs/evidence-index.md) — claim vocabulary
+- [docs/coop-story-plan-54.md](docs/coop-story-plan-54.md) — the story co-op
+  plan and its dated progress log
+- [docs/lan-arena.md](docs/lan-arena.md) and
+  [docs/lan-arena-combat-graph.md](docs/lan-arena-combat-graph.md) — network
+  protocol, replicas and combat graph
+- [docs/executable.md](docs/executable.md),
+  [docs/engine-functions.md](docs/engine-functions.md),
+  [docs/structures.md](docs/structures.md), [docs/combat.md](docs/combat.md) —
+  the engine as understood so far (RVAs, ABIs, structures)
+- [docs/cleanroom.md](docs/cleanroom.md) — the test-room harness
+- [docs/mod-packages.md](docs/mod-packages.md),
+  [docs/launcher-mods.md](docs/launcher-mods.md),
+  [docs/armour-choice.md](docs/armour-choice.md) — mod packages and the Mods tab
+- [docs/mod-loader.md](docs/mod-loader.md) — launcher, DLL and hook lifecycle
+- [docs/research-log.md](docs/research-log.md) — the chronological evidence
+  ledger; [docs/milestones.md](docs/milestones.md) and
+  [docs/project-status.md](docs/project-status.md) are history, not current
+  requirements
 - [docs/recording.md](docs/recording.md) — windowed Wine and OBS capture
-- [docs/sync.md](docs/sync.md) — private development mirror
+- [AGENTS.md](AGENTS.md) — the rules coding agents follow in this repository
+
+Issues and discussion live on the
+[project tracker](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues).
 
 ## License
 
@@ -391,6 +160,6 @@ license or redistribute Sudeki itself, its assets, or any user save data.
 
 Do not commit or redistribute Sudeki installers, executables, archives,
 extracted assets, saves, memory dumps containing game data, or Wine prefixes.
-Keep the user-supplied vanilla tree read-only and run experiments against the
+Keep the user-supplied vanilla tree read-only and run experiments against a
 dedicated working copy. Reverse-engineered names and structures must remain
 isolated and correctable as the engine model improves.
