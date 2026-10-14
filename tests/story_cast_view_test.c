@@ -35,7 +35,8 @@ static void codec_history(void) {
         b=a; (i<16?b.view.matrix:b.view.projection)[i<16?i:i-16]=NAN;
         assert(!SudekiMpStoryCastViewValid(&b));
     }
-    b=a;b.kind=3;assert(!SudekiMpStoryCastViewValid(&b));
+    b=a;b.kind=3;b.view.camera_serial=a.cast_sequence*4u+3u;assert(SudekiMpStoryCastViewValid(&b)); /* door camera */
+    b=a;b.kind=4;b.view.camera_serial=a.cast_sequence*4u+4u;assert(!SudekiMpStoryCastViewValid(&b));
     b=a;b.fence.character=4;assert(!SudekiMpStoryCastViewValid(&b));
     b=a;b.cast_sequence=0;assert(!SudekiMpStoryCastViewValid(&b));
     b=a;b.view.camera_serial=14;assert(!SudekiMpStoryCastViewValid(&b));

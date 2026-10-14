@@ -36,9 +36,12 @@ BOOL SudekiMpLanStoryWorldActorValid(const SudekiMpLanStoryWorldActor *a) {
     if(!a || (a->kind!=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND &&
         a->kind!=SUDEKIMP_LAN_STORY_WORLD_PC_KIND &&
-        a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND) ||
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND &&
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND &&
+        a->kind!=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND) ||
         !bounded(a->hit_points,0,100000000.0f) ||
-        (a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && a->hit_points!=0.0f) ||
+        (a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && a->kind!=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND && a->hit_points!=0.0f) ||
+        (a->kind==SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND && a->hit_points!=0.0f && a->hit_points!=1.0f) || /* door: collision enabled */
         (a->visual_flags & ~(a->kind==SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND ?
             SUDEKIMP_LAN_STORY_WORLD_HIDDEN : a->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND ?
             (SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE|SUDEKIMP_LAN_STORY_WORLD_HIDDEN|

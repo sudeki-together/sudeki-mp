@@ -35,6 +35,9 @@
 #include "hooks/lan_story_host_control.h"
 #include "hooks/lan_story_control.h"
 #include "hooks/lan_story_cast.h"
+#include "hooks/lan_story_door_camera.h"
+#include "hooks/lan_story_client_camera.h"
+#include "hooks/lan_story_inventory.h"
 #include "hooks/lan_arena_spirit_vfx.h"
 #include "hooks/lan_story_recruit.h"
 #include "hooks/lan_story_local_control.h"
@@ -193,10 +196,15 @@ static void follow_story_vfx(void *controller,const SudekiMpControlUpdateDispatc
             state.count,(unsigned)adopted,(unsigned)call.ready,(unsigned long)GetLastError());
     }
 }
+static BOOL door_camera_ready;
+/* Client native Exploration camera (#71): default on; [StoryAreas] ClientMathCamera=true keeps the mathematical view. */
+static BOOL client_native_camera=TRUE,client_camera_attempted;
+void SudekiMpLanStoryRuntimeSetClientNativeCamera(BOOL enabled) { client_native_camera=enabled; }
 /* Animated summon pose/phase follows the controller/party cadence, not the
  * slower area/sky snapshot. Capture area membership afresh for each packet;
  * unknown native observations never manufacture an empty effect roster. */
-static void publish_story_vfx(uint32_t now) {
+static void publish_story_vfx(uint32_t now,void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryScene *native) {
     static uint32_t attempted_at;
     if(attempted_at && now-attempted_at<15u) return;
     attempted_at=now;
@@ -211,9 +219,15 @@ static void publish_story_vfx(uint32_t now) {
         memcpy(vfx.current,area.current,sizeof(vfx.current));
         published=SudekiMpLanPartyPublishStoryVfx(session,&vfx);
     }
-    SudekiMpStoryCastView camera;
+    SudekiMpStoryCastView camera; SudekiMpLanStoryNativeRoster door_roster; BOOL door_roster_known=FALSE;
     if(area_captured && cast_attempted) for(unsigned character=0;character<4u;++character)
         if(SudekiMpLanStoryCastCaptureView(character,&camera)) {
+            /* Door camera (#67): a remote character in an open door's traverse
+             * zone gets the door's authored static view in place of "normal". */
+            if(!camera.kind && door_camera_ready) {
+                if(!door_roster_known) door_roster_known=SudekiMpLanStoryObserverRoster(controller,w,native,&door_roster);
+                if(door_roster_known) (void)SudekiMpLanStoryDoorCameraView(&door_roster,character,now,&camera);
+            }
             memcpy(camera.current,area.current,sizeof(camera.current));
             (void)SudekiMpLanPartyPublishStoryCastView(session,&camera);
         }
@@ -612,7 +626,26 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
                 (SudekiMpLanStoryAreaCapture(&area) && _stricmp(area.current,presented_cast_view.current)))
                 cast_view=&normal; /* Positively changed owner/world/area, not a timeout. */
         }
-        if(!SudekiMpLanStoryLocalControlPresentCast(roster,replica_exact,NULL,yaw,pitch,cast_view)) {
+        /* Native camera (#71): with no cast/door override, let the real
+         * Exploration camera advance with this frame's time and adopt its
+         * view; any refusal falls back to the mathematical presentation. */
+        BOOL native_view=FALSE;
+        static BOOL override_was_active,reseat_pending;
+        BOOL override_now=(cast_view && cast_view->valid) || presented_cast_view.kind || SudekiMpLanStoryLocalControlCastActive();
+        if(override_was_active && !override_now) reseat_pending=TRUE;
+        override_was_active=override_now;
+        if(client_camera_attempted && !override_now) {
+            static uint32_t last_native_tick; SudekiMpLanArenaOwnerViewLease owner; float look_x=0,look_y=0;
+            if(reseat_pending && SudekiMpLanStoryLocalControlViewOwner(&owner)) { (void)SudekiMpLanStoryClientCameraReseat(&owner); reseat_pending=FALSE; }
+            uint32_t tick=GetTickCount();
+            float dt=last_native_tick && tick-last_native_tick<200u?(float)(tick-last_native_tick)/1000.0f:0.0f;
+            last_native_tick=tick;
+            (void)SudekiMpLanStoryInputLookAxes(&look_x,&look_y);
+            if(SudekiMpLanStoryLocalControlViewOwner(&owner) &&
+                SudekiMpLanStoryClientCameraTick(&owner,dt,look_x,look_y) &&
+                SudekiMpLanStoryLocalControlAdoptNative(roster,replica_exact,NULL)) native_view=TRUE;
+        }
+        if(!native_view && !SudekiMpLanStoryLocalControlPresentCast(roster,replica_exact,NULL,yaw,pitch,cast_view)) {
             present_refusal("local_control",GetLastError()); return FALSE; }
         if(cast_view==&camera.view) presented_cast_view=camera;
         else if(cast_view==&normal) memset(&presented_cast_view,0,sizeof(presented_cast_view));
@@ -1304,6 +1337,8 @@ static BOOL drain_story_casts(void *controller,const SudekiMpControlUpdateDispat
     if(SudekiMpLanStoryCastRetains() &&
         (!SudekiMpLanStoryObserverRoster(controller,w,scene,&roster) ||
          !SudekiMpLanStoryCastService(w,&roster))) return FALSE;
+    SudekiMpLanStoryDoorCameraUninstall(); door_camera_ready=FALSE;
+    if(!SudekiMpLanStoryInventoryUninstall()) return FALSE;
     if(!SudekiMpLanStoryCastUninstall()) return FALSE;
     cast_attempted=FALSE; return TRUE;
 }
@@ -1747,6 +1782,10 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             remote_ready|=1u<<p;
         if(remote_ready && !cast_attempted) {
             cast_attempted=TRUE;
+            door_camera_ready=SudekiMpLanStoryDoorCameraInstall((HMODULE)game_base);
+            if(!SudekiMpLanStoryInventoryInstall((HMODULE)game_base))
+                SudekiMpLogFormat("story_inventory event=install_refused error=%lu\r\n",(unsigned long)GetLastError());
+            if(!door_camera_ready) SudekiMpLogFormat("story_door_camera event=install_refused error=%lu\r\n",(unsigned long)GetLastError());
             if(!SudekiMpLanStoryCastInstall((HMODULE)game_base))
                 SudekiMpLogWrite("story_cast event=install_refused admission=closed\r\n");
         }
@@ -2472,7 +2511,7 @@ static void service(void *controller,void *data,
         /* #54 research: the host only watches its natively started spawn groups. */
         if(!local_seat && known) {
             (void)SudekiMpLanStorySpawnTick(now,FALSE);
-            publish_story_vfx(now);
+            publish_story_vfx(now,controller,w,&native);
         }
         /* Client: tick replayed groups every service, including cutscenes. */
         if(local_seat) (void)SudekiMpLanStoryClientResidencyCall(w,tick_spawn_residency,&now);
@@ -2797,6 +2836,10 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
         if(!SudekiMpLanStoryRecruitInstall(module)) goto fail;
         local_control_attempted=TRUE;
         if(!SudekiMpLanStoryLocalControlInstall(module)) goto fail;
+        if(client_native_camera) {
+            client_camera_attempted=SudekiMpLanStoryClientCameraInstall(module);
+            if(!client_camera_attempted) SudekiMpLogFormat("story_client_camera event=install_refused error=%lu\r\n",(unsigned long)GetLastError());
+        }
         aim_pose_attempted=TRUE;
         if(!SudekiMpLanAimPoseOnlyInstall(module,story_aim_witness)) goto fail;
     }
@@ -2848,6 +2891,8 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     quick_menu_attempted=FALSE;
     /* No task observer, timing owner, actor lease or realtime hook may retire
      * while a native cast can still call into its namespace. */
+    SudekiMpLanStoryDoorCameraUninstall(); door_camera_ready=FALSE;
+    if(!SudekiMpLanStoryInventoryUninstall()) return retain_module();
     if(cast_attempted && !SudekiMpLanStoryCastUninstall()) return retain_module();
     cast_attempted=FALSE;
     if(!exited) {
@@ -2936,6 +2981,7 @@ if(!SudekiMpLanStorySpawnTraceUninstall()) return retain_module();
     if(activity_attempted && !SudekiMpLanStoryActivityUninstall()) return retain_module();
     activity_attempted=FALSE;
     if(exited && local_control_attempted && !SudekiMpLanStoryLocalControlNativeExitReturned()) return retain_module();
+    if(client_camera_attempted) { (void)SudekiMpLanStoryClientCameraUninstall(); client_camera_attempted=FALSE; }
     if(local_control_attempted && !SudekiMpLanStoryLocalControlUninstall()) return retain_module();
     local_control_attempted=FALSE;
     SudekiMpLanStoryXpReset();

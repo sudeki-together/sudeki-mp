@@ -7698,3 +7698,71 @@ unchanged saved-story profile. Live rendered fade/timing and gameplay regression
 acceptance remain UNKNOWN; candidate is built, not deployed to the running pair.
 Polling can miss a native popup wholly created and retired between captures;
 it does not invent a reward for a death without a positively observed popup.
+
+
+## 2026-10-12 — Tal stationary slope clearance and wall rebound
+
+Supported image SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`.
+Revision: dirty `199956d`, saved-story host correction; client presentation is
+unchanged. See the [candidate, tests and owner gate](
+coop-story-plan-54.md#2026-10-12--tal-lateral-idle-drift-beside-scenery).
+
+CONFIRMED_LIVE: the prior paired capture records approximately 0.006 units of
+Tal lateral excursion with roughly one-second resets. A fresh ten-second
+observation has zero requested/current speed and horizontal/secondary movement
+accumulators. Native velocity mode is zero; gravity velocity ranges down to
+-0.2548. All 56 bounded X writes hit the native position setter (RVA 3081 after
+the X store), via world-to-position publication 110C51 from collision 329FD.
+Debugger export-nearest labels are not function-identity evidence.
+
+Hardware-only contact observation identifies terrain type 1, shallow depth near
+1e-6, and normal approximately (0.04070, 0.99872, 0.03002). Native 33288 adds
+0.01 clearance before multiplying by the normal. Adjacent type-2 scenery
+contacts have horizontal separation near (-0.845, 0, -0.534). Three observed
+334A8-to-33562 responses at depths around 0.0039 produce X corrections of
+-0.010078 to -0.010117 normalized units. Tal's 0.6 collider X scale explains the
+roughly 0.006 world-unit reverse step. The floor clearance/wall-contact cycle is
+the observed displacement source; the client mirrors the host. Watches detached
+and did not write gameplay values. This does not establish vanilla behavior on
+identical geometry/frame timing.
+
+The existing stationary contact adapter now admits Tal and Buki's native
+velocity mode, bounded separately from ranged integrated movement, with current
+host roster/control authority. Gentle normals down to Y=0.998 are eligible;
+only type-1 shallow contact receives the existing small positive clearance.
+No hook seam, packet, save field or gameplay reward path is added. Wall, prop,
+steep, significant-penetration and nonneutral responses remain native.
+
+CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST: named guards IDLE_CONTACT_CALL,
+IDLE_CONTACT_FRAME, IDLE_CONTACT_NORMAL, IDLE_CONTACT_SEPARATION, IDLE_CONTACT_END,
+IDLE_CONTACT_THRESHOLD, IDLE_CONTACT_MARGIN and IDLE_CONTACT_HALF all reject
+every checked-byte mutation. The new melee-mode regression fails before the
+extension. Native synthetic slope tests pass for all four actor identities,
+small and adjacent front-separation branches, both x87 precisions, movement and
+nonterrain passthrough. The adjacent branch already zeros tiny horizontal
+responses; an initial test assumption that both branches pushed laterally was
+corrected to match executed retail behavior. Four adjacent movement/admission
+suites also pass; runtime build passes with existing native-ABI warnings.
+
+UNKNOWN: live visual result after deployment, broader terrain and roster parity.
+The patch reduces excess clearance without freezing position; fixture results do
+not close the owner gate or establish that every source of stationary drift is
+eliminated.
+
+
+## 2026-10-13 — Exterior client follows the host's loading house
+
+Supported image only. Live (owner, castle-road farmhouse, third exit): the client
+left outside background-loaded the house the host was entering and froze. The
+host area report named the house as `target` with residency state 1–3 during the
+native TEMP load; the follower's positive-target rule (`lan_story_area_follow.c`)
+cannot tell a loading house from a loading outdoor zone, and the temporary name
+travels on the presentation channel, which is not ordered against the area
+report. CONFIRMED_LIVE (logs: switch → registry 35→12 → `lead=4 count=0` →
+`pause_invariant_failed`) and CONFIRMED_STATIC (follower rule 1).
+
+Host-side correction: the TEMP zone observer (`lan_story_observer.c`, exact-byte
+hook already installed) notes the destination name; the area capture withholds
+it as the target. Residency entries unchanged. CONFIRMED_TEST +
+CONFIRMED_EXACT_IMAGE via StoryAreaFollowImageTest; live acceptance pending.

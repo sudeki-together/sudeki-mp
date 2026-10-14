@@ -104,9 +104,25 @@ second candidate covers the missed adjacent contact branch. Its visual gate
 remains open. See the [revision and owner gate](
 coop-story-plan-54.md#2026-10-11--idle-contact-first-candidate-failed-acceptance).
 
+
+Saved-story Tal lateral idle drift: native floor-clearance/scenery-rebound cycle
+confirmed in bounded live observation. A dirty `199956d` candidate extends the
+existing stationary terrain correction to native melee movement and gentle
+slopes. Five focused suites and the DLL build pass; no live acceptance or
+full-terrain guarantee. See the [evidence and pending gate](
+coop-story-plan-54.md#2026-10-12--tal-lateral-idle-drift-beside-scenery).
+
 ## Maintenance contract
 
 Update a row only when its evidence record identifies the revision, profile,
 procedure, result, and limitations. If evidence conflicts, preserve the more
 conservative status and link the conflict rather than choosing the most
 optimistic statement.
+
+Saved-story house return (client left outside): a second failure mode found
+live on 2026-10-13 — the exterior client followed the host's *loading* house as
+an ordinary background target. Host capture now withholds the native TEMP
+destination as the target (dirty `199956d` candidate `9c4d632b…`). Area suites
+and the DLL build pass; owner round-trip acceptance pending. C5 input accepted
+by the owner (#64 follow-up); client XP popups seen (#65 distribution check).
+See the [plan entry](coop-story-plan-54.md#2026-10-13--owner-gates-on-the-tal-drift-candidate-house-return-fails-again).

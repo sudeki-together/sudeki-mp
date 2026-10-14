@@ -142,7 +142,7 @@ static BOOL idle_contact_lease(void *actor) {
         !SudekiMpLanStoryObserverNativeRosterExact(&idle_roster)) return FALSE;
     unsigned c=0;
     for(;c<4 && idle_roster.actors[c]!=actor;++c) {}
-    if((c!=1 && c!=3) || !(idle_roster.available_mask&(1u<<c)) ||
+    if(c>=4 || !(idle_roster.available_mask&(1u<<c)) ||
         (c!=idle_roster.leader_character && !player_turn_lease(actor)) ||
         SudekiMpCleanroomEngineRangedCombatPrimePending() ||
         !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
@@ -157,7 +157,7 @@ void SudekiMpLanStoryControlObserveIdleContact(const SudekiMpControlUpdateDispat
     if(boundary(w,roster) && SudekiMpStoryIdleContactBindThread()) idle_roster=*roster;
     if(!idle_contact_reported && SudekiMpStoryIdleContactCount()) {
         idle_contact_reported=TRUE;
-        SudekiMpLogWrite("story_control event=idle_contact scope=stationary_ranged_terrain status=observed\r\n");
+        SudekiMpLogWrite("story_control event=idle_contact scope=stationary_party_terrain status=observed\r\n");
     }
 }
 BOOL SudekiMpLanStoryControlInstall(HMODULE image,unsigned locked_character_id) {

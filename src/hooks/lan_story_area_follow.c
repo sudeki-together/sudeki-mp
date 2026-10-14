@@ -82,6 +82,22 @@ BOOL SudekiMpLanStoryAreaFollowInitialize(HMODULE image) {
     base=b; return TRUE;
 }
 
+/* Latest native TEMP destination (house). Only the loading window matters:
+ * once the house is current (state 4) the report is held anyway, and a
+ * zero-state exit target already grants no load on the client. */
+static char temporary_latest[SUDEKIMP_STORY_AREA_NAME];
+static unsigned withheld_logs;
+void SudekiMpLanStoryAreaNoteTemporary(const char *name) {
+    memset(temporary_latest,0,sizeof(temporary_latest));
+    if(!name) return;
+    for(unsigned i=0;;++i) {
+        if(i+1u>=SUDEKIMP_STORY_AREA_NAME || !readable(name+i,1u) ||
+            (name[i] && (name[i]<0x20 || name[i]>0x7e))) {
+            memset(temporary_latest,0,sizeof(temporary_latest)); return;
+        }
+        if(!(temporary_latest[i]=name[i])) return;
+    }
+}
 BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out) {
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
     if(!out || !world) return FALSE;
@@ -89,6 +105,10 @@ BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out) {
     uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT),*target=*(uint8_t **)(world+WORLD_TARGET);
     if(!in_table(current,table,count) || !in_table(target,table,count) ||
         !name_of(current,out->current) || !name_of(target,out->target)) return FALSE;
+    if(out->target[0] && temporary_latest[0] && !_stricmp(out->target,temporary_latest)) {
+        if(withheld_logs<16u) { ++withheld_logs; SudekiMpLogFormat("story_area_capture event=target_withheld zone=%s reason=temporary_interior\r\n",out->target); }
+        memset(out->target,0,sizeof(out->target));
+    }
     for(unsigned i=0;i<count && out->count<SUDEKIMP_STORY_AREA_MAX;++i) {
         uint8_t *d=table+i*DESC_STRIDE; uint32_t state=*(uint32_t *)(d+DESC_STATE);
         if(!state) continue;

@@ -7,7 +7,7 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 9u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 10u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
@@ -20,6 +20,10 @@
 /* Group-spawned monster (#54); identifier is the portable spawn identity. */
 #define SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND 0x0f99u
 #define SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND 0x0f8fu
+/* DoorEntity (#67): native door model pose follows the host like scenery. */
+#define SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND 0x0f8cu
+/* Chest entity (#66): open animation follows the host like a door. */
+#define SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND 0x0f9cu
 #define SUDEKIMP_LAN_STORY_WORLD_HIDDEN 1u
 #define SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE 2u
 #define SUDEKIMP_LAN_STORY_WORLD_DEAD 4u

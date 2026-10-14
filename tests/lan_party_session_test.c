@@ -1532,11 +1532,11 @@ static void test_monster_display_wire(void) {
     uint8_t bytes[SUDEKIMP_LAN_STORY_WORLD_CHUNK_MAX_SIZE]; size_t size=0;
     SudekiMpLanStoryWorldChunk out;
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
-    CHECK(size==172u && bytes[3]==9u);
+    CHECK(size==172u && bytes[3]==10u);
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     CHECK(out.actors[0].visual_flags==SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE);
     CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size-1u,&out));
-    bytes[3]=8u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=9u;
+    bytes[3]=9u; CHECK(!SudekiMpLanStoryWorldChunkDecode(bytes,size,&out)); bytes[3]=10u;
     bytes[31]=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
     for(unsigned style=0;style<=7;++style) {
@@ -1560,6 +1560,20 @@ static void test_monster_display_wire(void) {
     a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
     CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
     CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out));
+    /* Doors (#67): a plain four-channel pose with no flags, no hit points. */
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND; a->visual_flags=0; a->clip[1]=1;
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    CHECK(SudekiMpLanStoryWorldChunkDecode(bytes,size,&out) && out.actors[0].kind==SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND);
+    a->visual_flags=SUDEKIMP_LAN_STORY_WORLD_HIDDEN;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->visual_flags=0; a->hit_points=1; /* door collision enabled travels as 0/1 */
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->hit_points=2;
+    CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->hit_points=0;
+    a->kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; /* chest (#66): plain pose */
+    CHECK(SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size));
+    a->hit_points=1; CHECK(!SudekiMpLanStoryWorldChunkEncode(&frame,0,bytes,sizeof(bytes),&size)); a->hit_points=0;
 }
 
 int main(void) {

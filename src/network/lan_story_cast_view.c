@@ -4,7 +4,7 @@ static void put(uint8_t *p,uint32_t x) {for(unsigned i=0;i<4;++i)p[i]=(uint8_t)(
 static uint32_t get(const uint8_t *p) {return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 BOOL SudekiMpStoryCastViewValid(const SudekiMpStoryCastView *s) {
     if(!s || !s->stream || !s->sequence || !SudekiMpLanStoryControlFenceValid(&s->fence) ||
-        s->revision<s->fence.revision || s->kind>2u || !SudekiMpLanStoryViewValid(&s->view) ||
+        s->revision<s->fence.revision || s->kind>3u || !SudekiMpLanStoryViewValid(&s->view) ||
         s->view.valid!=!!s->kind || (s->kind && (!s->cast_sequence ||
             s->view.camera_serial!=((uint32_t)s->cast_sequence*4u+s->kind)))) return FALSE;
     unsigned end=0;
@@ -54,7 +54,7 @@ BOOL SudekiMpStoryCastViewPush(SudekiMpStoryCastViewHistory *h,const SudekiMpSto
             (int32_t)(s->tick-last->tick)<0) return FALSE;
         if(s->revision!=last->revision || s->stream!=last->stream || !SudekiMpLanStoryControlFenceSame(&s->fence,&last->fence) ||
             strcmp(s->current,last->current)) h->count=0;
-        else if(s->cast_sequence<last->cast_sequence) return FALSE;
+        else if(s->kind==last->kind && s->cast_sequence<last->cast_sequence) return FALSE; /* reorder within one cast family only */
     }
     if(h->count==SUDEKIMP_STORY_CAST_VIEW_HISTORY) {
         memmove(h->samples,h->samples+1,(--h->count)*sizeof(*s));

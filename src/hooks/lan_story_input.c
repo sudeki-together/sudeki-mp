@@ -373,6 +373,14 @@ BOOL SudekiMpLanStoryInputOrbit(void *controller,void *actor,uint32_t transactio
     return TRUE;
 }
 
+BOOL SudekiMpLanStoryInputLookAxes(float *x,float *y) {
+    if(!x || !y) return FALSE;
+    uint32_t now=GetTickCount();
+    *x=focused && (uint32_t)(now-look_x_at)<=100u?look_x:0.0f;
+    *y=focused && (uint32_t)(now-look_y_at)<=100u?look_y:0.0f;
+    if(!isfinite(*x) || !isfinite(*y)) { *x=*y=0.0f; return FALSE; }
+    return TRUE;
+}
 BOOL SudekiMpLanStoryInputInstall(HMODULE image,unsigned client_player) {
     uint8_t *b=(uint8_t *)image;
     uint8_t handler[]={0x56,0x57,0x8b,0xf9,0x8b,0x0d,0,0,0,0,0x80,0x79,0x56,0,0x74,0x5c};

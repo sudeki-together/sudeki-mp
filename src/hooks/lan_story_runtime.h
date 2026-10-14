@@ -9,6 +9,8 @@
  * creation is limited to the separately validated Lighthouse recruitment. */
 BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig *config);
 BOOL SudekiMpUninstallLanStoryRuntime(void);
+/* #71: FALSE keeps the client's mathematical orbit camera (ini [StoryAreas] ClientMathCamera=true). */
+void SudekiMpLanStoryRuntimeSetClientNativeCamera(BOOL enabled);
 /* Lobby-owned terminal UI transaction: prepare restoration while paused,
  * retire observers/transport, balance pause and synchronously exit the world,
  * then remove native input/menu/trigger fences. May need render preparation. */

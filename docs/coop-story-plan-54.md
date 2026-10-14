@@ -4265,3 +4265,579 @@ The running pair still uses the preceding house-return candidate.
 host's XP values once, at the same death locations, and finish naturally on the
 client; damage numbers, death effects, loot and subsequent waves remain normal.
 The house-entry/return gate is still awaiting explicit owner confirmation.
+
+
+### 2026-10-12 — Tal lateral idle drift beside scenery
+
+Owner reports Tal shifting sideways and correcting on both screens. A paired
+five-minute capture shows roughly 0.006 world units of X excursion, repeating
+about once per second with neutral movement input. This is actual host actor
+position movement; client replication follows it.
+
+CONFIRMED_LIVE / CONFIRMED_STATIC: bounded hardware observations identify native
+collision publication as the writer. The small terrain-contact branch adds
+0.01 normalized clearance along a gentle sloped normal. This repeatedly nudges
+Tal toward adjacent type-2 scenery. That contact eventually produces about
+-0.0101 normalized X correction, or -0.0061 world units at Tal's collider scale.
+The original ranged-only idle correction excluded Tal and this slightly steeper
+floor. No game values were changed during observation; all watches detached.
+
+The candidate extends the existing two guarded seams to Tal/Buki's native
+velocity mode and gently sloped terrain (normal Y >= 0.998). Ranged actors keep
+their separate integrated-delta bound. Current host roster/control ownership,
+neutral movement, shallow terrain contact and ordinary-world/cast guards remain
+required. Wall/prop response, deeper contact, air and intentional movement retain
+their native paths. There is no network smoothing or position-lock change.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: five suites pass: StoryIdleContactImageTest,
+StoryAiMovementImageTest, StoryPlayerMovementImageTest, StoryMeleeAdmissionTest
+and StoryCastAdmissionTest. The added regression fails against the preceding
+adapter. Synthetic slope geometry executes the original contact routine for all
+four actors at both x87 precisions; the measured small-branch lateral push falls
+from about 0.00039954 to 0.000000439 normalized X units. All eight named native
+byte contracts, ABI preservation, rollback/restore retry and existing contact
+refusals pass. This is fixture evidence, not live visual acceptance.
+
+Dirty 199956d; saved-story profile 25/world 9/effects 5 unchanged. Built candidate
+SHA256 ed275320c18cd12ec733d45fb34b84b2ff79dad5229f0670e5d3944a6f1c1fe6.
+**Owner gate OPEN after reload:** idle at the reported sloped spot beside scenery
+and verify the sideways/reset cycle on both screens is gone; walk away and back,
+stop, block/dodge and attack; check gentle slopes and walls remain traversable
+and solid. Other terrain/roster live coverage remains unverified. Candidate is
+not deployed. The separate house-return and XP popup owner gates remain open.
+
+Owner requested reload: both games now load the matching lateral-contact candidate,
+with successful saved-story startup and native placement at the reported New
+Brightwater location. Host test invulnerability is confirmed for Ailish and Tal.
+Read-only position capture is running. Initial samples still contain gradual
+neutral-input position drift; full stability is not established. The owner
+visual gate remains OPEN. This build also contains the unaccepted XP popup
+candidate; its separate kill-test gate remains open.
+
+### 2026-10-13 — owner gates on the Tal drift candidate; house return fails again
+
+Pair reloaded on the `ed275320…` candidate (dirty `199956d`; the five idle-contact
+suites re-run and pass). Owner results on the castle-road route:
+
+- **C5 revised Tal input: accepted** ("1 is good"); follow-up tracked as #64.
+- **XP popups: seen on the client** ("yeah I can see them"); the XP award and
+  party distribution question is #65. No change expected.
+- **Tal lateral idle drift: not observed** at the owner's current spot. The
+  reported New Brightwater slope is still untested; gate stays open.
+- **House return: FAILED again** after a couple more farmhouse exits.
+
+CONFIRMED_LIVE / CONFIRMED_STATIC root cause of the new failure: the client's
+`story_area_follow event=switch target=LICo_Frappe_Farm` fired while the host was
+*entering* the house. The native TEMP transition background-loads the house like
+an ordinary target: the host report carried `target=LICo_Frappe_Farm` with a
+residency entry at state 1–3, which is exactly what the follower treats as a
+positively loading outdoor target (the 2026-10-12 guard only covers the
+zero-state exit case). The client called SwitchZoneNOW, dropped 35→12 bound
+actors, lost its party binding (`native_scene … lead=4 count=0`),
+`pause_invariant_failed`, and froze. The `temporary=` name arrives on the
+separate presentation channel, so it cannot order against the area report.
+
+Fix (host side, no wire change): `SudekiMpLanStoryAreaNoteTemporary` records the
+name the native TEMP export is entering (from the existing zone observer, before
+the native call); `SudekiMpLanStoryAreaCapture` withholds that name as the
+background target (`story_area_capture event=target_withheld`). Residency entries
+are unchanged, so the client still holds on the state-4 house as before.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: StoryAreaFollowImageTest gains the
+loading-house capture case (target captured, then withheld after the TEMP note,
+withheld report moves nothing, note release/replace); it, StoryAreaStateTest,
+StorySceneAreaTest and StoryAreaTest pass. DLL build passes (pre-existing
+warnings only). Candidate SHA256
+`9c4d632b6838bec916a949f115a50f791ea9dde757a84a86fb94731440a1a20f`, not deployed.
+**Owner gate OPEN after reload:** Tal outside, Ailish enters/stays/exits the
+farmhouse several times in a row, then another house; Tal keeps moving and his
+world keeps updating throughout. The New Brightwater idle-drift check and the
+simultaneous-kill XP check remain open.
+
+### 2026-10-13 — house entry/return accepted; chests and scripted doors reported
+
+CONFIRMED_LIVE (owner): "I think the farm is good" after repeated farmhouse round
+trips with Tal outside on candidate `9c4d632b…`. Host log shows
+`story_area_capture event=target_withheld zone=LICo_Frappe_Farm` on each entry;
+the client issued no `switch` and no `pause_invariant_failed`. House-return gate
+closed for the tested route; other houses remain unverified.
+
+New owner reports (Phase H scope, D4): chests can only be opened by the host's
+Ailish and an opened chest is not shown opened on the client; doors a host
+scene transition opens stay closed on the client, and Tal walks through the
+closed door. CONFIRMED_STATIC: chests (kind 0x0f9c, vtable 0x2d5200) and door
+triggers (kind 0x0fa6, vtable 0x2d5088) are world-registry entries on both
+peers with matching identifiers, but `entity_identity` (lan_story_world.c)
+admits only scenery, monsters, NPCs, allies and party actors, so their state
+is never replicated. Tracked as #66 (chests) and #67 (doors). Ordering against
+Phases D–G is an owner decision.
+
+### 2026-10-13 — E1 Shooter missiles: owner sees them; the missile entity is not replicated
+
+Owner demonstration on the castle-road ambush (candidate `9c4d632b…`). From the
+log marker: the host spawned 42 `Missile` entities (vtable 0x2D5A10, kind 0x0F97)
+and 91 `SpecialEffect`s; the client registry gained 0 missiles and 122
+`SpecialEffect`s. CONFIRMED_LIVE: what the client shows for a Shooter shot is the
+missile's effects, carried by the existing effects channel; the MissileEntity
+itself (position, impact, collision) exists on the host only. Owner judges the
+result visually good. E1 is therefore reduced to a verification item — impact
+position/timing and any missile-model cases — not new replication work, unless
+the acceptance route shows otherwise. E2 (allied guards) is unchanged: two
+`ALLY_NW_Guard` (kind 0x0F82) on the host, none on the client.
+
+### 2026-10-13 — Tal lateral idle drift: owner gate passed at New Brightwater
+
+Pair reloaded at the reported New Brightwater slope (test start leader
+-42.37,-5.03,350.35 / Tal -47.40,-4.81,352.20) on candidate `9c4d632b…` (same
+idle-contact code as `ed275320…`). Owner: "no drift as far as I can tell".
+CONFIRMED_LIVE (read-only 50 ms capture, 711 neutral-input samples / 36 s): the
+sideways snap-and-reset cycle is gone — zero adjacent X steps above 0.002 on
+either peer (the 2026-10-12 capture had the ~0.006 cycle about once a second).
+Host and client agree to 0.0001. A slow neutral creep remains (X 0.017, Z 0.139
+over 36 s, ≈4 mm/s, not visible to the owner); whether vanilla Tal creeps the
+same way on this slope is UNKNOWN and is not part of this gate. Gate closed for
+the reported spot; other terrain remains unverified.
+
+### 2026-10-13 — slow neutral slope creep is native
+
+Owner then saw both characters move over a longer wait at the New Brightwater
+slope. Host hardware watchpoint on Tal's Z (12 hits, detached): every write is
+the native collision publication (`CPosition::SetPosition` RVA 0x13050, caller
+RVA 0x120C51, from the movement solver near RVA 0x436EC), each frame moving Tal
+≈ −0.00009 Z / +0.00001 X. Ailish creeps the same way (−0.023 Z / 6 s vs Tal
+−0.025 Z / 6 s), so it is a slope/solver property, not the idle-contact adapter.
+CONFIRMED_LIVE (vanilla): Codex's 2026-10-12 same-ground capture of the
+*unmodified* game shows native Tal creeping 2.4–6.0 mm/s and native Ailish
+2.4 mm/s while stationary with the clip clock advancing, on the castle-road
+ground; the co-op pair measured 0.8–1.8 mm/s there and ≈4 mm/s at the NB slope.
+INFERENCE: the creep is retail behaviour (gravity resolved along a walkable
+slope) and scales with the slope. Removing it is a gameplay-semantics change
+(owner decision). The sideways snap cycle fixed earlier was a separate, mod-era
+visible artefact and stays fixed.
+
+### 2026-10-13 — Phase D kill audit (castle-road ambush, candidate `9c4d632b…`)
+
+Read-only captures plus both runtime logs from a log marker; owner fought both
+waves with Spirit Strikes and some Ailish shots, invulnerability on.
+
+- **D2 spawn parity — CONFIRMED_LIVE:** host 22 monsters (16 Levy, 4 Trooper,
+  2 Shooter), client 22 identical copies; one group start, same selection; 18
+  host despawns, 18 client follow-ups all found. One capture sample (of 3784)
+  showed host 0 / client 10 monsters during a host registry rebuild; harmless.
+- **D1 nonlethal replay — CONFIRMED_LIVE:** 56 host hits replayed, all proven,
+  copies clamped to 1 HP and removed only by host despawn; no client loot or
+  gameplay death. XP: 18 popups presented once each.
+- **D1 death presentation gap:** 16 `death_emitted` receipts for 18 deaths.
+  Identities 7 (style 2) and 0xC (style 4) reached 0 HP on the host but the
+  4E2810 observer receipt never matched, so their client copies vanished on
+  despawn with no death animation (owner did not notice). Suspect: Spirit
+  Strike kills use a different death effect. Added an observe-only
+  `death_receipt_refused` log (serial, style, prepared, effect kind/resource vs
+  expected) to `lan_story_spawn_events.h`; rebuild `5cfbd199…` for the repeat.
+- **D3 — owner:** drops appeared on Tal's screen; Tal and Ailish each collected
+  some; pickups execute on the host (2 logged, items 204/341) and the host gets
+  the notice. Visible-and-collectible accepted; *credit* to the collector is D6.
+- Client: four ~100 ms frame hitches in the big wave; no faults.
+- Owner asks for remote players to be "full persons" (chests, doors, pickups
+  credited to them): Phase H / D6 — ordering decision pending.
+
+### 2026-10-13 — D1 death receipts: Spirit Strike run reproduces nothing
+
+Repeat ambush on candidate `5cfbd199…` (adds the observe-only
+`death_receipt_refused` log), owner killing with Tal's Spirit Strike only.
+CONFIRMED_LIVE: 32 monsters on each peer, 32 host despawns, **32 `death_emitted`
+receipts, 32 client `death_presented`** — no missing death animation. Every
+refused receipt (32 monsters × 1–10) was a non-death emission 0.3–33 s before the
+death: the spawn-in effect (`7e8a6f3f` / `af48a1bf`) and hit effects
+(`9a1ba193`, `37a3bf5f`, `dee1c453`), all with death style 0 as intended. Death
+visual assets this run: `4f0291d3` (styles 2/4), `162ab413` (style 4).
+Conclusion: the earlier 2-of-18 gap is intermittent and happens before the
+resource check — identity lease, component back-link or thread/arming — none of
+which were logged. Next build logs those exits for leased monsters. Spirit
+Strike kills are not the cause (HYPOTHESIS retired).
+
+### 2026-10-13 — owner reorders: Phase H (doors, chests, pickups) before E/F/G
+
+Owner decision after the kill audit: remote players must be "full persons" —
+start Phase H now, doors first (#67), then chests (#66), then pickups credited
+to the collector (D6 rule). D5 (#63) and the rest of D6 follow; E/F/G after H.
+D2 spawn parity and D3 visible/collectible drops are accepted; D1 keeps the
+intermittent death-receipt hunt open with the widened log (build `ac1f23ae…`).
+
+### 2026-10-13 — H1 doors: native door model and live cycle (research, no code)
+
+CONFIRMED_STATIC (Ghidra, exact build) and CONFIRMED_LIVE (read-only polling of
+all resident doors on both peers while the owner used the road's TallGate):
+`DoorEntity` (vtable 0x2D6430, node 0x2D6454, kind 0x0F8C) embeds `CPosition`
+at +0x150 (→+0x44), `CStats` at +0x260, `CDoor` at +0x3B0 (vtable 0x2D637C) and
+the animation component at +0x4F0 (vtable 0x2C8504, →+0x58). `CDoor` state is
++0x74; the player-use cycle on the host ran 0→2→3→5 (door anim 0x17 into +0x60,
+collision byte position+0x100 cleared) →6→7 (close anim 0x18) →0 in ≈4 s; the
+script path is `CDoor::ActivateFromScript` 0→0xB→0xC→0xD / 0xD→0xE→0xF→0.
+The client's three doors share identifiers and model topology (renderer
+0x2DF8EC, 4 channels, 1 submodel) but their entity nodes are paused and `CDoor`
+never left state 0 — the door stays closed on Tal's screen; he passes through
+because the host simulates his position with the host's collision already off.
+Fix direction chosen: admit `DoorEntity` to the world catalog as a new kind so
+the door's animation pose follows the host like NPC/scenery poses (no client
+state machine); PVS portal state (`CSceneManager::SetPVSDoorState` RVA 0x1B6C0)
+is a follow-up if the open doorway renders wrong on the client.
+
+### 2026-10-13 — H1 doors candidate: DoorEntity joins the world catalog
+
+`SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND` 0x0F8C added to the world frame (world
+version 9→10; validator accepts the kind with no flags/hit points); the world
+sync admits `DoorEntity` (vtable 0x2D6430 / node 0x2D6454) with its embedded
+CPosition at +0x150, four channels and bank entry zero authored (like scenery).
+A malformed door is skipped, never refusing the frame. No client state machine,
+collision or PVS change: only the door model's pose follows the host.
+CONFIRMED_TEST: LanPartySessionTest (wire version, door kind accept/refuse
+cases), StoryShotsTest, SkillTraceImageTest pass; DLL build passes.
+CONFIRMED_LIVE (startup): on candidate `5392ea2f…` both peers catalogue the
+same three doors (Portcullis, TallGate, BigDoglegDoor; 3/7/3 animations), no
+stall, no owner change. **Owner gate OPEN:** open the road TallGate with Ailish
+and watch it on Tal's screen; then the castle portcullis.
+
+### 2026-10-13 — H1 door pose accepted; door camera requested
+
+CONFIRMED_LIVE (owner, candidate `5392ea2f…`): "he walked through and the door
+actually opened" — the TallGate opened on Tal's screen as Ailish used it. The
+door-pose replication is accepted for the tested doors. Owner follow-up (H1b):
+Tal's camera should take the door's authored static camera during his
+walk-through, as the game forces for the lead (CDoor "Static camera to use from
+front/back", +0x78/+0x84; "Player traverse distance" +0x9C). Research next:
+how the native lead path applies that camera (state 3/4 helper RVA 0xCEA30 and
+the traverse helpers) and the client camera facility to reuse.
+
+### 2026-10-13 — H1b door camera: native mechanism (research, no code)
+
+CONFIRMED_STATIC (Ghidra, exact build): when the lead traverses a door, the
+CDoor state 3/4 helper (RVA 0xCEA30) picks the authored camera ResourceName at
+CDoor+0x84 (front) or +0x78 (back; flags bit 2) and calls
+`CCameraManager::SetStaticCameraPosition(mgr 0x3C2F30, "default", &name, 0.0,
+false, 0.0)` (RVA 0x38500): the named camera slot ("default" = the player
+camera) resolves the camera resource (RVA 0x3E540 → 0x108750 via the resource
+manager 0x408D10) and starts a `Camera::StaticPositionTransitionTarget`
+transition on the camera controller 0x3D4B30 (RVA 0x58D510 → 0x4E79A0). The
+player-use cycle ends it at state 10 via RVA 0x4E93B0 on the camera's state
+object (+0x40, kind 0x13). Live door camera names: TallGate front/back resource
+ids 0x0135AF49/0x0135AF48, Portcullis back only (front = none 0x7FFFF),
+traverse distance +0x9C = 5.0 (TallGate/Portcullis) / 2.5 (BigDoglegDoor).
+Constraint: the client camera is the mod's mathematical view
+(`SudekiMpLanStoryLocalControlPresent`, no native camera tick), so the native
+static transition cannot be reused there. Direction: build a `SudekiMpLanStoryView`
+from the door's camera resource (position/orientation fields still to be read
+from the transition target's methods) and present it through the existing
+cast-view path while the remote character is within the door's traverse
+distance of an open door; front/back chosen by the character's side.
+
+H1b design (proposed, not started): host-computed door camera for remote
+characters. `Camera::StaticPositionTransitionTarget` (vtable 0x2D9764, slot 0 =
+RVA 0x18B5C0) copies the camera resource's +0x8/+0xC/+0x10 into the camera
+position and, unless resource+0x2C is set, keeps the player as look target —
+so a door camera is "fixed authored position, look at the character". Host:
+per remote character, when a catalogued door's CDoor state is non-zero and the
+character is within +0x9C of the door position, resolve the front/back camera
+resource (side from the door forward), build a look-at `SudekiMpLanStoryView`
+(projection copied from the host render camera) and publish it through the
+cast-view channel as a new kind 3 (validator currently caps kind at 2; client
+presents any non-zero kind, kind 0 releases). Unknowns: the camera resource
+lookup on the host (engine `SudekiMpResourceLookup` resolves proxies of type
+41 only; the camera type id and the native lookup RVA 0x3E540/0x108750 need an
+exact-byte check), the resource's own look target when +0x2C is set, and the
+front/back mapping (calibrate against the lead's choice live). Estimate: one
+to two sessions with two owner gates.
+
+### 2026-10-13 — Phase H trace: native interaction system (static, exact build)
+
+Owner direction: after the door camera, trace the interaction system so remote
+players can act as real players. CONFIRMED_STATIC (Ghidra decompiles of the
+plan's RVAs; the mod's `interaction_provenance` observer already names them):
+- Trigger manager global 0x408D24: up to 15 candidate records (+0x20, stride
+  0x1C: kind at +0, owner at +4, usable/trigger entity at +0x10, flags at
+  +0x19/+0x18, state at +0x20 = 2 while interacting), press latch +0x1D8, flag
+  byte +0x1D9 (bit1 = candidate has OnAction, bit0 = usable, bit3/4/6 misc),
+  last-contact +0x1D4.
+- RVA 0xD330 (per-frame scan) collects usables/triggers around the native
+  **front** character (group players 0x408D94) and writes +0x1D9 flags.
+- RVA 0xD6F0 → 0xD7A0 (dispatch): for each candidate, with the latch set and
+  the source actor equal to the current front actor (RVA 0x1122C0 accessor),
+  gate 0xD9A0 checks OnAction presence, the front arbiter's busy bit 0x80,
+  combat state (cluster manager +0x34) and the UI state, then marks the
+  candidate state 2 and 0xCCD0 builds the SOL message ("OnAction" / "OnEntry" /
+  "OnExit") carrying the acting actor pointer (+0xC) and a "source is front"
+  bool (+0x40), queued through 0x1B9EF0.
+- Weak attack press writes the latch (0xDB11A) for the front actor only; the
+  mod's melee admission refuses remote presses there (story_interaction_guard).
+Consequence: everything a chest, door or NPC does is a script message whose
+actor argument is the front character. A remote "player" needs (1) candidate
+discovery around the remote actor (the provenance module has a read-only
+nearby-usable query seam) and (2) a host-executed dispatch with the remote
+actor as the message actor and as the "front" for that scoped call — the
+"scoped interacting-actor swap" of plan D4. Door use by a remote actor would
+then run the native door traverse for that actor, and the door camera call
+(0x38500) during that scope must be redirected to the client (H1b), not applied
+to the host camera. Next: run the existing provenance trace on the host while
+the owner uses a chest, a door and an NPC to confirm the live chain.
+
+### 2026-10-13 — H1b door camera: live chain captured (host, TallGate)
+
+CONFIRMED_LIVE (gdb hardware breakpoints on the host, two passes): per pass
+`CDoor` traverse helper (RVA 0xCEA30, door pointer on the stack) →
+`CCameraManager::SetStaticCameraPosition("default", &camera, 0.0, false, 0.0)`
+(RVA 0x38500, called from RVA 0xCEAEF) → `Camera::StaticPositionTransitionTarget`
+start (RVA 0x18B5C0). Side rule: flags +0x73 bit 2 clear → the +0x84 camera
+("from back" slot; TallGate id 0x0135AF48), bit 2 set → the +0x78 camera
+("from front"; id 0x0135AF49). Camera resource record (0x30 bytes, vtable RVA
+0xCDD70): +0x08 position, +0x14 look direction (unit), +0x20 ResourceName
+{kind 0x0FBA, id, refs}, +0x2C flag 1 = fixed direction (these do not track the
+player). TallGate: af48 at (-121.6, 9.6, -69.8) looking (-0.69,-0.19,0.70);
+af49 at (-134.4, 11.1, -56.1) looking (0.60,-0.42,-0.68); both aim at the gate
+(dot 0.99). Blend time 0. So Tal's door view is fully determined by: which door,
+which side, the two authored records — no native camera needed on the client.
+
+### 2026-10-13 — H1b door camera candidate (host-computed, cast-view kind 3)
+
+New `src/network/lan_story_door_view.[ch]` (pure: side selection — the camera
+standing on the character's side of the door plane, as the lead path chooses —
+and the camera-to-world view from the record's position/direction, or a look
+at the character's +1.8 target for non-fixed records) and
+`src/hooks/lan_story_door_camera.[ch]` (host: exact-image guards on the
+static-camera lookup RVA 0x3E540 entry and SetStaticCameraPosition's call to it
+at RVA 0xE7DD9; the lookup is invoked as the game does — EAX=-1, ResourceName
+by value with a NULL reference pointer, ESP restored — and the returned record
+is proved by its vtable 0x2CDD70 and id). For a non-leader character inside an
+open door's traverse zone the host rewrites that character's kind-0 cast view
+to kind 3 with the door view and the host camera's projection; release at
+traverse+2.0 or 1.5 s after the door returns to state 0. Cast-view codec admits
+kind 3 (rejects 4). Installed with the cast module once a remote player is
+ready; uninstalled with it.
+CONFIRMED_TEST: StoryDoorViewTest (TallGate numbers, both sides, single
+camera, tracking record, invalid inputs), StoryCastViewTest, LanPartySessionTest
+pass; DLL build passes. Candidate `2d34815d…` deployed to the pair.
+**Owner gate OPEN:** Ailish opens the TallGate; Tal walks through while it is
+open; Tal's camera should take the gate camera on his side and return after.
+
+**2026-10-13 host crash on the door-camera candidate `2d34815d…`** (owner: "I just
+crashed"): host access violation at EIP 0xFFFFFFFF with ESI/EDI holding the
+camera ResourceName kind/id — the mod's static-camera lookup thunk. Cause: the
+inline-asm output was not early-clobber, so the compiler placed the call
+target in EAX, which the thunk then set to -1 (the native type selector) before
+`call`. Fix: `"=&a"` output, call target held in ECX (a stack-relative memory operand
+would be mis-addressed after the pushes — caught in the object dump), kind/id
+pinned to EDI/ESI, plus a research log line before each lookup. No native state was
+written before the fault (the lookup had not run). Rebuilt; redeploy pending.
+
+### 2026-10-14 — H1b door camera: works mechanically; the real complaint is the client camera itself
+
+CONFIRMED_LIVE (candidate `7b5407fc…`): host `story_door_camera event=engaged
+character=2 camera=1 state=5 distance=2.25` → client `story_cast_view
+event=client character=2 kind=3` → `released distance=4.76 state=0`. Owner: "it
+kinda works" — accepted as mechanism, not as feel. Owner's actual frustration:
+Tal's camera "doesn't have the same boundaries as Ailish's — movement
+limitations based on how close the character is to a wall". That is the
+documented limit of the client's mathematical orbit view
+(`SudekiMpLanStoryLocalControlPresent`: no native collision avoidance, return
+steering or spring smoothing). Direction to research (H1c): drive a native
+Exploration camera on the client for the remote character (precedent: the
+2026-08-27 Player 2 native camera bridge — `CCameraManager::SetCameraTarget`
+RVA 0x37170 + `SetCameraState(Exploration)` RVA 0x37530 — whose authored
+obstruction logic pulled Camera 2 in at walls), ticking it despite the paused
+client world, with the door/cast views layered on top as today.
+
+### 2026-10-14 — owner decision: client native camera (H1c, #71) before chests
+
+Owner: "camera first. I want him to have as close to the real thing as
+possible if not 1-1." Research starts on driving a native Exploration camera
+for the remote character on the client; door/cast views stay as overrides.
+
+### 2026-10-14 — H1c client native camera: research and candidate
+
+CONFIRMED_LIVE (client inspection): the client's "default" camera already
+targets Tal (slot 1 GameObjectTarget = PC_TAL, slot 0 OffsetTarget) but sits in
+`Camera::CameraInterpolationState` (vt 0x2DB9A4 / data 0x2DB998, kind 0x13)
+while the host's is in Exploration (state vt 0x2D9854 / `ExplorationStateData`
+0x2CA694); the speed global (0x408DA0) is paused (+0x28 = 1, count +0x2A = 1),
+so the scheduled camera update (node vtable slot 1, RVA 0xE7660) never runs —
+it returns at once while `speed+0x28` is set. CONFIRMED_STATIC: that update
+takes a timing block (dt at +0xC), runs the state's gate (slot 0x20) and update
+(slot 0xC → Exploration solver RVA 0x47C190 → 0x47B630 / slots 0x50, 0x80),
+advances fades and the camera velocity; `CCamera::InputEvent` (RVA 0xE85F0)
+accepts actions 0x69/0x6A with owner 0 when camera+0x107 is set and the UI
+flag (0x408D8C → +0x56) is clear; `CCameraManager::SetCameraState` (RVA
+0x37530, name, "Exploration", 0.0, false, 99999.9) selects Exploration as the
+retail bootstrap at RVA 0x4CF831 does, after `CanSetCameraState` (RVA 0x37C30).
+Candidate: new `lan_story_client_camera.[ch]` — per client presentation with
+no cast/door override: request Exploration when the state class differs
+(rate limited), feed the focused right stick as native 0x69/0x6A events,
+clear the speed pause byte around one call of the camera's own update with
+the real frame dt (≤ 0.1 s), restore it, then
+`SudekiMpLanStoryLocalControlAdoptNative` copies the resulting render matrix
+and projection into the local view bookkeeping (no camera write). Any refusal
+falls back to the mathematical view. Default on; `[StoryAreas]
+ClientMathCamera=true` keeps the old view. Exact-image guards on all five
+entries. CONFIRMED_TEST: StoryClientCameraImageTest (every guarded byte
+mutation refused; malformed/unnamed leases never tick). DLL build passes.
+Candidate `fea89fb8…`. **Owner gate OPEN:** Tal's camera should now behave
+like Ailish's — pulls in at walls, native return steering and spring, right
+stick orbit — with the door/cast views still appearing on top.
+
+### 2026-10-14 — H1c first live result: "that's not right" — two defects found
+
+Candidate `fea89fb8…`/`ec74ee32…` live: the client camera did reach Exploration
+(`state_vt=2d9854`, ticking) but the owner rejected the result. Diagnosis from
+live reads and logs:
+1. **Door view never released on the client.** `SudekiMpStoryCastViewPush`
+   rejected every later kind-0 ("normal") sample as a reorder because its cast
+   sequence (0) was lower than the door view's (0x8001); the client kept the
+   gate camera while Tal walked 12 m away. Fix: the reorder rule applies within
+   one cast family only (`s->kind==last->kind`).
+2. **Native camera aimed at a stale point.** Under the pause nothing refreshes
+   the camera targets: `Camera::GameObjectTarget` caches the actor's live
+   CPosition in its slot-1 refresh (RVA 0x19A290) and `Camera::OffsetTarget`
+   recomposes its matrix from the wrapped target (RVA 0x19A0D0); on the client
+   both still held New Brightwater coordinates. The manager's gated per-frame
+   method (vtable slot 3, RVA 0x36BD0 → 0x1196C0/0x134D90) is the native
+   driver (decompile pending). Fix: the tick refreshes the camera's two target
+   slots, inner then outer, through their own vtable slot 1 (exact classes),
+   before the camera update.
+3. Gating: the host publishes kind-0 cast views continuously; the native branch
+   treated any cast sample as an override and never ran after the first one.
+   Fix: only a *valid* cast view or an active local cast overrides.
+Rebuilt; StoryClientCameraImageTest, StoryCastViewTest, LanPartySessionTest pass.
+
+### 2026-10-14 — H1c second live result: walls yes, doors no
+
+Candidate `73521b51…`: owner confirms the native camera now respects walls
+(world geometry) but not doors — "I can move the camera past the door to see
+the area we just left". CONFIRMED_LIVE (read-only): every door's collision
+object (CPosition+0x8C) carries an activation byte at +0xF4 that is 1 on the
+host and 0 on the client for all three doors; the same holds for most scenery
+colliders (host 10 of 22 active, client 1 of 22); NPC colliders are 0 on both.
+The host object also carries built per-face bytes at +0x30..+0x40 that the
+client's lacks, so activation is a registration step, not a flag: it is
+scheduled entity work that the client's native pause never ran. The CDoor
+state machine toggles the same byte (0 at state 0xC open, 1 at 0xE close), so
+door openness and camera solidity are the same mechanism. Thirteen writers of
++0xF4 found by byte scan; the cluster at RVA 0x1105xx–0x110Dxx (collision
+system, next to the position publication 0x110BD0) is the likely registration
+path (decompile in progress). Direction: activate the client copies' colliders
+through the native registration once per catalogued door/scenery (exact
+seams), or tick those entity nodes once under a lifted pause, then mirror the
+host's open/closed byte with the door pose.
+
+### 2026-10-14 — H1d door/scenery collision on the client (candidate)
+
+CONFIRMED_STATIC: retail RVA 0x110D20 (`fastcall`, CPosition) copies
+CPosition+0x100 (collision enabled) into the collision object's activation
+byte (+0x8C → +0xF4); RVA 0x110D00 clears it; the CDoor state machine writes
+both at open (0xC) and close (0xE). Candidate: the world frame's door record
+carries the host's CPosition+0x100 as `hit_points` 0/1 (validator: doors 0 or
+1); the client apply mirrors that byte on its door copy and then runs 0x110D20
+for every catalogued door and scenery target (exact entry bytes guarded at
+world init), so the client's camera collision sees the same solids as the
+host's. CONFIRMED_TEST: LanPartySessionTest (door 0/1 accepted, 2 refused),
+StoryMonsterDamageFlushImageTest, StoryShotsTest pass; DLL build passes.
+Candidate `76e128a9…`. **Owner gate:** Tal's camera stops at a closed door
+(gate) like Ailish's, and passes while the door is open.
+
+### 2026-10-14 — H1c/H1d accepted: client native camera with doors
+
+Owner on candidate `c0ef40a3…`: "that's better!" then, after the hand-back fix,
+"the other side of the door moment is gone". CONFIRMED_LIVE (owner) for the
+tested route: Tal's camera is the native Exploration camera (walls, corners,
+orbit), door colliders follow the host's open/closed byte and stay open while
+Tal is still in the doorway, the door view (kind 3) layers on top and, on
+hand-back, the client re-enters Exploration via `CanSetCameraState` /
+`SetCameraState("default","Exploration",0,false,99999.9)` so the camera is
+re-seated behind Tal instead of recovering from behind the door. Mathematical
+view remains the fallback (`[StoryAreas] ClientMathCamera=true`). Open
+follow-ups: the manager's own target-refresh driver (RVA 0x36BD0 →
+0x1196C0/0x134D90) as the canonical path instead of per-target slot-1 calls;
+scenery colliders activated only for catalogued scenery; other routes/doors.
+
+### 2026-10-14 — H2 chests (#66): first trace
+
+CONFIRMED_LIVE (owner opened `ICa_Chest_General1d` with Ailish, Tal watching;
+read-only pollers on both peers): chests are a distinct entity class (vtable
+0x2D5200, node 0x2D5224, kind 0x0F9C) with the door-like layout — CPosition at
++0x150 (→+0x44), CStats +0x260, animation component vt 0x2C8504 at +0x3A4
+(→+0x58), renderer 0x2DF8EC, 4 channels, 1 submodel — plus an "OpenObject"
+usable component at +0x688 (vt 0x2D514C; bases 0x2D51BC/+4, 0x2D51C4/+0x18,
+0x2D51E4/+0x3C) serialising "Tsa Overrides chest operation" (+0x9C), "Distance
+player uses object from" (+0x98 = 1.0), "Gel script to run" (+0x78, empty on
+this chest) and `CurrentState` (+0x74, "Closed"…). Opening on the host:
++0x74 0 → 4 (approach, player position copied into +0x54..+0x5C) → 5 → 8 (open,
+fields cleared) over ≈4.5 s; the chest entity is paused on the host until used
+and permanently paused on the client, whose copy never changed. The loot path
+is not observed by the mod (no `CInventory::AddItem` RVA 0x217E0 /
+`AddItemToInventory` RVA 0x22150 hook), so what the owner received is UNKNOWN;
+decompiles of the entity update, the usable state machine and the Treasure
+class are in progress. Plan for #66: (a) admit chest kind 0x0F9C to the world
+catalog so the open animation follows the host like doors; (b) observe the
+host inventory-add path for the D6 ledger; (c) remote open = Phase H dispatch.
+
+### 2026-10-14 — H2 chests: reward path, item names, candidate
+
+CONFIRMED_STATIC: the chest usable component's state machine is RVA 0x1849D0
+(base at +0x18, state = +0x5C there = component +0x74): 1→3→4 plays the open
+animation (anim id 0x52 into +0x48) and walks the player in; 2/7 run the
+optional GEL script (+0x60/+0x78) and the reward helper RVA 0x185090: if the
+component's item id (+0xB8) is not −1, `CInventory::CanAddItem` then
+`CInventory::AddItem(item, 1, 1)` (RVA 0x217E0, thiscall on the party
+inventory 0x408D84) → state 8 (open). Item display names come from the item
+table 0x408D80 (def +0x50 = localisation token) through the localisation
+manager 0x409E0C (the blacksmith adapter's path). CONFIRMED_LIVE: the chest
+the owner opened (`ICa_Chest_General1d`) held item 320 = "100 Florins"; the
+others in range: 321 "150 Florins", 318 "50 Florins", 243 "Orb of Vigor".
+Candidate `770bff81…`: (a) chest kind 0x0F9C joins the world catalog (pose
+follows the host; validator plain pose); (b) host inventory observer
+`lan_story_inventory.[ch]`: relative-call hooks on the six exact
+`CInventory::AddItem` call sites (three AddItemToInventory exports, script/shop
+RVA 0x89DA4, pickup RVA 0x1338DB, chest RVA 0x1850BD) → thiscall stubs that log
+and tail-call the original; observe-only, host only. LanPartySessionTest passes
+(chest kind, no flags/hit points). **Owner gate:** after reload the save's
+chest is closed again — open it with Ailish while Tal watches: the lid should
+open on Tal's screen and the host log should show `story_inventory
+event=add_item site=chest item=320 quantity=1`.
+
+### 2026-10-14 — H2 chest lid accepted; glow missing; loot observed
+
+CONFIRMED_LIVE (owner, candidate `770bff81…`): the chest lid opened on Tal's
+screen ("it did in fact open on Tal's side"); the host observer logged
+`story_inventory event=add_item site=chest item=320 quantity=1 show=1`
+(100 Florins). Missing on the client: the chest's open glow — the host spawned
+a `SpecialEffect` (identifier cf2b3c97) at the chest position; one-off world
+effects are not carried to the client (only spawn sigils and cast visuals are).
+Next: find the chest's effect spawn path and resource, then carry such host
+world effects (asset, position, lifetime) through the presentation channel.
+
+### 2026-10-14 — H2 chest/door effects: resources identified, whitelisted
+
+CONFIRMED_LIVE (host registry poll on the previous candidate, one chest
+opening): opening a chest spawns two `SpecialEffect`s (vt 0x2D3C7C) with no
+retained name text — `SFXA205_OPEN_CHEST` (resource id 0x62d4dab3, placed at
+the chest, ~4 s) and `SFXE007_CHEST_OPEN` (0x81bd29e3, attached, render wrapper
+present). Opening a door spawned `SFXA203_OPEN_DOORS` (0x7148157b, ~4 s). The
+closed-chest shimmer sitting on each unopened chest is `SFXAR006_10_REVEALED`
+(0x3026f213). None of them carries the effect skip flag (`+0x3E0` bit 3), so
+the only reason the client never saw them is the closed resource whitelist
+(`SUDEKIMP_STORY_WORLD_RESOURCES`): `lan_story_world_visuals.h` dropped them
+with kind 0. The identifiers were resolved by hashing every resource name found
+in the game data with the retained-text hash (`SudekiMpSpiritVisualKindForTyped
+Resource`: upper-case `NAME.hom`, alternate add/multiply) — the earlier
+"identifier cf2b3c97" note was a misread. Candidate `deea724c…` adds the three
+open effects to the whitelist (source mask 1; 110 world kinds, last kind 239);
+StorySkillVfxCodecTest, StoryCastViewTest, StoryClientCameraImageTest and
+LanPartySessionTest pass. **Owner gate:** open the chest again (reload reset
+it) — Tal should now see the open glow; a door opening should show its burst on
+his side as well. Not yet carried: the closed-chest shimmer (looping; would
+need the loop playback path) — add only if the owner wants it.
+
+### 2026-10-14 — H2 chest glow accepted
+
+CONFIRMED_LIVE (owner, candidate `deea724c…`): "Tal saw the glow this time."
+Host log: `story_world_visual event=observed source=1 kind=238` (SFXE007) and
+`kind=237` (SFXA205) alongside `story_inventory event=add_item site=chest
+item=320`. #66 part 1 (host-opened chest shown to clients) is complete; part 2
+(remote player opens, loot credited to the opener) is Phase H / D6.

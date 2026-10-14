@@ -48,6 +48,9 @@ void SudekiMpLanStoryInputMuteMovement(void);
 BOOL SudekiMpLanStoryInputOrbit(void *controller,void *actor,uint32_t transaction,
     float *horizontal_seconds,float *vertical_seconds);
 void SudekiMpLanStoryInputClear(void);
+/* Latest focused right-stick look axes (native 69/6A magnitudes, -1..1), or
+ * zeros when stale/unfocused. Read-only; nothing is consumed. */
+BOOL SudekiMpLanStoryInputLookAxes(float *x,float *y);
 /* Caller first retires all presentation/containment users of Exact. Failed
  * restoration retains the original callback and hook metadata for retry. */
 BOOL SudekiMpLanStoryInputUninstall(void);

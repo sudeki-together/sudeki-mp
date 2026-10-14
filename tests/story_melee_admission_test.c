@@ -299,6 +299,15 @@ int main(void) {
     SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(idle_contact_lease(actor));
     idle_remote=FALSE;assert(!idle_contact_lease(actor));idle_remote=TRUE;
     lease_ok=FALSE;assert(!idle_contact_lease(actor));lease_ok=TRUE;
+    for(unsigned c=0;c<4;++c) {
+        memset(r.actors,0,sizeof(r.actors));r.actors[c]=actor;
+        r.available_mask=1u<<c;r.leader_character=c;
+        SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(idle_contact_lease(actor));
+        r.leader_character=(c+1)%4;r.available_mask|=1u<<r.leader_character;
+        SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(idle_contact_lease(actor));
+        idle_remote=FALSE;assert(!idle_contact_lease(actor));idle_remote=TRUE;
+        lease_ok=FALSE;assert(!idle_contact_lease(actor));lease_ok=TRUE;
+    }
     SudekiMpLanStoryControlObserveIdleContact(&w,NULL);assert(!idle_contact_lease(actor));
     idle_binding=FALSE;SudekiMpLanStoryControlObserveIdleContact(&w,&r);assert(!idle_contact_lease(actor));
     puts("story idle contact: host roster, remote authority, load, pause, cast and unknown-state guards passed");

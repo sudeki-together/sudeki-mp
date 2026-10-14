@@ -152,6 +152,29 @@ int main(int argc,char **argv) {
     host.entries[0]=host.entries[1];memset(&host.entries[1],0,sizeof(host.entries[1]));host.count=1;
     SudekiMpLanStoryAreaFollow(&host,11000,NULL);
     assert(switches==2 && enters==1 && releases==4 && !strcmp(called,names[1]));
+    /* Host capture during a native house entry: the house loads as the
+     * background target (state 1..3) exactly like an outdoor zone. Live,
+     * the exterior client followed it and lost its world (2026-10-13).
+     * The TEMP observer names the house; capture then withholds the target. */
+    *(void **)(world+0x394)=table+2*0x54;*(unsigned *)(table+2*0x54+0x34)=1;
+    SudekiMpStoryAreaState cap={0};
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !strcmp(cap.target,names[2]) && cap.count==2);
+    SudekiMpLanStoryAreaNoteTemporary("farm_interior");
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !cap.target[0] && cap.count==2 &&
+        !strcmp(cap.entries[1].name,names[2]) && cap.entries[1].state==1 &&
+        SudekiMpStoryAreaStateExterior(&cap));
+    /* The withheld report moves nothing on a client that has no such target. */
+    *(void **)(world+0x394)=NULL;*(unsigned *)(table+2*0x54+0x34)=0;
+    SudekiMpLanStoryAreaFollow(&cap,12000,NULL);
+    assert(switches==2 && enters==1 && releases==4);
+    /* Another TEMP destination or no name releases the earlier one. */
+    *(void **)(world+0x394)=table+2*0x54;*(unsigned *)(table+2*0x54+0x34)=2;
+    SudekiMpLanStoryAreaNoteTemporary("Other_House");
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !strcmp(cap.target,names[2]));
+    SudekiMpLanStoryAreaNoteTemporary(names[2]);
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !cap.target[0]);
+    SudekiMpLanStoryAreaNoteTemporary(NULL);
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !strcmp(cap.target,names[2]));
     puts("story area follow exact-image guards and interior/return/outdoor call routing passed (no live loading)");
     VirtualFree(image,0,MEM_RELEASE);return 0;
 }

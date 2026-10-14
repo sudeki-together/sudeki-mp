@@ -3,6 +3,7 @@
 
 #include "hooks/lan_story_observer.h"
 #include "network/lan_story_frame.h"
+#include "hooks/lan_arena_owner_view.h"
 
 /* The containment owner accepts only its retained native party actors,
  * unchanged world/descriptor/group/controller and registry/pause/task
@@ -59,6 +60,17 @@ BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *ros
 BOOL SudekiMpLanStoryLocalControlPresentCast(const SudekiMpLanStoryNativeRoster *roster,
     SudekiMpLanStoryLocalViewExact exact,void *context,float horizontal_seconds,float vertical_seconds,
     const SudekiMpLanStoryView *cast);
+/* Native camera (#71): the leased camera/render state for the client's own
+ * character, copied; FALSE until the view is seeded and the lease valid. */
+BOOL SudekiMpLanStoryLocalControlViewOwner(SudekiMpLanArenaOwnerViewLease *out);
+/* TRUE while the last presentation was a cast/door override (the normal path must run once to release it). */
+BOOL SudekiMpLanStoryLocalControlCastActive(void);
+/* After the native camera advanced the leased render state: adopt its matrix
+ * and projection as the current local view (same preconditions as Present)
+ * so later mathematical frames continue from the native pose. Writes nothing
+ * to the camera. */
+BOOL SudekiMpLanStoryLocalControlAdoptNative(const SudekiMpLanStoryNativeRoster *roster,
+    SudekiMpLanStoryLocalViewExact exact,void *context);
 /* Explicit priority handoff before the host-cutscene presenter borrows view. */
 BOOL SudekiMpLanStoryLocalControlRestoreCastView(const SudekiMpLanStoryNativeRoster *roster,
     SudekiMpLanStoryLocalViewExact exact,void *context);

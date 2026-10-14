@@ -13,7 +13,7 @@ typedef struct SudekiMpStoryCastView {
     uint64_t stream;
     uint32_t sequence,tick,revision;
     uint16_t cast_sequence;
-    uint8_t kind; /* 0 positively normal, 1 InitCam, 2 SkillCam. */
+    uint8_t kind; /* 0 positively normal, 1 InitCam, 2 SkillCam, 3 door camera (#67). */
     char current[SUDEKIMP_STORY_AREA_NAME];
     SudekiMpLanStoryView view;
 } SudekiMpStoryCastView;

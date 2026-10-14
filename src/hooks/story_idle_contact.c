@@ -69,7 +69,7 @@ static BOOL exact(void) {
  * remain native. No previous-frame ground bit/source is used as authority. */
 static BOOL up_normal(const float *n) {
     return isfinite(n[0]) && isfinite(n[1]) && isfinite(n[2]) &&
-        n[1]>=0.999f && n[1]<=1.00001f &&
+        n[1]>=0.998f && n[1]<=1.00001f &&
         fabsf(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]-1.0f)<=0.0001f;
 }
 static BOOL eligible(const uint32_t *f,unsigned site) {
@@ -82,7 +82,8 @@ static BOOL eligible(const uint32_t *f,unsigned site) {
         !readable(collider=*(uint8_t **)(frame+12),0x84) ||
         *(void **)collider!=base+0x2c85fcu ||
         !readable(actor=*(uint8_t **)(collider+0x10),0xdcu) ||
-        (*(void **)actor!=base+0x2d555cu && *(void **)actor!=base+0x2d66fcu) ||
+        (*(void **)actor!=base+0x2d555cu && *(void **)actor!=base+0x2d66fcu &&
+         *(void **)actor!=base+0x2d5010u && *(void **)actor!=base+0x2d5a88u) ||
         *(void **)(actor+0x60)!=collider || !lease(actor)) return FALSE;
     unsigned count=*(unsigned *)(manager+0x9c);
     uint8_t **records=*(uint8_t ***)(manager+0x90);
@@ -99,12 +100,20 @@ static BOOL eligible(const uint32_t *f,unsigned site) {
         *(void **)(object+0x100)!=position+4 ||
         !readable(movement=*(uint8_t **)(actor+0x80),0xc0) ||
         *(void **)movement!=base+0x2c8644u || *(void **)(movement+0x10)!=actor ||
-        movement[0x79]!=1 || *(float *)(movement+0x24)!=0 || *(float *)(movement+0x28)!=0 ||
+        *(float *)(movement+0x24)!=0 || *(float *)(movement+0x28)!=0 ||
         !readable(arbiter=*(uint8_t **)(actor+0x90),0x64) ||
         *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10)!=actor ||
         (*(uint32_t *)(arbiter+0x50)&0x081812c8u) || (arbiter[0x60]&5u)) return FALSE;
+    /* Ranged first-person movement publishes an integrated delta. Native
+     * Tal/Buki movement instead publishes velocity, integrated by the swept
+     * solve. Keep separate bounds and require the matching native mode.
+     * On gentle terrain the old .01 clearance repeatedly pushed stationary
+     * Tal sideways into a neighboring wall, which then pushed him back. */
+    BOOL ranged=*(void **)actor==base+0x2d555cu || *(void **)actor==base+0x2d66fcu;
     const float *delta=(const float *)(object+0xe0);
-    if(delta[0]!=0 || delta[2]!=0 || !isfinite(delta[1]) || delta[1]>=0 || delta[1]<-0.02f ||
+    if(movement[0x79]!=(ranged?1:0) ||
+        delta[0]!=0 || delta[2]!=0 || !isfinite(delta[1]) || delta[1]>=0 ||
+        delta[1]<(ranged?-0.02f:-0.5f) ||
         *(float *)(movement+0x34)!=0 || *(float *)(movement+0x3c)!=0 ||
         *(float *)(movement+0x40)!=0 || *(float *)(movement+0x44)!=0 || *(float *)(movement+0x48)!=0)
         return FALSE;

@@ -331,6 +331,7 @@ static void __cdecl zone_load(const char *s) { begin_zone(LOAD,s); ((ZoneCall)ho
 static void __attribute__((thiscall)) zone_main(void *w,const char *s) { before_world_change(); begin_zone(MAIN,s); ((MainCall)hooks[MAIN].trampoline)(w,s); end_zone(); }
 static void __attribute__((thiscall)) zone_temp(void *w,const char *s,const void *r) {
     TemporaryJournal journal;
+    SudekiMpLanStoryAreaNoteTemporary(s);
     uint32_t source_epoch=begin_zone(TEMP,s);
     temporary_journal_begin(&journal,TEMP,source_epoch,w,s,r);
     ((TempCall)hooks[TEMP].trampoline)(w,s,r);

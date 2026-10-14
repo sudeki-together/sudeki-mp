@@ -86,11 +86,30 @@ static void spawn_event_death_emitted(void *component,void *effect) {
     if(!spawn_event_begin() || client_role || !readable(component,0xe0u) ||
         *(void **)component!=image_base+0x2c8504u || !fx_exact(effect) || !in_registry(effect)) return;
     uint8_t *actor=*(void **)((uint8_t *)component+0x10u);uint32_t id;
-    if(!spawn_event_identity(actor,&id) || *(void **)(actor+0x58u)!=component) return;
+    if(!spawn_event_identity(actor,&id) || *(void **)(actor+0x58u)!=component) {
+        /* Research (#54 D1): a group monster whose receipt cannot be leased.
+         * Only registry monsters of the exact class are worth a line. */
+        static unsigned unleased_logs;
+        if(unleased_logs<32u && readable(actor,0x5cu) && *(void **)actor==image_base+0x2d5fa0u && in_registry(actor)) {
+            ++unleased_logs; uint32_t style_now=death_style(actor);
+            SudekiMpLogFormat("story_spawn_event event=death_receipt_unleased actor=%p style=%u backlink=%u effect_kind=%02lx effect_resource=%08lx ms=%lu\r\n",
+                (void *)actor,style_now,*(void **)(actor+0x58u)==component,
+                (unsigned long)(*(uint32_t *)((uint8_t *)effect+0x29cu)&0x7fu),(unsigned long)*(uint32_t *)((uint8_t *)effect+0x2a0u),(unsigned long)GetTickCount());
+        }
+        return;
+    }
     unsigned style=death_style(actor);SudekiMpStoryDeathVisual v;
-    if(!SudekiMpStoryDeathVisualPrepare(image_base,actor,style,&v,visual_memory) ||
-        (*(uint32_t *)((uint8_t *)effect+0x29cu)&0x7fu)!=0x29u ||
-        *(uint32_t *)((uint8_t *)effect+0x2a0u)!=v.resource[1]) return;
+    BOOL prepared=SudekiMpStoryDeathVisualPrepare(image_base,actor,style,&v,visual_memory);
+    if(!prepared || (*(uint32_t *)((uint8_t *)effect+0x29cu)&0x7fu)!=0x29u ||
+        *(uint32_t *)((uint8_t *)effect+0x2a0u)!=v.resource[1]) {
+        /* Research (#54 D1): a leased monster's receipt that does not match its
+         * authored death resource. Observation only; nothing is emitted. */
+        static unsigned refused_logs;
+        if(refused_logs<64u) { ++refused_logs; SudekiMpLogFormat("story_spawn_event event=death_receipt_refused serial=%lu style=%u prepared=%u effect_kind=%02lx effect_resource=%08lx expected=%08lx ms=%lu\r\n",
+            (unsigned long)id,style,prepared,(unsigned long)(*(uint32_t *)((uint8_t *)effect+0x29cu)&0x7fu),
+            (unsigned long)*(uint32_t *)((uint8_t *)effect+0x2a0u),(unsigned long)(prepared?v.resource[1]:0u),(unsigned long)GetTickCount()); }
+        return;
+    }
     for(unsigned i=0;i<SPAWN_EVENT_SLOTS;++i) {
         SpawnEventLease *e=&spawn_events[i];
         if(!e->used || e->state.serial!=id || e->actor.object!=actor) continue;

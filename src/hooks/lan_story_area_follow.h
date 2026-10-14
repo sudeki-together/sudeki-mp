@@ -20,6 +20,12 @@ BOOL SudekiMpLanStoryAreaFollowInitialize(HMODULE image);
 /* Native game thread. Reads the current native residency; FALSE when the
  * world/descriptor table is not exactly readable. */
 BOOL SudekiMpLanStoryAreaCapture(SudekiMpStoryAreaState *out);
+/* Native game thread, from the TEMP zone export observer: `name` is the
+ * interior the native temporary transition is entering (a house). Capture
+ * withholds it as the background target: while it loads (state 1..3) it is
+ * indistinguishable from an ordinary outdoor target, and a character left
+ * outside must never background-load the lead's house (#54 D2 house return). */
+void SudekiMpLanStoryAreaNoteTemporary(const char *name);
 /* Client, native game thread, once per dispatch with the newest host state.
  * Ordinary state-3 zones only; state-4 temporary travel has a separate owner.
  * A background target also requires a positive host residency entry; native

@@ -5,7 +5,8 @@
 
 /* Only the saved-story host may grant a current, ordinary-world roster lease.
  * The adapter additionally proves a native, current-query terrain contact and
- * neutral first-person ranged movement. No terrain pointer survives a call. */
+ * neutral movement in the actor's native mode. No terrain pointer survives a
+ * call; wall, prop and deeper-penetration responses remain native. */
 typedef BOOL (*SudekiMpStoryIdleContactLease)(void *actor);
 BOOL SudekiMpStoryIdleContactImageExact(uint8_t *image);
 BOOL SudekiMpStoryIdleContactInstall(HMODULE image,SudekiMpStoryIdleContactLease);

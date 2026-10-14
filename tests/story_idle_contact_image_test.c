@@ -119,8 +119,13 @@ static void guard_tests(void) {
     reset(); run(TRUE);
     *(void **)actor=image+0x2d66fc; run(TRUE); /* Same native Elco movement component. */
     reset(); grant=FALSE; run(FALSE);
-    reset(); *(void **)actor=image+0x2d5010; run(FALSE);
-    reset(); *(void **)actor=image+0x2d5a88; run(FALSE);
+    for(unsigned c=0;c<2;++c) {
+        reset(); *(void **)actor=image+(c?0x2d5a88:0x2d5010);
+        movement[0x79]=0; *(float *)(object+0xe4)=-0.2548f; run(TRUE);
+        movement[0x79]=1; run(FALSE);
+        movement[0x79]=0; *(float *)(object+0xe4)=-0.6f; run(FALSE);
+    }
+    reset(); *(void **)actor=image+0x2d5fa0; run(FALSE);
     for(unsigned kind=2;kind<=5;++kind) { reset(); *(unsigned *)(record+0x20)=kind; run(FALSE); }
     reset(); *(unsigned *)(manager+0x9c)=0; run(FALSE);
     reset(); *(unsigned *)(manager+0x9c)=501; run(FALSE);
@@ -147,7 +152,11 @@ static void guard_tests(void) {
     }
     reset(); arbiter[0x60]=1; run(FALSE);
     reset(); arbiter[0x60]=4; run(FALSE);
-    reset(); probe_normal[1]=0.9f; run(FALSE); probe_normal[1]=1;
+    reset(); probe_normal[0]=0.04f; probe_normal[2]=0.03f;
+    probe_normal[1]=sqrtf(1.0f-0.04f*0.04f-0.03f*0.03f); run(TRUE);
+    probe_normal[0]=0.08f;probe_normal[2]=0;
+    probe_normal[1]=sqrtf(1.0f-0.08f*0.08f);run(FALSE);
+    probe_normal[0]=0;probe_normal[1]=0.9f; run(FALSE); probe_normal[1]=1;
     probe_normal[0]=NAN; run(FALSE); probe_normal[0]=0;
     probe_normal[2]=0.5f; run(FALSE); probe_normal[2]=0;
     probe_depth=test_site?0.0002f:0.00002f; run(FALSE); probe_depth=NAN; run(FALSE);
@@ -215,6 +224,39 @@ static void contact_tests(void) {
     center[1]=0.999998f; invoke_native(); assert(center[1]==retail);
     puts("IDLE_CONTACT_NATIVE_PASSTHROUGH: air, larger penetration, movement and nonterrain match original");
 }
+/* A synthetic gentle floor recreates the observed source of the sideways
+ * drift. Execute the full native solver, not a duplicate of the policy. */
+static void slope_tests(void) {
+    const unsigned vts[]={0x2d5a88,0x2d66fc,0x2d5010,0x2d555c};
+    float triangle[9]={-1,0.07f,-1, 1,-0.01f,-1, 0,-0.03f,1};
+    float n[4];plane(n,triangle,triangle+3,triangle+6);
+    if(n[1]<0) for(unsigned i=0;i<4;++i) n[i]=-n[i];
+    const float depths[]={0.000002f,0.00002f,0.00008f};
+    for(unsigned c=0;c<4;++c) for(unsigned d=0;d<3;++d) {
+        reset();*(void **)actor=image+vts[c];movement[0x79]=(c==1 || c==3);
+        *(float *)(object+0xe4)=movement[0x79]?-0.004f:-0.2548f;
+        memcpy(record+0x34,triangle,sizeof(triangle));
+        float start=(1.0f-depths[d])/n[1];
+        grant=FALSE;center[0]=center[2]=0;center[1]=start;invoke_native();
+        float retail_x=center[0],retail_z=center[2];
+        /* Only the small-depth branch moves laterally here. The adjacent
+         * branch already suppresses horizontal corrections below .01. */
+        if(d==0) assert(hypotf(retail_x,retail_z)>0.0004f);
+        else assert(retail_x==0 && retail_z==0);
+        grant=TRUE;center[0]=center[2]=0;center[1]=start;invoke_native();
+        assert(hypotf(center[0],center[2])<0.000006f);
+        assert(center[0]*n[0]+center[1]*n[1]+center[2]*n[2]>=1.0f);
+        printf("IDLE_CONTACT_SLOPE: character=%u depth=%.9f retail_x=%.9f corrected_x=%.9f\n",
+            c,depths[d],retail_x,center[0]);
+        /* Wall/object contacts and intentional movement retain native response. */
+        *(unsigned *)(record+0x20)=2;
+        center[0]=center[2]=0;center[1]=start;invoke_native();
+        assert(center[0]==retail_x && center[2]==retail_z);
+        *(unsigned *)(record+0x20)=1;*(float *)(movement+0x24)=1;
+        center[0]=center[2]=0;center[1]=start;invoke_native();
+        assert(center[0]==retail_x && center[2]==retail_z);
+    }
+}
 int main(int argc,char **argv) {
     wchar_t path[32768]; assert(argc==2 && MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,32768));
     image=map_image(path); contracts(); reset(); thread=GetCurrentThreadId();
@@ -232,11 +274,11 @@ int main(int argc,char **argv) {
         probe_entry=image+(test_site?0x334a8:0x33288);probe_depth=test_site?0.000012f:0.000002f;
         guard_tests();
     }
-    memcpy(SudekiMpStoryIdleContactNext,next,sizeof(next)); contact_tests();
+    memcpy(SudekiMpStoryIdleContactNext,next,sizeof(next)); contact_tests();slope_tests();
     /* The live game uses single-precision x87 control. Repeat native geometry
      * at that precision as well as the harness's extended-precision default. */
     uint16_t native_cw=0x007f;
-    __asm__ volatile("fldcw %0" :: "m"(native_cw)); contact_tests();
+    __asm__ volatile("fldcw %0" :: "m"(native_cw)); contact_tests();slope_tests();
     __asm__ volatile("fninit");
     uint8_t saved=image[0x334a9]; image[0x334a9]^=1;
     assert(!SudekiMpStoryIdleContactUninstall() && !memcmp(SudekiMpStoryIdleContactNext,next,sizeof(next)));

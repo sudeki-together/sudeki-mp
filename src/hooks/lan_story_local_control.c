@@ -576,6 +576,30 @@ BOOL SudekiMpLanStoryLocalControlPresentCast(const SudekiMpLanStoryNativeRoster 
     if(!casting) {view.cast_active=FALSE; memset(&view.cast_geometry,0,sizeof(view.cast_geometry));}
     view.published=TRUE; SetLastError(ERROR_SUCCESS); return TRUE;
 }
+BOOL SudekiMpLanStoryLocalControlCastActive(void) { return view.cast_active; }
+BOOL SudekiMpLanStoryLocalControlViewOwner(SudekiMpLanArenaOwnerViewLease *out) {
+    if(!out || !base || !entered || !view.seeded || !view.owner.valid) return FALSE;
+    *out=view.owner; return TRUE;
+}
+BOOL SudekiMpLanStoryLocalControlAdoptNative(const SudekiMpLanStoryNativeRoster *r,
+    SudekiMpLanStoryLocalViewExact exact,void *context) {
+    if(!base || !entered || uncertain || active || native_thread!=GetCurrentThreadId() ||
+        !r || !exact || !same_party(&retained,r) || r->leader_character!=selected ||
+        !exact(r,context) || !binding(r) ||
+        !SudekiMpLanStoryInputExact(r->controller,r->actors[selected]) || !camera_ready(r,NULL)) return FALSE;
+    uint8_t *state=view.owner.render_state;
+    SudekiMpLanStoryView next={0}; float position[3];
+    memcpy(next.matrix,state+0x90u,sizeof(next.matrix));
+    memcpy(next.projection,state+0xd0u,sizeof(next.projection));
+    next.valid=1;
+    if(!SudekiMpLanStoryViewGeometryValid(&next) || !actor_position(r->actors[selected],position)) return FALSE;
+    float dx=next.matrix[12]-position[0],dz=next.matrix[14]-position[2],flat=sqrtf(dx*dx+dz*dz);
+    view.geometry=next; view.framed=TRUE; view.published=TRUE;
+    if(isfinite(flat) && flat>0.1f && flat<30.0f) view.distance=flat;
+    memcpy(view.anchor,position,sizeof(view.anchor));
+    view.cast_active=FALSE; memset(&view.cast_geometry,0,sizeof(view.cast_geometry));
+    SetLastError(ERROR_SUCCESS); return TRUE;
+}
 BOOL SudekiMpLanStoryLocalControlPresent(const SudekiMpLanStoryNativeRoster *r,
     SudekiMpLanStoryLocalViewExact exact,void *context,float yaw,float pitch) {
     return SudekiMpLanStoryLocalControlPresentCast(r,exact,context,yaw,pitch,NULL);

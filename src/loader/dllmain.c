@@ -1222,6 +1222,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
                 !SudekiMpInstallControlSeparation(game_module,0,FALSE,FALSE,FALSE,0,
                     FALSE,0,FALSE,NULL,FALSE,FALSE,FALSE,0) ||
                 !SudekiMpInstallLanArenaWindowPolicy(game_module) ||
+                (SudekiMpLanStoryRuntimeSetClientNativeCamera(
+                    !read_config_boolean(config_path,L"StoryAreas",L"ClientMathCamera")),FALSE) ||
                 !SudekiMpInstallLanStoryRuntime(game_module,&party)) {
                 DWORD error=GetLastError();
                 SudekiMpLogFormat("lan_story startup=failed error=%lu\r\n",(unsigned long)error);

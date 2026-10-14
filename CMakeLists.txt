@@ -141,6 +141,10 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_realtime.c
     src/hooks/lan_story_quick_menu.c
     src/hooks/lan_story_cast.c
+    src/hooks/lan_story_door_camera.c
+    src/hooks/lan_story_client_camera.c
+    src/hooks/lan_story_inventory.c
+    src/network/lan_story_door_view.c
     src/hooks/lan_story_host_control.c
     src/hooks/lan_story_control.c
     src/hooks/story_player_turn.c
@@ -2055,10 +2059,22 @@ target_compile_options(SudekiMP.SaveSearchSpeedImageTest PRIVATE -Wall -Wextra -
 target_link_options(SudekiMP.SaveSearchSpeedImageTest PRIVATE -municode)
 target_link_libraries(SudekiMP.SaveSearchSpeedImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.SaveSearchSpeedImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryDoorViewTest tests/story_door_view_test.c src/network/lan_story_door_view.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
+target_include_directories(SudekiMP.StoryDoorViewTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryDoorViewTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryDoorViewTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryDoorViewTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryDoorViewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryAreaStateTest tests/story_area_state_test.c src/network/lan_story_area_state.c)
 target_include_directories(SudekiMP.StoryAreaStateTest PRIVATE src)
 target_compile_options(SudekiMP.StoryAreaStateTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 set_target_properties(SudekiMP.StoryAreaStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryClientCameraImageTest tests/story_client_camera_image_test.c
+    src/hooks/lan_story_client_camera.c src/engine/build_identity.c src/engine/sha256.c src/engine/log.c)
+target_include_directories(SudekiMP.StoryClientCameraImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryClientCameraImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryClientCameraImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryClientCameraImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryAreaFollowImageTest tests/story_area_follow_image_test.c
     src/hooks/lan_story_area_follow.c src/network/lan_story_area_state.c
     src/network/lan_story_effect_state.c src/engine/build_identity.c src/engine/sha256.c)

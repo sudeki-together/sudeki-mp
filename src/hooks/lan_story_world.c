@@ -84,6 +84,11 @@ static BOOL empty_clip_hit;
 static unsigned empty_channels;
 static unsigned empty_clip_skips;
 static PositionSet set_position;
+/* Retail 510D20: copies CPosition+0x100 (collision enabled) into the collision
+ * object's activation byte (+0x8C -> +0xF4). Scheduled entity work on the host;
+ * the paused client runs it here for doors and scenery (#71). */
+typedef void (__attribute__((fastcall)) *CollisionSync)(void *position);
+static CollisionSync collision_sync;
 static PositionMatrix position_matrix;
 static SelectorSet set_selector;
 static ValueSet set_rate;
@@ -268,7 +273,13 @@ static BOOL scenery(const Target *t) {
 }
 static unsigned pose_channels(const Target *t) { return t->channel_count; }
 static unsigned pose_blends(const Target *t) { return t->channel_count-1u; }
-static unsigned first_clip(const Target *t) { return scenery(t)?0u:1u; }
+/* DoorEntity (#67): four channels like an NPC, but like scenery its bank
+ * entry zero is a real authored clip (the resting door). */
+static BOOL door(const Target *t) { return t->kind==SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND; }
+/* Chest entity (#66): same layout family as a door (CPosition +0x150, four
+ * channels, authored entry zero), opened by its OpenObject usable component. */
+static BOOL chest(const Target *t) { return t->kind==SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; }
+static unsigned first_clip(const Target *t) { return scenery(t) || door(t) || chest(t)?0u:1u; }
 static BOOL blend_storage(const Target *t,BOOL write) {
     if(scenery(t)) return t->channel_count==1u && !t->blends;
     return memory(t->blends,(t->channel_count-1u)*20u,write) &&
@@ -375,6 +386,20 @@ static BOOL entity_identity(void *entity,const SudekiMpLanStoryNativeRoster *ros
             (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) return FALSE;
         *kind=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND; return TRUE;
     }
+    if(*(void **)e==base+0x2d6430u) {
+        /* DoorEntity (#67): exact primary and update-node bases; CPosition is
+         * embedded at +0x150 (checked by target()). The host owns the CDoor
+         * state machine; only the door model's pose travels. */
+        if(*(void **)(e+8u)!=base+0x2d6454u ||
+            (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND) return FALSE;
+        *kind=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND; return TRUE;
+    }
+    if(*(void **)e==base+0x2d5200u) {
+        /* Chest (#66): exact primary and update-node bases; CPosition at +0x150. */
+        if(*(void **)(e+8u)!=base+0x2d5224u ||
+            (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND) return FALSE;
+        *kind=SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND; return TRUE;
+    }
     if(*(void **)e==base+0x2d65a0u) {
         if(*(void **)(e+8u)!=base+0x2d65c4u || *(void **)(e+0x2cu)!=base+0x2d65e4u ||
             (*(uint32_t *)(e+0x30u)&0x1fffu)!=SUDEKIMP_LAN_STORY_WORLD_NPC_KIND) return FALSE;
@@ -411,6 +436,7 @@ static BOOL target(void *entity,const SudekiMpLanStoryNativeRoster *roster,Targe
     /* Exact54C8A0 embeds this NPCEntity's CPosition at+150; this is not the
      * unrelated playable-character model-component layout. */
     if((t.kind==SUDEKIMP_LAN_STORY_WORLD_NPC_KIND && t.position!=t.entity+0x150u) ||
+        ((door(&t) || chest(&t)) && t.position!=t.entity+0x150u) ||
         (scenery(&t) && t.position!=t.entity+0x210u) ||
         (t.kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && (t.position<=t.entity || t.position>=t.entity+0x2000u)) ||
         !memory(t.position,0x104u,write) ||
@@ -823,6 +849,14 @@ static BOOL catalog(const Registry *registry,const SudekiMpLanStoryNativeRoster 
             uint8_t *position=*(uint8_t **)(entity+0x44u);
             if(!readable(position,0xb8u) || *(void **)position!=base+0x2cdefcu ||
                 *(void **)(position+0x10u)!=entity) return FALSE;
+            include=*(void **)(position+0xb4u)!=NULL;
+        }
+        if(*(void **)entity==base+0x2d6430u || *(void **)entity==base+0x2d5200u) {
+            /* DoorEntity (#67) / chest (#66): joins when its model wrapper is
+             * bound; a malformed one is left out rather than refusing the frame. */
+            uint8_t *position=readable(entity,0x154u)?*(uint8_t **)(entity+0x44u):NULL;
+            if(position!=entity+0x150u || !readable(position,0xb8u) ||
+                *(void **)position!=base+0x2cdefcu || *(void **)(position+0x10u)!=entity) continue;
             include=*(void **)(position+0xb4u)!=NULL;
         }
         if(!include) continue;
@@ -1274,6 +1308,10 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
             if(host_bound[j].previous.kind==targets[i].kind &&
                 host_bound[j].previous.identifier==targets[i].identifier) { old=&host_bound[j]; break; }
         BOOL pose_read=read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base);
+        /* Door (#67/#71): the native door toggles CPosition+0x100 (and its
+         * collision object) at open/close; the client mirrors that byte. */
+        if(pose_read && door(&targets[i]))
+            frame.actors[i].hit_points=targets[i].position[0x100u]?1.0f:0.0f;
         if(pose_read && targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) {
             float hp=0.0f;
             const uint8_t *stats=readable(targets[i].entity+0x4cu,4u)?*(const uint8_t *const *)(targets[i].entity+0x4cu):NULL;
@@ -1437,6 +1475,7 @@ static BOOL target_chain_still(const Target *t,const Registry *registry) {
         *(uint32_t *)(t->entity+0x34u)!=t->native_identifier ||
         *(void **)(t->entity+0x44u)!=t->position ||
         (t->kind==SUDEKIMP_LAN_STORY_WORLD_NPC_KIND && t->position!=t->entity+0x150u) ||
+        ((door(t) || chest(t)) && t->position!=t->entity+0x150u) ||
         (t->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && (t->position<=t->entity || t->position>=t->entity+0x2000u)) ||
         (scenery(t) && t->position!=t->entity+0x210u) ||
         !writable(t->position,0x104u) || *(void **)t->position!=base+0x2cdefcu ||
@@ -2446,6 +2485,37 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
         if(!body_forward(t,a,forward)) goto fail;
         set_position(t->position,a->position);
         set_forward(t->position,forward);
+        if(door(t) || scenery(t)) {
+            /* Collision solidity (#71): doors follow the host's open/closed
+             * byte; scenery keeps its authored byte. Either way the native
+             * 510D20 publishes it into the collision object, which the
+             * paused client's own entity updates never did (camera passed
+             * through closed doors). */
+            if(door(t)) {
+                uint8_t want=a->hit_points!=0.0f?1u:0u;
+                /* The host re-solidifies a door about a second after its lead
+                 * passed; a remote character still in the doorway would have
+                 * his camera collide with it. Hold the client copy open while
+                 * the local character is inside the door's traverse zone
+                 * (CDoor+0x9C), camera-only: movement is host-owned. */
+                if(want && roster->leader_character<4u) {
+                    const uint8_t *local=roster->actors[roster->leader_character],*lpos;
+                    const float *traverse=(const float *)(t->entity+0x3b0u+0x9cu);
+                    if(readable(local,0x48u) && readable(lpos=*(const uint8_t *const *)(local+0x44u),0x24u) &&
+                        *(void *const *)lpos==base+0x2cdefcu && isfinite(*traverse) && *traverse>0 && *traverse<=50.0f) {
+                        float dx=*(const float *)(lpos+0x18u)-*(const float *)(t->position+0x18u);
+                        float dz=*(const float *)(lpos+0x20u)-*(const float *)(t->position+0x20u);
+                        if(isfinite(dx) && isfinite(dz) && dx*dx+dz*dz<=(*traverse+1.0f)*(*traverse+1.0f)) want=0u;
+                    }
+                }
+                if(t->position[0x100u]!=want) {
+                    t->position[0x100u]=want;
+                    static unsigned door_logs;
+                    if(door_logs<32u) { ++door_logs; SudekiMpLogFormat("lan_story_world event=door_collision side=client identifier=%08lx enabled=%u\r\n",(unsigned long)t->identifier,want); }
+                }
+            }
+            if(collision_sync) collision_sync(t->position);
+        }
         if(!target_chain_still(t,registry)) goto fail;
         /* State/time/blend setters are closed native memory/math operations:
          * no allocation, object callbacks or message pumping. One synchronous
@@ -2571,7 +2641,9 @@ BOOL SudekiMpInitializeLanStoryWorld(HMODULE image) {
     static const uint8_t matrix[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x51,0x56,0x8b,0xf1,0x8b,0x86};
     static const uint8_t update[]={0x55,0x8b,0xec,0x83,0xe4,0xf0,0x81,0xec,0xe4,0,0,0,0x53,0x8b,0x5d,0x08};
     static const uint8_t available[]={0x56,0x8b,0x74,0x24,0x08,0x85,0xf6,0x75,0x06,0xb0,0x01,0x5e};
+    static const uint8_t sync[]={0x8b,0x81,0x8c,0,0,0,0x85,0xc0,0x74,0x0c,0x8a,0x89,0x00,0x01,0,0,0x88,0x88,0xf4,0};
     if(base || !image || !SudekiMpCheckLoadedExecutable(image) ||
+        memcmp(b+0x110d20u,sync,sizeof(sync)) ||
         memcmp(b+0x3050u,position,sizeof(position)) || memcmp(b+0x1114d0u,facing,sizeof(facing)) ||
         memcmp(b+0x111cc0u,matrix,sizeof(matrix)) || memcmp(b+0x110d40u,update,sizeof(update)) ||
         b[0x111cdau]!=0xe8 || b+0x111cdfu+*(int32_t *)(b+0x111cdbu)!=b+0x110d40u) {
@@ -2588,6 +2660,7 @@ BOOL SudekiMpInitializeLanStoryWorld(HMODULE image) {
         SetLastError(ERROR_INVALID_DATA); return FALSE;
     }
     set_position=(PositionSet)(b+0x3050u); position_matrix=(PositionMatrix)(b+0x111cc0u);
+    collision_sync=(CollisionSync)(b+0x110d20u);
     world_set_forward=b+0x1114d0u; set_selector=(SelectorSet)(b+0x223000u);
     set_rate=(ValueSet)(b+0x2230d0u); set_time=(TimeSet)(b+0x223180u);
     set_state=(StateSet)(b+0x223240u); set_blend=(BlendSet)(b+0x2234c0u);
