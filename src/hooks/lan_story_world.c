@@ -1418,6 +1418,19 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
                 }
                 last_selector[c]=sel; last_state[c]=st;
             }
+            /* Bounded research diagnostic (item-use animation, 2026-10-15):
+             * the base channel as it goes on the wire, on every change. */
+            {
+                static uint32_t last_wire_clip[4]; static uint8_t last_wire_state[4]; static unsigned wire_logs;
+                const SudekiMpLanStoryWorldActor *w=&frame.actors[i]; unsigned c=targets[i].character;
+                if((w->clip[0]!=last_wire_clip[c] || w->state[0]!=last_wire_state[c]) && wire_logs<400u) {
+                    ++wire_logs;
+                    SudekiMpLogFormat("lan_story_world event=pc_base_wire ms=%lu character=%u clip0=%08lx occurrence=%u state0=%u time0=%.3f rate0=%.3f ranged_base=%u\r\n",
+                        (unsigned long)GetTickCount(),c,(unsigned long)w->clip[0],w->clip_occurrence[0],w->state[0],
+                        (double)w->time[0],(double)w->rate[0],(unsigned)next[i].ranged_base);
+                }
+                last_wire_clip[c]=w->clip[0]; last_wire_state[c]=w->state[0];
+            }
             if(GetTickCount()-last_split_log[targets[i].character]>(allow_frozen?1000u:5000u)) {
                 last_split_log[targets[i].character]=GetTickCount();
                 const Target *t=&targets[i];
@@ -2316,6 +2329,20 @@ BOOL SudekiMpLanStoryWorldPrepare(const SudekiMpLanStoryNativeRoster *roster,
         profile_start=profile_now();
         BOOL supported=pose_supported(&targets[i],&frame->actors[i],selectors[i]);
         profile_add(1,profile_start);
+        /* Bounded research diagnostic (item-use animation, 2026-10-15): how
+         * the client resolved a party member's base channel, on every change. */
+        if(targets[i].character<4u && SudekiMpLogResearchEnabled()) {
+            static uint32_t last_clip[4]; static uint8_t last_state[4]; static BOOL last_ok[4]; static unsigned logs;
+            const SudekiMpLanStoryWorldActor *w=&frame->actors[i]; unsigned c=targets[i].character;
+            if((w->clip[0]!=last_clip[c] || w->state[0]!=last_state[c] || supported!=last_ok[c]) && logs<400u) {
+                ++logs;
+                SudekiMpLogFormat("lan_story_world event=pc_base_apply ms=%lu character=%u clip0=%08lx occurrence=%u state0=%u time0=%.3f selector=%u supported=%u stage=%s local_selector=%u local_state=%u skip=%02x\r\n",
+                    (unsigned long)GetTickCount(),c,(unsigned long)w->clip[0],w->clip_occurrence[0],w->state[0],(double)w->time[0],
+                    selectors[i][0],(unsigned)supported,supported?"ok":stage,(unsigned)*(const uint16_t *)targets[i].rows[0],
+                    (unsigned)*(const uint16_t *)(targets[i].rows[0]+2u),(unsigned)empty_channels);
+            }
+            last_clip[c]=w->clip[0]; last_state[c]=w->state[0]; last_ok[c]=supported;
+        }
         if(scenery_due && scenery(&targets[i])) log_scenery_pose(supported?"client":"client_unsupported",&targets[i],&frame->actors[i]);
         skip_pose[i]=(uint8_t)empty_channels;
         if(empty_clip_hit) ++empty_clip_skips;

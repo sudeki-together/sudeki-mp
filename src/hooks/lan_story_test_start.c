@@ -3,6 +3,8 @@
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "hooks/lan_story_area_follow.h"
+#include "cleanroom/engine.h"
+#include <math.h>
 
 #include <stdint.h>
 #include <string.h>
@@ -17,6 +19,13 @@ static float leader_xyz[3],follower_xyz[3];
 static BOOL pending;
 static DWORD ready_since,zone_since;
 static char start_zone[40];
+static float leader_health_fraction,follower_health_fraction;
+void SudekiMpLanStoryTestStartSetLeaderHealth(float fraction) {
+    leader_health_fraction=isfinite(fraction) && fraction>0.0f && fraction<1.0f?fraction:0.0f;
+}
+void SudekiMpLanStoryTestStartSetFollowerHealth(float fraction) {
+    follower_health_fraction=isfinite(fraction) && fraction>0.0f && fraction<1.0f?fraction:0.0f;
+}
 void SudekiMpLanStoryTestStartSetZone(const char *zone) {
     memset(start_zone,0,sizeof(start_zone));
     if(zone) strncpy(start_zone,zone,sizeof(start_zone)-1u);
@@ -83,4 +92,17 @@ void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster
     }
     SudekiMpLogFormat("story_test_start event=placed leader=%u placed=%u refused=%u\r\n",
         roster->leader_character,placed,refused);
+    for(unsigned c=0;c<4u;++c) if(roster->available_mask&(1u<<c)) {
+        static const SudekiMpCleanroomActor types[4]={SUDEKIMP_CLEANROOM_BUKI,SUDEKIMP_CLEANROOM_ELCO,
+            SUDEKIMP_CLEANROOM_TAL,SUDEKIMP_CLEANROOM_AILISH};
+        float fraction=c==roster->leader_character?leader_health_fraction:follower_health_fraction;
+        if(fraction<=0.0f) continue;
+        float hp=0.0f,sp=0.0f; BOOL ok=FALSE; float target=0.0f;
+        if(SudekiMpCleanroomEngineActorResources(types[c],&hp,&sp) && hp>1.0f) {
+            target=floorf(hp*fraction); if(target<1.0f) target=1.0f;
+            ok=SudekiMpCleanroomEngineSetActorResources(types[c],target,sp);
+        }
+        SudekiMpLogFormat("story_test_start event=%s fraction=%.2f character=%u hp=%.0f->%.0f ok=%u\r\n",
+            c==roster->leader_character?"leader_health":"follower_health",(double)fraction,c,(double)hp,(double)target,(unsigned)ok);
+    }
 }

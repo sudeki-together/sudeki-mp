@@ -35,6 +35,11 @@ typedef struct SudekiMpPanelText {
     float x, y, size, width;
     char text[128];
 } SudekiMpPanelText;
+enum { SUDEKIMP_PANEL_BOXES = 4 };
+/* Overlay-only framed rectangle in full-viewport 960x720 coordinates, drawn
+ * before the texts: style 0 = dialog panel (fill + gold frame), 1 = button at
+ * rest, 2 = focused button. */
+typedef struct SudekiMpOverlayBox { float x, y, width, height; unsigned style; } SudekiMpOverlayBox;
 typedef struct SudekiMpTitleExtras {
     unsigned informational_rows;
     char rows[SUDEKIMP_TITLE_MAX_ROWS][80];
@@ -49,6 +54,8 @@ typedef struct SudekiMpTitleExtras {
     unsigned text_count;
     SudekiMpPanelControl controls[SUDEKIMP_PANEL_CONTROLS];
     SudekiMpPanelText texts[SUDEKIMP_PANEL_TEXTS];
+    unsigned box_count;
+    SudekiMpOverlayBox boxes[SUDEKIMP_PANEL_BOXES];
 } SudekiMpTitleExtras;
 /* Render-thread only. Warm during the native intro, before its root entrance.
  * TRUE means all required button states and lettering are ready; the optional

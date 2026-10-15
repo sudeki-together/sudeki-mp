@@ -63,6 +63,15 @@ BOOL SudekiMpLanStoryControlRetainsKey(const SudekiMpLanPartyLease *key);
 BOOL SudekiMpLanStoryControlRetains(void);
 /* Ends the empty native scope and restores both Q/E callsites. Must precede
  * StoryObserver/ControlSeparation teardown. Failures retain dependencies. */
+/* #75: equip a weapon item on a remote player's character at the host, from
+ * that player's own M menu request. Grants the item to this game first when
+ * missing (equipment follows the character), then runs the native equip.
+ * Returns a SudekiMpLanStoryActionOutcome value. */
+unsigned SudekiMpLanStoryControlEquipWeapon(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item);
+/* #75 / D10: use a consumable on the requesting player's own character. */
+unsigned SudekiMpLanStoryControlUseItem(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item);
 BOOL SudekiMpLanStoryControlUninstall(void);
 
 #endif

@@ -50,6 +50,13 @@ BOOL SudekiMpLanStoryClientObserve(void *controller,
     const SudekiMpLanStoryScene *scene);
 BOOL SudekiMpLanStoryClientAcquire(SudekiMpLanStoryClientReport *report);
 BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *report);
+/* #75: while the client's own native Main Menu is shown (and briefly after it
+ * closes) the engine creates UI/script tasks ("OnMainMenuActivate/Deactivate",
+ * preview model). With this set, Service adopts a small task-counter advance as
+ * the new baseline when every other paused-world invariant still holds, instead
+ * of declaring the paused observation changed. Never adopts GEL time, trigger
+ * queue, registry or roster differences. */
+void SudekiMpLanStoryClientAllowUiTasks(BOOL allow);
 /* Fixed Lighthouse transition, while retaining the same full native pause.
  * The request uses this client's local load/scene identities; the runtime
  * separately proves the host's authenticated transition. Native operations

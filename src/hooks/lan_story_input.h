@@ -29,6 +29,13 @@ BOOL SudekiMpLanStoryInputSample(void *controller,void *actor,uint32_t transacti
 /* Consume this window's native action19 press edge. No native controller
  * cache is seeded. Releases/repeats cannot open the menu a second time. */
 BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t transaction);
+/* One admitted fresh press of the native main-menu action (0x18, M). */
+BOOL SudekiMpLanStoryInputTakeMainMenu(void *controller,void *actor,uint32_t transaction);
+/* Same press, but only focus-gated: lets a shown native menu be closed even
+ * when input admission has lapsed. */
+BOOL SudekiMpLanStoryInputTakeMainMenuRaw(void);
+/* Research: log every native event seen by the controller listener hook (capped). */
+void SudekiMpLanStoryInputTraceEvents(BOOL on);
 /* One native frame of 2C/2D/2E states, packed as weak|strong<<2|sweep<<4.
  * Press=1, held=2, release=3, neutral=0; simultaneous events stay together.
  * generation changes on focus/menu/rebind so unsent history can be retired. */

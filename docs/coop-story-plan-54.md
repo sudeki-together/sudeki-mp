@@ -63,6 +63,8 @@ the progress log.
 | D6 | **Save transfer.** On join the host's current save goes to the client's temp area and the session loads from it, so clients don't need an identical save. Every host save replaces the temp copy (checksum-verified; partial transfers discarded). On session end or disconnect the client asks "Disconnected. Would you like to save?": Yes copies it into a co-op slot (never over the player's own saves without asking; backup first), No deletes it. After a client crash, the same question comes at next launch, asked once; closing it counts as No. Only one temp copy exists. Unclaimed copies auto-delete after 7 days. The launcher gets "clear pending co-op saves". Uninstall removes the temp folder. The client's native save menu stays blocked. Transfer goes over the reliable lobby (TCP) link. |
 | D7 | Enemy scope: Kurians (Levy, Trooper, Shooter) and Grotesques, **Shooter missiles**, **allied guards**, and the **Mungo** boss (`BOSS_MUNGOMOFO`, shield variant). |
 | D8 | Remote control parity. Every frame the host refreshes each remote player's character **auto-target** (its own CTargeter) from **that player's** facing; remote turning uses the **player** turn path; movement keeps being sent during attacks like the native controller. **No lock-on** (Tal has none in normal play). Deferred until needed: remote block; a per-player auto-target-off setting. |
+| D9 | **Per-game party inventory (owner, 2026-10-14).** Every player's game keeps its own vanilla shared party inventory and purse; nothing is pooled across machines. Loot — florins, consumables, materials and chest contents picked up off the ground or from dead enemies/chests — is **copied into every player's inventory** (the host observes its native `AddItem` at the pickup/treasure sites and clients add the same item natively, with the native pickup popup). **Shop purchases count only for the buyer**; shop/script `AddItem` sites are never replicated. Equipment state (what each character wears) replicates as state so every game shows the same models/animation banks; each player chooses their own character's equipment from their own menu (request to host). Consequence for D6: a client's inventory lives in its own game, so a save transfer from the host must not erase it — the mod's per-player ledger/sidecar re-applies it after loading the host's save. |
+| D10 | **Client menu scope (owner, 2026-10-15).** A client's M menu edits only its own character: equipment and consumables are requests the host executes natively on that character; consumable use from a client offers **no target choice** (self only — the host keeps vanilla targeting). Weapon info (F3) and the other read-only pages stay available. |
 | NG | **New-game co-op.** The host can start a new game; clients start a new game together and stay in sync through the intro by presenting the host's (client world contained, host cinematic shown). Each client seat is **locked to its character** and spectates until that character joins the party, then takes control. Checkpoints re-prove client/host agreement (zone, cinematic, roster). |
 
 **Acceptance route (end of plan):** new game; the host plays **Tal** from the start; the client
@@ -4841,3 +4843,449 @@ Host log: `story_world_visual event=observed source=1 kind=238` (SFXE007) and
 `kind=237` (SFXA205) alongside `story_inventory event=add_item site=chest
 item=320`. #66 part 1 (host-opened chest shown to clients) is complete; part 2
 (remote player opens, loot credited to the opener) is Phase H / D6.
+
+### 2026-10-14 — Owner observations after a treasure pickup; inventory decision (D9)
+
+CONFIRMED_LIVE (owner, candidate `deea724c…` / `19931be`): Ailish opened a
+treasure object holding **Hukin's Fate** (item 3; host observer
+`add_item site=chest item=3`). (1) Tal's player never saw the item: the
+client's own `CInventory` is never updated — only the host's game owns the real
+pickup. (2) The client cannot open the M game menu (held closed by design: it
+would operate on the client's stale local save). (3) When the host equipped
+Hukin's Fate on Tal from the M menu, **Tal's client froze until the old sword
+was re-equipped** — HYPOTHESIS: the host's frames reference the new weapon's
+model/animation bank, which the client's Tal (still holding the old sword) does
+not have, so frames are refused until equipment matches; no equipment state is
+replicated for party members today. Owner decision recorded as D9 (per-game
+vanilla inventory; loot copies to everyone; shop purchases personal; equipment
+replicates as state). Order agreed: equipment replication first (freeze is
+host-triggerable at any time), then H1 chest use, then the inventory loot copy
+and the client menu. Live chain for H1 captured the same session: the chest use
+entry (RVA 0x184EC0) is invoked from RVA 0xB5D9E under the script VM, i.e. the
+`OnAction` script calls a native export; `0x295B0(controller,0)` follows from
+RVA 0x184F83.
+
+### 2026-10-14 — #74 equipment freeze: cause confirmed, grant candidate
+
+CONFIRMED_LIVE + CONFIRMED_STATIC: the party frame already carries each
+character's equipped weapon (`weapon_item_plus_one`, host `lan_story_snapshot.c`
+`equipped_item`), and the client's `SudekiMpLanStoryReplicaPrepareEquipment`
+(`lan_story_replica.c`) equips it natively from the client's **own** weapon
+rows. Hukin's Fate was never in the client's inventory, so the lookup set
+`ERROR_NOT_FOUND` — the client logged exactly `lan_story event=present_refused
+step=prepare error=1168` (×12) and refused every frame until the host re-equipped
+a sword the client owned. Candidate `aa5389e0…` (D5 "equipment goes to its
+owner"): new engine helper `SudekiMpGrantCharacterWeaponItem` (same exact
+`CInventory::AddItem` image proof, item-table identity, weapon-family and
+pending-swap guards as the test-room grant; `show=1` for the native notice);
+the replica adapter grants the missing item once per host epoch/generation,
+re-describes the rows and continues with the ordinary equip. StoryWeaponPose,
+StoryVfxDispatch, StoryCastView, StoryClientCameraImage and LanPartySession
+pass. **Owner gate:** Ailish opens the treasure object and equips Hukin's Fate on
+Tal from the host menu — no freeze; client log `equipment_granted … granted=1`
+and `weapon_grant item=3`; Tal's model changes on both screens. Not covered:
+armour (no armour state in the frame yet; #40), unequip (no validated contract).
+
+### 2026-10-14 — Farmhouse entry: two host paths; one freezes the client
+
+CONFIRMED_LIVE (two owner round trips, candidates `aa5389e0…` then `b3c2755a…`):
+(a) **Split path** — host logs `host_control_blocked reason=split_transition_hold`,
+Tal's body stays outside, control returns at once (client `native_binding_
+acknowledged` → `host_confirmed_movement`); only the brief hold is visible
+("the same minor freeze he has always had … acceptable for now").
+(b) **Take-along path** — host logs `zone_begin method=5 … temporary=
+lico_frappe_farm`, then `host_control_drain reason=roster_unknown` and
+`load_drained seat=2`; Tal's host body is popped inside beside Ailish (live
+read: both at −166,4.4,−70, AI override 0, AI mode byte 1, arbiter idle); after
+the host leaves (`zone_begin … temporary=` empty) the offer chain reaches
+"offer_attempt" and then refuses silently every frame, so the client stays in
+`waiting_for_host_offer` and goes spectator: the "froze when I went inside"
+report. Which path runs depends on where Tal stands when Ailish enters
+(HYPOTHESIS: inside the door trigger → native take-along). Candidate
+`b3c2755a…` adds rate-limited names for the formerly silent refusals
+(`offer_begin_refused`, `offer_lease_refused`, `offer_acquire_*`;
+`story_native_control event=acquire_refused reason=generation_stale|
+slot_not_empty|body_not_idle|identity_drift|ai_override|ai_mode`). Next: owner
+reproduces (b) with Tal beside Ailish at the door; fix follows the named reason.
+
+### 2026-10-14 — #74 equipment grant accepted
+
+CONFIRMED_LIVE (owner, candidate `b3c2755a…`): Ailish equipped Hukin's Fate on
+Tal from the host menu; "he didn't freeze". Client log: `weapon_grant item=3
+category=4 policy=equipment_follows_character` → `lan_story_replica
+event=equipment_granted character=2 … item=3 granted=1` → `equipment_requested
+… status=0` (started). Weapons only; armour has no frame state yet (#40).
+Owner direction for the menu (#75): every player gets the M menu for **their
+own character only** — the host must no longer switch to another human's
+character (F-keys) and equip for them; AI companions remain the host's.
+
+### 2026-10-14 — #75 M-menu scope: native seams and first candidate
+
+CONFIRMED_LIVE (gdb watch/traps on the host while the owner used the menu):
+the Main Menu object is `*(0x3C2F78)` (vtable RVA 0x2CAE0C), its selected
+party slot is `ui+0x170` indexing `group+0x90+slot*0xC`; the F-key character
+switch is one routine, RVA 0x96300 (EAX = ui, pushed direction, RET 4: ±1
+modulo `group+0xCC`, then preview/page rebuild), called from the menu input
+handler at RVA 0x93B24 (next) and 0x93B47 (previous); the menu opens through
+vtable slot RVA 0x2CAE4C → RVA 0x956D0 (sets slot 0, "OnMainMenuActivate",
+`0x40AFD0(1)` pause) requested by the gameplay HUD state machine
+(`*(0x3C2F88)`, requested state 0xB, RVA 0x9DD80 case 0xB); the Weapons layer
+confirms an equip through one call site, RVA 0x16F1A4 → 0x1706D0 (layer on the
+stack, RET 4; rows at widgets+0x88C, selected +0x858, item id at row+0x84).
+The mod's armour page (#40) did call the native armour equip for Tal three
+times; its visible effect on a non-front character is UNKNOWN.
+Candidate `bfdcee75…`: `lan_story_main_menu.[ch]` wraps both
+cycle calls so a player only lands on slots they own (host: own character and
+AI companions, never a connected client's character; client: own only — pure
+policy in `lan_story_menu_policy.[ch]`, tested), moves the selection to the
+player's slot after open, and on the client turns the equip call into a host
+request (`SUDEKIMP_STORY_ACTION_EQUIP_WEAPON`, slot = weapon item id of the
+fence character's family; host `SudekiMpLanStoryControlEquipWeapon` grants the
+item if missing then equips natively). StoryMainMenuImageTest (exact guards),
+StoryMenuPolicyTest, StoryActionTransportTest, LanPartySessionTest and
+StoryClientCameraImageTest pass. Not yet: opening the M menu on the client
+(the native key path is still being traced), armour, skills pages.
+**Owner gate (host side):** open M as Ailish — F-keys must no longer reach Tal;
+equipping Ailish's own weapons works as before.
+
+### 2026-10-14 — #75 client M menu: open works; presentation stops in menu render mode
+
+CONFIRMED_LIVE (client candidates `e3d6f7a5…` → `1a388156…`): the client's M
+press (native action 0x18, sampled like Q's 0x19) delivers the gameplay HUD
+command 0xF and the native Main Menu opens on Tal's own page; equip presses on
+the Weapons page reach the intercept (native "equip" fires on every row
+selection, not only on confirm). What then breaks: the client's render-world
+mode (`*(0x408D1C)+0x6C`) goes 0→1 for the menu, the primary world-render
+branch (CALL 0x28D45B → 0x1D48C0, the only seam the client presents from) is
+skipped, no frame is presented, and after 250 ms the control layer reports
+`pending_presentation_stale`, clears input and the host offer decays
+("waiting for host sync"; equip requests refused; the menu could not be closed
+because the close key travels through the swallowed gameplay listener).
+Ruled out along the way (CONFIRMED_LIVE, poller): the menu's entity-pause pass
+(RVA 0xFD610) and disable-move/listener pause (RVA 0xAFD0) — both now skipped
+on the client — and the speed-pause count (a count of 1 is the client's normal
+owned pause). Candidate `1a388156…` adds the M toggle (menu input handler
+kind 5 / command 1 = back). Next: present while the render mode is 1 (candidate
+seams: force the primary branch for the client, or drive presentation from the
+effects seam which keeps running), so control, input and the equip request
+journal stay alive with the menu open.
+
+### 2026-10-14 — #75 client menu hold candidate
+
+CONFIRMED_STATIC (frame renderer RVA 0x28D3F0): the world is rendered only when
+`*(0x408D1C)+0x6C == 0`; any full-screen UI mode draws UI only, so no mod seam
+in the world render runs while the Main Menu is up and "the world behind the
+menu" has no vanilla visual. Candidate `514e0b77…`: while the client's Main Menu
+is shown, `service_client_control` no longer treats the (necessarily) stale
+presentation as pending and `queue_client_action` accepts requests on the last
+presented frame — control lease, muted input and the equip request journal stay
+alive; M toggles close (menu input kind 5/command 1). On close the newest host
+frame applies at once. **Owner gate:** open M on Tal, wait ~10 s, equip another
+Tal weapon, close with M, move — no sync wait; host `story_main_menu
+event=host_equip`; model switch on both screens.
+
+### 2026-10-15 — #75 client menu: hold, UI-task adoption, request window
+
+CONFIRMED_LIVE (client candidates `2c5a1d5e…` → `36b7f38f…`, owner round trips):
+with the native Main Menu shown the client's world-render branch is skipped,
+so (1) the control service must hold the lease through an invalid *and* stale
+presentation sample and an unready local view, and the dispatch must not call
+`invalidate_presentation()` for the missing render attempt; (2) the menu's open
+("OnMainMenuActivate", preview model) advances the native task-created counter
+by one, which the containment read as `pause_invariant_failed scheduler=0
+tasks=52->53` → UNKNOWN; `SudekiMpLanStoryClientAllowUiTasks` now lets Service
+adopt a small counter advance while the menu is shown (+3 s) when GEL time,
+trigger queue, registry and roster are unchanged (`ui_tasks_adopted`); (3) the
+M key is a gameplay-listener action the client swallows, so the close is the
+mod's own: a focus-gated raw press delivers the active UI's "back" (menu input
+handler kind 5 / command 1: sub-layer → page list, page list → leave, state 6);
+the earlier admitted-only sampling lost presses once the lease decayed; (4) the
+client's equip requests arrived at the host but were answered EXPIRED because
+the acknowledged frame cannot advance in the menu — `story_action_current`
+exempts `EQUIP_WEAPON` from the eight-frame window (fence currency kept).
+Repeated open/close cycles accepted in the log of `991a3c4b…`; equip through
+the client menu is the open gate on `36b7f38f…`. Known: F-keys do not reach the
+client menu (same swallowed listener; harmless with one owned slot); the host
+logs `menu_pause=native` (unchanged behaviour).
+
+### 2026-10-15 — #75: menu key device ownership, equip currency, items decision
+
+CONFIRMED_LIVE (client `36b7f38f…`): after menu actions on the client (equip
+row, F3 info) the native UI re-owns the controller listener's device, so the
+mod's input hook — which samples only events from the owned device — stopped
+seeing the M key (one `key` line per session) and the menu could not be left;
+`77ba8b80…` samples the main-menu action for any device. Equip requests reached
+the host but were answered EXPIRED because `story_action_current` also demands
+a fresh client scene observation, which a client in its menu cannot publish;
+EQUIP now needs only the control fence (same fence, control READY, no frame
+ahead of the host). Owner reports item use from the client menu does not heal:
+it runs on the paused replica only — recorded as decision D10 (client item use
+= host request, self only). Gates open: F3 → M → M → M leaves the menu; equip
+from the client menu changes Tal's weapon on both screens (`host_equip`).
+
+### 2026-10-15 — #75 client weapon equip through the host: working
+
+CONFIRMED_LIVE (host/client logs + live memory, candidate `3fbee5dc…`): a weapon
+confirmed on Tal's own Weapons page becomes `EQUIP_WEAPON` (item id), reaches
+the host (client-side frame expiry exempted for this kind; host currency = control
+fence + READY only), and the host equips it with the **Main Menu's own equip
+core** — tracked handle from the actor (RVA 0x2000: `8B 09 89 08 C7 40 04 …`),
+item definition in ESI, context 0x34BE70 in EDI, generic apply-item-to-character
+RVA 0x12DF60 (consumes the handle) — `weapon_equip item=0 applied=1`; the frame
+then carries the weapon and the client replica equips it (`equipment_requested
+item=0 status=0`); live, host and client Tal both hold item 0. The combat
+quick-activation path tried first (`SudekiMpActivateCharacterWeapon`) reported
+STARTED but left an idle AI-driven Tal on his old weapon. The three native
+routines (item lookup, `0x12E1E0` can-use, `0x12DF60` apply, then
+`CInventory::ReduceItem`) are also the Items page's use path, so USE_ITEM (D10,
+self only) reuses them. Pending owner visual confirmation of the swap.
+
+### 2026-10-15 — #75 client weapon equip accepted
+
+CONFIRMED_LIVE (owner, candidate `3fbee5dc…`): equipping the training sword from
+Tal's own menu changed Tal's weapon on both games ("the mini-Tal in the main
+menu had not changed … when I switch a weapon I can see that swap on Ailish's
+screen"). Known cosmetic gap: the client menu's 3D preview is rebuilt only by the
+native equip (which the client now skips) — rebuild it after the replica equips
+while the menu is shown. Next: USE_ITEM (D10, self only) on the same native
+apply path; the client Items page intercept at the Items-page use handler
+(RVA 0x179A50) call site.
+
+### 2026-10-15 — #75 / D10 item use candidate
+
+CONFIRMED_STATIC (Items page use handler RVA 0x179A50 and its callers): the
+Items layer confirms through one call site (RVA 0x17761D, layer on the stack,
+RET 4); the handler maps the selected row (layer+0x124 index, rows at +0x158,
+row+0x84 = category-2 row index) to the item definition through the inventory's
+category lookup (RVA 0x21CE0, thiscall(inventory, 2, row)), builds the target
+handle, runs can-use (RVA 0x12E1E0, 0 = usable), apply (RVA 0x12DF60, context
+0x34BE70) and `CInventory::ReduceItem(id,1)`. Consumables are CItemConsumable
+(vtable RVA 0x2D3B20, category word +0x88 = 2). Candidate `be181080…`:
+`USE_ITEM` action kind (item id = slot | extra<<8; the extra byte is zero for
+every other kind), client Items-page intercept → request for the player's own
+character (no target), host `SudekiMpUseItemOnCharacter` = the same three
+native calls with exact-image checks on all four entries and the Items page's
+three call sites, client reduces its own inventory by one on STARTED. Transport,
+session, menu policy and image suites pass. **Owner gate:** heal Tal from his
+own Items page — HP rises on both screens, count −1 on both. Not covered: a
+consumable the host does not own (purchase case, D9) — logged as stage 3/… and
+refused; quantity check deliberately omitted for this cut.
+
+### 2026-10-15 — #75 / D10 item use: host crash, cause and fix
+
+CONFIRMED_LIVE (two runs, candidate `be181080…`): the first client item use
+(`use_requested a=204 b=1`, Tal healing himself from his own Items page)
+killed the **host**, not the client. Wine's backtrace: page fault at the
+handle-make entry (RVA 0x2000, `mov ecx,[ecx]`) with ECX = EDX = 0, EBX =
+the item definition. The client then lost the host and left to the title
+through its normal native-exit path (`story_native_exit` → `story_session_ended`),
+which is what looked like a client crash.
+
+Cause (CONFIRMED_STATIC in the compiled DLL): `SudekiMpUseItemOnCharacter`
+runs two inline-asm blocks, can-use then apply, and both named
+`&actor_pointer` as an EDX *input*. GCC therefore assumed EDX survived the
+first block, but the native can-use call (MS ABI, 0x12E1E0) clobbers EDX and
+ECX, so the apply block passed a null address to handle-make. The one-block
+equip path never had the problem. Fix: both blocks take the item and the
+actor address as in-out operands (`"+b"`, `"+d"`) and reload them between the
+blocks; the rebuilt code reloads EBX/EDX from the stack before the apply call.
+Both native calls return with `ret 0xC`, so the stack contract was already
+right. Candidate `715c6800…` staged on both games. **Owner gate unchanged:**
+heal Tal from his own Items page — HP rises on both screens, count −1 on both;
+expect host `item_use item=… applied=1` and `host_use … outcome=1`, client
+`use_applied`.
+
+### 2026-10-15 — #75 / D10 item use accepted; client confirm prompt candidate
+
+CONFIRMED_LIVE (owner, candidate `715c6800…`): Tal healed himself from his
+own Items page. Host `item_use item=204 applied=1` / `host_use … outcome=1`,
+client `use_applied item=204 local_reduced=1`; HP rose on both screens.
+
+Owner rule (2026-10-15): a client's Items page must not show the party-target
+view at all (D10: self only). Instead the list confirm opens a second
+"are you sure" prompt.
+
+CONFIRMED_STATIC (Items layer input handler RVA 0x1770B0, vtable 0x2D8BBC
+slot +0x2C; mode word layer+0x8C): list mode 0, confirm commands 0/2 → when a
+consumable is highlighted (layer+0x200 = definition, set by the list refresh
+RVA 0x178390 through the category lookup) the handler plays the confirm sound
+and calls the mode switch (RVA 0x177850, ESI = layer, EDI = new mode = 5)
+from RVA 0x177166; mode 5 is the party-target view whose confirm is the use
+handler (RVA 0x179A50, already intercepted) and whose commands 6–9 move the
+portrait cursor (`*(ui+0x218)+0x30C4`). The native pause-menu yes/no
+(`SUI_Pause_YesNo`, "Are you sure you want to quit?") is private to the
+pause layer (owners RVA 0x1DC70 / 0x1C920), not a reusable dialog, so the
+prompt is mod-drawn.
+
+Candidate `07d9ca2d…`: new seam in the Main Menu adapter — the list-confirm
+call at RVA 0x177166 (guards: `mov edi,5` at 0x177104, the sound call
+context with base-relative operands, `mov esi,ebx`, the `mov al,1` epilogue)
+is redirected on every seat; on a client it records the highlighted
+consumable and the player's own slot as a prompt and skips the mode switch,
+so the Items list stays where it is. The runtime draws the prompt with the
+title-view text renderer ("Use this item on yourself?", Yes/No, hint line).
+Keys while the prompt is shown: Enter/Space decide, Left/Right/Tab switch,
+Esc/M cancel; a native confirm arriving while the prompt is shown decides
+it too, and a 300 ms suppress window stops the same key from re-opening it.
+The prompt drops itself when the Items layer stops being the active UI or the
+highlighted row changes. Host unchanged (native party-target view). Image
+suite (12 seams) and menu policy test pass. **Owner gate:** on Tal, Items →
+confirm a potion: no party view, a yes/no prompt appears over the menu; Yes
+heals as before (both screens, count −1), No/Esc leaves the list untouched.
+Unknown until seen: whether the overlay draws while the native menu owns the
+frame (first draw result is logged as `confirm_render`).
+
+### 2026-10-15 — confirm prompt accepted as working; framed dialog; item-use feedback (#76)
+
+CONFIRMED_LIVE (owner, candidate `07d9ca2d…`): the client Items confirm opened
+the mod prompt instead of the party view, and Yes healed as before. Owner
+feedback: the prompt was bare text and the world name tags ("Host"/"Guest")
+showed through the menu. Candidate `3d106933…`: the overlay renderer gained
+framed boxes (dialog panel + rest/focused buttons, diffuse-only quads like the
+letterbox bars) and the prompt is a centred dialog with two lit buttons and a
+hint line; name tags are not drawn while the client's native menu is shown.
+Owner gate: dialog looks like a window over the menu, lit button follows
+Left/Right, no stray tags.
+
+Owner question: Tal shows no "use" moment on his own screen when he uses an
+item, while Ailish does on the host. CONFIRMED_STATIC: the consumable heal
+method (RVA 0x12E7B0, CItemConsumable vtable +0x20) attaches the item's
+visual effect to each target through the attachment factory RVA 0xBCE90
+(resource from the definition +0xE0) and fires the script callback
+`PCItemUseCallback` plus a timed script job; none of that reaches the joiner's
+replica. Filed as #76 with a host-authoritative proposal (client attaches the
+same effect locally on STARTED; clip replication if the callback animates).
+
+### 2026-10-15 — client-side presentation of an accepted item use (#76 candidate)
+
+Owner (framed dialog accepted visually): the Items list quantity only updated
+after leaving and re-entering the menu, and Tal should "fire the same
+ItemUseCallback" as the host's character.
+
+Candidate `ed03a5b9…` (D10 unchanged: the host still decides): when the
+client's USE_ITEM result is STARTED, the client now runs the native apply on
+its own replica with the can-use check skipped (`SudekiMpUseItemOnCharacter(…,
+validated=TRUE)`): the CItemConsumable method attaches the item effect
+(0xBCE90), fires `PCItemUseCallback`, and `CInventory::ReduceItem` lowers the
+local count — the separate local reduce is now the fallback only. The stat
+change it makes locally is overwritten by the replicated party state. Then,
+if the Items page is the active UI, the page is rebuilt the way a category
+switch does (RVA 0x178820, stdcall-like RET 4, exact entry bytes) and the
+party panel is refreshed (RVA 0x15B570, EAX = its current cursor, RET 4).
+Logs: client `item_use item=… applied=1 validated=1`, `use_applied …
+local_apply=1 refreshed=1`, `story_main_menu event=items_refreshed`.
+**Owner gate:** Tal uses a potion from his own menu: quantity drops at once
+in the list, Tal's own screen shows the item effect/use moment the host's
+character gets, no containment complaint (`pause_invariant`/`ui_tasks`) and
+no crash. Unknown: whether the callback runs cleanly in the contained client
+script VM — watch the client log.
+
+### 2026-10-15 — item-use animation A/B, part 1 (host, outside the menu)
+
+Test aid added: `[StoryAreas] TestStartLeaderHealth=<fraction>` lowers the
+host leader's HP after the test-start placement (cleanroom resource setter;
+logged `story_test_start event=leader_health hp=300->150 ok=1`).
+
+CONFIRMED_LIVE (owner, host as Ailish, Healing Ointment used **outside** the
+M menu, i.e. the in-game quick item path): the host logged a one-shot base
+clip on character 3 — `base_clip_change selector=4->4 state=1->65 time=260
+rate=24` followed by `selector=4->1 state=65->0` — and the client mirrored
+the heal (`party_resources character=3 hp=150->300`). That one-shot is the
+use animation. Part 2 (same use from the M menu, then on Tal) follows after a
+reload at half health.
+
+### 2026-10-15 — item-use animation A/B, part 2: what the client misses
+
+CONFIRMED_LIVE (host as Ailish, Healing Ointment from the M menu and outside
+it; host/client wire diagnostics `pc_base_wire` / `pc_base_apply`, candidate
+`5d864d36…`): the use moment on the host is (a) a short base-channel
+one-shot (Ailish: selector 4 for ~0.2 s, then selector 14, clip `ba938095`,
+20 frames at 24/s, completion bit 0x40 then back to idle), (b) a
+`SpecialEffect` created ~0.7 s later by the scheduled `PCItemUseCallback`
+job, parented to the character (`SFXM005_HEAL`, resource id 0xa1707ff3,
+alive ~2 s). The body clip **is** on the wire and the client **applied** it
+(`pc_base_apply … selector=14 supported=1`, local row followed within one
+frame), so the missing part on the joiner's screen is the heal effect: it is
+not whitelisted, so the world-cosmetic capture skipped it. The client's own
+local apply of an accepted use plays the clip only through the host (the
+script job never runs in the contained client), so the same fix covers Tal.
+
+Candidate `9aad8d50…`: `SFXM005_HEAL` added to the world-cosmetic whitelist
+(source mask 1). Open question for the gate: the effect is parented to the
+character with a zero local transform, so the capture must deliver the
+composed world matrix (`RVA_WORLD_MATRIX` on the effect's position
+component); if the client shows it at the origin or not at all, the
+parented case needs an owner-actor attachment like the shield visuals.
+**Owner gate:** Ailish uses an ointment (any path): Tal's screen shows the
+heal sparkle on Ailish plus the short clip; then Tal uses one from his menu:
+both screens show the sparkle on Tal.
+
+### 2026-10-15 — remote item use: the native action path (#76 research)
+
+CONFIRMED_STATIC / CONFIRMED_LIVE (candidates `ef59f3e5…` → `3d9…` series):
+the quick item menu does not call the Items-page apply. It runs can-use,
+then hands the item to the character's "use item" action: RVA 0xDC110
+(arbiter, item definition, party slot on the stack, RET 0xC, AL = started)
+checks arbiter+0x50 against 0x29BE6F0 / 0x400000 and +0x60 bit 0, stores
+the definition at action+0x44 and a target handle (group slot) at
+action+0x48 with kind 0x9A at +0x40 (action object = `*(character+0x9C)`,
+RVA 0x58A390), then RVA 0x4DA5B0 raises arbiter 0x800|0x20 and sets the
++0xB4 component state to 7. The keyframe routine RVA 0x58A480 applies the
+item (RVA 0x12DF60, ESI = definition, EAX = handle copy) and sets the
+"applied" byte action+0x54; the end handler RVA 0x58A3C0 (per-class
+"animation ended" virtuals such as RVA 0x153ED10 for kind 0x9A) applies
+only if that byte is still 0, then clears 0x800|0x20.
+
+Live on the host for the remote-controlled Tal: the action starts
+(`item_action started=1`), 0x821 is raised, the keyframe routine runs at
++0.3 s (`applied=1`, kind cleared) and the action ends at +0.6 s, but
+Tal's host HP (stats+0x2C) stays at 200 across every sample and no
+SFXM005_HEAL entity appears. The mod's remote move path first interrupted
+the action with a zero-speed submission; that is fixed (busy mask includes
+0x20 and the move path returns held without any native call), yet the
+keyframe apply still changes nothing. Open question: why the identical
+apply call heals when the mod makes it directly but not from the action's
+keyframe for this body. Interim (`host_use_target` / `item_use …
+hp_after` logs added): the host starts the action for the animation and
+applies the item directly once (no second count reduction).
+
+Client quick menu: the items page is category 5 (CONFIRMED_LIVE); a row
+confirm there now becomes a USE_ITEM request for the player's own
+character (`story_quick_menu event=closed reason=item_queued`).
+
+### 2026-10-15 — remote item use accepted (M and Q menus)
+
+CONFIRMED_LIVE (owner, candidate `3c…` = commit below): Tal uses a Healing
+Ointment from his own M menu and from the Q menu; both screens show the use
+animation, the heal and the SFXM005_HEAL sparkle. Root cause of the long
+"animation but no heal": the native quick menu runs can-use (RVA 0x12E1E0)
+immediately before starting the action, and the apply that follows (keyframe
+RVA 0x58A480 or direct) only takes effect after that call; the host now runs
+can-use with the same handle contract before RVA 0xDC110. Interim direct
+apply removed; the Items-page apply stays as the fallback when the action
+cannot start. Also fixed on the way: the remote move path no longer submits
+anything while arbiter 0x20 is set (the zero-speed submission interrupted the
+action), and the client quick menu's item page is category 5.
+
+## 10. Remaining work (owner review 2026-10-15)
+
+Against the original phases, with the #54 route (castle road ↔ New
+Brightwater, Ailish host / Tal client) as the yardstick:
+
+| Area | State | Next step |
+|---|---|---|
+| A groundwork, B protocol split, C remote control parity, D1–D5 enemies/drops | Accepted live (see §9 and the status matrix) | — |
+| **D6 loot rule (D9)** | Not wired. Ground/enemy/chest pickups still land in the host's inventory only; purchases untested | Host captures every native pickup (0x217E0 AddItem from the pickup/chest/drop paths) and sends a grant to every client, which runs AddItem locally; shop purchases (merchant path) never send a grant, so bought items stay personal. Needs the pickup call sites per source and a client-side AddItem guard. |
+| E1 missiles, E2 allied guards, E3 Mungo | E2 partially seen in world frames; E1/E3 open | Research-first items; no owner gate yet |
+| F combat state + spectating | Not started | Client cluster follow, fallen-character spectate |
+| G lead vs ownership | Not started (death/lead hold still in place) | Decouple host controller/camera from the native lead |
+| **H interactions (D4)** | H1 remote door/chest use open (#66/#67 follow-up); shops/talk host-only | Scoped front-actor swap at the interaction seams (0x40D330/0x40D6F0/0x40D9A0/0x40CCD0) |
+| **I saves (D6)** | #72 filed, nothing built | Host→joiner save transfer with protections, then the rest of Phase I |
+| J new-game co-op | Not started | — |
+| Client menu follow-ups | Weapon preview stale after relayed equip; armour relay (#40/#74); F-keys unreachable on the client menu | Small adapter items |
+| Void fall (#73), departure hold (#70), slope slide (#69), client camera walls (#71) | Issues filed | Owner priority |
+| Bosses, full campaign, two-machine/native-Windows runs | Untested | Owner priority |
+
+Owner rule restated for D6: **items picked up** (ground drops, enemy drops,
+chests) are cloned to every player's inventory; **items a player buys** stay
+with that player. Nothing else is shared.

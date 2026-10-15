@@ -110,6 +110,10 @@ typedef struct SudekiMpLanPartyPresence {
     uint8_t ack_result[4]; /* SudekiMpPartySwapResult */
 } SudekiMpLanPartyPresence;
 BOOL SudekiMpLanPartyCommandValid(const SudekiMpLanPartyCommand *command);
+/* Research hook: the host names each story-action EXPIRED decision (receive
+ * not current, fenced by a presence change, stale at take). NULL = silent. */
+typedef void (*SudekiMpLanPartyActionTrace)(const char *reason,unsigned kind,unsigned slot,unsigned detail);
+void SudekiMpLanPartySetActionTrace(SudekiMpLanPartyActionTrace trace);
 BOOL SudekiMpLanPartyPresenceValid(const SudekiMpLanPartyPresence *presence);
 
 /* Optional negotiated SMP4 sidecar. The nested LA42 input is unchanged;

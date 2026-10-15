@@ -153,7 +153,16 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
         e->result=1;
         uint8_t *m=e->menu,*list=*(uint8_t **)(m+0x214u),*category=*(uint8_t **)(m+0x208u);
         unsigned category_id=*(unsigned *)(m+0x204u);
-        unsigned limit=category_id==0u?6u:category_id==1u?2u:0u;
+        /* Category 2 (items): the selected row becomes a USE_ITEM request for
+         * the player's own character (D10); the native dispatcher never runs. */
+        unsigned limit=category_id==0u?6u:category_id==1u?2u:category_id==5u?64u:0u; /* 5 = items (CONFIRMED_LIVE 2026-10-15) */
+        {   /* Bounded diagnostic (client quick-menu items, 2026-10-15). */
+            static unsigned confirm_logs;
+            if(confirm_logs<64u) { ++confirm_logs;
+                SudekiMpLogFormat("story_quick_menu event=confirm kind=%u command=%u value=%u category=%u limit=%u admission=%u flags=%u,%u,%u,%u pending=%lu\r\n",
+                    e->kind,e->command,e->value,category_id,limit,(unsigned)admission,
+                    m[0x188u],m[0x189u],m[0xfdu],m[0xfeu],(unsigned long)*(unsigned *)(m+0x108u)); }
+        }
         if(e->kind==5u && e->value && admission && limit &&
             !m[0x188u] && !m[0x189u] && !m[0xfdu] && !m[0xfeu] &&
             !*(unsigned *)(m+0x108u) && readable(category,0xbcu) &&
@@ -167,6 +176,21 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
                 if(category_id==0u && slot>=0 && slot<6 &&
                     request_action(actor_owner,SUDEKIMP_STORY_ACTION_SKILL,(unsigned)slot))
                     close_owned("skill_queued");
+                if(category_id==5u && slot>=0) {
+                    static const uint8_t lookup_entry[]={0x53,0x8b,0x5c,0x24,0x08,0x55,0x56,0x57,0x8b,0x3d};
+                    typedef void *(__attribute__((thiscall)) *ItemLookup)(void *,int,int);
+                    void *inventory=readable(base+0x408d84u,4u)?*(void **)(base+0x408d84u):NULL;
+                    uint8_t *def=NULL; unsigned item=~0u;
+                    if(readable(inventory,0x130u) && readable(base+0x21ce0u,14u) &&
+                        !memcmp(base+0x21ce0u,lookup_entry,sizeof(lookup_entry)) &&
+                        *(void **)(base+0x21ce0u+10u)==base+0x408d80u)
+                        def=((ItemLookup)(base+0x21ce0u))(inventory,2,slot);
+                    if(def && readable(def,0x8cu) && *(void **)def==base+0x2d3b20u && *(uint32_t *)(def+0x88u)==2u)
+                        item=*(uint32_t *)(def+0x14u);
+                    if(item<999u && request_action(actor_owner,SUDEKIMP_STORY_ACTION_USE_ITEM,item))
+                        close_owned("item_queued");
+                    else SudekiMpLogFormat("story_quick_menu event=item_refused row=%d item=%u\r\n",slot,item);
+                }
                 if(category_id==1u) {
                     int first;
                     /* Retail rows contain the actor's strike ID, not their
@@ -190,6 +214,12 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
 static uint8_t __attribute__((thiscall,force_align_arg_pointer)) input_menu(
     void *menu,unsigned kind,unsigned command,unsigned value) {
     ++callbacks; UiEvent e={menu,kind,command,value,0};
+    {   /* Bounded diagnostic (client quick-menu items, 2026-10-15): every event. */
+        static unsigned event_logs;
+        if(retained && menu==menu_owner && event_logs<120u && kind!=0x19u) { ++event_logs;
+            SudekiMpLogFormat("story_quick_menu event=input kind=%u command=%u value=%u scope=%u category=%lu\r\n",
+                kind,command,value,scope,readable(menu,0x208u)?(unsigned long)*(unsigned *)((uint8_t *)menu+0x204u):0ul); }
+    }
     if(!retained) e.result=native_input?native_input(menu,kind,command,value):0;
     else if(scope && menu==menu_owner && menu_exact(menu) &&
         kind!=5u && kind!=6u && kind!=0x19u) {

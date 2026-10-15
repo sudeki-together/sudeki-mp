@@ -83,6 +83,40 @@ BOOL SudekiMpRestoreElcoInterruptedIdleWeapon(void *character);
  * through native inventory; preserve equipped items and existing quantities.
  * The caller supplies the actual process command line, never a network string. */
 BOOL SudekiMpGrantTestroomCharacterWeapons(void *character, const char *command);
+/* Replica-only (#74, plan D5/D9): give this character's game the weapon item
+ * the host equipped on it when it is missing locally -- equipment follows the
+ * character's owner. Exact AddItem image, item-table identity and weapon
+ * family checks; never unequips or touches other heroes. TRUE when owned. */
+BOOL SudekiMpGrantCharacterWeaponItem(void *character, unsigned int item_id);
+/* Host (#75): equip a weapon item on a party character exactly as the Main
+ * Menu's Weapons page does (RVA 0x1706D0 core): tracked handle from the actor
+ * (RVA 0x2000), item definition in ESI, context 0x34BE70 in EDI, generic
+ * apply-item-to-character (RVA 0x12DF60, consumes the handle). Immediate while
+ * the weapon is sheathed; otherwise the native sheath/swap path takes it. The
+ * caller holds the game-thread actor lease and has already granted the item.
+ * TRUE when the weapon component now holds (or has pending) that item. */
+BOOL SudekiMpEquipCharacterWeaponItem(void *character, unsigned int item_id);
+/* Host (#75 / D10): use a consumable (CItemConsumable, category 2) on a party
+ * character exactly as the Items page does (RVA 0x179A50 core): tracked handle
+ * from the actor (RVA 0x2000), definition in ESI, can-use RVA 0x12E1E0 (0 =
+ * usable), apply RVA 0x12DF60 (context 0x34BE70 in EDI), then
+ * CInventory::ReduceItem(id,1). No target choice: the caller names the actor.
+ * *stage names the refusal (0 = applied). */
+/* validated: the host already accepted this use (client presentation of its
+ * own accepted request), so the native can-use check is skipped and the apply
+ * runs for its effect attachment, PCItemUseCallback and inventory reduction. */
+BOOL SudekiMpUseItemOnCharacter(void *character, unsigned int item_id, unsigned int *stage, BOOL validated, BOOL reduce);
+/* Client bookkeeping after a host-applied use: CInventory::ReduceItem(id,1) on
+ * this game's own inventory so counts stay in step. */
+BOOL SudekiMpReduceLocalItem(unsigned int item_id);
+/* Host: start the native "use item" action on a character, exactly what the
+ * quick item menu does (RVA 0x9C199 call site -> RVA 0xDC110: arbiter, item
+ * definition, party slot on the stack, RET 0xC, AL = started). The action
+ * plays the use animation, applies the item at its keyframe and spawns the
+ * item effect through the character's own arbiter; the count is reduced by
+ * one when it starts, as the quick menu does. *stage names the refusal
+ * (0 = started; 50+ = arbiter busy bits). */
+BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage);
 /* Host game-thread only, after the remote actor lease is validated. Proton
  * Phaser misses FP recharge/blend while the local camera owns another
  * hero. Uses native recharge, never resets charge or forces reload complete.

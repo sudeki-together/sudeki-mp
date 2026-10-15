@@ -414,6 +414,26 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
          * panel's centered 4:3 canvas. Keep lettering uniformly scaled. */
         float hud_x=(float)desc.Width/SUDEKIMP_TITLE_CANVAS_WIDTH;
         float hud_y=(float)desc.Height/SUDEKIMP_TITLE_CANVAS_HEIGHT;
+        if(extras->box_count>SUDEKIMP_PANEL_BOXES) { result=E_INVALIDARG; goto restore; }
+        if(extras->box_count) {
+            /* Untextured quads: diffuse only, like the letterbox bars. */
+            DRAW_CALL(IDirect3DDevice9_SetTexture(device,0,NULL));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLOROP,D3DTOP_SELECTARG2));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG2));
+            for(unsigned i=0;i<extras->box_count;++i) {
+                const SudekiMpOverlayBox *b=&extras->boxes[i];
+                float x=b->x*hud_x,y=b->y*hud_y,w=b->width*hud_x,h=b->height*hud_y;
+                float border=(b->style?1.f:2.f)*scale;
+                DWORD edge=b->style==2u?tint(0x80cfda,opacity):b->style==1u?tint(0x354856,opacity):tint(0xc7ad73,opacity);
+                DWORD upper=b->style==2u?tint(0x24495a,opacity):b->style==1u?tint(0x111f2d,opacity):tint(0x152d3d,opacity*.97f);
+                DWORD lower=b->style?tint(0x0a1522,opacity):tint(0x080f1c,opacity*.97f);
+                if(!isfinite(x) || !isfinite(y) || w<=2*border || h<=2*border) { result=E_INVALIDARG; goto restore; }
+                DRAW_CALL(panel_rect(device,x,y,w,h,edge,edge));
+                DRAW_CALL(panel_rect(device,x+border,y+border,w-2*border,h-2*border,upper,lower));
+            }
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_COLOROP,D3DTOP_MODULATE));
+            DRAW_CALL(IDirect3DDevice9_SetTextureStageState(device,0,D3DTSS_ALPHAOP,D3DTOP_MODULATE));
+        }
         for(unsigned i=0;i<extras->text_count;++i) {
             const SudekiMpPanelText *t=&extras->texts[i];
             float x=t->x*hud_x,y=t->y*hud_y,width=t->width*hud_x;

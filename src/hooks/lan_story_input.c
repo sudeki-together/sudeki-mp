@@ -28,6 +28,9 @@ static BOOL focused;
 static void *sample_controller,*sample_actor;
 static uint32_t sample_transaction;
 static BOOL quick_down,quick_pending;
+static BOOL menu_down,menu_pending,menu_pending_raw; /* native action 0x18: main menu (#75) */
+static BOOL trace_events; static unsigned trace_event_count;
+void SudekiMpLanStoryInputTraceEvents(BOOL on) { if(on && !trace_events) trace_event_count=0; trace_events=on; }
 static unsigned melee_down;
 static uint8_t melee_buttons;
 static uint32_t melee_generation;
@@ -48,7 +51,7 @@ typedef struct NativeEvent {
 
 static void clear_sample(void) {
     sample_controller=sample_actor=NULL; sample_transaction=0;
-    quick_pending=FALSE; ranged_held=block_held=FALSE;
+    quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
     clear_melee(); /* Preserve down bits until physical releases. */
     sample_x=sample_z=0; sample_scale=1.0f;
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
@@ -61,6 +64,17 @@ static void sample_quick(const NativeEvent *e,BOOL admitted) {
     BOOL down=e->value!=0;
     if(down && !quick_down && admitted) quick_pending=TRUE;
     quick_down=down;
+}
+/* Native 4277B0 maps action 0x18 to listener+98 (main menu) beside 0x19
+ * (listener+90, Q). Same edge rule as Q: one admitted fresh press. */
+static void sample_menu(const NativeEvent *e,BOOL admitted) {
+    if(e->action!=0x18u) return;
+    BOOL down=e->value!=0;
+    if(down && !menu_down) { static unsigned logs; if(logs++<32u)
+        SudekiMpLogFormat("story_main_menu event=key admitted=%u focused=%u transaction=%lu\r\n",(unsigned)admitted,(unsigned)focused,(unsigned long)sample_transaction); }
+    if(down && !menu_down && admitted) menu_pending=TRUE;
+    if(down && !menu_down && focused) menu_pending_raw=TRUE;
+    menu_down=down;
 }
 /* Retail action31 maps listener+78 = controller+A4 (block).
  * Keep physical down across focus/menu/rebind; only a fresh admitted press
@@ -112,12 +126,12 @@ static LRESULT CALLBACK focus_messages(int code,WPARAM sent,LPARAM raw) {
                 (m->message==WM_ACTIVATE && LOWORD(m->wParam)==WA_INACTIVE) ||
                 (m->message==WM_ACTIVATEAPP && !m->wParam)) {
                 focused=FALSE; sample_x=sample_z=0;
-                quick_pending=FALSE; ranged_held=block_held=FALSE;
+                quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
                 clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             } else if(m->message==WM_SETFOCUS) {
                 focused=TRUE; sample_x=sample_z=0;
-                quick_pending=FALSE; ranged_held=block_held=FALSE;
+                quick_pending=menu_pending=FALSE; ranged_held=block_held=FALSE;
                 clear_melee();
                 look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
             }
@@ -198,9 +212,16 @@ static void __attribute__((thiscall,force_align_arg_pointer)) story_input(
         else if(readable(event,sizeof(NativeEvent))) {
             NativeEvent e; memcpy(&e,event,sizeof(e));
             int owner=*(int *)(controller+INPUT_SUBOBJECT+0x5cu);
+            if(trace_events && trace_event_count<300u) { ++trace_event_count;
+                SudekiMpLogFormat("story_input event=native action=%#x value=%ld owner=%d device=%ld mode=%lu/%lu\r\n",
+                    e.action,(long)e.value,owner,(long)e.owner,
+                    (unsigned long)*(uint32_t *)(controller+0x80u),(unsigned long)*(uint32_t *)(controller+0x84u)); }
             BOOL admitted=sample_transaction && focused && window_exact() &&
             controller==sample_controller &&
                 *(void **)(controller+ACTOR_TARGET)==sample_actor;
+            /* The main-menu toggle is sampled for any device: the native menu
+             * re-owns the listener's device while shown (#75). */
+            sample_menu(&e,admitted && (controller[0x1d0u]&2u));
             if(owner==-1 || owner==e.owner) {
                 sample_quick(&e,admitted && (controller[0x1d0u]&2u));
                 sample_melee(&e,admitted && (controller[0x1d0u]&2u),GetTickCount());
@@ -320,6 +341,14 @@ BOOL SudekiMpLanStoryInputTakeQuickMenu(void *controller,void *actor,uint32_t tr
     if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return FALSE;
     BOOL pressed=quick_pending; quick_pending=FALSE; return pressed;
 }
+BOOL SudekiMpLanStoryInputTakeMainMenu(void *controller,void *actor,uint32_t transaction) {
+    float x,z;
+    if(!SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) || !focused) return FALSE;
+    BOOL pressed=menu_pending; menu_pending=FALSE; return pressed;
+}
+BOOL SudekiMpLanStoryInputTakeMainMenuRaw(void) {
+    BOOL pressed=menu_pending_raw && focused; menu_pending_raw=FALSE; return pressed;
+}
 BOOL SudekiMpLanStoryInputMelee(void *controller,void *actor,uint32_t transaction,
     uint8_t *buttons,uint32_t *generation) {
     float x,z;
@@ -411,7 +440,7 @@ BOOL SudekiMpLanStoryInputInstall(HMODULE image,unsigned client_player) {
      * installs no trampoline and never changes native controller/actor fields. */
     if(!base) { base=b; original_input=(NativeInput)(b+INPUT_HANDLER); }
     player=client_player;
-    quick_down=quick_pending=FALSE;
+    quick_down=quick_pending=menu_down=menu_pending=menu_pending_raw=FALSE;
     InterlockedExchange(&retained,1);
     if(!SudekiMpInstallPointerHook(&input_hook,(void **)(b+INPUT_VT),
             b+INPUT_HANDLER,story_input)) {

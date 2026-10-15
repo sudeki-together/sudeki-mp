@@ -11,24 +11,31 @@ static uint32_t get32(const uint8_t *p) {
 static void putfloat(uint8_t *p,float f) { uint32_t n; memcpy(&n,&f,4); put32(p,n); }
 static float getfloat(const uint8_t *p) { uint32_t n=get32(p); float f; memcpy(&f,&n,4); return f; }
 
-static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned character) {
+BOOL SudekiMpStoryWeaponItemForCharacter(unsigned character,unsigned item) {
+    static const unsigned first[4]={24u,36u,0u,12u}; /* Buki, Elco, Tal, Ailish */
+    return character<4u && item>=first[character] && item<first[character]+12u;
+}
+static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned extra,unsigned character) {
+    if(kind==SUDEKIMP_STORY_ACTION_USE_ITEM) return SUDEKIMP_STORY_ACTION_ITEM(slot,extra)<999u;
+    if(extra) return FALSE;
     return (kind==SUDEKIMP_STORY_ACTION_SKILL && slot<6u) ||
         (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1u && slot<=2u) ||
-        (kind==SUDEKIMP_STORY_ACTION_MELEE && (character==0u || character==2u) && slot>=1u && slot<=3u);
+        (kind==SUDEKIMP_STORY_ACTION_MELEE && (character==0u || character==2u) && slot>=1u && slot<=3u) ||
+        (kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON && SudekiMpStoryWeaponItemForCharacter(character,slot));
 }
 BOOL SudekiMpLanStoryActionRequestValid(const SudekiMpLanStoryActionRequest *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&
-        r->acknowledged_frame && action_slot_valid(r->kind,r->slot,r->fence.character);
+        r->acknowledged_frame && action_slot_valid(r->kind,r->slot,r->extra,r->fence.character);
 }
 BOOL SudekiMpLanStoryActionRequestSame(const SudekiMpLanStoryActionRequest *a,
     const SudekiMpLanStoryActionRequest *b) {
     return SudekiMpLanStoryActionRequestValid(a) && SudekiMpLanStoryActionRequestValid(b) &&
         SudekiMpLanStoryControlFenceSame(&a->fence,&b->fence) && a->request==b->request &&
-        a->acknowledged_frame==b->acknowledged_frame && a->kind==b->kind && a->slot==b->slot;
+        a->acknowledged_frame==b->acknowledged_frame && a->kind==b->kind && a->slot==b->slot && a->extra==b->extra;
 }
 BOOL SudekiMpLanStoryActionResultValid(const SudekiMpLanStoryActionResult *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&
-        action_slot_valid(r->kind,r->slot,r->fence.character) && r->outcome>=SUDEKIMP_STORY_ACTION_STARTED &&
+        action_slot_valid(r->kind,r->slot,r->extra,r->fence.character) && r->outcome>=SUDEKIMP_STORY_ACTION_STARTED &&
         r->outcome<=SUDEKIMP_STORY_ACTION_NO_SP &&
         (r->outcome!=SUDEKIMP_STORY_ACTION_SUBMITTED || r->kind==SUDEKIMP_STORY_ACTION_MELEE) &&
         (r->outcome!=SUDEKIMP_STORY_ACTION_STARTED || r->kind!=SUDEKIMP_STORY_ACTION_MELEE) &&
@@ -38,19 +45,19 @@ BOOL SudekiMpLanStoryActionResultMatches(const SudekiMpLanStoryActionResult *r,
     const SudekiMpLanStoryActionRequest *q) {
     return SudekiMpLanStoryActionResultValid(r) && SudekiMpLanStoryActionRequestValid(q) &&
         SudekiMpLanStoryControlFenceSame(&r->fence,&q->fence) && r->request==q->request &&
-        r->kind==q->kind && r->slot==q->slot;
+        r->kind==q->kind && r->slot==q->slot && r->extra==q->extra;
 }
 BOOL SudekiMpLanStoryActionRequestEncode(const SudekiMpLanStoryActionRequest *r,uint8_t *p,size_t n) {
     if(!p || n!=SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE || !SudekiMpLanStoryActionRequestValid(r) ||
         !SudekiMpLanStoryControlFenceEncode(&r->fence,p,SUDEKIMP_STORY_CONTROL_FENCE_SIZE)) return FALSE;
     put32(p+20,r->request); put32(p+24,r->acknowledged_frame);
-    p[28]=r->kind; p[29]=r->slot; p[30]=p[31]=0; return TRUE;
+    p[28]=r->kind; p[29]=r->slot; p[30]=r->extra; p[31]=0; return TRUE;
 }
 BOOL SudekiMpLanStoryActionRequestDecode(const uint8_t *p,size_t n,SudekiMpLanStoryActionRequest *r) {
     SudekiMpLanStoryActionRequest next={0};
-    if(!p || !r || n!=SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE || p[30] || p[31] ||
+    if(!p || !r || n!=SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE || p[31] ||
         !SudekiMpLanStoryControlFenceDecode(p,SUDEKIMP_STORY_CONTROL_FENCE_SIZE,&next.fence)) return FALSE;
-    next.request=get32(p+20); next.acknowledged_frame=get32(p+24); next.kind=p[28]; next.slot=p[29];
+    next.request=get32(p+20); next.acknowledged_frame=get32(p+24); next.kind=p[28]; next.slot=p[29]; next.extra=p[30];
     if(!SudekiMpLanStoryActionRequestValid(&next)) return FALSE;
     *r=next; return TRUE;
 }
@@ -58,13 +65,13 @@ BOOL SudekiMpLanStoryActionResultEncode(const SudekiMpLanStoryActionResult *r,ui
     if(!p || n!=SUDEKIMP_STORY_ACTION_RESULT_WIRE_SIZE || !SudekiMpLanStoryActionResultValid(r) ||
         !SudekiMpLanStoryControlFenceEncode(&r->fence,p,SUDEKIMP_STORY_CONTROL_FENCE_SIZE)) return FALSE;
     put32(p+20,r->request); put32(p+24,r->observed_tick);
-    p[28]=r->kind; p[29]=r->slot; p[30]=r->outcome; p[31]=0; return TRUE;
+    p[28]=r->kind; p[29]=r->slot; p[30]=r->outcome; p[31]=r->extra; return TRUE;
 }
 BOOL SudekiMpLanStoryActionResultDecode(const uint8_t *p,size_t n,SudekiMpLanStoryActionResult *r) {
     SudekiMpLanStoryActionResult next={0};
-    if(!p || !r || n!=SUDEKIMP_STORY_ACTION_RESULT_WIRE_SIZE || p[31] ||
+    if(!p || !r || n!=SUDEKIMP_STORY_ACTION_RESULT_WIRE_SIZE ||
         !SudekiMpLanStoryControlFenceDecode(p,SUDEKIMP_STORY_CONTROL_FENCE_SIZE,&next.fence)) return FALSE;
-    next.request=get32(p+20); next.observed_tick=get32(p+24);
+    next.request=get32(p+20); next.observed_tick=get32(p+24); next.extra=p[31];
     next.kind=p[28]; next.slot=p[29]; next.outcome=p[30];
     if(!SudekiMpLanStoryActionResultValid(&next)) return FALSE;
     *r=next; return TRUE;

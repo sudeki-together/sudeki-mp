@@ -321,6 +321,13 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
         for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
         SudekiMpLanStoryTestStartSetZone(narrow);
     }
+    {
+        wchar_t text[32]; float fraction=0.0f;
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartLeaderHealth",L"",text,32,path);
+        if(text[0] && swscanf(text,L"%f",&fraction)==1) SudekiMpLanStoryTestStartSetLeaderHealth(fraction);
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartFollowerHealth",L"",text,32,path); fraction=0.0f;
+        if(text[0] && swscanf(text,L"%f",&fraction)==1) SudekiMpLanStoryTestStartSetFollowerHealth(fraction);
+    }
     if(!SudekiMpLanStoryTestStartConfigure(game_module,leader,follower))
         SudekiMpLogFormat("story_test_start event=refused error=%lu\r\n",(unsigned long)GetLastError());
 }

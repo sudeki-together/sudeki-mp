@@ -143,6 +143,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_effects.c
     src/hooks/lan_story_realtime.c
     src/hooks/lan_story_quick_menu.c
+    src/hooks/lan_story_main_menu.c src/network/lan_story_menu_policy.c
     src/hooks/lan_story_cast.c
     src/hooks/lan_story_door_camera.c
     src/hooks/lan_story_client_camera.c
@@ -2052,6 +2053,19 @@ target_link_options(SudekiMP.StoryQuickInputTest PRIVATE -Wl,--gc-sections)
 set_target_properties(SudekiMP.StoryQuickInputTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 get_target_property(SUDEKIMP_STORY_ACTION_TEST_SOURCES SudekiMP.StoryShotsTest SOURCES)
 list(REMOVE_ITEM SUDEKIMP_STORY_ACTION_TEST_SOURCES tests/story_shots_test.c)
+add_executable(SudekiMP.StoryMainMenuImageTest tests/story_main_menu_image_test.c
+    src/hooks/lan_story_main_menu.c src/hooks/call_hook.c src/network/lan_story_menu_policy.c
+    src/engine/build_identity.c src/engine/sha256.c src/engine/log.c)
+target_include_directories(SudekiMP.StoryMainMenuImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMainMenuImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryMainMenuImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryMainMenuImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryMenuPolicyTest tests/story_menu_policy_test.c src/network/lan_story_menu_policy.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
+target_include_directories(SudekiMP.StoryMenuPolicyTest PRIVATE src)
+target_compile_definitions(SudekiMP.StoryMenuPolicyTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StoryMenuPolicyTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryMenuPolicyTest PRIVATE ws2_32 bcrypt)
+set_target_properties(SudekiMP.StoryMenuPolicyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryActionTransportTest tests/story_action_transport_test.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
 target_include_directories(SudekiMP.StoryActionTransportTest PRIVATE src)
 target_compile_definitions(SudekiMP.StoryActionTransportTest PRIVATE WIN32_LEAN_AND_MEAN)

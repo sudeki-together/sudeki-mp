@@ -33,6 +33,9 @@ void SudekiMpPartyMenuToggle(void);
 BOOL SudekiMpPartyMenuCapturesInput(void);
 /* Called only by the exact native menu render adapter, on its game thread. */
 BOOL SudekiMpPartyMenuRender(void *device);
+/* Centered yes/no question over the native Main Menu (client item use, D10):
+ * text only, same atlas and shadow as the roster strip. choice 0 = Yes. */
+BOOL SudekiMpPartyMenuRenderConfirm(void *device,const char *question,unsigned choice);
 /* Does not release the shared title renderer: its existing owner does that. */
 void SudekiMpPartyMenuReset(void);
 #endif

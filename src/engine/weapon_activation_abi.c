@@ -1020,6 +1020,275 @@ BOOL SudekiMpGrantTestroomCharacterWeapons(void *character, const char *command)
     return TRUE;
 }
 
+void *SudekiMpEquipHandleMake __attribute__((used)), *SudekiMpEquipApply __attribute__((used)),
+    *SudekiMpEquipContext __attribute__((used));
+BOOL SudekiMpEquipCharacterWeaponItem(void *character, unsigned int item_id) {
+    static const uint8_t make_entry[] = {0x8b,0x09,0x89,0x08,0xc7,0x40,0x04,0x00,0x00,0x00,0x00}; /* 402000: mov ecx,[ecx]; mov [eax],ecx; mov [eax+4],0 */
+    static const uint8_t site[] = {0xbf,0x70,0xbe,0x74,0x00,0xe8};        /* 5707bf: mov edi,74BE70; call */
+    uint8_t *base = (uint8_t *)native_module;
+    void *weapon, *inventory, *database, *item;
+    unsigned int category;
+    int32_t displacement;
+    if (base == NULL || item_id >= 48u ||
+        !character_weapon_context(character, &weapon, &inventory, &category) ||
+        *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL) return FALSE;
+    database = *(void **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    if (!readable_memory(database, 12u + (item_id + 1u) * 4u)) return FALSE;
+    item = *(void **)((uint8_t *)database + 12u + item_id * 4u);
+    if (item == NULL || !item_matches_family(item, category) || !readable_memory(item, 0x8cu) ||
+        *(uint32_t *)((uint8_t *)item + ITEM_ID_OFFSET) != item_id ||
+        *(void **)item != base + 0x2d3a28u ||
+        *(uint32_t *)((uint8_t *)item + 0x88u) != category) return FALSE;
+    if (*(void **)((uint8_t *)weapon + 0x268u) == item) return TRUE;
+    /* Exact image: the handle maker, the Main Menu's call site (relocated
+     * context operand + displacement to the apply routine). */
+    if (!readable_memory(base + 0x2000u, sizeof(make_entry)) ||
+        memcmp(base + 0x2000u, make_entry, sizeof(make_entry)) != 0) {
+        SudekiMpLogWrite("weapon_equip event=refused guard=handle_maker\r\n"); return FALSE;
+    }
+    if (!readable_memory(base + 0x1707bfu, 10u) || base[0x1707bfu] != site[0] ||
+        *(void **)(base + 0x1707c0u) != base + 0x34be70u || base[0x1707c4u] != site[5]) {
+        SudekiMpLogWrite("weapon_equip event=refused guard=call_site\r\n"); return FALSE;
+    }
+    memcpy(&displacement, base + 0x1707c5u, 4u);
+    if (base + 0x1707c9u + displacement != base + 0x12df60u) {
+        SudekiMpLogWrite("weapon_equip event=refused guard=apply_target\r\n"); return FALSE;
+    }
+    SudekiMpEquipHandleMake = base + 0x2000u; SudekiMpEquipApply = base + 0x12df60u;
+    SudekiMpEquipContext = base + 0x34be70u;
+    void *actor_pointer = character;
+    __asm__ volatile(
+        "sub $12,%%esp\n\t"
+        "mov %%esp,%%eax\n\t"
+        "mov %%edx,%%ecx\n\t"
+        "call *_SudekiMpEquipHandleMake\n\t"
+        "mov %%ebx,%%esi\n\t"
+        "mov _SudekiMpEquipContext,%%edi\n\t"
+        "call *_SudekiMpEquipApply\n\t"
+        : : "b"(item), "d"(&actor_pointer)
+        : "eax", "ecx", "esi", "edi", "memory", "cc");
+    if (!character_weapon_context(character, &weapon, &inventory, &category)) return FALSE;
+    BOOL now = *(void **)((uint8_t *)weapon + 0x268u) == item ||
+        *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) == item;
+    SudekiMpLogFormat("weapon_equip item=%u category=%u applied=%u pending=%u\r\n", item_id, category,
+        (unsigned)(*(void **)((uint8_t *)weapon + 0x268u) == item),
+        (unsigned)(*(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) == item));
+    return now;
+}
+
+void *SudekiMpUseCanUse __attribute__((used));
+static BOOL item_path_exact(uint8_t *base) {
+    static const uint8_t make_entry[] = {0x8b,0x09,0x89,0x08,0xc7,0x40,0x04,0x00,0x00,0x00,0x00};
+    static const uint8_t canuse_entry[] = {0x51,0x53,0x55,0x57,0x8b,0x7c,0x24,0x14,0x32,0xdb};
+    static const uint8_t apply_entry[] = {0x8b,0x4c,0x24,0x04,0x8b,0x41,0x2c,0x8b,0x50,0x10};
+    static const uint8_t reduce_tail[] = {0x53,0x55,0x56,0x33,0xdb,0x57};
+    int32_t d;
+    if (!readable_memory(base + 0x2000u, sizeof(make_entry)) || memcmp(base + 0x2000u, make_entry, sizeof(make_entry)) ||
+        !readable_memory(base + 0x12e1e0u, sizeof(canuse_entry)) || memcmp(base + 0x12e1e0u, canuse_entry, sizeof(canuse_entry)) ||
+        !readable_memory(base + 0x12df60u, sizeof(apply_entry)) || memcmp(base + 0x12df60u, apply_entry, sizeof(apply_entry)) ||
+        !readable_memory(base + 0x21ab0u, 14u) || base[0x21ab0u] != 0x83u || base[0x21ab1u] != 0xecu ||
+        base[0x21ab2u] != 0x0cu || base[0x21ab3u] != 0xa1u ||
+        *(void **)(base + 0x21ab4u) != base + RVA_ITEM_DATABASE_GLOBAL ||
+        memcmp(base + 0x21ab8u, reduce_tail, sizeof(reduce_tail)) ||
+        !readable_memory(base + 0x179af6u, 0x40u)) return FALSE;
+    /* The Items page's own three calls: can-use, apply (with the context), reduce. */
+    if (base[0x179af6u] != 0xe8u) return FALSE;
+    memcpy(&d, base + 0x179af7u, 4u); if (base + 0x179afbu + d != base + 0x12e1e0u) return FALSE;
+    if (base[0x179b19u] != 0xbfu || *(void **)(base + 0x179b1au) != base + 0x34be70u || base[0x179b1eu] != 0xe8u) return FALSE;
+    memcpy(&d, base + 0x179b1fu, 4u); if (base + 0x179b23u + d != base + 0x12df60u) return FALSE;
+    if (memcmp(base + 0x179b26u, "\x6a\x00\x6a\x01\x51\x8b\xcb\xe8", 8u)) return FALSE;
+    memcpy(&d, base + 0x179b2eu, 4u); if (base + 0x179b32u + d != base + 0x21ab0u) return FALSE;
+    return TRUE;
+}
+BOOL SudekiMpUseItemOnCharacter(void *character, unsigned int item_id, unsigned int *stage, BOOL validated, BOOL reduce) {
+    typedef void (__attribute__((thiscall)) *ReduceFunction)(void *, int, int, int);
+    uint8_t *base = (uint8_t *)native_module;
+    void *inventory, *database, *item, *actor_pointer = character, *item_register, *actor_address;
+    unsigned int code = 0, s = 0;
+    if (stage) *stage = 1u;
+    if (base == NULL || character == NULL || item_id >= 999u ||
+        !readable_memory(base + RVA_INVENTORY_GLOBAL, 4u) || !readable_memory(base + RVA_ITEM_DATABASE_GLOBAL, 4u)) return FALSE;
+    inventory = *(void **)(base + RVA_INVENTORY_GLOBAL); database = *(void **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    s = 2u; if (!readable_memory(inventory, 0x130u) || !readable_memory(database, 12u + (item_id + 1u) * 4u)) goto refuse;
+    item = *(void **)((uint8_t *)database + 12u + item_id * 4u);
+    s = 3u; if (item == NULL || !readable_memory(item, 0x8cu) || *(uint32_t *)((uint8_t *)item + ITEM_ID_OFFSET) != item_id ||
+        *(void **)item != base + 0x2d3b20u || *(uint32_t *)((uint8_t *)item + 0x88u) != 2u) goto refuse;
+    s = 4u; if (!readable_memory(character, 0xc4u) || !item_path_exact(base)) goto refuse;
+    SudekiMpEquipHandleMake = base + 0x2000u; SudekiMpUseCanUse = base + 0x12e1e0u;
+    SudekiMpEquipApply = base + 0x12df60u; SudekiMpEquipContext = base + 0x34be70u;
+    item_register = item; actor_address = &actor_pointer;
+    if (!validated) {
+        __asm__ volatile(
+            "sub $12,%%esp\n\t"
+            "mov %%esp,%%eax\n\t"
+            "mov %%edx,%%ecx\n\t"
+            "call *_SudekiMpEquipHandleMake\n\t"
+            "mov %%ebx,%%esi\n\t"
+            "call *_SudekiMpUseCanUse\n\t"
+            : "=a"(code), "+b"(item_register), "+d"(actor_address)
+            : : "ecx", "esi", "edi", "memory", "cc");
+        s = 100u + code; if (code != 0u) goto refuse;
+    }
+    /* The native can-use call (MS ABI) is free to clobber EDX and ECX, and
+     * does: on 2026-10-15 the host crashed at the handle-make entry with
+     * ECX = 0 because the compiler had kept &actor_pointer in EDX across
+     * both blocks. Reload the registers for the apply block. */
+    item_register = item; actor_address = &actor_pointer;
+    __asm__ volatile(
+        "sub $12,%%esp\n\t"
+        "mov %%esp,%%eax\n\t"
+        "mov %%edx,%%ecx\n\t"
+        "call *_SudekiMpEquipHandleMake\n\t"
+        "mov %%ebx,%%esi\n\t"
+        "mov _SudekiMpEquipContext,%%edi\n\t"
+        "call *_SudekiMpEquipApply\n\t"
+        : "+b"(item_register), "+d"(actor_address)
+        : : "eax", "ecx", "esi", "edi", "memory", "cc");
+    if (reduce) ((ReduceFunction)(base + 0x21ab0u))(inventory, (int)item_id, 1, 0);
+    {
+        uint8_t *stats = readable_memory((uint8_t *)character + 0x4cu, 4u) ? *(uint8_t **)((uint8_t *)character + 0x4cu) : NULL;
+        SudekiMpLogFormat("item_use item=%u applied=1 validated=%u reduced=%u hp_after=%.0f\r\n", item_id, (unsigned)validated,
+            (unsigned)reduce, readable_memory(stats, 0x30u) ? (double)*(float *)(stats + 0x2cu) : -1.0);
+    }
+    if (stage) *stage = 0u;
+    return TRUE;
+refuse:
+    SudekiMpLogFormat("item_use item=%u applied=0 stage=%u\r\n", item_id, s);
+    if (stage) *stage = s;
+    return FALSE;
+}
+BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage) {
+    typedef void (__attribute__((thiscall)) *ReduceFunction)(void *, int, int, int);
+    static const uint8_t site[] = {0x8b,0x4c,0x24,0x10,0x8b,0x81,0x90,0x00,0x00,0x00,0x8b,0x8f,0xd8,0x01,0x00,0x00,
+        0x85,0xc9,0x78,0x03,0x51,0xeb,0x02,0x6a,0x00,0x56,0x50,0xe8};
+    static const uint8_t entry[] = {0x83,0xec,0x0c,0x53,0x8b,0x5c,0x24,0x14,0x8b,0x43,0x50,0x55,0x8b,0x6c,0x24,0x20,
+        0x56,0x57,0xa9,0xf0,0xe6,0x9b,0x02};
+    uint8_t *base = (uint8_t *)native_module, *arbiter;
+    void *inventory, *database, *item;
+    unsigned int s = 1u; uint32_t state = 0; uint8_t started = 0; int32_t d;
+    if (stage) *stage = s;
+    if (base == NULL || character == NULL || item_id >= 999u || slot >= 4u ||
+        !readable_memory(base + RVA_INVENTORY_GLOBAL, 4u) || !readable_memory(base + RVA_ITEM_DATABASE_GLOBAL, 4u)) return FALSE;
+    inventory = *(void **)(base + RVA_INVENTORY_GLOBAL); database = *(void **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    s = 2u; if (!readable_memory(inventory, 0x130u) || !readable_memory(database, 12u + (item_id + 1u) * 4u)) goto refuse;
+    item = *(void **)((uint8_t *)database + 12u + item_id * 4u);
+    s = 3u; if (item == NULL || !readable_memory(item, 0x8cu) || *(uint32_t *)((uint8_t *)item + ITEM_ID_OFFSET) != item_id ||
+        *(void **)item != base + 0x2d3b20u || *(uint32_t *)((uint8_t *)item + 0x88u) != 2u) goto refuse;
+    s = 4u; if (!readable_memory(base + 0x9c199u, sizeof(site) + 4u) || memcmp(base + 0x9c199u, site, sizeof(site))) goto refuse;
+    memcpy(&d, base + 0x9c1b5u, 4u); if (base + 0x9c1b9u + d != base + 0xdc110u) goto refuse;
+    if (!readable_memory(base + 0xdc110u, sizeof(entry)) || memcmp(base + 0xdc110u, entry, sizeof(entry))) goto refuse;
+    s = 5u; if (!readable_memory(character, 0x94u) || !readable_memory(arbiter = *(uint8_t **)((uint8_t *)character + 0x90u), 0x64u) ||
+        !readable_memory(*(void **)(arbiter + 0x10u), 0xa0u) || *(void **)(arbiter + 0x10u) != character ||
+        !readable_memory(base + 0x21ab0u, 4u)) goto refuse;
+    state = *(uint32_t *)(arbiter + 0x50u);
+    /* The native quick menu runs can-use (RVA 0x12E1E0) immediately before
+     * starting the action, and the apply that follows (keyframe or direct)
+     * changed nothing when can-use had been skipped (host HP flat,
+     * 2026-10-15): can-use prepares the target state the apply consumes.
+     * Run it here with the same handle/ESI contract; 0 = usable. */
+    {
+        void *actor_pointer = character, *item_register = item, *actor_address = &actor_pointer; unsigned int code = 0;
+        if (!readable_memory(base + 0x12e1e0u, 4u) || !readable_memory(base + 0x2000u, 11u) ||
+            memcmp(base + 0x2000u, "\x8b\x09\x89\x08\xc7\x40\x04\x00\x00\x00\x00", 11u)) { s = 7u; goto refuse; }
+        SudekiMpEquipHandleMake = base + 0x2000u; SudekiMpUseCanUse = base + 0x12e1e0u;
+        __asm__ volatile(
+            "sub $12,%%esp\n\t"
+            "mov %%esp,%%eax\n\t"
+            "mov %%edx,%%ecx\n\t"
+            "call *_SudekiMpEquipHandleMake\n\t"
+            "mov %%ebx,%%esi\n\t"
+            "call *_SudekiMpUseCanUse\n\t"
+            : "=a"(code), "+b"(item_register), "+d"(actor_address)
+            : : "ecx", "esi", "edi", "memory", "cc");
+        if (code != 0u) { s = 100u + code; goto refuse; }
+    }
+    /* The native entry's own admission, checked first so a refusal is named. */
+    s = 50u; if (state & 0x29be6f0u) goto refuse;
+    s = 51u; if (state & 0x400000u) goto refuse;
+    s = 52u; if (arbiter[0x60u] & 1u) goto refuse;
+    s = 53u; if (!*(void **)(*(uint8_t **)(arbiter + 0x10u) + 0x9cu)) goto refuse;
+    {
+        void *target = base + 0xdc110u;
+        __asm__ volatile(
+            "push %[slot]\n\t"
+            "push %%esi\n\t"
+            "push %[arb]\n\t"
+            "call *%[fn]\n\t"
+            : "=a"(started)
+            : [slot]"r"((int)slot), "S"(item), [arb]"r"(arbiter), [fn]"r"(target)
+            : "ecx", "edx", "memory", "cc");
+    }
+    started &= 0xffu;
+    if (started) ((ReduceFunction)(base + 0x21ab0u))(inventory, (int)item_id, 1, 0);
+    SudekiMpLogFormat("item_action item=%u slot=%u started=%u arb50=%08lx\r\n", item_id, slot, (unsigned)started, (unsigned long)state);
+    if (stage) *stage = started ? 0u : 6u;
+    return started != 0u;
+refuse:
+    SudekiMpLogFormat("item_action item=%u slot=%u started=0 stage=%u arb50=%08lx\r\n", item_id, slot, s, (unsigned long)state);
+    if (stage) *stage = s;
+    return FALSE;
+}
+BOOL SudekiMpReduceLocalItem(unsigned int item_id) {
+    typedef void (__attribute__((thiscall)) *ReduceFunction)(void *, int, int, int);
+    static const uint8_t reduce_tail[] = {0x53,0x55,0x56,0x33,0xdb,0x57};
+    uint8_t *base = (uint8_t *)native_module;
+    void *inventory;
+    if (base == NULL || item_id >= 999u || !readable_memory(base + RVA_INVENTORY_GLOBAL, 4u) ||
+        !readable_memory(inventory = *(void **)(base + RVA_INVENTORY_GLOBAL), 0x130u) ||
+        !readable_memory(base + 0x21ab0u, 14u) || base[0x21ab0u] != 0x83u || base[0x21ab1u] != 0xecu ||
+        base[0x21ab2u] != 0x0cu || base[0x21ab3u] != 0xa1u ||
+        *(void **)(base + 0x21ab4u) != base + RVA_ITEM_DATABASE_GLOBAL ||
+        memcmp(base + 0x21ab8u, reduce_tail, sizeof(reduce_tail))) return FALSE;
+    ((ReduceFunction)(base + 0x21ab0u))(inventory, (int)item_id, 1, 0);
+    return TRUE;
+}
+
+BOOL SudekiMpGrantCharacterWeaponItem(void *character, unsigned int item_id) {
+    typedef void (__attribute__((thiscall)) *AddItemFunction)(void *, int, int, int);
+    static const uint8_t add_entry[] = {0x83,0xec,0x08,0x53,0x55,0x56,0x57,0x8b,0xf1};
+    uint8_t *base = (uint8_t *)native_module;
+    void *weapon, *inventory, *database, *item, *fresh_weapon, *fresh_inventory;
+    unsigned int category, fresh_category, j;
+    SudekiMpWeaponQuickList owned;
+    if (base == NULL || item_id >= 48u ||
+        !character_weapon_context(character, &weapon, &inventory, &category) ||
+        *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL ||
+        !SudekiMpDescribeCharacterWeapons(character, &owned)) return FALSE;
+    database = *(void **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    /* Same exact CInventory::AddItem image proof as the test-room grant. */
+    if (!readable_memory(database, 12u + (item_id + 1u) * 4u) ||
+        *(uint32_t *)(base + 0x30c064u) != 0x217e0u ||
+        base[0x217e0u] != 0xa1u ||
+        *(void **)(base + 0x217e1u) != base + RVA_ITEM_DATABASE_GLOBAL ||
+        memcmp(base + 0x217e5u, add_entry, sizeof(add_entry)) != 0 ||
+        memcmp(base + 0x21be80u, "\x8b\x81\x88\x00\x00\x00\xc3", 7u) != 0 ||
+        *(void **)(base + 0x2d3a30u) != base + 0x21be80u) return FALSE;
+    item = *(void **)((uint8_t *)database + 12u + item_id * 4u);
+    if (item == NULL || !item_matches_family(item, category) ||
+        !readable_memory(item, 0x8cu) ||
+        *(uint32_t *)((uint8_t *)item + ITEM_ID_OFFSET) != item_id ||
+        *(void **)item != base + 0x2d3a28u ||
+        *(uint32_t *)((uint8_t *)item + 0x88u) != category) return FALSE;
+    for (j = 0u; j < owned.row_count; ++j)
+        if (owned.rows[j].native_item == item) return TRUE;
+    if (!character_weapon_context(character, &fresh_weapon, &fresh_inventory,
+            &fresh_category) || fresh_weapon != weapon ||
+        fresh_inventory != inventory || fresh_category != category ||
+        *(void **)(base + RVA_ITEM_DATABASE_GLOBAL) != database ||
+        *(void **)((uint8_t *)database + 12u + item_id * 4u) != item ||
+        *(void **)((uint8_t *)weapon + WEAPON_PENDING_ITEM_OFFSET) != NULL) return FALSE;
+    /* show=1: the native "item received" notice tells the owner what arrived. */
+    ((AddItemFunction)(base + 0x217e0u))(inventory, (int)item_id, 1, 1);
+    if (!SudekiMpDescribeCharacterWeapons(character, &owned)) return FALSE;
+    for (j = 0u; j < owned.row_count; ++j)
+        if (owned.rows[j].native_item == item) break;
+    if (j == owned.row_count) return FALSE;
+    SudekiMpLogFormat(
+        "weapon_grant item=%u category=%u policy=equipment_follows_character\r\n",
+        item_id, category);
+    return TRUE;
+}
+
 SudekiMpWeaponActivationResult SudekiMpActivateCharacterWeapon(
     void *character,
     unsigned int slot

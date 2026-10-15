@@ -15,6 +15,13 @@ BOOL SudekiMpLanStoryTestStartConfigure(HMODULE image, const float leader[3],
 /* Optional [StoryAreas] TestStartZone: native zone (descriptor name) made
  * current before placing, via the area follower's native calls. */
 void SudekiMpLanStoryTestStartSetZone(const char *zone);
+/* Optional [StoryAreas] TestStartLeaderHealth = fraction (0 < f < 1): after
+ * placement the host leader's HP is lowered to that fraction of its current
+ * value through the cleanroom resource setter, so item/heal gates can be
+ * played from a fresh load. Test aid only; ignored outside (0,1). */
+void SudekiMpLanStoryTestStartSetLeaderHealth(float fraction);
+/* Same for every other available party member ([StoryAreas] TestStartFollowerHealth). */
+void SudekiMpLanStoryTestStartSetFollowerHealth(float fraction);
 /* Native game thread, from the host runtime service with a proved roster. */
 void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster);
 

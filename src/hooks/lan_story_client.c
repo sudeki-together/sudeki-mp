@@ -746,6 +746,8 @@ BOOL SudekiMpLanStoryClientAcquire(SudekiMpLanStoryClientReport *out) {
 }
 static BOOL adopt_native(BOOL call_scoped);
 static BOOL follow_recent_now(void);
+static BOOL ui_tasks_allowed;
+void SudekiMpLanStoryClientAllowUiTasks(BOOL allow) { ui_tasks_allowed=allow; }
 BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     BOOL paused=FALSE;
     if(!native_thread_exact() || presentation_active || InterlockedCompareExchange(&busy,0,0) ||
@@ -771,6 +773,17 @@ BOOL SudekiMpLanStoryClientService(SudekiMpLanStoryClientReport *out) {
     }
     BOOL exact=paused && SudekiMpLanPartyMenuNativeOwnsPause();
     BOOL roster=roster_exact(),input=input_closed(retained_roster.controller);
+    if(ui_tasks_allowed && phase==SUDEKIMP_STORY_CLIENT_PAUSED && world_identity() &&
+        readable(base+TASK_CREATED,4u)) {
+        uint32_t created=*(uint32_t *)(base+TASK_CREATED),expected=world_pause.created_tasks;
+        if(created!=expected && created-expected<=4u && trigger_hooks_exact() && trigger_queue_empty() &&
+            !InterlockedCompareExchange(&trigger_fault,0,0) && !*(void **)(world_pause.manager+0x10080) &&
+            !memcmp(world_pause.gel+0x38,world_pause.gel_time,sizeof(world_pause.gel_time)) && same_load()) {
+            SudekiMpLogFormat("lan_story_client event=ui_tasks_adopted tasks=%lu->%lu\r\n",
+                (unsigned long)expected,(unsigned long)created);
+            world_pause.created_tasks=created;
+        }
+    }
     BOOL entities=registry_exact(1),scheduler=scheduler_exact() && same_load();
     if(phase==SUDEKIMP_STORY_CLIENT_UNKNOWN) {
         report_state(out,exact,roster,input,scheduler,entities);

@@ -73,12 +73,26 @@ typedef enum SudekiMpLanStoryActionKind {
     SUDEKIMP_STORY_ACTION_SPIRIT,
     /* Tal and Buki. slot is 1 weak, 2 strong, 3 sweep.
      * A press requests native admission, never an animation or hit result. */
-    SUDEKIMP_STORY_ACTION_MELEE
+    SUDEKIMP_STORY_ACTION_MELEE,
+    /* #75: equip a weapon the requesting player chose in their own M menu.
+     * slot is the native weapon item id (0..47) and must belong to the
+     * fence character's weapon family. The host grants a missing item to its
+     * own game first (equipment follows the character), then equips natively;
+     * the party frame carries the result back. Never armour, never unequip. */
+    SUDEKIMP_STORY_ACTION_EQUIP_WEAPON,
+    /* #75 / D10: use a consumable on the requesting player's OWN character
+     * (never a target choice). The item id (0..998) is slot | extra<<8. The
+     * host runs the Items page's native can-use / apply / ReduceItem path. */
+    SUDEKIMP_STORY_ACTION_USE_ITEM
 } SudekiMpLanStoryActionKind;
+#define SUDEKIMP_STORY_ACTION_ITEM(slot,extra) ((unsigned)(slot)|((unsigned)(extra)<<8))
+/* Native weapon item ids per character: Tal 0..11, Ailish 12..23,
+ * Buki 24..35, Elco 36..47 (CItem id +0x14, inventory categories 4/5/7/6). */
+BOOL SudekiMpStoryWeaponItemForCharacter(unsigned character,unsigned item);
 typedef struct SudekiMpLanStoryActionRequest {
     SudekiMpLanStoryControlFence fence;
     uint32_t request,acknowledged_frame;
-    uint8_t kind,slot;
+    uint8_t kind,slot,extra; /* extra: high item-id byte for USE_ITEM, else 0 */
 } SudekiMpLanStoryActionRequest;
 typedef enum SudekiMpLanStoryActionOutcome {
     SUDEKIMP_STORY_ACTION_STARTED=1,
@@ -95,7 +109,7 @@ typedef enum SudekiMpLanStoryActionOutcome {
 typedef struct SudekiMpLanStoryActionResult {
     SudekiMpLanStoryControlFence fence;
     uint32_t request,observed_tick;
-    uint8_t kind,slot,outcome;
+    uint8_t kind,slot,outcome,extra;
 } SudekiMpLanStoryActionResult;
 #define SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE 32u
 #define SUDEKIMP_STORY_ACTION_RESULT_WIRE_SIZE 32u

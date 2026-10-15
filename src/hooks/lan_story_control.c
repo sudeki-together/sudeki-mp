@@ -16,6 +16,7 @@
 #include "engine/log.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
+#include "network/lan_story_handoff.h"
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -35,7 +36,12 @@ static BOOL idle_contact_reported;
 /* Retail IsAttacking (RVA88D0) reads bit1000. Transfers/drains must wait for
  * it. Ordinary movement instead reaches native Move/CanMove every frame;
  * the arbiter owns which phases of the combo permit locomotion. */
-enum { STORY_BODY_BUSY_FLAGS=0x081812c8u };
+/* 0x20 = native item-use action in progress (quick-menu path, RVA 0xDC110 →
+ * 0x4DA5B0 sets 0x800|0x20; the completion handler 0x58A3C0 applies the item
+ * only while 0x20 is still set). The mod must not drive the body meanwhile,
+ * exactly as the native player controller's admission mask 0x29BE6F0 does
+ * (owner gate 2026-10-15: Tal's action animated but never applied). */
+enum { STORY_BODY_BUSY_FLAGS=0x081812c8u|0x20u };
 
 static BOOL readable(const void *p,size_t n) {
     MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
@@ -225,11 +231,44 @@ static BOOL block_world_ready(void *actor) {
         SudekiMpLanStoryCastBodyDrained(actor) &&
         SudekiMpStoryMeleeInteractionClear(base,actor,2u,readable);
 }
+/* Bounded research diagnostic (item action, 2026-10-15): the remote body's
+ * arbiter state word on every change, sampled at dispatch rate. */
+static void trace_arbiter_flags(const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,const char *where) {
+    static uint32_t last[4]; static unsigned logs;
+    if(!roster || !key || key->seat>=4u || logs>=400u) return;
+    uint8_t *a=roster->actors[key->seat],*arbiter=readable(a,0x94u)?*(uint8_t **)(a+0x90u):NULL;
+    if(!readable(arbiter,0x64u)) return;
+    uint32_t now=*(uint32_t *)(arbiter+0x50u);
+    uint8_t *action=readable(a,0xa0u)?*(uint8_t **)(a+0x9cu):NULL; BOOL ok=readable(action,0x58u);
+    uint8_t *block=readable(a,0xb8u)?*(uint8_t **)(a+0xb4u):NULL; BOOL bok=readable(block,0x20u);
+    static uint32_t last_cancel[4],last_block[4];
+    uint32_t cancel=ok?action[0x54u]:0u,bstate=bok?*(uint32_t *)(block+0x18u):0xffu;
+    uint8_t *stats=readable(a,0x50u)?*(uint8_t **)(a+0x4cu):NULL; float hp=readable(stats,0x30u)?*(float *)(stats+0x2cu):-1.0f;
+    static float last_hp[4];
+    if(now!=last[key->seat] || cancel!=last_cancel[key->seat] || bstate!=last_block[key->seat] || hp!=last_hp[key->seat]) { ++logs;
+        last_cancel[key->seat]=cancel; last_block[key->seat]=bstate; last_hp[key->seat]=hp;
+        SudekiMpLogFormat("story_arbiter event=flags seat=%u where=%s arb50=%08lx->%08lx arb54=%d action=%p kind=%lu def=%08lx handle=%08lx applied=%lu block_state=%lu hp=%.0f ms=%lu\r\n",
+            key->seat,where,(unsigned long)last[key->seat],(unsigned long)now,(int)(int8_t)arbiter[0x54u],(void *)action,
+            ok?(unsigned long)*(uint32_t *)(action+0x40u):0ul,ok?(unsigned long)*(uint32_t *)(action+0x44u):0ul,
+            ok?(unsigned long)*(uint32_t *)(action+0x48u):0ul,(unsigned long)cancel,(unsigned long)bstate,(double)hp,(unsigned long)GetTickCount());
+        last[key->seat]=now; }
+}
 BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,float x,float z,
     BOOL *temporarily_held) {
+    trace_arbiter_flags(roster,key,"move");
     if(temporarily_held) *temporarily_held=FALSE;
     if(!boundary(w,roster) || !key || key->seat>=4u || !isfinite(x) || !isfinite(z)) return FALSE;
+    {   /* Native item-use action in progress (arbiter 0x20): the native player
+         * controller submits nothing while it runs, and even a zero-speed
+         * submission interrupted it (owner gate 2026-10-15: animation played,
+         * item never applied). Hold without touching the body. */
+        uint8_t *a=roster->actors[key->seat],*arbiter=readable(a,0x94u)?*(uint8_t **)(a+0x90u):NULL;
+        if(readable(arbiter,0x64u) && *(void **)(arbiter+0x10u)==a && (*(uint32_t *)(arbiter+0x50u)&0x20u)) {
+            if(temporarily_held) *temporarily_held=TRUE;
+            return TRUE;
+        }
+    }
     /* A neutral packet may quiesce our speed while native UI or a menu is
      * active. New locomotion still requires the ordinary unpaused world. */
     BOOL ordinary=ordinary_world(TRUE);
@@ -389,4 +428,65 @@ BOOL SudekiMpLanStoryControlUninstall(void) {
     if(!restored) return retain(error);
     base=NULL; installed=FALSE; native_thread=0; idle_contact_reported=FALSE;
     return TRUE;
+}
+
+unsigned SudekiMpLanStoryControlEquipWeapon(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item) {
+    if(!boundary(w,roster) || !key || key->seat>=4u || !(roster->available_mask&(1u<<key->seat)) ||
+        !SudekiMpStoryWeaponItemForCharacter(key->seat,item) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    void *actor=roster->actors[key->seat];
+    /* Native rule: no weapon change while fighting, drawing or casting. */
+    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    SudekiMpWeaponQuickList list;
+    if(!SudekiMpGrantCharacterWeaponItem(actor,item) || !SudekiMpDescribeCharacterWeapons(actor,&list) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    unsigned slot=SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS; BOOL equipped=FALSE;
+    for(unsigned i=0;i<list.row_count;++i) {
+        const uint8_t *row_item=list.rows[i].native_item;
+        if(!readable(row_item,0x18u)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+        if(*(const uint32_t *)(row_item+0x14u)==item) { slot=list.rows[i].slot; equipped=list.rows[i].equipped; }
+    }
+    if(slot>=SUDEKIMP_WEAPON_ACTIVATION_MAX_ROWS) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    if(equipped) return SUDEKIMP_STORY_ACTION_STARTED;
+    /* The Main Menu's own equip core, not the combat quick-activation: that
+     * one left an idle AI-driven Tal on its old weapon (live, 2026-10-15). */
+    BOOL applied=SudekiMpEquipCharacterWeaponItem(actor,item);
+    unsigned outcome=applied?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    SudekiMpLogFormat("story_main_menu event=host_equip character=%u item=%u slot=%u applied=%u outcome=%u\r\n",
+        key->seat,item,slot,(unsigned)applied,outcome);
+    return outcome;
+}
+
+unsigned SudekiMpLanStoryControlUseItem(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item) {
+    if(!boundary(w,roster) || !key || key->seat>=4u || !(roster->available_mask&(1u<<key->seat)) ||
+        item>=999u || !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    void *actor=roster->actors[key->seat];
+    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    /* Prefer the native "use item" action (quick-menu path: animation,
+     * keyframe apply, item effect through the character's arbiter); the
+     * direct Items-page apply remains the fallback (owner, 2026-10-15). */
+    unsigned stage=0,action_stage=0,slot=0; BOOL applied=FALSE,action=FALSE;
+    {   /* The character's party slot (group+0x90+slot*0xC), as the quick menu indexes it. */
+        const uint8_t *group=roster->group; unsigned count=group?*(const unsigned *)(group+0xccu):0u;
+        for(unsigned i=0;i<count && i<4u;++i) if(*(void *const *)(group+0x90u+i*0xcu)==actor) slot=i;
+    }
+    action=SudekiMpUseItemActionOnCharacter(actor,item,slot,&action_stage);
+    /* Native quick-menu path (animation, keyframe apply, item effect through
+     * the character's own arbiter; CONFIRMED_LIVE for the remote Tal on
+     * 2026-10-15 once the native can-use ran first). The direct Items-page
+     * apply remains the fallback when the action cannot start. */
+    if(!action && action_stage<50u) applied=SudekiMpUseItemOnCharacter(actor,item,&stage,FALSE,TRUE);
+    {   const uint8_t *group=roster->group; const uint8_t *s0=group?group+0x90u+slot*0xcu:NULL;
+        SudekiMpLogFormat("story_main_menu event=host_use_target actor=%p slot=%u slot_words=%08lx,%08lx,%08lx\r\n",actor,slot,
+            s0?(unsigned long)*(const uint32_t *)s0:0ul,s0?(unsigned long)*(const uint32_t *)(s0+4u):0ul,s0?(unsigned long)*(const uint32_t *)(s0+8u):0ul); }
+    unsigned outcome=(action || applied)?SUDEKIMP_STORY_ACTION_STARTED:
+        (action_stage>=50u || stage>=100u)?SUDEKIMP_STORY_ACTION_BUSY:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    /* can-use refused (stage 100+code, e.g. full HP): not a body-busy case. */
+    if(!action && action_stage>=100u && !applied) outcome=SUDEKIMP_STORY_ACTION_BUSY;
+    trace_arbiter_flags(roster,key,"use");
+    SudekiMpLogFormat("story_main_menu event=host_use character=%u item=%u action=%u action_stage=%u applied=%u stage=%u outcome=%u\r\n",
+        key->seat,item,(unsigned)action,action_stage,(unsigned)applied,stage,outcome);
+    return outcome;
 }

@@ -261,6 +261,33 @@ BOOL SudekiMpPartyMenuRender(void *device) {
     return SudekiMpTitleViewDraw(device,count,selected,enabled,NULL,
         SUDEKIMP_TITLE_BUTTON_REST,0,1,&window,&panel);
 }
+BOOL SudekiMpPartyMenuRenderConfirm(void *device,const char *question,unsigned choice) {
+    if(!SudekiMpTitleViewRestore() || !SudekiMpTitleViewPrepare(device)) return FALSE;
+    SudekiMpTitleExtras overlay={0};
+    overlay.overlay=TRUE;
+    /* A small framed dialog in the middle of the 960x720 canvas: question,
+     * two buttons (the chosen one lit), one hint line. */
+    overlay.boxes[overlay.box_count++]=(SudekiMpOverlayBox){300,286,360,134,0};
+    static const char *const answers[2]={"Yes","No"};
+    for(unsigned i=0;i<2u;++i)
+        overlay.boxes[overlay.box_count++]=(SudekiMpOverlayBox){372.f+i*116.f,336,100,34,choice==i?2u:1u};
+    SudekiMpPanelText *line=&overlay.texts[overlay.text_count++];
+    float width=SudekiMpTitleViewTextWidth(question,128u,19.0f);
+    line->x=width>0?480.0f-width/2.0f:320.0f; line->y=312; line->width=340; line->size=19;
+    snprintf(line->text,sizeof(line->text),"%s",question);
+    for(unsigned i=0;i<2u;++i) {
+        line=&overlay.texts[overlay.text_count++];
+        width=SudekiMpTitleViewTextWidth(answers[i],8u,19.0f);
+        line->x=422.f+i*116.f-(width>0?width/2.0f:14.f); line->y=353; line->width=96; line->size=19;
+        snprintf(line->text,sizeof(line->text),"%s",answers[i]);
+    }
+    line=&overlay.texts[overlay.text_count++];
+    static const char hint[]="Enter confirms   Left/Right switches   Esc cancels";
+    width=SudekiMpTitleViewTextWidth(hint,sizeof(hint),12.0f);
+    line->x=width>0?480.0f-width/2.0f:330.0f; line->y=398; line->width=340; line->size=12;
+    snprintf(line->text,sizeof(line->text),"%s",hint);
+    return SudekiMpTitleViewDraw(device,1,0,0,NULL,SUDEKIMP_TITLE_BUTTON_REST,0,1,&window,&overlay);
+}
 void SudekiMpPartyMenuReset(void) {
     memset(&state,0,sizeof(state)); memset(keys,0,sizeof(keys));
     command=NULL; opened=focused=FALSE; window=NULL; page=HOME; selected=recipient=0;

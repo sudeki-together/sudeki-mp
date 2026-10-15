@@ -197,13 +197,16 @@ static void clear_story_action(Peer *p) {
 /* Host only: input fencing can cancel a queued action before the game thread
  * takes it, but must leave a terminal result for same-ID retries. A taken
  * request may already have executed; only its native result can finish it. */
+static SudekiMpLanPartyActionTrace action_trace;
+void SudekiMpLanPartySetActionTrace(SudekiMpLanPartyActionTrace trace) { action_trace=trace; }
 static void expire_untaken_story_action(Peer *p,uint32_t now) {
     if(!p->story_action_pending || p->story_action_taken ||
         !SudekiMpLanStoryActionRequestValid(&p->story_action) ||
         SudekiMpLanStoryActionResultMatches(&p->story_action_result,&p->story_action)) return;
     const SudekiMpLanStoryActionRequest *r=&p->story_action;
+    if(action_trace) action_trace("fenced_untaken",r->kind,r->slot,r->request);
     p->story_action_result=(SudekiMpLanStoryActionResult){r->fence,
-        r->request,now,r->kind,r->slot,SUDEKIMP_STORY_ACTION_EXPIRED};
+        r->request,now,r->kind,r->slot,SUDEKIMP_STORY_ACTION_EXPIRED,r->extra};
     p->story_action_pending=0;p->story_action_taken=1;
 }
 static void clear_story_media(SudekiMpLanPartySession *s) {
@@ -948,6 +951,17 @@ static BOOL story_action_current(const SudekiMpLanPartySession *s,const Peer *p,
     if(!p || !SudekiMpLanStoryActionRequestValid(request)) return FALSE;
     SudekiMpLanStoryMovement fence={0}; fence.fence=request->fence;
     uint32_t last=s->config.local_seat?s->story_frame_sequence:p->story_last_frame;
+    /* #75: an equip request is not frame-timed; a client in its own native
+     * menu cannot present frames, so its acknowledged frame falls behind the
+     * host's while the control fence stays current. Skills/Spirit/melee keep
+     * the eight-frame window. */
+    if(request->kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON || request->kind==SUDEKIMP_STORY_ACTION_USE_ITEM)
+        /* The client cannot present, acknowledge frames or publish its scene
+         * inside its menu; the control fence and READY phase are the currency
+         * that matters for an equip. */
+        return story_control_peer(s,p,&fence.fence) &&
+            p->story_control.phase==SUDEKIMP_STORY_CONTROL_READY &&
+            SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&fence.fence);
     return story_movement_current(s,p,&fence,now) && last &&
         !sequence_ahead(request->acknowledged_frame,last) &&
         (uint32_t)(last-request->acknowledged_frame)<=8u;
@@ -1508,11 +1522,13 @@ static void receive_message(SudekiMpLanPartySession *s,
             p->story_action_pending=fresh?1:0; p->story_action_taken=fresh?0:1;
             memset(&p->story_action_result,0,sizeof(p->story_action_result));
             if(!fresh) {
+                if(action_trace) action_trace("receive_not_current",request.kind,request.slot,
+                    (p->story_control.phase<<8)|(unsigned)SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&request.fence));
                 /* A delayed first datagram still needs a terminal reply.
                  * Authenticated/current-fence but stale requests are NEVER
                  * native admission, nor can retries rejuvenate their frame. */
                 p->story_action_result=(SudekiMpLanStoryActionResult){request.fence,
-                    request.request,s->now,request.kind,request.slot,SUDEKIMP_STORY_ACTION_EXPIRED};
+                    request.request,s->now,request.kind,request.slot,SUDEKIMP_STORY_ACTION_EXPIRED,request.extra};
                 (void)send_story_action_result(s,p);
             }
         }
@@ -2686,7 +2702,10 @@ BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *s,
     AcquireSRWLockExclusive(&s->lock); Peer *p=leased(s,lease);
     uint32_t now=GetTickCount();
     BOOL same=p && SudekiMpLanStoryActionRequestSame(request,&p->story_action);
+    /* #75: an equip request is never frame-expired on the client either; its
+     * acknowledged frame cannot advance while the client's own menu is up. */
     BOOL frame_expired=p && s->story_frame_sequence &&
+        request->kind!=SUDEKIMP_STORY_ACTION_EQUIP_WEAPON && request->kind!=SUDEKIMP_STORY_ACTION_USE_ITEM &&
         !sequence_ahead(request->acknowledged_frame,s->story_frame_sequence) &&
         (uint32_t)(s->story_frame_sequence-request->acknowledged_frame)>8u;
     BOOL ok=p && story_control_peer(s,p,&request->fence) &&
@@ -2707,7 +2726,7 @@ BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *s,
              * A previously sent ID (same) ALWAYS recovers the host result. */
             p->story_action_pending=0;
             p->story_action_result=(SudekiMpLanStoryActionResult){request->fence,
-                request->request,now,request->kind,request->slot,SUDEKIMP_STORY_ACTION_EXPIRED};
+                request->request,now,request->kind,request->slot,SUDEKIMP_STORY_ACTION_EXPIRED,request->extra};
         }
     }
     if(ok && !p->story_action_result.request)
@@ -2725,9 +2744,11 @@ BOOL SudekiMpLanPartyTakeStoryAction(SudekiMpLanPartySession *s,
         p->story_action_pending=0; p->story_action_taken=1;
         if(ok) *request=p->story_action;
         else {
+            if(action_trace) action_trace("take_stale",p->story_action.kind,p->story_action.slot,
+                (unsigned)(now-p->story_action_received_at));
             p->story_action_result=(SudekiMpLanStoryActionResult){p->story_action.fence,
                 p->story_action.request,now,p->story_action.kind,p->story_action.slot,
-                SUDEKIMP_STORY_ACTION_EXPIRED};
+                SUDEKIMP_STORY_ACTION_EXPIRED,p->story_action.extra};
             (void)send_story_action_result(s,p);
         }
     }

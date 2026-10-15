@@ -8162,23 +8162,37 @@ BOOL SudekiMpLanPartyControlStoryActorOwned(const SudekiMpControlUpdateDispatchW
     }
     return why==NULL;
 }
+/* Rate-limited name for a refused story acquire (#74 follow-up: a client
+ * stuck waiting for the host offer after a host house visit). */
+static void story_acquire_refusal(unsigned seat,const char *why,uint32_t detail) {
+    static const char *last[4]; static DWORD at[4];
+    DWORD now=GetTickCount();
+    if(seat>=4u || (last[seat]==why && now-at[seat]<2000u)) return;
+    last[seat]=why; at[seat]=now;
+    SudekiMpLogFormat("story_native_control event=acquire_refused seat=%u reason=%s detail=%lu\r\n",
+        seat,why,(unsigned long)detail);
+}
 BOOL SudekiMpLanPartyControlStoryAcquire(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,
     SudekiMpLanPartyControlDrainProbe ready) {
     if(!ready || !story_key_valid(key)) return FALSE;
     PartyNativeLease before,fresh,*owned=&story_native_control.actor[key->seat]; void **slot;
-    if(owned->phase!=PARTY_NATIVE_EMPTY)
-        return SudekiMpLanPartyControlStoryExact(w,roster,key) && story_control_stop(w,roster,key);
-    if(key->generation<=story_native_control.last_generation[key->seat] ||
-        !story_control_observe(w,roster,key,&before,&slot) ||
-        !ready(key,before.actor,w) ||
-        !story_control_observe(w,roster,key,&fresh,&slot) ||
-        before.actor!=fresh.actor || before.group!=fresh.group ||
+    if(owned->phase!=PARTY_NATIVE_EMPTY) {
+        BOOL ok=SudekiMpLanPartyControlStoryExact(w,roster,key) && story_control_stop(w,roster,key);
+        if(!ok) story_acquire_refusal(key->seat,"slot_not_empty",owned->phase);
+        return ok;
+    }
+    const char *why=NULL;
+    if(key->generation<=story_native_control.last_generation[key->seat]) why="generation_stale";
+    else if(!story_control_observe(w,roster,key,&before,&slot)) why="observe";
+    else if(!ready(key,before.actor,w)) why="body_not_idle";
+    else if(!story_control_observe(w,roster,key,&fresh,&slot)) why="reobserve";
+    else if(before.actor!=fresh.actor || before.group!=fresh.group ||
         before.controller!=fresh.controller || before.host!=fresh.host ||
-        before.ai!=fresh.ai || before.mode!=fresh.mode ||
-        owned->phase!=PARTY_NATIVE_EMPTY ||
-        *(int16_t *)((uint8_t *)fresh.ai+0x16au)!=0 ||
-        ((uint8_t *)fresh.mode)[0xbu]!=1u) return FALSE;
+        before.ai!=fresh.ai || before.mode!=fresh.mode || owned->phase!=PARTY_NATIVE_EMPTY) why="identity_drift";
+    else if(*(int16_t *)((uint8_t *)fresh.ai+0x16au)!=0) why="ai_override";
+    else if(((uint8_t *)fresh.mode)[0xbu]!=1u) why="ai_mode";
+    if(why) { story_acquire_refusal(key->seat,why,key->generation); return FALSE; }
     uint32_t previous=story_native_control.last_generation[key->seat];
     *owned=fresh; owned->phase=PARTY_NATIVE_QUARANTINED;
     story_native_control.last_generation[key->seat]=key->generation;

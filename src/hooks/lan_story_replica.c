@@ -48,6 +48,8 @@ static struct EquipmentAttempt {
     void *actor,*weapon,*item;
     uint32_t epoch,generation;
 } equipment_attempts[4];
+/* #74: one native weapon grant per host epoch/generation and character. */
+static struct EquipmentAttempt equipment_grants[4];
 static SudekiMpLanArenaOwnerViewLease view_owner;
 static SudekiMpLanStoryView saved_view,last_view;
 static float saved_anchor[3];
@@ -416,7 +418,37 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
                     expected=item; slot=list.rows[i].slot;
                 }
             }
-            if(!expected) { SetLastError(ERROR_NOT_FOUND); return FALSE; }
+            if(!expected) {
+                /* #74 (D5/D9): the host equipped a weapon this game never
+                 * received, so the native equip below could not find it and
+                 * every frame was refused. Equipment follows the character's
+                 * owner: grant the item once per host epoch/generation, then
+                 * re-describe and continue with the ordinary equip path. */
+                unsigned id=state->weapon_item_plus_one-1u;
+                struct EquipmentAttempt *grant=&equipment_grants[c];
+                if(grant->actor==actor && grant->item==(void *)(uintptr_t)state->weapon_item_plus_one &&
+                    grant->epoch==frame->epoch && grant->generation==state->generation) {
+                    SetLastError(ERROR_NOT_FOUND); return FALSE;
+                }
+                *grant=(struct EquipmentAttempt){actor,weapon,(void *)(uintptr_t)state->weapon_item_plus_one,
+                    frame->epoch,state->generation};
+                applying=TRUE;
+                BOOL granted=SudekiMpGrantCharacterWeaponItem(actor,id);
+                applying=FALSE;
+                SudekiMpLogFormat("lan_story_replica event=equipment_granted character=%u epoch=%lu generation=%lu item=%u granted=%u\r\n",
+                    c,(unsigned long)frame->epoch,(unsigned long)state->generation,id,(unsigned)granted);
+                if(!granted || !exact(roster,context) || !SudekiMpDescribeCharacterWeapons(actor,&list) ||
+                    *(void **)((uint8_t *)actor+0xc0u)!=weapon) { SetLastError(ERROR_NOT_FOUND); return FALSE; }
+                for(unsigned i=0;i<list.row_count;++i) {
+                    void *item=list.rows[i].native_item;
+                    if(!readable(item,0x18u)) return FALSE;
+                    if(*(uint32_t *)((uint8_t *)item+0x14u)==id) {
+                        if(expected) return FALSE;
+                        expected=item; slot=list.rows[i].slot;
+                    }
+                }
+                if(!expected) { SetLastError(ERROR_NOT_FOUND); return FALSE; }
+            }
         }
         if(*(void **)(weapon+0x268u)!=expected) {
             /* There is no validated unequip contract in this adapter. */

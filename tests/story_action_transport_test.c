@@ -117,7 +117,7 @@ static void exercise(unsigned character) {
     assert(got && remote_movement.world_x==movement.world_x && remote_movement.world_z==movement.world_z);
     movement.world_x=movement.world_z=4;
     assert(!SudekiMpLanPartySendStoryMovement(client,&peer.lease,&movement));
-    SudekiMpLanStoryActionRequest r={state.fence,1,1,SUDEKIMP_STORY_ACTION_SKILL,3},taken;
+    SudekiMpLanStoryActionRequest r={state.fence,1,1,SUDEKIMP_STORY_ACTION_SKILL,3,0},taken;
     SudekiMpLanStoryActionRequest invalid=r; invalid.fence.character=3;
     assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid));
     invalid=r; invalid.acknowledged_frame=2;
@@ -128,7 +128,7 @@ static void exercise(unsigned character) {
     invalid=r; ++invalid.request; assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid));
     receive_request(&r,FALSE);
     assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
-    SudekiMpLanStoryActionResult result={r.fence,r.request,GetTickCount(),r.kind,r.slot,SUDEKIMP_STORY_ACTION_STARTED};
+    SudekiMpLanStoryActionResult result={r.fence,r.request,GetTickCount(),r.kind,r.slot,SUDEKIMP_STORY_ACTION_STARTED,0};
     assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
     receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
     result.outcome=SUDEKIMP_STORY_ACTION_BUSY;
@@ -145,7 +145,7 @@ static void exercise(unsigned character) {
         bytes[30]=1; assert(!SudekiMpLanStoryActionRequestDecode(bytes,sizeof(bytes),&invalid));
         receive_request(&r,TRUE);
         result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
-            SUDEKIMP_STORY_ACTION_STARTED};
+            SUDEKIMP_STORY_ACTION_STARTED,0};
         assert(!SudekiMpLanStoryActionResultValid(&result)); /* submission is not acceptance */
         result.outcome=SUDEKIMP_STORY_ACTION_NO_SP; assert(!SudekiMpLanStoryActionResultValid(&result));
         result.outcome=SUDEKIMP_STORY_ACTION_SUBMITTED;
@@ -154,13 +154,42 @@ static void exercise(unsigned character) {
         receive_request(&r,FALSE); receive_result(&r,SUDEKIMP_STORY_ACTION_SUBMITTED);
         assert(!SudekiMpLanPartyTakeStoryAction(host,&peer.lease,GetTickCount(),&taken));
     }
+    { /* #75/D10 use-item request: item id 0..998 carried as slot|extra<<8. */
+        ++r.request; r.kind=SUDEKIMP_STORY_ACTION_USE_ITEM; r.slot=(uint8_t)(320u&0xffu); r.extra=(uint8_t)(320u>>8);
+        assert(SudekiMpLanStoryActionRequestValid(&r) && SUDEKIMP_STORY_ACTION_ITEM(r.slot,r.extra)==320u);
+        invalid=r; invalid.slot=(uint8_t)(999u&0xffu); invalid.extra=(uint8_t)(999u>>8); assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        invalid=r; invalid.kind=SUDEKIMP_STORY_ACTION_SKILL; invalid.slot=1; assert(!SudekiMpLanStoryActionRequestValid(&invalid)); /* extra only for USE_ITEM */
+        uint8_t bytes[SUDEKIMP_STORY_ACTION_REQUEST_WIRE_SIZE]; SudekiMpLanStoryActionRequest back;
+        assert(SudekiMpLanStoryActionRequestEncode(&r,bytes,sizeof(bytes)) && bytes[30]==1 &&
+            SudekiMpLanStoryActionRequestDecode(bytes,sizeof(bytes),&back) && SudekiMpLanStoryActionRequestSame(&r,&back));
+        receive_request(&r,TRUE);
+        result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,SUDEKIMP_STORY_ACTION_STARTED,r.extra};
+        assert(SudekiMpLanStoryActionResultValid(&result) && SudekiMpLanStoryActionResultMatches(&result,&r));
+        result.extra=0; assert(!SudekiMpLanStoryActionResultMatches(&result,&r)); result.extra=r.extra;
+        assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+        receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
+        r.extra=0;
+    }
+    { /* #75 equip request: a weapon item of the fence character's family only. */
+        unsigned first=character==2u?0u:24u;
+        ++r.request; r.kind=SUDEKIMP_STORY_ACTION_EQUIP_WEAPON; r.slot=(uint8_t)(first+3u);
+        assert(SudekiMpLanStoryActionRequestValid(&r));
+        invalid=r; invalid.slot=(uint8_t)(first+12u); assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        invalid=r; invalid.fence.character=3; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        receive_request(&r,TRUE);
+        result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,SUDEKIMP_STORY_ACTION_STARTED,0};
+        assert(SudekiMpLanStoryActionResultValid(&result));
+        assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+        receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
+        result.outcome=SUDEKIMP_STORY_ACTION_SUBMITTED; assert(!SudekiMpLanStoryActionResultValid(&result));
+    }
     for(unsigned variant=1;variant<=2;++variant) {
         ++r.request; r.kind=SUDEKIMP_STORY_ACTION_SPIRIT; r.slot=(uint8_t)variant;
         invalid=r; invalid.slot=0; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
         invalid.slot=3; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
         receive_request(&r,TRUE);
         result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
-            variant==1?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_NO_SP};
+            variant==1?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_NO_SP,0};
         assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
         receive_result(&r,result.outcome);
         receive_request(&r,FALSE); receive_result(&r,result.outcome);
@@ -189,7 +218,7 @@ static void exercise(unsigned character) {
     invalid=r;++invalid.request;
     assert(!SudekiMpLanPartySendStoryAction(client,&peer.lease,&invalid));
     result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
-        SUDEKIMP_STORY_ACTION_STARTED};
+        SUDEKIMP_STORY_ACTION_STARTED,0};
     assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
     receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
     change_presence();receive_request(&r,FALSE);receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
@@ -197,7 +226,7 @@ static void exercise(unsigned character) {
     ++r.request;r.kind=SUDEKIMP_STORY_ACTION_MELEE;r.slot=2;
     receive_request(&r,TRUE);
     result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,
-        SUDEKIMP_STORY_ACTION_SUBMITTED};
+        SUDEKIMP_STORY_ACTION_SUBMITTED,0};
     assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
     receive_result(&r,SUDEKIMP_STORY_ACTION_SUBMITTED);
     r.kind=SUDEKIMP_STORY_ACTION_SKILL;r.slot=3;
