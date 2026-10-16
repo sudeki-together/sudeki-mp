@@ -80,8 +80,44 @@ static void areas(void) {
     s.phase=SUDEKIMP_LAN_STORY_LOADING; s.available_mask=0; s.leader_seat=SUDEKIMP_LAN_STORY_NO_SEAT;
     assert(!SudekiMpLanStorySceneCharacterArea(&s,2u,w,t));
 }
+static void kamo_split_scenes(void) {
+    static const struct {const char *world,*temporary;} shops[]={
+        {"newbrightwater","lnbr_kamo_shop"},
+        {"illuminacastle","lica_kamo_shop"},
+        {"shadani_mo","lsmob04_kamo_shop"},
+        {"transentia_city","ltci_kamo_shop"},
+        {"crystal_reef","dcre_kamo_shop"},
+        {"cyantine_citadel","dcci_kamo_shop"}
+    };
+    for(unsigned i=0;i<sizeof(shops)/sizeof(*shops);++i) {
+        SudekiMpLanStoryScene before=ready(19,1,100,NULL,0);
+        before.leader_seat=3u; /* Ailish enters; Tal retains the exterior. */
+        memset(before.world,0,sizeof(before.world));
+        strcpy(before.world,shops[i].world);
+        SudekiMpLanStoryScene inside=before,after,decoded;
+        inside.revision=2;inside.observed_tick=200;inside.inside_mask=8u;
+        strcpy(inside.temporary,shops[i].temporary);
+        after=before;after.revision=3;after.observed_tick=300;
+        uint8_t wire[SUDEKIMP_LAN_STORY_WIRE_SIZE];
+        const SudekiMpLanStoryScene *scenes[]={&before,&inside,&after};
+        for(unsigned j=0;j<3u;++j) {
+            assert(SudekiMpLanStorySceneValid(scenes[j]));
+            assert(SudekiMpLanStorySceneEncode(scenes[j],wire,sizeof(wire)));
+            assert(SudekiMpLanStorySceneDecode(wire,sizeof(wire),&decoded));
+            assert(!memcmp(scenes[j],&decoded,sizeof(decoded)));
+            assert(decoded.epoch==before.epoch);
+            assert(SudekiMpLanStorySceneCharacterAreaMatches(&decoded,2u,shops[i].world,""));
+            assert(SudekiMpLanStorySceneCharacterAreaMatches(&decoded,3u,shops[i].world,
+                j==1u?shops[i].temporary:""));
+            assert(!!SudekiMpLanStorySceneSameArea(&decoded,2u,3u)==(j!=1u));
+        }
+        assert(SudekiMpLanStorySceneAdvances(&before,&inside));
+        assert(SudekiMpLanStorySceneAdvances(&inside,&after));
+        printf("PASS named KamoSplitScene destination=%s epoch_retained=1 Tal_outside=1\n",shops[i].temporary);
+    }
+}
 int main(void) {
-    validity(); codec(); advances(); areas();
+    validity(); codec(); advances(); areas(); kamo_split_scenes();
     puts("StorySceneAreaTest: PASS (scene v2 per-character area policy/codec; no native, network or gameplay)");
     return 0;
 }

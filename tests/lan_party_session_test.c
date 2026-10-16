@@ -712,7 +712,12 @@ static void test_old_story_movement_profile(void) {
     SudekiMpLanPartyPoll(host,GetTickCount());
     CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
     CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
-    hello[44]=25;
+    hello[44]=25; /* Previous profile has no acknowledged per-game loot grants. */
+    raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
+    SudekiMpLanPartyPoll(host,GetTickCount());
+    CHECK(raw_read(sock,bytes,&source)==RAW_HEADER+9);
+    CHECK(bytes[6]==RAW_REJECT && bytes[RAW_HEADER+8]==SUDEKIMP_LAN_ARENA_REJECT_MAP);
+    hello[44]=26;
     raw_send(sock,&to,RAW_HELLO,1,0,0,0,0,hello,sizeof(hello),SUDEKIMP_LAN_PARTY_VERSION);
     SudekiMpLanPartyPoll(host,GetTickCount()); (void)raw_read(sock,bytes,&source);
     CHECK(bytes[6]==RAW_ACK);

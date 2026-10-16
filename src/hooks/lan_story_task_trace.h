@@ -69,6 +69,22 @@ typedef struct SudekiMpStoryTaskInstruction {
 BOOL SudekiMpLanStoryTaskInspectInstruction(HMODULE,const void *consumer,
     const SudekiMpStoryTaskAdmissionView *,SudekiMpStoryTaskInstruction *);
 
+/* Passive, exact supported EnterInterior helper proof, only between its own
+ * completed DisableGamepad and the call that begins native TEMP travel. This
+ * is not a control lease: consumers must freshly prove this same roster, their
+ * held remote actor, ordinary world/body state and native pause count zero.
+ * No callback/thread pointer is exported and no task is paused or retained. */
+typedef struct SudekiMpLanStoryInteriorTravel {
+    uint32_t load_generation,task,destination_hash;
+    void *world,*descriptor,*group,*controller,*leader,*destination;
+    char destination_name[48];
+} SudekiMpLanStoryInteriorTravel;
+BOOL SudekiMpLanStoryTaskInteriorTravel(SudekiMpLanStoryInteriorTravel *out);
+/* Existing native filter owner calls this AFTER a real None(0)/All(1) call.
+ * A suppressed remote-cast call must not report a mutation. Other filter calls
+ * invalidate the plain observation; this never changes native ownership. */
+void SudekiMpLanStoryTaskInteriorFilterObserved(void *controller,unsigned filter);
+
 typedef struct SudekiMpLanStoryTaskTraceStatus {
     uint32_t load_generation;
     uint32_t start_task, on_load_task;

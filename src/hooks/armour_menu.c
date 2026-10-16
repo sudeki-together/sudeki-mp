@@ -405,6 +405,57 @@ static void __attribute__((naked, noinline)) case_stub(void) {
 LAYER_STUB(fill_stub, armour_fill, SudekiMpArmourMenuFillTrampoline)
 LAYER_STUB(equip_stub, armour_select, SudekiMpArmourMenuEquipTrampoline)
 LAYER_STUB(details_stub, armour_details_entry, SudekiMpArmourMenuDetailsTrampoline)
+
+/* The Weapons page remains native when ArmourChoice is enabled, but its
+ * entries are shared with this adapter. Refresh consumers must prove these
+ * exact owned detours rather than bypassing or adding another patch owner. */
+static BOOL refresh_entry_exact(uint8_t *b, unsigned rva, const uint8_t original[6],
+    const SudekiMpInlineHook *hook, const void *stub, const void *published_trampoline) {
+    uint8_t replacement[6] = {0xe9, 0, 0, 0, 0, 0x90}, trampoline[11];
+    int32_t displacement;
+    MEMORY_BASIC_INFORMATION region;
+    if (!readable(b + rva, 6)) return FALSE;
+    if (!hook->installed) return !memcmp(b + rva, original, 6);
+    if (base != b || hook->target != b + rva || hook->length != 6 ||
+        memcmp(hook->original, original, 6) || !hook->trampoline ||
+        hook->trampoline != published_trampoline || !readable(hook->trampoline, sizeof(trampoline))) return FALSE;
+    displacement = (int32_t)((uintptr_t)stub - (uintptr_t)(b + rva + 5));
+    memcpy(replacement + 1, &displacement, 4);
+    if (memcmp(hook->replacement, replacement, sizeof(replacement)) ||
+        memcmp(b + rva, replacement, sizeof(replacement))) return FALSE;
+    memcpy(trampoline, original, 6);
+    trampoline[6] = 0xe9;
+    displacement = (int32_t)((uintptr_t)(b + rva + 6) - ((uintptr_t)hook->trampoline + 11));
+    memcpy(trampoline + 7, &displacement, 4);
+    if (memcmp(hook->trampoline, trampoline, sizeof(trampoline)) ||
+        VirtualQuery(hook->trampoline, &region, sizeof(region)) != sizeof(region) ||
+        !(region.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return FALSE;
+    return TRUE;
+}
+
+BOOL SudekiMpArmourMenuWeaponsRefreshExact(HMODULE image, void *layer) {
+    static const uint8_t fill_tail[] = {
+        0x83,0xec,0x5c,0x8b,0x45,0x08,0x53,0x56,0x8b,0xb0,0x8c,0,0,0,
+        0x57,0x81,0xc6,0xd0,0x07,0,0,0xe8,0xa0,0xda,0,0
+    };
+    static const uint8_t details_tail[] = {0x81,0xec,0x74,0x01,0,0};
+    DWORD saved = GetLastError();
+    uint8_t *b = (uint8_t *)image;
+    if (!b || (base && base != b) || !SudekiMpCheckLoadedExecutable(image) ||
+        (layer && layer == SudekiMpArmourMenuLayer) ||
+        !refresh_entry_exact(b, LIST_FILL, fill_bytes, &fill_hook, (const void *)(uintptr_t)fill_stub,
+            SudekiMpArmourMenuFillTrampoline) ||
+        !refresh_entry_exact(b, DETAILS, details_bytes, &details_hook, (const void *)(uintptr_t)details_stub,
+            SudekiMpArmourMenuDetailsTrampoline) ||
+        !readable(b + LIST_FILL + 6, sizeof(fill_tail)) || memcmp(b + LIST_FILL + 6, fill_tail, sizeof(fill_tail)) ||
+        !readable(b + DETAILS + 6, sizeof(details_tail)) || memcmp(b + DETAILS + 6, details_tail, sizeof(details_tail))) {
+        SetLastError(ERROR_INVALID_DATA);
+        return FALSE;
+    }
+    SetLastError(saved);
+    return TRUE;
+}
+
 /* Destructor slot (thiscall): forget the layer before the native destructor. */
 static void __attribute__((naked, noinline)) dtor_stub(void) {
     __asm__ volatile(

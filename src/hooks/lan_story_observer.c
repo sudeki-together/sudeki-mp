@@ -2,6 +2,7 @@
 #include "hooks/lan_story_area_follow.h"
 #include "hooks/call_hook.h"
 #include "cleanroom/engine.h"
+#include "engine/build_identity.h"
 #include "engine/log.h"
 #include <string.h>
 
@@ -37,6 +38,10 @@ static const SudekiMpLanStoryObserverSplit *split_owner;
 static BOOL split_active,split_transition,split_exiting;
 static unsigned last_logged_revision;
 static uint64_t last_dispatch_serial;
+/* Only the opt-in helper raises required. An ordinary authored door keeps
+ * its existing fallback policy; a test request must never fall back to a
+ * whole-party TEMP transition when the split owner declines. */
+static BOOL test_temp_required,test_temp_admitted,test_temp_dispatched;
 /* Diagnostics only. A bounded synchronous copy is not a retained native
  * ResourceName, a transition ticket, or permission to replay a zone call. */
 enum { TEMP_JOURNAL_LIMIT=64, TEMP_RESOURCE_TEXT=128 };
@@ -242,6 +247,7 @@ static uint32_t begin_zone(unsigned kind,const char *name) {
     if(native_thread && native_thread!=thread) foreign_thread=TRUE;
     else native_thread=thread;
     ++call_depth;
+    if(kind==TEMP && test_temp_required) test_temp_admitted=FALSE;
     uint32_t source_epoch=observed.epoch;
     /* Split-area travel keeps the exterior epoch: only the lead's area moves.
      * Anything else (or a declined/unknown request) is vanilla whole-party. */
@@ -255,12 +261,18 @@ static uint32_t begin_zone(unsigned kind,const char *name) {
             memcpy(observed.temporary,copy,sizeof(copy));
             observed.inside_mask=(uint8_t)(1u<<observed.leader_seat);
             split_active=split_transition=TRUE; split_exiting=FALSE;
+            if(test_temp_required) test_temp_admitted=TRUE;
             SudekiMpLogFormat("lan_story event=split_begin epoch=%lu temporary=%s inside=%u available=%u policy=exterior_epoch_retained\r\n",
                 (unsigned long)observed.epoch,observed.temporary,observed.inside_mask,observed.available_mask);
             ReleaseSRWLockExclusive(&state_lock);
             return source_epoch;
         }
         if(split_owner->ended) split_owner->ended(TRUE);
+    }
+    if(kind==TEMP && test_temp_required) {
+        --call_depth;
+        ReleaseSRWLockExclusive(&state_lock);
+        return source_epoch;
     }
     if(kind==EXIT && split_active && !split_exiting && call_depth==1u &&
         split_owner && split_owner->begin_exit()) {
@@ -331,9 +343,11 @@ static void __cdecl zone_load(const char *s) { begin_zone(LOAD,s); ((ZoneCall)ho
 static void __attribute__((thiscall)) zone_main(void *w,const char *s) { before_world_change(); begin_zone(MAIN,s); ((MainCall)hooks[MAIN].trampoline)(w,s); end_zone(); }
 static void __attribute__((thiscall)) zone_temp(void *w,const char *s,const void *r) {
     TemporaryJournal journal;
-    SudekiMpLanStoryAreaNoteTemporary(s);
     uint32_t source_epoch=begin_zone(TEMP,s);
+    if(test_temp_required && !test_temp_admitted) return;
+    SudekiMpLanStoryAreaNoteTemporary(s);
     temporary_journal_begin(&journal,TEMP,source_epoch,w,s,r);
+    if(test_temp_required) test_temp_dispatched=TRUE;
     ((TempCall)hooks[TEMP].trampoline)(w,s,r);
     temporary_journal_end(&journal,w); end_zone();
 }
@@ -686,6 +700,145 @@ BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoste
     ReleaseSRWLockShared(&state_lock); return ok;
 }
 
+static const struct {const char *name; unsigned rva,size; uint8_t bytes[42];} test_temp_guards[]={
+    {"TestTemporaryEntryBody",0x64b9,42,{0x53,0x56,0x8b,0x75,0x0c,0x8b,0x06,0x83,0xe0,0xb5,0x83,0xc8,0x35,0x89,0x06,
+        0x8b,0x45,0x08,0x57,0x8b,0xd9,0x85,0xc0,0x0f,0x84,0x31,0x02,0,0,0x81,0x7e,0x04,0xff,0xff,0x07,0,0x0f,0x84,0x24,0x02,0,0}},
+    {"TestTemporaryUnloadedTarget",0x64e3,21,{0x50,0x53,0xe8,0xc6,0xf4,0xff,0xff,0x85,0xc0,0x74,0x0a,0x83,0x78,0x34,0,
+        0x0f,0x85,0x0f,0x02,0,0}},
+    {"TestTemporaryResourceCopy",0x6628,10,{0x8d,0x4b,0x44,0x8b,0xc6,0xe8,0x8e,0xe5,0xff,0xff}},
+    {"TestTemporaryReturnABI",0x6707,9,{0x5f,0x5e,0x5b,0x8b,0xe5,0x5d,0xc2,0x08,0}},
+    {"TestTemporaryResourceRetain",0x1b9676,16,{0x8b,0x7f,0x08,0x89,0x7e,0x08,0x8b,0xc6,0x85,0xff,0x74,0x02,0xff,0x07,0x5f,0xc3}}
+};
+static BOOL test_temp_code_exact(void) {
+    const SudekiMpInlineHook *h=&hooks[TEMP];
+    uint8_t patch[9]={0xe9,0,0,0,0,0x90,0x90,0x90,0x90},trampoline[14];
+    int32_t displacement;
+    MEMORY_BASIC_INFORMATION memory;
+    if(!base || !installed || !SudekiMpCheckLoadedExecutable((HMODULE)base) ||
+        !h->installed || h->target!=base+rvas[TEMP] || h->length!=9 ||
+        memcmp(h->original,entries[TEMP],9) || !readable(h->target,9) || !readable(h->trampoline,14)) return FALSE;
+    displacement=(int32_t)((uintptr_t)zone_temp-(uintptr_t)(h->target+5));
+    memcpy(patch+1,&displacement,4);
+    memcpy(trampoline,entries[TEMP],9);trampoline[9]=0xe9;
+    displacement=(int32_t)((uintptr_t)(h->target+9)-((uintptr_t)h->trampoline+14));
+    memcpy(trampoline+10,&displacement,4);
+    if(memcmp(h->replacement,patch,9) || memcmp(h->target,patch,9) ||
+        memcmp(h->trampoline,trampoline,14) ||
+        VirtualQuery(h->trampoline,&memory,sizeof(memory))!=sizeof(memory) ||
+        !(memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))) return FALSE;
+    for(unsigned i=0;i<sizeof(test_temp_guards)/sizeof(*test_temp_guards);++i)
+        if(!readable(base+test_temp_guards[i].rva,test_temp_guards[i].size) ||
+            memcmp(base+test_temp_guards[i].rva,test_temp_guards[i].bytes,test_temp_guards[i].size)) return FALSE;
+    return TRUE;
+}
+/* Under state_lock, on the established native thread. Positive result is a
+ * fresh identity proof, not a retained pointer or a native task admission. */
+static int test_temp_ready_locked(const char *zone,SudekiMpLanStoryNativeRoster *r,uint8_t **target) {
+    if(!native_thread || native_thread!=GetCurrentThreadId()) return 0;
+    if(!base || !installed || exhausted || foreign_thread || !test_temp_code_exact() ||
+        !split_owner || !split_owner->test_ready) return -1;
+    if(call_depth || split_active || split_transition ||
+        observed.temporary[0] || published.temporary[0] || !last_dispatch_serial ||
+        !roster_identity_locked(last_controller,&published,r) ||
+        !SudekiMpLanStorySceneSame(&observed,&published)) return 0;
+    uint8_t *world=r->world,*descriptor=r->descriptor;
+    if(!readable(world,0x3a0) || !world[0x399] || !world[0x39a] || !world[0x39b] ||
+        *(uint32_t *)(descriptor+0x34)!=3u || *(void **)(world+0x14)) return 0;
+    unsigned count=*(unsigned *)(world+0x54);
+    uint8_t *table=*(uint8_t **)(world+0x50);
+    if(!count || count>512u || !readable(table,count*0x54u)) return -1;
+    char name[64];uint32_t state;
+    if(!temporary_descriptor(table,count,descriptor,&state,name) || state!=3) return -1;
+    *target=NULL;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *d=table+i*0x54u;
+        if(!temporary_descriptor(table,count,d,&state,name)) return -1;
+        if(!strcmp(name,zone)) {
+            if(*target) return -1;
+            *target=d;
+        }
+    }
+    if(!*target || *(uint32_t *)(*target+0x34)!=0u || *target==descriptor) return -1;
+    uint8_t *actor=r->actors[r->leader_character],*position,*tracking;
+    if(!readable(actor,0x98) || !readable(position=*(uint8_t **)(actor+0x44),0x5c) ||
+        *(void **)position!=base+0x2cdefc ||
+        !readable(tracking=*(uint8_t **)(actor+0x74),0x42) ||
+        *(uint16_t *)(tracking+0x40)==0xffffu) return 0;
+    for(unsigned i=0;i<3;++i)
+        if((*(uint32_t *)(position+0x18+i*4)&0x7f800000u)==0x7f800000u ||
+            (*(uint32_t *)(position+0x50+i*4)&0x7f800000u)==0x7f800000u) return 0;
+    return split_owner->test_ready(zone,r->leader_character)?1:0;
+}
+
+int SudekiMpLanStoryObserverTestEnterTemporary(const char *zone,const char *marker) {
+    char name[64],marker_check[64],authored[64];
+    SudekiMpLanStoryNativeRoster before,after;
+    uint8_t *target=NULL,*again=NULL;
+    SudekiMpResourceName resource={0};
+    if(!name_copy(name,zone) || !name_copy(marker_check,marker)) return -1;
+    memcpy(authored,marker,strlen(marker_check)+1u); /* Preserve authored case. */
+    AcquireSRWLockExclusive(&state_lock);
+    int ready=test_temp_dispatched?-1:test_temp_ready_locked(name,&before,&target);
+    ReleaseSRWLockExclusive(&state_lock);
+    if(ready!=1) return ready;
+    if(!SudekiMpCleanroomEngineResourceNameFromText(&resource,authored)) {
+        SudekiMpLogWrite("story_test_temp event=refused reason=resource_constructor\r\n");
+        return -1;
+    }
+    TemporaryResourceCopy resource_copy=temporary_resource_copy(&resource);
+    if(!resource_copy.text_valid || strcmp(resource_copy.text,authored)) {
+        SudekiMpCleanroomEngineReleaseResourceName(&resource);
+        SudekiMpLogWrite("story_test_temp event=refused reason=resource_identity\r\n");
+        return -1;
+    }
+    AcquireSRWLockExclusive(&state_lock);
+    ready=test_temp_dispatched?-1:test_temp_ready_locked(name,&after,&again);
+    if(ready==1 && (!same_native_roster(&before,&after) || target!=again)) ready=0;
+    if(ready==1) {test_temp_required=TRUE;test_temp_admitted=FALSE;}
+    ReleaseSRWLockExclusive(&state_lock);
+    if(ready!=1) {
+        SudekiMpCleanroomEngineReleaseResourceName(&resource);
+        return ready;
+    }
+    /* Same adapter and same journal/split callbacks as the authored door.
+     * Required admission suppresses vanilla fallback if its owner declines. */
+    zone_temp(before.world,name,&resource);
+    test_temp_required=FALSE;
+    TemporaryWorldCopy result=temporary_world_copy(before.world);
+    TemporaryResourceCopy retained=temporary_resource_copy((uint8_t *)before.world+0x44);
+    BOOL accepted=test_temp_dispatched && result.exact && result.descriptor==before.descriptor &&
+        result.pending==target && result.state==3u && !result.ready && !result.placed &&
+        retained.text_valid && retained.identifier==resource_copy.identifier &&
+        !strcmp(retained.text,authored) &&
+        *(void **)((uint8_t *)before.world+0x4c)==resource.text_reference;
+    /* 0x662D -> 0x4BC0 -> 0x1B9630 retains a distinct world reference.
+     * Release this caller's reference; never retain a stack ResourceName. */
+    SudekiMpCleanroomEngineReleaseResourceName(&resource);
+    SudekiMpLogFormat("story_test_temp event=%s zone=%s marker=%s native_entered=%u result=%s retry=%s\r\n",
+        test_temp_dispatched?"dispatched":"deferred",name,authored,test_temp_dispatched,
+        accepted?"accepted_pending":"unknown",test_temp_dispatched?"forbidden":"allowed");
+    return test_temp_dispatched?1:0;
+}
+
+BOOL SudekiMpLanStoryObserverTestTemporarySettled(const char *zone) {
+    char name[64],current[64];uint32_t state;
+    SudekiMpLanStoryNativeRoster roster;
+    if(!name_copy(name,zone)) return FALSE;
+    AcquireSRWLockShared(&state_lock);
+    BOOL ok=test_temp_dispatched && split_active && !split_transition && !split_exiting &&
+        !strcmp(observed.temporary,name) && !strcmp(published.temporary,name) &&
+        roster_identity_locked(last_controller,&published,&roster);
+    if(ok) {
+        uint8_t *world=roster.world,*table=*(uint8_t **)(world+0x50);
+        unsigned count=*(unsigned *)(world+0x54);
+        ok=count && count<=512u && readable(table,count*0x54u) &&
+            temporary_descriptor(table,count,roster.descriptor,&state,current) &&
+            state==4u && !strcmp(current,name);
+    }
+    ReleaseSRWLockShared(&state_lock);
+    return ok;
+}
+
 BOOL SudekiMpLanStoryObserverUninstall(void) {
     if(!base) return TRUE;
     AcquireSRWLockExclusive(&state_lock);
@@ -706,6 +859,7 @@ BOOL SudekiMpLanStoryObserverUninstall(void) {
         last_world=last_descriptor=last_group=last_controller=NULL;
         memset(last_actors,0,sizeof(last_actors)); last_exact=FALSE; last_logged_revision=0;
         last_dispatch_serial=0;
+        test_temp_required=test_temp_admitted=test_temp_dispatched=FALSE;
         temporary_records=0; temporary_overflow_logged=FALSE;
     }
     ReleaseSRWLockExclusive(&state_lock);

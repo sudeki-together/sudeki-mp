@@ -48,6 +48,9 @@ BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transacti
 /* Native action31, held only in the exact focused binding. */
 BOOL SudekiMpLanStoryInputBlock(void *controller,void *actor,uint32_t transaction);
 void SudekiMpLanStoryInputMuteMovement(void);
+/* Same gameplay discard during an unchanged-area media gap, preserving only
+ * independently focused/fresh camera axes and their ORIGINAL timestamps. */
+void SudekiMpLanStoryInputMuteForCamera(void);
 /* Consume elapsed time once per local presentation. Uses window-owned 69/6A
  * events and retail Exploration sensitivity/inversion. Outputs bounded axis
  * seconds; the view applies native authored rotation and distance settings.

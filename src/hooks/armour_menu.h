@@ -22,4 +22,10 @@ BOOL SudekiMpArmourMenuInstall(HMODULE image, const wchar_t *config_path);
 BOOL SudekiMpArmourMenuUninstall(void);
 /* TRUE while the armour choice seams are installed (its events are logged). */
 BOOL SudekiMpArmourMenuActive(void);
+/* Read-only proof for the native Weapons refresh entry points. Accepts the
+ * supported originals or this adapter's exact retained detours/trampolines;
+ * rejects its armour-mode layer. NULL layer requests code-only validation.
+ * Does not call native code, refresh a layer, or install another hook. The
+ * caller must establish the active Weapons layer and its game-thread lease. */
+BOOL SudekiMpArmourMenuWeaponsRefreshExact(HMODULE image, void *layer);
 #endif

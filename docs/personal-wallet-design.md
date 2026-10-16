@@ -1,5 +1,12 @@
 # Shared inventory and personal wallets
 
+For saved-story co-op #54, owner decision D9 in
+[the binding plan](coop-story-plan-54.md#1-owner-decisions-binding-for-this-plan)
+supersedes this older character-account policy: each game retains its own
+native inventory and purse, loot is copied, and purchases/consumption remain
+personal. The foundation below stays inactive; it must not be enabled unchanged
+for that profile. Phase I owns durable per-player inventory recovery.
+
 This is the policy contract for a future cooperative economy adapter. The
 implementation is an intentionally native-inert foundation:
 

@@ -6,6 +6,7 @@
 #include <assert.h>
 #include <stdio.h>
 void SudekiMpLogFormat(const char *fmt,...) {(void)fmt;}
+void SudekiMpLogWrite(const char *text) {(void)text;}
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {(void)actor;return NULL;}
 BOOL SudekiMpLanPartyProjectileLifetimeObserve(SudekiMpLanPartyProjectileObservation *o,unsigned c,unsigned *n) {
     (void)o;(void)c;*n=0;return TRUE;
@@ -96,7 +97,11 @@ static void named_checks(void) {
     for(unsigned n=0;n<sizeof(pick)/sizeof(pick[0]);++n) for(unsigned i=0;i<pick[n][1];++i) {
         b[pick[n][0]+i]^=1;assert(!world_pickup_code());b[pick[n][0]+i]^=1;
     }
-    puts("PASS named WorldDropCollect native inventory/consume calls and stdcall returns");
+    assert(SudekiMpLanStoryInventoryInstall(image));
+    assert(world_pickup_code()); /* Shared seam recognizes its actual owner. */
+    b[0x1338dcu]^=1; assert(!world_pickup_code()); b[0x1338dcu]^=1;
+    assert(SudekiMpLanStoryInventoryUninstall() && world_pickup_code());
+    puts("PASS named WorldDropCollect native and owned observer call; foreign redirect refused");
 }
 int main(int argc,char **argv) {
     assert(argc==2);wchar_t path[MAX_PATH];assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,MAX_PATH));

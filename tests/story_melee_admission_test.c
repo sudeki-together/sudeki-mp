@@ -7,9 +7,11 @@ static BOOL prime,pending_weapon,weapon_known=TRUE,cast_idle=TRUE;
 static BOOL spirit_known=TRUE,lower_submits=TRUE,lower_returns=TRUE;
 static int spirit_state;
 static unsigned calls,last_kind;
-static unsigned movement_calls;
+static unsigned movement_calls,target_calls;
 static float movement_x,movement_z;
 static BOOL idle_loading,idle_remote=TRUE,idle_binding=TRUE;
+static BOOL turn_ready=TRUE,ai_acquired=TRUE;
+static unsigned ai_gate_calls,ai_last_gate;
 BOOL SudekiMpLanStoryObserverWorldLoading(void) { return idle_loading; }
 BOOL SudekiMpLanStoryObserverNativeRosterExact(const SudekiMpLanStoryNativeRoster *r) {
     return roster_ok && r && r->dispatch_serial==7;
@@ -18,14 +20,21 @@ BOOL SudekiMpLanPartyControlStoryTurnOwner(void *a,SudekiMpLanPartyLease *key) {
     (void)a; *key=(SudekiMpLanPartyLease){.seat=3,.token=5,.generation=2}; return idle_remote;
 }
 BOOL SudekiMpLanStoryRuntimeTurnLeaseExact(const SudekiMpLanPartyLease *key) {
-    return idle_remote && lease_ok && key->token==5;
+    return turn_ready && idle_remote && lease_ok && key->token==5;
+}
+BOOL SudekiMpLanStoryRuntimeAiLeaseExact(const SudekiMpLanPartyLease *key) {
+    return ai_acquired && idle_remote && lease_ok && key->seat==3 && key->token==5 && key->generation==2;
+}
+void SudekiMpLanStoryResearch54AiGate(const void *a,unsigned gate) {
+    assert(a); ++ai_gate_calls; ai_last_gate=gate;
 }
 BOOL SudekiMpStoryIdleContactBindThread(void) { return idle_binding; }
 uint32_t SudekiMpStoryIdleContactCount(void) { return 0; }
 void SudekiMpLogWrite(const char *message) { (void)message; }
+void SudekiMpLogFormat(const char *format,...) { (void)format; }
 BOOL SudekiMpLanPartyControlStoryRefreshTarget(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z) {
-    (void)x; (void)z; return SudekiMpLanPartyControlStoryExact(w,r,k);
+    (void)x; (void)z; ++target_calls; return SudekiMpLanPartyControlStoryExact(w,r,k);
 }
 BOOL SudekiMpLanPartyControlStoryMove(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,float x,float z) {
@@ -81,6 +90,70 @@ BOOL SudekiMpLanPartyControlStoryBlock(const SudekiMpControlUpdateDispatchWitnes
     const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanPartyLease *k,BOOL held) {
     assert(SudekiMpLanPartyControlStoryExact(w,r,k));++block_calls;last_block=held;return TRUE;
 }
+static void ai_prepare_admission(void) {
+    /* PREPARE owns the acquired AI lease but does not grant player turning. */
+    turn_ready=FALSE;
+    assert(!player_turn_lease(actor));
+    assert(ai_movement_lease(actor,2u) && ai_gate_calls==1 && ai_last_gate==2u);
+    unsigned accepted=ai_gate_calls;
+    #define AI_REFUSE() assert(!ai_movement_lease(actor,3u) && ai_gate_calls==accepted && !player_turn_lease(actor))
+    ai_acquired=FALSE; AI_REFUSE(); ai_acquired=TRUE;
+    lease_ok=FALSE; AI_REFUSE(); lease_ok=TRUE;
+    idle_remote=FALSE; AI_REFUSE(); idle_remote=TRUE;
+    installed=FALSE; AI_REFUSE(); installed=TRUE;
+    DWORD thread=native_thread;
+    native_thread=0; AI_REFUSE(); native_thread=thread^1u; AI_REFUSE(); native_thread=thread;
+    for(unsigned i=0;i<2;++i) {
+        switches[i].instruction[0]=0x90; AI_REFUSE(); switches[i].instruction[0]=0xe8;
+    }
+    speed[0x28]=1; AI_REFUSE(); speed[0x28]=0;
+    *(uint16_t *)(speed+0x2a)=1; AI_REFUSE(); *(uint16_t *)(speed+0x2a)=0;
+    *(int *)(speed+0x20)=1; AI_REFUSE(); *(int *)(speed+0x20)=0;
+    *(int *)(speed+0x24)=1; AI_REFUSE(); *(int *)(speed+0x24)=0;
+    combat_known=FALSE; AI_REFUSE(); combat_known=TRUE;
+    *(void **)(base+0x408da0)=NULL; AI_REFUSE(); *(void **)(base+0x408da0)=speed;
+    uint8_t *image=base; base=NULL; AI_REFUSE(); base=image;
+    #undef AI_REFUSE
+    assert(ai_movement_lease(actor,4u) && ai_gate_calls==accepted+1 && ai_last_gate==4u);
+    turn_ready=TRUE;
+    assert(player_turn_lease(actor) && ai_movement_lease(actor,5u));
+    puts("story PREPARE AI suppression: acquired ownership without READY turning; lease, hooks, world and thread guards passed");
+}
+static void native_pause_movement(const SudekiMpControlUpdateDispatchWitness *w,
+    SudekiMpLanStoryNativeRoster *r,SudekiMpLanPartyLease *k) {
+    unsigned moves=movement_calls,targets=target_calls,dodges=dodge_calls;
+    uint32_t flags=*(uint32_t *)(arbiter+0x50);
+    *(uint32_t *)(arbiter+0x50)=2u;
+    for(unsigned refs=1;refs<=2;++refs) {
+        actor[0x2b]=(uint8_t)refs;
+        uint8_t before[sizeof(actor)];memcpy(before,actor,sizeof(before));
+        BOOL held=FALSE;
+        assert(SudekiMpLanStoryControlMove(w,r,k,0.3f,1.8f,&held) && held);
+        held=FALSE;
+        assert(SudekiMpLanStoryControlMove(w,r,k,0,0,&held) && held);
+        assert(movement_calls==moves && target_calls==targets && dodge_calls==dodges);
+        assert(!memcmp(before,actor,sizeof(before)));
+    }
+    /* A paused body cannot hide a lost lease, stale generation or roster. */
+    BOOL held=TRUE;
+    lease_ok=FALSE;
+    assert(!SudekiMpLanStoryControlMove(w,r,k,0,0,&held) && !held);
+    lease_ok=TRUE;++k->generation;
+    assert(!SudekiMpLanStoryControlMove(w,r,k,0.3f,1.8f,&held) && !held);
+    --k->generation;roster_ok=FALSE;
+    assert(!SudekiMpLanStoryControlMove(w,r,k,0,0,&held) && !held);
+    roster_ok=TRUE;
+    assert(movement_calls==moves && target_calls==targets && dodge_calls==dodges);
+    assert(actor[0x2b]==2u);
+    actor[0x2b]=0;
+    /* Binary-exact values keep this a forwarding check, independent of the
+     * x86 compiler's extended precision for decimal float constants. */
+    assert(SudekiMpLanStoryControlMove(w,r,k,0.5f,1.5f,&held) && !held);
+    assert(movement_calls==moves+1 && target_calls==targets+1 && dodge_calls==dodges+1);
+    assert(movement_x==0.5f && movement_z==1.5f);
+    *(uint32_t *)(arbiter+0x50)=flags;
+    puts("story native actor pause: no target/dodge/movement calls while paused; stale ownership refuses and zero references resume");
+}
 int main(void) {
     assert((STORY_BODY_BUSY_FLAGS&0x1000u)!=0 && !(STORY_BODY_BUSY_FLAGS&3u));
     base=VirtualAlloc(NULL,0x409000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE); assert(base);
@@ -97,6 +170,7 @@ int main(void) {
         switches[i].instruction[0]=0xe8;
         memcpy(switches[i].instruction+1,&switches[i].replacement_displacement,4);
     }
+    ai_prepare_admission();
     SudekiMpControlUpdateDispatchWitness w={.dispatch_serial=7,.service_post_original_exact=TRUE};
     SudekiMpLanStoryNativeRoster r={.available_mask=12,.leader_character=3}; r.actors[2]=actor;
     SudekiMpLanPartyLease k={.seat=2,.token=5,.generation=2};
@@ -141,6 +215,7 @@ int main(void) {
     speed[0x28]=0; interaction_mode[0x4c]=1;
     assert(SudekiMpLanStoryControlMove(&w,&r,&k,0,1.8f,&held) && held && !movement_x && !movement_z);
     interaction_mode[0x4c]=0;
+    native_pause_movement(&w,&r,&k);
     /* Held block must bypass the generic body-busy gate and ordinary Move,
      * for Tal and Buki, including native cooldown and neutral input. */
     unsigned before_move=movement_calls;

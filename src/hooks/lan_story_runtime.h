@@ -21,6 +21,9 @@ unsigned SudekiMpLanStoryRuntimePort(void);
 BOOL SudekiMpLanStoryRuntimeReady(void);
 /* Game-thread read-only authority check for the retained C2 turn callback. */
 BOOL SudekiMpLanStoryRuntimeTurnLeaseExact(const SudekiMpLanPartyLease *native_key);
+/* Same exact acquired owner, including PREPARE. AI movement suppression only;
+ * player input/turning still requires the acknowledged TurnLease above. */
+BOOL SudekiMpLanStoryRuntimeAiLeaseExact(const SudekiMpLanPartyLease *native_key);
 void SudekiMpLanStoryRuntimeLobbyService(SudekiMpLobby *lobby);
 /* Lobby player name holding character 0..3 (Buki, Elco, Tal, Ailish) from the
  * last lobby status copy; FALSE when the character is not held by a present

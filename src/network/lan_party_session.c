@@ -21,6 +21,7 @@ enum {
     MSG_STORY_CONTROL, MSG_STORY_CONTROL_ACK, MSG_STORY_MOVEMENT, MSG_STORY_RECRUITMENT,
     MSG_STORY_PRESENTATION, MSG_STORY_CATCHUP, MSG_STORY_CATCHUP_ACK,
     MSG_STORY_ACTION, MSG_STORY_ACTION_RESULT, MSG_STORY_LOOT, MSG_STORY_AREA, MSG_STORY_EFFECTS, MSG_STORY_VFX, MSG_STORY_CAST_VIEW, MSG_STORY_RANGED, MSG_STORY_VFX_CHUNK, MSG_STORY_BLOCK, MSG_STORY_AUDIO, MSG_STORY_MELEE, MSG_STORY_XP,
+    MSG_STORY_LOOT_GRANT, MSG_STORY_LOOT_GRANT_ACK,
     COMMAND_SIZE = 24, PRESENCE_SIZE = 95, INPUT_FENCE_SIZE = 12, PRESENCE_INTERVAL = 100,
     /* Saved profile 23 adds host-owned world/drop visual kinds; profile 22
      * preserves all native spawn-start arguments. Saved profile 21 requires grouped melee snapshots. Earlier saved-story
@@ -28,7 +29,8 @@ enum {
      * Profile 20 preserved native scaled movement magnitude. The
      * 36-byte movement layout is unchanged; older gameplay profiles refuse
      * at handshake instead of silently dropping requests faster than one. */
-    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 25, STORY_SCENE_INTERVAL = 100,
+    /* Profile 26 requires D9 source-specific, acknowledged inventory grants. */
+    STORY_OBSERVATION_PROFILE = 16, STORY_GAMEPLAY_PROFILE = 26, STORY_SCENE_INTERVAL = 100,
     STORY_AREA_INTERVAL = 250,
     JETPACK_STATE_SIZE = 42, COMBAT_MODE_SIZE = 13, COMBAT_MODE_INTERVAL = 100,
     INPUT_EXTENSION_SIZE = 5, AILISH_STATE_SIZE = 11 + 9 * SUDEKIMP_LAN_WEAPON_SHOT_HISTORY,
@@ -47,6 +49,8 @@ _Static_assert(HEADER + SUDEKIMP_STORY_CATCHUP_HEADER_SIZE +
 
 _Static_assert(HEADER + SUDEKIMP_STORY_VFX_CHUNK_MAX <= MAX_DATAGRAM,
     "Story visual fragment exceeds path MTU");
+_Static_assert(HEADER + SUDEKIMP_STORY_LOOT_GRANT_WIRE_SIZE <= MAX_DATAGRAM,
+    "Story loot grant exceeds path MTU");
 
 typedef struct Peer {
     SudekiMpLanPartyPeerStatus status;
@@ -93,6 +97,8 @@ typedef struct Peer {
     SudekiMpLanStoryActionResult story_action_result;
     uint32_t story_action_received_at;
     uint8_t story_action_pending,story_action_taken;
+    SudekiMpStoryLootGrantOutbox story_loot_outbox;
+    SudekiMpStoryLootGrantInbox story_loot_inbox;
 } Peer;
 
 typedef struct Assembly {
@@ -144,6 +150,14 @@ struct SudekiMpLanPartySession {
     uint32_t story_frame_receipts[FRAME_QUEUE];
     unsigned story_frame_head,story_frame_count;
     uint32_t story_frame_sequence,story_frame_tick,story_frame_received_at;
+    /* A same-area revision may clear presentation before its next pair
+     * arrives. This independent reference is movement-only, never media. */
+    struct {
+        SudekiMpLanPartyLease connection;
+        SudekiMpLanStoryControlFence fence;
+        SudekiMpLanStoryScene scene;
+        uint32_t sequence,received_at;
+    } story_movement_reference;
     StoryWorldAssembly story_world_assembly[ASSEMBLIES];
     SudekiMpLanStoryWorldFrame story_world_frames[FRAME_QUEUE];
     uint32_t story_world_receipts[FRAME_QUEUE];
@@ -171,6 +185,8 @@ struct SudekiMpLanPartySession {
     uint32_t story_presentation_receipts[FRAME_QUEUE],story_presentation_sequence;
     unsigned story_presentation_head,story_presentation_count;
     uint8_t story_loot_save[32],story_loot_bound;
+    uint32_t story_loot_grant_serial;
+    unsigned story_loot_grant_fault;
     SudekiMpStoryLootState story_loot;
     SudekiMpLanStoryLootAssembly story_loot_assembly;
     uint32_t story_loot_epoch,story_loot_scene_revision,story_loot_tick,story_loot_received_at;
@@ -181,6 +197,58 @@ struct SudekiMpLanPartySession {
 };
 
 static void service_presence_transport(SudekiMpLanPartySession *s,Peer *p);
+static unsigned player_character_locked(const SudekiMpLanPartySession *s,unsigned p);
+static BOOL story_movement_reference_current(const SudekiMpLanPartySession *s,
+    const SudekiMpLanStoryScene *next,uint32_t now) {
+    unsigned local=s->config.local_seat;
+    if(s->config.story_observation!=2u || !local || local>=4u ||
+        !s->story_movement_reference.sequence) return FALSE;
+    const Peer *p=&s->peer[local];
+    const SudekiMpLanStoryScene *prior=&s->story_movement_reference.scene;
+    const SudekiMpLanStoryControlFence *f=&s->story_movement_reference.fence;
+    const SudekiMpLanPartyLease *lease=&s->story_movement_reference.connection;
+    int32_t age=(int32_t)(now-s->story_movement_reference.received_at);
+    char world[SUDEKIMP_LAN_STORY_NAME_SIZE],temporary[SUDEKIMP_LAN_STORY_NAME_SIZE];
+    return age>=0 && age<=250 && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+        p->status.transport_confirmed && lease->token && lease->generation && lease->seat==local &&
+        lease->token==p->status.lease.token && lease->generation==p->status.lease.generation &&
+        lease->seat==p->status.lease.seat && f->player==local &&
+        f->character==player_character_locked(s,local) &&
+        p->story_control.phase==SUDEKIMP_STORY_CONTROL_READY &&
+        SudekiMpLanStoryControlFenceSame(f,&p->story_control.fence) &&
+        SudekiMpLanStoryControlFenceSame(f,&p->story_control_ack) &&
+        SudekiMpLanStoryControlMatchesScene(f,prior) && SudekiMpLanStoryControlMatchesScene(f,next) &&
+        prior->epoch==next->epoch && prior->available_mask==next->available_mask &&
+        prior->leader_seat==next->leader_seat && !memcmp(prior->world,next->world,sizeof(prior->world)) &&
+        SudekiMpLanStorySceneCharacterArea(prior,f->character,world,temporary) &&
+        SudekiMpLanStorySceneCharacterAreaMatches(next,f->character,world,temporary);
+}
+static void retain_story_movement_reference(SudekiMpLanPartySession *s,
+    const SudekiMpLanStoryScene *next) {
+    unsigned local=s->config.local_seat;
+    if(s->story_frame_sequence && s->config.story_observation==2u && local && local<4u) {
+        /* The latest validated frame remains in its ring slot after Pop.
+         * Copy only its acknowledgement identity, never an actor/world pose. */
+        memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
+        const Peer *p=&s->peer[local];unsigned c=player_character_locked(s,local);
+        for(unsigned i=0;c<4u && i<FRAME_QUEUE;++i) {
+            const SudekiMpLanStoryFrame *frame=&s->story_frames[i];
+            if(frame->sequence!=s->story_frame_sequence ||
+                !SudekiMpLanStoryFrameMatchesScene(frame,&s->story_scene) ||
+                frame->actors[c].generation!=p->story_control.fence.actor_generation) continue;
+            s->story_movement_reference.connection=p->status.lease;
+            s->story_movement_reference.fence=p->story_control.fence;
+            s->story_movement_reference.scene=s->story_scene;
+            s->story_movement_reference.sequence=frame->sequence;
+            s->story_movement_reference.received_at=s->story_frame_received_at;
+            break;
+        }
+    }
+    /* Further compatible revisions keep the ORIGINAL receipt and fence.
+     * They cannot renew a gap or resurrect an expired acknowledgement. */
+    if(!story_movement_reference_current(s,next,s->now))
+        memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
+}
 static BOOL story_tick_near_scene(uint32_t tick,uint32_t scene_tick) {
     /* A newer heartbeat for the SAME epoch/revision may overtake the frame.
      * Local receipt freshness and independent frame sequences still apply. */
@@ -236,6 +304,7 @@ static void clear_story_media(SudekiMpLanPartySession *s) {
     s->story_effect_received_at=0;
 }
 static void clear_story_frames(SudekiMpLanPartySession *s) {
+    memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
     clear_story_media(s);
     /* Keep the account revision floor and trusted save identity. A roster
      * change/reconnect must not reset reward ownership or permit rollback. */
@@ -266,7 +335,10 @@ static void clear_story_scene_change(SudekiMpLanPartySession *s,const SudekiMpLa
     if(s->story_scene.revision && s->story_scene.epoch==next->epoch &&
         !memcmp(s->story_scene.world,next->world,sizeof(next->world)) &&
         s->story_scene.available_mask==next->available_mask &&
-        s->story_scene.leader_seat==next->leader_seat) clear_story_media(s);
+        s->story_scene.leader_seat==next->leader_seat) {
+        retain_story_movement_reference(s,next);
+        clear_story_media(s);
+    }
     else clear_story_frames(s);
 }
 
@@ -588,6 +660,23 @@ static void send_ack(SudekiMpLanPartySession *s, Peer *p) {
     uint8_t body[9]; put64(body, p->nonce); body[8] = (uint8_t)p->status.phase;
     (void)send_peer(s, p, MSG_ACK, next_sequence(p), 0, body, sizeof(body));
 }
+static BOOL send_loot_grant_ack(SudekiMpLanPartySession *s,Peer *p,const SudekiMpStoryLootGrant *grant) {
+    uint8_t bytes[SUDEKIMP_STORY_LOOT_GRANT_WIRE_SIZE];
+    return SudekiMpStoryLootGrantEncode(grant,1,bytes,sizeof(bytes)) &&
+        send_peer(s,p,MSG_STORY_LOOT_GRANT_ACK,next_sequence(p),0,bytes,sizeof(bytes));
+}
+static void service_loot_grants(SudekiMpLanPartySession *s,Peer *p) {
+    SudekiMpStoryLootGrantOutbox *q=&p->story_loot_outbox;
+    if(s->config.local_seat || s->config.story_observation!=2u || s->story_loot_grant_fault ||
+        p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !p->status.transport_confirmed || !q->count ||
+        (q->last_sent_at && (uint32_t)(s->now-q->last_sent_at)<SUDEKIMP_STORY_LOOT_GRANT_RETRY_MS)) return;
+    uint8_t bytes[SUDEKIMP_STORY_LOOT_GRANT_WIRE_SIZE];
+    if(SudekiMpStoryLootGrantEncode(&q->records[q->head],0,bytes,sizeof(bytes))) {
+        /* A failed send still leaves the same immutable head for retry. */
+        (void)send_peer(s,p,MSG_STORY_LOOT_GRANT,next_sequence(p),0,bytes,sizeof(bytes));
+        q->last_sent_at=s->now;
+    }
+}
 static void send_extension_caps(SudekiMpLanPartySession *s, Peer *p) {
     uint8_t body[2] = {SUDEKIMP_LAN_PARTY_EXTENSION_VERSION,
         SUDEKIMP_LAN_PARTY_EXTENSION_SUPPORTED};
@@ -612,6 +701,11 @@ static void reject(SudekiMpLanPartySession *s, const struct sockaddr_in *source,
     (void)send_message(s, source, MSG_REJECT, seat, 0, 0, 0, 0, body, sizeof(body));
 }
 static void drain(SudekiMpLanPartySession *s, Peer *p, SudekiMpLanArenaRejectReason why) {
+    /* An unacknowledged grant may already have changed native inventory.
+     * Preserve an explicit session-level fault across Peer reset/rejoin;
+     * neither silently discard it nor replay it under a new lease. */
+    if(p->story_loot_outbox.count || p->story_loot_inbox.available)
+        s->story_loot_grant_fault=SUDEKIMP_STORY_LOOT_GRANT_FAULT_DISCONNECTED;
     /* A departed lobby player must make a fresh character choice. Retire the
      * old ticket under this same transport lock, before native cleanup can
      * publish FREE; an old HELLO must never reacquire that slot in between. */
@@ -917,7 +1011,12 @@ static BOOL story_control_advances(const Peer *p,const SudekiMpLanStoryControlSt
         (int32_t)(v->observed_tick-p->story_control.observed_tick)<0) return FALSE;
     return TRUE;
 }
-static void story_control_store(Peer *p,const SudekiMpLanStoryControlState *v) {
+static void story_control_store(SudekiMpLanPartySession *s,Peer *p,
+    const SudekiMpLanStoryControlState *v) {
+    if(s->config.local_seat &&
+        (v->phase!=SUDEKIMP_STORY_CONTROL_READY ||
+         !SudekiMpLanStoryControlFenceSame(&s->story_movement_reference.fence,&v->fence)))
+        memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
     if(!SudekiMpLanStoryControlFenceSame(&p->story_control.fence,&v->fence)) {
         clear_story_action(p);
         memset(&p->story_control_ack,0,sizeof(p->story_control_ack));
@@ -1205,7 +1304,7 @@ static void receive_message(SudekiMpLanPartySession *s,
     size_t body_size = size - HEADER;
     if (seat == 0 || seat >= SUDEKIMP_LAN_PARTY_PLAYERS || bytes[27] ||
         get16(bytes + 24) != body_size || kind < MSG_HELLO ||
-        kind > MSG_STORY_XP ||
+        kind > MSG_STORY_LOOT_GRANT_ACK ||
         part >= SUDEKIMP_LAN_PARTY_CHUNKS || (kind != MSG_FRAME && part)) return;
     if (get16(bytes + 4) != SUDEKIMP_LAN_PARTY_VERSION) {
         if (!s->config.local_seat && kind == MSG_HELLO && body_size == HELLO_SIZE)
@@ -1251,6 +1350,28 @@ static void receive_message(SudekiMpLanPartySession *s,
     if (!connected_phase(p->status.phase) || !sequence ||
         !same_address(source, &p->address) || !token || !generation ||
         token != p->status.lease.token || generation != p->status.lease.generation) return;
+    if(kind==MSG_STORY_LOOT_GRANT || kind==MSG_STORY_LOOT_GRANT_ACK) {
+        SudekiMpStoryLootGrant grant;
+        BOOL acknowledgement=kind==MSG_STORY_LOOT_GRANT_ACK;
+        if(s->config.story_observation!=2u || s->story_loot_grant_fault ||
+            p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING ||
+            (acknowledgement?!!s->config.local_seat:!s->config.local_seat) ||
+            !SudekiMpStoryLootGrantDecode(body,body_size,acknowledgement,&grant)) return;
+        if(acknowledgement) {
+            if(!SudekiMpStoryLootGrantAcknowledge(&p->story_loot_outbox,&grant)) return;
+        } else {
+            int accepted=SudekiMpStoryLootGrantReceive(&p->story_loot_inbox,&grant);
+            if(!accepted) return;
+            if(accepted==2) (void)send_loot_grant_ack(s,p,&grant);
+        }
+        /* This independent journal accepts a delayed envelope when its
+         * immutable grant identity is current. Other channels cannot erase
+         * an inventory delta simply by overtaking it. */
+        p->last_received_at=s->now;
+        if(!p->received_sequence || SudekiMpLanArenaSequenceNewer(sequence,p->received_sequence))
+            p->received_sequence=sequence;
+        return;
+    }
     if(kind==MSG_STORY_LOOT) {
         if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !accept_story_loot(s,body,body_size)) return;
         p->last_received_at=s->now;
@@ -1293,6 +1414,7 @@ static void receive_message(SudekiMpLanPartySession *s,
             (s->story_frame_sequence &&
                 (!SudekiMpLanArenaSequenceNewer(frame.sequence,s->story_frame_sequence) ||
                  (int32_t)(frame.host_tick-s->story_frame_tick)<=0))) return;
+        memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
         if(s->story_frame_count==FRAME_QUEUE) {
             s->story_frame_head=(s->story_frame_head+1u)%FRAME_QUEUE;
             --s->story_frame_count;
@@ -1429,7 +1551,7 @@ static void receive_message(SudekiMpLanPartySession *s,
         BOOL refreshed=!p->story_control.fence.transaction ||
             next.fence.transaction!=p->story_control.fence.transaction ||
             (int32_t)(next.observed_tick-p->story_control.observed_tick)>0;
-        story_control_store(p,&next);
+        story_control_store(s,p,&next);
         if(refreshed) p->story_control_received_at=s->now;
         p->received_sequence=sequence; p->last_received_at=s->now; return;
     }
@@ -1899,6 +2021,9 @@ BOOL SudekiMpLanPartyStoryObservation(SudekiMpLanPartySession *s) {
 void SudekiMpLanPartyPoll(SudekiMpLanPartySession *s, uint32_t now) {
     if (!s) return;
     AcquireSRWLockExclusive(&s->lock); s->now = now;
+    if(s->story_movement_reference.sequence &&
+        !story_movement_reference_current(s,&s->story_scene,now))
+        memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
     if (s->config.lobby_members && !s->lobby_poll_started) {
         s->lobby_poll_started=TRUE;
         for (unsigned i=0;i<4;++i) s->peer[i].last_received_at=now;
@@ -1952,6 +2077,7 @@ void SudekiMpLanPartyPoll(SudekiMpLanPartySession *s, uint32_t now) {
              (uint32_t)(now-p->last_presentation_offer_at)>=KEEPALIVE_INTERVAL))
             send_presentation_caps(s,p);
         service_presence_transport(s,p);
+        service_loot_grants(s,p);
     }
     ReleaseSRWLockExclusive(&s->lock);
 }
@@ -2269,6 +2395,82 @@ BOOL SudekiMpLanPartyBindStoryLootSave(SudekiMpLanPartySession *s,const uint8_t 
     if(ok) { memcpy(s->story_loot_save,identity,32); s->story_loot_bound=1; }
     ReleaseSRWLockExclusive(&s->lock); return ok;
 }
+static BOOL publish_story_loot_grant(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease recipients[4],unsigned mask,
+    unsigned source,unsigned item,unsigned quantity,unsigned show,uint32_t *serial) {
+    if(!s || s->config.local_seat || s->config.story_observation!=2u ||
+        source>UINT8_MAX || show>UINT8_MAX || (mask&~14u)) return FALSE;
+    SudekiMpStoryLootGrant grant={1,0,item,quantity,(uint8_t)source,(uint8_t)show};
+    if(!SudekiMpStoryLootGrantValid(&grant)) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL ok=!s->story_loot_grant_fault;
+    if(s->story_loot_grant_serial==UINT32_MAX) {
+        s->story_loot_grant_fault=SUDEKIMP_STORY_LOOT_GRANT_FAULT_SERIAL;ok=FALSE;
+    }
+    for(unsigned i=1;ok && i<4u;++i) {
+        Peer *p=&s->peer[i];
+        BOOL admitted=p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING && p->status.transport_confirmed;
+        if(recipients && (admitted!=!!(mask&(1u<<i)) ||
+            ((mask&(1u<<i)) && leased(s,&recipients[i])!=p))) ok=FALSE;
+        if(admitted && p->story_loot_outbox.count>=SUDEKIMP_STORY_LOOT_GRANT_CAPACITY) ok=FALSE;
+    }
+    if(ok) {
+        grant.serial=++s->story_loot_grant_serial;
+        for(unsigned i=1;i<4u;++i) {
+            Peer *p=&s->peer[i];
+            if(p->status.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !p->status.transport_confirmed) continue;
+            grant.previous=p->story_loot_outbox.last_serial;
+            /* All capacities and predecessors were reserved under this lock.
+             * Native/thread consumers cannot interleave with the commit. */
+            (void)SudekiMpStoryLootGrantEnqueue(&p->story_loot_outbox,&grant);
+        }
+        if(serial) *serial=grant.serial;
+    }
+    ReleaseSRWLockExclusive(&s->lock);return ok;
+}
+BOOL SudekiMpLanPartyPublishStoryLootGrant(SudekiMpLanPartySession *s,
+    unsigned source,unsigned item,unsigned quantity,unsigned show,uint32_t *serial) {
+    return publish_story_loot_grant(s,NULL,0,source,item,quantity,show,serial);
+}
+BOOL SudekiMpLanPartyPublishStoryLootGrantForRecipients(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease recipients[4],unsigned mask,
+    unsigned source,unsigned item,unsigned quantity,unsigned show,uint32_t *serial) {
+    return recipients && publish_story_loot_grant(s,recipients,mask,source,item,quantity,show,serial);
+}
+BOOL SudekiMpLanPartyPeekStoryLootGrant(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease *lease,SudekiMpStoryLootGrant *grant) {
+    if(!s || !lease || !grant || !s->config.local_seat || s->config.story_observation!=2u ||
+        lease->seat!=s->config.local_seat) return FALSE;
+    AcquireSRWLockShared(&s->lock);Peer *p=leased(s,lease);
+    BOOL ok=p && !s->story_loot_grant_fault && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+        SudekiMpStoryLootGrantPeek(&p->story_loot_inbox,grant);
+    ReleaseSRWLockShared(&s->lock);return ok;
+}
+BOOL SudekiMpLanPartyTakeStoryLootGrant(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease *lease,const SudekiMpStoryLootGrant *grant) {
+    if(!s || !lease || !grant || !s->config.local_seat || s->config.story_observation!=2u ||
+        lease->seat!=s->config.local_seat) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);Peer *p=leased(s,lease);
+    BOOL ok=p && !s->story_loot_grant_fault && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+        SudekiMpStoryLootGrantTake(&p->story_loot_inbox,grant);
+    ReleaseSRWLockExclusive(&s->lock);return ok;
+}
+BOOL SudekiMpLanPartyCompleteStoryLootGrant(SudekiMpLanPartySession *s,
+    const SudekiMpLanPartyLease *lease,const SudekiMpStoryLootGrant *grant,BOOL applied) {
+    if(!s || !lease || !grant || !s->config.local_seat || s->config.story_observation!=2u ||
+        lease->seat!=s->config.local_seat) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);Peer *p=leased(s,lease);
+    BOOL ok=p && !s->story_loot_grant_fault && p->status.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+        SudekiMpStoryLootGrantComplete(&p->story_loot_inbox,grant,applied);
+    if(p && p->story_loot_inbox.quarantined) s->story_loot_grant_fault=SUDEKIMP_STORY_LOOT_GRANT_FAULT_NATIVE;
+    if(ok) (void)send_loot_grant_ack(s,p,grant);
+    ReleaseSRWLockExclusive(&s->lock);return ok;
+}
+unsigned SudekiMpLanPartyStoryLootGrantFault(SudekiMpLanPartySession *s) {
+    if(!s) return SUDEKIMP_STORY_LOOT_GRANT_FAULT_NATIVE;
+    AcquireSRWLockShared(&s->lock);unsigned fault=s->story_loot_grant_fault;
+    ReleaseSRWLockShared(&s->lock);return fault;
+}
 BOOL SudekiMpLanPartySendStoryLoot(SudekiMpLanPartySession *s,const SudekiMpStoryLootState *state,
     const SudekiMpLanStoryScene *scene) {
     if(!s || s->config.local_seat || s->config.story_observation!=2u || !SudekiMpStoryLootValid(state) ||
@@ -2520,7 +2722,7 @@ BOOL SudekiMpLanPartyPublishStoryControl(SudekiMpLanPartySession *s,
         (state->phase!=SUDEKIMP_STORY_CONTROL_READY ||
          SudekiMpLanStoryControlFenceSame(&p->story_control_ack,&state->fence));
     if(ok) {
-        story_control_store(p,state);
+        story_control_store(s,p,state);
         /* Store even if sending fails: future input must obey the latest host
          * decision, and the game thread may retry this same transaction. */
         ok=send_peer(s,p,MSG_STORY_CONTROL,next_sequence(p),0,bytes,sizeof(bytes));
@@ -2583,8 +2785,14 @@ BOOL SudekiMpLanPartySendStoryMovement(SudekiMpLanPartySession *s,
         lease->seat!=s->config.local_seat ||
         !SudekiMpLanStoryMovementEncode(input,bytes,sizeof(bytes))) return FALSE;
     AcquireSRWLockExclusive(&s->lock); Peer *p=leased(s,lease); uint32_t now=GetTickCount();
+    uint32_t reference=s->story_frame_sequence;
+    if(s->story_movement_reference.sequence) {
+        if(!story_movement_reference_current(s,&s->story_scene,now))
+            memset(&s->story_movement_reference,0,sizeof(s->story_movement_reference));
+        else if(!reference) reference=s->story_movement_reference.sequence;
+    }
     BOOL ok=p && story_movement_current(s,p,input,now) &&
-        s->story_frame_sequence && !sequence_ahead(input->acknowledged_frame,s->story_frame_sequence) &&
+        reference && !sequence_ahead(input->acknowledged_frame,reference) &&
         (!p->story_movement_sequence ||
          SudekiMpLanArenaSequenceNewer(input->sequence,p->story_movement_sequence));
     if(ok) {

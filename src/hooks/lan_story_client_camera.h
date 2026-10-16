@@ -15,16 +15,27 @@
  * CCameraManager::SetCameraState (RVA 0x37530) requests it as the retail
  * bootstrap does (0.0, false, 99999.9). The leased camera, its target (the
  * client's own character) and render state come from the local-control
- * owner lease; nothing else is written. Exact-image gated. */
+ * owner lease. During this owned Exploration call only, an exact-image hook
+ * retains tiny finite height corrections the native camera would discard;
+ * the native spring, error bound and collision continuation are unchanged. */
 BOOL SudekiMpLanStoryClientCameraInstall(HMODULE image);
+/* Read-only preflight for an established independent camera during a bounded
+ * missing-frame interval. Requires its already established native thread,
+ * ordinary Exploration state and complete native target chain;
+ * never requests a state or changes camera/input/time. Caller separately
+ * proves current selected-actor/view ownership and client pause containment. */
+BOOL SudekiMpLanStoryClientCameraContinuityReady(const SudekiMpLanArenaOwnerViewLease *owner);
 /* Client game thread, once per presentation when no cast/door override is
  * active. TRUE: the native camera advanced this frame and the render state
- * holds its view. FALSE: nothing was changed (caller presents as before). */
+ * holds its view. The normal route may request Exploration and return FALSE
+ * while that native state transition is pending. */
 BOOL SudekiMpLanStoryClientCameraTick(const SudekiMpLanArenaOwnerViewLease *owner,
     float dt_seconds,float look_x,float look_y);
 /* After a cast/door override hands the view back, re-enter Exploration through
  * the manager (the retail zone-entry bootstrap call) so the native camera is
  * re-seated behind its target instead of recovering from behind a door. */
 BOOL SudekiMpLanStoryClientCameraReseat(const SudekiMpLanArenaOwnerViewLease *owner);
+/* FALSE retains hook dependencies; runtime must keep the module and retry
+ * before destroying the camera lease or unloading the DLL. */
 BOOL SudekiMpLanStoryClientCameraUninstall(void);
 #endif

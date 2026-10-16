@@ -1,3 +1,4 @@
+#include "hooks/lan_story_inventory.h"
 /* Private implementation of host-authored world cosmetics. Included by the
  * existing visual owner: no additional native hooks, AI or client missiles. */
 enum { WORLD_VISUAL_MAX=128, WORLD_REGISTRY_MAX=8192 };
@@ -194,7 +195,9 @@ static BOOL world_pickup_code(void) {
         !memcmp(b+0x1338a0u,"\x53\x8b\x5c\x24\x08\x8b\x43\x10",8) &&
         *(void **)(b+0x1338c2u)==b+0x408d84u &&
         !memcmp(b+0x1338c6u,"\x6a\x01\x56\x8b\xcf\xe8\0\xe1\xee\xff",10) &&
-        !memcmp(b+0x1338d4u,"\x6a\x01\x6a\x01\x56\x8b\xcf\xe8\0\xdf\xee\xff\x53\xe8\x3a\0\0\0",18) &&
+        !memcmp(b+0x1338d4u,"\x6a\x01\x6a\x01\x56\x8b\xcf",7) &&
+        SudekiMpLanStoryInventoryPickupCallExact(image) &&
+        !memcmp(b+0x1338e0u,"\x53\xe8\x3a\0\0\0",6) &&
         !memcmp(b+0x1338ebu,"\xc2\x04\0",3) && !memcmp(b+0x133913u,"\xc2\x04\0",3);
 }
 BOOL SudekiMpLanStoryWorldCollectNearby(void *actor,uint8_t type) {

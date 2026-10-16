@@ -23,6 +23,7 @@
 #include "hooks/lan_arena_pause_panel.h"
 #include "hooks/lan_arena_runtime.h"
 #include "hooks/lan_arena_cast_context.h"
+#include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_party_cast.h"
 #include "hooks/lan_party_menu_native.h"
 #include "hooks/lan_party_local_control.h"
@@ -43,6 +44,11 @@
 #include "hooks/xinput_player_two.h"
 #include "hooks/zone_transition_trace.h"
 #include "input/bridge_receiver.h"
+
+/* This native skill fixture does not install the saved-story task owner. */
+void SudekiMpLanStoryTaskInteriorFilterObserved(void *controller,unsigned filter) {
+    (void)controller;(void)filter;
+}
 
 #include <windows.h>
 #include <float.h>

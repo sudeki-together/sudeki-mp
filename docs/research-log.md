@@ -7766,3 +7766,440 @@ Host-side correction: the TEMP zone observer (`lan_story_observer.c`, exact-byte
 hook already installed) notes the destination name; the area capture withholds
 it as the target. Residency entries unchanged. CONFIRMED_TEST +
 CONFIRMED_EXACT_IMAGE via StoryAreaFollowImageTest; live acceptance pending.
+
+
+## 2026-10-15 — D6 source-specific inventory copying and native ownership
+
+Supported image as identified in `docs/executable.md`; RVAs below.
+CONFIRMED_STATIC and CONFIRMED_EXACT_IMAGE via `StoryInventoryImageTest`:
+`CInventory::AddItem` 0x217E0 is thiscall `(inventory,id,quantity,show)`, RET12,
+void. Globals inventory 0x408D84 / database 0x408D80 have vtables 0x2CA378 /
+0x2C693C; native categories use 0x2D4184. Pickup 0x1338DB and chest 0x1850BD
+call AddItem after CanAddItem, with quantity/show 1. Three export calls and
+merchant 0x89DA4 are deliberately excluded. No AddItem entry hook is installed.
+Money definitions are kind39, denomination +0xDC; AddItem invokes AddMoney
+0x21C50 and caps the purse at 99,999. Category40 is separately established by
+native inventory initialization at 0x2157E and an executed native fixture.
+
+The earlier six-site observer overlapped `world_pickup_code`'s literal call
+bytes. Collector proof now consults the seam owner for original/owned-call
+identity, retaining surrounding signatures. The world image test exercises
+native, owned and foreign targets. Native mutation is game-thread-only,
+prepared against current globals/definition/count, then claimed once by the
+transport before entry. A failed post-call proof is uncertain, never a retry.
+Unknown host capture is reported to the runtime quarantine rather than silently
+skipping a consumed pickup.
+
+CONFIRMED_TEST: `StoryLootGrantTransportTest` exercises the separate D9 grant
+journal, source allowlist, repeated/lost delivery and ACK, predecessor order,
+capacity/backpressure, recipient lease changes and scene/disconnect behavior.
+Profile26 rejects older saved-story peers. This is session-local delivery;
+crash/persistent recovery is not implemented. It does not activate the older
+four-character personal-wallet or entitlement foundation.
+
+Merchant stock is non-depleting (`shop_catalog_adapter.c`); native BUY
+0x89D70 calls AddItem at0x89DA4 and debits inventory+0x134. SELL is0x89DF0.
+Remote item-use helpers now leave host counts untouched while the client's
+accepted-result path debits its own inventory. Exact owner-gate procedure and
+six executed test targets are recorded in the plan's D6 progress entry.
+At initial deployment all live candidate inventory, menu, personal-use and shop
+checks remained UNKNOWN; subsequent bounded pickup/chest acceptance is recorded
+in the plan and the entry below.
+
+## 2026-10-15 — D6 reward refresh on the active Weapons page
+
+CONFIRMED_LIVE on profile26, dirty `4370296`, Ailish host / Tal client:
+the farmhouse sword was awarded once to both inventories and equipped on Tal,
+but the client had to reopen Weapons to see it. The active Items refresh was
+already accepted. The loot handler called the Items-only refresh for every
+reward, so Weapons retained its old list. Owner report and the bounded paired
+trace agree; see the plan's D6 chest acceptance entry.
+
+CONFIRMED_STATIC on the supported image: Weapons rebuild RVA0x16FC60 is
+stdcall(layer), RET4; it fills the selected character's inventory family,
+selects the equipped weapon and calls details RVA0x16F5B0, also stdcall(layer).
+Native equip calls rebuild at0x1707E3 then ListSelect at0x1707F5. ListSelect
+RVA0x17D3C0 is thiscall(list,row), RET4. The layer vtable is0x2D8904; the widget
+block at layer+0x8C embeds list vtable0x2D8CF4 at+0x7D0. Selected row is+0x858,
+count+0x884, row array+0x88C, item ID row+0x84. Layer+0x48=2 is browsing;
+More Info uses state5. Rebuild retains its actor reference locally, not in the
+layer. The existing armour-choice adapter owns rebuild/details entry hooks.
+
+The correction dispatches reward refresh to the shown Items or Weapons page.
+Weapons rebuilds through the existing owner, restores the highlighted item by
+ID after rows may move, then refreshes its details. Other Weapons states defer
+until browsing; only a plain pending flag survives frames. Actor ownership,
+active layer and widget identity are checked around the native rebuild. Armour
+choice's instance is excluded, and no second hook owns the shared native entry.
+No inventory grant or equipment action is repeated by refreshing the page.
+
+CONFIRMED_EXACT_IMAGE: `StoryMainMenuImageTest` checks the refresh signatures,
+call targets, RET4 sites and input slot by name/byte mutation, plus installation
+with the existing armour hooks and restoration. `ArmourMenuRefreshImageTest`
+checks original/owned signatures, foreign detours, retained trampoline bytes,
+metadata and executable protection, image identity, armour exclusion, and that
+the proof function installs no patch. CONFIRMED_TEST:
+`StoryMainMenuRefreshTest` executes retained native prologues with synthetic UI
+bodies, both original and ArmourChoice-owned entries. It verifies item-ID
+selection across reordered rows, More Info deferral exactly once while
+unfocused, actor/inventory refusal, changed layer/widgets/actor after rebuild,
+armour exclusion, missing-item fallback and cancellation on closing the menu.
+These do not establish live menu behavior.
+The owner must still verify an already-open Weapons page updates without
+reopening and retains its selection, including a reward arriving in More Info.
+
+Player-name substitution in acquisition notices is deferred to
+[#77](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/77);
+native weapon-family and equip restrictions remain unchanged.
+
+
+## 2026-10-15 — Kamo exterior retention before client input ACK
+
+The saved-story Kamo freeze was preceded by an unacknowledged client input
+handoff. Host acquisition already owned Tal, but the shared activity/split
+mask required READY. With outside mask zero the ordinary native TEMP path
+paused the exterior and advanced the epoch, leaving client presentation
+closed. The TEMP adapter is destination-agnostic; shipped SOL level metadata
+contains six Kamo interiors, and none needs a new map-specific registration.
+
+The correction derives exterior ownership from exact acquired non-draining
+leases and keeps activity/input on READY. The existing AI move/snap adapter
+uses a separate acquired-lease predicate during PREPARE; native player turn
+still requires READY and the matching ACK. Both paths retain connection,
+character, thread, host binding, menu, swap and lifetime checks. No new patch
+seam, native call, or wire version. Seven focused suites pass, including named
+AI byte-contract mutation checks and native TEMP enter/exit fixtures. Evidence
+is bounded to tests until the owner accepts shop entry/stay/return. See the
+[plan evidence and gate](coop-story-plan-54.md#2026-10-15--kamo-interiors-during-a-pending-client-handoff).
+
+### Kamo shop interaction and independent exterior control
+
+CONFIRMED_LIVE: the corrected delayed-ACK entry preserves the exterior epoch
+and reaches client READY. Starting the merchant interaction separately raises
+the native lead AI override to one and uses controller filters two/two.
+`HostControlBound` treated that as lost binding and drained the remote actor;
+client world presentation continued. The prior entry fix did not establish
+shop-modal control acceptance.
+
+CONFIRMED_STATIC / CONFIRMED_TEST: exterior retention now has its own exact
+settled split/actor proof. The lead's script counter is not borrowed as remote
+AI ownership. Exterior input additionally requires the ordinary controller
+state or an exact native shop singleton/state witness. IsShopActive at RVA
+`0x8D1C0` establishes the frontend/shop state fields; the supported-image test
+checks its relocated singleton operand and refuses every byte mutation.
+Host global readiness, host filters, new acquisitions and swap gates remain
+unchanged. Runtime callbacks revalidate native identities without retaining a
+dispatch witness. Opening/closing states retain suppression but gate requests.
+The three focused follow-up suites and DLL build pass; live modal movement,
+return/revisit, other shops/characters and multiplayer disconnect remain open.
+See the same plan entry for exact test names, the fixture correction and limits.
+
+### Kamo residency capture: executable copy-on-write pages
+
+CONFIRMED_LIVE: the owner recheck still lost Tal and NPC movement during the
+shop modal. The exact split residency snapshot was empty despite a settled
+TEMP and retained exemption. Read-only Windows page queries showed the three
+supported executable singleton slots at RVAs `0x408D10`, `0x408D94`, `0x408DA4`
+were committed `MEM_IMAGE` / `PAGE_WRITECOPY` with the executable allocation
+base. Heap world/descriptor/name pages were `PAGE_READWRITE`. The capture's
+new strict heap reader rejected those image globals before copying identity.
+Tal then drained and all 14 remote NPC activity leases were released; effects
+continued through the separate split animation path. Closing the modal
+restored a new control transaction.
+
+The slots-only reader now accepts readable COW protections, while requiring
+the original verified image allocation, exact known RVA, bounded committed
+region and no guard/noaccess. Heap and native owner checks are unchanged.
+CONFIRMED_TEST: `StorySplitPreflightTest` now runs the complete residency
+capture on real `FILE_MAP_COPY` globals, before/after private writes, and
+refuses guarded/inaccessible/wrong-allocation/unmapped cases. The previous
+private-image fixture masked this production failure. The DLL build and named
+`SplitImageGlobalsReadable` checks pass; the live owner gate remains open.
+
+
+### Kamo doorway control delay and independent exterior steering
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`: the owner accepts Tal
+and NPC movement during the open shop after the executable COW-slot correction.
+The remaining report concerns building entry/exit. The entry capture contains
+about two seconds of host-filter hold after positive TEMP settlement; Tal's
+native pause clears before that filter, leaving about1.85 seconds of avoidable
+wait. Network input continues normally. No exit occurs in that capture.
+
+CONFIRMED_STATIC / CONFIRMED_TEST: settled exterior steering now depends on its
+own positive actor/residency lease and zero native pause count, independently
+of host modal readiness. The native node is actor+8; Pause RVA0x1060C0 and
+Resume RVA0x106100 use node+0x23 (actor+0x2B). ControlMove proves its exact lease
+before treating nonzero pause as held, and submits no target/dodge/neutral move
+while paused. Movement/turn use this narrower permission; block, melee,
+ranged, item, equip and cast requests retain existing action-modal gates.
+World/body, session/ACK, packet freshness and all identity checks remain.
+No native filter or pause reference is changed.
+
+The four focused suites, named supported-image counter/turn checks, and DLL
+build pass for candidate `0aaf5b94…`; see the plan entry for names and the
+floating-point fixture correction. This removes the proven policy wait only
+after settled exterior proof. Pre-entry scripted travel and native entry/exit
+gaps remain held; begin_exit retires the current residency proof immediately.
+Return-trip timing and a live comparison remain owner gates, as do other shops,
+full-roster and multi-client coverage. No claim of fully uninterrupted doorway
+travel follows from these tests.
+
+### Stationary client interrupted by host area travel
+
+CONFIRMED_LIVE / CONFIRMED_STATIC, saved-story profile26, dirty `4370296`:
+the owner's clarification concerns the client remaining outside while the
+host changes areas. The return capture records a 575ms host steering hold
+with fresh nonzero remote input, unchanged READY/fence/transaction, zero
+sampled native actor pause, and continuing client presentation. The maximum
+packet gap in that window is39ms. The current entry capture finishes initial
+client admission only after the host is inside; it cannot establish an
+already-controlled client's entry interruption.
+
+The completed-return correction requires the original kept-exterior ticket,
+balanced exit receipt, positive ordinary-world settlement and exact native
+world, descriptor/data, party, leader, actor/AI and epoch identity. It expires
+after five seconds or when ordinary host readiness returns. A provisional
+entry ticket survives ordinary readiness while still inside. Actions keep
+their original modal gates; native filters and pause references are unchanged.
+
+Separately, the client preserves an already armed binding for at most250ms
+from the original presentation receipt while a new global revision waits for
+its matching party/world pair, only with unchanged own area and fresh exact
+native owner, peer, control fence and actor generation. It sends no input,
+admits no actions and replays no old presentation during that gap. Transient
+combat/menu presses are consumed, including the ranged physical press count.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: candidate `3c35be26…` builds, and
+the split-control, split-preflight, host-filter and native TEMP suites pass
+(TEMP normal and mismatch modes). Named supported-image entry/exit descriptor
+ordering, shop and pause contracts actually execute; see the
+[plan evidence and owner gate](coop-story-plan-54.md#2026-10-15--kamo-interiors-during-a-pending-client-handoff)
+for exact names. Client input routing is source-reviewed in addition to
+predicate tests. Continuous live control, pre-entry script gating, genuine
+native transition gaps, other shops and multi-client recovery remain open.
+
+
+### Independent exterior entry: host script scope and fresh movement
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`: the owner reports that
+exit is much shorter but still visible, while entry still blocks Tal outside.
+Established-control entry holds repeat at about2.1 seconds, mostly before
+native TEMP starts, with Tal's sampled native pause zero and fresh input
+packets arriving. The latest stationary comparison contains no stale packets;
+therefore input starvation does not explain that long scripted hold. Native
+loading/return still contains a separate short pause of about42–46ms.
+
+CONFIRMED_STATIC: shipped `EnterInterior|SRSBS` (hash `5BCA8FB4`, logical
+`3171A`) executes the host-local DisableGamepad before its fade wait. A passive
+observation in the existing shared task STEP owner now records its exact
+load/task/program, argument stack, return scope, destination catalog, world,
+controller and own UIStartTSA/actual native filter return. Existing remote
+exterior steering can consume that proof only until native TEMP begins.
+Foreign filter/TSA calls, changed pending filter, unverified child instructions,
+retired/replaced task, changed program/world/roster and unknown state refuse it.
+No native task, filter, pause, wait or scheduler is rewritten. Action admission
+retains the prior modal restrictions. Frontend filter calls before the task
+thread is known cannot arm or poison an observation; known foreign callers
+still revoke it.
+
+The client separately sends fresh movement during an unchanged-own-area scene
+revision gap. Session and runtime independently require the same connection,
+control fence/READY acknowledgement, actor generation and own area, with an
+unextended250ms bound from original receipt. Neither layer revives old media
+or enables combat/menu actions. The movement sequence and original admitted
+frame acknowledgement remain distinct; no protocol change is introduced.
+
+CONFIRMED_STATIC: `EnableFastLoad|B` (hash `C27825FA`, logical `326B`) invokes
+native PauseGame/UnpauseGame (RVAs `104BE0`/`104BF0`) around loading. Their
+GameSpeed::SetGamePaused route (RVA `272F0`, global pause helper `27490`) pauses
+both entity scheduling and the global simulation clock. Exempting only Tal's
+entity count would not provide continuous simulation. Existing split animation
+ends before the final release and cannot safely be reused as an independent
+physics tick. A presentation buffer can hide only its remaining admitted tail;
+it cannot remove a real host-position pause. Independent clock, collision,
+object lifetime and capture contracts remain open. The read-only hardware
+watch expired without a transition and detached; it provides no live caller
+attribution. No global pause bypass or stale-frame replay is implemented.
+
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: candidate `ea987d31…` builds and the
+seven focused suites pass, with actual named supported EXE/GEX byte checks,
+loopback fresh-movement checks, shared observer regression and refusal cases.
+See the [plan evidence](coop-story-plan-54.md#2026-10-15--independent-client-travel-continuity-remains-open)
+for exact names, test-fixture failures/corrections, bounded timing sample and
+remaining limits. The final genuine COW singleton slice proves isolation from
+a second shared view. Live entry/return movement remains an owner gate; the
+long-hold correction does not claim continuous simulation during FastLoad.
+
+
+### First settled exterior dispatch: eligibility before steering
+
+CONFIRMED_STATIC / CONFIRMED_LIVE, saved-story profile26, dirty `4370296`:
+the later owner-tested entry with `ea987d31…` retains the passive approach
+proof until TEMP begins, removing the scripted two-second wait in that case.
+After the unknown-roster interval, native residency is exact but the outside
+eligibility mask remains zero until the end of input service. The first
+settled dispatch therefore substitutes a zero movement command for fresh
+nonzero input. CArbiter::SetSpeed at RVA `DB070` writes target speed and blend;
+zero initiates a stop rather than preserving motion. Brief idle-to-run clips
+are observed afterward; their entire duration is not proven to originate
+exclusively from that command.
+
+`refresh_split_eligibility` now validates peer/assignment/control fence and
+fresh native roster/lease before the steering queries. Final post-service
+mask recomputation and all native pause/action guards remain. The actual-helper
+refusal cases and named supported-image host-filter/shop/pause contracts pass
+in the two focused suites for candidate `bce72ec0…`. See the
+[plan evidence](coop-story-plan-54.md#2026-10-15--first-settled-dispatch-submitted-a-stop)
+for timings, scope and remaining owner gate. This does not claim removal of
+the separate client presentation gap or global FastLoad simulation pause.
+
+### Kamo transition: qualified owner acceptance
+
+CONFIRMED_LIVE (owner report), saved-story profile26, dirty `4370296`, candidate
+`bce72ec0…`: after testing the settled-eligibility correction, the owner reports
+a minuscule flicker that is much more acceptable, explicitly not seamless.
+This accepts the improvement for continuing D6 checks; the residual flicker
+remains a follow-up. It does not establish zero native pause, resolve the
+earlier entry before initial READY, or cover other shops/characters and
+multi-client recovery. No new code or tests accompany this documentation-only
+record. See the [qualified acceptance and next checks](coop-story-plan-54.md#2026-10-15--kamo-transition-improvement-accepted-with-residual-flicker).
+
+### Residual Kamo flicker: independent camera continuation
+
+The owner requests further reduction before D6 continues. CONFIRMED_STATIC:
+the missing-pair path skips camera updates and accumulates time for the next
+solve; the input-gap path also cleared camera-look axes. Candidate `f919367d…`
+on dirty `4370296`, saved-story profile26, adds a separately guarded camera
+callback with the normal camera's shared clock and original receipt limit.
+It requires current-revision normal camera/cinematic observations plus fresh
+selected-actor/native-view ownership. It neither promotes media readiness nor
+replays old actors, effects or resource changes. A strict Exploration-only
+preflight cannot take over unknown native states; all target checks precede
+native input/refresh. The gap input discard preserves only independently fresh
+camera axes, with unchanged focus and expiry rules.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: the DLL and three focused suites pass;
+see the [named checks and owner gate](coop-story-plan-54.md#2026-10-15--residual-flicker-independent-camera-continuation-candidate).
+No live camera solve is exercised by these fixtures. The camera contribution
+to the visible flicker remains an INFERENCE pending the owner test. Native
+FastLoad simulation holds and the first new-revision frame's buffering behavior
+remain separate limits; no zero-freeze claim is made.
+
+### Kamo return bump: separate native movement from presentation timing
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate `f919367d…`:
+the owner reports entry interruption is no longer apparent, with a slight
+exit bump remaining. Two returns have explicit host holds of 48/44 ms and
+unchanged running clips. A positive native pause sample and its position later
+displayed on the client support a genuine host-side contribution. There is no
+missing-pair state on those exits, and no successful camera-only continuation
+anywhere in this run; neither the visual improvement nor the exit bump is
+proof that the new callback ran.
+
+The first new-revision pair's immediate display followed by a restored
+interpolation buffer can also produce a jump/hold in principle. Its contribution
+to these exits remains a HYPOTHESIS. A read-only timing capture on the existing
+pair will compare displayed source ticks with native movement rather than
+changing buffering semantics speculatively. See the
+[owner report and remaining gate](coop-story-plan-54.md#2026-10-15--entry-imperceptible-small-exit-bump-still-under-investigation).
+
+
+### Small camera dip: timing correlation outside shop travel
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate `f919367d…`:
+a completed read-only capture confirms a new-revision displayed-tick jump
+followed by rebuffering on entry and return. A separate approximately 0.01022
+world-unit downward eye step on return occurs with negligible actor height
+change. Four similar steps occur without a revision change; all five coincide
+with 23–25 ms camera-clock increments. This narrows the investigation to the
+native camera update but does not establish exclusive causation or justify
+clamping its final geometry. See the [measured timing and limits](coop-story-plan-54.md#2026-10-15--return-timing-measured-camera-dip-also-occurs-while-idle).
+
+### Exploration camera height quantization and scoped continuation
+
+CONFIRMED_EXACT_IMAGE: `158110` computes the height spring correction using
+working elapsed time squared; `157E60` clamps it to the remaining error.
+The comparisons at `158019`/`158026` use approximately 0.0101/0.0099 thresholds.
+Below-threshold corrections are discarded. The apply continuation at `15805C`
+removes the absolute value, adds the signed correction and retains the native
+collision check. Collision retries pass height-enable zero and do not reenter
+this correction. This mechanism is consistent with the live step timing;
+exclusive causation of the owner's return bump remains an INFERENCE.
+
+The camera timing prefix contains input-ring interval bounds, not two missing
+elapsed-time fields. The wrapper's zero bounds suppress duplicate queued input
+replay; elapsed time is still supplied. Native game timing has no fixed 45 Hz
+floor. A later live sample showed zero inner/outer target velocities and no
+comparable dip, so stale target velocity was not demonstrated. No speculative
+target refresh or timing clamp is part of the candidate.
+
+Candidate `2d6c862c…`, dirty `4370296`, profile26 implements a single exact
+six-byte seam through `lan_story_client_camera_height`. Only fresh owned-client
+Exploration scope with verified native caller/context/geometry admits tiny
+finite nonzero steps into the original apply/collision continuation. The bridge
+preserves the floating-point environment, registers, flags and LastError.
+Checked restoration runs before dependency retirement and retains the module
+on failure. Host cameras do not install this adapter in this profile.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: three focused executables pass, including
+all new named byte-mutation checks and actual synthetic x87-branch execution,
+patch failure, thread/identity refusal and restoration retry. The fixture
+does not execute full-world collision or establish arbitrary concurrent unload.
+See the [named checks and pending owner gate](coop-story-plan-54.md#2026-10-15--small-camera-height-correction-candidate).
+
+### 2026-10-15 — Client item result must not replay the native script
+
+CONFIRMED_LIVE / CONFIRMED_STATIC, saved-story profile26, dirty `4370296`:
+an accepted M-item result locally calls `SudekiMpUseItemOnCharacter` with
+validation bypassed. In the reproduced failure, this adds a registry entity
+outside the client presentation bracket; the immediately following entity and
+scheduler invariant checks fail and retain UNKNOWN containment. The host has
+already started the authoritative item action. Client resources and
+`SFXM005_HEAL` have separate replication paths, so native script execution is
+an additional mutation, not a safe presentation operation.
+
+Candidate `3b8f95fe…` limits accepted item-result handling to one local inventory
+debit and an active Items-page refresh. A synthetic fixture executes the actual
+runtime result consumer and refuses any native apply call, including a fallback
+after failed bookkeeping. The native menu and world-visual image suites also
+pass; named checks and evidence limits are in the
+[D6 failure record](coop-story-plan-54.md#2026-10-15--d6-q-debit-without-heal-local-item-replay-freezes-client).
+Live effects/control acceptance remains pending.
+
+A separate Q attempt debited the client without a matching host request or
+heal. Read-only hook inspection found the Q adapter installed and retained,
+with no owned menu/open trace in that run. Its bypass route remains UNKNOWN;
+do not equate removing duplicate result execution with fixing Q submission.
+
+### 2026-10-15 — Owned Q item request and result containment accepted live
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate `3b8f95fe…`:
+the owned Q Items selection submits item204 to the host. One accepted result
+reduces client stock3→2 without local native apply; the host action heals Tal
+100→350 and the client receives that health. Host stock remains4. The owner
+confirms healing and continued control. This establishes the observed Q route
+and result containment, not the cause of the earlier unowned-Q debit or visual
+effect parity. Corrected M-path and host-zero-stock checks remain open. See the
+[qualified acceptance and next florin gate](coop-story-plan-54.md#2026-10-15--d6-q-healing-and-continued-control-accepted).
+
+### 2026-10-15 — Chest money replication observed live
+
+CONFIRMED_LIVE on the current saved-story D6 candidate: a native chest reward
+(source2, item321, quantity1) queues one host grant and completes one client
+grant. Each native purse increases by150 once, with no immediate repeat in the
+27-second observation. This is chest-source currency evidence; ground-money
+collection and longer dedupe transitions were not exercised. See the
+[plan acceptance](coop-story-plan-54.md#2026-10-15--d6-chest-florins-credited-once-to-both-purses).
+
+### 2026-10-15 — Tal-collected ground money shares once
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate `3b8f95fe…`:
+the owner completes the prepared loose-bag pickup. Native proximity collection
+identifies Tal and consumes item321; one source1 grant credits150 to each
+independent purse. Host655→805 and client515→665 occur once, with balances
+unchanged at a fresh55-second follow-up. The host drop and client cosmetic
+instance retire. This establishes ground-money sharing independently of the
+earlier source2 chest reward; full area unload/re-interaction/reconnect are
+still untested. See the [qualified acceptance](coop-story-plan-54.md#2026-10-15--d6-tal-ground-florin-pickup-credited-once-to-both-purses).

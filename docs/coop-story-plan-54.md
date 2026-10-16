@@ -168,7 +168,7 @@ for a non-lead actor with that actor's facing, without touching `controller+0x24
 | D3 | **Host drops on every screen**: host captures DroppedItem creation (identity, item, quantity, position) into the presentation message; client presents the real drop at the same place. Pickup is executed on the host for whichever character collects it. | Owner gate: the client sees exactly the host's drops and can collect them |
 | D4 | **Monster freeze fixes**: transform-only fallback for monsters whose pose/clip is unsupported (keep position and facing, skip channels); monsters never refuse the whole world frame during clip preparation | Research54: no `monster_gap` > 300 ms outside load; owner gate |
 | D5 | Hit feedback: prove or fix the flash (0x4DFAB0) and stat-display (0x528FF0) lease live; stagger stays pose-driven | Owner gate: red flash, bar and numbers visible on the client |
-| D6 | **Loot rule** (economy activation): wire native pickups through the existing economy foundation (`personal_wallet`, `story_loot`, entitlement ledger, sidecars), with credit-all for florins/consumables/materials, shared keys/quest items, equipment to its owner, and cap-hit logging. This is the activation milestone described in `docs/personal-wallet-design.md`. | Pure tests for the rule table; image tests for the pickup seam; owner gate |
+| D6 | **Loot rule (D9 supersedes the original character-ledger rule):** copy host-collected ground/enemy/chest loot into each joined player’s native inventory and purse. Exclude shop/script grants; retain native stack limits and report caps. Each game keeps its own purchases and consumption. The older character-wallet foundation stays inactive; save/sidecar recovery belongs to I. | Source classification, delivery/dedupe and exact-image tests; ordinary pickups, farmhouse sword chest/equip, active Items/Weapons refresh, host-only shop purchases, Q self-use healing/control and chest florin credit accepted live. M self-use healing/effects/refresh/control, zero-host-stock use and Tal-collected ground florins also accepted live; no chest repeat through Kamo entry/return. The five scoped route checks have recorded passes; broader unload/re-interaction/reconnect dedupe remains follow-up coverage. |
 
 ## 7. Phase E–J
 
@@ -5267,6 +5267,977 @@ cannot start. Also fixed on the way: the remote move path no longer submits
 anything while arbiter 0x20 is set (the zero-speed submission interrupted the
 action), and the client quick menu's item page is category 5.
 
+### 2026-10-15 — D6 per-game loot candidate (owner gate OPEN)
+
+Revision: `4370296` plus the D6 working-tree changes; saved-story profile **26**.
+D9 governs this step: every game keeps its own native party inventory and purse.
+The older four-character `personal_wallet`/entitlement design is not activated.
+Native merchant listings do not deplete: catalog `+4` is price, not stock;
+BUY RVA `0x89D70` adds at `0x89DA4` then debits the local purse. The brief's
+`0x489DF0` is the **VA of SELL**, not a purchase RVA. Client shop access is H.
+
+CONFIRMED_STATIC / CONFIRMED_EXACT_IMAGE: the existing inventory adapter remains
+the only owner of six `CInventory::AddItem` callsites. Pickup `0x1338DB` and
+chest `0x1850BD` pass `(inventory,item,1,1)` after native capacity checks; the
+three exports and shop `0x89DA4` are excluded. Ground and enemy drops use the
+same pickup source. Kind 39 money follows AddItem → AddMoney `0x21C50` with
+native denomination and 99,999 cap. Native item category 40 is also admitted.
+The client validates inventory, item-manager, definition and category ownership
+before a single native AddItem; native popups and caps remain native.
+
+The world-drop collector's literal byte check overlapped the inventory
+observer. It now recognizes the original call or this adapter's exact installed
+replacement, with all surrounding bytes retained. The image regression proves
+both accepted states and rejects a foreign redirect. Transactional install,
+reverse rollback, failed restoration retention and retry, and game-thread-only
+binding/retirement are tested by name.
+
+CONFIRMED_TEST: independent grant/ACK messages carry immutable source, serial,
+predecessor, item and quantity. A bounded per-peer outbox retries its head until
+the client's native outcome is committed; lost/repeated messages cannot repeat
+AddItem. Native preparation precedes claiming the serial. Scene/control changes
+do not discard grants. Recipient leases are checked atomically; host capture
+retains a plain-data FIFO during backpressure. Unknown native outcomes, changed
+recipients or disconnect with pending grants explicitly quarantine delivery.
+This does **not** establish crash/restart/reconnect recovery; that belongs to I.
+Mixed profile 25/26 peers are refused at handshake.
+
+D9 also exposed a double debit: remote item use reduced both host and client
+inventories. The remote host action/fallback now preserves the host stack; the
+requesting client's accepted-result path still spends one local item. This
+ownership change needs the live count check below. Host native menus retain
+normal native spending.
+
+Validation performed on the dirty candidate, supported image SHA256
+`8ceb1d3cf667ad906f13252cb5bdf762eb018ebbecb8bffeb92f3b27b0dfbb94`:
+
+- MinGW `SudekiMP` build passes (existing native-ABI pedantic warnings).
+- GE-Proton Wine: `SudekiMP.StoryInventoryImageTest`,
+  `SudekiMP.StoryWorldVisualImageTest`, `SudekiMP.StoryMainMenuImageTest`,
+  `SudekiMP.StoryLootGrantTransportTest`, `SudekiMP.StoryActionTransportTest`,
+  `SudekiMP.LanPartySessionTest` all exit 0. Run the three `*ImageTest.exe`
+  targets with the supported `SUDEKI.exe` path as their sole argument; run
+  the other three without arguments. Exact command records are retained in
+  the private D6 test artifact. Named native checks actually ran; compilation
+  alone is not counted as an image test.
+- Inventory fixture executes retail AddItem for consumables, category 40 and
+  florins, checks caps, six-source inclusion/exclusion, unknown outcomes,
+  single-use leases and foreign-thread refusal. Loopback covers delivery to
+  multiple clients, immutable retries, missing ACKs, queue capacity, stale
+  leases and scene/disconnect fences. These are not live gameplay acceptance.
+- Read-only observation of the preceding live pair agrees with the required
+  inventory/database/category layout. It does not prove candidate behavior.
+
+**Owner gate — stop here after staging the candidate.** Ailish host / Tal
+client, existing New Brightwater save and castle-road approach; logs freshly
+rotated. Start health remains 0.5 for both characters for heal checks.
+
+1. On Tal, open M → Items and note ointment count. Ailish collects one ointment.
+   Tal's count must rise once without closing/reopening the page; check the
+   host's count too. Log: one `story_loot event=queued` and one matching
+   `event=granted`, with `refreshed=1` on the active Items page.
+2. Collect a chest reward. Both inventories gain its item once; waiting,
+   closing/reopening M, and moving areas must not award it again.
+3. Collect a florin drop. Each game's own purse gains the native denomination
+   once, independently respecting its cap. Tal must still be able to collect
+   a host-authored drop by approaching it.
+4. Tal uses one ointment from M, then Q when hurt. His count drops once per
+   accepted use; Ailish's host count stays unchanged; heal/animation/effect
+   remain correct. Separately check host-zero-stock/client-positive-stock use.
+5. Ailish buys an ointment: only her game's count/money changes. The inverse
+   **Tal-client purchase gate is deferred to H client shops**; no live client
+   checkout is claimed by source exclusion tests.
+
+Deployment observation: candidate `db74b2d7…` is staged on both peers with
+matching changed DLL hashes and fresh logs. Both startup checks pass; host
+placed both characters at the castle-road approach with half health, the
+inventory observer installed, and the client reached confirmed movement.
+These are startup observations only. The first pickup/menu owner gate is open.
+Graph findings were recorded and recalled; AST update completed with the
+existing native-C parser limitations.
+
+Pending: all five visual/gameplay checks, live teardown with pending loot,
+full-roster/full-campaign coverage, two-machine/native-Windows runs and Phase I
+persistence. No step-completion commit or push before owner acceptance.
+
+### 2026-10-15 — D6 pickup counter accepted; chest gate next
+
+CONFIRMED_LIVE, bounded to saved-story profile26, Ailish host / Tal client on
+castle road, Linux/GE-Proton Wine, `4370296` plus D6 dirty candidate
+`db74b2d7…`. The owner reports Tal's item counter increasing during the requested
+open-M → Items pickup check. Paired logs independently show eight host pickup
+grants (serials1–8), each applied once on the client, with matching item and
+quantity, native count +1, completion acknowledged and `refreshed=1` every time.
+Item204 specifically increases from4 to5 on both games. No duplicate grant,
+cap, capture uncertainty, delivery quarantine or waiting state appears in this
+sample. Evidence artifact: `d6-pickup-menu-20261015`.
+
+The ordinary-pickup / active-Items-page gate is accepted. No chest source or
+florin grant appears in this capture; their gates remain open. Next: Ailish
+opens one chest; both games must receive its reward once, with no repeat after
+waiting or reopening Items. Personal item-use counts, shop exclusion live,
+remote collection, pending-loot teardown and persistent recovery retain their
+previous limits. No code change, rebuild, reload, commit or push for this review.
+
+### 2026-10-15 — D6 sword chest accepted; open Weapons refresh missing
+
+CONFIRMED_LIVE on the same profile26 Ailish-host/Tal-client dirty `4370296`
+candidate `db74b2d7…`: the owner reports Ailish collected the farmhouse sword,
+Tal received it after reopening Weapons, and the equipment test worked.
+The paired trace records one chest grant (serial9, source2, item3, quantity1),
+native count0→1 in each game and one client completion, followed by the host's
+successful Tal equip. All nine grants in the sample match without duplicates.
+Evidence artifact: `d6-chest-weapon-20261015`. This accepts this chest reward
+and equip scenario; repeat-after-area-change, florins and spending gates remain.
+
+The open Weapons page did **not** refresh: the grant's `refreshed=0` and
+`items_refresh_refused` agree with the owner's required reopen. Loot currently
+calls the Items-only refresh regardless of the shown page. Extend the existing
+menu adapter with a guarded native Weapons refresh; do not change weapon-family
+restrictions or award the reward again. The owner defers using joined players'
+display names in weapon-acquisition notices to
+[#77](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/77).
+
+### 2026-10-15 — D6 automatic Weapons refresh candidate
+
+Revision `4370296` plus preserved D6 working-tree changes, profile26. Reward
+completion now dispatches to the active Items or Weapons page. Weapons uses
+the native list rebuild, restores the highlighted weapon by item ID and updates
+its details. More Info and transition states defer until browsing; no native
+pointer is retained for that delay. The existing armour adapter validates its
+own shared hooks; its armour layer is excluded. No second hook, inventory grant
+or equip is introduced by this refresh. See the research log's corresponding
+entry for the native functions, layout and evidence boundaries.
+
+Validation on the supported executable from `docs/executable.md`, GE-Proton
+Wine: `SudekiMP.StoryMainMenuImageTest`,
+`SudekiMP.ArmourMenuRefreshImageTest`, and `SudekiMP.StoryMainMenuRefreshTest`
+all exit0; each takes the supported `SUDEKI.exe` as its sole argument. The first
+two execute named original/owned native byte and ownership checks, including
+foreign detours and restoration. The third executes synthetic UI bodies behind
+retained native prologues: selection after row insertion, deferred refresh,
+ownership changes, armour exclusion and closing the menu are covered for both
+original and owned entries. This is CONFIRMED_EXACT_IMAGE / CONFIRMED_TEST,
+not live automatic-refresh acceptance.
+
+**Owner gate after the next paired reload:** keep Tal's M → Weapons page open,
+highlight an existing weapon, and collect the farmhouse sword with Ailish.
+The new sword must appear once without reopening, the highlight must stay on
+the same weapon, and the new sword must still equip on both screens. If testing
+a reward during F3 More Info, return to the list: it must be current without
+leaving Weapons. Existing Items-page refresh must remain intact. No completion
+commit or push; D6's florin and independent-spending checks remain open.
+
+Reload observation: at the owner's request, candidate `be910918…` replaced
+`db74b2d7…` on both peers; the tested source manifest and both deployed hashes
+match. The old pair exited, logs were rotated, both new DLLs report `status=ok`,
+and the original configuration files were restored after loading the temporary
+invulnerable test setup. The host reached its lobby; the client is waiting for
+a real window-focus click before startup continues. Joining, placement and the
+automatic Weapons refresh remain unconfirmed on this run. No gameplay input
+was automated. This is a deployment observation, not owner acceptance.
+
+### D6 repeatable farmhouse start — 2026-10-15, test aid
+
+Owner requested a paired reload that loads New Brightwater, puts Ailish inside
+the farmhouse at her previous spot, and keeps Tal at his previous exterior
+spot. The optional host test-start configuration now accepts
+`TestStartTemporaryZone`, `TestStartTemporaryMarker`, and
+`TestStartTemporaryLeader` in addition to the existing exterior start. It waits
+for an outside remote-control lease, places the exterior pair, then uses the
+existing observer/split owner to request native TEMP with the authored arrival
+marker. Only the leader receives the final interior position after positively
+observed settlement. An unknown or timed-out transition is never retried or
+force-cancelled. Normal saves and player-initiated travel are unchanged.
+
+The DLL builds and `SudekiMP.StoryTestStartTest` passes its synthetic placement,
+readiness, stale-identity, once-only entry, and follower-exclusion checks.
+`SudekiMP.StoryTestTemporaryImageTest` passes eleven named checks against the
+supported executable, including the five native byte guards, the owned
+entry/trampoline, actual TEMP entry, resource retention, admission refusal,
+separate settlement, and no retry after an uncertain return.
+`SudekiMP.StoryTemporaryContextTest` still passes. The native fixture also
+confirms that full-party mode at depth zero leaves follower counters untouched.
+These are CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE.
+This test convenience does not accept the automatic Weapons refresh or
+complete D6.
+
+The first reload stayed pending. After client focus established Tal's control,
+the test-start preflight still rejected its configuration. A focused regression
+test reproduced rejection of readable copy-on-write name memory; the new test
+name predicate now accepts it without changing the existing native-object
+reader. `SudekiMP.StorySplitPreflightTest` passes all six readable protections
+and rejects guarded/inaccessible memory, invalid names and invalid admission.
+
+Reload observation: candidate `6ce135bb…` is deployed with matching hashes on
+both peers, and the original configuration files are restored. Logs confirm
+both exterior placements, one accepted native farmhouse entry with the authored
+marker, settled interior state, and final placement of only Ailish. Tal stayed
+at the requested exterior point throughout entry and then moved in response to
+client input. Native invulnerability leases were confirmed for both. This is
+CONFIRMED_LIVE placement/control evidence; the Weapons refresh owner gate and
+D6 remain open. Window focus was activated; no gameplay input was automated.
+
+### 2026-10-15 — D6 automatic Weapons refresh accepted
+
+CONFIRMED_LIVE, saved-story profile26, Ailish host / Tal client on the
+farmhouse test route, Linux/GE-Proton Wine, revision `4370296` plus preserved
+D6 dirty changes, candidate `6ce135bb…`. The owner confirms the acquired sword
+automatically appears in Tal's open Weapons menu without reopening it. The
+paired capture agrees: one chest reward, native count0→1 in both games, one
+completed client grant and a successful active Weapons refresh. Evidence
+artifact: `d6-weapons-refresh-accepted-20261015`.
+
+This accepts automatic reward visibility in the open Weapons list. Highlight
+preservation and the More Info return path retain their exact-image/synthetic
+test evidence; neither was separately accepted in this live check. Chest
+repeat-after-area-change, florins, personal consumption, host shop exclusion
+and pending-loot teardown remain open. Earlier D3 live acceptance already
+establishes that either player can collect host-authored drops; recheck Tal's
+collection with D6 florin credit. Next owner check: collect a florin drop and
+verify each game's purse gains its denomination once, then test Tal's personal
+ointment use without debiting Ailish's inventory. No code change, rebuild,
+reload, commit or push for this acceptance record.
+
+### 2026-10-15 — D6 host shop purchase exclusion accepted
+
+CONFIRMED_LIVE, saved-story profile26, Ailish host / Tal client at New
+Brightwater's nearby shop, Linux/GE-Proton Wine, revision `4370296` plus
+preserved D6 dirty changes, candidate `6ce135bb…`. The owner reports that
+buying from the shop did not update Tal. The read-only inventory capture
+confirms two purchases, first two ointments and then one: Ailish's game changes
+from4→6→7 ointments and365→265→215 florins; Tal's game remains at4 ointments
+and365 florins throughout. The native inventory observer identifies both
+transactions as shop purchases with the matching quantities, and no loot-copy
+grant is emitted. Evidence artifact: `d6-host-shop-exclusion-20261015`.
+
+This accepts buyer-only host purchases for this item/shop scenario. It does
+not accept client checkout (Phase H), selling, other merchants or personal
+consumption. Next: Tal uses one ointment through M and another through Q
+while hurt; only his own stock may decrease, with native healing and effects.
+The host-zero-stock/client-positive-stock variant, florin drops, extended chest
+dedupe and pending-loot teardown remain open. The pair was reloaded at the
+native save position with automatic test teleports disabled; party
+invulnerability remains enabled. No gameplay input was automated. No code
+change, rebuild, commit or push for this acceptance record.
+
+### 2026-10-15 — D6 item-use preparation without teleporting
+
+The native save restored full HP while test invulnerability remained enabled,
+so it could not establish the requested healing/count check. The test-start
+adapter now accepts valid `TestStartLeaderHealth` / `TestStartFollowerHealth`
+fractions without `TestStartLeader` coordinates. This explicit health-only
+mode clears placement/TEMP configuration and never calls position, zone-load
+or TEMP seams. Malformed nonempty position configuration does not silently
+opt into this mode. Defaults remain inactive.
+
+After the normal ready-world delay, the existing host game-thread service
+checks the exact roster and matching actor, changes HP through the existing
+native resource setter, preserves SP and checks the result. It consumes the
+one-shot before mutation, including uncertain partial setter outcomes.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE, dirty revision `4370296`, candidate
+`95ab5574…`: DLL build and `SudekiMP.StoryTestStartTest` pass, including
+once-only health, unchanged positions, no area/TEMP calls, readiness, actor
+replacement, invalid configuration and uncertain setter cases.
+`SudekiMP.SkillTraceImageTest <supported SUDEKI.exe>` exits0; its named
+`GetCharacterNumberStat` and `SetCharacterNumberStat` byte checks actually ran.
+That target also needed the existing inventory adapter added to its source
+list to satisfy the D6 shared pickup-call validation dependency; this was a
+test-link correction, not a new runtime hook.
+
+The next owner gate remains personal consumption: start Tal at one quarter of
+his saved HP at the native save position, with invulnerability retained, then
+use an ointment through M and another through Q. Record fresh counts after
+reload; previous shop purchases were accepted in their own capture and are
+not presumed persisted. No item-use acceptance follows from this test aid.
+
+### 2026-10-15 — Kamo interiors during a pending client handoff
+
+**CONFIRMED_LIVE failure / CONFIRMED_STATIC cause:** saved-story profile26,
+revision `4370296` with preserved D6 dirty work. Before Ailish entered the
+New Brightwater Kamo shop, Tal's client remained at `pending_input_arm` and
+had not acknowledged control. The host had acquired Tal's native lease, but
+its exterior mask required READY and stayed zero. Native TEMP therefore ran
+with `keep_live=0`, paused the exterior, and changed the scene epoch; the
+client then stopped presenting at `native_presentation_changed`. Host frames
+continued. This was not evidence of a missing shop asset. Initial focus-hook
+setup is a plausible input-arm blocker; the old log does not identify the
+specific failed predicate.
+
+The correction separates acquired exterior ownership from acknowledged input
+permission. An exact acquired, non-draining remote actor retains its exterior
+during PREPARE as well as READY. Its native follower AI movement/snap is also
+suppressed under the acquired ownership proof, so it cannot follow the host
+while waiting for input. Player steering, attacks, activity and nearby loot
+collection still require the existing READY/ACK gates. No native hook or
+protocol format changed; stale owner, connection, thread, scene and native
+identity checks remain.
+
+The generic TEMP path covers the six authored Kamo interiors:
+`LNBr_Kamo_shop`, `LICa_Kamo_Shop`, `LSMoB04_Kamo_shop`, `LTCi_Kamo_Shop`,
+`DCRe_Kamo_Shop`, and `DCCi_Kamo_Shop`. These are regression inputs, not a
+new destination allowlist. Supported archive level metadata contains these
+six entries among 53 interiors; each corresponding zone resource exists.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE:** DLL build and seven focused suites
+pass: `StorySplitControlTest`, `StorySplitPreflightTest`, `StorySceneAreaTest`,
+`StoryMeleeAdmissionTest`, `StoryAiMovementImageTest`, `StoryPlayerTurnImageTest`,
+and `StoryTempExteriorImageTest` (normal and mismatch modes). Tests cover
+PREPARE without input permission, ACK, lost readiness, invalid/draining leases,
+multiple clients, all six shop names with four exterior character choices,
+and retained scene epochs across entry/exit. The six named native contracts
+`AI_MOVE_FRAME`, `AI_MOVE_CHOICE`, `AI_MOVE_PLAYER_CACHE`, `AI_SNAP_FRAME`,
+`AI_SNAP_CHOICE`, `AI_SNAP_CLEANUP` actually executed with every-byte rejection.
+Native TEMP body tests use a synthetic world and inert leaf callees; they do
+not prove live behavior at all shops. A test-fixture name-padding error was
+corrected before the final scene suite passed.
+
+**Follow-up live result:** the delayed-ACK entry retained the exterior and the
+same epoch; the client reached READY and continued presenting outdoor frames.
+Opening Kamo's shop then exposed a separate control failure: the native script
+raised Ailish's AI override from zero to one and used controller filter mode
+two. The shared host binding test rejected that legitimate modal ownership
+and drained Tal. The world continued presenting, but Tal lost control. A host
+ointment purchase was recorded as a shop grant, with no copied loot grant;
+the subsequent inventory observation was host five/client four, with purses
+315/365. These are post-purchase values, not a new before/after capture.
+
+The follow-up correction leaves global host readiness unchanged. A positively
+owned, settled exterior character retains its independent lease through the
+lead's interaction transition. Input additionally needs ordinary native host
+control or the positively identified native shop modal; unknown transition
+state retains AI suppression but grants no movement, cast or item request.
+Fresh native residency and actor ownership are rechecked between dispatches;
+no copied dispatch witness, native filter write or new patch seam is used.
+New acquisition, party swaps and initial caster construction keep their prior
+host readiness gates.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE:** the follow-up DLL build,
+`StorySplitControlTest`, `StorySplitPreflightTest`, and `StoryHostFilterTest`
+pass. The last suite executes the named `IsShopActive` supported-image check
+and rejects all 42 individual byte mutations. Tests distinguish retained
+ownership from input permission, require READY/ACK, refuse changed roster,
+split, world, thread, component and filter ownership, and close permission
+immediately on entry/exit gaps. A synthetic residency fixture was moved to
+private writable memory after its initial copy-on-write mapping was correctly
+refused. That fixture change did not cover the executable singleton slots;
+the subsequent owner test exposed the missing case described below.
+
+**Owner recheck failed / mapped-page cause confirmed:** with the shop open,
+some effects continued but Tal and outdoor NPCs stopped. The log again shows
+Tal's lease draining on the lead's override change, releasing all 14 remote
+NPC activity leases. Closing the shop restored control. Read-only live checks
+found the split settled and its exemption retained, but the new residency
+snapshot empty. Windows reports all three executable singleton slots (world,
+party group and controller) as committed `PAGE_WRITECOPY` image pages; the
+new capture had incorrectly applied its narrower heap access check to them.
+The world, descriptor and zone-name objects themselves were ordinary private
+writable pages. No global world pause or transport stall was established.
+
+The correction admits readable copy-on-write access only for those three
+fixed slots within the verified executable's original allocation. Native
+object ownership checks remain unchanged. The settled diagnostic now reports
+residency capture outcome, refusal stage and the three page protections.
+**CONFIRMED_TEST:** the rebuilt DLL and `StorySplitPreflightTest` pass, including
+named `SplitImageGlobalsReadable`: real `FILE_MAP_COPY` singleton slots before
+and after a private write, full settled/capture success, and guarded,
+inaccessible, wrong-allocation and unmapped refusals. The previous private
+image fixture had missed this live page type. The owner subsequently accepted
+Tal and NPC movement with the shop open on candidate `ab57cf75…`; earlier
+pure checks alone had not established that live acceptance.
+
+**Remaining owner report:** Tal stays in his own area, but his control is
+interrupted when Ailish enters or leaves another area. This is independent
+client continuity, not the host's own loading or doorway duration. The captured entry holds input for about 4.2 seconds:
+about two seconds before TEMP begins, a short native transition, then about
+two seconds after settled exterior residency. Tal's own pause clears shortly
+after settlement, leaving roughly 1.85 seconds of avoidable host-filter wait.
+The same run also contains a three-second buying-screen opening filter hold;
+no client movement was attempted in that particular opening window. No exit
+is present in that capture, so its cause and duration remain unmeasured.
+
+The next scoped correction separates exterior steering from action admission.
+An exactly owned, positively settled exterior body may move and turn once its
+own native pause count is zero, without borrowing the lead's modal filter.
+A genuine pause returns a held result before target, dodge or even neutral
+movement submission. Native world/body gates, connection, READY/ACK and fresh
+input remain mandatory. Attacks, block, ranged fire, items and casts retain
+the previous positive modal admission. No pause counter or host filter is
+written. The change does not grant control across unknown residency, before
+TEMP entry, or after the split's exit proof has been retired.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE**, dirty revision `4370296`, candidate
+`0aaf5b94…`: DLL build, `StorySplitControlTest`, `StoryMeleeAdmissionTest`,
+`StoryHostFilterTest <supported EXE>` and `StoryPlayerTurnImageTest <supported
+EXE>` pass. The named `NativeNodePauseCounterTest`,
+`NativeNodePauseCounterIncrement`, `NativeNodeResumeCounterDecrementAndZero`,
+`IsShopActive` and six player-turn/movement byte contracts actually execute.
+Policy tests distinguish steering from action permission, preserve pause
+references without target/dodge/movement calls, refuse stale ownership and
+resume on zero. An initial movement-vector assertion used nonbinary decimal
+components; the fixture now uses exactly representable components, retaining
+the exact equality and native-call-count assertions. No production change
+was needed for that fixture correction. These checks do not prove live delay
+reduction or safe control across an unobserved exit.
+
+**Owner follow-up on `0aaf5b94…`:** slightly improved, but the requested
+behavior is that a client remaining outside keeps control while the host
+changes areas. The new exit capture confirms a 575ms authoritative steering
+hold. Tal's client remains READY, continues presenting, and sends fresh
+nonzero movement; the host has the same actor/fence/transaction but gates it
+on its own input filter after return. Native Tal pause is zero during the
+sampled hold. Client and host positions both plateau. The measured packet
+window has a maximum gap of39ms, so this is not a matching network outage.
+
+The new entry is not an already-controlled-client acceptance sample: Tal
+finishes initial input admission after Ailish is inside, with no movement
+packets before entry. The code also invalidates presentation on global scene
+revision changes while waiting for a matching party/world pair, and clears
+input binding as a consequence. This is a separate short re-arm path; do not
+claim that startup capture measures an established client's interruption.
+
+The correction extends only the exact retained exterior identity across
+a completed host return. It requires the same kept-exterior entry ticket, a
+matching balanced exit receipt, a positive ordinary-world settlement, and the
+same world/descriptor/data/party/leader/actor/AI/epoch. The return proof expires
+within five seconds and retires when host input readiness returns, on a new
+transition, or on identity loss. Genuine native transition/pause gaps remain
+held. The action permission still requires its prior positive modal contract.
+Client input binding may also survive a brief unrelated-area revision gap,
+with the same established native owner and original fresh receipt; it sends
+no new movement/actions and does not replay or relabel old media during that
+gap. Fresh matched frames are still required for normal input/presentation.
+
+**CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE**, dirty revision `4370296`, candidate
+`3c35be26…`: DLL build and four focused suites pass: `StorySplitControlTest`,
+`StorySplitPreflightTest`, `StoryHostFilterTest <supported EXE>`, and
+`StoryTempExteriorImageTest <supported EXE>` in both normal and mismatch modes.
+Named `SplitReturnedResidency` tests cover all four exterior character choices,
+balanced receipts, settlement, identity replacement, expiry and ordinary-ready
+retirement. `ReturnedExteriorSteering` refuses stale owners and native pauses
+and leaves action admission unchanged. The client gap tests cover the original
+250ms receipt horizon, initial PREPARE refusal, fresh identity/fence/connection
+checks, and changed own-area rejection. The pending branch sends no input and
+consumes transient combat/menu edges, including ranged presses.
+
+The supported-image checks actually executed by name:
+`TempReturnEntryCurrentDescriptorBeforeKeep`, `TempReturnExitZeroRegister`,
+`TempReturnExitClearsPendingAndCurrent`,
+`TempReturnExitOrdinaryDescriptorBeforeReceipt`, `IsShopActive`,
+`NativeNodePauseCounterTest`, `NativeNodePauseCounterIncrement`, and
+`NativeNodeResumeCounterDecrementAndZero`. Native body fixtures use synthetic
+worlds and do not establish uninterrupted live travel. The pre-entry script
+filter and genuine native transition/pause gaps remain unproven for independent
+steering; this candidate does not broadly bypass them.
+
+**Owner gate open:** establish Tal's control first, then keep him outside and
+try moving him while Ailish visits and returns from Kamo. Confirm the
+stationary client's control continuity separately from the host's transition.
+Movement during the open shop is accepted; independent travel continuity
+still needs the next candidate's live check. Also verify a delayed client handoff can
+finish with the host already inside. The other five shops, other roster
+members and disconnect during a shop stay still need live coverage. A draining
+third participant can conservatively close the remaining exterior binding;
+multi-client disconnect/recovery is not established by this two-player test. Resume
+the D6 personal-item and florin checks after this gate; no D6 acceptance is
+claimed from these tests.
+
+### 2026-10-15 — Independent client travel continuity remains open
+
+The owner reports candidate `3c35be26…` greatly reduces the exit freeze but
+does not remove it; entry still stops Tal until Ailish arrives. This is not
+acceptance of uninterrupted exterior control. In the paired saved-story
+profile26 capture, two entry holds last2159ms and2093ms; two return holds
+last46ms and43ms. The second entry begins after established client control.
+Tal remains READY, sends movement, and the host continues publishing exterior
+worlds while the client presents normally through the long pre-entry hold.
+All sampled Tal pause counts in that long interval are zero. The generic
+native TEMP entry begins only about two seconds after the hold starts.
+
+The completed-return proof is admitted on both exits. The client binding
+retention also runs on entry/return without another initial input-arm cycle.
+However, withholding movement during the missing-pair interval produces
+entry packet gaps of136ms and117ms, exceeding the existing100ms freshness
+limit. These are separate from the long pre-entry host-filter hold.
+
+Research identifies the authored generic `EnterInterior|SRSBS` helper: it
+disables the host controller, waits for the fade, then invokes the native
+interior entry. The next correction requires positive live helper/task,
+program, controller and world identity before exempting an existing exterior
+player from that host filter. A fresh-movement-only path across an unchanged
+client area revision is also being tested. Neither path may revive stale
+media, widen action admission, or bypass an unknown native pause. The residual
+exit pause is now statically traced to `EnableFastLoad|B`, which calls native
+PauseGame/UnpauseGame and pauses the global clock as well as entity scheduling.
+A later stationary trip repeats a2118ms entry hold and42ms exit hold, with
+packets continuing and no stale frames. The short hardware watch expired
+without a transition, so there is no live caller-stack attribution from it.
+Owner gate remains continuous Tal movement while Ailish enters and leaves,
+with Tal outside.
+
+
+Candidate `ea987d31…` implements that positive pre-entry task proof and fresh
+movement-only continuity. **CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE:** DLL and
+seven focused suites pass on dirty `4370296`: `StorySplitControlTest`,
+`StoryMovementContinuityTest`, `StoryHostFilterTest`, `SpiritInstanceAbiTest`,
+`SkillTraceImageTest`, `StoryInteriorTravelTest` and `StoryTaskHostImageTest`.
+The interior suite actually runs named `StepOneOpcode`,
+`CompiledCallPushReturnScope`, `ReturnPopScope`, `PushArgumentStack`,
+`UIStartTSAFlag`, `UIInTSAFlag` and all seven `Script_<hash>` body checks,
+including every-byte mutation refusal. Synthetic cases exercise the shared
+STEP observer, own/foreign filters and TSA, child return scopes, stale
+program/task/world, pre-owner startup, native entry retirement and teardown.
+`ClientRevisionGapMotion`, `InteriorApproachSteering`,
+`InteriorFilterObservation`, `IsShopActive` and the three native pause-counter
+contracts also ran by name. The transport suite uses real loopback packets.
+
+Fixture failures were retained: the initial whole-image COW mapping could not
+accept the hook helper's write-protection request. Merely protecting a shared
+view as WRITECOPY did not isolate its writes on the test runner. The final
+fixture uses a genuine `FILE_MAP_COPY` singleton slice and checks that a
+separate shared view stays unchanged. Production guards were not weakened.
+A synthetic timing sample measures about0.93us per ordinary step observation
+and44–99us per active proof with2/64 descriptors; live opcode cost is not yet
+measured. The native retail VM/gameplay is not executed by the new proof test.
+
+**OWNER GATE STILL OPEN:** establish Tal's control before moving Ailish, leave
+him outside, and try moving continuously through her entry and return.
+The new task lifecycle and revision-gap movement diagnostics are bounded.
+Short global FastLoad pauses, presentation starvation, other shops/characters
+and multi-client recovery remain separate unaccepted cases. No claim of zero
+freeze or D6 acceptance is made; personal item-use/florins remain next after
+this control gate.
+
+
+### 2026-10-15 — First settled dispatch submitted a stop
+
+Owner feedback on `ea987d31…`: much shorter, still not seamless; gate remains
+open. On the later entry after established client control, the exact approach
+proof arms and lasts until TEMP begins. No two-second scripted hold remains
+there. The explicit settled steering hold is21ms, while client presentations
+are109.8ms apart. That21ms does not include earlier native roster/capture gaps.
+One recorded exit holds steering51ms. The first entry begins before initial
+client READY and still holds2148ms; its unarmed proof ends with generic
+`lost_exactness`, whose failing stage remains unknown.
+
+CONFIRMED_STATIC / CONFIRMED_LIVE: an unknown TEMP roster clears the outside
+eligibility mask. On the first exact settled dispatch, exterior steering is
+queried before the mask is repopulated. Fresh input is replaced with zero;
+only the end of that dispatch restores eligibility. Native SetSpeed
+(RVA `DB070`) makes zero input a blended stop, not a no-op. Host and client
+subsequently show brief idle-to-run transitions (about122ms/105ms). Attribution
+of their full duration to that single stop is an INFERENCE, not a measurement
+of the setter's exclusive effect.
+
+Candidate `bce72ec0…` adds a fresh eligibility pass before per-peer steering.
+It requires the current READY scene/roster, observing connected peer, unchanged
+assignment/connection/fence, acquired undrained unswapped actor and exact native
+lease. PREPARE can retain residency but gains no input permission. The existing
+post-service recomputation remains; native pause and action gates are unchanged.
+CONFIRMED_TEST: DLL build, `StorySplitControlTest` and `StoryHostFilterTest`
+pass. Named `SettledEligibilityPrepass` covers first settled recovery, PREPARE,
+unknown/loading/null/changed scenes, stale/disconnected peers/native leases,
+swaps and unchanged input/readiness state. Named host-filter, shop and all
+three native pause-counter image checks actually ran. Two independent source
+reviews found no remaining blocker in this correction.
+
+OWNER GATE: establish Tal's control before Ailish travels, then keep moving him
+outside through her entry and return. This correction removes an avoidable
+stop submission; the roughly110ms client matching-frame gap and genuine native
+FastLoad pause remain separate work. Do not claim seamless travel or advance
+D6 on build/test evidence alone.
+
+### 2026-10-15 — Kamo transition improvement accepted with residual flicker
+
+CONFIRMED_LIVE (owner report), saved-story profile26, dirty revision `4370296`,
+candidate `bce72ec0…`: the owner reports that the interruption is now a
+"miniscule flicker" and "much more acceptable", while explicitly saying it is
+not seamless. Record this as qualified acceptance for continuing the D6
+checks, not as removal of every transition pause. The residual flicker stays
+open for follow-up; its duration is not measured by this visual report.
+
+The paired runtime logs contain two entries after established client control
+and two returns. Both entry approach proofs arm and end at native TEMP; no
+explicit entry steering hold is logged, and the entry input windows contain
+moving frames with zero held/stale frames. Return steering holds are 41 ms and
+42 ms. All three logged client revision gaps report movement sent. One entry
+still has a 115.3 ms presentation interval. No post-startup READY loss or host
+drain is recorded. These observations support the improvement, but absence
+of an explicit entry hold does not exclude native capture/scheduling gaps.
+
+The earlier entry before initial client READY, other shops/roster members,
+live observer overhead and multi-client disconnect/recovery remain unproven.
+The native FastLoad pause and matching-frame gap are not declared resolved.
+No new code, build, reload or gameplay input accompanies this acceptance note.
+
+Next is Tal's personal item use through M and then Q: healing and effects
+should work, each use should consume only his own stock, and Ailish's stock
+should remain unchanged. Establish current counts rather than reusing a
+pre-reload baseline. Then verify that a collected florin reward credits each
+player's purse exactly once. D6 remains open until its own checks pass.
+
+### 2026-10-15 — Residual flicker: independent camera continuation candidate
+
+The owner prefers removing the remaining flicker before returning to D6. The
+previous improvement remains accepted, but this follow-up owner gate is open.
+CONFIRMED_STATIC: a missing current-revision party/world pair skips the entire
+presentation callback, including the client's owned camera. Its next update
+can receive the accumulated interval, capped at 100 ms. The latest tested
+entries retain Tal's running clip, so the former injected idle transition is
+not observed there. Camera catch-up contributing to the visible flicker is an
+INFERENCE; the separate 41–42 ms host simulation holds remain measured limits.
+
+Dirty `4370296`, candidate `f919367d…`, adds camera-only continuation during an
+already established unchanged-area revision gap. A shared clock serves normal
+and gap frames, rejects duplicate ticks and avoids deferred catch-up after a
+refused gap frame. Current peer, control fence, native roster, selected actor,
+camera ownership, current-revision normal cast selector and non-cinematic
+dialogue must all be positively observed. The original 250 ms receipt limit
+remains. Menus, casts, recruitment, changed identities and unknown state refuse
+continuation. The native preflight permits already active Exploration only;
+it cannot request a camera-state change. Complete target validation now
+precedes camera input and target refresh. Fresh camera-look input retains its
+original timestamps while gameplay input is discarded during the gap.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: DLL build and three focused suites pass:
+`StorySplitControlTest`, `StoryQuickInputTest` and
+`StoryClientCameraImageTest <supported EXE>`. Actual named checks include
+`RevisionGapCameraClock`, `RevisionGapCameraAdmission`, `CameraGapInput`,
+`CameraContinuityNoMutation`, `CameraTargetPreflightBeforeWrites`, and native
+byte guards `CameraNodeUpdate`, `CameraInputEvent`, `SetCameraState`,
+`CanSetCameraState`, `NodeVtableUpdateSlot` with every checked byte mutation
+refused. These are synthetic runtime/native-ownership fixtures and exact-image
+guards; they do not execute a live camera solve or establish visual acceptance.
+
+OWNER GATE: establish Tal's control, then keep him outside while Ailish enters
+and leaves Kamo. Compare the brief interruption and try orbiting Tal's camera
+through travel. Logs must show actual camera continuation; fresh cast/dialogue
+packets may restrict when it can run. No stale actor/effect replay or native
+world-pause bypass is implemented. The new pair still needs owner acceptance;
+seamless motion, other shops/roster and multi-client recovery remain unproven.
+D6 personal item use and florin checks wait for this follow-up.
+
+### 2026-10-15 — Entry imperceptible; small exit bump still under investigation
+
+CONFIRMED_LIVE (owner report), profile26, dirty `4370296`, candidate
+`f919367d…`: the owner cannot really see the entry interruption anymore but
+still notices a slight bump on exit. This accepts the observed entry
+improvement; it does not establish seamless return or complete D6.
+
+The two measured returns retain Tal's running clip, fresh input and ownership,
+with explicit host steering holds of 48 ms and 44 ms. One host sample
+positively records Tal's native pause count at one; the client subsequently
+shows that paused position. Neither exit enters the client's missing-pair
+state. The camera-only gap callback logs no successful application in this
+run: its two entry attempts are refused. Therefore the reported improvement
+must not be credited to successful camera-only continuation. Shared clock and
+look-input changes are present, but their exclusive contribution is unmeasured.
+
+CONFIRMED_STATIC: the first single pair after a revision change is shown at
+its newest tick. Later pairs restore the interpolation delay and may hold that
+already displayed tick until the delayed timeline catches up. Whether this
+adds a visible jump/hold to the measured native pause is still a HYPOTHESIS.
+Changing the buffer ramp would trade a hold for slower playback; no such
+behavior change is made without evidence.
+
+A bounded read-only capture is prepared on the existing pair to compare the
+displayed host tick, frame receipt, revision and buffer with Tal's native
+position/pause and the client camera clock/view. No reload, native mutation or
+gameplay input accompanies this pass. OWNER GATE: one Kamo entry/return with
+Tal moving outside near the exit, then inspect the timing capture. D6 remains
+paused at this follow-up; other shop/roster/multi-client coverage stays open.
+
+### 2026-10-15 — Return timing measured; camera dip also occurs while idle
+
+CONFIRMED_LIVE, same profile26/dirty `4370296` candidate `f919367d…`:
+the completed read-only capture includes one entry and return with Tal nearly
+stationary. Return has a 42 ms explicit host steering hold. Its displayed
+source tick advances by 88 ms, then remains unchanged for at least 40.5 ms;
+the first later advance is sampled 48.6 ms after the new-revision sample.
+Entry similarly advances by 115 ms and first progresses again after 65 ms.
+This confirms the timestamp jump/rebuffer behavior, without proving its
+visible contribution during running. Both transitions have missing-pair frames
+in this pass; their camera-only callbacks again refuse. These observations do
+not replace the earlier pass where return had no missing-pair frames.
+
+The return camera eye drops approximately 0.01022 world units while Tal's
+height changes only 0.00000334. Four similar downward camera steps also occur
+outside travel, with no revision change. All five observed steps coincide
+with camera-clock increments of 23–25 ms; ordinary shorter increments have
+only minute height changes. The offset persists after each step. This is a
+measured timing correlation, not yet proof of a specific native solver fault.
+The rebuffer hold cannot alone explain the same-revision camera steps.
+Native camera timing/solver research continues before another correction.
+No new source change, build, reload or gameplay input accompanies this capture.
+D6 item-use and florin acceptance remains pending.
+
+### 2026-10-15 — Small camera-height correction candidate
+
+CONFIRMED_EXACT_IMAGE: the Exploration solver computes a spring correction
+from elapsed time squared, clamps it to the remaining height error, then
+discards corrections below approximately 0.0099 world units. Its original
+apply continuation still performs the collision check. This explains a
+mechanism consistent with the measured centimetre-sized steps at longer
+client camera intervals; it does not establish that all return interruption
+comes from the camera. A later target-velocity capture had zero target
+velocities and no comparable dip, so stale velocity was not established as
+the cause. Native timing has no fixed 45 Hz floor.
+
+Dirty `4370296`, saved-story profile26, candidate `2d6c862c…` adds a guarded
+continuation at RVA `158026` for small, finite, nonzero corrections during the
+owned client's Exploration camera update. Fresh camera/state/data/target,
+selected-actor, native caller/context/geometry and game-thread proofs are
+required. Accepted corrections enter the original apply/collision path at
+`15805C`. Cast cameras, unowned calls, ordinary corrections and invalid values
+retain the native branch. No global constant, elapsed-time cap, substep or
+world-pause bypass is introduced. Checked teardown precedes retirement of its
+dependencies and retains the module on restoration failure.
+
+CONFIRMED_TEST / CONFIRMED_EXACT_IMAGE: the DLL builds and all three focused
+executables actually pass: `StoryClientCameraHeightTest`,
+`StoryClientCameraImageTest`, and `StorySplitControlTest`. New named byte
+checks are `HeightCaller`, `HeightEntryAndErrorClamp`, `HeightCutoff`,
+`HeightApplyCollision`, `HeightSpring`, `HeightConstants` and
+`HeightCutoffRelocations`; every checked-byte mutation is refused. Execution
+checks cover signed tiny corrections, original outside-scope behavior, x87
+stack/control, registers, flags and LastError preservation, fresh identity and
+thread refusal, final-patch failure and restoration retry. Existing camera
+preflight and revision-gap clock/admission checks also pass. The new fixture
+stops before collision/full-world execution and does not prove arbitrary
+concurrent teardown safety; runtime teardown remains on the game-thread seam.
+
+OWNER GATE: at the same save point, check Kamo entry and return with Tal
+outside, then ordinary idle, movement and camera orbit near obstacles. Look
+for the remaining small vertical bump and any new camera drift or collision
+problem. Visual acceptance is pending. Native FastLoad pauses and the
+new-revision rebuffer are separate measured limits; zero-freeze continuity
+and D6 item-use/florin acceptance remain unproven.
+
+### 2026-10-15 — Residual entry/exit hitch deferred to #78
+
+At the owner's request, created [#78: revisit the small client hitch on nearby
+host area transitions](https://git.unfilteredrealm.com/sudeki-together/sudeki-mp/issues/78).
+This covers both host entry and return while the client stays in its current
+area; “exit bump” was the earlier shorthand. The issue records reproduction,
+measured contributors, the tested camera-height candidate and remaining owner
+acceptance. Further hitch investigation is deferred. The latest candidate is
+not marked visually accepted, and seamless continuity remains unproven. No
+code change, build, reload or gameplay input accompanies this issue record.
+
+### 2026-10-15 — D6 personal item-use gate resumed
+
+After deferring the transition hitch to #78, the owner requests the next D6
+check. The existing profile26 pair, dirty `4370296` / candidate `2d6c862c…`,
+was verified and a bounded read-only inventory/health capture started. Fresh
+stable readings show four Healing Ointments and 365 florins in each game,
+Tal at 100 HP and Ailish at 300 HP. No reload or teleport was needed.
+
+OWNER GATE: Tal uses one ointment through M, closes M, then uses another
+through Q. His stock should change 4→3→2, the host's should remain four, and
+both uses should heal with normal effects. Actions and visual acceptance are
+pending; baseline observation alone does not pass this gate. Florin collection
+follows this check.
+
+### 2026-10-15 — D6 Q debit without heal; local item replay freezes client
+
+The owner reports an ointment consumed through Q without applying, followed
+by a client stuck at host world sync. CONFIRMED_LIVE on candidate `2d6c862c…`:
+the first M request debits the client 4→3 and heals Tal 100→350 on the host,
+then on the client. The intervening Q attempt debits 3→2 with HP unchanged
+and no matching host request/result. A second M request debits 2→1 and heals
+to 600. The host inventory remains four and both purses remain 365 throughout.
+The completed read-only capture has no unknown inventory/health samples.
+
+After that second M result, the local native apply creates an extra entity;
+the next containment check reports both entity and scheduler mismatch and
+retains the paused UNKNOWN state. The Q hooks are still installed and retained,
+but their menu-owner and trace count remain zero. The Q bypass is therefore
+unresolved; the absence of a request is established, not its originating path.
+The two M heals do not pass the full gate because safe continued play fails.
+
+Dirty `4370296`, profile26, candidate `3b8f95fe…` removes native item-script
+execution from accepted client results. The client debits its inventory once;
+the existing host resource, animation and heal-effect replication paths own
+presentation. It does not force-clear a busy actor or relax containment.
+`StoryItemResultTest`, `StoryMainMenuImageTest` and
+`StoryWorldVisualImageTest` actually pass. The first executes the runtime result
+consumer with spies for accepted/duplicate/rejected/mismatched results, absent
+ownership, peer/actor replacement and failed bookkeeping without script fallback.
+Named image checks include `UseCall`, `ListConfirmCall`,
+`WorldVisualWeakDestruction` and `WorldDropCollect` (native/owned observer call,
+foreign redirect refusal). DLL build and diff check pass. These tests do not
+prove live healing effects, Q routing or recovery from the previous paused run.
+
+OWNER GATE after reload: open Q and leave the item selection visible without
+consuming, so its actual route can be observed. Recheck M healing, debit,
+replicated effects and continued control after the correction; Q consumption
+and florins remain pending. The separate transition hitch stays deferred to #78.
+
+### 2026-10-15 — D6 Q healing and continued control accepted
+
+Saved-story profile26, dirty `4370296`, candidate `3b8f95fe…`, same New
+Brightwater pair. The owner confirms: “he heals and stays controllable” and
+requests moving on. CONFIRMED_LIVE: the highlighted Items category is owned by
+the Q adapter; confirmation queues item204, receives one accepted host result,
+and debits client stock 3→2. Tal's HP changes 100→350 on both games. Host stock
+stays four and both purses stay 365. The result records local reduction only,
+with presentation assigned to host replication. The native host item action
+reaches its applied and completed states; no client containment failure is
+recorded in this captured interval.
+
+This passes Q healing, independent consumption and continued control for the
+tested selection. It does not identify the originating route of the earlier
+unowned-Q debit, establish visual-effect parity, or replace a corrected M-path
+recheck. Host-zero-stock/client-positive-stock use remains untested. No new
+code, build, reload or teleport is needed for this acceptance.
+
+**Next owner gate: shared florins.** A bounded read-only inventory capture is
+running on the existing pair. Collect a money drop with either character and
+wait after collection. Both purses should gain the native denomination once;
+the pickup/treasure grant must have one matching client application and no
+later duplicate. Baseline is 365 florins in each game. D6 remains open; the
+residual nearby-area hitch remains deferred to #78.
+
+### 2026-10-15 — D6 chest florins credited once to both purses
+
+CONFIRMED_LIVE on saved-story profile26, dirty `4370296`, candidate
+`3b8f95fe…`. The owner completes the money-collection check. Both purses change
+365→515, a full 150-florin credit to each game. Native source classification
+is chest/treasure (source2), item321, quantity1. One host grant is queued and
+one matching client grant completes without a cap hit. The read-only capture
+records exactly one money change per game, no unknown samples, and no repeat
+credit for the following 27 seconds. The same run has no client containment
+failure. This establishes chest florin sharing and absence of an immediate
+duplicate; loose ground-money pickup, area-return/reconnect dedupe and live
+currency-cap behavior were not exercised.
+
+**Next owner gate: corrected M-menu self-use.** On the same pair, Tal has two
+Healing Ointments and 350 HP; the host has four ointments. A fresh bounded
+read-only capture is prepared. Use one ointment through Tal's M Items page,
+close the menu and move. Expect client stock2→1, host stock4 unchanged,
+host-authoritative healing on both games, visible healing effects and continued
+control. Q healing/control is already accepted; its earlier unowned-route
+failure remains a separate unknown. No build, reload, teleport or gameplay
+input was performed for the florin check. D6 remains open.
+
+### 2026-10-15 — D6 M self-use debit and healing verified
+
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate
+`3b8f95fe…`, same pair. After the owner reports completing M self-use, one
+accepted request for item204 reduces Tal's client stock2→1, leaves host stock4
+unchanged, and heals Tal350→600 on both games. Both purses remain515. The active
+Items page reports a successful refresh. Client native apply remains disabled;
+`SFXM005_HEAL.HOM` is observed advancing through the replicated effect path.
+No unknown inventory samples or containment failure occur in this interval;
+the subsequent presentation reports roster, scheduler and entity checks valid,
+input admitted and control phase5.
+
+The owner subsequently confirms “Both looked normal” for healing effects and
+movement after closing M. This passes M self-use healing, personal debit,
+effects, active Items refresh and continued control for the tested Tal route.
+
+**Next owner gate: host stock zero, client stock positive.** The owner sells
+Ailish's four Healing Ointments at Kamo, closes the shop, then uses Tal's last
+ointment through Q. Log the host4→0 and client1 retained before use, followed
+by client1→0, a successful heal and no host stock requirement. The existing
+bounded inventory/HP capture remains active. Loose ground-money pickup and
+extended chest dedupe also remain. No code change, build, reload, teleport or
+automated gameplay input accompanies this observation.
+
+### 2026-10-15 — D6 zero-host-stock test prepared with missing health
+
+The owner sold the four host ointments. CONFIRMED_LIVE: host stock4→0 and
+purse515→655; client stock stays1 and purse stays515. Tal is full at600 HP,
+and the owner cannot use another ointment; the two refused requests leave
+client stock unchanged. The zero-host-stock healing check is not yet passed.
+
+The existing health-only test routine was re-armed for this test, with exact
+image/configuration/party checks and placement disabled. Its host game-thread
+service reports Tal600→150, and a fresh read-only capture confirms150 on both
+games, Ailish300 unchanged, and the zero-host/one-client inventory setup intact.
+No reload, teleport, native action from the debugger, or direct native-health
+write was performed. This is private test preparation, not a new gameplay
+feature or a general live configuration API.
+
+OWNER GATE: use Tal's last ointment through Q, then move. Expect successful
+healing with client1→0 and host0 unchanged; the fresh bounded capture is active.
+
+### 2026-10-15 — D6 client item use with an empty host inventory accepted
+
+The owner confirms “used. it works.” CONFIRMED_LIVE, saved-story profile26,
+dirty `4370296`, candidate `3b8f95fe…`: one accepted Q request heals Tal150→400
+on both games while client ointment stock1→0 and host stock remains0. Client
+bookkeeping reduces once without native script replay. Host/client purses
+remain655/515 and Ailish remains300 HP. There are no unknown inventory samples
+or client containment failures in the captured interval. This passes the
+host-zero-stock/client-positive-stock case for the tested Healing Ointment.
+
+The earlier host sale is also isolated: host stock4→0 and purse515→655, while
+the client retains its item and515 florins. The chest reward still has exactly
+one host queue and one client grant after M opening/closing and a logged Kamo
+entry and completed return. That covers nearby shop travel without a repeat
+chest award; full zone unload, re-interaction and reconnect are not claimed.
+
+**Next owner gate: loose ground florins collected by Tal.** The same bounded
+read-only capture remains active, with host655/client515 as the new purse
+baseline. Collect one loose money pickup on Tal, wait ten seconds and verify
+one native pickup-source grant credits its denomination once to each purse.
+D6 stays open; no code change, build, reload or teleport accompanies acceptance.
+
+### 2026-10-15 — D6 controlled ground-florin test preparation
+
+The owner requested a nearby native drop instead of searching for a random
+drop or combat chest. On the same dirty candidate and running pair, the exact
+image and named native export/ABI, existing hook ownership and game-thread
+roster checks passed. One native 150-florin bag was created near Tal through
+the game's own drop function. Native setup completed without a direct purse
+grant; host655/client515 remained unchanged. The uncollected bag subsequently
+disappeared before the owner pickup check. This is preparation evidence, not
+acceptance of ground-florin sharing or its client visual.
+
+A fresh single bag is now prepared with bounded read-only capture. Native
+setup completion and the matching client cosmetic instance were both observed;
+the two purses remain unchanged before collection. Tal should collect it by
+proximity; expect host655→805 and client515→665 once,
+with the bag disappearing on both screens. Owner acceptance remains pending.
+No production code, build, reload, teleport, commit or push is part of this setup.
+
+### 2026-10-15 — D6 Tal ground-florin pickup credited once to both purses
+
+The owner reports “done” after collecting the prepared bag and waiting.
+CONFIRMED_LIVE, saved-story profile26, dirty `4370296`, candidate `3b8f95fe…`:
+the native pickup records Tal (character35), item321, quantity1 and consumed1.
+One pickup-source grant (source1, serial2) credits host655→805 and client515→665.
+The independent purse capture records exactly one increase of150 for each game;
+a fresh observation55 seconds later confirms the same balances. The real host
+drop and its matching client cosmetic instance are both removed.
+
+This passes the loose-ground money sharing gate for Tal's proximity pickup,
+including client presentation and removal as observed in native state. It does
+not rely on direct purse writes or a chest grant. Owner screen-by-screen
+visual comparison is not separately reported. No new production code, build,
+reload, teleport, commit or push accompanies this acceptance.
+
+**Additional coverage, not a new route-acceptance gate:** full area unload,
+chest re-interaction and reconnect were not exercised. The original five D6
+owner checks required moving areas without a repeat award; the observed Kamo
+entry/return already covers that scoped check. Asking for a full unload as
+the mandatory next gate unnecessarily expanded it. The five scoped checks
+now have recorded results, with the Tal-client shop direction expressly
+deferred to H. Broader coverage remains a follow-up and is not claimed passed.
+Persistence recovery belongs to Phase I. Any later travel check starts from
+host805/client665 unless new legitimate loot or spending changes the baseline.
+
+### 2026-10-15 — D6 travel-test clarification
+
+The recorded authored route out of New Brightwater leads through
+`WS_Country_SE_to_Bright_NE` toward `Illumina_Countryside_SE`, the countryside
+containing Frappe Farm (see the countryside-to-church mapping in the research
+log). A visible loading screen alone does not prove a full world unload.
+No travel was performed for this clarification. The owner does not need an
+extra full-unload trip to pass the already completed ground-florin check.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New
@@ -5275,7 +6246,7 @@ Brightwater, Ailish host / Tal client) as the yardstick:
 | Area | State | Next step |
 |---|---|---|
 | A groundwork, B protocol split, C remote control parity, D1–D5 enemies/drops | Accepted live (see §9 and the status matrix) | — |
-| **D6 loot rule (D9)** | Not wired. Ground/enemy/chest pickups still land in the host's inventory only; purchases untested | Host captures every native pickup (0x217E0 AddItem from the pickup/chest/drop paths) and sends a grant to every client, which runs AddItem locally; shop purchases (merchant path) never send a grant, so bought items stay personal. Needs the pickup call sites per source and a client-side AddItem guard. |
+| **D6 loot rule (D9)** | Ordinary pickups, active Items/Weapons refresh, farmhouse sword chest and Tal equip, buyer-only host shop purchases, Q self-use healing/control without host debit, and chest/ground florins to both purses once accepted live | M self-use healing/effects/refresh/control and zero-host-stock use also accepted; no chest repeat through Kamo travel. Five scoped owner checks have passed; full-unload/re-interaction/reconnect dedupe remains additional coverage. Selection preservation/More Info have automated evidence only. Client checkout still requires H. No persistent recovery yet (I). |
 | E1 missiles, E2 allied guards, E3 Mungo | E2 partially seen in world frames; E1/E3 open | Research-first items; no owner gate yet |
 | F combat state + spectating | Not started | Client cluster follow, fallen-character spectate |
 | G lead vs ownership | Not started (death/lead hold still in place) | Decouple host controller/camera from the native lead |

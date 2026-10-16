@@ -16,7 +16,8 @@
  *  - the Weapons layer equip call (RVA 0x16F1A4 -> RVA 0x1706D0, layer on
  *    the stack, RET 4): a client turns it into a host request instead of
  *    equipping its paused replica locally.
- * Nothing here reads or writes inventory; the host applies requests natively. */
+ * Equipment/use requests are applied by the host. Reward refresh reads the
+ * local inventory through the existing weapon adapter and updates native UI. */
 
 /* May the local player land on / edit this party actor? NULL = everything. */
 typedef BOOL (*SudekiMpStoryMenuSlotAllowed)(void *actor);
@@ -62,6 +63,11 @@ void SudekiMpLanStoryMainMenuPromptRendered(BOOL ok,DWORD error);
  * the party panel (`*(ui+0x218)`, RVA 0x15B570, EAX = its current cursor,
  * one stack arg, RET 4). TRUE when both ran. */
 BOOL SudekiMpLanStoryMainMenuRefreshItems(void);
+/* Game-thread reward notification: refresh the active Items or Weapons page.
+ * Weapons uses its native list/details routines and preserves the highlighted
+ * item. More Info/transition states defer until browse in PollKeys; armour
+ * choice is excluded. TRUE means a refresh ran, never that loot was awarded. */
+BOOL SudekiMpLanStoryMainMenuRefreshInventory(void);
 /* The Main Menu object reports itself shown (+0x29). */
 BOOL SudekiMpLanStoryMainMenuVisible(void);
 /* Natural-language counters for the research log. */

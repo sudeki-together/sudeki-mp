@@ -63,5 +63,19 @@ int main(void) {
     attack.value=0; sample_melee(&attack,TRUE,60);
     attack.value=1; sample_melee(&attack,TRUE,60); SudekiMpLanStoryInputMuteMovement();
     assert(!take_melee()); sample_melee(&attack,TRUE,61); assert(!take_melee());
+    sample_x=sample_z=1; look_x=0.5f;look_y=-0.25f;
+    look_x_at=11;look_y_at=12;look_sample_at=13;
+    ranged_held=block_held=TRUE;
+    SudekiMpLanStoryInputMuteForCamera();
+    assert(!sample_x && !sample_z && !take_melee() && !ranged_held && !block_held);
+    assert(look_x==0.5f && look_y==-0.25f && look_x_at==11 && look_y_at==12 && look_sample_at==13);
+    assert(sample_controller==(void *)1 && sample_actor==(void *)2 && sample_transaction==3);
+    float x=1,y=1;focused=FALSE;
+    assert(SudekiMpLanStoryInputLookAxes(&x,&y) && !x && !y);
+    focused=TRUE;look_x_at=look_y_at=GetTickCount()-101u;
+    assert(SudekiMpLanStoryInputLookAxes(&x,&y) && !x && !y);
+    SudekiMpLanStoryInputMuteMovement();
+    assert(!look_x && !look_y && !look_x_at && !look_y_at && !look_sample_at);
+    puts("PASS named CameraGapInput preserves original look timestamps only; gameplay discarded, focus loss and stale axes remain zero, menu mute still clears look");
     puts("story Q/melee grouped states, native cadence, rebind and menu-mute tests passed (synthetic)"); return 0;
 }

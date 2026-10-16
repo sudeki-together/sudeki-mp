@@ -313,7 +313,27 @@ static BOOL read_config_xyz(const wchar_t *path,const wchar_t *key,float out[3])
 }
 static void configure_test_start(HMODULE game_module,const wchar_t *path) {
     float leader[3],follower[3];
-    if(!read_config_xyz(path,L"TestStartLeader",leader)) return;
+    float leader_health=0.0f,follower_health=0.0f;
+    {
+        wchar_t text[32];
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartLeaderHealth",L"",text,32,path);
+        if(text[0]) (void)swscanf(text,L"%f",&leader_health);
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartFollowerHealth",L"",text,32,path);
+        if(text[0]) (void)swscanf(text,L"%f",&follower_health);
+        SudekiMpLanStoryTestStartSetLeaderHealth(leader_health);
+        SudekiMpLanStoryTestStartSetFollowerHealth(follower_health);
+    }
+    if(!read_config_xyz(path,L"TestStartLeader",leader)) {
+        wchar_t text[96];
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartLeader",L"",text,96,path);
+        /* An omitted placement opts into health-only preparation. Malformed
+         * nonempty placement coordinates remain refused, never reinterpreted. */
+        BOOL health_requested=(isfinite(leader_health) && leader_health>0.0f && leader_health<1.0f) ||
+            (isfinite(follower_health) && follower_health>0.0f && follower_health<1.0f);
+        if(!text[0] && health_requested && !SudekiMpLanStoryTestStartConfigureHealthOnly(game_module))
+            SudekiMpLogFormat("story_test_start event=health_only_refused error=%lu\r\n",(unsigned long)GetLastError());
+        return;
+    }
     if(!read_config_xyz(path,L"TestStartFollower",follower)) memcpy(follower,leader,sizeof(follower));
     {
         wchar_t zone[40]; char narrow[40]={0};
@@ -322,11 +342,16 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
         SudekiMpLanStoryTestStartSetZone(narrow);
     }
     {
-        wchar_t text[32]; float fraction=0.0f;
-        GetPrivateProfileStringW(L"StoryAreas",L"TestStartLeaderHealth",L"",text,32,path);
-        if(text[0] && swscanf(text,L"%f",&fraction)==1) SudekiMpLanStoryTestStartSetLeaderHealth(fraction);
-        GetPrivateProfileStringW(L"StoryAreas",L"TestStartFollowerHealth",L"",text,32,path); fraction=0.0f;
-        if(text[0] && swscanf(text,L"%f",&fraction)==1) SudekiMpLanStoryTestStartSetFollowerHealth(fraction);
+        wchar_t zone[40],marker[96]; char narrow_zone[40]={0},narrow_marker[96]={0};
+        float interior[3];
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartTemporaryZone",L"",zone,40,path);
+        GetPrivateProfileStringW(L"StoryAreas",L"TestStartTemporaryMarker",L"",marker,96,path);
+        for(unsigned i=0;i<39u && zone[i];++i) narrow_zone[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
+        for(unsigned i=0;i<95u && marker[i];++i) narrow_marker[i]=(marker[i]>=0x20 && marker[i]<0x7f)?(char)marker[i]:'_';
+        (void)SudekiMpLanStoryTestStartSetTemporary(NULL,NULL,NULL);
+        if(zone[0] && (!read_config_xyz(path,L"TestStartTemporaryLeader",interior) ||
+            !SudekiMpLanStoryTestStartSetTemporary(narrow_zone,narrow_marker,interior)))
+            SudekiMpLogFormat("story_test_start event=temporary_config_refused\r\n");
     }
     if(!SudekiMpLanStoryTestStartConfigure(game_module,leader,follower))
         SudekiMpLogFormat("story_test_start event=refused error=%lu\r\n",(unsigned long)GetLastError());

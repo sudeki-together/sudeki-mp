@@ -1,7 +1,9 @@
 #include "hooks/lan_story_main_menu.h"
 #include "hooks/call_hook.h"
+#include "hooks/armour_menu.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "engine/weapon_activation_abi.h"
 #include "network/lan_story_menu_policy.h"
 #include <string.h>
 #if !defined(__GNUC__) || !defined(__i386__)
@@ -23,7 +25,10 @@ enum {
     RVA_DISABLE_MOVE=0xafd0u, RVA_OPEN_MOVE_CALL=0x956f9u, RVA_CLOSE_MOVE_CALL=0x959ffu,
     UI_SELECTED=0x170u, GROUP_SLOTS=0x90u, GROUP_SLOT_STRIDE=0x0cu, GROUP_COUNT=0xccu,
     RVA_HUD_GLOBAL=0x3c2f88u, RVA_HUD_VTABLE=0x2caf9cu, HUD_STATE=0xb8u, HUD_OPEN_MAIN_MENU=0xfu, MENU_SHOWN=0x29u,
-    LAYER_WIDGETS=0x8cu, W_LIST_SELECTED=0x858u, W_LIST_ROWS=0x88cu, ROW_ITEM=0x84u, MAX_ROWS=64u
+    LAYER_WIDGETS=0x8cu, W_LIST_SELECTED=0x858u, W_LIST_ROWS=0x88cu, ROW_ITEM=0x84u, MAX_ROWS=64u,
+    RVA_WEAPONS_VTABLE=0x2d8904u, RVA_WEAPONS_REBUILD=0x16fc60u,
+    RVA_WEAPONS_DETAILS=0x16f5b0u, RVA_LIST_SELECT=0x17d3c0u,
+    RVA_LIST_VTABLE=0x2d8cf4u, W_LIST=0x7d0u, W_LIST_COUNT=0x884u
 };
 typedef void (__attribute__((thiscall)) *MenuOpen)(void *);
 typedef uint8_t (__attribute__((thiscall)) *HudInput)(void *,unsigned,unsigned,unsigned);
@@ -41,6 +46,7 @@ static MenuOpen native_open;
 static SudekiMpStoryMenuSlotAllowed slot_allowed;
 static SudekiMpStoryMenuEquipRequest equip_request,use_request;
 static BOOL installed;
+static BOOL weapons_refresh_pending;
 static unsigned redirected,requests,trace_count;
 /* Tail-call targets for the naked stubs below (MinGW underscore symbols). */
 void *SudekiMpStoryMenuCycleTarget __attribute__((used));
@@ -126,6 +132,7 @@ static void cycle_native(uint8_t *ui,int forward) {
     __asm__ volatile("push %1; call *%2" : "+a"(ui) : "r"(forward), "r"(f) : "ecx","edx","memory","cc");
 }
 static void __attribute__((thiscall,force_align_arg_pointer)) open_menu(void *menu) {
+    weapons_refresh_pending=FALSE; /* A fresh native page builds from inventory. */
     native_open(menu);
     uint8_t *ui=menu,*group; unsigned count;
     if(!installed || !menu_exact(ui,&group,&count)) return;
@@ -285,6 +292,34 @@ static void __attribute__((naked,noinline)) confirm_stub(void) {
         "mov %ebp,%esp; popal; jnz 1f; jmp *_SudekiMpStoryMenuConfirmTarget;"
         "1: ret");
 }
+static BOOL call_exact(uint8_t *b,unsigned site,unsigned target) {
+    int32_t displacement;
+    if(!readable(b+site,5u) || b[site]!=0xe8u) return FALSE;
+    memcpy(&displacement,b+site+1u,4u);
+    return b+site+5u+displacement==b+target;
+}
+static BOOL weapons_refresh_code_exact(uint8_t *b) {
+    /* ArmourChoice owns the first six bytes of rebuild/details. Ask that
+     * adapter to recognize its own hooks; never accept an arbitrary jump. */
+    static const uint8_t rebuild_tail[]={0x83,0xec,0x5c,0x8b,0x45,0x08,0x53,0x56};
+    static const uint8_t details_tail[]={0x81,0xec,0x74,0x01,0x00,0x00};
+    static const uint8_t select_entry[]={0x53,0x55,0x56,0x8b,0xf1,0x8b,0x96,0xb4,0x00,0x00,0x00};
+    static const uint8_t ret4[]={0xc2,0x04,0x00};
+    return SudekiMpArmourMenuWeaponsRefreshExact((HMODULE)b,NULL) &&
+        readable(b+RVA_WEAPONS_REBUILD+6u,sizeof(rebuild_tail)) &&
+        !memcmp(b+RVA_WEAPONS_REBUILD+6u,rebuild_tail,sizeof(rebuild_tail)) &&
+        readable(b+RVA_WEAPONS_DETAILS+6u,sizeof(details_tail)) &&
+        !memcmp(b+RVA_WEAPONS_DETAILS+6u,details_tail,sizeof(details_tail)) &&
+        readable(b+RVA_LIST_SELECT,sizeof(select_entry)) &&
+        !memcmp(b+RVA_LIST_SELECT,select_entry,sizeof(select_entry)) &&
+        readable(b+0x16fe8au,3u) && !memcmp(b+0x16fe8au,ret4,3u) &&
+        readable(b+0x17d62au,3u) && !memcmp(b+0x17d62au,ret4,3u) &&
+        call_exact(b,0x1707e3u,RVA_WEAPONS_REBUILD) &&
+        call_exact(b,0x1707f5u,RVA_LIST_SELECT) &&
+        call_exact(b,0x16fe76u,RVA_WEAPONS_DETAILS) &&
+        readable(b+RVA_WEAPONS_VTABLE+0x2cu,4u) &&
+        *(void **)(b+RVA_WEAPONS_VTABLE+0x2cu)==b+0x16f110u;
+}
 static BOOL image_exact(uint8_t *b) {
     /* Items list confirm context: sound call, ESI = layer, the mode switch,
      * then `mov al,1` and the epilogue; EDI = 5 is loaded at RVA 0x177104. */
@@ -297,7 +332,7 @@ static BOOL image_exact(uint8_t *b) {
         b[0x177164u]!=0x8bu || b[0x177165u]!=0xf3u || memcmp(b+0x17716bu,confirm_tail,sizeof(confirm_tail))) return FALSE;
     static const uint8_t cycle_tail[]={0x83,0xec,0x1c,0x53,0x56,0x8b,0xf0};
     static const uint8_t open_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x81,0xec,0xb0,0x00,0x00,0x00};
-    return readable(b+RVA_CYCLE,13u) && b[RVA_CYCLE]==0x8bu && b[RVA_CYCLE+1u]==0x0du &&
+    return weapons_refresh_code_exact(b) && readable(b+RVA_CYCLE,13u) && b[RVA_CYCLE]==0x8bu && b[RVA_CYCLE+1u]==0x0du &&
         *(uint32_t *)(b+RVA_CYCLE+2u)==(uint32_t)(uintptr_t)(b+RVA_GROUP_GLOBAL) &&
         !memcmp(b+RVA_CYCLE+6u,cycle_tail,sizeof(cycle_tail)) &&
         readable(b+RVA_MENU_OPEN,sizeof(open_entry)) && !memcmp(b+RVA_MENU_OPEN,open_entry,sizeof(open_entry)) &&
@@ -329,7 +364,7 @@ BOOL SudekiMpLanStoryMainMenuInstall(HMODULE image,SudekiMpStoryMenuSlotAllowed 
         DWORD error=GetLastError();
         (void)SudekiMpLanStoryMainMenuUninstall(); SetLastError(error); return FALSE;
     }
-    installed=TRUE; redirected=requests=0;
+    installed=TRUE; weapons_refresh_pending=FALSE; redirected=requests=0;
     SudekiMpLogFormat("story_main_menu event=install scope=%s equip=%s entity_pause=%s menu_pause=%s\r\n",
         allowed?"owned_slots":"all",request?"request":"native",request?"skipped":"native",request?"skipped":"native");
     return TRUE;
@@ -347,7 +382,7 @@ BOOL SudekiMpLanStoryMainMenuUninstall(void) {
     for(unsigned i=2u;i>0;--i)
         if(cycle_hooks[i-1u].installed && !SudekiMpRestoreRelativeCallHook(&cycle_hooks[i-1u])) { ok=FALSE; if(!error) error=GetLastError(); }
     if(!ok) { SetLastError(error); return FALSE; } /* A failed restoration retains the adapter. */
-    installed=FALSE; slot_allowed=NULL; equip_request=NULL; use_request=NULL; base=NULL; native_open=NULL; SudekiMpStoryMenuSkipPause=0;
+    installed=FALSE; weapons_refresh_pending=FALSE; slot_allowed=NULL; equip_request=NULL; use_request=NULL; base=NULL; native_open=NULL; SudekiMpStoryMenuSkipPause=0;
     memset(&prompt,0,sizeof(prompt));
     return TRUE;
 }
@@ -406,10 +441,14 @@ static uint8_t *active_ui(void) {
     uint8_t *front=*(uint8_t **)(base+0x408d1cu);
     return readable(front,0x174u)?*(uint8_t **)(front+0x170u):NULL;
 }
+static BOOL refresh_weapons(void);
 void SudekiMpLanStoryMainMenuPollKeys(void) {
     enum { K_M, K_ESCAPE, K_F3, K_RETURN, K_SPACE, K_LEFT, K_RIGHT, K_TAB, K_COUNT };
     static BOOL down[K_COUNT]; static const int keys[K_COUNT]={'M',VK_ESCAPE,VK_F3,VK_RETURN,VK_SPACE,VK_LEFT,VK_RIGHT,VK_TAB};
-    if(!installed || !SudekiMpLanStoryMainMenuVisible()) { memset(down,0,sizeof(down)); prompt_close("confirm_dropped"); return; }
+    if(!installed || !SudekiMpLanStoryMainMenuVisible()) { weapons_refresh_pending=FALSE; memset(down,0,sizeof(down)); prompt_close("confirm_dropped"); return; }
+    /* A reward can arrive during More Info or a page transition. Refresh on
+     * returning to browse, before accepting another equip key, even unfocused. */
+    if(weapons_refresh_pending) (void)refresh_weapons();
     DWORD owner=0; HWND fg=GetForegroundWindow();
     BOOL focused=fg && GetWindowThreadProcessId(fg,&owner) && owner==GetCurrentProcessId();
     /* The prompt belongs to one Items layer and one highlighted row. */
@@ -432,6 +471,54 @@ void SudekiMpLanStoryMainMenuPollKeys(void) {
     else if(edge[K_F3]) (void)deliver_active(10u,"f3_info");
 }
 typedef void (__attribute__((stdcall)) *ItemsRebuild)(void *);
+typedef void (__attribute__((thiscall)) *WeaponListSelect)(void *,int);
+static BOOL weapon_rows(uint8_t *widgets,uint8_t ***rows_out,unsigned *count_out) {
+    if(!readable(widgets,W_LIST_ROWS+4u) || *(void **)(widgets+W_LIST)!=base+RVA_LIST_VTABLE) return FALSE;
+    unsigned count=*(unsigned *)(widgets+W_LIST_COUNT);
+    uint8_t **rows=*(uint8_t ***)(widgets+W_LIST_ROWS);
+    if(count>MAX_ROWS || (count && !readable(rows,count*4u))) return FALSE;
+    for(unsigned i=0;i<count;++i)
+        if(!readable(rows[i],ROW_ITEM+4u) || *(unsigned *)(rows[i]+ROW_ITEM)>=48u) return FALSE;
+    *rows_out=rows; *count_out=count; return TRUE;
+}
+static BOOL refresh_weapons(void) {
+    uint8_t *layer=active_ui();
+    if(!readable(layer,LAYER_WIDGETS+4u) || *(void **)layer!=base+RVA_WEAPONS_VTABLE ||
+        !SudekiMpArmourMenuWeaponsRefreshExact((HMODULE)base,layer)) {
+        weapons_refresh_pending=FALSE; return FALSE;
+    }
+    if(*(unsigned *)(layer+0x48u)!=2u) return FALSE; /* Defer until browsing. */
+    weapons_refresh_pending=FALSE;
+    void *actor=own_actor(); SudekiMpWeaponQuickList inventory;
+    uint8_t *widgets=*(uint8_t **)(layer+LAYER_WIDGETS),**rows; unsigned count;
+    if(!actor || !weapons_refresh_code_exact(base) ||
+        !SudekiMpDescribeCharacterWeapons(actor,&inventory) || !weapon_rows(widgets,&rows,&count)) {
+        trace("weapons_refresh_refused",0,0); return FALSE;
+    }
+    int selected=*(int *)(widgets+W_LIST_SELECTED);
+    unsigned item=selected>=0 && (unsigned)selected<count?*(unsigned *)(rows[selected]+ROW_ITEM):~0u;
+    ((ItemsRebuild)(base+RVA_WEAPONS_REBUILD))(layer);
+    /* Native rebuild selects the equipped weapon. Restore the highlighted
+     * item by identity, since inserting a reward can change its row index. */
+    if(active_ui()!=layer || own_actor()!=actor ||
+        !readable(layer,LAYER_WIDGETS+4u) || *(uint8_t **)(layer+LAYER_WIDGETS)!=widgets ||
+        !weapon_rows(widgets,&rows,&count)) return FALSE;
+    for(unsigned i=0;i<count;++i) if(*(unsigned *)(rows[i]+ROW_ITEM)==item) {
+        ((WeaponListSelect)(base+RVA_LIST_SELECT))(widgets+W_LIST,(int)i);
+        ((ItemsRebuild)(base+RVA_WEAPONS_DETAILS))(layer);
+        break;
+    }
+    trace("weapons_refreshed",count,item); return TRUE;
+}
+BOOL SudekiMpLanStoryMainMenuRefreshInventory(void) {
+    if(!installed || !SudekiMpLanStoryMainMenuVisible()) return FALSE;
+    uint8_t *layer=active_ui();
+    if(!readable(layer,4u)) return FALSE;
+    if(*(void **)layer==base+RVA_ITEMS_VTABLE) return SudekiMpLanStoryMainMenuRefreshItems();
+    if(*(void **)layer!=base+RVA_WEAPONS_VTABLE) return FALSE;
+    weapons_refresh_pending=TRUE;
+    return refresh_weapons();
+}
 BOOL SudekiMpLanStoryMainMenuRefreshItems(void) {
     static const uint8_t rebuild_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x4c,0x53,0x56,0x8b,0x75,0x08};
     static const uint8_t panel_entry[]={0x53,0x55,0x8b,0x6c,0x24,0x0c,0x56,0x57,0x8d,0xb5,0x70,0x01,0x00,0x00,0xbf,0x04,0x00,0x00,0x00};

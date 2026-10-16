@@ -23,6 +23,29 @@ BOOL SudekiMpLanStorySplitUninstall(void);
  * stay outside (remote-controlled, currently held by their players). */
 void SudekiMpLanStorySplitSetEligibility(BOOL host_ready,uint8_t outside_mask);
 BOOL SudekiMpLanStorySplitActive(void);
+struct SudekiMpLanStoryNativeRoster;
+/* Read-only proof for an already leased exterior follower while the host is
+ * settled inside TEMP. Revalidates the observer roster, retained world/party
+ * identities and this owner's exact lead-only exemption. Entry/exit gaps,
+ * replacements and non-exempt actors refuse. Does not grant input authority,
+ * change native pause counters or establish a controller dispatch witness. */
+BOOL SudekiMpLanStorySplitExteriorActorExact(
+    const struct SudekiMpLanStoryNativeRoster *roster,unsigned character);
+/* Read-only native identity proof for the same exterior follower after this
+ * owner's matching balanced TEMP exit and positive ordinary settlement.
+ * Expires after five seconds; native EXIT gaps and any replacement refuse.
+ * Does not grant action authority or bypass native body/world pauses. */
+BOOL SudekiMpLanStorySplitReturnedActorExact(
+    const struct SudekiMpLanStoryNativeRoster *roster,unsigned character);
+/* Game-thread plain-state retirement when actual host input readiness resumes.
+ * Preserves an active TEMP visit's provisional receipt; uninstall retires all
+ * state. SetEligibility's ready means scene eligibility, not input readiness,
+ * and therefore cannot retire a completed-return token itself. */
+void SudekiMpLanStorySplitClearReturned(void);
+/* Read-only game-thread admission for the opt-in native TEMP test start.
+ * Requires an installed/attached split owner and a held outside character;
+ * it neither starts a split nor changes native state. */
+BOOL SudekiMpLanStorySplitTestCanEnterTemporary(const char *zone,unsigned leader_character);
 /* Host world capture: native zone data whose authored spawns belong to the
  * occupied TEMP while a split is active, else NULL. Copy-only identity. */
 const void *SudekiMpLanStorySplitTemporaryData(void);

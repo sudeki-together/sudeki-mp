@@ -9,7 +9,8 @@
  * No spawn, native task, actor lease, input or camera mutation. Temporary
  * entry/exit also emit a bounded local diagnostic journal of copied authored
  * resource text and exterior return context. This is not a replay/transport
- * API and does not establish asynchronous transition completion. */
+ * API and does not establish asynchronous transition completion. The explicit
+ * test-start API below is the only opt-in transition initiator here. */
 BOOL SudekiMpLanStoryObserverInstall(HMODULE module);
 BOOL SudekiMpLanStoryObserverSample(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,
@@ -53,10 +54,25 @@ typedef struct SudekiMpLanStoryObserverSplit {
     BOOL (*begin_exit)(void);
     void (*settled)(BOOL inside);
     void (*ended)(BOOL vanilla_change);
+    /* Optional read-only test-start preflight. Must not call the observer. */
+    BOOL (*test_ready)(const char *temporary,unsigned leader_character);
 } SudekiMpLanStoryObserverSplit;
 BOOL SudekiMpLanStoryObserverSetSplit(const SudekiMpLanStoryObserverSplit *split);
 /* Native thread, before a whole-world zone call (SET/ENTER/SWITCH/MAIN) runs
  * its original; NULL clears. */
 BOOL SudekiMpLanStoryObserverSetWorldChangeHook(void (*hook)(void));
+
+/* Opt-in host test-start, on the established native thread. Requires a fresh
+ * exact READY exterior roster and the installed split owner's admission.
+ * -1: terminal refusal, native entry not called; 0: not ready, not called;
+ * 1: native entry dispatched exactly once (completion remains unproven).
+ * An uncertain post-call result is still 1 and must NEVER be retried. One
+ * request is permitted per installation. marker is the authored arrival
+ * ResourceName text, not the destination zone name. No field teleport. */
+int SudekiMpLanStoryObserverTestEnterTemporary(const char *zone,const char *marker);
+/* Positive matching TEMP completion only: native state 4, exact current
+ * roster, matching split name, no pending transition. FALSE means unknown
+ * or incomplete; it does not authorize retrying entry. */
+BOOL SudekiMpLanStoryObserverTestTemporarySettled(const char *zone);
 
 #endif

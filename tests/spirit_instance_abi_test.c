@@ -41,6 +41,15 @@ BOOL SudekiMpLanCastContextStartingSkillTask(void *actor,uint64_t session,
 }
 static uint8_t fake_ui[0xe4],fake_ui_root[0x178],foreign_ui[0xe4];
 static uint8_t fake_controller[0x260],foreign_controller[0x260];
+static unsigned interior_filter_observations;
+static void *interior_filter_controller;
+static unsigned interior_filter_value;
+void SudekiMpLanStoryTaskInteriorFilterObserved(void *controller,unsigned filter) {
+    ++interior_filter_observations;interior_filter_controller=controller;
+    interior_filter_value=filter;
+    CHECK(*(uint32_t *)((uint8_t *)controller+0x84)==filter);
+    SetLastError(ERROR_INVALID_DATA); /* The passive observer must not leak it. */
+}
 static BOOL local_witness_valid=TRUE;
 static volatile uint32_t input_bridge_eax __attribute__((used)),input_bridge_edi __attribute__((used));
 static volatile float input_bridge_fpu __attribute__((used));
@@ -1605,16 +1614,22 @@ int main(void) {
             {
                 ControllerFilterFunction none=(ControllerFilterFunction)(image+0x8ac0);
                 ControllerFilterFunction all=(ControllerFilterFunction)(image+0x8ae0);
+                interior_filter_observations=0;
                 *(uint32_t *)(fake_controller+0x84)=2; *(uint32_t *)(fake_controller+0x88)=0;
                 remote=SudekiMpEnterSpiritInstance(&instances[1]); CHECK(remote);
                 none(fake_controller); all(fake_controller);
                 CHECK(*(uint32_t *)(fake_controller+0x84)==2 && !*(uint32_t *)(fake_controller+0x88));
+                CHECK(!interior_filter_observations);
                 local=SudekiMpEnterSpiritInstance(&instances[0]); CHECK(local);
+                SetLastError(ERROR_ACCESS_DENIED);
                 none(fake_controller);
+                CHECK(GetLastError()==ERROR_ACCESS_DENIED && interior_filter_observations==1 &&
+                    interior_filter_controller==fake_controller && interior_filter_value==0);
                 CHECK(!*(uint32_t *)(fake_controller+0x84) && *(uint32_t *)(fake_controller+0x88)==1);
                 CHECK(SudekiMpLeaveSpiritInstance(local));
                 all(fake_controller); /* A peer cannot release a local casting filter. */
                 CHECK(!*(uint32_t *)(fake_controller+0x84) && *(uint32_t *)(fake_controller+0x88)==1);
+                CHECK(interior_filter_observations==1);
                 local_witness_valid=FALSE; none(fake_controller);
                 CHECK(update_fault && *(uint32_t *)(fake_controller+0x88)==1);
                 local_witness_valid=TRUE; update_fault=FALSE;
@@ -1623,6 +1638,8 @@ int main(void) {
                 update_fault=FALSE; CHECK(SudekiMpLeaveSpiritInstance(remote));
                 all(fake_controller);
                 CHECK(*(uint32_t *)(fake_controller+0x84)==1 && *(uint32_t *)(fake_controller+0x88)==2);
+                CHECK(interior_filter_observations==2 && interior_filter_value==1);
+                puts("PASS named InteriorFilterObservation native-only post-call, suppressed remote excluded, LastError preserved");
             }
             *(uint32_t *)(fake_controller+0x1d0)=11;
             *(float *)(fake_controller+0x1d8)=19.f;

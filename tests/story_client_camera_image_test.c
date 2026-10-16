@@ -1,6 +1,7 @@
 #include "engine/build_identity.h"
 #include "hooks/lan_story_client_camera.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,118 @@ static uint8_t *map_image(const wchar_t *path) {
     }
     free(raw);return b;
 }
+typedef struct CameraFixture {
+    SudekiMpLanArenaOwnerViewLease lease;
+    uint8_t camera[0x110],render[0xe0],manager[0x60],state[0x20],data[0x20];
+    uint8_t inner[0x34],outer[0xd0],actor[0x98],position[0x98],speed[0x2c],ui[0x58];
+} CameraFixture;
+static void camera_fixture(CameraFixture *f,uint8_t *image) {
+    memset(f,0,sizeof(*f));
+    f->lease.valid=TRUE;f->lease.camera=f->camera;f->lease.render_state=f->render;
+    *(void **)f->camera=image+0x2cce5cu;*(void **)(f->camera+8)=image+0x2cce6cu;
+    *(void **)(f->camera+0x34)=f->render;*(void **)(f->camera+0x3c)=f->state;
+    *(void **)(f->camera+0x40)=f->data;strcpy((char *)f->camera+0x4c,"default");
+    *(void **)f->render=image+0x2dd638u;*(void **)f->manager=image+0x2c7b80u;
+    *(void **)(f->manager+0x20)=f->camera;*(void **)(f->manager+0x24)=f->camera;
+    *(void **)f->state=image+0x2d9854u;*(void **)f->data=image+0x2ca694u;
+    *(void **)(f->camera+0xb8)=f->inner;*(void **)(f->camera+0xb4)=f->outer;
+    *(void **)f->inner=image+0x2d42ccu;*(uint32_t *)(f->inner+4)=1;
+    *(void **)(f->inner+0x20)=f->actor;
+    *(void **)f->outer=image+0x2d436cu;*(uint32_t *)(f->outer+4)=1;
+    *(void **)(f->outer+0x20)=f->inner;
+    *(void **)f->actor=image+0x2d5010u;*(void **)(f->actor+0x44)=f->position;
+    *(void **)f->position=image+0x2cdefcu;*(void **)(f->position+0x10)=f->actor;
+    f->camera[0x107]=1;f->speed[0x28]=1;
+    *(void **)(image+0x409d7cu)=f->manager;*(void **)(image+0x408da0u)=f->speed;
+    *(void **)(image+0x408d8cu)=f->ui;
+}
+static void readiness_unchanged(CameraFixture *f,BOOL expected,BOOL tick_refused) {
+    CameraFixture before=*f;
+    assert(!!SudekiMpLanStoryClientCameraContinuityReady(&f->lease)==!!expected);
+    assert(!memcmp(f,&before,sizeof(*f)));
+    if(tick_refused) {
+        /* The exact image is deliberately non-executable. A premature input,
+         * state request, refresh or update call faults rather than hiding an
+         * incorrect refusal order behind an inert replacement. */
+        assert(!SudekiMpLanStoryClientCameraTick(&f->lease,0.016f,0.25f,-0.25f));
+        assert(!memcmp(f,&before,sizeof(*f)));
+    }
+}
+static DWORD WINAPI continuity_foreign_thread(void *context) {
+    CameraFixture *f=context;
+    readiness_unchanged(f,FALSE,TRUE);return 0;
+}
+static void continuity_preflight(uint8_t *image) {
+    CameraFixture f;
+    camera_fixture(&f,image);
+    assert(SudekiMpLanStoryClientCameraInstall((HMODULE)image));
+    readiness_unchanged(&f,FALSE,FALSE); /* Cannot establish its own thread. */
+    CameraFixture before=f;
+    assert(!SudekiMpLanStoryClientCameraTick(&f.lease,0,0,0));
+    assert(!memcmp(&f,&before,sizeof(f))); /* Valid zero-dt normal setup only. */
+    readiness_unchanged(&f,TRUE,FALSE);
+    assert(!SudekiMpLanStoryClientCameraContinuityReady(NULL));
+    f.lease.valid=FALSE;readiness_unchanged(&f,FALSE,TRUE);f.lease.valid=TRUE;
+    *(void **)(f.manager+0x20)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.manager+0x20)=f.camera;
+    *(void **)(f.camera+0x34)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.camera+0x34)=f.render;
+    /* Unknown, cast or other named states must not trigger SetCameraState.
+     * Even native interpolation lacks a proven Exploration destination. */
+    *(void **)f.state=image;readiness_unchanged(&f,FALSE,FALSE);
+    *(void **)f.state=image+0x2db9a4u;*(void **)f.data=image+0x2db998u;
+    readiness_unchanged(&f,FALSE,FALSE);
+    *(void **)f.state=image+0x2d9854u;readiness_unchanged(&f,FALSE,FALSE);
+    *(void **)f.data=image+0x2ca694u;
+    readiness_unchanged(&f,TRUE,FALSE);
+    puts("PASS CameraContinuityNoMutation: established Exploration only; unknown/cast/transition state, manager, render and unestablished ownership refuse without native calls");
+
+    *(void **)(f.camera+0xb4)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.camera+0xb4)=f.outer;
+    *(void **)f.outer=image;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)f.outer=image+0x2d436cu;
+    *(uint32_t *)(f.outer+4)=0;readiness_unchanged(&f,FALSE,TRUE);*(uint32_t *)(f.outer+4)=1;
+    *(void **)(f.outer+0x20)=f.actor;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.outer+0x20)=f.inner;
+    *(void **)(f.camera+0xb8)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.camera+0xb8)=f.inner;
+    *(uint32_t *)(f.inner+4)=0;readiness_unchanged(&f,FALSE,TRUE);*(uint32_t *)(f.inner+4)=1;
+    *(void **)(f.inner+0x20)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.inner+0x20)=f.actor;
+    *(void **)f.actor=image;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)f.actor=image+0x2d5010u;
+    *(void **)(f.actor+0x44)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.actor+0x44)=f.position;
+    *(void **)(f.position+0x10)=NULL;readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.position+0x10)=f.actor;
+    *(uintptr_t *)(f.position+0x94)=1;readiness_unchanged(&f,FALSE,TRUE);
+    *(uintptr_t *)(f.position+0x94)=0;
+    *(float *)(f.position+0x18)=NAN;readiness_unchanged(&f,FALSE,TRUE);
+    *(float *)(f.position+0x18)=0;
+    unsigned slots[]={0x2d42d0u,0x2d42dcu,0x2d4370u};
+    for(unsigned i=0;i<sizeof(slots)/sizeof(*slots);++i) {
+        void *saved=*(void **)(image+slots[i]);*(void **)(image+slots[i])=NULL;
+        readiness_unchanged(&f,FALSE,TRUE);*(void **)(image+slots[i])=saved;
+    }
+    uint8_t *page=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    assert(page);DWORD old;
+    assert(VirtualProtect(page,4096,PAGE_NOACCESS,&old));
+    *(void **)(f.camera+0xb4)=page;readiness_unchanged(&f,FALSE,TRUE);
+    assert(VirtualProtect(page,4096,PAGE_READWRITE|PAGE_GUARD,&old));
+    readiness_unchanged(&f,FALSE,TRUE);
+    *(void **)(f.camera+0xb4)=f.outer;assert(VirtualFree(page,0,MEM_RELEASE));
+    /* The direct native GameObjectTarget pair is also a complete chain. */
+    *(void **)(f.camera+0xb4)=f.inner;readiness_unchanged(&f,TRUE,FALSE);
+    *(void **)(f.camera+0xb4)=f.outer;
+    unsigned actors[]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
+    for(unsigned i=0;i<4u;++i) { *(void **)f.actor=image+actors[i];readiness_unchanged(&f,TRUE,FALSE); }
+    HANDLE thread=CreateThread(NULL,0,continuity_foreign_thread,&f,0,NULL);
+    assert(thread && WaitForSingleObject(thread,10000)==WAIT_OBJECT_0);CloseHandle(thread);
+    readiness_unchanged(&f,TRUE,FALSE);
+    assert(SudekiMpLanStoryClientCameraUninstall());
+    readiness_unchanged(&f,FALSE,TRUE);
+    puts("PASS CameraTargetPreflightBeforeWrites: all four party targets, direct/offset chains; broken reference, native virtual, actor/position, protected page and foreign thread refuse before input or refresh");
+}
 int main(int argc,char **argv) {
     assert(argc==2);wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,argv[1],-1,path,1024));
@@ -75,6 +188,7 @@ int main(int argc,char **argv) {
     strcpy((char *)(camera+0x4c),"other");
     assert(!SudekiMpLanStoryClientCameraTick(&lease,0.016f,0,0));
     assert(SudekiMpLanStoryClientCameraUninstall());
+    continuity_preflight(image);
     puts("story client camera exact-image guards and lease refusals passed (no native tick)");
     VirtualFree(image,0,MEM_RELEASE);return 0;
 }

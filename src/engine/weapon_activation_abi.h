@@ -107,16 +107,17 @@ BOOL SudekiMpEquipCharacterWeaponItem(void *character, unsigned int item_id);
  * runs for its effect attachment, PCItemUseCallback and inventory reduction. */
 BOOL SudekiMpUseItemOnCharacter(void *character, unsigned int item_id, unsigned int *stage, BOOL validated, BOOL reduce);
 /* Client bookkeeping after a host-applied use: CInventory::ReduceItem(id,1) on
- * this game's own inventory so counts stay in step. */
+ * the requesting player's own inventory. Other games keep their copies (D9). */
 BOOL SudekiMpReduceLocalItem(unsigned int item_id);
 /* Host: start the native "use item" action on a character, exactly what the
  * quick item menu does (RVA 0x9C199 call site -> RVA 0xDC110: arbiter, item
  * definition, party slot on the stack, RET 0xC, AL = started). The action
  * plays the use animation, applies the item at its keyframe and spawns the
- * item effect through the character's own arbiter; the count is reduced by
- * one when it starts, as the quick menu does. *stage names the refusal
+ * item effect through the character's own arbiter. reduce requests the native
+ * quick-menu count debit on this game; a remote action passes FALSE because
+ * the requesting client's inventory owns that debit (D9). *stage names the refusal
  * (0 = started; 50+ = arbiter busy bits). */
-BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage);
+BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage, BOOL reduce);
 /* Host game-thread only, after the remote actor lease is validated. Proton
  * Phaser misses FP recharge/blend while the local camera owns another
  * hero. Uses native recharge, never resets charge or forces reload complete.

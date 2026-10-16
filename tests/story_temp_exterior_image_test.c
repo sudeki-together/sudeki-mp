@@ -250,11 +250,32 @@ static void install_failure(void) {
     assert(!SudekiMpLanStoryTempExteriorInstall((HMODULE)mapped) && !base);
     assert(!memcmp(before,mapped,IMAGE_SIZE)); fail_install=0; free(before);
 }
+static void return_slot_contracts(void) {
+    /* Inspect the supported relocated image before any hook or leaf redirect.
+     * The adapter's full-body hashes cover the intervening native code; these
+     * named sites make the return proof's descriptor ordering auditable. */
+    static const struct {const char *name;unsigned rva,size;uint8_t bytes[33];} sites[]={
+        {"TempReturnEntryCurrentDescriptorBeforeKeep",0x6524,8,
+            {0x8b,0x43,0x0c,0xe8,0xd4,0x4f,0x10,0x00}},
+        {"TempReturnExitZeroRegister",0x6723,2,{0x33,0xf6}},
+        {"TempReturnExitClearsPendingAndCurrent",0x676e,6,
+            {0x89,0x73,0x14,0x89,0x73,0x0c}},
+        {"TempReturnExitOrdinaryDescriptorBeforeReceipt",0x6780,33,
+            {0xba,0x03,0x00,0x00,0x00,0x39,0x50,0x34,0x74,0x09,0x83,0xc0,0x54,
+             0x3b,0xc1,0x75,0xf4,0xeb,0x06,0x89,0x73,0x0c,0x89,0x43,0x10,
+             0x8b,0x7b,0x10,0xe8,0x0f,0x4d,0x10,0x00}}
+    };
+    for(unsigned i=0;i<sizeof(sites)/sizeof(*sites);++i) {
+        assert(!memcmp(mapped+sites[i].rva,sites[i].bytes,sites[i].size));
+        printf("PASS named %s exact supported image return-slot ordering\n",sites[i].name);
+    }
+}
 int main(int argc,char **argv) {
     assert(argc==2 || argc==3); wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,0,argv[1],-1,path,1024));
     const char *mode=argc==3?argv[2]:"native";
-    mapped=map_image(path); uint8_t *before=malloc(IMAGE_SIZE); assert(before);
+    mapped=map_image(path); return_slot_contracts();
+    uint8_t *before=malloc(IMAGE_SIZE); assert(before);
     memcpy(before,mapped,IMAGE_SIZE);
     /* Foreign/unexpected text refuses installation. */
     mapped[0x6600]^=0xff;

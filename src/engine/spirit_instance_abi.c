@@ -2,6 +2,7 @@
 #include "engine/cast_light_abi.h"
 #include "hooks/call_hook.h"
 #include "hooks/lan_arena_cast_context.h"
+#include "hooks/lan_story_task_trace.h"
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -1426,6 +1427,11 @@ static void route_skill_filter(void *controller,unsigned int filter) {
     }
     if(update_fault || GetCurrentThreadId()!=owner_thread) { INSTANCE_FAULT(); return; }
     native_skill_filters[filter](controller);
+    /* Passive provenance only, after the real controller callback. Suppressed
+     * remote casts above never create a native filter ownership observation. */
+    DWORD error=GetLastError();
+    SudekiMpLanStoryTaskInteriorFilterObserved(controller,filter);
+    SetLastError(error);
 }
 static void __attribute__((thiscall)) route_skill_filter_none(void *controller) {
     route_skill_filter(controller,0);

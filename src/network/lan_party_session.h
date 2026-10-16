@@ -16,6 +16,7 @@
 #include "network/lan_story_presentation.h"
 #include "network/lan_story_catchup.h"
 #include "network/lan_story_loot.h"
+#include "network/lan_story_loot_grant.h"
 #include "engine/party_ownership.h"
 #include <windows.h>
 
@@ -201,6 +202,36 @@ typedef struct SudekiMpLanPartySession SudekiMpLanPartySession;
  * character accounts and consumed world sources; Get never awards a delta.
  * These functions do not enable client interaction or touch native inventory. */
 BOOL SudekiMpLanPartyBindStoryLootSave(SudekiMpLanPartySession *,const uint8_t save_identity[32]);
+/* D9: grants to each currently admitted game's native inventory. This is a
+ * connection-owned, acknowledged journal, independent of scene and control
+ * fences. Worker code only queues bytes. Publish is atomic across peers and
+ * FALSE retains all existing records; the native observer MUST retain/retry
+ * the unsent event. Queue exhaustion never overwrites a prior grant.
+ * No durable/restart recovery is claimed: disconnect with pending work
+ * quarantines the channel until this session is replaced. The fault is
+ * retained across rejoin and scene changes, never converted into a retry of
+ * an uncertain native mutation. Phase I owns persistent account recovery. */
+enum { SUDEKIMP_STORY_LOOT_GRANT_FAULT_NONE=0,
+    SUDEKIMP_STORY_LOOT_GRANT_FAULT_DISCONNECTED=1,
+    SUDEKIMP_STORY_LOOT_GRANT_FAULT_NATIVE=2,
+    SUDEKIMP_STORY_LOOT_GRANT_FAULT_SERIAL=3 };
+BOOL SudekiMpLanPartyPublishStoryLootGrant(SudekiMpLanPartySession *,
+    unsigned source,unsigned item,unsigned quantity,unsigned show,uint32_t *serial);
+/* For a retained native event, bind recipients at observation time; a later
+ * join/rejoin must not acquire the old event. Exact mask/lease comparison and
+ * queue reservation happen under the same transport lock. */
+BOOL SudekiMpLanPartyPublishStoryLootGrantForRecipients(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease recipients[4],unsigned mask,
+    unsigned source,unsigned item,unsigned quantity,unsigned show,uint32_t *serial);
+BOOL SudekiMpLanPartyPeekStoryLootGrant(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease *,SudekiMpStoryLootGrant *);
+BOOL SudekiMpLanPartyTakeStoryLootGrant(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease *,const SudekiMpStoryLootGrant *);
+/* TRUE means native completion was journaled, even if its ACK send failed.
+ * Retransmission recovers that ACK without calling native AddItem again. */
+BOOL SudekiMpLanPartyCompleteStoryLootGrant(SudekiMpLanPartySession *,
+    const SudekiMpLanPartyLease *,const SudekiMpStoryLootGrant *,BOOL applied);
+unsigned SudekiMpLanPartyStoryLootGrantFault(SudekiMpLanPartySession *);
 BOOL SudekiMpLanPartySendStoryLoot(SudekiMpLanPartySession *,const SudekiMpStoryLootState *,
     const SudekiMpLanStoryScene *fresh_native_scene);
 BOOL SudekiMpLanPartyGetStoryLoot(SudekiMpLanPartySession *,const SudekiMpLanPartyLease *,
@@ -322,6 +353,11 @@ BOOL SudekiMpLanPartySendStoryRanged(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryRanged *input);
 BOOL SudekiMpLanPartyTakeStoryRanged(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,uint32_t now,SudekiMpLanStoryRanged *input,uint32_t *received_at);
+/* Movement alone may acknowledge the last validated frame during a same-area
+ * scene revision gap, for at most 250 ms from its original receipt. Connection,
+ * READY fence, actor generation and character area must remain exact. This is
+ * transport permission only: no old media is restored and combat gates remain
+ * unchanged; the game-thread caller must separately prove native ownership. */
 BOOL SudekiMpLanPartySendStoryMovement(SudekiMpLanPartySession *session,
     const SudekiMpLanPartyLease *lease,const SudekiMpLanStoryMovement *input);
 BOOL SudekiMpLanPartyTakeStoryMovement(SudekiMpLanPartySession *session,

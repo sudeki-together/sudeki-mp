@@ -1157,7 +1157,7 @@ refuse:
     if (stage) *stage = s;
     return FALSE;
 }
-BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage) {
+BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage, BOOL reduce) {
     typedef void (__attribute__((thiscall)) *ReduceFunction)(void *, int, int, int);
     static const uint8_t site[] = {0x8b,0x4c,0x24,0x10,0x8b,0x81,0x90,0x00,0x00,0x00,0x8b,0x8f,0xd8,0x01,0x00,0x00,
         0x85,0xc9,0x78,0x03,0x51,0xeb,0x02,0x6a,0x00,0x56,0x50,0xe8};
@@ -1219,8 +1219,9 @@ BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, uns
             : "ecx", "edx", "memory", "cc");
     }
     started &= 0xffu;
-    if (started) ((ReduceFunction)(base + 0x21ab0u))(inventory, (int)item_id, 1, 0);
-    SudekiMpLogFormat("item_action item=%u slot=%u started=%u arb50=%08lx\r\n", item_id, slot, (unsigned)started, (unsigned long)state);
+    if (started && reduce) ((ReduceFunction)(base + 0x21ab0u))(inventory, (int)item_id, 1, 0);
+    SudekiMpLogFormat("item_action item=%u slot=%u started=%u reduced=%u arb50=%08lx\r\n",
+        item_id, slot, (unsigned)started, (unsigned)(started && reduce), (unsigned long)state);
     if (stage) *stage = started ? 0u : 6u;
     return started != 0u;
 refuse:

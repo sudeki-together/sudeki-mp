@@ -17,6 +17,14 @@ void SudekiMpLogFormat(const char *format,...) {
 }
 void SudekiMpLogWrite(const char *s) { (void)s; assert(!"unexpected log path"); }
 BOOL SudekiMpCleanroomEngineWorldReady(void) { assert(!"native call"); return FALSE; }
+BOOL SudekiMpCheckLoadedExecutable(HMODULE image) { (void)image; assert(!"image call"); return FALSE; }
+BOOL SudekiMpCleanroomEngineResourceNameFromText(SudekiMpResourceName *r,const char *s) {
+    (void)r; (void)s; assert(!"resource call"); return FALSE;
+}
+void SudekiMpCleanroomEngineReleaseResourceName(SudekiMpResourceName *r) {
+    (void)r; assert(!"resource release");
+}
+void SudekiMpLanStoryAreaNoteTemporary(const char *s) {(void)s; assert(!"native TEMP call");}
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor a) {
     (void)a; assert(!"native call"); return NULL;
 }

@@ -105,6 +105,8 @@ static unsigned truncated_quotas;
 static unsigned submit_kind, submit_depth, add_depth, argument_depth;
 static volatile LONG callbacks,trace_fault;
 static BOOL installed;
+static unsigned interior_events;
+static void interior_clear(const char *reason);
 
 static BOOL retain(DWORD error) {
     HMODULE self;
@@ -576,6 +578,7 @@ story_submit_begin(unsigned kind,void *manager,void *descriptor) {
         if(submit_depth || status.load_generation==UINT32_MAX) {
             fault("saved_submit_overlap"); SetLastError(error); return 0;
         }
+        interior_clear("load_generation");interior_events=0;
         uint32_t generation=status.load_generation+1;
         BOOL truncated=status.log_truncated;
         memset(&status,0,sizeof(status));
@@ -782,6 +785,324 @@ BOOL SudekiMpLanStoryTaskInspectInstruction(HMODULE image,const void *consumer,
     }
     SetLastError(ERROR_SUCCESS);return TRUE;
 }
+/* A passive observation of the supported generic EnterInterior|SRSBS helper.
+ * This owns no VM wait, input filter, task reference or native object. */
+typedef struct InteriorBody {
+    unsigned rva,size,relocations[5],relocation_count;
+    uint64_t hash;
+} InteriorBody;
+static const InteriorBody interior_native_bodies[]={
+    {0x1c41d0,0x55,{0x1a,0x38,0x40},3,UINT64_C(0x8bfcaac409fb6eea)},
+    {0x1c4970,0x195,{0x14,0x23,0xae,0x107,0x171},5,UINT64_C(0x1de48fe33f38dc0f)},
+    {0x1c4e50,0x9c,{0},0,UINT64_C(0x7faf6602b1ac81ba)},
+    {0x1c4470,0x3a,{5},1,UINT64_C(0xd878491a3cbf19c7)},
+    {0xb9c0,0x12,{1},1,UINT64_C(0x0744fe65da7377ef)},
+    {0xb9e0,9,{1},1,UINT64_C(0x54c366ecf87c3bcc)}
+};
+typedef struct InteriorScript { uint32_t hash,offset,size; uint64_t body; } InteriorScript;
+static const InteriorScript interior_scripts[]={
+    {0x0faef694u,0x84deu,0x42u,UINT64_C(0xd2308f7a31a55f28)},
+    {0x323e8996u,0x5835u,0x29u,UINT64_C(0x9b20c97cf2aa4205)},
+    {0x7c8b25d9u,0x585eu,0x29u,UINT64_C(0x7f9b0ce82e0ff38b)},
+    {0xc50530cfu,0x2f0c7u,0xcu,UINT64_C(0x30bb635bb986e07e)},
+    {0x53766b13u,0x2f5b6u,0xcu,UINT64_C(0x27c1c396e4804dac)},
+    {0xa1f57c90u,0x31696u,0x84u,UINT64_C(0x699c3baf31d29808)},
+    {0x5bca8fb4u,0x3171au,0x25au,UINT64_C(0x030bf1b380a3d7fe)}
+};
+typedef struct InteriorObservation {
+    SudekiMpLanStoryInteriorTravel value;
+    void *thread,*manager,*code,*code_end,*table,*pool,*ui;
+    uint32_t frame_depth,frame_return,slots,count,capacity;
+    BOOL candidate,tsa,disabled;
+} InteriorObservation;
+typedef struct InteriorStep {
+    void *thread;
+    uint32_t task,pc;
+    BOOL own_tsa,own_filter,filter_returned;
+} InteriorStep;
+static InteriorObservation interior;
+static InteriorStep *interior_step_scope;
+static volatile LONG interior_foreign;
+static void interior_event(const char *event,const char *reason) {
+    if(!installed || !native_thread || native_thread!=GetCurrentThreadId() || interior_events>=64u) return;
+    DWORD error=GetLastError();++interior_events;
+    SudekiMpLogFormat("lan_story_task event=interior_%s reason=%s generation=%lu task=%lu destination=%08lx armed=%u observation_only=1\r\n",
+        event,reason,(unsigned long)interior.value.load_generation,(unsigned long)interior.value.task,
+        (unsigned long)interior.value.destination_hash,interior.disabled);
+    SetLastError(error);
+}
+static void interior_clear(const char *reason) {
+    if(interior.candidate) interior_event("ended",reason);
+    memset(&interior,0,sizeof(interior));
+}
+static uint64_t interior_hash(const uint8_t *p,unsigned size) {
+    uint64_t hash=UINT64_C(14695981039346656037);
+    for(unsigned i=0;i<size;++i) hash=(hash^p[i])*UINT64_C(1099511628211);
+    return hash;
+}
+static BOOL interior_native_exact(void) {
+    if(!image_base) return FALSE;
+    for(unsigned n=0;n<sizeof(interior_native_bodies)/sizeof(*interior_native_bodies);++n) {
+        const InteriorBody *b=&interior_native_bodies[n];
+        const uint8_t *p=image_base+b->rva;
+        if(!readable(p,b->size)) return FALSE;
+        uint64_t hash=UINT64_C(14695981039346656037);
+        for(unsigned i=0;i<b->size;++i) {
+            uint8_t byte=p[i];
+            for(unsigned j=0;j<b->relocation_count;++j) if(i>=b->relocations[j] && i<b->relocations[j]+4u) {
+                uint32_t word; memcpy(&word,p+b->relocations[j],4);
+                word-=(uint32_t)(uintptr_t)image_base-0x400000u;
+                byte=(uint8_t)(word>>(8u*(i-b->relocations[j]))); break;
+            }
+            hash=(hash^byte)*UINT64_C(1099511628211);
+        }
+        if(hash!=b->hash) return FALSE;
+    }
+    return TRUE;
+}
+static BOOL interior_program_exact(void *manager,BOOL same) {
+    if(!manager_exact(manager) || !readable(image_base+0x3c3108,8) ||
+        *(void **)(image_base+0x3c3108)!=manager ||
+        *(void **)(image_base+RUNTIME_GLOBAL)!=(uint8_t *)manager+0x20) return FALSE;
+    uint8_t *m=manager,*code=*(uint8_t **)(m+0x34),*end=*(uint8_t **)(m+0x38);
+    uintptr_t limit=*(uintptr_t *)(m+0x3c);
+    unsigned slots=*(unsigned *)(m+0x20),count=*(unsigned *)(m+0x2c),capacity=*(unsigned *)(m+0x30);
+    uintptr_t *table=*(uintptr_t **)(m+0x24),pool=*(uintptr_t *)(m+0x28);
+    if(!code || (uintptr_t)end<=(uintptr_t)code || limit<(uintptr_t)end ||
+        !slots || slots>65536u || (slots&(slots-1u)) || !count || count>capacity || capacity>65536u ||
+        !readable(table,(size_t)slots*4u)) return FALSE;
+    if(same && (manager!=interior.manager || code!=interior.code || end!=interior.code_end ||
+        table!=interior.table || (void *)pool!=interior.pool || slots!=interior.slots ||
+        count!=interior.count || capacity!=interior.capacity)) return FALSE;
+    for(unsigned n=0;n<sizeof(interior_scripts)/sizeof(*interior_scripts);++n) {
+        const InteriorScript *s=&interior_scripts[n];
+        if((uintptr_t)end-(uintptr_t)code<s->offset+s->size ||
+            !readable(code+s->offset,s->size) || interior_hash(code+s->offset,s->size)!=s->body) return FALSE;
+        unsigned slot=s->hash&(slots-1u),probe;
+        for(probe=0;probe<slots;++probe,slot=(slot+1u)&(slots-1u)) {
+            uintptr_t entry=table[slot];
+            if(!instruction_pool_entry(entry,pool,count,16) || !readable((void *)entry,16)) return FALSE;
+            if(*(uint32_t *)(entry+4)!=s->hash) continue;
+            if(*(uint32_t *)(entry+8)!=s->offset) return FALSE;
+            break;
+        }
+        if(probe==slots) return FALSE;
+    }
+    return TRUE;
+}
+static BOOL interior_name(const char *p,char out[48],uint32_t *hash) {
+    uint32_t h=2166136261u;
+    memset(out,0,48);
+    /* One bounded memory-region query, not one query per name byte. A short
+     * allocation still lies within its committed native heap page. */
+    if(!readable(p,48)) return FALSE;
+    for(unsigned i=0;i<48u;++i) {
+        unsigned char c=(unsigned char)p[i];
+        if(!c) { if(!i) return FALSE; *hash=h; return TRUE; }
+        if(c<0x20u || c>0x7eu) return FALSE;
+        out[i]=(char)c;
+        if(c>='A' && c<='Z') c=(unsigned char)(c+('a'-'A'));
+        h=(h^c)*16777619u;
+    }
+    return FALSE;
+}
+static BOOL interior_world(SudekiMpLanStoryInteriorTravel *v,uint32_t destination) {
+    /* Fixed supported image slots; readable accepts the native image's COW
+     * pages as well as heap pages. All pointees still need positive types. */
+    if(!readable(image_base+0x408d10,4) || !readable(image_base+GROUP_GLOBAL,4) ||
+        !readable(image_base+0x408da4,4)) return FALSE;
+    uint8_t *world=*(uint8_t **)(image_base+0x408d10),*group=*(uint8_t **)(image_base+GROUP_GLOBAL),
+        *controller=*(uint8_t **)(image_base+0x408da4);
+    if(!readable(world,0x39bu) || *(void **)world!=image_base+0x2c4c3c ||
+        !world[0x39a] || *(void **)(world+0x14) ||
+        !readable(group,0xd4) || !*(unsigned *)(group+0xcc) || *(unsigned *)(group+0xcc)>4u ||
+        !readable(controller,0x24c) || *(void **)controller!=image_base+0x2c9f5c ||
+        *(void **)(controller+0x2c)!=image_base+0x2c9f84) return FALSE;
+    void *leader=*(void **)(controller+0x248);
+    if(!leader || *(void **)(group+0x90)!=leader) return FALSE;
+    uint8_t *table=*(uint8_t **)(world+0x50),*current=*(uint8_t **)(world+0xc),*target=NULL;
+    unsigned count=*(unsigned *)(world+0x54);
+    if(!count || count>512u || !readable(table,count*0x54u) ||
+        !instruction_pool_entry((uintptr_t)current,(uintptr_t)table,count,0x54) ||
+        *(void **)current!=image_base+0x2c82a4 || *(unsigned *)(current+0x34)!=3u ||
+        !*(void **)(current+0x14)) return FALSE;
+    char target_name[48]={0};
+    for(unsigned n=0;n<count;++n) {
+        uint8_t *d=table+n*0x54u; char name[48]; uint32_t hash;
+        if(*(void **)d!=image_base+0x2c82a4 || !interior_name(*(const char **)(d+0x24),name,&hash)) return FALSE;
+        if(hash!=destination) continue;
+        if(target || d==current || *(unsigned *)(d+0x34)!=0u) return FALSE;
+        target=d; memcpy(target_name,name,sizeof(target_name));
+    }
+    if(!target) return FALSE;
+    v->world=world;v->descriptor=current;v->group=group;v->controller=controller;
+    v->leader=leader;v->destination=target;v->destination_hash=destination;
+    memcpy(v->destination_name,target_name,sizeof(v->destination_name)); return TRUE;
+}
+static BOOL interior_ui(void **value,unsigned enabled) {
+    if(!readable(image_base+0x408d1c,4)) return FALSE;
+    uint8_t *ui=*(uint8_t **)(image_base+0x408d1c);
+    if(!readable(ui,0x61) || *(void **)ui!=image_base+0x2c5210 || ui[0x60]!=enabled) return FALSE;
+    *value=ui; return TRUE;
+}
+static BOOL interior_task_exact(void) {
+    Task *t=find_task(interior.thread,FALSE);
+    if(!interior.candidate || !t || t->id!=interior.value.task ||
+        t->generation!=interior.value.load_generation || t->generation!=status.load_generation ||
+        t->manager!=load_manager || t->manager!=interior.manager || t->terminal || t->retirement_entered ||
+        !readable(t->thread,0x50)) return FALSE;
+    uint8_t *thread=t->thread;
+    unsigned depth=*(unsigned *)(thread+0x10),capacity=*(unsigned *)(thread+0x14);
+    uint32_t *stack=*(uint32_t **)(thread+0x18);
+    return depth>=interior.frame_depth && depth<=64u && depth<=capacity &&
+        readable(stack,depth*4u) && stack[interior.frame_depth-1u]==interior.frame_return;
+}
+static BOOL interior_live(void) {
+    void *ui; SudekiMpLanStoryInteriorTravel v={0};
+    return interior_task_exact() && interior_native_exact() && interior_program_exact(interior.manager,TRUE) &&
+        interior_ui(&ui,interior.tsa?1u:0u) && ui==interior.ui &&
+        interior_world(&v,interior.value.destination_hash) && v.world==interior.value.world &&
+        v.descriptor==interior.value.descriptor && v.group==interior.value.group &&
+        v.controller==interior.value.controller && v.leader==interior.value.leader &&
+        v.destination==interior.value.destination && !strcmp(v.destination_name,interior.value.destination_name) &&
+        (!interior.disabled || (!*(unsigned *)((uint8_t *)v.controller+0x84) &&
+            *(unsigned *)((uint8_t *)v.controller+0x80)<=1u));
+}
+static void interior_capture(Task *t) {
+    interior_clear("new_helper");
+    if(!t || !t->id || !t->generation || t->generation!=status.load_generation || t->manager!=load_manager ||
+        t->terminal || t->retirement_entered || !readable(t->thread,0x50) ||
+        !interior_native_exact() || !interior_program_exact(t->manager,FALSE)) return;
+    uint8_t *thread=t->thread,*m=t->manager;
+    unsigned used=*(unsigned *)(thread+0x28),capacity=*(unsigned *)(thread+0x24),
+        depth=*(unsigned *)(thread+0x10),frames=*(unsigned *)(thread+0x14);
+    uint32_t *args=*(uint32_t **)(thread+0x20),*returns=*(uint32_t **)(thread+0x18);
+    uintptr_t bottom=*(uintptr_t *)(thread+0x1c);
+    if(*(unsigned *)(thread+0x34)!=0x5bca8fb4u || used<5u || used>capacity || capacity>65536u ||
+        bottom>UINTPTR_MAX-capacity*4u || (uintptr_t)args!=bottom+(capacity-used)*4u ||
+        !readable(args,20) || args[1]!=1u || !args[4] || !depth || depth>64u || depth>frames ||
+        !readable(returns,depth*4u) || !interior_ui(&interior.ui,0) ||
+        !interior_world(&interior.value,args[4])) { interior_clear("lost_exactness");return; }
+    uint8_t *code=*(uint8_t **)(m+0x34);uintptr_t end=*(uintptr_t *)(m+0x38);
+    uint32_t caller=returns[depth-1u],hash;
+    if(caller<5u || caller>end-(uintptr_t)code || !readable(code+caller-5u,5) ||
+        code[caller-5u]!=0x27u) { interior_clear("lost_exactness");return; }
+    memcpy(&hash,code+caller-4u,4);
+    if(hash!=0x5bca8fb4u) { interior_clear("lost_exactness");return; }
+    interior.thread=thread;interior.manager=m;interior.code=*(void **)(m+0x34);
+    interior.code_end=*(void **)(m+0x38);interior.table=*(void **)(m+0x24);interior.pool=*(void **)(m+0x28);
+    interior.slots=*(unsigned *)(m+0x20);interior.count=*(unsigned *)(m+0x2c);interior.capacity=*(unsigned *)(m+0x30);
+    interior.value.task=t->id;interior.value.load_generation=t->generation;
+    interior.frame_depth=depth;interior.frame_return=returns[depth-1u];interior.candidate=TRUE;
+    interior_event("candidate","generic_enter");
+}
+static void interior_step_begin(void *thread,InteriorStep *scope) {
+    memset(scope,0,sizeof(*scope));scope->thread=thread;
+    if(InterlockedCompareExchange(&interior_foreign,0,0) || InterlockedCompareExchange(&trace_fault,0,0)) {
+        interior_clear("lost_exactness");return;
+    }
+    Task *t=find_task(thread,FALSE);
+    /* Away from a doorway, reject ordinary PCs before querying the program
+     * or scanning any body/catalog. Untracked tasks cannot arm this proof. */
+    if(!interior.candidate) {
+        if(!t || t->terminal || t->retirement_entered || !readable(thread,0x50) ||
+            *(uint32_t *)((uint8_t *)thread+0xc)!=0x3171au) return;
+    }
+    /* During a candidate, unrelated TSA calls must also revoke it. */
+    if(!readable(thread,0x50) || !load_manager || !manager_exact(load_manager)) { interior_clear("lost_exactness");return; }
+    uint8_t *m=load_manager,*code=*(uint8_t **)(m+0x34);
+    uintptr_t end=*(uintptr_t *)(m+0x38); uint32_t pc=*(uint32_t *)((uint8_t *)thread+0xc);
+    if(!code || end<=(uintptr_t)code || pc>=end-(uintptr_t)code || !readable(code+pc,1)) {
+        interior_clear("lost_exactness");return;
+    }
+    scope->pc=pc;scope->task=t?t->id:0;
+    if(pc==0x3171au) interior_capture(t);
+    if(!interior.candidate) return;
+    if(!interior_task_exact()) { interior_clear("lost_exactness");return; }
+    unsigned opcode=code[pc];uint32_t hash=0;
+    if(opcode==0x27 || opcode==0x28) {
+        if(end-(uintptr_t)code-pc<5u || !readable(code+pc,5)) { interior_clear("lost_exactness");return; }
+        memcpy(&hash,code+pc+1u,4);
+    }
+    BOOL owner=t && t->id==interior.value.task && thread==interior.thread;
+    if(opcode==0x27 && hash==0x91a6a1e9u) {
+        SudekiMpStoryTaskInstruction instruction;
+        if(!owner || pc!=0x3176cu || interior.tsa || !interior_live() ||
+            !inspect_instruction(t,&instruction) || instruction.kind!=SUDEKIMP_STORY_INSTRUCTION_NATIVE ||
+            instruction.native_rva!=0xb9c0 || instruction.argument_count!=1u ||
+            !*(unsigned *)((uint8_t *)thread+0x28) ||
+            !readable(*(void **)((uint8_t *)thread+0x20),4) ||
+            **(uint32_t **)((uint8_t *)thread+0x20)!=1u) interior_clear("tsa_owner");
+        else scope->own_tsa=TRUE;
+    }
+    if(owner && pc==0x31871u) interior_clear("temp_begin"); /* Before native TEMP/load begins. */
+    if(owner && pc==0x5856u && interior.tsa && !interior.disabled) {
+        uint8_t *th=thread;unsigned depth=*(unsigned *)(th+0x10);
+        uint32_t *frames=*(uint32_t **)(th+0x18);
+        scope->own_filter=opcode==0x28 && hash==0xaa3f38acu && depth==interior.frame_depth+1u &&
+            readable(frames,depth*4u) && frames[depth-1u]==0x31822u && interior_live();
+        if(!scope->own_filter) interior_clear("lost_exactness");
+    }
+}
+void SudekiMpLanStoryTaskInteriorFilterObserved(void *controller,unsigned filter) {
+    /* Frontend filters can precede the first saved-script callback. There is
+     * no candidate or established native owner to invalidate at that point. */
+    if(!native_thread) return;
+    if(native_thread!=GetCurrentThreadId()) {
+        if(installed) InterlockedExchange(&interior_foreign,1);
+        return;
+    }
+    InteriorStep *scope=interior_step_scope;
+    if(!scope || !scope->own_filter || scope->filter_returned || filter!=0u ||
+        scope->thread!=current_thread || scope->task!=interior.value.task ||
+        controller!=interior.value.controller || !interior_live()) interior_clear("filter_owner");
+    else scope->filter_returned=TRUE;
+}
+static void interior_step_end(const InteriorStep *scope,int result) {
+    if(!interior.candidate) return;
+    if(!interior_task_exact()) { interior_clear("lost_exactness");return; }
+    if(scope->own_tsa || scope->own_filter) {
+        uint32_t pc=*(uint32_t *)((uint8_t *)interior.thread+0xc);
+        if(result==2 && !scope->filter_returned && pc==scope->pc) return; /* No opcode fetched. */
+        if(result!=0 || scope->task!=interior.value.task || pc!=scope->pc+5u) { interior_clear("lost_exactness");return; }
+        if(scope->own_tsa) interior.tsa=TRUE;
+        if(scope->own_filter) {
+            if(!scope->filter_returned) { interior_clear("lost_exactness");return; }
+            interior.disabled=TRUE;
+            interior_event("armed","native_filter_returned");
+        }
+        if(!interior_live()) interior_clear("lost_exactness");
+    }
+    if(scope->thread==interior.thread && result==1) interior_clear("task_terminal");
+}
+BOOL SudekiMpLanStoryTaskInteriorTravel(SudekiMpLanStoryInteriorTravel *out) {
+    if(!out || !SudekiMpLanStoryTaskHostExact((HMODULE)image_base) ||
+        InterlockedCompareExchange(&callbacks,0,0) || InterlockedCompareExchange(&trace_fault,0,0) ||
+        InterlockedCompareExchange(&interior_foreign,0,0) || !interior.disabled || !interior.tsa) return FALSE;
+    if(!interior_live()) { interior_clear("lost_exactness");return FALSE; }
+    uint8_t *thread=interior.thread;unsigned depth=*(unsigned *)(thread+0x10);
+    uint32_t pc=*(uint32_t *)(thread+0xc),*frames=*(uint32_t **)(thread+0x18);
+    BOOL helper=depth==interior.frame_depth && pc>=0x31822u && pc<=0x31871u;
+    BOOL disabling=depth==interior.frame_depth+1u && frames[depth-1u]==0x31822u && pc>=0x585bu && pc<0x585eu;
+    /* These three compiled helpers are the supported battle-score wait path;
+     * their full bodies are checked along with the parent on every read. */
+    BOOL child=FALSE;
+    if(depth>interior.frame_depth) {
+        uint32_t caller=frames[interior.frame_depth];
+        if(depth==interior.frame_depth+1u) {
+            child=(caller==0x3182fu && pc>=0x2f0c7u && pc<0x2f0d3u) ||
+                (caller==0x31839u && pc>=0x2f5b6u && pc<0x2f5c2u) ||
+                (caller==0x31844u && pc>=0x31696u && pc<0x3171au);
+        } else if(depth==interior.frame_depth+2u && caller==0x31844u) {
+            uint32_t nested=frames[depth-1u];
+            child=(nested==0x316ccu && pc>=0x2f0c7u && pc<0x2f0d3u) ||
+                (nested==0x31706u && pc>=0x84deu && pc<0x8520u);
+        }
+    }
+    if(!helper && !disabling && !child) { interior_clear("lost_exactness");return FALSE; }
+    *out=interior.value;return TRUE;
+}
+
 static BOOL admission_run(void *thread,BOOL exact,uint32_t *waiting_id) {
     *waiting_id=0;
     if(!admission_decide) return TRUE;
@@ -839,10 +1160,15 @@ static int __attribute__((fastcall,force_align_arg_pointer)) story_step(void *th
     else fault("step_thread");
     uint32_t waiting_id=0;
     BOOL run=admission_run(thread,exact,&waiting_id);
+    InteriorStep observation={0},*previous_scope=interior_step_scope;
+    if(run && exact) { interior_step_begin(thread,&observation);interior_step_scope=&observation; }
     SetLastError(error);
     int result=run?(cast_step?cast_step(thread,edx):original_step(thread,edx)):2;
     error=GetLastError();
-    if(run && exact) admission_returned(thread,waiting_id,result);
+    if(run && exact) {
+        interior_step_scope=previous_scope;interior_step_end(&observation,result);
+        admission_returned(thread,waiting_id,result);
+    }
     if(exact) {
         Task *t=find_task(thread,FALSE);
         if(t && result==1) {
@@ -1360,6 +1686,7 @@ BOOL SudekiMpLanStoryTaskTraceForgetExitedWorld(void) {
      * from the destroyed world; they do not belong to that saved generation.
      * The next exact StartLoadedGame scope installs its own manager again. */
     load_manager=NULL;
+    interior_clear("world_exit");
     memset(tasks,0,sizeof(tasks));
     memset(add_scopes,0,sizeof(add_scopes));
     memset(argument_scopes,0,sizeof(argument_scopes));
@@ -1399,6 +1726,7 @@ BOOL SudekiMpLanStoryTaskTraceUninstall(void) {
     if(!ok || InterlockedCompareExchange(&callbacks,0,0)) return retain(GetLastError());
     /* Every observer is synchronous. No native object ever stores a mod
      * callback, borrowed diagnostic address, or additional task reference. */
+    interior_clear("uninstall");interior_events=0;interior_step_scope=NULL;InterlockedExchange(&interior_foreign,0);
     installed=FALSE; image_base=NULL; native_thread=0; current_thread=NULL; load_manager=NULL;
     original_submit=NULL; original_create=NULL; original_step=NULL; original_retire=NULL; original_add=NULL;
     original_arguments=NULL;

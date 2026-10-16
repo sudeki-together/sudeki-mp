@@ -133,7 +133,13 @@ static BOOL player_turn_lease(void *actor) {
         SudekiMpLanStoryRuntimeTurnLeaseExact(&key);
 }
 static BOOL ai_movement_lease(void *actor,unsigned gate) {
-    if(!player_turn_lease(actor)) return FALSE;
+    SudekiMpLanPartyLease key;
+    /* An acquired PREPARE lease already owns this body's AI suppression.
+     * Client input and player turning still wait for the separate READY ACK. */
+    if(!base || !installed || !native_thread || native_thread!=GetCurrentThreadId() ||
+        !hooks_exact() || !ordinary_world(TRUE) ||
+        !SudekiMpLanPartyControlStoryTurnOwner(actor,&key) ||
+        !SudekiMpLanStoryRuntimeAiLeaseExact(&key)) return FALSE;
     SudekiMpLanStoryResearch54AiGate(actor,gate);
     return TRUE;
 }
@@ -258,7 +264,20 @@ BOOL SudekiMpLanStoryControlMove(const SudekiMpControlUpdateDispatchWitness *w,
     BOOL *temporarily_held) {
     trace_arbiter_flags(roster,key,"move");
     if(temporarily_held) *temporarily_held=FALSE;
-    if(!boundary(w,roster) || !key || key->seat>=4u || !isfinite(x) || !isfinite(z)) return FALSE;
+    if(!boundary(w,roster) || !key || key->seat>=4u || !isfinite(x) || !isfinite(z) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return FALSE;
+    {   /* The native node at actor+8 keeps its pause references at +0x23.
+         * TEMP travel may retain a genuine pause after the split owner removes
+         * only its own added references. Preserve that pause without target,
+         * dodge or even neutral movement submissions; an exact lease above is
+         * mandatory before treating this as a temporary hold. */
+        const uint8_t *a=roster->actors[key->seat];
+        if(!readable(a,0x2cu)) return FALSE;
+        if(a[0x2bu]) {
+            if(temporarily_held) *temporarily_held=TRUE;
+            return TRUE;
+        }
+    }
     {   /* Native item-use action in progress (arbiter 0x20): the native player
          * controller submits nothing while it runs, and even a zero-speed
          * submission interrupted it (owner gate 2026-10-15: animation played,
@@ -472,12 +491,15 @@ unsigned SudekiMpLanStoryControlUseItem(const SudekiMpControlUpdateDispatchWitne
         const uint8_t *group=roster->group; unsigned count=group?*(const unsigned *)(group+0xccu):0u;
         for(unsigned i=0;i<count && i<4u;++i) if(*(void *const *)(group+0x90u+i*0xcu)==actor) slot=i;
     }
-    action=SudekiMpUseItemActionOnCharacter(actor,item,slot,&action_stage);
+    /* D9: the host owns the actor's action, while the requesting client's
+     * game owns the consumed item. Its accepted result debits that inventory
+     * once; neither native route below may also debit the host's copy. */
+    action=SudekiMpUseItemActionOnCharacter(actor,item,slot,&action_stage,FALSE);
     /* Native quick-menu path (animation, keyframe apply, item effect through
      * the character's own arbiter; CONFIRMED_LIVE for the remote Tal on
      * 2026-10-15 once the native can-use ran first). The direct Items-page
      * apply remains the fallback when the action cannot start. */
-    if(!action && action_stage<50u) applied=SudekiMpUseItemOnCharacter(actor,item,&stage,FALSE,TRUE);
+    if(!action && action_stage<50u) applied=SudekiMpUseItemOnCharacter(actor,item,&stage,FALSE,FALSE);
     {   const uint8_t *group=roster->group; const uint8_t *s0=group?group+0x90u+slot*0xcu:NULL;
         SudekiMpLogFormat("story_main_menu event=host_use_target actor=%p slot=%u slot_words=%08lx,%08lx,%08lx\r\n",actor,slot,
             s0?(unsigned long)*(const uint32_t *)s0:0ul,s0?(unsigned long)*(const uint32_t *)(s0+4u):0ul,s0?(unsigned long)*(const uint32_t *)(s0+8u):0ul); }

@@ -1,6 +1,8 @@
 #include "hooks/lan_story_host_control.h"
 #include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_story_control.h"
+#include "hooks/lan_story_split.h"
+#include "hooks/lan_party_control.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
 #include "engine/cast_light_abi.h"
@@ -361,6 +363,110 @@ BOOL SudekiMpLanStoryHostControlReady(void *controller,
     uint8_t *c=controller;
     int mode=input_owner.owned?0:1;
     return *(int *)(c+0x80u)==mode && *(int *)(c+0x84u)==mode;
+}
+static BOOL exterior_actor_owned(const SudekiMpLanStoryNativeRoster *r,unsigned character) {
+    SudekiMpLanPartyLease key={0};
+    return SudekiMpLanPartyControlStoryTurnOwner(r->actors[character],&key) &&
+        key.seat==character;
+}
+static BOOL interior_approach_exact(const SudekiMpLanStoryNativeRoster *r) {
+    SudekiMpLanStoryInteriorTravel travel;
+    /* The task owner proves the authored host-local helper and its actual
+     * DisableGamepad call. This fresh roster ties that observation to the
+     * existing exterior actor lease; a host filter alone grants nothing. */
+    return r && r->leader_character<4u &&
+        SudekiMpLanStoryTaskInteriorTravel(&travel) && travel.load_generation && travel.task &&
+        travel.destination_hash && travel.destination && travel.destination_name[0] &&
+        travel.world==r->world && travel.descriptor==r->descriptor &&
+        travel.group==r->group && travel.controller==r->controller &&
+        travel.leader==r->actors[r->leader_character];
+}
+BOOL SudekiMpLanStoryHostControlExteriorNativeBound(const SudekiMpLanStoryNativeRoster *r,
+    unsigned character) {
+    if(!base || active || stopping || requested<4u || rotation.entered ||
+        input_owner.owned || input_owner.releasing || !native_thread ||
+        native_thread!=GetCurrentThreadId() || !r || character>=4u ||
+        r->leader_character!=locked || locked>=4u || character==locked ||
+        !entries_exact() || !SudekiMpLanStoryObserverNativeRosterExact(r) ||
+        !readable(r->controller,0x24cu) || *(void **)r->controller!=base+CONTROLLER_VT ||
+        *(void **)((uint8_t *)r->controller+0x2cu)!=base+INPUT_VT ||
+        (!SudekiMpLanStorySplitExteriorActorExact(r,character) &&
+         !SudekiMpLanStorySplitReturnedActorExact(r,character) &&
+         !interior_approach_exact(r)) ||
+        !exterior_actor_owned(r,character)) return FALSE;
+    /* The retained exterior actor has its own positive native lease. The
+     * lead's script override/filter is not that lease's owner, and is never
+     * borrowed or changed here. Keep every component and mode identity exact;
+     * an unowned follower still requires the ordinary ref0/mode1 contract. */
+    for(unsigned c=0;c<4u;++c) if(r->available_mask&(1u<<c)) {
+        uint8_t *a=r->actors[c],*ai=r->ai[c],*mode;
+        if(!readable(a,0x98u) || *(void **)(a+0x94u)!=ai || !readable(ai,0x174u) ||
+            *(void **)ai!=base+0x2d4924u || *(void **)(ai+0x10u)!=a ||
+            !readable(mode=*(uint8_t **)(ai+0x3cu),0xcu)) return FALSE;
+        if(c==locked) { if(mode[0xbu]!=0u) return FALSE; }
+        else if(!exterior_actor_owned(r,c) &&
+            (*(int16_t *)(ai+0x16au)!=0 || mode[0xbu]!=1u)) return FALSE;
+    }
+    return SudekiMpLanStoryObserverNativeRosterExact(r);
+}
+static const uint8_t shop_active_tail[]={
+    0x85,0xc0,0x74,0x1e,0x83,0xb8,0xb8,0,0,0,0x07,0x74,0x0f,0x8b,0x40,0x74,
+    0x83,0xb8,0x88,0,0,0,0,0x75,0x03,0x33,0xc0,0xc3,0xb8,1,0,0,0,0xc3,0x32,0xc0,0xc3};
+static BOOL native_shop_active_exact(void) {
+    /* Retail IsShopActive (RVA8D1C0), including its relocated singleton load,
+     * proves the two state fields. Observe the exact typed singleton pair;
+     * no native function or UI ownership mutation is needed. */
+    uint8_t *code=base+0x8d1c0u,*ui,*shop;
+    if(!readable(code,5u+sizeof(shop_active_tail)) || code[0]!=0xa1u ||
+        *(void **)(code+1u)!=base+0x3c2f88u ||
+        memcmp(code+5u,shop_active_tail,sizeof(shop_active_tail)) ||
+        !readable(base+0x3c2f88u,sizeof(void *)) ||
+        !readable(base+0x3c2f70u,sizeof(void *))) return FALSE;
+    ui=*(uint8_t **)(base+0x3c2f88u); shop=*(uint8_t **)(base+0x3c2f70u);
+    return readable(ui,0xbcu) && *(void **)ui==base+0x2caf9cu &&
+        *(void **)(ui+0x74u)==shop && readable(shop,0x8cu) &&
+        *(void **)shop==base+0x2cabb4u &&
+        (*(unsigned *)(ui+0xb8u)==7u || *(int *)(shop+0x88u)!=0);
+}
+BOOL SudekiMpLanStoryHostControlExteriorNativeReady(const SudekiMpLanStoryNativeRoster *r,
+    unsigned character) {
+    if(!SudekiMpLanStoryHostControlExteriorNativeBound(r,character) ||
+        !SudekiMpLanStorySplitExteriorActorExact(r,character)) return FALSE;
+    uint8_t *c=r->controller,*ai=r->ai[r->leader_character];
+    int current=*(int *)(c+0x80u),pending=*(int *)(c+0x84u);
+    int16_t overrides=*(int16_t *)(ai+0x16au);
+    /* Action admission still requires the settled interior split. A completed
+     * return permits only retention/steering through the host's remaining
+     * filter transition; ordinary control or the exact native shop modal must
+     * also supply readiness here. */
+    return (overrides==0 && current==1 && pending==1) ||
+        (overrides==1 && current==2 && pending==2 && native_shop_active_exact());
+}
+BOOL SudekiMpLanStoryHostControlExteriorNativeSteeringReady(const SudekiMpLanStoryNativeRoster *r,
+    unsigned character) {
+    if(!SudekiMpLanStoryHostControlExteriorNativeBound(r,character)) return FALSE;
+    /* The exterior body's held lease is independent of the lead's modal
+     * filter. Native Pause/Resume (RVA1060C0/106100) count node+23, where this
+     * actor's node is actor+8. Preserve every native pause reference; callers
+     * still prove the unpaused world and their own body/action boundaries. */
+    return ((const uint8_t *)r->actors[character])[0x2bu]==0u;
+}
+static BOOL exterior_dispatch(void *controller,const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryScene *scene,unsigned character,BOOL ready) {
+    SudekiMpLanStoryNativeRoster r;
+    return observe(controller,w,scene,&r) &&
+        SudekiMpLanStoryControlActorOwned(w,&r,character) &&
+        (ready?SudekiMpLanStoryHostControlExteriorNativeReady(&r,character):
+               SudekiMpLanStoryHostControlExteriorNativeBound(&r,character)) &&
+        SudekiMpLanStoryObserverRosterStillExact(w,&r);
+}
+BOOL SudekiMpLanStoryHostControlExteriorBound(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,unsigned character) {
+    return exterior_dispatch(controller,w,scene,character,FALSE);
+}
+BOOL SudekiMpLanStoryHostControlExteriorReady(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene,unsigned character) {
+    return exterior_dispatch(controller,w,scene,character,TRUE);
 }
 BOOL SudekiMpLanStoryHostControlRetains(void) {
     return input_owner.owned || rotation.entered || active || requested<4u;

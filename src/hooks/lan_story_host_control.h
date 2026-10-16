@@ -33,6 +33,32 @@ BOOL SudekiMpLanStoryHostControlReady(void *controller,
 BOOL SudekiMpLanStoryHostControlBound(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanStoryScene *scene);
+/* Existing HELD exterior actor only, after the split owner positively proves
+ * a settled TEMP or a completed balanced return and that actor's retained
+ * exterior membership. Bound retains its independent lease across the lead's
+ * native interaction transition. The task owner's exact host-local interior
+ * approach proof also permits retention/steering before TEMP begins, with
+ * the same world/descriptor/group/controller/lead and existing remote lease.
+ * Ready requires the settled TEMP proof plus
+ * ordinary host input or the native shop modal for action admission; a return
+ * proof never grants actions.
+ * Neither permits acquisition, rotation, or input to the host's interior.
+ * Session/ACK, world pause and the remote body's action guards remain callers'
+ * responsibility. These never change the host's AI or native input filter. */
+BOOL SudekiMpLanStoryHostControlExteriorBound(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryScene *,unsigned character);
+BOOL SudekiMpLanStoryHostControlExteriorReady(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *,const SudekiMpLanStoryScene *,unsigned character);
+/* Between dispatches, revalidate the retained roster on the native thread;
+ * a copied controller witness is not authority for a native callback. */
+BOOL SudekiMpLanStoryHostControlExteriorNativeBound(const SudekiMpLanStoryNativeRoster *,unsigned character);
+BOOL SudekiMpLanStoryHostControlExteriorNativeReady(const SudekiMpLanStoryNativeRoster *,unsigned character);
+/* Steering/turn only: same positive exterior, approach or completed-return binding, independently
+ * of the lead's native modal filter, and the remote actor's pause count zero.
+ * World/body, session/ACK and packet freshness remain mandatory. A paused
+ * body must be held without even a neutral native movement submission.
+ * This does not replace NativeReady for action submission. */
+BOOL SudekiMpLanStoryHostControlExteriorNativeSteeringReady(const SudekiMpLanStoryNativeRoster *,unsigned character);
 /* Stop requesting rotations/menu input ownership, then service native filter
  * retirement before removing the story observer or destroying the world.
  * A native rotation already entered must first yield a coherent binding. */

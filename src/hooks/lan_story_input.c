@@ -369,10 +369,14 @@ BOOL SudekiMpLanStoryInputBlock(void *controller,void *actor,uint32_t transactio
     float x,z;
     return SudekiMpLanStoryInputSample(controller,actor,transaction,&x,&z) && focused && block_held;
 }
-void SudekiMpLanStoryInputMuteMovement(void) {
+void SudekiMpLanStoryInputMuteForCamera(void) {
     if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return;
     sample_x=sample_z=0;
     clear_melee(); ranged_held=block_held=FALSE;
+}
+void SudekiMpLanStoryInputMuteMovement(void) {
+    if(!native_thread_exact() || InterlockedCompareExchange(&callbacks,0,0)) return;
+    SudekiMpLanStoryInputMuteForCamera();
     look_x=look_y=0; look_x_at=look_y_at=look_sample_at=0;
 }
 

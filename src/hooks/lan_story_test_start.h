@@ -12,13 +12,25 @@
  * TestStartFollower = x,y,z. Not a gameplay feature. */
 BOOL SudekiMpLanStoryTestStartConfigure(HMODULE image, const float leader[3],
     const float follower[3]);
+/* Optional health-only test start: use the configured fractions once after
+ * load readiness, without placement or zone/TEMP operations. Clears any
+ * previous start configuration; no valid fraction leaves the aid unarmed.
+ * Startup-only, before service begins; used when TestStartLeader is absent. */
+BOOL SudekiMpLanStoryTestStartConfigureHealthOnly(HMODULE image);
 /* Optional [StoryAreas] TestStartZone: native zone (descriptor name) made
  * current before placing, via the area follower's native calls. */
 void SudekiMpLanStoryTestStartSetZone(const char *zone);
+/* Optional test-only split start. First place the party in TestStartZone;
+ * then enter this native TEMP with its authored arrival marker and place only
+ * the leader at the interior coordinates after the split has settled.
+ * Missing/invalid configuration disables this extra step. */
+BOOL SudekiMpLanStoryTestStartSetTemporary(const char *zone,const char *marker,
+    const float leader[3]);
 /* Optional [StoryAreas] TestStartLeaderHealth = fraction (0 < f < 1): after
- * placement the host leader's HP is lowered to that fraction of its current
- * value through the cleanroom resource setter, so item/heal gates can be
- * played from a fresh load. Test aid only; ignored outside (0,1). */
+ * placement, or at the unchanged save position in health-only mode, the host
+ * leader's HP is lowered to that fraction of its current value through the
+ * cleanroom resource setter, so item/heal gates can be played from a fresh
+ * load. Test aid only; ignored outside (0,1). */
 void SudekiMpLanStoryTestStartSetLeaderHealth(float fraction);
 /* Same for every other available party member ([StoryAreas] TestStartFollowerHealth). */
 void SudekiMpLanStoryTestStartSetFollowerHealth(float fraction);

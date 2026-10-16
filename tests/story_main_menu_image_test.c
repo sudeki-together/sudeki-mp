@@ -1,5 +1,6 @@
 #include "engine/build_identity.h"
 #include "hooks/lan_story_main_menu.h"
+#include "hooks/armour_menu.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,11 +53,17 @@ int main(int argc,char **argv) {
         {"EquipCall",0x16f1a4u,5u},{"MenuOpenEntry",0x956d0u,12u},{"MenuOpenSlot",0x2cae4cu,4u},
         {"OpenPauseCall",0x957f5u,5u},{"ClosePauseCall",0x95a14u,5u},
         {"OpenMoveCall",0x956f9u,5u},{"CloseMoveCall",0x959ffu,5u},{"UseCall",0x17761du,5u},
-        {"ListConfirmCall",0x177166u,5u}};
-    enum { SEAMS=12 };
-    uint8_t before[SEAMS][13];
+        {"ListConfirmCall",0x177166u,5u},
+        {"WeaponsRebuildEntry",0x16fc60u,32u},{"WeaponsDetailsEntry",0x16f5b0u,12u},
+        {"WeaponsListSelectEntry",0x17d3c0u,11u},{"WeaponsRebuildRet4",0x16fe8au,3u},
+        {"WeaponsSelectRet4",0x17d62au,3u},{"WeaponsEquipRebuildCall",0x1707e3u,5u},
+        {"WeaponsEquipSelectCall",0x1707f5u,5u},{"WeaponsRebuildDetailsCall",0x16fe76u,5u},
+        {"WeaponsLayerInputSlot",0x2d8930u,4u}};
+    enum { SEAMS=sizeof(seams)/sizeof(seams[0]) };
+    uint8_t before[SEAMS][32];
     for(unsigned i=0;i<SEAMS;++i) memcpy(before[i],image+seams[i].rva,seams[i].count);
     assert(SudekiMpLanStoryMainMenuInstall((HMODULE)image,allow_all,NULL,NULL));
+    assert(!SudekiMpLanStoryMainMenuRefreshInventory()); /* no shown native menu */
     assert(!SudekiMpLanStoryMainMenuInstall((HMODULE)image,allow_all,NULL,NULL)); /* once */
     /* Installed: both cycle calls and the equip call were redirected, the open slot replaced. */
     assert(memcmp(image+0x93b25u,before[1]+1,4u) && memcmp(image+0x93b48u,before[2]+1,4u) &&
@@ -76,8 +83,22 @@ int main(int argc,char **argv) {
             image[seams[i].rva+j]^=1u;
             assert(SudekiMpLanStoryMainMenuInstall((HMODULE)image,NULL,NULL,NULL) && SudekiMpLanStoryMainMenuUninstall());
         }
+        printf("PASS %s (%u byte mutations)\n",seams[i].name,seams[i].count);
     }
     for(unsigned i=0;i<SEAMS;++i) assert(!memcmp(before[i],image+seams[i].rva,seams[i].count));
+    /* The usual ArmourChoice profile owns rebuild/details. Main-menu refresh
+     * must coexist with those exact hooks, and leave their ownership intact. */
+    wchar_t temp[MAX_PATH],ini[MAX_PATH];
+    assert(GetTempPathW(MAX_PATH,temp) && GetTempFileNameW(temp,L"smr",0,ini));
+    assert(WritePrivateProfileStringW(L"Menus",L"ArmourChoice",L"true",ini));
+    assert(SudekiMpArmourMenuInstall((HMODULE)image,ini));
+    assert(SudekiMpLanStoryMainMenuInstall((HMODULE)image,allow_all,NULL,NULL));
+    assert(SudekiMpLanStoryMainMenuUninstall());
+    assert(SudekiMpArmourMenuWeaponsRefreshExact((HMODULE)image,NULL));
+    assert(SudekiMpArmourMenuUninstall());
+    assert(DeleteFileW(ini));
+    for(unsigned i=0;i<SEAMS;++i) assert(!memcmp(before[i],image+seams[i].rva,seams[i].count));
+    puts("PASS WeaponsRefreshWithOwnedArmourHooksAndRestore");
     printf("story main menu image guards ok\n");
     return 0;
 }
