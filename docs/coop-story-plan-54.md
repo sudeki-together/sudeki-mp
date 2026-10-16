@@ -6632,12 +6632,31 @@ the return) hit the same writer, 0xC3200 (CONFIRMED_LIVE + STATIC): a
 last-safe-position tracker. While the character stands on accepted ground it
 copies CPosition into +0xAC..+0xB4. On other ground (a surface-type test via
 actor+0x130 -> +0xF8 -> byte +2) it counts time in +0xB8, and past a limit
-the character is put back at the recorded spot. Both returns landed where
-Tal stood before the move, not at a follower slot: INFERENCE, the native
-fall/unsafe-ground recovery rejects the background house's floor, not a
-party catch-up. Next: why that floor fails the check (its surface or sector
-not registered for a non-current zone) and whether registering the house's
-collision/sector makes it count.
+the character is put back at the recorded spot. A 50 ms poll in the
+single-player stage then showed that the tracker ACCEPTS the house floor
+(safe spot 0.30, 0.10, -1.50; timer 0; surface type 2; sector 0x0D01), and
+that the character was moved about 0.4 s later to 17.00, 9.61, 373.00, about
+2.3 units from the leader; the tracker only copied that. The mover is the
+player-party formation snap in 0xB3690 (CONFIRMED_STATIC): with the global
+flag 0x3207E1 set (export `AiPCFormationSetSnapEnabled(bool)`, RVA 0xB2C30),
+a member in a follow AI state (0x0C/0x11), without blocking AI flags, whose
+squared distance from the leader exceeds 900 (30 units) is teleported beside
+the leader (0xF30A0 on member+0x98). Remote Tal 110 units away was not
+snapped during the chest test (not in a follow state then).
+
+CONFIRMED_LIVE (single-player stage, 2026-10-16): with the snap flag cleared,
+Tal moved into the background-resident Kamo shop stayed on its floor
+(0.30, 0.10, -1.50) for the whole 5 s sample while the host's current zone
+remained NewBrightwater. The flag was restored afterwards.
+
+So the host side of "go inside alone" is feasible with native pieces:
+background-load the house (SwitchZoneNOW, state 2), keep formation snap off
+while a remote player is inside (the native export; it also stops AI
+companions catching up, which scripts already toggle), place the player at
+the house's arrival point, and the reverse on exit. Open: walking around
+inside under remote control; NPCs/objects of a non-current house; the client
+side (Tal's own game loading and entering the house); exit; more than one
+house at once; eviction of the background slot by outdoor streaming.
 
 Client side (same run): moving Tal into a zone his own game does not have
 loaded failed the client's roster invariant (`pause_invariant_failed
