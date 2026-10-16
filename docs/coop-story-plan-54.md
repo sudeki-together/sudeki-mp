@@ -6468,6 +6468,19 @@ machines or a joiner prefix with no save at all.
   Full stage sequence and the end signal (music back to `BS_IllumCountry`)
   are on #80.
 
+### 2026-10-16 — H1 scope and owner decisions
+
+Owner decisions for H1 (remote interaction), 2026-10-16:
+- (a) While a remote player opens a chest, the other players keep full
+  control of their own characters; only the opener is held.
+- Doors are in H1 scope: a remote player can go inside through a house door
+  **alone**. The host's player stays outside with full control, the reverse
+  of the accepted case where the host is inside and the client outside. This
+  needs new engine work: the host keeps the interior loaded and simulates the
+  remote character there while its own view stays outside.
+- First chest gate: the farmhouse sword chest (the D6 chest).
+- NPC talk and shops for remote players come later.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New
