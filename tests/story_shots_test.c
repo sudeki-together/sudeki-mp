@@ -86,11 +86,15 @@ int main(void) {
     assert(decoded.actors[3].shots.latest==6 && decoded.actors[3].shots.events[3].origin[2]==400);
     bytes[3]=7; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[3]=SUDEKIMP_LAN_STORY_FRAME_VERSION;
     bytes[108+97]=1; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+97]=0;
-    /* #40/#74: byte 97 carries the worn armour (id+1, 101..140); 98/99 stay reserved. */
+    /* #40/#74: byte 97 carries the worn armour (id+1, 101..140); v10 byte 98
+     * is the H1a use hint (0..2); 99 stays reserved. */
     bytes[108+97]=141; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded));
     bytes[108+97]=102; assert(SudekiMpLanStoryFrameDecode(bytes,n,&decoded) && decoded.actors[3].armour_item_plus_one==102);
     bytes[108+97]=0;
-    bytes[108+98]=1; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+98]=0;
+    bytes[108+98]=1; assert(SudekiMpLanStoryFrameDecode(bytes,n,&decoded) && decoded.actors[3].use_hint==1u);
+    bytes[108+98]=2; assert(SudekiMpLanStoryFrameDecode(bytes,n,&decoded) && decoded.actors[3].use_hint==2u);
+    bytes[108+98]=3; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+98]=0;
+    bytes[108+99]=1; assert(!SudekiMpLanStoryFrameDecode(bytes,n,&decoded)); bytes[108+99]=0;
     {   SudekiMpLanStoryFrame armoured=f; uint8_t again[sizeof(bytes)]; size_t m=0;
         armoured.actors[3].armour_item_plus_one=106;
         assert(SudekiMpLanStoryFrameEncode(&armoured,again,sizeof(again),&m) && again[108+97]==106 &&

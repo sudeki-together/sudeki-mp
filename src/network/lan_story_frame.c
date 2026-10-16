@@ -99,7 +99,7 @@ static BOOL absent_actor(const SudekiMpLanStoryActor *a) {
     if(a->shots.count || a->shots.latest || !SudekiMpLanStoryShotsValid(&a->shots,0u)) return FALSE;
     if(a->generation || a->character || a->animation_state ||
         a->weapon_item_plus_one || a->weapon_visible || a->weapon_attachment[0] ||
-        a->weapon_attachment[1] || a->native_pose || a->armour_item_plus_one || a->combo_hud || a->hp || a->sp ||
+        a->weapon_attachment[1] || a->native_pose || a->armour_item_plus_one || a->use_hint || a->combo_hud || a->hp || a->sp ||
         a->x!=0 || a->y!=0 || a->z!=0 || a->facing_x!=0 || a->facing_z!=0 ||
         a->locomotion.valid || a->locomotion.sequence) return FALSE;
     for(unsigned i=0;i<4u;++i)
@@ -139,6 +139,7 @@ BOOL SudekiMpLanStoryActorValid(const SudekiMpLanStoryActor *a,unsigned characte
         if(item<weapon_first[character] || item>=weapon_first[character]+12u) return FALSE;
     }
     if(a->armour_item_plus_one && (a->armour_item_plus_one<101u || a->armour_item_plus_one>140u)) return FALSE;
+    if(a->use_hint>2u) return FALSE;
     if(a->native_pose) {
         const SudekiMpLanArenaLocomotion *m=&a->locomotion;
         if(a->animation_state || m->valid || m->sequence) return FALSE;
@@ -207,7 +208,7 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryActor *a) {
     for(unsigned i=0;i<3u;++i) put_float(p+79+i*4,m->blend[i]);
     p[91]=a->weapon_visible;
     p[92]=a->weapon_attachment[0]; p[93]=a->weapon_attachment[1]; put16(p+94,a->combo_hud);
-    p[96]=a->shots.count; p[97]=a->armour_item_plus_one; p[98]=p[99]=0; put32(p+100,a->shots.latest);
+    p[96]=a->shots.count; p[97]=a->armour_item_plus_one; p[98]=a->use_hint; p[99]=0; put32(p+100,a->shots.latest);
     for(unsigned i=0;i<SUDEKIMP_LAN_STORY_SHOT_HISTORY;++i) {
         const SudekiMpLanStoryShot *e=&a->shots.events[i]; uint8_t *q=p+104+i*36u;
         put32(q,e->sequence); put32(q+4,e->host_tick); q[8]=e->item; q[9]=0;
@@ -217,8 +218,8 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryActor *a) {
 }
 static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryActor *a,unsigned character) {
     SudekiMpLanArenaLocomotion *m=&a->locomotion;
-    if(p[0]!=character || p[3]>1u || p[91]>1u || p[98] || p[99]) return FALSE;
-    a->armour_item_plus_one=p[97];
+    if(p[0]!=character || p[3]>1u || p[91]>1u || p[98]>2u || p[99]) return FALSE;
+    a->armour_item_plus_one=p[97]; a->use_hint=p[98];
     a->character=p[0]; a->animation_state=p[1]; a->weapon_item_plus_one=p[2]; a->native_pose=p[3];
     a->weapon_visible=p[91]; a->combo_hud=get16(p+94);
     a->weapon_attachment[0]=p[92]; a->weapon_attachment[1]=p[93];

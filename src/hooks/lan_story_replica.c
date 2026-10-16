@@ -1,3 +1,4 @@
+#include "hooks/lan_story_remote_use.h"
 #include "hooks/lan_story_replica.h"
 #include "hooks/lan_arena_owner_view.h"
 #include "hooks/lan_story_residency.h"
@@ -529,6 +530,7 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
             *(void **)(weapon+0x268u)!=expected || !exact(roster,context)) return FALSE;
         replica_armour(c,actor,frame,state);
         if(!exact(roster,context)) return FALSE;
+        if(c==roster->leader_character) SudekiMpLanStoryRemoteUseIconApply(state->use_hint);
     }
     SetLastError(ERROR_SUCCESS); return TRUE;
 }

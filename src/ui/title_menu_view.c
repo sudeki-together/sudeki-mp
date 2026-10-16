@@ -440,7 +440,7 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
             DRAW_CALL(text_left(device,t->text,sizeof(t->text),x+scale,y+scale,
                 t->size*scale,width,tint(0x07121d,opacity*.8f)));
             DRAW_CALL(text_left(device,t->text,sizeof(t->text),x,y,
-                t->size*scale,width,tint(0xd7d0b8,opacity*.9f)));
+                t->size*scale,width,tint(t->colour?t->colour:0xd7d0b8,opacity*.9f)));
         }
         goto restore;
     }

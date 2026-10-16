@@ -6481,6 +6481,89 @@ Owner decisions for H1 (remote interaction), 2026-10-16:
 - First chest gate: the farmhouse sword chest (the D6 chest).
 - NPC talk and shops for remote players come later.
 
+### 2026-10-16 — H1a remote chest: seams for a scoped front (research, no code)
+
+CONFIRMED_STATIC (supported image), extending the H1 research above:
+- The front is always the handle at `party_group+0x90` (party group
+  `*(0x408D94)`; party slot N is `+0x90+N*0xC`). Every front read in the chest
+  call graph is `mov ecx,[0x408D94]; add ecx,0x90; lea eax,[esp+..];
+  call 0x15B0`, where 0x15B0/0x15E0 are the generic intrusive-handle copy and
+  release helpers (ECX = source handle, EAX = destination). Sites include
+  0x184F53, 0x184B3E, 0x184C75 (treasure), 0xB67C4, 0xB68BE, 0xB5E74, 0xB5F44
+  and the reads in 0xB60A0, 0xB6300 and 0xB5EC0.
+- The treasure use export (RVA 0x184EC0) and the treasure state machine (RVA
+  0x1849D0) are reached only through data references RVA 0x2D51A0 and
+  0x2D51C8, the treasure component's vtable slots.
+- The controller off/on calls are 0x295B0(0) at 0x184F7E and 0x295B0(1) at
+  0x184B69 and 0x184CA0. 0x295B0 writes controller+0x84.
+- The message builder RVA 0xCCD0 takes (manager, target handle, trigger
+  entity, event name, kind, source). It allocates a 0x44-byte SOL message (+0xC
+  trigger entity, +0x30 kind, +0x40 "source is the front") and queues it with
+  RVA 0x1B9EF0. The dispatcher RVA 0xD7A0 calls it with the candidate's target
+  (`candidate[1]-4`), trigger (`candidate[4]`) and "OnAction" for kind 2. The
+  gate RVA 0xD9A0 needs the press latch (manager+0x1D8) and refuses while the
+  front's arbiter has bit 0x80.
+- Candidates are 0x1C bytes at manager+0x20 (count +0xC, at most 15), added
+  by the scan RVA 0xD330 from the trigger-volume callback RVA 0x123D30.
+
+Design (HYPOTHESIS until built and played):
+1. Scoped front: relative-call hooks on the listed `call 0x15B0` sites only.
+   When a game-thread scope for a remote opener is active and ECX is
+   `party_group+0x90`, substitute that player's own linked slot handle. Outside
+   the scope they pass through unchanged.
+2. Scope windows: our own facing check (0xB60A0) and message build (0xCCD0)
+   for the press, then the treasure vtable slots (use export and state
+   machine) while that component's open belongs to the remote opener.
+3. The three controller calls are skipped inside the scope, so the host keeps
+   control. The opener is held by bit 0x200 on their own arbiter, which the
+   remote move path already respects.
+4. Press: the host turns the remote player's weak-attack press into a use when
+   an unopened chest's trigger is within reach and the facing check passes for
+   that player.
+
+Open before building: a live read of a real candidate (target and trigger
+values) at a chest the host stands at. Gate ordering: the farmhouse sword
+chest is inside the farmhouse, so the chest gate needs the remote player
+inside first (H1 doors, or the native take-along path, whose 2026-10-14
+client freeze was never retested).
+
+### 2026-10-16 — H1a remote chest use: built; owner sees a single clean open
+
+Code: `src/hooks/lan_story_remote_use.c` (new adapter), host press hook in
+`lan_story_runtime.c`, frame v10 use hint (byte 98), client icon apply in the
+replica. Live findings on the way (CONFIRMED_LIVE unless marked):
+- gdb on the treasure use export: the native open is dispatched by the
+  interaction manager to the usable listener RVA 0xB5C30 (`treasure+0x3C`,
+  args chest, actor, kind 2), then 0xB5CE0, then the use slot. No script call.
+  The host now calls that listener for the remote player inside a scope that
+  redirects the 16 front-handle copies to the opener's party slot, and skips
+  the three controller switches.
+- The open loop: the chest writes its use animation id into the opener's
+  arbiter action fields; they are recorded at start and restored at the end.
+- The second animation: the treasure finish handler (vtable +0x60, 0x185000)
+  runs from the opener's own actor update, outside the update scope, and wrote
+  the next action into the front (the host's character). It is now wrapped in
+  the same scope; the wrapper keeps ESI, which 0xB5E60 reads as its action id.
+- Paused areas: chests outside the host leader's area are paused and get no
+  updates (zero in 4 s by gdb), so the open stalled. The host steps a remote
+  opener's chest when it is paused or skipped for 0.5 s; stepping more often
+  replayed the animation. A 5 s watchdog releases a stalled open.
+- The bottom-left prompt is a CUIScene context-menu flag (set 0xB210, clear
+  0xB230 on `*(0x408D1C)`). The native idle update picks flag 4 when
+  treasure+0x73 bit 1 is set, otherwise 0x200; the host showed 0x84 with
+  Ailish at E3_NB_ShdCamp (the hand "open" prompt). A first candidate always
+  set 0x200: the client logged it, but the owner did not see the hand prompt.
+  The host now sends the native choice (frame v10 byte 98: 1 = flag 4,
+  2 = 0x200). The client's UI clears the flag (natively the usable re-sets
+  it every frame), so the client re-asserts it while the hint is on. The
+  prompt range is an approximation (3 units, about 70 degrees); natively it
+  is the chest's trigger volume. Owner (build 93e4af07): "it stays on now".
+- Owner result (build ce4fd823, E3_NB_ShdCamp next to the host): Tal opens
+  the chest once, gets the loot (also copied by D6) and returns to idle; the
+  host keeps control. Open: the remote player still walks through chests in a
+  paused area (#82); one startup where the client refused frames after
+  following the border warp (cause UNKNOWN, logs kept privately); doors (H1b).
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New

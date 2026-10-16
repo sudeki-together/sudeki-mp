@@ -17,4 +17,10 @@
 BOOL SudekiMpLanStoryNameTagsInstall(HMODULE);
 BOOL SudekiMpLanStoryNameTagsUninstall(void);
 void SudekiMpLanStoryNameTagsRender(void *device);
+/* Research aid ([StoryAreas] ResearchMarker=NAME[,NAME...], up to 4 native
+ * ResourceNames): every registry entity with one of these names gets a
+ * yellow overlay label with its camera distance, drawn on top of the scene
+ * (visible through walls) and pinned to the screen edge when off-screen or
+ * behind the camera. Read-only; empty disables it. */
+void SudekiMpLanStoryNameTagsSetMarkers(const char *names);
 #endif

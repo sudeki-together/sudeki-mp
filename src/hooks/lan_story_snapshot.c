@@ -1,3 +1,4 @@
+#include "hooks/lan_story_remote_use.h"
 #include "hooks/lan_story_snapshot.h"
 #include "hooks/lan_story_combo_hud.h"
 #include "engine/log.h"
@@ -183,6 +184,8 @@ capture_stage="observe_actor";         if(!SudekiMpLanStoryObserverRosterStillEx
             if(SudekiMpCharacterWornArmour(roster.actors[c],&armour) && armour>=100u && armour<=139u)
                 actor->armour_item_plus_one=(uint8_t)(armour+1u);
         }
+        /* H1a: interact icon for a remote-controlled character. */
+        if(c!=roster.leader_character) actor->use_hint=(uint8_t)SudekiMpLanStoryRemoteUseHint(roster.actors[c]);
         actor->weapon_visible=actor_before[c].weapon_visible;
         memcpy(actor->weapon_attachment,actor_before[c].attachment,sizeof(actor->weapon_attachment));
         /* A model without the authored hand locator (e.g. a [ResourceSwap]

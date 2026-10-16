@@ -110,8 +110,96 @@ static float tag_opacity(float depth) {
     float distant_fade=clamp01((FADE_FAR_END-depth)/(float)(FADE_FAR_END-FADE_FAR_FULL));
     return close_fade*distant_fade;
 }
+enum { MARKERS=4, MARKER_CHARS=48, MARKER_HITS=8, REGISTRY=0x409d8c };
+static char markers[MARKERS][MARKER_CHARS];
+static unsigned marker_count,marker_logs;
+void SudekiMpLanStoryNameTagsSetMarkers(const char *names) {
+    memset(markers,0,sizeof(markers)); marker_count=0;
+    for(const char *s=names;s && *s && marker_count<MARKERS;) {
+        while(*s==',' || *s==' ') ++s;
+        unsigned k=0;
+        while(*s && *s!=',' && k<MARKER_CHARS-1u) markers[marker_count][k++]=*s++;
+        while(k && markers[marker_count][k-1]==' ') --k;
+        markers[marker_count][k]=0;
+        if(k) ++marker_count;
+        while(*s && *s!=',') ++s;
+    }
+}
+static BOOL marker_name(const uint8_t *entity,char out[MARKER_CHARS]) {
+    const uint32_t *r=readable(entity+0x38u,4u)?*(const uint32_t *const *)(entity+0x38u):NULL;
+    if(!readable(r,8u)) return FALSE;
+    const char *s=(const char *)(uintptr_t)r[1]; unsigned k=0;
+    while(k<MARKER_CHARS-1u && readable(s+k,1u) && s[k]>=0x20 && s[k]<0x7f) { out[k]=s[k]; ++k; }
+    out[k]=0; return k!=0;
+}
+/* Screen point for any world point: inside the view it is the projection;
+ * off-screen or behind the camera it is pinned to the edge in its direction. */
+static BOOL marker_point(const Camera *c,const float p[3],float *sx,float *sy,float *depth,BOOL *pinned) {
+    float v[3]={0,0,0};
+    for(unsigned axis=0;axis<3;++axis) for(unsigned k=0;k<3;++k) v[axis]+=(p[k]-c->matrix[12+k])*c->matrix[4*axis+k];
+    if(!finite_vector(v,3,10000000)) return FALSE;
+    *depth=sqrtf(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+    float cx=c->width*0.5f,cy=c->height*0.5f,mx=c->width*0.06f,my=c->height*0.08f;
+    if(v[2]>c->near_z) {
+        *sx=cx+c->fx*v[0]/v[2]; *sy=cy-c->fy*v[1]/v[2];
+        if(isfinite(*sx) && isfinite(*sy) && *sx>=mx && *sx<=c->width-mx && *sy>=my && *sy<=c->height-my) {
+            *pinned=FALSE; return TRUE;
+        }
+    }
+    float dx=v[0],dy=-v[1];
+    if(v[2]<=c->near_z && fabsf(dx)<0.001f && fabsf(dy)<0.001f) dy=1.0f; /* straight behind: bottom */
+    if(v[2]<=c->near_z && fabsf(dy)<fabsf(dx)*0.25f) dy=fabsf(dx)*0.25f;
+    float tx=fabsf(dx)>0.0001f?(cx-mx)/fabsf(dx):1e9f,ty=fabsf(dy)>0.0001f?(cy-my)/fabsf(dy):1e9f;
+    float t=tx<ty?tx:ty;
+    *sx=cx+dx*t; *sy=cy+dy*t; *pinned=TRUE;
+    return isfinite(*sx) && isfinite(*sy);
+}
+static void render_markers(void *device) {
+    if(!marker_count) return;
+    const uint8_t *owner=readable(base+REGISTRY,4u)?*(const uint8_t *const *)(base+REGISTRY):NULL;
+    if(!readable(owner,0x40u)) return;
+    unsigned count=*(const uint32_t *)(owner+0x34u);
+    const uint8_t *const *entries=*(const uint8_t *const *const *)(owner+0x3cu);
+    if(!count || count>8192u || !readable(entries,count*sizeof(*entries))) return;
+    Camera cam; if(!camera(&cam)) return;
+    SudekiMpTitleExtras extras; HWND window=NULL; unsigned hits=0;
+    memset(&extras,0,sizeof(extras)); extras.overlay=TRUE;
+    for(unsigned i=0;i<count && hits<MARKER_HITS;++i) {
+        const uint8_t *e=entries[i]; char name[MARKER_CHARS];
+        if(!readable(e,0x48u) || !marker_name(e,name)) continue;
+        BOOL wanted=FALSE;
+        for(unsigned m=0;m<marker_count && !wanted;++m) wanted=!_stricmp(name,markers[m]);
+        if(!wanted) continue;
+        const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
+        if(!readable(position,0x24u) || *(void *const *)position!=base+POSITION_VTABLE ||
+            *(const void *const *)(position+0x10u)!=e) continue;
+        float at[3]; memcpy(at,position+0x18u,sizeof(at));
+        if(!finite_vector(at,3,1000000)) continue;
+        at[1]+=1.2f;
+        float sx,sy,depth; BOOL pinned;
+        if(!marker_point(&cam,at,&sx,&sy,&depth,&pinned)) continue;
+        const float size=18.f; float scale=fminf(cam.width/960.f,cam.height/720.f);
+        SudekiMpPanelText *t=&extras.texts[extras.text_count++];
+        snprintf(t->text,sizeof(t->text),"%s%s %.0fm%s",pinned?"<< ":"[ ",name,depth,pinned?" >>":" ]");
+        float pixels=SudekiMpTitleViewTextWidth(t->text,sizeof(t->text),size*scale);
+        if(pixels<0) pixels=0;
+        float left=sx-pixels*.5f;
+        if(left<4.f) left=4.f;
+        if(left+pixels>cam.width-4.f) left=cam.width-4.f-pixels;
+        t->x=left*960.f/cam.width; t->y=sy*720.f/cam.height; t->size=size; t->width=600.f; t->colour=0xffd21f;
+        if(marker_logs<16u) { ++marker_logs;
+            SudekiMpLogFormat("lan_story_name_tags event=marker name=%s world=%.1f,%.1f,%.1f screen=%.0f,%.0f distance=%.1f pinned=%u\r\n",
+                name,(double)at[0],(double)at[1]-1.2,(double)at[2],(double)sx,(double)sy,(double)depth,(unsigned)pinned); }
+        ++hits;
+        if(extras.text_count>=SUDEKIMP_PANEL_TEXTS) break;
+    }
+    if(!extras.text_count) return;
+    if(!SudekiMpTitleViewPrepare(device) || !SudekiMpTitleViewDraw(device,1,0,0,NULL,
+        SUDEKIMP_TITLE_BUTTON_REST,0,1.0f,&window,&extras)) return;
+}
 void SudekiMpLanStoryNameTagsRender(void *device) {
     if(!base || !device) return;
+    render_markers(device);
     SudekiMpTitleExtras extras; HWND window=NULL; Camera cam;
     BOOL have_camera=FALSE;
     memset(&extras,0,sizeof(extras)); extras.overlay=TRUE;

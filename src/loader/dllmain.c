@@ -311,6 +311,13 @@ static BOOL read_config_xyz(const wchar_t *path,const wchar_t *key,float out[3])
     return text[0] && swscanf(text,L"%f , %f , %f",&out[0],&out[1],&out[2])==3 &&
         isfinite(out[0]) && isfinite(out[1]) && isfinite(out[2]);
 }
+static void configure_research_markers(const wchar_t *path) {
+    wchar_t wide[200]; char narrow[200]={0};
+    GetPrivateProfileStringW(L"StoryAreas",L"ResearchMarker",L"",wide,200,path);
+    for(unsigned i=0;i<199u && wide[i];++i) narrow[i]=(wide[i]>=0x20 && wide[i]<0x7f)?(char)wide[i]:'_';
+    SudekiMpLanStoryNameTagsSetMarkers(narrow);
+    if(narrow[0]) SudekiMpLogFormat("story_markers event=configured names=%s\r\n",narrow);
+}
 static void configure_test_start(HMODULE game_module,const wchar_t *path) {
     float leader[3],follower[3];
     float leader_health=0.0f,follower_health=0.0f;
@@ -1218,6 +1225,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             /* Player names on the HUD card and above party heads (saved story). */
             (saved_story && !config_key_false(config_path,L"SudekiMP",L"PlayerNameTags") &&
                 !SudekiMpLanStoryNameTagsInstall(game_module)) ||
+            /* Research aid: yellow see-through markers on named entities. */
+            (saved_story && (configure_research_markers(config_path),FALSE)) ||
             /* Probe only: aggregate animation renderer update callers. */
             (read_config_boolean(config_path,L"StoryAreas",L"AnimTrace") &&
                 !SudekiMpLanStoryAnimTraceInstall(game_module)) ||

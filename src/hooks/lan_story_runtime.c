@@ -38,6 +38,7 @@
 #include "hooks/lan_story_door_camera.h"
 #include "hooks/lan_story_client_camera.h"
 #include "hooks/lan_story_inventory.h"
+#include "hooks/lan_story_remote_use.h"
 #include "hooks/lan_story_main_menu.h"
 #include "hooks/armour_menu.h"
 #include "ui/party_menu.h"
@@ -76,7 +77,7 @@ static int phases[4];
 static BOOL saved_profile,client_attempted,menu_attempted,input_attempted,replica_attempted;
 static BOOL world_attempted,effects_attempted,render_attempted,presentation_attempted;
 static BOOL realtime_attempted;
-static BOOL quick_menu_attempted;
+static BOOL quick_menu_attempted,remote_use_attempted;
 static BOOL main_menu_attempted; static HMODULE main_menu_module;
 static void action_trace(const char *reason,unsigned kind,unsigned slot,unsigned detail) {
     SudekiMpLogFormat("story_action event=expired reason=%s kind=%u slot=%u detail=%#x\r\n",reason,kind,slot,detail);
@@ -499,6 +500,10 @@ static void capture_initial_objects(void *controller,const SudekiMpControlUpdate
         BOOL ok=SudekiMpLanStoryLootTraceInstall((HMODULE)game_base) &&
             SudekiMpLanStoryLootTraceBind(w,&roster);
         SudekiMpLogFormat("story_loot_trace event=install ok=%u policy=observe_only\r\n",(unsigned)ok);
+        /* H1a: remote chest use, same native thread and boundary. */
+        remote_use_attempted=TRUE;
+        if(!SudekiMpLanStoryRemoteUseInstall((HMODULE)game_base))
+            SudekiMpLogFormat("story_remote_use event=unavailable error=%lu\r\n",(unsigned long)GetLastError());
     }
 }
 static BOOL replica_exact(const SudekiMpLanStoryNativeRoster *roster,void *unused) {
@@ -2005,6 +2010,7 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
                 c,(unsigned long)fire->press,outcome);
         }
     }
+    SudekiMpLanStoryRemoteUseService(); /* H1a: once per host frame */
     for(unsigned p=1;p<4u;++p) {
         if(!host_control[p].native_key.token) continue;
         unsigned character=host_control[p].native_key.seat;
@@ -2016,6 +2022,17 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
         uint8_t buttons=0;uint32_t serial=0;
         if(!SudekiMpLanPartyTakeStoryMelee(session,&host_control[p].connection,GetTickCount(),
             admitted,&buttons,&serial)) continue;
+        {   /* H1a: a weak-attack press facing an unopened chest is a use,
+             * exactly the native rule for the front player. The press is
+             * consumed; while the open runs the opener does not attack. */
+            void *actor=character<4u?roster.actors[character]:NULL;
+            if(actor && SudekiMpLanStoryRemoteUseActive(actor)) buttons=0;
+            else if(admitted && actor && (buttons&3u)==1u && SudekiMpLanStoryRemoteUseTry(actor)) {
+                buttons&=(uint8_t)~3u;
+                SudekiMpLogFormat("story_remote_use event=press_used player=%u character=%u serial=%lu\r\n",
+                    p,character,(unsigned long)serial);
+            }
+        }
         unsigned outcome=SudekiMpLanStoryControlMeleeSnapshot(w,&roster,&host_control[p].native_key,buttons);
         static unsigned snapshot_logs;
         if(serial && SudekiMpLogResearchEnabled() && snapshot_logs++<4096u)
@@ -3396,6 +3413,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     area_follow_ready=saved_profile && SudekiMpLanStoryAreaFollowInitialize(module);
     if(saved_profile && !(local_seat?SudekiMpLanStoryInventoryInitialize(module):
         SudekiMpLanStoryInventoryInstall(module))) goto fail;
+    if(saved_profile && local_seat && !SudekiMpLanStoryRemoteUseIconInitialize(module))
+        SudekiMpLogWrite("story_remote_use event=icon_unavailable\r\n");
     if(saved_profile && !SudekiMpLanStoryXpInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpStoryCharacterAudioInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpLanStoryMusicInitialize(module))
@@ -3499,6 +3518,8 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     unsigned exited=saved_profile?SudekiMpLobbyGameplayStoryExitStatus():0u;
     if(shots_attempted && !SudekiMpLanStoryShotsUninstall()) return retain_module();
     shots_attempted=FALSE;
+    if(remote_use_attempted && !SudekiMpLanStoryRemoteUseUninstall()) return retain_module();
+    remote_use_attempted=FALSE;
     if(loot_trace_attempted && !SudekiMpLanStoryLootTraceUninstall()) return retain_module();
     loot_trace_attempted=FALSE;
     /* Native Quit may have destroyed the world even if its final observation

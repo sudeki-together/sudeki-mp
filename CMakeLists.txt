@@ -150,6 +150,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_client_camera.c
     src/hooks/lan_story_client_camera_height.c
     src/hooks/lan_story_inventory.c
+    src/hooks/lan_story_remote_use.c
     src/network/lan_story_door_view.c
     src/hooks/lan_story_host_control.c
     src/hooks/lan_story_control.c
@@ -1965,6 +1966,12 @@ target_include_directories(SudekiMP.StoryRealtimeImageTest PRIVATE src)
 target_compile_options(SudekiMP.StoryRealtimeImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StoryRealtimeImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StoryRealtimeImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryRemoteUseImageTest tests/story_remote_use_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryRemoteUseImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryRemoteUseImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryRemoteUseImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryRemoteUseImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryQuickMenuImageTest tests/story_quick_menu_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c src/engine/spirit_activation_abi.c)
 target_include_directories(SudekiMP.StoryQuickMenuImageTest PRIVATE src)
