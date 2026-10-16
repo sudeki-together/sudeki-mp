@@ -263,6 +263,69 @@ void SudekiMpLanStoryAreaResearchService(uint32_t now) {
             (unsigned long)(now-research_issued));
     }
 }
+/* Research (H1b client, [StoryAreas] ResearchEnterTemporary=ZONE,MARKER):
+ * once, on the client, enter that house locally with the native
+ * CWorld::EnterTemporaryZone(name, ResourceName marker) (RVA 0x64B0,
+ * thiscall), as the authored interior helper does; then log the client's
+ * current zone. While armed the ordinary follower stands down (it would
+ * return the client to the host's current zone). */
+enum { RVA_ENTER_TEMPORARY=0x64b0u };
+static char research_temp_zone[SUDEKIMP_STORY_AREA_NAME],research_temp_marker[64];
+static uint32_t research_temp_first,research_temp_done,research_temp_logged; static unsigned research_temp_logs;
+void SudekiMpLanStoryAreaSetResearchTemporary(const char *zone,const char *marker) {
+    memset(research_temp_zone,0,sizeof(research_temp_zone)); memset(research_temp_marker,0,sizeof(research_temp_marker));
+    if(zone && marker) { strncpy(research_temp_zone,zone,sizeof(research_temp_zone)-1u); strncpy(research_temp_marker,marker,sizeof(research_temp_marker)-1u); }
+    research_temp_first=research_temp_done=research_temp_logged=0; research_temp_logs=0;
+}
+BOOL SudekiMpLanStoryAreaResearchTemporaryArmed(void) { return research_temp_zone[0]!=0; }
+typedef void (__attribute__((thiscall)) *EnterTemporary)(void *,const char *,const void *);
+static void enter_temporary_use(void *resource,void *context) {
+    ((EnterTemporary)(base+RVA_ENTER_TEMPORARY))(context,research_temp_zone,resource);
+}
+void SudekiMpLanStoryAreaResearchClientService(uint32_t now) {
+    if(!research_temp_zone[0] || research_temp_logs>=60u) return;
+    static const uint8_t enter_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x24};
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!world || !*(world+WORLD_ARMED)) return;
+    if(!research_temp_first) { research_temp_first=now?now:1u; return; }
+    if(!research_temp_done && now-research_temp_first>12000u) {
+        research_temp_done=now?now:1u;
+        uint8_t *d=find(research_temp_zone,table,count);
+        /* The story observer owns an inline hook here (one adapter per
+         * seam); calling through it is the intended path. Accept the native
+         * entry or a JMP into this DLL. */
+        BOOL entry_ok=readable(base+RVA_ENTER_TEMPORARY,sizeof(enter_entry)) &&
+            !memcmp(base+RVA_ENTER_TEMPORARY,enter_entry,sizeof(enter_entry));
+        if(!entry_ok && readable(base+RVA_ENTER_TEMPORARY,5u) && base[RVA_ENTER_TEMPORARY]==0xe9u) {
+            int32_t rel; memcpy(&rel,base+RVA_ENTER_TEMPORARY+1u,4u);
+            const void *target=base+RVA_ENTER_TEMPORARY+5u+rel; HMODULE self=NULL,owner=NULL;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)(uintptr_t)&SudekiMpLanStoryAreaResearchClientService,&self);
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                (LPCSTR)target,&owner);
+            entry_ok=self && owner==self;
+        }
+        if(!d || !entry_ok) {
+            ++research_temp_logs; SudekiMpLogFormat("story_area_research event=client_enter_refused zone=%s found=%u\r\n",research_temp_zone,(unsigned)(d!=NULL));
+            return;
+        }
+        if(!SudekiMpLanStorySkyReleaseLighting()) { research_temp_done=0; return; }
+        SudekiMpLogFormat("story_area_research event=client_enter_temporary zone=%s marker=%s\r\n",research_temp_zone,research_temp_marker);
+        last_call_at=GetTickCount(); if(!last_call_at) last_call_at=1u;
+        InterlockedExchange(&calling,1);
+        BOOL ok=SudekiMpLanStoryWithResourceName(research_temp_marker,0x35u,enter_temporary_use,world);
+        InterlockedExchange(&calling,0);
+        SudekiMpLogFormat("story_area_research event=client_enter_returned ok=%u\r\n",(unsigned)ok);
+    }
+    if(research_temp_done && now-research_temp_logged>=1000u) {
+        research_temp_logged=now?now:1u; ++research_temp_logs;
+        uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT); char cn[SUDEKIMP_STORY_AREA_NAME]="-";
+        if(current) (void)name_of(current,cn);
+        SudekiMpLogFormat("story_area_research event=client_state current=%s state=%lu pending=%u t=%lu\r\n",cn,
+            current?(unsigned long)*(uint32_t *)(current+DESC_STATE):0ul,(unsigned)(*(void **)(world+WORLD_PENDING)!=NULL),
+            (unsigned long)(now-research_temp_done));
+    }
+}
 int SudekiMpLanStoryAreaZoneState(const char *zone) {
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
     uint8_t *d=world && zone && zone[0]?find(zone,table,count):NULL;

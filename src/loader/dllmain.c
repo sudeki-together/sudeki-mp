@@ -318,7 +318,26 @@ static void configure_research_markers(const wchar_t *path) {
     SudekiMpLanStoryNameTagsSetMarkers(narrow);
     if(narrow[0]) SudekiMpLogFormat("story_markers event=configured names=%s\r\n",narrow);
 }
+static void configure_research(const wchar_t *path) {
+    /* H1b research switches; inactive unless set. Read before the test-start
+     * placement keys so a client ini without them still arms its own. */
+    {
+        wchar_t zone[40]; char narrow[40]={0};
+        GetPrivateProfileStringW(L"StoryAreas",L"ResearchBackgroundZone",L"",zone,40,path);
+        for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
+        SudekiMpLanStoryAreaSetResearchZone(narrow);
+        float xyz[3];
+        if(narrow[0] && read_config_xyz(path,L"ResearchPlaceFollower",xyz)) SudekiMpLanStoryTestStartSetResearchPlace(narrow,xyz);
+        SudekiMpLanStoryTestStartSetResearchSnapOff(read_config_boolean(path,L"StoryAreas",L"ResearchSnapOff"));
+        wchar_t temp[96]; char t_narrow[96]={0};
+        GetPrivateProfileStringW(L"StoryAreas",L"ResearchEnterTemporary",L"",temp,96,path);
+        for(unsigned i=0;i<95u && temp[i];++i) t_narrow[i]=(temp[i]>=0x20 && temp[i]<0x7f)?(char)temp[i]:'_';
+        char *comma=strchr(t_narrow,',');
+        if(comma) { *comma=0; SudekiMpLanStoryAreaSetResearchTemporary(t_narrow,comma+1); }
+    }
+}
 static void configure_test_start(HMODULE game_module,const wchar_t *path) {
+    configure_research(path);
     float leader[3],follower[3];
     float leader_health=0.0f,follower_health=0.0f;
     {
@@ -347,14 +366,6 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
         GetPrivateProfileStringW(L"StoryAreas",L"TestStartZone",L"",zone,40,path);
         for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
         SudekiMpLanStoryTestStartSetZone(narrow);
-    }
-    {
-        wchar_t zone[40]; char narrow[40]={0};
-        GetPrivateProfileStringW(L"StoryAreas",L"ResearchBackgroundZone",L"",zone,40,path);
-        for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
-        SudekiMpLanStoryAreaSetResearchZone(narrow);
-        float xyz[3];
-        if(narrow[0] && read_config_xyz(path,L"ResearchPlaceFollower",xyz)) SudekiMpLanStoryTestStartSetResearchPlace(narrow,xyz);
     }
     {
         wchar_t zone[40],marker[96]; char narrow_zone[40]={0},narrow_marker[96]={0};

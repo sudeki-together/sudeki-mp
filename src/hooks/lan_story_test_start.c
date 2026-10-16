@@ -173,7 +173,8 @@ static void service_temporary(const SudekiMpLanStoryNativeRoster *roster,DWORD n
  * non-leader party member at the given point with the native setter on the
  * game thread, then log their positions once a second for 15 s. */
 static float research_xyz[3]; static char research_place_zone[40];
-static BOOL research_armed,research_placed; static DWORD research_resident_since,research_placed_at,research_logged_at;
+static BOOL research_armed,research_placed,research_snap_off;
+void SudekiMpLanStoryTestStartSetResearchSnapOff(BOOL off) { research_snap_off=off; } static DWORD research_resident_since,research_placed_at,research_logged_at;
 void SudekiMpLanStoryTestStartSetResearchPlace(const char *zone,const float xyz[3]) {
     research_armed=zone && zone[0] && xyz; research_placed=FALSE; research_resident_since=0;
     memset(research_place_zone,0,sizeof(research_place_zone));
@@ -185,8 +186,18 @@ void SudekiMpLanStoryTestStartResearchService(const SudekiMpLanStoryNativeRoster
     if(!research_placed) {
         if(SudekiMpLanStoryAreaZoneState(research_place_zone)!=2) { research_resident_since=0; return; }
         if(!research_resident_since) { research_resident_since=now?now:1u; return; }
-        if(now-research_resident_since<2000u || !SudekiMpLanStoryObserverNativeRosterExact(roster)) return;
+        if(now-research_resident_since<5000u || !SudekiMpLanStoryObserverNativeRosterExact(roster)) return;
         unsigned placed=0;
+        if(research_snap_off) {
+            /* Native export AiPCFormationSetSnapEnabled(bool), RVA 0xB2C30
+             * (cdecl): mov al,[esp+4]; mov [0x3207E1],al; ret. */
+            static const uint8_t snap_entry[]={0x8a,0x44,0x24,0x04,0xa2};
+            if(readable(base+0xb2c30u,10u) && !memcmp(base+0xb2c30u,snap_entry,sizeof(snap_entry)) &&
+                *(uint8_t **)(base+0xb2c35u)==base+0x3207e1u) {
+                ((void (__cdecl *)(int))(base+0xb2c30u))(0);
+                SudekiMpLogWrite("story_area_research event=formation_snap_off\r\n");
+            }
+        }
         for(unsigned c=0;c<4u;++c) if(c!=roster->leader_character && (roster->available_mask&(1u<<c)) && place(roster->actors[c],research_xyz)) ++placed;
         research_placed=TRUE; research_placed_at=now?now:1u; research_logged_at=0;
         SudekiMpLogFormat("story_area_research event=placed_followers zone=%s placed=%u at=%.2f,%.2f,%.2f\r\n",

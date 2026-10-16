@@ -46,6 +46,10 @@ int SudekiMpLanStoryAreaZoneState(const char *zone);
 /* Research (H1b): [StoryAreas] ResearchBackgroundZone. Host game thread. */
 void SudekiMpLanStoryAreaSetResearchZone(const char *zone);
 void SudekiMpLanStoryAreaResearchService(uint32_t now);
+/* Research (H1b client): [StoryAreas] ResearchEnterTemporary=ZONE,MARKER. */
+void SudekiMpLanStoryAreaSetResearchTemporary(const char *zone,const char *marker);
+BOOL SudekiMpLanStoryAreaResearchTemporaryArmed(void);
+void SudekiMpLanStoryAreaResearchClientService(uint32_t now);
 
 BOOL SudekiMpLanStoryEffectsCapture(SudekiMpStoryEffectState *out);
 /* Presentation never drives zone residency; only applies in its current zone. */

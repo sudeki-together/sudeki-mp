@@ -39,5 +39,6 @@ void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster
 /* Research (H1b): place non-leaders in a background-resident zone. */
 void SudekiMpLanStoryTestStartSetResearchPlace(const char *zone,const float xyz[3]);
 void SudekiMpLanStoryTestStartResearchService(const SudekiMpLanStoryNativeRoster *roster);
+void SudekiMpLanStoryTestStartSetResearchSnapOff(BOOL off);
 
 #endif

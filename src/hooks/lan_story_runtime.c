@@ -3172,9 +3172,11 @@ static void service(void *controller,void *data,
                 }
                 /* A host house entry does not move an exterior client or
                  * release that client's exterior effect owners. */
-                if(exterior && (!story_vfx.active || !_stricmp(story_vfx.current,area.current) || reset_story_vfx(w)))
+                if(exterior && !SudekiMpLanStoryAreaResearchTemporaryArmed() &&
+                    (!story_vfx.active || !_stricmp(story_vfx.current,area.current) || reset_story_vfx(w)))
                     SudekiMpLanStoryAreaFollow(&area,now,w);
             }
+            if(known && native.phase==SUDEKIMP_LAN_STORY_READY) SudekiMpLanStoryAreaResearchClientService(now);
             SudekiMpStoryXp xp;uint32_t xp_age=0;
             if(area_peer_known && known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
                 SudekiMpLanPartyGetStoryXp(session,&area_peer.lease,now,&xp,&xp_age))

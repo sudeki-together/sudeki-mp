@@ -6680,6 +6680,38 @@ by name. Next (client side): the client enters the house locally with the
 same zone and marker when its own character goes in, while its presentation
 accepts that character inside and the host's character outside.
 
+### 2026-10-16 — H1b co-op research: host side holds; our sync layer blocks the client
+
+Research builds 08c36c77 / cb8037f6 (switches: host `ResearchBackgroundZone`,
+`ResearchPlaceFollower`, `ResearchSnapOff`; client `ResearchEnterTemporary=
+LNBr_Kamo_shop,NB_Kamo_Shop_Start_Pos`), co-op pair:
+- CONFIRMED_LIVE host: with formation snap off (native export), Tal stayed in
+  the background-resident Kamo shop on its floor (y 0.08..0.10) while the
+  host's current zone stayed NewBrightwater. The co-op host matches the
+  single-player result.
+- CONFIRMED_LIVE client: Tal's game stopped presenting as soon as the host
+  background-loaded the shop. The host's scene observer counts the
+  background SwitchZoneNOW as a zone change (`zone_begin method=1`, epoch
+  +1). The client refuses frames from a new epoch until its own zone matches
+  (`spectator state=5 native_presentation_changed`), and the research build
+  had stood the client follower down. So the client never reached its own
+  house entry. A first attempt was also refused by our own guard: the story
+  observer owns an inline hook on EnterTemporaryZone, which the guard now
+  accepts.
+- Owner (earlier run): the host's camera stopped following Ailish while Tal
+  was in the shop. UNKNOWN cause; INFERENCE: the host camera frames the party.
+
+Design work before the next live test (our layer, not the engine):
+1. The host scene epoch must not change for a background house load made
+   for a remote player (or the client must accept that change without
+   re-matching its own zone).
+2. Client order: enter the house locally first, then accept host frames that
+   put its character in that house while the host's character is outside
+   (the reverse of the existing "host inside, client outside" foreign path).
+3. Host camera: keep framing the host's own character, not the party.
+4. Keep formation snap off only while a remote player is in a house; restore
+   on exit.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New
