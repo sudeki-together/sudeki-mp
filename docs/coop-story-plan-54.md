@@ -6666,6 +6666,20 @@ before the host moves him. The research switches are off in the stage.
 Not yet tested: the house's NPCs/scripts while not current; the client side
 (Tal's own game entering the house); exit and return.
 
+### 2026-10-16 — H1b: native house entry/exit arguments captured
+
+CONFIRMED_LIVE (gdb on the host while Ailish left and re-entered the Kamo
+shop): `CWorld::ExitTemporaryZone()` (RVA 0x6710, no arguments) and
+`CWorld::EnterTemporaryZone("LNBr_Kamo_shop", marker)` (RVA 0x64B0); the
+ResourceName marker carries id 0x8F6191ED = `NB_Kamo_Shop_Start_Pos` (the
+name hash). Both are called from the SOL script VM (the authored interior
+helper), not directly from the door trigger. The game data names doors and
+markers systematically (`<town>_Kamo_Shop_Entry_Trig`, `…_Exit_Trig`,
+`…_Start_Pos`, with NB_/CC_/CR_ town prefixes), so house doors can be mapped
+by name. Next (client side): the client enters the house locally with the
+same zone and marker when its own character goes in, while its presentation
+accepts that character inside and the host's character outside.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New
