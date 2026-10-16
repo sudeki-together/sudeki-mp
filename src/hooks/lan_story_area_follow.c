@@ -218,6 +218,51 @@ int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now) {
     return 1;
 }
 
+/* Research (H1b, [StoryAreas] ResearchBackgroundZone): once, on the host,
+ * background-load one named zone with the native SwitchZoneNOW while the
+ * current zone stays as it is, then log its native residency once a second.
+ * The question is whether a house descriptor reaches resident state 2
+ * without becoming current. Observation only after the one native call. */
+static char research_zone[SUDEKIMP_STORY_AREA_NAME];
+static uint32_t research_first,research_issued,research_logged;
+static unsigned research_logs;
+void SudekiMpLanStoryAreaSetResearchZone(const char *zone) {
+    memset(research_zone,0,sizeof(research_zone));
+    if(zone) strncpy(research_zone,zone,sizeof(research_zone)-1u);
+    research_first=research_issued=research_logged=0; research_logs=0;
+}
+void SudekiMpLanStoryAreaResearchService(uint32_t now) {
+    if(!research_zone[0] || research_logs>=120u) return;
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!world || !*(world+WORLD_ARMED)) return;
+    uint8_t *d=find(research_zone,table,count);
+    if(!d) { if(!research_logs++) SudekiMpLogFormat("story_area_research event=unknown_zone zone=%s\r\n",research_zone); return; }
+    if(!research_first) { research_first=now?now:1u; return; }
+    if(!research_issued && now-research_first>8000u) {
+        uint32_t state=*(uint32_t *)(d+DESC_STATE);
+        uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT);
+        if(state || current==d || *(void **)(world+WORLD_PENDING) || *(uint8_t **)(world+WORLD_TARGET)==d) {
+            ++research_logs; research_issued=now?now:1u;
+            SudekiMpLogFormat("story_area_research event=skipped zone=%s state=%lu current=%u pending=%u\r\n",research_zone,
+                (unsigned long)state,(unsigned)(current==d),(unsigned)(*(void **)(world+WORLD_PENDING)!=NULL));
+            return;
+        }
+        research_issued=now?now:1u;
+        SudekiMpLogFormat("story_area_research event=switch_zone_now zone=%s\r\n",research_zone);
+        call_zone(RVA_SWITCH_ZONE_NOW,research_zone);
+    }
+    if(research_issued && now-research_logged>=1000u) {
+        research_logged=now?now:1u; ++research_logs;
+        uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT),*target=*(uint8_t **)(world+WORLD_TARGET);
+        char cn[SUDEKIMP_STORY_AREA_NAME]="-",tn[SUDEKIMP_STORY_AREA_NAME]="-";
+        if(current) (void)name_of(current,cn);
+        if(target) (void)name_of(target,tn);
+        SudekiMpLogFormat("story_area_research event=state zone=%s state=%lu req30=%lu links=%lu current=%s target=%s pending=%u t=%lu\r\n",
+            research_zone,(unsigned long)*(uint32_t *)(d+DESC_STATE),(unsigned long)*(uint32_t *)(d+0x30u),
+            (unsigned long)*(uint32_t *)(d+0x3cu),cn,tn,(unsigned)(*(void **)(world+WORLD_PENDING)!=NULL),
+            (unsigned long)(now-research_issued));
+    }
+}
 int SudekiMpLanStoryAreaZoneState(const char *zone) {
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
     uint8_t *d=world && zone && zone[0]?find(zone,table,count):NULL;

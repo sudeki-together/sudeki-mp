@@ -43,6 +43,9 @@ uint32_t SudekiMpLanStoryAreaFollowLastCall(void);
 int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now);
 /* Native descriptor state of `zone` (3 when current), -1 when unknown. */
 int SudekiMpLanStoryAreaZoneState(const char *zone);
+/* Research (H1b): [StoryAreas] ResearchBackgroundZone. Host game thread. */
+void SudekiMpLanStoryAreaSetResearchZone(const char *zone);
+void SudekiMpLanStoryAreaResearchService(uint32_t now);
 
 BOOL SudekiMpLanStoryEffectsCapture(SudekiMpStoryEffectState *out);
 /* Presentation never drives zone residency; only applies in its current zone. */

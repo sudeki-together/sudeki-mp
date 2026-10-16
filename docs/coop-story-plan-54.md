@@ -6564,6 +6564,89 @@ replica. Live findings on the way (CONFIRMED_LIVE unless marked):
   paused area (#82); one startup where the client refused frames after
   following the border warp (cause UNKNOWN, logs kept privately); doors (H1b).
 
+### 2026-10-16 — H1b solo door entry: engine constraint (research, no code)
+
+CONFIRMED_STATIC (exports and decompile, supported image): building doors
+call `CWorld::EnterTemporaryZone(name, ResourceName)` (export RVA 0x64B0) and
+`CWorld::ExitTemporaryZone()` (RVA 0x6710); the main world stays registered
+(live 2026-08-21: Kamo, church). EnterTemporaryZone releases the current
+zone's renderer, makes the temporary descriptor the world's current zone
+(world+0x14 / state 4), stores the FRONT's position and inverted facing as
+the return point (world+0x28..0x40) and pauses the front (+0x2B). The world
+renders and simulates one current zone. A host whose own view stays outside
+therefore cannot also make an interior current for a remote player, and
+background loading is known to leave zones inert (TestStartZone finding).
+
+Consequence for the owner decision "Tal goes in alone": any form needs a
+change outside H1a's pattern:
+- A. The client simulates its player inside its own loaded interior. The host
+  parks that character outside; interior pickups and chests become client
+  claims that the host validates. This changes the authority model (owner
+  decision required by AGENTS.md).
+- B. The native take-along: the whole party enters together (simplest; the
+  host goes in too).
+- C. The host's world goes into the interior with the remote player while the
+  host's own character waits outside (the host player sees the interior).
+- D. Decouple the host view and camera from the current zone (Phase G scale);
+  UNKNOWN whether the renderer allows it at all.
+Decision pending.
+
+### 2026-10-16 — H1b research: a house can be resident while the host stays outside
+
+Owner direction: expand the engine rather than accept the one-zone limit
+("the engine was made for the original Xbox's memory"). Research path: zone
+bookkeeping, what a background zone lacks, hard limits, then live tests.
+
+CONFIRMED_LIVE (Ailish inside the Kamo shop, host memory): three zones were
+resident at once: NewBrightwater state 3 (main, still loaded), LNBr_Kamo_shop
+state 4 (current house; interior coordinates near the origin, e.g. 0.26,
+0.09, -1.81) and WS_Country_SE_to_Bright_NE state 2. The native return point
+outside the door was -18.8, -2.8, 340.1.
+
+CONFIRMED_STATIC: `SwitchZoneNOW` looks the name up in the world's descriptor
+table (houses included) and, for state 0, calls 0x5A70: it unloads the
+previous background target (world+0x394) and its linked zones, then sets the
+new one loading. The per-descriptor state setter is 0x10AD70 (new state in
+EAX). The single background slot is bookkeeping, not a hard limit.
+
+CONFIRMED_LIVE (research build 36573472, `[StoryAreas]
+ResearchBackgroundZone=LNBr_Kamo_shop`, host outside): one SwitchZoneNOW
+took the shop to state 1, then state 2 (resident) within 1 s and held there,
+with NewBrightwater still current. Tal's host body, moved externally to
+0.30, 0.40, -1.50, settled on the shop floor (y 0.10) within 0.4 s, so the
+background house's floor collision is active. Within 0.8 s he was moved back
+beside Ailish (16.04, 9.58, 371.8). A hardware watch on the repeated move
+caught the writer: CPosition::SetPosition called from 0x110BD0 (parent-matrix
+set) inside the movement/collision step 0x32320 (called per flagged body from
+0x336B0), which integrates the movement body's own position (+0x20..0x28)
+and writes it back. So it is not a party catch-up: INFERENCE, the external
+write moved only CPosition, not the movement body.
+
+Follow-up (research build 404b6a7a, `ResearchPlaceFollower=0.30,0.40,-1.50`,
+host game thread, native setter 0x3050 once the shop was resident 2 s):
+Tal settled at 0.30, 0.32, -1.50, then within 1 s stood at 16.76, 9.60,
+372.77, about 2 units behind Ailish (16.12, 9.57, 370.81) where a follower
+stands. So it is not a timing race. The movement component is actor+0x80 (vtable
+0x2C8644). A two-phase hardware watch on its +0xAC (both the placement and
+the return) hit the same writer, 0xC3200 (CONFIRMED_LIVE + STATIC): a
+last-safe-position tracker. While the character stands on accepted ground it
+copies CPosition into +0xAC..+0xB4. On other ground (a surface-type test via
+actor+0x130 -> +0xF8 -> byte +2) it counts time in +0xB8, and past a limit
+the character is put back at the recorded spot. Both returns landed where
+Tal stood before the move, not at a follower slot: INFERENCE, the native
+fall/unsafe-ground recovery rejects the background house's floor, not a
+party catch-up. Next: why that floor fails the check (its surface or sector
+not registered for a non-current zone) and whether registering the house's
+collision/sector makes it count.
+
+Client side (same run): moving Tal into a zone his own game does not have
+loaded failed the client's roster invariant (`pause_invariant_failed
+roster=0`) and stopped its presentation (the owner saw a freeze). Expected
+for this experiment: a real feature must load the house on the client
+before the host moves him. The research switches are off in the stage.
+Not yet tested: the house's NPCs/scripts while not current; the client side
+(Tal's own game entering the house); exit and return.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New

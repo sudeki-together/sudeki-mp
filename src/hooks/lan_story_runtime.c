@@ -3101,7 +3101,8 @@ static void service(void *controller,void *data,
             SudekiMpLanStoryNativeRoster start_roster;
             if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished() &&
                 SudekiMpLanStoryObserverRoster(controller,w,&native,&start_roster))
-                SudekiMpLanStoryTestStartService(&start_roster);
+                { SudekiMpLanStoryTestStartService(&start_roster); SudekiMpLanStoryTestStartResearchService(&start_roster); }
+            if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished()) SudekiMpLanStoryAreaResearchService(GetTickCount());
         }
         timing_end(&cast_service_timing,cast_start);
         LARGE_INTEGER control_start=timing_begin();

@@ -36,5 +36,8 @@ void SudekiMpLanStoryTestStartSetLeaderHealth(float fraction);
 void SudekiMpLanStoryTestStartSetFollowerHealth(float fraction);
 /* Native game thread, from the host runtime service with a proved roster. */
 void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster);
+/* Research (H1b): place non-leaders in a background-resident zone. */
+void SudekiMpLanStoryTestStartSetResearchPlace(const char *zone,const float xyz[3]);
+void SudekiMpLanStoryTestStartResearchService(const SudekiMpLanStoryNativeRoster *roster);
 
 #endif

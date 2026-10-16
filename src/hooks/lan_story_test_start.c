@@ -168,6 +168,43 @@ static void service_temporary(const SudekiMpLanStoryNativeRoster *roster,DWORD n
         (double)temporary_leader_xyz[1],(double)temporary_leader_xyz[2]);
 }
 
+/* Research (H1b, [StoryAreas] ResearchPlaceFollower + ResearchBackgroundZone):
+ * once the background zone has been resident (state 2) for 2 s, place every
+ * non-leader party member at the given point with the native setter on the
+ * game thread, then log their positions once a second for 15 s. */
+static float research_xyz[3]; static char research_place_zone[40];
+static BOOL research_armed,research_placed; static DWORD research_resident_since,research_placed_at,research_logged_at;
+void SudekiMpLanStoryTestStartSetResearchPlace(const char *zone,const float xyz[3]) {
+    research_armed=zone && zone[0] && xyz; research_placed=FALSE; research_resident_since=0;
+    memset(research_place_zone,0,sizeof(research_place_zone));
+    if(research_armed) { strncpy(research_place_zone,zone,sizeof(research_place_zone)-1u); memcpy(research_xyz,xyz,sizeof(research_xyz)); }
+}
+void SudekiMpLanStoryTestStartResearchService(const SudekiMpLanStoryNativeRoster *roster) {
+    if(!research_armed || !base || !roster || roster->leader_character>=4u) return;
+    DWORD now=GetTickCount();
+    if(!research_placed) {
+        if(SudekiMpLanStoryAreaZoneState(research_place_zone)!=2) { research_resident_since=0; return; }
+        if(!research_resident_since) { research_resident_since=now?now:1u; return; }
+        if(now-research_resident_since<2000u || !SudekiMpLanStoryObserverNativeRosterExact(roster)) return;
+        unsigned placed=0;
+        for(unsigned c=0;c<4u;++c) if(c!=roster->leader_character && (roster->available_mask&(1u<<c)) && place(roster->actors[c],research_xyz)) ++placed;
+        research_placed=TRUE; research_placed_at=now?now:1u; research_logged_at=0;
+        SudekiMpLogFormat("story_area_research event=placed_followers zone=%s placed=%u at=%.2f,%.2f,%.2f\r\n",
+            research_place_zone,placed,(double)research_xyz[0],(double)research_xyz[1],(double)research_xyz[2]);
+        return;
+    }
+    if(now-research_placed_at>15000u || (research_logged_at && now-research_logged_at<1000u)) return;
+    research_logged_at=now?now:1u;
+    for(unsigned c=0;c<4u;++c) {
+        if(!(roster->available_mask&(1u<<c))) continue;
+        const uint8_t *a=roster->actors[c],*p=readable(a,0x48u)?*(const uint8_t *const *)(a+0x44u):NULL;
+        if(!readable(p,0x24u)) continue;
+        const float *xyz=(const float *)(p+0x18u);
+        SudekiMpLogFormat("story_area_research event=follower_pos character=%u leader=%u pos=%.2f,%.2f,%.2f paused=%u zone_state=%d t=%lu\r\n",
+            c,(unsigned)(c==roster->leader_character),(double)xyz[0],(double)xyz[1],(double)xyz[2],(unsigned)a[0x2bu],
+            SudekiMpLanStoryAreaZoneState(research_place_zone),(unsigned long)(now-research_placed_at));
+    }
+}
 void SudekiMpLanStoryTestStartService(const SudekiMpLanStoryNativeRoster *roster) {
     if(!pending || !base || !roster || roster->leader_character>=4u ||
         !(roster->available_mask&(1u<<roster->leader_character))) { ready_since=0; return; }

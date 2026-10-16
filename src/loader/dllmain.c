@@ -349,6 +349,14 @@ static void configure_test_start(HMODULE game_module,const wchar_t *path) {
         SudekiMpLanStoryTestStartSetZone(narrow);
     }
     {
+        wchar_t zone[40]; char narrow[40]={0};
+        GetPrivateProfileStringW(L"StoryAreas",L"ResearchBackgroundZone",L"",zone,40,path);
+        for(unsigned i=0;i<39u && zone[i];++i) narrow[i]=(zone[i]>=0x20 && zone[i]<0x7f)?(char)zone[i]:'_';
+        SudekiMpLanStoryAreaSetResearchZone(narrow);
+        float xyz[3];
+        if(narrow[0] && read_config_xyz(path,L"ResearchPlaceFollower",xyz)) SudekiMpLanStoryTestStartSetResearchPlace(narrow,xyz);
+    }
+    {
         wchar_t zone[40],marker[96]; char narrow_zone[40]={0},narrow_marker[96]={0};
         float interior[3];
         GetPrivateProfileStringW(L"StoryAreas",L"TestStartTemporaryZone",L"",zone,40,path);
