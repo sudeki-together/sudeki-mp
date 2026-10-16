@@ -12,7 +12,8 @@
 #define SUDEKIMP_LOBBY_DISCOVERY_PORT 26771
 /* Matching saved-story builds now require the NPC world presentation stream.
  * Reject older lobbies before either side starts loading a saved game. */
-#define SUDEKIMP_LOBBY_VERSION 11
+/* 12: host save transfer (#72). */
+#define SUDEKIMP_LOBBY_VERSION 12
 #define SUDEKIMP_LOBBY_SAVE_LABEL 48
 enum { SUDEKIMP_LOBBY_NO_CHARACTER = 4 };
 enum { SUDEKIMP_LOBBY_AI_COVER, SUDEKIMP_LOBBY_SHARED_PAUSE };
@@ -61,6 +62,17 @@ typedef struct SudekiMpLobbyAdmission {
     uint64_t ticket; /* Host sees all; clients receive only their own. */
     uint8_t phase;
 } SudekiMpLobbyAdmission;
+/* #72 save transfer as seen by this side. Client: REQUESTED after
+ * SudekiMpLobbyRequestSave, RECEIVING after an accepted offer, COMPLETE when
+ * both records hashed to the published identity, FAILED with a
+ * SudekiMpSaveTransferRefusal code. Host: transfers_started counts offers. */
+enum { SUDEKIMP_LOBBY_SAVE_IDLE, SUDEKIMP_LOBBY_SAVE_REQUESTED, SUDEKIMP_LOBBY_SAVE_RECEIVING,
+    SUDEKIMP_LOBBY_SAVE_COMPLETE, SUDEKIMP_LOBBY_SAVE_FAILED };
+typedef struct SudekiMpLobbySaveTransfer {
+    uint8_t phase, refusal, host_has_records, reserved;
+    uint16_t permille;
+    uint32_t transfers_started;
+} SudekiMpLobbySaveTransfer;
 typedef struct SudekiMpLobbyStatus {
     SudekiMpLobbyPhase phase;
     uint8_t local_slot, advertised;
@@ -70,6 +82,7 @@ typedef struct SudekiMpLobbyStatus {
     char host_ipv4[16]; /* Actual connected endpoint, never host-supplied. */
     SudekiMpLobbyStart start;
     SudekiMpLobbySavedGame saved_game;
+    SudekiMpLobbySaveTransfer save_transfer;
     BOOL departure_safe;
     uint8_t running, absence_policy, paused;
     uint32_t roster_revision;
@@ -147,4 +160,17 @@ void SudekiMpLobbyAdmissionAck(SudekiMpLobby *, uint32_t sequence,
 BOOL SudekiMpLobbyHostAdmissionComplete(SudekiMpLobby *, unsigned player,
     uint32_t sequence, uint64_t ticket, BOOL success);
 void SudekiMpLobbyStatusGet(SudekiMpLobby *, SudekiMpLobbyStatus *);
+/* #72 host: the verified bytes of the currently selected save pair. Refused
+ * unless the destination is the saved game and both records have the fixed
+ * native sizes and hash to the published identity. A new selection or
+ * destination drops them and every transfer in progress. */
+BOOL SudekiMpLobbyProvideSaveRecords(SudekiMpLobby *, const uint8_t *fish, size_t fish_size,
+    const uint8_t *bunny, size_t bunny_size);
+/* #72 client: ask the host for the published save pair (this game does not
+ * have it). Only offers that follow a request are accepted. */
+BOOL SudekiMpLobbyRequestSave(SudekiMpLobby *);
+/* #72 client: copy out a COMPLETE, verified pair for the current published
+ * identity (buffers of exactly the native record sizes) and reset to IDLE. */
+BOOL SudekiMpLobbyTakeReceivedSave(SudekiMpLobby *, uint8_t *fish, size_t fish_size,
+    uint8_t *bunny, size_t bunny_size);
 #endif

@@ -162,7 +162,9 @@ static BOOL __attribute__((used,noinline)) equip_intercept(uint8_t *layer) {
                 if(index>=0 && (unsigned)index<MAX_ROWS && readable(rows,(index+1u)*4u) &&
                     readable(rows[index],ROW_ITEM+4u)) {
                     int id=*(int *)(rows[index]+ROW_ITEM); stage=3;
-                    if(id>=0 && id<48) { item=(unsigned)id; stage=4; outcome=equip_request(actor,item); }
+                    /* Weapon rows (0..47) or the armour choice page's rows
+                     * (armour ids 100..139, #40/#74); the runtime picks the kind. */
+                    if((id>=0 && id<48) || (id>=100 && id<=139)) { item=(unsigned)id; stage=4; outcome=equip_request(actor,item); }
                     else trace("equip_row_item",(unsigned)id,(unsigned)index);
                 } else trace("equip_row_unreadable",(unsigned)index,0);
             } else trace("equip_no_actor",selected,count);

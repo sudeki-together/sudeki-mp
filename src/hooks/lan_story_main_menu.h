@@ -15,7 +15,9 @@
  *    native open the selection moves to the player's own slot;
  *  - the Weapons layer equip call (RVA 0x16F1A4 -> RVA 0x1706D0, layer on
  *    the stack, RET 4): a client turns it into a host request instead of
- *    equipping its paused replica locally.
+ *    equipping its paused replica locally. The armour choice page reuses
+ *    this layer and call; its armour rows (ids 100..139) become armour
+ *    requests (#40/#74).
  * Equipment/use requests are applied by the host. Reward refresh reads the
  * local inventory through the existing weapon adapter and updates native UI. */
 

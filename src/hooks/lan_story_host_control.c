@@ -364,6 +364,27 @@ BOOL SudekiMpLanStoryHostControlReady(void *controller,
     int mode=input_owner.owned?0:1;
     return *(int *)(c+0x80u)==mode && *(int *)(c+0x84u)==mode;
 }
+/* Front use animations switch the controller off for their own duration:
+ * chest 0x184EC0 / 0x1849D0, breakable 0x150FF0 / 0x150B20 / 0x150DF0 and
+ * usable 0x19C470 / 0x19C010 set the front's arbiter bit 0x200 together with
+ * 0x295B0(0) (controller+0x84 = 0), and clear both at the end
+ * (CONFIRMED_STATIC 2026-10-16). Dialogue (0xEF700) and the script gamepad
+ * export (0x9DD40) never set 0x200. Such a lock holds only the front body;
+ * remote players keep their own control (owner decision H1 (a)). Read-only. */
+BOOL SudekiMpLanStoryHostControlFrontUseLock(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *w,const SudekiMpLanStoryScene *scene) {
+    if(!SudekiMpLanStoryHostControlBound(controller,w,scene) ||
+        input_owner.owned || input_owner.releasing) return FALSE;
+    const uint8_t *c=controller; int current=*(const int *)(c+0x80u);
+    if(*(const int *)(c+0x84u)!=0 || (current!=0 && current!=1)) return FALSE;
+    SudekiMpLanStoryNativeRoster r;
+    if(!observe(controller,w,scene,&r) || r.leader_character>=4u) return FALSE;
+    const uint8_t *front=r.actors[r.leader_character];
+    const uint8_t *arbiter=readable(front,0x94u)?*(const uint8_t *const *)(front+0x90u):NULL;
+    return readable(arbiter,0x54u) && *(void *const *)arbiter==base+0x2cc9acu &&
+        *(const void *const *)(arbiter+0x10u)==front &&
+        (*(const uint32_t *)(arbiter+0x50u)&0x200u)!=0u;
+}
 static BOOL exterior_actor_owned(const SudekiMpLanStoryNativeRoster *r,unsigned character) {
     SudekiMpLanPartyLease key={0};
     return SudekiMpLanPartyControlStoryTurnOwner(r->actors[character],&key) &&

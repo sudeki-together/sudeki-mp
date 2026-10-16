@@ -56,6 +56,13 @@ BOOL SudekiMpSaveCatalogRefresh(SudekiMpSaveCatalog *catalog);
  * not claim a byte baseline for fish; the fingerprint establishes that baseline. */
 BOOL SudekiMpSaveCatalogFingerprint(SudekiMpSaveCatalog *catalog,
     unsigned index, SudekiMpSaveFingerprint *fingerprint);
+/* #72 host: read the reviewed pair's bytes for the save transfer. Same
+ * guarded open as Fingerprint (listed identities, no reparse points); the
+ * buffers must match the file sizes exactly, and the bytes read must hash to
+ * the reviewed fingerprint. Nothing is written. */
+BOOL SudekiMpSaveCatalogRead(SudekiMpSaveCatalog *catalog, unsigned index,
+    const SudekiMpSaveFingerprint *fingerprint, uint8_t *fish, size_t fish_size,
+    uint8_t *bunny, size_t bunny_size);
 /* Confirmation: rehash the same selected pair and compare with Review. */
 BOOL SudekiMpSaveCatalogVerify(SudekiMpSaveCatalog *catalog,
     unsigned index, const SudekiMpSaveFingerprint *fingerprint);

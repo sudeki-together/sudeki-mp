@@ -534,3 +534,24 @@ fail:
 }
 
 BOOL SudekiMpArmourMenuActive(void) { return base != NULL; }
+BOOL SudekiMpArmourMenuRefreshShown(void *character) {
+    DWORD saved = GetLastError();
+    uint8_t *ui, *front, *active;
+    void *party_ref;
+    BOOL refreshed = FALSE;
+    if (!base || !character) return FALSE;
+    ui = ptr_at(base + UI_GLOBAL);
+    party_ref = current_party_ref();
+    /* Main Menu vtable RVA 0x2CAE0C, shown byte +0x29, preview manager +0x178. */
+    if (!ui || !readable(ui, UI_PREVIEW_FLAG + 4) || *(void **)ui != base + 0x2cae0c || ui[0x29] != 1 ||
+        !party_ref || ptr_at(party_ref) != character || !readable(ui + UI_PREVIEW, 0x40)) { SetLastError(saved); return FALSE; }
+    refresh_preview(ui, party_ref);
+    refreshed = TRUE;
+    front = ptr_at(base + 0x408d1c);
+    active = front && readable(front, 0x174) ? ptr_at(front + 0x170) : NULL;
+    if (active && active == (uint8_t *)SudekiMpArmourMenuLayer) armour_fill(active);
+    SudekiMpLogFormat("armour_menu event=refresh_shown character=%p armour_layer=%d\r\n", character,
+        active && active == (uint8_t *)SudekiMpArmourMenuLayer);
+    SetLastError(saved);
+    return refreshed;
+}

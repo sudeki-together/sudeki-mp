@@ -28,4 +28,11 @@ BOOL SudekiMpArmourMenuActive(void);
  * Does not call native code, refresh a layer, or install another hook. The
  * caller must establish the active Weapons layer and its game-thread lease. */
 BOOL SudekiMpArmourMenuWeaponsRefreshExact(HMODULE image, void *layer);
+/* Saved-story client, game thread, after its replica's equipment changed to
+ * the host's state (#40/#74): when the Main Menu is shown on that character,
+ * reload the 3D preview (0x160F90 + 0x161B50, as an armour equip does) and,
+ * when the armour layer is the active UI, refill its list and details.
+ * FALSE when the menu is not shown, shows another character, or the adapter
+ * is not installed. Never equips anything. */
+BOOL SudekiMpArmourMenuRefreshShown(void *character);
 #endif

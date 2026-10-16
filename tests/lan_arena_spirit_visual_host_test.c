@@ -9,6 +9,7 @@
 /* Diagnostics are not an acceptance assertion and do not need disk I/O in
  * this deterministic standalone fixture. */
 void SudekiMpLogFormat(const char *format, ...) { (void)format; }
+void SudekiMpLogWrite(const char *message) { (void)message; }
 
 /* This registry fixture has no projectile lifetime service. Projectile
  * sampling is exercised separately; absence here must remain unknown. */

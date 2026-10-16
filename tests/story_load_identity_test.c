@@ -145,7 +145,36 @@ static void reservation_cases(void) {
     assert(SudekiMpLanStoryLoadCancel() && releases==before_releases+1 && !file_lease);
     assert(VirtualFree(records,0,MEM_RELEASE) && VirtualFree(base,0,MEM_RELEASE));base=NULL;
 }
+/* #72: the native save-list invalidation runs only on the title thread, only
+ * with no load in progress, and only over the exact native routine. The
+ * synthetic copy below is the supported image's RVA 0xFEFC0 with its absolute
+ * operands rebased; state 3 takes the "list is building" path (sets the
+ * native rebuild bit and returns), so no native free is executed. */
+static void native_catalog_invalidation(void) {
+    uint8_t *b=VirtualAlloc(NULL,0x34c000,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);assert(b);
+    uint8_t *r=b+0xfefc0u; uint32_t state_va=(uint32_t)(uintptr_t)(b+CATALOG_STATE);
+    uint32_t request_va=(uint32_t)(uintptr_t)(b+CATALOG_REQUEST);
+    static const uint8_t head[]={0x85,0xc0,0x7e,0x3d,0x83,0xf8,0x03,0x7e,0x31,0x83,0xf8,0x05,0x75,0x33};
+    r[0]=0xa1; memcpy(r+1,&state_va,4); memcpy(r+5,head,sizeof(head));
+    r[0x3f]=0x80; r[0x40]=0x0d; memcpy(r+0x41,&request_va,4); r[0x45]=0x02; r[0x46]=0xc3; /* 0x4fefff: or [request],2; ret */
+    uint8_t *saved_base=base; DWORD saved_thread=native_thread;
+    LONG saved_installed=installed,saved_phase=phase;
+    base=b; installed=1; native_thread=GetCurrentThreadId(); phase=SUDEKIMP_STORY_LOAD_IDLE;
+    *(unsigned *)(b+CATALOG_STATE)=3; b[CATALOG_REQUEST]=0;
+    assert(SudekiMpLanStoryLoadInvalidateNativeCatalog() && (b[CATALOG_REQUEST]&2));
+    phase=SUDEKIMP_STORY_LOAD_PREPARED; b[CATALOG_REQUEST]=0;
+    assert(!SudekiMpLanStoryLoadInvalidateNativeCatalog() && !b[CATALOG_REQUEST]);
+    phase=SUDEKIMP_STORY_LOAD_IDLE; native_thread=GetCurrentThreadId()+1u;
+    assert(!SudekiMpLanStoryLoadInvalidateNativeCatalog());
+    native_thread=GetCurrentThreadId(); r[7]^=1u;
+    assert(!SudekiMpLanStoryLoadInvalidateNativeCatalog() && !b[CATALOG_REQUEST]); r[7]^=1u;
+    memcpy(r+1,&request_va,4); assert(!SudekiMpLanStoryLoadInvalidateNativeCatalog()); memcpy(r+1,&state_va,4);
+    assert(SudekiMpLanStoryLoadInvalidateNativeCatalog() && (b[CATALOG_REQUEST]&2));
+    base=saved_base; native_thread=saved_thread; installed=saved_installed; phase=saved_phase;
+    VirtualFree(b,0,MEM_RELEASE);
+}
 int main(void) {
+    native_catalog_invalidation();
     InitializeCriticalSection(&lease_lock); lease_lock_ready=TRUE;
     installed=1; native_thread=GetCurrentThreadId();
     accepted.folder_slot=fake_lease.slot=5;

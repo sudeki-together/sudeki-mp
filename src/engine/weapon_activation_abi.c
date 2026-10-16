@@ -1229,6 +1229,92 @@ refuse:
     if (stage) *stage = s;
     return FALSE;
 }
+enum {
+    RVA_EQUIPPED_VTABLE = 0x002d4ef4u, RVA_ARMOUR_ITEM_VTABLE = 0x002d39b8u, RVA_ARMOUR_EQUIP = 0x00160580u,
+    CHARACTER_EQUIPPED_OFFSET = 0xe0u, EQUIPPED_ARMOUR_OFFSET = 0x18u, EQUIPPED_ARMOUR_ID_OFFSET = 0x1cu,
+    ARMOUR_FIRST_ID = 100u, ARMOUR_LAST_ID = 139u, ITEM_CLASS_OFFSET = 0x88u, ITEM_USED_ON_OFFSET = 0x84u
+};
+static uint8_t *character_equipped(void *character) {
+    uint8_t *base = (uint8_t *)native_module, *equipped;
+    if (base == NULL || !readable_memory((uint8_t *)character + CHARACTER_EQUIPPED_OFFSET, 4u)) return NULL;
+    equipped = *(uint8_t **)((uint8_t *)character + CHARACTER_EQUIPPED_OFFSET);
+    if (!readable_memory(equipped, 0x20u) || *(void **)equipped != base + RVA_EQUIPPED_VTABLE ||
+        *(void **)(equipped + 0x10u) != character) return NULL;
+    return equipped;
+}
+static uint8_t *armour_definition(unsigned int item_id) {
+    uint8_t *base = (uint8_t *)native_module, *database, *item;
+    if (base == NULL || item_id < ARMOUR_FIRST_ID || item_id > ARMOUR_LAST_ID ||
+        !readable_memory(base + RVA_ITEM_DATABASE_GLOBAL, 4u)) return NULL;
+    database = *(uint8_t **)(base + RVA_ITEM_DATABASE_GLOBAL);
+    if (!readable_memory(database, 12u + (item_id + 1u) * 4u)) return NULL;
+    item = *(uint8_t **)(database + 12u + item_id * 4u);
+    if (!readable_memory(item, 0x8cu) || *(void **)item != base + RVA_ARMOUR_ITEM_VTABLE ||
+        *(uint32_t *)(item + ITEM_ID_OFFSET) != item_id) return NULL;
+    return item;
+}
+BOOL SudekiMpCharacterWornArmour(void *character, unsigned int *item_id) {
+    uint8_t *equipped = character_equipped(character), *item;
+    if (!item_id || !equipped) return FALSE;
+    *item_id = 0u;
+    item = *(uint8_t **)(equipped + EQUIPPED_ARMOUR_OFFSET);
+    if (!item) return TRUE;
+    unsigned int id = *(uint32_t *)(equipped + EQUIPPED_ARMOUR_ID_OFFSET);
+    if (armour_definition(id) != item) return FALSE;
+    *item_id = id;
+    return TRUE;
+}
+unsigned int SudekiMpStoryArmourClassForCharacter(unsigned int character) {
+    static const unsigned int classes[4] = {0x15u, 0x16u, 0x13u, 0x14u}; /* Buki, Elco, Tal, Ailish */
+    return character < 4u ? classes[character] : 0u;
+}
+BOOL SudekiMpArmourItemWearable(unsigned int character, unsigned int item_id) {
+    uint8_t *item = armour_definition(item_id);
+    unsigned int wanted = SudekiMpStoryArmourClassForCharacter(character);
+    if (!item || !wanted || *(uint32_t *)(item + ITEM_CLASS_OFFSET) != wanted) return FALSE;
+    return *(int32_t *)(item + ITEM_USED_ON_OFFSET) == 1 || *(int32_t *)(item + ITEM_USED_ON_OFFSET) == 2;
+}
+BOOL SudekiMpArmourEquipEntryExact(void) {
+    /* push ebx; mov ebx,[esp+8]; push ebp; push esi; mov esi,eax; push edi;
+     * test esi,esi; je; mov eax,[ebx+0x18]; cmp eax,esi */
+    static const uint8_t entry[] = {0x53,0x8b,0x5c,0x24,0x08,0x55,0x56,0x8b,0xf0,0x57,0x85,0xf6,0x0f,0x84};
+    static const uint8_t compare[] = {0x8b,0x43,0x18,0x3b,0xc6};
+    uint8_t *base = (uint8_t *)native_module;
+    return base != NULL && readable_memory(base + RVA_ARMOUR_EQUIP, 0x20u) &&
+        !memcmp(base + RVA_ARMOUR_EQUIP, entry, sizeof(entry)) &&
+        !memcmp(base + RVA_ARMOUR_EQUIP + 0x12u, compare, sizeof(compare)) &&
+        readable_memory(base + RVA_EQUIPPED_VTABLE, 4u) && readable_memory(base + RVA_ARMOUR_ITEM_VTABLE, 4u);
+}
+BOOL SudekiMpEquipCharacterArmourItem(void *character, unsigned int character_index, unsigned int item_id) {
+    uint8_t *base = (uint8_t *)native_module, *equipped, *item, *previous;
+    unsigned int worn = 0u;
+    if (!SudekiMpArmourEquipEntryExact()) {
+        SudekiMpLogFormat("armour_equip event=refused guard=entry item=%u\r\n", item_id); return FALSE;
+    }
+    equipped = character_equipped(character); item = armour_definition(item_id);
+    if (!equipped || !item || !SudekiMpArmourItemWearable(character_index, item_id) ||
+        !SudekiMpCharacterWornArmour(character, &worn)) {
+        SudekiMpLogFormat("armour_equip event=refused guard=identity item=%u character=%u\r\n", item_id, character_index); return FALSE;
+    }
+    if (worn == item_id) return TRUE;
+    previous = *(uint8_t **)(equipped + EQUIPPED_ARMOUR_OFFSET);
+    /* Each armour keeps its own runes: with +0x18 cleared the native equip
+     * skips copying the outgoing runes (armour-choice rule, docs/armour-choice.md). */
+    *(uint8_t **)(equipped + EQUIPPED_ARMOUR_OFFSET) = NULL;
+    {
+        void *target = base + RVA_ARMOUR_EQUIP;
+        __asm__ volatile("push %%ecx\n\tcall *%%edx"
+            : "+a"(item), "+c"(equipped), "+d"(target) : : "memory", "cc");
+    }
+    equipped = character_equipped(character);
+    BOOL applied = equipped && SudekiMpCharacterWornArmour(character, &worn) && worn == item_id;
+    if (!applied && equipped && !*(uint8_t **)(equipped + EQUIPPED_ARMOUR_OFFSET)) {
+        /* Never leave a character without its armour after a refused call. */
+        *(uint8_t **)(equipped + EQUIPPED_ARMOUR_OFFSET) = previous;
+    }
+    SudekiMpLogFormat("armour_equip item=%u character=%u applied=%u\r\n", item_id, character_index, (unsigned)applied);
+    return applied;
+}
 BOOL SudekiMpReduceLocalItem(unsigned int item_id) {
     typedef void (__attribute__((thiscall)) *ReduceFunction)(void *, int, int, int);
     static const uint8_t reduce_tail[] = {0x53,0x55,0x56,0x33,0xdb,0x57};

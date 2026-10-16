@@ -5,6 +5,7 @@
 #include "engine/build_identity.h"
 #include "engine/skill_activation_abi.h"
 #include "engine/weapon_activation_abi.h"
+#include "hooks/lan_story_inventory.h"
 #include "engine/log.h"
 #include "network/lan_party_motion.h"
 #include <math.h>
@@ -50,6 +51,32 @@ static struct EquipmentAttempt {
 } equipment_attempts[4];
 /* #74: one native weapon grant per host epoch/generation and character. */
 static struct EquipmentAttempt equipment_grants[4];
+/* #40/#74: one armour grant+equip attempt per host epoch/generation, armour
+ * and character; a refusal is logged once and never blocks the frame. */
+static struct ArmourAttempt { void *actor; uint32_t epoch,generation; uint8_t armour; } armour_attempts[4];
+static void replica_armour(unsigned c,void *actor,const SudekiMpLanStoryFrame *frame,
+    const SudekiMpLanStoryActor *state) {
+    unsigned worn=0,wanted=state->armour_item_plus_one?state->armour_item_plus_one-1u:0u;
+    if(!wanted || !SudekiMpCharacterWornArmour(actor,&worn) || worn==wanted) return;
+    struct ArmourAttempt *attempt=&armour_attempts[c];
+    if(attempt->actor==actor && attempt->epoch==frame->epoch &&
+        attempt->generation==state->generation && attempt->armour==state->armour_item_plus_one) return;
+    *attempt=(struct ArmourAttempt){actor,frame->epoch,state->generation,state->armour_item_plus_one};
+    /* D9: each game keeps its own inventory; equipment follows the character,
+     * so a missing armour is granted once before the native equip. */
+    SudekiMpStoryInventoryGrant grant; SudekiMpStoryInventoryGrantResult granted={0};
+    BOOL owned=FALSE,grant_ran=FALSE;
+    if(SudekiMpLanStoryInventoryPrepare(wanted,1u,&grant)) {
+        owned=grant.before>0u;
+        if(!owned) { applying=TRUE; grant_ran=SudekiMpLanStoryInventoryApply(&grant,&granted); applying=FALSE; }
+    }
+    applying=TRUE;
+    BOOL equipped=SudekiMpEquipCharacterArmourItem(actor,c,wanted);
+    applying=FALSE;
+    SudekiMpLogFormat("lan_story_replica event=armour character=%u epoch=%lu generation=%lu from=%u to=%u owned=%u granted=%u equipped=%u\r\n",
+        c,(unsigned long)frame->epoch,(unsigned long)state->generation,worn,wanted,(unsigned)owned,
+        grant_ran?(unsigned)granted.status:0u,(unsigned)equipped);
+}
 static SudekiMpLanArenaOwnerViewLease view_owner;
 static SudekiMpLanStoryView saved_view,last_view;
 static float saved_anchor[3];
@@ -500,6 +527,8 @@ BOOL SudekiMpLanStoryReplicaPrepareEquipment(const SudekiMpLanStoryNativeRoster 
         }
         if(*(void **)((uint8_t *)actor+0xc0u)!=weapon ||
             *(void **)(weapon+0x268u)!=expected || !exact(roster,context)) return FALSE;
+        replica_armour(c,actor,frame,state);
+        if(!exact(roster,context)) return FALSE;
     }
     SetLastError(ERROR_SUCCESS); return TRUE;
 }

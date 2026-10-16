@@ -178,6 +178,11 @@ capture_stage="observe_actor";         if(!SudekiMpLanStoryObserverRosterStillEx
         SudekiMpLanStoryActor *actor=&frame.actors[c];
         actor->generation=next.generation[c]; actor->character=(uint8_t)c;
         actor->weapon_item_plus_one=actor_before[c].item;
+        {   /* #40/#74: worn armour travels as state; unknown stays 0 (never "unequip"). */
+            unsigned armour=0;
+            if(SudekiMpCharacterWornArmour(roster.actors[c],&armour) && armour>=100u && armour<=139u)
+                actor->armour_item_plus_one=(uint8_t)(armour+1u);
+        }
         actor->weapon_visible=actor_before[c].weapon_visible;
         memcpy(actor->weapon_attachment,actor_before[c].attachment,sizeof(actor->weapon_attachment));
         /* A model without the authored hand locator (e.g. a [ResourceSwap]

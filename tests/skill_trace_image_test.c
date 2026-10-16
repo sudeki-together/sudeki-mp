@@ -9004,6 +9004,21 @@ int wmain(int argc, wchar_t **argv) {
         }
         image[0xd87bau] = saved_item_set_call;
     }
+    if (SudekiMpInitializeWeaponActivationAbi((HMODULE)image)) {
+        /* #40/#74: native armour equip entry RVA 0x160580 (EAX = armour,
+         * stack = CEquipped, RET 4) and its +0x18 compare are exact; one
+         * changed byte in either refuses the relay's native equip. */
+        uint8_t saved_entry = image[0x160580u + 9u], saved_compare = image[0x160592u + 2u];
+        if (!SudekiMpArmourEquipEntryExact()) { fputs("FAIL: armour equip entry rejected\n", stderr); ++failures; }
+        image[0x160580u + 9u] ^= 1u;
+        if (SudekiMpArmourEquipEntryExact()) { fputs("FAIL: changed armour equip entry admitted\n", stderr); ++failures; }
+        image[0x160580u + 9u] = saved_entry;
+        image[0x160592u + 2u] ^= 1u;
+        if (SudekiMpArmourEquipEntryExact()) { fputs("FAIL: changed armour compare admitted\n", stderr); ++failures; }
+        image[0x160592u + 2u] = saved_compare;
+        if (!SudekiMpArmourEquipEntryExact()) { fputs("FAIL: armour equip entry not restored\n", stderr); ++failures; }
+        SudekiMpResetWeaponActivationAbi();
+    }
     if (!SudekiMpInitializeWeaponActivationAbi((HMODULE)image) ||
         !SudekiMpInitializeItemActivationAbi((HMODULE)image)) {
         fprintf(stderr, "weapon activation ABI rejected image (error=%lu)\n",

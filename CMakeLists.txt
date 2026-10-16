@@ -46,6 +46,7 @@ add_library(SudekiMP SHARED
     src/ui/save_catalog.c
     src/ui/party_menu.c
     src/network/title_lobby.c
+    src/network/story_save_transfer.c
     src/loader/lobby_launch.c
     src/hooks/lobby_instance.c
     src/hooks/window_title.c
@@ -474,6 +475,7 @@ add_executable(SudekiMP.LanArenaSpiritVisualHostTest
     src/hooks/lan_arena_spirit_visual_host.c
     src/hooks/call_hook.c
     src/network/lan_arena_protocol.c
+    src/hooks/lan_story_inventory.c
 )
 target_include_directories(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE src)
 target_compile_definitions(SudekiMP.LanArenaSpiritVisualHostTest PRIVATE
@@ -1109,7 +1111,7 @@ target_compile_options(SudekiMP.LanPartyClientControlTest PRIVATE -Wall -Wextra 
 set_target_properties(SudekiMP.LanPartyClientControlTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-add_executable(SudekiMP.TitleLobbyProtocolTest tests/title_lobby_protocol_test.c)
+add_executable(SudekiMP.TitleLobbyProtocolTest tests/title_lobby_protocol_test.c src/network/story_save_transfer.c)
 target_include_directories(SudekiMP.TitleLobbyProtocolTest PRIVATE src)
 target_compile_options(SudekiMP.TitleLobbyProtocolTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.TitleLobbyProtocolTest PRIVATE ws2_32 bcrypt)
@@ -2097,6 +2099,12 @@ target_compile_options(SudekiMP.StoryLootGrantTransportTest PRIVATE -Wall -Wextr
 target_link_libraries(SudekiMP.StoryLootGrantTransportTest PRIVATE ws2_32 bcrypt)
 set_target_properties(SudekiMP.StoryLootGrantTransportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(SudekiMP.StorySaveTransferTest tests/story_save_transfer_test.c src/network/story_save_transfer.c)
+target_include_directories(SudekiMP.StorySaveTransferTest PRIVATE src)
+target_compile_definitions(SudekiMP.StorySaveTransferTest PRIVATE WIN32_LEAN_AND_MEAN)
+target_compile_options(SudekiMP.StorySaveTransferTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StorySaveTransferTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StorySaveTransferTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryMenuPolicyTest tests/story_menu_policy_test.c src/network/lan_story_menu_policy.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
 target_include_directories(SudekiMP.StoryMenuPolicyTest PRIVATE src)
 target_compile_definitions(SudekiMP.StoryMenuPolicyTest PRIVATE WIN32_LEAN_AND_MEAN)
@@ -2342,7 +2350,7 @@ target_link_libraries(SudekiMP.StoryMeleeTransportTest PRIVATE ws2_32 bcrypt)
 set_target_properties(SudekiMP.StoryMeleeTransportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.StoryProjectileVisualTest tests/story_projectile_visual_test.c
-    src/network/lan_arena_protocol.c src/hooks/call_hook.c)
+    src/network/lan_arena_protocol.c src/hooks/call_hook.c src/hooks/lan_story_inventory.c)
 target_include_directories(SudekiMP.StoryProjectileVisualTest PRIVATE src)
 target_compile_options(SudekiMP.StoryProjectileVisualTest PRIVATE -Wall -Wextra -Werror -UNDEBUG -ffunction-sections -fdata-sections)
 target_link_options(SudekiMP.StoryProjectileVisualTest PRIVATE -Wl,--gc-sections)

@@ -433,6 +433,21 @@ BOOL SudekiMpLanStoryLoadPrepare(SudekiMpSaveCatalog *catalog,unsigned index,
     SudekiMpLogFormat("story_load event=prepared folder_slot=%u files=pinned\r\n",reviewed_slot);
     return TRUE;
 }
+BOOL SudekiMpLanStoryLoadInvalidateNativeCatalog(void) {
+    /* mov eax,[CATALOG_STATE]; test eax,eax; jle; cmp eax,3; jle; cmp eax,5; jne */
+    static const uint8_t tail[]={0x85,0xc0,0x7e,0x3d,0x83,0xf8,0x03,0x7e,0x31,0x83,0xf8,0x05,0x75,0x33};
+    SudekiMpStoryLoadState current=state();
+    if(!InterlockedCompareExchange(&installed,0,0) || !base || !thread_exact() ||
+        (current!=SUDEKIMP_STORY_LOAD_IDLE && current!=SUDEKIMP_STORY_LOAD_FAILED) ||
+        !readable(base+0xfefc0u,5u+sizeof(tail)) || base[0xfefc0u]!=0xa1u ||
+        *(void **)(base+0xfefc1u)!=base+CATALOG_STATE || memcmp(base+0xfefc5u,tail,sizeof(tail))) {
+        SetLastError(ERROR_INVALID_STATE); return FALSE;
+    }
+    unsigned before=*(unsigned *)(base+CATALOG_STATE);
+    ((void (*)(void))(void *)(base+0xfefc0u))();
+    SudekiMpLogFormat("story_load event=native_catalog_invalidated state=%u->%u\r\n",before,*(unsigned *)(base+CATALOG_STATE));
+    return TRUE;
+}
 BOOL SudekiMpLanStoryLoadNeedsTitle(void) { return state()==SUDEKIMP_STORY_LOAD_PREPARED; }
 BOOL SudekiMpLanStoryLoadArmTitle(void *owner) {
     if(!thread_exact() || state()!=SUDEKIMP_STORY_LOAD_PREPARED || !title_identity(owner) ||

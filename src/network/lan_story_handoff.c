@@ -21,7 +21,8 @@ static BOOL action_slot_valid(unsigned kind,unsigned slot,unsigned extra,unsigne
     return (kind==SUDEKIMP_STORY_ACTION_SKILL && slot<6u) ||
         (kind==SUDEKIMP_STORY_ACTION_SPIRIT && slot>=1u && slot<=2u) ||
         (kind==SUDEKIMP_STORY_ACTION_MELEE && (character==0u || character==2u) && slot>=1u && slot<=3u) ||
-        (kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON && SudekiMpStoryWeaponItemForCharacter(character,slot));
+        (kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON && SudekiMpStoryWeaponItemForCharacter(character,slot)) ||
+        (kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR && character<4u && slot>=100u && slot<=139u);
 }
 BOOL SudekiMpLanStoryActionRequestValid(const SudekiMpLanStoryActionRequest *r) {
     return r && SudekiMpLanStoryControlFenceValid(&r->fence) && r->request &&

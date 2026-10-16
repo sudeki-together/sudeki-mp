@@ -455,11 +455,17 @@ enum { RVA_FX_VTABLE=0x2d3c7cu, RVA_FX_NODE_VTABLE=0x2d3ca4u, RVA_FX_UPDATE=0x13
  * flag 0x4000000 is set), then flag 1 cleared. The owner still releases it. */
 typedef void (__attribute__((thiscall)) *FxVisible)(void *,int);
 static BOOL fx_sigil(const uint8_t *e);
+static BOOL fx_hide_visual(uint8_t *e);
 static BOOL fx_hide(uint8_t *e) {
     /* Re-prove immediately before the visual write, including when called
      * outside the follow path. New SpecialEffect instances include hits,
      * pickups and level-up effects; their class alone grants no hide lease. */
     if(!fx_sigil(e)) return FALSE;
+    return fx_hide_visual(e);
+}
+/* Caller has just proved registry membership, the exact class and the
+ * resource that grants this hide. */
+static BOOL fx_hide_visual(uint8_t *e) {
     uint8_t *holder=readable(e,0x218u)?*(uint8_t **)(e+0x214u):NULL;
     uint8_t *object=readable(holder,0xcu)?*(uint8_t **)(holder+8u):NULL;
     if(!readable(object,0x38u)) return FALSE;
@@ -512,6 +518,35 @@ static BOOL fx_exact(const uint8_t *e) {
         *(void *const *)(e+8u)==image_base+RVA_FX_NODE_VTABLE &&
         ((void *const *)(image_base+RVA_FX_NODE_VTABLE))[1]==image_base+RVA_FX_UPDATE &&
         !memcmp(image_base+RVA_FX_UPDATE,fx_entry,sizeof(fx_entry));
+}
+/* Reveal markers (#79): fireflies, SFXAR006_10_REVEALED (.hom hash), mark
+ * an invisible chest or door until Ailish's dispel retires them on the host
+ * and fades the object in. The client's own script never runs the dispel;
+ * the world relay mirrors the fade (render alpha). A marker standing at an
+ * object the host has revealed is hidden like a sigil: visual flags only,
+ * its script owner keeps and releases it (hide CONFIRMED_LIVE 2026-10-16). */
+enum { RES_REVEAL_MARKER=0x3026f213u };
+BOOL SudekiMpLanStoryRevealMarkersHide(const float position[3]) {
+    if(!image_base || !position || !client_role) return FALSE;
+    const uint8_t *owner=readable(image_base+RVA_REGISTRY,4u)?*(const uint8_t *const *)(image_base+RVA_REGISTRY):NULL;
+    if(!readable(owner,0x40u)) return FALSE;
+    unsigned count=*(const uint32_t *)(owner+0x34u),hidden=0;
+    uint8_t *const *entries=*(uint8_t *const *const *)(owner+0x3cu);
+    if(!count || count>8192u || !readable(entries,count*sizeof(*entries))) return FALSE;
+    for(unsigned i=0;i<count;++i) {
+        uint8_t *e=entries[i];
+        if(!fx_exact(e) || (*(const uint32_t *)(e+0x29cu)&0x7fu)!=0x29u ||
+            *(const uint32_t *)(e+0x2a0u)!=RES_REVEAL_MARKER ||
+            *(uint8_t **)(e+0x44u)!=e+0x160u || *(void **)(e+0x160u)!=image_base+0x2cdefcu ||
+            *(uint8_t **)(e+0x170u)!=e) continue;
+        const float *at=(const float *)(e+0x160u+0x18u);
+        float dx=at[0]-position[0],dy=at[1]-position[1],dz=at[2]-position[2];
+        if(!isfinite(dx) || !isfinite(dy) || !isfinite(dz) || dx*dx+dz*dz>1.0f || fabsf(dy)>2.0f) continue;
+        if(fx_hide_visual(e)) ++hidden;
+    }
+    SudekiMpLogFormat("story_spawn_trace event=reveal_marker_hidden count=%u at=%.2f,%.2f,%.2f\r\n",
+        hidden,(double)position[0],(double)position[1],(double)position[2]);
+    return hidden!=0u;
 }
 static BOOL fx_sigil(const uint8_t *e) {
     return image_base && in_registry(e) && fx_exact(e) &&

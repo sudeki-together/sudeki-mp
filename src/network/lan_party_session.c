@@ -1054,7 +1054,8 @@ static BOOL story_action_current(const SudekiMpLanPartySession *s,const Peer *p,
      * menu cannot present frames, so its acknowledged frame falls behind the
      * host's while the control fence stays current. Skills/Spirit/melee keep
      * the eight-frame window. */
-    if(request->kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON || request->kind==SUDEKIMP_STORY_ACTION_USE_ITEM)
+    if(request->kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON || request->kind==SUDEKIMP_STORY_ACTION_USE_ITEM ||
+        request->kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR)
         /* The client cannot present, acknowledge frames or publish its scene
          * inside its menu; the control fence and READY phase are the currency
          * that matters for an equip. */
@@ -2914,6 +2915,7 @@ BOOL SudekiMpLanPartySendStoryAction(SudekiMpLanPartySession *s,
      * acknowledged frame cannot advance while the client's own menu is up. */
     BOOL frame_expired=p && s->story_frame_sequence &&
         request->kind!=SUDEKIMP_STORY_ACTION_EQUIP_WEAPON && request->kind!=SUDEKIMP_STORY_ACTION_USE_ITEM &&
+        request->kind!=SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR &&
         !sequence_ahead(request->acknowledged_frame,s->story_frame_sequence) &&
         (uint32_t)(s->story_frame_sequence-request->acknowledged_frame)>8u;
     BOOL ok=p && story_control_peer(s,p,&request->fence) &&

@@ -2,9 +2,12 @@
 #include "ui/save_catalog.h"
 #include "network/title_lobby.h"
 #include "network/lan_arena_endpoint.h"
+#include "network/story_save_transfer.h"
 #include "engine/log.h"
 #include "hooks/lobby_gameplay.h"
+#include "hooks/lan_story_load.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -50,6 +53,7 @@ void SudekiMpLobbyUiConfigureAuto(const SudekiMpLobbyAuto *config) {
 }
 BOOL SudekiMpLobbyUiAutoWantsOpen(void) { return auto_enabled && !auto_opened; }
 
+static BOOL save_missing(void);
 static BOOL start_busy(void) {
     return !status.running && status.start.phase>=SUDEKIMP_LOBBY_START_PREPARE && status.start.phase<=SUDEKIMP_LOBBY_START_COMPLETE;
 }
@@ -503,8 +507,8 @@ static void build_view(void) {
         if (host) control(VISIBILITY,SUDEKIMP_PANEL_BUTTON,504,492,364,40,
             status.advertised?"Discoverable on LAN":"Unlisted - Join by Address",!busy,status.advertised);
         else note(504,512,17,364,"Unclaimed characters stay with AI.");
-        control(READY,SUDEKIMP_PANEL_BUTTON,76,560,240,40,wanted_ready?"Not Ready":"Ready",
-            connected && (testroom || saved) && !busy && !status.running && local->locked,FALSE);
+        control(READY,SUDEKIMP_PANEL_BUTTON,76,560,240,40,wanted_ready?"Not Ready":save_missing()?"Receiving Save":"Ready",
+            connected && (testroom || saved) && !busy && !status.running && local->locked && !save_missing(),FALSE);
         control(START_GAME,SUDEKIMP_PANEL_BUTTON,340,560,280,40,busy?"Loading...":status.running?"Game Running":host?"Start Game":"Waiting for Host",
             host && ((testroom && SudekiMpLobbyGameplayTestroomAvailable()) ||
                 (saved && SudekiMpLobbyGameplaySavedAvailable())) &&
@@ -668,7 +672,7 @@ static void auto_step(void) {
     if (!leader_assigned && me->character<4u && !me->locked) {
         if (auto_act(LOCK_CHARACTER,0)) auto_log("lock"); return;
     }
-    if (auto_config.ready && !me->ready && !wanted_ready) { if (auto_act(READY,0)) auto_log("ready"); return; }
+    if (auto_config.ready && !me->ready && !wanted_ready && !save_missing()) { if (auto_act(READY,0)) auto_log("ready"); return; }
     if (status.phase==SUDEKIMP_LOBBY_HOSTING && auto_config.start && !auto_started) {
         unsigned present=0; BOOL all_ready=TRUE;
         for (unsigned i=0;i<4;++i) if (status.members[i].present) { ++present; if (!status.members[i].ready) all_ready=FALSE; }
@@ -676,6 +680,98 @@ static void auto_step(void) {
         if (status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME) return;
         if (auto_act(START_GAME,0)) { auto_started=TRUE; auto_log("start"); }
     }
+}
+/* #72: a joiner without the host's save receives it from the host. */
+static struct {
+    uint8_t fish[32],bunny[32];   /* identity this state belongs to */
+    BOOL checked,have,requested,imported,expired;
+    unsigned attempts; uint8_t logged_phase; DWORD retry_at;
+} save_rx_ui;
+static BOOL local_save_present(const SudekiMpLobbySavedGame *wanted) {
+    SudekiMpSaveFingerprint candidate; SudekiMpSaveTransferIdentity identity; unsigned reserved=0;
+    if (!SudekiMpSaveCatalogRefresh(&saves)) return FALSE;
+    memcpy(identity.fish_sha256,wanted->fish_sha256,32); memcpy(identity.bunny_sha256,wanted->bunny_sha256,32);
+    if (saves.directory[0] && SudekiMpSaveTransferFindImported(saves.directory,&identity,&reserved)) return TRUE;
+    for (unsigned i=0;i<saves.count;++i)
+        if (SudekiMpSaveCatalogFingerprint(&saves,i,&candidate) &&
+            !memcmp(candidate.fish_sha256,wanted->fish_sha256,32) &&
+            !memcmp(candidate.bunny_sha256,wanted->bunny_sha256,32)) return TRUE;
+    return FALSE;
+}
+static void expire_received_saves(void) {
+    if (save_rx_ui.expired) return;
+    save_rx_ui.expired=TRUE;
+    unsigned removed=0;
+    if (SudekiMpSaveCatalogRefresh(&saves) && saves.directory[0] &&
+        SudekiMpSaveTransferExpire(saves.directory,7ull*86400ull,&removed) && removed)
+        SudekiMpLogFormat("title_lobby event=received_saves_expired removed=%u age_days=7\r\n",removed);
+}
+static void import_received_save(void) {
+    uint8_t *fish=malloc(SUDEKIMP_SAVE_TRANSFER_FISH_BYTES),bunny[SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES];
+    SudekiMpSaveTransferIdentity identity; unsigned slot=0; BOOL taken=FALSE,imported=FALSE;
+    memcpy(identity.fish_sha256,status.saved_game.fish_sha256,32);
+    memcpy(identity.bunny_sha256,status.saved_game.bunny_sha256,32);
+    if (fish) taken=SudekiMpLobbyTakeReceivedSave(session,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny));
+    if (taken && SudekiMpSaveCatalogRefresh(&saves) && saves.directory[0])
+        imported=SudekiMpSaveTransferImport(saves.directory,fish,bunny,&identity,&slot);
+    SudekiMpLogFormat("title_lobby event=save_received taken=%u imported=%u reserved_slot=%u error=%lu\r\n",
+        (unsigned)taken,(unsigned)imported,slot,(unsigned long)(imported?0ul:GetLastError()));
+    free(fish);
+    save_rx_ui.imported=imported; save_rx_ui.have=imported;
+    /* The game cached its save list before this folder existed; let it
+     * rebuild so the native loader can find the reserved slot. */
+    if (imported && !SudekiMpLanStoryLoadInvalidateNativeCatalog()) {
+        save_rx_ui.have=FALSE;
+        SudekiMpLogFormat("title_lobby event=save_received native_catalog=refused error=%lu\r\n",(unsigned long)GetLastError());
+        strcpy(message,"The host's save was stored; restart the game to load it.");
+        return;
+    }
+    if (imported) { refresh_saves(); strcpy(message,"Received the host's save. You can get ready."); }
+    else strcpy(message,"The host's save arrived but could not be stored. Check the save folder.");
+}
+static void service_save_transfer(void) {
+    if (status.phase!=SUDEKIMP_LOBBY_CONNECTED || status.start.destination!=SUDEKIMP_LOBBY_DEST_SAVEDGAME ||
+        !status.saved_game.label[0]) return;
+    if (memcmp(save_rx_ui.fish,status.saved_game.fish_sha256,32) ||
+        memcmp(save_rx_ui.bunny,status.saved_game.bunny_sha256,32)) {
+        BOOL expired=save_rx_ui.expired;
+        memset(&save_rx_ui,0,sizeof(save_rx_ui)); save_rx_ui.expired=expired;
+        memcpy(save_rx_ui.fish,status.saved_game.fish_sha256,32);
+        memcpy(save_rx_ui.bunny,status.saved_game.bunny_sha256,32);
+    }
+    if (!save_rx_ui.checked) {
+        save_rx_ui.checked=TRUE;
+        save_rx_ui.have=local_save_present(&status.saved_game);
+        SudekiMpLogFormat("title_lobby event=save_check host_folder=%lu local_copy=%u\r\n",
+            (unsigned long)status.saved_game.folder_slot,(unsigned)save_rx_ui.have);
+    }
+    if (save_rx_ui.have) return;
+    /* No local copy: never be Ready without it. */
+    if (wanted_ready) { wanted_ready=FALSE; SudekiMpLobbyReady(session,FALSE); }
+    const SudekiMpLobbySaveTransfer *t=&status.save_transfer;
+    if (t->phase!=save_rx_ui.logged_phase) {
+        save_rx_ui.logged_phase=t->phase;
+        SudekiMpLogFormat("title_lobby event=save_transfer phase=%u permille=%u refusal=%u\r\n",
+            t->phase,t->permille,t->refusal);
+    }
+    DWORD now=GetTickCount();
+    if (t->phase==SUDEKIMP_LOBBY_SAVE_COMPLETE) { import_received_save(); return; }
+    if (t->phase==SUDEKIMP_LOBBY_SAVE_RECEIVING || t->phase==SUDEKIMP_LOBBY_SAVE_REQUESTED) {
+        snprintf(message,sizeof(message),"Receiving the host's save... %u%%",(unsigned)t->permille/10u);
+        return;
+    }
+    if (t->phase==SUDEKIMP_LOBBY_SAVE_FAILED)
+        snprintf(message,sizeof(message),"The host's save could not be received (reason %u).",(unsigned)t->refusal);
+    /* First request at once; at most two retries, five seconds apart. */
+    if (save_rx_ui.attempts<3u && (!save_rx_ui.attempts || (LONG)(now-save_rx_ui.retry_at)>=0) &&
+        SudekiMpLobbyRequestSave(session)) {
+        ++save_rx_ui.attempts; save_rx_ui.retry_at=now+5000u;
+        SudekiMpLogFormat("title_lobby event=save_requested attempt=%u\r\n",save_rx_ui.attempts);
+    }
+}
+static BOOL save_missing(void) {
+    return status.phase==SUDEKIMP_LOBBY_CONNECTED && status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        save_rx_ui.checked && !save_rx_ui.have;
 }
 void SudekiMpLobbyUiPoll(HWND window,BOOL input) {
     if (!opened) return;
@@ -693,6 +789,8 @@ void SudekiMpLobbyUiPoll(HWND window,BOOL input) {
     if (page==ROOM && editing!=player && (status.phase==SUDEKIMP_LOBBY_HOSTING || status.phase==SUDEKIMP_LOBBY_CONNECTED))
         snprintf(player,sizeof(player),"%s",status.members[status.local_slot].name);
     if (status.start.revision!=seen_revision) { seen_revision=status.start.revision; wanted_ready=FALSE; }
+    expire_received_saves();
+    service_save_transfer();
     service_start(window);
     auto_step();
     if (logged_start!=status.start.phase) {
@@ -832,7 +930,9 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection) {
     case JOIN_SELECTED:
         if (*armed_server.ipv4) { join_room(&armed_server); if (page==ROOM) *selection=0; }
         break;
-    case READY: wanted_ready=!wanted_ready; SudekiMpLobbyReady(session,wanted_ready); break;
+    case READY:
+        if (save_missing()) { strcpy(message,"Wait until the host's save has been received."); break; }
+        wanted_ready=!wanted_ready; SudekiMpLobbyReady(session,wanted_ready); break;
     case CHARACTER_BUKI: case CHARACTER_ELCO: case CHARACTER_TAL: case CHARACTER_AILISH:
         if (!SudekiMpLobbySelectCharacter(session,(unsigned)(armed_action-CHARACTER_BUKI),FALSE))
             strcpy(message,"Character selection is waiting for the host or the previous request.");
@@ -902,6 +1002,14 @@ BOOL SudekiMpLobbyUiCommit(unsigned *selection) {
             if (!SudekiMpLobbySelectSavedGame(session,&save)) {
                 strcpy(message,"The destination could not be changed. Return to the lobby and try again.");
                 break;
+            }
+            {   /* #72: keep the reviewed pair ready for joiners without it. */
+                uint8_t *fish=malloc(SUDEKIMP_SAVE_TRANSFER_FISH_BYTES),bunny[SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES];
+                BOOL provided=fish && SudekiMpSaveCatalogRead(&saves,selected_save,&reviewed_save,
+                        fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny)) &&
+                    SudekiMpLobbyProvideSaveRecords(session,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny));
+                free(fish);
+                SudekiMpLogFormat("title_lobby event=save_records provided=%u\r\n",(unsigned)provided);
             }
             SudekiMpLobbyStatusGet(session,&status);
             wanted_ready=status.members[status.local_slot].ready!=0;

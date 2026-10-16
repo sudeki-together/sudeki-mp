@@ -60,6 +60,18 @@ int main(void) {
     SudekiMpSaveFingerprint fingerprint;
     assert(SudekiMpSaveCatalogRefresh(catalog) && catalog->count==1 && catalog->entries[0].folder_slot==5);
     assert(SudekiMpSaveCatalogFingerprint(catalog,0,&fingerprint));
+    {   /* #72 host read of the reviewed pair: exact sizes and reviewed hashes only. */
+        uint8_t *fish_bytes=HeapAlloc(GetProcessHeap(),0,0x280200),bunny_bytes[0x600];assert(fish_bytes);
+        assert(SudekiMpSaveCatalogRead(catalog,0,&fingerprint,fish_bytes,0x280200,bunny_bytes,sizeof(bunny_bytes)));
+        assert(*(uint32_t *)fish_bytes==0x280000 && !memcmp(bunny_bytes,metadata,sizeof(metadata)));
+        assert(!SudekiMpSaveCatalogRead(catalog,0,&fingerprint,fish_bytes,0x2801ff,bunny_bytes,sizeof(bunny_bytes)));
+        assert(!SudekiMpSaveCatalogRead(catalog,0,&fingerprint,fish_bytes,0x280200,bunny_bytes,sizeof(bunny_bytes)-1u));
+        SudekiMpSaveFingerprint other=fingerprint;other.bunny_sha256[1]^=1u;
+        assert(!SudekiMpSaveCatalogRead(catalog,0,&other,fish_bytes,0x280200,bunny_bytes,sizeof(bunny_bytes)));
+        other=fingerprint;other.folder_slot=6;
+        assert(!SudekiMpSaveCatalogRead(catalog,0,&other,fish_bytes,0x280200,bunny_bytes,sizeof(bunny_bytes)));
+        HeapFree(GetProcessHeap(),0,fish_bytes);
+    }
     InitializeCriticalSection(&lease_lock);lease_lock_ready=TRUE;installed=1;native_thread=GetCurrentThreadId();
     base=VirtualAlloc(NULL,0x420000,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);assert(base);
     uint8_t manager[0x1c]={0},strings[0x14]={0},records[RECORD_BYTES];

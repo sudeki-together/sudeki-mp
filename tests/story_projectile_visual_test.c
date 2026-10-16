@@ -9,6 +9,7 @@ static SudekiMpLanPartyProjectileObservation extra[64];
 static BOOL observation_ok=TRUE;
 static unsigned observation_count;
 void SudekiMpLogFormat(const char *fmt,...) {(void)fmt;}
+void SudekiMpLogWrite(const char *message) {(void)message;}
 void *SudekiMpCleanroomEngineActorEntity(SudekiMpCleanroomActor actor) {(void)actor;return NULL;}
 BOOL SudekiMpLanPartyProjectileLifetimeObserve(SudekiMpLanPartyProjectileObservation *out,unsigned cap,unsigned *n) {
     if(!observation_ok || cap<observation_count) return FALSE;

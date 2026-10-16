@@ -183,6 +183,18 @@ static void exercise(unsigned character) {
         receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
         result.outcome=SUDEKIMP_STORY_ACTION_SUBMITTED; assert(!SudekiMpLanStoryActionResultValid(&result));
     }
+    { /* #40/#74 armour request: an armour item id (100..139); the host checks the class. */
+        ++r.request; r.kind=SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR; r.slot=101;
+        assert(SudekiMpLanStoryActionRequestValid(&r));
+        invalid=r; invalid.slot=99; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        invalid=r; invalid.slot=140; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        invalid=r; invalid.extra=1; assert(!SudekiMpLanStoryActionRequestValid(&invalid));
+        receive_request(&r,TRUE);
+        result=(SudekiMpLanStoryActionResult){r.fence,r.request,GetTickCount(),r.kind,r.slot,SUDEKIMP_STORY_ACTION_STARTED,0};
+        assert(SudekiMpLanStoryActionResultValid(&result));
+        assert(SudekiMpLanPartyPublishStoryActionResult(host,&peer.lease,&result));
+        receive_result(&r,SUDEKIMP_STORY_ACTION_STARTED);
+    }
     for(unsigned variant=1;variant<=2;++variant) {
         ++r.request; r.kind=SUDEKIMP_STORY_ACTION_SPIRIT; r.slot=(uint8_t)variant;
         invalid=r; invalid.slot=0; assert(!SudekiMpLanStoryActionRequestValid(&invalid));

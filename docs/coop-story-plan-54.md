@@ -6238,6 +6238,236 @@ log). A visible loading screen alone does not prove a full world unload.
 No travel was performed for this clarification. The owner does not need an
 extra full-unload trip to pass the already completed ground-florin check.
 
+### 2026-10-16 — Armour relay and live menu preview (#40, #74) — candidate, owner gate OPEN
+
+Unattended work (owner direction 2026-10-16: "work unattended on things you can
+do fully alone"). Revision `a706c1e` plus uncommitted changes; nothing pushed.
+
+CONFIRMED_LIVE read-only memory scan (both games of the live pair, image
+relocated to 0x7ABD0000 under Wine): armour items are ids 100..139 (class
+vtable RVA 0x2D39B8, item class +0x88 = 0x12..0x20); CEquipped =
+`*(character+0xE0)`, vtable RVA 0x2D4EF4, owner backpointer +0x10, worn armour
++0x18, its id +0x1C. Tal wears 101 and owns 100 and 101 in both games; Ailish
+wears 105. CONFIRMED_STATIC: native armour equip RVA 0x160580 takes the armour
+in EAX and CEquipped on the stack, RET 4; with +0x18 cleared it skips the rune
+copy (the armour-choice rule).
+
+Found while tracing: on the client the armour page's Enter reached the Main
+Menu equip intercept, which admitted only weapon ids, so armour equips were
+silently refused. And while the client's menu is shown the engine skips its
+world presentation, so the replica cannot follow a relayed weapon until the
+menu closes: that, not a missing refresh, is why the menu preview stayed stale.
+
+Candidate (DLL `75e3027e…`):
+- Party frame version 9: actor byte 97 carries the worn armour (id+1; 0 =
+  not observed, never "unequip"). Host fills it from CEquipped; the client
+  replica equips it natively once per epoch/generation/armour, granting the
+  item first if this game does not own it (D9), and never blocks the frame.
+- New request kind EQUIP_ARMOUR (slot = armour id 100..139, same fence-only
+  transport rules as EQUIP_WEAPON). Host checks the class for the character,
+  grants a missing armour once, equips natively (`host_equip_armour`).
+- On a STARTED weapon or armour result the client equips its own character
+  with the same native routine its menu would have used and refreshes the
+  open page and 3D preview (`equip_result … local=1 refreshed=1`).
+- Tests: story frame codec (armour byte bounds, round trip, reserved bytes),
+  action transport (armour request), SkillTrace image test (armour equip entry
+  and its +0x18 compare refuse a changed byte); Main Menu image/refresh,
+  inventory image, loot grant, item result suites still pass.
+
+**Owner gate (Ailish host, Tal client, both games freshly launched):**
+1. Tal opens M → Armor and equips the other armour (100 ↔ 101). Expected: the
+   preview in Tal's open menu changes at once; Ailish sees Tal's new armour;
+   after closing, Tal's own screen shows it too.
+2. Tal opens M → Weapons and swaps weapon. Expected: the menu preview now
+   updates while the menu is still open (previously stale).
+3. Ailish opens her M → Tal → Armor and switches Tal's armour. Expected: Tal's
+   screen shows the change without a freeze.
+Logs: client `story_main_menu event=equip_result`, `lan_story_replica
+event=armour`; host `host_equip_armour`, `armour_equip … applied=1`.
+
+### 2026-10-16 — H1 remote chest use: static research and proposed design (no code)
+
+CONFIRMED_STATIC (Ghidra decompiles + disassembly, supported image). How a
+chest is opened natively, and what it does to "the player":
+- Candidates: trigger-volume callback RVA 0x123D30 tests an entity against the
+  volume (RVA 0x124320, third argument "entity is front") and calls the scan
+  RVA 0xD330, which appends a candidate {kind, target, trigger entity} to the
+  interaction manager (`*(0x408D24)`, up to 15 at +0x20, stride 0x1C).
+- Per frame, RVA 0xCFD0 → 0xD6F0 → 0xD7A0 walks the candidates; with the press
+  latch (+0x1D8, written by the front's weak-attack press) the gate RVA 0xD9A0
+  checks OnAction presence, the front arbiter busy bit 0x80, combat and UI
+  state, then RVA 0xCCD0 builds the SOL message (+0xC trigger entity, event
+  string, kind, +0x40 "source is front") and queues it (RVA 0x1B9EF0). The
+  message carries no actor: the script and the natives it calls use the front.
+- The chest's OnAction script calls the treasure use export RVA 0x184EC0
+  (data reference RVA 0x2D51A0). It admits only if RVA 0xB60A0 accepts the
+  **front character's position and facing** against the chest, sets the
+  front arbiter bit 0x200 and switches the controller off (RVA 0x295B0(0) at
+  0x184F7E). The treasure state machine RVA 0x1849D0 then turns the front
+  toward the chest (RVA 0xB67B0 → turn RVA 0xB6E50), plays and waits on its
+  use animation (RVA 0xB5EC0/0xB5F30 → 0xE0EA0/0xE0F30), and in states 2/7
+  clears 0x200 on the front, switches the controller back on (0x184B69 /
+  0x184CA0) and awards the contents (picked up by the D6 loot copy).
+- The front is read from the party group `*(0x408D94)` at these sites in that
+  call graph: 0x184F43, 0x184B2E, 0x184C5E, 0xB60C1, 0xB6306, 0xB67B3,
+  0xB68AE, 0xB5E63, 0xB5EC3, 0xB5F33.
+
+Consequences: a host-proxy open (send OnAction as if Ailish used it) would
+freeze **Ailish's** controls, turn and animate **Ailish**, and refuse unless
+Ailish faces the chest; it would not let Tal open a chest Ailish is away from
+(the owner's complaint of 2026-10-14).
+
+Proposed design (HYPOTHESIS until built and played):
+1. Input: no new client path. The client already sends Tal's weak-attack
+   press. On the host, before submitting it as melee, check for a usable in
+   front of Tal (treasure entities in the world registry within reach, unopened,
+   and the 0xB60A0 facing test evaluated for Tal); if found, the press becomes
+   a use, exactly the native rule for the front player.
+2. Dispatch: build the chest's OnAction message with RVA 0xCCD0 for its
+   trigger entity (the same message the native dispatch would queue).
+3. Scoped identity: while that treasure component's use export and state
+   machine run, the ten front reads above resolve to Tal (call-site hooks on
+   their handle copies, scoped by the active component, or a shadow group with
+   slots swapped for the duration of those calls), so Tal is the one checked,
+   turned, animated and flagged 0x200.
+4. The controller on/off calls are skipped while the opener is remote (the
+   host keeps control); Tal's own control is held by the 0x200 bit, which the
+   remote move path already respects.
+5. Doors are a separate case: a door traverse moves its user, so doors need
+   their own trace before reusing this.
+
+Open questions for the owner before building: (a) while Tal opens a chest,
+should Ailish keep full control (proposed) or pause like single player; (b)
+which chest on the route is the first gate (the farmhouse sword chest was
+used for D6).
+
+### 2026-10-16 — #72 host save transfer to a joiner: built and run end to end
+
+Unattended work; revision `a706c1e` plus uncommitted changes, DLL `d0536c98…`.
+Protections are the owner's from #72.
+
+What was built:
+- `src/network/story_save_transfer.c`: policy-neutral core. Only the two
+  native records travel, as one stream (main record then small record), at
+  their fixed sizes (2,621,952 and 1,536 bytes; 26 of 26 saves in two
+  prefixes, CONFIRMED_LIVE). An offer must name exactly the hashes the lobby
+  already published; 448-byte chunks are accepted strictly in order for one
+  transfer id; the received bytes must hash to the published pair before they
+  are released. Staging writes through temporary names, re-reads and re-hashes.
+- Lobby (version 12): two frames (client save request, host save data) over
+  the existing exact-build TCP lobby. The host serves only its verified,
+  currently selected pair; a client accepts an offer only after it asked and
+  only for the published identity. Tests: offline protections (foreign
+  request ignored, unsolicited offer ignored, tampered chunk refused, a new
+  destination retires the pair) and a real-socket loopback moving the full
+  pair through the worker in about 1.2 s.
+- Import: a received pair goes to a reserved, marker-tagged folder
+  `SAVESLOT9900..9999`; an unmarked folder (a player's own save, even in that
+  range) is never written, reused or removed. Seven-day expiry removes only
+  marked folders' own three files. Expiry runs once when the lobby opens.
+- Lobby UI: the host provides its reviewed pair after selecting a save; a
+  joiner without a local copy requests it, shows progress, cannot get Ready
+  until it has it, imports it, then refreshes the game's save list.
+- The stale `TitleLobbyProtocolTest` expectations (destination before
+  selection, credential reclaim after departure) were updated to the current
+  lobby contract; it passes again, five runs in a row.
+
+CONFIRMED_STATIC + CONFIRMED_LIVE findings on the way:
+- The small record stores its own folder as a NUL-terminated string in the 16
+  bytes at 0x200 (`SAVESLOT0011\`; bytes after the terminator are left-over
+  buffer contents, e.g. `d7 75` in slot 0000). The native list keys rows by
+  that stored folder and loads from it: a copy left under another folder name
+  failed `story_load … reason=catalog_or_row`. The import therefore changes
+  only the four folder digits; the marker records the original folder; a
+  reserved copy is accepted only when its main record hashes to the published
+  value and its small record, with the original digits restored, does too.
+- The game caches its save list once (`*(RVA 0x34B320)` state 5). Its own
+  invalidation routine RVA 0xFEFC0 (used by native saving, callers RVA 0x804A0
+  and 0x164AA0) frees it so the next Load page rebuilds; the import calls it
+  through an exact-byte, title-thread, no-load-in-progress guard.
+
+CONFIRMED_LIVE end-to-end self-run (no gameplay input; the automated lobby
+selects, readies and starts): the client's copy of save 11 was moved out of
+its save folder; the client logged `save_check local_copy=0`, received the
+pair, `save_received imported=1 reserved_slot=9900`, `native_catalog_
+invalidated state=5->0`, `saved_pair_prepared host_folder=11
+local_folder=9900`, loaded and entered the game; the host loaded; the client
+presented host frames and took control of Tal. The client's own slot 11 was
+restored afterwards; the reserved copy stays (it expires after seven days).
+
+Not built yet (#72 scope): re-send when the host saves during the session,
+the client save-menu guard, the next-launch keep/discard prompt, the launcher
+import/export button and uninstall cleanup. Owner gate still needed on two
+machines or a joiner prefix with no save at all.
+
+### 2026-10-16 — Client Q-menu weapon swap; H1 owner answer; #79 filed
+
+- **Q-menu weapons (client):** the owner reported that M-menu weapon swaps
+  worked for Tal but Q-menu swaps did nothing. The client log showed
+  confirms on the weapons page as `category=2 limit=0`, so the press was
+  swallowed. The Q-menu adapter (`src/hooks/lan_story_quick_menu.c`) now
+  resolves a weapons row the way the native page does: the character's
+  weapon inventory category (Buki 7, Elco 6, Tal 4, Ailish 5; read from the
+  live item table), item lookup 0x21CE0, weapon vtable check, and the
+  character's own 12-id weapon range. It then queues EQUIP_WEAPON, which uses
+  the existing host relay and client result path. Evidence: CONFIRMED_TEST
+  (focused suites pass; full build clean). Live gate OPEN: the owner should
+  swap Tal's weapon from the Q menu.
+- **Build fixes:** a706c1e left four test targets unlinkable (the shared
+  world-visuals header now calls the inventory module; the outbox test needed
+  stubs for the client result effects). The test targets were fixed;
+  product code is unchanged.
+- **H1 decision (a):** while one player opens a chest, the other players keep
+  full control of their own characters. Only the opener's character is held
+  by the chest-open sequence. Chest choice for the first live gate: pending
+  from the owner.
+- **#79 filed:** in some scripted scenes (Ailish's weapon training) the client
+  sees a chest's glow but not the chest or the training obstacles.
+  HYPOTHESIS: script-spawned objects are absent from the client's world while
+  their SpecialEffect is replicated.
+- **#79 invisible chest, cause found (CONFIRMED_LIVE):** `HC_TutorialInvChest`
+  is loaded in both worlds. Ailish's dispel fades its render-object alpha
+  (object+0x13) from 0 to 255, removes the firefly marker
+  `SFXAR006_10_REVEALED` and plays `SFXAR005_30_REVEALED`; the client's own
+  script never runs it. Writing alpha 255 on the client made the chest visible
+  to Tal, and the hidden render flag on his firefly effect removed the
+  fireflies. Candidate fix (CONFIRMED_TEST only): world wire v11 carries
+  render alpha for scenery, doors and chests (flag 0x40, actor byte 127); when
+  a chest or door goes from invisible to visible, the client hides reveal
+  markers within 1 unit (visual flags only, like spawn sigils). Live gate
+  OPEN: reload before the dispel and repeat it. The weapon-training
+  obstacles are not yet checked.
+- **Client frozen while the host smashes or opens (owner report):** remote
+  steering required the host controller in its normal mode. Native front use
+  animations (chest 0x184EC0/0x1849D0, breakable 0x150FF0/0x150B20/0x150DF0,
+  usable 0x19C470/0x19C010) switch it off with 0x295B0(0) and set the front
+  arbiter bit 0x200 (CONFIRMED_STATIC). Live log: Tal held about 2.4 s per
+  smash and 4.7 s per chest. Dialogue and the script gamepad export switch it
+  off without 0x200, so they still hold remote players. Candidate fix
+  (CONFIRMED_TEST only): a read-only front-use lock check admits remote
+  steering, actions and turn leases during such an animation; swap, recruit
+  and menu gates are unchanged. Live gate OPEN.
+- **Tutorials (owner decision):** in Ailish's weapon training,
+  `HC_TutorialInvChest` and its marker exist only in the host's world
+  (registry diff, CONFIRMED_LIVE): the tutorial script creates them. Clients
+  will spectate Ailish's view during her tutorials instead of having objects
+  created in their worlds (#80). Detecting a tutorial is UNKNOWN. The same diff
+  showed two barrels the host smashed still standing on the client
+  (UNKNOWN cause, not yet filed).
+- **Tutorial stall traced to the test-start teleport (CONFIRMED_LIVE):** after
+  the hidden chest, the next stage (`HC_SE_Dispell`) never started in co-op or
+  single player when the party was placed by TestStartLeader/TestStartZone. A
+  vanilla run (observed by an external memory poller) and a modded
+  single-player run reached on foot both completed. Narrowed further: the
+  teleport is fine; `TestStartZone` (background `SwitchZoneNOW` load of the
+  zone) is the cause. A start at the countryside border without a zone key,
+  walking in, completes; a zone-key start west of the `HC_SE_zone_audio`
+  trigger still stalls. Background-loaded zone entities register with
+  refs=0 versus 1 normally; the missing setup is UNKNOWN. A test-tool
+  limitation, not a co-op gameplay bug.
+  Full stage sequence and the end signal (music back to `BS_IllumCountry`)
+  are on #80.
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New

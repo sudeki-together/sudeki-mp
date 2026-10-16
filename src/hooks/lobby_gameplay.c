@@ -1,4 +1,5 @@
 #include "hooks/lobby_gameplay.h"
+#include "network/story_save_transfer.h"
 #include "hooks/lan_party_runtime.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/lan_story_runtime.h"
@@ -186,6 +187,17 @@ static BOOL prepare_save(const SudekiMpLobbySavedGame *wanted) {
             if (selected!=~0u) { SetLastError(ERROR_DUP_NAME); return FALSE; }
             selected=i; local=candidate;
         }
+    }
+    if (selected==~0u) {
+        /* #72: a copy received from the host lives in a reserved folder whose
+         * stored folder field names that folder; it is accepted only when its
+         * bytes prove to be the published pair (see story_save_transfer.h). */
+        SudekiMpSaveTransferIdentity identity; unsigned reserved=0;
+        memcpy(identity.fish_sha256,wanted->fish_sha256,32); memcpy(identity.bunny_sha256,wanted->bunny_sha256,32);
+        if (catalog.directory[0] && SudekiMpSaveTransferFindImported(catalog.directory,&identity,&reserved))
+            for (unsigned i=0;i<catalog.count;++i) if (catalog.entries[i].folder_slot==reserved &&
+                SudekiMpSaveCatalogFingerprint(&catalog,i,&local) &&
+                !memcmp(local.fish_sha256,wanted->fish_sha256,32)) { selected=i; break; }
     }
     if (selected==~0u) { SetLastError(ERROR_FILE_NOT_FOUND); return FALSE; }
     /* Both peers inspect their fingerprint-matching local copy. A remote

@@ -421,6 +421,45 @@ BOOL SudekiMpSaveCatalogVerify(SudekiMpSaveCatalog *catalog,
     return TRUE;
 }
 
+static BOOL read_whole(HANDLE file, uint8_t *buffer, size_t size, const SudekiMpSaveFileIdentity *expected) {
+    LARGE_INTEGER zero; zero.QuadPart=0; DWORD got=0; uint8_t extra;
+    return expected->size==size && size<=0xffffffffu && SetFilePointerEx(file,zero,NULL,FILE_BEGIN) &&
+        ReadFile(file,buffer,(DWORD)size,&got,NULL) && got==size &&
+        ReadFile(file,&extra,1,&got,NULL) && got==0;
+}
+static BOOL digest(const uint8_t *bytes, size_t size, uint8_t out[32]) {
+    BCRYPT_ALG_HANDLE algorithm=NULL; BCRYPT_HASH_HANDLE hash=NULL; BOOL ok=FALSE;
+    if(size>0xffffffffu || BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0)<0) return FALSE;
+    if(BCryptCreateHash(algorithm,&hash,NULL,0,NULL,0,0)>=0 &&
+        BCryptHashData(hash,(PUCHAR)(uintptr_t)bytes,(ULONG)size,0)>=0 &&
+        BCryptFinishHash(hash,out,32,0)>=0) ok=TRUE;
+    if(hash) BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm,0);
+    return ok;
+}
+BOOL SudekiMpSaveCatalogRead(SudekiMpSaveCatalog *catalog, unsigned index,
+    const SudekiMpSaveFingerprint *fingerprint, uint8_t *fish, size_t fish_size,
+    uint8_t *bunny, size_t bunny_size) {
+    SavePair pair; wchar_t root[MAX_PATH]; uint8_t actual[32];
+    if(!catalog || !fingerprint || !fish || !bunny || catalog->count>SUDEKIMP_SAVE_CATALOG_MAX_ENTRIES ||
+        index>=catalog->count || catalog->entries[index].folder_slot!=fingerprint->folder_slot)
+        return fail(catalog,ERROR_INVALID_PARAMETER,"Select a save first.");
+    if(!save_directory(root) || wcsncmp(root,catalog->directory,MAX_PATH))
+        return fail(catalog,ERROR_INVALID_STATE,"The save folder changed. Refresh the list.");
+    const SudekiMpSaveCatalogEntry *entry=&catalog->entries[index];
+    if(!open_pair(root,entry->folder_slot,&pair))
+        return fail(catalog,GetLastError(),"Unable to read this save. Refresh and try again.");
+    BOOL ok=same_identity(&catalog->directory_identity,&pair.root_identity,FALSE) &&
+        same_identity(&entry->fish,&pair.fish_identity,TRUE) &&
+        same_identity(&entry->bunny,&pair.bunny_identity,TRUE) &&
+        read_whole(pair.fish,fish,fish_size,&entry->fish) && read_whole(pair.bunny,bunny,bunny_size,&entry->bunny) &&
+        digest(fish,fish_size,actual) && !memcmp(actual,fingerprint->fish_sha256,32) &&
+        digest(bunny,bunny_size,actual) && !memcmp(actual,fingerprint->bunny_sha256,32);
+    close_pair(&pair);
+    if(!ok) return fail(catalog,ERROR_FILE_INVALID,"This save changed after review. Select it again.");
+    catalog->error[0]='\0'; SetLastError(ERROR_SUCCESS); return TRUE;
+}
+
 struct SudekiMpSaveLease {
     SavePair pair;
     unsigned folder_slot;

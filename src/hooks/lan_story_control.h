@@ -70,6 +70,10 @@ BOOL SudekiMpLanStoryControlRetains(void);
 unsigned SudekiMpLanStoryControlEquipWeapon(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item);
 /* #75 / D10: use a consumable on the requesting player's own character. */
+/* #40/#74: equip a worn armour on the leased character (armour choice
+ * request). Class check, one grant if this game lacks it, native equip. */
+unsigned SudekiMpLanStoryControlEquipArmour(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item);
 unsigned SudekiMpLanStoryControlUseItem(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item);
 BOOL SudekiMpLanStoryControlUninstall(void);

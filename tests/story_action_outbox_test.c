@@ -9,6 +9,12 @@ static SudekiMpLanStoryActionRequest sent;
 static SudekiMpLanStoryActionResult terminal;
 void SudekiMpLogFormat(const char *format,...) {(void)format;}
 void SudekiMpLanStoryMenuNotice(const char *text) {(void)text;++notices;}
+/* Client-side result effects (equip, item reduction): not exercised here. */
+BOOL SudekiMpEquipCharacterWeaponItem(void *character,unsigned int item) {(void)character;(void)item;return FALSE;}
+BOOL SudekiMpEquipCharacterArmourItem(void *character,unsigned int index,unsigned int item) {(void)character;(void)index;(void)item;return FALSE;}
+BOOL SudekiMpReduceLocalItem(unsigned int item) {(void)item;return FALSE;}
+BOOL SudekiMpLanStoryInventoryPrepare(uint32_t item,uint32_t quantity,SudekiMpStoryInventoryGrant *grant) {(void)item;(void)quantity;(void)grant;return FALSE;}
+BOOL SudekiMpLanStoryInventoryApply(SudekiMpStoryInventoryGrant *grant,SudekiMpStoryInventoryGrantResult *result) {(void)grant;(void)result;return FALSE;}
 BOOL SudekiMpLanPartyGetStoryActionResult(SudekiMpLanPartySession *s,
     const SudekiMpLanPartyLease *connection,SudekiMpLanStoryActionResult *result) {
     assert(s==session && same_connection(connection,&client_action_connection));

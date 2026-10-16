@@ -34,4 +34,7 @@ void SudekiMpLanStorySpawnSigilsFollow(const SudekiMpStorySigilState *host);
 BOOL SudekiMpLanStoryGatesCapture(SudekiMpStoryEffectState *out);
 BOOL SudekiMpLanStoryGatesFollow(const SudekiMpStoryEffectState *host);
 BOOL SudekiMpLanStoryGateIdentity(const void *entity,uint32_t *identity);
+/* Client, game thread: hide the reveal-marker effects standing at a chest or
+ * door the host has fully revealed (alpha 255, #79). Visual flags only; TRUE if any hid. */
+BOOL SudekiMpLanStoryRevealMarkersHide(const float position[3]);
 #endif

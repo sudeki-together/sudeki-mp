@@ -43,9 +43,13 @@ BOOL SudekiMpLanStoryWorldActorValid(const SudekiMpLanStoryWorldActor *a) {
         (a->kind!=SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND && a->kind!=SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND && a->hit_points!=0.0f) ||
         (a->kind==SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND && a->hit_points!=0.0f && a->hit_points!=1.0f) || /* door: collision enabled */
         (a->visual_flags & ~(a->kind==SUDEKIMP_LAN_STORY_WORLD_SCENERY_KIND ?
-            SUDEKIMP_LAN_STORY_WORLD_HIDDEN : a->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND ?
+            (SUDEKIMP_LAN_STORY_WORLD_HIDDEN|SUDEKIMP_LAN_STORY_WORLD_ALPHA) :
+            a->kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND ?
             (SUDEKIMP_LAN_STORY_WORLD_STAT_VISIBLE|SUDEKIMP_LAN_STORY_WORLD_HIDDEN|
-             SUDEKIMP_LAN_STORY_WORLD_DEAD|SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK) : 0u)) ||
+             SUDEKIMP_LAN_STORY_WORLD_DEAD|SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK) :
+            (a->kind==SUDEKIMP_LAN_STORY_WORLD_DOOR_KIND || a->kind==SUDEKIMP_LAN_STORY_WORLD_CHEST_KIND) ?
+            SUDEKIMP_LAN_STORY_WORLD_ALPHA : 0u)) ||
+        (!(a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_ALPHA) && a->alpha) ||
         ((a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK)>>SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT)>4u ||
         ((a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK) && !(a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_DEAD)) ||
         (a->kind==SUDEKIMP_LAN_STORY_WORLD_PC_KIND && SudekiMpLanStoryWorldCharacter(a->identifier)>=4u) ||
@@ -141,7 +145,7 @@ static void write_actor(uint8_t *p,const SudekiMpLanStoryWorldActor *a) {
         put16(p+112+2*i,a->clip_occurrence[i]);
     }
     put32(p+120,a->clip[4]); put16(p+124,a->clip_occurrence[4]);
-    p[126]=a->state[4]; p[127]=0;
+    p[126]=a->state[4]; p[127]=a->alpha;
     put_float(p+128,a->rate[4]); put_float(p+132,a->time[4]);
     put_float(p+136,a->blend[3]);
     put_float(p+140,a->hit_points);
@@ -159,7 +163,7 @@ static BOOL read_actor(const uint8_t *p,SudekiMpLanStoryWorldActor *a) {
         a->rate[i]=get_float(p+68+4*i); a->time[i]=get_float(p+84+4*i);
         a->clip_occurrence[i]=get16(p+112+2*i);
     }
-    if(p[127]) return FALSE;
+    a->alpha=p[127];
     a->clip[4]=get32(p+120); a->clip_occurrence[4]=get16(p+124);
     a->state[4]=p[126]; a->rate[4]=get_float(p+128); a->time[4]=get_float(p+132);
     a->blend[3]=get_float(p+136);

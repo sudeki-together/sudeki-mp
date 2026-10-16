@@ -39,6 +39,7 @@
 #include "hooks/lan_story_client_camera.h"
 #include "hooks/lan_story_inventory.h"
 #include "hooks/lan_story_main_menu.h"
+#include "hooks/armour_menu.h"
 #include "ui/party_menu.h"
 #include "engine/weapon_activation_abi.h"
 #include "hooks/lan_arena_spirit_vfx.h"
@@ -93,6 +94,9 @@ static unsigned loot_pending,loot_fault_reported;
 static BOOL loot_capture_fault;
 static BOOL cast_attempted;
 static BOOL host_attempted,menu_initialized,menu_lobby_known,menu_scene_known,host_binding_ready;
+/* Host front in a native use animation (chest, breakable): remote players
+ * keep their own control while only the front is held (H1 (a)). */
+static BOOL host_front_use;
 static BOOL control_attempted,recruit_attempted,local_control_attempted,activity_attempted;
 static BOOL split_attempted;
 static uint8_t traced_foreign;
@@ -1340,12 +1344,12 @@ static BOOL exterior_control_allowed(unsigned player,ExteriorControlPermission p
 }
 static BOOL remote_input_ready(unsigned player) {
     /* Action admission retains its positive host/shop modal contract. */
-    return host_binding_ready || exterior_control_allowed(player,EXTERIOR_ACTION);
+    return host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_ACTION);
 }
 static BOOL remote_steering_ready(unsigned player) {
     /* A settled exterior player's movement does not borrow the host's
      * dialogue/filter state. Native body/world pauses still hold movement. */
-    return host_binding_ready || exterior_control_allowed(player,EXTERIOR_STEERING);
+    return host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_STEERING);
 }
 static BOOL remote_action_ready(unsigned player,unsigned kind) {
     /* Existing same-area casts have their own native modal admission. An
@@ -1367,7 +1371,7 @@ static BOOL runtime_control_lease_exact(const SudekiMpLanPartyLease *key,BOOL in
             !SudekiMpLanPartyPeerStatusGet(session,p,&peer) ||
             peer.phase!=SUDEKIMP_LAN_PARTY_OBSERVING || !peer.transport_confirmed ||
             !same_connection(&peer.lease,&host_control[p].connection) ||
-            (!host_binding_ready && !exterior_control_allowed(p,input_ready?EXTERIOR_STEERING:EXTERIOR_RETAIN)) ||
+            (!host_binding_ready && !host_front_use && !exterior_control_allowed(p,input_ready?EXTERIOR_STEERING:EXTERIOR_RETAIN)) ||
             (input_ready && !SudekiMpLanPartyStoryControlAcknowledged(session,&peer.lease,&host_control[p].fence))) continue;
         return TRUE;
     }
@@ -2035,6 +2039,8 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
                 outcome=SudekiMpLanStoryCastSubmitSpirit(w,&roster,&host_control[p].native_key,request.slot);
             else if(request.kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON)
                 outcome=SudekiMpLanStoryControlEquipWeapon(w,&roster,&host_control[p].native_key,request.slot);
+            else if(request.kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR)
+                outcome=SudekiMpLanStoryControlEquipArmour(w,&roster,&host_control[p].native_key,request.slot);
             else if(request.kind==SUDEKIMP_STORY_ACTION_USE_ITEM)
                 outcome=SudekiMpLanStoryControlUseItem(w,&roster,&host_control[p].native_key,
                     SUDEKIMP_STORY_ACTION_ITEM(request.slot,request.extra));
@@ -2121,7 +2127,10 @@ static BOOL menu_slot_allowed(void *actor) {
 static BOOL queue_client_action(void *actor,unsigned kind,unsigned slot);
 static unsigned menu_equip_request(void *actor,unsigned item) {
     if(!local_seat) return SUDEKIMP_STORY_MENU_EQUIP_NATIVE;
-    return queue_client_action(actor,SUDEKIMP_STORY_ACTION_EQUIP_WEAPON,item)?
+    /* The armour choice page reuses the Weapons layer and its equip call;
+     * its rows are armour item ids (100..139). */
+    unsigned kind=item>=100u && item<=139u?SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR:SUDEKIMP_STORY_ACTION_EQUIP_WEAPON;
+    return queue_client_action(actor,kind,item)?
         SUDEKIMP_STORY_MENU_EQUIP_QUEUED:SUDEKIMP_STORY_MENU_EQUIP_REFUSED;
 }
 static unsigned menu_use_request(void *actor,unsigned item) {
@@ -2179,6 +2188,33 @@ static void service_client_action(const SudekiMpLanPartyLease *connection,
                     item,(unsigned)reduced,(unsigned)refreshed);
             } else SudekiMpLanStoryMenuNotice(result.outcome==SUDEKIMP_STORY_ACTION_BUSY?
                 "That item cannot be used right now.":"That item could not be used.");
+        }
+        if(result.kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON || result.kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR) {
+            /* While this game's menu is shown its world presentation is
+             * skipped, so the replica cannot follow the host's equipment until
+             * the menu closes and the menu preview stayed stale (owner,
+             * 2026-10-15). After the host accepted, equip this game's own
+             * character with the same native routine its menu would have used
+             * and refresh the open page; later frames then already match. */
+            unsigned character=fence->character; void *actor=character<4u?client_seed.actors[character]:NULL;
+            BOOL local=FALSE,refreshed=FALSE;
+            if(result.outcome==SUDEKIMP_STORY_ACTION_STARTED && actor) {
+                if(result.kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR) {
+                    SudekiMpStoryInventoryGrant grant; SudekiMpStoryInventoryGrantResult granted={0};
+                    if(SudekiMpLanStoryInventoryPrepare(result.slot,1u,&grant) && !grant.before)
+                        (void)SudekiMpLanStoryInventoryApply(&grant,&granted);
+                    local=SudekiMpEquipCharacterArmourItem(actor,character,result.slot);
+                } else local=SudekiMpEquipCharacterWeaponItem(actor,result.slot);
+                if(main_menu_open()) {
+                    refreshed=SudekiMpArmourMenuRefreshShown(actor);
+                    if(result.kind==SUDEKIMP_STORY_ACTION_EQUIP_WEAPON) refreshed|=SudekiMpLanStoryMainMenuRefreshInventory();
+                }
+            } else SudekiMpLanStoryMenuNotice(result.outcome==SUDEKIMP_STORY_ACTION_BUSY?
+                "Your character is busy; try again when ready.":
+                result.kind==SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR?"That armour could not be equipped.":
+                "That weapon could not be equipped.");
+            SudekiMpLogFormat("story_main_menu event=equip_result kind=%u item=%u outcome=%u local=%u refreshed=%u\r\n",
+                result.kind,result.slot,result.outcome,(unsigned)local,(unsigned)refreshed);
         }
         if((result.kind==SUDEKIMP_STORY_ACTION_SKILL || result.kind==SUDEKIMP_STORY_ACTION_SPIRIT) &&
             result.outcome!=SUDEKIMP_STORY_ACTION_STARTED)
@@ -3008,6 +3044,15 @@ static void service(void *controller,void *data,
             if(loaded) known=SudekiMpLanStoryObserverSample(controller,w,&native);
             host_binding_ready=loaded && known &&
                 SudekiMpLanStoryHostControlReady(controller,w,&native);
+            {
+                BOOL front_use=loaded && known && !host_binding_ready &&
+                    SudekiMpLanStoryHostControlFrontUseLock(controller,w,&native);
+                static unsigned front_use_logs;
+                if(front_use!=host_front_use && front_use_logs<64u) { ++front_use_logs;
+                    SudekiMpLogFormat("lan_story_control event=host_front_use active=%u ms=%lu\r\n",
+                        front_use?1u:0u,(unsigned long)GetTickCount()); }
+                host_front_use=front_use;
+            }
             /* Load acknowledgement is independent of the transient native
              * control binding shown in the session menu. */
             InterlockedExchange(&runtime_ready,loaded && known &&
@@ -3282,7 +3327,7 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     memset(&capture_timing,0,sizeof(capture_timing)); memset(&present_timing,0,sizeof(present_timing));
     memset(&effects_timing,0,sizeof(effects_timing));
     game_base=(uint8_t *)module;
-    menu_lobby_known=menu_scene_known=host_binding_ready=FALSE;
+    menu_lobby_known=menu_scene_known=host_binding_ready=host_front_use=FALSE;
     presentation_attempted=FALSE;
     memset(&menu_lobby,0,sizeof(menu_lobby)); memset(&menu_scene,0,sizeof(menu_scene));
     memcpy(story_lobby_tickets,config->lobby_nonce,sizeof(story_lobby_tickets));

@@ -16,6 +16,9 @@ static void initialize(SudekiMpLobby *s,BOOL host) {
     if (host) {
         s->status.members[0].reserved=s->status.members[0].present=1;
         name_copy(s->status.members[0].name,"Host");
+        /* Selection requires a chosen destination (current lobby rule); the
+         * test-room destination keeps the host free to pick any character. */
+        s->status.start.destination=SUDEKIMP_LOBBY_DEST_TESTROOM;
     }
 }
 static BOOL hello(SudekiMpLobby *host,SudekiMpLobby *client,unsigned connection,const uint8_t *credential) {
@@ -93,6 +96,8 @@ static void loopback(void) {
     assert(SudekiMpLobbyHost(host,"Loopback fixture","",port,FALSE));
     assert(SudekiMpLobbyJoin(client,"127.0.0.1",port,""));
     assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_NONE));
+    /* The lobby UI chooses a destination before anyone selects a character. */
+    assert(SudekiMpLobbyDestination(host,SUDEKIMP_LOBBY_DEST_TESTROOM)); Sleep(150);
     assert(SudekiMpLobbySelectCharacter(host,2,TRUE));
     /* A concurrent roster change can reject an in-flight choice; the UI retries
      * after observing the newer revision. The fixture waits for that snapshot. */
@@ -125,14 +130,123 @@ static void loopback(void) {
         SudekiMpLobbyStatusGet(host,&h); if (!h.members[1].present) break; Sleep(10);
     } while ((LONG)(deadline-GetTickCount())>0);
     assert(!h.members[1].present && h.members[1].reserved && h.members[1].character==1);
+    /* Current contract (SudekiMpLobbyReconnect): departure invalidates the
+     * credential at once, so a reconnect is a fresh join. It never reclaims
+     * the departed slot or its character while that slot drains. */
     assert(SudekiMpLobbyReconnect(client));
-    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_FAILED));
-    SudekiMpLobbyStatusGet(client,&c); assert(c.local_slot==1 && c.members[1].character==1);
-    assert(SudekiMpLobbyHostAdmit(host,1));
-    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_OFFERED));
+    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_NONE));
+    SudekiMpLobbyStatusGet(client,&c);
+    assert(c.local_slot!=1 && c.members[c.local_slot].character==SUDEKIMP_LOBBY_NO_CHARACTER);
+    SudekiMpLobbyStatusGet(host,&h);
+    assert(h.members[1].reserved && !h.members[1].present && !SudekiMpLobbyHostAdmit(host,1));
     assert(SudekiMpLobbyDestroy(late)); assert(SudekiMpLobbyDestroy(client)); assert(SudekiMpLobbyDestroy(host));
 }
+/* #72 save transfer fixtures: synthetic records with the fixed native sizes. */
+static uint8_t *save_fish,*save_bunny;
+static SudekiMpLobbySavedGame transfer_save;
+static void make_save_records(void) {
+    save_fish=malloc(SUDEKIMP_SAVE_TRANSFER_FISH_BYTES); save_bunny=malloc(SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES);
+    assert(save_fish && save_bunny);
+    for (unsigned i=0;i<SUDEKIMP_SAVE_TRANSFER_FISH_BYTES;++i) save_fish[i]=(uint8_t)(i*31u+(i>>9));
+    for (unsigned i=0;i<SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES;++i) save_bunny[i]=(uint8_t)(i^0x5au);
+    memset(&transfer_save,0,sizeof(transfer_save));
+    transfer_save.folder_slot=11;
+    assert(SudekiMpSaveTransferHash(save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,transfer_save.fish_sha256));
+    assert(SudekiMpSaveTransferHash(save_bunny,SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES,transfer_save.bunny_sha256));
+    strcpy(transfer_save.label,"Transfer fixture");
+    transfer_save.party_count=2; transfer_save.leader=3; transfer_save.party_mask=(1u<<3)|(1u<<2);
+    transfer_save.party_order[0]=3; transfer_save.party_order[1]=2; transfer_save.party_order[2]=4; transfer_save.party_order[3]=4;
+}
+static void save_request_packet(SudekiMpLobby *client,uint8_t *bytes,const SudekiMpLobbySavedGame *save) {
+    packet(client,bytes,SAVE_REQUEST);
+    memcpy(bytes+BODY,save->fish_sha256,32); memcpy(bytes+BODY+32,save->bunny_sha256,32);
+}
+static void offline_save_transfer(void) {
+    SudekiMpLobby host,client; uint8_t bytes[WIRE]; BOOL done=FALSE;
+    initialize(&host,TRUE); initialize(&client,FALSE);
+    assert(hello(&host,&client,1,NULL)); state(&host,&client,1);
+    assert(SudekiMpLobbySelectSavedGame(&host,&transfer_save)); state(&host,&client,1);
+    assert(client.status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME);
+    /* Host: only the exact published pair is accepted as the source. */
+    save_bunny[3]^=1u;
+    assert(!SudekiMpLobbyProvideSaveRecords(&host,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,save_bunny,SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES));
+    save_bunny[3]^=1u;
+    assert(!SudekiMpLobbyProvideSaveRecords(&host,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES-1u,save_bunny,SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES));
+    assert(SudekiMpLobbyProvideSaveRecords(&host,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,save_bunny,SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES));
+    assert(host.status.save_transfer.host_has_records);
+    /* A request for any other identity is ignored, never served. */
+    SudekiMpLobbySavedGame other=transfer_save; other.fish_sha256[0]^=1u;
+    save_request_packet(&client,bytes,&other); assert(received(&host,1,bytes) && !host.save_tx[1].stream);
+    save_request_packet(&client,bytes,&transfer_save); bytes[BODY+64]=1; assert(!received(&host,1,bytes));
+    /* Serve a real request; an unsolicited offer is ignored by the client. */
+    save_request_packet(&client,bytes,&transfer_save); assert(received(&host,1,bytes) && host.save_tx[1].stream);
+    assert(host.status.save_transfer.transfers_started==1u);
+    uint8_t offer[WIRE]; packet(&host,offer,SAVE_DATA); assert(SudekiMpSaveTransferSenderOffer(&host.save_tx[1],offer+BODY));
+    assert(received(&client,0,offer) && client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_IDLE && !client.save_rx.stream);
+    assert(SudekiMpLobbyRequestSave(&client) && client.save_request_pending &&
+        client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_REQUESTED);
+    assert(received(&client,0,offer) && client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_RECEIVING);
+    unsigned chunks=0;
+    while (!done) {
+        packet(&host,bytes,SAVE_DATA); assert(SudekiMpSaveTransferSenderNext(&host.save_tx[1],bytes+BODY,&done));
+        assert(received(&client,0,bytes)); ++chunks;
+    }
+    assert(chunks==SUDEKIMP_SAVE_TRANSFER_CHUNKS && client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_COMPLETE);
+    uint8_t *fish=malloc(SUDEKIMP_SAVE_TRANSFER_FISH_BYTES),bunny[SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES];
+    assert(fish && SudekiMpLobbyTakeReceivedSave(&client,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny)));
+    assert(!memcmp(fish,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES) && !memcmp(bunny,save_bunny,sizeof(bunny)));
+    assert(client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_IDLE &&
+        !SudekiMpLobbyTakeReceivedSave(&client,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny)));
+    /* A tampered chunk is refused at completion; nothing is released. */
+    save_request_packet(&client,bytes,&transfer_save); assert(received(&host,1,bytes));
+    assert(SudekiMpLobbyRequestSave(&client));
+    packet(&host,offer,SAVE_DATA); assert(SudekiMpSaveTransferSenderOffer(&host.save_tx[1],offer+BODY) && received(&client,0,offer));
+    done=FALSE; chunks=0;
+    while (!done) {
+        packet(&host,bytes,SAVE_DATA); assert(SudekiMpSaveTransferSenderNext(&host.save_tx[1],bytes+BODY,&done));
+        if (chunks++==100u) bytes[BODY+16+7]^=0x10u;
+        assert(received(&client,0,bytes));
+    }
+    assert(client.status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_FAILED &&
+        client.status.save_transfer.refusal==SUDEKIMP_SAVE_TRANSFER_HASH_MISMATCH &&
+        !SudekiMpLobbyTakeReceivedSave(&client,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny)));
+    /* A new destination retires the host pair and its transfers. */
+    save_request_packet(&client,bytes,&transfer_save); assert(received(&host,1,bytes) && host.save_tx[1].stream);
+    assert(SudekiMpLobbyDestination(&host,SUDEKIMP_LOBBY_DEST_TESTROOM));
+    assert(!host.save_records && !host.save_tx[1].stream && !host.status.save_transfer.host_has_records);
+    free(fish); save_host_reset(&host); save_client_reset(&client);
+}
+static void loopback_save_transfer(void) {
+    SudekiMpLobby *host=SudekiMpLobbyCreate(),*client=SudekiMpLobbyCreate();
+    assert(host && client);
+    SOCKET probe=bound_socket(SOCK_STREAM,0,FALSE); struct sockaddr_in endpoint; int size=sizeof(endpoint);
+    assert(probe!=INVALID_SOCKET && !getsockname(probe,(struct sockaddr *)&endpoint,&size));
+    uint16_t port=ntohs(endpoint.sin_port); close_socket(&probe);
+    assert(SudekiMpLobbyHost(host,"Save transfer fixture","",port,FALSE));
+    assert(SudekiMpLobbyJoin(client,"127.0.0.1",port,""));
+    assert(wait_phase(client,SUDEKIMP_LOBBY_CONNECTED,SUDEKIMP_LOBBY_ADMISSION_NONE));
+    assert(SudekiMpLobbySelectSavedGame(host,&transfer_save));
+    assert(SudekiMpLobbyProvideSaveRecords(host,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,save_bunny,SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES));
+    SudekiMpLobbyStatus c; DWORD deadline=GetTickCount()+5000;
+    do { SudekiMpLobbyStatusGet(client,&c); if (c.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME) break; Sleep(10); }
+    while ((LONG)(deadline-GetTickCount())>0);
+    assert(c.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME);
+    DWORD began=GetTickCount();
+    assert(SudekiMpLobbyRequestSave(client));
+    deadline=GetTickCount()+30000;
+    do { SudekiMpLobbyStatusGet(client,&c); if (c.save_transfer.phase>=SUDEKIMP_LOBBY_SAVE_COMPLETE) break; Sleep(20); }
+    while ((LONG)(deadline-GetTickCount())>0);
+    assert(c.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_COMPLETE && c.phase==SUDEKIMP_LOBBY_CONNECTED);
+    uint8_t *fish=malloc(SUDEKIMP_SAVE_TRANSFER_FISH_BYTES),bunny[SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES];
+    assert(fish && SudekiMpLobbyTakeReceivedSave(client,fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,bunny,sizeof(bunny)));
+    assert(!memcmp(fish,save_fish,SUDEKIMP_SAVE_TRANSFER_FISH_BYTES) && !memcmp(bunny,save_bunny,sizeof(bunny)));
+    printf("loopback save transfer: %u bytes in %lu ms\n",(unsigned)SUDEKIMP_SAVE_TRANSFER_TOTAL_BYTES,
+        (unsigned long)(GetTickCount()-began));
+    free(fish);
+    assert(SudekiMpLobbyDestroy(client)); assert(SudekiMpLobbyDestroy(host));
+}
 int main(void) {
+    make_save_records(); offline_save_transfer(); loopback_save_transfer();
     offline_start_reservation();
     SudekiMpLobby host,client,late,rejoined; uint8_t bytes[WIRE],credential[16];
     initialize(&host,TRUE); initialize(&client,FALSE); initialize(&late,FALSE);

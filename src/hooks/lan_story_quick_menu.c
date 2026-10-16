@@ -153,9 +153,11 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
         e->result=1;
         uint8_t *m=e->menu,*list=*(uint8_t **)(m+0x214u),*category=*(uint8_t **)(m+0x208u);
         unsigned category_id=*(unsigned *)(m+0x204u);
-        /* Category 2 (items): the selected row becomes a USE_ITEM request for
-         * the player's own character (D10); the native dispatcher never runs. */
-        unsigned limit=category_id==0u?6u:category_id==1u?2u:category_id==5u?64u:0u; /* 5 = items (CONFIRMED_LIVE 2026-10-15) */
+        /* Category 5 (items): the selected row becomes a USE_ITEM request and
+         * category 2 (weapons) an EQUIP_WEAPON request, both for the player's
+         * own character (D10); the native dispatcher never runs. */
+        unsigned limit=category_id==0u?6u:category_id==1u?2u:
+            (category_id==5u || category_id==2u)?64u:0u; /* 5 = items (CONFIRMED_LIVE 2026-10-15) */
         {   /* Bounded diagnostic (client quick-menu items, 2026-10-15). */
             static unsigned confirm_logs;
             if(confirm_logs<64u) { ++confirm_logs;
@@ -176,18 +178,31 @@ static BOOL input_present(const SudekiMpLanStoryNativeRoster *r,
                 if(category_id==0u && slot>=0 && slot<6 &&
                     request_action(actor_owner,SUDEKIMP_STORY_ACTION_SKILL,(unsigned)slot))
                     close_owned("skill_queued");
-                if(category_id==5u && slot>=0) {
+                if((category_id==5u || category_id==2u) && slot>=0) {
                     static const uint8_t lookup_entry[]={0x53,0x8b,0x5c,0x24,0x08,0x55,0x56,0x57,0x8b,0x3d};
+                    /* Weapon inventory category per character (Buki, Elco,
+                     * Tal, Ailish), read from the live item table 2026-10-16;
+                     * the native weapons page resolves its rows the same way. */
+                    static const unsigned weapon_category[4]={7u,6u,4u,5u};
+                    static const unsigned weapon_first[4]={24u,36u,0u,12u}; /* 12 ids each; host re-checks */
                     typedef void *(__attribute__((thiscall)) *ItemLookup)(void *,int,int);
+                    BOOL weapon=category_id==2u;
+                    unsigned want=weapon?weapon_category[r->leader_character]:2u;
                     void *inventory=readable(base+0x408d84u,4u)?*(void **)(base+0x408d84u):NULL;
                     uint8_t *def=NULL; unsigned item=~0u;
                     if(readable(inventory,0x130u) && readable(base+0x21ce0u,14u) &&
                         !memcmp(base+0x21ce0u,lookup_entry,sizeof(lookup_entry)) &&
                         *(void **)(base+0x21ce0u+10u)==base+0x408d80u)
-                        def=((ItemLookup)(base+0x21ce0u))(inventory,2,slot);
-                    if(def && readable(def,0x8cu) && *(void **)def==base+0x2d3b20u && *(uint32_t *)(def+0x88u)==2u)
+                        def=((ItemLookup)(base+0x21ce0u))(inventory,(int)want,slot);
+                    if(def && readable(def,0x8cu) && *(uint32_t *)(def+0x88u)==want &&
+                        *(void **)def==base+(weapon?0x2d3a28u:0x2d3b20u))
                         item=*(uint32_t *)(def+0x14u);
-                    if(item<999u && request_action(actor_owner,SUDEKIMP_STORY_ACTION_USE_ITEM,item))
+                    if(weapon) {
+                        if(item>=weapon_first[r->leader_character] && item<weapon_first[r->leader_character]+12u &&
+                            request_action(actor_owner,SUDEKIMP_STORY_ACTION_EQUIP_WEAPON,item))
+                            close_owned("weapon_queued");
+                        else SudekiMpLogFormat("story_quick_menu event=weapon_refused row=%d item=%u\r\n",slot,item);
+                    } else if(item<999u && request_action(actor_owner,SUDEKIMP_STORY_ACTION_USE_ITEM,item))
                         close_owned("item_queued");
                     else SudekiMpLogFormat("story_quick_menu event=item_refused row=%d item=%u\r\n",slot,item);
                 }

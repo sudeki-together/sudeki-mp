@@ -1312,6 +1312,10 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
          * collision object) at open/close; the client mirrors that byte. */
         if(pose_read && door(&targets[i]))
             frame.actors[i].hit_points=targets[i].position[0x100u]?1.0f:0.0f;
+        if(pose_read && (scenery(&targets[i]) || door(&targets[i]) || chest(&targets[i]))) {
+            frame.actors[i].visual_flags|=SUDEKIMP_LAN_STORY_WORLD_ALPHA;
+            frame.actors[i].alpha=targets[i].object[0x13u];
+        }
         if(pose_read && targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_MONSTER_KIND) {
             float hp=0.0f;
             const uint8_t *stats=readable(targets[i].entity+0x4cu,4u)?*(const uint8_t *const *)(targets[i].entity+0x4cu):NULL;
@@ -2503,6 +2507,21 @@ BOOL SudekiMpLanStoryWorldApplyPrepared(const SudekiMpLanStoryNativeRoster *rost
             uint32_t *flags=(uint32_t *)(t->object+0x34u);
             *flags=(*flags&~4u)|(hidden?4u:0u);
             if(((*flags&4u)!=0u)!=hidden) goto fail;
+        }
+        /* Script fades (invisible chest, #79): the render object's colour
+         * alpha only. The native renderer derives its own draw flags from it
+         * (observed live: +0x34 followed within a frame). */
+        if((a->visual_flags&SUDEKIMP_LAN_STORY_WORLD_ALPHA) &&
+            (scenery(t) || door(t) || chest(t)) && t->object[0x13u]!=a->alpha) {
+            static unsigned alpha_logs;
+            if(alpha_logs<64u) { ++alpha_logs;
+                SudekiMpLogFormat("lan_story_world event=alpha_apply identifier=%08lx kind=%04x local=%u host=%u\r\n",
+                    (unsigned long)t->identifier,(unsigned)t->kind,(unsigned)t->object[0x13u],(unsigned)a->alpha); }
+            /* An undispelled invisible chest pulses its alpha (about 0..64,
+             * the shimmer Ailish sees); only the dispel takes it to 255. */
+            BOOL revealed=t->object[0x13u]!=0xffu && a->alpha==0xffu && (door(t) || chest(t));
+            t->object[0x13u]=a->alpha;
+            if(revealed) (void)SudekiMpLanStoryRevealMarkersHide((const float *)(t->position+0x18u));
         }
         /* 403050 changes only CPosition coordinates/dirty serial. 5114D0
          * changes its basis through scalar/D3DX math, with no owner, resource,

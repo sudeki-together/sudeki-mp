@@ -37,6 +37,11 @@ BOOL SudekiMpUninstallLanStoryLoad(void);
 BOOL SudekiMpLanStoryLoadPrepare(SudekiMpSaveCatalog *catalog, unsigned index,
     const SudekiMpSaveFingerprint *fingerprint);
 BOOL SudekiMpLanStoryLoadNeedsTitle(void);
+/* #72: after a save pair was imported on disk, drop the game's cached save
+ * list through its own routine (RVA 0xFEFC0, the one native saving uses) so
+ * the next Load page rebuilds it from the save folder. Title update thread
+ * only, never while a load is prepared or running; exact entry bytes. */
+BOOL SudekiMpLanStoryLoadInvalidateNativeCatalog(void);
 /* Arm before dispatching the original title Continue action. */
 BOOL SudekiMpLanStoryLoadArmTitle(void *title);
 /* Call after EVERY original native title update, including child pages. */

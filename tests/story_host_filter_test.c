@@ -137,6 +137,26 @@ static void test_exterior_independent_lease(void) {
         .service_post_original_exact=TRUE,.dispatch_serial=42};
     assert(SudekiMpLanStoryHostControlBound(controller,&w,&exterior_scene));
     assert(SudekiMpLanStoryHostControlReady(controller,&w,&exterior_scene));
+    {   /* Front use animation (chest, breakable): the controller is switched
+         * off with the front's arbiter bit 0x200. Remote control only. */
+        static uint8_t arbiter[0x58];
+        *(void **)arbiter=base+0x2cc9ac; *(void **)(arbiter+0x10)=actors[3];
+        *(void **)(actors[3]+0x90)=arbiter;
+        assert(!SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        filters(1,0); /* off, no 0x200: dialogue or script toggle */
+        assert(!SudekiMpLanStoryHostControlReady(controller,&w,&exterior_scene));
+        assert(!SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        *(uint32_t *)(arbiter+0x50)=0x200;
+        assert(SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        filters(0,0); assert(SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        filters(3,0); assert(!SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        filters(1,0); *(void **)(arbiter+0x10)=actors[2]; /* not the front's arbiter */
+        assert(!SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        *(void **)(arbiter+0x10)=actors[3]; input_owner.owned=TRUE; /* our own input ownership */
+        assert(!SudekiMpLanStoryHostControlFrontUseLock(controller,&w,&exterior_scene));
+        input_owner.owned=FALSE; *(uint32_t *)(arbiter+0x50)=0; *(void **)(actors[3]+0x90)=NULL;
+        filters(1,1); assert(SudekiMpLanStoryHostControlReady(controller,&w,&exterior_scene));
+    }
     /* Native interaction opening retains the already held exterior actor.
      * Unknown modal ownership does not grant actions or alter filters. */
     *(int16_t *)(ais[3]+0x16a)=1; filters(2,2);

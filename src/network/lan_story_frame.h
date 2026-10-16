@@ -5,7 +5,7 @@
 #include "network/lan_party_story.h"
 #include <windows.h>
 
-#define SUDEKIMP_LAN_STORY_FRAME_VERSION 8u
+#define SUDEKIMP_LAN_STORY_FRAME_VERSION 9u /* 9: worn armour (#40/#74) */
 #define SUDEKIMP_LAN_STORY_FRAME_HEADER_SIZE 108u
 #define SUDEKIMP_LAN_STORY_ACTOR_WIRE_SIZE 248u
 #define SUDEKIMP_LAN_STORY_FRAME_MAX_SIZE (108u + 4u * 248u)
@@ -70,6 +70,9 @@ typedef struct SudekiMpLanStoryActor {
     /* Native pose is supplied by the matching world record. Semantic fields
      * must be zero; this flag never authorizes a native object or action. */
     uint8_t native_pose;
+    /* #40/#74: worn armour, native item id plus one (armour ids 100..139);
+     * zero means not observed, never "remove the armour". */
+    uint8_t armour_item_plus_one;
     /* Native Tal/Buki combo UI: known bit 15, three 3-bit icons (0..3/7),
      * bit 9 timing marker. Zero is unknown, not an empty row. */
     uint16_t combo_hud;

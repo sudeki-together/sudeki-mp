@@ -26,6 +26,12 @@ BOOL SudekiMpLanStoryHostControlService(void *controller,
 BOOL SudekiMpLanStoryHostControlReady(void *controller,
     const SudekiMpControlUpdateDispatchWitness *witness,
     const SudekiMpLanStoryScene *scene);
+/* Same exact binding while the front plays a native use animation (chest,
+ * breakable, usable) that switched the controller off. Grants remote
+ * players their own steering/actions only; never host input. */
+BOOL SudekiMpLanStoryHostControlFrontUseLock(void *controller,
+    const SudekiMpControlUpdateDispatchWitness *witness,
+    const SudekiMpLanStoryScene *scene);
 /* Existing companion ownership depends on the exact host actor binding,
  * not on whether a native interaction currently accepts host input. This
  * proves the same roster/AI/controller ownership as Ready, but does not

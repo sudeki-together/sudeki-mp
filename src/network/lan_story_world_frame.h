@@ -7,7 +7,7 @@
  * to create objects, execute scripts, select assets or apply damage. Native
  * playback must resolve each identity to an already loaded exact NPC or
  * canonical party owner, or an already loaded generic scenery entity. */
-#define SUDEKIMP_LAN_STORY_WORLD_VERSION 10u
+#define SUDEKIMP_LAN_STORY_WORLD_VERSION 11u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_ACTORS 64u
 #define SUDEKIMP_LAN_STORY_WORLD_CHUNK_ACTORS 8u
 #define SUDEKIMP_LAN_STORY_WORLD_MAX_CHUNKS 8u
@@ -29,6 +29,11 @@
 #define SUDEKIMP_LAN_STORY_WORLD_DEAD 4u
 #define SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT 3u
 #define SUDEKIMP_LAN_STORY_WORLD_DEATH_MASK (7u << SUDEKIMP_LAN_STORY_WORLD_DEATH_SHIFT)
+/* Scenery, doors and chests: `alpha` carries the host render object's
+ * colour alpha (object+0x13). A script fade (an invisible chest revealed by
+ * Ailish's dispel) changes only that byte; the client's own script never
+ * runs it (CONFIRMED_LIVE 2026-10-16, HC_TutorialInvChest). */
+#define SUDEKIMP_LAN_STORY_WORLD_ALPHA 0x40u
 /* Portable record category, NOT ResourceName encoded_kind: the native low
  * seven bits may change during lazy resolution. Canonical ID is independent. */
 #define SUDEKIMP_LAN_STORY_WORLD_PC_KIND 0x0f81u
@@ -54,6 +59,8 @@ typedef struct SudekiMpLanStoryWorldActor {
     float rate[5], time[5], blend[4];
     /* Monsters only (#54): host native HitPoints (CStats+0x2C); 0 otherwise. */
     float hit_points;
+    /* Valid only with SUDEKIMP_LAN_STORY_WORLD_ALPHA; 0 otherwise. */
+    uint8_t alpha;
 } SudekiMpLanStoryWorldActor;
 
 typedef struct SudekiMpLanStoryWorldFrame {

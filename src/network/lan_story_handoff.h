@@ -83,7 +83,13 @@ typedef enum SudekiMpLanStoryActionKind {
     /* #75 / D10: use a consumable on the requesting player's OWN character
      * (never a target choice). The item id (0..998) is slot | extra<<8. The
      * host runs the Items page's native can-use / apply / ReduceItem path. */
-    SUDEKIMP_STORY_ACTION_USE_ITEM
+    SUDEKIMP_STORY_ACTION_USE_ITEM,
+    /* #40/#74: equip an armour the requesting player chose in their own M
+     * menu (armour choice page). slot is the native armour item id
+     * (100..139); the host checks the class for the fence character, grants
+     * a missing item to its own game, then equips natively; the party frame
+     * carries the worn armour back. Never unequip. */
+    SUDEKIMP_STORY_ACTION_EQUIP_ARMOUR
 } SudekiMpLanStoryActionKind;
 #define SUDEKIMP_STORY_ACTION_ITEM(slot,extra) ((unsigned)(slot)|((unsigned)(extra)<<8))
 /* Native weapon item ids per character: Tal 0..11, Ailish 12..23,

@@ -1,5 +1,6 @@
 #include "hooks/story_melee_snapshot.h"
 #include "hooks/lan_story_control.h"
+#include "hooks/lan_story_inventory.h"
 #include "hooks/lan_story_cast.h"
 #include "hooks/lan_party_control.h"
 #include "hooks/story_interaction_guard.h"
@@ -474,6 +475,32 @@ unsigned SudekiMpLanStoryControlEquipWeapon(const SudekiMpControlUpdateDispatchW
     unsigned outcome=applied?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
     SudekiMpLogFormat("story_main_menu event=host_equip character=%u item=%u slot=%u applied=%u outcome=%u\r\n",
         key->seat,item,slot,(unsigned)applied,outcome);
+    return outcome;
+}
+
+unsigned SudekiMpLanStoryControlEquipArmour(const SudekiMpControlUpdateDispatchWitness *w,
+    const SudekiMpLanStoryNativeRoster *roster,const SudekiMpLanPartyLease *key,unsigned item) {
+    if(!boundary(w,roster) || !key || key->seat>=4u || !(roster->available_mask&(1u<<key->seat)) ||
+        !SudekiMpArmourItemWearable(key->seat,item) ||
+        !SudekiMpLanPartyControlStoryExact(w,roster,key)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    void *actor=roster->actors[key->seat];
+    /* Same native rule as a weapon change: never while fighting or acting. */
+    if(!ordinary_world(FALSE) || !body_idle(key,actor,w)) return SUDEKIMP_STORY_ACTION_BUSY;
+    unsigned worn=0;
+    if(!SudekiMpCharacterWornArmour(actor,&worn)) return SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    if(worn==item) return SUDEKIMP_STORY_ACTION_STARTED;
+    /* D9: per-game inventory; equipment follows the character, so the host
+     * receives the client's chosen armour once if it does not own it. */
+    SudekiMpStoryInventoryGrant grant; SudekiMpStoryInventoryGrantResult granted={0};
+    BOOL owned=FALSE,grant_ran=FALSE;
+    if(SudekiMpLanStoryInventoryPrepare(item,1u,&grant)) {
+        owned=grant.before>0u;
+        if(!owned) grant_ran=SudekiMpLanStoryInventoryApply(&grant,&granted);
+    }
+    BOOL applied=SudekiMpLanPartyControlStoryExact(w,roster,key) && SudekiMpEquipCharacterArmourItem(actor,key->seat,item);
+    unsigned outcome=applied?SUDEKIMP_STORY_ACTION_STARTED:SUDEKIMP_STORY_ACTION_UNAVAILABLE;
+    SudekiMpLogFormat("story_main_menu event=host_equip_armour character=%u item=%u from=%u owned=%u granted=%u applied=%u outcome=%u\r\n",
+        key->seat,item,worn,(unsigned)owned,grant_ran?(unsigned)granted.status:0u,(unsigned)applied,outcome);
     return outcome;
 }
 

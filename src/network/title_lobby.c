@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include "network/title_lobby.h"
+#include "network/story_save_transfer.h"
 #include "engine/build_identity.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -9,7 +10,9 @@
 
 enum { WIRE = 512, BODY = 48, HELLO = 1, STATE, READY, LOAD_ACK,
     SELECT_CHARACTER, SET_NAME, ADMISSION_ACK,
-    QUERY = 10, OFFER, VERSION = SUDEKIMP_LOBBY_VERSION, POLL_LIMIT = 16, TIMEOUT = 8000 };
+    QUERY = 10, OFFER, SAVE_REQUEST, SAVE_DATA,
+    VERSION = SUDEKIMP_LOBBY_VERSION, POLL_LIMIT = 16, TIMEOUT = 8000, SAVE_BURST = 64 };
+_Static_assert(WIRE - BODY == SUDEKIMP_SAVE_TRANSFER_BODY_BYTES, "a save transfer body fills one lobby frame body");
 typedef struct Connection {
     SOCKET socket;
     unsigned rx_size, tx_size, tx_offset;
@@ -43,6 +46,14 @@ struct SudekiMpLobby {
     DWORD admission_at[4];
     unsigned admission_ack;
     BOOL saved_start_enabled;
+    /* #72 save transfer. Host: verified copy of the selected pair and one
+     * sender per member connection. Client: one receiver. */
+    uint8_t *save_records;
+    SudekiMpSaveTransferIdentity save_records_identity;
+    SudekiMpSaveTransferSender save_tx[4];
+    uint8_t save_tx_offer[4];
+    SudekiMpSaveTransferReceiver save_rx;
+    BOOL save_request_pending;
 };
 
 static void close_socket(SOCKET *socket) {
@@ -198,7 +209,52 @@ static void error(SudekiMpLobby *s, const char *text) {
 static void connection_close(Connection *c) {
     close_socket(&c->socket); memset(c,0,sizeof(*c)); c->socket=INVALID_SOCKET;
 }
+static void published_identity(const SudekiMpLobby *s, SudekiMpSaveTransferIdentity *out) {
+    memcpy(out->fish_sha256,s->status.saved_game.fish_sha256,32);
+    memcpy(out->bunny_sha256,s->status.saved_game.bunny_sha256,32);
+}
+/* Host: a new selection/destination retires the pair and every transfer. */
+static void save_host_reset(SudekiMpLobby *s) {
+    for (unsigned i=0;i<4;++i) { SudekiMpSaveTransferSenderEnd(&s->save_tx[i]); s->save_tx_offer[i]=0; }
+    free(s->save_records); s->save_records=NULL;
+    memset(&s->save_records_identity,0,sizeof(s->save_records_identity));
+    s->status.save_transfer.host_has_records=0;
+}
+static void save_client_reset(SudekiMpLobby *s) {
+    SudekiMpSaveTransferReceiverEnd(&s->save_rx); s->save_request_pending=FALSE;
+    s->status.save_transfer.phase=SUDEKIMP_LOBBY_SAVE_IDLE;
+    s->status.save_transfer.permille=0; s->status.save_transfer.refusal=0;
+}
+/* Client: offers are accepted only after this side requested the save, and
+ * only for exactly the identity the host already published in STATE. */
+static void save_data(SudekiMpLobby *s, const uint8_t *body) {
+    SudekiMpLobbySaveTransfer *t=&s->status.save_transfer;
+    SudekiMpSaveTransferRefusal why=SUDEKIMP_SAVE_TRANSFER_OK;
+    SudekiMpSaveTransferIdentity published; published_identity(s,&published);
+    if (!memcmp(body,"SVOF",4)) {
+        if (t->phase!=SUDEKIMP_LOBBY_SAVE_REQUESTED && t->phase!=SUDEKIMP_LOBBY_SAVE_RECEIVING) return;
+        if (s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+            SudekiMpSaveTransferReceiverOffer(&s->save_rx,body,&published,&why)) {
+            t->phase=SUDEKIMP_LOBBY_SAVE_RECEIVING; t->permille=0; t->refusal=0;
+        } else { SudekiMpSaveTransferReceiverEnd(&s->save_rx); t->phase=SUDEKIMP_LOBBY_SAVE_FAILED; t->refusal=(uint8_t)why; }
+    } else if (!memcmp(body,"SVCH",4) && t->phase==SUDEKIMP_LOBBY_SAVE_RECEIVING) {
+        SudekiMpSaveTransferStatus status=SudekiMpSaveTransferReceiverChunk(&s->save_rx,body,&why);
+        if (status==SUDEKIMP_SAVE_TRANSFER_COMPLETE) { t->phase=SUDEKIMP_LOBBY_SAVE_COMPLETE; t->permille=1000; }
+        else if (status==SUDEKIMP_SAVE_TRANSFER_PROGRESS) t->permille=(uint16_t)SudekiMpSaveTransferReceiverPermille(&s->save_rx);
+        else { SudekiMpSaveTransferReceiverEnd(&s->save_rx); t->phase=SUDEKIMP_LOBBY_SAVE_FAILED; t->refusal=(uint8_t)why; }
+    }
+}
+/* Send as much of the queued frame as the socket takes now. */
+static BOOL flush(Connection *c) {
+    while (c->tx_size) {
+        int n=send(c->socket,(const char *)c->tx+c->tx_offset,(int)(c->tx_size-c->tx_offset),0);
+        if (n>0) { c->tx_offset+=(unsigned)n; if (c->tx_offset==c->tx_size) c->tx_size=c->tx_offset=0; }
+        else return n<0 && WSAGetLastError()==WSAEWOULDBLOCK;
+    }
+    return TRUE;
+}
 static void leave_locked(SudekiMpLobby *s) {
+    save_host_reset(s); save_client_reset(s);
     close_socket(&s->listener); close_socket(&s->discovery);
     for (unsigned i=0;i<4;++i) connection_close(&s->connections[i]);
     for (unsigned i=0;i<4;++i) member_clear(&s->status.members[i]);
@@ -371,8 +427,25 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
             /* A stale completion must not affect a newer admission. */
             if (get32(body)==s->status.admission[player].sequence &&
                 !admission_ack(s,player,get32(body),get64(body+4),body[12])) return FALSE;
+        } else if (p[5]==SAVE_REQUEST && zero(body+64,WIRE-BODY-64)) {
+            /* #72: stream the selected pair only for exactly its published
+             * identity; a stale or foreign request is ignored, not trusted. */
+            SudekiMpSaveTransferIdentity published; published_identity(s,&published);
+            uint32_t id=0;
+            if (s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME && s->save_records &&
+                !memcmp(body,published.fish_sha256,32) && !memcmp(body+32,published.bunny_sha256,32) &&
+                !memcmp(&published,&s->save_records_identity,sizeof(published)) &&
+                random_bytes(&id,sizeof(id)) && id) {
+                SudekiMpSaveTransferSenderEnd(&s->save_tx[player]);
+                if (SudekiMpSaveTransferSenderBegin(&s->save_tx[player],id,s->save_records,
+                        SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,s->save_records+SUDEKIMP_SAVE_TRANSFER_FISH_BYTES,
+                        SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES,&published,NULL)) {
+                    s->save_tx_offer[player]=1; ++s->status.save_transfer.transfers_started;
+                }
+            }
         } else return FALSE;
     } else {
+        if (p[5]==SAVE_DATA) { if (c->admitted) save_data(s,body); return TRUE; }
         if (p[5]!=STATE || body[0]<1 || body[0]>3 || body[1]>1 || !wire_name(body+2) ||
             body[222]>1 || body[223]>SUDEKIMP_LOBBY_SHARED_PAUSE || body[224]>1 ||
             !zero(body+225,3) || !get32(body+228) || zero(body+248,16) || body[268]>1 ||
@@ -441,6 +514,7 @@ static BOOL received(SudekiMpLobby *s, unsigned connection, const uint8_t *p) {
         if (s->status.admission[body[0]].sequence!=admissions[body[0]].sequence) s->admission_ack=0;
         if (admissions[body[0]].phase>=SUDEKIMP_LOBBY_ADMISSION_COMPLETE) s->admission_ack=0;
         s->status.start=start;
+        if (!saved_game_equal(&s->status.saved_game,&saved_game)) save_client_reset(s);
         s->status.saved_game=saved_game;
         s->status.local_slot=body[0]; s->status.advertised=body[1];
         s->status.running=body[222]; s->status.absence_policy=body[223]; s->status.paused=body[224];
@@ -467,7 +541,8 @@ static BOOL pump(SudekiMpLobby *s, unsigned slot, DWORD now) {
         } }
         else if (!n || WSAGetLastError()!=WSAEWOULDBLOCK) return FALSE;
     }
-    for (unsigned limit=0;limit<4;++limit) {
+    unsigned frames=s->save_rx.stream?SAVE_BURST:4u; /* #72: drain chunk frames while receiving */
+    for (unsigned limit=0;limit<frames;++limit) {
         int n=recv(c->socket,(char *)c->rx+c->rx_size,WIRE-(int)c->rx_size,0);
         if (!n) return FALSE;
         if (n<0) { if (WSAGetLastError()!=WSAEWOULDBLOCK) return FALSE; break; }
@@ -588,6 +663,7 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
             unsigned player=c->player; BOOL admitted=c->admitted;
             connection_close(c);
             if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) {
+                if (player<4) { SudekiMpSaveTransferSenderEnd(&s->save_tx[player]); s->save_tx_offer[player]=0; }
                 if (admitted && player>0 && player<4) depart_member_locked(s,player);
             }
             else {
@@ -599,6 +675,12 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
         if (c->admitted && !c->tx_size && (DWORD)(now-c->sent)>=100u) {
             if (s->status.phase==SUDEKIMP_LOBBY_HOSTING) state_packet(s,c->player,bytes);
             else if (s->command_pending) memcpy(bytes,s->command,WIRE);
+            else if (s->save_request_pending) {
+                packet(s,bytes,SAVE_REQUEST);
+                memcpy(bytes+BODY,s->status.saved_game.fish_sha256,32);
+                memcpy(bytes+BODY+32,s->status.saved_game.bunny_sha256,32);
+                s->save_request_pending=FALSE;
+            }
             else if (s->admission_ack && s->status.running) {
                 const SudekiMpLobbyAdmission *a=&s->status.admission[s->status.local_slot];
                 packet(s,bytes,ADMISSION_ACK); put32(bytes+BODY,a->sequence);
@@ -609,6 +691,23 @@ static void poll_locked(SudekiMpLobby *s, DWORD now) {
                 put32(bytes+BODY+8,s->status.start.revision); bytes[BODY+12]=(uint8_t)s->load_ack;
             } else { packet(s,bytes,READY); bytes[BODY]=s->desired_ready?1:0; put32(bytes+BODY+4,s->ready_revision); }
             enqueue(c,bytes); c->sent=now;
+        }
+        /* #72: after the periodic frame, push save chunks while the socket
+         * accepts them; STATE keeps its 100 ms turn because it is queued first. */
+        if (s->status.phase==SUDEKIMP_LOBBY_HOSTING && c->admitted && c->player<4 &&
+            s->save_tx[c->player].stream) {
+            unsigned player=c->player;
+            for (unsigned burst=0;burst<SAVE_BURST;++burst) {
+                if (!flush(c) || c->tx_size) break;
+                BOOL done=FALSE;
+                packet(s,bytes,SAVE_DATA);
+                if (s->save_tx_offer[player]) {
+                    if (!SudekiMpSaveTransferSenderOffer(&s->save_tx[player],bytes+BODY)) break;
+                    s->save_tx_offer[player]=0;
+                } else if (!SudekiMpSaveTransferSenderNext(&s->save_tx[player],bytes+BODY,&done)) break;
+                enqueue(c,bytes);
+                if (done) { (void)flush(c); SudekiMpSaveTransferSenderEnd(&s->save_tx[player]); break; }
+            }
         }
     }
     /* pump/apply_ack can advance the phase after the poll-entry timestamp.
@@ -802,6 +901,7 @@ BOOL SudekiMpLobbyDestination(SudekiMpLobby *s,unsigned destination) {
         memset(&s->status.start,0,sizeof(s->status.start));
         memset(&s->status.saved_game,0,sizeof(s->status.saved_game));
         s->status.start.revision=revision; s->status.start.destination=(uint8_t)destination;
+        save_host_reset(s);
     }
     ReleaseSRWLockExclusive(&s->lock); return okay;
 }
@@ -826,6 +926,7 @@ BOOL SudekiMpLobbySelectSavedGame(SudekiMpLobby *s,const SudekiMpLobbySavedGame 
         memset(&s->status.start,0,sizeof(s->status.start));
         s->status.start.revision=revision; s->status.start.destination=SUDEKIMP_LOBBY_DEST_SAVEDGAME;
         s->status.saved_game=candidate;
+        save_host_reset(s);
     }
     ReleaseSRWLockExclusive(&s->lock); return okay;
 }
@@ -1023,4 +1124,60 @@ void SudekiMpLobbyStatusGet(SudekiMpLobby *s,SudekiMpLobbyStatus *out) {
     memset(out,0,sizeof(*out));
     if (!s) return;
     AcquireSRWLockShared(&s->lock); *out=s->status; ReleaseSRWLockShared(&s->lock);
+}
+
+BOOL SudekiMpLobbyProvideSaveRecords(SudekiMpLobby *s, const uint8_t *fish, size_t fish_size,
+    const uint8_t *bunny, size_t bunny_size) {
+    if (!s || !fish || !bunny || fish_size!=SUDEKIMP_SAVE_TRANSFER_FISH_BYTES ||
+        bunny_size!=SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES) return FALSE;
+    SudekiMpSaveTransferIdentity actual;
+    if (!SudekiMpSaveTransferHash(fish,fish_size,actual.fish_sha256) ||
+        !SudekiMpSaveTransferHash(bunny,bunny_size,actual.bunny_sha256)) return FALSE;
+    uint8_t *copy=malloc(SUDEKIMP_SAVE_TRANSFER_TOTAL_BYTES);
+    if (!copy) return FALSE;
+    memcpy(copy,fish,fish_size); memcpy(copy+fish_size,bunny,bunny_size);
+    AcquireSRWLockExclusive(&s->lock);
+    SudekiMpSaveTransferIdentity published; published_identity(s,&published);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_HOSTING &&
+        s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        !memcmp(&actual,&published,sizeof(actual));
+    if (okay) {
+        save_host_reset(s);
+        s->save_records=copy; copy=NULL; s->save_records_identity=actual;
+        s->status.save_transfer.host_has_records=1;
+    }
+    ReleaseSRWLockExclusive(&s->lock);
+    free(copy);
+    return okay;
+}
+BOOL SudekiMpLobbyRequestSave(SudekiMpLobby *s) {
+    if (!s) return FALSE;
+    AcquireSRWLockExclusive(&s->lock);
+    BOOL okay=s->status.phase==SUDEKIMP_LOBBY_CONNECTED && s->connections[0].admitted &&
+        s->status.start.destination==SUDEKIMP_LOBBY_DEST_SAVEDGAME &&
+        saved_game_valid(&s->status.saved_game) &&
+        s->status.save_transfer.phase!=SUDEKIMP_LOBBY_SAVE_RECEIVING;
+    if (okay) {
+        SudekiMpSaveTransferReceiverEnd(&s->save_rx);
+        s->save_request_pending=TRUE;
+        s->status.save_transfer.phase=SUDEKIMP_LOBBY_SAVE_REQUESTED;
+        s->status.save_transfer.permille=0; s->status.save_transfer.refusal=0;
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
+}
+BOOL SudekiMpLobbyTakeReceivedSave(SudekiMpLobby *s, uint8_t *fish, size_t fish_size,
+    uint8_t *bunny, size_t bunny_size) {
+    if (!s || !fish || !bunny || fish_size!=SUDEKIMP_SAVE_TRANSFER_FISH_BYTES ||
+        bunny_size!=SUDEKIMP_SAVE_TRANSFER_BUNNY_BYTES) return FALSE;
+    const uint8_t *got_fish,*got_bunny;
+    AcquireSRWLockExclusive(&s->lock);
+    SudekiMpSaveTransferIdentity published; published_identity(s,&published);
+    BOOL okay=s->status.save_transfer.phase==SUDEKIMP_LOBBY_SAVE_COMPLETE &&
+        SudekiMpSaveTransferReceiverRecords(&s->save_rx,&got_fish,&got_bunny) &&
+        !memcmp(&s->save_rx.identity,&published,sizeof(published));
+    if (okay) {
+        memcpy(fish,got_fish,fish_size); memcpy(bunny,got_bunny,bunny_size);
+        save_client_reset(s);
+    }
+    ReleaseSRWLockExclusive(&s->lock); return okay;
 }

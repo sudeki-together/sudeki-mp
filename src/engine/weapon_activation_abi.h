@@ -118,6 +118,29 @@ BOOL SudekiMpReduceLocalItem(unsigned int item_id);
  * the requesting client's inventory owns that debit (D9). *stage names the refusal
  * (0 = started; 50+ = arbiter busy bits). */
 BOOL SudekiMpUseItemActionOnCharacter(void *character, unsigned int item_id, unsigned int slot, unsigned int *stage, BOOL reduce);
+/* Worn armour (#40/#74). CEquipped = *(character+0xE0) (vtable RVA 0x2D4EF4,
+ * owner backpointer +0x10, worn CItemArmour* +0x18 with vtable RVA 0x2D39B8,
+ * its item id +0x1C == item+0x14). Armour item ids are 100..139 on the
+ * supported image (CONFIRMED_LIVE item-table scan, 2026-10-16). *item_id = 0
+ * when nothing is worn. FALSE when the layout does not match. */
+BOOL SudekiMpCharacterWornArmour(void *character, unsigned int *item_id);
+/* Armour class (item+0x88) the party character may wear: the CItemArmour::
+ * CanUse pairs (RVA 0x130080) by party index Buki 0x15, Elco 0x16, Tal 0x13,
+ * Ailish 0x14. 0 for any other index. */
+unsigned int SudekiMpStoryArmourClassForCharacter(unsigned int character);
+/* TRUE when item_id is a database CItemArmour of the given party character's
+ * class with usage ("Item Used On" +0x84) 1 or 2. Read-only. */
+BOOL SudekiMpArmourItemWearable(unsigned int character, unsigned int item_id);
+/* Equip a worn armour through the game's own routine RVA 0x160580 (EAX =
+ * CItemArmour, stack = CEquipped, RET 4), exactly as the Main Menu armour
+ * choice does: +0x18 is cleared first so each armour keeps its own runes.
+ * The character must already own the item (the caller grants it). Exact entry
+ * bytes, CEquipped identity and wearability are proven first; the result is
+ * re-read. Game thread only. */
+BOOL SudekiMpEquipCharacterArmourItem(void *character, unsigned int character_index, unsigned int item_id);
+/* Exact-image proof of the armour equip entry (RVA 0x160580) on the image the
+ * ABI was initialised with; read-only. */
+BOOL SudekiMpArmourEquipEntryExact(void);
 /* Host game-thread only, after the remote actor lease is validated. Proton
  * Phaser misses FP recharge/blend while the local camera owns another
  * hero. Uses native recharge, never resets charge or forces reload complete.
