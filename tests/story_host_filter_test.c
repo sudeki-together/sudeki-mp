@@ -9,6 +9,13 @@ static BOOL roster_exact=TRUE,filter_exact=TRUE;
 static BOOL witness_exact=TRUE,split_exact=TRUE,returned_exact=FALSE;
 static BOOL approach_exact;
 static SudekiMpLanStoryInteriorTravel approach;
+static uint8_t destination[0x54];
+static BOOL lead_entry_member; static unsigned lead_entry_asks; static char lead_entry_zone[48];
+static BOOL visit_settled;
+BOOL SudekiMpLanStoryRemoteInteriorHostVisitSettled(const SudekiMpLanStoryNativeRoster *r,unsigned c) {(void)r;(void)c;return visit_settled;}
+BOOL SudekiMpLanStoryRemoteInteriorHostLeadEntryMember(const SudekiMpLanStoryNativeRoster *r,unsigned c,const char *zone) {
+    (void)r;(void)c; ++lead_entry_asks; strcpy(lead_entry_zone,zone?zone:""); return lead_entry_member;
+}
 BOOL SudekiMpLanStoryTaskInteriorTravel(SudekiMpLanStoryInteriorTravel *out) {
     if(!approach_exact) return FALSE;
     *out=approach;return TRUE;
@@ -314,7 +321,8 @@ static void approach_fixture(void) {
     approach=(SudekiMpLanStoryInteriorTravel){.load_generation=3,.task=29,
         .destination_hash=123,.world=exterior_roster.world,.descriptor=exterior_roster.descriptor,
         .group=exterior_roster.group,.controller=controller,.leader=actors[3],
-        .destination=(void *)4};
+        .destination=destination};
+    memset(destination,0,sizeof(destination));
     strcpy(approach.destination_name,"interior");
 }
 static void test_interior_approach_steering(void) {
@@ -346,6 +354,39 @@ static void test_interior_approach_steering(void) {
     assert(exterior_steering() && !exterior_ready() && none_calls+all_calls==calls);
     assert(!*(int *)(controller+0x80) && !*(int *)(controller+0x84));
     puts("PASS named InteriorApproachSteering exact task/world/party/controller/lead only; native pause and actions unchanged");
+}
+static void test_interior_approach_resident_house(void) {
+    /* H1b: the lead uses the door of a shop kept background-resident for a
+     * remote player's visit: steering only through the visit's lead-entry
+     * contract; loading/current/unloading destinations stay refused. */
+    unsigned calls=none_calls+all_calls;
+    approach_fixture(); lead_entry_asks=0;
+    *(unsigned *)(destination+0x34)=0; assert(exterior_steering() && !lead_entry_asks);
+    *(unsigned *)(destination+0x34)=2; lead_entry_member=TRUE;
+    assert(exterior_bound() && exterior_steering() && !exterior_ready() && lead_entry_asks && !strcmp(lead_entry_zone,"interior"));
+    lead_entry_member=FALSE; assert(!exterior_bound() && !exterior_steering());
+    lead_entry_member=TRUE;
+    for(unsigned st=1;st<=4;++st) if(st!=2) { *(unsigned *)(destination+0x34)=st; assert(!exterior_bound() && !exterior_steering()); }
+    *(unsigned *)(destination+0x34)=2;
+    actors[2][0x2b]=1; assert(exterior_bound() && !exterior_steering()); actors[2][0x2b]=0;   /* native pause holds */
+    approach.destination=NULL; assert(!exterior_bound()); approach.destination=destination;
+    assert(exterior_steering() && none_calls+all_calls==calls && !*(int *)(controller+0x80) && !*(int *)(controller+0x84));
+    *(unsigned *)(destination+0x34)=0; lead_entry_member=FALSE;
+    puts("PASS named InteriorApproachResidentHouse resident destination only with the lead-entry member contract; 1/3/4 refused");
+}
+static void test_visit_settled_member(void) {
+    /* H1b: a member settled in its own shop visit keeps its body through
+     * the lead's modal; native pause and the action contract still hold. */
+    unsigned calls=none_calls+all_calls;
+    approach_fixture(); approach_exact=FALSE; visit_settled=FALSE;
+    assert(!exterior_bound() && !exterior_steering());
+    visit_settled=TRUE; assert(exterior_bound() && exterior_steering() && !exterior_ready());
+    actors[2][0x2b]=1; assert(exterior_bound() && !exterior_steering()); actors[2][0x2b]=0;
+    owned_mask=0; assert(!exterior_bound()); owned_mask=4;
+    roster_exact=FALSE; assert(!exterior_bound()); roster_exact=TRUE;
+    assert(none_calls+all_calls==calls && !*(int *)(controller+0x80) && !*(int *)(controller+0x84));
+    visit_settled=FALSE;
+    puts("PASS named VisitSettledMember settled visit member keeps steering; pause, ownership and roster still refuse");
 }
 static uint8_t *map_image(const wchar_t *path) {
     SudekiMpBuildCheck check;
@@ -470,6 +511,8 @@ int main(int argc,char **argv) {
     test_exterior_steering();
     test_returned_steering();
     test_interior_approach_steering();
+    test_interior_approach_resident_house();
+    test_visit_settled_member();
     if(argc==2) test_shop_image(argv[1]);
     VirtualFree(base,0,MEM_RELEASE); base=NULL;
     puts("story host filter lease regression tests passed (synthetic, no gameplay)");

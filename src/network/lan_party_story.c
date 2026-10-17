@@ -17,10 +17,12 @@ int SudekiMpLanStorySceneValid(const SudekiMpLanStoryScene *s) {
         (s->available_mask&~15u) || s->leader_seat>SUDEKIMP_LAN_STORY_NO_SEAT ||
         !name_valid(s->world,s->phase==SUDEKIMP_LAN_STORY_READY) ||
         !name_valid(s->temporary,0) || (s->temporary[0] && !s->world[0]) ||
-        (s->inside_mask&~15u)) return 0;
+        (s->inside_mask&~15u) || s->exterior_retained>1u) return 0;
     if(s->phase!=SUDEKIMP_LAN_STORY_READY)
-        return !s->available_mask && !s->inside_mask && s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT;
-    if((s->inside_mask&~s->available_mask) || (!s->temporary[0])!=(!s->inside_mask)) return 0;
+        return !s->available_mask && !s->inside_mask && !s->exterior_retained &&
+            s->leader_seat==SUDEKIMP_LAN_STORY_NO_SEAT;
+    if((s->inside_mask&~s->available_mask) || (!s->temporary[0])!=(!s->inside_mask) ||
+        (s->exterior_retained && !s->temporary[0])) return 0;
     return s->leader_seat<4u && (s->available_mask&(1u<<s->leader_seat))!=0;
 }
 int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
@@ -29,10 +31,13 @@ int SudekiMpLanStorySceneSame(const SudekiMpLanStoryScene *a,
         a->available_mask==b->available_mask && a->leader_seat==b->leader_seat &&
         !memcmp(a->world,b->world,sizeof(a->world)) &&
         !memcmp(a->temporary,b->temporary,sizeof(a->temporary)) &&
-        a->inside_mask==b->inside_mask;
+        a->inside_mask==b->inside_mask && a->exterior_retained==b->exterior_retained;
 }
+/* The exterior stays live: someone stands in it, or the host states it kept
+ * it loaded while everyone is in the temporary (split/shop visits). */
 static int exterior_occupied(const SudekiMpLanStoryScene *s) {
-    return s->phase==SUDEKIMP_LAN_STORY_READY && (s->available_mask&~s->inside_mask)!=0;
+    return s->phase==SUDEKIMP_LAN_STORY_READY &&
+        ((s->available_mask&~s->inside_mask)!=0 || s->exterior_retained);
 }
 int SudekiMpLanStorySceneAdvances(const SudekiMpLanStoryScene *p,
     const SudekiMpLanStoryScene *n) {
@@ -67,7 +72,7 @@ int SudekiMpLanStorySceneEncode(const SudekiMpLanStoryScene *s,uint8_t *p,size_t
     p[12]=s->phase; p[13]=s->available_mask; p[14]=s->leader_seat;
     memcpy(p+15,s->world,sizeof(s->world));
     memcpy(p+79,s->temporary,sizeof(s->temporary));
-    p[143]=s->inside_mask;
+    p[143]=(uint8_t)(s->inside_mask|(s->exterior_retained?0x80u:0u));
     return 1;
 }
 int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene *s) {
@@ -77,7 +82,7 @@ int SudekiMpLanStorySceneDecode(const uint8_t *p,size_t n,SudekiMpLanStoryScene 
     v.phase=p[12]; v.available_mask=p[13]; v.leader_seat=p[14];
     memcpy(v.world,p+15,sizeof(v.world));
     memcpy(v.temporary,p+79,sizeof(v.temporary));
-    v.inside_mask=p[143];
+    v.inside_mask=(uint8_t)(p[143]&0x7fu); v.exterior_retained=(uint8_t)(p[143]>>7);
     if(!SudekiMpLanStorySceneValid(&v)) return 0;
     *s=v; return 1;
 }
@@ -100,6 +105,18 @@ int SudekiMpLanStorySceneSameArea(const SudekiMpLanStoryScene *s,unsigned int a,
     char wa[SUDEKIMP_LAN_STORY_NAME_SIZE],ta[SUDEKIMP_LAN_STORY_NAME_SIZE];
     return SudekiMpLanStorySceneCharacterArea(s,a,wa,ta) &&
         SudekiMpLanStorySceneCharacterAreaMatches(s,b,wa,ta);
+}
+int SudekiMpLanStorySceneConversationShared(const SudekiMpLanStoryScene *s,
+    unsigned int viewer,unsigned int preferred) {
+    if(!SudekiMpLanStorySceneValid(s) || s->phase!=SUDEKIMP_LAN_STORY_READY) return 0;
+    if(!s->inside_mask) return 1;
+    unsigned int view=SudekiMpLanStoryViewSeat(s,viewer,preferred);
+    if(view>=4u || s->leader_seat>=4u) return 0;
+    if(SudekiMpLanStorySceneSameArea(s,view,s->leader_seat)) return 1;
+    /* Interim: only a viewer inside its own visit (the lead elsewhere) is
+     * excluded; players waiting outside a house the lead is in keep today's
+     * view of its conversations until the co-op conversation design. */
+    return !(s->inside_mask&(1u<<view));
 }
 unsigned int SudekiMpLanStoryViewSeat(const SudekiMpLanStoryScene *s,
     unsigned int player,unsigned int preferred) {

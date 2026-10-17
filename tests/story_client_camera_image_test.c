@@ -5,6 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* The house static camera builds its ResourceName through the spawn-trace
+ * helper; here it never runs a native constructor. */
+static unsigned resource_calls;
+BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
+    void (*use)(void *resource,void *context),void *context) {
+    (void)name;(void)kind;(void)use;(void)context;++resource_calls;return FALSE;
+}
 /* Exact-image guards of the client native camera (#71): every checked byte of
  * the camera update, input event, SetCameraState/CanSetCameraState entries and
  * the node vtable slot refuses mutation; a malformed lease never ticks. */
@@ -187,6 +194,14 @@ int main(int argc,char **argv) {
     assert(!SudekiMpLanStoryClientCameraTick(&lease,0.016f,0,0));
     strcpy((char *)(camera+0x4c),"other");
     assert(!SudekiMpLanStoryClientCameraTick(&lease,0.016f,0,0));
+    /* House static camera: refused for a non-default camera, a bad lease or
+     * a mutated SetStaticCameraPosition entry, before any native call. */
+    assert(!SudekiMpLanStoryClientCameraHouseStatic(&lease,"NB_Kamo_Shop_Cam") && !resource_calls);
+    strcpy((char *)(camera+0x4c),"default");
+    image[0x38500]^=1; assert(!SudekiMpLanStoryClientCameraHouseStatic(&lease,"NB_Kamo_Shop_Cam") && !resource_calls); image[0x38500]^=1;
+    assert(!SudekiMpLanStoryClientCameraHouseStatic(NULL,"NB_Kamo_Shop_Cam") && !SudekiMpLanStoryClientCameraHouseStatic(&lease,""));
+    assert(!SudekiMpLanStoryClientCameraHouseStatic(&lease,"NB_Kamo_Shop_Cam") && resource_calls==1); /* name helper refused */
+    puts("story client camera house static: refusals before any native call");
     assert(SudekiMpLanStoryClientCameraUninstall());
     continuity_preflight(image);
     puts("story client camera exact-image guards and lease refusals passed (no native tick)");

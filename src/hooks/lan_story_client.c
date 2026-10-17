@@ -1020,8 +1020,28 @@ static BOOL adopt_native(BOOL call_scoped) {
     }
     if(!trigger_hooks_exact() || !trigger_queue_empty() || InterlockedCompareExchange(&trigger_fault,0,0) ||
         *(void **)(p->manager+0x10080)) { adopt_refused("trigger_or_script_busy"); return FALSE; }
+    /* H1b: this client's own house entry/exit (EnterTemporaryZone /
+     * ExitTemporaryZone, a recent area call) moves the current zone into or
+     * out of a temporary (state 4) descriptor. Adopt the observer's matching
+     * READY scene for it: same world, party and lead, temporary named exactly
+     * when the native current zone is temporary. */
+    SudekiMpLanStoryScene scene_next=retained_scene;
+    {
+        BOOL temporary_now=readable(next.descriptor,0x38u) && *(uint32_t *)((uint8_t *)next.descriptor+0x34u)==4u;
+        if(temporary_now!=(retained_scene.temporary[0]!=0)) {
+            SudekiMpLanStoryScene published;
+            if(!SudekiMpLanStoryObserverPublished(&published) ||
+                strcmp(published.world,retained_scene.world) ||
+                (published.temporary[0]!=0)!=temporary_now ||
+                published.available_mask!=retained_scene.available_mask ||
+                published.leader_seat!=retained_scene.leader_seat) {
+                adopt_refused("temporary_scene_pending"); return FALSE;
+            }
+            scene_next=published;
+        }
+    }
     /* Same world, group, controller, party actors/AI; only the zone moved. */
-    if(!roster_matches(&next,&retained_scene)) { adopt_refused("roster_or_swap_pending"); return FALSE; }
+    if(!roster_matches(&next,&scene_next)) { adopt_refused("roster_or_swap_pending"); return FALSE; }
     if(!count || count>MAX_ENTITIES || !readable(entries,count*sizeof(*entries))) { adopt_refused("registry_unreadable"); return FALSE; }
     /* This delayed animation-owner cleanup may retire only its proved effect.
      * No task creation, additions or unrelated removals are admitted. Never
@@ -1085,7 +1105,12 @@ static BOOL adopt_native(BOOL call_scoped) {
     memcpy(entity_pause,adopted,count*sizeof(*adopted));
     if(count<MAX_ENTITIES) memset(entity_pause+count,0,(MAX_ENTITIES-count)*sizeof(*entity_pause));
     p->entities=entries; p->count=count; p->created_tasks=*(uint32_t *)(base+TASK_CREATED);
-    retained_roster=next;
+    if(strcmp(scene_next.temporary,retained_scene.temporary) || scene_next.epoch!=retained_scene.epoch) {
+        next.epoch=scene_next.epoch; next.revision=scene_next.revision;
+        SudekiMpLogFormat("lan_story_client event=temporary_adopted epoch=%lu temporary=%s previous=%s\r\n",
+            (unsigned long)scene_next.epoch,scene_next.temporary,retained_scene.temporary);
+    }
+    retained_roster=next; retained_scene=scene_next;
     if(adopt_logs<200u) { ++adopt_logs;
         SudekiMpLogFormat("lan_story_client event=residency_adopted entities=%u kept=%u added=%u suspended=%u rebased=%u removed=%u descriptor=%p\r\n",
             count,kept,added,suspended,rebased,removed,next.descriptor); }

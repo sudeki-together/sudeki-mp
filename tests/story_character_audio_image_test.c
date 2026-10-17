@@ -56,6 +56,19 @@ static void num(void *p,uint32_t v){memcpy(p,&v,4);}
 static volatile uint32_t abi[6] __attribute__((used));
 static volatile uint32_t stub_handle __attribute__((used))=0x123400,stub_calls __attribute__((used));
 static volatile uint32_t emitter_calls __attribute__((used));
+static volatile uint32_t spot_abi[6] __attribute__((used)),spot_calls __attribute__((used));
+static uint8_t *volatile spot_pool __attribute__((used));
+/* EmitterPlay's ABI as CSound::PlayCue uses it: EAX = spot emitter, then
+ * (cue, NULL, 1, 0, 0), RET 0x14. Records, bumps the pool generation. */
+__attribute__((naked,used,noinline)) static void spot_emitter_stub(void) {
+    __asm__ volatile("movl %eax,_spot_abi\n\t"
+        "movl 4(%esp),%eax\n\tmovl %eax,_spot_abi+4\n\t"
+        "movl 8(%esp),%eax\n\tmovl %eax,_spot_abi+8\n\t"
+        "movl 12(%esp),%eax\n\tmovl %eax,_spot_abi+12\n\t"
+        "movl 16(%esp),%eax\n\tmovl %eax,_spot_abi+16\n\t"
+        "movl 20(%esp),%eax\n\tmovl %eax,_spot_abi+20\n\t"
+        "incl _spot_calls\n\tmovl _spot_pool,%eax\n\tincl 4(%eax)\n\txorl %eax,%eax\n\tret $20\n\t");
+}
 static BOOL playback_exact(void *unused){(void)unused;return admitted;}
 __attribute__((naked,used,noinline)) static void native_play_stub(void) {
     __asm__ volatile("movl %ecx,_abi\n\tmovl %esi,_abi+4\n\t"
@@ -237,6 +250,30 @@ int main(int argc,char **argv) {
     assert(!SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==1);admitted=TRUE;
     assert(SudekiMpStoryCharacterAudioPresent(&roster,&frame,playback_exact,NULL) && startup_calls==2);
     puts("PASS witnessed Spirit startup once per cast, retransmit, late-drop and closed admission");
+    {   /* H1b door spot cue through the CSound spot emitter. */
+        uint8_t csound[0x2c]={0},spot[0x14]={0};char cue[]="BlockStart";
+        ptr(csound,base+0x2c6238);ptr(csound+8,base+0x2c6240);ptr(csound+0x18,spot);
+        ptr(spot,base+0x2e1db4);ptr(spot+4,bank);spot[0x10]=1;
+        ptr(base+0x408d40,csound);spot_pool=pool;spot_entry=(void *)spot_emitter_stub;
+        snprintf(names,sizeof(names),"%s","BlockStart");
+        unsigned generation=u32(pool+4);
+        host_mode=TRUE;assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));host_mode=FALSE;
+        ptr(csound,base);assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));ptr(csound,base+0x2c6238);
+        ptr(csound+0x18,NULL);assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));ptr(csound+0x18,spot);
+        spot[0x10]=0;assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));spot[0x10]=1;
+        ptr(spot+8,spot);assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));ptr(spot+8,NULL);
+        assert(!SudekiMpStoryCharacterAudioPlaySpot("generic_wooden_door")); /* not in this bank */
+        assert(!SudekiMpStoryCharacterAudioPlaySpot("blockstart"));          /* exact case */
+        categories[0x18]=1;assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));categories[0x18]=0;
+        num(spot+0xc,2);assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));num(spot+0xc,0);
+        base[0x280b90]^=1;assert(!SudekiMpStoryCharacterAudioPlaySpot(cue));base[0x280b90]^=1;
+        assert(!spot_calls && u32(pool+4)==generation);
+        assert(SudekiMpStoryCharacterAudioPlaySpot(cue) && spot_calls==1 && u32(pool+4)==generation+1);
+        assert(spot_abi[0]==(uint32_t)(uintptr_t)spot && spot_abi[1]==(uint32_t)(uintptr_t)cue &&
+            !spot_abi[2] && spot_abi[3]==1 && !spot_abi[4] && !spot_abi[5]);
+        spot_entry=NULL;ptr(base+0x408d40,NULL);
+        puts("PASS door spot cue: PlayCue's EmitterPlay ABI, spot emitter/bank/cue/capacity proofs and refusals before any call");
+    }
 
     const char *banks_by_character[]={"BUKISoundScript.xsb","ELCOSoundScript.xsb","TalSoundScript.xsb","ALICESoundScript.xsb"};
     const char *shared_cues[]={"hit_sml","hit_med","hit_lrg","death"};

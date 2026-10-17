@@ -1,6 +1,7 @@
 #include "network/lan_story_area_state.h"
 #include <string.h>
 _Static_assert(SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u,"story area datagram bound");
+_Static_assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==501u,"story area v2 layout");
 static void put(uint8_t *p,uint32_t v) {for(unsigned i=0;i<4u;++i) p[i]=(uint8_t)(v>>(8u*i));}
 static uint32_t get(const uint8_t *p) {return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
 static BOOL name_valid(const char *n,BOOL allow_empty) {
@@ -12,7 +13,9 @@ static BOOL name_valid(const char *n,BOOL allow_empty) {
 }
 BOOL SudekiMpStoryAreaStateValid(const SudekiMpStoryAreaState *s) {
     static const SudekiMpStoryAreaEntry zero;
-    if(!s || s->count>SUDEKIMP_STORY_AREA_MAX || !name_valid(s->current,FALSE) || !name_valid(s->target,TRUE)) return FALSE;
+    if(!s || s->count>SUDEKIMP_STORY_AREA_MAX || !name_valid(s->current,FALSE) || !name_valid(s->target,TRUE) ||
+        !name_valid(s->temporary_zone,TRUE) || !name_valid(s->temporary_marker,TRUE) ||
+        (!s->temporary_zone[0])!=(!s->temporary_marker[0])) return FALSE;
     for(unsigned i=0;i<s->count;++i)
         if(!name_valid(s->entries[i].name,FALSE) || !s->entries[i].state || s->entries[i].state>4u) return FALSE;
     for(unsigned i=s->count;i<SUDEKIMP_STORY_AREA_MAX;++i)
@@ -22,7 +25,9 @@ BOOL SudekiMpStoryAreaStateValid(const SudekiMpStoryAreaState *s) {
 BOOL SudekiMpStoryAreaStateSame(const SudekiMpStoryAreaState *a,const SudekiMpStoryAreaState *b) {
     return SudekiMpStoryAreaStateValid(a) && SudekiMpStoryAreaStateValid(b) &&
         !memcmp(a->current,b->current,sizeof(a->current)) && !memcmp(a->target,b->target,sizeof(a->target)) &&
-        a->count==b->count && !memcmp(a->entries,b->entries,sizeof(a->entries));
+        a->count==b->count && !memcmp(a->entries,b->entries,sizeof(a->entries)) &&
+        !memcmp(a->temporary_zone,b->temporary_zone,sizeof(a->temporary_zone)) &&
+        !memcmp(a->temporary_marker,b->temporary_marker,sizeof(a->temporary_marker));
 }
 BOOL SudekiMpStoryAreaStateExterior(const SudekiMpStoryAreaState *s) {
     if(!SudekiMpStoryAreaStateValid(s)) return FALSE;
@@ -48,6 +53,7 @@ BOOL SudekiMpStoryAreaStateEncode(const SudekiMpStoryAreaState *s,uint8_t *p,siz
     for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i) {
         memcpy(p+93+i*41u,s->entries[i].name,40u); p[133+i*41u]=s->entries[i].state;
     }
+    memcpy(p+421,s->temporary_zone,40u); memcpy(p+461,s->temporary_marker,40u);
     return TRUE;
 }
 BOOL SudekiMpStoryAreaStateDecode(const uint8_t *p,size_t n,SudekiMpStoryAreaState *out) {
@@ -57,6 +63,7 @@ BOOL SudekiMpStoryAreaStateDecode(const uint8_t *p,size_t n,SudekiMpStoryAreaSta
     for(unsigned i=0;i<SUDEKIMP_STORY_AREA_MAX;++i) {
         memcpy(s.entries[i].name,p+93+i*41u,40u); s.entries[i].state=p[133+i*41u];
     }
+    memcpy(s.temporary_zone,p+421,40u); memcpy(s.temporary_marker,p+461,40u);
     if(!s.sequence || !SudekiMpStoryAreaStateValid(&s)) return FALSE;
     *out=s; return TRUE;
 }

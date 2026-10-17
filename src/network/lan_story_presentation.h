@@ -44,6 +44,10 @@ BOOL SudekiMpLanStoryPresentationCueValid(const char *cue);
 BOOL SudekiMpLanStoryPresentationValid(const SudekiMpLanStoryPresentation *frame);
 BOOL SudekiMpLanStoryPresentationMatches(const SudekiMpLanStoryPresentation *frame,
     const SudekiMpLanStoryFrame *party);
+/* The idle record for the same frame: no dialogue, line, text, voice cue or
+ * bars; identity and serials kept. Used for a conversation that plays only
+ * on the host's own game (a shopkeeper's, D11). */
+void SudekiMpLanStoryPresentationClearDialogue(SudekiMpLanStoryPresentation *frame);
 BOOL SudekiMpLanStoryPresentationEncode(const SudekiMpLanStoryPresentation *frame,
     uint8_t *bytes,size_t capacity,size_t *written);
 BOOL SudekiMpLanStoryPresentationDecode(const uint8_t *bytes,size_t size,

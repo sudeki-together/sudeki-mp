@@ -70,6 +70,14 @@ static BOOL readable(const void *p,size_t n) {
     return access==PAGE_READWRITE || access==PAGE_EXECUTE_READWRITE ||
         access==PAGE_READONLY || access==PAGE_EXECUTE_READ;
 }
+static BOOL writable(const void *p,size_t n) {
+    MEMORY_BASIC_INFORMATION m; uintptr_t a=(uintptr_t)p;
+    if(!p || !n || a>UINTPTR_MAX-n || VirtualQuery(p,&m,sizeof(m))!=sizeof(m) ||
+        m.State!=MEM_COMMIT || (m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) ||
+        a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
+    DWORD access=m.Protect&0xffu;
+    return access==PAGE_READWRITE || access==PAGE_EXECUTE_READWRITE;
+}
 static BOOL thread_exact(void) {
     DWORD t=GetCurrentThreadId();
     if(!native_thread) native_thread=t;
@@ -129,8 +137,169 @@ static void __attribute__((thiscall)) lead_only(void *group) {
     }
     if(exempt_count) exempt_group=g;
 }
+/* H1b shop members (owner decision 2026-10-17, D11: players in the same
+ * shop see each other). The door script's HidePartyMembers (0x24A70, right
+ * after lead-only) hides every follower: 0x4E06D0 raises the int16 depth at
+ * model+0x74 and sets bit 4 on the body render object; gated weapon objects
+ * get bit 4 too. ShowPartyMembers (0x24950) undoes it after the exit.
+ * A member inside the lead's own shop is shown depth-neutrally: the export
+ * ClrROFlags(model,4) (0xE1330, thiscall, ret 4) for the body and a native-
+ * order clear for weapon objects without the renderer-callback bit. Release
+ * re-hides what is still ours while the native hide is outstanding, so the
+ * native ShowPartyMembers balances unchanged. CONFIRMED_STATIC. */
+enum { RO_SET=0xe12e0, RO_CLR=0xe1330, BODY_VTABLE=0x2dd700, POSITION_VTABLE=0x2cdefc,
+    WEAPON_VTABLE=0x2d4d3c, RENDER_CALLBACK_BIT=0x4000000 };
+typedef void (__attribute__((thiscall)) *RoFlags)(void *,uint32_t);
+static RoFlags ro_set,ro_clr;
+static BOOL visibility_exact;
+typedef struct MemberShow {
+    BOOL held;
+    uint8_t *world,*group,*actor,*model;
+    int16_t depth_at;
+    uint8_t *weapon[2]; uint32_t weapon_written[2];
+    unsigned reasserts;
+} MemberShow;
+static MemberShow shows[4];
+static uint8_t *body_object(uint8_t *actor,uint8_t *model) {
+    uint8_t *pos=*(uint8_t **)(actor+0x44u),*wrapper,*body,*renderer;
+    if(!readable(pos,0xb8u) || *(void **)pos!=base+POSITION_VTABLE || *(uint8_t **)(pos+0x10u)!=actor ||
+        !readable(wrapper=*(uint8_t **)(pos+0xb4u),0x14u) || !writable(body=*(uint8_t **)(wrapper+8u),0x38u) ||
+        *(void **)body!=base+BODY_VTABLE || !readable(renderer=*(uint8_t **)(wrapper+0x10u),4u) ||
+        *(uint8_t **)(body+0x14u)!=renderer || *(void **)renderer!=base+RENDERER_VTABLE) return NULL;
+    (void)model; return body;
+}
+static BOOL member_model(uint8_t *actor,uint8_t **model) {
+    *model=readable(actor,0xc4u)?*(uint8_t **)(actor+0x58u):NULL;
+    return *model && writable(*model,0x76u) && *(uint8_t **)(*model+0x10u)==actor && body_object(actor,*model);
+}
+/* The weapon's two render objects (NULL when absent, as natively). */
+static void weapon_objects(uint8_t *actor,uint8_t *out[2]) {
+    static const unsigned slot[2]={0xf4u,0x204u};
+    out[0]=out[1]=NULL;
+    uint8_t *w=*(uint8_t **)(actor+0xc0u);
+    if(!readable(w,0x3bcu) || *(void **)w!=base+WEAPON_VTABLE || *(uint8_t **)(w+0x10u)!=actor) return;
+    for(unsigned k=0;k<2u;++k) {
+        uint8_t *p=*(uint8_t **)(w+slot[k]),*o;
+        if(!p || !readable(p,0xcu) || !(o=*(uint8_t **)(p+8u))) continue;
+        if(!writable(o,0x38u) || *(void **)o!=base+BODY_VTABLE ||
+            (*(uint32_t *)(o+0x34u)&RENDER_CALLBACK_BIT)) continue; /* never run its callback */
+        out[k]=o;
+    }
+}
+static unsigned show_traces;
+static const char *show_last[4];
+static void show_log(unsigned c,const char *action,const char *result,int depth) {
+    /* A repeated refusal (every frame while inside) logs once. */
+    if(c<4u && !strncmp(result,"refused",7)) { if(show_last[c]==result) return; show_last[c]=result; }
+    else if(c<4u) show_last[c]=NULL;
+    if(show_traces++<300u) SudekiMpLogFormat("lan_story_split event=member_visibility action=%s character=%u depth=%d result=%s\r\n",
+        action,c,depth,result);
+}
+/* Positive retirement only (world/group replaced or not a follower now). */
+static BOOL show_identity_gone(const MemberShow *m) {
+    return *(uint8_t **)(base+WORLD)!=m->world || *(uint8_t **)(base+GROUP)!=m->group ||
+        !group_member(m->group,m->actor);
+}
+void SudekiMpLanStorySplitReleaseMember(unsigned c,const char *reason) {
+    MemberShow *m=c<4u?&shows[c]:NULL;
+    if(!m || !m->held || !base || native_thread!=GetCurrentThreadId()) return; /* kept: Uninstall refuses */
+    if(show_identity_gone(m)) { show_log(c,"release","retired",0); memset(m,0,sizeof(*m)); return; }
+    uint8_t *model;
+    if(!member_model(m->actor,&model) || model!=m->model) { show_log(c,"release","unresolved",0); return; }
+    int depth=*(int16_t *)(model+0x74u);
+    if(depth>=m->depth_at) {
+        /* The native door hide is still outstanding: put ours back. */
+        uint8_t *body=body_object(m->actor,model);
+        if(body && !(*(uint32_t *)(body+0x34u)&4u)) ro_set(model,4u);
+        for(unsigned k=0;k<2u;++k) if(m->weapon[k] && writable(m->weapon[k],0x38u) &&
+            *(uint32_t *)(m->weapon[k]+0x34u)==m->weapon_written[k])
+            *(uint32_t *)(m->weapon[k]+0x34u)=m->weapon_written[k]|4u;
+        show_log(c,reason?reason:"release","restored",depth);
+    } else show_log(c,reason?reason:"release","native_released",depth);
+    memset(m,0,sizeof(*m));
+}
+static void release_all(const char *reason) {
+    for(unsigned c=0;c<4u;++c) SudekiMpLanStorySplitReleaseMember(c,reason);
+}
+int SudekiMpLanStorySplitShowMember(const SudekiMpLanStoryNativeRoster *r,unsigned c) {
+    if(!visibility_exact || !base || !r || c>=4u || c==r->leader_character || !thread_exact()) return -1;
+    MemberShow *m=&shows[c];
+    uint8_t *actor=r->actors[c],*model;
+    if(m->held) {
+        if(show_identity_gone(m) || actor!=m->actor || !member_model(actor,&model) || model!=m->model) {
+            SudekiMpLanStorySplitReleaseMember(c,"identity_changed"); return 0;
+        }
+        /* Upkeep: while the native depth is unchanged, keep ours visible. */
+        if(*(int16_t *)(model+0x74u)==m->depth_at) {
+            uint8_t *body=body_object(actor,model),*now[2];
+            if(body && (*(uint32_t *)(body+0x34u)&4u)) {
+                ro_clr(model,4u); if(!m->reasserts++) show_log(c,"reassert","body",m->depth_at);
+            }
+            weapon_objects(actor,now);
+            for(unsigned k=0;k<2u;++k) {
+                if(now[k]!=m->weapon[k]) { m->weapon[k]=NULL; continue; } /* replaced: native owns it */
+                if(m->weapon[k] && (*(uint32_t *)(m->weapon[k]+0x34u)&4u)) {
+                    m->weapon_written[k]=*(uint32_t *)(m->weapon[k]+0x34u)&~4u;
+                    *(uint32_t *)(m->weapon[k]+0x34u)=m->weapon_written[k];
+                }
+            }
+        }
+        return 1;
+    }
+    if(!active || !settled_inside) return 0;
+    if(!actor || character_of(actor)!=c || r->group!=*(uint8_t **)(base+GROUP) || !group_member(r->group,actor) ||
+        !member_model(actor,&model)) { show_log(c,"show","refused_identity",0); return -1; }
+    uint8_t *body=body_object(actor,model);
+    int depth=*(int16_t *)(model+0x74u);
+    if(!(*(uint32_t *)(body+0x34u)&4u)) return 1;             /* natively visible: nothing to do */
+    if(depth<1) { show_log(c,"show","refused_depth",depth); return -1; }
+    memset(m,0,sizeof(*m));
+    m->world=*(uint8_t **)(base+WORLD); m->group=r->group; m->actor=actor; m->model=model; m->depth_at=(int16_t)depth;
+    ro_clr(model,4u);
+    if(*(uint32_t *)(body+0x34u)&4u) { show_log(c,"show","native_refused",depth); memset(m,0,sizeof(*m)); return -1; }
+    uint8_t *objects[2]; weapon_objects(actor,objects);
+    uint8_t *w=*(uint8_t **)(actor+0xc0u);
+    BOOL logically_visible=readable(w,0x3bcu) && (w[0x3b8u]&2u);
+    for(unsigned k=0;k<2u;++k) if(objects[k] && logically_visible && (*(uint32_t *)(objects[k]+0x34u)&4u)) {
+        m->weapon[k]=objects[k]; m->weapon_written[k]=*(uint32_t *)(objects[k]+0x34u)&~4u;
+        *(uint32_t *)(objects[k]+0x34u)=m->weapon_written[k];
+    }
+    m->held=TRUE;
+    show_last[c]=NULL;
+    if(show_traces++<300u) SudekiMpLogFormat("lan_story_split event=member_visibility action=show character=%u depth=%d weapons=%u,%u result=leased\r\n",
+        c,depth,m->weapon[0]?1u:0u,m->weapon[1]?1u:0u);
+    return 1;
+}
+/* Member visibility: exact exports and the native hide/show it balances. */
+static BOOL visibility_bind(uint8_t *b) {
+    static const struct { unsigned rva,size; uint8_t bytes[36]; } guards[]={
+        {RO_SET,34,{0x8b,0x41,0x10,0x8b,0x40,0x44,0x85,0xc0,0x74,0x41,0x8b,0x80,0xb4,0,0,0,0x85,0xc0,0x74,0x37,
+            0x56,0x57,0x8b,0x78,0x08,0x8b,0x47,0x34,0x8b,0xf0,0x0b,0x74,0x24,0x0c}},
+        {RO_CLR,36,{0x8b,0x41,0x10,0x8b,0x40,0x44,0x85,0xc0,0x74,0x43,0x8b,0x80,0xb4,0,0,0,0x85,0xc0,0x74,0x39,
+            0x56,0x8b,0x74,0x24,0x08,0x57,0x8b,0x78,0x08,0x8b,0x47,0x34,0xf7,0xd6,0x23,0xf0}},
+        {0x24aa5,18,{0x8b,0x46,0x58,0x85,0xc0,0x74,0x05,0xe8,0x1f,0xbc,0x0b,0x00,0x8b,0x9e,0xc0,0,0,0}},
+        {0x24985,18,{0x8b,0x46,0x58,0x85,0xc0,0x74,0x05,0xe8,0x8f,0xbd,0x0b,0x00,0x8b,0x9e,0xc0,0,0,0}},
+        {0x24af6,6,{0x8b,0x83,0xf4,0,0,0}},{0x24b37,6,{0x8b,0x83,0x04,0x02,0,0}},
+        {0x249d6,6,{0x8b,0x83,0xf4,0,0,0}},{0x24a17,6,{0x8b,0x83,0x04,0x02,0,0}},
+        {0xe06d0,12,{0x66,0xff,0x40,0x74,0x8b,0x40,0x10,0x8b,0x40,0x44,0x85,0xc0}},
+        {0xe0720,13,{0x66,0xff,0x48,0x74,0x66,0x8b,0x48,0x74,0x66,0x85,0xc9,0x7f,0x4a}},
+        {0x1d64da,11,{0x8b,0x46,0x34,0xa8,0x04,0x74,0x04,0xa8,0x20,0x74,0x74}},
+    };
+    BOOL exact=TRUE;
+    for(unsigned i=0;i<sizeof(guards)/sizeof(guards[0]) && exact;++i)
+        exact=readable(b+guards[i].rva,guards[i].size) && !memcmp(b+guards[i].rva,guards[i].bytes,guards[i].size);
+    visibility_exact=exact;
+    ro_set=exact?(RoFlags)(b+RO_SET):NULL; ro_clr=exact?(RoFlags)(b+RO_CLR):NULL;
+    return exact;
+}
+BOOL SudekiMpLanStorySplitMemberLeasesHeld(void) {
+    for(unsigned c=0;c<4u;++c) if(shows[c].held) return TRUE;
+    return FALSE;
+}
 static void __attribute__((thiscall)) full_party(void *group) {
     uint8_t *g=group;
+    /* Ending lead-only: our shows go before the native show balances. */
+    if(thread_exact() && readable(g,0xd4) && *(int *)(g+0xd0)==1) release_all("full_party");
     if(exempt_count && thread_exact() && readable(g,0xd4) && *(int *)(g+0xd0)==1) {
         if(g==exempt_group) {
             for(unsigned i=0;i<exempt_count;++i) {
@@ -483,6 +652,7 @@ static void settled(BOOL inside) {
 }
 static void ended(BOOL vanilla) {
     SudekiMpLogFormat("lan_story_split event=ended vanilla=%u temporary=%s\r\n",vanilla,temporary);
+    release_all("split_ended"); /* no observer call: its lock is held here */
     active=settled_inside=FALSE; temporary_data=NULL; memset(temporary,0,sizeof(temporary));
     memset(&residency,0,sizeof(residency));
     if(vanilla || !returned.settled) clear_returned();
@@ -538,7 +708,8 @@ const void *SudekiMpLanStorySplitTemporaryData(void) {return active&&settled_ins
 BOOL SudekiMpLanStorySplitUninstall(void) {
     if(!native_thread || native_thread==GetCurrentThreadId()) clear_returned();
     if(!base) return TRUE;
-    if(active || exempt_count) {SetLastError(ERROR_BUSY); return FALSE;}
+    if(native_thread==GetCurrentThreadId()) release_all("uninstall");
+    if(active || exempt_count || SudekiMpLanStorySplitMemberLeasesHeld()) {SetLastError(ERROR_BUSY); return FALSE;}
     if(observer_set) {
         if(!SudekiMpLanStoryObserverSetSplit(NULL)) {SetLastError(ERROR_BUSY); return FALSE;}
         observer_set=FALSE;
@@ -552,6 +723,7 @@ BOOL SudekiMpLanStorySplitUninstall(void) {
     if(!attached && !SudekiMpLanStoryTempExteriorUninstall()) ok=FALSE;
     if(!ok) {SetLastError(ERROR_BUSY); return FALSE;}
     base=NULL; native_thread=0; host_ready=FALSE; outside_mask=0;
+    visibility_exact=FALSE; ro_set=ro_clr=NULL; memset(shows,0,sizeof(shows));
     InterlockedExchange(&test_preflight_reported,0);
     return TRUE;
 }
@@ -592,6 +764,7 @@ BOOL SudekiMpLanStorySplitInstall(HMODULE image) {
         (void)SudekiMpLanStorySplitUninstall();
         SetLastError(error?error:ERROR_INVALID_STATE); return FALSE;
     }
+    if(!visibility_bind(b)) SudekiMpLogWrite("lan_story_split event=member_visibility_unavailable reason=image\r\n");
     SudekiMpLogWrite("lan_story_split event=installed seams=temp_exterior,lead_only,full_party,scene_walk\r\n");
     return TRUE;
 }

@@ -35,6 +35,13 @@ BOOL SudekiMpLanStoryClientCameraTick(const SudekiMpLanArenaOwnerViewLease *owne
  * the manager (the retail zone-entry bootstrap call) so the native camera is
  * re-seated behind its target instead of recovering from behind a door. */
 BOOL SudekiMpLanStoryClientCameraReseat(const SudekiMpLanArenaOwnerViewLease *owner);
+/* H1b: settled in a house whose cluster script sets a static camera (the
+ * client holds that script): call SetCameraStaticPosition('default',
+ * position, 0, false, 0) natively; the transition ends in Aimed (fixed eye
+ * aimed at the character), which Tick then treats as ordinary. */
+BOOL SudekiMpLanStoryClientCameraHouseStatic(const SudekiMpLanArenaOwnerViewLease *owner,const char *position);
+/* Left the house: Exploration (0, false, 0) as the vanilla exit asks. */
+BOOL SudekiMpLanStoryClientCameraHouseRelease(const SudekiMpLanArenaOwnerViewLease *owner);
 /* FALSE retains hook dependencies; runtime must keep the module and retry
  * before destroying the camera lease or unloading the DLL. */
 BOOL SudekiMpLanStoryClientCameraUninstall(void);

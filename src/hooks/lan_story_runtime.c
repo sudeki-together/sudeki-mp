@@ -9,6 +9,8 @@
 #include "hooks/lan_story_sky.h"
 #include "hooks/lan_story_music.h"
 #include "hooks/lan_story_character_audio.h"
+#include "hooks/lan_story_zone_banner.h"
+#include "hooks/lan_story_shop.h"
 #include "hooks/lan_story_combo_hud.h"
 #include "cleanroom/engine.h"
 #include "engine/spirit_instance_abi.h"
@@ -39,6 +41,7 @@
 #include "hooks/lan_story_client_camera.h"
 #include "hooks/lan_story_inventory.h"
 #include "hooks/lan_story_remote_use.h"
+#include "hooks/lan_story_remote_interior.h"
 #include "hooks/lan_story_main_menu.h"
 #include "hooks/armour_menu.h"
 #include "ui/party_menu.h"
@@ -77,12 +80,19 @@ static int phases[4];
 static BOOL saved_profile,client_attempted,menu_attempted,input_attempted,replica_attempted;
 static BOOL world_attempted,effects_attempted,render_attempted,presentation_attempted;
 static BOOL realtime_attempted;
-static BOOL quick_menu_attempted,remote_use_attempted;
+static BOOL quick_menu_attempted,remote_use_attempted,shop_attempted;
 static BOOL main_menu_attempted; static HMODULE main_menu_module;
 static void action_trace(const char *reason,unsigned kind,unsigned slot,unsigned detail) {
     SudekiMpLogFormat("story_action event=expired reason=%s kind=%u slot=%u detail=%#x\r\n",reason,kind,slot,detail);
 }
 static BOOL main_menu_open(void) { return main_menu_attempted && local_seat && SudekiMpLanStoryMainMenuVisible(); }
+/* H1b: this client's own shop screen (D11) holds the body and the session
+ * menu key like the Main Menu does. */
+static BOOL shop_open(void) { return shop_attempted && local_seat && SudekiMpLanStoryShopActive(); }
+/* H1b: an examinable's box of this client's own (the gramophone) holds the
+ * body and takes the interact press until it closes, as natively. */
+static BOOL examine_open(void) { return shop_attempted && local_seat && SudekiMpLanStoryZoneBannerExamineActive(); }
+static BOOL table_modal(void) { return shop_open() || examine_open(); }
 static BOOL inventory_bound;
 typedef struct StoryPendingLoot {
     struct StoryPendingLoot *next;
@@ -386,6 +396,10 @@ static struct {
     SudekiMpLanStoryNativeRoster exterior_roster;
     BOOL acquired,draining,ready,input_held;
     uint32_t transaction,last_input_at;
+    /* Receipt of this player's latest movement packet. Never zeroed by a
+     * host-side hold (last_input_at is): it only says the client is still
+     * sending (H1b shop visits end a member whose client stopped). */
+    uint32_t heard_at;
     SudekiMpLanStoryMovement movement;
     SudekiMpLanStoryRanged ranged;
     uint32_t ranged_at,ranged_press;
@@ -643,7 +657,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
     /* Host cutscene (#54): while the host's letterbox is up, a client that
      * drives its own character shows the host's cinematic camera too (same
      * view publication spectators use), and its own camera resumes after. */
-    BOOL cinematic=client_local_selected && frame->dialogue &&
+    BOOL cinematic=client_local_selected && frame->dialogue && !shop_open() &&
         (frame->dialogue->flags&SUDEKIMP_STORY_LETTERBOX_PRESENT) && frame->party->view.valid;
     if(cinematic!=host_cinematic_view)
         SudekiMpLogFormat("lan_story_client event=host_cinematic_view active=%u\r\n",(unsigned)cinematic);
@@ -703,10 +717,21 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
         static BOOL override_was_active,reseat_pending;
         BOOL override_now=(cast_view && cast_view->valid) || presented_cast_view.kind || SudekiMpLanStoryLocalControlCastActive();
         if(override_was_active && !override_now) reseat_pending=TRUE;
+        if(SudekiMpLanStoryRemoteInteriorClientTakeReseat()) reseat_pending=TRUE;
         override_was_active=override_now;
         if(client_camera_attempted && !override_now) {
             SudekiMpLanArenaOwnerViewLease owner; float look_x=0,look_y=0;
-            if(reseat_pending && SudekiMpLanStoryLocalControlViewOwner(&owner)) { (void)SudekiMpLanStoryClientCameraReseat(&owner); reseat_pending=FALSE; }
+            if(reseat_pending && SudekiMpLanStoryLocalControlViewOwner(&owner)) {
+                /* H1b: settled in a house with an authored static camera, use
+                 * it (as its cluster script does natively); back out, the
+                 * vanilla exit's Exploration; else the ordinary reseat. */
+                static BOOL house_camera;
+                const char *house=SudekiMpLanStoryRemoteInteriorClientHouseCamera();
+                if(house && SudekiMpLanStoryClientCameraHouseStatic(&owner,house)) house_camera=TRUE;
+                else if(house_camera) { (void)SudekiMpLanStoryClientCameraHouseRelease(&owner); house_camera=FALSE; }
+                else (void)SudekiMpLanStoryClientCameraReseat(&owner);
+                reseat_pending=FALSE;
+            }
             (void)SudekiMpLanStoryInputLookAxes(&look_x,&look_y);
             native_view=present_native_camera(roster,GetTickCount(),look_x,look_y);
         }
@@ -758,7 +783,10 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
         }
         SudekiMpLanStoryAreaFadeApply(roster);
         if(aim_pose_attempted) SudekiMpLanAimActors(roster->actors[3],NULL);
-        if(frame->dialogue) {
+        /* H1b: this player's own shopkeeper conversation or shop is up on
+         * this game; host lines arriving meanwhile are not presented (D11). */
+        if(frame->dialogue && shop_open()) (void)SudekiMpLanStoryCinematicAudioStop(audio_present_exact,(void *)roster);
+        else if(frame->dialogue) {
             BOOL ok=SudekiMpLanStoryCinematicAudioPresent(frame->dialogue,audio_present_exact,(void *)roster);
             DWORD error=ok?ERROR_SUCCESS:GetLastError();
             trace_cinematic(&audio_trace,"audio",frame->dialogue,ok,error);
@@ -835,6 +863,8 @@ static uint8_t client_foreign_characters(const SudekiMpLanStoryScene *remote) {
     if(c>=4u) return 0;
     for(unsigned o=0;o<4u;++o) if((remote->available_mask&(1u<<o)) && !SudekiMpLanStorySceneSameArea(remote,c,o))
         mask|=(uint8_t)(1u<<o);
+    /* H1b: players in the same shop see each other (owner decision
+     * 2026-10-17, D11, replacing the first per-visitor instancing). */
     return mask;
 }
 static BOOL current_presentation(const SudekiMpLanStoryScene *native,SudekiMpLanStoryScene *remote) {
@@ -941,6 +971,11 @@ static BOOL flush_damage_residency(void *context) {
 static BOOL tick_spawn_residency(void *context) {
     return SudekiMpLanStorySpawnTick(*(const uint32_t *)context,TRUE);
 }
+/* H1b: the door's 2D spot cue (native cue only; no entity or task). */
+static BOOL door_cue_residency(void *context) {
+    (void)SudekiMpStoryCharacterAudioPlaySpot((const char *)context);
+    return FALSE;
+}
 static BOOL spawns_residency(void *context) {
     return SudekiMpLanStorySpawnEventsFollow(context);
 }
@@ -1019,12 +1054,30 @@ static void refresh_menu(void) {
 static BOOL menu_admission(void) { return saved_profile && session; }
 static void menu_toggle(void) {
     if(InterlockedCompareExchange(&stopping,0,0)) return;
+    if(shop_open()) return; /* Escape is the shop's own back key while it is shown */
+    if(examine_open()) { SudekiMpLanStoryZoneBannerExamineClose("escape"); return; }
     refresh_menu();
     SudekiMpLanStoryMenuToggle();
+}
+typedef struct ShopDrainStep { BOOL ran,idle; } ShopDrainStep;
+static BOOL drain_shop(const SudekiMpLanStoryNativeRoster *r,const SudekiMpLanStoryScene *scene,void *context) {
+    ShopDrainStep *step=context; (void)r; (void)scene;
+    step->ran=TRUE; step->idle=SudekiMpLanStoryShopDrain(GetTickCount());
+    return TRUE;
 }
 static BOOL retire_client(void) {
     SudekiMpLanStoryClientReport report;
     SudekiMpLanStoryInputClear(); client_input_ready=FALSE;
+    /* H1b: this client's own shop screen closes first (its back command);
+     * the shop owner refuses to uninstall while it may still be shown. */
+    if(shop_attempted && !SudekiMpLanStoryShopIdle()) {
+        ShopDrainStep step={0};
+        (void)SudekiMpLanStoryClientPresent(drain_shop,&step);
+        /* Teardown with the presentation scope lost: the lease still ends
+         * through its own witnessed close steps (never left half open). */
+        if(!step.ran) step.idle=SudekiMpLanStoryShopDrain(GetTickCount());
+        if(!step.idle) return FALSE;
+    }
     if(!reset_story_vfx(NULL)) return FALSE;
     if(!SudekiMpLanStorySkyReleaseLighting()) return FALSE;
     if(quick_menu_attempted && SudekiMpLanStoryQuickMenuCapturesInput() &&
@@ -1215,9 +1268,28 @@ static void present(void) {
         control.fence.character==chosen &&
         control.fence.actor_generation==sample.actors[chosen].generation;
     int dialogue_index=dialogue_for_party(&history[dialogue_party_index],now);
+    /* Owner 2026-10-17: a host conversation does not reach a player inside
+     * their own shop visit while the lead is elsewhere (interim rule until
+     * the co-op conversation design is decided): that client is given the
+     * idle record for the same frame. */
+    static SudekiMpLanStoryPresentation shown_dialogue;
+    if(dialogue_index>=0) {
+        shown_dialogue=dialogue_history[dialogue_index];
+        if(!SudekiMpLanStorySceneConversationShared(&remote,chosen<4u?chosen:remote.leader_seat,4u)) {
+            static uint32_t hidden_epoch,hidden_conversation; static unsigned hidden_logs;
+            if(shown_dialogue.flags && (shown_dialogue.epoch!=hidden_epoch ||
+                shown_dialogue.conversation_serial!=hidden_conversation) && hidden_logs<32u) {
+                ++hidden_logs; hidden_epoch=shown_dialogue.epoch; hidden_conversation=shown_dialogue.conversation_serial;
+                SudekiMpLogFormat("story_cinematic event=area_hidden epoch=%lu conversation=%lu viewer=%u lead=%u inside=%u temporary=%s\r\n",
+                    (unsigned long)shown_dialogue.epoch,(unsigned long)shown_dialogue.conversation_serial,chosen,
+                    (unsigned)remote.leader_seat,(unsigned)remote.inside_mask,remote.temporary[0]?remote.temporary:"-");
+            }
+            SudekiMpLanStoryPresentationClearDialogue(&shown_dialogue);
+        }
+    }
     StoryPresentation presented={&sample,&world_sample,FALSE,
         control_offered?&control:NULL,&peer.lease,
-        dialogue_index>=0?&dialogue_history[dialogue_index]:NULL};
+        dialogue_index>=0?&shown_dialogue:NULL};
     LARGE_INTEGER present_start=timing_begin();
     {
         uint8_t foreign=client_foreign_characters(&remote);
@@ -1263,7 +1335,7 @@ static void present(void) {
          * Interpolation changes host_tick but cannot invent a speech event. */
         visible_dialogue_valid=dialogue_index>=0;
         if(visible_dialogue_valid) {
-            visible_dialogue=dialogue_history[dialogue_index];
+            visible_dialogue=shown_dialogue;
             visible_dialogue_receipt=dialogue_receipts[dialogue_index];
         }
         presentation_sample.lease=peer.lease; presentation_sample.scene=remote;
@@ -1347,21 +1419,30 @@ static BOOL exterior_control_allowed(unsigned player,ExteriorControlPermission p
         return SudekiMpLanStoryHostControlExteriorNativeReady(r,c);
     return permission==EXTERIOR_RETAIN && SudekiMpLanStoryHostControlExteriorNativeBound(r,c);
 }
+/* H1b: the body is parked at the door outside while the lead's own entry
+ * reloads the house this player is in; their screen keeps them inside, so
+ * nothing they do may act on the parked body. */
+static BOOL member_parked(unsigned player) {
+    return player<4u && SudekiMpLanStoryRemoteInteriorMemberParked(host_control[player].native_key.seat);
+}
 static BOOL remote_input_ready(unsigned player) {
     /* Action admission retains its positive host/shop modal contract. */
-    return host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_ACTION);
+    return !member_parked(player) &&
+        (host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_ACTION));
 }
 static BOOL remote_steering_ready(unsigned player) {
     /* A settled exterior player's movement does not borrow the host's
      * dialogue/filter state. Native body/world pauses still hold movement. */
-    return host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_STEERING);
+    return !member_parked(player) &&
+        (host_binding_ready || host_front_use || exterior_control_allowed(player,EXTERIOR_STEERING));
 }
 static BOOL remote_action_ready(unsigned player,unsigned kind) {
     /* Existing same-area casts have their own native modal admission. An
      * exterior shop handoff also needs positive input readiness: retaining
      * the body during an unknown interaction must not submit an item/cast. */
-    return (kind!=SUDEKIMP_STORY_ACTION_MELEE && !host_control[player].exterior_roster.epoch) ||
-        remote_input_ready(player);
+    return !member_parked(player) &&
+        ((kind!=SUDEKIMP_STORY_ACTION_MELEE && !host_control[player].exterior_roster.epoch) ||
+        remote_input_ready(player));
 }
 static BOOL runtime_control_lease_exact(const SudekiMpLanPartyLease *key,BOOL input_ready) {
     if(!key || !session || !saved_profile || !control_attempted || local_seat ||
@@ -1659,6 +1740,11 @@ static unsigned host_input_mask(void) {
         if(host_control[p].ready && !host_control[p].draining && !host_control[p].input_held) mask|=1u<<p;
     return mask;
 }
+/* The host lead stands in the current exterior (H1b: other members may be
+ * in a background-resident house; the lead may still use a door). */
+static BOOL scene_lead_outside(const SudekiMpLanStoryScene *s) {
+    return !s->temporary[0] || (s->leader_seat<4u && !(s->inside_mask&(1u<<s->leader_seat)));
+}
 static void refresh_split_eligibility(const SudekiMpControlUpdateDispatchWitness *w,
     const SudekiMpLanStoryScene *scene,const SudekiMpLanStoryNativeRoster *roster) {
     if(!split_attempted || !saved_profile || !control_attempted || local_seat ||
@@ -1692,7 +1778,7 @@ static void refresh_split_eligibility(const SudekiMpControlUpdateDispatchWitness
      * starts an idle transition. PREPARE retains residency, not input rights.
      * The ordinary per-peer service still rechecks/drains, and the final
      * post-service mask publication below remains responsible for removals. */
-    SudekiMpLanStorySplitSetEligibility(known && !scene->temporary[0],(uint8_t)mask);
+    SudekiMpLanStorySplitSetEligibility(known && scene_lead_outside(scene),(uint8_t)mask);
 }
 static void trace_control_block(unsigned p,const char *reason) {
     if(p>=4u || control_block_trace[p]==reason) return;
@@ -1777,6 +1863,13 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
             SudekiMpLanStoryControlExact(w,&roster,&host_control[p].native_key) &&
             SudekiMpLanStoryHostControlExteriorBound(controller,w,scene,character))
             host_control[p].exterior_roster=roster;
+        if(host_control[p].native_key.token && !host_control[p].draining &&
+            SudekiMpLanStoryObserverHolding()) {
+            /* A background zone load briefly cleared the exact party proof
+             * (and the host binding with it); the observer holds the
+             * unchanged scene. Hold input likewise instead of draining. */
+            trace_control_block(p,"background_load_hold"); continue;
+        }
         if(host_control[p].native_key.token && !known && !host_control[p].draining &&
             split_attempted && SudekiMpLanStorySplitActive()) {
             /* Host lead's split-area transition: the exterior player's actor is
@@ -1873,6 +1966,7 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
         if(host_control[p].ready &&
             SudekiMpLanPartyTakeStoryMovement(session,&peer.lease,now,&input,&receipt)) {
             host_control[p].movement=input; host_control[p].last_input_at=receipt; took=TRUE;
+            host_control[p].heard_at=receipt?receipt:1u;
         }
         /* Block is serviced before movement, including neutral/expired intent.
          * Native movement/action locks must never swallow the release. */
@@ -1965,7 +2059,7 @@ static void service_story_controls(void *controller,const SudekiMpControlUpdateD
          * including a client still preparing its local view/input. This is
          * shared by all authored TEMP interiors, including every Kamo shop. */
         if(split_attempted) SudekiMpLanStorySplitSetEligibility(
-            scene->phase==SUDEKIMP_LAN_STORY_READY && !scene->temporary[0],(uint8_t)split_mask);
+            scene->phase==SUDEKIMP_LAN_STORY_READY && scene_lead_outside(scene),(uint8_t)split_mask);
     } else if(split_attempted) SudekiMpLanStorySplitSetEligibility(FALSE,0u);
     if(known && host_binding_ready && story_policy_initialized &&
         story_presence.ownership.phase==SUDEKIMP_PARTY_SWAP_IDLE) {
@@ -2370,7 +2464,8 @@ static BOOL client_revision_gap_camera(const SudekiMpLanStoryNativeRoster *roste
     unsigned last=dialogue_count-1u;
     if(!presentation_fresh(now,dialogue_receipts[last]) ||
         dialogue_history[last].epoch!=remote.epoch || dialogue_history[last].revision!=remote.revision ||
-        (dialogue_history[last].flags&SUDEKIMP_STORY_LETTERBOX_PRESENT)) return FALSE;
+        ((dialogue_history[last].flags&SUDEKIMP_STORY_LETTERBOX_PRESENT) &&
+         SudekiMpLanStorySceneConversationShared(&remote,state.fence.character,4u))) return FALSE;
     /* ViewOwner is a stored identity, not a fresh target proof. Validate the
      * selected actor/view binding before any camera call; continuation must
      * also refuse a native state takeover instead of requesting Exploration. */
@@ -2457,13 +2552,13 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     const char *pending=!roster_known?"pending_roster":
         /* #75: the native Main Menu owns the camera while shown; the local
          * view cannot be ready and no frame can be presented. Hold the lease. */
-        !local_ready && !main_menu_open()?"pending_local_control":
-        !presentation_sample.valid && !main_menu_open()?"pending_presentation_invalid":
+        !local_ready && !main_menu_open() && !shop_open()?"pending_local_control":
+        !presentation_sample.valid && !main_menu_open() && !shop_open()?"pending_presentation_invalid":
         /* #75: with the native Main Menu shown the world-render branch is
          * skipped, so no frame can be presented; keep this control lease and
          * its (muted) input alive on the last presented frame instead of
          * decaying to a stale presentation and losing the host offer. */
-        !presentation_fresh(now,presentation_sample.receipt) && !main_menu_open()?"pending_presentation_stale":
+        !presentation_fresh(now,presentation_sample.receipt) && !main_menu_open() && !shop_open()?"pending_presentation_stale":
         presentation_sample.scene.epoch!=state.fence.epoch?"pending_epoch":
         presentation_sample.scene.revision<state.fence.revision?"pending_revision":
         presented_generations[chosen]!=state.fence.actor_generation?"pending_generation":
@@ -2527,7 +2622,7 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     service_client_action(&peer.lease,&state.fence,now);
     float local_x=0,local_z=0,x=0,z=0;
     if(SudekiMpLanStoryMenuCapturesInput()) SudekiMpLanStoryInputClear();
-    else if(SudekiMpLanStoryQuickMenuCapturesInput() || main_menu_open()) SudekiMpLanStoryInputMuteMovement();
+    else if(SudekiMpLanStoryQuickMenuCapturesInput() || main_menu_open() || table_modal()) SudekiMpLanStoryInputMuteMovement();
     else if(!SudekiMpLanStoryInputSample(controller,roster.actors[chosen],state.fence.transaction,&local_x,&local_z) ||
         !SudekiMpLanStoryLocalControlDirection(controller,w,&roster,native,local_x,local_z,&x,&z)) {
         static unsigned sample_fail_logs;
@@ -2548,7 +2643,27 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     if(chosen==0u || chosen==2u) {
         uint8_t buttons=0;uint32_t generation=0;
         BOOL active=SudekiMpLanStoryInputMelee(controller,roster.actors[chosen],state.fence.transaction,
-            &buttons,&generation) && !SudekiMpLanStoryMenuCapturesInput() && !SudekiMpLanStoryQuickMenuCapturesInput() && !main_menu_open();
+            &buttons,&generation) && !SudekiMpLanStoryMenuCapturesInput() && !SudekiMpLanStoryQuickMenuCapturesInput() && !main_menu_open() &&
+            !table_modal();
+        /* H1b: while this client's examinable box is up, its interact press
+         * and release are the box's (confirm), never a swing on the host. */
+        if(examine_open()) {
+            static BOOL examine_pressed;
+            unsigned weak=buttons&3u;
+            if(weak==1u) { SudekiMpLanStoryZoneBannerExamineInput(TRUE); examine_pressed=TRUE; }
+            else if(weak==3u) {
+                if(!examine_pressed) SudekiMpLanStoryZoneBannerExamineInput(TRUE);
+                SudekiMpLanStoryZoneBannerExamineInput(FALSE); examine_pressed=FALSE;
+            }
+            if(weak) SudekiMpLanStoryInputConsumeWeak();
+            buttons=0;
+        }
+        /* H1b: with the shopkeeper's talk prompt shown, the interact (weak)
+         * press is this game's own, never a swing on the host. */
+        if(active && shop_attempted && SudekiMpLanStoryShopPromptShown() &&
+            ((buttons&3u)==1u || (buttons&3u)==3u)) {       /* a tap may sample as release */
+            SudekiMpLanStoryShopRequestOpen(); SudekiMpLanStoryInputConsumeWeak(); buttons&=~3u;
+        }
         if(generation!=client_melee_generation) {
             SudekiMpStoryMeleeCancel(&client_melee_sender);client_melee_generation=generation;
         }
@@ -2603,6 +2718,35 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
     }
 }
 
+/* H1b: the shopkeeper's talk prompt and this client's own shop lease (D11),
+ * inside the exact client presentation step. */
+static BOOL service_shop(const SudekiMpLanStoryNativeRoster *r,
+    const SudekiMpLanStoryScene *scene,void *unused) {
+    (void)unused; (void)scene;
+    unsigned c=session?SudekiMpLanPartyLocalCharacter(session):4u;
+    /* Only Buki and Tal send the weak press this prompt claims. */
+    void *actor=(c==0u || c==2u) && (r->available_mask&(1u<<c))?r->actors[c]:NULL;
+    uint32_t now=GetTickCount();
+    BOOL blocked=!client_input_ready || InterlockedCompareExchange(&stopping,0,0) ||
+        SudekiMpLanStoryMenuCapturesInput() || SudekiMpLanStoryQuickMenuCapturesInput() || main_menu_open() ||
+        host_cinematic_view ||
+        /* A host line or letterbox actually on screen (a valid record alone
+         * is the idle state: live 2026-10-17 it hid the prompt throughout;
+         * a conversation flag without a line draws nothing, and the host's
+         * own shopkeeper conversation is sent that way until its first line
+         * classifies it). */
+        (visible_dialogue_valid && presentation_fresh(now,visible_dialogue_receipt) &&
+            (visible_dialogue.flags&(SUDEKIMP_STORY_LINE_ACTIVE|SUDEKIMP_STORY_LETTERBOX_PRESENT)));
+    static BOOL last_blocked=2; static unsigned blocked_logs;
+    if(blocked!=last_blocked && blocked_logs<64u) { last_blocked=blocked; ++blocked_logs;
+        SudekiMpLogFormat("story_shop event=gate blocked=%u input=%u menu=%u quick=%u main=%u cinematic=%u dialogue=%u in_shop=%s actor=%u\r\n",
+            (unsigned)blocked,(unsigned)client_input_ready,(unsigned)SudekiMpLanStoryMenuCapturesInput(),
+            (unsigned)SudekiMpLanStoryQuickMenuCapturesInput(),(unsigned)main_menu_open(),(unsigned)host_cinematic_view,
+            (unsigned)(visible_dialogue_valid?visible_dialogue.flags:0u),
+            SudekiMpLanStoryRemoteInteriorClientShopZone()?SudekiMpLanStoryRemoteInteriorClientShopZone():"-",(unsigned)(actor!=NULL)); }
+    SudekiMpLanStoryShopService(actor,SudekiMpLanStoryRemoteInteriorClientShopZone(),blocked,now);
+    return FALSE;
+}
 static void menu_frame(void) {
     if(!session || !saved_profile || !runtime_thread ||
         GetCurrentThreadId()!=runtime_thread) return;
@@ -2619,12 +2763,24 @@ static void menu_frame(void) {
             /* #75: the native Main Menu can always be left with M, and the
              * containment tolerates the menu's own UI tasks while it is shown
              * and for a moment after it closes. */
-            if(main_menu_attempted) {
-                static DWORD menu_seen_at; DWORD t=GetTickCount();
-                BOOL shown=SudekiMpLanStoryMainMenuVisible();
+            {
+                static DWORD menu_seen_at,shop_seen_at; DWORD t=GetTickCount();
+                BOOL shown=main_menu_attempted && SudekiMpLanStoryMainMenuVisible(),shop=shop_open();
                 if(shown) menu_seen_at=t;
-                SudekiMpLanStoryClientAllowUiTasks(shown || (menu_seen_at && t-menu_seen_at<3000u));
+                if(shop) shop_seen_at=t;
+                if(main_menu_attempted || shop_attempted)
+                    SudekiMpLanStoryClientAllowUiTasks(shown || shop || (menu_seen_at && t-menu_seen_at<3000u) ||
+                        (shop_seen_at && t-shop_seen_at<3000u));
                 if(shown) { (void)SudekiMpLanStoryInputTakeMainMenuRaw(); SudekiMpLanStoryMainMenuPollKeys(); }
+                /* H1b: the shop screen takes Escape/M/F3; a due house exit
+                 * waits until it is closed (and asks it to close). */
+                if(shop) SudekiMpLanStoryShopPollKeys();
+                if(shop_attempted) {
+                    SudekiMpLanStoryRemoteInteriorClientHoldExit(shop);
+                    if(shop && SudekiMpLanStoryRemoteInteriorClientWantsOut()) SudekiMpLanStoryShopRequestClose("interior_exit");
+                    if(examine_open() && SudekiMpLanStoryRemoteInteriorClientWantsOut())
+                        SudekiMpLanStoryZoneBannerExamineClose("interior_exit");
+                }
             }
             SudekiMpLanStoryClientReport report={0};
             BOOL contained=SudekiMpLanStoryClientRetains()?
@@ -2632,18 +2788,21 @@ static void menu_frame(void) {
             /* #75: with the client's Main Menu shown the world-render branch
              * (and so the presentation attempt) is skipped by the engine; that
              * is a hold, not an invalid presentation. */
-            if(!contained || (!presentation_attempted && !main_menu_open())) invalidate_presentation();
+            if(!contained || (!presentation_attempted && !main_menu_open() && !shop_open())) invalidate_presentation();
             /* A stale native interaction prompt (e.g. the save point's hand
              * icon and "Save") survives the pause; clear it through the HUD's
              * own update every half second while contained. */
             if(contained) { static DWORD prompt_checked; DWORD t=GetTickCount();
-                if(t-prompt_checked>=500u) { prompt_checked=t; (void)SudekiMpLanStoryContextPromptClear((HMODULE)game_base); } }
+                /* Not under this client's own talk prompt or shop screen. */
+                if(t-prompt_checked>=500u && !table_modal() && !(shop_attempted && SudekiMpLanStoryShopPromptShown())) {
+                    prompt_checked=t; (void)SudekiMpLanStoryContextPromptClear((HMODULE)game_base); } }
             if(contained && quick_menu_attempted) {
                 BOOL serviced=SudekiMpLanStoryClientPresent(service_quick_menu,NULL);
                 if(main_menu_open()) { static BOOL last=TRUE; static DWORD at; DWORD t=GetTickCount();
                     if(serviced!=last || t-at>=2000u) { last=serviced; at=t;
                         SudekiMpLogFormat("story_main_menu event=menu_service present=%u error=%lu\r\n",(unsigned)serviced,(unsigned long)GetLastError()); } }
             }
+            if(contained && shop_attempted) (void)SudekiMpLanStoryClientPresent(service_shop,NULL);
             if(contained && (SudekiMpLanStoryCinematicAudioRetains() || SudekiMpStoryCharacterAudioRetains()) &&
                 (!visible_dialogue_valid || !presentation_fresh(GetTickCount(),visible_dialogue_receipt)))
                 (void)SudekiMpLanStoryClientPresent(stop_stale_audio,NULL);
@@ -2657,7 +2816,7 @@ static void menu_frame(void) {
         !(m.Protect&(PAGE_GUARD|PAGE_NOACCESS)) &&
         (uintptr_t)slot+sizeof(*slot)<=(uintptr_t)m.BaseAddress+m.RegionSize)
     {
-        if(local_seat && visible_dialogue_valid && presentation_fresh(GetTickCount(),visible_dialogue_receipt)) {
+        if(local_seat && visible_dialogue_valid && !shop_open() && presentation_fresh(GetTickCount(),visible_dialogue_receipt)) {
             BOOL ok=SudekiMpStoryCinematicViewRender(*slot,&visible_dialogue);
             DWORD error=ok?ERROR_SUCCESS:GetLastError();
             trace_cinematic(&overlay_trace,"overlay",&visible_dialogue,ok,error);
@@ -2943,6 +3102,7 @@ static void service_story_loot(BOOL native_ready) {
         return;
     }
     if(!native_ready) return; /* Menu is allowed; title/loading is not. */
+    if(table_modal()) return; /* granted once this client's shop screen or examine box closes */
     SudekiMpLanPartyPeerStatus peer;
     SudekiMpStoryLootGrant grant;
     SudekiMpStoryInventoryGrant native_grant;
@@ -3101,7 +3261,22 @@ static void service(void *controller,void *data,
             SudekiMpLanStoryNativeRoster start_roster;
             if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished() &&
                 SudekiMpLanStoryObserverRoster(controller,w,&native,&start_roster))
-                { SudekiMpLanStoryTestStartService(&start_roster); SudekiMpLanStoryTestStartResearchService(&start_roster); }
+                { SudekiMpLanStoryTestStartService(&start_roster); SudekiMpLanStoryTestStartResearchService(&start_roster);
+                  uint8_t remote_characters=0,input_fresh=0; uint32_t at=GetTickCount();
+                  for(unsigned p=1;p<4u;++p) {
+                      SudekiMpLanPartyPeerStatus peer={0}; unsigned c=SudekiMpLanPartyPlayerCharacter(session,p);
+                      if(c<4u && SudekiMpLanPartyPeerStatusGet(session,p,&peer) &&
+                          peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING && peer.transport_confirmed) {
+                          remote_characters|=(uint8_t)(1u<<c);
+                          /* While the host itself holds this player's input
+                           * (control not ready, menus, shop UI, a busy body)
+                           * it takes no packets: that is not client silence. */
+                          BOOL host_holds=!host_control[p].ready || host_control[p].input_held;
+                          if(host_holds || (host_control[p].heard_at && at-host_control[p].heard_at<=2000u))
+                              input_fresh|=(uint8_t)(1u<<c);
+                      }
+                  }
+                  SudekiMpLanStoryRemoteInteriorHostService(&start_roster,&native,remote_characters,input_fresh,at); }
             if(native.phase==SUDEKIMP_LAN_STORY_READY && load_finished()) SudekiMpLanStoryAreaResearchService(GetTickCount());
         }
         timing_end(&cast_service_timing,cast_start);
@@ -3145,6 +3320,8 @@ static void service(void *controller,void *data,
             last_area_at=now?now:1u;
             BOOL area_captured=SudekiMpLanStoryAreaCapture(&area);
             if(area_captured) {
+                /* H1b: the lead's interior marker lets clients follow her in. */
+                if(native.temporary[0]) (void)SudekiMpLanStoryObserverLastTemporary(area.temporary_zone,area.temporary_marker);
                 (void)SudekiMpLanPartyPublishStoryArea(session,&area);
                 SudekiMpStoryXp xp;
                 if(SudekiMpLanStoryXpCapture(native.epoch,native.revision,now,area.current,&xp))
@@ -3157,8 +3334,26 @@ static void service(void *controller,void *data,
                 (void)SudekiMpLanPartyPublishStoryEffects(session,&effects);
             }
         } else if(local_seat) {
+            SudekiMpLanStoryRemoteInteriorClientTick(now);
             SudekiMpLanPartyPeerStatus area_peer; SudekiMpStoryAreaState area;
             BOOL area_peer_known=SudekiMpLanPartyPeerStatusGet(session,local_seat,&area_peer);
+            {   /* H1b: this player's character in a house (alone or with the lead). */
+                SudekiMpLanStoryScene host_scene; SudekiMpStoryAreaState host_area;
+                BOOL have_area=area_peer_known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+                    SudekiMpLanPartyGetStoryArea(session,&area_peer.lease,now,&host_area);
+                if(area_peer_known && known && area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
+                    SudekiMpLanPartyGetStoryScene(session,&area_peer.lease,now,&host_scene))
+                    SudekiMpLanStoryRemoteInteriorClientService(&host_scene,have_area?&host_area:NULL,&native,
+                        SudekiMpLanPartyLocalCharacter(session),now);
+                /* The door script's spot cue, music fade and zone banner, for
+                 * this client's local entry. */
+                const char *door_cue;
+                if(SudekiMpLanStoryRemoteInteriorClientTakeDoorCue(&door_cue))
+                    (void)SudekiMpLanStoryClientResidencyCall(w,door_cue_residency,(void *)door_cue);
+                (void)SudekiMpLanStoryMusicInterior(SudekiMpLanStoryRemoteInteriorClientHolds(),w);
+                SudekiMpLanStoryZoneBannerService(now,w);
+                SudekiMpLanStoryWorldSetLocalZone(SudekiMpLanStoryRemoteInteriorClientShopData());
+            }
             if(area_peer_known &&
                 area_peer.phase==SUDEKIMP_LAN_PARTY_OBSERVING &&
                 SudekiMpLanPartyGetStoryArea(session,&area_peer.lease,now,&area)) {
@@ -3173,6 +3368,7 @@ static void service(void *controller,void *data,
                 /* A host house entry does not move an exterior client or
                  * release that client's exterior effect owners. */
                 if(exterior && !SudekiMpLanStoryAreaResearchTemporaryArmed() &&
+                    !SudekiMpLanStoryRemoteInteriorClientHolds() &&
                     (!story_vfx.active || !_stricmp(story_vfx.current,area.current) || reset_story_vfx(w)))
                     SudekiMpLanStoryAreaFollow(&area,now,w);
             }
@@ -3231,6 +3427,7 @@ static void service(void *controller,void *data,
             SudekiMpLanStoryWorldFrame world;
             if(saved_profile) {
                 SudekiMpLanStoryWorldSetExcludedZone(split_attempted?SudekiMpLanStorySplitTemporaryData():NULL);
+                SudekiMpLanStoryWorldSetExcludedHouse(SudekiMpLanStoryRemoteInteriorHostHouseData());
                 SudekiMpLanStoryWorldSetSplitAllowlist(split_attempted && SudekiMpLanStorySplitActive());
                 world_captured=SudekiMpLanStoryWorldCapture(session,controller,w,&native,&frame,&world)?1u:0u;
                 if(world_captured) world_count=world.count;
@@ -3416,12 +3613,20 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     area_follow_ready=saved_profile && SudekiMpLanStoryAreaFollowInitialize(module);
     if(saved_profile && !(local_seat?SudekiMpLanStoryInventoryInitialize(module):
         SudekiMpLanStoryInventoryInstall(module))) goto fail;
+    if(saved_profile && !SudekiMpLanStoryRemoteInteriorInitialize(module))
+        SudekiMpLogWrite("story_remote_interior event=unavailable\r\n");
     if(saved_profile && local_seat && !SudekiMpLanStoryRemoteUseIconInitialize(module))
         SudekiMpLogWrite("story_remote_use event=icon_unavailable\r\n");
+    if(saved_profile && local_seat) {
+        shop_attempted=SudekiMpLanStoryShopInstall(module);
+        if(!shop_attempted) SudekiMpLogFormat("story_shop event=unavailable error=%lu\r\n",(unsigned long)GetLastError());
+    }
     if(saved_profile && !SudekiMpLanStoryXpInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpStoryCharacterAudioInitialize(module,!local_seat)) goto fail;
     if(saved_profile && !SudekiMpLanStoryMusicInitialize(module))
         SudekiMpLogWrite("story_music event=unavailable\r\n");
+    if(saved_profile && local_seat && !SudekiMpLanStoryZoneBannerInitialize(module))
+        SudekiMpLogWrite("story_zone_banner event=unavailable\r\n");
     /* Spawn tracking is functional (#54: client group replay and monster
      * identity), not only research. */
     if(saved_profile && !SudekiMpLanStorySpawnTraceInstall(module,local_seat!=0))
@@ -3434,8 +3639,8 @@ BOOL SudekiMpInstallLanStoryRuntime(HMODULE module,const SudekiMpLanPartyConfig 
     if(saved_profile && !SudekiMpLanStoryComboHudInitialize(module,!local_seat)) goto fail;
     if(!SudekiMpLanStoryObserverInstall(module)) goto fail;
     /* Identity is unknown (not mismatched) while a world load is pending. */
-    SudekiMpCastLightSetUnknownWitness(SudekiMpLanStoryObserverWorldLoading);
-    SudekiMpSpiritInstanceSetUnknownWitness(SudekiMpLanStoryObserverWorldLoading);
+    SudekiMpCastLightSetUnknownWitness(SudekiMpLanStoryObserverIdentityUnknown);
+    SudekiMpSpiritInstanceSetUnknownWitness(SudekiMpLanStoryObserverIdentityUnknown);
     if(saved_profile) {
         realtime_attempted=TRUE;
         if(!SudekiMpLanStoryRealtimeInstall(module)) goto fail;
@@ -3521,6 +3726,8 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     unsigned exited=saved_profile?SudekiMpLobbyGameplayStoryExitStatus():0u;
     if(shots_attempted && !SudekiMpLanStoryShotsUninstall()) return retain_module();
     shots_attempted=FALSE;
+    if(shop_attempted && !SudekiMpLanStoryShopUninstall()) return retain_module();
+    shop_attempted=FALSE;
     if(remote_use_attempted && !SudekiMpLanStoryRemoteUseUninstall()) return retain_module();
     remote_use_attempted=FALSE;
     if(loot_trace_attempted && !SudekiMpLanStoryLootTraceUninstall()) return retain_module();
@@ -3528,6 +3735,14 @@ static BOOL retire_runtime(BOOL exit_to_title) {
     /* Native Quit may have destroyed the world even if its final observation
      * was unknown. Never retry Quit or inspect the old actor leases then. */
     if(exited==2u) return retain_module();
+    /* H1b member visits own native state (positions, snap flag, held light
+     * calls, a background house, a client fade): drain before the observer
+     * and sky owners go. Guarded native reads only; a vanished world refuses. */
+    if(saved_profile) {
+        SudekiMpLanStoryRemoteInteriorReset(); (void)SudekiMpLanStoryMusicInteriorReset();
+        SudekiMpLanStoryZoneBannerReset();
+        SudekiMpLanStoryWorldSetLocalZone(NULL); SudekiMpLanStoryWorldSetExcludedHouse(NULL);
+    }
     /* The game-thread cleanup in retire_client owns cosmetic retirement.
      * Loader/network teardown must never discard its pending weak handles. */
     if(story_vfx.active) return retain_module();

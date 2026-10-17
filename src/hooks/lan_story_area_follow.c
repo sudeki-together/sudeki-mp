@@ -279,43 +279,122 @@ void SudekiMpLanStoryAreaSetResearchTemporary(const char *zone,const char *marke
 }
 BOOL SudekiMpLanStoryAreaResearchTemporaryArmed(void) { return research_temp_zone[0]!=0; }
 typedef void (__attribute__((thiscall)) *EnterTemporary)(void *,const char *,const void *);
+typedef void (__attribute__((thiscall)) *ExitTemporary)(void *);
+enum { RVA_EXIT_TEMPORARY=0x6710u };
+/* The story observer owns inline hooks on both temporary exports (one
+ * adapter per seam); calling through them is the intended path. Accept the
+ * native entry bytes or a JMP into this DLL. */
+static BOOL temporary_entry_ok(unsigned rva,const uint8_t *entry,size_t size) {
+    if(readable(base+rva,size) && !memcmp(base+rva,entry,size)) return TRUE;
+    if(!readable(base+rva,5u) || base[rva]!=0xe9u) return FALSE;
+    int32_t rel; memcpy(&rel,base+rva+1u,4u);
+    const void *target=base+rva+5u+rel; HMODULE self=NULL,owner=NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)(uintptr_t)&temporary_entry_ok,&self);
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)target,&owner);
+    return self && owner==self;
+}
+static const char *enter_temporary_zone;
 static void enter_temporary_use(void *resource,void *context) {
-    ((EnterTemporary)(base+RVA_ENTER_TEMPORARY))(context,research_temp_zone,resource);
+    ((EnterTemporary)(base+RVA_ENTER_TEMPORARY))(context,enter_temporary_zone,resource);
+}
+int SudekiMpLanStoryAreaEnterTemporary(const char *zone,const char *marker) {
+    static const uint8_t entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x24};
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!zone || !marker || !world || !*(world+WORLD_ARMED) || *(void **)(world+WORLD_PENDING)) return 0;
+    uint8_t *d=find(zone,table,count);
+    /* Native entry refuses a target that is not unloaded (0x64E3). */
+    if(!d || *(uint32_t *)(d+DESC_STATE) || *(uint8_t **)(world+WORLD_CURRENT)==d ||
+        !temporary_entry_ok(RVA_ENTER_TEMPORARY,entry,sizeof(entry))) return -1;
+    if(!SudekiMpLanStorySkyReleaseLighting()) return 0;
+    last_call_at=GetTickCount(); if(!last_call_at) last_call_at=1u;
+    enter_temporary_zone=zone;
+    InterlockedExchange(&calling,1);
+    BOOL ok=SudekiMpLanStoryWithResourceName(marker,0x35u,enter_temporary_use,world);
+    InterlockedExchange(&calling,0);
+    enter_temporary_zone=NULL;
+    return ok?1:-1;
+}
+int SudekiMpLanStoryAreaExitTemporary(void) {
+    static const uint8_t entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf0,0x81,0xec,0x84,0,0,0};
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!world || !*(world+WORLD_ARMED) || *(void **)(world+WORLD_PENDING)) return 0;
+    uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT);
+    if(!in_table(current,table,count) || !current || *(uint32_t *)(current+DESC_STATE)!=4u ||
+        !temporary_entry_ok(RVA_EXIT_TEMPORARY,entry,sizeof(entry))) return -1;
+    if(!SudekiMpLanStorySkyReleaseLighting()) return 0;
+    last_call_at=GetTickCount(); if(!last_call_at) last_call_at=1u;
+    InterlockedExchange(&calling,1);
+    ((ExitTemporary)(base+RVA_EXIT_TEMPORARY))(world);
+    InterlockedExchange(&calling,0);
+    return 1;
+}
+/* ?UnloadZone@@YAXPBD@Z (RVA 0x7BB0, cdecl): state setter 0x50AD70 with
+ * state 0 on the named descriptor. Bytes: mov eax,[esp+4]; mov ecx,[world]. */
+enum { RVA_UNLOAD_ZONE=0x7bb0u };
+/* -1 refused, 0 not now, 1 already unloaded, 2 ready to unload. */
+static int unload_check(const char *zone) {
+    static const uint8_t entry[6]={0x8b,0x44,0x24,0x04,0x8b,0x0d};
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!zone || !world || !readable(base+RVA_UNLOAD_ZONE,10u) || memcmp(base+RVA_UNLOAD_ZONE,entry,sizeof(entry)) ||
+        *(uint8_t **)(base+RVA_UNLOAD_ZONE+6u)!=base+RVA_WORLD_GLOBAL) return -1;
+    uint8_t *d=find(zone,table,count);
+    if(!d) return -1;
+    uint32_t state=*(uint32_t *)(d+DESC_STATE);
+    /* Only a resident, non-current, non-pending house. */
+    if(state!=2u || *(uint8_t **)(world+WORLD_CURRENT)==d || *(uint8_t **)(world+WORLD_LOADED)==d ||
+        *(uint8_t **)(world+WORLD_PENDING)==d) return state?0:1;
+    return 2;
+}
+BOOL SudekiMpLanStoryAreaResidentUnloadable(const char *zone) { return unload_check(zone)==2; }
+int SudekiMpLanStoryAreaUnloadResident(const char *zone) {
+    int check=unload_check(zone);
+    if(check!=2) return check;
+    SudekiMpLogFormat("story_area event=unload_resident zone=%s\r\n",zone);
+    ((ZoneCall)(base+RVA_UNLOAD_ZONE))(zone);
+    return 1;
+}
+int SudekiMpLanStoryAreaBackgroundLoad(const char *zone) {
+    unsigned count; uint8_t *table,*world=world_now(&count,&table);
+    if(!zone || !world || !*(world+WORLD_ARMED)) return -1;
+    uint8_t *d=find(zone,table,count);
+    if(!d) return -1;
+    uint32_t state=*(uint32_t *)(d+DESC_STATE);
+    if(state) return (int)state;
+    uint8_t *current=*(uint8_t **)(world+WORLD_CURRENT),*target=*(uint8_t **)(world+WORLD_TARGET);
+    if(current==d || *(void **)(world+WORLD_PENDING) || !in_table(target,table,count)) return -1;
+    /* SwitchZoneNOW unloads the previous background target (and its
+     * links): never take the host's own streaming target, loading or
+     * resident. Fail closed; the visit is refused. */
+    if(target && target!=d && *(uint32_t *)(target+DESC_STATE)!=0u) {
+        char busy[SUDEKIMP_STORY_AREA_NAME]="-"; (void)name_of(target,busy);
+        SudekiMpLogFormat("story_area event=background_load_refused zone=%s reason=streaming_target_in_use target=%s state=%lu\r\n",
+            zone,busy,(unsigned long)*(uint32_t *)(target+DESC_STATE));
+        return -1;
+    }
+    char previous[SUDEKIMP_STORY_AREA_NAME]="-";
+    if(target) (void)name_of(target,previous);
+    /* A house loaded for a remote character is not a background target the
+     * client should follow (it enters that house itself, which needs it
+     * unloaded). */
+    SudekiMpLanStoryAreaNoteTemporary(zone);
+    SudekiMpLogFormat("story_area event=background_load zone=%s previous_target=%s previous_state=%lu\r\n",
+        zone,previous,target?(unsigned long)*(uint32_t *)(target+DESC_STATE):0ul);
+    call_zone(RVA_SWITCH_ZONE_NOW,zone);
+    return (int)*(uint32_t *)(d+DESC_STATE);
 }
 void SudekiMpLanStoryAreaResearchClientService(uint32_t now) {
     if(!research_temp_zone[0] || research_temp_logs>=60u) return;
-    static const uint8_t enter_entry[]={0x55,0x8b,0xec,0x83,0xe4,0xf8,0x83,0xec,0x24};
     unsigned count; uint8_t *table,*world=world_now(&count,&table);
     if(!world || !*(world+WORLD_ARMED)) return;
     if(!research_temp_first) { research_temp_first=now?now:1u; return; }
     if(!research_temp_done && now-research_temp_first>12000u) {
         research_temp_done=now?now:1u;
-        uint8_t *d=find(research_temp_zone,table,count);
-        /* The story observer owns an inline hook here (one adapter per
-         * seam); calling through it is the intended path. Accept the native
-         * entry or a JMP into this DLL. */
-        BOOL entry_ok=readable(base+RVA_ENTER_TEMPORARY,sizeof(enter_entry)) &&
-            !memcmp(base+RVA_ENTER_TEMPORARY,enter_entry,sizeof(enter_entry));
-        if(!entry_ok && readable(base+RVA_ENTER_TEMPORARY,5u) && base[RVA_ENTER_TEMPORARY]==0xe9u) {
-            int32_t rel; memcpy(&rel,base+RVA_ENTER_TEMPORARY+1u,4u);
-            const void *target=base+RVA_ENTER_TEMPORARY+5u+rel; HMODULE self=NULL,owner=NULL;
-            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                (LPCSTR)(uintptr_t)&SudekiMpLanStoryAreaResearchClientService,&self);
-            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                (LPCSTR)target,&owner);
-            entry_ok=self && owner==self;
-        }
-        if(!d || !entry_ok) {
-            ++research_temp_logs; SudekiMpLogFormat("story_area_research event=client_enter_refused zone=%s found=%u\r\n",research_temp_zone,(unsigned)(d!=NULL));
-            return;
-        }
-        if(!SudekiMpLanStorySkyReleaseLighting()) { research_temp_done=0; return; }
         SudekiMpLogFormat("story_area_research event=client_enter_temporary zone=%s marker=%s\r\n",research_temp_zone,research_temp_marker);
-        last_call_at=GetTickCount(); if(!last_call_at) last_call_at=1u;
-        InterlockedExchange(&calling,1);
-        BOOL ok=SudekiMpLanStoryWithResourceName(research_temp_marker,0x35u,enter_temporary_use,world);
-        InterlockedExchange(&calling,0);
-        SudekiMpLogFormat("story_area_research event=client_enter_returned ok=%u\r\n",(unsigned)ok);
+        int r=SudekiMpLanStoryAreaEnterTemporary(research_temp_zone,research_temp_marker);
+        if(!r) { research_temp_done=0; return; }
+        SudekiMpLogFormat("story_area_research event=client_enter_returned ok=%u\r\n",(unsigned)(r>0));
     }
     if(research_temp_done && now-research_temp_logged>=1000u) {
         research_temp_logged=now?now:1u; ++research_temp_logs;

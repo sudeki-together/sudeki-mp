@@ -23,6 +23,12 @@ static const struct { const char *name; unsigned rva,size; uint32_t hash; } code
     {"BATTLE_SCORE_ENCOUNTER",0x39ad0u,0x22u,0xca19d71au},
     {"BATTLE_SCORE_UPDATE",0x391c0u,0x396u,0xdde984d4u},
     {"BATTLE_SCORE_EMITTER_LOAD",0x28ae50u,0x60u,0x59fe6168u},
+    /* Exports the interior door scripts reach (EnterInterior|SRSBS fades the
+     * score to 0 before EnterTemporaryZone; ExitInterior|BSN fades it back
+     * to 1 when it had been playing; CONFIRMED_STATIC, SOLWORLDM.gex). */
+    {"BATTLE_SCORE_FADE",0x39990u,0x18u,0x5149052fu},
+    {"BATTLE_SCORE_IS_PLAYING",0x39920u,0x17u,0xd0afeb7bu},
+    {"BATTLE_SCORE_VARIATION_STOP",0x39c20u,0x8u,0x7c8d1aa1u},
 };
 static const struct { unsigned rva,target; } relocations[]={
     {0x395b4u,0x2e1db4u},
@@ -152,9 +158,11 @@ static BOOL observe(MusicOwner *out,SudekiMpStoryEffectState *state) {
     }
     *out=a; return TRUE;
 }
+static BOOL interior_muted,interior_restore;
 BOOL SudekiMpLanStoryMusicInitialize(HMODULE image) {
     if(busy || !image || !SudekiMpCheckLoadedExecutable(image) || !code_exact((uint8_t *)image)) return FALSE;
-    base=(uint8_t *)image; memset(&last_capture,0,sizeof(last_capture)); native_thread=0; applied_epoch=applied_revision=applied_sequence=0; return TRUE;
+    base=(uint8_t *)image; memset(&last_capture,0,sizeof(last_capture)); native_thread=0; applied_epoch=applied_revision=applied_sequence=0;
+    interior_muted=interior_restore=FALSE; return TRUE;
 }
 void SudekiMpLanStoryMusicCapture(SudekiMpStoryEffectState *out,
     const SudekiMpControlUpdateDispatchWitness *w) {
@@ -219,4 +227,69 @@ BOOL SudekiMpLanStoryMusicFollow(const SudekiMpStoryEffectState *h,
     BOOL contained=SudekiMpLanStoryClientResidencyCall(w,present,&call); busy=FALSE;
     if(!contained || !call.applied) return FALSE;
     applied_epoch=h->epoch; applied_revision=h->revision; applied_sequence=h->sequence; return TRUE;
+}
+
+/* H1b: a client that enters a house locally (direct EnterTemporaryZone)
+ * never runs the door script, so it keeps the exterior score playing. Do
+ * what EnterInterior|SRSBS does (remember whether the score played, stop
+ * its variation, fade it to 0) and what ExitInterior|BSN does on leaving
+ * (fade back to 1 when it had been playing). The fade time is the scripts'
+ * FadeTime 2.0 (INFERENCE). Only the scalar score fields are touched; no
+ * emitter, bank or cue is required, so a paused or empty cue still works. */
+enum { RVA_SCORE_FADE=0x39990u, RVA_SCORE_IS_PLAYING=0x39920u, RVA_SCORE_VARIATION_STOP=0x39c20u };
+static const float interior_fade_seconds=2.0f;
+typedef uint8_t (__attribute__((thiscall)) *ScoreFade)(void *,float,float);
+typedef uint32_t (__attribute__((thiscall)) *ScoreIsPlaying)(void *);
+typedef void (__attribute__((thiscall)) *ScoreVariationStop)(void *);
+static uint8_t *score_object(void) {
+    if(!base || !memory(base+0x409d80u,4,FALSE)) return NULL;
+    uint8_t *s=*(uint8_t **)(base+0x409d80u);
+    if(!typed(s,0x100u,0x2c7bf4u,TRUE) ||
+        *(void **)(s+8u)!=base+0x2c7bfcu || *(void **)(s+0x2cu)!=base+0x2c7c1cu ||
+        *(void **)(s+0x30u)!=base+0x2c7c24u || s[0xacu]>1u) return NULL;
+    return s;
+}
+static void interior_set(uint8_t *s,BOOL inside,const char *why) {
+    if(inside) {
+        BOOL playing=((ScoreIsPlaying)(base+RVA_SCORE_IS_PLAYING))(s)!=0u;
+        ((ScoreVariationStop)(base+RVA_SCORE_VARIATION_STOP))(s);
+        if(playing) (void)((ScoreFade)(base+RVA_SCORE_FADE))(s,interior_fade_seconds,0.0f);
+        interior_restore=playing; interior_muted=TRUE;
+    } else {
+        if(interior_restore) (void)((ScoreFade)(base+RVA_SCORE_FADE))(s,interior_fade_seconds,1.0f);
+        interior_muted=FALSE;
+    }
+    SudekiMpLogFormat("story_music event=%s why=%s restore=%u volume_bits=%08lx\r\n",
+        inside?"interior_mute":"interior_restore",why,(unsigned)interior_restore,(unsigned long)word(s+0x6cu));
+    if(!inside) interior_restore=FALSE;
+}
+typedef struct InteriorCall {
+    BOOL inside;
+    const SudekiMpControlUpdateDispatchWitness *w;
+    BOOL done;
+} InteriorCall;
+static BOOL interior_apply(void *context) {
+    InteriorCall *call=context; uint8_t *s;
+    if(!witnessed(call->w) || !code_exact(base) || !(s=score_object())) return FALSE;
+    interior_set(s,call->inside,"local_house");
+    call->done=TRUE;
+    return FALSE; /* scalar fields only: no residency change */
+}
+BOOL SudekiMpLanStoryMusicInterior(BOOL inside,const SudekiMpControlUpdateDispatchWitness *w) {
+    if(busy || !base) return FALSE;
+    if((inside!=FALSE)==interior_muted) return TRUE;
+    if(!witnessed(w)) return FALSE;
+    InteriorCall call={inside!=FALSE,w,FALSE}; busy=TRUE;
+    BOOL contained=SudekiMpLanStoryClientResidencyCall(w,interior_apply,&call); busy=FALSE;
+    return contained && call.done;
+}
+BOOL SudekiMpLanStoryMusicInteriorReset(void) {
+    uint8_t *s;
+    if(!interior_muted) return TRUE;
+    if(busy || !base || (native_thread && native_thread!=GetCurrentThreadId()) || !code_exact(base) || !(s=score_object())) {
+        SudekiMpLogFormat("story_music event=interior_restore_failed restore=%u policy=retain\r\n",(unsigned)interior_restore);
+        return FALSE;
+    }
+    interior_set(s,FALSE,"teardown");
+    return TRUE;
 }

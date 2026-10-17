@@ -49,4 +49,15 @@ BOOL SudekiMpLanStorySplitTestCanEnterTemporary(const char *zone,unsigned leader
 /* Host world capture: native zone data whose authored spawns belong to the
  * occupied TEMP while a split is active, else NULL. Copy-only identity. */
 const void *SudekiMpLanStorySplitTemporaryData(void);
+/* H1b, host native thread: show a member standing inside the lead's own
+ * shop (settled split), undoing the door script's party hide for that member
+ * only (body via the ClrROFlags export, weapon render objects in native
+ * order; the native hide depth is left for ShowPartyMembers). Called every
+ * frame while inside (upkeep). 1 shown/visible, 0 not yet, -1 refused. */
+int SudekiMpLanStorySplitShowMember(const struct SudekiMpLanStoryNativeRoster *roster,unsigned character);
+/* Undo a show while the native hide is still outstanding (or retire it when
+ * the native show already ran, or the world/group/member is gone). Safe to
+ * call for a member without a show. Never calls the observer. */
+void SudekiMpLanStorySplitReleaseMember(unsigned character,const char *reason);
+BOOL SudekiMpLanStorySplitMemberLeasesHeld(void);
 #endif

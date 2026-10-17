@@ -35,6 +35,8 @@ typedef struct SudekiMpLanStorySpeechCapture {
     void *speech;
     const void *text;
     BOOL continuous,dialogue_active,line_active;
+    /* The current conversation is a shopkeeper's (D11): sent as idle. */
+    BOOL private_conversation;
     BOOL trace_known;
     unsigned trace_count,trace_flags;
     SudekiMpLanStoryPresentation previous;

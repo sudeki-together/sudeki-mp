@@ -1,4 +1,5 @@
 #include "hooks/lan_story_cinematic.h"
+#include "hooks/lan_story_shopkeepers.h"
 #include "cleanroom/engine.h"
 #include "engine/log.h"
 #include <stdint.h>
@@ -276,6 +277,42 @@ static BOOL speaker_name(const SpeechObservation *s,uint16_t *out) {
         *(uint32_t *)(component+0xc0u)==flags &&
         ((flags&0x80000000u) || *(const uint16_t **)(component+0xc4u)==text);
 }
+/* Is the line's speaker a table-shop shopkeeper (plan D11)? Classified by
+ * the speaker entity's native ResourceName, read like the remote-interior
+ * entity lookup (entity+0x38 -> record[1]), never by the display name. A
+ * line with no speaker (narration) is not a shopkeeper's. FALSE = unknown. */
+static BOOL speaker_keeper(const SpeechObservation *s,BOOL *keeper) {
+    char name[65]; unsigned n=0;
+    *keeper=FALSE;
+    if(!s->speaker) return TRUE;
+    uint8_t *base=(uint8_t *)GetModuleHandleW(NULL);
+    uint8_t *registry=*(uint8_t **)(base+0x409d8cu),*entity=s->speaker;
+    if(!readable(registry,0x40u)) return FALSE;
+    uint32_t count=*(uint32_t *)(registry+0x34u);
+    void **entries=*(void ***)(registry+0x3cu);
+    if(!count || count>8192u || !readable(entries,count*sizeof(void *))) return FALSE;
+    unsigned matches=0;
+    for(unsigned i=0;i<count;++i) if(entries[i]==entity) ++matches;
+    if(matches!=1u || !readable(entity,0x50u)) return FALSE;
+    const uint32_t *record=*(const uint32_t **)(entity+0x38u);
+    if(!readable(record,8u)) return FALSE;
+    const char *text=(const char *)(uintptr_t)record[1];
+    uintptr_t boundary=0;
+    for(;n<sizeof(name);++n) {
+        uintptr_t address=(uintptr_t)(text+n);
+        if(address==UINTPTR_MAX) return FALSE;
+        if(address+1u>boundary) {
+            MEMORY_BASIC_INFORMATION m;
+            if(!readable(text+n,1u) || VirtualQuery(text+n,&m,sizeof(m))!=sizeof(m)) return FALSE;
+            boundary=(uintptr_t)m.BaseAddress+m.RegionSize;
+        }
+        name[n]=text[n]; if(!name[n]) break;
+    }
+    if(n==sizeof(name)) return FALSE;
+    if(*(const uint32_t **)(entity+0x38u)!=record) return FALSE;
+    *keeper=SudekiMpLanStoryShopkeeperIs(name);
+    return TRUE;
+}
 static BOOL speech_contents(const SpeechObservation *s,SudekiMpLanStoryPresentation *out) {
     if(s->dialogue_state || s->mode!=2u) out->flags|=SUDEKIMP_STORY_DIALOGUE_ACTIVE;
     if(s->mode==2u) return TRUE;
@@ -294,7 +331,8 @@ BOOL SudekiMpLanStoryCinematicCaptureSpeech(SudekiMpLanStorySpeechCapture *captu
     SudekiMpLanStoryCinematicExact exact,void *context) {
     SpeechObservation before,after;
     BorderObservation border_before,border_after;
-    SudekiMpLanStoryPresentation f={0},check={0};
+    SudekiMpLanStoryPresentation f={0},check={0},raw;
+    BOOL keeper=FALSE,keeper_check=FALSE;
     if(!capture || !out || !exact || !SudekiMpLanStoryFrameValid(party)) {
         SetLastError(ERROR_INVALID_PARAMETER); return FALSE;
     }
@@ -308,6 +346,9 @@ BOOL SudekiMpLanStoryCinematicCaptureSpeech(SudekiMpLanStorySpeechCapture *captu
     border_contents(&border_before,&f);
     BOOL active=!!(f.flags&SUDEKIMP_STORY_DIALOGUE_ACTIVE);
     BOOL line=!!(f.flags&SUDEKIMP_STORY_LINE_ACTIVE);
+    if(line && (!speaker_keeper(&before,&keeper) || !exact(context) ||
+        !speaker_keeper(&after,&keeper_check) || keeper!=keeper_check)) goto unknown;
+    BOOL private_conversation=SudekiMpLanStorySpeechPrivateStep(capture->private_conversation,active,line,keeper);
     BOOL continuity=capture->continuous && capture->epoch==party->epoch && capture->speech==before.speech;
     BOOL conversation_changed=active && (!continuity || !capture->dialogue_active);
     BOOL line_changed=line && (!continuity || !capture->line_active ||
@@ -323,18 +364,29 @@ BOOL SudekiMpLanStoryCinematicCaptureSpeech(SudekiMpLanStorySpeechCapture *captu
     f.conversation_serial=capture->conversation_serial+(conversation_changed?1u:0u);
     f.line_serial=capture->line_serial+(line_changed?1u:0u);
     if(!SudekiMpLanStoryPresentationMatches(&f,party)) goto unknown;
+    /* D11: the host player's own shopkeeper conversation is sent as the idle
+     * record for the same frame (no text, voice, bars or camera on a client).
+     * Serials and continuity keep tracking the native lines. */
+    raw=f;
+    if(private_conversation) SudekiMpLanStoryPresentationClearDialogue(&f);
+    if(private_conversation!=capture->private_conversation)
+        SudekiMpLogFormat("story_cinematic event=%s epoch=%lu conversation=%lu\r\n",
+            private_conversation?"private_conversation":"private_end",
+            (unsigned long)raw.epoch,(unsigned long)raw.conversation_serial);
+    capture->private_conversation=private_conversation;
     capture->native_thread=thread; capture->epoch=party->epoch; capture->continuous=TRUE;
     capture->conversation_serial=f.conversation_serial; capture->line_serial=f.line_serial;
     capture->speech=before.speech; capture->text=before.text;
-    capture->dialogue_active=active; capture->line_active=line; capture->previous=f;
+    capture->dialogue_active=active; capture->line_active=line; capture->previous=raw;
     /* Bounded per-capture diagnostics contain lengths/timing, never dialogue
      * text. A later live run can distinguish capture, audio and draw failures. */
     if(capture->trace_count<64u && (!capture->trace_known || line_changed ||
-        capture->trace_flags!=f.flags)) {
-        ++capture->trace_count; capture->trace_known=TRUE; capture->trace_flags=f.flags;
-        SudekiMpLogFormat("story_cinematic event=captured epoch=%lu line=%lu flags=%u elapsed_ms=%lu bars=%.4f,%.4f\r\n",
-            (unsigned long)f.epoch,(unsigned long)f.line_serial,(unsigned)f.flags,
-            (unsigned long)f.elapsed_ms,(double)f.letterbox,(double)f.letterbox_bottom);
+        capture->trace_flags!=raw.flags)) {
+        ++capture->trace_count; capture->trace_known=TRUE; capture->trace_flags=raw.flags;
+        SudekiMpLogFormat("story_cinematic event=captured epoch=%lu line=%lu flags=%u elapsed_ms=%lu bars=%.4f,%.4f private=%u\r\n",
+            (unsigned long)raw.epoch,(unsigned long)raw.line_serial,(unsigned)raw.flags,
+            (unsigned long)raw.elapsed_ms,(double)raw.letterbox,(double)raw.letterbox_bottom,
+            (unsigned)private_conversation);
     }
     *out=f; SetLastError(ERROR_SUCCESS); return TRUE;
 unknown:

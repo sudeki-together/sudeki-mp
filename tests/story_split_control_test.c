@@ -101,6 +101,7 @@ BOOL SudekiMpLanStoryLocalControlCastActive(void) {return camera_cast_active;}
 BOOL SudekiMpLanStoryQuickMenuCapturesInput(void) {return camera_quick_menu;}
 BOOL SudekiMpLanStoryMainMenuVisible(void) {return camera_main_menu;}
 BOOL SudekiMpLanStoryWorldRecruiting(void) {return camera_world_recruiting;}
+BOOL SudekiMpLanStoryRemoteInteriorMemberParked(unsigned character) {(void)character;return FALSE;}
 BOOL SudekiMpLanStoryClientRecruiting(void) {return camera_client_recruiting;}
 void SudekiMpLanStorySplitSetEligibility(BOOL ready,uint8_t mask) {
     ++eligibility_calls;eligible_ready=ready;eligible_mask=mask;

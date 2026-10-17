@@ -1,8 +1,10 @@
 #include "hooks/lan_story_activity.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include "hooks/lan_story_observer.h"
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
 
 #if !defined(__GNUC__) || !defined(__i386__)
 #error "Story activity requires the supported native x86 ABI"
@@ -98,6 +100,13 @@ static BOOL zone(uint8_t *w,unsigned index,Zone *out) {
         !memory(z.clusters,z.cluster_count*0x48u,FALSE) ||
         (z.spawn_count && !memory(z.spawns,z.spawn_count*0x90u,TRUE))) return FALSE;
     *out=z; return TRUE;
+}
+/* Native state of zone `index` (owner +0x34), or UINT_MAX when unknown. */
+static unsigned zone_state(uint8_t *w,unsigned index) {
+    uint8_t *owner;
+    if(index>=MAX_ZONES || !memory(w,0x390u,FALSE) ||
+        !memory(owner=*(uint8_t **)(w+0x58u+index*4u),0x54u,FALSE) || *(void **)owner!=base+0x2c82a4u) return UINT_MAX;
+    return *(unsigned *)(owner+0x34u);
 }
 static BOOL same_zone(const Zone *a,const Zone *b) {
     return a->index==b->index && a->owner==b->owner && a->data==b->data &&
@@ -232,6 +241,15 @@ BOOL SudekiMpLanStoryActivityService(const SudekiMpControlUpdateDispatchWitness 
             !memory(membership=*(uint8_t **)(actor+0x74u),0x42u,FALSE) ||
             *(void **)membership!=base+0x2d47bcu || *(void **)(membership+0x10u)!=actor) return fail();
         uint16_t sector=*(uint16_t *)(membership+0x40u);
+        /* H1b: a member standing in a background-resident house (state 2)
+         * needs no lease (its entities are not area-suspended) and must not
+         * get one: that house unloads when the member leaves. */
+        if((sector&0xffu)!=0xffu && world) {
+            unsigned st=zone_state(world,sector>>8);
+            uint8_t *owner=(st==1u || st==2u)?*(uint8_t **)(world+0x58u+(sector>>8)*4u):NULL;
+            const char *zn=owner && memory(owner,0x28u,FALSE)?*(const char **)(owner+0x24u):NULL;
+            if(zn && memory(zn,1u,FALSE) && SudekiMpLanStoryObserverRemoteHouseIs(zn)) continue;
+        }
         Zone z; uint8_t *cluster;
         reason="resident_zone_cluster";
         if((sector&0xffu)==0xffu || !zone(world,sector>>8,&z) ||
@@ -257,6 +275,18 @@ BOOL SudekiMpLanStoryActivityService(const SudekiMpControlUpdateDispatchWitness 
             if(count==MAX_LEASES || !activity_exact(&a,owned)) return fail();
             wanted[count++]=a;
         }
+    }
+    /* A lease whose zone was unloaded (state 0) lost its NPC with the zone:
+     * nothing remains to release (H1b: a background house unloads when the
+     * member leaves). Forget it instead of refusing every later service. */
+    for(unsigned i=0;i<lease_count;) {
+        if(zone_state(world,leases[i].zone.index)==0u) {
+            if(trace_count<32u) {++trace_count;SudekiMpLogFormat(
+                "lan_story_activity event=lease_dropped npc=%08lx zone=%u reason=zone_unloaded\r\n",
+                (unsigned long)leases[i].identity,leases[i].zone.index);}
+            leases[i]=leases[--lease_count]; continue;
+        }
+        ++i;
     }
     /* Prove every outstanding lease before changing any flag/reference. */
     reason="retained_lease";

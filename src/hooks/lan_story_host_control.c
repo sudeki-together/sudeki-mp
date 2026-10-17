@@ -2,6 +2,7 @@
 #include "hooks/lan_story_task_trace.h"
 #include "hooks/lan_story_control.h"
 #include "hooks/lan_story_split.h"
+#include "hooks/lan_story_remote_interior.h"
 #include "hooks/lan_party_control.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
@@ -390,17 +391,31 @@ static BOOL exterior_actor_owned(const SudekiMpLanStoryNativeRoster *r,unsigned 
     return SudekiMpLanPartyControlStoryTurnOwner(r->actors[character],&key) &&
         key.seat==character;
 }
-static BOOL interior_approach_exact(const SudekiMpLanStoryNativeRoster *r) {
+static BOOL interior_approach_exact(const SudekiMpLanStoryNativeRoster *r,unsigned character) {
     SudekiMpLanStoryInteriorTravel travel;
     /* The task owner proves the authored host-local helper and its actual
      * DisableGamepad call. This fresh roster ties that observation to the
      * existing exterior actor lease; a host filter alone grants nothing. */
-    return r && r->leader_character<4u &&
+    if(!(r && r->leader_character<4u &&
         SudekiMpLanStoryTaskInteriorTravel(&travel) && travel.load_generation && travel.task &&
         travel.destination_hash && travel.destination && travel.destination_name[0] &&
         travel.world==r->world && travel.descriptor==r->descriptor &&
         travel.group==r->group && travel.controller==r->controller &&
-        travel.leader==r->actors[r->leader_character];
+        travel.leader==r->actors[r->leader_character]) || !readable(travel.destination,0x38u)) return FALSE;
+    unsigned state=*(const unsigned *)((const uint8_t *)travel.destination+0x34u);
+    /* H1b: the lead is using the door of a shop that is background-resident
+     * for another player's visit (owner 2026-10-17: that player keeps
+     * steering). Only for a member proven inside that visit, or outside,
+     * while the lead's entry will park, unload and rejoin them. */
+    if(state==2u) {
+        BOOL member=SudekiMpLanStoryRemoteInteriorHostLeadEntryMember(r,character,travel.destination_name);
+        static unsigned traces; static int last=-1;
+        if(traces<16u && (int)member!=last) { ++traces; last=(int)member;
+            SudekiMpLogFormat("lan_story_host_control event=approach_resident character=%u zone=%s result=%s\r\n",
+                character,travel.destination_name,member?"accepted":"refused"); }
+        return member;
+    }
+    return state==0u;
 }
 BOOL SudekiMpLanStoryHostControlExteriorNativeBound(const SudekiMpLanStoryNativeRoster *r,
     unsigned character) {
@@ -413,7 +428,10 @@ BOOL SudekiMpLanStoryHostControlExteriorNativeBound(const SudekiMpLanStoryNative
         *(void **)((uint8_t *)r->controller+0x2cu)!=base+INPUT_VT ||
         (!SudekiMpLanStorySplitExteriorActorExact(r,character) &&
          !SudekiMpLanStorySplitReturnedActorExact(r,character) &&
-         !interior_approach_exact(r)) ||
+         !interior_approach_exact(r,character) &&
+         /* H1b: a member settled in its own shop visit while the lead is
+          * elsewhere is not held by the lead's modal (owner 2026-10-17). */
+         !SudekiMpLanStoryRemoteInteriorHostVisitSettled(r,character)) ||
         !exterior_actor_owned(r,character)) return FALSE;
     /* The retained exterior actor has its own positive native lease. The
      * lead's script override/filter is not that lease's owner, and is never

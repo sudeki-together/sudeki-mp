@@ -1,6 +1,7 @@
 #ifndef SUDEKIMP_LAN_STORY_REMOTE_USE_H
 #define SUDEKIMP_LAN_STORY_REMOTE_USE_H
 #include <windows.h>
+#include <stdint.h>
 /* H1a: a remote player opens a chest with the native treasure path, as that
  * player (owner decisions 2026-10-16: the host keeps full control; only the
  * opener is held).
@@ -37,6 +38,9 @@ unsigned SudekiMpLanStoryRemoteUseHint(const void *actor);
  * interact icon (flag 0x200) from the host's use hint, game thread only. */
 BOOL SudekiMpLanStoryRemoteUseIconInitialize(HMODULE image);
 void SudekiMpLanStoryRemoteUseIconApply(unsigned hint);
+/* Client: this game's own prompt bits (flag 2, a shopkeeper talk prompt),
+ * combined with the host's chest hint; re-assert every frame while wanted. */
+BOOL SudekiMpLanStoryRemoteUseIconSetLocal(uint32_t bits); /* FALSE: no icon owner */
 /* Host, game thread, once per frame: step remote opens whose chest the
  * native update skipped (paused area), including the timeout release. */
 void SudekiMpLanStoryRemoteUseService(void);

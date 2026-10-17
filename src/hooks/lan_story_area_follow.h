@@ -43,6 +43,24 @@ uint32_t SudekiMpLanStoryAreaFollowLastCall(void);
 int SudekiMpLanStoryAreaGoTo(const char *zone,uint32_t now);
 /* Native descriptor state of `zone` (3 when current), -1 when unknown. */
 int SudekiMpLanStoryAreaZoneState(const char *zone);
+/* H1b remote interior, native game thread. Host: background-load a house
+ * with SwitchZoneNOW without making it current; withheld from the client's
+ * area follower. Returns the descriptor state (2 = resident), 0 while
+ * waiting, -1 when refused/unknown. Client: enter/leave a house locally with
+ * the native EnterTemporaryZone(zone, ResourceName marker) /
+ * ExitTemporaryZone through the observer's hooks. 1 = called, 0 = not yet
+ * (retry later), -1 = refused. */
+int SudekiMpLanStoryAreaBackgroundLoad(const char *zone);
+/* Host: unload a background-resident (state 2), non-current house with the
+ * native UnloadZone. Interiors share one coordinate space, so a resident
+ * empty house can capture the lead's sector inside another house. 1 =
+ * unloaded or already unloaded, 0 = not now, -1 = refused. */
+int SudekiMpLanStoryAreaUnloadResident(const char *zone);
+/* TRUE when UnloadResident would unload `zone` now (no call made). */
+BOOL SudekiMpLanStoryAreaResidentUnloadable(const char *zone);
+
+int SudekiMpLanStoryAreaEnterTemporary(const char *zone,const char *marker);
+int SudekiMpLanStoryAreaExitTemporary(void);
 /* Research (H1b): [StoryAreas] ResearchBackgroundZone. Host game thread. */
 void SudekiMpLanStoryAreaSetResearchZone(const char *zone);
 void SudekiMpLanStoryAreaResearchService(uint32_t now);

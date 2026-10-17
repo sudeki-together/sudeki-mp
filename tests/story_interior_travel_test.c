@@ -275,6 +275,18 @@ static void cases(void) {
     arm();*(const char **)(descriptors[1]+0x24)="different";assert(!proof());
     arm();*(unsigned *)(other+0xc)=0x3176c;assert(story_step(other,NULL)==0);assert(!proof());
     puts("InteriorTravel.StaleTaskProgramFrameWorldAndTsaRefuse: PASS");
+
+    /* H1b: a destination background-resident for a co-op visit (state 2)
+     * arms like an unloaded one; it may unload (2 -> 0) mid-proof; loading,
+     * current and unloading destinations are still refused. */
+    fixture();*(unsigned *)(descriptors[1]+0x34)=2;step(0x3171a);assert(interior.candidate);
+    arm();*(unsigned *)(descriptors[1]+0x34)=2;assert(proof());
+    *(unsigned *)(descriptors[1]+0x34)=0;assert(proof());
+    *(unsigned *)(descriptors[1]+0x34)=1;assert(!proof());
+    arm();*(unsigned *)(descriptors[1]+0x34)=4;assert(!proof());
+    fixture();*(unsigned *)(descriptors[1]+0x34)=1;step(0x3171a);assert(!interior.candidate);
+    fixture();*(unsigned *)(descriptors[1]+0x34)=4;step(0x3171a);assert(!interior.candidate);
+    puts("InteriorTravel.ResidentDestinationArms: PASS");
 }
 static void benchmark(void) {
     LARGE_INTEGER frequency,start,end;assert(QueryPerformanceFrequency(&frequency));

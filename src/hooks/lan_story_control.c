@@ -86,37 +86,56 @@ static BOOL boundary(const SudekiMpControlUpdateDispatchWitness *w,
         (native_thread && native_thread!=GetCurrentThreadId())) return FALSE;
     native_thread=GetCurrentThreadId(); return TRUE;
 }
+static const char *body_busy_reason;
 static BOOL body_idle_common(const SudekiMpLanPartyLease *key,void *actor,
     const SudekiMpControlUpdateDispatchWitness *w,BOOL include_lighting,BOOL movement_request) {
-    uint8_t *a=actor,*arbiter,*interaction,*mode; SudekiMpCharacterSkillState skill;
+    uint8_t *a=actor,*arbiter=NULL,*interaction,*mode; SudekiMpCharacterSkillState skill;
     static const uint32_t actor_vt[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
     BOOL pending=TRUE; int spirit=-1;
     BOOL aiming=movement_request && SudekiMpLanStoryCastAiming(actor);
     uint32_t busy=movement_request ? STORY_BODY_BUSY_FLAGS&~0x1000u : STORY_BODY_BUSY_FLAGS;
-    if(!base || !key || key->seat>=4u || !w || !w->service_post_original_exact ||
-        !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w) ||
-        !readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
-        !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
-        *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor ||
-        (*(uint32_t *)(arbiter+0x50u)&busy) || (arbiter[0x60u]&5u) ||
-        SudekiMpCleanroomEngineRangedCombatPrimePending() ||
-        !SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0 ||
-        !SudekiMpWeaponActivationPending(actor,&pending) || pending ||
-        !SudekiMpObserveCharacterSkill(actor,&skill) || (!aiming && skill.active) ||
-        !readable(skill.skill,0x78u) || *(void **)(a+0xd8u)!=skill.skill ||
-        *(void **)((uint8_t *)skill.skill+0x10u)!=actor ||
-        (!aiming && ((uint8_t *)skill.skill)[0x6cu])) return FALSE;
-    void *task=*(void **)((uint8_t *)skill.skill+0x74u);
-    if(!aiming && task && (!readable(task,8u) || *(void **)task || !*((uint32_t *)task+1))) return FALSE;
-    interaction=*(uint8_t **)(a+0xa8u);
-    if(interaction && (!readable(interaction,0x64u) ||
-        !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) return FALSE;
-    return (aiming || (include_lighting?SudekiMpLanStoryCastDrained(actor):SudekiMpLanStoryCastBodyDrained(actor))) &&
-        SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w);
+    /* Same checks in order; the first failing one is kept for diagnostics. */
+    const char *why=
+        (!base || !key || key->seat>=4u || !w || !w->service_post_original_exact ||
+         !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w))?"witness":
+        (!readable(a,0xdcu) || *(void **)a!=base+actor_vt[key->seat] ||
+         !readable(arbiter=*(uint8_t **)(a+0x90u),0x64u) ||
+         *(void **)arbiter!=base+0x2cc9acu || *(void **)(arbiter+0x10u)!=actor)?"identity":
+        (*(uint32_t *)(arbiter+0x50u)&busy)?"arbiter_flags":
+        (arbiter[0x60u]&5u)?"arbiter_60":
+        SudekiMpCleanroomEngineRangedCombatPrimePending()?"ranged_prime":
+        (!SudekiMpCleanroomEngineSpiritPresentationState(&spirit) || spirit!=0)?"spirit":
+        (!SudekiMpWeaponActivationPending(actor,&pending) || pending)?"weapon":
+        (!SudekiMpObserveCharacterSkill(actor,&skill) || (!aiming && skill.active) ||
+         !readable(skill.skill,0x78u) || *(void **)(a+0xd8u)!=skill.skill ||
+         *(void **)((uint8_t *)skill.skill+0x10u)!=actor ||
+         (!aiming && ((uint8_t *)skill.skill)[0x6cu]))?"skill":NULL;
+    if(!why) {
+        void *task=*(void **)((uint8_t *)skill.skill+0x74u);
+        if(!aiming && task && (!readable(task,8u) || *(void **)task || !*((uint32_t *)task+1))) why="skill_task";
+    }
+    if(!why) {
+        interaction=*(uint8_t **)(a+0xa8u);
+        if(interaction && (!readable(interaction,0x64u) ||
+            !readable(mode=*(uint8_t **)(interaction+0x60u),0x4du) || mode[0x4cu])) why="interaction";
+    }
+    if(!why && !aiming && !(include_lighting?SudekiMpLanStoryCastDrained(actor):SudekiMpLanStoryCastBodyDrained(actor)))
+        why=include_lighting?"cast_lighting":"cast_body";
+    if(!why && !SudekiMpControlSeparationUpdateDispatchWitnessStillExact(w)) why="witness_after";
+    body_busy_reason=why;
+    return why==NULL;
 }
 static BOOL body_idle(const SudekiMpLanPartyLease *key,void *actor,
     const SudekiMpControlUpdateDispatchWitness *w) {
-    return body_idle_common(key,actor,w,TRUE,FALSE);
+    BOOL idle=body_idle_common(key,actor,w,TRUE,FALSE);
+    static const char *logged; static unsigned logs;
+    if(!idle && body_busy_reason!=logged && logs<64u) {
+        ++logs; logged=body_busy_reason;
+        SudekiMpLogFormat("lan_story_control event=drain_body_busy seat=%u reason=%s\r\n",
+            key?key->seat:9u,body_busy_reason?body_busy_reason:"-");
+    }
+    if(idle) logged=NULL;
+    return idle;
 }
 static BOOL ordinary_world(BOOL allow_combat) {
     BOOL combat=TRUE; uint8_t *speed;

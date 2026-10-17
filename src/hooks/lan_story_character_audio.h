@@ -15,4 +15,8 @@ BOOL SudekiMpStoryCharacterAudioRetains(void);
  * client residency operation. Uses the native bank setter/refcount lifetime. */
 BOOL SudekiMpStoryCharacterAudioBindEffect(const SudekiMpLanStoryNativeRoster *roster,
     unsigned character,void *sound);
+/* Client, native thread, inside the caller's exact residency operation: play
+ * a 2D spot cue (an interior door sound) once through the spot emitter's
+ * guarded native play, as CSound::PlayCue does. TRUE when a cue started. */
+BOOL SudekiMpStoryCharacterAudioPlaySpot(const char *cue);
 #endif

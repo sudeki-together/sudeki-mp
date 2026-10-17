@@ -9,4 +9,12 @@ void SudekiMpLanStoryMusicCapture(SudekiMpStoryEffectState *out,
     const SudekiMpControlUpdateDispatchWitness *witness);
 BOOL SudekiMpLanStoryMusicFollow(const SudekiMpStoryEffectState *host,
     const SudekiMpControlUpdateDispatchWitness *witness);
+/* Client, native thread, every frame: inside = this client holds a local
+ * house entry (H1b). Mirrors the interior door scripts: entering fades the
+ * score to 0 (remembering whether it played), leaving fades it back to 1
+ * when it had been playing. Converges; FALSE = not applied yet (retried). */
+BOOL SudekiMpLanStoryMusicInterior(BOOL inside,const SudekiMpControlUpdateDispatchWitness *witness);
+/* Runtime teardown, native thread: restore a score this module muted.
+ * FALSE (logged) when the owner cannot be proved; the state is kept. */
+BOOL SudekiMpLanStoryMusicInteriorReset(void);
 #endif

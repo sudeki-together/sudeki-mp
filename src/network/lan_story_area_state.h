@@ -5,8 +5,8 @@
 #include <stdint.h>
 #define SUDEKIMP_STORY_AREA_NAME 40u
 #define SUDEKIMP_STORY_AREA_MAX 8u
-#define SUDEKIMP_STORY_AREA_CODEC_VERSION 1u
-#define SUDEKIMP_STORY_AREA_WIRE_SIZE (12u+2u*SUDEKIMP_STORY_AREA_NAME+1u+SUDEKIMP_STORY_AREA_MAX*(SUDEKIMP_STORY_AREA_NAME+1u))
+#define SUDEKIMP_STORY_AREA_CODEC_VERSION 2u
+#define SUDEKIMP_STORY_AREA_WIRE_SIZE (12u+2u*SUDEKIMP_STORY_AREA_NAME+1u+SUDEKIMP_STORY_AREA_MAX*(SUDEKIMP_STORY_AREA_NAME+1u)+2u*SUDEKIMP_STORY_AREA_NAME)
 /* Only zone residency. Presentation has its own atomic, sequenced channel. */
 typedef struct SudekiMpStoryAreaEntry {
     char name[SUDEKIMP_STORY_AREA_NAME];
@@ -17,6 +17,10 @@ typedef struct SudekiMpStoryAreaState {
     char current[SUDEKIMP_STORY_AREA_NAME],target[SUDEKIMP_STORY_AREA_NAME];
     uint8_t count;
     SudekiMpStoryAreaEntry entries[SUDEKIMP_STORY_AREA_MAX];
+    /* H1b: the temporary zone the host's last native TEMP entry used and its
+     * authored arrival marker (ResourceName text), so a client can enter the
+     * same interior locally. Both empty when unknown. Not residency. */
+    char temporary_zone[SUDEKIMP_STORY_AREA_NAME],temporary_marker[SUDEKIMP_STORY_AREA_NAME];
 } SudekiMpStoryAreaState;
 BOOL SudekiMpStoryAreaStateValid(const SudekiMpStoryAreaState *state);
 /* Positive ordinary-zone evidence for SwitchZoneNOW/EnterZone following.

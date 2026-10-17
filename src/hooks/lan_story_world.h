@@ -20,6 +20,12 @@ BOOL SudekiMpInitializeLanStoryWorld(HMODULE image);
  * (or NULL). Entities spawned by that zone's authored catalog are left out
  * of the exterior world frame. Copy-only identities; recomputed per call. */
 void SudekiMpLanStoryWorldSetExcludedZone(const void *zone_data);
+/* H1b host: a background-resident house's zone data (NULL clears); its
+ * spawns are left out of the host frame like the split zone's. */
+void SudekiMpLanStoryWorldSetExcludedHouse(const void *zone_data);
+/* H1b client: the zone data of the shop this client entered locally (NULL
+ * clears). Its NPCs the host does not pose keep their native idle clock. */
+void SudekiMpLanStoryWorldSetLocalZone(const void *zone_data);
 /* Host only. TRUE freezes the exterior catalog as the (kind,identifier) set of
  * the last successful capture; while frozen, other registry entities (an
  * occupied split-area TEMP's objects) are left out. FALSE releases it. */

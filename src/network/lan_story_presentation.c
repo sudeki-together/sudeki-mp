@@ -59,6 +59,13 @@ BOOL SudekiMpLanStoryPresentationValid(const SudekiMpLanStoryPresentation *f) {
     } else if(f->cue[0]) return FALSE;
     return TRUE;
 }
+void SudekiMpLanStoryPresentationClearDialogue(SudekiMpLanStoryPresentation *f) {
+    if(!f) return;
+    f->flags=0; f->letterbox=f->letterbox_bottom=0;
+    f->elapsed_ms=f->duration_ms=0;
+    memset(f->subtitle,0,sizeof(f->subtitle)); memset(f->speaker,0,sizeof(f->speaker));
+    memset(f->cue,0,sizeof(f->cue));
+}
 BOOL SudekiMpLanStoryPresentationMatches(const SudekiMpLanStoryPresentation *f,
     const SudekiMpLanStoryFrame *p) {
     return SudekiMpLanStoryPresentationValid(f) && SudekiMpLanStoryFrameValid(p) &&

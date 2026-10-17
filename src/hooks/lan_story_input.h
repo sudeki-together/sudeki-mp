@@ -41,6 +41,9 @@ void SudekiMpLanStoryInputTraceEvents(BOOL on);
  * generation changes on focus/menu/rebind so unsent history can be retired. */
 BOOL SudekiMpLanStoryInputMelee(void *controller,void *actor,uint32_t transaction,
     uint8_t *buttons,uint32_t *generation);
+/* Drop the weak-attack states still pending after a press the caller kept
+ * (a shopkeeper talk prompt): no held or release state reaches the host. */
+void SudekiMpLanStoryInputConsumeWeak(void);
 /* Keep the exact binding while a local menu owns navigation. Discard held
  * movement/look/attack edges so closing it cannot replay old gameplay input. */
 BOOL SudekiMpLanStoryInputRanged(void *controller,void *actor,uint32_t transaction,

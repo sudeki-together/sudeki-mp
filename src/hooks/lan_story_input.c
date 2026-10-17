@@ -104,6 +104,10 @@ static void sample_melee(const NativeEvent *e,BOOL admitted,uint32_t now) {
         melee_buttons=(uint8_t)((melee_buttons&~(3u<<shift))|(admitted?3u<<shift:0u));
     if(down) melee_down|=bit; else melee_down&=~bit;
 }
+/* H1b: a press claimed by this game's own talk prompt. The weak pair is
+ * dropped from the pending states and its later physical release produces
+ * no state (melee_down still records the button). */
+void SudekiMpLanStoryInputConsumeWeak(void) { melee_buttons=(uint8_t)(melee_buttons&~3u); }
 static uint8_t take_melee(void) {
     uint8_t buttons=melee_buttons;
     melee_buttons=SudekiMpStoryMeleeAdvance(buttons);

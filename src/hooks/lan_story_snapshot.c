@@ -1,4 +1,5 @@
 #include "hooks/lan_story_remote_use.h"
+#include "hooks/lan_story_remote_interior.h"
 #include "hooks/lan_story_snapshot.h"
 #include "hooks/lan_story_combo_hud.h"
 #include "engine/log.h"
@@ -213,6 +214,13 @@ capture_stage="motion";         if(!native_poses && (!SudekiMpCleanroomEngineWor
             SetLastError(ERROR_NOT_SUPPORTED); return FALSE;
         }
         actor->x=position[0]; actor->y=position[1]; actor->z=position[2];
+        {   /* H1b: a member parked outside during the lead's entry into the
+             * house they were in is shown where they stood. */
+            float held[3];
+            if(SudekiMpLanStoryRemoteInteriorHeldPose(c,roster.actors[c],scene->epoch,held)) {
+                actor->x=held[0]; actor->y=held[1]; actor->z=held[2];
+            }
+        }
         actor->facing_x=facing[0]; actor->facing_z=facing[1];
         actor->hp=(uint32_t)hp; actor->sp=(uint32_t)sp;
         if(c==0u || c==2u) actor->combo_hud=SudekiMpLanStoryComboHudCapture(w,&roster,c);

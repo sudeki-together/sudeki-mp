@@ -436,7 +436,8 @@ BOOL SudekiMpTitleViewDraw(void *raw, unsigned count, unsigned selected,
         }
         for(unsigned i=0;i<extras->text_count;++i) {
             const SudekiMpPanelText *t=&extras->texts[i];
-            float x=t->x*hud_x,y=t->y*hud_y,width=t->width*hud_x;
+            float x=t->x*hud_x+t->indent*scale,y=t->y*hud_y,width=t->width*hud_x-t->indent*scale;
+            if(!isfinite(x) || !(width>0)) continue;
             DRAW_CALL(text_left(device,t->text,sizeof(t->text),x+scale,y+scale,
                 t->size*scale,width,tint(0x07121d,opacity*.8f)));
             DRAW_CALL(text_left(device,t->text,sizeof(t->text),x,y,

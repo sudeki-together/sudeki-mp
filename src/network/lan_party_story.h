@@ -28,6 +28,12 @@ typedef struct SudekiMpLanStoryScene {
      * inside_mask is a subset of available_mask. Vanilla whole-party travel is
      * inside_mask==available_mask. Never set outside READY. */
     uint8_t inside_mask;
+    /* The host keeps the exterior `world` loaded and live while characters
+     * are in `temporary` (split door visits, H1b shop visits), so the
+     * exterior's lifetime (epoch) continues even when nobody stands in it.
+     * Only READY with a temporary; vanilla whole-party travel never sets it.
+     * Wire: bit 7 of the inside_mask byte. */
+    uint8_t exterior_retained;
 } SudekiMpLanStoryScene;
 
 int SudekiMpLanStorySceneValid(const SudekiMpLanStoryScene *scene);
@@ -59,5 +65,12 @@ int SudekiMpLanStorySceneSameArea(const SudekiMpLanStoryScene *scene,
     unsigned int a, unsigned int b);
 unsigned int SudekiMpLanStoryViewSeat(const SudekiMpLanStoryScene *scene,
     unsigned int player_seat, unsigned int preferred_companion);
+/* Is a host conversation (the lead's) presented to this viewer? Interim
+ * rule (owner 2026-10-17): not to a viewer inside its own house visit while
+ * the lead is elsewhere; otherwise as before (same area, nobody inside, or
+ * the viewer waiting outside the lead's house). Unknown (invalid scene, no
+ * lead, no view seat) is FALSE. */
+int SudekiMpLanStorySceneConversationShared(const SudekiMpLanStoryScene *scene,
+    unsigned int viewer_character, unsigned int preferred_companion);
 
 #endif

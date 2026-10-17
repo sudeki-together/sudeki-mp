@@ -18,7 +18,7 @@ static SudekiMpStoryAreaState sample(void) {
 int main(void) {
     uint8_t wire[SUDEKIMP_STORY_AREA_WIRE_SIZE];
     SudekiMpStoryAreaState s=sample(),d;
-    assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==421u && SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u);
+    assert(SUDEKIMP_STORY_AREA_WIRE_SIZE==501u && SUDEKIMP_STORY_AREA_WIRE_SIZE+28u<=1468u);
     assert(SudekiMpStoryAreaStateValid(&s));
     assert(SudekiMpStoryAreaStateExterior(&s));
     assert(SudekiMpStoryAreaStateEncode(&s,wire,sizeof(wire)));
@@ -49,6 +49,18 @@ int main(void) {
     memset(d.target,'a',sizeof(d.target)); d=s; memset(d.target,'a',sizeof(d.target)); assert(!SudekiMpStoryAreaStateValid(&d));
     /* Empty target is allowed (no background load pending). */
     d=s; memset(d.target,0,sizeof(d.target)); assert(SudekiMpStoryAreaStateValid(&d));
+    /* v2 (H1b): the host's last interior zone and arrival marker travel
+     * together (both or neither) and round-trip exactly. */
+    d=s; strcpy(d.temporary_zone,"LNBr_TallTent02"); strcpy(d.temporary_marker,"NB_TALLTENT02_START_POS");
+    assert(SudekiMpStoryAreaStateValid(&d) && !SudekiMpStoryAreaStateSame(&s,&d));
+    {   SudekiMpStoryAreaState e; uint8_t w2[SUDEKIMP_STORY_AREA_WIRE_SIZE];
+        assert(SudekiMpStoryAreaStateEncode(&d,w2,sizeof(w2)));
+        assert(SudekiMpStoryAreaStateDecode(w2,sizeof(w2),&e) && !memcmp(&d,&e,sizeof(d)));
+        w2[0]=1; assert(!SudekiMpStoryAreaStateDecode(w2,sizeof(w2),&e)); /* v1 refused */ }
+    d=s; strcpy(d.temporary_zone,"LNBr_TallTent02"); assert(!SudekiMpStoryAreaStateValid(&d));
+    d=s; strcpy(d.temporary_marker,"NB_TALLTENT02_START_POS"); assert(!SudekiMpStoryAreaStateValid(&d));
+    d=s; strcpy(d.temporary_zone,"x"); strcpy(d.temporary_marker,"y"); d.temporary_marker[5]='z';
+    assert(!SudekiMpStoryAreaStateValid(&d));
     wire[12+2*SUDEKIMP_STORY_AREA_NAME]=9; assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d));
     wire[0]=0; assert(!SudekiMpStoryAreaStateDecode(wire,sizeof(wire),&d));
     puts("story area state tests passed");

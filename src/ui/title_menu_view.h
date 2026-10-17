@@ -36,6 +36,9 @@ typedef struct SudekiMpPanelText {
     char text[128];
     /* Overlay text colour, 0xRRGGBB; 0 = the default parchment colour. */
     unsigned colour;
+    /* Overlay only: an offset after x in text units (the measured width of
+     * the text before it on the same row), scaled like the glyphs. */
+    float indent;
 } SudekiMpPanelText;
 enum { SUDEKIMP_PANEL_BOXES = 4 };
 /* Overlay-only framed rectangle in full-viewport 960x720 coordinates, drawn

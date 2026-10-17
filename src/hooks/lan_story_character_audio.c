@@ -651,3 +651,42 @@ BOOL SudekiMpStoryCharacterAudioPresent(const SudekiMpLanStoryNativeRoster *rost
     }
     busy=FALSE;return ok;
 }
+
+/* H1b: an interior door's spot cue. EnterInterior|SRSBS and ExitInterior|BSN
+ * play GetSound()->PlayCue(cue) right before their fade (CONFIRMED_STATIC,
+ * SOLWORLDM.gex); a client entering a house locally runs no door script.
+ * CSound::PlayCue (0x17090) only does EmitterPlay(EAX = CSound+0x18 spot
+ * emitter; cue, NULL, 1, 0, 0) and may be detoured by another owner, so the
+ * guarded EmitterPlay is called with those same arguments: an unattached 2D
+ * emitter, fire and forget (no handle is requested or kept). Client only. */
+__attribute__((naked,noinline,used)) static void invoke_spot(void *entry __attribute__((unused)),
+    void *emitter __attribute__((unused)),const char *name __attribute__((unused))) {
+    __asm__ volatile("pushl %ebp\n\tmovl %esp,%ebp\n\t"
+        "pushl $0\n\tpushl $0\n\tpushl $1\n\tpushl $0\n\tpushl 16(%ebp)\n\t"
+        "movl 12(%ebp),%eax\n\tcall *8(%ebp)\n\tleave\n\tret\n\t");
+}
+/* The guarded native EmitterPlay (a test may substitute a recording stub). */
+static void *spot_entry;
+static BOOL spot_refused(const char *cue,const char *reason) {
+    static unsigned spot_logs;
+    if(spot_logs++<16u) SudekiMpLogFormat("story_character_audio event=spot_refused cue=%s reason=%s\r\n",cue?cue:"-",reason);
+    return FALSE;
+}
+BOOL SudekiMpStoryCharacterAudioPlaySpot(const char *cue) {
+    AudioOwner a; unsigned index=0;
+    if(host_mode || busy || !base || !cue || !*cue || (native_thread && native_thread!=GetCurrentThreadId()))
+        return spot_refused(cue,"owner_or_thread");
+    uint8_t *sound=memory(base+0x408d40u,4,FALSE)?*(uint8_t **)(base+0x408d40u):NULL;
+    if(!typed(base,sound,0x2cu,0x2c6238u) || *(void **)(sound+8u)!=base+0x2c6240u) return spot_refused(cue,"sound");
+    uint8_t *emitter=*(uint8_t **)(sound+0x18u);
+    if(!typed(base,emitter,0x14u,0x2e1db4u) || emitter[0x10u]!=1u || u32(emitter+8u)) return spot_refused(cue,"emitter");
+    if(!methods(base) || !owner(*(uint8_t **)(emitter+4u),&a)) return spot_refused(cue,"bank");
+    a.emitter=emitter;
+    if(!cue_index(&a,cue,&index)) return spot_refused(cue,"cue");
+    if(!play_available(&a)) return spot_refused(cue,"capacity");
+    uint32_t generation=u32(a.pool+4u);
+    busy=TRUE; invoke_spot(spot_entry?spot_entry:base+0x28aeb0u,emitter,cue); busy=FALSE;
+    BOOL played=*(uint8_t **)(base+0x409e8cu)==a.pool && u32(a.pool+4u)!=generation;
+    if(traces++<300) SudekiMpLogFormat("story_character_audio event=spot_played cue=%s played=%u\r\n",cue,(unsigned)played);
+    return played;
+}

@@ -37,6 +37,10 @@ static void codec(void) {
     wire[143]=0x10u; assert(!SudekiMpLanStorySceneDecode(wire,sizeof(wire),&out));
     SudekiMpLanStoryScene a=ready(3,7,99,"lnbr_church",8u),b=a; b.inside_mask=12u;
     assert(!SudekiMpLanStorySceneSame(&a,&b));
+    /* exterior_retained travels in bit 7 of the inside_mask byte. */
+    in=ready(3,7,99,"lnbr_kamo_shop",12u); in.exterior_retained=1u;
+    assert(SudekiMpLanStorySceneEncode(&in,wire,sizeof(wire)) && wire[143]==0x8cu);
+    assert(SudekiMpLanStorySceneDecode(wire,sizeof(wire),&out) && !memcmp(&in,&out,sizeof(in)));
 }
 static void advances(void) {
     SudekiMpLanStoryScene outside=ready(5,1,100,NULL,0);
@@ -64,6 +68,19 @@ static void advances(void) {
     SudekiMpLanStoryScene repeat=ailish_in; repeat.observed_tick=201;
     assert(SudekiMpLanStorySceneAdvances(&ailish_in,&repeat));
     repeat.inside_mask=12u; assert(!SudekiMpLanStorySceneAdvances(&ailish_in,&repeat));
+    /* H1b: the host states the exterior stays live while everyone is in a
+     * shop (split + members). Same epoch is then allowed both ways; without
+     * the statement whole-party travel still needs a new epoch. */
+    SudekiMpLanStoryScene shop_all=ready(5,4,400,"lnbr_kamo_shop",12u); shop_all.exterior_retained=1u;
+    SudekiMpLanStoryScene shop_out=ready(5,5,500,NULL,0);
+    assert(SudekiMpLanStorySceneValid(&shop_all));
+    assert(SudekiMpLanStorySceneAdvances(&outside,&shop_all));
+    assert(SudekiMpLanStorySceneAdvances(&shop_all,&shop_out));
+    SudekiMpLanStoryScene shop_plain=shop_all; shop_plain.exterior_retained=0u;
+    assert(!SudekiMpLanStorySceneSame(&shop_all,&shop_plain));
+    assert(!SudekiMpLanStorySceneAdvances(&shop_plain,&shop_out));
+    SudekiMpLanStoryScene bad=shop_out; bad.exterior_retained=1u; assert(!SudekiMpLanStorySceneValid(&bad));
+    bad=shop_all; bad.exterior_retained=2u; assert(!SudekiMpLanStorySceneValid(&bad));
 }
 static void areas(void) {
     SudekiMpLanStoryScene s=ready(5,2,200,"lnbr_church",8u);
@@ -116,8 +133,27 @@ static void kamo_split_scenes(void) {
         printf("PASS named KamoSplitScene destination=%s epoch_retained=1 Tal_outside=1\n",shops[i].temporary);
     }
 }
+static void conversation_scope(void) {
+    /* Interim rule (owner 2026-10-17): a host conversation belongs to the
+     * host lead's area. Ailish (3) leads. */
+    SudekiMpLanStoryScene s=ready(6,6,100,NULL,0); s.leader_seat=3u;
+    assert(SudekiMpLanStorySceneConversationShared(&s,2u,4u));             /* nobody inside */
+    assert(SudekiMpLanStorySceneConversationShared(&s,0u,4u));             /* unavailable viewer: no split */
+    s=ready(6,6,100,"lnbr_kamo_shop",4u); s.leader_seat=3u;                /* Tal in his shop, lead outside */
+    assert(!SudekiMpLanStorySceneConversationShared(&s,2u,4u));
+    s=ready(6,7,100,"lnbr_kamo_shop",12u); s.leader_seat=3u;               /* both inside */
+    assert(SudekiMpLanStorySceneConversationShared(&s,2u,4u));
+    s=ready(6,7,100,"lnbr_church",8u); s.leader_seat=3u;                   /* lead in a story house: as before */
+    assert(SudekiMpLanStorySceneConversationShared(&s,2u,4u));
+    assert(SudekiMpLanStorySceneConversationShared(&s,0u,4u));             /* unavailable viewer: the lead's view */
+    s.leader_seat=SUDEKIMP_LAN_STORY_NO_SEAT; assert(!SudekiMpLanStorySceneConversationShared(&s,2u,4u));
+    s=ready(6,7,100,"lnbr_kamo_shop",4u); s.leader_seat=3u; s.phase=SUDEKIMP_LAN_STORY_LOADING;
+    assert(!SudekiMpLanStorySceneConversationShared(&s,2u,4u));
+    assert(!SudekiMpLanStorySceneConversationShared(NULL,2u,4u));
+    puts("StorySceneArea.ConversationShared: PASS (hidden only inside the viewer's own visit; unknown hides)");
+}
 int main(void) {
-    validity(); codec(); advances(); areas(); kamo_split_scenes();
+    validity(); codec(); advances(); areas(); kamo_split_scenes(); conversation_scope();
     puts("StorySceneAreaTest: PASS (scene v2 per-character area policy/codec; no native, network or gameplay)");
     return 0;
 }

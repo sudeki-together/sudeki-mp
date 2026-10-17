@@ -133,6 +133,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_character_audio.c
     src/hooks/lan_story_recruit_setup.c
     src/ui/story_cinematic_view.c
+    src/ui/story_markup.c
     src/hooks/lan_story_input.c
     src/hooks/lan_story_replica.c
     src/hooks/lan_story_world.c
@@ -151,6 +152,10 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_client_camera_height.c
     src/hooks/lan_story_inventory.c
     src/hooks/lan_story_remote_use.c
+    src/hooks/lan_story_remote_interior.c
+    src/hooks/lan_story_zone_banner.c
+    src/hooks/lan_story_shop.c
+    src/engine/sol_shop_stock.c
     src/network/lan_story_door_view.c
     src/hooks/lan_story_host_control.c
     src/hooks/lan_story_control.c
@@ -2180,6 +2185,18 @@ target_compile_definitions(SudekiMP.StoryDoorViewTest PRIVATE WIN32_LEAN_AND_MEA
 target_compile_options(SudekiMP.StoryDoorViewTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StoryDoorViewTest PRIVATE ws2_32 bcrypt)
 set_target_properties(SudekiMP.StoryDoorViewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryPresentationPrivacyTest tests/story_presentation_privacy_test.c src/network/lan_story_presentation.c)
+target_include_directories(SudekiMP.StoryPresentationPrivacyTest PRIVATE src)
+target_compile_options(SudekiMP.StoryPresentationPrivacyTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryPresentationPrivacyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryMarkupTest tests/story_markup_test.c src/ui/story_markup.c)
+target_include_directories(SudekiMP.StoryMarkupTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMarkupTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryMarkupTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryRejoinSpotTest tests/story_rejoin_spot_test.c)
+target_include_directories(SudekiMP.StoryRejoinSpotTest PRIVATE src)
+target_compile_options(SudekiMP.StoryRejoinSpotTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.StoryRejoinSpotTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryAreaStateTest tests/story_area_state_test.c src/network/lan_story_area_state.c)
 target_include_directories(SudekiMP.StoryAreaStateTest PRIVATE src)
 target_compile_options(SudekiMP.StoryAreaStateTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -2320,6 +2337,33 @@ target_compile_options(SudekiMP.StoryMusicImageTest PRIVATE -Wall -Wextra -Werro
 target_link_libraries(SudekiMP.StoryMusicImageTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StoryMusicImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(SudekiMP.StoryZoneBannerImageTest tests/story_zone_banner_image_test.c
+    src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryZoneBannerImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryZoneBannerImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryZoneBannerImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryZoneBannerImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryShopImageTest tests/story_shop_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryShopImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryShopImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryShopImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryShopImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.SolShopStockTest tests/sol_shop_stock_test.c
+    src/engine/sol_shop_stock.c src/engine/sha256.c)
+target_include_directories(SudekiMP.SolShopStockTest PRIVATE src)
+target_compile_options(SudekiMP.SolShopStockTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.SolShopStockTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# The image test #includes src/engine/sol_shop_stock.c to reach its static
+# load_path(), so that source is not listed again here.
+add_executable(SudekiMP.SolShopStockImageTest tests/sol_shop_stock_image_test.c src/engine/sha256.c)
+target_include_directories(SudekiMP.SolShopStockImageTest PRIVATE src)
+target_compile_options(SudekiMP.SolShopStockImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+set_target_properties(SudekiMP.SolShopStockImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 add_executable(SudekiMP.StoryComboHudImageTest tests/story_combo_hud_image_test.c
     src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c
     src/engine/buki_replica_native.c ${SUDEKIMP_STORY_ACTION_TEST_SOURCES})
@@ -2456,6 +2500,13 @@ target_include_directories(SudekiMP.StorySplitPreflightTest PRIVATE src)
 target_compile_options(SudekiMP.StorySplitPreflightTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(SudekiMP.StorySplitPreflightTest PRIVATE bcrypt)
 set_target_properties(SudekiMP.StorySplitPreflightTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(SudekiMP.StoryMemberVisibilityImageTest tests/story_member_visibility_image_test.c
+    src/hooks/call_hook.c src/engine/build_identity.c src/engine/sha256.c)
+target_include_directories(SudekiMP.StoryMemberVisibilityImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryMemberVisibilityImageTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(SudekiMP.StoryMemberVisibilityImageTest PRIVATE bcrypt)
+set_target_properties(SudekiMP.StoryMemberVisibilityImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_executable(SudekiMP.StorySplitControlTest tests/story_split_control_test.c)
 target_include_directories(SudekiMP.StorySplitControlTest PRIVATE src)

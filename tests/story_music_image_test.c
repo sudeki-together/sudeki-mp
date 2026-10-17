@@ -124,6 +124,31 @@ int main(int argc,char **argv) {
     assert(SudekiMpLanStoryMusicFollow(&h,&w) && score[0xac]==1 && !loads);
     ++h.sequence; ptr(cue+8,bank); assert(!SudekiMpLanStoryMusicFollow(&h,&w));
     num(entries+8,2); assert(SudekiMpLanStoryMusicFollow(&h,&w));
+    /* H1b interior door fade on a client's local house entry (native Fade,
+     * IsPlaying and VariationStop execute on the fixture). */
+    num(score+0x6c,bits(1.f)); num(score+0x70,0); num(score+0x74,bits(1.f)); score[0xc0]=1;
+    unsigned before=calls;
+    assert(SudekiMpLanStoryMusicInterior(TRUE,&w) && calls==before+1);
+    assert(score[0xc0]==0 && word(score+0x74)==bits(0.f) && word(score+0x70)==bits(-.5f) && word(score+0x6c)==bits(1.f));
+    assert(SudekiMpLanStoryMusicInterior(TRUE,&w) && calls==before+1); /* converged */
+    assert(SudekiMpLanStoryMusicInterior(FALSE,&w) && word(score+0x74)==bits(1.f) && calls==before+2);
+    num(score+0x6c,0); num(score+0x70,0); num(score+0x74,0); /* silent at entry: no fade either way */
+    assert(SudekiMpLanStoryMusicInterior(TRUE,&w) && !word(score+0x74) && !word(score+0x70));
+    assert(SudekiMpLanStoryMusicInterior(FALSE,&w) && !word(score+0x74) && !word(score+0x70));
+    num(score+0x6c,bits(1.f)); num(score+0x74,bits(1.f));
+    admission=FALSE; assert(!SudekiMpLanStoryMusicInterior(TRUE,&w)); admission=TRUE;
+    exact_witness=FALSE; assert(!SudekiMpLanStoryMusicInterior(TRUE,&w)); exact_witness=TRUE;
+    ++w.native_thread_id; assert(!SudekiMpLanStoryMusicInterior(TRUE,&w)); --w.native_thread_id;
+    ptr(score,image); assert(!SudekiMpLanStoryMusicInterior(TRUE,&w)); ptr(score,image+0x2c7bf4);
+    image[0x39990]^=1; assert(!SudekiMpLanStoryMusicInterior(TRUE,&w)); image[0x39990]^=1;
+    assert(word(score+0x74)==bits(1.f)); /* refusals wrote nothing */
+    assert(SudekiMpLanStoryMusicInterior(TRUE,&w) && !word(score+0x74));
+    assert(SudekiMpLanStoryMusicInteriorReset() && word(score+0x74)==bits(1.f));
+    assert(SudekiMpLanStoryMusicInteriorReset()); /* nothing left to restore */
+    assert(SudekiMpLanStoryMusicInterior(TRUE,&w) && !word(score+0x74));
+    ptr(score,image); assert(!SudekiMpLanStoryMusicInteriorReset()); ptr(score,image+0x2c7bf4);
+    assert(!word(score+0x74) && SudekiMpLanStoryMusicInteriorReset() && word(score+0x74)==bits(1.f));
+    puts("Story music interior door fade, convergence, refusal and teardown restore: PASS");
     VirtualFree(score,0,MEM_RELEASE); VirtualFree(image,0,MEM_RELEASE);
     puts("Story music exact-image guards, native encounter transitions and owner refusal: PASS");
     return 0;

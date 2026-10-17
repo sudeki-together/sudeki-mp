@@ -6,6 +6,7 @@
 #include "hooks/lan_story_material.h"
 #include "hooks/lan_story_residency.h"
 #include "hooks/lan_story_research54.h"
+#include "hooks/lan_story_remote_interior.h"
 #include "cleanroom/engine.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
@@ -205,6 +206,29 @@ static BOOL registry_capture(Registry *r) {
     if(!r->count || r->count>MAX_REGISTRY || !readable(r->entries,r->count*sizeof(void *))) return FALSE;
     memcpy(r->entities,r->entries,r->count*sizeof(void *)); return registry_still(r);
 }
+/* H1b: the zone data of the shop this client entered locally (NULL when
+ * none). Its own NPCs that the host does not pose (Kamo: the host leaves the
+ * shop out of its frame, or has only an inert background copy) keep their
+ * native idle clock; everything else stays host-posed. Game thread. */
+static const void *local_zone;
+void SudekiMpLanStoryWorldSetLocalZone(const void *zone_data) {local_zone=zone_data;}
+static BOOL zone_spawned(const void *zone,const uint8_t *entity) {
+    const uint8_t *data=zone,*c,*spawns;
+    if(!data || !readable(data,0x12au) || *(void *const *)data!=base+0x2cdcdcu ||
+        !readable(c=*(const uint8_t *const *)(data+0x118u),0x1cu)) return FALSE;
+    unsigned n=*(const unsigned *)(c+0x10u); spawns=*(const uint8_t *const *)(c+0x18u);
+    if(!n || n>512u || !readable(spawns,n*0x90u)) return FALSE;
+    for(unsigned i=0;i<n;++i) {
+        uintptr_t r=*(const uintptr_t *)(spawns+i*0x90u+0x78u);
+        if(r>0x2cu && (const uint8_t *)(r-0x2cu)==entity) return TRUE;
+    }
+    return FALSE;
+}
+static BOOL local_idle_npc(const uint8_t *e) {
+    if(!local_zone || !client_seen || *(void *const *)e!=base+0x2d65a0u) return FALSE;
+    for(unsigned i=0;i<client_count;++i) if(client_bound[i].target.entity==e) return FALSE;
+    return zone_spawned(local_zone,e);
+}
 unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) {
     static const uint32_t pc_vtables[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
     unsigned n=0;
@@ -224,6 +248,7 @@ unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) {
          * They must not consume the bounded actor exclusion list either. */
         if(*(void *const *)e==base+0x2d3c7cu &&
             *(void *const *)(e+8u)==base+0x2d3ca4u) continue;
+        if(local_idle_npc(e)) continue;
         const uint8_t *position=*(const uint8_t *const *)(e+0x44u);
         if(readable(position,0xb8u) && *(void *const *)position==base+0x2cdefcu &&
             *(const void *const *)(position+0x10u)==e) {
@@ -504,10 +529,11 @@ static int target_order(const void *left,const void *right) {
     if(a->kind!=b->kind) return a->kind<b->kind?-1:1;
     return a->identifier<b->identifier?-1:a->identifier>b->identifier;
 }
-static const void *excluded_zone;
-static const uint8_t *excluded[512];
+static const void *excluded_zone,*excluded_house;
+static const uint8_t *excluded[1024];
 static unsigned excluded_count;
 void SudekiMpLanStoryWorldSetExcludedZone(const void *zone_data) {excluded_zone=zone_data;}
+void SudekiMpLanStoryWorldSetExcludedHouse(const void *zone_data) {excluded_house=zone_data;}
 static uint8_t foreign_characters;
 static BOOL allow_frozen;
 static unsigned allow_count;
@@ -535,18 +561,27 @@ void SudekiMpLanStoryWorldSetSplitAllowlist(BOOL frozen) {
     } else if(!frozen && allow_frozen) SudekiMpLogFormat("lan_story_world event=split_allowlist frozen=0\r\n");
     allow_frozen=frozen;
 }
-static BOOL excluded_capture(void) {
-    excluded_count=0;
-    const uint8_t *data=excluded_zone,*c,*spawns;
+static BOOL exclude_zone_spawns(const void *zone) {
+    const uint8_t *data=zone,*c,*spawns;
     if(!data) return TRUE;
     if(!readable(data,0x12au) || *(void *const *)data!=base+0x2cdcdcu ||
         !readable(c=*(const uint8_t *const *)(data+0x118u),0x1cu)) return FALSE;
     unsigned n=*(const unsigned *)(c+0x10u); spawns=*(const uint8_t *const *)(c+0x18u);
     if(n>512u || (n && !readable(spawns,n*0x90u))) return FALSE;
-    for(unsigned i=0;i<n;++i) {
+    for(unsigned i=0;i<n && excluded_count<sizeof(excluded)/sizeof(excluded[0]);++i) {
         uintptr_t r=*(const uintptr_t *)(spawns+i*0x90u+0x78u);
         if(r>0x2cu) excluded[excluded_count++]=(const uint8_t *)(r-0x2cu);
     }
+    return TRUE;
+}
+static BOOL excluded_capture(void) {
+    excluded_count=0;
+    if(!exclude_zone_spawns(excluded_zone)) return FALSE;
+    /* H1b background house: its spawns are inert on the host; the members'
+     * clients idle their own copies. An unreadable house slot only means
+     * nothing more is excluded (never a failed capture). */
+    unsigned before=excluded_count;
+    if(excluded_house!=excluded_zone && !exclude_zone_spawns(excluded_house)) excluded_count=before;
     return TRUE;
 }
 
@@ -1308,6 +1343,14 @@ BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,void *control
             if(host_bound[j].previous.kind==targets[i].kind &&
                 host_bound[j].previous.identifier==targets[i].identifier) { old=&host_bound[j]; break; }
         BOOL pose_read=read_pose_detail(&targets[i],&frame.actors[i],&next[i].ranged_base);
+        {   /* H1b: a member parked outside during the lead's entry into the
+             * house they were in is published where they stood, in this
+             * frame as in the party frame (they must match exactly). */
+            float held[3];
+            if(pose_read && targets[i].kind==SUDEKIMP_LAN_STORY_WORLD_PC_KIND && targets[i].character<4u &&
+                SudekiMpLanStoryRemoteInteriorHeldPose(targets[i].character,roster.actors[targets[i].character],party->epoch,held))
+                memcpy(frame.actors[i].position,held,sizeof(held));
+        }
         /* Door (#67/#71): the native door toggles CPosition+0x100 (and its
          * collision object) at open/close; the client mirrors that byte. */
         if(pose_read && door(&targets[i]))

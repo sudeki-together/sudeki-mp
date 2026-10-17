@@ -75,4 +75,50 @@ int SudekiMpLanStoryObserverTestEnterTemporary(const char *zone,const char *mark
  * or incomplete; it does not authorize retrying entry. */
 BOOL SudekiMpLanStoryObserverTestTemporarySettled(const char *zone);
 
+/* H1b remote interior (host, native thread): non-lead characters in `mask`
+ * stand in `zone`, a house the host keeps background-resident (state 2)
+ * while the lead stays in the current exterior. The exterior epoch is kept;
+ * the scene names `zone` as temporary and marks only `mask` inside. Refused
+ * outside a READY exterior scene, during a split or a zone call, or when
+ * `mask` holds the lead or a missing character. Clear ends it (revision
+ * only). The evict callback runs on the native thread before any zone call
+ * other than a background load of `zone` itself, and must move the members
+ * out and call Clear; a zone call that still finds the mask set clears it
+ * and follows the vanilla (new epoch) path. */
+BOOL SudekiMpLanStoryObserverSetRemoteInterior(const char *zone,uint8_t mask);
+void SudekiMpLanStoryObserverClearRemoteInterior(void);
+/* Remove only `mask` from the remote interior (others stay inside). */
+void SudekiMpLanStoryObserverClearRemoteMembers(uint8_t mask);
+void SudekiMpLanStoryObserverSetRemoteInteriorEvict(void (*evict)(void));
+/* The house the remote-interior owner keeps background-resident (NULL
+ * clears). The native entry refuses a loaded target, and entering one
+ * anyway hangs the transition (CONFIRMED_LIVE 2026-10-17), so a native TEMP
+ * to exactly that house first runs the lead-entry callback (native thread,
+ * before the entry; it moves its members' bodies out and unloads the house,
+ * keeping them in the remote mask so the split begins with them inside, or
+ * changes nothing, in which case the native entry is a no-op). */
+void SudekiMpLanStoryObserverNoteResidentHouse(const char *zone);
+void SudekiMpLanStoryObserverSetRemoteInteriorLeadEntry(void (*release)(const char *zone));
+/* The house a member visit (loading or inside) uses, NULL when none. Any
+ * native zone call other than a load of / entry into that house runs the
+ * evict callback first, also while no member is marked inside yet. While
+ * set (or while members/resident house remain) Uninstall refuses. */
+void SudekiMpLanStoryObserverSetRemoteVisit(const char *zone);
+/* TRUE when `zone` is the member visit's house or the resident house. */
+BOOL SudekiMpLanStoryObserverRemoteHouseIs(const char *zone);
+/* TRUE while the sampler is holding the last READY scene through a short
+ * native party miss during a background zone load (no epoch change), and
+ * for 1.5 s after the hold ends. */
+BOOL SudekiMpLanStoryObserverHolding(void);
+/* Identity is unknown, not changed: a whole-world load is pending, the
+ * sampler holds through a background-load miss, or a background zone load
+ * was requested within the last 5 s (its first native frame can fail an
+ * identity proof before any sample observes it). */
+BOOL SudekiMpLanStoryObserverIdentityUnknown(void);
+/* The last published READY scene (no native proof; callers re-prove). */
+BOOL SudekiMpLanStoryObserverPublished(SudekiMpLanStoryScene *out);
+/* The zone and authored arrival marker (ResourceName text) of the last
+ * native TEMP entry on this machine; FALSE when none or too long. */
+BOOL SudekiMpLanStoryObserverLastTemporary(char zone[40],char marker[40]);
+
 #endif

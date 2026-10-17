@@ -11,6 +11,13 @@ BOOL SudekiMpLanStorySkyUninstall(void);
 /* Game thread: restore the target/rate before an area switch or session exit.
  * FALSE retains the lease for retry; an unknown owner must not be written. */
 BOOL SudekiMpLanStorySkyReleaseLighting(void);
+/* Host, native thread (H1b): while held, the scene light calls (ambient,
+ * light group set/inc, brightness, colour adjust, background) are queued,
+ * not applied or published. Release applies them through the exports (and
+ * so publishes them) or drops them. Capture ends by itself 35 s after it
+ * began (later calls pass through; queued ones wait for Release). */
+void SudekiMpLanStorySkyHoldLighting(BOOL hold);
+void SudekiMpLanStorySkyReleaseHeld(BOOL apply);
 /* Host: copy the latest calls into a presentation report. */
 void SudekiMpLanStorySkyCapture(SudekiMpStoryEffectState *out);
 /* Client: replay calls newer than the last applied ones. */

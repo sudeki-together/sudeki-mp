@@ -325,8 +325,21 @@ BOOL SudekiMpLanStoryRemoteUseIconInitialize(HMODULE image) {
 /* The client's UI clears these flags; natively the usable in front sets its
  * flag every frame (CONFIRMED_LIVE 2026-10-16: our one-time set read back as
  * cleared, the prompt "shows up then vanishes"). Re-assert while wanted. */
+static uint32_t icon_host,icon_local;
+static void icon_refresh(void);
 void SudekiMpLanStoryRemoteUseIconApply(unsigned hint) {
-    uint32_t want=hint==1u?4u:hint==2u?0x200u:0u;
+    icon_host=hint==1u?4u:hint==2u?0x200u:0u;
+    icon_refresh();
+}
+/* H1b: the client's own shopkeeper talk prompt (flag 2) shares this one
+ * owner of the flag word with the host's chest hint. */
+BOOL SudekiMpLanStoryRemoteUseIconSetLocal(uint32_t bits) {
+    icon_local=bits&(2u|0x40u); /* talk, examine */
+    icon_refresh();
+    return icon_base!=NULL;
+}
+static void icon_refresh(void) {
+    uint32_t want=icon_host|icon_local;
     if(!icon_base || (!want && !icon_shown)) return;
     uint8_t *scene=readable(icon_base+RVA_UI_SCENE,4u)?*(uint8_t **)(icon_base+RVA_UI_SCENE):NULL;
     uint8_t *hud=readable(scene,0x178u)?*(uint8_t **)(scene+0x174u):NULL;
@@ -334,8 +347,9 @@ void SudekiMpLanStoryRemoteUseIconApply(unsigned hint) {
     if(!readable(ctx,0x5cu)) return;
     typedef void (__attribute__((thiscall)) *Flags)(void *,uint32_t);
     uint32_t flags=*(uint32_t *)(ctx+0x58u);
-    if(icon_shown && icon_shown!=want && (flags&icon_shown)) ((Flags)(icon_base+RVA_FLAGS_CLEAR))(scene,icon_shown);
-    if(want && !(flags&want)) ((Flags)(icon_base+RVA_FLAGS_SET))(scene,want);
+    uint32_t drop=icon_shown&~want&flags,need=want&~flags;
+    if(drop) ((Flags)(icon_base+RVA_FLAGS_CLEAR))(scene,drop);
+    if(need) ((Flags)(icon_base+RVA_FLAGS_SET))(scene,need);
     if(want!=icon_shown) log_event("story_remote_use event=%s shown=%u flag=%u\r\n","icon",want?1u:0u,want);
     icon_shown=want;
 }

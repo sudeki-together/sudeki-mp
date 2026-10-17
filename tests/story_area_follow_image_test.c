@@ -23,6 +23,9 @@ BOOL SudekiMpLanStorySpawnEventsCapture(SudekiMpStoryEffectState *s) {(void)s;re
 void SudekiMpLanStorySpawnDespawnCapture(SudekiMpStoryDespawn *s) {(void)s;}
 void SudekiMpLanStorySpawnEffectsCapture(SudekiMpStoryEffectState *s) {(void)s;}
 void SudekiMpLanStorySkyCapture(SudekiMpStoryEffectState *s) {(void)s;}
+void SudekiMpLogWrite(const char *message) {(void)message;}
+BOOL SudekiMpLanStoryWithResourceName(const char *name,unsigned kind,
+    void (*use)(void *resource,void *context),void *context) {(void)name;(void)kind;(void)use;(void)context;return FALSE;}
 BOOL SudekiMpLanStoryClientResidencyCall(const SudekiMpControlUpdateDispatchWitness *w,
     SudekiMpLanStoryClientResidencyOperation op,void *context) {(void)w;(void)op;(void)context;return FALSE;}
 static void __cdecl switched(const char *name) {
@@ -30,6 +33,19 @@ static void __cdecl switched(const char *name) {
 }
 static void __cdecl entered(const char *name) {
     assert(SudekiMpLanStoryAreaFollowCalling());++enters;strcpy(called,name);
+}
+/* UnloadZone (0x7BB0) internals: find(world,name) and the state setter are
+ * stdcall callees there; redirected so no native zone code runs. */
+static unsigned unloads; static void *unloaded_desc; static uint8_t *find_table; static unsigned find_count;
+static void *__attribute__((stdcall)) find_stub(void *w,const char *n) {
+    (void)w;
+    for(unsigned i=0;i<find_count;++i)
+        if(!_stricmp(*(const char **)(find_table+i*0x54+0x24),n)) return find_table+i*0x54;
+    return NULL;
+}
+static void __attribute__((stdcall)) setter_stub(void *d) { ++unloads; unloaded_desc=d; }
+static void call_to(uint8_t *p,void *to) {
+    assert(p[0]==0xe8); *(int32_t *)(p+1)=(int32_t)((uintptr_t)to-(uintptr_t)p-5u);
 }
 static void jump(uint8_t *p,void *to) {
     p[0]=0xe9;*(uint32_t *)(p+1)=(uint32_t)((uintptr_t)to-(uintptr_t)p-5u);
@@ -175,6 +191,49 @@ int main(int argc,char **argv) {
     assert(SudekiMpLanStoryAreaCapture(&cap) && !cap.target[0]);
     SudekiMpLanStoryAreaNoteTemporary(NULL);
     assert(SudekiMpLanStoryAreaCapture(&cap) && !strcmp(cap.target,names[2]));
+    /* H1b helpers. UnloadResident: only a resident (2), non-current,
+     * non-pending, non-next house is unloaded; loading (1) waits (0). */
+    find_table=table; find_count=3;
+    call_to(image+0x7bbc,(void *)find_stub); call_to(image+0x7bc8,(void *)setter_stub);
+    *(void **)(world+0x394)=NULL; *(void **)(world+0x14)=NULL; *(void **)(world+0x10)=NULL;
+    *(void **)(world+0xc)=table; *(unsigned *)(table+0x34)=3;
+    *(unsigned *)(table+2*0x54+0x34)=2;
+    assert(SudekiMpLanStoryAreaUnloadResident(names[2])==1 && unloads==1 && unloaded_desc==table+2*0x54);
+    *(unsigned *)(table+2*0x54+0x34)=1;
+    assert(SudekiMpLanStoryAreaUnloadResident(names[2])==0 && unloads==1);
+    *(unsigned *)(table+2*0x54+0x34)=0;
+    assert(SudekiMpLanStoryAreaUnloadResident(names[2])==1 && unloads==1);
+    assert(SudekiMpLanStoryAreaUnloadResident(names[0])==0 && unloads==1);       /* current */
+    *(unsigned *)(table+2*0x54+0x34)=2; *(void **)(world+0x14)=table+2*0x54;
+    assert(SudekiMpLanStoryAreaUnloadResident(names[2])==0 && unloads==1);       /* pending */
+    *(void **)(world+0x14)=NULL;
+    assert(SudekiMpLanStoryAreaUnloadResident("No_Such_Zone")==-1 && unloads==1);
+    image[0x7bb2]^=1u; assert(SudekiMpLanStoryAreaUnloadResident(names[2])==-1 && unloads==1); image[0x7bb2]^=1u;
+    image[0x7bb6]^=1u; assert(SudekiMpLanStoryAreaUnloadResident(names[2])==-1 && unloads==1); image[0x7bb6]^=1u;
+    *(void **)(world+0x10)=table+2*0x54;                                          /* next current */
+    assert(SudekiMpLanStoryAreaUnloadResident(names[2])==0 && unloads==1);
+    *(void **)(world+0x10)=NULL;
+    /* BackgroundLoad: SwitchZoneNOW for an unloaded house; never while the
+     * host's own streaming target (another zone) is loading or resident. */
+    unsigned before_switches=switches;
+    *(unsigned *)(table+2*0x54+0x34)=0; *(unsigned *)(table+0x54+0x34)=2; *(void **)(world+0x394)=table+0x54;
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==-1 && switches==before_switches);
+    *(unsigned *)(table+0x54+0x34)=1;
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==-1 && switches==before_switches);
+    *(unsigned *)(table+0x54+0x34)=0;
+    *(void **)(world+0x14)=table+0x54;                                            /* load pending */
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==-1 && switches==before_switches);
+    *(void **)(world+0x14)=NULL; world[0x39b]=0;                                  /* world not armed */
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==-1 && switches==before_switches);
+    world[0x39b]=1;
+    assert(SudekiMpLanStoryAreaBackgroundLoad("No_Such_Zone")==-1 && switches==before_switches);
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==0 && switches==before_switches+1 && !strcmp(called,names[2]));
+    /* The loaded house is withheld from clients' background following. */
+    *(void **)(world+0x394)=table+2*0x54; *(unsigned *)(table+2*0x54+0x34)=1;
+    assert(SudekiMpLanStoryAreaCapture(&cap) && !cap.target[0]);
+    *(unsigned *)(table+2*0x54+0x34)=2;
+    assert(SudekiMpLanStoryAreaBackgroundLoad(names[2])==2 && switches==before_switches+1);
+    puts("story area H1b helpers: unload only resident non-current houses, background load never takes the streaming target");
     puts("story area follow exact-image guards and interior/return/outdoor call routing passed (no live loading)");
     VirtualFree(image,0,MEM_RELEASE);return 0;
 }

@@ -62,6 +62,32 @@ static void effect_renderer_ownership(void) {
     pointer(effects[0],8,base);
     assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);
     assert(out[0]==renderers[0] && out[1]==renderers[129]);
+    pointer(effects[0],8,base+0x2d3ca4u);
+    /* H1b: an NPC of the client's locally entered shop that the host does
+     * not pose keeps its native idle clock; posed or foreign NPCs do not. */
+    uint8_t npc[0x48]={0},npc_position[0xb8]={0},npc_wrapper[0x14]={0},npc_renderer[4]={0};
+    uint8_t zone[0x12a]={0},cluster[0x1c]={0},spawns[0x90]={0};
+    pointer(npc,0,base+0x2d65a0u); pointer(npc,0x44,npc_position);
+    pointer(npc_position,0,base+0x2cdefc); pointer(npc_position,0x10,npc); pointer(npc_position,0xb4,npc_wrapper);
+    pointer(npc_wrapper,0x10,npc_renderer);
+    pointer(zone,0,base+0x2cdcdcu); pointer(zone,0x118,cluster); word(cluster,0x10,1); pointer(cluster,0x18,spawns);
+    pointer(spawns,0x78,npc+0x2c);
+    void *with_npc[131]; memcpy(with_npc,entries,sizeof(entries)); with_npc[130]=npc;
+    word(owner,0x34,131); pointer(owner,0x3c,with_npc); pointer(base,0x409d8c,owner);
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2 && out[1]==npc_renderer); /* no local shop */
+    SudekiMpLanStoryWorldSetLocalZone(zone);
+    BOOL seen=client_seen; unsigned bound=client_count; client_seen=FALSE;
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* unknown: owned */
+    client_seen=TRUE; client_count=0;
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==1 && out[0]==renderers[129]); /* idles locally */
+    client_bound[0].target.entity=npc; client_count=1;
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* host-posed: owned */
+    client_bound[0].target.entity=NULL; client_count=0;
+    pointer(spawns,0x78,actor+0x2c);
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* not this shop's */
+    pointer(spawns,0x78,npc+0x2c); pointer(zone,0,base);
+    assert(SudekiMpLanStoryWorldOwnedRenderers(out,128)==2);                     /* unproved zone */
+    SudekiMpLanStoryWorldSetLocalZone(NULL); client_seen=seen; client_count=bound;
     pointer(base,0x409d8c,NULL);
 }
 static void hit_reactions(Fixture *f,Target t) {

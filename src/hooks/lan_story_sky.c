@@ -132,32 +132,66 @@ static void light_record(uint32_t kind,const uint32_t *args,unsigned n) {
         SudekiMpLogFormat("story_sky event=light kind=%lu serial=%lu args=%08lx,%08lx,%08lx,%08lx\r\n",(unsigned long)kind,
             (unsigned long)light_serial,(unsigned long)c->args[0],(unsigned long)c->args[1],(unsigned long)c->args[2],(unsigned long)c->args[3]); }
 }
+/* H1b: a house the host background-loads for a remote member runs its
+ * load script on the host, whose lighting (e.g. Kamo shop ambient 0.09,
+ * CONFIRMED_LIVE 2026-10-16) would darken the lead's exterior. While held,
+ * these calls are queued instead of applied or published. */
+enum { HELD_MAX=24, HOLD_LIMIT_MS=35000u };
+static BOOL light_hold;
+/* Capture has its own deadline (a visit's load plus its drain stay under
+ * 30 s): if the owner stops servicing, later calls pass through again. */
+static DWORD hold_since;
+static SudekiMpStoryLightCall held[HELD_MAX];
+static unsigned held_count,held_dropped;
+static BOOL hold_take(uint32_t kind,const uint32_t *args,unsigned n) {
+    if(!light_hold || replaying || GetCurrentThreadId()!=native_thread) return FALSE;
+    if(GetTickCount()-hold_since>HOLD_LIMIT_MS) {
+        light_hold=FALSE;
+        SudekiMpLogFormat("story_sky event=light_hold_expired held=%u policy=pass_through\r\n",held_count);
+        return FALSE;
+    }
+    /* Full: drop the oldest, keep the latest state (like light_ring). */
+    if(held_count==HELD_MAX) { memmove(held,held+1,(HELD_MAX-1u)*sizeof(*held)); --held_count; ++held_dropped; }
+    SudekiMpStoryLightCall *c=&held[held_count++];
+    memset(c,0,sizeof(*c)); c->kind=kind; memcpy(c->args,args,n*4u);
+    if(logs<5000u) { ++logs;
+        SudekiMpLogFormat("story_sky event=light_held kind=%lu args=%08lx,%08lx,%08lx,%08lx\r\n",(unsigned long)kind,
+            (unsigned long)args[0],(unsigned long)(n>1?args[1]:0),(unsigned long)(n>2?args[2]:0),(unsigned long)(n>3?args[3]:0)); }
+    return TRUE;
+}
 typedef void (__attribute__((thiscall)) *Ambient)(void *,float,float,float);
 typedef void (__cdecl *Group)(int,float,float,float);
 typedef void (__cdecl *One)(float);
 typedef void (__cdecl *Three)(float,float,float);
 static void __attribute__((thiscall)) ambient_hook(void *self,float r,float g,float b) {
-    if(self==scene()) { uint32_t w[3]={bits(r),bits(g),bits(b)}; light_record(SUDEKIMP_STORY_LIGHT_AMBIENT,w,3u); }
+    if(self==scene()) { uint32_t w[3]={bits(r),bits(g),bits(b)};
+        if(hold_take(SUDEKIMP_STORY_LIGHT_AMBIENT,w,3u)) return;
+        light_record(SUDEKIMP_STORY_LIGHT_AMBIENT,w,3u); }
     ((Ambient)light_hooks[0].trampoline)(self,r,g,b);
 }
 static void __cdecl group_set_hook(int group,float r,float g,float b) {
-    uint32_t w[4]={(uint32_t)group,bits(r),bits(g),bits(b)}; light_record(SUDEKIMP_STORY_LIGHT_GROUP_SET,w,4u);
+    uint32_t w[4]={(uint32_t)group,bits(r),bits(g),bits(b)}; if(hold_take(SUDEKIMP_STORY_LIGHT_GROUP_SET,w,4u)) return;
+    light_record(SUDEKIMP_STORY_LIGHT_GROUP_SET,w,4u);
     ((Group)light_hooks[1].trampoline)(group,r,g,b);
 }
 static void __cdecl group_inc_hook(int group,float r,float g,float b) {
-    uint32_t w[4]={(uint32_t)group,bits(r),bits(g),bits(b)}; light_record(SUDEKIMP_STORY_LIGHT_GROUP_INC,w,4u);
+    uint32_t w[4]={(uint32_t)group,bits(r),bits(g),bits(b)}; if(hold_take(SUDEKIMP_STORY_LIGHT_GROUP_INC,w,4u)) return;
+    light_record(SUDEKIMP_STORY_LIGHT_GROUP_INC,w,4u);
     ((Group)light_hooks[2].trampoline)(group,r,g,b);
 }
 static void __cdecl brightness_global_hook(float v) {
-    uint32_t w[1]={bits(v)}; light_record(SUDEKIMP_STORY_LIGHT_BRIGHTNESS,w,1u);
+    uint32_t w[1]={bits(v)}; if(hold_take(SUDEKIMP_STORY_LIGHT_BRIGHTNESS,w,1u)) return;
+    light_record(SUDEKIMP_STORY_LIGHT_BRIGHTNESS,w,1u);
     ((One)light_hooks[3].trampoline)(v);
 }
 static void __cdecl colour_adjust_hook(float r,float g,float b) {
-    uint32_t w[3]={bits(r),bits(g),bits(b)}; light_record(SUDEKIMP_STORY_LIGHT_COLOUR_ADJUST,w,3u);
+    uint32_t w[3]={bits(r),bits(g),bits(b)}; if(hold_take(SUDEKIMP_STORY_LIGHT_COLOUR_ADJUST,w,3u)) return;
+    light_record(SUDEKIMP_STORY_LIGHT_COLOUR_ADJUST,w,3u);
     ((Three)light_hooks[4].trampoline)(r,g,b);
 }
 static void __cdecl background_hook(float r,float g,float b) {
-    uint32_t w[3]={bits(r),bits(g),bits(b)}; light_record(SUDEKIMP_STORY_LIGHT_BACKGROUND,w,3u);
+    uint32_t w[3]={bits(r),bits(g),bits(b)}; if(hold_take(SUDEKIMP_STORY_LIGHT_BACKGROUND,w,3u)) return;
+    light_record(SUDEKIMP_STORY_LIGHT_BACKGROUND,w,3u);
     ((Three)light_hooks[5].trampoline)(r,g,b);
 }
 static const void *light_replacements[LIGHT_HOOKS]={(const void *)ambient_hook,(const void *)group_set_hook,
@@ -223,6 +257,7 @@ static void dome_use(void *resource,void *context) {
 BOOL SudekiMpLanStorySkyInstall(HMODULE image) {
     uint8_t *b=(uint8_t *)image;
     if(!b || !SudekiMpCheckLoadedExecutable(image)) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
+    light_hold=FALSE; held_count=held_dropped=0;
     for(unsigned i=0;i<SUDEKIMP_STORY_SKY_KINDS;++i)
         if(!SudekiMpInstallInlineHook(&hooks[i],b+rvas[i],entries[i],lengths[i],replacements[i])) {
             DWORD error=GetLastError();
@@ -252,6 +287,7 @@ BOOL SudekiMpLanStorySkyUninstall(void) {
     if(dome_hook.installed && !SudekiMpRestoreInlineHook(&dome_hook)) ok=FALSE;
     for(unsigned i=LIGHT_HOOKS;i--;) if(light_hooks[i].installed && !SudekiMpRestoreInlineHook(&light_hooks[i])) ok=FALSE;
     for(unsigned i=SUDEKIMP_STORY_SKY_KINDS;i--;) if(hooks[i].installed && !SudekiMpRestoreInlineHook(&hooks[i])) ok=FALSE;
+    if(ok) { light_hold=FALSE; held_count=held_dropped=0; }
     return ok;
 }
 static void fog_state_log(const char *side);
@@ -480,4 +516,30 @@ void SudekiMpLanStorySkyFollow(const SudekiMpStoryEffectState *host) {
             host->sky_dome,(unsigned long)host->sky_dome_serial,(unsigned)ok); }
     }
     fog_state_log("client");
+}
+void SudekiMpLanStorySkyHoldLighting(BOOL hold) {
+    if(hold && !light_hold) { held_count=held_dropped=0; hold_since=GetTickCount(); }
+    light_hold=hold;
+}
+void SudekiMpLanStorySkyReleaseHeld(BOOL apply) {
+    unsigned count=held_count,applied=0;
+    light_hold=FALSE; held_count=0;
+    if(apply && base) for(unsigned i=0;i<count;++i) {
+        /* Through the exports: the hooks record them for clients as usual. */
+        const SudekiMpStoryLightCall *c=&held[i]; float f[4];
+        for(unsigned a=0;a<4u;++a) f[a]=flt(c->args[a]);
+        unsigned k=c->kind-1u; void *s=scene();
+        switch(c->kind) {
+        case SUDEKIMP_STORY_LIGHT_AMBIENT: if(s) { ((Ambient)(base+light_rvas[k]))(s,f[0],f[1],f[2]); ++applied; } break;
+        case SUDEKIMP_STORY_LIGHT_GROUP_SET: case SUDEKIMP_STORY_LIGHT_GROUP_INC:
+            if(c->args[0]<64u) { ((Group)(base+light_rvas[k]))((int)c->args[0],f[1],f[2],f[3]); ++applied; } break;
+        case SUDEKIMP_STORY_LIGHT_BRIGHTNESS: ((One)(base+light_rvas[k]))(f[0]); ++applied; break;
+        case SUDEKIMP_STORY_LIGHT_COLOUR_ADJUST: case SUDEKIMP_STORY_LIGHT_BACKGROUND:
+            ((Three)(base+light_rvas[k]))(f[0],f[1],f[2]); ++applied; break;
+        default: break;
+        }
+    }
+    if(count || held_dropped) SudekiMpLogFormat("story_sky event=light_hold_released apply=%u held=%u applied=%u dropped=%u\r\n",
+        (unsigned)apply,count,applied,held_dropped);
+    held_dropped=0;
 }

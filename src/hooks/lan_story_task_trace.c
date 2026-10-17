@@ -931,7 +931,11 @@ static BOOL interior_world(SudekiMpLanStoryInteriorTravel *v,uint32_t destinatio
         uint8_t *d=table+n*0x54u; char name[48]; uint32_t hash;
         if(*(void **)d!=image_base+0x2c82a4 || !interior_name(*(const char **)(d+0x24),name,&hash)) return FALSE;
         if(hash!=destination) continue;
-        if(target || d==current || *(unsigned *)(d+0x34)!=0u) return FALSE;
+        /* Unloaded (0), or background-resident for a co-op shop visit (2):
+         * the host control proof then also requires that visit's exact
+         * lead-entry contract (lan_story_host_control.c). Loading, current
+         * and unloading destinations stay refused. */
+        if(target || d==current || (*(unsigned *)(d+0x34)!=0u && *(unsigned *)(d+0x34)!=2u)) return FALSE;
         target=d; memcpy(target_name,name,sizeof(target_name));
     }
     if(!target) return FALSE;
