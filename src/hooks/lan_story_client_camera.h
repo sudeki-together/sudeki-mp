@@ -45,4 +45,14 @@ BOOL SudekiMpLanStoryClientCameraHouseRelease(const SudekiMpLanArenaOwnerViewLea
 /* FALSE retains hook dependencies; runtime must keep the module and retry
  * before destroying the camera lease or unloading the DLL. */
 BOOL SudekiMpLanStoryClientCameraUninstall(void);
+/* H1b Kamo talk: the native speech camera. Observe is read-only: DEFAULT
+ * (the client's own camera is selected and rendered), SPEECH (CSpeech's
+ * "SpeechCamera" is), or UNKNOWN (anything else, or its guards failed).
+ * Ready: DEFAULT and the speech camera's routines are exact. Return
+ * (native thread): select "default" again as the shopkeeper's script does;
+ * TRUE once DEFAULT. Uninstall refuses while SPEECH. */
+enum { SUDEKIMP_SPEECH_CAMERA_UNKNOWN=0, SUDEKIMP_SPEECH_CAMERA_DEFAULT=1, SUDEKIMP_SPEECH_CAMERA_SPEECH=2 };
+int SudekiMpLanStoryClientCameraSpeechObserve(void);
+BOOL SudekiMpLanStoryClientCameraSpeechReady(void);
+BOOL SudekiMpLanStoryClientCameraSpeechReturn(void);
 #endif

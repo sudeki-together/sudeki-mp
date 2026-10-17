@@ -11,6 +11,7 @@
 #include "hooks/lan_story_character_audio.h"
 #include "hooks/lan_story_zone_banner.h"
 #include "hooks/lan_story_shop.h"
+#include "hooks/lan_story_npc_gesture.h"
 #include "hooks/lan_story_combo_hud.h"
 #include "cleanroom/engine.h"
 #include "engine/spirit_instance_abi.h"
@@ -715,13 +716,24 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
          * view; any refusal falls back to the mathematical presentation. */
         BOOL native_view=FALSE;
         static BOOL override_was_active,reseat_pending;
-        BOOL override_now=(cast_view && cast_view->valid) || presented_cast_view.kind || SudekiMpLanStoryLocalControlCastActive();
+        /* H1b Kamo talk: this player's own conversation has the native speech
+         * camera selected; the client camera gives way (no tick, no cast
+         * write) until the conversation selects "default" again. */
+        int speech_camera=client_camera_attempted?SudekiMpLanStoryClientCameraSpeechObserve():SUDEKIMP_SPEECH_CAMERA_UNKNOWN;
+        BOOL speech_yield=shop_attempted && SudekiMpLanStoryShopSpeechCameraHeld() &&
+            speech_camera==SUDEKIMP_SPEECH_CAMERA_SPEECH;
+        if(speech_camera==SUDEKIMP_SPEECH_CAMERA_SPEECH && !speech_yield) {
+            static unsigned unowned_logs;
+            if(unowned_logs<4u) { ++unowned_logs; SudekiMpLogWrite("story_client_camera event=speech_unowned policy=not_yielded\r\n"); }
+        }
+        BOOL override_now=(cast_view && cast_view->valid) || presented_cast_view.kind || SudekiMpLanStoryLocalControlCastActive() ||
+            speech_yield;
         if(override_was_active && !override_now) reseat_pending=TRUE;
         if(SudekiMpLanStoryRemoteInteriorClientTakeReseat()) reseat_pending=TRUE;
         override_was_active=override_now;
         if(client_camera_attempted && !override_now) {
             SudekiMpLanArenaOwnerViewLease owner; float look_x=0,look_y=0;
-            if(reseat_pending && SudekiMpLanStoryLocalControlViewOwner(&owner)) {
+            if(reseat_pending && speech_camera!=SUDEKIMP_SPEECH_CAMERA_SPEECH && SudekiMpLanStoryLocalControlViewOwner(&owner)) {
                 /* H1b: settled in a house with an authored static camera, use
                  * it (as its cluster script does natively); back out, the
                  * vanilla exit's Exploration; else the ordinary reseat. */
@@ -735,6 +747,7 @@ static BOOL apply_presented_frame(const SudekiMpLanStoryNativeRoster *roster,
             (void)SudekiMpLanStoryInputLookAxes(&look_x,&look_y);
             native_view=present_native_camera(roster,GetTickCount(),look_x,look_y);
         }
+        if(speech_yield) native_view=TRUE;
         if(!native_view && !SudekiMpLanStoryLocalControlPresentCast(roster,replica_exact,NULL,yaw,pitch,cast_view)) {
             present_refusal("local_control",GetLastError()); return FALSE; }
         if(cast_view==&camera.view) presented_cast_view=camera;
@@ -1075,7 +1088,11 @@ static BOOL retire_client(void) {
         (void)SudekiMpLanStoryClientPresent(drain_shop,&step);
         /* Teardown with the presentation scope lost: the lease still ends
          * through its own witnessed close steps (never left half open). */
-        if(!step.ran) step.idle=SudekiMpLanStoryShopDrain(GetTickCount());
+        if(!step.ran) {
+            /* Unscoped: the gesture driver makes no native call here. */
+            SudekiMpLanStoryNpcGestureDrain("unscoped");
+            step.idle=SudekiMpLanStoryShopDrain(GetTickCount());
+        }
         if(!step.idle) return FALSE;
     }
     if(!reset_story_vfx(NULL)) return FALSE;
@@ -2442,7 +2459,7 @@ static BOOL client_revision_gap_camera(const SudekiMpLanStoryNativeRoster *roste
     SudekiMpLanArenaOwnerViewLease owner;
     uint32_t now=GetTickCount();
     if(!client_camera_attempted || !runtime_thread || runtime_thread!=GetCurrentThreadId() ||
-        host_cinematic_view || presented_cast_view.kind ||
+        host_cinematic_view || presented_cast_view.kind || (shop_attempted && SudekiMpLanStoryShopSpeechCameraHeld()) ||
         SudekiMpLanStoryLocalControlCastActive() || SudekiMpLanStoryMenuCapturesInput() ||
         SudekiMpLanStoryQuickMenuCapturesInput() || main_menu_open() ||
         SudekiMpLanStoryWorldRecruiting() || SudekiMpLanStoryClientRecruiting() ||
@@ -2657,6 +2674,11 @@ static void service_client_control(void *controller,const SudekiMpControlUpdateD
             }
             if(weak) SudekiMpLanStoryInputConsumeWeak();
             buttons=0;
+        }
+        /* H1b: during this game's own Kamo conversation the interact press
+         * is the conversation's (e.g. it closes the farewell). */
+        if(shop_open() && ((buttons&3u)==1u || (buttons&3u)==3u)) {
+            SudekiMpLanStoryShopInteractPress(); SudekiMpLanStoryInputConsumeWeak(); buttons&=~3u;
         }
         /* H1b: with the shopkeeper's talk prompt shown, the interact (weak)
          * press is this game's own, never a swing on the host. */

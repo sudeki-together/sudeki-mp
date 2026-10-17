@@ -161,7 +161,67 @@ static void continuity_preflight(uint8_t *image) {
     readiness_unchanged(&f,FALSE,TRUE);
     puts("PASS CameraTargetPreflightBeforeWrites: all four party targets, direct/offset chains; broken reference, native virtual, actor/position, protected page and foreign thread refuse before input or refresh");
 }
+
+/* H1b speech camera: SetRenderCamera stand-in behind a patched jump. */
+static uint8_t *speech_manager,*speech_render_obj,*speech_cams[2];
+static unsigned set_render_calls;
+static uint8_t __attribute__((thiscall)) stub_set_render(void *manager,const char *name) {
+    assert(manager==speech_manager && name && !strcmp(name,"default")); ++set_render_calls;
+    *(void **)(speech_manager+0x20)=speech_cams[0]; *(void **)(speech_render_obj+0x7c)=*(void **)(speech_cams[0]+0x34);
+    return 1;
+}
+static void speech_camera(uint8_t *image) {
+    const struct {unsigned rva,count;} guards[]={{0x36fb0u,32u},{0x370d8u,21u},{0x370fau,3u},{0x15ac0u,27u},
+        {0x15ffau,5u},{0x16007u,5u},{0x2c5690u,13u},{0x36e83u,3u}};
+    static uint8_t cams[2][0x110],renders[2][0xe0],manager[0x60],scene[0x44],render_obj[0x80];
+    for(unsigned i=0;i<2;++i) {
+        *(void **)cams[i]=image+0x2cce5cu; *(void **)(cams[i]+8)=image+0x2cce6cu; *(void **)(cams[i]+0x34)=renders[i];
+        *(void **)renders[i]=image+0x2dd638u; speech_cams[i]=cams[i];
+    }
+    strcpy((char *)(cams[0]+0x4c),"default"); strcpy((char *)(cams[1]+0x4c),"SpeechCamera");
+    *(void **)manager=image+0x2c7b80u; *(void **)(manager+0x24)=cams[0]; *(void **)(manager+0x28)=cams[1];
+    *(void **)(scene+0x40)=render_obj; speech_manager=manager; speech_render_obj=render_obj;
+    *(void **)(image+0x409d7cu)=manager; *(void **)(image+0x408d58u)=scene;
+    *(void **)(manager+0x20)=cams[0]; *(void **)(render_obj+0x7c)=renders[0];
+    assert(SudekiMpLanStoryClientCameraInstall((HMODULE)image));
+    assert(SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_DEFAULT && SudekiMpLanStoryClientCameraSpeechReady());
+    assert(SudekiMpLanStoryClientCameraUninstall());
+    for(unsigned i=0;i<sizeof(guards)/sizeof(*guards);++i) for(unsigned j=0;j<guards[i].count;++j) {
+        image[guards[i].rva+j]^=1u;
+        assert(SudekiMpLanStoryClientCameraInstall((HMODULE)image));          /* the module itself still installs */
+        assert(!SudekiMpLanStoryClientCameraSpeechReady() &&
+            SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_UNKNOWN);
+        assert(SudekiMpLanStoryClientCameraUninstall());
+        image[guards[i].rva+j]^=1u;
+    }
+    assert(SudekiMpLanStoryClientCameraInstall((HMODULE)image));
+    /* SPEECH: both the manager and the renderer slot name the speech camera. */
+    *(void **)(manager+0x20)=cams[1]; *(void **)(render_obj+0x7c)=renders[1];
+    assert(SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_SPEECH && !SudekiMpLanStoryClientCameraSpeechReady());
+    assert(!SudekiMpLanStoryClientCameraUninstall());                          /* refused while selected */
+    *(void **)(render_obj+0x7c)=renders[0]; assert(SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_UNKNOWN);
+    *(void **)(render_obj+0x7c)=renders[1];
+    *(void **)(cams[1]+0x3c)=cams[0]; assert(SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_UNKNOWN);
+    *(void **)(cams[1]+0x3c)=NULL;
+    *(void **)(manager+0x2c)=cams[1]; assert(SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_UNKNOWN); /* duplicate */
+    *(void **)(manager+0x2c)=NULL;
+    /* Return: one SetRenderCamera("default"), then DEFAULT. */
+    uint8_t saved[5]; memcpy(saved,image+0x36fb0u,5); DWORD old_protect;
+    /* The mapped image is not executable; only the patched entry runs, for this call. */
+    assert(VirtualProtect(image+0x36fb0u,5,PAGE_EXECUTE_READWRITE,&old_protect));
+    image[0x36fb0u]=0xe9; int32_t rel=(int32_t)((uint8_t *)(uintptr_t)stub_set_render-(image+0x36fb0u+5)); memcpy(image+0x36fb1u,&rel,4);
+    assert(FlushInstructionCache(GetCurrentProcess(),image+0x36fb0u,5));
+    assert(SudekiMpLanStoryClientCameraSpeechReturn() && set_render_calls==1 &&
+        SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_DEFAULT);
+    assert(SudekiMpLanStoryClientCameraSpeechReturn() && set_render_calls==1);      /* already back: no call */
+    memcpy(image+0x36fb0u,saved,5); assert(FlushInstructionCache(GetCurrentProcess(),image+0x36fb0u,5));
+    assert(VirtualProtect(image+0x36fb0u,5,old_protect,&old_protect));
+    assert(SudekiMpLanStoryClientCameraUninstall());
+    *(void **)(image+0x409d7cu)=NULL; *(void **)(image+0x408d58u)=NULL;
+    puts("PASS SpeechCamera guards, observe (default/speech/unknown), uninstall refusal, single return call");
+}
 int main(int argc,char **argv) {
+    setvbuf(stdout,NULL,_IONBF,0);
     assert(argc==2);wchar_t path[1024];
     assert(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,argv[1],-1,path,1024));
     uint8_t *image=map_image(path);
@@ -204,6 +264,7 @@ int main(int argc,char **argv) {
     puts("story client camera house static: refusals before any native call");
     assert(SudekiMpLanStoryClientCameraUninstall());
     continuity_preflight(image);
+    speech_camera(image);
     puts("story client camera exact-image guards and lease refusals passed (no native tick)");
     VirtualFree(image,0,MEM_RELEASE);return 0;
 }

@@ -22,4 +22,7 @@ BOOL SudekiMpLanStoryAmbientUninstall(void);
 /* Runtime, client presentation path only: TRUE renews the activity lease
  * (expires after 500 ms without renewal); FALSE retires it at once. */
 void SudekiMpLanStoryAmbientSetActive(BOOL active);
+/* The current frame's bounded local delta (seconds) while the lease is
+ * live; FALSE otherwise. Client game thread. */
+BOOL SudekiMpLanStoryAmbientFrameDelta(float *dt);
 #endif

@@ -20,6 +20,15 @@ BOOL SudekiMpLanStoryZoneBannerExamine(const char *zone,uint16_t text,unsigned m
 }
 BOOL SudekiMpLanStoryZoneBannerExamineActive(void) {return examine_active;}
 BOOL SudekiMpLanStoryCinematicAudioRetains(void) {return FALSE;}
+static BOOL gesture_on,gesture_stall,gesture_end_done=TRUE; static unsigned gesture_ticks,gesture_drains,gesture_ends;
+BOOL SudekiMpLanStoryNpcGestureInstall(HMODULE image) {(void)image;return TRUE;}
+BOOL SudekiMpLanStoryNpcGestureUninstall(void) {return TRUE;}
+BOOL SudekiMpLanStoryNpcGestureBegin(const void *npc,uint32_t now) {(void)now;assert(npc);return gesture_on;}
+BOOL SudekiMpLanStoryNpcGestureReady(void) {return gesture_on;}
+void SudekiMpLanStoryNpcGestureTick(uint32_t now) {(void)now;++gesture_ticks;}
+BOOL SudekiMpLanStoryNpcGestureStalled(const void *speech,uint32_t now) {(void)speech;(void)now;BOOL s=gesture_stall;gesture_stall=FALSE;return s;}
+BOOL SudekiMpLanStoryNpcGestureEnd(uint32_t now) {(void)now;++gesture_ends;return gesture_end_done;}
+void SudekiMpLanStoryNpcGestureDrain(const char *why) {(void)why;++gesture_drains;}
 static const void *kamo; static float kamo_at[3],tal_at[3];
 static uint8_t gramophone[4]; static float gramophone_at[3]={-3.24361f,0.0f,-3.1753f};
 const void *SudekiMpLanStoryRemoteInteriorEntityNamed(const char *name,const void *cached,DWORD *scan,uint32_t now) {
@@ -79,21 +88,30 @@ static void num(void *at,uint32_t value) {memcpy(at,&value,4);}
  * the routines the lease calls (after the guard checks on the real bytes). */
 static uint8_t *m_cs,*m_ui,*m_hud,*m_shop,*m_scene,*m_group;
 static char calls[2048];
-static int asked_id,asked_animate=-1,asked_show=-1,line_id,line_b1=-1,line_b3=-1; static void *asked_speaker,*asked_listener;
+static int asked_id,asked_animate=-1,asked_show=-1,line_id,line_b1=-1,line_b3=-1; static void *asked_speaker,*asked_listener,*line_listener;
 static unsigned starts,shop_backs;
 static uint16_t m_text[]={'H','i',0};
 static void note(const char *what) { if(strlen(calls)+strlen(what)+2<sizeof(calls)) { strcat(calls,what); strcat(calls,","); } }
 static uint32_t rd(const uint8_t *p) { uint32_t v; memcpy(&v,p,4); return v; }
+static BOOL speech_ready_stub,speech_return_ok=TRUE,turn_local; static unsigned speech_returns,turn_calls;
+BOOL SudekiMpLanStoryClientCameraSpeechReady(void) { return speech_ready_stub; }
+BOOL SudekiMpLanStoryClientCameraSpeechReturn(void) { ++speech_returns; note("speech_return"); return speech_return_ok; }
+BOOL SudekiMpLanStoryWorldLocalTurn(const void *e,const float target[3],float radians,BOOL *done) {
+    (void)target; assert(e && radians>=0 && radians<=0.32f); ++turn_calls; note("turn");
+    if(!turn_local) return FALSE;
+    *done=turn_calls>=3u; return TRUE;
+}
 static void set_focus(void *layer) { memcpy(m_scene+0x170,&layer,4); }
 static uint8_t __attribute__((thiscall)) stub_ask(void *cs,void *spk,void *lst,int id,uint8_t u,uint8_t animate,uint8_t choice,uint8_t show) {
     (void)u;(void)choice; assert(cs==m_cs); note("ask"); asked_id=id; asked_animate=animate; asked_show=show;
-    asked_speaker=spk?*(void **)spk:NULL; asked_listener=lst;
+    asked_speaker=spk?*(void **)spk:NULL; asked_listener=lst?*(void **)lst:NULL;
     num(m_cs+0xc8,0); void *t=m_text; memcpy(m_cs+0xd8,&t,4); memcpy(m_cs+0xdc,&t,4); memcpy(m_cs+0xe0,&t,4);
     float d=1.0f; memcpy(m_cs+0xd0,&d,4); m_cs[0x47a]=1; m_ui[0x6b8]|=0x20; num(m_ui+0x6a4,0);
     return 1;
 }
 static uint8_t __attribute__((thiscall)) stub_line(void *cs,void *spk,void *lst,int id,uint8_t b1,uint8_t b2,uint8_t b3,uint8_t b4) {
-    (void)spk;(void)lst;(void)b2;(void)b4; assert(cs==m_cs); note("say"); line_id=id; line_b1=b1; line_b3=b3;
+    (void)spk;(void)b2;(void)b4; assert(cs==m_cs); note("say"); line_id=id; line_b1=b1; line_b3=b3;
+    line_listener=lst?*(void **)lst:NULL;
     num(m_cs+0xc8,b1==0); void *t=m_text; memcpy(m_cs+0xd8,&t,4); float d=1.0f; memcpy(m_cs+0xd0,&d,4);
     return 1;
 }
@@ -209,13 +227,14 @@ static void talk_tests(uint8_t *image,DWORD T) {
     talk_reset_model(image);
     step(&t,1); assert(SudekiMpLanStoryShopPromptShown() && icon_bits==2);
     SudekiMpLanStoryShopRequestOpen(); assert(phase==T_REQUESTED && exit_held && SudekiMpLanStoryShopActive());
-    assert(step(&t,1)==T_OPENING && !strcmp(calls,"cam0,gel1,clear,start,igm,") && !icon_bits);
+    assert(step(&t,1)==T_FACE && !strcmp(calls,"cam0,gel1,clear,start,") && !icon_bits);
+    assert(step(&t,1)==T_OPENING && !strcmp(calls,"cam0,gel1,clear,start,turn,igm,"));   /* not local: no turn */
     assert(step(&t,1)==T_ASK);
     assert(step(&t,1)==T_QUESTION && asked_id==2837 && asked_animate==0 && asked_show==1 && asked_speaker==kamo && !asked_listener);
     assert(step(&t,1)==T_ANSWER && step(&t,3)==T_ANSWER);              /* the player is choosing */
     choose(2); assert(step(&t,1)==T_SETTLE);
-    assert(step(&t,1)==T_SAY && step(&t,1)==T_SAY && line_id==2024 && line_b1==0 && line_b3==0);
-    assert(step(&t,1)==T_ASK && step(&t,1)==T_QUESTION && asked_id==2838);
+    assert(step(&t,1)==T_SAY && step(&t,1)==T_SAY && line_id==2024 && line_b1==0 && line_b3==0 && line_listener==tal_at);
+    assert(step(&t,1)==T_ASK && step(&t,1)==T_QUESTION && asked_id==2838 && asked_listener==tal_at);   /* vanilla T1b */
     assert(step(&t,1)==T_ANSWER); choose(1); assert(step(&t,1)==T_SETTLE);
     assert(step(&t,1)==OPENING && talk.shop); assert(step(&t,1)==OPEN);
     shop_back_native(); assert(step(&t,1)==T_REDIALOG && !talk.shop);
@@ -223,7 +242,8 @@ static void talk_tests(uint8_t *image,DWORD T) {
     assert(step(&t,1)==T_ASK && step(&t,1)==T_QUESTION && asked_id==2838);
     assert(step(&t,1)==T_ANSWER); choose(3); assert(step(&t,1)==T_SETTLE);
     assert(step(&t,1)==T_SAY && step(&t,1)==T_SAY && line_id==2025);
-    assert(step(&t,1)==T_END);
+    assert(step(&t,1)==T_FAREWELL && step(&t,3)==T_FAREWELL);              /* held until the press */
+    SudekiMpLanStoryShopInteractPress(); assert(step(&t,1)==T_END);
     assert(step(&t,2)==T_END_HUD && rd(m_hud+HUD_STATE)==1);   /* EndConversation, then the box closes */
     assert(step(&t,1)==IDLE && !m_cs[0x47d] && m_cs[0x475]==1 && !exit_held && !talk.gel_set && !talk.cam_set);
     assert(strstr(calls,"shop_start,") && strstr(calls,"shop_clear,") && strstr(calls,"end,menus,") && strstr(calls,"gel0,cam1,"));
@@ -231,28 +251,29 @@ static void talk_tests(uint8_t *image,DWORD T) {
     puts("Kamo talk: greeting, chat, shop, re-ask and farewell in the vanilla order, all restored: PASS");
     /* 2. A close while the choice menu is up answers it (ignored) and ends: no line plays. */
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,3); assert(step(&t,1)==T_ANSWER && rd(m_ui+0x4c)==3);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(step(&t,1)==T_ANSWER && rd(m_ui+0x4c)==3);
     SudekiMpLanStoryShopRequestClose("interior_exit"); line_id=0;
     assert(step(&t,1)==T_END); assert(step(&t,1)==T_END && strstr(calls,"confirm,"));
     unsigned p=step(&t,4); assert(p==IDLE && !line_id && !m_cs[0x47d] && m_cs[0x475]==1 && !rd(m_ui+0x4c));
     puts("Kamo talk: close on the open question answers it, ends and restores without a line: PASS");
     /* 3. A close while Tal's shop is open: back command, then the end. */
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(phase==T_ANSWER); choose(1); step(&t,2); assert(step(&t,1)==OPEN);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER); choose(1); step(&t,2); assert(step(&t,1)==OPEN);
     shop_backs=0; SudekiMpLanStoryShopRequestClose("interior_exit"); assert(shop_backs==1 && talk.close);
     shop_back_native(); assert(step(&t,1)==T_END); p=step(&t,4);
     assert(p==IDLE && !m_cs[0x47d] && rd(m_hud+HUD_STATE)==1);
     puts("Kamo talk: close during the shop leaves it by its back command and ends: PASS");
     /* 4. Teardown drain during a line stops it and ends; Drain is TRUE only at IDLE. */
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(phase==T_ANSWER); choose(2); step(&t,3); assert(phase==T_SAY && rd(m_cs+0xc8)==1);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER); choose(2); step(&t,3); assert(phase==T_SAY && rd(m_cs+0xc8)==1);
     unsigned drains=0; while(!SudekiMpLanStoryShopDrain(t++)) { native_tick(); assert(++drains<20); }
     assert(phase==IDLE && strstr(calls,"stop,") && !m_cs[0x47d]);
     puts("Kamo talk: teardown drain stops the line, ends the conversation and restores: PASS");
     /* 5. Story block 2000+: T2 (2839), Shop or Goodbye only. */
     talk_reset_model(image); num(image+0x3c2fec,2000); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(phase==T_ANSWER && asked_id==2839);
-    choose(2); step(&t,3); assert(phase==T_SAY && line_id==2025); p=step(&t,5); assert(p==IDLE);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER && asked_id==2839);
+    choose(2); step(&t,3); assert(phase==T_SAY && line_id==2025); assert(step(&t,1)==T_FAREWELL);
+    SudekiMpLanStoryShopInteractPress(); p=step(&t,5); assert(p==IDLE);
     num(image+0x3c2fec,1400);
     puts("Kamo talk: story block 2000 asks 2839 and its second choice is the farewell: PASS");
     /* 6. Refusals before any native call: missing sentence, busy speech, wrong shopkeeper class. */
@@ -270,7 +291,7 @@ static void talk_tests(uint8_t *image,DWORD T) {
     }
     /* 7. An unserviced lease follows the conversation witness; uninstall waits for the restore. */
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(phase==T_ANSWER);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER);
     last_service_at=GetTickCount()-5000u; assert(SudekiMpLanStoryShopActive());            /* menu up */
     assert(!SudekiMpLanStoryShopUninstall());
     while(!SudekiMpLanStoryShopDrain(t++)) native_tick();
@@ -280,7 +301,7 @@ static void talk_tests(uint8_t *image,DWORD T) {
      * unserviced still holds the gates (the conversation is still set). */
     talk_ready=TRUE; installed=TRUE;
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); assert(phase==T_ANSWER); choose(1); step(&t,2); assert(step(&t,1)==OPEN && talk.shop);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER); choose(1); step(&t,2); assert(step(&t,1)==OPEN && talk.shop);
     shop_back_native(); last_service_at=GetTickCount()-5000u;
     assert(shop_witness()==W_CLOSED && SudekiMpLanStoryShopActive());
     while(!SudekiMpLanStoryShopDrain(t++)) native_tick();
@@ -289,7 +310,7 @@ static void talk_tests(uint8_t *image,DWORD T) {
     /* 9. Back in game (1,1) while the conversation's shop open is pending:
      * the conversation ends and restores (never the plain-shop close). */
     talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
-    SudekiMpLanStoryShopRequestOpen(); step(&t,4); choose(1); shop_start_pending=TRUE; step(&t,2);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); choose(1); shop_start_pending=TRUE; step(&t,2);
     assert(phase==OPENING && talk.shop && rd(m_hud+HUD_STATE)==0);
     num(m_hud+HUD_STATE,1); num(m_hud+HUD_REQUEST,1); set_focus(m_hud); shop_start_pending=FALSE;
     assert(step(&t,1)==T_END && !talk.shop);
@@ -301,6 +322,56 @@ static void talk_tests(uint8_t *image,DWORD T) {
     last_service_at=GetTickCount()-1000u; SudekiMpLanStoryShopRequestOpen(); assert(phase==IDLE && SudekiMpLanStoryShopIdle());
     talk_ready=FALSE;
     puts("Kamo talk: a press with the lease unserviced is refused: PASS");
+    /* 11. The native speech camera (owner 2026-10-17): left on for the lines,
+     * then aiming stops and "default" is selected again before the restore;
+     * the lease holds until that return succeeds. */
+    talk_ready=TRUE; speech_ready_stub=TRUE; speech_return_ok=FALSE; speech_returns=0;
+    talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
+    SudekiMpLanStoryShopRequestOpen(); assert(step(&t,1)==T_FACE && !strcmp(calls,"gel1,clear,start,") && m_cs[0x475]==1);
+    assert(SudekiMpLanStoryShopSpeechCameraHeld());
+    step(&t,4); assert(phase==T_ANSWER); choose(3); step(&t,3); assert(phase==T_SAY && line_id==2025);
+    assert(step(&t,2)==T_FAREWELL && !speech_returns && SudekiMpLanStoryShopSpeechCameraHeld());   /* camera kept */
+    m_cs[0x47b]=1;                                 /* the dialog's own confirm (0x4A4590), as on the host */
+    assert(step(&t,1)==T_END && !speech_returns && !m_cs[0x475]);                       /* aiming stopped */
+    p=step(&t,6); assert(p==T_END_HUD && speech_returns && SudekiMpLanStoryShopSpeechCameraHeld());
+    { const char *cam0=strstr(calls,"cam0,"),*menus=strstr(calls,"menus,"),*back=strstr(calls,"speech_return,");
+      assert(cam0 && menus && back && cam0<menus && menus<back); }         /* back after the box closed */
+    assert(!SudekiMpLanStoryShopUninstall());
+    speech_return_ok=TRUE; p=step(&t,2); assert(p==IDLE && m_cs[0x475]==1 && !m_cs[0x47d] && !SudekiMpLanStoryShopSpeechCameraHeld());
+    speech_ready_stub=FALSE;
+    puts("Kamo talk: speech camera kept for the lines and the farewell, returned before the restore, lease held until returned: PASS");
+    /* 13. A close while the farewell waits ends it without the press. */
+    talk_ready=TRUE;
+    talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER); choose(3); step(&t,4); assert(phase==T_FAREWELL);
+    SudekiMpLanStoryShopInteractPress(); talk.pressed=FALSE;                 /* (a press outside the wait is ignored below) */
+    SudekiMpLanStoryShopRequestClose("interior_exit"); p=step(&t,5); assert(p==IDLE && !m_cs[0x47d]);
+    phase=T_ANSWER; SudekiMpLanStoryShopInteractPress(); assert(!talk.pressed); phase=IDLE;
+    puts("Kamo talk: the farewell waits for the press; a close ends it; presses elsewhere are ignored: PASS");
+    /* 12. Kamo turns to the player before the dialog shows (vanilla), and
+     * the dialog still opens when the turn cannot finish (1 s bound). */
+    turn_local=TRUE; turn_calls=0;
+    talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,1);
+    assert(step(&t,1)==T_FACE && step(&t,1)==T_FACE && step(&t,1)==T_OPENING && turn_calls==3);
+    while(!SudekiMpLanStoryShopDrain(t++)) native_tick();
+    turn_calls=0; turn_local=FALSE; talk_ready=FALSE;
+    puts("Kamo talk: the shopkeeper turns to the player before the dialog opens: PASS");
+    /* 14. Gestures on (KamoGestures): every shopkeeper line animated as
+     * natively, the driver ticked each step, a stalled lock stops the line
+     * and animates no more, and the restore waits for the driver's end. */
+    talk_ready=TRUE; gesture_on=TRUE; gesture_end_done=FALSE; gesture_ticks=gesture_ends=0;
+    talk_reset_model(image); talk_armed=TRUE; tal_at[2]=-0.5f; step(&t,1); tal_at[2]=-2.0f; step(&t,1);
+    SudekiMpLanStoryShopRequestOpen(); step(&t,5); assert(phase==T_ANSWER && asked_animate==1 && gesture_ticks>=5);
+    choose(2); step(&t,3); assert(phase==T_SAY && line_id==2024 && line_b3==1);
+    gesture_stall=TRUE; calls[0]=0; step(&t,1); assert(strstr(calls,"stop,") && phase==T_ASK);   /* stalled: line stopped */
+    step(&t,1); assert(phase==T_QUESTION && asked_id==2838 && asked_animate==0);          /* no further animation */
+    step(&t,1); assert(phase==T_ANSWER); choose(3); step(&t,3); assert(phase==T_SAY && line_b3==0);
+    step(&t,1); assert(phase==T_FAREWELL); SudekiMpLanStoryShopInteractPress();
+    p=step(&t,6); assert(p==T_END_HUD && gesture_ends);                                  /* held for the driver */
+    gesture_end_done=TRUE; p=step(&t,2); assert(p==IDLE);
+    gesture_on=FALSE; talk_ready=FALSE;
+    puts("Kamo talk: gestures animate the lines, a stalled lock stops the line, the end waits for the driver: PASS");
     free(m_cs); free(m_ui); free(m_hud); free(m_shop); free(m_scene); free(m_group);
 }
 int main(int argc,char **argv) {

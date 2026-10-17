@@ -3,6 +3,7 @@
 #include "hooks/call_hook.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
+#include <math.h>
 #include <string.h>
 #if !defined(__GNUC__) || !defined(__i386__)
 #error "Ambient animation requires the supported x86 ABI"
@@ -44,6 +45,17 @@ static BOOL readable_code(const void *p,size_t n) {
         a+n>(uintptr_t)m.BaseAddress+m.RegionSize) return FALSE;
     DWORD access=m.Protect&0xffu;
     return access==PAGE_EXECUTE_READ || access==PAGE_EXECUTE_READWRITE || access==PAGE_EXECUTE_WRITECOPY;
+}
+/* The bounded local delta of the current native frame, while the client's
+ * presentation lease is live (H1b: an NPC animation component the client
+ * runs uses the same clock as its renderer). */
+BOOL SudekiMpLanStoryAmbientFrameDelta(float *dt) {
+    if(!dt || !base) return FALSE;
+    *dt=0.0f;
+    DWORD now=GetTickCount();
+    if(!InterlockedCompareExchange(&active,0,0) || now-active_tick>LEASE_MS || !frame_valid) return FALSE;
+    memcpy(dt,&frame_dt_bits,sizeof(*dt));
+    return isfinite(*dt);
 }
 void SudekiMpLanStoryAmbientSetActive(BOOL on) {
     if(on) { active_thread=GetCurrentThreadId(); active_tick=GetTickCount(); InterlockedExchange(&active,1); }

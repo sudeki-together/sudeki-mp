@@ -229,6 +229,58 @@ static BOOL local_idle_npc(const uint8_t *e) {
     for(unsigned i=0;i<client_count;++i) if(client_bound[i].target.entity==e) return FALSE;
     return zone_spawned(local_zone,e);
 }
+static void set_forward(void *position,const float *direction);
+/* H1b: a client-only NPC of this client's own shop visit (in the registry,
+ * never posed by a host frame), on this adapter's thread with no apply
+ * active. Read-only. */
+BOOL SudekiMpLanStoryWorldLocalIdleNpc(const void *entity) {
+    if(!base || active || !client_seen || !entity || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        !readable(base+0x409d8cu,4u)) return FALSE;
+    const uint8_t *owner=*(const uint8_t *const *)(base+0x409d8cu);
+    if(!readable(owner,0x40u) || !readable(entity,0x48u)) return FALSE;
+    unsigned count=*(const uint32_t *)(owner+0x34u);
+    void *const *entries=*(void *const *const *)(owner+0x3cu);
+    if(!count || count>MAX_REGISTRY || !readable(entries,count*sizeof(void *))) return FALSE;
+    for(unsigned i=0;i<count;++i) if(entries[i]==entity) return local_idle_npc(entity);
+    return FALSE;
+}
+/* H1b Kamo talk (owner 2026-10-17): turn a client-only NPC (spawned by this
+ * client's own shop visit, matched to no host frame) toward `target` by at
+ * most `max_radians` about the vertical axis, as his talk script's
+ * AiSetTargetDirection does natively (the paused client runs no AI). The
+ * same native basis write the world apply uses (5114D0), on this adapter's
+ * thread with no apply active; facing only, no position or collision. */
+BOOL SudekiMpLanStoryWorldLocalTurn(const void *entity,const float target[3],float max_radians,BOOL *done) {
+    if(done) *done=FALSE;
+    if(!base || active || !client_seen || !entity || !target || !done || !isfinite(max_radians) || max_radians<0 ||
+        (native_thread && native_thread!=GetCurrentThreadId()) || !readable(base+0x409d8cu,4u)) return FALSE;
+    const uint8_t *e=entity,*owner=*(const uint8_t *const *)(base+0x409d8cu);
+    if(!readable(owner,0x40u) || !readable(e,0x48u)) return FALSE;
+    unsigned count=*(const uint32_t *)(owner+0x34u); BOOL member=FALSE;
+    void *const *entries=*(void *const *const *)(owner+0x3cu);
+    if(!count || count>MAX_REGISTRY || !readable(entries,count*sizeof(void *))) return FALSE;
+    for(unsigned i=0;i<count && !member;++i) member=entries[i]==entity;
+    if(!member || !local_idle_npc(e)) return FALSE;
+    uint8_t *position=*(uint8_t *const *)(e+0x44u);
+    if(!writable(position,0xbcu) || *(void **)position!=base+0x2cdefcu || *(const void *const *)(position+0x10u)!=entity ||
+        !world_set_forward) return FALSE;
+    float *at=(float *)(position+0x18u),*fwd=(float *)(position+0x50u);
+    float dx=target[0]-at[0],dz=target[2]-at[2],d=sqrtf(dx*dx+dz*dz);
+    if(!isfinite(d) || !isfinite(fwd[0]) || !isfinite(fwd[2])) return FALSE;
+    if(d<0.05f) { *done=TRUE; return TRUE; }
+    float want=atan2f(dx,dz),have=atan2f(fwd[0],fwd[2]),delta=want-have;
+    while(delta>3.14159265f) delta-=6.2831853f;
+    while(delta<-3.14159265f) delta+=6.2831853f;
+    if(fabsf(delta)<=0.01745329f) { *done=TRUE; return TRUE; }        /* within 1 degree */
+    float step=fabsf(delta)<=max_radians?delta:(delta>0?max_radians:-max_radians);
+    float yaw=have+step,dir[3]={sinf(yaw),0.0f,cosf(yaw)};
+    set_forward(position,dir);
+    position[0xb8u]=1u;                                               /* dirty, as 403050 marks it */
+    float dot=fwd[0]*dir[0]+fwd[2]*dir[2];
+    if(!(dot>0.999f)) return FALSE;
+    *done=fabsf(delta-step)<=0.01745329f;
+    return TRUE;
+}
 unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max) {
     static const uint32_t pc_vtables[4]={0x2d5a88u,0x2d66fcu,0x2d5010u,0x2d555cu};
     unsigned n=0;

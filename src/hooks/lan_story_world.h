@@ -41,6 +41,14 @@ unsigned SudekiMpLanStoryWorldSplitAnimateTargets(SudekiMpLanStoryWorldAnimateTa
  * wrapper, plus party-character model banks). Copy-only pointers for the
  * ambient adapter's exclusion list; re-validated by nobody, compared only. */
 unsigned SudekiMpLanStoryWorldOwnedRenderers(void **out,unsigned max);
+/* H1b, client, native thread: turn a client-only NPC of this client's own
+ * shop visit toward `target` (xz) by at most `max_radians`. FALSE when the
+ * NPC is not proven local (e.g. matched to a host frame): nothing written.
+ * `done` once within 1 degree. */
+BOOL SudekiMpLanStoryWorldLocalTurn(const void *entity,const float target[3],float max_radians,BOOL *done);
+/* H1b, client, native thread: `entity` is a client-only NPC of this client's
+ * own shop visit (registry member, matched to no host frame). Read-only. */
+BOOL SudekiMpLanStoryWorldLocalIdleNpc(const void *entity);
 /* Client: party characters in a different host area keep their last pose. */
 void SudekiMpLanStoryWorldSetForeignCharacters(uint8_t mask);
 BOOL SudekiMpLanStoryWorldCapture(SudekiMpLanPartySession *session,

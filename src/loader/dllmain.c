@@ -29,6 +29,7 @@
 #include "hooks/lan_story_research54.h"
 #include "hooks/lan_story_ambient.h"
 #include "hooks/lan_story_area_fade.h"
+#include "hooks/lan_story_npc_gesture.h"
 #include "hooks/resource_swap.h"
 #include "hooks/texture_mods.h"
 #include "hooks/armour_menu.h"
@@ -1260,6 +1261,8 @@ DWORD WINAPI SudekiMP_Initialize(void *unused) {
             !SudekiMpResourceSwapInstall(game_module,config_path) ||
             /* Client fade for party characters inside another host area. */
             (saved_story && (SudekiMpLanStoryAreaFadeEnable(!config_key_false(config_path,L"StoryAreas",L"AreaFade")),FALSE)) ||
+            /* H1b Kamo talk gestures on a client's own game (default off). */
+            (saved_story && (SudekiMpLanStoryNpcGestureEnable(read_config_boolean(config_path,L"StoryAreas",L"KamoGestures")),FALSE)) ||
             /* Client ambient animation for zone-placed props (water, chimes,
              * leaves): zero-delta renderers no entity owns get a local delta.
              * Shares the AnimTrace entry bytes, so the probe excludes it. */

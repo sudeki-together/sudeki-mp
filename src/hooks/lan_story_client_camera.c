@@ -71,6 +71,71 @@ static BOOL house_image_exact(uint8_t *b) {
         readable(b+VT_AIMED_STATE,0x18u) && *(void **)(b+VT_AIMED_STATE+0x10u)==b+RVA_AIMED_ID &&
         readable(b+RVA_AIMED_STATE,4u);
 }
+/* H1b Kamo talk (owner 2026-10-17): the native speech camera. CSpeech's
+ * per-line SetCamera 0x415AC0 (gated by CSpeech+0x475) aims the stateless
+ * camera named "SpeechCamera" (RVA 0x2C5690) and selects it with
+ * CCameraManager::SetRenderCamera 0x436FB0 (thiscall(manager, name), RET 4;
+ * writes manager+0x20 and the renderer slot *(*(0x408D58)+0x40)+0x7C at
+ * 0x4370D8). Vanilla returns with SwitchActiveCamera("default") when the
+ * shopkeeper's script ends. CONFIRMED_STATIC; the client is unhooked there. */
+enum { RVA_SET_RENDER_CAMERA=0x36fb0u, RVA_SPEECH_SET_CAMERA=0x15ac0u, RVA_SPEECH_CAMERA_NAME=0x2c5690u,
+    RVA_SCENE_MANAGER=0x408d58u, CAMERA_SLOTS=10u };
+typedef uint8_t (__attribute__((thiscall)) *SetRenderCamera)(void *manager,const char *name);
+static BOOL speech_ready;
+static BOOL speech_image_exact(uint8_t *b) {
+    return bytes(b,RVA_SET_RENDER_CAMERA,"\x55\x8b\xec\x83\xe4\xf8\x83\xec\x14\x53\x8b\xd9\x8b\x43\x20\x56\x57"
+            "\xc6\x44\x24\x13\x00\x85\xc0\x74\x0a\x8a\x88\x05\x01\x00\x00",32u) &&
+        bytes(b,0x370d8u,"\x8b\x4c\x24\x1c\x8b\x41\x40\x8b\x4a\x34\x89\x48\x7c\x8a\x4c\x24\x13\x5f\x89\x53\x20",21u) &&
+        bytes(b,0x370fau,"\xc2\x04\x00",3u) &&
+        bytes(b,RVA_SPEECH_SET_CAMERA,"\x55\x8b\xec\x83\xe4\xf8\x83\xec\x6c\x53\x8b\xd9\x80\xbb\x75\x04\x00\x00\x00"
+            "\x56\x57\x0f\x84\x42\x05\x00\x00",27u) &&
+        bytes(b,0x15ffau,"\x68",1u) && readable(b+0x15ffbu,4u) &&
+        *(uint32_t *)(b+0x15ffbu)==(uint32_t)(uintptr_t)(b+RVA_SPEECH_CAMERA_NAME) &&
+        bytes(b,0x16007u,"\xe8\xa4\x0f\x02\x00",5u) &&
+        bytes(b,RVA_SPEECH_CAMERA_NAME,"SpeechCamera",13u) &&
+        bytes(b,0x36e83u,"\x8d\x7d\x24",3u) && readable(b+RVA_SCENE_MANAGER,4u);
+}
+/* The one camera slot (of the manager's ten at +0x24) with this name. */
+static uint8_t *camera_named(const uint8_t *manager,const char *name) {
+    uint8_t *found=NULL; unsigned matches=0; size_t n=strlen(name)+1u;
+    for(unsigned i=0;i<CAMERA_SLOTS;++i) {
+        uint8_t *c=*(uint8_t *const *)(manager+0x24u+i*4u);
+        if(!c) continue;
+        if(!readable(c,0x10cu)) return NULL;
+        if(!memcmp(c+0x4cu,name,n)) { found=c; ++matches; }
+    }
+    return matches==1u && *(void **)found==base+VT_CAMERA && readable(*(void **)(found+0x34u),0xe0u) &&
+        **(void ***)(found+0x34u)==base+VT_RENDER?found:NULL;
+}
+int SudekiMpLanStoryClientCameraSpeechObserve(void) {
+    if(!base || !speech_ready) return SUDEKIMP_SPEECH_CAMERA_UNKNOWN;
+    uint8_t *manager=readable(base+RVA_CAMERA_MANAGER,4u)?*(uint8_t **)(base+RVA_CAMERA_MANAGER):NULL;
+    if(!readable(manager,0x60u) || *(void **)manager!=base+VT_MANAGER) return SUDEKIMP_SPEECH_CAMERA_UNKNOWN;
+    uint8_t *def=camera_named(manager,"default"),*speech=camera_named(manager,"SpeechCamera");
+    uint8_t *scene=*(uint8_t **)(base+RVA_SCENE_MANAGER),*render=readable(scene,0x44u)?*(uint8_t **)(scene+0x40u):NULL;
+    if(!def || !speech || !readable(render,0x80u)) return SUDEKIMP_SPEECH_CAMERA_UNKNOWN;
+    void *current=*(void **)(manager+0x20u),*slot=*(void **)(render+0x7cu);
+    if(current==def && slot==*(void **)(def+0x34u)) return SUDEKIMP_SPEECH_CAMERA_DEFAULT;
+    if(current==speech && slot==*(void **)(speech+0x34u) && !*(void **)(speech+0x3cu)) return SUDEKIMP_SPEECH_CAMERA_SPEECH;
+    return SUDEKIMP_SPEECH_CAMERA_UNKNOWN;
+}
+BOOL SudekiMpLanStoryClientCameraSpeechReady(void) {
+    return base && speech_ready && !tick_active && SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_DEFAULT;
+}
+BOOL SudekiMpLanStoryClientCameraSpeechReturn(void) {
+    static unsigned return_logs;
+    if(!base || !speech_ready || tick_active || (native_thread && native_thread!=GetCurrentThreadId())) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
+    int seen=SudekiMpLanStoryClientCameraSpeechObserve();
+    if(seen==SUDEKIMP_SPEECH_CAMERA_DEFAULT) return TRUE;
+    if(seen!=SUDEKIMP_SPEECH_CAMERA_SPEECH) { SetLastError(ERROR_BUSY); return FALSE; }
+    ((SetRenderCamera)(base+RVA_SET_RENDER_CAMERA))(*(uint8_t **)(base+RVA_CAMERA_MANAGER),"default");
+    BOOL ok=SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_DEFAULT;
+    if(return_logs<16u) { ++return_logs; SudekiMpLogFormat("story_client_camera event=speech_return result=%u\r\n",(unsigned)ok); }
+    if(!ok) SetLastError(ERROR_BUSY);
+    return ok;
+}
 static BOOL aimed_state(const uint8_t *camera) {
     const uint8_t *state=*(const uint8_t *const *)(camera+0x3cu);
     return state && state==*(const uint8_t *const *)(base+RVA_AIMED_STATE) && readable(state,4u) &&
@@ -82,11 +147,14 @@ BOOL SudekiMpLanStoryClientCameraInstall(HMODULE image) {
     if(!image_exact(b)) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
     if(!SudekiMpLanStoryClientCameraHeightInstall(image,height_scope_exact)) return FALSE;
     base=b; native_thread=0; state_requested_at=0; logs=ticks=state_requests=0; house_static=FALSE;
+    speech_ready=speech_image_exact(b);
+    if(!speech_ready) SudekiMpLogWrite("story_client_camera event=speech_camera_unavailable policy=house_view_kept\r\n");
     SudekiMpLogWrite("story_client_camera event=installed update=e7660 input=e85f0 state=37530 policy=native_exploration_tick_under_pause small_height_steps=owned_exploration_only\r\n");
     return TRUE;
 }
 BOOL SudekiMpLanStoryClientCameraUninstall(void) {
-    if(tick_active || (native_thread && native_thread!=GetCurrentThreadId())) {
+    if(tick_active || (native_thread && native_thread!=GetCurrentThreadId()) ||
+        SudekiMpLanStoryClientCameraSpeechObserve()==SUDEKIMP_SPEECH_CAMERA_SPEECH) {
         SetLastError(ERROR_BUSY);return FALSE;
     }
     /* A failed native restoration still owns this callback and all of its

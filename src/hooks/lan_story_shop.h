@@ -46,6 +46,13 @@ BOOL SudekiMpLanStoryShopActive(void);
 BOOL SudekiMpLanStoryShopDrain(uint32_t now);
 /* No lease (nothing for teardown to drain). */
 BOOL SudekiMpLanStoryShopIdle(void);
+/* TRUE while this player's own Kamo conversation lets the native speech
+ * camera be selected (or is returning from it): the client camera gives
+ * way and must not re-seat until it is the selected camera again. */
+BOOL SudekiMpLanStoryShopSpeechCameraHeld(void);
+/* The player's interact press while this game's own Kamo conversation is
+ * up (the runtime never sends it to the host); it closes the farewell. */
+void SudekiMpLanStoryShopInteractPress(void);
 /* The area is changing under an open shop: leave it through its own back
  * command (rate-limited) until it is observed closed. */
 void SudekiMpLanStoryShopRequestClose(const char *why);

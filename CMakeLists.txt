@@ -155,6 +155,7 @@ add_library(SudekiMP SHARED
     src/hooks/lan_story_remote_interior.c
     src/hooks/lan_story_zone_banner.c
     src/hooks/lan_story_shop.c
+    src/hooks/lan_story_npc_gesture.c
     src/engine/sol_shop_stock.c
     src/network/lan_story_door_view.c
     src/hooks/lan_story_host_control.c
@@ -2193,6 +2194,10 @@ add_executable(SudekiMP.StoryMarkupTest tests/story_markup_test.c src/ui/story_m
 target_include_directories(SudekiMP.StoryMarkupTest PRIVATE src)
 target_compile_options(SudekiMP.StoryMarkupTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 set_target_properties(SudekiMP.StoryMarkupTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(SudekiMP.StoryNpcGestureImageTest tests/story_npc_gesture_image_test.c)
+target_include_directories(SudekiMP.StoryNpcGestureImageTest PRIVATE src)
+target_compile_options(SudekiMP.StoryNpcGestureImageTest PRIVATE -Wall -Wextra -Werror -Wno-attributes -UNDEBUG)
+set_target_properties(SudekiMP.StoryNpcGestureImageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(SudekiMP.StoryRejoinSpotTest tests/story_rejoin_spot_test.c)
 target_include_directories(SudekiMP.StoryRejoinSpotTest PRIVATE src)
 target_compile_options(SudekiMP.StoryRejoinSpotTest PRIVATE -Wall -Wextra -Werror -UNDEBUG)

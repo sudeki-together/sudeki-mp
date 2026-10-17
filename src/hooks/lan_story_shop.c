@@ -6,6 +6,9 @@
 #include "hooks/lan_story_shopkeepers.h"
 #include "hooks/lan_story_cinematic.h"
 #include "hooks/lan_story_zone_banner.h"
+#include "hooks/lan_story_client_camera.h"
+#include "hooks/lan_story_world.h"
+#include "hooks/lan_story_npc_gesture.h"
 #include "engine/build_identity.h"
 #include "engine/log.h"
 #include "engine/sol_shop_stock.h"
@@ -196,6 +199,7 @@ static const struct { const char *name; unsigned rva,size; uint32_t hash; } talk
     {"SET_IGM_STATE",0xb1e0u,0x19u,0x53cb6afdu},
     {"GET_IGM_STATE",0xb200u,0xdu,0x9c7f63e6u},
     {"SHOW_INGAME_MENUS",0xb880u,0x1du,0xfe9bcf0eu},
+    {"SPEECH_SET_LISTENER_ANIMATES",0x13cd0u,0x11u,0x637ea738u},
     {"GET_STORY_BLOCK",0xfda00u,0x7u,0xe5a6a06au},
     {"HUD_ENTER_DIALOG",0x9de16u,0x52u,0x71df64e6u},
     {"HUD_EXIT_DIALOG",0x9e22bu,0x33u,0x064221b7u},
@@ -229,6 +233,7 @@ enum { RVA_SPEECH=0x408d3cu, RVA_DIALOG=0x3c2f94u, RVA_MOVIE=0x408db8u, RVA_SPEE
     RVA_ASK=0x13730u, RVA_ANSWER=0x13860u, RVA_LINE=0x13910u, RVA_STOP=0x13ee0u, RVA_TALKING=0x155e0u,
     RVA_SET_GEL=0x132c0u, RVA_SET_MOVE_CAMERA=0x157c0u, RVA_DIALOG_START=0xa4650u, RVA_DIALOG_END=0xa4690u,
     RVA_DIALOG_ACTIVE=0xa4730u, RVA_DIALOG_CLEAR=0xa4800u, RVA_DIALOG_INPUT=0xa3250u, RVA_SET_IGM=0xb1e0u,
+    RVA_SET_LISTENER_ANIMATES=0x13cd0u,
     Q_T1=2837u, Q_T1B=2838u, Q_T2=2839u, Q_T2B=2840u, LINE_CHAT=2024u, LINE_FAREWELL=2025u, T2_BLOCK=2000,
     TALK_WAIT_MS=2000u, TALK_STEP_MS=3000u, TALK_QUARANTINE_MS=10000u };
 typedef uint8_t (__attribute__((thiscall)) *SpeechLine)(void *,void *,void *,int,uint8_t,uint8_t,uint8_t,uint8_t);
@@ -283,20 +288,33 @@ static unsigned hud_request(void) { uint8_t *hud=hud_exact(); return hud?*(unsig
 /* This lease's conversation state. */
 static struct {
     BOOL t2,gel_set,cam_set,shop,say_issued,stop_issued,end_issued,menus_issued,quarantine_logged;
+    unsigned speech;      /* the native speech camera: SPEECH_* */
+    BOOL pressed;         /* the player's interact press, while the farewell waits */
+    BOOL gesture;         /* this conversation's lines are animated (KamoGestures) */
+    BOOL listener_anim_set; uint8_t listener_anim_saved;
+    DWORD face_at;        /* last turn step */
     uint8_t cam_saved;
     unsigned question,answer,line,next;
     float duration;
     const char *close;
     DWORD started,inject_at,end_since;
     uint32_t speaker[3];  /* TPtr{obj,...}: the natives read only its object */
+    uint32_t listener[3]; /* this player's character, as vanilla's theActivator */
 } talk;
 enum { NEXT_REASK=1u, NEXT_END=2u };
+/* The native speech camera during this lease (owner 2026-10-17): HELD while
+ * CSpeech may select and aim it, RETURN once the conversation is ending
+ * (SetMoveCamera(0) stops further aiming) until "default" is selected again,
+ * then RETURNED. NONE: the camera was not available (house view kept). */
+enum { SPEECH_NONE, SPEECH_HELD, SPEECH_RETURN, SPEECH_RETURNED };
+enum { FACE_LIMIT_MS=1000u };
+static void *service_actor;   /* this player's character, from the service call */
 /* The conversation has visibly or natively begun and is not yet undone. */
 static BOOL talk_witness(void) {
     uint8_t *cs=speech(),*ui=dialog();
     if(!cs || !ui) return TRUE;
     return *(uint32_t *)(ui+0x4cu) || hud_state()==2u || (talk.gel_set && cs[0x47du]) ||
-        *(uint32_t *)(cs+0xc8u)!=2u;
+        *(uint32_t *)(cs+0xc8u)!=2u || talk.speech==SPEECH_HELD || talk.speech==SPEECH_RETURN;
 }
 static const char *talk_refusal(const void *kamo) {
     uint8_t *cs=speech(),*ui=dialog(),*hud=hud_exact();
@@ -317,7 +335,7 @@ static const char *talk_refusal(const void *kamo) {
 
 /* ---- lease ---- */
 enum { IDLE, REQUESTED, OPENING, OPEN, CLOSING,
-    T_REQUESTED, T_OPENING, T_ASK, T_QUESTION, T_ANSWER, T_SETTLE, T_SAY, T_REDIALOG, T_END, T_END_HUD, T_QUARANTINE };
+    T_REQUESTED, T_OPENING, T_ASK, T_QUESTION, T_ANSWER, T_SETTLE, T_SAY, T_REDIALOG, T_END, T_END_HUD, T_FACE, T_FAREWELL };
 static unsigned phase;
 static DWORD phase_at;
 static BOOL prompt_shown,talk_armed=TRUE;
@@ -326,7 +344,7 @@ static const Shopkeeper *keeper;
 static void enter(unsigned p,uint32_t now,const char *why) {
     static const char *const names[]={"idle","requested","opening","open","closing",
         "talk_requested","talk_opening","talk_ask","talk_question","talk_answer","talk_settle","talk_say",
-        "talk_redialog","talk_end","talk_end_hud","talk_quarantine"};
+        "talk_redialog","talk_end","talk_end_hud","talk_face","talk_farewell"};
     trace("story_shop event=%s why=%s\r\n",names[p],why);
     phase=p; phase_at=now?now:1u;
     if(p==IDLE) SudekiMpLanStoryRemoteInteriorClientHoldExit(FALSE);
@@ -389,7 +407,32 @@ static float line_seconds(const uint8_t *cs) {
     float d=*(const float *)(cs+0xd0u);
     return isfinite(d) && d>=0 && d<=60.0f?d:10.0f;
 }
+/* The conversation is ending: no further aiming, then the client's own
+ * camera again (vanilla SwitchActiveCamera("default")); retried until done. */
+static void speech_hold_end(void) {
+    if(talk.speech!=SPEECH_HELD) return;
+    uint8_t *cs=speech();
+    if(cs) { ((SpeechSet)(base+RVA_SET_MOVE_CAMERA))(cs,0); talk.cam_set=TRUE; }
+    talk.speech=SPEECH_RETURN;
+}
+/* Vanilla switches back after EndInteractionScript (the box has closed and
+ * the HUD is back), not at the end of the last line. */
+static void speech_return(void) {
+    speech_hold_end();
+    if(talk.speech==SPEECH_RETURN && SudekiMpLanStoryClientCameraSpeechReturn()) talk.speech=SPEECH_RETURNED;
+}
+/* Vanilla animates every shopkeeper line (Ask|PN and Say pass animate 1);
+ * here only while the gesture driver can run the speaker's animation. */
+static uint8_t talk_animate(void) { return talk.gesture && SudekiMpLanStoryNpcGestureReady()?1u:0u; }
+/* This player's character as a TPtr the natives can read, or NULL. */
+static void *talk_listener(void) {
+    float at[3];
+    if(!service_actor || !actor_at(service_actor,at)) return NULL;
+    talk.listener[0]=(uint32_t)(uintptr_t)service_actor; talk.listener[1]=talk.listener[2]=0;
+    return talk.listener;
+}
 static void talk_finish(uint32_t now,const char *why) {
+    speech_hold_end();
     if(!talk.close) talk.close=why;
     if(!talk.end_since) talk.end_since=now?now:1u;
     talk.stop_issued=talk.end_issued=talk.menus_issued=FALSE; talk.inject_at=0;
@@ -397,20 +440,29 @@ static void talk_finish(uint32_t now,const char *why) {
 }
 static void talk_restore(uint32_t now) {
     uint8_t *cs=speech();
-    if(!cs) return;
+    if(!cs || (talk.speech!=SPEECH_NONE && talk.speech!=SPEECH_RETURNED)) return;
     if(talk.gel_set) { ((SpeechSet)(base+RVA_SET_GEL))(cs,0); talk.gel_set=cs[0x47du]!=0; }
     if(talk.cam_set) { ((SpeechSet)(base+RVA_SET_MOVE_CAMERA))(cs,talk.cam_saved); talk.cam_set=cs[0x475u]!=talk.cam_saved; }
-    if(talk.gel_set || talk.cam_set) return;
+    if(talk.listener_anim_set) {
+        ((SpeechSet)(base+RVA_SET_LISTENER_ANIMATES))(cs,talk.listener_anim_saved);
+        talk.listener_anim_set=cs[0x473u]!=(talk.listener_anim_saved?1u:0u);
+    }
+    if(talk.gel_set || talk.cam_set || talk.listener_anim_set) return;
     uint8_t *ui=dialog();
     trace("story_shop event=talk_end why=%s ui=%lu speech=%lu igm=%u gel=%u move_camera=%u\r\n",talk.close?talk.close:"-",
         ui?(unsigned long)*(uint32_t *)(ui+0x4cu):99ul,(unsigned long)*(uint32_t *)(cs+0xc8u),hud_state(),
         (unsigned)cs[0x47du],(unsigned)cs[0x475u]);
-    talk_armed=FALSE; enter(IDLE,now,"talk_done");
+    talk_armed=FALSE; talk.speech=SPEECH_NONE; enter(IDLE,now,"talk_done");
 }
 static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
     uint8_t *cs=speech(),*ui=dialog();
     if(draining && !talk.close && phase!=T_REQUESTED) talk.close="stopping";
     if(phase!=T_REQUESTED && phase!=T_END && phase!=T_END_HUD && (!cs || !ui)) { talk_finish(now,"owners"); return; }
+    /* An animated line whose speaker lock never comes would hold forever:
+     * stop it and animate no further line (the gesture driver logs it). */
+    if((phase==T_QUESTION || phase==T_SAY || phase==T_ASK) && SudekiMpLanStoryNpcGestureStalled(cs,now)) {
+        ((SpeechVoid)(base+RVA_STOP))(cs); talk.gesture=FALSE;
+    }
     switch(phase) {
     case T_REQUESTED: {
         const char *refused=draining?"stopping":!in_reach?"left_shopkeeper":!stock_ready?"stock":open_refusal();
@@ -418,14 +470,49 @@ static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
         if(refused) { trace("story_shop event=talk_refused reason=%s\r\n",refused); enter(IDLE,now,"refused"); break; }
         prompt_set(FALSE);
         talk.question=talk.t2?Q_T2:Q_T1;
+        /* The shopkeeper's native gestures (StartInteractionScript loads his
+         * gesture bank), when the switch is on and he is local to this game. */
+        talk.gesture=SudekiMpLanStoryNpcGestureBegin(keeper_entity,now);
+        if(talk.gesture) {
+            /* Animated lines would also take the listener's TSA lock
+             * (0x413C08, CSpeech+0x473): the listener is this player's own
+             * character, posed by the host, whose animation this game never
+             * runs. Its native setter turns that off for this conversation. */
+            talk.listener_anim_saved=cs[0x473u];
+            ((SpeechSet)(base+RVA_SET_LISTENER_ANIMATES))(cs,0); talk.listener_anim_set=TRUE;
+            if(cs[0x473u]) { talk.gesture=FALSE; trace("story_shop event=talk_gesture_off reason=listener_flag\r\n"); }
+        }
         talk.cam_saved=cs[0x475u];
-        ((SpeechSet)(base+RVA_SET_MOVE_CAMERA))(cs,0); talk.cam_set=TRUE;
+        /* The native speech camera (vanilla), when the client camera can
+         * give way to it and take the view back; else the house view. */
+        if(talk.cam_saved==1u && SudekiMpLanStoryClientCameraSpeechReady()) talk.speech=SPEECH_HELD;
+        else { ((SpeechSet)(base+RVA_SET_MOVE_CAMERA))(cs,0); talk.cam_set=TRUE; }
         ((SpeechSet)(base+RVA_SET_GEL))(cs,1); talk.gel_set=TRUE;
         ((VoidCall)(base+RVA_DIALOG_CLEAR))(); ((VoidCall)(base+RVA_DIALOG_START))();
-        if(cs[0x475u] || cs[0x47du]!=1u || !(ui[0x6b8u]&0x80u)) { talk_finish(now,"open_unproven"); break; }
-        ((SceneState)(base+RVA_SET_IGM))(scene_exact(),2);
-        trace("story_shop event=talk_open t2=%u question=%u igm=%u request=%u\r\n",(unsigned)talk.t2,talk.question,hud_state(),hud_request());
-        enter(T_OPENING,now,"start_conversation");
+        if(cs[0x475u]!=(talk.speech==SPEECH_HELD?1u:0u) || cs[0x47du]!=1u || !(ui[0x6b8u]&0x80u)) {
+            talk_finish(now,"open_unproven"); break;
+        }
+        trace("story_shop event=talk_open t2=%u question=%u igm=%u request=%u speech_camera=%u\r\n",(unsigned)talk.t2,
+            talk.question,hud_state(),hud_request(),(unsigned)(talk.speech==SPEECH_HELD));
+        /* Vanilla turns the shopkeeper to the player before ShowDialog. */
+        talk.face_at=now?now:1u;
+        enter(T_FACE,now,"start_conversation");
+        break; }
+    case T_FACE: {
+        if(talk.close) { talk_finish(now,talk.close); break; }
+        /* At most 360 degrees a second (his authored standing turn rate),
+         * stepped by this frame's real time (bounded). */
+        DWORD dt=now-talk.face_at; talk.face_at=now?now:1u;
+        if(dt>50u) dt=50u;
+        float at[3]; BOOL done=TRUE;
+        BOOL turned=service_actor && actor_at(service_actor,at) && keeper_entity &&
+            SudekiMpLanStoryWorldLocalTurn(keeper_entity,at,6.2831853f*(float)dt/1000.0f,&done);
+        if(!turned || done || now-phase_at>=FACE_LIMIT_MS) {
+            trace("story_shop event=talk_face result=%s after_ms=%lu\r\n",!turned?"not_local":done?"facing":"timeout",
+                (unsigned long)(now-phase_at));
+            ((SceneState)(base+RVA_SET_IGM))(scene_exact(),2);
+            enter(T_OPENING,now,"faced");
+        }
         break; }
     case T_OPENING:
     case T_REDIALOG: {
@@ -449,7 +536,11 @@ static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
             break;
         }
         talk.speaker[0]=(uint32_t)(uintptr_t)keeper_entity; talk.speaker[1]=talk.speaker[2]=0;
-        uint8_t r=((SpeechLine)(base+RVA_ASK))(cs,talk.speaker,NULL,(int)talk.question,1,0,0,1);
+        /* Vanilla re-asks (T1b/T2b) name the player as listener; the first
+         * question has none. With animate 0 the listener only frames the
+         * speech camera (its TSA lock at 0x413C08 needs CSpeech+0x474). */
+        void *listener=talk.question!=Q_T1 && talk.question!=Q_T2?talk_listener():NULL;
+        uint8_t r=((SpeechLine)(base+RVA_ASK))(cs,talk.speaker,listener,(int)talk.question,1,talk_animate(),0,1);
         const uint16_t *text=*(const uint16_t **)(cs+0xd8u);
         BOOL proven=r && cs[0x47au]==1u && readable(text,2u) && text[0] && *(void **)(cs+0xdcu) &&
             *(void **)(cs+0xe0u) && (ui[0x6b8u]&0x20u) && !*(uint32_t *)(ui+0x6a4u);
@@ -501,7 +592,9 @@ static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
                 break;
             }
             talk.speaker[0]=(uint32_t)(uintptr_t)keeper_entity;
-            uint8_t r=((SpeechLine)(base+RVA_LINE))(cs,talk.speaker,NULL,(int)talk.line,0,1,0,0);
+            /* Say(theEntity, theActivator, ...): the player is the listener
+             * (vanilla's two-shot framing of the farewell). */
+            uint8_t r=((SpeechLine)(base+RVA_LINE))(cs,talk.speaker,talk_listener(),(int)talk.line,0,1,talk_animate(),0);
             uint32_t mode=*(uint32_t *)(cs+0xc8u); const uint16_t *text=*(const uint16_t **)(cs+0xd8u);
             BOOL ok=r && (mode==1u || mode==2u) && readable(text,2u) && text[0];
             talk.say_issued=TRUE; talk.duration=line_seconds(cs); phase_at=now?now:1u;
@@ -516,12 +609,22 @@ static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
         }
         if(talk.close) talk_finish(now,talk.close);
         else if(talk.next==NEXT_REASK) { talk.question=(talk.t2?Q_T2:Q_T1)+1u; enter(T_ASK,now,"reask"); }
-        else talk_finish(now,"farewell");
+        else { talk.pressed=FALSE; enter(T_FAREWELL,now,"farewell_shown"); }
         break; }
+    case T_FAREWELL:
+        /* As on the host's own game: the farewell stays on screen, in its
+         * camera, until the player presses interact again: the press seen by
+         * the runtime, or the dialog's own confirm (CSpeech+0x47B, set by
+         * the UIDialog input in its text state, 0x4A4590). */
+        if(talk.close) talk_finish(now,talk.close);
+        else if(talk.pressed || cs[0x47bu]) talk_finish(now,"farewell");
+        break;
     case T_END: {
         /* EndInteractionScript, from any point: no line is played on a
          * close; an open question is answered (the highlighted choice,
-         * ignored) so the conversation can end. */
+         * ignored) so the conversation can end. The speech camera stays until
+         * the box has closed (or this end is slow: then it goes back now). */
+        if(now-talk.end_since>=TALK_STEP_MS) speech_return();
         if(cs && ui) {
             if(*(uint32_t *)(ui+0x4cu)==3u && focus()==ui) {
                 if(!talk.inject_at || now-talk.inject_at>=500u) {
@@ -547,8 +650,11 @@ static void talk_step(uint32_t now,BOOL in_reach,BOOL draining) {
         }
         break; }
     case T_END_HUD: {
+        speech_return();
         unsigned st=hud_state();
-        if(st==1u && cs && !talking(cs)) { talk_restore(now); break; }
+        /* EndInteractionScript also releases the speaker's gesture lock and
+         * dumps his gesture bank (bounded inside the driver). */
+        if(st==1u && cs && !talking(cs) && SudekiMpLanStoryNpcGestureEnd(now)) { talk_restore(now); break; }
         if(now-phase_at>=TALK_STEP_MS) {
             if(st==0u || st==2u) ((VoidCall)(base+RVA_SHOW_INGAME))();
             phase_at=now?now:1u;
@@ -633,7 +739,7 @@ static void lease_step(uint32_t now,BOOL in_reach,BOOL draining) {
 static DWORD last_service_at;
 void SudekiMpLanStoryShopService(void *actor,const char *in_shop,BOOL blocked,uint32_t now) {
     if(!installed || (native_thread && native_thread!=GetCurrentThreadId())) return;
-    native_thread=GetCurrentThreadId(); last_service_at=now?now:1u;
+    native_thread=GetCurrentThreadId(); last_service_at=now?now:1u; service_actor=actor;
     /* The shopkeeper of the table shop this player is settled in, in reach? */
     keeper=SudekiMpLanStoryShopkeeperOf(in_shop);
     float at[3],npc[3];
@@ -650,6 +756,7 @@ void SudekiMpLanStoryShopService(void *actor,const char *in_shop,BOOL blocked,ui
         }
     }
     lease_step(now,in_reach && !blocked,FALSE);
+    SudekiMpLanStoryNpcGestureTick(now);
     if(phase!=IDLE) return;
     if(out_of_reach) talk_armed=TRUE;
     /* An examinable in reach (its box not already up). */
@@ -676,11 +783,19 @@ BOOL SudekiMpLanStoryShopDrain(uint32_t now) {
     if(native_thread && native_thread!=GetCurrentThreadId()) return FALSE;
     last_service_at=now?now:1u;
     lease_step(now,FALSE,TRUE);
+    SudekiMpLanStoryNpcGestureTick(now);
+    if(phase==IDLE) SudekiMpLanStoryNpcGestureDrain("stopping");
     if(phase==IDLE && prompt_shown) prompt_set(FALSE);
     return phase==IDLE;
 }
 BOOL SudekiMpLanStoryShopPromptShown(void) { return installed && phase==IDLE && prompt_shown; }
 BOOL SudekiMpLanStoryShopIdle(void) { return !installed || phase==IDLE; }
+void SudekiMpLanStoryShopInteractPress(void) {
+    if(installed && phase==T_FAREWELL) talk.pressed=TRUE;
+}
+BOOL SudekiMpLanStoryShopSpeechCameraHeld(void) {
+    return installed && (talk.speech==SPEECH_HELD || talk.speech==SPEECH_RETURN);
+}
 void SudekiMpLanStoryShopRequestOpen(void) {
     /* Only a prompt the presentation step is servicing now (a press taken
      * while it is not running is never queued). */
@@ -766,6 +881,7 @@ BOOL SudekiMpLanStoryShopInstall(HMODULE image) {
      * (stock_ready) fixes the sentence ids. */
     talk_ready=talk_exact(b);
     if(!talk_ready) trace("story_shop event=talk_unavailable policy=direct_shop\r\n");
+    else (void)SudekiMpLanStoryNpcGestureInstall(image);   /* off unless [StoryAreas] KamoGestures */
     if(!SudekiMpInstallRelativeCallHook(&move_hook,b+RVA_SHOW_MOVE_CALL,b+RVA_DISABLE_MOVE,(const void *)(uintptr_t)move_skip)) {
         DWORD error=GetLastError(); base=NULL; SetLastError(error); return FALSE;
     }
@@ -779,7 +895,10 @@ BOOL SudekiMpLanStoryShopUninstall(void) {
     if(!installed) return TRUE;
     /* Never restore the skipped call while a shop may still be shown: its
      * later Show(false) would run an unbalanced 0x40AFD0. */
-    if(phase!=IDLE || shop_witness()==W_OPEN || talk.gel_set || talk.cam_set) { SetLastError(ERROR_BUSY); return FALSE; }
+    if(phase!=IDLE || shop_witness()==W_OPEN || talk.gel_set || talk.cam_set || talk.listener_anim_set ||
+        talk.speech==SPEECH_HELD || talk.speech==SPEECH_RETURN || !SudekiMpLanStoryNpcGestureUninstall()) {
+        SetLastError(ERROR_BUSY); return FALSE;
+    }
     if(prompt_shown) prompt_set(FALSE);
     if(!SudekiMpRestoreRelativeCallHook(&move_hook)) { SetLastError(ERROR_BUSY); return FALSE; }
     installed=FALSE; base=NULL; native_thread=0;

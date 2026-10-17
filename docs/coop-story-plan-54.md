@@ -6729,6 +6729,17 @@ Dirty tree on 9f1d265; committed with this entry. Evidence per item:
 
 Tests: full Wine suite 196–198 of 208 (the known non-pass set: probes, launcher GUI/tabs/mods fixtures, argument-taking image tests run separately and passing: StoryInteriorTravelTest, SolShopStockImageTest).
 
+### 2026-10-17 — H1b Kamo presentation on Tal's game: speech camera, turn, farewell, gestures
+
+Dirty tree on 3d1c5c6; committed with this entry. Evidence per item:
+
+- **Speech camera** for Tal's Kamo conversation: the native SpeechCamera close-up on Kamo's face for the lines, and the wider two-shot for the farewell (Tal passed as the listener on the re-ask and Say lines). The client camera reseat yields while the speech camera is held; it returns before the conversation restores, and the camera module refuses to uninstall while it is held. CONFIRMED_LIVE (owner: "his face cam and turning does indeed work").
+- **Kamo turns to face Tal** before the dialog opens (bounded local turn, 360°/s, at most 1 s). CONFIRMED_LIVE (owner, same check).
+- **Farewell holds until the press**, as on the host: the "last of the big spenders" line and its camera stay until the player confirms (the native CSpeech confirm byte), then return to Tal's camera. CONFIRMED_LIVE (owner: "yeah it works now"). The owner saw no gesture on that line.
+- **Kamo line gestures** (client driver, `[StoryAreas] KamoGestures`, default off): loads bank 5 for the conversation, runs Kamo's native animation update once per frame only while a speech lock is active (renderer events discarded first), stops the line and turns gestures off if a lock stalls, the clock is missing or Kamo stops being local, and dumps the bank at the end. CONFIRMED_TEST (exact-image guards, plus the driver state machine against stand-ins) and CONFIRMED_EXACT_IMAGE (installs on the live client). Whether the gesture plays is UNKNOWN until the owner checks it live.
+
+Tests: full Wine suite 197 of 209 (the known non-pass set); argument-taking image tests run separately and passing (StoryInteriorTravelTest, SolShopStockImageTest, StoryAreaFinaliseImageTest normal, StoryAreaWorkerImageTest idle/active/flush).
+
 ## 10. Remaining work (owner review 2026-10-15)
 
 Against the original phases, with the #54 route (castle road ↔ New
